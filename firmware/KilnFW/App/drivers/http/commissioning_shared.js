@@ -1,4 +1,4 @@
-/* commissioning_shared.js -- extracted 2026-09-08 (SETUP_WIZARD_PLAN.md step
+/* commissioning_shared.js -- extracted 2026-09-08 (SETUP_WIZARD.md step
  * 8, "safety processor" step). Owner decision: embed the wizard's own
  * safety-processor step inline rather than linking out, but REUSE the
  * existing write path and its confirm_commit_landed() read-back rather than

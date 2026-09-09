@@ -74,7 +74,7 @@ extern const uint8_t nav_js_gz_start[] asm("_binary_nav_js_gz_start");
 extern const uint8_t nav_js_gz_end[] asm("_binary_nav_js_gz_end");
 extern const uint8_t app_js_gz_start[] asm("_binary_app_js_gz_start");
 extern const uint8_t app_js_gz_end[] asm("_binary_app_js_gz_end");
-/* SETUP_WIZARD_PLAN.md step 8 (safety processor commissioning): the
+/* SETUP_WIZARD.md step 8 (safety processor commissioning): the
  * client-side confirm-and-read-back logic shared between
  * safety_commissioning_page.html and setup_wizard_page.html's step 7, so
  * that step could embed inline (owner decision) without duplicating that
@@ -1120,7 +1120,7 @@ esp_err_t wifi_provision_http_start(void)
     static const httpd_uri_t app_js_uri = {
         .uri = "/app.js", .method = HTTP_GET, .handler = app_js_get_handler,
     };
-    /* SETUP_WIZARD_PLAN.md step 8 -- see commissioning_shared.js's own
+    /* SETUP_WIZARD.md step 8 -- see commissioning_shared.js's own
      * header comment. Same module/reasoning as nav_js_uri/app_js_uri above. */
     static const httpd_uri_t commissioning_shared_js_uri = {
         .uri = "/commissioning_shared.js", .method = HTTP_GET, .handler = commissioning_shared_js_get_handler,

@@ -1,6 +1,6 @@
 // Host tests for App/drivers/persist/setup_wizard_progress.c -- the whole-
 // kiln setup wizard's thin, versioned NVS progress record
-// (docs/SETUP_WIZARD_PLAN.md implementation step 1).
+// (docs/SETUP_WIZARD.md implementation step 1).
 //
 // THE LOAD-BEARING PROPERTY THIS FILE EXISTS TO PROVE: readiness is
 // authoritative over the stored record. A step recorded DONE whose

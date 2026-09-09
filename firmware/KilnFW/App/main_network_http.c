@@ -434,7 +434,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
                  esp_err_to_name(readiness_err));
     }
 
-    // SETUP_WIZARD_PLAN.md step 3: the /setup page shell. Registered right
+    // SETUP_WIZARD.md step 3: the /setup page shell. Registered right
     // after readiness for the same reason -- no ordering dependency, the
     // page is static markup/JS that reads GET /api/readiness (just started
     // above) and GET /api/setup/progress (a later step's endpoint) entirely
@@ -445,7 +445,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
                  esp_err_to_name(setup_wizard_err));
     }
 
-    // SETUP_WIZARD_PLAN.md implementation step 2: GET/POST
+    // SETUP_WIZARD.md implementation step 2: GET/POST
     // /api/setup/progress, the endpoint the /setup page shell just started
     // above already fetches. Registered right after it for the same
     // "no ordering dependency, just keep the two together" reason --

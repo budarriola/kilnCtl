@@ -519,7 +519,7 @@
 
   // ---- Setup-wizard OFFER banner -----------------------------------------
   //
-  // SETUP_WIZARD_PLAN.md: "OFFER the wizard rather than forcing a redirect"
+  // SETUP_WIZARD.md: "OFFER the wizard rather than forcing a redirect"
   // -- an owner decision in force for the whole plan. This polls the same
   // GET /api/readiness the /readiness and /setup pages already poll (no new
   // endpoint, no new JSON field -- same "reuse, spend no json_cap headroom"

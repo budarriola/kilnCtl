@@ -1,7 +1,7 @@
 // setup_progress_http -- GET/POST /api/setup/progress: the HTTP face of
 // drivers/persist/setup_wizard_progress.h.
 //
-// docs/SETUP_WIZARD_PLAN.md implementation step 2. This is the whole-kiln
+// docs/SETUP_WIZARD.md implementation step 2. This is the whole-kiln
 // setup wizard's progress store made reachable over HTTP -- nothing more.
 // It does NOT compute or embed a live readiness snapshot in its response
 // (that merge is the setup-page shell's job, implementation step 3, per the

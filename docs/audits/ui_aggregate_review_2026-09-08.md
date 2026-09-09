@@ -166,7 +166,7 @@ route with a reason naming recovery mode.
 ### 6c. No banner collision today
 
 The setup-wizard work (`e949dc7e`) is **plan-only** — `ROADMAP.md` and
-`docs/SETUP_WIZARD_PLAN.md`, no page changes — so there is no wizard offer banner
+`docs/SETUP_WIZARD.md`, no page changes — so there is no wizard offer banner
 competing for the top of the page yet. The safety TC offset warning
 (`safety_commissioning_page.html:1386+`) is in-card on its own page, not a top-of-page
 banner, and does not compete with the recovery banner either. The recovery banner and the

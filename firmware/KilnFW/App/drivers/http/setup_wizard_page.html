@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>kilnCtl - Setup Wizard</title>
 <script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
-<!-- docs/SETUP_WIZARD_PLAN.md, implementation step 3: "/setup page shell:
+<!-- docs/SETUP_WIZARD.md, implementation step 3: "/setup page shell:
      overview screen, 13 rows, status merged from /api/setup/progress +
      /api/readiness, resume button, deep-link #step=N. No step content yet."
      This file is that shell -- the stepper, the overview, the merge/
@@ -33,11 +33,11 @@
      resume-where-you-left-off button, and the completion gate
      (computeCompleteness()) that refuses "done" while any readiness item is
      not_done/cannot_yet or a safety-relevant step is skipped
-     (SETUP_WIZARD_PLAN.md section 6). -->
+     (SETUP_WIZARD.md section 6). -->
 <link rel="stylesheet" href="/theme.css">
 <script defer src="/nav.js"></script>
 <script defer src="/app.js"></script>
-<!-- SETUP_WIZARD_PLAN.md step 8 (safety processor commissioning): shared
+<!-- SETUP_WIZARD.md step 8 (safety processor commissioning): shared
      confirm-and-read-back logic with safety_commissioning_page.html -- see
      commissioning_shared.js's own header comment for why this is one
      implementation, not two. -->
@@ -95,7 +95,7 @@
   .gstepper span.done { color: var(--ok); border-color: var(--ok); }
   /* ADDED: the safety wizard's stepper never needed a "regressed" or
      "skipped" state -- four questions, no persistence across sessions. This
-     one does (SETUP_WIZARD_PLAN.md section 5 item 3). Distinct border/text
+     one does (SETUP_WIZARD.md section 5 item 3). Distinct border/text
      colours from .done/.current, still only --warn/--bad tokens. */
   .gstepper span.skipped { color: var(--muted); border-color: var(--border); text-decoration: line-through; }
   .gstepper span.regressed { color: #fff; background: var(--bad); border-color: var(--bad); font-weight: bold; }
@@ -141,7 +141,7 @@
 
   /* ---- Completion gate banner: refuses to render "complete" the moment any
      readiness item is not_done/cannot_yet or a safety-relevant step is
-     skipped (SETUP_WIZARD_PLAN.md section 6). Same visual weight as the
+     skipped (SETUP_WIZARD.md section 6). Same visual weight as the
      safety-commissioning page's writewindow banners. ---- */
   .gate { border-radius: var(--ui-radius); padding: 0.8em 1em; margin: 0.8em 0; font-weight: bold; }
   .gate.gate-incomplete { background: var(--warn); color: #fff; font-weight: normal; }
@@ -216,7 +216,7 @@ from the board (<code>GET /api/readiness</code>), never trusted from memory alon
   <p id="stepStatusLine" class="hint"></p>
   <div id="stepRegressedNote" class="review-row" hidden></div>
 
-  <!-- Steps 0-3 (implementation steps 4-5 of SETUP_WIZARD_PLAN.md section 8):
+  <!-- Steps 0-3 (implementation steps 4-5 of SETUP_WIZARD.md section 8):
        real content, wired to the same endpoints/validation the existing
        settings pages already use -- see the per-step render*/commit*
        functions below. Steps 4-12 fall through to #stepGenericContent. -->
@@ -224,12 +224,12 @@ from the board (<code>GET /api/readiness</code>), never trusted from memory alon
   <div id="stepBody1" hidden></div>
   <div id="stepBody2" hidden></div>
   <div id="stepBody3" hidden></div>
-  <!-- Steps 4-6 (implementation step 6 of SETUP_WIZARD_PLAN.md section 8):
+  <!-- Steps 4-6 (implementation step 6 of SETUP_WIZARD.md section 8):
        zone type, relay assignment, zone commissioning limits. -->
   <div id="stepBody4" hidden></div>
   <div id="stepBody5" hidden></div>
   <div id="stepBody6" hidden></div>
-  <!-- Step 7 (implementation step 8 of SETUP_WIZARD_PLAN.md section 8):
+  <!-- Step 7 (implementation step 8 of SETUP_WIZARD.md section 8):
        safety processor commissioning, embedded inline per owner decision --
        reuses the /api/safety/commissioning write path and its
        confirm_commit_landed() read-back via commissioning_shared.js, rather
@@ -245,7 +245,7 @@ from the board (<code>GET /api/readiness</code>), never trusted from memory alon
 
   <div id="stepGenericContent" hidden>
     <p class="hint">This step's own screen (fields, live validation, the commit path) is not built yet
-      -- docs/SETUP_WIZARD_PLAN.md's implementation steps 8-11 add that one step at a time. This shell
+      -- docs/SETUP_WIZARD.md's implementation steps 8-11 add that one step at a time. This shell
       already tracks and renders this step's true state from the board, and lets you jump straight to
       it (deep link <code>#step=N</code>), independent of every other step and resumable after a
       reload or a reboot.</p>
@@ -266,7 +266,7 @@ from the board (<code>GET /api/readiness</code>), never trusted from memory alon
  * commissioning page.
  * ========================================================================== */
 
-// SETUP_WIZARD_PLAN.md section 3's ordered 13 steps. `readinessKeys` names
+// SETUP_WIZARD.md section 3's ordered 13 steps. `readinessKeys` names
 // the /api/readiness item(s) (readiness_http.c's own `key` field -- see that
 // file's append_item() call sites) this step's DONE claim is checked
 // against; readiness is authoritative over anything the progress store says
@@ -299,7 +299,7 @@ var WIZARD_STEPS = [
 ];
 
 function defaultProgress() {
-  // Documented shape of GET /api/setup/progress per SETUP_WIZARD_PLAN.md
+  // Documented shape of GET /api/setup/progress per SETUP_WIZARD.md
   // section 5 item 2 ("thin blob: {version, per-step {state, ts, note}}"),
   // reproduced here as the fallback used whenever that endpoint (plan step
   // 2, not landed as of this file) 404s, errors, or has not been built yet
@@ -450,7 +450,7 @@ function pickResumeStep(mergedSteps) {
 /* ==========================================================================
  * Step 0-3 content: pure validators + formatters (kept DOM-free so
  * test_setup_wizard.js can drive them directly, same discipline as the
- * merge functions above). SETUP_WIZARD_PLAN.md implementation steps 4-5
+ * merge functions above). SETUP_WIZARD.md implementation steps 4-5
  * (section 8): preflight, network/time/units, zone count + thermocouple
  * channels, thermocouple types + offsets. NOTHING here duplicates a
  * firmware validation rule -- every one of these re-checks a value
@@ -562,7 +562,7 @@ function validateStep3(thermoCount, zones, calMinC, calMaxC) {
 
 /* ==========================================================================
  * Shared POST /api/zones builder for steps 4-6 (implementation step 6,
- * SETUP_WIZARD_PLAN.md section 8). zones_http_post_parse.c REQUIRES most
+ * SETUP_WIZARD.md section 8). zones_http_post_parse.c REQUIRES most
  * per-zone fields on every whole-page submission (relay_mask, cal, kp/ki/kd,
  * ramp, sanity, mode, maxtemp, mintemp, window, minon, minoff,
  * timingprofile -- see that file's own "missing or ..." refusals) and treats
@@ -1149,7 +1149,7 @@ function renderStep10() {
       return;
     }
     var html = '<p class="hint"><b>Hand-entered gains complete this step just as fully as autotune does</b> ' +
-      '-- this is a deliberate owner decision (SETUP_WIZARD_PLAN.md section 10 Q4), not a shortcut nobody ' +
+      '-- this is a deliberate owner decision (SETUP_WIZARD.md section 10 Q4), not a shortcut nobody ' +
       'noticed. <code>/api/readiness</code>\'s <code>autotune</code> item accepts either a full identified ' +
       'model or <code>kp &gt; 0</code> typed in by hand, for every zone, and this screen checks the exact ' +
       'same thing.</p>';
@@ -2317,7 +2317,7 @@ function renderStep6() {
 }
 
 /* ---- Step 7: safety processor commissioning, EMBEDDED per owner decision
- * (SETUP_WIZARD_PLAN.md, "owner decisions" block, item 1). Reuses the
+ * (SETUP_WIZARD.md, "owner decisions" block, item 1). Reuses the
  * existing /api/safety/commissioning write path verbatim, and
  * commissioning_shared.js for the confirm-and-read-back logic that page
  * already implements -- not a second implementation. Every field written
@@ -2520,7 +2520,7 @@ function gRenderStepDetail(stepId) {
   if (s.safety) {
     safetyNote.hidden = false;
     safetyNote.textContent = 'Safety-relevant: skipping this step blocks "setup complete" ' +
-      '(SETUP_WIZARD_PLAN.md section 6).';
+      '(SETUP_WIZARD.md section 6).';
   } else {
     safetyNote.hidden = true;
   }

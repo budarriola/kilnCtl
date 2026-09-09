@@ -1,12 +1,12 @@
 // setup_wizard_progress -- thin, versioned NVS record of which steps of the
-// whole-kiln setup wizard (docs/SETUP_WIZARD_PLAN.md) have been visited.
+// whole-kiln setup wizard (docs/SETUP_WIZARD.md) have been visited.
 //
 // This module owns ONLY step-visited state: {state, timestamp, note} per
 // step, nothing else. It never stores a copy of any config value (zone
 // settings, PID gains, safety-processor params, ...) -- every such value's
 // source of truth stays its existing store (zones_cfg via
 // zones_config_json.h, the Pico's config_store via safety_cfg_store.h,
-// etc). See docs/SETUP_WIZARD_PLAN.md section 5 point 2: "the wizard can
+// etc). See docs/SETUP_WIZARD.md section 5 point 2: "the wizard can
 // never disagree with the board about a value; at worst it disagrees about
 // whether a step was visited" -- and section 9: "do not add a wizard-owned
 // copy of any config value" (this repo's "reset one side of a pair" bug
@@ -15,7 +15,7 @@
 //
 // PERSISTENCE: lives in NVS ONLY, deliberately NOT on the `cfg` LittleFS
 // partition and NOT dual-written there the way display_power_cfg.c/
-// unit_pref.c are -- docs/SETUP_WIZARD_PLAN.md section 5 point 1: user
+// unit_pref.c are -- docs/SETUP_WIZARD.md section 5 point 1: user
 // config is mid-migration to `cfg` with NVS dual-write
 // (docs/CONFIG_FILESYSTEM.md), and this record is exactly what must stay
 // intact while diagnosing a filesystem problem, so it deliberately does not
@@ -27,7 +27,7 @@
 // is setup_wizard_progress_effective_state() below, a pure function so it
 // can be exercised by a host test with no HTTP/readiness wiring at all.
 // Wiring it to a live readiness snapshot is the setup-page shell's job
-// (docs/SETUP_WIZARD_PLAN.md implementation step 3), not this module's.
+// (docs/SETUP_WIZARD.md implementation step 3), not this module's.
 //
 // SCHEMA HISTORY / MIGRATION: version 1 stored {state, ts} per step only.
 // Version 2 (current) appends `note[SETUP_WIZARD_NOTE_MAX]` to the TAIL of
@@ -47,7 +47,7 @@
 extern "C" {
 #endif
 
-// One row per docs/SETUP_WIZARD_PLAN.md section 3's table (steps 0..12).
+// One row per docs/SETUP_WIZARD.md section 3's table (steps 0..12).
 #define SETUP_WIZARD_STEP_COUNT 13
 
 typedef enum {
@@ -107,7 +107,7 @@ typedef enum {
     SETUP_WIZ_EFFECTIVE_REGRESSED = 3,
 } setup_wizard_effective_state_t;
 
-// THE precedence rule (docs/SETUP_WIZARD_PLAN.md section 5 point 3):
+// THE precedence rule (docs/SETUP_WIZARD.md section 5 point 3):
 // `/api/readiness` is authoritative over this store. A step stored as DONE
 // whose readiness-backed item is applicable and reports not-ready must
 // render as REGRESSED, never as DONE -- readiness wins.

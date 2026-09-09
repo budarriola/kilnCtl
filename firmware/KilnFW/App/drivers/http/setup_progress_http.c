@@ -46,7 +46,7 @@ static void json_escape(const char *src, char *out, size_t out_cap)
  * Shape: {"version":N,"steps":{"0":{"state":...,"ts":...,"note":...},...}}
  * -- steps keyed by string index (object, not array) to match the
  * setup-page shell's already-landed contract (setup_wizard_page.html's
- * defaultProgress()/mergeAllSteps(), docs/SETUP_WIZARD_PLAN.md section 5
+ * defaultProgress()/mergeAllSteps(), docs/SETUP_WIZARD.md section 5
  * item 2's own "{version, per-step {state, ts, note}}" wording). */
 #define SETUP_PROGRESS_JSON_CAP 2048
 
@@ -120,7 +120,7 @@ static esp_err_t api_setup_progress_get_handler(httpd_req_t *req)
 /* POST /api/setup/progress -- form body "step=<0-12>&state=pending|done|skipped[&note=...]",
  * same bounded-body-then-validate-then-commit shape as every other settings
  * POST in this codebase (settings_http.c's settings_tz_post_handler). One
- * step per call, matching docs/SETUP_WIZARD_PLAN.md section 5 point 6:
+ * step per call, matching docs/SETUP_WIZARD.md section 5 point 6:
  * "[w]rites stay per-step ... There is no global 'commit everything at the
  * end'". */
 #define SETUP_PROGRESS_BODY_MAX 192

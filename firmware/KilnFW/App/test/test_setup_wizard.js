@@ -1,5 +1,5 @@
 /* Node-only test harness for setup_wizard_page.html's stepper state machine
- * (SETUP_WIZARD_PLAN.md, implementation step 3): computeStepState(),
+ * (SETUP_WIZARD.md, implementation step 3): computeStepState(),
  * mergeAllSteps(), computeCompleteness(), pickResumeStep().
  *
  * Same extraction technique test_guided_flow.js uses for
@@ -283,6 +283,56 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   const mergedNonSafetySkipped = ctx.mergeAllSteps(nonSafetySkippedProgress, allOkReadiness);
   const gateNonSafetyOk = ctx.computeCompleteness(mergedNonSafetySkipped, allOkReadiness);
   assert(gateNonSafetyOk.complete === true, 'skipping a non-safety step (11: coupling matrix) does not block completion');
+})();
+
+// ---- Owner decision 2026-09-09: /api/readiness is now a REAL firing gate
+// (readiness_gate.c/.h), blocking on safety_trip, recovery_mode, crash_report
+// and estop_verified with NO override. The wizard must consume that SAME
+// predicate -- computeCompleteness() already iterates every item in the raw
+// /api/readiness response, not just the keys any WIZARD_STEPS entry declares,
+// so a whole-board item none of the 13 steps track (crash_report,
+// recovery_mode, safety_trip, estop_verified, safety_context, cfg_fs) still
+// blocks "Setup complete" the instant readiness_http.c reports it not_done --
+// there is no second, wizard-owned copy of "is this board allowed to fire" to
+// drift from readiness_gate's. This is not hypothetical: the bench board's
+// live /api/readiness right now reports crash_report=not_done (an
+// unacknowledged panic from today's profile_executor task) and
+// estop_verified=not_done, neither of which any wizard step maps to.
+(function testGateBlocksOnUnmappedFiringGateItem() {
+  const ctx = loadPageScript(noopFetch);
+  const allDoneProgress = {
+    version: 1,
+    steps: Object.fromEntries(ctx.WIZARD_STEPS.map((s) => [String(s.id), { state: 'done' }])),
+  };
+  // Every step-tracked key is 'ok', but readiness ALSO reports the four real
+  // firing-gate items (readiness_gate.h's READINESS_GATE_KEY_* strings) plus
+  // two other whole-board items no step maps to -- exactly the bench shape.
+  const stepKeyItems = ctx.WIZARD_STEPS.reduce((acc, s) => acc.concat(s.readinessKeys.map((k) => item(k, 'ok'))), []);
+  const readinessWithCrash = readinessOf(stepKeyItems.concat([
+    item('recovery_mode', 'ok'),
+    item('safety_trip', 'ok'),
+    item('crash_report', 'not_done', 'unacknowledged crash on record (IllegalInstruction, task profile_executo)'),
+    item('estop_verified', 'not_done', 'never confirmed'),
+  ]));
+  const merged = ctx.mergeAllSteps(allDoneProgress, readinessWithCrash);
+  const gate = ctx.computeCompleteness(merged, readinessWithCrash);
+  assert(gate.complete === false,
+    'an unmapped not_done firing-gate item (crash_report) blocks "Setup complete" even with all 13 steps done');
+  assert(gate.reasons.some((r) => /crash_report|Unacknowledged crash report/.test(r)),
+    'the refusal names the crash_report item, not a generic message');
+  assert(gate.reasons.some((r) => /estop_verified|E-stop interlock verified/.test(r)),
+    'the refusal also names estop_verified independently -- both real gate blockers surface, not just the first');
+
+  // And the inverse: once every item (step-tracked AND whole-board) reads
+  // ok/deliberately_off, completion is granted -- proves the block above was
+  // this test's fixture, not some unrelated always-false path.
+  const readinessAllClear = readinessOf(stepKeyItems.concat([
+    item('recovery_mode', 'ok'), item('safety_trip', 'ok'),
+    item('crash_report', 'ok'), item('estop_verified', 'ok'),
+  ]));
+  const mergedClear = ctx.mergeAllSteps(allDoneProgress, readinessAllClear);
+  const gateClear = ctx.computeCompleteness(mergedClear, readinessAllClear);
+  assert(gateClear.complete === true, 'once the firing-gate items also clear, completion is granted');
 })();
 
 // ---- Review 2026-09-08 (docs/audits/setup_wizard_review_2026-09-08.md) §2a/

@@ -351,7 +351,7 @@ details.info > *:not(summary) { display: block; margin: 0.4em 0 0; }
                        font-weight: bold; }
 .kc-recovery-banner[hidden] { display: none; }
 
-/* Setup-wizard OFFER banner (SETUP_WIZARD_PLAN.md, "OFFER the wizard rather
+/* Setup-wizard OFFER banner (SETUP_WIZARD.md, "OFFER the wizard rather
    than forcing a redirect" -- owner decision in force). Same in-flow
    placement/no-leftover-gap shape as the two banners above, but
    deliberately the mildest of the three: --ui-accent-1 (this file's
