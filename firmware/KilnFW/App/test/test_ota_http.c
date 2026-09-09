@@ -1226,10 +1226,54 @@ static void test_sw_reset_body_does_not_claim_trip_clearing(void)
     (void)sw_reset_post_handler(&req);
 
     TEST_CHECK(s_last_err_code == 0, "control: the idle path must be accepted so a body is actually sent");
-    TEST_CHECK(strstr(s_last_sendstr_body, "does NOT clear a latched safety trip") != NULL,
-               "the body must state that a latched safety trip is NOT cleared by this reboot");
-    TEST_CHECK(strstr(s_last_sendstr_body, "Clear latched trip") != NULL,
-               "the body must name the real clear path (\"Clear latched trip\" on the Safety page)");
+    TEST_CHECK(strstr(s_last_sendstr_body, "WILL latch a safety trip") != NULL,
+               "the body must state that this reboot CREATES a latched trip -- 2026-09-09: the "
+               "earlier wording only denied clearing one, which still let an operator be "
+               "surprised by the S6a latch this route reliably causes");
+    TEST_CHECK(strstr(s_last_sendstr_body, "nothing on this path clears it") != NULL,
+               "the body must still state that a latched safety trip is NOT cleared by this reboot");
+    TEST_CHECK(strstr(s_last_sendstr_body, "/api/safety/clear_trip") != NULL
+                   && strstr(s_last_sendstr_body, "Clear latched trip") != NULL,
+               "the body must name the real clear path -- the route AND the button an operator "
+               "can actually press (\"Clear latched trip\" on the Safety page)");
+    TEST_CHECK(strstr(s_last_sendstr_body, "REQUIRED FOLLOW-UP") != NULL,
+               "clearing the trip must be presented as a required follow-up before heating, not "
+               "as optional background information");
+}
+
+// 2026-09-09 regression guard for the second confirmed defect in this route:
+// xTaskCreatePinnedToCoreWithCaps()'s return value was DISCARDED, and the
+// response then said this controller was rebooting no matter what. On a
+// PSRAM allocation failure that is a lie, and -- because the Pico had
+// already been commanded and may already be resetting -- a lie about a
+// half-reset system. Two properties are pinned here: the failure is
+// reported (not swallowed), and the report says NEITHER processor rebooted,
+// which is only true because the task is now created BEFORE the Pico is
+// commanded.
+//
+// Negative-tested by restoring the discarded-return-value form in
+// sw_reset_http.c (production code, not a copy here), confirming RED, and
+// reversing that edit by hand.
+static void test_sw_reset_reports_task_creation_failure(void)
+{
+    TEST_SECTION("sw_reset_post_handler -- a failed reboot-task creation is reported, and nothing is left half-reset");
+    sw_reset_authenticate();
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    s_last_err_code = 0;
+    s_last_sendstr_body[0] = '\0';
+    g_stub_task_create_result = pdFAIL;
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = sw_reset_post_handler(&req);
+    g_stub_task_create_result = pdPASS; /* leave the shared default as the other tests expect */
+
+    TEST_CHECK(err == ESP_OK, "sw_reset_post_handler must always return ESP_OK");
+    TEST_CHECK(strstr(s_last_sendstr_body, "FAILED") != NULL,
+               "a failed task creation must be reported as a failure, never as \"ok -- rebooting\"");
+    TEST_CHECK(strstr(s_last_sendstr_body, "NEITHER processor was rebooted") != NULL,
+               "the report must say neither processor rebooted -- the task is created before the "
+               "safety processor is commanded precisely so that this is true");
 }
 
 // Auth-before-interlock, same property as decision 3's factory_reset test
@@ -1420,12 +1464,18 @@ void run_test_ota_http(void)
     test_pico_rollback_status_reports_pending_while_in_progress();
     test_pico_rollback_status_reports_all_four_outcomes_honestly();
 
+    /* sw_reset_post_handler() now REFUSES the whole route if it cannot create
+     * its reboot task, so the accepted-path tests below need the stub to
+     * report success; test_sw_reset_reports_task_creation_failure() flips it
+     * back to pdFAIL for its own duration. */
+    g_stub_task_create_result = pdPASS;
     test_sw_reset_missing_auth_never_reaches_interlock();
     test_sw_reset_refuses_during_firing();
     test_sw_reset_refuses_while_paused();
     test_sw_reset_refuses_during_autotune();
     test_sw_reset_ok_when_idle();
     test_sw_reset_body_does_not_claim_trip_clearing();
+    test_sw_reset_reports_task_creation_failure();
     test_sw_reset_does_not_touch_nvs();
     test_sw_reset_pico_outcome_mapping();
     test_sw_reset_pico_sentences_are_honest();

@@ -149,14 +149,18 @@ relay is armed), and older safety firmware may not know this command at all.
 Either way this controller still reboots, and the message below reports what
 actually happened on <em>each</em> processor -- it will not claim the safety
 processor rebooted unless the safety processor said so.</p>
-<p><strong>This does not clear a latched safety trip.</strong> It is a plain
-reboot and nothing on this path sends a clear. If the safety processor has
-tripped, rebooting will not release it -- and while this controller resets,
-its fault line to the safety processor is briefly undefined, which is itself
-a mainFault (S6a) condition, so a reboot can leave you with a trip latched
-even if there was not one before. To release a latched trip use
-<a href="/safety">Clear latched trip on the Safety page</a>; heat stays
-blocked until you do. No JTAG is needed for that, and never was.</p>
+<p><strong>This reboot will latch a safety trip, and does not clear one.</strong>
+While this controller resets, its fault line to the safety processor is
+undefined, which the safety processor reads as a main fault and latches as
+S6a (<code>SAFETY_TRIP_MAIN_FAULT</code>). Expect that trip every time --
+rebooting the safety processor as well does not avoid it, because the RP2040
+comes back long before this controller does and re-latches on the still-
+undefined line. That is correct fail-safe behaviour, not a fault in the
+board, and nothing on this path sends a clear.</p>
+<p><strong>Required follow-up before heating:</strong> clear the latched trip
+with <a href="/safety">Clear latched trip on the Safety page</a> (or the
+dashboard's Clear Trip button) -- both POST <code>/api/safety/clear_trip</code>.
+Heat stays blocked until you do. No JTAG is needed for that, and never was.</p>
 <p>
 <button type="button" id="swResetBtn">Reboot both processors (no config changes)</button>
 </p>
@@ -271,8 +275,9 @@ document.getElementById('swResetBtn').addEventListener('click', function () {
   if (!kcConfirm('This reboots both processors right now -- this controller, and the safety '
                + 'processor in place (same firmware). No configuration is erased or changed. '
                + 'The safety processor may refuse if its relay is armed; the result will say so. '
-               + 'This does NOT clear a latched safety trip -- and it can cause one. '
-               + 'Use "Clear latched trip" on the Safety page for that. '
+               + 'This WILL latch an S6a main-fault trip on the safety processor -- expect it '
+               + 'every time -- and it does NOT clear one. Required follow-up before heating: '
+               + '"Clear latched trip" on the Safety page (or Clear Trip on the dashboard). '
                + 'Continue?')) {
     return;
   }

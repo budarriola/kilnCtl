@@ -116,12 +116,16 @@ bool update_task_request_rollback(const char **out_reason, uint8_t *out_reason_c
 // Returns true when a reboot is allowed. Returns false, filling
 // `*out_reason` (free text, for THIS processor's local log) and
 // `*out_reason_code` (a kilnlink_reboot_result_reason_t, for the wire) when
-// it is refused. The one refusal today is the relay being ARMED -- the same
+// it is refused. There are two refusals. The relay being ARMED -- the same
 // gate SET_CONFIG/SET_CT_CAL/ROLLBACK already use, and for the same reason:
 // resetting the safety processor while it is holding heating permission
-// would drop that supervision mid-firing.
+// would drop that supervision mid-firing. And a firmware transfer being in
+// progress (update_task_transfer_active()), because a reset mid-transfer
+// leaves a partially written slot; the ESP refuses that case too, but this
+// side must hold independently since uart_bridge passthrough and bench tools
+// reach this policy directly.
 //
-// Reads relay state only -- no flash, no config_store, no bootloader
+// Reads relay state and transfer state only -- no flash, no config_store, no bootloader
 // metadata. See update_task_reboot_now()'s comment for the "touches no
 // configuration" property this whole pair exists to keep provable.
 bool update_task_reboot_allowed(const char **out_reason, uint8_t *out_reason_code);

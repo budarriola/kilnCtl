@@ -223,6 +223,12 @@ static void test_reboot_allowed_is_the_armed_gate_only(void)
     TEST_CHECK(strstr(body, "KILNLINK_REBOOT_RESULT_REASON_ARMED") != NULL,
                "an ARMED relay produces the ARMED refusal reason, so the ESP can report WHY, not "
                "just that something went wrong");
+    TEST_CHECK(strstr(body, "update_task_transfer_active") != NULL
+                   && strstr(body, "KILNLINK_REBOOT_RESULT_REASON_TRANSFER_ACTIVE") != NULL,
+               "a firmware transfer in progress produces its own refusal -- the Pico-side policy "
+               "must hold independently of the ESP's ota_http_check_interlocks(), because "
+               "uart_bridge passthrough and bench tools reach it with no such check, and a reset "
+               "mid-transfer leaves a partially written slot");
     TEST_CHECK(strstr(body, "hal_wdt_reboot") == NULL,
                "the policy half never reboots -- that separation is what lets link_task reply on "
                "the wire BEFORE the reset, which a rollback structurally cannot do");

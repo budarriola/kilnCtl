@@ -1207,6 +1207,34 @@ bool update_task_reboot_allowed(const char **out_reason, uint8_t *out_reason_cod
         return false;
     }
 
+    // Second gate: a firmware transfer into the inactive slot is in flight.
+    // The ESP's own ota_http_check_interlocks() already refuses this case
+    // (snap.other_update_in_progress), so on the normal path this is
+    // defence in depth -- but the Pico-side policy is the half that must be
+    // independently correct, and OTHER senders reach it with no such check
+    // at all: the raw uart_bridge passthrough, and any bench tool that can
+    // put a 0x29 on the wire.
+    //
+    // What rebooting here would have cost: s_transfer_active spans
+    // UPDATE_BEGIN..UPDATE_END, during which chunks are being written into
+    // the inactive slot and the receive/gap-tracking state lives only in
+    // RAM. A watchdog_reboot() mid-transfer would leave that slot holding a
+    // partial image with no record that it is partial, and would discard the
+    // gap cursor, so the ESP's transfer would fail (or, worse, have to be
+    // restarted blind) against a slot whose contents nobody can describe.
+    // Refusing costs the operator one retry after the update finishes;
+    // accepting costs a half-written firmware slot.
+    if (update_task_transfer_active()) {
+        if (out_reason) {
+            *out_reason = "refused: a firmware transfer is in progress, reboot would leave a "
+                          "partially written slot";
+        }
+        if (out_reason_code) {
+            *out_reason_code = KILNLINK_REBOOT_RESULT_REASON_TRANSFER_ACTIVE;
+        }
+        return false;
+    }
+
     if (out_reason) {
         *out_reason = "ok";
     }

@@ -65,6 +65,18 @@ typedef enum {
      * (CommonFW/README.md rule 6: do not let an unrecognized value alias a
      * real reason). */
     KILNLINK_REBOOT_RESULT_REASON_UNKNOWN = 2,
+    /* Refused: a firmware transfer into this processor's inactive slot is in
+     * progress (update_task_transfer_active()). Resetting mid-transfer would
+     * leave a partially written slot behind and abandon the transfer state
+     * that only RAM holds. Added 2026-09-09 WITHOUT a
+     * KILNLINK_PROTOCOL_VERSION bump, and that is safe for the same reason
+     * the frame pair itself needed none: this byte is only ever read out of
+     * a REQUEST-TRIGGERED 0x2A reply, and CommonFW/README.md rule 6 already
+     * requires a receiver to treat any value outside its known range as
+     * UNKNOWN rather than aliasing it onto a real reason. An older ESP
+     * therefore reports "refused, reason unknown" -- never "accepted", and
+     * never the wrong reason. */
+    KILNLINK_REBOOT_RESULT_REASON_TRANSFER_ACTIVE = 3,
 } kilnlink_reboot_result_reason_t;
 
 typedef enum {

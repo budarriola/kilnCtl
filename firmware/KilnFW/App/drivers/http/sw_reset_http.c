@@ -1,5 +1,6 @@
 #include "sw_reset_http.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 
 #include "esp_heap_caps.h"
@@ -29,8 +30,18 @@ static const char *TAG = "sw_reset";
 //    own 2026-09-09 CORRECTION comment carries the full verification (S6a
 //    is unconditional in safety_guards.c -- reboot_grace_active gates only
 //    S6b -- and an ESP reset floats GPIO6, which the Pico reads AS
-//    mainFault, so this route tends to CAUSE an S6a latch rather than clear
-//    one). Extending the grace over S6a was considered and rejected: S6a's
+//    mainFault, so this route reliably CAUSES an S6a latch rather than
+//    clearing one -- and now that the Pico reboots too, the Pico's own
+//    RAM-only latch clearing does not rescue it either: the RP2040 is back
+//    watching the still-floating line long before the ESP is. The response
+//    body therefore states plainly that the reboot WILL latch S6a and that
+//    POST /api/safety/clear_trip is a REQUIRED follow-up before heating.
+//    Auto-clearing it here was considered and rejected outright: the trip is
+//    correct -- the main processor really was absent -- and clearing it from
+//    the same request that caused it would make S6a unable to report the one
+//    event it exists to report.
+//
+//    Extending the grace over S6a was considered and rejected too: S6a's
 //    evidence is a present positive assertion rather than S6b's absence of
 //    information, so suppression would discard it rather than defer it, and
 //    a grace cannot un-latch the already-latched trip anyway. The real
@@ -97,10 +108,36 @@ typedef enum {
 // case where the Pico refused its own reboot (relay ARMED) and therefore
 // stays up -- without it, that Pico's S6b link-dead guard would nuisance-trip
 // on this ESP's 10-15 second silence.
+
+// Set by the handler once the response has been written and it is safe for
+// the task below to take the board down. The task is CREATED before the Pico
+// is commanded (see the handler), so without this flag a task that happened
+// to run immediately could reboot this ESP while the handler was still
+// waiting on the Pico's reply -- which would produce exactly the divergence
+// this ordering exists to prevent: no response written, and a report nobody
+// ever reads. volatile, written once by the handler task, read by the reboot
+// task; no lock needed for a single-word flag with one writer.
+static volatile bool s_reboot_armed = false;
+
 static void sw_reset_reboot_task(void *arg)
 {
     (void)arg;
     vTaskDelay(pdMS_TO_TICKS(500));
+
+    // Wait for the handler to finish (bounded). Every path through the
+    // handler arms this flag before returning, so the timeout is defensive
+    // only: 5 s is far longer than the Pico exchange (~345 ms worst case)
+    // plus the response write, and expiring reboots anyway rather than
+    // leaking a task that never dies.
+    const int kArmPollMs = 20;
+    const int kArmWaitMs = 5000;
+    for (int waited = 0; !s_reboot_armed && waited < kArmWaitMs; waited += kArmPollMs) {
+        vTaskDelay(pdMS_TO_TICKS(kArmPollMs));
+    }
+    if (!s_reboot_armed) {
+        ESP_LOGW(TAG, "sw_reset: reboot task armed-flag never set after %d ms -- rebooting anyway",
+                 kArmWaitMs);
+    }
 
     if (s_safety) {
         esp_err_t announce_err = safety_link_send_announce_reboot(s_safety);
@@ -205,7 +242,50 @@ static esp_err_t sw_reset_post_handler(httpd_req_t *req)
 
     ESP_LOGW(TAG, "sw_reset from %s: authenticated, rebooting -- no config touched", ip);
 
-    // Pico half FIRST, on this task, while there is still an HTTP response
+    // THIS controller's reboot task is created FIRST, before anything is
+    // commanded anywhere, and a failure to create it aborts the whole route
+    // without touching the safety processor.
+    //
+    // Why this ordering: task creation is the one step here that can fail
+    // for a local reason (PSRAM allocation), and it is the step that owns
+    // the ESP half of the reboot. Created after the Pico command, a failure
+    // leaves the system HALF-RESET -- the safety processor has already
+    // accepted and is resetting, and there is nothing left to undo it with.
+    // Created first, a failure leaves BOTH processors untouched and the
+    // operator gets an error instead of a false "both rebooted", which is
+    // the whole defect being fixed here (the return value used to be
+    // discarded entirely, and the response claimed this controller was
+    // rebooting regardless -- this repo's "logging unchecked success"
+    // class).
+    //
+    // The created-but-not-yet-run window is closed by s_reboot_armed: the
+    // task delays, then waits for the handler to arm it, so it cannot
+    // reboot this ESP out from under the Pico exchange or the response.
+    //
+    // 2026-08-22-style PSRAM-stack note: sw_reset_reboot_task() only
+    // vTaskDelay()s, sends one fire-and-forget UART frame and calls
+    // hal_wdt_reboot() -- no flash access on this task's own stack, so
+    // unlike factory_reset.c's erase path there is no flash-worker dispatch
+    // needed here.
+    s_reboot_armed = false;
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(sw_reset_reboot_task, "sw_reset_reboot",
+                                                         3072, NULL, tskIDLE_PRIORITY + 1, NULL,
+                                                         tskNO_AFFINITY,
+                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (created != pdPASS) {
+        ESP_LOGE(TAG, "sw_reset from %s: could not create the reboot task (%d) -- NOTHING was "
+                      "rebooted; the safety processor was deliberately not commanded",
+                 ip, (int)created);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req,
+                           "FAILED -- could not start this controller's reboot (out of memory). "
+                           "NEITHER processor was rebooted: the safety processor was deliberately "
+                           "not commanded, so nothing is half-reset. No configuration was changed. "
+                           "Try again; if it keeps failing, power-cycle the board.");
+        return ESP_OK;
+    }
+
+    // Pico half next, on this task, while there is still an HTTP response
     // to put the answer in. safety_link_send_reboot() is bounded (one send
     // plus SAFETY_LINK_REPLY_TIMEOUT_MS, ~345 ms at 230400 baud), well
     // inside what an httpd handler may spend, and doing it here is the only
@@ -225,35 +305,47 @@ static esp_err_t sw_reset_post_handler(httpd_req_t *req)
         ESP_LOGW(TAG, "sw_reset: no safety link configured this boot -- ESP half only");
     }
 
-    // 2026-08-22-style PSRAM-stack note: sw_reset_reboot_task() only
-    // vTaskDelay()s, sends one fire-and-forget UART frame and calls
-    // hal_wdt_reboot() -- no flash access on this task's own stack, so
-    // unlike factory_reset.c's erase path there is no flash-worker dispatch
-    // needed here.
-    xTaskCreatePinnedToCoreWithCaps(sw_reset_reboot_task, "sw_reset_reboot", 3072, NULL,
-                                    tskIDLE_PRIORITY + 1, NULL, tskNO_AFFINITY,
-                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-
     // Reported per-processor, never as one undifferentiated "ok": the two
     // halves genuinely can disagree (a Pico holding an armed relay refuses
     // while this ESP still reboots), and an operator told "both rebooted"
     // when only one did will draw exactly the wrong conclusion about
     // whatever stuck state they were trying to clear.
-    char body[640];
+    //
+    // The S6a sentence says WILL, not "does not clear": this route reliably
+    // CREATES a latched main-fault trip. GPIO6 floats through the ESP's
+    // reset (safety_link.c calls that an undefined fault state at the
+    // safety processor), safety_guards.c's S6a trips on the debounced
+    // mainFault line unconditionally, and a Pico that reboots too comes back
+    // first and re-latches on the still-floating line. So the follow-up is
+    // not optional advice, it is required before heating -- said here rather
+    // than left for the operator to discover from a refusing kiln.
+    char body[960];
     int n = snprintf(body, sizeof(body),
                      "ok -- rebooting this controller now; it will be unreachable for about 10-15 "
                      "seconds, then come back on the same address. No configuration was changed on "
-                     "either processor. This does NOT clear a latched safety trip (see "
-                     "\"Clear latched trip\" on the Safety page). %s",
+                     "either processor. %s "
+                     "IMPORTANT: this reboot WILL latch a safety trip. While this controller "
+                     "resets, its fault line to the safety processor is undefined, which the "
+                     "safety processor reads as a main-fault (S6a) and latches "
+                     "SAFETY_TRIP_MAIN_FAULT. That is correct fail-safe behaviour, not a bug, and "
+                     "nothing on this path clears it. REQUIRED FOLLOW-UP before heating: clear the "
+                     "trip with POST /api/safety/clear_trip -- the \"Clear latched trip\" button on "
+                     "the Safety page, or the dashboard's Clear Trip button. Heat stays blocked "
+                     "until you do.",
                      sw_reset_pico_sentence(pico_report));
     if (n < 0 || (size_t)n >= sizeof(body)) {
         /* Truncated (cannot happen with today's strings, but never send half
-         * a sentence about which processors rebooted). */
+         * a sentence about which processors rebooted -- and never drop the
+         * required-follow-up half either). */
         httpd_resp_sendstr(req, "ok -- rebooting this controller now. No configuration was changed. "
-                                "See the log for the safety processor's own outcome.");
+                                "This reboot WILL latch an S6a main-fault trip: clear it with POST "
+                                "/api/safety/clear_trip (Safety page) before heating. See the log "
+                                "for the safety processor's own outcome.");
+        s_reboot_armed = true;
         return ESP_OK;
     }
     httpd_resp_sendstr(req, body);
+    s_reboot_armed = true;
     return ESP_OK;
 }
 
