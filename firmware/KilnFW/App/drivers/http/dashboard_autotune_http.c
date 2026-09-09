@@ -188,9 +188,19 @@ esp_err_t autotune_start_post_handler(httpd_req_t *req)
      * (dashboard_exec_http.c): it answers 409 Conflict with the blocking item
      * named in full, before the body is even read, instead of the generic 400
      * autotune_begin_run_locked()'s own refusal produces further down.
-     * Deliberately reuses recovery_err[] rather than adding a second ~200-byte
-     * local to a frame on the shared 8 KB httpd task stack
+     * Deliberately reuses recovery_err[] as the OUTPUT buffer for
+     * readiness_gate_refuses_start()'s message, rather than adding a second
+     * ~200-byte local for that purpose, on the shared 8 KB httpd task stack
      * (check_httpd_task_stack_budget; CLAUDE.md's httpd-stack-blob note).
+     * This does NOT mean no further local is added: the json[] buffer a few
+     * lines below (sizeof(recovery_err) + 96 = 288 B) IS a genuine second
+     * stack local, needed to wrap recovery_err's text in the JSON envelope
+     * this endpoint's caller expects -- check_httpd_task_stack_budget.py
+     * measures autotune_start_post_handler's reachable depth well under this
+     * file's worst path (4304 B of the 4832 B ceiling, cfgfs_status_get_
+     * handler) with this buffer included, so it is not the blob this repo's
+     * class of bug looks for; it just is not what the sentence above is
+     * about.
      *
      * If this call were ever deleted, the autotune start would still be
      * refused -- just with a less specific status/message. If autotune_begin_
