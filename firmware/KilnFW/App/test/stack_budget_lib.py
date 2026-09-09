@@ -81,6 +81,19 @@ ENTRY_RE = re.compile(r"\bentry\ta1, (0x[0-9a-f]+|\d+)")
 # automatically (the offset address is simply absent from `frames`), so this
 # regex only needs to capture what objdump actually printed.
 CALL_RE = re.compile(r"\bcall(?:4|8|12)\t([0-9a-f]+)(?: <([^>]+)>)?")
+# Xtensa's INDIRECT call form -- callx4/8/12 <reg> -- targets whatever address
+# is currently in the named register (a function pointer: an LVGL flush/timer
+# callback, a queued-worker dispatch, a registered I2C owner callback, ...).
+# There is no static target here at all, so deepest()'s walk cannot follow it
+# no matter how the frames/calls graph is built. A function that contains one
+# of these is a genuine dead end for this analysis, not a gap that better
+# parsing could close -- see has_unresolved_dispatch() below, added
+# 2026-09-09 after an opus review found check_all_task_stack_budgets.py
+# reporting confident "measured and within budget" passes for tasks (lvgl:
+# 752 B against an 8192 B stack; bx_flash_worker, recovery_exit,
+# backlight_pwm, i2c_owner_*) whose real depth lives almost entirely behind
+# exactly this kind of call.
+CALLX_RE = re.compile(r"\bcallx(?:4|8|12)\b")
 
 
 def find_objdump():
@@ -118,16 +131,20 @@ class ParsedElf:
     """Address-keyed frame sizes + call graph, plus a name->[addresses] index
     for root resolution."""
 
-    def __init__(self, frames, calls, names, name_addrs):
+    def __init__(self, frames, calls, names, name_addrs, indirect):
         self.frames = frames          # {addr:int -> frame_bytes:int}
         self.calls = calls            # {addr:int -> set(addr:int)}
         self.names = names            # {addr:int -> name:str}  (display only)
         self.name_addrs = name_addrs  # {name:str -> [addr:int, ...]}
+        self.indirect = indirect      # {addr:int -> bool}  True iff this function's own
+                                       # disassembly contains a callx4/8/12 (indirect call
+                                       # through a register -- a function pointer this walk
+                                       # cannot resolve a target address for at all)
 
 
 def parse(objdump, elf):
     out = subprocess.run([objdump, "-d", elf], capture_output=True, text=True, check=True).stdout
-    frames, calls, names, name_addrs = {}, {}, {}, {}
+    frames, calls, names, name_addrs, indirect = {}, {}, {}, {}, {}
     seen_entry = set()
     cur = None
     for line in out.splitlines():
@@ -137,6 +154,7 @@ def parse(objdump, elf):
             name = m.group(2)
             frames.setdefault(cur, 0)
             calls.setdefault(cur, set())
+            indirect.setdefault(cur, False)
             names[cur] = name
             name_addrs.setdefault(name, []).append(cur)
             continue
@@ -150,7 +168,39 @@ def parse(objdump, elf):
         c = CALL_RE.search(line)
         if c:
             calls[cur].add(int(c.group(1), 16))
-    return ParsedElf(frames, calls, names, name_addrs)
+        if CALLX_RE.search(line):
+            indirect[cur] = True
+    return ParsedElf(frames, calls, names, name_addrs, indirect)
+
+
+def reachable_addrs(root_addr, parsed):
+    """Every address deepest() can actually walk to from root_addr (i.e. only
+    following resolved call4/8/12 edges whose target has a frame). Used to
+    look for indirect dispatch anywhere in the graph this walk covers, not
+    just on whichever single path happens to be deepest."""
+    seen = set()
+    stack = [root_addr]
+    while stack:
+        a = stack.pop()
+        if a in seen:
+            continue
+        seen.add(a)
+        for c in parsed.calls.get(a, ()):
+            if c in parsed.frames and c not in seen:
+                stack.append(c)
+    return seen
+
+
+def has_unresolved_dispatch(root_addr, parsed):
+    """True if root_addr or anything in its resolvable call graph contains an
+    indirect call (callx4/8/12). When true, deepest(root_addr, parsed) is a
+    LOWER BOUND, not a measurement: the real worst-case path may continue
+    through whatever function pointer that callx targets at runtime (an LVGL
+    flush/timer callback, a queued-worker dispatch, a registered I2C
+    callback, ...), and this walk has no way to know what that is or how deep
+    it goes. Callers must not report a confident pass off of a total this
+    flags -- see check_all_task_stack_budgets.py's INDETERMINATE handling."""
+    return any(parsed.indirect.get(a, False) for a in reachable_addrs(root_addr, parsed))
 
 
 def resolve_root(parsed, name, elf, addr2line=None, expect_path_substr=None):
@@ -191,27 +241,47 @@ def resolve_root(parsed, name, elf, addr2line=None, expect_path_substr=None):
 
 def deepest(root_addr, parsed):
     """Deepest cumulative-byte static call path from root_addr. Returns
-    (total_bytes, [addr, ...] path after the root, NOT including root)."""
+    (total_bytes, [addr, ...] path after the root, NOT including root).
+
+    MEMO CORRECTNESS (fixed 2026-09-09, opus review of 316967b7): a node hit
+    while walking INSIDE a recursion cut (addr already in on_stack, so that
+    branch returns (0, []) early) must NOT be cached as if it were that
+    node's true deepest value -- the same node reached later via a DIFFERENT
+    path, with a different on_stack, may not hit that cycle at all and could
+    legitimately measure deeper. Caching the cut-short value under the first
+    on_stack it happened to be visited with would then leak into every later
+    reuse of that memo entry, silently under-reporting -- always in the
+    unsafe direction (this checker's one stated invariant is that it may
+    under- but never over-estimate). Fixed by tracking, per call, whether the
+    subtree the call just computed contains a cut anywhere in it, and only
+    writing an address's memo entry when its own computation was cut-free --
+    a cut result is recomputed (safely, since real Xtensa call graphs here
+    are small and shallow) every time it is reached, instead of being cached
+    as if final."""
     memo = {}
     frames, calls = parsed.frames, parsed.calls
 
     def walk(addr, on_stack):
         if addr in on_stack:
-            return 0, []
+            return 0, [], True  # cycle cut here; caller must not cache this branch's result
         if addr in memo:
-            return memo[addr]
+            return memo[addr][0], memo[addr][1], False
         best = (0, [])
+        any_cut = False
         for callee in sorted(calls.get(addr, ())):
             if callee not in frames:
                 continue  # unresolved indirect target / offset-qualified caption / section marker
-            d, p = walk(callee, on_stack | {addr})
+            d, p, cut = walk(callee, on_stack | {addr})
+            any_cut = any_cut or cut
             if d > best[0]:
                 best = (d, [callee] + p)
         result = (frames.get(addr, 0) + best[0], best[1])
-        memo[addr] = result
-        return result
+        if not any_cut:
+            memo[addr] = result
+        return result[0], result[1], any_cut
 
-    return walk(root_addr, set())
+    total, path, _cut = walk(root_addr, set())
+    return total, path
 
 
 def render_path(parsed, root_addr, path_addrs):

@@ -98,14 +98,42 @@ over a regression without documenting why in this file.
 
 WHAT IT DOES NOT MODEL (same LIMITS as every other checker in this family)
 ---------------------------------------------------------------------------
-  * Indirect calls (`callx8` through a function pointer) are not followed.
-  * Recursion is cut at the first repeat rather than unrolled.
+  * Indirect calls (`callx4/8/12` through a function pointer) are not
+    followed -- stack_budget_lib.has_unresolved_dispatch() detects when a
+    task's reachable call graph contains one of these and, as of 2026-09-09
+    (opus review of 316967b7's initial version, which measured `lvgl` at
+    752 B against its 8192 B stack and reported a confident pass -- the real
+    depth was entirely behind lv_timer_handler()'s function-pointer
+    dispatch), such a task is printed and counted as INDETERMINATE, never as
+    a plain pass. In practice this now flags every one of the 28 tasks in
+    this table -- ESP-IDF's own driver/HAL layer is function-pointer-based
+    almost everywhere -- so a ceiling-based regression gate is still applied
+    (and still fails a task that regresses or goes negative), but the
+    "measured and within budget" headline is reserved for tasks with zero
+    indirect dispatch in their reachable graph, which turns out to be none
+    of them today. `lvgl` additionally has extra_roots: known callback entry
+    points (the flush callback, the touch read callback, every page's
+    lv_timer_create() refresh callback) that this script measures as their
+    own roots and adds the deepest of onto lvgl's base -- a real,
+    source-derived improvement over the bare 752 B, but still not a full
+    measurement (LVGL's own internal animation/event-callback dispatch stays
+    invisible), so `lvgl` still reports INDETERMINATE too.
+  * Recursion is cut at the first repeat rather than unrolled; deepest()'s
+    memo only caches a node's result when its subtree computed with no cut
+    in it, so a cut branch is recomputed rather than poisoning later reuse
+    of that node from a different call path (fixed 2026-09-09, see
+    deepest()'s docstring in stack_budget_lib.py).
   * ISR/window-overflow spill beyond UNMODELED_OVERHEAD_BYTES is not modelled.
-Both make this an UNDER-estimate of true worst-case depth, never an over-
-estimate: anything this reports as too deep genuinely is too deep.
+All three make this an UNDER-estimate of true worst-case depth, never an
+over-estimate: anything this reports as too deep genuinely is too deep, and
+an INDETERMINATE task's true depth may be worse than what is printed.
 
-EXIT CODES: 0 OK, 1 FAIL (at least one task over ceiling or honest-negative),
-3 SKIP (no ELF / no objdump -- never claims success without measuring).
+EXIT CODES: 0 OK (all ceiling-graded tasks within budget; INDETERMINATE tasks
+are noted, not failed, as long as their own known lower bound is within
+budget), 1 FAIL (at least one task over its ceiling, honest-negative, or
+missing a CEILING_BYTES entry -- a table row must never silently go
+ungraded), 3 SKIP (no ELF / no objdump -- never claims success without
+measuring).
 run_all_checks.ps1 sorts check_*.ps1 by plain FullName; this file's
 "check_a..." prefix sorts it after check_00_kilnfw_target_build.ps1 (which
 publishes the fresh ELF this script reads) and before the untouched
@@ -195,99 +223,124 @@ def extract_sdkconfig_macro(rel_path, usage_pattern, sdkconfig_key):
 # thermo_owner.c -- see stack_budget_lib.py's docstring).
 # ---------------------------------------------------------------------------
 TASKS = [
-    dict(name="boot_button", root="boot_button_task", ceiling=None,
+    dict(name="boot_button", root="boot_button_task",
          stack=lambda: extract_int_literal("drivers/bridge/boot_button.c",
              r'xTaskCreate\(boot_button_task,\s*"boot_button",\s*(\d+)')),
-    dict(name="gpio_probe", root="gpio_probe_task", ceiling=None,
+    dict(name="gpio_probe", root="gpio_probe_task",
          stack=lambda: extract_int_literal("drivers/bridge/gpio_probe.c",
              r'xTaskCreatePinnedToCoreWithCaps\(gpio_probe_task,\s*"gpio_probe",\s*(\d+)')),
-    dict(name="link_watchdog", root="link_watchdog_task", ceiling=None,
+    dict(name="link_watchdog", root="link_watchdog_task",
          stack=lambda: extract_int_literal("drivers/bridge/uart_bridge.c",
              r'xTaskCreatePinnedToCoreWithCaps\(link_watchdog_task,\s*"link_watchdog",\s*(\d+)')),
-    dict(name="bx_flash_worker", root="bx_worker_task", ceiling=None,
+    dict(name="bx_flash_worker", root="bx_worker_task",
          stack=lambda: extract_local_macro("drivers/bridge/uart_bridge_ext.c",
              r'#define BX_WORKER_STACK\s+(\d+)',
              r'xTaskCreatePinnedToCore\(bx_worker_task,\s*"bx_flash_worker",\s*BX_WORKER_STACK')),
-    dict(name="info_uart_bridge", root="info_bridge_task", ceiling=None,
+    dict(name="info_uart_bridge", root="info_bridge_task",
          stack=lambda: extract_int_literal("drivers/bridge/uart_bridge_info.c",
              r'xTaskCreatePinnedToCoreWithCaps\(info_bridge_task,\s*"info_uart_bridge",\s*(\d+)')),
-    dict(name="io_uart_bridge", root="io_bridge_task", ceiling=None,
+    dict(name="io_uart_bridge", root="io_bridge_task",
          stack=lambda: extract_int_literal("drivers/bridge/uart_bridge_io.c",
              r'xTaskCreatePinnedToCoreWithCaps\(io_bridge_task,\s*"io_uart_bridge",\s*(\d+)')),
-    dict(name="safety_uart_bridge", root="safety_bridge_task", ceiling=None,
+    dict(name="safety_uart_bridge", root="safety_bridge_task",
          stack=lambda: extract_int_literal("drivers/bridge/uart_bridge_safety.c",
              r'xTaskCreatePinnedToCoreWithCaps\(safety_bridge_task,\s*"safety_uart_bridge",\s*(\d+)')),
-    dict(name="thermo_uart_bridge", root="thermo_bridge_task", ceiling=None,
+    dict(name="thermo_uart_bridge", root="thermo_bridge_task",
          stack=lambda: extract_int_literal("drivers/bridge/uart_bridge_thermo.c",
              r'xTaskCreatePinnedToCoreWithCaps\(thermo_bridge_task,\s*"thermo_uart_bridge",\s*(\d+)')),
-    dict(name="touch_uart_bridge", root="touch_bridge_task", ceiling=None,
+    dict(name="touch_uart_bridge", root="touch_bridge_task",
          stack=lambda: extract_int_literal("drivers/bridge/uart_bridge_touch.c",
              r'xTaskCreatePinnedToCoreWithCaps\(touch_bridge_task,\s*"touch_uart_bridge",\s*(\d+)')),
-    dict(name="autotune_engine", root="task_entry", ceiling=None,
+    dict(name="autotune_engine", root="task_entry",
          stack=lambda: extract_int_literal("drivers/control/autotune_engine.c",
              r'xTaskCreatePinnedToCoreWithCaps\(task_entry,\s*"autotune_engine",\s*(\d+)')),
-    dict(name="profile_exec_wdt", root="watchdog_task_entry", ceiling=None,
+    dict(name="profile_exec_wdt", root="watchdog_task_entry",
          stack=lambda: extract_int_literal("drivers/control/profile_executor_start.c",
              r'xTaskCreatePinnedToCore\(watchdog_task_entry,\s*"profile_exec_wdt",\s*(\d+)')),
-    dict(name="ota_rollback_reboot", root="ota_rollback_reboot_task", ceiling=None,
+    dict(name="ota_rollback_reboot", root="ota_rollback_reboot_task",
          stack=lambda: extract_int_literal("drivers/http/ota_http_esp.c",
              r'xTaskCreate\(ota_rollback_reboot_task,\s*"ota_rollback_reboot",\s*(\d+)')),
-    dict(name="ota_pico_rollback", root="ota_pico_rollback_task", ceiling=None,
+    dict(name="ota_pico_rollback", root="ota_pico_rollback_task",
          stack=lambda: extract_int_literal("drivers/http/ota_http_pico.c",
              r'xTaskCreate\(ota_pico_rollback_task,\s*"ota_pico_rollback",\s*(\d+)')),
-    dict(name="recovery_exit", root="ota_recovery_exit_reboot_task", ceiling=None,
+    dict(name="recovery_exit", root="ota_recovery_exit_reboot_task",
          stack=lambda: extract_int_literal("drivers/http/ota_http_recovery.c",
              r'xTaskCreate\(ota_recovery_exit_reboot_task,\s*"recovery_exit_reboot",\s*(\d+)')),
-    dict(name="backlight_pwm", root="backlight_pwm_task", ceiling=None,
+    dict(name="backlight_pwm", root="backlight_pwm_task",
          stack=lambda: extract_int_literal("drivers/hw/backlight_pwm.c",
              r'xTaskCreate\(backlight_pwm_task,\s*"backlight_pwm",\s*(\d+)')),
-    dict(name="i2c_owner_ns2009", root="i2c_owner_task", ceiling=None,
+    dict(name="i2c_owner_ns2009", root="i2c_owner_task",
          stack=lambda: extract_int_literal("drivers/hw/NS2009.c",
              r'i2c_owner_init\(&t->owner,\s*bus,\s*8,\s*5,\s*(\d+)')),
-    dict(name="i2c_owner_sx1509", root="i2c_owner_task", ceiling=None,
+    dict(name="i2c_owner_sx1509", root="i2c_owner_task",
          stack=lambda: extract_int_literal("drivers/hw/SX1509.c",
              r'i2c_owner_init\(&e->owner,\s*bus,\s*8,\s*5,\s*(\d+)')),
-    dict(name="kiln_io_owner", root="owner_task", expect_path="kiln_io_owner.c", ceiling=None,
+    dict(name="kiln_io_owner", root="owner_task", expect_path="kiln_io_owner.c",
          stack=lambda: extract_int_literal("drivers/owners/kiln_io_owner.c",
              r'xTaskCreatePinnedToCore\(owner_task,\s*"kiln_io_owner",\s*(\d+)')),
-    dict(name="thermo_owner", root="owner_task", expect_path="thermo_owner.c", ceiling=None,
+    dict(name="thermo_owner", root="owner_task", expect_path="thermo_owner.c",
          stack=lambda: extract_int_literal("drivers/owners/thermo_owner.c",
              r'xTaskCreatePinnedToCore\(owner_task,\s*"thermo_owner",\s*(\d+)')),
-    dict(name="telemetry_log", root="telemetry_log_task", ceiling=None,
+    dict(name="telemetry_log", root="telemetry_log_task",
          stack=lambda: extract_int_literal("drivers/persist/telemetry_log.c",
              r'xTaskCreatePinnedToCoreWithCaps\(telemetry_log_task,\s*"telemetry_log",\s*(\d+)')),
-    dict(name="danger_mode", root="danger_mode_task", ceiling=None,
+    dict(name="danger_mode", root="danger_mode_task",
          stack=lambda: extract_int_literal("drivers/safety/danger_mode.c",
              r'xTaskCreate\(danger_mode_task,\s*"danger_mode",\s*(\d+)')),
-    dict(name="safety_owner_evt", root="hal_uart_esp_event_task", ceiling=None,
+    dict(name="safety_owner_evt", root="hal_uart_esp_event_task",
          stack=lambda: extract_sdkconfig_macro("drivers/safety/safety_link.c",
              r'uart_owner_init\(&link->owner,.*?UART_OWNER_STACK_SIZE',
              "CONFIG_KILNCTL_UART_OWNER_STACK_SIZE")),
-    dict(name="safety_proto_rx", root="uart_protocol_rx_task", ceiling=None,
+    dict(name="safety_proto_rx", root="uart_protocol_rx_task",
          stack=lambda: extract_sdkconfig_macro("drivers/safety/safety_link.c",
              r'uart_protocol_init\(&link->proto,.*?UART_PROTOCOL_STACK_SIZE',
              "CONFIG_KILNCTL_UART_PROTOCOL_STACK_SIZE")),
-    dict(name="safety_poll", root="safety_poll_task", ceiling=None,
+    dict(name="safety_poll", root="safety_poll_task",
          historical_note="2026-09-04 panic: safety_poll's configASSERT was reached via a deep LVGL "
                           "call path that corrupted thermo_owner.c's s_slots[] -- see lvgl's note below.",
          stack=lambda: extract_local_macro("drivers/safety/safety_link.c",
              r'#define SAFETY_POLL_TASK_STACK\s+(\d+)',
              r'xTaskCreatePinnedToCoreWithCaps\(safety_poll_task,\s*"safety_poll",\s*SAFETY_POLL_TASK_STACK')),
-    dict(name="lvgl", root="lvgl_port_task", ceiling=None,
+    dict(name="lvgl", root="lvgl_port_task",
          historical_note="2026-09-04 panic: s_lvgl_task_stack (this task's own 8192 B stack) sits close "
                           "behind thermo_owner.c's s_slots[] in .bss; a reentrant lv_obj_invalidate()-in-"
                           "flush-callback path (pre-51e1ef5) could run this stack deep enough to corrupt it.",
          stack=lambda: extract_local_macro("drivers/ui/lvgl_port.c",
              r'static StackType_t s_lvgl_task_stack\[(\d+)\s*/\s*sizeof\(StackType_t\)\]',
-             r'xTaskCreateStaticPinnedToCore\(\s*lvgl_port_task,\s*"lvgl",\s*sizeof\(s_lvgl_task_stack\)')),
-    dict(name="screen_idle", root="screen_idle_task", ceiling=None,
+             r'xTaskCreateStaticPinnedToCore\(\s*lvgl_port_task,\s*"lvgl",\s*sizeof\(s_lvgl_task_stack\)'),
+         # lvgl_port_task's own body is thin -- practically all of its real
+         # depth lives behind lv_timer_handler()'s internal function-pointer
+         # dispatch (stack_budget_lib.has_unresolved_dispatch() confirms this
+         # task is flagged), which this walk cannot follow at all. These are
+         # the KNOWN callback entry points lv_timer_handler() invokes that
+         # way and that this codebase registers -- the display flush
+         # callback, the touch indev read callback, and every page's
+         # lv_timer_create() refresh callback (see grep for lv_timer_create
+         # across drivers/ui/ui_page_*.c). Measuring each as its OWN root and
+         # adding the deepest of them onto this task's base turns "752 B
+         # measured, real depth invisible" into a real, source-derived lower
+         # bound instead -- still not a full measurement (LVGL's own
+         # internals -- animations, other registered lv_obj event callbacks,
+         # anything a future page adds -- stay unresolved, which is why this
+         # task still reports INDETERMINATE, never a bare pass; see
+         # check_all_task_stack_budgets.py's main()).
+         extra_roots=[
+             ("ili9488_flush_cb", "lvgl_port.c"),
+             ("touch_read_cb", "lvgl_port.c"),
+             ("refresh_cb", "ui_page_diagnostics.c"),
+             ("ui_home_refresh_cb", "ui_page_home.c"),
+             ("refresh_cb", "ui_page_network.c"),
+             ("refresh_cb", "ui_page_network_manage.c"),
+             ("refresh_cb", "ui_page_temperature.c"),
+         ]),
+    dict(name="screen_idle", root="screen_idle_task",
          stack=lambda: extract_int_literal("drivers/ui/screen_idle.c",
              r'xTaskCreatePinnedToCore\(screen_idle_task,\s*"screen_idle",\s*(\d+)')),
-    dict(name="uart_owner_evt_task", root="hal_uart_esp_event_task", ceiling=None,
+    dict(name="uart_owner_evt_task", root="hal_uart_esp_event_task",
          stack=lambda: extract_sdkconfig_macro("main_network_http.c",
              r'uart_owner_init\(&ctx->uart_owner,.*?UART_OWNER_STACK_SIZE',
              "CONFIG_KILNCTL_UART_OWNER_STACK_SIZE")),
-    dict(name="uart_proto_rx", root="uart_protocol_rx_task", ceiling=None,
+    dict(name="uart_proto_rx", root="uart_protocol_rx_task",
          stack=lambda: extract_sdkconfig_macro("main_network_http.c",
              r'uart_protocol_init\(&ctx->uart_proto,.*?UART_PROTOCOL_STACK_SIZE',
              "CONFIG_KILNCTL_UART_PROTOCOL_STACK_SIZE")),
@@ -323,7 +376,15 @@ CEILING_BYTES = {
     "safety_owner_evt": 176,
     "safety_proto_rx": 3584,
     "safety_poll": 3104,
-    "lvgl": 752,
+    # 4880 = 752 (lvgl_port_task's own deepest resolved path) + 4128
+    # (ui_home_refresh_cb, the deepest of the extra_roots callbacks -- see
+    # TASKS["lvgl"]'s comment), measured 2026-09-09 against KilnCtrl.elf as
+    # rebuilt that day. Still a LOWER BOUND: this task remains INDETERMINATE
+    # because lv_timer_handler()'s own internals (animations, other lv_obj
+    # event callbacks, anything a future page adds) are not covered by
+    # extra_roots and are not resolvable at all by this walk.
+    
+    "lvgl": 4880,
     "screen_idle": 3008,
     "uart_owner_evt_task": 176,
     "uart_proto_rx": 3584,
@@ -378,11 +439,41 @@ def main():
             errors.append(f"{tname}: could not derive declared stack size from source: {e}")
             continue
 
-        total, path_addrs = lib.deepest(root_addr, parsed)
+        own_total, path_addrs = lib.deepest(root_addr, parsed)
+
+        # Known callback entry points that also run ON this task's own stack
+        # (registered with some library that dispatches to them by function
+        # pointer -- see the "extra_roots" comment on TASKS["lvgl"]). Each is
+        # measured as its own root and the DEEPEST one is added onto the
+        # task's own depth: only one callback runs at a time, so they do not
+        # stack on top of each other, but each one's frames stack on top of
+        # whatever got the task to the dispatch point in the first place.
+        extra_total = 0
+        extra_label = None
+        extra_errors = []
+        for extra_name, extra_path in task.get("extra_roots", []):
+            try:
+                extra_addr = lib.resolve_root(parsed, extra_name, args.elf, addr2line, extra_path)
+            except ValueError as e:
+                extra_errors.append(f"{extra_name} ({extra_path}): {e}")
+                continue
+            d, _p = lib.deepest(extra_addr, parsed)
+            if d > extra_total:
+                extra_total = d
+                extra_label = extra_name
+        if extra_errors:
+            errors.append(f"{tname}: could not resolve declared extra_roots callback(s): "
+                           + "; ".join(extra_errors))
+            continue
+
+        total = own_total + extra_total
+        indirect = lib.has_unresolved_dispatch(root_addr, parsed)
         overhead = UNMODELED_OVERHEAD_BYTES
         honest_free = declared - total - overhead
-        results.append(dict(task=task, declared=declared, total=total, path_addrs=path_addrs,
-                             root_addr=root_addr, overhead=overhead, honest_free=honest_free))
+        results.append(dict(task=task, declared=declared, own_total=own_total, total=total,
+                             path_addrs=path_addrs, root_addr=root_addr, overhead=overhead,
+                             honest_free=honest_free, indirect=indirect,
+                             extra_total=extra_total, extra_label=extra_label))
 
     if errors:
         print("check_all_task_stack_budgets: FAIL -- could not measure every registered task:")
@@ -407,10 +498,23 @@ def main():
     print()
 
     failed = []
+    indeterminate = []
     for r in sorted(results, key=lambda r: r["honest_free"]):
         task = r["task"]
         tname = task["name"]
-        ceiling = forced_ceilings.get(tname, CEILING_BYTES.get(tname))
+        # A task with no CEILING_BYTES entry must not silently fall back to
+        # "honest-free-only" grading -- that is exactly the kind of quiet
+        # degradation this table exists to prevent (a typo'd or newly-added
+        # task name would otherwise measure forever without ever being
+        # graded against a regression ceiling and nobody would notice).
+        if tname in forced_ceilings:
+            ceiling = forced_ceilings[tname]
+        elif tname in CEILING_BYTES:
+            ceiling = CEILING_BYTES[tname]
+        else:
+            errors.append(f"{tname}: no CEILING_BYTES entry -- every TASKS row must be graded "
+                           "against a ceiling (run --dump-ceilings to capture one and add it)")
+            continue
         note = f"  [{task['historical_note']}]" if "historical_note" in task else ""
         print(f"-- {tname} (root {task['root']}, declared {r['declared']} B) --{note}")
         running = 0
@@ -418,20 +522,47 @@ def main():
             fsize = parsed.frames.get(fn, 0)
             running += fsize
             print(f"    {fsize:>6} B  {running:>6} B cumulative  {parsed.names.get(fn, hex(fn))}")
+        if r["extra_total"]:
+            print(f"    + {r['extra_total']:>6} B  deepest known dispatch-target callback "
+                  f"({r['extra_label']}), added to own depth (see TASKS extra_roots)")
         pct = 100.0 * r["honest_free"] / r["declared"] if r["declared"] else 0.0
-        print(f"    total {r['total']} B; ceiling {ceiling if ceiling is not None else 'UNSET'} B; "
+        print(f"    total {r['total']} B; ceiling {ceiling} B; "
               f"honest free {r['honest_free']} B ({pct:.1f}% of {r['declared']} B)")
         task_failed = False
-        if ceiling is not None and r["total"] > ceiling:
+        if r["total"] > ceiling:
             print(f"    FAIL: {r['total']} B exceeds the {ceiling} B ceiling for {tname}.")
             task_failed = True
         if r["honest_free"] < 0:
             print(f"    FAIL: honest free is negative ({r['honest_free']} B) once the "
                   f"{UNMODELED_OVERHEAD_BYTES} B unmodeled-overhead allowance is counted.")
             task_failed = True
+        if r["indirect"]:
+            # A confirmed lower bound is still worth printing (a lower bound
+            # that already exceeds the ceiling or the declared stack is a
+            # real, valid FAIL above), but a task flagged this way must NEVER
+            # be reported as a clean pass: its true worst-case path continues
+            # through a function pointer this walk cannot see past, so
+            # "within budget" here means only "the KNOWN part is within
+            # budget", not "this task is safe".
+            if task_failed:
+                print(f"    INDETERMINATE too: {tname}'s call graph contains an unresolved "
+                      "indirect call (callx4/8/12) outside what extra_roots covers -- the FAIL "
+                      "above is real (it is a lower bound), but the true worst case may be "
+                      "worse still.")
+            else:
+                print(f"    INDETERMINATE: {tname}'s call graph contains an unresolved indirect "
+                      f"call (callx4/8/12) this walk cannot follow -- {r['total']} B above is a "
+                      "LOWER BOUND, not a measurement. Not reported as a pass.")
+            indeterminate.append(tname)
         if task_failed:
             failed.append(tname)
         print()
+
+    if errors:
+        print("check_all_task_stack_budgets: FAIL -- could not grade every measured task:")
+        for e in errors:
+            print(f"  {e}")
+        return 1
 
     if failed:
         print(f"check_all_task_stack_budgets: FAIL -- {len(failed)} of {len(results)} tasks over "
@@ -441,7 +572,16 @@ def main():
               "without a documented reason for accepting the new margin.")
         return 1
 
-    print(f"check_all_task_stack_budgets: OK -- all {len(results)} tasks measured and within budget.")
+    confident = len(results) - len(indeterminate)
+    if indeterminate:
+        print(f"check_all_task_stack_budgets: OK -- {confident} of {len(results)} tasks fully "
+              f"measured and within budget; {len(indeterminate)} INDETERMINATE (known lower bound "
+              f"only, within budget as far as this walk can see, true depth unresolved): "
+              f"{', '.join(indeterminate)}.")
+        print("  INDETERMINATE is not a pass claim for those tasks -- see the per-task notes above "
+              "for what remains unresolved and why (unresolved indirect/function-pointer dispatch).")
+    else:
+        print(f"check_all_task_stack_budgets: OK -- all {len(results)} tasks measured and within budget.")
     return 0
 
 
