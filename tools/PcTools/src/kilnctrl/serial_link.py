@@ -292,6 +292,28 @@ def identify_port(info: "PortInfo") -> Optional[str]:
         return _SERIAL_IDENTITIES.get(serial.upper())
     for vidpid, board in _SERIALLESS_VID_PID_IDENTITIES.items():
         if vidpid in hwid:
+            # Loud, not blocking: reviewed 2026-09-09 (opus review of
+            # d045cd64/249ce287/9e9dfb45) -- ANY serial-less 1A86:7522 device
+            # is adopted as the main board here, and CH340-family adapters
+            # overwhelmingly ship with no serial, so a generic dongle on this
+            # bench would be silently identified as the main board and handed
+            # profile/OTA/settings WRITE traffic by recommend_port(). No safe
+            # mechanical guard was found: the one thing that would prove it
+            # (a firmware round trip before trusting a serial-less port for
+            # WRITE traffic) needs a live link this identify_port() layer does
+            # not have, and COM14 -- the actual main board on this bench --
+            # has no serial, so any check that treats "no serial" itself as
+            # suspicious would refuse the real board. A log line is the
+            # cheap, safe compromise: it costs nothing when the assumption
+            # holds (the ordinary case here) and gives a human something to
+            # search for if a second serial-less CH340K-family device is ever
+            # plugged in and traffic goes to the wrong port.
+            log.warning(
+                "identify_port: %s matched serial-less VID:PID %s -> %r with NO "
+                "serial number to confirm it -- if more than one serial-less "
+                "%s device is attached, the wrong one may be adopted as %r",
+                info.device, vidpid, board, vidpid, board,
+            )
             return board
     return None
 

@@ -269,6 +269,32 @@ class SerialFirstIdentificationTest(unittest.TestCase):
         self.assertIsNone(serial_link.identify_port(self._info(
             "COM1", "Communications Port (COM1)", r"ACPI\PNP0501\0")))
 
+    def test_serialless_vid_pid_fallback_warns_loudly(self) -> None:
+        """Opus review, 2026-09-09: a serial-less 1A86:7522 device is
+        adopted as the main board on VID:PID alone (CH340-family adapters
+        overwhelmingly ship with no serial), and COM14 -- the REAL main
+        board -- has no serial either, so this fallback cannot be tightened
+        without refusing the genuine bench board. No safe mechanical guard
+        exists; the compromise is a loud log line so a second serial-less
+        CH340K-family unit on the bench leaves a trace to search for. This
+        pins that the warning actually fires, and that it changes nothing
+        about which board is returned."""
+        info = self._info("COM14", "USB-SERIAL CH340K (COM14)",
+                          "USB VID:PID=1A86:7522 LOCATION=1-2.4.4.4")
+        with self.assertLogs(serial_link.log, level="WARNING") as cm:
+            result = serial_link.identify_port(info)
+        self.assertEqual(result, "main_board")
+        self.assertTrue(any("serial-less" in msg for msg in cm.output))
+
+        # Negative control: a port identified BY SERIAL must not warn --
+        # the warning is specific to the no-serial fallback path, not
+        # emitted on every identify_port() call.
+        with self.assertRaises(AssertionError):
+            with self.assertLogs(serial_link.log, level="WARNING"):
+                serial_link.identify_port(self._info(
+                    "COM3", "USB-SERIAL-JTAG",
+                    "USB VID:PID=303A:1001 SER=1C:DB:D4:92:F4:7C"))
+
 
 if __name__ == "__main__":
     unittest.main()
