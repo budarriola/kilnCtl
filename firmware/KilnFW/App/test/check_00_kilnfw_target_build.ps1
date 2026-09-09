@@ -205,20 +205,68 @@ try {
         Fail "sdkconfig copy did not verify (hash mismatch) -- refusing to build against an unconfirmed config"
     }
 
+    # FRESHNESS SIGNAL, FIXED 2026-09-09 (opus review of 16f0563f).
+    # ------------------------------------------------------------
+    # The original check took $buildStart = Get-Date AFTER the mirror above
+    # and required bin/elf mtime >= $buildStart. That is wrong on its own
+    # terms: Mirror-Tree's robocopy /MIR only touches files that actually
+    # changed, so a second consecutive run on an UNCHANGED tree correctly
+    # updates nothing, ninja correctly relinks nothing, and the (perfectly
+    # valid, current) artifacts from the PREVIOUS run predate this run's
+    # $buildStart -- a wall-clock gate cannot tell that apart from the real
+    # hazard (a broken toolchain silently no-op'ing despite a genuine source
+    # change) because both look identical by "predates the moment this run
+    # started". Comparing against wall-clock time is answering the wrong
+    # question; what actually matters is whether the artifact is at least as
+    # new as the newest INPUT that could affect it.
+    #
+    # Fix: snapshot the newest LastWriteTime among the tracked source trees
+    # (Mirror-Tree already made these current relative to the main tree,
+    # including any uncommitted edit) BEFORE the build runs, then after the
+    # build require bin/elf mtime >= that snapshot, not >= $buildStart.
+    # robocopy preserves source mtimes by default (it does not touch a
+    # file's timestamp merely by copying it unchanged), so this is a genuine
+    # content-derived signal, not a copy-time artifact:
+    #   * Unchanged tree, second run: newest source mtime is whatever it was
+    #     the last time a file actually changed (before this run even
+    #     started); the existing artifacts from the prior successful run are
+    #     already >= that -- PASS, correctly, no matter how long ago they
+    #     were built.
+    #   * A real edit landed (committed or not) and the toolchain silently
+    #     no-ops anyway: the edited file's mtime is now newer than the
+    #     existing (stale, unrelinked) artifacts -- FAIL, correctly, because
+    #     the artifact provably does not reflect current source.
+    # components\lvgl is excluded from this scan for the same reason it is
+    # excluded from Mirror-Tree: it is a submodule, effectively static here,
+    # and not part of "did today's edit get built".
+    function Get-NewestSourceTime([string[]] $roots) {
+        $newest = $null
+        foreach ($root in $roots) {
+            if (-not (Test-Path $root)) { continue }
+            $candidate = Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -notmatch '\\build\\' -and $_.FullName -notmatch '\\components\\lvgl\\' } |
+                Measure-Object -Property LastWriteTime -Maximum
+            if ($candidate.Maximum -and (-not $newest -or $candidate.Maximum -gt $newest)) {
+                $newest = $candidate.Maximum
+            }
+        }
+        return $newest
+    }
+
+    $newestSourceTime = Get-NewestSourceTime @(
+        (Join-Path $WorktreePath "firmware\KilnFW"),
+        (Join-Path $WorktreePath "firmware\hwAbstraction")
+    )
+    if (-not $newestSourceTime) {
+        Fail "could not determine a newest source mtime under $WorktreePath after mirroring -- refusing to grade artifact freshness with no signal to grade it against"
+    }
+
     & $IdfProfile *>&1 | Out-Null
 
     $env:CCACHE_DISABLE = "1"
 
     $binPath = Join-Path $WorktreePath "firmware\KilnFW\build\KilnCtrl.bin"
     $elfPath = Join-Path $WorktreePath "firmware\KilnFW\build\KilnCtrl.elf"
-
-    # Snapshot for the freshness check below: a build that reports exit 0
-    # without actually re-linking (the MSYSTEM no-op case above, or any other
-    # silent short-circuit) must not be allowed to pass off a PRE-EXISTING,
-    # stale elf/bin from a previous run as this run's output -- downstream
-    # ELF-reading checks (check_httpd_task_stack_budget.ps1 and siblings)
-    # trust whatever this check just published as current.
-    $buildStart = Get-Date
 
     Write-Host "Building KilnFW target (CCACHE_DISABLE=1) in $WorktreePath ..."
     $buildOutput = & idf.py -C (Join-Path $WorktreePath "firmware\KilnFW") build 2>&1
@@ -235,15 +283,18 @@ try {
     }
 
     # Positive freshness check, not just existence: both artifacts' last-write
-    # time must fall AT OR AFTER $buildStart. A stale elf/bin left over from a
-    # prior run (e.g. the MSYSTEM no-op) predates $buildStart and must FAIL
-    # loudly here rather than be mistaken for a fresh build.
+    # time must be AT OR AFTER the newest tracked source mtime captured above
+    # -- see the "FRESHNESS SIGNAL" comment. A stale elf/bin that predates the
+    # newest source edit (the MSYSTEM no-op, or any other silent short-
+    # circuit) must FAIL loudly here rather than be mistaken for a fresh
+    # build; an elf/bin that is merely older than "now" but already reflects
+    # every current source file (the legitimate no-op case) must PASS.
     $binTime = (Get-Item $binPath).LastWriteTime
     $elfTime = (Get-Item $elfPath).LastWriteTime
     # Small negative tolerance for filesystem timestamp granularity/clock skew.
     $tolerance = [TimeSpan]::FromSeconds(2)
-    if (($binTime -lt $buildStart.Subtract($tolerance)) -or ($elfTime -lt $buildStart.Subtract($tolerance))) {
-        Fail "idf.py build reported success (exit 0) but $binPath (mtime $binTime) / $elfPath (mtime $elfTime) predate this run's build start ($buildStart) -- the build silently did not relink (known cause: MSYSTEM/MSYS environment inherited from a git-bash launcher confusing idf.py). Refusing to publish a stale artifact as current."
+    if (($binTime -lt $newestSourceTime.Subtract($tolerance)) -or ($elfTime -lt $newestSourceTime.Subtract($tolerance))) {
+        Fail "idf.py build reported success (exit 0) but $binPath (mtime $binTime) / $elfPath (mtime $elfTime) predate the newest tracked source file's mtime ($newestSourceTime) -- the build silently did not relink against current source (known cause: MSYSTEM/MSYS environment inherited from a git-bash launcher confusing idf.py, or any other silent no-op). Refusing to publish a stale artifact as current."
     }
 
     # Publish into the shared main-tree build/ directory so the ELF-reading
