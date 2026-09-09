@@ -51,11 +51,23 @@ if (-not $serverFiles) {
 }
 
 $realCount = 0
+$decoratedNames = New-Object System.Collections.Generic.List[string]
 foreach ($f in $serverFiles) {
     $lines = Get-Content -LiteralPath $f.FullName
-    foreach ($line in $lines) {
-        if ($line.TrimStart() -match '^@_srv\._tool\(\)\s*$') {
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i].TrimStart() -match '^@_srv\._tool\(\)\s*$') {
             $realCount++
+            # Line counting alone is blind to a name collision: two decorated
+            # functions sharing a name still count as 2 here but register as
+            # 1 in the live MCP server (the second definition wins), so the
+            # doc count would silently overstate reality by however many
+            # names collide. Capture the function name so we can catch that.
+            for ($j = $i + 1; $j -lt $lines.Count; $j++) {
+                if ($lines[$j].TrimStart() -match '^(async\s+)?def\s+(\w+)\s*\(') {
+                    $decoratedNames.Add($Matches[2])
+                    break
+                }
+            }
         }
     }
 }
@@ -85,18 +97,33 @@ if (-not $bundlesMatch.Success) {
 $bundlesBody = $bundlesMatch.Groups[1].Value
 
 $attachedCount = 0
+$attachedNames = New-Object System.Collections.Generic.List[string]
 foreach ($bundleName in $attachedBundles) {
     $bundleMatch = [regex]::Match($bundlesBody, "`"$bundleName`"\s*:\s*\{([^}]*)\}", 'Singleline')
     if (-not $bundleMatch.Success) {
         Write-Error "check_mcp_tool_count_doc: attached bundle '$bundleName' not found in workbench.py BUNDLES"
         exit 1
     }
-    $entryMatches = [regex]::Matches($bundleMatch.Groups[1].Value, '^\s*"[^"]+"\s*:', 'Multiline')
+    $entryMatches = [regex]::Matches($bundleMatch.Groups[1].Value, '^\s*"([^"]+)"\s*:', 'Multiline')
+    foreach ($m in $entryMatches) { $attachedNames.Add($m.Groups[1].Value) }
     $attachedCount += $entryMatches.Count
 }
 $realCount += $attachedCount
 
 $failed = $false
+
+# A duplicate tool name (two @_srv._tool()-decorated defs, or a decorated
+# name reused by a workbench bundle entry) registers once in the real MCP
+# server -- the second registration silently overwrites the first -- while
+# every line/entry-counting pass above still counts it twice. That makes the
+# doc count an overstatement the rest of this script cannot see on its own,
+# so check name uniqueness explicitly.
+$allNames = @($decoratedNames) + @($attachedNames)
+$dupNames = $allNames | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name }
+if ($dupNames) {
+    Write-Error "check_mcp_tool_count_doc: duplicate tool name(s) registered more than once, so the real live count is lower than the line count: $($dupNames -join ', ')"
+    $failed = $true
+}
 
 $claudeMdPath = Join-Path $repoRoot "CLAUDE.md"
 $claudeMd = Get-Content -LiteralPath $claudeMdPath -Raw
