@@ -148,20 +148,23 @@ _VID_HINTS: tuple[tuple[str, int], ...] = (
     ("10C4:EA60", 40),  # Silicon Labs CP210x
     ("1A86:7523", 40),  # WCH CH340
     ("1A86:55D4", 40),  # WCH CH9102
-    ("1A86:55D3", 40),  # WCH CH343 (this board's UART bridge)
     ("0403:6001", 40),  # FTDI FT232R
     ("0403:6015", 40),  # FTDI FT231X
     ("303A:1001", -80),  # Espressif native USB-Serial-JTAG
-    # WCH CH340K -- the UnitTestFixture board's UART bridge (fixture.py),
+    # WCH CH340K -- THIS BOARD's (the main board's) own UART bridge. See the
+    # board-identity block below: this was recorded backwards between
+    # 2026-09-05 and 2026-09-09 (it was scored -80 here as "the fixture's"),
+    # which is what made recommend_port() return None on a bench where the
+    # main board was the only UART bridge attached.
+    ("1A86:7522", 40),
+    # WCH CH343 -- the UnitTestFixture board's UART bridge (fixture.py),
     # never the main board's. Both boards' plain "ch340"/"ch343" substring
     # hints above score positive on either board's description text, so
-    # without this the generic +50 "ch340" hint alone made recommend_port()
-    # (the MAIN board's picker) tie the fixture's CH340K against the main
-    # board's own CH343 bridge and lose the tie-break on COM-port name
-    # ("COM14" < "COM6" lexicographically) -- confirmed on the bench
-    # 2026-09-05 with both boards attached. See is_fixture_port() below for
-    # the belt-and-suspenders exclusion applied on top of this score.
-    ("1A86:7522", -80),
+    # without this the generic text hints alone let the fixture's bridge tie
+    # against the main board's in recommend_port() (the MAIN board's picker)
+    # and win on the COM-port-name tie-break. See is_fixture_port() below
+    # for the belt-and-suspenders exclusion applied on top of this score.
+    ("1A86:55D3", -80),
     # Raspberry Pi Debug Probe / picoprobe CMSIS-DAP -- the SWD/JTAG path used
     # by debug_program(peer="pico"); its CDC interface is the Pico's bench
     # console (console_capture.py), never the kiln UART bridge. Its generic
@@ -179,38 +182,132 @@ _VID_HINTS: tuple[tuple[str, int], ...] = (
 )
 
 # ---------------------------------------------------------------------------
-# Known board identities (bench enumeration, 2026-09-05, both boards attached
-# simultaneously). Both boards' native ESP32-S3 USB-Serial-JTAG interface
-# shares VID:PID 303A:1001 -- indistinguishable by VID:PID alone -- so the USB
-# serial number is the only anchor for that side; the two boards' UART
-# bridges are different silicon (CH343 vs CH340K) and can also be told apart
-# by VID:PID, though the CH340K reports no serial number of its own.
+# Known board identities. SERIAL NUMBER IS THE SOURCE OF TRUTH: a port whose
+# USB descriptor carries a serial number is identified by that serial and by
+# nothing else. VID:PID is consulted ONLY for a port that reports no serial
+# at all (the CH340K below is the one such device on this bench), because
+# VID:PID names a chip family, not a unit, and this repo has already been
+# burned once by treating it as an identity.
+#
+# Bench enumeration, corrected 2026-09-09 (see the correction note below):
+#
+#   main board  ESP32-S3 native USB-Serial-JTAG  303A:1001  SER=1C:DB:D4:92:F4:7C
+#   main board  CH340K UART bridge               1A86:7522  (no serial number)
+#   fixture     ESP32-S3 native USB-Serial-JTAG  303A:1001  SER=68:B6:B3:29:D0:B8
+#   fixture     CH343 UART bridge                1A86:55D3  SER=552E006806
+#
+# CORRECTION, 2026-09-09 -- the two UART bridges were recorded BACKWARDS from
+# 2026-09-05 (402ab01a) until this change. That commit saw two WCH bridges
+# enumerate when the fixture joined the bench and assigned them by assumption
+# ("Confirmed via bench USB enumeration that the fixture's CH340K (1A86:7522)
+# and the main board's CH343 (1A86:55D3) are different silicon"); the
+# enumeration confirmed that they were different silicon, never WHICH board
+# each belonged to. No round trip was ever run to settle it. The evidence
+# that settles it now:
+#
+#   * `get_fw_version` over the CH340K (COM14) answers as KilnFW, the main
+#     board's firmware, with the main board's commit -- a live round trip,
+#     2026-09-09;
+#   * COM14 was already confirmed as the main board's PC<->ESP link on
+#     2026-09-04 (d99784c3), a day BEFORE the fixture was revived and before
+#     1A86:55D3/552E006806 first appears anywhere in this repo's history;
+#   * every 2026-09-08 audit of the main board's CONTROL link
+#     (docs/audits/control_uart_link_dead_2026-09-08.md and its siblings)
+#     names COM14, and settings.py's `last_port` is COM14;
+#   * the main board's live STA IP 192.168.1.156 resolves by ARP to MAC
+#     1C:DB:D4:92:F4:7C, matching MAIN_BOARD_JTAG_SERIAL below -- so the JTAG
+#     side of the table was right all along and only the UART side was wrong.
+#
+# The hardware did not change; the record did. Do not "restore" the old
+# assignment without a round trip that proves it.
+#
 # `mcp_server_flash.py` pins the same MAIN_BOARD_JTAG_SERIAL /
-# FIXTURE_JTAG_SERIAL for OpenOCD's `adapter serial`; `fixture.py` keeps its
-# own historical text-hint exclusion list but is cross-checked against
-# is_main_board_port() below.
+# FIXTURE_JTAG_SERIAL for OpenOCD's `adapter serial`; `fixture.py`'s
+# `recommend_fixture_port()` keys on FIXTURE_UART_SERIAL and cross-checks
+# against is_main_board_port() below.
 # ---------------------------------------------------------------------------
-MAIN_BOARD_JTAG_SERIAL = "1C:DB:D4:92:F4:7C"  # 303A:1001, COM3
-MAIN_BOARD_UART_SERIAL = "552E006806"  # CH343 1A86:55D3, COM6
-FIXTURE_JTAG_SERIAL = "68:B6:B3:29:D0:B8"  # 303A:1001, COM7
-FIXTURE_UART_VID_PID = "1A86:7522"  # CH340K, no serial number, COM14
+MAIN_BOARD_JTAG_SERIAL = "1C:DB:D4:92:F4:7C"  # 303A:1001; = the board's STA MAC
+FIXTURE_JTAG_SERIAL = "68:B6:B3:29:D0:B8"  # 303A:1001
+
+#: The fixture's UART bridge DOES report a per-unit serial -- so it is
+#: identified by that serial, not by its 1A86:55D3 VID:PID, which is only a
+#: fallback for a hypothetical serial-less CH343.
+FIXTURE_UART_SERIAL = "552E006806"  # CH343 1A86:55D3
+FIXTURE_UART_VID_PID = "1A86:55D3"
+
+#: The main board's UART bridge reports NO serial number at all (Windows
+#: enumerates it as `USB\VID_1A86&PID_7522\B&87525BA&0&4` -- that trailing
+#: field is a USB port path, not a serial; pyserial reports `serial_number`
+#: as the empty string). VID:PID is therefore the only handle this one port
+#: has, and it is used *only because* there is no serial to prefer. If a
+#: second CH340K-family device ever joins this bench, this stops being
+#: sufficient and an explicit `port=` is required -- see
+#: docs/UNIT_TEST_FIXTURE_PLAN.md "PC connection identity".
+MAIN_BOARD_UART_VID_PID = "1A86:7522"  # CH340K, no serial number
+
+#: Every serial number that names a board interface, mapped to its board.
+#: Consulted FIRST for any port that reports a serial; see identify_port().
+_SERIAL_IDENTITIES: "dict[str, str]" = {
+    MAIN_BOARD_JTAG_SERIAL.upper(): "main_board",
+    FIXTURE_UART_SERIAL.upper(): "fixture",
+    FIXTURE_JTAG_SERIAL.upper(): "fixture",
+}
+
+#: VID:PIDs used ONLY for a port that reports no serial number at all.
+_SERIALLESS_VID_PID_IDENTITIES: "dict[str, str]" = {
+    MAIN_BOARD_UART_VID_PID.upper(): "main_board",
+    FIXTURE_UART_VID_PID.upper(): "fixture",
+}
+
+
+def hwid_serial(hwid: str) -> Optional[str]:
+    """The ``SER=...`` USB serial number in a pyserial ``hwid`` string, or
+    None when the descriptor carries none.
+
+    Windows renders a serial-less device's instance id with a ``&``-prefixed
+    USB port path in the same position a serial would occupy, and pyserial
+    then reports ``serial_number=""`` and omits ``SER=`` from ``hwid``
+    entirely -- so "no ``SER=`` token" genuinely means "this unit has no
+    serial to identify it by", not "pyserial hid it".
+    """
+    match = re.search(r"SER=(\S+)", hwid or "", re.IGNORECASE)
+    if match is None:
+        return None
+    return match.group(1) or None
+
+
+def identify_port(info: "PortInfo") -> Optional[str]:
+    """Which board a port belongs to: ``"main_board"``, ``"fixture"``, or
+    None if it is neither (or cannot be told apart).
+
+    Serial number first, VID:PID only as a fallback for a port that reports
+    no serial. A port that DOES report a serial is never identified by
+    VID:PID: an unrecognised serial on a known VID:PID means "some third
+    unit of the same chip family", which must come back as None rather than
+    be silently adopted as one of our two boards.
+    """
+    hwid = (info.hwid or "").upper()
+    serial = hwid_serial(hwid)
+    if serial is not None:
+        return _SERIAL_IDENTITIES.get(serial.upper())
+    for vidpid, board in _SERIALLESS_VID_PID_IDENTITIES.items():
+        if vidpid in hwid:
+            return board
+    return None
 
 
 def is_main_board_port(info: "PortInfo") -> bool:
-    """True if `info` is one of the main board's two USB interfaces
-    (JTAG by serial number, UART bridge by serial number)."""
-    hwid = info.hwid.upper()
-    return MAIN_BOARD_JTAG_SERIAL.upper() in hwid or MAIN_BOARD_UART_SERIAL in hwid
+    """True if `info` is one of the main board's two USB interfaces (native
+    JTAG by serial number; CH340K UART bridge by VID:PID, since that unit
+    reports no serial -- see :func:`identify_port`)."""
+    return identify_port(info) == "main_board"
 
 
 def is_fixture_port(info: "PortInfo") -> bool:
     """True if `info` is one of the UnitTestFixture board's two USB
-    interfaces (JTAG by serial number; the CH340K UART bridge reports no
-    serial number at all, so that side is identified by VID:PID alone --
-    see FIXTURE_UART_VID_PID's comment for the caveat if a second CH340K
-    device ever joins the bench)."""
-    hwid = info.hwid.upper()
-    return FIXTURE_JTAG_SERIAL.upper() in hwid or FIXTURE_UART_VID_PID in hwid
+    interfaces -- both of which report a serial number, so both are
+    identified by serial alone (see :func:`identify_port`)."""
+    return identify_port(info) == "fixture"
 
 
 def enumerated_303a_1001_serials() -> "list[str]":
@@ -321,9 +418,12 @@ def debug_probe_hwid_serial(hwid: str) -> Optional[str]:
     probe's serial (``adapter_serial``/``KILNCTL_PICO_PROBE_SERIAL``) for
     exactly this reason; :func:`list_debug_probe_ports` exposes the same
     field so a caller can tell which enumerated port is *that* probe.
+
+    Thin alias for :func:`hwid_serial`, kept under its historical name for
+    the probe-specific callers; one parser, so the board-identity table and
+    the probe pin can never disagree about what a serial number is.
     """
-    match = re.search(r"SER=([^\s]+)", hwid, re.IGNORECASE)
-    return match.group(1) if match else None
+    return hwid_serial(hwid)
 
 
 def list_debug_probe_ports(*, serial: Optional[str] = None) -> list[PortInfo]:
@@ -367,12 +467,17 @@ def recommend_port() -> Optional[str]:
     nothing scores.
 
     Explicitly excludes any port identified as the UnitTestFixture board
-    (is_fixture_port()), on top of that board's CH340K already scoring
+    (is_fixture_port(), which resolves the fixture's CH343 bridge by its
+    serial number 552E006806), on top of that bridge already scoring
     negative via _VID_HINTS -- two independent checks, since a fixture port
     silently winning here would send main-board traffic (profiles, OTA,
-    settings) out the wrong board's UART. Confirmed on the bench 2026-09-05:
-    before this exclusion, recommend_port() picked the fixture's COM14 over
-    the main board's COM6."""
+    settings) out the wrong board's UART.
+
+    2026-09-09: this used to exclude the main board's OWN CH340K bridge,
+    the boards' UART identities having been recorded backwards (see the
+    board-identity block above), so on a bench with the fixture's bridge
+    unplugged it returned None and every kilnctrl call failed with "no
+    serial port open"."""
     for info in list_ports():
         if info.score > 0 and not is_fixture_port(info) and not is_debug_probe_port(info):
             return info.device

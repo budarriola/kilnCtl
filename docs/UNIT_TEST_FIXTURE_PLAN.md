@@ -70,30 +70,75 @@ an address switch) actually happened — see `fixture.py`'s module docstring.
 
 ## PC connection identity
 
-Bench USB enumeration, 2026-09-05, both boards plugged in at once:
+**Serial number is the source of truth.** A port whose USB descriptor
+carries a serial number is identified by that serial and by nothing else;
+VID:PID is consulted *only* for a port that reports no serial at all. VID:PID
+names a chip family, not a unit — see the correction below for what happens
+when it is treated as an identity.
+
+Bench USB enumeration, **corrected 2026-09-09**:
 
 | Board | Port role | VID:PID | Serial |
 |---|---|---|---|
-| Fixture | native JTAG | 303A:1001 | ...D0:B8 (COM7) |
-| Fixture | UART bridge (CH340K) | 1A86:7522 | none (COM14) |
-| Main board | native JTAG | 303A:1001 | ...F4:7C (COM3) |
-| Main board | UART bridge (CH343) | 1A86:55D3 | 552E006806 (COM6) |
+| Fixture | native JTAG | 303A:1001 | 68:B6:B3:29:D0:B8 |
+| Fixture | UART bridge (CH343) | 1A86:55D3 | 552E006806 |
+| Main board | native JTAG | 303A:1001 | 1C:DB:D4:92:F4:7C (= its Wi-Fi STA MAC) |
+| Main board | UART bridge (CH340K) | 1A86:7522 | **none** (COM14) |
 
-Fixture and main board use different UART bridge silicon (CH340K vs CH343),
-so `recommend_fixture_port()` keys on VID:PID `1A86:7522`, excluding the main
-board's `1A86:55D3`/303A:1001/JTAG by VID:PID (and, redundantly, by text
-hints). The CH340K reports no per-device serial, so a second CH340K-family
-device on the bench would be ambiguous — `KILNCTL_FIXTURE_PORT` env var /
-`port=` is the fallback.
+`recommend_fixture_port()` resolves the fixture's bridge by serial
+`552E006806`, and additionally excludes 303A:1001 and the main board's
+`1A86:7522` by VID:PID and by text hints. The main board's CH340K is the one
+device on this bench with no serial number at all, so `1A86:7522` is the only
+handle it has; if a second CH340K-family device ever joins the bench, that
+stops being sufficient and `KILNCTL_FIXTURE_PORT` / `port=` is the fallback.
+
+### CORRECTION 2026-09-09: the two UART bridges were recorded backwards
+
+From `402ab01a` (2026-09-05) until `HEAD` today, the table above had the two
+UART bridges swapped: the main board's CH340K was recorded as the fixture's
+and hard-excluded from main-board autodiscovery, while the fixture's CH343
+was recorded as the main board's. `402ab01a`'s message says it "Confirmed via
+bench USB enumeration that the fixture's CH340K (1A86:7522) and the main
+board's CH343 (1A86:55D3) are different silicon" — the enumeration confirmed
+they were *different silicon*, never *which board owned which*, and no round
+trip was ever run to settle it. `2545936e` then built the exclusion on that
+assumption and `3530e598` inherited it.
+
+Symptom, 2026-09-09: with the fixture's bridge unplugged, `recommend_port()`
+returned `None` on a bench whose only UART bridge was the main board's, and
+every `kilnctrl` call reported "no serial port open". Conversely
+`recommend_fixture_port()` would have returned the **kiln's own** UART port
+for relay commands.
+
+Evidence that settles it (the hardware did not change; the record did):
+
+- Live `get_fw_version` over COM14 (the CH340K) answers as **KilnFW**, the
+  main board's firmware, at the main board's commit.
+- COM14 was already confirmed as the main board's PC↔ESP link on 2026-09-04
+  in `d99784c3`, a day *before* the fixture was revived and before
+  `1A86:55D3`/`552E006806` appears anywhere in this repo's history.
+- Every 2026-09-08 audit of the main board's CONTROL link
+  (`docs/audits/control_uart_link_dead_2026-09-08.md` and siblings) names
+  COM14, and `settings.py`'s `last_port` is COM14.
+- The main board's live STA IP `192.168.1.156` resolves by ARP to MAC
+  `1C:DB:D4:92:F4:7C`, matching `MAIN_BOARD_JTAG_SERIAL` — the JTAG half of
+  the table was right all along; only the UART half was wrong.
+
+Descriptor reprogramming was considered and ruled out: WCH bridge descriptors
+are writable, but nothing here reprogrammed one, and Windows names a device
+from its driver/INF and instance path rather than from a reflashed string
+anyway (see the "Windows USB names vs descriptors" finding).
 
 **Fixed in `2545936` (2026-09-06 follow-up task):** the two identical
 VID:PID (303A:1001) native JTAG ports are now told apart everywhere by USB
 serial number. `serial_link.py` gained a board-identity table
-(`MAIN_BOARD_JTAG_SERIAL`/`MAIN_BOARD_UART_SERIAL`/`FIXTURE_JTAG_SERIAL`/
-`FIXTURE_UART_VID_PID`, `is_main_board_port()`/`is_fixture_port()`);
+(`MAIN_BOARD_JTAG_SERIAL`/`MAIN_BOARD_UART_VID_PID`/`FIXTURE_JTAG_SERIAL`/
+`FIXTURE_UART_SERIAL`, `identify_port()` and its
+`is_main_board_port()`/`is_fixture_port()` wrappers — note the constant names
+changed with the 2026-09-09 correction above);
 `recommend_port()` (the MAIN board's own picker) now explicitly excludes
-fixture ports — confirmed bug: it previously picked the fixture's CH340K
-port when the main board was unplugged, instead of refusing.
+fixture ports — confirmed bug: it previously picked the fixture's bridge
+when the main board was unplugged, instead of refusing.
 `recommend_fixture_port()` now also excludes by VID:PID/serial directly
 (a 303A:1001 port with a generic, non-"jtag" description was not excluded by
 the old text-only check) and never falls back to an unidentified port.
@@ -131,6 +176,6 @@ of this fix.
    the bit flips (nothing externally wired to observe yet).
 4. Run `SCAN` to confirm U5's real address — `DEFAULT_RELAY_MAP` assumed
    0x21 without hardware confirmation.
-5. With the main board attached too, confirm `fixture_*` never touches COM6/COM3 — the unit tests cover the logic, not the real USB stack.
+5. With the main board attached too, confirm `fixture_*` never touches the main board's COM14/COM3 — the unit tests cover the logic, not the real USB stack.
 6. Once real relay hardware exists: replace `DEFAULT_RELAY_MAP` with the
    real map and verify drive polarity against a multimeter.

@@ -30,53 +30,83 @@ from kilnctrl.serial_link import PortInfo  # noqa: E402
 
 
 class RecommendFixturePortTest(unittest.TestCase):
-    """Bench enumeration, 2026-09-05, both boards plugged in at once:
-    fixture ESP32-S3 JTAG 303A:1001 (COM7), fixture CH340K UART 1A86:7522, no
-    serial (COM14), main board ESP32-S3 JTAG 303A:1001 SER=1C:DB:D4:92:F4:7C
-    (COM3), main board CH343 UART 1A86:55D3 SER=552E006806 (COM6). The
-    fixture and the main board use DIFFERENT UART bridge silicon (CH340K vs
-    CH343), so recommend_fixture_port() must pick the CH340K and must never
-    pick the main board's CH343 -- confusing the two would let a relay
-    command land on the wrong board's UART task 7.
+    """Bench enumeration, both boards plugged in at once, with each UART
+    bridge assigned to the board that actually owns it (CORRECTED 2026-09-09
+    -- they were recorded backwards from 2026-09-05 until then; a live
+    get_fw_version over the CH340K answered as KilnFW, the MAIN board, and
+    serial_link.py's board-identity block carries the full evidence):
+
+      fixture    303A:1001 SER=68:B6:B3:29:D0:B8  native JTAG          (COM7)
+      fixture    1A86:55D3 SER=552E006806         CH343 UART bridge    (COM6)
+      main board 303A:1001 SER=1C:DB:D4:92:F4:7C  native JTAG          (COM3)
+      main board 1A86:7522 no serial number       CH340K UART bridge   (COM14)
+
+    recommend_fixture_port() must resolve the fixture's bridge by its USB
+    SERIAL NUMBER (552E006806) and must never pick the main board's CH340K
+    -- confusing the two would let a relay command land on the kiln's own
+    UART task 7. Under the backwards identities it did exactly that.
     """
 
     def _patch_ports(self, infos):
         return mock.patch.object(fixture, "_list_serial_ports", return_value=infos)
 
-    def test_picks_fixture_ch340k_over_everything_else(self) -> None:
+    def test_picks_fixture_bridge_by_serial_over_everything_else(self) -> None:
         infos = [
             PortInfo(device="COM7", description="USB-SERIAL-JTAG", manufacturer="Espressif",
                      hwid="USB VID:PID=303A:1001 SER=68:B6:B3:29:D0:B8", score=0),
-            PortInfo(device="COM14", description="USB-SERIAL CH340", manufacturer="wch.cn",
-                     hwid="USB VID:PID=1A86:7522", score=0),
+            PortInfo(device="COM14", description="USB-SERIAL CH340K", manufacturer="wch.cn",
+                     hwid="USB VID:PID=1A86:7522 LOCATION=1-2.4.4.4", score=0),
             PortInfo(device="COM3", description="USB-SERIAL-JTAG", manufacturer="Espressif",
                      hwid="USB VID:PID=303A:1001 SER=1C:DB:D4:92:F4:7C", score=0),
             PortInfo(device="COM6", description="USB-SERIAL CH343", manufacturer="wch.cn",
                      hwid="USB VID:PID=1A86:55D3 SER=552E006806", score=0),
         ]
         with self._patch_ports(infos):
-            self.assertEqual(fixture.recommend_fixture_port(), "COM14")
+            self.assertEqual(fixture.recommend_fixture_port(), "COM6")
 
-    def test_never_picks_main_board_ch343(self) -> None:
-        """Negative test: with only the main board's CH343 port visible (the
-        fixture unplugged), recommend_fixture_port() must refuse to guess
-        rather than silently pointing at the wrong board."""
+    def test_never_picks_main_board_bridge(self) -> None:
+        """With only the main board's CH340K bridge visible (the fixture
+        unplugged -- the live 2026-09-09 bench state),
+        recommend_fixture_port() must refuse to guess rather than silently
+        pointing relay traffic at the kiln's own UART."""
         infos = [
-            PortInfo(device="COM6", description="USB-SERIAL CH343", manufacturer="wch.cn",
-                     hwid="USB VID:PID=1A86:55D3 SER=552E006806", score=0),
+            PortInfo(device="COM14", description="USB-SERIAL CH340K (COM14)", manufacturer="wch.cn",
+                     hwid="USB VID:PID=1A86:7522 LOCATION=1-2.4.4.4", score=0),
         ]
         with self._patch_ports(infos):
             self.assertIsNone(fixture.recommend_fixture_port())
 
+    def test_unknown_ch343_serial_is_not_adopted_as_the_fixture(self) -> None:
+        """A different CH343 unit (same chip family, unknown serial) must
+        NOT be taken for the fixture: chip family is not an identity, which
+        is precisely the mistake that produced the backwards 2026-09-05
+        table."""
+        infos = [
+            PortInfo(device="COM20", description="USB-SERIAL CH343", manufacturer="wch.cn",
+                     hwid="USB VID:PID=1A86:55D3 SER=AABBCCDDEE", score=0),
+        ]
+        with self._patch_ports(infos):
+            self.assertIsNone(fixture.recommend_fixture_port())
+
+    def test_serialless_ch343_falls_back_to_vid_pid(self) -> None:
+        """Fallback path: a CH343 that reports no serial at all has nothing
+        but its VID:PID to be identified by, so the fallback accepts it."""
+        infos = [
+            PortInfo(device="COM21", description="USB-SERIAL CH343", manufacturer="wch.cn",
+                     hwid="USB VID:PID=1A86:55D3", score=0),
+        ]
+        with self._patch_ports(infos):
+            self.assertEqual(fixture.recommend_fixture_port(), "COM21")
+
     def test_six_port_bench_each_picker_owns_its_board(self) -> None:
-        """Full bench enumeration, 2026-09-05: both boards AND both CMSIS-DAP
+        """Full bench enumeration: both boards AND both CMSIS-DAP
         debug probes attached at once. recommend_fixture_port() must still
-        land on exactly the fixture's CH340K and nothing else."""
+        land on exactly the fixture's CH343 bridge and nothing else."""
         infos = [
             PortInfo(device="COM7", description="USB-SERIAL-JTAG", manufacturer="Espressif",
                      hwid="USB VID:PID=303A:1001 SER=68:B6:B3:29:D0:B8", score=0),
-            PortInfo(device="COM14", description="USB-SERIAL CH340", manufacturer="wch.cn",
-                     hwid="USB VID:PID=1A86:7522", score=0),
+            PortInfo(device="COM14", description="USB-SERIAL CH340K", manufacturer="wch.cn",
+                     hwid="USB VID:PID=1A86:7522 LOCATION=1-2.4.4.4", score=0),
             PortInfo(device="COM3", description="USB-SERIAL-JTAG", manufacturer="Espressif",
                      hwid="USB VID:PID=303A:1001 SER=1C:DB:D4:92:F4:7C", score=0),
             PortInfo(device="COM6", description="USB-SERIAL CH343", manufacturer="wch.cn",
@@ -87,7 +117,7 @@ class RecommendFixturePortTest(unittest.TestCase):
                      hwid="USB VID:PID=2E8A:000C SER=DEADBEEF00000000", score=0),
         ]
         with self._patch_ports(infos):
-            self.assertEqual(fixture.recommend_fixture_port(), "COM14")
+            self.assertEqual(fixture.recommend_fixture_port(), "COM6")
 
     def test_never_picks_main_board_native_jtag_with_generic_description(self) -> None:
         """Reviewer finding: a 303A:1001 port that enumerates with a generic
@@ -104,8 +134,8 @@ class RecommendFixturePortTest(unittest.TestCase):
             self.assertIsNone(fixture.recommend_fixture_port())
 
     def test_never_falls_back_when_only_unrelated_port_present(self) -> None:
-        """No CH340K anywhere on the bench: must return None, never fall
-        back to some other unexcluded, unidentified port."""
+        """No fixture bridge anywhere on the bench: must return None, never
+        fall back to some other unexcluded, unidentified port."""
         infos = [
             PortInfo(device="COM20", description="Some Other USB Serial", manufacturer="Acme",
                      hwid="USB VID:PID=0000:0000", score=0),

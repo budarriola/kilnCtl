@@ -2,11 +2,21 @@
 """Tests for serial_link.py's main-board / fixture port disambiguation.
 
 Two ESP32-S3 boards are now permanently on the bench (2026-09-05): the main
-board and the UnitTestFixture. Confirmed bug this covers: recommend_port()
-(the MAIN board's picker) used to pick the fixture's CH340K UART bridge
-(COM14) over the main board's own CH343 bridge (COM6), because both boards'
-generic "ch340"/"ch343" text hints score +50 and the tie-break on COM-port
-name text ("COM14" < "COM6" lexicographically) favoured the fixture.
+board and the UnitTestFixture. Identification is by USB SERIAL NUMBER
+wherever the unit reports one, and by VID:PID only for the one unit that
+does not (the main board's CH340K bridge).
+
+Bench identities, CORRECTED 2026-09-09 -- the two boards' UART bridges were
+recorded backwards from 2026-09-05 until then, so recommend_port() excluded
+the MAIN board's own bridge and returned None on a bench where it was the
+only bridge attached. Settled by a live get_fw_version round trip over the
+CH340K (COM14), which answered as KilnFW. See serial_link.py's
+board-identity block for the full evidence.
+
+  main board  303A:1001 SER=1C:DB:D4:92:F4:7C   (native JTAG, = its STA MAC)
+  main board  1A86:7522 no serial               (CH340K UART bridge, COM14)
+  fixture     303A:1001 SER=68:B6:B3:29:D0:B8   (native JTAG)
+  fixture     1A86:55D3 SER=552E006806          (CH343 UART bridge)
 
 Run with: python -m pytest tools/PcTools/tests/test_serial_link_board_identity.py -q
 """
@@ -35,8 +45,9 @@ class _FakeComPort:
         self.hwid = hwid
 
 
-#: Bench enumeration, 2026-09-05, all six ports present at once (both
-#: boards' JTAG + UART, both CMSIS-DAP debug probes).
+#: Bench enumeration, all six ports present at once (both boards' JTAG +
+#: UART, both CMSIS-DAP debug probes), with each UART bridge assigned to the
+#: board that actually owns it (see the module docstring).
 _SIX_PORT_BENCH = [
     _FakeComPort("COM7", "USB-SERIAL-JTAG", "Espressif",
                  "USB VID:PID=303A:1001 SER=68:B6:B3:29:D0:B8"),
@@ -63,20 +74,22 @@ class RecommendPortTest(unittest.TestCase):
 
     def test_six_port_bench_picks_main_board_not_fixture(self) -> None:
         with _patch_comports(_SIX_PORT_BENCH):
-            self.assertEqual(serial_link.recommend_port(), "COM6")
+            self.assertEqual(serial_link.recommend_port(), "COM14")
 
-    def test_fixture_absent_behavior_unchanged(self) -> None:
-        """Only the main board attached (no fixture on the bench at all):
-        must still pick the main board's CH343 exactly as before this
-        change."""
+    def test_fixture_absent_picks_the_main_boards_own_bridge(self) -> None:
+        """Only the main board attached (no fixture bridge on the bench) --
+        the live 2026-09-09 bench state, enumerated verbatim. This is the
+        regression the backwards UART identities caused: recommend_port()
+        returned None here, and every kilnctrl call failed with "no serial
+        port open"."""
         ports = [
-            _FakeComPort("COM3", "USB-SERIAL-JTAG", "Espressif",
+            _FakeComPort("COM3", "USB Serial Device (COM3)", "Microsoft",
                          "USB VID:PID=303A:1001 SER=1C:DB:D4:92:F4:7C"),
-            _FakeComPort("COM6", "USB-SERIAL CH343", "wch.cn",
-                         "USB VID:PID=1A86:55D3 SER=552E006806"),
+            _FakeComPort("COM14", "USB-SERIAL CH340K (COM14)", "wch.cn",
+                         "USB VID:PID=1A86:7522 LOCATION=1-2.4.4.4"),
         ]
         with _patch_comports(ports):
-            self.assertEqual(serial_link.recommend_port(), "COM6")
+            self.assertEqual(serial_link.recommend_port(), "COM14")
 
     def test_only_fixture_attached_finds_nothing(self) -> None:
         """Fixture alone on the bench (main board unplugged): the main
@@ -85,8 +98,8 @@ class RecommendPortTest(unittest.TestCase):
         ports = [
             _FakeComPort("COM7", "USB-SERIAL-JTAG", "Espressif",
                          "USB VID:PID=303A:1001 SER=68:B6:B3:29:D0:B8"),
-            _FakeComPort("COM14", "USB-SERIAL CH340K", "wch.cn",
-                         "USB VID:PID=1A86:7522"),
+            _FakeComPort("COM6", "USB-SERIAL CH343", "wch.cn",
+                         "USB VID:PID=1A86:55D3 SER=552E006806"),
         ]
         with _patch_comports(ports):
             self.assertIsNone(serial_link.recommend_port())
@@ -99,37 +112,37 @@ class RecommendPortTest(unittest.TestCase):
         test_only_fixture_attached_finds_nothing actually exercises the fix
         rather than passing vacuously. This is also the real confirmed bug:
         with only the fixture attached (main board unplugged), the pre-fix
-        picker had nothing to exclude the fixture's CH340K with and
-        returned its port as if it were the main board's."""
+        picker had nothing to exclude the fixture's bridge with and returned
+        its port as if it were the main board's."""
         ports = [
             _FakeComPort("COM7", "USB-SERIAL-JTAG", "Espressif",
                          "USB VID:PID=303A:1001 SER=68:B6:B3:29:D0:B8"),
-            _FakeComPort("COM14", "USB-SERIAL CH340K", "wch.cn",
-                         "USB VID:PID=1A86:7522"),
+            _FakeComPort("COM6", "USB-SERIAL CH343", "wch.cn",
+                         "USB VID:PID=1A86:55D3 SER=552E006806"),
         ]
         pre_fix_vid_hints = tuple(
-            h for h in serial_link._VID_HINTS if h[0] != "1A86:7522"
+            h for h in serial_link._VID_HINTS if h[0] != "1A86:55D3"
         )
         with mock.patch.object(serial_link, "is_fixture_port", return_value=False), \
              mock.patch.object(serial_link, "_VID_HINTS", pre_fix_vid_hints):
             with _patch_comports(ports):
-                self.assertEqual(serial_link.recommend_port(), "COM14")
+                self.assertEqual(serial_link.recommend_port(), "COM6")
 
 
 class BoardIdentityHelpersTest(unittest.TestCase):
     def test_is_main_board_port_matches_jtag_and_uart(self) -> None:
         jtag = PortInfo(device="COM3", description="USB-SERIAL-JTAG", manufacturer="Espressif",
                          hwid="USB VID:PID=303A:1001 SER=1C:DB:D4:92:F4:7C", score=0)
-        uart = PortInfo(device="COM6", description="USB-SERIAL CH343", manufacturer="wch.cn",
-                         hwid="USB VID:PID=1A86:55D3 SER=552E006806", score=0)
+        uart = PortInfo(device="COM14", description="USB-SERIAL CH340K", manufacturer="wch.cn",
+                         hwid="USB VID:PID=1A86:7522 LOCATION=1-2.4.4.4", score=0)
         self.assertTrue(serial_link.is_main_board_port(jtag))
         self.assertTrue(serial_link.is_main_board_port(uart))
 
     def test_is_fixture_port_matches_jtag_and_uart(self) -> None:
         jtag = PortInfo(device="COM7", description="USB-SERIAL-JTAG", manufacturer="Espressif",
                          hwid="USB VID:PID=303A:1001 SER=68:B6:B3:29:D0:B8", score=0)
-        uart = PortInfo(device="COM14", description="USB-SERIAL CH340K", manufacturer="wch.cn",
-                         hwid="USB VID:PID=1A86:7522", score=0)
+        uart = PortInfo(device="COM6", description="USB-SERIAL CH343", manufacturer="wch.cn",
+                         hwid="USB VID:PID=1A86:55D3 SER=552E006806", score=0)
         self.assertTrue(serial_link.is_fixture_port(jtag))
         self.assertTrue(serial_link.is_fixture_port(uart))
 
@@ -151,8 +164,8 @@ _PROBE_A = _FakeComPort("COM10", "USB Serial Device (COM10)", "Microsoft",
                         "USB VID:PID=2E8A:000C SER=E66540F0A36C6E21 LOCATION=1-2.4.2:x.1")
 _PROBE_B = _FakeComPort("COM11", "USB Serial Device (COM11)", "Microsoft",
                         "USB VID:PID=2E8A:000C SER=DEADBEEF00000000 LOCATION=1-2.4.3:x.1")
-_MAIN_BRIDGE = _FakeComPort("COM6", "USB-SERIAL CH343", "wch.cn",
-                            "USB VID:PID=1A86:55D3 SER=552E006806")
+_MAIN_BRIDGE = _FakeComPort("COM14", "USB-SERIAL CH340K (COM14)", "wch.cn",
+                            "USB VID:PID=1A86:7522 LOCATION=1-2.4.4.4")
 _INERT = _FakeComPort("COM1", "Communications Port (COM1)", "", r"ACPI\PNP0501\0")
 
 
@@ -171,11 +184,11 @@ class DebugProbeExclusionTest(unittest.TestCase):
 
     def test_bridge_only_selects_the_bridge(self) -> None:
         with _patch_comports([_MAIN_BRIDGE, _INERT]):
-            self.assertEqual(serial_link.recommend_port(), "COM6")
+            self.assertEqual(serial_link.recommend_port(), "COM14")
 
     def test_both_present_selects_the_bridge(self) -> None:
         with _patch_comports([_PROBE_A, _PROBE_B, _MAIN_BRIDGE, _INERT]):
-            self.assertEqual(serial_link.recommend_port(), "COM6")
+            self.assertEqual(serial_link.recommend_port(), "COM14")
 
     def test_probe_never_recommended_in_listing(self) -> None:
         with _patch_comports([_PROBE_A, _PROBE_B, _MAIN_BRIDGE]):
@@ -193,6 +206,68 @@ class DebugProbeExclusionTest(unittest.TestCase):
         self.assertFalse(serial_link.is_debug_probe_port(
             PortInfo(device="COM6", description="USB-SERIAL CH343", manufacturer="wch.cn",
                      hwid="USB VID:PID=1A86:55D3 SER=552E006806", score=0)))
+
+
+class SerialFirstIdentificationTest(unittest.TestCase):
+    """Serial number is the source of truth; VID:PID is a fallback used only
+    where the unit reports no serial. Regression cover for the 2026-09-05
+    mix-up, which came from treating a chip family (CH340K vs CH343) as a
+    board identity."""
+
+    @staticmethod
+    def _info(device, description, hwid):
+        return PortInfo(device=device, description=description,
+                        manufacturer="wch.cn", hwid=hwid, score=0)
+
+    def test_identify_by_serial_main_board_jtag(self) -> None:
+        self.assertEqual(serial_link.identify_port(self._info(
+            "COM3", "USB Serial Device",
+            "USB VID:PID=303A:1001 SER=1C:DB:D4:92:F4:7C")), "main_board")
+
+    def test_identify_by_serial_fixture_uart_bridge(self) -> None:
+        """The fixture's bridge DOES report a serial, so the serial decides
+        -- not its 1A86:55D3 chip family."""
+        self.assertEqual(serial_link.identify_port(self._info(
+            "COM6", "USB-SERIAL CH343",
+            "USB VID:PID=1A86:55D3 SER=552E006806")), "fixture")
+
+    def test_identify_by_serial_fixture_jtag(self) -> None:
+        self.assertEqual(serial_link.identify_port(self._info(
+            "COM7", "USB Serial Device",
+            "USB VID:PID=303A:1001 SER=68:B6:B3:29:D0:B8")), "fixture")
+
+    def test_serial_wins_over_vid_pid_for_a_third_unit(self) -> None:
+        """A DIFFERENT CH343 (same VID:PID, unknown serial) must come back
+        as unidentified, never adopted as the fixture on chip family alone.
+        Same for a third ESP32-S3 on the shared 303A:1001."""
+        self.assertIsNone(serial_link.identify_port(self._info(
+            "COM20", "USB-SERIAL CH343",
+            "USB VID:PID=1A86:55D3 SER=AABBCCDDEE")))
+        self.assertIsNone(serial_link.identify_port(self._info(
+            "COM21", "USB Serial Device",
+            "USB VID:PID=303A:1001 SER=00:00:00:00:00:01")))
+
+    def test_vid_pid_fallback_only_when_no_serial(self) -> None:
+        """The main board's CH340K reports no serial at all (verbatim bench
+        hwid, 2026-09-09) -- VID:PID is the only handle it has, and this is
+        the sole case where the fallback fires."""
+        info = self._info("COM14", "USB-SERIAL CH340K (COM14)",
+                          "USB VID:PID=1A86:7522 LOCATION=1-2.4.4.4")
+        self.assertIsNone(serial_link.hwid_serial(info.hwid))
+        self.assertEqual(serial_link.identify_port(info), "main_board")
+        self.assertTrue(serial_link.is_main_board_port(info))
+        self.assertFalse(serial_link.is_fixture_port(info))
+
+    def test_hwid_serial_absent_vs_present(self) -> None:
+        self.assertIsNone(serial_link.hwid_serial("USB VID:PID=1A86:7522"))
+        self.assertIsNone(serial_link.hwid_serial(""))
+        self.assertEqual(
+            serial_link.hwid_serial("USB VID:PID=1A86:55D3 SER=552E006806"),
+            "552E006806")
+
+    def test_unknown_device_identifies_as_neither(self) -> None:
+        self.assertIsNone(serial_link.identify_port(self._info(
+            "COM1", "Communications Port (COM1)", r"ACPI\PNP0501\0")))
 
 
 if __name__ == "__main__":

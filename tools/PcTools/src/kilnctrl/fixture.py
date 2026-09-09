@@ -51,6 +51,7 @@ import threading
 from dataclasses import dataclass
 from typing import Optional
 
+from . import serial_link as _serial_link
 from .protocol import Device, Frame, MsgType  # noqa: F401 - re-exported for callers/tests
 from .serial_link import SendResult, UartLink
 from .serial_link import list_ports as _list_serial_ports
@@ -83,33 +84,36 @@ PCF8575_PIN_COUNT = 16
 #: docstring and the error message below both already promise.
 KILNCTL_FIXTURE_PORT_ENV = "KILNCTL_FIXTURE_PORT"
 
-#: USB VID:PID for the fixture's own USB-UART bridge: a CH340K, confirmed by
-#: bench enumeration 2026-09-05 (both boards plugged in simultaneously):
-#:   fixture   ESP32-S3 native USB-Serial-JTAG  303A:1001  SER=68:B6:B3:29:D0:B8 (COM7)
-#:   fixture   CH340K UART                       1A86:7522  no serial number     (COM14)
-#:   main board ESP32-S3 native USB-Serial-JTAG  303A:1001  SER=1C:DB:D4:92:F4:7C (COM3)
-#:   main board CH343 UART                        1A86:55D3  SER=552E006806       (COM6)
-#: The two boards' UART bridges are DIFFERENT silicon (CH340K vs CH343), so
-#: VID:PID alone distinguishes them here -- unlike the two ESP32-S3 native
-#: ports, which share 303A:1001 and are told apart only by serial number (see
-#: mcp_server_flash.py's pinned adapter_serial for that side). The CH340K
-#: itself reports no per-device serial (Windows still strips MI_xx from a
-#: composite descriptor, but there is no serial to strip here in the first
-#: place), so if a second CH340K-based board ever joins the bench, VID:PID
-#: stops being sufficient and an explicit port will be required again -- see
-#: docs/UNIT_TEST_FIXTURE_PLAN.md "PC connection identity".
-FIXTURE_VID_PID_HINT = "1A86:7522"
+#: USB SERIAL NUMBER of the fixture's own USB-UART bridge -- a CH343, which
+#: reports a per-unit serial and is therefore identified by it, never by its
+#: chip family. Bench enumeration, CORRECTED 2026-09-09 (the two boards'
+#: bridges were recorded backwards from 2026-09-05 until then; the full
+#: evidence is in serial_link.py's board-identity block):
+#:   fixture    ESP32-S3 native USB-Serial-JTAG  303A:1001  SER=68:B6:B3:29:D0:B8
+#:   fixture    CH343 UART bridge                 1A86:55D3  SER=552E006806
+#:   main board ESP32-S3 native USB-Serial-JTAG  303A:1001  SER=1C:DB:D4:92:F4:7C
+#:   main board CH340K UART bridge                1A86:7522  (no serial number)
+#: The main board's CH340K is the one device on this bench with no serial at
+#: all, so it is the only one VID:PID has to speak for -- see
+#: serial_link.MAIN_BOARD_UART_VID_PID and docs/UNIT_TEST_FIXTURE_PLAN.md
+#: "PC connection identity".
+FIXTURE_UART_SERIAL = _serial_link.FIXTURE_UART_SERIAL  # "552E006806"
+
+#: VID:PID of the same bridge. A *fallback* only, for a hypothetical CH343
+#: that reports no serial; FIXTURE_UART_SERIAL is what actually matches on
+#: this bench.
+FIXTURE_VID_PID_HINT = _serial_link.FIXTURE_UART_VID_PID  # "1A86:55D3"
 
 #: Descriptor substrings that mean "definitely not the fixture's UART bridge"
 #: -- the two CMSIS-DAP debug probes, both boards' JTAG/Serial-JTAG ports,
-#: and the main board's own CH343 bridge (1A86:55D3 -- a different chip
-#: family from the fixture's CH340K, but excluded by name too as a second,
+#: and the main board's own CH340K bridge (1A86:7522 -- a different chip
+#: family from the fixture's CH343, but excluded by name too as a second,
 #: independent check: see test_fixture.py's
-#: test_recommend_never_picks_main_board_ch343). Kept separate from
+#: test_never_picks_main_board_bridge). Kept separate from
 #: kilnctrl's own _PORT_HINTS (serial_link.py) rather than imported, since
 #: this module must not depend on that link's board-specific scoring
 #: assumptions.
-_EXCLUDE_HINTS = ("jtag", "cmsis-dap", "debug", "mbed", "55d3", "ch343")
+_EXCLUDE_HINTS = ("jtag", "cmsis-dap", "debug", "mbed", "7522", "ch340")
 
 
 class FixtureError(RuntimeError):
@@ -153,27 +157,32 @@ DEFAULT_RELAY_MAP: "dict[str, RelayId]" = _default_relay_map()
 #: hand back a native ESP32-S3 JTAG port, main board's or the fixture's own,
 #: as the fixture's UART bridge). Both boards' native USB-Serial-JTAG shares
 #: 303A:1001, so that VID:PID is excluded unconditionally regardless of which
-#: board it belongs to; the main board's CH343 bridge is excluded by its own
-#: VID:PID and, redundantly, by its pinned serial number.
-_EXCLUDE_HWID_TOKENS = ("303A:1001", "1A86:55D3", "552E006806")
+#: board it belongs to; the main board's CH340K bridge is excluded by its own
+#: VID:PID, the only handle that serial-less unit has.
+_EXCLUDE_HWID_TOKENS = ("303A:1001", "1A86:7522")
 
 
 def recommend_fixture_port() -> Optional[str]:
-    """The fixture's CH340K UART bridge port, identified by VID:PID
-    (:data:`FIXTURE_VID_PID_HINT`), or None if it is not present.
+    """The fixture's CH343 UART bridge port, identified by its USB SERIAL
+    NUMBER (:data:`FIXTURE_UART_SERIAL`), or None if it is not present.
 
-    Never falls back to "some other unexcluded port" -- a positive VID:PID
-    match on the fixture's CH340K is required, or this returns None. Also
-    excludes by VID:PID/serial directly (:data:`_EXCLUDE_HWID_TOKENS`), not
-    just the free-text ``_EXCLUDE_HINTS`` substrings, since a 303A:1001 port
-    reporting a generic description (no "JTAG" text at all) would otherwise
-    slip past the text-only check and could be returned as if it were the
-    fixture's own port.
+    Serial first, VID:PID only as a fallback for a bridge that reports no
+    serial at all -- the same rule as
+    :func:`kilnctrl.serial_link.identify_port`, and the reason this file no
+    longer names the wrong board's chip family: a CH343 or CH340K is a chip,
+    not a unit, and from 2026-09-05 to 2026-09-09 this function keyed on the
+    MAIN board's bridge and would have sent relay commands down the kiln's
+    own UART. See serial_link.py's board-identity block for the evidence
+    that settled which is which.
 
-    Does NOT positively confirm the fixture beyond that VID:PID match -- a
-    second CH340K-based device on the bench would still be ambiguous, see
-    FIXTURE_VID_PID_HINT's docstring. Prefer an explicit
-    ``KILNCTL_FIXTURE_PORT``/``port=`` when in doubt.
+    Never falls back to "some other unexcluded port" -- a positive match is
+    required, or this returns None. Also excludes by VID:PID directly
+    (:data:`_EXCLUDE_HWID_TOKENS`), not just the free-text
+    ``_EXCLUDE_HINTS`` substrings, since a 303A:1001 port reporting a
+    generic description (no "JTAG" text at all) would otherwise slip past
+    the text-only check and could be returned as if it were the fixture's
+    own port. Prefer an explicit ``KILNCTL_FIXTURE_PORT``/``port=`` when in
+    doubt.
     """
     hinted = []
     for info in _list_serial_ports():
@@ -188,6 +197,13 @@ def recommend_fixture_port() -> Optional[str]:
         # same one mcp_server_flash.py pins OpenOCD's `adapter serial` to).
         if _is_main_board_port(info):
             continue
+        serial = _serial_link.hwid_serial(info.hwid)
+        if serial is not None:
+            # This unit identifies itself; only its own serial will do.
+            if serial.upper() == FIXTURE_UART_SERIAL.upper():
+                hinted.append(info)
+            continue
+        # No serial to go on -- chip family is all that is left.
         if FIXTURE_VID_PID_HINT.lower() in info.hwid.lower():
             hinted.append(info)
     if not hinted:
