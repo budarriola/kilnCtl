@@ -126,7 +126,12 @@ typedef struct {
     bool  bar2_cleared;
     bool  degraded;              // median_normalised >= +1.0 with n >= VETO_MIN_N
     bool  degraded_untrusted;    // median_normalised >= +1.0 but n < VETO_MIN_N: too
-                                 // thin to VETO on, still enough to refuse an ACCEPT
+                                 // thin to VETO on, still enough to refuse an ACCEPT.
+                                 // Consumed only inside firing_compare.c's own verdict
+                                 // logic today -- no caller outside this file (iter_tune.c
+                                 // included) reads this field yet; it is exposed on the
+                                 // result struct for a future caller that wants the WHY,
+                                 // not because one exists now.
 } firing_compare_subscore_t;
 
 typedef struct {
@@ -136,9 +141,14 @@ typedef struct {
     uint16_t in_band_n;
     float in_band_median_delta;  // trial - baseline, fraction of ticks; negative == worse
     bool  in_band_veto;
-    bool  in_band_degraded_untrusted; // in-band fell outside tolerance at n < VETO_MIN_N
+    bool  in_band_degraded_untrusted; // in-band fell outside tolerance at n < VETO_MIN_N.
+                                      // Same "no consumer yet" note as sub[]'s
+                                      // degraded_untrusted above: read only inside this
+                                      // file's own verdict computation today.
     bool  accept_blocked_untrusted;   // an ACCEPT was downgraded to INSUFFICIENT purely
-                                      // by a low-n degradation somewhere
+                                      // by a low-n degradation somewhere. Also has no
+                                      // consumer outside this file yet -- exposed for a
+                                      // future caller, not read by one today.
     bool  bar2_applied;
     // Human-facing composite ONLY (plan sec 2.2: "a composite IS still
     // computed and displayed for humans; it never decides anything").

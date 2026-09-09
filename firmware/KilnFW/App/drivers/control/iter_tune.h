@@ -187,7 +187,13 @@ typedef struct {
     uint8_t carries;
     uint8_t cage_edge_hits;
     uint8_t status;            // iter_tune_status_t
-    uint8_t stop_reason;       // iter_tune_stop_reason_t
+    uint8_t stop_reason;       // iter_tune_stop_reason_t -- RAM-only, part of this
+                               // in-RAM state struct like every other field here;
+                               // 249ce287's commit message called it "persisted",
+                               // which is not true of anything in
+                               // iter_tune_zone_state_t -- nothing in this module
+                               // writes NVS/LittleFS/config_store. Corrected here
+                               // since the commit message itself cannot be edited.
 } iter_tune_zone_state_t;
 
 // Turns the mechanism on for a zone. The FIRST enable snapshots
