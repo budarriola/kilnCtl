@@ -140,6 +140,31 @@ HTTP_DIR = os.path.join(REPO_ROOT, "firmware", "KilnFW", "App", "drivers", "http
 # reachable handler path getting WORSE, not to relitigate this depth.
 CEILING_BYTES = 4832
 
+# 2026-09-08 honesty fix (docs/audits/2026-09-08-httpd-stack-gap.md, `022bde0a`):
+# the static walk's "N B free" framing was misleading. It measures only each
+# handler's own reachable frames -- it cannot see ESP-IDF's httpd
+# dispatch/session-parsing machinery (runs BELOW every handler root) or
+# Xtensa ISR window-spill onto whatever stack is current, both of which run
+# on the real task before/around the handler and are structurally invisible
+# to a per-handler frame walk. That audit measured live, on hardware
+# (build `4bbfcfbe`): 1528-1656 B of free stack at the worst observed mark,
+# against this script's naive "8192 - 4832 = 3360 B free" implication -- a
+# ~1700-1900 B gap that did not move when four different deep handlers were
+# deliberately exercised (probing did not deepen the mark further), so it is
+# attributed to a roughly CONSTANT per-request/dispatch overhead rather than
+# to any one handler being mismeasured.
+#
+# UNMODELED_OVERHEAD_BYTES below is that gap's documented, doc-traceable
+# estimate -- 1800 B, the midpoint of the audit's 1700-1900 B range. Sanity
+# check: applying it to the CURRENT worst case (revert_post_handler, 4832 B)
+# gives 8192 - 4832 - 1800 = 1560 B honest headroom (19.0%), matching the
+# audit's live-measured 1528 B / 18.7% to within 32 B / 0.3 pp -- close
+# enough to trust the constant without pretending it is exact. This is a
+# subtracted allowance, not a re-measurement: it does not explain the gap
+# mechanically (that remains open per the audit's Verdict section), it just
+# stops the printed number from being read as real margin when it isn't.
+UNMODELED_OVERHEAD_BYTES = 1800
+
 HANDLER_RE = re.compile(r"\.handler\s*=\s*([A-Za-z_][A-Za-z0-9_]*)")
 
 
@@ -157,6 +182,8 @@ def main():
     ap.add_argument("--elf", default=DEFAULT_ELF)
     ap.add_argument("--ceiling-bytes", type=int, default=None,
                      help="override CEILING_BYTES (used by the negative test)")
+    ap.add_argument("--overhead-bytes", type=int, default=None,
+                     help="override UNMODELED_OVERHEAD_BYTES (used by the negative test)")
     args = ap.parse_args()
 
     if not os.path.isfile(args.elf):
@@ -178,6 +205,8 @@ def main():
     frames, calls = base.parse(objdump, args.elf)
 
     ceiling = args.ceiling_bytes or CEILING_BYTES
+    overhead = args.overhead_bytes if args.overhead_bytes is not None else UNMODELED_OVERHEAD_BYTES
+    stack_bytes = 8192
     results = []
     for r in roots:
         if r not in frames:
@@ -201,6 +230,26 @@ def main():
         running += frames.get(fn, 0)
         print(f"    {frames.get(fn, 0):>6} B  {running:>6} B cumulative  {fn}")
 
+    # Honest headroom: subtract the unmodelled dispatch/ISR overhead (see
+    # UNMODELED_OVERHEAD_BYTES above) from the naive "stack - worst path"
+    # figure before calling it free. This is the number a human should
+    # actually act on -- docs/audits/2026-09-08-httpd-stack-gap.md's whole
+    # point was that the naive figure reads as comfortable when live
+    # measurement was not.
+    naive_free = stack_bytes - worst_total
+    honest_free = naive_free - overhead
+    honest_pct = 100.0 * honest_free / stack_bytes
+    if honest_pct < 15.0:
+        level = "CRITICAL"
+    elif honest_pct < 30.0:
+        level = "LOW"
+    else:
+        level = "OK"
+    print()
+    print(f"naive implied free: {naive_free} B (ignores dispatch/ISR overhead -- do not act on this)")
+    print(f"honest free (naive - {overhead} B unmodelled overhead): {honest_free} B "
+          f"({honest_pct:.1f}% of {stack_bytes} B) -- classified {level}")
+
     if worst_total > ceiling:
         print()
         print(f"check_httpd_task_stack_budget: FAIL -- {worst_root} reaches {worst_total} B, "
@@ -212,8 +261,19 @@ def main():
               "cfgfs_status_get_handler / api_setup_progress_get_handler for the pattern.")
         return 1
 
+    if honest_pct < 15.0:
+        print()
+        print(f"check_httpd_task_stack_budget: FAIL -- honest headroom is {honest_pct:.1f}% "
+              "(CRITICAL, <15%) once the unmodelled dispatch/ISR overhead is counted, even though "
+              f"the static path itself ({worst_total} B) is still under the {ceiling} B ceiling.")
+        print("  This is the gap documented in docs/audits/2026-09-08-httpd-stack-gap.md: the "
+              "ceiling alone does not see it. Fix the same way -- move large locals off this "
+              "stack -- or lower CEILING_BYTES until honest headroom clears CRITICAL.")
+        return 1
+
     print()
-    print("check_httpd_task_stack_budget: OK")
+    print("check_httpd_task_stack_budget: OK"
+          + (" (honest headroom is LOW -- worth a look, not yet failing)" if level == "LOW" else ""))
     return 0
 
 

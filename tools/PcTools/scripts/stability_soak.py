@@ -389,6 +389,38 @@ def main() -> int:
     print(f"  heap_internal.free trend: {heap_trend}"
           + (" *** FLOOR BREACH ABOVE ***" if any(v < HEAP_INTERNAL_FLOOR_BYTES for v in col("heap_internal_free")) else ""))
     print(f"  stack min headroom% trend: {stack_pct_trend} (idle-only run cannot prove firing-time headroom -- see docstring)")
+
+    # --- predicted-vs-actual cross-check (docs/audits/2026-09-08-httpd-stack-gap.md) ---
+    # The static check's own "honest" headroom estimate is a constant-overhead
+    # ALLOWANCE, not a measurement -- this is the live cross-check that audit
+    # recommended to actually validate it, cheaply, on every soak run rather
+    # than only when someone remembers to re-run the audit by hand.
+    httpd_pct_samples = [
+        float(r["stack_min_headroom_pct"]) for r in rows
+        if r.get("stack_worst_task") == "httpd_worker" and r.get("stack_min_headroom_pct") not in (None, "")
+    ]
+    if httpd_pct_samples:
+        worst_live_pct = min(httpd_pct_samples)
+        try:
+            import subprocess
+            check_path = Path(__file__).resolve().parents[3] / "firmware" / "KilnFW" / "App" / "test" / "check_httpd_task_stack_budget.py"
+            out = subprocess.run([sys.executable, str(check_path)], capture_output=True, text=True, timeout=60).stdout
+            pred_pct = None
+            for line in out.splitlines():
+                if line.startswith("honest free"):
+                    pred_pct = float(line.split("(")[1].split("%")[0])
+                    break
+            if pred_pct is not None:
+                divergence = abs(pred_pct - worst_live_pct)
+                print(f"  httpd_worker predicted-vs-actual: static honest estimate={pred_pct:.1f}%, "
+                      f"live worst this run={worst_live_pct:.1f}% (divergence {divergence:.1f} pp)")
+                if divergence > 8.0:
+                    all_problems.append(
+                        f"httpd_worker static honest-headroom estimate ({pred_pct:.1f}%) diverges from "
+                        f"live worst ({worst_live_pct:.1f}%) by {divergence:.1f} pp -- "
+                        "UNMODELED_OVERHEAD_BYTES in check_httpd_task_stack_budget.py may need retuning")
+        except Exception as exc:  # noqa: BLE001 -- cross-check is best-effort, never blocks the soak
+            print(f"  httpd_worker predicted-vs-actual: skipped ({exc})")
     print(f"  safety crc_errors delta over run: {crc_delta}")
     print(f"  safety timeouts delta over run: {timeout_delta}")
     print(f"  safety broadcast_dropped delta over run: {bd_delta}")
