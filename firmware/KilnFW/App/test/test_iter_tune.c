@@ -1,16 +1,24 @@
-// test_iter_tune.c -- PID_EXPANSION_PLAN.md 3.3 "Iterative tuning".
-// Pure host tests, no ESP-IDF stubs needed (see iter_tune.h's top comment).
+// test_iter_tune.c -- ITER_TUNE_REDESIGN_PLAN.md steps 1, 2 and 5:
+// firing_score.c (per-segment tracking scoring), firing_compare.c
+// (matched-pair comparator + accept rule) and the rewritten iter_tune.c
+// decision core. Pure host tests, no ESP-IDF stubs needed.
 //
-// Every check below has a documented negative case: mutate the constant or
-// input named in the comment, watch the named test go red, then revert.
-// Literals used as expected values are computed independently of the
-// module's own constants where the point is to pin BEHAVIOR, not restate
-// the constant (e.g. the noise-floor tests use 15%/25% deltas chosen to
-// straddle ITER_TUNE_MIN_RELATIVE_IMPROVEMENT's 20% from literals, not by
-// reading the macro back).
+// The old whole-firing-IAE tests are gone with the code they tested (plan
+// step 5's gate: "the old whole-firing path fully removed, not left dual").
+//
+// NEGATIVE TESTS. Each block below names the PRODUCTION edit that makes it
+// go red -- not a test-local copy, per this repo's standing rule that a
+// negative test on a mirror is vacuous. Two were actually run and confirmed
+// RED during this change (see the commit message):
+//   - firing_compare.c's veto: change `ss->median_normalised >= 1.0f` to
+//     `>= 100.0f` -> test_veto_rejects_a_trade goes red.
+//   - iter_tune.c's cage: drop the anchor clamp in
+//     iter_tune_clamp_to_cage() -> test_cage_clamps_to_anchor goes red.
 
 #include "test_common.h"
 #include "../drivers/control/iter_tune.h"
+#include "../drivers/control/firing_score.h"
+#include "../drivers/control/firing_compare.h"
 
 #include <string.h>
 
@@ -19,483 +27,568 @@
 // silent clamp mismatch -- is where it will be caught.
 #define ZONE_PID_GAIN_MAX_MIRROR 1000.0f
 
-static iter_tune_firing_t mk_firing(uint8_t profile_id, uint8_t zone_mask, float start_temp_c,
-                                     float iae, float kp, float ki, float kd)
+static firing_score_cfg_t mk_cfg(void)
 {
-    iter_tune_firing_t f;
-    memset(&f, 0, sizeof(f));
-    f.profile_id = profile_id;
-    f.zone_mask = zone_mask;
-    f.start_temp_c = start_temp_c;
-    f.iae_normalized = iae;
-    f.gains.kp = kp;
-    f.gains.ki = ki;
-    f.gains.kd = kd;
-    return f;
+    firing_score_cfg_t c;
+    memset(&c, 0, sizeof(c));
+    c.band_c = 5.0f;
+    c.temp_bucket_c = 5.0f;
+    c.rate_bucket_c_per_hr = 25.0f;
+    c.min_scored_ticks = 10;
+    return c;
 }
+
+// ------------------------------------------------------------------ score
 
 static void test_gain_ceil_mirrors_zone_pid_gain_max(void)
 {
     TEST_SECTION("iter_tune: ITER_TUNE_GAIN_CEIL_C mirrors ZONE_PID_GAIN_MAX");
     // Negative test: change ITER_TUNE_GAIN_CEIL_C in iter_tune.h without
-    // updating ZONE_PID_GAIN_MAX_MIRROR above (or vice versa) -- this goes
-    // red immediately, which is the point: the two headers cannot see each
-    // other, so this is the only thing that would catch a drift.
-    TEST_CHECK(ITER_TUNE_GAIN_CEIL_C == ZONE_PID_GAIN_MAX_MIRROR, "gain ceiling must mirror zones_http.h's bound");
+    // changing ZONE_PID_GAIN_MAX -> red here.
+    TEST_CHECK(ITER_TUNE_GAIN_CEIL_C == ZONE_PID_GAIN_MAX_MIRROR, "ceiling mirrors zone gain max");
 }
 
-static void test_disabled_zone_refuses(void)
+static void test_classify_rate(void)
 {
-    TEST_SECTION("iter_tune: disabled zone refuses everything");
-    iter_tune_zone_state_t st;
-    memset(&st, 0, sizeof(st)); // enabled == false by zero-init -- the default-OFF requirement
-    iter_tune_firing_t f = mk_firing(7, 0x07, 25.0f, 0.05f, 10.0f, 0.1f, 1.0f);
-    char reason[96];
-    iter_tune_result_t r = iter_tune_process_firing(&st, &f, reason, sizeof(reason));
-    // Negative test: flip st.enabled = true here -- this assertion goes red
-    // (result becomes SEEDED_BASELINE), proving the check is load-bearing.
-    TEST_CHECK(r == ITER_TUNE_RESULT_DISABLED, "disabled zone must refuse, not seed a baseline");
-    TEST_CHECK(!st.has_baseline, "disabled zone must not acquire a baseline");
+    TEST_SECTION("firing_score: a near-zero commanded rate is a DWELL, not a ramp");
+    // This is what stops lag_s dividing by a near-zero rate. Negative test:
+    // lower FIRING_SCORE_RAMP_MIN_RATE_C_PER_HR to 1.0f -> red.
+    TEST_CHECK(firing_score_classify(0.0f) == FIRING_SEG_DWELL, "0 C/hr is a dwell");
+    TEST_CHECK(firing_score_classify(5.0f) == FIRING_SEG_DWELL, "5 C/hr is a dwell");
+    TEST_CHECK(firing_score_classify(60.0f) == FIRING_SEG_RAMP_UP, "60 C/hr is a ramp up");
+    TEST_CHECK(firing_score_classify(-60.0f) == FIRING_SEG_RAMP_DOWN, "-60 C/hr is a ramp down");
 }
 
-static void test_first_firing_seeds_baseline_no_perturbation_yet(void)
+// Two ramps, same TRACKING LAG in seconds but wildly different commanded
+// rates and error magnitudes, must score the same lag_s. This is the whole
+// reason lag is expressed in seconds.
+static void test_lag_is_rate_normalised(void)
 {
-    TEST_SECTION("iter_tune: first firing seeds baseline");
-    iter_tune_zone_state_t st;
-    memset(&st, 0, sizeof(st));
-    st.enabled = true;
-    iter_tune_firing_t f = mk_firing(7, 0x07, 25.0f, 0.0500f, 10.0f, 0.10f, 1.0f);
-    char reason[96];
-    iter_tune_result_t r = iter_tune_process_firing(&st, &f, reason, sizeof(reason));
-    TEST_CHECK(r == ITER_TUNE_RESULT_SEEDED_BASELINE, "first-ever firing must seed, not compare");
-    TEST_CHECK(st.has_baseline, "baseline must now be set");
-    TEST_CHECK_NEAR(st.baseline.iae_normalized, 0.0500, 1e-6, "seeded score must match input exactly");
-    iter_tune_gains_t active = iter_tune_active_gains(&st);
-    TEST_CHECK_NEAR(active.kp, 10.0, 1e-6, "active gains before any trial must equal seeded gains");
+    TEST_SECTION("firing_score: 0.5C at 50C/hr and 5C at 500C/hr are the same lag");
+    firing_score_cfg_t cfg = mk_cfg();
+    firing_score_seg_t a, b;
+    bool cap_a = true, cap_b = true;
+
+    firing_score_seg_begin(&a, &cfg, 0, 50.0f, 100.0f, 30.0f, 100.0f);
+    firing_score_seg_begin(&b, &cfg, 0, 500.0f, 100.0f, 30.0f, 100.0f);
+    for (int t = 0; t < 200; t++) {
+        firing_score_seg_tick(&a, &cap_a, 100.0f, 99.5f, false, 1.0f);
+        firing_score_seg_tick(&b, &cap_b, 100.0f, 95.0f, false, 1.0f);
+    }
+    firing_segment_score_t sa, sb;
+    TEST_CHECK(firing_score_seg_finish(&a, &sa), "slow ramp scored");
+    TEST_CHECK(firing_score_seg_finish(&b, &sb), "fast ramp scored");
+    // 0.5 / (50/3600) = 36 s; 5.0 / (500/3600) = 36 s. Histogram bin is 2 s.
+    TEST_CHECK_NEAR(sa.value[FIRING_SUBSCORE_LAG_S], 36.0f, 2.0f, "slow ramp lag ~36 s");
+    TEST_CHECK_NEAR(sb.value[FIRING_SUBSCORE_LAG_S], 36.0f, 2.0f, "fast ramp lag ~36 s");
 }
 
-static void test_perturbation_bounded_alternates_and_reverts_exactly(void)
+// THE CENTRAL CLAIM OF THE REDESIGN: two firings differing only in start
+// temperature must score identically. Negative test: delete the
+// `if (zone_captured && !*zone_captured)` early-return block in
+// firing_score.c's firing_score_seg_tick() -> red.
+static void test_start_temperature_does_not_change_the_score(void)
 {
-    TEST_SECTION("iter_tune: perturbation bounded, alternates, exact revert");
-    iter_tune_zone_state_t st;
-    memset(&st, 0, sizeof(st));
-    st.enabled = true;
-    // Non-round baseline gains, deliberately -- an exact-revert bug that
-    // only shows up on values a naive rounding/re-derivation would hide is
-    // exactly the kind of thing an idealized 10.0/0.1/1.0 fixture would
-    // mask (this repo's own "idealized test input" bug class).
-    iter_tune_firing_t seed = mk_firing(7, 0x07, 25.13f, 0.05123f, 12.34567f, 0.089123f, 3.0215f);
-    char reason[96];
-    iter_tune_process_firing(&st, &seed, reason, sizeof(reason));
+    TEST_SECTION("firing_score: capture-transient exclusion makes start temperature irrelevant");
+    firing_score_cfg_t cfg = mk_cfg();
 
-    iter_tune_gains_t g1;
-    TEST_CHECK(iter_tune_propose_perturbation(&st, &g1), "first perturbation must be proposable");
-    // First call: next_perturb_negative starts false -> direction is +5%.
-    TEST_CHECK_NEAR(g1.kp, 12.34567 * 1.05, 1e-3, "kp perturbation must be +5% on first call");
-    TEST_CHECK_NEAR(g1.ki, 0.089123 * 1.05, 1e-5, "ki perturbation must be +5% on first call");
-    TEST_CHECK_NEAR(g1.kd, 3.0215, 1e-6, "kd must be left untouched by a perturbation");
-    // Negative test: a second propose while one is pending must be refused
-    // (mutate the has_pending guard away in iter_tune_propose_perturbation
-    // and this goes red -- it would silently overwrite the outstanding
-    // trial instead of returning false).
-    iter_tune_gains_t g_ignored;
-    TEST_CHECK(!iter_tune_propose_perturbation(&st, &g_ignored), "cannot propose a second trial while one is pending");
-
-    // Score the trial WORSE than baseline (0.05123 -> 0.06, a real
-    // regression) -- must revert to the EXACT original bits, not a
-    // recomputation from the perturbation fraction.
-    iter_tune_firing_t worse = mk_firing(7, 0x07, 25.13f, 0.06000f, g1.kp, g1.ki, g1.kd);
-    iter_tune_result_t r = iter_tune_process_firing(&st, &worse, reason, sizeof(reason));
-    TEST_CHECK(r == ITER_TUNE_RESULT_REVERTED, "a worse score must revert");
-    iter_tune_gains_t active = iter_tune_active_gains(&st);
-    // Negative test: if process_firing recomputed the revert (e.g.
-    // g / 1.05 instead of leaving baseline.gains untouched), floating-point
-    // division would not land back on this literal -- the tolerance here
-    // (1e-4) is set by float32's own decimal precision at this magnitude,
-    // not by how exact the revert needs to be; a recomputed g.kp/1.05 would
-    // miss it by far more than that (division is not the exact inverse of
-    // multiplication in float32, and the two paths round differently).
-    TEST_CHECK_NEAR(active.kp, 12.34567, 1e-4, "revert must restore the EXACT original kp, not a recomputation");
-    TEST_CHECK_NEAR(active.ki, 0.089123, 1e-6, "revert must restore the EXACT original ki");
-    TEST_CHECK(!st.has_pending, "revert must clear the pending trial");
-
-    // Now propose again -- direction must have alternated to negative.
-    iter_tune_gains_t g2;
-    TEST_CHECK(iter_tune_propose_perturbation(&st, &g2), "second perturbation must be proposable after revert");
-    TEST_CHECK_NEAR(g2.kp, 12.34567 * 0.95, 1e-3, "perturbation direction must alternate to -5% on second call");
+    float scores[2];
+    for (int cold = 0; cold < 2; cold++) {
+        bool captured = false;
+        firing_score_seg_t seg;
+        firing_score_seg_begin(&seg, &cfg, 0, 0.0f, 100.0f, 30.0f, 100.0f);
+        // A cold start spends 300 ticks climbing from 20 C; a warm start
+        // only 20. Both then hold at exactly the same 1.0 C offset.
+        int prefix = cold ? 300 : 20;
+        for (int t = 0; t < prefix; t++) {
+            float actual = cold ? 20.0f + (float)t * 0.2f : 90.0f + (float)t * 0.2f;
+            if (actual > 94.0f) actual = 94.0f; // stays outside the 5 C band
+            firing_score_seg_tick(&seg, &captured, 100.0f, actual, false, 1.0f);
+        }
+        for (int t = 0; t < 600; t++) {
+            firing_score_seg_tick(&seg, &captured, 100.0f, 101.0f, false, 1.0f);
+        }
+        firing_segment_score_t s;
+        TEST_CHECK(firing_score_seg_finish(&seg, &s), "segment scored");
+        scores[cold] = s.value[FIRING_SUBSCORE_STEADY_RMS_C];
+    }
+    TEST_CHECK_NEAR(scores[0], scores[1], 0.001f, "warm and cold starts score identically");
 }
 
-static void test_perturbation_clamps_at_ceiling_and_floor(void)
+static void test_saturated_ticks_are_excluded(void)
 {
-    TEST_SECTION("iter_tune: perturbation clamps to gain bounds");
-    iter_tune_zone_state_t st;
-    memset(&st, 0, sizeof(st));
-    st.enabled = true;
-    // Baseline kp already at the ceiling -- a +5% nudge must clamp, not
-    // exceed ITER_TUNE_GAIN_CEIL_C (== ZONE_PID_GAIN_MAX).
-    iter_tune_firing_t seed = mk_firing(3, 0x01, 20.0f, 0.10f, ITER_TUNE_GAIN_CEIL_C, 0.0f, 0.0f);
-    char reason[96];
-    iter_tune_process_firing(&st, &seed, reason, sizeof(reason));
-    iter_tune_gains_t g;
-    iter_tune_propose_perturbation(&st, &g);
-    // Negative test: remove the clampf() call on kp in iter_tune.c and this
-    // goes red (g.kp would be 1050.0, exceeding the board's accepted bound).
-    TEST_CHECK(g.kp <= ITER_TUNE_GAIN_CEIL_C, "kp perturbation must clamp at the gain ceiling");
-    TEST_CHECK_NEAR(g.kp, ITER_TUNE_GAIN_CEIL_C, 1e-6, "clamped kp must equal the ceiling exactly");
-
-    // Floor case: ki starts at 0, a -5% nudge (second call, direction now
-    // flipped) of 0 stays 0 -- must not go negative.
-    iter_tune_zone_state_t st2;
-    memset(&st2, 0, sizeof(st2));
-    st2.enabled = true;
-    iter_tune_firing_t seed2 = mk_firing(3, 0x01, 20.0f, 0.10f, 5.0f, 0.0f, 0.0f);
-    iter_tune_process_firing(&st2, &seed2, reason, sizeof(reason));
-    st2.next_perturb_negative = true; // force the -5% direction directly
-    iter_tune_gains_t g2;
-    iter_tune_propose_perturbation(&st2, &g2);
-    TEST_CHECK(g2.ki >= ITER_TUNE_GAIN_FLOOR_C, "ki perturbation must clamp at the gain floor, never go negative");
+    TEST_SECTION("firing_score: saturated-and-still-cold ticks are not scored");
+    // Negative test: delete the `if (saturated_high && err < 0.0f) return;`
+    // line in firing_score.c -> red.
+    firing_score_cfg_t cfg = mk_cfg();
+    firing_score_seg_t seg;
+    bool cap = true;
+    firing_score_seg_begin(&seg, &cfg, 0, 0.0f, 100.0f, 30.0f, 100.0f);
+    for (int t = 0; t < 400; t++) {
+        firing_score_seg_tick(&seg, &cap, 100.0f, 96.0f, true, 1.0f); // saturated, below target
+    }
+    firing_segment_score_t s;
+    TEST_CHECK(!firing_score_seg_finish(&seg, &s), "all-saturated segment is dropped, not scored");
 }
 
-static void test_noise_floor_refuses_small_improvement(void)
+static void test_short_segment_dropped(void)
 {
-    TEST_SECTION("iter_tune: sub-floor improvement is refused (reverted)");
-    iter_tune_zone_state_t st;
-    memset(&st, 0, sizeof(st));
-    st.enabled = true;
-    // Baseline score 1.0000 -- realistic magnitude (this bench's measured
-    // iae_normalized_whole_c means run 0.88-1.60, noise_floor.json) chosen
-    // so 20% relative (0.2000) and the absolute floor (0.2000) coincide
-    // here; this test is about the relative/percentage behavior, the
-    // absolute-floor-governs case has its own dedicated tests below.
-    iter_tune_firing_t seed = mk_firing(7, 0x07, 30.0f, 1.0000f, 10.0f, 0.1f, 1.0f);
-    char reason[96];
-    iter_tune_process_firing(&st, &seed, reason, sizeof(reason));
-    iter_tune_gains_t g;
-    iter_tune_propose_perturbation(&st, &g);
-
-    // 15% better -- chosen to sit strictly below ITER_TUNE_MIN_RELATIVE_
-    // IMPROVEMENT's 20% floor without being derived from that macro.
-    iter_tune_firing_t trial = mk_firing(7, 0x07, 30.0f, 0.8500f, g.kp, g.ki, g.kd);
-    iter_tune_result_t r = iter_tune_process_firing(&st, &trial, reason, sizeof(reason));
-    // Negative test: this is THE test that proves the noise floor is
-    // load-bearing. Weaken ITER_TUNE_MIN_RELATIVE_IMPROVEMENT (e.g. to
-    // 0.10f) and this specific assertion flips from REVERTED to ACCEPTED --
-    // confirmed by hand during this task (see the task report) and
-    // reverted immediately after.
-    TEST_CHECK(r == ITER_TUNE_RESULT_REVERTED, "a 15% improvement must be refused -- below the 20% noise floor");
-    TEST_CHECK_NEAR(st.baseline.iae_normalized, 1.0000, 1e-6, "baseline score must NOT move on a refused trial");
-    TEST_CHECK_NEAR(st.baseline.gains.kp, 10.0, 1e-6, "baseline gains must NOT move on a refused trial");
+    TEST_SECTION("firing_score: a segment shorter than min_scored_ticks is dropped");
+    firing_score_cfg_t cfg = mk_cfg();
+    firing_score_seg_t seg;
+    bool cap = true;
+    firing_score_seg_begin(&seg, &cfg, 0, 0.0f, 100.0f, 30.0f, 100.0f);
+    for (int t = 0; t < 5; t++) firing_score_seg_tick(&seg, &cap, 100.0f, 100.0f, false, 1.0f);
+    firing_segment_score_t s;
+    TEST_CHECK(!firing_score_seg_finish(&seg, &s), "5 ticks < 10 min ticks");
 }
 
-static void test_noise_floor_accepts_clear_improvement(void)
-{
-    TEST_SECTION("iter_tune: above-floor improvement is accepted");
-    iter_tune_zone_state_t st;
-    memset(&st, 0, sizeof(st));
-    st.enabled = true;
-    iter_tune_firing_t seed = mk_firing(7, 0x07, 30.0f, 1.0000f, 10.0f, 0.1f, 1.0f);
-    char reason[96];
-    iter_tune_process_firing(&st, &seed, reason, sizeof(reason));
-    iter_tune_gains_t g;
-    iter_tune_propose_perturbation(&st, &g);
+// ---------------------------------------------------------------- compare
 
-    // 25% better -- chosen to sit strictly above the 20% floor.
-    iter_tune_firing_t trial = mk_firing(7, 0x07, 30.0f, 0.7500f, g.kp, g.ki, g.kd);
-    iter_tune_result_t r = iter_tune_process_firing(&st, &trial, reason, sizeof(reason));
-    // Negative test: tighten ITER_TUNE_MIN_RELATIVE_IMPROVEMENT above 0.25
-    // (e.g. to 0.30f) and this assertion flips from ACCEPTED to REVERTED.
-    TEST_CHECK(r == ITER_TUNE_RESULT_ACCEPTED, "a 25% improvement must be accepted -- above the 20% floor");
-    TEST_CHECK_NEAR(st.baseline.iae_normalized, 0.7500, 1e-6, "accepted trial's score must become the new baseline");
-    TEST_CHECK_NEAR(st.baseline.gains.kp, g.kp, 1e-9, "accepted trial's EXACT gains must become the new baseline");
-    TEST_CHECK(!st.has_pending, "accept must clear the pending trial");
+static void add_seg(firing_score_set_t *set, uint8_t zone, firing_seg_kind_t kind, int16_t rate_bucket,
+                    int16_t temp_bucket, float rate_c_per_s, const float *values, const bool *has,
+                    float in_band)
+{
+    firing_segment_score_t s;
+    memset(&s, 0, sizeof(s));
+    s.key.zone_index = zone;
+    s.key.kind = (uint8_t)kind;
+    s.key.rate_bucket = rate_bucket;
+    s.key.temp_bucket = temp_bucket;
+    s.rate_c_per_s = rate_c_per_s;
+    s.scored_ticks = 600;
+    s.merged = 1;
+    s.in_band_frac = in_band;
+    for (int i = 0; i < FIRING_SUBSCORE_COUNT; i++) { s.has[i] = has[i]; s.value[i] = values[i]; }
+    TEST_CHECK(firing_score_set_add(set, &s), "segment added to set");
 }
 
-static void test_absolute_floor_blocks_relative_pass_at_low_baseline(void)
+static void add_dwell(firing_score_set_t *set, int16_t temp_bucket, float entry, float steady, float in_band)
 {
-    TEST_SECTION("iter_tune: absolute noise floor overrides a passing relative percentage once baseline score is small");
-    // This is the exact failure mode the 2026-09 arithmetic in iter_tune.h
-    // found live in z2's own measured data: once a zone is well-tuned
-    // enough that 20% of its score is smaller than the measured noise
-    // floor (ITER_TUNE_MIN_ABSOLUTE_IMPROVEMENT_C, 0.20 degC), a relative-
-    // only test would accept a swing that is not distinguishable from
-    // noise. Baseline 0.5000 -- comfortably below the 1.0 threshold where
-    // 20% of the score equals the absolute floor.
-    iter_tune_zone_state_t st;
-    memset(&st, 0, sizeof(st));
-    st.enabled = true;
-    iter_tune_firing_t seed = mk_firing(7, 0x07, 30.0f, 0.5000f, 10.0f, 0.1f, 1.0f);
-    char reason[96];
-    iter_tune_process_firing(&st, &seed, reason, sizeof(reason));
-    iter_tune_gains_t g;
-    iter_tune_propose_perturbation(&st, &g);
-
-    // 30% better (0.5000 -> 0.3500, improvement 0.1500) -- clears the 20%
-    // RELATIVE requirement (0.10) with margin, but 0.1500 < the 0.20
-    // ABSOLUTE floor, so this must still revert.
-    iter_tune_firing_t trial = mk_firing(7, 0x07, 30.0f, 0.3500f, g.kp, g.ki, g.kd);
-    iter_tune_result_t r = iter_tune_process_firing(&st, &trial, reason, sizeof(reason));
-    // Negative test: this is what would have shipped without this task's
-    // fix -- with only ITER_TUNE_MIN_RELATIVE_IMPROVEMENT (no max() against
-    // ITER_TUNE_MIN_ABSOLUTE_IMPROVEMENT_C), 30% > 20% and this would be
-    // ACCEPTED. Reverting to the old single-term check (required =
-    // relative_required, dropping the absolute floor entirely) flips this
-    // assertion from REVERTED to ACCEPTED.
-    TEST_CHECK(r == ITER_TUNE_RESULT_REVERTED,
-               "a 30%% relative improvement below the 0.20 absolute noise floor must still revert");
-    TEST_CHECK_NEAR(st.baseline.iae_normalized, 0.5000, 1e-6, "baseline score must NOT move on a refused trial");
+    float v[FIRING_SUBSCORE_COUNT] = {0.0f, entry, steady};
+    bool h[FIRING_SUBSCORE_COUNT] = {false, true, true};
+    add_seg(set, 0, FIRING_SEG_DWELL, 0, temp_bucket, 0.0f, v, h, in_band);
 }
 
-static void test_absolute_floor_does_not_loosen_high_baseline(void)
+static void test_no_matched_pairs_is_first_class(void)
 {
-    TEST_SECTION("iter_tune: absolute floor never loosens the requirement when relative is already stricter");
-    // At a large baseline score, 20% relative demands far more than the
-    // 0.20 absolute floor -- the max() must not let the floor substitute
-    // for the (larger) relative requirement.
-    iter_tune_zone_state_t st;
-    memset(&st, 0, sizeof(st));
-    st.enabled = true;
-    iter_tune_firing_t seed = mk_firing(7, 0x07, 30.0f, 5.0000f, 10.0f, 0.1f, 1.0f);
-    char reason[96];
-    iter_tune_process_firing(&st, &seed, reason, sizeof(reason));
-    iter_tune_gains_t g;
-    iter_tune_propose_perturbation(&st, &g);
-
-    // Improvement of 0.30 clears the absolute floor (0.20) by 50% but is
-    // only 6% relative -- far below the 20% relative requirement (1.00 in
-    // absolute terms at this baseline) -- must revert.
-    iter_tune_firing_t trial = mk_firing(7, 0x07, 30.0f, 4.7000f, g.kp, g.ki, g.kd);
-    iter_tune_result_t r = iter_tune_process_firing(&st, &trial, reason, sizeof(reason));
-    // Negative test: if the code used min() instead of max() (or dropped
-    // the relative term when the absolute floor is smaller), this would
-    // flip to ACCEPTED since 0.30 > 0.20.
-    TEST_CHECK(r == ITER_TUNE_RESULT_REVERTED, "clearing only the absolute floor must not be enough at a large baseline");
-
-    // A trial improving by 1.2 (24% relative, clears the 1.00 relative
-    // requirement) must accept. New trial needs its own proposed
-    // perturbation -- the previous one was cleared by the revert above.
-    iter_tune_gains_t g2;
-    iter_tune_propose_perturbation(&st, &g2);
-    iter_tune_firing_t trial2 = mk_firing(7, 0x07, 30.0f, 3.8000f, g2.kp, g2.ki, g2.kd);
-    iter_tune_result_t r2 = iter_tune_process_firing(&st, &trial2, reason, sizeof(reason));
-    TEST_CHECK(r2 == ITER_TUNE_RESULT_ACCEPTED, "a 24%% relative improvement at a large baseline must accept");
+    TEST_SECTION("firing_compare: disjoint classes yield NO_MATCHED_PAIRS, not a verdict");
+    firing_score_set_t a, b;
+    memset(&a, 0, sizeof(a));
+    memset(&b, 0, sizeof(b));
+    add_dwell(&a, 4, 2.0f, 1.0f, 0.9f);
+    add_dwell(&b, 9, 0.1f, 0.1f, 1.0f); // hugely "better", but a different class
+    firing_compare_result_t r;
+    TEST_CHECK(firing_compare(&a, &b, NULL, &r) == FIRING_COMPARE_NO_MATCHED_PAIRS,
+               "different temperature buckets never compare");
+    TEST_CHECK(r.sub[FIRING_SUBSCORE_STEADY_RMS_C].n == 0, "n == 0 reported explicitly");
 }
 
-static void test_refuses_comparison_across_different_profiles(void)
+// Two firings of DIFFERENT profiles, different lengths, sharing three
+// classes, still compare -- the old module refused this outright.
+static void test_different_profiles_still_compare(void)
 {
-    TEST_SECTION("iter_tune: refuses cross-profile comparison");
-    iter_tune_zone_state_t st;
-    memset(&st, 0, sizeof(st));
-    st.enabled = true;
-    iter_tune_firing_t seed = mk_firing(7, 0x07, 30.0f, 0.10f, 10.0f, 0.1f, 1.0f);
-    char reason[96];
-    iter_tune_process_firing(&st, &seed, reason, sizeof(reason));
-    iter_tune_gains_t g;
-    iter_tune_propose_perturbation(&st, &g);
-
-    // Different profile_id, dramatically better score -- must still be
-    // refused; a huge score improvement on the WRONG profile is not
-    // evidence about this profile's gains.
-    iter_tune_firing_t other_profile = mk_firing(9, 0x07, 30.0f, 0.01f, g.kp, g.ki, g.kd);
-    iter_tune_result_t r = iter_tune_process_firing(&st, &other_profile, reason, sizeof(reason));
-    // Negative test: delete the profile_id check in iter_tune_comparable()
-    // and this goes red (result becomes ACCEPTED on cross-profile data).
-    TEST_CHECK(r == ITER_TUNE_RESULT_REFUSED_NOT_COMPARABLE, "must refuse comparison across different profiles");
-    TEST_CHECK(st.has_pending, "trial must stay pending -- an incomparable firing decides nothing");
-    TEST_CHECK_NEAR(st.baseline.gains.kp, 10.0, 1e-6, "baseline must be untouched by a refused comparison");
+    TEST_SECTION("firing_compare: dissimilar firings compare on their shared classes");
+    firing_score_set_t a, b;
+    memset(&a, 0, sizeof(a));
+    memset(&b, 0, sizeof(b));
+    add_dwell(&a, 4, 3.0f, 2.0f, 0.9f);
+    add_dwell(&a, 5, 3.0f, 2.0f, 0.9f);
+    add_dwell(&a, 6, 3.0f, 2.0f, 0.9f);
+    add_dwell(&a, 7, 3.0f, 2.0f, 0.9f); // class only firing A has
+    add_dwell(&b, 4, 1.0f, 1.0f, 0.95f);
+    add_dwell(&b, 5, 1.0f, 1.0f, 0.95f);
+    add_dwell(&b, 6, 1.0f, 1.0f, 0.95f);
+    firing_compare_result_t r;
+    TEST_CHECK(firing_compare(&a, &b, NULL, &r) == FIRING_COMPARE_ACCEPT, "clear 2C/1C win accepted");
+    TEST_CHECK(r.matched_classes == 3, "only the three shared classes contributed");
+    TEST_CHECK(r.sub[FIRING_SUBSCORE_STEADY_RMS_C].n == 3, "n == 3");
 }
 
-static void test_refuses_comparison_across_different_zone_masks(void)
+static void test_owner_floor_refuses_small_wins(void)
 {
-    TEST_SECTION("iter_tune: refuses cross-zone-set comparison");
+    TEST_SECTION("firing_compare: a sub-0.5C improvement is refused, per the owner's floor");
+    // Negative test: lower FIRING_COMPARE_OWNER_FLOOR_C to 0.05f in
+    // firing_compare.h -> red.
+    firing_score_set_t a, b;
+    memset(&a, 0, sizeof(a));
+    memset(&b, 0, sizeof(b));
+    for (int16_t k = 4; k <= 6; k++) {
+        add_dwell(&a, k, 2.0f, 2.0f, 0.9f);
+        add_dwell(&b, k, 1.8f, 1.8f, 0.9f); // 0.2 C better -- real, but below the floor
+    }
+    firing_compare_result_t r;
+    TEST_CHECK(firing_compare(&a, &b, NULL, &r) == FIRING_COMPARE_INSUFFICIENT,
+               "0.2C improvement is not worth kiln time");
+}
+
+// The non-dominance test: buying lag with overshoot must be REJECTED, never
+// silently traded. This is the check the composite would have got wrong.
+static void test_veto_rejects_a_trade(void)
+{
+    TEST_SECTION("firing_compare: 1C of lag bought with 1C of overshoot is rejected");
+    firing_score_set_t a, b;
+    memset(&a, 0, sizeof(a));
+    memset(&b, 0, sizeof(b));
+    for (int16_t k = 4; k <= 6; k++) {
+        add_dwell(&a, k, 1.0f, 3.0f, 0.9f);
+        add_dwell(&b, k, 3.0f, 1.0f, 0.9f); // steady 2C better, entry peak 2C worse
+    }
+    firing_compare_result_t r;
+    TEST_CHECK(firing_compare(&a, &b, NULL, &r) == FIRING_COMPARE_REJECT_DEGRADED,
+               "a trade is a rejection, not an acceptance");
+    TEST_CHECK(r.sub[FIRING_SUBSCORE_ENTRY_PEAK_C].degraded, "the degraded sub-score is named");
+    TEST_CHECK(r.sub[FIRING_SUBSCORE_STEADY_RMS_C].bar1_cleared, "the improving one still cleared Bar 1");
+}
+
+static void test_in_band_veto(void)
+{
+    TEST_SECTION("firing_compare: a fall in time-in-band vetoes an otherwise-good trial");
+    firing_score_set_t a, b;
+    memset(&a, 0, sizeof(a));
+    memset(&b, 0, sizeof(b));
+    for (int16_t k = 4; k <= 6; k++) {
+        add_dwell(&a, k, 2.0f, 2.0f, 0.98f);
+        add_dwell(&b, k, 1.0f, 1.0f, 0.70f); // both sub-scores better, but far more time out of band
+    }
+    firing_compare_result_t r;
+    TEST_CHECK(firing_compare(&a, &b, NULL, &r) == FIRING_COMPARE_REJECT_DEGRADED, "in-band veto fires");
+    TEST_CHECK(r.in_band_veto, "in_band_veto flagged");
+}
+
+static void test_bar2_requires_sign_consistency(void)
+{
+    TEST_SECTION("firing_compare: with a floor present, Bar 2 needs n>=5 consistently-signed pairs");
+    firing_score_set_t a, b;
+    memset(&a, 0, sizeof(a));
+    memset(&b, 0, sizeof(b));
+    // Four pairs only: below Bar 2's n >= 5, so Bar 2 cannot be cleared.
+    for (int16_t k = 4; k <= 7; k++) {
+        add_dwell(&a, k, 2.0f, 3.0f, 0.9f);
+        add_dwell(&b, k, 1.0f, 1.0f, 0.9f);
+    }
+    firing_compare_floors_t floors;
+    memset(&floors, 0, sizeof(floors));
+    floors.available = true;
+    floors.floor_value[FIRING_SUBSCORE_ENTRY_PEAK_C] = 0.2f;
+    floors.floor_value[FIRING_SUBSCORE_STEADY_RMS_C] = 0.2f;
+    floors.floor_value[FIRING_SUBSCORE_LAG_S] = 5.0f;
+
+    firing_compare_result_t r;
+    TEST_CHECK(firing_compare(&a, &b, &floors, &r) == FIRING_COMPARE_INSUFFICIENT,
+               "Bar 1 cleared but Bar 2 short of n>=5 -> refuse");
+    TEST_CHECK(r.bar2_applied, "Bar 2 was applied");
+
+    // Same data with a fifth matched class clears it.
+    add_dwell(&a, 8, 2.0f, 3.0f, 0.9f);
+    add_dwell(&b, 8, 1.0f, 1.0f, 0.9f);
+    TEST_CHECK(firing_compare(&a, &b, &floors, &r) == FIRING_COMPARE_ACCEPT, "n==5 and all-signed -> accept");
+    TEST_CHECK(!r.bar2_applied || r.sub[FIRING_SUBSCORE_STEADY_RMS_C].bar2_cleared, "Bar 2 cleared");
+}
+
+// --------------------------------------------------------------- iter_tune
+
+static iter_tune_gains_t g3(float kp, float ki, float kd)
+{
+    iter_tune_gains_t g = {kp, ki, kd};
+    return g;
+}
+
+static firing_compare_result_t verdict(firing_compare_verdict_t v)
+{
+    firing_compare_result_t r;
+    memset(&r, 0, sizeof(r));
+    r.verdict = v;
+    r.sub[FIRING_SUBSCORE_STEADY_RMS_C].n = 3;
+    return r;
+}
+
+static void test_default_off_and_anchor_on_first_enable(void)
+{
+    TEST_SECTION("iter_tune: zeroed state is OFF; the first enable snapshots the anchor");
     iter_tune_zone_state_t st;
     memset(&st, 0, sizeof(st));
-    st.enabled = true;
-    iter_tune_firing_t seed = mk_firing(7, 0x07, 30.0f, 0.10f, 10.0f, 0.1f, 1.0f);
-    char reason[96];
-    iter_tune_process_firing(&st, &seed, reason, sizeof(reason));
-    iter_tune_gains_t g;
-    iter_tune_propose_perturbation(&st, &g);
+    TEST_CHECK(!st.enabled, "default OFF");
+    TEST_CHECK(!iter_tune_propose_perturbation(&st, NULL), "a disabled zone proposes nothing");
 
-    iter_tune_firing_t other_mask = mk_firing(7, 0x03, 30.0f, 0.01f, g.kp, g.ki, g.kd);
-    iter_tune_result_t r = iter_tune_process_firing(&st, &other_mask, reason, sizeof(reason));
-    // Negative test: delete the zone_mask check and this goes red.
-    TEST_CHECK(r == ITER_TUNE_RESULT_REFUSED_NOT_COMPARABLE, "must refuse comparison across different zone sets");
+    TEST_CHECK(iter_tune_enable(&st, g3(0.04f, 0.0003f, 0.65f)), "enable succeeds");
+    TEST_CHECK(st.has_anchor && st.anchor.kp == 0.04f, "anchor snapshotted from the live gains");
+    TEST_CHECK(st.baseline.kp == 0.04f, "baseline seeded from the same gains");
+
+    // A second enable must not move the anchor.
+    st.baseline.kp = 0.08f;
+    st.enabled = false;
+    st.status = (uint8_t)ITER_TUNE_STATUS_TUNING;
+    TEST_CHECK(iter_tune_enable(&st, g3(0.08f, 0.0003f, 0.65f)), "re-enable succeeds");
+    TEST_CHECK(st.anchor.kp == 0.04f, "anchor did NOT move on re-enable");
 }
 
-static void test_refuses_comparison_on_residual_heat(void)
+// Negative test: delete the `if (state->has_anchor) { ... }` cage-narrowing
+// block in iter_tune.c's iter_tune_clamp_to_cage() -> red here. Confirmed.
+static void test_cage_clamps_to_anchor(void)
 {
-    TEST_SECTION("iter_tune: refuses comparison on residual-heat start temp (project_autotune_needs_rested_baseline)");
+    TEST_SECTION("iter_tune: gains are caged to [0.5x, 2x] of the commissioned anchor");
     iter_tune_zone_state_t st;
     memset(&st, 0, sizeof(st));
-    st.enabled = true;
-    iter_tune_firing_t seed = mk_firing(7, 0x07, 25.0f, 0.10f, 10.0f, 0.1f, 1.0f);
-    char reason[96];
-    iter_tune_process_firing(&st, &seed, reason, sizeof(reason));
-    iter_tune_gains_t g;
-    iter_tune_propose_perturbation(&st, &g);
+    iter_tune_enable(&st, g3(1.0f, 0.01f, 0.5f));
 
-    // 1.9 degC apart -- literal below the (tightened) 2.0 degC tolerance,
-    // must compare. Chosen independently of ITER_TUNE_START_TEMP_
-    // TOLERANCE_C's own value -- this pins the boundary's BEHAVIOR, not a
-    // restatement of the constant.
-    iter_tune_firing_t close = mk_firing(7, 0x07, 26.9f, 0.05f, g.kp, g.ki, g.kd);
-    iter_tune_result_t r_close = iter_tune_process_firing(&st, &close, reason, sizeof(reason));
-    TEST_CHECK(r_close != ITER_TUNE_RESULT_REFUSED_NOT_COMPARABLE, "1.9 degC start-temp gap must still be comparable");
-
-    // Reset and try the far case.
-    memset(&st, 0, sizeof(st));
-    st.enabled = true;
-    iter_tune_process_firing(&st, &seed, reason, sizeof(reason));
-    iter_tune_propose_perturbation(&st, &g);
-    // 2.1 degC apart -- literal above the tightened tolerance, must refuse.
-    // This pair of tests (1.9 vs 2.1) pins the actual boundary behavior
-    // rather than restating ITER_TUNE_START_TEMP_TOLERANCE_C's value.
-    iter_tune_firing_t far = mk_firing(7, 0x07, 27.1f, 0.05f, g.kp, g.ki, g.kd);
-    iter_tune_result_t r_far = iter_tune_process_firing(&st, &far, reason, sizeof(reason));
-    // Negative test: change ITER_TUNE_START_TEMP_TOLERANCE_C to 5.0f (its
-    // old, confounded value) and this specific assertion goes red (2.1
-    // degC gap becomes comparable again).
-    TEST_CHECK(r_far == ITER_TUNE_RESULT_REFUSED_NOT_COMPARABLE, "2.1 degC start-temp gap must be refused -- residual heat");
+    bool hit = false;
+    iter_tune_gains_t hi = iter_tune_clamp_to_cage(&st, g3(50.0f, 5.0f, 0.5f), &hit);
+    TEST_CHECK(hit, "clamp reported hitting an edge");
+    TEST_CHECK(hi.kp == 2.0f, "kp clamped to 2x anchor");
+    TEST_CHECK(hi.ki == 0.02f, "ki clamped to 2x anchor");
+    iter_tune_gains_t lo = iter_tune_clamp_to_cage(&st, g3(0.0f, 0.0f, 0.5f), &hit);
+    TEST_CHECK(lo.kp == 0.5f, "kp clamped to 0.5x anchor");
+    TEST_CHECK(lo.ki == 0.005f, "ki clamped to 0.5x anchor");
+    TEST_CHECK(lo.kd == 0.5f, "kd passed through untouched");
 }
 
-static void test_confounded_capture_pair_is_now_refused(void)
+static void test_absolute_ceiling_still_binds(void)
 {
-    TEST_SECTION("iter_tune: the holdfix_clean/final 4.8 degC start-temp pair is refused under the tightened window");
-    // This is the negative test the coordinator asked for directly: the
-    // exact pair this module's noise-floor comment used to (wrongly) treat
-    // as a clean same-gain repeat now must be refused as NOT COMPARABLE,
-    // because it never was one -- see iter_tune.h's corrected noise-floor
-    // comment. Literal 4.8 degC gap taken directly from the two captures'
-    // own first poll rows (holdfix_clean.jsonl z0 24.57 degC @ 10:16:38 vs
-    // final.jsonl z0 29.32 degC @ 14:14:29 -- an average of the two is used
-    // here as a representative single-zone start_temp_c, independent of
-    // ITER_TUNE_START_TEMP_TOLERANCE_C's own value).
+    TEST_SECTION("iter_tune: the absolute ceiling binds even inside a permissive cage");
     iter_tune_zone_state_t st;
     memset(&st, 0, sizeof(st));
-    st.enabled = true;
-    iter_tune_firing_t seed = mk_firing(7, 0x07, 24.57f, 0.0275f, 8.0f, 0.05f, 0.5f);
-    char reason[96];
-    iter_tune_process_firing(&st, &seed, reason, sizeof(reason));
-    iter_tune_gains_t g;
-    iter_tune_propose_perturbation(&st, &g);
-
-    iter_tune_firing_t trial = mk_firing(7, 0x07, 29.32f, 0.0337f, g.kp, g.ki, g.kd);
-    iter_tune_result_t r = iter_tune_process_firing(&st, &trial, reason, sizeof(reason));
-    TEST_CHECK(r == ITER_TUNE_RESULT_REFUSED_NOT_COMPARABLE,
-               "the real 4.8 degC contaminated pair must be refused as not comparable, not scored as a revert");
-    TEST_CHECK(st.has_pending, "the trial must remain pending -- an incomparable firing decides nothing");
+    iter_tune_enable(&st, g3(900.0f, 1.0f, 0.5f)); // 2x anchor would be 1800 > 1000
+    bool hit = false;
+    iter_tune_gains_t g = iter_tune_clamp_to_cage(&st, g3(1800.0f, 1.0f, 0.5f), &hit);
+    TEST_CHECK(g.kp == ITER_TUNE_GAIN_CEIL_C, "clamped to the absolute ceiling, not 2x anchor");
 }
 
-static void test_baseline_refreshes_without_pending_trial(void)
+static void test_one_parameter_per_trial_and_kd_untouched(void)
 {
-    TEST_SECTION("iter_tune: re-firing baseline gains with no trial refreshes, does not judge");
+    TEST_SECTION("iter_tune: one parameter moves per trial; kd never moves");
     iter_tune_zone_state_t st;
     memset(&st, 0, sizeof(st));
-    st.enabled = true;
-    iter_tune_firing_t seed = mk_firing(7, 0x07, 30.0f, 0.10f, 10.0f, 0.1f, 1.0f);
-    char reason[96];
-    iter_tune_process_firing(&st, &seed, reason, sizeof(reason));
-    TEST_CHECK(!st.has_pending, "no trial should be pending right after seeding");
-
-    // Fire again on baseline gains, wildly different score -- must NOT be
-    // interpreted as an accept/reject decision (no trial was outstanding),
-    // just a refresh of the recorded baseline identity/score.
-    iter_tune_firing_t again = mk_firing(7, 0x07, 30.0f, 0.02f, 10.0f, 0.1f, 1.0f);
-    iter_tune_result_t r = iter_tune_process_firing(&st, &again, reason, sizeof(reason));
-    TEST_CHECK(r == ITER_TUNE_RESULT_BASELINE_REFRESHED, "firing with no pending trial must refresh, not accept/revert");
-    TEST_CHECK_NEAR(st.baseline.iae_normalized, 0.02, 1e-6, "refresh must update the recorded score");
+    iter_tune_enable(&st, g3(1.0f, 0.01f, 0.5f));
+    iter_tune_gains_t p;
+    TEST_CHECK(iter_tune_propose_perturbation(&st, &p), "first proposal made");
+    TEST_CHECK_NEAR(p.kp, 1.0f * (1.0f + ITER_TUNE_STEP_START), 1e-5f, "kp moved by the starting step");
+    TEST_CHECK(p.ki == 0.01f, "ki did NOT move in the same trial");
+    TEST_CHECK(p.kd == 0.5f, "kd untouched");
+    TEST_CHECK(!iter_tune_propose_perturbation(&st, &p), "no second proposal while one is pending");
 }
 
-// ---------------------------------------------------------------------
-// Real-data sanity check -- CORRECTED: the two source captures
-// (tools/PcTools/tests/fixtures/plant_sim/holdfix_clean.jsonl and
-// final.jsonl) are NOT a same-gain, same-starting-temperature pair -- their
-// own first poll rows are 4.8 degC apart (see iter_tune.h's noise-floor
-// comment and test_confounded_capture_pair_is_now_refused() below, which
-// pins that this exact pair is refused as NOT COMPARABLE under the real
-// start_temp_c values). This test reuses only the QUANTIZED, real,
-// non-round iae_normalized figures from those captures --
-//   z0: 0.0275 -> 0.0337 (+22.5%, worse)
-//   z1: 0.0160 -> 0.0236 (+47.5%, worse)
-// -- as scoring input (this repo's documented "idealized test input" bug
-// class is about round/idealized magnitudes, not about start_temp_c), but
-// deliberately holds start_temp_c IDENTICAL (25.0f) across each seed/trial
-// pair here so THIS test isolates the accept/revert-vs-score-delta logic
-// from the comparability check, which has its own dedicated tests above.
-// It is a synthetic same-start-temp scenario using real-world score
-// magnitudes, not a claim that the source captures were themselves
-// comparable.
-static void test_real_capture_data_regression_is_reverted(void)
+// The exact-revert posture, kept verbatim from the old module.
+static void test_revert_is_bit_exact(void)
 {
-    TEST_SECTION("iter_tune: real plant_sim capture spread (holdfix_clean -> final) reverts on both zones");
-    iter_tune_zone_state_t st_z0;
-    memset(&st_z0, 0, sizeof(st_z0));
-    st_z0.enabled = true;
-    iter_tune_firing_t seed_z0 = mk_firing(7, 0x07, 25.0f, 0.0275f, 8.0f, 0.05f, 0.5f);
-    char reason[96];
-    iter_tune_process_firing(&st_z0, &seed_z0, reason, sizeof(reason));
-    iter_tune_gains_t g0;
-    iter_tune_propose_perturbation(&st_z0, &g0);
-    iter_tune_firing_t trial_z0 = mk_firing(7, 0x07, 25.0f, 0.0337f, g0.kp, g0.ki, g0.kd);
-    iter_tune_result_t r0 = iter_tune_process_firing(&st_z0, &trial_z0, reason, sizeof(reason));
-    TEST_CHECK(r0 == ITER_TUNE_RESULT_REVERTED, "z0's real-capture regression (0.0275->0.0337) must revert");
+    TEST_SECTION("iter_tune: revert restores the exact float bits, never a recomputation");
+    iter_tune_zone_state_t st;
+    memset(&st, 0, sizeof(st));
+    iter_tune_enable(&st, g3(0.0318f, 0.0002f, 0.6526f));
+    iter_tune_gains_t before = iter_tune_active_gains(&st);
+    iter_tune_propose_perturbation(&st, NULL);
+    TEST_CHECK(iter_tune_active_gains(&st).kp != before.kp, "trial gains are live while pending");
+    firing_compare_result_t r = verdict(FIRING_COMPARE_INSUFFICIENT);
+    TEST_CHECK(iter_tune_process_comparison(&st, &r, NULL, 0) == ITER_TUNE_RESULT_REVERTED, "reverted");
+    iter_tune_gains_t after = iter_tune_active_gains(&st);
+    TEST_CHECK(memcmp(&before, &after, sizeof(before)) == 0, "byte-identical revert");
+}
 
-    iter_tune_zone_state_t st_z1;
-    memset(&st_z1, 0, sizeof(st_z1));
-    st_z1.enabled = true;
-    iter_tune_firing_t seed_z1 = mk_firing(7, 0x07, 25.0f, 0.0160f, 7.0f, 0.04f, 0.4f);
-    iter_tune_process_firing(&st_z1, &seed_z1, reason, sizeof(reason));
-    iter_tune_gains_t g1;
-    iter_tune_propose_perturbation(&st_z1, &g1);
-    iter_tune_firing_t trial_z1 = mk_firing(7, 0x07, 25.0f, 0.0236f, g1.kp, g1.ki, g1.kd);
-    iter_tune_result_t r1 = iter_tune_process_firing(&st_z1, &trial_z1, reason, sizeof(reason));
-    TEST_CHECK(r1 == ITER_TUNE_RESULT_REVERTED, "z1's real-capture regression (0.0160->0.0236) must revert");
+static void test_accept_moves_baseline(void)
+{
+    TEST_SECTION("iter_tune: an accepted trial becomes the new baseline");
+    iter_tune_zone_state_t st;
+    memset(&st, 0, sizeof(st));
+    iter_tune_enable(&st, g3(1.0f, 0.01f, 0.5f));
+    iter_tune_gains_t p;
+    iter_tune_propose_perturbation(&st, &p);
+    firing_compare_result_t r = verdict(FIRING_COMPARE_ACCEPT);
+    TEST_CHECK(iter_tune_process_comparison(&st, &r, NULL, 0) == ITER_TUNE_RESULT_ACCEPTED, "accepted");
+    TEST_CHECK(iter_tune_active_gains(&st).kp == p.kp, "baseline moved to the trial gains");
+    TEST_CHECK(!st.has_pending, "trial cleared");
+}
 
-    // And the mirror direction (final -> holdfix_clean, i.e. treating the
-    // SAME pair as an improvement) is 47.5% relative -- large enough to
-    // clear the OLD relative-only 20% floor -- but the absolute swing is
-    // only 0.0076, far below ITER_TUNE_MIN_ABSOLUTE_IMPROVEMENT_C (0.20,
-    // this task's addition). UPDATED 2026-09: under the combined
-    // relative+absolute requirement this now correctly reverts too -- these
-    // captures' iae_normalized magnitudes (~0.02-0.03) are an order of
-    // magnitude below the noise_floor.json campaign's measured scale for
-    // this same metric on this same bench (z0-z2 means 0.88-1.60), so a
-    // 47.5% swing of THIS size is not distinguishable from noise no matter
-    // which direction it points -- exactly the case the absolute floor
-    // exists to catch, see test_absolute_floor_blocks_relative_pass_at_
-    // low_baseline() above for the isolated version of this behavior.
-    iter_tune_zone_state_t st_z1b;
-    memset(&st_z1b, 0, sizeof(st_z1b));
-    st_z1b.enabled = true;
-    iter_tune_firing_t seed_z1b = mk_firing(7, 0x07, 25.0f, 0.0236f, 7.0f, 0.04f, 0.4f);
-    iter_tune_process_firing(&st_z1b, &seed_z1b, reason, sizeof(reason));
-    iter_tune_gains_t g1b;
-    iter_tune_propose_perturbation(&st_z1b, &g1b);
-    iter_tune_firing_t trial_z1b = mk_firing(7, 0x07, 25.0f, 0.0160f, g1b.kp, g1b.ki, g1b.kd);
-    iter_tune_result_t r1b = iter_tune_process_firing(&st_z1b, &trial_z1b, reason, sizeof(reason));
-    // Negative test: drop the ITER_TUNE_MIN_ABSOLUTE_IMPROVEMENT_C term
-    // from the max() in iter_tune.c (i.e. required = relative_required
-    // alone, the old behavior) and this flips from REVERTED to ACCEPTED --
-    // this line is the exact regression case for that.
-    TEST_CHECK(r1b == ITER_TUNE_RESULT_REVERTED,
-               "z1's real-capture 47.5%% improvement direction is still below the absolute noise floor and must revert");
+// Coordinate descent cycles the parameter after EVERY scored trial (plan
+// sec 4), and each parameter carries its own step. Negative test: change
+// iter_tune.c's post-verdict advance_param(state) call to only run on a
+// reject -> red, because the second proposal then moves kp again.
+static void test_parameter_cycles_every_trial(void)
+{
+    TEST_SECTION("iter_tune: the parameter cycles kp -> ki after every scored trial");
+    iter_tune_zone_state_t st;
+    memset(&st, 0, sizeof(st));
+    iter_tune_enable(&st, g3(1.0f, 0.01f, 0.5f));
+    firing_compare_result_t r = verdict(FIRING_COMPARE_INSUFFICIENT);
+
+    iter_tune_gains_t p1, p2;
+    iter_tune_propose_perturbation(&st, &p1);
+    TEST_CHECK(p1.kp != 1.0f && p1.ki == 0.01f, "first trial moves kp");
+    iter_tune_process_comparison(&st, &r, NULL, 0);
+    iter_tune_propose_perturbation(&st, &p2);
+    TEST_CHECK(p2.kp == 1.0f && p2.ki != 0.01f, "second trial moves ki, not kp again");
+}
+
+// An unmeasurable result means the step was TOO SMALL, so it must GROW.
+// Halving it here (the plan's literal schedule) is what made the mechanism
+// structurally inert in simulation. Negative test: change iter_tune.c's
+// INSUFFICIENT branch back to `state->step_frac[pi] * 0.5f` -> red.
+static void test_insufficient_grows_the_step(void)
+{
+    TEST_SECTION("iter_tune: an unmeasurable trial GROWS the step; a degraded one halves it");
+    iter_tune_zone_state_t st;
+    memset(&st, 0, sizeof(st));
+    iter_tune_enable(&st, g3(1.0f, 0.01f, 0.5f));
+
+    firing_compare_result_t insuff = verdict(FIRING_COMPARE_INSUFFICIENT);
+    iter_tune_propose_perturbation(&st, NULL);
+    iter_tune_process_comparison(&st, &insuff, NULL, 0);
+    TEST_CHECK(st.step_frac[ITER_TUNE_PARAM_KP] > ITER_TUNE_STEP_START, "kp step grew after an unmeasurable trial");
+    TEST_CHECK(st.step_frac[ITER_TUNE_PARAM_KP] <= ITER_TUNE_STEP_PROBE_MAX, "and stayed under the probe cap");
+
+    firing_compare_result_t bad = verdict(FIRING_COMPARE_REJECT_DEGRADED);
+    memset(&st, 0, sizeof(st));
+    iter_tune_enable(&st, g3(1.0f, 0.01f, 0.5f));
+    for (int i = 0; i < 2; i++) {
+        // Two DEGRADED verdicts on kp: one to reverse direction, one to halve.
+        st.param = ITER_TUNE_PARAM_KP;
+        iter_tune_propose_perturbation(&st, NULL);
+        st.param = ITER_TUNE_PARAM_KP;
+        iter_tune_process_comparison(&st, &bad, NULL, 0);
+    }
+    TEST_CHECK_NEAR(st.step_frac[ITER_TUNE_PARAM_KP], ITER_TUNE_STEP_START * 0.5f, 1e-6f,
+                    "two degraded trials halve the step");
+}
+
+static void test_trial_budget_stops_the_zone(void)
+{
+    TEST_SECTION("iter_tune: six scored trials converge the zone (owner decision 9.2)");
+    iter_tune_zone_state_t st;
+    memset(&st, 0, sizeof(st));
+    iter_tune_enable(&st, g3(1.0f, 0.01f, 0.5f));
+    // Alternating accept/reject keeps the step at its 10% start (neither two
+    // consecutive accepts nor two consecutive rejects), so this test measures
+    // the TRIAL BUDGET and nothing else -- a run of accepts would instead hit
+    // the cage edge first, which is a different stopping rule with its own
+    // test below.
+    firing_compare_result_t acc = verdict(FIRING_COMPARE_ACCEPT);
+    firing_compare_result_t rej = verdict(FIRING_COMPARE_INSUFFICIENT);
+    int proposals = 0;
+    for (int i = 0; i < 20; i++) {
+        if (!iter_tune_propose_perturbation(&st, NULL)) break;
+        proposals++;
+        iter_tune_process_comparison(&st, (i % 2) ? &rej : &acc, NULL, 0);
+    }
+    TEST_CHECK(proposals == ITER_TUNE_MAX_TRIALS, "exactly the trial budget was spent");
+    TEST_CHECK(st.status == ITER_TUNE_STATUS_CONVERGED, "zone converged");
+    TEST_CHECK(!st.enabled, "and stopped proposing");
+}
+
+// The cage is a stopping rule as well as a clamp: a search that keeps
+// pushing at a boundary it may not cross is done. Negative test: raise
+// ITER_TUNE_MAX_CAGE_EDGE_HITS to 99 -> red (the loop then runs to the trial
+// budget instead).
+static void test_cage_edge_stops_the_zone(void)
+{
+    TEST_SECTION("iter_tune: two cage-edge hits stop the zone before the trial budget");
+    iter_tune_zone_state_t st;
+    memset(&st, 0, sizeof(st));
+    iter_tune_enable(&st, g3(1.0f, 0.01f, 0.5f));
+    // Retire ki so every trial lands on kp: with the parameter cycling every
+    // trial (plan sec 4), a six-trial budget splits three each and neither
+    // reaches its cage edge, which would test nothing.
+    st.param_done[ITER_TUNE_PARAM_KI] = 1;
+    firing_compare_result_t acc = verdict(FIRING_COMPARE_ACCEPT);
+    int proposals = 0;
+    for (int i = 0; i < 20; i++) {
+        if (!iter_tune_propose_perturbation(&st, NULL)) break;
+        proposals++;
+        iter_tune_process_comparison(&st, &acc, NULL, 0);
+    }
+    TEST_CHECK(proposals < ITER_TUNE_MAX_TRIALS, "an unbroken run of accepts hits the cage first");
+    TEST_CHECK(st.status == ITER_TUNE_STATUS_CONVERGED, "zone converged at the cage edge");
+    TEST_CHECK(st.baseline.kp <= 2.0f * st.anchor.kp, "and never left the cage");
+}
+
+static void test_carry_limit(void)
+{
+    TEST_SECTION("iter_tune: an unscorable trial carries at most 3 times, then reverts unscored");
+    iter_tune_zone_state_t st;
+    memset(&st, 0, sizeof(st));
+    iter_tune_enable(&st, g3(1.0f, 0.01f, 0.5f));
+    iter_tune_gains_t before = iter_tune_active_gains(&st);
+    iter_tune_propose_perturbation(&st, NULL);
+    firing_compare_result_t r = verdict(FIRING_COMPARE_NO_MATCHED_PAIRS);
+    for (int i = 0; i < ITER_TUNE_MAX_CARRIES; i++) {
+        TEST_CHECK(iter_tune_process_comparison(&st, &r, NULL, 0) == ITER_TUNE_RESULT_CARRIED, "carried");
+        TEST_CHECK(st.has_pending, "trial stays armed while carrying");
+    }
+    TEST_CHECK(iter_tune_process_comparison(&st, &r, NULL, 0) == ITER_TUNE_RESULT_CARRY_EXHAUSTED,
+               "the fourth unscorable firing discards it");
+    TEST_CHECK(st.trials_scored == 0, "an unscored carry never counted against the budget");
+    iter_tune_gains_t after = iter_tune_active_gains(&st);
+    TEST_CHECK(memcmp(&before, &after, sizeof(before)) == 0, "gains reverted exactly");
+}
+
+static void test_fault_disables_stickily(void)
+{
+    TEST_SECTION("iter_tune: a fault discards the trial and disables the zone, sticky");
+    iter_tune_zone_state_t st;
+    memset(&st, 0, sizeof(st));
+    iter_tune_enable(&st, g3(1.0f, 0.01f, 0.5f));
+    iter_tune_gains_t before = iter_tune_active_gains(&st);
+    iter_tune_propose_perturbation(&st, NULL);
+    iter_tune_fault(&st);
+    TEST_CHECK(!st.enabled && st.status == ITER_TUNE_STATUS_FAULTED, "faulted and disabled");
+    iter_tune_gains_t after_fault = iter_tune_active_gains(&st);
+    TEST_CHECK(memcmp(&before, &after_fault, sizeof(before)) == 0, "gains reverted");
+    TEST_CHECK(!iter_tune_enable(&st, g3(1.0f, 0.01f, 0.5f)), "does not retry on a plain re-enable");
+}
+
+static void test_restore_commissioned(void)
+{
+    TEST_SECTION("iter_tune: restore-commissioned puts the anchor back and disables the zone");
+    iter_tune_zone_state_t st;
+    memset(&st, 0, sizeof(st));
+    iter_tune_enable(&st, g3(1.0f, 0.01f, 0.5f));
+    firing_compare_result_t r = verdict(FIRING_COMPARE_ACCEPT);
+    iter_tune_propose_perturbation(&st, NULL);
+    iter_tune_process_comparison(&st, &r, NULL, 0);
+    TEST_CHECK(st.baseline.kp != 1.0f, "gains have moved");
+    iter_tune_gains_t back = iter_tune_restore_commissioned(&st);
+    TEST_CHECK(back.kp == 1.0f, "commissioned kp returned");
+    TEST_CHECK(!st.enabled, "and the zone is off");
+}
+
+static void test_reanchor_moves_the_cage(void)
+{
+    TEST_SECTION("iter_tune: re-anchor deliberately moves the cage centre and restarts the budget");
+    iter_tune_zone_state_t st;
+    memset(&st, 0, sizeof(st));
+    iter_tune_enable(&st, g3(1.0f, 0.01f, 0.5f));
+    st.trials_scored = 4;
+    iter_tune_reanchor(&st, g3(2.0f, 0.02f, 0.5f));
+    TEST_CHECK(st.anchor.kp == 2.0f, "anchor moved");
+    TEST_CHECK(st.trials_scored == 0, "budget restarted");
+    bool hit = false;
+    TEST_CHECK(iter_tune_clamp_to_cage(&st, g3(10.0f, 1.0f, 0.5f), &hit).kp == 4.0f, "new cage in force");
 }
 
 void run_test_iter_tune(void)
 {
     test_gain_ceil_mirrors_zone_pid_gain_max();
-    test_disabled_zone_refuses();
-    test_first_firing_seeds_baseline_no_perturbation_yet();
-    test_perturbation_bounded_alternates_and_reverts_exactly();
-    test_perturbation_clamps_at_ceiling_and_floor();
-    test_noise_floor_refuses_small_improvement();
-    test_noise_floor_accepts_clear_improvement();
-    test_absolute_floor_blocks_relative_pass_at_low_baseline();
-    test_absolute_floor_does_not_loosen_high_baseline();
-    test_refuses_comparison_across_different_profiles();
-    test_refuses_comparison_across_different_zone_masks();
-    test_refuses_comparison_on_residual_heat();
-    test_confounded_capture_pair_is_now_refused();
-    test_baseline_refreshes_without_pending_trial();
-    test_real_capture_data_regression_is_reverted();
+    test_classify_rate();
+    test_lag_is_rate_normalised();
+    test_start_temperature_does_not_change_the_score();
+    test_saturated_ticks_are_excluded();
+    test_short_segment_dropped();
+    test_no_matched_pairs_is_first_class();
+    test_different_profiles_still_compare();
+    test_owner_floor_refuses_small_wins();
+    test_veto_rejects_a_trade();
+    test_in_band_veto();
+    test_bar2_requires_sign_consistency();
+    test_default_off_and_anchor_on_first_enable();
+    test_cage_clamps_to_anchor();
+    test_absolute_ceiling_still_binds();
+    test_one_parameter_per_trial_and_kd_untouched();
+    test_revert_is_bit_exact();
+    test_accept_moves_baseline();
+    test_parameter_cycles_every_trial();
+    test_insufficient_grows_the_step();
+    test_trial_budget_stops_the_zone();
+    test_cage_edge_stops_the_zone();
+    test_carry_limit();
+    test_fault_disables_stickily();
+    test_restore_commissioned();
+    test_reanchor_moves_the_cage();
 }

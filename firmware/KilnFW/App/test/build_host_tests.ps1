@@ -151,7 +151,9 @@ try {
         (Join-Path $driversDir "persist/kiln_cfg_store_cfg_fs.c"),
         (Join-Path $driversDir "hw/touch_dev.c"),
         (Join-Path $driversDir "control/ramp_ident.c"),
-        (Join-Path $driversDir "control/iter_tune.c")
+        (Join-Path $driversDir "control/iter_tune.c"),
+        (Join-Path $driversDir "control/firing_score.c"),
+        (Join-Path $driversDir "control/firing_compare.c")
     )
 
     # hal_time migration (HW_ABSTRACTION.md item 5) pushed the "main"
@@ -649,7 +651,8 @@ try {
     $slExtra = @("kilnlink_config_page.c", "kilnlink_announce.c", "kilnlink_announce_reboot.c",
                  "kilnlink_clear_trip.c", "kilnlink_commit_config.c", "kilnlink_commit_config_rejected.c",
                  "kilnlink_context.c", "kilnlink_get_config_page.c", "kilnlink_get_ct_cal.c",
-                 "kilnlink_rollback.c", "kilnlink_rollback_result.c", "kilnlink_set_config.c", "kilnlink_set_ct_cal.c",
+                 "kilnlink_rollback.c", "kilnlink_rollback_result.c", "kilnlink_reboot.c",
+                 "kilnlink_reboot_result.c", "kilnlink_set_config.c", "kilnlink_set_ct_cal.c",
                  "kilnlink_set_log_level.c", "kilnlink_set_param.c", "kilnlink_frame.c", "kilnlink_crc.c",
                  "kilnlink_param.c", "kilnlink_param_value.c", "kilnlink_ct_auto_zero_begin.c",
                  "kilnlink_get_ct_auto_zero.c", "kilnlink_ct_auto_zero_status.c") | ForEach-Object { "`"$(Join-Path $commonSrc $_)`"" }

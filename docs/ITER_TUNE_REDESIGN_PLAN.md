@@ -1,5 +1,16 @@
 # `iter_tune` redesign — tracking-quality-driven iterative tuning
 
+> **Status update, 2026-09-09:** steps 1, 2 and 5 are IMPLEMENTED and
+> validated in simulation — `control/firing_score.c`, `control/firing_compare.c`
+> and a rewritten `control/iter_tune.c` (the old whole-firing IAE path is
+> deleted, not left dual). Numbers, and two design defects the simulation
+> found in this document's own sec 4 step schedule, are in
+> `docs/audits/iter_tune_redesign_sim_2026-09-09.md`. Steps 3-4 and 6-9
+> (the sec 6.5 credibility gate against a recorded firing, the noise-floor
+> artifact, persistence/HTTP surface, the write-surface check, shadow mode
+> and hardware trials) are NOT done; nothing is wired into
+> `profile_executor.c` and the module proposes nothing on hardware.
+>
 > **Status:** design only, nothing implemented. **Owner decision, 2026-09-08:**
 > *keep `iter_tune`, but redesign it* — "design it better so it does not
 > require the same starting point. what i care about is how well it tracks the

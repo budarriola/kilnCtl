@@ -1,238 +1,112 @@
 #pragma once
-// iter_tune.h -- PID_EXPANSION_PLAN.md 3.3, "Iterative tuning": the layer
-// that scores each firing with its own already-recorded normalized IAE
-// (profile_executor_firing_stats.c's firing_stats_snapshot(), read there,
-// never recomputed here), perturbs a zone's gains slightly, and keeps the
-// change only if the NEXT comparable firing scores better.
+// iter_tune.h -- ITER_TUNE_REDESIGN_PLAN.md step 5: the redesigned
+// iterative-tuning decision core.
 //
-// WHY THIS LAYER MATTERS MORE THAN THE IDENTIFICATION LAYERS (see the
-// plan's 3.3 entry on "Dynamics from ramps", SHELVED): every identification
-// fit in this codebase needs an informative signal -- a held step, an
-// excited ramp -- and every one of those has turned out to be fakeable by
-// something that isn't plant dynamics (the ramp fit reduced to a function
-// of the commanded rate alone). This layer needs none of that: it only
-// asks "did the whole firing track better than last time," which is true
-// or false regardless of what shape the profile commanded. It is much
-// harder to fool BUT it is trivially fooled by noise if the accept
-// threshold isn't respected -- see the noise-floor section below, which is
-// the load-bearing part of this file.
+// WHAT CHANGED, AND WHY THE OLD CORE IS GONE RATHER THAN KEPT ALONGSIDE.
+// The previous version of this module scored a whole firing with one scalar
+// (profile_executor_firing_stats.c's iae_normalized) and refused to compare
+// two firings whose start temperatures differed by more than 2 degC. That
+// made it correct and nearly always idle -- the only two full captures this
+// repo has of the same profile and build differ by 4.8 degC at the first
+// sample. The owner's requirement (2026-09-08) was precisely that the
+// start-point dependence go away and that the objective be "how well it
+// tracks the target temperature". So the scalar, the comparability window,
+// and the relative/absolute IAE thresholds are DELETED, not deprecated --
+// the plan's step 5 gate is "the old whole-firing path fully removed, not
+// left dual". Scoring now lives in firing_score.c (per matched segment) and
+// the accept rule in firing_compare.c (matched-pair, non-dominance).
 //
-// THIS MODULE IS PURE DECISION LOGIC. No ESP-IDF, no NVS, no lock, no
-// FreeRTOS -- same posture as max31856_codec.c/panel_codec.c. The caller
-// (integration point documented at the bottom of this file) owns:
-//   - persisting iter_tune_zone_state_t (its own NVS namespace, own opt-in
-//     flag storage -- deliberately NOT zones_http.c/adaptive_tune's own
-//     "adap_tune" namespace; those are owned by other in-flight work this
-//     session, see PID_EXPANSION_PLAN.md 3.3's other two open bullets)
-//   - actually writing gains into the zone's live PID config before a run
-//     and reading profile_exec_firing_stats_t back out after one
-//   - calling iter_tune_process_firing() exactly once per completed run,
-//     at the same run-boundary-only call site profile_executor_firing_
-//     stats.c already finalizes a profile_firing_run_record_t (see
-//     firing_stats_maybe_finalize() in that file) -- NEVER mid-run, or a
-//     perturbation could be judged against telemetry it didn't produce.
+// WHAT IS KEPT VERBATIM from the old module, because it was right:
+//   - the EXACT-REVERT posture: gains are never recomputed on revert;
+//     iter_tune_active_gains() returns the same float bits that were
+//     accepted. Revert is a flag clear, never an arithmetic undo.
+//   - pure decision logic: no ESP-IDF, no NVS, no lock, no FreeRTOS. The
+//     caller owns persistence and the one run-boundary call site.
+//   - opt-in per zone, default OFF (a zeroed struct is a valid disabled
+//     state).
+//   - kd is never touched.
 //
-// This file does NOT touch adaptive_tune.c/.h, adaptive_tune_ki.c,
-// adaptive_tune_model.c, adaptive_tune_internal.h, zones_http.c, or any
-// display file, and is not wired into profile_executor.c by this change --
-// wiring it in is the caller's job, at the integration point documented at
-// the end of this header.
+// THE CAGE IS ANCHORED TO A PERSISTED COMMISSIONING SNAPSHOT, not to the
+// rolling baseline. A baseline-relative cage ratchets -- this repo has been
+// bitten by exactly that ("Bound relative to persisted state"). Per the
+// plan's settled owner decision 9.1, the anchor is captured AUTOMATICALLY
+// the first time iter_tune is enabled for a zone, and can be deliberately
+// moved later by an explicit re-anchor action, which is a different action
+// from the "restore commissioned gains" revert.
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
+#include "firing_compare.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// ---------------------------------------------------------------------
-// Bounds -- mirror the limits the other tuning layers already respect.
-//
-// ITER_TUNE_GAIN_CEIL_C mirrors ZONE_PID_GAIN_MAX (zones_http.h, 1000.0f)
-// by VALUE, not by #include -- this file must stay free of zones_http.h's
-// dependency chain (that header is owned by other in-flight work this
-// session). test_iter_tune.c pins both values with an explicit comment so
-// the day one changes without the other, the test goes red, not silent.
+// Absolute bounds. ITER_TUNE_GAIN_CEIL_C mirrors ZONE_PID_GAIN_MAX
+// (zones_http.h, 1000.0f) by VALUE, not by #include -- this file must stay
+// free of that header's dependency chain. test_iter_tune.c pins both values
+// with an explicit comment so the day one changes without the other, the
+// test goes red, not silent.
 #define ITER_TUNE_GAIN_FLOOR_C 0.0f
 #define ITER_TUNE_GAIN_CEIL_C 1000.0f
 
-// Bounded, revertible nudge per trial -- same posture as adaptive_tune's
-// ADAPTIVE_TUNE_MAX_FRACTIONAL_MOVE / ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE
-// (both 20%, adaptive_tune_internal.h), but iterative tuning has no fitted
-// model to bound the move against -- only the immediately prior accepted
-// gains -- so a materially smaller step is used: 20% of a gain, applied
-// blind (no plant model informing direction or size), would be a much
-// larger single-firing swing than a blended, model-checked 20% move.
-#define ITER_TUNE_PERTURB_FRACTION 0.05f
+// The cage, relative to the persisted commissioned anchor (plan sec 4).
+#define ITER_TUNE_CAGE_LOW_FACTOR 0.5f
+#define ITER_TUNE_CAGE_HIGH_FACTOR 2.0f
 
-// ---------------------------------------------------------------------
-// The noise floor. THIS IS THE PART THAT MAKES THE MECHANISM HONEST.
+// Adaptive step. The plan (sec 4) specifies: start at 10%, HALVE after two
+// consecutive rejects, double (capped at 20%) after two consecutive
+// accepts, converge below 3%.
 //
-// Two firings of the same profile, same zones, same gains do not produce
-// identical normalized IAE -- ordinary sensor quantization (0.1 degC),
-// ambient drift, and the executor's own tick jitter all move it. Accepting
-// ANY improvement, however small, ratchets on that noise and calls it
-// progress; §3.3's own adaptive-tune-Ki work independently hit exactly
-// this failure mode (a vacuous decreasing-direction test) before it was
-// closed.
-//
-// THIS REPO HAS NO UNCONTAMINATED SAME-GAIN REPEAT-FIRING DATASET, and an
-// earlier version of this comment claimed one anyway. It compared
-// holdfix_clean.jsonl and final.jsonl (both climb_mode=coupled/
-// integral_floor=ff_hold, i.e. the same shipped build) and read their
-// whole-run normalized-IAE spread (+22.5% / +47.5% / +28.6% across the
-// three zones) as if it were a measurement of run-to-run noise. It is not:
-// the two captures' own first poll rows show a **4.8 degC warmer start**
-// in final.jsonl (z0/z1/z2: 24.57/24.62/24.71 degC at 10:16:38 vs
-// 29.32/29.50/29.57 degC at 14:14:29, same afternoon). That is exactly
-// this repo's own documented failure mode --
-// project_autotune_needs_rested_baseline, "residual heat biases results" --
-// applied to THIS module's own evidence. An unknown, likely large share of
-// that spread is segment 0 needing less heating from a warmer start, not
-// noise. Presenting a confounded number as a measured noise floor was the
-// mistake; it is corrected here rather than quietly reused.
-//
-// So: the true noise floor -- the spread between two firings of the same
-// profile, same gains, both from a genuinely rested start -- is UNKNOWN.
-// It has not been measured in this repo. ITER_TUNE_MIN_RELATIVE_IMPROVEMENT
-// below is a DELIBERATELY CONSERVATIVE CHOICE pending real data, not a
-// number derived from these two runs -- 20%, matching the fractional-move
-// convention every other bounded layer in this file's neighborhood already
-// uses (ADAPTIVE_TUNE_MAX_FRACTIONAL_MOVE / ADAPTIVE_TUNE_KI_MAX_
-// FRACTIONAL_MOVE, adaptive_tune_internal.h), chosen because it is the
-// established convention here, not because two contaminated data points
-// support it. It could be too loose or too tight; nobody has the
-// experiment that would tell.
-//
-// WHAT WOULD ACTUALLY ESTABLISH THE NOISE FLOOR: N repeat firings (N >= 5
-// suggested) of the SAME profile, with GAINS HELD FIXED across all of
-// them, each one starting from a genuinely rested baseline (every zone at
-// ambient, not just the one nominally under test -- see this repo's own
-// "Autotune needs a rested baseline" lesson) and separated by enough time
-// to fully cool between firings. The spread of iae_normalized across that
-// set, per zone, is the real noise floor this file should be comparing
-// against. That is a hardware experiment for someone to run later; this
-// file cannot manufacture it from captures that were never designed to
-// hold gains and starting temperature fixed.
-//
-// HONEST CONSEQUENCE of shipping a conservative guess instead of a
-// measured floor: this mechanism may accept real noise as an improvement,
-// or revert a real improvement that measured smaller than actual noise on
-// one firing -- in either direction, unquantified until the experiment
-// above is run. Neither failure compounds, because every subsequent firing
-// is scored against whatever is currently accepted, not against history --
-// a lucky accept gets re-tested the very next firing under the same bar.
-//
-// ---------------------------------------------------------------------
-// UPDATE 2026-09: the experiment above has now been run --
-// tools/PcTools/config_presets/noise_floor.json, schema 2, six repeat
-// firings of the same profile/gains (generated_from lists all six; the
-// file's own start_conditions block flags them as NOT strictly like-for-
-// like -- start temps span 1.29 degC against a 1.0 degC threshold -- so
-// these numbers are a slight overestimate of true noise, i.e. still on the
-// conservative side, not an underestimate). The metric this file scores on
-// is iae_normalized_whole_c; per zone (mean / std_c / range-of-6 = "noise_
-// floor_c" in that artifact):
-//   z0: mean 1.6043, std_c 0.05267, range 0.11565
-//   z1: mean 1.1904, std_c 0.03181, range 0.07709
-//   z2: mean 0.8765, std_c 0.05408, range 0.14730
-//
-// THE ARITHMETIC (do not reuse the "range" column directly as a threshold
-// -- a max-min range across n=6 repeats is 2.53*sigma, not 1*sigma, and a
-// single future accept/reject decision needs a two-sample PREDICTION
-// interval, not a description of the sample already in hand). This
-// mechanism compares exactly one trial firing against exactly one baseline
-// firing, so the right figure is the two-sided prediction interval for the
-// difference of two independent same-distribution draws:
-//   PI = t(.975, n-1=5) * std_c * sqrt(2) = 2.571 * std_c * 1.41421
-//   z0: 2.571 * 0.05267 * 1.41421 = 0.1915 degC
-//   z1: 2.571 * 0.03181 * 1.41421 = 0.1156 degC
-//   z2: 2.571 * 0.05408 * 1.41421 = 0.1966 degC
-// A trial/baseline pair separated by less than this, for that zone, is not
-// distinguishable from noise at 97.5% one-sided confidence -- accepting it
-// as "improvement" ratchets on nothing.
-//
-// ITER_TUNE_MIN_RELATIVE_IMPROVEMENT is a RELATIVE threshold; the floor
-// above is ABSOLUTE (degrees C of normalized IAE). Converting requires the
-// magnitude the relative fraction is taken OF. At this bench's own
-// measured baseline magnitudes (the means above -- consistent with the
-// 0.5-1.7 normalized-IAE range the A/B campaign report,
-// logs/coupling/ab_campaign_report.md, shows for real runs), 20% relative
-// works out to:
-//   z0: 0.20 * 1.6043 = 0.3209 degC  (>= 0.1915 PI --  1.68x margin, SAFE)
-//   z1: 0.20 * 1.1904 = 0.2381 degC  (>= 0.1156 PI --  2.06x margin, SAFE)
-//   z2: 0.20 * 0.8765 = 0.1753 degC  (<  0.1966 PI -- 0.89x margin, UNSAFE)
-//
-// VERDICT: 20% relative is NOT uniformly conservative. For z0 and z1 it
-// clears the noise floor with 1.7-2x margin -- correctly conservative,
-// matching the header's original intent. For z2 it is already, TODAY, at
-// today's measured typical magnitude, BELOW the noise floor: a trial that
-// scored 17.5% better than baseline would be ACCEPTED even though a
-// 19.7 degC... (0.1966 degC) swing on this zone is not statistically
-// distinguishable from ordinary run-to-run noise (0.1966 degC). This is not a distant
-// risk -- it is the current, live threshold on the current, live baseline
-// magnitude. It gets WORSE as tuning succeeds: this mechanism's whole
-// point is to shrink iae_normalized over time, and a purely relative
-// threshold's absolute requirement shrinks in lockstep, while the noise
-// floor (a property of the sensor/tick-jitter/ambient-drift measurement
-// process, not of how well-tuned the zone currently is) does not shrink
-// with it. Eventually any fixed relative fraction, applied to a
-// sufficiently well-tuned baseline, demands less absolute separation than
-// the noise floor -- a purely relative bound is the wrong shape for a
-// floor that is fundamentally absolute.
-//
-// FIX: keep the relative fraction (still the right primary signal --
-// it scales the required improvement to how far from good a zone
-// currently is) but require the ABSOLUTE improvement to also clear a
-// floor sized to the worst-case (largest) measured prediction interval
-// across the three zones -- max(0.1915, 0.1156, 0.1966) = 0.1966, rounded
-// up to 0.20 degC for headroom given the artifact's own like-for-like
-// caveat could still be underestimating drift contamination in the other
-// direction on a different bench day. A single global absolute constant
-// (not per-zone) is deliberately used here even though the floor differs
-// by nearly 2x across zones (0.077-0.147 in the range column): sizing to
-// the WORST zone makes the other two zones somewhat more conservative than
-// their own individual floor strictly requires, but that is the safe
-// direction to err in, and three near-identical per-zone constants (0.19
-// / 0.12 / 0.20, all within 2x of each other) are not worth the added
-// state, host-test surface, and per-zone config plumbing (zone_mask
-// already exists for grouping, not per-zone THRESHOLDS) for a difference
-// this small. iter_tune_process_firing() now requires:
-//   (baseline_score - firing_score) >= max(
-//       ITER_TUNE_MIN_RELATIVE_IMPROVEMENT * baseline_score,
-//       ITER_TUNE_MIN_ABSOLUTE_IMPROVEMENT_C)
-// which behaves exactly as before (relative-driven) whenever the baseline
-// score is large enough that its 20% already clears 0.20 degC (baseline
-// score >= 1.0, true for today's z0/z1 and marginal for z2), and falls
-// back to the absolute floor once tuning has driven the baseline score
-// low enough that 20% of it no longer would.
-#define ITER_TUNE_MIN_RELATIVE_IMPROVEMENT 0.20f
+// DELIBERATE DEVIATION, FOUND IN SIMULATION (sim_iter_tune.c, this change):
+// the plan's rule halves the step after ANY two rejects, but the two reject
+// kinds mean opposite things.
+//   - REJECT_DEGRADED means the change WAS measurable and was bad. Halving
+//     is right: take a smaller bite.
+//   - INSUFFICIENT means nothing cleared the 0.5 degC floor, i.e. the change
+//     was TOO SMALL TO MEASURE. Halving it makes the next signal smaller
+//     still, which is exactly backwards, and the search then walks itself
+//     down to the 3% convergence threshold having learned nothing.
+// The simulator measured this directly: on the bench plant model a 10% step
+// on kp or ki moves the sub-scores by ~0.01-0.10 degC against a 0.5 degC
+// floor, while an oracle grid over the same cage shows 1.5-1.7 degC of
+// tracking error genuinely available. Under the plan's own schedule the
+// mechanism was structurally inert -- it refused every trial from every
+// starting gain set, for the same "two mutually exclusive conditions"
+// reason this repo has already recorded once for dwell credit.
+// So: INSUFFICIENT now GROWS the step (doubling, capped at
+// ITER_TUNE_STEP_PROBE_MAX and still hard-caged to [0.5x, 2x] of the
+// anchor) until the change is large enough to be measurable at all;
+// DEGRADED still halves it. Convergence is unchanged in spirit: a zone
+// stops when it has probed both directions of both parameters at the probe
+// cap without a measurable result, or the step is halved below 3%.
+#define ITER_TUNE_STEP_START 0.20f
+#define ITER_TUNE_STEP_MAX 0.20f
+// Growth cap for the "too small to measure" case. 50% of the baseline is
+// still inside the [0.5x, 2x] cage from the anchor, so this widens the
+// STEP, never the bound.
+#define ITER_TUNE_STEP_PROBE_MAX 0.50f
+#define ITER_TUNE_STEP_MIN 0.03f
 
-// See the UPDATE block above this constant for the derivation: the largest
-// of the three zones' measured two-sample prediction intervals (z2,
-// 0.1966 degC), rounded up to 0.20 degC. Applied as a floor UNDER the
-// relative requirement (max() of the two, see iter_tune_process_firing()),
-// never in place of it -- a large baseline score should still require
-// a large absolute improvement, not just this floor.
-#define ITER_TUNE_MIN_ABSOLUTE_IMPROVEMENT_C 0.20f
+// Owner decision 9.2: six SCORED trials per zone, not twelve. Six is the
+// smallest round number strictly above Bar 2's own n >= 5 minimum, leaving
+// one trial of margin rather than landing exactly on the bar.
+#define ITER_TUNE_MAX_TRIALS 6
 
-// Two firings are only comparable at a "comparable starting temperature" --
-// project_autotune_needs_rested_baseline (this repo's own lesson):
-// residual heat from a prior firing biases the fitted/measured behavior.
-// Originally set to 5.0 degC on the mistaken belief that the holdfix_
-// clean.jsonl/final.jsonl pair above was a clean noise-floor measurement;
-// that pair is 4.8 degC apart and would have been ACCEPTED as comparable
-// under that window -- i.e. the window was loose enough to admit the exact
-// confound it exists to exclude. Tightened to 2.0 degC: the plant's own
-// dwell-settle criterion and the residual-heat lesson both point at "a
-// couple of degrees at most" for "this zone is at a rested baseline,"
-// and 2.0 degC excludes the 4.8 degC contaminated pair with margin while
-// still tolerating ordinary sensor/ambient jitter at a genuinely rested
-// start.
-#define ITER_TUNE_START_TEMP_TOLERANCE_C 2.0f
+// Three consecutive rejects while already at the minimum step is the
+// "this zone has nothing left to find" stopping condition.
+#define ITER_TUNE_MAX_REJECTS_AT_MIN_STEP 3
 
-// ---------------------------------------------------------------------
+// A gain that clamps to a cage edge twice stops the zone -- the search is
+// pushing at a boundary it is not allowed to cross.
+#define ITER_TUNE_MAX_CAGE_EDGE_HITS 2
+
+// A trial that scores no matched pairs stays armed and rides the next
+// firing, but only this many times, so a stale trial cannot ride
+// indefinitely against a moving plant (plan sec 4).
+#define ITER_TUNE_MAX_CARRIES 3
 
 typedef struct {
     float kp;
@@ -240,105 +114,145 @@ typedef struct {
     float kd;
 } iter_tune_gains_t;
 
-// One firing's identity + score, as the caller reads it back from
-// profile_firing_run_record_t / profile_exec_firing_stats_t after a run
-// completes. iae_normalized is copied VERBATIM from
-// profile_exec_firing_stats_t.iae_normalized (profile_executor_firing_
-// stats.c's firing_stats_snapshot()) -- never recomputed here.
-typedef struct {
-    uint8_t profile_id;
-    uint8_t zone_mask;     // profile.zone_mask for this run -- must match exactly to compare
-    float   start_temp_c;  // this zone's actual_c at the first accumulated tick
-    float   iae_normalized;// score -- lower is better
-    iter_tune_gains_t gains; // the gains that PRODUCED this score
-} iter_tune_firing_t;
-
-// Persisted per-zone state. Zero-initialized is a valid, fully-disabled
-// starting state (enabled == false, has_baseline == false) -- matches the
-// "opt-in, default OFF, per zone" requirement without a separate init call.
-typedef struct {
-    bool enabled;                    // per-zone opt-in, default OFF
-
-    bool               has_baseline; // false until the first firing under this mechanism completes
-    iter_tune_firing_t baseline;     // last ACCEPTED (or seeded) firing: its gains + the score they earned
-
-    bool               has_pending;    // a perturbation is currently on trial
-    iter_tune_gains_t  pending_gains;  // gains under trial (only meaningful if has_pending)
-    bool               next_perturb_negative; // alternates trial direction call to call -- see
-                                               // iter_tune_propose_perturbation()'s doc comment
-} iter_tune_zone_state_t;
+typedef enum {
+    ITER_TUNE_PARAM_KP = 0,
+    ITER_TUNE_PARAM_KI = 1,
+    ITER_TUNE_PARAM_COUNT = 2,
+} iter_tune_param_t;
 
 typedef enum {
-    ITER_TUNE_RESULT_DISABLED,          // state->enabled was false; nothing touched
-    ITER_TUNE_RESULT_SEEDED_BASELINE,   // no prior baseline -- this firing became one, no comparison made
-    ITER_TUNE_RESULT_BASELINE_REFRESHED,// firing used baseline gains (no trial pending) -- baseline updated
-    ITER_TUNE_RESULT_REFUSED_NOT_COMPARABLE, // different profile/zone_mask/start temp -- trial left pending, unscored
-    ITER_TUNE_RESULT_ACCEPTED,          // trial scored >= MIN_RELATIVE_IMPROVEMENT better -- new baseline
-    ITER_TUNE_RESULT_REVERTED,          // trial scored worse, or not enough better -- baseline gains restored
+    ITER_TUNE_STATUS_OFF = 0,       // never enabled
+    ITER_TUNE_STATUS_TUNING = 1,    // enabled, still has budget
+    ITER_TUNE_STATUS_CONVERGED = 2, // a stopping rule fired; sticky
+    ITER_TUNE_STATUS_FAULTED = 3,   // a guard trip / fault / operator halt ended it; sticky
+} iter_tune_status_t;
+
+typedef enum {
+    ITER_TUNE_RESULT_DISABLED = 0,
+    ITER_TUNE_RESULT_NO_TRIAL = 1,          // nothing was pending; nothing judged
+    ITER_TUNE_RESULT_ACCEPTED = 2,
+    ITER_TUNE_RESULT_REVERTED = 3,          // rejected or insufficient evidence -- exact revert
+    ITER_TUNE_RESULT_CARRIED = 4,           // no matched pairs; trial stays armed for the next firing
+    ITER_TUNE_RESULT_CARRY_EXHAUSTED = 5,   // carried too often; reverted unscored
 } iter_tune_result_t;
 
-// True (and reason left empty) only if `b` may be legitimately compared
-// against `a` -- same profile_id, same zone_mask, and a starting
-// temperature within ITER_TUNE_START_TEMP_TOLERANCE_C. Pure, no state
-// mutation; exposed separately from iter_tune_process_firing() so it is
-// independently host-testable per REQUIREMENT.
-bool iter_tune_comparable(const iter_tune_firing_t *a, const iter_tune_firing_t *b, char *reason,
-                           size_t reason_len);
+// Persisted per-zone state. A zeroed struct is a valid, fully-disabled
+// starting state -- "opt-in, default OFF, per zone" with no init call.
+typedef struct {
+    bool enabled;
 
-// Returns the gains that should be applied to this zone's live PID config
-// RIGHT NOW -- the pending trial's gains if one is in flight, otherwise the
-// current accepted baseline. A caller that always asks this function for
-// "what gains do I run with" gets an exact revert for free: REVERTED never
-// recomputes anything, it just clears has_pending, so this function starts
-// returning the untouched baseline.gains again -- the same float bits that
-// were accepted last time, not a recomputation of them.
+    // Cage anchor: the gains active the FIRST time this zone was enabled
+    // (owner decision 9.1). Never rewritten by tuning; moved only by an
+    // explicit iter_tune_reanchor().
+    bool              has_anchor;
+    iter_tune_gains_t anchor;
+
+    // Current accepted gains. Trial gains live ONLY in pending_gains, so a
+    // revert is a flag clear and is bit-exact.
+    bool              has_baseline;
+    iter_tune_gains_t baseline;
+
+    bool              has_pending;
+    iter_tune_gains_t pending_gains;
+
+    // Per-PARAMETER search state. The plan (sec 4) specifies coordinate
+    // descent "cycling kp -> ki -> next zone", i.e. the parameter advances
+    // every trial -- so each parameter must carry its OWN step size and
+    // direction, or one parameter's ladder silently resets the other's.
+    // Measured in simulation: with a single shared step and a parameter that
+    // only advanced on failure, a six-trial budget was spent entirely on kp
+    // (which the oracle grid shows barely moves tracking on this plant) and
+    // ki -- which carries almost all of the available improvement -- was
+    // never reached at all.
+    uint8_t param;                                   // parameter to move on the NEXT proposal
+    float   step_frac[ITER_TUNE_PARAM_COUNT];        // adaptive step, fraction of the baseline value
+    bool    step_negative[ITER_TUNE_PARAM_COUNT];    // direction of the next proposal
+    uint8_t consec_accepts[ITER_TUNE_PARAM_COUNT];
+    uint8_t consec_rejects[ITER_TUNE_PARAM_COUNT];   // consecutive DEGRADED rejects -- these halve the step
+    uint8_t param_done[ITER_TUNE_PARAM_COUNT];       // 1 once this parameter is exhausted
+    uint8_t trials_scored;
+    uint8_t carries;
+    uint8_t cage_edge_hits;
+    uint8_t status;            // iter_tune_status_t
+} iter_tune_zone_state_t;
+
+// Turns the mechanism on for a zone. The FIRST enable snapshots
+// `current_gains` as the commissioned anchor and seeds the baseline from it;
+// a later re-enable leaves both alone. Returns false if already enabled.
+bool iter_tune_enable(iter_tune_zone_state_t *state, iter_tune_gains_t current_gains);
+
+// Deliberately moves the cage centre (owner decision 9.1's "re-anchor"),
+// e.g. after a fresh hand-tuning pass. Distinct from the revert action
+// below: this moves the ANCHOR, not the gains. Clears any pending trial and
+// restarts the budget, because the search space has changed.
+void iter_tune_reanchor(iter_tune_zone_state_t *state, iter_tune_gains_t new_anchor);
+
+// The single operator action of plan sec 4's Revert path: put the persisted
+// commissioned gains back and disable the module for this zone. Returns the
+// gains the caller must write.
+iter_tune_gains_t iter_tune_restore_commissioned(iter_tune_zone_state_t *state);
+
+// Ends tuning for this zone after a guard trip, FAULTED transition, or
+// operator halt during a trial firing: the trial is discarded UNSCORED,
+// gains revert, and the zone is disabled with a sticky status. It does not
+// retry (plan sec 5.5).
+void iter_tune_fault(iter_tune_zone_state_t *state);
+
+// The gains to run with right now: the pending trial's if one is armed,
+// otherwise the accepted baseline. A caller that always asks this gets the
+// exact revert for free.
 iter_tune_gains_t iter_tune_active_gains(const iter_tune_zone_state_t *state);
 
-// Proposes a new bounded, revertible perturbation of the current baseline
-// gains (kp and ki move by +/-ITER_TUNE_PERTURB_FRACTION, alternating sign
-// call to call so both directions get explored over time rather than
-// walking off in whichever direction the first nudge happened to try; kd
-// is left untouched -- derivative gain is the noise-sensitive term and is
-// out of scope for a blind perturbation with no plant model backing it).
-// Clamped to [ITER_TUNE_GAIN_FLOOR_C, ITER_TUNE_GAIN_CEIL_C]. Requires
-// state->enabled && state->has_baseline && !state->has_pending; returns
-// false (state untouched) otherwise -- callers should not propose a second
-// trial while one is already outstanding. On success, writes
-// state->pending_gains, sets has_pending, flips next_perturb_negative, and
-// returns true.
+// Clamps `g` into the cage: [0.5x, 2x] of the anchor for kp and ki, and the
+// absolute [FLOOR, CEIL] bounds, with kd passed through untouched. Pure;
+// applied inside iter_tune_propose_perturbation() AND intended to be
+// re-applied by the caller before writing, so a bug in one layer is caught
+// by the other (plan sec 5.3). Sets *out_hit_edge when a clamp actually
+// bound.
+iter_tune_gains_t iter_tune_clamp_to_cage(const iter_tune_zone_state_t *state, iter_tune_gains_t g,
+                                          bool *out_hit_edge);
+
+// Proposes the next single-parameter perturbation. ONE parameter, ONE zone,
+// per firing -- never two: the measured coupling matrix is large and
+// asymmetric, so a simultaneous two-zone perturbation is unattributable by
+// construction. kd is never touched. Returns false (state untouched) when
+// disabled, unanchored, already pending, or stopped.
 bool iter_tune_propose_perturbation(iter_tune_zone_state_t *state, iter_tune_gains_t *out_gains);
 
-// The one call site this whole module funnels through, at run-completion
-// time only (see this header's top comment). `firing` is the just-
-// completed run's identity/score, scored under iter_tune_active_gains()'s
-// gains as of when that run STARTED (the caller is responsible for that
-// invariant -- this function has no way to check it).
-iter_tune_result_t iter_tune_process_firing(iter_tune_zone_state_t *state, const iter_tune_firing_t *firing,
-                                             char *reason, size_t reason_len);
+// The one call site, at run completion only. `cmp` is firing_compare()'s
+// verdict for this firing's score set against the baseline's. Applies the
+// accept/revert, the adaptive step update, the carry rule, and the stopping
+// rules. `reason` is optional human text.
+iter_tune_result_t iter_tune_process_comparison(iter_tune_zone_state_t *state,
+                                                const firing_compare_result_t *cmp, char *reason,
+                                                size_t reason_len);
+
+const char *iter_tune_status_str(iter_tune_status_t status);
+const char *iter_tune_result_str(iter_tune_result_t result);
 
 #ifdef __cplusplus
 }
 #endif
 
 // ---------------------------------------------------------------------
-// INTEGRATION POINT (documented, not wired in by this change -- see this
-// file's top comment for why: avoiding profile_executor.c during a session
-// where other agents are mid-flight on adjacent work in that area).
+// INTEGRATION POINT (documented; deliberately not wired in by this change --
+// plan step 7 owns persistence and the HTTP surface, and step 8 puts it in
+// shadow mode on hardware before it ever proposes anything there).
 //
-// At run start (profile_executor_run(), before the executor task begins
-// driving a PID-mode zone): for each zone with iter_tune enabled, call
-// iter_tune_active_gains() and write the result into that zone's live
-// pid_cfg (zones_config_set_pid() or equivalent) before the run begins.
+// At run start: for each enabled zone, iter_tune_propose_perturbation() if
+// no trial is armed, then write iter_tune_active_gains() into the zone's
+// live pid_cfg via zones_config_set_pid(zone, kp, ki, kd) -- that call is
+// this module's ONLY write path into board state, and kd is passed through
+// unmodified.
 //
-// At run completion (profile_executor_firing_stats.c's firing_stats_
-// maybe_finalize(), the same call site that already builds a
-// profile_firing_run_record_t): for each zone with iter_tune enabled,
-// build an iter_tune_firing_t from that record's zr->stats.iae_normalized,
-// zr->kp/ki/kd, rec->profile_id, rec->zone_mask, and the zone's actual_c
-// at the run's first accumulated tick (not currently captured anywhere --
-// a caller wiring this in needs to add that one field, e.g. to zone_
-// runtime_t, alongside fs_target_min_c/fs_target_max_c's existing
-// first-tick capture pattern), then call iter_tune_process_firing(). If
-// the result is ITER_TUNE_RESULT_ACCEPTED or ITER_TUNE_RESULT_REVERTED,
-// persist the (possibly reverted) state and call
-// iter_tune_propose_perturbation() to arm the next run's trial.
+// During the run: feed firing_score_seg_tick() per zone per executor tick,
+// opening a segment at every profile segment boundary.
+//
+// At run completion (profile_executor_firing_stats.c's
+// firing_stats_maybe_finalize(), the same run-boundary-only call site that
+// already builds a profile_firing_run_record_t): firing_compare() this
+// firing's score set against the stored baseline set, then
+// iter_tune_process_comparison(). On ACCEPTED, persist the new baseline AND
+// the trial's score set as the new baseline set. On REVERTED, persist
+// nothing but the state flags. On a guard trip or halt, call
+// iter_tune_fault() instead of comparing anything.
