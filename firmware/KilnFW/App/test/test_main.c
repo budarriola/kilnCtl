@@ -32,6 +32,7 @@ void run_test_safety_link(void);
 void run_test_dashboard_safety_ready(void);
 void run_test_readiness_commissioning(void);
 void run_test_readiness_ct_applicability(void);
+void run_test_readiness_ct_topology_applicability(void);
 void run_test_readiness_ct_installed_zero_reads_ok(void);
 void run_test_readiness_guard_max_temp(void);
 void run_test_readiness_safety_trip(void);
@@ -116,6 +117,7 @@ int main(void)
     run_test_dashboard_safety_ready();
     run_test_readiness_commissioning();
     run_test_readiness_ct_applicability();
+    run_test_readiness_ct_topology_applicability();
     run_test_readiness_ct_installed_zero_reads_ok();
     run_test_readiness_guard_max_temp();
     run_test_readiness_safety_trip();

@@ -132,13 +132,39 @@ typedef enum {
  * rule: when the ct_installed param is itself unset, the record defaults to
  * 1 (installed) rather than 0, so an unanswered "are CTs fitted?" question
  * never relaxes these six params' requirement. Callers that have not yet
- * determined ct_installed's cached value should therefore pass 1, not 0. */
-static inline bool readiness_param_required_for_commissioning(uint16_t param_id, uint8_t ct_installed_value)
+ * determined ct_installed's cached value should therefore pass 1, not 0.
+ *
+ * `ct_topology_value` mirrors firmware/SaftyFW/src/config_params.c's
+ * config_params_all_required_set() (0x031F, CONFIG_STORE_CT_TOPOLOGY_SUMMED
+ * = 1u there -- this header has no shared include with the Pico build, so
+ * the value is compared by literal, same as zone_cfg_committed_ct_topology()
+ * and dashboard_ct_topology_is_summed() already do against this same param
+ * id elsewhere in this driver). Pico-side, 2026-09-09 (commit b5cb83a4) made
+ * ct_channel_map[0..2] required ONLY when ct_installed != 0 AND
+ * ct_topology != SUMMED: in summed mode the one shared CT is read by zone id
+ * straight into S14/S15, never through ct_channel_map, so a fully-configured
+ * summed board has no meaningful answer for "which relay does each CT
+ * watch" and was left permanently uncommissionable by the Pico's OLD rule
+ * (docs/audits/commissioning_gap_and_no_heat_2026-09-09.md). This ESP-side
+ * copy of the same rule was not updated in that pass -- fixed here so a
+ * summed board's readiness item 10a agrees with the Pico's own
+ * commissioned:true instead of counting ct_channel_map[0..2] as
+ * unset-forever. i_normal_a[0..2] is NOT re-gated on topology: unlike the
+ * map, it still requires a live current measurement to fill in regardless
+ * of topology, and the Pico's own required mask never included it either
+ * way -- see the paragraph above.
+ *
+ * Callers that have not yet determined ct_topology's cached value should
+ * pass 0 (PER_ZONE): the unconditional branch, so an unknown topology never
+ * relaxes the requirement, matching the ct_installed default-safe rule. */
+static inline bool readiness_param_required_for_commissioning(uint16_t param_id, uint8_t ct_installed_value,
+                                                                uint8_t ct_topology_value)
 {
     switch (param_id) {
     case READINESS_PARAM_ID_CT_CHANNEL_MAP_0:
     case READINESS_PARAM_ID_CT_CHANNEL_MAP_1:
     case READINESS_PARAM_ID_CT_CHANNEL_MAP_2:
+        return ct_installed_value != 0u && ct_topology_value == 0u;
     case READINESS_PARAM_ID_I_NORMAL_A_0:
     case READINESS_PARAM_ID_I_NORMAL_A_1:
     case READINESS_PARAM_ID_I_NORMAL_A_2:

@@ -69,24 +69,81 @@ void run_test_readiness_ct_applicability(void)
 
     /* ct_installed == 0: none of the six CT params are applicable. */
     for (int i = 0; i < 6; i++) {
-        TEST_CHECK(readiness_param_required_for_commissioning(ct_ids[i], 0) == false,
+        TEST_CHECK(readiness_param_required_for_commissioning(ct_ids[i], 0, 0) == false,
                     "a CT param must not be required when ct_installed == 0");
     }
 
     /* ct_installed != 0: all six become required again -- ct_installed == 0
      * must not turn into a blanket "CT params never matter" suppression. */
     for (int i = 0; i < 6; i++) {
-        TEST_CHECK(readiness_param_required_for_commissioning(ct_ids[i], 1) == true,
+        TEST_CHECK(readiness_param_required_for_commissioning(ct_ids[i], 1, 0) == true,
                     "a CT param must be required when ct_installed != 0");
     }
 
     /* A non-CT param (abs_max_temp_c, id 0x0104) is required either way --
      * this is what proves the rule is applicability, not a global relaxation
      * whenever ct_installed happens to be 0. */
-    TEST_CHECK(readiness_param_required_for_commissioning(0x0104u, 0) == true,
+    TEST_CHECK(readiness_param_required_for_commissioning(0x0104u, 0, 0) == true,
                 "a non-CT param must stay required when ct_installed == 0");
-    TEST_CHECK(readiness_param_required_for_commissioning(0x0104u, 1) == true,
+    TEST_CHECK(readiness_param_required_for_commissioning(0x0104u, 1, 0) == true,
                 "a non-CT param must stay required when ct_installed != 0");
+}
+
+/* readiness_param_required_for_commissioning()'s ct_topology gate
+ * (2026-09-09, mirroring firmware/SaftyFW/src/config_params.c's
+ * config_params_all_required_set() fix in b5cb83a4): ct_channel_map[0..2]
+ * must NOT be required on a summed-CT board, since summed mode's S14/S15
+ * read relay_now_mask by zone id and never consult that map -- a
+ * fully-configured summed board has no meaningful answer to give it and was
+ * left permanently "not commissioned" by this ESP-side copy of the rule
+ * even after the Pico side was fixed. i_normal_a[0..2] must stay gated on
+ * ct_installed ONLY: unlike the map, a topology change does not remove its
+ * need for a live current measurement. */
+void run_test_readiness_ct_topology_applicability(void)
+{
+    TEST_SECTION("readiness commissioning item -- ct_topology applicability (mirrors config_params.c)");
+
+    const uint16_t map_ids[3] = {
+        READINESS_PARAM_ID_CT_CHANNEL_MAP_0, READINESS_PARAM_ID_CT_CHANNEL_MAP_1,
+        READINESS_PARAM_ID_CT_CHANNEL_MAP_2,
+    };
+    const uint16_t normal_ids[3] = {
+        READINESS_PARAM_ID_I_NORMAL_A_0, READINESS_PARAM_ID_I_NORMAL_A_1, READINESS_PARAM_ID_I_NORMAL_A_2,
+    };
+
+    /* CTs fitted, per_zone topology (0): ct_channel_map is required -- the
+     * pre-existing, unconditional-on-topology behaviour. */
+    for (int i = 0; i < 3; i++) {
+        TEST_CHECK(readiness_param_required_for_commissioning(map_ids[i], 1, 0) == true,
+                    "ct_channel_map must be required when ct_installed=1 and topology=per_zone");
+    }
+
+    /* CTs fitted, summed topology (1): ct_channel_map must NOT be required
+     * -- this is the exact fully-configured-summed-board case that used to
+     * read commissioning as permanently incomplete on the ESP side even
+     * though the Pico itself reported commissioned:true. */
+    for (int i = 0; i < 3; i++) {
+        TEST_CHECK(readiness_param_required_for_commissioning(map_ids[i], 1, 1) == false,
+                    "ct_channel_map must NOT be required when ct_installed=1 and topology=summed");
+    }
+
+    /* No CTs fitted at all: ct_channel_map stays not-required regardless of
+     * topology (topology is meaningless without CTs in the first place). */
+    for (int i = 0; i < 3; i++) {
+        TEST_CHECK(readiness_param_required_for_commissioning(map_ids[i], 0, 0) == false,
+                    "ct_channel_map must not be required when ct_installed=0, topology=per_zone");
+        TEST_CHECK(readiness_param_required_for_commissioning(map_ids[i], 0, 1) == false,
+                    "ct_channel_map must not be required when ct_installed=0, topology=summed");
+    }
+
+    /* i_normal_a must NOT be re-gated on topology -- stays required whenever
+     * CTs are fitted, summed or not. */
+    for (int i = 0; i < 3; i++) {
+        TEST_CHECK(readiness_param_required_for_commissioning(normal_ids[i], 1, 0) == true,
+                    "i_normal_a must stay required with ct_installed=1, topology=per_zone");
+        TEST_CHECK(readiness_param_required_for_commissioning(normal_ids[i], 1, 1) == true,
+                    "i_normal_a must stay required with ct_installed=1, topology=summed (NOT re-gated)");
+    }
 }
 
 /* End-to-end through readiness_commissioning_status(): the exact scenario the
@@ -108,7 +165,7 @@ void run_test_readiness_ct_installed_zero_reads_ok(void)
         READINESS_PARAM_ID_I_NORMAL_A_1,     READINESS_PARAM_ID_I_NORMAL_A_2,
     };
     for (int i = 0; i < 6; i++) {
-        if (readiness_param_required_for_commissioning(ct_ids[i], ct_installed_value)) {
+        if (readiness_param_required_for_commissioning(ct_ids[i], ct_installed_value, 0)) {
             applicable++;
             unset++; /* these six are unset on this board */
         }
@@ -127,7 +184,7 @@ void run_test_readiness_ct_installed_zero_reads_ok(void)
     applicable = 0;
     unset = 0;
     for (int i = 0; i < 6; i++) {
-        if (readiness_param_required_for_commissioning(ct_ids[i], ct_installed_value)) {
+        if (readiness_param_required_for_commissioning(ct_ids[i], ct_installed_value, 0)) {
             applicable++;
             unset++;
         }
@@ -142,7 +199,7 @@ void run_test_readiness_ct_installed_zero_reads_ok(void)
     applicable = 0;
     unset = 0;
     for (int i = 0; i < 6; i++) {
-        if (readiness_param_required_for_commissioning(ct_ids[i], 0)) {
+        if (readiness_param_required_for_commissioning(ct_ids[i], 0, 0)) {
             applicable++;
         }
     }

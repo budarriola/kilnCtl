@@ -596,11 +596,22 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
          * unset/unfetched ct_installed must never relax the six CT params'
          * requirement, only an explicit 0 does. */
         uint8_t ct_installed_value = 1;
+        /* ct_topology (0x031F): 0 (per_zone, the safe default) unless an
+         * explicit, set value says otherwise -- see
+         * readiness_param_required_for_commissioning()'s comment. Same
+         * param id and idiom as zone_cfg_committed_ct_topology()
+         * (zones_current_sweep_task.c) and dashboard_ct_topology_is_summed()
+         * (dashboard_status_http.c). */
+        uint8_t ct_topology_value = 0;
         for (size_t i = 0; i < count; i++) {
             safety_cfg_param_t p;
-            if (safety_cfg_store_get_by_index(i, &p) && p.param_id == 0x0109u && p.set) {
+            if (!safety_cfg_store_get_by_index(i, &p)) {
+                continue;
+            }
+            if (p.param_id == 0x0109u && p.set) {
                 ct_installed_value = p.value.u8_val;
-                break;
+            } else if (p.param_id == 0x031Fu && p.set) {
+                ct_topology_value = p.value.u8_val;
             }
         }
 
@@ -612,7 +623,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
             if (!safety_cfg_store_get_by_index(i, &p)) {
                 continue;
             }
-            if (!readiness_param_required_for_commissioning(p.param_id, ct_installed_value)) {
+            if (!readiness_param_required_for_commissioning(p.param_id, ct_installed_value, ct_topology_value)) {
                 excluded++;
                 continue;
             }
