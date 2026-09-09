@@ -665,6 +665,67 @@ static void test_seqlock_concurrent_read_never_tears(void)
                "the seqlock rejected or masked every torn snapshot");
 }
 
+// --- Multi-reader seqlock fallback test (2026-09-09, opus review) ----------
+//
+// The single-reader test above is exactly what let b202fe56/5671ee03's
+// fallback bug through: with only one reader thread, there is no second
+// reader around to race against config_store_seqlock_read()'s (pre-fix)
+// unsynchronised `s_last_good_record = copy;` write, which every
+// successful read used to perform regardless of whether that call was on
+// the exhausted-retries fallback path or not. On real hardware the two
+// concurrent readers are core-1's trip-path callers (safety_core.c,
+// thermo_task.c, current_task.c) -- so this test spawns several reader
+// threads against one writer thread, all real OS threads the host
+// scheduler does put on separate physical cores, same rationale as the
+// single-reader test's header comment above.
+//
+// SAME CAVEAT AS ABOVE APPLIES: this proves the read-side protocol has no
+// internal data race under real concurrent access on x86/Windows threads;
+// it does not and cannot prove the HAL_DMB()/hardware/sync.h barrier choice
+// is correct on actual Cortex-M0+ silicon. That still requires the bench
+// board.
+#define SEQLOCK_RACE_READER_COUNT 4
+
+static void test_seqlock_multi_reader_never_tears(void)
+{
+    TEST_SECTION("config_store_flash: MULTIPLE concurrent readers never observe a torn record "
+                 "(regression test for the writer-owned-fallback fix -- a single reader thread "
+                 "cannot exercise this)");
+    reset_all();
+    config_store_boot_load();
+
+    seqlock_race_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    HANDLE writer = CreateThread(NULL, 0, seqlock_race_writer_fn, &ctx, 0, NULL);
+    TEST_CHECK(writer != NULL, "fixture can start the writer thread");
+
+    HANDLE readers[SEQLOCK_RACE_READER_COUNT];
+    for (int i = 0; i < SEQLOCK_RACE_READER_COUNT; i++) {
+        readers[i] = CreateThread(NULL, 0, seqlock_race_reader_fn, &ctx, 0, NULL);
+        TEST_CHECK(readers[i] != NULL, "fixture can start each reader thread");
+    }
+
+    Sleep(500); // real wall-clock window for the OS scheduler to interleave all threads
+    InterlockedExchange(&ctx.stop, 1);
+    WaitForSingleObject(writer, INFINITE);
+    CloseHandle(writer);
+    for (int i = 0; i < SEQLOCK_RACE_READER_COUNT; i++) {
+        WaitForSingleObject(readers[i], INFINITE);
+        CloseHandle(readers[i]);
+    }
+
+    printf("    (%d readers; writes=%ld, consistent reads=%ld, torn reads=%ld)\n",
+           SEQLOCK_RACE_READER_COUNT, ctx.write_count, ctx.consistent_count, ctx.torn_count);
+
+    TEST_CHECK(ctx.write_count > 0, "sanity: the writer thread actually ran");
+    TEST_CHECK(ctx.consistent_count > 0, "sanity: the reader threads actually ran");
+    TEST_CHECK(ctx.torn_count == 0,
+               "no reader ever observed tc_type/estop_active_level disagreeing with "
+               "MULTIPLE concurrent readers -- the writer-owned fallback double buffer means "
+               "no reader ever writes shared state, so readers cannot race each other");
+}
+
 int main(void)
 {
     test_boot_load_blank_sector_is_default();
@@ -681,6 +742,7 @@ int main(void)
     test_migration_from_legacy_single_sector_layout();
     test_corrupt_active_sector_falls_back_to_other_sector();
     test_seqlock_concurrent_read_never_tears();
+    test_seqlock_multi_reader_never_tears();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

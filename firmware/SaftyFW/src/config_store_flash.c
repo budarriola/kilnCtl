@@ -218,17 +218,39 @@ static volatile uint32_t s_seq_counter = 0u; // even == stable, odd == write in 
 // any measured worst case.
 #define CONFIG_STORE_SEQLOCK_MAX_RETRIES 4u
 
-// Last snapshot this module itself has ever confirmed stable, used as the
-// fallback when config_store_seqlock_read() exhausts its retries (see that
-// function's own comment for why this fallback is safe for a guard
-// threshold specifically). Deliberately NOT itself read/written under the
-// seqlock: it is only ever touched from inside config_store_seqlock_read(),
-// which already holds a stable, freshly-copied struct at that point (either
-// the snapshot it just took, or -- on the exhausted-retries path -- the
-// value this static already held from a previous successful call), so no
-// second synchronisation layer is needed around it.
-static config_store_record_t s_last_good_record;
-static bool s_last_good_valid = false;
+// Fallback used when config_store_seqlock_read() exhausts its retries (see
+// that function's own comment for why a value one commit "behind" is safe
+// for a guard threshold specifically).
+//
+// FIX (2026-09-09, opus review of b202fe56/5671ee03): this was originally a
+// single s_last_good_record struct that EVERY successful reader -- on
+// EITHER core -- wrote to right after taking its own stable copy. That
+// premise ("only ever touched from inside config_store_seqlock_read(),
+// which already holds a stable, freshly-copied struct") is true of the
+// WRITE's *source*, but says nothing about the write's *destination*:
+// s_last_good_record itself was unsynchronised, so a core-1 trip-path
+// reader landing on the exhausted-retries path could read it while a
+// core-0 reader was mid-write to that same ~512 B struct -- a torn read on
+// the one path this whole seqlock exists to protect. Multiple concurrent
+// readers were never exercised by the original host test (single reader
+// thread), which is how this got through.
+//
+// Fix shape: make the fallback WRITER-owned, so no reader ever writes to
+// it -- readers only ever read config_store_seqlock_write()'s output, never
+// each other's. It is a double buffer, not a single struct, specifically so
+// a reader on the exhausted-retries path never needs to synchronise against
+// a concurrent writer commit of the fallback itself: config_store_seqlock_
+// write() (the sole writer, core 0 only) always writes into the buffer NOT
+// currently marked active, and only flips s_fallback_active -- a single,
+// naturally-aligned 32-bit word, atomic on Cortex-M0+ with no extra locking
+// needed -- after that write has fully landed. So whichever buffer a reader
+// is pointed at by s_fallback_active is, by construction, never being
+// written while that reader is copying it: the writer is always touching
+// the OTHER slot. This removes the second race structurally rather than
+// adding a second seqlock around the fallback.
+static config_store_record_t s_fallback_buf[2];
+static volatile uint32_t s_fallback_active = 0u; // index into s_fallback_buf currently stable/readable
+static bool s_fallback_valid = false; // set true after the writer's first-ever commit
 
 // Snapshot s_cached_record into *out under the seqlock above, retrying up
 // to CONFIG_STORE_SEQLOCK_MAX_RETRIES times if the writer is (or was)
@@ -269,15 +291,24 @@ static bool config_store_seqlock_read(config_store_record_t *out)
         uint32_t seq2 = s_seq_counter;
         if (seq1 == seq2) {
             *out = copy;
-            s_last_good_record = copy;
-            s_last_good_valid = true;
             return true;
         }
         // seq changed between the two reads (or is now odd): the copy may
         // be torn. Retry.
     }
-    if (s_last_good_valid) {
-        *out = s_last_good_record;
+    if (s_fallback_valid) {
+        // Reader-side counterpart of the writer-owned double buffer above:
+        // read the active index once, barrier, then copy that slot. The
+        // writer never touches this slot while it is the active one (it
+        // only ever writes the OTHER slot, then flips the index once that
+        // write is complete), so this copy cannot observe a torn struct
+        // regardless of what the writer is doing concurrently on core 0.
+        uint32_t idx = s_fallback_active;
+        // Barrier: this core must observe idx before it copies
+        // s_fallback_buf[idx] -- otherwise the CPU could hoist part of the
+        // struct copy ahead of the index read.
+        HAL_DMB();
+        *out = s_fallback_buf[idx];
         return true;
     }
     return false; // never had a stable snapshot -- caller's !s_loaded path applies
@@ -305,6 +336,24 @@ static void config_store_seqlock_write(const config_store_record_t *rec)
     // actually finished landing in SRAM from this core's perspective.
     HAL_DMB();
     s_seq_counter = seq + 2u; // even again: stable, safe for readers
+
+    // Writer-owned fallback double buffer (see s_fallback_buf's comment
+    // above): commit *rec into the slot NOT currently marked active, then
+    // flip the index. This is safe with no locking because this function
+    // is the sole writer (link_task, core 0 only) -- there is no other
+    // writer to race against here, only readers, and readers never touch
+    // the slot this function is about to overwrite (they only ever read
+    // whichever slot s_fallback_active currently names).
+    uint32_t fb_idx = s_fallback_active;
+    uint32_t fb_other = 1u - fb_idx;
+    s_fallback_buf[fb_other] = *rec;
+    // Barrier: the buffer write above must be complete, as observed by
+    // another core, before the index flip below is published -- otherwise
+    // a reader could see the new index and copy a fallback slot that has
+    // not actually finished landing in SRAM yet.
+    HAL_DMB();
+    s_fallback_active = fb_other;
+    s_fallback_valid = true;
 }
 
 static size_t s_cached_slot = CONFIG_STORE_NO_SLOT;
