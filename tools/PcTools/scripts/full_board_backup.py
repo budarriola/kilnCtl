@@ -103,7 +103,7 @@ def _get_json(url: str, timeout: float):
         return None, f"request failed: {e}"
     try:
         return json.loads(body), None
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         pass
     # Retry once with bareword nan/inf normalized -- see module comment.
     try:
