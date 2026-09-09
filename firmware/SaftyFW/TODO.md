@@ -971,3 +971,51 @@ correctly; only the WARN bit's presence differs from the last few flash
 records. Not chased further here -- flagging it since it doesn't match this
 board's established baseline.
 
+## 2026-09-09 -- Pico flashed to f52e736d (DRDY level-fallback fix)
+
+Pico only, flashed at commit `c13f8828` (HEAD includes `f52e736d`, "Fix
+safety MAX31856 boot-time DRDY missed-edge self-latch": `~DRDY` is a
+latching level cleared only by a host read; the edge IRQ could be armed
+after the first auto-conversion already asserted it, self-latching the
+missed edge permanently. Fix adds a level-based fallback checked on every
+notify-wait timeout, not a one-shot, extracted into a pure host-testable
+module). Built from a clean detached worktree, `C:/wt/picoflash_drdy`
+(`git worktree add ... origin/main`, `git submodule update --init`).
+2377/2377 host tests pass. Flashed `SaftyFW.elf` via
+`debug_program(peer="pico", confirm=true)`.
+
+Pre-flash: no firing, relays off (`io_read` R1-R4 all 0), `safety_get_status`
+link up, safety TC **invalid** ("no MAX31856 fault bits set"),
+`safety_get_diag` `state tripped`, `trip_reason 5`, `trip_mask 0x0010` (S5,
+latched, flags `[calibration_missing]`), `commissioned=False` (expected --
+`ct_channel_map` unset; `ct_installed=1`/`ct_topology=1` were just set per
+the 2026-09-08 commissioning step), `/api/thermo/faults`'s equivalent
+safety state matched `safety_get_status`'s "safety TC invalid".
+
+Post-flash: **safety TC now reads valid** -- `safety_get_status`: "safety
+thermocouple valid | 34.53 C (CJ 35.02 C)", stable at ~34.5/35.0 C across
+multiple polls over 90+ s. The chip was healthy all along; the missed-edge
+self-latch was the defect, confirmed fixed. `safety_get_fw_version`: Pico
+build `c13f8828`, protocol v12 (min compatible v7); ESP `get_fw_version`:
+`uart_protocol_version 11`, compatible yes. `safety_get_link_stats` showed
+2 crc/framing errors and 779 timeouts (pre-existing counters, not reset by
+this flash) with no growth after link-up. `safety_get_commissioning`
+post-flash: `abs_max_temp_c=80C` ARMED, `max_rate_c_per_min=33.3C/min`
+ARMED, S14/S15 channel structure unchanged, `borrowed=False` -- matches
+pre-flash.
+
+The expected post-reset S6a `MAIN_FAULT` trip occurred (`trip_reason 3`,
+`trip_mask 0x0004`) once link-up and protocol compatibility were confirmed
+both directions. **Deviation from the established pattern**:
+`safety_clear_trip()` was called three times, each followed by
+`safety_set_fault_out(assert_fault=false)` on one attempt, spaced several
+seconds apart over a 90+ s window with TC readings good and stable the
+whole time -- the trip did NOT clear (`trip_mask` stayed `0x0004`,
+`state tripped`, `warn_mask` picked up `0x0200` after the first clear
+attempt). Left latched rather than forced further; this is flagged as an
+open finding, not glossed over. S5 (the sensor-invalid latch from
+pre-flash) did not reappear post-reboot -- it is RAM-latched and cleared
+by the reset itself, consistent with commit `24090c9a`'s record above.
+No regression otherwise: relays confirmed off (`io_read` R1-R4 = 0), no
+firing, frame discards not climbing.
+
