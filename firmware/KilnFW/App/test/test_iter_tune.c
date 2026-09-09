@@ -580,6 +580,105 @@ static void test_cage_edge_stops_the_zone(void)
     TEST_CHECK(st.baseline.kp <= 2.0f * st.anchor.kp, "and never left the cage");
 }
 
+// Opus review of 249ce287, finding 4: a proposal that clamps to no
+// movement used to retire the parameter after trying only ONE direction --
+// step_negative[pi] was never flipped first. A baseline sitting at the TOP
+// of the cage (a common resting place after a run of accepts) retired kp
+// forever the first time an upward step clamped to no movement, even
+// though a downward step was still entirely legal and unexplored.
+// NEGATIVE TEST: revert the cage_edge_dir_tried flip-before-retire block in
+// iter_tune.c's iter_tune_propose_perturbation() back to unconditional
+// retirement -> red here (both checks).
+static void test_cage_edge_no_movement_tries_other_direction_first(void)
+{
+    TEST_SECTION("iter_tune: a clamp-to-no-movement at one cage edge tries the OTHER direction "
+                 "before retiring the parameter");
+    iter_tune_zone_state_t st;
+    memset(&st, 0, sizeof(st));
+    iter_tune_enable(&st, g3(1.0f, 0.01f, 0.5f)); // cage: kp in [0.5, 2.0]
+    st.param_done[ITER_TUNE_PARAM_KI] = 1;        // every trial lands on kp
+    st.param = ITER_TUNE_PARAM_KP;
+
+    // Baseline sitting exactly at the cage's TOP edge, proposing upward.
+    st.baseline.kp = 2.0f;
+    st.step_negative[ITER_TUNE_PARAM_KP] = false; // positive direction
+    st.step_frac[ITER_TUNE_PARAM_KP] = ITER_TUNE_STEP_START;
+
+    // First proposal: upward from the top edge clamps to no movement.
+    // Must NOT retire kp -- must flip direction and report no trial yet.
+    iter_tune_gains_t out;
+    bool proposed = iter_tune_propose_perturbation(&st, &out);
+    TEST_CHECK(!proposed, "the immovable upward step produces no trial this call");
+    TEST_CHECK(st.param_done[ITER_TUNE_PARAM_KP] == 0,
+               "kp is NOT retired after only the upward direction proved immovable");
+    TEST_CHECK(st.step_negative[ITER_TUNE_PARAM_KP] == true,
+               "the direction flipped to negative so the next proposal tries downward");
+    TEST_CHECK(st.status == ITER_TUNE_STATUS_TUNING, "the zone is still tuning, not converged");
+
+    // Second proposal: downward from the top edge is well inside the cage
+    // and must produce a real, moving trial.
+    proposed = iter_tune_propose_perturbation(&st, &out);
+    TEST_CHECK(proposed, "the downward step, now tried, produces a real trial");
+    TEST_CHECK(out.kp < 2.0f, "the trial actually moved kp down from the cage edge");
+    TEST_CHECK(st.has_pending, "a trial is now pending");
+}
+
+// Both directions genuinely immovable (a degenerate, collapsed cage) must
+// still retire the parameter -- this is the "genuinely exhausted" half of
+// the same fix, and without it the fix above would spin forever instead of
+// converging.
+static void test_cage_edge_both_directions_immovable_retires(void)
+{
+    TEST_SECTION("iter_tune: BOTH directions proven immovable at the cage edge DOES retire the "
+                 "parameter");
+    iter_tune_zone_state_t st;
+    memset(&st, 0, sizeof(st));
+    iter_tune_enable(&st, g3(1.0f, 0.01f, 0.5f));
+    st.param_done[ITER_TUNE_PARAM_KI] = 1;
+    st.param = ITER_TUNE_PARAM_KP;
+
+    // A single-point cage: anchor 1.0 with the low/high factors collapsed
+    // onto each other is not reachable via enable(), so drive it directly
+    // with a baseline at the top edge and a step so large that BOTH
+    // directions clamp back to the same edge value (up clamps to the cage
+    // ceiling it is already at; down is then forced through the same
+    // no-movement check by pre-marking the down direction as already tried,
+    // isolating exactly the "both bits set" branch under test).
+    st.baseline.kp = 2.0f;
+    st.step_negative[ITER_TUNE_PARAM_KP] = false;
+    st.step_frac[ITER_TUNE_PARAM_KP] = ITER_TUNE_STEP_START;
+    st.cage_edge_dir_tried[ITER_TUNE_PARAM_KP] = 0x2u; // negative direction already proven immovable
+
+    iter_tune_gains_t out;
+    bool proposed = iter_tune_propose_perturbation(&st, &out);
+    TEST_CHECK(!proposed, "no trial produced");
+    TEST_CHECK(st.param_done[ITER_TUNE_PARAM_KP] == 1,
+               "kp IS retired once both directions are proven immovable");
+}
+
+// An ACCEPT moves the baseline, which invalidates any earlier
+// "immovable in this direction" finding for the accepted parameter (it was
+// relative to the OLD baseline position) -- confirmed by re-testing the
+// direction right after an accept.
+static void test_accept_clears_cage_edge_direction_memory(void)
+{
+    TEST_SECTION("iter_tune: an ACCEPT clears cage_edge_dir_tried for the accepted parameter");
+    iter_tune_zone_state_t st;
+    memset(&st, 0, sizeof(st));
+    iter_tune_enable(&st, g3(1.0f, 0.01f, 0.5f));
+    st.param = ITER_TUNE_PARAM_KP;
+    st.cage_edge_dir_tried[ITER_TUNE_PARAM_KP] = 0x1u; // stale: positive direction "immovable"
+
+    st.has_pending = true;
+    st.pending_gains = st.baseline;
+    st.pending_gains.kp = 1.1f;
+    firing_compare_result_t acc = verdict(FIRING_COMPARE_ACCEPT);
+    iter_tune_process_comparison(&st, &acc, NULL, 0);
+
+    TEST_CHECK(st.cage_edge_dir_tried[ITER_TUNE_PARAM_KP] == 0,
+               "the stale immovability finding is cleared once the baseline moves");
+}
+
 static void test_carry_limit(void)
 {
     TEST_SECTION("iter_tune: an unscorable trial carries at most 3 times, then reverts unscored");
@@ -811,6 +910,9 @@ void run_test_iter_tune(void)
     test_insufficient_grows_the_step();
     test_trial_budget_stops_the_zone();
     test_cage_edge_stops_the_zone();
+    test_cage_edge_no_movement_tries_other_direction_first();
+    test_cage_edge_both_directions_immovable_retires();
+    test_accept_clears_cage_edge_direction_memory();
     test_carry_limit();
     test_fault_disables_stickily();
     test_restore_commissioned();

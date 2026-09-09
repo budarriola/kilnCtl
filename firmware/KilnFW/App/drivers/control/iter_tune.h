@@ -183,6 +183,18 @@ typedef struct {
     uint8_t consec_accepts[ITER_TUNE_PARAM_COUNT];
     uint8_t consec_rejects[ITER_TUNE_PARAM_COUNT];   // consecutive DEGRADED rejects -- these halve the step
     uint8_t param_done[ITER_TUNE_PARAM_COUNT];       // 1 once this parameter is exhausted
+    // Bitmask per parameter: bit 0 set once the POSITIVE direction has hit
+    // a cage edge with zero movement, bit 1 for NEGATIVE. 2026-09-09 fix
+    // (opus review of 249ce287): a clamp-produced-no-movement used to retire
+    // the parameter after trying only ONE direction -- step_negative[pi] was
+    // never flipped first. A baseline sitting at the top of the cage (a
+    // common resting place after a run of accepted increases) retired kp
+    // forever the first time an upward step clamped to no movement, even
+    // though a downward step was still entirely legal, and could stop the
+    // whole zone CONVERGED / STOP_PARAMS_EXHAUSTED with real search space
+    // left unexplored. Both bits set (both directions independently proven
+    // immovable) is what now actually retires the parameter.
+    uint8_t cage_edge_dir_tried[ITER_TUNE_PARAM_COUNT];
     uint8_t trials_scored;
     uint8_t carries;
     uint8_t cage_edge_hits;

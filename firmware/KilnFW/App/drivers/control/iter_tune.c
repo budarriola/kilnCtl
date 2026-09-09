@@ -47,6 +47,7 @@ static void reset_search_state(iter_tune_zone_state_t *state)
         state->consec_accepts[p] = 0;
         state->consec_rejects[p] = 0;
         state->param_done[p] = 0;
+        state->cage_edge_dir_tried[p] = 0;
     }
     state->trials_scored = 0;
     state->carries = 0;
@@ -228,9 +229,25 @@ bool iter_tune_propose_perturbation(iter_tune_zone_state_t *state, iter_tune_gai
     // reaching here means the clamp bound hard against a real cage edge.
     iter_tune_gains_t base = state->baseline;
     if (*param_ptr(&g, state->param) == *param_ptr(&base, state->param)) {
-        // The whole step is outside the cage in this direction, so this
-        // parameter cannot move further this way. Retire it rather than
-        // returning false forever with the status still TUNING.
+        // The whole step is outside the cage in this direction. Record
+        // THIS direction as proven immovable, then try the OTHER direction
+        // before retiring the parameter outright -- 2026-09-09 fix: a
+        // baseline sitting at one edge of the cage (e.g. after a run of
+        // accepted increases) previously retired the parameter the first
+        // time the step clamped to no movement, even though the opposite
+        // direction was still entirely legal and unexplored.
+        uint8_t dir_bit = state->step_negative[pi] ? 0x2u : 0x1u;
+        state->cage_edge_dir_tried[pi] |= dir_bit;
+        if (state->cage_edge_dir_tried[pi] != 0x3u) {
+            // Only one direction proven immovable so far -- flip and retry
+            // the other one on the NEXT proposal for this same parameter
+            // (param is deliberately NOT advanced: the flipped direction
+            // gets its own trial before moving on).
+            state->step_negative[pi] = !state->step_negative[pi];
+            return false;
+        }
+        // Both directions independently proven immovable -- genuinely
+        // exhausted, retire it.
         state->param_done[pi] = 1;
         advance_param(state);
         bool all_retired = true;
@@ -302,6 +319,13 @@ iter_tune_result_t iter_tune_process_comparison(iter_tune_zone_state_t *state,
         state->has_pending = false;
         state->consec_accepts[pi]++;
         state->consec_rejects[pi] = 0;
+        // The baseline just moved, so any earlier "this direction is
+        // immovable" finding for this parameter was relative to the OLD
+        // baseline position and may no longer hold at the new one (the cage
+        // is fixed relative to the persisted anchor, but the baseline's
+        // position inside it just changed) -- clear both bits rather than
+        // carry a stale immovability finding forward.
+        state->cage_edge_dir_tried[pi] = 0;
         if (state->consec_accepts[pi] >= 2) {
             // Plan sec 4 caps accept-driven growth at 20%; a step already
             // grown past that by the probe path below keeps what it has
