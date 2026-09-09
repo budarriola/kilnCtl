@@ -294,19 +294,41 @@ static int uart_log_vprintf(const char *fmt, va_list args)
     return n;
 }
 
+/* 2026-09-08 stack-margin fix (uart_log_bridge measured LOW live, 1080 B
+ * free of 4096 B / 26.4%): uart_log_bridge_task()'s own frame was 832 B,
+ * dominated by three ~253-256 B buffers that used to be plain stack
+ * locals -- `entry` (the dequeued line), `payload` (entry + level byte,
+ * ready to send) and `drop_payload` (the separate "N line(s) dropped"
+ * notice). None of them need to be on the stack: this task is a SINGLE
+ * instance (see s_bridge's own comment), it is the sole reader of its
+ * queue, and nothing here is reentrant or ISR-called, so there is no
+ * concurrent-access hazard in giving them static storage instead.
+ * `payload` and `drop_payload` are also never live at the same time --
+ * `payload` is fully sent before `drop_payload` is even built -- so they
+ * are folded into one shared buffer (`s_send_buf`) rather than two.
+ * Plain `static` (not MALLOC_CAP_SPIRAM/heap): this task never writes
+ * flash or NVS (see uart_log_bridge_start()'s own comment on why its
+ * task stack is PSRAM-backed), so there is no flash-write-from-PSRAM
+ * hazard to dodge here the way bx_flash_worker's callers must; a
+ * compile-time static in ordinary internal DRAM .bss is simplest and
+ * costs nothing extra since none of this is on a hot path. This drops
+ * uart_log_bridge_task's own frame from 832 B to well under 100 B. */
+static uart_log_entry_t s_log_task_entry;
+static uint8_t s_log_task_send_buf[1 + UART_LOG_TEXT_MAX];
+
 static void uart_log_bridge_task(void *arg)
 {
     uart_log_bridge_t *bridge = (uart_log_bridge_t *)arg;
-    uart_log_entry_t entry;
+    uart_log_entry_t *entry = &s_log_task_entry;
 
     while (true) {
-        if (xQueueReceive(bridge->queue, &entry, portMAX_DELAY) != pdTRUE) {
+        if (xQueueReceive(bridge->queue, entry, portMAX_DELAY) != pdTRUE) {
             continue;
         }
 
-        uint8_t payload[1 + UART_LOG_TEXT_MAX];
-        payload[0] = entry.level;
-        memcpy(&payload[1], entry.text, entry.len);
+        uint8_t *payload = s_log_task_send_buf;
+        payload[0] = entry->level;
+        memcpy(&payload[1], entry->text, entry->len);
 
         /* Fire-and-forget: the result is intentionally ignored -- there is
          * nowhere to report it that wouldn't itself just be another log line
@@ -317,7 +339,7 @@ static void uart_log_bridge_task(void *arg)
          * 10-retry uart_protocol_send() call here was the actual congestion
          * mechanism, not merely a slow path. */
         uart_protocol_send_limited(bridge->proto, UART_PROTO_DEVICE_HOST, UART_TASK_ID_LOG,
-                                    UART_TASK_ID_LOG, payload, (size_t)entry.len + 1,
+                                    UART_TASK_ID_LOG, payload, (size_t)entry->len + 1,
                                     UART_LOG_BRIDGE_ACK_TIMEOUT_MS, UART_LOG_BRIDGE_MAX_RETRIES);
 
         /* Surface any lines lost to a full queue since the last report --
@@ -331,7 +353,10 @@ static void uart_log_bridge_task(void *arg)
         uint32_t dropped = s_dropped_lines;
         if (dropped > 0) {
             s_dropped_lines -= dropped;
-            uint8_t drop_payload[1 + UART_LOG_TEXT_MAX];
+            /* `payload` (above) is fully sent by this point -- reuse the
+             * same static buffer rather than a second one; see this
+             * function's opening comment. */
+            uint8_t *drop_payload = s_log_task_send_buf;
             drop_payload[0] = UART_LOG_LEVEL_WARN;
             int m = snprintf((char *)&drop_payload[1], UART_LOG_TEXT_MAX,
                               "uart_log_bridge: %u log line(s) dropped (queue full)",
