@@ -143,9 +143,21 @@ esp_err_t zones_config_cfg_fs_save(const zones_cfg_t *cfg, uint32_t rev)
      * serialize verbatim. Recomputing here, in the one place this module
      * actually writes bytes, means every file this function ever produces
      * is guaranteed to decode cleanly regardless of what happened to the
-     * caller's copy before it got here. A local, properly-aligned copy (not
-     * a cast of `raw + 4`) avoids any alignment assumption about a byte
-     * buffer. */
+     * caller's copy before it got here.
+     *
+     * 2026-09-09 correction: the paragraph above used to claim this uses "a
+     * local, properly-aligned copy (not a cast of `raw + 4`)" to avoid any
+     * alignment assumption about a byte buffer. 379f3fe6's frame-reduction
+     * pass (see the 2026-09-09 comment below) replaced that local struct
+     * copy with exactly the cast this comment says is avoided --
+     * `(zones_cfg_t *)(raw + 4)`, below. It is safe TODAY only because
+     * `zones_cfg_t` contains no 8-byte-aligned member (no `uint64_t`,
+     * `double`, etc.), so `_Alignof(zones_cfg_t) == 4` and `raw + 4` is
+     * always 4-aligned (malloc's own alignment guarantee covers `raw`
+     * itself). Nothing enforced that invariant, so a future 8-byte field
+     * added to zones_cfg_t would silently misalign this access instead of
+     * failing the build -- the _Static_assert immediately below exists to
+     * turn that into a compile error instead. */
     /* HEAP, never the stack -- the same rule the load path above already
      * follows, and for the same reason. 2026-09-09: this was the one
      * remaining stack copy of this buffer, and with `stamped` beside it this
@@ -173,6 +185,13 @@ esp_err_t zones_config_cfg_fs_save(const zones_cfg_t *cfg, uint32_t rev)
      * the caller's cfg. */
     put_u32_le(raw, rev);
     memcpy(raw + 4, cfg, blob_len);
+    /* See the 2026-09-09 correction above: this cast is only well-aligned
+     * because zones_cfg_t needs no more than 4-byte alignment. Pin that
+     * assumption so an 8-byte field added later fails the build instead of
+     * producing a misaligned struct access on the board. */
+    _Static_assert(_Alignof(zones_cfg_t) <= 4, "zones_cfg_t alignment grew past 4 -- raw + 4 below is only "
+                                                "4-aligned; a >4-byte-aligned member here needs a real "
+                                                "aligned copy, not this cast");
     zones_cfg_t *raw_cfg = (zones_cfg_t *)(raw + 4);
     uint32_t crc = zones_config_json_compute_crc(raw_cfg);
     put_u32_le(raw + 4 + offsetof(zones_cfg_t, crc32), crc);
