@@ -998,6 +998,7 @@ typedef struct {
     uint32_t cmd_commit_config_rejected_count;    /* KILNLINK_COMMIT_CONFIG_REJECTED_CMD (0x20) */
     uint32_t cmd_rollback_result_count;           /* KILNLINK_ROLLBACK_RESULT_CMD (0x25) */
     uint32_t cmd_ct_auto_zero_status_count;       /* KILNLINK_CT_AUTO_ZERO_STATUS_CMD (0x28) */
+    uint32_t cmd_reboot_result_count;             /* KILNLINK_REBOOT_RESULT_CMD (0x2A) */
 
     /* 2026-08-23, size-window follow-up: the histogram above proves WHICH
      * cmd byte a dequeued frame carried, but says nothing about how LONG it
@@ -1024,6 +1025,7 @@ typedef struct {
     uint8_t last_commit_config_rejected_len;
     uint8_t last_rollback_result_len;
     uint8_t last_ct_auto_zero_status_len;
+    uint8_t last_reboot_result_len;
 
     /* HW_ABSTRACTION.md "Still open", 2026-09-06: on-board ESP<->Pico link
      * reply latency, measured in safety_exchange() (safety_link_inbox.c)
@@ -1201,6 +1203,19 @@ typedef struct {
     uart_proto_message_t stashed_ct_auto_zero_status;
     bool                 has_stashed_ct_auto_zero_status;
     TickType_t           stashed_ct_auto_zero_status_tick;
+
+    /* SAFETY_CMD_REBOOT_RESULT (0x2A) -- the reply to the reboot-in-place
+     * command (kilnlink_reboot_result.h), stashed unconditionally exactly
+     * like CT_AUTO_ZERO_STATUS above and for the same reason: it arrives on
+     * this same shared inbox as GET_STATUS/DIAG/POWER, so a reply landing
+     * between safety_link_send_reboot()'s own drain window and the caller
+     * looking again would otherwise be discarded by the next unrelated
+     * drain. One caller (sw_reset_http.c, via safety_link_send_reboot()),
+     * serialized by xact_lock, so there is nothing to match on -- any
+     * stashed frame belongs to the most recent request. */
+    uart_proto_message_t stashed_reboot_result;
+    bool                 has_stashed_reboot_result;
+    TickType_t           stashed_reboot_result_tick;
 
     safety_link_stats_t stats;
     /* Running sum backing stats.link_reply_us_mean -- kept outside
@@ -2015,6 +2030,64 @@ esp_err_t safety_link_send_rollback_ex(SafetyLinkClass *link, safety_link_rollba
  * calling esp_restart(), not after -- there is no way to recover a reboot
  * that has already begun. */
 esp_err_t safety_link_send_announce_reboot(SafetyLinkClass *link);
+
+/* The honest outcome of safety_link_send_reboot() below. Deliberately
+ * distinguishes "the Pico said yes" from "nobody answered" -- silence is
+ * NEVER folded into success here, the same discipline
+ * safety_link_rollback_outcome_t documents at length for the rollback path
+ * (and for the same reason: a link that was simply down looks exactly like
+ * a peer that accepted, if you only measure whether a refusal arrived). */
+typedef enum {
+    /* The Pico decoded SAFETY_CMD_REBOOT, its ARMED gate passed, and it
+     * replied SAFETY_CMD_REBOOT_RESULT with accepted=1. This means "accepted
+     * and about to reset", NOT "finished rebooting" -- the reply necessarily
+     * leaves before the reset happens (kilnlink_reboot_result.h). */
+    SAFETY_LINK_REBOOT_OUTCOME_ACCEPTED = 0,
+    /* The Pico replied accepted=0. `out_reason_code` carries the
+     * kilnlink_reboot_result_reason_t (today: ARMED). */
+    SAFETY_LINK_REBOOT_OUTCOME_REFUSED,
+    /* The link was down before the request was even sent -- nothing left
+     * this board. Distinguished from NO_REPLY because it is diagnosable
+     * without involving the peer at all. */
+    SAFETY_LINK_REBOOT_OUTCOME_LINK_DOWN,
+    /* The request could not be encoded, or the UART refused it locally. */
+    SAFETY_LINK_REBOOT_OUTCOME_SEND_FAILED,
+    /* The request went out and nothing came back within the reply window.
+     * The honest reading: UNKNOWN. Either the Pico predates this command
+     * (its dispatch has no case for 0x29 and it silently dropped it), or
+     * the reply was lost, or the link died in between. Callers must report
+     * this as "not confirmed", never as a reboot that happened. */
+    SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY,
+} safety_link_reboot_outcome_t;
+
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_REBOOT (0x29) / its reply
+ * SAFETY_CMD_REBOOT_RESULT (0x2A) -- the genuine "safety processor, reboot
+ * yourself in place, into the SAME firmware slot" command, the Pico half of
+ * this driver's own sw_reset_http.c (POST /api/sw_reset).
+ *
+ * NOT safety_link_send_rollback[_ex]() above: a rollback marks the running
+ * slot BAD, writes bootloader metadata, and comes back on a DIFFERENT,
+ * possibly-refused image. NOT safety_link_send_announce_reboot() either:
+ * that is a courtesy notice about the ESP's own reboot that asks the Pico to
+ * do nothing at all. This command changes no image and no configuration --
+ * see update_task_reboot_now() (SaftyFW) for the "touches no configuration"
+ * proof, which is a property of that function's whole body.
+ *
+ * One round trip, structured like safety_link_get_ct_auto_zero_status():
+ * take xact_lock, clear any stale stash, send the 1-byte BROADCAST, wait up
+ * to SAFETY_LINK_REPLY_TIMEOUT_MS, then read the stash. Unlike the rollback
+ * path there is NO boot_id watch and no inference from silence: this frame
+ * is ACKed on acceptance (kilnlink_reboot_result.h's "SYMMETRIC" comment),
+ * so a positive answer is either on the wire or it did not happen.
+ *
+ * `out_outcome` is required and always written. `out_reason_code`, if
+ * non-NULL, is filled with the peer's kilnlink_reboot_result_reason_t on
+ * REFUSED only. Returns ESP_ERR_INVALID_ARG/ESP_ERR_INVALID_STATE for the
+ * usual local misuse, otherwise ESP_OK with the real answer in
+ * `*out_outcome` -- an unreachable or refusing peer is not an error of this
+ * function, it is an outcome. */
+esp_err_t safety_link_send_reboot(SafetyLinkClass *link, safety_link_reboot_outcome_t *out_outcome,
+                                   uint8_t *out_reason_code);
 
 /* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_CT_CAL (0x19) -- the
  * GUI/bench-tool's path to commissioning one channel of SaftyFW's

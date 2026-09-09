@@ -63,6 +63,11 @@ idf_component_register(
          # for a refused SAFETY_CMD_ROLLBACK, safety_link.c decodes this the
          # same way it decodes COMMIT_CONFIG_REJECTED above.
          "${KILNLINK_DIR}/src/kilnlink_rollback_result.c"
+         # SAFETY_CMD_REBOOT (0x29) / SAFETY_CMD_REBOOT_RESULT (0x2A) -- the
+         # reboot-in-place command behind POST /api/sw_reset
+         # (App/drivers/http/sw_reset_http.c via safety_link_send_reboot()).
+         "${KILNLINK_DIR}/src/kilnlink_reboot.c"
+         "${KILNLINK_DIR}/src/kilnlink_reboot_result.c"
          # CT_COMMISSIONING_PLAN.md step 2 -- SAFETY_CMD_CT_AUTO_ZERO_BEGIN
          # (0x26) / SAFETY_CMD_GET_CT_AUTO_ZERO (0x27) / SAFETY_CMD_CT_AUTO_
          # ZERO_STATUS (0x28 reply), safety_link_commands.c's safety_link_

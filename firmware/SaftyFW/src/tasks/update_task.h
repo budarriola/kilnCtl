@@ -99,6 +99,49 @@ void update_task_handle_abort(const uint8_t *payload, uint8_t length);
 // any detail this pass did not need to touch.
 bool update_task_request_rollback(const char **out_reason, uint8_t *out_reason_code);
 
+// SAFETY_CMD_REBOOT (0x29) -- "reboot yourself, in place, into the SAME
+// firmware slot you are running now", the Pico half of KilnFW's POST
+// /api/sw_reset. Split into a PURE POLICY half (this function) and an
+// ACT half (update_task_reboot_now() below), unlike
+// update_task_request_rollback() above which does both in one call.
+//
+// The split exists because this command, unlike a rollback, CAN honestly
+// ACK its own acceptance on the wire: link_task_handle_reboot() asks this
+// function, sends SAFETY_CMD_REBOOT_RESULT (0x2A) with the answer, lets the
+// UART drain, and only then calls update_task_reboot_now(). Folding the
+// reboot into this function the way request_rollback() does would make that
+// impossible -- there would be no instant between "decided" and "reset" in
+// which a reply could be queued.
+//
+// Returns true when a reboot is allowed. Returns false, filling
+// `*out_reason` (free text, for THIS processor's local log) and
+// `*out_reason_code` (a kilnlink_reboot_result_reason_t, for the wire) when
+// it is refused. The one refusal today is the relay being ARMED -- the same
+// gate SET_CONFIG/SET_CT_CAL/ROLLBACK already use, and for the same reason:
+// resetting the safety processor while it is holding heating permission
+// would drop that supervision mid-firing.
+//
+// Reads relay state only -- no flash, no config_store, no bootloader
+// metadata. See update_task_reboot_now()'s comment for the "touches no
+// configuration" property this whole pair exists to keep provable.
+bool update_task_reboot_allowed(const char **out_reason, uint8_t *out_reason_code);
+
+// The ACT half of the pair above: reboots the RP2040 in place, via the SAME
+// hal_wdt_reboot() (pico-sdk watchdog_reboot(0,0,0)) that
+// update_task_request_rollback() already uses -- there is deliberately no
+// second reboot mechanism in this firmware.
+//
+// TOUCHES NO CONFIGURATION, and that is the load-bearing difference from a
+// rollback: this function's whole body is a log line and hal_wdt_reboot().
+// It writes no bootloader metadata record (so the running slot stays the
+// running slot), calls nothing in config_store, and performs no flash write
+// of any kind. The board comes back up on exactly the image it is running
+// now, with exactly the configuration it has now.
+//
+// DOES NOT RETURN. Callers must have already sent/logged everything they
+// want the world to see before calling it.
+void update_task_reboot_now(void);
+
 // True while an UPDATE_BEGIN...UPDATE_END/ABORT transfer is actively staged
 // (s_transfer_active, update_task.c) -- i.e. between a UPDATE_BEGIN this
 // task accepted and whichever of UPDATE_END/UPDATE_ABORT/an internal

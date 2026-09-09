@@ -199,7 +199,39 @@
  * KILNLINK_MIN_COMPATIBLE is NOT raised alongside this bump, same
  * reasoning as 8->9/9->10/10->11: a peer built against 7 through 11
  * remains fully compatible with a 12-built peer for every frame that
- * existed before this pass. */
+ * existed before this pass.
+ *
+ * 12 -> 12, DELIBERATELY NOT BUMPED (2026-09-09): SAFETY_CMD_REBOOT (0x29,
+ * ESP->Pico, kilnlink_reboot.h) and its reply SAFETY_CMD_REBOOT_RESULT
+ * (0x2A, Pico->ESP, kilnlink_reboot_result.h) -- the genuine "reboot
+ * yourself in place, same firmware slot" command behind KilnFW's POST
+ * /api/sw_reset. Two brand-new ids, nothing existing changed shape. This
+ * entry exists because the question "does an additive opcode need a bump?"
+ * was asked explicitly, and the answer here is NO -- a narrower argument
+ * than the 11->12 step's, resting on one specific structural property:
+ *   - This pair is REQUEST-TRIGGERED in both directions. Only a build that
+ *     has this feature ever sends 0x29, and a Pico only ever emits 0x2A in
+ *     direct reply to a 0x29 it just decoded. There is therefore no path by
+ *     which an OLD peer, in either direction, ever receives a byte it does
+ *     not know: an old Pico never sends 0x2A (it never understood a 0x29 to
+ *     reply to), and an old ESP never receives 0x2A (it never sent a 0x29).
+ *     Contrast SAFETY_CMD_ROLLBACK_RESULT (8->9) and the Frame A length
+ *     growths (5->6, 9->10), all emitted on the PICO's own initiative and
+ *     therefore genuinely needing both a bump and a peer_protocol_version
+ *     gate to know when it was safe to speak.
+ *   - This file's stated rule is "bump when a change would break a peer
+ *     running the old value." Nothing here can: an old Pico drops the
+ *     unrecognized 0x29 into link_task.c's dispatch default (counted, never
+ *     acted on), safety_link_send_reboot() sees no reply within its bounded
+ *     window and reports NO_REPLY, and sw_reset_http.c reports honestly
+ *     that the safety processor was NOT confirmed to reboot. Degraded,
+ *     visible, never misreported as success -- exactly the property a bump
+ *     would have been protecting.
+ * If a FUTURE change makes either frame Pico-initiated (an unsolicited "I
+ * am about to reboot myself" notice, say), that change DOES need a bump
+ * plus a link_frame_*_supported() gate like ROLLBACK_RESULT's -- the
+ * argument above depends entirely on the request-triggered shape and does
+ * not survive without it. */
 #define KILNLINK_PROTOCOL_VERSION 12
 
 /* The oldest peer this build will talk to (docs/LINK_PROTOCOL.md section 4,

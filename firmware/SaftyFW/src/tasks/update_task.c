@@ -108,6 +108,7 @@
 #include "update_receiver.h" // src/update/
 
 #include "kilnlink/kilnlink_frame.h" // KILNLINK_FRAME_MAX_PAYLOAD
+#include "kilnlink/kilnlink_reboot_result.h" // kilnlink_reboot_result_reason_t, for update_task_reboot_allowed()'s out_reason_code
 #include "kilnlink/kilnlink_rollback_result.h" // kilnlink_rollback_result_reason_t, for update_task_request_rollback()'s out_reason_code
 
 #define UPDATE_TASK_STACK_WORDS (configMINIMAL_STACK_SIZE * 3) // page_buf below is 512 bytes
@@ -1174,6 +1175,65 @@ bool update_task_request_rollback(const char **out_reason, uint8_t *out_reason_c
         // Defensive only: hal_wdt_reboot() does not return on real
         // hardware. Never reached, but a function declared to return bool
         // must not fall off its own end.
+    }
+}
+
+// --- Reboot in place (SAFETY_CMD_REBOOT, 0x29) ----------------------------
+//
+// The Pico half of KilnFW's POST /api/sw_reset. Split policy/act pair --
+// see update_task.h's own doc comments on both functions for why this one
+// is split where update_task_request_rollback() above is not.
+
+bool update_task_reboot_allowed(const char **out_reason, uint8_t *out_reason_code)
+{
+    // The SAME ARMED-equivalent gate update_task_request_rollback() above
+    // uses, reached the same legal way (safety_core_get_output_status(), not
+    // relay_owner.h directly -- see this file's header comment). A reboot in
+    // place is less disruptive than a rollback in that it changes no image
+    // and no configuration, but it is exactly as disruptive in the one way
+    // that matters here: the safety processor stops supervising for a
+    // couple of seconds. That is not something to do while it is holding
+    // heating permission.
+    bool relay_energized = false;
+    safety_core_get_output_status(&relay_energized, NULL);
+    if (relay_energized) {
+        if (out_reason) {
+            *out_reason = "refused: relay is ARMED, reboot is refused while ARMED "
+                          "(same gate as config writes and rollback)";
+        }
+        if (out_reason_code) {
+            *out_reason_code = KILNLINK_REBOOT_RESULT_REASON_ARMED;
+        }
+        return false;
+    }
+
+    if (out_reason) {
+        *out_reason = "ok";
+    }
+    if (out_reason_code) {
+        *out_reason_code = KILNLINK_REBOOT_RESULT_REASON_NONE;
+    }
+    return true;
+}
+
+void update_task_reboot_now(void)
+{
+    // Everything this function does is on these four lines, and that is the
+    // point: no update_task_persist_metadata(), no config_store_* call, no
+    // flash_safe_execute(), no bootloader_decide_* -- nothing that could
+    // change which slot boots or what configuration it boots with. Compare
+    // update_task_request_rollback() above, which deliberately DOES write a
+    // metadata record before its own hal_wdt_reboot(). If a future edit adds
+    // any write to this function, test_reboot_in_place_wiring.c (SaftyFW's
+    // host test suite) fails: it scans this exact function body.
+    log_task_log(LOG_LEVEL_WARN, "reboot", "rebooting in place, same slot, no config touched");
+
+    // Same single reboot mechanism the rest of this file already uses --
+    // hal_wdt.h's Pico backend is pico-sdk's watchdog_reboot(0, 0, 0). No
+    // second mechanism is introduced for this command.
+    hal_wdt_reboot();
+    for (;;) {
+        // Defensive only: hal_wdt_reboot() does not return on real hardware.
     }
 }
 

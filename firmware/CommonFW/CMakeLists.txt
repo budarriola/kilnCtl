@@ -60,6 +60,8 @@ add_library(kilnlink STATIC
     src/kilnlink_get_config_page.c
     src/kilnlink_config_page.c
     src/kilnlink_rollback_result.c
+    src/kilnlink_reboot.c
+    src/kilnlink_reboot_result.c
     src/kilnlink_fw_version.c
     src/kilnlink_ct_auto_zero_begin.c
     src/kilnlink_get_ct_auto_zero.c
@@ -381,6 +383,24 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         target_compile_options(test_rollback_result PRIVATE -Wall -Wextra -Werror)
     endif()
     add_test(NAME test_rollback_result COMMAND test_rollback_result)
+
+    add_executable(test_reboot test/test_reboot.c)
+    target_link_libraries(test_reboot PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_reboot PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_reboot PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_reboot COMMAND test_reboot)
+
+    add_executable(test_reboot_result test/test_reboot_result.c)
+    target_link_libraries(test_reboot_result PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_reboot_result PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_reboot_result PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_reboot_result COMMAND test_reboot_result)
 
     add_executable(test_inject_tc test/test_inject_tc.c)
     target_link_libraries(test_inject_tc PRIVATE kilnlink)

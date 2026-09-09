@@ -92,19 +92,73 @@
      menu as the danger-zone erases below, reusing their confirm-then-POST-
      then-report idiom, but NOT one of the danger-btn scopes -- it erases
      nothing at all, so it sits above the "Danger zone" heading rather than
-     inside it, with no --bad styling. Immediately useful for clearing a
-     stuck safety-processor trip without JTAG. -->
+     inside it, with no --bad styling.
+
+     2026-09-09 CORRECTION: this block previously claimed the reboot was
+     "immediately useful for clearing a stuck safety-processor trip without
+     JTAG", and da506105's commit message said it clears "an S6a trip". Both
+     are FALSE, and the copy below now says the opposite. Verified against
+     the code:
+
+       * S6a is unconditional. safety_guards.c's S6a block trips on the
+         debounced mainFault line with no grace check at all
+         (`if (in->main_fault_asserted) trip(..., SAFETY_TRIP_MAIN_FAULT, ...)`).
+         reboot_grace_active gates ONLY S6b's two trip() calls, inside the
+         link-dead block, and safety_guards.h says so explicitly ("Scope is
+         narrow and deliberate: this ONLY suppresses S6b's own trip
+         condition").
+       * A reboot ASSERTS S6a rather than clearing it. GPIO6 (the isolated
+         fault line) powers up as a floating input on ESP reset, and
+         safety_link.c calls a floating gate on U1 "an undefined fault state
+         at the safety processor" -- so the whole reset-to-bring-up window
+         looks like mainFault to the Pico. CLAUDE.md records the same thing
+         from the bench: resetting the ESP trips S6a.
+       * Rebooting the Pico too does not rescue it. The Pico's latch is RAM
+         only, so its own reboot does clear it -- but an RP2040 boots far
+         faster than an ESP32-S3, so the fresh Pico is watching a still-
+         floating GPIO6 and re-latches SAFETY_TRIP_MAIN_FAULT immediately.
+       * Nothing on this path sends a clear. safety_link_send_clear_trip()'s
+         only callers are POST /api/safety/clear_trip and the PC bridge.
+
+     Extending the grace to cover S6a was considered and REJECTED (option (a)
+     of the review), for two independent reasons. Safety: S6b's evidence is
+     the ABSENCE of information, which is why deferring judgement on it is
+     sound and why its elapsed accumulator can keep running so the trip fires
+     the tick the window shuts; S6a's evidence is a PRESENT positive
+     assertion that the main processor is faulted or gone, and once the ESP
+     is back the line falls again, so suppressing it would discard that
+     evidence permanently rather than defer it -- there is no equivalent
+     "re-fires on expiry" property to lean on. Correctness: it would not even
+     work. A grace suppresses NEW trips; it cannot un-latch the ALREADY
+     latched trip the operator is trying to clear, which is the entire
+     scenario. So (a) buys real risk for zero benefit.
+
+     And it is unnecessary: a non-JTAG clear path already exists and always
+     did -- the "Clear latched trip" button on the Safety page (and the
+     dashboard's own Clear Trip button), both POSTing /api/safety/clear_trip.
+     That is where this copy now points. -->
 <h2 id="sw-reset">Reboot</h2>
-<p>Reboots the ESP right now, and tells the safety processor to expect that
-so it does not raise a false link-lost alarm. This does <strong>not</strong>
-erase or change any configuration -- zones, profiles, Wi-Fi credentials and
-saved settings are all left exactly as they are. Refused while a firing or
-autotune is running, or with any heater commanded on. (The safety processor
-itself is only notified, not rebooted -- there is currently no way to make it
-reboot from here; see the board's documentation if you need to clear its
-state, e.g. with a physical reset.)</p>
+<p>Reboots <strong>both</strong> processors right now: this controller, and
+the safety processor, which is commanded to restart in place -- same
+firmware, same settings. This does <strong>not</strong> erase or change any
+configuration on either one -- zones, profiles, Wi-Fi credentials and saved
+settings are all left exactly as they are. Refused while a firing or autotune
+is running, or with any heater commanded on.</p>
+<p>The safety processor can refuse on its own account (it will, if its heating
+relay is armed), and older safety firmware may not know this command at all.
+Either way this controller still reboots, and the message below reports what
+actually happened on <em>each</em> processor -- it will not claim the safety
+processor rebooted unless the safety processor said so.</p>
+<p><strong>This does not clear a latched safety trip.</strong> It is a plain
+reboot and nothing on this path sends a clear. If the safety processor has
+tripped, rebooting will not release it -- and while this controller resets,
+its fault line to the safety processor is briefly undefined, which is itself
+a mainFault (S6a) condition, so a reboot can leave you with a trip latched
+even if there was not one before. To release a latched trip use
+<a href="/safety">Clear latched trip on the Safety page</a>; heat stays
+blocked until you do. No JTAG is needed for that, and never was.</p>
 <p>
-<button type="button" id="swResetBtn">Reboot ESP (no config changes)</button>
+<button type="button" id="swResetBtn">Reboot both processors (no config changes)</button>
 </p>
 <p id="swResetStatus"></p>
 
@@ -214,12 +268,16 @@ document.getElementById('cfgFsFormatConfirmBtn').addEventListener('click', funct
 // mixed into the danger-btn loop below: no scope, no "erases X" wording, and
 // a different confirm message reflecting that nothing is being erased.
 document.getElementById('swResetBtn').addEventListener('click', function () {
-  if (!kcConfirm('This reboots the ESP right now (the safety processor is only notified, not '
-               + 'rebooted). No configuration is erased or changed. Continue?')) {
+  if (!kcConfirm('This reboots both processors right now -- this controller, and the safety '
+               + 'processor in place (same firmware). No configuration is erased or changed. '
+               + 'The safety processor may refuse if its relay is armed; the result will say so. '
+               + 'This does NOT clear a latched safety trip -- and it can cause one. '
+               + 'Use "Clear latched trip" on the Safety page for that. '
+               + 'Continue?')) {
     return;
   }
   var status = document.getElementById('swResetStatus');
-  status.textContent = 'Rebooting...';
+  status.textContent = 'Rebooting both processors...';
   fetch('/api/sw_reset', { method: 'POST' }).then(function (r) {
     return r.text().then(function (t) { return { ok: r.ok, text: t }; });
   }).then(function (res) {

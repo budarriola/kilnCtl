@@ -39,6 +39,8 @@
 #include "kilnlink/kilnlink_clear_trip.h"
 #include "kilnlink/kilnlink_commit_config.h"
 #include "kilnlink/kilnlink_commit_config_rejected.h"
+#include "kilnlink/kilnlink_reboot.h"
+#include "kilnlink/kilnlink_reboot_result.h"
 #include "kilnlink/kilnlink_rollback_result.h"
 #include "kilnlink/kilnlink_config_page.h"
 #include "kilnlink/kilnlink_context.h"
@@ -657,6 +659,124 @@ esp_err_t safety_link_send_announce_reboot(SafetyLinkClass *link)
      * the wire). */
     return uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
                                          UART_TASK_ID_SAFETY, payload, len);
+}
+
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_REBOOT (0x29) / reply
+ * SAFETY_CMD_REBOOT_RESULT (0x2A) -- see safety_link.h's doc comment on
+ * this function and on safety_link_reboot_outcome_t for the full contract
+ * (and for why this one, unlike the rollback path, never has to infer
+ * acceptance from silence). Structured like safety_link_get_ct_auto_zero_
+ * status(): one round trip, xact_lock held across it, the reply read from
+ * the unconditional stash safety_drain_inbox_ex() fills. */
+esp_err_t safety_link_send_reboot(SafetyLinkClass *link, safety_link_reboot_outcome_t *out_outcome,
+                                   uint8_t *out_reason_code)
+{
+    safety_link_reboot_outcome_t local_outcome = SAFETY_LINK_REBOOT_OUTCOME_LINK_DOWN;
+    if (!out_outcome) {
+        out_outcome = &local_outcome; /* every path below still writes it, so the logs stay honest */
+    }
+    *out_outcome = SAFETY_LINK_REBOOT_OUTCOME_LINK_DOWN;
+
+    if (!link) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Refuse locally when the link is already known down, same first check
+     * safety_link_send_rollback_ex() makes and for the same reason: sending
+     * into a dead link and then reporting the resulting silence as an
+     * unknown outcome would hide a fact this board already knows for
+     * certain. LINK_DOWN is a distinct outcome from NO_REPLY on purpose. */
+    safety_link_status_t link_status;
+    if (safety_link_get_status(link, &link_status) != ESP_OK || !link_status.link_up) {
+        ESP_LOGW(TAG, "reboot: refused locally, the safety link is down -- not sending");
+        *out_outcome = SAFETY_LINK_REBOOT_OUTCOME_LINK_DOWN;
+        return ESP_OK;
+    }
+
+    kilnlink_reboot_t msg = {0};
+    uint8_t payload[KILNLINK_REBOOT_LEN];
+    kilnlink_reboot_status_t status = KILNLINK_REBOOT_OK;
+    size_t len = kilnlink_reboot_encode(&msg, payload, sizeof(payload), &status);
+    if (len == 0) {
+        ESP_LOGE(TAG, "reboot: encode failed (status=%d)", (int)status);
+        *out_outcome = SAFETY_LINK_REBOOT_OUTCOME_SEND_FAILED;
+        return ESP_OK;
+    }
+
+    if (xSemaphoreTake(link->xact_lock, pdMS_TO_TICKS(SAFETY_XACT_LOCK_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGE(TAG, "reboot: timed out after %ums waiting for the safety link transaction lock",
+                 (unsigned)SAFETY_XACT_LOCK_TIMEOUT_MS);
+        *out_outcome = SAFETY_LINK_REBOOT_OUTCOME_SEND_FAILED;
+        return ESP_OK;
+    }
+
+    /* A reply stashed by a PRIOR request must never be read as this one's
+     * answer -- same reasoning as safety_clear_stashed_rollback_result()'s
+     * own comment, and the same "anything already queued is from before our
+     * request" drain safety_link_get_ct_auto_zero_status() does. */
+    uart_proto_message_t stale;
+    (void)safety_take_stashed_reboot_result(link, &stale);
+    (void)safety_drain_inbox(link, 0);
+
+    ESP_LOGW(TAG, "reboot: sending -- asking the safety processor to reboot in place "
+                  "(same firmware slot, no configuration touched)");
+    esp_err_t err = uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY,
+                                                  UART_TASK_ID_SAFETY, UART_TASK_ID_SAFETY,
+                                                  payload, len);
+    if (err != ESP_OK) {
+        if (safety_lock(link)) {
+            link->stats.timeouts++;
+            safety_unlock(link);
+        }
+        xSemaphoreGive(link->xact_lock);
+        ESP_LOGE(TAG, "reboot: send failed: %s", esp_err_to_name(err));
+        *out_outcome = SAFETY_LINK_REBOOT_OUTCOME_SEND_FAILED;
+        return ESP_OK;
+    }
+
+    (void)safety_drain_inbox(link, SAFETY_LINK_REPLY_TIMEOUT_MS);
+
+    uart_proto_message_t reply;
+    bool got_reply = safety_take_stashed_reboot_result(link, &reply);
+    xSemaphoreGive(link->xact_lock);
+
+    if (!got_reply) {
+        /* Silence. Either a Pico too old to have a dispatch case for 0x29,
+         * a lost reply, or a link that died mid-request. All three are
+         * UNKNOWN, and none of them may be reported as a reboot that
+         * happened -- see safety_link_reboot_outcome_t's own comment. */
+        ESP_LOGW(TAG, "reboot: no REBOOT_RESULT within %ums -- outcome NOT confirmed, never reported "
+                      "as accepted (a safety processor predating this command answers exactly like this)",
+                 (unsigned)SAFETY_LINK_REPLY_TIMEOUT_MS);
+        *out_outcome = SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY;
+        return ESP_OK;
+    }
+
+    kilnlink_reboot_result_t result = {0};
+    if (kilnlink_reboot_result_decode(reply.payload, reply.length, &result) != KILNLINK_REBOOT_RESULT_OK) {
+        /* Matched the id/length gate in the inbox but failed the codec's own
+         * checks -- do not claim an outcome this driver cannot prove. */
+        ESP_LOGE(TAG, "reboot: a REBOOT_RESULT-shaped frame arrived but failed to decode");
+        *out_outcome = SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY;
+        return ESP_OK;
+    }
+
+    if (result.accepted) {
+        ESP_LOGW(TAG, "reboot: ACCEPTED by the safety processor -- it is about to reset "
+                      "(this confirms acceptance, not completion)");
+        *out_outcome = SAFETY_LINK_REBOOT_OUTCOME_ACCEPTED;
+        return ESP_OK;
+    }
+
+    if (out_reason_code) {
+        *out_reason_code = result.reason;
+    }
+    ESP_LOGW(TAG, "reboot: REFUSED by the safety processor (reason=%u)", (unsigned)result.reason);
+    *out_outcome = SAFETY_LINK_REBOOT_OUTCOME_REFUSED;
+    return ESP_OK;
 }
 
 /* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_CT_CAL (0x19) -- see

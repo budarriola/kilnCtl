@@ -1,5 +1,7 @@
 #include "sw_reset_http.h"
 
+#include <stdio.h>
+
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -11,31 +13,90 @@
 #include "ota_http.h" /* interlocks + challenge/response auth -- same idiom as
                         * factory_reset.c's reset_post_handler(), see there for
                         * the full rationale on auth-before-interlock ordering */
-#include "safety_link.h" /* safety_link_send_announce_reboot() -- the existing,
-                           * version-independent courtesy notice; see this
-                           * file's header comment on what it does NOT do */
+#include "safety_link.h" /* safety_link_send_reboot() -- the real Pico
+                           * reboot-in-place command (SAFETY_CMD_REBOOT,
+                           * 0x29); safety_link_send_announce_reboot() is
+                           * still sent alongside it, see the reboot task */
 #include "wifi_provision_http.h"
 
 static const char *TAG = "sw_reset";
+
+// --- What this route deliberately does NOT do ----------------------------
+//
+// 1. It does not clear a latched safety trip, and must not be described as
+//    if it did. da506105's UI copy and commit message both claimed it
+//    cleared "a stuck S6a trip"; that was false, and settings_page.html's
+//    own 2026-09-09 CORRECTION comment carries the full verification (S6a
+//    is unconditional in safety_guards.c -- reboot_grace_active gates only
+//    S6b -- and an ESP reset floats GPIO6, which the Pico reads AS
+//    mainFault, so this route tends to CAUSE an S6a latch rather than clear
+//    one). Extending the grace over S6a was considered and rejected: S6a's
+//    evidence is a present positive assertion rather than S6b's absence of
+//    information, so suppression would discard it rather than defer it, and
+//    a grace cannot un-latch the already-latched trip anyway. The real
+//    clear path is POST /api/safety/clear_trip
+//    (safety_link_send_clear_trip()), reachable without JTAG from the
+//    Safety page -- not from here.
+//
+// 2. It does not call boot_guard_reset_counter(). That escape hatch exists
+//    for a TOOL that knows it just deliberately replaced the firmware
+//    (docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md),
+//    and an operator clicking Reboot is NOT the same fact. All a click
+//    proves is that this board reached the HTTP stack on this boot --
+//    exactly the evidence boot_confirm_is_healthy() already tries to use,
+//    not the independent "the firmware just changed" knowledge that
+//    justifies bypassing the counter. Wiring it in here would mask a board
+//    that boots fine, serves this page, and then dies minutes later: an
+//    operator rebooting it each time would clear the counter every cycle
+//    and recovery mode would never arm. That is the same failure the
+//    audit's negative test proved when the call was placed in
+//    boot_guard_init(), just triggered by a human instead of by every boot.
+//
+//    The residual is accepted and real: because the counter is NOT cleared
+//    here, and because boot_confirm's one-shot NVS snapshot can miss, a
+//    run of back-to-back reboots from this button can still walk a healthy
+//    board toward recovery mode. Reported rather than papered over -- the
+//    fix belongs in boot_confirm's snapshot (retry it) or in flash_firmware()
+//    calling boot_guard_reset_counter(), not in weakening the counter from a
+//    web button.
 
 // Set once by sw_reset_http_start(), read-only after -- same pattern as
 // ota_http.c's own s_io/s_thermo_bus/ota_http_safety. May be NULL on a board
 // with no safety processor commissioned yet; every use below tolerates that.
 static SafetyLinkClass *s_safety;
 
-// Runs on its own short-lived task so the "ok" response already queued by
-// the handler has a chance to reach the client before esp_restart() tears
-// the connection down -- identical shape to factory_reset.c's reboot_task()
-// and ota_http_esp.c's ota_rollback_reboot_task().
+// How the two halves of this reboot are reported to the operator.
 //
-// Pico half: sends SAFETY_CMD_ANNOUNCE_REBOOT (existing courtesy notice,
-// KILNLINK_PROTOCOL_VERSION untouched) so SaftyFW's S6b link-dead guard does
-// not nuisance-trip on the ESP's brief absence -- the SAME call ota_http_esp.c
-// already makes before its own esp_restart(). This is NOT a command that
-// makes the Pico reboot: the wire protocol has no such command today (see
-// this file's header comment). The owner asked for both processors to
-// reboot; only the ESP half is implemented here. Reported, not silently
-// dropped.
+// The distinction that matters: "the safety processor accepted and is about
+// to reset" IS provable from the wire (SAFETY_CMD_REBOOT_RESULT, accepted=1).
+// "The safety processor finished rebooting" is NOT provable here -- that
+// reply necessarily leaves the Pico before its reset, and this ESP is about
+// to reboot itself, so it will not be around to watch. Every sentence below
+// therefore says "accepted"/"commanded", never "rebooted".
+typedef enum {
+    SW_RESET_PICO_ACCEPTED = 0,
+    SW_RESET_PICO_REFUSED,
+    SW_RESET_PICO_UNCONFIRMED, /* sent but unanswered -- or link down, or send failed */
+    SW_RESET_PICO_NO_LINK,     /* no safety processor configured on this boot at all */
+} sw_reset_pico_report_t;
+
+// Runs on its own short-lived task so the response already queued by the
+// handler has a chance to reach the client before esp_restart() tears the
+// connection down -- identical shape to factory_reset.c's reboot_task() and
+// ota_http_esp.c's ota_rollback_reboot_task().
+//
+// The Pico's own reboot is NOT commanded here: it is commanded on the
+// request task, before the response is written, so its real outcome can go
+// INTO that response (2026-09-09 -- the first version of this file only ever
+// sent ANNOUNCE_REBOOT from here and said so in its own comments, because no
+// wire command for a Pico reboot-in-place existed yet; SAFETY_CMD_REBOOT
+// (0x29, kilnlink_reboot.h) now does).
+//
+// ANNOUNCE_REBOOT is still sent from here, and is still a different fact:
+// it announces THIS ESP's imminent absence. It matters most in exactly the
+// case where the Pico refused its own reboot (relay ARMED) and therefore
+// stays up -- without it, that Pico's S6b link-dead guard would nuisance-trip
+// on this ESP's 10-15 second silence.
 static void sw_reset_reboot_task(void *arg)
 {
     (void)arg;
@@ -55,6 +116,57 @@ static void sw_reset_reboot_task(void *arg)
     ESP_LOGW(TAG, "sw_reset: rebooting ESP now (no configuration touched)");
     hal_wdt_reboot(); /* esp_restart() under the hood -- never returns on real hardware */
     vTaskDelete(NULL); /* defensive only, see factory_reset.c's identical comment */
+}
+
+// Translates safety_link_send_reboot()'s outcome into this file's reporting
+// vocabulary. Pure mapping, no policy -- and in particular it NEVER upgrades
+// an unconfirmed outcome to accepted. Non-static so the host test can pin
+// that property without an httpd_req_t.
+sw_reset_pico_report_t sw_reset_classify_pico_outcome(esp_err_t err,
+                                                      safety_link_reboot_outcome_t outcome)
+{
+    if (err != ESP_OK) {
+        // A local/driver error, not an answer from the peer. Not knowing is
+        // not the same as being told no: unconfirmed, never refused.
+        return SW_RESET_PICO_UNCONFIRMED;
+    }
+    switch (outcome) {
+    case SAFETY_LINK_REBOOT_OUTCOME_ACCEPTED:
+        return SW_RESET_PICO_ACCEPTED;
+    case SAFETY_LINK_REBOOT_OUTCOME_REFUSED:
+        return SW_RESET_PICO_REFUSED;
+    case SAFETY_LINK_REBOOT_OUTCOME_LINK_DOWN:
+    case SAFETY_LINK_REBOOT_OUTCOME_SEND_FAILED:
+    case SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY:
+    default:
+        // Every remaining case -- including any future enumerator this
+        // switch has not been taught about -- is "we do not know".
+        // Deliberately the default, so a new outcome can never silently
+        // read as success.
+        return SW_RESET_PICO_UNCONFIRMED;
+    }
+}
+
+// The operator-facing sentence for each outcome. Kept next to the enum so a
+// new outcome cannot be added without a sentence for it.
+const char *sw_reset_pico_sentence(sw_reset_pico_report_t report)
+{
+    switch (report) {
+    case SW_RESET_PICO_ACCEPTED:
+        return "The safety processor accepted the reboot and is resetting into the same firmware; "
+               "its configuration was not touched.";
+    case SW_RESET_PICO_REFUSED:
+        return "The safety processor REFUSED to reboot (its heating relay is armed). It stays "
+               "running; only this controller is rebooting.";
+    case SW_RESET_PICO_NO_LINK:
+        return "No safety processor is configured on this boot, so nothing was sent to one. Only "
+               "this controller is rebooting.";
+    case SW_RESET_PICO_UNCONFIRMED:
+    default:
+        return "The reboot was sent to the safety processor but it did not confirm, so its reboot "
+               "is NOT confirmed -- it may be running firmware that predates this command, or the "
+               "link dropped. Only this controller's reboot is certain.";
+    }
 }
 
 static esp_err_t sw_reset_post_handler(httpd_req_t *req)
@@ -93,6 +205,26 @@ static esp_err_t sw_reset_post_handler(httpd_req_t *req)
 
     ESP_LOGW(TAG, "sw_reset from %s: authenticated, rebooting -- no config touched", ip);
 
+    // Pico half FIRST, on this task, while there is still an HTTP response
+    // to put the answer in. safety_link_send_reboot() is bounded (one send
+    // plus SAFETY_LINK_REPLY_TIMEOUT_MS, ~345 ms at 230400 baud), well
+    // inside what an httpd handler may spend, and doing it here is the only
+    // way this route can report honestly on BOTH processors: run from the
+    // delayed reboot task instead and the answer arrives after the response
+    // has already been written, so nobody ever learns it.
+    sw_reset_pico_report_t pico_report = SW_RESET_PICO_NO_LINK;
+    if (s_safety) {
+        safety_link_reboot_outcome_t outcome = SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY;
+        uint8_t reason_code = 0;
+        esp_err_t reboot_err = safety_link_send_reboot(s_safety, &outcome, &reason_code);
+        pico_report = sw_reset_classify_pico_outcome(reboot_err, outcome);
+        ESP_LOGW(TAG, "sw_reset: safety processor reboot -> outcome=%d err=%s reason=%u: %s",
+                 (int)outcome, esp_err_to_name(reboot_err), (unsigned)reason_code,
+                 sw_reset_pico_sentence(pico_report));
+    } else {
+        ESP_LOGW(TAG, "sw_reset: no safety link configured this boot -- ESP half only");
+    }
+
     // 2026-08-22-style PSRAM-stack note: sw_reset_reboot_task() only
     // vTaskDelay()s, sends one fire-and-forget UART frame and calls
     // hal_wdt_reboot() -- no flash access on this task's own stack, so
@@ -102,9 +234,26 @@ static esp_err_t sw_reset_post_handler(httpd_req_t *req)
                                     tskIDLE_PRIORITY + 1, NULL, tskNO_AFFINITY,
                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
-    httpd_resp_sendstr(req, "ok -- rebooting the ESP now (safety processor not yet reboot-able over "
-                            "the link, see docs); the board will be unreachable for about 10-15 "
-                            "seconds, then come back on the same address. No configuration was changed.");
+    // Reported per-processor, never as one undifferentiated "ok": the two
+    // halves genuinely can disagree (a Pico holding an armed relay refuses
+    // while this ESP still reboots), and an operator told "both rebooted"
+    // when only one did will draw exactly the wrong conclusion about
+    // whatever stuck state they were trying to clear.
+    char body[640];
+    int n = snprintf(body, sizeof(body),
+                     "ok -- rebooting this controller now; it will be unreachable for about 10-15 "
+                     "seconds, then come back on the same address. No configuration was changed on "
+                     "either processor. This does NOT clear a latched safety trip (see "
+                     "\"Clear latched trip\" on the Safety page). %s",
+                     sw_reset_pico_sentence(pico_report));
+    if (n < 0 || (size_t)n >= sizeof(body)) {
+        /* Truncated (cannot happen with today's strings, but never send half
+         * a sentence about which processors rebooted). */
+        httpd_resp_sendstr(req, "ok -- rebooting this controller now. No configuration was changed. "
+                                "See the log for the safety processor's own outcome.");
+        return ESP_OK;
+    }
+    httpd_resp_sendstr(req, body);
     return ESP_OK;
 }
 

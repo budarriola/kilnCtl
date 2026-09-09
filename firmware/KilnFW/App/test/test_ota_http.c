@@ -320,6 +320,22 @@ esp_err_t safety_link_get_peer_version_status(SafetyLinkClass *link, bool *out_k
     return ESP_FAIL;
 }
 esp_err_t safety_link_send_announce_reboot(SafetyLinkClass *link) { (void)link; return ESP_OK; }
+
+// safety_link.h -- SAFETY_CMD_REBOOT (0x29). Never actually invoked by any
+// test here: sw_reset_http.c's own s_safety stays NULL (sw_reset_http_start()
+// is never called in this suite), so the handler takes its NO_LINK branch.
+// The ESP-side SEQUENCING this stub would otherwise be needed for is covered
+// without it, by testing sw_reset_classify_pico_outcome() directly -- see
+// test_sw_reset_pico_outcome_mapping(). Same "must resolve, never called"
+// role as the safety_link_get_status() stub above.
+esp_err_t safety_link_send_reboot(SafetyLinkClass *link, safety_link_reboot_outcome_t *out_outcome,
+                                   uint8_t *out_reason_code)
+{
+    (void)link;
+    (void)out_reason_code;
+    if (out_outcome) *out_outcome = SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY;
+    return ESP_OK;
+}
 esp_err_t safety_link_send_rollback_ex(SafetyLinkClass *link, safety_link_rollback_outcome_t *out_outcome,
                                         uint8_t *out_reason_code)
 {
@@ -508,7 +524,21 @@ esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status)
     }
     return ESP_OK;
 }
-esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s) { (void)r; (void)s; return ESP_OK; }
+// Records the last success-path body so a test can assert on its WORDING,
+// not just on the absence of an error code. Added 2026-09-09 for
+// test_sw_reset_body_does_not_claim_trip_clearing(); every pre-existing
+// caller is unaffected (this only ever writes to a file-static buffer).
+static char s_last_sendstr_body[1024];
+esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s)
+{
+    (void)r;
+    s_last_sendstr_body[0] = '\0';
+    if (s) {
+        strncpy(s_last_sendstr_body, s, sizeof(s_last_sendstr_body) - 1);
+        s_last_sendstr_body[sizeof(s_last_sendstr_body) - 1] = '\0';
+    }
+    return ESP_OK;
+}
 int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len) { (void)r; (void)buf; (void)buf_len; return 0; }
 
 // ---------------------------------------------------------------------------
@@ -1170,6 +1200,38 @@ static void test_sw_reset_ok_when_idle(void)
     TEST_CHECK(s_last_err_code == 0, "an idle kiln's reboot request must not be refused");
 }
 
+// 2026-09-09 regression guard for da506105's confirmed defect: that commit
+// shipped UI copy and a commit message claiming this route clears "a stuck
+// S6a trip". It does not and cannot -- S6a is unconditional in
+// safety_guards.c (reboot_grace_active gates only S6b), an ESP reset floats
+// GPIO6 and so reads AS mainFault at the Pico, and nothing on this path
+// calls safety_link_send_clear_trip(). Pinning the accepted response's
+// wording is what stops the claim drifting back in: the body must state
+// plainly that a latched trip is NOT cleared, and must name the route that
+// does clear one, so an operator is never told the opposite of the truth.
+//
+// Negative-tested by deleting the "does NOT clear" sentence from
+// sw_reset_http.c's own snprintf (production code, not a copy here),
+// confirming RED, and restoring it by hand.
+static void test_sw_reset_body_does_not_claim_trip_clearing(void)
+{
+    TEST_SECTION("sw_reset_post_handler -- the accepted body denies clearing a trip and names the real clear path");
+    sw_reset_authenticate();
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    s_last_err_code = 0;
+    s_last_sendstr_body[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    (void)sw_reset_post_handler(&req);
+
+    TEST_CHECK(s_last_err_code == 0, "control: the idle path must be accepted so a body is actually sent");
+    TEST_CHECK(strstr(s_last_sendstr_body, "does NOT clear a latched safety trip") != NULL,
+               "the body must state that a latched safety trip is NOT cleared by this reboot");
+    TEST_CHECK(strstr(s_last_sendstr_body, "Clear latched trip") != NULL,
+               "the body must name the real clear path (\"Clear latched trip\" on the Safety page)");
+}
+
 // Auth-before-interlock, same property as decision 3's factory_reset test
 // above: an unauthenticated caller must never reach the interlock (or a
 // firing/temperature-naming refusal reason).
@@ -1234,6 +1296,99 @@ static void test_sw_reset_does_not_touch_nvs(void)
     hal_kv_close(&h);
 }
 
+// --- ESP-side sequencing for the Pico half (SAFETY_CMD_REBOOT, 0x29) -------
+//
+// sw_reset_post_handler() commands the Pico on the REQUEST task and reports
+// the answer in its own HTTP response. The load-bearing part of that
+// sequencing is the classification: what the ESP is willing to CLAIM about
+// the safety processor for each thing safety_link_send_reboot() can return.
+// sw_reset_classify_pico_outcome() is the whole of that decision, and it is
+// exercised here directly against the real (non-static) function in
+// sw_reset_http.c -- not a copy of its logic.
+//
+// THE PROPERTY: only an explicit, wire-visible accepted=1 may ever produce
+// SW_RESET_PICO_ACCEPTED. Silence, a dead link, a local send failure, a
+// driver error, and any outcome enumerator added in the future must all read
+// as UNCONFIRMED. This is the "a timeout must never be misreported as
+// success" rule the rollback path documents at length, applied to the one
+// place where this feature could quietly claim both processors rebooted when
+// only one did.
+static void test_sw_reset_pico_outcome_mapping(void)
+{
+    TEST_SECTION("sw_reset_classify_pico_outcome -- only an explicit accepted=1 reads as ACCEPTED");
+
+    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_OK, SAFETY_LINK_REBOOT_OUTCOME_ACCEPTED) ==
+                   SW_RESET_PICO_ACCEPTED,
+               "an explicit ACCEPTED outcome reports the safety processor as accepted");
+    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_OK, SAFETY_LINK_REBOOT_OUTCOME_REFUSED) ==
+                   SW_RESET_PICO_REFUSED,
+               "an explicit REFUSED outcome reports a refusal, distinct from silence");
+
+    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_OK, SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY) ==
+                   SW_RESET_PICO_UNCONFIRMED,
+               "silence (a Pico predating this command, or a lost reply) is UNCONFIRMED, never accepted");
+    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_OK, SAFETY_LINK_REBOOT_OUTCOME_LINK_DOWN) ==
+                   SW_RESET_PICO_UNCONFIRMED,
+               "a link that was already down is UNCONFIRMED, never accepted");
+    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_OK, SAFETY_LINK_REBOOT_OUTCOME_SEND_FAILED) ==
+                   SW_RESET_PICO_UNCONFIRMED,
+               "a local send failure is UNCONFIRMED, never accepted");
+
+    // A driver-level error must not be able to smuggle an ACCEPTED through
+    // on the back of whatever happened to be left in *out_outcome.
+    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_ERR_INVALID_STATE,
+                                              SAFETY_LINK_REBOOT_OUTCOME_ACCEPTED) ==
+                   SW_RESET_PICO_UNCONFIRMED,
+               "a non-ESP_OK return is UNCONFIRMED even when the outcome argument says ACCEPTED");
+    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_ERR_INVALID_ARG,
+                                              SAFETY_LINK_REBOOT_OUTCOME_REFUSED) ==
+                   SW_RESET_PICO_UNCONFIRMED,
+               "a non-ESP_OK return is UNCONFIRMED rather than a refusal it cannot actually vouch for");
+
+    // Any future enumerator this switch has not been taught about must fall
+    // through to UNCONFIRMED, not to accepted. Cast a value past the end of
+    // the enum to stand in for one.
+    TEST_CHECK(sw_reset_classify_pico_outcome(
+                   ESP_OK, (safety_link_reboot_outcome_t)(SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY + 1)) ==
+                   SW_RESET_PICO_UNCONFIRMED,
+               "an unrecognized outcome value reads as UNCONFIRMED, so a future outcome cannot "
+               "silently become success");
+}
+
+// The operator-facing half of the same property: the text this route puts in
+// its HTTP response (and the settings page shows verbatim) must not claim the
+// safety processor rebooted unless it did. A mapping that is right while the
+// sentence lies would be exactly as harmful as the mapping being wrong.
+static void test_sw_reset_pico_sentences_are_honest(void)
+{
+    TEST_SECTION("sw_reset_pico_sentence -- no non-accepted outcome claims the safety processor rebooted");
+
+    const char *accepted = sw_reset_pico_sentence(SW_RESET_PICO_ACCEPTED);
+    const char *refused = sw_reset_pico_sentence(SW_RESET_PICO_REFUSED);
+    const char *unconfirmed = sw_reset_pico_sentence(SW_RESET_PICO_UNCONFIRMED);
+    const char *no_link = sw_reset_pico_sentence(SW_RESET_PICO_NO_LINK);
+
+    TEST_CHECK(strstr(accepted, "accepted") != NULL,
+               "the accepted sentence says the safety processor accepted");
+    TEST_CHECK(strstr(refused, "REFUSED") != NULL, "the refusal sentence says REFUSED");
+    TEST_CHECK(strstr(unconfirmed, "NOT confirmed") != NULL,
+               "the unconfirmed sentence says NOT confirmed, in as many words");
+
+    TEST_CHECK(strstr(refused, "accepted") == NULL,
+               "the refusal sentence must never contain the word accepted");
+    TEST_CHECK(strstr(unconfirmed, "accepted") == NULL,
+               "the unconfirmed sentence must never contain the word accepted");
+    TEST_CHECK(strstr(no_link, "accepted") == NULL,
+               "the no-safety-processor sentence must never contain the word accepted");
+
+    // Every outcome must have its own distinct sentence -- a duplicate would
+    // mean two genuinely different results read identically to the operator.
+    TEST_CHECK(strcmp(accepted, refused) != 0 && strcmp(accepted, unconfirmed) != 0 &&
+                   strcmp(accepted, no_link) != 0 && strcmp(refused, unconfirmed) != 0 &&
+                   strcmp(refused, no_link) != 0 && strcmp(unconfirmed, no_link) != 0,
+               "all four outcome sentences are distinct");
+}
+
 // ---------------------------------------------------------------------------
 
 void run_test_ota_http(void)
@@ -1270,7 +1425,10 @@ void run_test_ota_http(void)
     test_sw_reset_refuses_while_paused();
     test_sw_reset_refuses_during_autotune();
     test_sw_reset_ok_when_idle();
+    test_sw_reset_body_does_not_claim_trip_clearing();
     test_sw_reset_does_not_touch_nvs();
+    test_sw_reset_pico_outcome_mapping();
+    test_sw_reset_pico_sentences_are_honest();
 }
 
 int main(void)

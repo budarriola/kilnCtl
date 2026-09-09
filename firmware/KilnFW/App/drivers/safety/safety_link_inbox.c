@@ -45,6 +45,7 @@
 #include "kilnlink/kilnlink_clear_trip.h"
 #include "kilnlink/kilnlink_commit_config.h"
 #include "kilnlink/kilnlink_commit_config_rejected.h"
+#include "kilnlink/kilnlink_reboot_result.h"
 #include "kilnlink/kilnlink_rollback_result.h"
 #include "kilnlink/kilnlink_config_page.h"
 #include "kilnlink/kilnlink_context.h"
@@ -230,6 +231,10 @@ static void safety_count_cmd_byte(SafetyLinkClass *link, uint8_t cmd, uint8_t le
         link->stats.cmd_ct_auto_zero_status_count++;
         link->stats.last_ct_auto_zero_status_len = len;
         break;
+    case KILNLINK_REBOOT_RESULT_CMD:
+        link->stats.cmd_reboot_result_count++;
+        link->stats.last_reboot_result_len = len;
+        break;
     default:
         /* Not counted here -- the switch in safety_drain_inbox_ex() below
          * already counts and records this exact case via
@@ -386,6 +391,21 @@ bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms, bool want_st
                     link->stashed_ct_auto_zero_status = msg;
                     link->has_stashed_ct_auto_zero_status = true;
                     link->stashed_ct_auto_zero_status_tick = xTaskGetTickCount();
+                    safety_unlock(link);
+                }
+                break;
+            case KILNLINK_REBOOT_RESULT_CMD: /* SAFETY_CMD_REBOOT_RESULT (0x2A) -- the reply to the
+                                                * reboot-in-place command. ALWAYS stashed rather than
+                                                * also offering a direct out-param, same reasoning as
+                                                * CT_AUTO_ZERO_STATUS above: one caller
+                                                * (safety_link_send_reboot()), serialized by xact_lock,
+                                                * polling at its own pace -- the want-flag/out-param
+                                                * plumbing safety_drain_still_waiting() would need buys
+                                                * nothing here. */
+                if (msg.length == KILNLINK_REBOOT_RESULT_LEN && safety_lock(link)) {
+                    link->stashed_reboot_result = msg;
+                    link->has_stashed_reboot_result = true;
+                    link->stashed_reboot_result_tick = xTaskGetTickCount();
                     safety_unlock(link);
                 }
                 break;
@@ -575,6 +595,27 @@ bool safety_take_stashed_ct_auto_zero_status(SafetyLinkClass *link, uart_proto_m
             } else {
                 *out = link->stashed_ct_auto_zero_status;
                 link->has_stashed_ct_auto_zero_status = false;
+                took = true;
+            }
+        }
+        safety_unlock(link);
+    }
+    return took;
+}
+
+/* Takes the stashed REBOOT_RESULT frame, same age-ceiling/take-once
+ * contract as safety_take_stashed_rollback_result() above. Consumed only by
+ * safety_link_send_reboot(). */
+bool safety_take_stashed_reboot_result(SafetyLinkClass *link, uart_proto_message_t *out)
+{
+    bool took = false;
+    if (safety_lock(link)) {
+        if (link->has_stashed_reboot_result) {
+            if (safety_elapsed_ms(link->stashed_reboot_result_tick) > SAFETY_STASHED_PAGE_MAX_AGE_MS) {
+                link->has_stashed_reboot_result = false; /* too old to be anyone's reply */
+            } else {
+                *out = link->stashed_reboot_result;
+                link->has_stashed_reboot_result = false;
                 took = true;
             }
         }

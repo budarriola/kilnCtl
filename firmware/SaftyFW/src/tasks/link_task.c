@@ -103,6 +103,8 @@
 #include "kilnlink/kilnlink_inject_tc.h" // SAFETY_CMD_INJECT_TC (0x21), see link_task_handle_inject_tc()
 #include "kilnlink/kilnlink_param.h" // SAFETY_CMD_PARAM (0x1E reply), see link_task_send_param()
 #include "kilnlink/kilnlink_power.h"
+#include "kilnlink/kilnlink_reboot.h" // SAFETY_CMD_REBOOT, see link_task_handle_reboot()
+#include "kilnlink/kilnlink_reboot_result.h" // SAFETY_CMD_REBOOT_RESULT, see link_task_handle_reboot()
 #include "kilnlink/kilnlink_rollback.h" // SAFETY_CMD_ROLLBACK, see link_task_handle_rollback()
 #include "kilnlink/kilnlink_rollback_result.h" // SAFETY_CMD_ROLLBACK_RESULT, see link_task_send_rollback_result()
 #include "kilnlink/kilnlink_set_clock.h" // SAFETY_CMD_SET_CLOCK, see link_task_handle_set_clock()
@@ -1712,6 +1714,107 @@ static void link_task_send_rollback_result(uint8_t reason_code)
     link_task_send_broadcast(payload, (uint8_t)len);
 }
 
+// How long link_task_handle_reboot() below will wait for the TX ring to
+// drain after queuing its SAFETY_CMD_REBOOT_RESULT reply, before resetting
+// the chip out from under it. A 3-byte payload is ~12 stuffed bytes on the
+// wire; at this link's 230400 baud that is well under 1 ms, so 10 ms is
+// ~20x margin. It is also deliberately BELOW link_task's own 30 ms
+// watchdog check-in deadline (watchdog_task.c's WATCHDOG_CHECKIN_LINK_TASK
+// row): blocking this task past that deadline would reset the board via the
+// watchdog instead of via update_task_reboot_now(), which would still be a
+// reboot but an unexplained one, and would land BEFORE the reply the
+// operator is waiting on ever left the ring.
+#define LINK_TASK_REBOOT_TX_DRAIN_MS 10u
+
+// SAFETY_CMD_REBOOT (0x29), CommonFW/docs/LINK_PROTOCOL.md section 4 -- the
+// Pico half of KilnFW's POST /api/sw_reset: "reboot yourself, in place,
+// into the SAME firmware slot you are running now."
+//
+// NOT link_task_handle_rollback() above: that one writes a bootloader
+// metadata record and comes back on the OTHER image, and is refusable by
+// bootloader_decide_rollback() for reasons that have nothing to do with
+// this command. NOT link_task_handle_announce_reboot() below either: that
+// one is a courtesy notice about the ESP's own reboot and does nothing to
+// this processor.
+//
+// Unlike EVERY other consequential ESP->Pico command in this file, this one
+// ACKs on the wire in BOTH directions -- accepted and refused. It can,
+// where a rollback cannot: update_task_request_rollback() never returns on
+// acceptance, but update_task_reboot_allowed() is pure policy, so there is
+// a real instant here between deciding and resetting in which the reply can
+// be queued and drained. See kilnlink_reboot_result.h's "SYMMETRIC" comment.
+//
+// Order matters and is the whole design: decide, LOG, send the reply, drain
+// the TX ring, and only then reset. Anything after update_task_reboot_now()
+// would never run.
+static void link_task_handle_reboot(const kilnlink_frame_t *frame)
+{
+    kilnlink_reboot_t msg;
+    kilnlink_reboot_status_t dstatus = kilnlink_reboot_decode(frame->payload, frame->length, &msg);
+    if (dstatus != KILNLINK_REBOOT_OK) {
+        // Malformed/wrong-length/wrong-cmd -- untrusted wire input,
+        // discarded silently like every other decode failure in this file.
+        return;
+    }
+
+    const char *reason = NULL;
+    uint8_t reason_code = KILNLINK_REBOOT_RESULT_REASON_UNKNOWN;
+    bool allowed = update_task_reboot_allowed(&reason, &reason_code);
+
+    // Logged BEFORE the reset below, for the same reason
+    // link_task_handle_rollback() logs before its own call: nothing after
+    // update_task_reboot_now() runs, so this is the last chance to record
+    // the decision in THIS boot's log.
+    log_task_log(LOG_LEVEL_WARN, "reboot", reason ? reason : (allowed ? "ok" : "refused"));
+
+    kilnlink_reboot_result_t result = {0};
+    result.accepted = allowed ? 1u : 0u;
+    result.reason = allowed ? (uint8_t)KILNLINK_REBOOT_RESULT_REASON_NONE : reason_code;
+
+    uint8_t payload[KILNLINK_REBOOT_RESULT_LEN];
+    kilnlink_reboot_result_status_t estatus;
+    size_t len = kilnlink_reboot_result_encode(&result, payload, sizeof(payload), &estatus);
+    if (len == 0) {
+        // Shouldn't happen for a fixed-size local buffer. Refuse to reboot
+        // rather than reset a board whose operator will never learn whether
+        // the command landed -- the ESP's own bounded wait then reports
+        // NO_REPLY, which is honest. Never reboot silently.
+        return;
+    }
+    bool sent = link_task_send_broadcast(payload, (uint8_t)len);
+
+    if (!allowed) {
+        return; // refused: the reply above is the entire outcome
+    }
+
+    if (!sent) {
+        // The TX ring had no room (uart_owner_send() drops whole frames, it
+        // never partially writes -- LINK_PROTOCOL.md sec 2 rule 3). The
+        // reboot was accepted by policy, so it still happens; the ESP will
+        // simply see NO_REPLY and report the Pico's reboot as unconfirmed
+        // rather than as accepted. Recorded so a bench log can tell this
+        // case apart from a peer that was never listening.
+        log_task_log(LOG_LEVEL_WARN, "reboot",
+                     "REBOOT_RESULT was dropped by a full TX ring -- rebooting anyway, "
+                     "the ESP will report the safety processor's reboot as unconfirmed");
+    }
+
+    // Let the reply actually leave the wire before the chip resets. Bounded
+    // and short -- see LINK_TASK_REBOOT_TX_DRAIN_MS's own comment for the
+    // baud arithmetic and the watchdog-deadline ceiling. Exits early the
+    // moment the ring is empty; a ring that never empties (a wedged ISR)
+    // must not block the reboot forever, so the bound is a hard cap, not a
+    // retry loop.
+    for (unsigned waited = 0; waited < LINK_TASK_REBOOT_TX_DRAIN_MS; waited++) {
+        if (uart_owner_get_tx_head() == uart_owner_get_tx_tail()) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    update_task_reboot_now(); // does not return
+}
+
 // SAFETY_CMD_ANNOUNCE_REBOOT (0x18), CommonFW/docs/LINK_PROTOCOL.md section
 // 4 -- KilnFW/TODO.md's "SAFETY_CMD_ANNOUNCE_REBOOT sent before the ESP
 // reboots" line. Fire-and-forget, never ACKs on the wire, same shape as
@@ -2238,6 +2341,9 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
         break;
     case LINK_FRAME_ROLLBACK_CMD:
         link_task_handle_rollback(&frame);
+        break;
+    case LINK_FRAME_REBOOT_CMD:
+        link_task_handle_reboot(&frame);
         break;
     case LINK_FRAME_ANNOUNCE_REBOOT_CMD:
         link_task_handle_announce_reboot(&frame);

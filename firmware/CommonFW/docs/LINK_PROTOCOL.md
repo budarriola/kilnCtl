@@ -686,6 +686,76 @@ timeout and reports "unknown outcome" rather than success when nothing
 arrives in that window, exactly the same as it would if the link had simply
 been down. **A timeout must never be misreported as success.**
 
+### `SAFETY_CMD_REBOOT` = `0x29` (ESP → Pico)
+
+One byte, no arguments — same shape as `SAFETY_CMD_ROLLBACK`.
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | `0x29` |
+
+"Reboot yourself, in place, into the **same** firmware slot you are running
+now." The Pico half of KilnFW's `POST /api/sw_reset`
+(`App/drivers/http/sw_reset_http.c`) — a clean reboot of both processors
+from the UI, for clearing stuck state without JTAG.
+
+**Not `SAFETY_CMD_ROLLBACK`** (`0x17`): that command marks the running slot
+BAD, writes a new bootloader metadata record to flash, and comes back on the
+*other*, possibly-refused image. **Not `SAFETY_CMD_ANNOUNCE_REBOOT`**
+(`0x18`) either: that is a courtesy notice about the *ESP's* own reboot and
+instructs the Pico to do nothing.
+
+**Touches no configuration.** `link_task_handle_reboot()` →
+`update_task_request_reboot()` (`src/tasks/update_task.c`) reads the relay
+state, logs, sends the reply below, and calls `hal_wdt_reboot()`. There is
+no `config_store_*` call, no `update_task_persist_metadata()`, no flash
+write of any kind on that path.
+
+**Refusable**, the same way a rollback is: refused while the relay is
+energized (ARMED). Rebooting the safety processor while it holds heating
+permission would drop that supervision mid-firing. The refusal — *and*, unlike
+`ROLLBACK`, the acceptance — is reported on the wire by
+`SAFETY_CMD_REBOOT_RESULT` below.
+
+### `SAFETY_CMD_REBOOT_RESULT` = `0x2A` (Pico → ESP)
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | `0x2A` |
+| 1 | u8 | `accepted` (0/1) |
+| 2 | u8 | `reason` |
+
+`reason` is `kilnlink_reboot_result_reason_t`:
+
+| Value | Meaning |
+|---|---|
+| 0 | `NONE` — accepted; `reason` carries nothing |
+| 1 | `ARMED` — refused, the relay is ARMED (same gate `SET_CONFIG`/`ROLLBACK` use) |
+| 2 | `UNKNOWN` — fallback; should not occur in practice |
+
+**Symmetric, unlike `ROLLBACK_RESULT`.** A rollback cannot ACK its own
+acceptance because `update_task_request_rollback()` never returns once it
+accepts. A reboot-in-place has no such constraint: the handler decides,
+**sends this frame with `accepted = 1`, lets the UART drain, and only then**
+calls `hal_wdt_reboot()`. So the ESP gets positive, wire-visible
+confirmation — it never has to infer acceptance from silence.
+
+That confirmation means "the Pico accepted and is about to reset", **not**
+"the Pico finished rebooting" — the frame necessarily leaves before the reset.
+`sw_reset_http.c` reports exactly that distinction to the operator.
+
+**Skew safety, and why `KILNLINK_PROTOCOL_VERSION` was *not* bumped for this
+pair.** This exchange is *request-triggered in both directions*: only a build
+with this feature ever sends `0x29`, and the Pico only ever emits `0x2A` in
+direct reply to a `0x29` it just decoded. No old peer can ever receive a byte
+it does not know, in either direction — so, unlike `ROLLBACK_RESULT` (an
+unsolicited, Pico-initiated reply, hence its `MIN_PROTOCOL` gate), no
+peer-version gate is needed or even possible here. A new ESP talking to an
+old Pico gets no reply at all, and `safety_link_send_reboot()` reports
+`NO_REPLY` — **never** accepted. See `kilnlink_version.h`'s "12 → 12,
+DELIBERATELY NOT BUMPED" entry for the full argument, including what would
+force a bump if this frame ever became Pico-initiated.
+
 ### `SAFETY_CMD_GET_FW_VERSION` = `0x0B` (ESP → Pico)
 
 One byte, no arguments. Sent by the ESP at boot and whenever the Pico's

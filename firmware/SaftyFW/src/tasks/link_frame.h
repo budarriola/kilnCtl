@@ -453,6 +453,31 @@ void link_frame_apply_set_ct_cal(const config_store_record_t *committed, uint8_t
 #define LINK_FRAME_CT_AUTO_ZERO_BEGIN_CMD 0x26u
 #define LINK_FRAME_GET_CT_AUTO_ZERO_CMD   0x27u
 
+// --- Reboot in place: ESP -> Pico SAFETY_CMD_REBOOT (0x29,
+// kilnlink_reboot.h) and its Pico -> ESP reply SAFETY_CMD_REBOOT_RESULT
+// (0x2A, kilnlink_reboot_result.h). Same "redefined here as a local dispatch
+// id" convention as LINK_FRAME_ROLLBACK_CMD above; the payloads are decoded/
+// encoded by the kilnlink codecs in src/tasks/link_task.c, not packed here.
+//
+// "Reboot yourself, in place, into the SAME firmware slot you are running
+// now" -- the Pico half of KilnFW's POST /api/sw_reset. NOT
+// LINK_FRAME_ROLLBACK_CMD (0x17): that one writes a bootloader metadata
+// record and comes back on the OTHER image. NOT LINK_FRAME_ANNOUNCE_REBOOT_
+// CMD (0x18) either: that one is about the ESP's own reboot and asks the
+// Pico to do nothing. link_task_handle_reboot() checks the ARMED gate
+// (update_task_reboot_allowed()), replies 0x2A with accepted/refused, drains
+// the TX ring, and only then calls update_task_reboot_now().
+//
+// Deliberately NO link_frame_reboot_result_supported() gate, unlike
+// LINK_FRAME_ROLLBACK_RESULT's own MIN_PROTOCOL above: 0x2A is only ever
+// sent in direct reply to a 0x29 this build just decoded, and only an ESP
+// new enough to have this feature ever sends 0x29 -- so an old peer can
+// never receive it. See kilnlink_version.h's "12 -> 12, DELIBERATELY NOT
+// BUMPED" entry for the full argument, and what would force a bump if this
+// frame ever became Pico-initiated.
+#define LINK_FRAME_REBOOT_CMD        0x29u
+#define LINK_FRAME_REBOOT_RESULT_CMD 0x2Au
+
 // --- Update frames: SAFTYFW Phase 10, CommonFW/docs/UPDATE_PROTOCOL.md
 // section 4's frame table. Plain #define ids, same convention as every other
 // command byte in this file -- these are dispatched in src/tasks/link_task.c's

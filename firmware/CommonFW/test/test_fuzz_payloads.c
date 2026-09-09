@@ -76,6 +76,8 @@
 #include "kilnlink/kilnlink_param_value.h"
 #include "kilnlink/kilnlink_power.h"
 #include "kilnlink/kilnlink_rollback.h"
+#include "kilnlink/kilnlink_reboot.h"
+#include "kilnlink/kilnlink_reboot_result.h"
 #include "kilnlink/kilnlink_rollback_result.h"
 #include "kilnlink/kilnlink_set_clock.h"
 #include "kilnlink/kilnlink_set_config.h"
@@ -167,6 +169,8 @@ typedef struct {
         kilnlink_get_config_page_t get_config_page;
         kilnlink_config_page_t config_page;
         kilnlink_rollback_result_t rollback_result;
+        kilnlink_reboot_t reboot;
+        kilnlink_reboot_result_t reboot_result;
         kilnlink_fw_version_t fw_version;
     } out;
     uint8_t post[CANARY_LEN];
@@ -248,6 +252,8 @@ DECL_ADAPTER(get_config_page, KILNLINK_GET_CONFIG_PAGE_LEN + 32);
 DECL_ADAPTER(config_page, KILNLINK_CONFIG_PAGE_HDR_LEN +
                                KILNLINK_CONFIG_PAGE_MAX_ENTRIES * KILNLINK_CONFIG_PAGE_ENTRY_MAX_LEN + 32);
 DECL_ADAPTER(rollback_result, KILNLINK_ROLLBACK_RESULT_LEN + 32);
+DECL_ADAPTER(reboot, KILNLINK_REBOOT_LEN + 32);
+DECL_ADAPTER(reboot_result, KILNLINK_REBOOT_RESULT_LEN + 32);
 DECL_ADAPTER(fw_version, KILNLINK_FW_VERSION_MAX_LEN + 32);
 
 static int decode_context(const uint8_t *p, size_t len)
@@ -452,6 +458,20 @@ static int decode_rollback_result(const uint8_t *p, size_t len)
     arm_canaries(&g_rollback_result);
     int rc = (int)kilnlink_rollback_result_decode(p, len, &g_rollback_result.out.rollback_result);
     check_canaries(&g_rollback_result, "kilnlink_rollback_result_decode", ++g_rollback_result_calls);
+    return rc;
+}
+static int decode_reboot(const uint8_t *p, size_t len)
+{
+    arm_canaries(&g_reboot);
+    int rc = (int)kilnlink_reboot_decode(p, len, &g_reboot.out.reboot);
+    check_canaries(&g_reboot, "kilnlink_reboot_decode", ++g_reboot_calls);
+    return rc;
+}
+static int decode_reboot_result(const uint8_t *p, size_t len)
+{
+    arm_canaries(&g_reboot_result);
+    int rc = (int)kilnlink_reboot_result_decode(p, len, &g_reboot_result.out.reboot_result);
+    check_canaries(&g_reboot_result, "kilnlink_reboot_result_decode", ++g_reboot_result_calls);
     return rc;
 }
 static int decode_fw_version(const uint8_t *p, size_t len)
@@ -732,6 +752,19 @@ static size_t build_valid_rollback_result(uint8_t *out, size_t out_cap)
     kilnlink_rollback_result_status_t st;
     return kilnlink_rollback_result_encode(&msg, out, out_cap, &st);
 }
+static size_t build_valid_reboot(uint8_t *out, size_t out_cap)
+{
+    kilnlink_reboot_status_t st;
+    return kilnlink_reboot_encode(NULL, out, out_cap, &st);
+}
+static size_t build_valid_reboot_result(uint8_t *out, size_t out_cap)
+{
+    kilnlink_reboot_result_t msg;
+    msg.accepted = 1;
+    msg.reason = KILNLINK_REBOOT_RESULT_REASON_NONE;
+    kilnlink_reboot_result_status_t st;
+    return kilnlink_reboot_result_encode(&msg, out, out_cap, &st);
+}
 static size_t build_valid_fw_version(uint8_t *out, size_t out_cap)
 {
     kilnlink_fw_version_t msg;
@@ -815,6 +848,9 @@ static const decoder_case_t k_cases[] = {
     {"kilnlink_config_page_decode", decode_config_page, build_valid_config_page, config_page_MAX_LEN, 0},
     {"kilnlink_rollback_result_decode", decode_rollback_result, build_valid_rollback_result,
      rollback_result_MAX_LEN, 0},
+    {"kilnlink_reboot_decode", decode_reboot, build_valid_reboot, reboot_MAX_LEN, 0},
+    {"kilnlink_reboot_result_decode", decode_reboot_result, build_valid_reboot_result,
+     reboot_result_MAX_LEN, 0},
     {"kilnlink_fw_version_decode", decode_fw_version, build_valid_fw_version, fw_version_MAX_LEN, 0},
 };
 

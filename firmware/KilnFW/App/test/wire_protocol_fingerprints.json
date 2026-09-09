@@ -51,6 +51,8 @@
       "kilnlink_power.h:KILNLINK_POWER_LEN=KILNLINK_POWER_LEN_V2",
       "kilnlink_power.h:KILNLINK_POWER_LEN_V1=55u",
       "kilnlink_power.h:KILNLINK_POWER_LEN_V2=61u",
+      "kilnlink_reboot.h:KILNLINK_REBOOT_LEN=1u",
+      "kilnlink_reboot_result.h:KILNLINK_REBOOT_RESULT_LEN=3u",
       "kilnlink_rollback.h:KILNLINK_ROLLBACK_LEN=1u",
       "kilnlink_rollback_result.h:KILNLINK_ROLLBACK_RESULT_LEN=3u",
       "kilnlink_set_clock.h:KILNLINK_SET_CLOCK_LEN=9u",
@@ -71,6 +73,8 @@
       "link_frame.h:LINK_FRAME_GET_CT_AUTO_ZERO_CMD=0x27u",
       "link_frame.h:LINK_FRAME_GET_CT_CAL_CMD=0x22u",
       "link_frame.h:LINK_FRAME_PUSH_CONTEXT_CMD=0x07u",
+      "link_frame.h:LINK_FRAME_REBOOT_CMD=0x29u",
+      "link_frame.h:LINK_FRAME_REBOOT_RESULT_CMD=0x2Au",
       "link_frame.h:LINK_FRAME_ROLLBACK_CMD=0x17u",
       "link_frame.h:LINK_FRAME_SET_CLOCK_CMD=0x0Cu",
       "link_frame.h:LINK_FRAME_SET_CONFIG_CMD=0x16u",
@@ -117,7 +121,7 @@
       "uart_task_ids.h:SAFETY_CMD_UPDATE_END=0x12u",
       "uart_task_ids.h:SAFETY_CMD_UPDATE_STATUS=0x14u"
     ],
-    "fingerprint": "c3a4671611f4e3ed",
+    "fingerprint": "f2b4a344ec289df0",
     "version": 12
   },
   "uart": {
