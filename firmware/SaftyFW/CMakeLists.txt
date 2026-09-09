@@ -140,6 +140,10 @@ set(SAFTYFW_APP_SOURCES
     src/tasks/log_task.c
     src/tasks/tx_watermark.c
     src/tasks/update_task.c
+    # 2026-09-09 -- the pure ARMED/TRANSFER_ACTIVE decision table behind
+    # update_task_reboot_allowed(), split out so it can be host-compiled and
+    # behaviourally tested (see update_task_reboot_policy.h for why).
+    src/tasks/update_task_reboot_policy.c
     # Phase 10 -- update_task.c's own frame-receive/decision logic. These
     # four are the FROZEN, host-tested (272/272, test/build_host_tests.ps1)
     # pure modules from src/update/; bootloader/crc32.c and

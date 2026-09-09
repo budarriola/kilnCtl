@@ -194,11 +194,24 @@ static void test_reboot_now_touches_no_configuration(void)
     free(text);
 }
 
-// Property 3, the policy half: the ARMED gate, and no reboot inside it.
+// Property 3, the policy half: update_task_reboot_allowed() gathers the two
+// live inputs and defers the actual ARMED/TRANSFER_ACTIVE decision to
+// update_task_reboot_policy_decide() (update_task_reboot_policy.c, a
+// separate freestanding file with no FreeRTOS/pico dependency -- 2026-09-09,
+// see that file's own header comment). THIS scan only pins the WIRING: that
+// update_task_reboot_allowed() reads relay state the legal way, calls the
+// pure decision function, and never reboots or writes anything itself. The
+// decision table's actual input/output behaviour -- what each combination of
+// relay-armed and transfer-active actually returns -- is no longer provable
+// by a source-text scan (a scan proves identifiers are PRESENT, not that the
+// function returns the right thing for a given input) and is instead pinned
+// behaviourally, against the real linked-in production function, by
+// test_update_task_reboot_policy.c.
 static void test_reboot_allowed_is_the_armed_gate_only(void)
 {
-    TEST_SECTION("update_task_reboot_allowed() is pure policy -- it refuses on the ARMED gate and "
-                 "never reboots or writes anything itself");
+    TEST_SECTION("update_task_reboot_allowed() is pure policy wiring -- it reads relay/transfer "
+                 "state the legal way, defers the decision to update_task_reboot_policy_decide(), "
+                 "and never reboots or writes anything itself");
 
     char *text = read_file_any(UPDATE_TASK_CANDIDATES,
                                sizeof(UPDATE_TASK_CANDIDATES) / sizeof(UPDATE_TASK_CANDIDATES[0]));
@@ -220,15 +233,13 @@ static void test_reboot_allowed_is_the_armed_gate_only(void)
     TEST_CHECK(strstr(body, "safety_core_get_output_status") != NULL,
                "the refusal reads relay state through safety_core_get_output_status() -- the same "
                "legal channel update_task_request_rollback() uses, not relay_owner.h directly");
-    TEST_CHECK(strstr(body, "KILNLINK_REBOOT_RESULT_REASON_ARMED") != NULL,
-               "an ARMED relay produces the ARMED refusal reason, so the ESP can report WHY, not "
-               "just that something went wrong");
-    TEST_CHECK(strstr(body, "update_task_transfer_active") != NULL
-                   && strstr(body, "KILNLINK_REBOOT_RESULT_REASON_TRANSFER_ACTIVE") != NULL,
-               "a firmware transfer in progress produces its own refusal -- the Pico-side policy "
-               "must hold independently of the ESP's ota_http_check_interlocks(), because "
-               "uart_bridge passthrough and bench tools reach it with no such check, and a reset "
-               "mid-transfer leaves a partially written slot");
+    TEST_CHECK(strstr(body, "update_task_transfer_active") != NULL,
+               "the wrapper also reads the transfer-active state, so the pure decision function "
+               "gets both live inputs");
+    TEST_CHECK(strstr(body, "update_task_reboot_policy_decide") != NULL,
+               "the actual ARMED/TRANSFER_ACTIVE decision is made by the pure, host-tested "
+               "update_task_reboot_policy_decide() -- not restated inline here where it could "
+               "silently drift from the behaviourally-tested copy");
     TEST_CHECK(strstr(body, "hal_wdt_reboot") == NULL,
                "the policy half never reboots -- that separation is what lets link_task reply on "
                "the wire BEFORE the reset, which a rollback structurally cannot do");

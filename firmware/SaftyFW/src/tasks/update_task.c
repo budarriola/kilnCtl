@@ -111,6 +111,9 @@
 #include "kilnlink/kilnlink_reboot_result.h" // kilnlink_reboot_result_reason_t, for update_task_reboot_allowed()'s out_reason_code
 #include "kilnlink/kilnlink_rollback_result.h" // kilnlink_rollback_result_reason_t, for update_task_request_rollback()'s out_reason_code
 
+#include "update_task_reboot_policy.h" // update_task_reboot_policy_decide() -- the pure,
+                                        // host-testable half of update_task_reboot_allowed()
+
 #define UPDATE_TASK_STACK_WORDS (configMINIMAL_STACK_SIZE * 3) // page_buf below is 512 bytes
 #define UPDATE_TASK_POLL_MS            100
 #define UPDATE_STATUS_TX_PERIOD_MS     500  // matches link_task.c's own Frame A cadence
@@ -1186,34 +1189,33 @@ bool update_task_request_rollback(const char **out_reason, uint8_t *out_reason_c
 
 bool update_task_reboot_allowed(const char **out_reason, uint8_t *out_reason_code)
 {
-    // The SAME ARMED-equivalent gate update_task_request_rollback() above
-    // uses, reached the same legal way (safety_core_get_output_status(), not
-    // relay_owner.h directly -- see this file's header comment). A reboot in
-    // place is less disruptive than a rollback in that it changes no image
-    // and no configuration, but it is exactly as disruptive in the one way
-    // that matters here: the safety processor stops supervising for a
-    // couple of seconds. That is not something to do while it is holding
-    // heating permission.
+    // Gathers the two live inputs and hands them to the pure decision table
+    // in update_task_reboot_policy.c -- 2026-09-09, split out so the
+    // decision itself can be host-compiled and behaviourally tested
+    // (test_update_task_reboot_policy.c), rather than only pinned by
+    // test_reboot_in_place_wiring.c's source-text scan (which proves the
+    // right identifiers are PRESENT, not that the function returns the
+    // right thing). See update_task_reboot_policy.h for the full rationale
+    // and the ARMED-checked-first ordering.
+    //
+    // relay_energized: the SAME ARMED-equivalent gate
+    // update_task_request_rollback() above uses, reached the same legal way
+    // (safety_core_get_output_status(), not relay_owner.h directly -- see
+    // this file's header comment). A reboot in place is less disruptive
+    // than a rollback in that it changes no image and no configuration, but
+    // it is exactly as disruptive in the one way that matters here: the
+    // safety processor stops supervising for a couple of seconds. That is
+    // not something to do while it is holding heating permission.
     bool relay_energized = false;
     safety_core_get_output_status(&relay_energized, NULL);
-    if (relay_energized) {
-        if (out_reason) {
-            *out_reason = "refused: relay is ARMED, reboot is refused while ARMED "
-                          "(same gate as config writes and rollback)";
-        }
-        if (out_reason_code) {
-            *out_reason_code = KILNLINK_REBOOT_RESULT_REASON_ARMED;
-        }
-        return false;
-    }
 
-    // Second gate: a firmware transfer into the inactive slot is in flight.
-    // The ESP's own ota_http_check_interlocks() already refuses this case
-    // (snap.other_update_in_progress), so on the normal path this is
-    // defence in depth -- but the Pico-side policy is the half that must be
-    // independently correct, and OTHER senders reach it with no such check
-    // at all: the raw uart_bridge passthrough, and any bench tool that can
-    // put a 0x29 on the wire.
+    // transfer_active: a firmware transfer into the inactive slot is in
+    // flight. The ESP's own ota_http_check_interlocks() already refuses
+    // this case (snap.other_update_in_progress), so on the normal path this
+    // is defence in depth -- but the Pico-side policy is the half that must
+    // be independently correct, and OTHER senders reach it with no such
+    // check at all: the raw uart_bridge passthrough, and any bench tool
+    // that can put a 0x29 on the wire.
     //
     // What rebooting here would have cost: s_transfer_active spans
     // UPDATE_BEGIN..UPDATE_END, during which chunks are being written into
@@ -1224,24 +1226,8 @@ bool update_task_reboot_allowed(const char **out_reason, uint8_t *out_reason_cod
     // restarted blind) against a slot whose contents nobody can describe.
     // Refusing costs the operator one retry after the update finishes;
     // accepting costs a half-written firmware slot.
-    if (update_task_transfer_active()) {
-        if (out_reason) {
-            *out_reason = "refused: a firmware transfer is in progress, reboot would leave a "
-                          "partially written slot";
-        }
-        if (out_reason_code) {
-            *out_reason_code = KILNLINK_REBOOT_RESULT_REASON_TRANSFER_ACTIVE;
-        }
-        return false;
-    }
-
-    if (out_reason) {
-        *out_reason = "ok";
-    }
-    if (out_reason_code) {
-        *out_reason_code = KILNLINK_REBOOT_RESULT_REASON_NONE;
-    }
-    return true;
+    return update_task_reboot_policy_decide(relay_energized, update_task_transfer_active(),
+                                            out_reason, out_reason_code);
 }
 
 void update_task_reboot_now(void)
