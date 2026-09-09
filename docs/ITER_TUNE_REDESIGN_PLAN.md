@@ -1,14 +1,29 @@
 # `iter_tune` redesign — tracking-quality-driven iterative tuning
 
-> **Status update, 2026-09-09:** steps 1, 2 and 5 are IMPLEMENTED and
-> validated in simulation — `control/firing_score.c`, `control/firing_compare.c`
-> and a rewritten `control/iter_tune.c` (the old whole-firing IAE path is
-> deleted, not left dual). Numbers, and two design defects the simulation
-> found in this document's own sec 4 step schedule, are in
-> `docs/audits/iter_tune_redesign_sim_2026-09-09.md`. Steps 3-4 and 6-9
-> (the sec 6.5 credibility gate against a recorded firing, the noise-floor
-> artifact, persistence/HTTP surface, the write-surface check, shadow mode
-> and hardware trials) are NOT done; nothing is wired into
+> **Status update, 2026-09-09 (later pass):** steps 1, 2 and 5 are
+> IMPLEMENTED and validated in simulation — `control/firing_score.c`,
+> `control/firing_compare.c` and a rewritten `control/iter_tune.c` (the old
+> whole-firing IAE path is deleted, not left dual). Numbers, and two design
+> defects the simulation found in this document's own sec 4 step schedule,
+> are in `docs/audits/iter_tune_redesign_sim_2026-09-09.md`. Step 7's
+> `check_iter_tune_write_surface.ps1` (`tools/check_iter_tune_write_surface.ps1`
+> + `tools/PcTools/scripts/iter_tune_write_surface_check.py`) is now also
+> IMPLEMENTED and negative-tested: it fails if `iter_tune.c`/`.h` ever calls
+> a setter/persistence/hardware API directly, and separately fails if any
+> production file outside `test/` calls an `iter_tune_*` function at all
+> (today, none does — confirmed by grep, not just by this check). Steps 3-4
+> and the rest of 6-9 (the sec 6.5 credibility gate against a recorded
+> firing, the noise-floor artifact, persistence/HTTP surface, shadow mode
+> and hardware trials) are still NOT done and were not attempted in this
+> pass — they require the G1-G4 simulation-harness work of sec 6.1
+> (`sim_plant_from_zone_cfg()`, the real `heater_output.c` PWM window, relay
+> lag, MAX31856 quantisation), none of which exists yet in
+> `firmware/KilnFW/App/test/sim_plant.c`/`.h` as of this pass, and that is
+> substantial-enough net-new C work that it was left for a dedicated pass
+> rather than rushed. 65 real `logs/coupling/*.jsonl` captures exist locally
+> as of this pass (`.gitignore` keeps them local-only), so the credibility
+> gate in sec 6.5 is data-ready whenever the harness work lands — the gap is
+> harness code, not missing captures. Nothing is wired into
 > `profile_executor.c` and the module proposes nothing on hardware.
 >
 > **Owner decision, 2026-09-08:**
