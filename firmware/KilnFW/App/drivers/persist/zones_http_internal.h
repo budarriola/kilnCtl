@@ -257,6 +257,20 @@ typedef struct {
     volatile char                ct_map_reason[96];
     volatile uint8_t             k_ct_derived_mask;
     volatile char                k_ct_reason[96];
+    /* Feature: nameplate-derived S14/S15 arming. Mirrors k_ct_derived_mask/
+     * k_ct_reason above, one push behind: after zone_sweep_push_k_ct_v_per_a()
+     * (which calibrates the CT SCALE), zone_sweep_push_i_normal_a() pushes
+     * every zone's already-measured, already-persisted normal current
+     * (zones_config_get_normal_current(), zone_normals_set()'s own store) to
+     * the safety processor's i_normal_a[0..2] (0x031A-0x031C) -- the single
+     * missing link that leaves S14 (per-channel over-current) and S15
+     * (per-zone under-current, summed topology) dormant even after a
+     * successful sweep: those guards read cfg->i_normal_a on the Pico, and
+     * nothing before this pushed the ESP's measured value there. See
+     * zone_sweep_plan_i_normal()'s doc comment for what "already measured"
+     * means in each CT topology. */
+    volatile uint8_t             i_normal_pushed_mask;
+    volatile char                i_normal_reason[96];
     /* opus review finding (MEDIUM): see zone_sweep_status_t's identically-
      * named field in zones_config_accessors.h. */
     volatile uint8_t             summed_unmeasured_mask;
@@ -308,6 +322,10 @@ bool zone_sweep_derive_ct_channel(const float *per_ch_a, uint8_t *out_ch);
 zone_kct_derive_t zone_sweep_derive_k_ct(float measured_total_a, float expected_power_w, float mains_voltage_v,
                                          float k_old, float *out_k);
 const char *zone_kct_derive_str(zone_kct_derive_t r);
+
+/* zones_current_sweep_task.c defines this -- see its own doc comment. Exposed
+ * here so host tests can drive the planning decision without a fake link. */
+uint8_t zone_sweep_plan_i_normal(float *out_a, char *note, size_t note_cap);
 
 /* CT_COMMISSIONING_PLAN.md step 3, `ct_topology = summed`: the shared CT
  * (channel 3, index 2) reads every zone, so a zone's own normal is not the

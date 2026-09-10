@@ -476,15 +476,23 @@ static esp_err_t sweep_status_get_handler(httpd_req_t *req)
      * zone_sweep_status_t's own comment for why the two share no field. */
     char k_reason_escaped[sizeof(st.k_ct_reason) * 2 + 1];
     zones_json_escape(st.k_ct_reason, k_reason_escaped, sizeof(k_reason_escaped));
-    char json[1024];
+    /* Feature: nameplate current -> S14/S15 arming -- reports separately from
+     * k_ct_reason for the same reason ct_map_reason and k_ct_reason already
+     * do (independent failure modes, one shared string could only ever
+     * report one). */
+    char i_normal_reason_escaped[sizeof(st.i_normal_reason) * 2 + 1];
+    zones_json_escape(st.i_normal_reason, i_normal_reason_escaped, sizeof(i_normal_reason_escaped));
+    char json[1200];
     int n = snprintf(json, sizeof(json),
                      "{\"state\":\"%s\",\"zone_index\":%u,\"zones_done\":%u,\"zones_total\":%u,"
                      "\"reason\":\"%s\",\"ct_map_derived_mask\":%u,\"ct_map_reason\":\"%s\","
                      "\"k_ct_derived_mask\":%u,\"k_ct_reason\":\"%s\","
+                     "\"i_normal_pushed_mask\":%u,\"i_normal_reason\":\"%s\","
                      "\"summed_unmeasured_mask\":%u}",
                      zone_sweep_state_str(st.state), st.zone_index, st.zones_done, st.zones_total,
                      reason_escaped, st.ct_map_derived_mask, ct_reason_escaped,
-                     st.k_ct_derived_mask, k_reason_escaped, st.summed_unmeasured_mask);
+                     st.k_ct_derived_mask, k_reason_escaped,
+                     st.i_normal_pushed_mask, i_normal_reason_escaped, st.summed_unmeasured_mask);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, n > 0 ? (size_t)n : 0);
 }

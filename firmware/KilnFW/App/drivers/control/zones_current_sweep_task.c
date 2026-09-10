@@ -732,6 +732,211 @@ static void zone_sweep_push_k_ct_v_per_a(void)
     s_sweep.k_ct_reason[sizeof(s_sweep.k_ct_reason) - 1] = '\0';
 }
 
+/* ---- Feature: nameplate current -> S14/S15 arming --------------------------
+ * safety_guards.c's S14 (per-channel over-current) and S15 (per-zone
+ * under-current, summed topology) both key entirely off
+ * cfg->i_normal_a[0..2]/i_normal_valid[0..2] on the SAFETY PROCESSOR -- see
+ * that file's own S14/S15 block. Before this, nothing ever wrote those
+ * params: zone_normals_set() (called from
+ * zone_sweep_task_record_normal()/zone_sweep_task_record_ct_channels() above)
+ * persists a zone's measured normal current only in the ESP's own NVS
+ * (zones_config_get_normal_current()) -- the Pico never sees it, so
+ * i_normal_valid[] stays false forever and both guards report "inactive"
+ * even on a board that has completed a full, successful current sweep. That
+ * is exactly this bench's situation. This function is the missing push,
+ * built on the identical stage/COMMIT_CONFIG/verify pattern
+ * zone_sweep_push_k_ct_v_per_a() above already uses for the same safety
+ * processor -- deliberately AFTER that call (never before/interleaved, same
+ * reasoning: both stage into the one Pico-side config buffer and each ends
+ * its own COMMIT_CONFIG transaction). */
+
+#define ZONE_INORMAL_PARAM_ID(zi) ((uint16_t)(0x031Au + (zi)))
+
+/* Pure planning decision: which zones have an already-measured, still-
+ * plausible normal current worth pushing, and what value. Host-testable
+ * without a fake link -- every input is the ESP's own persisted store.
+ *
+ * Deliberately NOT limited to zones measured in the run that just finished:
+ * zones_config_get_normal_current() is the durable record (survives a
+ * reboot), and a zone skipped this run (relay_mask == 0, or this run only
+ * re-measured a subset) still has a previously-measured normal that keeps
+ * its own S14/S15 armed -- there is no reason to let a partial re-sweep
+ * un-arm a zone it did not touch. A zone with no measurement on record
+ * (never swept) is left unplanned -- exactly the "leave the guard dormant
+ * rather than fabricate a threshold" rule the owner asked for: this
+ * function never invents a value, it only relays one this board already
+ * measured. `out_a` must have MAX31856_CHANNEL_COUNT entries. */
+uint8_t zone_sweep_plan_i_normal(float *out_a, char *note, size_t note_cap)
+{
+    uint8_t plan_mask = 0;
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        float amps = 0.0f;
+        bool measured = false;
+        if (!zones_config_get_normal_current(zi, &amps, &measured) || !measured) {
+            continue;
+        }
+        if (!isfinite(amps) || amps <= 0.0f) {
+            /* zones_config_get_normal_current()'s own contract already
+             * refuses to persist a non-finite/non-positive value (see
+             * zone_normals_set()), so this is defence in depth, not the
+             * expected path -- never push a guard threshold this function
+             * cannot vouch for. */
+            continue;
+        }
+        out_a[zi] = amps;
+        plan_mask |= (uint8_t)(1u << zi);
+    }
+    if (plan_mask == 0 && note) {
+        snprintf(note, note_cap, "no zone has a measured normal current yet -- S14/S15 stay dormant");
+    }
+    return plan_mask;
+}
+
+/* H3-style repair for this push -- mirrors zone_sweep_unstage_k_ct() above.
+ * `prior` holds whatever the Pico had committed for each planned zone BEFORE
+ * this attempt started staging (captured by the caller, since once staging
+ * begins the ESP's own cache of "committed" is stale until the next
+ * refetch); a zone with no prior commit restores to 0.0f/unset, matching
+ * safety_guards.c reading i_normal_valid[] false the same way it does for a
+ * board that was never swept at all -- the safe direction for a repair. */
+static void zone_sweep_unstage_i_normal(uint8_t staged_mask, const float *prior, char *note, size_t note_cap)
+{
+    if (staged_mask == 0 || !s_hw_safety) {
+        return;
+    }
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        if ((staged_mask & (1u << zi)) == 0) {
+            continue;
+        }
+        kilnlink_param_value_t v;
+        memset(&v, 0, sizeof(v));
+        v.f32_val = prior ? prior[zi] : 0.0f;
+        if (safety_link_send_set_param(s_hw_safety, ZONE_INORMAL_PARAM_ID(zi),
+                                       KILNLINK_PARAM_TYPE_F32, v) != ESP_OK) {
+            snprintf(note, note_cap,
+                     "i_normal_a staging failed and could NOT be backed out -- re-run the "
+                     "sweep before saving again");
+            return;
+        }
+    }
+}
+
+/* H1-style verification for this push -- mirrors
+ * zone_sweep_confirm_k_ct_landed() above, same "an ACKed commit is not proof
+ * anything was stored" reasoning and the same exact-bit-equality check (both
+ * sides carry the identical IEEE-754 f32). */
+static bool zone_sweep_confirm_i_normal_landed(uint8_t mask, const float *planned_a, char *reason,
+                                                size_t reason_cap)
+{
+    uint16_t best_known_crc = 0;
+    bool peer_known = false;
+    (void)safety_link_get_peer_build_status(s_hw_safety, &peer_known, NULL, NULL, NULL, NULL, NULL,
+                                             NULL, &best_known_crc);
+    if (!safety_cfg_store_refetch(s_hw_safety, peer_known ? best_known_crc : 0)) {
+        snprintf(reason, reason_cap,
+                 "the i_normal_a commit could not be read back to confirm it -- treated as "
+                 "NOT written");
+        return false;
+    }
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        if ((mask & (1u << zi)) == 0) {
+            continue;
+        }
+        float committed = 0.0f;
+        if (!zone_cfg_committed_f32(ZONE_INORMAL_PARAM_ID(zi), &committed) || committed != planned_a[zi]) {
+            /* Same "%u is at most 3 digits, prove the fixed text fits reason_cap
+             * (96)" discipline as zone_sweep_run_all_zones()'s ENERGIZE_REFUSED
+             * arm -- the longer wording this replaced (naming S14/S15
+             * explicitly) measured 106 bytes against reason_cap==96 and broke
+             * -Werror=format-truncation. Same meaning, shorter words. */
+            snprintf(reason, reason_cap,
+                     "i_normal_a[%u] does not read back as written -- treated as NOT written",
+                     (unsigned)zi);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Called only from zone_sweep_task(), immediately after
+ * zone_sweep_push_k_ct_v_per_a(), with every relay already off -- same
+ * calling convention as that function.
+ *
+ * NOTE (constraint check, owner-directed): this stages SET_PARAM + one
+ * COMMIT_CONFIG, the exact path safety_cfg_http.c's hand-typed-value POST
+ * already uses -- no new wire message and no KILNLINK_PROTOCOL_VERSION or
+ * ZONES_CFG_VERSION bump. It is subject to the SAME "Pico refuses config
+ * writes while relay_owner is ARMED, only in the post-reset grace window"
+ * rule as every other push in this file (zone_sweep_push_ct_channel_map(),
+ * zone_sweep_push_k_ct_v_per_a()) -- a rejected/unacknowledged commit here
+ * reads exactly like those do (rejected/timeout note, unstaged, mask stays
+ * 0), it is not a new failure mode this function introduces. */
+static void zone_sweep_push_i_normal_a(void)
+{
+    char note[sizeof(s_sweep.i_normal_reason)];
+    note[0] = '\0';
+    float planned_a[MAX31856_CHANNEL_COUNT] = {0};
+    float prior_a[MAX31856_CHANNEL_COUNT] = {0};
+    uint8_t staged_mask = 0;
+
+    uint8_t plan_mask = zone_sweep_plan_i_normal(planned_a, note, sizeof(note));
+    if (plan_mask != 0 && !s_hw_safety) {
+        snprintf(note, sizeof(note), "safety link not available -- i_normal_a not written");
+        plan_mask = 0;
+    }
+
+    if (plan_mask != 0) {
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            if ((plan_mask & (1u << zi)) == 0) {
+                continue;
+            }
+            (void)zone_cfg_committed_f32(ZONE_INORMAL_PARAM_ID(zi), &prior_a[zi]); /* 0.0f if never committed */
+            kilnlink_param_value_t v;
+            memset(&v, 0, sizeof(v));
+            v.f32_val = planned_a[zi];
+            esp_err_t err = safety_link_send_set_param(s_hw_safety, ZONE_INORMAL_PARAM_ID(zi),
+                                                       KILNLINK_PARAM_TYPE_F32, v);
+            if (err != ESP_OK) {
+                snprintf(note, sizeof(note), "staging i_normal_a[%u] failed: %.24s", zi,
+                         esp_err_to_name(err));
+                zone_sweep_unstage_i_normal(staged_mask, prior_a, note, sizeof(note));
+                plan_mask = 0;
+                break;
+            }
+            staged_mask |= (uint8_t)(1u << zi);
+        }
+    }
+
+    if (plan_mask != 0) {
+        uint16_t reject_param_id = 0;
+        uint8_t reject_reason = 0;
+        bool rejected = false;
+        esp_err_t err = safety_link_send_commit_config(s_hw_safety, &reject_param_id, &reject_reason,
+                                                        &rejected);
+        if (err != ESP_OK) {
+            snprintf(note, sizeof(note), "i_normal_a staged but the commit was not "
+                                          "acknowledged (%.24s)", esp_err_to_name(err));
+            zone_sweep_unstage_i_normal(staged_mask, prior_a, note, sizeof(note));
+            plan_mask = 0;
+        } else if (rejected) {
+            snprintf(note, sizeof(note), "the safety processor rejected the i_normal_a commit "
+                                          "(id 0x%04X, reason %u)", (unsigned)reject_param_id,
+                     (unsigned)reject_reason);
+            zone_sweep_unstage_i_normal(staged_mask, prior_a, note, sizeof(note));
+            plan_mask = 0;
+        } else if (!zone_sweep_confirm_i_normal_landed(plan_mask, planned_a, note, sizeof(note))) {
+            zone_sweep_unstage_i_normal(staged_mask, prior_a, note, sizeof(note));
+            plan_mask = 0;
+        } else {
+            note[0] = '\0';
+        }
+    }
+
+    s_sweep.i_normal_pushed_mask = plan_mask;
+    strncpy((char *)s_sweep.i_normal_reason, note, sizeof(s_sweep.i_normal_reason) - 1);
+    s_sweep.i_normal_reason[sizeof(s_sweep.i_normal_reason) - 1] = '\0';
+}
+
 static void zone_sweep_task_zone_done(void *ctx)
 {
     (void)ctx;
@@ -818,6 +1023,10 @@ static void zone_sweep_task(void *arg)
          * refuses outright if the map push left that buffer in a state it
          * could not repair. */
         zone_sweep_push_k_ct_v_per_a();
+        /* Feature: nameplate current -> S14/S15 arming. Strictly AFTER the
+         * k_ct push, same "one Pico-side staged buffer, one transaction at a
+         * time" reasoning -- see zone_sweep_push_i_normal_a()'s own comment. */
+        zone_sweep_push_i_normal_a();
         /* DONE goes up only AFTER the push has finished (opus review,
          * 2026-08-28). Setting it first left a window two link round trips
          * wide in which a status poll saw state=done with
@@ -926,6 +1135,8 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
     s_sweep.ct_map_reason[0] = '\0';
     s_sweep.k_ct_derived_mask = 0;
     s_sweep.k_ct_reason[0] = '\0';
+    s_sweep.i_normal_pushed_mask = 0;
+    s_sweep.i_normal_reason[0] = '\0';
     s_sweep.summed_unmeasured_mask = 0;
 
     BaseType_t created = xTaskCreate(zone_sweep_task, "zone_sweep", 4096, NULL, tskIDLE_PRIORITY + 2, &s_sweep.task);
@@ -969,6 +1180,9 @@ void zones_current_sweep_get_status(zone_sweep_status_t *out)
     out->k_ct_derived_mask = s_sweep.k_ct_derived_mask;
     strncpy(out->k_ct_reason, (const char *)s_sweep.k_ct_reason, sizeof(out->k_ct_reason) - 1);
     out->k_ct_reason[sizeof(out->k_ct_reason) - 1] = '\0';
+    out->i_normal_pushed_mask = s_sweep.i_normal_pushed_mask;
+    strncpy(out->i_normal_reason, (const char *)s_sweep.i_normal_reason, sizeof(out->i_normal_reason) - 1);
+    out->i_normal_reason[sizeof(out->i_normal_reason) - 1] = '\0';
     out->summed_unmeasured_mask = s_sweep.summed_unmeasured_mask;
 }
 

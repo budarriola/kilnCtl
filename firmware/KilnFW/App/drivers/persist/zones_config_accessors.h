@@ -1420,6 +1420,16 @@ typedef struct {
      * the safety processor. */
     uint8_t k_ct_derived_mask;
     char    k_ct_reason[96];
+    /* Feature: nameplate current -> S14/S15 arming. bit zi set means zone
+     * zi's already-measured normal current (zones_config_get_normal_current(),
+     * NOT necessarily measured by THIS run -- see zone_sweep_plan_i_normal())
+     * was pushed to and confirmed written on the safety processor's
+     * i_normal_a[zi] (0x031A + zi), arming S14 (per-channel over-current) and,
+     * in summed-CT topology, S15 (per-zone under-current) for that zone.
+     * i_normal_reason is "" only when nothing needs saying, same convention
+     * as ct_map_reason/k_ct_reason above. */
+    uint8_t i_normal_pushed_mask;
+    char    i_normal_reason[96];
     /* opus review finding (MEDIUM), CT_COMMISSIONING_PLAN.md step 3 summed
      * topology: zone_sweep_summed_normal_a() refuses (rather than clamping
      * to a persisted zero) when a zone's shared-channel reading came back

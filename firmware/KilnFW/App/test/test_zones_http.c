@@ -8974,6 +8974,68 @@ static void test_zone_sweep_plan_k_ct_implausible_reason_is_not_truncated(void)
                "the operator sees the WHOLE reason, not a %.70s-truncated fragment of it");
 }
 
+// ---- zone_sweep_plan_i_normal() -- nameplate current -> S14/S15 arming ----
+
+static void test_zone_sweep_plan_i_normal_nothing_measured_yet(void)
+{
+    TEST_SECTION("zone_sweep_plan_i_normal -- an unswept board plans nothing and says why");
+
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    float a[MAX31856_CHANNEL_COUNT] = {0};
+    char note[96] = "";
+    TEST_CHECK(zone_sweep_plan_i_normal(a, note, sizeof(note)) == 0,
+               "no zone has ever been measured -- nothing to push");
+    TEST_CHECK(note[0] != '\0', "the operator is told S14/S15 stay dormant, not left to guess why");
+}
+
+static void test_zone_sweep_plan_i_normal_plans_every_measured_zone(void)
+{
+    TEST_SECTION("zone_sweep_plan_i_normal -- plans exactly the zones with a measured normal");
+
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    nvs_test_enable(true);
+    nvs_test_clear();
+    TEST_CHECK(zone_normals_set(0, 4.2f), "zone 0 measured");
+    TEST_CHECK(zone_normals_set(2, 6.9f), "zone 2 measured");
+    // zone 1 deliberately left unmeasured.
+
+    float a[MAX31856_CHANNEL_COUNT] = {0};
+    char note[96] = "unset";
+    uint8_t mask = zone_sweep_plan_i_normal(a, note, sizeof(note));
+    TEST_CHECK(mask == 0x05, "bits 0 and 2 set, bit 1 (unmeasured) clear");
+    TEST_CHECK(a[0] == 4.2f, "zone 0's planned value is exactly what was measured");
+    TEST_CHECK(a[2] == 6.9f, "zone 2's planned value is exactly what was measured");
+    TEST_CHECK(strcmp(note, "unset") == 0, "a non-empty plan leaves note untouched -- only a total refusal explains itself");
+
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_zone_sweep_plan_i_normal_survives_a_partial_resweep(void)
+{
+    TEST_SECTION("zone_sweep_plan_i_normal -- a zone this run did not touch still keeps its old measurement armed");
+
+    // This is the property the doc comment calls out explicitly: the plan
+    // reads the durable store, not "what this run just measured" -- a sweep
+    // that only re-measures zone 0 must not un-arm S14/S15 for zone 1, which
+    // still has a perfectly good prior measurement on record.
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    nvs_test_enable(true);
+    nvs_test_clear();
+    TEST_CHECK(zone_normals_set(1, 3.0f), "zone 1 measured by an EARLIER sweep");
+
+    float a[MAX31856_CHANNEL_COUNT] = {0};
+    char note[96] = "";
+    uint8_t mask = zone_sweep_plan_i_normal(a, note, sizeof(note));
+    TEST_CHECK(mask == 0x02, "zone 1's old measurement is still planned even though no new sweep touched it");
+    TEST_CHECK(a[1] == 3.0f, "the persisted value, not a freshly-measured one, is what gets planned");
+
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 // ---- the push, and every way it can fail after something has been staged ---
 
 static int kct_setparam_count_for(uint16_t param_id)
@@ -9718,6 +9780,10 @@ void run_test_zones_http(void)
     test_zone_sweep_push_k_ct_rejected_commit_backs_the_staging_out();
     test_zone_sweep_push_k_ct_partial_staging_failure_backs_out_what_staged();
     test_zone_sweep_push_k_ct_backout_restores_the_uncommissioned_zero();
+
+    test_zone_sweep_plan_i_normal_nothing_measured_yet();
+    test_zone_sweep_plan_i_normal_plans_every_measured_zone();
+    test_zone_sweep_plan_i_normal_survives_a_partial_resweep();
 
     test_ct_mapping_mismatch_silent_when_never_measured();
     test_ct_mapping_mismatch_within_band_is_silent();
