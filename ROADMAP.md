@@ -1,6 +1,119 @@
 # kilnCtl Roadmap — both processors
 
 > **Status:** planning · **Last reviewed:** 2026-09-10, roadmap-upkeep audit
+> (eleventh sweep) — 27 commits landed since the tenth sweep (`c4b026d8`).
+> Verified against code and git history, not against another doc's status
+> marker; check suite re-run fresh this sweep, **90/90 passing** (confirmed
+> against `run_all_checks.ps1` output, matching the tenth sweep's target of
+> "84 -> 87" continuing to "87 -> 90"). Landed and confirmed:
+> - **ESP flashed to HEAD `170f4b75`** (`c34fb2a5`, 2026-09-10, clean
+>   detached worktree at `origin/main`) — the board had been stuck at
+>   `6355c822` since 2026-09-06. `flash_firmware(..., verify=True)` confirmed
+>   the running partition/build; Pico-side commissioning (S8 20 C/min,
+>   `mains_voltage_v=120`) survived the ESP-only reset unchanged. Full record:
+>   `docs/audits/esp_bring_up_to_head_2026-09-10.md`.
+>   - `/api/readiness` item `safety_commissioned` now reports **exactly 3**
+>     missing parameters, `i_normal_a[0..2]` — `ct_channel_map` is no longer
+>     counted, confirming the summed-topology mirror fix (tenth sweep) is
+>     live on both sides. The `i_normal_a` write path (`c0729e1e`) is now on
+>     the board, so a CT sweep could arm S14/S15 — **none has been run; both
+>     guards remain DORMANT**.
+>   - **Side effect, not a regression: S1 `abs_max_temp_c` moved 80 -> 85 C.**
+>     `safety_ceiling_sync.c` (new this HEAD) pushes the ESP's configured
+>     zone ceiling to the Pico's S1 threshold on link-up, and at the time of
+>     the flash that policy added 5 C of headroom above the ESP's own 80 C
+>     ceiling. **The owner has since decided a web-page ceiling must be a
+>     hard cutoff (exact value, no added headroom), and a fix is in progress
+>     right now**: `firmware/KilnFW/App/drivers/safety/safety_ceiling_policy.c`
+>     / `.h` show as locally modified, uncommitted, in this session's own
+>     `git status` (along with `sim_plant.c` and two test files) — do not
+>     touch these files or commit over them this sweep. Until that lands and
+>     is flashed, the live Pico still enforces 85 C, 5 C looser than the ESP.
+> - **The 45 C discriminating coupling plateau ran and finished** (`7c18a11e`):
+>   settled 46 min, z2 residual **-1.58 C** — close to the -2.9 C SCALE
+>   prediction and far from the -8.4 C OFFSET prediction from the ninth/tenth
+>   sweep's own pre-registered criterion, so **SCALE is favored, OFFSET
+>   excluded**, for z2 specifically.
+> - **Eight-plateau shape-vs-scale analysis** (`b60a3f85`): the simulation-
+>   and hardware-derived corrections **agree** to 0.030/0.037/0.040 once a
+>   hardware drift allowance is applied, leaving a common ~0.035
+>   row-independent residual. But **z0 is a shape error, not a scale error**:
+>   fitted exponent 1.366 with an offset that survives leave-one-campaign-out,
+>   crossing zero once across eight plateaus. Leading hypothesis: buoyant
+>   transport into the top zone, superlinear in delta-T. **The adopted
+>   coupling matrix is refuted against its own acceptance criterion** — this
+>   updates, and is consistent with, the tenth sweep's `cplval75` refutation.
+>   A uniform per-row rescale will not fix z0; joint re-identification is
+>   still required (unchanged open item, see below).
+> - **Simulator coupling model class was wrong, now fixed** (`d63a5591`): it
+>   used a temperature-difference exchange term (`g*(T_j-T_i)`), identically
+>   zero at a uniform dwell, where the firmware's `zone_coupling_solve.c`
+>   couples by additive duty-driven source gain
+>   (`diag(k)+coupling_coeff`) — two model classes that agree only in
+>   differential mode, and the recorded dwell operating point is almost pure
+>   common mode. This was the real cause behind the credibility gate's ramp
+>   MAE bar failing outright; after the fix, ramp MAE passes on 5 of 6
+>   zone-runs against the 3 C bar (`docs/audits/sim_credibility_gate_real_cause_2026-09-10.md`,
+>   confirmed current in `docs/ITER_TUNE_REDESIGN_PLAN.md`'s own live status
+>   block, itself already updated by a concurrent pass this sweep — re-read
+>   that doc directly rather than trusting a fixed number here, since a
+>   further rebuild during this same day moved the count from da9f3775's
+>   "5 pass / 1 fail" framing to a 6-zone-run framing with the same shape).
+> - **Credibility gate reports honestly now** (`da9f3775` and siblings,
+>   `b351edf0`): previously-vacuous dwell-entry-peak passes fixed, ambient
+>   leakage in the state stated. Gate overall verdict remains **GATE FAILS**
+>   — dwell offset and dwell-entry peak are the open bars, per
+>   `docs/ITER_TUNE_REDESIGN_PLAN.md`'s live status.
+> - **Second-order plant hypothesis for the dwell-entry-peak bar: refuted as
+>   tested** (`4f26a7f7`). **Closed-loop replay (candidate 3) explains dwell
+>   offset but not the peak residual** (`170f4b75`). All three investigated
+>   candidates for the peak residual are now eliminated — the leading
+>   hypothesis reduces to the z0 coupling deficit above; do not re-propose
+>   second-order plant or closed-loop replay as the peak explanation again.
+> - **A1 false-accept regression root-caused and fixed** (`8b96b591`): dwell-
+>   entry peak now smoothed over one PWM window, false-accept rate 3.64% ->
+>   1.97%.
+> - **Capture-scoring adapter added** (`49bb1123`, `firing_score_from_capture`
+>   runs `firing_score.c`/`firing_compare.c` against real bench captures), and
+>   a finding recorded: **profile 7's dwells are shorter than its entry
+>   window**, so `steady_rms_c` can never produce a sample — Bar 2 (noise-
+>   floor spread) is structurally unreachable for that profile.
+> - Smaller fixes this sweep, each confirmed in git log: ceiling-reconcile
+>   budget/backoff (`d2710518`), `climb_window_floor_s` wired into the
+>   autotune-engine producer path (`bd77ffd1`), atomic ELF publish for
+>   `check_00` (`25508277`), the ELF-archive test-write guard (`aa698221`),
+>   `check_doc_hash_citations.ps1` now resolving submodule commit hashes
+>   (`79d93233` — this is the fix that lets this very sweep's citations be
+>   checked correctly).
+> - **Coupling capture procedure revised again** (`c42d9384`): delta-T-
+>   targeted plateaus, ambient measured at the thermocouples, a same-session
+>   high-delta-T joint hold, and a new criterion B distinguishing scale from
+>   shape errors — now an estimated 7.25-8.75 h capture, up from the tenth
+>   sweep's 6.5-8 h.
+> - Check suite: **87 -> 90 discovered, 90 passing, 0 failed**, re-confirmed
+>   by a fresh run this sweep (see status line above).
+>
+> **Open, in flight, or owner-blocked as of this sweep** (do not mark any of
+> these done): the S1 ceiling hard-cutoff fix is **uncommitted, in progress
+> right now** in this session's own working tree (`safety_ceiling_policy.c`/
+> `.h`, `sim_plant.c`, two test files) — until it lands and is reflashed the
+> live Pico ceiling is 85 C, 5 C looser than the ESP's 80 C; the coupling
+> matrix still needs joint re-identification and the board runs uncoupled
+> feedforward until then, and a per-row rescale will not fix z0's shape
+> error; S14/S15 remain dormant pending a CT sweep populating
+> `i_normal_a[0..2]` (write path live, sweep not yet run); the credibility
+> gate's dwell-offset and dwell-entry-peak bars are still open with all three
+> investigated peak-residual hypotheses now eliminated; S8 stays at its
+> hand-set 20 C/min until the matrix is re-identified; `abs_max_temp_c` must
+> still be raised Pico-first-then-ESP before a real firing; the E-stop
+> double-pole switch is still unwired; two Pico reboots at heat start remain
+> unexplained; `safety_poll` (3104/3104 B) and `autotune_engine` (2944/2944
+> B) both still sit at exactly zero stack margin; the Pico fault-hook
+> diagnostics (malloc/assert latching, `boot_reason` bits) have never been
+> verified on hardware; iter_tune persistence, HTTP surface and shadow mode
+> remain unbuilt, deliberately behind the credibility gate. Full detail for
+> closed items before this sweep lives in `docs/COMPLETED_2026-09.md`.
+> **Reviewed before that:** 2026-09-10, roadmap-upkeep audit
 > (tenth sweep) — 53 commits landed since the ninth sweep (`fa424d74`).
 > Verified against code and git history, not against another doc's status
 > marker. Landed and confirmed:
