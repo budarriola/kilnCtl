@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -170,6 +171,75 @@ void safety_ceiling_policy_apply_lower(float current_pico_ceiling_c, bool curren
                                         safety_ceiling_writer_fn writer, void *writer_ctx,
                                         safety_ceiling_sync_result_t *out_result, char *reason_out,
                                         size_t reason_cap);
+
+/* 2026-09-10 opus review finding A: safety_ceiling_sync_reconcile_on_link_up()
+ * (safety_link_poll.c) runs this policy's guard_raise() unconditionally on
+ * EVERY safety_poll_task tick (~500 ms, sdkconfig CONFIG_ESP_TASK_WDT_TIMEOUT_S
+ * = 5 s) while the link is up. That is a true no-op only when the cached Pico
+ * ceiling is already known and wide enough; the moment a raise is genuinely
+ * needed AND the Pico refuses it (config_store.c's unconditional "ARMED
+ * refuses every write", which is the Pico's ORDINARY standing state -- see
+ * safety_ceiling_policy_guard_raise()'s own doc comment), the exact same
+ * expensive stage+commit+confirm round trip (safety_cfg_http_set_and_
+ * confirm_f32() -> apply_pairs() -> two UART exchanges, PLUS confirm_commit_
+ * landed()'s up-to-2000ms safety_cfg_store_refetch() on any ACKed-but-
+ * unconfirmed path) would otherwise be retried twice a second, forever,
+ * against a refusal that cannot resolve until the relay de-energises --
+ * pure cost, and unrate-limited logging with it.
+ *
+ * This is a tiny PURE backoff state machine (no I/O, no clock source of its
+ * own -- the caller supplies `now_us` from whatever monotonic clock it has,
+ * exactly the same "pure decision, real clock stays outside" split this
+ * file's other functions already use) that the ESP-glue reconcile call site
+ * (safety_ceiling_sync.c) consults BEFORE calling guard_raise() at all: while
+ * backed off, the reconcile is skipped entirely -- no UART round trip, no
+ * log line -- and only re-attempted once `now_us` reaches `backoff_until_us`.
+ *
+ * Backoff duration depends on WHY the previous attempt failed:
+ *   - the Pico reported ARMED (writer's reason_out contains "ARMED", the
+ *     literal substring commit_reject_reason_words()/config_store.c's own
+ *     REFUSED_ARMED message always carries) -- this is the expected,
+ *     long-lived state on any bench that has been up more than a minute, so
+ *     back off HARD (SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_US) rather than
+ *     retry against a guaranteed refusal.
+ *   - any other failure (communication error, unconfirmed read-back, etc)
+ *     -- back off more modestly (SAFETY_CEILING_RECONCILE_RETRY_BACKOFF_US)
+ *     since these ARE expected to be transient.
+ * A successful attempt (or one that needed no write at all) clears the
+ * backoff immediately, so the very next tick can react promptly to a
+ * relay that has just been de-energised or a config that has just changed.
+ *
+ * Remaining window: the ESP's zone ceiling can exceed the Pico's confirmed
+ * ceiling for up to one backoff period (worst case
+ * SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_US) after the mismatch first
+ * appears, before the next attempt even starts -- this reconcile path was
+ * ALREADY best-effort/eventual (safety_ceiling_sync.h's own doc comment:
+ * "never blocks heat or fails the boot... left for the next tick or the
+ * next interactive zones POST to retry"), so this widens an already-open
+ * eventual-consistency window, it does not create a new kind of one. The
+ * hard invariant that must never be violated (the Pico ceiling must never
+ * be TIGHTER than the ESP's) is unaffected either way: a failed/skipped
+ * reconcile leaves the Pico's ceiling exactly where it was -- possibly
+ * stale-low, never dropped further. */
+#define SAFETY_CEILING_RECONCILE_RETRY_BACKOFF_US ((int64_t)5 * 1000 * 1000)  /* 5 s -- ordinary transient failure */
+#define SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_US ((int64_t)30 * 1000 * 1000) /* 30 s -- Pico ARMED, guaranteed refusal */
+
+typedef struct {
+    int64_t backoff_until_us; /* 0 == never backed off / not currently backing off */
+} safety_ceiling_reconcile_backoff_t;
+
+/* True iff a reconcile attempt may be made now (state->backoff_until_us has
+ * been reached or was never set). Never mutates `state`. */
+bool safety_ceiling_reconcile_should_attempt(const safety_ceiling_reconcile_backoff_t *state, int64_t now_us);
+
+/* Updates `state` after an attempt. `ok` is guard_raise()'s own return value;
+ * `reason` is whatever it left in reason_out (may be NULL/empty on success).
+ * A successful attempt (ok == true, including the "nothing needed" case)
+ * clears the backoff. A failed attempt sets backoff_until_us = now_us plus
+ * the ARMED or ordinary backoff duration, chosen by whether `reason`
+ * contains the substring "ARMED". */
+void safety_ceiling_reconcile_record_result(safety_ceiling_reconcile_backoff_t *state, int64_t now_us, bool ok,
+                                             const char *reason);
 
 #ifdef __cplusplus
 }

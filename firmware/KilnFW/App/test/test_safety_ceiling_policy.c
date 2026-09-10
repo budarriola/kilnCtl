@@ -134,10 +134,110 @@ static void test_zero_ceiling_zone_excluded_from_maximum(void)
     TEST_CHECK_NEAR(target, 155.0f, 0.001f, "the maximum must come from the one real zone (150) + headroom, ignoring the zero zones");
 }
 
+// ---------------------------------------------------------------------
+// 5. 2026-09-10 opus review finding A: safety_ceiling_reconcile_backoff_t --
+//    the pure backoff decision safety_ceiling_sync_reconcile_on_link_up()
+//    (safety_ceiling_sync.c) must consult BEFORE calling guard_raise() on
+//    every safety_poll_task tick, so a Pico that is ARMED (its ordinary
+//    standing state) and therefore guaranteed to refuse a raise does not
+//    get retried twice a second forever.
+// ---------------------------------------------------------------------
+
+static void test_reconcile_backoff_starts_open(void)
+{
+    safety_ceiling_reconcile_backoff_t state = { 0 };
+    TEST_CHECK(safety_ceiling_reconcile_should_attempt(&state, 0),
+               "a freshly-initialised backoff state must allow the very first attempt");
+    TEST_CHECK(safety_ceiling_reconcile_should_attempt(&state, 1000000),
+               "and every later time too, until a failure records one");
+}
+
+static void test_reconcile_backoff_after_armed_refusal_is_the_long_backoff(void)
+{
+    safety_ceiling_reconcile_backoff_t state = { 0 };
+    int64_t now = 1000000000LL; // arbitrary non-zero epoch
+
+    safety_ceiling_reconcile_record_result(&state, now, false,
+                                            "commit rejected: abs_max_temp_c (id 260) -- relay is ARMED -- "
+                                            "config writes are refused while ARMED -- values were staged but "
+                                            "NOT written");
+
+    TEST_CHECK(!safety_ceiling_reconcile_should_attempt(&state, now),
+               "must not retry in the same instant as an ARMED refusal");
+    TEST_CHECK(!safety_ceiling_reconcile_should_attempt(&state, now + SAFETY_CEILING_RECONCILE_RETRY_BACKOFF_US),
+               "the SHORT backoff must not be enough to clear an ARMED refusal's backoff -- proves the two "
+               "durations are not accidentally the same");
+    TEST_CHECK(safety_ceiling_reconcile_should_attempt(&state, now + SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_US),
+               "the full ARMED backoff duration must clear it");
+}
+
+static void test_reconcile_backoff_after_ordinary_failure_is_the_short_backoff(void)
+{
+    safety_ceiling_reconcile_backoff_t state = { 0 };
+    int64_t now = 5000000000LL;
+
+    safety_ceiling_reconcile_record_result(&state, now, false,
+                                            "communication with the safety processor failed while staging "
+                                            "abs_max_temp_c (id 260): ESP_ERR_TIMEOUT");
+
+    TEST_CHECK(!safety_ceiling_reconcile_should_attempt(&state, now),
+               "must not retry in the same instant as an ordinary failure");
+    TEST_CHECK(safety_ceiling_reconcile_should_attempt(&state, now + SAFETY_CEILING_RECONCILE_RETRY_BACKOFF_US),
+               "the short backoff duration must clear an ordinary (non-ARMED) failure");
+    // Prove it is genuinely the SHORT one, not merely "the ARMED duration
+    // also happens to have elapsed" -- a negative-test-shaped check: if the
+    // implementation collapsed both branches onto the long duration, this
+    // would fail where the assertion above would still pass.
+    TEST_CHECK(SAFETY_CEILING_RECONCILE_RETRY_BACKOFF_US < SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_US,
+               "sanity: the two configured backoff constants must actually differ");
+}
+
+static void test_reconcile_backoff_success_clears_it_immediately(void)
+{
+    safety_ceiling_reconcile_backoff_t state = { 0 };
+    int64_t now = 2000000000LL;
+
+    safety_ceiling_reconcile_record_result(&state, now, false, "relay is ARMED -- config writes are refused");
+    TEST_CHECK(!safety_ceiling_reconcile_should_attempt(&state, now + 1),
+               "sanity: the ARMED backoff must actually be pending before the success case below");
+
+    // A relay that de-energises (or a config change that no longer needs a
+    // raise) must be reflected the very next tick, not wait out an armed
+    // backoff that no longer applies.
+    safety_ceiling_reconcile_record_result(&state, now + 1, true, NULL);
+    TEST_CHECK(safety_ceiling_reconcile_should_attempt(&state, now + 1),
+               "a successful (or no-op) result must clear the backoff immediately, not merely shorten it");
+    TEST_CHECK(safety_ceiling_reconcile_should_attempt(&state, now + 2),
+               "and stay clear afterward, not just at the exact instant of success");
+}
+
+static void test_reconcile_backoff_reason_without_armed_substring_is_short(void)
+{
+    // The classifier looks for the literal substring "ARMED" -- any failure
+    // reason that does not contain it (even one that is ALSO Pico-related)
+    // must fall into the short/ordinary backoff, not the long one. Guards
+    // against an over-broad classifier that treats every failure as ARMED.
+    safety_ceiling_reconcile_backoff_t state = { 0 };
+    int64_t now = 3000000000LL;
+
+    safety_ceiling_reconcile_record_result(&state, now, false,
+                                            "the safety processor accepted the commit but this board could not "
+                                            "read the config back to confirm it -- treating the write as "
+                                            "UNCONFIRMED, not successful");
+
+    TEST_CHECK(safety_ceiling_reconcile_should_attempt(&state, now + SAFETY_CEILING_RECONCILE_RETRY_BACKOFF_US),
+               "a non-ARMED failure reason must use the short backoff even when it is otherwise Pico-related");
+}
+
 void run_test_safety_ceiling_policy(void)
 {
     test_raise_writes_pico_first_and_confirms();
     test_lower_is_esp_first_pico_best_effort_after();
     test_failed_pico_raise_blocks_and_leaves_esp_unchanged();
     test_zero_ceiling_zone_excluded_from_maximum();
+    test_reconcile_backoff_starts_open();
+    test_reconcile_backoff_after_armed_refusal_is_the_long_backoff();
+    test_reconcile_backoff_after_ordinary_failure_is_the_short_backoff();
+    test_reconcile_backoff_success_clears_it_immediately();
+    test_reconcile_backoff_reason_without_armed_substring_is_short();
 }

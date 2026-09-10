@@ -152,3 +152,26 @@ void safety_ceiling_policy_apply_lower(float current_pico_ceiling_c, bool curren
         *out_result = SAFETY_CEILING_SYNC_LOWERED;
     }
 }
+
+bool safety_ceiling_reconcile_should_attempt(const safety_ceiling_reconcile_backoff_t *state, int64_t now_us)
+{
+    if (!state) {
+        return true;
+    }
+    return now_us >= state->backoff_until_us;
+}
+
+void safety_ceiling_reconcile_record_result(safety_ceiling_reconcile_backoff_t *state, int64_t now_us, bool ok,
+                                             const char *reason)
+{
+    if (!state) {
+        return;
+    }
+    if (ok) {
+        state->backoff_until_us = 0;
+        return;
+    }
+    bool armed = reason && strstr(reason, "ARMED") != NULL;
+    int64_t backoff_us = armed ? SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_US : SAFETY_CEILING_RECONCILE_RETRY_BACKOFF_US;
+    state->backoff_until_us = now_us + backoff_us;
+}
