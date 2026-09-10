@@ -20,8 +20,32 @@
 #
 # WHAT THIS CHECKS: `git fetch origin main`, then a real `idf.py build`
 # against a worktree checked out EXACTLY at that fetched ref -- no
-# uncommitted edits, no local-tree mirroring, nothing but what a fresh
-# `git pull` on origin/main would hand another session.
+# uncommitted edits, no local-tree mirroring of tracked files.
+#
+# ONE DELIBERATE EXCEPTION, and the claim above is overstated without saying
+# so (2026-09-10, opus review round 2): `sdkconfig` is gitignored (see
+# docs/CONFIG_FILESYSTEM.md and the "gitignored config hides mismatch"
+# lesson elsewhere in this repo's history) and is NOT part of what a fresh
+# `git pull` on origin/main hands another session at all -- ESP-IDF cannot
+# build without one, so this check copies the MAIN TREE's own sdkconfig
+# into the worktree below (hash-verified after the copy) rather than
+# fabricating a default one. That means this check does NOT actually prove
+# "a fresh clone of origin/main builds" -- it proves "origin/main's SOURCE
+# builds against whatever board config happens to be sitting in the machine
+# running this check". A push that changes a Kconfig default, or that
+# depends on a config symbol this machine's sdkconfig happens to set but a
+# fresh `idf.py menuconfig` would not, still passes here even though it
+# would not build cleanly for another session starting from scratch.
+# Seeding from somewhere is unavoidable (a bare origin/main checkout has no
+# sdkconfig at all, and idf.py cannot proceed without one) and the main
+# tree's own committed-adjacent, board-tuned config is the least-wrong
+# available source -- but the exception is real, not merely theoretical:
+# see feedback_gitignored_config_hides_mismatch.md's FT6336U incident. A
+# stronger version of this check would build against a MINIMAL/default
+# sdkconfig (`idf.py set-target` + whatever `sdkconfig.defaults` this repo
+# commits, if any) as a SECOND, separate run, specifically to catch a
+# Kconfig-default drift this seeded-config run cannot see by construction --
+# not attempted here today; flagged as a real gap, not "not applicable".
 #
 # FAILURE MESSAGE CONTRACT: this check's FAILED text always says
 # "origin/main (commit <sha>) does not build" and points at investigating
