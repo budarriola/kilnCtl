@@ -20,7 +20,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, config_presets, debug_probe, devices, elf_archive, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -180,6 +180,21 @@ def get_openocd_status() -> str:
     return "\n".join(lines)
 
 
+def _archive_flashed_safty_elf() -> str:
+    """Best-effort SaftyFW counterpart to mcp_server_flash._archive_flashed_elf
+    -- SaftyFW has no archive_elf.cmake step at all (KilnFW's exists, SaftyFW's
+    does not), so this is the ONLY thing that archives a flashed Pico ELF.
+    Never raises into the caller; see elf_archive.py's module docstring."""
+    try:
+        safty_fw_root = debug_probe._safty_fw_root()
+        elf_path = debug_probe._safty_fw_elf()
+        result = elf_archive.archive_safty_elf(elf_path, safty_fw_root, "debug_program(peer=pico)")
+        return f"\n\nelf archived: {result.archived_path} (identity {result.identity})"
+    except Exception as exc:  # noqa: BLE001 - archiving is a diagnostic convenience, never fail the flash over it
+        _srv._session_log.warning("debug_program: safty elf archiving failed (non-fatal): %s", exc)
+        return ""
+
+
 @_srv._tool()
 def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = False, allow_stale: bool = False) -> str:
     """Flashes an ELF to `peer` ("esp" or "pico") over OpenOCD and resets it.
@@ -243,6 +258,8 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
                 "link is up (safety_get_status shows link up and FW_VERSION "
                 "exchanged) before calling safety_clear_trip()."
             )
+            if elf_path is None:
+                note += _archive_flashed_safty_elf()
         return stale_prefix + f"programmed {peer} OK, reset and running" + note
     return _openocd_error_message(f"program failed for {peer}", output)
 

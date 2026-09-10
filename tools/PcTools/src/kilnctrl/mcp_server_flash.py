@@ -20,7 +20,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, capability_preflight, config_presets, debug_probe, devices, esp_app_desc, flash_provenance, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, capability_preflight, config_presets, debug_probe, devices, elf_archive, esp_app_desc, flash_provenance, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -385,6 +385,28 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
             "ordinary reflashes could still eventually walk this board into recovery mode.")
 
 
+def _archive_flashed_elf(build_dir: str, app_bin_path: str, tree_state,
+                          kiln_fw_root: Optional[str]) -> str:
+    """Best-effort: archives the exact ELF that was just flashed into the
+    CANONICAL (main-tree) elf_archive so a later panic can be symbolized,
+    regardless of whether this flash came from a kiln_fw_root override whose
+    own build/ directory (and elf_archive) may not outlive this call. Never
+    raises into the caller and never fails the flash result -- see
+    elf_archive.py's module docstring for why this exists and archive_elf.cmake's
+    header comment for the build-time counterpart this complements. Returns a
+    short suffix string to append to the success message (empty on failure,
+    logged instead)."""
+    elf_path = os.path.join(build_dir, "KilnCtrl.elf")
+    try:
+        app_desc = esp_app_desc.parse_app_desc_file(app_bin_path)
+        source = f"flash_firmware(kiln_fw_root={kiln_fw_root})" if kiln_fw_root else "flash_firmware"
+        result = elf_archive.archive_kiln_elf(elf_path, app_desc.build_timestamp, tree_state.head, source)
+        return f"\nelf archived: {result.archived_path} (key {result.elf_key})"
+    except Exception as exc:  # noqa: BLE001 - archiving is a diagnostic convenience, never fail the flash over it
+        _srv._session_log.warning("flash_firmware: elf archiving failed (non-fatal): %s", exc)
+        return ""
+
+
 @_srv._tool()
 def flash_firmware(
     board_cfg: str = "board/esp32s3-builtin.cfg",
@@ -673,7 +695,8 @@ def flash_firmware(
             tree_state, provenance_path, outcome=flash_provenance.OUTCOME_FLASHED_OK,
             kiln_fw_root_override=kiln_fw_root,
         )
-        return _post_flash(stale_prefix + "flashed and verified OK (bootloader + partition table + app), board reset and running")
+        archive_note = _archive_flashed_elf(build_dir, app_bin_path, tree_state, kiln_fw_root)
+        return _post_flash(stale_prefix + "flashed and verified OK (bootloader + partition table + app), board reset and running" + archive_note)
 
     if retry_once:
         _srv._session_log.warning("flash_firmware: first attempt failed, retrying once (known benign quirk)")
@@ -683,7 +706,8 @@ def flash_firmware(
                 tree_state, provenance_path, outcome=flash_provenance.OUTCOME_FLASHED_OK,
                 kiln_fw_root_override=kiln_fw_root,
             )
-            return _post_flash("flashed and verified OK on retry (first attempt hit the known benign Verify-Failed quirk)")
+            archive_note = _archive_flashed_elf(build_dir, app_bin_path, tree_state, kiln_fw_root)
+            return _post_flash("flashed and verified OK on retry (first attempt hit the known benign Verify-Failed quirk)" + archive_note)
         output = output2
 
     tail = "\n".join(output.strip().splitlines()[-25:])
@@ -887,3 +911,59 @@ def debug_check_partition_table(host: Optional[str] = None, csv_path: Optional[s
     return f"host={resolved}\n{diff.report()}"
 
 
+@_srv._tool()
+def find_crash_elf(host: Optional[str] = None, fw_build: Optional[str] = None) -> str:
+    """Finds the ELF that matches the ESP's CURRENTLY RUNNING firmware, so a
+    coredump/panic backtrace can be symbolized against the right file instead
+    of `build/KilnCtrl.elf` (whatever was built most recently -- confidently
+    wrong once the board is running an older flash, per CLAUDE.md's firmware
+    gotchas). One call in place of hunting through
+    `firmware/KilnFW/build/elf_archive/` by hand.
+
+    Looks up `elf_archive`'s manifest (populated by every flash_firmware()
+    call -- see elf_archive.py -- plus archive_elf.cmake's own POST_BUILD
+    step) keyed by the board's own reported build timestamp.
+
+    `fw_build`: pass this directly if you already have it (e.g. from a
+    crash_report or get_heap_status result) -- skips querying the board.
+    Otherwise this queries `GET /api/status` at `host` (same resolution order
+    as every ota_*/adaptive_tune_* tool: explicit host, else STA IP, else the
+    fallback AP address).
+
+    Fails LOUD with no match rather than falling back to KilnCtrl-latest.elf
+    or the newest-by-mtime file -- either would silently reproduce the exact
+    failure mode (confident wrong line numbers) this tool exists to prevent."""
+    if fw_build is None:
+        from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
+        resolved = _ota_resolve_host(host)
+        try:
+            info = capability_preflight.get_board_info(resolved)
+        except Exception as exc:  # noqa: BLE001 - report as a normal tool error, not a crash
+            return f"error: could not query board at {resolved}: {exc}"
+        fw_build = info.fw_build
+        if not fw_build:
+            return f"error: board at {resolved} did not report fw_build in /api/status"
+    path, message = elf_archive.find_kiln_elf_for_build(fw_build)
+    if path is None:
+        return f"error: {message}"
+    return message
+
+
+@_srv._tool()
+def find_safty_crash_elf(commit: str, build_date: Optional[str] = None, build_time: Optional[str] = None) -> str:
+    """SaftyFW/Pico counterpart to find_crash_elf() -- looks up the archived
+    ELF matching a given SAFTYFW_GIT_COMMIT (plus optional build date/time to
+    disambiguate multiple builds from the same commit).
+
+    SaftyFW has no HTTP API, so there is no automatic "ask the board" path
+    the way find_crash_elf() has -- get `commit` from wherever the board's
+    identity is already known for this diagnosis (a live SWD register/symbol
+    read via debug_read_symbol, or a recent debug_program()/build log).
+
+    Same loud-failure contract as find_crash_elf(): no match, or an
+    ambiguous multi-build match, is reported as an error naming what was
+    searched -- never a guessed substitute."""
+    path, message = elf_archive.find_safty_elf_for_identity(commit, build_date, build_time)
+    if path is None:
+        return f"error: {message}"
+    return message

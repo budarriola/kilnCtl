@@ -1,0 +1,277 @@
+"""elf_archive.py -- archives the exact ELF that was just flashed, keyed so a
+board's own self-reported build identity can find it again later, and looks
+it up.
+
+Why this exists (2026-09-10): an ESP panic could not be symbolized because no
+ELF matching the running firmware (commit 0dddd435) existed anywhere. The
+`firmware/KilnFW/build/elf_archive/` directory already existed and IS
+populated -- by `archive_elf.cmake`, invoked as a POST_BUILD step on every
+`idf.py build` (see that file), keyed by a SHA256 of the linked ELF. That
+mechanism works for the ordinary build-in-place workflow. It has one gap:
+`flash_firmware(kiln_fw_root=...)` -- the sanctioned "build from a clean git
+worktree at HEAD" path, used specifically when the main tree carries another
+session's foreign WIP -- builds in a temporary worktree whose own
+`build/elf_archive/` never rides along when that worktree is torn down. That
+override is exactly how the unmatched 0dddd435 build was produced.
+
+This module closes that gap from the FLASH side rather than the build side:
+`flash_firmware()` (and `debug_program(peer="pico")`) call `archive_kiln_elf`/
+`archive_safty_elf` after a confirmed-successful flash, copying whatever ELF
+was actually just flashed into the CANONICAL archive location (always under
+the main tree's firmware/<KilnFW|SaftyFW>/build/elf_archive/, never the
+override's own build dir) and recording a manifest entry keyed by the
+identity the board can report about itself later:
+  - KilnFW: the embedded esp_app_desc build timestamp (the same string
+    dashboard_http.c reports as `fw_build`), plus git commit for context.
+  - SaftyFW: SAFTYFW_GIT_COMMIT + SAFTYFW_BUILD_DATE + SAFTYFW_BUILD_TIME
+    from the build's own saftyfw_build_info.h (SaftyFW has no HTTP API to
+    ask, so there is no runtime-reported timestamp to key on independently --
+    this is the same identity stale_check.py already trusts).
+
+This also runs on the ordinary (non-override) path, redundantly with
+archive_elf.cmake -- harmless (same content hashes to the same key, second
+write is a no-op) and means the manifest (which the cmake step does not
+maintain) stays populated even for a plain in-place build+flash.
+
+Lookup (`find_kiln_elf_for_build` / `find_safty_elf_for_identity`) is a
+manifest read: given the identity string the board reports, look up the
+recorded elf_key and confirm the file is still on disk. No match is reported
+loudly with the identity that was searched for and how many entries the
+manifest holds -- never a silent fallback to `KilnCtrl-latest.elf` or the
+newest-by-mtime file, either of which would produce a plausible WRONG
+symbolization exactly like the incident this module exists to prevent.
+
+Retention: `prune_archive` caps each archive directory at `MAX_ARCHIVED_ELFS`
+entries (default 60), deleting the oldest-by-mtime files first, and never
+deletes `<prefix>-latest.elf` or any entry named in the surviving manifest's
+most recent `KEEP_RECENT_ENTRIES` (default 10) rows regardless of age -- a
+board flashed weeks ago and only diagnosed today should not have already lost
+its ELF. Pruning runs after every archive call, so the directory is bounded
+on an ongoing basis rather than needing a separate cron/cleanup step.
+`firmware/KilnFW/.gitignore` / `firmware/SaftyFW/.gitignore` already exclude
+the whole `build/` tree (elf_archive included), confirmed by
+`git check-ignore -v`; nothing here needs to touch .gitignore.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+import time
+from dataclasses import dataclass, asdict
+from typing import Optional
+
+from . import stale_check
+
+MAX_ARCHIVED_ELFS = 60
+KEEP_RECENT_ENTRIES = 10
+MANIFEST_NAME = "manifest.json"
+
+
+def _repo_root() -> str:
+    """tools/PcTools/src/kilnctrl/ -> repo root is four levels up."""
+    return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+
+
+def kiln_archive_dir() -> str:
+    """Canonical KilnFW ELF archive dir -- always the MAIN tree's, regardless
+    of any kiln_fw_root override used to build/flash."""
+    return os.path.join(_repo_root(), "firmware", "KilnFW", "build", "elf_archive")
+
+
+def safty_archive_dir() -> str:
+    return os.path.join(_repo_root(), "firmware", "SaftyFW", "build", "elf_archive")
+
+
+def _sha256_key(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()[:12]
+
+
+def _load_manifest(archive_dir: str) -> dict:
+    path = os.path.join(archive_dir, MANIFEST_NAME)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_manifest(archive_dir: str, manifest: dict) -> None:
+    path = os.path.join(archive_dir, MANIFEST_NAME)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+
+@dataclass
+class ArchiveResult:
+    elf_key: str
+    archived_path: str
+    identity: str  # the lookup key recorded for this entry
+    newly_archived: bool  # False if this content was already archived
+
+
+def _archive(elf_path: str, archive_dir: str, prefix: str, identity: str,
+             extra: dict) -> ArchiveResult:
+    if not os.path.isfile(elf_path):
+        raise FileNotFoundError(f"elf_archive: no ELF at {elf_path} to archive")
+    os.makedirs(archive_dir, exist_ok=True)
+    elf_key = _sha256_key(elf_path)
+    dest = os.path.join(archive_dir, f"{prefix}-{elf_key}.elf")
+    newly_archived = not os.path.exists(dest)
+    if newly_archived:
+        shutil.copyfile(elf_path, dest)
+    latest = os.path.join(archive_dir, f"{prefix}-latest.elf")
+    shutil.copyfile(elf_path, latest)
+
+    manifest = _load_manifest(archive_dir)
+    # A monotonic sequence number, not just the wall-clock "archived_at"
+    # string: several archives can land within the same second (bench
+    # scripts, or this module's own tests), and archived_at's second
+    # resolution can't order those deterministically -- retention below needs
+    # an unambiguous "most recent N" to protect.
+    next_seq = 1 + max((e.get("seq", 0) for e in manifest.values()), default=0)
+    entry = {
+        "elf_key": elf_key,
+        "identity": identity,
+        "seq": next_seq,
+        "archived_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        **extra,
+    }
+    # Keyed by identity so a lookup is one dict access; elf_key kept inside
+    # the entry too so pruning can find the file regardless of which key
+    # style is used to inspect the manifest by hand.
+    manifest[identity] = entry
+    _write_manifest(archive_dir, manifest)
+
+    _prune(archive_dir, prefix, manifest)
+    return ArchiveResult(elf_key=elf_key, archived_path=dest, identity=identity,
+                          newly_archived=newly_archived)
+
+
+def _prune(archive_dir: str, prefix: str, manifest: dict) -> None:
+    """Caps the archive at MAX_ARCHIVED_ELFS files, deleting oldest-by-mtime
+    first. Never deletes `<prefix>-latest.elf`, and never deletes a file whose
+    elf_key is referenced by one of the KEEP_RECENT_ENTRIES most-recently-
+    archived manifest entries."""
+    try:
+        entries = sorted(
+            (name for name in os.listdir(archive_dir)
+             if name.startswith(prefix + "-") and name.endswith(".elf")
+             and name != f"{prefix}-latest.elf"),
+        )
+    except OSError:
+        return
+    if len(entries) <= MAX_ARCHIVED_ELFS:
+        return
+
+    protected_keys = set()
+    for entry in sorted(manifest.values(), key=lambda e: e.get("seq", 0), reverse=True)[:KEEP_RECENT_ENTRIES]:
+        key = entry.get("elf_key")
+        if key:
+            protected_keys.add(f"{prefix}-{key}.elf")
+
+    full_paths = [os.path.join(archive_dir, name) for name in entries]
+    full_paths.sort(key=lambda p: os.path.getmtime(p))  # oldest first
+
+    to_delete_count = len(entries) - MAX_ARCHIVED_ELFS
+    deleted = 0
+    for p in full_paths:
+        if deleted >= to_delete_count:
+            break
+        if os.path.basename(p) in protected_keys:
+            continue
+        try:
+            os.remove(p)
+            deleted += 1
+        except OSError:
+            continue
+
+
+def archive_kiln_elf(elf_path: str, fw_build: str, git_commit: Optional[str],
+                      source: str) -> ArchiveResult:
+    """Archives a just-flashed KilnFW ELF, keyed by `fw_build` (the exact
+    string the board's own /api/status reports back as `fw_build` -- see
+    esp_app_desc.build_timestamp / build_timestamps_match). `source` is a
+    short note (e.g. "flash_firmware" or "flash_firmware:kiln_fw_root
+    override") recorded for provenance, not used as a lookup key."""
+    return _archive(elf_path, kiln_archive_dir(), "KilnCtrl", fw_build,
+                     extra={"git_commit": git_commit, "source": source})
+
+
+def archive_safty_elf(elf_path: str, safty_fw_root: str, source: str) -> ArchiveResult:
+    """Archives a just-flashed SaftyFW ELF, keyed by its own
+    saftyfw_build_info.h identity (commit + build date + build time) --
+    SaftyFW has no HTTP API to report a runtime build timestamp independently,
+    so this is the same identity stale_check.py already trusts."""
+    header_path = os.path.join(safty_fw_root, "build", "saftyfw_build_info.h")
+    commit = stale_check._parse_header_define(header_path, "SAFTYFW_GIT_COMMIT")
+    build_date = stale_check._parse_header_define(header_path, "SAFTYFW_BUILD_DATE")
+    build_time = stale_check._parse_header_define(header_path, "SAFTYFW_BUILD_TIME")
+    if not commit:
+        raise ValueError(f"elf_archive: could not read SAFTYFW_GIT_COMMIT from {header_path}")
+    identity = f"{commit}_{build_date or 'unknown-date'}_{build_time or 'unknown-time'}"
+    return _archive(elf_path, safty_archive_dir(), "SaftyFW", identity,
+                     extra={"git_commit": commit, "build_date": build_date,
+                            "build_time": build_time, "source": source})
+
+
+def find_kiln_elf_for_build(fw_build: str) -> tuple[Optional[str], str]:
+    """Returns (path, message). path is None on no match -- message always
+    explains what was searched and, on a miss, how many entries exist so a
+    genuine "never archived" case is distinguishable from a manifest bug."""
+    archive_dir = kiln_archive_dir()
+    manifest = _load_manifest(archive_dir)
+    entry = manifest.get(fw_build)
+    if entry is None:
+        return None, (
+            f"no archived ELF found for fw_build={fw_build!r} "
+            f"({len(manifest)} entries in {archive_dir}/{MANIFEST_NAME}) -- "
+            "this build was never flashed via flash_firmware() since this "
+            "mechanism was added, or the manifest entry was pruned"
+        )
+    path = os.path.join(archive_dir, f"KilnCtrl-{entry['elf_key']}.elf")
+    if not os.path.isfile(path):
+        return None, (
+            f"manifest has an entry for fw_build={fw_build!r} (elf_key={entry['elf_key']}) "
+            f"but the file is missing on disk at {path} -- do not guess a substitute"
+        )
+    return path, f"found {path} (archived {entry.get('archived_at')}, commit {entry.get('git_commit')})"
+
+
+def find_safty_elf_for_identity(commit: str, build_date: Optional[str] = None,
+                                 build_time: Optional[str] = None) -> tuple[Optional[str], str]:
+    archive_dir = safty_archive_dir()
+    manifest = _load_manifest(archive_dir)
+    if build_date and build_time:
+        identity = f"{commit}_{build_date}_{build_time}"
+        entry = manifest.get(identity)
+        if entry:
+            path = os.path.join(archive_dir, f"SaftyFW-{entry['elf_key']}.elf")
+            if os.path.isfile(path):
+                return path, f"found {path} (exact match, archived {entry.get('archived_at')})"
+    # Fall back to a commit-only match if exactly one entry has that commit --
+    # ambiguous (more than one) is reported loudly rather than picking one.
+    candidates = [e for e in manifest.values() if e.get("git_commit") == commit]
+    if len(candidates) == 1:
+        entry = candidates[0]
+        path = os.path.join(archive_dir, f"SaftyFW-{entry['elf_key']}.elf")
+        if os.path.isfile(path):
+            return path, f"found {path} (commit-only match, archived {entry.get('archived_at')})"
+    if len(candidates) > 1:
+        return None, (
+            f"commit {commit!r} matches {len(candidates)} archived entries with different "
+            "build date/time (rebuilt more than once from the same commit) -- pass "
+            "build_date/build_time to disambiguate, do not guess"
+        )
+    return None, (
+        f"no archived ELF found for SaftyFW commit={commit!r} "
+        f"({len(manifest)} entries in {archive_dir}/{MANIFEST_NAME})"
+    )
