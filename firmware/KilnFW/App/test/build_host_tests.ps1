@@ -1327,6 +1327,36 @@ try {
         Write-Host $script:simCredibilityGateLine
     }
 
+    # ---- firing_score_from_capture.exe: ITER_TUNE_REDESIGN_PLAN.md sec
+    # 3.1.1's "recommended next step" -- feeds a recorded capture's real
+    # per-tick data into the PRODUCTION firing_score.c/firing_compare.c
+    # (linked as-is, same convention as sim_iter_tune above) so Bar 2's
+    # real-hardware noise floor can be measured instead of guessed. Same
+    # informational posture as sim_credibility_gate directly above: never
+    # counted in $totalExpected/buildFailures/failedExes, and a missing
+    # capture SKIPs (exit 3) rather than failing or silently passing.
+    $exeFsfc = Join-Path $outDir "kilnctl_firing_score_from_capture.exe"
+    $cmdFsfc = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$outDir\\`" /Fe:`"$exeFsfc`" `"$(Join-Path $testDir 'firing_score_from_capture.c')`" " +
+            "`"$(Join-Path $driversDir 'control/firing_score.c')`" `"$(Join-Path $driversDir 'control/firing_compare.c')`""
+    if (Test-Path $exeFsfc) { Remove-Item -Force $exeFsfc }
+    cmd.exe /c $cmdFsfc
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $exeFsfc)) {
+        Write-Host "BUILD FAILED: firing_score_from_capture (informational only, does not fail this script)"
+    } else {
+        $repoRoot = Join-Path $testDir "..\..\..\.."
+        $basePath = Join-Path $repoRoot "logs\coupling\noise_floor_p7_run1.jsonl"
+        $trialPath = Join-Path $repoRoot "logs\coupling\noise_floor_p7d_run3.jsonl"
+        $fsfcOutput = & $exeFsfc $basePath $trialPath
+        $fsfcOutput | ForEach-Object { Write-Host $_ }
+        switch ($LASTEXITCODE) {
+            0 { $script:firingScoreFromCaptureLine = "firing_score_from_capture: RAN (informational -- see verdict/medians above)" }
+            3 { $script:firingScoreFromCaptureLine = "firing_score_from_capture: SKIP (captures not present locally -- gitignored, expected on a fresh clone)" }
+            default { $script:firingScoreFromCaptureLine = "firing_score_from_capture: ERROR exit $LASTEXITCODE (informational only, does not fail this script)" }
+        }
+        Write-Host $script:firingScoreFromCaptureLine
+    }
+
     # ---- summary ----------------------------------------------------------
     #
     # 28 executables are attempted above (main + zones_http + safety_cfg_http +
