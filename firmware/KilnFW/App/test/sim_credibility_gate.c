@@ -70,16 +70,15 @@
 #define NZ 3
 #define MAX_TICKS 20000
 
-// ---- G1 measured data (same literals as sim_iter_tune.c/sim_wide_temp_sweep.c,
-// tuned_baseline_20260831.json / coupling_matrix_20260831.json, commit 78f2134) ----
-static const float g_k_dc[NZ]        = { 31.9609f, 23.4805f, 21.7422f };
-static const float g_tau_s[NZ]       = { 166.9f,   129.1f,   114.8f   };
-static const float g_dead_time_s[NZ] = { 41.1f,    38.1f,    37.2f    };
-static const float g_coupling_coeff[NZ][NZ] = {
-    { 0.00f, 27.32f, 21.72f },
-    { 14.30f, 0.00f, 22.15f },
-    { 8.33f, 12.42f,  0.00f },
-};
+// ---- G1 measured data + coupling cross-gain: ONE shared source now
+// (sim_measured_zone_constants.h), not a per-file literal -- this file,
+// sim_iter_tune.c and sim_wide_temp_sweep.c each used to hand-copy
+// tuned_baseline_20260831.json's model_k_dc/model_tau_s/model_dead_time_s,
+// which went stale against the live board and silently invalidated a
+// downstream "structural infeasibility" conclusion; see
+// docs/audits/cplval75_coupling_verdict_2026-09-10.md sec 4/D2/D3 and that
+// header's own comment for the live values and provenance. ----
+#include "sim_measured_zone_constants.h"
 // G3: relay actuation lag is NOT bench-measured (same posture as
 // sim_iter_tune.c / docs/audits/iter_tune_redesign_sim_2026-09-09.md) --
 // 0.5 s is an assumed placeholder, stated here rather than hidden.
@@ -202,11 +201,33 @@ static int load_capture(const char *path, tick_t *out, int max_ticks)
     return n;
 }
 
+// ---- G1 coupling: sec 6.2's iterative numerical fit, run ONCE (ambient
+// only offsets a linear model's baseline, it does not change the gains
+// being fit) and reused by every run_replay() call. Anti-circularity: the
+// fit's only inputs are g_coupling_coeff/g_k_dc/g_tau_s/g_dead_time_s
+// (checked-in bench measurements), never a capture's actual_c -- see
+// sim_kiln_coupling_fit_iterative()'s own header comment. ----
+static float g_fitted_coupling_w_per_c[SIM_KILN_MAX_ZONES][SIM_KILN_MAX_ZONES];
+static bool  g_coupling_fit_converged = false;
+static int   g_coupling_fit_sweeps = 0;
+static bool  g_coupling_fitted = false;
+
+static void ensure_coupling_fitted(void)
+{
+    if (g_coupling_fitted) return;
+    g_coupling_fit_sweeps = sim_kiln_coupling_fit_iterative(
+        NZ, g_coupling_coeff, g_k_dc, g_tau_s, g_dead_time_s,
+        /*ambient_c=*/24.0f, /*rel_tol=*/0.10f, /*max_iters=*/50,
+        g_fitted_coupling_w_per_c, &g_coupling_fit_converged);
+    g_coupling_fitted = true;
+}
+
 // ---- simulated replay: zero-order-hold recorded duty through the real
 // heater_output.c window + G3 relay lag + G1 plant/coupling, 1 s substep,
 // sampled back out at each capture tick. Fills sim_reading[n][NZ]. ----
 static void run_replay(const tick_t *ticks, int n, float sim_reading[][NZ])
 {
+    ensure_coupling_fitted();
     sim_kiln_cfg_t kcfg;
     memset(&kcfg, 0, sizeof(kcfg));
     kcfg.zone_count = NZ;
@@ -235,7 +256,7 @@ static void run_replay(const tick_t *ticks, int n, float sim_reading[][NZ])
         kcfg.zone[z].plant = pcfg;
         kcfg.zone[z].radiative_coeff_w_per_k4 = 0.0f; // this profile stays well below cone temp
     }
-    sim_kiln_coupling_from_cross_gain(NZ, g_coupling_coeff, g_k_dc, kcfg.coupling_w_per_c);
+    memcpy(kcfg.coupling_w_per_c, g_fitted_coupling_w_per_c, sizeof(kcfg.coupling_w_per_c));
 
     sim_kiln_state_t kstate;
     sim_kiln_reset(&kstate, &kcfg);
@@ -410,12 +431,17 @@ int main(int argc, char **argv)
     printf("=== sim_credibility_gate (ITER_TUNE_REDESIGN_PLAN.md sec 6.5) ===\n");
     printf("calibration: %s (%d ticks)\n", cal_path, cal_n);
     printf("hold-out:    %s (%d ticks)\n", hold_path, hold_n);
-    printf("model: fixed, checked-in G1 params + algebraic-first-cut coupling\n"
-           "  (sec 6.2's iterative 10%% numerical fit against a simulator step\n"
-           "  test was NOT performed for this gate -- see caveats below).\n"
+    printf("model: fixed, checked-in G1 params + sec 6.2 ITERATIVELY-FITTED coupling\n"
+           "  (sim_kiln_coupling_fit_iterative(): %d sweep(s), %s within 10%%\n"
+           "  of every measured cross-gain -- see per-pair detail below).\n"
            "  Relay lag (G3) is the same UNMEASURED 0.5s placeholder\n"
-           "  sim_iter_tune.c uses, not a bench-measured value.\n\n");
-    printf("Structural ceiling of the literal sec 6.2 mapping (h=loss_coeff=1.0):\n"
+           "  sim_iter_tune.c uses, not a bench-measured value.\n\n",
+           g_coupling_fit_sweeps, g_coupling_fit_converged ? "CONVERGED" : "DID NOT CONVERGE");
+    printf("Structural ceiling of the literal sec 6.2 own-duty mapping\n"
+           "  (h=loss_coeff=1.0 is a provably free/inert scale here -- see\n"
+           "  sim_plant_from_zone_cfg()'s header comment; rescaling h together\n"
+           "  with heater_power_w/thermal_mass leaves the ODE, and therefore this\n"
+           "  ceiling, unchanged, so there is no alternative h that raises it):\n"
            "  a zone driven at duty=1.0 forever, with NO coupling contribution,\n"
            "  approaches ambient + model_k_dc and can never exceed it:\n");
     {
@@ -428,9 +454,28 @@ int main(int argc, char **argv)
             printf("    z%d: ambient(%.1f) + model_k_dc(%.2f) = %.2fC ceiling, own-duty-only\n",
                    z, ambient_c, g_k_dc[z], ambient_c + g_k_dc[z]);
     }
-    printf("  Coupling from other zones can push a zone above its own ceiling in\n"
-           "  reality; whether it does here depends on the coupling matrix, which\n"
-           "  is the algebraic first cut, NOT the sec 6.2 iteratively-matched one.\n\n");
+    printf("  Coupling from other zones can push a zone above its own ceiling; the\n"
+           "  matrix above is now the sec 6.2 iteratively-matched fit, so this is\n"
+           "  the model's best available answer to whether that is enough, not a\n"
+           "  known-understated placeholder.\n\n");
+    printf("Coupling fit detail (measured cross-gain vs the fitted matrix's own\n"
+           "  simulated cross-gain, at convergence or after the iteration cap).\n"
+           "  FEASIBILITY: in this row-coupled model, driving zone j alone can only\n"
+           "  ever push zone i's temperature up to zone j's OWN loaded steady-state\n"
+           "  rise (<= model_k_dc[j]), no matter how large coupling_w_per_c[i][j]\n"
+           "  grows -- a passive receiver cannot exceed its (lossy) source. Any\n"
+           "  coupling_coeff[i][j] >= model_k_dc[j] is therefore UNREACHABLE by this\n"
+           "  model class at ANY conductance, not a fit-quality problem:\n");
+    for (int i = 0; i < NZ; i++) {
+        for (int j = 0; j < NZ; j++) {
+            if (i == j) continue;
+            bool infeasible = g_coupling_coeff[i][j] >= g_k_dc[j];
+            printf("    coupling_coeff[%d][%d] (measured)=%.2fC vs model_k_dc[%d]=%.2fC  ->  coupling_w_per_c[%d][%d] (fitted)=%.5f W/C%s\n",
+                   i, j, g_coupling_coeff[i][j], j, g_k_dc[j], i, j, g_fitted_coupling_w_per_c[i][j],
+                   infeasible ? "  <-- UNREACHABLE (measured >= driving zone's own ceiling)" : "");
+        }
+    }
+    printf("\n");
 
     bool pass = true;
     const char *labels[2] = {"CALIBRATION", "HOLD-OUT"};

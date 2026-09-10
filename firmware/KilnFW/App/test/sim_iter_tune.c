@@ -58,17 +58,14 @@
 
 #define NZ 3
 
-// ---- G1: measured plant data (tools/PcTools/config_presets/
-// tuned_baseline_20260831.json + coupling_matrix_20260831.json, adopted
-// 78f2134, series 813ad90) -- same literals sim_wide_temp_sweep.c uses. ----
-static const float g_k_dc[NZ]        = { 31.9609f, 23.4805f, 21.7422f };
-static const float g_tau_s[NZ]       = { 166.9f,   129.1f,   114.8f   };
-static const float g_dead_time_s[NZ] = { 41.1f,    38.1f,    37.2f    };
-static const float g_coupling_coeff[NZ][NZ] = {
-    { 0.00f, 27.32f, 21.72f },
-    { 14.30f, 0.00f, 22.15f },
-    { 8.33f, 12.42f,  0.00f },
-};
+// ---- G1: measured plant data + coupling cross-gain, now a SINGLE shared
+// source (see sim_measured_zone_constants.h's own header comment for why:
+// this file, sim_credibility_gate.c and sim_wide_temp_sweep.c used to each
+// carry a hand-copied literal from a preset file that went stale against
+// the live board -- docs/audits/cplval75_coupling_verdict_2026-09-10.md
+// sec 4/D2). g_k_dc/g_tau_s/g_dead_time_s/g_coupling_coeff all come from
+// that header now. ----
+#include "sim_measured_zone_constants.h"
 static const float g_kp_bench[NZ] = { 0.0318f, 0.0361f, 0.0355f };
 static const float g_ki_bench[NZ] = { 0.0002f, 0.0003f, 0.0003f };
 static const float g_kd_bench[NZ] = { 0.6526f, 0.6874f, 0.6598f };

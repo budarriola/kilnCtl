@@ -32,21 +32,16 @@
 
 #define NZ 3
 
-// ---- G1: measured plant data (tools/PcTools/config_presets/
-// tuned_baseline_20260831.json's model_k_dc/model_tau_s/model_dead_time_s,
-// and coupling_matrix_20260831.json's adopted matrix, commit 78f2134,
-// series 813ad90) -- checked-in as literals here rather than parsed from
-// JSON at runtime; the provenance is these two files, unchanged, and a diff
-// against them is how a re-identification would be reflected here. ----
-static const float g_k_dc[NZ]        = { 31.9609f, 23.4805f, 21.7422f };
-static const float g_tau_s[NZ]       = { 166.9f,   129.1f,   114.8f   };
-static const float g_dead_time_s[NZ] = { 41.1f,    38.1f,    37.2f    };
-// row = affected zone, column = stepped zone, diagonal 0 (zones_http.h contract)
-static const float g_coupling_coeff[NZ][NZ] = {
-    { 0.00f, 27.32f, 21.72f },
-    { 14.30f, 0.00f, 22.15f },
-    { 8.33f, 12.42f,  0.00f },
-};
+// ---- G1: measured plant data + coupling cross-gain, now a SINGLE shared
+// source (sim_measured_zone_constants.h) rather than a hand-copied literal
+// per file -- this file, sim_iter_tune.c and sim_credibility_gate.c used to
+// each carry their own copy of tuned_baseline_20260831.json's
+// model_k_dc/model_tau_s/model_dead_time_s, a PRESET that went stale
+// against the live board (docs/audits/cplval75_coupling_verdict_2026-09-10.md
+// sec 4/D2: live k_dc is 39.2459/31.9669/31.6810, not the preset's
+// 31.9609/23.4805/21.7422). See that header's own comment for full
+// provenance and re-sync instructions. ----
+#include "sim_measured_zone_constants.h"
 static const float g_kp[NZ] = { 0.0318f, 0.0361f, 0.0355f };
 static const float g_ki[NZ] = { 0.0002f, 0.0003f, 0.0003f };
 static const float g_kd[NZ] = { 0.6526f, 0.6874f, 0.6598f };

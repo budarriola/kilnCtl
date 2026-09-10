@@ -188,6 +188,50 @@ void sim_kiln_coupling_from_cross_gain(int zone_count,
                                         const float k_dc[SIM_KILN_MAX_ZONES],
                                         float out_coupling_w_per_c[SIM_KILN_MAX_ZONES][SIM_KILN_MAX_ZONES]);
 
+/* sec 6.2's promised follow-up to the algebraic first cut above: adjusts
+ * out_coupling_w_per_c (seeded from sim_kiln_coupling_from_cross_gain())
+ * until each zone's SIMULATED steady-state cross-gain -- measured by
+ * actually driving sim_kiln_step() with zone j alone at duty=1.0 to
+ * quasi-steady-state and reading zone i's element rise, exactly the bench
+ * procedure coupling_coeff[][] itself was measured by -- matches the given
+ * coupling_coeff[i][j] to within rel_tol (plan sec 6.2's 10%, i.e. 0.10).
+ * The algebraic cut understates the match because it ignores that coupling
+ * also loads the driving zone j (some of j's own heat now leaves into i and
+ * others, so j's own steady rise sits below k_dc[j], understating the
+ * energy available to couple out) and, with 3+ zones, third-zone paths --
+ * both effects only a closed-loop simulated measurement can see.
+ *
+ * ANTI-CIRCULARITY: this function's only physical inputs are k_dc/tau_s/
+ * dead_time_s (already-fitted single-zone FOPDT parameters) and
+ * coupling_coeff[][] (the measured cross-gain matrix from the bench
+ * coupling capture) -- both already checked into the model before this
+ * runs. It drives sim_kiln itself with synthetic step duties and reads
+ * back sim_kiln's own element temperatures; it never opens, parses, or
+ * otherwise looks at any recorded capture's actual_c, so a capture used
+ * later as a hold-out for sim_credibility_gate stays untouched by this fit.
+ *
+ * Iterates coordinate-descent style (each off-diagonal column j solved by
+ * a damped secant-style update, columns re-swept because they interact
+ * through shared zones) up to max_iters times. ambient_c/dt_s/settle_s
+ * control the synthetic step test (settle_s must clear the slowest zone's
+ * dead time + a few time constants to reach quasi-steady-state).
+ *
+ * Returns the number of sweeps actually run (>=1) and writes to
+ * *out_converged whether every off-diagonal reached rel_tol before
+ * max_iters was reached -- this is a real numerical fit, not guaranteed to
+ * converge for an arbitrary coupling_coeff/k_dc combination, and a caller
+ * must check *out_converged rather than assume it. */
+int sim_kiln_coupling_fit_iterative(int zone_count,
+                                     const float coupling_coeff[SIM_KILN_MAX_ZONES][SIM_KILN_MAX_ZONES],
+                                     const float k_dc[SIM_KILN_MAX_ZONES],
+                                     const float tau_s[SIM_KILN_MAX_ZONES],
+                                     const float dead_time_s[SIM_KILN_MAX_ZONES],
+                                     float ambient_c,
+                                     float rel_tol,
+                                     int max_iters,
+                                     float out_coupling_w_per_c[SIM_KILN_MAX_ZONES][SIM_KILN_MAX_ZONES],
+                                     bool *out_converged);
+
 /* ------------------------------------------------------------------------
  * G3 (plan sec 6.1) -- relay actuation lag: a fixed transport delay on the
  * *commanded relay state* itself, distinct from sim_plant_cfg_t's

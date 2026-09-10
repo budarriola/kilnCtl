@@ -220,14 +220,30 @@ static float coupling_diagonal_k_dc(uint8_t member_zi, float fallback_ff_k_dc, b
  * because `use_measured_diag_k_dc` was false -- or was true with the field
  * unpopulated -- and coupling_diagonal_k_dc() silently degraded to that
  * fallback, cell by cell. The resulting matrix describes no single
- * experiment. On this bench's own adopted data that mixture solves the
- * observed 70 degC three-zone hold as u = [0.076, -0.118, 2.085] at 2-norm
- * condition 14.19 -- a negative duty and one at twice full scale -- where
- * the self-consistent matrix gives [0.207, 0.523, 1.027] at condition 4.64,
- * within 0.01 of the observed z1 duty. This is the repo's named "reset one
- * side of a pair" shape: two halves of ONE matrix, each internally
- * consistent, joined by a contract ("these cells came from the same runs")
- * that nothing enforced.
+ * experiment. This is the repo's named "reset one side of a pair" shape:
+ * two halves of ONE matrix, each internally consistent, joined by a contract
+ * ("these cells came from the same runs") that nothing enforced.
+ *
+ * CORRECTED 2026-09-10 (docs/audits/cplval75_coupling_verdict_2026-09-10.md
+ * sec 4, D4): this comment used to quote u = [0.076, -0.118, 2.085] at 2-norm
+ * condition 14.19 for the mixed matrix, vs [0.207, 0.523, 1.027] at 4.64 for
+ * the self-consistent one, as the measured harm -- those numbers were
+ * computed against tools/PcTools/config_presets/tuned_baseline_20260831.json,
+ * a PRESET FILE, not the live board's own model_k_dc. On the board's actual
+ * diagonal (39.2459/31.9669/31.6810, not the preset's 31.9609/23.4805/21.7422)
+ * the mixed matrix solves the same 70 degC hold as u = [0.119, 0.532, 1.165]
+ * at condition 5.508 -- no negative duty, nothing near twice full scale, and
+ * a condition number less than half the quoted figure. The guard's LOGIC is
+ * unaffected by this -- mixing two experiments' halves is wrong on its own
+ * terms regardless of magnitude, and this guard still correctly refuses
+ * today's board (coupling_diag_k_dc = 0.0 on all three zones against six
+ * measured off-diagonals) -- but the harm this comment cites as justification
+ * was overstated. The real, measured-on-hardware harm is
+ * cplval75_coupling_verdict_2026-09-10.md sec 2's finding: even the
+ * self-consistent live matrix under-predicts settled three-zone hold duty by
+ * 12/19/31% per row (a gain deficit, not a wrong-diagonal artifact), which is
+ * a stronger argument for treating this matrix as unproven than the
+ * mixed-vs-self-consistent comparison ever was.
  *
  * The invariant enforced here, stated once: IF the system carries any
  * measured off-diagonal at all, THEN no member's diagonal may come from the
