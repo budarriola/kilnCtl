@@ -237,20 +237,123 @@ static volatile uint32_t s_seq_counter = 0u; // even == stable, odd == write in 
 //
 // Fix shape: make the fallback WRITER-owned, so no reader ever writes to
 // it -- readers only ever read config_store_seqlock_write()'s output, never
-// each other's. It is a double buffer, not a single struct, specifically so
-// a reader on the exhausted-retries path never needs to synchronise against
-// a concurrent writer commit of the fallback itself: config_store_seqlock_
-// write() (the sole writer, core 0 only) always writes into the buffer NOT
-// currently marked active, and only flips s_fallback_active -- a single,
-// naturally-aligned 32-bit word, atomic on Cortex-M0+ with no extra locking
-// needed -- after that write has fully landed. So whichever buffer a reader
-// is pointed at by s_fallback_active is, by construction, never being
-// written while that reader is copying it: the writer is always touching
-// the OTHER slot. This removes the second race structurally rather than
-// adding a second seqlock around the fallback.
+// each other's. It is a double buffer, not a single struct.
+//
+// SECOND FIX (2026-09-09, opus review of the fix above): the paragraph this
+// replaces claimed "whichever buffer a reader is pointed at by
+// s_fallback_active is, by construction, never being written while that
+// reader is copying it" -- true for ONE writer commit during a reader's
+// copy, but false across TWO. Scenario: reader latches idx==0 (buffer 0
+// active), begins copying s_fallback_buf[0], and is preempted. Writer
+// commit #1 targets the OTHER slot (1), then flips active to 1. Writer
+// commit #2 now targets fb_other = 1 - 1 = 0 -- the exact slot the
+// suspended reader is still mid-copy of -- and flips active back to 0. The
+// reader resumes and finishes copying a struct that was torn by commit #2,
+// and a naive "is s_fallback_active still == idx?" recheck would not catch
+// it either: the index legitimately returned to the same value (classic
+// ABA), even though the buffer underneath was overwritten in between.
+//
+// A bare 0/1 index cannot be recheckable against a torn read of the slot it
+// names; a monotonically-increasing generation counter can, because a
+// SECOND writer commit during a reader's window necessarily increments it
+// (there is no way for the generation counter itself to return to a
+// previously-seen value the way the 0/1 index can), so a mismatch is a
+// reliable signal to retry no matter how many commits happened during the
+// read.  This is a seqlock over the fallback double buffer, using exactly
+// the same protocol as s_seq_counter/s_cached_record above -- odd means
+// "writer touching the fallback buffer/index right now", even means
+// stable -- with its own small bounded retry count (writes here are rare
+// commissioning commits, same rationale as CONFIG_STORE_SEQLOCK_MAX_RETRIES
+// above). If even this second-level retry is exhausted (only reachable
+// under a pathologically fast, continuous stream of writer commits -- never
+// the real ARMED-refused-anyway commissioning-commit shape this store
+// actually sees), config_store_seqlock_read() reports "no stable snapshot"
+// exactly like the never-loaded case, and every caller already has a safe
+// default for that (see each getter below) -- fail closed, never hand out a
+// possibly-torn struct.
 static config_store_record_t s_fallback_buf[2];
 static volatile uint32_t s_fallback_active = 0u; // index into s_fallback_buf currently stable/readable
-static bool s_fallback_valid = false; // set true after the writer's first-ever commit
+static volatile uint32_t s_fallback_gen = 0u; // even == stable, odd == fallback buffer/index write in progress
+static bool s_fallback_valid = false; // see config_store_boot_load(): seeded true at boot once a
+                                       // confirmed-safe boot record exists, not left false until
+                                       // the first commissioning write (opus review finding B)
+#define CONFIG_STORE_FALLBACK_SEQLOCK_MAX_RETRIES 4u
+
+// Test-only instrumentation (opus review 2026-09-09): the multi-reader race
+// test asserted zero torn reads but had no way to prove the exhausted-
+// primary-retries fallback path in config_store_seqlock_read() ever actually
+// ran -- "0 torn" is equally consistent with "the fallback was exercised and
+// never tore" and "the fallback was never reached at all", and only the
+// former is evidence the test claims to be. Incremented every time a reader
+// falls through to the fallback branch below; a test asserting this is
+// non-zero is the difference between a real regression test and a vacuous
+// one. Not gated behind a test-only build flag: a plain counter increment is
+// negligible cost even in production, and keeping it live means it is always
+// available for a future diagnostics hook too.
+static volatile uint32_t s_fallback_taken_count = 0u;
+
+uint32_t config_store_test_fallback_taken_count(void)
+{
+    return s_fallback_taken_count;
+}
+
+void config_store_test_fallback_taken_count_reset(void)
+{
+    s_fallback_taken_count = 0u;
+}
+
+// TEST-ONLY deterministic race injection (2026-09-09): the real ABA window
+// this fix closes is a handful of instructions wide on real hardware, and
+// proved impractical to hit reliably even with real, heavily-loaded OS
+// threads on a fast host (the multi-reader race test above still only
+// demonstrates "no torn read seen in this run", never a guarantee the
+// narrowest interleaving was tried). This hook is called, if set, from
+// inside config_store_seqlock_read()'s fallback branch AFTER the index has
+// been read but BEFORE the struct copy -- exactly where a real writer
+// commit landing "during" the copy would have to land. A test can install a
+// hook that itself calls config_store_write() (single-threaded, fully
+// deterministic) to force exactly the two-commits-during-one-copy scenario
+// the fix above exists to survive. NULL (a single branch on a well-predicted
+// pointer) in production; never wired to anything at runtime outside tests.
+static void (*s_fallback_test_hook)(void) = NULL;
+
+void config_store_test_set_fallback_hook(void (*hook)(void))
+{
+    s_fallback_test_hook = hook;
+}
+
+// TEST-ONLY (2026-09-09): forces config_store_seqlock_read() straight past
+// the primary seqlock into the fallback branch below, skipping its retry
+// loop entirely. A single-threaded test has no concurrent writer to make
+// the primary loop actually fail (it always sees a stable, even sequence
+// immediately), so this is the only way to deterministically reach and
+// exercise the fallback path's own ABA-closing seqlock without real thread
+// races. False (no effect) in production.
+static bool s_fallback_test_force = false;
+
+void config_store_test_force_fallback_path(bool force)
+{
+    s_fallback_test_force = force;
+}
+
+// TEST-ONLY (2026-09-09): resets the fallback double buffer's state
+// (validity, active index, generation counter, and both slots) back to its
+// true cold-boot condition. Needed because these are static globals that,
+// on real hardware, are reinitialised by a genuine power cycle but on this
+// host test binary otherwise persist for the life of the whole test
+// executable -- without this, a test running after ANY earlier test in the
+// same binary has already called config_store_write() would find
+// s_fallback_valid already true from that earlier call, masking a
+// regression in config_store_boot_load()'s own seeding of it (opus review
+// finding B; see test_fallback_seeded_at_boot_before_any_write()).
+void config_store_test_reset_fallback_state(void)
+{
+    memset(s_fallback_buf, 0, sizeof(s_fallback_buf));
+    s_fallback_active = 0u;
+    s_fallback_gen = 0u;
+    s_fallback_valid = false;
+    s_fallback_taken_count = 0u;
+}
 
 // Snapshot s_cached_record into *out under the seqlock above, retrying up
 // to CONFIG_STORE_SEQLOCK_MAX_RETRIES times if the writer is (or was)
@@ -271,7 +374,8 @@ static bool s_fallback_valid = false; // set true after the writer's first-ever 
 // than reading a threshold that is briefly one write old.
 static bool config_store_seqlock_read(config_store_record_t *out)
 {
-    for (unsigned attempt = 0; attempt < CONFIG_STORE_SEQLOCK_MAX_RETRIES; attempt++) {
+    for (unsigned attempt = 0;
+         !s_fallback_test_force && attempt < CONFIG_STORE_SEQLOCK_MAX_RETRIES; attempt++) {
         uint32_t seq1 = s_seq_counter;
         // Barrier: this core must not read the struct below using a stale
         // cached view taken BEFORE it observed seq1 -- forces "read seq1"
@@ -297,19 +401,66 @@ static bool config_store_seqlock_read(config_store_record_t *out)
         // be torn. Retry.
     }
     if (s_fallback_valid) {
-        // Reader-side counterpart of the writer-owned double buffer above:
-        // read the active index once, barrier, then copy that slot. The
-        // writer never touches this slot while it is the active one (it
-        // only ever writes the OTHER slot, then flips the index once that
-        // write is complete), so this copy cannot observe a torn struct
-        // regardless of what the writer is doing concurrently on core 0.
-        uint32_t idx = s_fallback_active;
-        // Barrier: this core must observe idx before it copies
-        // s_fallback_buf[idx] -- otherwise the CPU could hoist part of the
-        // struct copy ahead of the index read.
-        HAL_DMB();
-        *out = s_fallback_buf[idx];
-        return true;
+        // Reader-side counterpart of the writer-owned double buffer above,
+        // now its own seqlock (see s_fallback_gen's comment above for why a
+        // bare index recheck cannot catch two writer commits landing during
+        // one reader's copy -- classic ABA). Bounded retries, same rationale
+        // as the primary seqlock's CONFIG_STORE_SEQLOCK_MAX_RETRIES.
+        for (unsigned fb_attempt = 0; fb_attempt < CONFIG_STORE_FALLBACK_SEQLOCK_MAX_RETRIES;
+             fb_attempt++) {
+            uint32_t gen1 = s_fallback_gen;
+            // Barrier: this core must not read the index/buffer below using a
+            // stale cached view taken before it observed gen1.
+            HAL_DMB();
+            if (gen1 & 1u) {
+                continue; // writer is mid-update of the fallback buffer -- retry
+            }
+            uint32_t idx = s_fallback_active;
+            // Barrier: idx must be observed before the struct copy below --
+            // otherwise the CPU could hoist part of the copy ahead of the
+            // index read.
+            HAL_DMB();
+            // Copy split into two halves with the TEST-ONLY hook (see its
+            // own comment above) run in between, purely so a test can
+            // deterministically land a writer commit (or two, for ABA)
+            // WHILE this copy is in progress -- exactly the window a real
+            // concurrent writer would have to hit, rather than merely
+            // before or after it. Functionally equivalent to one whole-
+            // struct copy when no hook is installed (the production case).
+            config_store_record_t copy;
+            uint8_t *copy_bytes = (uint8_t *)&copy;
+            const uint8_t *src_bytes = (const uint8_t *)&s_fallback_buf[idx];
+            size_t split_at = offsetof(config_store_record_t, tc_type) <
+                                       offsetof(config_store_record_t, estop_active_level)
+                                   ? (offsetof(config_store_record_t, tc_type) +
+                                      offsetof(config_store_record_t, estop_active_level)) /
+                                         2u
+                                   : sizeof(copy) / 2u;
+            memcpy(copy_bytes, src_bytes, split_at);
+            if (s_fallback_test_hook != NULL) {
+                s_fallback_test_hook(); // TEST-ONLY, see its own comment above
+            }
+            memcpy(copy_bytes + split_at, src_bytes + split_at, sizeof(copy) - split_at);
+            // Barrier: the struct copy above must be complete, as observed by
+            // this core, before the re-read of the generation counter below.
+            HAL_DMB();
+            uint32_t gen2 = s_fallback_gen;
+            if (gen1 == gen2) {
+                *out = copy;
+                s_fallback_taken_count++;
+                return true;
+            }
+            // Generation moved (or is now odd): one or more writer commits
+            // landed during this copy -- possibly into the very slot `idx`
+            // named, even if s_fallback_active has since returned to a
+            // value equal to idx again (ABA). Retry rather than trust it.
+        }
+        // Exhausted even the fallback's own retries -- only reachable under
+        // continuous writer activity far outside this store's real usage
+        // pattern (rare, deliberate, ARMED-refused-anyway commissioning
+        // commits). Fail closed: report "no stable snapshot" rather than
+        // risk handing out a torn struct; every caller already has a safe
+        // default for exactly this return value.
     }
     return false; // never had a stable snapshot -- caller's !s_loaded path applies
 }
@@ -339,11 +490,16 @@ static void config_store_seqlock_write(const config_store_record_t *rec)
 
     // Writer-owned fallback double buffer (see s_fallback_buf's comment
     // above): commit *rec into the slot NOT currently marked active, then
-    // flip the index. This is safe with no locking because this function
-    // is the sole writer (link_task, core 0 only) -- there is no other
-    // writer to race against here, only readers, and readers never touch
-    // the slot this function is about to overwrite (they only ever read
-    // whichever slot s_fallback_active currently names).
+    // flip the index -- now wrapped in its own seqlock (s_fallback_gen) so
+    // a reader that catches TWO of these commits during one copy can
+    // detect it (see s_fallback_gen's comment for the ABA this closes).
+    // This function remains the sole writer (link_task, core 0 only) -- no
+    // writer-side mutual exclusion is needed, only publishing the update to
+    // readers on the other core in the right order, same as the primary
+    // seqlock above.
+    uint32_t fb_gen = s_fallback_gen;
+    s_fallback_gen = fb_gen + 1u; // odd: fallback buffer/index write in progress
+    HAL_DMB();
     uint32_t fb_idx = s_fallback_active;
     uint32_t fb_other = 1u - fb_idx;
     s_fallback_buf[fb_other] = *rec;
@@ -353,6 +509,12 @@ static void config_store_seqlock_write(const config_store_record_t *rec)
     // not actually finished landing in SRAM yet.
     HAL_DMB();
     s_fallback_active = fb_other;
+    // Barrier: the index flip above must be complete, as observed by
+    // another core, before the generation counter is published as even
+    // again -- otherwise a reader could see "even" and trust an index/
+    // buffer pair that has not actually finished landing in SRAM yet.
+    HAL_DMB();
+    s_fallback_gen = fb_gen + 2u; // even again: stable, safe for readers
     s_fallback_valid = true;
 }
 
@@ -447,6 +609,28 @@ void config_store_boot_load(void)
 
     s_cached_slot = read_latest_or_default(&s_cached_record, &s_cached_sector, &reject_info);
     s_load_rejected = (s_cached_slot == CONFIG_STORE_NO_SLOT) && reject_info.rejected;
+
+    // Opus review finding B (2026-09-09): seed the writer-owned fallback
+    // buffer from the boot-time record instead of leaving s_fallback_valid
+    // false until the first-ever config_store_write(). Before this, a
+    // core-1 reader that exhausted the primary seqlock's retries during the
+    // window between boot and the first commissioning write got `false`
+    // back from config_store_seqlock_read() and fell through to each
+    // getter's own accessor default (calibration_missing=true, etc) instead
+    // of the perfectly good record this function just loaded and validated
+    // -- a real availability regression (nuisance-trip direction only,
+    // since every one of those defaults is itself fail-safe) with no
+    // matching justification: s_cached_record here is exactly as trustworthy
+    // as any later config_store_write() commit (same validation path,
+    // config_store_find_latest_multi_ex()/config_params_validate_ranges()
+    // via read_latest_or_default() above, or config_store_default() when
+    // nothing was ever committed). No concurrent reader exists yet at this
+    // point (config_store_boot_load() runs pre-scheduler, single core, same
+    // contract this function's header comment already documents), so a
+    // plain assignment -- not the seqlock -- is correct and sufficient here.
+    s_fallback_buf[0] = s_cached_record;
+    s_fallback_active = 0u;
+    s_fallback_valid = true;
 
     if (s_load_rejected) {
         // Two calls, not one. The single formatted line this replaced did not

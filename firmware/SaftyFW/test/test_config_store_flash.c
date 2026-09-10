@@ -55,6 +55,12 @@ static void reset_all(void)
     TEST_CHECK(fake_flash_reset_all_sized(TEST_FLASH_TOTAL_SIZE) == true,
                "fake_flash sized to cover the real config-store offset");
     config_store_flash_host_stub_reset();
+    // The fallback double buffer's own statics (s_fallback_valid/_active/
+    // _gen/_buf) are NOT reset by the above -- on real hardware a power
+    // cycle reinitialises them, but in this one long-lived test process
+    // they would otherwise carry state across every test case (see
+    // config_store_test_reset_fallback_state()'s own comment).
+    config_store_test_reset_fallback_state();
 }
 
 static void test_boot_load_blank_sector_is_default(void)
@@ -103,6 +109,57 @@ static void test_write_then_reload_round_trips(void)
                "calibration_missing survives a reload");
     TEST_CHECK(config_store_get_config_crc() != 0, "a committed record reports a nonzero CRC");
     TEST_CHECK(config_store_is_config_rejected() == false, "a good record is not a rejection");
+}
+
+// opus review 2026-09-09, finding B: before this fix, s_fallback_valid
+// stayed false from boot until the first-ever config_store_write() in that
+// boot -- so a core-1 reader hitting the exhausted-retries fallback path
+// during that window got accessor defaults (calibration_missing=true, etc)
+// instead of the perfectly good record config_store_boot_load() just loaded
+// and validated from flash. This test commits a record, reboots (a fresh
+// config_store_boot_load(), same simulated-power-cycle idiom as the reload
+// test above), and then -- with NO write at all in this "boot" -- forces
+// the fallback path via config_store_test_force_fallback_path() (no hook
+// needed: proving the seed alone is enough, with no writer activity in this
+// boot to ever flip s_fallback_valid the old way) and checks the record
+// that comes back is the persisted one, not a default.
+static void test_fallback_seeded_at_boot_before_any_write(void)
+{
+    TEST_SECTION("config_store_flash: fallback buffer is seeded at boot -- no availability gap "
+                 "before the first commissioning write of a boot (opus review finding B)");
+    reset_all();
+    config_store_boot_load();
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_type = 0x07u; // MAX31856_TC_TYPE_T
+    rec.calibration_missing = false;
+    const char *reason = NULL;
+    TEST_CHECK(config_store_write(&rec, &reason) == true, "fixture: commissioning write succeeds");
+
+    // Simulate a reboot -- same idiom as test_write_then_reload_round_trips(),
+    // but ALSO reset the fallback double buffer's own statics back to a true
+    // cold-boot state (reset_all() does this too, but that ran before the
+    // fixture write above -- this call is what actually simulates the power
+    // cycle between the write and the reload). Deliberately NO config_store_
+    // write() call after this point: the whole point is to prove the
+    // fallback is trustworthy in a boot that has not committed anything yet.
+    config_store_test_reset_fallback_state();
+    config_store_boot_load();
+
+    config_store_test_force_fallback_path(true);
+    config_store_record_t snap;
+    memset(&snap, 0, sizeof(snap));
+    config_store_get_full_record(&snap);
+    config_store_test_force_fallback_path(false);
+
+    TEST_CHECK(snap.tc_type == 0x07u,
+               "the fallback path returns the persisted tc_type, not CONFIG_STORE_DEFAULT_TC_TYPE "
+               "-- no write happened yet this boot, so the old code would have returned false "
+               "here (s_fallback_valid still false) and every getter's own accessor default");
+    TEST_CHECK(snap.calibration_missing == false,
+               "the fallback path returns the persisted calibration_missing, not the fail-safe "
+               "'true' every getter falls back to when config_store_seqlock_read() returns false");
 }
 
 static void test_write_refused_while_armed(void)
@@ -693,6 +750,7 @@ static void test_seqlock_multi_reader_never_tears(void)
                  "cannot exercise this)");
     reset_all();
     config_store_boot_load();
+    config_store_test_fallback_taken_count_reset();
 
     seqlock_race_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
@@ -715,21 +773,140 @@ static void test_seqlock_multi_reader_never_tears(void)
         CloseHandle(readers[i]);
     }
 
-    printf("    (%d readers; writes=%ld, consistent reads=%ld, torn reads=%ld)\n",
-           SEQLOCK_RACE_READER_COUNT, ctx.write_count, ctx.consistent_count, ctx.torn_count);
+    uint32_t fallback_taken = config_store_test_fallback_taken_count();
+    printf("    (%d readers; writes=%ld, consistent reads=%ld, torn reads=%ld, "
+           "fallback_taken=%lu)\n",
+           SEQLOCK_RACE_READER_COUNT, ctx.write_count, ctx.consistent_count, ctx.torn_count,
+           (unsigned long)fallback_taken);
 
     TEST_CHECK(ctx.write_count > 0, "sanity: the writer thread actually ran");
     TEST_CHECK(ctx.consistent_count > 0, "sanity: the reader threads actually ran");
+    // opus review 2026-09-09: a torn_count==0 result proves nothing about the
+    // fallback path specifically unless the fallback path actually ran at
+    // least once during this test -- otherwise "0 torn" is equally
+    // consistent with "the fallback was exercised and never tore" (what this
+    // test claims) and "the primary seqlock always won and the fallback
+    // branch never executed" (a vacuous pass). See s_fallback_taken_count's
+    // comment in config_store_flash.c.
+    TEST_CHECK(fallback_taken > 0,
+               "the exhausted-retries fallback path was actually taken at least once during "
+               "this race -- otherwise the torn_count==0 check below is vacuous");
     TEST_CHECK(ctx.torn_count == 0,
                "no reader ever observed tc_type/estop_active_level disagreeing with "
-               "MULTIPLE concurrent readers -- the writer-owned fallback double buffer means "
-               "no reader ever writes shared state, so readers cannot race each other");
+               "MULTIPLE concurrent readers -- the fallback double buffer's own seqlock "
+               "(s_fallback_gen) means a reader that catches the writer mid-commit, "
+               "including across two commits (ABA), retries instead of trusting a torn copy");
+}
+
+// --- Deterministic fallback-buffer ABA test (2026-09-09, opus review finding A) --
+//
+// The real-thread races above are honest about what they can and cannot
+// prove (see that section's own header comment) -- and in practice, even
+// heavily loaded, they did not land the exact two-commits-during-one-copy
+// interleaving needed to exercise the ABA this fix closes: the window is a
+// handful of instructions wide, not a useful fraction of an OS scheduling
+// quantum. This test does not rely on OS thread timing at all. It uses
+// config_store_test_force_fallback_path() to make config_store_seqlock_
+// read() go straight to the fallback branch (single-threaded, no writer is
+// ever actually racing the primary seqlock, so it would otherwise never
+// fail on its own), and config_store_test_set_fallback_hook() to run two
+// full config_store_write() commits from INSIDE the fallback branch, in the
+// gap between the two halves of its own copy -- deterministically
+// reproducing "the writer lands two commits while a reader is mid-copy of
+// the fallback buffer", landing the second one back in the exact slot the
+// reader started reading. See config_store_flash.c's s_fallback_gen comment
+// for why this specific shape (index returns to the same value, but the
+// buffer underneath was rewritten in between) defeats a bare index recheck.
+static int s_aba_hook_calls;      // every time the production code invoked the hook pointer
+static int s_aba_hook_commits_ran; // guards the actual writes to fire only once -- the fix's
+                                    // own retry loop calls this hook again on every fallback
+                                    // attempt it takes (up to CONFIG_STORE_FALLBACK_SEQLOCK_
+                                    // MAX_RETRIES times), and re-running two more commits on a
+                                    // later retry would just move the goalposts, not test
+                                    // anything -- one deliberate double-commit is the scenario.
+
+static void aba_two_commits_hook(void)
+{
+    s_aba_hook_calls++;
+    if (s_aba_hook_commits_ran) {
+        return;
+    }
+    s_aba_hook_commits_ran = 1;
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.calibration_missing = false;
+    const char *reason = NULL;
+    // First commit: writer targets the OTHER slot from whatever the reader
+    // is currently reading and flips active there (safe on its own -- the
+    // reader's slot is untouched by this one commit).
+    rec.tc_type = 0x01u;
+    rec.estop_active_level = DISCRETE_PIN_POLICY_ESTOP_ACTIVE_HIGH;
+    TEST_CHECK(config_store_write(&rec, &reason), "ABA test: first in-flight commit succeeds");
+    // Second commit: writer's target flips back to the reader's ORIGINAL
+    // slot -- overwriting the exact buffer the reader is mid-copy of.
+    rec.tc_type = 0x02u;
+    rec.estop_active_level = DISCRETE_PIN_POLICY_ESTOP_ACTIVE_LOW;
+    TEST_CHECK(config_store_write(&rec, &reason), "ABA test: second in-flight commit succeeds");
+}
+
+static void test_fallback_aba_two_commits_during_one_copy(void)
+{
+    TEST_SECTION("config_store_flash: fallback buffer survives TWO writer commits landing "
+                 "during one reader's copy (deterministic ABA regression test, opus review "
+                 "finding A -- ff2506e9-shape fix)");
+    reset_all();
+    config_store_boot_load();
+
+    // Seed the fallback buffer with a known, stable record (tc_type=0x01,
+    // ESTOP_ACTIVE_HIGH) before forcing the race, so the "before" state is
+    // well-defined and distinct from both in-flight commits the hook makes.
+    config_store_record_t seed;
+    config_store_default(&seed);
+    seed.calibration_missing = false;
+    seed.tc_type = 0x01u;
+    seed.estop_active_level = DISCRETE_PIN_POLICY_ESTOP_ACTIVE_HIGH;
+    const char *reason = NULL;
+    TEST_CHECK(config_store_write(&seed, &reason), "fixture: seed commit succeeds");
+
+    s_aba_hook_calls = 0;
+    s_aba_hook_commits_ran = 0;
+    config_store_test_force_fallback_path(true);
+    config_store_test_set_fallback_hook(aba_two_commits_hook);
+
+    config_store_record_t snap;
+    memset(&snap, 0, sizeof(snap));
+    config_store_get_full_record(&snap);
+
+    config_store_test_set_fallback_hook(NULL);
+    config_store_test_force_fallback_path(false);
+
+    TEST_CHECK(s_aba_hook_calls >= 1,
+               "fixture: the hook ran at least once during the read (the fix's own retry loop "
+               "may call it again on a later attempt; only the first invocation's two commits "
+               "actually run, see the hook's own guard)");
+    TEST_CHECK(s_aba_hook_commits_ran == 1, "fixture: the two in-flight commits actually ran");
+
+    uint8_t g_from_tc_type = (snap.tc_type == 0x02u) ? 1u : (snap.tc_type == 0x01u ? 0u : 0xFFu);
+    uint8_t g_from_estop =
+        (snap.estop_active_level == DISCRETE_PIN_POLICY_ESTOP_ACTIVE_LOW)
+            ? 1u
+            : (snap.estop_active_level == DISCRETE_PIN_POLICY_ESTOP_ACTIVE_HIGH ? 0u : 0xFFu);
+    printf("    (snap.tc_type=0x%02X snap.estop_active_level=%u -> g_tc=%u g_estop=%u)\n",
+           snap.tc_type, snap.estop_active_level, g_from_tc_type, g_from_estop);
+    TEST_CHECK(g_from_tc_type != 0xFFu && g_from_estop != 0xFFu,
+               "fixture: the returned record carries one of the known generations in each field");
+    TEST_CHECK(g_from_tc_type == g_from_estop,
+               "the fallback seqlock's generation recheck caught the two in-flight commits and "
+               "did not hand back a record mixing tc_type from one generation with "
+               "estop_active_level from another -- this is the exact ABA a bare 0/1 index "
+               "recheck cannot detect (the index legitimately returns to the same value)");
 }
 
 int main(void)
 {
     test_boot_load_blank_sector_is_default();
     test_write_then_reload_round_trips();
+    test_fallback_seeded_at_boot_before_any_write();
     test_write_refused_while_armed();
     test_seq_increments_and_survives_wraparound();
     test_safe_execute_timeout_is_reported_and_leaves_cache_unchanged();
@@ -743,6 +920,7 @@ int main(void)
     test_corrupt_active_sector_falls_back_to_other_sector();
     test_seqlock_concurrent_read_never_tears();
     test_seqlock_multi_reader_never_tears();
+    test_fallback_aba_two_commits_during_one_copy();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {
