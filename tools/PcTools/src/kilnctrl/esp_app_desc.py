@@ -143,6 +143,22 @@ def parse_app_desc_file(bin_path: str) -> AppDesc:
     return parse_app_desc(image_bytes)
 
 
+def normalize_build_timestamp(fw_build: str) -> str:
+    """Whitespace-normalized form of a "Mon D YYYY HH:MM:SS"-shaped build
+    timestamp string. ESP-IDF's __DATE__ pads single-digit days with an
+    extra space ("Sep  3 2026") which is easy to introduce or lose when a
+    value passes through JSON/logging -- collapsing runs of whitespace to a
+    single space makes that difference (not a meaningful mismatch) a
+    non-issue for both comparison (build_timestamps_match, below) and
+    lookup keys derived from a fw_build string (elf_archive.py's manifest is
+    keyed on exactly this normalized form -- 2026-09-10, opus review round
+    2, defect D: it previously keyed/looked up on the raw, unnormalized
+    string, so an exact `manifest.get(fw_build)` missed an archived entry on
+    any day whose __DATE__ padding differs from what was recorded, i.e.
+    roughly a third of days)."""
+    return " ".join(fw_build.split())
+
+
 def build_timestamps_match(app_desc: AppDesc, fw_build: Optional[str]) -> bool:
     """Compares an AppDesc's build_timestamp against a board-reported
     `fw_build` string (dashboard_http.c's fw_build field, same "Mon D YYYY
@@ -152,4 +168,4 @@ def build_timestamps_match(app_desc: AppDesc, fw_build: Optional[str]) -> bool:
     through JSON/logging, and that difference is not a meaningful mismatch."""
     if fw_build is None:
         return False
-    return " ".join(app_desc.build_timestamp.split()) == " ".join(fw_build.split())
+    return normalize_build_timestamp(app_desc.build_timestamp) == normalize_build_timestamp(fw_build)
