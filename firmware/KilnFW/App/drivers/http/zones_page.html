@@ -310,6 +310,21 @@ shown here for the same wiring picture the zones above give, never editable from
 this page.</p>
 <div id="safetyWiring" class="hint"></div>
 
+<!-- Owner request 2026-09-10: "if i change the max temp in the web gui it
+     should change it in the pico too." The Pico's abs_max_temp_c ceiling now
+     TRACKS the highest configured zone max_temp_c (plus headroom) -- shown
+     here, read-only, so the relationship (and any lag between them, e.g.
+     because the Pico refused a raise while ARMED) is visible rather than a
+     silent number nobody can see. See safety_ceiling_policy.h for the
+     invariant/ordering rule this reflects. -->
+<label>Safety processor ceiling (read-only)</label>
+<p class="hint">The RP2040 safety processor's own absolute temperature ceiling tracks
+the highest configured zone's max temp (+5&deg;C headroom) -- it is raised before a
+zone's limit is, and only lowered after, so it can never end up tighter than your
+zones. If the safety processor cannot be reached right now (e.g. it is armed),
+raising a zone's limit is refused rather than silently left unenforced.</p>
+<div id="safetyCeiling" class="hint"></div>
+
 <!-- 2026-08-27+2 (Task 2): CT-to-zone mapping mismatch warnings, computed
      from the same GET /api/zones response (ct_warn_mask) -- silent for any
      zone whose normal current was never measured (Task 1), a WARNING never
@@ -1828,6 +1843,37 @@ function renderSafetyWiring(sw) {
   }
 }
 
+/* Owner request 2026-09-10: data.safety_ceiling read-only -- target_c is
+   what THIS page's own zone maxima currently imply the Pico's ceiling
+   should be (safety_ceiling_policy.h's formula); pico_current_c/pico_known
+   is what the Pico's cache last actually confirmed. The two can legitimately
+   disagree (most commonly: the Pico is ARMED, its ordinary standing state,
+   and a recent raise attempt was refused) -- shown plainly rather than
+   collapsed into one number, so an operator who just raised a zone's limit
+   and got refused can see WHY the kiln might still trip at the old ceiling. */
+function renderSafetyCeiling(sc) {
+  var el = document.getElementById('safetyCeiling');
+  if (!sc || !(sc.target_c > 0)) {
+    el.textContent = 'No zone has a configured max temp yet -- nothing for the safety processor to track.';
+    return;
+  }
+  var target = sc.target_c.toFixed(1) + ' °C';
+  if (!sc.pico_known) {
+    el.textContent = 'Target: ' + target + '  |  Safety processor ceiling: not yet known (never fetched this boot)';
+    return;
+  }
+  var current = sc.pico_current_c.toFixed(1) + ' °C';
+  if (Math.abs(sc.pico_current_c - sc.target_c) < 0.05) {
+    el.textContent = 'Safety processor ceiling: ' + current + ' (matches target)';
+  } else if (sc.pico_current_c > sc.target_c) {
+    el.textContent = 'Safety processor ceiling: ' + current + '  |  target: ' + target +
+      '  (wider than needed -- safe, will tighten to target next time it can be written)';
+  } else {
+    el.textContent = 'Safety processor ceiling: ' + current + '  |  target: ' + target +
+      '  (LOWER than target -- a recent raise likely could not be confirmed; see the save error, or try again)';
+  }
+}
+
 /* Task 2: bit N-1 of ct_warn_mask = zone N (1-based) is currently commanded
    on and its live current mismatches its Task 1 measured normal -- a
    WARNING, never a trip; see zones_ct_mapping_mismatch()'s doc comment. */
@@ -1959,6 +2005,7 @@ function loadCurrent() {
       renderZones();
       populateAutotuneZones();
       renderSafetyWiring(data.safety_wiring);
+      renderSafetyCeiling(data.safety_ceiling);
       renderCtWarnings(data.ct_warn_mask, data.zones);
       renderTuningQuality(data.zones);
     } catch (err) {
@@ -2220,7 +2267,18 @@ document.getElementById('saveBtn').addEventListener('click', function () {
       : '');
     loadCurrent();
   }).catch(function (e) {
-    msg.textContent = 'Save failed: ' + e.message;
+    /* POST /api/zones's safety-ceiling-raise refusal (owner request
+       2026-09-10) answers 409 with a JSON body ({"ok":false,"reason":...})
+       rather than the plain-text bodies most other refusals here use --
+       unwrap it so the operator sees the actual reason, not a raw JSON
+       blob. Falls back to the raw message for every other (plain-text)
+       failure shape unchanged. */
+    var text = e.message;
+    try {
+      var parsed = JSON.parse(text);
+      if (parsed && parsed.reason) text = parsed.reason;
+    } catch (parseErr) { /* not JSON -- show as-is */ }
+    msg.textContent = 'Save failed: ' + text;
   });
 });
 

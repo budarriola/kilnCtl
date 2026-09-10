@@ -18,6 +18,9 @@
 #include "http_form.h"
 #include "kilnlink/kilnlink_commit_config_rejected.h"
 #include "safety_cfg_store.h"
+#include "s8_rate_guard_estimate.h" // S8 rate-guard auto-calc write path (docs/audits/s8_auto_calc_design_2026-09-09.md)
+#include "zones_config_accessors.h" // zones_config_get_model()/_get_model_fit_context() -- s8 auto-calc's input
+#include "zones_config_query.h"     // zones_config_get_thermo_count()
 #include "uart_task_ids.h" // SAFETY_FLAG_TC_NOT_INSTALLED/SAFETY_FLAG_TC_INJECTED
 #include "web_encoding.h"
 #include "wifi_provision_http.h"
@@ -123,6 +126,16 @@ typedef struct {
     float ct_cal_a_fs[SAFETY_CT_CAL_CHANNELS];
     float ct_cal_zero_mv[SAFETY_CT_CAL_CHANNELS];
     safety_ct_cal_source_t ct_cal_source[SAFETY_CT_CAL_CHANNELS];
+
+    /* S8 rate-guard write provenance (docs/audits/s8_auto_calc_design_2026-
+     * 09-09.md "Part 3") -- ESP-local, same "always known" reasoning as
+     * relay_type/ct_cal above. rate_guard_has_provenance false means "never
+     * recorded" (a board that predates this feature, or was just bench-
+     * preset) -- the page must render the raw 0x0204 value from params[]
+     * with no source label rather than guess. */
+    bool rate_guard_has_provenance;
+    safety_rate_guard_source_t rate_guard_source;
+    float rate_guard_value; /* meaningless unless rate_guard_has_provenance */
 } safety_cfg_http_snapshot_t;
 
 static const char *ct_cal_source_name(safety_ct_cal_source_t s)
@@ -246,6 +259,14 @@ static size_t build_commissioning_json(const safety_cfg_http_snapshot_t *s, char
         APPEND("}");
     }
     APPEND("]");
+    APPEND(",\"rate_guard_provenance\":{\"has_value\":%s",
+           s->rate_guard_has_provenance ? "true" : "false");
+    if (s->rate_guard_has_provenance) {
+        APPEND(",\"source\":\"%s\",\"value\":%.6g",
+               s->rate_guard_source == SAFETY_RATE_GUARD_SOURCE_AUTO ? "auto" : "manual",
+               (double)s->rate_guard_value);
+    }
+    APPEND("}");
     APPEND(",\"params\":[");
 
     size_t count = safety_cfg_store_param_count();
@@ -341,6 +362,8 @@ static esp_err_t commissioning_get_handler(httpd_req_t *req)
         snap.ct_cal_has_value[ch] = safety_cfg_store_get_ct_cal_input(
             ch, &snap.ct_cal_a_fs[ch], &snap.ct_cal_zero_mv[ch], &snap.ct_cal_source[ch]);
     }
+    (void)safety_cfg_store_get_rate_guard_meta(&snap.rate_guard_source, &snap.rate_guard_value,
+                                                &snap.rate_guard_has_provenance);
     snap.cached_crc = safety_cfg_store_cached_crc();
     uint32_t fetched = safety_cfg_store_fetched_ms_ago();
     snap.fetched_ms_ago_or_neg1 = (fetched == UINT32_MAX) ? -1 : (int64_t)fetched;
@@ -809,6 +832,33 @@ static bool apply_pairs(SafetyLinkClass *link, const safety_cfg_post_pair_t *pai
     return true;
 }
 
+/* Public single-field stage+commit+confirm wrapper -- owner request
+ * 2026-09-10 ("if i change the max temp in the web gui it should change it
+ * in the pico too."). safety_ceiling_sync.c (zones_http_post.c's helper)
+ * uses this as the `safety_ceiling_writer_fn` callback for abs_max_temp_c
+ * (param id 0x0104): it needs exactly this file's apply_pairs()/confirm_
+ * commit_landed() machinery -- stage, commit, and a live read-back that
+ * proves the value actually landed, not merely that it was ACKed within the
+ * reply window -- and does not deserve a second implementation of any of
+ * that. Declared in safety_cfg_http.h.
+ *
+ * Single pair, always committed (`commit=true` is unconditional -- there is
+ * no legitimate reason to stage this field without committing it). Reports
+ * failure (including the ARMED refusal, verbatim via commit_reject_reason_
+ * words()) through `reason_out`/`reason_cap` exactly like every other
+ * caller of apply_pairs() in this file. */
+bool safety_cfg_http_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_id, float value,
+                                          char *reason_out, size_t reason_cap)
+{
+    if (!reason_out || reason_cap == 0) {
+        return false;
+    }
+    safety_cfg_post_pair_t pair;
+    pair.param_id = param_id;
+    snprintf(pair.value_text, sizeof(pair.value_text), "%.9g", (double)value);
+    return apply_pairs(link, &pair, 1, /*commit=*/true, reason_out, reason_cap);
+}
+
 static esp_err_t commissioning_post_handler(httpd_req_t *req)
 {
     /* 2026-09-05 DRAM_PSRAM_PLAN.md: same rationale as commissioning_get_
@@ -846,6 +896,30 @@ static esp_err_t commissioning_post_handler(httpd_req_t *req)
 
     char reason[160];
     bool ok = apply_pairs(s_link, pairs, n, commit, reason, sizeof(reason));
+
+    /* S8 rate-guard write provenance -- this generic endpoint is how an
+     * operator hand-enters max_rate_c_per_min (0x0204) today, so a
+     * successful COMMITTED write of it here is, by definition, a MANUAL
+     * write: tag it so the commissioning page never shows a stale
+     * "auto-derived" label for a value the operator just typed over it.
+     * Only tagged when `commit` actually happened -- apply_pairs() already
+     * guarantees confirm_commit_landed() ran in that case, so this is the
+     * same "verify before tagging" discipline the auto-apply endpoint uses.
+     * A stage-only (commit=false) submission changes nothing on the Pico
+     * yet, so it must not touch this record either. */
+    if (ok && commit) {
+        for (int i = 0; i < n; i++) {
+            if (pairs[i].param_id == 0x0204) {
+                char *end = NULL;
+                float value = strtof(pairs[i].value_text, &end);
+                if (end != pairs[i].value_text && isfinite(value)) {
+                    esp_err_t nvs_err = ESP_OK;
+                    safety_cfg_store_set_rate_guard_meta(SAFETY_RATE_GUARD_SOURCE_MANUAL, value, &nvs_err);
+                }
+                break;
+            }
+        }
+    }
 
     char resp[256];
     int len;
@@ -1608,7 +1682,203 @@ static esp_err_t bench_preset_post_handler(httpd_req_t *req)
     ESP_LOGI(TAG, "bench_preset: applied (%u fields) -- calibration_missing remains set, "
                   "the sec-1 commissioning fields were deliberately not sent",
              (unsigned)SAFETY_CFG_BENCH_PRESET_COUNT);
+    /* SAFETY_CFG_BENCH_PRESET always includes 0x0204 (max_rate_c_per_min),
+     * reset to its dormant 0.0 default -- this record's provenance for
+     * whatever value the guard held BEFORE the preset is now meaningless,
+     * and leaving it standing would show a stale "auto-derived"/"hand-
+     * entered" label next to a value the preset just replaced. */
+    safety_cfg_store_clear_rate_guard_meta();
     return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+/* ---------------------------------------------------------------------- */
+/* GET/POST /api/safety/rate_guard/auto -- S8 auto-calc write path         */
+/* docs/audits/s8_auto_calc_design_2026-09-09.md "Part 3"                 */
+/* ---------------------------------------------------------------------- */
+
+/* Gathers every zone's identified model + fit context into s8_rate_guard_
+ * estimate()'s input shape and runs it. Pure gathering (no I/O beyond the
+ * zones_config accessors every other read-only endpoint in this codebase
+ * already calls directly, e.g. readiness_http.c's own per-zone loop) --
+ * kept separate from the handler below so the decision logic can be
+ * exercised without an httpd_req_t. */
+static s8_rate_guard_estimate_reason_t rate_guard_gather_and_estimate(float *out_c_per_min)
+{
+    s8_rate_guard_zone_input_t zones[MAX31856_CHANNEL_COUNT];
+    memset(zones, 0, sizeof(zones));
+    uint8_t thermo_count = zones_config_get_thermo_count();
+    if (thermo_count > MAX31856_CHANNEL_COUNT) {
+        thermo_count = MAX31856_CHANNEL_COUNT; /* defensive, matches s8_rate_guard_estimate()'s own clamp */
+    }
+    for (uint8_t i = 0; i < thermo_count; i++) {
+        float k_dc = 0.0f, tau_s = 0.0f, dead_time_s = 0.0f;
+        float fit_temp_c = 0.0f, fit_ambient_c = 0.0f;
+        bool have_model = zones_config_get_model(i, &k_dc, &tau_s, &dead_time_s) && k_dc > 0.0f && tau_s > 0.0f;
+        bool have_fit_ctx = zones_config_get_model_fit_context(i, &fit_temp_c, &fit_ambient_c);
+        zones[i].valid = have_model && have_fit_ctx;
+        zones[i].k_dc = k_dc;
+        zones[i].tau_s = tau_s;
+        zones[i].fit_temp_c = fit_temp_c;
+    }
+    return s8_rate_guard_estimate(zones, thermo_count, out_c_per_min);
+}
+
+/* Reads the CURRENT value of 0x0204 (max_rate_c_per_min) from this ESP's
+ * cache -- NOT a live fetch (same cache commissioning_get_handler's own JSON
+ * reads from). `*out_is_set` follows the same M1 "unset means unset,
+ * regardless of what the raw cache says, on a peer too old to report it
+ * reliably" rule the rest of this file already applies -- but since this
+ * path only ever runs on a board with a link up (the estimate itself needs
+ * a live plant model, which only exists post-commissioning), treating an
+ * unreliable-unset peer as "not set" is the conservative direction: it
+ * makes s8_rate_guard_auto_decide() treat the guard as dormant and APPLY,
+ * which is only wrong in the (already out-of-support) direction of a
+ * pre-v8 Pico, and even then only skips a confirm step for a guard whose
+ * real current value this build cannot trust anyway. */
+static bool rate_guard_current_value(float *out_value, bool *out_is_set)
+{
+    size_t count = safety_cfg_store_param_count();
+    for (size_t i = 0; i < count; i++) {
+        safety_cfg_param_t p;
+        if (!safety_cfg_store_get_by_index(i, &p) || p.param_id != 0x0204) {
+            continue;
+        }
+        if (!p.set) {
+            *out_is_set = false;
+            return true;
+        }
+        *out_value = p.value.f32_val;
+        *out_is_set = true;
+        return true;
+    }
+    return false; /* 0x0204 not in this build's table at all -- should not happen */
+}
+
+/* Shared by both GET (preview) and POST (act): computes the candidate,
+ * reads the current value, and classifies. Returns false (nothing else
+ * meaningful) only if no zone has a usable identification, or 0x0204's
+ * current value could not be read at all. */
+static bool rate_guard_auto_compute(float *out_candidate, float *out_current, bool *out_current_is_set,
+                                     s8_rate_guard_auto_decision_t *out_decision, char *err_out,
+                                     size_t err_cap)
+{
+    s8_rate_guard_estimate_reason_t reason = rate_guard_gather_and_estimate(out_candidate);
+    if (reason != S8_RATE_GUARD_ESTIMATE_OK) {
+        snprintf(err_out, err_cap, "no zone has a usable identification yet (run autotune on at "
+                                    "least one zone first)");
+        return false;
+    }
+    if (!rate_guard_current_value(out_current, out_current_is_set)) {
+        snprintf(err_out, err_cap, "internal error: max_rate_c_per_min (0x0204) missing from this "
+                                    "build's parameter table");
+        return false;
+    }
+    *out_decision = s8_rate_guard_auto_decide(*out_candidate, *out_current, *out_current_is_set);
+    return true;
+}
+
+/* GET: compute-and-report only, never writes anything -- safe to poll from
+ * the commissioning page on every load, same as the rest of this endpoint's
+ * GET side. */
+static esp_err_t rate_guard_auto_get_handler(httpd_req_t *req)
+{
+    float candidate = 0.0f, current = 0.0f;
+    bool current_is_set = false;
+    s8_rate_guard_auto_decision_t decision = S8_RATE_GUARD_AUTO_APPLY;
+    char err[160];
+    char resp[256];
+    int len;
+    if (!rate_guard_auto_compute(&candidate, &current, &current_is_set, &decision, err, sizeof(err))) {
+        len = snprintf(resp, sizeof(resp), "{\"ok\":false,\"reason\":\"%s\"}", err);
+    } else {
+        len = snprintf(resp, sizeof(resp),
+                        "{\"ok\":true,\"candidate_c_per_min\":%.6g,\"current_set\":%s,"
+                        "\"current_c_per_min\":%.6g,\"would_loosen\":%s}",
+                        (double)candidate, current_is_set ? "true" : "false", (double)current,
+                        decision == S8_RATE_GUARD_AUTO_SUGGEST_ONLY ? "true" : "false");
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
+}
+
+/* POST: body is either empty (act on the tighten/apply policy only) or
+ * "confirm=1" (operator has reviewed a loosening suggestion from a prior GET
+ * and explicitly wants it applied anyway -- the ONLY way a loosening ever
+ * gets written by this endpoint). Every write goes through apply_pairs()
+ * (commit=true), which forces confirm_commit_landed()'s live read-back --
+ * same "never trust SET_PARAM/COMMIT_CONFIG's own ok" discipline as every
+ * other write on this page -- before this handler tags the provenance
+ * record or reports success. */
+static esp_err_t rate_guard_auto_post_handler(httpd_req_t *req)
+{
+    bool confirm = false;
+    if (req->content_len > 0) {
+        char body[32];
+        if (read_body(req, body, sizeof(body))) {
+            char value[4] = {0};
+            confirm = http_form_find_field(body, "confirm", value, sizeof(value)) >= 0 &&
+                      strcmp(value, "1") == 0;
+        }
+    }
+
+    float candidate = 0.0f, current = 0.0f;
+    bool current_is_set = false;
+    s8_rate_guard_auto_decision_t decision = S8_RATE_GUARD_AUTO_APPLY;
+    char err[160];
+    char resp[320];
+    int len;
+    if (!rate_guard_auto_compute(&candidate, &current, &current_is_set, &decision, err, sizeof(err))) {
+        len = snprintf(resp, sizeof(resp), "{\"ok\":false,\"reason\":\"%s\"}", err);
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
+    }
+
+    if (decision == S8_RATE_GUARD_AUTO_SUGGEST_ONLY && !confirm) {
+        /* Never loosen silently -- report the suggestion, write nothing. */
+        len = snprintf(resp, sizeof(resp),
+                        "{\"ok\":true,\"applied\":false,\"candidate_c_per_min\":%.6g,"
+                        "\"current_c_per_min\":%.6g,\"reason\":\"this would LOOSEN the guard from "
+                        "%.6g to %.6g C/min -- POST again with confirm=1 to apply it anyway\"}",
+                        (double)candidate, (double)current, (double)current, (double)candidate);
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
+    }
+
+    safety_cfg_post_pair_t pair;
+    pair.param_id = 0x0204;
+    snprintf(pair.value_text, sizeof(pair.value_text), "%.9g", (double)candidate);
+
+    char reason[160];
+    bool ok = apply_pairs(s_link, &pair, 1, true /* always commit -- this endpoint has no stage-only mode */,
+                           reason, sizeof(reason));
+    if (!ok) {
+        char escaped[192];
+        size_t o = 0;
+        for (const char *c = reason; *c && o + 2 < sizeof(escaped); c++) {
+            if (*c == '"' || *c == '\\') {
+                escaped[o++] = '\\';
+            }
+            escaped[o++] = *c;
+        }
+        escaped[o] = '\0';
+        len = snprintf(resp, sizeof(resp), "{\"ok\":false,\"reason\":\"%s\"}", escaped);
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
+    }
+
+    /* apply_pairs() already forced a live read-back that confirms 0x0204
+     * now reads `candidate` on the Pico -- only NOW is it correct to tag
+     * this record AUTO. A failed persist here (out_nvs_err) costs a UI
+     * label on the next boot, never the safety value itself, so it does not
+     * change this response. */
+    esp_err_t nvs_err = ESP_OK;
+    safety_cfg_store_set_rate_guard_meta(SAFETY_RATE_GUARD_SOURCE_AUTO, candidate, &nvs_err);
+
+    len = snprintf(resp, sizeof(resp),
+                    "{\"ok\":true,\"applied\":true,\"value_c_per_min\":%.6g,\"was_loosen\":%s}",
+                    (double)candidate, (decision == S8_RATE_GUARD_AUTO_SUGGEST_ONLY) ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
 }
 
 /* ---- The page itself ---------------------------------------------------
@@ -1670,6 +1940,12 @@ esp_err_t safety_cfg_http_start(SafetyLinkClass *link_or_null, kiln_io_t *io_or_
         .uri = "/api/safety/commissioning/ct_auto_zero", .method = HTTP_POST,
         .handler = ct_auto_zero_post_handler,
     };
+    static const httpd_uri_t rate_guard_auto_get_uri = {
+        .uri = "/api/safety/rate_guard/auto", .method = HTTP_GET, .handler = rate_guard_auto_get_handler,
+    };
+    static const httpd_uri_t rate_guard_auto_post_uri = {
+        .uri = "/api/safety/rate_guard/auto", .method = HTTP_POST, .handler = rate_guard_auto_post_handler,
+    };
 
     /* The HTML page. Registered alongside the API rather than in a separate
      * module because the two are useless apart -- and because a missing page
@@ -1683,8 +1959,9 @@ esp_err_t safety_cfg_http_start(SafetyLinkClass *link_or_null, kiln_io_t *io_or_
         .handler = commissioning_page_get_handler,
     };
 
-    const httpd_uri_t *uris[] = { &page_uri, &get_uri, &post_uri, &bench_uri, &relay_type_uri, &ct_cal_uri,
-                                   &ct_auto_zero_uri };
+    const httpd_uri_t *uris[] = { &page_uri,       &get_uri,          &post_uri,       &bench_uri,
+                                   &relay_type_uri, &ct_cal_uri,       &ct_auto_zero_uri,
+                                   &rate_guard_auto_get_uri, &rate_guard_auto_post_uri };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         esp_err_t err = httpd_register_uri_handler(server, uris[i]);
         if (err != ESP_OK) {

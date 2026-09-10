@@ -17,6 +17,7 @@
 #include "http_form.h"
 #include "ota_http.h" /* ota_http_check_interlocks() -- the shared "not while firing" gate */
 #include "ota_interlock.h"
+#include "safety_ceiling_sync.h" /* owner request 2026-09-10 -- Pico abs_max_temp_c tracks the zone max */
 #include "zone_settings_source_chain.h"
 
 esp_err_t zones_post_handler(httpd_req_t *req)
@@ -331,6 +332,64 @@ esp_err_t zones_post_handler(httpd_req_t *req)
          * current live value, copied above -- left untouched. */
     }
 
+    /* Owner request 2026-09-10 ("if i change the max temp in the web gui it
+     * should change it in the pico too."): the Pico's own independent
+     * abs_max_temp_c ceiling must never end up TIGHTER than the highest
+     * configured zone max_temp_c -- see safety_ceiling_policy.h's header
+     * comment for the full invariant and why RAISING requires the Pico to
+     * be written and CONFIRMED first, strictly before this handler's own
+     * commit point below. `tmp.zones[i].max_temp_c` is the PROPOSED new
+     * config -- this must run against `tmp`, not the still-live
+     * `s_zones.cfg`, and it must run BEFORE the commit point so a refused
+     * Pico raise leaves s_zones completely untouched, same "never partially
+     * apply" discipline the rest of this handler already follows.
+     *
+     * A refusal here is EXPECTED, not exotic, whenever the Pico is in its
+     * ordinary standing ARMED state (config_store_decide_write() refuses
+     * every config write unconditionally while ARMED, with no per-field
+     * carve-out -- see safety_ceiling_policy.h's top comment) -- so this
+     * reports a clear, specific, operator-facing reason via HTTP 409
+     * rather than a generic 400/500, and never silently drops the raise or
+     * requires an undocumented safety-processor reset. */
+    {
+        float new_max_temp_c[MAX31856_CHANNEL_COUNT];
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            new_max_temp_c[i] = (i < tmp.thermo_count) ? tmp.zones[i].max_temp_c : 0.0f;
+        }
+        safety_ceiling_sync_result_t ceiling_result;
+        char ceiling_reason[192];
+        if (!safety_ceiling_sync_guard_raise(s_hw_safety, new_max_temp_c, MAX31856_CHANNEL_COUNT, &ceiling_result,
+                                              ceiling_reason, sizeof(ceiling_reason))) {
+            ESP_LOGW(ZONES_HTTP_TAG,
+                     "POST /api/zones refused: raising the safety processor's ceiling failed/could not be "
+                     "confirmed -- zone config left UNCHANGED: %s",
+                     ceiling_reason);
+            char escaped[224];
+            size_t o = 0;
+            for (const char *c = ceiling_reason; *c && o + 2 < sizeof(escaped); c++) {
+                if (*c == '"' || *c == '\\') {
+                    escaped[o++] = '\\';
+                }
+                escaped[o++] = *c;
+            }
+            escaped[o] = '\0';
+            char resp[300];
+            int len = snprintf(resp, sizeof(resp),
+                                "{\"ok\":false,\"error\":\"safety_ceiling_raise_failed\",\"reason\":\"%s\"}",
+                                escaped);
+            httpd_resp_set_status(req, "409 Conflict");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
+            free(body);
+            return ESP_OK;
+        }
+        /* ceiling_result is RAISED or NONE here -- either way the Pico's
+         * ceiling is now confirmed to be >= the proposed new max, so this
+         * commit is safe to apply. A LOWER (if any) is deliberately NOT
+         * attempted here -- see this handler's post-commit block below for
+         * why that direction goes AFTER, not before. */
+    }
+
     /* Commit point: every rejection above returned before touching s_zones,
      * so this is the first and only line at which the submission becomes the
      * live config -- and therefore the only place in this handler the
@@ -372,6 +431,38 @@ esp_err_t zones_post_handler(httpd_req_t *req)
          * cosmetic data that failed to persist is not worth refusing a
          * whole-page save that DID validate and apply everything else. */
     }
+
+    /* LOWERING direction, deliberately AFTER the commit above -- see
+     * safety_ceiling_policy.h's top comment for why: applying the ESP's own
+     * (now-lower) zone config FIRST can never put the Pico's ceiling below
+     * the live max (the Pico's ceiling only ever gets tightened here, never
+     * loosened), whereas tightening the Pico BEFORE the ESP commit could
+     * transiently -- or, if the ESP write then somehow failed, permanently
+     * -- leave the Pico's ceiling BELOW the ESP's still-live higher max.
+     * Best-effort only: a failure here (most likely the Pico's ordinary
+     * ARMED state, same as the raise path) is logged, never treated as this
+     * request's own failure -- the invariant stays satisfied either way
+     * (Pico ceiling merely stays wider than strictly necessary until the
+     * next opportunity, e.g. after a safety-processor reset). */
+    {
+        float new_max_temp_c[MAX31856_CHANNEL_COUNT];
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            new_max_temp_c[i] = (i < s_zones.cfg.thermo_count) ? s_zones.cfg.zones[i].max_temp_c : 0.0f;
+        }
+        safety_ceiling_sync_result_t ceiling_result = SAFETY_CEILING_SYNC_NONE;
+        char ceiling_reason[192];
+        safety_ceiling_sync_apply_lower(s_hw_safety, new_max_temp_c, MAX31856_CHANNEL_COUNT, &ceiling_result,
+                                         ceiling_reason, sizeof(ceiling_reason));
+        if (ceiling_result == SAFETY_CEILING_SYNC_LOWER_FAILED) {
+            ESP_LOGW(ZONES_HTTP_TAG,
+                     "safety processor ceiling not lowered to track the new (lower) zone max -- %s -- "
+                     "Pico ceiling stays wider than the new max, which is safe, just not tight",
+                     ceiling_reason);
+        } else if (ceiling_result == SAFETY_CEILING_SYNC_LOWERED) {
+            ESP_LOGI(ZONES_HTTP_TAG, "safety processor ceiling lowered to track the new zone max");
+        }
+    }
+
     free(body);
     return httpd_resp_sendstr(req, "ok");
 }

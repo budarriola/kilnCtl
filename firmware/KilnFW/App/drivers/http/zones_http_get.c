@@ -14,6 +14,7 @@
 #include "esp_log.h"
 
 #include "MAX31856.h"
+#include "safety_ceiling_sync.h" /* owner request 2026-09-10 -- Pico abs_max_temp_c tracking display */
 #include "web_encoding.h"
 
 /* Embedded via EMBED_TXTFILES, pre-gzipped at configure time by
@@ -210,6 +211,23 @@ esp_err_t zones_get_handler(httpd_req_t *req)
     zones_get_safety_wiring(&safety_wiring);
     uint8_t ct_warn_mask = zones_ct_mapping_warn_mask();
 
+    /* Owner request 2026-09-10: "if i change the max temp in the web gui it
+     * should change it in the pico too" -- surface the RELATIONSHIP, not
+     * just the raise/lower outcome of the last save. `target_c` is what
+     * this page's own zone maxima currently imply the Pico's ceiling
+     * SHOULD be (safety_ceiling_policy.h's formula); `pico_known`/
+     * `pico_current_c` is what the Pico's cache actually last confirmed --
+     * the two can legitimately differ (e.g. right after a raise the Pico
+     * refused because it is ARMED), and the page is expected to show that
+     * difference rather than hide it. */
+    float ceiling_zone_max[MAX31856_CHANNEL_COUNT];
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        ceiling_zone_max[zi] = (zi < s_zones.cfg.thermo_count) ? s_zones.cfg.zones[zi].max_temp_c : 0.0f;
+    }
+    float ceiling_target_c = safety_ceiling_policy_target_c(ceiling_zone_max, MAX31856_CHANNEL_COUNT);
+    float ceiling_pico_current_c = 0.0f;
+    bool ceiling_pico_known = safety_ceiling_sync_get_current_pico_ceiling(&ceiling_pico_current_c);
+
     APPEND("{\"thermo_count\":%u,\"relay_count\":%u,\"max_simultaneous_relays\":%u,"
            "\"continue_on_zone_trip\":%s,\"safety_tc_type\":%u,"
            "\"pc_link_abort_silence_ms\":%.0f,"
@@ -244,6 +262,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
            "\"safety_wiring\":{\"link_up\":%s,\"tc_temp_valid\":%s,\"tc_temp_c\":%.1f,"
            "\"tc_fault\":%u,\"relay_energized\":%s,\"tc_is_separate_sensor\":%s},"
            "\"ct_warn_mask\":%u,"
+           "\"safety_ceiling\":{\"target_c\":%.1f,\"pico_known\":%s,\"pico_current_c\":%.1f},"
            "\"relay_names\":[",
            s_zones.cfg.thermo_count, s_zones.cfg.relay_count, s_zones.cfg.max_simultaneous_relays,
            s_zones.cfg.continue_on_zone_trip ? "true" : "false", s_zones.cfg.safety_tc_type,
@@ -253,7 +272,8 @@ esp_err_t zones_get_handler(httpd_req_t *req)
            safety_wiring.link_up ? "true" : "false", safety_wiring.tc_temp_valid ? "true" : "false",
            (double)safety_wiring.tc_temp_c, safety_wiring.tc_fault, safety_wiring.relay_energized ? "true" : "false",
            safety_wiring.tc_is_separate_sensor ? "true" : "false",
-           ct_warn_mask);
+           ct_warn_mask, (double)ceiling_target_c, ceiling_pico_known ? "true" : "false",
+           (double)ceiling_pico_current_c);
 
     for (uint8_t r = 0; r < KILN_IO_RELAY_COUNT; r++) {
         char rn_escaped[RELAY_NAME_MAX_LEN * 2 + 1];

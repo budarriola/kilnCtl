@@ -101,6 +101,7 @@ try {
         (Join-Path $testDir "test_ramp_lock_onesided.c"),
         (Join-Path $testDir "test_zone_sweep_relay_off_wiring.c"),
         (Join-Path $testDir "test_approach_rate_cap.c"),
+        (Join-Path $testDir "test_safety_ceiling_policy.c"),
         (Join-Path $testDir "sim_plant.c"),
         (Join-Path $driversDir "control/pid.c"),
         (Join-Path $driversDir "control/cone_table.c"),
@@ -153,7 +154,8 @@ try {
         (Join-Path $driversDir "control/ramp_ident.c"),
         (Join-Path $driversDir "control/iter_tune.c"),
         (Join-Path $driversDir "control/firing_score.c"),
-        (Join-Path $driversDir "control/firing_compare.c")
+        (Join-Path $driversDir "control/firing_compare.c"),
+        (Join-Path $driversDir "safety/safety_ceiling_policy.c")
     )
 
     # hal_time migration (HW_ABSTRACTION.md item 5) pushed the "main"
@@ -317,7 +319,17 @@ try {
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/zones_config_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
+            # Owner request 2026-09-10: zones_http_post.c (#included above via
+            # test_zones_http.c) now calls safety_ceiling_sync_guard_raise()/
+            # _apply_lower(), and zones_http.c (also #included above, for
+            # zones_json_escape()) calls safety_ceiling_policy_target_c()/
+            # safety_ceiling_sync_get_current_pico_ceiling() for the GET
+            # response's new safety_ceiling field -- link the real pure-logic
+            # + ESP-glue objects in, same convention as every other plain .c
+            # this executable already links alongside its #included sources.
+            "`"$(Join-Path $driversDir 'safety/safety_ceiling_policy.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/safety_ceiling_sync.c')`""
     # fake_kv.c/hal_status.c/hal_esp_common.c added HW_ABSTRACTION.md Phase 3
     # item 3 (nvs.h -> hal_kv.h migration): zones_http.c/zones_config_store.c now
     # call hal_kv_*()/hal_status_to_esp_err() instead of nvs_*() directly, and
@@ -334,9 +346,20 @@ try {
     # links the REAL ones via test_safety_cfg_store.c's #include of safety_cfg_
     # store.c, so linking both into one binary would multiply-define every
     # safety_cfg_store_* symbol.
+    # S8 rate-guard auto-calc write path (docs/audits/s8_auto_calc_design_
+    # 2026-09-09.md "Part 3") pulled in the REAL s8_rate_guard_estimate.c/
+    # s8_rate_guard_auto_decide() as a second source here -- pure, host-
+    # testable logic with no store/link dependency of its own, so there is
+    # no reason to fake it the way safety_cfg_store_*/zones_config_* are
+    # faked below (those genuinely need real hardware/NVS on target).
+    # zones_config_get_model()/_get_thermo_count()/_get_model_fit_context()
+    # ARE faked in test_safety_cfg_http.c itself, same "own stub, real
+    # accessor links into a different executable" reasoning as the CT
+    # calibration fakes already there.
     $exe3 = Join-Path $outDir "kilnctl_host_tests_safety_cfg_http.exe"
     $cmd3 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
-            "/Fo:`"$outDir\\safety_cfg_http_`" /Fe:`"$exe3`" `"$(Join-Path $testDir 'test_safety_cfg_http.c')`""
+            "/Fo:`"$outDir\\`" /Fe:`"$exe3`" `"$(Join-Path $testDir 'test_safety_cfg_http.c')`" " +
+            "`"$(Join-Path $driversDir 'control/s8_rate_guard_estimate.c')`""
 
     Invoke-HostTestExe -Name "safety_cfg_http" -ExePath $exe3 -BuildCmd $cmd3
 

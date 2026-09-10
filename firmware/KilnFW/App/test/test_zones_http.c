@@ -112,6 +112,33 @@ void relay_cycles_set_type(uint8_t relay, relay_type_t type, uint32_t rated_over
 
 #undef asm
 
+// Owner request 2026-09-10 ("if i change the max temp in the web gui it
+// should change it in the pico too."): zones_http_post.c (#included above)
+// now calls safety_ceiling_sync_guard_raise()/_apply_lower(), whose real
+// implementation (safety_ceiling_sync.c, linked into this executable as a
+// plain .c file -- see build_host_tests.ps1) calls THIS function to actually
+// stage+commit+confirm the Pico write. The real body
+// (safety_cfg_http.c's safety_cfg_http_set_and_confirm_f32()) lives inside a
+// giant ESP-httpd-owning translation unit this executable has no business
+// pulling in (same "fake body, not the real file" reasoning as
+// relay_cycles_set_type() above) -- so this fake always reports success,
+// which is the correct behaviour for every existing test in this file: none
+// of them are testing the Pico-ceiling-sync feature itself (that is
+// test_safety_ceiling_policy.c's job, entirely at the pure-logic layer,
+// with its own fake writer) -- they only need a whole-page zone POST to
+// keep working exactly as it did before this feature existed.
+bool safety_cfg_http_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_id, float value,
+                                          char *reason_out, size_t reason_cap)
+{
+    (void)link;
+    (void)param_id;
+    (void)value;
+    if (reason_out && reason_cap > 0) {
+        reason_out[0] = '\0';
+    }
+    return true;
+}
+
 // ---- HW_ABSTRACTION.md Phase 3 item 3: nvs.h -> hal_kv.h migration ---
 // zones_http.c/zones_config_store.c now call hal_kv_*() instead of nvs_*()
 // directly (production no longer includes nvs.h/nvs_flash.h at all), so

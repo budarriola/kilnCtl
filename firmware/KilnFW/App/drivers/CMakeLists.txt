@@ -330,6 +330,17 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # module's own header comment for why).
                        "http/kiln_cfg_http.c"
                        "safety/safety_cfg_store.c"
+                       # Owner request 2026-09-10 ("if i change the max temp
+                       # in the web gui it should change it in the pico
+                       # too."): safety_ceiling_policy.c is the pure decision
+                       # logic (host-tested, App/test/test_safety_ceiling_
+                       # policy.c), safety_ceiling_sync.c is its ESP-side
+                       # glue to safety_cfg_store.c's cache and safety_cfg_
+                       # http.c's confirm-by-readback writer -- see
+                       # safety_ceiling_policy.h for the invariant/ordering
+                       # rule both implement.
+                       "safety/safety_ceiling_policy.c"
+                       "safety/safety_ceiling_sync.c"
                        "http/safety_cfg_http.c"
                        # rules_http.c/rules_eval.c/rules_task.c (the "Relays &
                        # Rules" engine) were deleted 2026-08-27: relay/IO

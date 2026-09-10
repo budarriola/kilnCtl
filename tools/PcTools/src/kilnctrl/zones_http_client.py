@@ -464,6 +464,14 @@ _TOP_INT_FIELDS = {"thermo_count", "relay_count", "max_simultaneous_relays", "sa
 #: field at all.
 _TOP_READONLY_OR_STRUCTURAL_KEYS = {
     "relay_zone_owned_mask", "safety_wiring", "ct_warn_mask",
+    # safety_ceiling (owner request 2026-09-10): read-only telemetry --
+    # {target_c, pico_known, pico_current_c} showing what the Pico's
+    # abs_max_temp_c ceiling should be (from the zone maxima,
+    # safety_ceiling_policy.h's formula) and what it last confirmed. There
+    # is no POST field for it: the Pico's ceiling is written by the
+    # firmware's own zones_post_handler (safety_ceiling_sync.c), triggered
+    # by max_temp_c changes, never posted directly by a client.
+    "safety_ceiling",
     "relay_names", "timing_profiles", "zones",
     # docs/ON_OFF_ZONE_PLAN.md step 6 (ZONES_CFG_VERSION 22->23, 2026-09-08):
     # the resolved on/off hysteresis/min-on-off-seconds DEFAULTS, emitted
