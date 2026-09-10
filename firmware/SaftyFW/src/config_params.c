@@ -654,8 +654,26 @@ bool config_params_validate_ranges(const config_store_record_t *rec,
 
     RANGE_F32_FINITE(rec->firing_margin_c, "firing_margin_c");
     RANGE_F32_FINITE(rec->overshoot_margin_c, "overshoot_margin_c");
-    RANGE_F32_RANGE_OR_ZERO(rec->max_rate_c_per_min, CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR,
-                             CONFIG_STORE_MAX_RATE_C_PER_MIN_CEILING, "max_rate_c_per_min");
+    // max_rate_c_per_min: same "would refuse to LOAD every pre-existing
+    // commissioned board" hazard as abs_max_temp_c/max_expected_power_w/
+    // i_normal_a[0..2] above, found in the 2026-09-10 S8 review -- this
+    // range check was unconditional here, unlike every one of those
+    // adjacent bounded fields. RANGE_F32_RANGE_OR_ZERO's own "0 always
+    // bypasses" sentinel does NOT cover this: a board legitimately
+    // commissioned to a tighter value in (0, CONFIG_STORE_MAX_RATE_C_PER_
+    // MIN_FLOOR) before this [15, 60] bound existed is nonzero and would
+    // hit RANGE_FAIL, which rejects the WHOLE record -- losing
+    // abs_max_temp_c and every other commissioned field along with it, not
+    // just this one. Gate on the fields_set bit exactly like the precedent
+    // fields do: once the bit IS set, the value came only from CHECK_F32_
+    // RANGE_OR_ZERO at SET_PARAM time (config_params_set()) and is
+    // re-checked here as full belt-and-suspenders; an untouched pre-
+    // existing record's stale/legacy value in this field is never refused
+    // purely because nobody has re-commissioned it since this bound shipped.
+    if (config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_MAX_RATE_C_PER_MIN)) {
+        RANGE_F32_RANGE_OR_ZERO(rec->max_rate_c_per_min, CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR,
+                                 CONFIG_STORE_MAX_RATE_C_PER_MIN_CEILING, "max_rate_c_per_min");
+    }
     RANGE_F32_FINITE(rec->tc_disagreement_c, "tc_disagreement_c");
     RANGE_F32_FINITE(rec->tc_expected_offset_c, "tc_expected_offset_c");
     RANGE_F32_FINITE(rec->tc_offset_c, "tc_offset_c");
