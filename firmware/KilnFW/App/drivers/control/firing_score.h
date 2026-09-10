@@ -57,10 +57,28 @@ extern "C" {
 // near-zero number.
 #define FIRING_SCORE_RAMP_MIN_RATE_C_PER_HR 10.0f
 
-// Dwell-entry peak is smoothed with this EMA time constant before the max is
-// taken (see firing_score_seg_tick()'s comment) -- one heater_output.c PWM
-// window, the natural period of the on/off ripple this is filtering out.
-#define FIRING_SCORE_ENTRY_SMOOTH_TAU_S 60.0f
+// 8b96b591 added a 60 s EMA smoothing the dwell-entry peak before taking the
+// max, to fix a simulator-only A1 false-accept regression (0.00% -> 3.64%)
+// caused by d63a5591's coupling-model change. Reverted 2026-09-10
+// (docs/audits/firing_score_entry_ema_review_2026-09-10.md): the EMA's tau
+// was a bare literal with no compile-time or runtime link to the actual
+// per-zone heater window (heater_window_ms is per-zone and runtime
+// configurable; this header deliberately has no dependency on
+// heater_output.h to stay pure decision/measurement logic), it attenuated a
+// genuine entry-peak signal to as little as ~40% on a zone with no fitted
+// model (entry_window_s falls back to exactly one smoothing tau) and ~85%
+// even on a fitted zone, it moved the one-sided degradation veto in the
+// accept-permissive direction (a measured 0.55 degC true degradation -- just
+// over FIRING_COMPARE_OWNER_FLOOR_C -- came out ~0.22-0.47 degC smoothed,
+// i.e. capable of silently clearing the veto's 0.5 degC bar), it had a
+// one-tick bypass (the very first entry-window tick seeded the EMA with, and
+// could set entry_peak_c from, the raw unsmoothed sample -- exactly the
+// PWM-edge case it was meant to filter), and the one real-hardware
+// measurement of this statistic (49bb1123's capture-pair verification,
+// entry_peak_c n=6, median delta -0.05 degC) sits 10x inside the floor, i.e.
+// does not corroborate the problem existing outside the simulator. The
+// honest A1 number is 3.64% (24/660), not the smoothed 1.97% -- see the
+// audit doc for full before/after figures.
 
 // Lag histogram: 512 bins of 2 s covers 0..1024 s of tracking lag at 2 s
 // median resolution. A streaming histogram rather than a stored tick array
@@ -134,7 +152,6 @@ typedef struct {
     uint32_t lag_samples;
     bool  entry_seen;
     float entry_peak_c;
-    float entry_err_ema_c;     // PWM-window-smoothed error; see firing_score.c's entry-peak comment
     uint32_t steady_ticks;
     double steady_sumsq;
 } firing_score_seg_t;

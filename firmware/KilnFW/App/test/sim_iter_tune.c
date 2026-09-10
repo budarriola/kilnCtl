@@ -52,6 +52,7 @@
 #include "sim_plant.h"
 
 #include <math.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -606,8 +607,8 @@ int main(int argc, char **argv)
     int total = accepts + rejects + insufficient + nopairs;
     printf("  %d null comparisons: ACCEPT %d (%.2f%%)  REJECT %d  INSUFFICIENT %d  NO_PAIRS %d\n",
            total, accepts, 100.0 * accepts / (total ? total : 1), rejects, insufficient, nopairs);
-    printf("  A1 bar: false-accept <= 2%% (hard fail above 5%%) -> %s\n",
-           (100.0 * accepts / (total ? total : 1)) <= 2.0 ? "PASS" : "FAIL");
+    bool a1_pass = (100.0 * accepts / (total ? total : 1)) <= 2.0;
+    printf("  A1 bar: false-accept <= 2%% (hard fail above 5%%) -> %s\n", a1_pass ? "PASS" : "FAIL");
 
     // ---- Part 3: A2 never-worse over a mismatched ensemble ----
     printf("\n#### PART 3: A2 never-worse, mismatched plant ensemble (K+/-30%%, tau+/-40%%, "
@@ -635,10 +636,28 @@ int main(int argc, char **argv)
            zruns, mc_runs, better, same, worse, 100.0 * worse / (zruns ? zruns : 1));
     printf("  mean cost change %+0.4f C; terminated %d/%d; A6 cage violations %d\n",
            sum_delta / (zruns ? zruns : 1), conv, zruns, cage);
-    printf("  A2 bar: worse-by-more-than-one-floor <= 1%% -> %s\n",
-           (100.0 * worse / (zruns ? zruns : 1)) <= 1.0 ? "PASS" : "FAIL");
-    printf("  A5 bar: termination within budget >= 95%% -> %s\n",
-           (100.0 * conv / (zruns ? zruns : 1)) >= 95.0 ? "PASS" : "FAIL");
-    printf("  A6 bar: 0 cage violations -> %s\n", cage == 0 ? "PASS" : "FAIL");
-    return 0;
+    bool a2_pass = (100.0 * worse / (zruns ? zruns : 1)) <= 1.0;
+    bool a5_pass = (100.0 * conv / (zruns ? zruns : 1)) >= 95.0;
+    bool a6_pass = (cage == 0);
+    printf("  A2 bar: worse-by-more-than-one-floor <= 1%% -> %s\n", a2_pass ? "PASS" : "FAIL");
+    printf("  A5 bar: termination within budget >= 95%% -> %s\n", a5_pass ? "PASS" : "FAIL");
+    printf("  A6 bar: 0 cage violations -> %s\n", a6_pass ? "PASS" : "FAIL");
+
+    // ---- Enforcement ----
+    // Until 2026-09-10 this harness's bars were printf-only: main() always
+    // `return 0`, so build_host_tests.ps1 (which links this as a
+    // "data-generating harness, not run automatically") and every other
+    // check_*.ps1/run_all_checks.ps1 saw a clean exit no matter what the
+    // A1/A2/A5/A6 verdicts said. That is exactly how the A1 false-accept
+    // rate went from 0% to 3.64% after d63a5591 and was caught only by a
+    // manual re-run, not by any automated gate (see
+    // docs/audits/firing_score_entry_ema_review_2026-09-10.md). Make the
+    // failure loud: a non-zero exit whenever any bar fails, checked by
+    // check_sim_iter_tune_bars.ps1. The printf verdicts above remain
+    // unconditional so this still works as a data-generating harness for
+    // manual/exploratory runs -- nothing here changes what is printed
+    // (only main()'s day: the return no reader ever looked at before).
+    bool all_pass = a1_pass && a2_pass && a5_pass && a6_pass;
+    printf("\n#### OVERALL: %s ####\n", all_pass ? "PASS (A1/A2/A5/A6 all clear)" : "FAIL");
+    return all_pass ? 0 : 1;
 }
