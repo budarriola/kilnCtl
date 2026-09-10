@@ -115,6 +115,29 @@ if (Test-Path $halBoundaryNegativeTest) {
 # matching toolchain/build dir is missing (IDF's compile_commands.json /
 # SaftyFW's build.ninja) -- that is a correct, non-vacuous failure on a
 # machine without that toolchain configured, not a bug in the script.
+# test_regsp_margin_against_declared.py and test_regsp_stale_literal.py
+# (firmware/SaftyFW/test/) are negative tests for the 2026-09-10 (round 2)
+# opus-review defects A -- they prove check_saftyfw_task_stack_budgets.py's
+# regsp_margin_fail() and stack_budget_lib_arm.py's parse() can actually
+# detect the bugs they were written against. Neither check_*.ps1 nor
+# check_saftyfw_task_stack_budgets.ps1 invoked them, and a repo-wide grep
+# found no reference to either filename anywhere but the file itself -- the
+# same "orphaned negative test" shape check_saftyfw_task_count.py was found
+# in earlier. Added explicitly, same pattern as the hal boundary negative
+# test above; run with plain `python` (no special venv needed, same as the
+# checker they import).
+$saftyfwTestDir = Join-Path $repoRoot "firmware\SaftyFW\test"
+$saftyfwOrphanTests = @("test_regsp_margin_against_declared.py", "test_regsp_stale_literal.py")
+foreach ($name in $saftyfwOrphanTests) {
+    $scriptPath = Join-Path $saftyfwTestDir $name
+    if (Test-Path $scriptPath) {
+        $checks += Get-Item $scriptPath
+    } else {
+        Write-Host "WARNING: expected SaftyFW negative test $scriptPath not found -- has it moved?" -ForegroundColor Yellow
+    }
+}
+$checks = $checks | Sort-Object FullName
+
 $hwAbstractionTestDir = Join-Path $repoRoot "firmware\hwAbstraction\test"
 $hwAbstractionScripts = @("compile_esp_backends.ps1", "compile_pico_backends.ps1", "test_host_fakes.ps1")
 foreach ($name in $hwAbstractionScripts) {
@@ -216,10 +239,15 @@ foreach ($c in $checks) {
         # first failure is a runner that hides every failure after it.
         $prev = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
-        if ($c.Extension -eq ".py") {
+        if ($c.FullName -eq $selfcheckPy) {
             # selfcheck.py (see above) -- run under the PcTools venv's own
             # interpreter, not `powershell -File`, which cannot execute it.
             $output = & $selfcheckPython $c.FullName 2>&1
+        } elseif ($c.Extension -eq ".py") {
+            # The SaftyFW orphan negative tests (see above) -- no special
+            # venv needed, same interpreter unittest is invoked with
+            # directly during development.
+            $output = & python $c.FullName 2>&1
         } else {
             $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $c.FullName 2>&1
         }

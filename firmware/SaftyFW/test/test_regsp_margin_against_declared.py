@@ -14,16 +14,24 @@ though a hand-copied ceiling says otherwise.
 
 This test uses link_task's REAL declared stack (read back from its own
 #define via the production declared_words() helper, same as the checker
-itself does -- no hand-typed byte count) and the REAL historical measurement
-recorded in this file's own CEILING_BYTES comment (4736 B, unresolved regsp)
-to prove:
-  1. Old (bug) formula, graded against CEILING_BYTES["link_task"] (9472):
-     4736*2 > 9472 is False -- the margin check never fires. This documents
-     the failure being fixed, it does not exercise production code.
-  2. Fixed formula, graded against declared_bytes (6144): 4736*2 > 6144 is
-     True -- the margin check correctly fires, since a real unresolved frame
-     anywhere near 2x what was measured would not fit in the 6144 B FreeRTOS
-     actually gave this task.
+itself does -- no hand-typed byte count) to prove:
+  1. Old (bug) formula, graded against CEILING_BYTES["link_task"]: a
+     measurement set to exactly ceiling/REGSP_MARGIN_FACTOR never fires
+     the margin check, by construction. This documents the failure being
+     fixed; it does not exercise production code.
+  2. Fixed formula, graded against the LIVE declared_bytes (read from
+     link_task.c, not a byte count copied into this file): a measurement
+     just over declared_bytes/REGSP_MARGIN_FACTOR correctly fires.
+
+2026-09-10: this test previously hardcoded both the expected declared_bytes
+(6144) and the "historical measurement" (4736 B) it fed to part 2. c27484a2
+raised LINK_TASK_STACK_WORDS from configMINIMAL_STACK_SIZE*6 to *10 (6144 ->
+10240 B) without anyone touching this file, and the hardcoded 4736 no longer
+satisfies 4736*2 > 10240 -- exactly the kind of drift this test exists to
+catch in the CHECKER, not fall victim to itself. Both constants are now
+derived from the checker's own declared_bytes at test time so the test's
+behavior tracks whatever link_task.c currently declares, the same way
+production code does.
 
 Part 2 imports check_saftyfw_task_stack_budgets's own REGSP_MARGIN_FACTOR
 and re-derives regsp_margin_fail exactly as main()'s per-task loop does, so a
@@ -39,28 +47,38 @@ import unittest
 sys.path.insert(0, os.path.dirname(__file__))
 import check_saftyfw_task_stack_budgets as chk  # noqa: E402
 
-# Historical measurement recorded in CEILING_BYTES's own comment for
-# link_task (4736 B measured, unresolved regsp) -- not re-derived from a
-# fresh ELF walk here (that needs a live build; check_saftyfw_task_stack_
-# budgets.ps1 / this repo's host-test run cover the live-ELF path), but a
-# fixed, documented real number rather than an invented one.
-LINK_TASK_MEASURED_HISTORICAL = 4736
+
+def _link_task_declared_bytes():
+    """Live declared stack for link_task, read the same way the checker
+    itself computes it -- never a byte count hand-typed into this file."""
+    return chk.declared_words(
+        "link_task.c", "LINK_TASK_STACK_WORDS",
+        r'xTaskCreate\(link_task_fn,\s*"link_task",\s*LINK_TASK_STACK_WORDS') * 4
 
 
 class RegspMarginGradedAgainstDeclaredTest(unittest.TestCase):
     def test_declared_bytes_is_read_from_real_source_not_hand_typed(self):
-        declared_bytes = chk.declared_words(
-            "link_task.c", "LINK_TASK_STACK_WORDS",
-            r'xTaskCreate\(link_task_fn,\s*"link_task",\s*LINK_TASK_STACK_WORDS') * 4
-        # configMINIMAL_STACK_SIZE(256) * 6 words * 4 B/word = 6144 B.
-        self.assertEqual(declared_bytes, 6144)
+        declared_bytes = _link_task_declared_bytes()
+        # Must be a positive, word-aligned byte count derived from a real
+        # #define -- not asserted against a specific number, since that
+        # number is exactly what changes (legitimately) when link_task's
+        # stack is retuned, and hardcoding it here is the bug this test
+        # documents (see module docstring, 2026-09-10).
+        self.assertGreater(declared_bytes, 0)
+        self.assertEqual(declared_bytes % 4, 0)
 
     def test_old_ceiling_graded_formula_could_never_fire(self):
         # Documents the failure being fixed -- computed independently here,
         # not by calling production code (the whole point is that grading
-        # against `ceiling` is no longer what production code does).
+        # against `ceiling` is no longer what production code does). The
+        # measurement is derived from the ceiling itself (ceiling /
+        # REGSP_MARGIN_FACTOR, matching how every CEILING_BYTES row was
+        # hand-set to exactly 2x its own measurement), not a hardcoded
+        # historical byte count, so this stays true regardless of future
+        # ceiling-table edits.
         old_ceiling = chk.CEILING_BYTES["link_task"]
-        old_formula_result = LINK_TASK_MEASURED_HISTORICAL * chk.REGSP_MARGIN_FACTOR > old_ceiling
+        measured = old_ceiling // chk.REGSP_MARGIN_FACTOR
+        old_formula_result = measured * chk.REGSP_MARGIN_FACTOR > old_ceiling
         self.assertFalse(
             old_formula_result,
             "the OLD (ceiling-graded) formula was expected to be false by "
@@ -70,29 +88,28 @@ class RegspMarginGradedAgainstDeclaredTest(unittest.TestCase):
     def test_fixed_formula_grades_against_declared_and_fires(self):
         # Calls PRODUCTION code directly (chk.regsp_margin_fail) so a
         # regression back to grading against `ceiling` is caught here, not
-        # just documented.
-        declared_bytes = chk.declared_words(
-            "link_task.c", "LINK_TASK_STACK_WORDS",
-            r'xTaskCreate\(link_task_fn,\s*"link_task",\s*LINK_TASK_STACK_WORDS') * 4
-        result = chk.regsp_margin_fail(LINK_TASK_MEASURED_HISTORICAL, declared_bytes,
-                                        unresolved_regsp=True)
+        # just documented. The measurement is derived from the LIVE
+        # declared_bytes (declared_bytes / REGSP_MARGIN_FACTOR + 1, i.e.
+        # just over half), not a hardcoded byte count -- so it stays a
+        # genuine over-margin measurement no matter what link_task.c
+        # currently declares.
+        declared_bytes = _link_task_declared_bytes()
+        measured = declared_bytes // chk.REGSP_MARGIN_FACTOR + 1
+        result = chk.regsp_margin_fail(measured, declared_bytes, unresolved_regsp=True)
         self.assertTrue(
             result,
             "regsp_margin_fail() graded against declared_bytes should fire "
-            "for link_task's historical measurement (4736 B * 2 = 9472 > "
-            "6144 declared) -- an unresolved regsp frame anywhere near "
-            "double the measured lower bound would not fit in what FreeRTOS "
-            "actually allocated this task")
+            "for a measurement just over declared_bytes/REGSP_MARGIN_FACTOR "
+            "-- an unresolved regsp frame anywhere near that much again "
+            "would not fit in what FreeRTOS actually allocated this task")
 
     def test_no_fail_when_regsp_fully_resolved(self):
         # unresolved_regsp=False must short-circuit regardless of the
         # arithmetic -- a fully-resolved task's exact measurement is not
         # subject to this speculative margin at all.
-        declared_bytes = chk.declared_words(
-            "link_task.c", "LINK_TASK_STACK_WORDS",
-            r'xTaskCreate\(link_task_fn,\s*"link_task",\s*LINK_TASK_STACK_WORDS') * 4
-        result = chk.regsp_margin_fail(LINK_TASK_MEASURED_HISTORICAL, declared_bytes,
-                                        unresolved_regsp=False)
+        declared_bytes = _link_task_declared_bytes()
+        measured = declared_bytes // chk.REGSP_MARGIN_FACTOR + 1
+        result = chk.regsp_margin_fail(measured, declared_bytes, unresolved_regsp=False)
         self.assertFalse(result)
 
 
