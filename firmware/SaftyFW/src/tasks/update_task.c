@@ -114,7 +114,15 @@
 #include "update_task_reboot_policy.h" // update_task_reboot_policy_decide() -- the pure,
                                         // host-testable half of update_task_reboot_allowed()
 
-#define UPDATE_TASK_STACK_WORDS (configMINIMAL_STACK_SIZE * 3) // page_buf below is 512 bytes
+// 2026-09-10 (owner decision "raise both stacks"): check_saftyfw_task_stack_
+// budgets.py's regsp-margin check FAILED at *3 -- measured 2536 B lower
+// bound needs declared >= 5072 B for that check to clear, and *3 (3072 B)
+// was only 83% of that. Bumped to *6 (6144 B), the same headroom
+// current_task/safety_core already carry, same "RAM is cheap" reasoning as
+// link_task.c's own LINK_TASK_STACK_WORDS comment. configTOTAL_HEAP_SIZE
+// (FreeRTOSConfig.h) raised in the same commit to keep non-stack heap
+// headroom sane after this and link_task's stacks both grew.
+#define UPDATE_TASK_STACK_WORDS (configMINIMAL_STACK_SIZE * 6) // page_buf below is 512 bytes
 #define UPDATE_TASK_POLL_MS            100
 #define UPDATE_STATUS_TX_PERIOD_MS     500  // matches link_task.c's own Frame A cadence
 #define UPDATE_CONFIRM_TICK_PERIOD_MS  2000 // matches link_task.c's own Frame B cadence

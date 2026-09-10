@@ -98,7 +98,19 @@
 // discrete_task.c's per-task stack bumps (see each file's own comment) --
 // smaller and more targeted than the reverted global configMINIMAL_STACK_
 // SIZE bump above. RP2040 has 264KB SRAM total, so 40K leaves ample margin.
-#define configTOTAL_HEAP_SIZE                   (40 * 1024)
+// 2026-09-10: raised 40K->56K alongside link_task.c's LINK_TASK_STACK_WORDS
+// (*6->*10, +4096 B) and update_task.c's UPDATE_TASK_STACK_WORDS (*3->*6,
+// +3072 B) -- both grew to clear check_saftyfw_task_stack_budgets.py's
+// regsp-margin check (owner decision "raise both stacks"). Before this the
+// nine tasks' declared stacks already summed to 33792 B against a 40960 B
+// heap, leaving only ~7168 B for every queue/semaphore/TCB the rest of the
+// firmware allocates -- the two stack bumps above would have consumed that
+// entire remainder and left nothing, recreating the exact heap-exhaustion
+// hazard (vApplicationMallocFailedHook) an earlier session hit by raising
+// configMINIMAL_STACK_SIZE globally instead of per-task. 56K keeps the same
+// ~15K non-stack margin this codebase has run on since the 40K bump, still
+// well under a quarter of the RP2040's 264KB total SRAM.
+#define configTOTAL_HEAP_SIZE                   (56 * 1024)
 #define configAPPLICATION_ALLOCATED_HEAP        0
 #define configENABLE_HEAP_PROTECTOR             0
 #define configKERNEL_PROVIDED_STATIC_MEMORY     1

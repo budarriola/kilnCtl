@@ -138,7 +138,19 @@
 // raw[~259] and stuffed[~520] in one call path, so the true peak is only
 // reachable by a full-size UPDATE_DATA frame, not by the boot-time TX that
 // happened to trip it first.
-#define LINK_TASK_STACK_WORDS      (configMINIMAL_STACK_SIZE * 6)
+// 2026-09-10 (owner decision "raise both stacks"): check_saftyfw_task_stack_
+// budgets.py's regsp-margin check (2x REGSP_MARGIN_FACTOR against an
+// unresolved register-computed frame adjust it cannot size exactly) FAILED
+// at *6 -- measured 4736 B lower bound needs declared >= 9472 B for that
+// check to clear, and *6 (6144 B) was only 77% of that. Bumped to *10
+// (10240 B) rather than the bare minimum *10 threshold-clearing value, same
+// "RAM is cheap, a Pico stack overflow corrupts a neighbour and is hours to
+// diagnose" reasoning as the other five stack overflows this project has
+// hit -- see check_saftyfw_task_stack_budgets.py's CEILING_BYTES comment
+// for the incident history. configTOTAL_HEAP_SIZE (FreeRTOSConfig.h) raised
+// in the same commit to keep non-stack heap headroom sane after this and
+// update_task's stacks both grew.
+#define LINK_TASK_STACK_WORDS      (configMINIMAL_STACK_SIZE * 10)
 // Bounded wait, not a blocking read: this task also owns the 500 ms TX
 // cadence and must check in with watchdog_task, so it polls uart_owner's RX
 // ring on a short period rather than blocking on a queue receive.
