@@ -38,6 +38,7 @@ s8_rate_guard_estimate_reason_t s8_rate_guard_estimate(const s8_rate_guard_zone_
     float best_k_dc = 0.0f;
     float best_tau_s = 0.0f;
     float best_coupling_sum = 0.0f;
+    bool  best_coupling_provenance_ok = false;
 
     for (uint8_t i = 0; i < zone_count; i++) {
         const s8_rate_guard_zone_input_t *z = &zones[i];
@@ -81,6 +82,7 @@ s8_rate_guard_estimate_reason_t s8_rate_guard_estimate(const s8_rate_guard_zone_
             best_k_dc = z->k_dc;
             best_tau_s = z->tau_s;
             best_coupling_sum = z->coupling_gain_sum_c_per_duty;
+            best_coupling_provenance_ok = z->coupling_provenance_ok;
         }
     }
 
@@ -88,17 +90,39 @@ s8_rate_guard_estimate_reason_t s8_rate_guard_estimate(const s8_rate_guard_zone_
         return S8_RATE_GUARD_ESTIMATE_NO_DATA;
     }
 
+    // 2026-09-10 fix (finding C, "PROVENANCE" in the header): an unproven
+    // coupling matrix (measured off-diagonals, no member's coupling_diag_
+    // k_dc ever identified on hardware -- the same condition zone_coupling_
+    // solve.c's control path refuses whole) must not receive the smaller,
+    // coupled-basis margin. Fold the coupling contribution out of the basis
+    // entirely in that case. Note this is NOT the same thing as a
+    // genuinely single-zone board (zone_count == 1): a single-zone board
+    // has no other heater to couple from at all, so its own-zone k_dc/tau_s
+    // fit already IS the full physical picture, and the ordinary
+    // identification-error margin (1.3x) is the right one for it, same as
+    // for a proven multi-zone board. The WIDER S8_RATE_GUARD_ESTIMATE_
+    // MARGIN_UNCOUPLED (2.0x) is reserved for the case this basis cannot
+    // see at all: a board with MORE than one zone (so a stuck relay on
+    // another zone really could drive this TC) whose coupling data is not
+    // trustworthy -- exactly the gap between "no coupling contribution in
+    // the basis" and "no coupling risk in reality."
+    float coupling_for_basis = best_coupling_provenance_ok ? best_coupling_sum : 0.0f;
+    bool  multi_zone_unproven = (zone_count > 1) && !best_coupling_provenance_ok;
+    float margin = multi_zone_unproven ? S8_RATE_GUARD_ESTIMATE_MARGIN_UNCOUPLED
+                                        : S8_RATE_GUARD_ESTIMATE_MARGIN;
+
     // First-order step response's initial slope at full duty (u=1.0),
     // INCLUDING the other zones' coupled contribution at their own full
-    // duty -- the actual worst case, since every real firing starts with
-    // all zones at full duty together and S8 watches one TC shared by all
-    // of them (safety_guards.c has no per-zone concept):
+    // duty (when that contribution's provenance checks out) -- the actual
+    // worst case, since every real firing starts with all zones at full
+    // duty together and S8 watches one TC shared by all of them
+    // (safety_guards.c has no per-zone concept):
     // dT/dt|t=0 = (k_dc + coupling_gain_sum) * u / tau_s, in degC/second.
     // Converted to degC/minute to match max_rate_c_per_min's own unit.
-    float total_gain_c_per_duty = best_k_dc + best_coupling_sum;
+    float total_gain_c_per_duty = best_k_dc + coupling_for_basis;
     float slope_c_per_min = (total_gain_c_per_duty / best_tau_s) * 60.0f;
 
-    float candidate = slope_c_per_min * S8_RATE_GUARD_ESTIMATE_MARGIN;
+    float candidate = slope_c_per_min * margin;
 
     if (!isfinite(candidate)) {
         // Defensive: a pathological tau_s near zero could overflow the

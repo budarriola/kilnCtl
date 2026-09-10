@@ -364,6 +364,28 @@ bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNE
     return true;
 }
 
+// zones_config_get_coupling_diag_k_dc() -- added for the 2026-09-10 finding
+// C fix (safety_cfg_http.c's rate_guard_gather_and_estimate() now mirrors
+// zone_coupling_solve.c's coupling_matrix_provenance_ok() rule: a matrix
+// carrying measured off-diagonals is refused unless every member's own
+// diag_k_dc has been identified on hardware). Every existing test in this
+// file leaves s_stub_zone_has_coupling all-false (no measured off-diagonal
+// at all), so board_coupling_provenance_ok is trivially true regardless of
+// what this stub returns -- it exists only so the link succeeds. Defaults
+// to "not identified" (false), matching this bench's real, live state.
+static bool  s_stub_zone_has_coupling_diag_k_dc[TEST_SAFETY_CFG_HTTP_MAX_ZONES];
+static float s_stub_zone_coupling_diag_k_dc[TEST_SAFETY_CFG_HTTP_MAX_ZONES];
+
+bool zones_config_get_coupling_diag_k_dc(uint8_t zone_index, float *out_k_dc)
+{
+    if (!out_k_dc || zone_index >= TEST_SAFETY_CFG_HTTP_MAX_ZONES ||
+        !s_stub_zone_has_coupling_diag_k_dc[zone_index]) {
+        return false;
+    }
+    *out_k_dc = s_stub_zone_coupling_diag_k_dc[zone_index];
+    return true;
+}
+
 bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
 {
     if (out_dead_time_s) *out_dead_time_s = 0.0f;
@@ -402,6 +424,8 @@ static void reset_rate_guard_stubs(void)
     memset(s_stub_zone_has_fit_ctx, 0, sizeof(s_stub_zone_has_fit_ctx));
     memset(s_stub_zone_fit_temp_c, 0, sizeof(s_stub_zone_fit_temp_c));
     memset(s_stub_zone_has_coupling, 0, sizeof(s_stub_zone_has_coupling));
+    memset(s_stub_zone_has_coupling_diag_k_dc, 0, sizeof(s_stub_zone_has_coupling_diag_k_dc));
+    memset(s_stub_zone_coupling_diag_k_dc, 0, sizeof(s_stub_zone_coupling_diag_k_dc));
     memset(s_stub_zone_coupling_row, 0, sizeof(s_stub_zone_coupling_row));
 }
 
@@ -1635,8 +1659,9 @@ static void test_rate_guard_auto_compute_dormant_applies(void)
     float candidate = 0.0f, current = -1.0f;
     bool current_is_set = true;
     s8_rate_guard_auto_decision_t decision;
+    s8_rate_guard_estimate_reason_t clamp_reason;
     char err[160];
-    bool ok = rate_guard_auto_compute(&candidate, &current, &current_is_set, &decision, err, sizeof(err));
+    bool ok = rate_guard_auto_compute(&candidate, &current, &current_is_set, &decision, &clamp_reason, err, sizeof(err));
     TEST_CHECK(ok, "compute succeeds with one identified zone");
     TEST_CHECK(!current_is_set, "correctly reports the guard as currently dormant");
     TEST_CHECK(decision == S8_RATE_GUARD_AUTO_APPLY, "arming a dormant guard always applies");
@@ -1657,8 +1682,9 @@ static void test_rate_guard_auto_compute_tighten_applies(void)
     float candidate = 0.0f, current = 0.0f;
     bool current_is_set = false;
     s8_rate_guard_auto_decision_t decision;
+    s8_rate_guard_estimate_reason_t clamp_reason;
     char err[160];
-    bool ok = rate_guard_auto_compute(&candidate, &current, &current_is_set, &decision, err, sizeof(err));
+    bool ok = rate_guard_auto_compute(&candidate, &current, &current_is_set, &decision, &clamp_reason, err, sizeof(err));
     TEST_CHECK(ok, "compute succeeds");
     TEST_CHECK(fabsf(candidate - 15.0f) < 1e-3f, "candidate is floored to 15.0 C/min");
     TEST_CHECK(decision == S8_RATE_GUARD_AUTO_APPLY, "15.0 < 33.3 -- tightens, so this applies");
@@ -1679,8 +1705,9 @@ static void test_rate_guard_auto_compute_loosen_suggests_only(void)
     float candidate = 0.0f, current = 0.0f;
     bool current_is_set = false;
     s8_rate_guard_auto_decision_t decision;
+    s8_rate_guard_estimate_reason_t clamp_reason;
     char err[160];
-    bool ok = rate_guard_auto_compute(&candidate, &current, &current_is_set, &decision, err, sizeof(err));
+    bool ok = rate_guard_auto_compute(&candidate, &current, &current_is_set, &decision, &clamp_reason, err, sizeof(err));
     TEST_CHECK(ok, "compute succeeds");
     TEST_CHECK(fabsf(candidate - 26.0f) < 1e-3f, "candidate is 26.0 C/min");
     TEST_CHECK(decision == S8_RATE_GUARD_AUTO_SUGGEST_ONLY,
@@ -1696,8 +1723,10 @@ static void test_rate_guard_auto_compute_no_data_fails_with_reason(void)
     float candidate = 0.0f, current = 0.0f;
     bool current_is_set = false;
     s8_rate_guard_auto_decision_t decision;
+    s8_rate_guard_estimate_reason_t clamp_reason;
     char err[160] = {0};
-    bool ok = rate_guard_auto_compute(&candidate, &current, &current_is_set, &decision, err, sizeof(err));
+    bool ok = rate_guard_auto_compute(&candidate, &current, &current_is_set, &decision, &clamp_reason, err,
+                                       sizeof(err));
     TEST_CHECK(!ok, "no zone identified -> compute refuses");
     TEST_CHECK(err[0] != '\0', "a non-empty reason is produced");
 }

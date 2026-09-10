@@ -75,12 +75,20 @@
 // S8_RATE_GUARD_ESTIMATE_FLOOR_C_PER_MIN and at most _CEILING_C_PER_MIN --
 // the SAME two bounds firmware/SaftyFW/src/config_store.h's
 // CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR/_CEILING enforce independently on
-// the Pico. With the coupled basis above, the floor is no longer the
-// dominant term on this bench's measured data (z0/z1/z2 candidates land at
-// roughly 37.9/36.2/28.9 C/min -- see the design doc's 2026-09-10 addendum
-// for the worked numbers) -- it remains as a backstop against a
-// near-degenerate identification (tiny k_dc, or a coupling-free single-zone
-// board), not as the value this guard is expected to normally clamp to.
+// the Pico.
+// 2026-09-10 CORRECTION (opus review of 431019ba/0820dfa6/fb495e05): the
+// 37.9/36.2/28.9 C/min figures previously quoted here (and in the design
+// doc) were computed from tools/PcTools/config_presets/tuned_baseline_
+// 20260831.json -- a PRESET FILE, not this board -- combined with the
+// LIVE coupling sums, which is exactly the mixture that inflated the
+// result. This board's own model_k_dc/tau_s
+// (docs/audits/cplval75_coupling_verdict_2026-09-10.md) are 39.2459/263.8,
+// 31.9669/269.8, 31.6810/270.9; with the live coupling sums (49.04/36.45/
+// 20.75) the honest z0/z1/z2 candidates are **26.10 / 19.78 / 15.10 C/min**.
+// z2 lands 0.7% above the 15.0 floor -- i.e. on THIS board's live data the
+// floor is very nearly the value this guard clamps to for the coldest
+// zone, the opposite of the claim this comment used to make. See finding B
+// below before trusting any of these three numbers as a safety margin.
 // s8_rate_guard_estimate_reason_t distinguishes an unclamped derivation
 // (S8_RATE_GUARD_ESTIMATE_OK) from a floor- or ceiling-clamped one
 // (_OK_CLAMPED_FLOOR / _OK_CLAMPED_CEILING) so a caller -- and an operator
@@ -148,10 +156,66 @@ extern "C" {
  * bench numbers. */
 #define S8_RATE_GUARD_ESTIMATE_MARGIN 1.3f
 
+/* 2026-09-10 finding B (opus review): 1.3x was sized for "the identification
+ * is a fit against noisy captures, not ground truth" -- but the only plant
+ * this basis has real data for (docs/audits/cplval75_coupling_verdict_2026-
+ * 09-10.md) shows the coupling matrix under-predicting settled gain by a
+ * SYSTEMATIC 12/19/31% per row (z0/z1/z2), not symmetric noise. Dividing
+ * 1.3 by those deficits leaves effective margin of 1.16x/1.09x/0.99x -- z2,
+ * the coldest zone and the one this module actually picks on this board,
+ * has NO headroom left once the known deficit is backed out, before any
+ * allowance for further, still-unmeasured fit noise.
+ * DECISION: do not paper over this with a bigger multiplier chosen to make
+ * the arithmetic come out to 1.3x again -- a bigger number invented to
+ * cancel a specific, cited deficit is exactly the "looks principled, is
+ * not" failure this review exists to catch, and it does nothing for the
+ * *unmeasured* noise the margin is also supposed to cover. Instead:
+ * S8_RATE_GUARD_ESTIMATE_MARGIN (1.3x) is scoped to a basis whose
+ * provenance has actually been checked -- see coupling_provenance_ok below
+ * and this header's "PROVENANCE" section -- and a board whose coupling
+ * matrix fails that check (this bench, today) must not receive the coupled
+ * 1.3x treatment at all; it falls back to the wider, historical
+ * own-zone-only S8_RATE_GUARD_ESTIMATE_MARGIN_UNCOUPLED margin below. Once
+ * this plant's coupling matrix is re-identified and its per-row deficit is
+ * re-measured at (ideally) <5%, 1.3x is defensible again; until then this
+ * board should not auto-derive S8 from the coupled basis at all (see
+ * finding C and the module's overall verdict in the 2026-09-10 review). */
+
+/* Margin for the OWN-ZONE-ONLY basis (coupling_gain_sum treated as 0,
+ * whether because a genuinely single-zone board has nothing to couple from,
+ * or because coupling_provenance_ok is false and this module refuses to
+ * trust an unproven matrix -- see PROVENANCE below). This is the historical
+ * pre-2026-09-10 factor: unlike the coupled basis, this one is NOT "already
+ * the physical worst case" (a stuck relay on a multi-zone board still drives
+ * every OTHER zone's heater too, which this basis cannot see), so it keeps
+ * the larger, more conservative multiplier rather than 1.3x. Finding D
+ * (2026-09-10 review): the previous code applied 1.3x uniformly, including
+ * to boards with no usable coupling data, while claiming in a caller
+ * comment ("no worse than the previous own-zone-only basis") that the
+ * result was unchanged from the pre-coupling 2.0x version -- it was not
+ * (2.0x -> 1.3x is a 1.54x loosening on exactly the boards least equipped to
+ * detect a cross-zone runaway). This macro makes that claim true again. */
+#define S8_RATE_GUARD_ESTIMATE_MARGIN_UNCOUPLED 2.0f
+
+// PROVENANCE (2026-09-10 finding C): zone_coupling_solve.c's control path
+// (coupling_matrix_provenance_ok()) refuses a coupling matrix WHOLE, falling
+// back to the uncoupled per-zone basis, whenever it carries measured
+// off-diagonals but no member's coupling_diag_k_dc has ever been identified
+// on hardware (COUPLING_SOLVE_FALLBACK_MIXED_PROVENANCE) -- exactly this
+// bench's condition today. Before this fix, this module (a SAFETY threshold)
+// read the same zones_config_get_coupling() data raw, with no equivalent
+// check, deriving numbers from a matrix the control path deliberately will
+// not touch. That was backwards: a safety estimator should trust unproven
+// data LESS than a feedforward path, not fail to notice the same guard
+// exists. The caller now passes `coupling_provenance_ok`, computed with the
+// SAME rule coupling_matrix_provenance_ok() uses (mirrored, not shared,
+// since KilnFW's HTTP layer does not link zone_coupling_solve.c's static
+// helper); see s8_rate_guard_estimate.c for how it changes the margin used.
 typedef enum {
     /* Candidate derived directly from the identified plant, unclamped by
      * either bound -- the normal case on a commissioned, coupling-aware
-     * board. */
+     * board whose coupling matrix has also passed the provenance check
+     * above. */
     S8_RATE_GUARD_ESTIMATE_OK = 0,
     /* Derived candidate was below the floor and was raised to it -- the
      * caller/operator should know this number came from a bound, not from
@@ -211,15 +275,33 @@ typedef struct {
      * (which would UNDERSTATE the coupled basis) is treated the same as a
      * non-finite one -- see s8_rate_guard_estimate.c. */
     float coupling_gain_sum_c_per_duty;
+    /* 2026-09-10 addition (finding C, "PROVENANCE" above): true only if
+     * EITHER this board has no measured off-diagonal coupling at all (a
+     * genuinely single-zone board -- nothing to prove), OR every zone's
+     * coupling_diag_k_dc has been identified on hardware, mirroring
+     * coupling_matrix_provenance_ok()'s rule exactly. When false, this
+     * module ignores coupling_gain_sum_c_per_duty (treats it as 0 for the
+     * basis) and uses S8_RATE_GUARD_ESTIMATE_MARGIN_UNCOUPLED instead of
+     * S8_RATE_GUARD_ESTIMATE_MARGIN, regardless of what value the caller
+     * put in coupling_gain_sum_c_per_duty -- an unproven matrix must not
+     * receive the smaller, coupled-basis margin. */
+    bool coupling_provenance_ok;
 } s8_rate_guard_zone_input_t;
 
 /* Computes the auto-calc candidate. Picks the single VALID zone whose
  * fit_temp_c is LOWEST (see this header's top comment for the honest,
  * reduced strength of this "conservative" claim), computes that zone's
  * maximum achievable slope at full duty INCLUDING the other zones' coupled
- * contribution -- (k_dc + coupling_gain_sum_c_per_duty) / tau_s, converted
- * from degC/s to degC/min -- applies S8_RATE_GUARD_ESTIMATE_MARGIN, then
- * clamps to [S8_RATE_GUARD_ESTIMATE_FLOOR_C_PER_MIN, _CEILING_C_PER_MIN].
+ * contribution ONLY if that zone's coupling_provenance_ok is true -- (k_dc +
+ * coupling_gain_sum_c_per_duty) / tau_s, converted from degC/s to degC/min.
+ * Margin is S8_RATE_GUARD_ESTIMATE_MARGIN (1.3x) UNLESS this is a multi-zone
+ * board (zone_count > 1) whose coupling_provenance_ok is false, in which
+ * case coupling is ignored (basis is k_dc / tau_s alone) AND
+ * S8_RATE_GUARD_ESTIMATE_MARGIN_UNCOUPLED (2.0x) applies instead -- a
+ * genuinely single-zone board (zone_count == 1) has no other heater to be
+ * missing coupling protection against, so it keeps the ordinary 1.3x margin
+ * even with coupling_gain_sum_c_per_duty == 0. Then clamps to
+ * [S8_RATE_GUARD_ESTIMATE_FLOOR_C_PER_MIN, _CEILING_C_PER_MIN].
  *
  * Returns S8_RATE_GUARD_ESTIMATE_OK (unclamped), _OK_CLAMPED_FLOOR/_CEILING
  * (clamped -- see those enumerators' comments), with *out_c_per_min set in

@@ -451,3 +451,68 @@ path specifically -- both bounds are the SAME `[15, 60]` the estimator
 already clamps to, so that check cannot reject anything this module emits;
 it remains a real, useful bound on a hand-typed MANUAL value, which is a
 different claim than the one originally made.
+
+## 2026-09-10 addendum: the worked bench numbers above are wrong, and a
+## second review found four more defects
+
+The "37.9/36.2/28.9 C/min" figures above are **not this board's numbers**.
+`k=31.96/tau=166.9`, `23.48/129.1`, `21.74/114.8` are
+`tools/PcTools/config_presets/tuned_baseline_20260831.json` -- a preset
+file -- combined with the LIVE coupling sums (49.04/36.45/20.75), which is
+exactly the mixture that inflates the result. This board's own live
+`model_k_dc`/`model_tau_s`
+(`docs/audits/cplval75_coupling_verdict_2026-09-10.md`) are
+`39.2459/263.8`, `31.9669/269.8`, `31.6810/270.9`. Recomputed honestly:
+
+```
+z0: (39.2459+49.04)/263.8*60*1.3 = 26.10 C/min
+z1: (31.9669+36.45)/269.8*60*1.3 = 19.78 C/min
+z2: (31.6810+20.75)/270.9*60*1.3 = 15.10 C/min   <- 0.7% above the 15.0 floor
+```
+
+Not "comfortably inside [15, 60]" -- z2 is nearly clamped, on the exact zone
+this module picks (lowest fit_temp_c).
+
+That same 2026-09-10 review (`docs/audits/s8_rate_guard_review_2026-09-10.md`
+if present, else see `s8_rate_guard_estimate.h`'s inline comments, which are
+now the authoritative source) found four further defects, since fixed:
+
+- **The 1.3x margin has no headroom left.** The live coupling matrix
+  under-predicts settled gain by 12/19/31% per row
+  (`cplval75_coupling_verdict_2026-09-10.md`). Dividing 1.3 by those
+  deficits leaves 1.16x/1.09x/0.99x -- z2 has none. Rather than inventing a
+  bigger multiplier to paper over a cited, systematic deficit,
+  `S8_RATE_GUARD_ESTIMATE_MARGIN` (1.3x) is now scoped to a coupling basis
+  whose provenance has been checked (see next item); an unproven matrix
+  gets the wider `S8_RATE_GUARD_ESTIMATE_MARGIN_UNCOUPLED` (2.0x) instead.
+- **The estimator bypassed the provenance guard the control path already
+  enforces on this exact data.** `zone_coupling_solve.c`'s
+  `coupling_matrix_provenance_ok()` refuses this board's coupling matrix
+  whole (`COUPLING_SOLVE_FALLBACK_MIXED_PROVENANCE` -- all three
+  `coupling_diag_k_dc` are 0.0, never identified on hardware), so
+  feedforward never touches these numbers. `safety_cfg_http.c` now computes
+  the same board-wide provenance check and passes it through
+  `coupling_provenance_ok`; the coupled 1.3x basis is used only when it is
+  true.
+- **A coupling-less board was a net loosening, not a floor.** Zeroing
+  `coupling_gain_sum` while still applying 1.3x (down from the pre-coupling
+  2.0x) silently loosened such a board's threshold by 1.54x. Fixed by the
+  same provenance flag: no usable/proven coupling means the 2.0x
+  own-zone-only margin, matching the old behaviour for real this time.
+- **`OK_CLAMPED_FLOOR`/`_CEILING` were computed but never surfaced.**
+  Neither the GET nor POST JSON carried the distinction the header and this
+  document both claimed an operator could see. `/api/safety/rate_guard/auto`
+  now returns `"candidate_source":"plant"|"floor"|"ceiling"` in every
+  successful response.
+
+**Verdict: S8 should NOT be auto-derived from the coupled basis on this
+board today.** Its coupling matrix has never been identified on hardware
+(provenance check fails) and, even where measured, the matrix
+under-predicts real gain by up to 31% with no known noise floor on top of
+that bias. The estimator now falls back to the uncoupled, 2.0x-margin basis
+on this board rather than refusing outright, but that basis is itself only
+an own-zone k_dc/tau_s estimate with no cross-zone protection -- appropriate
+as a conservative fallback, not as a reason to trust the number blindly.
+Recommendation: leave S8 at its hand-set 20 C/min on this board until the
+coupling matrix is re-identified and its per-row deficit re-measured
+(ideally under ~5%); re-run this addendum's arithmetic once that lands.

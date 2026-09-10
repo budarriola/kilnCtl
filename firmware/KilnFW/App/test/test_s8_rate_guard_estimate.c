@@ -56,7 +56,7 @@ static void test_fit_temp_unknown_sentinel_rejected(void)
     // produce NO_DATA, not a candidate built from that zone's k_dc/tau_s.
     s8_rate_guard_zone_input_t sentinel_only[1] = {
         { .valid = true, .k_dc = 31.96f, .tau_s = 166.9f, .fit_temp_c = FIT_TEMP_UNKNOWN,
-          .coupling_gain_sum_c_per_duty = 0.0f },
+          .coupling_gain_sum_c_per_duty = 0.0f , .coupling_provenance_ok = true },
     };
     float out = -1.0f;
     s8_rate_guard_estimate_reason_t r = s8_rate_guard_estimate(sentinel_only, 1, &out);
@@ -72,9 +72,9 @@ static void test_fit_temp_unknown_sentinel_rejected(void)
     // for the real identification. The real zone must win instead.
     s8_rate_guard_zone_input_t mixed[2] = {
         { .valid = true, .k_dc = 999.0f, .tau_s = 1.0f, .fit_temp_c = FIT_TEMP_UNKNOWN,
-          .coupling_gain_sum_c_per_duty = 0.0f }, // would dominate catastrophically if it won
+          .coupling_gain_sum_c_per_duty = 0.0f , .coupling_provenance_ok = true }, // would dominate catastrophically if it won
         { .valid = true, .k_dc = 10.0f, .tau_s = 60.0f, .fit_temp_c = 40.0f,
-          .coupling_gain_sum_c_per_duty = 0.0f }, // -> 10.0 C/min unclamped * 1.3 margin = 13.0 -> floor
+          .coupling_gain_sum_c_per_duty = 0.0f , .coupling_provenance_ok = true }, // -> 10.0 C/min unclamped * 1.3 margin = 13.0 -> floor
     };
     out = -1.0f;
     r = s8_rate_guard_estimate(mixed, 2, &out);
@@ -107,7 +107,7 @@ static void test_basic_derivation_and_margin(void)
     // below the floor, so the floor must win.
     s8_rate_guard_zone_input_t zones[1] = {
         { .valid = true, .k_dc = 38.0f, .tau_s = 1200.0f, .fit_temp_c = 40.0f,
-          .coupling_gain_sum_c_per_duty = 0.0f },
+          .coupling_gain_sum_c_per_duty = 0.0f , .coupling_provenance_ok = true },
     };
     float out = 0.0f;
     s8_rate_guard_estimate_reason_t r = s8_rate_guard_estimate(zones, 1, &out);
@@ -165,7 +165,7 @@ static void test_coupling_gain_is_included_in_basis(void)
     // full duty) rather than an artifact of ignoring coupling.
     s8_rate_guard_zone_input_t zones[1] = {
         { .valid = true, .k_dc = 31.96f, .tau_s = 166.9f, .fit_temp_c = 40.0f,
-          .coupling_gain_sum_c_per_duty = 49.04f },
+          .coupling_gain_sum_c_per_duty = 49.04f , .coupling_provenance_ok = true },
     };
     float out = 0.0f;
     s8_rate_guard_estimate_reason_t r = s8_rate_guard_estimate(zones, 1, &out);
@@ -190,7 +190,7 @@ static void test_coupling_gain_is_included_in_basis(void)
     // a non-finite k_dc/tau_s/fit_temp_c.
     s8_rate_guard_zone_input_t negative_coupling[1] = {
         { .valid = true, .k_dc = 20.0f, .tau_s = 60.0f, .fit_temp_c = 40.0f,
-          .coupling_gain_sum_c_per_duty = -5.0f },
+          .coupling_gain_sum_c_per_duty = -5.0f , .coupling_provenance_ok = true },
     };
     out = -1.0f;
     r = s8_rate_guard_estimate(negative_coupling, 1, &out);
@@ -201,12 +201,70 @@ static void test_coupling_gain_is_included_in_basis(void)
     // NaN coupling_gain_sum_c_per_duty must also be rejected.
     s8_rate_guard_zone_input_t nan_coupling[1] = {
         { .valid = true, .k_dc = 20.0f, .tau_s = 60.0f, .fit_temp_c = 40.0f,
-          .coupling_gain_sum_c_per_duty = NAN },
+          .coupling_gain_sum_c_per_duty = NAN , .coupling_provenance_ok = true },
     };
     out = -1.0f;
     r = s8_rate_guard_estimate(nan_coupling, 1, &out);
     TEST_CHECK(r == S8_RATE_GUARD_ESTIMATE_NO_DATA,
                "a NaN coupling_gain_sum_c_per_duty is rejected outright");
+}
+
+static void test_unproven_coupling_uses_wider_uncoupled_margin(void)
+{
+    TEST_SECTION("finding C/D (2026-09-10 review): on a MULTI-zone board, "
+                 "coupling_provenance_ok == false must ignore the coupling contribution AND use "
+                 "the wider S8_RATE_GUARD_ESTIMATE_MARGIN_UNCOUPLED (2.0x), not the 1.3x coupled "
+                 "margin -- but a genuinely single-zone board keeps the ordinary 1.3x margin, "
+                 "since it has no other heater to be missing coupling protection against");
+
+    // A 3-zone board (zone_count == 3, matching MAX31856_CHANNEL_COUNT on
+    // real hardware) whose coupling matrix is unproven -- mirrors this
+    // bench: coupling_diag_k_dc == 0.0 on every zone, so zone_coupling_
+    // solve.c's coupling_matrix_provenance_ok() refuses the matrix whole.
+    // Zone 0 is the coldest (wins selection) with the same k_dc/tau/
+    // coupling_sum as test_coupling_gain_is_included_in_basis (31.96/166.9/
+    // 49.04), but coupling_provenance_ok = false. Coupling must be ignored
+    // entirely: own-only slope = 31.96/166.9*60 = 11.49 C/min, *2.0
+    // uncoupled margin = 22.98 -- inside [15,60], unclamped. If the
+    // coupling sum were used with the coupled 1.3x margin instead, this
+    // would be 37.87 (that OTHER test's own expected value) -- a very
+    // different, and here WRONG, number for an unproven matrix.
+    s8_rate_guard_zone_input_t multi_unproven[3] = {
+        { .valid = true, .k_dc = 31.96f, .tau_s = 166.9f, .fit_temp_c = 40.0f,
+          .coupling_gain_sum_c_per_duty = 49.04f, .coupling_provenance_ok = false },
+        { .valid = true, .k_dc = 23.48f, .tau_s = 129.1f, .fit_temp_c = 60.0f,
+          .coupling_gain_sum_c_per_duty = 36.45f, .coupling_provenance_ok = false }, // hotter, loses selection
+        { .valid = true, .k_dc = 21.74f, .tau_s = 114.8f, .fit_temp_c = 70.0f,
+          .coupling_gain_sum_c_per_duty = 20.75f, .coupling_provenance_ok = false }, // hotter, loses selection
+    };
+    float out = 0.0f;
+    s8_rate_guard_estimate_reason_t r = s8_rate_guard_estimate(multi_unproven, 3, &out);
+    TEST_CHECK(r == S8_RATE_GUARD_ESTIMATE_OK, "multi-zone unproven-coupling candidate lands unclamped");
+    TEST_CHECK(fabsf(out - 22.98f) < 0.05f,
+               "candidate uses zone 0's k_dc alone (coupling ignored because the board's coupling "
+               "provenance is unproven) times the 2.0x UNCOUPLED margin, not the 49.04 coupling sum "
+               "times 1.3x -- proves this is not merely a bigger multiplier applied to the same "
+               "(wrong) basis, and that zone_count (not just the winning zone's own flag) gates it");
+
+    // A GENUINELY single-zone board (zone_count == 1, zero coupling,
+    // provenance trivially ok since there is nothing to prove) must keep
+    // the ORDINARY 1.3x margin -- there is no other heater on the board to
+    // be missing coupling protection against, so the wider margin's whole
+    // rationale does not apply. Reproduces test_basic_derivation_and_
+    // margin's floor-clamp case exactly (11.49*1.3 = 14.9, below the 15.0
+    // floor).
+    s8_rate_guard_zone_input_t single_zone[1] = {
+        { .valid = true, .k_dc = 31.96f, .tau_s = 166.9f, .fit_temp_c = 40.0f,
+          .coupling_gain_sum_c_per_duty = 0.0f, .coupling_provenance_ok = true },
+    };
+    out = 0.0f;
+    r = s8_rate_guard_estimate(single_zone, 1, &out);
+    TEST_CHECK(r == S8_RATE_GUARD_ESTIMATE_OK_CLAMPED_FLOOR,
+               "a genuinely single-zone board (zone_count==1) still uses the 1.3x margin, not 2.0x "
+               "-- 11.49*1.3=14.9 is below the floor and must clamp up to it, not land at "
+               "11.49*2.0=22.98 unclamped");
+    TEST_CHECK(fabsf(out - S8_RATE_GUARD_ESTIMATE_FLOOR_C_PER_MIN) < 1e-4f,
+               "clamped to the floor, proving the single-zone case did NOT receive the wider margin");
 }
 
 static void test_picks_lowest_fit_temp_across_zones(void)
@@ -221,9 +279,9 @@ static void test_picks_lowest_fit_temp_across_zones(void)
     // above). Coldest -- zone 1 -- must be the one used.
     s8_rate_guard_zone_input_t zones[2] = {
         { .valid = true, .k_dc = 100.0f, .tau_s = 10.0f, .fit_temp_c = 900.0f,
-          .coupling_gain_sum_c_per_duty = 0.0f }, // would clamp to ceiling
+          .coupling_gain_sum_c_per_duty = 0.0f , .coupling_provenance_ok = true }, // would clamp to ceiling
         { .valid = true, .k_dc = 20.0f, .tau_s = 60.0f, .fit_temp_c = 40.0f,
-          .coupling_gain_sum_c_per_duty = 0.0f }, // -> 26.0 C/min unclamped
+          .coupling_gain_sum_c_per_duty = 0.0f , .coupling_provenance_ok = true }, // -> 26.0 C/min unclamped
     };
     float out = 0.0f;
     s8_rate_guard_estimate_reason_t r = s8_rate_guard_estimate(zones, 2, &out);
@@ -251,11 +309,11 @@ static void test_invalid_entries_are_skipped(void)
     // coverage below for that separate case).
     s8_rate_guard_zone_input_t zones[3] = {
         { .valid = false, .k_dc = 10.0f, .tau_s = 60.0f, .fit_temp_c = 20.0f,
-          .coupling_gain_sum_c_per_duty = 0.0f },  // skipped: not valid
+          .coupling_gain_sum_c_per_duty = 0.0f , .coupling_provenance_ok = true },  // skipped: not valid
         { .valid = true, .k_dc = 0.0f, .tau_s = 60.0f, .fit_temp_c = 20.0f,
-          .coupling_gain_sum_c_per_duty = 0.0f },  // skipped: k_dc <= 0
+          .coupling_gain_sum_c_per_duty = 0.0f , .coupling_provenance_ok = true },  // skipped: k_dc <= 0
         { .valid = true, .k_dc = 20.0f, .tau_s = 60.0f, .fit_temp_c = 500.0f,
-          .coupling_gain_sum_c_per_duty = 0.0f },  // the only real candidate -> 26.0 C/min
+          .coupling_gain_sum_c_per_duty = 0.0f , .coupling_provenance_ok = true },  // the only real candidate -> 26.0 C/min
     };
     float out = 0.0f;
     s8_rate_guard_estimate_reason_t r = s8_rate_guard_estimate(zones, 3, &out);
@@ -266,11 +324,11 @@ static void test_invalid_entries_are_skipped(void)
     // it (documented, defensive) -- confirm a candidate placed AFTER that
     // bound is correctly never seen.
     s8_rate_guard_zone_input_t zones_oob[4] = {
-        { .valid = false, .k_dc = 0.0f, .tau_s = 0.0f, .fit_temp_c = 0.0f, .coupling_gain_sum_c_per_duty = 0.0f },
-        { .valid = false, .k_dc = 0.0f, .tau_s = 0.0f, .fit_temp_c = 0.0f, .coupling_gain_sum_c_per_duty = 0.0f },
-        { .valid = false, .k_dc = 0.0f, .tau_s = 0.0f, .fit_temp_c = 0.0f, .coupling_gain_sum_c_per_duty = 0.0f },
+        { .valid = false, .k_dc = 0.0f, .tau_s = 0.0f, .fit_temp_c = 0.0f, .coupling_gain_sum_c_per_duty = 0.0f , .coupling_provenance_ok = true },
+        { .valid = false, .k_dc = 0.0f, .tau_s = 0.0f, .fit_temp_c = 0.0f, .coupling_gain_sum_c_per_duty = 0.0f , .coupling_provenance_ok = true },
+        { .valid = false, .k_dc = 0.0f, .tau_s = 0.0f, .fit_temp_c = 0.0f, .coupling_gain_sum_c_per_duty = 0.0f , .coupling_provenance_ok = true },
         { .valid = true, .k_dc = 20.0f, .tau_s = 60.0f, .fit_temp_c = 500.0f,
-          .coupling_gain_sum_c_per_duty = 0.0f }, // beyond the clamp
+          .coupling_gain_sum_c_per_duty = 0.0f , .coupling_provenance_ok = true }, // beyond the clamp
     };
     out = -1.0f;
     r = s8_rate_guard_estimate(zones_oob, 4, &out);
@@ -281,9 +339,9 @@ static void test_invalid_entries_are_skipped(void)
     // NaN k_dc / tau_s / fit_temp_c must each independently be skipped, same
     // as the <=0 cases above -- proves this isn't just a sign check.
     s8_rate_guard_zone_input_t nan_zones[3] = {
-        { .valid = true, .k_dc = NAN, .tau_s = 60.0f, .fit_temp_c = 20.0f, .coupling_gain_sum_c_per_duty = 0.0f },
-        { .valid = true, .k_dc = 10.0f, .tau_s = NAN, .fit_temp_c = 20.0f, .coupling_gain_sum_c_per_duty = 0.0f },
-        { .valid = true, .k_dc = 10.0f, .tau_s = 60.0f, .fit_temp_c = NAN, .coupling_gain_sum_c_per_duty = 0.0f },
+        { .valid = true, .k_dc = NAN, .tau_s = 60.0f, .fit_temp_c = 20.0f, .coupling_gain_sum_c_per_duty = 0.0f , .coupling_provenance_ok = true },
+        { .valid = true, .k_dc = 10.0f, .tau_s = NAN, .fit_temp_c = 20.0f, .coupling_gain_sum_c_per_duty = 0.0f , .coupling_provenance_ok = true },
+        { .valid = true, .k_dc = 10.0f, .tau_s = 60.0f, .fit_temp_c = NAN, .coupling_gain_sum_c_per_duty = 0.0f , .coupling_provenance_ok = true },
     };
     out = -1.0f;
     r = s8_rate_guard_estimate(nan_zones, 3, &out);
@@ -330,6 +388,7 @@ int main(void)
     test_fit_temp_unknown_sentinel_rejected();
     test_basic_derivation_and_margin();
     test_coupling_gain_is_included_in_basis();
+    test_unproven_coupling_uses_wider_uncoupled_margin();
     test_picks_lowest_fit_temp_across_zones();
     test_invalid_entries_are_skipped();
     test_auto_decide_policy();
