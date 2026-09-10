@@ -361,6 +361,62 @@ bool safety_cfg_store_set_ct_cal_input(size_t ch, float a_fs, float zero_mv,
                                         safety_ct_cal_source_t source, float *out_k_ct_v_per_a,
                                         uint16_t *out_zero_counts, esp_err_t *out_nvs_err);
 
+/* ---------------------------------------------------------------------- */
+/* S8 rate-guard (max_rate_c_per_min, 0x0204) write provenance --
+ * docs/audits/s8_auto_calc_design_2026-09-09.md "Part 3". ESP-local, never
+ * fetched from the Pico -- same "not one of the Pico-fetched answers"
+ * reasoning as the CT calibration-input record above: the wire value itself
+ * (0x0204) is unchanged and unaware of this, this cache only remembers WHO
+ * last wrote it, so the commissioning page can render "auto-derived from
+ * zone N's identification" vs. "hand-entered" and an operator overriding an
+ * auto value is never confused about which one they are replacing. */
+
+/* MANUAL always wins in the sense that s8_rate_guard_estimate.c's write
+ * path never overwrites a value without going through the tighten/loosen
+ * policy in s8_rate_guard_auto_decide() regardless of the CURRENT source --
+ * unlike CT calibration's SWEEP, an AUTO candidate is allowed to tighten a
+ * MANUAL value (the safety-relevant question is direction, not who wrote
+ * the number it is replacing). This enum exists purely for UI provenance,
+ * not to gate writes -- see s8_rate_guard_estimate.h's s8_rate_guard_auto_
+ * decide() for the actual gate. */
+typedef enum {
+    SAFETY_RATE_GUARD_SOURCE_MANUAL = 0,
+    SAFETY_RATE_GUARD_SOURCE_AUTO = 1,
+} safety_rate_guard_source_t;
+
+/* Reports the last-written value's provenance and the value itself, as this
+ * ESP-local record remembers it (NOT a live read of the Pico's actual
+ * 0x0204 -- that is safety_cfg_store_get_by_index()'s job; the two can
+ * drift apart if this record was cleared, e.g. by a bench preset re-arming
+ * the guard to 0.0 outside this module, and safety_cfg_http.c's GET handler
+ * is expected to report both rather than let one silently stand in for the
+ * other). Returns false (outputs untouched) if nothing has ever been
+ * recorded (fresh board, or explicitly cleared). */
+bool safety_cfg_store_get_rate_guard_meta(safety_rate_guard_source_t *out_source, float *out_value,
+                                           bool *out_has_value);
+
+/* Records that `value` was just written to 0x0204 by `source`. Does NOT
+ * itself talk to the Pico -- callers (safety_cfg_http.c's commissioning POST
+ * handler for MANUAL, and its rate-guard auto-apply endpoint for AUTO) call
+ * this only AFTER confirm_commit_landed()-equivalent verification that the
+ * write actually landed, same ordering discipline as safety_cfg_store_set_
+ * ct_cal_input()'s 2026-09-06 audit-fixed caller. `out_nvs_err` (optional)
+ * reports the NVS write's own esp_err_t, same "logging unchecked success"
+ * fix as the sibling setters above -- a failed persist here is a lost UI
+ * label, not a lost safety value (the Pico's flash write already
+ * succeeded), so it never changes this function's own true/false return,
+ * only out_nvs_err. */
+bool safety_cfg_store_set_rate_guard_meta(safety_rate_guard_source_t source, float value,
+                                           esp_err_t *out_nvs_err);
+
+/* Clears the provenance record (has_value -> false) without touching 0x0204
+ * itself -- used when something OTHER than the tagged write paths above
+ * changes the Pico's value out from under this record (bench_preset_post_
+ * handler resetting max_rate_c_per_min to 0.0/dormant is the one caller
+ * today), so the commissioning page never keeps showing a stale "auto-
+ * derived"/"hand-entered" label for a value that preset just replaced. */
+void safety_cfg_store_clear_rate_guard_meta(void);
+
 #ifdef __cplusplus
 }
 #endif

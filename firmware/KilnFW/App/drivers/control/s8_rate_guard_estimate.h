@@ -119,6 +119,55 @@ typedef struct {
 s8_rate_guard_estimate_reason_t s8_rate_guard_estimate(const s8_rate_guard_zone_input_t *zones,
                                                         uint8_t zone_count, float *out_c_per_min);
 
+/* WRITE POLICY (docs/audits/s8_auto_calc_design_2026-09-09.md's "Part 3 --
+ * the write path" section has the full writeup; this is the short version
+ * next to the function it governs).
+ *
+ * Chose "tighten-auto-apply, loosen-requires-confirm" over the two pure
+ * options the design doc's Part 2 left open:
+ *   - Pure auto-apply (every re-identification silently overwrites the Pico's
+ *     armed threshold) was rejected: a bad identification -- corrupted
+ *     model_k_dc/tau_s, or a fit run at an unrepresentative operating point --
+ *     could silently RAISE the threshold, i.e. reduce protection, with no
+ *     operator ever looking at the new number. "Autocalculate for real
+ *     kilns" does not mean "never let a human notice the guard moved
+ *     the wrong way."
+ *   - Pure suggest-and-confirm (every candidate, tighter or looser, waits
+ *     for an operator click) was rejected too: it reproduces exactly the
+ *     staleness problem that motivated this feature -- a guard that sits at
+ *     its old, possibly-wrong number until someone remembers to go confirm
+ *     it, which is the "hand-entered number is the wrong design long-term"
+ *     complaint restated.
+ *   - The middle path implemented here auto-applies only the direction that
+ *     can never make the guard less safe (tightening, or arming a dormant
+ *     guard for the first time) and requires an explicit confirm for the
+ *     one direction that can (loosening an already-armed guard). This is
+ *     genuinely fail-safe, not merely appealing: the two decisions are not
+ *     symmetric risks being averaged, they are a safety-relevant one
+ *     (loosen) and a safety-neutral-or-positive one (tighten) with
+ *     deliberately different handling.
+ *
+ * `current_is_set` false (guard currently DORMANT, max_rate_c_per_min == 0 /
+ * never commissioned, safety_guards.c's own "0 disables the check" contract)
+ * always returns APPLY: an unset guard enforces no ceiling at all -- moving
+ * from "no ceiling" to any finite one, however derived, cannot be a
+ * loosening. When `current_is_set` is true and `candidate_c_per_min` is
+ * greater than `current_c_per_min`, this ALWAYS returns SUGGEST_ONLY -- the
+ * caller (the HTTP write path, not this pure function) must never write that
+ * candidate without a separate, explicit operator confirmation, and must
+ * still read back and verify whatever it does eventually write (see
+ * s8_rate_guard_estimate.c's own "never write anything itself" note above --
+ * that remains true of this function too; it only classifies, it never
+ * calls into safety_link). */
+typedef enum {
+    S8_RATE_GUARD_AUTO_APPLY = 0,    /* tightens, ties, or arms a dormant guard -- safe to write immediately */
+    S8_RATE_GUARD_AUTO_SUGGEST_ONLY, /* would LOOSEN an armed guard -- must not be written without an
+                                       * explicit operator confirm */
+} s8_rate_guard_auto_decision_t;
+
+s8_rate_guard_auto_decision_t s8_rate_guard_auto_decide(float candidate_c_per_min, float current_c_per_min,
+                                                         bool current_is_set);
+
 #ifdef __cplusplus
 }
 #endif

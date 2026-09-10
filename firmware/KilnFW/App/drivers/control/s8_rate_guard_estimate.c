@@ -78,3 +78,17 @@ s8_rate_guard_estimate_reason_t s8_rate_guard_estimate(const s8_rate_guard_zone_
     *out_c_per_min = candidate;
     return S8_RATE_GUARD_ESTIMATE_OK;
 }
+
+s8_rate_guard_auto_decision_t s8_rate_guard_auto_decide(float candidate_c_per_min, float current_c_per_min,
+                                                         bool current_is_set)
+{
+    // Arming a dormant guard is never a loosening -- see this function's
+    // header comment for the full policy writeup.
+    if (!current_is_set) {
+        return S8_RATE_GUARD_AUTO_APPLY;
+    }
+    if (candidate_c_per_min <= current_c_per_min) {
+        return S8_RATE_GUARD_AUTO_APPLY;
+    }
+    return S8_RATE_GUARD_AUTO_SUGGEST_ONLY;
+}

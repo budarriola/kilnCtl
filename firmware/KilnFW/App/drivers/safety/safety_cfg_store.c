@@ -64,12 +64,21 @@ NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
 #define NVS_KEY_SAFETY_CT_CAL "safetyctcal"
 #define SAFETY_CT_CAL_BLOB_VERSION 1u
 
+/* S8 rate-guard write provenance (docs/audits/s8_auto_calc_design_2026-09-
+ * 09.md "Part 3") -- own key/version, same "not one of the Pico-fetched
+ * answers" reasoning as the two blobs above. "safetyrateg" is 11
+ * characters, inside the 15-char NVS key limit, checked below like the
+ * others. */
+#define NVS_KEY_SAFETY_RATE_GUARD "safetyrateg"
+#define SAFETY_RATE_GUARD_META_BLOB_VERSION 1u
+
 /* Compile-time guard -- macro now shared via nvs_key_check.h (see that
  * header) so every module with NVS key literals gets the identical check;
  * this file used to define NVS_KEY_LEN_CHECK locally. */
 NVS_KEY_LEN_CHECK(NVS_KEY_SAFETY_CFG);
 NVS_KEY_LEN_CHECK(NVS_KEY_SAFETY_RELAY);
 NVS_KEY_LEN_CHECK(NVS_KEY_SAFETY_CT_CAL);
+NVS_KEY_LEN_CHECK(NVS_KEY_SAFETY_RATE_GUARD);
 
 typedef struct {
     uint8_t version;
@@ -92,6 +101,18 @@ typedef struct {
 } safety_ct_cal_blob_t;
 
 static safety_ct_cal_blob_t s_ct_cal;
+
+/* S8 rate-guard write provenance -- who last wrote max_rate_c_per_min
+ * (0x0204) and what value they wrote, per safety_cfg_store.h's own doc
+ * comment on safety_rate_guard_source_t. */
+typedef struct {
+    uint8_t version;
+    uint8_t has_value; /* 0/1 -- never recorded (or explicitly cleared) means "unknown provenance" */
+    uint8_t source;    /* safety_rate_guard_source_t */
+    float value;
+} safety_rate_guard_meta_blob_t;
+
+static safety_rate_guard_meta_blob_t s_rate_guard_meta;
 
 /* Bump whenever safety_cfg_store_blob_t's on-flash layout changes -- mirrors
  * ZONES_CFG_VERSION/KILN_CFG_STORE_VERSION's role in their own files.
@@ -775,6 +796,113 @@ bool safety_ct_cal_convert(float a_fs, float zero_mv, float gain, float *out_k_c
     return true;
 }
 
+/* ---------------------------------------------------------------------- */
+/* S8 rate-guard write provenance                                         */
+/* ---------------------------------------------------------------------- */
+
+static void reset_rate_guard_meta_to_defaults(void)
+{
+    memset(&s_rate_guard_meta, 0, sizeof(s_rate_guard_meta));
+    s_rate_guard_meta.version = SAFETY_RATE_GUARD_META_BLOB_VERSION;
+}
+
+/* Same current/migrate(none-yet)/refuse discipline as load_ct_cal(). */
+static void load_rate_guard_meta(void)
+{
+    reset_rate_guard_meta_to_defaults();
+
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return;
+    }
+    safety_rate_guard_meta_blob_t loaded;
+    size_t len = sizeof(loaded);
+    err = hal_kv_get_blob(&h, NVS_KEY_SAFETY_RATE_GUARD, &loaded, &len);
+    hal_kv_close(&h);
+    if (err != HAL_OK || len != sizeof(loaded)) {
+        return;
+    }
+    if (loaded.version != SAFETY_RATE_GUARD_META_BLOB_VERSION) {
+        ESP_LOGW(TAG, "safety rate-guard provenance blob is version %u, this build knows only %u -- "
+                      "resetting to defaults",
+                 (unsigned)loaded.version, (unsigned)SAFETY_RATE_GUARD_META_BLOB_VERSION);
+        return;
+    }
+    s_rate_guard_meta = loaded;
+}
+
+/* Same "httpd-worker-only caller" discipline as save_ct_cal(). */
+static esp_err_t save_rate_guard_meta(void)
+{
+    if (caller_stack_is_external()) {
+        ESP_LOGE(TAG, "save_rate_guard_meta: REFUSING -- calling task's stack is in external RAM "
+                      "(PSRAM). A flash/NVS write from here would abort the whole board -- see "
+                      "caller_stack_is_external()'s comment.");
+        return ESP_ERR_INVALID_STATE;
+    }
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return hal_status_to_esp_err(err);
+    }
+    s_rate_guard_meta.version = SAFETY_RATE_GUARD_META_BLOB_VERSION;
+    err = hal_kv_set_blob(&h, NVS_KEY_SAFETY_RATE_GUARD, &s_rate_guard_meta, sizeof(s_rate_guard_meta));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
+    }
+    hal_kv_close(&h);
+    return hal_status_to_esp_err(err);
+}
+
+bool safety_cfg_store_get_rate_guard_meta(safety_rate_guard_source_t *out_source, float *out_value,
+                                           bool *out_has_value)
+{
+    if (out_has_value) {
+        *out_has_value = s_rate_guard_meta.has_value != 0;
+    }
+    if (!s_rate_guard_meta.has_value) {
+        return false;
+    }
+    if (out_source) {
+        *out_source = (safety_rate_guard_source_t)s_rate_guard_meta.source;
+    }
+    if (out_value) {
+        *out_value = s_rate_guard_meta.value;
+    }
+    return true;
+}
+
+bool safety_cfg_store_set_rate_guard_meta(safety_rate_guard_source_t source, float value,
+                                           esp_err_t *out_nvs_err)
+{
+    if (out_nvs_err) {
+        *out_nvs_err = ESP_OK;
+    }
+    s_rate_guard_meta.has_value = 1;
+    s_rate_guard_meta.source = (uint8_t)source;
+    s_rate_guard_meta.value = value;
+    esp_err_t err = save_rate_guard_meta();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "safety_cfg_store_set_rate_guard_meta: NVS write failed (%s) -- provenance "
+                      "label applied live but will not survive a reboot",
+                 esp_err_to_name(err));
+    }
+    if (out_nvs_err) {
+        *out_nvs_err = err;
+    }
+    return true;
+}
+
+void safety_cfg_store_clear_rate_guard_meta(void)
+{
+    reset_rate_guard_meta_to_defaults();
+    esp_err_t err = save_rate_guard_meta();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "safety_cfg_store_clear_rate_guard_meta: NVS write failed (%s)", esp_err_to_name(err));
+    }
+}
+
 static int index_for_id(uint16_t id); /* defined below -- forward declared for ct_cal_channel_gain() */
 
 static float ct_cal_channel_gain(size_t ch)
@@ -913,6 +1041,8 @@ esp_err_t safety_cfg_store_init(void)
      * inputs and their source markers, same "every boot, not only after a
      * fresh POST" reasoning as the relay type just above. */
     load_ct_cal();
+    /* S8 rate-guard write provenance -- same "every boot" reasoning. */
+    load_rate_guard_meta();
     /* 2026-08-27 audit fix (defect c): this used to stamp s_fetched_at_us =
      * hal_time_now_us() here whenever the loaded blob's config_crc != 0
      * ("a load from NVS counts as fetched"). That was a DIFFERENT and worse

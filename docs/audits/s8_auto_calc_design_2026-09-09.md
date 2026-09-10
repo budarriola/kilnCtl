@@ -155,35 +155,145 @@ an incorrect-but-bounded threshold -- exactly the same trust boundary every
 other Pico guard threshold pushed from `zones_config` already has (e.g.
 `abs_max_temp_c`), not a new one this feature introduces.
 
-`s8_rate_guard_estimate()` **never writes anything itself** -- it is a pure
-function returning a suggested value. Wiring it to an actual
-`safety_set_rate_guard()` call (an HTTP endpoint or MCP tool that reads
-zones_config, calls this function, and either auto-applies or presents the
-suggestion for confirmation) is explicit future work, deliberately not done
-in this pass: it is additive (uses the existing 0x0204 wire field, no
-protocol/schema change) but is exactly the kind of new write-path this
-task's instructions say to flag rather than build unreviewed. **Stopping
-here on this specific piece and reporting it, rather than wiring a live
-auto-push, is a deliberate choice for the owner to weigh: auto-apply on
-every commissioning/autotune completion, vs. compute-and-suggest requiring
-an explicit confirm identical to today's manual path.**
+`s8_rate_guard_estimate()` itself still **never writes anything** -- it
+remains a pure function returning a suggested value. Part 3 below (2026-09-
+10) is the follow-up pass this section originally deferred: the write path
+is now built.
+
+### Part 3 -- the write path (2026-09-10)
+
+**Chosen policy: tighten-auto-apply, loosen-requires-confirm** -- the
+middle path this section's Part 2 draft left open, not either pure option.
+
+- **Pure auto-apply** (every re-identification silently overwrites the
+  Pico's armed threshold) was rejected: a bad identification -- corrupted
+  `model_k_dc`/`tau_s`, or a fit run at an unrepresentative operating point
+  -- could silently RAISE the threshold, i.e. reduce protection, with no
+  operator ever looking at the new number. "Autocalculate for real kilns"
+  does not mean "never let a human notice the guard moved the wrong way."
+- **Pure suggest-and-confirm** (every candidate, tighter or looser, waits
+  for an operator click) was rejected too: it reproduces the exact
+  staleness problem that motivated this feature -- a guard sitting at its
+  old, possibly-wrong number until someone remembers to confirm it, which
+  is the "hand-entered number is the wrong design long-term" complaint
+  restated, not answered.
+- The implemented middle path auto-applies only the direction that can
+  never make the guard less safe (tightening, or arming a dormant guard --
+  `max_rate_c_per_min == 0` -- for the first time, since "no ceiling" is
+  never tighter than any finite one) and requires an explicit operator
+  confirm for the one direction that can reduce protection (loosening an
+  already-armed guard). This is a genuinely fail-safe split, not two risks
+  averaged: tightening is safety-neutral-or-positive, loosening is the one
+  safety-relevant case, and the two get deliberately different handling.
+  **Never loosen silently** is enforced structurally, not by convention:
+  `s8_rate_guard_auto_decide()` (`s8_rate_guard_estimate.h/.c`) is a pure
+  policy function returning `S8_RATE_GUARD_AUTO_SUGGEST_ONLY` whenever
+  `candidate > current` against an armed guard, and the only caller that
+  can turn a `SUGGEST_ONLY` into an actual write
+  (`rate_guard_auto_post_handler`, `safety_cfg_http.c`) requires the
+  request body to carry `confirm=1` -- there is no code path from a
+  looser candidate to a Pico write without that explicit flag.
+
+**Read-back and verify, every write.** The auto-apply endpoint (`POST
+/api/safety/rate_guard/auto`, `GET` for a write-free preview) reuses
+`apply_pairs()` with `commit=true`, the SAME function every other
+commissioning write on this page uses -- including its
+`confirm_commit_landed()` live read-back that this codebase's own
+commissioning-write audit added specifically because "ACKed and not
+rejected" is not proof a write landed. The provenance record (below) is
+only tagged AFTER `apply_pairs()` reports success, i.e. after that
+read-back already confirmed the Pico's 0x0204 now holds exactly the
+candidate value -- never optimistically, before verification.
+
+**Operator override survives, and is now visibly distinguishable.**
+`safety_cfg_store_get/set/clear_rate_guard_meta()` (`safety_cfg_store.h/.c`)
+add an ESP-local (never sent to the Pico -- same "not one of the Pico-
+fetched answers" reasoning as the CT-calibration-input and safety-relay-type
+records that already live in this same store) provenance record: who last
+wrote 0x0204 (`SAFETY_RATE_GUARD_SOURCE_MANUAL`/`_AUTO`) and what value.
+`commissioning_post_handler`'s existing generic id=/value= write path (how
+an operator hand-enters `max_rate_c_per_min` today) tags MANUAL on a
+committed write of 0x0204; the new auto-apply endpoint tags AUTO, only
+after its own verified write. `GET /api/safety/commissioning`'s JSON now
+carries a `rate_guard_provenance` object (`has_value`, and when true,
+`source`/`value`) so the commissioning page can render "auto-derived" vs.
+"hand-entered" and an operator overriding a value they never asked to be
+auto-derived is not surprised by it changing under them. `bench_preset_post_
+handler` (which resets 0x0204 to its dormant 0.0 default) clears this
+record, since neither label is true of a value the bench preset just
+replaced.
+
+**Never make the Pico's guard tighter than the ESP's equivalent -- reverified
+here, not just cited.** Re-checked directly (not taken on trust from Part 1):
+`grep -rn sanity_rate_c_per_min firmware/KilnFW/App` still shows only
+`zones_config_json.h`'s "direction/rate sanity threshold" field comment and
+`test_zones_http.c`'s "guard 1's MINIMUM rise rate, the dead-element check"
+-- a zone heating too SLOWLY trips it, not one heating too fast. There is no
+ESP-side *maximum*-rate ceiling for S8's `max_rate_c_per_min` to be compared
+against or made looser than; the constraint from the task brief does not
+bind here, exactly as Part 1 already concluded and this pass's own grep
+confirms independently. The Pico's own `CONFIG_STORE_MAX_RATE_C_PER_MIN_
+FLOOR`/`_CEILING` range check (`config_params.c`) is untouched by this pass
+and remains the sole, independent backstop against an absurd value from
+either a hand-entered or auto-derived write -- this write path does not
+bypass it, and does not need to: it writes through the same 0x0204 SET_
+PARAM/COMMIT_CONFIG path the Pico already range-checks unconditionally.
+
+**Validation is unchanged from Part 2, because this pass changes no
+numbers.** The write path calls the SAME `s8_rate_guard_estimate()` with the
+same `S8_RATE_GUARD_ESTIMATE_MARGIN`/floor/ceiling Part 2 already validated
+against all 65 `logs/coupling/*.jsonl` captures (0/65 trip at 15.0, 20.0, or
+60.0 C/min, reproducing this firmware's own baseline-sample-and-hold 60s-
+window estimator plus its 2-consecutive-window debounce) -- this pass adds
+the mechanism that writes a candidate, not a new candidate-generation
+formula, so that validation carries forward unchanged rather than needing
+to be redone. The simulation-harness cross-check at high temperature
+Part 2 flagged as follow-up validation was **still not run** in this pass
+either -- genuinely open, not silently dropped: exercising
+`sim_plant_from_zone_cfg()`/relay-lag/quantization at a temperature this
+bench cannot physically reach is additional scope this pass did not have
+time for, and is called out here again rather than implied done.
+
+**What happens on a real kiln, stated plainly.** Per the high-temperature
+transfer analysis Part 2 already cites, `k` and `tau` both fall by roughly
+20x as a real kiln heats toward cone temperatures, and the plant is
+*fastest* at the bottom of a firing (cold start) and gets progressively
+slower from there. This design's single, unscheduled threshold -- sized off
+the coldest identified zone's own full-duty slope times a 2x margin -- is
+therefore conservative for the entire rest of a real firing: it stays tight
+enough to catch a genuine runaway at every hotter point (the guard does not
+loosen as the kiln heats, even though the plant itself is getting slower and
+so, in principle, could tolerate a lower ceiling later in the firing without
+losing runaway detection). The cost of not scheduling the threshold is
+nuisance-trip margin at high temperature that a future multi-point schedule
+(the `zone_model_at()`/`coupling_at()` seam `5d3bc854` added) could recover,
+not a safety gap -- the failure direction stays tight-not-loose across the
+whole firing, exactly the direction this guard should err in.
+
+Code: `s8_rate_guard_estimate.h/.c` (new `s8_rate_guard_auto_decide()`),
+`safety_cfg_store.h/.c` (new rate-guard provenance store), `safety_cfg_
+http.c` (`GET`/`POST /api/safety/rate_guard/auto`, plus the MANUAL-tagging
+hook in `commissioning_post_handler` and the clear hook in `bench_preset_
+post_handler`). Host tests: `test_s8_rate_guard_estimate.c` (policy
+function, including the exact-tie and marginally-looser boundary cases) and
+`test_safety_cfg_http.c` (gather/current-value/compute helpers, the JSON
+provenance rendering, and handler-level smoke tests for apply/suggest/
+never-write-on-GET, via fakes for `zones_config_get_model()`/`_get_thermo_
+count()`/`_get_model_fit_context()` and the new provenance store). Negative-
+tested by breaking `s8_rate_guard_auto_decide()`'s tighten/loosen comparison
+in production, confirming 2 failures RED, and restoring by hand (`git diff`
+on the file empty afterward).
+
+Not done in this pass, same as Part 2's own list: no temperature schedule,
+and no simulation-harness cross-check at high temperature.
 
 ### Backward compatibility
 
-A hand-set value remains fully supported and takes priority by construction:
-this feature adds no new field and no new enum state to `max_rate_c_per_min`
-itself -- it only adds a computation that, if and when wired to a write
-path, would call the SAME `safety_set_rate_guard()`/0x0204 commissioning
-call an operator's manual entry already uses. There is nothing on the wire
-or in `config_store` that distinguishes "auto-derived" from "hand-set" --
-whichever was written most recently is what is armed, exactly like the
-firmware's other config fields today. Once a real write path exists, its UI
-should show provenance explicitly (e.g. "last set: 20.0 C/min, hand-entered
-on <date>" vs. "auto-suggested from zone 1's identification at 40 C") so an
-operator overriding a value they never asked to be auto-derived is not
-surprised by it changing under them -- called out here as a UI requirement
-for whoever builds the write path, not implemented in this pass (no UI
-changes were made).
+A hand-set value remains fully supported and now visibly distinguishable
+from an auto-derived one (see Part 3's provenance record above) -- neither
+this feature nor Part 3's write path adds a new field or enum state to
+`max_rate_c_per_min` itself on the wire; both write paths call the SAME
+0x0204 SET_PARAM/COMMIT_CONFIG an operator's manual entry always used.
 
 ### Validation against evidence
 
@@ -218,11 +328,11 @@ a live write path.
 
 ### What was NOT done, and why (explicit stops)
 
-- **No live write path.** See "who computes it, and when" above --
-  building the actual auto-apply/suggest-and-confirm HTTP or MCP surface
-  is deliberately left to a follow-up pass with its own review, since it is
-  the piece that turns a pure computation into something that can change
-  armed safety-processor state.
+- ~~No live write path.~~ **Done 2026-09-10, see Part 3 above** -- the
+  auto-apply/suggest-and-confirm HTTP surface is built
+  (`GET`/`POST /api/safety/rate_guard/auto`), with its own review of the
+  tighten/loosen policy, the read-back-and-verify discipline, and the
+  operator-override provenance record.
 - **No config-schema or protocol version bump.** Confirmed unnecessary:
   the estimator is pure KilnFW-side code reading fields
   `zones_config_get_model()`/`_get_model_fit_context()` already expose, and

@@ -78,9 +78,23 @@ esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *valu
    Same local-stub convention as httpd_resp_set_hdr() just above. */
 void web_set_asset_cache_headers(httpd_req_t *r);
 void web_set_asset_cache_headers(httpd_req_t *r) { (void)r; }
+// Captures the last body handed to httpd_resp_send() -- needed only by the
+// rate_guard_auto handler-level tests below (test_build_json_* and the
+// apply_pairs tests all call the static helpers directly and never look at
+// this). Every pre-existing caller of httpd_resp_send() is unaffected: the
+// stub's return value and (void) semantics for callers that ignore the
+// capture are unchanged.
+static char s_stub_last_httpd_resp[512];
 esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
 {
-    (void)r; (void)buf; (void)buf_len; return ESP_OK;
+    (void)r;
+    if (buf && buf_len > 0 && (size_t)buf_len < sizeof(s_stub_last_httpd_resp)) {
+        memcpy(s_stub_last_httpd_resp, buf, (size_t)buf_len);
+        s_stub_last_httpd_resp[buf_len] = '\0';
+    } else {
+        s_stub_last_httpd_resp[0] = '\0';
+    }
+    return ESP_OK;
 }
 esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *buf, size_t buf_len)
 {
@@ -252,6 +266,106 @@ float safety_cfg_store_ct_cal_channel_gain(size_t ch)
 {
     (void)ch;
     return 0.715f;
+}
+
+// S8 rate-guard auto-calc (docs/audits/s8_auto_calc_design_2026-09-09.md
+// "Part 3") -- this file's own fakes, same "own stub, real store links into
+// the OTHER executable" reasoning as the CT calibration/relay-type pairs
+// above. s8_rate_guard_estimate()/s8_rate_guard_auto_decide() themselves
+// are the REAL implementation (linked in via build_host_tests.ps1's cmd3
+// second source) -- only the zones_config accessors and the ESP-local
+// provenance store need faking here.
+static bool s_stub_rate_guard_meta_has_value = false;
+static safety_rate_guard_source_t s_stub_rate_guard_meta_source = SAFETY_RATE_GUARD_SOURCE_MANUAL;
+static float s_stub_rate_guard_meta_value = 0.0f;
+static int s_stub_rate_guard_meta_set_calls = 0;
+static int s_stub_rate_guard_meta_clear_calls = 0;
+
+bool safety_cfg_store_get_rate_guard_meta(safety_rate_guard_source_t *out_source, float *out_value,
+                                           bool *out_has_value)
+{
+    if (out_has_value) *out_has_value = s_stub_rate_guard_meta_has_value;
+    if (!s_stub_rate_guard_meta_has_value) {
+        return false;
+    }
+    if (out_source) *out_source = s_stub_rate_guard_meta_source;
+    if (out_value) *out_value = s_stub_rate_guard_meta_value;
+    return true;
+}
+
+bool safety_cfg_store_set_rate_guard_meta(safety_rate_guard_source_t source, float value,
+                                           esp_err_t *out_nvs_err)
+{
+    s_stub_rate_guard_meta_set_calls++;
+    s_stub_rate_guard_meta_has_value = true;
+    s_stub_rate_guard_meta_source = source;
+    s_stub_rate_guard_meta_value = value;
+    if (out_nvs_err) *out_nvs_err = ESP_OK;
+    return true;
+}
+
+void safety_cfg_store_clear_rate_guard_meta(void)
+{
+    s_stub_rate_guard_meta_clear_calls++;
+    s_stub_rate_guard_meta_has_value = false;
+    s_stub_rate_guard_meta_source = SAFETY_RATE_GUARD_SOURCE_MANUAL;
+    s_stub_rate_guard_meta_value = 0.0f;
+}
+
+// zones_config_get_model()/_get_model_fit_context()/_get_thermo_count() --
+// controllable per-zone fakes so this file's rate_guard_auto handler tests
+// can drive S8_RATE_GUARD_ESTIMATE_OK vs NO_DATA and specific k_dc/tau_s/
+// fit_temp_c combinations without any real zones_config storage.
+#define TEST_SAFETY_CFG_HTTP_MAX_ZONES 3
+static uint8_t s_stub_thermo_count = TEST_SAFETY_CFG_HTTP_MAX_ZONES;
+static bool s_stub_zone_has_model[TEST_SAFETY_CFG_HTTP_MAX_ZONES];
+static float s_stub_zone_k_dc[TEST_SAFETY_CFG_HTTP_MAX_ZONES];
+static float s_stub_zone_tau_s[TEST_SAFETY_CFG_HTTP_MAX_ZONES];
+static bool s_stub_zone_has_fit_ctx[TEST_SAFETY_CFG_HTTP_MAX_ZONES];
+static float s_stub_zone_fit_temp_c[TEST_SAFETY_CFG_HTTP_MAX_ZONES];
+
+uint8_t zones_config_get_thermo_count(void)
+{
+    return s_stub_thermo_count;
+}
+
+bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
+{
+    if (out_dead_time_s) *out_dead_time_s = 0.0f;
+    if (zone_index >= TEST_SAFETY_CFG_HTTP_MAX_ZONES || !s_stub_zone_has_model[zone_index]) {
+        return false;
+    }
+    if (out_k_dc) *out_k_dc = s_stub_zone_k_dc[zone_index];
+    if (out_tau_s) *out_tau_s = s_stub_zone_tau_s[zone_index];
+    return true;
+}
+
+bool zones_config_get_model_fit_context(uint8_t zone_index, float *out_fit_temp_c, float *out_fit_ambient_c)
+{
+    if (out_fit_ambient_c) *out_fit_ambient_c = 20.0f;
+    if (zone_index >= TEST_SAFETY_CFG_HTTP_MAX_ZONES || !s_stub_zone_has_fit_ctx[zone_index]) {
+        return false;
+    }
+    if (out_fit_temp_c) *out_fit_temp_c = s_stub_zone_fit_temp_c[zone_index];
+    return true;
+}
+
+// Resets every rate-guard-related stub to a known "nothing configured"
+// state -- called at the top of each rate_guard_auto test so tests cannot
+// leak state into each other via these file-static knobs.
+static void reset_rate_guard_stubs(void)
+{
+    s_stub_rate_guard_meta_has_value = false;
+    s_stub_rate_guard_meta_source = SAFETY_RATE_GUARD_SOURCE_MANUAL;
+    s_stub_rate_guard_meta_value = 0.0f;
+    s_stub_rate_guard_meta_set_calls = 0;
+    s_stub_rate_guard_meta_clear_calls = 0;
+    s_stub_thermo_count = TEST_SAFETY_CFG_HTTP_MAX_ZONES;
+    memset(s_stub_zone_has_model, 0, sizeof(s_stub_zone_has_model));
+    memset(s_stub_zone_k_dc, 0, sizeof(s_stub_zone_k_dc));
+    memset(s_stub_zone_tau_s, 0, sizeof(s_stub_zone_tau_s));
+    memset(s_stub_zone_has_fit_ctx, 0, sizeof(s_stub_zone_has_fit_ctx));
+    memset(s_stub_zone_fit_temp_c, 0, sizeof(s_stub_zone_fit_temp_c));
 }
 
 // ---------------------------------------------------------------------------
@@ -1319,8 +1433,360 @@ static void test_ct_auto_zero_100mv_refusal_uses_quantized_counts(void)
                "above is measuring a real large delta, not tripping on any nonzero difference");
 }
 
+// ---------------------------------------------------------------------------
+// S8 rate-guard auto-calc write path (docs/audits/s8_auto_calc_design_2026-
+// 09-09.md "Part 3") -- rate_guard_gather_and_estimate()/rate_guard_current_
+// value()/rate_guard_auto_compute() directly (same "call the static helper
+// directly" convention this whole file already uses for apply_pairs()/
+// build_commissioning_json()), plus a few handler-level smoke tests via the
+// captured httpd_resp_send() body for the two cases reachable without a
+// real request body (content_len == 0 -- see rate_guard_auto_post_handler's
+// own comment: an empty body is a legitimate "act on tighten/apply only"
+// submission).
+// ---------------------------------------------------------------------------
+
+// s_stub_params (this file's fake for safety_cfg_store_get_by_index()) is
+// indexed by array POSITION, not by id -- the real SAFETY_CFG_PARAM_TABLE
+// this fake stands in for lives in safety_cfg_store.c, which this
+// executable does NOT link (see this file's header comment: the real store
+// links into the OTHER executable). Position 0 is as good as any other for
+// this fake; rate_guard_current_value() searches by param_id, not position,
+// so this is a faithful stand-in for "0x0204 lives somewhere in the table".
+static void set_current_rate_guard(bool set, float value)
+{
+    s_stub_params[0].param_id = 0x0204u;
+    s_stub_params[0].set = set;
+    s_stub_params[0].value.f32_val = value;
+}
+
+static void test_rate_guard_gather_no_zone_identified_is_no_data(void)
+{
+    TEST_SECTION("rate_guard_gather_and_estimate -- no zone identified -> NO_DATA");
+    reset_all();
+    reset_rate_guard_stubs();
+    float out = -1.0f;
+    s8_rate_guard_estimate_reason_t r = rate_guard_gather_and_estimate(&out);
+    TEST_CHECK(r == S8_RATE_GUARD_ESTIMATE_NO_DATA, "an uncommissioned board reports NO_DATA");
+}
+
+static void test_rate_guard_gather_picks_coldest_identified_zone(void)
+{
+    TEST_SECTION("rate_guard_gather_and_estimate -- reaches the REAL s8_rate_guard_estimate() "
+                 "through zones_config_get_model()/_get_model_fit_context()'s fakes");
+    reset_all();
+    reset_rate_guard_stubs();
+    // Zone 0: identified at 500C (hot). Zone 1: identified at 20C (cold) --
+    // this is the one that must win.
+    s_stub_zone_has_model[0] = true;
+    s_stub_zone_k_dc[0] = 5.0f;
+    s_stub_zone_tau_s[0] = 60.0f;
+    s_stub_zone_has_fit_ctx[0] = true;
+    s_stub_zone_fit_temp_c[0] = 500.0f;
+
+    s_stub_zone_has_model[1] = true;
+    s_stub_zone_k_dc[1] = 10.0f;
+    s_stub_zone_tau_s[1] = 60.0f;
+    s_stub_zone_has_fit_ctx[1] = true;
+    s_stub_zone_fit_temp_c[1] = 20.0f;
+
+    float out = -1.0f;
+    s8_rate_guard_estimate_reason_t r = rate_guard_gather_and_estimate(&out);
+    TEST_CHECK(r == S8_RATE_GUARD_ESTIMATE_OK, "two identified zones -> OK");
+    // Zone 1: (10/60)*60*2 = 20 C/min -- inside [15,60], so unclamped.
+    TEST_CHECK(fabsf(out - 20.0f) < 1e-3f, "zone 1 (coldest fit_temp_c) wins, not zone 0");
+}
+
+static void test_rate_guard_gather_missing_fit_context_disqualifies_zone(void)
+{
+    TEST_SECTION("rate_guard_gather_and_estimate -- a model with NO recorded fit context is not a "
+                 "candidate, even though k_dc/tau_s alone look usable");
+    reset_all();
+    reset_rate_guard_stubs();
+    s_stub_zone_has_model[0] = true;
+    s_stub_zone_k_dc[0] = 10.0f;
+    s_stub_zone_tau_s[0] = 60.0f;
+    s_stub_zone_has_fit_ctx[0] = false; // never recorded
+    float out = -1.0f;
+    s8_rate_guard_estimate_reason_t r = rate_guard_gather_and_estimate(&out);
+    TEST_CHECK(r == S8_RATE_GUARD_ESTIMATE_NO_DATA,
+               "a model with no fit context is disqualified -- this function must not invent a fit "
+               "temperature of 0.0 just because the struct was zero-initialized");
+}
+
+static void test_rate_guard_current_value_reads_0x0204_by_id_not_position(void)
+{
+    TEST_SECTION("rate_guard_current_value -- reads 0x0204's REAL table position, not index 0");
+    reset_all();
+    reset_rate_guard_stubs();
+    set_current_rate_guard(true, 20.0f);
+    float value = -1.0f;
+    bool is_set = false;
+    bool ok = rate_guard_current_value(&value, &is_set);
+    TEST_CHECK(ok, "0x0204 is always in this build's table");
+    TEST_CHECK(is_set, "current value is reported set");
+    TEST_CHECK(fabsf(value - 20.0f) < 1e-6f, "the exact bench value (20.0) round-trips");
+}
+
+static void test_rate_guard_current_value_dormant_reports_unset(void)
+{
+    TEST_SECTION("rate_guard_current_value -- dormant (never fetched) reports is_set=false");
+    reset_all();
+    reset_rate_guard_stubs();
+    set_current_rate_guard(false, 0.0f);
+    float value = -1.0f;
+    bool is_set = true; // deliberately seeded wrong, to prove the function actually clears it
+    bool ok = rate_guard_current_value(&value, &is_set);
+    TEST_CHECK(ok, "0x0204 is always in this build's table, even when unset");
+    TEST_CHECK(!is_set, "dormant/unset is reported honestly, not defaulted to true");
+}
+
+static void test_rate_guard_auto_compute_dormant_applies(void)
+{
+    TEST_SECTION("rate_guard_auto_compute -- a dormant guard's first commissioning always APPLIES");
+    reset_all();
+    reset_rate_guard_stubs();
+    set_current_rate_guard(false, 0.0f);
+    s_stub_zone_has_model[0] = true;
+    s_stub_zone_k_dc[0] = 5.0f;
+    s_stub_zone_tau_s[0] = 60.0f;
+    s_stub_zone_has_fit_ctx[0] = true;
+    s_stub_zone_fit_temp_c[0] = 20.0f;
+
+    float candidate = 0.0f, current = -1.0f;
+    bool current_is_set = true;
+    s8_rate_guard_auto_decision_t decision;
+    char err[160];
+    bool ok = rate_guard_auto_compute(&candidate, &current, &current_is_set, &decision, err, sizeof(err));
+    TEST_CHECK(ok, "compute succeeds with one identified zone");
+    TEST_CHECK(!current_is_set, "correctly reports the guard as currently dormant");
+    TEST_CHECK(decision == S8_RATE_GUARD_AUTO_APPLY, "arming a dormant guard always applies");
+}
+
+static void test_rate_guard_auto_compute_tighten_applies(void)
+{
+    TEST_SECTION("rate_guard_auto_compute -- a tighter candidate against an ARMED guard applies");
+    reset_all();
+    reset_rate_guard_stubs();
+    set_current_rate_guard(true, 33.3f); // the old, wrong bench default
+    s_stub_zone_has_model[0] = true;
+    s_stub_zone_k_dc[0] = 5.0f;
+    s_stub_zone_tau_s[0] = 60.0f;
+    s_stub_zone_has_fit_ctx[0] = true;
+    s_stub_zone_fit_temp_c[0] = 20.0f; // -> (5/60)*60*2 = 10, floored to 15.0
+
+    float candidate = 0.0f, current = 0.0f;
+    bool current_is_set = false;
+    s8_rate_guard_auto_decision_t decision;
+    char err[160];
+    bool ok = rate_guard_auto_compute(&candidate, &current, &current_is_set, &decision, err, sizeof(err));
+    TEST_CHECK(ok, "compute succeeds");
+    TEST_CHECK(fabsf(candidate - 15.0f) < 1e-3f, "candidate is floored to 15.0 C/min");
+    TEST_CHECK(decision == S8_RATE_GUARD_AUTO_APPLY, "15.0 < 33.3 -- tightens, so this applies");
+}
+
+static void test_rate_guard_auto_compute_loosen_suggests_only(void)
+{
+    TEST_SECTION("rate_guard_auto_compute -- a looser candidate against an ARMED guard is SUGGEST_ONLY");
+    reset_all();
+    reset_rate_guard_stubs();
+    set_current_rate_guard(true, 15.0f); // already at the floor
+    s_stub_zone_has_model[0] = true;
+    s_stub_zone_k_dc[0] = 10.0f;
+    s_stub_zone_tau_s[0] = 60.0f;
+    s_stub_zone_has_fit_ctx[0] = true;
+    s_stub_zone_fit_temp_c[0] = 20.0f; // -> (10/60)*60*2 = 20 C/min
+
+    float candidate = 0.0f, current = 0.0f;
+    bool current_is_set = false;
+    s8_rate_guard_auto_decision_t decision;
+    char err[160];
+    bool ok = rate_guard_auto_compute(&candidate, &current, &current_is_set, &decision, err, sizeof(err));
+    TEST_CHECK(ok, "compute succeeds");
+    TEST_CHECK(fabsf(candidate - 20.0f) < 1e-3f, "candidate is 20.0 C/min");
+    TEST_CHECK(decision == S8_RATE_GUARD_AUTO_SUGGEST_ONLY,
+               "20.0 > 15.0 -- loosens the armed guard, must require confirmation, never auto-apply");
+}
+
+static void test_rate_guard_auto_compute_no_data_fails_with_reason(void)
+{
+    TEST_SECTION("rate_guard_auto_compute -- no identified zone at all fails with a named reason");
+    reset_all();
+    reset_rate_guard_stubs();
+    set_current_rate_guard(true, 20.0f);
+    float candidate = 0.0f, current = 0.0f;
+    bool current_is_set = false;
+    s8_rate_guard_auto_decision_t decision;
+    char err[160] = {0};
+    bool ok = rate_guard_auto_compute(&candidate, &current, &current_is_set, &decision, err, sizeof(err));
+    TEST_CHECK(!ok, "no zone identified -> compute refuses");
+    TEST_CHECK(err[0] != '\0', "a non-empty reason is produced");
+}
+
+static void test_build_json_rate_guard_provenance_absent(void)
+{
+    TEST_SECTION("build_commissioning_json -- rate_guard_provenance.has_value:false, no source/value "
+                 "printed, when nothing has ever been recorded (fresh board / bench preset just ran)");
+    reset_all();
+    safety_cfg_http_snapshot_t snap = {0};
+    snap.rate_guard_has_provenance = false;
+    snap.rate_guard_source = SAFETY_RATE_GUARD_SOURCE_AUTO; // deliberately set, must be ignored
+    snap.rate_guard_value = 99.0f;                          // deliberately set, must be ignored
+
+    static char json[SAFETY_CFG_JSON_MAX];
+    size_t len = build_commissioning_json(&snap, json, sizeof(json));
+    TEST_CHECK(len > 0, "JSON built successfully");
+    TEST_CHECK(strstr(json, "\"rate_guard_provenance\":{\"has_value\":false}") != NULL,
+               "has_value:false with nothing else -- source/value are never printed for an absent record, "
+               "even though the (stale) snapshot fields carry values");
+}
+
+static void test_build_json_rate_guard_provenance_auto(void)
+{
+    TEST_SECTION("build_commissioning_json -- rate_guard_provenance reports source:\"auto\" and the value");
+    reset_all();
+    safety_cfg_http_snapshot_t snap = {0};
+    snap.rate_guard_has_provenance = true;
+    snap.rate_guard_source = SAFETY_RATE_GUARD_SOURCE_AUTO;
+    snap.rate_guard_value = 20.0f;
+
+    static char json[SAFETY_CFG_JSON_MAX];
+    size_t len = build_commissioning_json(&snap, json, sizeof(json));
+    TEST_CHECK(len > 0, "JSON built successfully");
+    TEST_CHECK(strstr(json, "\"has_value\":true") != NULL, "has_value:true");
+    TEST_CHECK(strstr(json, "\"source\":\"auto\"") != NULL, "source is reported as auto, not manual");
+    TEST_CHECK(strstr(json, "\"value\":20") != NULL, "the recorded value is reported");
+}
+
+static void test_build_json_rate_guard_provenance_manual(void)
+{
+    TEST_SECTION("build_commissioning_json -- rate_guard_provenance reports source:\"manual\"");
+    reset_all();
+    safety_cfg_http_snapshot_t snap = {0};
+    snap.rate_guard_has_provenance = true;
+    snap.rate_guard_source = SAFETY_RATE_GUARD_SOURCE_MANUAL;
+    snap.rate_guard_value = 25.0f;
+
+    static char json[SAFETY_CFG_JSON_MAX];
+    size_t len = build_commissioning_json(&snap, json, sizeof(json));
+    TEST_CHECK(len > 0, "JSON built successfully");
+    TEST_CHECK(strstr(json, "\"source\":\"manual\"") != NULL,
+               "an operator hand-entry is labeled manual, never mistaken for auto");
+}
+
+static void test_rate_guard_auto_post_handler_dormant_applies_and_tags_auto(void)
+{
+    TEST_SECTION("rate_guard_auto_post_handler -- candidate does not loosen the guard, empty body -> "
+                 "writes via apply_pairs, tags the provenance record AUTO only after a verified read-back");
+    reset_all();
+    reset_rate_guard_stubs();
+    s_stub_lookup_type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_lookup_name = "max_rate_c_per_min";
+    s_stub_zone_has_model[0] = true;
+    s_stub_zone_k_dc[0] = 5.0f;
+    s_stub_zone_tau_s[0] = 60.0f;
+    s_stub_zone_has_fit_ctx[0] = true;
+    s_stub_zone_fit_temp_c[0] = 20.0f; // -> floored to 15.0
+    // s_stub_params (the fake for safety_cfg_store_get_by_index()) is read
+    // BOTH by rate_guard_auto_compute()'s own pre-write lookup and by
+    // apply_pairs()'s post-commit read-back (confirm_commit_landed()) --
+    // there is only one fake state for both, so seed it with the value the
+    // Pico is expected to read back AFTER the commit (15.0), exactly like a
+    // real 15.0-committed board would answer at any point once the write
+    // has landed. This exercises the tighten-applies path end to end,
+    // through the real write/verify machinery, without needing a separate
+    // "before" and "after" fake.
+    set_current_rate_guard(true, 15.0f);
+
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    s_link = &fake_link;
+    httpd_req_t req = { .content_len = 0 };
+    esp_err_t err = rate_guard_auto_post_handler(&req);
+    s_link = NULL;
+
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK regardless of application-level result");
+    TEST_CHECK(strstr(s_stub_last_httpd_resp, "\"ok\":true") != NULL, "reports success");
+    TEST_CHECK(strstr(s_stub_last_httpd_resp, "\"applied\":true") != NULL, "reports it actually applied");
+    TEST_CHECK(s_stub_set_param_calls == 1, "exactly one SET_PARAM was staged");
+    TEST_CHECK(s_stub_commit_calls == 1, "a commit was sent");
+    TEST_CHECK(s_stub_rate_guard_meta_set_calls == 1,
+               "the provenance record was tagged exactly once, only after the write verified");
+    TEST_CHECK(s_stub_rate_guard_meta_source == SAFETY_RATE_GUARD_SOURCE_AUTO,
+               "tagged AUTO, never MANUAL, for this endpoint");
+}
+
+static void test_rate_guard_auto_post_handler_loosen_without_confirm_never_writes(void)
+{
+    TEST_SECTION("rate_guard_auto_post_handler -- a looser candidate against an armed guard, empty "
+                 "body (no confirm) -- must NOT write, must NOT tag provenance");
+    reset_all();
+    reset_rate_guard_stubs();
+    set_current_rate_guard(true, 15.0f); // armed at the floor
+    s_stub_zone_has_model[0] = true;
+    s_stub_zone_k_dc[0] = 10.0f;
+    s_stub_zone_tau_s[0] = 60.0f;
+    s_stub_zone_has_fit_ctx[0] = true;
+    s_stub_zone_fit_temp_c[0] = 20.0f; // -> 20.0 C/min, LOOSER than 15.0
+
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    s_link = &fake_link;
+    httpd_req_t req = { .content_len = 0 }; // no "confirm=1"
+    esp_err_t err = rate_guard_auto_post_handler(&req);
+    s_link = NULL;
+
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strstr(s_stub_last_httpd_resp, "\"applied\":false") != NULL,
+               "reports the suggestion without applying it");
+    TEST_CHECK(strstr(s_stub_last_httpd_resp, "LOOSEN") != NULL,
+               "the reason explicitly says this would loosen the guard");
+    TEST_CHECK(s_stub_set_param_calls == 0,
+               "NEVER LOOSEN SILENTLY -- no SET_PARAM was sent for a loosening candidate without confirm=1");
+    TEST_CHECK(s_stub_commit_calls == 0, "no commit either");
+    TEST_CHECK(s_stub_rate_guard_meta_set_calls == 0, "the provenance record is untouched -- nothing was written");
+}
+
+static void test_rate_guard_auto_get_handler_never_writes(void)
+{
+    TEST_SECTION("rate_guard_auto_get_handler -- pure preview, never calls SET_PARAM/commit regardless "
+                 "of what the candidate would be");
+    reset_all();
+    reset_rate_guard_stubs();
+    set_current_rate_guard(true, 15.0f);
+    s_stub_zone_has_model[0] = true;
+    s_stub_zone_k_dc[0] = 10.0f;
+    s_stub_zone_tau_s[0] = 60.0f;
+    s_stub_zone_has_fit_ctx[0] = true;
+    s_stub_zone_fit_temp_c[0] = 20.0f; // looser candidate -- GET must still never write
+
+    httpd_req_t req = { .content_len = 0 };
+    esp_err_t err = rate_guard_auto_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strstr(s_stub_last_httpd_resp, "\"would_loosen\":true") != NULL,
+               "correctly previews that this candidate would loosen the guard");
+    TEST_CHECK(s_stub_set_param_calls == 0, "GET never writes, regardless of decision");
+    TEST_CHECK(s_stub_commit_calls == 0, "GET never commits");
+    TEST_CHECK(s_stub_rate_guard_meta_set_calls == 0, "GET never tags provenance");
+}
+
 int main(void)
 {
+    test_rate_guard_gather_no_zone_identified_is_no_data();
+    test_rate_guard_gather_picks_coldest_identified_zone();
+    test_rate_guard_gather_missing_fit_context_disqualifies_zone();
+    test_rate_guard_current_value_reads_0x0204_by_id_not_position();
+    test_rate_guard_current_value_dormant_reports_unset();
+    test_rate_guard_auto_compute_dormant_applies();
+    test_rate_guard_auto_compute_tighten_applies();
+    test_rate_guard_auto_compute_loosen_suggests_only();
+    test_rate_guard_auto_compute_no_data_fails_with_reason();
+    test_build_json_rate_guard_provenance_absent();
+    test_build_json_rate_guard_provenance_auto();
+    test_build_json_rate_guard_provenance_manual();
+    test_rate_guard_auto_post_handler_dormant_applies_and_tags_auto();
+    test_rate_guard_auto_post_handler_loosen_without_confirm_never_writes();
+    test_rate_guard_auto_get_handler_never_writes();
+
     test_parse_single_pair_no_commit();
     test_parse_multiple_pairs_plus_commit();
     test_parse_rejects_value_without_id();

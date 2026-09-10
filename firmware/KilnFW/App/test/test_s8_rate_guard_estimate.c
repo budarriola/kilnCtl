@@ -154,12 +154,45 @@ static void test_invalid_entries_are_skipped(void)
     TEST_CHECK(out == -1.0f, "out_c_per_min untouched when every candidate was disqualified");
 }
 
+static void test_auto_decide_policy(void)
+{
+    TEST_SECTION("s8_rate_guard_auto_decide: tighten-auto-apply, loosen-requires-confirm");
+
+    // Dormant guard (never commissioned / 0.0) -- arming it is always
+    // APPLY, regardless of how large the candidate is, since "no ceiling"
+    // is never tighter than any finite one.
+    TEST_CHECK(s8_rate_guard_auto_decide(60.0f, 0.0f, false) == S8_RATE_GUARD_AUTO_APPLY,
+               "arming a dormant guard at the ceiling still auto-applies");
+    TEST_CHECK(s8_rate_guard_auto_decide(15.0f, 0.0f, false) == S8_RATE_GUARD_AUTO_APPLY,
+               "arming a dormant guard at the floor auto-applies");
+
+    // Armed guard, candidate tightens (strictly less) -- APPLY.
+    TEST_CHECK(s8_rate_guard_auto_decide(15.0f, 20.0f, true) == S8_RATE_GUARD_AUTO_APPLY,
+               "a strictly tighter candidate auto-applies");
+
+    // Armed guard, candidate ties exactly -- APPLY (not a loosening, no
+    // reason to demand a confirm for a no-op write).
+    TEST_CHECK(s8_rate_guard_auto_decide(20.0f, 20.0f, true) == S8_RATE_GUARD_AUTO_APPLY,
+               "an unchanged candidate auto-applies (treated as a tie, not a loosening)");
+
+    // Armed guard, candidate loosens (strictly greater) -- SUGGEST_ONLY,
+    // the one case this whole policy exists to catch.
+    TEST_CHECK(s8_rate_guard_auto_decide(25.0f, 20.0f, true) == S8_RATE_GUARD_AUTO_SUGGEST_ONLY,
+               "a looser candidate against an armed guard must never auto-apply");
+
+    // Barely looser -- proves this is a strict compare, not fuzzed with an
+    // epsilon that could let a tiny loosening slip through as a "tie".
+    TEST_CHECK(s8_rate_guard_auto_decide(20.001f, 20.0f, true) == S8_RATE_GUARD_AUTO_SUGGEST_ONLY,
+               "even a marginally looser candidate requires confirmation");
+}
+
 int main(void)
 {
     test_no_data_when_nothing_valid();
     test_basic_derivation_and_margin();
     test_picks_lowest_fit_temp_across_zones();
     test_invalid_entries_are_skipped();
+    test_auto_decide_policy();
 
     printf("\n%d/%d checks passed\n", g_checks - g_failures, g_checks);
     if (g_failures > 0) {

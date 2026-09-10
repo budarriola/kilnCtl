@@ -1027,8 +1027,17 @@ esp_err_t wifi_provision_http_start(void)
      * check_uri_handler_cap.ps1 caught it exactly as designed. Set to 130:
      * 121 plus 9 spare slots, same headroom as every bump above. RAM cost:
      * 12 extra pointer slots * 4 bytes = 48 bytes, noise against the
-     * documented ~11.9 kB DRAM failure floor. */
-    config.max_uri_handlers = 130;
+     * documented ~11.9 kB DRAM failure floor.
+     *
+     * Bumped 130 -> 140, 2026-09-10: safety_cfg_http.c's two new routes
+     * (GET+POST /api/safety/rate_guard/auto -- the S8 auto-calc write path,
+     * docs/audits/s8_auto_calc_design_2026-09-09.md "Part 3") took the real
+     * count from 129 to 131 -- one over this cap. check_uri_handler_cap.ps1
+     * caught it exactly as designed. Set to 140: 131 plus 9 spare slots,
+     * same headroom convention as every bump above. RAM cost: 10 extra
+     * pointer slots * 4 bytes = 40 bytes, noise against the documented
+     * ~11.9 kB DRAM failure floor. */
+    config.max_uri_handlers = 140;
     /* Default (4096) is tight for the largest POST handlers on this server:
      * zones_post_handler (zones_http.c) alone stacks a 2561-byte body
      * buffer plus a ~170-byte zones_cfg_t scratch copy on top of whatever
