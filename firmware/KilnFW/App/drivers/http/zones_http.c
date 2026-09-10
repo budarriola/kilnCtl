@@ -464,37 +464,61 @@ static const char *zone_sweep_state_str(zone_sweep_state_t s)
     }
 }
 
+/* 2026-09-10 opus review, httpd stack blob class (see check_httpd_task_
+ * stack_budget.py and project_httpd_stack_blob_class): the four *_escaped
+ * buffers plus json[] used to live on this handler's own stack frame --
+ * i_normal_reason_escaped[193] was the newest addition, bringing the frame
+ * to roughly +369 B beyond the pre-existing three. This repo has had two
+ * real panics from exactly this shared-8KB-httpd-stack class, so growing
+ * the frame further is the wrong direction; heap-allocate the whole lot
+ * instead, following diagnostics_http.c's cfgfs_status_get_handler()
+ * pattern (malloc once, free on every return path, a clean 500 on OOM
+ * rather than growing the stack to guarantee success). */
+typedef struct {
+    char reason_escaped[64 * 2 + 1];          /* zone_sweep_status_t::reason[64] */
+    char ct_reason_escaped[96 * 2 + 1];       /* ::ct_map_reason[96] */
+    char k_reason_escaped[96 * 2 + 1];        /* ::k_ct_reason[96] */
+    char i_normal_reason_escaped[96 * 2 + 1]; /* ::i_normal_reason[96] */
+    char json[1200]; /* heap now, not stack -- kept at the size this handler already needed once
+                       * i_normal_reason_escaped's worst case is included; no stack cost either way. */
+} sweep_status_scratch_t;
+
 static esp_err_t sweep_status_get_handler(httpd_req_t *req)
 {
     zone_sweep_status_t st;
     zones_current_sweep_get_status(&st);
-    char reason_escaped[sizeof(st.reason) * 2 + 1];
-    zones_json_escape(st.reason, reason_escaped, sizeof(reason_escaped));
-    char ct_reason_escaped[sizeof(st.ct_map_reason) * 2 + 1];
-    zones_json_escape(st.ct_map_reason, ct_reason_escaped, sizeof(ct_reason_escaped));
+
+    sweep_status_scratch_t *s = malloc(sizeof(*s));
+    if (!s) {
+        ESP_LOGE(ZONES_HTTP_TAG, "sweep_status_get_handler: malloc(%u) failed", (unsigned)sizeof(*s));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_OK;
+    }
+
+    zones_json_escape(st.reason, s->reason_escaped, sizeof(s->reason_escaped));
+    zones_json_escape(st.ct_map_reason, s->ct_reason_escaped, sizeof(s->ct_reason_escaped));
     /* M12b: the CT-scale derivation reports separately -- see
      * zone_sweep_status_t's own comment for why the two share no field. */
-    char k_reason_escaped[sizeof(st.k_ct_reason) * 2 + 1];
-    zones_json_escape(st.k_ct_reason, k_reason_escaped, sizeof(k_reason_escaped));
+    zones_json_escape(st.k_ct_reason, s->k_reason_escaped, sizeof(s->k_reason_escaped));
     /* Feature: nameplate current -> S14/S15 arming -- reports separately from
      * k_ct_reason for the same reason ct_map_reason and k_ct_reason already
      * do (independent failure modes, one shared string could only ever
      * report one). */
-    char i_normal_reason_escaped[sizeof(st.i_normal_reason) * 2 + 1];
-    zones_json_escape(st.i_normal_reason, i_normal_reason_escaped, sizeof(i_normal_reason_escaped));
-    char json[1200];
-    int n = snprintf(json, sizeof(json),
+    zones_json_escape(st.i_normal_reason, s->i_normal_reason_escaped, sizeof(s->i_normal_reason_escaped));
+    int n = snprintf(s->json, sizeof(s->json),
                      "{\"state\":\"%s\",\"zone_index\":%u,\"zones_done\":%u,\"zones_total\":%u,"
                      "\"reason\":\"%s\",\"ct_map_derived_mask\":%u,\"ct_map_reason\":\"%s\","
                      "\"k_ct_derived_mask\":%u,\"k_ct_reason\":\"%s\","
                      "\"i_normal_pushed_mask\":%u,\"i_normal_reason\":\"%s\","
                      "\"summed_unmeasured_mask\":%u}",
                      zone_sweep_state_str(st.state), st.zone_index, st.zones_done, st.zones_total,
-                     reason_escaped, st.ct_map_derived_mask, ct_reason_escaped,
-                     st.k_ct_derived_mask, k_reason_escaped,
-                     st.i_normal_pushed_mask, i_normal_reason_escaped, st.summed_unmeasured_mask);
+                     s->reason_escaped, st.ct_map_derived_mask, s->ct_reason_escaped,
+                     st.k_ct_derived_mask, s->k_reason_escaped,
+                     st.i_normal_pushed_mask, s->i_normal_reason_escaped, st.summed_unmeasured_mask);
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, n > 0 ? (size_t)n : 0);
+    esp_err_t ret = httpd_resp_send(req, s->json, n > 0 ? (size_t)n : 0);
+    free(s);
+    return ret;
 }
 
 /* M12: the persisted derivation record, for the commissioning page. Kept a

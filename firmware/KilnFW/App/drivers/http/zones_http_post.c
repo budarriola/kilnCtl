@@ -356,33 +356,64 @@ esp_err_t zones_post_handler(httpd_req_t *req)
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
             new_max_temp_c[i] = (i < tmp.thermo_count) ? tmp.zones[i].max_temp_c : 0.0f;
         }
+        /* 2026-09-10 opus review, httpd stack blob class: ceiling_reason[192] +
+         * escaped[224] + resp[300] used to all live on THIS handler's own
+         * frame, which already also carries the full `tmp` zone-config struct
+         * -- 716 B live simultaneously on the shared 8 KB httpd stack this
+         * repo has already panicked from twice. Heap-allocate the trio,
+         * following diagnostics_http.c's cfgfs_status_get_handler() pattern.
+         * ceiling_reason is the guard's own out-param, needed on the call
+         * below regardless of outcome, so the allocation happens before the
+         * call, not just in the failure arm; a malloc failure here fails
+         * SAFE by refusing the raise (reason_out=NULL is tolerated by
+         * safety_ceiling_policy_guard_raise()) rather than risking an
+         * unconfirmed raise. */
+        typedef struct {
+            char ceiling_reason[192];
+            char escaped[224];
+            char resp[300];
+        } ceiling_scratch_t;
+        ceiling_scratch_t *cs = malloc(sizeof(*cs));
         safety_ceiling_sync_result_t ceiling_result;
-        char ceiling_reason[192];
-        if (!safety_ceiling_sync_guard_raise(s_hw_safety, new_max_temp_c, MAX31856_CHANNEL_COUNT, &ceiling_result,
-                                              ceiling_reason, sizeof(ceiling_reason))) {
+        bool raise_ok;
+        if (!cs) {
+            ESP_LOGE(ZONES_HTTP_TAG, "zones_post_handler: malloc(%u) failed -- refusing the ceiling raise",
+                     (unsigned)sizeof(*cs));
+            raise_ok = safety_ceiling_sync_guard_raise(s_hw_safety, new_max_temp_c, MAX31856_CHANNEL_COUNT,
+                                                       &ceiling_result, NULL, 0);
+        } else {
+            raise_ok = safety_ceiling_sync_guard_raise(s_hw_safety, new_max_temp_c, MAX31856_CHANNEL_COUNT,
+                                                       &ceiling_result, cs->ceiling_reason,
+                                                       sizeof(cs->ceiling_reason));
+        }
+        if (!raise_ok) {
             ESP_LOGW(ZONES_HTTP_TAG,
                      "POST /api/zones refused: raising the safety processor's ceiling failed/could not be "
                      "confirmed -- zone config left UNCHANGED: %s",
-                     ceiling_reason);
-            char escaped[224];
-            size_t o = 0;
-            for (const char *c = ceiling_reason; *c && o + 2 < sizeof(escaped); c++) {
-                if (*c == '"' || *c == '\\') {
-                    escaped[o++] = '\\';
+                     cs ? cs->ceiling_reason : "(out of memory -- no detail available)");
+            if (cs) {
+                size_t o = 0;
+                for (const char *c = cs->ceiling_reason; *c && o + 2 < sizeof(cs->escaped); c++) {
+                    if (*c == '"' || *c == '\\') {
+                        cs->escaped[o++] = '\\';
+                    }
+                    cs->escaped[o++] = *c;
                 }
-                escaped[o++] = *c;
+                cs->escaped[o] = '\0';
+                int len = snprintf(cs->resp, sizeof(cs->resp),
+                                    "{\"ok\":false,\"error\":\"safety_ceiling_raise_failed\",\"reason\":\"%s\"}",
+                                    cs->escaped);
+                httpd_resp_set_status(req, "409 Conflict");
+                httpd_resp_set_type(req, "application/json");
+                httpd_resp_send(req, cs->resp, len > 0 && (size_t)len < sizeof(cs->resp) ? (size_t)len : strlen(cs->resp));
+                free(cs);
+            } else {
+                httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
             }
-            escaped[o] = '\0';
-            char resp[300];
-            int len = snprintf(resp, sizeof(resp),
-                                "{\"ok\":false,\"error\":\"safety_ceiling_raise_failed\",\"reason\":\"%s\"}",
-                                escaped);
-            httpd_resp_set_status(req, "409 Conflict");
-            httpd_resp_set_type(req, "application/json");
-            httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
             free(body);
             return ESP_OK;
         }
+        free(cs);
         /* ceiling_result is RAISED or NONE here -- either way the Pico's
          * ceiling is now confirmed to be >= the proposed new max, so this
          * commit is safe to apply. A LOWER (if any) is deliberately NOT
