@@ -141,6 +141,23 @@ static void zone_sweep_task_record_ct_channels(void *ctx, uint8_t zi, uint8_t re
             (void)zone_cfg_committed_f32(ZONE_KCT_PARAM_ID(ZONE_CT_CHANNEL_COUNT - 1), &live_k_ct);
             if (zone_sweep_summed_normal_a(with_on, s_ct_summed_idle_a, live_k_ct, &normal_a)) {
                 zone_normals_set(zi, normal_a);
+                /* 2026-09-10 fix (finding A, s14_s15_ct_calibration_sweep
+                 * audit): the shared channel absolutely DOES have a scale
+                 * factor worth deriving in summed mode -- there is exactly
+                 * one CT and, once every zone's normal_a resolves above the
+                 * noise floor, exactly one whole-kiln total (the sum of
+                 * those per-zone deltas, each measured with every other
+                 * relay forced off -- see zone_sweep_hw_energize()'s 0xFF
+                 * mask -- so no zone's current is double-counted). This
+                 * accumulator is the summed-topology equivalent of the
+                 * per_zone branch's own s_ct_derive.measured_total_a total
+                 * a few lines below in the non-summed path. Left at 0 (its
+                 * memset default) and never touched if any zone stays
+                 * unmeasured -- zone_sweep_plan_k_ct()'s summed branch
+                 * refuses on s_sweep.summed_unmeasured_mask != 0 for exactly
+                 * the same "an incomplete total scales k_ct low" reason the
+                 * per_zone branch already documents. */
+                s_ct_derive.measured_total_a += normal_a;
             } else {
                 /* opus review finding (MEDIUM): the shared channel read
                  * LOWER with this zone on than idle -- a wiring/noise
@@ -644,6 +661,65 @@ static bool zone_sweep_confirm_k_ct_landed(uint8_t mask, const float *k_new, cha
     return true;
 }
 
+/* 2026-09-10 fix (finding A, s14_s15_ct_calibration_sweep audit): summed-
+ * topology twin of zone_sweep_plan_k_ct() below. One shared CT, one
+ * whole-kiln total (s_ct_derive.measured_total_a, accumulated zone-by-zone
+ * in zone_sweep_task_record_ct_channels()'s summed branch), so this is
+ * simpler than the per-channel case, not harder -- no zone_for_ch mapping,
+ * no conflict/unresolved bookkeeping, because there is only ever one
+ * candidate channel: ZONE_CT_CHANNEL_COUNT-1. s_ct_derive.derived_mask is
+ * deliberately left untouched by this whole function (it stays the sentinel
+ * zone_sweep_push_ct_channel_map() reads as "not applicable" for this
+ * topology) -- the mask this function hands back is a local one, scoped to
+ * the k_ct push only. */
+static uint8_t zone_sweep_plan_k_ct_summed(float *out_k, char *note, size_t note_cap)
+{
+    const uint8_t ch = ZONE_CT_CHANNEL_COUNT - 1;
+    /* Same "an incomplete total scales k_ct low" reasoning as the per_zone
+     * branch's unresolved_zone_mask check -- here a zone counts as missing
+     * whenever zone_sweep_summed_normal_a() could not clear the noise floor
+     * for it (s_sweep.summed_unmeasured_mask), since its contribution to
+     * measured_total_a was never added at all in that case. */
+    if (s_sweep.summed_unmeasured_mask != 0) {
+        snprintf(note, note_cap,
+                 "not every zone's normal current cleared the noise floor -- an incomplete "
+                 "total would scale k_ct low, so it was not set");
+        return 0;
+    }
+    /* CT_COMMISSIONING_PLAN.md step 1: manual still wins over the sweep in
+     * summed mode too -- same check as the per_zone loop, just against the
+     * one channel that exists here. */
+    float existing_a_fs = 0.0f, existing_zero_mv = 0.0f;
+    safety_ct_cal_source_t existing_source = SAFETY_CT_CAL_SOURCE_SWEEP;
+    if (safety_cfg_store_get_ct_cal_input(ch, &existing_a_fs, &existing_zero_mv, &existing_source) &&
+        existing_source == SAFETY_CT_CAL_SOURCE_MANUAL) {
+        snprintf(note, note_cap,
+                 "the shared CT channel was calibrated manually -- the sweep does not "
+                 "overwrite it");
+        return 0;
+    }
+    float mains_v = 0.0f, power_w = 0.0f;
+    if (!zone_cfg_committed_f32(ZONE_MAINS_VOLTAGE_PARAM_ID, &mains_v) ||
+        !zone_cfg_committed_f32(ZONE_MAX_POWER_PARAM_ID, &power_w)) {
+        snprintf(note, note_cap, "CT scale not calibrated: %.70s",
+                 zone_kct_derive_str(ZONE_KCT_DERIVE_NO_NAMEPLATE));
+        return 0;
+    }
+    float k_old = 0.0f;
+    if (!zone_cfg_committed_f32(ZONE_KCT_PARAM_ID(ch), &k_old)) {
+        k_old = 0.0f; /* never committed -- zone_sweep_derive_k_ct() refuses on it */
+    }
+    float k_new = 0.0f;
+    zone_kct_derive_t r =
+        zone_sweep_derive_k_ct(s_ct_derive.measured_total_a, power_w, mains_v, k_old, &k_new);
+    if (r != ZONE_KCT_DERIVE_OK) {
+        snprintf(note, note_cap, "CT scale not calibrated: %.70s", zone_kct_derive_str(r));
+        return 0;
+    }
+    out_k[ch] = k_new;
+    return (uint8_t)(1u << ch);
+}
+
 /* Decides what this run may calibrate, ahead of touching the link at all --
  * separated from the staging below so the whole decision (including every
  * refusal) is reachable from a host test without a fake link. Returns the
@@ -651,6 +727,9 @@ static bool zone_sweep_confirm_k_ct_landed(uint8_t mask, const float *k_new, cha
  * reason whenever that mask comes back 0. */
 static uint8_t zone_sweep_plan_k_ct(float *out_k, char *note, size_t note_cap)
 {
+    if (s_ct_topology_summed) {
+        return zone_sweep_plan_k_ct_summed(out_k, note, note_cap);
+    }
     if (s_ct_derive.derived_mask == 0) {
         snprintf(note, note_cap, "no CT channel was identified -- CT scale not calibrated");
         return 0;

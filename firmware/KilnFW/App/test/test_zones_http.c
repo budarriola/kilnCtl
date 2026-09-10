@@ -9010,6 +9010,113 @@ static void test_zone_sweep_plan_k_ct_skips_a_manually_calibrated_channel(void)
     test_ct_cal_reset();
 }
 
+// 2026-09-10 fix (finding A, s14_s15_ct_calibration_sweep audit): before this
+// fix, ct_topology=summed left s_ct_derive.derived_mask at 0 for the whole
+// run, so zone_sweep_plan_k_ct()'s per-channel loop -- gated on that same
+// mask -- could never plan anything on a summed board, regardless of load.
+// zone_sweep_plan_k_ct_summed() is the fix: one shared channel, one
+// whole-kiln total, no per-relay map needed at all.
+static void kct_setup_clean_summed_run(void)
+{
+    test_link_reset();
+    test_cfg_rows_reset();
+    memset(&s_ct_derive, 0, sizeof(s_ct_derive));
+    zone_k_ct_clear();
+    s_sweep.summed_unmeasured_mask = 0;
+    // Deliberately NOT touching derived_mask/zone_for_ch -- the summed path
+    // must not need them, and a stray non-zero value here would be a bug in
+    // the test, not the production path.
+    s_ct_derive.measured_total_a = 30.0f; // matches the nameplate exactly
+    test_cfg_set_f32(ZONE_MAINS_VOLTAGE_PARAM_ID, 240.0f, true);
+    test_cfg_set_f32(ZONE_MAX_POWER_PARAM_ID, 7200.0f, true);
+    test_cfg_set_f32(ZONE_KCT_PARAM_ID(ZONE_CT_CHANNEL_COUNT - 1), 0.0333f, true);
+}
+
+static void test_zone_sweep_plan_k_ct_summed_derives_from_shared_channel(void)
+{
+    TEST_SECTION("zone_sweep_plan_k_ct -- summed topology: a complete run derives the ONE shared "
+                 "channel from the whole-kiln total, with no per-relay map involved at all");
+
+    s_ct_topology_summed = true;
+    kct_setup_clean_summed_run();
+
+    float k[ZONE_CT_CHANNEL_COUNT] = {0};
+    char note[96] = "";
+    uint8_t mask = zone_sweep_plan_k_ct(k, note, sizeof(note));
+
+    TEST_CHECK(mask == (uint8_t)(1u << (ZONE_CT_CHANNEL_COUNT - 1)),
+               "only the shared channel's bit is set");
+    TEST_CHECK(note[0] == '\0', "a clean plan says nothing");
+    TEST_CHECK(fabsf(k[ZONE_CT_CHANNEL_COUNT - 1] - 0.0333f) < 1e-6f,
+               "a matching measurement leaves the scale where it was");
+    TEST_CHECK(s_ct_derive.derived_mask == 0,
+               "the ct_channel_map derivation state is left untouched -- still 'not applicable'");
+
+    s_ct_topology_summed = false;
+}
+
+static void test_zone_sweep_plan_k_ct_summed_refuses_when_any_zone_unmeasured(void)
+{
+    TEST_SECTION("zone_sweep_plan_k_ct -- summed topology: NEGATIVE TEST, an incomplete pass "
+                 "(one zone never cleared the noise floor) refuses rather than scaling k_ct off a "
+                 "partial total");
+
+    s_ct_topology_summed = true;
+    kct_setup_clean_summed_run();
+    s_sweep.summed_unmeasured_mask = (uint8_t)(1u << 1); // zone 1 never measured
+
+    float k[ZONE_CT_CHANNEL_COUNT] = {0};
+    char note[96] = "";
+    uint8_t mask = zone_sweep_plan_k_ct(k, note, sizeof(note));
+
+    TEST_CHECK(mask == 0, "an incomplete pass derives nothing");
+    TEST_CHECK(strstr(note, "incomplete") != NULL, "and says why");
+
+    s_sweep.summed_unmeasured_mask = 0;
+    s_ct_topology_summed = false;
+}
+
+static void test_zone_sweep_plan_k_ct_summed_skips_a_manually_calibrated_channel(void)
+{
+    TEST_SECTION("zone_sweep_plan_k_ct -- summed topology: CT_COMMISSIONING_PLAN.md step 1 still "
+                 "applies -- a hand-entered A_fs/zero_mv on the shared channel is never overwritten");
+
+    s_ct_topology_summed = true;
+    kct_setup_clean_summed_run();
+    test_ct_cal_set(ZONE_CT_CHANNEL_COUNT - 1, 1.0f, 0.0f, SAFETY_CT_CAL_SOURCE_MANUAL);
+
+    float k[ZONE_CT_CHANNEL_COUNT] = {0};
+    char note[96] = "";
+    uint8_t mask = zone_sweep_plan_k_ct(k, note, sizeof(note));
+
+    TEST_CHECK(mask == 0, "the manually-calibrated shared channel is excluded from the plan");
+    TEST_CHECK(strstr(note, "manually") != NULL, "and says why");
+
+    test_ct_cal_reset();
+    s_ct_topology_summed = false;
+}
+
+// PROOF this is really the new summed branch executing, not the pre-existing
+// per_zone code silently doing the same thing: with s_ct_topology_summed
+// left false (kct_setup_clean_run()'s per_zone fixture, which never touches
+// s_sweep.summed_unmeasured_mask), the ORIGINAL derived_mask-gated behavior
+// must still run unchanged.
+static void test_zone_sweep_plan_k_ct_per_zone_path_unaffected_by_summed_fix(void)
+{
+    TEST_SECTION("zone_sweep_plan_k_ct -- NEGATIVE TEST: per_zone topology is untouched by the "
+                 "summed-mode fix above -- still gated on derived_mask, not summed_unmeasured_mask");
+
+    kct_setup_clean_run(); // s_ct_topology_summed stays false
+    s_sweep.summed_unmeasured_mask = 0xFFu; // would refuse every summed plan if the branch leaked
+
+    float k[ZONE_CT_CHANNEL_COUNT] = {0};
+    char note[96] = "";
+    TEST_CHECK(zone_sweep_plan_k_ct(k, note, sizeof(note)) == 0x07,
+               "per_zone path plans all three channels, ignoring summed_unmeasured_mask entirely");
+
+    s_sweep.summed_unmeasured_mask = 0;
+}
+
 static void test_zone_sweep_plan_k_ct_plans_every_channel_when_none_are_manual(void)
 {
     TEST_SECTION("zone_sweep_plan_k_ct -- NEGATIVE TEST: with no manual channel at all, every "
@@ -9934,6 +10041,10 @@ void run_test_zones_http(void)
     test_zone_sweep_derive_k_ct_refuses_an_uncommissioned_prior_k();
     test_zone_sweep_derive_k_ct_refuses_an_implausible_correction();
     test_zone_sweep_plan_k_ct_clean_run_plans_every_derived_channel();
+    test_zone_sweep_plan_k_ct_summed_derives_from_shared_channel();
+    test_zone_sweep_plan_k_ct_summed_refuses_when_any_zone_unmeasured();
+    test_zone_sweep_plan_k_ct_summed_skips_a_manually_calibrated_channel();
+    test_zone_sweep_plan_k_ct_per_zone_path_unaffected_by_summed_fix();
     test_zone_sweep_plan_k_ct_skips_a_manually_calibrated_channel();
     test_zone_sweep_plan_k_ct_plans_every_channel_when_none_are_manual();
     test_zone_sweep_plan_k_ct_refuses_an_incomplete_run();
