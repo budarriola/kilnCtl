@@ -1179,6 +1179,20 @@ try {
 
     Invoke-HostTestExe -Name "readiness_gate" -ExePath $exe34 -BuildCmd $cmd34
 
+    # ---- test_s8_rate_guard_estimate.c: its own THIRTY-FIFTH, separate
+    # executable. docs/audits/s8_auto_calc_design_2026-09-09.md's auto-calc
+    # for the RP2040 safety processor's S8 rate-of-rise guard. Own executable
+    # for the same reason zone_coupling_solve's exe20 is: s8_rate_guard_
+    # estimate.c is a small, fully self-contained pure-math module (only
+    # <math.h> and MAX31856.h's channel-count constant) with no fakes to
+    # collide with anything already linked into another executable.
+    $exe35 = Join-Path $outDir "kilnctl_host_tests_s8_rate_guard_estimate.exe"
+    $cmd35 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$outDir\\`" /Fe:`"$exe35`" `"$(Join-Path $testDir 'test_s8_rate_guard_estimate.c')`" " +
+            "`"$(Join-Path $driversDir 'control/s8_rate_guard_estimate.c')`""
+
+    Invoke-HostTestExe -Name "s8_rate_guard_estimate" -ExePath $exe35 -BuildCmd $cmd35
+
     # ---- summary ----------------------------------------------------------
     #
     # 28 executables are attempted above (main + zones_http + safety_cfg_http +
@@ -1217,7 +1231,10 @@ try {
     # 32 -> 33: this pass added test_readiness_gate.c as its own 33rd
     # Invoke-HostTestExe call (readiness_gate.h's firing interlock, owner
     # decision 2026-09-09 -- see docs/SAFETY_CASE.md sec 3 item 10).
-    $totalExpected = 33
+    # 33 -> 34: this pass added test_s8_rate_guard_estimate.c as its own 34th
+    # Invoke-HostTestExe call (S8 rate-guard auto-calc,
+    # docs/audits/s8_auto_calc_design_2026-09-09.md).
+    $totalExpected = 34
     Write-Host ""
     Write-Host "Built: $($script:builtExes.Count)/$totalExpected executables"
     if ($script:buildFailures.Count -gt 0) {

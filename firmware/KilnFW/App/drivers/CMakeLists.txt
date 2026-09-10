@@ -375,6 +375,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "control/heat_enable.c"
                        "control/heater_output.c"
                        "control/zone_coupling_solve.c"
+                       "control/s8_rate_guard_estimate.c"
                        "control/profile_executor.c"
                        # profile_executor.c split 2026-09-01 ("files over
                        # 1500 lines should be broken up where it makes
