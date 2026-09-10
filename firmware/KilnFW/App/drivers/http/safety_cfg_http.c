@@ -136,6 +136,20 @@ typedef struct {
     bool rate_guard_has_provenance;
     safety_rate_guard_source_t rate_guard_source;
     float rate_guard_value; /* meaningless unless rate_guard_has_provenance */
+
+    /* Field-by-field diff of the most recent refetch (safety_cfg_store.h's
+     * safety_cfg_diff_entry_t) -- 2026-09-10, the decoded config-diff tool
+     * docs/audits/safety_config_crc_seq_2026-09-10.md recommended, so an
+     * operator sees WHICH named field(s) moved on a config_crc change
+     * instead of just the fact that one occurred. Populated straight from
+     * safety_cfg_store_get_diff() et al, same "snapshot is a plain struct so
+     * this file's JSON builder stays host-testable with no live link" pattern
+     * every other field above already follows. */
+    size_t diff_count;
+    safety_cfg_diff_entry_t diff_entries[SAFETY_CFG_STORE_DIFF_MAX];
+    bool diff_truncated;
+    uint16_t diff_from_crc;
+    uint16_t diff_to_crc;
 } safety_cfg_http_snapshot_t;
 
 static const char *ct_cal_source_name(safety_ct_cal_source_t s)
@@ -314,7 +328,48 @@ static size_t build_commissioning_json(const safety_cfg_http_snapshot_t *s, char
         }
         APPEND("}");
     }
-    APPEND("]}");
+    APPEND("]");
+
+    /* "last_diff": decoded field-by-field diff of the most recent refetch,
+     * per safety_cfg_http_snapshot_t's own comment. from_crc/to_crc are 0/0
+     * ("nothing refetched this boot") until the first refetch; an operator
+     * seeing count==0 after a stale->fresh transition can trust that no
+     * *decodable* field actually moved (a seq-only bump, say), rather than
+     * wondering whether this endpoint just failed to compute it. */
+    APPEND(",\"last_diff\":{\"from_crc\":%u,\"to_crc\":%u,\"truncated\":%s,\"fields\":[",
+           (unsigned)s->diff_from_crc, (unsigned)s->diff_to_crc, s->diff_truncated ? "true" : "false");
+    for (size_t i = 0; i < s->diff_count; i++) {
+        const safety_cfg_diff_entry_t *d = &s->diff_entries[i];
+        APPEND("%s{\"name\":\"%s\"", i == 0 ? "" : ",", d->name);
+        if (d->old_set) {
+            switch (d->type) {
+            case KILNLINK_PARAM_TYPE_BOOL: APPEND(",\"old\":%s", d->old_value.bool_val ? "true" : "false"); break;
+            case KILNLINK_PARAM_TYPE_U8: APPEND(",\"old\":%u", (unsigned)d->old_value.u8_val); break;
+            case KILNLINK_PARAM_TYPE_U16: APPEND(",\"old\":%u", (unsigned)d->old_value.u16_val); break;
+            case KILNLINK_PARAM_TYPE_F32:
+                if (isfinite(d->old_value.f32_val)) {
+                    APPEND(",\"old\":%.6g", (double)d->old_value.f32_val);
+                }
+                break;
+            default: break;
+            }
+        }
+        if (d->new_set) {
+            switch (d->type) {
+            case KILNLINK_PARAM_TYPE_BOOL: APPEND(",\"new\":%s", d->new_value.bool_val ? "true" : "false"); break;
+            case KILNLINK_PARAM_TYPE_U8: APPEND(",\"new\":%u", (unsigned)d->new_value.u8_val); break;
+            case KILNLINK_PARAM_TYPE_U16: APPEND(",\"new\":%u", (unsigned)d->new_value.u16_val); break;
+            case KILNLINK_PARAM_TYPE_F32:
+                if (isfinite(d->new_value.f32_val)) {
+                    APPEND(",\"new\":%.6g", (double)d->new_value.f32_val);
+                }
+                break;
+            default: break;
+            }
+        }
+        APPEND("}");
+    }
+    APPEND("]}}");
 
 #undef APPEND
     return o;
@@ -324,7 +379,8 @@ static size_t build_commissioning_json(const safety_cfg_http_snapshot_t *s, char
  * entry is at most ~80 bytes (id+name up to ~24 chars+type+set+value), times
  * SAFETY_CFG_PARAM_COUNT, plus a small fixed header -- generous headroom
  * over the ~57*80 + 128 ~= 4700 bytes a full response actually needs. */
-#define SAFETY_CFG_JSON_MAX (SAFETY_CFG_PARAM_COUNT * 128u + 256u)
+#define SAFETY_CFG_JSON_MAX \
+    (SAFETY_CFG_PARAM_COUNT * 128u + SAFETY_CFG_STORE_DIFF_MAX * 128u + 256u)
 
 static esp_err_t commissioning_get_handler(httpd_req_t *req)
 {
@@ -364,6 +420,15 @@ static esp_err_t commissioning_get_handler(httpd_req_t *req)
     }
     (void)safety_cfg_store_get_rate_guard_meta(&snap.rate_guard_source, &snap.rate_guard_value,
                                                 &snap.rate_guard_has_provenance);
+    snap.diff_count = safety_cfg_store_diff_count();
+    if (snap.diff_count > SAFETY_CFG_STORE_DIFF_MAX) {
+        snap.diff_count = SAFETY_CFG_STORE_DIFF_MAX; /* defensive only -- cannot happen */
+    }
+    for (size_t i = 0; i < snap.diff_count; i++) {
+        (void)safety_cfg_store_get_diff(i, &snap.diff_entries[i]);
+    }
+    snap.diff_truncated = safety_cfg_store_diff_truncated();
+    safety_cfg_store_get_diff_crc_range(&snap.diff_from_crc, &snap.diff_to_crc);
     snap.cached_crc = safety_cfg_store_cached_crc();
     uint32_t fetched = safety_cfg_store_fetched_ms_ago();
     snap.fetched_ms_ago_or_neg1 = (fetched == UINT32_MAX) ? -1 : (int64_t)fetched;
@@ -1710,6 +1775,44 @@ static s8_rate_guard_estimate_reason_t rate_guard_gather_and_estimate(float *out
     if (thermo_count > MAX31856_CHANNEL_COUNT) {
         thermo_count = MAX31856_CHANNEL_COUNT; /* defensive, matches s8_rate_guard_estimate()'s own clamp */
     }
+
+    /* 2026-09-10 fix (finding C): mirrors zone_coupling_solve.c's
+     * coupling_matrix_provenance_ok() rule -- the control path (ff_hold/
+     * ff_climb) refuses to use this same coupling data whole whenever it
+     * carries measured off-diagonals but no member's coupling_diag_k_dc has
+     * ever been identified on hardware. This estimator is a SAFETY
+     * threshold; it must trust the data at least as little as the
+     * feedforward path does, not less. board_coupling_provenance_ok is
+     * computed board-wide (a property of the whole matrix, same as the
+     * control path) and applied to every zone below -- see
+     * s8_rate_guard_estimate.h's PROVENANCE section. */
+    bool any_measured_off_diagonal = false;
+    for (uint8_t row = 0; row < thermo_count && !any_measured_off_diagonal; row++) {
+        float row_cells[MAX31856_CHANNEL_COUNT] = {0};
+        if (!zones_config_get_coupling(row, row_cells)) {
+            continue;
+        }
+        for (uint8_t col = 0; col < thermo_count; col++) {
+            if (col == row) {
+                continue;
+            }
+            if (isfinite(row_cells[col]) && row_cells[col] != 0.0f) {
+                any_measured_off_diagonal = true;
+                break;
+            }
+        }
+    }
+    bool board_coupling_provenance_ok = true;
+    if (any_measured_off_diagonal) {
+        for (uint8_t i = 0; i < thermo_count; i++) {
+            float diag_k_dc = 0.0f;
+            if (!(zones_config_get_coupling_diag_k_dc(i, &diag_k_dc) && isfinite(diag_k_dc) && diag_k_dc > 0.0f)) {
+                board_coupling_provenance_ok = false;
+                break;
+            }
+        }
+    }
+
     for (uint8_t i = 0; i < thermo_count; i++) {
         float k_dc = 0.0f, tau_s = 0.0f, dead_time_s = 0.0f;
         float fit_temp_c = 0.0f, fit_ambient_c = 0.0f;
@@ -1739,11 +1842,26 @@ static s8_rate_guard_estimate_reason_t rate_guard_gather_and_estimate(float *out
          * "REAL FIRINGS ARE COUPLED". zones_config_get_coupling()'s row is
          * [affected=i][stepped=j]; exclude the diagonal (this zone's own
          * gain, already counted via k_dc) and sum the rest. A row read
-         * failure (uncommissioned coupling) leaves the sum at 0.0f, which
-         * for a genuinely single-zone board is correct and for a multi-zone
-         * board that has not run coupling identification yet is the best
-         * available answer -- the same "no worse than the previous
-         * own-zone-only basis" floor, not a claim of full coverage. */
+         * failure (uncommissioned coupling) leaves the sum at 0.0f. 2026-
+         * 09-10 fix (finding D): this comment used to claim that a zeroed
+         * sum reproduced "the previous own-zone-only basis" as a floor. It
+         * did not -- the margin also dropped 2.0x -> 1.3x in the same
+         * change, so a coupling-less board's threshold silently loosened by
+         * 1.54x, which is a strictly worse basis, not the same one. This is
+         * now actually true: board_coupling_provenance_ok (computed above
+         * this loop) makes s8_rate_guard_estimate() apply
+         * S8_RATE_GUARD_ESTIMATE_MARGIN_UNCOUPLED (2.0x, matching the
+         * pre-coupling value) whenever coupling is genuinely absent OR its
+         * provenance is unproven -- see coupling_provenance_ok below and
+         * s8_rate_guard_estimate.h's PROVENANCE section. */
+        /* 2026-09-10 fix ("also confirmed, smaller"): apply the SAME
+         * per-cell filter profile_feasibility.c's effective_k_dc() applies
+         * to this identical data (isfinite(row[j]) && row[j] > 0.0f) before
+         * summing, rather than trusting the raw row and only checking the
+         * SUM's sign afterward. Without this, a single negative cell could
+         * silently understate the basis without ever going negative overall
+         * (only a NaN cell was previously caught, via s8_rate_guard_
+         * estimate.c's isfinite() check on the summed total). */
         float coupling_row[MAX31856_CHANNEL_COUNT] = {0};
         float coupling_sum = 0.0f;
         if (zones_config_get_coupling(i, coupling_row)) {
@@ -1751,10 +1869,14 @@ static s8_rate_guard_estimate_reason_t rate_guard_gather_and_estimate(float *out
                 if (j == i) {
                     continue;
                 }
+                if (!isfinite(coupling_row[j]) || coupling_row[j] <= 0.0f) {
+                    continue;
+                }
                 coupling_sum += coupling_row[j];
             }
         }
         zones[i].coupling_gain_sum_c_per_duty = coupling_sum;
+        zones[i].coupling_provenance_ok = board_coupling_provenance_ok;
     }
     return s8_rate_guard_estimate(zones, thermo_count, out_c_per_min);
 }
@@ -1795,15 +1917,19 @@ static bool rate_guard_current_value(float *out_value, bool *out_is_set)
  * meaningful) only if no zone has a usable identification, or 0x0204's
  * current value could not be read at all. */
 static bool rate_guard_auto_compute(float *out_candidate, float *out_current, bool *out_current_is_set,
-                                     s8_rate_guard_auto_decision_t *out_decision, char *err_out,
+                                     s8_rate_guard_auto_decision_t *out_decision,
+                                     s8_rate_guard_estimate_reason_t *out_reason, char *err_out,
                                      size_t err_cap)
 {
     s8_rate_guard_estimate_reason_t reason = rate_guard_gather_and_estimate(out_candidate);
     /* OK and both CLAMPED_* variants all produce a usable *out_candidate --
      * see s8_rate_guard_estimate.h's enum comment. Only NO_DATA means no
-     * candidate was produced at all. The CLAMPED distinction exists for the
-     * caller (the GET/POST handlers below) to surface to the operator, not
-     * to gate whether a candidate exists. */
+     * candidate was produced at all. 2026-09-10 fix (finding E): the
+     * CLAMPED distinction previously stopped here -- neither JSON handler
+     * below actually surfaced it, despite this header's and this file's own
+     * comments claiming an operator could tell "from the plant" apart from
+     * "from a bound." *out_reason now carries it out to the callers that do. */
+    *out_reason = reason;
     if (reason != S8_RATE_GUARD_ESTIMATE_OK && reason != S8_RATE_GUARD_ESTIMATE_OK_CLAMPED_FLOOR &&
         reason != S8_RATE_GUARD_ESTIMATE_OK_CLAMPED_CEILING) {
         snprintf(err_out, err_cap, "no zone has a usable identification yet (run autotune on at "
@@ -1819,6 +1945,22 @@ static bool rate_guard_auto_compute(float *out_candidate, float *out_current, bo
     return true;
 }
 
+/* "plant" (S8_RATE_GUARD_ESTIMATE_OK), "floor", or "ceiling" -- see finding
+ * E: this is the string the GET/POST JSON now actually carries, closing the
+ * gap between this module's doc comments and what an operator could
+ * previously observe. */
+static const char *rate_guard_clamp_label(s8_rate_guard_estimate_reason_t reason)
+{
+    switch (reason) {
+    case S8_RATE_GUARD_ESTIMATE_OK_CLAMPED_FLOOR:
+        return "floor";
+    case S8_RATE_GUARD_ESTIMATE_OK_CLAMPED_CEILING:
+        return "ceiling";
+    default:
+        return "plant";
+    }
+}
+
 /* GET: compute-and-report only, never writes anything -- safe to poll from
  * the commissioning page on every load, same as the rest of this endpoint's
  * GET side. */
@@ -1827,17 +1969,19 @@ static esp_err_t rate_guard_auto_get_handler(httpd_req_t *req)
     float candidate = 0.0f, current = 0.0f;
     bool current_is_set = false;
     s8_rate_guard_auto_decision_t decision = S8_RATE_GUARD_AUTO_APPLY;
+    s8_rate_guard_estimate_reason_t reason = S8_RATE_GUARD_ESTIMATE_NO_DATA;
     char err[160];
-    char resp[256];
+    char resp[288];
     int len;
-    if (!rate_guard_auto_compute(&candidate, &current, &current_is_set, &decision, err, sizeof(err))) {
+    if (!rate_guard_auto_compute(&candidate, &current, &current_is_set, &decision, &reason, err, sizeof(err))) {
         len = snprintf(resp, sizeof(resp), "{\"ok\":false,\"reason\":\"%s\"}", err);
     } else {
         len = snprintf(resp, sizeof(resp),
                         "{\"ok\":true,\"candidate_c_per_min\":%.6g,\"current_set\":%s,"
-                        "\"current_c_per_min\":%.6g,\"would_loosen\":%s}",
+                        "\"current_c_per_min\":%.6g,\"would_loosen\":%s,\"candidate_source\":\"%s\"}",
                         (double)candidate, current_is_set ? "true" : "false", (double)current,
-                        decision == S8_RATE_GUARD_AUTO_SUGGEST_ONLY ? "true" : "false");
+                        decision == S8_RATE_GUARD_AUTO_SUGGEST_ONLY ? "true" : "false",
+                        rate_guard_clamp_label(reason));
     }
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
@@ -1866,10 +2010,12 @@ static esp_err_t rate_guard_auto_post_handler(httpd_req_t *req)
     float candidate = 0.0f, current = 0.0f;
     bool current_is_set = false;
     s8_rate_guard_auto_decision_t decision = S8_RATE_GUARD_AUTO_APPLY;
+    s8_rate_guard_estimate_reason_t clamp_reason = S8_RATE_GUARD_ESTIMATE_NO_DATA;
     char err[160];
     char resp[320];
     int len;
-    if (!rate_guard_auto_compute(&candidate, &current, &current_is_set, &decision, err, sizeof(err))) {
+    if (!rate_guard_auto_compute(&candidate, &current, &current_is_set, &decision, &clamp_reason, err,
+                                  sizeof(err))) {
         len = snprintf(resp, sizeof(resp), "{\"ok\":false,\"reason\":\"%s\"}", err);
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
@@ -1917,8 +2063,10 @@ static esp_err_t rate_guard_auto_post_handler(httpd_req_t *req)
     safety_cfg_store_set_rate_guard_meta(SAFETY_RATE_GUARD_SOURCE_AUTO, candidate, &nvs_err);
 
     len = snprintf(resp, sizeof(resp),
-                    "{\"ok\":true,\"applied\":true,\"value_c_per_min\":%.6g,\"was_loosen\":%s}",
-                    (double)candidate, (decision == S8_RATE_GUARD_AUTO_SUGGEST_ONLY) ? "true" : "false");
+                    "{\"ok\":true,\"applied\":true,\"value_c_per_min\":%.6g,\"was_loosen\":%s,"
+                    "\"candidate_source\":\"%s\"}",
+                    (double)candidate, (decision == S8_RATE_GUARD_AUTO_SUGGEST_ONLY) ? "true" : "false",
+                    rate_guard_clamp_label(clamp_reason));
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
 }

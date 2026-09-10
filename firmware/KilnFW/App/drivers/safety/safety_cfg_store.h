@@ -417,6 +417,61 @@ bool safety_cfg_store_set_rate_guard_meta(safety_rate_guard_source_t source, flo
  * derived"/"hand-entered" label for a value that preset just replaced. */
 void safety_cfg_store_clear_rate_guard_meta(void);
 
+/* ---------------------------------------------------------------------- */
+/* Field-by-field diff of the most recent refetch -- 2026-09-10, follow-up to
+ * docs/audits/safety_config_crc_seq_2026-09-10.md's recommendation ("a
+ * decoded config-diff tool ... the concrete fix for the CRC's inability to
+ * distinguish 'value changed' from 'write happened'"), same idea as the
+ * trip_mask decode: an operator staring at "config CRC changed" has no way to
+ * tell which of 68 fields moved, or whether any of them are the field they
+ * actually care about, without doing byte arithmetic by hand.
+ *
+ * safety_cfg_store_refetch_locked() computes this by comparing the
+ * about-to-be-installed scratch record against the cache it is about to
+ * replace, ONE PARAM AT A TIME, right before it installs it -- so this always
+ * describes "what just changed on the last successful refetch", never a
+ * comparison against whatever the Pico holds RIGHT NOW (that would need a
+ * second live round trip this module has no reason to make; the commissioning
+ * page already triggers a refetch on every CRC mismatch, so in practice this
+ * fires exactly when the operator's own "stale" flag does). Cleared to empty
+ * on a refetch that lands with zero changed fields (e.g. a `seq`-only CRC
+ * bump from an idempotent resend, per that audit doc) -- an empty diff after
+ * a stale->fresh transition is itself the honest answer "nothing you can see
+ * actually moved". */
+#define SAFETY_CFG_STORE_DIFF_MAX 12u
+
+typedef struct {
+    const char *name;
+    uint8_t type; /* KILNLINK_PARAM_TYPE_* */
+    bool old_set;
+    kilnlink_param_value_t old_value; /* meaningless if !old_set */
+    bool new_set;
+    kilnlink_param_value_t new_value; /* meaningless if !new_set */
+} safety_cfg_diff_entry_t;
+
+/* How many fields actually differed on the last successful refetch (capped at
+ * SAFETY_CFG_STORE_DIFF_MAX for storage -- see safety_cfg_store_diff_
+ * truncated() for whether the true count ran over that). 0 if nothing has
+ * been refetched yet this boot, or the last refetch changed nothing. */
+size_t safety_cfg_store_diff_count(void);
+
+/* Fills *out with diff entry `index` (0 <= index < safety_cfg_store_diff_
+ * count()). Returns false (out untouched) for an out-of-range index or a
+ * NULL out. */
+bool safety_cfg_store_get_diff(size_t index, safety_cfg_diff_entry_t *out);
+
+/* True if the last refetch changed more fields than SAFETY_CFG_STORE_DIFF_MAX
+ * can record -- the page should say "and N more" rather than imply the list
+ * above it is exhaustive. */
+bool safety_cfg_store_diff_truncated(void);
+
+/* The cached_config_crc values the last diff was computed between (from ->
+ * the record just replaced, to -> the record just installed) -- lets a caller
+ * label the diff ("what changed going from CRC A to CRC B") without a second
+ * source of truth for those two numbers. Both read 0 if nothing has been
+ * refetched yet this boot. */
+void safety_cfg_store_get_diff_crc_range(uint16_t *out_from_crc, uint16_t *out_to_crc);
+
 #ifdef __cplusplus
 }
 #endif

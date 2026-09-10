@@ -47,7 +47,10 @@
 #include "MAX31856.h"
 #include "ota_http.h" /* ota_http_check_interlocks() -- see backup_http.h's header comment */
 #include "profiles_http.h"
+#include "safety_ceiling_sync.h" /* 2026-09-10: a restored backup can raise max_temp_c same as a POST -- see
+                                  * the guard immediately before the zone-tuning commit loop below. */
 #include "zones_config_accessors.h"
+#include "zones_http_internal.h" /* s_hw_safety */
 
 /* ---- backup_import_apply()'s two big candidate arrays: heap, not stack ----
  *
@@ -933,6 +936,50 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
         }
     }
     bool settings_source_dirty = false; /* set true once any _no_save() commit below succeeds; see item 3 comment */
+
+    /* 2026-09-10 opus review: zones_http_post.c's zones_post_handler() gates every
+     * max_temp_c RAISE on safety_ceiling_sync_guard_raise() so the Pico's own
+     * abs_max_temp_c ceiling is written and CONFIRMED before the ESP's own ceiling
+     * is allowed to move up (see safety_ceiling_policy.h's header comment for the
+     * full invariant -- the Pico ceiling must never end up TIGHTER than the ESP's).
+     * A restored backup is the other place an operator can raise max_temp_c, and it
+     * was reaching zones_config_set_temp_limits() directly, bypassing that guard
+     * entirely -- precisely the defect 2d604d1d closed on the POST path, still open
+     * here. Build the proposed per-zone ceiling (backup's new value where the entry
+     * touches temp limits, else the zone's current live value) and run the same
+     * guard before ANY zone-tuning field commits, so a refused raise leaves the
+     * whole import uncommitted -- same "validate everything, then apply" discipline
+     * this function already follows for its two candidate arrays. */
+    {
+        float new_max_temp_c[MAX31856_CHANNEL_COUNT];
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            float cur_max = 0.0f, cur_min = 0.0f;
+            zones_config_get_temp_limits(zi, &cur_max, &cur_min);
+            new_max_temp_c[zi] = cur_max;
+        }
+        for (size_t i = 0; i < zone_candidate_count; i++) {
+            zone_candidate_t *zc = &zone_candidates[i];
+            if (zc->has_temp_limits && zc->index < MAX31856_CHANNEL_COUNT) {
+                new_max_temp_c[zc->index] = zc->max_temp_c;
+            }
+        }
+        safety_ceiling_sync_result_t ceiling_result;
+        char ceiling_reason[128];
+        if (!safety_ceiling_sync_guard_raise(s_hw_safety, new_max_temp_c, MAX31856_CHANNEL_COUNT, &ceiling_result,
+                                              ceiling_reason, sizeof(ceiling_reason))) {
+            /* Fixed prefix alone is already ~110 chars against a 160-byte err_cap -- room
+             * for ceiling_reason must be bounded explicitly (%.48s) rather than left open,
+             * or a long Pico-side reason string silently truncates this whole message
+             * instead of just the reason (-Werror=format-truncation caught the untruncated
+             * version outright: 164 B possible into a 160 B buffer with NO reason appended
+             * at all). */
+            snprintf(err_msg, err_cap,
+                    "backup would raise a zone ceiling; safety processor ceiling refused/unconfirmed: %.48s",
+                    ceiling_reason);
+            return false;
+        }
+    }
+
     for (size_t i = 0; i < zone_candidate_count; i++) {
         zone_candidate_t *zc = &zone_candidates[i];
         if (!zones_config_set_pid(zc->index, zc->kp, zc->ki, zc->kd)) {

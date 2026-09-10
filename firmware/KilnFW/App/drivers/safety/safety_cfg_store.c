@@ -292,6 +292,61 @@ typedef struct {
     safety_cfg_entry_t entries[SAFETY_CFG_PARAM_COUNT];
 } safety_cfg_store_blob_t;
 
+/* Field-by-field diff of the last successful refetch -- see safety_cfg_store.h's
+ * safety_cfg_diff_entry_t comment. Transient, RAM-only (never persisted --
+ * it describes an event, not state): computed fresh in
+ * safety_cfg_store_refetch_locked() every time it is about to install a new
+ * s_store, discarded (count reset to 0) on the very next refetch regardless
+ * of outcome, so a caller always sees either "the diff for the refetch that
+ * just happened" or "empty, nothing has refetched since I last looked". */
+static safety_cfg_diff_entry_t s_diff[SAFETY_CFG_STORE_DIFF_MAX];
+static size_t s_diff_count;
+static bool s_diff_truncated;
+static uint16_t s_diff_from_crc;
+static uint16_t s_diff_to_crc;
+
+/* NOT a separate function on purpose: safety_poll_task's own stack is
+ * documented near its ceiling (check_all_task_stack_budgets.ps1), and every
+ * function CALL on Xtensa's windowed ABI costs a register-window spill
+ * whether or not the callee has any locals of its own. This logic used to be
+ * its own safety_cfg_compute_diff()/safety_cfg_diff_value_equal() pair,
+ * called from refetch_locked() below; that put safety_poll_task 16 B over
+ * budget (3120 vs. 3104) for no reason -- refetch_locked() already exists on
+ * that same call path with its own frame, so folding the loop and the
+ * bit-exact comparison directly into its body (see the call site below,
+ * "safety_cfg_store_refetch_locked's own inline diff") adds ZERO new call
+ * frames, only a few bytes of additional locals inside a frame that already
+ * exists. See that call site for the actual loop. */
+
+size_t safety_cfg_store_diff_count(void)
+{
+    return s_diff_count;
+}
+
+bool safety_cfg_store_get_diff(size_t index, safety_cfg_diff_entry_t *out)
+{
+    if (!out || index >= s_diff_count) {
+        return false;
+    }
+    *out = s_diff[index];
+    return true;
+}
+
+bool safety_cfg_store_diff_truncated(void)
+{
+    return s_diff_truncated;
+}
+
+void safety_cfg_store_get_diff_crc_range(uint16_t *out_from_crc, uint16_t *out_to_crc)
+{
+    if (out_from_crc) {
+        *out_from_crc = s_diff_from_crc;
+    }
+    if (out_to_crc) {
+        *out_to_crc = s_diff_to_crc;
+    }
+}
+
 static safety_cfg_store_blob_t s_store;
 /* Set ONLY on a successful safety_cfg_store_refetch() -- a real, live round
  * trip to the Pico. 2026-08-27 audit fix (defect c): safety_cfg_store_init()
@@ -1332,6 +1387,57 @@ static bool safety_cfg_store_refetch_locked(SafetyLinkClass *link, uint16_t conf
             free(scr);
             return false;
         }
+    }
+
+    /* safety_cfg_store_refetch_locked's own inline diff -- see the comment
+     * above safety_cfg_store_diff_count() for why this is not a separate
+     * function. Same logic that function used to have: one param at a time,
+     * SAFETY_CFG_PARAM_TABLE order, bit-exact comparison (a diff tool that
+     * used epsilon-fuzzy float comparison could silently hide a real, if
+     * tiny, change from the operator). */
+    s_diff_count = 0;
+    s_diff_truncated = false;
+    s_diff_from_crc = s_store.config_crc;
+    s_diff_to_crc = scratch->config_crc;
+    for (size_t di = 0; di < SAFETY_CFG_PARAM_COUNT; di++) {
+        const safety_cfg_entry_t *o = &s_store.entries[di];
+        const safety_cfg_entry_t *n = &scratch->entries[di];
+        bool changed;
+        if (!o->set && !n->set) {
+            changed = false;
+        } else if (o->set != n->set) {
+            changed = true;
+        } else {
+            switch (SAFETY_CFG_PARAM_TABLE[di].type) {
+            case KILNLINK_PARAM_TYPE_BOOL:
+            case KILNLINK_PARAM_TYPE_U8:
+                changed = (o->value.u8_val != n->value.u8_val);
+                break;
+            case KILNLINK_PARAM_TYPE_U16:
+                changed = (o->value.u16_val != n->value.u16_val);
+                break;
+            case KILNLINK_PARAM_TYPE_F32:
+                changed = (memcmp(&o->value.f32_val, &n->value.f32_val, sizeof(o->value.f32_val)) != 0);
+                break;
+            default:
+                changed = false; /* unknown type: never claim a diff we cannot decode */
+                break;
+            }
+        }
+        if (!changed) {
+            continue;
+        }
+        if (s_diff_count >= SAFETY_CFG_STORE_DIFF_MAX) {
+            s_diff_truncated = true;
+            continue;
+        }
+        s_diff[s_diff_count].name = SAFETY_CFG_PARAM_TABLE[di].name;
+        s_diff[s_diff_count].type = SAFETY_CFG_PARAM_TABLE[di].type;
+        s_diff[s_diff_count].old_set = o->set;
+        s_diff[s_diff_count].old_value = o->value;
+        s_diff[s_diff_count].new_set = n->set;
+        s_diff[s_diff_count].new_value = n->value;
+        s_diff_count++;
     }
 
     s_store = *scratch;

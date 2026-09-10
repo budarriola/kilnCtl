@@ -161,6 +161,23 @@ bool safety_cfg_store_lookup(uint16_t param_id, uint8_t *out_type, const char **
 
 uint16_t safety_cfg_store_cached_crc(void) { return 0; }
 uint32_t safety_cfg_store_fetched_ms_ago(void) { return UINT32_MAX; }
+
+// safety_cfg_store's last-refetch diff (safety_cfg_store.h) -- commissioning_
+// get_handler() reads these to fill the snapshot; build_commissioning_json()
+// itself only reads the snapshot fields, per this file's own "pure JSON
+// builder tested directly, live-link-touching handler tested only via the
+// snapshot it fills" split (see the comment above test_build_json_borrowed_
+// unknown()). Stubbed empty here -- the last_diff RENDERING is what
+// test_build_json_last_diff_* above exercises, directly against a
+// hand-built snapshot.
+size_t safety_cfg_store_diff_count(void) { return 0; }
+bool safety_cfg_store_get_diff(size_t index, safety_cfg_diff_entry_t *out) { (void)index; (void)out; return false; }
+bool safety_cfg_store_diff_truncated(void) { return false; }
+void safety_cfg_store_get_diff_crc_range(uint16_t *out_from_crc, uint16_t *out_to_crc)
+{
+    if (out_from_crc) *out_from_crc = 0;
+    if (out_to_crc) *out_to_crc = 0;
+}
 static bool s_stub_refetch_result = true;
 static int s_stub_refetch_calls = 0;
 bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t crc)
@@ -682,6 +699,49 @@ static void test_build_json_set_param_includes_value(void)
     TEST_CHECK(len > 0, "JSON built successfully");
     TEST_CHECK(strstr(json, "\"set\":true") != NULL, "marked set:true");
     TEST_CHECK(strstr(json, "\"value\":1300") != NULL, "the real value is present");
+}
+
+// 2026-09-10: "last_diff" is the decoded field-by-field diff of the most
+// recent safety_cfg_store refetch (docs/audits/safety_config_crc_seq_2026-09-
+// 10.md's recommended follow-up to the config-CRC investigation, same idea as
+// the trip_mask decode) -- proves a genuine mismatch renders by name/old/new,
+// not just as a changed CRC number.
+static void test_build_json_last_diff_reports_named_mismatch(void)
+{
+    TEST_SECTION("build_commissioning_json -- last_diff names the field, old, and new value");
+    reset_all();
+    safety_cfg_http_snapshot_t snap = {0};
+    snap.diff_from_crc = 111;
+    snap.diff_to_crc = 222;
+    snap.diff_truncated = false;
+    snap.diff_count = 1;
+    snap.diff_entries[0].name = "mains_voltage_v";
+    snap.diff_entries[0].type = KILNLINK_PARAM_TYPE_F32;
+    snap.diff_entries[0].old_set = true;
+    snap.diff_entries[0].old_value.f32_val = 240.0f;
+    snap.diff_entries[0].new_set = true;
+    snap.diff_entries[0].new_value.f32_val = 120.0f;
+
+    static char json[SAFETY_CFG_JSON_MAX];
+    size_t len = build_commissioning_json(&snap, json, sizeof(json));
+    TEST_CHECK(len > 0, "JSON built successfully");
+    TEST_CHECK(strstr(json, "\"from_crc\":111") != NULL, "reports the CRC this diff was computed from");
+    TEST_CHECK(strstr(json, "\"to_crc\":222") != NULL, "reports the CRC this diff was computed to");
+    TEST_CHECK(strstr(json, "\"name\":\"mains_voltage_v\"") != NULL, "names the field that actually changed");
+    TEST_CHECK(strstr(json, "\"old\":240") != NULL, "reports the old value");
+    TEST_CHECK(strstr(json, "\"new\":120") != NULL, "reports the new value");
+}
+
+static void test_build_json_last_diff_empty_when_nothing_changed(void)
+{
+    TEST_SECTION("build_commissioning_json -- last_diff is an empty list when nothing decodable changed");
+    reset_all();
+    safety_cfg_http_snapshot_t snap = {0};
+    static char json[SAFETY_CFG_JSON_MAX];
+    size_t len = build_commissioning_json(&snap, json, sizeof(json));
+    TEST_CHECK(len > 0, "JSON built successfully");
+    TEST_CHECK(strstr(json, "\"last_diff\":{\"from_crc\":0,\"to_crc\":0,\"truncated\":false,\"fields\":[]}") != NULL,
+               "an all-zero snapshot renders an explicitly empty diff, not an omitted field");
 }
 
 // 2026-09-03, TASK 1/2: the live status-frame flags (BORROWED, TC_NOT_
@@ -1814,6 +1874,8 @@ int main(void)
     test_parse_value_for_type_bounds();
     test_build_json_unset_param_omits_value();
     test_build_json_set_param_includes_value();
+    test_build_json_last_diff_reports_named_mismatch();
+    test_build_json_last_diff_empty_when_nothing_changed();
     test_build_json_borrowed_unknown();
     test_build_json_borrowed_known_true_with_zone();
     test_build_json_borrowed_known_true_zone_unknown();
