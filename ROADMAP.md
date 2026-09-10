@@ -1,6 +1,115 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-09, roadmap-upkeep audit
+> **Status:** planning · **Last reviewed:** 2026-09-10, roadmap-upkeep audit
+> (tenth sweep) — 53 commits landed since the ninth sweep (`fa424d74`).
+> Verified against code and git history, not against another doc's status
+> marker. Landed and confirmed:
+> - **SaftyFW stack checker: two correctness fixes** — margin was graded
+>   against a ceiling set to exactly 2x its own measurement rather than the
+>   declared budget (`05b48cce`), and a stale PC-relative register literal
+>   could resolve and silently clear the INDETERMINATE tag (`82eecb0e`).
+>   Following from that, **stack budgets raised and now 9/9 ok**:
+>   `link_task` 6144->10240 B, `update_task` 3072->6144 B,
+>   `configTOTAL_HEAP_SIZE` 40K->56K (`c27484a2`) — the stacks would
+>   otherwise have consumed nearly the whole heap.
+> - **Check suite: 84 -> 87 discovered, 87 passing, 0 failed** (confirmed by
+>   a fresh run this sweep). New: `check_00_saftyfw_target_build.ps1`
+>   (`cfd8e3ce`) and `check_01_kilnfw_pushed_build.ps1` /
+>   `check_01_saftyfw_pushed_build.ps1` (`cbbec0fa`), which build the
+>   fetched `origin/main` rather than the local tree — closing the gap that
+>   let `main` break four times in a day.
+> - **ELF archiving on every flash, both processors, with loud-failure
+>   lookup** (`311047c2`) — the previous gap made a live panic
+>   unsymbolizable.
+> - **RP2040 `config_store` in-RAM-cache seqlock (`b202fe56`/`5671ee03`/
+>   `cb1ba325`) is now FLASHED** — `ae23aba4` (2026-09-09, clean detached
+>   worktree at HEAD; commissioning and S8 survived the reset) and again
+>   `b88ea6ba` (2026-09-10, later HEAD; commissioning survived). Both
+>   `docs/CONFIG_FILESYSTEM.md` and the ninth-sweep note above it had this
+>   marked "NOT yet flashed" — that was stale as of this sweep and has been
+>   corrected in `docs/CONFIG_FILESYSTEM.md`. Fallback-ABA fix and boot
+>   seeding also landed (`985e41b4`).
+> - **S8 (rate guard) auto-calculation from the identified plant model**:
+>   write path wired (`a4398558`), then three review-found defects fixed —
+>   sentinel-wins-selection, inverted margin, coupling-blind basis
+>   (`431019ba`), range check gated on `fields_set` (`9345f722`), caller
+>   rejects `FIT_TEMP_UNKNOWN` and feeds the real coupling gain
+>   (`0820dfa6`), margin scoped to checked provenance with a 2.0x
+>   uncoupled fallback and load-time range gate (`8f53d16c`, `fb495e05`).
+>   S8 stays at its hand-set 20 C/min on the bench regardless — the auto
+>   path is not trusted on this plant until the coupling matrix is
+>   re-identified (see open items).
+> - **S15/S14 arming**: `22eeab9f` gated `amps_valid_for_ct` on CT
+>   commissioning plus a 45 mA noise floor, and `1feffdd8` made the sweep
+>   back-out honest about a possibly-already-landed commit. `c0729e1e`
+>   (2026-09-10) adds the missing write path pushing each zone's measured
+>   normal current to the Pico's `i_normal_a[0..2]` — **this is new code,
+>   not yet flashed to the ESP** (the ESP's bench build is still 33+
+>   commits behind HEAD per `b88ea6ba`), so S14/S15 remain dormant on the
+>   running board today; do not mark this item closed.
+> - **Guard 1 climbing window** now derived as
+>   `clamp(dead_time+tau, 120, 900)` ~= 317 s (`cf3b5adb`), replacing zone
+>   0's spurious 60 s override (zones 1/2 never had one).
+> - **Safety-ceiling link-down bypass closed**: reconciled on every
+>   link-up tick, not just at boot (`1132d13a`). `zones` ceiling ->
+>   Pico propagation added (`2d604d1d`); `backup_import` bypass closed
+>   (`be25339b`).
+> - `sw_reset_esp` MCP tool added for the non-JTAG ESP reboot-in-place path
+>   (`8e10d9b0`).
+> - **`safety_poll` frame size**: two identical-looking 16 B trims landed
+>   back-to-back (`6d7454e8` then `edac93a2`, apparently the same fix
+>   committed twice) — it sits at exactly 3104 B against a 3104 B ceiling,
+>   zero margin; treat as fragile, not closed.
+> - **Coupling matrix: `cplval75` capture (`1efbdc0c`) refutes the adopted
+>   matrix against its own pre-registered criterion** (`d2e570ad`) — failing
+>   2 of 3 zones at every plateau by 6-9x tolerance; `ff_hold_infeasible`
+>   confirmed inert as a contributing cause. Joint identification procedure
+>   revised to 37-minute column steps from the live 271 s tau, acceptance
+>   step 6 inverted, 6.5-8 h total (`3120cca5`). A 45 C discriminating
+>   plateau (predicted z2 residual: ~-2.9 C for a per-row SCALE error vs.
+>   ~-8.4 C for a constant OFFSET) is **in progress on the bench board as of
+>   this sweep** — do not report a verdict here; check the capture's own
+>   record.
+> - **iter_tune credibility gate**: still FAILS. Both previously-published
+>   explanations were retired this sweep (`a5721a53`, exchange-vs-source
+>   coupling investigated and also ruled out) — the real cause is
+>   under investigation and currently **unknown**. Do not re-propose either
+>   retired explanation.
+> - Two SaftyFW double-reboot investigations: the first aborted mid-capture
+>   (`238e0eb9`); the second flashed current HEAD and did **not** reproduce
+>   the Pico reboot, instead surfacing an unrelated ESP panic on the ESP's
+>   own stale build after a per-zone thermal-guard trip (`b88ea6ba`) — two
+>   clean Pico runs is suggestive, not proof; the ESP panic itself was not
+>   investigated further.
+> - Plant constants centralized into `sim_measured_zone_constants.h`
+>   (`4d42bafe`), fixing a stale preset diagonal baked into three sim
+>   harnesses.
+> - `mains_voltage_v` corrected 240 -> 120 on the board, read-back confirmed
+>   (noted in the ninth sweep as landed; reconfirmed present at this HEAD).
+> - **run_all_checks.ps1 `-ListOnly` bug fixed** (`f2a293f8`, this sweep):
+>   `$SkipExitCode = 3` was assigned before `param()`, which PowerShell
+>   silently refuses — no switch bound at all, so `-ListOnly` always ran the
+>   full suite. `workbench.py`'s `repo_checks(list_only=True)` MCP tool has
+>   been getting a full 900s run back instead of a listing this whole time;
+>   same fix covers it. Verified `-ListOnly` now lists and exits promptly,
+>   and a full run is still 87/87.
+>
+> **Open, in flight, or owner-blocked as of this sweep** (do not mark any of
+> these done): the 45 C discriminating plateau is running now; the
+> iter_tune credibility gate's real cause is unknown after two published
+> explanations were retired; the coupling matrix needs joint
+> re-identification and the board runs uncoupled feedforward until then; S8
+> stays at its hand-set 20 C/min until the matrix is re-identified;
+> `i_normal_a`/S14/S15 have a write path in code (`c0729e1e`) but it is not
+> yet flashed, so both guards remain dormant on the bench board; `k_ct_v_per_a`
+> is still uncalibrated and the owner's stated CT transfer function does not
+> obviously reconcile with the committed `gain[ch]` of 0.715; the E-stop
+> double-pole switch is still unwired; `abs_max_temp_c` must be raised
+> Pico-first-then-ESP before a real firing; two Pico reboots at heat start
+> remain unexplained (did not recur on a clean reflash, but one clean run is
+> not proof); `safety_poll` has zero margin against its stack ceiling. Full
+> detail for closed items before this sweep lives in `docs/COMPLETED_2026-09.md`.
+> **Reviewed before that:** 2026-09-09, roadmap-upkeep audit
 > (ninth sweep, afternoon) — a very large amount landed since the eighth
 > sweep (`79080e0a`), 43 commits. Verified against code and git history, not
 > against any other doc's status marker. Landed and confirmed:
