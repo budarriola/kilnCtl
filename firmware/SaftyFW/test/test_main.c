@@ -43,6 +43,7 @@ void run_test_discrete_pin_policy(void);
 void run_test_commissioning_gate(void);
 void run_test_safety_core_s8_wiring(void);
 void run_test_safety_core_polarity_wiring(void);
+void run_test_safety_core_ct_calibration_gate(void);
 void run_test_update_task_relay_wiring(void);
 void run_test_reboot_in_place_wiring(void);
 void run_test_update_task_reboot_policy(void);
@@ -94,6 +95,7 @@ int main(void)
     run_test_commissioning_gate();
     run_test_safety_core_s8_wiring();
     run_test_safety_core_polarity_wiring();
+    run_test_safety_core_ct_calibration_gate();
     run_test_estop_deenergizes_relay();
     run_test_update_task_relay_wiring();
     run_test_reboot_in_place_wiring();

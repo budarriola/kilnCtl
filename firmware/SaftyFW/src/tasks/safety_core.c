@@ -1060,6 +1060,24 @@ static safety_guard_input_t safety_core_build_input(void)
             if (ct_summed && ch != 2u) {
                 continue;
             }
+            // Opus review finding 1: cs_counts_to_amps() (current_sense.c)
+            // returns 0.0f -- a plausible-looking reading, not an error --
+            // for any channel whose k_ct_v_per_a has never been
+            // commissioned. Without this gate amps_valid_for_ct[ch] went
+            // true off freshness alone, so S14/S15 could arm against a
+            // fabricated "0.00 A, always below expected" reading the
+            // instant a sweep on the OTHER side (the ESP) happened to
+            // record a nonzero i_normal_a for this channel -- exactly the
+            // "arm on an unvalidated threshold" hazard the owner's standing
+            // instruction forbids. Per-channel, not the all-three-AND
+            // s_current_sensing_commissioned (that flag answers a
+            // different question -- S9's "is the whole set a measurement
+            // at all" -- and is deliberately strict across all three
+            // channels even in summed topology, where only channel 2 has a
+            // CT wired up at all).
+            if (!(cfg_rec.k_ct_v_per_a[ch] > 0.0f)) {
+                continue;
+            }
             amps_for_ct[ch] = current.amps[ch];
             amps_valid_for_ct[ch] = true;
         }

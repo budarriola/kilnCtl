@@ -176,6 +176,38 @@ bool zone_sweep_derive_ct_channel(const float *per_ch_a, uint8_t *out_ch)
  * computed from noise is worse than no scale factor. */
 #define ZONE_KCT_MIN_MEASURED_A ZONE_SWEEP_CT_RESPOND_A
 
+/* Opus review finding 1 (S15 false-WARN): zone_sweep_summed_normal_a() used
+ * to accept ANY positive difference as a "measured normal", including a
+ * single ADC count of drift -- indistinguishable from real load current.
+ * ZONE_SWEEP_CT_RESPOND_A (2.0A) is the wrong floor to reuse here: it exists
+ * to gate k_ct CALIBRATION confidence against a normal kiln heater element,
+ * and this bench's own ~4W/120V fixture (roughly 33-90 mA) never reaches it
+ * -- reusing it would make i_normal_a un-measurable on this bench forever,
+ * not just noise-safe.
+ *
+ * This floor is instead sized off the bench's own measured ADC noise:
+ * channel 2's idle counts wander 60-79 around zero_counts[2]=63 (a
+ * peak-to-peak band of ~19 raw 12-bit counts), while the one observed real
+ * load swing was 60 -> 283 counts (~223 counts) -- more than 10x the noise
+ * band, so a floor well above the noise and still well below that real
+ * signal exists. Converting the noise band to amps needs current_sense.c's
+ * own formula (I = delta_counts * Vref / 4096 / (gain * sqrt(2) * k_ct)):
+ * at Vref=3.3V, k_ct=1.0 V/A (the CT probe's own owner-stated spec) and the
+ * CURRENTLY COMMITTED default gain of 0.715 (current_sense.c's
+ * CS_DEFAULT_GAIN, NOT the owner-stated 2.0 V DC/V rms conditioning figure
+ * -- that discrepancy is flagged, not resolved, here; using the smaller
+ * 0.715 is the conservative choice since amps-per-count is inversely
+ * proportional to gain and a smaller gain therefore reports a LARGER, more
+ * cautious floor), 19 counts ~= 15 mA. 3x that (~45 mA) clears the noise
+ * band with margin while staying far below the 223-count real signal this
+ * bench actually produced; it may still be close to or above this
+ * particular fixture's own tiny normal current, in which case the sweep
+ * correctly reports "not measured" rather than persisting a noise-derived
+ * threshold -- see this function's own zero-clamp comment below for why
+ * that is the safe failure direction. Revisit once the k_ct/gain
+ * discrepancy above is resolved for real hardware. */
+#define ZONE_SWEEP_NORMAL_NOISE_FLOOR_A 0.045f
+
 /* zone_kct_derive_t moved to zones_http_internal.h -- zones_current_sweep_
  * task.c calls zone_sweep_derive_k_ct()/zone_kct_derive_str() too. */
 
@@ -219,7 +251,13 @@ bool zone_sweep_summed_normal_a(float sum_with_zone_on_a, float sum_idle_a, floa
         return false;
     }
     float normal_a = sum_with_zone_on_a - sum_idle_a;
-    if (normal_a < 0.0f) {
+    if (normal_a < ZONE_SWEEP_NORMAL_NOISE_FLOOR_A) {
+        /* Below the noise floor (see ZONE_SWEEP_NORMAL_NOISE_FLOOR_A's own
+         * comment): a difference this small is not distinguishable from ADC
+         * drift, so it is not a measurement. Includes normal_a < 0.0f, the
+         * pre-existing wiring/noise-artifact case below -- same "leave the
+         * zone unmeasured, never persist a noise-derived threshold" outcome
+         * either way. */
         /* opus review finding (MEDIUM): this used to clamp to 0.0f and
          * still return true, which PERSISTS a normal_a of exactly zero --
          * indistinguishable from "measured and it's genuinely zero" -- and
