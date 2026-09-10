@@ -20,12 +20,21 @@ ELF-side walk to find in the first place, and "a task was added but is
 currently broken" must fail this check just as loudly as "a task was added
 and builds fine but nobody remembered the table."
 
-WHAT COUNTS AS A TASK CALL SITE: a line under firmware/SaftyFW/src/ (any
-depth) matching `xTaskCreate(<root_fn>, "<name>", ...)` in a *.c file. This
-excludes commented-out call sites (CALL_RE requires the actual paren-comma
-shape immediately after `xTaskCreate(`, which a `// ... xTaskCreate() ...`
-prose comment such as main.c's does not produce) and vendored FreeRTOS/
-pico-sdk kernel sources (not present at all under src/).
+WHAT COUNTS AS A TASK CALL SITE: text under firmware/SaftyFW/src/ (any
+depth, any *.c file, matched against the file's FULL TEXT so a call
+reflowed across multiple physical lines is still found -- see CALL_RE's
+comment) matching `xTaskCreate(<root_fn>, "<name>", ...)`. This excludes
+commented-out call sites (CALL_RE requires the actual paren-comma shape
+immediately after `xTaskCreate(`, which a `// ... xTaskCreate() ...` prose
+comment such as main.c's does not produce) and vendored FreeRTOS/pico-sdk
+kernel sources (not present at all under src/). CALL_RE matches only
+`xTaskCreate(...)` -- `xTaskCreateStatic()` and `xTaskCreateAffinitySet()`
+are NOT matched; no call site of either form exists in this codebase today
+(confirmed by grep), so this is a latent gap, not an active one. A task
+created either way today would silently miss both this check AND the
+stack-budget checker's per-task walk (which resolves roots from TASKS,
+populated from this same call-site scan) -- extend CALL_RE to cover them
+before either form is introduced.
 
 EXIT CODES: 0 OK (call sites found == TASKS entries, one-to-one by (root,
 name)), 1 FAIL (any set difference, in either direction), naming the
@@ -47,12 +56,34 @@ SRC_DIR = os.path.join(REPO_ROOT, "firmware", "SaftyFW", "src")
 # Deliberately anchored on `xTaskCreate(<ident>, "<ident>",` -- a prose
 # comment mentioning "xTaskCreate()" (no open-paren-comma-quote shape
 # immediately following) will not match.
+#
+# 2026-09-10 (opus review): this used to be applied with re.search() PER
+# LINE (see find_call_sites() below, pre-fix), even though \s* in the
+# pattern happily spans a newline on its own. That combination meant a call
+# site reflowed across two physical lines -- e.g.
+#   xTaskCreate(
+#       foo_task_fn, "foo_task", FOO_TASK_STACK_WORDS, ...)
+# -- produced NO match at all, because neither single line contains the
+# whole `xTaskCreate(<ident>, "<ident>",` shape: this checker exists
+# specifically to catch "a task call site with no TASKS row", and a reflow
+# is exactly the kind of incidental formatting change a new task's call
+# site could arrive with. Worse than a simple miss: if that new task also
+# lacked a TASKS row (the exact scenario this file exists to catch), BOTH
+# call_keys and table_keys would omit it and the check would print "OK:
+# one-to-one match" -- silent, for precisely the case that matters. Fixed
+# by matching against each file's FULL TEXT (see find_call_sites()) instead
+# of line-by-line, with line numbers recovered from the match offset. A
+# reflow of an EXISTING call site (in TASKS already) still fails loud
+# either way -- missing_from_source fires when the old shape can no longer
+# be found -- which is the safe direction and was never the bug.
 CALL_RE = re.compile(r'\bxTaskCreate\(\s*([A-Za-z_]\w*)\s*,\s*"([^"]+)"\s*,')
 
 
 def find_call_sites():
     """{(root_fn, name): [(path, lineno), ...]} for every real xTaskCreate()
-    call site under src/*.c."""
+    call site under src/*.c. Matched against each file's full text (not
+    line-by-line) so a call site reflowed across multiple physical lines is
+    still found -- see CALL_RE's comment above."""
     sites = {}
     for dirpath, _dirnames, filenames in os.walk(SRC_DIR):
         for fname in filenames:
@@ -60,11 +91,11 @@ def find_call_sites():
                 continue
             path = os.path.join(dirpath, fname)
             with open(path, encoding="utf-8", errors="replace") as f:
-                for lineno, line in enumerate(f, start=1):
-                    m = CALL_RE.search(line)
-                    if m:
-                        key = (m.group(1), m.group(2))
-                        sites.setdefault(key, []).append((path, lineno))
+                text = f.read()
+            for m in CALL_RE.finditer(text):
+                key = (m.group(1), m.group(2))
+                lineno = text.count("\n", 0, m.start()) + 1
+                sites.setdefault(key, []).append((path, lineno))
     return sites
 
 
