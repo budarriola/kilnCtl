@@ -339,8 +339,20 @@ uint8_t zone_sweep_plan_i_normal(float *out_a, char *note, size_t note_cap);
  * negative current, and clamping it to a persisted zero would silently make
  * S14/S15 inert for that zone forever -- opus review finding, MEDIUM). The
  * caller must treat false as "not measured": leave the zone's bit clear in
- * measured_mask rather than persisting anything for it. */
-bool zone_sweep_summed_normal_a(float sum_with_zone_on_a, float sum_idle_a, float *out_normal_a);
+ * measured_mask rather than persisting anything for it.
+ *
+ * `live_k_ct_v_per_a`: 2026-09-10 fix (opus review round 2, finding C) --
+ * the shared channel's currently-committed k_ct_v_per_a (read the same way
+ * zone_sweep_derive_k_ct()'s own `k_old` is, via zone_cfg_committed_f32();
+ * 0.0f/non-finite for "never committed", which falls back to the reference
+ * floor). The noise floor this function refuses below is a fixed AMPS
+ * value derived at one specific k_ct; since counts->amps is inversely
+ * proportional to k_ct, a channel committed to a different k_ct needs the
+ * floor rescaled to still reject the same underlying ADC noise -- see
+ * ZONE_SWEEP_NORMAL_NOISE_FLOOR_REF_K_CT's doc comment
+ * (zones_current_sweep_engine.c) for the full derivation. */
+bool zone_sweep_summed_normal_a(float sum_with_zone_on_a, float sum_idle_a, float live_k_ct_v_per_a,
+                                float *out_normal_a);
 zone_sweep_refusal_t zone_sweep_check_refusal(bool already_running, bool have_hw, bool config_valid,
                                               uint8_t thermo_count, bool profile_running_or_paused,
                                               bool autotune_active, bool link_up, bool trip_latched,

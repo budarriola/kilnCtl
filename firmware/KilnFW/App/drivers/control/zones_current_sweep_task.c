@@ -103,6 +103,15 @@ static struct {
     bool    map_push_failed;
 } s_ct_derive;
 
+/* Forward declaration + identical redefinition (legal in C when the token
+ * sequence matches exactly -- see the canonical definitions/doc comments
+ * further down this file) so zone_sweep_task_record_ct_channels() below can
+ * read the shared channel's live, committed k_ct_v_per_a for the 2026-09-10
+ * noise-floor rescaling fix (finding C) without reordering the rest of this
+ * file's M12b section. */
+#define ZONE_KCT_PARAM_ID(ch) ((uint16_t)(0x0308u + (ch)))
+static bool zone_cfg_committed_f32(uint16_t param_id, float *out);
+
 static void zone_sweep_task_record_ct_channels(void *ctx, uint8_t zi, uint8_t relay_mask,
                                                 const float *per_ch_avg_a)
 {
@@ -122,7 +131,15 @@ static void zone_sweep_task_record_ct_channels(void *ctx, uint8_t zi, uint8_t re
         float with_on = per_ch_avg_a[ZONE_CT_CHANNEL_COUNT - 1];
         if (!isnan(with_on)) {
             float normal_a = 0.0f;
-            if (zone_sweep_summed_normal_a(with_on, s_ct_summed_idle_a, &normal_a)) {
+            /* 2026-09-10 fix (finding C): the shared channel's live,
+             * committed k_ct_v_per_a -- 0.0f (zone_cfg_committed_f32
+             * returns false) for "never committed", which
+             * zone_sweep_summed_normal_a() treats as "use the reference
+             * floor unchanged". Read the same way zone_sweep_derive_k_ct's
+             * own `k_old` is, further down this file. */
+            float live_k_ct = 0.0f;
+            (void)zone_cfg_committed_f32(ZONE_KCT_PARAM_ID(ZONE_CT_CHANNEL_COUNT - 1), &live_k_ct);
+            if (zone_sweep_summed_normal_a(with_on, s_ct_summed_idle_a, live_k_ct, &normal_a)) {
                 zone_normals_set(zi, normal_a);
             } else {
                 /* opus review finding (MEDIUM): the shared channel read

@@ -207,6 +207,27 @@ bool zone_sweep_derive_ct_channel(const float *per_ch_a, uint8_t *out_ch)
  * that is the safe failure direction. Revisit once the k_ct/gain
  * discrepancy above is resolved for real hardware. */
 #define ZONE_SWEEP_NORMAL_NOISE_FLOOR_A 0.045f
+/* The k_ct_v_per_a this floor was DERIVED against (see the comment above --
+ * "k_ct=1.0 V/A, the CT probe's own owner-stated spec"). 2026-09-10 fix
+ * (opus review round 2, finding C): the floor above is a fixed AMPS
+ * constant, but the quantity it must reject is noise in raw ADC COUNTS, and
+ * counts->amps is inversely proportional to k_ct_v_per_a (see this file's
+ * own I = delta_counts / (gain * sqrt(2) * k_ct) formula, quoted above).
+ * If a channel's LIVE, committed k_ct_v_per_a differs from this reference
+ * value -- e.g. commissioned down to 0.1 V/A -- the SAME 19-count noise
+ * band converts to a proportionally larger amps reading (0.1/1.0 = 10x, so
+ * ~0.45A instead of ~0.045A) and would sail past this floor unchanged,
+ * silently accepting noise as a measurement again. zone_sweep_summed_
+ * normal_a() below rescales the floor by (this reference k_ct / the live
+ * k_ct) so the check tracks whatever the channel is actually calibrated to
+ * today, not just the value it happened to be measured against once.
+ * Residual, documented rather than closed: the front-end ADC gain half of
+ * the same formula (CS_DEFAULT_GAIN, 0.715) is a Pico-side hardware/
+ * firmware constant with no live-read path from the ESP32 side today, so
+ * this rescaling corrects for k_ct drift only, not a hypothetical future
+ * gain change -- see current_sense commissioning docs for that value's own
+ * provenance. */
+#define ZONE_SWEEP_NORMAL_NOISE_FLOOR_REF_K_CT 1.0f
 
 /* zone_kct_derive_t moved to zones_http_internal.h -- zones_current_sweep_
  * task.c calls zone_sweep_derive_k_ct()/zone_kct_derive_str() too. */
@@ -245,13 +266,27 @@ zone_kct_derive_t zone_sweep_derive_k_ct(float measured_total_a, float expected_
     return ZONE_KCT_DERIVE_OK;
 }
 
-bool zone_sweep_summed_normal_a(float sum_with_zone_on_a, float sum_idle_a, float *out_normal_a)
+bool zone_sweep_summed_normal_a(float sum_with_zone_on_a, float sum_idle_a, float live_k_ct_v_per_a,
+                                float *out_normal_a)
 {
     if (!isfinite(sum_with_zone_on_a) || !isfinite(sum_idle_a)) {
         return false;
     }
     float normal_a = sum_with_zone_on_a - sum_idle_a;
-    if (normal_a < ZONE_SWEEP_NORMAL_NOISE_FLOOR_A) {
+    /* 2026-09-10 fix (finding C): rescale the reference floor by how far the
+     * live, committed k_ct_v_per_a for this channel has drifted from the
+     * value the floor was derived against -- see ZONE_SWEEP_NORMAL_NOISE_
+     * FLOOR_REF_K_CT's own comment. An uncommissioned/non-finite/non-
+     * positive live value (0.0f on a fresh board, per zone_cfg_committed_f32's
+     * own "never committed" contract) falls back to the reference floor
+     * unchanged -- there is no live calibration to rescale against yet, and
+     * that is also the state this floor was originally sized for. */
+    float noise_floor_a = ZONE_SWEEP_NORMAL_NOISE_FLOOR_A;
+    if (isfinite(live_k_ct_v_per_a) && live_k_ct_v_per_a > 0.0f) {
+        noise_floor_a = ZONE_SWEEP_NORMAL_NOISE_FLOOR_A *
+                        (ZONE_SWEEP_NORMAL_NOISE_FLOOR_REF_K_CT / live_k_ct_v_per_a);
+    }
+    if (normal_a < noise_floor_a) {
         /* Below the noise floor (see ZONE_SWEEP_NORMAL_NOISE_FLOOR_A's own
          * comment): a difference this small is not distinguishable from ADC
          * drift, so it is not a measurement. Includes normal_a < 0.0f, the

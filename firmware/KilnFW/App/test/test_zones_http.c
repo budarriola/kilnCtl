@@ -8281,10 +8281,10 @@ static void test_zone_sweep_summed_normal_a_basic(void)
                  "CT_COMMISSIONING_PLAN.md step 3's own formula");
 
     float n = -1.0f;
-    TEST_CHECK(zone_sweep_summed_normal_a(5.0f, 0.5f, &n), "converts with a real idle baseline");
+    TEST_CHECK(zone_sweep_summed_normal_a(5.0f, 0.5f, 1.0f, &n), "converts with a real idle baseline");
     TEST_CHECK(fabsf(n - 4.5f) < 1e-6f, "5.0 - 0.5 = 4.5A");
 
-    TEST_CHECK(zone_sweep_summed_normal_a(3.0f, 0.0f, &n), "converts with a zero idle baseline");
+    TEST_CHECK(zone_sweep_summed_normal_a(3.0f, 0.0f, 1.0f, &n), "converts with a zero idle baseline");
     TEST_CHECK(fabsf(n - 3.0f) < 1e-6f, "no idle draw -- the reading is the normal as-is");
 
     // opus review finding (MEDIUM): a channel reading LOWER with the zone
@@ -8293,7 +8293,7 @@ static void test_zone_sweep_summed_normal_a_basic(void)
     // normal and silently makes S14/S15 inert for that zone forever. It
     // must now report "not measured" instead.
     n = -1.0f;
-    TEST_CHECK(zone_sweep_summed_normal_a(0.4f, 0.5f, &n) == false,
+    TEST_CHECK(zone_sweep_summed_normal_a(0.4f, 0.5f, 1.0f, &n) == false,
               "on < idle is refused (unmeasured), not clamped to a persisted zero");
     TEST_CHECK(n == -1.0f, "out param is left untouched on refusal");
 
@@ -8301,7 +8301,7 @@ static void test_zone_sweep_summed_normal_a_basic(void)
     // count as their idle baseline (a real, small negative delta from noise
     // at the CT's actual resolution, not a contrived exact-equal test input
     // -- see project_idealized_test_input_bug_class.md) must also refuse.
-    TEST_CHECK(zone_sweep_summed_normal_a(1.996f, 2.001f, &n) == false,
+    TEST_CHECK(zone_sweep_summed_normal_a(1.996f, 2.001f, 1.0f, &n) == false,
               "a small quantization-scale negative delta is refused, not clamped");
 
     // Opus review finding 1 (S15 false-WARN): equal on/idle (delta exactly
@@ -8315,24 +8315,73 @@ static void test_zone_sweep_summed_normal_a_basic(void)
     // any other below-floor delta -- there is no such thing as a
     // noise-floor-exempt "real zero" for a heater channel.
     n = -1.0f;
-    TEST_CHECK(zone_sweep_summed_normal_a(2.0f, 2.0f, &n) == false,
+    TEST_CHECK(zone_sweep_summed_normal_a(2.0f, 2.0f, 1.0f, &n) == false,
               "on == idle (delta 0) is below the noise floor -- refused, not persisted as zero");
     TEST_CHECK(n == -1.0f, "out param is left untouched on refusal");
 
     // Below the floor but still positive: noise, not a measurement.
     n = -1.0f;
-    TEST_CHECK(zone_sweep_summed_normal_a(2.010f, 2.0f, &n) == false,
+    TEST_CHECK(zone_sweep_summed_normal_a(2.010f, 2.0f, 1.0f, &n) == false,
               "a 10 mA delta is below the 45 mA noise floor -- refused");
     TEST_CHECK(n == -1.0f, "out param is left untouched on refusal");
 
     // At/above the floor: a real measurement.
     n = -1.0f;
-    TEST_CHECK(zone_sweep_summed_normal_a(2.050f, 2.0f, &n),
+    TEST_CHECK(zone_sweep_summed_normal_a(2.050f, 2.0f, 1.0f, &n),
               "a 50 mA delta clears the 45 mA noise floor -- accepted");
     TEST_CHECK(fabsf(n - 0.050f) < 1e-6f, "reports the measured delta");
 
-    TEST_CHECK(zone_sweep_summed_normal_a(NAN, 0.5f, &n) == false, "a NaN reading is refused");
-    TEST_CHECK(zone_sweep_summed_normal_a(5.0f, NAN, &n) == false, "a NaN idle baseline is refused");
+    TEST_CHECK(zone_sweep_summed_normal_a(NAN, 0.5f, 1.0f, &n) == false, "a NaN reading is refused");
+    TEST_CHECK(zone_sweep_summed_normal_a(5.0f, NAN, 1.0f, &n) == false, "a NaN idle baseline is refused");
+}
+
+static void test_zone_sweep_summed_normal_a_rescales_floor_with_live_k_ct(void)
+{
+    TEST_SECTION("zone_sweep_summed_normal_a -- the noise floor rescales with the channel's live "
+                 "k_ct_v_per_a (2026-09-10 fix, opus review round 2 finding C)");
+
+    // Reference case: at k_ct=1.0 (ZONE_SWEEP_NORMAL_NOISE_FLOOR_REF_K_CT),
+    // a 40 mA delta is below the 45 mA reference floor -- refused, matching
+    // test_zone_sweep_summed_normal_a_basic's own 10 mA-below-floor case.
+    float n = -1.0f;
+    TEST_CHECK(zone_sweep_summed_normal_a(2.040f, 2.0f, 1.0f, &n) == false,
+              "at the reference k_ct, a 40 mA delta stays below the 45 mA floor");
+
+    // The review's own numeric example: k_ct commissioned DOWN to 0.1 V/A
+    // means the SAME raw ADC noise converts to a 10x LARGER amps reading,
+    // so the floor must scale up by the same 10x (450 mA) to keep rejecting
+    // it -- a 40 mA delta must stay refused, not newly accepted just
+    // because the raw amps number looks tiny.
+    n = -1.0f;
+    TEST_CHECK(zone_sweep_summed_normal_a(2.040f, 2.0f, 0.1f, &n) == false,
+              "at k_ct=0.1 (10x more sensitive), the floor must scale to 450 mA -- 40 mA is still noise");
+
+    // And the flip side: at k_ct=0.1, a delta that WOULD have cleared the
+    // unscaled 45 mA reference floor (but not the correctly-scaled 450 mA
+    // one) must also be refused -- this is exactly the failure mode a
+    // fixed-amps floor misses (accepting noise as a measurement).
+    n = -1.0f;
+    TEST_CHECK(zone_sweep_summed_normal_a(2.100f, 2.0f, 0.1f, &n) == false,
+              "100 mA clears the UNSCALED reference floor but not the correctly-scaled 450 mA one "
+              "at k_ct=0.1 -- if this test ever regresses to accepted, the floor stopped tracking "
+              "live k_ct");
+
+    // A delta that genuinely clears the rescaled floor at k_ct=0.1 is
+    // accepted, same as any other above-floor measurement.
+    n = -1.0f;
+    TEST_CHECK(zone_sweep_summed_normal_a(2.500f, 2.0f, 0.1f, &n),
+              "500 mA clears the correctly-scaled 450 mA floor at k_ct=0.1 -- accepted");
+    TEST_CHECK(fabsf(n - 0.500f) < 1e-6f, "reports the measured delta");
+
+    // A committed-value of 0.0f/non-finite (zone_cfg_committed_f32's own
+    // "never committed" contract) must fall back to the UNSCALED reference
+    // floor, not divide by zero or otherwise misbehave.
+    n = -1.0f;
+    TEST_CHECK(zone_sweep_summed_normal_a(2.040f, 2.0f, 0.0f, &n) == false,
+              "an uncommissioned (0.0f) live k_ct falls back to the reference floor, unscaled");
+    n = -1.0f;
+    TEST_CHECK(zone_sweep_summed_normal_a(2.050f, 2.0f, 0.0f, &n),
+              "...and a delta above the unscaled reference floor is still accepted in that fallback");
 }
 
 static void test_record_ct_channels_summed_mode_derives_normal_from_channel3(void)
@@ -9873,6 +9922,7 @@ void run_test_zones_http(void)
     test_zone_normals_get_set_round_trip();
 
     test_zone_sweep_summed_normal_a_basic();
+    test_zone_sweep_summed_normal_a_rescales_floor_with_live_k_ct();
     test_record_ct_channels_summed_mode_derives_normal_from_channel3();
     test_record_ct_channels_summed_mode_negative_delta_leaves_zone_unmeasured();
     test_sweep_status_get_handler_reports_summed_unmeasured_mask();
