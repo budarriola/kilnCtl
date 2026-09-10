@@ -123,6 +123,33 @@ climbing-timeout signature and the source-level design. The explanation
 above is strongly supported by code and live counters but stops short of an
 oscilloscope-level confirmation.
 
+## Follow-up defect, not fixed here — for whoever picks this up
+
+**This is not merely a stale/unhelpful counter; the ESP-side accounting is
+factually wrong and says so out loud.** `safety_exchange()`'s comment at
+`firmware/KilnFW/App/drivers/safety/safety_link_inbox.c:772-778` asserts "the
+STATUS frame that just satisfied the wait ... cannot be anything other than
+the answer to the request sent a few lines up." That is false for this
+command: per `LINK_PROTOCOL.md`'s own "no longer a poll" note and
+`link_task.c`'s dispatch switch (no `GET_STATUS` case at all), the Pico never
+answers this request; any STATUS frame the ESP sees is its independent
+500 ms push, not a reply. The practical consequence: **this counter is
+guaranteed to read either ~0% or ~100% "failure" for the entire life of every
+boot**, permanently, with a false comment sitting next to it explaining why
+that can't be a bug. That is exactly the shape that costs the next
+investigator hours re-deriving what this pass already found — do not let
+this be re-discovered from scratch.
+
+**The fix, deliberately not made in this pass** (board stays idle, no flash,
+per the instruction that started this investigation): either stop
+incrementing `stats.timeouts`/`link_reply_us` for `SAFETY_CMD_GET_STATUS`
+entirely, or send it with `expect_status=false`, the same way the
+`!peer_version_known` `FW_VERSION` request already does
+(`safety_link_poll.c:432-446`) — and correct the now-disproven comment at
+`safety_link_inbox.c:772-778` in the same change. This belongs in its own
+pass with its own build/flash/verification, not folded into a capture that
+was only gated on this counter, not caused by it.
+
 ## Recommendation
 
 - **This link is safe to run the coupling capture on.** The counters worth
