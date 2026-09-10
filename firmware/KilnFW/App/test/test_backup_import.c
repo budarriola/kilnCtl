@@ -480,6 +480,39 @@ bool zones_config_get_temp_limits(uint8_t zone_index, float *out_max_temp_c, flo
     return true;
 }
 
+/* 2026-09-10 opus review, "the Pico-ceiling invariant is enforced at one
+ * door only": backup_import.c (#included above) now calls
+ * safety_ceiling_sync_guard_raise() before committing any zone tuning
+ * entry, and references s_hw_safety (extern'd from zones_http_internal.h,
+ * defined for real in zones_http.c -- not part of this executable's link,
+ * same "own fake bodies" convention every other zones_config_get_*() stub
+ * on this page already follows). s_hw_safety stays NULL here: this file's
+ * job is backup_import_apply()'s validate-then-commit logic, not the
+ * ceiling-sync feature itself (that is test_safety_ceiling_policy.c at the
+ * pure-logic layer and test_zones_http.c's test_reconcile_on_link_up_*()
+ * plus its own backup-import-specific ceiling test at the ESP-glue layer)
+ * -- and safety_ceiling_sync_guard_raise() with link == NULL always
+ * returns true (NONE), which is exactly "nothing to guard" and matches
+ * every pre-existing test in this file's assumption that importing a
+ * backup's zone tuning always succeeds once validated. */
+SafetyLinkClass *s_hw_safety = NULL;
+
+bool safety_ceiling_sync_guard_raise(SafetyLinkClass *link, const float *new_max_temp_c, size_t n,
+                                      safety_ceiling_sync_result_t *out_result, char *reason_out,
+                                      size_t reason_cap)
+{
+    (void)link;
+    (void)new_max_temp_c;
+    (void)n;
+    if (out_result) {
+        *out_result = SAFETY_CEILING_SYNC_NONE;
+    }
+    if (reason_out && reason_cap > 0) {
+        reason_out[0] = '\0';
+    }
+    return true;
+}
+
 /* v8 overrides. Settable so a test can prove a configured value actually
  * reaches the control path; defaults to "nothing configured", which is what
  * every pre-existing test in this file assumes. */
