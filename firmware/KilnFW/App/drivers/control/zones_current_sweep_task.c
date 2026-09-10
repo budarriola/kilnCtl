@@ -682,8 +682,8 @@ static uint8_t zone_sweep_plan_k_ct_summed(float *out_k, char *note, size_t note
      * measured_total_a was never added at all in that case. */
     if (s_sweep.summed_unmeasured_mask != 0) {
         snprintf(note, note_cap,
-                 "not every zone's normal current cleared the noise floor -- an incomplete "
-                 "total would scale k_ct low, so it was not set");
+                 "an incomplete pass -- some zone never cleared the noise floor, so k_ct was "
+                 "not set");
         return 0;
     }
     /* CT_COMMISSIONING_PLAN.md step 1: manual still wins over the sweep in
