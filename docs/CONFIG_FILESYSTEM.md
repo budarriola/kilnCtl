@@ -254,11 +254,24 @@ count.
   pico-sdk's `hardware/sync.h` `__dmb()`, not a bare CMSIS `__DMB()` that
   depended on an unguaranteed include order).
 
+  A third fix landed the same day, `cb1ba325`: review of `b202fe56`/
+  `5671ee03` found the seqlock's own fallback snapshot (`s_last_good_record`)
+  was written by *every successful reader* on either core via a plain
+  unsynchronised ~512 B struct assignment — two concurrent readers (link
+  path on core 0, trip path on core 1) could race each other writing it,
+  a torn read on exactly the path the seqlock exists to protect, invisible
+  to the single-reader host test. Fixed by making the fallback a
+  writer-owned double buffer (`s_fallback_buf[2]` + `s_fallback_active`):
+  only `config_store_seqlock_write()` (the sole writer, core 0) ever writes
+  either slot, into whichever is not currently active, flipping the index
+  only after that write lands — readers never write shared state.
+
   The A/B sector fix (`24090c9a`) is flashed to the bench Pico (`b7af9ebe`,
   2026-09-08: commissioning config read back byte-for-byte across the
   migration, CRC unchanged). The seqlock fix (`b202fe56`/`5671ee03`,
   2026-09-09) is NOT yet flashed — correct in source and host-tested, not
-  yet on the board. Full detail:
+  yet on the board (`cb1ba325` included — none of the three seqlock commits
+  are flashed). Full detail:
   `docs/audits/flash_endurance_review_2026-09-07.md` §5, R2.
 
 ## Dual-write window: now measured (2026-09-07)

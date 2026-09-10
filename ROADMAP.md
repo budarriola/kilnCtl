@@ -1,35 +1,96 @@
 # kilnCtl Roadmap — both processors
 
 > **Status:** planning · **Last reviewed:** 2026-09-09, roadmap-upkeep audit
-> (eighth sweep) — closed a day's worth of shipped-but-undocumented work: the
-> `READINESS_DETAIL_MAX 192` unification (`e8cfe344`, fixed a
-> `-Werror=format-truncation` break that had made `main` unbuildable), the
-> `iter_tune` redesign's steps 1/2/5 (`8f80a4de`, three latent defects fixed
-> same day in `249ce287` — see the iter_tune rows below), a real Pico
-> reboot-in-place command (`8b0e799a`, wire 0x29/0x2A,
-> `KILNLINK_PROTOCOL_VERSION` deliberately not bumped — see M8), E-stop
-> read-back verification and five related fixes (`69c43f39` and the five
-> commits before it), the zones model-fit sentinel plus GET exposure
-> (`5d3bc854`/`13588e40`), a builtin-profile `zone_mask`/`seg_kind` fix
-> (`4f41190f`), the serial-port identity correction — **COM14 is the MAIN
-> BOARD, not `UnitTestFixture`** (`3530e598` then `9e9dfb45`, which found
-> `3530e598` itself had inherited the old, backwards record — the two boards'
-> UART bridges were recorded swapped since `402ab01a`, 2026-09-05), and the
-> DC-gain audit (`3605f278`) that resolves the "factor of ten" apparent
-> identification error as a three-zone coupling hold attributed to one zone.
-> Also recorded as still-open, owner-side: `/api/readiness` becoming a real
-> firing gate on `safety_trip`/`recovery_mode`/`crash_report`/`estop_verified`
-> with **no override path** — in progress as of this sweep
-> (`profile_executor_run.c`'s `readiness_gate_block_t` interlock, being edited
-> concurrently with this pass; re-read it rather than trusting this line),
-> `check_httpd_task_stack_budget` red on `api_readiness_get_handler` (5408 B
-> against 4832 B, cost is `ac405f0b`'s `char json[4096]`, not the detail
-> buffers), the coupling matrix's FOPDT-diagonal/coupling-off-diagonal mixing
-> (fix in flight, not this sweep), and that `ff_hold` infeasibility above
-> roughly ambient+38 °C is **neither** the radiative term **nor** a
-> fitted-slope error — both explanations were checked and ruled out, so ask
-> before re-proposing either. Full detail for closed items before this sweep
-> lives in `docs/COMPLETED_2026-09.md`.
+> (ninth sweep, afternoon) — a very large amount landed since the eighth
+> sweep (`79080e0a`), 43 commits. Verified against code and git history, not
+> against any other doc's status marker. Landed and confirmed:
+> - **`/api/readiness` is now a real, no-override firing interlock**
+>   (`d5170d54`) — the eighth sweep's "in progress" line above is now closed —
+>   **and the same interlock was extended to autotune** (`cd43cc32`), since
+>   autotune commands the same relays through a separate choke point
+>   (`autotune_begin_run_locked()`) that the firing gate never touched.
+> - **Executor stack overflow fixed, plus the budget check that would have
+>   caught it** (`379f3fe6`); `backup_export`'s httpd-stack RED closed by a
+>   frame-size cut (`8bd5684e`); **table-driven stack budgets added for all
+>   28 previously-uncovered KilnFW tasks** (`316967b7`), then made honest
+>   about tasks reached only through indirect dispatch, where the checker
+>   cannot see the real worst case (`c726748e`) — read that commit before
+>   trusting a green KilnFW stack-budget run as a full proof.
+> - **SaftyFW: `current_task`/`discrete_task` stack overflow that could
+>   deadlock both cores, fixed** (`3afc5ea6`); a per-task stack-budget check
+>   added and `thermo_task`'s stack bumped (`5b8fc53d`).
+> - **SaftyFW `config_store` RAM-cache seqlock** against a confirmed-live
+>   cross-core torn read (`b202fe56`, barrier-primitive fix `5671ee03`, then
+>   a review-found fallback-buffer race fixed writer-owned rather than
+>   reader-written, `cb1ba325`) — **host-tested only, not yet flashed to the
+>   bench Pico.** See `docs/CONFIG_FILESYSTEM.md` for detail, and note this
+>   is a *different* defect from the RP2040 `config_store`'s still-open
+>   `next_write_slot` torn-slot issue (untouched by any of the above).
+> - **`check_00` target build added to the check suite** (`139debb5`,
+>   closing the gap that let an unbuildable `main` reach it), then hardened
+>   against an MSYSTEM no-op false-pass and given a freshness check
+>   (`16f0563f`), then that freshness gate's own false-positive on a
+>   legitimate no-op build fixed (`af0bb774`).
+> - **Summed-CT topology exempted from the `ct_channel_map` commissioning
+>   requirement** (`b5cb83a4`), plus an ESP-side mirror fix and a new
+>   truth-table drift check between the two sides.
+> - Commissioning render now exposes `estop_active_level` and four other
+>   previously-unprinted params (`d5768552`).
+> - **Serial-port identity: COM14 confirmed the MAIN BOARD** by excluding
+>   CMSIS-DAP probes from UART-bridge autodiscovery (`3530e598`) then
+>   identifying boards by USB serial number rather than chip family
+>   (`9e9dfb45`).
+> - **`iter_tune` redesign** (`8f80a4de`, three latent defects found in
+>   review and fixed same day: `249ce287`, `ce55440d`) plus a new write-
+>   surface guard and its own negative test (`f3fcd597`). Steps 1, 2 and 5
+>   of the plan's 9 steps landed; 3-4 and 6-9 remain open/design-only — see
+>   `docs/ITER_TUNE_REDESIGN_PLAN.md` itself for current step status (it is
+>   being edited by another pass concurrently with this sweep; re-read it
+>   rather than trusting a stale summary here).
+> - Simulation harness gaps G1-G4 promoted out of `sim_iter_tune.c`
+>   (`e0d2e006`).
+> - **A real Pico reboot-in-place wire command** (`8b0e799a`, `d045cd64` —
+>   the latter also reports a failed reboot task, names the S6a latch it
+>   causes, and gates the Pico on transfers) plus sw-reset honesty
+>   corrections.
+> - `boot_guard_reset_counter()` wired into `flash_firmware()` via a new
+>   HTTP route (`b09294fb`) — see `CLAUDE.md`'s boot_guard section for why
+>   this exists (a tool-driven clear, never an unconditional boot-path one).
+> - UI sweep: transient fetch/CDP harness errors no longer reported as
+>   layout FAILs (`8018cfe3`); viewport height settle-and-verify fix before
+>   the occlusion check (`1f91f500`).
+> - Audits: the DC-gain "factor of ten" resolved as cross-zone attribution,
+>   not an identification error (`3605f278`); S8 rate-guard's real
+>   achievable ramp rate measured, re-tune recommended (`bd2ad739`); a
+>   dual-processor flash + commissioning attempt (`7c3e6eac`); the owner's
+>   K4-open hypothesis for `cplval75`'s zero-heat run investigated
+>   (`8487d85d`); the commissioning gate blocking K4 traced to the
+>   `ct_channel_map` summed-mode gap above it fixed (`2b3f1206`); a stale
+>   RP2040 `config_store` atomicity claim and flash-status doc corrected
+>   (`f0974a9a` — itself an instance of a doc's own status line going stale
+>   a third way: "implemented, NOT YET FLASHED" after a later commit had
+>   already recorded it flashed and bench-verified).
+>
+> **Open, in flight, or owner-blocked as of this sweep** (do not mark any of
+> these done): commissioning the safety processor; S8's real-kiln rate value
+> and auto-calculation (owner decision recorded, design in flight); **the
+> bench heat path is still unconfirmed end to end** — today's no-heat run is
+> *explained* by `calibration_missing` refusing the enable, but that has not
+> been demonstrated as the actual mechanism, so do not record it as solved;
+> the coupling matrix is mixed-provenance and a guard now refuses it, so the
+> board runs uncoupled per-zone feedforward until a joint identification
+> capture is taken; `i_normal_a[0..2]` needs live current before S14/S15 can
+> arm; `abs_max_temp_c` must be raised Pico-first-then-ESP before a real
+> firing, and the Pico's ceiling must never end up tighter than the ESP's;
+> the E-stop double-pole switch is still not wired and polarity is still
+> unset (compiled default ACTIVE_HIGH); manual relay control and the CT
+> sweep deliberately bypass the readiness gate (owner decision, documented);
+> `iter_tune` remains inert and unwired by design, credibility gate in
+> flight; and `ff_hold` infeasibility above roughly ambient+38 °C is
+> **structural on this power-limited rig** — both the radiative-term and
+> fitted-slope explanations were checked and disproved, so do not re-propose
+> either. Full detail for closed items before this sweep lives in
+> `docs/COMPLETED_2026-09.md`.
 > **Last reviewed before that:** 2026-09-05, roadmap-upkeep audit
 > (seventh sweep) — landed the cone-unrated bucket (`1501f0c`+`3b0c82e`), the
 > `safety_cfg_http.c` PSRAM move (`541b357`, flashed and re-baselined —
@@ -102,7 +163,7 @@ open is short:
 | Size | Item | Where |
 |---|---|---|
 | **M** | ~~CTs — deferred, 2026-09-05~~ — superseded: a summed CT was fitted on GPIO28, 2026-09-05. **CT commissioning, 2026-09-06** — owner wants user-entered probe rating (any rating; real probes 10-100 A, bench probe 1 A), user-entered or auto-measured idle offset, real-amps readout, and a `ct_topology` (per_zone / summed) so S14 works on the one summed CT. Plan with steps 0-6: `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md`. **Steps 1-5 done** (`51c084f`, `7175078`, `9374e8a`, `8a124c4`, `b8f0f47`, `8239b87`: editable calibration fields, auto idle-offset over the wire, `ct_topology`/S15/summed sweep on both Pico and ESP, real-amps display on web/LCD/PcTools, docs). **Open: step 0** (noise-floor capture — the raw-counts path is now built end to end, `c49bb0e9`; the bench capture itself still has not been taken, see `CURRENT_SENSE.md` §4) and **step 6** (bench run with the owner) — both need the board reflashed with the step 1-5 firmware first. | `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md`; `docs/CONTACTOR_FEEDBACK_OPTIONS.md`; M5 |
-| — | ~~LittleFS for flash writes, 2026-09-06~~ — assessed **not adopted** for log retention, then **superseded 2026-09-07**: endurance review confirmed no wear problem exists either, but the owner directed the migration anyway for architectural reasons (structured, inspectable, backup-able user data). In progress — zones config, profiles, and prefs dual-write to a new `cfg` partition; see `docs/CONFIG_FILESYSTEM.md` for state and open items, `docs/LITTLEFS_ASSESSMENT.md`/`docs/FILESYSTEM_USER_DATA_PLAN.md` for the history. **RP2040 `config_store` A/B sectors (flash_endurance_review_2026-09-07.md R2): implemented, NOT YET FLASHED.** Sector B added at `SAFTYFW_CONFIG_STORE_FLASH_OFFSET_B` (immediately after sector A, inside the already-reserved 64K region); writes switch sectors instead of erasing in place, the reader arbitrates by scanning both and keeping the highest-seq CRC-valid record, and a legacy single-sector image loads unchanged (sector A keeps its original offset/format). 169/169 new+existing host tests pass, including power-cut injection at every interesting point and a negative test proving the old erase-in-place bug reproduces the zero-valid-copies window. **A Pico reflash is required to deploy this and has not been done** — see `docs/audits/flash_endurance_review_2026-09-07.md` for detail. | `docs/CONFIG_FILESYSTEM.md` |
+| — | ~~LittleFS for flash writes, 2026-09-06~~ — assessed **not adopted** for log retention, then **superseded 2026-09-07**: endurance review confirmed no wear problem exists either, but the owner directed the migration anyway for architectural reasons (structured, inspectable, backup-able user data). In progress — zones config, profiles, and prefs dual-write to a new `cfg` partition; see `docs/CONFIG_FILESYSTEM.md` for state and open items, `docs/LITTLEFS_ASSESSMENT.md`/`docs/FILESYSTEM_USER_DATA_PLAN.md` for the history. **RP2040 `config_store` A/B sectors (flash_endurance_review_2026-09-07.md R2): implemented AND FLASHED, `b7af9ebe` 2026-09-08** (bench-verified: commissioning config read back byte-for-byte across the migration, CRC unchanged) — this row previously read "NOT YET FLASHED" and was stale by a day. **Open, and NOT flashed: a separate defect in the same file's in-RAM cache**, found 2026-09-09 (`s_cached_record` read with no synchronisation across cores, `safety_config_version` observed changing mid-read during a live heating run). Fixed by a seqlock (`b202fe56`, barrier fix `5671ee03`, then a writer-owned-fallback correction `cb1ba325` after review found the first fix's own fallback snapshot could itself race two readers) — 169+ host tests including a torn-read reproduction (20,945/190k writes without the fix, 0 with it) — but **none of the three seqlock commits have been flashed to the bench Pico yet**. See `docs/CONFIG_FILESYSTEM.md` for detail. | `docs/CONFIG_FILESYSTEM.md` |
 | **XL** | **Whole-kiln setup wizard — NEW, owner request 2026-09-08.** One web page, `/setup`, guiding a new owner from a blank board to a kiln `/api/readiness` reports ready: network/time/units, zones + thermocouples + types, zone type (HEATER vs ON_OFF_DEVICE), relays and names, zone commissioning limits, the safety processor's own commissioning, current sensing + CT verification under load, autotune and the coupling matrix. Modelled on `safety_commissioning_page.html`'s guided flow (stepper, consequence-bearing radio cards, read-back-verified commit) and backed by the existing `/api/readiness` checklist rather than a new model. **DONE (2026-09-09).** All 13 wizard steps and all 11 implementation steps shipped; progress persisted in NVS (not `cfg`) so a filesystem problem cannot lose it. Two steps apply heat (CT sweep, autotune) and five need the owner present. | `docs/SETUP_WIZARD.md` |
 | **L** | **On/off device zones — NEW, owner request 2026-09-07.** A zone may drive a non-heater on/off device (vent, damper, fan, water feed) instead of a heating element, switched by per-segment rules on ramp phase / direction / temperature / time, with a stalled ramp counting as a dwell. **Design only, nothing implemented; 4 questions open for the owner.** Safety core: guards 1/2/3/4/9 must be disabled for such a zone — guard 1 (HEATING_FAILED) would otherwise false-trip on a *correctly working* vent, since "duty high, temperature flat" is both its trip condition and the device's normal signature. 9 ordered steps. | `docs/ON_OFF_ZONE_PLAN.md` |
 | — | ~~Relay type and contact-life budget, 2026-09-06~~ — done. Per-zone `ssr/contactor/mercury`; rated-life table; budget math; >80% warning / >90% error, indication only, on LCD topbar + LCD Diagnostics and web dashboard + web diagnostics; confirmed reset both places; safety relay type select (`contactor/mercury` only) and K4 edge counting on the ESP (`c6d41fc`). | `docs/RELAY_LIFE_BUDGET.md` |
@@ -1401,6 +1462,15 @@ reported OK on a failed build, a `flash_firmware` that didn't check the
 binary matched HEAD, two stack overflows found via unregistered margins, and
 two new CI guard scripts that both caught real violations on their first
 run. Full postmortem: [`docs/COMPLETED_2026-09.md`](docs/COMPLETED_2026-09.md#m13m14--fault-reporting-and-verification-findings-full-detail-moved-2026-09-04).
+**The same bug class recurred 2026-09-09** (see the header of this file):
+`profile_executor` (KilnFW, `379f3fe6`) and `current_task`/`discrete_task`
+(SaftyFW, `3afc5ea6`) both overflowed real task stacks with no budget check
+registered, same shape as the two 2026-08-28 findings — each fix landed
+alongside the missing check (`379f3fe6`'s own budget row; `5b8fc53d` for
+SaftyFW). `316967b7` closed the KilnFW-wide gap (28 previously-uncovered
+tasks got budgets in one pass), then `c726748e` found even that coverage
+overstates its own confidence for indirect-dispatch tasks — read that commit
+before treating a green stack-budget run as proof.
 
 ## M10 — Instrumentation: make the board tell you when it is wrong · *CLOSED 2026-09-04*
 
