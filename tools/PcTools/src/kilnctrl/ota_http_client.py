@@ -137,16 +137,18 @@ def derive_mac(ap_password: str, nonce: bytes, context: str) -> bytes:
     the HMAC KEY and the context string as the message -- this derivation is
     what keeps the literal Wi-Fi/AP password out of the value that's ever
     compared or sent). `context` must be exactly "esp", "pico",
-    "esp-rollback", "recovery", or "boot-guard-reset" (each is its own
-    context, not a reuse of "esp" -- see ota_http.h's doc comment on
+    "esp-rollback", "recovery", "boot-guard-reset", or "sw-reset" (each is its
+    own context, not a reuse of "esp" -- see ota_http.h's doc comment on
     OTA_HTTP_CONTEXT_ESP_ROLLBACK for why a plain-update MAC must not double
     as a rollback authorization, and ota_state.h's doc comment on
-    OTA_HTTP_CONTEXT_BOOT_GUARD_RESET for the same reasoning applied there).
+    OTA_HTTP_CONTEXT_BOOT_GUARD_RESET for the same reasoning applied there;
+    "sw-reset" is OTA_HTTP_CONTEXT_SW_RESET, POST /api/sw_reset -- see
+    sw_reset() below).
     """
-    if context not in ("esp", "pico", "esp-rollback", "recovery", "boot-guard-reset"):
+    if context not in ("esp", "pico", "esp-rollback", "recovery", "boot-guard-reset", "sw-reset"):
         raise ValueError(
-            f"context must be 'esp', 'pico', 'esp-rollback', 'recovery', or 'boot-guard-reset', "
-            f"got {context!r}")
+            f"context must be 'esp', 'pico', 'esp-rollback', 'recovery', 'boot-guard-reset', "
+            f"or 'sw-reset', got {context!r}")
     key = hmac.new(ap_password.encode("utf-8"), OTA_KDF_CONTEXT, hashlib.sha256).digest()
     msg = nonce + context.encode("ascii")
     return hmac.new(key, msg, hashlib.sha256).digest()
@@ -570,3 +572,85 @@ def get_boot_guard_status(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dic
         return json.loads(body_text)
     except Exception as exc:
         raise OtaHttpError(f"/api/boot_guard response was not valid JSON: {body_text!r}") from exc
+
+
+def sw_reset(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
+    """POST /api/sw_reset -- reboot BOTH processors: this ESP32-S3, and (since
+    8b0e799a) the RP2040 safety processor IN PLACE, same firmware slot, via
+    the wire command SAFETY_CMD_REBOOT (0x29) relayed over the isolated UART
+    link. This is the sanctioned non-JTAG way to get the Pico's config_store
+    back into its ~60s post-reset write grace window -- see
+    firmware/KilnFW/App/drivers/http/sw_reset_http.c's module doc comment for
+    the full rationale, and CLAUDE.md's "Anything involving the boards"
+    section for why JTAG (debug_reset(peer="pico")) is not the only path.
+
+    No config on either processor is touched by this call itself. The Pico
+    may REFUSE its half (heating relay armed, or a firmware transfer into it
+    in flight) while the ESP still reboots -- the two halves are reported
+    independently in the returned dict, never as one undifferentiated "ok".
+    SAFETY_CMD_ROLLBACK must never be used for this: it boots the OTHER,
+    possibly-refused bootloader slot, not the running one.
+
+    Same challenge/MAC dance as recovery_exit_esp()/rollback_esp(), signed
+    over its own "sw-reset" context (ota_http.h's OTA_HTTP_CONTEXT_SW_RESET)
+    -- NOT interchangeable with any other route's MAC.
+
+    IMPORTANT -- this call reliably LATCHES an S6a (SAFETY_TRIP_MAIN_FAULT)
+    trip on the safety processor: this ESP's isolated fault line to it goes
+    undefined across this ESP's own reset, which safety_guards.c's S6a block
+    reads as a main-fault unconditionally (there is no grace window over
+    S6a, only over S6b). This call does NOT clear that trip -- S6a exists to
+    report exactly this event, and auto-clearing it from the same call that
+    caused it would defeat that purpose. A REQUIRED follow-up before heating
+    is a separate, explicit call to clear the trip (POST
+    /api/safety/clear_trip) once the safety link is confirmed back up and the
+    trip mask is confirmed to be ONLY SAFETY_TRIP_MAIN_FAULT (bit 6, 0x0040)
+    -- never clear a trip carrying any other bit without understanding it
+    first.
+
+    On success (200), this ESP is already committed to rebooting itself from
+    a short-lived background task -- this call returns as soon as the
+    response arrives, before that reboot actually happens, so the connection
+    dropping out from under a caller mid-read is expected, not an error (see
+    sw_reset_http.c's own reboot-task comment). The response body is plain
+    text (not JSON, unlike every other route in this module) -- reported
+    back to the caller as {"ok": True, "detail": "<body text>"} on any 2xx,
+    since sw_reset_http.c's own text already states, per-processor, whether
+    the Pico accepted, refused (and why), or never confirmed; a caller that
+    wants the Pico's own outcome should parse that text or, more robustly,
+    poll safety_get_diag()/get_fw_version() (boot_id) once the ESP is back up.
+
+    NOT YET VERIFIED AGAINST REAL HARDWARE by this module's own test suite --
+    request construction/HMAC/response-parsing are unit-tested with mocked
+    HTTP only; see test_ota_http_client.py.
+    """
+    nonce = get_challenge(host, timeout)
+    mac_hex = derive_mac(ap_password, nonce, "sw-reset").hex()
+
+    req = urllib.request.Request(
+        _url(host, "/api/sw_reset"),
+        data=b"",
+        method="POST",
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Length": "0",
+            "X-Ota-Mac": mac_hex,
+        },
+    )
+    log.info("sw_reset requested: host=%s", host)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status_code = resp.status
+            body_text = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        status_code, detail = _http_error_detail(exc)
+        log.warning("sw_reset refused: host=%s status=%s detail=%s", host, status_code, detail)
+        raise OtaHttpError(f"/api/sw_reset refused: HTTP {status_code}: {detail}",
+                            status_code, detail) from exc
+    except urllib.error.URLError as exc:
+        _, detail = _http_error_detail(exc)
+        log.warning("sw_reset failed (unreachable): host=%s detail=%s", host, detail)
+        raise OtaHttpError(f"/api/sw_reset unreachable: {detail}") from exc
+
+    log.info("sw_reset accepted: host=%s status=%d body=%r", host, status_code, body_text)
+    return {"ok": True, "status_code": status_code, "detail": body_text}

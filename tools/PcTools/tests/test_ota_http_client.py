@@ -649,3 +649,95 @@ class PushImageLoggingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SwResetTest(unittest.TestCase):
+    def _mock_challenge_then(self, post_response=None, post_side_effect=None):
+        challenge_body = json.dumps({"nonce": "33" * 16}).encode()
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _fake_response(challenge_body)
+            if post_side_effect is not None:
+                raise post_side_effect
+            return post_response
+
+        return fake_urlopen, calls
+
+    def test_sends_sw_reset_context_mac_and_empty_body(self):
+        ok_text = b"ok -- rebooting this controller now"
+        challenge_body = json.dumps({"nonce": "33" * 16}).encode()
+
+        calls = {"n": 0}
+        captured_req = {}
+
+        def wrapper(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _fake_response(challenge_body)
+            captured_req["req"] = req
+            return _fake_response(ok_text)
+
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=wrapper):
+            result = ota.sw_reset("kiln.local", "hunter2")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["detail"], ok_text.decode())
+        req = captured_req["req"]
+        self.assertEqual(req.full_url, "http://kiln.local/api/sw_reset")
+        self.assertEqual(req.data, b"")
+        mac_header = req.headers.get("X-ota-mac") or req.headers.get("X-Ota-mac")
+        self.assertIsNotNone(mac_header)
+        self.assertEqual(len(mac_header), 64)
+        # Must be signed over the "sw-reset" context, NOT "esp"/"esp-rollback"/
+        # "pico"/"recovery"/"boot-guard-reset" -- a MAC for any of those other
+        # actions must not double as authorization for this one.
+        expected = ota.derive_mac("hunter2", bytes.fromhex("33" * 16), "sw-reset").hex()
+        self.assertEqual(mac_header, expected)
+        not_recovery_context = ota.derive_mac("hunter2", bytes.fromhex("33" * 16), "recovery").hex()
+        self.assertNotEqual(mac_header, not_recovery_context)
+
+    def test_surfaces_409_interlock_refusal(self):
+        err = urllib.error.HTTPError(
+            "http://x/api/sw_reset", 409, "Conflict", hdrs=None,
+            fp=io.BytesIO(b"refused: a firing is in progress"))
+        fake_urlopen, _ = self._mock_challenge_then(post_side_effect=err)
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            with self.assertRaises(ota.OtaHttpError) as ctx:
+                ota.sw_reset("kiln.local", "hunter2")
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertIn("a firing is in progress", ctx.exception.detail)
+
+    def test_surfaces_403_wrong_password(self):
+        err = urllib.error.HTTPError(
+            "http://x/api/sw_reset", 403, "Forbidden", hdrs=None,
+            fp=io.BytesIO(b"wrong password"))
+        fake_urlopen, _ = self._mock_challenge_then(post_side_effect=err)
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            with self.assertRaises(ota.OtaHttpError) as ctx:
+                ota.sw_reset("kiln.local", "hunter2")
+        self.assertEqual(ctx.exception.status, 403)
+
+    def test_unreachable_host_raises(self):
+        err = urllib.error.URLError("no route to host")
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(ota.OtaHttpError):
+                ota.sw_reset("192.0.2.1", "hunter2")
+
+
+class DeriveMacSwResetContextTest(unittest.TestCase):
+    def test_matches_manual_double_hmac(self):
+        nonce = bytes(range(16))
+        got = ota.derive_mac("hunter2", nonce, "sw-reset")
+        key = hmac.new(b"hunter2", b"kilnctl-ota-v1", hashlib.sha256).digest()
+        want = hmac.new(key, nonce + b"sw-reset", hashlib.sha256).digest()
+        self.assertEqual(got, want)
+
+    def test_diverges_from_every_other_context(self):
+        nonce = bytes(range(16))
+        sw_reset_mac = ota.derive_mac("hunter2", nonce, "sw-reset")
+        for other in ("esp", "pico", "esp-rollback", "recovery", "boot-guard-reset"):
+            self.assertNotEqual(sw_reset_mac, ota.derive_mac("hunter2", nonce, other),
+                                 f"sw-reset MAC must differ from {other!r}'s MAC")

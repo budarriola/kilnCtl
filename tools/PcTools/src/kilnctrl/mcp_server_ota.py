@@ -269,6 +269,73 @@ def ota_recovery_exit_esp(password: str, host: Optional[str] = None) -> str:
 
 
 @_srv._tool()
+def sw_reset_esp(password: str, confirm: bool = False, host: Optional[str] = None) -> str:
+    """Reboot BOTH processors right now -- this ESP32-S3, and (since
+    8b0e799a) the RP2040 safety processor IN PLACE, same firmware slot --
+    POST /api/sw_reset. This is the sanctioned, non-JTAG way to reopen the
+    safety processor's ~60s post-reset config_store write grace window: an
+    operator (or a tool) who needs to commission a field while the Pico is
+    ARMED (the ordinary standing state, in which config_store_write() refuses
+    every field) uses this to get a fresh grace window, rather than reaching
+    for debug_reset(peer="pico") over JTAG.
+
+    `confirm` must be True or this refuses immediately with no request sent
+    to the board at all -- same idiom as safety_set_rate_guard()'s own
+    confirm gate. This is a consequential action (both processors reset,
+    firing control genuinely drops for ~10-15s) and REQUIRES explicit intent
+    every call; there is no "remember my answer".
+
+    Also refused by the board itself (409, surfaced here as an error) while a
+    firing/autotune is running or any zone's heater is commanded on -- same
+    interlock factory_reset and the OTA update routes already use -- and the
+    safety processor separately refuses ITS OWN half (relay armed, or a
+    firmware transfer into it in flight) while still letting this ESP reboot;
+    that per-processor outcome is in the returned detail text, not summarized
+    away.
+
+    IMPORTANT, read before calling: this call reliably LATCHES an S6a
+    (SAFETY_TRIP_MAIN_FAULT) trip on the safety processor -- this ESP's
+    isolated fault line to it goes undefined across this ESP's own reset,
+    which safety_guards.c's S6a block reads as a main-fault unconditionally
+    (there is no grace window over S6a, only over S6b). This tool does NOT
+    clear that trip -- S6a exists to report exactly this event, and
+    auto-clearing it from the same call that caused it would defeat the
+    point. REQUIRED FOLLOW-UP before heating: once safety_get_status()/
+    safety_get_diag() show the link back up, confirm trip_mask is ONLY
+    SAFETY_TRIP_MAIN_FAULT (bit 6, 0x0040 -- decode any OTHER bit and stop,
+    do not clear) and then call safety_clear_trip() explicitly.
+
+    `password`: same AP-password-derived HMAC scheme as
+    ota_recovery_exit_esp()/ota_rollback_esp() -- but signed over yet another
+    distinct context ("sw-reset"), so a MAC captured for one action cannot be
+    reused to authorize this one.
+
+    No configuration is erased or changed on either processor by this call
+    -- contrast the danger-zone factory_reset scopes.
+
+    NOT YET VERIFIED AGAINST REAL HARDWARE by this repo's own automated test
+    suite -- request construction/HMAC/response-parsing are unit-tested with
+    mocked HTTP only; see test_ota_http_client.py.
+    """
+    if not confirm:
+        return ("error: refused -- confirm=True is required. This reboots BOTH processors right "
+                "now and WILL latch an S6a main-fault trip on the safety processor that you must "
+                "clear yourself afterward (safety_clear_trip(), only once trip_mask is confirmed "
+                "to be exactly 0x0040). No request was sent to the board.")
+    resolved = _ota_resolve_host(host)
+    try:
+        body = ota_http.sw_reset(resolved, password)
+    except ota_http.OtaHttpError as exc:
+        status_bit = f" (HTTP {exc.status})" if exc.status else ""
+        return f"error: {exc}{status_bit} (host={resolved})"
+    if not body.get("ok"):
+        return f"error: board reported failure: {body} (host={resolved})"
+    return (f"ok - sw_reset accepted (host={resolved}); board detail: {body.get('detail')!r} -- "
+            f"expect ~10-15s unreachable, then an S6a trip to clear with safety_clear_trip() "
+            f"once trip_mask is confirmed to be exactly 0x0040")
+
+
+@_srv._tool()
 def ota_update_pico(image_path: str, password: str, host: Optional[str] = None) -> str:
     """Push a new RP2040 safety-processor firmware image -- POST
     /api/ota/pico. Stages `image_path` (a raw SaftyFW .bin) into the ESP's
