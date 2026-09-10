@@ -161,6 +161,18 @@ ISR_STACKING_BYTES = 32
 REGSP_MARGIN_FACTOR = 2
 
 
+def regsp_margin_fail(measured_total, declared_bytes, unresolved_regsp):
+    """See the "REGSP_MARGIN_FACTOR safety margin" comment in main()'s
+    per-task loop. Graded against DECLARED stack, not a hand-maintained
+    ceiling -- a ceiling in CEILING_BYTES below was set to exactly
+    2x its own measurement for every task this applies to, which made
+    grading against `ceiling` false by construction (2026-09-10, opus
+    review round 2). Pulled out to its own function so this specific
+    comparison can be unit-tested directly rather than only through a full
+    ELF walk."""
+    return bool(unresolved_regsp) and (measured_total * REGSP_MARGIN_FACTOR > declared_bytes)
+
+
 def _read(name):
     path = os.path.join(SRC_TASKS_DIR, name)
     with open(path, encoding="utf-8", errors="replace") as f:
@@ -450,28 +462,28 @@ def main():
             errors.append(f"{tname}: no CEILING_BYTES entry -- every table row must be graded")
             continue
 
-        # 2026-09-10 (opus review): a task whose graph still contains a
-        # register-operand add/sub sp,rN this walk could not resolve (see
-        # has_unresolved_regsp()) is not merely incomplete, it may be
-        # WRONG -- own_total can already be missing a real frame the same
-        # way config_store_seqlock_read's 532/608 B ones were invisible
-        # before parse()'s literal-pool resolution was added. Before that
-        # fix, this checker let exactly such a task read "ok" simply
-        # because CEILING_BYTES happened to be pinned at the same
-        # under-measured number (current_task=348, discrete_task=184,
-        # both since corrected). Never repeat that: a REGSP_MARGIN_FACTOR
-        # safety margin is required on top of the ceiling for any task
-        # still carrying an unresolved regsp adjust, so a coincidentally-
-        # tight ceiling cannot mask a real under-measurement again. This is
-        # in ADDITION to, not instead of, resolving what can be resolved --
-        # most of this repo's regsp instances now resolve automatically.
-        regsp_margin_fail = unresolved_regsp and (measured_total * REGSP_MARGIN_FACTOR > ceiling)
+        # 2026-09-10 (opus review, round 2): grading REGSP_MARGIN_FACTOR against
+        # `ceiling` was false by construction -- every ceiling in CEILING_BYTES
+        # was itself set to exactly 2x its own measurement (e.g. link_task:
+        # 9472, measured 4736), so `measured_total * 2 > ceiling` reduces to
+        # `2*m > 2*m`, which never fires. It graded the table against itself,
+        # not against anything the hardware cares about. What overflows the
+        # processor is DECLARED stack, not a hand-maintained ceiling -- so this
+        # margin must be checked against declared_bytes: if an unresolved regsp
+        # frame could plausibly be as large, relative to what this walk already
+        # measured, as the resolved ones turned out to be (4-6x, see
+        # config_store_seqlock_read above), does that inflated total still fit
+        # in the stack FreeRTOS actually allocated? A task whose own_total is a
+        # large fraction of declared_bytes with an unresolved regsp adjust on
+        # its path is not safely "ok" merely because a ceiling was copied from
+        # the same measurement.
+        regsp_margin_fail_val = regsp_margin_fail(measured_total, declared_bytes, unresolved_regsp)
 
         over_ceiling = measured_total > ceiling
         over_declared = measured_total > declared_bytes
         results.append(dict(name=tname, declared=declared_bytes, measured=measured_total,
                              raw=own_total, ceiling=ceiling, indeterminate=indeterminate,
-                             unresolved_regsp=unresolved_regsp, regsp_margin_fail=regsp_margin_fail,
+                             unresolved_regsp=unresolved_regsp, regsp_margin_fail=regsp_margin_fail_val,
                              over_ceiling=over_ceiling, over_declared=over_declared,
                              historical_note=task.get("historical_note")))
 
