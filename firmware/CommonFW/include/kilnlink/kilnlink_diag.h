@@ -21,11 +21,35 @@ extern "C" {
 #define KILNLINK_DIAG_CMD 0x08u
 #define KILNLINK_DIAG_LEN 26u
 
-/* boot_reason byte (offset 10). */
+/* boot_reason byte (offset 10). Bits 3-5 added 2026-09-09 (RP2040
+ * fatal-fault diagnosability pass): SaftyFW's watchdog_hw->scratch[5] latch
+ * (firmware/SaftyFW/src/watchdog_overdue_diag_codec.h's watchdog_fatal_diag_t)
+ * now distinguishes a stack overflow / malloc failure / configASSERT
+ * failure from an ordinary watchdog timeout with nothing recorded -- before
+ * this, all four looked identical from the ESP's side (the incident that
+ * motivated this: 5b8fc53d, a configASSERT fired by a stack-overflow-
+ * corrupted queue control block, presented as "the safety link's status
+ * frame never decodes" and cost hours of protocol investigation before an
+ * SWD session found the real cause). Purely additive -- this byte already
+ * exists in the fixed 26-byte frame and only used bits 0-2, so this is NOT a
+ * KILNLINK_PROTOCOL_VERSION bump, same precedent as LINK_FLAG2_CJ_VALID
+ * (link_frame.h) reusing a spare bit in an already-transmitted byte. At
+ * most one of KILNLINK_DIAG_BOOT_STACK_OVERFLOW/_MALLOC_FAILED/_ASSERT_FAILED
+ * is ever set for a given boot -- they are mutually exclusive by
+ * construction on the SaftyFW side (see watchdog_fatal_diag_t's own doc
+ * comment) -- and any of them may be set alongside KILNLINK_DIAG_BOOT_WATCHDOG,
+ * since the fault is exactly what caused that watchdog reset. This byte does
+ * NOT localize an assert to a file/line (no room in one byte's spare bits
+ * for that); the fine-grained detail lives in SaftyFW's own boot-time
+ * console UART banner and in watchdog_fatal_diag_get_cached() for anyone
+ * with a probe attached -- see main.c's step 3c. */
 typedef enum {
-    KILNLINK_DIAG_BOOT_POWERON  = 0x01u,
-    KILNLINK_DIAG_BOOT_WATCHDOG = 0x02u,
-    KILNLINK_DIAG_BOOT_BROWNOUT = 0x04u,
+    KILNLINK_DIAG_BOOT_POWERON       = 0x01u,
+    KILNLINK_DIAG_BOOT_WATCHDOG      = 0x02u,
+    KILNLINK_DIAG_BOOT_BROWNOUT      = 0x04u,
+    KILNLINK_DIAG_BOOT_STACK_OVERFLOW = 0x08u, /* vApplicationStackOverflowHook() latched a reason last boot */
+    KILNLINK_DIAG_BOOT_MALLOC_FAILED  = 0x10u, /* vApplicationMallocFailedHook() latched a reason last boot */
+    KILNLINK_DIAG_BOOT_ASSERT_FAILED  = 0x20u, /* configASSERT() latched a reason last boot */
 } kilnlink_diag_boot_flag_t;
 
 /* flags byte (offset 25). */

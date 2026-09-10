@@ -82,6 +82,20 @@ watchdog_overflow_diag_t watchdog_overflow_diag_read(void);
 // in this codebase.
 watchdog_overflow_diag_t watchdog_overflow_diag_get_cached(void);
 
+// 2026-09-09: reads the SAME scratch[5] register once more and decodes
+// whichever of the THREE fatal formats is present (stack overflow /
+// malloc-failure / configASSERT) -- see watchdog_fatal_diag_t's own doc
+// comment (watchdog_overdue_diag_codec.h). Call in main() alongside
+// watchdog_overdue_diag_read()/watchdog_overflow_diag_read(), BEFORE
+// watchdog_overdue_diag_clear() zeroes the register. At most one of the
+// four formats can ever be present for a given boot.
+watchdog_fatal_diag_t watchdog_fatal_diag_read(void);
+
+// Returns whatever watchdog_fatal_diag_read() decoded this boot -- the
+// accessor link_task_send_diag() uses to put the fatal-fault kind on the
+// wire (kilnlink_diag.h's boot_reason bits 3-5).
+watchdog_fatal_diag_t watchdog_fatal_diag_get_cached(void);
+
 #ifdef __cplusplus
 }
 #endif

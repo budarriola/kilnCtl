@@ -212,6 +212,122 @@ static void test_two_name_bytes_disambiguate_every_current_task(void)
     }
 }
 
+// --- watchdog_fatal_diag_decode() -- 2026-09-09, the unified fatal-fault
+// read covering all three mutually-exclusive hooks that can kill this
+// firmware (stack overflow / malloc failure / configASSERT). See that
+// type's own doc comment (watchdog_overdue_diag_codec.h) for the full
+// mechanism and precision tradeoff.
+
+// A malloc-failure word (WATCHDOG_FATAL_MALLOC_WORD(), exactly what
+// vApplicationMallocFailedHook() writes) must decode with kind ==
+// MALLOC_FAILED and magic_ok true.
+static void test_fatal_decode_recognises_malloc_failed(void)
+{
+    watchdog_fatal_diag_t out = watchdog_fatal_diag_decode(WATCHDOG_FATAL_MALLOC_WORD());
+
+    TEST_CHECK(out.magic_ok, "a malloc-fail-shaped word (0xB4) must decode with magic_ok true");
+    TEST_CHECK(out.kind == (uint8_t)WATCHDOG_FATAL_KIND_MALLOC_FAILED,
+               "a malloc-fail-shaped word must decode as WATCHDOG_FATAL_KIND_MALLOC_FAILED");
+    TEST_CHECK(out.name_byte0 == 0u && out.name_byte1 == 0u && out.file_id == 0u && out.line == 0u,
+               "malloc-fail carries no payload beyond the kind -- every other field must stay "
+               "at its zero default");
+}
+
+// An assert-failure word must round-trip its file_id and line exactly.
+static void test_fatal_decode_recovers_assert_file_id_and_line(void)
+{
+    uint32_t word = WATCHDOG_FATAL_ASSERT_WORD(0x42u, 1234u);
+    watchdog_fatal_diag_t out = watchdog_fatal_diag_decode(word);
+
+    TEST_CHECK(out.magic_ok, "an assert-shaped word (0xA5) must decode with magic_ok true");
+    TEST_CHECK(out.kind == (uint8_t)WATCHDOG_FATAL_KIND_ASSERT,
+               "an assert-shaped word must decode as WATCHDOG_FATAL_KIND_ASSERT");
+    TEST_CHECK(out.file_id == 0x42u, "file_id must round-trip exactly");
+    TEST_CHECK(out.line == 1234u, "line must round-trip exactly");
+}
+
+// A line number of 0 (SAFTYFW_ASSERT_FILE_ID left at its default, an assert
+// on the very first line -- degenerate, but the codec must not confuse it
+// with "nothing recorded") must still report magic_ok true, distinguishing
+// "assert failed, file_id/line both legitimately 0" from "no fatal event".
+static void test_fatal_decode_assert_all_zero_payload_still_decodes(void)
+{
+    uint32_t word = WATCHDOG_FATAL_ASSERT_WORD(0u, 0u);
+    watchdog_fatal_diag_t out = watchdog_fatal_diag_decode(word);
+
+    TEST_CHECK(out.magic_ok, "an assert word with a zero payload is still a FRESH word (the magic "
+                              "tag alone carries validity) and must decode as such");
+    TEST_CHECK(out.kind == (uint8_t)WATCHDOG_FATAL_KIND_ASSERT, "kind must still be ASSERT");
+}
+
+// The stack-overflow format (0xE3) must delegate to watchdog_overflow_diag_decode()
+// rather than re-deriving its own copy of the name-byte layout -- proves the
+// unified reader recovers the exact same name bytes the dedicated overflow
+// reader does, from the identical hand-packed word the hook itself writes.
+static void test_fatal_decode_recognises_stack_overflow_and_recovers_name_bytes(void)
+{
+    uint32_t word = (0xE3u << 24) | ((uint32_t)'t' << 16) | ((uint32_t)'h' << 8);
+    watchdog_fatal_diag_t out = watchdog_fatal_diag_decode(word);
+
+    TEST_CHECK(out.magic_ok, "a stack-overflow-shaped word (0xE3) must decode with magic_ok true "
+                              "through the unified fatal reader too, not just the dedicated one");
+    TEST_CHECK(out.kind == (uint8_t)WATCHDOG_FATAL_KIND_STACK_OVERFLOW,
+               "a stack-overflow-shaped word must decode as WATCHDOG_FATAL_KIND_STACK_OVERFLOW");
+    TEST_CHECK(out.name_byte0 == (uint8_t)'t' && out.name_byte1 == (uint8_t)'h',
+               "the unified reader must recover the exact same name bytes the dedicated overflow "
+               "decoder does -- same physical bits, must not disagree");
+}
+
+// An all-zero word (fresh boot, or after watchdog_overdue_diag_clear()) must
+// decode as WATCHDOG_FATAL_KIND_NONE / magic_ok == false -- the common case,
+// since most boots do not die fatally at all.
+static void test_fatal_decode_missing_magic_reports_none(void)
+{
+    watchdog_fatal_diag_t out = watchdog_fatal_diag_decode(0x00000000u);
+
+    TEST_CHECK(!out.magic_ok, "an all-zero word must decode as magic_ok == false");
+    TEST_CHECK(out.kind == (uint8_t)WATCHDOG_FATAL_KIND_NONE,
+               "an all-zero word must decode as WATCHDOG_FATAL_KIND_NONE");
+}
+
+// The sibling watchdog_overdue_diag_t format (0xD9, a live "task overdue"
+// latch, NOT a fatal hook) must never be mistaken for one of the three
+// fatal kinds -- mutual exclusivity in the other direction from
+// test_sibling_scratch_format_magic_is_rejected above.
+static void test_fatal_decode_rejects_overdue_format_word(void)
+{
+    uint32_t overdue_shaped_word = watchdog_overdue_diag_encode(0xFFu, 5u, 100u);
+    watchdog_fatal_diag_t out = watchdog_fatal_diag_decode(overdue_shaped_word);
+
+    TEST_CHECK(!out.magic_ok, "a genuine watchdog_overdue_diag_t word (magic 0xD9) must not be "
+                               "mistaken for any of the three fatal kinds");
+    TEST_CHECK(out.kind == (uint8_t)WATCHDOG_FATAL_KIND_NONE,
+               "an overdue-shaped word must decode as WATCHDOG_FATAL_KIND_NONE through the "
+               "unified fatal reader");
+}
+
+// The three fatal magic bytes (0xE3 overflow, 0xB4 malloc-fail, 0xA5 assert)
+// plus the sibling overdue byte (0xD9) must all be pairwise distinct -- if
+// two ever collided, one event would silently masquerade as another. This
+// is the build-time-invariant the whole "share one register safely" design
+// depends on, checked explicitly rather than left to be noticed by accident.
+static void test_all_four_scratch5_magic_bytes_are_distinct(void)
+{
+    uint8_t overdue_magic = (uint8_t)(watchdog_overdue_diag_encode(0u, 0u, 0u) >> 24);
+    uint8_t overflow_magic = 0xE3u;
+    uint8_t malloc_magic = (uint8_t)(WATCHDOG_FATAL_MALLOC_WORD() >> 24);
+    uint8_t assert_magic = (uint8_t)(WATCHDOG_FATAL_ASSERT_WORD(0u, 0u) >> 24);
+
+    TEST_CHECK(overdue_magic != overflow_magic && overdue_magic != malloc_magic &&
+                   overdue_magic != assert_magic,
+               "overdue's magic byte must differ from every fatal kind's");
+    TEST_CHECK(overflow_magic != malloc_magic && overflow_magic != assert_magic,
+               "overflow's magic byte must differ from malloc-fail's and assert's");
+    TEST_CHECK(malloc_magic != assert_magic,
+               "malloc-fail's magic byte must differ from assert's -- otherwise a heap "
+               "exhaustion and a failed assertion would be indistinguishable on the next boot");
+}
+
 void run_test_watchdog_overdue_diag_codec(void)
 {
     TEST_SECTION("watchdog_overdue_diag_codec -- which task(s) missed their check-in deadline, "
@@ -229,4 +345,14 @@ void run_test_watchdog_overdue_diag_codec(void)
     test_overflow_missing_magic_reports_not_ok();
     test_overflow_decoder_rejects_overdue_format_word();
     test_two_name_bytes_disambiguate_every_current_task();
+
+    TEST_SECTION("watchdog_fatal_diag_decode -- the unified stack-overflow/malloc-fail/assert "
+                  "latch, 2026-09-09 RP2040 fatal-fault diagnosability pass");
+    test_fatal_decode_recognises_malloc_failed();
+    test_fatal_decode_recovers_assert_file_id_and_line();
+    test_fatal_decode_assert_all_zero_payload_still_decodes();
+    test_fatal_decode_recognises_stack_overflow_and_recovers_name_bytes();
+    test_fatal_decode_missing_magic_reports_none();
+    test_fatal_decode_rejects_overdue_format_word();
+    test_all_four_scratch5_magic_bytes_are_distinct();
 }

@@ -312,6 +312,7 @@ void dashboard_get_status(dashboard_status_t *out)
             out->diag_warn_mask = sl.diag_warn_mask;
             out->diag_trip_mask = sl.diag_trip_mask;
             out->diag_state = sl.diag_state;
+            out->diag_boot_reason = sl.diag_boot_reason;
             out->diag_age_ms = sl.age_ms;
             out->diag_context_age_100ms = sl.diag_context_age_100ms;
             out->diag_context_frames_ok = sl.diag_context_frames_ok;

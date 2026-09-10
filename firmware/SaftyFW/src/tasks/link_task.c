@@ -64,6 +64,7 @@
 #include "link_frame.h"
 
 #include "boot_reason.h"
+#include "watchdog_overdue_diag.h" // watchdog_fatal_diag_get_cached() -- 2026-09-09, kilnlink_diag.h boot_reason bits 3-5
 #include "config_params.h" // param_id <-> config_store_record_t field mapping, see SET_PARAM/GET_PARAM/COMMIT_CONFIG/GET_CONFIG_PAGE handlers below
 #include "config_store.h" // SAFETY_CMD_SET_CONFIG, see link_task_handle_set_config()
 #include "link_diag_flags.h" // pure Frame B `flags` assembly, see link_task_send_diag()
@@ -983,6 +984,31 @@ static void link_task_send_diag(void)
         boot_reason_byte |= KILNLINK_DIAG_BOOT_WATCHDOG;
     } else {
         boot_reason_byte |= KILNLINK_DIAG_BOOT_POWERON;
+    }
+
+    // 2026-09-09: bits 3-5, from the fatal-fault latch main.c read (and
+    // cached) at boot step 3c, before watchdog_overdue_diag_clear() zeroed
+    // the physical register -- see kilnlink_diag.h's own comment on these
+    // bits for why this needs no protocol-version bump. Read from the RAM
+    // cache (watchdog_fatal_diag_get_cached()), not the register itself,
+    // since link_task_send_diag() runs repeatedly for the life of this boot
+    // while the register was cleared once, at boot, same convention as
+    // boot_reason_get_cached() immediately above.
+    watchdog_fatal_diag_t fatal = watchdog_fatal_diag_get_cached();
+    if (fatal.magic_ok) {
+        switch ((watchdog_fatal_kind_t)fatal.kind) {
+        case WATCHDOG_FATAL_KIND_STACK_OVERFLOW:
+            boot_reason_byte |= KILNLINK_DIAG_BOOT_STACK_OVERFLOW;
+            break;
+        case WATCHDOG_FATAL_KIND_MALLOC_FAILED:
+            boot_reason_byte |= KILNLINK_DIAG_BOOT_MALLOC_FAILED;
+            break;
+        case WATCHDOG_FATAL_KIND_ASSERT:
+            boot_reason_byte |= KILNLINK_DIAG_BOOT_ASSERT_FAILED;
+            break;
+        default:
+            break;
+        }
     }
 
     // context_age_100ms: 255 ("never received") is real now, not a

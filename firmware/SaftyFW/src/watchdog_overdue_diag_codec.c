@@ -91,3 +91,52 @@ watchdog_overflow_diag_t watchdog_overflow_diag_decode(uint32_t word)
 
     return out;
 }
+
+// --- Fatal-fault latch decode, 2026-09-09 --------------------------------
+// See watchdog_fatal_diag_t's own doc comment (watchdog_overdue_diag_codec.h)
+// for why all three fatal formats share scratch[5] with each other and with
+// the 0xD9 overdue format. The two ENCODE sides that are not already inline
+// in main.c are WATCHDOG_FATAL_MALLOC_WORD()/WATCHDOG_FATAL_ASSERT_WORD()
+// macros in that header, not functions here, for the same "must not call
+// into another compilation unit from a fatal context" reason the overflow
+// format's own comment gives -- configASSERT() in particular can fire from
+// an ISR or from a corrupted stack.
+#define WATCHDOG_FATAL_MALLOC_MAGIC_BYTE 0xB4u
+#define WATCHDOG_FATAL_ASSERT_MAGIC_BYTE 0xA5u
+#define WATCHDOG_FATAL_MAGIC_SHIFT       24u
+#define WATCHDOG_FATAL_FILE_ID_SHIFT     16u
+#define WATCHDOG_FATAL_FILE_ID_MASK      0xFFu
+#define WATCHDOG_FATAL_LINE_MASK         0xFFFFu
+
+watchdog_fatal_diag_t watchdog_fatal_diag_decode(uint32_t word)
+{
+    watchdog_fatal_diag_t out;
+    out.magic_ok = false;
+    out.kind = (uint8_t)WATCHDOG_FATAL_KIND_NONE;
+    out.name_byte0 = 0;
+    out.name_byte1 = 0;
+    out.file_id = 0;
+    out.line = 0;
+
+    uint8_t magic = (uint8_t)(word >> WATCHDOG_FATAL_MAGIC_SHIFT);
+    if (magic == WATCHDOG_OVERFLOW_DIAG_MAGIC_BYTE) {
+        // Delegate rather than re-derive the two name-byte shifts: one
+        // definition of that layout, not two that can drift apart.
+        watchdog_overflow_diag_t ov = watchdog_overflow_diag_decode(word);
+        out.magic_ok = true;
+        out.kind = (uint8_t)WATCHDOG_FATAL_KIND_STACK_OVERFLOW;
+        out.name_byte0 = ov.name_byte0;
+        out.name_byte1 = ov.name_byte1;
+    } else if (magic == WATCHDOG_FATAL_MALLOC_MAGIC_BYTE) {
+        out.magic_ok = true;
+        out.kind = (uint8_t)WATCHDOG_FATAL_KIND_MALLOC_FAILED;
+    } else if (magic == WATCHDOG_FATAL_ASSERT_MAGIC_BYTE) {
+        out.magic_ok = true;
+        out.kind = (uint8_t)WATCHDOG_FATAL_KIND_ASSERT;
+        out.file_id =
+            (uint8_t)((word >> WATCHDOG_FATAL_FILE_ID_SHIFT) & WATCHDOG_FATAL_FILE_ID_MASK);
+        out.line = (uint16_t)(word & WATCHDOG_FATAL_LINE_MASK);
+    }
+
+    return out;
+}

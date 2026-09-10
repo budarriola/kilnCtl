@@ -287,6 +287,14 @@ extern "C" {
 #define SAFETY_LINK_DIAG_BOOT_POWERON  0x01u
 #define SAFETY_LINK_DIAG_BOOT_WATCHDOG 0x02u
 #define SAFETY_LINK_DIAG_BOOT_BROWNOUT 0x04u
+/* 2026-09-09, RP2040 fatal-fault diagnosability pass -- see
+ * kilnlink_diag.h's own comment on these bits. Mutually exclusive with each
+ * other (SaftyFW's watchdog_hw->scratch[5] latch can hold only one fatal
+ * event per boot); may accompany SAFETY_LINK_DIAG_BOOT_WATCHDOG since the
+ * fault is exactly what caused that reset. */
+#define SAFETY_LINK_DIAG_BOOT_STACK_OVERFLOW 0x08u
+#define SAFETY_LINK_DIAG_BOOT_MALLOC_FAILED  0x10u
+#define SAFETY_LINK_DIAG_BOOT_ASSERT_FAILED  0x20u
 
 /* DIAG state byte (offset 24), kilnlink_diag.h's kilnlink_diag_state_t
  * mirrored here, same reasoning as above. */

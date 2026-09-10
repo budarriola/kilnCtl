@@ -125,9 +125,108 @@
  * Uses portDISABLE_INTERRUPTS(), not taskDISABLE_INTERRUPTS(): this file is
  * included by FreeRTOS.h itself before task.h exists, so only port-level
  * macros (from portmacro.h, already in scope by this point) are available
- * here. */
+ * here.
+ *
+ * 2026-09-09, RP2040 fatal-fault diagnosability pass: this is what actually
+ * fired in the thermo_task incident (5b8fc53d) -- configASSERT(pxQueue->
+ * uxItemSize == 0) inside FreeRTOS's own xQueueSemaphoreTake(), reached
+ * because a stack overflow elsewhere had smashed a heap-resident queue
+ * control block WITHOUT reliably tripping the stack canary. Before this
+ * change, configASSERT recorded nothing at all -- the reboot that followed
+ * was bit-for-bit indistinguishable from a plain watchdog timeout, and the
+ * real cause took an SWD session to find. Now it latches into the same
+ * watchdog_hw->scratch[5] register vApplicationStackOverflowHook() (main.c)
+ * and vApplicationMallocFailedHook() (main.c) already share -- see
+ * watchdog_fatal_diag_t's own doc comment
+ * (watchdog_overdue_diag_codec.h) for the full mechanism and why one
+ * register safely serves all three mutually-exclusive fatal events.
+ *
+ * Deliberately a raw MMIO write via a constant-folding macro
+ * (SAFTYFW_CONFIGASSERT_WORD()), NOT a call into watchdog_overdue_diag_codec.h's
+ * own WATCHDOG_FATAL_ASSERT_WORD() macro, and NOT a function call:
+ * configASSERT() can fire from an ISR, from inside a FreeRTOS critical
+ * section, or -- as in the incident above -- from a context whose stack is
+ * already corrupted, so nothing beyond a single store is safe here, same
+ * discipline as the other two hooks. It is ALSO not safe to #include
+ * "watchdog_overdue_diag_codec.h" from this file even though that header
+ * itself has no FreeRTOS/pico-sdk dependency: FreeRTOSConfig.h is pulled in
+ * by pico-sdk library sources (e.g. pico_time/time.c, part of
+ * hwabstraction_pico) that have no include path to firmware/SaftyFW/src/ --
+ * confirmed the hard way, this broke the target build the first time it was
+ * tried. So the bit layout below is a SEPARATE, hand-synced copy of
+ * WATCHDOG_FATAL_ASSERT_WORD()'s -- exactly the same "no shared encoder
+ * across this boundary" discipline vApplicationStackOverflowHook() (main.c)
+ * and watchdog_overflow_diag_decode() (watchdog_overdue_diag_codec.c)
+ * already use for the 0xE3 format, extended here because configASSERT's own
+ * boundary (FreeRTOSConfig.h, visible to every FreeRTOS-adjacent TU) is even
+ * wider than a single hook function's. "hardware/watchdog.h" IS safe to
+ * include here -- it is pico-sdk's own header for watchdog_hw and is on
+ * every such TU's include path already (this file already required it
+ * transitively; the target build confirms it compiles from every call
+ * site). test_watchdog_overdue_diag_codec.c's
+ * test_all_four_scratch5_magic_bytes_are_distinct() and the assert-specific
+ * tests check watchdog_overdue_diag_codec.h's copy of this layout; keeping
+ * the two in sync is a hand discipline, not a compiler-checked one -- same
+ * as the 0xE3 format's existing precedent.
+ *
+ * PRECISION: __LINE__ (16 bits, truncated) is latched; the file is NOT
+ * identified by name (a translation unit may opt into an 8-bit
+ * SAFTYFW_ASSERT_FILE_ID by #define-ing it before including FreeRTOS.h --
+ * 0 means "not declared", which is what every vendored FreeRTOS kernel
+ * source file reads as, since none of them are ours to annotate). A bare
+ * line number does not by itself name which of the handful of kernel
+ * source files (queue.c/tasks.c/list.c/timers.c/stream_buffer.c/
+ * event_groups.c) is implicated -- but combined with the pinned kernel
+ * version already vendored in this tree, a line number is enough to grep
+ * straight to the exact assert that fired, which is what this incident
+ * actually needed. That is considered sufficient localisation given how
+ * scarce flash/scratch space is here; see watchdog_fatal_diag_t's own
+ * comment (watchdog_overdue_diag_codec.h) for the full precision tradeoff
+ * stated across all three formats.
+ *
+ * WHY A LITERAL ADDRESS, NOT "hardware/watchdog.h"'s watchdog_hw struct:
+ * tried that first -- it broke the target build. FreeRTOSConfig.h is
+ * pulled in very early by some pico-sdk library TUs (confirmed:
+ * pico_time/time.c, part of hwabstraction_pico, via pico.h ->
+ * pico/config.h -> FreeRTOS-Kernel's freertos_sdk_config.h ->
+ * FreeRTOSConfig.h), BEFORE pico/platform.h has defined __force_inline --
+ * "hardware/watchdog.h" transitively pulls in hardware/address_mapped.h,
+ * whose __force_inline-tagged functions then fail to parse ("expected ';'
+ * before 'static'") in that TU. main.c/watchdog_overdue_diag.c never hit
+ * this because they always include "pico/stdlib.h" (which brings in
+ * pico/platform.h) first. A literal MMIO address needs no pico-sdk header
+ * at all, so it cannot be hit by this ordering problem from any TU.
+ * WATCHDOG_BASE (0x40058000) and the SCRATCH5 byte offset (0x20) are from
+ * pico-sdk's own hardware/regs/addressmap.h and hardware/regs/watchdog.h
+ * (WATCHDOG_SCRATCH5_OFFSET) respectively -- reverify against those two
+ * files if this firmware is ever ported to a pico-sdk release that
+ * renumbers them; test_all_four_scratch5_magic_bytes_are_distinct() and the
+ * assert round-trip tests do not catch an address drift, only a magic-byte
+ * collision, since they exercise the codec's bit-packing, not this literal
+ * address. */
+#include <stdint.h>
+
+#ifndef SAFTYFW_ASSERT_FILE_ID
+#define SAFTYFW_ASSERT_FILE_ID 0u
+#endif
+
+/* MUST be kept byte-for-byte identical to watchdog_overdue_diag_codec.h's
+ * WATCHDOG_FATAL_ASSERT_WORD() (magic 0xA5, file_id at [23:16], line at
+ * [15:0]) -- see this block's own comment for why the two cannot share one
+ * definition. */
+#define SAFTYFW_CONFIGASSERT_WORD(file_id, line)                             \
+    (0xA5000000u | (((uint32_t)(file_id) & 0xFFu) << 16) |                   \
+     ((uint32_t)(line) & 0xFFFFu))
+
+/* RP2040 WATCHDOG_BASE + WATCHDOG_SCRATCH5_OFFSET, see this block's own
+ * comment for the derivation and why this is a literal address rather than
+ * watchdog_hw->scratch[5]. */
+#define SAFTYFW_WATCHDOG_SCRATCH5_ADDR ((volatile uint32_t *)(0x40058000u + 0x20u))
+
 #define configASSERT(x)                                                      \
     if ((x) == 0) {                                                          \
+        *SAFTYFW_WATCHDOG_SCRATCH5_ADDR =                                    \
+            SAFTYFW_CONFIGASSERT_WORD(SAFTYFW_ASSERT_FILE_ID, __LINE__);     \
         portDISABLE_INTERRUPTS();                                            \
         for (;;) {                                                           \
         }                                                                    \

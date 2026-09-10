@@ -283,6 +283,14 @@ typedef struct {
     uint16_t diag_warn_mask;
     uint16_t diag_trip_mask;
     uint8_t  diag_state;
+    /* 2026-09-09, RP2040 fatal-fault diagnosability pass: straight
+     * passthrough of safety_link_status_t::diag_boot_reason (SAFETY_LINK_
+     * DIAG_BOOT_* bits, safety_link.h), previously read off the wire and
+     * cached but never exposed past that struct. Bits 3-5 (STACK_OVERFLOW/
+     * MALLOC_FAILED/ASSERT_FAILED) name which of SaftyFW's three fatal
+     * hooks fired on its last boot, if any -- see kilnlink_diag.h's own
+     * comment for the full mechanism and why this needed no protocol bump. */
+    uint8_t  diag_boot_reason;
     /* How old the DIAG frame this diag_state/diag_trip_reason came from is --
      * shares safety_link_status_t's single cached_tick with the overall link
      * age (safety_link.c), so this is that same age, exposed under the diag_

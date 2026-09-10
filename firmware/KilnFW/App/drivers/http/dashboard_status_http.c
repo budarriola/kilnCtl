@@ -495,6 +495,21 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
         APPEND(",\"diag_warn_mask\":%u", (unsigned)ds->diag_warn_mask);
         APPEND(",\"diag_trip_mask\":%u", (unsigned)ds->diag_trip_mask);
         APPEND(",\"diag_state\":%u", (unsigned)ds->diag_state);
+        /* 2026-09-09: raw boot_reason byte plus three decoded booleans for
+         * the fatal-fault bits specifically (SAFETY_LINK_DIAG_BOOT_STACK_
+         * OVERFLOW/_MALLOC_FAILED/_ASSERT_FAILED, safety_link.h) -- this is
+         * "last fatal fault: X" for a caller that doesn't want to decode
+         * the raw byte itself. Full localisation (which task overflowed,
+         * which line asserted) is NOT on this wire -- see kilnlink_diag.h's
+         * comment on these bits -- only on SaftyFW's own boot-time console
+         * UART banner (main.c) or via SWD. */
+        APPEND(",\"diag_boot_reason\":%u", (unsigned)ds->diag_boot_reason);
+        APPEND(",\"diag_boot_stack_overflow\":%s",
+               (ds->diag_boot_reason & SAFETY_LINK_DIAG_BOOT_STACK_OVERFLOW) ? "true" : "false");
+        APPEND(",\"diag_boot_malloc_failed\":%s",
+               (ds->diag_boot_reason & SAFETY_LINK_DIAG_BOOT_MALLOC_FAILED) ? "true" : "false");
+        APPEND(",\"diag_boot_assert_failed\":%s",
+               (ds->diag_boot_reason & SAFETY_LINK_DIAG_BOOT_ASSERT_FAILED) ? "true" : "false");
         APPEND(",\"diag_age_ms\":%u", (unsigned)ds->diag_age_ms);
         APPEND(",\"diag_context_age_100ms\":%u", (unsigned)ds->diag_context_age_100ms);
         APPEND(",\"diag_context_frames_ok\":%lu", (unsigned long)ds->diag_context_frames_ok);

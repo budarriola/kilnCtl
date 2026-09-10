@@ -17,6 +17,8 @@
 // real. Steps 4-6 and 8-9 are TODOs for Phases 3-9 -- see the TODO comments
 // at each step below and TODO.md's own phase breakdown; this file does not
 // pretend those phases are done.
+#include <stdio.h> // snprintf, for the boot-time fatal-fault console banner (step 3c) -- see that block's own comment
+
 #include "pico/stdlib.h"
 
 #include "FreeRTOS.h"
@@ -144,6 +146,29 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 
 void vApplicationMallocFailedHook(void)
 {
+    // 2026-09-09: same treatment, and for the same reason, as the stack-
+    // overflow hook above -- until this line existed, a heap exhaustion on
+    // this board disabled interrupts, hung, let the unfed 1 s watchdog
+    // reset the chip, and left NOTHING behind: bit-for-bit
+    // indistinguishable from any other watchdog reset, from a stack
+    // overflow's own reset before that hook got its write, and from a
+    // failed configASSERT. Shares watchdog_hw->scratch[5] with the other
+    // three formats under its own magic byte (0xB4) -- see
+    // watchdog_fatal_diag_t's doc comment (watchdog_overdue_diag_codec.h)
+    // for why one register safely serves all of them.
+    //
+    // Raw MMIO write with a macro-built constant, not a function call, for
+    // the same reason the overflow hook above states: the heap is already
+    // exhausted here and the caller's context is not one to make
+    // assumptions in. WATCHDOG_FATAL_MALLOC_WORD() is a macro precisely so
+    // this stays one store.
+    //
+    // Records no payload beyond the kind: FreeRTOS's malloc-failed hook
+    // takes no arguments at all -- it is never told the requested size --
+    // so there is nothing further to record that would not require calling
+    // into the heap implementation from inside a heap failure.
+    watchdog_hw->scratch[5] = WATCHDOG_FATAL_MALLOC_WORD();
+
     taskDISABLE_INTERRUPTS();
     for (;;) {
     }
@@ -257,6 +282,13 @@ int main(void)
     (void)hal_scratch_claim(3u, "startup_diag", HAL_SCRATCH_TAG_NONE);
     (void)hal_scratch_claim(5u, "watchdog_overdue_diag", 0xD9u);
     (void)hal_scratch_claim(5u, "stack_overflow_hook", 0xE3u);
+    // 2026-09-09: slot 5's two other legitimate co-owners -- see
+    // watchdog_fatal_diag_t's doc comment (watchdog_overdue_diag_codec.h).
+    // Both write raw MMIO (vApplicationMallocFailedHook() in this file;
+    // configASSERT() in FreeRTOSConfig.h), same "claim here is bookkeeping
+    // only" note as the two claims immediately above.
+    (void)hal_scratch_claim(5u, "malloc_fail_hook", 0xB4u);
+    (void)hal_scratch_claim(5u, "assert_hook", 0xA5u);
     (void)hal_scratch_claim(6u, "boot_stage", HAL_SCRATCH_TAG_NONE);
     (void)hal_scratch_claim(7u, "clear_trip_diag", HAL_SCRATCH_TAG_NONE);
 
@@ -338,15 +370,59 @@ int main(void)
     // will ever report magic_ok == true for a given boot.
     watchdog_overflow_diag_t watchdog_overflow_diag = watchdog_overflow_diag_read();
 
-    // TODO: surface watchdog_overdue_diag/watchdog_overflow_diag in the
-    // DIAG frame (link_task.c, SAFETY_CMD_DIAG), same not-yet-surfaced
-    // state as boot_reason/clear_trip_diag above -- SWD-readable via
-    // watchdog_overdue_diag_get_cached()/watchdog_overflow_diag_get_cached()
-    // in the meantime.
-    (void)watchdog_overdue_diag;
-    (void)watchdog_overflow_diag;
+    // 2026-09-09: the unified fatal-fault read (stack overflow / malloc
+    // failure / configASSERT), same shared register, same read-before-clear
+    // discipline. Read AFTER the two above (all three reads decode the same
+    // still-unclearred word; order between them does not matter) but before
+    // watchdog_overdue_diag_clear() below.
+    watchdog_fatal_diag_t watchdog_fatal_diag = watchdog_fatal_diag_read();
 
-    watchdog_overdue_diag_clear(); // clears the one shared register regardless of which format was present, if either
+    // Surfaced two ways, deliberately NOT gated on anything below possibly
+    // failing to start: (1) here, as plain text on the debug-probe console
+    // UART (console_uart_init() already ran at the very top of main(), so
+    // this reaches a human with nothing but a serial terminal on the probe's
+    // COM port -- no JTAG/SWD session required to READ this, only to have
+    // flashed the board in the first place) and (2) later, once
+    // link_task_send_diag() runs, as kilnlink_diag.h boot_reason bits 3-5 in
+    // the existing SAFETY_CMD_DIAG frame (see that header and link_task.c),
+    // reaching the ESP's own diagnostics with no protocol-version bump and
+    // no frame-length change -- those bits were unused padding in an
+    // already-transmitted byte. SWD-readable via
+    // watchdog_overdue_diag_get_cached()/watchdog_overflow_diag_get_cached()/
+    // watchdog_fatal_diag_get_cached() in the meantime for anyone who does
+    // have a probe attached.
+    //
+    // snprintf/console_uart_puts are safe here: this is boot-time code,
+    // before vTaskStartScheduler(), on the one thread of execution, with a
+    // fully intact stack (nothing here runs from inside a fault hook).
+    if (watchdog_fatal_diag.magic_ok) {
+        char msg[80];
+        switch ((watchdog_fatal_kind_t)watchdog_fatal_diag.kind) {
+        case WATCHDOG_FATAL_KIND_STACK_OVERFLOW:
+            snprintf(msg, sizeof(msg),
+                     "!!! last boot: STACK OVERFLOW, task '%c%c...'\r\n",
+                     (char)(watchdog_fatal_diag.name_byte0 ? watchdog_fatal_diag.name_byte0 : '?'),
+                     (char)(watchdog_fatal_diag.name_byte1 ? watchdog_fatal_diag.name_byte1 : '?'));
+            break;
+        case WATCHDOG_FATAL_KIND_MALLOC_FAILED:
+            snprintf(msg, sizeof(msg), "!!! last boot: MALLOC FAILED (heap exhausted)\r\n");
+            break;
+        case WATCHDOG_FATAL_KIND_ASSERT:
+            snprintf(msg, sizeof(msg),
+                     "!!! last boot: configASSERT FAILED, file_id=%u line=%u\r\n",
+                     (unsigned)watchdog_fatal_diag.file_id, (unsigned)watchdog_fatal_diag.line);
+            break;
+        default:
+            snprintf(msg, sizeof(msg), "!!! last boot: unrecognised fatal latch\r\n");
+            break;
+        }
+        console_uart_puts(msg);
+    } else if (watchdog_overdue_diag.magic_ok) {
+        console_uart_puts("!!! last boot: watchdog check-in overdue\r\n");
+    }
+    (void)watchdog_overflow_diag; // fully absorbed into watchdog_fatal_diag above; kept as its own read/cache for existing callers of watchdog_overflow_diag_get_cached()
+
+    watchdog_overdue_diag_clear(); // clears the one shared register regardless of which format was present
 
     // --- Step 4: config from flash. ------------------------------------------
     // config_store_boot_load() (Phase 9) reads the config store's flash

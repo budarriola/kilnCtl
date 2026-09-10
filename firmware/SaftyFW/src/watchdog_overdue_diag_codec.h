@@ -57,6 +57,79 @@ typedef struct {
 // diagnostics.
 watchdog_overflow_diag_t watchdog_overflow_diag_decode(uint32_t word);
 
+// --- Fatal-fault latch, the same scratch[5] register, 2026-09-09 ----------
+//
+// WHY. Before this, exactly ONE of the three ways this firmware can die
+// fatally left any evidence at all: a stack overflow (watchdog_overflow_diag_t
+// above). The other two -- vApplicationMallocFailedHook() and a failed
+// configASSERT() -- did nothing but taskDISABLE_INTERRUPTS() and spin, which
+// means watchdog_task never runs again, the unfed 1 s hardware watchdog
+// resets the chip, and the board reboots roughly once a second forever with
+// no diagnostic of any kind. That is not hypothetical: the thermo_task
+// incident (5b8fc53d) was a heap-resident FreeRTOS queue control block
+// smashed by a stack overflow that did NOT reliably trip the canary, so the
+// fault surfaced as configASSERT(pxQueue->uxItemSize == 0) failing inside
+// xQueueSemaphoreTake() -- indistinguishable, from the ESP's side, from
+// "the safety link's status frame stopped decoding", and it cost hours of
+// protocol investigation before somebody read the registers over JTAG.
+//
+// The three formats share the one physical scratch[5] register,
+// distinguished by magic byte alone (0xE3 overflow / 0xB4 malloc-fail /
+// 0xA5 assert, all distinct from watchdog_overdue_diag_t's own 0xD9). This
+// is safe for exactly the reason the overflow format's own comment already
+// gives: each of these hooks disables interrupts and hangs, so at most one
+// of them can ever run in a given boot, and none of them can be followed by
+// watchdog_task reaching its own 0xD9 write.
+//
+// PRECISION, stated plainly. The kind (overflow / malloc-fail / assert) is
+// always recovered. Beyond that: overflow carries two task-name bytes;
+// malloc-fail carries nothing further (the FreeRTOS hook takes no arguments
+// -- it is not told the requested size); assert carries __LINE__ (16 bits)
+// plus an 8-bit file id that a translation unit may opt into by defining
+// SAFTYFW_ASSERT_FILE_ID before including FreeRTOS.h (0 = not declared,
+// which is what every FreeRTOS kernel source reads as). So an assert is NOT
+// localized to a file by default -- only to a line number within an
+// unnamed file. That is still decisive for the incident above, but do not
+// overclaim it: this codebase has 100+ configASSERT sites once the kernel
+// sources are counted, so a bare line number narrows the field, it does not
+// name the site. What it does do unambiguously, and what the incident
+// actually needed, is separate "an assertion failed" from "a stack
+// overflowed", from "the heap ran out", from "the watchdog fired with
+// nothing recorded" -- four states that were previously one.
+typedef enum {
+    WATCHDOG_FATAL_KIND_NONE           = 0, // no magic tag present: nothing was recorded
+    WATCHDOG_FATAL_KIND_STACK_OVERFLOW = 1, // 0xE3, vApplicationStackOverflowHook()
+    WATCHDOG_FATAL_KIND_MALLOC_FAILED  = 2, // 0xB4, vApplicationMallocFailedHook()
+    WATCHDOG_FATAL_KIND_ASSERT         = 3, // 0xA5, configASSERT() (FreeRTOSConfig.h)
+} watchdog_fatal_kind_t;
+
+typedef struct {
+    bool     magic_ok;   // true iff `kind` != NONE -- kept for symmetry with the two structs above
+    uint8_t  kind;       // watchdog_fatal_kind_t
+    uint8_t  name_byte0; // STACK_OVERFLOW only, else 0
+    uint8_t  name_byte1; // STACK_OVERFLOW only, else 0
+    uint8_t  file_id;    // ASSERT only, else 0 -- SAFTYFW_ASSERT_FILE_ID at the failing site, 0 = not declared
+    uint16_t line;       // ASSERT only, else 0 -- __LINE__ at the failing site, truncated to 16 bits
+} watchdog_fatal_diag_t;
+
+// Packing macros, deliberately macros and not functions: configASSERT()
+// lives in FreeRTOSConfig.h and must not call into another compilation unit
+// (it can fire from an ISR, from inside the scheduler's own critical
+// sections, or -- as in the incident above -- from a context whose stack is
+// already corrupt). A macro compiles to one constant-folded MMIO store.
+// FreeRTOSConfig.h includes THIS header for them, which is safe: this file
+// pulls in nothing but stdbool/stdint.
+#define WATCHDOG_FATAL_MALLOC_WORD() (0xB4000000u)
+#define WATCHDOG_FATAL_ASSERT_WORD(file_id, line)                            \
+    (0xA5000000u | (((uint32_t)(file_id) & 0xFFu) << 16) |                   \
+     ((uint32_t)(line) & 0xFFFFu))
+
+// Decodes any of the three fatal formats out of one scratch[5] word. A word
+// carrying watchdog_overdue_diag_t's 0xD9 tag, a zeroed register, or
+// uninitialised power-on garbage all decode to WATCHDOG_FATAL_KIND_NONE --
+// same "nothing usable here" contract as every other decode in this file.
+watchdog_fatal_diag_t watchdog_fatal_diag_decode(uint32_t word);
+
 // Largest overage this format can represent -- (1 << 13) - 1. Encoding a
 // larger value saturates to this rather than silently truncating into a
 // misleadingly small one (20ms instead of 2000ms would be exactly the wrong

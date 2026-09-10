@@ -29,6 +29,9 @@ static watchdog_overdue_diag_t s_watchdog_overdue_cached;
 // comment. Distinctly named from s_watchdog_overdue_cached above, same
 // nm/objdump-disambiguation discipline as clear_trip_diag.c's own rename.
 static watchdog_overflow_diag_t s_watchdog_overflow_cached;
+// 2026-09-09, the fatal-fault latch (stack overflow / malloc failure /
+// configASSERT). Distinctly named for the same nm/objdump reason.
+static watchdog_fatal_diag_t s_watchdog_fatal_cached;
 
 void watchdog_overdue_diag_mark(uint8_t overdue_mask, uint8_t worst_task_id,
                                  uint16_t worst_overage_ms)
@@ -71,4 +74,27 @@ watchdog_overflow_diag_t watchdog_overflow_diag_read(void)
 watchdog_overflow_diag_t watchdog_overflow_diag_get_cached(void)
 {
     return s_watchdog_overflow_cached;
+}
+
+// 2026-09-09: the unified fatal-fault read. Same physical register, same
+// read-once-at-boot contract, same cache discipline as the two above --
+// see watchdog_fatal_diag_t's doc comment (watchdog_overdue_diag_codec.h)
+// for why one register serves all three fatal formats. This supersedes
+// watchdog_overflow_diag_read() for callers that want "what killed the last
+// boot" rather than specifically "did a stack overflow kill it"; the
+// overflow-specific pair stays for its existing callers and because it is
+// the one format carrying task-name bytes.
+watchdog_fatal_diag_t watchdog_fatal_diag_read(void)
+{
+    uint32_t raw = 0u;
+    (void)hal_scratch_read_u32(WATCHDOG_OVERDUE_DIAG_SCRATCH, &raw,
+                                WATCHDOG_OVERDUE_DIAG_SCRATCH, 0u, NULL);
+    watchdog_fatal_diag_t out = watchdog_fatal_diag_decode(raw);
+    s_watchdog_fatal_cached = out;
+    return out;
+}
+
+watchdog_fatal_diag_t watchdog_fatal_diag_get_cached(void)
+{
+    return s_watchdog_fatal_cached;
 }

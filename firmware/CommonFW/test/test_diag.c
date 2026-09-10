@@ -193,10 +193,45 @@ static void test_encode_buffer_too_small(void)
           "encode() with an undersized output buffer -> ERR_BUFFER_TOO_SMALL");
 }
 
+/* 2026-09-09, RP2040 fatal-fault diagnosability pass: boot_reason bits 3-5
+ * (STACK_OVERFLOW/MALLOC_FAILED/ASSERT_FAILED), added purely by reusing
+ * spare bits of an already-transmitted byte -- see kilnlink_diag.h's own
+ * comment on why this needed no KILNLINK_DIAG_LEN/protocol-version change.
+ * Proves they round-trip byte-exact through the SAME fixed-length codec
+ * every other boot_reason bit already goes through, and that they compose
+ * correctly alongside KILNLINK_DIAG_BOOT_WATCHDOG (a fatal hook firing IS
+ * what caused that watchdog reset, so both bits are legitimately set
+ * together). */
+static void test_round_trip_fatal_boot_reason_bits(void)
+{
+    kilnlink_diag_t dg = {0};
+    dg.boot_reason = (uint8_t)(KILNLINK_DIAG_BOOT_WATCHDOG | KILNLINK_DIAG_BOOT_ASSERT_FAILED);
+
+    uint8_t buf[KILNLINK_DIAG_LEN];
+    kilnlink_diag_status_t status;
+    size_t n = kilnlink_diag_encode(&dg, buf, sizeof(buf), &status);
+    CHECK(status == KILNLINK_DIAG_OK, "encode() reports OK with fatal boot_reason bits set");
+    CHECK(n == KILNLINK_DIAG_LEN, "encode() still writes exactly 26 bytes -- fatal bits reuse "
+                                   "spare bits in the EXISTING boot_reason byte, they do not "
+                                   "grow the frame");
+
+    kilnlink_diag_t decoded;
+    kilnlink_diag_status_t dstatus = kilnlink_diag_decode(buf, n, &decoded);
+    CHECK(dstatus == KILNLINK_DIAG_OK, "decode() reports OK");
+    CHECK(decoded.boot_reason == dg.boot_reason,
+          "WATCHDOG and ASSERT_FAILED bits must both round-trip exactly, set together");
+    CHECK((decoded.boot_reason & KILNLINK_DIAG_BOOT_STACK_OVERFLOW) == 0,
+          "STACK_OVERFLOW must stay clear when it was never set -- these three fatal bits "
+          "are mutually exclusive on the SaftyFW side and the codec must not conflate them");
+    CHECK((decoded.boot_reason & KILNLINK_DIAG_BOOT_MALLOC_FAILED) == 0,
+          "MALLOC_FAILED must stay clear when it was never set");
+}
+
 int main(void)
 {
     test_round_trip();
     test_round_trip_never_received_context();
+    test_round_trip_fatal_boot_reason_bits();
     test_vector_healthy_armed();
     test_vector_tripped_with_history();
     test_decode_too_short();
