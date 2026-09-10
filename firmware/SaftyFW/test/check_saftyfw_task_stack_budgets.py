@@ -83,38 +83,69 @@ FREERTOS_CONFIG = os.path.join(REPO_ROOT, "firmware", "SaftyFW", "FreeRTOSConfig
 # failure class af0bb774 fixed for KilnFW's check_00 the same day: compare
 # artifact mtime against the newest mtime among the sources that feed the
 # measurement, and refuse rather than measure when the artifact is older.
-# Every *.c/*.h under src/tasks/ is included (not just the files named in
-# TASKS below) because a task's reachable call graph routinely calls into a
-# sibling task's helper; every *.c/*.h directly under src/ (config_store.c,
-# config_store.h, config_store_flash.c, ...) is included because every task
-# here calls into config_store; FreeRTOSConfig.h because configMINIMAL_
-# STACK_SIZE is read from it; and this checker's own two files, because a
-# fix to the measurement logic itself must invalidate any prior "fresh"
-# verdict just as much as a firmware source edit would.
-FRESHNESS_GLOBS = (
-    os.path.join(SRC_TASKS_DIR, "*.c"),
-    os.path.join(SRC_TASKS_DIR, "*.h"),
-    os.path.join(SRC_DIR, "*.c"),
-    os.path.join(SRC_DIR, "*.h"),
+# Originally every *.c/*.h directly under src/tasks/ and src/ (non-
+# recursive globs) plus FreeRTOSConfig.h and this checker's own two files.
+# 2026-09-10 (opus review): that non-recursive src/*.{c,h} glob silently
+# excluded roughly half of what actually feeds the measurement --
+# firmware/SaftyFW/src/update/*.c (update_receiver.c, image_header.c,
+# confirm.c, received_ranges.c -- all in update_task's reachable call
+# graph) and firmware/SaftyFW/src/board/ are both one level too deep for a
+# non-recursive glob to see; firmware/hwAbstraction/ (hal_uart_pico_
+# internal.h, hal_flash_pico.c, hal_gpio* -- reached by every task, e.g.
+# link_task.c's own #include "hal_uart_pico_internal.h") and
+# firmware/CommonFW/ (link_frame.h and friends, link_task's kilnlink frame
+# codecs) were excluded ENTIRELY. Edit any of those and this gate reported
+# "fresh" on an ELF that predated the edit -- exactly the failure mode this
+# gate exists to catch (the third stale-artifact incident in two days).
+# check_saftyfw_task_count.py already gets this right with os.walk(); this
+# checker did not, despite living right next to it. Now recursive, and
+# rooted at every directory whose contents can end up on a task's call
+# graph or feed this checker's own measurement logic, not just the ones
+# named in TASKS below (a task's graph routinely calls into a sibling
+# task's helper, and every task here calls into config_store).
+FRESHNESS_ROOTS = (
+    SRC_DIR,   # recursive: src/tasks/, src/update/, src/board/, src/*.c|h
+    os.path.join(REPO_ROOT, "firmware", "hwAbstraction"),
+    os.path.join(REPO_ROOT, "firmware", "CommonFW"),
+)
+FRESHNESS_EXTRA_FILES = (
     FREERTOS_CONFIG,
     os.path.join(os.path.dirname(__file__), "check_saftyfw_task_stack_budgets.py"),
     os.path.join(os.path.dirname(__file__), "stack_budget_lib_arm.py"),
 )
+# Build/vendored/test-only content under those roots has no bearing on what
+# actually gets linked into SaftyFW.elf's task call graphs and would only
+# make this gate spuriously "stale" on every unrelated edit -- excluded the
+# same way run_all_checks.ps1 excludes build/vendored trees from its own
+# discovery glob.
+FRESHNESS_EXCLUDE_DIR_NAMES = {"build", "test", ".git", "docs"}
 
 
 def newest_source_mtime():
-    import glob as globmod
     newest_path, newest_t = None, -1.0
-    for pattern in FRESHNESS_GLOBS:
-        for path in globmod.glob(pattern):
-            if not os.path.isfile(path):
-                continue
-            t = os.path.getmtime(path)
-            if t > newest_t:
-                newest_path, newest_t = path, t
+
+    def consider(path):
+        nonlocal newest_path, newest_t
+        if not path.endswith((".c", ".h", ".cpp", ".hpp")):
+            return
+        if not os.path.isfile(path):
+            return
+        t = os.path.getmtime(path)
+        if t > newest_t:
+            newest_path, newest_t = path, t
+
+    for root in FRESHNESS_ROOTS:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in FRESHNESS_EXCLUDE_DIR_NAMES]
+            for fname in filenames:
+                consider(os.path.join(dirpath, fname))
+    for path in FRESHNESS_EXTRA_FILES:
+        consider(path)
+
     if newest_t < 0:
-        raise ValueError("newest_source_mtime: no source files matched any FRESHNESS_GLOBS pattern "
-                          "-- refusing to grade artifact freshness with no signal to grade it against")
+        raise ValueError("newest_source_mtime: no source files matched any FRESHNESS_ROOTS/"
+                          "FRESHNESS_EXTRA_FILES entry -- refusing to grade artifact freshness "
+                          "with no signal to grade it against")
     return newest_path, newest_t
 
 # Cortex-M0+ exception entry (NVIC hardware stacking): r0-r3, r12, lr, pc,
