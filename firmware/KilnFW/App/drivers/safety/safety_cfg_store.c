@@ -292,6 +292,61 @@ typedef struct {
     safety_cfg_entry_t entries[SAFETY_CFG_PARAM_COUNT];
 } safety_cfg_store_blob_t;
 
+/* Field-by-field diff of the last successful refetch -- see safety_cfg_store.h's
+ * safety_cfg_diff_entry_t comment. Transient, RAM-only (never persisted --
+ * it describes an event, not state): computed fresh in
+ * safety_cfg_store_refetch_locked() every time it is about to install a new
+ * s_store, discarded (count reset to 0) on the very next refetch regardless
+ * of outcome, so a caller always sees either "the diff for the refetch that
+ * just happened" or "empty, nothing has refetched since I last looked". */
+static safety_cfg_diff_entry_t s_diff[SAFETY_CFG_STORE_DIFF_MAX];
+static size_t s_diff_count;
+static bool s_diff_truncated;
+static uint16_t s_diff_from_crc;
+static uint16_t s_diff_to_crc;
+
+/* NOT a separate function on purpose: safety_poll_task's own stack is
+ * documented near its ceiling (check_all_task_stack_budgets.ps1), and every
+ * function CALL on Xtensa's windowed ABI costs a register-window spill
+ * whether or not the callee has any locals of its own. This logic used to be
+ * its own safety_cfg_compute_diff()/safety_cfg_diff_value_equal() pair,
+ * called from refetch_locked() below; that put safety_poll_task 16 B over
+ * budget (3120 vs. 3104) for no reason -- refetch_locked() already exists on
+ * that same call path with its own frame, so folding the loop and the
+ * bit-exact comparison directly into its body (see the call site below,
+ * "safety_cfg_store_refetch_locked's own inline diff") adds ZERO new call
+ * frames, only a few bytes of additional locals inside a frame that already
+ * exists. See that call site for the actual loop. */
+
+size_t safety_cfg_store_diff_count(void)
+{
+    return s_diff_count;
+}
+
+bool safety_cfg_store_get_diff(size_t index, safety_cfg_diff_entry_t *out)
+{
+    if (!out || index >= s_diff_count) {
+        return false;
+    }
+    *out = s_diff[index];
+    return true;
+}
+
+bool safety_cfg_store_diff_truncated(void)
+{
+    return s_diff_truncated;
+}
+
+void safety_cfg_store_get_diff_crc_range(uint16_t *out_from_crc, uint16_t *out_to_crc)
+{
+    if (out_from_crc) {
+        *out_from_crc = s_diff_from_crc;
+    }
+    if (out_to_crc) {
+        *out_to_crc = s_diff_to_crc;
+    }
+}
+
 static safety_cfg_store_blob_t s_store;
 /* Set ONLY on a successful safety_cfg_store_refetch() -- a real, live round
  * trip to the Pico. 2026-08-27 audit fix (defect c): safety_cfg_store_init()
@@ -1145,6 +1200,72 @@ typedef struct {
     kilnlink_config_page_t page;
 } safety_cfg_store_refetch_scratch_t;
 
+/* 2026-09-10 stack-budget pass (safety_poll over its 3104 B ceiling by 16 B
+ * once safety_cfg_store_maybe_refetch()'s call into this file joined
+ * safety_poll_task's call graph today): these two rate-limited failure-log
+ * helpers used to be inlined directly in safety_cfg_store_refetch_locked()
+ * below. Each holds its own `now_us` local plus a multi-arg ESP_LOGW/ESP_LOGE
+ * call, and a function's stack frame is sized for the UNION of every
+ * branch's locals, not just the branch actually taken -- so those bytes were
+ * charged against refetch_locked()'s frame (and therefore against
+ * safety_poll_task's worst-case depth) on every call, success path included,
+ * even though they are needed only on a failure. Pulling them out into their
+ * own static functions moves that reservation onto helper frames that are
+ * NOT on the path this checker measures as worst-case (get_config_page's own
+ * chain dominates), which is what actually recovers the bytes -- not the
+ * extraction itself. Both are marked noinline: each has exactly one call
+ * site, which GCC -O2 happily inlines right back into refetch_locked()
+ * (measured: extracting without noinline left refetch_locked()'s own frame
+ * unchanged at 80 B). Behavior is unchanged: same rate-limit state
+ * (s_last_refetch_fail_log_us/s_refetch_fail_suppressed), same messages. */
+/* Portable noinline: this file's own host tests (test_safety_cfg_store.c,
+ * MSVC via build_host_tests.ps1) don't understand GCC/Xtensa's
+ * __attribute__((noinline)) syntax at all -- it is a hard syntax error under
+ * cl.exe, not merely a no-op, so guard it rather than assume every compiler
+ * that builds this file is GCC-compatible. Behavior on the real ESP-IDF
+ * (Xtensa GCC) target is unchanged; the host build simply never inlines
+ * these differently than any other static function, which is irrelevant off-
+ * target (no stack-budget checker runs against a host .exe). */
+#if defined(_MSC_VER)
+#define SAFETY_CFG_STORE_NOINLINE
+#else
+#define SAFETY_CFG_STORE_NOINLINE __attribute__((noinline))
+#endif
+
+static void SAFETY_CFG_STORE_NOINLINE safety_cfg_store_log_budget_exceeded(uint8_t page_index)
+{
+    int64_t now_us = (int64_t)hal_time_now_us();
+    if (now_us - s_last_refetch_fail_log_us >= SAFETY_CFG_STORE_REFETCH_LOG_INTERVAL_US) {
+        ESP_LOGW(TAG, "safety_cfg_store_refetch: wall-clock budget (%u ms) exhausted after "
+                      "page %u -- cache left unchanged, retrying on a later poll",
+                 (unsigned)SAFETY_CFG_STORE_REFETCH_BUDGET_MS, (unsigned)page_index);
+        s_last_refetch_fail_log_us = now_us;
+        s_refetch_fail_suppressed = 0;
+    } else {
+        s_refetch_fail_suppressed++;
+    }
+}
+
+static void SAFETY_CFG_STORE_NOINLINE safety_cfg_store_log_page_fetch_failed(uint8_t page_index, esp_err_t err)
+{
+    int64_t now_us = (int64_t)hal_time_now_us();
+    if (now_us - s_last_refetch_fail_log_us >= SAFETY_CFG_STORE_REFETCH_LOG_INTERVAL_US) {
+        if (s_refetch_fail_suppressed > 0) {
+            ESP_LOGW(TAG, "safety_cfg_store_refetch: page %u failed (%s) -- cache left "
+                          "unchanged (+%lu more failed attempts suppressed)",
+                     (unsigned)page_index, esp_err_to_name(err),
+                     (unsigned long)s_refetch_fail_suppressed);
+        } else {
+            ESP_LOGW(TAG, "safety_cfg_store_refetch: page %u failed (%s) -- cache left unchanged",
+                     (unsigned)page_index, esp_err_to_name(err));
+        }
+        s_last_refetch_fail_log_us = now_us;
+        s_refetch_fail_suppressed = 0;
+    } else {
+        s_refetch_fail_suppressed++;
+    }
+}
+
 /* The actual refetch body -- unchanged in substance from before the H5 fix,
  * just renamed and made static so safety_cfg_store_refetch() below can wrap
  * it with s_store_lock. MUST NOT be called directly by anything except that
@@ -1188,16 +1309,7 @@ static bool safety_cfg_store_refetch_locked(SafetyLinkClass *link, uint16_t conf
              * re-invokes this from scratch (page 0) on the very next poll as
              * long as the CRC still disagrees, so nothing here is lost, only
              * deferred to a later iteration that gets a fresh budget. */
-            int64_t now_us = (int64_t)hal_time_now_us();
-            if (now_us - s_last_refetch_fail_log_us >= SAFETY_CFG_STORE_REFETCH_LOG_INTERVAL_US) {
-                ESP_LOGW(TAG, "safety_cfg_store_refetch: wall-clock budget (%u ms) exhausted after "
-                              "page %u -- cache left unchanged, retrying on a later poll",
-                         (unsigned)SAFETY_CFG_STORE_REFETCH_BUDGET_MS, (unsigned)page_index);
-                s_last_refetch_fail_log_us = now_us;
-                s_refetch_fail_suppressed = 0;
-            } else {
-                s_refetch_fail_suppressed++;
-            }
+            safety_cfg_store_log_budget_exceeded(page_index);
             free(scr);
             return false;
         }
@@ -1234,22 +1346,7 @@ static bool safety_cfg_store_refetch_locked(SafetyLinkClass *link, uint16_t conf
         kilnlink_config_page_t *page = &scr->page;
         esp_err_t err = safety_link_get_config_page(link, page_index, page);
         if (err != ESP_OK) {
-            int64_t now_us = (int64_t)hal_time_now_us();
-            if (now_us - s_last_refetch_fail_log_us >= SAFETY_CFG_STORE_REFETCH_LOG_INTERVAL_US) {
-                if (s_refetch_fail_suppressed > 0) {
-                    ESP_LOGW(TAG, "safety_cfg_store_refetch: page %u failed (%s) -- cache left "
-                                  "unchanged (+%lu more failed attempts suppressed)",
-                             (unsigned)page_index, esp_err_to_name(err),
-                             (unsigned long)s_refetch_fail_suppressed);
-                } else {
-                    ESP_LOGW(TAG, "safety_cfg_store_refetch: page %u failed (%s) -- cache left unchanged",
-                             (unsigned)page_index, esp_err_to_name(err));
-                }
-                s_last_refetch_fail_log_us = now_us;
-                s_refetch_fail_suppressed = 0;
-            } else {
-                s_refetch_fail_suppressed++;
-            }
+            safety_cfg_store_log_page_fetch_failed(page_index, err);
             free(scr);
             return false;
         }
@@ -1290,6 +1387,57 @@ static bool safety_cfg_store_refetch_locked(SafetyLinkClass *link, uint16_t conf
             free(scr);
             return false;
         }
+    }
+
+    /* safety_cfg_store_refetch_locked's own inline diff -- see the comment
+     * above safety_cfg_store_diff_count() for why this is not a separate
+     * function. Same logic that function used to have: one param at a time,
+     * SAFETY_CFG_PARAM_TABLE order, bit-exact comparison (a diff tool that
+     * used epsilon-fuzzy float comparison could silently hide a real, if
+     * tiny, change from the operator). */
+    s_diff_count = 0;
+    s_diff_truncated = false;
+    s_diff_from_crc = s_store.config_crc;
+    s_diff_to_crc = scratch->config_crc;
+    for (size_t di = 0; di < SAFETY_CFG_PARAM_COUNT; di++) {
+        const safety_cfg_entry_t *o = &s_store.entries[di];
+        const safety_cfg_entry_t *n = &scratch->entries[di];
+        bool changed;
+        if (!o->set && !n->set) {
+            changed = false;
+        } else if (o->set != n->set) {
+            changed = true;
+        } else {
+            switch (SAFETY_CFG_PARAM_TABLE[di].type) {
+            case KILNLINK_PARAM_TYPE_BOOL:
+            case KILNLINK_PARAM_TYPE_U8:
+                changed = (o->value.u8_val != n->value.u8_val);
+                break;
+            case KILNLINK_PARAM_TYPE_U16:
+                changed = (o->value.u16_val != n->value.u16_val);
+                break;
+            case KILNLINK_PARAM_TYPE_F32:
+                changed = (memcmp(&o->value.f32_val, &n->value.f32_val, sizeof(o->value.f32_val)) != 0);
+                break;
+            default:
+                changed = false; /* unknown type: never claim a diff we cannot decode */
+                break;
+            }
+        }
+        if (!changed) {
+            continue;
+        }
+        if (s_diff_count >= SAFETY_CFG_STORE_DIFF_MAX) {
+            s_diff_truncated = true;
+            continue;
+        }
+        s_diff[s_diff_count].name = SAFETY_CFG_PARAM_TABLE[di].name;
+        s_diff[s_diff_count].type = SAFETY_CFG_PARAM_TABLE[di].type;
+        s_diff[s_diff_count].old_set = o->set;
+        s_diff[s_diff_count].old_value = o->value;
+        s_diff[s_diff_count].new_set = n->set;
+        s_diff[s_diff_count].new_value = n->value;
+        s_diff_count++;
     }
 
     s_store = *scratch;
