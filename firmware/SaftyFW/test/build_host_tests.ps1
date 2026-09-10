@@ -350,7 +350,13 @@ try {
         (Join-Path $hwAbstractionCommonDir "hal_status.c")
     )
     $configStoreFlashSourceArgs = ($configStoreFlashSources | ForEach-Object { '"' + $_ + '"' }) -join " "
-    $configStoreFlashCmd = "call `"$vcvars`" x64 >nul && cl /nologo /W4 /WX /std:c17 " +
+    # /D SAFTYFW_HOST_TEST_BUILD=1 -- 2026-09-10, opus review finding B: gates
+    # config_store_flash.c's two test-only kill switches (s_fallback_test_hook,
+    # s_fallback_test_force) so they compile only here, never into the
+    # arm-none-eabi target build (CMakeLists.txt does not define this macro).
+    # This is the ONLY place that macro is defined in this repo -- see
+    # config_store_flash.c's own comment on the #ifdef for what it gates and why.
+    $configStoreFlashCmd = "call `"$vcvars`" x64 >nul && cl /nologo /W4 /WX /std:c17 /D SAFTYFW_HOST_TEST_BUILD=1 " +
         "/I `"$srcDir`" /I `"$srcDir\board`" /I `"$bootDir`" /I `"$commonIncDir`" " +
         "/I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" " +
         "/I `"$configStoreFlashHostStubsDir`" /I `"$testDir`" " +

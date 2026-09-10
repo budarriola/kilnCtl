@@ -1126,16 +1126,23 @@ bool config_store_write(const config_store_record_t *rec, const char **out_reaso
 uint32_t config_store_test_fallback_taken_count(void);
 void config_store_test_fallback_taken_count_reset(void);
 
-// TEST-ONLY (2026-09-09): deterministic single-threaded race injection for
-// the fallback double buffer's own ABA-closing seqlock. See
-// config_store_flash.c's own comments on s_fallback_test_hook and
-// s_fallback_test_force for what each does; both are no-ops (NULL/false) in
-// production. NOT reset by config_store_flash_host_stub_reset() -- a test
-// that installs a hook or forces the fallback path must clear it itself
-// (hook(NULL), force(false)) before returning, the same discipline any
-// other test-only global here would need.
+// TEST-ONLY (2026-09-09; gated 2026-09-10, opus review finding B): deterministic
+// single-threaded race injection for the fallback double buffer's own
+// ABA-closing seqlock. See config_store_flash.c's own comments on
+// s_fallback_test_hook and s_fallback_test_force for what each does. Both
+// are now compiled out of target firmware entirely -- neither the function-
+// pointer hook nor the seqlock-bypass flag exists in the flashed ELF at
+// all -- behind SAFTYFW_HOST_TEST_BUILD, defined only by
+// test/build_host_tests.ps1's cl.exe invocation; the host tests that call
+// these (test_config_store_flash.c) are only ever built there. NOT reset by
+// config_store_flash_host_stub_reset() -- a test that installs a hook or
+// forces the fallback path must clear it itself (hook(NULL), force(false))
+// before returning, the same discipline any other test-only global here
+// would need.
+#ifdef SAFTYFW_HOST_TEST_BUILD
 void config_store_test_set_fallback_hook(void (*hook)(void));
 void config_store_test_force_fallback_path(bool force);
+#endif
 
 // TEST-ONLY (2026-09-09): resets the fallback double buffer's validity/
 // index/generation/contents back to a true cold-boot state -- see

@@ -302,6 +302,36 @@ void config_store_test_fallback_taken_count_reset(void)
     s_fallback_taken_count = 0u;
 }
 
+// 2026-09-10, opus review finding B: both of these TEST-ONLY hooks used to
+// be compiled into every build, including target firmware actually flashed
+// to the board -- unconditionally, on the trip path, and in ordinary
+// corruptible .bss. s_fallback_test_force is read in
+// config_store_seqlock_read()'s primary retry loop CONDITION below: non-
+// zero makes every config read on the trip path skip the primary seqlock
+// entirely and serve a one-commit-stale fallback record. s_fallback_
+// test_hook is an indirect function-pointer call reached from the same
+// function. Neither was ever #ifdef-gated, and in the flashed ELF
+// s_fallback_test_force sat one byte away from s_fallback_valid -- this
+// project has had four separate stack-overflow incidents this year smash
+// nearby statics, one of them a FreeRTOS StaticSemaphore_t.
+//
+// Both are now gated behind SAFTYFW_HOST_TEST_BUILD, defined ONLY by
+// test/build_host_tests.ps1's cl.exe invocation (see that script) -- never
+// defined by CMakeLists.txt's arm-none-eabi target build, so neither symbol
+// nor the indirect call it enables exists in flashed firmware at all. The
+// host tests that depend on them (test_config_store_flash.c) keep working
+// unchanged, since the host build always defines the macro.
+//
+// config_store_test_fallback_taken_count()/_reset() above stay UNGATED and
+// live in every build: s_fallback_taken_count is a plain counter (no
+// control-flow effect, no function pointer, cost is one non-atomic
+// increment already paid on every fallback read), and it is what proved
+// the multi-reader ABA regression test above was actually exercising the
+// fallback path rather than vacuously passing -- see that static's own
+// comment. Removing it would trade a real regression-detection tool for a
+// hazard reduction it does not need.
+#ifdef SAFTYFW_HOST_TEST_BUILD
+
 // TEST-ONLY deterministic race injection (2026-09-09): the real ABA window
 // this fix closes is a handful of instructions wide on real hardware, and
 // proved impractical to hit reliably even with real, heavily-loaded OS
@@ -313,8 +343,8 @@ void config_store_test_fallback_taken_count_reset(void)
 // commit landing "during" the copy would have to land. A test can install a
 // hook that itself calls config_store_write() (single-threaded, fully
 // deterministic) to force exactly the two-commits-during-one-copy scenario
-// the fix above exists to survive. NULL (a single branch on a well-predicted
-// pointer) in production; never wired to anything at runtime outside tests.
+// the fix above exists to survive. Compiled out of target firmware entirely
+// (see SAFTYFW_HOST_TEST_BUILD comment above) rather than merely NULL there.
 static void (*s_fallback_test_hook)(void) = NULL;
 
 void config_store_test_set_fallback_hook(void (*hook)(void))
@@ -328,13 +358,16 @@ void config_store_test_set_fallback_hook(void (*hook)(void))
 // the primary loop actually fail (it always sees a stable, even sequence
 // immediately), so this is the only way to deterministically reach and
 // exercise the fallback path's own ABA-closing seqlock without real thread
-// races. False (no effect) in production.
+// races. Compiled out of target firmware entirely (see
+// SAFTYFW_HOST_TEST_BUILD comment above) rather than merely false there.
 static bool s_fallback_test_force = false;
 
 void config_store_test_force_fallback_path(bool force)
 {
     s_fallback_test_force = force;
 }
+
+#endif // SAFTYFW_HOST_TEST_BUILD
 
 // TEST-ONLY (2026-09-09): resets the fallback double buffer's state
 // (validity, active index, generation counter, and both slots) back to its
@@ -375,7 +408,10 @@ void config_store_test_reset_fallback_state(void)
 static bool config_store_seqlock_read(config_store_record_t *out)
 {
     for (unsigned attempt = 0;
-         !s_fallback_test_force && attempt < CONFIG_STORE_SEQLOCK_MAX_RETRIES; attempt++) {
+#ifdef SAFTYFW_HOST_TEST_BUILD
+         !s_fallback_test_force &&
+#endif
+         attempt < CONFIG_STORE_SEQLOCK_MAX_RETRIES; attempt++) {
         uint32_t seq1 = s_seq_counter;
         // Barrier: this core must not read the struct below using a stale
         // cached view taken BEFORE it observed seq1 -- forces "read seq1"
@@ -437,9 +473,11 @@ static bool config_store_seqlock_read(config_store_record_t *out)
                                          2u
                                    : sizeof(copy) / 2u;
             memcpy(copy_bytes, src_bytes, split_at);
+#ifdef SAFTYFW_HOST_TEST_BUILD
             if (s_fallback_test_hook != NULL) {
                 s_fallback_test_hook(); // TEST-ONLY, see its own comment above
             }
+#endif
             memcpy(copy_bytes + split_at, src_bytes + split_at, sizeof(copy) - split_at);
             // Barrier: the struct copy above must be complete, as observed by
             // this core, before the re-read of the generation counter below.
