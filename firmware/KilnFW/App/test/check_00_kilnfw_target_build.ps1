@@ -303,7 +303,9 @@ try {
     # just ran against -- not whatever was last built by hand, hours or days
     # ago.
     #
-    # ATOMIC PUBLISH (2026-09-10, objdump-subprocess-error investigation):
+    # PUBLISH (2026-09-10, objdump-subprocess-error investigation; corrected
+    # 2026-09-10 after an Opus review found the original fix's central claim
+    # false):
     # the ELF-reading checks (check_uart_log_bridge_stack_budget.py,
     # check_all_task_stack_budgets.py, check_httpd/main/system_uart_bridge's
     # own checkers) do NOT take "kilnfw_checkbuild_worktree" or any other
@@ -315,26 +317,98 @@ try {
     # partially-written file -- objdump then fails with a subprocess error
     # that has nothing to do with the actual object code, and looks
     # indistinguishable from a real toolchain problem unless you already
-    # know to suspect the race. Copying to a sibling temp file first and
-    # then Move-Item-ing (Force) it onto the final name makes the publish
-    # atomic from every reader's point of view: a reader that opens the
-    # path either sees the complete old file (rename hasn't happened yet)
-    # or the complete new file (rename already happened) -- there is no
-    # window where the path resolves to a half-written file, because the
-    # bytes are never written into that path directly. Same treatment for
-    # .bin for the same reason, even though nothing here currently reads it
-    # from build/ concurrently -- no reason to leave that side of the pair
-    # non-atomic once the hazard is understood.
+    # know to suspect the race.
+    #
+    # CORRECTED CLAIM: copying to a sibling temp file and then calling
+    # `Move-Item -Force` onto the final name is NOT atomic on Windows.
+    # Windows PowerShell 5.1's `Move-Item -Force` is implemented as
+    # delete-destination-then-rename, not `MoveFileEx(MOVEFILE_REPLACE_EXISTING)`.
+    # Demonstrated by reproduction: with the destination held open under
+    # ordinary `FILE_SHARE_READ` (what `objdump` does), `Move-Item -Force`
+    # throws `System.IO.IOException: Cannot create a file when that file
+    # already exists.`, leaving the destination file UNTOUCHED and the temp
+    # file orphaned -- i.e. there is a real window in which the delete
+    # succeeded conceptually but didn't, and, worse, an orphaned .tmp_<pid>
+    # file was left in build/ with no cleanup, which is exactly what was
+    # found sitting in this tree (KilnCtrl.elf.tmp_6288, an orphan from an
+    # earlier failed publish under this exact code path).
+    #
+    # A further reproduction shows switching to the real Win32 primitive
+    # (`MoveFileEx` with `MOVEFILE_REPLACE_EXISTING`, which is what .NET's
+    # `[System.IO.File]::Move(src, dst, $true)` calls on runtimes that have
+    # that overload -- Windows PowerShell 5.1's .NET Framework 4.8 does NOT)
+    # does not by itself make the publish atomic "from every reader's point
+    # of view" either: when the destination is held open by a reader, even
+    # with FILE_SHARE_READ|FILE_SHARE_DELETE granted, MoveFileEx itself
+    # fails with ERROR_ACCESS_DENIED (5). True atomic replace-of-an-open-file,
+    # the way POSIX rename(2) behaves, is not available on NTFS through this
+    # API. So there is no implementation that makes an in-place publish safe
+    # against a reader that is mid-read RIGHT NOW; the realistic goal is:
+    # (a) never leave a half-written file at the destination path, (b) never
+    # leave an orphaned temp file behind on failure, and (c) fail LOUDLY
+    # instead of silently leaving a stale artifact in place when the publish
+    # cannot complete.
+    #
+    # Implementation: MoveFileEx(MOVEFILE_REPLACE_EXISTING) is used instead
+    # of `Move-Item -Force` because when the destination is NOT concurrently
+    # held open (the overwhelmingly common case -- nothing should have the
+    # published ELF open outside of the brief window an ELF-reading check is
+    # actually running), it performs the replace as a single kernel call
+    # rather than Move-Item's delete-then-create, so there is no window
+    # where the destination path does not exist at all. If the destination
+    # IS held open, a short bounded retry gives a transient reader a chance
+    # to close before giving up; on final failure the temp file is removed
+    # (never left orphaned) and the check FAILS naming the destination path,
+    # rather than silently leaving the previous (stale) artifact in place
+    # with no signal that publish did not happen this run.
     $mainBuildDir = Join-Path $repoRoot "firmware\KilnFW\build"
     New-Item -ItemType Directory -Force -Path $mainBuildDir | Out-Null
+
+    if (-not ([System.Management.Automation.PSTypeName]"KilnFWCheck00.NativeMove").Type) {
+        Add-Type -Namespace KilnFWCheck00 -Name NativeMove -MemberDefinition @"
+[DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFileName, uint dwFlags);
+"@
+    }
+    $MOVEFILE_REPLACE_EXISTING = 0x1
+    $MOVEFILE_WRITE_THROUGH = 0x8
+
+    function Publish-BuildArtifact {
+        param([string]$SourcePath, [string]$TempPath, [string]$FinalPath)
+        Copy-Item -Path $SourcePath -Destination $TempPath -Force
+        $attempts = 0
+        $maxAttempts = 5
+        $lastErr = 0
+        while ($attempts -lt $maxAttempts) {
+            $ok = [KilnFWCheck00.NativeMove]::MoveFileEx($TempPath, $FinalPath, $MOVEFILE_REPLACE_EXISTING -bor $MOVEFILE_WRITE_THROUGH)
+            if ($ok) { return }
+            $lastErr = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            $attempts++
+            Start-Sleep -Milliseconds 200
+        }
+        # Publish did not complete -- clean up the temp file so it is never
+        # left as an orphan, and fail loudly instead of silently leaving the
+        # previous (stale) $FinalPath in place with no signal.
+        Remove-Item -Path $TempPath -Force -ErrorAction SilentlyContinue
+        Fail "Could not publish $FinalPath -- MoveFileEx failed after $maxAttempts attempts with Win32 error $lastErr (5=ERROR_ACCESS_DENIED usually means another process has $FinalPath open; find and close it, e.g. a stuck objdump/nm/readelf). The stale existing $FinalPath was left untouched; refusing to report PASS with an unpublished build."
+    }
+
     $elfTmp = Join-Path $mainBuildDir "KilnCtrl.elf.tmp_$PID"
     $binTmp = Join-Path $mainBuildDir "KilnCtrl.bin.tmp_$PID"
-    Copy-Item -Path $elfPath -Destination $elfTmp -Force
-    Copy-Item -Path $binPath -Destination $binTmp -Force
-    Move-Item -Path $elfTmp -Destination (Join-Path $mainBuildDir "KilnCtrl.elf") -Force
-    Move-Item -Path $binTmp -Destination (Join-Path $mainBuildDir "KilnCtrl.bin") -Force
-    Write-Host "Published fresh KilnCtrl.elf/.bin to $mainBuildDir (atomic rename)"
+    Publish-BuildArtifact -SourcePath $elfPath -TempPath $elfTmp -FinalPath (Join-Path $mainBuildDir "KilnCtrl.elf")
+    Publish-BuildArtifact -SourcePath $binPath -TempPath $binTmp -FinalPath (Join-Path $mainBuildDir "KilnCtrl.bin")
+    Write-Host "Published fresh KilnCtrl.elf/.bin to $mainBuildDir"
 } finally {
+    # Belt-and-suspenders: Publish-BuildArtifact already removes its own temp
+    # file on a MoveFileEx failure, but an unexpected exception elsewhere in
+    # the try block (e.g. Copy-Item itself throwing) could still leave a
+    # KilnCtrl.{elf,bin}.tmp_$PID orphan in build/ -- exactly the class of
+    # leftover found in this tree (KilnCtrl.elf.tmp_6288) before this fix.
+    # $PID is this script's own process id, so this only ever removes a temp
+    # file this run itself could have created, never another process's.
+    $mainBuildDirCleanup = Join-Path $repoRoot "firmware\KilnFW\build"
+    Remove-Item -Path (Join-Path $mainBuildDirCleanup "KilnCtrl.elf.tmp_$PID") -Force -ErrorAction SilentlyContinue
+    Remove-Item -Path (Join-Path $mainBuildDirCleanup "KilnCtrl.bin.tmp_$PID") -Force -ErrorAction SilentlyContinue
     Exit-BuildLock -Lock $lock
 }
 
