@@ -966,7 +966,7 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
         safety_ceiling_sync_result_t ceiling_result;
         char ceiling_reason[128];
         if (!safety_ceiling_sync_guard_raise(s_hw_safety, new_max_temp_c, MAX31856_CHANNEL_COUNT, &ceiling_result,
-                                              ceiling_reason, sizeof(ceiling_reason))) {
+                                              ceiling_reason, sizeof(ceiling_reason), NULL)) {
             /* Fixed prefix alone is already ~110 chars against a 160-byte err_cap -- room
              * for ceiling_reason must be bounded explicitly (%.48s) rather than left open,
              * or a long Pico-side reason string silently truncates this whole message

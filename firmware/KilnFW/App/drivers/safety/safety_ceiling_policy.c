@@ -1,7 +1,6 @@
 #include "safety_ceiling_policy.h"
 
 #include <stdio.h>
-#include <string.h>
 
 /* Small epsilon for float compares -- these values arrive via a %.9g wire
  * round trip (safety_cfg_http.c's existing convention for every f32 param),
@@ -47,7 +46,7 @@ bool safety_ceiling_policy_guard_raise(float current_pico_ceiling_c, bool curren
                                         const float *new_max_temp_c, size_t new_n,
                                         safety_ceiling_writer_fn writer, void *writer_ctx,
                                         safety_ceiling_sync_result_t *out_result, char *reason_out,
-                                        size_t reason_cap)
+                                        size_t reason_cap, safety_ceiling_refusal_class_t *out_refusal_class)
 {
     safety_ceiling_sync_result_t local_result = SAFETY_CEILING_SYNC_NONE;
     if (reason_out && reason_cap > 0) {
@@ -83,13 +82,17 @@ bool safety_ceiling_policy_guard_raise(float current_pico_ceiling_c, bool curren
     /* A raise is needed. The Pico MUST confirm this BEFORE the caller is
      * allowed to commit the new zone config -- see this header's top
      * comment for why the order matters. */
-    bool ok = writer && writer(writer_ctx, new_target, reason_out, reason_cap);
+    safety_ceiling_refusal_class_t local_class = SAFETY_CEILING_REFUSAL_OTHER;
+    bool ok = writer && writer(writer_ctx, new_target, reason_out, reason_cap, &local_class);
     if (!ok) {
         if (reason_out && reason_cap > 0 && reason_out[0] == '\0') {
             snprintf(reason_out, reason_cap, "no writer available to raise the safety processor's ceiling");
         }
         if (out_result) {
             *out_result = SAFETY_CEILING_SYNC_RAISE_FAILED;
+        }
+        if (out_refusal_class) {
+            *out_refusal_class = writer ? local_class : SAFETY_CEILING_REFUSAL_OTHER;
         }
         return false;
     }
@@ -144,7 +147,10 @@ void safety_ceiling_policy_apply_lower(float current_pico_ceiling_c, bool curren
         return;
     }
 
-    bool ok = writer && writer(writer_ctx, new_target, reason_out, reason_cap);
+    /* Best-effort only -- this path never checks the failure class (see
+     * this function's own header comment: never blocking, invariant holds
+     * either way), so NULL here is correct, not a shortcut. */
+    bool ok = writer && writer(writer_ctx, new_target, reason_out, reason_cap, NULL);
     if (!ok) {
         if (reason_out && reason_cap > 0 && reason_out[0] == '\0') {
             snprintf(reason_out, reason_cap, "no writer available to lower the safety processor's ceiling");
@@ -168,7 +174,7 @@ bool safety_ceiling_reconcile_should_attempt(const safety_ceiling_reconcile_back
 }
 
 void safety_ceiling_reconcile_record_result(safety_ceiling_reconcile_backoff_t *state, int64_t now_us, bool ok,
-                                             const char *reason)
+                                             safety_ceiling_refusal_class_t refusal_class)
 {
     if (!state) {
         return;
@@ -177,7 +183,26 @@ void safety_ceiling_reconcile_record_result(safety_ceiling_reconcile_backoff_t *
         state->backoff_until_us = 0;
         return;
     }
-    bool armed = reason && strstr(reason, "ARMED") != NULL;
-    int64_t backoff_us = armed ? SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_US : SAFETY_CEILING_RECONCILE_RETRY_BACKOFF_US;
+    int64_t backoff_us;
+    switch (refusal_class) {
+    case SAFETY_CEILING_REFUSAL_ARMED:
+        /* Deterministic jitter derived from now_us (no RNG, stays a pure
+         * function of its inputs) -- see this header's block comment for
+         * why a fixed-period backoff risks phase-locking against a
+         * per-zone PWM window that can be shorter than the backoff. */
+        backoff_us = SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_BASE_US +
+                     (now_us % SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_JITTER_US);
+        break;
+    case SAFETY_CEILING_REFUSAL_STORAGE:
+        backoff_us = SAFETY_CEILING_RECONCILE_STORAGE_BACKOFF_US;
+        break;
+    case SAFETY_CEILING_REFUSAL_RANGE:
+    case SAFETY_CEILING_REFUSAL_CONTRADICTION:
+    case SAFETY_CEILING_REFUSAL_OTHER:
+    case SAFETY_CEILING_REFUSAL_NONE:
+    default:
+        backoff_us = SAFETY_CEILING_RECONCILE_RETRY_BACKOFF_US;
+        break;
+    }
     state->backoff_until_us = now_us + backoff_us;
 }

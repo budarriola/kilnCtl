@@ -137,7 +137,8 @@ static int s_ceiling_writer_calls = 0;
 static float s_ceiling_writer_last_target_c = 0.0f;
 
 bool safety_cfg_http_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_id, float value,
-                                          char *reason_out, size_t reason_cap)
+                                          char *reason_out, size_t reason_cap,
+                                          safety_ceiling_refusal_class_t *out_class)
 {
     (void)link;
     (void)param_id;
@@ -145,6 +146,9 @@ bool safety_cfg_http_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_i
     s_ceiling_writer_last_target_c = value;
     if (reason_out && reason_cap > 0) {
         reason_out[0] = '\0';
+    }
+    if (out_class) {
+        *out_class = SAFETY_CEILING_REFUSAL_NONE;
     }
     return true;
 }

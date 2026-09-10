@@ -499,7 +499,7 @@ SafetyLinkClass *s_hw_safety = NULL;
 
 bool safety_ceiling_sync_guard_raise(SafetyLinkClass *link, const float *new_max_temp_c, size_t n,
                                       safety_ceiling_sync_result_t *out_result, char *reason_out,
-                                      size_t reason_cap)
+                                      size_t reason_cap, safety_ceiling_refusal_class_t *out_refusal_class)
 {
     (void)link;
     (void)new_max_temp_c;
@@ -509,6 +509,9 @@ bool safety_ceiling_sync_guard_raise(SafetyLinkClass *link, const float *new_max
     }
     if (reason_out && reason_cap > 0) {
         reason_out[0] = '\0';
+    }
+    if (out_refusal_class) {
+        *out_refusal_class = SAFETY_CEILING_REFUSAL_NONE;
     }
     return true;
 }

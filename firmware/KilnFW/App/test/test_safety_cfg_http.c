@@ -903,7 +903,7 @@ static void test_apply_pairs_all_succeed_with_commit(void)
     s_stub_params[1].set = true;
     s_stub_params[1].value.u16_val = 75;
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 2, true, reason, sizeof(reason));
+    bool ok = apply_pairs(&fake_link, pairs, 2, true, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == true, "all staged and committed successfully");
     TEST_CHECK(reason[0] == '\0', "no reason text on success");
     TEST_CHECK(s_stub_set_param_calls == 2, "both pairs were staged");
@@ -932,7 +932,7 @@ static void test_apply_pairs_estop_polarity_commit_clears_verification(void)
     s_stub_params[0].set = true;
     s_stub_params[0].value.u8_val = 1;
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason));
+    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == true, "commit landed");
     TEST_CHECK(s_stub_estop_verif_clear_calls == 1,
                "a landed commit that includes 0x0212 clears the E-stop verification exactly once");
@@ -956,7 +956,7 @@ static void test_apply_pairs_unrelated_commit_does_not_clear_verification(void)
     s_stub_params[0].set = true;
     s_stub_params[0].value.u16_val = 100;
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason));
+    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == true, "commit landed");
     TEST_CHECK(s_stub_estop_verif_clear_calls == 0,
                "a landed commit of an unrelated param must NOT touch estop_verification");
@@ -990,7 +990,7 @@ static void test_apply_pairs_readback_mismatch_fails_even_when_acked_and_not_rej
     // three times while live_config_crc never moved and the Pico's own
     // histogram showed commit_config_rejected=2.
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason));
+    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == false, "a commit that ACKed but did not actually land is reported as FAILED");
     TEST_CHECK(reason[0] != '\0', "a non-empty reason is produced");
     TEST_CHECK(strstr(reason, "does not read back") != NULL || strstr(reason, "FAILED") != NULL,
@@ -1021,7 +1021,7 @@ static void test_apply_pairs_tc_offset_c_readback_mismatch_fails(void)
     // reports tc_offset_c back as -4.25 after the "commit", the exact shape
     // of a write that ACKed on the wire but did not really land.
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason));
+    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == false,
                "a tc_offset_c commit that ACKed but did not actually land is reported as FAILED, "
                "never as success -- a wrong safety-TC calibration offset silently believed to be "
@@ -1041,7 +1041,7 @@ static void test_apply_pairs_refetch_failure_reports_unconfirmed_not_success(voi
     memset(&fake_link, 0, sizeof(fake_link));
     safety_cfg_post_pair_t pairs[1] = { { .param_id = 0x0104u, .value_text = "1300" } };
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason));
+    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == false, "an unconfirmable commit is never reported as success");
     TEST_CHECK(strstr(reason, "UNCONFIRMED") != NULL || strstr(reason, "could not read") != NULL,
                "the reason is honest about not knowing, not a fabricated success or a fabricated field name");
@@ -1065,11 +1065,38 @@ static void test_apply_pairs_late_rejection_attaches_pico_reason_to_confirmed_fa
     memset(&fake_link, 0, sizeof(fake_link));
     safety_cfg_post_pair_t pairs[1] = { { .param_id = 0x0104u, .value_text = "1300" } };
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason));
+    safety_ceiling_refusal_class_t refusal_class = SAFETY_CEILING_REFUSAL_OTHER;
+    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), &refusal_class);
     TEST_CHECK(ok == false, "still reported as failed -- the read-back is what decides, and it never matched");
     TEST_CHECK(strstr(reason, "ARMED") != NULL,
                "the Pico's OWN late-arriving reason is attached to the failure, not a generic message");
     TEST_CHECK(s_stub_take_stashed_calls >= 1, "the stash was actually consulted");
+    // 2026-09-10 opus review finding B: the machine-readable classification
+    // must come from the stash's own numeric reject reason (KILNLINK_
+    // COMMIT_CONFIG_REJECT_ARMED, set above), not from grepping `reason`.
+    TEST_CHECK(refusal_class == SAFETY_CEILING_REFUSAL_ARMED,
+               "a late-arriving stashed ARMED rejection must classify as ARMED via its numeric reason code");
+}
+
+static void test_apply_pairs_refetch_failure_with_no_stash_classifies_as_other_not_armed(void)
+{
+    TEST_SECTION("apply_pairs -- an unconfirmable commit with NO rejection frame in hand must classify as "
+                 "OTHER, never guess ARMED just because ARMED is the most common real-world cause");
+    reset_all();
+    s_stub_refetch_result = false; // safety_cfg_store_refetch() could not complete
+    // s_stub_late_rejected stays false -- no stashed frame at all, the
+    // "genuinely could not confirm, and does not even know why" case.
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    safety_cfg_post_pair_t pairs[1] = { { .param_id = 0x0104u, .value_text = "1300" } };
+    char reason[160];
+    safety_ceiling_refusal_class_t refusal_class = SAFETY_CEILING_REFUSAL_ARMED; // deliberately wrong seed
+    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), &refusal_class);
+    TEST_CHECK(ok == false, "an unconfirmable commit is never reported as success");
+    TEST_CHECK(refusal_class == SAFETY_CEILING_REFUSAL_OTHER,
+               "with no numeric reject reason available, the classification must be the safe default "
+               "OTHER, never a guessed ARMED -- this is the exact case the pre-fix strstr classifier "
+               "got wrong when a stashed frame missed the read-back window");
 }
 
 // ---------------------------------------------------------------------------
@@ -1165,7 +1192,7 @@ static void test_confirm_commit_landed_lookup_failure_on_its_own_pass_fails_clos
     // fail exactly that one.
     s_stub_lookup_fail_at_call = 2;
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason));
+    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == false, "a lookup failure inside confirm_commit_landed() fails the whole commit");
     TEST_CHECK(reason[0] != '\0', "a non-empty reason is produced");
     TEST_CHECK(strstr(reason, "UNCONFIRMED") != NULL,
@@ -1188,7 +1215,7 @@ static void test_confirm_commit_landed_parse_failure_on_its_own_pass_fails_close
     s_stub_lookup_type_override_call = 2;
     s_stub_lookup_type_override_value = KILNLINK_PARAM_TYPE_BOOL;
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason));
+    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == false, "a re-parse failure inside confirm_commit_landed() fails the whole commit");
     TEST_CHECK(reason[0] != '\0', "a non-empty reason is produced");
     TEST_CHECK(strstr(reason, "UNCONFIRMED") != NULL,
@@ -1204,7 +1231,7 @@ static void test_apply_pairs_unknown_id_is_refused_and_named(void)
     memset(&fake_link, 0, sizeof(fake_link));
     safety_cfg_post_pair_t pairs[1] = { { .param_id = 0x9999, .value_text = "1" } };
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 1, false, reason, sizeof(reason));
+    bool ok = apply_pairs(&fake_link, pairs, 1, false, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == false, "an unknown id is refused");
     TEST_CHECK(strstr(reason, "39321") != NULL || strstr(reason, "unknown") != NULL,
                "the reason names the offending id (COMMISSIONING.md sec 2's per-id refusal)");
@@ -1220,7 +1247,7 @@ static void test_apply_pairs_refused_commit_surfaces_reason(void)
     memset(&fake_link, 0, sizeof(fake_link));
     safety_cfg_post_pair_t pairs[1] = { { .param_id = 513, .value_text = "100" } };
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason));
+    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == false, "an un-ACKed commit is reported as a failure");
     TEST_CHECK(reason[0] != '\0', "a non-empty reason is always produced on failure");
     TEST_CHECK(strstr(reason, "commit") != NULL || strstr(reason, "acknowledge") != NULL,
@@ -1245,7 +1272,7 @@ static void test_apply_pairs_rejected_commit_names_field_and_reason(void)
     // from parse_value_for_type(), so this must be an in-range U16.
     safety_cfg_post_pair_t pairs[1] = { { .param_id = 0x0104u, .value_text = "500" } };
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason));
+    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == false, "a rejected commit is reported as a failure, not success");
     TEST_CHECK(strstr(reason, "abs_max_temp_c") != NULL,
                "the offending field is named (COMMISSIONING.md sec 3.1: \"name the offending field\")");
@@ -1261,7 +1288,7 @@ static void test_apply_pairs_rejected_commit_names_field_and_reason(void)
     s_stub_commit_reject_param_id = KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID;
     s_stub_commit_reject_reason = KILNLINK_COMMIT_CONFIG_REJECT_ARMED;
     reason[0] = '\0';
-    ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason));
+    ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == false, "an ARMED rejection is reported as a failure");
     TEST_CHECK(strstr(reason, "ARMED") != NULL, "the ARMED reason is named");
     TEST_CHECK(strstr(reason, "0x0104") == NULL && strstr(reason, "abs_max_temp_c") == NULL,
@@ -2006,6 +2033,7 @@ int main(void)
     test_apply_pairs_readback_mismatch_fails_even_when_acked_and_not_rejected();
     test_apply_pairs_tc_offset_c_readback_mismatch_fails();
     test_apply_pairs_refetch_failure_reports_unconfirmed_not_success();
+    test_apply_pairs_refetch_failure_with_no_stash_classifies_as_other_not_armed();
     test_apply_pairs_late_rejection_attaches_pico_reason_to_confirmed_failure();
     test_confirm_commit_landed_lookup_failure_on_its_own_pass_fails_closed();
     test_confirm_commit_landed_parse_failure_on_its_own_pass_fails_closed();

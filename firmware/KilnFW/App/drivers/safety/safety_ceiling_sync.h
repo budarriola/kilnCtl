@@ -35,10 +35,17 @@ extern "C" {
  * policy_guard_raise()'s own contract -- this is a thin wrapper around it).
  * On false, `reason_out` names why and the caller MUST reject the whole
  * zones POST without applying `new_max_temp_c` or anything else from that
- * submission. */
+ * submission.
+ *
+ * `out_refusal_class` (may be NULL) receives the machine-readable
+ * classification of a failed raise -- safety_ceiling_refusal_class_t, see
+ * safety_ceiling_policy.h. zones_http_post.c/backup_import.c's callers
+ * pass NULL (they only need the human-readable `reason_out`); the
+ * reconcile path (safety_ceiling_sync_reconcile_on_link_up() below) is the
+ * one caller that needs it, to drive its backoff without parsing prose. */
 bool safety_ceiling_sync_guard_raise(SafetyLinkClass *link, const float *new_max_temp_c, size_t n,
                                       safety_ceiling_sync_result_t *out_result, char *reason_out,
-                                      size_t reason_cap);
+                                      size_t reason_cap, safety_ceiling_refusal_class_t *out_refusal_class);
 
 /* Call AFTER a zones_cfg_t has already been committed. Best-effort --
  * never blocks, never reports a failure the caller must act on (see

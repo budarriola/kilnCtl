@@ -380,11 +380,11 @@ esp_err_t zones_post_handler(httpd_req_t *req)
             ESP_LOGE(ZONES_HTTP_TAG, "zones_post_handler: malloc(%u) failed -- refusing the ceiling raise",
                      (unsigned)sizeof(*cs));
             raise_ok = safety_ceiling_sync_guard_raise(s_hw_safety, new_max_temp_c, MAX31856_CHANNEL_COUNT,
-                                                       &ceiling_result, NULL, 0);
+                                                       &ceiling_result, NULL, 0, NULL);
         } else {
             raise_ok = safety_ceiling_sync_guard_raise(s_hw_safety, new_max_temp_c, MAX31856_CHANNEL_COUNT,
                                                        &ceiling_result, cs->ceiling_reason,
-                                                       sizeof(cs->ceiling_reason));
+                                                       sizeof(cs->ceiling_reason), NULL);
         }
         if (!raise_ok) {
             ESP_LOGW(ZONES_HTTP_TAG,

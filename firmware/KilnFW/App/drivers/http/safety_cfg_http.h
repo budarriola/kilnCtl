@@ -13,6 +13,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "safety_ceiling_policy.h" /* safety_ceiling_refusal_class_t -- set_and_confirm_f32()'s out_class */
 #include "safety_link.h"
 #include "kiln_io.h" /* CT_COMMISSIONING_PLAN.md step 2 -- ct_auto_zero_post_handler()'s
                       * relays-off precondition reads kiln_io_relays_off_ms()/
@@ -46,9 +47,18 @@ esp_err_t safety_cfg_http_start(SafetyLinkClass *link_or_null, kiln_io_t *io_or_
  * (config writes are refused unconditionally whenever the relay is ARMED --
  * SaftyFW's config_store_decide_write(), no per-field carve-out) verbatim
  * via `reason_out` when that is why it failed -- callers must surface this
- * to the operator, not silently retry or require an undocumented reset. */
+ * to the operator, not silently retry or require an undocumented reset.
+ *
+ * `out_class` (may be NULL) receives the machine-readable classification
+ * of the failure -- safety_ceiling_refusal_class_t -- 2026-09-10 opus
+ * review finding: control flow (e.g. safety_ceiling_sync.c's reconcile
+ * backoff) must never classify a refusal by substring-matching
+ * `reason_out`'s prose; it must use this out-of-band, numeric
+ * classification instead. Only meaningful when this function returns
+ * false. */
 bool safety_cfg_http_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_id, float value,
-                                          char *reason_out, size_t reason_cap);
+                                          char *reason_out, size_t reason_cap,
+                                          safety_ceiling_refusal_class_t *out_class);
 
 #ifdef __cplusplus
 }

@@ -37,11 +37,12 @@ static uint32_t s_suppressed_log_count = 0;
  * apply_pairs()/confirm_commit_landed() machinery via its public wrapper --
  * stage, commit, and a live read-back that proves the value landed, never
  * a bare ACK. */
-static bool pico_ceiling_writer(void *ctx, float target_c, char *reason_out, size_t reason_cap)
+static bool pico_ceiling_writer(void *ctx, float target_c, char *reason_out, size_t reason_cap,
+                                 safety_ceiling_refusal_class_t *out_class)
 {
     SafetyLinkClass *link = (SafetyLinkClass *)ctx;
     return safety_cfg_http_set_and_confirm_f32(link, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, target_c, reason_out,
-                                                reason_cap);
+                                                reason_cap, out_class);
 }
 
 bool safety_ceiling_sync_get_current_pico_ceiling(float *out_value)
@@ -67,7 +68,7 @@ bool safety_ceiling_sync_get_current_pico_ceiling(float *out_value)
 
 bool safety_ceiling_sync_guard_raise(SafetyLinkClass *link, const float *new_max_temp_c, size_t n,
                                       safety_ceiling_sync_result_t *out_result, char *reason_out,
-                                      size_t reason_cap)
+                                      size_t reason_cap, safety_ceiling_refusal_class_t *out_refusal_class)
 {
     if (!link) {
         if (out_result) {
@@ -81,7 +82,7 @@ bool safety_ceiling_sync_guard_raise(SafetyLinkClass *link, const float *new_max
     float current = 0.0f;
     bool known = safety_ceiling_sync_get_current_pico_ceiling(&current);
     return safety_ceiling_policy_guard_raise(current, known, new_max_temp_c, n, pico_ceiling_writer, link,
-                                              out_result, reason_out, reason_cap);
+                                              out_result, reason_out, reason_cap, out_refusal_class);
 }
 
 void safety_ceiling_sync_apply_lower(SafetyLinkClass *link, const float *new_max_temp_c, size_t n,
@@ -112,14 +113,21 @@ void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link)
         return; /* same gate safety_sync_tc_type() uses -- no real config to derive a target from yet */
     }
 
-    /* check_all_task_stack_budgets.ps1: this function runs on safety_poll_task,
-     * which this codebase keeps at essentially zero stack margin (see
-     * safety_cfg_store.c's own SAFETY_CFG_STORE_REFETCH_BUDGET_MS comment on
-     * that task's history) -- `now_us` is static (file-scope storage, not a
-     * stack local) purely for that reason, same convention as s_last_log_us/
-     * s_suppressed_log_count below; this function is only ever called from
-     * safety_poll_task, never concurrently, so there is no reentrancy hazard
-     * in reusing one instance across calls. */
+    /* 2026-09-10 opus review finding: the comment this replaces claimed
+     * `now_us` was made static (file-scope storage, not a stack local) as a
+     * stack-budget measure for safety_poll_task -- that claim was false.
+     * This same function frame already carries `float new_max_temp_c[3]`
+     * and `char reason[128]` (both genuine stack locals, ~140 bytes) a few
+     * lines below, so moving 8 bytes of `int64_t` off the stack saves
+     * nothing meaningful; safety_poll_task in fact has 4788 of 8192 bytes
+     * free. `now_us` stays static anyway (harmless, not a fix for anything)
+     * purely for consistency with s_last_log_us/s_suppressed_log_count
+     * below, which for the same reason as always -- rate-limiting a WARN
+     * log across calls -- genuinely must persist between calls; this
+     * function is only ever called from safety_poll_task, never
+     * concurrently, so there is no reentrancy hazard in reusing one
+     * instance. Do not cite this comment as a stack-budget justification
+     * for anything -- it is not one. */
     static int64_t now_us;
     now_us = (int64_t)hal_time_now_us();
     if (!safety_ceiling_reconcile_should_attempt(&s_reconcile_backoff, now_us)) {
@@ -139,9 +147,13 @@ void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link)
     }
     safety_ceiling_sync_result_t result = SAFETY_CEILING_SYNC_NONE;
     char reason[128] = { 0 };
+    safety_ceiling_refusal_class_t refusal_class = SAFETY_CEILING_REFUSAL_NONE;
     bool ok = safety_ceiling_sync_guard_raise(link, new_max_temp_c, MAX31856_CHANNEL_COUNT, &result, reason,
-                                              sizeof(reason));
-    safety_ceiling_reconcile_record_result(&s_reconcile_backoff, now_us, ok, reason);
+                                              sizeof(reason), &refusal_class);
+    /* 2026-09-10 opus review finding: the backoff decision now runs on the
+     * numeric `refusal_class` above, never on `reason`'s prose -- `reason`
+     * is kept purely for the human-readable log line below. */
+    safety_ceiling_reconcile_record_result(&s_reconcile_backoff, now_us, ok, refusal_class);
     if (!ok) {
         if (now_us - s_last_log_us >= SAFETY_CEILING_SYNC_LOG_INTERVAL_US) {
             ESP_LOGW(TAG,

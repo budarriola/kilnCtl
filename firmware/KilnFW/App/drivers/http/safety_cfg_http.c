@@ -17,6 +17,7 @@
 
 #include "http_form.h"
 #include "kilnlink/kilnlink_commit_config_rejected.h"
+#include "safety_ceiling_policy.h" /* safety_ceiling_refusal_class_t -- 2026-09-10 opus review finding */
 #include "safety_cfg_store.h"
 #include "s8_rate_guard_estimate.h" // S8 rate-guard auto-calc write path (docs/audits/s8_auto_calc_design_2026-09-09.md)
 #include "zones_config_accessors.h" // zones_config_get_model()/_get_model_fit_context() -- s8 auto-calc's input
@@ -612,6 +613,11 @@ static bool parse_value_for_type(const char *text, uint8_t type, kilnlink_param_
  * to apply_pairs() which is its other caller). */
 static const char *commit_reject_reason_words(uint8_t reason);
 
+/* Forward declaration -- confirm_commit_landed() below needs this before its
+ * own definition later in the file (kept next to commit_reject_reason_words(),
+ * which every call site of this function already pairs with). */
+static safety_ceiling_refusal_class_t reject_reason_to_refusal_class(uint8_t reason);
+
 /* True if two kilnlink_param_value_t of the same wire `type` hold the same
  * value. F32 is compared bit-for-bit (memcmp), not with an epsilon -- both
  * ends of this link encode/decode the identical 4-byte IEEE-754 layout
@@ -656,10 +662,22 @@ static bool param_value_equal(uint8_t type, const kilnlink_param_value_t *a, con
  * function was busy doing the live re-fetch (safety_link_take_stashed_
  * commit_rejected()), attaches the Pico's OWN reason instead of a generic
  * "does not match" message -- the read-back is what DECIDES pass/fail, the
- * stash only explains WHY when it can. */
+ * stash only explains WHY when it can.
+ *
+ * `out_class` (may be NULL) receives the machine-readable refusal
+ * classification whenever this returns false -- 2026-09-10 opus review
+ * finding. Defaults to SAFETY_CEILING_REFUSAL_OTHER (never a guessed
+ * ARMED) unless a stashed COMMIT_CONFIG_REJECTED frame is actually found,
+ * in which case it is set from that frame's own numeric reason via
+ * reject_reason_to_refusal_class() -- exactly mirroring what reason_out's
+ * prose says in that branch, just as a number instead of a substring to
+ * grep for. */
 static bool confirm_commit_landed(SafetyLinkClass *link, const safety_cfg_post_pair_t *pairs, int n_pairs,
-                                   char *reason_out, size_t reason_cap)
+                                   char *reason_out, size_t reason_cap, safety_ceiling_refusal_class_t *out_class)
 {
+    if (out_class) {
+        *out_class = SAFETY_CEILING_REFUSAL_OTHER;
+    }
     uint16_t best_known_crc = 0;
     bool peer_known = false;
     (void)safety_link_get_peer_build_status(link, &peer_known, NULL, NULL, NULL, NULL, NULL, NULL,
@@ -669,6 +687,9 @@ static bool confirm_commit_landed(SafetyLinkClass *link, const safety_cfg_post_p
         uint16_t rp = 0;
         uint8_t rr = 0;
         if (safety_link_take_stashed_commit_rejected(link, &rp, &rr)) {
+            if (out_class) {
+                *out_class = reject_reason_to_refusal_class(rr);
+            }
             uint8_t rt = 0;
             const char *rn = NULL;
             if (rp != KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID && safety_cfg_store_lookup(rp, &rt, &rn)) {
@@ -734,6 +755,9 @@ static bool confirm_commit_landed(SafetyLinkClass *link, const safety_cfg_post_p
             uint8_t rr = 0;
             if (safety_link_take_stashed_commit_rejected(link, &rp, &rr) &&
                 (rp == pairs[i].param_id || rp == KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID)) {
+                if (out_class) {
+                    *out_class = reject_reason_to_refusal_class(rr);
+                }
                 snprintf(reason_out, reason_cap,
                          "commit rejected: %s (id %u) -- %s -- values were staged but NOT written", name,
                          (unsigned)pairs[i].param_id, commit_reject_reason_words(rr));
@@ -768,6 +792,26 @@ static const char *commit_reject_reason_words(uint8_t reason)
     }
 }
 
+/* 2026-09-10 opus review finding: safety_ceiling_sync.c's reconcile backoff
+ * used to classify a refusal by `strstr(reason, "ARMED")` against the
+ * human-readable sentence above -- wrong on multiple counts (see
+ * safety_ceiling_policy.h's block comment on the backoff for the full
+ * list). The fix is to classify from the NUMERIC reject reason directly,
+ * whenever it is actually known, and report SAFETY_CEILING_REFUSAL_OTHER
+ * (never a guessed ARMED) whenever it is not. This is the one place that
+ * numeric code exists on this side of the link -- reuse it, do not
+ * re-derive a classification from prose anywhere else. */
+static safety_ceiling_refusal_class_t reject_reason_to_refusal_class(uint8_t reason)
+{
+    switch (reason) {
+    case KILNLINK_COMMIT_CONFIG_REJECT_ARMED: return SAFETY_CEILING_REFUSAL_ARMED;
+    case KILNLINK_COMMIT_CONFIG_REJECT_STORAGE: return SAFETY_CEILING_REFUSAL_STORAGE;
+    case KILNLINK_COMMIT_CONFIG_REJECT_RANGE: return SAFETY_CEILING_REFUSAL_RANGE;
+    case KILNLINK_COMMIT_CONFIG_REJECT_CONTRADICTION: return SAFETY_CEILING_REFUSAL_CONTRADICTION;
+    default: return SAFETY_CEILING_REFUSAL_OTHER;
+    }
+}
+
 /* Stages every pair via safety_link_send_set_param(), then (if `commit`)
  * sends COMMIT_CONFIG. Writes a human-readable outcome into reason_out
  * (always NUL-terminated if reason_cap > 0) and returns true only if every
@@ -796,9 +840,20 @@ static const char *commit_reject_reason_words(uint8_t reason)
  * before this ESP can prove which polarity it was against. */
 #define SAFETY_PARAM_ID_ESTOP_ACTIVE_LEVEL 0x0212u
 
+/* `out_class` (may be NULL) receives the machine-readable refusal
+ * classification whenever this returns false -- 2026-09-10 opus review
+ * finding, same contract as confirm_commit_landed()'s own out_class.
+ * Defaults to SAFETY_CEILING_REFUSAL_OTHER at entry (correct for every
+ * failure path here except a directly-observed COMMIT_CONFIG_REJECTED
+ * reply, which knows its numeric reason for certain and overrides it via
+ * reject_reason_to_refusal_class() -- no guessing involved either way). */
 static bool apply_pairs(SafetyLinkClass *link, const safety_cfg_post_pair_t *pairs, int n_pairs,
-                        bool commit, char *reason_out, size_t reason_cap)
+                        bool commit, char *reason_out, size_t reason_cap,
+                        safety_ceiling_refusal_class_t *out_class)
 {
+    if (out_class) {
+        *out_class = SAFETY_CEILING_REFUSAL_OTHER;
+    }
     if (!link) {
         snprintf(reason_out, reason_cap, "safety link not available on this board");
         return false;
@@ -840,6 +895,12 @@ static bool apply_pairs(SafetyLinkClass *link, const safety_cfg_post_pair_t *pai
             return false;
         }
         if (rejected) {
+            if (out_class) {
+                /* Known for certain here (this is the direct, in-window
+                 * reply -- no stash race involved), so this is the MORE
+                 * reliable of the two classification sites in this file. */
+                *out_class = reject_reason_to_refusal_class(reject_reason);
+            }
             uint8_t reject_type = 0;
             const char *reject_name = NULL;
             if (reject_param_id != KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID &&
@@ -861,7 +922,7 @@ static bool apply_pairs(SafetyLinkClass *link, const safety_cfg_post_pair_t *pai
          * write landed (see confirm_commit_landed()'s header comment for the
          * full audit trail) -- force a live read-back before this function
          * is allowed to report success. */
-        if (!confirm_commit_landed(link, pairs, n_pairs, reason_out, reason_cap)) {
+        if (!confirm_commit_landed(link, pairs, n_pairs, reason_out, reason_cap, out_class)) {
             return false;
         }
         /* Landed for real -- now invalidate a standing E-stop verification if
@@ -888,11 +949,21 @@ static bool apply_pairs(SafetyLinkClass *link, const safety_cfg_post_pair_t *pai
                              "estop_active_level committed, but the E-stop verification record "
                              "could NOT be cleared (%s) -- re-run the bench procedure",
                              esp_err_to_name(clear_err));
+                    /* Not a Pico-ceiling refusal of any kind (the commit
+                     * itself landed) -- explicit OTHER, overriding whatever
+                     * confirm_commit_landed() left (irrelevant here, since
+                     * it succeeded). */
+                    if (out_class) {
+                        *out_class = SAFETY_CEILING_REFUSAL_OTHER;
+                    }
                     return false;
                 }
                 break;
             }
         }
+    }
+    if (out_class) {
+        *out_class = SAFETY_CEILING_REFUSAL_NONE;
     }
     reason_out[0] = '\0';
     return true;
@@ -914,15 +985,19 @@ static bool apply_pairs(SafetyLinkClass *link, const safety_cfg_post_pair_t *pai
  * words()) through `reason_out`/`reason_cap` exactly like every other
  * caller of apply_pairs() in this file. */
 bool safety_cfg_http_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_id, float value,
-                                          char *reason_out, size_t reason_cap)
+                                          char *reason_out, size_t reason_cap,
+                                          safety_ceiling_refusal_class_t *out_class)
 {
+    if (out_class) {
+        *out_class = SAFETY_CEILING_REFUSAL_OTHER;
+    }
     if (!reason_out || reason_cap == 0) {
         return false;
     }
     safety_cfg_post_pair_t pair;
     pair.param_id = param_id;
     snprintf(pair.value_text, sizeof(pair.value_text), "%.9g", (double)value);
-    return apply_pairs(link, &pair, 1, /*commit=*/true, reason_out, reason_cap);
+    return apply_pairs(link, &pair, 1, /*commit=*/true, reason_out, reason_cap, out_class);
 }
 
 static esp_err_t commissioning_post_handler(httpd_req_t *req)
@@ -961,7 +1036,7 @@ static esp_err_t commissioning_post_handler(httpd_req_t *req)
     }
 
     char reason[160];
-    bool ok = apply_pairs(s_link, pairs, n, commit, reason, sizeof(reason));
+    bool ok = apply_pairs(s_link, pairs, n, commit, reason, sizeof(reason), NULL);
 
     /* S8 rate-guard write provenance -- this generic endpoint is how an
      * operator hand-enters max_rate_c_per_min (0x0204) today, so a
@@ -1172,7 +1247,7 @@ static esp_err_t ct_cal_post_handler(httpd_req_t *req)
     snprintf(pairs[1].value_text, sizeof(pairs[1].value_text), "%u", (unsigned)zero_counts);
 
     char reason[160];
-    bool ok = apply_pairs(s_link, pairs, 2, commit, reason, sizeof(reason));
+    bool ok = apply_pairs(s_link, pairs, 2, commit, reason, sizeof(reason), NULL);
 
     bool persisted = false;
     esp_err_t nvs_err = ESP_OK;
@@ -1603,7 +1678,7 @@ static esp_err_t ct_auto_zero_post_handler(httpd_req_t *req)
     snprintf(pairs[1].value_text, sizeof(pairs[1].value_text), "%u", (unsigned)zero_counts);
 
     char reason[160];
-    bool ok = apply_pairs(s_link, pairs, 2, true /* always commit on confirm */, reason, sizeof(reason));
+    bool ok = apply_pairs(s_link, pairs, 2, true /* always commit on confirm */, reason, sizeof(reason), NULL);
 
     bool persisted = false;
     esp_err_t nvs_err = ESP_OK;
@@ -2025,7 +2100,7 @@ static esp_err_t rate_guard_auto_post_handler(httpd_req_t *req)
 
     char reason[160];
     bool ok = apply_pairs(s_link, &pair, 1, true /* always commit -- this endpoint has no stage-only mode */,
-                           reason, sizeof(reason));
+                           reason, sizeof(reason), NULL);
     if (!ok) {
         char escaped[192];
         size_t o = 0;

@@ -125,6 +125,33 @@ typedef enum {
     SAFETY_CEILING_SYNC_LOWER_FAILED, /* a lower was attempted and failed -- NON-blocking, Pico stays wider */
 } safety_ceiling_sync_result_t;
 
+/* 2026-09-10 opus review finding: classifying a refusal by substring-
+ * matching the human-readable `reason_out` sentence (the original
+ * implementation of this backoff) is wrong on multiple counts -- the
+ * string containing "ARMED" is not always produced on a genuine ARMED
+ * refusal (safety_cfg_http.c's confirm-by-readback path only has it when a
+ * one-shot stashed COMMIT_CONFIG_REJECTED frame happens to still be there),
+ * `strstr` has no word boundary (a hypothetical "not ARMED"/"DISARMED"
+ * message would misclassify), and prose is not a stable contract between
+ * caller and callee. The writer now reports the refusal class directly, by
+ * NUMBER, alongside the human string -- `reason_out` stays exactly what an
+ * operator sees; `out_class` is what control flow (the reconcile backoff)
+ * is allowed to depend on. `out_class` may be NULL (callers that only need
+ * the human message, e.g. apply_lower()'s best-effort writer call, pass
+ * NULL and are not required to interpret it). When non-NULL, the writer
+ * MUST write it whenever it returns false: SAFETY_CEILING_REFUSAL_OTHER is
+ * the safe default for any failure whose exact cause could not be proven
+ * (comms error, unconfirmed read-back with no rejection frame in hand) --
+ * never guess ARMED without the numeric reject reason in hand. */
+typedef enum {
+    SAFETY_CEILING_REFUSAL_NONE = 0,     /* not a failure (writer returned true) */
+    SAFETY_CEILING_REFUSAL_ARMED,        /* Pico's KILNLINK_COMMIT_CONFIG_REJECT_ARMED, known for certain */
+    SAFETY_CEILING_REFUSAL_STORAGE,      /* Pico's KILNLINK_COMMIT_CONFIG_REJECT_STORAGE, known for certain */
+    SAFETY_CEILING_REFUSAL_RANGE,        /* Pico's KILNLINK_COMMIT_CONFIG_REJECT_RANGE, known for certain */
+    SAFETY_CEILING_REFUSAL_CONTRADICTION,/* Pico's KILNLINK_COMMIT_CONFIG_REJECT_CONTRADICTION, known for certain */
+    SAFETY_CEILING_REFUSAL_OTHER,        /* anything else: comms failure, unconfirmed read-back, no writer, etc */
+} safety_ceiling_refusal_class_t;
+
 /* Writes (stage + commit + confirm-by-readback) a single float parameter
  * to the Pico and reports whether it is now CONFIRMED to hold that exact
  * value -- the same contract safety_cfg_http.c's confirm_commit_landed()
@@ -134,8 +161,12 @@ typedef enum {
  * commit_reject_reason_words()'s "relay is ARMED -- config writes are
  * refused while ARMED" -- when that is why it failed, since that is the
  * single most likely and most operator-actionable failure mode for this
- * particular field, see this header's own top comment). */
-typedef bool (*safety_ceiling_writer_fn)(void *ctx, float target_c, char *reason_out, size_t reason_cap);
+ * particular field, see this header's own top comment). `out_class` (may
+ * be NULL) must be filled with the machine-readable classification above
+ * whenever this function returns false -- see the enum's own comment for
+ * why this exists separately from `reason_out`. */
+typedef bool (*safety_ceiling_writer_fn)(void *ctx, float target_c, char *reason_out, size_t reason_cap,
+                                          safety_ceiling_refusal_class_t *out_class);
 
 /* Call BEFORE committing a proposed new zone configuration. Computes the
  * new target from `new_max_temp_c`/`new_n` and compares it against the
@@ -168,12 +199,17 @@ typedef bool (*safety_ceiling_writer_fn)(void *ctx, float target_c, char *reason
  *     in its ordinary ARMED state (see this header's top comment) -- the
  *     caller must surface `reason_out` to the operator directly, not log
  *     it and proceed, and not silently require a safety-processor reset
- *     without saying so. */
+ *     without saying so.
+ *
+ * `out_refusal_class` (may be NULL) receives the machine-readable
+ * classification of a failed raise -- see safety_ceiling_refusal_class_t's
+ * own comment. Only meaningful when this function returns false; left
+ * untouched on success. */
 bool safety_ceiling_policy_guard_raise(float current_pico_ceiling_c, bool current_known,
                                         const float *new_max_temp_c, size_t new_n,
                                         safety_ceiling_writer_fn writer, void *writer_ctx,
                                         safety_ceiling_sync_result_t *out_result, char *reason_out,
-                                        size_t reason_cap);
+                                        size_t reason_cap, safety_ceiling_refusal_class_t *out_refusal_class);
 
 /* Call AFTER a zone configuration has already been committed (whether or
  * not safety_ceiling_policy_guard_raise() was involved -- calling this
@@ -213,34 +249,80 @@ void safety_ceiling_policy_apply_lower(float current_pico_ceiling_c, bool curren
  * backed off, the reconcile is skipped entirely -- no UART round trip, no
  * log line -- and only re-attempted once `now_us` reaches `backoff_until_us`.
  *
- * Backoff duration depends on WHY the previous attempt failed:
- *   - the Pico reported ARMED (writer's reason_out contains "ARMED", the
- *     literal substring commit_reject_reason_words()/config_store.c's own
- *     REFUSED_ARMED message always carries) -- this is the expected,
- *     long-lived state on any bench that has been up more than a minute, so
- *     back off HARD (SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_US) rather than
- *     retry against a guaranteed refusal.
- *   - any other failure (communication error, unconfirmed read-back, etc)
- *     -- back off more modestly (SAFETY_CEILING_RECONCILE_RETRY_BACKOFF_US)
- *     since these ARE expected to be transient.
+ * Backoff duration depends on the CLASSIFIED reason the previous attempt
+ * failed (safety_ceiling_refusal_class_t, reported by the writer as a
+ * number -- 2026-09-10 opus review finding B fixed this from an earlier
+ * version that classified by `strstr(reason, "ARMED")`, which is wrong on
+ * three counts: (1) the human-readable reason string is not always
+ * produced on a genuine ARMED refusal -- safety_cfg_http.c's confirm-by-
+ * readback path only attaches it when a one-shot stashed
+ * COMMIT_CONFIG_REJECTED frame happens to still be there when it looks,
+ * so a late or already-consumed frame silently fell through to a generic
+ * "could not confirm" sentence with no "ARMED" in it at all, and the
+ * identical physical condition got the SHORT backoff instead of the long
+ * one; (2) `strstr` has no word boundary (a hypothetical "not ARMED" or
+ * "DISARMED" message would misclassify -- no such string exists today, but
+ * the classifier was wrong regardless of whether anything currently
+ * triggers it); (3) it silently lumped the genuinely persistent
+ * KILNLINK_COMMIT_CONFIG_REJECT_STORAGE failure (a Pico with a failing
+ * flash write) in with "ordinary transient failure" and gave it the SHORT
+ * backoff, which hammers a hardware fault that retrying faster cannot fix):
+ *
+ *   - SAFETY_CEILING_REFUSAL_ARMED -- the Pico's ordinary standing state on
+ *     any bench that has been up more than a minute, and it only clears
+ *     when the relay de-energises. During a firing the relay is PWM-
+ *     chopped on a per-zone, runtime-settable window (commonly 60 s); a
+ *     FIXED backoff risks phase-locking against that window (an off-window
+ *     shorter than the backoff period can be stepped over on every single
+ *     attempt, forever, the same way a fixed-frequency strobe can appear to
+ *     freeze a rotating fan). SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_BASE_US
+ *     plus a jitter term derived from `now_us` (deterministic, no RNG, so
+ *     this stays a pure function of its inputs -- see
+ *     safety_ceiling_reconcile_record_result()'s own comment) walks the
+ *     retry's phase relative to any fixed PWM period across successive
+ *     attempts instead of parking it at one fixed offset forever.
+ *   - SAFETY_CEILING_REFUSAL_STORAGE -- a real hardware/flash fault that
+ *     retrying sooner cannot fix and that does not resolve on its own the
+ *     way ARMED does; back off LONGER
+ *     (SAFETY_CEILING_RECONCILE_STORAGE_BACKOFF_US) than even the ARMED
+ *     case, and rely on the (already rate-limited) WARN log for an operator
+ *     to notice and intervene rather than hammering the link.
+ *   - SAFETY_CEILING_REFUSAL_RANGE / _CONTRADICTION / _OTHER (comms error,
+ *     unconfirmed read-back with no rejection frame in hand, no writer
+ *     available) -- back off modestly (SAFETY_CEILING_RECONCILE_RETRY_
+ *     BACKOFF_US), the original "ordinary transient failure" case; this is
+ *     also the SAFE DEFAULT the writer reports whenever it cannot prove
+ *     exactly which numbered reason applied, so an unproven failure never
+ *     silently earns the long backoff either.
+ *
  * A successful attempt (or one that needed no write at all) clears the
  * backoff immediately, so the very next tick can react promptly to a
  * relay that has just been de-energised or a config that has just changed.
+ * The cost this backoff exists to bound (versus the pre-backoff every-
+ * ~500ms retry) is preserved by every branch above: at most one ≤2 s
+ * safety_cfg_store_refetch() every few seconds, never every tick.
  *
- * Remaining window: the ESP's zone ceiling can exceed the Pico's confirmed
- * ceiling for up to one backoff period (worst case
- * SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_US) after the mismatch first
- * appears, before the next attempt even starts -- this reconcile path was
- * ALREADY best-effort/eventual (safety_ceiling_sync.h's own doc comment:
- * "never blocks heat or fails the boot... left for the next tick or the
- * next interactive zones POST to retry"), so this widens an already-open
- * eventual-consistency window, it does not create a new kind of one. The
- * hard invariant that must never be violated (the Pico ceiling must never
- * be TIGHTER than the ESP's) is unaffected either way: a failed/skipped
- * reconcile leaves the Pico's ceiling exactly where it was -- possibly
- * stale-low, never dropped further. */
-#define SAFETY_CEILING_RECONCILE_RETRY_BACKOFF_US ((int64_t)5 * 1000 * 1000)  /* 5 s -- ordinary transient failure */
-#define SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_US ((int64_t)30 * 1000 * 1000) /* 30 s -- Pico ARMED, guaranteed refusal */
+ * Remaining window -- CORRECTED 2026-09-10 (the previous wording here was
+ * wrong): a failed raise leaves the ESP's zone ceiling ABOVE the Pico's
+ * confirmed ceiling -- i.e. the Pico strictly TIGHTER than the ESP, the one
+ * state this feature exists to prevent -- for as long as the underlying
+ * cause persists, NOT merely "up to one backoff period". The backoff only
+ * bounds how often a retry is ATTEMPTED; it does nothing to bound how long
+ * the mismatch itself lasts. Concretely: a raise attempted while the relay
+ * is ARMED (its ordinary standing state through an entire firing) fails on
+ * every attempt until the relay de-energises, so the mismatch can persist
+ * for the WHOLE firing, not one backoff period of it. This reconcile path
+ * was already best-effort/eventual (safety_ceiling_sync.h's own doc
+ * comment: "never blocks heat or fails the boot... left for the next tick
+ * or the next interactive zones POST to retry") and this is a plain
+ * statement of how eventual "eventual" can be, not a new hazard introduced
+ * by the backoff -- the pre-backoff ~500 ms retry had the exact same
+ * unbounded-persistence property whenever the relay stayed ARMED, it just
+ * polled more often while doing nothing more effective. */
+#define SAFETY_CEILING_RECONCILE_RETRY_BACKOFF_US ((int64_t)5 * 1000 * 1000)  /* 5 s -- ordinary/unclassified transient failure */
+#define SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_BASE_US ((int64_t)6 * 1000 * 1000)   /* 6 s base -- strictly longer than the 5 s ordinary backoff, Pico ARMED is a guaranteed refusal until relay de-energises */
+#define SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_JITTER_US ((int64_t)3 * 1000 * 1000) /* +0..3 s jitter, so the 6-9 s cadence cannot phase-lock against a fixed PWM window */
+#define SAFETY_CEILING_RECONCILE_STORAGE_BACKOFF_US ((int64_t)60 * 1000 * 1000) /* 60 s -- persistent hardware fault; faster retry cannot help */
 
 typedef struct {
     int64_t backoff_until_us; /* 0 == never backed off / not currently backing off */
@@ -250,14 +332,18 @@ typedef struct {
  * been reached or was never set). Never mutates `state`. */
 bool safety_ceiling_reconcile_should_attempt(const safety_ceiling_reconcile_backoff_t *state, int64_t now_us);
 
-/* Updates `state` after an attempt. `ok` is guard_raise()'s own return value;
- * `reason` is whatever it left in reason_out (may be NULL/empty on success).
- * A successful attempt (ok == true, including the "nothing needed" case)
- * clears the backoff. A failed attempt sets backoff_until_us = now_us plus
- * the ARMED or ordinary backoff duration, chosen by whether `reason`
- * contains the substring "ARMED". */
+/* Updates `state` after an attempt. `ok` is guard_raise()'s own return
+ * value; `refusal_class` is whatever it left in *out_refusal_class (ignored
+ * when ok is true). A successful attempt (ok == true, including the
+ * "nothing needed" case) clears the backoff. A failed attempt sets
+ * backoff_until_us = now_us plus the backoff duration selected by
+ * `refusal_class` -- see this header's block comment above for the full
+ * rationale per class. The ARMED case's jitter term is derived
+ * deterministically from `now_us` (no RNG, no extra state) so this stays a
+ * pure function purely of its inputs, host-testable exactly like every
+ * other function in this file. */
 void safety_ceiling_reconcile_record_result(safety_ceiling_reconcile_backoff_t *state, int64_t now_us, bool ok,
-                                             const char *reason);
+                                             safety_ceiling_refusal_class_t refusal_class);
 
 #ifdef __cplusplus
 }
