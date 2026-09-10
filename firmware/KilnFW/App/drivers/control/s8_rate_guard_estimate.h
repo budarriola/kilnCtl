@@ -3,49 +3,105 @@
 // identified per-zone plant model, instead of an operator-typed number.
 // docs/audits/s8_auto_calc_design_2026-09-09.md is the design doc this
 // implements; read that first for the reasoning this header only summarizes.
+// 2026-09-10 review (docs/audits/s8_auto_calc_design_2026-09-09.md's
+// follow-up review) found five confirmed defects in the version described
+// above and reworked the derivation below; the fixes are described inline
+// at each affected point rather than re-narrated in full here.
 //
 // WHY THIS EXISTS: docs/audits/s8_rate_guard_retune_2026-09-09.md found the
 // bench's compiled S8 default (33.3 C/min) was derived from "2x the fastest
 // shipped PROFILE ramp" -- a number with no relationship to what the plant
 // can actually do. This module instead derives a candidate threshold from
 // model_k_dc/model_tau_s (zones_config_get_model()), the same FOPDT
-// parameters autotune/profile_executor already trust for feedforward.
+// parameters autotune/profile_executor already trust for feedforward, PLUS
+// (since this pass) the measured cross-zone coupling gains onto that same
+// zone (zones_config_get_coupling()) -- see "REAL FIRINGS ARE COUPLED"
+// below for why the own-zone-only version was wrong.
 //
-// TEMPERATURE DEPENDENCE (the hard part -- see the design doc's own section):
-// k and tau both fall by roughly the same factor at high temperature
-// (PID_EXPANSION_PLAN.md / high_temperature_transfer_analysis), so a single
-// identification's k/tau ratio is NOT assumed portable to a different
-// operating point. This module does not attempt to schedule the threshold
-// across temperature -- it deliberately picks the LOWEST model_fit_temp_c
-// across all zones with a valid identification (the coldest, and per the
-// audit's own finding, the FASTEST part of any firing) as its one evidence
-// point, on the reasoning that a ceiling sized for the fastest-known
-// operating point stays conservative (never accidentally loose) everywhere
-// hotter, where the plant is slower. It refuses to guess at a hotter regime
-// it has no data for: if every zone's only identification sits at a high
-// fit_temp_c (commissioning skipped a cold-start run), this function
-// declines to produce an estimate at all (S8_RATE_GUARD_ESTIMATE_NO_DATA)
-// rather than deriving a number from an unrepresentative point and silently
-// under-protecting the coldest, fastest part of a real firing.
+// TEMPERATURE DEPENDENCE, HONESTLY RESTATED: the original version of this
+// header claimed picking the coldest zone's fit was "conservative" because
+// k and tau both fall at high temperature. That reasoning does not survive
+// contact with this document's OWN cited data: PID_EXPANSION_PLAN.md /
+// high_temperature_transfer_analysis reports k and tau falling by roughly
+// the SAME factor (~20x at 1200 C) as the kiln heats up. If k and tau fall
+// together, k/tau ~ P/C (heater power over thermal mass) is approximately
+// INVARIANT across the firing -- picking the coldest fit buys close to zero
+// conservatism, not the "generous everywhere hotter" margin originally
+// claimed. This module still picks the lowest-fit_temp_c zone (there is no
+// data today to justify picking any other single point, and it is not
+// LESS safe than the alternative), but the real protection against
+// temperature drift is the MARGIN below, sized as a noise/model-error
+// allowance, not as a stand-in for "protects the whole firing by
+// construction." A temperature-scheduled threshold (the zone_model_at()/
+// coupling_at() seam added in 5d3bc854) remains the honest long-term fix
+// and is not attempted here.
+//
+// REAL FIRINGS ARE COUPLED, SO THE BASIS MUST BE TOO: S8
+// (firmware/SaftyFW/src/safety_guards.c) watches ONE global
+// `safety_tc_c` -- there is no per-zone S8. Every real firing starts with
+// all three zones at full duty together, and the measured coupling matrix
+// (docs/audits/high_temperature_transfer_analysis_2026-09-08.md,
+// `zones_config_get_coupling()`) shows the off-diagonal contribution onto a
+// zone is comparable to or larger than that zone's own diagonal gain (z0:
+// own k_dc 31.96, but z1->z0 + z2->z0 = 27.32 + 21.72 = 49.04 -- the
+// all-zones-firing gain is ~2.5x the own-zone-only basis the previous
+// version used). A candidate built from k_dc alone therefore UNDERSTATES
+// the actual worst-case initial slope by roughly that factor on this plant.
+// This version's basis is (k_dc + coupling_gain_sum) / tau_s, where
+// coupling_gain_sum is the sum of the OTHER zones' measured steady-state
+// gain onto this one -- i.e. the same all-zones-full-duty scenario a stuck
+// relay actually produces.
+//
+// MARGIN, HONESTLY SIZED: the previous version applied a 2.0x "margin" on
+// top of the own-zone-only (uncoupled) basis and called the result
+// "conservative." Two things were wrong with that: (1) since the basis was
+// already missing the ~2.5x coupling contribution, a nominal 2.0x margin on
+// the WRONG (too-small) basis is not actually more conservative than 1.0x
+// on the right one -- on this plant the "2x margin, own-zone-only" number
+// (z0: (31.96/166.9)*60*2.0 = 22.98 C/min) reads as if it has margin to
+// spare, while a stuck-on relay driving all zones through this TC produces
+// (81.0/166.9)*60 = 29.1 C/min from a full-duty START, i.e. the "safety
+// margin" was in the WRONG direction versus a real runaway. (2) A full-duty
+// stuck relay IS exactly the basis this function now computes (own gain +
+// coupling gain, at u=1.0) -- there is no further multiplicative headroom
+// to add for "how much worse could a runaway be," since duty cannot exceed
+// 1.0. What legitimately remains to size a margin for is measurement/model
+// error in the identified k_dc/tau_s/coupling values themselves, not "how
+// much worse than measured could reality be" -- that is now folded into the
+// basis directly. S8_RATE_GUARD_ESTIMATE_MARGIN is therefore 1.3 (30%
+// headroom for identification error), not 2.0.
 //
 // FAIL-SAFE DIRECTION: this function only ever produces a candidate at least
 // S8_RATE_GUARD_ESTIMATE_FLOOR_C_PER_MIN and at most _CEILING_C_PER_MIN --
 // the SAME two bounds firmware/SaftyFW/src/config_store.h's
 // CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR/_CEILING enforce independently on
-// the Pico. Errs tight (nuisance-trip), never loose (missed runaway): the
-// margin factor multiplies the identified plant's OWN fastest achievable
-// rate, and the floor refuses to let a bad/near-zero identification produce
-// an unusably-loose (or negative/zero) threshold.
+// the Pico. With the coupled basis above, the floor is no longer the
+// dominant term on this bench's measured data (z0/z1/z2 candidates land at
+// roughly 37.9/36.2/28.9 C/min -- see the design doc's 2026-09-10 addendum
+// for the worked numbers) -- it remains as a backstop against a
+// near-degenerate identification (tiny k_dc, or a coupling-free single-zone
+// board), not as the value this guard is expected to normally clamp to.
+// s8_rate_guard_estimate_reason_t distinguishes an unclamped derivation
+// (S8_RATE_GUARD_ESTIMATE_OK) from a floor- or ceiling-clamped one
+// (_OK_CLAMPED_FLOOR / _OK_CLAMPED_CEILING) so a caller -- and an operator
+// looking at commissioning data -- can tell "this number came from your
+// plant" from "this number came from a bound because your plant's own
+// number was out of range," which the previous single OK value for both
+// cases could not distinguish.
 //
 // WHO COMPUTES, WHO ENFORCES: the ESP computes this candidate (it alone
 // holds the plant model; the Pico has none) but never pushes it unchecked --
 // see this header's own doc comment on s8_rate_guard_estimate() below for
 // the trust boundary this implies, and the design doc's "who computes it"
 // section for the full argument. The Pico's own floor/ceiling range check
-// (config_params.c, CHECK_F32_RANGE_OR_ZERO) is the second, INDEPENDENT
-// backstop: even a compromised or buggy ESP cannot push an absurd value
-// past it. A hand-entered operator override always remains possible and
-// takes priority -- this module only ever produces a SUGGESTION for
+// (config_params.c, RANGE_F32_RANGE_OR_ZERO) is a SEPARATE plausibility
+// bound with the SAME [15, 60] range this module already clamps its own
+// output to -- it cannot reject anything this function emits (its job is to
+// bound a hand-entered MANUAL value, which does not pass through this
+// module at all) and is not an independent backstop against a
+// compromised/buggy ESP for the AUTO path specifically; that claim is
+// removed below. A hand-entered operator override always remains possible
+// and takes priority -- this module only ever produces a SUGGESTION for
 // safety_set_rate_guard(), never writes anything itself.
 #ifndef S8_RATE_GUARD_ESTIMATE_H
 #define S8_RATE_GUARD_ESTIMATE_H
@@ -65,57 +121,115 @@ extern "C" {
  * estimator peaking at 7.69 C/min; extended simulator 13.1-13.5 C/min).
  * Duplicated rather than shared because KilnFW and SaftyFW are separate
  * firmware images with no common header today; kept in sync by this
- * comment plus docs/audits/s8_auto_calc_design_2026-09-09.md, and by
- * test_s8_rate_guard_estimate.c's own cross-check against the literal
- * values quoted in config_store.h (a text-scan test, same precedent as
- * this codebase's other cross-repo constant-sync checks, e.g.
- * check_safety_trip_words_sync.ps1). */
+ * comment plus docs/audits/s8_auto_calc_design_2026-09-09.md. NOTE (2026-
+ * 09-10 review): the previous version of this comment claimed
+ * test_s8_rate_guard_estimate.c performs a text-scan cross-check against
+ * config_store.h's literal values, the way check_safety_trip_words_sync.ps1
+ * does for a different pair of constants. It does not -- that test file has
+ * no file I/O and never references config_store.h. No such check exists
+ * today; keeping the two headers in sync is manual, by this comment alone,
+ * until a real cross-check is written. */
 #define S8_RATE_GUARD_ESTIMATE_FLOOR_C_PER_MIN   15.0f
 #define S8_RATE_GUARD_ESTIMATE_CEILING_C_PER_MIN 60.0f
 
-/* 2x the identified plant's own fastest achievable dT/dt at full duty --
- * same "2x measured peak" convention c43323a2 and this codebase's other
- * safety-margin choices already use, just applied to a measured plant
- * capability instead of a shipped profile's authored ramp. */
-#define S8_RATE_GUARD_ESTIMATE_MARGIN 2.0f
+/* 30% headroom for identification error (k_dc/tau_s/coupling measurement
+ * and fit noise) on top of the all-zones-full-duty basis computed below.
+ * NOT "2x measured peak" -- that framing (this macro's previous value,
+ * 2.0f, applied to an own-zone-only basis) was reviewed 2026-09-10 and
+ * found backwards: a stuck-on relay driving every zone through S8's single
+ * shared TC is a duty=1.0 event, i.e. exactly the (k_dc + coupling_gain_sum)
+ * basis this module now computes -- there is no physical "worse than full
+ * duty" to buy extra margin against, so multiplying that already-worst-case
+ * basis by 2x is not a safety margin, it is just a bigger number. What
+ * legitimately needs headroom is that the plant identification itself is
+ * a fit against noisy captures, not ground truth -- 1.3x is sized for that,
+ * not for "how much worse could a runaway be." See this header's top
+ * comment ("MARGIN, HONESTLY SIZED") for the full reasoning and the worked
+ * bench numbers. */
+#define S8_RATE_GUARD_ESTIMATE_MARGIN 1.3f
 
 typedef enum {
+    /* Candidate derived directly from the identified plant, unclamped by
+     * either bound -- the normal case on a commissioned, coupling-aware
+     * board. */
     S8_RATE_GUARD_ESTIMATE_OK = 0,
-    /* No zone has a usable identification (model_k_dc/model_tau_s > 0 AND
-     * model_fit_temp_c != ZONE_MODEL_FIT_TEMP_UNKNOWN) -- an uncommissioned
-     * or never-autotuned board. Caller must not silently arm S8 with a
-     * guessed number; fall back to floor or require a manual value. */
+    /* Derived candidate was below the floor and was raised to it -- the
+     * caller/operator should know this number came from a bound, not from
+     * the plant, e.g. a near-degenerate identification or a coupling-free
+     * single-zone board. Previously indistinguishable from _OK. */
+    S8_RATE_GUARD_ESTIMATE_OK_CLAMPED_FLOOR,
+    /* Derived candidate was above the ceiling and was capped to it -- same
+     * "tell the operator this isn't the plant's real number" reasoning. */
+    S8_RATE_GUARD_ESTIMATE_OK_CLAMPED_CEILING,
+    /* No zone has a usable identification: model_k_dc/model_tau_s > 0 AND
+     * model_fit_temp_c is a REAL identified operating point, not the
+     * ZONE_MODEL_FIT_TEMP_UNKNOWN sentinel (-273.15f,
+     * zones_config_accessors.h) -- an uncommissioned or never-autotuned
+     * board, OR a board whose zones were migrated up from a pre-v24 record
+     * that stamped the sentinel into every zone (zones_config_json.h /
+     * zones_config_migrate.c) and have not been re-identified since. 2026-
+     * 09-10 review: the previous version of this function validated
+     * fit_temp_c with isfinite() only, and -273.15f IS finite -- being the
+     * lowest representable "plausible" temperature, the sentinel
+     * unconditionally WON the coldest-zone selection below on every board
+     * carrying it (which, as of this review, is every zone on this bench).
+     * Caller must not silently arm S8 with a guessed number; fall back to
+     * floor or require a manual value. */
     S8_RATE_GUARD_ESTIMATE_NO_DATA,
 } s8_rate_guard_estimate_reason_t;
 
-/* Per-zone input -- the caller (a future MCP tool / HTTP handler) builds
- * this from zones_config_get_model()/zones_config_get_model_fit_context()
- * for each commissioned zone. `valid` must be false unless BOTH calls
- * succeeded AND k_dc/tau_s are finite and > 0.0f AND fit_temp_c is not
+/* Per-zone input -- the caller (safety_cfg_http.c's rate_guard_gather_and_
+ * estimate()) builds this from zones_config_get_model()/
+ * zones_config_get_model_fit_context()/zones_config_get_coupling() for each
+ * commissioned zone. `valid` must be false unless model_k_dc/model_tau_s
+ * are finite and > 0.0f AND fit_temp_c is a real identified value, i.e. NOT
  * ZONE_MODEL_FIT_TEMP_UNKNOWN -- this function does not re-derive validity
  * from raw accessor failure codes, to keep it a pure function with no
- * dependency on zones_config_accessors.h's runtime state. */
+ * dependency on zones_config_accessors.h's runtime state, but it DOES
+ * independently reject the UNKNOWN sentinel value itself (see NO_DATA's
+ * comment above) rather than trusting the caller's `valid` flag alone for
+ * that specific case, since that flag is exactly what one live caller got
+ * wrong. */
 typedef struct {
     bool  valid;
-    float k_dc;       /* model_k_dc, degC per unit duty at steady state */
+    float k_dc;       /* model_k_dc, degC per unit duty at steady state, this
+                        * zone's OWN heater only */
     float tau_s;      /* model_tau_s, seconds */
     float fit_temp_c; /* model_fit_temp_c -- the operating point this zone's
                         * k_dc/tau_s were identified at */
+    /* Sum of the OTHER zones' measured steady-state gain onto THIS zone's
+     * thermocouple (degC per unit duty each, summed) -- i.e. the row of
+     * zones_config_get_coupling() for this zone with the diagonal entry
+     * excluded. Required, not optional: S8 watches one TC shared by every
+     * zone (safety_guards.c has no per-zone concept), so a caller that
+     * fills this with 0.0f on a multi-zone board is not being conservative,
+     * it is silently reproducing the ~2.5x-too-small basis the 2026-09-10
+     * review found (docs/audits/high_temperature_transfer_analysis_2026-09-
+     * 08.md's z0 row: 27.32 + 21.72 = 49.04 against an own k_dc of 31.96).
+     * 0.0f is only correct for a genuinely single-zone board with no other
+     * heaters to couple from. Must be finite and >= 0.0f; a negative value
+     * (which would UNDERSTATE the coupled basis) is treated the same as a
+     * non-finite one -- see s8_rate_guard_estimate.c. */
+    float coupling_gain_sum_c_per_duty;
 } s8_rate_guard_zone_input_t;
 
 /* Computes the auto-calc candidate. Picks the single VALID zone whose
- * fit_temp_c is LOWEST (see this header's top comment for why "lowest" is
- * the conservative choice), computes that zone's own maximum achievable
- * slope at full duty (k_dc / tau_s, converted from degC/s to degC/min),
- * applies S8_RATE_GUARD_ESTIMATE_MARGIN (in degC/min), then clamps to
- * [S8_RATE_GUARD_ESTIMATE_FLOOR_C_PER_MIN, _CEILING_C_PER_MIN].
+ * fit_temp_c is LOWEST (see this header's top comment for the honest,
+ * reduced strength of this "conservative" claim), computes that zone's
+ * maximum achievable slope at full duty INCLUDING the other zones' coupled
+ * contribution -- (k_dc + coupling_gain_sum_c_per_duty) / tau_s, converted
+ * from degC/s to degC/min -- applies S8_RATE_GUARD_ESTIMATE_MARGIN, then
+ * clamps to [S8_RATE_GUARD_ESTIMATE_FLOOR_C_PER_MIN, _CEILING_C_PER_MIN].
  *
- * Returns S8_RATE_GUARD_ESTIMATE_OK with *out_c_per_min set, or
- * S8_RATE_GUARD_ESTIMATE_NO_DATA (out_c_per_min untouched) if no zone in
- * `zones[0..zone_count-1]` is valid. zone_count above MAX31856_CHANNEL_COUNT
- * is treated as MAX31856_CHANNEL_COUNT (defensive, matches this codebase's
- * other array-bound conventions); NULL zones/out_c_per_min, or zone_count
- * == 0, also returns NO_DATA. */
+ * Returns S8_RATE_GUARD_ESTIMATE_OK (unclamped), _OK_CLAMPED_FLOOR/_CEILING
+ * (clamped -- see those enumerators' comments), with *out_c_per_min set in
+ * all three OK* cases; or S8_RATE_GUARD_ESTIMATE_NO_DATA (out_c_per_min
+ * untouched) if no zone in `zones[0..zone_count-1]` is valid, INCLUDING the
+ * case where every candidate zone's fit_temp_c is the
+ * ZONE_MODEL_FIT_TEMP_UNKNOWN sentinel. zone_count above
+ * MAX31856_CHANNEL_COUNT is treated as MAX31856_CHANNEL_COUNT (defensive,
+ * matches this codebase's other array-bound conventions); NULL zones/
+ * out_c_per_min, or zone_count == 0, also returns NO_DATA. */
 s8_rate_guard_estimate_reason_t s8_rate_guard_estimate(const s8_rate_guard_zone_input_t *zones,
                                                         uint8_t zone_count, float *out_c_per_min);
 
