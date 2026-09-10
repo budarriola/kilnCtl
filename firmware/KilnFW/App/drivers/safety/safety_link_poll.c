@@ -69,6 +69,7 @@
  * to trigger safety_cfg_store_maybe_refetch()'s fetch-on-change check; see
  * safety_sync_cfg_cache() below. */
 #include "safety_cfg_store.h"
+#include "safety_ceiling_sync.h" /* safety_ceiling_sync_reconcile_on_link_up() -- see its call site below */
 
 /* ROADMAP.md M5 -- SAFETY_CMD_PUSH_CONTEXT's live-state sources. safety_link.h
  * only forward-declares these as void* (kiln_io_t is an anonymous-struct
@@ -276,6 +277,24 @@ static void safety_update_health(SafetyLinkClass *link)
         }
         safety_sync_tc_type(link);
         safety_sync_cfg_cache(link);
+        /* 2026-09-10 opus review: the raise-guard in zones_http_post.c only
+         * runs from that one POST handler, and treats a NULL link as
+         * "nothing to guard" -- so a board that boots (or reconnects after a
+         * Pico swap/reflash) with a Pico ceiling behind the ESP's already-
+         * persisted zone config has nothing to close that gap until an
+         * operator happens to POST the zones page again. Deliberately
+         * called unconditionally here, every tick the link is up -- same
+         * level-triggered, "keep retrying, never silently drop it"
+         * discipline as safety_sync_tc_type() above, not gated on
+         * link->down_logged, so this also covers the very first tick after
+         * boot when the link comes up before ever having been observed
+         * down (down_logged starts false, so a down_logged-gated call would
+         * never fire that case at all -- this is the "no boot-time
+         * reconciliation anywhere" gap the audit found). Cheap when nothing
+         * needs correcting: safety_ceiling_sync_guard_raise() reads the
+         * Pico's cached ceiling and only performs a real write+confirm UART
+         * round trip when a raise is actually needed. */
+        safety_ceiling_sync_reconcile_on_link_up(link);
     } else if (!link->down_logged ||
                safety_elapsed_ms(link->down_log_tick) >= SAFETY_LINK_DOWN_LOG_PERIOD_MS) {
         /* TODO.md 9.6: text only -- the fault bit below still asserts

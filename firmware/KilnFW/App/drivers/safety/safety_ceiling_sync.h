@@ -58,6 +58,38 @@ void safety_ceiling_sync_apply_lower(SafetyLinkClass *link, const float *new_max
  * tracks: N C" alongside the ESP's own zone maximum. */
 bool safety_ceiling_sync_get_current_pico_ceiling(float *out_value);
 
+/* 2026-09-10 opus review: guard_raise()/apply_lower() above only run from
+ * zones_http_post.c's POST handler, so a board that boots (or reconnects)
+ * with `link == NULL` -- and every path that changes the ESP's own zone
+ * max_temp_c other than that one POST handler (backup_import.c's restore
+ * path being the concrete example that motivated this) -- can leave the
+ * ESP's zone ceiling ABOVE the Pico's abs_max_temp_c with nothing to
+ * notice or fix it, because guard_raise() treats `link == NULL` as "no
+ * invariant to maintain" rather than deferring the check. The ESP's zone
+ * config persists in NVS across a Pico that gets replaced, reflashed, or
+ * simply comes up later than the ESP's own boot; only the ESP side knows
+ * what the ceiling SHOULD be, so reconciliation has to be driven from
+ * here, not the Pico.
+ *
+ * Call this on every safety_poll_task() tick while the link is up (same
+ * call site and same level-triggered discipline as safety_sync_tc_type()
+ * in safety_link_poll.c -- see the comment at its call site for why this
+ * is level-triggered rather than gated on the down->up edge alone: a
+ * down_logged-gated call would miss the very first tick after boot, when
+ * the link can come up before ever having been observed down). It reads
+ * the live zones_cfg_t, builds the same per-zone max_temp_c array
+ * zones_http_post.c's handler would, and runs it through safety_ceiling_
+ * sync_guard_raise(): a no-op if the Pico's ceiling (kept current by
+ * safety_cfg_store.c's own refetch) is already wide enough -- the ordinary
+ * case on every tick of a healthy link -- otherwise a real raise+confirm
+ * write, logged either way. Never blocks heat or fails the boot: a failed
+ * reconcile here is logged and left for the next tick or the next
+ * interactive zones POST to retry, same "never silently drop it, keep
+ * retrying" convention as safety_sync_tc_type(). Requires zones_config_
+ * is_valid() internally, same gate as that function, for the same reason
+ * (no fabricated ceiling from a zeroed default config). */
+void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link);
+
 #ifdef __cplusplus
 }
 #endif

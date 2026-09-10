@@ -89,6 +89,21 @@ esp_err_t thermo_owner_command_read_all(MAX31856Reading *out, size_t max_reading
 bool zones_config_get_safety_tc_type(uint8_t *out_tc_type) { (void)out_tc_type; return false; }
 bool zones_config_is_valid(void) { return true; }
 
+/* 2026-09-10 opus review: safety_link_poll.c (#included below) now calls
+ * safety_ceiling_sync_reconcile_on_link_up() on every tick the link is up,
+ * to close the "link-down bypass" gap in the Pico-ceiling invariant (see
+ * safety_ceiling_sync.h's own comment). The real implementation
+ * (safety_ceiling_sync.c) pulls in zones_config_accessors.c's real
+ * getters and safety_cfg_http.c's UART exchange machinery -- outside what
+ * this executable links (it exists to compile-check safety_link.c's own
+ * logic, same "everything else is faked" convention as every other stub on
+ * this page). Faked as a no-op, same as safety_sync_tc_type()'s own
+ * zones_config_get_safety_tc_type()/zones_config_is_valid() dependencies
+ * just above -- this file is not the place ceiling-sync behaviour is
+ * tested (that is test_safety_ceiling_policy.c at the pure-logic layer and
+ * test_zones_http.c's test_reconcile_on_link_up_*() at the ESP-glue layer). */
+void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link) { (void)link; }
+
 // relay_cycles_note_safety_edge() -- RELAY_LIFE_BUDGET.md.
 // safety_apply_status() (safety_link_frames.c) now calls this once per
 // OBSERVED K4 (SAFETY_FLAG_RELAY) transition. Faked as a plain counter, same

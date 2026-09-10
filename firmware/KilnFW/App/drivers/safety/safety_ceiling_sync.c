@@ -2,8 +2,14 @@
 
 #include <string.h>
 
+#include "esp_log.h"
+
+#include "MAX31856.h"
 #include "safety_cfg_http.h"
 #include "safety_cfg_store.h"
+#include "zones_config_accessors.h"
+
+static const char *TAG = "safety_ceiling_sync";
 
 /* The writer callback safety_ceiling_policy.c calls. `ctx` is the
  * SafetyLinkClass* to write through (may be NULL -- handled below, callers
@@ -76,4 +82,39 @@ void safety_ceiling_sync_apply_lower(SafetyLinkClass *link, const float *new_max
     bool known = safety_ceiling_sync_get_current_pico_ceiling(&current);
     safety_ceiling_policy_apply_lower(current, known, new_max_temp_c, n, pico_ceiling_writer, link, out_result,
                                        reason_out, reason_cap);
+}
+
+void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link)
+{
+    if (!link) {
+        return; /* nothing to reconcile against */
+    }
+    if (!zones_config_is_valid()) {
+        return; /* same gate safety_sync_tc_type() uses -- no real config to derive a target from yet */
+    }
+    float new_max_temp_c[MAX31856_CHANNEL_COUNT];
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        float cur_max = 0.0f, cur_min = 0.0f;
+        zones_config_get_temp_limits(zi, &cur_max, &cur_min);
+        new_max_temp_c[zi] = cur_max;
+    }
+    safety_ceiling_sync_result_t result = SAFETY_CEILING_SYNC_NONE;
+    char reason[128];
+    bool ok = safety_ceiling_sync_guard_raise(link, new_max_temp_c, MAX31856_CHANNEL_COUNT, &result, reason,
+                                              sizeof(reason));
+    if (!ok) {
+        ESP_LOGW(TAG,
+                 "link-up reconcile: could not raise/confirm the safety processor's ceiling to match the ESP's "
+                 "zone config -- %s -- will retry on the next link-up transition or the next zones POST",
+                 reason);
+        return;
+    }
+    if (result == SAFETY_CEILING_SYNC_RAISED) {
+        ESP_LOGI(TAG,
+                 "link-up reconcile: safety processor's ceiling was behind the ESP's zone config -- raised and "
+                 "confirmed");
+    }
+    /* SAFETY_CEILING_SYNC_NONE: already wide enough (the ordinary case on a
+     * healthy reconnect where nothing changed while the link was down) --
+     * nothing worth logging. */
 }
