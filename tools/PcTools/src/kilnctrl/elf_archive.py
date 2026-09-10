@@ -64,6 +64,7 @@ from dataclasses import dataclass, asdict
 from typing import Optional
 
 from . import stale_check
+from .esp_app_desc import normalize_build_timestamp
 
 MAX_ARCHIVED_ELFS = 60
 KEEP_RECENT_ENTRIES = 10
@@ -83,6 +84,57 @@ def kiln_archive_dir() -> str:
 
 def safty_archive_dir() -> str:
     return os.path.join(_repo_root(), "firmware", "SaftyFW", "build", "elf_archive")
+
+
+def _canonical_archive_dirs() -> set[str]:
+    """The two real archive directories, computed directly from _repo_root()
+    rather than through kiln_archive_dir()/safty_archive_dir() -- those two
+    functions are exactly what a test is expected to monkeypatch, so a guard
+    that read them back would be blind precisely when it needs to fire."""
+    root = _repo_root()
+    return {
+        os.path.normpath(os.path.join(root, "firmware", "KilnFW", "build", "elf_archive")),
+        os.path.normpath(os.path.join(root, "firmware", "SaftyFW", "build", "elf_archive")),
+    }
+
+
+def _guard_against_test_write(archive_dir: str) -> None:
+    """2026-09-10: a host test (test_flash_board_pinning.py /
+    test_flash_firmware_verify.py) drove flash_firmware() end-to-end while
+    mocking OpenOCD, stale_check and flash_provenance -- but not elf_archive
+    -- so archive_kiln_elf() ran for real against the CANONICAL archive and
+    overwrote the manifest entry for a genuine build ("Sep  9 2026 14:18:51")
+    with a fabricated commit ("abc1234", a test fixture string). The archive
+    exists specifically to let a real panic be symbolized against the right
+    ELF; a contaminated entry produces confident, wrong line numbers.
+
+    Rather than relying on every future test author remembering to patch
+    this module (the exact thing that failed here), make it structurally
+    impossible: refuse loudly, before touching disk, whenever pytest is
+    running (PYTEST_CURRENT_TEST is set by pytest for the duration of every
+    test) and the archive_dir in play is one of the two real ones. A test
+    that correctly monkeypatches kiln_archive_dir()/safty_archive_dir() (as
+    test_elf_archive.py does) is unaffected -- its archive_dir is a temp
+    path and never matches. KILNCTL_ALLOW_TEST_ARCHIVE_WRITE=1 is the
+    explicit, deliberate escape hatch for a test that really means to
+    exercise the canonical path (none does today)."""
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    if os.environ.get("KILNCTL_ALLOW_TEST_ARCHIVE_WRITE"):
+        return
+    if os.path.normpath(archive_dir) in _canonical_archive_dirs():
+        raise RuntimeError(
+            "elf_archive: refusing to write to the CANONICAL archive "
+            f"({archive_dir}) from inside a pytest run (PYTEST_CURRENT_TEST is "
+            "set). This directory holds real symbolization data for real "
+            "hardware panics. The calling test must monkeypatch "
+            "elf_archive.kiln_archive_dir() / elf_archive.safty_archive_dir() "
+            "to point at a temp directory (see test_elf_archive.py), or patch "
+            "elf_archive.archive_kiln_elf / elf_archive.archive_safty_elf "
+            "directly if it does not need real archiving behavior. Set "
+            "KILNCTL_ALLOW_TEST_ARCHIVE_WRITE=1 only if a test deliberately "
+            "needs to exercise the canonical path."
+        )
 
 
 def _sha256_key(path: str) -> str:
@@ -120,6 +172,7 @@ class ArchiveResult:
 
 def _archive(elf_path: str, archive_dir: str, prefix: str, identity: str,
              extra: dict) -> ArchiveResult:
+    _guard_against_test_write(archive_dir)
     if not os.path.isfile(elf_path):
         raise FileNotFoundError(f"elf_archive: no ELF at {elf_path} to archive")
     os.makedirs(archive_dir, exist_ok=True)
@@ -201,8 +254,16 @@ def archive_kiln_elf(elf_path: str, fw_build: str, git_commit: Optional[str],
     string the board's own /api/status reports back as `fw_build` -- see
     esp_app_desc.build_timestamp / build_timestamps_match). `source` is a
     short note (e.g. "flash_firmware" or "flash_firmware:kiln_fw_root
-    override") recorded for provenance, not used as a lookup key."""
-    return _archive(elf_path, kiln_archive_dir(), "KilnCtrl", fw_build,
+    override") recorded for provenance, not used as a lookup key.
+
+    2026-09-10 fix (opus review round 2, defect D): `fw_build` is
+    whitespace-normalized via esp_app_desc.normalize_build_timestamp()
+    before being used as the manifest key, matching what
+    find_kiln_elf_for_build() now normalizes its lookup key to and what
+    build_timestamps_match() already normalized for comparison -- see that
+    function's doc comment for why raw __DATE__ strings are not safe to key
+    on directly (single-digit-day padding varies)."""
+    return _archive(elf_path, kiln_archive_dir(), "KilnCtrl", normalize_build_timestamp(fw_build),
                      extra={"git_commit": git_commit, "source": source})
 
 
@@ -229,7 +290,14 @@ def find_kiln_elf_for_build(fw_build: str) -> tuple[Optional[str], str]:
     genuine "never archived" case is distinguishable from a manifest bug."""
     archive_dir = kiln_archive_dir()
     manifest = _load_manifest(archive_dir)
-    entry = manifest.get(fw_build)
+    # 2026-09-10 fix (opus review round 2, defect D): normalize the lookup
+    # key the same way archive_kiln_elf() now normalizes the stored key --
+    # an exact, unnormalized `manifest.get(fw_build)` missed an archived
+    # entry whenever the caller's fw_build string's __DATE__ single-digit-day
+    # padding differed textually from what was recorded, even though it was
+    # the same build (build_timestamps_match() already tolerated exactly
+    # this difference; the archive's own key/lookup did not).
+    entry = manifest.get(normalize_build_timestamp(fw_build))
     if entry is None:
         return None, (
             f"no archived ELF found for fw_build={fw_build!r} "

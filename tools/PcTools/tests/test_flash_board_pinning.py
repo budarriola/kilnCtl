@@ -130,6 +130,17 @@ class FlashFirmwareAdapterPinningTest(unittest.TestCase):
         self._preflash_patch.start()
         self.addCleanup(self._preflash_patch.stop)
 
+        # 2026-09-10: this class drives flash_firmware() end-to-end, which
+        # (via _archive_flashed_elf) calls elf_archive.archive_kiln_elf()
+        # against the CANONICAL (main-tree) archive -- unpatched, this ran
+        # for real and overwrote a genuine manifest entry with this test's
+        # fabricated "abc1234" commit (see elf_archive.py's own guard,
+        # added because of this exact incident). Patch it out explicitly,
+        # in addition to that guard.
+        self._archive_patch = unittest.mock.patch.object(mf.elf_archive, "archive_kiln_elf")
+        self._archive_patch.start()
+        self.addCleanup(self._archive_patch.stop)
+
     def test_refuses_before_touching_openocd_when_serial_absent(self) -> None:
         with unittest.mock.patch.object(mf.serial_link, "list_ports", return_value=[_FIXTURE_JTAG]):
             result = mf.flash_firmware(verify=False)

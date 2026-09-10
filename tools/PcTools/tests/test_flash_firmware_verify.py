@@ -189,6 +189,17 @@ class FlashFirmwareVerifyWiringTest(unittest.TestCase):
         self.preflash_mock = self._preflash_patch.start()
         self.addCleanup(self._preflash_patch.stop)
 
+        # 2026-09-10: this class drives flash_firmware() end-to-end, which
+        # calls _archive_flashed_elf() -> elf_archive.archive_kiln_elf()
+        # against the CANONICAL (main-tree) archive -- this test class never
+        # meant to exercise that, but nothing here stopped it from actually
+        # doing so and overwriting a real manifest entry with a fabricated
+        # commit (see elf_archive.py's own guard for the incident this
+        # caused). Patch it out explicitly, in addition to that guard.
+        self._archive_patch = unittest.mock.patch.object(mf.elf_archive, "archive_kiln_elf")
+        self._archive_patch.start()
+        self.addCleanup(self._archive_patch.stop)
+
     def test_verify_false_skips_verification_entirely(self):
         with unittest.mock.patch.object(mf, "_verify_flash_landed") as verify_mock:
             result = mf.flash_firmware(verify=False)
@@ -544,6 +555,12 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         self._preflash_patch = unittest.mock.patch.object(mf, "_preflash_board_address", return_value=None)
         self._preflash_patch.start()
         self.addCleanup(self._preflash_patch.stop)
+
+        # See FlashFirmwareVerifyWiringTest.setUp -- this class also drives
+        # flash_firmware() end-to-end and must not touch the real archive.
+        self._archive_patch = unittest.mock.patch.object(mf.elf_archive, "archive_kiln_elf")
+        self._archive_patch.start()
+        self.addCleanup(self._archive_patch.stop)
 
     def test_missing_kiln_fw_root_path_is_refused(self):
         result = mf.flash_firmware(kiln_fw_root=os.path.join(self.tmp_root, "does-not-exist"), verify=False)

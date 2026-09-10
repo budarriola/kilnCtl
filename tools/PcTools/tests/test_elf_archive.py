@@ -14,6 +14,7 @@ import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -48,6 +49,31 @@ class ArchiveKilnElfTest(unittest.TestCase):
         path, message = elf_archive.find_kiln_elf_for_build("Sep 10 2026 12:00:00")
         self.assertEqual(path, result.archived_path)
         self.assertIn("found", message)
+
+    def test_lookup_tolerates_single_digit_day_padding_drift(self):
+        # 2026-09-10 (opus review round 2, defect D): elf_archive.py used to
+        # key/look up the manifest on the RAW fw_build string, unnormalized --
+        # but ESP-IDF's __DATE__ double-pads single-digit days ("Sep  3
+        # 2026"), and that padding is easy to gain or lose passing through
+        # JSON/logging (esp_app_desc.build_timestamps_match() already
+        # tolerates exactly this). Archive with single-space padding, look up
+        # with double-space padding (as if the day were single-digit and the
+        # caller's copy of the string lost/gained a space) -- must still find
+        # it, not report "no archived ELF found" for a build that IS archived.
+        elf_path = os.path.join(self._tmp.name, "KilnCtrl.elf")
+        _write_fake_elf(elf_path, b"fake elf bytes v1")
+        result = elf_archive.archive_kiln_elf(elf_path, "Sep  3 2026 20:13:41", "0dddd435", "test")
+
+        path, message = elf_archive.find_kiln_elf_for_build("Sep 3 2026 20:13:41")
+        self.assertEqual(path, result.archived_path,
+                          "single- vs double-space day padding must not change the lookup result")
+        self.assertIn("found", message)
+
+        # And the reverse direction: archived with single-space, looked up
+        # with the double-space form.
+        path2, message2 = elf_archive.find_kiln_elf_for_build("Sep  3 2026 20:13:41")
+        self.assertEqual(path2, result.archived_path)
+        self.assertIn("found", message2)
 
     def test_lookup_with_no_match_fails_loudly(self):
         elf_path = os.path.join(self._tmp.name, "KilnCtrl.elf")
@@ -207,6 +233,82 @@ class ArchiveSaftyElfTest(unittest.TestCase):
         path, message = elf_archive.find_safty_elf_for_identity("neverseen00")
         self.assertIsNone(path)
         self.assertIn("no archived ELF found", message)
+
+
+class CanonicalArchiveWriteGuardTest(unittest.TestCase):
+    """2026-09-10: test_flash_board_pinning.py and test_flash_firmware_verify.py
+    drove flash_firmware() end-to-end without mocking elf_archive, so
+    archive_kiln_elf() ran for real against the CANONICAL (main-tree) archive
+    and overwrote a genuine manifest entry with a fabricated commit
+    ('abc1234', a test fixture string) -- exactly the failure mode the
+    archive exists to prevent (a later panic symbolized against a mislabeled
+    ELF). Fixed structurally: _guard_against_test_write() refuses any write
+    to the two real archive directories whenever pytest is running, unless
+    the caller explicitly monkeypatched kiln_archive_dir()/safty_archive_dir()
+    (as every well-behaved test here does) or set
+    KILNCTL_ALLOW_TEST_ARCHIVE_WRITE=1. This class proves that guard fires
+    for real, not just when told to."""
+
+    MARKER_IDENTITY = "REGRESSION-TEST-MARKER-DO-NOT-TRUST"
+
+    def tearDown(self):
+        # Belt-and-suspenders cleanup in case the guard is ever broken and
+        # this test actually reaches disk: never leave a marker entry behind
+        # in the real archive.
+        manifest = elf_archive._load_manifest(elf_archive.kiln_archive_dir())
+        entry = manifest.pop(self.MARKER_IDENTITY, None)
+        if entry is not None:
+            elf_path = os.path.join(elf_archive.kiln_archive_dir(), f"KilnCtrl-{entry['elf_key']}.elf")
+            try:
+                os.remove(elf_path)
+            except OSError:
+                pass
+            elf_archive._write_manifest(elf_archive.kiln_archive_dir(), manifest)
+
+    def test_direct_guard_refuses_the_real_kiln_dir(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            elf_archive._guard_against_test_write(elf_archive.kiln_archive_dir())
+        self.assertIn("CANONICAL", str(ctx.exception))
+
+    def test_direct_guard_refuses_the_real_safty_dir(self):
+        with self.assertRaises(RuntimeError):
+            elf_archive._guard_against_test_write(elf_archive.safty_archive_dir())
+
+    def test_guard_allows_a_monkeypatched_tmp_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            # Must not raise -- this is the well-behaved shape every other
+            # test class in this file uses.
+            elf_archive._guard_against_test_write(d)
+
+    def test_archive_kiln_elf_against_the_real_dir_is_refused_end_to_end(self):
+        """The production entry point, not just the guard helper: calling
+        archive_kiln_elf() WITHOUT monkeypatching kiln_archive_dir() (the
+        exact mistake test_flash_board_pinning.py made) must raise before
+        touching disk."""
+        with tempfile.TemporaryDirectory() as d:
+            elf_path = os.path.join(d, "KilnCtrl.elf")
+            _write_fake_elf(elf_path, b"regression-test-fake-elf-content")
+            with self.assertRaises(RuntimeError):
+                elf_archive.archive_kiln_elf(elf_path, self.MARKER_IDENTITY, "deadbeef", "test")
+        # Confirm nothing was written to the real manifest.
+        manifest = elf_archive._load_manifest(elf_archive.kiln_archive_dir())
+        self.assertNotIn(self.MARKER_IDENTITY, manifest)
+
+    def test_negative_removing_the_guard_reproduces_the_incident(self):
+        """Proves the guard test above is not vacuous: with
+        _guard_against_test_write patched to a no-op (simulating the
+        pre-fix code, which had no such call at all), the same call that
+        was just refused instead SUCCEEDS and writes into the real
+        canonical archive -- reproducing the exact contamination this
+        module's docstring and CLAUDE.md describe. Cleaned up in tearDown."""
+        with tempfile.TemporaryDirectory() as d:
+            elf_path = os.path.join(d, "KilnCtrl.elf")
+            _write_fake_elf(elf_path, b"regression-test-fake-elf-content-2")
+            with unittest.mock.patch.object(elf_archive, "_guard_against_test_write", return_value=None):
+                result = elf_archive.archive_kiln_elf(elf_path, self.MARKER_IDENTITY, "deadbeef", "test")
+        self.assertTrue(os.path.isfile(result.archived_path))
+        manifest = elf_archive._load_manifest(elf_archive.kiln_archive_dir())
+        self.assertIn(self.MARKER_IDENTITY, manifest)  # ... which is exactly the bug -- cleaned up in tearDown
 
 
 if __name__ == "__main__":
