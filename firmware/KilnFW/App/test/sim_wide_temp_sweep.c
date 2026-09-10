@@ -187,6 +187,23 @@ static void verify_coupling_step_test(void)
     // exchange model required.
     printf("# rise z1=%.3f rise z2=%.3f (bench measured coupling_coeff z1<-z0=%.2f z2<-z0=%.2f, should now match directly)\n",
            rise1, rise2, g_coupling_coeff[1][0], g_coupling_coeff[2][0]);
+    // This used to only printf() the comparison, in a harness nothing runs
+    // automatically -- so a regression in the additive-coupling wiring
+    // could sit unnoticed indefinitely. Assert it for real, at a tolerance
+    // loose enough for 20000s to not be fully settled but tight enough to
+    // catch a wrong model class or a wrong matrix entry (which the retired
+    // exchange model would have missed by 10x or more, not 10%).
+    const float tol = 0.10f * fmaxf(g_coupling_coeff[1][0], g_coupling_coeff[2][0]);
+    bool z1_ok = fabsf(rise1 - g_coupling_coeff[1][0]) <= tol;
+    bool z2_ok = fabsf(rise2 - g_coupling_coeff[2][0]) <= tol;
+    if (!z1_ok || !z2_ok) {
+        fprintf(stderr, "FAIL: coupling step-test mismatch (tol=%.2f): "
+                "z1 rise=%.3f vs measured=%.2f (%s), z2 rise=%.3f vs measured=%.2f (%s)\n",
+                tol, rise1, g_coupling_coeff[1][0], z1_ok ? "ok" : "FAIL",
+                rise2, g_coupling_coeff[2][0], z2_ok ? "ok" : "FAIL");
+        exit(1);
+    }
+    printf("# coupling step-test: PASS (within %.2f of measured cross-gain)\n", tol);
 }
 
 typedef struct {
