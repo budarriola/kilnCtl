@@ -67,8 +67,14 @@ $candidates = Get-ChildItem -Path $searchRoots -Recurse -File -Include "check_*.
         # board read via debug interface"), not a standalone repo-state
         # guard -- it needs a connected, powered board and cannot run as
         # part of an unattended run_all_checks.ps1 pass. Documented
-        # exclusion, not an orphan.
-        $_.FullName -notmatch '\\PcTools\\scripts\\'
+        # exclusion, not an orphan. 2026-09-10: narrowed from excluding the
+        # WHOLE \PcTools\scripts\ directory to excluding just this one
+        # file -- the wholesale directory exclusion silently orphaned any
+        # FUTURE standalone check_*/test_* dropped anywhere else in that
+        # directory (confirmed: as of this pass it is still the only
+        # check_*/test_*-shaped file there, so narrowing changes nothing
+        # today, but it stops being a blind spot for the next one).
+        $_.FullName -notmatch '\\PcTools\\scripts\\check_chip_partition_table\.py$'
     } |
     Sort-Object FullName
 

@@ -103,8 +103,18 @@ $halBoundaryNegativeTest = Join-Path $repoRoot "firmware\KilnFW\App\test\test_ch
 if (Test-Path $halBoundaryNegativeTest) {
     $checks += Get-Item $halBoundaryNegativeTest
     $checks = $checks | Sort-Object FullName
-} else {
-    Write-Host "WARNING: expected negative test $halBoundaryNegativeTest not found -- has it moved?" -ForegroundColor Yellow
+} elseif (-not $AllowFewerChecks) {
+    # 2026-09-10 (opus review, round 2): this used to be a silent WARNING
+    # that dropped the check from $checks while the script still reported
+    # every remaining check passed -- exactly the "wired but silently
+    # skipped" trap selfcheck.py's block below was already hardened
+    # against (a check that goes missing must not read as a clean run).
+    # Hard failure instead, same pattern.
+    Write-Host ""
+    Write-Host "FAILED: expected negative test $halBoundaryNegativeTest not found --" -ForegroundColor Red
+    Write-Host "        has it moved? A missing negative test must not read as a clean run." -ForegroundColor Red
+    Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+    exit 2
 }
 
 # firmware/hwAbstraction/test/{compile_esp_backends,compile_pico_backends,
@@ -132,8 +142,16 @@ foreach ($name in $saftyfwOrphanTests) {
     $scriptPath = Join-Path $saftyfwTestDir $name
     if (Test-Path $scriptPath) {
         $checks += Get-Item $scriptPath
-    } else {
-        Write-Host "WARNING: expected SaftyFW negative test $scriptPath not found -- has it moved?" -ForegroundColor Yellow
+    } elseif (-not $AllowFewerChecks) {
+        # See the hal-boundary block above: a silent WARNING here used to
+        # drop the check from $checks with no effect on the final pass/fail
+        # count -- "wired but silently skipped" is invisible, which is the
+        # recurring class this whole file exists to close.
+        Write-Host ""
+        Write-Host "FAILED: expected SaftyFW negative test $scriptPath not found --" -ForegroundColor Red
+        Write-Host "        has it moved? A missing negative test must not read as a clean run." -ForegroundColor Red
+        Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+        exit 2
     }
 }
 $checks = $checks | Sort-Object FullName
@@ -144,8 +162,13 @@ foreach ($name in $hwAbstractionScripts) {
     $scriptPath = Join-Path $hwAbstractionTestDir $name
     if (Test-Path $scriptPath) {
         $checks += Get-Item $scriptPath
-    } else {
-        Write-Host "WARNING: expected hwAbstraction test $scriptPath not found -- has it moved?" -ForegroundColor Yellow
+    } elseif (-not $AllowFewerChecks) {
+        # Same hardening as the two blocks above.
+        Write-Host ""
+        Write-Host "FAILED: expected hwAbstraction test $scriptPath not found --" -ForegroundColor Red
+        Write-Host "        has it moved? A missing expected check must not read as a clean run." -ForegroundColor Red
+        Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+        exit 2
     }
 }
 $checks = $checks | Sort-Object FullName

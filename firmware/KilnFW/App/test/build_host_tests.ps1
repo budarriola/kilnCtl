@@ -1230,6 +1230,26 @@ try {
 
     Invoke-HostTestExe -Name "s8_rate_guard_estimate" -ExePath $exe35 -BuildCmd $cmd35
 
+    # ---- test_flash_worker_boot_order.c: its own THIRTY-SIXTH, separate
+    # executable. Positive/negative test for the 2026-09-08 flash-worker
+    # boot-ordering fix (1f741635, "boot order beats bounded waits" --
+    # uart_bridge_ext_start_flash_worker() moved to run BEFORE
+    # relay_cycles_init()/adaptive_tune_init() in main_control_bringup.c).
+    # Found completely unwired 2026-09-10 (opus review): it has its own
+    # main(), was never named in this script, and the only reference
+    # anywhere in the tracked tree was a prose mention in
+    # docs/FILESYSTEM_PLAN.md. Own executable because it hand-declares
+    # uart_bridge_ext_flash_worker_started() itself (see the file's own
+    # header comment) -- that would collide at link time with the real
+    # uart_bridge.c body, or with exe17/exe19/exe20's own fakes of the same
+    # symbol, wherever else it's linked.
+    $exe36 = Join-Path $outDir "kilnctl_host_tests_flash_worker_boot_order.exe"
+    $cmd36 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$outDir\\`" /Fe:`"$exe36`" `"$(Join-Path $testDir 'test_flash_worker_boot_order.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`""
+
+    Invoke-HostTestExe -Name "flash_worker_boot_order" -ExePath $exe36 -BuildCmd $cmd36
+
     # ---- sim_iter_tune.exe / sim_wide_temp_sweep.exe: data-generating
     # harnesses (ITER_TUNE_REDESIGN_PLAN.md sec 6/7), not TEST_CHECK
     # pass/fail suites -- their stdout is the evidence for the audit docs
@@ -1327,6 +1347,45 @@ try {
         Write-Host $script:simCredibilityGateLine
     }
 
+    # ---- sim_credibility_gate_closedloop.exe: candidate 3 from
+    # docs/audits/sim_credibility_gate_real_cause_2026-09-10.md sec 6/8.
+    # Found completely unwired 2026-09-10 (opus review): 600 lines, no build
+    # recipe anywhere. Its own header comment states plainly that it is NOT
+    # a pass/fail gate the way sim_credibility_gate.c is (its replay is
+    # closed-loop against the SETPOINT through the real controller, so a
+    # mismatch confounds plant model / controller gains / controller's own
+    # plant model into one number) and that gains provenance for the two
+    # checked-in captures is not established (both candidate sources --
+    # tuned_baseline_20260831.json and the live board's control_get_zones()
+    # -- are demonstrably wrong for the captures' 2026-09-02 timestamp; see
+    # the file's own header for the numbers). Its negative/inconclusive
+    # finding was deliberate, so treating its stdout as a verdict would be
+    # papering over that finding, not fixing anything -- but leaving it
+    # with literally no automated signal is how it went unwired in the
+    # first place. Compromise: build it every run (a real, mechanical
+    # signal, printed loudly either way -- if pid.c/heater_output.c/
+    # zone_coupling_solve.c/profile_executor_feedforward.c's signatures
+    # drift, "BUILD FAILED" now appears in this script's output instead of
+    # nothing appearing at all), but never run it automatically and never
+    # let its build/run result affect this script's own exit code -- same
+    # non-gate posture as sim_iter_tune/sim_wide_temp_sweep above, for the
+    # same reason sim_credibility_gate's own gains-uncertain conclusions
+    # are informational rather than blocking.
+    $exeClosedloop = Join-Path $outDir "kilnctl_sim_credibility_gate_closedloop.exe"
+    $cmdClosedloop = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$outDir\\`" /Fe:`"$exeClosedloop`" `"$(Join-Path $testDir 'sim_credibility_gate_closedloop.c')`" " +
+            "`"$(Join-Path $testDir 'sim_plant.c')`" " +
+            "`"$(Join-Path $driversDir 'control/pid.c')`" `"$(Join-Path $driversDir 'control/heater_output.c')`" " +
+            "`"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`" " +
+            "`"$(Join-Path $driversDir 'control/profile_executor_feedforward.c')`""
+    if (Test-Path $exeClosedloop) { Remove-Item -Force $exeClosedloop }
+    cmd.exe /c $cmdClosedloop
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $exeClosedloop)) {
+        Write-Host "BUILD FAILED: sim_credibility_gate_closedloop (informational only, does not fail this script -- see file header for its own caveats on why it is build-only)"
+    } else {
+        Write-Host "sim_credibility_gate_closedloop: BUILD OK (not run automatically -- diagnostic with unresolved gains provenance, see file header; run by hand with the two capture paths as argv)"
+    }
+
     # ---- firing_score_from_capture.exe: ITER_TUNE_REDESIGN_PLAN.md sec
     # 3.1.1's "recommended next step" -- feeds a recorded capture's real
     # per-tick data into the PRODUCTION firing_score.c/firing_compare.c
@@ -1398,7 +1457,13 @@ try {
     # 33 -> 34: this pass added test_s8_rate_guard_estimate.c as its own 34th
     # Invoke-HostTestExe call (S8 rate-guard auto-calc,
     # docs/audits/s8_auto_calc_design_2026-09-09.md).
-    $totalExpected = 34
+    # 34 -> 35: this pass wired test_flash_worker_boot_order.c as its own
+    # 35th Invoke-HostTestExe call -- found completely unwired 2026-09-10
+    # (opus review, check_no_orphaned_checks.ps1 gap): it had its own
+    # main() and no build recipe anywhere in the tree, so no automated
+    # path had ever run it since it was added for the 2026-09-08
+    # flash-worker boot-order fix (1f741635).
+    $totalExpected = 35
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the
