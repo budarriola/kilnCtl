@@ -206,6 +206,24 @@ shrink when the lower zones are stepped **individually** (this capture's
 column-by-column design) rather than held jointly, which this capture
 measures directly as a side effect of its main purpose.
 
+## Link health watch-list — corrected 2026-09-10
+
+`docs/audits/safety_link_get_status_timeout_counter_2026-09-10.md` found that
+this link's `safety_get_link_stats`/`get_heap_status` **`timeouts` counter
+climbs at the `sent` rate (effectively 100%) as this link's ordinary,
+already-present behavior** on a boot whose phase lands unluckily — it is not
+a request/reply pairing at all (`SAFETY_CMD_GET_STATUS` is a Pico-driven
+500 ms unsolicited push per `firmware/CommonFW/docs/LINK_PROTOCOL.md`, "no
+longer a poll"; the ESP's own send elicits no reply by design). **Do not use
+"timeouts flat" as a go/no-go signal or an abort trigger** — that was this
+document's own wrong instruction in an earlier revision. Watch instead:
+`crc/framing errors` (should stay flat), `cmd_status_count`/`diag_applied`/
+`power_applied` (should keep climbing at a steady rate — a stall here is the
+real "link stopped delivering" signal), and `link_reply_us.count`/`max`
+(erratic movement, not a fixed value, is the signal to act on). None of these
+are affected by whether the vestigial GET_STATUS timeout stat reads 0% or
+100% this boot.
+
 ## Precondition 0 — bench heat path: CONFIRMED working
 
 `docs/audits/cplval75_aborted_executor_panic_2026-09-09.md` recorded that an
