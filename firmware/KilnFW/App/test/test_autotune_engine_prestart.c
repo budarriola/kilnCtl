@@ -377,6 +377,31 @@ bool zones_config_get_progress_band_c(uint8_t zone_index, float *out_band_c)
     return true;
 }
 
+/* 2026-09-10 opus review finding B: autotune_engine.c now derives guard 1's
+ * climbing-branch window floor from the zone's fitted plant model, via the
+ * same zone_model_at() seam profile_executor_feedforward.c/profile_
+ * feasibility.c already use (zones_config_accessors.c is not linked into
+ * this executable -- see this file's own header comment -- so this needs
+ * its own fake, same convention as every other zones_config_get_* stub in
+ * this file). Settable per-zone (indexed by zone), defaulting to "no model"
+ * (returns false, all-zero outs) so every pre-existing test in this file
+ * that never touches this feature sees exactly today's "don't touch
+ * window_s" behaviour -- identical to test_profile_executor_prestart.c's
+ * own g_stub_model_valid/zones_config_get_model() default. */
+static bool g_stub_model_valid[MAX31856_CHANNEL_COUNT] = {false};
+static float g_stub_model_k_dc[MAX31856_CHANNEL_COUNT] = {0};
+static float g_stub_model_tau_s[MAX31856_CHANNEL_COUNT] = {0};
+static float g_stub_model_dead_time_s[MAX31856_CHANNEL_COUNT] = {0};
+bool zone_model_at(uint8_t zone_index, float T_c, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
+{
+    (void)T_c;
+    if (zone_index >= MAX31856_CHANNEL_COUNT) return false;
+    if (out_k_dc) *out_k_dc = g_stub_model_k_dc[zone_index];
+    if (out_tau_s) *out_tau_s = g_stub_model_tau_s[zone_index];
+    if (out_dead_time_s) *out_dead_time_s = g_stub_model_dead_time_s[zone_index];
+    return g_stub_model_valid[zone_index];
+}
+
 bool zones_config_get_executor_thresholds(uint8_t zone_index, float *o1, float *o2, float *o3, float *o4)
 {
     (void)zone_index;
@@ -2007,6 +2032,116 @@ static void test_step_no_ceiling_rising_reading_does_not_trip(void)
 
     TEST_CHECK(!s_at.guard_state.is_tripped, "a healthily rising reading must not trip any guard");
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_STEPPING, "the run must still be stepping, not aborted");
+}
+
+// ---------------------------------------------------------------------------
+// 2026-09-10 opus review finding B: profile_executor.c's own guard-1 climb-
+// window-floor fix (cf3b5adb) never reached autotune_engine.c's identical
+// thermal_guard_tick() call site -- s_at.guard_cfg (built in autotune_begin_
+// run_locked()) never set climb_window_floor_s, so a STEP run against a
+// zone with a real, previously-fitted plant model (tau ~264-271s on this
+// bench) and a short operator-configured wrong_dir_window_s (60s, a
+// perfectly reasonable value for guard 2's falling-while-heating case)
+// evaluated guard 1's climbing branch against that 60s window instead of
+// the physically-required dead_time_s+tau_s minimum -- a healthy but slow
+// element that has not yet produced a measurable rise within the first 60s
+// (it is still inside its own dead time) reads as "not rising" and false-
+// trips HEATING_FAILED, exactly the shape cf3b5adb closed for the OTHER
+// caller. progress_rise_check_relaxed only covers the window AFTER
+// step_element_proven, so this is squarely the early-climb phase leading up
+// to that -- the gap the fix (autotune_engine.c's own zone_model_at() call,
+// mirroring profile_executor.c's) closes.
+// ---------------------------------------------------------------------------
+
+// Common trace shape for both tests below: flat for dead_time_s (52.8s, a
+// real fitted value from this bench's own zone model), then rising at a
+// modest, physically-plausible 1.2C/min (0.02C/s == 0.02C/tick at this
+// harness's 1s/tick rate -- the SAME per-tick rate
+// test_step_no_ceiling_rising_reading_does_not_trip() above already uses
+// for "a healthy rise"). Arithmetic (see this test's own report/comment
+// history): over a floor-less 60s window, only the last (60-52.8)=7.2s of
+// that window shows any rise at all -- delta = 7.2*0.02 = 0.144C, well
+// under the 0.5C (rate_cfg 0.5C/min * elapsed_min 1.0) guard 1 demands, a
+// FALSE trip against a genuinely healthy trace. Over the derived floor
+// (dead_time_s+tau_s = 52.8+264.0 = 316.8s, inside CLIMB_WINDOW_FLOOR_MIN/
+// MAX_S's [120,900] clamp so it applies unclamped), the same slope
+// accumulates (316.8-52.8)*0.02 = 5.28C against an expected 0.5*5.28 =
+// 2.64C -- comfortably clears the bar.
+#define GUARD1_FLOOR_TEST_DEAD_TIME_S 52.8f
+#define GUARD1_FLOOR_TEST_TAU_S 264.0f
+#define GUARD1_FLOOR_TEST_WRONG_DIR_WINDOW_S 60.0f
+#define GUARD1_FLOOR_TEST_SLOPE_C_PER_TICK 0.02f
+#define GUARD1_FLOOR_TEST_N_TICKS 340 /* > dead_time_s + tau_s (316.8s) with margin */
+
+static void run_guard1_floor_test_trace(float start_temp_c)
+{
+    for (int i = 0; i < GUARD1_FLOOR_TEST_N_TICKS && state_is_running(s_at.state); i++) {
+        xSemaphoreTake(s_at.lock, portMAX_DELAY);
+        float elapsed_s = (float)i; // 1s/tick, dt_ms defaults to AUTOTUNE_ENGINE_TICK_MS every tick
+        float rise_c = (elapsed_s > GUARD1_FLOOR_TEST_DEAD_TIME_S)
+                           ? (elapsed_s - GUARD1_FLOOR_TEST_DEAD_TIME_S) * GUARD1_FLOOR_TEST_SLOPE_C_PER_TICK
+                           : 0.0f;
+        s_stub_ch0_temp_c = start_temp_c + rise_c;
+        autotune_engine_tick_locked();
+        xSemaphoreGive(s_at.lock);
+    }
+}
+
+static void test_step_slow_healthy_zone_with_model_does_not_false_trip_guard1(void)
+{
+    TEST_SECTION("step test, real plant model + short operator wrong_dir_window_s -- a slow but healthy "
+                 "zone (still inside its own dead time at 60s) must NOT false-trip guard 1 (the finding B "
+                 "false trip cf3b5adb's climb_window_floor_s fix closes)");
+    start_stepping_run(/*max_temp_c=*/1300.0f, /*step_duty=*/1.0f);
+    // A short operator-configured window -- exactly the "60s, sized for
+    // guard 2's falling-while-heating case" scenario thermal_guard.c's own
+    // fix comment describes, poked directly (white-box, same convention as
+    // this file's other post-start guard_cfg overrides). Left at 0 (this
+    // file's default from zones_config_get_guard_thresholds()) this test
+    // would ALSO pass, for the wrong reason (no override, effective_f()
+    // falls back to PROGRESS_WINDOW_S=300s, already close to the floor) --
+    // an explicit short override is what actually exercises the bug.
+    s_at.guard_cfg.wrong_dir_window_s = GUARD1_FLOOR_TEST_WRONG_DIR_WINDOW_S;
+    g_stub_model_valid[0] = true;
+    g_stub_model_k_dc[0] = 1.0f; // unused by climb_window_floor_s's derivation, set for realism
+    g_stub_model_tau_s[0] = GUARD1_FLOOR_TEST_TAU_S;
+    g_stub_model_dead_time_s[0] = GUARD1_FLOOR_TEST_DEAD_TIME_S;
+
+    run_guard1_floor_test_trace(/*start_temp_c=*/25.0f);
+
+    TEST_CHECK(!s_at.guard_state.is_tripped,
+              "a slow-but-healthy zone with a trusted plant model must not false-trip guard 1 just because "
+              "the operator's own wrong_dir_window_s is shorter than the zone's physical dead_time_s+tau_s");
+    TEST_CHECK(state_is_running(s_at.state), "the run must still be stepping, not aborted");
+
+    g_stub_model_valid[0] = false; // restore this suite's default for every later test
+    g_stub_model_k_dc[0] = 0.0f;
+    g_stub_model_tau_s[0] = 0.0f;
+    g_stub_model_dead_time_s[0] = 0.0f;
+}
+
+static void test_step_slow_healthy_zone_without_model_still_false_trips_guard1(void)
+{
+    TEST_SECTION("companion/boundary case: the IDENTICAL trace and short window, but with NO trusted plant "
+                 "model yet (the ordinary state before any successful autotune run) -- proves the floor "
+                 "derivation is actually engaged above by showing the exact same input DOES trip without "
+                 "it, i.e. this is a real behavioural difference, not a test that would pass either way");
+    start_stepping_run(/*max_temp_c=*/1300.0f, /*step_duty=*/1.0f);
+    s_at.guard_cfg.wrong_dir_window_s = GUARD1_FLOOR_TEST_WRONG_DIR_WINDOW_S;
+    // g_stub_model_valid[0] left at this suite's default (false) -- no model
+    // fitted yet, zone_model_at() returns false, climb_window_floor_s stays
+    // 0.0f ("don't touch window_s"), identical to today's pre-fix behaviour
+    // for a zone with no model on file.
+
+    run_guard1_floor_test_trace(/*start_temp_c=*/25.0f);
+
+    TEST_CHECK(s_at.guard_state.is_tripped,
+              "without a trusted model there is no floor to derive -- the same short window/slow rise "
+              "trips guard 1 exactly as it would have before this fix existed for the OTHER caller "
+              "(profile_executor.c), proving the test above is actually exercising the floor, not a "
+              "trace that never trips regardless");
+    TEST_CHECK(s_at.guard_state.reason == THERMAL_GUARD_TRIP_HEATING_FAILED, "specifically guard 1");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "the run must abort on this genuinely false-trip-shaped input");
 }
 
 // Reproduces the exact bench defect this slice exists to fix: an honest step
@@ -6071,6 +6206,8 @@ void run_test_autotune_engine_prestart(void)
     test_step_no_ceiling_flat_reading_trips_guard1();
     test_step_max_temp_configured_flat_reading_still_trips_guard1();
     test_step_no_ceiling_rising_reading_does_not_trip();
+    test_step_slow_healthy_zone_with_model_does_not_false_trip_guard1();
+    test_step_slow_healthy_zone_without_model_still_false_trips_guard1();
     test_guard1_relaxes_once_element_proven_then_response_plateaus();
     test_guard1_relaxation_engages_at_a_realistic_ceiling();
     test_guard1_relaxation_engages_with_no_ceiling_configured();

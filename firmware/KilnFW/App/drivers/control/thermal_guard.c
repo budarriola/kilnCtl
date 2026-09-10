@@ -256,6 +256,23 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
                  * if an operator has actually configured it, same override
                  * rule as the directional path below. */
                 float window_s = effective_f(cfg->wrong_dir_window_s, PROGRESS_WINDOW_S);
+                /* 2026-09-10 opus review finding B (narrower half): this
+                 * branch is the same guard-1-family "must show enough
+                 * response in a bounded window" check as the directional
+                 * path below, and takes the same operator wrong_dir_window_s
+                 * override -- but never applied climb_window_floor_s, so a
+                 * relay-method autotune on a slow zone (relay_min_swing_c is
+                 * only non-zero during that method, per this field's own
+                 * doc comment) could evaluate a 300s-or-operator-configured
+                 * window against a plant whose own dead_time_s+tau_s is
+                 * longer than that, undercounting how long a healthy slow
+                 * zone legitimately takes to show a full swing. Same "only
+                 * ever lengthens window_s" rule as the directional branch's
+                 * own fix: a zone with no model, or a window already longer
+                 * than the derived floor, sees byte-identical behaviour. */
+                if (cfg->climb_window_floor_s > window_s) {
+                    window_s = cfg->climb_window_floor_s;
+                }
                 if (state->progress_window_elapsed_s >= window_s) {
                     float swing = state->progress_window_max_c - state->progress_window_min_c;
                     if (swing < in->relay_min_swing_c) {

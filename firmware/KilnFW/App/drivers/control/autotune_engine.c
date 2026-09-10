@@ -38,6 +38,50 @@ EXT_RAM_BSS_ATTR s_at_t s_at;
  * -- this function never takes or gives the lock itself, matching
  * task_entry()'s existing discipline; every early-return below stands in for
  * that loop's "xSemaphoreGive(s_at.lock); continue;" pairs. */
+/* Extracted 2026-09-10 (check_all_task_stack_budgets FAIL: autotune_engine
+ * 2960 B vs its 2944 B ceiling, 16 B over) out of autotune_engine_tick_locked()
+ * below. The three float locals + bool this needs to bridge zone_model_at()'s
+ * outputs into thermal_guard_derive_climb_window_floor_s()'s inputs were
+ * costing tick_locked its own 16 B of frame even though neither callee sits
+ * on that task's deepest measured call chain (see the check's own printout --
+ * safety_link_send_announce_version_burst's chain is what actually sets the
+ * ceiling) -- a function's own frame size counts every local it declares
+ * anywhere in its body, not just the ones on the path the profiler happens to
+ * print. Moving them into their own frame here removes that 16 B from
+ * tick_locked entirely; unlike the safety_poll helper-extraction case (CLAUDE.md's
+ * "a CALL is not free on Xtensa" note), this is a genuine net win because the
+ * two calls it wraps do not deepen whatever the true worst-case chain through
+ * them is -- it merely moves already-existing locals into a leaf frame instead
+ * of holding them live in the middle of a much deeper caller.
+ *
+ * __attribute__((noinline)) is required, not decorative: this is a single-
+ * call-site static function, and GCC's optimizer inlines exactly those by
+ * default regardless of -Os/-O2, which folds the locals straight back into
+ * tick_locked's frame and silently undoes the whole point of extracting them
+ * (confirmed by measuring -- the plain `static float` version measured
+ * byte-identical to the pre-extraction inline block, 2960 B/16 B over). */
+/* Portable noinline -- same guard as safety_cfg_store.c's
+ * SAFETY_CFG_STORE_NOINLINE (see that file's comment): this file's own host
+ * tests (test_autotune_engine_prestart.c, MSVC via build_host_tests.ps1)
+ * hard-fail on GCC/Xtensa's __attribute__((noinline)) syntax under cl.exe --
+ * not a no-op, a syntax error (confirmed: C2143/C2059/C2091/C2085 on this
+ * exact line). Real ESP-IDF (Xtensa GCC) target behavior is unchanged; the
+ * host .exe simply never inlines this differently than any other static
+ * function, which is irrelevant off-target (no stack-budget checker runs
+ * against a host build). */
+#if defined(_MSC_VER)
+#define AUTOTUNE_ENGINE_NOINLINE
+#else
+#define AUTOTUNE_ENGINE_NOINLINE __attribute__((noinline))
+#endif
+
+static AUTOTUNE_ENGINE_NOINLINE float autotune_zone_climb_window_floor_s(uint8_t zone_index, float actual_c)
+{
+    float model_k_dc = 0.0f, model_tau_s = 0.0f, model_dead_time_s = 0.0f;
+    bool model_valid = zone_model_at(zone_index, actual_c, &model_k_dc, &model_tau_s, &model_dead_time_s);
+    return thermal_guard_derive_climb_window_floor_s(model_tau_s, model_dead_time_s, model_valid);
+}
+
 static void autotune_engine_tick_locked(void)
 {
     TickType_t now = xTaskGetTickCount();
@@ -330,6 +374,39 @@ static void autotune_engine_tick_locked(void)
         guard_cfg_this_tick.sanity_rate_c_per_min =
             autotune_step_guard_sanity_rate(s_at.guard_cfg.sanity_rate_c_per_min, s_at.step_duty);
     }
+    /* 2026-09-10 opus review finding B: cf3b5adb floored guard 1's climbing-
+     * branch window at dead_time_s+tau_s in profile_executor.c's tick
+     * (guard_cfg_this_tick.climb_window_floor_s = thermal_guard_derive_
+     * climb_window_floor_s(...)) but never set the SAME field here --
+     * thermal_guard_cfg_t is a struct with two producers
+     * (profile_executor.c and this file) and, until now, only one of them
+     * filled in this field, leaving it at guard_cfg's own persisted 0 for
+     * every autotune tick regardless of method. A STEP run on a slow zone
+     * (this bench's tau ~264-271s) evaluates guard 1's climbing branch
+     * against the unfloored wrong_dir_window_s/PROGRESS_WINDOW_S default,
+     * which can be shorter than the zone's own dead_time_s+tau_s -- the
+     * exact false HEATING_FAILED trip cf3b5adb exists to prevent, just
+     * reachable from the other caller. progress_rise_check_relaxed (set
+     * just above) only covers the window AFTER step_element_proven, so this
+     * gap was open for the whole early-climb phase leading up to that.
+     *
+     * Same derivation as profile_executor.c's call site, same zone_model_at()
+     * seam profile_executor_feedforward.c/profile_feasibility.c already use
+     * (a temperature-scheduled passthrough to zones_config_get_model() today
+     * -- see zones_config_accessors.c's own comment; this file already
+     * includes zones_config_accessors.h via autotune_engine_internal.h) so
+     * a future gain schedule benefits both callers identically rather than
+     * this file quietly reading the un-scheduled accessor underneath it.
+     * model_valid=false (no trustworthy fit yet, or none ever produced)
+     * makes the derivation return 0.0f -- "don't touch window_s" --
+     * identical to today's behaviour for a zone with no model, exactly like
+     * the profile_executor call site's own fallback. Computed fresh every
+     * tick from s_at.zone_index/s_at.actual_c, never written back to any
+     * persisted config. Factored into autotune_zone_climb_window_floor_s()
+     * above this function -- see that helper's own comment for why (stack
+     * budget, not readability). */
+    guard_cfg_this_tick.climb_window_floor_s =
+        autotune_zone_climb_window_floor_s(s_at.zone_index, s_at.actual_c);
     /* Scaled the same way as the alive/death thresholds above -- see
      * AUTOTUNE_REFERENCE_K_C_PER_DUTY's comment. Falls back to the bare
      * 5.0C constant when probe_k_rough is unavailable (plain runs, or

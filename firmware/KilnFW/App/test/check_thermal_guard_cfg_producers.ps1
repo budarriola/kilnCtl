@@ -159,4 +159,65 @@ if ($missing.Count -gt 0) {
 }
 
 Write-Host "Thermal guard cfg producer check passed: all $($fields.Count) thermal_guard_cfg_t fields are assigned somewhere in App/drivers (excluding test/)."
+
+# --- 3. Per-caller check: every file that calls thermal_guard_tick() must
+# assign climb_window_floor_s ITSELF, not merely somewhere in the tree. ---
+#
+# WHY THIS EXTRA PHASE. 2026-09-10 opus review: cf3b5adb added
+# thermal_guard_cfg_t.climb_window_floor_s and wired it up in
+# profile_executor.c's per-tick guard_cfg_this_tick, which satisfied phase 1
+# above (the field DOES have a producer somewhere) -- but autotune_engine.c
+# builds its OWN separate per-tick thermal_guard_cfg_t local
+# (guard_cfg_this_tick = s_at.guard_cfg, then a couple of per-tick field
+# overrides) and never set this field there, so a STEP autotune run on a
+# slow zone evaluated guard 1's climbing branch against an unfloored window
+# and could false-trip HEATING_FAILED on a healthy zone -- silent, because
+# phase 1's "assigned SOMEWHERE" check was already satisfied by the other
+# caller. This is exactly this repo's "paired input left shared" bug class
+# (docs, project_paired_input_left_shared.md): one field, two independent
+# producers, only one kept current. This phase is deliberately narrow (only
+# this one field, pinned to the two known call sites of thermal_guard_tick())
+# rather than a general "every field at every call site" rule, per this
+# check's own file-header precedent for when a narrow check is honest: a
+# concrete, stable pair, not a speculative general rule that would also flag
+# ordinary one-sided initialization patterns elsewhere in this codebase.
+$FIELD_REQUIRING_PER_CALLER_PRODUCER = "climb_window_floor_s"
+
+$tickCallSites = Get-ChildItem -Path $driversDir -Filter "*.c" -Recurse -File |
+    Where-Object { $_.FullName -notmatch '\\test\\' } |
+    Where-Object { $_.Name -ne 'thermal_guard.c' } | # defines thermal_guard_tick(), does not call it
+    Where-Object {
+        $codeOnly = (Get-CodeOnlyLines -Path $_.FullName) -join "`n"
+        $codeOnly -match 'thermal_guard_tick\s*\('
+    }
+
+if ($tickCallSites.Count -lt 2) {
+    throw "check_thermal_guard_cfg_producers (phase 3): expected at least 2 production callers of thermal_guard_tick() (profile_executor.c and autotune_engine.c) but found $($tickCallSites.Count) -- has a caller moved, been renamed, or been removed? This check is now blind to the case it exists for."
+}
+
+$missingPerCaller = @()
+foreach ($f in $tickCallSites) {
+    $codeOnly = (Get-CodeOnlyLines -Path $f.FullName) -join "`n"
+    $escaped = [regex]::Escape($FIELD_REQUIRING_PER_CALLER_PRODUCER)
+    $assignedHere = ($codeOnly -match "\.\s*$escaped\s*=") -or ($codeOnly -match "->\s*$escaped\s*=")
+    if (-not $assignedHere) {
+        $missingPerCaller += $f.FullName
+    }
+}
+
+if ($missingPerCaller.Count -gt 0) {
+    Write-Host "THERMAL GUARD CFG PER-CALLER PRODUCER CHECK FAILED:" -ForegroundColor Red
+    foreach ($m in $missingPerCaller) {
+        Write-Host "  $m calls thermal_guard_tick() but never assigns .$FIELD_REQUIRING_PER_CALLER_PRODUCER itself" -ForegroundColor Red
+    }
+    Write-Host ""
+    Write-Host "  Every caller of thermal_guard_tick() builds its OWN per-tick thermal_guard_cfg_t" -ForegroundColor Red
+    Write-Host "  copy -- a field set by only SOME callers silently reverts to whatever that" -ForegroundColor Red
+    Write-Host "  caller's base config held (often 0, i.e. 'no floor') for every other caller," -ForegroundColor Red
+    Write-Host "  with phase 1 above unable to see it because the field DOES have a producer" -ForegroundColor Red
+    Write-Host "  elsewhere. See the 2026-09-10 opus review finding B this phase closes." -ForegroundColor Red
+    throw "$($missingPerCaller.Count) caller(s) of thermal_guard_tick() never assign .$FIELD_REQUIRING_PER_CALLER_PRODUCER"
+}
+
+Write-Host "Thermal guard cfg per-caller producer check passed: all $($tickCallSites.Count) callers of thermal_guard_tick() assign .$FIELD_REQUIRING_PER_CALLER_PRODUCER themselves."
 exit 0
