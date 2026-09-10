@@ -124,6 +124,11 @@ def newest_source_mtime():
 # total below rather than modelled instruction-by-instruction.
 ISR_STACKING_BYTES = 32
 
+# See the "REGSP_MARGIN_FACTOR safety margin" comment in main() below --
+# applies only to a task whose graph still contains a register-operand
+# add/sub sp,rN this walk could not resolve to an exact byte count.
+REGSP_MARGIN_FACTOR = 2
+
 
 def _read(name):
     path = os.path.join(SRC_TASKS_DIR, name)
@@ -276,16 +281,37 @@ def elf_side_stack_words_by_root(objdump, elf):
 # that time, not a theoretical maximum; retighten down if a fix legitimately
 # shrinks it, never raise one to paper over a regression without documenting
 # why in this file.
+# Retightened 2026-09-10 (opus review of this checker, see stack_budget_lib_
+# arm.py's REGSP_RE/LDR_PC_RE comment): the 2026-09-09 numbers below for
+# current_task (348) and discrete_task (184) were themselves the bug this
+# review found -- both were pinned at the exact under-measured lower bound
+# from BEFORE parse() could resolve config_store_seqlock_read's 532/608 B
+# register-computed frames (`ldr r4, [pc,#N]` / `add sp, r4`, invisible to
+# the old SUB_SP_RE-only walk), so this checker reported "ok" for two tasks
+# it was silently under-measuring by 4-6x -- and those are the same two
+# that actually overflowed on 2026-09-09 hardware. Hand-disassembly at the
+# time (opus review) put current_task ~1.2 KB and discrete_task ~1.1 KB
+# against 6144/4096 B stacks -- genuinely fine margins, this was a checker-
+# honesty bug, not a live overflow. Values below are measured against
+# SaftyFW.elf as rebuilt 2026-09-10 with the regsp-literal resolution in
+# place; current_task and link_task still reach one additional register-
+# operand sp adjust this walk cannot resolve to an exact byte count (an
+# epilogue restore computed via movs+lsls rather than a PC-relative
+# literal -- see stack_budget_lib_arm.has_unresolved_regsp()), so their
+# ceilings carry REGSP_MARGIN_FACTOR headroom on top of the measured total
+# instead of being pinned at it; main() also independently refuses to pass
+# either if a future measurement closes to within that margin (regsp-margin
+# FAIL), so this table cannot mask a repeat the way the old numbers did.
 CEILING_BYTES = {
-    "current_task": 348,
-    "discrete_task": 184,
-    "link_task": 784,
+    "current_task": 2752,   # measured 1376 B, unresolved regsp -- 2x margin
+    "discrete_task": 1160,
+    "link_task": 9472,      # measured 4736 B, unresolved regsp -- 2x margin
     "log_task": 472,
     "relay_owner": 224,
-    "safety_core": 780,
-    "thermo_task": 832,
-    "update_task": 796,
-    "watchdog_task": 288,
+    "safety_core": 2160,
+    "thermo_task": 1216,
+    "update_task": 2536,
+    "watchdog_task": 304,
 }
 
 
@@ -385,6 +411,7 @@ def main():
 
         own_total, path_addrs = lib.deepest(root_addr, parsed)
         indeterminate = lib.has_unresolved_dispatch(root_addr, parsed)
+        unresolved_regsp = lib.has_unresolved_regsp(root_addr, parsed)
         measured_total = own_total + ISR_STACKING_BYTES
 
         ceiling = forced_ceilings.get(tname, CEILING_BYTES.get(tname))
@@ -392,10 +419,28 @@ def main():
             errors.append(f"{tname}: no CEILING_BYTES entry -- every table row must be graded")
             continue
 
+        # 2026-09-10 (opus review): a task whose graph still contains a
+        # register-operand add/sub sp,rN this walk could not resolve (see
+        # has_unresolved_regsp()) is not merely incomplete, it may be
+        # WRONG -- own_total can already be missing a real frame the same
+        # way config_store_seqlock_read's 532/608 B ones were invisible
+        # before parse()'s literal-pool resolution was added. Before that
+        # fix, this checker let exactly such a task read "ok" simply
+        # because CEILING_BYTES happened to be pinned at the same
+        # under-measured number (current_task=348, discrete_task=184,
+        # both since corrected). Never repeat that: a REGSP_MARGIN_FACTOR
+        # safety margin is required on top of the ceiling for any task
+        # still carrying an unresolved regsp adjust, so a coincidentally-
+        # tight ceiling cannot mask a real under-measurement again. This is
+        # in ADDITION to, not instead of, resolving what can be resolved --
+        # most of this repo's regsp instances now resolve automatically.
+        regsp_margin_fail = unresolved_regsp and (measured_total * REGSP_MARGIN_FACTOR > ceiling)
+
         over_ceiling = measured_total > ceiling
         over_declared = measured_total > declared_bytes
         results.append(dict(name=tname, declared=declared_bytes, measured=measured_total,
                              raw=own_total, ceiling=ceiling, indeterminate=indeterminate,
+                             unresolved_regsp=unresolved_regsp, regsp_margin_fail=regsp_margin_fail,
                              over_ceiling=over_ceiling, over_declared=over_declared,
                              historical_note=task.get("historical_note")))
 
@@ -412,10 +457,18 @@ def main():
     print(f"  ISR stacking allowance added to every total: {ISR_STACKING_BYTES} B")
     print()
     for r in sorted(results, key=lambda x: -x["measured"]):
-        tag = "INDETERMINATE (lower bound)" if r["indeterminate"] else "measured"
+        if r["unresolved_regsp"]:
+            tag = "INDETERMINATE (unresolved regsp -- may be WRONG, not just incomplete)"
+        elif r["indeterminate"]:
+            tag = "INDETERMINATE (lower bound)"
+        else:
+            tag = "measured"
         margin = r["declared"] - r["measured"]
-        status = "FAIL(ceiling)" if r["over_ceiling"] else ("FAIL(>declared)" if r["over_declared"] else "ok")
-        if r["over_ceiling"] or r["over_declared"]:
+        status = ("FAIL(ceiling)" if r["over_ceiling"]
+                  else "FAIL(>declared)" if r["over_declared"]
+                  else f"FAIL(regsp-margin<{REGSP_MARGIN_FACTOR}x)" if r["regsp_margin_fail"]
+                  else "ok")
+        if r["over_ceiling"] or r["over_declared"] or r["regsp_margin_fail"]:
             fail = True
         print(f"  {r['name']:16s} {tag:28s} total={r['measured']:5d} B  "
               f"declared={r['declared']:5d} B  margin={margin:5d} B  "

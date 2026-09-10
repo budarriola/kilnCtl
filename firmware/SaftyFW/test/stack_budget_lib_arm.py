@@ -125,9 +125,34 @@ SUBW_SP_RE = re.compile(r"\bsub\.w\tsp, sp, #(\d+)\b")
 # Register-operand sp adjust -- see module docstring "REGISTER-COMPUTED stack
 # adjust". Deliberately excludes the immediate forms (SUB_SP_RE/SUBW_SP_RE
 # above) by requiring the operand to start with a register name, not '#'.
-REGSP_RE = re.compile(r"\b(?:add|sub)\tsp, (r\d+|sl|fp|lr|ip)\b")
+REGSP_RE = re.compile(r"\b(add|sub)\tsp, (r\d+|sl|fp|lr|ip)\b")
 BL_RE = re.compile(r"\bbl\t([0-9a-f]+) <([^>]+)>")
 BLX_REG_RE = re.compile(r"\bblx\t(r\d+|sl|fp|lr|ip)\b")
+
+# config_store_seqlock_read (2026-09-10, opus review of this checker) proved
+# REGSP_RE's target is resolvable in the common case: GCC materializes the
+# adjustment via a PC-relative literal-pool load immediately before the
+# add/sub, e.g. `ldr r4, [pc, #568] @ (10003860 <...>)` then `add sp, r4`,
+# with the literal itself a `.word` a few instructions later holding the
+# signed delta (0xfffffdec == -532, i.e. sp -= 532: a 532-byte frame this
+# walk previously could not see AT ALL -- `current_task`/`discrete_task`
+# both reach this function and were measured 4-6x under real depth as a
+# result). Reusing the same "resolve the PC-relative literal, cross-check
+# against the ELF's own .word table" technique
+# elf_side_stack_words_by_root() already uses for xTaskCreate's stack-depth
+# argument: when the register add/sub sp,rN targets a register whose value
+# was JUST loaded this way, recover the real byte count instead of falling
+# back to the INDETERMINATE lower-bound path. Unresolvable cases (register
+# not freshly loaded from a PC-relative literal, e.g. computed some other
+# way) still fall back to regsp_adjust=True, i.e. INDETERMINATE -- this is
+# strictly an improvement, never a new way to be wrong.
+WORD_RE = re.compile(r"^\s*([0-9a-f]+):\s+[0-9a-f]+\s+\.word\s+0x([0-9a-f]+)\s*$")
+LDR_PC_RE = re.compile(r"\bldr\t(r\d+|sl|fp|lr|ip), \[pc, #\d+\]\s*@ \(([0-9a-f]+)")
+
+
+def _s32(word):
+    """Reinterpret an unsigned 32-bit word as signed."""
+    return word - 0x100000000 if word & 0x80000000 else word
 
 
 def find_objdump():
@@ -184,10 +209,24 @@ class ParsedElf:
 
 def parse(objdump, elf):
     out = subprocess.run([objdump, "-d", elf], capture_output=True, text=True, check=True).stdout
+    lines = out.splitlines()
+
+    # First pass: every `.word` literal in the disassembly, keyed by its own
+    # address, so a PC-relative `ldr rN, [pc, #imm] @ (ADDR ...)` a few lines
+    # earlier can be resolved to the actual constant GCC put there. Same
+    # technique check_saftyfw_task_stack_budgets.py's elf_side_stack_words_
+    # by_root() already uses for xTaskCreate's stack-depth argument.
+    words_by_addr = {}
+    for line in lines:
+        m = WORD_RE.match(line)
+        if m:
+            words_by_addr[int(m.group(1), 16)] = int(m.group(2), 16)
+
     frames, calls, names, name_addrs, indirect, regsp_adjust = {}, {}, {}, {}, {}, {}
     has_subw_anywhere = False
     cur = None
-    for line in out.splitlines():
+    ldr_pc_regs = {}  # register name -> literal address, reset per function
+    for line in lines:
         m = FN_RE.match(line)
         if m:
             cur = int(m.group(1), 16)
@@ -198,6 +237,7 @@ def parse(objdump, elf):
             regsp_adjust.setdefault(cur, False)
             names[cur] = name
             name_addrs.setdefault(name, []).append(cur)
+            ldr_pc_regs = {}
             continue
         if cur is None:
             continue
@@ -210,8 +250,36 @@ def parse(objdump, elf):
             frames[cur] = frames.get(cur, 0) + int(s.group(1))
         if SUBW_SP_RE.search(line):
             has_subw_anywhere = True
-        if REGSP_RE.search(line):
-            regsp_adjust[cur] = True
+        ldr = LDR_PC_RE.search(line)
+        rsp = REGSP_RE.search(line)
+        if rsp:
+            op, reg = rsp.group(1), rsp.group(2)
+            literal_addr = ldr_pc_regs.get(reg)
+            word = words_by_addr.get(literal_addr) if literal_addr is not None else None
+            resolved = False
+            if word is not None:
+                delta = _s32(word)
+                # `sub sp, rN`: sp -= rN -- a positive rN grows the frame.
+                # `add sp, rN`: sp += rN -- a NEGATIVE rN (i.e. GCC's way of
+                # encoding a large `sub sp,#N` that a Thumb-1 immediate can't
+                # hold) grows the frame; a positive rN is an epilogue
+                # shrinking a growth already counted elsewhere, contributes 0.
+                growth = delta if op == "sub" and delta > 0 else (-delta if op == "add" and delta < 0 else 0)
+                if growth > 0:
+                    frames[cur] = frames.get(cur, 0) + growth
+                    resolved = True
+                elif growth == 0:
+                    # A resolved literal that nets to zero/negative growth
+                    # (an epilogue restore) is not a mismeasurement -- still
+                    # resolved, not indeterminate.
+                    resolved = True
+            if not resolved:
+                # Register not freshly loaded via a PC-relative literal, or
+                # the literal could not be found -- genuinely can't measure
+                # this one, so it stays INDETERMINATE (see module docstring).
+                regsp_adjust[cur] = True
+        if ldr:
+            ldr_pc_regs[ldr.group(1)] = int(ldr.group(2), 16)
         c = BL_RE.search(line)
         if c:
             calls[cur].add(int(c.group(1), 16))
@@ -250,6 +318,21 @@ def has_unresolved_dispatch(root_addr, parsed):
     reachable = reachable_addrs(root_addr, parsed)
     return (any(parsed.indirect.get(a, False) for a in reachable)
             or any(parsed.regsp_adjust.get(a, False) for a in reachable))
+
+
+def has_unresolved_regsp(root_addr, parsed):
+    """True if root_addr's reachable call graph still contains a
+    register-operand add/sub sp,rN this walk could NOT resolve via the
+    PC-relative-literal technique in parse() (2026-09-10) -- i.e. the
+    genuinely-unmeasured subset of has_unresolved_dispatch(), excluding
+    plain `blx <reg>` (unresolved calls, a documented, accepted lower-bound
+    contract on their own). Narrower than has_unresolved_dispatch() so a
+    caller can single out the case that was silently under-measuring real
+    depth (config_store_seqlock_read's 532/608 B frames, 2026-09-10) from
+    the merely-incomplete-call-graph case, and hold only the former to a
+    stricter bar."""
+    reachable = reachable_addrs(root_addr, parsed)
+    return any(parsed.regsp_adjust.get(a, False) for a in reachable)
 
 
 def resolve_root(parsed, name, elf, addr2line=None, expect_path_substr=None):
