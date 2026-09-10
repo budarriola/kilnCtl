@@ -53,8 +53,6 @@
 #              from a Python check, or any other exit code.
 # A check that can never legitimately skip should simply never exit 3; there
 # is no opt-in required beyond using this exit code correctly.
-$SkipExitCode = 3
-
 param(
     # Print what would run, run nothing. For confirming the glob sees what you
     # expect after moving a directory.
@@ -63,6 +61,13 @@ param(
     # Skip the discovery floor. Only for a deliberate partial tree.
     [switch]$AllowFewerChecks
 )
+
+# param() must be the first statement in the script, so this assignment --
+# previously placed above param() -- is here instead. It was harmless on its
+# own (PowerShell just silently failed to bind ANY parameter when param()
+# wasn't first, running the switches as $null/$false), but it meant
+# -ListOnly did nothing at all: the script always ran the full suite.
+$SkipExitCode = 3
 
 $ErrorActionPreference = "Stop"
 
