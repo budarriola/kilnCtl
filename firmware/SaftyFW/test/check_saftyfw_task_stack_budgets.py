@@ -61,6 +61,7 @@ never claims success without measuring).
 
 import os
 import re
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -69,7 +70,52 @@ import stack_budget_lib_arm as lib  # noqa: E402
 REPO_ROOT = lib.REPO_ROOT
 DEFAULT_ELF = lib.DEFAULT_ELF
 SRC_TASKS_DIR = os.path.join(REPO_ROOT, "firmware", "SaftyFW", "src", "tasks")
+SRC_DIR = os.path.join(REPO_ROOT, "firmware", "SaftyFW", "src")
 FREERTOS_CONFIG = os.path.join(REPO_ROOT, "firmware", "SaftyFW", "FreeRTOSConfig.h")
+
+# FRESHNESS GATE -------------------------------------------------------------
+# 2026-09-09: this checker was run once against a SaftyFW.elf built the
+# PREVIOUS day (Sep 8 21:40), 16-20 hours stale against thermo_task.c,
+# current_task.c, discrete_task.c and config_store_flash.c (all edited Sep 9
+# for the seqlock work) -- with no gate at all, it happily printed confident
+# "measured"/INDETERMINATE numbers off a binary that did not contain the
+# seqlock's large per-getter scratch-copy frames at all. This is the same
+# failure class af0bb774 fixed for KilnFW's check_00 the same day: compare
+# artifact mtime against the newest mtime among the sources that feed the
+# measurement, and refuse rather than measure when the artifact is older.
+# Every *.c/*.h under src/tasks/ is included (not just the files named in
+# TASKS below) because a task's reachable call graph routinely calls into a
+# sibling task's helper; every *.c/*.h directly under src/ (config_store.c,
+# config_store.h, config_store_flash.c, ...) is included because every task
+# here calls into config_store; FreeRTOSConfig.h because configMINIMAL_
+# STACK_SIZE is read from it; and this checker's own two files, because a
+# fix to the measurement logic itself must invalidate any prior "fresh"
+# verdict just as much as a firmware source edit would.
+FRESHNESS_GLOBS = (
+    os.path.join(SRC_TASKS_DIR, "*.c"),
+    os.path.join(SRC_TASKS_DIR, "*.h"),
+    os.path.join(SRC_DIR, "*.c"),
+    os.path.join(SRC_DIR, "*.h"),
+    FREERTOS_CONFIG,
+    os.path.join(os.path.dirname(__file__), "check_saftyfw_task_stack_budgets.py"),
+    os.path.join(os.path.dirname(__file__), "stack_budget_lib_arm.py"),
+)
+
+
+def newest_source_mtime():
+    import glob as globmod
+    newest_path, newest_t = None, -1.0
+    for pattern in FRESHNESS_GLOBS:
+        for path in globmod.glob(pattern):
+            if not os.path.isfile(path):
+                continue
+            t = os.path.getmtime(path)
+            if t > newest_t:
+                newest_path, newest_t = path, t
+    if newest_t < 0:
+        raise ValueError("newest_source_mtime: no source files matched any FRESHNESS_GLOBS pattern "
+                          "-- refusing to grade artifact freshness with no signal to grade it against")
+    return newest_path, newest_t
 
 # Cortex-M0+ exception entry (NVIC hardware stacking): r0-r3, r12, lr, pc,
 # xPSR = 8 words = 32 bytes, pushed onto whichever stack was active at the
@@ -158,6 +204,72 @@ TASKS = [
              r'xTaskCreate\(watchdog_task_fn,\s*"watchdog_task",\s*WATCHDOG_TASK_STACK_WORDS')),
 ]
 
+# ---------------------------------------------------------------------------
+# ELF-SIDE RECONCILIATION -- "stop mixing sources" (opus review, 2026-09-09).
+# `declared_words()`/`declared_bytes` above are parsed from the CURRENT C
+# SOURCE (the macro's #define text). `measured`, everywhere else in this
+# file, comes from walking the ELF's disassembly. Before the freshness gate
+# above existed, those two could silently describe two different builds --
+# and even with the gate (which only proves the ELF is not OLDER than the
+# source, not that this ELF was actually compiled FROM this exact source),
+# a renamed macro, a changed call-site pattern, or a wrong multiplier could
+# still make declared_bytes print a number that is not what xTaskCreate()
+# was actually handed in the binary being measured. FreeRTOS's RP2040
+# xTaskCreate() takes usStackDepth as its 3rd argument (r2); every task here
+# compiles that argument as `movs r2, #N` immediately followed by
+# `lsls r2, r2, #k` (N << k words) right before the `bl xTaskCreate` --
+# confirmed by inspecting all nine call sites in SaftyFW.elf as built
+# 2026-09-09, see the commit that added this reconciliation. This walks the
+# ELF a second, independent way and cross-checks the two: mismatch is a
+# hard FAIL naming both numbers, never a silent pick-one.
+# ---------------------------------------------------------------------------
+WORD_RE = re.compile(r"^\s*([0-9a-f]+):\s+[0-9a-f]+\s+\.word\s+0x([0-9a-f]+)\s*$")
+FN_HDR_RE = re.compile(r"^([0-9a-f]{7,8}) <(.+)>:")
+MOVS_R2_RE = re.compile(r"\bmovs\tr2, #(\d+)\b")
+LSLS_R2_RE = re.compile(r"\blsls\tr2, r2, #(\d+)\b")
+LDR_R0_PC_RE = re.compile(r"\bldr\tr0, \[pc, #\d+\]\s*@ \(([0-9a-f]+)")
+BL_XTASKCREATE_RE = re.compile(r"\bbl\t[0-9a-f]+ <xTaskCreate>")
+
+
+def elf_side_stack_words_by_root(objdump, elf):
+    """Independent second walk of the ELF: {root_func_addr: stack_words_actually_
+    passed_to_xTaskCreate}, derived entirely from the binary, no source file
+    involved. See module-level comment above TASKS' CEILING_BYTES block."""
+    out = subprocess.run([objdump, "-d", elf], capture_output=True, text=True, check=True).stdout
+    words_by_addr = {}
+    for line in out.splitlines():
+        m = WORD_RE.match(line)
+        if m:
+            words_by_addr[int(m.group(1), 16)] = int(m.group(2), 16)
+
+    result = {}
+    cur_movs_r2 = None
+    cur_ldr_r0_target = None
+    for line in out.splitlines():
+        if FN_HDR_RE.match(line):
+            cur_movs_r2 = None
+            cur_ldr_r0_target = None
+            continue
+        m = MOVS_R2_RE.search(line)
+        if m:
+            cur_movs_r2 = int(m.group(1))
+        m = LSLS_R2_RE.search(line)
+        if m and cur_movs_r2 is not None:
+            cur_movs_r2 = cur_movs_r2 << int(m.group(1))
+        m = LDR_R0_PC_RE.search(line)
+        if m:
+            cur_ldr_r0_target = int(m.group(1), 16)
+        if BL_XTASKCREATE_RE.search(line):
+            if cur_movs_r2 is not None and cur_ldr_r0_target is not None:
+                fn_ptr = words_by_addr.get(cur_ldr_r0_target)
+                if fn_ptr is not None:
+                    root_addr = fn_ptr & ~1  # strip Thumb bit
+                    result[root_addr] = cur_movs_r2
+            cur_movs_r2 = None
+            cur_ldr_r0_target = None
+    return result
+
+
 # Measured 2026-09-09 against SaftyFW.elf as built that day (the run that
 # added this check) -- see module docstring "EXIT CODES". A ceiling here is
 # the deepest resolved-lower-bound path plus ISR_STACKING_BYTES measured at
@@ -195,6 +307,19 @@ def main():
         print("  Build SaftyFW and re-run; unmeasured, not passing -- this is a SKIP, not a pass.")
         return 3
 
+    elf_mtime = os.path.getmtime(args.elf)
+    newest_path, newest_mtime = newest_source_mtime()
+    if elf_mtime < newest_mtime:
+        import datetime
+        print("check_saftyfw_task_stack_budgets: FAIL: STALE ELF -- " + args.elf)
+        print(f"  ELF mtime:    {datetime.datetime.fromtimestamp(elf_mtime)}")
+        print(f"  newest source mtime: {datetime.datetime.fromtimestamp(newest_mtime)}  ({newest_path})")
+        print("  This ELF predates a source file its own measurement depends on -- rebuild SaftyFW "
+              "and re-run. A stale ELF has produced confident, wrong numbers before (2026-09-09: "
+              "a Sep-8 ELF measured discrete_task at 184 B 'measured, fully resolved' with no "
+              "seqlock code in it at all). Refusing to report a measurement rather than repeat that.")
+        return 1
+
     objdump = lib.find_objdump()
     if not objdump:
         print("check_saftyfw_task_stack_budgets: SKIP: arm-none-eabi-objdump not found "
@@ -220,6 +345,8 @@ def main():
     # PER TASK, against that task's own reachable call graph, and folds it into the
     # same INDETERMINATE handling as an unresolved blx -- see the per-task loop.
 
+    elf_words_by_root = elf_side_stack_words_by_root(objdump, args.elf)
+
     results = []
     errors = []
     for task in TASKS:
@@ -235,6 +362,25 @@ def main():
         except ValueError as e:
             errors.append(f"{tname}: could not derive declared stack size from source: {e}")
             continue
+
+        # "Stop mixing sources": declared_bytes above came from the .c file's #define
+        # text; cross-check it against what the ELF's own xTaskCreate() call site
+        # actually passed as usStackDepth, derived independently from the binary
+        # (see elf_side_stack_words_by_root's docstring). Refuse rather than print a
+        # declared value that does not exist in the binary being measured.
+        elf_words = elf_words_by_root.get(root_addr)
+        if elf_words is None:
+            errors.append(f"{tname}: could not locate/decode this task's xTaskCreate() call site in "
+                           "the ELF disassembly to cross-check declared_bytes -- refusing to report "
+                           "a declared value with nothing on the binary side to reconcile it against")
+            continue
+        if elf_words != words:
+            errors.append(f"{tname}: declared stack size MISMATCH -- source macro says {words} words "
+                           f"({words * 4} B) but the ELF's own xTaskCreate() call site passes "
+                           f"{elf_words} words ({elf_words * 4} B). declared_bytes would be reporting "
+                           "a number that does not exist in the binary being measured; refusing.")
+            continue
+
         declared_bytes = words * 4  # RP2040 FreeRTOS SMP port: xTaskCreate takes DEPTH IN WORDS
 
         own_total, path_addrs = lib.deepest(root_addr, parsed)
