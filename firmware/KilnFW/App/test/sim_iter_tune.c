@@ -19,7 +19,7 @@
 // LINKED AS-IS, NOT REIMPLEMENTED (plan sec 6.3): pid.c, heater_output.c
 // (this is gap G2 -- the real 60 s PWM window, not a continuous duty),
 // zone_coupling_solve.c, sim_plant.c, and all three modules under test.
-// G1 (sim_plant_from_zone_cfg()/sim_kiln_coupling_from_cross_gain()), G3
+// G1 (sim_plant_from_zone_cfg()), G3
 // (sim_relay_lag_step()) and G4 (sim_max31856_quantize_tc()) now live in
 // sim_plant.c/.h itself (promoted 2026-09-09 so any other harness gets them
 // for free) rather than as file-local code here; this file's own new code is
@@ -163,22 +163,14 @@ static void build_cfg(sim_kiln_cfg_t *cfg, const plant_variant_t *v)
         cfg->zone[i].radiative_coeff_w_per_k4 = 0.0f; // inside the fitted region; see file header
     }
 
-    float scaled_coupling[NZ][NZ];
+    // ADDITIVE source-gain coupling (matches zone_coupling_solve.c and
+    // sim_kiln_step() -- see docs/audits/sim_credibility_gate_real_cause_2026-09-10.md):
+    // coupling_w_per_c[i][j] is used directly as the measured cross-gain,
+    // scaled by this trial's coupling_scale mismatch knob. No k_dc-scaled
+    // algebraic cut or fit is needed in this model class.
     for (int i = 0; i < NZ; i++) {
         for (int j = 0; j < NZ; j++) {
-            scaled_coupling[i][j] = v->coupling_scale * g_coupling_coeff[i][j];
-        }
-    }
-    // Denominator is the NOMINAL measured k_dc, not this trial's mismatched
-    // one -- coupling_diag_k_dc is a fixed property of the cross-gain
-    // identification itself (plan sec 6.2), not something a plant-mismatch
-    // trial should also perturb; only coupling_scale (g_coupling_coeff's own
-    // mismatch knob) varies here, matching the pre-promotion behaviour.
-    float coupling_out[SIM_KILN_MAX_ZONES][SIM_KILN_MAX_ZONES];
-    sim_kiln_coupling_from_cross_gain(NZ, scaled_coupling, g_k_dc, coupling_out);
-    for (int i = 0; i < NZ; i++) {
-        for (int j = 0; j < NZ; j++) {
-            cfg->coupling_w_per_c[i][j] = coupling_out[i][j];
+            cfg->coupling_w_per_c[i][j] = (i == j) ? 0.0f : (v->coupling_scale * g_coupling_coeff[i][j]);
         }
     }
 

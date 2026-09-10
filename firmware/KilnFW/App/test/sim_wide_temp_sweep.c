@@ -149,18 +149,22 @@ static void build_zone_cfg(sim_kiln_cfg_t *cfg, float ambient_c, float radiative
         cfg->zone[i].radiative_coeff_w_per_k4 = radiative_coeff;
         for (int j = 0; j < NZ; j++) {
             if (i == j) continue;
-            // g_ij = h_i * coupling_coeff[i][j] / diag_k_dc[j] -- algebraic first cut
-            cfg->coupling_w_per_c[i][j] = 1.0f * g_coupling_coeff[i][j] / g_k_dc[j];
+            // ADDITIVE source-gain coupling (matches zone_coupling_solve.c and
+            // sim_kiln_step() -- see docs/audits/sim_credibility_gate_real_cause_2026-09-10.md):
+            // the measured cross-gain IS coupling_w_per_c directly in this
+            // model class, no k_dc-scaled algebraic cut needed.
+            cfg->coupling_w_per_c[i][j] = g_coupling_coeff[i][j];
         }
     }
     cfg->sensor_noise_c = 0.05f; // deterministic LCG noise, small vs quantisation LSB (~0.00024C)
 }
 
-// One-zone step test inside the simulator, to check the algebraic
-// first-cut coupling conductance against the measured cross-gain
-// (plan sec 6.2's "measured inside the sim, not derived" instruction --
-// this is the verification half; full iterative re-fit is out of scope for
-// this pass and is flagged as such in the audit doc).
+// One-zone step test inside the simulator, to check the (now-additive,
+// used-directly) coupling conductance against the measured cross-gain --
+// with coupling_w_per_c[i][j] used as-is, this zone's simulated rise at
+// duty=1 forever should approach g_coupling_coeff[i][0] directly (same
+// units, no fit involved), unlike the retired exchange model where the
+// comparison was unit-mismatched.
 static void verify_coupling_step_test(void)
 {
     sim_kiln_cfg_t cfg;
@@ -177,10 +181,11 @@ static void verify_coupling_step_test(void)
            sim_kiln_element_c(&st, 0), sim_kiln_element_c(&st, 1), sim_kiln_element_c(&st, 2));
     float rise1 = sim_kiln_element_c(&st, 1) - 20.0f;
     float rise2 = sim_kiln_element_c(&st, 2) - 20.0f;
-    // measured cross-gain g_10=14.30, g_20=8.33 in the bench's own fitted units;
-    // the sim's rise is in degC at duty=1 (not directly comparable in units --
-    // logged for residual-direction info only, per plan's "record the residual").
-    printf("# rise z1=%.3f rise z2=%.3f (bench measured coupling_coeff z1<-z0=%.2f z2<-z0=%.2f, unit mismatch expected, direction/ratio is the check)\n",
+    // Additive model: rise1/rise2 should approach g_coupling_coeff[1][0] /
+    // g_coupling_coeff[2][0] directly (same units, coupling_w_per_c used
+    // as-is) -- not merely direction/ratio agreement as the retired
+    // exchange model required.
+    printf("# rise z1=%.3f rise z2=%.3f (bench measured coupling_coeff z1<-z0=%.2f z2<-z0=%.2f, should now match directly)\n",
            rise1, rise2, g_coupling_coeff[1][0], g_coupling_coeff[2][0]);
 }
 
@@ -442,9 +447,10 @@ static void run_firing2(float target_c, float ramp_c_per_hr, float dwell_s, floa
         double t_k = (double)last_reading[i] + 273.15;
         double amb_k = (double)ambient_c + 273.15;
         double rad_w = (double)cfg.zone[i].radiative_coeff_w_per_k4 * (t_k*t_k*t_k*t_k - amb_k*amb_k*amb_k*amb_k);
+        // ADDITIVE source-gain coupling: power in from neighbour j's duty,
+        // not a (T_j - T_i) exchange term -- matches sim_kiln_step() itself.
         double coupling_w = 0;
-        for (int j = 0; j < NZ; j++) if (j != i) coupling_w += (double)cfg.coupling_w_per_c[i][j] *
-                                                                (sim_kiln_element_c(&sim,j) - sim_kiln_element_c(&sim,i));
+        for (int j = 0; j < NZ; j++) if (j != i) coupling_w += (double)cfg.coupling_w_per_c[i][j] * (double)prev_sim_duty[j];
         printf("  z%d: ramp_max_err=%.2fC dwell_offset=%.2fC low_T_overshoot=%.2fC ff_hold=%.4f ff_climb=%.4f rad_loss_w=%.3f coupling_w=%.3f\n",
                i, max_err[i], dwell_offset, max_overshoot_low_t[i], last_hold[i], last_climb[i], rad_w, coupling_w);
     }

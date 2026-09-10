@@ -1216,6 +1216,50 @@ try {
 
     Invoke-HostTestExe -Name "s8_rate_guard_estimate" -ExePath $exe35 -BuildCmd $cmd35
 
+    # ---- sim_credibility_gate.exe: ITER_TUNE_REDESIGN_PLAN.md sec 6.5's
+    # model credibility gate (docs/audits/sim_credibility_gate_real_cause_2026-09-10.md).
+    # Not run through Invoke-HostTestExe and NOT counted in $totalExpected /
+    # buildFailures / failedExes below -- two reasons, both deliberate:
+    #   1. Its two capture inputs (logs/coupling/noise_floor_p7*.jsonl) and
+    #      tools/PcTools/config_presets/noise_floor.json are gitignored/
+    #      local-only. A fresh clone must SKIP (exit 3), never fail or
+    #      silently pass -- the gate already refuses to run without them
+    #      and prints why; that SKIP must stay visibly distinct from the
+    #      main pass count, not vanish into it either direction.
+    #   2. Even WITH the captures present, this gate has one bar that is
+    #      currently, honestly open (the dwell-entry overshoot PEAK bar --
+    #      see the audit doc sec 6/8 candidates 1-3, none yet implemented)
+    #      on top of the noise-floor spread bar it feeds. Folding a gate
+    #      with a known-open bar into the blocking build would either turn
+    #      every host-test run red for a known, tracked reason (masking
+    #      genuine regressions in the noise) or force loosening a bar to
+    #      make it pass -- both worse than surfacing it informationally.
+    # So: build it, run it if the captures exist, print its own PASS/FAIL/
+    # SKIP line, but never let its exit code affect this script's own exit
+    # code. This is strictly better than the prior state (referenced by no
+    # build recipe at all, so nothing re-ran it) without pretending the
+    # dwell-entry-peak gap is closed.
+    $exeGate = Join-Path $outDir "kilnctl_sim_credibility_gate.exe"
+    $cmdGate = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$outDir\\`" /Fe:`"$exeGate`" `"$(Join-Path $testDir 'sim_credibility_gate.c')`" " +
+            "`"$(Join-Path $testDir 'sim_plant.c')`" `"$(Join-Path $driversDir 'control/heater_output.c')`""
+    if (Test-Path $exeGate) { Remove-Item -Force $exeGate }
+    cmd.exe /c $cmdGate
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $exeGate)) {
+        Write-Host "BUILD FAILED: sim_credibility_gate (informational only, does not fail this script)"
+    } else {
+        $repoRoot = Join-Path $testDir "..\..\..\.."
+        $calPath = Join-Path $repoRoot "logs\coupling\noise_floor_p7_run1.jsonl"
+        $holdPath = Join-Path $repoRoot "logs\coupling\noise_floor_p7d_run1.jsonl"
+        $nfPath = Join-Path $repoRoot "tools\PcTools\config_presets\noise_floor.json"
+        & $exeGate $calPath $holdPath $nfPath
+        switch ($LASTEXITCODE) {
+            0 { Write-Host "sim_credibility_gate: PASS" }
+            3 { Write-Host "sim_credibility_gate: SKIP (captures not present locally -- gitignored, expected on a fresh clone)" }
+            default { Write-Host "sim_credibility_gate: FAIL (informational only, does not fail this script -- see its own output above and docs/audits/sim_credibility_gate_real_cause_2026-09-10.md for the known-open dwell-entry-peak bar)" }
+        }
+    }
+
     # ---- summary ----------------------------------------------------------
     #
     # 28 executables are attempted above (main + zones_http + safety_cfg_http +

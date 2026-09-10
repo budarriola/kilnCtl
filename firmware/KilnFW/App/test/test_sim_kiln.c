@@ -92,8 +92,16 @@ static thermal_guard_trip_t run_until_trip(sim_kiln_state_t *st, const sim_kiln_
 
 static void test_coupling(void)
 {
-    /* Coupled: zone 0 at full duty must visibly heat zone 1, which is idle. */
-    sim_kiln_cfg_t cfg = two_zone_cfg(3.0f);
+    /* Coupled: zone 0 at full duty must visibly heat zone 1, which is idle.
+     * ADDITIVE source-gain coupling (matches the firmware's
+     * zone_coupling_solve.c model class -- see sim_kiln_step()'s own
+     * comment): coupling_w_per_c[i][j] is W delivered to zone i per unit of
+     * zone j's commanded duty, not a (T_j - T_i) conductance, so 250 W/duty
+     * here is a power term, not a small conductance -- steady rise =
+     * coupling_w_per_c / loss_coeff_w_per_c = 250/5 = 50C, comfortably
+     * above both this check's 40C floor and below the driven zone's own
+     * 400C rise. */
+    sim_kiln_cfg_t cfg = two_zone_cfg(250.0f);
     sim_kiln_state_t st;
     sim_kiln_reset(&st, &cfg);
 
@@ -381,7 +389,11 @@ static void test_cross_gain_matrix(void)
     const int steps = 4 * 3600 / (int)DT_S;
     const float duty_step = 0.5f;
 
-    sim_kiln_cfg_t cfg = two_zone_cfg(3.0f);
+    /* 250 W/duty (see test_coupling()'s comment on units): steady cross
+     * rise = coupling_w_per_c * duty_step / loss_coeff_w_per_c = 250*0.5/5 =
+     * 25C, giving K[1][0] = 25/0.5 = 50 -- a comfortably measurable fraction
+     * of K[0][0] = 200 (steady direct rise 1000/5=200C at duty_step=0.5). */
+    sim_kiln_cfg_t cfg = two_zone_cfg(250.0f);
     sim_kiln_state_t st;
     sim_kiln_reset(&st, &cfg);
 
@@ -408,8 +420,20 @@ static void test_cross_gain_matrix(void)
     TEST_CHECK(cross.k_gain_c_per_duty > 0.0f, "the cross gain K[1][0] is positive -- zone 0's duty heats zone 1");
     TEST_CHECK(cross.k_gain_c_per_duty < direct.k_gain_c_per_duty,
                "the cross gain is smaller than the direct gain K[0][0]");
-    TEST_CHECK(cross.dead_time_s + cross.tau_s > direct.dead_time_s + direct.tau_s,
-               "the cross path is slower than the direct path (heat arrives through the neighbor's mass)");
+    /* ADDITIVE source-gain coupling (unlike the retired temperature-
+     * difference exchange model) injects power into zone 1 directly from
+     * zone 0's DUTY, not from zone 0's own temperature rise -- there is no
+     * extra "heat arrives through the neighbor's mass" propagation step.
+     * Both zones share identical plant/sensor parameters (two_zone_cfg()),
+     * so the cross path's dynamics should match the direct path's, not lag
+     * behind it. */
+    float direct_span = direct.dead_time_s + direct.tau_s;
+    float cross_span = cross.dead_time_s + cross.tau_s;
+    char span_detail[160];
+    snprintf(span_detail, sizeof(span_detail),
+             "cross path span %.1fs matches direct path span %.1fs (additive coupling adds no extra propagation delay)",
+             (double)cross_span, (double)direct_span);
+    TEST_CHECK(fabsf(cross_span - direct_span) < 0.25f * direct_span, span_detail);
 
     char detail[160];
     snprintf(detail, sizeof(detail), "cross/direct gain ratio %.2f is a real coupling, not numerical noise",

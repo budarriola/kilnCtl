@@ -201,24 +201,25 @@ static int load_capture(const char *path, tick_t *out, int max_ticks)
     return n;
 }
 
-// ---- G1 coupling: sec 6.2's iterative numerical fit, run ONCE (ambient
-// only offsets a linear model's baseline, it does not change the gains
-// being fit) and reused by every run_replay() call. Anti-circularity: the
-// fit's only inputs are g_coupling_coeff/g_k_dc/g_tau_s/g_dead_time_s
-// (checked-in bench measurements), never a capture's actual_c -- see
-// sim_kiln_coupling_fit_iterative()'s own header comment. ----
+// ---- G1 coupling: sim_kiln_step() now uses the ADDITIVE source-gain
+// coupling model, the same model class the firmware's zone_coupling_solve.c
+// solves (G = diag(model_k_dc) + coupling_coeff). In that model class the
+// measured cross-gain g_coupling_coeff[i][j] IS the conductance sim_kiln
+// wants, directly -- no fit needed. (The previous version of this file ran
+// sim_kiln_coupling_fit_iterative() here to compensate for the retired
+// temperature-difference exchange model's loading behaviour; that function
+// no longer exists -- see docs/audits/sim_credibility_gate_real_cause_2026-09-10.md.) ----
 static float g_fitted_coupling_w_per_c[SIM_KILN_MAX_ZONES][SIM_KILN_MAX_ZONES];
-static bool  g_coupling_fit_converged = false;
-static int   g_coupling_fit_sweeps = 0;
 static bool  g_coupling_fitted = false;
 
 static void ensure_coupling_fitted(void)
 {
     if (g_coupling_fitted) return;
-    g_coupling_fit_sweeps = sim_kiln_coupling_fit_iterative(
-        NZ, g_coupling_coeff, g_k_dc, g_tau_s, g_dead_time_s,
-        /*ambient_c=*/24.0f, /*rel_tol=*/0.10f, /*max_iters=*/50,
-        g_fitted_coupling_w_per_c, &g_coupling_fit_converged);
+    for (int i = 0; i < NZ; i++) {
+        for (int j = 0; j < NZ; j++) {
+            g_fitted_coupling_w_per_c[i][j] = (i == j) ? 0.0f : g_coupling_coeff[i][j];
+        }
+    }
     g_coupling_fitted = true;
 }
 
@@ -431,12 +432,13 @@ int main(int argc, char **argv)
     printf("=== sim_credibility_gate (ITER_TUNE_REDESIGN_PLAN.md sec 6.5) ===\n");
     printf("calibration: %s (%d ticks)\n", cal_path, cal_n);
     printf("hold-out:    %s (%d ticks)\n", hold_path, hold_n);
-    printf("model: fixed, checked-in G1 params + sec 6.2 ITERATIVELY-FITTED coupling\n"
-           "  (sim_kiln_coupling_fit_iterative(): %d sweep(s), %s within 10%%\n"
-           "  of every measured cross-gain -- see per-pair detail below).\n"
+    printf("model: fixed, checked-in G1 params. Coupling is the ADDITIVE\n"
+           "  source-gain model (sim_kiln_step(): coupling_w_per_c[i][j] * duty[j]),\n"
+           "  matching the firmware's zone_coupling_solve.c model class -- the\n"
+           "  measured cross-gain matrix is used directly, no fit needed (see\n"
+           "  docs/audits/sim_credibility_gate_real_cause_2026-09-10.md).\n"
            "  Relay lag (G3) is the same UNMEASURED 0.5s placeholder\n"
-           "  sim_iter_tune.c uses, not a bench-measured value.\n\n",
-           g_coupling_fit_sweeps, g_coupling_fit_converged ? "CONVERGED" : "DID NOT CONVERGE");
+           "  sim_iter_tune.c uses, not a bench-measured value.\n\n");
     printf("Structural ceiling of the literal sec 6.2 own-duty mapping\n"
            "  (h=loss_coeff=1.0 is a provably free/inert scale here -- see\n"
            "  sim_plant_from_zone_cfg()'s header comment; rescaling h together\n"
@@ -454,25 +456,18 @@ int main(int argc, char **argv)
             printf("    z%d: ambient(%.1f) + model_k_dc(%.2f) = %.2fC ceiling, own-duty-only\n",
                    z, ambient_c, g_k_dc[z], ambient_c + g_k_dc[z]);
     }
-    printf("  Coupling from other zones can push a zone above its own ceiling; the\n"
-           "  matrix above is now the sec 6.2 iteratively-matched fit, so this is\n"
-           "  the model's best available answer to whether that is enough, not a\n"
-           "  known-understated placeholder.\n\n");
-    printf("Coupling fit detail (measured cross-gain vs the fitted matrix's own\n"
-           "  simulated cross-gain, at convergence or after the iteration cap).\n"
-           "  FEASIBILITY: in this row-coupled model, driving zone j alone can only\n"
-           "  ever push zone i's temperature up to zone j's OWN loaded steady-state\n"
-           "  rise (<= model_k_dc[j]), no matter how large coupling_w_per_c[i][j]\n"
-           "  grows -- a passive receiver cannot exceed its (lossy) source. Any\n"
-           "  coupling_coeff[i][j] >= model_k_dc[j] is therefore UNREACHABLE by this\n"
-           "  model class at ANY conductance, not a fit-quality problem:\n");
+    printf("  Coupling from other zones adds its own independent power term (the\n"
+           "  additive model, unlike the retired temperature-difference exchange\n"
+           "  model, has no feasibility ceiling coupled to model_k_dc[j] -- see\n"
+           "  the retraction in sec 3 of the audit doc above); a zone's total rise\n"
+           "  is its own ceiling PLUS whatever every other zone's duty adds.\n\n");
+    printf("Coupling matrix used this run (measured cross-gain, used directly as\n"
+           "  coupling_w_per_c -- no fit or feasibility bound in this model class):\n");
     for (int i = 0; i < NZ; i++) {
         for (int j = 0; j < NZ; j++) {
             if (i == j) continue;
-            bool infeasible = g_coupling_coeff[i][j] >= g_k_dc[j];
-            printf("    coupling_coeff[%d][%d] (measured)=%.2fC vs model_k_dc[%d]=%.2fC  ->  coupling_w_per_c[%d][%d] (fitted)=%.5f W/C%s\n",
-                   i, j, g_coupling_coeff[i][j], j, g_k_dc[j], i, j, g_fitted_coupling_w_per_c[i][j],
-                   infeasible ? "  <-- UNREACHABLE (measured >= driving zone's own ceiling)" : "");
+            printf("    coupling_coeff[%d][%d] (measured)=%.2fC  ->  coupling_w_per_c[%d][%d] (used)=%.5f W\n",
+                   i, j, g_coupling_coeff[i][j], i, j, g_fitted_coupling_w_per_c[i][j]);
         }
     }
     printf("\n");

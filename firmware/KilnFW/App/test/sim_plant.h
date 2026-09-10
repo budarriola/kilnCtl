@@ -93,9 +93,16 @@ typedef struct {
 typedef struct {
     int   zone_count;
     sim_kiln_zone_cfg_t zone[SIM_KILN_MAX_ZONES];
-    /* Conductance between zone i's and zone j's heated masses, W/degC.
-     * Symmetric in physical reality; nothing here enforces that, so an
-     * asymmetric matrix is allowed if a test wants one. [i][i] is ignored. */
+    /* ADDITIVE source-gain coupling: coupling_w_per_c[i][j] is the power
+     * (W) delivered into zone i's element balance per unit of zone j's
+     * commanded duty (u_j in [0,1]) -- NOT a conductance on (T_j - T_i).
+     * Matches the firmware's model class (zone_coupling_solve.c's
+     * G = diag(model_k_dc) + coupling_coeff, off-diagonals driven by the
+     * neighbour's duty, not the temperature difference between zones) --
+     * see sim_kiln_step()'s own comment for why the two must agree.
+     * Not necessarily symmetric even in physical reality (nothing requires
+     * zone i to warm zone j exactly as much as the reverse), and nothing
+     * here enforces symmetry either way. [i][i] is ignored. */
     float coupling_w_per_c[SIM_KILN_MAX_ZONES][SIM_KILN_MAX_ZONES];
     /* Zone i reads physical zone sensor_map[i]'s thermocouple. Identity
      * (sensor_map[i] == i) unless a test is modeling swapped connectors.
@@ -173,64 +180,20 @@ float sim_kiln_element_c(const sim_kiln_state_t *state, int zone);
  * and 0 tau/heater_power would divide by zero in sim_plant_step()). */
 bool sim_plant_from_zone_cfg(const zone_cfg_t *zcfg, float ambient_c, sim_plant_cfg_t *out);
 
-/* G1's coupling counterpart: the algebraic first cut sec 6.2 describes for
- * turning a fitted steady-state cross-gain matrix (coupling_coeff[i][j] =
- * zone i's rise per unit when zone j is stepped, as zones_config_get_coupling()
- * / coupling_at() report it) into sim_kiln's conductance matrix
- * coupling_w_per_c[i][j] on (T_j - T_i). g_ij ~= h_i * coupling_coeff[i][j] /
- * k_dc[j], with h_i = 1 per sim_plant_from_zone_cfg()'s own free-scale choice.
- * This is documented in the plan as a STARTING POINT only -- the sim's
- * conductance loads zone j too (energy flows both ways), so matching the
- * simulated cross-gain to the measured one to within 10% requires an
- * additional numerical fit this function does not attempt. */
-void sim_kiln_coupling_from_cross_gain(int zone_count,
-                                        const float coupling_coeff[SIM_KILN_MAX_ZONES][SIM_KILN_MAX_ZONES],
-                                        const float k_dc[SIM_KILN_MAX_ZONES],
-                                        float out_coupling_w_per_c[SIM_KILN_MAX_ZONES][SIM_KILN_MAX_ZONES]);
-
-/* sec 6.2's promised follow-up to the algebraic first cut above: adjusts
- * out_coupling_w_per_c (seeded from sim_kiln_coupling_from_cross_gain())
- * until each zone's SIMULATED steady-state cross-gain -- measured by
- * actually driving sim_kiln_step() with zone j alone at duty=1.0 to
- * quasi-steady-state and reading zone i's element rise, exactly the bench
- * procedure coupling_coeff[][] itself was measured by -- matches the given
- * coupling_coeff[i][j] to within rel_tol (plan sec 6.2's 10%, i.e. 0.10).
- * The algebraic cut understates the match because it ignores that coupling
- * also loads the driving zone j (some of j's own heat now leaves into i and
- * others, so j's own steady rise sits below k_dc[j], understating the
- * energy available to couple out) and, with 3+ zones, third-zone paths --
- * both effects only a closed-loop simulated measurement can see.
- *
- * ANTI-CIRCULARITY: this function's only physical inputs are k_dc/tau_s/
- * dead_time_s (already-fitted single-zone FOPDT parameters) and
- * coupling_coeff[][] (the measured cross-gain matrix from the bench
- * coupling capture) -- both already checked into the model before this
- * runs. It drives sim_kiln itself with synthetic step duties and reads
- * back sim_kiln's own element temperatures; it never opens, parses, or
- * otherwise looks at any recorded capture's actual_c, so a capture used
- * later as a hold-out for sim_credibility_gate stays untouched by this fit.
- *
- * Iterates coordinate-descent style (each off-diagonal column j solved by
- * a damped secant-style update, columns re-swept because they interact
- * through shared zones) up to max_iters times. ambient_c/dt_s/settle_s
- * control the synthetic step test (settle_s must clear the slowest zone's
- * dead time + a few time constants to reach quasi-steady-state).
- *
- * Returns the number of sweeps actually run (>=1) and writes to
- * *out_converged whether every off-diagonal reached rel_tol before
- * max_iters was reached -- this is a real numerical fit, not guaranteed to
- * converge for an arbitrary coupling_coeff/k_dc combination, and a caller
- * must check *out_converged rather than assume it. */
-int sim_kiln_coupling_fit_iterative(int zone_count,
-                                     const float coupling_coeff[SIM_KILN_MAX_ZONES][SIM_KILN_MAX_ZONES],
-                                     const float k_dc[SIM_KILN_MAX_ZONES],
-                                     const float tau_s[SIM_KILN_MAX_ZONES],
-                                     const float dead_time_s[SIM_KILN_MAX_ZONES],
-                                     float ambient_c,
-                                     float rel_tol,
-                                     int max_iters,
-                                     float out_coupling_w_per_c[SIM_KILN_MAX_ZONES][SIM_KILN_MAX_ZONES],
-                                     bool *out_converged);
+/* G1's coupling counterpart: sim_kiln_step() now uses the ADDITIVE
+ * source-gain coupling model (see that function's own comment), the same
+ * model class the firmware's zone_coupling_solve.c solves
+ * (G = diag(model_k_dc) + coupling_coeff). In that model class the measured
+ * cross-gain coupling_coeff[i][j] (zone i's rise per unit duty in zone j,
+ * as zones_config_get_coupling()/coupling_at() report it) *is* the
+ * conductance sim_kiln wants -- coupling_w_per_c[i][j] = coupling_coeff[i][j]
+ * directly, no fit or k_dc-scaled algebraic cut required. The two functions
+ * that used to live here (sim_kiln_coupling_from_cross_gain(), an algebraic
+ * first cut for the retired temperature-difference exchange model, and
+ * sim_kiln_coupling_fit_iterative(), its numerical refinement) both existed
+ * to compensate for that older model's loading behaviour and are
+ * unnecessary now that the coefficient is used as-is; removed
+ * 2026-09-10, see docs/audits/sim_credibility_gate_real_cause_2026-09-10.md. */
 
 /* ------------------------------------------------------------------------
  * G3 (plan sec 6.1) -- relay actuation lag: a fixed transport delay on the
