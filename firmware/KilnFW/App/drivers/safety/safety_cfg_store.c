@@ -1145,6 +1145,72 @@ typedef struct {
     kilnlink_config_page_t page;
 } safety_cfg_store_refetch_scratch_t;
 
+/* 2026-09-10 stack-budget pass (safety_poll over its 3104 B ceiling by 16 B
+ * once safety_cfg_store_maybe_refetch()'s call into this file joined
+ * safety_poll_task's call graph today): these two rate-limited failure-log
+ * helpers used to be inlined directly in safety_cfg_store_refetch_locked()
+ * below. Each holds its own `now_us` local plus a multi-arg ESP_LOGW/ESP_LOGE
+ * call, and a function's stack frame is sized for the UNION of every
+ * branch's locals, not just the branch actually taken -- so those bytes were
+ * charged against refetch_locked()'s frame (and therefore against
+ * safety_poll_task's worst-case depth) on every call, success path included,
+ * even though they are needed only on a failure. Pulling them out into their
+ * own static functions moves that reservation onto helper frames that are
+ * NOT on the path this checker measures as worst-case (get_config_page's own
+ * chain dominates), which is what actually recovers the bytes -- not the
+ * extraction itself. Both are marked noinline: each has exactly one call
+ * site, which GCC -O2 happily inlines right back into refetch_locked()
+ * (measured: extracting without noinline left refetch_locked()'s own frame
+ * unchanged at 80 B). Behavior is unchanged: same rate-limit state
+ * (s_last_refetch_fail_log_us/s_refetch_fail_suppressed), same messages. */
+/* Portable noinline: this file's own host tests (test_safety_cfg_store.c,
+ * MSVC via build_host_tests.ps1) don't understand GCC/Xtensa's
+ * __attribute__((noinline)) syntax at all -- it is a hard syntax error under
+ * cl.exe, not merely a no-op, so guard it rather than assume every compiler
+ * that builds this file is GCC-compatible. Behavior on the real ESP-IDF
+ * (Xtensa GCC) target is unchanged; the host build simply never inlines
+ * these differently than any other static function, which is irrelevant off-
+ * target (no stack-budget checker runs against a host .exe). */
+#if defined(_MSC_VER)
+#define SAFETY_CFG_STORE_NOINLINE
+#else
+#define SAFETY_CFG_STORE_NOINLINE __attribute__((noinline))
+#endif
+
+static void SAFETY_CFG_STORE_NOINLINE safety_cfg_store_log_budget_exceeded(uint8_t page_index)
+{
+    int64_t now_us = (int64_t)hal_time_now_us();
+    if (now_us - s_last_refetch_fail_log_us >= SAFETY_CFG_STORE_REFETCH_LOG_INTERVAL_US) {
+        ESP_LOGW(TAG, "safety_cfg_store_refetch: wall-clock budget (%u ms) exhausted after "
+                      "page %u -- cache left unchanged, retrying on a later poll",
+                 (unsigned)SAFETY_CFG_STORE_REFETCH_BUDGET_MS, (unsigned)page_index);
+        s_last_refetch_fail_log_us = now_us;
+        s_refetch_fail_suppressed = 0;
+    } else {
+        s_refetch_fail_suppressed++;
+    }
+}
+
+static void SAFETY_CFG_STORE_NOINLINE safety_cfg_store_log_page_fetch_failed(uint8_t page_index, esp_err_t err)
+{
+    int64_t now_us = (int64_t)hal_time_now_us();
+    if (now_us - s_last_refetch_fail_log_us >= SAFETY_CFG_STORE_REFETCH_LOG_INTERVAL_US) {
+        if (s_refetch_fail_suppressed > 0) {
+            ESP_LOGW(TAG, "safety_cfg_store_refetch: page %u failed (%s) -- cache left "
+                          "unchanged (+%lu more failed attempts suppressed)",
+                     (unsigned)page_index, esp_err_to_name(err),
+                     (unsigned long)s_refetch_fail_suppressed);
+        } else {
+            ESP_LOGW(TAG, "safety_cfg_store_refetch: page %u failed (%s) -- cache left unchanged",
+                     (unsigned)page_index, esp_err_to_name(err));
+        }
+        s_last_refetch_fail_log_us = now_us;
+        s_refetch_fail_suppressed = 0;
+    } else {
+        s_refetch_fail_suppressed++;
+    }
+}
+
 /* The actual refetch body -- unchanged in substance from before the H5 fix,
  * just renamed and made static so safety_cfg_store_refetch() below can wrap
  * it with s_store_lock. MUST NOT be called directly by anything except that
@@ -1188,16 +1254,7 @@ static bool safety_cfg_store_refetch_locked(SafetyLinkClass *link, uint16_t conf
              * re-invokes this from scratch (page 0) on the very next poll as
              * long as the CRC still disagrees, so nothing here is lost, only
              * deferred to a later iteration that gets a fresh budget. */
-            int64_t now_us = (int64_t)hal_time_now_us();
-            if (now_us - s_last_refetch_fail_log_us >= SAFETY_CFG_STORE_REFETCH_LOG_INTERVAL_US) {
-                ESP_LOGW(TAG, "safety_cfg_store_refetch: wall-clock budget (%u ms) exhausted after "
-                              "page %u -- cache left unchanged, retrying on a later poll",
-                         (unsigned)SAFETY_CFG_STORE_REFETCH_BUDGET_MS, (unsigned)page_index);
-                s_last_refetch_fail_log_us = now_us;
-                s_refetch_fail_suppressed = 0;
-            } else {
-                s_refetch_fail_suppressed++;
-            }
+            safety_cfg_store_log_budget_exceeded(page_index);
             free(scr);
             return false;
         }
@@ -1234,22 +1291,7 @@ static bool safety_cfg_store_refetch_locked(SafetyLinkClass *link, uint16_t conf
         kilnlink_config_page_t *page = &scr->page;
         esp_err_t err = safety_link_get_config_page(link, page_index, page);
         if (err != ESP_OK) {
-            int64_t now_us = (int64_t)hal_time_now_us();
-            if (now_us - s_last_refetch_fail_log_us >= SAFETY_CFG_STORE_REFETCH_LOG_INTERVAL_US) {
-                if (s_refetch_fail_suppressed > 0) {
-                    ESP_LOGW(TAG, "safety_cfg_store_refetch: page %u failed (%s) -- cache left "
-                                  "unchanged (+%lu more failed attempts suppressed)",
-                             (unsigned)page_index, esp_err_to_name(err),
-                             (unsigned long)s_refetch_fail_suppressed);
-                } else {
-                    ESP_LOGW(TAG, "safety_cfg_store_refetch: page %u failed (%s) -- cache left unchanged",
-                             (unsigned)page_index, esp_err_to_name(err));
-                }
-                s_last_refetch_fail_log_us = now_us;
-                s_refetch_fail_suppressed = 0;
-            } else {
-                s_refetch_fail_suppressed++;
-            }
+            safety_cfg_store_log_page_fetch_failed(page_index, err);
             free(scr);
             return false;
         }
