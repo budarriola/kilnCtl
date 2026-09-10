@@ -1600,6 +1600,88 @@ static void test_rate_guard_gather_picks_coldest_identified_zone(void)
     TEST_CHECK(fabsf(out - 26.0f) < 1e-3f, "zone 1 (coldest fit_temp_c) wins, not zone 0");
 }
 
+// 2026-09-10 (opus review round 2, defect B): these two are new -- no
+// existing test in this file ever set s_stub_zone_has_coupling[] true, so
+// the off-diagonal/board_coupling_provenance_ok path safety_cfg_http.c's
+// rate_guard_gather_and_estimate() computes via the now-SHARED
+// zone_coupling_matrix_provenance_ok()/zone_coupling_use_measured_diag_k_dc()
+// (zone_coupling_solve.c/.h) was entirely unexercised here. Both zones have
+// identical identified models/fit context so the only thing that differs
+// between them is coupling provenance -- isolating the margin
+// (S8_RATE_GUARD_ESTIMATE_MARGIN_UNCOUPLED 2.0x vs S8_RATE_GUARD_ESTIMATE_
+// MARGIN 1.3x) as the sole observable effect of that shared call.
+static void test_rate_guard_gather_measured_offdiag_without_diag_k_dc_is_unproven(void)
+{
+    TEST_SECTION("rate_guard_gather_and_estimate -- a measured off-diagonal with NO member's "
+                 "coupling_diag_k_dc identified is unproven -> MARGIN_UNCOUPLED (2.0x), exercising "
+                 "the shared zone_coupling_matrix_provenance_ok() path");
+    reset_all();
+    reset_rate_guard_stubs();
+    s_stub_thermo_count = 2;
+    s_stub_zone_has_model[0] = true;
+    s_stub_zone_k_dc[0] = 20.0f;
+    s_stub_zone_tau_s[0] = 60.0f;
+    s_stub_zone_has_fit_ctx[0] = true;
+    s_stub_zone_fit_temp_c[0] = 20.0f;
+    s_stub_zone_has_model[1] = true;
+    s_stub_zone_k_dc[1] = 20.0f;
+    s_stub_zone_tau_s[1] = 60.0f;
+    s_stub_zone_has_fit_ctx[1] = true;
+    s_stub_zone_fit_temp_c[1] = 20.0f;
+    // A measured, nonzero off-diagonal -- coupling data exists -- but
+    // neither zone's coupling_diag_k_dc is identified (both left false by
+    // reset_rate_guard_stubs() above), which is this bench's real, live
+    // state today. zone_coupling_matrix_provenance_ok() must refuse the
+    // whole matrix.
+    s_stub_zone_has_coupling[0] = true;
+    s_stub_zone_coupling_row[0][1] = 5.0f;
+    s_stub_zone_has_coupling[1] = true;
+    s_stub_zone_coupling_row[1][0] = 5.0f;
+    float out = -1.0f;
+    s8_rate_guard_estimate_reason_t r = rate_guard_gather_and_estimate(&out);
+    TEST_CHECK(r == S8_RATE_GUARD_ESTIMATE_OK, "still produces an estimate, just at the wider margin");
+    // (20/60)*60*2.0 = 40.0 C/min -- UNCOUPLED margin, unproven coupling.
+    TEST_CHECK(fabsf(out - 40.0f) < 1e-3f,
+               "unproven coupling must fall back to the 2.0x UNCOUPLED margin, not 1.3x -- a "
+               "regression back to the pre-fix mirror (missing the use_measured_diag_k_dc gate, or "
+               "any other divergence from the real zone_coupling_matrix_provenance_ok()) would "
+               "silently accept this matrix and report 26.0 instead");
+}
+
+static void test_rate_guard_gather_measured_offdiag_with_diag_k_dc_is_proven(void)
+{
+    TEST_SECTION("rate_guard_gather_and_estimate -- a measured off-diagonal WITH every member's "
+                 "coupling_diag_k_dc identified is proven -> the tighter coupled margin (1.3x)");
+    reset_all();
+    reset_rate_guard_stubs();
+    s_stub_thermo_count = 2;
+    s_stub_zone_has_model[0] = true;
+    s_stub_zone_k_dc[0] = 20.0f;
+    s_stub_zone_tau_s[0] = 60.0f;
+    s_stub_zone_has_fit_ctx[0] = true;
+    s_stub_zone_fit_temp_c[0] = 20.0f;
+    s_stub_zone_has_model[1] = true;
+    s_stub_zone_k_dc[1] = 20.0f;
+    s_stub_zone_tau_s[1] = 60.0f;
+    s_stub_zone_has_fit_ctx[1] = true;
+    s_stub_zone_fit_temp_c[1] = 20.0f;
+    s_stub_zone_has_coupling[0] = true;
+    s_stub_zone_coupling_row[0][1] = 5.0f;
+    s_stub_zone_has_coupling[1] = true;
+    s_stub_zone_coupling_row[1][0] = 5.0f;
+    // Every member now has a measured, usable diag_k_dc -- provenance ok.
+    s_stub_zone_has_coupling_diag_k_dc[0] = true;
+    s_stub_zone_coupling_diag_k_dc[0] = 20.0f;
+    s_stub_zone_has_coupling_diag_k_dc[1] = true;
+    s_stub_zone_coupling_diag_k_dc[1] = 20.0f;
+    float out = -1.0f;
+    s8_rate_guard_estimate_reason_t r = rate_guard_gather_and_estimate(&out);
+    TEST_CHECK(r == S8_RATE_GUARD_ESTIMATE_OK, "produces an estimate at the tighter margin");
+    TEST_CHECK(fabsf(out - 40.0f) >= 1e-3f,
+               "proven coupling must NOT land on the same number the unproven case above produces "
+               "-- if it does, board_coupling_provenance_ok is not actually distinguishing the two");
+}
+
 static void test_rate_guard_gather_missing_fit_context_disqualifies_zone(void)
 {
     TEST_SECTION("rate_guard_gather_and_estimate -- a model with NO recorded fit context is not a "
@@ -1882,6 +1964,8 @@ int main(void)
 {
     test_rate_guard_gather_no_zone_identified_is_no_data();
     test_rate_guard_gather_picks_coldest_identified_zone();
+    test_rate_guard_gather_measured_offdiag_without_diag_k_dc_is_unproven();
+    test_rate_guard_gather_measured_offdiag_with_diag_k_dc_is_proven();
     test_rate_guard_gather_missing_fit_context_disqualifies_zone();
     test_rate_guard_current_value_reads_0x0204_by_id_not_position();
     test_rate_guard_current_value_dormant_reports_unset();

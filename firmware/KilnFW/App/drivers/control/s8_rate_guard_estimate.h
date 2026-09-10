@@ -207,10 +207,16 @@ extern "C" {
 // check, deriving numbers from a matrix the control path deliberately will
 // not touch. That was backwards: a safety estimator should trust unproven
 // data LESS than a feedforward path, not fail to notice the same guard
-// exists. The caller now passes `coupling_provenance_ok`, computed with the
-// SAME rule coupling_matrix_provenance_ok() uses (mirrored, not shared,
-// since KilnFW's HTTP layer does not link zone_coupling_solve.c's static
-// helper); see s8_rate_guard_estimate.c for how it changes the margin used.
+// exists. The caller now passes `coupling_provenance_ok`, computed by
+// calling the REAL zone_coupling_matrix_provenance_ok() directly (2026-09-10,
+// opus review round 2, defect B) -- that function was made non-static and
+// exposed from zone_coupling_solve.h specifically so this caller could link
+// it instead of hand-copying the rule. The earlier "mirrored, not shared"
+// reimplementation omitted the `use_measured_diag_k_dc` gate the real
+// function applies first, which would have accepted a matrix the control
+// path refuses whenever that flag is ever false with off-diagonals
+// populated -- see zone_coupling_matrix_provenance_ok()'s own doc comment.
+// See s8_rate_guard_estimate.c for how the result changes the margin used.
 typedef enum {
     /* Candidate derived directly from the identified plant, unclamped by
      * either bound -- the normal case on a commissioned, coupling-aware

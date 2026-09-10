@@ -21,6 +21,7 @@
 #include "s8_rate_guard_estimate.h" // S8 rate-guard auto-calc write path (docs/audits/s8_auto_calc_design_2026-09-09.md)
 #include "zones_config_accessors.h" // zones_config_get_model()/_get_model_fit_context() -- s8 auto-calc's input
 #include "zones_config_query.h"     // zones_config_get_thermo_count()
+#include "zone_coupling_solve.h"    // zone_coupling_matrix_provenance_ok()/_use_measured_diag_k_dc()
 #include "uart_task_ids.h" // SAFETY_FLAG_TC_NOT_INSTALLED/SAFETY_FLAG_TC_INJECTED
 #include "web_encoding.h"
 #include "wifi_provision_http.h"
@@ -1776,42 +1777,28 @@ static s8_rate_guard_estimate_reason_t rate_guard_gather_and_estimate(float *out
         thermo_count = MAX31856_CHANNEL_COUNT; /* defensive, matches s8_rate_guard_estimate()'s own clamp */
     }
 
-    /* 2026-09-10 fix (finding C): mirrors zone_coupling_solve.c's
-     * coupling_matrix_provenance_ok() rule -- the control path (ff_hold/
-     * ff_climb) refuses to use this same coupling data whole whenever it
-     * carries measured off-diagonals but no member's coupling_diag_k_dc has
-     * ever been identified on hardware. This estimator is a SAFETY
-     * threshold; it must trust the data at least as little as the
-     * feedforward path does, not less. board_coupling_provenance_ok is
-     * computed board-wide (a property of the whole matrix, same as the
-     * control path) and applied to every zone below -- see
-     * s8_rate_guard_estimate.h's PROVENANCE section. */
-    bool any_measured_off_diagonal = false;
-    for (uint8_t row = 0; row < thermo_count && !any_measured_off_diagonal; row++) {
-        float row_cells[MAX31856_CHANNEL_COUNT] = {0};
-        if (!zones_config_get_coupling(row, row_cells)) {
-            continue;
-        }
-        for (uint8_t col = 0; col < thermo_count; col++) {
-            if (col == row) {
-                continue;
-            }
-            if (isfinite(row_cells[col]) && row_cells[col] != 0.0f) {
-                any_measured_off_diagonal = true;
-                break;
-            }
-        }
+    /* 2026-09-10 fix (finding C, then hardened by opus review round 2
+     * defect B): this used to reimplement zone_coupling_solve.c's
+     * coupling_matrix_provenance_ok() rule by hand, and the reimplementation
+     * OMITTED the `use_measured_diag_k_dc` gate the real function applies
+     * first -- so a board with `s_coupling_use_measured_diag_k_dc` false and
+     * measured off-diagonals populated would have had the control path
+     * refuse the matrix while this safety estimator accepted it anyway,
+     * backwards from the stated principle that a safety threshold must
+     * trust the data at least as little as feedforward, never less. Now
+     * calls the SAME shared zone_coupling_matrix_provenance_ok() (exposed
+     * from zone_coupling_solve.h) with the SAME shared
+     * zone_coupling_use_measured_diag_k_dc() flag the control path uses --
+     * there is no second copy of this rule left to drift.
+     * board_coupling_provenance_ok is computed board-wide (a property of the
+     * whole matrix, same as the control path) and applied to every zone
+     * below -- see s8_rate_guard_estimate.h's PROVENANCE section. */
+    uint8_t members[MAX31856_CHANNEL_COUNT];
+    for (uint8_t i = 0; i < thermo_count; i++) {
+        members[i] = i;
     }
-    bool board_coupling_provenance_ok = true;
-    if (any_measured_off_diagonal) {
-        for (uint8_t i = 0; i < thermo_count; i++) {
-            float diag_k_dc = 0.0f;
-            if (!(zones_config_get_coupling_diag_k_dc(i, &diag_k_dc) && isfinite(diag_k_dc) && diag_k_dc > 0.0f)) {
-                board_coupling_provenance_ok = false;
-                break;
-            }
-        }
-    }
+    bool board_coupling_provenance_ok =
+        zone_coupling_matrix_provenance_ok(members, thermo_count, zone_coupling_use_measured_diag_k_dc());
 
     for (uint8_t i = 0; i < thermo_count; i++) {
         float k_dc = 0.0f, tau_s = 0.0f, dead_time_s = 0.0f;

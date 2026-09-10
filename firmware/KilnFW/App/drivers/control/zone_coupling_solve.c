@@ -272,7 +272,7 @@ static float coupling_diagonal_k_dc(uint8_t member_zi, float fallback_ff_k_dc, b
  * adopted months earlier). Distinguishing those needs a provenance stamp
  * stored alongside the cells, i.e. a new zone_cfg_t field and a
  * ZONES_CFG_VERSION bump. See the audit for that recommendation. */
-static bool coupling_matrix_provenance_ok(const uint8_t *members, uint8_t n, bool use_measured_diag_k_dc)
+bool zone_coupling_matrix_provenance_ok(const uint8_t *members, uint8_t n, bool use_measured_diag_k_dc)
 {
     bool any_measured_off_diagonal = false;
     for (uint8_t row = 0; row < n && !any_measured_off_diagonal; row++) {
@@ -297,6 +297,17 @@ static bool coupling_matrix_provenance_ok(const uint8_t *members, uint8_t n, boo
             return false;
         }
     }
+    return true;
+}
+
+/* 2026-09-10 (opus review round 2, defect B): moved here from a private
+ * `static const bool s_coupling_use_measured_diag_k_dc = true` in
+ * profile_executor_feedforward.c -- see zone_coupling_solve.h's doc comment
+ * on the declaration for why. Same value, same rollout-gate reasoning
+ * (PID_EXPANSION_PLAN.md sec 3.2); only the storage location changed, so
+ * this is a no-op for the control path. */
+bool zone_coupling_use_measured_diag_k_dc(void)
+{
     return true;
 }
 
@@ -366,7 +377,7 @@ float zone_coupling_solve_hold(bool z_qualifies, float z_ff_k_dc, uint8_t zi, bo
     /* See coupling_column_provenance_ok() above: refuse to ASSEMBLE a matrix
      * whose diagonal and off-diagonals come from different experiments,
      * rather than assembling it and hoping the numbers are compatible. */
-    if (!coupling_matrix_provenance_ok(members, n, use_measured_diag_k_dc)) {
+    if (!zone_coupling_matrix_provenance_ok(members, n, use_measured_diag_k_dc)) {
         *out_reason = COUPLING_SOLVE_FALLBACK_MIXED_PROVENANCE;
         return diagonal_hold;
     }
@@ -530,7 +541,7 @@ float zone_coupling_solve_climb(bool z_qualifies, float z_ff_k_dc, float z_ff_ta
     /* Same provenance refusal as the hold term's -- the climb term solves the
      * SAME G with the same membership, so a matrix the hold term refuses to
      * assemble must not be assembled here either. */
-    if (!coupling_matrix_provenance_ok(members, n, use_measured_diag_k_dc)) {
+    if (!zone_coupling_matrix_provenance_ok(members, n, use_measured_diag_k_dc)) {
         *out_reason = COUPLING_SOLVE_FALLBACK_MIXED_PROVENANCE;
         return diagonal_climb;
     }

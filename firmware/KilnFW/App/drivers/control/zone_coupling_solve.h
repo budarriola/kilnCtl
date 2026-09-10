@@ -297,6 +297,38 @@ coupling_solve_reason_t zone_coupling_gauss_solve_partial_pivot_vec(uint8_t n,
  * already established for the matrix path. See
  * test_zone_coupling_solve.c's fallback-diagonal cases (n==1 and
  * out-of-range/unqualified paths, flag on vs off, measured vs unmeasured). */
+/* Shared provenance gate for a coupling matrix: refuses the matrix outright
+ * whenever any member row carries a measured off-diagonal but
+ * `use_measured_diag_k_dc` is false (an off-diagonal identified without a
+ * measured diagonal is not trustworthy data by itself), and, when the flag
+ * is true, additionally requires EVERY member's coupling_diag_k_dc to be
+ * populated (finite and > 0.0f). `members`/`n` name which zones are in the
+ * system being evaluated -- same shape zone_coupling_solve_hold/_climb use
+ * internally.
+ *
+ * 2026-09-10 fix (opus review, round 2, defect B): this used to be `static`
+ * inside zone_coupling_solve.c, and safety_cfg_http.c's S8 rate-guard
+ * estimator (rate_guard_gather_and_estimate()) carried its OWN, textually
+ * separate reimplementation of this rule -- one that omitted the
+ * `use_measured_diag_k_dc` check entirely, going straight to the
+ * `diag_k_dc > 0` loop. A safety estimator silently trusting data the
+ * control path refuses is backwards (the safety threshold must trust the
+ * data at least as little as feedforward, never less). Exposing the real
+ * function and having the mirror call it directly removes the drift
+ * surface outright, rather than merely detecting it after the fact. */
+bool zone_coupling_matrix_provenance_ok(const uint8_t *members, uint8_t n, bool use_measured_diag_k_dc);
+
+/* The single canonical `use_measured_diag_k_dc` value every caller of
+ * zone_coupling_solve_hold/_climb/zone_coupling_matrix_provenance_ok should
+ * pass -- moved here (2026-09-10, opus review round 2, defect B) from a
+ * private `static const bool s_coupling_use_measured_diag_k_dc` inside
+ * profile_executor_feedforward.c, which safety_cfg_http.c's S8 rate-guard
+ * estimator had no way to see and so never gated on at all. Now both the
+ * control path and the safety mirror read the identical flag from the
+ * identical function -- there is no second copy left to drift. See
+ * zone_coupling_solve_hold()'s own doc comment for what this flag means. */
+bool zone_coupling_use_measured_diag_k_dc(void);
+
 float zone_coupling_solve_hold(bool z_qualifies, float z_ff_k_dc, uint8_t zi, bool use_measured_diag_k_dc,
                                const zone_coupling_neighbor_t *zones, uint8_t zone_count,
                                float setpoint_c, float ambient_c, bool *out_used_matrix, bool *out_infeasible,

@@ -186,8 +186,13 @@ static uint16_t s_coupling_prev_membership_sig[MAX31856_CHANNEL_COUNT];
  * guard refuses whenever measured off-diagonals exist, so setting this
  * constant back to false does not restore the old mixed matrix -- it
  * disables the coupled solve outright. Which is the point: there is no
- * configuration in which the two halves can be silently combined again. */
-static const bool s_coupling_use_measured_diag_k_dc = true;
+ * configuration in which the two halves can be silently combined again.
+ *
+ * 2026-09-10: this constant moved to zone_coupling_solve.h/.c as
+ * zone_coupling_use_measured_diag_k_dc() (opus review round 2, defect B) so
+ * safety_cfg_http.c's S8 rate-guard estimator reads the SAME flag instead of
+ * having no way to see it at all -- call sites below now call that function
+ * directly rather than reading a local static. */
 
 static float solve_hold_for_zone(const zone_runtime_t *z, uint8_t zi, float setpoint_c, float ambient_c,
                                   bool *out_used_matrix, bool *out_infeasible,
@@ -198,7 +203,7 @@ static float solve_hold_for_zone(const zone_runtime_t *z, uint8_t zi, float setp
     bool z_qualifies = zone_qualifies_as_coupling_neighbor(z);
     zone_coupling_hold_cache_t *cache_row = (zi < MAX31856_CHANNEL_COUNT) ? &s_coupling_hold_cache[zi] : &s_coupling_hold_cache[0];
     uint16_t *prev_sig = (zi < MAX31856_CHANNEL_COUNT) ? &s_coupling_prev_membership_sig[zi] : &s_coupling_prev_membership_sig[0];
-    return zone_coupling_solve_hold(z_qualifies, z->ff_k_dc, zi, s_coupling_use_measured_diag_k_dc, zones,
+    return zone_coupling_solve_hold(z_qualifies, z->ff_k_dc, zi, zone_coupling_use_measured_diag_k_dc(), zones,
                                     MAX31856_CHANNEL_COUNT, setpoint_c,
                                     ambient_c, out_used_matrix, out_infeasible, out_reason,
                                     out_membership_changed, cache_row, prev_sig);
@@ -223,7 +228,7 @@ static float solve_climb_for_zone(const zone_runtime_t *z, uint8_t zi, float rat
     bool z_qualifies = zone_qualifies_as_coupling_neighbor(z);
     zone_coupling_climb_cache_t *cache_row = (zi < MAX31856_CHANNEL_COUNT) ? &s_coupling_climb_cache[zi] : &s_coupling_climb_cache[0];
     uint16_t *prev_sig = (zi < MAX31856_CHANNEL_COUNT) ? &s_coupling_climb_prev_membership_sig[zi] : &s_coupling_climb_prev_membership_sig[0];
-    return zone_coupling_solve_climb(z_qualifies, z->ff_k_dc, z->ff_tau_s, zi, s_coupling_use_measured_diag_k_dc,
+    return zone_coupling_solve_climb(z_qualifies, z->ff_k_dc, z->ff_tau_s, zi, zone_coupling_use_measured_diag_k_dc(),
                                      zones, MAX31856_CHANNEL_COUNT,
                                      rate_c_per_s, out_used_matrix, out_infeasible, out_reason,
                                      out_membership_changed, cache_row, prev_sig);
