@@ -45,6 +45,17 @@ during this pass and was not interacted with. Simulation and host-only work.
 > unexplained is now the ENTIRE gap, not a fraction of it structurally capped
 > by an unreachable target. The gate's failure needs a different explanation
 > than "2 of 6 cross-gains are physically unreachable" — that reason is gone.
+>
+> **Stated plainly, so this is not left implicit:** this file's headline
+> "structural infeasibility" conclusion (item 2 below) is RETIRED. It does not
+> survive in any weakened or partial form — zero of six cross-gains are
+> unreachable on the live diagonal, not "fewer than two." The gate's continuing
+> FAIL is real (see "What survives" above) but now has an **unexplained
+> cause**: this document no longer supplies a reason for it, and neither does
+> any other document as of this correction. Do not read the retired conclusion
+> as still explaining the FAIL in a reduced way — it explains none of it.
+> Finding a new explanation for the gate's failure is open work, not something
+> this correction pass did.
 
 ## Original findings (as written 2026-09-10, before the correction above)
 
