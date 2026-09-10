@@ -173,6 +173,14 @@ GENERIC_WRITE_RE = re.compile(
     r"bics?|muls?|mlas?|sdiv|udiv|rsbs?|adcs?|sbcs?|ldr|ldrb|ldrh|ldrsb|ldrsh|"
     r"rev|rev16|revsh|sxtb|sxth|uxtb|uxth)\t" + _REGSP_TRACKED_REG_RE + r"\b")
 POP_RE = re.compile(r"\bpop\t\{([^}]*)\}")
+# 2026-09-10 (opus review, round 2, defect E): `pop` was handled above, but
+# `ldm`/`ldmia` -- the remaining multi-register writer on Cortex-M0+ Thumb-1
+# outside `pop` -- was not, so `ldmia r4!, {r0, r1}` left r0/r1 (and, on the
+# writeback form, r4 itself) still tracked in ldr_pc_regs after this line,
+# exactly the stale-literal shape this feature exists to catch. Matches both
+# `ldm` and `ldmia` (Thumb-1 only has the incrementing-after form, but IA is
+# sometimes spelled out and sometimes not depending on objdump version).
+LDM_RE = re.compile(r"\bldm(?:ia)?\t(r\d+|sl|fp|lr|ip)(!)?,\s*\{([^}]*)\}")
 # AAPCS: a `bl`/`blx` call may clobber r0-r3, r12 (ip) and lr (the link
 # register itself is overwritten with the return address).
 BL_CLOBBERS = ("r0", "r1", "r2", "r3", "ip", "lr")
@@ -186,6 +194,17 @@ def _invalidate_clobbered_regs(line, ldr_pc_regs):
     if p:
         for r in (x.strip() for x in p.group(1).split(",")):
             ldr_pc_regs.pop(r, None)
+        return
+    lm = LDM_RE.search(line)
+    if lm:
+        base_reg, writeback, reglist = lm.group(1), lm.group(2), lm.group(3)
+        for r in (x.strip() for x in reglist.split(",")):
+            ldr_pc_regs.pop(r, None)
+        if writeback:
+            # `ldmia rN!, {...}` also rewrites the base register itself
+            # (post-increment writeback) -- a stale PC-relative literal
+            # previously tracked in rN is no longer valid either.
+            ldr_pc_regs.pop(base_reg, None)
         return
     if BL_RE.search(line) or BLX_REG_RE.search(line):
         for r in BL_CLOBBERS:

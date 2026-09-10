@@ -95,5 +95,56 @@ class StaleLiteralRegspTest(unittest.TestCase):
             "the (unresolved) regsp adjust should contribute 0")
 
 
+# Second synthetic transcript for the 2026-09-10 (round 2) opus-review
+# defect E: GENERIC_WRITE_RE/POP_RE covered every remaining Thumb-1
+# register-writing mnemonic EXCEPT `ldm`/`ldmia` -- the only other
+# multi-register writer available on Cortex-M0+ outside `pop`. Same stale-
+# literal shape as above, but the clobber is `ldmia r0!, {r4, r5}` instead
+# of `movs r4, #0`.
+OBJDUMP_TEXT_LDM = """
+10000200 <victim_ldm_fn>:
+   10000200:	b510      	push	{r4, lr}
+   10000202:	4c07      	ldr	r4, [pc, #28]	@ (10000220 <victim_ldm_fn+0x20>)
+   10000204:	cc30      	ldmia	r0!, {r4, r5}
+   10000206:	4460      	add	sp, r4
+   10000208:	bd10      	pop	{r4, pc}
+   1000020a:	46c0      	nop			@ (mov r8, r8)
+   1000020c:	46c0      	nop			@ (mov r8, r8)
+   1000020e:	46c0      	nop			@ (mov r8, r8)
+   10000210:	46c0      	nop			@ (mov r8, r8)
+   10000212:	46c0      	nop			@ (mov r8, r8)
+   10000214:	46c0      	nop			@ (mov r8, r8)
+   10000216:	46c0      	nop			@ (mov r8, r8)
+   10000218:	46c0      	nop			@ (mov r8, r8)
+   1000021a:	46c0      	nop			@ (mov r8, r8)
+   1000021c:	46c0      	nop			@ (mov r8, r8)
+   1000021e:	46c0      	nop			@ (mov r8, r8)
+   10000220:	fffffda8 	.word	0xfffffda8
+"""
+
+
+class StaleLiteralAcrossLdmTest(unittest.TestCase):
+    def test_ldm_clobbered_register_is_not_resolved_against_stale_literal(self):
+        fake_result = mock.Mock(stdout=OBJDUMP_TEXT_LDM)
+        with mock.patch.object(lib.subprocess, "run", return_value=fake_result):
+            parsed = lib.parse("fake-objdump", "fake.elf")
+
+        root_addr = 0x10000200
+        self.assertIn(root_addr, parsed.frames, "victim_ldm_fn was not parsed at all")
+
+        self.assertTrue(
+            parsed.regsp_adjust.get(root_addr, False),
+            "victim_ldm_fn's `add sp, r4` was resolved (regsp_adjust=False) "
+            "even though r4 was clobbered by `ldmia r0!, {r4, r5}` between "
+            "the pc-relative load and the sp adjust -- ldm/ldmia must "
+            "invalidate every register in its list (and the base register "
+            "on the writeback form), same as pop already does")
+
+        self.assertEqual(
+            parsed.frames[root_addr], 8,
+            "unexpected frame total -- push {r4,lr} should contribute 8 B and "
+            "the (unresolved) regsp adjust should contribute 0")
+
+
 if __name__ == "__main__":
     unittest.main()
