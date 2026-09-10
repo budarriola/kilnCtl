@@ -18,17 +18,27 @@
 >     live on both sides. The `i_normal_a` write path (`c0729e1e`) is now on
 >     the board, so a CT sweep could arm S14/S15 — **none has been run; both
 >     guards remain DORMANT**.
->   - **Side effect, not a regression: S1 `abs_max_temp_c` moved 80 -> 85 C.**
->     `safety_ceiling_sync.c` (new this HEAD) pushes the ESP's configured
->     zone ceiling to the Pico's S1 threshold on link-up, and at the time of
->     the flash that policy added 5 C of headroom above the ESP's own 80 C
->     ceiling. **The owner has since decided a web-page ceiling must be a
->     hard cutoff (exact value, no added headroom), and a fix is in progress
->     right now**: `firmware/KilnFW/App/drivers/safety/safety_ceiling_policy.c`
->     / `.h` show as locally modified, uncommitted, in this session's own
->     `git status` (along with `sim_plant.c` and two test files) — do not
->     touch these files or commit over them this sweep. Until that lands and
->     is flashed, the live Pico still enforces 85 C, 5 C looser than the ESP.
+>   - **Side effect, since fixed: S1 `abs_max_temp_c` moved 80 -> 85 C, then
+>     corrected back.** `safety_ceiling_sync.c` (new this HEAD) pushes the
+>     ESP's configured zone ceiling to the Pico's S1 threshold on link-up,
+>     and at the time of the flash that policy added 5 C of headroom above
+>     the ESP's own 80 C ceiling. The owner decided a web-page ceiling must
+>     be a hard cutoff (exact value, no added headroom), and the fix has
+>     **landed and been verified on the bench**: `c99356f8` makes
+>     `safety_ceiling_policy_target_c()` return the ESP's configured maximum
+>     exactly — `SAFETY_CEILING_HEADROOM_C` (5.0f) stays defined but unused,
+>     documented as historical. Verified live in both directions: 85 -> 80
+>     to match the ESP, a raise of zone 0 to 90 took the Pico to exactly 90,
+>     and a lower back to 80 took it to exactly 80. Negative-tested by
+>     restoring the `+ SAFETY_CEILING_HEADROOM_C` line (turned 6 tests red),
+>     then reversed by hand; 90/90 checks and 34/34 host-test executables
+>     pass. **Practical consequence for operators**: with the ceilings now
+>     equal, reaching the configured limit latches a safety-processor trip
+>     requiring a manual clear, rather than the ESP stopping a few degrees
+>     early — this is the deliberate trade for a hard cutoff, and it is why
+>     profiles should stay below the ceiling (see the dashboard proximity
+>     warning, `a9abd273`, and the owner's ~5 C profile-headroom guidance —
+>     a separate mechanism, deliberately left untouched by `c99356f8`).
 > - **The 45 C discriminating coupling plateau ran and finished** (`7c18a11e`):
 >   settled 46 min, z2 residual **-1.58 C** — close to the -2.9 C SCALE
 >   prediction and far from the -8.4 C OFFSET prediction from the ninth/tenth
@@ -94,14 +104,17 @@
 >   by a fresh run this sweep (see status line above).
 >
 > **Open, in flight, or owner-blocked as of this sweep** (do not mark any of
-> these done): the S1 ceiling hard-cutoff fix is **uncommitted, in progress
-> right now** in this session's own working tree (`safety_ceiling_policy.c`/
-> `.h`, `sim_plant.c`, two test files) — until it lands and is reflashed the
-> live Pico ceiling is 85 C, 5 C looser than the ESP's 80 C; the coupling
-> matrix still needs joint re-identification and the board runs uncoupled
-> feedforward until then, and a per-row rescale will not fix z0's shape
-> error; S14/S15 remain dormant pending a CT sweep populating
-> `i_normal_a[0..2]` (write path live, sweep not yet run); the credibility
+> these done): the S1 ceiling hard-cutoff fix has **landed and is verified**
+> (`c99356f8`, see above) — no longer open, listed here only until the next
+> sweep folds it into "closed items"; a long coupling-identification capture
+> is now actually running on the bench (`docs/COUPLING_JOINT_IDENTIFICATION_CAPTURE.md`)
+> and the board runs uncoupled feedforward until it completes and the matrix
+> is re-identified, and a per-row rescale will not fix z0's shape error;
+> S14/S15 remain dormant — a sweep was attempted and did NOT arm them
+> (`a2ce8aba`): the summed-topology `derived_mask` gap means the
+> `k_ct_v_per_a` derivation path never executes on this wiring regardless of
+> load size, and separately the fixture's ~33-90 mA draw sits at or below
+> the sweep's 45 mA noise floor for a single pass; the credibility
 > gate's dwell-offset and dwell-entry-peak bars are still open with all three
 > investigated peak-residual hypotheses now eliminated; S8 stays at its
 > hand-set 20 C/min until the matrix is re-identified; `abs_max_temp_c` must
