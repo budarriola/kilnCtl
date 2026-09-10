@@ -1,30 +1,85 @@
 # `iter_tune` redesign — tracking-quality-driven iterative tuning
 
-> **Status update, 2026-09-09 (later pass):** steps 1, 2 and 5 are
-> IMPLEMENTED and validated in simulation — `control/firing_score.c`,
-> `control/firing_compare.c` and a rewritten `control/iter_tune.c` (the old
-> whole-firing IAE path is deleted, not left dual). Numbers, and two design
-> defects the simulation found in this document's own sec 4 step schedule,
-> are in `docs/audits/iter_tune_redesign_sim_2026-09-09.md`. Step 7's
-> `check_iter_tune_write_surface.ps1` (`tools/check_iter_tune_write_surface.ps1`
-> + `tools/PcTools/scripts/iter_tune_write_surface_check.py`) is now also
-> IMPLEMENTED and negative-tested: it fails if `iter_tune.c`/`.h` ever calls
-> a setter/persistence/hardware API directly, and separately fails if any
-> production file outside `test/` calls an `iter_tune_*` function at all
-> (today, none does — confirmed by grep, not just by this check). Steps 3-4
-> and the rest of 6-9 (the sec 6.5 credibility gate against a recorded
-> firing, the noise-floor artifact, persistence/HTTP surface, shadow mode
-> and hardware trials) are still NOT done and were not attempted in this
-> pass — they require the G1-G4 simulation-harness work of sec 6.1
-> (`sim_plant_from_zone_cfg()`, the real `heater_output.c` PWM window, relay
-> lag, MAX31856 quantisation), none of which exists yet in
-> `firmware/KilnFW/App/test/sim_plant.c`/`.h` as of this pass, and that is
-> substantial-enough net-new C work that it was left for a dedicated pass
-> rather than rushed. 65 real `logs/coupling/*.jsonl` captures exist locally
-> as of this pass (`.gitignore` keeps them local-only), so the credibility
-> gate in sec 6.5 is data-ready whenever the harness work lands — the gap is
-> harness code, not missing captures. Nothing is wired into
+> **Status update, 2026-09-10 (later pass):** steps 1, 2, 3, 4, 5 and the
+> write-surface part of 7 are now IMPLEMENTED. The status paragraph that used
+> to stand here (dated 2026-09-09) said steps 3-4 and the sec 6.5 credibility
+> gate were not attempted and blocked on G1-G4 harness work that "does not
+> exist yet" — that is stale as of this pass and was corrected here rather
+> than left to mislead the next reader. What actually landed since:
+>
+> - Steps 1, 2, 5: `control/firing_score.c`, `control/firing_compare.c` and a
+>   rewritten `control/iter_tune.c` (`8f80a4de`, three defect fixes in
+>   `249ce287`/`ce55440d`). Numbers and two design defects the simulation
+>   found in the plan's own sec 4 step schedule are in
+>   `docs/audits/iter_tune_redesign_sim_2026-09-09.md`.
+> - Step 7's write-surface guard: `check_iter_tune_write_surface.ps1`
+>   (`f3fcd597`) is IMPLEMENTED and negative-tested — it fails if
+>   `iter_tune.c`/`.h` ever calls a setter/persistence/hardware API directly,
+>   and separately fails if any production file outside `test/` calls an
+>   `iter_tune_*` function at all (today, none does).
+> - Step 3, the G1-G4 sim-harness gaps: all four are IMPLEMENTED in
+>   `firmware/KilnFW/App/test/sim_plant.c`/`.h` (`e0d2e006`) —
+>   `sim_plant_from_zone_cfg()`, the real `heater_output.c` PWM window via
+>   linking (not reimplementation), relay actuation lag, and MAX31856
+>   quantisation.
+> - The sec 6.5 credibility gate: IMPLEMENTED as
+>   `firmware/KilnFW/App/test/sim_credibility_gate.c` (`225d4b91`), wired into
+>   `build_host_tests.ps1` as an informational (non-blocking) step. It first
+>   failed outright (ramp MAE 8-10 °C against a 3 °C bar) for a reason
+>   diagnosed in `docs/audits/sim_credibility_gate_real_cause_2026-09-10.md`:
+>   the simulator coupled zones by conservative *exchange* (`g·(T_j−T_i)`)
+>   while the firmware's own `zone_coupling_solve.c` couples by additive
+>   *source-gain* (`diag(k)+coupling_coeff`) — two different model classes
+>   that agree only in differential mode, and the recorded dwell operating
+>   point is almost pure common mode. `d63a5591` changed `sim_kiln_step()` to
+>   the firmware's own model class. **Current state as of this pass (rebuilt
+>   from HEAD, `logs/coupling/noise_floor_p7_run1.jsonl` /
+>   `noise_floor_p7d_run1.jsonl`): ramp MAE now PASSES on 5 of 6 zone-runs**
+>   (calibration 1.481/1.710/3.367 °C, hold-out 1.489/1.335/2.780 °C against a
+>   3.0 °C bar — only calibration z2 misses, at 3.367), **dwell offset misses
+>   on 5 of 6** (−2.1 to −4.8 °C against ±1.5, one hold-out z0 pass at −1.412),
+>   dwell-entry-peak is mixed pass/fail per segment, and the noise-floor
+>   spread check fails 4 of 6 keys (simulated spread pessimistic vs. 2×
+>   `noise_floor.json`). **The gate's overall verdict is still `GATE FAILS`**
+>   — three of its four bars are open, most acutely dwell-entry peak, which
+>   the audit doc's own sec 6 says is not yet demonstrated by any variant
+>   tried. Per plan sec 6.5 this means: simulation results are materially
+>   credible for *tracking-error* purposes (the ramp MAE bar, which is what
+>   steps 1/2/5's own validation and A1-A8 depend on) but not yet for
+>   dwell-entry overshoot specifically, and the plan does not proceed past
+>   this gate to treat the simulator as evidence for anything dwell-entry-peak
+>   related until that bar closes.
+>
+> **Still NOT done, and NOT attempted in this pass either** (see the
+> 2026-09-10 status update below sec 9 for why): the noise-floor artifact
+> (Bar 2, sec 3.1/4), persistence + HTTP surface (step 7's remaining parts),
+> and shadow mode (step 8). All three were assessed this pass, not skipped
+> unexamined — the noise-floor question turned out to be answerable from
+> existing local captures (see the new subsection after sec 3.1); persistence
+> and shadow mode remain blocked on net-new C engineering of the same
+> "dedicated pass" size as G1-G4 was, now compounded by the still-open
+> dwell-entry-peak credibility bar above. Nothing is wired into
 > `profile_executor.c` and the module proposes nothing on hardware.
+>
+> **Regression found in this pass: `d63a5591`'s coupling-model fix moved A1's
+> false-accept rate off zero.** Re-running `sim_iter_tune.exe 220` (the exact
+> harness size behind the `docs/audits/iter_tune_redesign_sim_2026-09-09.md`
+> baseline) from `HEAD` gives **660 null comparisons: 24 ACCEPT (3.64 %),
+> 21 REJECT, 615 INSUFFICIENT** — up from the recorded baseline of
+> **0 ACCEPT (0.00 %)**. This is still under A1's 5 % hard-fail line but above
+> its 2 % target bar, so A1 now reads **FAIL** where it previously PASSed. Part
+> 1 (24 zone-runs: 0 improved, 24 unchanged, 0 regressed, 24/24 converged) and
+> Part 3 (A2/A5/A6, mismatched ensemble: 660 zone-runs, 0 worse, 0 cage
+> violations, all PASS) are unchanged in shape from the baseline. Nothing in
+> `iter_tune.c`, `firing_score.c` or `firing_compare.c` changed between the
+> baseline run and this one — the only relevant change on the path is
+> `sim_plant.c`'s coupling model class (additive source-gain, landed for the
+> sec 6.5 gate above). Not root-caused or fixed in this pass — flagged here
+> per the standing instruction that a rise in false accepts means something is
+> wrong, and left for the same dedicated pass as the other open items, since
+> diagnosing it properly means understanding how the new coupling model
+> changes the null experiment's own noise characteristics, not just the
+> comparator or `iter_tune.c`'s decision logic.
 >
 > **Owner decision, 2026-09-08:**
 > *keep `iter_tune`, but redesign it* — "design it better so it does not
@@ -245,6 +300,50 @@ Bar 2's floor: it is keyed on the *old* metric set, and its own
 `start_conditions` block flags the six runs as not strictly like-for-like
 (start temps span 1.29 °C). It is kept as a cross-check on the simulator's
 realism (§6.3), not as a threshold source.
+
+### 3.1.1 Can a real hardware noise floor be determined today? (2026-09-10)
+
+Checked against the 65 (now 108, counting derivative/cooldown files) local
+`logs/coupling/*.jsonl` captures. Answer: **partially — a genuinely
+comparable rested pair exists, but it only bears on the old whole-firing
+metric, not on the new per-segment sub-scores (`lag_s`/`entry_peak_c`/
+`steady_rms_c`) that Bar 2 actually needs.**
+
+- **A comparable pair exists.** `noise_floor.json`'s own
+  `start_conditions.runs` (per-channel thermocouple start reading, not the
+  coarser whole-tick sample used to flag the six-repeat set as NOT
+  like-for-like) shows `noise_floor_p7_run1.jsonl` and
+  `noise_floor_p7d_run3.jsonl` — both profile 7, both the campaign's own
+  claimed same preset (`coupling_matrix_pre20260902`) — starting within
+  **0.10-0.15 °C per channel** (channel means 28.643 °C vs. 28.603 °C, a
+  0.04 °C gap). That is inside the plan's own 0.5 °C "not worth chasing" bar
+  and far tighter than the 1.29 °C spread that made the six-run set as a
+  *whole* fail its own like-for-like check, and dramatically tighter than the
+  4.8 °C-apart pair §0's original critique of the old design was about (a
+  different, older pair — not this campaign). **This retracts nothing in §0
+  or §3.1's existing text** (both statements are about different pairs/sets
+  and remain true as written); it says a better pair than either of those
+  now exists in the local capture set.
+- **What it cannot yet give Bar 2.** `firing_score.c`'s three sub-scores have
+  only ever been run against `sim_plant.c` output (`sim_iter_tune.c`,
+  `sim_credibility_gate.c`) — there is no tool in this repo that runs
+  `firing_score.c` against a real `.jsonl` capture's recorded actual/target
+  series to produce `lag_s`/`entry_peak_c`/`steady_rms_c` values for it. Until
+  that (small, bounded) adapter exists, "the real per-segment noise floor" for
+  Bar 2's new metrics cannot be computed from this pair or any other —
+  reporting a number here without that adapter would be exactly the kind of
+  invented floor this section was written to prevent. The old whole-firing
+  `iae_normalized_whole_c` floor for this pair specifically was not computed
+  either, since `noise_floor.json`'s existing six-repeat aggregate already
+  supersedes any single-pair number for that metric and using this pair alone
+  would only *discard* information, not add it.
+- **Recommended next step, not done here:** write a small host tool
+  (`firing_score.c` + a `.jsonl` reader, no `sim_plant.c` dependency) that
+  replays `noise_floor_p7_run1.jsonl` and `noise_floor_p7d_run3.jsonl`'s
+  recorded per-tick actual/target/segment data through the real scoring
+  function and reports the paired differences per sub-score. That is the
+  concrete capture (already in hand) that would settle Bar 2's real-hardware
+  floor question, once that adapter is written.
 
 ---
 
