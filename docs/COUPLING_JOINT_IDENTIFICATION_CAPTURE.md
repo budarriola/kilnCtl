@@ -1,8 +1,37 @@
 # Joint coupling-matrix identification — capture procedure
 
-**Status: ready to execute once the bench heat path is confirmed working. Not yet run.**
-Design/analysis pass, 2026-09-09. No control code was changed and nothing was
-flashed to produce this document.
+**Status: ready to execute. Bench heat path confirmed working. Not yet run.**
+Design/analysis pass, 2026-09-09; revised 2026-09-10 per
+`docs/audits/cplval75_coupling_verdict_2026-09-10.md` (`d2e570ad`). No control
+code was changed and nothing was flashed to produce either version of this
+document.
+
+**2026-09-10 revision — read this before running anything.** The `cplval75`
+settled-hold capture (analyzed in `d2e570ad`) found three problems with the
+procedure below as first written, and answered part of it outright:
+
+1. The step-duration floor was computed from a stale preset file, not the
+   board — it understated the real floor by ~60% (§"Step sizes" below).
+2. Acceptance step 6 (reproduce the ~62 °C `ff_hold_infeasible` boundary) is
+   backwards: that boundary is now known to be the *old* matrix's z2-row gain
+   deficit announcing itself, not a plant power limit. A correctly identified
+   matrix should push it out past the 80 °C ceiling, not reproduce it.
+   Testing for the old boundary would reject a correct result.
+3. The 62–75 °C acceptance span was too narrow (1.4×) to separate a per-row
+   scale error from a constant offset. A 45 °C plateau is now included to
+   widen it to ~2.9×.
+
+It also found that part of the original plan is now unnecessary: the 70 °C and
+75 °C validation holds already exist as genuinely held-out data
+(`cplval75`, `logs/coupling/cplval75_20260910_settled_hold_points.tsv`,
+commit `1efbdc0c`) and do not need to be re-run — see "Acceptance test" below,
+which now pins the falsifying prediction from that data before any new
+capture runs. This saves roughly two hours of kiln time. The three single-zone
+column steps are unaffected and are, if anything, more clearly justified than
+before (§2c of `d2e570ad`: three proportional three-zone holds are collinear,
+`cond(U) = 730`, and cannot separate diagonal from off-diagonal no matter how
+many are added — single-zone column steps are the only shape that resolves
+this).
 
 ## Why this capture exists
 
@@ -21,7 +50,20 @@ against each candidate:
 | self-consistent (coupling run's own diagonal) | 4.641 | `[0.207, 0.523, 1.027]` | `[0.145, 0.53, 0.90]` |
 
 The mixed matrix demands a negative duty from zone 1 and 2.085 from zone 2 —
-infeasible, and roughly triples the condition number. `587a34ae` ("Refuse a
+infeasible, and roughly triples the condition number.
+
+**Correction (2026-09-10, `d2e570ad`):** the table above computes `model_k_dc`
+from `tuned_baseline_20260831.json`, a preset file — not the board. The
+board's live diagonal (confirmed again this pass via `GET /api/zones`) is
+39.2459 / 31.9669 / 31.6810 °C/duty, not 31.96 / 23.48 / 21.74. On the live
+diagonal the shipped mixed matrix's condition number is **5.508**, not 14.194,
+and it solves to `u = [0.119, 0.532, 1.165]` at the same 70 °C hold — no
+negative duty, and only zone 2 mildly infeasible. The provenance guard's
+rationale is unaffected (mixing two experiments' halves is wrong regardless of
+magnitude), but the *measured* harm is smaller than originally reported, and
+the real justification for this capture is now the 12/19/31% per-row gain
+deficit `d2e570ad` measured directly against `cplval75`, not this table. See
+that audit for the corrected numbers throughout. `587a34ae` ("Refuse a
 coupling matrix assembled from two different experiments") added
 `coupling_matrix_provenance_ok()` in `zone_coupling_solve.c`, called from both
 `zone_coupling_solve_hold()` and `zone_coupling_solve_climb()`: if the system
@@ -61,20 +103,17 @@ published through `kiln_call`/`kiln_find` on the `kilnctrl` MCP server), one
 per zone, from a rested baseline, each followed by full cooldown before the
 next. No firmware change, no new MCP tool.
 
-## Precondition 0 — the bench heat path must be confirmed working first
+## Precondition 0 — bench heat path: CONFIRMED working
 
-`docs/audits/cplval75_aborted_executor_panic_2026-09-09.md` recorded that the
-most recent attempt at a heating capture on this same profile shape got zero
+`docs/audits/cplval75_aborted_executor_panic_2026-09-09.md` recorded that an
+earlier attempt at a heating capture on this same profile shape got zero
 thermal response for 397 s while duty wound up to saturation on all three
-zones — mains power or a downstream element/wiring break, not a control
-defect. That run also panicked (`profile_executor`, unacknowledged crash
-report) independently of the no-heat finding. **Do not start this capture
-until the owner has physically confirmed heat reaches the kiln** (mains
-present, contactor closes, an element visibly glows or `ct_counts` moves
-under a manual relay-on test) and the outstanding crash report from that run
-has been reviewed/acknowledged. This document assumes that confirmation has
-already happened by the time anyone runs the steps below; it does not
-substitute for it.
+zones. That gate is now satisfied: a 13-minute proof run took the bench board
+from 36 °C to 53 °C, and `cplval75` subsequently completed a full 2h38m
+heating capture (three settled plateaus at 62/70/75 °C — see
+`docs/audits/cplval75_coupling_verdict_2026-09-10.md`, `d2e570ad`). The heat
+path is real and working; this gate does not need to be re-checked before
+running the steps below.
 
 Also confirm before starting:
 - `get_heap_status` — no unacknowledged crash banner.
@@ -128,9 +167,17 @@ Concretely, before each of the three zone steps:
 
 ## Step sizes, duration, and settling — confirmed not assumed
 
-Existing FOPDT fits: `model_tau_s` = 166.9 / 129.1 / 114.8 s for zones 0/1/2
-(`tools/PcTools/config_presets/tuned_baseline_20260831.json`). The worst case
-is zone 0's 166.9 s.
+**2026-09-10 correction:** the durations below were originally derived from
+`model_tau_s` = 166.9 / 129.1 / 114.8 s, read from
+`tools/PcTools/config_presets/tuned_baseline_20260831.json` — a preset file,
+not the board. Re-read live from the board this pass (`GET /api/zones`,
+2026-09-10): **`model_tau_s` = 263.8 / 269.8 / 270.9 s** for zones 0/1/2 — all
+three roughly 2.4× the preset values, and the worst case is now zone 2's
+270.9 s, not zone 0. (Live `model_k_dc` is likewise 39.2459 / 31.9669 /
+31.6810, not the preset's 31.96 / 23.48 / 21.74 — see the correction above.)
+This matters because dwell truncation is exactly the failure mode this floor
+exists to prevent: two earlier captures (`coupid6`, the aborted 2026-09-09
+run) were made unusable by dwells too short to settle.
 
 `docs/audits/dc_gain_factor_of_ten_2026-09-09.md` §5 specifies the
 duration floor this capture must clear, based on the previous unusable
@@ -146,10 +193,13 @@ Apply this per zone step:
   ceiling from a ~25–32 °C start, and comfortably clear of the ceiling even
   accounting for the small cross-heat the other two (undriven, duty≈0)
   zones will show.
-- **Minimum wall clock per step:** 8 × 166.9 s ≈ 1335 s ≈ **22.5 minutes**,
-  rounded up to **25 minutes** minimum before the fit is even considered;
-  do not shorten this to zone 1/2's smaller τ — one duration floor for all
-  three keeps the three columns comparable.
+- **Minimum wall clock per step:** 8 × 270.9 s ≈ 2167 s ≈ **36.1 minutes**,
+  rounded up to **37 minutes** minimum before the fit is even considered;
+  do not shorten this to zone 0/1's smaller τ — one duration floor for all
+  three keeps the three columns comparable. (This floor is worst-case-zone
+  driven and is now 270.9 s's, not 166.9 s's — recompute it again from
+  `GET /api/zones` if the board's fitted `model_tau_s` changes before this
+  capture runs.)
 - **Settling is confirmed by the firmware's own gate, not by a fixed timer.**
   `autotune_finalize_fit()`'s persist path only writes the coupling cells
   when `s_at.model.settled && s_at.model.extrapolation_converged &&
@@ -162,7 +212,7 @@ Apply this per zone step:
   (`MAX_EXTRAPOLATION_RATIO = 2.0` in `pid_autotune.c` bounds it, but the
   audit's own truncated-trace table shows −6% to −69% bias, which is not
   acceptable for a matrix meant to replace the current fallback). If
-  `model_settled` is false after the 25-minute floor, let the run continue —
+  `model_settled` is false after the 37-minute floor, let the run continue —
   the firmware's own 4-hour backstop is the real ceiling, not this
   document's estimate.
 
@@ -206,11 +256,23 @@ directly comparable to `coupid6`/`cpl_z*`/`cplval75`:
 ## Total kiln time, and splitting across sessions
 
 Per zone: rested-wait (typically well under the 3600 s timeout once the
-board has been sitting idle) + ≥25 min step + a cooldown-to-`T_amb0` wait
+board has been sitting idle) + ≥37 min step + a cooldown-to-`T_amb0` wait
 before the next zone's step (natural convective cooling; budget 30–60 min
 based on the `cooldown_after_*` tails already in `logs/coupling/`). Call it
-roughly **1.5–2 hours per zone**, **4.5–6 hours total** for all three
-columns plus the final validation hold below.
+roughly **1.75–2.25 hours per zone**, **~5.5–6.5 hours total** for the three
+columns.
+
+Add one fresh 45 °C three-zone hold for the widened acceptance test below
+(rested-wait + ≥37 min hold + cooldown, same shape as a column step): roughly
+**1–1.5 hours** more.
+
+**The 70 °C and 75 °C validation holds do NOT need to be re-run** — they
+already exist as genuinely held-out settled data (`cplval75`,
+`docs/audits/cplval75_coupling_verdict_2026-09-10.md`, `d2e570ad`), saving
+roughly two hours versus the original plan. **Total new kiln time for this
+capture: roughly 6.5–8 hours** (three columns + one new 45 °C hold), against
+an original estimate of 4.5–6 hours that used an understated step duration
+and included a validation hold that turned out to be unnecessary.
 
 **This can be split across sessions, zone by zone, without invalidating the
 result** — each zone's step supplies its own diagonal and its own row of
@@ -227,50 +289,75 @@ same few-day window, note the run timestamps in the committed observations
 doc, and do not "top up" one stale column later without re-running the whole
 set.
 
-## Acceptance test — defined now, before any data exists
+## Acceptance test — pinned now, against data that already exists
 
 Project memory: *"a matrix with 'coverage of 1' needs a prediction that
 tests it"* — the standing lesson from `project_coupling_matrix_resolved` and
-the negative-test discipline in `CLAUDE.md`. This is that prediction, fixed
-before the capture runs so it cannot be tuned to fit afterward.
+the negative-test discipline in `CLAUDE.md`. This is that prediction. As of
+the 2026-09-10 revision, two of the three points it is tested against already
+exist as genuinely held-out data and are pinned here **before** the new
+capture runs, so nothing about the criterion can be tuned to fit afterward.
 
 1. **Condition number.** Compute `cond(G)` (2-norm) for the freshly
    assembled self-consistent matrix using the real solver path (not a
-   reimplementation). **Must be < 10.** For reference: the rejected mixed
-   matrix measured 14.194; the single coupling-run-diagonal candidate
-   measured 4.641. A result at or above 10 means the joint identification
-   did not actually resolve the mismatch and should not be adopted.
-2. **Falsifying prediction — a fresh three-zone hold.** Before running it,
-   compute the solver's predicted steady-state duty `u_pred =
-   G⁻¹(T_sp·[1,1,1] − T_amb)` for a **70 °C three-zone hold** (choosing 70 °C
-   specifically because it is the exact setpoint the two candidate matrices
-   were already compared at in `3605f278`, so this run is directly
-   comparable to that table). Record `u_pred` in the observations doc before
-   starting the hold.
-3. **Run the hold** for ≥8 τ (≥25 min, same floor as the column steps),
-   averaging observed duty over the final 10 minutes on all three zones, and
+   reimplementation). **Must be < 10.** For reference: the shipped mixed
+   matrix measures **5.508** on the live diagonal (not 14.194 — that figure
+   used the stale preset diagonal, see the correction above); the single
+   coupling-run-diagonal candidate measured 4.641. A result at or above 10
+   means the joint identification did not actually resolve the mismatch and
+   should not be adopted.
+2. **Falsifying prediction — pinned now, from existing held-out holds.**
+   `cplval75` (`docs/audits/cplval75_coupling_verdict_2026-09-10.md`,
+   `d2e570ad`) already contains two settled, full three-zone holds that were
+   never used to fit any column step and remain valid held-out validation
+   data for a jointly identified matrix:
+
+   ```
+   u(62 °C) = [0.168, 0.371, 0.591]   ambient 29.19 / 29.07 / 29.03 °C
+   u(70 °C) = [0.176, 0.479, 0.759]   (+~2 °C drift by the 75 °C plateau)
+   u(75 °C) = [0.176, 0.545, 0.853]
+   ```
+
+   The 70 °C plateau is settled at 6.8 τ (temperature std ≤ 0.27 °C, duty
+   flat); the 75 °C plateau is stronger, 10.2 τ, std ≤ 0.33 °C. **Add one new
+   fresh 45 °C three-zone hold** to widen the span from 1.4× to ~2.9× in
+   rise, wide enough to separate a per-row scale error from a constant
+   offset (§2d of `d2e570ad` found the 62–75 °C span alone could not). Before
+   running the 45 °C hold, compute and record `u_pred = G⁻¹(T_sp·[1,1,1] −
+   T_amb)` for it from the freshly assembled matrix, the same way `u_pred`
+   would be computed for 62/70/75 °C — this is the only leg of the
+   prediction not already pinned by existing data.
+3. **Run the new 45 °C hold** for ≥8 τ (≥37 min, same floor as the column
+   steps — recompute from live `model_tau_s` if it has changed), averaging
+   observed duty over the final 10 minutes on all three zones, and
    confirming settlement the same way `coupid6` failed to: duty must be
    flat, not still monotonically drifting, at the end of the averaging
    window.
 4. **Pass/fail:** the fit is accepted only if every zone's observed settled
    duty is within **0.05 duty (absolute) or 15% (relative), whichever is
-   looser**, of `u_pred`. This is deliberately close to the 0.01–14% the
-   self-consistent-diagonal candidate already achieved against the OLD
-   mixed-off-diagonal matrix in `3605f278` — a jointly identified matrix
-   should do at least as well as that partial fix did.
+   looser**, of `u_pred`, at **all four** plateaus — 45 °C (new) and 62/70/75
+   °C (existing `cplval75` data, pinned above). A matrix that passes only the
+   three existing points and misses the new low-ΔT one has a scale/offset
+   ambiguity the wider span exists to catch.
 5. **What would falsify it:** `u_pred` and the observed duty disagreeing
-   outside that band on any zone, OR any zone's duty still trending
-   (non-flat) at the end of the averaging window (the `coupid6` failure
-   mode), OR the solve reporting `COUPLING_SOLVE_FALLBACK_MIXED_PROVENANCE`
-   at any point during the hold (meaning the guard itself does not consider
-   the persisted matrix self-consistent — check this via the `control`
-   capture's `bd_coupling_correction`/`ff_hold_used_matrix` fields, matching
-   `cplval75`'s own diagnostic use of `ff_hold_used_matrix`).
-6. Separately, confirm the `ff_hold` infeasibility boundary moves the same
-   direction `3605f278`'s simulation predicted: no infeasible tick below
-   ~62 °C (`project_ff_hold_infeasible_above_62c`'s documented boundary),
-   consistent with that audit's simulated 63.3 °C first-infeasible point for
-   the self-consistent matrix.
+   outside that band on any zone at any of the four plateaus, OR the new
+   hold's duty still trending (non-flat) at the end of its averaging window
+   (the `coupid6` failure mode), OR the solve reporting
+   `COUPLING_SOLVE_FALLBACK_MIXED_PROVENANCE` at any point (meaning the guard
+   itself does not consider the persisted matrix self-consistent — check via
+   the `control` capture's `bd_coupling_correction`/`ff_hold_used_matrix`
+   fields, matching `cplval75`'s own diagnostic use of that flag).
+6. **First-infeasible boundary — rewritten 2026-09-10, reversed from the
+   original criterion.** `d2e570ad` §3 shows the previously documented
+   ~62 °C `ff_hold_infeasible` boundary was the OLD matrix's z2-row gain
+   deficit announcing itself (predicted `u=1` at ΔT=38.2 °C), not a plant
+   power limit — `cplval75` measured z2 actually holding at duty 0.853 at
+   ΔT=46 °C, well past that boundary. The freshly assembled matrix must
+   therefore push its own solved first-infeasible ΔT (`1/`, on the diagonal
+   of `G⁻¹`, per zone) out past **ΔT = 51 °C** (≈80 °C bench ceiling minus a
+   ~29 °C ambient) on every zone. **Reproducing the old ~62 °C boundary is
+   now a FAIL, not a pass** — it would mean the new matrix carries the same
+   gain deficit as the old one.
 
 ## Bench limits — and what they mean, not just what they are
 
@@ -279,20 +366,24 @@ before the capture runs so it cannot be tuned to fit afterward.
   zone in the ESP-side config, confirmed in
   `tools/PcTools/config_presets/bench_fixture.json`). The owner's standing
   margin rule is ~5 °C, so **75 °C is the working maximum** for anything in
-  this capture, including the validation hold above.
-- `K_diag ≈ 38 °C/duty` (the coupling run's own diagonal) means a single
-  zone at full duty from ~25–32 °C ambient tops out around 63–70 °C on its
-  own; it **cannot** reach 40 °C above ambient at full duty. The documented
-  `ff_hold` infeasibility above ~62 °C is a direct, structural consequence
-  of this gain, not a bug to be engineered around — a three-zone hold
-  request above that boundary can genuinely demand more combined duty than
-  the plant can supply, and the correct system behavior there is the
-  feedforward saturating/reporting infeasible, not silently under-heating.
-  This capture's validation hold (70 °C) is deliberately chosen to sit just
-  past that boundary, matching `3605f278`'s own comparison point, so a small
-  amount of `ff_hold_infeasible` near the end of ramp-in is expected and not
-  itself a failure of the acceptance test — the pass/fail criterion above is
-  about the *settled* duty at hold, not the transient into it.
+  this capture, including the new 45 °C plateau and the three column steps.
+- **Corrected 2026-09-10 (`d2e570ad` §3).** The original text here claimed
+  the documented `ff_hold` infeasibility above ~62 °C was "a direct,
+  structural consequence of [the coupling run's own ~38 °C/duty diagonal],
+  not a bug to be engineered around." **That is wrong as stated and is
+  refuted by `cplval75`:** the ~62 °C boundary is the shipped matrix's z2-row
+  gain deficit (§2–3 of `d2e570ad`) predicting saturation at ΔT=38.2 °C,
+  while the plant itself was measured holding z2 at duty 0.853 at ΔT=46 °C —
+  4 °C of ΔT and roughly 0.15 duty of headroom past where the old matrix
+  claimed the plant ran out of power, with no sign of actually saturating.
+  Extrapolating the three measured points puts the real `u₂=1` boundary near
+  ΔT≈51–53 °C, i.e. a setpoint at or above the 80 °C ceiling — not 62 °C.
+  **Do not treat a ~62 °C infeasibility boundary as expected or acceptable
+  from a jointly identified matrix** (see acceptance step 6 above, reversed
+  accordingly). Some infeasibility very close to the 75–80 °C ceiling on z2
+  is still plausible and is not itself a failure of the acceptance test,
+  which is about the *settled* duty at each of the four hold plateaus, not
+  the transient into them.
 
 ## What this capture will and will not establish
 
