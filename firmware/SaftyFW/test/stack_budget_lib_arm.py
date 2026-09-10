@@ -149,6 +149,52 @@ BLX_REG_RE = re.compile(r"\bblx\t(r\d+|sl|fp|lr|ip)\b")
 WORD_RE = re.compile(r"^\s*([0-9a-f]+):\s+[0-9a-f]+\s+\.word\s+0x([0-9a-f]+)\s*$")
 LDR_PC_RE = re.compile(r"\bldr\t(r\d+|sl|fp|lr|ip), \[pc, #\d+\]\s*@ \(([0-9a-f]+)")
 
+# 2026-09-10 (opus review, round 2): ldr_pc_regs tracked "this register was
+# last loaded from this PC-relative literal address" but was NEVER
+# invalidated when that register was subsequently clobbered by anything
+# other than another `ldr rN, [pc, #imm]` -- not a `movs rN, #imm`, not a
+# `mov rN, rM`, not a `pop {..., rN, ...}`, not a `bl` (which trashes
+# r0-r3/r12/lr per AAPCS). A later, unrelated `add sp, rN` could then resolve
+# against a STALE literal address left over from an earlier, unconnected
+# load into the same register -- adding a WRONG byte count to frames[cur]
+# and marking the function `resolved = True`, which clears regsp_adjust and
+# silently drops the INDETERMINATE tag. That is exactly the "confidently
+# wrong, not just incomplete" failure this whole literal-resolution feature
+# was added to fix, reappearing one level down. Fix: track every register
+# write on every disassembly line (generic data-processing/load mnemonics,
+# `pop {..}`, and `bl`'s AAPCS-clobbered set) and drop that register out of
+# ldr_pc_regs the moment anything but a fresh `ldr rN,[pc,#imm]` writes it.
+# When in doubt (a write we don't recognize the shape of), we still prefer
+# to invalidate -- a spurious INDETERMINATE costs nothing but honesty; a
+# missed invalidation reintroduces the bug this note describes.
+_REGSP_TRACKED_REG_RE = r"(r\d+|sl|fp|lr|ip)"
+GENERIC_WRITE_RE = re.compile(
+    r"\b(movs?|mvns?|adds?|subs?|lsls?|lsrs?|asrs?|rors?|ands?|orrs?|orns?|eors?|"
+    r"bics?|muls?|mlas?|sdiv|udiv|rsbs?|adcs?|sbcs?|ldr|ldrb|ldrh|ldrsb|ldrsh|"
+    r"rev|rev16|revsh|sxtb|sxth|uxtb|uxth)\t" + _REGSP_TRACKED_REG_RE + r"\b")
+POP_RE = re.compile(r"\bpop\t\{([^}]*)\}")
+# AAPCS: a `bl`/`blx` call may clobber r0-r3, r12 (ip) and lr (the link
+# register itself is overwritten with the return address).
+BL_CLOBBERS = ("r0", "r1", "r2", "r3", "ip", "lr")
+
+
+def _invalidate_clobbered_regs(line, ldr_pc_regs):
+    """Drop any register from ldr_pc_regs that this disassembly line
+    redefines by any means OTHER than a fresh `ldr rN, [pc, #imm]` (that
+    case is (re-)established by the caller right after this runs)."""
+    p = POP_RE.search(line)
+    if p:
+        for r in (x.strip() for x in p.group(1).split(",")):
+            ldr_pc_regs.pop(r, None)
+        return
+    if BL_RE.search(line) or BLX_REG_RE.search(line):
+        for r in BL_CLOBBERS:
+            ldr_pc_regs.pop(r, None)
+        return
+    m = GENERIC_WRITE_RE.search(line)
+    if m:
+        ldr_pc_regs.pop(m.group(2), None)
+
 
 def _s32(word):
     """Reinterpret an unsigned 32-bit word as signed."""
@@ -278,6 +324,10 @@ def parse(objdump, elf):
                 # the literal could not be found -- genuinely can't measure
                 # this one, so it stays INDETERMINATE (see module docstring).
                 regsp_adjust[cur] = True
+        # Invalidate any register this line redefines by a means other than
+        # the `ldr rN, [pc, #imm]` handled just below -- see
+        # _invalidate_clobbered_regs' docstring ("stale literal" bug, 2026-09-10).
+        _invalidate_clobbered_regs(line, ldr_pc_regs)
         if ldr:
             ldr_pc_regs[ldr.group(1)] = int(ldr.group(2), 16)
         c = BL_RE.search(line)
