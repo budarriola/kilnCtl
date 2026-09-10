@@ -57,6 +57,11 @@ extern "C" {
 // near-zero number.
 #define FIRING_SCORE_RAMP_MIN_RATE_C_PER_HR 10.0f
 
+// Dwell-entry peak is smoothed with this EMA time constant before the max is
+// taken (see firing_score_seg_tick()'s comment) -- one heater_output.c PWM
+// window, the natural period of the on/off ripple this is filtering out.
+#define FIRING_SCORE_ENTRY_SMOOTH_TAU_S 60.0f
+
 // Lag histogram: 512 bins of 2 s covers 0..1024 s of tracking lag at 2 s
 // median resolution. A streaming histogram rather than a stored tick array
 // because this module runs on the target with a fixed, small footprint --
@@ -129,6 +134,7 @@ typedef struct {
     uint32_t lag_samples;
     bool  entry_seen;
     float entry_peak_c;
+    float entry_err_ema_c;     // PWM-window-smoothed error; see firing_score.c's entry-peak comment
     uint32_t steady_ticks;
     double steady_sumsq;
 } firing_score_seg_t;

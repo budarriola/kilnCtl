@@ -96,8 +96,24 @@ void firing_score_seg_tick(firing_score_seg_t *seg, bool *zone_captured, float t
         }
     } else {
         if (seg->elapsed_s <= seg->entry_window_s) {
-            if (!seg->entry_seen || err > seg->entry_peak_c) {
-                seg->entry_peak_c = err;
+            // Smooth over one PWM window before taking the max: a neighbour
+            // zone's coupling contribution (sim_plant.c's additive model,
+            // d63a5591) is driven directly by that zone's commanded duty,
+            // which chops on/off every heater_output.c PWM window -- real
+            // physics, not sensor noise, but a single unlucky tick sampled
+            // right on a neighbour's "on" edge otherwise sets entry_peak_c
+            // from one instant rather than the actual overshoot trajectory.
+            // A genuine overshoot from a real gain change persists across
+            // many ticks (this zone's own tau is ~265-271 s -- see
+            // sim_measured_zone_constants.h), so smoothing at the PWM
+            // window's timescale removes the ripple without blunting real
+            // signal. EMA, not a stored ring buffer, to match this module's
+            // fixed-footprint posture (same technique as sim_plant.c's own
+            // sensor_pipeline_step() lag filter).
+            float alpha = dt_s / (FIRING_SCORE_ENTRY_SMOOTH_TAU_S + dt_s);
+            seg->entry_err_ema_c = seg->entry_seen ? (seg->entry_err_ema_c + alpha * (err - seg->entry_err_ema_c)) : err;
+            if (!seg->entry_seen || seg->entry_err_ema_c > seg->entry_peak_c) {
+                seg->entry_peak_c = seg->entry_err_ema_c;
                 seg->entry_seen = true;
             }
         } else {
