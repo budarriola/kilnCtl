@@ -1,0 +1,59 @@
+# cplval45 (user slot #0, temporarily overwriting 'cplval75' -- restored after)
+# hardware capture, 2026-09-10, 13:19-14:19 local.
+# Raw capture: logs/coupling/cplval45_20260910.jsonl (5 s /api/profile_exec +
+# /api/status + /api/control poll, one JSON object per line: {"t","exec",
+# "status","control"}). Stays local (.gitignore:100 excludes logs/**/*.jsonl);
+# this file is the derived, committed summary. Converted to the
+# HH:MM:SS-{exec} form coupled_ident_report expects at
+# logs/coupling/cplval45_20260910_examexec.jsonl (also local, same gitignore
+# pattern -- not committed).
+#
+# Purpose: discriminate per-row SCALE vs constant OFFSET as the explanation
+# for the coupling matrix's forward-residual error found in cplval75
+# (docs/audits/cplval75_coupling_verdict_2026-09-10.md, commit d2e570ad).
+# Pre-registered BEFORE this measurement (docs/audits/
+# cplval45_scale_vs_offset_aborted_2026-09-10.md, commit 238e0eb9):
+#   z2 forward residual (G.u - dT) ~= -2.9 C if SCALE, ~= -8.4 C if OFFSET.
+#
+# Single segment: target=45.0C, ramp=60.0C/hr, dwell=60min, zone_mask=0x7.
+# Live model_tau_s ~= 264-271s (8 tau ~= 36 min) -- dwell sized past that.
+# Window is the FINAL 600s (10 min) of the dwell, confirmed settled by
+# temp_std_c and duty flatness, not assumed from elapsed time. Actual dwell
+# ran 2758s (~46 min, ~10.4 tau @ tau=264s) before being stopped manually.
+#
+# ambient convention: capture's first zone temperature reading after the
+# profile started (coupled_ident.py::_run_ambient's convention), NOT the
+# pre-flight baseline -- matches cplval75's methodology so the two captures
+# are comparable.
+#
+# target_c  zone  dwell_duration_s  dwell_tau_count  ambient_c  mean_temp_c  temp_std_c  mean_duty  dT_c
+45.0	0	2758	10.45	34.45	44.989	0.476	0.1485	10.539
+45.0	1	2758	10.45	34.42	45.057	0.358	0.1672	10.637
+45.0	2	2758	10.45	34.23	45.028	0.347	0.1864	10.798
+#
+# Forward residual (G.u - dT_observed), G = coupling matrix with off-diagonals
+# as stored on-board and diagonal substituted from live model_k_dc
+# (39.2459 / 31.9669 / 31.6810 C/duty -- unchanged from cplval75's reading
+# earlier the same day), u = mean_duty vector above:
+#
+#   zone0: Gu=14.446  dT=10.539  residual=+3.907  (Gu/dT=1.371)
+#   zone1: Gu=11.599  dT=10.637  residual=+0.962  (Gu/dT=1.090)
+#   zone2: Gu= 9.220  dT=10.798  residual=-1.578  (Gu/dT=0.854)
+#
+# z2 residual = -1.58 C. Neither pre-registered figure exactly: about 45% of
+# the SCALE prediction's magnitude (-2.9 C) and less than a fifth of the
+# OFFSET prediction's magnitude (-8.4 C). Same SIGN as the SCALE prediction
+# and the 62/70/75C run's z2 sign; the OFFSET hypothesis (a constant error
+# independent of dT) is decisively excluded -- an ~8.4C error at dT~10.8C
+# would mean the matrix predicts a NEGATIVE required duty, which is not what
+# was observed. SCALE is the better-supported hypothesis, though the
+# magnitude undershoots the naive linear extrapolation from the 62-75C data
+# (ratio-based scaling from z2's 75C point predicts ~-2.5C at this dT), a gap
+# plausibly explained by: this plateau's smaller dT giving proportionally
+# larger relative noise (temp_std/dT ~=3.2% here vs <1% at 75C), and/or the
+# per-row scale factor itself not being dT-invariant down to dT~11C.
+#
+# z0 residual flips SIGN relative to the 62-75C runs (+3.91 here vs -3.36/
+# -4.28/-5.58 there) -- the matrix now OVER-predicts z0's required duty at
+# this low dT. This is new information not covered by either pre-registered
+# hypothesis and is worth a follow-up look; see the audit doc.
