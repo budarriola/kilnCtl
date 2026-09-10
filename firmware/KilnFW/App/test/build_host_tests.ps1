@@ -329,7 +329,13 @@ try {
             # + ESP-glue objects in, same convention as every other plain .c
             # this executable already links alongside its #included sources.
             "`"$(Join-Path $driversDir 'safety/safety_ceiling_policy.c')`" " +
-            "`"$(Join-Path $driversDir 'safety/safety_ceiling_sync.c')`""
+            "`"$(Join-Path $driversDir 'safety/safety_ceiling_sync.c')`" " +
+            # 2026-09-10 opus review finding A: safety_ceiling_sync.c now calls
+            # hal_time_now_us() (its own reconcile backoff timer, replacing a
+            # direct esp_timer_get_time() call the HAL include-boundary check
+            # refuses) -- fake_time.c supplies it here, same convention as
+            # every other hal_time_now_us() caller linked into this suite.
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`""
     # fake_kv.c/hal_status.c/hal_esp_common.c added HW_ABSTRACTION.md Phase 3
     # item 3 (nvs.h -> hal_kv.h migration): zones_http.c/zones_config_store.c now
     # call hal_kv_*()/hal_status_to_esp_err() instead of nvs_*() directly, and
@@ -356,10 +362,18 @@ try {
     # ARE faked in test_safety_cfg_http.c itself, same "own stub, real
     # accessor links into a different executable" reasoning as the CT
     # calibration fakes already there.
+    # 2026-09-10 (opus review round 2, defect B fix): safety_cfg_http.c's
+    # rate_guard_gather_and_estimate() now calls the REAL
+    # zone_coupling_matrix_provenance_ok()/zone_coupling_use_measured_diag_
+    # k_dc() (zone_coupling_solve.c) instead of reimplementing the rule by
+    # hand, so that source must link into this executable too -- pure,
+    # host-testable logic with no store/link dependency of its own, same
+    # reasoning as s8_rate_guard_estimate.c just above.
     $exe3 = Join-Path $outDir "kilnctl_host_tests_safety_cfg_http.exe"
     $cmd3 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$outDir\\`" /Fe:`"$exe3`" `"$(Join-Path $testDir 'test_safety_cfg_http.c')`" " +
-            "`"$(Join-Path $driversDir 'control/s8_rate_guard_estimate.c')`""
+            "`"$(Join-Path $driversDir 'control/s8_rate_guard_estimate.c')`" " +
+            "`"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`""
 
     Invoke-HostTestExe -Name "safety_cfg_http" -ExePath $exe3 -BuildCmd $cmd3
 
@@ -1216,6 +1230,48 @@ try {
 
     Invoke-HostTestExe -Name "s8_rate_guard_estimate" -ExePath $exe35 -BuildCmd $cmd35
 
+    # ---- sim_iter_tune.exe / sim_wide_temp_sweep.exe: data-generating
+    # harnesses (ITER_TUNE_REDESIGN_PLAN.md sec 6/7), not TEST_CHECK
+    # pass/fail suites -- their stdout is the evidence for the audit docs
+    # they feed, not a verdict. Until 2026-09-10 NEITHER had any build
+    # recipe anywhere in the tree (confirmed by grep) -- both were edited by
+    # the additive-coupling-model change (d63a5591) and compiled clean by
+    # hand at review time, but that means every prior edit to either file
+    # went in completely unverified by any automated path. Build them here,
+    # informationally, same as sim_credibility_gate below: never counted in
+    # $totalExpected/buildFailures/failedExes (they take bench captures /
+    # profile arguments this script does not have and are not meant to run
+    # unattended), but a build failure here is now visible instead of silent.
+    $exeIterTune = Join-Path $outDir "kilnctl_sim_iter_tune.exe"
+    $cmdIterTune = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$outDir\\`" /Fe:`"$exeIterTune`" `"$(Join-Path $testDir 'sim_iter_tune.c')`" " +
+            "`"$(Join-Path $testDir 'sim_plant.c')`" " +
+            "`"$(Join-Path $driversDir 'control/pid.c')`" `"$(Join-Path $driversDir 'control/heater_output.c')`" " +
+            "`"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`" " +
+            "`"$(Join-Path $driversDir 'control/firing_score.c')`" `"$(Join-Path $driversDir 'control/firing_compare.c')`" " +
+            "`"$(Join-Path $driversDir 'control/iter_tune.c')`""
+    if (Test-Path $exeIterTune) { Remove-Item -Force $exeIterTune }
+    cmd.exe /c $cmdIterTune
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $exeIterTune)) {
+        Write-Host "BUILD FAILED: sim_iter_tune (informational only, does not fail this script)"
+    } else {
+        Write-Host "sim_iter_tune: BUILD OK (data-generating harness, not run automatically -- see file header for usage)"
+    }
+
+    $exeWideSweep = Join-Path $outDir "kilnctl_sim_wide_temp_sweep.exe"
+    $cmdWideSweep = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$outDir\\`" /Fe:`"$exeWideSweep`" `"$(Join-Path $testDir 'sim_wide_temp_sweep.c')`" " +
+            "`"$(Join-Path $testDir 'sim_plant.c')`" " +
+            "`"$(Join-Path $driversDir 'control/pid.c')`" `"$(Join-Path $driversDir 'control/heater_output.c')`" " +
+            "`"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`""
+    if (Test-Path $exeWideSweep) { Remove-Item -Force $exeWideSweep }
+    cmd.exe /c $cmdWideSweep
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $exeWideSweep)) {
+        Write-Host "BUILD FAILED: sim_wide_temp_sweep (informational only, does not fail this script)"
+    } else {
+        Write-Host "sim_wide_temp_sweep: BUILD OK (data-generating harness, not run automatically -- see file header for usage)"
+    }
+
     # ---- sim_credibility_gate.exe: ITER_TUNE_REDESIGN_PLAN.md sec 6.5's
     # model credibility gate (docs/audits/sim_credibility_gate_real_cause_2026-09-10.md).
     # Not run through Invoke-HostTestExe and NOT counted in $totalExpected /
@@ -1226,19 +1282,27 @@ try {
     #      silently pass -- the gate already refuses to run without them
     #      and prints why; that SKIP must stay visibly distinct from the
     #      main pass count, not vanish into it either direction.
-    #   2. Even WITH the captures present, this gate has one bar that is
-    #      currently, honestly open (the dwell-entry overshoot PEAK bar --
-    #      see the audit doc sec 6/8 candidates 1-3, none yet implemented)
-    #      on top of the noise-floor spread bar it feeds. Folding a gate
-    #      with a known-open bar into the blocking build would either turn
-    #      every host-test run red for a known, tracked reason (masking
-    #      genuine regressions in the noise) or force loosening a bar to
+    #   2. Even WITH the captures present, this gate currently FAILS on
+    #      multiple bars, not one -- as of 2026-09-10, against the two
+    #      checked-in captures: dwell offset fails 5 of 6 zone/capture
+    #      cells (up to -4.82C against a +/-1.5C bar); z2 CALIBRATION ramp
+    #      MAE (3.367C) exceeds its own 3.0C bar; the dwell-entry overshoot
+    #      PEAK bar fails 2 of 12 evaluable cells (6 more are structurally
+    #      UNEVALUABLE -- segment 2 occurs in a single capture tick); and
+    #      the noise-floor spread check fails 4 of 6 cells. See the gate's
+    #      own "-- honest per-bar tally --" output for the current counts;
+    #      do not summarize this as "one known-open bar" anywhere -- that
+    #      framing was wrong and made new regressions indistinguishable
+    #      from the pre-existing failures. Folding a gate that fails this
+    #      broadly into the blocking build would either turn every
+    #      host-test run red for reasons already tracked here (masking a
+    #      genuine NEW regression in the noise) or force loosening bars to
     #      make it pass -- both worse than surfacing it informationally.
     # So: build it, run it if the captures exist, print its own PASS/FAIL/
-    # SKIP line, but never let its exit code affect this script's own exit
-    # code. This is strictly better than the prior state (referenced by no
-    # build recipe at all, so nothing re-ran it) without pretending the
-    # dwell-entry-peak gap is closed.
+    # SKIP line and per-bar tally, but never let its exit code affect this
+    # script's own exit code. This is strictly better than the prior state
+    # (referenced by no build recipe at all, so nothing re-ran it) without
+    # pretending the gaps above are closed.
     $exeGate = Join-Path $outDir "kilnctl_sim_credibility_gate.exe"
     $cmdGate = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$outDir\\`" /Fe:`"$exeGate`" `"$(Join-Path $testDir 'sim_credibility_gate.c')`" " +
@@ -1252,12 +1316,15 @@ try {
         $calPath = Join-Path $repoRoot "logs\coupling\noise_floor_p7_run1.jsonl"
         $holdPath = Join-Path $repoRoot "logs\coupling\noise_floor_p7d_run1.jsonl"
         $nfPath = Join-Path $repoRoot "tools\PcTools\config_presets\noise_floor.json"
-        & $exeGate $calPath $holdPath $nfPath
+        $gateOutput = & $exeGate $calPath $holdPath $nfPath
+        $gateOutput | ForEach-Object { Write-Host $_ }
+        $script:simCredibilityGateTally = ($gateOutput | Select-String -Pattern "^\s*(ramp MAE|dwell offset|dwell-entry peak|noise-floor spread):") -join "`n"
         switch ($LASTEXITCODE) {
-            0 { Write-Host "sim_credibility_gate: PASS" }
-            3 { Write-Host "sim_credibility_gate: SKIP (captures not present locally -- gitignored, expected on a fresh clone)" }
-            default { Write-Host "sim_credibility_gate: FAIL (informational only, does not fail this script -- see its own output above and docs/audits/sim_credibility_gate_real_cause_2026-09-10.md for the known-open dwell-entry-peak bar)" }
+            0 { $script:simCredibilityGateLine = "sim_credibility_gate: PASS" }
+            3 { $script:simCredibilityGateLine = "sim_credibility_gate: SKIP (captures not present locally -- gitignored, expected on a fresh clone)" }
+            default { $script:simCredibilityGateLine = "sim_credibility_gate: FAIL (informational only, does not fail this script -- see the per-bar tally above/below and docs/audits/sim_credibility_gate_real_cause_2026-09-10.md)" }
         }
+        Write-Host $script:simCredibilityGateLine
     }
 
     # ---- summary ----------------------------------------------------------
@@ -1303,6 +1370,16 @@ try {
     # docs/audits/s8_auto_calc_design_2026-09-09.md).
     $totalExpected = 34
     Write-Host ""
+    if ($script:simCredibilityGateLine) {
+        # Non-blocking, but its verdict must not scroll off above the
+        # summary unseen (2026-09-10: a non-blocking check whose result is
+        # printed once, above a page of other output, and read by nothing
+        # is close to the "reports green with zero coverage" shape this
+        # repo has been burned by before). Repeat it here.
+        Write-Host $script:simCredibilityGateLine
+        if ($script:simCredibilityGateTally) { Write-Host $script:simCredibilityGateTally }
+        Write-Host ""
+    }
     Write-Host "Built: $($script:builtExes.Count)/$totalExpected executables"
     if ($script:buildFailures.Count -gt 0) {
         Write-Host "BUILD FAILURES ($($script:buildFailures.Count)) -- these did not even run:"
