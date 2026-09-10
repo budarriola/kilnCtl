@@ -32,6 +32,31 @@
   non-hash token (an MPN, a register value, a CRC) that a human confirmed is
   not meant to be a commit reference.
 
+  SUBMODULE HASHES: a citation can name a commit that lives in a submodule's
+  own history (e.g. `firmware/KilnFW/components/lvgl`) rather than this
+  repo's. Those hashes will never resolve against the parent repo no matter
+  how correct they are, so before failing a hash this script also tries it
+  against every submodule listed in .gitmodules (only submodules that are
+  actually initialized on disk are tried; an uninitialized submodule is
+  silently skipped for this purpose, not treated as a failure). This applies
+  automatically to any doc, not just ones about lvgl -- no per-doc
+  annotation is needed for a real submodule commit hash.
+
+  ILLUSTRATIVE / NOT-A-CITATION HASHES: prose sometimes needs to quote a
+  hash-shaped token that is NOT a citation -- e.g. discussing a fabricated
+  hash another session introduced by mistake ("not the fabricated
+  `abc1234`"). To avoid such a quote being flagged as a dangling citation
+  while not opening a loophole that lets a genuinely bad citation hide, the
+  ONLY recognised marker is the literal word "fabricated" immediately
+  preceding the backtick-quoted token (case-insensitive, e.g. "the
+  fabricated `abc1234`"). This is narrow by design: a real citation is never
+  phrased as "the fabricated `<hash>`" -- that phrasing asserts the hash is
+  fake, which is a claim a reviewer reading the prose would notice and
+  challenge if it were being used to smuggle a real, wrong citation past
+  this check. Tokens matched this way are reported separately as "excluded
+  (marked fabricated)" and are never counted as citations or checked for
+  existence.
+
   This script proves EXISTENCE only. It does not and cannot mechanically
   verify that a hash's commit actually supports the claim made about it
   (topical relevance) -- that requires reading the commit's diff/subject
@@ -76,10 +101,20 @@ $KnownNonHashFalsePositives = @(
     @{ File = 'hardware/mainBoard/todo.md'; Hash = '74269244182' }          # ferrite bead MPN
 )
 
-$hashPattern = '`([0-9a-f]{7,40})`'
+$hashPattern = '((?i:fabricated)\s+)?`([0-9a-f]{7,40})`'
 $failures = @()
 $totalCitations = 0
+$excludedFabricated = 0
 $uniqueChecked = @{}
+
+# Submodule paths (only ones actually initialized/checked out on disk are
+# usable as a resolution target). See header, "SUBMODULE HASHES".
+$submodulePaths = @()
+if (Test-Path '.gitmodules') {
+    $submodulePaths = (git config -f .gitmodules --get-regexp '\.path$') |
+        ForEach-Object { ($_ -split '\s+', 2)[1] } |
+        Where-Object { Test-Path (Join-Path $_ '.git') }
+}
 
 foreach ($file in $files) {
     if (-not (Test-Path $file)) { continue }
@@ -89,10 +124,14 @@ foreach ($file in $files) {
         $line = $_
         $matches_ = [regex]::Matches($line, $hashPattern)
         foreach ($m in $matches_) {
-            $hash = $m.Groups[1].Value
-            # Skip tokens that are pure decimal-looking or too short to be a
-            # meaningful abbreviated SHA (git's own minimum is 4, but this repo's
-            # convention is >=7 per the pattern above already).
+            $isFabricatedMarker = $m.Groups[1].Success
+            $hash = $m.Groups[2].Value
+            if ($isFabricatedMarker) {
+                # Marked as an illustrative/not-a-citation token -- see header.
+                $excludedFabricated++
+                continue
+            }
+
             $totalCitations++
             $uniqueChecked[$hash] = $true
 
@@ -102,19 +141,28 @@ foreach ($file in $files) {
             if ($isKnownFalsePositive) { continue }
 
             & git cat-file -e "$hash^{commit}" 2>$null 1>$null
-            if ($LASTEXITCODE -ne 0) {
-                $failures += [PSCustomObject]@{
-                    File = $file
-                    Line = $lineNum
-                    Hash = $hash
-                    Text = $line.Trim()
-                }
+            if ($LASTEXITCODE -eq 0) { continue }
+
+            # Not in the parent repo -- try each initialized submodule before
+            # declaring this a dangling citation. See header, "SUBMODULE HASHES".
+            $resolvedInSubmodule = $false
+            foreach ($subPath in $submodulePaths) {
+                & git -C $subPath cat-file -e "$hash^{commit}" 2>$null 1>$null
+                if ($LASTEXITCODE -eq 0) { $resolvedInSubmodule = $true; break }
+            }
+            if ($resolvedInSubmodule) { continue }
+
+            $failures += [PSCustomObject]@{
+                File = $file
+                Line = $lineNum
+                Hash = $hash
+                Text = $line.Trim()
             }
         }
     }
 }
 
-Write-Host "check_doc_hash_citations: $totalCitations citations, $($uniqueChecked.Count) unique hashes checked."
+Write-Host "check_doc_hash_citations: $totalCitations citations, $($uniqueChecked.Count) unique hashes checked, $excludedFabricated excluded (marked fabricated)."
 
 if ($failures.Count -gt 0) {
     Write-Host "FAIL: $($failures.Count) cited hash(es) do not resolve to a commit:" -ForegroundColor Red
