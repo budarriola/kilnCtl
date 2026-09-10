@@ -302,11 +302,38 @@ try {
     # siblings, see header) see a build that is current with the source they
     # just ran against -- not whatever was last built by hand, hours or days
     # ago.
+    #
+    # ATOMIC PUBLISH (2026-09-10, objdump-subprocess-error investigation):
+    # the ELF-reading checks (check_uart_log_bridge_stack_budget.py,
+    # check_all_task_stack_budgets.py, check_httpd/main/system_uart_bridge's
+    # own checkers) do NOT take "kilnfw_checkbuild_worktree" or any other
+    # lock while reading firmware\KilnFW\build\KilnCtrl.elf -- only this
+    # script and check_01_kilnfw_pushed_build.ps1 do. A plain `Copy-Item
+    # -Force` writes into the destination file IN PLACE, so a concurrent
+    # `run_all_checks.ps1` (or a manually-launched checker) that opens
+    # KilnCtrl.elf for objdump while this copy is mid-flight gets a
+    # partially-written file -- objdump then fails with a subprocess error
+    # that has nothing to do with the actual object code, and looks
+    # indistinguishable from a real toolchain problem unless you already
+    # know to suspect the race. Copying to a sibling temp file first and
+    # then Move-Item-ing (Force) it onto the final name makes the publish
+    # atomic from every reader's point of view: a reader that opens the
+    # path either sees the complete old file (rename hasn't happened yet)
+    # or the complete new file (rename already happened) -- there is no
+    # window where the path resolves to a half-written file, because the
+    # bytes are never written into that path directly. Same treatment for
+    # .bin for the same reason, even though nothing here currently reads it
+    # from build/ concurrently -- no reason to leave that side of the pair
+    # non-atomic once the hazard is understood.
     $mainBuildDir = Join-Path $repoRoot "firmware\KilnFW\build"
     New-Item -ItemType Directory -Force -Path $mainBuildDir | Out-Null
-    Copy-Item -Path $elfPath -Destination (Join-Path $mainBuildDir "KilnCtrl.elf") -Force
-    Copy-Item -Path $binPath -Destination (Join-Path $mainBuildDir "KilnCtrl.bin") -Force
-    Write-Host "Published fresh KilnCtrl.elf/.bin to $mainBuildDir"
+    $elfTmp = Join-Path $mainBuildDir "KilnCtrl.elf.tmp_$PID"
+    $binTmp = Join-Path $mainBuildDir "KilnCtrl.bin.tmp_$PID"
+    Copy-Item -Path $elfPath -Destination $elfTmp -Force
+    Copy-Item -Path $binPath -Destination $binTmp -Force
+    Move-Item -Path $elfTmp -Destination (Join-Path $mainBuildDir "KilnCtrl.elf") -Force
+    Move-Item -Path $binTmp -Destination (Join-Path $mainBuildDir "KilnCtrl.bin") -Force
+    Write-Host "Published fresh KilnCtrl.elf/.bin to $mainBuildDir (atomic rename)"
 } finally {
     Exit-BuildLock -Lock $lock
 }
