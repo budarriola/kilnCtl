@@ -505,41 +505,100 @@ static bool zone_cfg_committed_f32(uint16_t param_id, float *out)
     return false;
 }
 
-/* H3's repair, for this push -- see zone_sweep_unstage_ct_channels()'s own
- * comment for the full reasoning about why leftovers in the Pico's staged
- * buffer are a real hazard and why overwriting is the only available
- * remedy. Best-effort by construction, for the same reason. */
-static void zone_sweep_unstage_k_ct(uint8_t staged_mask, char *note, size_t note_cap)
-{
-    if (staged_mask == 0 || !s_hw_safety) {
-        return;
-    }
-    for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
-        if ((staged_mask & (1u << c)) == 0) {
-            continue;
-        }
-        float restore = ZONE_KCT_UNCOMMISSIONED;
-        (void)zone_cfg_committed_f32(ZONE_KCT_PARAM_ID(c), &restore);
-        kilnlink_param_value_t v;
-        memset(&v, 0, sizeof(v));
-        v.f32_val = restore;
-        if (safety_link_send_set_param(s_hw_safety, ZONE_KCT_PARAM_ID(c),
-                                       KILNLINK_PARAM_TYPE_F32, v) != ESP_OK) {
-            snprintf(note, note_cap,
-                     "CT scale staging failed and could NOT be backed out -- re-run the "
-                     "sweep before saving again");
-            return;
-        }
-    }
-}
-
 /* H1's verification, for this push. An ACKed, un-rejected COMMIT_CONFIG is
  * not proof anything was stored (zone_sweep_confirm_ct_map_landed()'s
  * comment) -- force a LIVE re-fetch and require every channel written to
  * read back as exactly the float that was sent. Exact equality is right
  * here, not a tolerance: the wire, config_store's record and this cache all
  * carry the identical IEEE-754 f32, so anything other than bit-equality
- * means the value did not land, not that it landed imprecisely. */
+ * means the value did not land, not that it landed imprecisely.
+ *
+ * Forward-declared: zone_sweep_unstage_k_ct() below (the restore path) needs
+ * to call this SAME check against its own restore values -- see that
+ * function's comment for why a restore that only stages and never commits
+ * is exactly the defect this reuse closes. */
+static bool zone_sweep_confirm_k_ct_landed(uint8_t mask, const float *k_new, char *reason,
+                                            size_t reason_cap);
+
+/* H3's repair, for this push -- see zone_sweep_unstage_ct_channels()'s own
+ * comment for the full reasoning about why leftovers in the Pico's staged
+ * buffer are a real hazard and why overwriting is the only available
+ * remedy.
+ *
+ * Opus review finding 2: this used to SET_PARAM the restore values and stop
+ * -- no COMMIT_CONFIG. That is harmless when the push's own COMMIT_CONFIG
+ * never landed (rejected, or the send itself failed): nothing was ever
+ * committed, so overwriting the Pico's STAGED buffer is enough to stop a
+ * later unrelated commit from picking up the stale bytes. But the caller
+ * also reaches this function after zone_sweep_confirm_k_ct_landed() fails on
+ * an ACKed, un-rejected commit -- meaning the push's COMMIT_CONFIG may well
+ * have actually landed. Staging the old value without committing it back
+ * leaves the Pico's COMMITTED record holding the new (bad-readback) value
+ * while the caller went on to report "not written". This function now
+ * commits the restore and verifies it landed the same way the original push
+ * did -- but ONLY when `commit_may_have_landed` says the push's own commit
+ * might actually have reached the Pico's committed record (an ACKed,
+ * un-rejected COMMIT_CONFIG whose read-back then failed to confirm). When
+ * the push's commit demonstrably never landed at all (a SET_PARAM failure,
+ * a rejected commit, or the commit send itself failing) the Pico's
+ * COMMITTED record cannot hold the new value, so overwriting the STAGED
+ * buffer is the whole remedy -- committing that restore too would just be
+ * an extra round trip with nothing at risk if skipped, and previous
+ * behaviour (and its host tests) already relied on no commit happening on
+ * that path.
+ *
+ * `prior` must be the value captured BEFORE this push started staging (the
+ * caller's own pre-push snapshot, not a possibly-just-refreshed cache read
+ * here) so a restore always targets the true prior state. Returns true once
+ * the restore is known-safe (either confirmed committed, or never needed to
+ * be); the caller must treat false as "unknown", never as "successfully
+ * backed out". */
+static bool zone_sweep_unstage_k_ct(uint8_t staged_mask, const float *prior, bool commit_may_have_landed,
+                                     char *note, size_t note_cap)
+{
+    if (staged_mask == 0 || !s_hw_safety) {
+        return true;
+    }
+    for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+        if ((staged_mask & (1u << c)) == 0) {
+            continue;
+        }
+        kilnlink_param_value_t v;
+        memset(&v, 0, sizeof(v));
+        v.f32_val = prior[c];
+        if (safety_link_send_set_param(s_hw_safety, ZONE_KCT_PARAM_ID(c),
+                                       KILNLINK_PARAM_TYPE_F32, v) != ESP_OK) {
+            snprintf(note, note_cap,
+                     "CT scale backout SET_PARAM failed -- UNKNOWN state, re-run the sweep");
+            return false;
+        }
+    }
+
+    if (!commit_may_have_landed) {
+        return true;
+    }
+
+    uint16_t reject_param_id = 0;
+    uint8_t reject_reason = 0;
+    bool rejected = false;
+    esp_err_t err = safety_link_send_commit_config(s_hw_safety, &reject_param_id, &reject_reason,
+                                                    &rejected);
+    if (err != ESP_OK || rejected) {
+        snprintf(note, note_cap,
+                 "CT scale backout commit failed -- UNKNOWN state, re-run the sweep");
+        return false;
+    }
+
+    char verify_reason[96];
+    if (!zone_sweep_confirm_k_ct_landed(staged_mask, prior, verify_reason, sizeof(verify_reason))) {
+        snprintf(note, note_cap,
+                 "CT scale backout not confirmed -- UNKNOWN state, re-run the sweep");
+        return false;
+    }
+    return true;
+}
+
+/* Definition for the forward declaration above zone_sweep_unstage_k_ct(). */
 static bool zone_sweep_confirm_k_ct_landed(uint8_t mask, const float *k_new, char *reason,
                                             size_t reason_cap)
 {
@@ -669,6 +728,7 @@ static void zone_sweep_push_k_ct_v_per_a(void)
     char note[sizeof(s_sweep.k_ct_reason)];
     note[0] = '\0';
     float k_new[ZONE_CT_CHANNEL_COUNT] = {0};
+    float prior_k[ZONE_CT_CHANNEL_COUNT] = {0};
     uint8_t staged_mask = 0;
 
     uint8_t plan_mask = zone_sweep_plan_k_ct(k_new, note, sizeof(note));
@@ -682,6 +742,13 @@ static void zone_sweep_push_k_ct_v_per_a(void)
             if ((plan_mask & (1u << c)) == 0) {
                 continue;
             }
+            /* Prior value, captured BEFORE staging -- see
+             * zone_sweep_unstage_k_ct()'s comment for why a restore must
+             * target this snapshot rather than a cache that may already
+             * have been refreshed by a failed confirm's own refetch.
+             * Defaults to ZONE_KCT_UNCOMMISSIONED (never committed). */
+            prior_k[c] = ZONE_KCT_UNCOMMISSIONED;
+            (void)zone_cfg_committed_f32(ZONE_KCT_PARAM_ID(c), &prior_k[c]);
             kilnlink_param_value_t v;
             memset(&v, 0, sizeof(v));
             v.f32_val = k_new[c];
@@ -690,7 +757,7 @@ static void zone_sweep_push_k_ct_v_per_a(void)
             if (err != ESP_OK) {
                 snprintf(note, sizeof(note), "staging k_ct_v_per_a[%u] failed: %.24s", c,
                          esp_err_to_name(err));
-                zone_sweep_unstage_k_ct(staged_mask, note, sizeof(note));
+                (void)zone_sweep_unstage_k_ct(staged_mask, prior_k, false, note, sizeof(note));
                 plan_mask = 0;
                 break;
             }
@@ -707,16 +774,21 @@ static void zone_sweep_push_k_ct_v_per_a(void)
         if (err != ESP_OK) {
             snprintf(note, sizeof(note), "CT scale staged but the commit was not "
                                           "acknowledged (%.24s)", esp_err_to_name(err));
-            zone_sweep_unstage_k_ct(staged_mask, note, sizeof(note));
+            (void)zone_sweep_unstage_k_ct(staged_mask, prior_k, false, note, sizeof(note));
             plan_mask = 0;
         } else if (rejected) {
             snprintf(note, sizeof(note), "the safety processor rejected the CT scale commit "
                                           "(id 0x%04X, reason %u)", (unsigned)reject_param_id,
                      (unsigned)reject_reason);
-            zone_sweep_unstage_k_ct(staged_mask, note, sizeof(note));
+            (void)zone_sweep_unstage_k_ct(staged_mask, prior_k, false, note, sizeof(note));
             plan_mask = 0;
         } else if (!zone_sweep_confirm_k_ct_landed(plan_mask, k_new, note, sizeof(note))) {
-            zone_sweep_unstage_k_ct(staged_mask, note, sizeof(note));
+            /* The commit above was ACKed and un-rejected -- it may actually
+             * have landed on the Pico despite the read-back failure. The
+             * restore below must itself be committed and verified, or this
+             * note must say UNKNOWN rather than "not written" -- see
+             * zone_sweep_unstage_k_ct()'s comment. */
+            (void)zone_sweep_unstage_k_ct(staged_mask, prior_k, true, note, sizeof(note));
             plan_mask = 0;
         } else {
             for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
@@ -792,17 +864,40 @@ uint8_t zone_sweep_plan_i_normal(float *out_a, char *note, size_t note_cap)
     return plan_mask;
 }
 
-/* H3-style repair for this push -- mirrors zone_sweep_unstage_k_ct() above.
+/* Forward-declared: zone_sweep_unstage_i_normal() below needs to call this
+ * SAME check against its own restore values -- see that function's comment. */
+static bool zone_sweep_confirm_i_normal_landed(uint8_t mask, const float *planned_a, char *reason,
+                                                size_t reason_cap);
+
+/* H3-style repair for this push -- mirrors zone_sweep_unstage_k_ct() above,
+ * including its opus-review fix: staging the restore values alone is not
+ * enough once the push's own COMMIT_CONFIG may have actually landed (ACKed,
+ * un-rejected, only the read-back failed) -- the restore must be committed
+ * and verified too, or the caller must be told the outcome is UNKNOWN, never
+ * silently reported as "not written" while the Pico may hold the new value.
+ *
  * `prior` holds whatever the Pico had committed for each planned zone BEFORE
  * this attempt started staging (captured by the caller, since once staging
  * begins the ESP's own cache of "committed" is stale until the next
  * refetch); a zone with no prior commit restores to 0.0f/unset, matching
  * safety_guards.c reading i_normal_valid[] false the same way it does for a
- * board that was never swept at all -- the safe direction for a repair. */
-static void zone_sweep_unstage_i_normal(uint8_t staged_mask, const float *prior, char *note, size_t note_cap)
+ * board that was never swept at all -- the safe direction for a repair.
+ *
+ * `commit_may_have_landed`, same split as zone_sweep_unstage_k_ct(): only
+ * true when the push's own COMMIT_CONFIG was ACKed and un-rejected and the
+ * read-back is what failed -- the only case where the Pico's COMMITTED
+ * record (not just its staging buffer) might hold the new value. The other
+ * failure paths (a SET_PARAM failure, a rejected commit, an unacknowledged
+ * commit) never got that far, so restaging without committing is already
+ * the whole remedy there, matching prior behaviour and its host tests.
+ *
+ * Returns true once the restore is known-safe (confirmed committed, or
+ * never needed to be). */
+static bool zone_sweep_unstage_i_normal(uint8_t staged_mask, const float *prior, bool commit_may_have_landed,
+                                         char *note, size_t note_cap)
 {
     if (staged_mask == 0 || !s_hw_safety) {
-        return;
+        return true;
     }
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         if ((staged_mask & (1u << zi)) == 0) {
@@ -814,11 +909,33 @@ static void zone_sweep_unstage_i_normal(uint8_t staged_mask, const float *prior,
         if (safety_link_send_set_param(s_hw_safety, ZONE_INORMAL_PARAM_ID(zi),
                                        KILNLINK_PARAM_TYPE_F32, v) != ESP_OK) {
             snprintf(note, note_cap,
-                     "i_normal_a staging failed and could NOT be backed out -- re-run the "
-                     "sweep before saving again");
-            return;
+                     "i_normal_a backout SET_PARAM failed -- UNKNOWN state, re-run the sweep");
+            return false;
         }
     }
+
+    if (!commit_may_have_landed) {
+        return true;
+    }
+
+    uint16_t reject_param_id = 0;
+    uint8_t reject_reason = 0;
+    bool rejected = false;
+    esp_err_t err = safety_link_send_commit_config(s_hw_safety, &reject_param_id, &reject_reason,
+                                                    &rejected);
+    if (err != ESP_OK || rejected) {
+        snprintf(note, note_cap,
+                 "i_normal_a backout commit failed -- UNKNOWN state, re-run the sweep");
+        return false;
+    }
+
+    char verify_reason[96];
+    if (!zone_sweep_confirm_i_normal_landed(staged_mask, prior, verify_reason, sizeof(verify_reason))) {
+        snprintf(note, note_cap,
+                 "i_normal_a backout not confirmed -- UNKNOWN state, re-run the sweep");
+        return false;
+    }
+    return true;
 }
 
 /* H1-style verification for this push -- mirrors
@@ -899,7 +1016,7 @@ static void zone_sweep_push_i_normal_a(void)
             if (err != ESP_OK) {
                 snprintf(note, sizeof(note), "staging i_normal_a[%u] failed: %.24s", zi,
                          esp_err_to_name(err));
-                zone_sweep_unstage_i_normal(staged_mask, prior_a, note, sizeof(note));
+                (void)zone_sweep_unstage_i_normal(staged_mask, prior_a, false, note, sizeof(note));
                 plan_mask = 0;
                 break;
             }
@@ -916,16 +1033,18 @@ static void zone_sweep_push_i_normal_a(void)
         if (err != ESP_OK) {
             snprintf(note, sizeof(note), "i_normal_a staged but the commit was not "
                                           "acknowledged (%.24s)", esp_err_to_name(err));
-            zone_sweep_unstage_i_normal(staged_mask, prior_a, note, sizeof(note));
+            (void)zone_sweep_unstage_i_normal(staged_mask, prior_a, false, note, sizeof(note));
             plan_mask = 0;
         } else if (rejected) {
             snprintf(note, sizeof(note), "the safety processor rejected the i_normal_a commit "
                                           "(id 0x%04X, reason %u)", (unsigned)reject_param_id,
                      (unsigned)reject_reason);
-            zone_sweep_unstage_i_normal(staged_mask, prior_a, note, sizeof(note));
+            (void)zone_sweep_unstage_i_normal(staged_mask, prior_a, false, note, sizeof(note));
             plan_mask = 0;
         } else if (!zone_sweep_confirm_i_normal_landed(plan_mask, planned_a, note, sizeof(note))) {
-            zone_sweep_unstage_i_normal(staged_mask, prior_a, note, sizeof(note));
+            /* The commit above was ACKed and un-rejected -- it may actually
+             * have landed on the Pico despite the read-back failure. */
+            (void)zone_sweep_unstage_i_normal(staged_mask, prior_a, true, note, sizeof(note));
             plan_mask = 0;
         } else {
             note[0] = '\0';

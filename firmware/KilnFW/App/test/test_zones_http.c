@@ -127,12 +127,22 @@ void relay_cycles_set_type(uint8_t relay, relay_type_t type, uint32_t rated_over
 // test_safety_ceiling_policy.c's job, entirely at the pure-logic layer,
 // with its own fake writer) -- they only need a whole-page zone POST to
 // keep working exactly as it did before this feature existed.
+/* 2026-09-10 opus review: link-down bypass / boot-time reconciliation test
+ * below (test_reconcile_on_link_up_*) needs to observe whether THIS fake
+ * was actually called and with what target, not just that it always
+ * succeeds -- so it now records call count and last value alongside the
+ * existing unconditional-success behaviour every other test in this file
+ * still relies on. */
+static int s_ceiling_writer_calls = 0;
+static float s_ceiling_writer_last_target_c = 0.0f;
+
 bool safety_cfg_http_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_id, float value,
                                           char *reason_out, size_t reason_cap)
 {
     (void)link;
     (void)param_id;
-    (void)value;
+    s_ceiling_writer_calls++;
+    s_ceiling_writer_last_target_c = value;
     if (reason_out && reason_cap > 0) {
         reason_out[0] = '\0';
     }
@@ -8294,11 +8304,32 @@ static void test_zone_sweep_summed_normal_a_basic(void)
     TEST_CHECK(zone_sweep_summed_normal_a(1.996f, 2.001f, &n) == false,
               "a small quantization-scale negative delta is refused, not clamped");
 
-    // Equal on/idle (delta exactly 0) is a legitimate zero normal, not a
-    // refusal -- draws the line precisely at "would go negative."
+    // Opus review finding 1 (S15 false-WARN): equal on/idle (delta exactly
+    // 0) used to be accepted as "a real zero normal". That is exactly the
+    // shape of a single ADC count of drift -- indistinguishable from noise
+    // -- and this bench's own measured idle wander (channel 2: 60-79 counts
+    // around zero_counts=63) means a difference has to clear a real noise
+    // floor before it can be trusted as a measurement at all, not merely be
+    // non-negative. See ZONE_SWEEP_NORMAL_NOISE_FLOOR_A's own comment for
+    // where 45 mA comes from. A delta of exactly 0 is now refused, same as
+    // any other below-floor delta -- there is no such thing as a
+    // noise-floor-exempt "real zero" for a heater channel.
     n = -1.0f;
-    TEST_CHECK(zone_sweep_summed_normal_a(2.0f, 2.0f, &n), "on == idle converts (a real zero normal)");
-    TEST_CHECK(n == 0.0f, "on == idle yields exactly zero");
+    TEST_CHECK(zone_sweep_summed_normal_a(2.0f, 2.0f, &n) == false,
+              "on == idle (delta 0) is below the noise floor -- refused, not persisted as zero");
+    TEST_CHECK(n == -1.0f, "out param is left untouched on refusal");
+
+    // Below the floor but still positive: noise, not a measurement.
+    n = -1.0f;
+    TEST_CHECK(zone_sweep_summed_normal_a(2.010f, 2.0f, &n) == false,
+              "a 10 mA delta is below the 45 mA noise floor -- refused");
+    TEST_CHECK(n == -1.0f, "out param is left untouched on refusal");
+
+    // At/above the floor: a real measurement.
+    n = -1.0f;
+    TEST_CHECK(zone_sweep_summed_normal_a(2.050f, 2.0f, &n),
+              "a 50 mA delta clears the 45 mA noise floor -- accepted");
+    TEST_CHECK(fabsf(n - 0.050f) < 1e-6f, "reports the measured delta");
 
     TEST_CHECK(zone_sweep_summed_normal_a(NAN, 0.5f, &n) == false, "a NaN reading is refused");
     TEST_CHECK(zone_sweep_summed_normal_a(5.0f, NAN, &n) == false, "a NaN idle baseline is refused");
@@ -8692,6 +8723,85 @@ static void test_zones_current_sweep_start_atomic_gate_closes_the_race(void)
     zones_http_set_hw(NULL, NULL, NULL);
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
     s_zones_config_valid = false;
+}
+
+// ---------------------------------------------------------------------------
+// 2026-09-10 opus review, "the Pico-ceiling invariant is enforced at one
+// door only": zones_post_handler's guard_raise()/apply_lower() calls
+// (zones_http_post.c) only ever run from that one POST handler, and
+// safety_ceiling_sync_guard_raise()/apply_lower() both treat `link == NULL`
+// as "nothing to guard" -- so a board that boots (or whose safety link
+// drops and reconnects) with a Pico ceiling behind the ESP's already-
+// persisted zone config has nothing to close that gap until an operator
+// happens to POST the zones page again. safety_ceiling_sync_reconcile_
+// on_link_up() (safety_ceiling_sync.c) closes it: called every
+// safety_poll_task tick the link is up (safety_link_poll.c), it re-derives
+// the ESP's own ceiling target and re-runs the same guard_raise() the POST
+// handler uses. These three tests exercise it directly, using the same
+// fake safety_cfg_http_set_and_confirm_f32() (now call-counted) every other
+// ceiling-adjacent test in this file already relies on.
+static void reconcile_test_reset(void)
+{
+    s_ceiling_writer_calls = 0;
+    s_ceiling_writer_last_target_c = 0.0f;
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones_config_valid = false;
+}
+
+static void test_reconcile_on_link_up_null_link_is_a_noop(void)
+{
+    reconcile_test_reset();
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.zones[0].max_temp_c = 1200.0f;
+
+    safety_ceiling_sync_reconcile_on_link_up(NULL);
+
+    TEST_CHECK(s_ceiling_writer_calls == 0,
+              "link == NULL means no safety processor to reconcile against this boot -- must never "
+              "attempt a write");
+    reconcile_test_reset();
+}
+
+static void test_reconcile_on_link_up_invalid_config_is_a_noop(void)
+{
+    static SafetyLinkClass dummy_safety;
+    memset(&dummy_safety, 0, sizeof(dummy_safety));
+    reconcile_test_reset();
+    s_zones_config_valid = false; // never loaded a real config yet
+
+    safety_ceiling_sync_reconcile_on_link_up(&dummy_safety);
+
+    TEST_CHECK(s_ceiling_writer_calls == 0,
+              "an invalid (never-loaded) zones config must never be used to derive a Pico target -- "
+              "same gate safety_sync_tc_type() uses");
+    reconcile_test_reset();
+}
+
+static void test_reconcile_on_link_up_raises_when_pico_ceiling_is_unknown(void)
+{
+    static SafetyLinkClass dummy_safety;
+    memset(&dummy_safety, 0, sizeof(dummy_safety));
+    reconcile_test_reset();
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.zones[0].max_temp_c = 1200.0f;
+
+    // safety_ceiling_sync_get_current_pico_ceiling() reads safety_cfg_store's
+    // cache, which this executable never populates with a real fetched
+    // abs_max_temp_c row -- exactly the "current_known == false" case
+    // safety_ceiling_policy_guard_raise() documents as "assume the worst,
+    // always raise" (test_safety_ceiling_policy.c covers that decision at
+    // the pure-logic layer; this proves the ESP-glue call site actually
+    // reaches it on a link-up reconcile, not just from zones_post_handler).
+    safety_ceiling_sync_reconcile_on_link_up(&dummy_safety);
+
+    TEST_CHECK(s_ceiling_writer_calls == 1,
+              "an unknown Pico ceiling against a real configured max_temp_c must trigger exactly one "
+              "raise+confirm write on a link-up reconcile");
+    TEST_CHECK_NEAR(s_ceiling_writer_last_target_c, 1205.0, 1e-6,
+                   "target must be the configured max (1200) + the policy's fixed headroom (5C)");
+    reconcile_test_reset();
 }
 
 // ---------------------------------------------------------------------------
@@ -9175,7 +9285,11 @@ static void test_zone_sweep_push_k_ct_backout_restores_the_uncommissioned_zero(v
     uint8_t staged_only_ch0 = 0x01;
     test_cfg_set_f32(ZONE_KCT_PARAM_ID(0), 0.0333f, false); // present but never set
     char note[96] = "";
-    zone_sweep_unstage_k_ct(staged_only_ch0, note, sizeof(note));
+    float restore_prior[ZONE_CT_CHANNEL_COUNT] = {0};
+    // commit_may_have_landed=false: nothing was ever committed on this
+    // direct-drive path, so this exercises the restage-only branch, same
+    // as the two callers above.
+    zone_sweep_unstage_k_ct(staged_only_ch0, restore_prior, false, note, sizeof(note));
     TEST_CHECK(s_setparam_count == 1 && s_setparam_log[0].value.f32_val == 0.0f,
                "a never-committed channel is restored to the uncommissioned 0.0");
     s_hw_safety = NULL;
@@ -9793,6 +9907,10 @@ void run_test_zones_http(void)
 
     test_zones_current_sweep_start_wired_refusals();
     test_zones_current_sweep_start_atomic_gate_closes_the_race();
+
+    test_reconcile_on_link_up_null_link_is_a_noop();
+    test_reconcile_on_link_up_invalid_config_is_a_noop();
+    test_reconcile_on_link_up_raises_when_pico_ceiling_is_unknown();
 }
 
 /* test_zones_config_cfg_fs.c -- separate TU, same executable (see that
