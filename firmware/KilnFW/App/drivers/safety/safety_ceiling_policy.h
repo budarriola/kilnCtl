@@ -60,19 +60,34 @@ extern "C" {
  * side must surface that to the operator instead of silently requiring a
  * safety-processor reset. */
 
-/* Owner's standing "profile target vs configured limit" convention
- * elsewhere in this codebase (dashboard warning, a9abd273) uses 5 C of
- * headroom between an intended target and a hard ceiling. The Pico's
- * absolute ceiling is one layer further out than that: it must clear not
- * just the profile's intended target but the ESP's OWN zone ceiling
- * (which is itself already above any sane profile target). Adding the
- * SAME 5 C headroom here, on top of the ESP's zone ceiling rather than on
- * top of a profile target, keeps the two ceilings from tripping at
- * effectively the same instant on ordinary sensor noise/offset -- the
- * Pico is meant to catch the ESP having ALREADY failed to limit, not to
- * race it. Using the same constant (rather than inventing a second
- * number) also means one already-reviewed convention governs both
- * gaps, instead of two headroom values that could drift apart. */
+/* HISTORICAL, NO LONGER APPLIED -- kept only so the reasoning that was
+ * tried and then explicitly overridden is not lost. Originally this file
+ * added 5 C of headroom on top of the ESP's zone ceiling before writing
+ * the Pico's target, reusing the owner's separate "profile target vs
+ * configured limit" convention (dashboard warning, a9abd273) on the
+ * theory that it would keep the two ceilings from tripping at effectively
+ * the same instant on ordinary sensor noise/offset -- the Pico is meant
+ * to catch the ESP having ALREADY failed to limit, not to race it.
+ *
+ * 2026-09-10 owner correction, verbatim: "the intent of the web page
+ * setting was to put a hard cutoff." The number typed into the zone
+ * ceiling field is meant to BE the Pico's cutoff, not a value the Pico
+ * trips 5 C above -- so safety_ceiling_policy_target_c() no longer adds
+ * this constant; it returns the ESP's own configured maximum exactly.
+ *
+ * The nuisance-trip concern above is real but is handled differently, not
+ * ignored: equality (Pico ceiling == ESP zone ceiling) still satisfies the
+ * standing invariant that the Pico must never be TIGHTER than the ESP
+ * (see this file's own top comment) -- a value that is EQUAL is not
+ * tighter. What headroom would have bought was a margin against the two
+ * ceilings tripping on the same instant of sensor noise; a hard cutoff
+ * accepts that trade deliberately; there is no separate noise margin
+ * elsewhere in this file's logic. This constant is left defined (unused
+ * by safety_ceiling_policy_target_c()) rather than deleted outright, in
+ * case a future noise-margin need resurfaces and wants to reuse the
+ * reviewed value rather than inventing a new one -- if nothing comes to
+ * reference it, delete it in a later pass instead of leaving dead
+ * ballast. */
 #define SAFETY_CEILING_HEADROOM_C 5.0f
 
 /* Computes the Pico ceiling TARGET this policy wants for a given set of
@@ -94,7 +109,10 @@ extern "C" {
  * leave the Pico's abs_max_temp_c untouched, never write a manufactured
  * default in its place (same "do not invent a default" rule the zero-
  * zone case above follows). Otherwise returns
- * `max(max_temp_c[i] for max_temp_c[i] > 0) + SAFETY_CEILING_HEADROOM_C`. */
+ * `max(max_temp_c[i] for max_temp_c[i] > 0)` EXACTLY -- no added headroom
+ * (2026-09-10 owner correction: the web page's setting is a hard cutoff;
+ * see SAFETY_CEILING_HEADROOM_C's comment below for what this used to
+ * add and why it no longer does). */
 float safety_ceiling_policy_target_c(const float *max_temp_c, size_t n);
 
 /* Outcome of a sync attempt, reported back to the HTTP layer so it can

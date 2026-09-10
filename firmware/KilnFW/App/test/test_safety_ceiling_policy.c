@@ -42,7 +42,31 @@ static void test_raise_writes_pico_first_and_confirms(void)
     TEST_CHECK((may_commit), "a confirmed Pico raise must allow the ESP commit to proceed");
     TEST_CHECK((result == SAFETY_CEILING_SYNC_RAISED), "result must report RAISED");
     TEST_CHECK((w.calls == 1), "the writer (Pico) must be called exactly once");
-    TEST_CHECK_NEAR(w.last_target_c, 125.0f, 0.001f, "target must be the new max (120) + 5C headroom");
+    // 2026-09-10 owner correction: "the intent of the web page setting was
+    // to put a hard cutoff." No headroom is added any more -- the Pico's
+    // target is the ESP's own configured maximum, exactly.
+    TEST_CHECK_NEAR(w.last_target_c, 120.0f, 0.001f, "target must be the new max (120) EXACTLY -- no headroom");
+}
+
+// ---------------------------------------------------------------------
+// 1b. Equality: a Pico ceiling already exactly equal to the new ESP
+//     target must be treated as satisfied -- no raise, nothing written.
+//     Equality is NOT "tighter than", so the standing invariant holds.
+// ---------------------------------------------------------------------
+static void test_equal_ceiling_is_satisfied_no_write(void)
+{
+    float new_zones[3] = { 80.0f, 80.0f, 80.0f };
+    fake_writer_state_t w = { .result_to_return = true };
+    safety_ceiling_sync_result_t result;
+    char reason[128] = { 0 };
+
+    // Pico already sits at exactly 80, the same as the new target.
+    bool may_commit = safety_ceiling_policy_guard_raise(80.0f, true, new_zones, 3, fake_writer, &w,
+                                                          &result, reason, sizeof(reason));
+
+    TEST_CHECK((may_commit), "an already-equal ceiling must never block a commit");
+    TEST_CHECK((result == SAFETY_CEILING_SYNC_NONE), "an already-equal ceiling must report NONE (no raise needed)");
+    TEST_CHECK((w.calls == 0), "the Pico must NOT be re-written when its ceiling already exactly equals the target");
 }
 
 // ---------------------------------------------------------------------
@@ -57,11 +81,12 @@ static void test_lower_is_esp_first_pico_best_effort_after(void)
     safety_ceiling_sync_result_t raise_result;
     char reason[128] = { 0 };
 
-    // Pico currently sits at 125 (from the raise above). guard_raise() must
-    // see this as "no raise needed" and NOT touch the Pico -- the ESP's own
-    // commit (simulated by the caller, not modeled in this pure-logic test)
-    // is what happens first for a lowering change.
-    bool may_commit = safety_ceiling_policy_guard_raise(125.0f, true, new_zones, 3, fake_writer, &raise_w,
+    // Pico currently sits at 120 (from the raise above -- no headroom
+    // added any more, see test 1). guard_raise() must see this as "no
+    // raise needed" and NOT touch the Pico -- the ESP's own commit
+    // (simulated by the caller, not modeled in this pure-logic test) is
+    // what happens first for a lowering change.
+    bool may_commit = safety_ceiling_policy_guard_raise(120.0f, true, new_zones, 3, fake_writer, &raise_w,
                                                           &raise_result, reason, sizeof(reason));
     TEST_CHECK((may_commit), "a lowering change must never be blocked by the raise guard");
     TEST_CHECK((raise_result == SAFETY_CEILING_SYNC_NONE), "no raise is needed when the target is already lower");
@@ -70,11 +95,11 @@ static void test_lower_is_esp_first_pico_best_effort_after(void)
     // Only AFTER the (simulated) ESP commit does the best-effort lower run.
     fake_writer_state_t lower_w = { .result_to_return = true };
     safety_ceiling_sync_result_t lower_result;
-    safety_ceiling_policy_apply_lower(125.0f, true, new_zones, 3, fake_writer, &lower_w, &lower_result, reason,
+    safety_ceiling_policy_apply_lower(120.0f, true, new_zones, 3, fake_writer, &lower_w, &lower_result, reason,
                                        sizeof(reason));
     TEST_CHECK((lower_result == SAFETY_CEILING_SYNC_LOWERED), "apply_lower must report LOWERED on a confirmed write");
     TEST_CHECK((lower_w.calls == 1), "apply_lower must write the Pico exactly once");
-    TEST_CHECK_NEAR(lower_w.last_target_c, 85.0f, 0.001f, "lowered target must be the new max (80) + 5C headroom");
+    TEST_CHECK_NEAR(lower_w.last_target_c, 80.0f, 0.001f, "lowered target must be the new max (80) EXACTLY -- no headroom");
 }
 
 // ---------------------------------------------------------------------
@@ -131,7 +156,7 @@ static void test_zero_ceiling_zone_excluded_from_maximum(void)
     // must not drag the maximum down, and must not count as "0 is the max".
     float mixed[3] = { 0.0f, 150.0f, 0.0f };
     float target = safety_ceiling_policy_target_c(mixed, 3);
-    TEST_CHECK_NEAR(target, 155.0f, 0.001f, "the maximum must come from the one real zone (150) + headroom, ignoring the zero zones");
+    TEST_CHECK_NEAR(target, 150.0f, 0.001f, "the maximum must come from the one real zone (150) EXACTLY, ignoring the zero zones, no headroom");
 }
 
 // ---------------------------------------------------------------------
@@ -232,6 +257,7 @@ static void test_reconcile_backoff_reason_without_armed_substring_is_short(void)
 void run_test_safety_ceiling_policy(void)
 {
     test_raise_writes_pico_first_and_confirms();
+    test_equal_ceiling_is_satisfied_no_write();
     test_lower_is_esp_first_pico_best_effort_after();
     test_failed_pico_raise_blocks_and_leaves_esp_unchanged();
     test_zero_ceiling_zone_excluded_from_maximum();

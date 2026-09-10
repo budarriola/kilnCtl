@@ -34,7 +34,13 @@ float safety_ceiling_policy_target_c(const float *max_temp_c, size_t n)
     if (!any) {
         return 0.0f;
     }
-    return best + SAFETY_CEILING_HEADROOM_C;
+    /* 2026-09-10 owner correction: "the intent of the web page setting was
+     * to put a hard cutoff." The Pico's target is the ESP's configured
+     * ceiling EXACTLY -- no added headroom. See this header's own
+     * SAFETY_CEILING_HEADROOM_C comment for what used to be added here,
+     * why, and why equality (not >) still satisfies the standing
+     * never-tighter-than-the-ESP invariant. */
+    return best;
 }
 
 bool safety_ceiling_policy_guard_raise(float current_pico_ceiling_c, bool current_known,

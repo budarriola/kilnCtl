@@ -8848,8 +8848,9 @@ static void test_reconcile_on_link_up_raises_when_pico_ceiling_is_unknown(void)
     TEST_CHECK(s_ceiling_writer_calls == 1,
               "an unknown Pico ceiling against a real configured max_temp_c must trigger exactly one "
               "raise+confirm write on a link-up reconcile");
-    TEST_CHECK_NEAR(s_ceiling_writer_last_target_c, 1205.0, 1e-6,
-                   "target must be the configured max (1200) + the policy's fixed headroom (5C)");
+    TEST_CHECK_NEAR(s_ceiling_writer_last_target_c, 1200.0, 1e-6,
+                   "target must be the configured max (1200) EXACTLY -- 2026-09-10 owner correction removed "
+                   "the policy's former +5C headroom so the web page's setting is a hard cutoff");
     reconcile_test_reset();
 }
 
