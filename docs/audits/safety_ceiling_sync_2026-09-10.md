@@ -3,6 +3,22 @@
 Owner request, verbatim: "if i change the max temp in the web gui it should
 change it in the pico too."
 
+**Disclosure (2026-09-10 opus review), since `git log` on `safety_cfg_http.c`
+alone would otherwise mislead the next reader:** the commit that introduced
+this feature (`2d604d1d`, "Sync the Pico's abs_max_temp_c ceiling to the
+ESP's zone max_temp_c") also carries roughly 250 lines of unrelated work in
+that same file -- the S8 rate-guard auto-calc endpoint and its write-
+provenance tagging (`docs/audits/s8_auto_calc_design_2026-09-09.md`,
+`safety_cfg_http_set_and_confirm_f32()`'s neighbouring `rate_guard_*`
+additions, `#include "s8_rate_guard_estimate.h"`, etc.). `a4398558`
+discloses this from the S8 feature's own side, but `2d604d1d`'s own commit
+message says nothing about it, so a reader tracing only the ceiling-sync
+feature through `git log -- safety_cfg_http.c` would see S8 auto-calc
+history attributed to a commit that never mentions it, and vice versa. Both
+features are real and both landed correctly -- this note exists only so
+that mismatch is documented somewhere findable, not to imply either commit
+needs to be redone. History is not being rewritten.
+
 ## Problem
 
 The ESP's per-zone `max_temp_c` (`zones_cfg_t`) and the RP2040 safety
