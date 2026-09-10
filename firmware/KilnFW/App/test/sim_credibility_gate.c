@@ -9,13 +9,25 @@
 // -- model_k_dc/model_tau_s/model_dead_time_s and the coupling matrix -- is
 // the same checked-in snapshot sim_iter_tune.c and sim_wide_temp_sweep.c
 // already use (tools/PcTools/config_presets/tuned_baseline_20260831.json,
-// coupling_matrix_20260831.json, adopted commit 78f2134). The ONLY per-run
+// coupling_matrix_20260831.json, adopted commit 78f2134). The per-run
 // input taken from a capture is the recorded PID DUTY COMMAND sequence and
 // the recorded SETPOINT sequence -- i.e. this replays the plant's response
 // to what the real controller commanded, it does not re-derive or tune
-// anything from the recorded temperatures themselves. The recorded
-// temperatures are used exclusively as the answer key for comparison.
-// Nothing here ever reads a capture's own actual_c into a fit.
+// anything from the recorded temperatures themselves against a fit. The
+// recorded temperatures are otherwise used exclusively as the answer key
+// for comparison -- but NOT exclusively: run_replay() also derives
+// ambient_c from each capture's own first-valid actual_c per zone (mean
+// across zones) and feeds it into sim_plant_from_zone_cfg() as the plant's
+// loss reference, not merely an initial condition. Steady dwell
+// temperature is ambient + sum_i(coupling_w_per_c[i][j]*duty[j]), so
+// dwell_offset -- one of the scored bars below -- shifts close to 1:1 with
+// this capture-derived number. That makes ambient_c one free parameter
+// taken from the answer key, on exactly the metric it most directly moves.
+// It is NOT a fit (nothing is adjusted to reduce error against actual_c),
+// but it is real per-capture leakage from actual_c into the model's
+// operating point, and the two captures used here differ in ambient_c by
+// ~0.26C. Treat dwell_offset as measured under that dependency, not as an
+// unconditional zero-leakage number.
 //
 // Two DIFFERENT captures are scored independently against this one fixed
 // model (no fitting to either): logs/coupling/noise_floor_p7_run1.jsonl
@@ -89,6 +101,15 @@
 #define BAR_DWELL_OFFSET_C    1.5f
 #define BAR_DWELL_PEAK_C      2.0f
 #define BAR_NOISE_SPREAD_MULT 2.0f
+// Minimum number of ticks observed inside a dwell-entry window before that
+// (zone, segment) cell is trusted to mean anything. dwell_entry_peak_sim/rec
+// are initialised to 0 and only ever raised (see score_replay()), so a
+// segment that is barely reached -- or a sim that never reaches target --
+// registers peak=0 and would otherwise PASS vacuously (rec_peak <= bar
+// becomes true precisely because nothing happened). Six ticks at the ~5.2s
+// capture rate is ~30s of dwell-entry data; below that the cell is reported
+// UNEVALUABLE, not PASS.
+#define MIN_PEAK_SAMPLES 6
 
 typedef struct {
     double t;
@@ -308,6 +329,7 @@ typedef struct {
     // per (zone, segment) dwell-entry overshoot peak, sim vs recorded
     float dwell_entry_peak_sim[NZ][8];
     float dwell_entry_peak_rec[NZ][8];
+    int   dwell_entry_peak_n[NZ][8];  // ticks observed in the dwell-entry window
     int   seg_count;
 } scores_t;
 
@@ -344,6 +366,7 @@ static void score_replay(const tick_t *ticks, int n, float sim_reading[][NZ], sc
                     float over_rec = ticks[i].actual_c[z] - ticks[i].target_c;
                     if (over_sim > s->dwell_entry_peak_sim[z][seg]) s->dwell_entry_peak_sim[z][seg] = over_sim;
                     if (over_rec > s->dwell_entry_peak_rec[z][seg]) s->dwell_entry_peak_rec[z][seg] = over_rec;
+                    s->dwell_entry_peak_n[z][seg]++;
                 }
             }
         }
@@ -473,6 +496,10 @@ int main(int argc, char **argv)
     printf("\n");
 
     bool pass = true;
+    int ramp_pass = 0, ramp_fail = 0;
+    int dwell_pass = 0, dwell_fail = 0;
+    int peak_pass = 0, peak_fail = 0, peak_uneval = 0;
+    int noise_pass = 0, noise_fail = 0, noise_uneval = 0;
     const char *labels[2] = {"CALIBRATION", "HOLD-OUT"};
     scores_t *sc[2] = {&cal_s, &hold_s};
     for (int r = 0; r < 2; r++) {
@@ -483,13 +510,24 @@ int main(int argc, char **argv)
             printf("  z%d: ramp MAE=%.3fC (bar %.1f) %s | dwell offset=%.3fC (bar +/-%.1f) %s\n",
                    z, sc[r]->ramp_mae[z], BAR_RAMP_MAE_C, ramp_ok ? "PASS" : "FAIL",
                    sc[r]->dwell_offset[z], BAR_DWELL_OFFSET_C, dwell_ok ? "PASS" : "FAIL");
+            if (ramp_ok) ramp_pass++; else ramp_fail++;
+            if (dwell_ok) dwell_pass++; else dwell_fail++;
             if (!ramp_ok || !dwell_ok) pass = false;
             for (int seg = 0; seg < sc[r]->seg_count && seg < 8; seg++) {
+                int nsamp = sc[r]->dwell_entry_peak_n[z][seg];
+                if (nsamp < MIN_PEAK_SAMPLES) {
+                    printf("      seg%d dwell-entry overshoot peak: sim=%.3fC rec=%.3fC (n=%d ticks, need >=%d) UNEVALUABLE\n",
+                           seg, sc[r]->dwell_entry_peak_sim[z][seg], sc[r]->dwell_entry_peak_rec[z][seg],
+                           nsamp, MIN_PEAK_SAMPLES);
+                    peak_uneval++;
+                    continue; // not counted toward pass or fail -- too few samples to mean anything
+                }
                 float diff = fabsf(sc[r]->dwell_entry_peak_sim[z][seg] - sc[r]->dwell_entry_peak_rec[z][seg]);
                 bool peak_ok = diff <= BAR_DWELL_PEAK_C;
-                printf("      seg%d dwell-entry overshoot peak: sim=%.3fC rec=%.3fC diff=%.3fC (bar %.1f) %s\n",
+                printf("      seg%d dwell-entry overshoot peak: sim=%.3fC rec=%.3fC diff=%.3fC (bar %.1f, n=%d) %s\n",
                        seg, sc[r]->dwell_entry_peak_sim[z][seg], sc[r]->dwell_entry_peak_rec[z][seg], diff,
-                       BAR_DWELL_PEAK_C, peak_ok ? "PASS" : "FAIL");
+                       BAR_DWELL_PEAK_C, nsamp, peak_ok ? "PASS" : "FAIL");
+                if (peak_ok) peak_pass++; else peak_fail++;
                 if (!peak_ok) pass = false;
             }
         }
@@ -501,21 +539,37 @@ int main(int argc, char **argv)
         for (int seg = 0; seg < cal_s.seg_count && seg < 8 && seg < hold_s.seg_count; seg++) {
             float nfc;
             if (!read_noise_floor(nf_path, z, seg, &nfc)) continue;
+            if (cal_s.dwell_entry_peak_n[z][seg] < MIN_PEAK_SAMPLES ||
+                hold_s.dwell_entry_peak_n[z][seg] < MIN_PEAK_SAMPLES) {
+                printf("  z%d seg%d: UNEVALUABLE (cal n=%d, hold n=%d, need >=%d each)\n",
+                       z, seg, cal_s.dwell_entry_peak_n[z][seg], hold_s.dwell_entry_peak_n[z][seg],
+                       MIN_PEAK_SAMPLES);
+                noise_uneval++;
+                continue;
+            }
             float spread = fabsf(cal_s.dwell_entry_peak_sim[z][seg] - hold_s.dwell_entry_peak_sim[z][seg]);
             bool optimistic = spread <= nfc; // model spread smaller than or equal to real spread: tolerated
             bool within_2x = spread <= BAR_NOISE_SPREAD_MULT * nfc;
             printf("  z%d seg%d: sim spread=%.3fC  real noise_floor=%.3fC  2x=%.3fC  %s\n",
                    z, seg, spread, nfc, 2.0f * nfc,
                    optimistic ? "OPTIMISTIC (tolerated, sec 3.1)" : (within_2x ? "PESSIMISTIC but within 2x (PASS)" : "PESSIMISTIC, EXCEEDS 2x (FAIL)"));
-            if (!optimistic && !within_2x) pass = false;
+            if (!optimistic && !within_2x) { noise_fail++; pass = false; } else { noise_pass++; }
         }
     }
+
+    printf("\n-- honest per-bar tally (this run) --\n");
+    printf("  ramp MAE:          %d pass, %d fail\n", ramp_pass, ramp_fail);
+    printf("  dwell offset:      %d pass, %d fail\n", dwell_pass, dwell_fail);
+    printf("  dwell-entry peak:  %d pass, %d fail, %d unevaluable\n", peak_pass, peak_fail, peak_uneval);
+    printf("  noise-floor spread:%d pass, %d fail, %d unevaluable\n", noise_pass, noise_fail, noise_uneval);
 
     printf("\n=== RESULT: %s ===\n", pass ? "GATE PASSES" : "GATE FAILS");
     if (!pass) {
         printf("Per plan sec 6.5: the plan stops here and reports. Results from\n"
                "sim_iter_tune.c / sim_wide_temp_sweep.c should NOT be treated as\n"
-               "evidence about the real kiln until this gate is closed.\n");
+               "evidence about the real kiln until this gate is closed. This is not\n"
+               "a single known-open bar -- see the per-bar tally above for which\n"
+               "bars and how many cells actually failed this run.\n");
     }
     return pass ? 0 : 1;
 }
