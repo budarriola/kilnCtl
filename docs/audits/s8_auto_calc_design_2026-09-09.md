@@ -370,3 +370,84 @@ and restoring by hand (confirmed via `git diff`/`grep` showing no leftover
 break). SaftyFW host tests: 2468/2468 checks, 34/34 KilnFW host-test
 executables, `tools/run_all_checks.ps1`: 82/82, KilnFW and SaftyFW target
 builds both green.
+
+## 2026-09-10 correction -- five confirmed defects, fixed
+
+An opus review of this document and the code above found five confirmed
+defects that, together, meant S8 could not fire on this bench under any
+legal setting -- a guard that was nominally ARMED and practically inert.
+Fixed in `431019ba`/`0820dfa6`/`9345f722`; this section corrects the
+claims above rather than editing them in place, so the review trail stays
+intact.
+
+1. **The "unknown" sentinel always won coldest-zone selection.**
+   `ZONE_MODEL_FIT_TEMP_UNKNOWN` (-273.15f) is finite, so the `isfinite()`-
+   only validation in Part 2's implementation let it unconditionally win
+   the "lowest fit_temp_c" comparison. Every zone on this bench, migrated
+   up from a pre-v24 record, carries this sentinel today -- so the module
+   had been silently deriving from it, not from a real identification.
+   Fixed: the sentinel is now checked and rejected explicitly, at both the
+   estimator and its one caller.
+
+2. **The floor made S8 structurally unreachable, and the margin was
+   inverted.** `CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR` (15.0) sits above
+   this bench's own measured maximum achievable rate (11.5 C/min own-zone-
+   only at z0). Applying `MARGIN = 2.0` to the OWN-ZONE-ONLY basis (a
+   stuck relay is a duty=1.0 event, i.e. exactly this basis at margin 1.0)
+   was not "conservative" in the direction that matters -- it inflated a
+   too-small number rather than correcting it. Fixed: the basis now
+   includes the OTHER zones' coupled contribution (see #4), and the
+   margin dropped to 1.3 (identification-error headroom only). The
+   estimator's return type now distinguishes an unclamped derivation from
+   a floor/ceiling-clamped one.
+
+3. **"Coldest is fastest" is contradicted by this document's own cited
+   physics.** Section "Temperature dependence" above states k and tau
+   fall by roughly the SAME factor (~20x at 1200 C) -- which makes k/tau
+   approximately INVARIANT across a firing, not smaller at higher
+   temperature. The conservatism claimed for picking the coldest fit is
+   therefore close to zero, not the "generous everywhere hotter" margin
+   originally claimed. This module still picks the lowest-fit_temp_c zone
+   (there is no data to justify picking any other point, and it is not
+   less safe), but `s8_rate_guard_estimate.h` no longer claims a strength
+   of guarantee the data does not support.
+
+4. **The estimator ignored coupling while S8 reads one TC heated by all
+   three zones.** `safety_guards.c`'s S8 has no per-zone concept -- every
+   real firing starts with all zones at full duty together. The measured
+   coupling matrix (`docs/audits/high_temperature_transfer_analysis_2026-
+   09-08.md`) shows the all-zones-firing gain onto z0 is ~2.5x its own-
+   zone-only `k_dc` (31.96 own vs 27.32+21.72=49.04 coupled-in). Fixed:
+   the basis is now `(k_dc + coupling_gain_sum) / tau_s`, where
+   `coupling_gain_sum` is the OTHER zones' measured steady-state gain onto
+   this one, sourced from `zones_config_get_coupling()`.
+
+5. **The load-time range check was ungated.** `config_params.c` applied
+   `RANGE_F32_RANGE_OR_ZERO` to `max_rate_c_per_min` unconditionally,
+   unlike every adjacent bounded field carved from the former reserved
+   block. A board legitimately commissioned to a value in
+   `(0, 15)` before this bound shipped would fail to LOAD at all -- losing
+   every other commissioned field along with it. Fixed: gated on
+   `CONFIG_STORE_SET_MAX_RATE_C_PER_MIN`, matching the precedent fields
+   exactly.
+
+**Worked bench numbers with the fix applied** (using the measured fits:
+z0 k=31.96/tau=166.9s, z1 k=23.48/tau=129.1s, z2 k=21.74/tau=114.8s, and
+the coupling matrix's off-diagonal sums 49.04/36.45/20.75 respectively):
+z0 -> 37.9 C/min, z1 -> 36.2 C/min, z2 -> 28.9 C/min, all unclamped and
+comfortably inside `[15, 60]` -- S8 is no longer structurally inert on this
+plant once coupling-aware, once the sentinel is rejected, and once a zone
+is re-identified post-fix (the bench's existing fits still carry the
+pre-v24 sentinel and must be re-run through autotune to produce a usable
+`fit_temp_c` before the auto-calc endpoint will return anything but
+`NO_DATA`).
+
+Two false claims corrected at the same time: this document's "kept in sync
+... by test_s8_rate_guard_estimate.c's own cross-check against config_
+store.h" (no such check exists -- the test has no file I/O), and "the
+Pico's CHECK_F32_RANGE_OR_ZERO is an independent backstop ... even a
+compromised or buggy ESP cannot push an absurd value past it" for the AUTO
+path specifically -- both bounds are the SAME `[15, 60]` the estimator
+already clamps to, so that check cannot reject anything this module emits;
+it remains a real, useful bound on a hand-typed MANUAL value, which is a
+different claim than the one originally made.
