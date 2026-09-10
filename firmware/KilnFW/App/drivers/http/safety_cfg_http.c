@@ -1715,10 +1715,46 @@ static s8_rate_guard_estimate_reason_t rate_guard_gather_and_estimate(float *out
         float fit_temp_c = 0.0f, fit_ambient_c = 0.0f;
         bool have_model = zones_config_get_model(i, &k_dc, &tau_s, &dead_time_s) && k_dc > 0.0f && tau_s > 0.0f;
         bool have_fit_ctx = zones_config_get_model_fit_context(i, &fit_temp_c, &fit_ambient_c);
-        zones[i].valid = have_model && have_fit_ctx;
+        /* 2026-09-10 fix: `have_fit_ctx` alone does not mean the fit is
+         * USABLE -- a zone migrated up from a pre-v24 record reads back
+         * ZONE_MODEL_FIT_TEMP_UNKNOWN successfully (the accessor call
+         * succeeds; it just returns the sentinel), and that sentinel is
+         * finite, so s8_rate_guard_estimate() cannot be relied on alone to
+         * catch it if this flag admits it as "valid" input from a caller
+         * that otherwise looks fine. s8_rate_guard_estimate() independently
+         * rejects the sentinel too (belt and braces, since this was the
+         * exact live bug: this flag WAS built as `have_model && have_fit_
+         * ctx` with no sentinel check, and the sentinel is what every zone
+         * on this bench carries today, pre-any-post-v24 re-identification).
+         */
+        bool fit_ctx_usable = have_fit_ctx && fit_temp_c != ZONE_MODEL_FIT_TEMP_UNKNOWN;
+        zones[i].valid = have_model && fit_ctx_usable;
         zones[i].k_dc = k_dc;
         zones[i].tau_s = tau_s;
         zones[i].fit_temp_c = fit_temp_c;
+
+        /* Sum of the OTHER zones' measured steady-state coupling gain onto
+         * THIS zone -- S8 watches one TC shared by all zones, so the
+         * all-zones-full-duty basis needs this; see s8_rate_guard_estimate.h
+         * "REAL FIRINGS ARE COUPLED". zones_config_get_coupling()'s row is
+         * [affected=i][stepped=j]; exclude the diagonal (this zone's own
+         * gain, already counted via k_dc) and sum the rest. A row read
+         * failure (uncommissioned coupling) leaves the sum at 0.0f, which
+         * for a genuinely single-zone board is correct and for a multi-zone
+         * board that has not run coupling identification yet is the best
+         * available answer -- the same "no worse than the previous
+         * own-zone-only basis" floor, not a claim of full coverage. */
+        float coupling_row[MAX31856_CHANNEL_COUNT] = {0};
+        float coupling_sum = 0.0f;
+        if (zones_config_get_coupling(i, coupling_row)) {
+            for (uint8_t j = 0; j < thermo_count && j < MAX31856_CHANNEL_COUNT; j++) {
+                if (j == i) {
+                    continue;
+                }
+                coupling_sum += coupling_row[j];
+            }
+        }
+        zones[i].coupling_gain_sum_c_per_duty = coupling_sum;
     }
     return s8_rate_guard_estimate(zones, thermo_count, out_c_per_min);
 }
@@ -1763,7 +1799,13 @@ static bool rate_guard_auto_compute(float *out_candidate, float *out_current, bo
                                      size_t err_cap)
 {
     s8_rate_guard_estimate_reason_t reason = rate_guard_gather_and_estimate(out_candidate);
-    if (reason != S8_RATE_GUARD_ESTIMATE_OK) {
+    /* OK and both CLAMPED_* variants all produce a usable *out_candidate --
+     * see s8_rate_guard_estimate.h's enum comment. Only NO_DATA means no
+     * candidate was produced at all. The CLAMPED distinction exists for the
+     * caller (the GET/POST handlers below) to surface to the operator, not
+     * to gate whether a candidate exists. */
+    if (reason != S8_RATE_GUARD_ESTIMATE_OK && reason != S8_RATE_GUARD_ESTIMATE_OK_CLAMPED_FLOOR &&
+        reason != S8_RATE_GUARD_ESTIMATE_OK_CLAMPED_CEILING) {
         snprintf(err_out, err_cap, "no zone has a usable identification yet (run autotune on at "
                                     "least one zone first)");
         return false;

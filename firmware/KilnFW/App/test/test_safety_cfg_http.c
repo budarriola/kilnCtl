@@ -323,10 +323,28 @@ static float s_stub_zone_k_dc[TEST_SAFETY_CFG_HTTP_MAX_ZONES];
 static float s_stub_zone_tau_s[TEST_SAFETY_CFG_HTTP_MAX_ZONES];
 static bool s_stub_zone_has_fit_ctx[TEST_SAFETY_CFG_HTTP_MAX_ZONES];
 static float s_stub_zone_fit_temp_c[TEST_SAFETY_CFG_HTTP_MAX_ZONES];
+// Coupling row fakes -- [affected][stepped], same shape as the real
+// zones_config_get_coupling(). Added for the 2026-09-10 S8 review (defect
+// D: the estimator's basis must include coupling, not just each zone's own
+// k_dc) -- default all-zero so existing tests (written before coupling was
+// part of the basis) keep their own-zone-only expected values unchanged.
+static bool  s_stub_zone_has_coupling[TEST_SAFETY_CFG_HTTP_MAX_ZONES];
+static float s_stub_zone_coupling_row[TEST_SAFETY_CFG_HTTP_MAX_ZONES][TEST_SAFETY_CFG_HTTP_MAX_ZONES];
 
 uint8_t zones_config_get_thermo_count(void)
 {
     return s_stub_thermo_count;
+}
+
+bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT])
+{
+    if (!out_row || zone_index >= TEST_SAFETY_CFG_HTTP_MAX_ZONES || !s_stub_zone_has_coupling[zone_index]) {
+        return false;
+    }
+    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT && j < TEST_SAFETY_CFG_HTTP_MAX_ZONES; j++) {
+        out_row[j] = s_stub_zone_coupling_row[zone_index][j];
+    }
+    return true;
 }
 
 bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
@@ -366,6 +384,8 @@ static void reset_rate_guard_stubs(void)
     memset(s_stub_zone_tau_s, 0, sizeof(s_stub_zone_tau_s));
     memset(s_stub_zone_has_fit_ctx, 0, sizeof(s_stub_zone_has_fit_ctx));
     memset(s_stub_zone_fit_temp_c, 0, sizeof(s_stub_zone_fit_temp_c));
+    memset(s_stub_zone_has_coupling, 0, sizeof(s_stub_zone_has_coupling));
+    memset(s_stub_zone_coupling_row, 0, sizeof(s_stub_zone_coupling_row));
 }
 
 // ---------------------------------------------------------------------------
@@ -1484,7 +1504,7 @@ static void test_rate_guard_gather_picks_coldest_identified_zone(void)
     s_stub_zone_fit_temp_c[0] = 500.0f;
 
     s_stub_zone_has_model[1] = true;
-    s_stub_zone_k_dc[1] = 10.0f;
+    s_stub_zone_k_dc[1] = 20.0f;
     s_stub_zone_tau_s[1] = 60.0f;
     s_stub_zone_has_fit_ctx[1] = true;
     s_stub_zone_fit_temp_c[1] = 20.0f;
@@ -1492,8 +1512,8 @@ static void test_rate_guard_gather_picks_coldest_identified_zone(void)
     float out = -1.0f;
     s8_rate_guard_estimate_reason_t r = rate_guard_gather_and_estimate(&out);
     TEST_CHECK(r == S8_RATE_GUARD_ESTIMATE_OK, "two identified zones -> OK");
-    // Zone 1: (10/60)*60*2 = 20 C/min -- inside [15,60], so unclamped.
-    TEST_CHECK(fabsf(out - 20.0f) < 1e-3f, "zone 1 (coldest fit_temp_c) wins, not zone 0");
+    // Zone 1: (20/60)*60*1.3 = 26.0 C/min -- inside [15,60], so unclamped.
+    TEST_CHECK(fabsf(out - 26.0f) < 1e-3f, "zone 1 (coldest fit_temp_c) wins, not zone 0");
 }
 
 static void test_rate_guard_gather_missing_fit_context_disqualifies_zone(void)
@@ -1572,7 +1592,7 @@ static void test_rate_guard_auto_compute_tighten_applies(void)
     s_stub_zone_k_dc[0] = 5.0f;
     s_stub_zone_tau_s[0] = 60.0f;
     s_stub_zone_has_fit_ctx[0] = true;
-    s_stub_zone_fit_temp_c[0] = 20.0f; // -> (5/60)*60*2 = 10, floored to 15.0
+    s_stub_zone_fit_temp_c[0] = 20.0f; // -> (5/60)*60*1.3 = 6.5, floored to 15.0
 
     float candidate = 0.0f, current = 0.0f;
     bool current_is_set = false;
@@ -1591,10 +1611,10 @@ static void test_rate_guard_auto_compute_loosen_suggests_only(void)
     reset_rate_guard_stubs();
     set_current_rate_guard(true, 15.0f); // already at the floor
     s_stub_zone_has_model[0] = true;
-    s_stub_zone_k_dc[0] = 10.0f;
+    s_stub_zone_k_dc[0] = 20.0f;
     s_stub_zone_tau_s[0] = 60.0f;
     s_stub_zone_has_fit_ctx[0] = true;
-    s_stub_zone_fit_temp_c[0] = 20.0f; // -> (10/60)*60*2 = 20 C/min
+    s_stub_zone_fit_temp_c[0] = 20.0f; // -> (20/60)*60*1.3 = 26.0 C/min
 
     float candidate = 0.0f, current = 0.0f;
     bool current_is_set = false;
@@ -1602,9 +1622,9 @@ static void test_rate_guard_auto_compute_loosen_suggests_only(void)
     char err[160];
     bool ok = rate_guard_auto_compute(&candidate, &current, &current_is_set, &decision, err, sizeof(err));
     TEST_CHECK(ok, "compute succeeds");
-    TEST_CHECK(fabsf(candidate - 20.0f) < 1e-3f, "candidate is 20.0 C/min");
+    TEST_CHECK(fabsf(candidate - 26.0f) < 1e-3f, "candidate is 26.0 C/min");
     TEST_CHECK(decision == S8_RATE_GUARD_AUTO_SUGGEST_ONLY,
-               "20.0 > 15.0 -- loosens the armed guard, must require confirmation, never auto-apply");
+               "26.0 > 15.0 -- loosens the armed guard, must require confirmation, never auto-apply");
 }
 
 static void test_rate_guard_auto_compute_no_data_fails_with_reason(void)
@@ -1723,10 +1743,10 @@ static void test_rate_guard_auto_post_handler_loosen_without_confirm_never_write
     reset_rate_guard_stubs();
     set_current_rate_guard(true, 15.0f); // armed at the floor
     s_stub_zone_has_model[0] = true;
-    s_stub_zone_k_dc[0] = 10.0f;
+    s_stub_zone_k_dc[0] = 20.0f;
     s_stub_zone_tau_s[0] = 60.0f;
     s_stub_zone_has_fit_ctx[0] = true;
-    s_stub_zone_fit_temp_c[0] = 20.0f; // -> 20.0 C/min, LOOSER than 15.0
+    s_stub_zone_fit_temp_c[0] = 20.0f; // -> 26.0 C/min, LOOSER than 15.0
 
     SafetyLinkClass fake_link;
     memset(&fake_link, 0, sizeof(fake_link));
@@ -1754,7 +1774,7 @@ static void test_rate_guard_auto_get_handler_never_writes(void)
     reset_rate_guard_stubs();
     set_current_rate_guard(true, 15.0f);
     s_stub_zone_has_model[0] = true;
-    s_stub_zone_k_dc[0] = 10.0f;
+    s_stub_zone_k_dc[0] = 20.0f;
     s_stub_zone_tau_s[0] = 60.0f;
     s_stub_zone_has_fit_ctx[0] = true;
     s_stub_zone_fit_temp_c[0] = 20.0f; // looser candidate -- GET must still never write
