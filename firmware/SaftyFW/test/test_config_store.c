@@ -700,7 +700,7 @@ static void test_v2_full_roundtrip(void)
     rec.firing_margin_c = 111.0f;
     rec.overshoot_margin_c = 66.0f;
     rec.overshoot_time_s = 121u;
-    rec.max_rate_c_per_min = 12.5f;
+    rec.max_rate_c_per_min = 20.0f; // above CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR (15.0)
     rec.rate_window_s = 61u;
     rec.blind_grace_s = 62u;
     rec.frozen_window_s = 601u;
@@ -1172,6 +1172,81 @@ static void test_unpack_validates_ranges_on_load(void)
                "validation is wired into that path too");
 }
 
+// docs/audits/s8_rate_guard_retune_2026-09-09.md: max_rate_c_per_min now
+// carries a hard [CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR, _CEILING] bound,
+// enforced both at SET_PARAM time (config_params_set(), CHECK_F32_RANGE_OR_
+// ZERO) and again at load time (config_params_validate_ranges(),
+// RANGE_F32_RANGE_OR_ZERO) -- same belt-and-suspenders pattern as
+// abs_max_temp_c above. 0.0f (disabled/not-commissioned) is the one
+// exception: it always bypasses both bounds, since it is the sentinel, not a
+// rate. This check was proven capable of failing (RED) by temporarily
+// raising CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR above 20.0 in config_store.h,
+// observing every test below (and every other test in this file staging
+// max_rate_c_per_min=20.0 for an unrelated reason) fail, then restoring the
+// constant by hand -- confirmed via an empty `git diff` on that file.
+static void test_s8_rate_guard_bounds(void)
+{
+    TEST_SECTION("max_rate_c_per_min -- CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR/_CEILING bound "
+                 "any commissioned (nonzero) value, at both SET_PARAM time and load time");
+
+    config_store_record_t rec;
+    kilnlink_param_value_t v;
+
+    // --- SET_PARAM-time gate (config_params_set(), 0x0204) ------------------
+    config_store_default(&rec);
+    v.f32_val = 0.0f;
+    TEST_CHECK(config_params_set(&rec, 0x0204u, KILNLINK_PARAM_TYPE_F32, v),
+               "0.0 (disabled sentinel) is accepted -- it always bypasses the bound");
+
+    config_store_default(&rec);
+    v.f32_val = CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR;
+    TEST_CHECK(config_params_set(&rec, 0x0204u, KILNLINK_PARAM_TYPE_F32, v),
+               "exactly the floor is accepted (inclusive bound)");
+
+    config_store_default(&rec);
+    v.f32_val = CONFIG_STORE_MAX_RATE_C_PER_MIN_CEILING;
+    TEST_CHECK(config_params_set(&rec, 0x0204u, KILNLINK_PARAM_TYPE_F32, v),
+               "exactly the ceiling is accepted (inclusive bound)");
+
+    config_store_default(&rec);
+    config_store_record_t before = rec;
+    v.f32_val = CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR - 0.1f;
+    TEST_CHECK(!config_params_set(&rec, 0x0204u, KILNLINK_PARAM_TYPE_F32, v),
+               "a nonzero value just below the floor is refused -- would nuisance-trip on "
+               "ordinary recorded bench operation (audit's measured 7.69-13.5 C/min peak)");
+    TEST_CHECK(memcmp(&rec, &before, sizeof(rec)) == 0, "rec untouched by the refused write");
+
+    config_store_default(&rec);
+    before = rec;
+    v.f32_val = CONFIG_STORE_MAX_RATE_C_PER_MIN_CEILING + 0.1f;
+    TEST_CHECK(!config_params_set(&rec, 0x0204u, KILNLINK_PARAM_TYPE_F32, v),
+               "a value above the ceiling is refused -- an absurd magnitude (units slip, or a "
+               "runaway auto-derivation) must not silently disarm S8");
+    TEST_CHECK(memcmp(&rec, &before, sizeof(rec)) == 0, "rec untouched by the refused write");
+
+    // --- Load-time re-check (config_params_validate_ranges(), via unpack) --
+    // A record that bypassed SET_PARAM's gate entirely (direct struct write,
+    // simulating a record committed by a different/older build or a bit
+    // flip) must still be refused when loaded.
+    config_store_default(&rec);
+    rec.max_rate_c_per_min = CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR - 1.0f;
+    rec.fields_set |= CONFIG_STORE_SET_MAX_RATE_C_PER_MIN;
+    uint8_t record[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&rec, record);
+    config_store_record_t out;
+    TEST_CHECK(!config_store_unpack(record, &out),
+               "a CRC-valid record with a too-tight committed max_rate_c_per_min is refused at "
+               "LOAD time too, not only at commissioning");
+
+    config_store_default(&rec);
+    rec.max_rate_c_per_min = 0.0f;
+    rec.fields_set |= CONFIG_STORE_SET_MAX_RATE_C_PER_MIN;
+    config_store_pack(&rec, record);
+    TEST_CHECK(config_store_unpack(record, &out),
+               "a committed-but-0.0 (disabled) max_rate_c_per_min still loads fine -- the "
+               "sentinel is exempt from the bound at load time too");
+}
+
 static void test_reject_info_distinguishes_fresh_from_rejected(void)
 {
     TEST_SECTION("config_store_unpack_ex/find_latest_ex -- fresh board vs. committed-and-"
@@ -1528,7 +1603,11 @@ static void test_config_params_set_range_validation(void)
 
         // Sanity: a normal finite value is still accepted -- proves this
         // isn't an over-tight validator rejecting legitimate values too.
-        v.f32_val = 12.5f;
+        // 20.0 (not 12.5) since max_rate_c_per_min now carries its own
+        // [CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR, _CEILING] bound (15..60) --
+        // see that macro's doc comment (config_store.h) -- and this loop
+        // shares one value across every field in the table.
+        v.f32_val = 20.0f;
         TEST_CHECK(config_params_set(&rec, f32_ids[i], KILNLINK_PARAM_TYPE_F32, v),
                    "an ordinary finite value is still accepted for this F32 field");
     }
@@ -2073,7 +2152,7 @@ static void test_config_params_all_required_set(void)
     config_params_set(&rec, 0x0107u, KILNLINK_PARAM_TYPE_U8, v);
     v.u8_val = 2u;
     config_params_set(&rec, 0x0108u, KILNLINK_PARAM_TYPE_U8, v); // ct_channel_map, all 3
-    v.f32_val = 5.0f;
+    v.f32_val = 20.0f; // above CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR (15.0)
     config_params_set(&rec, 0x0204u, KILNLINK_PARAM_TYPE_F32, v); // max_rate_c_per_min
     config_params_finalize_ct_channel_map(&rec);
 
@@ -2159,7 +2238,7 @@ static void test_ct_installed_gates_the_channel_map(void)
     config_params_set(&base, 0x0104u, KILNLINK_PARAM_TYPE_F32, v);
     v.u8_val = CONFIG_STORE_DEFAULT_TC_TYPE;
     config_params_set(&base, 0x0105u, KILNLINK_PARAM_TYPE_U8, v);
-    v.f32_val = 5.0f;
+    v.f32_val = 20.0f; // above CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR (15.0)
     config_params_set(&base, 0x0204u, KILNLINK_PARAM_TYPE_F32, v);
     v.f32_val = 240.0f;
     config_params_set(&base, 0x030Eu, KILNLINK_PARAM_TYPE_F32, v);
@@ -2237,7 +2316,7 @@ static void test_ct_topology_summed_skips_the_channel_map(void)
     config_params_set(&base, 0x0104u, KILNLINK_PARAM_TYPE_F32, v);
     v.u8_val = CONFIG_STORE_DEFAULT_TC_TYPE;
     config_params_set(&base, 0x0105u, KILNLINK_PARAM_TYPE_U8, v);
-    v.f32_val = 5.0f;
+    v.f32_val = 20.0f; // above CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR (15.0)
     config_params_set(&base, 0x0204u, KILNLINK_PARAM_TYPE_F32, v);
     v.f32_val = 240.0f;
     config_params_set(&base, 0x030Eu, KILNLINK_PARAM_TYPE_F32, v);
@@ -2649,6 +2728,7 @@ void run_test_config_store(void)
     test_future_version_refused();
     test_unset_fields_distinguishable_from_zero();
     test_unpack_validates_ranges_on_load();
+    test_s8_rate_guard_bounds();
     test_reject_info_distinguishes_fresh_from_rejected();
     test_seq_to_version();
     test_tc_type_voltage_mode_clamp_v2();

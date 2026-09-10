@@ -357,6 +357,13 @@ bool config_params_is_set(const config_store_record_t *rec, uint16_t id)
 #define CHECK_F32_FINITE() do { if (!isfinite(value.f32_val)) { return false; } } while (0)
 #define CHECK_F32_NONNEG() do { if (!isfinite(value.f32_val) || value.f32_val < 0.0f) { return false; } } while (0)
 #define CHECK_F32_POS() do { if (!isfinite(value.f32_val) || value.f32_val <= 0.0f) { return false; } } while (0)
+// 0.0f (disabled/not-commissioned) always passes; any nonzero value must
+// land in [min, max] -- see config_store.h's CONFIG_STORE_MAX_RATE_C_PER_MIN_
+// FLOOR/_CEILING comment for why this exists and what it protects against.
+#define CHECK_F32_RANGE_OR_ZERO(min, max) do { \
+        if (!isfinite(value.f32_val)) { return false; } \
+        if (value.f32_val != 0.0f && (value.f32_val < (min) || value.f32_val > (max))) { return false; } \
+    } while (0)
 
 bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
                         kilnlink_param_value_t value)
@@ -404,7 +411,7 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     case 0x0201u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->firing_margin_c = value.f32_val; return true;
     case 0x0202u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->overshoot_margin_c = value.f32_val; return true;
     case 0x0203u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->overshoot_time_s = value.u16_val; return true;
-    case 0x0204u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->max_rate_c_per_min = value.f32_val; rec->fields_set |= CONFIG_STORE_SET_MAX_RATE_C_PER_MIN; return true;
+    case 0x0204u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_RANGE_OR_ZERO(CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR, CONFIG_STORE_MAX_RATE_C_PER_MIN_CEILING); rec->max_rate_c_per_min = value.f32_val; rec->fields_set |= CONFIG_STORE_SET_MAX_RATE_C_PER_MIN; return true;
     case 0x0205u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->rate_window_s = value.u16_val; return true;
     case 0x0206u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->blind_grace_s = value.u16_val; return true;
     case 0x0207u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->frozen_window_s = value.u16_val; return true;
@@ -565,6 +572,17 @@ bool config_params_validate_ranges(const config_store_record_t *rec,
             RANGE_FAIL((field_name), "this field must be a real positive value -- no unlimited/no-limit state exists"); \
         } \
     } while (0)
+// 0.0f (disabled/not-commissioned) always passes; matches CHECK_F32_RANGE_OR_
+// ZERO's SET_PARAM-time gate above -- this is the load-time/re-validate half
+// of the same belt-and-suspenders pattern every other commissioned field uses.
+#define RANGE_F32_RANGE_OR_ZERO(field, min, max, field_name) do { \
+        if (!isfinite(field)) { \
+            RANGE_FAIL((field_name), "NaN/Inf is never a valid value for this field"); \
+        } \
+        if ((field) != 0.0f && ((field) < (min) || (field) > (max))) { \
+            RANGE_FAIL((field_name), "commissioned value outside its documented floor/ceiling"); \
+        } \
+    } while (0)
 
     RANGE_U8_MAX(rec->tc_source, CONFIG_STORE_TC_SOURCE_BOTH, "tc_source");
     RANGE_U8_MAX(rec->borrowed_zone_index, 2u, "borrowed_zone_index");
@@ -636,7 +654,8 @@ bool config_params_validate_ranges(const config_store_record_t *rec,
 
     RANGE_F32_FINITE(rec->firing_margin_c, "firing_margin_c");
     RANGE_F32_FINITE(rec->overshoot_margin_c, "overshoot_margin_c");
-    RANGE_F32_FINITE(rec->max_rate_c_per_min, "max_rate_c_per_min");
+    RANGE_F32_RANGE_OR_ZERO(rec->max_rate_c_per_min, CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR,
+                             CONFIG_STORE_MAX_RATE_C_PER_MIN_CEILING, "max_rate_c_per_min");
     RANGE_F32_FINITE(rec->tc_disagreement_c, "tc_disagreement_c");
     RANGE_F32_FINITE(rec->tc_expected_offset_c, "tc_expected_offset_c");
     RANGE_F32_FINITE(rec->tc_offset_c, "tc_offset_c");

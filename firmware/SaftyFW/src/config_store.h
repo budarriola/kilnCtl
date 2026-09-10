@@ -204,6 +204,28 @@ extern "C" {
 // tighter value rather than rely on this one.
 #define CONFIG_STORE_DEFAULT_MAX_RATE_C_PER_MIN 33.3f
 
+// docs/audits/s8_rate_guard_retune_2026-09-09.md: a hard floor/ceiling on any
+// COMMISSIONED (nonzero) max_rate_c_per_min value, enforced in
+// config_params.c regardless of who or what produced the number -- an
+// operator's typo, a stale/mis-identified plant-model auto-derivation, or a
+// compromised/buggy sender on the link. 0.0f (disabled/not-commissioned)
+// always bypasses both bounds; it is the sentinel, not a rate.
+//   FLOOR: the same audit measured the firmware's own 60s-window rate
+//   estimator peaking at 7.69 C/min (raw per-sample: 9.92) across all 65
+//   recorded bench captures, and the extended simulator at 13.1-13.5 C/min
+//   at the faithful (power_scale=1) bench model. A guard tighter than this
+//   floor would trip on ordinary recorded operation -- see
+//   test_s8_rate_guard_bounds() (test_config_store.c) for the proof this
+//   bound is load-bearing, not decorative.
+#define CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR   15.0f
+//   CEILING: deliberately left ABOVE the historical 33.3 C/min default so a
+//   hand-set legacy/manual value stays valid (backward compatibility), while
+//   still refusing an obviously-wrong magnitude (e.g. a units slip such as
+//   999 C/hr typed into a C/min field, or an auto-derivation that ran away
+//   from a bad plant-model fit). A guard looser than this ceiling could miss
+//   a genuine runaway.
+#define CONFIG_STORE_MAX_RATE_C_PER_MIN_CEILING 60.0f
+
 // Highest tc_type/borrowed_type_expected byte that is a real, linearized
 // MAX31856 thermocouple type (MAX31856_TC_TYPE_T) -- duplicated as a literal
 // for the same dependency-free reason CONFIG_STORE_DEFAULT_TC_TYPE's comment
@@ -1092,6 +1114,34 @@ void config_store_get_full_record(config_store_record_t *out);
 // Wired to SAFETY_CMD_SET_CONFIG (0x16, LINK_PROTOCOL.md sec 4) via
 // link_task_handle_set_config() (src/tasks/link_task.c).
 bool config_store_write(const config_store_record_t *rec, const char **out_reason);
+
+// TEST-ONLY instrumentation (opus review 2026-09-09): counts how many times
+// config_store_seqlock_read() has fallen through to the writer-owned
+// fallback double buffer (i.e. the primary seqlock's
+// CONFIG_STORE_SEQLOCK_MAX_RETRIES were exhausted). Exists so a host test
+// asserting "no torn read" can also prove the fallback path was actually
+// exercised, rather than merely never reached -- see config_store_flash.c's
+// s_fallback_taken_count comment. Not gated behind a build flag: cheap
+// enough to leave live in production too.
+uint32_t config_store_test_fallback_taken_count(void);
+void config_store_test_fallback_taken_count_reset(void);
+
+// TEST-ONLY (2026-09-09): deterministic single-threaded race injection for
+// the fallback double buffer's own ABA-closing seqlock. See
+// config_store_flash.c's own comments on s_fallback_test_hook and
+// s_fallback_test_force for what each does; both are no-ops (NULL/false) in
+// production. NOT reset by config_store_flash_host_stub_reset() -- a test
+// that installs a hook or forces the fallback path must clear it itself
+// (hook(NULL), force(false)) before returning, the same discipline any
+// other test-only global here would need.
+void config_store_test_set_fallback_hook(void (*hook)(void));
+void config_store_test_force_fallback_path(bool force);
+
+// TEST-ONLY (2026-09-09): resets the fallback double buffer's validity/
+// index/generation/contents back to a true cold-boot state -- see
+// config_store_flash.c's own comment on config_store_test_reset_fallback_
+// state() for why this is needed at all in a host test binary.
+void config_store_test_reset_fallback_state(void);
 
 // The cached record's `seq`, mapped through config_store_seq_to_version()
 // below -- what SAFETY_CMD_FW_VERSION's `config_version` byte carries

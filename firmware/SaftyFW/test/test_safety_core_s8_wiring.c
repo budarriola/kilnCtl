@@ -189,16 +189,19 @@ static void run_section2_whole_chain(void)
 
     // -- Commissioned path: config_store's REAL producer (config_params_set(),
     // the identical function COMMIT_CONFIG's handler calls on real hardware)
-    // stages max_rate_c_per_min=10.0C/min, rate_window_s=60s -- comfortably
-    // below the 20C/min ramp above, so a correctly-wired chain MUST trip.
+    // stages max_rate_c_per_min=15.0C/min (CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR,
+    // the tightest a commissioned value may legally go per the
+    // s8_rate_guard_retune_2026-09-09 audit -- was 10.0 before that floor
+    // existed), still below the 20C/min ramp above, so a correctly-wired
+    // chain MUST trip.
     {
         config_store_record_t rec;
         config_store_default(&rec);
 
         kilnlink_param_value_t v;
-        v.f32_val = 10.0f;
+        v.f32_val = 15.0f;
         TEST_CHECK(config_params_set(&rec, 0x0204u, KILNLINK_PARAM_TYPE_F32, v),
-                   "config_params_set() accepts max_rate_c_per_min=10.0 on param 0x0204 -- "
+                   "config_params_set() accepts max_rate_c_per_min=15.0 on param 0x0204 -- "
                    "the real wire id SET_PARAM/COMMIT_CONFIG use");
         TEST_CHECK((rec.fields_set & CONFIG_STORE_SET_MAX_RATE_C_PER_MIN) != 0u,
                    "config_params_set() actually sets CONFIG_STORE_SET_MAX_RATE_C_PER_MIN in "
@@ -212,7 +215,7 @@ static void run_section2_whole_chain(void)
         memset(&cfg, 0, sizeof(cfg));
         apply_s8_cfg_from_record(&rec, &cfg);
 
-        TEST_CHECK(cfg.max_rate_c_per_min == 10.0f,
+        TEST_CHECK(cfg.max_rate_c_per_min == 15.0f,
                    "the commissioned value reached safety_guard_cfg_t.max_rate_c_per_min");
         TEST_CHECK(cfg.rate_window_s == 60.0f,
                    "the commissioned value reached safety_guard_cfg_t.rate_window_s");

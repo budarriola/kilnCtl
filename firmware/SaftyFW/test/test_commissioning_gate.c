@@ -40,7 +40,7 @@ static void stage_full_commissioning(config_store_record_t *rec)
     config_params_set(rec, 0x0107u, KILNLINK_PARAM_TYPE_U8, v);
     v.u8_val = 2u;
     config_params_set(rec, 0x0108u, KILNLINK_PARAM_TYPE_U8, v); // ct_channel_map 0..2
-    v.f32_val = 5.0f;
+    v.f32_val = 20.0f; // above CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR (15.0)
     config_params_set(rec, 0x0204u, KILNLINK_PARAM_TYPE_F32, v); // max_rate_c_per_min
     v.f32_val = 240.0f;
     config_params_set(rec, 0x030Eu, KILNLINK_PARAM_TYPE_F32, v); // mains_voltage_v
@@ -72,7 +72,7 @@ static void stage_full_commissioning_except_ct_map(config_store_record_t *rec)
     config_params_set(rec, 0x0104u, KILNLINK_PARAM_TYPE_F32, v);
     v.u8_val = CONFIG_STORE_DEFAULT_TC_TYPE;
     config_params_set(rec, 0x0105u, KILNLINK_PARAM_TYPE_U8, v);
-    v.f32_val = 5.0f;
+    v.f32_val = 20.0f; // above CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR (15.0)
     config_params_set(rec, 0x0204u, KILNLINK_PARAM_TYPE_F32, v);
     v.f32_val = 240.0f;
     config_params_set(rec, 0x030Eu, KILNLINK_PARAM_TYPE_F32, v);
