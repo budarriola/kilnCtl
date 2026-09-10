@@ -268,10 +268,11 @@ count.
 
   The A/B sector fix (`24090c9a`) is flashed to the bench Pico (`b7af9ebe`,
   2026-09-08: commissioning config read back byte-for-byte across the
-  migration, CRC unchanged). The seqlock fix (`b202fe56`/`5671ee03`,
-  2026-09-09) is NOT yet flashed — correct in source and host-tested, not
-  yet on the board (`cb1ba325` included — none of the three seqlock commits
-  are flashed). Full detail:
+  migration, CRC unchanged). The seqlock fix (`b202fe56`/`5671ee03`/
+  `cb1ba325`) was flashed 2026-09-09 (`ae23aba4`, from a clean detached
+  worktree at HEAD — commissioning and S8 survived the reset) and again
+  2026-09-10 to a later HEAD (`b88ea6ba`); commissioning survived both
+  resets. Full detail:
   `docs/audits/flash_endurance_review_2026-09-07.md` §5, R2.
 
 ## Dual-write window: now measured (2026-09-07)
