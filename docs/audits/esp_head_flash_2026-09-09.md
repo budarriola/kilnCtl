@@ -36,14 +36,19 @@ matched the just-built binary).
 verify=True)` → `"flashed and verified OK (bootloader + partition table +
 app), board reset and running"`, provenance HEAD `0dddd435` tree clean.
 
-## Post-flash: S6a
+## Post-flash: S6b
 
-As expected, the reset tripped S6a while the safety-link handshake came
-back up. `safety_get_diag()` showed `trip_reason 7 | trip_mask 0x0040` —
-**bit 6 only** (mainFault), nothing else set. Confirmed link up
-(`cmd_status_count` climbing, `frames_received` incrementing) before
-calling `safety_clear_trip()`; diag then read `state armed | trip_reason 0
-| trip_mask 0x0000`.
+As expected, the reset tripped the safety-link handshake guard while the
+ESP was still coming up. `safety_get_diag()` showed `trip_reason 7 |
+trip_mask 0x0040` — **bit 6 only**, nothing else set. `trip_reason 7` is
+`SAFETY_TRIP_LINK_DEAD` (**S6b**, not S6a/`SAFETY_TRIP_MAIN_FAULT`, which
+is `trip_reason 6` / bit 5 / `0x0020` — corrected here 2026-09-09, this
+entry originally mislabeled it "S6a"/mainFault). `trip_mask = 1 <<
+(trip_reason - 1)`, so bit 6 for reason 7 is arithmetically consistent;
+only the guard name was wrong. Confirmed link up (`cmd_status_count`
+climbing, `frames_received` incrementing) before calling
+`safety_clear_trip()`; diag then read `state armed | trip_reason 0 |
+trip_mask 0x0000`.
 
 ## Post-flash verification
 

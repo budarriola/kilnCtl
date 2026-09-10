@@ -513,6 +513,50 @@ class SafetyLinkStats:
 #: make the same distinction.
 SAFETY_TRIP_INEFFECTIVE = 10
 
+#: Full safety_trip_t reason -> (enum name, guard tag) map
+#: (firmware/SaftyFW/docs/ARCHITECTURE.md). Kept here so a caller/human never
+#: has to compute `1 << (reason - 1)` by hand or guess which guard a reason
+#: number names -- CLAUDE.md documented this wrong (bit 6/0x0040 for S6a,
+#: actually bit 5/0x0020) for most of 2026-09-09 before being corrected, and
+#: that mistake was propagated into other docs the same day. The bit
+#: position is NOT the guard number past S3 -- S4 and S10 are WARN-only and
+#: leave gaps in the enum, so `reason - 1` diverges from the guard number
+#: from S5 onward.
+SAFETY_TRIP_NAMES: "dict[int, tuple[str, str]]" = {
+    0: ("SAFETY_TRIP_NONE", "-"),
+    1: ("SAFETY_TRIP_OVERTEMP", "S1"),
+    2: ("SAFETY_TRIP_OVER_SETPOINT", "S2"),
+    3: ("SAFETY_TRIP_LOAD_STUCK_ON", "S3"),
+    5: ("SAFETY_TRIP_SENSOR_INVALID", "S5"),
+    6: ("SAFETY_TRIP_MAIN_FAULT", "S6a"),
+    7: ("SAFETY_TRIP_LINK_DEAD", "S6b"),
+    8: ("SAFETY_TRIP_ESTOP", "S7"),
+    9: ("SAFETY_TRIP_RATE", "S8"),
+    10: ("SAFETY_TRIP_INEFFECTIVE", "S9"),
+    12: ("SAFETY_TRIP_FROZEN_SENSOR", "S11"),
+    13: ("SAFETY_TRIP_ENCLOSURE_TEMP", "S12"),
+    14: ("SAFETY_TRIP_BORROWED_STALE", "S13"),
+    15: ("SAFETY_TRIP_CONFIG_CORRUPT", "-"),
+    16: ("SAFETY_TRIP_SELF_TEST", "-"),
+}
+
+
+def safety_trip_mask_for_reason(reason: int) -> int:
+    """Mirrors link_frame_trip_mask_for_reason() (firmware/SaftyFW/src/tasks/
+    link_frame.c) exactly: 0 for SAFETY_TRIP_NONE, else 1 << (reason - 1)."""
+    if reason == 0:
+        return 0
+    return 1 << (reason - 1)
+
+
+def describe_safety_trip_reason(reason: int) -> str:
+    """'<name> (<guard tag>)' for a trip_reason byte, or a plain unknown-
+    reason label -- never just a bare integer a reader has to look up."""
+    name, tag = SAFETY_TRIP_NAMES.get(reason, (f"unknown reason {reason}", "?"))
+    if tag == "-":
+        return name
+    return f"{name} ({tag})"
+
 
 @dataclass(frozen=True)
 class SafetyDiag:
@@ -573,10 +617,25 @@ class SafetyDiag:
             "never received" if self.context_never_received else f"{self.context_age_100ms * 100} ms"
         )
 
+        reason_desc = describe_safety_trip_reason(self.trip_reason)
+        expected_mask = safety_trip_mask_for_reason(self.trip_reason)
+        if self.trip_mask == expected_mask:
+            mask_desc = f"0x{self.trip_mask:04x}"
+        else:
+            # Disagreement between the reason byte and the mask field --
+            # exactly the ambiguity that led CLAUDE.md to document the wrong
+            # constant for S6a on 2026-09-09. Never let a caller silently
+            # trust one field without seeing the other contradicts it.
+            mask_desc = (
+                f"0x{self.trip_mask:04x} (MISMATCH: trip_reason {self.trip_reason} "
+                f"implies 0x{expected_mask:04x} = 1 << ({self.trip_reason} - 1))"
+            )
+
         return (
             f"boot reason: {boot_desc} | state {state_desc} | "
-            f"trip_reason {self.trip_reason} | warn_mask 0x{self.warn_mask:04x} | "
-            f"trip_mask 0x{self.trip_mask:04x} | uptime {self.uptime_ms} ms | "
+            f"trip_reason {self.trip_reason} [{reason_desc}] | "
+            f"warn_mask 0x{self.warn_mask:04x} | "
+            f"trip_mask {mask_desc} | uptime {self.uptime_ms} ms | "
             f"context age {context_age} | context frames ok {self.context_frames_ok}, "
             f"bad {self.context_frames_bad} | tx frames dropped {self.tx_frames_dropped}"
             + (f" | flags [{', '.join(flag_bits)}]" if flag_bits else "")

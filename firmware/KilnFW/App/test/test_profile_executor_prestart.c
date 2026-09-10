@@ -1169,7 +1169,7 @@ static void test_run_refused_by_readiness_safety_trip(void)
 {
     TEST_SECTION("profile_executor_run() is refused by the readiness interlock -- latched safety trip");
     reset_readiness_facts_to_ready();
-    s_test_readiness_facts.safety_trip_mask = 0x0040u; /* S6a mainFault -- what a reboot latches */
+    s_test_readiness_facts.safety_trip_mask = 0x0020u; /* S6a mainFault (trip_mask = 1 << (reason-1) = 1 << 5) -- what a reboot latches */
     run_and_expect_gate_refusal("a latched safety trip refuses a firing at run()", "TRIP");
 }
 

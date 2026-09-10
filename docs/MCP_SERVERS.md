@@ -253,7 +253,10 @@ suppression of this was tried and reverted as unsafe. Procedure:
 2. Call `safety_get_status()` and confirm link is up and FW_VERSION has
    been exchanged (not just that the tool call succeeded).
 3. Confirm the trip is this one, not something else: `trip_reason` /
-   `trip_mask` should show only `SAFETY_TRIP_MAIN_FAULT` (bit 6, `0x0040`)
+   `trip_mask` should show only `SAFETY_TRIP_MAIN_FAULT` (`trip_reason 6`,
+   `trip_mask` bit 5 = `0x0020` -- `trip_mask` is `1 << (trip_reason - 1)`,
+   see CLAUDE.md's dual-reflash note; `0x0040` is bit 6, `trip_reason 7`
+   `SAFETY_TRIP_LINK_DEAD`/S6b, a DIFFERENT guard)
    -- if any other bit is set, do not clear, investigate instead.
 4. Only then call `safety_clear_trip()`. Clearing before the link is
    actually up just re-trips (`safety_guards_try_clear()` re-checks live

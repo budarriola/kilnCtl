@@ -136,7 +136,7 @@ static void test_safety_trip_alone_refuses(void)
 {
     TEST_SECTION("a latched safety trip alone refuses a start");
     set_fully_ready();
-    s_fake_facts.safety_trip_mask = 0x0040u; /* SAFETY_TRIP_MAIN_FAULT, S6a -- what a reboot latches */
+    s_fake_facts.safety_trip_mask = 0x0020u; /* SAFETY_TRIP_MAIN_FAULT, S6a (trip_mask = 1 << (reason-1) = 1 << 5) -- what a reboot latches */
     check_one_blocking_item("a latched safety trip refuses the start", READINESS_GATE_BLOCK_SAFETY_TRIP,
                             "TRIP");
 }

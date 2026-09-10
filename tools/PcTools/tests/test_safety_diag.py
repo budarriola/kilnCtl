@@ -156,6 +156,58 @@ class SafetyDiagDescribeTests(unittest.TestCase):
         text = value.describe()
         self.assertIn("context age never received", text)
 
+    def test_trip_mask_for_reason_matches_firmware_mapping(self):
+        """Pins safety_trip_mask_for_reason() against SaftyFW's own
+        safety_trip_t enum (firmware/SaftyFW/docs/ARCHITECTURE.md) and its
+        link_frame_trip_mask_for_reason() (link_frame.c): mask = 1 <<
+        (reason - 1), reason 0 -> mask 0. This is the exact relationship
+        CLAUDE.md got wrong for S6a on 2026-09-09 (documented bit 6/0x0040,
+        actually bit 5/0x0020) -- if this ever regresses (e.g. a future
+        edit reintroduces an off-by-one), this test must go red."""
+        from kilnctrl.devices_safety import safety_trip_mask_for_reason
+
+        expected = {
+            0: 0x0000,  # SAFETY_TRIP_NONE
+            1: 0x0001,  # S1  SAFETY_TRIP_OVERTEMP
+            2: 0x0002,  # S2  SAFETY_TRIP_OVER_SETPOINT
+            3: 0x0004,  # S3  SAFETY_TRIP_LOAD_STUCK_ON
+            5: 0x0010,  # S5  SAFETY_TRIP_SENSOR_INVALID
+            6: 0x0020,  # S6a SAFETY_TRIP_MAIN_FAULT  (NOT 0x0040)
+            7: 0x0040,  # S6b SAFETY_TRIP_LINK_DEAD
+            8: 0x0080,  # S7  SAFETY_TRIP_ESTOP
+            9: 0x0100,  # S8  SAFETY_TRIP_RATE
+            10: 0x0200,  # S9  SAFETY_TRIP_INEFFECTIVE
+            12: 0x0800,  # S11 SAFETY_TRIP_FROZEN_SENSOR
+            13: 0x1000,  # S12 SAFETY_TRIP_ENCLOSURE_TEMP
+            14: 0x2000,  # S13 SAFETY_TRIP_BORROWED_STALE
+            15: 0x4000,  # SAFETY_TRIP_CONFIG_CORRUPT
+            16: 0x8000,  # SAFETY_TRIP_SELF_TEST
+        }
+        for reason, mask in expected.items():
+            self.assertEqual(
+                safety_trip_mask_for_reason(reason),
+                mask,
+                f"reason {reason} should produce mask 0x{mask:04x}",
+            )
+
+    def test_describe_names_the_reason_and_flags_mask_mismatch(self):
+        """describe() must decode trip_reason into its enum name/guard tag
+        (so a reader never has to compute 1 << (reason - 1) by hand), and
+        must call out a wire trip_mask that disagrees with what trip_reason
+        implies rather than printing it silently -- the exact ambiguity
+        that let 'trip_reason 6 | trip_mask 0x0040' pass as innocuous."""
+        vector = _build_vector(ever_received=True, state=4, trip_reason=6, trip_mask=0x0020)
+        _subcommand, value = devices.parse_safety_response(vector)
+        text = value.describe()
+        self.assertIn("SAFETY_TRIP_MAIN_FAULT", text)
+        self.assertIn("S6a", text)
+        self.assertNotIn("MISMATCH", text)
+
+        bad_vector = _build_vector(ever_received=True, state=4, trip_reason=6, trip_mask=0x0040)
+        _subcommand, bad_value = devices.parse_safety_response(bad_vector)
+        bad_text = bad_value.describe()
+        self.assertIn("MISMATCH", bad_text)
+
 
 if __name__ == "__main__":
     unittest.main()

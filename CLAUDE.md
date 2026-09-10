@@ -80,10 +80,18 @@ factory boot target.
 Resetting both processors close together (a dual reflash) correctly trips
 S6a (mainFault) while the ESP's safety-link handshake is still coming up —
 expected, not a bug. Confirm link-up via `safety_get_status()` and that
-`trip_reason`/`trip_mask` show only `SAFETY_TRIP_MAIN_FAULT` (bit 6,
-`0x0040`) before calling `safety_clear_trip()`. Full procedure and rationale:
-`docs/MCP_SERVERS.md`'s flash section and
-`docs/audits/s6a_startup_grace_revert_2026-09-07.md`.
+`trip_reason`/`trip_mask` show only `SAFETY_TRIP_MAIN_FAULT` before calling
+`safety_clear_trip()`. **`trip_mask` is `1 << (trip_reason - 1)`**
+(`link_frame_trip_mask_for_reason()`, `firmware/SaftyFW/src/tasks/link_frame.c:237`)
+— derive the expected mask from that formula rather than quoting a fixed
+constant, since the enum leaves gaps (S4/S10 are WARN-only and skip a
+number) so bit position is NOT the guard number past S3. S6a is
+`SAFETY_TRIP_MAIN_FAULT = 6`, so its mask is bit 5, `0x0020` — **not**
+`0x0040`, which is bit 6 (`trip_reason 7`, `SAFETY_TRIP_LINK_DEAD`/S6b).
+Full procedure and rationale: `docs/MCP_SERVERS.md`'s flash section,
+`docs/audits/s6a_startup_grace_revert_2026-09-07.md`, and
+`firmware/SaftyFW/docs/ARCHITECTURE.md`'s "Correction, 2026-08-27 audit"
+section.
 
 `ota_rollback_esp()` itself has a hazard, 2026-09-04: rolling back past a
 `zones_cfg` schema bump (e.g. v22, `ZONES_CFG_VERSION` in
