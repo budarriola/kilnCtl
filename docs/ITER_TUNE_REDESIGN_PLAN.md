@@ -453,27 +453,54 @@ Units become nominal rather than physical — that is fine, because nothing in
 the scoring cares about watts, only about the input/output dynamics, which are
 then exact.
 
-Coupling is harder and is the part that must be **measured inside the sim, not
-derived**. The firmware's `coupling_coeff[i][j]` is a fitted steady-state
-cross-gain (zone *i*'s rise per unit when zone *j* is stepped, with
-`coupling_diag_k_dc` as that identification's own diagonal); the sim's
-`coupling_w_per_c[i][j]` is a conductance on `(T_j − T_i)`. The algebraic
-first cut is `g_ij ≈ h_i · coupling_coeff[i][j] / coupling_diag_k_dc[j]`, but
-the sim's coupling also loads zone *j* (it is a conductance, energy flows both
-ways), so this is only a starting point. **Procedure:** set the first cut,
-then run a single-zone step test *in the simulator*, read off the resulting
-cross-gains exactly the way the bench identification did, and iterate the
-matrix until the simulated cross-gains match the measured ones
-(`[0, 27.32, 21.72] / [14.30, 0, 22.15] / [8.33, 12.42, 0]`) to within 10 %.
-That fitted matrix is checked in as data alongside the measured one, with the
-residual recorded.
-
-One honest consequence to state: the measured matrix is **asymmetric**, and a
-conductance model of the form `g·(T_j − T_i)` is symmetric in form. `sim_kiln`
-permits an asymmetric `g` (its own header says so), so the numbers can be
-matched — but the resulting model is then not energy-conserving. That is
-acceptable for scoring a controller and is **not** acceptable as a physical
-claim about the kiln.
+> **RETRACTED, 2026-09-10 — do not implement the two paragraphs below.** They
+> describe `coupling_w_per_c[i][j]` as a conductance on `(T_j − T_i)`
+> (temperature-difference exchange), including the algebraic first cut and
+> the "sim's coupling also loads zone *j*" both-ways-energy-flow argument,
+> and an iterative fit procedure to match that model class to the measured
+> cross-gains. That model class was tried and retired:
+> `docs/audits/sim_credibility_gate_real_cause_2026-09-10.md` found it
+> disagreed with the firmware's own `zone_coupling_solve.c` (additive
+> *source-gain*, `diag(k)+coupling_coeff`, energy added to zone *i* without
+> being removed from zone *j* — deliberately, matching the firmware's own
+> static-gain model) badly enough to fail the sec 6.5 credibility gate
+> outright. `d63a5591` changed `sim_kiln_step()` to the additive model and
+> removed the iterative-fit function this section describes
+> (`sim_kiln_coupling_fit_iterative()` no longer exists). In the additive
+> model class the measured cross-gain `coupling_coeff[i][j]` IS the
+> `coupling_w_per_c[i][j]` sim_kiln wants, directly — no fit, no iteration,
+> no free scale, and no energy-conservation caveat to make (the model was
+> never energy-conserving under either class; the additive class doesn't
+> pretend to load the other zone in the first place, so there is nothing to
+> retract there). See `firmware/KilnFW/App/test/sim_credibility_gate.c`'s
+> `ensure_coupling_fitted()` for the current, load-bearing mapping. Anyone
+> reading "plan sec 6.2" cited elsewhere (including in
+> `sim_credibility_gate.c`'s own comments) for the coupling model should land
+> here, not on the paragraphs below.
+>
+> Original text, kept for history only:
+>
+> Coupling is harder and is the part that must be **measured inside the sim, not
+> derived**. The firmware's `coupling_coeff[i][j]` is a fitted steady-state
+> cross-gain (zone *i*'s rise per unit when zone *j* is stepped, with
+> `coupling_diag_k_dc` as that identification's own diagonal); the sim's
+> `coupling_w_per_c[i][j]` is a conductance on `(T_j − T_i)`. The algebraic
+> first cut is `g_ij ≈ h_i · coupling_coeff[i][j] / coupling_diag_k_dc[j]`, but
+> the sim's coupling also loads zone *j* (it is a conductance, energy flows both
+> ways), so this is only a starting point. **Procedure:** set the first cut,
+> then run a single-zone step test *in the simulator*, read off the resulting
+> cross-gains exactly the way the bench identification did, and iterate the
+> matrix until the simulated cross-gains match the measured ones
+> (`[0, 27.32, 21.72] / [14.30, 0, 22.15] / [8.33, 12.42, 0]`) to within 10 %.
+> That fitted matrix is checked in as data alongside the measured one, with the
+> residual recorded.
+>
+> One honest consequence to state: the measured matrix is **asymmetric**, and a
+> conductance model of the form `g·(T_j − T_i)` is symmetric in form. `sim_kiln`
+> permits an asymmetric `g` (its own header says so), so the numbers can be
+> matched — but the resulting model is then not energy-conserving. That is
+> acceptable for scoring a controller and is **not** acceptable as a physical
+> claim about the kiln.
 
 Measured values the mapping is driven from (`tools/PcTools/config_presets/`):
 
