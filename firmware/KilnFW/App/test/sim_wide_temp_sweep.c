@@ -109,33 +109,20 @@ static const bool SWEEP_USE_MEASURED_DIAG_K_DC = (KILN_SWEEP_USE_MEASURED_DIAG !
 // nothing beyond the qualitative "1Hz switching through a 60s window"
 // autotune-defeat finding). 0.5s is an ASSUMED placeholder for an SSR-class
 // device, clearly flagged; the sweep below also runs 0s and 2s variants to
-// bound sensitivity to this unmeasured number. ----
-#define RELAY_LAG_RING_MAX 8
-typedef struct {
-    bool ring[RELAY_LAG_RING_MAX];
-    int  head;
-    int  len;
-} relay_lag_t;
-static bool relay_lag_step(relay_lag_t *rl, bool commanded, float lag_s, float dt_s)
-{
-    int lag_steps = (dt_s > 0.0f) ? (int)(lag_s / dt_s + 0.5f) : 0;
-    if (lag_steps < 0) lag_steps = 0;
-    if (lag_steps >= RELAY_LAG_RING_MAX) lag_steps = RELAY_LAG_RING_MAX - 1;
-    rl->ring[rl->head] = commanded;
-    if (rl->len < RELAY_LAG_RING_MAX) rl->len++;
-    int read_idx = rl->head - lag_steps;
-    while (read_idx < 0) read_idx += RELAY_LAG_RING_MAX;
-    bool out = (lag_steps < rl->len) ? rl->ring[read_idx] : false;
-    rl->head = (rl->head + 1) % RELAY_LAG_RING_MAX;
-    return out;
-}
-
-// ---- G4: MAX31856 quantisation, applied after sim's own noise, before use ----
-static float quantize_tc(float value_c)
-{
-    if (!isfinite(value_c)) return value_c;
-    return roundf(value_c / MAX31856_TC_TEMP_C_PER_LSB) * MAX31856_TC_TEMP_C_PER_LSB;
-}
+// bound sensitivity to this unmeasured number.
+//
+// 2026-09-09 (opus review, finding C): this file used to carry its OWN
+// local copy of the relay-lag ring and the MAX31856 quantiser instead of the
+// promoted sim_plant.h helpers (sim_relay_lag_t/sim_relay_lag_step,
+// sim_max31856_quantize_tc) that e0d2e006 introduced specifically so no
+// harness could accidentally run unquantized/unlagged synthetic data ever
+// again. This file's local quantize_tc() rounded at the raw
+// MAX31856_TC_TEMP_C_PER_LSB (1/4096 C) instead of the real achievable
+// 32*MAX31856_TC_TEMP_C_PER_LSB (0.0078125 C) -- exactly the too-fine
+// constant e0d2e006's own commit message named as the bug it was fixing,
+// just never removed from this sibling harness. Now uses the shared
+// helpers; the local relay_lag_t/relay_lag_step/quantize_tc definitions are
+// deleted rather than kept as unused dead code.
 
 // ---- G1 mapping (plan sec 6.2): h=loss_coeff_w_per_c=1.0 free-scale pick ----
 //
@@ -205,7 +192,7 @@ static void verify_coupling_step_test(void)
 typedef struct {
     pid_state_t pid[NZ];
     heater_output_state_t heater[NZ];
-    relay_lag_t lag[NZ];
+    sim_relay_lag_t lag[NZ];
     zone_coupling_hold_cache_t hold_cache[NZ];
     zone_coupling_climb_cache_t climb_cache[NZ];
     uint16_t hold_sig[NZ];
@@ -429,7 +416,7 @@ static void run_firing2(float target_c, float ramp_c_per_hr, float dwell_s, floa
         bool relay_cmd[NZ], relay_actual[NZ];
         for (int i = 0; i < NZ; i++) {
             relay_cmd[i] = heater_output_duty(&ctl.heater[i], &hcfg, duty_cmd[i], dt_ms);
-            relay_actual[i] = relay_lag_step(&ctl.lag[i], relay_cmd[i], relay_lag_s, dt_s);
+            relay_actual[i] = sim_relay_lag_step(&ctl.lag[i], relay_cmd[i], relay_lag_s, dt_s);
         }
 
         float sim_duty[NZ];
@@ -440,7 +427,7 @@ static void run_firing2(float target_c, float ramp_c_per_hr, float dwell_s, floa
             prev_reading[i] = last_reading[i];
             prev_sim_duty[i] = sim_duty[i];
             float raw = sim_kiln_reading_c(&sim, &cfg, i);
-            float q = quantize_tc(raw); // G4
+            float q = sim_max31856_quantize_tc(raw); // G4
             float rate_c_per_min = fabsf(q - last_reading[i]) / dt_s * 60.0f;
             if (rate_c_per_min > max_rate_c_per_min) max_rate_c_per_min = rate_c_per_min;
             last_reading[i] = q;
