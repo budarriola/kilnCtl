@@ -43,6 +43,65 @@
  * deliberately does not; see thermal_guard_cfg_t.cross_zone_max_delta_c. */
 #define CROSS_ZONE_PERIOD_S_DEFAULT 600.0f
 
+/* Guard 1's climbing-branch window floor -- see thermal_guard_derive_climb_
+ * window_floor_s()'s own comment (thermal_guard.h) for the derivation.
+ * Bounds exist for the same reason S8's estimate has them
+ * (s8_rate_guard_estimate.h): a degenerate model (near-zero tau/dead_time
+ * from a bad fit) must not silently produce a near-zero floor that is
+ * effectively no floor at all, and a wildly large one must not silently
+ * disarm the guard by making the window practically infinite. FLOOR_MIN_S
+ * matches WRONG_DIR_WINDOW_S (120s) -- never derive a floor shorter than the
+ * guard's own pre-existing "how long may heat be commanded with no
+ * response" ceiling. FLOOR_MAX_S (900s = 15min) is a detection-latency cap:
+ * even a very slow zone's dead element must be caught within a quarter
+ * hour. */
+#define CLIMB_WINDOW_FLOOR_MIN_S 120.0f
+#define CLIMB_WINDOW_FLOOR_MAX_S 900.0f
+
+float thermal_guard_derive_climb_window_floor_s(float tau_s, float dead_time_s, bool model_valid)
+{
+    /* Fail safe: no model, or a model the caller itself didn't trust ->
+     * 0.0f, meaning "no derived floor" -- the caller (thermal_guard_tick())
+     * treats 0 as "don't touch window_s", i.e. exactly today's behaviour.
+     * Never guess a floor from partial/untrusted data. */
+    if (!model_valid) {
+        return 0.0f;
+    }
+    /* Defence in depth, same lesson as s8_rate_guard_estimate.c's 2026-09-10
+     * fix: don't trust model_valid alone. ZONE_MODEL_FIT_TEMP_UNKNOWN
+     * (-273.15f) is finite, so isfinite() alone would not catch a sentinel
+     * accidentally routed into these parameters; reject anything <= 0 too
+     * (a dead-time or tau of zero or less is not physically meaningful and
+     * would make the derived floor collapse toward the very failure mode
+     * this function exists to prevent). */
+    if (!isfinite(tau_s) || !isfinite(dead_time_s) || tau_s <= 0.0f || dead_time_s <= 0.0f) {
+        return 0.0f;
+    }
+
+    /* A first-order-plus-dead-time plant cannot show ANY response before
+     * dead_time_s elapses, and after that needs on the order of one time
+     * constant to accumulate a rise a 0.5C/min sanity-rate check (this
+     * guard's default) can reliably clear -- a step response reaches ~63%
+     * of its final value at t = L + tau, and profile_executor's own
+     * feedforward ramps duty up rather than stepping it, so a real climb is
+     * if anything slower to get going than that idealization. dead_time_s +
+     * tau_s is therefore the minimum window inside which a HEALTHY slow
+     * zone can be expected to clear the rise bar; below that, the guard is
+     * not testing health, it's testing the plant's own time constant. No
+     * extra multiplicative margin is added on top -- unlike S8's rate
+     * threshold, a longer window only ever COSTS detection latency, so the
+     * bias here is to keep it as tight as the physics honestly allows
+     * rather than pad it further. */
+    float floor_s = dead_time_s + tau_s;
+
+    if (floor_s < CLIMB_WINDOW_FLOOR_MIN_S) {
+        floor_s = CLIMB_WINDOW_FLOOR_MIN_S;
+    } else if (floor_s > CLIMB_WINDOW_FLOOR_MAX_S) {
+        floor_s = CLIMB_WINDOW_FLOOR_MAX_S;
+    }
+    return floor_s;
+}
+
 void thermal_guard_reset(thermal_guard_state_t *state)
 {
     memset(state, 0, sizeof(*state));
@@ -252,6 +311,27 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
                                               climbing
                                                   ? effective_f(cfg->progress_window_s, PROGRESS_WINDOW_S)
                                                   : WRONG_DIR_WINDOW_S);
+                /* 2026-09-10 fix (docs/audits/esp_panic_after_zone0_guard_
+                 * trip_2026-09-10.md): wrong_dir_window_s is sized for
+                 * guard 2's falling-while-heating case and can be
+                 * (correctly, for THAT case) much shorter than a slow
+                 * zone's own thermal time constant -- 60s on a bench whose
+                 * zones run tau ~264-271s. Applied to guard 1's climbing
+                 * branch too (the override above does that unconditionally),
+                 * a window shorter than dead_time_s+tau_s cannot
+                 * distinguish a healthy slow zone from a dead one: neither
+                 * has produced a measurable rise yet. climb_window_floor_s
+                 * (0 unless the caller has a trusted plant model; see
+                 * thermal_guard_derive_climb_window_floor_s()) raises
+                 * window_s to that physical minimum ONLY on the climbing
+                 * branch -- guard 2's falling-rate check, which must stay
+                 * fast regardless of tau, is untouched. This only ever
+                 * lengthens window_s, never shortens it: a zone with no
+                 * model, or an operator's OWN window already longer than
+                 * the derived floor, sees byte-identical behaviour. */
+                if (climbing && cfg->climb_window_floor_s > window_s) {
+                    window_s = cfg->climb_window_floor_s;
+                }
                 if (state->progress_window_elapsed_s >= window_s) {
                     float delta = in->measurement_c - state->progress_window_start_c;
                     float elapsed_min = state->progress_window_elapsed_s / 60.0f;

@@ -1222,6 +1222,19 @@ void executor_task_entry(void *arg)
                 z->effective_target_c != s_exec.target_c);
             guard_cfg_this_tick.sanity_rate_c_per_min =
                 profile_executor_guard_sanity_rate(z->guard_cfg.sanity_rate_c_per_min, guard_zone_rate_c_per_s);
+            /* 2026-09-10 fix (docs/audits/esp_panic_after_zone0_guard_trip_
+             * 2026-09-10.md): guard 1's climbing window must never be
+             * shorter than this zone's own dead_time_s+tau_s -- see
+             * thermal_guard_derive_climb_window_floor_s()'s comment. z->ff_*
+             * are already this zone's validated model (zone_load_model()
+             * above this tick loop; ff_enabled false means no trustworthy
+             * model, in which case this passes model_valid=false and the
+             * derivation returns 0.0f -- "don't touch window_s", identical
+             * to before this field existed). Computed fresh every tick, on
+             * the same per-tick local copy as sanity_rate_c_per_min above,
+             * never written back to the zone's persisted guard_cfg. */
+            guard_cfg_this_tick.climb_window_floor_s = thermal_guard_derive_climb_window_floor_s(
+                z->ff_tau_s, z->ff_dead_time_s, z->ff_enabled);
 
             thermal_guard_input_t gin = {
                 .sensor_ok = sensor_ok[zi],

@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -1173,5 +1174,159 @@ void run_test_thermal_guard(void)
         TEST_CHECK(!s.is_tripped, "clear() un-latches");
         in.measurement_c = 20.0f;
         TEST_CHECK(thermal_guard_tick(&s, &cfg, &in) == false, "post-clear tick with a safe reading does not re-trip");
+    }
+
+    /* --- thermal_guard_derive_climb_window_floor_s() -- pure function unit
+     * tests -- docs/audits/esp_panic_after_zone0_guard_trip_2026-09-10.md. */
+    {
+        /* z0's live plant model (docs/audits/cplval75_coupling_verdict_
+         * 2026-09-10.md): tau=263.8s, dead_time=52.8s -> 316.6s, inside
+         * [120,900] so no clamp applies. */
+        float f = thermal_guard_derive_climb_window_floor_s(263.8f, 52.8f, true);
+        TEST_CHECK(f > 316.0f && f < 317.0f, "z0 derives ~316.6s (dead_time+tau)");
+
+        /* model_valid=false (no trustworthy model this tick) -> 0.0f, i.e.
+         * "don't touch window_s" -- fail safe, never guess. */
+        f = thermal_guard_derive_climb_window_floor_s(263.8f, 52.8f, false);
+        TEST_CHECK(f == 0.0f, "model_valid=false yields 0.0f regardless of tau/dead_time");
+
+        /* ZONE_MODEL_FIT_TEMP_UNKNOWN (-273.15f) must not sneak through even
+         * if a caller carelessly passed it (this function does not know
+         * about fit_temp_c specifically, but must reject any <=0 input on
+         * general principle -- the sentinel is exactly such a value). Same
+         * defence-in-depth lesson as s8_rate_guard_estimate.c's 2026-09-10
+         * fix: never trust the caller's validity flag alone. */
+        f = thermal_guard_derive_climb_window_floor_s(-273.15f, 52.8f, true);
+        TEST_CHECK(f == 0.0f, "a sentinel/negative tau_s is rejected even with model_valid=true");
+        f = thermal_guard_derive_climb_window_floor_s(263.8f, -273.15f, true);
+        TEST_CHECK(f == 0.0f, "a sentinel/negative dead_time_s is rejected even with model_valid=true");
+        f = thermal_guard_derive_climb_window_floor_s(0.0f, 52.8f, true);
+        TEST_CHECK(f == 0.0f, "tau_s==0 is rejected");
+        f = thermal_guard_derive_climb_window_floor_s(NAN, 52.8f, true);
+        TEST_CHECK(f == 0.0f, "non-finite tau_s is rejected");
+
+        /* Clamping: a degenerate near-zero model must not produce a
+         * near-zero (effectively no) floor -- CLIMB_WINDOW_FLOOR_MIN_S. */
+        f = thermal_guard_derive_climb_window_floor_s(1.0f, 1.0f, true);
+        TEST_CHECK(f == 120.0f, "tiny tau/dead_time clamps up to the 120s floor minimum");
+
+        /* Clamping: a huge/implausible model must not disarm the guard by
+         * making the window practically infinite -- CLIMB_WINDOW_FLOOR_MAX_S. */
+        f = thermal_guard_derive_climb_window_floor_s(5000.0f, 5000.0f, true);
+        TEST_CHECK(f == 900.0f, "huge tau/dead_time clamps down to the 900s floor maximum");
+    }
+
+    /* --- Guard 1 integration: the derived floor fixes the bench false trip
+     * without weakening detection of a genuinely dead element ---
+     *
+     * Both scenarios below share z0's live model (tau=263.8s,
+     * dead_time=52.8s -> derived floor ~316.6s) and an operator-configured
+     * wrong_dir_window_s=60s -- the EXACT bench configuration that caused
+     * the false trip (docs/audits/esp_panic_after_zone0_guard_trip_
+     * 2026-09-10.md). Readings are quantized to the MAX31856's real
+     * 0.0078125C LSB (after the driver masks the low bits) rather than
+     * smooth synthetic floats, per this repo's documented "idealized test
+     * input" failure class (project_idealized_test_input_bug_class.md) --
+     * quantization is not what makes "measurable" hard here (it's far
+     * finer than anything below), but using it anyway proves the guard's
+     * behaviour survives realistic sensor granularity, not just noiseless
+     * floats. */
+    {
+        const float MAX31856_LSB_C = 0.0078125f;
+        const float TAU_S = 263.8f;
+        const float DEAD_TIME_S = 52.8f;
+        const float DERIVED_FLOOR_S =
+            thermal_guard_derive_climb_window_floor_s(TAU_S, DEAD_TIME_S, true); /* ~316.6s */
+
+        /* Slow-but-healthy zone: no response before dead_time_s elapses
+         * (a real FOPDT plant cannot respond earlier), then a real,
+         * constant post-dead-time rise rate of 1.2C/min -- slow enough that
+         * a 60s window (barely 7.2s past dead time) sees well under the
+         * default 0.5C/min*1min=0.5C the guard demands, but a
+         * dead_time+tau-scaled window sees comfortably more than its own
+         * (proportionally larger) requirement. This is deliberately a
+         * SLOWER early response than z0's own full-duty step gain would
+         * give (39.25C/duty) -- representative of profile_executor's
+         * feedforward still ramping commanded duty up from a cold start,
+         * per this bench trip's own log ("feedforward still ramping duty
+         * up") -- not a claim that 1.2C/min is z0's true steady-state
+         * slope. */
+        {
+            thermal_guard_state_t s;
+            thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f,
+                                        .min_temp_c = -20.0f,
+                                        .wrong_dir_window_s = 60.0f,
+                                        .climb_window_floor_s = DERIVED_FLOOR_S};
+            thermal_guard_reset(&s);
+            thermal_guard_input_t in = base_input();
+            in.setpoint_c = 500.0f; /* far above -> unambiguously climbing */
+            in.commanded_duty = 1.0f;
+            float start_c = 20.0f;
+            in.measurement_c = start_c;
+            bool tripped = false;
+            int total_ticks = (int)(DERIVED_FLOOR_S / in.dt_s) + 5; /* run a bit past the floor window */
+            for (int i = 0; i < total_ticks && !tripped; i++) {
+                float t_s = (float)(i + 1) * in.dt_s;
+                float rise_c = (t_s > DEAD_TIME_S) ? (t_s - DEAD_TIME_S) * (1.2f / 60.0f) : 0.0f;
+                float quantized_c = roundf((start_c + rise_c) / MAX31856_LSB_C) * MAX31856_LSB_C;
+                in.measurement_c = quantized_c;
+                tripped = thermal_guard_tick(&s, &cfg, &in);
+            }
+            TEST_CHECK(!tripped,
+                       "slow-but-healthy zone (1.2C/min post-dead-time) does NOT trip guard 1 once "
+                       "climb_window_floor_s widens the 60s operator window to the derived ~316.6s");
+        }
+
+        /* Same operator config, same model, but a GENUINELY dead element:
+         * commanded duty 1.0 the whole time and the true temperature never
+         * moves (only quantization noise, alternating +/-1 LSB, so this
+         * isn't a perfectly noiseless idealization either). Must still trip
+         * -- the derived floor must not disarm guard 1, only correct its
+         * window to something a healthy zone can actually clear. */
+        {
+            thermal_guard_state_t s;
+            thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f,
+                                        .min_temp_c = -20.0f,
+                                        .wrong_dir_window_s = 60.0f,
+                                        .climb_window_floor_s = DERIVED_FLOOR_S};
+            thermal_guard_reset(&s);
+            thermal_guard_input_t in = base_input();
+            in.setpoint_c = 500.0f;
+            in.commanded_duty = 1.0f;
+            in.measurement_c = 20.0f;
+            bool tripped = false;
+            int trip_tick = -1;
+            /* Run out to a bit past DOUBLE the derived floor window -- a
+             * dead element must be caught well within that, not merely
+             * "eventually". */
+            int total_ticks = (int)(2.0f * DERIVED_FLOOR_S / in.dt_s) + 5;
+            for (int i = 0; i < total_ticks; i++) {
+                float dither = ((i % 2) == 0) ? MAX31856_LSB_C : -MAX31856_LSB_C;
+                in.measurement_c = 20.0f + dither;
+                if (thermal_guard_tick(&s, &cfg, &in)) {
+                    trip_tick = i;
+                    tripped = true;
+                    break;
+                }
+            }
+            TEST_CHECK(tripped, "a genuinely dead element (no real rise, only 1-LSB dither) still trips guard 1 "
+                                 "with the derived floor in place");
+            TEST_CHECK(!tripped || s.reason == THERMAL_GUARD_TRIP_HEATING_FAILED, "reason is HEATING_FAILED");
+            /* Detection latency cost: this must land close to the derived
+             * floor window (~316.6s => tick index ~30 at dt_s=10), not the
+             * operator's original 60s (tick index ~5) -- quantifying
+             * exactly the latency this fix trades for the false-trip fix
+             * above. Allow a couple of ticks of slack either side of the
+             * window boundary. */
+            if (tripped) {
+                float trip_s = (float)(trip_tick + 1) * in.dt_s;
+                char detail[192];
+                snprintf(detail, sizeof(detail),
+                         "trip landed at %.0fs -- expected within a couple ticks of the derived floor (%.1fs), "
+                         "not at the original 60s window",
+                         (double)trip_s, (double)DERIVED_FLOOR_S);
+                TEST_CHECK(trip_s >= DERIVED_FLOOR_S - 15.0f && trip_s <= DERIVED_FLOOR_S + 15.0f, detail);
+            }
+        }
     }
 }

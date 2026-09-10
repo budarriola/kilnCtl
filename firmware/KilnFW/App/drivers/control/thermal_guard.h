@@ -121,7 +121,42 @@ typedef struct {
      * once the plant is already hot). Outside the band -- a ramp, a cold
      * start, a genuinely lagging zone -- guard 1 is unchanged. */
     float progress_band_c;
+    /* Guard 1's climbing-branch window FLOOR, in seconds -- 2026-09-10,
+     * docs/audits/esp_panic_after_zone0_guard_trip_2026-09-10.md. Unlike
+     * every field above, 0 does NOT mean "substitute a firmware default":
+     * it means "no derived floor available" (no trusted plant model this
+     * tick), and thermal_guard_tick() leaves window_s completely alone in
+     * that case -- byte-identical to before this field existed. When
+     * nonzero (the caller has a valid model -- see
+     * thermal_guard_derive_climb_window_floor_s() below, meant to be called
+     * once per tick from the zone's cached ff_tau_s/ff_dead_time_s), it
+     * raises guard 1's climbing window up to this floor if the configured/
+     * fallback window would otherwise be shorter -- it can only lengthen
+     * window_s, never shorten it, and it never touches guard 2's
+     * falling-rate window. This is a per-tick LOCAL value the caller
+     * computes fresh (same pattern profile_executor.c's guard_cfg_this_tick
+     * already uses for sanity_rate_c_per_min), not a persisted zone_cfg_t
+     * field -- the plant model can change (a fresh autotune) without an
+     * operator ever touching Settings > Zones. */
+    float climb_window_floor_s;
 } thermal_guard_cfg_t;
+
+/* Derives guard 1's climbing-branch window floor from a zone's identified
+ * FOPDT plant model (tau_s, dead_time_s). Pure, host-testable, no I/O --
+ * same discipline as s8_rate_guard_estimate.c's estimator, which this
+ * mirrors: fails safe (returns 0.0f, meaning "no derived floor") on any
+ * missing/non-finite/non-positive input rather than guessing, so a bad or
+ * absent model can only fall back to thermal_guard.c's pre-existing
+ * defaults/operator config -- it can never widen OR shrink the guard
+ * silently. model_valid should be the same validity gate the caller already
+ * applies to the model (e.g. profile_executor.c's zone_runtime_t.ff_enabled,
+ * which zone_load_model() only sets once k_dc/tau_s/dead_time_s are all
+ * finite and positive) -- this function does not re-derive that gate, only
+ * defends against the specific sentinel/non-finite/<=0 cases documented at
+ * its call site, since a caller's own validity flag has been wrong before
+ * (s8_rate_guard_estimate.c's 2026-09-10 finding). Result is clamped to
+ * [120s, 900s] -- see thermal_guard.c's CLIMB_WINDOW_FLOOR_MIN_S/MAX_S. */
+float thermal_guard_derive_climb_window_floor_s(float tau_s, float dead_time_s, bool model_valid);
 
 /* One call's worth of input. measurement_c must be the RAW (uncalibrated)
  * reading -- TODO.md 6A.7 is explicit that a calibration offset must not be
