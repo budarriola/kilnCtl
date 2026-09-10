@@ -42,6 +42,15 @@ extern "C" {
 void watchdog_overdue_diag_mark(uint8_t overdue_mask, uint8_t worst_task_id,
                                  uint16_t worst_overage_ms);
 
+// 2026-09-10: call from watchdog_task_fn()'s healthy (all_ok) branch, the
+// same branch that feeds the hardware watchdog. Clears scratch[5] iff it is
+// still tagged with THIS format's own 0xD9 mark (never a fatal tag) --
+// closing the "transient overdue that recovered before the watchdog fired
+// leaves a stale latch for the NEXT, unrelated reset" gap. See the .c file
+// for why this is safe with respect to a genuine fatal latch from the other
+// core (SMP, see watchdog_overdue_diag_mark()'s own comment).
+void watchdog_overdue_diag_notify_recovered(void);
+
 // Reads scratch[5], decodes it, and caches the result. Call once, early in
 // main(), in the same boot step as boot_reason_read()/clear_trip_diag_read()
 // -- BEFORE watchdog_overdue_diag_clear() (this is the only chance to see

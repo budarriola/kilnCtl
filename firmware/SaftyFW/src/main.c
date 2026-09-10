@@ -97,9 +97,27 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
     // with a DIFFERENT magic byte (0xE3 vs that format's 0xD9) so the two
     // never collide -- see watchdog_overflow_diag_t's own doc comment
     // (watchdog_overdue_diag_codec.h) for why sharing one register is
-    // correct: a stack overflow's interrupt-disable is exactly what
-    // prevents watchdog_task from ever reaching its own write, so the two
-    // events are mutually exclusive by construction.
+    // correct.
+    //
+    // CORRECTION, 2026-09-10 (opus review finding A): the paragraph that
+    // used to sit here claimed "a stack overflow's interrupt-disable is
+    // exactly what prevents watchdog_task from ever reaching its own write,
+    // so the two events are mutually exclusive by construction." That is
+    // false on this chip: FreeRTOSConfig.h sets configNUMBER_OF_CORES 2, and
+    // taskDISABLE_INTERRUPTS() below silences only the CALLING core.
+    // watchdog_task runs pinned to SAFTYFW_CORE_TRIP_PATH (watchdog_task.c),
+    // while every other task -- including whichever one just overflowed
+    // here -- runs pinned to SAFTYFW_CORE_LINK_PATH (link_task.c/log_task.c/
+    // update_task.c). A stack overflow on the LINK core hangs only that
+    // core; watchdog_task keeps running on the TRIP core, notices the hung
+    // task missed its check-in, and DOES reach its own write. The mutual-
+    // exclusion property this comment used to claim does not hold. What
+    // actually protects THIS write now is watchdog_overdue_diag_mark()'s own
+    // guard (watchdog_overdue_diag.c): it reads the register back first and
+    // refuses to overwrite an already-latched fatal tag, so whichever of the
+    // two writers gets here first always wins and is never clobbered by the
+    // other. This write itself stays a plain, ungated MMIO store -- correct,
+    // for the "stack may already be corrupted" reason given below.
     //
     // Deliberately NOT calling into watchdog_overdue_diag.c/_codec.c's own
     // functions: this hook may be running moments after the very stack

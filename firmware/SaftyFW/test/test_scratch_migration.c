@@ -21,7 +21,9 @@
 #include "../src/boot_reason.h"
 #include "../src/clear_trip_diag.h"
 #include "../src/watchdog_overdue_diag.h"
+#include "../src/watchdog_overdue_diag_codec.h"
 #include "fake_scratch.h"
+#include "hal_scratch.h"
 
 // Real slot numbers, duplicated here (not #include-able -- they are
 // private #defines inside boot_reason.c/clear_trip_diag.c/
@@ -129,6 +131,96 @@ static void test_the_three_modules_do_not_collide_on_shared_backend(void)
     TEST_CHECK(overdue_after.magic_ok, "clearing clear_trip_diag's slot 7 must not clear watchdog_overdue_diag's slot 5");
 }
 
+// 2026-09-10, opus review finding A: reproduces the SMP overwrite this
+// firmware shipped with. Before the fix, watchdog_overdue_diag_mark() wrote
+// its own 0xD9 tag over scratch[5] unconditionally, on the (false on a
+// dual-core chip) assumption that a fatal hook and watchdog_task's own
+// overdue branch could never both run in the same boot. Latch a fatal tag
+// first (as vApplicationMallocFailedHook() would, on the OTHER core), then
+// call watchdog_overdue_diag_mark() (as watchdog_task, still running on ITS
+// core, would once it notices the hung core's task missed its check-in) --
+// the fatal tag must survive.
+static void test_overdue_mark_does_not_overwrite_a_live_fatal_tag(void)
+{
+    fake_scratch_reset_all();
+
+    // Simulate vApplicationMallocFailedHook()'s raw write (main.c never
+    // calls into watchdog_overdue_diag.c's own encoder from a fatal hook --
+    // see that file's header comment -- so this test pokes the same word
+    // main.c would, via the shared macro both sides already depend on).
+    (void)hal_scratch_write_u32(SCRATCH_OVERDUE, WATCHDOG_FATAL_MALLOC_WORD());
+
+    watchdog_fatal_diag_t before = watchdog_fatal_diag_read();
+    TEST_CHECK(before.magic_ok && before.kind == (uint8_t)WATCHDOG_FATAL_KIND_MALLOC_FAILED,
+               "the simulated malloc-fail latch must decode correctly before the overdue mark is attempted");
+
+    // watchdog_task, still alive on its own core, now notices the hung
+    // core's task missed its deadline and calls mark() -- exactly the
+    // sequence that used to erase the fatal tag.
+    watchdog_overdue_diag_mark(/* overdue_mask */ 0x02u, /* worst_task_id */ 1u,
+                                /* worst_overage_ms */ 900u);
+
+    watchdog_fatal_diag_t after = watchdog_fatal_diag_read();
+    TEST_CHECK(after.magic_ok && after.kind == (uint8_t)WATCHDOG_FATAL_KIND_MALLOC_FAILED,
+               "watchdog_overdue_diag_mark() must refuse to overwrite an already-latched fatal tag "
+               "from the other core -- this is the fix for opus review finding A");
+
+    watchdog_overdue_diag_t overdue = watchdog_overdue_diag_read();
+    TEST_CHECK(!overdue.magic_ok,
+               "the overdue format must NOT have been written over the fatal tag -- "
+               "decoding the register as the overdue format must still show nothing usable");
+}
+
+// A genuine overdue mark, with no fatal tag present, must still write
+// normally -- the guard must not be so broad that it refuses every write.
+static void test_overdue_mark_still_writes_when_nothing_fatal_is_latched(void)
+{
+    fake_scratch_reset_all();
+
+    watchdog_overdue_diag_mark(0x04u, 2u, 120u);
+
+    watchdog_overdue_diag_t out = watchdog_overdue_diag_read();
+    TEST_CHECK(out.magic_ok && out.overdue_mask == 0x04u,
+               "an overdue mark with no pre-existing fatal tag must still write normally");
+}
+
+// 2026-09-10, opus review finding A (transient-overdue half): a miss that
+// recovers before the hardware watchdog fires must not leave a stale 0xD9
+// latch for a later, unrelated reset to misreport.
+static void test_recovered_overdue_is_cleared_not_left_stale(void)
+{
+    fake_scratch_reset_all();
+
+    watchdog_overdue_diag_mark(0x01u, 0u, 50u);
+    TEST_CHECK(watchdog_overdue_diag_read().magic_ok,
+               "sanity: the transient miss must actually latch before recovery is simulated");
+
+    // watchdog_task_fn()'s next iteration finds all_ok true (the task caught
+    // up and fed on schedule) and calls the new recovered-notification hook.
+    watchdog_overdue_diag_notify_recovered();
+
+    TEST_CHECK(!watchdog_overdue_diag_read().magic_ok,
+               "a recovered transient overdue must be cleared so a LATER, unrelated reset "
+               "does not misreport check-in overdue for a boot in which nothing was overdue");
+}
+
+// The recovered-clear must never touch a genuine fatal latch, even though
+// in practice a fatal hook's hung core means watchdog_task should never
+// reach the all_ok branch again this boot -- defence in depth, per the
+// callee's own comment.
+static void test_recovered_notify_never_clears_a_fatal_tag(void)
+{
+    fake_scratch_reset_all();
+
+    (void)hal_scratch_write_u32(SCRATCH_OVERDUE, WATCHDOG_FATAL_MALLOC_WORD());
+
+    watchdog_overdue_diag_notify_recovered();
+
+    watchdog_fatal_diag_t after = watchdog_fatal_diag_read();
+    TEST_CHECK(after.magic_ok && after.kind == (uint8_t)WATCHDOG_FATAL_KIND_MALLOC_FAILED,
+               "watchdog_overdue_diag_notify_recovered() must never clear a genuine fatal latch");
+}
+
 void run_test_scratch_migration(void)
 {
     test_boot_reason_round_trips_through_hal_scratch();
@@ -136,4 +228,8 @@ void run_test_scratch_migration(void)
     test_clear_trip_diag_round_trips_through_hal_scratch();
     test_watchdog_overdue_diag_round_trips_through_hal_scratch();
     test_the_three_modules_do_not_collide_on_shared_backend();
+    test_overdue_mark_does_not_overwrite_a_live_fatal_tag();
+    test_overdue_mark_still_writes_when_nothing_fatal_is_latched();
+    test_recovered_overdue_is_cleared_not_left_stale();
+    test_recovered_notify_never_clears_a_fatal_tag();
 }

@@ -36,9 +36,92 @@ static watchdog_fatal_diag_t s_watchdog_fatal_cached;
 void watchdog_overdue_diag_mark(uint8_t overdue_mask, uint8_t worst_task_id,
                                  uint16_t worst_overage_ms)
 {
+    // 2026-09-10, opus review finding A: this firmware is
+    // configNUMBER_OF_CORES 2 (FreeRTOSConfig.h) and watchdog_task runs
+    // pinned to SAFTYFW_CORE_TRIP_PATH while every other task (link_task,
+    // log_task, update_task) runs pinned to SAFTYFW_CORE_LINK_PATH
+    // (watchdog_task.c / link_task.c / log_task.c / update_task.c). A fatal
+    // hook (stack overflow / malloc-fail / configASSERT) on the OTHER core
+    // disables interrupts and hangs THAT core only -- it does not stop
+    // watchdog_task from continuing to run on its own core, noticing the
+    // hung core's task missed its check-in, and reaching this function.
+    // Before this guard, that call unconditionally overwrote whatever fatal
+    // tag (0xE3/0xB4/0xA5) the hung core had just latched with this format's
+    // own 0xD9 tag -- erasing the one piece of forensic evidence the fatal
+    // hooks exist to leave, roughly 700ms before the unfed hardware watchdog
+    // reset the chip, so the boot banner reported "check-in overdue" instead
+    // of the real fault kind and line. The old single-core reasoning ("the
+    // two events are mutually exclusive by construction") assumed only one
+    // core exists; it does not hold with SMP.
+    //
+    // Fix: read back whatever is currently latched and refuse to overwrite
+    // it if it already decodes as one of the three fatal formats. This read
+    // is safe here (unlike in the fatal hooks themselves) -- watchdog_task
+    // is an ordinary FreeRTOS task with an intact stack, calling into
+    // hal_scratch through the normal function-call path.
+    uint32_t existing_raw = 0u;
+    // hal_scratch_read_u32()'s own return is intentionally not checked here,
+    // same as the read in watchdog_fatal_diag_read() below and the write
+    // below it: a failed read leaves existing_raw at its 0-initialised
+    // value, which watchdog_fatal_diag_decode() reads as
+    // WATCHDOG_FATAL_KIND_NONE (no magic byte matches 0), so the guard falls
+    // through to writing the overdue latch -- the same outcome as "nothing
+    // was there to protect". There is no more defensive action available to
+    // a diagnostic register on a read failure here: this call runs on the
+    // trip path itself, moments before a hardware watchdog reset, with no
+    // error-reporting channel of its own.
+    (void)hal_scratch_read_u32(WATCHDOG_OVERDUE_DIAG_SCRATCH, &existing_raw,
+                                WATCHDOG_OVERDUE_DIAG_SCRATCH, 0u, NULL);
+    watchdog_fatal_diag_t existing_fatal = watchdog_fatal_diag_decode(existing_raw);
+    if (existing_fatal.kind != (uint8_t)WATCHDOG_FATAL_KIND_NONE) {
+        // A fatal tag from the OTHER core is already latched this boot --
+        // leave it alone. This boot's overdue-mask/worst-task/worst-overage
+        // detail is real but strictly less useful than "which fatal fault
+        // killed the board", so it is deliberately dropped rather than
+        // fought over the one shared register.
+        return;
+    }
+
+    // Same "no further recourse on this path" justification as the read
+    // above -- a failed write here is a diagnostic-register write, not a
+    // safety-relevant one; the watchdog reset that follows is unaffected
+    // either way.
     (void)hal_scratch_write_u32(
         WATCHDOG_OVERDUE_DIAG_SCRATCH,
         watchdog_overdue_diag_encode(overdue_mask, worst_task_id, worst_overage_ms));
+}
+
+void watchdog_overdue_diag_notify_recovered(void)
+{
+    // 2026-09-10, opus review finding A (transient-overdue half): a mark()
+    // above records a real event, but watchdog_task_fn()'s healthy branch
+    // never called back in here, so a transient miss that recovered before
+    // the hardware watchdog fired (a task briefly overran, then caught up
+    // and fed on schedule again) left the 0xD9 overdue tag latched in
+    // scratch[5] until the NEXT reset -- possibly hours later, for an
+    // unrelated reason -- which would then misreport "check-in overdue" for
+    // a boot in which nothing was actually overdue.
+    //
+    // Called from watchdog_task_fn()'s all_ok branch (the same branch that
+    // feeds the hardware watchdog), this clears the latch ONLY if it is
+    // still tagged as THIS format's own 0xD9 overdue mark -- never a fatal
+    // tag. That check matters: unlike the mark() guard above, this path has
+    // no read-first-then-decide-not-to-write ordering concern with a fatal
+    // hook on the other core, because a fatal hook that has actually fired
+    // has permanently hung its own core and that core's task(s) will never
+    // check in again, so watchdog_task will keep taking the OVERDUE branch
+    // (and calling mark(), which itself refuses to clobber the fatal tag)
+    // rather than ever reaching this all_ok path again this boot. Checking
+    // the tag anyway is just defence in depth, same discipline as the rest
+    // of this module's "never trust a derived value over the raw facts"
+    // comments.
+    uint32_t existing_raw = 0u;
+    (void)hal_scratch_read_u32(WATCHDOG_OVERDUE_DIAG_SCRATCH, &existing_raw,
+                                WATCHDOG_OVERDUE_DIAG_SCRATCH, 0u, NULL);
+    watchdog_overdue_diag_t existing = watchdog_overdue_diag_decode(existing_raw);
+    if (existing.magic_ok) {
+        (void)hal_scratch_clear(WATCHDOG_OVERDUE_DIAG_SCRATCH);
+    }
 }
 
 watchdog_overdue_diag_t watchdog_overdue_diag_read(void)

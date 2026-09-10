@@ -162,6 +162,13 @@ static void watchdog_task_fn(void *arg)
         s_diag_watchdog_loops++;
 
         if (all_ok) {
+            // 2026-09-10, opus review finding A (transient-overdue half):
+            // clear any stale overdue latch a PRIOR, since-recovered miss
+            // left behind, so a later, unrelated reset does not misreport
+            // "check-in overdue" for a boot in which nothing was overdue.
+            // Never touches a genuine fatal latch -- see the callee's own
+            // comment.
+            watchdog_overdue_diag_notify_recovered();
             (void)hal_wdt_feed();
 
             // Toggle, not set-high: a steady blink at half the feed period
