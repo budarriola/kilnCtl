@@ -694,6 +694,33 @@ bool zones_config_set_model_fit_context(uint8_t zone_index, float fit_temp_c, fl
     return s_stub_set_model_fit_context_result;
 }
 
+/* docs/audits/adaptive_tune_vs_owner_requirements_2026-09-11.md item 4:
+ * autotune_engine_accept()'s accept path now ALSO calls this right after
+ * zones_config_set_model() succeeds, re-anchoring adaptive_tune_model.c's
+ * ratchet-prevention baseline to the fresh model this autotune just wrote --
+ * same "configurable result + call-count/last-args capture" convention as
+ * s_stub_set_model_fit_context_* just above, so a test can prove both the
+ * positive (called, with the exact same gain as model_k_dc) and the
+ * negative (NOT called when the model persist fails or on the RELAY path,
+ * which never calls zones_config_set_model() at all). */
+static bool s_stub_set_autotune_baseline_k_dc_result = true;
+static int s_stub_set_autotune_baseline_k_dc_call_count = 0;
+static uint8_t s_stub_set_autotune_baseline_k_dc_zone = 0xFF;
+static float s_stub_set_autotune_baseline_k_dc_value = 0.0f;
+bool zones_config_get_autotune_baseline_k_dc(uint8_t zone_index, float *out_k_dc)
+{
+    (void)zone_index;
+    if (out_k_dc) *out_k_dc = 0.0f;
+    return true;
+}
+bool zones_config_set_autotune_baseline_k_dc(uint8_t zone_index, float k_dc)
+{
+    s_stub_set_autotune_baseline_k_dc_call_count++;
+    s_stub_set_autotune_baseline_k_dc_zone = zone_index;
+    s_stub_set_autotune_baseline_k_dc_value = k_dc;
+    return s_stub_set_autotune_baseline_k_dc_result;
+}
+
 /* PID_EXPANSION_PLAN.md section 3.2 follow-up: autotune_engine_accept()'s
  * on-board coupling_diag_k_dc identification pass writes this alongside
  * zones_config_set_model() above, from the SAME fitted gain. Configurable
@@ -3901,6 +3928,127 @@ static void test_autotune_engine_accept_skips_coupling_diag_k_dc_on_relay_method
     s_stub_set_model_result = false;
 }
 
+/* docs/audits/adaptive_tune_vs_owner_requirements_2026-09-11.md item 4:
+ * a NEW full autotune Accept must re-anchor adaptive_tune_model.c's
+ * ratchet-prevention baseline (autotune_baseline_k_dc) to the fresh model
+ * just written -- same "reset one side of a pair" contract adaptive_tune_
+ * clear_ki_baseline() already covers for the Ki side (called unconditionally
+ * for both methods, elsewhere in autotune_engine_guard.c). Positive proof,
+ * same convention as test_autotune_engine_accept_writes_coupling_diag_k_dc_
+ * on_a_clean_step_accept() above. */
+static void test_autotune_engine_accept_resets_adaptive_tune_baseline_on_a_clean_step_accept(void)
+{
+    TEST_SECTION("autotune_engine_accept() re-anchors adaptive_tune's K_dc baseline to the new model on a "
+                 "successful STEP accept");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 2; /* deliberately not zone 0/1 -- catches a hardcoded index */
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 33.7f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+
+    s_stub_set_pid_result = true;
+    s_stub_set_model_result = true;
+    s_stub_set_autotune_baseline_k_dc_result = true;
+    s_stub_set_autotune_baseline_k_dc_call_count = 0;
+    s_stub_set_autotune_baseline_k_dc_zone = 0xFF;
+    s_stub_set_autotune_baseline_k_dc_value = 0.0f;
+
+    bool accepted = autotune_engine_accept(NULL, NULL);
+
+    TEST_CHECK(accepted, "a fully clean STEP fit accepts");
+    TEST_CHECK(s_stub_set_autotune_baseline_k_dc_call_count == 1,
+              "zones_config_set_autotune_baseline_k_dc() is called exactly once on a successful STEP accept");
+    TEST_CHECK(s_stub_set_autotune_baseline_k_dc_zone == 2, "written for the zone under test, not a hardcoded index");
+    TEST_CHECK_NEAR(s_stub_set_autotune_baseline_k_dc_value, 33.7f, 1e-4,
+                    "the baseline persisted is exactly this accept's own k_gain_c_per_duty -- the same value "
+                    "model_k_dc was just written with, never a stale or unrelated number");
+
+    s_stub_set_pid_result = false;
+    s_stub_set_model_result = false;
+}
+
+/* Negative proof: the model failing to persist must skip the baseline reset
+ * too -- re-anchoring to a model that isn't actually stored would leave
+ * adaptive_tune bounding drift against a fit the zone isn't running. */
+static void test_autotune_engine_accept_skips_adaptive_tune_baseline_reset_when_model_persist_fails(void)
+{
+    TEST_SECTION("autotune_engine_accept() does NOT reset the adaptive-tune baseline when "
+                 "zones_config_set_model() itself fails/refuses");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 0;
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 10.0f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+
+    s_stub_set_pid_result = true;
+    s_stub_set_model_result = false; /* the case under test -- model persist refuses/fails */
+    s_stub_set_autotune_baseline_k_dc_call_count = 0;
+
+    bool accepted = autotune_engine_accept(NULL, NULL);
+
+    TEST_CHECK(accepted, "acceptance itself still succeeds -- the gains are already live");
+    TEST_CHECK(s_stub_set_autotune_baseline_k_dc_call_count == 0,
+              "zones_config_set_autotune_baseline_k_dc() must NOT be called when the model failed to persist");
+
+    s_stub_set_pid_result = false;
+}
+
+/* Negative proof 2: a RELAY-method accept measures no FOPDT model, so there
+ * is nothing for the K_dc baseline to re-anchor to either. */
+static void test_autotune_engine_accept_skips_adaptive_tune_baseline_reset_on_relay_method(void)
+{
+    TEST_SECTION("autotune_engine_accept() does NOT reset the adaptive-tune baseline on the RELAY path -- "
+                 "a relay test measures no FOPDT model to re-anchor to");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_RELAY;
+    s_at.zone_index = 0;
+    s_at.relay.valid = true;
+
+    s_stub_set_pid_result = true;
+    s_stub_set_model_result = true;
+    s_stub_set_autotune_baseline_k_dc_call_count = 0;
+
+    bool accepted = autotune_engine_accept(NULL, NULL);
+
+    TEST_CHECK(accepted, "a relay-method accept still succeeds -- gains only, no model");
+    TEST_CHECK(s_stub_set_autotune_baseline_k_dc_call_count == 0,
+              "zones_config_set_autotune_baseline_k_dc() must NOT be called on the RELAY path");
+
+    s_stub_set_pid_result = false;
+    s_stub_set_model_result = false;
+}
+
 /* TODO.md 6A.4 positive proof: autotune_engine_accept(opts={ack_unsettled=ack, adopt_ceiling=true}) on a
  * successful STEP accept with a real predicted ceiling must adopt it into
  * max_ramp_c_per_hr via zones_config_set_max_ramp(), with exactly this
@@ -6186,6 +6334,9 @@ void run_test_autotune_engine_prestart(void)
     test_autotune_engine_accept_writes_coupling_diag_k_dc_on_step_success();
     test_autotune_engine_accept_skips_coupling_diag_k_dc_when_model_persist_fails();
     test_autotune_engine_accept_skips_coupling_diag_k_dc_on_relay_method();
+    test_autotune_engine_accept_resets_adaptive_tune_baseline_on_a_clean_step_accept();
+    test_autotune_engine_accept_skips_adaptive_tune_baseline_reset_when_model_persist_fails();
+    test_autotune_engine_accept_skips_adaptive_tune_baseline_reset_on_relay_method();
     test_autotune_engine_accept_adopts_ceiling_when_requested();
     test_autotune_engine_accept_does_not_adopt_ceiling_by_default();
     test_autotune_engine_accept_does_not_adopt_a_zero_ceiling();

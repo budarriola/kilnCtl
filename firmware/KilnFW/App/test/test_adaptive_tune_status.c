@@ -223,7 +223,14 @@ static void test_run_status_fields_cleared_on_faulted_run(void)
     // reasonable number of runs. Simulates "the model was independently
     // changed" (e.g. a hand edit) between runs -- a legitimate real scenario,
     // not just a test convenience.
+    // docs/audits/adaptive_tune_vs_owner_requirements_2026-09-11.md: the
+    // implausible-jump guard now checks the fit against autotune_baseline_
+    // k_dc (fixed at the last full autotune Accept), not the live k_dc this
+    // module itself moves -- so forcing the refusal here means moving BOTH,
+    // exactly what a real "run a fresh autotune, then hand-edit before the
+    // next firing" sequence would do to this zone's persisted config.
     s_fake_zone_cfg[1].k_dc = 1000.0f;
+    s_fake_zone_cfg[1].autotune_baseline_k_dc = 1000.0f;
 
     // Run 2: clean, model refine now refuses (implausible jump), which
     // frees the Ki diagnosis (D5) to genuinely apply this run.
@@ -295,7 +302,14 @@ static void test_run_status_fields_cleared_on_excluded_fraction_refusal(void)
     TEST_CHECK(adaptive_tune_zones[1].coupled_applied, "setup: run 1 must have genuinely applied a coupled solve");
     TEST_CHECK(adaptive_tune_zones[1].coupled_cells_changed > 0, "setup: run 1's coupled solve must have changed >0 cells");
 
-    s_fake_zone_cfg[1].k_dc = 1000.0f; // see faulted-run test's own comment on this line
+    // docs/audits/adaptive_tune_vs_owner_requirements_2026-09-11.md: the
+    // implausible-jump guard now checks the fit against autotune_baseline_
+    // k_dc (fixed at the last full autotune Accept), not the live k_dc this
+    // module itself moves -- so forcing the refusal here means moving BOTH,
+    // exactly what a real "run a fresh autotune, then hand-edit before the
+    // next firing" sequence would do to this zone's persisted config.
+    s_fake_zone_cfg[1].k_dc = 1000.0f;
+    s_fake_zone_cfg[1].autotune_baseline_k_dc = 1000.0f; // see faulted-run test's own comment on this line
 
     feed_settled_dwell(1, 25.0f, 22.0f, 0.5f, 20, DT_S);
     profile_firing_run_record_t rec2 = make_clean_record(94, 1, 900);

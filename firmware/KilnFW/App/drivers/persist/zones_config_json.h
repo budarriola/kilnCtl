@@ -60,7 +60,7 @@ extern "C" {
  * value. Shared because both files must agree on what "the current version"
  * means: nvs_save() writes it, decode_zones_blob() decides whether a stored
  * blob needs migrating against it. */
-#define ZONES_CFG_VERSION 25
+#define ZONES_CFG_VERSION 26
 
 /* Bounds for zones_cfg_t::ease_off_window_mult (ZONES_CFG_VERSION 15->16,
  * 2026-09-03): the terminal ease-off's window, as a multiple of a zone's own
@@ -917,10 +917,131 @@ typedef struct {
      * model_fit_temp_c's -273.15 sentinel, 0 needs no separate backfill
      * here). */
     float coil_power_w;
+    /* ZONES_CFG_VERSION 25->26 (docs/audits/adaptive_tune_vs_owner_
+     * requirements_2026-09-11.md): the K_dc value the last full autotune
+     * Accept actually wrote via zones_config_set_model() -- i.e. model_k_dc
+     * at the moment autotune_engine_guard.c's accept path last landed one,
+     * BEFORE any adaptive_tune run-end refinement has had a chance to nudge
+     * it. adaptive_tune_refine_zone_locked() (adaptive_tune_model.c) anchors
+     * both its plausibility ratio test and its blend target to THIS field,
+     * never to the live (possibly already-adapted) model_k_dc -- see that
+     * function's own comment for the "bound relative to persisted state
+     * ratchets" defect this field exists to close: reading the live,
+     * self-moving model_k_dc as both reference and blend baseline let
+     * repeated accepted refinements walk arbitrarily far from the original
+     * measurement, each individual run's +-20% cap notwithstanding, because
+     * the reference itself moved with every accepted run.
+     *
+     * 0 = "no baseline recorded yet" -- the same "0 means not measured"
+     * sentinel model_k_dc itself already uses. This is legal and expected on
+     * a board upgrading from a pre-v26 blob (backfilled by the migration
+     * below) or on a zone that has never had a full autotune Accept land
+     * (adaptive_tune_refine_zone_locked() already separately refuses when
+     * model_k_dc itself is 0 -- "no existing step-test model to refine" --
+     * so a zero baseline is only ever observed alongside a zone this module
+     * would refuse to touch anyway). adaptive_tune_refine_zone_locked() also
+     * bootstraps this field itself, from the live model_k_dc, the first time
+     * it runs against a zone that has a model but no recorded baseline yet
+     * (an already-autotuned but not-yet-touched-by-this-pass board) -- see
+     * that function's own comment.
+     *
+     * Reset alongside adaptive_tune_clear_ki_baseline() by
+     * autotune_engine_guard.c's accept path (adaptive_tune_reset_k_dc_
+     * baseline(), called right after a fresh zones_config_set_model()
+     * lands) -- both are "reset one side of a pair" hazards joined by the
+     * same event (a new full autotune Accept just replaced this zone's
+     * plant model / PID from a fresh, trustworthy measurement), so both
+     * must re-anchor together or the Ki-diagnosis layer would keep
+     * comparing against a live Ki that this K_dc reset just made stale, or
+     * vice versa -- see project_reset_one_side_bug_class. */
+    float autotune_baseline_k_dc;
 } zone_cfg_t;
 
+/* Frozen v25 zone layout -- what zone_cfg_t looked like immediately before
+ * THIS pass (ZONES_CFG_VERSION 25->26): predates autotune_baseline_k_dc.
+ * Field-for-field IDENTICAL to zone_cfg_v24_t below plus coil_power_w
+ * appended at the true tail (the field v24->25 itself added) -- copied
+ * verbatim from that frozen struct's actual layout, never hand-guessed from
+ * the CURRENT (top-of-file) zone_cfg_t, whose field order/types differ from
+ * every one of these historical snapshots. */
+typedef struct {
+    char name[ZONE_NAME_MAX_LEN + 1];
+    float cal_offset_c;
+    float pid_kp;
+    float pid_ki;
+    float pid_kd;
+    float max_ramp_c_per_hr;
+    float sanity_rate_c_per_min;
+    float max_temp_c;
+    float min_temp_c;
+    float heater_window_ms;
+    float heater_min_on_ms;
+    float heater_min_off_ms;
+    float guard_wrong_dir_window_s;
+    float guard_wrong_dir_rate_c_per_min;
+    float guard_off_settle_s;
+    float guard_runaway_rate_c_per_min;
+    float guard_runaway_margin_c;
+    float guard_drift_period_s;
+    float guard_sensor_fault_debounce_ticks;
+    float guard_frozen_window_s;
+    float cross_zone_max_delta_c;
+    float model_k_dc;
+    float model_tau_s;
+    float model_dead_time_s;
+    float fuzzy_strength_pct;
+    float coupling_coeff[MAX31856_CHANNEL_COUNT];
+    float coupling_tau_s[MAX31856_CHANNEL_COUNT];
+    float coupling_dead_time_s[MAX31856_CHANNEL_COUNT];
+    uint8_t relay_mask;
+    uint8_t control_mode;
+    uint8_t tc_type;
+    uint8_t thermo_mask;
+    uint8_t ct_mask;
+    uint8_t timing_profile;
+    uint8_t settings_source[SRC_GROUP_COUNT];
+    uint8_t  tuning_valid;
+    uint8_t  tuning_method;
+    uint8_t  tuning_rule;
+    uint8_t  tuning_settled;
+    uint8_t  tuning_extrapolation_converged;
+    uint8_t  tuning_tau_consistent;
+    float    tuning_baseline_c;
+    float    tuning_step_ambient_c;
+    float    tuning_raw_rise_c;
+    float    tuning_rise_inf_c;
+    uint32_t tuning_seq;
+    uint8_t  adaptive_tune_enabled;
+    float coupling_diag_k_dc;
+    float ease_off_window_mult;
+    float approach_rate_cap_c_per_hr;
+    float error_band_c;
+    float rate_band_c_per_s;
+    uint8_t relay_type;
+    float progress_band_c;
+    uint8_t zone_type;
+    uint8_t failsafe_state;
+    float hyst_c;
+    uint16_t min_on_s;
+    uint16_t min_off_s;
+    float model_fit_temp_c;
+    float model_fit_ambient_c;
+    float coil_power_w;
+} zone_cfg_v25_t;
+
+/* 244 = 240 (zone_cfg_v24_t's own byte-for-byte size) + 4 (coil_power_w).
+ * Confirmed against a standalone layout replica of this exact struct, never
+ * sizeof(zone_cfg_t) -- see zone_cfg_v22_t's own assert comment for why that
+ * name is never safe to use for this purpose. */
+_Static_assert(sizeof(zone_cfg_v25_t) == 244,
+               "zone_cfg_v25_t must match the on-flash v25 layout byte-for-byte (244 bytes)"); /* v25 -- predates autotune_baseline_k_dc */
+_Static_assert(offsetof(zone_cfg_v25_t, name) == 0,
+               "zone_cfg_v25_t::name must stay at byte offset 0");
+_Static_assert(offsetof(zone_cfg_v25_t, coil_power_w) == 240,
+               "zone_cfg_v25_t::coil_power_w must stay at byte offset 240");
+
 /* Frozen v24 zone layout -- what zone_cfg_t looked like immediately before
- * THIS pass (ZONES_CFG_VERSION 24->25): predates coil_power_w. Field order
+ * v24->25 (predates coil_power_w). Field order
  * hand-copied from v24's actual shape (== v23's shape plus
  * model_fit_temp_c/model_fit_ambient_c), never derived from the live
  * struct -- same discipline as every other frozen zone_cfg_vN_t in this
@@ -3115,8 +3236,30 @@ typedef struct {
     zone_timing_profile_t timing_profiles[MAX31856_CHANNEL_COUNT];
     float pc_link_abort_silence_ms;
     uint32_t crc32;
-} zones_cfg_v24_t; /* v24 -- what zones_cfg_t looked like immediately before THIS
-                     * pass; predates coil_power_w. */
+} zones_cfg_v24_t; /* v24 -- what zones_cfg_t looked like immediately before v24->25;
+                     * predates coil_power_w. */
+
+/* Frozen v25 layout -- what zones_cfg_t looked like immediately before THIS
+ * pass (ZONES_CFG_VERSION 25->26): zones[] is the per-zone shape that
+ * predates this pass's autotune_baseline_k_dc addition (zone_cfg_v25_t,
+ * frozen above). Same shape as v24's own wrapper -- no wrapper-level scalar
+ * removed here either, just zones[] pinned to the smaller, historical
+ * per-zone type. This is what a LIVE, already-commissioned v25 board looks
+ * like on flash right now -- the exact blob a v25->v26 upgrade must read. */
+typedef struct {
+    uint8_t version;
+    uint8_t thermo_count;
+    uint8_t relay_count;
+    uint8_t max_simultaneous_relays;
+    uint8_t continue_on_zone_trip;
+    uint8_t safety_tc_type;
+    zone_cfg_v25_t zones[MAX31856_CHANNEL_COUNT];
+    uint8_t timing_profile_count;
+    zone_timing_profile_t timing_profiles[MAX31856_CHANNEL_COUNT];
+    float pc_link_abort_silence_ms;
+    uint32_t crc32;
+} zones_cfg_v25_t; /* v25 -- what zones_cfg_t looked like immediately before THIS
+                     * pass; predates autotune_baseline_k_dc. */
 
 /* Frozen v21 layout -- what zones_cfg_t looked like immediately before THIS
  * pass (ZONES_CFG_VERSION 21->22): zones[] is the per-zone shape that

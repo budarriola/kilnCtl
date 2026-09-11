@@ -6571,19 +6571,23 @@ static void test_nvs_load_from_v23_blob_defaults_model_fit_context_to_unknown(vo
     nvs_test_clear();
 }
 
-// Opus review finding 10 (2026-09-10): the ZONES_CFG_VERSION 24->25 bump
-// (coil_power_w) moves v24 OFF the current-version path (full CRC check)
-// and ONTO the older-version migration path, which discarded every
-// historical version's own crc32 unchecked -- so a v24 blob with a single
-// flipped bit could silently migrate to v25. zones_config_migrate.c's
-// decode_zones_blob() now verifies a v24 blob's own crc32 (computed the
-// same "everything before crc32, then 4 zero bytes" way as the current-
-// version check) BEFORE calling case 24's converter -- narrowly, for v24
-// only, not every historical version (see that fix's own comment for why).
-static void make_minimal_valid_v24_blob(zones_cfg_v24_t *src)
+// Opus review finding 10 (2026-09-10): the ZONES_CFG_VERSION N-1->N bump
+// moves the immediately-prior version OFF the current-version path (full CRC
+// check) and ONTO the older-version migration path, which discarded every
+// historical version's own crc32 unchecked -- so a blob one version behind
+// current, with a single flipped bit, could silently migrate. zones_config_
+// migrate.c's decode_zones_blob() verifies THAT ONE prior version's own
+// crc32 (computed the same "everything before crc32, then 4 zero bytes" way
+// as the current-version check) BEFORE calling its converter -- narrowly,
+// for ZONES_CFG_VERSION-1 only, not every historical version (see that
+// fix's own comment for why). The 25->26 pass (autotune_baseline_k_dc)
+// moves this coverage from v24 (tested until that pass) to v25 -- these
+// tests were updated in lockstep rather than left describing a version this
+// gate no longer covers, so a green suite still means what it claims.
+static void make_minimal_valid_v25_blob(zones_cfg_v25_t *src)
 {
     memset(src, 0, sizeof(*src));
-    src->version = 24;
+    src->version = 25;
     src->thermo_count = 2;
     src->relay_count = 2;
     src->safety_tc_type = 3;
@@ -6608,61 +6612,64 @@ static void make_minimal_valid_v24_blob(zones_cfg_v24_t *src)
     }
     // Same "everything before crc32, then 4 zero bytes" computation
     // zones_config_migrate.c's decode_zones_blob() itself uses to verify a
-    // v24 blob (check_link_impl_isolation.ps1: no separate CRC-named
+    // v25 blob (check_link_impl_isolation.ps1: no separate CRC-named
     // function here, INLINE only, matching production's own inline
     // computation rather than a locally reimplemented routine -- this is
     // esp_crc32_le(), CommonFW's own CRC32 primitive, called twice, not a
     // hand-rolled CRC algorithm).
     {
         static const uint8_t zero4[sizeof(uint32_t)] = {0};
-        uint32_t crc = esp_crc32_le(0, (const uint8_t *)src, offsetof(zones_cfg_v24_t, crc32));
+        uint32_t crc = esp_crc32_le(0, (const uint8_t *)src, offsetof(zones_cfg_v25_t, crc32));
         src->crc32 = esp_crc32_le(crc, zero4, sizeof(zero4));
     }
 }
 
-static void test_decode_zones_blob_accepts_a_v24_blob_with_a_correct_crc(void)
+static void test_decode_zones_blob_accepts_a_v25_blob_with_a_correct_crc(void)
 {
-    TEST_SECTION("decode_zones_blob -- a v24 blob with a CORRECT crc32 still migrates to v25 "
+    TEST_SECTION("decode_zones_blob -- a v25 blob with a CORRECT crc32 still migrates to v26 "
                  "(opus review finding 10's fix must not refuse good blobs)");
 
-    zones_cfg_v24_t src;
-    make_minimal_valid_v24_blob(&src);
+    zones_cfg_v25_t src;
+    make_minimal_valid_v25_blob(&src);
 
     zones_cfg_t out;
     const char *reason = "unset";
     zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
-    TEST_CHECK(r == ZONES_DECODE_OK, "a well-formed, correctly-CRC'd v24 blob migrates cleanly");
-    TEST_CHECK(out.version == ZONES_CFG_VERSION, "migrated config is stamped the current (v25) version");
+    TEST_CHECK(r == ZONES_DECODE_OK, "a well-formed, correctly-CRC'd v25 blob migrates cleanly");
+    TEST_CHECK(out.version == ZONES_CFG_VERSION, "migrated config is stamped the current (v26) version");
     TEST_CHECK(out.thermo_count == 2, "sibling field survives the hop unchanged");
+    TEST_CHECK(out.zones[0].autotune_baseline_k_dc == 0.0f,
+               "a migrated zone's new autotune_baseline_k_dc reads the 'not recorded yet' sentinel, "
+               "not garbage from beyond the v25 blob's own tail");
 }
 
-static void test_decode_zones_blob_refuses_a_v24_blob_with_a_corrupted_crc(void)
+static void test_decode_zones_blob_refuses_a_v25_blob_with_a_corrupted_crc(void)
 {
-    TEST_SECTION("decode_zones_blob -- NEGATIVE TEST: a v24 blob with a flipped bit and its OLD "
+    TEST_SECTION("decode_zones_blob -- NEGATIVE TEST: a v25 blob with a flipped bit and its OLD "
                  "(now-mismatched) crc32 is refused, not silently migrated (opus review finding 10)");
 
-    zones_cfg_v24_t src;
-    make_minimal_valid_v24_blob(&src);
+    zones_cfg_v25_t src;
+    make_minimal_valid_v25_blob(&src);
     // Flip one bit of a real, in-range value (a PID gain) -- exactly finding
     // 10's own worked example of a corruption this check must catch that
     // zones_config_json_validate() alone would not (the flipped value can
     // easily still be in-range).
     src.zones[0].pid_kp = 12.5f;
     // valid CRC over the pre-corruption bytes -- same inline computation as
-    // make_minimal_valid_v24_blob() above (check_link_impl_isolation.ps1:
+    // make_minimal_valid_v25_blob() above (check_link_impl_isolation.ps1:
     // no separate CRC-named function, just esp_crc32_le() called directly).
     {
         static const uint8_t zero4[sizeof(uint32_t)] = {0};
-        uint32_t crc = esp_crc32_le(0, (const uint8_t *)&src, offsetof(zones_cfg_v24_t, crc32));
+        uint32_t crc = esp_crc32_le(0, (const uint8_t *)&src, offsetof(zones_cfg_v25_t, crc32));
         src.crc32 = esp_crc32_le(crc, zero4, sizeof(zero4));
     }
     uint8_t *raw = (uint8_t *)&src;
-    raw[offsetof(zones_cfg_v24_t, zones[0].pid_kp)] ^= 0x01; // corrupt AFTER computing the CRC
+    raw[offsetof(zones_cfg_v25_t, zones[0].pid_kp)] ^= 0x01; // corrupt AFTER computing the CRC
 
     zones_cfg_t out;
     const char *reason = "unset";
     zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
-    TEST_CHECK(r == ZONES_DECODE_CORRUPT, "a v24 blob whose bytes no longer match its own crc32 is refused");
+    TEST_CHECK(r == ZONES_DECODE_CORRUPT, "a v25 blob whose bytes no longer match its own crc32 is refused");
     TEST_CHECK(out.thermo_count == 0, "a refused blob leaves *out zeroed, never a half-migrated struct");
 }
 
@@ -10415,8 +10422,8 @@ void run_test_zones_http(void)
     test_zero_initialized_zone_cfg_is_heater_and_failsafe_off();
     test_nvs_load_from_v22_blob_defaults_zone_type_and_failsafe_to_zero();
     test_nvs_load_from_v23_blob_defaults_model_fit_context_to_unknown();
-    test_decode_zones_blob_accepts_a_v24_blob_with_a_correct_crc();
-    test_decode_zones_blob_refuses_a_v24_blob_with_a_corrupted_crc();
+    test_decode_zones_blob_accepts_a_v25_blob_with_a_correct_crc();
+    test_decode_zones_blob_refuses_a_v25_blob_with_a_corrupted_crc();
     test_zone_is_on_off_and_zone_needs_ceiling();
     test_NEGATIVE_wrong_zone_band_read_is_caught();
     test_NEGATIVE_migration_default_of_zero_instead_of_20_is_caught();

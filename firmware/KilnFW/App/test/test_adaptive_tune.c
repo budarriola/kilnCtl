@@ -60,6 +60,7 @@ int g_test_count = 0;
 static struct {
     float k_dc, tau_s, dead_time_s;
     float kp, ki, kd;
+    float autotune_baseline_k_dc; // 0 = "not recorded yet", same sentinel convention as k_dc
 } s_fake_zone_cfg[TEST_MAX_ZONES];
 
 bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
@@ -78,6 +79,27 @@ bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float d
     s_fake_zone_cfg[zone_index].dead_time_s = dead_time_s;
     return true;
 }
+// docs/audits/adaptive_tune_vs_owner_requirements_2026-09-11.md's fix: the
+// real zones_config_get/set_autotune_baseline_k_dc() (zones_config_
+// accessors.c) this fakes -- same "tiny in-RAM table" convention and same
+// 0-is-a-legal-sentinel behavior as the real setter (no bound check here;
+// the real ZONE_AUTOTUNE_K_DC_MAX bound is exercised via adaptive_tune_
+// model.c's OWN ADAPTIVE_TUNE_K_DC_ABS_MAX check before it ever calls this
+// setter with an out-of-range value -- see test_adaptive_tune_model.c's
+// K_dc-ratchet regression test).
+bool zones_config_get_autotune_baseline_k_dc(uint8_t zone_index, float *out_k_dc)
+{
+    if (zone_index >= TEST_MAX_ZONES) return false;
+    *out_k_dc = s_fake_zone_cfg[zone_index].autotune_baseline_k_dc;
+    return true;
+}
+bool zones_config_set_autotune_baseline_k_dc(uint8_t zone_index, float k_dc)
+{
+    if (zone_index >= TEST_MAX_ZONES) return false;
+    s_fake_zone_cfg[zone_index].autotune_baseline_k_dc = k_dc;
+    return true;
+}
+
 bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, float *out_kd)
 {
     if (zone_index >= TEST_MAX_ZONES) return false;
@@ -385,6 +407,7 @@ void run_test_adaptive_tune(void)
 
     TEST_SECTION("adaptive_tune: refinement improves the estimate");
     test_refinement_improves_gain_estimate_on_known_plant();
+    test_repeated_accepted_refinements_stay_within_baseline_envelope();
 
     TEST_SECTION("adaptive_tune: coupled identification -- pure fit");
     test_coupled_fit_refuses_underdetermined_observation_set();

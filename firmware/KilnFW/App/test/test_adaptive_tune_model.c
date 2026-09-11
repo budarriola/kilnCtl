@@ -278,6 +278,74 @@ static void test_per_run_move_is_bounded_even_with_many_dwells(void)
                "a single run's applied move must never exceed the per-run fractional cap");
 }
 
+// docs/audits/adaptive_tune_vs_owner_requirements_2026-09-11.md: THE
+// regression test the pre-fix code could not pass. Before this pass, the
+// plausibility ratio test read the LIVE model_k_dc -- the exact value THIS
+// function is the only thing that ever moves once a zone is opted in -- so a
+// fit could be refused as ">5x last week's value" while being many times the
+// ORIGINAL autotune measurement, as long as each intervening accepted run's
+// own move stayed under 5x its own immediately-prior value. No single run's
+// guard was ever wrong in isolation; composed across many accepted runs they
+// placed NO ceiling on the total drift.
+//
+// This test feeds, every run, a fit chosen relative to whatever K_dc is
+// CURRENTLY live (fit = live * 4.9 -- always just inside the OLD, live-
+// relative ratio guard, so the pre-fix code never refuses it on plausibility
+// grounds) and checks after every run that K_dc has not left
+// [baseline/ADAPTIVE_TUNE_MAX_JUMP_RATIO, baseline*ADAPTIVE_TUNE_MAX_JUMP_
+// RATIO] -- the fixed, provable lifetime envelope this fix's own comment
+// (adaptive_tune_model.c, just above the ratio check) derives by induction
+// once the ratio test is anchored to the FIXED baseline instead.
+//
+// NEGATIVE TEST: reverting adaptive_tune_model.c's ratio-test anchor back to
+// k_dc (instead of baseline_k_dc) makes this test fail within a handful of
+// runs -- each accepted run's own live reference grows ~1.2x (the per-run
+// +-20% cap saturating every time, since fit=live*4.9 always overshoots that
+// cap), so live compounds roughly like baseline*1.2^run and crosses
+// baseline*5 well before run 8. Confirmed by hand: see this task's commit
+// message for the restore-and-diff proof.
+static void test_repeated_accepted_refinements_stay_within_baseline_envelope(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true;
+    const float baseline = 10.0f;
+    s_fake_zone_cfg[1].k_dc = baseline; // this IS the original autotune's own result --
+                                         // no separate autotune_baseline_k_dc set yet, so
+                                         // adaptive_tune_refine_zone_locked() must bootstrap
+                                         // it from this value on its first call below.
+    const float ambient = 22.0f;
+    const float duties[4] = {0.20f, 0.50f, 0.80f, 0.35f};
+    const float lower_bound = baseline / ADAPTIVE_TUNE_MAX_JUMP_RATIO;
+    const float upper_bound = baseline * ADAPTIVE_TUNE_MAX_JUMP_RATIO;
+
+    for (int run = 0; run < 10; run++) {
+        // Fresh ring each run -- a clean fit to exactly ONE target value,
+        // never a blend of this run's and a prior run's differing targets.
+        adaptive_tune_zones[1].ring_count = 0;
+        adaptive_tune_zones[1].ring_head = 0;
+        // Just inside the OLD (live-relative) ratio guard every single run --
+        // this is what let the pre-fix code accept every one of these as
+        // "plausible", never refusing on that basis.
+        float fit = s_fake_zone_cfg[1].k_dc * 4.9f;
+        for (int i = 0; i < 4; i++) {
+            feed_settled_dwell(1, ambient + fit * duties[i], ambient, duties[i], SETTLE_TICKS, DT_S);
+        }
+        profile_firing_run_record_t rec = make_clean_record((uint32_t)(200 + run), 1, 900);
+        adaptive_tune_run_end(&rec, true);
+
+        TEST_CHECK(s_fake_zone_cfg[1].k_dc <= upper_bound + 1e-3f,
+                   "K_dc must never exceed the ORIGINAL autotune baseline's x5 lifetime envelope, "
+                   "however many accepted refinements have run");
+        TEST_CHECK(s_fake_zone_cfg[1].k_dc >= lower_bound - 1e-3f,
+                   "K_dc must never fall below the ORIGINAL autotune baseline's /5 lifetime envelope, "
+                   "however many accepted refinements have run");
+    }
+
+    TEST_CHECK(s_fake_zone_cfg[1].autotune_baseline_k_dc == baseline,
+               "adaptive_tune's own refinements must NEVER move the baseline anchor itself -- only a fresh "
+               "full autotune Accept (autotune_engine_guard.c) may do that");
+}
+
 // ---------------------------------------------------------------------
 // Full coupled identification -- adaptive_tune_coupled_fit() pure-math tests.
 // ---------------------------------------------------------------------

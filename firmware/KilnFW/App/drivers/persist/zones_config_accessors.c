@@ -1559,6 +1559,33 @@ bool zones_config_set_model_fit_context(uint8_t zone_index, float fit_temp_c, fl
     return nvs_save() == ESP_OK;
 }
 
+bool zones_config_get_autotune_baseline_k_dc(uint8_t zone_index, float *out_k_dc)
+{
+    if (!out_k_dc || zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    *out_k_dc = s_zones.cfg.zones[zone_index].autotune_baseline_k_dc;
+    return true;
+}
+
+bool zones_config_set_autotune_baseline_k_dc(uint8_t zone_index, float k_dc)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    /* 0 is always legal (the "no baseline recorded" sentinel); any other
+     * value must be finite, non-negative, and inside ZONE_AUTOTUNE_K_DC_MAX
+     * -- see that constant's own comment for the physical justification.
+     * Same reject-nothing-half-applied discipline as every other setter in
+     * this file, though there is only one field here to half-apply. */
+    if (!isfinite(k_dc) || k_dc < 0.0f || k_dc > ZONE_AUTOTUNE_K_DC_MAX) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].autotune_baseline_k_dc = k_dc;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
 /* Passthrough seams -- see their own header comment (zones_config_accessors.h)
  * for why T_c is accepted but not yet used. (void)-cast rather than an
  * unnamed parameter so the seam's future consumer is easy to grep for. */

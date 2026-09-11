@@ -182,6 +182,35 @@ extern "C" {
 #define ZONE_MIN_TEMP_C_MIN (-50.0f)
 #define ZONE_MIN_TEMP_C_MAX 200.0f
 
+/* zone_cfg_t::autotune_baseline_k_dc (ZONES_CFG_VERSION 25->26, docs/audits/
+ * adaptive_tune_vs_owner_requirements_2026-09-11.md) -- an ABSOLUTE ceiling
+ * on a zone's static gain, unlike ZONE_MODEL_K_MAX just above (which that
+ * constant's own comment already documents as "a typo/garbage filter, not
+ * physics": 5000 is an order of magnitude past anything a real fit produces,
+ * chosen only to catch a decimal-point slip). This one is derived from an
+ * actual physical limit, not a margin-of-convenience: model_k_dc is defined
+ * as the predicted steady-state temperature RISE above ambient at 100% duty
+ * (zone_cfg_t::model_k_dc's own comment). ZONE_MAX_TEMP_C_MAX just above is
+ * this same codebase's own considered answer to "what is the hottest
+ * temperature this system is designed to ever legitimately report" --
+ * 2500C, ~485C of headroom above cone 42, the top of the standard
+ * pyrometric cone table. A fitted or blended K_dc predicting a steady-state
+ * rise beyond that ceiling is not describing a real, reachable operating
+ * point of THIS kiln; it is describing a temperature nothing in this
+ * system's own safety envelope (guard 5, profile run-start refusal, every
+ * MAX31856's own configured range) will ever let it actually reach or
+ * report. Reusing ZONE_MAX_TEMP_C_MAX directly, rather than inventing a
+ * second, separately-justified number, keeps this bound anchored to a
+ * decision the codebase has already made about physical plausibility.
+ *
+ * This is the "absolute bound on K_dc, analogous to
+ * ZONE_COUPLING_COEFF_MAX" adaptive_tune_model.c's blend/plausibility path
+ * enforces before ever writing a new autotune_baseline_k_dc or blended
+ * model_k_dc -- see ADAPTIVE_TUNE_K_DC_ABS_MAX (adaptive_tune_internal.h),
+ * which is literally this constant, not a re-derivation of it, so the two
+ * can never drift apart. */
+#define ZONE_AUTOTUNE_K_DC_MAX ZONE_MAX_TEMP_C_MAX
+
 /* zone_cfg_t::heater_window_ms/heater_min_on_ms/heater_min_off_ms -- 0 = not
  * configured (caller substitutes PROFILE_EXECUTOR_DEFAULT_*_MS). */
 #define ZONE_HEATER_WINDOW_MS_MAX 600000.0f
@@ -657,6 +686,32 @@ bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float d
  * explicitly marks a fit's context as unknown/cleared. */
 bool zones_config_get_model_fit_context(uint8_t zone_index, float *out_fit_temp_c, float *out_fit_ambient_c);
 bool zones_config_set_model_fit_context(uint8_t zone_index, float fit_temp_c, float fit_ambient_c);
+
+/* zone_cfg_t::autotune_baseline_k_dc (ZONES_CFG_VERSION 25->26) -- the K_dc
+ * value the last full autotune Accept actually wrote, kept separate from
+ * model_k_dc itself for the identical reason model_fit_temp_c/
+ * model_fit_ambient_c are kept separate from it: adaptive_tune_model.c's
+ * refine path needs an anchor that does NOT move every time IT writes
+ * model_k_dc, or the anchor and the thing it bounds become the same moving
+ * target (see docs/audits/adaptive_tune_vs_owner_requirements_2026-09-11.md
+ * and this field's own zone_cfg_t comment for the full "bound relative to
+ * persisted state ratchets" defect this exists to close).
+ *
+ * 0 = "no baseline recorded yet" -- same sentinel convention model_k_dc
+ * itself uses for "no model". Getter returns false only for an out-of-range
+ * zone_index (same as every getter in this file); the 0 sentinel is a valid,
+ * meaningful answer, not a "cannot answer". Setter refuses (without writing)
+ * a non-finite, negative, or > ZONE_AUTOTUNE_K_DC_MAX value -- see that
+ * constant's own comment for the physical justification. Callers: (1)
+ * autotune_engine_guard.c's accept path, immediately after a fresh
+ * zones_config_set_model() lands from a NEW full autotune run (re-anchors to
+ * the new measurement); (2) adaptive_tune_refine_zone_locked() itself, the
+ * first time it runs against a zone whose model predates this field
+ * (bootstraps the anchor from the live model_k_dc rather than refusing
+ * outright, so an already-autotuned board is not stuck at "no baseline"
+ * forever just because it upgraded before this field existed). */
+bool zones_config_get_autotune_baseline_k_dc(uint8_t zone_index, float *out_k_dc);
+bool zones_config_set_autotune_baseline_k_dc(uint8_t zone_index, float k_dc);
 
 /* zone_model_at()/coupling_at() -- HIGH_TEMPERATURE_TRANSFER_ANALYSIS's
  * "cheap seam" (item 2): every control-path reader of a zone's plant model

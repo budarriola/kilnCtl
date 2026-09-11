@@ -72,12 +72,88 @@ bool adaptive_tune_refine_zone_locked(uint8_t zi, uint8_t profile_id)
         return false;
     }
 
-    if (k_fit > k_dc * ADAPTIVE_TUNE_MAX_JUMP_RATIO || k_fit < k_dc / ADAPTIVE_TUNE_MAX_JUMP_RATIO) {
-        adaptive_tune_set_refusal(z, "fit %.4f is implausible against prior K %.4f (>%.0fx)", (double)k_fit, (double)k_dc,
-                    (double)ADAPTIVE_TUNE_MAX_JUMP_RATIO);
+    // docs/audits/adaptive_tune_vs_owner_requirements_2026-09-11.md's
+    // defect: the plausibility ratio test below used to read the LIVE
+    // model_k_dc -- which THIS SAME FUNCTION is the only thing that ever
+    // moves once a zone is opted in. That made "is this fit plausible" a
+    // question checked against a reference that ratchets forward (or
+    // backward) with every accepted run: a fit could be refused as >5x last
+    // week's value while being, say, 40x the ORIGINAL autotune measurement,
+    // as long as each intervening accepted run's own move stayed under 5x
+    // its OWN immediately-prior value. No single run's guard was ever
+    // wrong in isolation; composed across many accepted runs they placed no
+    // ceiling on the total drift at all.
+    //
+    // Fix: anchor the ratio test (below) to autotune_baseline_k_dc -- the
+    // K_dc the last FULL autotune Accept actually wrote
+    // (autotune_engine_guard.c, via zones_config_set_autotune_baseline_
+    // k_dc()), which THIS function never moves. The blend target and its
+    // own per-run move cap are DELIBERATELY left reading the live k_dc,
+    // unchanged -- see the comment just before the ratio check for why that
+    // alone is enough to bound the whole module's lifetime range, without
+    // sacrificing the intended multi-run convergence behavior a fixed,
+    // repeated true gain is supposed to produce.
+    //
+    // A board that already has a model but predates this field (upgraded
+    // from a pre-v26 blob, or simply never had this bootstrap run before)
+    // reads 0 ("not recorded yet") -- bootstrapped here, once, from the live
+    // model_k_dc, rather than either refusing outright (which would
+    // permanently disable this zone until a fresh autotune) or silently
+    // treating 0 as a real gain (which the ratio test below would then
+    // reject every future fit against). A failed persist here is only
+    // logged, not fatal to this run -- the in-RAM value below still anchors
+    // this call correctly, and the next accepted run's zones_config_set_
+    // model() write will not retry this bootstrap (has_applied semantics
+    // aside, autotune_baseline_k_dc only needs to exist once), so a
+    // transient NVS failure here is not silently invisible forever the way
+    // it would be if nothing ever logged it.
+    float baseline_k_dc;
+    if (!zones_config_get_autotune_baseline_k_dc(zi, &baseline_k_dc) || !(baseline_k_dc > 0.0f)) {
+        baseline_k_dc = k_dc;
+        if (!zones_config_set_autotune_baseline_k_dc(zi, baseline_k_dc)) {
+            ESP_LOGW(ADAPTIVE_TUNE_TAG,
+                     "zone %u: could not persist bootstrapped autotune_baseline_k_dc=%.4f -- "
+                     "using it in-RAM for this run only, will retry bootstrapping next run",
+                     (unsigned)zi, (double)baseline_k_dc);
+        }
+    }
+
+    // THE fix: the plausibility ratio test is anchored to baseline_k_dc (a
+    // FIXED reference, never moved by this function), not to the live k_dc
+    // this function itself writes. This is what turns the +-5x guard from a
+    // per-run check into an actual LIFETIME ceiling -- proof below.
+    if (k_fit > baseline_k_dc * ADAPTIVE_TUNE_MAX_JUMP_RATIO || k_fit < baseline_k_dc / ADAPTIVE_TUNE_MAX_JUMP_RATIO) {
+        adaptive_tune_set_refusal(z, "fit %.4f is implausible against autotune baseline K %.4f (>%.0fx)", (double)k_fit,
+                    (double)baseline_k_dc, (double)ADAPTIVE_TUNE_MAX_JUMP_RATIO);
         return false;
     }
 
+    // Blend target and its own +-20% per-run move cap are DELIBERATELY still
+    // relative to the LIVE k_dc, exactly as before this fix -- this is what
+    // preserves the intended multi-run convergence behavior (H4(b), see
+    // test_adaptive_tune_ki_verdict.c's test_ki_diagnosis_eventually_runs_
+    // after_repeated_converging_refinements(): repeated runs against the
+    // SAME true gain must keep closing the gap, asymptotically, not freeze
+    // after the first accepted nudge). Only the PLAUSIBILITY reference
+    // (immediately above) moved to the fixed baseline -- and that alone is
+    // sufficient to cap this loop's lifetime range, by induction:
+    //   - k_dc starts at baseline_k_dc (either a real prior autotune's value,
+    //     or bootstrapped from it above), which is trivially inside
+    //     [baseline/RATIO, baseline*RATIO].
+    //   - Every k_fit this function ever accepts satisfies that same
+    //     [baseline/RATIO, baseline*RATIO] bound (the ratio check just above,
+    //     unconditionally, every run).
+    //   - k_blended is a convex combination of k_dc and k_fit (ALPHA in
+    //     (0,1)), and the +-20% clamp below only ever moves it TOWARD k_dc --
+    //     both operations preserve membership in any interval that already
+    //     contains both endpoints.
+    // So if k_dc is in [baseline/RATIO, baseline*RATIO] before a run, it
+    // still is after -- for every run, forever, regardless of how many
+    // accepted refinements have run or how their individual fits trended.
+    // This is what "the plausibility reference must be anchored to the
+    // original autotune result" (docs/audits/adaptive_tune_vs_owner_
+    // requirements_2026-09-11.md) actually buys: a hard, provable lifetime
+    // envelope, without touching the per-run convergence dynamics at all.
     float k_blended = k_dc + ADAPTIVE_TUNE_BLEND_ALPHA * (k_fit - k_dc);
     float max_move = k_dc * ADAPTIVE_TUNE_MAX_FRACTIONAL_MOVE;
     if (k_blended > k_dc + max_move) k_blended = k_dc + max_move;
@@ -86,9 +162,24 @@ bool adaptive_tune_refine_zone_locked(uint8_t zi, uint8_t profile_id)
         adaptive_tune_set_refusal(z, "blended gain %.4f is not positive", (double)k_blended);
         return false;
     }
+    // Absolute physical ceiling -- see ADAPTIVE_TUNE_K_DC_ABS_MAX's own
+    // comment. Independent of, and checked in addition to, the
+    // baseline-relative envelope just above: that envelope bounds DRIFT from
+    // this zone's own history, this bound catches a baseline itself that was
+    // bootstrapped from (or an autotune Accept that wrote) an implausible
+    // measurement in the first place.
+    if (k_blended > ADAPTIVE_TUNE_K_DC_ABS_MAX) {
+        adaptive_tune_set_refusal(z, "blended gain %.4f exceeds the absolute K_dc ceiling %.1f", (double)k_blended,
+                    (double)ADAPTIVE_TUNE_K_DC_ABS_MAX);
+        return false;
+    }
 
     // F1: refuse rather than write a blend too small to be a material
-    // change -- see ADAPTIVE_TUNE_MIN_MATERIAL_MOVE_FRAC's own comment.
+    // change -- see ADAPTIVE_TUNE_MIN_MATERIAL_MOVE_FRAC's own comment. This
+    // check stays relative to the LIVE k_dc (not baseline_k_dc) deliberately
+    // -- it is asking "would this write actually change anything from what
+    // is live right now", a different question from the plausibility/blend
+    // anchor above.
     float material_move = fabsf(k_blended - k_dc);
     if (material_move < k_dc * ADAPTIVE_TUNE_MIN_MATERIAL_MOVE_FRAC) {
         adaptive_tune_set_refusal(z, "blended gain %.4f is not a material change from prior %.4f (<%.2f%%)", (double)k_blended,

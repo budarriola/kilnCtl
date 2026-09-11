@@ -478,6 +478,36 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
                      "rejected or failed to persist -- this fit's operating point will read as unknown",
                      zone, (double)m.baseline_c, (double)step_ambient_c);
         }
+        /* docs/audits/adaptive_tune_vs_owner_requirements_2026-09-11.md item
+         * 4 ("reset one side of a pair"): a NEW full autotune Accept just
+         * replaced this zone's plant model from a fresh, trustworthy
+         * measurement -- re-anchor adaptive_tune_model.c's ratchet-prevention
+         * baseline (autotune_baseline_k_dc) to THIS value, right alongside
+         * the model write it anchors, not on some later, easier-to-forget
+         * path. Joined by the SAME event to adaptive_tune_clear_ki_baseline()
+         * just above (called unconditionally for both methods, before this
+         * `else` branch): that call already re-latches the Ki-diagnosis side
+         * of this same "a fresh autotune result landed" contract every time
+         * gains are accepted; this call re-latches the K_dc side every time a
+         * MODEL is accepted (a strict subset -- relay-method runs write gains
+         * but no model, see this function's own comment above, so they
+         * correctly clear Ki's baseline without touching this one). Letting
+         * only one of the two re-anchor would leave the other comparing
+         * future refinements against a now-stale reference from before this
+         * autotune -- exactly the "reset one side of a pair" bug class this
+         * codebase has shipped four times before. Best-effort like every
+         * other write in this block: a failed persist here leaves the OLD
+         * baseline in place, which is safe (adaptive_tune_refine_zone_
+         * locked() will just keep bounding drift against a slightly stale
+         * anchor, never against nothing) -- not a reason to undo the model or
+         * gains that already landed. */
+        if (!zones_config_set_autotune_baseline_k_dc(zone, m.k_gain_c_per_duty)) {
+            ESP_LOGW(AT_TAG,
+                     "autotune zone %u: plant model persisted but its adaptive-tune baseline K_dc=%.4f was "
+                     "rejected or failed to persist -- adaptive_tune will keep bounding drift against the "
+                     "prior (now stale) baseline until this succeeds",
+                     zone, (double)m.k_gain_c_per_duty);
+        }
     }
     /* TODO.md 6A.4, "autotune's predicted ramp ceiling is shown but not
      * wired into max_ramp_c_per_hr" -- opt-in only (adopt_ceiling defaults

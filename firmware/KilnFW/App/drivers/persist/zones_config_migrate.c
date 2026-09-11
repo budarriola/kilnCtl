@@ -867,6 +867,40 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * struct. */
         return true;
     }
+    case 25: {
+        /* v25 -> v26 (THIS pass, docs/audits/adaptive_tune_vs_owner_
+         * requirements_2026-09-11.md): autotune_baseline_k_dc is brand new,
+         * appended at the true tail after coil_power_w -- zone_cfg_v25_t is
+         * therefore a byte-for-byte prefix of the current (v26) zone_cfg_t,
+         * same "plain memcpy of the smaller historical shape" technique
+         * case 24 uses just above. Every zone's autotune_baseline_k_dc is
+         * left at 0 by this function's entry memset, and 0 IS this field's
+         * own "no baseline recorded yet" sentinel -- same as case 24's
+         * coil_power_w, no separate backfill needed. adaptive_tune_refine_
+         * zone_locked() bootstraps a real baseline from the live model_k_dc
+         * itself, the first time it runs against an upgraded zone that
+         * already has a model but reads 0 here -- see that function's own
+         * comment. */
+        zones_cfg_v25_t src;
+        memcpy(&src, blob, sizeof(src));
+        out->thermo_count = src.thermo_count;
+        out->relay_count = src.relay_count;
+        out->max_simultaneous_relays = src.max_simultaneous_relays;
+        out->continue_on_zone_trip = src.continue_on_zone_trip;
+        out->safety_tc_type = src.safety_tc_type;
+        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v25 value */
+        out->timing_profile_count = src.timing_profile_count;
+        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            memcpy(&out->zones[i], &src.zones[i], sizeof(src.zones[i]));
+            /* out->zones[i].autotune_baseline_k_dc already 0 from this
+             * function's entry memset -- see this case's own top comment. */
+        }
+        /* src.crc32 deliberately NOT carried over -- it covered the v25
+         * shape; nvs_save() stamps a fresh one over the current (v26)
+         * struct. */
+        return true;
+    }
     default:
         /* No known historical (or current) layout for this version --
          * zones_cfg_expected_len_for_version() already returned 0 for it and
@@ -1039,17 +1073,22 @@ zones_decode_result_t zones_config_json_decode_blob(const void *blob, size_t len
          * that, unlike a fresh corruption, has never been exercised by any
          * existing test fixture for those versions. Documented here as the
          * accepted, narrower scope rather than silently left same as before. */
+        /* ZONES_CFG_VERSION 25->26: this check follows the immediately-prior
+         * version (whichever ZONES_CFG_VERSION - 1 names), same "narrow,
+         * one-version-at-a-time" scope opus review finding 10's comment
+         * above accepted -- v1..v24 remain uncovered by this specific gate
+         * for the same reasons given there, not widened by this pass. */
         if (version == ZONES_CFG_VERSION - 1) {
-            _Static_assert(offsetof(zones_cfg_v24_t, crc32) + sizeof(uint32_t) == sizeof(zones_cfg_v24_t),
-                           "zones_cfg_v24_t's CRC check below assumes crc32 is its last field");
+            _Static_assert(offsetof(zones_cfg_v25_t, crc32) + sizeof(uint32_t) == sizeof(zones_cfg_v25_t),
+                           "zones_cfg_v25_t's CRC check below assumes crc32 is its last field");
             uint32_t stored_crc = 0;
-            memcpy(&stored_crc, (const uint8_t *)blob + offsetof(zones_cfg_v24_t, crc32), sizeof(stored_crc));
+            memcpy(&stored_crc, (const uint8_t *)blob + offsetof(zones_cfg_v25_t, crc32), sizeof(stored_crc));
             static const uint8_t zero4[sizeof(uint32_t)] = {0};
             uint32_t computed_crc =
-                esp_crc32_le(0, (const uint8_t *)blob, offsetof(zones_cfg_v24_t, crc32));
+                esp_crc32_le(0, (const uint8_t *)blob, offsetof(zones_cfg_v25_t, crc32));
             computed_crc = esp_crc32_le(computed_crc, zero4, sizeof(zero4));
             if (computed_crc != stored_crc) {
-                *reason = "CRC mismatch on the stored v24 blob -- treating as corrupt rather than migrating it";
+                *reason = "CRC mismatch on the stored v25 blob -- treating as corrupt rather than migrating it";
                 return ZONES_DECODE_CORRUPT;
             }
         }

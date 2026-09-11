@@ -400,6 +400,20 @@ bool zones_config_json_validate(const zones_cfg_t *cand, const char **err_reason
             *err_reason = "zone coil_power_w out of range";
             return false;
         }
+        /* ZONES_CFG_VERSION 25->26: autotune_baseline_k_dc. 0 is always legal
+         * (the documented "no baseline recorded yet" sentinel, same
+         * convention model_k_dc itself already uses); anything else must be
+         * finite, non-negative, and no larger than ZONE_AUTOTUNE_K_DC_MAX --
+         * the same physically-derived ceiling adaptive_tune_model.c's
+         * blend/plausibility path enforces before ever writing this field,
+         * kept in sync deliberately, same reasoning as coil_power_w's own
+         * comment just above. */
+        if (z->autotune_baseline_k_dc != 0.0f &&
+            (!isfinite(z->autotune_baseline_k_dc) || z->autotune_baseline_k_dc < 0.0f ||
+             z->autotune_baseline_k_dc > ZONE_AUTOTUNE_K_DC_MAX)) {
+            *err_reason = "zone autotune_baseline_k_dc out of range";
+            return false;
+        }
         if (!isfinite(z->max_temp_c) || z->max_temp_c < 0.0f || z->max_temp_c > ZONE_MAX_TEMP_C_MAX) {
             *err_reason = "zone max_temp_c out of range";
             return false;

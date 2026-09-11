@@ -39,6 +39,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
+#include "zones_config_accessors.h" /* ZONE_AUTOTUNE_K_DC_MAX -- ADAPTIVE_TUNE_K_DC_ABS_MAX below
+                                       * is literally this constant, never a re-derivation of it */
 #include "flash_worker.h" /* uart_bridge_ext_run_on_flash_worker() -- see
  * adaptive_tune.c's top comment for the full reasoning. Narrow header
  * (esp_err.h only), not the hand-declaration this used to carry. */
@@ -117,6 +119,21 @@ extern const char *ADAPTIVE_TUNE_TAG;
 
 #define ADAPTIVE_TUNE_BLEND_ALPHA 0.15f
 #define ADAPTIVE_TUNE_MAX_FRACTIONAL_MOVE 0.20f
+
+// docs/audits/adaptive_tune_vs_owner_requirements_2026-09-11.md: an ABSOLUTE
+// ceiling on a blended/bootstrapped K_dc, checked in adaptive_tune_refine_
+// zone_locked() (adaptive_tune_model.c) in addition to (never instead of)
+// the ratio/fractional-move guards above. Those guards alone are NOT a
+// bound: each one looks fine per-run, but composed across many accepted
+// runs they let K_dc walk arbitrarily far, because -- before this pass --
+// their own reference point was the live, already-adapted model_k_dc, which
+// they themselves had just moved. Literally ZONE_AUTOTUNE_K_DC_MAX
+// (zones_config_accessors.h), not a second, independently-chosen number --
+// see that constant's own comment for the physical derivation (this
+// system's own existing answer to "what temperature rise could this kiln
+// ever physically/safely report", ZONE_MAX_TEMP_C_MAX) so the two constants
+// can never silently drift apart.
+#define ADAPTIVE_TUNE_K_DC_ABS_MAX ZONE_AUTOTUNE_K_DC_MAX
 
 #define ADAPTIVE_TUNE_MIN_MATERIAL_MOVE_FRAC 0.005f
 
