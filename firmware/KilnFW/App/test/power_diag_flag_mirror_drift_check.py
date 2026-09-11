@@ -66,6 +66,16 @@ MIRROR_MAP = [
     ("kilnlink_diag.h", "KILNLINK_DIAG_BOOT_POWERON", "safety_link.h", "SAFETY_LINK_DIAG_BOOT_POWERON"),
     ("kilnlink_diag.h", "KILNLINK_DIAG_BOOT_WATCHDOG", "safety_link.h", "SAFETY_LINK_DIAG_BOOT_WATCHDOG"),
     ("kilnlink_diag.h", "KILNLINK_DIAG_BOOT_BROWNOUT", "safety_link.h", "SAFETY_LINK_DIAG_BOOT_BROWNOUT"),
+    # 2026-09-09: bits 3-5 added alongside the fatal-fault latch (stack
+    # overflow / malloc failure / configASSERT) surfaced in the DIAG frame's
+    # boot_reason byte -- missed in this map when those bits were added,
+    # found by the 2026-09-11 fault-hook diagnostics audit.
+    ("kilnlink_diag.h", "KILNLINK_DIAG_BOOT_STACK_OVERFLOW",
+     "safety_link.h", "SAFETY_LINK_DIAG_BOOT_STACK_OVERFLOW"),
+    ("kilnlink_diag.h", "KILNLINK_DIAG_BOOT_MALLOC_FAILED",
+     "safety_link.h", "SAFETY_LINK_DIAG_BOOT_MALLOC_FAILED"),
+    ("kilnlink_diag.h", "KILNLINK_DIAG_BOOT_ASSERT_FAILED",
+     "safety_link.h", "SAFETY_LINK_DIAG_BOOT_ASSERT_FAILED"),
     ("kilnlink_diag.h", "KILNLINK_DIAG_STATE_INIT", "safety_link.h", "SAFETY_LINK_DIAG_STATE_INIT"),
     ("kilnlink_diag.h", "KILNLINK_DIAG_STATE_GRACE", "safety_link.h", "SAFETY_LINK_DIAG_STATE_GRACE"),
     ("kilnlink_diag.h", "KILNLINK_DIAG_STATE_ARMED", "safety_link.h", "SAFETY_LINK_DIAG_STATE_ARMED"),
