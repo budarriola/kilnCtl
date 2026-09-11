@@ -387,6 +387,20 @@ class SafetyLinkStats:
     #: power_applied below for the counters that actually answer that.
     frames_received: int
     crc_errors: int
+    #: REDEFINED 2026-09-10 (docs/audits/
+    #: safety_link_get_status_timeout_counter_2026-09-10.md and its follow-up
+    #: opus review). NO LONGER "GET_STATUS exchanges that got no reply" --
+    #: GET_STATUS is not a request/reply pair (the Pico never answers it),
+    #: so that per-exchange definition either produced a permanent, bimodal
+    #: ~0%/~100% artifact, or (a first attempted fix) a value that could
+    #: never rise above what the existing ~1500 ms link_up age check already
+    #: showed. The ESP now writes this once per ~500 ms poll iteration,
+    #: incrementing it when NO new STATUS frame was applied anywhere during
+    #: that whole iteration (elapsed-time push-throughput, not a per-request
+    #: match) -- see safety_link_stats_t::timeouts's own doc comment
+    #: (firmware/KilnFW/App/drivers/safety/safety_link.h). Near zero on a
+    #: healthy link; rises with real partial loss (e.g. losing 2 of every 3
+    #: pushes) well before the link_up age check would trip.
     timeouts: int
     poll_period_ms: int
     #: BROADCAST frames (GET_STATUS/DIAG/POWER/TRIP_EVENT/FW_VERSION -- any

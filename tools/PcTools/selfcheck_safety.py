@@ -94,9 +94,16 @@ def safety_checks() -> None:
     check("classify GET_LINK_STATS reply", subcommand, 0x04)
     check("frames sent", stats.frames_sent, 1000)
     # Sent climbing with received stuck at zero is exactly the signature of
-    # the missing Pico firmware.
+    # the missing Pico firmware. This is a hand-built wire fixture, not a
+    # live board -- it just proves the field decodes; the 1000 value no
+    # longer means "1000 GET_STATUS exchanges got no reply" on real firmware
+    # (that per-exchange definition was retired 2026-09-10, docs/audits/
+    # safety_link_get_status_timeout_counter_2026-09-10.md) -- it is now a
+    # count of ~500 ms poll iterations that saw zero new STATUS frames
+    # applied anywhere, which a link with NOTHING ever received (this
+    # fixture) would trivially max out on every single iteration too.
     check("nothing ever received", stats.frames_received, 0)
-    check("every poll timed out", stats.timeouts, 1000)
+    check("every poll iteration saw a push gap", stats.timeouts, 1000)
     check("poll period", stats.poll_period_ms, 500)
 
     for label, bad in (

@@ -200,10 +200,18 @@ def get_heap_status(host: Optional[str] = None) -> str:
                     f"max={t['max']} mean={t['mean']} (us)"
                 )
                 # link_reply_us only: `timeouts` is safety_link_stats_t's
-                # existing counter (requests with no matching reply at all),
-                # surfaced here rather than as a separate metric -- see
-                # dashboard_http_client.py's get_diagnostics_timing() doc
-                # comment.
+                # existing counter, surfaced here rather than as a separate
+                # metric -- see dashboard_http_client.py's
+                # get_diagnostics_timing() doc comment. REDEFINED 2026-09-10
+                # (docs/audits/safety_link_get_status_timeout_counter_2026-09-10.md
+                # and its follow-up review): no longer "requests with no
+                # matching reply" (GET_STATUS never gets a matching reply by
+                # design, so that definition either always read ~0% or
+                # ~100% on a healthy link, or, in a first attempted fix,
+                # could not exceed what the link's own age-based liveness
+                # check already showed); now a count of ~500 ms poll
+                # iterations with zero new STATUS frames applied anywhere --
+                # near zero when healthy, rising under real partial loss.
                 if key == "link_reply_us" and "timeouts" in t:
                     line += f" timeouts={t['timeouts']}"
                 lines.append(line)

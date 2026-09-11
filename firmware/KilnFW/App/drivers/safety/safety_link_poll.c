@@ -422,6 +422,36 @@ void safety_poll_task(void *arg)
         TickType_t started = xTaskGetTickCount();
         esp_err_t poll_err = safety_exchange(link, request, sizeof(request), true);
 
+        /* 2026-09-10, finding 5 (docs/audits/
+         * safety_link_get_status_timeout_counter_2026-09-10.md follow-up
+         * review): the real partial-loss signal, deliberately independent of
+         * poll_err/no_reply_streak below -- those reflect only THIS
+         * exchange's own phase-dependent ~345 ms wait, which is exactly what
+         * made the original stats.timeouts counter useless (see that field's
+         * own doc comment). This instead compares total applied STATUS
+         * frames (frames_received) across the WHOLE iteration -- covering
+         * this exchange's own wait plus every other drain that ran since the
+         * previous iteration's snapshot (an opportunistic pre-drain, an
+         * idle-tick drain) -- against the previous iteration's snapshot, so
+         * it measures elapsed-time push throughput rather than this
+         * request's own timing. See safety_link_status_push_gap_observed()'s
+         * (safety_link.h) doc comment for the full reasoning. */
+        uint32_t frames_received_now = 0;
+        if (safety_lock(link)) {
+            frames_received_now = link->stats.frames_received;
+            safety_unlock(link);
+        }
+        if (link->push_gap_baseline_valid &&
+            safety_link_status_push_gap_observed(link->push_gap_baseline_frames_received,
+                                                  frames_received_now)) {
+            if (safety_lock(link)) {
+                link->stats.timeouts++;
+                safety_unlock(link);
+            }
+        }
+        link->push_gap_baseline_frames_received = frames_received_now;
+        link->push_gap_baseline_valid = true;
+
         /* SAFETY_LINK_BACKOFF_MAX_STREAK's comment: streak resets to 0 the
          * instant any exchange succeeds -- a Pico that comes online later is
          * back to full normal cadence on its very first reply, no reboot

@@ -434,51 +434,46 @@ static void test_reboot_confirmed_requires_both_boot_id_and_build_identity(void)
 }
 
 // --------------------------------------------------------------------------
-// safety_link_status_wait_is_real_timeout() -- 2026-09-10 fix for the dead
-// GET_STATUS request/reply accounting (docs/audits/
-// safety_link_get_status_timeout_counter_2026-09-10.md). GET_STATUS is not a
-// request/reply pair: the Pico never answers it (no dispatch case at all),
-// it just pushes STATUS on its own free-running 500 ms clock, so a raw
-// "nothing landed inside this wait window" observation is not, by itself,
-// evidence the peer is down -- it is exactly as likely on a perfectly
-// healthy link whose push phase happens to fall outside the window. Before
-// this fix every such miss was counted as a stats.timeouts, producing a
-// permanent, bimodal ~0%/~100% reading rather than a real rate. The fix
-// gates that count on safety_link_up_locked() -- the same age-based check
-// S6a/S6b already key off -- so a healthy link reads healthy and a
-// genuinely dead one still shows up.
+// safety_link_status_push_gap_observed() -- 2026-09-10 fix, round 2, for the
+// dead GET_STATUS request/reply accounting (docs/audits/
+// safety_link_get_status_timeout_counter_2026-09-10.md and its follow-up
+// opus review, findings 4 and 5). Round 1 gated the per-exchange miss's
+// stats.timeouts increment AND its returned err on safety_link_up_locked(),
+// which (finding 4) made safety_link_ping() launder that same age check
+// instead of remaining independent evidence, and (finding 5) made
+// stats.timeouts a strict, less-sensitive subset of that existing 1500 ms
+// boolean -- a link genuinely losing e.g. 2 of every 3 pushes can still read
+// "up" by that check, so the counter stayed at 0 with real loss happening.
+//
+// Round 2: safety_exchange()'s own `err` is unconditionally ESP_ERR_TIMEOUT
+// on a miss again (restoring safety_link_ping() as real evidence), and
+// stats.timeouts is redefined entirely -- no longer touched by safety_
+// exchange() at all, instead written once per safety_poll_task() iteration
+// by comparing frames_received across the whole iteration (this predicate),
+// which is not tied to any single request's own phase.
 // --------------------------------------------------------------------------
 
-static void test_status_wait_frame_landed_is_never_a_timeout(void)
+static void test_push_gap_frames_received_advanced_is_not_a_gap(void)
 {
-    TEST_SECTION("safety_link_status_wait_is_real_timeout -- a frame landing in the window is never a timeout");
+    TEST_SECTION("safety_link_status_push_gap_observed -- frames_received advancing across the "
+                 "iteration means at least one STATUS was applied -- not a gap");
 
-    TEST_CHECK(safety_link_status_wait_is_real_timeout(/*status_landed_in_window=*/true,
-                                                        /*link_looks_up=*/true) == false,
-               "landed, link up -- not a timeout");
-    TEST_CHECK(safety_link_status_wait_is_real_timeout(/*status_landed_in_window=*/true,
-                                                        /*link_looks_up=*/false) == false,
-               "landed, link (implausibly) reported down -- a frame arriving still can't be a timeout");
+    TEST_CHECK(safety_link_status_push_gap_observed(/*frames_received_before=*/100u,
+                                                     /*frames_received_after=*/101u) == false,
+               "advanced by one -- healthy, not a gap");
+    TEST_CHECK(safety_link_status_push_gap_observed(/*frames_received_before=*/100u,
+                                                     /*frames_received_after=*/104u) == false,
+               "advanced by several (multiple drains caught multiple pushes) -- still not a gap");
 }
 
-static void test_status_wait_miss_on_healthy_link_is_not_a_timeout(void)
+static void test_push_gap_frames_received_unchanged_is_a_gap(void)
 {
-    TEST_SECTION("safety_link_status_wait_is_real_timeout -- a coincidental phase miss on a healthy "
-                 "link must read healthy, not as a failure (the exact defect this fix closes)");
+    TEST_SECTION("safety_link_status_push_gap_observed -- zero growth across a whole iteration is "
+                 "the real partial-loss signal this fix restores (finding 5)");
 
-    TEST_CHECK(safety_link_status_wait_is_real_timeout(/*status_landed_in_window=*/false,
-                                                        /*link_looks_up=*/true) == false,
-               "no frame in this specific window, but safety_link_up_locked() says the peer is "
-               "alive -- must NOT count as a timeout");
-}
-
-static void test_status_wait_miss_on_dead_link_is_a_real_timeout(void)
-{
-    TEST_SECTION("safety_link_status_wait_is_real_timeout -- a genuinely dead peer must still count");
-
-    TEST_CHECK(safety_link_status_wait_is_real_timeout(/*status_landed_in_window=*/false,
-                                                        /*link_looks_up=*/false) == true,
-               "no frame in the window AND the age-based liveness check also says down -- real timeout");
+    TEST_CHECK(safety_link_status_push_gap_observed(/*frames_received_before=*/100u,
+                                                     /*frames_received_after=*/100u) == true,
+               "no new STATUS applied anywhere this iteration -- a real gap");
 }
 
 void run_test_safety_link(void)
@@ -505,7 +500,6 @@ void run_test_safety_link(void)
     test_build_identity_unknown_before_or_after_is_not_evidence();
     test_build_identity_real_change_is_evidence();
     test_reboot_confirmed_requires_both_boot_id_and_build_identity();
-    test_status_wait_frame_landed_is_never_a_timeout();
-    test_status_wait_miss_on_healthy_link_is_not_a_timeout();
-    test_status_wait_miss_on_dead_link_is_a_real_timeout();
+    test_push_gap_frames_received_advanced_is_not_a_gap();
+    test_push_gap_frames_received_unchanged_is_a_gap();
 }

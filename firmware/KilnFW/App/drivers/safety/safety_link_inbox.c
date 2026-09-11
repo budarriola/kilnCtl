@@ -797,36 +797,42 @@ esp_err_t safety_exchange(SafetyLinkClass *link, const uint8_t *request, size_t 
                 safety_unlock(link);
             }
         } else {
-            /* No STATUS landed inside this specific window. For GET_STATUS
-             * that is NOT, by itself, evidence the peer is gone (see this
-             * function's header comment and safety_link_status_wait_is_real_
-             * timeout()'s own doc comment, safety_link.h): a perfectly
-             * healthy link whose independent 500 ms push phase simply falls
-             * outside this window produces the exact same observation, and
-             * before this fix that miscounted every single one of those as a
-             * failure (docs/audits/
-             * safety_link_get_status_timeout_counter_2026-09-10.md).
-             * safety_link_up_locked() -- the same age-based check S6a/S6b
-             * key off, driven by the most recent valid frame of ANY type --
-             * is what actually knows whether the peer is there; only count
-             * this as a real stats.timeouts, and only report ESP_ERR_TIMEOUT
-             * to the caller, when that check agrees the link looks down. */
-            bool link_looks_up = false;
-            if (safety_lock(link)) {
-                link_looks_up = safety_link_up_locked(link);
-                safety_unlock(link);
-            }
-            if (safety_link_status_wait_is_real_timeout(false, link_looks_up)) {
-                if (safety_lock(link)) {
-                    link->stats.timeouts++;
-                    safety_unlock(link);
-                }
-                err = ESP_ERR_TIMEOUT;
-            }
-            /* else: the link's own liveness check says it is up -- this was
-             * a coincidental phase miss on an otherwise healthy link, not a
-             * failure. Leave err at ESP_OK (already set by the successful
-             * send above) and do not touch stats.timeouts. */
+            /* No STATUS landed inside this specific window. 2026-09-10,
+             * finding 4 (docs/audits/
+             * safety_link_get_status_timeout_counter_2026-09-10.md follow-up
+             * review): an earlier version of this fix gated `err` itself on
+             * safety_link_up_locked() so a phase-miss on an otherwise-up link
+             * returned ESP_OK -- that broke safety_link_ping()'s whole
+             * purpose. safety_link_up_locked() is a ~1500 ms (3-poll-period)
+             * age window; a peer that has gone silent 900 ms ago still reads
+             * "up" by that check, and safety_link_ping() exists precisely so
+             * a caller can ask "is anyone answering RIGHT NOW" as evidence
+             * INDEPENDENT of that age check -- gating ping's own result on
+             * the very thing it is meant to corroborate makes it stop being
+             * independent evidence at all. So: `err` is unconditionally
+             * ESP_ERR_TIMEOUT here, exactly as before any of this file's
+             * 2026-09-10 changes -- this call genuinely got no answer, and
+             * callers (safety_link_ping() and safety_poll_task()'s
+             * no_reply_streak) must be told that honestly.
+             *
+             * What must NOT happen is folding that back into stats.timeouts:
+             * for expect_status (GET_STATUS only, in practice), a miss here
+             * is not the failure signal it looks like -- see this function's
+             * header comment: the Pico never answers this request, so a miss
+             * is exactly as likely on a healthy link whose independent
+             * 500 ms push phase simply falls outside this specific ~345 ms
+             * window as it is on a dead one. Counting it unconditionally is
+             * the original bug (stats.timeouts climbing at the `sent` rate
+             * forever on a healthy link); gating it on safety_link_up_locked()
+             * (finding 5) makes it a strict subset of that boolean and blind
+             * to real partial loss, since a link still losing 2 of 3 pushes
+             * can still read "up" by that same 1500 ms window. Neither is
+             * counted here any more -- stats.timeouts is now written
+             * exclusively by safety_poll_task()'s per-iteration push-gap
+             * check (safety_link_poll.c), which measures elapsed-time-based
+             * push throughput instead of this call's own request-phase-
+             * dependent window. See that check's own comment. */
+            err = ESP_ERR_TIMEOUT;
         }
     } else {
         /* A peer that volunteers a status right after (e.g. after

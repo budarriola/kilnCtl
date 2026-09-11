@@ -160,7 +160,13 @@ def get_diagnostics_timing(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S)
     bench session with a scope. Returns ``{"display_flush_us": {...},
     "thermo_read_us": {...}, "link_reply_us": {...}}``, each with
     count/last/min/max/mean in microseconds (link_reply_us also carries
-    ``timeouts``, safety_link_stats_t's existing counter, not a new one);
+    ``timeouts``, safety_link_stats_t's existing counter, not a new one --
+    REDEFINED 2026-09-10, docs/audits/
+    safety_link_get_status_timeout_counter_2026-09-10.md and its follow-up
+    review: no longer a per-GET_STATUS-exchange miss count, which could
+    climb on a perfectly healthy link; now a count of ~500 ms poll
+    iterations that saw zero new STATUS frames applied anywhere, near zero
+    when healthy and rising only under real partial loss);
     count == 0 means that path has not run yet on this boot (min/mean are 0
     until then, not a real measurement)."""
     req = urllib.request.Request(_url(host, "/api/diagnostics/timing"), method="GET")
@@ -236,6 +242,11 @@ def get_heap_status(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> dic
             # count's doc comment). Also carries a `timeouts` sub-field --
             # NOT a separate counter, it is safety_link_stats_t's existing
             # `timeouts` field surfaced under this block for convenience.
+            # `timeouts` itself was redefined 2026-09-10 (docs/audits/
+            # safety_link_get_status_timeout_counter_2026-09-10.md and its
+            # follow-up review) from a per-GET_STATUS-exchange miss count to
+            # a per-poll-iteration push-gap count -- see that field's own
+            # doc comment in safety_link.h.
             result["link_reply_us"] = timing.get("link_reply_us")
 
     return result

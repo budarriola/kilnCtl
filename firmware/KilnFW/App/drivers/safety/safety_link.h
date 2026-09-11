@@ -520,39 +520,36 @@ static inline bool safety_drain_still_waiting(bool want_status, bool got_status,
     return false;
 }
 
-/* Pure decision: given whether a STATUS frame landed inside safety_
- * exchange()'s GET_STATUS wait window, and whether the link's own age-based
- * liveness check (safety_link_up_locked() -- the same one S6a/S6b key off,
- * driven by the most recent valid frame of ANY type, not by this specific
- * request) currently says the peer looks up, decide whether this exchange
- * should count as a real `stats.timeouts`. Extracted as its own pure,
- * host-testable predicate for the same reason safety_drain_still_waiting()/
- * safety_link_rollback_infer_outcome() are: the logic is worth pinning on
- * its own, without needing the FreeRTOS-timed send/wait cycle around it.
+/* Pure decision: given the total count of applied STATUS frames
+ * (safety_link_stats_t::frames_received) at the start and end of one
+ * safety_poll_task() iteration (~poll_period_ms, nominally matching the
+ * Pico's own free-running STATUS push period), decide whether that whole
+ * iteration observed a push "gap" -- zero new STATUS frames applied over an
+ * entire push period, via ANY drain path, not just this iteration's own
+ * GET_STATUS wait window. Extracted as its own pure, host-testable
+ * predicate for the same reason safety_drain_still_waiting()/safety_link_
+ * rollback_infer_outcome() are.
  *
  * Why this exists, 2026-09-10 (docs/audits/
- * safety_link_get_status_timeout_counter_2026-09-10.md): SAFETY_CMD_
- * GET_STATUS is NOT a request/reply pair (LINK_PROTOCOL.md "no longer a
- * poll") -- SaftyFW's link_task.c has no dispatch case for it at all, and
- * instead pushes STATUS unsolicited on its own free-running 500 ms clock.
- * Before this fix, "no frame landed inside this specific ~345 ms window"
- * was counted as a timeout unconditionally, which is not evidence of a dead
- * peer -- a perfectly healthy link whose independent 500 ms push phase
- * simply falls outside this particular window produces the exact same
- * observation. Because both clocks are free-running with no resync, a given
- * boot's phase offset stays essentially fixed for its whole life, so this
- * produced a permanent, bimodal ~0% or ~100% "failure" rate rather than a
- * real one -- measured live as `timeouts` climbing in lockstep with `sent`
- * (every single poll) for the entire session, with `link_reply_us.count`
- * frozen. `safety_link_up_locked()` is what actually knows whether the peer
- * is there; only count a real timeout when it agrees. */
-static inline bool safety_link_status_wait_is_real_timeout(bool status_landed_in_window,
-                                                             bool link_looks_up)
+ * safety_link_get_status_timeout_counter_2026-09-10.md and its follow-up
+ * review): SAFETY_CMD_GET_STATUS is NOT a request/reply pair -- the Pico
+ * never answers it, it just pushes STATUS on its own free-running 500 ms
+ * clock -- so "no frame landed inside safety_exchange()'s own ~345 ms wait
+ * window" is phase-dependent noise, not a link-health signal (a first
+ * attempt at this fix gated that per-exchange miss on safety_link_up_
+ * locked(), which just made the counter a strict, less-sensitive subset of
+ * that existing 1500 ms boolean, blind to a link genuinely losing e.g. 2 of
+ * every 3 pushes while still reading "up"). This predicate instead measures
+ * real push throughput over elapsed wall time, independent of any single
+ * request's phase: on a healthy link, frames_received should advance by at
+ * least one every ~poll_period_ms via SOME drain (the exchange's own wait,
+ * an opportunistic pre-drain, or an idle-tick drain) even when this
+ * iteration's own GET_STATUS wait missed; a genuinely lossy link shows
+ * whole iterations with zero growth. */
+static inline bool safety_link_status_push_gap_observed(uint32_t frames_received_before,
+                                                          uint32_t frames_received_after)
 {
-    if (status_landed_in_window) {
-        return false; /* a frame arrived -- not a timeout by any measure */
-    }
-    return !link_looks_up;
+    return frames_received_after == frames_received_before;
 }
 
 /* Per-request ACK timeout handed to uart_protocol_send. Deliberately much
@@ -936,19 +933,40 @@ typedef struct {
     uint32_t frames_received;
     uint32_t frame_errors;    /* malformed/unexpected payloads seen by this driver,
                                * plus uart_owner's line-error count for UART1 */
-    uint32_t timeouts;        /* requests that produced no usable answer (no ACK,
-                               * a NACK, or an ACK with no status frame behind it).
-                               * For GET_STATUS specifically (the only expect_
-                               * status=true command -- safety_link_ping()/the
-                               * periodic poll), a miss inside the wait window is
-                               * only counted here when safety_link_up_locked()
-                               * ALSO says the peer looks down; see safety_
-                               * exchange()'s (safety_link_inbox.c) and safety_
-                               * link_status_wait_is_real_timeout()'s own doc
-                               * comments (2026-09-10 fix, docs/audits/
-                               * safety_link_get_status_timeout_counter_2026-09-10.md)
-                               * for why a raw window-miss alone is not evidence
-                               * of a dead peer on this push-only command. */
+    uint32_t timeouts;        /* REDEFINED 2026-09-10 (docs/audits/
+                               * safety_link_get_status_timeout_counter_2026-09-10.md
+                               * and its follow-up review). NO LONGER "requests
+                               * that produced no usable answer" -- that
+                               * definition was only ever meaningful for
+                               * SAFETY_CMD_GET_STATUS in practice (the only
+                               * expect_status=true command), and GET_STATUS is
+                               * not a request/reply pair: the Pico never
+                               * answers it, so counting a per-exchange miss
+                               * either produced a permanent, bimodal ~0%/~100%
+                               * artifact (the original bug) or, gated on
+                               * safety_link_up_locked(), a strict subset of
+                               * that existing 1500 ms boolean blind to real
+                               * partial loss (finding 5). Neither is counted
+                               * here any more; safety_exchange() (safety_link_
+                               * inbox.c) no longer touches this field at all.
+                               *
+                               * Now written exclusively by safety_poll_task()
+                               * (safety_link_poll.c): incremented once per
+                               * poll iteration (~poll_period_ms, nominally
+                               * matching the Pico's own free-running STATUS
+                               * push period) whose START-to-END span saw ZERO
+                               * new STATUS frames applied via ANY drain path
+                               * -- not just that iteration's own GET_STATUS
+                               * wait window, so it is not phase-locked to this
+                               * side's own request timing the way the old
+                               * definition was. See safety_link_status_push_
+                               * gap_observed()'s (this header) own doc comment
+                               * for the full reasoning: near zero on a healthy
+                               * link, rises with real partial loss, and
+                               * distinguishable from safety_link_up_locked()
+                               * (which only trips after a full 1500 ms of
+                               * silence) because this counts individual lossy
+                               * periods, not a single age threshold. */
     uint16_t poll_period_ms;  /* current period; 0 = polling off */
     /* 2026-08-23, the DIAG-frame-went-dark investigation, continued: real,
      * monotonic "this frame type was successfully applied N times" counts --
@@ -1111,14 +1129,18 @@ typedef struct {
      *
      * A miss inside the window (safety_drain_inbox_for_status() returns
      * false) contributes to none of these fields -- there is no frame to
-     * time -- and, since the 2026-09-10 fix, is only added to the `timeouts`
-     * field above when safety_link_up_locked() also says the peer looks
-     * down (see that field's own doc comment and safety_exchange()'s
-     * implementation, safety_link_inbox.c); no separate link_reply_timeouts
-     * counter exists, since that would just duplicate `timeouts` under this
-     * feature's own name (LINK_PROTOCOL.md's own "reuse, don't duplicate"
-     * convention -- see get_heap_status's/the diagnostics/timing endpoint's
-     * use of `timeouts` for this purpose). */
+     * time -- but, since the 2026-09-10 follow-up review, no longer
+     * increments `timeouts` either: that field is redefined (see its own
+     * doc comment above) to measure real elapsed-time push loss from
+     * safety_poll_task(), not this call's own request-phase-dependent miss,
+     * and `err` is returned as ESP_ERR_TIMEOUT from THIS call unconditionally
+     * on a miss so safety_link_ping() stays independent evidence (finding 4
+     * -- gating the return value on safety_link_up_locked() made a "ping"
+     * that could report success against a peer that had gone silent up to
+     * 1500 ms ago, laundering the very age check it exists to corroborate).
+     * No separate link_reply_timeouts counter exists here either, since a
+     * per-exchange miss count would just reintroduce the original
+     * phase-locked artifact under a new name. */
     uint32_t link_reply_us_count;
     uint32_t link_reply_us_last;
     uint32_t link_reply_us_min;
@@ -1293,6 +1315,16 @@ typedef struct {
     /* 2026-08-20 congestion fix -- see SAFETY_LINK_BACKOFF_MAX_STREAK's
      * comment. Poll-task-only, no lock needed. */
     uint8_t             no_reply_streak;
+
+    /* 2026-09-10, finding 5 fix: the per-iteration push-gap detector's own
+     * baseline. Poll-task-only, no lock needed -- same convention as
+     * no_reply_streak above; only safety_poll_task() ever reads or writes
+     * these. push_gap_baseline_valid is false until the first iteration has
+     * taken a baseline snapshot (there is nothing to compare the very first
+     * reading against). See safety_link_status_push_gap_observed()'s doc
+     * comment and stats.timeouts' own doc comment for what this drives. */
+    uint32_t            push_gap_baseline_frames_received;
+    bool                push_gap_baseline_valid;
 
     uint32_t fault_sources;        /* bitwise OR of safety_fault_source_t */
     bool     fault_on_link_loss;   /* policy: raise SAFETY_FAULT_SRC_SAFETY_LINK

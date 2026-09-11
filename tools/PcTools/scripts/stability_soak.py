@@ -30,7 +30,16 @@ a separate call nobody remembers to make):
     coverage (see --firing-in-progress below).
   * safety link stats (crc_errors, timeouts, broadcast_dropped)  -- flat
     counters, not the absolute values, are the pass criterion: this link
-    has never been observed reset these to zero
+    has never been observed reset these to zero. `timeouts` was redefined
+    2026-09-10 (docs/audits/safety_link_get_status_timeout_counter_2026-09-10.md
+    and its follow-up review): it no longer counts per-GET_STATUS-exchange
+    misses (which could climb on a perfectly healthy link, a known false-
+    positive risk this script's flat-not-absolute criterion was already
+    written defensively against) -- it now counts ~500 ms poll iterations
+    that saw zero new STATUS frames applied anywhere, which stays at zero
+    on a healthy link and only climbs under real partial loss. The "flat is
+    healthy" assumption below is unchanged and, if anything, more reliable
+    now than before this redefinition.
   * safety GET_STATUS / GET_DIAG (warn_mask, trip_mask, link_up, boot_id)
     -- any NEW bit vs. the first sample's baseline is unexpected; a bit
     already set at the first sample (expected: S5, no safety thermocouple

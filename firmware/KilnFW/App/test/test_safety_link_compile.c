@@ -1498,16 +1498,24 @@ static void test_link_reply_us_records_a_matched_exchange(void)
 // check.md). This exercises the real "no matching reply" path -- the
 // request is sent successfully but nothing answers -- and pins that
 // link_reply_us must NOT advance in that case (the exchange has nothing to
-// time), while the existing `timeouts` counter still does. Manually
-// confirmed this test fails if safety_link_inbox.c's timeout branch is
-// changed to increment link_reply_us_count/link_reply_us_last instead of
-// (or in addition to) stats.timeouts -- i.e. this is not a vacuous check
-// against a mirror, it pins the real production correlation.
+// time).
+//
+// UPDATED 2026-09-10 (finding 5, the follow-up opus review on docs/audits/
+// safety_link_get_status_timeout_counter_2026-09-10.md): this test used to
+// also pin that a miss advances `stats.timeouts` by 1 directly from
+// safety_exchange(). That is no longer true, deliberately -- stats.timeouts
+// is now written exclusively by safety_poll_task()'s per-iteration push-gap
+// check (safety_link_poll.c), which this file's own header comment
+// documents as out of scope (it needs the real FreeRTOS-timed loop, not
+// just this one safety_exchange() call). safety_exchange() itself no longer
+// touches stats.timeouts at all -- see that field's own doc comment
+// (safety_link.h) and safety_exchange()'s implementation (safety_link_
+// inbox.c) for why.
 static void test_link_reply_us_not_recorded_when_nothing_answers(void)
 {
     TEST_SECTION("safety_exchange() -- REGRESSION PIN: a request that is sent but never "
-                 "answered must NOT advance link_reply_us (there is no reply to time); it "
-                 "must still advance the existing stats.timeouts counter, not a new one");
+                 "answered must NOT advance link_reply_us (there is no reply to time), and "
+                 "must NOT touch stats.timeouts either (that counter moved to safety_poll_task())");
 
     reset_link_reply_us_test_state();
     SafetyLinkClass link = make_link();
@@ -1523,8 +1531,45 @@ static void test_link_reply_us_not_recorded_when_nothing_answers(void)
     TEST_CHECK(link.stats.link_reply_us_count == 0,
                "link_reply_us_count is untouched -- no matched reply to time");
     TEST_CHECK(link.stats.link_reply_us_last == 0, "last is untouched (still its zeroed initial value)");
-    TEST_CHECK(link.stats.timeouts == 1,
-               "the EXISTING timeouts counter records this, not a new/duplicate counter");
+    TEST_CHECK(link.stats.timeouts == 0,
+               "safety_exchange() no longer increments timeouts at all -- that accounting "
+               "moved to safety_poll_task()'s elapsed-time push-gap check");
+}
+
+// Negative-test companion, finding 4 (same follow-up review): an earlier
+// version of this fix gated safety_exchange()'s returned `err` on safety_
+// link_up_locked(), so a miss on a link that still read "up" by that ~1500 ms
+// age check returned ESP_OK -- silently laundering safety_link_ping() into a
+// restatement of the age check it exists to independently corroborate. This
+// pins the fix: even with the link reading UP (ever_received=true,
+// cached_tick=0 -- see this file's own "xTaskGetTickCount() always returns 0"
+// header comment a few tests up), a miss must still report ESP_ERR_TIMEOUT.
+// Manually confirmed this test fails if the miss branch is changed back to
+// `if (!safety_link_up_locked(link)) { err = ESP_ERR_TIMEOUT; }`.
+static void test_exchange_timeout_is_reported_even_when_link_reads_up(void)
+{
+    TEST_SECTION("safety_exchange() -- REGRESSION PIN (finding 4): a miss reports "
+                 "ESP_ERR_TIMEOUT even when safety_link_up_locked() would say the link is up -- "
+                 "safety_link_ping() must stay independent evidence, not a restatement of the age check");
+
+    reset_link_reply_us_test_state();
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+    link.ever_received = true;
+    link.cached_tick = 0; // reads as age 0 under the stub tick clock -- link reads UP
+    link.poll_period_ms = 500;
+
+    TEST_CHECK(safety_link_up_locked(&link) == true,
+               "sanity check: this link genuinely reads up by the age-based liveness check");
+
+    s_stub_broadcast_send_succeeds = true;
+    s_stub_broadcast_reply_push = false; // nothing lands in the inbox this exchange
+
+    const uint8_t request[] = { SAFETY_CMD_GET_STATUS };
+    esp_err_t err = safety_exchange(&link, request, sizeof(request), true);
+
+    TEST_CHECK(err == ESP_ERR_TIMEOUT,
+               "a miss is reported as a timeout regardless of the link's age-based liveness state");
 }
 
 int g_test_failures = 0;
@@ -1561,6 +1606,7 @@ int main(void)
     test_link_loss_during_update_denies_heat_end_to_end();
     test_link_reply_us_records_a_matched_exchange();
     test_link_reply_us_not_recorded_when_nothing_answers();
+    test_exchange_timeout_is_reported_even_when_link_reads_up();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;
