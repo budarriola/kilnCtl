@@ -369,3 +369,281 @@ captured and checked against Criterion A.
   scale and zone stacking context cited in candidate discussions.
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+
+---
+
+# Review, 2026-09-11 — RECOMMENDATION (B) REFUTED BY DATA ALREADY ON HAND
+
+**Adversarial review of the above. Do not act on §3's recommendation.** Analysis only: no board
+touched, nothing flashed, no heating run, no `.kicad_*` file touched, no firmware or config
+changed. Read-only `control_get_zones` was the only board call made.
+
+**Headline:** the load-bearing claim in §1B/§3 — that a total-power superlinear loss term is
+*structurally invisible* in single-column operation — is **false for the single-column data this
+project has actually captured**. The four-point z2-alone discriminator
+(`z2_single_column_superlinearity_discriminator_2026-09-11.md`) swept a total power that
+**brackets and exceeds** the joint plateau's, and found the ΔT0/duty ratio flat. A term that is
+monotone increasing in total power cannot be zero at a higher total power and 33% at a lower one.
+Class (B) is refuted, for any `k_loss` and any `gamma_total > 1`, without needing a new run.
+
+## R1. The total-power arithmetic (the decisive point)
+
+`P_total = sum_i( u_i * coil_power_w[i] )`. Two preliminaries:
+
+- **`coil_power_w` has no value anywhere in this repo or on the live board.** It was added at
+  `ZONES_CFG_VERSION` 24->25 and no audit, preset, or readback records a non-zero figure;
+  `zones_config_json.c:397` and `zones_http_post_parse.c:295` both treat `0.0f` as *unset*. So
+  `P_total` cannot be evaluated in watts today at all — a fact §1B should have stated, since it
+  is the very scalar class (B) is defined on. The comparison below is therefore done in
+  **duty-share** terms, which is sufficient because only the *ratio* of the two `P_total` values
+  matters.
+- **`mains_voltage_v` is not part of this arithmetic.** It is read once from Pico config and used
+  solely to derive expected CT current (`zones_current_sweep_engine.c:371`); it never scales
+  delivered thermal power in any model. Its live value is `120`
+  (`esp_bring_up_to_head_2026-09-10.md`, `cplval45_scale_vs_offset_2026-09-10.md`,
+  `coupling_joint_identification_capture_2026-09-10.md`); the `240` in
+  `safety_commissioning_completion_2026-09-09.md` is the superseded commissioning value. The doc
+  above states `120` correctly. Either way it cancels out of the comparison.
+
+**The joint plateau that produced the 33% deficit** (`947709a8`) held
+`u = [0.163, 0.210, 0.247]`, so `sum u = 0.620`.
+
+**The single-column discriminator** (`cf1f8ce9` / `1b9afd4f`) drove **z2 alone** at
+`u2 = 0.237, 0.547, 0.530, 0.920`, so `sum u = 0.237, 0.547, 0.530, 0.920`.
+
+Assuming equal per-zone coil power `P` (corroborated below):
+
+| condition | `sum u` | `P_total / P` | `P_total` vs joint | ΔT0/duty |
+|---|---|---|---|---|
+| single-column L1 | 0.237 | 0.237 | **0.38x** | 22.7 |
+| single-column L3 | 0.530 | 0.530 | **0.86x** | 21.5 |
+| single-column L2 | 0.547 | 0.547 | **0.88x** | 22.5 |
+| **joint (33% deficit)** | **0.620** | **0.620** | **1.00x** | — (deficit 33%) |
+| single-column L4 | 0.920 | 0.920 | **1.48x** | 21.9 |
+
+**The single-column sweep spanned 0.38x to 1.48x the joint case's total power. Its top point
+carried 48% MORE total power than the joint plateau where the 33% deficit was measured.** On the
+~4 W fixture (`project_bench_is_a_4w_test_fixture`, ~1.33 W/zone) that is ~1.22 W single-column
+against ~0.83 W joint. **A pure total-power term must therefore have shown up in the
+single-column sweep, larger there than in the joint case. It did not: the ratio was flat within
+5% (22.7 / 22.5 / 21.5 / 21.9), non-monotonic, and the highest-power point had a *lower* ratio
+than the lowest-power point by less than its own noise band.**
+
+**Quantitatively, calibrating class (B) to the observed effect** — pick `k_loss` so the deficit is
+exactly 33% at `P_total = 0.620`, with `gamma_total = 4/3` (deficit fraction `= k * P^(1/3)`,
+giving `k = 0.387`):
+
+| `sum u` | class-B predicted deficit | class-B predicted ΔT0/duty (normalised at L1) | measured |
+|---|---|---|---|
+| 0.237 | 23.9% | 22.7 | 22.7 |
+| 0.530 | 31.3% | 20.5 | 21.5 |
+| 0.547 | 31.7% | 20.4 | 22.5 |
+| 0.920 | 37.6% | **18.61** | **21.9** |
+
+Class (B) predicts the ratio falls **17%** across the sweep; the measurement moves **3.5%**, in
+the wrong direction, inside noise. At L4 class (B) predicts `ΔT0 = 17.12 °C` against a measured
+`20.19 °C` — a **3.1 °C** miss, six times the 0.5 °C not-worth-chasing floor and far outside that
+point's ≤5% uncertainty band.
+
+**This refutation does not depend on `gamma_total = 4/3`, or on `k_loss`, or on the allocation
+rule.** Any `P^gamma` with `gamma > 1` gives a deficit fraction monotone increasing in `P_total`.
+Calibrating it to 33% at `P_total = 0.620` forces a deficit **strictly greater than 33%** at
+`P_total = 0.920`. The single-column data shows ~0% there. The contradiction is structural.
+
+**Sensitivity to unequal coils.** The only escape is if z2's coil is much weaker than z0's/z1's.
+Solving `0.920*P2 < 0.163*P + 0.210*P + 0.247*P2` gives `P2 < 0.554 * P` — z2's element would
+have to be under 56% of the others'. Nothing in this repo claims that, and the live diagonal
+argues against it: `coupling_diag_k_dc = 42.73 / 32.40 / 33.85 °C/duty` (`control_get_zones`,
+read live this session) puts z2 *above* z1. Since `k_dc = P_coil * R_th`, making `P2` half of
+`P1` would require z2's thermal resistance to be ~1.8x z1's — an unevidenced extra assumption
+introduced solely to rescue the hypothesis.
+
+**Where §1B's reasoning goes wrong.** §1B argues the term is "already absorbed into the single
+column's own measured `model_k_dc`". Absorption into a *gain* is only possible if the term is
+**linear** in that zone's duty — i.e. `gamma_total = 1`, which by construction produces no
+joint/single discrepancy at all. The moment `gamma_total > 1` the term is no longer absorbable
+and appears as **curvature in ΔT-per-duty**, which is precisely the quantity the discriminator
+measured at four levels. §1B conflates "absorbable into a gain" with "nonlinear", and in doing so
+asserts a blindness that the actual experiment did not have. The discriminator was not a
+single-column *identification* (which would indeed be blind); it was a single-column *ratio
+sweep*, which is exactly the right instrument for this term.
+
+**Second, independent contradiction from existing data.** Class (B) is monotone in `P_total`, so
+its deficit must be *largest* at the highest joint total power. The 62-75 °C plateaus
+(`b64fe09d`) carry joint totals of ~1.13-1.57 — roughly 2x the 0.620 point — and there the linear
+model failed in the **opposite** direction. §2 records this as merely "not explained by any
+candidate". It is stronger than that for class (B) specifically: it is a **sign contradiction at
+the operating point where B's own effect should dominate**. §3 nonetheless recommends B while
+parking the reversal behind a possible mixed-provenance artifact. Even granting that escape hatch
+in full, R1 above stands on its own and does not need it.
+
+**Verdict on §3: refuted.** `P_loss = k_loss * max(0, P_total)^gamma` is not a viable model class
+for this discrepancy. Whatever produces the joint-only deficit is **not a function of total power
+alone** — it must depend on *how* the power is distributed. That is class (C)'s defining property
+(and, in a different form, class (A)'s), so the ranking in §2/§3 should be considered inverted by
+this review: the evidence points away from B and toward mechanisms that vanish when a single zone
+carries the whole load.
+
+## R2. `gamma = 4/3` reuse — not justified; a familiar number recycled
+
+Plainly: **no.** Three separate problems, only the first of which the doc acknowledges at all.
+
+1. **Wrong independent variable.** `Nu ~ Ra^(1/3)` gives `h ~ ΔT^(1/3)` and hence
+   `Q ~ ΔT^(4/3)` — a law in **temperature difference**. §1B applies the same exponent to
+   **power**, `P_total^(4/3)`. These agree only if `ΔT ∝ P_total`, i.e. only if the plant is
+   linear — the very thing under dispute. Transplanting the exponent across that substitution is
+   not a "physical prior"; it is dimensional coincidence.
+2. **Wrong mechanism for the constraint it must satisfy.** The 4/3 free-convection law describes
+   loss from a surface at a given excess temperature, *however that temperature was produced*. An
+   enclosure-skin loss term is therefore exactly the kind of term the single-column sweep **does**
+   see — and that sweep took z2 to 63.1 °C and z0 to 51.9 °C, well *above* the joint plateau's
+   43-44 °C. The physical picture offered in §1B actively undercuts §1B's own invisibility claim,
+   independently of R1's arithmetic.
+3. **Provenance.** The exponent's only citation in this repo is
+   `z0_buoyant_coupling_term_proposal_2026-09-10.md`, whose mechanism was **refuted on hardware**
+   (`z2_single_column_superlinearity_discriminator_2026-09-11.md`, four-point null result). §3
+   reason 1 explicitly counts "fixed by a physical prior ... as `z0_buoyant_coupling_term_proposal`
+   already did" as an argument *for* B's parsimony — i.e. it converts a refuted hypothesis's
+   parameter into a free parameter saved. That is not parsimony; the prior carries no evidential
+   weight here. The doc correctly marks buoyancy refuted in its own preamble, which makes the
+   reuse in §3 harder to defend, not easier.
+
+Note also that at a 13 °C rise over ~30 °C ambient on a ~4 W fixture, *any* convective/radiative
+loss nonlinearity is small: over 303 K -> 316 K a `T^4` radiative law is nearer `~ΔT^1.0` in
+excess-temperature terms across this span. A 33% effect is not plausibly enclosure-loss curvature
+at this scale, quite apart from R1.
+
+## R3. Direction/sign — the doc is CORRECT here
+
+Checked, and it holds in the doc's favour. Over-prediction means the joint dwell reached a
+*lower* ΔT0 than `G*u` predicts, i.e. it needed *more* combined duty. An added loss term removes
+delivered heat, lowering predicted ΔT for the same duties, moving the prediction toward the
+observation. The sign is right and is not backwards.
+
+**The sign is simply not the binding constraint.** Classes (C) and (D) reproduce the same sign
+equally well (§1C, §1D), so sign agreement discriminates nothing among them. §3 reason 1 leans on
+"directly and simply produces the measured sign" as if it were selective. It is not.
+
+§3 reason 1 also claims B produces "the rough scale". **No fit was performed and `k_loss` is
+never computed anywhere in the doc** — the scale is asserted, not shown. R1 above appears to be
+the first time the term has been evaluated numerically, and doing so is what refutes it.
+
+## R4. The §4 experiment — partly already run, mis-specified at the high level, and underpowered
+
+**(a) Its class-B arm is already answered.** Allocation 1 (`[U_total, 0, 0]`) *is* a single-column
+plateau, and §4 says so ("already have this class of data"). Combined with R1, the B-vs-nothing
+comparison has already been made at four total-power levels and came out negative. Running it
+again is not discriminating; it is confirmatory of a result already in hand.
+
+**(b) Identity slip.** §4's allocation 1 is written `[U_total, 0, 0]` — **z0-alone**. The
+four-point ratio data is **z2-alone**, and z0 is the *top* zone with nothing above it while z2 is
+the *bottom* (`project_zone_physical_arrangement`). "Already have this class of data" is true for
+z2-alone, not for z0-alone. Either the allocation should be written `[0, 0, U_total]` or the claim
+should be dropped.
+
+**(c) Two of the six plateaus are unrunnable as specified.** §4 step 2 sets the high level at
+`U_total ~ 1.6-2.0`. Allocation 1 then commands a single zone at duty **1.6-2.0** — impossible.
+Allocation 2 at `U_total = 2.0` commands **1.0 / 1.0**, both at the rail, with zero PID headroom,
+so it cannot settle to a meaningful converged duty either. Only allocation 3 is feasible at the
+high level; that row of the design collapses to one usable cell.
+
+**(d) The discrimination tolerance is understated by 2-3x.** §4 adopts `947709a8`'s ±0.3-0.5 °C
+**coefficient-noise** bound as the acceptance band. That bound covers coefficient uncertainty
+only. The dominant per-plateau term is missing: converged PID duty dither is 0.03-0.04
+(`z2_single_column_superlinearity_discriminator_2026-09-11.md`, "Measurement uncertainty"), and
+propagating 0.03 through `[c00, c01, c02] = [42.73, 25.42, 22.15]` over a 3-poll average gives
+**±0.94 °C** on the predicted ΔT0 alone. Add the ≤0.46 °C ambient-reference term and the
+≤0.2-0.3 °C anchor uncertainty and a realistic **per-plateau** figure is **~1.1-1.3 °C**; comparing
+two plateaus is ~1.5-1.8 °C. The stated band is not the right yardstick.
+
+**(e) Underpowered for its own class-C signature.** §4 claims allocation 3 ("three active pairs")
+should show a "measurably larger" deficit than allocation 2 ("one active pair"). Doing the
+arithmetic §4 omits: at fixed `U_total`, allocation 2's bilinear sum is `(U/2)^2 = U^2/4`;
+allocation 3's is `3*(U/3)^2 = U^2/3`. The ratio is **1.33x, not 3x.** If allocation 3 carries the
+whole measured 4.3 °C, allocation 2 carries ~3.2 °C, so **the class-C signature is a ~1.1 °C
+difference** — at or below the ~1.5-1.8 °C two-plateau uncertainty from (d). With n=1 per cell and
+six cells (four usable, per (c)), the design has roughly **0.6-0.7σ** of separation on the very
+comparison it is built to make. **Not adequately powered.** It would need replication (2-3
+plateaus per allocation) and/or a more extreme allocation contrast (e.g. `[U/2, U/2, 0]` versus
+`[0, U/2, U/2]` versus a strongly uneven three-way split), which separate *which pair* rather than
+*how many* and give much larger signal ratios.
+
+**(f) Ambient confound is not the limiting factor**, to be fair to §4: the ~0.035 row-independent
+ambient term is bounded at ≤0.46 °C against a 4.3-4.5 °C effect, and §4's fixed-`U_total`,
+same-session design makes it largely common-mode across allocations. It is (d)'s duty-dither term
+and (e)'s small signature, not ambient and not the 2.9% coefficient repeatability, that sink the
+power budget.
+
+**(g) What survives.** The allocation-sweep *idea* — vary the split at fixed total — remains the
+right instrument, and R1 strengthens the case for running it, because R1 says the mechanism must
+depend on the split. It should be re-specified as a **class-A / class-C** discriminator at a
+single feasible total (~0.6-0.9, matching the point where the 33% is already measured), with
+replicated plateaus and pair-identity contrasts, and the `U_total ~ 1.6-2.0` row dropped.
+
+## R5. Overstatement, uncited numbers, and contradictions with established facts
+
+Hypothesis written as conclusion:
+
+- **§1B**: "a superlinear-in-total-power loss is already larger than three separate linear
+  single-zone loss terms would predict, which is precisely 'the joint case needs more combined
+  duty than the columns imply'". Stated as established. It is an unfitted hypothesis, and per R1
+  a false one.
+- **§3 reason 1**: "produces the *measured* sign and rough scale". The scale was never computed.
+- **§3 reason 2**: "structurally consistent with why the single-column discriminator saw nothing —
+  the *cleanest* fit to the one hard constraint every candidate must satisfy." This is the exact
+  claim R1 refutes; B is in fact the **only** listed candidate that the existing single-column
+  data actively contradicts. (C) and (D) satisfy the constraint trivially and correctly.
+
+Uncited / incorrect numbers:
+
+- **"~33% at ΔT≈45C total" (§0 and §4).** No source says this. The 33% was measured at
+  **ΔT0 = 13.28 °C** (absolute 43.53 °C, ambient 30.25 °C) — `947709a8`. The "45" appears to be
+  `b64fe09d`'s joint hold **target of 45.4 °C absolute**, read as a ΔT. Two different quantities
+  from two different runs.
+- **The joint total duty (§4 step 2, §5).** §4 anchors the low level at "~0.51 ... matching
+  `coupling_joint_identification_capture`'s low-ΔT hold duties 0.1499+0.1728+0.1853", and §5
+  repeats "the one measured joint-hold total of ~0.51". But the **33% deficit was measured at a
+  different plateau**: `u = [0.163, 0.210, 0.247]`, `sum u = 0.620` (`947709a8`). The doc
+  attributes the deficit to the 0.508 hold. This matters directly — 0.620 is the number class (B)
+  must be evaluated at, and it is the number R1 uses.
+- **"c02 2.9% week-over-week" (§0).** `947709a8` states the two measurements were **one day
+  apart**, not a week. Propagated mislabel.
+- **Source filename wrong, twice** (§0 preamble and Sources): cited as
+  `docs/audits/single_column_superlinearity_discriminator_2026-09-11.md`; the file is
+  `docs/audits/z2_single_column_superlinearity_discriminator_2026-09-11.md`. The `z2_` prefix is
+  load-bearing — it is what makes slip (b) above visible.
+
+Consistency with established facts — checked, and the doc is **correct** on: buoyancy refuted
+(stated plainly, not hedged); single-column transport linear; superposition failing by ~33%; zone
+stacking (z0 top, z2 bottom) cited correctly in §1; and candidate (D) honestly flagged as
+unfalsifiable on this bench rather than ranked on thin evidence. §2's refusal to paper over the
+sign reversal, and §5's conclusion that no validated bounded region exists, are both sound and
+should be kept as written. The 0.5 °C floor is respected throughout — the effects under discussion
+(4.3-4.5 °C, and R1's 3.1 °C miss) are all well above it, and the ≤0.46 °C ambient term is
+correctly set aside rather than chased.
+
+## R6. Summary
+
+| Point | Verdict |
+|---|---|
+| §1B/§3 invisibility claim | **Refuted.** Single-column swept 0.38x-1.48x the joint total power; ratio flat. |
+| §3 recommendation of class (B) | **Refuted**, independent of `gamma` and `k_loss`. Do not adopt. |
+| `gamma = 4/3` reuse | **Not justified.** Wrong variable, wrong mechanism, refuted provenance. |
+| Sign/direction of the loss term | **Correct**, but non-selective — (C) and (D) match it too. |
+| §4 experiment | Class-B arm already answered; high-power row infeasible; **~0.6-0.7σ, underpowered**. |
+| §2 "sign reversal unexplained" | Correct, and **stronger against (B) than stated** — a sign contradiction at (B)'s own worst case. |
+| §5 bounded-region analysis | Sound; keep. |
+
+**Recommended next step (design only, nothing run here):** treat "the deficit depends on how total
+power is split, not on the total" as the surviving finding, and re-specify §4 as a replicated
+class-A / class-C allocation contrast at a single feasible total near `sum u ~ 0.62`, sized
+against a ~1.1-1.3 °C per-plateau uncertainty rather than ±0.3-0.5 °C.
+
+Reviewed against: `docs/audits/joint_vs_singlecolumn_matched_dT0_2026-09-11.md` (`5844a3e8`,
+`947709a8`), `docs/audits/z2_single_column_superlinearity_discriminator_2026-09-11.md`
+(`cf1f8ce9`, `1b9afd4f`), `docs/audits/coupling_joint_identification_capture_2026-09-10.md`
+(`b64fe09d`), `docs/audits/cplval75_coupling_verdict_2026-09-10.md`,
+`docs/audits/z0_buoyant_coupling_term_proposal_2026-09-10.md`, and a live read-only
+`control_get_zones`.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
