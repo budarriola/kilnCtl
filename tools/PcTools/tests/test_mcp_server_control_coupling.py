@@ -129,14 +129,38 @@ class ControlGetZonesCouplingTest(unittest.TestCase):
         self.assertIn("z2: [8.33, 12.42, 0]", result)
 
     def test_diag_k_dc_zero_means_unmeasured_not_zero_gain(self):
+        """Flag reads as compiled FALSE here (patched) -- the "not currently
+        used" branch. See test_diag_k_dc_reflects_flag_compiled_true below
+        for the other branch: this tool must never hardcode either value
+        (docs/audits/coupling_measured_diag_flag_audit_2026-09-11.md found
+        exactly that mistake -- a hardcoded "compiled false" string survived
+        the flag actually flipping true and moving files)."""
         p1, p2, p3 = self._patch(_zones_json())
-        with p1, p2, p3:
+        with p1, p2, p3, unittest.mock.patch.object(
+            mc, "_read_coupling_use_measured_diag_k_dc_compiled_value",
+            unittest.mock.Mock(return_value=False),
+        ):
             result = mc.control_get_zones()
         self.assertIn("z0=0.0 (never identified on hardware)", result)
         self.assertIn("z1=0.0 (never identified on hardware)", result)
         self.assertIn("z2=9.5000", result)
-        self.assertIn("s_coupling_use_measured_diag_k_dc is compiled false", result)
+        self.assertIn("zone_coupling_use_measured_diag_k_dc() is compiled false", result)
         self.assertIn("not currently used", result)
+
+    def test_diag_k_dc_reflects_flag_compiled_true(self):
+        """Negative test for the hardcoded-string class: prove the renderer
+        actually reads the live compiled value rather than always printing
+        "false" -- flip the patched value to True and confirm the rendered
+        text changes to match, instead of repeating the stale claim."""
+        p1, p2, p3 = self._patch(_zones_json())
+        with p1, p2, p3, unittest.mock.patch.object(
+            mc, "_read_coupling_use_measured_diag_k_dc_compiled_value",
+            unittest.mock.Mock(return_value=True),
+        ):
+            result = mc.control_get_zones()
+        self.assertIn("z2=9.5000", result)
+        self.assertIn("zone_coupling_use_measured_diag_k_dc() is compiled true", result)
+        self.assertNotIn("compiled false", result)
 
     def test_TRANSPOSED_mapping_is_caught_by_this_test(self):
         """Negative test (required by feedback_negative_test_every_check):

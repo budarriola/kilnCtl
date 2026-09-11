@@ -13,11 +13,13 @@ import json
 import math
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
@@ -83,6 +85,48 @@ def _control_resolve_host(host: Optional[str]) -> str:
     return ota_http.OTA_AP_DEFAULT_HOST
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+_COUPLING_SOLVE_C_PATH = (
+    _REPO_ROOT
+    / "firmware"
+    / "KilnFW"
+    / "App"
+    / "drivers"
+    / "control"
+    / "zone_coupling_solve.c"
+)
+#: Matches the body of `zone_coupling_use_measured_diag_k_dc()` well enough to
+#: pull out its `return true;`/`return false;` -- tolerant of whitespace so a
+#: reformat doesn't silently stop matching (in which case
+#: `_read_coupling_use_measured_diag_k_dc_compiled_value()` returns None and
+#: callers fall back to "unknown", never to a stale guess).
+_COUPLING_USE_MEASURED_DIAG_RE = re.compile(
+    r"zone_coupling_use_measured_diag_k_dc\s*\(\s*void\s*\)\s*\{\s*return\s+(true|false)\s*;",
+    re.DOTALL,
+)
+
+
+def _read_coupling_use_measured_diag_k_dc_compiled_value() -> Optional[bool]:
+    """Derive the CURRENT compiled value of
+    `zone_coupling_use_measured_diag_k_dc()` by reading it straight out of
+    `zone_coupling_solve.c` at call time, rather than hardcoding a copy of a
+    value that lives in firmware source and has already gone stale here once
+    (see docs/audits/coupling_measured_diag_flag_audit_2026-09-11.md). This
+    reads whatever source tree this PC tool checkout has on disk -- not
+    necessarily what a given board was actually flashed with -- so the
+    caller should describe it as "compiled in this source tree", not "on the
+    board". Returns None if the file is missing or the function's shape no
+    longer matches (never guesses)."""
+    try:
+        text = _COUPLING_SOLVE_C_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    m = _COUPLING_USE_MEASURED_DIAG_RE.search(text)
+    if not m:
+        return None
+    return m.group(1) == "true"
+
+
 def _describe_coupling_matrix(zones_json: dict) -> str:
     """Render the coupling matrix from a GET /api/zones JSON body.
 
@@ -110,17 +154,35 @@ def _describe_coupling_matrix(zones_json: dict) -> str:
             for c in cells
         )
         lines.append(f"  z{i}: [{cells_str}]")
+    use_measured_diag = _read_coupling_use_measured_diag_k_dc_compiled_value()
+    if use_measured_diag is None:
+        flag_desc = (
+            "zone_coupling_use_measured_diag_k_dc() compiled value unknown -- "
+            f"could not read/parse {_COUPLING_SOLVE_C_PATH}"
+        )
+    else:
+        flag_desc = (
+            "zone_coupling_use_measured_diag_k_dc() is compiled "
+            f"{'true' if use_measured_diag else 'false'} in this source tree "
+            "(read live from zone_coupling_solve.c, not hardcoded here)"
+        )
     diag_bits = []
     for i, z in enumerate(zones):
         k_dc = z.get("coupling_diag_k_dc")
         if k_dc == 0.0:
             diag_bits.append(f"z{i}=0.0 (never identified on hardware)")
-        else:
+        elif use_measured_diag:
             diag_bits.append(
-                f"z{i}={k_dc:.4f} (measured, but firmware's "
-                "s_coupling_use_measured_diag_k_dc is compiled false -- not "
-                "currently used even though present)"
+                f"z{i}={k_dc:.4f} (measured; used as the coupled matrix's "
+                f"diagonal when {flag_desc} and provenance passes)"
             )
+        elif use_measured_diag is False:
+            diag_bits.append(
+                f"z{i}={k_dc:.4f} (measured, but {flag_desc} -- "
+                "not currently used even though present)"
+            )
+        else:
+            diag_bits.append(f"z{i}={k_dc:.4f} (measured; usage gated by {flag_desc})")
     lines.append("coupling_diag_k_dc: " + "  ".join(diag_bits))
     return "\n".join(lines)
 
