@@ -1,6 +1,89 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-10, roadmap-upkeep audit
+> **Status:** planning · **Last reviewed:** 2026-09-11, roadmap-upkeep audit
+> (thirteenth sweep) — doc-reconciliation pass over today's findings, no
+> hardware touched, no firmware behaviour changed. Verified against the
+> named commits and audit docs, not against this list's own prose.
+> - **Coupling model class, not just the coefficients, is the defect** — this
+>   sharpens, not reopens, the eleventh sweep's refutation. `fd8d7b93`
+>   re-ran the 62-75 C under-prediction test against the fresh column-by-
+>   column matrix (not the old mixed-provenance one) and **all nine
+>   zone/plateau cells still under-predict, ~9-31%**. The sign reversal
+>   against the low-level ~33% *over*-prediction is confirmed **real and
+>   still unexplained** — do not assume the fresh matrix will resolve it.
+>   `8ee40a7b`/`763acbdc` proposed and then **refuted** a total-power
+>   superlinear enclosure-loss term from data already on hand (a single-
+>   column sweep reached 1.48x the joint case's total power with a flat
+>   response — refutes any gamma>1 for this signature). The surviving
+>   signature is that the deficit tracks **how power is split across zones,
+>   not the total power drawn**. Also found in the same pass: `coil_power_w`
+>   is `0.0f`/unset everywhere in the firmware, so total power in watts
+>   cannot be evaluated at all today — a "consumer without producer"
+>   instance, not yet fixed. Net effect on the eighth-through-twelfth
+>   sweeps' buoyancy hypothesis (z0 fitted exponent 1.366, "leading
+>   hypothesis: buoyant transport into the top zone, superlinear in
+>   delta-T", still stated further down this file): buoyancy was already
+>   refuted on hardware before today (single-column transport measured
+>   linear, `cf1f8ce9`/`1b9afd4f`/`5844a3e8`/`947709a8`) and the superlinear-
+>   power alternative is refuted now — **neither surviving hypothesis
+>   explains the z0 shape error**; treat every "buoyant"/"superlinear"
+>   phrase below this line as a retired hypothesis, not a live one. The
+>   defect is the model class (`G*u = b`, additive duty-driven off-
+>   diagonals), not a coefficient — unchanged conclusion, now with a second
+>   eliminated alternative.
+> - **`s_coupling_use_measured_diag_k_dc` arbitrates nothing on this board**
+>   (`ef8a374f`): it compiles **true**, not false, and has moved to
+>   `zone_coupling_solve.c`; the live diagonals already match the measured
+>   constants to 3-4 significant figures. Any doc or MCP diagnostic string
+>   still claiming this flag is `false` is stale — a PC-side MCP string with
+>   that claim is being fixed in a separate pass, do not touch it here.
+> - **`sim_iter_tune` A1 pin's exit condition was unfalsifiable, now fixed**
+>   (`645551c2`, stale operator banners fixed by `250a0fef`): the old
+>   condition ("when the coupling re-identification lands") was satisfiable
+>   on a false trigger. A1 measured today at **24/660 (3.64%)**, unchanged
+>   from the number quoted elsewhere in this file — the fix changes what the
+>   pin *means*, not today's measured value.
+> - **Fuzzy controller: confirmed still running plain PID on the bench**
+>   (`7e669c18`) — `control_mode=3` but `fuzzy_strength_pct=0.0` on all
+>   three live zones, which per `pid_fuzzy_adjust()`'s own contract
+>   reproduces base PID bit-for-bit. No closed-loop simulation exercises the
+>   fuzzy path at all. The one hardware capture that did exercise it
+>   (`fuzzy_ab_20260904d` arm B1, referenced in §3.6f below) is a single,
+>   unpaired-A-arm run with 100% of its samples falling in one of the rule
+>   table's nine cells — insufficient to characterize the layer, not just
+>   "one capture short." **Two new owner requirements, not yet designed
+>   against:** (1) the fuzzy controller must not ship with parameters tuned
+>   on this bench fixture — it must bootstrap from the PID autotune result
+>   on the *installed* kiln and keep adapting over heat cycles, because the
+>   bench is a ~4 W/120 V fixture capped ~40 C above ambient while a real
+>   kiln reaches ~1200 C where radiation dominates and both k and tau fall
+>   ~20x from the bench-fitted values; (2) any controller change is to be
+>   tested in simulation first, which today's finding shows the current sim
+>   harness cannot do for the fuzzy path — this is a new, currently-unmet
+>   prerequisite for further fuzzy work, see
+>   `firmware/KilnFW/docs/PID_EXPANSION_PLAN.md` §10.
+> - **Two unexplained Pico reboots at heat start: closed pending recurrence,
+>   NOT root-caused** (`26505ce6`) — downgrades the eleventh/twelfth
+>   sweeps' "remain unexplained" to a specific, falsifiable leading
+>   candidate: most likely `link_task`'s stack overflow already fixed by
+>   `c27484a2` (the SaftyFW stack-budget fix from the tenth sweep). The
+>   direct `scratch[5]` evidence that would have confirmed this
+>   self-erased, so this is not proven — treat as closed-pending-recurrence,
+>   watch for a recurrence post-`c27484a2` before calling it fixed. A
+>   relay-inrush brownout at the same moment remains undiscriminated: there
+>   is no brownout detector distinct from the watchdog bit.
+> - **RP2040 fault-hook diagnostics audited on the source, still unverified
+>   on hardware** (`8267fab2`) — this is a narrowing, not a reversal, of the
+>   "never been verified on hardware" claim below: all 3 in-scope bits have
+>   real producers in code, but the producer-to-consumer chain has **never
+>   been observed end-to-end on hardware**. `BOOT_BROWNOUT` is now confirmed
+>   **dead** (no detector backs it — consistent with the brownout gap noted
+>   above). A mirror-drift check was itself found missing the three fatal-
+>   fault bits and has been fixed. `relay_owner` and `watchdog_task` remain
+>   on the bare 256-word minimum stack, unrelated to this finding but noted
+>   in the same audit.
+>
+> **Reviewed before that:** 2026-09-10, roadmap-upkeep audit
 > (twelfth sweep, updated in place after a same-day correction) — commits
 > landed since the eleventh sweep (`dd67ec7e`, corrected by `e5b7fff9`).
 > Verified against code and git history, not against a commit message's own

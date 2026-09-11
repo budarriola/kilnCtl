@@ -5842,3 +5842,38 @@ failed 4 checks with the exact expected/actual values quoted (`got 0.0000,
 want 35.3200`, plus the three round-trip checks) — reverted by hand,
 `git diff` on the production file empty. Full suite: 32/32 host-test
 executables built and passed after the fix and after the revert.
+
+## 10. Fuzzy-controller scoping and new owner requirements (2026-09-11)
+
+`7e669c18` re-confirmed §3.6f's finding with a live readback: the board runs
+`control_mode=3` (`ZONE_CONTROL_MODE_PID_FUZZY`) but `fuzzy_strength_pct=0.0`
+on all three zones, which is `pid_fuzzy_adjust()`'s own documented
+bit-for-bit-equal-to-base-PID short circuit — **the board runs plain PID
+today, not fuzzy-adjusted PID.** No closed-loop simulation exercises the
+fuzzy path at all (`plant_sim.py` and friends never call `pid_fuzzy_adjust`
+in a closed loop — only the host unit tests in `test_pid_fuzzy.c` drive it
+directly, open-loop). The one hardware capture that did run a nonzero
+strength (`fuzzy_ab_20260904d` arm B1, §3.6f) is a single, unpaired-A-arm
+run with 100% of its samples landing in one of the rule table's nine cells —
+insufficient to characterize the layer's behavior, let alone tune it.
+
+**Two new owner requirements as of this date, neither designed against
+yet:**
+1. The fuzzy controller must not ship with parameters trained on this bench
+   fixture. It must bootstrap from the PID autotune result on the
+   *installed* kiln and continue adapting over subsequent heat cycles.
+   Rationale: this bench rig is a ~4 W/120 V fixture capped near 40 C above
+   ambient, while a real kiln reaches ~1200 C where radiation dominates and
+   both the plant gain `k` and time constant `tau` fall roughly 20x from
+   their bench-fitted values — any rule table or gain schedule tuned on
+   bench data would be tuned against the wrong plant.
+2. Controller changes are to be tested in simulation first. Finding (this
+   date): the current simulation harness has no closed-loop path that
+   exercises `pid_fuzzy_adjust()` at all, so this requirement is currently
+   **unmet** for the fuzzy layer specifically — a prerequisite for any
+   further fuzzy work is building that closed-loop sim path, not merely
+   running the existing open-loop host tests.
+
+Neither requirement is scoped into a task list yet; treat both as open
+blockers ahead of any further fuzzy-strength tuning work, bench or
+simulated.
