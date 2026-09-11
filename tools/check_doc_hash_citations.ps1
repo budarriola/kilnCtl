@@ -47,6 +47,25 @@
   no other-submodule or parent fallback. An unknown `sub:` name, an
   uninitialized/missing submodule, or a hash that does not resolve in the
   named submodule are all reported as failures -- never silently swallowed.
+  The `sub:` token requires a `\b` word boundary before it (so "notsub:lvgl"
+  does NOT trigger it -- same widening class as the fabricated-marker fix
+  below) and must sit with NO whitespace between the name and the backtick
+  (`sub:lvgl`85aa60d1`` -- not `sub:lvgl \`85aa60d1\``); the two were
+  mismatched in an earlier revision of this fix (pattern allowed whitespace,
+  this comment said "immediately") and are now both the stricter, no-space
+  form.
+
+  KNOWN LIMITATION shared with the fabricated marker below: prose that
+  quotes the `sub:<name>`\`hash\` or `fabricated`\`hash\` syntax ITSELF
+  (e.g. a doc explaining this convention, as this comment block does) would
+  be parsed as a real citation/exclusion if it lived in a scanned *.md file.
+  This script does not parse fenced/inline code spans specially. Not
+  believed to bite in practice -- doc prose describing these markers has so
+  far always done so without the fully-formed backtick-hash token in
+  scannable *.md prose (this very explanation lives in a .ps1 comment, which
+  is not scanned) -- but a future doc author demonstrating the syntax in a
+  *.md file should break the example (e.g. insert a space or use a
+  non-hex/short placeholder) rather than write a literal working token.
 
   This replaced an earlier design (added in 79d93233) that tried EVERY
   initialized submodule automatically before failing any unresolved hash,
@@ -126,7 +145,7 @@ $KnownNonHashFalsePositives = @(
     @{ File = 'hardware/mainBoard/todo.md'; Hash = '74269244182' }          # ferrite bead MPN
 )
 
-$hashPattern = '(\b(?i:fabricated)\s+)?(?:(?i:sub):([A-Za-z0-9_.\-]+)\s*)?`([0-9a-f]{7,40})`'
+$hashPattern = '(\b(?i:fabricated)\s+)?(?:\b(?i:sub):([A-Za-z0-9_.\-]+))?`([0-9a-f]{7,40})`'
 $failures = @()
 $totalCitations = 0
 $excludedFabricated = 0
