@@ -168,6 +168,15 @@ the board can sit cold on the bench the whole time. It tests each pole
 independently, because they are independent circuits and either one can be
 wrong while the other reads perfectly healthy.
 
+**This fixture, 2026-09-10: pole 1 is permanently unwired, by owner
+decision** (`docs/HARDWARE.md` §5.1 "Decision, 2026-09-10"). Step 2's pole 1
+check below cannot pass here and is not expected to — skip it, and confirm
+`estop_verified` on pole 2 alone: the pole-2 read/debounce/trip/relay-command
+chain is what "checked and acted on" means for this fixture, and it is what
+`test_estop_deenergizes_relay.c` proves. Do not fabricate a pole 1 result to
+satisfy step 2's wording. A future rewiring of this fixture to add pole 1
+would restore the full procedure below unchanged.
+
 1. **Power up normally**, E-stop **not** pressed. Confirm the board is idle
    and no guard is tripped (`/safety` or `GET /api/status`).
 2. **Press and hold the E-stop.**

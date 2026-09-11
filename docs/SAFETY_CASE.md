@@ -54,7 +54,7 @@ mitigates it beyond operator diligence).
 | H4 shock during service | **P:** physical isolation, TVS/current-limiting on input rails (`hardware/mainBoard/Power.kicad_sch`), K4 mechanical contactor | Standard practice, not re-verified as part of this pass — hardware review, out of scope here. Accepted as adequately covered by physical design, not by firmware. |
 | H5 both processors agree falsely | **G:** dual-processor design itself — KilnFW's relay-authority gate (`relay_authority_on_blocked()`) and SaftyFW's independent guard set are separate codebases reading separate sensors | **A (accepted risk).** No cross-check exists that either processor's "healthy" verdict is *correct* rather than merely self-consistent — e.g. both could be reading a shared, physically-faulted thermocouple wire (H9). Not designed against; documented, not solved. |
 | H6 link loss unnoticed | **R:** KilnFW's link-loss watchdog drops relays and asserts `SAFETY_FAULT_SRC_PC_LINK` (opt-in, default OFF for the PC link; unconditional relay-drop). **CommonFW link protocol:** SaftyFW's own liveness split — soft trip at 1.5s (blocks new heat-on), hard 30s firing-abort (`LINK_PROTOCOL.md` §8, wired 2026-09-04, `profile_executor.c:1201-1236`, pinned by `test_safety_link.c:77-92`) | The 30s firing-abort is **host-test-pinned but not hardware-verified** — nobody has held the link down on the bench and watched it with a stopwatch (ROADMAP.md, "Blocked on hardware that does not exist yet": "Time the link-staleness ceiling... Code is flashed; nobody has held the link down"). SaftyFW cannot react to a *live* E-stop/fault report from the Pico either way — that path is one-directional today (`SAFETY_MODEL.md`, "Nothing on the main board reacts to a safety-processor-reported E-stop or fault"). |
-| H7 E-stop unreachable | **G:** S7, GPIO9 debounced 50ms, normally-closed wiring (cut cable/pulled connector/press all read as stop) | **Disagreement resolved in code, not yet in wiring**: the E-stop *polarity* bug (S7 inverted, shipped and fixed 2026-08-24, `discrete_pin_policy.c`) is closed and negative-tested. But **no physical E-stop button or deliberate jumper is fitted on a freshly-built board** (`HARDWARE.md` §5: "no jumper is currently fitted anywhere on the estop net in the schematic"). The bench board today reads GPIO9 **low** (healthy/closed) only because *something* is bridging the net physically — not because a button or documented jumper is present. **This means the E-stop input on the bench is not actually being exercised by a physical stop action**; it is present-and-quiet, not tested-and-quiet. |
+| H7 E-stop unreachable | **G:** S7, GPIO9 debounced 50ms, normally-closed wiring (cut cable/pulled connector/press all read as stop); firmware also independently commands `relay_owner` into TRIPPED on assertion, pinned end-to-end by `firmware/SaftyFW/test/test_estop_deenergizes_relay.c` | **Resolved in code and closed by owner decision on wiring.** The E-stop *polarity* bug (S7 inverted, shipped and fixed 2026-08-24, `discrete_pin_policy.c`) is closed and negative-tested. A contact is physically fitted on this bench board (GPIO9 confirmed LOW/healthy 2026-09-08, superseding the earlier "no jumper fitted" note — `HARDWARE.md` §5). The double-pole design's pole 1 (hardware-interrupting the line contactor coil, `HARDWARE.md` §5.1) will **not** be wired on this fixture — owner decision 2026-09-10, "consider it closed so long as the signal is checked and acted on" — so the E-stop here is **firmware-mediated only**: it depends on the safety processor running and reaching the trip path, unlike a wired pole 1 which cuts power regardless of firmware state. Immaterial on this ~4 W/120 V fixture (`HARDWARE.md` §5.1); a real kiln installation should still wire pole 1. |
 | H8 bad OTA leaves unsafe state | **R:** both update paths refused unless idle and cool (`SAFETY_MODEL.md`-adjacent update interlocks); `flash_firmware()`'s post-flash verify (tooling, not firmware) | The specific item "link-loss heating block **not** bypassed during a Pico update" is **pinned in CI (2026-09-04) but still OPEN as a hardware-exercise item** — "a test suite is not a substitute for running a real update while heat is nominally blocked and confirming it stays blocked" (ROADMAP.md M8/M13). Argued + host-tested only, not hardware-verified. |
 | H9 downstream-of-both-relays SPOF | none identified as closed | **A (accepted risk) — now concretized (§3 item 4a).** The relay stages are not literally one shared point; they are staged in series (contactor, then per-zone SSRs) and each is genuinely single-point for a different reason. The line contactor is the single point whose failure disables K4's *entire* real-world effect (every SaftyFW guard trip becomes cosmetic, not just S9's), while each per-zone SSR is the single point downstream of *both* authorities for that zone's element specifically (a stuck SSR keeps that element hot regardless of the ESP's own command, and is normally still caught by K4/contactor dropping — unless the contactor has *also* welded). Neither failure alone routinely causes uncontrolled heat; a welded contactor plus a welded/stuck SSR (or an ESP-side command left on with no independent overtemp backstop) does. No specific mitigation beyond K4 itself is documented, and this system's evidence for K4→contactor actually being wired as documented is schematic-derived, not bench-proven (§3 item 4a). |
 | H10 guard masked / unreachable | **Process, not a guard:** `GUARD_TEST_MATRIX.md` §6/§6a/§6c/§10 — an explicit, repeatedly-recomputed reachability audit | This is the one hazard with strong process evidence: as of §6c (2026-09-03), 11 of 14 implemented guards are structurally reachable; S1/S13/S14 are deliberately configured off (not bugs); S8 exists but is excluded from the denominator pending a measured ramp. S6a is reachable in source but **cannot be provoked by any current host fixture** (`virtual_dut`/SimFW were both removed 2026-08-28) — bench hardware is the only way to exercise it. See §5 below for the full evidence table. |
@@ -109,15 +109,17 @@ here; none is copied from an unverified summary.
    `GUARD_TEST_MATRIX.md` §6/§9 for the existing analysis, unchanged by this
    pass.
 
-3. **The E-stop input is not exercised by a physical stop action on a
-   freshly-built board.** Verified against `HARDWARE.md` §5 and the schematic
-   note: no jumper or button is documented as fitted on the `estop` net. The
-   *bench* board separately reads GPIO9 low (closed contact, healthy) —
-   confirmed by SWD readback 2026-08-24 — meaning some physical continuity
-   exists on that specific unit, but it is not documented as a real
-   button+cable able to demonstrate the open-on-press behavior on demand.
-   **This confirms the concern in the task brief**: the E-stop is present and
-   quiet, not press-tested.
+3. **Stale as of 2026-09-10 — superseded, see H7 above.** This item
+   originally read: "the E-stop input is not exercised by a physical stop
+   action on a freshly-built board... present and quiet, not press-tested."
+   That premise ("no jumper or button... documented as fitted") was itself
+   corrected 2026-09-08 (`HARDWARE.md` §5: a contact is physically fitted),
+   and `firmware/SaftyFW/README.md`'s bench verification procedure plus
+   `estop_verification.c`'s durable operator record now give pole 2 an actual
+   demonstrated press-to-open test, not an assumption. Pole 1 (the physical
+   interlock) will not be wired on this fixture — owner decision 2026-09-10,
+   see H7 — so it is never press-tested here by design, not by oversight;
+   that is the firmware-mediated-only consequence H7 states.
 
 4. **Current sensing can be disabled entirely** (`ct_installed = no`), a
    first-class, ASKED commissioning state (`GUARD_TEST_MATRIX.md` §9). On a
@@ -457,8 +459,9 @@ given).
 | S6a main-fault trip | argued | reachable in source (`safety_core.c:1073`) since the wiring commits; **cannot be provoked by any current host fixture** — needs bench hardware, permanently (no I2C-expander/opto emulation exists or is planned) |
 | S6b link-dead (both tiers) | host-tested | §2 provocation table (10s soft, 120s hard) |
 | S6b hardware | **not done** | §3.4 row unexecuted |
-| S7 E-stop trip logic | host-tested, negative-tested | `test_discrete_pin_policy.c`; polarity-inversion bug reintroduced and confirmed to fail 4+2 assertions, then restored (2026-08-24) |
-| S7 physical button/jumper | **argued only, contradicted by hardware note** | schematic says no jumper fitted; bench GPIO9 reads low by some undocumented continuity — not a demonstrated press-to-open test |
+| S7 E-stop trip logic | host-tested, negative-tested | `test_discrete_pin_policy.c`; polarity-inversion bug reintroduced and confirmed to fail 4+2 assertions, then restored (2026-08-24); relay-deenergize end-to-end pinned by `firmware/SaftyFW/test/test_estop_deenergizes_relay.c` |
+| S7 pole 2 (telemetry) press-test | bench-verified procedure + durable record | `firmware/SaftyFW/README.md` "Bench verification procedure"; `estop_verification.c`, gated by `estop_verified` on `/api/readiness` |
+| S7 pole 1 (physical interlock) | **not applicable to this fixture — closed by owner decision, not a gap** | owner, 2026-09-10: pole 1 will not be wired here; E-stop is firmware-mediated only on this fixture, `HARDWARE.md` §5.1 |
 | S8 rate-of-rise (pure logic + config wiring) | host-tested | `test_s8()`, `test_safety_core_s8_wiring.c`, 2026-09-03 |
 | S8 hardware / real threshold | **not done, and cannot be until a ramp is measured** | ROADMAP.md M3 |
 | S9 trip-ineffective escalation logic | host-tested | §2 provocation table |
@@ -490,8 +493,11 @@ guard 9's trip/priority path **and** its fault-clear path, corrected
 2026-09-04 — see the guard 9 row above), **3 hardware-verified** (S5's
 fit/masking finding, KilnFW guard 6, E-stop polarity fix), and the remaining
 **~8 explicitly marked "not done"** for hardware. What remains **argued
-only** is narrower than a previous pass of this table claimed: S6a's
-permanent hardware-only status and the E-stop jumper/button claim. Guard 9's
+only** is narrower than a previous pass of this table claimed, and now
+narrower still: S7's pole-2 press test is bench-verified (not argued), and
+S7's pole 1 is not a gap at all — closed 2026-09-10 as not applicable to this
+fixture (owner decision). What's left argued-only is S6a's permanent
+hardware-only status. Guard 9's
 fault-clear path is no longer argued-only — the underlying "never clears"
 defect it used to describe was fixed in `0d85dbb` (2026-08-27) and is now
 host-tested against the real function. KilnFW guards 1/2/3/4/5/6/7 are

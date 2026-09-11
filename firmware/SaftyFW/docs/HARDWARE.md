@@ -433,9 +433,18 @@ deliberate jumper to `GND_Safty`.
 > **That state is the DEFAULT and the preferred safe-to-fire state** (owner
 > decision 2026-09-08) — it is not a bypass to be worked around, and §5.1's
 > configurable polarity is defaulted so that this reading is *not* a fault
-> condition. What is still outstanding is the **switch itself**: with a plain
-> closed contact rather than a real E-stop, S7 cannot be exercised by pressing
-> anything. Fit the double-pole switch of §5.1 before relying on the E-stop.
+> condition.
+>
+> **CLOSED, 2026-09-10 — pole 1 will not be wired on this fixture.** Owner
+> decision, verbatim: "im not going to wire the double pole switch on the
+> fixture. consider it closed so long as the signal is checked and acted on."
+> §5.1's pole 1 (in series with the external line contactor coil) stays
+> permanently unwired here; §5.1's coverage table already states plainly what
+> that means and does not mean. The remaining bar — pole 2 read, debounced,
+> and acted on — is met and hardware-independently verified end to end by
+> `firmware/SaftyFW/test/test_estop_deenergizes_relay.c`; see §5.1 for the
+> safety consequence of skipping pole 1. This closes the "fit the double-pole
+> switch" action item below; do not re-open it for this fixture.
 >
 > Do not read the table above and assume the pin's state — read the pin. The
 > 2026-08-16 line above sat here wrong for three weeks, which is the same
@@ -519,6 +528,25 @@ line contactor** (§3) — S3 reports it and the current keeps flowing. And a
 board wired with pole 2 but *not* pole 1 leaves K4's own contact as the only
 barrier, which is exactly the single point of failure the series contact
 exists to remove.
+
+**Decision, 2026-09-10: pole 1 stays unwired on this fixture, permanently.**
+Owner, verbatim: "im not going to wire the double pole switch on the fixture.
+consider it closed so long as the signal is checked and acted on." Pole 2 plus
+the firmware response above is what this board runs on from here forward —
+verified by `firmware/SaftyFW/test/test_estop_deenergizes_relay.c` and by the
+bench-verification procedure in `firmware/SaftyFW/README.md` /
+`estop_verification.c`. The consequence, stated once and plainly rather than
+argued: **with pole 1 unwired, the E-stop is firmware-mediated only** — it
+depends on the safety processor actually running and reaching this trip path,
+where a hardware-interrupting series pole would cut power regardless of
+firmware state (a dead, crashed, unpowered or unprogrammed RP2040 defeats the
+firmware path but not a wired pole 1, per the coverage paragraph above). On
+this ~4 W, 120 V bench fixture (`CLAUDE.md`/memory: "Bench is a ~4 W test
+fixture") that gap is immaterial — the fixture cannot become dangerous even
+with the E-stop wholly inert, which is part of why heat runs on it are
+pre-authorized. **A real kiln installation is a different judgement and wants
+pole 1 wired in series with the contactor coil**, exactly as §5.1 designs it;
+this decision closes the item for this fixture only, not as general guidance.
 
 ### 5.2 Configurable polarity — and which failures each setting can see
 
