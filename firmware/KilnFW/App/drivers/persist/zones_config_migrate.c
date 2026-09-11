@@ -1018,6 +1018,41 @@ zones_decode_result_t zones_config_json_decode_blob(const void *blob, size_t len
             return ZONES_DECODE_CORRUPT;
         }
     } else {
+        /* Opus review finding 10 (2026-09-10): every OLDER-version branch
+         * discarded its own blob's crc32 unchecked before this fix -- the
+         * length-must-match-the-claimed-version check above is the only
+         * integrity gate a v1..v24 blob ever passed through, so a single
+         * flipped bit anywhere in range (a PID gain, say) migrates straight
+         * to the current layout and passes zones_config_json_validate()
+         * silently. This is a PRE-EXISTING gap this pass did not create,
+         * but ZONES_CFG_VERSION's 24->25 bump widens it immediately: a v24
+         * blob that used to take the `version == ZONES_CFG_VERSION` branch
+         * above (full CRC check) now takes THIS branch instead, with its
+         * own real, computable crc32 (zones_cfg_v24_t's tail field)
+         * discarded by case 24's converter same as every other case here.
+         * Closing that one immediately-widened step, narrowly, rather than
+         * every historical version at once: v1..v6 predate crc32 entirely
+         * (zones_cfg_t::crc32's own comment) and v7..v23 would need their
+         * own frozen-struct verification added one at a time, each a
+         * separate, independently reviewable change -- bundling all of them
+         * into this pass risks a copy-paste offset mistake in a codepath
+         * that, unlike a fresh corruption, has never been exercised by any
+         * existing test fixture for those versions. Documented here as the
+         * accepted, narrower scope rather than silently left same as before. */
+        if (version == ZONES_CFG_VERSION - 1) {
+            _Static_assert(offsetof(zones_cfg_v24_t, crc32) + sizeof(uint32_t) == sizeof(zones_cfg_v24_t),
+                           "zones_cfg_v24_t's CRC check below assumes crc32 is its last field");
+            uint32_t stored_crc = 0;
+            memcpy(&stored_crc, (const uint8_t *)blob + offsetof(zones_cfg_v24_t, crc32), sizeof(stored_crc));
+            static const uint8_t zero4[sizeof(uint32_t)] = {0};
+            uint32_t computed_crc =
+                esp_crc32_le(0, (const uint8_t *)blob, offsetof(zones_cfg_v24_t, crc32));
+            computed_crc = esp_crc32_le(computed_crc, zero4, sizeof(zero4));
+            if (computed_crc != stored_crc) {
+                *reason = "CRC mismatch on the stored v24 blob -- treating as corrupt rather than migrating it";
+                return ZONES_DECODE_CORRUPT;
+            }
+        }
         if (!convert_versioned_blob_to_current(version, blob, out)) {
             memset(out, 0, sizeof(*out));
             *reason = "unable to convert stored version to the current layout";

@@ -246,18 +246,28 @@ extern "C" {
 #define ZONE_MIN_ON_OFF_S_DEFAULT 30
 
 /* zone_cfg_t::coil_power_w (ZONES_CFG_VERSION 24->25, owner request: "allow
- * the user to enter different wattage for each coil"). 0 = SENTINEL, "not
- * overridden" -- the operator has only answered the single whole-kiln
- * max_expected_power_w nameplate question (safety_cfg_store's 0x0319,
- * safety_commissioning_page.html), and every coil is assumed identical, so
- * this zone's share is max_expected_power_w / relay_count (equal split --
- * see zones_config_get_coil_power_w()). A nonzero value here OVERRIDES that
- * equal share for this one zone, for a kiln with different-wattage
+ * the user to enter different wattage for each coil"). "Coil" here means
+ * THIS ZONE's heating element(s) taken together, not one physical relay
+ * (opus review finding 6, 2026-09-10): a zone's measured current is always
+ * one CT reading summing every relay in zone_cfg_t::relay_mask, so there is
+ * no per-relay measurement this field could ever be compared against --
+ * the comparison unit zone_sweep_check_expected_current() actually uses is
+ * per ZONE, matching what can actually be measured. A zone that drives two
+ * relays still has exactly one coil_power_w and one measured current.
+ *
+ * 0 = SENTINEL, "not overridden" -- the operator has only answered the
+ * single whole-kiln max_expected_power_w nameplate question
+ * (safety_cfg_store's 0x0319, safety_commissioning_page.html), and every
+ * zone is assumed identical, so this zone's share is max_expected_power_w
+ * / thermo_count (equal split across ZONES, never across relay_count --
+ * see zones_config_get_coil_power_w() and zone_sweep_expected_coil_
+ * current_a()'s own zone_count parameter). A nonzero value here OVERRIDES
+ * that equal share for this one zone, for a kiln with different-wattage
  * elements. Both modes must keep working together: an operator who
  * overrides zone 0 but leaves zones 1/2 at 0 gets an explicit figure for
  * zone 0 and an equal split of the (whole, still-summed) nameplate for the
  * other two -- NOT a re-split of some remaining "leftover" wattage, since
- * this board has no way to know the un-overridden coils are identical to
+ * this board has no way to know the un-overridden zones are identical to
  * each other rather than merely unspecified.
  *
  * MIN/MAX mirror the SUM field's own plausibility window (safety_

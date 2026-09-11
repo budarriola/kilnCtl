@@ -336,9 +336,29 @@ const char *zone_kct_derive_str(zone_kct_derive_t r)
  * are the same wattage and the nameplate is for the sum, AND allow a
  * per-coil override": an override (coil_power_w_override > 0, zone_cfg_t::
  * coil_power_w) always wins; otherwise this zone's expected share is the
- * whole-kiln sum split evenly across relay_count coils. Both modes are the
- * SAME function, not two separate code paths, so there is only ever one
- * place that can disagree with itself about which convention applies.
+ * whole-kiln sum split evenly across every ZONE (not every relay -- see
+ * this function's own comparison-unit note below). Both modes are the SAME
+ * function, not two separate code paths, so there is only ever one place
+ * that can disagree with itself about which convention applies.
+ *
+ * COMPARISON UNIT (opus review finding 6, 2026-09-10): the measurement this
+ * gets compared against (zones_config_get_normal_current(), the sweep's
+ * own zone_sweep_summed_normal_a()/per-channel path) is ALWAYS a whole
+ * ZONE's current -- one CT reading per zone, summing every relay
+ * zone_cfg_t::relay_mask commands together, with no way to see an
+ * individual relay's own share. So this function's divisor must be the
+ * ZONE count (thermo_count, the number of things a measurement exists
+ * for), never the RELAY count -- a zone with relay_mask driving two
+ * relays still has exactly one measured current, and "coil" in this
+ * feature's naming (matching the owner's own wording, and the schema
+ * field zone_cfg_t::coil_power_w) means "this zone's element(s) taken
+ * together," not "one physical relay." Naming this parameter zone_count,
+ * not relay_count, so the signature cannot silently drift back to the
+ * wrong divisor the way it briefly did before this note (the one call
+ * site, zones_current_sweep_task.c's zone_sweep_check_nameplate_all(),
+ * always passed thermo_count -- the disagreement was between the CORRECT
+ * call site and this function's own former name/comment, never a live
+ * bug in what was computed).
  *
  * I_expected = P_share / V is the exact formula CLAUDE.md's mains_voltage_v
  * warning describes (once commissioned at 240V on a 120V board, silently
@@ -348,14 +368,14 @@ const char *zone_kct_derive_str(zone_kct_derive_t r)
  * number in this firmware that answers "what mains voltage feeds this
  * board's P/V", never a second copy that could drift out of agreement with
  * it. */
-float zone_sweep_expected_coil_current_a(float coil_power_w_override, float sum_power_w, uint8_t relay_count,
+float zone_sweep_expected_coil_current_a(float coil_power_w_override, float sum_power_w, uint8_t zone_count,
                                           float mains_voltage_v)
 {
     float share_w;
     if (isfinite(coil_power_w_override) && coil_power_w_override > 0.0f) {
-        share_w = coil_power_w_override; /* explicit per-coil override wins */
-    } else if (relay_count > 0 && isfinite(sum_power_w) && sum_power_w > 0.0f) {
-        share_w = sum_power_w / (float)relay_count; /* equal-split default */
+        share_w = coil_power_w_override; /* explicit per-zone override wins */
+    } else if (zone_count > 0 && isfinite(sum_power_w) && sum_power_w > 0.0f) {
+        share_w = sum_power_w / (float)zone_count; /* equal-split default, split across ZONES */
     } else {
         return -1.0f; /* no usable nameplate at all -- negative is never a valid current */
     }

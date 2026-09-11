@@ -351,8 +351,14 @@ typedef enum {
 
 /* Pure decision, host-testable off-target -- see zones_current_sweep_engine.c
  * for the full derivation and why this reuses zone_sweep_derive_k_ct()'s own
- * ZONE_KCT_RATIO_MIN/MAX plausibility band rather than a new number. */
-float zone_sweep_expected_coil_current_a(float coil_power_w_override, float sum_power_w, uint8_t relay_count,
+ * ZONE_KCT_RATIO_MIN/MAX plausibility band rather than a new number.
+ * zone_count (opus review finding 6): the divisor for the equal-split
+ * default MUST be the number of zones (thermo_count), never a relay count
+ * -- a zone's measured current is always one CT reading for the whole
+ * zone (every relay in zone_cfg_t::relay_mask summed together), so the
+ * comparison unit is per-zone regardless of how many relays one zone
+ * drives. See the function's own doc comment for the full reasoning. */
+float zone_sweep_expected_coil_current_a(float coil_power_w_override, float sum_power_w, uint8_t zone_count,
                                           float mains_voltage_v);
 zone_nameplate_check_t zone_sweep_check_expected_current(float measured_a, float expected_a);
 const char *zone_nameplate_check_str(zone_nameplate_check_t r);

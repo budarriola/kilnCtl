@@ -1049,7 +1049,11 @@ function zoneBlock(z, i, relayCount, thermoCount) {
     '<input type="number" step="0.05" min="0" max="20" class="sanity" value="' + (z.sanity_rate_c_per_min || 0) + '">' +
     '<label>Coil nameplate power, W (0 = split the safety page\'s whole-kiln nameplate ' +
     'evenly across every coil)</label>' +
-    '<input type="number" step="1" min="0" max="100000" class="coilpower" value="' + (z.coil_power_w || 0) + '">' +
+    /* opus review finding 9: step must match ZONE_COIL_POWER_W_MIN (0.1W) --
+       step="1" made 0.1-0.99W unreachable even though the firmware accepts
+       it, and quantized this bench's own ~4W/3-zone case (~1.33W/zone,
+       smallest enterable override was 1W, a ~25% step) into invisibility. */
+    '<input type="number" step="0.1" min="0" max="100000" class="coilpower" value="' + (z.coil_power_w || 0) + '">' +
     '<div class="row2">' +
       '<div><label>Max temp &deg;C (0 = no ceiling) -- hard safety trip, no debounce</label>' +
       '<input type="number" step="1" class="maxtemp" value="' + (z.max_temp_c || 0) + '"></div>' +
@@ -1948,6 +1952,26 @@ function renderSweepStatus(st) {
     if (unmeasured.length) {
       text += ' -- zone ' + unmeasured.join(', ') + ' not measured -- re-sweep';
     }
+  }
+  /* Owner feature (2026-09-10): "cause a fault if much higher or lower than
+     expected" -- compares this same sweep's measured normal current against
+     what the nameplate (whole-kiln sum, or a per-coil override) implies it
+     should be. Opus review finding 7: this was computed and carried all the
+     way to this JSON with no page ever showing it -- an advisory nobody can
+     see is not advisory. Rendered here, same place/pattern as k_ct_reason
+     just above, because this IS a fault-style check -- just one this bench's
+     own current-sense chain cannot honestly arm as a Pico safety trip (see
+     zone_sweep_check_expected_current()'s own comment, zones_current_sweep_
+     engine.c, for why: an uncharacterized systematic offset, not noise, so
+     no sample count fixes it -- a real kiln's larger currents make that
+     offset negligible, which is exactly where this check is meant to bite). */
+  if (st.state === 'done' && typeof st.nameplate_mismatch_mask === 'number') {
+    var npzones = [];
+    for (var np = 0; np < 8; np++) { if (st.nameplate_mismatch_mask & (1 << np)) npzones.push(np + 1); }
+    text += npzones.length
+      ? ' -- nameplate check: zone ' + npzones.join(', ') + ' current disagrees with the nameplate (advisory, not a trip)'
+      : ' -- nameplate check: OK';
+    if (st.nameplate_reason) text += ' (' + st.nameplate_reason + ')';
   }
   msg.textContent = text;
   if (running && !sweepPollTimer) {
