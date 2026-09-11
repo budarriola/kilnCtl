@@ -198,6 +198,7 @@ esp_err_t relay_names_save(void);
 
 void zone_normals_load(void);
 bool zone_normals_set(uint8_t zone_index, float amps);
+bool zone_normals_invalidate_mask(uint8_t zone_mask);
 
 void zone_ct_map_clear(void);
 bool zone_ct_map_set(uint8_t ct_channel, uint8_t zone_index);
@@ -271,6 +272,24 @@ typedef struct {
      * means in each CT topology. */
     volatile uint8_t             i_normal_pushed_mask;
     volatile char                i_normal_reason[96];
+    /* Owner feature (2026-09-10): "set the nameplate value, find the normal
+     * current on first heat, cause a fault if much higher or lower than
+     * expected." This is a SEPARATE, ESP-side-only advisory check from
+     * i_normal_pushed_mask above -- that push arms the Pico's own S14/S15
+     * guards against the MEASURED value as their own baseline; this one
+     * compares the SAME measurement against what the operator's nameplate
+     * (whole-kiln sum, or a per-coil override -- zone_cfg_t::coil_power_w)
+     * IMPLIES the current should be, at commissioning time. Deliberately
+     * NOT wired to any Pico safety trip -- see
+     * zone_sweep_check_expected_current()'s own doc comment for why arming
+     * a hard fault here is refused on this bench specifically. Bit zi set
+     * in nameplate_mismatch_mask means zone zi's measured normal current
+     * disagreed with its nameplate-implied expectation by more than
+     * zone_sweep_check_expected_current()'s plausibility band; 0 means
+     * every checked zone was plausible (or nothing was checked --
+     * nameplate_reason says which). */
+    volatile uint8_t             nameplate_mismatch_mask;
+    volatile char                nameplate_reason[96];
     /* opus review finding (MEDIUM): see zone_sweep_status_t's identically-
      * named field in zones_config_accessors.h. */
     volatile uint8_t             summed_unmeasured_mask;
@@ -322,6 +341,21 @@ bool zone_sweep_derive_ct_channel(const float *per_ch_a, uint8_t *out_ch);
 zone_kct_derive_t zone_sweep_derive_k_ct(float measured_total_a, float expected_power_w, float mains_voltage_v,
                                          float k_old, float *out_k);
 const char *zone_kct_derive_str(zone_kct_derive_t r);
+
+typedef enum {
+    ZONE_NAMEPLATE_CHECK_OK = 0,
+    ZONE_NAMEPLATE_CHECK_NO_NAMEPLATE, /* no usable expected current -- nameplate/coil share/mains_v missing */
+    ZONE_NAMEPLATE_CHECK_NO_MEASUREMENT, /* this zone has no measured normal current yet */
+    ZONE_NAMEPLATE_CHECK_MISMATCH, /* measured current is implausible vs. the nameplate-implied expectation */
+} zone_nameplate_check_t;
+
+/* Pure decision, host-testable off-target -- see zones_current_sweep_engine.c
+ * for the full derivation and why this reuses zone_sweep_derive_k_ct()'s own
+ * ZONE_KCT_RATIO_MIN/MAX plausibility band rather than a new number. */
+float zone_sweep_expected_coil_current_a(float coil_power_w_override, float sum_power_w, uint8_t relay_count,
+                                          float mains_voltage_v);
+zone_nameplate_check_t zone_sweep_check_expected_current(float measured_a, float expected_a);
+const char *zone_nameplate_check_str(zone_nameplate_check_t r);
 
 /* zones_current_sweep_task.c defines this -- see its own doc comment. Exposed
  * here so host tests can drive the planning decision without a fake link. */

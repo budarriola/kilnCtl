@@ -129,7 +129,26 @@ static void zone_sweep_task_record_ct_channels(void *ctx, uint8_t zi, uint8_t re
          * derived straight from the shared channel and recorded here (the
          * only place with both per_ch_avg_a and zi in hand). */
         float with_on = per_ch_avg_a[ZONE_CT_CHANNEL_COUNT - 1];
-        if (!isnan(with_on)) {
+        if (isnan(with_on)) {
+            /* 2026-09-10 fix (finding: NaN sample -> incomplete total, no
+             * refusal): a NaN shared-CT sample used to fall straight through
+             * this whole branch WITHOUT setting summed_unmeasured_mask (that
+             * bit was only ever set in the below-idle-baseline case further
+             * down). zone_sweep_plan_k_ct_summed()'s only completeness guard
+             * is `summed_unmeasured_mask != 0` -- leaving it clear here let
+             * an incomplete measured_total_a (this zone's contribution never
+             * added) derive an arbitrarily wrong k_ct with no refusal, since
+             * a one-of-three-zones-missing total still lands inside
+             * ZONE_KCT_RATIO_MIN/MAX. Treat a NaN sample exactly like the
+             * below-idle case: record it as unmeasured so the operator sees
+             * which zone needs a re-sweep, and so the calibration refuses
+             * rather than silently derives from a hole in the total. */
+            ESP_LOGW(ZONES_HTTP_TAG,
+                     "zone %u: summed-CT reading with relay on was NaN -- treating as unmeasured, "
+                     "not persisting a normal",
+                     zi);
+            s_sweep.summed_unmeasured_mask |= (uint8_t)(1u << zi);
+        } else {
             float normal_a = 0.0f;
             /* 2026-09-10 fix (finding C): the shared channel's live,
              * committed k_ct_v_per_a -- 0.0f (zone_cfg_committed_f32
@@ -887,11 +906,34 @@ static void zone_sweep_push_k_ct_v_per_a(void)
             (void)zone_sweep_unstage_k_ct(staged_mask, prior_k, true, note, sizeof(note));
             plan_mask = 0;
         } else {
+            /* 2026-09-10 fix (finding: k_ct rescale vs. stale i_normal): a
+             * confirmed k_ct change invalidates every zone's stored
+             * normal_current_a that was measured under the OLD scale for
+             * this channel -- see zone_normals_invalidate_mask()'s own
+             * comment. Computed BEFORE zone_k_ct_set() below so "old scale"
+             * unambiguously means "before this write", and done for every
+             * confirmed channel even if k_new == prior_k (a no-op rescale
+             * is still cheap and keeps this path from depending on an exact
+             * float comparison to decide whether a guard stays armed). */
+            uint8_t stale_zone_mask = 0;
             for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
-                if ((plan_mask & (1u << c)) != 0) {
-                    (void)zone_k_ct_set(c, k_new[c]);
+                if ((plan_mask & (1u << c)) == 0) {
+                    continue;
                 }
+                if (s_ct_topology_summed) {
+                    /* One shared channel feeds every zone's amps -- see
+                     * zone_sweep_task_record_ct_channels()'s summed branch --
+                     * so a scale change here is stale for the whole board,
+                     * not just the zones this run happened to measure. */
+                    for (uint8_t zi = 0; zi < s_zones.cfg.thermo_count && zi < MAX31856_CHANNEL_COUNT; zi++) {
+                        stale_zone_mask |= (uint8_t)(1u << zi);
+                    }
+                } else if (s_ct_derive.zone_for_ch[c] < MAX31856_CHANNEL_COUNT) {
+                    stale_zone_mask |= (uint8_t)(1u << s_ct_derive.zone_for_ch[c]);
+                }
+                (void)zone_k_ct_set(c, k_new[c]);
             }
+            (void)zone_normals_invalidate_mask(stale_zone_mask);
         }
     }
 
@@ -1152,6 +1194,59 @@ static void zone_sweep_push_i_normal_a(void)
     s_sweep.i_normal_reason[sizeof(s_sweep.i_normal_reason) - 1] = '\0';
 }
 
+/* Owner feature (2026-09-10): compare every zone's already-measured normal
+ * current against what the nameplate (whole-kiln sum, or a per-coil
+ * override) implies it should be -- see zone_sweep_check_expected_current()'s
+ * own doc comment (zones_current_sweep_engine.c) for the full rationale,
+ * including why this is advisory-only and never escalated to a trip. Pure
+ * ESP-local bookkeeping (no link traffic), so it is safe to run regardless
+ * of whether zone_sweep_push_i_normal_a() above actually landed on the
+ * Pico -- the two features share a measurement, not a transaction. */
+static void zone_sweep_check_nameplate_all(void)
+{
+    float mains_v = 0.0f, sum_power_w = 0.0f;
+    bool have_mains = zone_cfg_committed_f32(ZONE_MAINS_VOLTAGE_PARAM_ID, &mains_v);
+    bool have_sum = zone_cfg_committed_f32(ZONE_MAX_POWER_PARAM_ID, &sum_power_w);
+    uint8_t mismatch_mask = 0;
+    char note[sizeof(s_sweep.nameplate_reason)];
+    note[0] = '\0';
+    uint8_t checked = 0;
+
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        if (zi >= s_zones.cfg.thermo_count) {
+            continue;
+        }
+        float coil_override = 0.0f;
+        (void)zones_config_get_coil_power_w(zi, &coil_override);
+        float expected_a = -1.0f;
+        if (have_mains && (have_sum || coil_override > 0.0f)) {
+            expected_a = zone_sweep_expected_coil_current_a(coil_override, sum_power_w,
+                                                             s_zones.cfg.thermo_count, mains_v);
+        }
+        float measured_a = 0.0f;
+        bool measured = false;
+        (void)zones_config_get_normal_current(zi, &measured_a, &measured);
+
+        zone_nameplate_check_t r =
+            zone_sweep_check_expected_current(measured ? measured_a : -1.0f, expected_a);
+        if (r == ZONE_NAMEPLATE_CHECK_MISMATCH) {
+            mismatch_mask |= (uint8_t)(1u << zi);
+        }
+        if (r != ZONE_NAMEPLATE_CHECK_OK) {
+            checked++;
+            if (note[0] == '\0') {
+                snprintf(note, sizeof(note), "zone %u: %.70s", (unsigned)zi, zone_nameplate_check_str(r));
+            }
+        }
+    }
+    if (mismatch_mask == 0 && note[0] == '\0' && checked == 0) {
+        snprintf(note, sizeof(note), "every measured zone agrees with its nameplate-implied current");
+    }
+    s_sweep.nameplate_mismatch_mask = mismatch_mask;
+    strncpy((char *)s_sweep.nameplate_reason, note, sizeof(s_sweep.nameplate_reason) - 1);
+    s_sweep.nameplate_reason[sizeof(s_sweep.nameplate_reason) - 1] = '\0';
+}
+
 static void zone_sweep_task_zone_done(void *ctx)
 {
     (void)ctx;
@@ -1242,6 +1337,10 @@ static void zone_sweep_task(void *arg)
          * k_ct push, same "one Pico-side staged buffer, one transaction at a
          * time" reasoning -- see zone_sweep_push_i_normal_a()'s own comment. */
         zone_sweep_push_i_normal_a();
+        /* Owner feature: nameplate-implied expected-current advisory --
+         * ESP-local, no link traffic, runs after the push above purely to
+         * keep every sweep-completion side effect together in one place. */
+        zone_sweep_check_nameplate_all();
         /* DONE goes up only AFTER the push has finished (opus review,
          * 2026-08-28). Setting it first left a window two link round trips
          * wide in which a status poll saw state=done with
@@ -1399,6 +1498,9 @@ void zones_current_sweep_get_status(zone_sweep_status_t *out)
     strncpy(out->i_normal_reason, (const char *)s_sweep.i_normal_reason, sizeof(out->i_normal_reason) - 1);
     out->i_normal_reason[sizeof(out->i_normal_reason) - 1] = '\0';
     out->summed_unmeasured_mask = s_sweep.summed_unmeasured_mask;
+    out->nameplate_mismatch_mask = s_sweep.nameplate_mismatch_mask;
+    strncpy(out->nameplate_reason, (const char *)s_sweep.nameplate_reason, sizeof(out->nameplate_reason) - 1);
+    out->nameplate_reason[sizeof(out->nameplate_reason) - 1] = '\0';
 }
 
 /* ---- Task 2: runtime CT-to-zone mapping check ----------------------------- */

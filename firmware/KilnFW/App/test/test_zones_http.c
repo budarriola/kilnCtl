@@ -8455,6 +8455,44 @@ static void test_record_ct_channels_summed_mode_negative_delta_leaves_zone_unmea
     nvs_test_clear();
 }
 
+static void test_record_ct_channels_summed_mode_nan_sample_leaves_zone_unmeasured(void)
+{
+    TEST_SECTION("zone_sweep_task_record_ct_channels -- 2026-09-10 fix: a NaN shared-CT sample "
+                 "must leave the zone UNMEASURED and set summed_unmeasured_mask, exactly like the "
+                 "below-idle case -- the pre-fix code fell straight through the branch and left "
+                 "summed_unmeasured_mask clear, letting an incomplete measured_total_a derive an "
+                 "arbitrarily wrong k_ct with no refusal");
+
+    nvs_test_enable(true);
+    nvs_test_clear();
+    memset(&s_ct_derive, 0, sizeof(s_ct_derive));
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    memset((void *)&s_sweep, 0, sizeof(s_sweep));
+
+    s_ct_topology_summed = true;
+    s_ct_summed_idle_a = 0.3f;
+
+    float per_ch_avg_a[ZONE_CT_CHANNEL_COUNT] = { NAN, NAN, NAN }; // shared channel sample itself is NaN
+    zone_sweep_task_record_ct_channels(NULL, /*zi=*/1, /*relay_mask=*/0x02u, per_ch_avg_a);
+
+    float amps = -1.0f;
+    bool measured = true;
+    TEST_CHECK(zones_config_get_normal_current(1, &amps, &measured), "getter still answers for zone 1");
+    TEST_CHECK(!measured, "nothing was persisted for zone 1 on a NaN sample");
+    TEST_CHECK((s_sweep.summed_unmeasured_mask & (1u << 1)) != 0,
+              "zone 1's bit IS set in summed_unmeasured_mask on a NaN sample -- this is the exact "
+              "line that was missing before the fix");
+    TEST_CHECK(s_ct_derive.measured_total_a == 0.0f,
+               "a NaN sample never contributes to measured_total_a, matching the refusal signal above");
+
+    s_ct_topology_summed = false;
+    s_ct_summed_idle_a = 0.0f;
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    memset((void *)&s_sweep, 0, sizeof(s_sweep));
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 static void test_sweep_status_get_handler_reports_summed_unmeasured_mask(void)
 {
     TEST_SECTION("sweep_status_get_handler -- opus review finding (MEDIUM): "
@@ -8958,6 +8996,97 @@ static void test_zone_sweep_derive_k_ct_refuses_an_implausible_correction(void)
                "the same 2x ratio on a plausible k_old is accepted");
 }
 
+// ---------------------------------------------------------------------------
+// Owner feature (2026-09-10): per-coil nameplate wattage + expected-current
+// advisory. zone_sweep_expected_coil_current_a()/zone_sweep_check_expected_
+// current() are the pure decisions; every refusal below is paired with the
+// same call made valid, same "prove the guard can actually fail" discipline
+// as the k_ct block above.
+// ---------------------------------------------------------------------------
+
+static void test_zone_sweep_expected_coil_current_equal_split_default(void)
+{
+    TEST_SECTION("zone_sweep_expected_coil_current_a -- no override: equal split of the sum nameplate");
+
+    // Owner's own worked example: "account that all coils are the same
+    // wattage and the nameplate is for the sum." A 3-zone board with a 9kW
+    // sum nameplate and no per-coil override splits to 3kW/coil; at 240V
+    // that is 12.5A per coil.
+    float a = zone_sweep_expected_coil_current_a(0.0f, 9000.0f, 3, 240.0f);
+    TEST_CHECK(fabsf(a - 12.5f) < 1e-4f, "9kW sum / 3 coils / 240V = 12.5A expected per coil");
+
+    // This bench's own real fixture (owner-confirmed, ~4W/120V, roughly
+    // 33-90 mA total): the split-and-divide must accept a tiny nameplate as
+    // legitimate, not clamp or reject it as implausibly small.
+    a = zone_sweep_expected_coil_current_a(0.0f, 4.0f, 3, 120.0f);
+    TEST_CHECK(a > 0.0f && fabsf(a - (4.0f / 3.0f / 120.0f)) < 1e-6f,
+               "a ~4W/120V bench nameplate splits and derives a plausible tiny expected current, not a rejection");
+}
+
+static void test_zone_sweep_expected_coil_current_override_wins(void)
+{
+    TEST_SECTION("zone_sweep_expected_coil_current_a -- a per-coil override always wins over the equal split");
+
+    // Different-wattage elements: zone 0 is a 1000W coil the operator
+    // entered directly, on a board whose SUM nameplate (9000W over 3 coils)
+    // would otherwise imply 3000W/coil -- the override must win outright,
+    // not blend with or get clamped by the equal share.
+    float a_override = zone_sweep_expected_coil_current_a(1000.0f, 9000.0f, 3, 240.0f);
+    float a_equal_share = zone_sweep_expected_coil_current_a(0.0f, 9000.0f, 3, 240.0f);
+    TEST_CHECK(fabsf(a_override - (1000.0f / 240.0f)) < 1e-4f, "an override zone reports ITS OWN wattage / voltage");
+    TEST_CHECK(fabsf(a_override - a_equal_share) > 1e-3f,
+               "an overridden coil's expected current differs from the un-overridden equal-share answer");
+}
+
+static void test_zone_sweep_expected_coil_current_refuses_without_inputs(void)
+{
+    TEST_SECTION("zone_sweep_expected_coil_current_a -- refuses (negative sentinel) without a usable nameplate");
+
+    TEST_CHECK(zone_sweep_expected_coil_current_a(0.0f, 0.0f, 3, 240.0f) < 0.0f,
+               "no sum and no override answers nothing");
+    TEST_CHECK(zone_sweep_expected_coil_current_a(0.0f, 9000.0f, 0, 240.0f) < 0.0f,
+               "zero relay_count cannot be split across");
+    TEST_CHECK(zone_sweep_expected_coil_current_a(0.0f, 9000.0f, 3, 0.0f) < 0.0f,
+               "zero mains voltage -- P/V would divide by zero -- answers nothing");
+    // A NaN override is treated as "not an override" (isfinite() fails), the
+    // same as 0.0f -- it falls through to the equal-share default rather
+    // than propagating NaN, so a corrupted override field degrades to the
+    // safe default instead of poisoning the whole comparison.
+    TEST_CHECK(fabsf(zone_sweep_expected_coil_current_a(NAN, 9000.0f, 3, 240.0f) - 12.5f) < 1e-4f,
+               "a NaN override falls through to the equal-share answer, not a fabricated or negative one");
+}
+
+static void test_zone_sweep_check_expected_current_ok_and_mismatch(void)
+{
+    TEST_SECTION("zone_sweep_check_expected_current -- reuses the k_ct ratio band, does not invent a new one");
+
+    // Exact match and the same ZONE_KCT_RATIO_MIN/MAX (0.2x-5.0x) band the
+    // k_ct calibration above already exercises -- deliberately the SAME
+    // constants, not a re-typed copy, so a change to one changes both.
+    TEST_CHECK(zone_sweep_check_expected_current(12.5f, 12.5f) == ZONE_NAMEPLATE_CHECK_OK,
+               "an exact match is OK");
+    TEST_CHECK(zone_sweep_check_expected_current(3.0f, 12.5f) == ZONE_NAMEPLATE_CHECK_OK,
+               "0.24x is inside the 0.2x floor -- OK");
+    TEST_CHECK(zone_sweep_check_expected_current(62.0f, 12.5f) == ZONE_NAMEPLATE_CHECK_OK,
+               "4.96x is inside the 5.0x ceiling -- OK");
+    TEST_CHECK(zone_sweep_check_expected_current(1.0f, 12.5f) == ZONE_NAMEPLATE_CHECK_MISMATCH,
+               "0.08x (well under 0.2x) is a MISMATCH -- 'much lower than expected'");
+    TEST_CHECK(zone_sweep_check_expected_current(100.0f, 12.5f) == ZONE_NAMEPLATE_CHECK_MISMATCH,
+               "8x (well over 5.0x) is a MISMATCH -- 'much higher than expected'");
+}
+
+static void test_zone_sweep_check_expected_current_refuses_without_data(void)
+{
+    TEST_SECTION("zone_sweep_check_expected_current -- NO_NAMEPLATE / NO_MEASUREMENT, never a fabricated verdict");
+
+    TEST_CHECK(zone_sweep_check_expected_current(12.5f, -1.0f) == ZONE_NAMEPLATE_CHECK_NO_NAMEPLATE,
+               "the negative sentinel from zone_sweep_expected_coil_current_a() reads as NO_NAMEPLATE");
+    TEST_CHECK(zone_sweep_check_expected_current(-1.0f, 12.5f) == ZONE_NAMEPLATE_CHECK_NO_MEASUREMENT,
+               "an unmeasured zone (this function's own 'not measured' sentinel) reads as NO_MEASUREMENT");
+    TEST_CHECK(zone_sweep_check_expected_current(NAN, 12.5f) == ZONE_NAMEPLATE_CHECK_NO_MEASUREMENT,
+               "a NaN measurement reads as NO_MEASUREMENT, not a crash or a false OK");
+}
+
 // ---- the plan, which is where the run's own completeness is judged ---------
 
 // Puts s_ct_derive and the fake committed record into the state a clean
@@ -9301,6 +9430,68 @@ static void test_zone_sweep_plan_i_normal_survives_a_partial_resweep(void)
     uint8_t mask = zone_sweep_plan_i_normal(a, note, sizeof(note));
     TEST_CHECK(mask == 0x02, "zone 1's old measurement is still planned even though no new sweep touched it");
     TEST_CHECK(a[1] == 3.0f, "the persisted value, not a freshly-measured one, is what gets planned");
+
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_zone_normals_invalidate_mask_clears_measured_bits_and_amps(void)
+{
+    TEST_SECTION("zone_normals_invalidate_mask -- 2026-09-10 fix (k_ct rescale vs. stale "
+                 "i_normal): a confirmed k_ct change must invalidate every zone's stored normal "
+                 "that was measured under the OLD scale, so zone_sweep_plan_i_normal() sees "
+                 "'never measured' rather than pushing an S14/S15 threshold on the wrong scale");
+
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    nvs_test_enable(true);
+    nvs_test_clear();
+    TEST_CHECK(zone_normals_set(0, 4.2f), "zone 0 measured under the OLD k_ct");
+    TEST_CHECK(zone_normals_set(1, 3.0f), "zone 1 measured under the OLD k_ct");
+    TEST_CHECK(zone_normals_set(2, 6.9f), "zone 2 measured under the OLD k_ct");
+
+    TEST_CHECK(zone_normals_invalidate_mask((uint8_t)((1u << 0) | (1u << 2))),
+               "invalidating zones 0 and 2 (the ones whose scale just changed) succeeds");
+
+    float amps = -1.0f;
+    bool measured = true;
+    TEST_CHECK(zones_config_get_normal_current(0, &amps, &measured) && !measured,
+               "zone 0's stale measurement is gone");
+    TEST_CHECK(zones_config_get_normal_current(2, &amps, &measured) && !measured,
+               "zone 2's stale measurement is gone");
+    TEST_CHECK(zones_config_get_normal_current(1, &amps, &measured) && measured && amps == 3.0f,
+               "zone 1 was NOT in the invalidated mask -- its measurement (a different channel's "
+               "scale) is untouched");
+
+    // The downstream effect this whole fix exists for: the guard plan no
+    // longer offers the stale zones at all.
+    float a[MAX31856_CHANNEL_COUNT] = {0};
+    char note[96] = "";
+    uint8_t mask = zone_sweep_plan_i_normal(a, note, sizeof(note));
+    TEST_CHECK(mask == 0x02, "only zone 1 (never invalidated) is still planned after the rescale");
+
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_zone_normals_invalidate_mask_noop_on_zero_mask(void)
+{
+    TEST_SECTION("zone_normals_invalidate_mask -- an empty mask (no channel's k_ct actually "
+                 "changed) touches nothing, so an unrelated push cannot un-arm zones it never "
+                 "affected");
+
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    nvs_test_enable(true);
+    nvs_test_clear();
+    TEST_CHECK(zone_normals_set(0, 4.2f), "zone 0 measured");
+
+    TEST_CHECK(zone_normals_invalidate_mask(0), "a zero mask is accepted as a trivial success");
+
+    float amps = -1.0f;
+    bool measured = false;
+    TEST_CHECK(zones_config_get_normal_current(0, &amps, &measured) && measured && amps == 4.2f,
+               "zone 0's measurement survives an empty invalidation");
 
     memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
     nvs_test_enable(false);
@@ -10037,6 +10228,7 @@ void run_test_zones_http(void)
     test_zone_sweep_summed_normal_a_rescales_floor_with_live_k_ct();
     test_record_ct_channels_summed_mode_derives_normal_from_channel3();
     test_record_ct_channels_summed_mode_negative_delta_leaves_zone_unmeasured();
+    test_record_ct_channels_summed_mode_nan_sample_leaves_zone_unmeasured();
     test_sweep_status_get_handler_reports_summed_unmeasured_mask();
 
     test_zone_sweep_derive_k_ct_scales_by_the_measured_over_expected_ratio();
@@ -10044,6 +10236,11 @@ void run_test_zones_http(void)
     test_zone_sweep_derive_k_ct_refuses_without_a_measurement();
     test_zone_sweep_derive_k_ct_refuses_an_uncommissioned_prior_k();
     test_zone_sweep_derive_k_ct_refuses_an_implausible_correction();
+    test_zone_sweep_expected_coil_current_equal_split_default();
+    test_zone_sweep_expected_coil_current_override_wins();
+    test_zone_sweep_expected_coil_current_refuses_without_inputs();
+    test_zone_sweep_check_expected_current_ok_and_mismatch();
+    test_zone_sweep_check_expected_current_refuses_without_data();
     test_zone_sweep_plan_k_ct_clean_run_plans_every_derived_channel();
     test_zone_sweep_plan_k_ct_summed_derives_from_shared_channel();
     test_zone_sweep_plan_k_ct_summed_refuses_when_any_zone_unmeasured();
@@ -10064,6 +10261,8 @@ void run_test_zones_http(void)
     test_zone_sweep_plan_i_normal_nothing_measured_yet();
     test_zone_sweep_plan_i_normal_plans_every_measured_zone();
     test_zone_sweep_plan_i_normal_survives_a_partial_resweep();
+    test_zone_normals_invalidate_mask_clears_measured_bits_and_amps();
+    test_zone_normals_invalidate_mask_noop_on_zero_mask();
 
     test_ct_mapping_mismatch_silent_when_never_measured();
     test_ct_mapping_mismatch_within_band_is_silent();

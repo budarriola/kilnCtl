@@ -801,6 +801,44 @@ bool zone_normals_set(uint8_t zone_index, float amps)
     return zone_normals_save() == ESP_OK;
 }
 
+/* 2026-09-10 fix (finding: k_ct rescale vs. stale i_normal, "reset one side
+ * of a pair" class): every normal_current_a[] entry is a value measured
+ * UNDER WHATEVER k_ct_v_per_a WAS LIVE AT THE TIME OF THAT MEASUREMENT --
+ * see zone_sweep_task_record_ct_channels()'s summed branch, which converts
+ * the shared channel's raw reading to amps using the live, committed k_ct
+ * before this run's own derived k_ct is ever pushed. When
+ * zone_sweep_push_k_ct_v_per_a() actually confirms a NEW k_ct landed on the
+ * safety processor, every normal_current_a[] entry measured on the OLD
+ * scale -- including zones this same run just measured, and any zone from a
+ * prior run this one never touched -- is stale by exactly the ratio
+ * k_new/k_old. Rather than compute that rescale here (a sign/formula error
+ * would silently HALVE or DOUBLE an armed guard's threshold with no way to
+ * tell from the outside), this function simply clears measured_mask for the
+ * affected zones: zone_sweep_plan_i_normal() then sees "never measured" and
+ * leaves S14/S15 dormant for them, per the owner's own standing rule
+ * ("leave the guard dormant rather than fabricate a threshold") -- until an
+ * operator re-runs the sweep and produces a fresh measurement under the
+ * NEW scale. Refusing to arm is always safe; arming against a threshold
+ * whose scale might be wrong is not. `zone_mask` is a bitmask, bit i =
+ * zone i's stored normal is no longer trustworthy. */
+bool zone_normals_invalidate_mask(uint8_t zone_mask)
+{
+    if (zone_mask == 0) {
+        return true;
+    }
+    zone_mask &= (uint8_t)((1u << MAX31856_CHANNEL_COUNT) - 1u);
+    if ((s_zone_normals.cfg.measured_mask & zone_mask) == 0) {
+        return true; /* nothing measured in the affected set -- nothing to invalidate */
+    }
+    s_zone_normals.cfg.measured_mask &= (uint8_t)~zone_mask;
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        if (zone_mask & (1u << zi)) {
+            s_zone_normals.cfg.normal_current_a[zi] = 0.0f;
+        }
+    }
+    return zone_normals_save() == ESP_OK;
+}
+
 /* Same "the sweep is the only legitimate writer" rule zone_normals_set()
  * above states, applied to the derived CT map: this is measured data, and
  * an operator who wants to say it by hand says it on the commissioning page
