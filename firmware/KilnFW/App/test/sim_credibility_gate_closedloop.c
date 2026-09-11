@@ -226,6 +226,26 @@ extern float zone_feedforward(const zone_runtime_t *z, uint8_t zi, float setpoin
 extern float zone_taper_climb_rate(const zone_runtime_t *z, uint8_t zi, float target_c, float rate_c_per_s,
                                    float segment_target_c);
 
+// docs/FUZZY_CONTROLLER_PLAN.md finding (D) fix, 2026-09-11: seed_bumpless_
+// with_ff() (profile_executor_feedforward.c, linked below) now calls
+// zone_commanded_setpoint_c() (declared non-static in
+// profile_executor_pid_tick.c, NOT linked into this harness -- see this
+// file's top comment on avoiding profile_executor.c's own FreeRTOS-stubbed
+// machinery), so the linker needs a definition of that name here even
+// though this harness's own tick loop never reaches seed_bumpless_with_ff()
+// at all (it calls zone_feedforward()/zone_taper_climb_rate() directly,
+// inlining its own bumpless-seed via pid_seed_bumpless() -- see the tick
+// loop below). This file's own zone_runtime_t stand-in above has no
+// effective_target_c field and this harness never configures a per-zone
+// approach_rate_cap_c_per_hr, so "always uncapped" (return the shared
+// s_exec.target_c verbatim) is exactly this harness's own existing
+// behaviour -- link-satisfying only, never exercised.
+float zone_commanded_setpoint_c(const zone_runtime_t *z, uint8_t zi)
+{
+    (void)z; (void)zi;
+    return s_exec.target_c;
+}
+
 #define PID_D_FILTER_TAU_S 30.0f
 #define PID_SETPOINT_WEIGHT_B 1.0f
 #define PID_FUNCTIONAL_RANGE_C 25.0f

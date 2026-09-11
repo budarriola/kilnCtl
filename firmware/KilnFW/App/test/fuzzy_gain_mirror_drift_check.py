@@ -133,6 +133,18 @@ FOLDS = [
     (re.compile(r"\badjusted\."), "ADJUSTED."),
     (re.compile(r"\*out_cfg\b"), "ADJUSTED"),
     (re.compile(r"\badjusted\b"), "ADJUSTED"),
+    # docs/FUZZY_CONTROLLER_PLAN.md finding (D), fixed 2026-09-11: production
+    # now resolves this zone's own commanded setpoint via zone_commanded_
+    # setpoint_c(z, zi) (the same helper pid_family_zone_tick() already uses
+    # for its own error/feedforward terms -- see that function's own doc
+    # comment) instead of reading the shared s_exec.target_c directly, so a
+    # capped zone's gain scheduling tracks the same setpoint its control loop
+    # actually chases. Semantically this is still exactly "the setpoint this
+    # tick", the same role the mirror's plain `setpoint` parameter plays (see
+    # module docstring's first bullet) -- just resolved through a per-zone
+    # helper call instead of a raw shared-field read -- so it folds to the
+    # same SETPOINT token rather than being left to show up as drift.
+    (re.compile(r"\bzone_commanded_setpoint_c\(z,\s*zi\)"), "SETPOINT"),
     (re.compile(r"\bs_exec\.target_c\b"), "SETPOINT"),
     (re.compile(r"\bsetpoint\b"), "SETPOINT"),
     # strength_pct: production re-derives + clamps it from a config getter

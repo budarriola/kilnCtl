@@ -865,6 +865,23 @@ bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float d
     (void)zone_index; (void)k_dc; (void)tau_s; (void)dead_time_s;
     return true;
 }
+/* docs/audits/adaptive_tune_vs_owner_requirements_2026-09-11.md: link-time
+ * stand-ins for adaptive_tune_model.c's new baseline anchor accessors, same
+ * "link succeeds, no zone ever actually opts in" posture as set_model()/
+ * set_pid() just above -- zones_config_get_model() always returns false in
+ * this executable, so adaptive_tune_refine_zone_locked() always refuses
+ * before it would ever reach these. */
+bool zones_config_get_autotune_baseline_k_dc(uint8_t zone_index, float *out_k_dc)
+{
+    (void)zone_index;
+    if (out_k_dc) *out_k_dc = 0.0f;
+    return false;
+}
+bool zones_config_set_autotune_baseline_k_dc(uint8_t zone_index, float k_dc)
+{
+    (void)zone_index; (void)k_dc;
+    return true;
+}
 bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
 {
     (void)zone_index; (void)kp; (void)ki; (void)kd;
@@ -2773,6 +2790,79 @@ static void test_fuzzy_prepare_gains_nan_strength_falls_back_to_base_not_large(v
                               "must stay at base_kp");
     TEST_CHECK(out.ki == 0.02f, "ki must stay at base_ki");
     TEST_CHECK(out.kd == 2.0f, "kd must stay at base_kd");
+}
+
+// docs/FUZZY_CONTROLLER_PLAN.md finding (D), fixed 2026-09-11: pid_fuzzy_
+// prepare_gains() used to schedule gains off the error against the shared
+// s_exec.target_c unconditionally, while pid_family_zone_tick()'s own
+// pid_update_terms()/zone_feedforward() calls (the control loop this
+// scheduler is supposed to be tuning) already read zone_commanded_setpoint_c
+// (z, zi) -- z->effective_target_c whenever this zone has a non-zero
+// approach_rate_cap_c_per_hr configured. The "paired input left shared" bug
+// class (project_paired_input_left_shared.md and its three siblings): a
+// per-zone value existed, and one consumer was left reading the pre-cap
+// shared one. Exercises the REAL pid_fuzzy_prepare_gains() (this file
+// #includes profile_executor.c wholesale, same as the three tests above),
+// not a reimplementation -- the two "expect" values below come from direct
+// calls to the real, production pid_fuzzy_adjust() with the two candidate
+// error_c inputs, never from re-deriving pid_fuzzy_prepare_gains()'s own
+// logic. This test FAILS on the unfixed code (error_c = s_exec.target_c -
+// actual_c unconditionally): verified by hand -- see the commit message for
+// the negative-test result -- and must be re-verified the same way again if
+// this file's stub surface ever changes.
+static void test_fuzzy_prepare_gains_uses_zone_commanded_setpoint_when_capped(void)
+{
+    TEST_SECTION("pid_fuzzy_prepare_gains() -- for a zone with a configured approach_rate_cap_c_per_hr "
+                 "(effective_target_c diverged from the shared s_exec.target_c), gain scheduling uses "
+                 "THIS zone's own commanded setpoint (zone_commanded_setpoint_c()), not the shared, "
+                 "faster-moving destination -- PID_EXPANSION_PLAN.md sec 3.6d's own wiring convention, "
+                 "which this consumer was left out of");
+    reset_fuzzy_gain_test_state();
+    s_test_fuzzy_strength_present = true;
+    s_test_fuzzy_strength_pct = 100.0f;
+    g_stub_approach_rate_cap_c_per_hr[0] = 30.0f; /* non-zero: zone 0 is capped */
+
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.pid_cfg.kp = 1.0f;
+    z.pid_cfg.ki = 0.02f;
+    z.pid_cfg.kd = 2.0f;
+    z.pid_state.d_filtered = 0.0f; /* STEADY on the rate axis */
+    z.actual_c = 700.0f;
+    z.effective_target_c = 705.0f; /* this capped zone's OWN commanded setpoint: a small, near-ZERO error */
+    s_exec.target_c = 1000.0f;     /* the shared, faster-moving destination: a large POS error */
+
+    pid_cfg_t out;
+    memset(&out, 0, sizeof(out));
+    pid_fuzzy_prepare_gains(&z, 0, &out);
+
+    float expect_kp, expect_ki, expect_kd; /* CORRECT: error against effective_target_c (705-700=5) */
+    pid_fuzzy_adjust(5.0f, 0.0f, 20.0f, 0.5f, 1.0f, 0.02f, 2.0f, 100, &expect_kp, &expect_ki, &expect_kd);
+
+    float wrong_kp, wrong_ki, wrong_kd; /* WRONG (unfixed behaviour): error against s_exec.target_c (1000-700=300) */
+    pid_fuzzy_adjust(300.0f, 0.0f, 20.0f, 0.5f, 1.0f, 0.02f, 2.0f, 100, &wrong_kp, &wrong_ki, &wrong_kd);
+
+    TEST_CHECK(fabsf(expect_kp - wrong_kp) > 0.01f,
+               "test setup sanity: the two candidate error_c inputs land in different-enough rule-table "
+               "regions that this test can actually discriminate the fix from the bug");
+
+    TEST_CHECK(out.kp == expect_kp, "kp must match the error computed against THIS zone's own "
+                                    "effective_target_c, not the shared s_exec.target_c");
+    TEST_CHECK(out.ki == expect_ki, "ki must match the error computed against THIS zone's own "
+                                    "effective_target_c, not the shared s_exec.target_c");
+    TEST_CHECK(out.kd == expect_kd, "kd must match the error computed against THIS zone's own "
+                                    "effective_target_c, not the shared s_exec.target_c");
+    TEST_CHECK(out.kp != wrong_kp, "NEGATIVE-TEST PROOF: the wrong (unfixed) computation gives a "
+                                  "DIFFERENT kp -- this check can actually fail, not just currently pass");
+
+    /* g_stub_approach_rate_cap_c_per_hr is file-scope static, NOT cleared by
+     * reset_fuzzy_gain_test_state()/reset_coupling_test_state() -- restore
+     * zone 0 to uncapped so a later test in this file (any of them; several
+     * reuse zone 0 and assume every zone reads uncapped, the default every
+     * pre-existing test in this file predates this field's very existence)
+     * does not silently inherit this test's cap and get zone_commanded_
+     * setpoint_c() answers it never asked for. */
+    g_stub_approach_rate_cap_c_per_hr[0] = 0.0f;
 }
 
 // ---------------------------------------------------------------------------
@@ -7980,6 +8070,7 @@ void run_test_profile_executor_prestart(void)
     test_fuzzy_prepare_gains_zero_strength_is_base_gains_bit_exact();
     test_fuzzy_prepare_gains_matches_pid_fuzzy_adjust_directly();
     test_fuzzy_prepare_gains_nan_strength_falls_back_to_base_not_large();
+    test_fuzzy_prepare_gains_uses_zone_commanded_setpoint_when_capped();
 
     test_feedforward_zero_coupling_is_bit_identical_to_no_coupling();
     test_feedforward_hot_neighbor_subtracts_duty();

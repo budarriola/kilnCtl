@@ -578,10 +578,12 @@ float zone_feedforward(const zone_runtime_t *z, uint8_t zi, float setpoint_c, fl
  * both to look up z's own coupling row (PID_EXPANSION_PLAN.md section 2c)
  * and to skip that row's own diagonal. This is the same zone_feedforward()
  * called from the per-tick control loop (pid_family_zone_tick()), on the
- * same s_exec.target_c/target_rate_c_per_s -- deliberately identical inputs,
- * so a zone reseeded here is bumpless against exactly the feedforward the
- * very next tick will compute, coupling term included. If the two callers
- * ever diverge on what they pass, bump transfer breaks.
+ * same zone_commanded_setpoint_c(z, zi)/target_rate_c_per_s -- deliberately
+ * identical inputs, so a zone reseeded here is bumpless against exactly the
+ * feedforward the very next tick will compute, coupling term included. If
+ * the two callers ever diverge on what they pass, bump transfer breaks (see
+ * this function's body, fixed 2026-09-11 to call the same helper rather than
+ * the raw shared s_exec.target_c it used to read).
  *
  * Residual bump-transfer gap the reviewer flagged: "identical inputs" only
  * covers target_c/target_rate_c_per_s and zi -- it does NOT mean a
@@ -618,12 +620,24 @@ void seed_bumpless_with_ff(zone_runtime_t *z, uint8_t zi, float u_desired)
      * inputs to the very next real tick for the seed to actually be
      * bumpless; an untapered seed racing against a tapered next tick would
      * reintroduce exactly the duty step this function exists to avoid. */
+    /* Sibling of the docs/FUZZY_CONTROLLER_PLAN.md finding (D) fix in
+     * profile_executor_pid_tick.c (2026-09-11): this function's own doc
+     * comment above requires "identical inputs" to pid_family_zone_tick()'s
+     * own zone_taper_climb_rate()/zone_feedforward() calls for the seed to
+     * actually be bumpless -- but pid_family_zone_tick() was switched to
+     * zone_commanded_setpoint_c(z, zi) for those calls (PID_EXPANSION_PLAN.md
+     * sec 3.6d) while this seed kept reading the shared s_exec.target_c
+     * directly, silently breaking that stated invariant for any capped zone.
+     * Same "paired input left shared" class, same fix: call the one owning
+     * helper instead of the raw shared field. Inert today (every zone's
+     * approach_rate_cap_c_per_hr reads 0.0 live), live once a cap is set. */
+    float setpoint_c = zone_commanded_setpoint_c(z, zi);
     float rate_c_per_s = s_exec.target_rate_c_per_s;
     if (!s_exec.dwelling && rate_c_per_s != 0.0f) {
         const profile_segment_t *seg = &s_exec.profile.segments[s_exec.segment_index];
-        rate_c_per_s = zone_taper_climb_rate(z, zi, s_exec.target_c, rate_c_per_s, seg->target_c);
+        rate_c_per_s = zone_taper_climb_rate(z, zi, setpoint_c, rate_c_per_s, seg->target_c);
     }
     float ff_hold = 0.0f;
-    float u_ff = zone_feedforward(z, zi, s_exec.target_c, rate_c_per_s, &ff_hold);
-    pid_seed_bumpless(&z->pid_state, &z->pid_cfg, s_exec.target_c, z->actual_c, u_desired, u_ff, ff_hold);
+    float u_ff = zone_feedforward(z, zi, setpoint_c, rate_c_per_s, &ff_hold);
+    pid_seed_bumpless(&z->pid_state, &z->pid_cfg, setpoint_c, z->actual_c, u_desired, u_ff, ff_hold);
 }

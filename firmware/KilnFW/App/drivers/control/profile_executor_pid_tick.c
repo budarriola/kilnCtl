@@ -312,17 +312,29 @@ void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, pid_cfg_t *out_cfg)
 {
     *out_cfg = z->pid_cfg; /* d_filter_tau_s/b/pid_range_c untouched -- only kp/ki/kd move */
 
-    /* PID_EXPANSION_PLAN.md sec 3.6d note: deliberately NOT swapped to
-     * z->effective_target_c here, unlike pid_family_zone_tick()'s
-     * pid_update_terms()/zone_feedforward() calls -- this error feeds only
-     * the fuzzy gain-scheduling table (which Kp/Ki/Kd cell applies this
-     * tick), not the control loop's own feedback term, and the design study
-     * this field implements never asked for the gain-scheduling axis itself
-     * to move with a per-zone cap. Left as s_exec.target_c, the shared
-     * destination, to keep this pass's behavioural surface exactly what
-     * PER_ZONE_TARGET_DESIGN_STUDY.md option (b) specifies -- unaffected for
-     * every zone, capped or not. */
-    float error_c = s_exec.target_c - z->actual_c;
+    /* docs/FUZZY_CONTROLLER_PLAN.md finding (D), fixed 2026-09-11: this used
+     * to read the shared s_exec.target_c unconditionally while
+     * pid_family_zone_tick()'s own pid_update_terms()/zone_feedforward()
+     * calls (this file, above) read zone_commanded_setpoint_c(z, zi) -- the
+     * "paired input left shared" class this repo has hit four times before
+     * (project_paired_input_left_shared.md and its siblings): a per-zone
+     * approach-rate cap was added (PER_ZONE_TARGET_DESIGN_STUDY.md option (b))
+     * and this consumer was left reading the pre-cap shared value. That
+     * design study's own text says the gain-scheduling axis was deliberately
+     * left unswapped -- but "deliberately" there meant "not costed", not
+     * "verified safe": a capped zone's REAL tracking error (what the P/I/D
+     * terms actually chase) is `zone_commanded_setpoint_c(z, zi) - actual_c`,
+     * so scheduling gains off the shared, faster-moving destination instead
+     * picks a rule-table cell for an error the loop is not actually seeing --
+     * exactly backwards for a gain scheduler. Fixed by calling the same
+     * helper pid_family_zone_tick() already uses, rather than copying its
+     * result, so there is one owning function for "this zone's commanded
+     * setpoint this tick" and no second copy that can drift again. Inert on
+     * every zone today (approach_rate_cap_c_per_hr reads 0.0 live, confirmed
+     * via control_get_zones over the kilnctrl MCP 2026-09-11), so this changes
+     * no live behaviour -- it only fires once a zone is given a non-zero
+     * cap, which is the point of fixing it now rather than after. */
+    float error_c = zone_commanded_setpoint_c(z, zi) - z->actual_c;
     float error_rate_c_per_s = z->pid_state.d_filtered; /* hazard 1, see comment above */
 
     float strength_pct_f = 0.0f;
