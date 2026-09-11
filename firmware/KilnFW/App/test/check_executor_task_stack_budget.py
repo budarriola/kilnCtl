@@ -59,11 +59,42 @@ deepest-TICK static path of 1488 B, i.e. ~1220 B of real, measured,
 unmodelled overhead (ISR window-spill, FreeRTOS scheduler cost on top of the
 statically-visible call chain). That is used directly here, the same way
 check_uart_log_bridge_stack_budget.py prefers a real live/static pair over
-the httpd checker's 1800 B placeholder when one is available. Applying it to
-the post-fix worst case (2784 B): 4096 - 2784 - 1220 = 92 B honest headroom
--- thin, and worth watching, but the deepest path is now the pre-existing,
-already-reviewed shared UART send chain, not either of today's two fixed
-regressions.
+the httpd checker's 1800 B placeholder when one is available.
+
+2026-09-10 UPDATE -- the 92 B margin below was a CONFIRMED recurring crash,
+not a theoretical CRITICAL rating. `docs/audits/
+profile_executor_panic_2026-09-10_root_cause.md` traced a second
+`profile_executor` panic (byte-for-byte identical `exc_a0`/`exc_a1_sp` to
+2026-09-09's) to exactly this 2784 B path, reached from `profiles_stop()` ->
+`profile_executor_halt()` -> `heat_enable_release()` ->
+`safety_link_request_enable()`. The deepest branch of that path went through
+`safety_exchange()`'s own unconditional opportunistic pre-drain
+(`safety_drain_inbox(link, 0)`), which happened to dispatch a queued
+FW_VERSION or DIAG frame into `safety_apply_fw_version()` /
+`safety_apply_diag()` -- each of which, on specific low-frequency conditions
+(a Pico boot_id change; a stale S6a latched from before this boot), sent a
+FURTHER frame synchronously (`safety_link_send_announce_version_burst()` /
+`safety_link_send_clear_trip()`) reaching the same deep
+`uart_protocol_send_broadcast()` -> `frame_and_send$constprop$0()` chain a
+SECOND time, on top of the base exchange. Both of those side-effect sends ran
+on WHATEVER task happened to be draining the inbox -- not necessarily one
+with headroom for them -- so they were moved off this call path entirely:
+`safety_apply_fw_version()`/`safety_apply_diag()` now only set a pending flag
+(`reannounce_pending`/`boot_clear_pending`, `safety_link.h`) under lock, and
+`safety_poll_task` (`safety_link_poll.c`, its own dedicated 8192 B stack)
+performs the actual sends once per iteration. This is a structural fix, not a
+byte-shave: it removes two entire reachable branches from every caller of
+`safety_drain_inbox()`/`safety_exchange()`, `profile_executor` included, not
+just this one call site.
+
+Post-fix, the deepest static path from `executor_task_entry` is 1936 B (down
+from 2784 B), and it is now the irreducible one every caller of
+`safety_exchange()` already pays for the REQUEST itself: `safety_exchange`
+-> `uart_protocol_send_broadcast` -> `frame_and_send$constprop$0` -> ... --
+no side-effect branch, just sending the one frame this call always intended
+to send. CEILING_BYTES is set to that. Applying UNMODELED_OVERHEAD_BYTES:
+4096 - 1936 - 1220 = 940 B honest headroom (22.9%), classified LOW, not
+CRITICAL -- a real, structural improvement, not a relitigated number.
 
 LIMITS, stated honestly (same as check_main_task_stack_budget.py /
 check_httpd_task_stack_budget.py):
@@ -73,6 +104,18 @@ check_httpd_task_stack_budget.py):
     UNMODELED_OVERHEAD_BYTES accounts for, imperfectly, above).
 Both make this an UNDER-estimate: anything this reports as too deep genuinely
 is too deep.
+
+CRITICAL NOW FAILS THE CHECK (2026-09-10). Before this fix, a CRITICAL
+classification (honest_pct < 15%) printed a warning and still returned 0 --
+this is exactly the class flagged by feedback_negative_test_every_check.md:
+a check whose worst rating cannot fail is not a check, it is a comment. The
+92 B/2.2% CRITICAL result sat "passing" for a full day between the
+2026-09-09 fix and the 2026-09-10 recurrence, and the checker never once
+went red. This was defensible ONLY as long as 92 B was believed to be an
+already-reviewed, irreducible floor (the commit that set it said so
+explicitly); it is not defensible now that it is a documented, confirmed
+recurring crash signature. CRITICAL now fails, same as an over-ceiling total
+or a negative honest_free.
 """
 
 import argparse
@@ -88,9 +131,13 @@ DEFAULT_ELF = base.DEFAULT_ELF
 ROOT = "executor_task_entry"
 STACK_BYTES = 4096
 
-# See "CEILING, not a headroom-fraction budget" above -- the post-2026-09-09-fix
-# worst case, unrelated to either regression this check exists because of.
-CEILING_BYTES = 2784
+# See "CEILING, not a headroom-fraction budget" above and the 2026-09-10
+# UPDATE in the module docstring -- the post-2026-09-10-fix worst case
+# (1936 B), now the irreducible safety_exchange() request-send path, not the
+# side-effect announce-burst/boot-clear branches that used to make this
+# 2784 B. Lowered deliberately, with the cause stated, per "do not raise a
+# ceiling quietly" -- the same rule applies to lowering one.
+CEILING_BYTES = 1936
 
 # See "UNMODELED_OVERHEAD_BYTES" above -- this task's own live-measured figure,
 # not the httpd checker's 1800 B placeholder.
@@ -155,25 +202,32 @@ def main():
     print(f"honest free (naive - {overhead} B unmodelled overhead): {honest_free} B "
           f"({honest_pct:.1f}% of {stack_bytes} B) -- classified {level}")
 
-    # Two separate failure conditions, deliberately not the same gate:
-    #   1. The static path itself got WORSE than the known post-2026-09-09-fix
+    # Three separate failure conditions, deliberately not the same gate:
+    #   1. The static path itself got WORSE than the known post-2026-09-10-fix
     #      ceiling -- catches a regression on TOP of what is already here,
     #      the same "don't relitigate the current baseline" contract
     #      check_httpd_task_stack_budget.py uses its own CEILING_BYTES for.
     #   2. Honest free actually goes NEGATIVE -- a real, not merely
-    #      uncomfortable, predicted overflow. Unlike the httpd checker's
-    #      arbitrary 15%-of-stack CRITICAL cutoff, this task's post-fix
-    #      baseline (92 B honest free, 2.2%) is ALREADY inside any percentage
-    #      cutoff worth choosing, via a pre-existing, already-reviewed shared
-    #      UART frame-send chain (frame_and_send$constprop$0, ~1152 B,
-    #      documented as "unrelated to this task specifically" in
-    #      check_uart_log_bridge_stack_budget.py) that is out of this check's
-    #      scope to fix. A percentage cutoff here would make this check FAIL
-    #      on every run regardless of whether anything got worse, which is
-    #      exactly the "shipped vacuous" failure mode
-    #      feedback_negative_test_every_check.md warns about -- so the gate
-    #      that actually predicts an overflow (honest_free < 0) is the one
-    #      enforced, not an arbitrary band.
+    #      uncomfortable, predicted overflow.
+    #   3. CRITICAL (honest_pct < 15%). Before 2026-09-10 this was
+    #      deliberately NOT a failure, on the reasoning that this task's
+    #      post-fix baseline (92 B, 2.2%) was ALREADY inside any percentage
+    #      cutoff worth choosing, via a pre-existing shared UART frame-send
+    #      chain judged "unrelated to this task specifically" and out of
+    #      scope to fix -- so a percentage gate would fail on every run
+    #      regardless of whether anything got worse, exactly the "shipped
+    #      vacuous" failure mode feedback_negative_test_every_check.md warns
+    #      about. That reasoning is WITHDRAWN: docs/audits/
+    #      profile_executor_panic_2026-09-10_root_cause.md confirmed the 92 B
+    #      CRITICAL rating was a real, recurring crash (two panics, byte-for-
+    #      byte identical exception frames), not a benign, irreducible floor
+    #      -- it sat "passing" for a full day between the two panics. The
+    #      2026-09-10 fix also removed the two side-effect branches that were
+    #      inflating this number (see the module docstring), so CRITICAL is
+    #      no longer an unfixable structural fact of this task's only path --
+    #      it is now, correctly, a hard failure like the other two gates,
+    #      and the 940 B/22.9% LOW baseline this check ships with today has
+    #      comfortable room before it would ever trip.
     if total > ceiling:
         print()
         print(f"check_executor_task_stack_budget: FAIL -- {args.root} reaches {total} B, "
@@ -193,6 +247,18 @@ def main():
               f"itself ({total} B) is still under the {ceiling} B ceiling.")
         print("  Fix by moving large locals off this stack, or lower CEILING_BYTES/raise "
               "UNMODELED_OVERHEAD_BYTES only with a documented reason for accepting the new margin.")
+        return 1
+
+    if level == "CRITICAL":
+        print()
+        print(f"check_executor_task_stack_budget: FAIL -- honest free is {honest_free} B "
+              f"({honest_pct:.1f}% of {stack_bytes} B), classified CRITICAL (< 15%). "
+              "CRITICAL fails this check as of 2026-09-10 -- see the module docstring's "
+              "\"CRITICAL NOW FAILS\" section: this exact rating was a confirmed, recurring "
+              "profile_executor panic, not a benign floor.")
+        print("  Fix by moving large locals or side-effect sends off this stack (as the "
+              "2026-09-10 fix did for the announce-version/boot-clear branches), not by "
+              "raising UNMODELED_OVERHEAD_BYTES to make the number look better.")
         return 1
 
     print()

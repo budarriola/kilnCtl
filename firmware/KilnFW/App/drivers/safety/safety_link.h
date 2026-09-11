@@ -1349,6 +1349,33 @@ typedef struct {
     uint8_t esp_boot_id;
     uint8_t pico_boot_id;
     bool    pico_boot_id_known;
+    /* Set (under state_lock) by safety_apply_fw_version() when a boot_id
+     * change means an ANNOUNCE_VERSION re-burst is owed to the peer, per the
+     * comment above. Deliberately NOT sent synchronously from inside that
+     * function any more (2026-09-10, docs/audits/
+     * profile_executor_panic_2026-09-10_root_cause.md): safety_apply_fw_
+     * version() is reachable from safety_drain_inbox()'s opportunistic
+     * pre-drain, which runs on WHICHEVER task called safety_exchange() --
+     * including profile_executor on its comparatively tiny 4096 B stack --
+     * and the burst's own send chain (uart_protocol_send_broadcast ->
+     * frame_and_send -> ... ) is the deepest path in this codebase. Flagging
+     * it here and having safety_poll_task (safety_link_poll.c, its own
+     * dedicated 8192 B stack, and the same task that already does this exact
+     * send unconditionally as its boot push) perform the actual send moves
+     * that chain off every OTHER caller's stack instead. Read and cleared
+     * under state_lock by safety_poll_task once per iteration; never read or
+     * cleared anywhere else. */
+    bool    reannounce_pending;
+    /* Same deferral, same reason, for safety_apply_diag()'s stale-S6a
+     * boot-clear send (safety_link_frames.c) -- another synchronous
+     * uart_protocol_send_broadcast()-reaching call previously made straight
+     * from inside safety_drain_inbox_ex()'s dispatch, on whatever task was
+     * draining. Set under state_lock by safety_apply_diag() once its
+     * one-shot eligibility check passes; consumed by safety_link_service_
+     * boot_clear_if_pending() (called from safety_poll_task) which performs
+     * the actual send and latches s_boot_clear_attempted only on success,
+     * preserving the original retry-on-refusal contract. */
+    bool    boot_clear_pending;
     bool    peer_version_known;
     bool    peer_version_compatible;
     /* The peer's own numbers off the last FW_VERSION frame, kept alongside

@@ -407,10 +407,26 @@ void safety_poll_task(void *arg)
 
     while (true) {
         uint16_t period = 0;
+        bool reannounce_owed = false;
         if (safety_lock(link)) {
             period = link->poll_period_ms;
+            reannounce_owed = link->reannounce_pending;
+            link->reannounce_pending = false;
             safety_unlock(link);
         }
+        if (reannounce_owed) {
+            /* A Pico boot_id change was observed by safety_apply_fw_version()
+             * -- on WHATEVER task happened to be draining the inbox at the
+             * time, possibly one with far less stack than this task's own
+             * 8192 B -- and deferred here rather than sent from there. See
+             * reannounce_pending's doc comment (safety_link.h) and
+             * docs/audits/profile_executor_panic_2026-09-10_root_cause.md. */
+            safety_link_send_announce_version_burst(link);
+        }
+        /* Same deferral, same reason, for safety_apply_diag()'s stale-S6a
+         * boot-clear send -- see boot_clear_pending's doc comment
+         * (safety_link.h). No-op whenever nothing is pending. */
+        safety_link_service_boot_clear_if_pending(link);
 
         if (period == 0u) {
             /* Polling off: still drain anything the peer pushes unsolicited,

@@ -79,6 +79,7 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg);
 bool safety_apply_trip_event(SafetyLinkClass *link, const uart_proto_message_t *msg);
 bool safety_apply_update_status(SafetyLinkClass *link, const uart_proto_message_t *msg);
 void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *msg);
+void safety_link_service_boot_clear_if_pending(SafetyLinkClass *link);
 
 /* --- safety_link_inbox.c (drain / stash / request-reply exchange) ------- */
 

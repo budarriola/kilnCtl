@@ -308,6 +308,10 @@ void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *
              * above). Forget it; safety_apply_status() resyncs silently on
              * the next frame, counting zero edges for that resync. */
             link->safety_relay_state_known = false;
+            /* Owed to the peer, but NOT sent from here -- see
+             * reannounce_pending's own doc comment (safety_link.h) for why
+             * this moved off the calling task's stack 2026-09-10. */
+            link->reannounce_pending = true;
         }
     }
     /* TODO.md owner-report item 5: only overwrite the cached build/config
@@ -325,9 +329,9 @@ void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *
     }
     safety_unlock(link);
 
-    if (boot_id_changed) {
-        safety_link_send_announce_version_burst(link);
-    }
+    /* No synchronous send here any more -- reannounce_pending (set above,
+     * under the same lock, in the boot_id_changed branch) is what actually
+     * schedules the burst; safety_poll_task picks it up on its own stack. */
 }
 
 /* ------------------------------------------------------------------------ */
@@ -903,24 +907,50 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
                    link->cached.diag_trip_reason == SAFETY_LINK_TRIP_REASON_MAIN_FAULT) {
             want_boot_clear = true;
             /* s_boot_clear_attempted is NOT latched here -- only on ESP_OK
-             * from the actual send, below, outside the lock. A locally
-             * refused send (stale diag age, etc.) must be retryable on the
-             * next DIAG frame, still bounded by the deadline above. */
+             * from the actual send, in safety_link_service_boot_clear_if_
+             * pending() below. A locally refused send (stale diag age, etc.)
+             * must be retryable on the next DIAG frame, still bounded by the
+             * deadline above. */
         }
+    }
+    if (want_boot_clear) {
+        /* Flagged, not sent from here -- see boot_clear_pending's doc
+         * comment (safety_link.h) for why (2026-09-10, docs/audits/
+         * profile_executor_panic_2026-09-10_root_cause.md): this function is
+         * reached from safety_drain_inbox_ex()'s dispatch on WHATEVER task
+         * called it, and safety_link_send_clear_trip() reaches the same deep
+         * uart_protocol_send_broadcast() chain as the announce-version
+         * burst. safety_poll_task performs the actual send on its own
+         * 8192 B stack. */
+        link->boot_clear_pending = true;
     }
     safety_unlock(link);
-    if (want_boot_clear) {
-        /* This boot's own bring-up asserted nothing, yet SaftyFW still shows
-         * a latched S6a -- leftover from before this boot. See
-         * safety_link_mark_boot_clean()'s doc comment (safety_link.h). */
-        ESP_LOGW(TAG, "boot was clean but a stale S6a (main-controller-fault) trip is still "
-                      "latched from before this boot -- sending clear_trip to release it");
-        if (safety_link_send_clear_trip(link) == ESP_OK && safety_lock(link)) {
-            s_boot_clear_attempted = true;
-            safety_unlock(link);
-        }
-    }
     return true;
+}
+
+/* Performs the deferred boot_clear_pending send (see its doc comment,
+ * safety_link.h) and latches s_boot_clear_attempted on success -- the exact
+ * logic safety_apply_diag() used to run inline. Called only from
+ * safety_poll_task (safety_link_poll.c), which has the stack headroom this
+ * chain needs; safe to call unconditionally each iteration since it is a
+ * no-op whenever nothing is pending. */
+void safety_link_service_boot_clear_if_pending(SafetyLinkClass *link)
+{
+    bool owed = false;
+    if (safety_lock(link)) {
+        owed = link->boot_clear_pending;
+        link->boot_clear_pending = false;
+        safety_unlock(link);
+    }
+    if (!owed) {
+        return;
+    }
+    ESP_LOGW(TAG, "boot was clean but a stale S6a (main-controller-fault) trip is still "
+                  "latched from before this boot -- sending clear_trip to release it");
+    if (safety_link_send_clear_trip(link) == ESP_OK && safety_lock(link)) {
+        s_boot_clear_attempted = true;
+        safety_unlock(link);
+    }
 }
 
 /* Accepts one SAFETY_CMD_TRIP_EVENT (Frame D) frame from the Pico and
