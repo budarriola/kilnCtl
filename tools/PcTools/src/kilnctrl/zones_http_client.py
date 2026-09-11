@@ -337,6 +337,12 @@ _ZONE_FIELD_FORM_KEY = {
     "hyst_c": "hystc",
     "min_on_s": "minons",
     "min_off_s": "minoffs",
+    # ZONES_CFG_VERSION 24->25 (owner request: per-coil nameplate wattage
+    # override). 0 = not overridden, use an equal share of the safety
+    # page's whole-kiln sum nameplate -- see zones_config_json.h's
+    # coil_power_w comment. Same "optional, falls back to current_z on
+    # omit" POST handling as hyst_c/min_on_s/min_off_s above.
+    "coil_power_w": "coilpower",
 }
 #: docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs (ZONES_CFG_VERSION 20->21, Opus review of
 #: 5672719 item 4): the five independent settings_source groups, in the

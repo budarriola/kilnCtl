@@ -275,6 +275,32 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
         }
     }
 
+    /* ZONES_CFG_VERSION 24->25 (owner request: "allow the user to enter
+     * different wattage for each coil"): per-coil nameplate wattage
+     * override. OPTIONAL, same reasoning as z%u_hystc/z%u_minons above --
+     * every pre-existing client has never heard of this key and must not
+     * get a 400 on an otherwise unrelated save, nor silently lose an
+     * operator's override the next time one of those clients replays a
+     * whole-page submit. 0 is legal and means "not overridden, use an
+     * equal share of the whole-kiln sum nameplate" (zones_config_json.h's
+     * own coil_power_w comment) -- NOT validated against the sum here,
+     * since the sum lives on the safety processor and may not have been
+     * answered yet; that cross-check happens at the point of use
+     * (zone_sweep_check_expected_current(), zones_current_sweep_engine.c). */
+    snprintf(key, sizeof(key), "z%u_coilpower", i);
+    {
+        if (zones_config_json_field_present(body, key)) {
+            if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_COIL_POWER_W_MAX,
+                                                      &z->coil_power_w) ||
+                (z->coil_power_w != 0.0f && z->coil_power_w < ZONE_COIL_POWER_W_MIN)) {
+                *err_reason = "zone coil_power_w out of range (0 = use an equal share of the nameplate sum)";
+                return false;
+            }
+        } else {
+            z->coil_power_w = current_z->coil_power_w;
+        }
+    }
+
     /* 2026-08-27 (ZONES_CFG_VERSION 8->9, owner's request: "assign the zones
      * to them"): which timing_profiles[] slot this zone uses. REQUIRED, unlike
      * the nine fields it replaces (which were each individually OPTIONAL) --

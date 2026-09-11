@@ -1047,6 +1047,9 @@ function zoneBlock(z, i, relayCount, thermoCount) {
     infoDetailsHtml('sanity', 'minimum rise rate') +
     '</label>' +
     '<input type="number" step="0.05" min="0" max="20" class="sanity" value="' + (z.sanity_rate_c_per_min || 0) + '">' +
+    '<label>Coil nameplate power, W (0 = split the safety page\'s whole-kiln nameplate ' +
+    'evenly across every coil)</label>' +
+    '<input type="number" step="1" min="0" max="100000" class="coilpower" value="' + (z.coil_power_w || 0) + '">' +
     '<div class="row2">' +
       '<div><label>Max temp &deg;C (0 = no ceiling) -- hard safety trip, no debounce</label>' +
       '<input type="number" step="1" class="maxtemp" value="' + (z.max_temp_c || 0) + '"></div>' +
@@ -1789,7 +1792,7 @@ function renderZones() {
      * a zone that has never been explicitly configured -- "zone i reads
      * channel i" -- so a freshly grown thermoCount starts a new zone off
      * reading a real channel instead of nothing. */
-    var z = current.zones[i] || { name: '', relay_mask: 0, thermo_mask: (1 << i), cal_offset_c: 0, pid_kp: 0, pid_ki: 0, pid_kd: 0, max_ramp_c_per_hr: 0, sanity_rate_c_per_min: 0, control_mode: 0, max_temp_c: 0, min_temp_c: -20, heater_window_ms: 0, heater_min_on_ms: 0, heater_min_off_ms: 0, cross_zone_max_delta_c: 0, model_k_dc: 0, model_tau_s: 0, model_dead_time_s: 0, guard_wrong_dir_window_s: 0, guard_wrong_dir_rate_c_per_min: 0, guard_off_settle_s: 0, guard_runaway_rate_c_per_min: 0, guard_runaway_margin_c: 0, guard_drift_period_s: 0, guard_sensor_fault_debounce_ticks: 0, guard_frozen_window_s: 0, timing_profile: 0, tc_type: 3 /* Type K, matching MAX31856.c's/the NVS migration's default */,
+    var z = current.zones[i] || { name: '', relay_mask: 0, thermo_mask: (1 << i), cal_offset_c: 0, pid_kp: 0, pid_ki: 0, pid_kd: 0, max_ramp_c_per_hr: 0, sanity_rate_c_per_min: 0, coil_power_w: 0, control_mode: 0, max_temp_c: 0, min_temp_c: -20, heater_window_ms: 0, heater_min_on_ms: 0, heater_min_off_ms: 0, cross_zone_max_delta_c: 0, model_k_dc: 0, model_tau_s: 0, model_dead_time_s: 0, guard_wrong_dir_window_s: 0, guard_wrong_dir_rate_c_per_min: 0, guard_off_settle_s: 0, guard_runaway_rate_c_per_min: 0, guard_runaway_margin_c: 0, guard_drift_period_s: 0, guard_sensor_fault_debounce_ticks: 0, guard_frozen_window_s: 0, timing_profile: 0, tc_type: 3 /* Type K, matching MAX31856.c's/the NVS migration's default */,
       fuzzy_strength_pct: 30, /* coupling_c0.. omitted: zoneBlock() defaults each missing cell to 0 */
       settings_source: (i === 0 ? 255 : 0) /* zones_http.c's ZONE_SETTINGS_SOURCE_CUSTOM; PID_EXPANSION_PLAN.md 3.5's "default same as zone 0" */ };
     var zdiv = zoneBlock(z, i, relayCount, thermoCount);
@@ -2118,6 +2121,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     /* limits group. */
     params.push('z' + i + '_ramp=' + limitsStack.querySelector('.ramp').value);
     params.push('z' + i + '_sanity=' + limitsStack.querySelector('.sanity').value);
+    params.push('z' + i + '_coilpower=' + limitsStack.querySelector('.coilpower').value);
     params.push('z' + i + '_maxtemp=' + limitsStack.querySelector('.maxtemp').value);
     params.push('z' + i + '_mintemp=' + limitsStack.querySelector('.mintemp').value);
     /* relay timing group. */

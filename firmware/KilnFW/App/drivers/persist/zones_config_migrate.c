@@ -836,6 +836,37 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * struct. */
         return true;
     }
+    case 24: {
+        /* v24 -> v25 (THIS pass, owner request: per-coil nameplate wattage
+         * override): coil_power_w is brand new, appended at the true tail
+         * after model_fit_ambient_c -- zone_cfg_v24_t is therefore a
+         * byte-for-byte prefix of the current (v25) zone_cfg_t, same "plain
+         * memcpy of the smaller historical shape" technique case 23 uses
+         * just above. Every zone's coil_power_w is left at 0 by this
+         * function's entry memset, and 0 IS this field's own "not
+         * overridden, use an equal share of the sum nameplate" sentinel --
+         * unlike case 23's model_fit_temp_c, no separate backfill is
+         * needed. */
+        zones_cfg_v24_t src;
+        memcpy(&src, blob, sizeof(src));
+        out->thermo_count = src.thermo_count;
+        out->relay_count = src.relay_count;
+        out->max_simultaneous_relays = src.max_simultaneous_relays;
+        out->continue_on_zone_trip = src.continue_on_zone_trip;
+        out->safety_tc_type = src.safety_tc_type;
+        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v24 value */
+        out->timing_profile_count = src.timing_profile_count;
+        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            memcpy(&out->zones[i], &src.zones[i], sizeof(src.zones[i]));
+            /* out->zones[i].coil_power_w already 0 from this function's
+             * entry memset -- see this case's own top comment. */
+        }
+        /* src.crc32 deliberately NOT carried over -- it covered the v24
+         * shape; nvs_save() stamps a fresh one over the current (v25)
+         * struct. */
+        return true;
+    }
     default:
         /* No known historical (or current) layout for this version --
          * zones_cfg_expected_len_for_version() already returned 0 for it and

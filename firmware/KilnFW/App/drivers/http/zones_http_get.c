@@ -503,6 +503,16 @@ esp_err_t zones_get_handler(httpd_req_t *req)
          * convention as model_k_dc/tuning_* above. */
         APPEND("\"model_fit_temp_c\":%.2f,\"model_fit_ambient_c\":%.2f,",
                (double)z->model_fit_temp_c, (double)z->model_fit_ambient_c);
+        /* ZONES_CFG_VERSION 24->25's coil_power_w -- per-coil nameplate
+         * wattage override, 0 meaning "not overridden, use an equal share
+         * of the whole-kiln max_expected_power_w nameplate sum" (see that
+         * field's own comment in zones_config_json.h). Emits the RAW stored
+         * value, same "0 is a real, round-trippable answer, never resolved
+         * server-side into a substituted number" convention hyst_c/min_on_s/
+         * min_off_s above use, and the same reason: a page that reads this
+         * back and reposts it untouched must see the operator's own choice,
+         * not this endpoint's guess at what the sum implies. */
+        APPEND("\"coil_power_w\":%.2f,", (double)z->coil_power_w);
         /* docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs (ZONES_CFG_VERSION 20->21): emits both
          * forms. "settings_source_groups" is the real, current per-group
          * data -- one key per SRC_GROUP_NAMES entry, current page's own

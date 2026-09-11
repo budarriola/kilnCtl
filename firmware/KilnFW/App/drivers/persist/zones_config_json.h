@@ -60,7 +60,7 @@ extern "C" {
  * value. Shared because both files must agree on what "the current version"
  * means: nvs_save() writes it, decode_zones_blob() decides whether a stored
  * blob needs migrating against it. */
-#define ZONES_CFG_VERSION 24
+#define ZONES_CFG_VERSION 25
 
 /* Bounds for zones_cfg_t::ease_off_window_mult (ZONES_CFG_VERSION 15->16,
  * 2026-09-03): the terminal ease-off's window, as a multiple of a zone's own
@@ -244,6 +244,60 @@ extern "C" {
 #define ZONE_MIN_ON_OFF_S_MIN 1
 #define ZONE_MIN_ON_OFF_S_MAX 3600
 #define ZONE_MIN_ON_OFF_S_DEFAULT 30
+
+/* zone_cfg_t::coil_power_w (ZONES_CFG_VERSION 24->25, owner request: "allow
+ * the user to enter different wattage for each coil"). 0 = SENTINEL, "not
+ * overridden" -- the operator has only answered the single whole-kiln
+ * max_expected_power_w nameplate question (safety_cfg_store's 0x0319,
+ * safety_commissioning_page.html), and every coil is assumed identical, so
+ * this zone's share is max_expected_power_w / relay_count (equal split --
+ * see zones_config_get_coil_power_w()). A nonzero value here OVERRIDES that
+ * equal share for this one zone, for a kiln with different-wattage
+ * elements. Both modes must keep working together: an operator who
+ * overrides zone 0 but leaves zones 1/2 at 0 gets an explicit figure for
+ * zone 0 and an equal split of the (whole, still-summed) nameplate for the
+ * other two -- NOT a re-split of some remaining "leftover" wattage, since
+ * this board has no way to know the un-overridden coils are identical to
+ * each other rather than merely unspecified.
+ *
+ * MIN/MAX mirror the SUM field's own plausibility window (safety_
+ * commissioning_page.html's max_expected_power_w input, "cosmetic" risk
+ * class, no firmware-side bound today beyond IEEE-float finiteness) --
+ * deliberately wide: this bench's own real fixture is a ~4W/120V test load
+ * (owner-confirmed, docs/audits -- "roughly 33-90 mA total"), a real kiln
+ * element can run into the multi-kW range. Deliberately NOT bounded against
+ * the whole-kiln sum here: zones_config_get_coil_power_w() (this module)
+ * has no reference to max_expected_power_w, which lives in the safety
+ * processor's committed-param cache on the OTHER side of the link -- a
+ * static, write-time bound against a number this module cannot read would
+ * either be silently skipped (the common case, sum not yet answered) or
+ * force a specific write ORDER (sum before any override) that nothing else
+ * in this schema requires. An override that happens to exceed the sum is
+ * still just a number: zone_sweep_expected_coil_current_a() (zones_
+ * current_sweep_engine.c) uses it as-is, and zone_sweep_check_expected_
+ * current()'s own advisory (never armed as a trip -- see that function's
+ * comment) is exactly the mechanism that would flag such a configuration
+ * mistake at the point where both numbers ARE in hand. 0.1W floor rejects
+ * an accidental
+ * zero-ish typo (0 already means "not overridden", so a genuine near-zero
+ * override needs to be at least this to be distinguishable from "not set");
+ * 100000W (100kW) ceiling is far past any kiln this board could plausibly
+ * control and exists only to catch a units slip (e.g. entering milliwatts
+ * or a stray extra digit) the same way ZONE_APPROACH_RATE_CAP_C_PER_HR_MAX's
+ * own comment reasons about an implausible parameter value.
+ *
+ * ROLLBACK NOTE (same hazard as any ZONES_CFG_VERSION bump, CLAUDE.md's
+ * `ota_rollback_esp()` section): firmware built before this pass refuses a
+ * v25 blob as newer than it knows and falls back to running that boot on
+ * FIRMWARE-DEFAULT PID gains for every zone, with no separate warning --
+ * flash itself is untouched, so reflashing the newer firmware restores the
+ * real config, but a firing started right after a rollback and before
+ * reflashing runs on defaults. Read `control_get_zones` (or `GET /api/
+ * zones/config`) back after ANY rollback, before heating, to confirm which
+ * config the board is actually running -- this applies board-wide, not
+ * just to coil_power_w. */
+#define ZONE_COIL_POWER_W_MIN 0.1f
+#define ZONE_COIL_POWER_W_MAX 100000.0f
 
 typedef struct {
     char name[ZONE_NAME_MAX_LEN + 1];
@@ -844,7 +898,100 @@ typedef struct {
      * nothing for these to describe either. */
     float model_fit_temp_c;
     float model_fit_ambient_c;
+    /* ZONES_CFG_VERSION 24->25: per-coil nameplate wattage override -- see
+     * this field's own bound macros (ZONE_COIL_POWER_W_MIN/MAX) just above
+     * for the full "0 = equal share of the sum" rationale. Appended at the
+     * true tail, same discipline as model_fit_temp_c/model_fit_ambient_c
+     * just above it -- a v24 (or earlier) blob's zones all land on 0 via
+     * this function's entry memset, which IS the correct default (unlike
+     * model_fit_temp_c's -273.15 sentinel, 0 needs no separate backfill
+     * here). */
+    float coil_power_w;
 } zone_cfg_t;
+
+/* Frozen v24 zone layout -- what zone_cfg_t looked like immediately before
+ * THIS pass (ZONES_CFG_VERSION 24->25): predates coil_power_w. Field order
+ * hand-copied from v24's actual shape (== v23's shape plus
+ * model_fit_temp_c/model_fit_ambient_c), never derived from the live
+ * struct -- same discipline as every other frozen zone_cfg_vN_t in this
+ * file. */
+typedef struct {
+    char name[ZONE_NAME_MAX_LEN + 1];
+    float cal_offset_c;
+    float pid_kp;
+    float pid_ki;
+    float pid_kd;
+    float max_ramp_c_per_hr;
+    float sanity_rate_c_per_min;
+    float max_temp_c;
+    float min_temp_c;
+    float heater_window_ms;
+    float heater_min_on_ms;
+    float heater_min_off_ms;
+    float guard_wrong_dir_window_s;
+    float guard_wrong_dir_rate_c_per_min;
+    float guard_off_settle_s;
+    float guard_runaway_rate_c_per_min;
+    float guard_runaway_margin_c;
+    float guard_drift_period_s;
+    float guard_sensor_fault_debounce_ticks;
+    float guard_frozen_window_s;
+    float cross_zone_max_delta_c;
+    float model_k_dc;
+    float model_tau_s;
+    float model_dead_time_s;
+    float fuzzy_strength_pct;
+    float coupling_coeff[MAX31856_CHANNEL_COUNT];
+    float coupling_tau_s[MAX31856_CHANNEL_COUNT];
+    float coupling_dead_time_s[MAX31856_CHANNEL_COUNT];
+    uint8_t relay_mask;
+    uint8_t control_mode;
+    uint8_t tc_type;
+    uint8_t thermo_mask;
+    uint8_t ct_mask;
+    uint8_t timing_profile;
+    uint8_t settings_source[SRC_GROUP_COUNT];
+    uint8_t  tuning_valid;
+    uint8_t  tuning_method;
+    uint8_t  tuning_rule;
+    uint8_t  tuning_settled;
+    uint8_t  tuning_extrapolation_converged;
+    uint8_t  tuning_tau_consistent;
+    float    tuning_baseline_c;
+    float    tuning_step_ambient_c;
+    float    tuning_raw_rise_c;
+    float    tuning_rise_inf_c;
+    uint32_t tuning_seq;
+    uint8_t  adaptive_tune_enabled;
+    float coupling_diag_k_dc;
+    float ease_off_window_mult;
+    float approach_rate_cap_c_per_hr;
+    float error_band_c;
+    float rate_band_c_per_s;
+    uint8_t relay_type;
+    float progress_band_c;
+    uint8_t zone_type;
+    uint8_t failsafe_state;
+    float hyst_c;
+    uint16_t min_on_s;
+    uint16_t min_off_s;
+    float model_fit_temp_c;
+    float model_fit_ambient_c;
+} zone_cfg_v24_t;
+
+/* 240 = 232 (zone_cfg_v23_t's own byte-for-byte size) + 4 (model_fit_temp_c)
+ * + 4 (model_fit_ambient_c). Confirmed against a standalone layout replica
+ * of this exact struct, never sizeof(zone_cfg_t) -- see zone_cfg_v22_t's
+ * own assert comment for why that name is never safe to use for this
+ * purpose. */
+_Static_assert(sizeof(zone_cfg_v24_t) == 240,
+               "zone_cfg_v24_t must match the on-flash v24 layout byte-for-byte (240 bytes)"); /* v24 -- predates coil_power_w */
+_Static_assert(offsetof(zone_cfg_v24_t, name) == 0,
+               "zone_cfg_v24_t::name must stay at byte offset 0");
+_Static_assert(offsetof(zone_cfg_v24_t, model_fit_temp_c) == 232,
+               "zone_cfg_v24_t::model_fit_temp_c must stay at byte offset 232");
+_Static_assert(offsetof(zone_cfg_v24_t, model_fit_ambient_c) == 236,
+               "zone_cfg_v24_t::model_fit_ambient_c must stay at byte offset 236");
 
 /* Frozen v23 zone layout -- what zone_cfg_t looked like immediately before
  * THIS pass (ZONES_CFG_VERSION 23->24): predates model_fit_temp_c/
@@ -2938,6 +3085,28 @@ typedef struct {
     uint32_t crc32;
 } zones_cfg_v23_t; /* v23 -- what zones_cfg_t looked like immediately before THIS
                      * pass; predates model_fit_temp_c/model_fit_ambient_c. */
+
+/* Frozen v24 layout -- what zones_cfg_t looked like immediately before THIS
+ * pass (ZONES_CFG_VERSION 24->25): zones[] is the per-zone shape that
+ * predates this pass's coil_power_w addition (zone_cfg_v24_t, frozen
+ * above). Same shape as v23's own wrapper -- no wrapper-level scalar
+ * removed here either, just zones[] pinned to the smaller, historical
+ * per-zone type. This is what a LIVE, already-commissioned v24 board looks
+ * like on flash right now -- the exact blob a v24->v25 upgrade must read. */
+typedef struct {
+    uint8_t version;
+    uint8_t thermo_count;
+    uint8_t relay_count;
+    uint8_t max_simultaneous_relays;
+    uint8_t continue_on_zone_trip;
+    uint8_t safety_tc_type;
+    zone_cfg_v24_t zones[MAX31856_CHANNEL_COUNT];
+    uint8_t timing_profile_count;
+    zone_timing_profile_t timing_profiles[MAX31856_CHANNEL_COUNT];
+    float pc_link_abort_silence_ms;
+    uint32_t crc32;
+} zones_cfg_v24_t; /* v24 -- what zones_cfg_t looked like immediately before THIS
+                     * pass; predates coil_power_w. */
 
 /* Frozen v21 layout -- what zones_cfg_t looked like immediately before THIS
  * pass (ZONES_CFG_VERSION 21->22): zones[] is the per-zone shape that

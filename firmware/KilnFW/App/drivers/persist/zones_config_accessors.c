@@ -37,6 +37,31 @@ bool zones_config_set_max_ramp(uint8_t zone_index, float c_per_hr)
     return nvs_save() == ESP_OK;
 }
 
+bool zones_config_get_coil_power_w(uint8_t zone_index, float *out_power_w)
+{
+    if (!out_power_w || zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    *out_power_w = s_zones.cfg.zones[zone_index].coil_power_w;
+    return true;
+}
+
+/* Same bound parse_zone_fields()'s z%u_coil_power enforces. 0 is legal (the
+ * documented "not overridden" encoding). */
+bool zones_config_set_coil_power_w(uint8_t zone_index, float power_w)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    if (!isfinite(power_w) ||
+        (power_w != 0.0f && (power_w < ZONE_COIL_POWER_W_MIN || power_w > ZONE_COIL_POWER_W_MAX))) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].coil_power_w = power_w;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
 bool zones_config_get_cal_offset(uint8_t zone_index, float *out_cal_offset_c)
 {
     if (!out_cal_offset_c || zone_index >= s_zones.cfg.thermo_count) {

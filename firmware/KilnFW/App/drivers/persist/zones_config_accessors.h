@@ -910,6 +910,29 @@ bool zones_config_set_sanity_rate(uint8_t zone_index, float c_per_min);
  * (0..ZONE_MAX_RAMP_C_PER_HR_MAX). */
 bool zones_config_set_max_ramp(uint8_t zone_index, float c_per_hr);
 
+/* zone_cfg_t::coil_power_w raw accessor (ZONES_CFG_VERSION 24->25). Returns
+ * the RAW stored value, 0.0f meaning "not overridden" -- see that field's
+ * own ZONE_COIL_POWER_W_MIN/MAX comment in zones_config_json.h. This
+ * getter deliberately does NOT resolve the 0 sentinel into an equal share
+ * of the whole-kiln nameplate sum: that sum (max_expected_power_w, safety
+ * param 0x0319) lives in the safety processor's committed-param cache
+ * (safety_cfg_store.c/zone_cfg_committed_f32() in
+ * zones_current_sweep_task.c), which this module has no reference to and
+ * must not reach into -- the caller who has both numbers
+ * (zone_sweep_check_expected_current(), zones_current_sweep_engine.c) does
+ * the equal-split resolution itself. Same "false means cannot answer, zero
+ * is a real answer" convention as zones_config_get_max_ramp() above. */
+bool zones_config_get_coil_power_w(uint8_t zone_index, float *out_power_w);
+
+/* Setter for the getter above. 0.0f is always legal (the documented "not
+ * overridden" encoding); a nonzero value must be within
+ * [ZONE_COIL_POWER_W_MIN, ZONE_COIL_POWER_W_MAX]. Does not compare against
+ * the sum nameplate -- that cross-check happens at the point of use, on the
+ * safety processor's committed value, not at write time here (the sum may
+ * not have been answered yet, or may change later; a static comparison at
+ * write time could go stale). */
+bool zones_config_set_coil_power_w(uint8_t zone_index, float power_w);
+
 /* Getter/setter pair for a zone's cal_offset_c -- applied at read time by
  * zones_config_apply_cal() below, but until now there was no way to read the
  * stored offset itself back out (only its already-applied effect on a
@@ -1439,6 +1462,17 @@ typedef struct {
      * re-sweep; zero for every zone in per_zone topology, where this
      * refusal path is never reached. */
     uint8_t summed_unmeasured_mask;
+    /* Owner feature (2026-09-10): nameplate-implied expected-current
+     * advisory -- see zone_sweep_check_expected_current()'s own doc comment
+     * (zones_current_sweep_engine.c) for the full rationale and why this is
+     * ESP-side-only and never escalated into a Pico safety trip. Bit zi set
+     * means zone zi's measured normal current disagreed with what its
+     * nameplate (whole-kiln sum, or a coil_power_w override) implies it
+     * should be, by more than the same plausibility band k_ct calibration
+     * already uses. nameplate_reason is "" only when nothing needs saying,
+     * same convention as the other *_reason fields above. */
+    uint8_t nameplate_mismatch_mask;
+    char    nameplate_reason[96];
 } zone_sweep_status_t;
 
 void zones_current_sweep_get_status(zone_sweep_status_t *out);

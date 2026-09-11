@@ -479,8 +479,9 @@ typedef struct {
     char ct_reason_escaped[96 * 2 + 1];       /* ::ct_map_reason[96] */
     char k_reason_escaped[96 * 2 + 1];        /* ::k_ct_reason[96] */
     char i_normal_reason_escaped[96 * 2 + 1]; /* ::i_normal_reason[96] */
-    char json[1200]; /* heap now, not stack -- kept at the size this handler already needed once
-                       * i_normal_reason_escaped's worst case is included; no stack cost either way. */
+    char nameplate_reason_escaped[96 * 2 + 1]; /* ::nameplate_reason[96] */
+    char json[1500]; /* heap now, not stack -- widened for nameplate_reason_escaped's own
+                       * worst case; no stack cost either way, this is heap. */
 } sweep_status_scratch_t;
 
 static esp_err_t sweep_status_get_handler(httpd_req_t *req)
@@ -505,16 +506,24 @@ static esp_err_t sweep_status_get_handler(httpd_req_t *req)
      * do (independent failure modes, one shared string could only ever
      * report one). */
     zones_json_escape(st.i_normal_reason, s->i_normal_reason_escaped, sizeof(s->i_normal_reason_escaped));
+    /* Owner feature: nameplate-implied expected-current advisory -- reports
+     * separately from i_normal_reason for the same reason every other *_
+     * reason field here does (an independent check, one shared string could
+     * only ever report one). Never a safety trip -- see
+     * zone_sweep_check_expected_current()'s own doc comment. */
+    zones_json_escape(st.nameplate_reason, s->nameplate_reason_escaped, sizeof(s->nameplate_reason_escaped));
     int n = snprintf(s->json, sizeof(s->json),
                      "{\"state\":\"%s\",\"zone_index\":%u,\"zones_done\":%u,\"zones_total\":%u,"
                      "\"reason\":\"%s\",\"ct_map_derived_mask\":%u,\"ct_map_reason\":\"%s\","
                      "\"k_ct_derived_mask\":%u,\"k_ct_reason\":\"%s\","
                      "\"i_normal_pushed_mask\":%u,\"i_normal_reason\":\"%s\","
-                     "\"summed_unmeasured_mask\":%u}",
+                     "\"summed_unmeasured_mask\":%u,"
+                     "\"nameplate_mismatch_mask\":%u,\"nameplate_reason\":\"%s\"}",
                      zone_sweep_state_str(st.state), st.zone_index, st.zones_done, st.zones_total,
                      s->reason_escaped, st.ct_map_derived_mask, s->ct_reason_escaped,
                      st.k_ct_derived_mask, s->k_reason_escaped,
-                     st.i_normal_pushed_mask, s->i_normal_reason_escaped, st.summed_unmeasured_mask);
+                     st.i_normal_pushed_mask, s->i_normal_reason_escaped, st.summed_unmeasured_mask,
+                     st.nameplate_mismatch_mask, s->nameplate_reason_escaped);
     httpd_resp_set_type(req, "application/json");
     esp_err_t ret = httpd_resp_send(req, s->json, n > 0 ? (size_t)n : 0);
     free(s);

@@ -388,6 +388,18 @@ bool zones_config_json_validate(const zones_cfg_t *cand, const char **err_reason
             *err_reason = "zone model_fit_ambient_c out of range";
             return false;
         }
+        /* ZONES_CFG_VERSION 24->25: coil_power_w. 0 is always legal (the
+         * documented "not overridden, use an equal share of the sum
+         * nameplate" sentinel); anything else must be finite and inside the
+         * same bound zones_config_set_coil_power_w() enforces at write
+         * time -- kept in sync deliberately, same reasoning as
+         * model_fit_temp_c's own comment just above. */
+        if (z->coil_power_w != 0.0f &&
+            (!isfinite(z->coil_power_w) || z->coil_power_w < ZONE_COIL_POWER_W_MIN ||
+             z->coil_power_w > ZONE_COIL_POWER_W_MAX)) {
+            *err_reason = "zone coil_power_w out of range";
+            return false;
+        }
         if (!isfinite(z->max_temp_c) || z->max_temp_c < 0.0f || z->max_temp_c > ZONE_MAX_TEMP_C_MAX) {
             *err_reason = "zone max_temp_c out of range";
             return false;

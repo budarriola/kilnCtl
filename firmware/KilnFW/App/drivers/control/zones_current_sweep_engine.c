@@ -325,6 +325,100 @@ const char *zone_kct_derive_str(zone_kct_derive_t r)
     }
 }
 
+/* ---- Owner feature (2026-09-10): nameplate-implied expected current -----
+ * "the user should be able to set the name plate value and then on the
+ * first heating of the coils find the normal current. Cause a fault if
+ * much higher or lower than expected. Account that all coils are the same
+ * wattage and that the name plate is for the sum. Allow the user to enter
+ * different wattage for each coil."
+ *
+ * zone_sweep_expected_coil_current_a() implements "account that all coils
+ * are the same wattage and the nameplate is for the sum, AND allow a
+ * per-coil override": an override (coil_power_w_override > 0, zone_cfg_t::
+ * coil_power_w) always wins; otherwise this zone's expected share is the
+ * whole-kiln sum split evenly across relay_count coils. Both modes are the
+ * SAME function, not two separate code paths, so there is only ever one
+ * place that can disagree with itself about which convention applies.
+ *
+ * I_expected = P_share / V is the exact formula CLAUDE.md's mains_voltage_v
+ * warning describes (once commissioned at 240V on a 120V board, silently
+ * doubling every derived current) -- mains_voltage_v is read from the SAME
+ * committed safety-processor cache (0x030E) every other consumer in this
+ * file uses (zone_sweep_derive_k_ct() above), so there is exactly one
+ * number in this firmware that answers "what mains voltage feeds this
+ * board's P/V", never a second copy that could drift out of agreement with
+ * it. */
+float zone_sweep_expected_coil_current_a(float coil_power_w_override, float sum_power_w, uint8_t relay_count,
+                                          float mains_voltage_v)
+{
+    float share_w;
+    if (isfinite(coil_power_w_override) && coil_power_w_override > 0.0f) {
+        share_w = coil_power_w_override; /* explicit per-coil override wins */
+    } else if (relay_count > 0 && isfinite(sum_power_w) && sum_power_w > 0.0f) {
+        share_w = sum_power_w / (float)relay_count; /* equal-split default */
+    } else {
+        return -1.0f; /* no usable nameplate at all -- negative is never a valid current */
+    }
+    if (!isfinite(share_w) || share_w <= 0.0f || !isfinite(mains_voltage_v) || mains_voltage_v <= 0.0f) {
+        return -1.0f;
+    }
+    float expected_a = share_w / mains_voltage_v;
+    return (isfinite(expected_a) && expected_a > 0.0f) ? expected_a : -1.0f;
+}
+
+/* Pure comparison: does this zone's already-measured normal current
+ * (zones_config_get_normal_current(), the SAME value zone_sweep_plan_i_
+ * normal() pushes to the Pico's S14/S15 baseline) agree with what the
+ * nameplate implies it should be?
+ *
+ * Reuses ZONE_KCT_RATIO_MIN/MAX (0.2x-5.0x) verbatim rather than inventing
+ * a second plausibility band: it is the same shape of question this file
+ * already answers for k_ct calibration ("does a measured current agree
+ * with a nameplate-implied one, within CURRENT_SENSE.md sec 0's own
+ * documented ~2x accuracy scope") -- see zone_sweep_derive_k_ct()'s own
+ * comment for that provenance. A tighter band here would be inventing
+ * precision the same hardware does not have anywhere else in this file.
+ *
+ * NOT armed as a safety trip anywhere -- this is an ESP-side advisory
+ * result only (zone_sweep_ctx_t::nameplate_mismatch_mask/nameplate_reason,
+ * surfaced on GET /api/zones' status). docs/audits/s14_s15_followup_
+ * summed_kct_and_averaging_2026-09-10.md found this bench's own current
+ * chain sits against an UNCHARACTERIZED SYSTEMATIC offset
+ * (zero_counts[2]=63, no live-read path to characterize it) at the ~4W
+ * fixture load this bench actually draws -- averaging cannot correct a
+ * fixed offset at any sample count, so a "fault" armed against that offset
+ * would not be testing the nameplate agreement the owner asked for, it
+ * would be testing the offset. This function still runs and still reports
+ * MISMATCH/OK honestly; nothing downstream escalates that into a trip. A
+ * real kiln drawing amps (not milliamps) makes that same offset negligible
+ * by comparison, which is exactly where this check is meant to matter. */
+zone_nameplate_check_t zone_sweep_check_expected_current(float measured_a, float expected_a)
+{
+    if (!isfinite(expected_a) || expected_a <= 0.0f) {
+        return ZONE_NAMEPLATE_CHECK_NO_NAMEPLATE;
+    }
+    if (!isfinite(measured_a) || measured_a <= 0.0f) {
+        return ZONE_NAMEPLATE_CHECK_NO_MEASUREMENT;
+    }
+    float ratio = measured_a / expected_a;
+    if (!isfinite(ratio) || ratio < ZONE_KCT_RATIO_MIN || ratio > ZONE_KCT_RATIO_MAX) {
+        return ZONE_NAMEPLATE_CHECK_MISMATCH;
+    }
+    return ZONE_NAMEPLATE_CHECK_OK;
+}
+
+const char *zone_nameplate_check_str(zone_nameplate_check_t r)
+{
+    switch (r) {
+    case ZONE_NAMEPLATE_CHECK_OK: return "ok";
+    case ZONE_NAMEPLATE_CHECK_NO_NAMEPLATE: return "no usable nameplate/coil-share/mains-voltage yet";
+    case ZONE_NAMEPLATE_CHECK_NO_MEASUREMENT: return "no measured normal current for this zone yet";
+    case ZONE_NAMEPLATE_CHECK_MISMATCH:
+        return "measured normal current disagrees with the nameplate-implied expectation";
+    default: return "unknown";
+    }
+}
+
 const char *zone_sweep_refusal_str(zone_sweep_refusal_t r)
 {
     switch (r) {
