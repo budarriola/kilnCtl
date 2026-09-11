@@ -78,6 +78,53 @@ symbolization path, fixed together):
      superseded files were reconstructed once, by hand, from each orphaned
      ELF's own embedded esp_app_desc build timestamp, so every pre-existing
      on-disk ELF is now either reachable or deliberately protected.
+
+2026-09-10, opus review round 4 (round 3's fix was a snapshot of the leak,
+not the leak -- the hand reconstruction above was already stale by the time
+it was committed, since nothing stops `archive_elf.cmake`'s POST_BUILD copy
+from depositing the next unregistered file):
+  1. Root cause: `archive_elf.cmake` (invoked on every `idf.py build`) copies
+     an ELF into this directory keyed only by content hash and never touches
+     manifest.json -- so every ordinary build produces a file simultaneously
+     unreachable by lookup and unprotected from pruning. Closed from the
+     read/write side of this module rather than the cmake side (no reliable
+     way to compute the runtime-reported `fw_build` identity at cmake time):
+     `adopt_orphaned_kiln_elfs()` scans the archive directory for
+     `KilnCtrl-*.elf` files the manifest/superseded registry doesn't
+     reference, recovers each one's identity by scanning the ELF's own bytes
+     for its embedded `esp_app_desc_t` (`esp_app_desc.scan_elf_for_app_descs`
+     -- pyelftools is not available in this environment, confirmed 2026-09-10,
+     so this scans for the struct's magic word directly rather than parsing
+     ELF section headers), and registers it. Called automatically at the top
+     of every `archive_kiln_elf()` call, so the backlog self-heals on the
+     next flash and cannot grow unboundedly between fixes again. Also
+     callable directly for one-off maintenance; used once, 2026-09-10, to
+     adopt the 8 orphans measured live at review time (0 left unresolved).
+  2. `_prune()` used to protect only the `KEEP_RECENT_ENTRIES` (10)
+     most-recently-archived manifest entries, not all of them -- measured
+     live: 32 of 42 manifest entries were unprotected, one `_prune` call
+     away from deleting a file a real lookup could still resolve to.
+     Protection is now unconditional for every manifest- or
+     superseded-referenced elf_key, regardless of age -- a manifest entry
+     exists precisely so a build can be found again later, and there is no
+     principled point at which that stops being true. This means the
+     MAX_ARCHIVED_ELFS cap can no longer be enforced once registered content
+     alone exceeds it (already true live, ~1.3 GB across 68 files against a
+     60-file cap): `_prune` now says so loudly instead of silently leaving
+     the directory over cap or, worse, silently deleting something
+     reachable. Shedding registered identities is a separate, deliberate
+     decision for a human, not a side effect of an ordinary archive call.
+  3. `_load_manifest`'s raw/normalized-key migration used to drop the
+     lower-`seq` duplicate with no record at all when a collision was found
+     -- reproducing, by a different mechanism, the exact "unregistered
+     producer" class defect 1 above closes. The dropped entry is now
+     recorded into `superseded.json` (whichever of the two loses, regardless
+     of dict iteration order -- an earlier draft of this fix only handled
+     one direction of that comparison). A manifest whose top-level JSON
+     value isn't an object, or whose individual entry isn't one, is now a
+     loud warning instead of either a silent `{}` (indistinguishable from
+     "no manifest yet") or an uncaught `AttributeError` that took down every
+     caller over one malformed row.
 """
 
 from __future__ import annotations
@@ -85,13 +132,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import time
 from dataclasses import dataclass, asdict
 from typing import Optional
 
 from . import stale_check
-from .esp_app_desc import normalize_build_timestamp
+from .esp_app_desc import normalize_build_timestamp, scan_elf_for_app_descs
 
 MAX_ARCHIVED_ELFS = 60
 KEEP_RECENT_ENTRIES = 10
@@ -184,7 +232,15 @@ def _sha256_key(path: str) -> str:
     return h.hexdigest()[:12]
 
 
-def _load_manifest(archive_dir: str) -> dict:
+def _load_manifest(archive_dir: str, *, persist_migration: bool = True) -> dict:
+    """Loads and normalizes the manifest. `persist_migration` controls
+    whether a raw/normalized-key collision that drops an entry (see below)
+    is recorded into superseded.json immediately -- callers that already
+    hold archive_dir context and intend to write anyway (e.g. `_archive`)
+    can pass True (the default); it is also safe from a pure read path
+    (`find_kiln_elf_for_build`), which is exactly where this needs to run
+    since that is the only place a stale on-disk manifest otherwise gets
+    read at all."""
     path = os.path.join(archive_dir, MANIFEST_NAME)
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -192,6 +248,17 @@ def _load_manifest(archive_dir: str) -> dict:
     except (OSError, json.JSONDecodeError):
         return {}
     if not isinstance(raw, dict):
+        # 2026-09-10 (opus review round 3, defect 3): a corrupt manifest
+        # whose top-level value isn't an object at all previously fell
+        # through to the same `return {}` as "file absent" -- indistinguishable
+        # from a fresh archive. Make the distinction loud instead of silent;
+        # callers still get an empty (usable) manifest rather than a crash,
+        # since a hard failure here would block every subsequent archive/
+        # lookup call over one corrupt file.
+        print(f"elf_archive: WARNING -- {path} does not contain a JSON object "
+              f"(got {type(raw).__name__}); treating as empty. This manifest is "
+              "corrupt and needs manual inspection -- entries it held (if any) "
+              "are not being deleted, just not read.")
         return {}
     # 2026-09-10 (opus review round 3, defect 1): migrate raw (un-normalized)
     # keys transparently on every read. archive_kiln_elf()/find_kiln_elf_for_
@@ -207,12 +274,50 @@ def _load_manifest(archive_dir: str) -> dict:
     # already-normalized keys, and harmless for SaftyFW identity keys
     # (commit_date_time, no internal whitespace runs to collapse).
     manifest: dict = {}
+    dropped: list = []  # entries that lost the raw/normalized collision below
     for key, entry in raw.items():
+        if not isinstance(entry, dict):
+            # 2026-09-10 (opus review round 3, defect 3): a malformed
+            # individual entry (not a dict) previously raised AttributeError
+            # out of this function on the very next `.get()` call, taking
+            # down every caller (archive AND lookup) over one bad row.
+            # Skip it loudly instead -- it is neither reachable nor
+            # protected, same as an unregistered orphan file, but that is a
+            # narrower, more honest failure than refusing to read the whole
+            # manifest.
+            print(f"elf_archive: WARNING -- manifest entry {key!r} in {path} "
+                  f"is not an object (got {type(entry).__name__}); skipping it.")
+            continue
         norm_key = normalize_build_timestamp(key)
         prior = manifest.get(norm_key)
-        if prior is not None and prior.get("seq", 0) > entry.get("seq", 0):
-            continue  # keep whichever raw/normalized duplicate is more recent
+        if prior is None:
+            manifest[norm_key] = entry
+            continue
+        # A raw/normalized collision: keep whichever of the two has the
+        # higher seq, record the OTHER one as dropped -- regardless of which
+        # one (the earlier-seen `prior` or the just-read `entry`) that turns
+        # out to be. 2026-09-10 (opus review round 4, defect 3 correction):
+        # an earlier version of this branch only handled the case where
+        # `entry` (processed second, in dict order) lost -- if `prior`
+        # (processed first) had the LOWER seq instead, `manifest[norm_key] =
+        # entry` below silently overwrote it with no record at all, which is
+        # the exact silent-drop this fix exists to close. Iteration order
+        # must not change which duplicate gets recorded.
+        if prior.get("seq", 0) > entry.get("seq", 0):
+            dropped.append((norm_key, entry))
+            continue  # keep `prior`, already in manifest
+        dropped.append((norm_key, prior))
         manifest[norm_key] = entry
+    if dropped and persist_migration:
+        superseded = _load_superseded(archive_dir)
+        changed = False
+        for norm_key, entry in dropped:
+            bucket = superseded.setdefault(norm_key, [])
+            if not any(s.get("elf_key") == entry.get("elf_key") for s in bucket):
+                bucket.append(entry)
+                changed = True
+        if changed:
+            _write_superseded(archive_dir, superseded)
     return manifest
 
 
@@ -247,6 +352,120 @@ def _write_superseded(archive_dir: str, superseded: dict) -> None:
     os.replace(tmp, path)
 
 
+def adopt_orphaned_kiln_elfs(archive_dir: str) -> tuple[int, list[str]]:
+    """Scans `archive_dir` for `KilnCtrl-<key>.elf` files that neither the
+    manifest nor the superseded registry references, and registers each one
+    it can positively identify -- closing defect 1 (2026-09-10, opus review
+    round 4): `archive_elf.cmake`'s POST_BUILD step (see that file) copies
+    a freshly-linked ELF into this directory on every ordinary `idf.py
+    build`, keyed only by content hash, and never touches manifest.json.
+    Every such file is deposited simultaneously unreachable by lookup (no
+    manifest entry) and unprotected from `_prune` (only manifest/superseded-
+    referenced files survive pruning) -- confirmed live: 7 orphans measured
+    against a 42-entry manifest, one of which (`ca44736c7d9b`) is the exact
+    ELF a stack-budget measurement was taken against.
+
+    Identity for an orphan is recovered from the ELF's own embedded
+    `esp_app_desc_t` (`esp_app_desc.scan_elf_for_app_descs` -- see that
+    function for why this scans for the struct's magic word rather than
+    parsing ELF section headers). An orphan that yields zero or more than
+    one distinct timestamp is left alone and reported rather than guessed at
+    -- adopting it under a fabricated identity would be strictly worse than
+    leaving it unregistered, since a wrong manifest entry produces a
+    confident, WRONG symbolization instead of an honest "not found".
+
+    Called automatically from `_archive()` (KilnFW path only -- SaftyFW has
+    no embedded HTTP-reportable build timestamp to scan for) before every
+    ordinary archive, so the set of orphans can only shrink over time absent
+    a cmake/toolchain change. Also callable directly for one-off maintenance
+    against the existing backlog.
+
+    Returns (adopted_count, still_unresolved_filenames)."""
+    _guard_against_test_write(archive_dir)
+    prefix = "KilnCtrl"
+    try:
+        names = sorted(
+            name for name in os.listdir(archive_dir)
+            if name.startswith(prefix + "-") and name.endswith(".elf")
+            and name != f"{prefix}-latest.elf"
+        )
+    except OSError:
+        return 0, []
+
+    manifest = _load_manifest(archive_dir)
+    superseded = _load_superseded(archive_dir)
+    known_keys = {e.get("elf_key") for e in manifest.values() if isinstance(e, dict)}
+    for bucket in superseded.values():
+        known_keys.update(e.get("elf_key") for e in bucket if isinstance(e, dict))
+
+    key_re = re.compile(rf"^{prefix}-([0-9a-f]{{12}})\.elf$")
+    orphans = []
+    for name in names:
+        m = key_re.match(name)
+        if m and m.group(1) not in known_keys:
+            orphans.append((name, m.group(1)))
+
+    if not orphans:
+        return 0, []
+
+    adopted = 0
+    unresolved: list[str] = []
+    manifest_dirty = False
+    superseded_dirty = False
+    for name, elf_key in orphans:
+        elf_path = os.path.join(archive_dir, name)
+        try:
+            descs = scan_elf_for_app_descs(elf_path)
+        except OSError as exc:
+            print(f"elf_archive: WARNING -- could not scan orphan {name} for identity: {exc}")
+            unresolved.append(name)
+            continue
+        if len(descs) != 1:
+            print(f"elf_archive: WARNING -- orphan {name} yielded "
+                  f"{len(descs)} candidate build identities (need exactly 1); "
+                  "leaving it unregistered rather than guessing.")
+            unresolved.append(name)
+            continue
+        identity = normalize_build_timestamp(descs[0].build_timestamp)
+        entry = {
+            "elf_key": elf_key,
+            "identity": identity,
+            "seq": 1 + max((e.get("seq", 0) for e in manifest.values()), default=0),
+            "archived_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(os.path.getmtime(elf_path))),
+            "git_commit": None,
+            "source": "adopted:orphan-scan",
+        }
+        prior = manifest.get(identity)
+        if prior is None:
+            manifest[identity] = entry
+            manifest_dirty = True
+        elif prior.get("elf_key") == elf_key:
+            # Already the live entry's key by some other path -- nothing to do.
+            pass
+        else:
+            # Identity collision with an existing, different, current entry:
+            # don't disturb which one is "live" based only on a directory
+            # scan -- record the orphan as superseded so it is reachable via
+            # the superseded registry and protected from pruning, same as
+            # any other identity collision (see _archive's own handling).
+            bucket = superseded.setdefault(identity, [])
+            if not any(s.get("elf_key") == elf_key for s in bucket):
+                bucket.append(entry)
+                superseded_dirty = True
+        adopted += 1
+        known_keys.add(elf_key)
+
+    if manifest_dirty:
+        _write_manifest(archive_dir, manifest)
+    if superseded_dirty:
+        _write_superseded(archive_dir, superseded)
+    if adopted:
+        print(f"elf_archive: adopted {adopted} orphaned ELF(s) in {archive_dir} "
+              "into the manifest/superseded registry (archive_elf.cmake's "
+              "POST_BUILD copy never registers what it writes).")
+    return adopted, unresolved
+
+
 @dataclass
 class ArchiveResult:
     elf_key: str
@@ -268,6 +487,14 @@ def _archive(elf_path: str, archive_dir: str, prefix: str, identity: str,
         shutil.copyfile(elf_path, dest)
     latest = os.path.join(archive_dir, f"{prefix}-latest.elf")
     shutil.copyfile(elf_path, latest)
+
+    if prefix == "KilnCtrl":
+        # 2026-09-10 (opus review round 4, defect 1): adopt any orphans left
+        # behind by archive_elf.cmake's POST_BUILD copy (which never
+        # registers what it writes) before this call adds its own entry --
+        # keeps the backlog from growing between flashes and self-heals the
+        # existing one over time. See adopt_orphaned_kiln_elfs's docstring.
+        adopt_orphaned_kiln_elfs(archive_dir)
 
     manifest = _load_manifest(archive_dir)
     # 2026-09-10 (opus review round 3, defect 4): if this identity is already
@@ -308,13 +535,34 @@ def _archive(elf_path: str, archive_dir: str, prefix: str, identity: str,
 
 
 def _prune(archive_dir: str, prefix: str, manifest: dict, superseded: Optional[dict] = None) -> None:
-    """Caps the archive at MAX_ARCHIVED_ELFS files, deleting oldest-by-mtime
-    first. Never deletes `<prefix>-latest.elf`, never deletes a file whose
-    elf_key is referenced by one of the KEEP_RECENT_ENTRIES most-recently-
-    archived manifest entries, and never deletes a file whose elf_key is
-    recorded in `superseded` (an older build that shares its fw_build
-    identity with a newer one, see SUPERSEDED_NAME) -- those are exactly the
-    files that used to be neither reachable nor protected."""
+    """Caps the archive at MAX_ARCHIVED_ELFS files where it safely can,
+    deleting oldest-by-mtime first. Never deletes `<prefix>-latest.elf`, and
+    never deletes a file whose elf_key is referenced by ANY manifest entry
+    or ANY superseded entry (an older build that shares its fw_build
+    identity with a newer one, see SUPERSEDED_NAME).
+
+    2026-09-10 (opus review round 4, defect 2): this used to protect only
+    the KEEP_RECENT_ENTRIES=10 most-recently-archived manifest entries, on
+    the theory that 10 was enough headroom under a 60-file cap. Measured
+    live: 42 manifest entries existed against that 10-entry protection list,
+    so 32 manifest-REFERENCED files -- files a real panic's fw_build lookup
+    can still resolve to -- sat exactly as unprotected as the true orphans,
+    one `_prune` call away from `find_kiln_elf_for_build` reporting a
+    matching manifest entry whose file was already deleted. A manifest entry
+    exists specifically so a build can be found again later; there is no
+    principled age past which that stops being true. So protection is now
+    unconditional for anything the manifest or superseded registry still
+    names -- this can only make `_prune` delete FEWER files than before,
+    never more, and never anything reachable.
+
+    A consequence: once total referenced+superseded files exceed
+    MAX_ARCHIVED_ELFS (as they already do -- see the loud warning below),
+    the cap can no longer be enforced by deleting registered content, and
+    this function says so instead of silently leaving the directory over
+    cap. Shedding registered files is a separate, deliberate decision for a
+    human to make (which identities are actually safe to give up), not
+    something this function should do as a side effect of being called
+    after an ordinary archive."""
     try:
         entries = sorted(
             (name for name in os.listdir(archive_dir)
@@ -327,13 +575,13 @@ def _prune(archive_dir: str, prefix: str, manifest: dict, superseded: Optional[d
         return
 
     protected_keys = set()
-    for entry in sorted(manifest.values(), key=lambda e: e.get("seq", 0), reverse=True)[:KEEP_RECENT_ENTRIES]:
-        key = entry.get("elf_key")
+    for entry in manifest.values():
+        key = entry.get("elf_key") if isinstance(entry, dict) else None
         if key:
             protected_keys.add(f"{prefix}-{key}.elf")
     for bucket in (superseded or {}).values():
         for entry in bucket:
-            key = entry.get("elf_key")
+            key = entry.get("elf_key") if isinstance(entry, dict) else None
             if key:
                 protected_keys.add(f"{prefix}-{key}.elf")
 
@@ -352,6 +600,25 @@ def _prune(archive_dir: str, prefix: str, manifest: dict, superseded: Optional[d
             deleted += 1
         except OSError:
             continue
+
+    if deleted < to_delete_count:
+        # 2026-09-10 (opus review round 4, defect 4): this used to exit
+        # here with no signal at all -- indistinguishable from "the cap
+        # didn't need enforcing". A cap that is silently unenforceable is
+        # worse than no cap: the docstring/callers still believe 60 is a
+        # real ceiling. `superseded` protection is also permanent and
+        # append-only (nothing retires an entry once written), so this
+        # condition can only get worse over time on its own, never better,
+        # without a deliberate human decision.
+        print(f"elf_archive: WARNING -- {archive_dir} holds {len(entries)} "
+              f"{prefix} ELFs against a cap of {MAX_ARCHIVED_ELFS}, but only "
+              f"{deleted} of {to_delete_count} over-cap file(s) could be "
+              "deleted because the rest are referenced by the manifest or "
+              "superseded registry. The cap is NOT being enforced. This is "
+              "a deliberate correctness-over-cap tradeoff (see _prune's "
+              "docstring), not a bug being masked -- but it means disk usage "
+              "here is now unbounded until a human decides which registered "
+              "identities are safe to retire and removes them explicitly.")
 
 
 def archive_kiln_elf(elf_path: str, fw_build: str, git_commit: Optional[str],

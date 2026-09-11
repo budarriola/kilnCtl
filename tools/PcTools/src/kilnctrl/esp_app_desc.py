@@ -169,3 +169,67 @@ def build_timestamps_match(app_desc: AppDesc, fw_build: Optional[str]) -> bool:
     if fw_build is None:
         return False
     return normalize_build_timestamp(app_desc.build_timestamp) == normalize_build_timestamp(fw_build)
+
+
+def scan_elf_for_app_descs(elf_path: str) -> list[AppDesc]:
+    """Recovers the esp_app_desc_t(s) embedded in a linked ELF (as opposed to
+    a flashable .bin image, which `parse_app_desc_file` handles).
+
+    Added 2026-09-10 for elf_archive.py's orphan-adoption path: an ELF that
+    landed in the archive directory via `archive_elf.cmake`'s POST_BUILD copy
+    (see that file) is never registered in elf_archive.py's manifest, so it
+    is both unreachable by lookup and unprotected from pruning. Rather than
+    trusting the ELF's filename or mtime for identity, this reads the same
+    struct `parse_app_desc` reads out of a .bin -- but an ELF has no fixed
+    `esp_image_header_t`/`esp_image_segment_header_t` preceding it (those are
+    added by esptool's elf2image step when producing the .bin), so the fixed
+    APP_DESC_OFFSET=0x20 does not apply here.
+
+    Instead of parsing ELF section headers (which would need pyelftools --
+    not available in this environment, confirmed 2026-09-10), this scans the
+    raw file for the distinctive `ESP_APP_DESC_MAGIC_WORD` (0xABCD5432,
+    little-endian) and attempts to parse an `esp_app_desc_t` at each hit,
+    keeping only hits that decode to a plausible date string (3 alpha
+    characters, e.g. "Sep"). Validated against real archived ELFs during the
+    2026-09-10 review: every file produced exactly one match, at the same
+    struct layout `parse_app_desc` already knows (secure_version + reserv1 +
+    version[32] + project_name[32] before time[16]/date[16]), and the
+    recovered timestamp for `KilnCtrl-ca44736c7d9b.elf` ("Sep 10 2026
+    16:33:34") matched the identity already independently established by
+    hand for that file.
+
+    Returns a list because ambiguity (zero or more than one *distinct*
+    timestamp found) must be visible to the caller rather than silently
+    resolved by picking the first match -- a wrong adoption would corrupt
+    the manifest with a fabricated identity, exactly the failure class this
+    module exists to prevent elsewhere."""
+    with open(elf_path, "rb") as f:
+        data = f.read()
+    magic_bytes = struct.pack(_MAGIC_FMT, ESP_APP_DESC_MAGIC_WORD)
+    found: list[AppDesc] = []
+    seen: set[tuple[str, str]] = set()
+    idx = 0
+    while True:
+        idx = data.find(magic_bytes, idx)
+        if idx == -1:
+            break
+        # Struct starts at idx (no image-header offset for a bare ELF blob).
+        end = idx + _APP_DESC_MIN_SIZE
+        if end <= len(data):
+            chunk = data[idx:end]
+            time_s = _decode_cstr(chunk[_OFF_TIME:_OFF_TIME + _TIME_SIZE])
+            date_s = _decode_cstr(chunk[_OFF_DATE:_OFF_DATE + _DATE_SIZE])
+            # A plausible date starts with three letters ("Sep", "Oct", ...);
+            # this filters out coincidental 4-byte magic-word collisions
+            # elsewhere in the binary that don't sit on a real esp_app_desc_t.
+            if len(date_s) >= 3 and date_s[:3].isalpha():
+                key = (date_s, time_s)
+                if key not in seen:
+                    seen.add(key)
+                    version = _decode_cstr(chunk[_OFF_VERSION:_OFF_VERSION + _VERSION_SIZE])
+                    project_name = _decode_cstr(
+                        chunk[_OFF_PROJECT_NAME:_OFF_PROJECT_NAME + _PROJECT_NAME_SIZE])
+                    found.append(AppDesc(version=version, project_name=project_name,
+                                          time=time_s, date=date_s))
+        idx += 1
+    return found

@@ -196,6 +196,189 @@ class ArchiveKilnElfTest(unittest.TestCase):
         self.assertIn("no archived ELF found", message)
 
 
+def _pack_fake_app_desc(date_s: str, time_s: str) -> bytes:
+    """Builds the bytes of a bare esp_app_desc_t (magic word through the
+    date field) matching the layout esp_app_desc.scan_elf_for_app_descs
+    scans for -- NOT preceded by an esp_image_header_t/segment header, since
+    a linked ELF has none (those are added by esptool's elf2image step)."""
+    import struct as _struct
+    from kilnctrl.esp_app_desc import ESP_APP_DESC_MAGIC_WORD
+    return (
+        _struct.pack("<I", ESP_APP_DESC_MAGIC_WORD)
+        + b"\x00" * 4  # secure_version
+        + b"\x00" * 8  # reserv1
+        + b"KilnCtrl-test-v1".ljust(32, b"\x00")  # version
+        + b"KilnCtrl".ljust(32, b"\x00")  # project_name
+        + time_s.encode().ljust(16, b"\x00")
+        + date_s.encode().ljust(16, b"\x00")
+    )
+
+
+def _write_fake_producer_elf(path: str, date_s: str, time_s: str, filler: bytes = b"") -> None:
+    """Simulates exactly what archive_elf.cmake's POST_BUILD copy deposits:
+    a real linked ELF's bytes (here, a stand-in with surrounding filler so
+    the magic word isn't at offset 0, same as a real ELF) landing in the
+    archive directory -- with NO manifest entry, since that cmake step never
+    writes one (see archive_elf.cmake and defect 1)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(b"\x7fELF" + filler)
+        f.write(_pack_fake_app_desc(date_s, time_s))
+        f.write(b"\x00" * 16)  # trailing filler, like real section data
+
+
+class OrphanAdoptionTest(unittest.TestCase):
+    """2026-09-10 (opus review round 4, defect 1): archive_elf.cmake's
+    POST_BUILD step deposits a KilnCtrl-<hash>.elf into the archive
+    directory on every ordinary `idf.py build` but never registers it in
+    manifest.json -- measured live: 7 (then 8, mid-review) such files
+    against a 42-entry manifest, one of which was the exact ELF a
+    stack-budget measurement had been taken against. These tests prove the
+    PRODUCTION adoption path (adopt_orphaned_kiln_elfs, and its automatic
+    call from archive_kiln_elf) makes such a file reachable -- entirely
+    against a monkeypatched tmp archive dir, never the real one."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.archive_dir = os.path.join(self._tmp.name, "elf_archive")
+        os.makedirs(self.archive_dir, exist_ok=True)
+        self._orig = elf_archive.kiln_archive_dir
+        elf_archive.kiln_archive_dir = lambda: self.archive_dir
+
+    def tearDown(self):
+        elf_archive.kiln_archive_dir = self._orig
+        self._tmp.cleanup()
+
+    def test_producer_deposited_orphan_becomes_reachable(self):
+        # Exactly what archive_elf.cmake leaves behind: a file on disk,
+        # named by content hash, with no manifest entry at all.
+        orphan_path = os.path.join(self.archive_dir, "KilnCtrl-0a1b2c3d4e51.elf")
+        _write_fake_producer_elf(orphan_path, "Sep 10 2026", "16:33:34")
+
+        manifest_before = elf_archive._load_manifest(self.archive_dir)
+        self.assertNotIn("Sep 10 2026 16:33:34", manifest_before,
+                          "sanity: the orphan must start out unregistered")
+
+        path, msg = elf_archive.find_kiln_elf_for_build("Sep 10 2026 16:33:34")
+        self.assertIsNone(path, "sanity: unreachable before adoption, reproducing the incident")
+
+        adopted, unresolved = elf_archive.adopt_orphaned_kiln_elfs(self.archive_dir)
+        self.assertEqual(adopted, 1)
+        self.assertEqual(unresolved, [])
+
+        path, msg = elf_archive.find_kiln_elf_for_build("Sep 10 2026 16:33:34")
+        self.assertEqual(path, orphan_path, msg)
+        self.assertIn("found", msg)
+
+    def test_adoption_runs_automatically_from_archive_kiln_elf(self):
+        """The self-healing path: an orphan sitting in the archive from a
+        PRIOR plain `idf.py build` must be adopted the next time
+        archive_kiln_elf() runs (i.e. the next flash_firmware() call) --
+        without anyone calling adopt_orphaned_kiln_elfs directly."""
+        orphan_path = os.path.join(self.archive_dir, "KilnCtrl-0a1b2c3d4e52.elf")
+        _write_fake_producer_elf(orphan_path, "Sep 11 2026", "09:00:00")
+
+        # A normal flash of a completely different build.
+        new_elf = os.path.join(self._tmp.name, "KilnCtrl.elf")
+        _write_fake_elf(new_elf, b"the build that was just flashed")
+        elf_archive.archive_kiln_elf(new_elf, "Sep 12 2026 10:00:00", "abc123", "test")
+
+        path, msg = elf_archive.find_kiln_elf_for_build("Sep 11 2026 09:00:00")
+        self.assertEqual(path, orphan_path, msg)
+
+    def test_orphan_with_ambiguous_identity_is_left_unregistered_not_guessed(self):
+        """Two distinct embedded timestamps in one file (pathological, but
+        the point is: adoption must refuse to pick one rather than
+        fabricate an identity)."""
+        orphan_path = os.path.join(self.archive_dir, "KilnCtrl-0a1b2c3d4e53.elf")
+        os.makedirs(self.archive_dir, exist_ok=True)
+        with open(orphan_path, "wb") as f:
+            f.write(b"\x7fELF" + b"pad" * 4)
+            f.write(_pack_fake_app_desc("Sep 13 2026", "01:00:00"))
+            f.write(b"\x00" * 32)
+            f.write(_pack_fake_app_desc("Sep 14 2026", "02:00:00"))
+
+        adopted, unresolved = elf_archive.adopt_orphaned_kiln_elfs(self.archive_dir)
+        self.assertEqual(adopted, 0)
+        self.assertIn("KilnCtrl-0a1b2c3d4e53.elf", unresolved)
+        manifest = elf_archive._load_manifest(self.archive_dir)
+        self.assertNotIn("Sep 13 2026 01:00:00", manifest)
+        self.assertNotIn("Sep 14 2026 02:00:00", manifest)
+
+
+class ManifestMigrationCollisionTest(unittest.TestCase):
+    """2026-09-10 (opus review round 4, defect 3): when a raw key and its
+    normalized twin both exist in manifest.json, _load_manifest drops the
+    lower-`seq` one -- and, before this fix, recorded it nowhere, making it
+    just as unreachable-and-unprotected as an orphan file (the same failure
+    class defect 1 closes, reproduced by a different mechanism)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.archive_dir = os.path.join(self._tmp.name, "elf_archive")
+        os.makedirs(self.archive_dir, exist_ok=True)
+
+    def test_collision_loser_is_recorded_as_superseded_not_dropped(self):
+        raw_key = "Sep  5 2026 11:00:00"       # double-space day padding
+        norm_key = "Sep 5 2026 11:00:00"       # already normalized
+        manifest = {
+            raw_key: {
+                "elf_key": "loser0000001",
+                "identity": raw_key,
+                "seq": 1,
+                "archived_at": "2026-09-05T11:01:00Z",
+                "git_commit": "aaa",
+                "source": "test",
+            },
+            norm_key: {
+                "elf_key": "winner000001",
+                "identity": norm_key,
+                "seq": 2,
+                "archived_at": "2026-09-05T11:05:00Z",
+                "git_commit": "bbb",
+                "source": "test",
+            },
+        }
+        elf_archive._write_manifest(self.archive_dir, manifest)
+
+        loaded = elf_archive._load_manifest(self.archive_dir)
+        # Exactly one entry survives under the normalized key -- the higher-seq one.
+        self.assertEqual(loaded[norm_key]["elf_key"], "winner000001")
+
+        # 2026-09-10 fix: the loser must now be recorded in superseded.json,
+        # not silently dropped -- so it stays reachable/protected.
+        superseded = elf_archive._load_superseded(self.archive_dir)
+        self.assertIn(norm_key, superseded)
+        loser_keys = [e.get("elf_key") for e in superseded[norm_key]]
+        self.assertIn("loser0000001", loser_keys)
+
+    def test_negative_without_the_fix_collision_loser_is_orphaned(self):
+        """Proves the fix is load-bearing: with the superseded-recording
+        step monkeypatched away (simulating the pre-fix _load_manifest,
+        which only kept `manifest[norm_key] = entry` and otherwise
+        `continue`d), the loser must NOT appear in superseded.json --
+        reproducing the exact silent-drop this defect describes."""
+        raw_key = "Sep  6 2026 12:00:00"
+        norm_key = "Sep 6 2026 12:00:00"
+        manifest = {
+            raw_key: {"elf_key": "loser0000002", "identity": raw_key, "seq": 1,
+                       "archived_at": "x", "git_commit": "a", "source": "test"},
+            norm_key: {"elf_key": "winner000002", "identity": norm_key, "seq": 2,
+                        "archived_at": "x", "git_commit": "b", "source": "test"},
+        }
+        elf_archive._write_manifest(self.archive_dir, manifest)
+
+        # Pre-fix behavior: persist_migration=False skips the recording step
+        # this test targets (see _load_manifest's persist_migration param).
+        loaded = elf_archive._load_manifest(self.archive_dir, persist_migration=False)
+        self.assertEqual(loaded[norm_key]["elf_key"], "winner000002")
+
+        superseded = elf_archive._load_superseded(self.archive_dir)
+        self.assertNotIn(norm_key, superseded,
+                          "with persist_migration disabled, the collision loser must be "
+                          "unrecorded, reproducing the pre-fix silent-drop incident")
+
+
 class SupersededIdentityTest(unittest.TestCase):
     """2026-09-10 (opus review round 3, defect 4): firmware/KilnFW/build/
     elf_archive/ held 60 real KilnCtrl-*.elf files against only 3 manifest
@@ -291,23 +474,33 @@ class SupersededIdentityTest(unittest.TestCase):
 
 
 class PruneRetentionTest(unittest.TestCase):
+    """2026-09-10 (opus review round 4, defect 2): this class used to prove
+    the OLD, defective behavior -- that only the KEEP_RECENT_ENTRIES most
+    recent manifest entries survive pruning, i.e. that _prune WILL delete
+    a manifest-referenced (still lookup-reachable) file once enough newer
+    entries exist. That was exactly the bug: 32 of 42 real manifest entries
+    measured unprotected in the live archive, one _prune call away from
+    "manifest says found, file says missing". _prune now protects every
+    manifest- and superseded-referenced file unconditionally (age doesn't
+    matter -- reachability does), so these tests instead prove: (1) nothing
+    reachable is ever deleted even when that means going over cap, and
+    (2) the resulting cap-unenforceable state is reported loudly, not
+    silently."""
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.archive_dir = os.path.join(self._tmp.name, "elf_archive")
         self._orig = elf_archive.kiln_archive_dir
         elf_archive.kiln_archive_dir = lambda: self.archive_dir
         self._orig_max = elf_archive.MAX_ARCHIVED_ELFS
-        self._orig_keep_recent = elf_archive.KEEP_RECENT_ENTRIES
         elf_archive.MAX_ARCHIVED_ELFS = 3
-        elf_archive.KEEP_RECENT_ENTRIES = 2
 
     def tearDown(self):
         elf_archive.kiln_archive_dir = self._orig
         elf_archive.MAX_ARCHIVED_ELFS = self._orig_max
-        elf_archive.KEEP_RECENT_ENTRIES = self._orig_keep_recent
         self._tmp.cleanup()
 
-    def test_archive_is_capped_and_recent_entries_survive(self):
+    def test_all_distinct_identities_survive_pruning_even_over_cap(self):
         n = 8
         results = []
         for i in range(n):
@@ -322,12 +515,26 @@ class PruneRetentionTest(unittest.TestCase):
             if name.startswith("KilnCtrl-") and name.endswith(".elf")
             and name != "KilnCtrl-latest.elf"
         ]
-        self.assertLessEqual(len(remaining), elf_archive.MAX_ARCHIVED_ELFS)
+        # All 8 identities are distinct and every one is manifest-referenced,
+        # so all 8 must survive -- the cap of 3 is deliberately NOT enforced
+        # here, since enforcing it would mean deleting a reachable, still
+        # potentially-needed-for-symbolization ELF.
+        self.assertEqual(len(remaining), n)
+        for r in results:
+            self.assertTrue(os.path.isfile(r.archived_path),
+                             f"{r.archived_path} is manifest-referenced and must never be pruned")
 
-        # the most recently archived entries must not have been pruned away
-        last_two = results[-elf_archive.KEEP_RECENT_ENTRIES:]
-        for r in last_two:
-            self.assertTrue(os.path.isfile(r.archived_path), f"{r.archived_path} should survive pruning")
+    def test_unenforceable_cap_is_reported_loudly(self):
+        with unittest.mock.patch("builtins.print") as mock_print:
+            for i in range(8):
+                elf_path = os.path.join(self._tmp.name, f"build{i}.elf")
+                _write_fake_elf(elf_path, f"distinct content #{i}".encode())
+                elf_archive.archive_kiln_elf(elf_path, f"build-{i}", f"commit{i}", "test")
+        warnings = [str(c.args[0]) for c in mock_print.call_args_list if c.args]
+        self.assertTrue(
+            any("cap" in w.lower() and "not being enforced" in w.lower() for w in warnings),
+            f"expected a loud unenforceable-cap warning, got: {warnings}",
+        )
 
 
 class ArchiveSaftyElfTest(unittest.TestCase):
