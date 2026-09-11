@@ -144,6 +144,21 @@ FOLDS = [
     # module docstring's first bullet) -- just resolved through a per-zone
     # helper call instead of a raw shared-field read -- so it folds to the
     # same SETPOINT token rather than being left to show up as drift.
+    #
+    # BLIND SPOT (verified 2026-09-11, deliberate, not a bug in this check):
+    # folding zone_commanded_setpoint_c(z, zi) and s_exec.target_c to the same
+    # SETPOINT token means this check CANNOT detect a regression of production
+    # back from the former to the latter -- it structurally cannot express
+    # setpoint provenance, because the mirror it compares against
+    # (test_closed_loop.c's fuzzy_tick()) has no per-zone/cap concept at all,
+    # only a bare `setpoint` parameter. Confirmed directly: reverting this
+    # call site's error_c back to `s_exec.target_c - z->actual_c` still makes
+    # this check print OK. Do NOT "fix" this by un-folding the two tokens --
+    # that would just make the check fail permanently, not restore coverage
+    # the mirror is incapable of providing. The actual guard against that
+    # regression is test_fuzzy_prepare_gains_uses_zone_commanded_setpoint_
+    # when_capped() in test_profile_executor_prestart.c, which calls the real
+    # pid_fuzzy_prepare_gains() (not a mirror) and fails on the reverted code.
     (re.compile(r"\bzone_commanded_setpoint_c\(z,\s*zi\)"), "SETPOINT"),
     (re.compile(r"\bs_exec\.target_c\b"), "SETPOINT"),
     (re.compile(r"\bsetpoint\b"), "SETPOINT"),
