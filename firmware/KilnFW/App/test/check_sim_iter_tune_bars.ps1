@@ -36,10 +36,19 @@
 # firing_compare.c's degradation veto in the accept-permissive direction):
 # docs/audits/firing_score_entry_ema_review_2026-09-10.md.
 #
-# EXIT CONDITION: once the re-identified coupling matrix lands, re-measure
-# A1 at n=220 and either tighten sim_iter_tune.c's pin toward 2.0% or drop
-# it in favour of enforcing A1_DESIGN_TARGET_PCT directly. Whoever lands
-# that matrix should revisit this check and that file's constants.
+# EXIT CONDITION (updated 2026-09-11): the coupling re-identification this
+# was waiting on has landed (2026-09-10/11) without producing an adoptable
+# matrix -- the linear coupling model class itself was refuted (~33%
+# superposition error at matched dT; docs/audits/coupling_joint_identification_capture_2026-09-10.md,
+# commits 5844a3e8/947709a8). The exit condition is therefore restated on
+# sim_plant.c's coupling model rather than on the re-identification effort:
+# once sim_plant.c's coupling term is changed to a hardware-validated model
+# class (or a deliberate decision to keep the linear form is documented),
+# re-measure A1 at n=220 and either tighten sim_iter_tune.c's pin toward
+# 2.0% or drop it in favour of enforcing A1_DESIGN_TARGET_PCT directly. See
+# sim_iter_tune.c's A1_PINNED_MAX_ACCEPTS comment for the full text. A
+# 2026-09-11 re-run of this exact check reproduced 24/660 (3.6364%)
+# unchanged from the 2026-09-10 measurement -- no drift, no re-pin.
 #
 # 2026-09-10 SKIP vs FAIL, and why this does not depend on
 # build_host_tests.ps1 having run first: this check was first found FAILING

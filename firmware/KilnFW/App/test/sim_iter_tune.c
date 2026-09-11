@@ -640,11 +640,35 @@ int main(int argc, char **argv)
     //     produced. The fix is a re-identified coupling matrix (capture in
     //     progress as of this pin), not a change to this comparator or this
     //     harness -- this pin is a placeholder ceiling, not a target.
-    //   - EXIT CONDITION: once the re-identified coupling matrix lands,
-    //     re-measure A1 at mc_runs=220 (-> 660 comparisons) and either
-    //     tighten this pin toward A1_DESIGN_TARGET_PCT or remove it in
-    //     favour of enforcing A1_DESIGN_TARGET_PCT directly. Whoever lands
-    //     that matrix: this is your cue to revisit these two constants.
+    //   - EXIT CONDITION (updated 2026-09-11): the coupling re-identification
+    //     this pin was waiting on HAS landed (2026-09-10/11) but did NOT
+    //     produce an adoptable matrix -- the linear coupling model class
+    //     itself was refuted (superposition across zones fails by ~33% at
+    //     matched dT; see docs/audits/coupling_joint_identification_capture_2026-09-10.md
+    //     and commits 5844a3e8, 947709a8). "Once the matrix lands" is
+    //     therefore satisfied on its face without resolving the reason this
+    //     pin exists, so it is replaced with a condition stated on
+    //     sim_plant.c's coupling model, not on the re-identification effort:
+    //       1. sim_plant.c's coupling term is changed from the current
+    //          linear/additive form (the one d63a5591 introduced) to a model
+    //          class that has been validated against hardware at the
+    //          operating points this harness exercises (<=40 C, see this
+    //          file's header) -- e.g. one that accounts for the refuted
+    //          superposition assumption, OR a documented decision that the
+    //          linear model is being kept deliberately with the ~33%
+    //          superposition error accepted as in-scope; AND
+    //       2. this exact A1 measurement (kilnctl_sim_iter_tune.exe 220,
+    //          660 null comparisons) is re-run against that new/accepted
+    //          model.
+    //     Whichever of those two outcomes lands, re-measure A1 at
+    //     mc_runs=220 and either tighten this pin toward
+    //     A1_DESIGN_TARGET_PCT or remove it in favour of enforcing
+    //     A1_DESIGN_TARGET_PCT directly -- report the new accepts/total
+    //     alongside whichever change is made, per the RATCHET GUARD below.
+    //     Until then this pin stays exactly as measured: re-run 2026-09-11
+    //     (see check_sim_iter_tune_bars.ps1's own output) reproduced
+    //     24/660 (3.6364%) unchanged from the 2026-09-10 measurement below,
+    //     so no drift has occurred and no re-pin is justified today.
     //
     // DETERMINISM, CHECKED (not assumed): this harness has NO wall-clock or
     // OS-entropy seeding anywhere in the call chain (grepped for
