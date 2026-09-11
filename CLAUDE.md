@@ -171,20 +171,18 @@ region's mean RGB alongside the same for a bezel reference region, so this
 recipe doesn't have to be re-derived by hand each time
 (`.\sample_lcd_region.ps1 -Image full.jpg -X 500 -Y 650 -W 8 -H 8`).
 
-**Camera aim (2026-09-06):** the bench webcam has drifted since the crop
-defaults (`X=339 Y=487 W=594 H=231`, set as a stopgap in `26a8a98`) were
-measured. A fresh `-Full` capture shows the LCD panel's top-left corner
-around `(300-339, 460-490)` in the 1280x720 frame, with the panel's bottom
-edge running off the bottom of the frame (screen content still fully blue
-right at `y=719`, so an unknown slice of the lower UI is not captured at
-all) and the right edge cutting close to frame content near mid-frame
-(perspective-skewed, not a clean rectangle in-frame). Owner action: re-aim
-the camera so the whole panel is inside the frame and roughly centered
-(tilt down / pull back enough that the bottom edge clears `y=719` with
-margin), then re-run `capture_lcd.ps1 -Full`, remeasure the crop box by
-numeric sampling (never by eye), and update `capture_lcd.ps1`'s default
-crop to match. Until then, treat the current crop as showing only the
-upper portion of the panel.
+**Camera aim (2026-09-10):** the owner re-aimed the bench webcam after the
+2026-09-06 note above (bottom edge off-frame) — the whole panel is now
+inside the 1280x720 frame, closing that owner action. A fresh `-Full`
+capture and numeric edge scans (`sample_lcd_region.ps1` plus raw
+crop/rawvideo sampling against a black-bezel reference) found the panel at
+roughly `X=102-108` (left), `X=1006-1009` (right), `Y=12-16` (top),
+`Y=614-620` (bottom) — still mildly perspective-skewed corner to corner
+(~4-6px), not a clean rectangle, but no longer clipped. `capture_lcd.ps1`'s
+defaults are now the smallest axis-aligned box containing all four
+corners, `X=102 Y=12 W=907 H=609` (`tools/PcTools/scripts/capture_lcd.ps1:53-56`),
+which includes a few pixels of bezel on the tighter sides rather than
+clipping any UI content.
 
 Full rationale, token measurements, and how to add a tool: **docs/MCP_SERVERS.md**.
 

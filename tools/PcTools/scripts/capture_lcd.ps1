@@ -14,9 +14,11 @@
   1280x720 frame costs several times the tokens of the default 640x360 crop
   for no diagnostic gain.
 
-  The crop rectangle was measured from a full-frame capture on 2026-09-06.
-  If the camera or board is ever moved, re-run with -Full to get an
-  uncropped frame, read off the new rectangle, and update the defaults here.
+  The crop rectangle was re-measured from a full-frame capture on 2026-09-10
+  after the camera was re-aimed (see CLAUDE.md's "Camera aim" note). If the
+  camera or board is ever moved again, re-run with -Full to get an uncropped
+  frame, re-measure by numeric pixel sampling (never by eye) with
+  sample_lcd_region.ps1, and update the defaults here.
 
 .PARAMETER Out
   Output image path. Defaults to lcd.jpg in the current directory.
@@ -40,16 +42,20 @@ param(
     [switch]$Full,
     [int]$Width = 640,
     [string]$Device = "HD Pro Webcam C920",
-    # Active-area rectangle of the LCD within a 1280x720 frame, measured
-    # 2026-09-06 (the panel had shifted lower/right of the prior 2026-09-04
-    # rectangle, which was ~90% bezel). x,y is the top-left corner of the
-    # lit pixels, not the bezel. The panel is viewed at a tilt and its
-    # bottom-right corner runs off the bottom of the 1280x720 frame, so this
-    # rectangle is the largest inscribed all-panel box, not the full panel.
-    [int]$CropX = 339,
-    [int]$CropY = 487,
-    [int]$CropW = 594,
-    [int]$CropH = 231
+    # Active-area rectangle of the LCD within a 1280x720 frame, re-measured
+    # 2026-09-10 by numeric pixel sampling (sample_lcd_region.ps1, edge scans
+    # against a black-bezel reference) after the camera was re-aimed and the
+    # whole panel is now inside the frame. The panel is still slightly
+    # perspective-skewed (edges vary by ~4-6px corner to corner: left edge
+    # ~102-108, right edge ~1006-1009, top edge ~13-16, bottom edge
+    # ~614-620), so this rectangle is the smallest axis-aligned box that
+    # contains all four corners of the screen content -- it includes a few
+    # pixels of bezel on some sides rather than clipping any UI, since
+    # losing content is worse than a small margin.
+    [int]$CropX = 102,
+    [int]$CropY = 12,
+    [int]$CropW = 907,
+    [int]$CropH = 609
 )
 
 $ErrorActionPreference = "Stop"
