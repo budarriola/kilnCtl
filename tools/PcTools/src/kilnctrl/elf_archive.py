@@ -41,13 +41,21 @@ manifest holds -- never a silent fallback to `KilnCtrl-latest.elf` or the
 newest-by-mtime file, either of which would produce a plausible WRONG
 symbolization exactly like the incident this module exists to prevent.
 
-Retention: `prune_archive` caps each archive directory at `MAX_ARCHIVED_ELFS`
-entries (default 60), deleting the oldest-by-mtime files first, and never
-deletes `<prefix>-latest.elf` or any entry named in the surviving manifest's
-most recent `KEEP_RECENT_ENTRIES` (default 10) rows regardless of age -- a
-board flashed weeks ago and only diagnosed today should not have already lost
-its ELF. Pruning runs after every archive call, so the directory is bounded
-on an ongoing basis rather than needing a separate cron/cleanup step.
+Retention (current policy -- see the "owner-directed cleanup" note below for
+how this superseded the two intermediate versions this docstring also
+narrates for their historical context): `_prune` caps each archive directory
+at `MAX_ARCHIVED_ELFS` entries (default 60), deleting the oldest-by-
+archived_at files first. Never deletes `<prefix>-latest.elf`. A manifest
+entry that was actually flashed to a board (`_is_flash_sourced`) is protected
+UNCONDITIONALLY regardless of age -- a board flashed weeks ago and only
+diagnosed today should not have already lost its ELF, and an OLDER flashed
+build can still be the one currently running (OTA/otadata hazard, see
+CLAUDE.md). Anything else -- an ordinary local build that was never
+confirmed flashed, whether adopted from an orphan file or hand-reconstructed
+-- is protected only for `GRACE_PERIOD_HOURS` (default 48) after it was
+archived/adopted, then becomes eligible for deletion. Pruning runs after
+every archive call, so the directory is bounded on an ongoing basis rather
+than needing a separate cron/cleanup step.
 `firmware/KilnFW/.gitignore` / `firmware/SaftyFW/.gitignore` already exclude
 the whole `build/` tree (elf_archive included), confirmed by
 `git check-ignore -v`; nothing here needs to touch .gitignore.
@@ -125,10 +133,76 @@ from depositing the next unregistered file):
      loud warning instead of either a silent `{}` (indistinguishable from
      "no manifest yet") or an uncaught `AttributeError` that took down every
      caller over one malformed row.
+
+2026-09-10/11, owner-directed cleanup (round 4's fix made `_prune` honest
+about being unable to enforce the cap -- it did not make the cap
+enforceable, because "protect every registered identity forever" and "cap
+at 60" are contradictory once registered content alone exceeds 60, which was
+already true: measured live, only 2 of 47 manifest entries (source
+`flash_firmware`/`flash_firmware(kiln_fw_root=...)`) were ever actually
+flashed to a board; the other 45, plus all 21 superseded entries, were
+`archive_elf.cmake` POST_BUILD deposits from ordinary local builds that were
+never flashed, later given manifest entries by `adopt_orphaned_kiln_elfs()`/
+the round-3 hand reconstruction purely so they would not be silently
+unreachable -- "registered" was never the same claim as "flashed"):
+  1. Root cause fixed at the source: `archive_elf.cmake` no longer deposits
+     a permanent hash-keyed copy on every build at all (see that file) -- it
+     only refreshes the `KilnCtrl-latest.elf` convenience pointer, which is
+     overwritten in place and never accumulates. Going forward, the only way
+     a new entry lands in this directory is a confirmed flash
+     (`archive_kiln_elf`/`archive_safty_elf`) or a one-off manual
+     `adopt_orphaned_kiln_elfs()` maintenance call against a pre-existing
+     backlog -- so the volume this module has to manage is now bounded by
+     how often the board is actually flashed, not how often it is built.
+  2. Retention is now a real, provenance-based policy instead of
+     "protect everything registered, forever":
+       - `_is_flash_sourced()` recognizes an entry as an actual flash
+         (`source` starting with `"flash_firmware"` or `"debug_program"` --
+         the two call sites in mcp_server_flash.py/mcp_server_debug.py) and
+         such entries are protected from pruning UNCONDITIONALLY, regardless
+         of age -- this is the "keep flashed images generally" rule, and it
+         deliberately does not prefer the newest: an older flashed build can
+         still be the one a board is running (`flash_firmware()` writes only
+         the `factory` partition and never touches `otadata`, so an OTA that
+         pointed the boot target at `ota_0`/`ota_1` leaves the board running
+         an older flash indefinitely -- see CLAUDE.md's flash/OTA section).
+       - Anything else (an ordinary local build, whether adopted from an
+         orphan file or hand-reconstructed) is protected only for
+         `GRACE_PERIOD_HOURS` (48) after it was archived/adopted -- long
+         enough that a build someone is actively mid-debug on survives
+         several idle hours, short enough that it does not re-create the
+         original hoarding problem now that new non-flash entries can only
+         come from an explicit maintenance call, not an automatic per-build
+         one.
+       - Past its grace window, a non-flash entry is eligible for deletion,
+         oldest-by-archived_at first, until the directory is back at
+         `MAX_ARCHIVED_ELFS` -- and its manifest/superseded entry is removed
+         in the same pass, so a pruned file never leaves behind a dangling
+         "found ... but the file is missing on disk" lookup result.
+     This makes the cap meaningful again under ordinary operation: the set
+     of unconditionally-protected entries is now bounded by how often the
+     board is flashed (small), not by every local build ever adopted. The
+     loud "cap not being enforced" warning (round 4, defect 4) is kept for
+     the case that no longer needs to be hypothetical -- true flash volume
+     alone exceeding the cap -- since that is still a deliberate human
+     decision, not something `_prune` should paper over by deleting a
+     flashed image.
+  3. One-time reclaim (2026-09-10/11): of the 68 files on disk (47 manifest
+     + 21 superseded entries, 0 true orphans -- round 4's adoption pass had
+     already run), only 2 manifest entries were flash-sourced. The board's
+     own currently-running `fw_build` was read live (read-only) and
+     confirmed to match one of those two (`KilnCtrl-16bced646ac0.elf`,
+     entry `Sep 10 2026 15:45:13`, `source: flash_firmware`) via
+     `find_crash_elf()` before anything was deleted. The other 66 files
+     (45 non-flash manifest entries + 21 non-flash superseded entries) were
+     never-flashed local builds -- none within the new 48h grace window --
+     and were deleted along with their manifest/superseded entries,
+     reclaiming ~1.3 GB.
 """
 
 from __future__ import annotations
 
+import calendar
 import hashlib
 import json
 import os
@@ -142,8 +216,42 @@ from . import stale_check
 from .esp_app_desc import normalize_build_timestamp, scan_elf_for_app_descs
 
 MAX_ARCHIVED_ELFS = 60
-KEEP_RECENT_ENTRIES = 10
+# How long a non-flash-sourced entry (an ordinary local build, adopted or
+# hand-reconstructed rather than ever actually flashed) is protected from
+# pruning purely because it is recent -- see the module docstring's
+# "owner-directed cleanup" section. A flash-sourced entry (see
+# _is_flash_sourced) is protected unconditionally, regardless of age, and
+# does not use this window at all.
+GRACE_PERIOD_HOURS = 48
 MANIFEST_NAME = "manifest.json"
+# source strings recorded by the two real flash call sites
+# (mcp_server_flash.py's archive_kiln_elf call and mcp_server_debug.py's
+# archive_safty_elf call for debug_program(peer="pico")), including the
+# kiln_fw_root worktree-override variant ("flash_firmware:kiln_fw_root
+# override" / "flash_firmware(kiln_fw_root=...)"). Anything else --
+# "adopted:orphan-scan", "reconstructed-from-elf-appdesc-...",
+# "UNTRUSTED-REPAIRED", a test fixture string -- is a local build that was
+# never confirmed flashed to a board, not a build the owning tool merely
+# forgot to label.
+_FLASH_SOURCE_PREFIXES = ("flash_firmware", "debug_program")
+
+
+def _is_flash_sourced(entry: dict) -> bool:
+    source = entry.get("source") if isinstance(entry, dict) else None
+    return isinstance(source, str) and source.startswith(_FLASH_SOURCE_PREFIXES)
+
+
+def _parse_archived_at(entry: dict) -> Optional[float]:
+    """Returns the entry's archived_at as a UTC unix timestamp, or None if
+    absent/unparseable -- callers must treat that as "cannot prove this is
+    recent", not as "very old" or "very new"."""
+    stamp = entry.get("archived_at") if isinstance(entry, dict) else None
+    if not isinstance(stamp, str):
+        return None
+    try:
+        return calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
+    except ValueError:
+        return None
 # 2026-09-10 (opus review round 3, defect 4): when a new archive call reuses
 # an fw_build identity that the manifest already maps to a DIFFERENT elf_key
 # (a rebuild that didn't touch the translation unit embedding __DATE__/
@@ -380,6 +488,19 @@ def adopt_orphaned_kiln_elfs(archive_dir: str) -> tuple[int, list[str]]:
     a cmake/toolchain change. Also callable directly for one-off maintenance
     against the existing backlog.
 
+    2026-09-10/11: `archive_elf.cmake` no longer deposits an unregistered
+    copy on every build at all (see that file), so this should find nothing
+    to do on an ordinary run from here on -- it stays in place as the
+    self-healing path for any pre-existing backlog or an unanticipated
+    future producer, per its own defense-in-depth rationale above, not
+    because it is still needed for the common case. An entry this function
+    adopts is registered so it is *reachable*, not so it is *protected
+    forever*: `_prune`'s retention policy treats an adopted entry the same
+    as any other non-flash-sourced one (see `_is_flash_sourced`) -- eligible
+    for deletion once it ages out of `GRACE_PERIOD_HOURS`, since adoption
+    recovers an identity, it does not establish that the board was ever
+    flashed with it.
+
     Returns (adopted_count, still_unresolved_filenames)."""
     _guard_against_test_write(archive_dir)
     prefix = "KilnCtrl"
@@ -536,89 +657,156 @@ def _archive(elf_path: str, archive_dir: str, prefix: str, identity: str,
 
 def _prune(archive_dir: str, prefix: str, manifest: dict, superseded: Optional[dict] = None) -> None:
     """Caps the archive at MAX_ARCHIVED_ELFS files where it safely can,
-    deleting oldest-by-mtime first. Never deletes `<prefix>-latest.elf`, and
-    never deletes a file whose elf_key is referenced by ANY manifest entry
-    or ANY superseded entry (an older build that shares its fw_build
-    identity with a newer one, see SUPERSEDED_NAME).
+    deleting oldest-by-archived_at first. Never deletes `<prefix>-latest.elf`.
 
-    2026-09-10 (opus review round 4, defect 2): this used to protect only
-    the KEEP_RECENT_ENTRIES=10 most-recently-archived manifest entries, on
-    the theory that 10 was enough headroom under a 60-file cap. Measured
-    live: 42 manifest entries existed against that 10-entry protection list,
-    so 32 manifest-REFERENCED files -- files a real panic's fw_build lookup
-    can still resolve to -- sat exactly as unprotected as the true orphans,
-    one `_prune` call away from `find_kiln_elf_for_build` reporting a
-    matching manifest entry whose file was already deleted. A manifest entry
-    exists specifically so a build can be found again later; there is no
-    principled age past which that stops being true. So protection is now
-    unconditional for anything the manifest or superseded registry still
-    names -- this can only make `_prune` delete FEWER files than before,
-    never more, and never anything reachable.
+    Protection is provenance-based, not "everything registered, forever"
+    (see the module docstring's "owner-directed cleanup" section for the
+    incident this replaces):
+      - A manifest entry that is flash-sourced (`_is_flash_sourced` --
+        actually flashed via flash_firmware()/debug_program(), the two real
+        producers) is protected UNCONDITIONALLY, regardless of age. An older
+        flashed build can still be the one a board is running (OTA can point
+        the boot target at an image `flash_firmware()` never touches -- see
+        CLAUDE.md's flash/OTA section), so age is not a safe signal here.
+      - Any other manifest or superseded entry (an ordinary local build,
+        whether adopted from an orphan file or hand-reconstructed -- never
+        confirmed flashed) is protected only for GRACE_PERIOD_HOURS after it
+        was archived/adopted. An entry with no parseable `archived_at` is
+        treated as NOT recent (fails safe toward eligible-for-deletion,
+        never toward permanent protection by default) -- see
+        `_parse_archived_at`.
+    A file whose elf_key is protected by either rule is never deleted.
+    Deleting a file also removes its manifest/superseded entry (and
+    rewrites those to disk) so pruning never leaves a manifest entry whose
+    file is missing -- a lookup that later needs that identity should see
+    a clean "no archived ELF found", not "the file is missing on disk".
 
-    A consequence: once total referenced+superseded files exceed
-    MAX_ARCHIVED_ELFS (as they already do -- see the loud warning below),
-    the cap can no longer be enforced by deleting registered content, and
-    this function says so instead of silently leaving the directory over
-    cap. Shedding registered files is a separate, deliberate decision for a
-    human to make (which identities are actually safe to give up), not
-    something this function should do as a side effect of being called
-    after an ordinary archive."""
+    This makes the cap meaningful under ordinary operation: the
+    unconditionally-protected set is now bounded by how often the board is
+    actually flashed, not by every local build that was ever built or
+    adopted. If flash-sourced entries alone already exceed the cap, this
+    function says so loudly rather than deleting a flashed image to make
+    room -- that is still a deliberate human decision (see the warning
+    below), not something to be papered over."""
     try:
-        entries = sorted(
-            (name for name in os.listdir(archive_dir)
-             if name.startswith(prefix + "-") and name.endswith(".elf")
-             and name != f"{prefix}-latest.elf"),
-        )
+        entries = [
+            name for name in os.listdir(archive_dir)
+            if name.startswith(prefix + "-") and name.endswith(".elf")
+            and name != f"{prefix}-latest.elf"
+        ]
     except OSError:
         return
+
+    # Reverse-index elf_key -> (source dict, container, container-key) so a
+    # deleted file's entry can be removed from whichever of manifest/
+    # superseded it lives in.
+    key_info: dict[str, tuple[dict, bool, float]] = {}
+    # value: (entry, is_flash_sourced, archived_at-or-None)
+    for identity, entry in manifest.items():
+        if not isinstance(entry, dict):
+            continue
+        key = entry.get("elf_key")
+        if key:
+            key_info.setdefault(key, (entry, _is_flash_sourced(entry), _parse_archived_at(entry)))
+    for identity, bucket in (superseded or {}).items():
+        for entry in bucket:
+            key = entry.get("elf_key") if isinstance(entry, dict) else None
+            if key and key not in key_info:
+                key_info[key] = (entry, _is_flash_sourced(entry), _parse_archived_at(entry))
+
     if len(entries) <= MAX_ARCHIVED_ELFS:
         return
 
-    protected_keys = set()
-    for entry in manifest.values():
-        key = entry.get("elf_key") if isinstance(entry, dict) else None
-        if key:
-            protected_keys.add(f"{prefix}-{key}.elf")
-    for bucket in (superseded or {}).values():
-        for entry in bucket:
-            key = entry.get("elf_key") if isinstance(entry, dict) else None
-            if key:
-                protected_keys.add(f"{prefix}-{key}.elf")
+    now = time.time()
+    grace_seconds = GRACE_PERIOD_HOURS * 3600
 
-    full_paths = [os.path.join(archive_dir, name) for name in entries]
-    full_paths.sort(key=lambda p: os.path.getmtime(p))  # oldest first
+    def _elf_key_of(name: str) -> Optional[str]:
+        stem = name[len(prefix) + 1:-len(".elf")]
+        return stem or None
+
+    protected: set[str] = set()
+    eligible: list[tuple[float, str]] = []  # (archived_at-or-mtime, filename)
+    for name in entries:
+        key = _elf_key_of(name)
+        info = key_info.get(key) if key else None
+        if info is not None:
+            _entry, flash_sourced, archived_at = info
+            if flash_sourced:
+                protected.add(name)
+                continue
+            age_ok = archived_at is not None and (now - archived_at) < grace_seconds
+            if age_ok:
+                protected.add(name)
+                continue
+            sort_key = archived_at if archived_at is not None else 0.0
+        else:
+            # Unregistered file with no manifest/superseded entry at all --
+            # should not occur for KilnCtrl once adopt_orphaned_kiln_elfs()
+            # has run (called from _archive before this), but fail toward
+            # "eligible for deletion" rather than "protected forever" if it
+            # somehow does (e.g. SaftyFW, which has no adoption path).
+            try:
+                sort_key = os.path.getmtime(os.path.join(archive_dir, name))
+            except OSError:
+                sort_key = 0.0
+        eligible.append((sort_key, name))
+
+    eligible.sort()  # oldest first
 
     to_delete_count = len(entries) - MAX_ARCHIVED_ELFS
-    deleted = 0
-    for p in full_paths:
-        if deleted >= to_delete_count:
+    deleted_names: list[str] = []
+    for _sort_key, name in eligible:
+        if len(deleted_names) >= to_delete_count:
             break
-        if os.path.basename(p) in protected_keys:
-            continue
         try:
-            os.remove(p)
-            deleted += 1
+            os.remove(os.path.join(archive_dir, name))
+            deleted_names.append(name)
         except OSError:
             continue
 
-    if deleted < to_delete_count:
-        # 2026-09-10 (opus review round 4, defect 4): this used to exit
-        # here with no signal at all -- indistinguishable from "the cap
-        # didn't need enforcing". A cap that is silently unenforceable is
-        # worse than no cap: the docstring/callers still believe 60 is a
-        # real ceiling. `superseded` protection is also permanent and
-        # append-only (nothing retires an entry once written), so this
-        # condition can only get worse over time on its own, never better,
-        # without a deliberate human decision.
-        print(f"elf_archive: WARNING -- {archive_dir} holds {len(entries)} "
-              f"{prefix} ELFs against a cap of {MAX_ARCHIVED_ELFS}, but only "
-              f"{deleted} of {to_delete_count} over-cap file(s) could be "
-              "deleted because the rest are referenced by the manifest or "
-              "superseded registry. The cap is NOT being enforced. This is "
-              "a deliberate correctness-over-cap tradeoff (see _prune's "
-              "docstring), not a bug being masked -- but it means disk usage "
-              "here is now unbounded until a human decides which registered "
-              "identities are safe to retire and removes them explicitly.")
+    if deleted_names:
+        deleted_keys = {_elf_key_of(n) for n in deleted_names}
+        manifest_dirty = False
+        for identity in list(manifest.keys()):
+            entry = manifest[identity]
+            if isinstance(entry, dict) and entry.get("elf_key") in deleted_keys:
+                del manifest[identity]
+                manifest_dirty = True
+        if manifest_dirty:
+            _write_manifest(archive_dir, manifest)
+        if superseded is not None:
+            superseded_dirty = False
+            for identity in list(superseded.keys()):
+                bucket = [e for e in superseded[identity]
+                          if not (isinstance(e, dict) and e.get("elf_key") in deleted_keys)]
+                if len(bucket) != len(superseded[identity]):
+                    superseded_dirty = True
+                if bucket:
+                    superseded[identity] = bucket
+                else:
+                    del superseded[identity]
+            if superseded_dirty:
+                _write_superseded(archive_dir, superseded)
+        print(f"elf_archive: pruned {len(deleted_names)} never-flashed, "
+              f"past-grace-window {prefix} ELF(s) from {archive_dir} "
+              f"(cap {MAX_ARCHIVED_ELFS}).")
+
+    if len(deleted_names) < to_delete_count:
+        # A cap that is silently unenforceable is worse than no cap: callers
+        # still believe MAX_ARCHIVED_ELFS is a real ceiling. This can now
+        # only happen when flash-sourced entries (unconditionally protected)
+        # or very recent non-flash entries (within GRACE_PERIOD_HOURS) alone
+        # exceed the cap -- both are deliberate protections, not a bug being
+        # masked, but disk usage is unbounded until a human decides some of
+        # those identities are safe to retire and removes them explicitly.
+        still_over = len(entries) - len(deleted_names) - MAX_ARCHIVED_ELFS
+        print(f"elf_archive: WARNING -- {archive_dir} holds {len(entries) - len(deleted_names)} "
+              f"{prefix} ELFs against a cap of {MAX_ARCHIVED_ELFS} ({still_over} over) after "
+              f"pruning {len(deleted_names)} eligible file(s); the rest are protected because "
+              "they were actually flashed to a board (unconditional) or archived/adopted within "
+              f"the last {GRACE_PERIOD_HOURS}h grace window. The cap is NOT being enforced. This "
+              "is a deliberate correctness-over-cap tradeoff (see _prune's docstring), not a bug "
+              "being masked.")
 
 
 def archive_kiln_elf(elf_path: str, fw_build: str, git_commit: Optional[str],

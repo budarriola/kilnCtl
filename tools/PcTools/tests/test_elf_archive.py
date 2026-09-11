@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 
@@ -437,9 +438,7 @@ class SupersededIdentityTest(unittest.TestCase):
         the exact "unreachable AND unprotected" incident this defect
         describes."""
         orig_max = elf_archive.MAX_ARCHIVED_ELFS
-        orig_keep = elf_archive.KEEP_RECENT_ENTRIES
         elf_archive.MAX_ARCHIVED_ELFS = 2
-        elf_archive.KEEP_RECENT_ENTRIES = 1
         try:
             elf_a = os.path.join(self._tmp.name, "a.elf")
             elf_b = os.path.join(self._tmp.name, "b.elf")
@@ -470,7 +469,6 @@ class SupersededIdentityTest(unittest.TestCase):
             )
         finally:
             elf_archive.MAX_ARCHIVED_ELFS = orig_max
-            elf_archive.KEEP_RECENT_ENTRIES = orig_keep
 
 
 class PruneRetentionTest(unittest.TestCase):
@@ -480,12 +478,24 @@ class PruneRetentionTest(unittest.TestCase):
     a manifest-referenced (still lookup-reachable) file once enough newer
     entries exist. That was exactly the bug: 32 of 42 real manifest entries
     measured unprotected in the live archive, one _prune call away from
-    "manifest says found, file says missing". _prune now protects every
-    manifest- and superseded-referenced file unconditionally (age doesn't
-    matter -- reachability does), so these tests instead prove: (1) nothing
-    reachable is ever deleted even when that means going over cap, and
-    (2) the resulting cap-unenforceable state is reported loudly, not
-    silently."""
+    "manifest says found, file says missing".
+
+    2026-09-10/11 (owner-directed cleanup): a later fix made "manifest- and
+    superseded-referenced" protection unconditional regardless of age, which
+    closed that bug but reopened the original one from the other side -- it
+    made MAX_ARCHIVED_ELFS permanently unenforceable in practice, because
+    every ordinary local build eventually got a manifest entry too (see
+    adopt_orphaned_kiln_elfs). Retention is now provenance-based
+    (`_is_flash_sourced`): a genuinely flashed build is still protected
+    unconditionally, but everything else is only protected for
+    GRACE_PERIOD_HOURS after being archived/adopted, then becomes eligible.
+    The tests below prove: (1) recent entries of any provenance survive
+    pruning even over cap (nothing is deleted out from under someone mid-
+    debug), (2) a flash-sourced entry survives pruning even once it is old,
+    (3) an old, never-flashed entry IS deleted once it ages out and the
+    directory is over cap -- the cap is enforceable again, not just
+    non-silently-unenforceable -- and (4) the remaining-unenforceable case
+    (old entries that are still flash-sourced) is still reported loudly."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -534,6 +544,135 @@ class PruneRetentionTest(unittest.TestCase):
         self.assertTrue(
             any("cap" in w.lower() and "not being enforced" in w.lower() for w in warnings),
             f"expected a loud unenforceable-cap warning, got: {warnings}",
+        )
+
+    def _age_all_entries(self, hours: float) -> None:
+        """Back-dates every manifest entry's archived_at by `hours`, so the
+        grace window in _prune treats them as no longer recent -- without
+        this, every entry archived by a test looks "just now" and the
+        age-based half of the retention policy can never be exercised."""
+        manifest = elf_archive._load_manifest(self.archive_dir)
+        past = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - hours * 3600))
+        for entry in manifest.values():
+            entry["archived_at"] = past
+        elf_archive._write_manifest(self.archive_dir, manifest)
+
+    def test_old_never_flashed_entries_are_pruned_once_over_cap(self):
+        """The real enforcement case: once a never-flashed entry is both
+        past GRACE_PERIOD_HOURS and the directory is over cap, _prune must
+        actually delete some of them (file AND manifest entry) -- proving
+        the cap is enforceable again under ordinary operation, not merely
+        honest about being unenforceable. Which of the (tied-age, distinct-
+        hash) old entries specifically survives isn't asserted -- only that
+        the cap is met and the right NUMBER of never-flashed entries went."""
+        n_old = 4
+        for i in range(n_old):
+            elf_path = os.path.join(self._tmp.name, f"old{i}.elf")
+            _write_fake_elf(elf_path, f"old never-flashed build #{i}".encode())
+            elf_archive.archive_kiln_elf(elf_path, f"old-build-{i}", f"oldcommit{i}", "test")
+        self._age_all_entries(elf_archive.GRACE_PERIOD_HOURS + 1)
+
+        # One more archive call brings the count to n_old+1=5 against a cap
+        # of 3, with everything else now past its grace window -- this
+        # single _prune pass must evict exactly 2 to land back at the cap.
+        new_elf = os.path.join(self._tmp.name, "trigger.elf")
+        _write_fake_elf(new_elf, b"the archive call that triggers pruning")
+        elf_archive.archive_kiln_elf(new_elf, "trigger-build", "triggercommit", "test")
+
+        remaining = [
+            name for name in os.listdir(self.archive_dir)
+            if name.startswith("KilnCtrl-") and name.endswith(".elf")
+            and name != "KilnCtrl-latest.elf"
+        ]
+        self.assertEqual(len(remaining), elf_archive.MAX_ARCHIVED_ELFS,
+                          "cap must actually be enforced once entries are old and never-flashed")
+        manifest = elf_archive._load_manifest(self.archive_dir)
+        surviving_old = [k for k in manifest if k.startswith("old-build-")]
+        self.assertEqual(len(surviving_old), n_old - 2,
+                          "exactly enough old never-flashed entries must be pruned to meet the cap")
+        self.assertIn("trigger-build", manifest, "the fresh entry must survive (still in grace)")
+
+    def test_negative_without_grace_expiry_check_old_entries_are_not_pruned(self):
+        """Proves the age check in _prune (not something else) is what lets
+        old entries be deleted: monkeypatch _parse_archived_at to always
+        report "just now", reproducing the pre-fix (round 4) shape where
+        recency could never be established as expired, and confirm the same
+        scenario above then does NOT prune anything -- the directory stays
+        over cap."""
+        n_old = 4
+        for i in range(n_old):
+            elf_path = os.path.join(self._tmp.name, f"old{i}.elf")
+            _write_fake_elf(elf_path, f"old never-flashed build #{i}".encode())
+            elf_archive.archive_kiln_elf(elf_path, f"old-build-{i}", f"oldcommit{i}", "test")
+        self._age_all_entries(elf_archive.GRACE_PERIOD_HOURS + 1)
+
+        with unittest.mock.patch.object(elf_archive, "_parse_archived_at", return_value=time.time()):
+            new_elf = os.path.join(self._tmp.name, "trigger.elf")
+            _write_fake_elf(new_elf, b"trigger with the age check neutered")
+            elf_archive.archive_kiln_elf(new_elf, "trigger-build", "triggercommit", "test")
+
+        manifest = elf_archive._load_manifest(self.archive_dir)
+        surviving_old = [k for k in manifest if k.startswith("old-build-")]
+        self.assertEqual(len(surviving_old), n_old,
+                          "without a working age check, old never-flashed entries are never "
+                          "pruned -- reproducing the cap-can-never-be-enforced incident")
+
+    def test_flash_sourced_entry_survives_pruning_even_when_old(self):
+        """The other half of the policy: a genuinely flashed build must
+        never be deleted by _prune regardless of age -- an older flashed
+        build can still be the one a board is running (otadata hazard)."""
+        flashed_elf = os.path.join(self._tmp.name, "flashed.elf")
+        _write_fake_elf(flashed_elf, b"a real flash")
+        result = elf_archive.archive_kiln_elf(flashed_elf, "flashed-build", "realcommit", "flash_firmware")
+        for i in range(6):
+            elf_path = os.path.join(self._tmp.name, f"filler{i}.elf")
+            _write_fake_elf(elf_path, f"filler never-flashed build #{i}".encode())
+            elf_archive.archive_kiln_elf(elf_path, f"filler-build-{i}", f"fillercommit{i}", "test")
+        self._age_all_entries(elf_archive.GRACE_PERIOD_HOURS + 1)
+
+        newest_elf = os.path.join(self._tmp.name, "newest.elf")
+        _write_fake_elf(newest_elf, b"forces a prune pass")
+        elf_archive.archive_kiln_elf(newest_elf, "newest-build", "newestcommit", "test")
+
+        self.assertTrue(os.path.isfile(result.archived_path),
+                         "a flash-sourced entry must survive pruning even when old")
+        manifest = elf_archive._load_manifest(self.archive_dir)
+        self.assertIn("flashed-build", manifest)
+
+    def test_negative_without_flash_source_check_flashed_entry_gets_pruned(self):
+        """Proves _is_flash_sourced (not incidental recency) is what
+        protects the flashed entry above: monkeypatch it to always report
+        False -- as if every entry, flashed or not, were judged purely on
+        age -- and confirm the same flashed build then gets deleted once it
+        ages past the grace window, reproducing the "an old flashed image is
+        the one the board still needs and it just got deleted" incident."""
+        flashed_elf = os.path.join(self._tmp.name, "flashed.elf")
+        _write_fake_elf(flashed_elf, b"a real flash")
+        result = elf_archive.archive_kiln_elf(flashed_elf, "flashed-build", "realcommit", "flash_firmware")
+        for i in range(6):
+            elf_path = os.path.join(self._tmp.name, f"filler{i}.elf")
+            _write_fake_elf(elf_path, f"filler never-flashed build #{i}".encode())
+            elf_archive.archive_kiln_elf(elf_path, f"filler-build-{i}", f"fillercommit{i}", "test")
+        self._age_all_entries(elf_archive.GRACE_PERIOD_HOURS + 1)
+        # Make the flashed entry the single OLDEST one so it is deterministically
+        # first in line for deletion once its flash-provenance protection is
+        # removed below -- otherwise which of the several equally-aged, tied
+        # entries gets evicted would depend on filename (content-hash) sort
+        # order, making this test flaky.
+        manifest = elf_archive._load_manifest(self.archive_dir)
+        manifest["flashed-build"]["archived_at"] = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - (elf_archive.GRACE_PERIOD_HOURS + 100) * 3600))
+        elf_archive._write_manifest(self.archive_dir, manifest)
+
+        with unittest.mock.patch.object(elf_archive, "_is_flash_sourced", return_value=False):
+            newest_elf = os.path.join(self._tmp.name, "newest.elf")
+            _write_fake_elf(newest_elf, b"forces a prune pass with the flash check neutered")
+            elf_archive.archive_kiln_elf(newest_elf, "newest-build", "newestcommit", "test")
+
+        self.assertFalse(
+            os.path.isfile(result.archived_path),
+            "without the flash-source check, a genuinely flashed build is not protected from "
+            "pruning once old -- reproducing the incident",
         )
 
 

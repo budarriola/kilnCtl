@@ -316,7 +316,23 @@ Symbolize a crash against the ELF that matches the RUNNING image, not
 `build/KilnCtrl.elf` — that path is whatever was built most recently and
 produces confident, wrong line numbers once the board is running an older
 flash. Use `build/elf_archive/KilnCtrl-<hash>.elf`, matched by embedded build
-timestamp against the board's `fw_build`.
+timestamp against the board's `fw_build` — `find_crash_elf()` does this
+lookup for you. As of 2026-09-11 the archive only ever contains ELFs a board
+was actually flashed with: `archive_elf.cmake`'s POST_BUILD step used to also
+copy every ordinary `idf.py build` output into this same directory, keyed
+only by content hash, whether or not it was ever flashed (~1.3 GB / 68 files
+found and removed 2026-09-10/11, of which only 2 had ever actually been
+flashed) — it now only refreshes a `KilnCtrl-latest.elf` convenience pointer
+at the most recently *linked* build (not necessarily flashed; still useful
+before a first flash). The real archive is written by
+`archive_kiln_elf()`/`archive_safty_elf()` (`tools/PcTools/src/kilnctrl/elf_archive.py`),
+called only after a confirmed flash, and retention is provenance-based: an
+entry that was actually flashed is kept regardless of age (an older flashed
+build can still be the one running, see the OTA/`otadata` hazard above);
+anything else is kept only for a short grace window before it becomes
+eligible for pruning. `_prune`'s cap (`MAX_ARCHIVED_ELFS`, still 60) says so
+loudly, never silently, on the rare occasion actual flash volume alone
+exceeds it.
 
 `KILNCTL_TOUCH_CAL_SWAP_XY` is inert on this board's FT6336U capacitive
 panel — it only feeds the legacy resistive NS2009 path; the live knob is the
