@@ -10,7 +10,7 @@ Worktree: `C:\wt\opus_espflash_0910`, detached at `origin/main`. HEAD moved
 once (`aa698221` -> `170f4b75`) between worktree creation and build; rebuilt
 against the newer HEAD before flashing so the flashed image matches the
 actual current `origin/main` tip. `git submodule update --init` pulled
-`firmware/KilnFW/components/lvgl` (`85aa60d1`, unchanged across the HEAD
+`firmware/KilnFW/components/lvgl` (sub:lvgl`85aa60d1`, unchanged across the HEAD
 move). `sdkconfig` copied from the main tree and diffed identical before
 building. Build run via the PowerShell tool (`idf.py -C
 C:\wt\opus_espflash_0910\firmware\KilnFW build`), not Bash. Build succeeded

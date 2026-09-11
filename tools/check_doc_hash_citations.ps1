@@ -35,24 +35,49 @@
   SUBMODULE HASHES: a citation can name a commit that lives in a submodule's
   own history (e.g. `firmware/KilnFW/components/lvgl`) rather than this
   repo's. Those hashes will never resolve against the parent repo no matter
-  how correct they are, so before failing a hash this script also tries it
-  against every submodule listed in .gitmodules (only submodules that are
-  actually initialized on disk are tried; an uninitialized submodule is
-  silently skipped for this purpose, not treated as a failure). This applies
-  automatically to any doc, not just ones about lvgl -- no per-doc
-  annotation is needed for a real submodule commit hash.
+  how correct they are.
+
+  Parent-repo resolution is the default and requires no annotation -- this
+  covers the overwhelming majority of the ~1,100 citations in this repo
+  unchanged. A citation that refers to a SUBMODULE commit must say so
+  explicitly with a `sub:<name>` tag immediately before the backtick, e.g.
+  `sub:lvgl`85aa60d1``, where `<name>` is a submodule's leaf directory name
+  (`lvgl`, `mykicadMcp`, `TFT35-SPI` as of this writing -- derived from
+  .gitmodules, not hardcoded). Only that named submodule is tried; there is
+  no other-submodule or parent fallback. An unknown `sub:` name, an
+  uninitialized/missing submodule, or a hash that does not resolve in the
+  named submodule are all reported as failures -- never silently swallowed.
+
+  This replaced an earlier design (added in 79d93233) that tried EVERY
+  initialized submodule automatically before failing any unresolved hash,
+  with no way to tell from the output which repository (if any) actually
+  matched. That silent, unscoped fallback meant a mistyped PARENT-repo hash
+  that happened to collide with a real commit in some large submodule's
+  history (lvgl's history is large) would pass this check with no hint that
+  it resolved anywhere other than the intended repo -- worse than an
+  unresolved citation, since it reads as verified. Confirmed 2026-09-10: the
+  short hash `85aa60d` (a truncation of the real, single genuine submodule
+  citation in this repo, `85aa60d1`, see docs/audits/esp_bring_up_to_head_2026-09-10.md)
+  resolves in `firmware/KilnFW/components/lvgl` but nowhere in the parent
+  repo, and the old code accepted it with output identical to a normal
+  parent-repo pass -- no repository named anywhere.
 
   ILLUSTRATIVE / NOT-A-CITATION HASHES: prose sometimes needs to quote a
   hash-shaped token that is NOT a citation -- e.g. discussing a fabricated
   hash another session introduced by mistake ("not the fabricated
   `abc1234`"). To avoid such a quote being flagged as a dangling citation
   while not opening a loophole that lets a genuinely bad citation hide, the
-  ONLY recognised marker is the literal word "fabricated" immediately
+  ONLY recognised marker is the literal WORD "fabricated" immediately
   preceding the backtick-quoted token (case-insensitive, e.g. "the
-  fabricated `abc1234`"). This is narrow by design: a real citation is never
-  phrased as "the fabricated `<hash>`" -- that phrasing asserts the hash is
-  fake, which is a claim a reviewer reading the prose would notice and
-  challenge if it were being used to smuggle a real, wrong citation past
+  fabricated `abc1234`"), matched with a leading `\b` word boundary so a
+  larger word merely ending in "fabricated" (e.g. "notfabricated
+  `<hash>`") does NOT trigger it -- confirmed by negative test 2026-09-10,
+  which found the pre-`\b` regex DID wrongly exclude "notfabricated
+  `<hash>`" as though it were marked, a real widening of the loophole this
+  design otherwise closes. This is narrow by design: a real citation is
+  never phrased as "the fabricated `<hash>`" -- that phrasing asserts the
+  hash is fake, which is a claim a reviewer reading the prose would notice
+  and challenge if it were being used to smuggle a real, wrong citation past
   this check. Tokens matched this way are reported separately as "excluded
   (marked fabricated)" and are never counted as citations or checked for
   existence.
@@ -101,19 +126,26 @@ $KnownNonHashFalsePositives = @(
     @{ File = 'hardware/mainBoard/todo.md'; Hash = '74269244182' }          # ferrite bead MPN
 )
 
-$hashPattern = '((?i:fabricated)\s+)?`([0-9a-f]{7,40})`'
+$hashPattern = '(\b(?i:fabricated)\s+)?(?:(?i:sub):([A-Za-z0-9_.\-]+)\s*)?`([0-9a-f]{7,40})`'
 $failures = @()
 $totalCitations = 0
 $excludedFabricated = 0
 $uniqueChecked = @{}
+$resolvedInParent = 0
+$resolvedInSubmodule = @{}
 
 # Submodule paths (only ones actually initialized/checked out on disk are
-# usable as a resolution target). See header, "SUBMODULE HASHES".
-$submodulePaths = @()
+# usable as a resolution target). See header, "SUBMODULE HASHES". Keyed by
+# leaf directory name (what a `sub:<name>` tag names), not full path.
+$submodulesByName = @{}
 if (Test-Path '.gitmodules') {
-    $submodulePaths = (git config -f .gitmodules --get-regexp '\.path$') |
+    (git config -f .gitmodules --get-regexp '\.path$') |
         ForEach-Object { ($_ -split '\s+', 2)[1] } |
-        Where-Object { Test-Path (Join-Path $_ '.git') }
+        Where-Object { Test-Path (Join-Path $_ '.git') } |
+        ForEach-Object {
+            $leaf = Split-Path -Leaf $_
+            $submodulesByName[$leaf.ToLowerInvariant()] = $_
+        }
 }
 
 foreach ($file in $files) {
@@ -125,7 +157,8 @@ foreach ($file in $files) {
         $matches_ = [regex]::Matches($line, $hashPattern)
         foreach ($m in $matches_) {
             $isFabricatedMarker = $m.Groups[1].Success
-            $hash = $m.Groups[2].Value
+            $subName = $m.Groups[2].Value
+            $hash = $m.Groups[3].Value
             if ($isFabricatedMarker) {
                 # Marked as an illustrative/not-a-citation token -- see header.
                 $excludedFabricated++
@@ -140,37 +173,71 @@ foreach ($file in $files) {
             }
             if ($isKnownFalsePositive) { continue }
 
-            & git cat-file -e "$hash^{commit}" 2>$null 1>$null
-            if ($LASTEXITCODE -eq 0) { continue }
-
-            # Not in the parent repo -- try each initialized submodule before
-            # declaring this a dangling citation. See header, "SUBMODULE HASHES".
-            $resolvedInSubmodule = $false
-            foreach ($subPath in $submodulePaths) {
+            if ($subName) {
+                # Explicitly declared as a submodule citation -- see header,
+                # "SUBMODULE HASHES". Only the named submodule is tried; no
+                # fallback to the parent repo or any other submodule.
+                $subPath = $submodulesByName[$subName.ToLowerInvariant()]
+                if (-not $subPath) {
+                    $known = ($submodulesByName.Keys | Sort-Object) -join ', '
+                    $failures += [PSCustomObject]@{
+                        File = $file
+                        Line = $lineNum
+                        Hash = $hash
+                        Text = $line.Trim()
+                        Reason = "unknown sub: name '$subName' (known submodules: $known)"
+                    }
+                    continue
+                }
                 & git -C $subPath cat-file -e "$hash^{commit}" 2>$null 1>$null
-                if ($LASTEXITCODE -eq 0) { $resolvedInSubmodule = $true; break }
+                if ($LASTEXITCODE -eq 0) {
+                    if (-not $resolvedInSubmodule.ContainsKey($subName)) { $resolvedInSubmodule[$subName] = 0 }
+                    $resolvedInSubmodule[$subName]++
+                    continue
+                }
+                $failures += [PSCustomObject]@{
+                    File = $file
+                    Line = $lineNum
+                    Hash = $hash
+                    Text = $line.Trim()
+                    Reason = "declared sub:$subName but does not resolve in $subPath"
+                }
+                continue
             }
-            if ($resolvedInSubmodule) { continue }
+
+            # No sub: tag -- parent-repo resolution only (the default case,
+            # covering the overwhelming majority of citations). No implicit
+            # submodule fallback: see header, "SUBMODULE HASHES".
+            & git cat-file -e "$hash^{commit}" 2>$null 1>$null
+            if ($LASTEXITCODE -eq 0) { $resolvedInParent++; continue }
 
             $failures += [PSCustomObject]@{
                 File = $file
                 Line = $lineNum
                 Hash = $hash
                 Text = $line.Trim()
+                Reason = 'does not resolve in the parent repo (add sub:<name> if this cites a submodule commit)'
             }
         }
     }
 }
 
+$subSummary = if ($resolvedInSubmodule.Count -gt 0) {
+    ($resolvedInSubmodule.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Value) in $($_.Name)" }) -join ', '
+} else {
+    'none'
+}
 Write-Host "check_doc_hash_citations: $totalCitations citations, $($uniqueChecked.Count) unique hashes checked, $excludedFabricated excluded (marked fabricated)."
+Write-Host "  resolved: $resolvedInParent in parent repo; via sub: tag: $subSummary."
 
 if ($failures.Count -gt 0) {
     Write-Host "FAIL: $($failures.Count) cited hash(es) do not resolve to a commit:" -ForegroundColor Red
     foreach ($f in $failures) {
-        Write-Host ("  {0}:{1}: `{2}` -- {3}" -f $f.File, $f.Line, $f.Hash, $f.Text) -ForegroundColor Red
+        Write-Host ("  {0}:{1}: `{2}` -- {3}" -f $f.File, $f.Line, $f.Hash, $f.Reason) -ForegroundColor Red
+        Write-Host ("      {0}" -f $f.Text) -ForegroundColor Red
     }
     exit 1
 }
 
-Write-Host "PASS: every cited hash resolves to a commit in this repository." -ForegroundColor Green
+Write-Host "PASS: every cited hash resolves to a commit in the repository it names (parent by default, or the declared sub: submodule)." -ForegroundColor Green
 exit 0
