@@ -18,6 +18,63 @@
 # data-generating harness for exploratory runs (any sample size, any
 # argv[1]) -- run the .exe directly for that; this check only pins the one
 # canonical n=220 configuration the audit's figures reference.
+#
+# 2026-09-10 KNOWN-FAILURE PIN, NOT A CLEARED BAR: A1's real defect is
+# upstream of this repo's decision/measurement code -- d63a5591 changed
+# sim_plant.c's coupling model class, which correctly exposed
+# ENTRY_PEAK_C to neighbour-zone PWM ripple the old model never produced,
+# and the fix is a re-identified coupling matrix (capture in progress as of
+# this pin), not anything reachable from firing_score.c/firing_compare.c/
+# this harness. sim_iter_tune.c's A1 check therefore enforces a PINNED
+# ceiling (24/660, ~3.64%) instead of the real 2.0% design target -- see
+# that file's own A1_PINNED_MAX_ACCEPTS/A1_PINNED_TOTAL comment for the
+# full provenance and the ratchet-guard rule (the pin only ever tightens by
+# hand, never widens to paper over a regression). A green run of THIS
+# CHECK is not proof the 2.0% target is met -- read the "A1 NOTE" line in
+# its own output. Full reasoning, including why 8b96b591's EMA smoothing
+# was reverted rather than kept to hit 2.0% cheaply (it blinded
+# firing_compare.c's degradation veto in the accept-permissive direction):
+# docs/audits/firing_score_entry_ema_review_2026-09-10.md.
+#
+# EXIT CONDITION: once the re-identified coupling matrix lands, re-measure
+# A1 at n=220 and either tighten sim_iter_tune.c's pin toward 2.0% or drop
+# it in favour of enforcing A1_DESIGN_TARGET_PCT directly. Whoever lands
+# that matrix should revisit this check and that file's constants.
+#
+# 2026-09-10 SKIP vs FAIL, and why this does not depend on
+# build_host_tests.ps1 having run first: this check was first found FAILING
+# in another agent's environment with "'vswhere.exe' is not recognized" --
+# a toolchain-location problem, not an A1 regression -- while it PASSED
+# (against the pin) in this session's own environment on the identical
+# code. A check whose red is sometimes "the bar failed" and sometimes "the
+# compiler was never found" is exactly the ambiguity this repo has been
+# burned by today (three agents mis-read a red build in the last few
+# hours). This runner (run_all_checks.ps1) has a real, sanctioned THIRD
+# status for exactly this case -- exit code 3, "SKIP", distinct from both
+# PASS and FAIL, requiring a stated reason -- documented in its own header
+# as covering precisely "no toolchain installed". This check now:
+#   - builds with its OWN inline compiler flags rather than depending on
+#     build_host_tests.ps1 having already run and left
+#     App/test/build/host_tests_common_flags.rsp behind (sim_iter_tune.c
+#     only needs its own directory's relative includes, so that shared
+#     response file was never actually required here -- one less
+#     prerequisite that could silently make this check inert on a fresh
+#     checkout);
+#   - exits 3 (SKIP) only when the toolchain itself could not be found or
+#     invoked (vcvarsall.bat missing, or cl/vcvars produced no compiler
+#     diagnostics at all and no executable -- the signature of an
+#     environment problem, not a code problem);
+#   - exits 1 (FAIL) whenever the compiler actually ran and reported real
+#     diagnostics (grep for "error C" in its output) with no executable
+#     produced, and whenever the executable ran and any bar failed below
+#     the pin -- both of those ARE regressions in this checkout and must
+#     stay red.
+# This is not the "if not path.is_file(): skipTest(...)" antipattern this
+# repo has been burned by before: that shape passes (exit 0) when its
+# target is silently absent. SKIP here is exit 3, shown as a distinct
+# yellow status by run_all_checks.ps1 with a mandatory reason line, and a
+# SKIP still counts as "did not confirm the bars" -- it is never counted as
+# a clean pass.
 
 $ErrorActionPreference = "Stop"
 
@@ -25,19 +82,21 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..\..")).Path
 $testDir = $PSScriptRoot
 $driversDir = Join-Path $testDir "..\drivers"
 
+# Same hardcoded path build_host_tests.ps1 uses -- there is no other
+# mechanism in this repo to copy; both scripts invoke vcvarsall.bat the same
+# way ("call vcvarsall.bat x64 >nul && cl ..."). vswhere.exe warnings from
+# vcvarsall.bat's own internals are tolerated (see SKIP-vs-FAIL note above);
+# only vcvars ITSELF being absent is treated as an environment prerequisite.
 $vcvars = "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
 if (-not (Test-Path $vcvars)) {
-    Write-Host "FAIL: vcvarsall.bat not found at $vcvars -- update this path if MSVC Build Tools moved."
-    exit 1
+    Write-Host "SKIP: MSVC toolchain not found -- vcvarsall.bat missing at $vcvars."
+    Write-Host "      This is a prerequisite absence (documented SKIP case in run_all_checks.ps1's"
+    Write-Host "      own header: 'no toolchain installed'), not an A1/A2/A5/A6 result."
+    exit 3
 }
 
 $outDir = Join-Path $testDir "build"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-$rsp = Join-Path $outDir "host_tests_common_flags.rsp"
-if (-not (Test-Path $rsp)) {
-    Write-Host "FAIL: $rsp not found -- run build_host_tests.ps1 at least once first (it writes the shared response file this check reuses)."
-    exit 1
-}
 
 . (Join-Path $repoRoot "tools\build_lock.ps1")
 $lock = Enter-BuildLock -Name "kilnfw_sim_iter_tune_bars"
@@ -57,26 +116,70 @@ try {
     )
     $srcQuoted = ($src | ForEach-Object { "`"$_`"" }) -join " "
 
+    # sim_iter_tune.c's own #includes are relative ("../drivers/control/...")
+    # and need no /I flags, but the headers it pulls in (sim_plant.h ->
+    # max31856_codec.h, zone_coupling_solve.h -> MAX31856.h, etc.) reach into
+    # sibling driver directories and App/test/stubs/'s ESP-IDF type stand-ins
+    # by bare name. Inlined here (not read from build_host_tests.ps1's
+    # shared .rsp) so this check has no dependency on that script having run
+    # first -- see this file's SKIP-vs-FAIL header note.
+    $includeDirs = @(
+        (Join-Path $testDir "stubs"),
+        (Join-Path $testDir "..\..\..\CommonFW\include"),
+        (Join-Path $testDir "..\drivers"),
+        (Join-Path $testDir "..\drivers\bridge"),
+        (Join-Path $testDir "..\drivers\common"),
+        (Join-Path $testDir "..\drivers\control"),
+        (Join-Path $testDir "..\drivers\http"),
+        (Join-Path $testDir "..\drivers\hw"),
+        (Join-Path $testDir "..\drivers\net"),
+        (Join-Path $testDir "..\drivers\owners"),
+        (Join-Path $testDir "..\drivers\persist"),
+        (Join-Path $testDir "..\drivers\safety"),
+        (Join-Path $testDir "..\drivers\sim"),
+        (Join-Path $testDir "..\drivers\ui"),
+        (Join-Path $testDir "..\..\..\hwAbstraction\esp\spi"),
+        (Join-Path $testDir "..\..\..\hwAbstraction\esp\i2c"),
+        (Join-Path $testDir "..\..\..\hwAbstraction\esp\uart"),
+        (Join-Path $testDir "..\..\..\hwAbstraction\interface"),
+        (Join-Path $testDir "..\..\..\hwAbstraction\host"),
+        (Join-Path $testDir "..\..\..\hwAbstraction\esp\common")
+    )
+    $includeArgs = ($includeDirs | ForEach-Object { "/I`"$_`"" }) -join " "
+
     $bat = Join-Path $outDir "_check_sim_iter_tune_build.bat"
     @"
 @echo off
 call "$vcvars" x64 >nul
-cl @"$rsp" /std:c11 /Fo:"$outDir\\" /Fe:"$exe" $srcQuoted
+cl /nologo /W3 /EHsc /std:c11 $includeArgs /Fo:"$outDir\\" /Fe:"$exe" $srcQuoted
 echo BUILD_EXIT=%ERRORLEVEL%
 "@ | Set-Content -Encoding ascii -LiteralPath $bat
 
     $buildOut = cmd.exe /c "`"$bat`""
     $buildOut | ForEach-Object { Write-Host $_ }
+    Remove-Item -Force -ErrorAction SilentlyContinue $bat
+
     if (-not (Test-Path $exe)) {
-        Write-Host "FAIL: sim_iter_tune.exe did not build -- see compiler output above."
-        exit 1
+        # No executable. Was this a real compiler diagnostic against our own
+        # source (a genuine regression -- FAIL), or the toolchain never
+        # actually standing up (an environment problem -- SKIP)? MSVC
+        # diagnostics always look like "<file>(<line>): error C####: ...".
+        $hasCompilerError = $buildOut | Where-Object { $_ -match 'error C\d{4}' }
+        if ($hasCompilerError) {
+            Write-Host "FAIL: sim_iter_tune.exe did not build -- compiler reported real diagnostics above."
+            exit 1
+        }
+        Write-Host "SKIP: sim_iter_tune.exe did not build and the compiler reported no diagnostics against"
+        Write-Host "      this checkout's own source -- the toolchain itself could not be invoked in this"
+        Write-Host "      environment (see the raw build output above, e.g. a missing vswhere.exe/cl.exe on"
+        Write-Host "      PATH). Not an A1/A2/A5/A6 result."
+        exit 3
     }
 
     $runOut = & $exe 220 2>&1
     $runExit = $LASTEXITCODE
     $runOut | ForEach-Object { Write-Host $_ }
 
-    Remove-Item -Force -ErrorAction SilentlyContinue $bat
     Remove-Item -Force -ErrorAction SilentlyContinue $exe
 
     if ($runExit -ne 0) {
@@ -86,7 +189,11 @@ echo BUILD_EXIT=%ERRORLEVEL%
         exit 1
     }
 
-    Write-Host "PASS: sim_iter_tune.exe (n=220) -- A1/A2/A5/A6 all clear."
+    Write-Host "PASS: sim_iter_tune.exe (n=220) -- A2/A5/A6 clear; A1 clear ONLY against its pinned"
+    Write-Host "      known-failure ceiling (24/660, ~3.64%), NOT the 2.0% design target, which is"
+    Write-Host "      NOT yet met -- blocked on a coupling-matrix re-identification upstream of this"
+    Write-Host "      repo (d63a5591). See sim_iter_tune.c's A1_PINNED_MAX_ACCEPTS comment and"
+    Write-Host "      docs/audits/firing_score_entry_ema_review_2026-09-10.md."
     exit 0
 } finally {
     Exit-BuildLock -Lock $lock
