@@ -408,6 +408,7 @@ void run_test_adaptive_tune(void)
     TEST_SECTION("adaptive_tune: refinement improves the estimate");
     test_refinement_improves_gain_estimate_on_known_plant();
     test_repeated_accepted_refinements_stay_within_baseline_envelope();
+    test_adversarial_refinement_sequences_stay_within_baseline_envelope();
 
     TEST_SECTION("adaptive_tune: coupled identification -- pure fit");
     test_coupled_fit_refuses_underdetermined_observation_set();

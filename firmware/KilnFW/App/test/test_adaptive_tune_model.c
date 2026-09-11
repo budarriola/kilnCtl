@@ -346,6 +346,106 @@ static void test_repeated_accepted_refinements_stay_within_baseline_envelope(voi
                "full autotune Accept (autotune_engine_guard.c) may do that");
 }
 
+// ADVERSARIAL review 2026-09-11 (opus): the commit that introduced the
+// baseline anchor above rests on an induction argument -- that anchoring ONLY
+// the plausibility ratio test to a fixed baseline bounds K_dc for all time,
+// even though the blend target AND its own per-run +-20% move cap still read
+// the LIVE k_dc. The regression test above exercises exactly one observation
+// sequence (monotonically increasing, fit = live * 4.9 every run), which is
+// also the sequence that argument is most obviously true for. These three
+// tests attack the same argument from the directions that test actually
+// leaves open:
+//
+//   (a) DOWNWARD. The upper clamp is the one the existing test saturates;
+//       the lower clamp (k_dc - 0.2*k_dc) has entirely different arithmetic,
+//       and a /5 lower envelope is a MULTIPLICATIVE floor, not an additive
+//       one. Drive every run at the smallest fit the ratio check will accept.
+//   (b) ALTERNATING. A sequence that whipsaws between the top and the bottom
+//       of the accepted envelope on successive runs -- if any single step's
+//       clamp could ever overshoot the interval (rather than only ever moving
+//       TOWARD k_dc, as the induction claims), an alternating drive is the
+//       shape that exposes it, because it puts k_fit as far from k_dc as the
+//       ratio test allows on every single run, in both directions.
+//   (c) MAXIMUM WALK. Every run, pick whichever of the two ratio-test extremes
+//       (baseline/5 or baseline*5) is FURTHER from the current live k_dc --
+//       i.e. an adversary who, knowing the whole implementation, picks the fit
+//       that moves K_dc as far as it can be moved this run, for 200 runs.
+//       This is the strongest attack on "the bound holds for arbitrary
+//       accepted sequences, not just convergent ones".
+//
+// All three assert the SAME fixed envelope the induction claims, after every
+// single run. 200 runs is far past the ~9 at which the pre-fix, live-relative
+// anchor blows the bound (see the regression test's own comment).
+static void refine_once_with_fit(uint8_t zi, float fit, float ambient, uint32_t run_id)
+{
+    adaptive_tune_zones[zi].ring_count = 0;
+    adaptive_tune_zones[zi].ring_head = 0;
+    const float duties[4] = {0.20f, 0.50f, 0.80f, 0.35f};
+    for (int i = 0; i < 4; i++) {
+        feed_settled_dwell(zi, ambient + fit * duties[i], ambient, duties[i], SETTLE_TICKS, DT_S);
+    }
+    profile_firing_run_record_t rec = make_clean_record(run_id, zi, 900);
+    adaptive_tune_run_end(&rec, true);
+}
+
+static void test_adversarial_refinement_sequences_stay_within_baseline_envelope(void)
+{
+    const float baseline = 10.0f;
+    const float ambient = 22.0f;
+    const float lower_bound = baseline / ADAPTIVE_TUNE_MAX_JUMP_RATIO;
+    const float upper_bound = baseline * ADAPTIVE_TUNE_MAX_JUMP_RATIO;
+    // 1e-3 absolute, matching the regression test above: float arithmetic on
+    // values of order 10-50, not a tolerance wide enough to hide a real
+    // escape (the pre-fix code overshoots by whole multiples, not epsilons).
+    const float eps = 1e-3f;
+
+    // (a) DOWNWARD: every run drives at the lowest fit the fixed ratio test
+    // will accept. K_dc must approach, and never pass, baseline/5.
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = baseline;
+    for (int run = 0; run < 200; run++) {
+        refine_once_with_fit(1, lower_bound, ambient, (uint32_t)(1000 + run));
+        TEST_CHECK(s_fake_zone_cfg[1].k_dc >= lower_bound - eps,
+                   "downward-driven refinements must never fall below the fixed baseline/5 envelope");
+        TEST_CHECK(s_fake_zone_cfg[1].k_dc <= upper_bound + eps,
+                   "downward-driven refinements must never exceed the fixed baseline*5 envelope");
+    }
+    TEST_CHECK(s_fake_zone_cfg[1].autotune_baseline_k_dc == baseline,
+               "a downward-driven sequence must not move the baseline anchor either");
+
+    // (b) ALTERNATING: whipsaw between the two extremes of the accepted
+    // envelope on successive runs.
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = baseline;
+    for (int run = 0; run < 200; run++) {
+        float fit = (run % 2 == 0) ? upper_bound : lower_bound;
+        refine_once_with_fit(1, fit, ambient, (uint32_t)(3000 + run));
+        TEST_CHECK(s_fake_zone_cfg[1].k_dc >= lower_bound - eps,
+                   "alternating-extreme refinements must never fall below the fixed baseline/5 envelope");
+        TEST_CHECK(s_fake_zone_cfg[1].k_dc <= upper_bound + eps,
+                   "alternating-extreme refinements must never exceed the fixed baseline*5 envelope");
+    }
+
+    // (c) MAXIMUM WALK: an adversary picking, every run, whichever accepted
+    // extreme is further from the live k_dc.
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = baseline;
+    for (int run = 0; run < 200; run++) {
+        float live = s_fake_zone_cfg[1].k_dc;
+        float fit = (upper_bound - live) >= (live - lower_bound) ? upper_bound : lower_bound;
+        refine_once_with_fit(1, fit, ambient, (uint32_t)(5000 + run));
+        TEST_CHECK(s_fake_zone_cfg[1].k_dc >= lower_bound - eps,
+                   "a maximum-displacement adversarial sequence must never fall below baseline/5");
+        TEST_CHECK(s_fake_zone_cfg[1].k_dc <= upper_bound + eps,
+                   "a maximum-displacement adversarial sequence must never exceed baseline*5");
+    }
+    TEST_CHECK(s_fake_zone_cfg[1].autotune_baseline_k_dc == baseline,
+               "200 adversarially-chosen accepted refinements must still leave the baseline anchor untouched");
+}
+
 // ---------------------------------------------------------------------
 // Full coupled identification -- adaptive_tune_coupled_fit() pure-math tests.
 // ---------------------------------------------------------------------

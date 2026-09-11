@@ -463,6 +463,19 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
      * and would misrepresent a known fit as one taken at a genuine 0 degC. */
     z->model_fit_temp_c = current_z->model_fit_temp_c;
     z->model_fit_ambient_c = current_z->model_fit_ambient_c;
+    /* autotune_baseline_k_dc (ZONES_CFG_VERSION 25->26), opus adversarial
+     * review of 9728865: the SAME reset-one-side hazard again, and the one
+     * with the sharpest consequence of the three, because this field exists
+     * specifically to be the fixed anchor that stops adaptive_tune's K_dc
+     * ratchet. It has no z%u_ POST key either (its only writers are
+     * autotune_engine_guard.c's accept path and adaptive_tune_refine_zone_
+     * locked()'s one-shot bootstrap), so without this line EVERY whole-page
+     * save from the zones page silently zeroed it -- and 0 is its "no
+     * baseline recorded yet" sentinel, so the very next accepted refinement
+     * would re-bootstrap the anchor from the live, already-adapted
+     * model_k_dc. That is exactly the ratcheting reference 9728865 exists to
+     * remove, merely gated behind an ordinary operator page save. */
+    z->autotune_baseline_k_dc = current_z->autotune_baseline_k_dc;
     /* ZONES_CFG_VERSION 13->14's adaptive_tune_enabled, carried through for
      * exactly the same reason as the tuning_* block just above and for the
      * same reason coupling_diag_k_dc/fuzzy_strength_pct take the

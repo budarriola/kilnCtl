@@ -3902,6 +3902,14 @@ static void test_post_omitting_new_fields_preserves_stored_values(void)
      * is the strongest form of "omitted": a client CANNOT send it even if it
      * wanted to, and a whole-page save must therefore never clear it. */
     current.adaptive_tune_enabled = 1;
+    /* ZONES_CFG_VERSION 25->26 (opus adversarial review of 9728865): the
+     * adaptive-tune ratchet anchor. Like adaptive_tune_enabled it has NO
+     * z%u_ POST key at all, and unlike most preserved fields its zero value
+     * is a live sentinel ("no baseline recorded yet") that makes the next
+     * accepted refinement re-anchor to the already-adapted model_k_dc --
+     * i.e. clearing it here silently restores the very ratchet 9728865
+     * removed. */
+    current.autotune_baseline_k_dc = 12.5f;
 
     zone_cfg_t out;
     memset(&out, 0, sizeof(out));
@@ -3929,6 +3937,10 @@ static void test_post_omitting_new_fields_preserves_stored_values(void)
               "adaptive_tune_enabled must be PRESERVED by a whole-page save -- it has no POST key "
               "at all, so a save that clears it silently disables adaptive tuning behind the "
               "operator's back and persists that to NVS");
+    TEST_CHECK_NEAR(out.autotune_baseline_k_dc, 12.5f, 1e-6,
+                    "autotune_baseline_k_dc must be PRESERVED by a whole-page save -- it has no POST "
+                    "key at all, and zeroing it re-arms the adaptive_tune K_dc ratchet by making the "
+                    "next accepted refinement bootstrap its anchor from the already-adapted value");
 }
 
 // Opus review of 5672719 (item 2): no host test posted a
