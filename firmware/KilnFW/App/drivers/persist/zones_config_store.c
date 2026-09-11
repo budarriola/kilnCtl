@@ -801,26 +801,29 @@ bool zone_normals_set(uint8_t zone_index, float amps)
     return zone_normals_save() == ESP_OK;
 }
 
-/* 2026-09-10 fix (finding: k_ct rescale vs. stale i_normal, "reset one side
- * of a pair" class): every normal_current_a[] entry is a value measured
- * UNDER WHATEVER k_ct_v_per_a WAS LIVE AT THE TIME OF THAT MEASUREMENT --
- * see zone_sweep_task_record_ct_channels()'s summed branch, which converts
- * the shared channel's raw reading to amps using the live, committed k_ct
- * before this run's own derived k_ct is ever pushed. When
- * zone_sweep_push_k_ct_v_per_a() actually confirms a NEW k_ct landed on the
- * safety processor, every normal_current_a[] entry measured on the OLD
- * scale -- including zones this same run just measured, and any zone from a
- * prior run this one never touched -- is stale by exactly the ratio
- * k_new/k_old. Rather than compute that rescale here (a sign/formula error
- * would silently HALVE or DOUBLE an armed guard's threshold with no way to
- * tell from the outside), this function simply clears measured_mask for the
- * affected zones: zone_sweep_plan_i_normal() then sees "never measured" and
- * leaves S14/S15 dormant for them, per the owner's own standing rule
- * ("leave the guard dormant rather than fabricate a threshold") -- until an
- * operator re-runs the sweep and produces a fresh measurement under the
- * NEW scale. Refusing to arm is always safe; arming against a threshold
- * whose scale might be wrong is not. `zone_mask` is a bitmask, bit i =
- * zone i's stored normal is no longer trustworthy. */
+/* 2026-09-10: originally written to clear a zone's measured normal current
+ * whenever its channel's k_ct_v_per_a changed, on the theory that refusing
+ * to rescale (a sign/formula error there could silently halve or double an
+ * armed guard) was strictly safer than computing the conversion. Superseded
+ * the same day (opus review): clearing the ESP's OWN bookkeeping did not
+ * tell the safety processor anything -- the Pico is the only processor that
+ * actually runs S14/S15, and it kept its previously-committed i_normal_a
+ * unchanged, now silently on the WRONG scale relative to the k_ct it had
+ * just accepted. Worse, since a cleared zone can never be re-armed except
+ * by a sweep whose own k_ct derivation refused, the guard could only ever
+ * arm when calibration did NOT happen. The real fix
+ * (zone_sweep_push_kct_and_inormal() in zones_current_sweep_task.c) rescales
+ * the amps EXACTLY (amps_new = amps_old * k_old/k_new, the reciprocal of the
+ * ratio zone_sweep_derive_k_ct() already computed -- not a guess) and pushes
+ * k_ct and the corrected i_normal_a as ONE staged transaction, so the two
+ * processors can never disagree about scale, and a successful calibration
+ * now correctly arms the guard instead of erasing the evidence for it.
+ *
+ * This function is no longer called from the sweep path, but is kept as a
+ * correct, independently-tested primitive (clear a zone's measured normal
+ * and its measured_mask bit, e.g. for a future explicit "forget this zone's
+ * calibration" operator action) -- `zone_mask` is a bitmask, bit i = zone
+ * i's stored normal should be forgotten. */
 bool zone_normals_invalidate_mask(uint8_t zone_mask)
 {
     if (zone_mask == 0) {

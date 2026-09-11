@@ -688,7 +688,13 @@ bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc)
         // zone_ct_map_committed_value() with a reinterpreted float.
         for (int i = 0; i < s_setparam_count && i < TEST_SETPARAM_LOG_MAX; i++) {
             uint16_t id = s_setparam_log[i].param_id;
-            if (id >= 0x0308u && id <= 0x030Au) {
+            // 0x0308-0x030A: k_ct_v_per_a[0..2]. 0x031A onward: i_normal_a[zi]
+            // -- added 2026-09-10 for zone_sweep_push_kct_and_inormal()'s
+            // integration test, which needs a Pico fake that genuinely
+            // applies BOTH param groups in the same staged commit, not just
+            // k_ct alone.
+            if ((id >= 0x0308u && id <= 0x030Au) ||
+                (id >= 0x031Au && id < (uint16_t)(0x031Au + MAX31856_CHANNEL_COUNT))) {
                 test_cfg_set_f32(id, s_setparam_log[i].value.f32_val, true);
             }
         }
@@ -6565,6 +6571,90 @@ static void test_nvs_load_from_v23_blob_defaults_model_fit_context_to_unknown(vo
     nvs_test_clear();
 }
 
+// Opus review finding 10 (2026-09-10): the ZONES_CFG_VERSION 24->25 bump
+// (coil_power_w) moves v24 OFF the current-version path (full CRC check)
+// and ONTO the older-version migration path, which discarded every
+// historical version's own crc32 unchecked -- so a v24 blob with a single
+// flipped bit could silently migrate to v25. zones_config_migrate.c's
+// decode_zones_blob() now verifies a v24 blob's own crc32 (computed the
+// same "everything before crc32, then 4 zero bytes" way as the current-
+// version check) BEFORE calling case 24's converter -- narrowly, for v24
+// only, not every historical version (see that fix's own comment for why).
+static uint32_t compute_v24_crc(const zones_cfg_v24_t *cfg)
+{
+    static const uint8_t zero4[sizeof(uint32_t)] = {0};
+    uint32_t crc = esp_crc32_le(0, (const uint8_t *)cfg, offsetof(zones_cfg_v24_t, crc32));
+    return esp_crc32_le(crc, zero4, sizeof(zero4));
+}
+
+static void make_minimal_valid_v24_blob(zones_cfg_v24_t *src)
+{
+    memset(src, 0, sizeof(*src));
+    src->version = 24;
+    src->thermo_count = 2;
+    src->relay_count = 2;
+    src->safety_tc_type = 3;
+    src->pc_link_abort_silence_ms = 45000.0f;
+    src->timing_profile_count = 1;
+    snprintf(src->timing_profiles[0].name, sizeof(src->timing_profiles[0].name), "Default");
+    src->zones[0].relay_mask = 0x01;
+    src->zones[0].thermo_mask = 0x01;
+    src->zones[0].max_temp_c = 1300.0f;
+    src->zones[0].model_fit_temp_c = ZONE_MODEL_FIT_TEMP_UNKNOWN;
+    src->zones[0].model_fit_ambient_c = ZONE_MODEL_FIT_TEMP_UNKNOWN;
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        src->zones[0].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+    }
+    src->zones[1].relay_mask = 0x02;
+    src->zones[1].thermo_mask = 0x02;
+    src->zones[1].max_temp_c = 1250.0f;
+    src->zones[1].model_fit_temp_c = ZONE_MODEL_FIT_TEMP_UNKNOWN;
+    src->zones[1].model_fit_ambient_c = ZONE_MODEL_FIT_TEMP_UNKNOWN;
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        src->zones[1].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+    }
+    src->crc32 = compute_v24_crc(src);
+}
+
+static void test_decode_zones_blob_accepts_a_v24_blob_with_a_correct_crc(void)
+{
+    TEST_SECTION("decode_zones_blob -- a v24 blob with a CORRECT crc32 still migrates to v25 "
+                 "(opus review finding 10's fix must not refuse good blobs)");
+
+    zones_cfg_v24_t src;
+    make_minimal_valid_v24_blob(&src);
+
+    zones_cfg_t out;
+    const char *reason = "unset";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    TEST_CHECK(r == ZONES_DECODE_OK, "a well-formed, correctly-CRC'd v24 blob migrates cleanly");
+    TEST_CHECK(out.version == ZONES_CFG_VERSION, "migrated config is stamped the current (v25) version");
+    TEST_CHECK(out.thermo_count == 2, "sibling field survives the hop unchanged");
+}
+
+static void test_decode_zones_blob_refuses_a_v24_blob_with_a_corrupted_crc(void)
+{
+    TEST_SECTION("decode_zones_blob -- NEGATIVE TEST: a v24 blob with a flipped bit and its OLD "
+                 "(now-mismatched) crc32 is refused, not silently migrated (opus review finding 10)");
+
+    zones_cfg_v24_t src;
+    make_minimal_valid_v24_blob(&src);
+    // Flip one bit of a real, in-range value (a PID gain) -- exactly finding
+    // 10's own worked example of a corruption this check must catch that
+    // zones_config_json_validate() alone would not (the flipped value can
+    // easily still be in-range).
+    src.zones[0].pid_kp = 12.5f;
+    src.crc32 = compute_v24_crc(&src); // valid CRC over the pre-corruption bytes
+    uint8_t *raw = (uint8_t *)&src;
+    raw[offsetof(zones_cfg_v24_t, zones[0].pid_kp)] ^= 0x01; // corrupt AFTER computing the CRC
+
+    zones_cfg_t out;
+    const char *reason = "unset";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    TEST_CHECK(r == ZONES_DECODE_CORRUPT, "a v24 blob whose bytes no longer match its own crc32 is refused");
+    TEST_CHECK(out.thermo_count == 0, "a refused blob leaves *out zeroed, never a half-migrated struct");
+}
+
 // docs/ON_OFF_ZONE_PLAN.md sec 1/sec 2 predicates.
 static void test_zone_is_on_off_and_zone_needs_ceiling(void)
 {
@@ -9038,6 +9128,27 @@ static void test_zone_sweep_expected_coil_current_override_wins(void)
                "an overridden coil's expected current differs from the un-overridden equal-share answer");
 }
 
+static void test_zone_sweep_expected_coil_current_divides_by_zone_count_not_relay_count(void)
+{
+    TEST_SECTION("zone_sweep_expected_coil_current_a -- opus review finding 6: divides by ZONE count, "
+                 "never relay count, because a zone's measured current is one CT reading for every relay "
+                 "in that zone's relay_mask combined");
+
+    // A board where zone 0 alone drives TWO relays (a double-element zone --
+    // relay_count over the whole board is 4, but there are still only 3
+    // zones/measurements). The correct equal share is the 9kW sum split
+    // across the 3 ZONES (3kW/zone), NOT across the 4 physical relays
+    // (2.25kW/relay) -- there is no per-relay measurement to compare a
+    // per-relay figure against; zone 0's single CT reads both its relays'
+    // current summed together.
+    float a_by_zone_count = zone_sweep_expected_coil_current_a(0.0f, 9000.0f, /*zone_count=*/3, 240.0f);
+    float a_if_relay_count_were_used = zone_sweep_expected_coil_current_a(0.0f, 9000.0f, /*wrong divisor=*/4, 240.0f);
+    TEST_CHECK(fabsf(a_by_zone_count - 12.5f) < 1e-4f, "3kW/zone / 240V = 12.5A -- the correct per-zone answer");
+    TEST_CHECK(fabsf(a_by_zone_count - a_if_relay_count_were_used) > 1e-3f,
+               "the zone-count divisor and a (wrong) relay-count divisor must NOT coincidentally agree here -- "
+               "proves this test can tell the two apart, not just that some plausible number came out");
+}
+
 static void test_zone_sweep_expected_coil_current_refuses_without_inputs(void)
 {
     TEST_SECTION("zone_sweep_expected_coil_current_a -- refuses (negative sentinel) without a usable nameplate");
@@ -9045,7 +9156,7 @@ static void test_zone_sweep_expected_coil_current_refuses_without_inputs(void)
     TEST_CHECK(zone_sweep_expected_coil_current_a(0.0f, 0.0f, 3, 240.0f) < 0.0f,
                "no sum and no override answers nothing");
     TEST_CHECK(zone_sweep_expected_coil_current_a(0.0f, 9000.0f, 0, 240.0f) < 0.0f,
-               "zero relay_count cannot be split across");
+               "zero zone_count cannot be split across");
     TEST_CHECK(zone_sweep_expected_coil_current_a(0.0f, 9000.0f, 3, 0.0f) < 0.0f,
                "zero mains voltage -- P/V would divide by zero -- answers nothing");
     // A NaN override is treated as "not an override" (isfinite() fails), the
@@ -9647,6 +9758,134 @@ static void test_zone_sweep_push_k_ct_backout_restores_the_uncommissioned_zero(v
     s_hw_safety = NULL;
 }
 
+// ---- zone_sweep_push_kct_and_inormal() -- the INTEGRATION the two 2026-09-10
+// opus review findings live in: neither zone_sweep_push_k_ct_v_per_a() nor
+// zone_sweep_plan_i_normal() alone can see either defect, since both are
+// about what happens when a k_ct commit and an i_normal commit meet in the
+// same sweep run. ---------------------------------------------------------
+
+static void test_zone_sweep_push_kct_and_inormal_calibrating_sweep_arms_the_guard(void)
+{
+    TEST_SECTION("zone_sweep_push_kct_and_inormal -- a sweep whose k_ct DOES change still arms "
+                 "S14/S15, on the Pico, in the SAME commit -- opus review findings 1+2: the prior "
+                 "fix cleared the ESP's own record (finding 1: nothing sent to the Pico, which kept "
+                 "its OLD threshold forever) and did so unconditionally on every confirmed k_ct "
+                 "write, including one that just measured this very zone (finding 2: a successful "
+                 "calibration destroyed the evidence that would have armed it, so the guard could "
+                 "only ever arm on a run whose OWN k_ct derivation refused)");
+
+    kct_setup_clean_summed_run();
+    s_ct_topology_summed = true;
+    // A ratio-2 correction: the nameplate implies 60A, but only 30A measured
+    // -- a real, plausible re-calibration (well inside ZONE_KCT_RATIO_MIN/MAX)
+    // that actually changes k_ct, unlike kct_setup_clean_summed_run()'s
+    // baseline exact-match scenario.
+    s_ct_derive.measured_total_a = 15.0f; // half of the 30A nameplate-implied expectation
+    s_zones.cfg.thermo_count = 3;
+    nvs_test_enable(true);
+    nvs_test_clear();
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    // Zone 1 was measured THIS run (or an earlier one -- the property holds
+    // either way) at 3.0A under the OLD k_ct (0.0333).
+    TEST_CHECK(zone_normals_set(1, 3.0f), "zone 1 has a measured normal under the OLD scale");
+    s_cfg_refetch_applies_staged = true; // a Pico that genuinely applies every commit
+    s_hw_safety = (SafetyLinkClass *)1;
+
+    zone_sweep_push_kct_and_inormal();
+
+    // k_new = k_old * ratio = 0.0333 * (15.0/30.0) = 0.01665.
+    TEST_CHECK(s_sweep.k_ct_derived_mask != 0, "the k_ct change is confirmed and derived");
+    TEST_CHECK(s_sweep.k_ct_reason[0] == '\0', "a confirmed k_ct write says nothing");
+
+    // THE central property: the guard is ARMED, not dormant, after a
+    // successful calibration -- this is exactly backwards under the
+    // superseded fix (it would read 0 here, plan_mask cleared by the
+    // now-empty i_normal plan).
+    TEST_CHECK((s_sweep.i_normal_pushed_mask & (1u << 1)) != 0,
+               "zone 1's i_normal_a IS pushed -- the guard arms on a calibrating sweep");
+    TEST_CHECK(s_sweep.i_normal_reason[0] == '\0', "a confirmed i_normal_a write says nothing");
+
+    // THE exact-rescale property: amps_new = amps_old * k_old/k_new = 3.0 *
+    // (0.0333/0.01665) = 6.0 -- not the stale 3.0A, and not a cleared 0.
+    float pushed_i_normal = NAN;
+    for (int i = 0; i < s_setparam_count && i < TEST_SETPARAM_LOG_MAX; i++) {
+        if (s_setparam_log[i].param_id == (uint16_t)(0x031Au + 1)) {
+            pushed_i_normal = s_setparam_log[i].value.f32_val;
+        }
+    }
+    TEST_CHECK(!isnan(pushed_i_normal), "an i_normal_a SET_PARAM for zone 1 was actually sent");
+    TEST_CHECK(fabsf(pushed_i_normal - 6.0f) < 1e-3f,
+               "the value sent to the Pico is rescaled to the NEW k_ct, not the stale old-scale 3.0A");
+
+    // Both param groups landed in ONE shared commit -- the atomicity fix:
+    // the Pico is never observed holding the new k_ct with the old
+    // i_normal_a, not even for one link round trip.
+    TEST_CHECK(s_commit_count == 1,
+               "k_ct and i_normal_a are staged together and committed with ONE COMMIT_CONFIG, "
+               "never two separate transactions");
+
+    // The ESP's own record agrees with what the Pico now holds.
+    float amps = -1.0f;
+    bool measured = false;
+    TEST_CHECK(zones_config_get_normal_current(1, &amps, &measured) && measured,
+               "zone 1's ESP-side record is still measured (not cleared)");
+    TEST_CHECK(fabsf(amps - 6.0f) < 1e-3f,
+               "and rescaled to the new scale, matching exactly what was just confirmed on the wire");
+
+    s_hw_safety = NULL;
+    s_ct_topology_summed = false;
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_zone_sweep_push_kct_and_inormal_no_kct_change_falls_back_unchanged(void)
+{
+    TEST_SECTION("zone_sweep_push_kct_and_inormal -- no k_ct change this run (channel manually "
+                 "calibrated, so the sweep is refused outright) -> falls back to the original two "
+                 "independent pushes, unchanged (an already-armed zone keeps its own threshold, on "
+                 "the SAME scale, with no rescale needed)");
+
+    kct_setup_clean_summed_run();
+    s_ct_topology_summed = true;
+    // Manual calibration wins over the sweep (CT_COMMISSIONING_PLAN.md step
+    // 1) -- zone_sweep_plan_k_ct_summed() refuses outright, so kct_plan_mask
+    // comes back 0 regardless of measured_total_a.
+    test_ct_cal_set(ZONE_CT_CHANNEL_COUNT - 1, 1.0f, 0.0f, SAFETY_CT_CAL_SOURCE_MANUAL);
+    s_zones.cfg.thermo_count = 3;
+    nvs_test_enable(true);
+    nvs_test_clear();
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    TEST_CHECK(zone_normals_set(0, 4.2f), "zone 0 already armed from an earlier sweep");
+    s_cfg_refetch_applies_staged = true;
+    s_hw_safety = (SafetyLinkClass *)1;
+
+    zone_sweep_push_kct_and_inormal();
+
+    TEST_CHECK(s_sweep.k_ct_derived_mask == 0, "the manually-calibrated channel is not touched");
+
+    TEST_CHECK((s_sweep.i_normal_pushed_mask & (1u << 0)) != 0, "zone 0 is still pushed/armed");
+    float amps = -1.0f;
+    bool measured = false;
+    TEST_CHECK(zones_config_get_normal_current(0, &amps, &measured) && measured && amps == 4.2f,
+               "unchanged -- no rescale applied, since k_ct did not change");
+    // The refused k_ct plan stages/commits nothing at all (plan_mask == 0
+    // inside zone_sweep_push_k_ct_v_per_a() too) -- only i_normal_a's own
+    // independent push commits, so this is ONE commit here, not the
+    // combined transaction's shape. Falling back to two independently
+    // callable functions rather than one merged path is exactly the point:
+    // there is nothing here to keep in lockstep.
+    TEST_CHECK(s_commit_count == 1, "only i_normal_a's own independent commit runs -- the refused "
+                                     "k_ct plan sends nothing");
+
+    s_hw_safety = NULL;
+    s_ct_topology_summed = false;
+    test_ct_cal_reset();
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 // ---------------------------------------------------------------------------
 // heater_min_on_ms and HEATER_MIN_ON_MS_FLOOR (10 s, set by the owner
 // 2026-08-28).
@@ -10165,6 +10404,8 @@ void run_test_zones_http(void)
     test_zero_initialized_zone_cfg_is_heater_and_failsafe_off();
     test_nvs_load_from_v22_blob_defaults_zone_type_and_failsafe_to_zero();
     test_nvs_load_from_v23_blob_defaults_model_fit_context_to_unknown();
+    test_decode_zones_blob_accepts_a_v24_blob_with_a_correct_crc();
+    test_decode_zones_blob_refuses_a_v24_blob_with_a_corrupted_crc();
     test_zone_is_on_off_and_zone_needs_ceiling();
     test_NEGATIVE_wrong_zone_band_read_is_caught();
     test_NEGATIVE_migration_default_of_zero_instead_of_20_is_caught();
@@ -10238,6 +10479,7 @@ void run_test_zones_http(void)
     test_zone_sweep_derive_k_ct_refuses_an_implausible_correction();
     test_zone_sweep_expected_coil_current_equal_split_default();
     test_zone_sweep_expected_coil_current_override_wins();
+    test_zone_sweep_expected_coil_current_divides_by_zone_count_not_relay_count();
     test_zone_sweep_expected_coil_current_refuses_without_inputs();
     test_zone_sweep_check_expected_current_ok_and_mismatch();
     test_zone_sweep_check_expected_current_refuses_without_data();
@@ -10257,6 +10499,8 @@ void run_test_zones_http(void)
     test_zone_sweep_push_k_ct_rejected_commit_backs_the_staging_out();
     test_zone_sweep_push_k_ct_partial_staging_failure_backs_out_what_staged();
     test_zone_sweep_push_k_ct_backout_restores_the_uncommissioned_zero();
+    test_zone_sweep_push_kct_and_inormal_calibrating_sweep_arms_the_guard();
+    test_zone_sweep_push_kct_and_inormal_no_kct_change_falls_back_unchanged();
 
     test_zone_sweep_plan_i_normal_nothing_measured_yet();
     test_zone_sweep_plan_i_normal_plans_every_measured_zone();

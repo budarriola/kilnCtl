@@ -906,34 +906,30 @@ static void zone_sweep_push_k_ct_v_per_a(void)
             (void)zone_sweep_unstage_k_ct(staged_mask, prior_k, true, note, sizeof(note));
             plan_mask = 0;
         } else {
-            /* 2026-09-10 fix (finding: k_ct rescale vs. stale i_normal): a
-             * confirmed k_ct change invalidates every zone's stored
-             * normal_current_a that was measured under the OLD scale for
-             * this channel -- see zone_normals_invalidate_mask()'s own
-             * comment. Computed BEFORE zone_k_ct_set() below so "old scale"
-             * unambiguously means "before this write", and done for every
-             * confirmed channel even if k_new == prior_k (a no-op rescale
-             * is still cheap and keeps this path from depending on an exact
-             * float comparison to decide whether a guard stays armed). */
-            uint8_t stale_zone_mask = 0;
+            /* 2026-09-10 opus review (superseding the same day's earlier
+             * "invalidate on a confirmed k_ct change" fix): invalidating the
+             * ESP's own normal_current_a[] here fixed this function's own
+             * bookkeeping but (1) left the Pico holding its OLD i_normal_a
+             * threshold forever, since zone_sweep_push_i_normal_a() sends
+             * nothing when its plan comes back empty, and (2) meant a
+             * SUCCESSFUL calibrating sweep destroyed the very measurement
+             * that would have armed S14/S15, so the guard could only ever
+             * arm on a run whose k_ct derivation refused -- backwards. Both
+             * defects are closed by NOT touching normal_current_a here at
+             * all: zone_sweep_push_kct_and_inormal() (the sole caller this
+             * function has left once a scale change is actually planned --
+             * see its own doc comment) rescales and pushes the corrected
+             * i_normal_a to the Pico in the SAME staged transaction as this
+             * k_ct write, so the two processors' values can never disagree
+             * even transiently. This function, called standalone, now only
+             * ever runs with plan_mask == 0 in production (a refusal), so
+             * this branch is exercised only by this file's own direct unit
+             * tests exercising a real derivation in isolation. */
             for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
-                if ((plan_mask & (1u << c)) == 0) {
-                    continue;
+                if ((plan_mask & (1u << c)) != 0) {
+                    (void)zone_k_ct_set(c, k_new[c]);
                 }
-                if (s_ct_topology_summed) {
-                    /* One shared channel feeds every zone's amps -- see
-                     * zone_sweep_task_record_ct_channels()'s summed branch --
-                     * so a scale change here is stale for the whole board,
-                     * not just the zones this run happened to measure. */
-                    for (uint8_t zi = 0; zi < s_zones.cfg.thermo_count && zi < MAX31856_CHANNEL_COUNT; zi++) {
-                        stale_zone_mask |= (uint8_t)(1u << zi);
-                    }
-                } else if (s_ct_derive.zone_for_ch[c] < MAX31856_CHANNEL_COUNT) {
-                    stale_zone_mask |= (uint8_t)(1u << s_ct_derive.zone_for_ch[c]);
-                }
-                (void)zone_k_ct_set(c, k_new[c]);
             }
-            (void)zone_normals_invalidate_mask(stale_zone_mask);
         }
     }
 
@@ -1194,6 +1190,252 @@ static void zone_sweep_push_i_normal_a(void)
     s_sweep.i_normal_reason[sizeof(s_sweep.i_normal_reason) - 1] = '\0';
 }
 
+/* 2026-09-10 opus review, replacing the same day's earlier "invalidate on a
+ * confirmed k_ct change" fix -- that fix cleared the ESP's own bookkeeping
+ * but left the PICO (the only processor that actually runs S14/S15) holding
+ * its old i_normal_a threshold: either transiently (a plan_mask == 0 sends
+ * nothing at all, so a successful calibration left the Pico permanently
+ * armed on the stale scale) or, worse, never re-armed at all, since a
+ * calibrating run always destroyed the measurement that would have armed
+ * it before the push that could have sent the correction. Two confirmed
+ * findings from one fix: the guard could only ever arm on a run whose k_ct
+ * derivation FAILED, and the ESP/Pico could disagree about whether S14/S15
+ * were armed at all.
+ *
+ * The fix: when this run is about to confirm a NEW k_ct, do not touch
+ * normal_current_a at all. Instead, rescale every affected zone's
+ * already-measured amps to the NEW scale and push k_ct AND the corrected
+ * i_normal_a as ONE staged transaction (one shared COMMIT_CONFIG) -- so the
+ * Pico's k_ct_v_per_a and i_normal_a can never be observed on different
+ * scales, not even for one link round trip, and a successful calibration
+ * now correctly ARMS the guard instead of destroying its own evidence.
+ *
+ * The rescale is exact, not a guess: amps = V/k by construction (see
+ * zone_sweep_summed_normal_a() and zone_sweep_derive_k_ct()'s own ratio), so
+ * a zone's already-measured amps convert to the new scale as
+ * amps_new = amps_old * (k_old / k_new) -- literally the reciprocal of the
+ * same ratio zone_sweep_derive_k_ct() just used to derive k_new from k_old.
+ * zone_sweep_derive_k_ct() refuses outright (ZONE_KCT_DERIVE_NO_PRIOR_K)
+ * whenever k_old <= 0, so every channel in kct_plan_mask below is
+ * guaranteed a real, positive prior_k -- there is no "first commissioning,
+ * nothing to rescale from" case to special-case here; that case never
+ * reaches a non-zero plan_mask at all.
+ *
+ * When no k_ct change is planned this run (refused, a manually-calibrated
+ * channel, or no nameplate yet), there is nothing to keep in scale-lockstep
+ * with, so this falls back to the original two independent, separately
+ * unit-tested pushes -- zone_sweep_push_k_ct_v_per_a() will simply record
+ * why it did nothing, and zone_sweep_push_i_normal_a() re-pushes whatever
+ * zones are already armed under the UNCHANGED scale, exactly as before this
+ * fix. */
+static void zone_sweep_push_kct_and_inormal(void)
+{
+    float k_new[ZONE_CT_CHANNEL_COUNT] = {0};
+    char kct_note[sizeof(s_sweep.k_ct_reason)];
+    kct_note[0] = '\0';
+
+    uint8_t kct_plan_mask = zone_sweep_plan_k_ct(k_new, kct_note, sizeof(kct_note));
+    if (kct_plan_mask != 0 && !s_hw_safety) {
+        snprintf(kct_note, sizeof(kct_note), "safety link not available -- CT scale not written");
+        kct_plan_mask = 0;
+    }
+
+    if (kct_plan_mask == 0) {
+        /* Nothing to keep in lockstep this run -- the two original,
+         * independently unit-tested pushes are exactly right. */
+        zone_sweep_push_k_ct_v_per_a();
+        zone_sweep_push_i_normal_a();
+        return;
+    }
+
+    float prior_k[ZONE_CT_CHANNEL_COUNT] = {0};
+    float planned_a[MAX31856_CHANNEL_COUNT] = {0};
+    float prior_a[MAX31856_CHANNEL_COUNT] = {0};
+    char inorm_note[sizeof(s_sweep.i_normal_reason)];
+    inorm_note[0] = '\0';
+
+    uint8_t inorm_plan_mask = zone_sweep_plan_i_normal(planned_a, inorm_note, sizeof(inorm_note));
+
+    /* Rescale every zone this run's k_ct change affects, BEFORE anything is
+     * staged -- "old scale" unambiguously means "the committed value right
+     * now", read fresh here rather than reused from any other loop. */
+    for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+        if ((kct_plan_mask & (1u << c)) == 0) {
+            continue;
+        }
+        float k_old_c = 0.0f;
+        (void)zone_cfg_committed_f32(ZONE_KCT_PARAM_ID(c), &k_old_c); /* guaranteed > 0 -- see doc comment above */
+        uint8_t affected_mask = 0;
+        if (s_ct_topology_summed) {
+            /* One shared channel feeds every zone's amps -- a scale change
+             * here is stale for the whole board, not just the zones this
+             * run happened to (re-)measure. */
+            for (uint8_t zi = 0; zi < s_zones.cfg.thermo_count && zi < MAX31856_CHANNEL_COUNT; zi++) {
+                affected_mask |= (uint8_t)(1u << zi);
+            }
+        } else if (s_ct_derive.zone_for_ch[c] < MAX31856_CHANNEL_COUNT) {
+            affected_mask = (uint8_t)(1u << s_ct_derive.zone_for_ch[c]);
+        }
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            if ((affected_mask & (1u << zi)) == 0 || (inorm_plan_mask & (1u << zi)) == 0 ||
+                k_old_c <= 0.0f || k_new[c] <= 0.0f) {
+                continue;
+            }
+            planned_a[zi] = planned_a[zi] * (k_old_c / k_new[c]);
+        }
+    }
+
+    if (inorm_plan_mask != 0 && !s_hw_safety) {
+        snprintf(inorm_note, sizeof(inorm_note), "safety link not available -- i_normal_a not written");
+        inorm_plan_mask = 0;
+    }
+
+    uint8_t kct_staged_mask = 0, inorm_staged_mask = 0;
+    bool stage_failed = false;
+
+    for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT && !stage_failed; c++) {
+        if ((kct_plan_mask & (1u << c)) == 0) {
+            continue;
+        }
+        prior_k[c] = ZONE_KCT_UNCOMMISSIONED;
+        (void)zone_cfg_committed_f32(ZONE_KCT_PARAM_ID(c), &prior_k[c]);
+        kilnlink_param_value_t v;
+        memset(&v, 0, sizeof(v));
+        v.f32_val = k_new[c];
+        esp_err_t err =
+            safety_link_send_set_param(s_hw_safety, ZONE_KCT_PARAM_ID(c), KILNLINK_PARAM_TYPE_F32, v);
+        if (err != ESP_OK) {
+            snprintf(kct_note, sizeof(kct_note), "staging k_ct_v_per_a[%u] failed: %.24s", c,
+                     esp_err_to_name(err));
+            stage_failed = true;
+            break;
+        }
+        kct_staged_mask |= (uint8_t)(1u << c);
+    }
+
+    if (!stage_failed) {
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            if ((inorm_plan_mask & (1u << zi)) == 0) {
+                continue;
+            }
+            (void)zone_cfg_committed_f32(ZONE_INORMAL_PARAM_ID(zi), &prior_a[zi]);
+            kilnlink_param_value_t v;
+            memset(&v, 0, sizeof(v));
+            v.f32_val = planned_a[zi];
+            esp_err_t err = safety_link_send_set_param(s_hw_safety, ZONE_INORMAL_PARAM_ID(zi),
+                                                       KILNLINK_PARAM_TYPE_F32, v);
+            if (err != ESP_OK) {
+                snprintf(inorm_note, sizeof(inorm_note), "staging i_normal_a[%u] failed: %.24s", zi,
+                         esp_err_to_name(err));
+                stage_failed = true;
+                break;
+            }
+            inorm_staged_mask |= (uint8_t)(1u << zi);
+        }
+    }
+
+    bool ok = !stage_failed;
+    bool commit_may_have_landed = false;
+    if (ok) {
+        uint16_t reject_param_id = 0;
+        uint8_t reject_reason = 0;
+        bool rejected = false;
+        esp_err_t err = safety_link_send_commit_config(s_hw_safety, &reject_param_id, &reject_reason,
+                                                        &rejected);
+        if (err != ESP_OK) {
+            snprintf(kct_note, sizeof(kct_note),
+                     "CT scale + i_normal_a staged but the commit was not acknowledged (%.24s)",
+                     esp_err_to_name(err));
+            ok = false;
+        } else if (rejected) {
+            snprintf(kct_note, sizeof(kct_note),
+                     "the safety processor rejected the combined CT-scale/i_normal_a commit (id "
+                     "0x%04X, reason %u)",
+                     (unsigned)reject_param_id, (unsigned)reject_reason);
+            ok = false;
+        } else {
+            commit_may_have_landed = true;
+            /* Both confirms MUST run regardless of the other's result: it was
+             * one shared commit, so a failure on either side means the whole
+             * transaction's outcome is unknown and both sides must be rolled
+             * back together -- never short-circuit here. */
+            bool kct_confirmed = zone_sweep_confirm_k_ct_landed(kct_staged_mask, k_new, kct_note, sizeof(kct_note));
+            bool inorm_confirmed = (inorm_staged_mask == 0) ||
+                                    zone_sweep_confirm_i_normal_landed(inorm_staged_mask, planned_a, inorm_note,
+                                                                       sizeof(inorm_note));
+            ok = kct_confirmed && inorm_confirmed;
+        }
+    }
+
+    if (!ok) {
+        if (kct_note[0] == '\0') {
+            snprintf(kct_note, sizeof(kct_note),
+                     "rolled back -- the companion i_normal_a commit in this same transaction failed");
+        }
+        if (inorm_note[0] == '\0') {
+            snprintf(inorm_note, sizeof(inorm_note),
+                     "rolled back -- the companion CT-scale commit in this same transaction failed");
+        }
+        (void)zone_sweep_unstage_k_ct(kct_staged_mask, prior_k, commit_may_have_landed, kct_note, sizeof(kct_note));
+        (void)zone_sweep_unstage_i_normal(inorm_staged_mask, prior_a, commit_may_have_landed, inorm_note,
+                                          sizeof(inorm_note));
+        kct_plan_mask = 0;
+        inorm_plan_mask = 0;
+    } else {
+        for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+            if (kct_plan_mask & (1u << c)) {
+                (void)zone_k_ct_set(c, k_new[c]);
+            }
+        }
+        bool esp_persist_ok = true;
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            if (inorm_plan_mask & (1u << zi)) {
+                /* Persist the RESCALED value, matching exactly what the Pico
+                 * now holds -- the ESP's own record must never drift from
+                 * the value it just confirmed on the wire. Result CAPTURED
+                 * (2026-09-10 opus review, finding 3): the Pico has already
+                 * confirmed the new value on the wire at this point, so a
+                 * failure here cannot leave S14/S15 mis-armed -- but it CAN
+                 * leave stale NVS holding the OLD-scale amps with
+                 * measured_mask still set, which the next boot would reload
+                 * and re-push as though it were current. Silently
+                 * discarding this the way the ORIGINAL invalidation fix did
+                 * is exactly the unchecked-write class this codebase's
+                 * standing check (check_safety_call_results_checked.ps1)
+                 * exists to catch elsewhere -- surfaced in the operator-
+                 * visible reason here since a bare log line would not
+                 * survive to the next status poll. */
+                if (!zone_normals_set(zi, planned_a[zi])) {
+                    esp_persist_ok = false;
+                }
+            }
+        }
+        if (!esp_persist_ok) {
+            /* %.40s bounds the fixed text so the total (worst case: 96-byte
+             * inorm_note already holding some other text, plus this
+             * appended warning) provably fits without -Werror=format-
+             * truncation -- same discipline as this file's other %.NNs
+             * sites. Full detail goes to the log line below instead. */
+            size_t len = strnlen(inorm_note, sizeof(inorm_note));
+            if (len < sizeof(inorm_note) - 1) {
+                snprintf(inorm_note + len, sizeof(inorm_note) - len, "%s%.40s", len ? " " : "",
+                         "WARNING: ESP save failed, reboot first");
+            }
+            ESP_LOGE(ZONES_HTTP_TAG,
+                     "i_normal_a rescale: Pico confirmed but zone_normals_set() failed to persist -- "
+                     "NVS may reload a stale-scale value on the next boot");
+        }
+    }
+
+    s_sweep.k_ct_derived_mask = kct_plan_mask;
+    strncpy((char *)s_sweep.k_ct_reason, kct_note, sizeof(s_sweep.k_ct_reason) - 1);
+    s_sweep.k_ct_reason[sizeof(s_sweep.k_ct_reason) - 1] = '\0';
+
+    s_sweep.i_normal_pushed_mask = inorm_plan_mask;
+    strncpy((char *)s_sweep.i_normal_reason, inorm_note, sizeof(s_sweep.i_normal_reason) - 1);
+    s_sweep.i_normal_reason[sizeof(s_sweep.i_normal_reason) - 1] = '\0';
+}
+
 /* Owner feature (2026-09-10): compare every zone's already-measured normal
  * current against what the nameplate (whole-kiln sum, or a per-coil
  * override) implies it should be -- see zone_sweep_check_expected_current()'s
@@ -1326,17 +1568,25 @@ static void zone_sweep_task(void *arg)
          * that is the whole reason the one-to-one check exists -- deriving
          * from it would write a map that looks confirmed and is not. */
         zone_sweep_push_ct_channel_map();
-        /* M12b: strictly AFTER the map push, never before or interleaved.
-         * Both stage into the SAME staged-config buffer on the Pico and each
-         * ends with its own COMMIT_CONFIG, so they have to be two complete
-         * transactions in sequence; zone_sweep_plan_k_ct() additionally
-         * refuses outright if the map push left that buffer in a state it
-         * could not repair. */
-        zone_sweep_push_k_ct_v_per_a();
-        /* Feature: nameplate current -> S14/S15 arming. Strictly AFTER the
-         * k_ct push, same "one Pico-side staged buffer, one transaction at a
-         * time" reasoning -- see zone_sweep_push_i_normal_a()'s own comment. */
-        zone_sweep_push_i_normal_a();
+        /* M12b: strictly AFTER the map push, never before or interleaved --
+         * the map push stages into the SAME staged-config buffer on the
+         * Pico and ends its own COMMIT_CONFIG first; zone_sweep_plan_k_ct()
+         * additionally refuses outright if the map push left that buffer in
+         * a state it could not repair.
+         *
+         * 2026-09-10 opus review fix: k_ct and i_normal_a used to be two
+         * SEPARATE stage/COMMIT_CONFIG transactions here, which (confirmed)
+         * either left the Pico briefly armed on the new k_ct scale with the
+         * old i_normal_a threshold, or -- since the k_ct push alone used to
+         * invalidate the ESP's own measurement -- left it PERMANENTLY armed
+         * on the old threshold, since the now-empty i_normal plan sent
+         * nothing at all. zone_sweep_push_kct_and_inormal() folds both into
+         * ONE staged transaction (rescaling i_normal_a to the new scale
+         * first) whenever a k_ct change is actually confirmed this run, so
+         * the two processors' calibration can never be observed out of
+         * lockstep -- see its own doc comment for the exact rescale
+         * formula and why it is not a guess. */
+        zone_sweep_push_kct_and_inormal();
         /* Owner feature: nameplate-implied expected-current advisory --
          * ESP-local, no link traffic, runs after the push above purely to
          * keep every sweep-completion side effect together in one place. */
