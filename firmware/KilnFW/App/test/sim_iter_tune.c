@@ -665,10 +665,39 @@ int main(int argc, char **argv)
     //     A1_DESIGN_TARGET_PCT or remove it in favour of enforcing
     //     A1_DESIGN_TARGET_PCT directly -- report the new accepts/total
     //     alongside whichever change is made, per the RATCHET GUARD below.
-    //     Until then this pin stays exactly as measured: re-run 2026-09-11
-    //     (see check_sim_iter_tune_bars.ps1's own output) reproduced
-    //     24/660 (3.6364%) unchanged from the 2026-09-10 measurement below,
-    //     so no drift has occurred and no re-pin is justified today.
+    //     Re-run 2026-09-11 (immediately after the above, before the
+    //     coupling-model change below) reproduced 24/660 (3.6364%)
+    //     unchanged from the 2026-09-10 measurement, so no drift had
+    //     occurred yet and no re-pin was justified at that point.
+    //
+    //     RE-MEASURED 2026-09-11, AFTER sim_plant.c's coupling model was
+    //     changed from a constant matrix to a level-scheduled one (see
+    //     sim_kiln_coupling_schedule_scale(), sim_plant.c): outcome 1 above
+    //     ("sim_plant.c's coupling term is changed ... to a model class
+    //     validated against hardware ... e.g. one that accounts for the
+    //     refuted superposition assumption") is satisfied -- the schedule
+    //     is fit directly to the low-joint and 62-75C plateau residuals
+    //     that refuted the old constant matrix (docs/audits/
+    //     coupling_sign_reversal_artifact_test_2026-09-11.md). Re-running
+    //     this exact measurement (kilnctl_sim_iter_tune.exe 220) against it
+    //     gives 38/660 (5.76%) -- WORSE than the pinned 24/660 (3.64%), not
+    //     better. Reported honestly per the task's own instruction: this is
+    //     NOT evidence the schedule is a bad idea for its stated purpose
+    //     (it demonstrably improves the RMS joint-plateau residual it was
+    //     built to fix -- see test_sim_kiln.c's test_coupling_schedule_high_
+    //     joint_plateaus()) -- it is evidence that A1's false-accept
+    //     sensitivity to PWM-window coupling ripple (d63a5591's original
+    //     finding) is, if anything, HEIGHTENED by a schedule whose
+    //     correction can be LARGER in magnitude than the constant matrix's
+    //     off-diagonal terms once the joint-excess level moves past the
+    //     calibrated regime (see the extrapolation-beyond-level_hi comment
+    //     on sim_kiln_coupling_schedule_scale()). PER THE RATCHET GUARD
+    //     BELOW, THE PIN IS NOT LOOSENED to 38/660 -- it stays at 24/660,
+    //     so this check now correctly reports FAIL (a real regression on
+    //     this specific harness, not a bug in the harness). Follow-up
+    //     (not done here, out of this task's scope): investigate whether
+    //     A1's own ACCEPT criterion, not the plant model, is what's
+    //     under-penalizing schedule-induced ripple.
     //
     // DETERMINISM, CHECKED (not assumed): this harness has NO wall-clock or
     // OS-entropy seeding anywhere in the call chain (grepped for
