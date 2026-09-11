@@ -460,6 +460,365 @@ after sim work has done what it honestly can.
    evaluated against joint-zone data until the coupling model defect is
    resolved.
 
+## 8. Owner shipping constraint (added mid-task): no fixture-trained fuzzy parameters
+
+**Requirement, as given:** the fuzzy controller must not ship with
+parameters trained on this bench fixture. It must bootstrap from the PID
+autotune result on whatever kiln it is installed on, and continue to adapt
+over subsequent heat cycles on that kiln.
+
+**Why this is correct, stated plainly:** this bench is a ~4 W, 120 V
+fixture that cannot exceed roughly 40 °C above ambient. A real kiln runs to
+~1200 °C, where radiation (∝T⁴) dominates over the bench's conduction/
+convection-dominated regime, and both `k_gain_c_per_duty` and `tau_s` (the
+same FOPDT quantities autotune identifies — see `pid_autotune.h:54-57`)
+have been separately documented in this repo to fall by roughly 20x from
+low-temperature to high-temperature operation
+(`firmware/KilnFW/App/drivers/persist/zones_config_json.h:877-878`'s
+`high_temperature_transfer_analysis_2026-09-08.md` reference: "every
+model_k_dc/model_tau_s/model_dead_time_s fit ever taken was measured at
+some real, finite temperature" — the file's own comment already flags this
+as a known extrapolation hazard for the *plant model*, and the same
+argument applies with equal force to any fuzzy constant fitted here). A
+shipped constant tuned on this rig is not merely imprecise elsewhere — it
+is fitted to a different physical regime, which is a correct and
+independent reason to reject it regardless of the earlier findings in this
+document.
+
+### 8.1 Bootstrap: is the fuzzy layer already installation-independent?
+
+**No — checked directly, and the band edges are absolute, fixture-scale
+units, not derived from anything autotune measures.**
+
+- `ERROR_BAND_C_DEFAULT 20.0f` (`pid_fuzzy.c:90`) is degrees C of
+  **absolute setpoint error**. `RATE_BAND_C_PER_S_DEFAULT 0.5f`
+  (`pid_fuzzy.c:91`) is degrees C **per second** of absolute measured rate.
+  Both are compile-time constants (now per-zone-config overridable,
+  §3 tier #1, but still entered and stored as raw degC / degC-per-s, not
+  as a fraction of anything the plant model produces).
+  `pid_fuzzy.h:1-33`'s own header comment confirms this was **desk
+  reasoning about "a mid-size kiln zone"**, not a derivation from a
+  measured plant — i.e. already an admitted case of guessing a constant
+  for an installation that had not been measured, just not flagged as a
+  shipping hazard until now.
+- Compare against what autotune actually measures per zone
+  (`pid_autotune.h:54-57`, `zone_cfg_t::model_k_dc`/`model_tau_s`/
+  `model_dead_time_s`, `zones_config_json.h:386-388`): `k_gain_c_per_duty`
+  (steady-state °C per unit duty), `tau_s` (FOPDT time constant, seconds),
+  `dead_time_s` (transport delay, seconds), plus the resulting `kp`/`ki`/
+  `kd` (`pid_autotune.h:187-190`) and, for relay-based identification,
+  `ku` (ultimate gain, `pid_autotune.h:249`). **None of these are inputs to
+  `pid_fuzzy_adjust()` today** — the fuzzy layer only ever sees `error_c`
+  and `error_rate_c_per_s`, both raw degC/degC-per-s, compared against a
+  raw-degC/raw-degC-per-s band. The gain-multiplication contract (§1) means
+  the *output* (a rescale of kp/ki/kd) is already installation-independent
+  by construction — a ±25% nudge on whatever kp/ki/kd autotune produced is
+  proportionally correct regardless of the zone's absolute scale — but the
+  *decision of which cell fires* is not: it is made by comparing an
+  absolute-degree error against a fixed-degree band that has no relationship
+  to this installation's own identified thermal response.
+- **This is achievable to fix, and the fix is a real derivation, not a
+  better guess.** A dimensionless membership axis can be built directly
+  from what autotune already measures:
+  - **Error axis:** normalize error by a band derived from the identified
+    static gain and a characteristic duty step, e.g.
+    `error_band_c ≈ N × k_gain_c_per_duty × duty_step_reference` for some
+    fixed dimensionless `N` (a "how many duty-steps' worth of steady-state
+    temperature swing counts as large" choice, which — unlike 20.0f today —
+    is a dimensionless design choice, portable across installations by
+    construction) or, more directly, some multiple of the FOPDT model's own
+    characteristic scale (e.g. the overshoot a P-only step response of this
+    plant would produce, which is already a function of `k_gain_c_per_duty`,
+    `tau_s`, `dead_time_s`, and the identified `kp`). Either form makes the
+    error axis scale with the zone's own identified static gain rather than
+    with an assumed absolute degree count.
+  - **Rate axis:** normalize by the identified time constant —
+    `rate_band_c_per_s ≈ M × (typical error scale) / tau_s` for a
+    dimensionless `M`. This directly encodes "how many degrees per time
+    constant counts as a large rate," which is exactly the FOPDT-relative
+    quantity a 20x-different `tau_s` on a real kiln needs; today's fixed
+    0.5 °C/s has no `tau_s` term in it at all, so it cannot track a plant
+    whose time constant differs from this bench's by an order of magnitude
+    (this document's earlier finding that the bands sit 3-5x wider than
+    this rig's own observed envelope, §2, is a direct symptom of exactly
+    this — the band was sized for an assumed kiln, not derived from any
+    measured one).
+  - **Rule table:** the `RULE_TABLE` direction values (§3 tier #3) are
+    already dimensionless (∈{-1,0,+1}, a control-law choice about which way
+    to move a gain, not a physical quantity) and need no change under this
+    requirement — the shipping hazard is specifically in the two band
+    constants, not the rule directions.
+  - This normalization is a genuinely stronger answer than "ship a default,
+    then adapt away from it," because it removes the fixture-specific
+    number from the bootstrap step entirely — firing #1 on a fresh install
+    computes its own bands from its own just-completed autotune, with zero
+    fixture-derived constant anywhere in the path. **Recommendation: this
+    normalization should be designed and implemented before any continual
+    adaptation scheme (§8.2) is built**, since it removes the single most
+    obviously wrong shipped constant (an absolute band picked by desk
+    reasoning about "a mid-size kiln") independently of whether continual
+    adaptation is pursued at all, and continual adaptation without it would
+    be adapting a scale-mismatched quantity from the start.
+
+### 8.2 Continual adaptation across heat cycles
+
+**Mechanism proposed (design only — not implemented in this task):**
+
+- **What is updated:** the two membership-band values, `error_band_c`/
+  `rate_band_c_per_s` (already per-zone config, §3 tier #1-2), re-derived
+  per §8.1's normalization from whatever `model_k_dc`/`model_tau_s` the
+  zone's most recent autotune (or continual re-identification) produced.
+  `strength_pct` itself is a candidate second adaptation target (e.g.
+  reduced automatically if a firing shows persistent oscillation — see
+  §8.5) but should not be the first thing made adaptive, since it directly
+  scales how far gains may move and is the parameter most directly tied to
+  stability margin.
+- **When:** **end of firing only, never per-tick or per-segment.** A
+  kiln firing is exactly the kind of slow, high-dead-time process this
+  project's own standing practice (`profile_executor` locking guidance,
+  the reset-one-side bug class writeup) warns against touching mid-run:
+  updating a band while a firing is in progress changes which rule cell an
+  in-progress error/rate pair falls into, mid-firing, which is a behavior
+  change during an active heat with no operator visibility into why. A
+  clean re-identification (autotune re-run, or a lighter-weight passive
+  re-estimate from the completed firing's own settled-hold data, if one
+  exists) at the *end* of a firing, applied to the *next* firing, keeps the
+  adaptation boundary aligned with the same boundary `zones_config_reload`
+  and profile-executor state already use, and gives an operator a natural
+  point (between firings) to inspect what changed.
+- **From what error signal:** not the fuzzy layer's own tracking error —
+  that would make the scheme adapt to how well IT is doing, which is
+  circular (a band that made tracking look good by never leaving ZERO/
+  STEADY, as today's bands already do per §2, would reinforce itself).
+  Instead, adapt from the **same signal autotune already produces**: a
+  fresh or updated `model_k_dc`/`model_tau_s` fit from the completed
+  firing's own step response or settled-hold behavior. This ties adaptation
+  to an independent measurement of the plant, not to the fuzzy layer
+  grading its own homework.
+- **Where persisted:** `zones_config_*` / the `cfg` LittleFS partition,
+  the same store `error_band_c`/`rate_band_c_per_s` already live in
+  (`ZONES_CFG_VERSION` 18→19, currently at 25 as of this pass). A
+  version bump to carry an "adapted" pair of bands (or an adaptation
+  history/counter, if bounded drift tracking needs one — see §8.3) needs,
+  per this repo's established pattern (v24→25's `coil_power_w` addition,
+  `zones_config_json.h:248,911-923`): a frozen `zone_cfg_v25_t` struct (already
+  present), a new frozen struct for the next version, a converter function,
+  and a CRC check on the migration path — no shortcuts, matching the
+  discipline already documented for every prior bump in this file. Any
+  *new* standalone NVS key (as opposed to a field inside the existing
+  zone-config blob) would need to respect the 15-character NVS key cap
+  that broke `zone_normals` (`project_nvs_key_too_long_zone_normals.md`) —
+  a field added to the existing struct sidesteps this since it isn't a
+  separate NVS key, but a design that gives adaptation its own store (e.g.
+  a small history for drift detection) must check this explicitly, not
+  assume it's fine because prior fields fit.
+
+### 8.3 Bounded adaptation and safety
+
+This is the section most likely to be gotten wrong, and this repo has
+documented exactly how: **"a bound justified against a test constant is
+justified against nothing"** (`project_bound_relative_to_persisted_state.md`)
+and **"a RAM-latched baseline ratchets when the bounded quantity is
+persisted"** (same memory entry). A continual scheme that re-derives its
+own bands from its own most recent autotune, and persists that result, is
+structurally exactly this hazard: if "the current adapted value" is itself
+the reference point the next adaptation step is bounded against, there is
+no independent floor/ceiling at all — the bound walks with the value.
+
+Required to avoid this, concretely:
+
+- **Every bound must be anchored to the bootstrap value (the autotune
+  result at install/first-run), never to the most recently adapted value.**
+  E.g. `error_band_c` may drift only within, say, [0.5x, 2x] of the value
+  §8.1's derivation produced from the *most recent full autotune*, not
+  [0.5x, 2x] of *last cycle's adapted band*. Storing the anchor separately
+  (the bootstrap/last-autotune-derived band, immutable except by a fresh
+  autotune) and the adapted value separately is the concrete fix for the
+  ratchet hazard — same shape as this project's other per-zone model
+  fields already separate "measured" from "in-use."
+- **Suppression, not adaptation, during:** any active safety trip or fault
+  (thermocouple invalid, guard tripped, E-stop), autotune itself (autotune
+  is the source of truth being adapted around — it must not also be an
+  adaptation input concurrently), and any aborted/stopped firing
+  (`profiles_stop`, a firing that did not complete its planned segments) —
+  an incomplete firing's tail data is not a trustworthy plant
+  identification and must not update the persisted bands. This mirrors
+  `project_autotune_needs_rested_baseline.md`'s finding that a biased
+  starting condition corrupts a fit; an aborted-firing "fit" is the same
+  class of bad input.
+- **Operator revert:** a config action that restores `error_band_c`/
+  `rate_band_c_per_s` (and any other adapted field) to the bootstrap/
+  last-known-good autotune-derived value, discarding accumulated
+  adaptation — the same shape as the existing 0-sentinel convention
+  (`control_mode`/`tc_type`/etc.) that already means "use the firmware
+  default," extended to mean "use the last-autotune-derived value" for
+  these two fields specifically.
+- **The Pico's `abs_max_temp_c` stays completely outside this scheme** —
+  it is an independent, hard safety ceiling on the RP2040 safety
+  processor, has no relationship to the ESP-side fuzzy adaptation, and
+  per `feedback_abs_max_same_or_looser.md`'s standing rule must never be
+  tightened *or* loosened by anything this scheme does. This adaptation
+  proposal touches zero safety-processor state.
+
+### 8.4 Cold start
+
+Firing #1 on a fresh install runs classic, non-adaptive behavior derived
+entirely from that install's own first autotune, with **no fixture-derived
+number anywhere in the path**:
+
+1. Operator runs PID autotune (existing, unmodified feature) → produces
+   `model_k_dc`, `model_tau_s`, `model_dead_time_s`, `kp`/`ki`/`kd` for
+   this zone, on this kiln.
+2. §8.1's normalization derives `error_band_c`/`rate_band_c_per_s` from
+   those measured values (not from `ERROR_BAND_C_DEFAULT`/
+   `RATE_BAND_C_PER_S_DEFAULT`, which remain only as the fallback for a
+   zone that has genuinely never been autotuned at all — the same role the
+   0-sentinel already plays for other fields, and the only place this
+   bench's numbers should ever appear: as a last-resort fallback for an
+   un-autotuned zone, never as the shipped, intended value).
+3. `fuzzy_strength_pct` starts at a conservative, non-zero shipped default
+   (a genuine open design choice — this document does not set it, only
+   notes it must not be 0 if the feature is meant to run, mirroring §0's
+   live finding that 0 makes the whole layer inert) or, more
+   conservatively, starts at 0 and is only raised once §8.1/§8.2's
+   machinery is confirmed in place — an owner call.
+4. Firing #1 runs with these bootstrap bands; no adaptation update happens
+   until firing #1 completes (§8.2), and only if it completed normally
+   (§8.3).
+
+### 8.5 Convergence
+
+**Cannot be shown to converge in general, and should not be presented as
+if it can.** A scheme that re-fits `model_k_dc`/`model_tau_s` from each
+firing's own data and re-derives bands from that fit is subject to the
+same sources of noise and bias any repeated system identification is:
+measurement noise (thermocouple quantization, this rig's own ~5 s sample
+interval), a biased starting condition per `project_autotune_needs_rested_baseline.md`
+(residual heat from the prior firing biasing a same-day re-fit), and
+genuine physical drift (element aging, refractory condition) that a
+converging scheme would need to track, not average away. Without an
+explicit forgetting/averaging design, consecutive noisy fits can walk
+`error_band_c`/`rate_band_c_per_s` back and forth (oscillation) or trend
+in one direction indefinitely if a fit bias is systematic rather than
+random (drift) — and per §8.3, drift is exactly what an anchor-to-bootstrap
+bound is for: it does not make the underlying fit converge, it caps how
+far a non-converging fit is allowed to carry the adapted value before the
+next full autotune resets the anchor. Concrete guards, none of which prove
+convergence but all of which bound the damage from its absence:
+
+- Anchor bounds against the last full autotune (§8.3), not the running
+  adapted value — caps drift regardless of whether the underlying fit
+  sequence converges.
+- A minimum number of qualifying (non-aborted, fault-free) firings before
+  the first adaptation update is even applied, and/or an exponential
+  moving average across firings rather than replacing the anchor with the
+  single latest fit — reduces single-firing noise sensitivity, at the cost
+  of slower tracking of genuine drift.
+- A periodic full autotune re-run (operator-triggered or interval-based)
+  as the actual convergence backstop — the adaptation scheme's job is to
+  track a slowly drifting plant *between* autotunes, not to substitute for
+  one indefinitely.
+- This should be stated to the owner as an open engineering risk, not
+  resolved by this scoping pass: a formal convergence proof would need a
+  much more specific adaptation-law design (e.g. a bounded-gain recursive
+  estimator with a proven contraction property) than "re-fit and average,"
+  which is a reasonable first design but not one this document can certify
+  converges.
+
+### 8.6 Validation: sim harness for a continual scheme
+
+Per the sim-first constraint (§6) and this document's own finding that
+**no closed-loop sim exercises the fuzzy path at all today** (§6.1), a
+continual-adaptation scheme needs a harness one level beyond §6's
+single-firing single-zone sim:
+
+- **Shape:** a loop of MANY simulated firings (not one), each running
+  §6.1's wired-in single-zone closed loop to completion, then applying
+  §8.2's end-of-firing adaptation step (re-derive bands from that firing's
+  simulated data, apply §8.3's bounds) before the next simulated firing
+  starts — i.e. the adaptation state must persist *across* simulated
+  firings within one harness run, not reset each time, to actually
+  exercise "continue to adapt over subsequent heat cycles."
+- **Can `sim_iter_tune.c`'s Monte-Carlo apparatus be reused?** Partially,
+  and only for a narrow piece. Its `mc_runs` loop (§4) is built to try many
+  *independent* randomized starting conditions and score each once against
+  a fixed target — useful for asking "does this adaptation law behave
+  safely across a wide range of starting plant-model errors," reusing its
+  existing plant-variant randomization (`plant_variant_t`,
+  `sim_iter_tune.c:71-73`+). It is **not** built for the sequential,
+  state-carrying-across-runs shape a continual scheme needs (each
+  Monte-Carlo run in the existing tool is independent and disposable, not
+  chained) — the multi-firing adaptation loop above is new machinery, using
+  `sim_iter_tune.c`'s plant/scoring primitives as building blocks rather
+  than its outer Monte-Carlo driver.
+- **What this harness can and cannot validate**, restating §6.2 in this
+  context: single-zone, many-cycle adaptation behavior (does the band
+  settle, oscillate, or drift over N simulated firings; do the §8.3 bounds
+  actually cap excursions; does a deliberately biased/aborted-firing input
+  get correctly excluded) is **on firm ground** — single-column transport
+  is measured linear, so `sim_plant.c`'s single-zone response is not the
+  refuted part of the model. **Any claim about multi-zone joint adaptation,
+  or about the scheme converging to a numerically better tracking result
+  on a REAL kiln, is not** — the former hits the refuted coupling
+  superposition directly, and the latter requires trusting `sim_plant.c`'s
+  absolute accuracy, which §6.2 already rules out as a basis for hardware
+  improvement claims. A many-firing single-zone sim run can honestly show
+  "this adaptation law is stable and bounded across N simulated cycles
+  under this plant model" — it cannot honestly show "this adaptation law
+  will improve a real kiln's tracking," for the same reason §6.2 gives for
+  the single-firing case.
+
+## 9. Recommendation ordering, revisited
+
+**Agree with the coordinator's framing: `fuzzy_strength_pct = 0.0` on the
+live board (§0) means there is no live adaptive behavior to preserve and
+nothing currently in production to regress, which makes this a good moment
+for a structural change rather than an incremental one.** Concretely, this
+changes the ordering from §7 as follows:
+
+1. **§8.1's normalization (dimensionless bands derived from autotune) moves
+   ahead of the band-rescale recommendation in §7 step 3.** Rescaling
+   `ERROR_BAND_C`/`RATE_BAND_C_PER_S` to this rig's own measured envelope
+   (§7's prior step 3) would itself be fitting a constant to this bench
+   fixture — precisely the shipping hazard §8 identifies. That rescale
+   should not ship as a production default at all; it may still be useful
+   as a **sanity check that the §8.1 derivation, when evaluated against
+   this rig's own autotune numbers, lands in a similar range** (a
+   consistency check on the normalization, not a competing shipped value).
+2. **§7 steps 1-2 (exercise the untested rule cells; wire fuzzy into a
+   single-zone closed-loop sim) are still correct and now do double duty**
+   — the same sim harness is the prerequisite for both the original
+   tuning-scoping question and §8.6's many-firing adaptation validation.
+   Build it once, sized for reuse by §8.6 from the start (state that
+   persists across chained firing runs) rather than building a
+   single-firing harness first and retrofitting persistence later.
+3. **§8.1's dimensionless-band derivation should be implemented and
+   validated (single-zone, many simulated plant variants via
+   `sim_iter_tune.c`'s existing `plant_variant_t` randomization, per §8.6)
+   before any continual-adaptation mechanism (§8.2) is built.** Bootstrap
+   correctness is a precondition for adaptation correctness — adapting a
+   scale-mismatched quantity compounds the error `sim_iter_tune.c`'s
+   dimensional analysis (§8.1) says is already there.
+4. **§8.2's continual adaptation is the largest, riskiest piece of this
+   whole scoping question and should be the last thing attempted**, gated
+   on: §8.1 shipped and validated, §8.6's many-firing sim harness built and
+   showing bounded (§8.3), non-diverging behavior across a wide range of
+   simulated plant variants, and only then a single-zone hardware trial
+   with `fuzzy_strength_pct` nonzero and every §8.3 safety property
+   (suppression during faults/trips/autotune, anchor-to-bootstrap bounds,
+   operator revert) implemented and independently reviewed — this is
+   online adaptation on a heating system's control gains, and per this
+   project's own standing practice on production control-code changes, it
+   is an owner sign-off decision, not something this scoping document
+   authorizes.
+5. **§7's original steps on iter_tune-apparatus reuse and rule-table/
+   bucket-count changes (§7 steps 6-7) are unaffected by this section** —
+   they remain not recommended for the reasons already given, independent
+   of the shipping-constraint question.
+6. **Multi-zone/joint-dwell work stays blocked on the coupling-model
+   defect for both the tuning question (§7 step 5) and the adaptation
+   question (§8.6)** — nothing in this section changes that.
+
 ## Answering the owner's question directly
 
 The fuzzy layer does not produce an independent output to "improve" the way
@@ -478,3 +837,25 @@ answer is:
 above), both cheap and zero-risk, before any tuning campaign, manual or
 automated, can be evaluated against real data rather than against the same
 single centre-cell regime already on record.
+
+**Addendum — the shipping constraint (§8) changes what "improve" should
+mean here.** The owner's requirement that fuzzy bootstrap from each
+installation's own autotune and continue adapting, rather than ship a
+fixture-fitted constant, is correct and independently motivated (§8: real
+kilns run at a regime where `k`/`tau` differ from this bench by roughly
+20x). That requirement also reveals that the two band constants
+(`ERROR_BAND_C`/`RATE_BAND_C_PER_S`) are **already** a shipped,
+fixture-flavored guess — desk reasoning about "a mid-size kiln," never
+derived from any measured plant (§8.1) — so this is not a new defect
+introduced by tuning, it is a pre-existing one this scoping task surfaced.
+Given `fuzzy_strength_pct=0` live today (§0), there is no adaptive
+behavior in production to protect, which makes now the right time for the
+structural fix (§8.1's dimensionless, autotune-derived bands) rather than
+an incremental rescale (§7's original step 3, which would itself have
+shipped another fixture-fitted constant). **Recommended sequencing: ship
+§8.1's normalization first (bootstrap-only, no continual adaptation, fully
+sim-validatable single-zone per §8.6) as the near-term deliverable; treat
+§8.2's continual-adaptation-across-cycles as a separate, larger, later
+piece of work gated on §8.1 being validated and on the safety machinery in
+§8.3 being implemented and reviewed — not something to bundle into the
+same change.**
