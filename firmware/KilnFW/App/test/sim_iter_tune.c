@@ -721,10 +721,13 @@ int main(int argc, char **argv)
            100.0 * A1_PINNED_MAX_ACCEPTS / A1_PINNED_TOTAL, A1_DESIGN_TARGET_PCT, a1_pass ? "PASS" : "FAIL");
     if (a1_pass) {
         printf("  A1 NOTE: this PASS is against a pinned known-failure baseline, not proof the design\n"
-               "           target is met. Blocked on a coupling-matrix re-identification upstream of\n"
-               "           this file (d63a5591); see docs/audits/firing_score_entry_ema_review_2026-09-10.md\n"
-               "           for the exit condition and the veto-sensitivity numbers that justify the revert\n"
-               "           this pin is standing in for.\n");
+               "           target is met. The upstream cause is sim_plant.c's linear/additive\n"
+               "           coupling model (d63a5591). The re-identification this pin once named as\n"
+               "           its fix HAS landed (2026-09-10/11) and REFUTED that model class rather\n"
+               "           than replacing it, so the pin stands -- see this file's EXIT CONDITION\n"
+               "           comment above A1_PINNED_MAX_ACCEPTS, and\n"
+               "           docs/audits/firing_score_entry_ema_review_2026-09-10.md for the\n"
+               "           veto-sensitivity numbers that justify the revert this pin stands in for.\n");
     }
 
     // ---- Part 3: A2 never-worse over a mismatched ensemble ----

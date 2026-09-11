@@ -208,8 +208,10 @@ echo BUILD_EXIT=%ERRORLEVEL%
 
     Write-Host "PASS: sim_iter_tune.exe (n=220) -- A2/A5/A6 clear; A1 clear ONLY against its pinned"
     Write-Host "      known-failure ceiling (24/660, ~3.64%), NOT the 2.0% design target, which is"
-    Write-Host "      NOT yet met -- blocked on a coupling-matrix re-identification upstream of this"
-    Write-Host "      repo (d63a5591). See sim_iter_tune.c's A1_PINNED_MAX_ACCEPTS comment and"
+    Write-Host "      NOT yet met. Upstream cause is sim_plant.c's linear/additive coupling model"
+    Write-Host "      (d63a5591); the 2026-09-10/11 re-identification refuted that model class rather"
+    Write-Host "      than replacing it, so the pin stands. See sim_iter_tune.c's EXIT CONDITION"
+    Write-Host "      comment above A1_PINNED_MAX_ACCEPTS and"
     Write-Host "      docs/audits/firing_score_entry_ema_review_2026-09-10.md."
     exit 0
 } finally {
