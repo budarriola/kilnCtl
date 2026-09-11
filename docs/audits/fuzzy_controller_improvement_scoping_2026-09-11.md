@@ -7,6 +7,19 @@ the fuzzy logic controller (`pid_fuzzy.c`) be improved the same way?
 flashed and no heating run was performed for this task; all board facts
 below are live reads via `kiln_call`.
 
+**Load-bearing finding (justifies §8's whole restructure, stated here up
+front):** `pid_fuzzy.c`'s two membership-band constants —
+`ERROR_BAND_C_DEFAULT = 20.0f` and `RATE_BAND_C_PER_S_DEFAULT = 0.5f`
+(`pid_fuzzy.c:90-91`) — are **absolute degrees-C / degrees-C-per-second
+values that the code's own header comment admits were sized by desk
+reasoning about "a mid-size kiln zone," never derived from any measured
+plant** (`pid_fuzzy.h:1-33`). They were not fitted on this bench rig either
+— no fit exists at all — but they are exactly as installation-specific a
+guess as a bench-fitted constant would be, just an unmeasured one instead
+of a measured-then-misapplied one. This is why §8 below treats "bootstrap
+from autotune" as a structural fix to a pre-existing defect this scoping
+task surfaced, not merely a response to the owner's bench-fixture concern.
+
 ## 0. Live board state (verified, not assumed)
 
 `control_get_zones()`, read 2026-09-11:
@@ -768,6 +781,224 @@ single-firing single-zone sim:
   will improve a real kiln's tracking," for the same reason §6.2 gives for
   the single-firing case.
 
+### 8.7 Confidence-driven authority (`strength_pct` rising from 0)
+
+**Owner requirement:** the fuzzy layer should play a stronger part as
+confidence in it rises. **Agree with the framing: `strength_pct` is the
+correct carrier, not a new mechanism.** It already IS "how much authority
+fuzzy has over kp/ki/kd," bounded ±25%/±50% (`MAX_NUDGE_FRACTION=0.5f`,
+`pid_fuzzy.c:96`), and it already reads 0.0 on all three live zones (§0) —
+a confidence scheme's whole job is to be the thing that moves this one
+number up from 0, under evidence, rather than an operator picking a number
+by hand. No second knob is needed or proposed.
+
+**1. What confidence must be measured from, and the circularity question
+addressed directly.** Four candidate estimators, assessed:
+
+- **Tracking-error improvement, fuzzy-adjusted gains vs. base PID gains,
+  on comparable segments.** This is the most direct measure of "is fuzzy
+  actually helping" but requires an A/B within or across firings (run a
+  segment at the current `strength_pct`, a comparable one at 0, compare) —
+  expensive in kiln time and awkward mid-firing profile-fidelity terms
+  (§8.2 already rules out adapting mid-firing). Better suited as an
+  end-of-firing or paired-firing measurement than a per-tick one.
+- **Stability of the adapted parameters across cycles** (do §8.1's
+  autotune-derived bands and the resulting rule-cell gain deltas stay
+  consistent firing to firing, or do they swing). Cheap — reuses whatever
+  autotune/re-identification data §8.2 already collects — and directly
+  answers "is this a plant we understand well enough to trust a rescale
+  on," independent of whether fuzzy has ever been switched on.
+- **Rule-cell coverage** (§2/§8.7.2 below): has this specific cell been
+  visited at all, and how many times.
+- **Agreement between predicted and actual response** (does the FOPDT
+  model's own prediction, using the currently-adapted `k_dc`/`tau_s`,
+  track what the thermocouple actually reports during a firing) — this is
+  effectively the same signal `zone_coupling_solve.c`'s residual checks and
+  the coupling-audit work already compute for the plant model; reusing it
+  here means confidence in fuzzy is really "confidence in the plant model
+  fuzzy's bands were derived from," which is an honest and defensible
+  target.
+
+  **Recommended composite: confidence = f(rule-cell visit count, plant-fit
+  stability across the last N firings, predicted-vs-actual agreement on
+  the most recent firing).** Explicitly **excluding** the first candidate
+  (fuzzy-on-vs-fuzzy-off tracking-error comparison) **as the primary
+  driver** — see the circularity analysis below — while allowing it as a
+  secondary, occasional check (an explicit periodic A/B, not a per-firing
+  automatic signal).
+
+  **The circularity question, addressed directly, since the owner flagged
+  it as the subtlest point:** §8.2 already established that adaptation
+  must not be driven by the fuzzy layer's own tracking error, because a
+  layer that graded its own homework could reinforce a band that merely
+  keeps tracking inside ZERO/STEADY (exactly what today's bands already do,
+  per §2, with zero adaptive content). **The same argument applies to
+  confidence, and for the same reason, whenever confidence is built
+  directly from fuzzy-mode tracking error.** A rule that says "tracking
+  looked good while fuzzy was on strength=50, so raise confidence" cannot
+  distinguish "fuzzy helped" from "fuzzy did nothing because the error
+  never left the centre cell" (§2's own finding) from "the base PID gains
+  were already excellent and fuzzy's ±25% nudge was noise." **This is why
+  the composite above is built from signals independent of fuzzy's own
+  output**: plant-fit stability and rule-cell coverage say nothing about
+  whether fuzzy helped, only about whether the *inputs* fuzzy's decision
+  depends on (the plant identification, the visited cells) are
+  trustworthy — which is the right thing for a bootstrap-from-autotune
+  design to gate on. The predicted-vs-actual agreement candidate is
+  slightly closer to fuzzy's own domain (it is validating the FOPDT model,
+  which the bands are derived from, not fuzzy's rule table directly) but
+  is still upstream of fuzzy's decision, not downstream of its output — it
+  does not close the loop the way "did fuzzy's own tracking look good"
+  would. **Position taken: confidence must be built from evidence about
+  the plant and about coverage, never from fuzzy's own tracking-error
+  outcome as the primary signal, for exactly the same reason adaptation
+  itself must not be.** A periodic, explicit, deliberately-triggered A/B
+  (not an automatic per-firing signal) is the one place a direct
+  fuzzy-vs-PID comparison is legitimate, because it is designed and
+  reviewed as an experiment, not silently folded into a rising number.
+
+**2. Per-cell, not per-zone, not global.** The finding that 100% of 2178
+mode-3 samples sat in exactly one of nine rule cells (§2) means a single
+scalar confidence would let evidence gathered entirely in ZERO/STEADY
+license full authority in the NEG/RISING or POS/FALLING cells that have
+**never fired once on this hardware**. **Confidence must be per-rule-cell**
+(9 values per zone, 27 board-wide across 3 zones) — each cell's confidence
+rises only from evidence gathered while that specific cell was active, and
+starts at (and reverts toward, see point 3) zero for a cell with no visits.
+The applied `strength_pct` for a given tick should then be **the confidence
+of whichever cell is currently firing** (or, since membership is
+continuous/blended across up to 4 adjacent cells per the Mamdani weighting
+in `pid_fuzzy.c:265-279`, a membership-weighted blend of the active cells'
+confidences), not a single board-wide number. Cost: 9 floats/zone (27
+total) instead of 1, well inside the existing per-zone config blob's
+budget (`zones_config_json.h` already carries dozens of floats per zone);
+persistence follows the same `zones_config_*`/`cfg`-partition/version-bump
+discipline as §8.2's bands, as one more array field. This is a genuine
+increase in adaptation-state complexity and should be treated as its own
+schema addition, not folded silently into the same version bump as §8.1's
+bands.
+
+**3. Confidence must fall — concrete triggers, avoiding the same ratchet.**
+Monotonically-rising confidence is exactly the bound-against-latest-value
+ratchet already flagged in §8.3, applied to a different persisted
+quantity. Evidence that should pull a cell's (or, for a plant-level event,
+every cell's) confidence back down:
+
+- **A firing that used this cell's current authority and tracked worse**
+  than the plant-fit-stability baseline predicted — direct negative
+  evidence against that cell's authority specifically.
+- **Any guard trip or fault during a firing** — treat as inconclusive-to-
+  negative for every cell active that firing (does not prove fuzzy caused
+  it, but a tripped firing is not confirming evidence either, and per
+  §8.3's suppression rule its data must not feed adaptation forward at
+  all, confidence included).
+- **A fresh full autotune that produces `model_k_dc`/`model_tau_s` outside
+  a tolerance band of the previous fit** — this is the direct signal for
+  "the kiln has physically changed" (element ageing, a rebuild, a
+  different load, a new kiln entirely after a board swap). **This should
+  reset ALL per-cell confidences for that zone to zero, not decay them
+  gradually** — a materially different plant invalidates every rule cell's
+  accumulated evidence at once, the same way it already invalidates §8.1's
+  bootstrap bands and forces a fresh derivation. This is the concrete
+  mechanism for "a kiln that has physically changed gets reset rather than
+  coasting on history": the reset is triggered by the autotune delta,
+  not by an operator having to remember to do anything.
+- **Elapsed time or firing count alone must never raise confidence** — per
+  the owner's explicit requirement — but a long *gap* since the last
+  qualifying firing (kiln idle for months, moved, serviced) is reasonable
+  grounds to require a fresh autotune before resuming adaptation at all,
+  treated as a forced re-bootstrap rather than a confidence input.
+
+**4. Interaction with bootstrap — confirmed, and the ramp cannot outpace
+evidence by construction.** Confidence starts at zero for every cell on a
+fresh install (no autotune history exists to build stability/coverage
+evidence from), so `strength_pct` computed from it is 0 for firing #1 —
+**this is exactly §8.4's cold start (plain PID on autotune-derived gains)
+and is confirmed as the correct, safe result of this mechanism, not a
+separate rule that needs to be added on top of it.** Because confidence
+is built only from accumulated per-cell evidence (point 1/2), there is no
+path for `strength_pct` to rise faster than that evidence exists — the
+rate limit in point 5 below is a second, independent safeguard on top of
+this, not the only thing preventing an outpaced ramp.
+
+**5. Rate limiting and hysteresis — concrete numbers, justified.**
+- **Per-cycle rise cap: no more than +10 percentage points of `strength_pct`
+  per qualifying firing, per cell.** Justification: at `MAX_NUDGE_FRACTION
+  = 0.5f`, a 10-point step changes the maximum possible single-cell gain
+  nudge by exactly 5 percentage points of the base gain (10% of 50%) —
+  small enough that one firing's worth of authority increase is very
+  unlikely to itself be the difference between a stable and unstable
+  firing, given the existing bound already limits the ceiling nudge to
+  ±25% at strength 50 (§1) and this project's own measured fuzzy-vs-base
+  gain deltas at strength 50 were 12-25% (§2's per-zone table) — i.e. a
+  single 10-point step moves the achievable nudge by roughly the same
+  order as the *smallest* deltas already observed on real hardware, not a
+  step large enough to jump into an unexplored regime in one move.
+- **Fall is not rate-limited the same way — a negative-evidence or
+  autotune-delta trigger (point 3) should apply immediately, in full**,
+  since the asymmetry (fast down, slow up) is the safe direction for a
+  heating system: an authority increase should be earned slowly, a
+  withdrawal of trust should not wait for a matching countdown.
+- **Hysteresis: require 2 consecutive qualifying (non-aborted, fault-free)
+  firings showing stable-or-improving evidence before any rise is banked**,
+  so a single good firing right after a bad one does not bounce
+  `strength_pct` back up immediately — this directly prevents oscillation
+  between levels without needing a wider dead-band on the confidence
+  estimate itself (which would just delay, not prevent, oscillation if the
+  underlying evidence itself is noisy firing-to-firing).
+
+**6. Safety envelope.**
+- **Suppress the whole confidence-authority pipeline** (no rise, no fall
+  from ordinary evidence — though the autotune-delta reset in point 3
+  still applies, since a plant change is a fact regardless of what else is
+  happening) **during any active fault, trip, autotune run, or recovery
+  mode** (`boot_guard_is_recovery_mode()`, per CLAUDE.md's boot_guard
+  section) — same suppression list as §8.3's adaptation suppression,
+  applied here to the authority-raising mechanism specifically.
+- **Automatic ceiling: `strength_pct` should never be allowed to reach 100
+  without an explicit operator action.** A reasonable automatic ceiling is
+  50 (the point at which `pid_fuzzy.c`'s comment already documents the
+  concrete ±25% nudge this project has actual hardware data about, §2) —
+  reaching the full ±50% nudge at strength 100 is a materially larger
+  authority than anything ever measured on this hardware and should
+  require a deliberate operator decision, not an automatic climb.
+- **`abs_max_temp_c` on the Pico stays completely outside this mechanism**,
+  as an independent hard ceiling never tightened or loosened by anything
+  fuzzy's confidence does — same statement as §8.3, restated here because
+  it applies with equal force to the authority-raising path specifically,
+  not just to the band-adaptation path.
+
+**7. Validation — blocked on the same missing harness, not a new one.**
+This is inherently a multi-firing behavior (confidence accumulates evidence
+across cycles), so it needs §8.6's many-simulated-firings harness with
+state persisted across chained runs — **the same harness §8.2's continual
+band-adaptation validation needs, not a separate one.** Since §6.1 already
+establishes that no closed-loop sim exercises the fuzzy path at all today,
+**confidence-driven authority cannot be tested in any form — not even a
+single-firing sanity check — until that harness is wired.** This sits at
+exactly the same point in the ordering as §8.2 in §9 below: after §6's
+single-firing harness is built and after §8.1's dimensionless bands are
+validated, since a confidence estimate over an unvalidated band derivation
+would itself be confidence in the wrong quantity.
+
+**8. Observability.** Per-zone `strength_pct` (already an existing HTTP-only
+field, §0) plus, if per-cell confidence (point 2) ships, some rollup of it
+(e.g. "cells with any evidence: 3/9" or the currently-active cell's own
+confidence) must be visible to the operator. Constraints given: LCD pages
+are 480×320 landscape, no scrolling, no new colors. A single numeric
+`strength_pct` value (already just a 0-100 percentage) fits trivially
+alongside existing per-zone numeric readouts on an existing zones/control
+page without a new page or new color — reusing whatever numeric-field
+style already renders `Kp`/`Ki`/`Kd` is the direct answer, not a new
+widget. A full 9-cell-per-zone confidence breakdown does **not** fit
+comfortably in that space without scrolling or a dedicated page, so for
+the LCD specifically the recommendation is: show the single active-cell
+confidence (or the applied `strength_pct` — the operator-relevant number is
+"how much authority is fuzzy actually exercising right now," which is
+exactly the blended value from point 2) as one more numeric field, and
+reserve the full per-cell 3×3 breakdown for the web UI, which has no such
+space constraint and can render it as a small 3×3 grid.
+
 ## 9. Recommendation ordering, revisited
 
 **Agree with the coordinator's framing: `fuzzy_strength_pct = 0.0` on the
@@ -799,14 +1030,25 @@ changes the ordering from §7 as follows:
    correctness is a precondition for adaptation correctness — adapting a
    scale-mismatched quantity compounds the error `sim_iter_tune.c`'s
    dimensional analysis (§8.1) says is already there.
-4. **§8.2's continual adaptation is the largest, riskiest piece of this
-   whole scoping question and should be the last thing attempted**, gated
-   on: §8.1 shipped and validated, §8.6's many-firing sim harness built and
-   showing bounded (§8.3), non-diverging behavior across a wide range of
-   simulated plant variants, and only then a single-zone hardware trial
-   with `fuzzy_strength_pct` nonzero and every §8.3 safety property
+4. **§8.2's continual band adaptation and §8.7's confidence-driven
+   `strength_pct` are the largest, riskiest pieces of this whole scoping
+   question and should be attempted together, last, as one gated body of
+   work — not §8.2 first and §8.7 added afterward.** They share the same
+   validation harness (§8.6/§8.7 point 7), the same suppression list
+   (faults/trips/autotune/recovery mode), and the same ratchet hazard
+   (bound-against-latest for bands, monotonic-rise for confidence) — a
+   single review pass covering both is more likely to catch an interaction
+   between them (e.g. a band adaptation and a confidence rise landing in
+   the same firing) than two separate passes. Gated on: §8.1 shipped and
+   validated, §8.6's many-firing sim harness built and showing bounded
+   (§8.3), non-diverging behavior across a wide range of simulated plant
+   variants for BOTH the band values and the per-cell confidence/authority
+   values, and only then a single-zone hardware trial with
+   `fuzzy_strength_pct` starting at 0 and rising only under §8.7's measured,
+   rate-limited, per-cell evidence — with every §8.3/§8.7 safety property
    (suppression during faults/trips/autotune, anchor-to-bootstrap bounds,
-   operator revert) implemented and independently reviewed — this is
+   autotune-delta confidence reset, operator revert, the automatic
+   ceiling below 100) implemented and independently reviewed — this is
    online adaptation on a heating system's control gains, and per this
    project's own standing practice on production control-code changes, it
    is an owner sign-off decision, not something this scoping document
