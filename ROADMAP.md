@@ -1,50 +1,75 @@
 # kilnCtl Roadmap — both processors
 
 > **Status:** planning · **Last reviewed:** 2026-09-10, roadmap-upkeep audit
-> (twelfth sweep) — 20 commits landed since the eleventh sweep (`dd67ec7e`,
-> corrected by `e5b7fff9`). Verified against code and git history, not
-> against a commit message's own self-assessment — several claims below
-> were checked directly against source. Check suite re-run fresh this
-> sweep: **93/93 passing, 0 failed** (`tools/run_all_checks.ps1`, fresh run
-> this sweep). `check_all_task_stack_budgets.ps1` (KilnFW) is **not** red —
-> it reports `OK` by design: all 28 tasks are INDETERMINATE (unresolved
-> `callx4/8/12` dispatch means the walk can only produce a lower bound), and
-> INDETERMINATE is explicitly not scored as a failure. `safety_poll`
-> measured this run at 3136 B used / 4756 B honest free of 8192 (58.1%) —
-> a lower bound, not the true worst case. Landed and confirmed:
-> - **Web-GUI ceiling is a hard cutoff, confirmed in code** (`c99356f8`):
+> (twelfth sweep, updated in place after a same-day correction) — commits
+> landed since the eleventh sweep (`dd67ec7e`, corrected by `e5b7fff9`).
+> Verified against code and git history, not against a commit message's own
+> self-assessment. **Check-suite tallies were unstable all session** (93/93,
+> 92/1, 91/2 seen within one hour) because several sessions hold WIP in this
+> shared tree — do not read any single count below as a property of current
+> `HEAD`, only as what was true at the stated moment.
+> - **`check_all_task_stack_budgets.ps1` (KilnFW) does NOT skip grading on
+>   INDETERMINATE tasks — corrected from this sweep's own first pass.** A
+>   second read of `firmware/KilnFW/App/test/check_all_task_stack_budgets.py`
+>   (its own EXIT CODES doc at line 131, and the OK/FAIL branches around
+>   line 566-602) confirms: INDETERMINATE means the reported total is an
+>   explicit **lower bound**, not that the total goes unscored — an
+>   over-ceiling total still fails regardless of INDETERMINATE status. Runs
+>   earlier this session that reported it red were correct; my earlier
+>   "OK by design" framing in this same sweep was wrong and has been
+>   removed. `safety_poll` measured fresh at that time: 3136 B used, 4756 B
+>   honest free of 8192 (58.1%) — a lower bound, not the true worst case.
+>   That 3104 -> 3136 B ceiling move is now explained and is a deliberate,
+>   dated, causal ratchet update (`24b12f0a`, see next bullet), not
+>   unexplained drift.
+> - **Ceiling-reconcile backoff: landed** (`24b12f0a`, superseding the
+>   in-flight revert this sweep initially reported as uncommitted). ARMED is
+>   now treated as the latch it actually is (fixed 30 s backoff, jitter and
+>   the false PWM/de-energise claims removed from `safety_ceiling_policy.h`),
+>   **and** the ceiling reconcile moved off the blocking
+>   `safety_cfg_store_refetch()` onto a non-blocking `apply_pairs_ex()` path —
+>   this second half is the more important fix, since it stops
+>   `safety_poll_task` taking the blocking form `safety_cfg_store.c:1488-1510`
+>   documents as forbidden (httpd-worker callers keep the blocking path).
+>   Making that refetch function non-static cost one 32 B inlined frame on
+>   `safety_poll`'s deepest path — 3104 -> 3136 B — which is exactly the
+>   figure measured above.
+> - **elf_archive producer leak fixed at the root** (`b693f6f1`): orphan
+>   adoption now runs automatically inside `archive_kiln_elf()`, recovering
+>   identity by scanning for the `esp_app_desc_t` magic word — 68 files / 47
+>   manifest / 21 superseded / **0 unreferenced** at time of that commit.
+>   `_prune()` now protects every referenced ELF and reports loudly when the
+>   60-file cap is therefore unenforceable (archive is ~1.3 GB) — shedding
+>   registered identities to make room is an **open owner decision**, not a
+>   defect.
+> - `91f0adfb` closed a word-boundary hole in `check_doc_hash_citations.ps1`'s
+>   `sub:` tag matching.
+> - **Web-GUI ceiling hard cutoff, confirmed in code** (`c99356f8`):
 >   `safety_ceiling_policy_target_c()` (`firmware/KilnFW/App/drivers/safety/safety_ceiling_policy.c:16`)
 >   returns the ESP's configured maximum with no added headroom;
 >   `SAFETY_CEILING_HEADROOM_C` stays defined but unused, per that file's own
->   comment at line 39. Already recorded verified on hardware by the eleventh
->   sweep; unchanged this sweep.
-> - **`safety_ceiling_refusal_class_t`** exists and is used in
->   `safety_ceiling_policy.c/.h`, `safety_ceiling_sync.c/.h` and
->   `safety_cfg_http.c/.h` (`1e20721b`) — the refusal-classification half of
->   that commit is landed. **Its ARMED-state backoff is being reverted right
->   now, uncommitted, in this tree**: `git status` shows
->   `safety_ceiling_policy.c/.h` and `safety_cfg_store.c/.h` dirty as of this
->   sweep. Do not mark the backoff done; the classification-by-code part is.
-> - **`c8928e01`'s elf_archive fix is itself being corrected right now**:
->   `tools/PcTools/src/kilnctrl/elf_archive.py` and its test are dirty in
->   this tree (uncommitted), consistent with the brief that the "every ELF
->   reachable or protected" claim was false at commit time and another
->   session is fixing it. `firmware/KilnFW/archive_elf.cmake` itself is
->   clean (last touched `1fba9dde`) — the gap is in the Python-side registry,
->   not the CMake deposit step.
-> - `d141e152`, `df4da85b`/`7aefa049`, `9d796b57`, `6113859a`, `a3c566bc`,
->   `dbd8ff52`, `8489facf`, `15a8d1a1`, `370391a0`/`ca48ae0a` — all as
->   described in the brief handed to this sweep; each is a committed, clean
->   change (not superseded or dirty in this tree) and no code inspected this
+>   comment at line 39. Verified on hardware per the eleventh sweep;
+>   unchanged this sweep.
+> - `d141e152`, `df4da85b`/`7aefa049`, `9d796b57`, `6113859a`, `8489facf`,
+>   `15a8d1a1`, `370391a0`/`ca48ae0a` — as described in the brief handed to
+>   this sweep; each is a committed, clean change and no code inspected this
 >   sweep contradicts their stated effect.
+> - **Two items landed this sweep are already flagged as being reworked,
+>   record accordingly, not as closed:** `a3c566bc`'s `k_ct`/`i_normal` fix
+>   cleared the ESP's normals without telling the Pico, leaving the guard
+>   armed on a stale scale and making a calibrating sweep unable to ever arm
+>   S14/S15 — a rework is in progress. `6113859a`'s GET_STATUS timeout
+>   gating is separately being revised because it made `stats.timeouts`
+>   blind to partial loss.
 > - The **coupling joint-identification capture is still running** on the
 >   bench (`docs/COUPLING_JOINT_IDENTIFICATION_CAPTURE.md`, not touched this
 >   sweep per instruction) — the matrix remains refuted and the board runs
 >   uncoupled feedforward until it lands; this also gates the iter_tune
 >   dwell-offset bars, S8 auto-derivation, and the A1 pin's exit condition.
-> - **Three firmware commits are built but unflashed**: the refusal
->   classification, GET_STATUS accounting fix, and per-coil nameplate
->   wattage (`dbd8ff52`) — board is occupied by the coupling capture.
+> - **Several firmware commits remain built but unflashed** (refusal
+>   classification/backoff, GET_STATUS accounting, per-coil nameplate
+>   wattage `dbd8ff52`) pending the board, which is occupied by the coupling
+>   capture.
 >
 > **Reviewed before that:** 2026-09-10, roadmap-upkeep audit
 > (eleventh sweep) — 27 commits landed since the tenth sweep (`c4b026d8`).
