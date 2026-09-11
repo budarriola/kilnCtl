@@ -97,6 +97,14 @@ if (-not (Test-Path $vcvars)) {
 
 $outDir = Join-Path $testDir "build"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+# Own object directory, distinct from build_host_tests.ps1's shared
+# App/test/build -- both scripts can run concurrently (several agents run
+# the suite simultaneously here) and previously clobbered each other's
+# .obj files (pid.obj, firing_score.obj, etc.) despite holding different
+# build locks. The .exe itself still lands in $outDir since nothing else
+# writes that filename.
+$objDir = Join-Path $testDir "build_sim_iter_tune_bars_obj"
+New-Item -ItemType Directory -Force -Path $objDir | Out-Null
 
 . (Join-Path $repoRoot "tools\build_lock.ps1")
 $lock = Enter-BuildLock -Name "kilnfw_sim_iter_tune_bars"
@@ -151,7 +159,7 @@ try {
     @"
 @echo off
 call "$vcvars" x64 >nul
-cl /nologo /W3 /EHsc /std:c11 $includeArgs /Fo:"$outDir\\" /Fe:"$exe" $srcQuoted
+cl /nologo /W3 /EHsc /std:c11 $includeArgs /Fo:"$objDir\\" /Fe:"$exe" $srcQuoted
 echo BUILD_EXIT=%ERRORLEVEL%
 "@ | Set-Content -Encoding ascii -LiteralPath $bat
 
@@ -164,9 +172,9 @@ echo BUILD_EXIT=%ERRORLEVEL%
         # source (a genuine regression -- FAIL), or the toolchain never
         # actually standing up (an environment problem -- SKIP)? MSVC
         # diagnostics always look like "<file>(<line>): error C####: ...".
-        $hasCompilerError = $buildOut | Where-Object { $_ -match 'error C\d{4}' }
+        $hasCompilerError = $buildOut | Where-Object { $_ -match 'error C\d{4}' -or $_ -match 'error LNK\d+' -or $_ -match 'fatal error' }
         if ($hasCompilerError) {
-            Write-Host "FAIL: sim_iter_tune.exe did not build -- compiler reported real diagnostics above."
+            Write-Host "FAIL: sim_iter_tune.exe did not build -- compiler/linker reported real diagnostics above."
             exit 1
         }
         Write-Host "SKIP: sim_iter_tune.exe did not build and the compiler reported no diagnostics against"

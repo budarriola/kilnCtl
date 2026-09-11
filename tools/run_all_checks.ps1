@@ -115,6 +115,15 @@ if (Test-Path $halBoundaryNegativeTest) {
     Write-Host "        has it moved? A missing negative test must not read as a clean run." -ForegroundColor Red
     Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
     exit 2
+} elseif (-not (Test-Path $halBoundaryNegativeTest)) {
+    # 2026-09-10 (opus review, round 3): under -AllowFewerChecks this branch
+    # used to fall through with NO output at all -- strictly worse than the
+    # original silent WARNING it replaced, since -AllowFewerChecks is the one
+    # mode meant to tolerate a missing expected file, and it now does so with
+    # zero signal. Restore a visible warning.
+    Write-Host ""
+    Write-Host "WARNING: expected negative test $halBoundaryNegativeTest not found -- proceeding" -ForegroundColor Yellow
+    Write-Host "         without it because -AllowFewerChecks was passed." -ForegroundColor Yellow
 }
 
 # firmware/hwAbstraction/test/{compile_esp_backends,compile_pico_backends,
@@ -152,6 +161,12 @@ foreach ($name in $saftyfwOrphanTests) {
         Write-Host "        has it moved? A missing negative test must not read as a clean run." -ForegroundColor Red
         Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
         exit 2
+    } elseif (-not (Test-Path $scriptPath)) {
+        # Same restore as the hal-boundary block above: -AllowFewerChecks
+        # must not be completely silent about what it is tolerating.
+        Write-Host ""
+        Write-Host "WARNING: expected SaftyFW negative test $scriptPath not found -- proceeding" -ForegroundColor Yellow
+        Write-Host "         without it because -AllowFewerChecks was passed." -ForegroundColor Yellow
     }
 }
 $checks = $checks | Sort-Object FullName
@@ -169,6 +184,11 @@ foreach ($name in $hwAbstractionScripts) {
         Write-Host "        has it moved? A missing expected check must not read as a clean run." -ForegroundColor Red
         Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
         exit 2
+    } elseif (-not (Test-Path $scriptPath)) {
+        # Same restore as the hal-boundary block above.
+        Write-Host ""
+        Write-Host "WARNING: expected hwAbstraction test $scriptPath not found -- proceeding" -ForegroundColor Yellow
+        Write-Host "         without it because -AllowFewerChecks was passed." -ForegroundColor Yellow
     }
 }
 $checks = $checks | Sort-Object FullName
@@ -203,6 +223,11 @@ if ((Test-Path $selfcheckPy) -and (Test-Path $selfcheckPython)) {
     Write-Host "        has it moved? A missing selfcheck.py must not read as a clean run." -ForegroundColor Red
     Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
     exit 2
+} elseif (-not ((Test-Path $selfcheckPy) -and (Test-Path $selfcheckPython))) {
+    # Same restore as the hal-boundary block above.
+    Write-Host ""
+    Write-Host "WARNING: expected $selfcheckPy (or its venv $selfcheckPython) not found -- proceeding" -ForegroundColor Yellow
+    Write-Host "         without it because -AllowFewerChecks was passed." -ForegroundColor Yellow
 }
 
 # As of 2026-08-28 there are several: some under tools/, two under

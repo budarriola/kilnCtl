@@ -1230,7 +1230,7 @@ try {
 
     Invoke-HostTestExe -Name "s8_rate_guard_estimate" -ExePath $exe35 -BuildCmd $cmd35
 
-    # ---- test_flash_worker_boot_order.c: its own THIRTY-SIXTH, separate
+    # ---- test_flash_worker_boot_order.c: its own THIRTY-FIFTH, separate
     # executable. Positive/negative test for the 2026-09-08 flash-worker
     # boot-ordering fix (1f741635, "boot order beats bounded waits" --
     # uart_bridge_ext_start_flash_worker() moved to run BEFORE
@@ -1381,7 +1381,21 @@ try {
     if (Test-Path $exeClosedloop) { Remove-Item -Force $exeClosedloop }
     cmd.exe /c $cmdClosedloop
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $exeClosedloop)) {
-        Write-Host "BUILD FAILED: sim_credibility_gate_closedloop (informational only, does not fail this script -- see file header for its own caveats on why it is build-only)"
+        # 2026-09-10: a build failure here used to be purely cosmetic --
+        # printed and then discarded, same posture as sim_iter_tune/
+        # sim_wide_temp_sweep/sim_credibility_gate above, which is right for
+        # THEM (their run/verdict is genuinely informational) but wrong here:
+        # this file has no informational verdict at all, since it is never
+        # run automatically -- a BUILD failure is the only mechanical signal
+        # this file can ever produce, so letting it be silently non-gating
+        # meant it could never fail anything, which is exactly the "check
+        # that cannot fail" class this repo is eliminating. Its RESULTS stay
+        # non-gating (it is still never run automatically, and no PASS/FAIL
+        # verdict from it is ever consulted) -- only a compile break now
+        # fails this script, via the same $script:buildFailures list every
+        # other Invoke-HostTestExe-tracked source uses.
+        Write-Host "BUILD FAILED: sim_credibility_gate_closedloop -- this DOES fail this script (compile-only signal; the file is still never run automatically and its results, when it does run, stay non-gating -- see file header)"
+        $script:buildFailures += "sim_credibility_gate_closedloop"
     } else {
         Write-Host "sim_credibility_gate_closedloop: BUILD OK (not run automatically -- diagnostic with unresolved gains provenance, see file header; run by hand with the two capture paths as argv)"
     }

@@ -62,6 +62,23 @@ $testDirs = @(
     (Join-Path $repoRoot "firmware\SaftyFW\test")
 )
 
+# Strip comments before matching so a basename mentioned only in prose, a
+# commented-out block, or a skip-list comment does not count as "wired" --
+# rules 1 and 3 used to `-match` the raw file text, so a paragraph of prose
+# (this repo has one in front of nearly every build recipe) could satisfy
+# them with no actual build/include directive behind it. Strips PowerShell/
+# Python "#" line comments and PowerShell "<# ... #>" block comments; good
+# enough for this check's purpose (real build directives are code, not
+# comments) without needing a full tokenizer.
+function Strip-ScriptComments {
+    param([string]$Text)
+    $noBlock = $Text -replace '(?s)<#.*?#>', ''
+    $lines = $noBlock -split "`r?`n" | ForEach-Object {
+        if ($_ -match '^\s*#') { '' } else { $_ -replace '(?<!\S)#.*$', '' }
+    }
+    return ($lines -join "`n")
+}
+
 $orphans = @()
 $totalConsidered = 0
 
@@ -74,7 +91,7 @@ foreach ($testDir in $testDirs) {
     if (-not (Test-Path $buildScript)) {
         throw "check_test_c_files_wired: $buildScript not found -- has it moved or been renamed? This check is now blind for $testDir."
     }
-    $buildScriptText = Get-Content -Raw -Path $buildScript
+    $buildScriptText = Strip-ScriptComments (Get-Content -Raw -Path $buildScript)
 
     # All *.c files directly under this test/ dir (one level -- neither test
     # tree nests .c sources deeper than this today; build/ output lives
@@ -99,7 +116,7 @@ foreach ($testDir in $testDirs) {
     $driftCheckFiles = Get-ChildItem -Path (Join-Path $testDir "*") -File -Include "*.py", "*.ps1" -ErrorAction SilentlyContinue
     $driftCheckText = ""
     foreach ($f in $driftCheckFiles) {
-        $driftCheckText += (Get-Content -Raw -Path $f.FullName)
+        $driftCheckText += (Strip-ScriptComments (Get-Content -Raw -Path $f.FullName))
         $driftCheckText += "`n"
     }
 
