@@ -770,12 +770,17 @@ esp_err_t safety_exchange(SafetyLinkClass *link, const uint8_t *request, size_t 
 
     if (expect_status) {
         if (safety_drain_inbox_for_status(link, SAFETY_LINK_REPLY_TIMEOUT_MS)) {
-            /* A real matched reply -- see the doc comment on
-             * safety_link_stats_t::link_reply_us_count for why this counts
-             * as "matched" without a wire seq/msg id: this whole function is
-             * serialized by xact_lock, so the STATUS frame that just
-             * satisfied the wait above cannot be anything other than the
-             * answer to the request sent a few lines up. */
+            /* A STATUS frame landed inside the wait window. Note what this is
+             * NOT proof of: xact_lock only rules out a second *exchange*
+             * racing this one, it does not make the frame a caused reply --
+             * SAFETY_CMD_GET_STATUS has no dispatch case on the Pico
+             * (LINK_PROTOCOL.md "no longer a poll"; SaftyFW's link_task.c
+             * never answers this request), so any STATUS frame seen here is
+             * that peer's own free-running 500 ms push, which may or may not
+             * have anything to do with the send a few lines up. What is timed
+             * below is therefore "how long until a status push happened to
+             * land after we asked", not a measured reply latency -- see
+             * safety_link_stats_t::link_reply_us_count's own doc comment. */
             uint32_t elapsed_us = (uint32_t)(hal_time_now_us() - reply_start_us);
             if (safety_lock(link)) {
                 link->stats.link_reply_us_last = elapsed_us;
@@ -792,14 +797,36 @@ esp_err_t safety_exchange(SafetyLinkClass *link, const uint8_t *request, size_t 
                 safety_unlock(link);
             }
         } else {
-            /* ACKed but no answer: the peer's protocol layer is alive and its
-             * application layer is not. Counted as a timeout, since the result
-             * for the caller is the same -- no fresh data. */
+            /* No STATUS landed inside this specific window. For GET_STATUS
+             * that is NOT, by itself, evidence the peer is gone (see this
+             * function's header comment and safety_link_status_wait_is_real_
+             * timeout()'s own doc comment, safety_link.h): a perfectly
+             * healthy link whose independent 500 ms push phase simply falls
+             * outside this window produces the exact same observation, and
+             * before this fix that miscounted every single one of those as a
+             * failure (docs/audits/
+             * safety_link_get_status_timeout_counter_2026-09-10.md).
+             * safety_link_up_locked() -- the same age-based check S6a/S6b
+             * key off, driven by the most recent valid frame of ANY type --
+             * is what actually knows whether the peer is there; only count
+             * this as a real stats.timeouts, and only report ESP_ERR_TIMEOUT
+             * to the caller, when that check agrees the link looks down. */
+            bool link_looks_up = false;
             if (safety_lock(link)) {
-                link->stats.timeouts++;
+                link_looks_up = safety_link_up_locked(link);
                 safety_unlock(link);
             }
-            err = ESP_ERR_TIMEOUT;
+            if (safety_link_status_wait_is_real_timeout(false, link_looks_up)) {
+                if (safety_lock(link)) {
+                    link->stats.timeouts++;
+                    safety_unlock(link);
+                }
+                err = ESP_ERR_TIMEOUT;
+            }
+            /* else: the link's own liveness check says it is up -- this was
+             * a coincidental phase miss on an otherwise healthy link, not a
+             * failure. Leave err at ESP_OK (already set by the successful
+             * send above) and do not touch stats.timeouts. */
         }
     } else {
         /* A peer that volunteers a status right after (e.g. after

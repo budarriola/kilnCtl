@@ -729,6 +729,11 @@ esp_err_t safety_link_ping(SafetyLinkClass *link)
     if (!link->initialized) {
         return ESP_ERR_INVALID_STATE;
     }
+    /* Same GET_STATUS send as safety_poll_task() (safety_link_poll.c) --
+     * DO NOT DELETE as dead code; see that call site's comment. The Pico
+     * never answers it, but decoding it still refreshes the Pico's own
+     * link-liveness timestamp before its dispatch switch drops it, so this
+     * is a real ESP->Pico heartbeat, not a no-op. */
     const uint8_t request[] = { SAFETY_CMD_GET_STATUS };
     return safety_exchange(link, request, sizeof(request), true);
 }

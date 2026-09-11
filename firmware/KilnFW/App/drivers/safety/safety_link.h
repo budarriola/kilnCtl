@@ -520,6 +520,41 @@ static inline bool safety_drain_still_waiting(bool want_status, bool got_status,
     return false;
 }
 
+/* Pure decision: given whether a STATUS frame landed inside safety_
+ * exchange()'s GET_STATUS wait window, and whether the link's own age-based
+ * liveness check (safety_link_up_locked() -- the same one S6a/S6b key off,
+ * driven by the most recent valid frame of ANY type, not by this specific
+ * request) currently says the peer looks up, decide whether this exchange
+ * should count as a real `stats.timeouts`. Extracted as its own pure,
+ * host-testable predicate for the same reason safety_drain_still_waiting()/
+ * safety_link_rollback_infer_outcome() are: the logic is worth pinning on
+ * its own, without needing the FreeRTOS-timed send/wait cycle around it.
+ *
+ * Why this exists, 2026-09-10 (docs/audits/
+ * safety_link_get_status_timeout_counter_2026-09-10.md): SAFETY_CMD_
+ * GET_STATUS is NOT a request/reply pair (LINK_PROTOCOL.md "no longer a
+ * poll") -- SaftyFW's link_task.c has no dispatch case for it at all, and
+ * instead pushes STATUS unsolicited on its own free-running 500 ms clock.
+ * Before this fix, "no frame landed inside this specific ~345 ms window"
+ * was counted as a timeout unconditionally, which is not evidence of a dead
+ * peer -- a perfectly healthy link whose independent 500 ms push phase
+ * simply falls outside this particular window produces the exact same
+ * observation. Because both clocks are free-running with no resync, a given
+ * boot's phase offset stays essentially fixed for its whole life, so this
+ * produced a permanent, bimodal ~0% or ~100% "failure" rate rather than a
+ * real one -- measured live as `timeouts` climbing in lockstep with `sent`
+ * (every single poll) for the entire session, with `link_reply_us.count`
+ * frozen. `safety_link_up_locked()` is what actually knows whether the peer
+ * is there; only count a real timeout when it agrees. */
+static inline bool safety_link_status_wait_is_real_timeout(bool status_landed_in_window,
+                                                             bool link_looks_up)
+{
+    if (status_landed_in_window) {
+        return false; /* a frame arrived -- not a timeout by any measure */
+    }
+    return !link_looks_up;
+}
+
 /* Per-request ACK timeout handed to uart_protocol_send. Deliberately much
  * shorter than the PC link's 200 ms default: uart_protocol retries up to
  * UART_PROTO_MAX_RETRIES (10) times internally, so with no peer at all every
@@ -902,7 +937,18 @@ typedef struct {
     uint32_t frame_errors;    /* malformed/unexpected payloads seen by this driver,
                                * plus uart_owner's line-error count for UART1 */
     uint32_t timeouts;        /* requests that produced no usable answer (no ACK,
-                               * a NACK, or an ACK with no status frame behind it) */
+                               * a NACK, or an ACK with no status frame behind it).
+                               * For GET_STATUS specifically (the only expect_
+                               * status=true command -- safety_link_ping()/the
+                               * periodic poll), a miss inside the wait window is
+                               * only counted here when safety_link_up_locked()
+                               * ALSO says the peer looks down; see safety_
+                               * exchange()'s (safety_link_inbox.c) and safety_
+                               * link_status_wait_is_real_timeout()'s own doc
+                               * comments (2026-09-10 fix, docs/audits/
+                               * safety_link_get_status_timeout_counter_2026-09-10.md)
+                               * for why a raw window-miss alone is not evidence
+                               * of a dead peer on this push-only command. */
     uint16_t poll_period_ms;  /* current period; 0 = polling off */
     /* 2026-08-23, the DIAG-frame-went-dark investigation, continued: real,
      * monotonic "this frame type was successfully applied N times" counts --
@@ -1047,23 +1093,32 @@ typedef struct {
      *
      * Correlation is NOT by a wire seq/msg id -- SAFETY_CMD_GET_STATUS
      * carries none, and SaftyFW's link_task never runs the ACK'd DATA/ACK/
-     * NACK transport (see safety_exchange()'s own comment). The correlation
-     * is safety_exchange()'s own xact_lock: only one exchange is ever in
-     * flight on this link at a time, so the next STATUS frame
-     * safety_drain_inbox_for_status() decodes while that lock is held is,
-     * by construction, the reply to the request this same call just sent --
-     * there is no second candidate it could be. Only the expect_status path
-     * (safety_link_ping()/the periodic poll) is measured; the fire-and-
+     * NACK transport (see safety_exchange()'s own comment). xact_lock only
+     * rules out a second *exchange* racing this one on this ESP; it does
+     * NOT make the STATUS frame decoded here a reply CAUSED by this send --
+     * corrected 2026-09-10 (docs/audits/
+     * safety_link_get_status_timeout_counter_2026-09-10.md): the Pico has no
+     * dispatch case for GET_STATUS at all (LINK_PROTOCOL.md "no longer a
+     * poll") and pushes STATUS unsolicited on its own free-running 500 ms
+     * clock, so the frame landing inside this wait window may be that
+     * independent push, coincidentally timed, rather than an answer to this
+     * request. What this field actually measures is "how long after sending
+     * did a status push happen to land", which is a useful on-link latency
+     * figure but not a proven round-trip reply time. Only the expect_status
+     * path (safety_link_ping()/the periodic poll) is measured; the fire-and-
      * forget BROADCAST path (safety_link_request_enable()) has no defined
      * "matching reply" to time.
      *
-     * A timed-out exchange (safety_drain_inbox_for_status() returns false)
-     * contributes to none of these fields -- there is no reply to time --
-     * and is already counted by the `timeouts` field above; no separate
-     * link_reply_timeouts counter exists, since that would just duplicate
-     * `timeouts` under this feature's own name (LINK_PROTOCOL.md's own
-     * "reuse, don't duplicate" convention -- see get_heap_status's/the
-     * diagnostics/timing endpoint's use of `timeouts` for this purpose). */
+     * A miss inside the window (safety_drain_inbox_for_status() returns
+     * false) contributes to none of these fields -- there is no frame to
+     * time -- and, since the 2026-09-10 fix, is only added to the `timeouts`
+     * field above when safety_link_up_locked() also says the peer looks
+     * down (see that field's own doc comment and safety_exchange()'s
+     * implementation, safety_link_inbox.c); no separate link_reply_timeouts
+     * counter exists, since that would just duplicate `timeouts` under this
+     * feature's own name (LINK_PROTOCOL.md's own "reuse, don't duplicate"
+     * convention -- see get_heap_status's/the diagnostics/timing endpoint's
+     * use of `timeouts` for this purpose). */
     uint32_t link_reply_us_count;
     uint32_t link_reply_us_last;
     uint32_t link_reply_us_min;

@@ -371,6 +371,22 @@ static void safety_update_health(SafetyLinkClass *link)
 void safety_poll_task(void *arg)
 {
     SafetyLinkClass *link = (SafetyLinkClass *)arg;
+    /* DO NOT DELETE THIS SEND as "dead code" just because the Pico's
+     * link_task.c dispatch switch has no case for SAFETY_CMD_GET_STATUS and
+     * never answers it (confirmed, docs/audits/
+     * safety_link_get_status_timeout_counter_2026-09-10.md, and the
+     * 2026-09-10 opus review that followed it) -- what looks unanswered on
+     * this side is load-bearing on the OTHER side: every cleanly decoded
+     * frame updates the Pico's s_last_valid_frame_tick/s_valid_frame_seen
+     * (firmware/SaftyFW/src/tasks/link_task.c around line 2347-2348) BEFORE
+     * the dispatch switch falls through to `default:` and drops the
+     * unrecognized command -- so this is the ESP->Pico liveness heartbeat,
+     * not a no-op. Deleting it would trip the Pico's own S6b LINK_DEAD
+     * guard. What genuinely IS dead on the ESP side is only the "wait for a
+     * matched reply" half of this exchange -- see safety_exchange()'s
+     * (safety_link_inbox.c) and safety_link_status_wait_is_real_timeout()'s
+     * (safety_link.h) own comments for that fix; this send itself stays
+     * exactly as-is. */
     const uint8_t request[] = { SAFETY_CMD_GET_STATUS };
     /* ROADMAP.md M6 "Boot-time version request with retry" -- distinct from
      * ANNOUNCE_VERSION above (that's the ESP telling the Pico who it is,
