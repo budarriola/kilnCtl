@@ -332,6 +332,34 @@ before calling OpenOCD at all, if that serial isn't currently enumerated
 identity check, since either picker returning the other board's port
 misdirects UART traffic just as badly as an unpinned JTAG flash.
 
+## Building from a clean worktree for `kiln_fw_root`
+
+`flash_firmware(kiln_fw_root=...)` exists for exactly the "build from a clean
+git worktree at HEAD" case (the main tree carries another session's WIP that
+would ride along or trip the sensitive-dirty guard above). A fresh
+`git worktree add` there hits two traps, both hit and fixed 2026-09-11:
+
+1. **The `lvgl` submodule is not checked out in a fresh worktree.**
+   `git worktree add` does not initialize submodules on its own, and `idf.py
+   build` fails with `Failed to resolve component 'lvgl' required by
+   component 'drivers'` -- a plausible-looking but wrong lead (it reads like
+   a missing/renamed component, not a missing submodule checkout). Fix:
+   `git submodule update --init firmware/KilnFW/components/lvgl` before the
+   first build in the new worktree.
+2. **`sdkconfig` is gitignored**, so a fresh worktree has none, and `idf.py
+   build` silently defaults to plain `esp32` (`-- IDF_TARGET not set, using
+   default target: esp32`) instead of this board's `esp32s3`. The failure
+   this produces is a confusing one: the build proceeds a long way (dependency
+   resolution, most of the component list) before dying deep in a target-only
+   header (`temperature_sensor.h: 'TEMPERATURE_SENSOR_CLK_SRC_DEFAULT'
+   undeclared`) -- nothing in the error names "esp32 vs esp32s3" directly.
+   This is the same "gitignored config hides a mismatch" class as
+   `feedback_gitignored_config_hides_mismatch` (that one was the FT6336U
+   touch panel; this is the build target). Fix: after any `fullclean` or a
+   from-scratch worktree, run `idf.py -C <worktree>/firmware/KilnFW
+   set-target esp32s3` explicitly before `build` -- do not rely on a stale
+   `sdkconfig` or the tool's own default.
+
 ## Adding a tool
 
 For `kilnctrl`, write it in the server module with the existing

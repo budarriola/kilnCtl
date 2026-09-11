@@ -1,3 +1,5 @@
-plateau	duty_z2_avg	z0_avg_c	z1_avg_c	z2_avg_c	ambient_anchor_c	dT0_c	dT0_per_duty	n_samples	window_s
-lvl1_u0.24	0.237	37.98	38.68	42.68	32.6	5.38	22.7	3	624
-lvl2_u0.55	0.547	44.89	45.73	53.01	32.6	12.29	22.5	3	624
+pair	plateau	duty_z2_avg	z0_avg_c	z1_avg_c	z2_avg_c	ambient_anchor_c	dT0_c	dT0_per_duty	n_samples	window_s
+1	lvl1_u0.24	0.237	37.98	38.68	42.68	32.6	5.38	22.7	3	624
+1	lvl2_u0.55	0.547	44.89	45.73	53.01	32.6	12.29	22.5	3	624
+2	lvl3_u0.53	0.53	43.11	44.00	51.18	31.73	11.38	21.5	3	620
+2	lvl4_u0.92	0.92	51.92	52.86	63.07	31.73	20.19	21.9	3	620
