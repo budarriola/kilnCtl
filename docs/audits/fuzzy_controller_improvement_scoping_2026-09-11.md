@@ -1,5 +1,17 @@
 # Scoping: can the fuzzy controller be tuned the way iter_tune tunes PID? (2026-09-11)
 
+> **PARTIALLY SUPERSEDED (2026-09-11, added later same day).** §8.2's
+> "continual adaptation across heat cycles" mechanism was designed here in
+> ignorance of `adaptive_tune` (`firmware/KilnFW/App/drivers/control/adaptive_tune*`),
+> which already implements bootstrap-from-autotune plus per-cycle refinement
+> in shipped, host-tested code. See the superseding note inline at §8.2
+> below for the detail, and the two current documents:
+> `docs/audits/adaptive_tune_vs_owner_requirements_2026-09-11.md` (the
+> verifying audit) and `docs/FUZZY_CONTROLLER_PLAN.md` (corrected to match).
+> Every other section of this document, including the load-bearing
+> `ERROR_BAND_C_DEFAULT`/`RATE_BAND_C_PER_S_DEFAULT` finding just below and
+> §8.1's normalization proposal, stands unaffected.
+
 **Question posed by owner:** `sim_iter_tune.c`/iter_tune tunes PID gains. Can
 the fuzzy logic controller (`pid_fuzzy.c`) be improved the same way?
 
@@ -625,6 +637,52 @@ units, not derived from anything autotune measures.**
   separate NVS key, but a design that gives adaptation its own store (e.g.
   a small history for drift detection) must check this explicitly, not
   assume it's fine because prior fields fit.
+
+> **SUPERSEDED (2026-09-11).** This section designed a new bootstrap-and-
+> adapt mechanism without checking whether one already existed. One does:
+> `adaptive_tune` (`firmware/KilnFW/App/drivers/control/adaptive_tune.c` /
+> `_model.c` / `_ki.c`) already implements bootstrap-from-autotune and
+> per-cycle refinement, through the **same SIMC path**
+> (`pid_autotune_tune_from_fopdt`) that autotune's own Accept path uses,
+> writing the **same persisted zone-config gains** autotune writes, **opt-in
+> per zone, default off, with a revert path**. Independently verified
+> against source and the live board in
+> `docs/audits/adaptive_tune_vs_owner_requirements_2026-09-11.md`.
+>
+> That audit found `adaptive_tune` satisfies owner requirements (a)
+> (bootstrap strictly from an existing autotune result, never invents
+> starting gains) and (b) (continues refining every clean firing
+> indefinitely) **in code** — but it has **never run**: all three zones on
+> this board read `enabled=False` with `observations_lifetime=0`,
+> `revert_available=False`. This is off by design, not silently broken —
+> it is correctly wired end to end (host-tested, reachable via
+> `adaptive_tune_get_status`/`adaptive_tune_set_enabled`) — so this is
+> **not** an instance of this repo's consumer-without-producer or
+> inert-mode-flag defect classes; it is simply a feature nobody has opted
+> a zone into yet.
+>
+> Requirement (c) — authority graduated by measured confidence — is
+> satisfied by **nothing shipped**: every guard in `adaptive_tune`
+> (`ADAPTIVE_TUNE_MIN_OBSERVATIONS`, `ADAPTIVE_TUNE_BLEND_ALPHA`,
+> `ADAPTIVE_TUNE_MAX_FRACTIONAL_MOVE`) is a fixed constant applied
+> identically to the 1st and the 100th accepted refinement — a real,
+> open gap, but an additive one layered onto the existing mechanism, not
+> a reason to build a second one.
+>
+> The same audit also found a **ratchet defect** in `adaptive_tune`: its
+> K_dc plausibility/blend bounds are anchored to the most-recently-adapted
+> value rather than the original autotune result (the reference point
+> walks forward with every accepted refinement), and K_dc has no absolute
+> ceiling analogous to `ZONE_COUPLING_COEFF_MAX`. A fix for this is
+> **in progress by another agent** as of this note; this document does not
+> describe its outcome.
+>
+> **Conclusion: the mechanism proposed below in §8.2 should not be built.
+> The work belongs in `adaptive_tune`** — extending its fixed guards into a
+> confidence-graduated schedule for requirement (c), and fixing the ratchet
+> above — not in a second, competing bootstrap-and-adapt system. The
+> original §8.2 text below is left unmodified for the record; do not treat
+> it as a design to implement.
 
 ### 8.3 Bounded adaptation and safety
 
