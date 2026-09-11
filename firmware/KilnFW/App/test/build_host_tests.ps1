@@ -1400,6 +1400,23 @@ try {
         Write-Host "sim_credibility_gate_closedloop: BUILD OK (not run automatically -- diagnostic with unresolved gains provenance, see file header; run by hand with the two capture paths as argv)"
     }
 
+    # ---- sim_fuzzy_closedloop.exe: the closed-loop fuzzy-path harness
+    # docs/audits/fuzzy_controller_improvement_scoping_2026-09-11.md
+    # identified as the blocking prerequisite (no sim exercised
+    # pid_fuzzy_adjust() at all). Unlike sim_credibility_gate_closedloop
+    # above, this one IS run automatically and DOES gate the build via
+    # Invoke-HostTestExe -- every assertion inside it is deterministic,
+    # needs no external capture files, and has a known-correct answer (the
+    # strength_pct=0 bit-for-bit contract, and full 9-cell rule coverage at
+    # strength_pct 25/50) -- see the file's own top comment for why this
+    # posture differs from every other sim_*.c harness in this list.
+    $exeFuzzyCl = Join-Path $outDir "kilnctl_sim_fuzzy_closedloop.exe"
+    $cmdFuzzyCl = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$outDir\\`" /Fe:`"$exeFuzzyCl`" `"$(Join-Path $testDir 'sim_fuzzy_closedloop.c')`" " +
+            "`"$(Join-Path $testDir 'sim_plant.c')`" " +
+            "`"$(Join-Path $driversDir 'control/pid.c')`" `"$(Join-Path $driversDir 'control/pid_fuzzy.c')`""
+    Invoke-HostTestExe -Name "sim_fuzzy_closedloop" -ExePath $exeFuzzyCl -BuildCmd $cmdFuzzyCl
+
     # ---- firing_score_from_capture.exe: ITER_TUNE_REDESIGN_PLAN.md sec
     # 3.1.1's "recommended next step" -- feeds a recorded capture's real
     # per-tick data into the PRODUCTION firing_score.c/firing_compare.c
@@ -1477,7 +1494,13 @@ try {
     # main() and no build recipe anywhere in the tree, so no automated
     # path had ever run it since it was added for the 2026-09-08
     # flash-worker boot-order fix (1f741635).
-    $totalExpected = 35
+    # 35 -> 36: this pass added sim_fuzzy_closedloop.c as its own 36th
+    # Invoke-HostTestExe call -- the closed-loop fuzzy-path harness
+    # docs/audits/fuzzy_controller_improvement_scoping_2026-09-11.md
+    # identified as the missing blocking prerequisite (no sim ever called
+    # pid_fuzzy_adjust()). Unlike sim_credibility_gate_closedloop, this one
+    # IS deterministic/self-contained enough to gate the build.
+    $totalExpected = 36
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the
