@@ -1417,6 +1417,27 @@ try {
             "`"$(Join-Path $driversDir 'control/pid.c')`" `"$(Join-Path $driversDir 'control/pid_fuzzy.c')`""
     Invoke-HostTestExe -Name "sim_fuzzy_closedloop" -ExePath $exeFuzzyCl -BuildCmd $cmdFuzzyCl
 
+    # ---- fuzzy_nine_cell_probe.exe: docs/FUZZY_CONTROLLER_PLAN.md sec 5
+    # Stage 0 ("(v-a) offline rule-cell probe") -- a pure, no-plant,
+    # no-board numerical probe of pid_fuzzy_adjust() at all 9 rule-table
+    # cells, reporting the REAL multiplicative kp/ki/kd effect (not the
+    # rule table's raw +-1/0 integers) at strength_pct 25/50, the physical
+    # (degC, degC/s) coordinates each cell dominates at, and a per-cell
+    # reachability verdict against this plant's own measured ~0.083 degC/s
+    # max ramp rate and ~40 degC max bench rise. Complementary to, not a
+    # duplicate of, sim_fuzzy_closedloop.c above: that harness answers
+    # whether a closed-loop trajectory can REACH all 9 cells; this one
+    # answers what each cell actually DOES in physical units once it
+    # fires, and asserts the centre-cell contract (the only cell ever
+    # observed on hardware) stays exactly as documented. Deterministic,
+    # gates the build via Invoke-HostTestExe -- see the file's own top
+    # comment for the negative-test transcript.
+    $exeFuzzyCell = Join-Path $outDir "kilnctl_fuzzy_nine_cell_probe.exe"
+    $cmdFuzzyCell = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$outDir\\`" /Fe:`"$exeFuzzyCell`" `"$(Join-Path $testDir 'fuzzy_nine_cell_probe.c')`" " +
+            "`"$(Join-Path $driversDir 'control/pid_fuzzy.c')`""
+    Invoke-HostTestExe -Name "fuzzy_nine_cell_probe" -ExePath $exeFuzzyCell -BuildCmd $cmdFuzzyCell
+
     # ---- firing_score_from_capture.exe: ITER_TUNE_REDESIGN_PLAN.md sec
     # 3.1.1's "recommended next step" -- feeds a recorded capture's real
     # per-tick data into the PRODUCTION firing_score.c/firing_compare.c
@@ -1500,7 +1521,11 @@ try {
     # identified as the missing blocking prerequisite (no sim ever called
     # pid_fuzzy_adjust()). Unlike sim_credibility_gate_closedloop, this one
     # IS deterministic/self-contained enough to gate the build.
-    $totalExpected = 36
+    # 36 -> 37: this pass added fuzzy_nine_cell_probe.c as its own 37th
+    # Invoke-HostTestExe call -- FUZZY_CONTROLLER_PLAN.md sec 5's Stage 0
+    # offline 9-cell probe, reporting per-cell physical gain effects and
+    # reachability verdicts (docs/audits/fuzzy_nine_cell_offline_probe_2026-09-11.md).
+    $totalExpected = 37
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the
