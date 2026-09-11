@@ -111,6 +111,22 @@
 >   requirement until that harness exists.
 > - Baseline data is insufficient, not merely thin: one mode-3 capture,
 >   unpaired A-arm, 100% of its samples in one of nine rule cells.
+> - **Requirements (a) and (b) above are already met in code by
+>   `adaptive_tune` — not by fuzzy, and not yet by anything new.**
+>   `docs/audits/adaptive_tune_vs_owner_requirements_2026-09-11.md`
+>   (`655da406`) independently verified `adaptive_tune.c`/`.h` bootstraps
+>   strictly from an existing autotune result and keeps refining every
+>   clean firing indefinitely — host-tested and reachable end-to-end, but
+>   **disarmed on this board** (`enabled=False`, `observations_lifetime=0`
+>   on all three zones), so this is a statement about the code, not
+>   demonstrated hardware behaviour. Requirement (c), authority graduated
+>   by measured confidence, is **not addressed by any shipped code** —
+>   `adaptive_tune`'s guards are fixed constants, never graduated. A
+>   ratchet defect in `adaptive_tune`'s bound anchoring is being fixed in a
+>   separate, concurrent pass — in progress, not done, do not describe an
+>   outcome here. Do not build a second bootstrap-and-adapt mechanism for
+>   fuzzy: extend `adaptive_tune` for (c) instead. Full analysis and options:
+>   `docs/FUZZY_CONTROLLER_PLAN.md`.
 >
 > **Simulation fidelity — coupling-model replacement, in progress
 > elsewhere, do not describe an outcome.** Sources:

@@ -6,6 +6,14 @@ fuzzy layer *is* and what evidence exists; **this document does not restate it.*
 It weighs architectural options the scoping pass did not, and **disagrees with its
 recommendation** (§2, §4).
 
+**Update, `docs/audits/adaptive_tune_vs_owner_requirements_2026-09-11.md`
+(`655da406`), postdates this plan's authoring commit (`5a16e950`) by one commit
+and independently confirms finding (B) below in more depth than this plan
+originally had it: `adaptive_tune` satisfies owner requirements (a) and (b) **in
+code**, has never actually run on this board (disarmed, zero observations), and
+does **not** address requirement (c) — confidence-graduated authority — in any
+form. See §0.2.**
+
 No controller behaviour is changed by this document. No board was flashed and no
 heating run was performed. Board facts are live `kiln_call` reads.
 
@@ -84,6 +92,53 @@ identical today, so this is inert — but it is exactly the documented
 *paired-input-left-shared* class (`project_paired_input_left_shared`), armed by
 the first non-zero cap. It is a live latent defect independent of everything
 else in this plan.
+
+### 0.2 Audit update (`655da406`): what finding (B) means, precisely
+
+The 2026-09-11 audit (verified independently against source and a live
+`kiln_call(name="adaptive_tune_get_status")` read, not against this plan)
+sharpens finding (B) into three separate claims that this plan previously
+ran together:
+
+1. **(a) and (b) are satisfied by `adaptive_tune` today, in code.** It
+   refuses to refine without an existing autotuned model/PID/coupling row
+   (bootstrap-only, never invents starting gains) and keeps refining every
+   clean firing indefinitely, both host-tested (`test_adaptive_tune*.c`,
+   6 files).
+2. **This is a claim about the code, not about demonstrated hardware
+   behaviour.** All three zones read `enabled=False`,
+   `observations_lifetime=0` on the live board — `adaptive_tune` is
+   reachable end-to-end but has never actually run. It has contributed
+   nothing to this board's current gains.
+3. **Requirement (c), authority growing with measured confidence, is not
+   addressed by `adaptive_tune` in any form.** Every guard it has
+   (`ADAPTIVE_TUNE_MIN_OBSERVATIONS`, the blend factor, the per-run move
+   cap) is a fixed constant applied identically to the 1st and the 100th
+   accepted refinement — there is no confidence/authority state at all.
+   This is the one owner requirement nothing shipped addresses.
+
+The same audit also documents a **ratchet defect** in `adaptive_tune`
+(K_dc's plausibility/move bounds are anchored to the most recently
+adapted value, not the original autotune result, with no absolute
+ceiling) — a separate, concurrent pass is fixing this as of this writing;
+**it is in progress, not done**, and this plan does not describe its
+outcome.
+
+**Consequence for this plan's recommendation:** finding (B) below already
+concluded "extend `adaptive_tune`, do not build a second mechanism" for
+(a)/(b), and nothing here changes that. What the audit adds is precision
+about what is *left*: requirement (c) is wholly unaddressed by any shipped
+code, adaptive-tune or fuzzy, and is therefore the actual open target for
+"confidence-driven authority" work — not a new fuzzy-side bootstrap
+mechanism (scoping doc §8.2, which this plan's finding (B) already argued
+against building; see §4.2). Whatever shape (c) takes, criterion 5 (one
+writer per piece of state) says it belongs as additional state and a
+schedule layered onto `adaptive_tune`'s existing run-end call, not as a
+second mechanism reading/writing the same gains — the audit's own §4 and
+§7 reach the identical conclusion independently. The fuzzy-specific work
+that remains genuinely fuzzy's own — finding (A)'s rule-table detune and
+finding (D)'s shared-input defect — is unaffected by any of this and is
+still handled by options (ii)/(v) below.
 
 ---
 
@@ -252,7 +307,13 @@ rather than settles the delete/keep question.
 
 **Adopt (v) now; on its results, expect to land on (iii) as the answer to the
 owner's four requirements, with (iv) as the honest disposition of the fuzzy layer
-some cycles later.** Do not adopt (i).
+some cycles later.** Do not adopt (i). Requirements (a) and (b) are already
+answered — in code, not yet on hardware — by `adaptive_tune` (§0.2); the
+outstanding work this plan is actually deciding among is requirement (c)
+(confidence-graduated authority, unaddressed by any shipped mechanism) plus
+whatever is genuinely fuzzy-specific (finding A's rule-table detune, finding
+D's shared-input defect) — none of which is a reason to build a second
+bootstrap-and-adapt mechanism.
 
 Against the §1 criteria: (iii) wins 1, 2 and 5 outright; (i) wins only 3 and
 loses 1 badly; (ii) is the best option *if* the fuzzy layer is kept, and (v-a)
@@ -268,8 +329,14 @@ make it unnecessary, and (v-a) costs hours.
    it were.
 2. **`adaptive_tune` already exists** (finding B) and already implements
    "bootstrap from autotune, keep adapting each cycle" for the base gains. The
-   scoping doc designs a second such mechanism (§8.2) without reference to it.
-   Any continual-adaptation work must extend `adaptive_tune`, not sit beside it.
+   scoping doc designs a second such mechanism (its §8.2, "Continual
+   adaptation across heat cycles") without reference to it. Any
+   continual-adaptation work must extend `adaptive_tune`, not sit beside it.
+   `655da406` (§0.2) confirms this in more depth and narrows what remains:
+   (a)/(b) are met **in code** (never yet run on this board), and
+   requirement (c), confidence-graduated authority, is met by **nothing**
+   shipped — not `adaptive_tune`, not fuzzy. That is the actual open target,
+   not a second bootstrap mechanism on the fuzzy side.
 3. **Per-cell confidence (§8.7) is not buildable on the evidence available.**
    It requires per-cell evidence for 9 cells; 8 have never fired on this
    hardware and cannot be made to on a 40 degC fixture. The mechanism would spend
@@ -298,6 +365,12 @@ a pre-existing shipped guess.
 - **The owner decides the fuzzy layer must ship as a working feature** — this is
   a product decision that overrides the engineering ranking; the correct path is
   then (ii) + (v-a), not (i).
+- **`adaptive_tune` is turned on and run on this board, and/or its ratchet
+  defect fix (in progress, `655da406` §5) lands** — either changes finding (B)
+  from "satisfied in code" to "satisfied and observed," which strengthens (iv)
+  and weakens the case for spending fuzzy-side effort anywhere near
+  bootstrap/continual-adaptation territory. Confirm the fix actually landed
+  (do not assume from this plan) before citing it as done.
 
 ---
 
