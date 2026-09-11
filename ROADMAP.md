@@ -1,6 +1,52 @@
 # kilnCtl Roadmap — both processors
 
 > **Status:** planning · **Last reviewed:** 2026-09-10, roadmap-upkeep audit
+> (twelfth sweep) — 20 commits landed since the eleventh sweep (`dd67ec7e`,
+> corrected by `e5b7fff9`). Verified against code and git history, not
+> against a commit message's own self-assessment — several claims below
+> were checked directly against source. Check suite re-run fresh this
+> sweep: **93/93 passing, 0 failed** (`tools/run_all_checks.ps1`, fresh run
+> this sweep). `check_all_task_stack_budgets.ps1` (KilnFW) is **not** red —
+> it reports `OK` by design: all 28 tasks are INDETERMINATE (unresolved
+> `callx4/8/12` dispatch means the walk can only produce a lower bound), and
+> INDETERMINATE is explicitly not scored as a failure. `safety_poll`
+> measured this run at 3136 B used / 4756 B honest free of 8192 (58.1%) —
+> a lower bound, not the true worst case. Landed and confirmed:
+> - **Web-GUI ceiling is a hard cutoff, confirmed in code** (`c99356f8`):
+>   `safety_ceiling_policy_target_c()` (`firmware/KilnFW/App/drivers/safety/safety_ceiling_policy.c:16`)
+>   returns the ESP's configured maximum with no added headroom;
+>   `SAFETY_CEILING_HEADROOM_C` stays defined but unused, per that file's own
+>   comment at line 39. Already recorded verified on hardware by the eleventh
+>   sweep; unchanged this sweep.
+> - **`safety_ceiling_refusal_class_t`** exists and is used in
+>   `safety_ceiling_policy.c/.h`, `safety_ceiling_sync.c/.h` and
+>   `safety_cfg_http.c/.h` (`1e20721b`) — the refusal-classification half of
+>   that commit is landed. **Its ARMED-state backoff is being reverted right
+>   now, uncommitted, in this tree**: `git status` shows
+>   `safety_ceiling_policy.c/.h` and `safety_cfg_store.c/.h` dirty as of this
+>   sweep. Do not mark the backoff done; the classification-by-code part is.
+> - **`c8928e01`'s elf_archive fix is itself being corrected right now**:
+>   `tools/PcTools/src/kilnctrl/elf_archive.py` and its test are dirty in
+>   this tree (uncommitted), consistent with the brief that the "every ELF
+>   reachable or protected" claim was false at commit time and another
+>   session is fixing it. `firmware/KilnFW/archive_elf.cmake` itself is
+>   clean (last touched `1fba9dde`) — the gap is in the Python-side registry,
+>   not the CMake deposit step.
+> - `d141e152`, `df4da85b`/`7aefa049`, `9d796b57`, `6113859a`, `a3c566bc`,
+>   `dbd8ff52`, `8489facf`, `15a8d1a1`, `370391a0`/`ca48ae0a` — all as
+>   described in the brief handed to this sweep; each is a committed, clean
+>   change (not superseded or dirty in this tree) and no code inspected this
+>   sweep contradicts their stated effect.
+> - The **coupling joint-identification capture is still running** on the
+>   bench (`docs/COUPLING_JOINT_IDENTIFICATION_CAPTURE.md`, not touched this
+>   sweep per instruction) — the matrix remains refuted and the board runs
+>   uncoupled feedforward until it lands; this also gates the iter_tune
+>   dwell-offset bars, S8 auto-derivation, and the A1 pin's exit condition.
+> - **Three firmware commits are built but unflashed**: the refusal
+>   classification, GET_STATUS accounting fix, and per-coil nameplate
+>   wattage (`dbd8ff52`) — board is occupied by the coupling capture.
+>
+> **Reviewed before that:** 2026-09-10, roadmap-upkeep audit
 > (eleventh sweep) — 27 commits landed since the tenth sweep (`c4b026d8`).
 > Verified against code and git history, not against another doc's status
 > marker; check suite re-run fresh this sweep, **90/90 passing** (confirmed
