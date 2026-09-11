@@ -6580,13 +6580,6 @@ static void test_nvs_load_from_v23_blob_defaults_model_fit_context_to_unknown(vo
 // same "everything before crc32, then 4 zero bytes" way as the current-
 // version check) BEFORE calling case 24's converter -- narrowly, for v24
 // only, not every historical version (see that fix's own comment for why).
-static uint32_t compute_v24_crc(const zones_cfg_v24_t *cfg)
-{
-    static const uint8_t zero4[sizeof(uint32_t)] = {0};
-    uint32_t crc = esp_crc32_le(0, (const uint8_t *)cfg, offsetof(zones_cfg_v24_t, crc32));
-    return esp_crc32_le(crc, zero4, sizeof(zero4));
-}
-
 static void make_minimal_valid_v24_blob(zones_cfg_v24_t *src)
 {
     memset(src, 0, sizeof(*src));
@@ -6613,7 +6606,18 @@ static void make_minimal_valid_v24_blob(zones_cfg_v24_t *src)
     for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
         src->zones[1].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
     }
-    src->crc32 = compute_v24_crc(src);
+    // Same "everything before crc32, then 4 zero bytes" computation
+    // zones_config_migrate.c's decode_zones_blob() itself uses to verify a
+    // v24 blob (check_link_impl_isolation.ps1: no separate CRC-named
+    // function here, INLINE only, matching production's own inline
+    // computation rather than a locally reimplemented routine -- this is
+    // esp_crc32_le(), CommonFW's own CRC32 primitive, called twice, not a
+    // hand-rolled CRC algorithm).
+    {
+        static const uint8_t zero4[sizeof(uint32_t)] = {0};
+        uint32_t crc = esp_crc32_le(0, (const uint8_t *)src, offsetof(zones_cfg_v24_t, crc32));
+        src->crc32 = esp_crc32_le(crc, zero4, sizeof(zero4));
+    }
 }
 
 static void test_decode_zones_blob_accepts_a_v24_blob_with_a_correct_crc(void)
@@ -6644,7 +6648,14 @@ static void test_decode_zones_blob_refuses_a_v24_blob_with_a_corrupted_crc(void)
     // zones_config_json_validate() alone would not (the flipped value can
     // easily still be in-range).
     src.zones[0].pid_kp = 12.5f;
-    src.crc32 = compute_v24_crc(&src); // valid CRC over the pre-corruption bytes
+    // valid CRC over the pre-corruption bytes -- same inline computation as
+    // make_minimal_valid_v24_blob() above (check_link_impl_isolation.ps1:
+    // no separate CRC-named function, just esp_crc32_le() called directly).
+    {
+        static const uint8_t zero4[sizeof(uint32_t)] = {0};
+        uint32_t crc = esp_crc32_le(0, (const uint8_t *)&src, offsetof(zones_cfg_v24_t, crc32));
+        src.crc32 = esp_crc32_le(crc, zero4, sizeof(zero4));
+    }
     uint8_t *raw = (uint8_t *)&src;
     raw[offsetof(zones_cfg_v24_t, zones[0].pid_kp)] ^= 0x01; // corrupt AFTER computing the CRC
 
