@@ -204,36 +204,35 @@ static void test_reconcile_backoff_starts_open(void)
 static void test_reconcile_backoff_after_armed_refusal_is_the_long_backoff(void)
 {
     safety_ceiling_reconcile_backoff_t state = { 0 };
-    // Chosen so now % JITTER_US == 0 -- pins the jitter term at exactly 0 so
-    // this test can assert an EXACT boundary (base, not "base plus some
-    // unknown jitter in range") without coupling to the jitter formula's
-    // internals beyond "now_us % JITTER_US".
-    int64_t now = 3 * SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_JITTER_US;
+    int64_t now = 1234567890LL; // arbitrary, non-round -- see the fixed-duration test below for why this must not matter
 
     safety_ceiling_reconcile_record_result(&state, now, false, SAFETY_CEILING_REFUSAL_ARMED);
 
     TEST_CHECK(!safety_ceiling_reconcile_should_attempt(&state, now),
                "must not retry in the same instant as an ARMED refusal");
-    TEST_CHECK(!safety_ceiling_reconcile_should_attempt(&state, now + SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_BASE_US - 1),
-               "one microsecond short of the (zero-jitter, this `now`) ARMED backoff must not yet clear it");
-    TEST_CHECK(safety_ceiling_reconcile_should_attempt(&state, now + SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_BASE_US),
-               "the ARMED base backoff duration must clear it when jitter is exactly zero");
-    // ARMED backoff is base + jitter in [0, JITTER); the base plus the FULL
-    // jitter range is always enough to clear it regardless of `now`'s phase.
-    TEST_CHECK(safety_ceiling_reconcile_should_attempt(
-                   &state, now + SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_BASE_US +
-                               SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_JITTER_US),
-               "base + the full jitter window must always clear an ARMED backoff");
+    TEST_CHECK(!safety_ceiling_reconcile_should_attempt(&state, now + SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_US - 1),
+               "one microsecond short of the ARMED backoff must not yet clear it");
+    TEST_CHECK(safety_ceiling_reconcile_should_attempt(&state, now + SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_US),
+               "the full ARMED backoff duration must clear it");
 }
 
-static void test_reconcile_backoff_armed_jitter_varies_with_now(void)
+static void test_reconcile_backoff_armed_is_fixed_not_jittered(void)
 {
-    // 2026-09-10 opus review finding D: a FIXED ARMED backoff can phase-lock
-    // against a fixed-period PWM relay window and step over every off-window
-    // forever. Prove the recorded backoff duration actually varies with
-    // `now_us` (i.e. jitter is real, not a no-op constant folded into the
-    // base) -- a negative-test-shaped check: an implementation that dropped
-    // the `% JITTER_US` term would make every one of these deltas equal.
+    // CORRECTED 2026-09-10 (second opus review): the ARMED backoff used to
+    // carry a jitter term justified by a claim that RELAY_OWNER_STATE_ARMED
+    // clears on relay de-energise and therefore correlates with a per-zone
+    // PWM window -- false. relay_owner.c has exactly one assignment out of
+    // GRACE and nothing demotes ARMED; de-energising GPIO6 never touches
+    // s_state. ARMED is a standing latch for the rest of the Pico's uptime,
+    // uncorrelated with the relay's instantaneous energized/de-energized
+    // state, so a retry's phase relative to that state cannot affect
+    // whether the retry succeeds -- jitter bought nothing and has been
+    // removed. This is the negative-test-shaped replacement for the old
+    // (vacuous) "jitter varies with now_us" check: it proves the ARMED
+    // backoff duration is now IDENTICAL for two different `now_us` phases
+    // one microsecond apart -- the property jitter's presence would have
+    // broken, so an accidental re-introduction of a jitter term would make
+    // this fail.
     safety_ceiling_reconcile_backoff_t state_a = { 0 };
     safety_ceiling_reconcile_backoff_t state_b = { 0 };
     int64_t now_a = 1000000000LL;
@@ -244,17 +243,12 @@ static void test_reconcile_backoff_armed_jitter_varies_with_now(void)
 
     int64_t delay_a = state_a.backoff_until_us - now_a;
     int64_t delay_b = state_b.backoff_until_us - now_b;
-    TEST_CHECK(delay_a >= SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_BASE_US &&
-                   delay_a < SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_BASE_US + SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_JITTER_US,
-               "the ARMED backoff duration must fall within [base, base+jitter)");
-    // Different `now_us % JITTER_US` residues -- these two specific inputs
-    // are chosen (1 us apart, both far from a JITTER_US boundary) so their
-    // jittered delays differ; this is a property of the deterministic
-    // now_us-derived jitter, not a coincidence.
-    TEST_CHECK(delay_a != delay_b || (now_a % SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_JITTER_US) ==
-                                          (now_b % SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_JITTER_US),
-               "the jitter term must actually depend on now_us -- two different now_us phases one "
-               "microsecond apart must not always yield the identical backoff duration");
+    TEST_CHECK(delay_a == SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_US &&
+                   delay_b == SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_US,
+               "the ARMED backoff duration must be exactly the fixed constant, regardless of now_us");
+    TEST_CHECK(delay_a == delay_b,
+               "two different now_us phases one microsecond apart must yield the IDENTICAL backoff "
+               "duration -- there is no jitter term left to make them differ");
 }
 
 static void test_reconcile_backoff_after_ordinary_failure_is_the_short_backoff(void)
@@ -272,7 +266,7 @@ static void test_reconcile_backoff_after_ordinary_failure_is_the_short_backoff(v
     // also happens to have elapsed" -- a negative-test-shaped check: if the
     // implementation collapsed both branches onto the long duration, this
     // would fail where the assertion above would still pass.
-    TEST_CHECK(SAFETY_CEILING_RECONCILE_RETRY_BACKOFF_US < SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_BASE_US,
+    TEST_CHECK(SAFETY_CEILING_RECONCILE_RETRY_BACKOFF_US < SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_US,
                "sanity: the two configured backoff constants must actually differ");
 }
 
@@ -291,9 +285,7 @@ static void test_reconcile_backoff_storage_is_the_longest(void)
     TEST_CHECK(!safety_ceiling_reconcile_should_attempt(&state, now + SAFETY_CEILING_RECONCILE_RETRY_BACKOFF_US),
                "STORAGE must NOT use the short backoff -- a persistent flash fault retried every "
                "few seconds forever is the exact regression this class exists to prevent");
-    TEST_CHECK(!safety_ceiling_reconcile_should_attempt(
-                   &state, now + SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_BASE_US +
-                               SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_JITTER_US),
+    TEST_CHECK(!safety_ceiling_reconcile_should_attempt(&state, now + SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_US),
                "STORAGE must back off longer than even the ARMED case");
     TEST_CHECK(safety_ceiling_reconcile_should_attempt(&state, now + SAFETY_CEILING_RECONCILE_STORAGE_BACKOFF_US),
                "the full STORAGE backoff duration must clear it");
@@ -369,7 +361,7 @@ void run_test_safety_ceiling_policy(void)
     test_zero_ceiling_zone_excluded_from_maximum();
     test_reconcile_backoff_starts_open();
     test_reconcile_backoff_after_armed_refusal_is_the_long_backoff();
-    test_reconcile_backoff_armed_jitter_varies_with_now();
+    test_reconcile_backoff_armed_is_fixed_not_jittered();
     test_reconcile_backoff_after_ordinary_failure_is_the_short_backoff();
     test_reconcile_backoff_storage_is_the_longest();
     test_reconcile_backoff_success_clears_it_immediately();

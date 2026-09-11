@@ -671,9 +671,27 @@ static bool param_value_equal(uint8_t type, const kilnlink_param_value_t *a, con
  * in which case it is set from that frame's own numeric reason via
  * reject_reason_to_refusal_class() -- exactly mirroring what reason_out's
  * prose says in that branch, just as a number instead of a substring to
- * grep for. */
+ * grep for.
+ *
+ * `nonblocking_refetch` -- 2026-09-10 opus review, second finding: this
+ * function used to call the blocking safety_cfg_store_refetch() (portMAX_
+ * DELAY) unconditionally, which was correct for its original httpd-worker
+ * callers but became a rule violation once the ceiling-reconcile path
+ * (safety_ceiling_sync.c) started calling into apply_pairs()/this function
+ * from safety_poll_task itself, via safety_cfg_http_set_and_confirm_f32().
+ * safety_cfg_store.h's own safety_cfg_store_refetch_nonblocking() doc
+ * comment states the rule this serves: safety_poll_task must never block
+ * on s_store_lock behind an httpd commissioning POST. Pass true only from
+ * a safety_poll_task caller; every httpd-worker caller keeps passing
+ * false, unchanged. A non-blocking refetch that loses the lock race
+ * reports failure here (SAFETY_CEILING_REFUSAL_OTHER, via the "could not
+ * read the config back" branch below) exactly like a comms failure would
+ * -- the caller's own backoff/retry-next-tick contract already covers
+ * this, same as safety_cfg_store_maybe_refetch()'s existing non-blocking
+ * use. */
 static bool confirm_commit_landed(SafetyLinkClass *link, const safety_cfg_post_pair_t *pairs, int n_pairs,
-                                   char *reason_out, size_t reason_cap, safety_ceiling_refusal_class_t *out_class)
+                                   char *reason_out, size_t reason_cap, safety_ceiling_refusal_class_t *out_class,
+                                   bool nonblocking_refetch)
 {
     if (out_class) {
         *out_class = SAFETY_CEILING_REFUSAL_OTHER;
@@ -683,7 +701,27 @@ static bool confirm_commit_landed(SafetyLinkClass *link, const safety_cfg_post_p
     (void)safety_link_get_peer_build_status(link, &peer_known, NULL, NULL, NULL, NULL, NULL, NULL,
                                              &best_known_crc);
 
-    if (!safety_cfg_store_refetch(link, peer_known ? best_known_crc : 0)) {
+    bool refetch_ok = nonblocking_refetch
+                           ? safety_cfg_store_refetch_nonblocking(link, peer_known ? best_known_crc : 0)
+                           : safety_cfg_store_refetch(link, peer_known ? best_known_crc : 0);
+    if (!refetch_ok) {
+        /* 2026-09-10 opus review, lower-priority finding: safety_link_take_
+         * stashed_commit_rejected() is CONSUMING -- whichever caller reads
+         * the stash first, on either path through apply_pairs_ex(), removes
+         * it for everyone else. Now that the ceiling-reconcile path runs on
+         * a fixed 30s ARMED backoff (restored from the earlier ~6-9s
+         * jittered cadence), it competes for this one-shot frame with an
+         * interactive commissioning POST far less often than it did before
+         * this fix -- but the race is not eliminated, just made rarer. An
+         * operator's own POST can still occasionally lose its own rejection
+         * reason to a background reconcile attempt that happened to refetch
+         * first. Separately: this branch classifies from whatever is in the
+         * stash when THIS refetch failed -- a stale ARMED rejection left
+         * over from an earlier, unrelated POST can misclassify what is
+         * actually a fresh comms failure here. Harmless in effect (the
+         * worst case is an ARMED-length backoff applied to a comms hiccup,
+         * never the reverse), but the classification is not the certainty
+         * the code around it implies. */
         uint16_t rp = 0;
         uint8_t rr = 0;
         if (safety_link_take_stashed_commit_rejected(link, &rp, &rr)) {
@@ -846,10 +884,18 @@ static safety_ceiling_refusal_class_t reject_reason_to_refusal_class(uint8_t rea
  * Defaults to SAFETY_CEILING_REFUSAL_OTHER at entry (correct for every
  * failure path here except a directly-observed COMMIT_CONFIG_REJECTED
  * reply, which knows its numeric reason for certain and overrides it via
- * reject_reason_to_refusal_class() -- no guessing involved either way). */
-static bool apply_pairs(SafetyLinkClass *link, const safety_cfg_post_pair_t *pairs, int n_pairs,
-                        bool commit, char *reason_out, size_t reason_cap,
-                        safety_ceiling_refusal_class_t *out_class)
+ * reject_reason_to_refusal_class() -- no guessing involved either way).
+ *
+ * `nonblocking_refetch` is threaded straight through to confirm_commit_
+ * landed() -- see that function's own doc comment for the rule. Every
+ * httpd-worker call site in this file goes through the apply_pairs()
+ * wrapper just below, which always passes false (unchanged blocking
+ * behaviour); only safety_cfg_http_set_and_confirm_f32() (the ceiling-
+ * reconcile writer, called from safety_poll_task) calls this function
+ * directly with true. */
+static bool apply_pairs_ex(SafetyLinkClass *link, const safety_cfg_post_pair_t *pairs, int n_pairs,
+                            bool commit, char *reason_out, size_t reason_cap,
+                            safety_ceiling_refusal_class_t *out_class, bool nonblocking_refetch)
 {
     if (out_class) {
         *out_class = SAFETY_CEILING_REFUSAL_OTHER;
@@ -922,7 +968,7 @@ static bool apply_pairs(SafetyLinkClass *link, const safety_cfg_post_pair_t *pai
          * write landed (see confirm_commit_landed()'s header comment for the
          * full audit trail) -- force a live read-back before this function
          * is allowed to report success. */
-        if (!confirm_commit_landed(link, pairs, n_pairs, reason_out, reason_cap, out_class)) {
+        if (!confirm_commit_landed(link, pairs, n_pairs, reason_out, reason_cap, out_class, nonblocking_refetch)) {
             return false;
         }
         /* Landed for real -- now invalidate a standing E-stop verification if
@@ -969,6 +1015,16 @@ static bool apply_pairs(SafetyLinkClass *link, const safety_cfg_post_pair_t *pai
     return true;
 }
 
+/* Every httpd-worker call site in this file calls THIS wrapper, unchanged --
+ * always the blocking refetch (nonblocking_refetch=false), same behaviour
+ * as before apply_pairs_ex() existed. */
+static bool apply_pairs(SafetyLinkClass *link, const safety_cfg_post_pair_t *pairs, int n_pairs,
+                         bool commit, char *reason_out, size_t reason_cap,
+                         safety_ceiling_refusal_class_t *out_class)
+{
+    return apply_pairs_ex(link, pairs, n_pairs, commit, reason_out, reason_cap, out_class, /*nonblocking_refetch=*/false);
+}
+
 /* Public single-field stage+commit+confirm wrapper -- owner request
  * 2026-09-10 ("if i change the max temp in the web gui it should change it
  * in the pico too."). safety_ceiling_sync.c (zones_http_post.c's helper)
@@ -997,7 +1053,13 @@ bool safety_cfg_http_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_i
     safety_cfg_post_pair_t pair;
     pair.param_id = param_id;
     snprintf(pair.value_text, sizeof(pair.value_text), "%.9g", (double)value);
-    return apply_pairs(link, &pair, 1, /*commit=*/true, reason_out, reason_cap, out_class);
+    /* nonblocking_refetch=true -- this is the ceiling-reconcile writer,
+     * called from safety_poll_task (safety_ceiling_sync.c), never from an
+     * httpd worker. See confirm_commit_landed()'s doc comment for the rule
+     * this must never violate: safety_poll_task may not block on
+     * s_store_lock behind an httpd commissioning POST. */
+    return apply_pairs_ex(link, &pair, 1, /*commit=*/true, reason_out, reason_cap, out_class,
+                           /*nonblocking_refetch=*/true);
 }
 
 static esp_err_t commissioning_post_handler(httpd_req_t *req)

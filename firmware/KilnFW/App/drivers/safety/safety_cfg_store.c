@@ -1509,7 +1509,7 @@ bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc)
  * its own iteration even starts is exactly that mistake; this function is the
  * fix. Do not change safety_poll_task's caller to use safety_cfg_store_
  * refetch() (portMAX_DELAY) instead of this. */
-static bool safety_cfg_store_refetch_nonblocking(SafetyLinkClass *link, uint16_t config_crc)
+bool safety_cfg_store_refetch_nonblocking(SafetyLinkClass *link, uint16_t config_crc)
 {
     if (!link) {
         return false;

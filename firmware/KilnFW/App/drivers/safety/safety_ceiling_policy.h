@@ -268,19 +268,34 @@ void safety_ceiling_policy_apply_lower(float current_pico_ceiling_c, bool curren
  * flash write) in with "ordinary transient failure" and gave it the SHORT
  * backoff, which hammers a hardware fault that retrying faster cannot fix):
  *
- *   - SAFETY_CEILING_REFUSAL_ARMED -- the Pico's ordinary standing state on
- *     any bench that has been up more than a minute, and it only clears
- *     when the relay de-energises. During a firing the relay is PWM-
- *     chopped on a per-zone, runtime-settable window (commonly 60 s); a
- *     FIXED backoff risks phase-locking against that window (an off-window
- *     shorter than the backoff period can be stepped over on every single
- *     attempt, forever, the same way a fixed-frequency strobe can appear to
- *     freeze a rotating fan). SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_BASE_US
- *     plus a jitter term derived from `now_us` (deterministic, no RNG, so
- *     this stays a pure function of its inputs -- see
- *     safety_ceiling_reconcile_record_result()'s own comment) walks the
- *     retry's phase relative to any fixed PWM period across successive
- *     attempts instead of parking it at one fixed offset forever.
+ *   - SAFETY_CEILING_REFUSAL_ARMED -- CORRECTED 2026-09-10 (a second opus
+ *     review found the ARMED-clears-on-de-energise/PWM-window rationale
+ *     this backoff originally shipped with, and the jitter term derived
+ *     from it, were both built on a false premise -- see below).
+ *     RELAY_OWNER_STATE_ARMED (relay_owner.h) is a LATCH:
+ *     INIT -> GRACE -> ARMED -> TRIPPED. relay_owner_task() (relay_owner.c)
+ *     has exactly one assignment out of GRACE (the grace-timeout tick) and
+ *     nothing demotes ARMED back to GRACE; de-energising GPIO6 (a normal
+ *     PWM off-window, or any other de-energise) sets `s_energized = false`
+ *     and leaves `s_state == ARMED` untouched. So ARMED is NOT correlated
+ *     with the relay's instantaneous energized/de-energized state at all --
+ *     it is the Pico's ordinary STANDING state for the rest of its uptime
+ *     once the post-boot/post-trip-clear grace window ends, whether the
+ *     relay happens to be chopping high or sitting low at any given
+ *     instant. A raise attempted while ARMED therefore fails on EVERY
+ *     attempt for as long as the latch holds (see this header's own
+ *     "Remaining window" note below) -- there is no PWM off-window for a
+ *     retry to "catch" by varying its phase, because the condition being
+ *     retried against does not come and go with the relay's duty cycle.
+ *     Given that, a long, FIXED backoff is simply correct:
+ *     SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_US, chosen at least as long as
+ *     the pre-2026-09-10 30s figure this backoff first shipped with. No
+ *     jitter: jitter only has value against a condition that changes on a
+ *     timescale the jitter can decorrelate against, and this one does not
+ *     change on any timescale a retry can usefully catch early -- it
+ *     resolves only when the relay latch itself clears (de-energised AND a
+ *     boot/trip-clear cycle passes back through GRACE), an event this
+ *     backoff cannot hasten by retrying more or less often.
  *   - SAFETY_CEILING_REFUSAL_STORAGE -- a real hardware/flash fault that
  *     retrying sooner cannot fix and that does not resolve on its own the
  *     way ARMED does; back off LONGER
@@ -320,8 +335,19 @@ void safety_ceiling_policy_apply_lower(float current_pico_ceiling_c, bool curren
  * unbounded-persistence property whenever the relay stayed ARMED, it just
  * polled more often while doing nothing more effective. */
 #define SAFETY_CEILING_RECONCILE_RETRY_BACKOFF_US ((int64_t)5 * 1000 * 1000)  /* 5 s -- ordinary/unclassified transient failure */
-#define SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_BASE_US ((int64_t)6 * 1000 * 1000)   /* 6 s base -- strictly longer than the 5 s ordinary backoff, Pico ARMED is a guaranteed refusal until relay de-energises */
-#define SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_JITTER_US ((int64_t)3 * 1000 * 1000) /* +0..3 s jitter, so the 6-9 s cadence cannot phase-lock against a fixed PWM window */
+/* CORRECTED 2026-09-10 (second opus review): restored to a conservative
+ * fixed 30 s, no jitter -- see this header's block comment on
+ * SAFETY_CEILING_REFUSAL_ARMED above for why. ARMED is a latch, not a
+ * PWM-correlated condition: it does not clear on relay de-energise, only on
+ * a full de-energise-then-reboot-or-trip-clear cycle back through GRACE.
+ * A retry's phase relative to the relay's duty cycle is therefore
+ * irrelevant to whether this attempt can succeed, so jitter buys nothing
+ * and was removed along with the false rationale. 30 s (the figure this
+ * backoff shipped with before jitter was introduced) is still strictly
+ * longer than the 5 s ordinary backoff and short enough that a relay that
+ * has just cleared its latch (reboot, or a trip clear) is noticed within
+ * one Pico link-up cycle, not held back indefinitely. */
+#define SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_US ((int64_t)30 * 1000 * 1000) /* 30 s -- ARMED is a standing latch, not a transient window; no jitter needed or possible to justify */
 #define SAFETY_CEILING_RECONCILE_STORAGE_BACKOFF_US ((int64_t)60 * 1000 * 1000) /* 60 s -- persistent hardware fault; faster retry cannot help */
 
 typedef struct {
@@ -338,10 +364,12 @@ bool safety_ceiling_reconcile_should_attempt(const safety_ceiling_reconcile_back
  * "nothing needed" case) clears the backoff. A failed attempt sets
  * backoff_until_us = now_us plus the backoff duration selected by
  * `refusal_class` -- see this header's block comment above for the full
- * rationale per class. The ARMED case's jitter term is derived
- * deterministically from `now_us` (no RNG, no extra state) so this stays a
- * pure function purely of its inputs, host-testable exactly like every
- * other function in this file. */
+ * rationale per class (CORRECTED 2026-09-10: the ARMED case is now a fixed
+ * duration, no jitter -- see SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_US's own
+ * comment for why). This remains a pure function purely of its inputs
+ * (`now_us` is used only to compute the new deadline, not to derive any
+ * random or clock-dependent term), host-testable exactly like every other
+ * function in this file. */
 void safety_ceiling_reconcile_record_result(safety_ceiling_reconcile_backoff_t *state, int64_t now_us, bool ok,
                                              safety_ceiling_refusal_class_t refusal_class);
 

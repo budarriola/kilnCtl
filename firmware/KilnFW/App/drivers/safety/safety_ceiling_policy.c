@@ -186,12 +186,13 @@ void safety_ceiling_reconcile_record_result(safety_ceiling_reconcile_backoff_t *
     int64_t backoff_us;
     switch (refusal_class) {
     case SAFETY_CEILING_REFUSAL_ARMED:
-        /* Deterministic jitter derived from now_us (no RNG, stays a pure
-         * function of its inputs) -- see this header's block comment for
-         * why a fixed-period backoff risks phase-locking against a
-         * per-zone PWM window that can be shorter than the backoff. */
-        backoff_us = SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_BASE_US +
-                     (now_us % SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_JITTER_US);
+        /* CORRECTED 2026-09-10: fixed duration, no jitter -- see
+         * SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_US's own comment.
+         * RELAY_OWNER_STATE_ARMED is a latch (relay_owner.c/.h), not a
+         * PWM-correlated condition: it does not clear on relay
+         * de-energise, so a retry's phase relative to the relay's duty
+         * cycle cannot affect whether the retry succeeds. */
+        backoff_us = SAFETY_CEILING_RECONCILE_ARMED_BACKOFF_US;
         break;
     case SAFETY_CEILING_REFUSAL_STORAGE:
         backoff_us = SAFETY_CEILING_RECONCILE_STORAGE_BACKOFF_US;

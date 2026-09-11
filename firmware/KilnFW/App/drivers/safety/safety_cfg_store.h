@@ -195,6 +195,21 @@ bool safety_cfg_store_lookup(uint16_t param_id, uint8_t *out_type, const char **
  * refetch takes (bounded by SAFETY_CFG_STORE_REFETCH_BUDGET_MS). */
 bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc);
 
+/* Poll-side, non-blocking sibling of safety_cfg_store_refetch() above --
+ * 2026-08-28 audit fix (N2, BLOCKER). Tries s_store_lock with a zero
+ * timeout; if the httpd worker's safety_cfg_store_refetch() is mid-refetch
+ * (holding the lock for up to SAFETY_CFG_STORE_REFETCH_BUDGET_MS plus a
+ * synchronous NVS flush), this returns false IMMEDIATELY rather than
+ * blocking. Exported (2026-09-10 opus review, ceiling-reconcile backoff
+ * fix) so any other safety_poll_task caller that needs a live read-back --
+ * not only safety_cfg_store_maybe_refetch()'s own CRC-driven refill -- can
+ * respect the same non-blocking rule stated below. THE RULE THIS SERVES:
+ * safety_poll_task's own iteration is already budgeted up to ~3.2-3.7s
+ * against a 5s task-WDT-adjacent margin, and the Pico's link_timeout_s is
+ * watching this task's cadence for real -- do not call safety_cfg_store_
+ * refetch() (portMAX_DELAY) from safety_poll_task or anything it calls. */
+bool safety_cfg_store_refetch_nonblocking(SafetyLinkClass *link, uint16_t config_crc);
+
 /* The fetch-on-change trigger (COMMISSIONING.md sec 3, this file's own top
  * comment): if `live_config_crc` differs from safety_cfg_store_cached_crc(),
  * calls safety_cfg_store_refetch() and returns whatever it returned;

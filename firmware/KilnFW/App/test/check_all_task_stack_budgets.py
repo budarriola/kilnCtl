@@ -375,7 +375,25 @@ CEILING_BYTES = {
     "danger_mode": 2112,
     "safety_owner_evt": 176,
     "safety_proto_rx": 3584,
-    "safety_poll": 3104,
+    # 3136 = 3104 (prior baseline) + 32. 2026-09-10: safety_cfg_store_
+    # refetch_nonblocking() (safety_cfg_store.c) was made non-static/public
+    # (safety_cfg_store.h) so the ceiling-reconcile writer path
+    # (safety_cfg_http.c's confirm_commit_landed(), now callable with
+    # nonblocking_refetch=true from safety_ceiling_sync.c, itself called
+    # from safety_poll_task) can use the same non-blocking refetch
+    # safety_cfg_store_maybe_refetch() already used, instead of the
+    # forbidden blocking safety_cfg_store_refetch() (portMAX_DELAY) --
+    # see safety_cfg_store.c:1488-1510's own "ONLY path safety_poll_task
+    # may take" rule. Losing `static` on that function removed the
+    # compiler's ability to inline it into safety_cfg_store_maybe_
+    # refetch()'s call in the deepest measured path here, adding one new
+    # 32 B call frame (safety_cfg_store_maybe_refetch ->
+    # safety_cfg_store_refetch_nonblocking -> safety_cfg_store_refetch_
+    # locked -> ...), not a growth in any function's own locals. Measured
+    # against a freshly rebuilt KilnCtrl.elf (build_kilnfw, same day) with
+    # 4756 B (58.1%) of the 8192 B stack still honestly free -- ordinary,
+    # understood growth, not a regression to paper over.
+    "safety_poll": 3136,
     # 4880 = 752 (lvgl_port_task's own deepest resolved path) + 4128
     # (ui_home_refresh_cb, the deepest of the extra_roots callbacks -- see
     # TASKS["lvgl"]'s comment), measured 2026-09-09 against KilnCtrl.elf as

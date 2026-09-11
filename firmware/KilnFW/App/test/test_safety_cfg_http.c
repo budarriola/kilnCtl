@@ -186,6 +186,29 @@ bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t crc)
     s_stub_refetch_calls++;
     return s_stub_refetch_result;
 }
+// 2026-09-10 opus review, blocking-call fix: confirm_commit_landed() now
+// calls THIS non-blocking sibling instead when `nonblocking_refetch` is
+// true -- the ceiling-reconcile writer's own call path
+// (safety_cfg_http_set_and_confirm_f32() -> apply_pairs_ex(..., true)),
+// which is the only caller in this file's build that ever runs on
+// safety_poll_task. Deliberately a SEPARATE counter/result from the
+// blocking stub above (not shared) so
+// test_confirm_landed_uses_nonblocking_refetch_when_requested() below can
+// prove -- by call count, not by return value alone -- exactly which
+// refetch function a given call path used. This is what makes the
+// blocking-vs-non-blocking rule host-testable at all: without a distinct
+// counter here, a regression that quietly routed the reconcile path back
+// through the forbidden blocking safety_cfg_store_refetch() would still
+// pass every existing test in this file, since both stubs return the same
+// `bool` shape. */
+static bool s_stub_refetch_nonblocking_result = true;
+static int s_stub_refetch_nonblocking_calls = 0;
+bool safety_cfg_store_refetch_nonblocking(SafetyLinkClass *link, uint16_t crc)
+{
+    (void)link; (void)crc;
+    s_stub_refetch_nonblocking_calls++;
+    return s_stub_refetch_nonblocking_result;
+}
 bool safety_cfg_store_maybe_refetch(SafetyLinkClass *link, uint16_t crc) { (void)link; (void)crc; return false; }
 esp_err_t safety_cfg_store_init(void) { return ESP_OK; }
 
@@ -595,6 +618,8 @@ static void reset_all(void)
     s_stub_commit_reject_reason = KILNLINK_COMMIT_CONFIG_REJECT_RANGE;
     s_stub_refetch_result = true;
     s_stub_refetch_calls = 0;
+    s_stub_refetch_nonblocking_result = true;
+    s_stub_refetch_nonblocking_calls = 0;
     s_stub_late_rejected = false;
     s_stub_late_reject_param_id = KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID;
     s_stub_late_reject_reason = KILNLINK_COMMIT_CONFIG_REJECT_RANGE;
@@ -1030,6 +1055,50 @@ static void test_apply_pairs_tc_offset_c_readback_mismatch_fails(void)
     TEST_CHECK(strstr(reason, "tc_offset_c") != NULL,
                "the reason names the field, not just a generic failure");
     TEST_CHECK(s_stub_refetch_calls == 1, "a live read-back was attempted");
+}
+
+// 2026-09-10 opus review, second finding: confirm_commit_landed() used to
+// call the BLOCKING safety_cfg_store_refetch() (portMAX_DELAY) unconditionally
+// -- correct for every httpd-worker caller of apply_pairs(), but a documented
+// rule violation for the ceiling-reconcile writer (safety_ceiling_sync.c),
+// which runs on safety_poll_task and must never block on s_store_lock behind
+// an httpd commissioning POST (safety_cfg_store.c:1488-1510's own "ONLY path
+// safety_poll_task may take" rule). safety_cfg_http_set_and_confirm_f32() is
+// that writer's entry point, and is now the ONLY caller in this file's build
+// that reaches apply_pairs_ex() with nonblocking_refetch=true.
+//
+// This is the negative-test-shaped proof the blocking-call fix is real: it
+// checks CALL COUNTS on the two separately-tracked stubs, not just a return
+// value both stubs could satisfy identically. Break the fix by hand (e.g.
+// have safety_cfg_http_set_and_confirm_f32() call apply_pairs_ex(...,
+// /*nonblocking_refetch=*/false) instead) and this test fails: s_stub_
+// refetch_calls becomes 1 and s_stub_refetch_nonblocking_calls becomes 0,
+// the exact inversion of what this asserts.
+static void test_set_and_confirm_f32_uses_nonblocking_refetch(void)
+{
+    TEST_SECTION("safety_cfg_http_set_and_confirm_f32 -- the ceiling-reconcile writer's confirm "
+                 "step uses the NON-BLOCKING refetch, never the blocking one safety_poll_task must "
+                 "not call");
+    reset_all();
+    s_stub_lookup_type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_lookup_name = "abs_max_temp_c";
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    s_stub_params[0].param_id = 0x0104u;
+    s_stub_params[0].type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_params[0].set = true;
+    s_stub_params[0].value.f32_val = 120.0f;
+    char reason[160];
+    safety_ceiling_refusal_class_t out_class = SAFETY_CEILING_REFUSAL_OTHER;
+    bool ok = safety_cfg_http_set_and_confirm_f32(&fake_link, 0x0104u, 120.0f, reason, sizeof(reason),
+                                                   &out_class);
+    TEST_CHECK(ok == true, "staged, committed, and confirmed by read-back");
+    TEST_CHECK(s_stub_refetch_nonblocking_calls == 1,
+               "the confirm step must go through the NON-BLOCKING refetch exactly once");
+    TEST_CHECK(s_stub_refetch_calls == 0,
+               "the BLOCKING refetch (portMAX_DELAY) must NEVER be reached from this call path -- "
+               "safety_poll_task, the only caller of this function, may not block behind an httpd "
+               "commissioning POST holding s_store_lock");
 }
 
 static void test_apply_pairs_refetch_failure_reports_unconfirmed_not_success(void)
@@ -2032,6 +2101,7 @@ int main(void)
     test_apply_pairs_rejected_commit_names_field_and_reason();
     test_apply_pairs_readback_mismatch_fails_even_when_acked_and_not_rejected();
     test_apply_pairs_tc_offset_c_readback_mismatch_fails();
+    test_set_and_confirm_f32_uses_nonblocking_refetch();
     test_apply_pairs_refetch_failure_reports_unconfirmed_not_success();
     test_apply_pairs_refetch_failure_with_no_stash_classifies_as_other_not_armed();
     test_apply_pairs_late_rejection_attaches_pico_reason_to_confirmed_failure();
