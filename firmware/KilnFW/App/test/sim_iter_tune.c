@@ -622,7 +622,7 @@ int main(int argc, char **argv)
     // target above. Docs/audits/firing_score_entry_ema_review_2026-09-10.md
     // has the full story; short version:
     //
-    //   - 24 ACCEPT / 660 null comparisons (mc_runs=220, exactly the
+    //   - 24 ACCEPT / 660 null comparisons at mc_runs=220 (exactly the
     //     invocation check_sim_iter_tune_bars.ps1 uses) measured
     //     2026-09-10, immediately after reverting 8b96b591's dwell-entry
     //     EMA smoothing (that revert is correct and is staying -- the EMA
@@ -641,20 +641,53 @@ int main(int argc, char **argv)
     //     progress as of this pin), not a change to this comparator or this
     //     harness -- this pin is a placeholder ceiling, not a target.
     //   - EXIT CONDITION: once the re-identified coupling matrix lands,
-    //     re-measure A1 at n=220 (mc_runs=220 -> 660 comparisons) and either
+    //     re-measure A1 at mc_runs=220 (-> 660 comparisons) and either
     //     tighten this pin toward A1_DESIGN_TARGET_PCT or remove it in
     //     favour of enforcing A1_DESIGN_TARGET_PCT directly. Whoever lands
     //     that matrix: this is your cue to revisit these two constants.
+    //
+    // DETERMINISM, CHECKED (not assumed): this harness has NO wall-clock or
+    // OS-entropy seeding anywhere in the call chain (grepped for
+    // time(NULL)/GetTickCount/QueryPerformanceCounter/rand()/srand() in this
+    // file, sim_plant.c and iter_tune.c -- none). Every RNG is an explicit
+    // LCG: this file's own file-local `urand()` (rng_state, seeded 12345 at
+    // program start) drives ensemble variant generation, and
+    // sim_kiln_state_t.rng drives sensor noise -- seeded from
+    // plant_variant_t.noise_seed at run_firing()'s top (sim_iter_tune.c,
+    // right after sim_kiln_reset(), which itself hardcodes rng=0x1234567u --
+    // the noise_seed assignment runs AFTER that reset and overwrites it, so
+    // the seed genuinely reaches the consumer; verified by reading the call
+    // order, not just that a seed field is assigned somewhere. This is the
+    // same class of bug fault_sched.c once had (SET_SEED updated s_seed
+    // while fault_engine_t.rng_state stayed hardcoded at 0 from
+    // fault_engine_init(&s_engine, 0), making every declared seed cosmetic)
+    // -- checked here and NOT present. Empirically confirmed too: five
+    // consecutive `kilnctl_sim_iter_tune.exe 220` runs of this exact,
+    // unmodified source produced the IDENTICAL 24 ACCEPT / 21 REJECT / 615
+    // INSUFFICIENT / 0 NO_PAIRS breakdown every time (2026-09-10). This bar
+    // is NOT stochastic -- a bare exact-count pin is the correct instrument
+    // for it. (An earlier report elsewhere called this check's bar
+    // "stochastic"; that characterization does not hold for this harness at
+    // fixed mc_runs and is superseded by this note.)
+    //
+    // mc_runs SENSITIVITY: the pin is valid ONLY at mc_runs=220 (660
+    // comparisons), which is what determinism was verified at and what
+    // check_sim_iter_tune_bars.ps1 invokes. The comparison below is
+    // cross-multiplied so it stays ARITHMETICALLY exact at any mc_runs
+    // without rounding error -- but that says nothing about whether 24/660
+    // is still the right CEILING at a different mc_runs (a bigger ensemble
+    // can shift the true rate in either direction with tighter sampling
+    // noise). Raising mc_runs for better statistics without re-measuring
+    // and re-pinning at the new sample size would silently compare a new
+    // distribution against an old ceiling -- re-measure this exact pin at
+    // whatever mc_runs is adopted before trusting it there.
     //
     // RATCHET GUARD: this pin only ever gets TIGHTER by construction --
     // raising it requires editing these two literals by hand, with a
     // comment (this one, updated) recording the new measurement's
     // provenance. It must never be raised just to make a red run go green;
     // that defeats the entire point of pinning a known-failure instead of
-    // silently widening the design target. Compared by cross-multiplication
-    // (accepts * A1_PINNED_TOTAL <= A1_PINNED_MAX_ACCEPTS * total) so the
-    // bar is exact regardless of what mc_runs this run used, rather than
-    // comparing rounded percentages.
+    // silently widening the design target.
     const int A1_PINNED_MAX_ACCEPTS = 24;
     const int A1_PINNED_TOTAL = 660;
     bool a1_pass = ((int64_t)accepts * A1_PINNED_TOTAL) <= ((int64_t)A1_PINNED_MAX_ACCEPTS * total);

@@ -140,6 +140,76 @@ the real target is 2.0%, and that the blocker is the coupling
 re-identification -- so a reader of the green line cannot conclude the
 2.0% bar is met.
 
+## Determinism: checked, not assumed
+
+A hard-count pin over a stochastic statistic is the wrong instrument -- if
+identical runs can produce 23, 24, or 25 accepts, a threshold sitting
+exactly at the measured value (the margin here is a single event: 24/660
+passes, 24/660 is itself the ceiling, and 25/660 would fail) would flap
+red/green with no code change at all. This was checked directly rather than
+assumed, for two reasons: another agent's report characterized this check
+as failing on a "stochastic bar", and this repo has a documented instance
+of exactly this failure class -- `fault_sched.c` updated `s_seed` on
+`SET_SEED` while `fault_engine_t.rng_state` stayed hardcoded at 0 from
+`fault_engine_init(&s_engine, 0)`, so every scenario's declared seed was
+cosmetic and never reached the engine that consumed it.
+
+**Source audit.** Grepped `sim_iter_tune.c`, `sim_plant.c` and
+`iter_tune.c` for `time(NULL)`, `GetTickCount`, `QueryPerformanceCounter`,
+`rand()`, `srand()` -- zero hits. Every source of randomness is an explicit,
+seeded LCG:
+- `sim_iter_tune.c`'s file-local `urand()` uses a file-local `rng_state`
+  seeded to the literal `12345u` at program start (not reseeded per run),
+  driving ensemble/variant generation (`nominal_variant`/
+  `mismatched_variant`'s `k_scale`/`tau_scale`/`dead_scale`/
+  `start_offset_c`/etc.).
+- `sim_kiln_state_t.rng` drives per-tick sensor noise in `sim_plant.c`
+  (`sensor_pipeline_step`, line ~190/209). `sim_kiln_reset()` hardcodes
+  `state->rng = 0x1234567u` -- but `run_firing()` in `sim_iter_tune.c`
+  overwrites it immediately afterward with
+  `sim.rng = v->noise_seed ? v->noise_seed : 0x1234567u`, i.e. AFTER the
+  reset, not before it. This is the exact call-order check the
+  `fault_sched.c` bug class requires and did not get: it is not enough that
+  a seed field is assigned somewhere, it has to reach the consumer AFTER
+  whatever else might clobber it. Verified by reading the call order --
+  here the seed genuinely reaches the consumer.
+
+**Empirical confirmation.** Built `sim_iter_tune.c`/`sim_plant.c`/
+`pid.c`/`heater_output.c`/`zone_coupling_solve.c`/`firing_score.c`/
+`firing_compare.c`/`iter_tune.c` once (unmodified, current HEAD) and ran
+the resulting `.exe 220` five consecutive times:
+
+```
+run1:   660 null comparisons: ACCEPT 24 (3.64%)  REJECT 21  INSUFFICIENT 615  NO_PAIRS 0
+run2:   660 null comparisons: ACCEPT 24 (3.64%)  REJECT 21  INSUFFICIENT 615  NO_PAIRS 0
+run3:   660 null comparisons: ACCEPT 24 (3.64%)  REJECT 21  INSUFFICIENT 615  NO_PAIRS 0
+run4:   660 null comparisons: ACCEPT 24 (3.64%)  REJECT 21  INSUFFICIENT 615  NO_PAIRS 0
+run5:   660 null comparisons: ACCEPT 24 (3.64%)  REJECT 21  INSUFFICIENT 615  NO_PAIRS 0
+```
+
+Byte-identical across all five runs, including REJECT/INSUFFICIENT/NO_PAIRS
+-- not just the ACCEPT count. Measured spread: **zero**.
+
+**Verdict: `sim_iter_tune` is deterministic at fixed `mc_runs`.** The
+"stochastic bar" characterization does not hold for this harness and is
+superseded by this measurement. A bare exact-count pin (the
+cross-multiplied `accepts * A1_PINNED_TOTAL <= A1_PINNED_MAX_ACCEPTS *
+total` comparison already in place) is the correct instrument -- no
+tolerance band is needed or added. This finding is recorded a second time,
+next to the pin itself, in `sim_iter_tune.c`'s own comment, so it does not
+need to be re-litigated by a future reader who only has the code in front
+of them.
+
+**Scope of this guarantee.** Determinism was verified at `mc_runs=220`
+(660 comparisons), the exact invocation `check_sim_iter_tune_bars.ps1`
+uses -- the pin's validity as a ceiling is likewise scoped to that setting
+(see `sim_iter_tune.c`'s "mc_runs SENSITIVITY" comment). The
+cross-multiplied comparison stays arithmetically exact at any `mc_runs`,
+but that is a statement about the arithmetic, not about whether 24/660 is
+still the right ceiling at a different sample size -- raising `mc_runs`
+for better statistics requires re-measuring and re-pinning at the new
+size, not just trusting the old numbers to scale.
+
 ## Exit condition
 
 Once the re-identified coupling matrix lands: re-measure A1 at n=220
