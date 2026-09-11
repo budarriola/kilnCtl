@@ -137,13 +137,15 @@
 >   real and unexplained (see above). Two candidate replacements are already
 >   dead: buoyancy (refuted on hardware) and a total-power superlinear loss
 >   term for any gamma>1 (refuted from data on hand).
-> - Chosen next step, **not yet implemented** (`sim_plant.c` unchanged as of
->   this sweep — confirmed by `git log` on the file): a level-scheduled
->   coupling gain, fit empirically to the two already-captured plateaus and
->   labelled as such — no literature source found reports a measured sign
->   reversal of this kind, so it is curve-fitting bounded by real
->   measurements, not a derived physical law. Work is in progress in another
->   session; do not report a result here until it lands.
+> - **Level-scheduled coupling gain has now failed twice and is not the
+>   current plan.** First attempt (`8cbd9d67`, reverted `9f054181`) hit A1 at
+>   38/660; a second attempt meeting all four of that adjudication's retry
+>   conditions still hit 43/660 (worse), was reverted with nothing committed,
+>   and is recorded, with a labelled hypothesis for why, in
+>   `docs/audits/coupling_level_schedule_adjudication_2026-09-11.md`'s
+>   "Second attempt" section. A third attempt requires first explaining that
+>   result, per that doc's gate — this is a precondition on the model class,
+>   not an implementation detail to retry.
 > - Acceptance criterion: the `sim_iter_tune` A1 false-accept bar, pinned at
 >   **24/660 (3.64%)** against a 2.0% design target, to be re-measured after
 >   the coupling change per the pin's own (now-falsifiable, `645551c2`) exit

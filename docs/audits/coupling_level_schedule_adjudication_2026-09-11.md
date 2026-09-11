@@ -222,3 +222,109 @@ refuted by any of the above. To retry:
    proposing any change to the pin, and report the accept/reject/insufficient
    breakdown, not just the accept count — the reject count moving is as
    informative as the accept count.
+
+## 9. Second attempt (2026-09-11, same day) — all four retry conditions met, still worse
+
+A second attempt at the level-scheduled coupling term in `sim_plant.c` was made
+the same day, satisfying **all four** of section 8's conditions before being
+measured. **This was a correct implementation of the retry plan — it still
+failed.** That is the point of recording it: this is not a botched attempt to
+be redone more carefully, it is evidence about the model class.
+
+What was done, condition by condition:
+
+1. **Window-averaged duty.** A per-zone rolling duty-history ring (capacity
+   64) was added to `sim_kiln_state_t`, zeroed by the existing whole-struct
+   `memset` in `sim_kiln_reset()` (the reset-one-side-of-a-pair class this
+   repo tracks was explicitly checked and is not present here — one `memset`
+   covers both the new field and everything else). Verified working: driving
+   a binary PWM pattern whose ON-fraction matched the low-joint calibration
+   point (u = [0.156, 0.219, 0.25], 32-tick period dividing evenly into the
+   64-tick window) produced a window-averaged joint-excess of **~0.375** —
+   inside the calibrated `[0.373, 0.639]` domain, rather than collapsing to
+   the `{0, 1, 2}` values section 2 above showed the binary-fed schedule was
+   actually evaluated at.
+2. **Clamped.** Segment B was flattened at the plateau mean (scale 1.173) as
+   a hard ceiling — no extrapolation past it. (The first attempt reached
+   scale 4.14, a 4.6x energy-conservation violation per section 5 above.)
+3. **No unsupported slope.** No segment-B slope was fitted at all; it was
+   implemented flat-and-clamped above a short interpolation bridge, per
+   section 8 point 3's "step-with-transition" recommendation. Section 4's
+   finding — the three `cplval75` points' in-regime slope (0.144/unit) is
+   statistically indistinguishable from flat (2.46% spread inside 2.9%
+   coefficient repeatability) — was taken as the reason, not merely followed.
+4. **Re-measured A1 at `mc_runs=220`, full breakdown, before proposing any
+   pin change.**
+
+Tests added: single-column invariance (all zones off; one zone at duty 1.0
+with others at 0; a zone at exactly 0 beside a driven one — all must give
+excess 0, matching section 6's proof), and a window-averaging regression
+assertion that the level lands near 0.373 rather than snapping to an integer.
+A negative test (reintroducing an unbounded slope) was confirmed RED, then
+reversed by hand with an empty `git diff` against the intended state —
+proving the test actually exercises the clamp rather than passing vacuously.
+
+**Result: A1 went to 43/660 (6.52%).** Worse than the pinned ceiling (24/660,
+3.64%) **and** worse than the first, already-rejected attempt (38/660,
+5.76%). The pin was correctly left untouched.
+
+Everything was reverted by hand and confirmed byte-identical to pre-attempt
+`HEAD` (`git diff` empty against the touched files); the host suite returned
+to 36/36 and `check_sim_iter_tune_bars.ps1` back to the passing 24/660.
+**Nothing from this attempt was committed** — the code no longer exists
+anywhere except as reconstructed in this section, which is why this section
+exists.
+
+### Conclusion
+
+Evaluating the correction at the right quantity — window-averaged duty,
+matching the calibration exactly, per section 2's own diagnosis — **did not
+remove the ripple-amplification effect that sank the first attempt; it only
+moved where it lands.** Both attempts made A1 worse, not better, despite
+addressing that attempt's previously-identified defect. This points at the
+**model class** (a level-scheduled, joint-excess-keyed coupling gain) being
+wrong for this harness's false-accept sensitivity — not at either attempt's
+calibration, clamping, or evaluation domain, all of which were correct the
+second time.
+
+### Precondition for a third attempt
+
+**Do not retry a level-scheduled coupling term without first explaining why
+43/660 resulted despite all four of section 8's conditions being satisfied.**
+A third attempt that only re-checks calibration, clamping, slope support, or
+evaluation domain will be repeating the second attempt's already-satisfied
+conditions, not addressing the open question. The open question is why a
+correctly-scheduled, correctly-clamped, correctly-evaluated nonlinear
+correction still degrades A1 in both directions it has been tried.
+
+### An untested hypothesis (not a finding)
+
+One candidate explanation, offered explicitly as a hypothesis to be tested,
+not as a conclusion: **both attempts raised the effective coupling scale
+whenever two or three zones are on simultaneously** (scale > 1 in that
+regime — 1.96/4.14 in the first attempt, 1.173 clamped in the second), and
+under the real 60 s PWM window used by `sim_iter_tune.c`, multi-relay
+overlap is common during joint operation. If A1's false-accept sensitivity
+tracks coupling **magnitude** during multi-relay intervals rather than the
+schedule's particular shape, then *any* schedule of this form that sits
+above 1.0 at high joint level will worsen A1 regardless of how faithfully it
+is calibrated to the plateau data — because the plateau data (steady-state,
+time-averaged) is exactly what's insensitive to the PWM-ripple mechanism A1
+is measuring.
+
+The discriminating experiment, **not run here**: replace the schedule with
+the original constant matrix scaled by a single flat factor equal to the
+second attempt's clamped high-joint scale (1.173), with no joint-excess
+dependence at all, and re-measure A1. If that also degrades A1 by a
+comparable amount, the hypothesis is supported — the defect is in raising
+coupling magnitude during multi-relay intervals per se, independent of
+scheduling — and any future retry needs to address *that*, not the
+schedule's shape. If flat-scaling does *not* degrade A1 comparably, the
+hypothesis is wrong and the schedule's specific shape (its transition,
+non-monotonicity, or interaction with the window-averaging itself) is
+implicated instead, which would point back at the join-region dynamics
+rather than the plateau magnitude.
+
+This hypothesis is recorded because it is falsifiable with one cheap run and
+because it would materially change what a third attempt should even try;
+it is not recorded as an explanation to be assumed true.
