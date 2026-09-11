@@ -297,7 +297,7 @@ conditions, not addressing the open question. The open question is why a
 correctly-scheduled, correctly-clamped, correctly-evaluated nonlinear
 correction still degrades A1 in both directions it has been tried.
 
-### An untested hypothesis (not a finding)
+### A hypothesis, tested and PARTIALLY SUPPORTED (see section 10)
 
 One candidate explanation, offered explicitly as a hypothesis to be tested,
 not as a conclusion: **both attempts raised the effective coupling scale
@@ -328,3 +328,118 @@ rather than the plateau magnitude.
 This hypothesis is recorded because it is falsifiable with one cheap run and
 because it would materially change what a third attempt should even try;
 it is not recorded as an explanation to be assumed true.
+
+## 10. The discriminating experiment, run (2026-09-11, same day)
+
+Section 9's flat-scale experiment was run. Method: `sim_plant.c`'s
+`power_couple_w += cfg->coupling_w_per_c[i][j] * u_j;` line (the constant
+matrix's only point of application) was temporarily multiplied by a bare
+`float` factor — no schedule, no new state, no joint-excess dependence —
+and `sim_iter_tune.c`'s Part-2 null-experiment loop was temporarily
+instrumented to print, on every `ACCEPT`, which subscore cleared bar-1, its
+`n`, and the zone (mirroring section 1's instrumentation). Both changes were
+reverted by hand immediately after data collection; `git diff` on both
+touched files (`firmware/KilnFW/App/test/sim_plant.c`,
+`firmware/KilnFW/App/test/sim_iter_tune.c`) is empty, and a final re-run of
+`check_sim_iter_tune_bars.ps1` after reverting reproduced 24/660 exactly,
+confirming the revert is clean. `tools/run_all_checks.ps1` is green at
+94/94. No code was committed for this section — only this write-up.
+
+Control at factor **1.0** (must reproduce the pin exactly, checked first):
+`24/660 (3.64%)` — `ENTRY_PEAK_C 22 / LAG_S 2`, zones `z0 20 / z1 4`, all at
+`n == 3`. **Exact match to the pinned baseline**, so the instrumentation and
+build are trusted for the rest of this section.
+
+| factor | ACCEPT/660 | REJECT | INSUFFICIENT | `LAG_S` | `ENTRY_PEAK_C` | zones |
+|---|---|---|---|---|---|---|
+| 0.85 | 20 (3.03%) | 29 | 611 | 0 | 20 | z0 20 |
+| **1.0 (control)** | 24 (3.64%) | 21 | 615 | 2 | 22 | z0 20, z1 4 |
+| **1.173** | **38 (5.76%)** | 48 | 574 | 11 | 27 | z0 34, z1 4 |
+| 1.35 | 18 (2.73%) | 54 | 588 | 3 | 15 | z0 15, z1 3 |
+
+All accepts at every factor cleared at `n == 3` on exactly one subscore, same
+as the pinned baseline and both schedule attempts.
+
+### Reading the numbers
+
+**Headline match, at the matched scale.** At factor 1.173 — the exact clamp
+value the second schedule attempt settled on for high joint level — flat
+scaling gives **38/660**, matching the *first* schedule attempt's 38/660
+almost exactly (and landing between the two schedule attempts' 38 and 43).
+A pure, uniform, always-applied magnitude increase of this size produces a
+comparably-sized A1 regression to a level-scheduled gain that only reaches
+that magnitude during multi-relay overlap. That is consistent with the
+hypothesis: raising coupling magnitude during joint operation degrades A1
+regardless of whether the increase is scheduled or constant.
+
+**But the cluster shape does not match either schedule attempt.** Section 1's
+table for the schedule showed `ENTRY_PEAK_C` **unchanged at exactly 22** (all
++14 new accepts landing on `LAG_S`, spreading into z2 for the first time: z0
+18, z1 14, z2 6). The flat-scale run at the same headline size instead moves
+**both** subscores (`ENTRY_PEAK_C` 22 -> 27, `LAG_S` 2 -> 11) and shows **no
+z2 spread at all** (z0 34, z1 4 — the same two zones as the pinned baseline,
+just more of them). If A1 sensitivity tracked coupling magnitude alone with
+no dependence on the schedule's specific shape, a comparable-magnitude flat
+change should have reproduced a comparable *cluster signature*, not just a
+comparable *count*. It did not: the schedule's signature (`ENTRY_PEAK_C`
+pinned, all growth on `LAG_S`, z2 newly implicated) looks like it carries
+information about the schedule's transition/nonlinearity specifically, not
+just about the peak magnitude it reaches.
+
+**Reject count is monotone in `|factor - 1|`; accept count is not.**
+`21 -> 29 -> 48 -> 54` as the factor moves `1.0 -> 0.85 -> 1.173 -> 1.35`
+(sorted by distance from 1.0: 0, 0.15, 0.173, 0.35) is monotonically
+increasing — more coupling perturbation in either direction produces more
+divergence between the paired runs, exactly as expected for a magnitude
+effect. But `ACCEPT` peaks near 1.173 and *drops* to 18 (below the pin) at
+1.35, as some of the additional divergence crosses over from "clears bar-1
+as an accept" to "trips the degradation veto as a reject" — a three-way
+split moving through a threshold, not a magnitude-tracking count on its own.
+This confirms the audit's earlier point (section 1: "the REJECT count
+moving is as informative as the accept count") generalizes here too: ACCEPT
+alone is not a monotone proxy for coupling-magnitude perturbation, but
+INSUFFICIENT (monotonically falling: 615 -> 611 -> 574 -> 588 — actually
+non-monotone here too, lowest at 1.173) and REJECT together are a more
+reliable read of "how much divergence is this perturbation injecting."
+
+### Verdict: PARTIAL — magnitude matters, but shape is not fungible with it
+
+Neither pure reading from section 8/9 holds cleanly:
+
+- **Not fully SUPPORTED**: if A1 tracked coupling magnitude alone independent
+  of shape, the flat-scale run at 1.173 should have reproduced the schedule's
+  cluster signature (pinned `ENTRY_PEAK_C`, all growth on `LAG_S`, z2 newly
+  implicated) at a comparable count. It reproduced the *count* but not the
+  *signature* — `ENTRY_PEAK_C` moved too, and z2 never appeared.
+- **Not fully REFUTED**: a null, shape-free perturbation of the same
+  magnitude the schedule reaches at high joint level degrades A1 by a
+  comparable amount (38 vs 38, both well above the 24 pin) using no schedule
+  and no window-averaging at all. The model class is not innocent merely
+  because it isn't a flat scale — plain magnitude, applied uniformly across
+  *all* joint operation (not just high-joint intervals), is already enough
+  to fail this bar at the same scale value.
+
+**Consequence for A1 as a gate on coupling-model changes:** A1 is not
+purely a shape detector, and it is not purely a magnitude detector either —
+it responds to both, and the two effects do not obviously add or factor
+cleanly (the schedule's real-world exposure is a small high-joint-level
+fraction of the trace — section 2 measured 9.4%/0.3% at level 1/2 — yet
+produced a comparable regression to a factor applied unconditionally on
+100% of joint operation). That asymmetry suggests the schedule's
+*transition region* and its interaction with PWM windowing (Jensen,
+section 2) carries disproportionate weight relative to its exposure
+fraction — worth investigating directly in any future attempt, per section
+9's "precondition for a third attempt," but not resolved by this
+experiment. **A1 can still usefully gate coupling-model changes** (a model
+that raises effective joint-operation coupling scale materially above 1.0,
+schedule or not, should be expected to move this bar and must be
+re-measured before being adopted) but it should not be read as isolating
+*which* property of a candidate model (its magnitude vs. its shape) is
+responsible for a given regression — this experiment shows both can produce
+the same headline number via different cluster mechanisms, so the headline
+alone under-determines the diagnosis and the per-subscore/per-zone cluster
+breakdown (as run here and in section 1) is required every time, not
+optional supporting detail.
+
+The pin stays at 24/660. No model change is proposed by this section; it is
+a measurement only.
