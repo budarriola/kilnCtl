@@ -10,6 +10,7 @@ Run with: python -m pytest tools/PcTools/tests/test_elf_archive.py -q
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -123,6 +124,170 @@ class ArchiveKilnElfTest(unittest.TestCase):
         path, message = elf_archive.find_kiln_elf_for_build("Sep 10 2026 12:00:00")
         self.assertIsNone(path)
         self.assertIn("missing on disk", message)
+
+    def test_preexisting_raw_key_entry_is_reachable_after_normalization_fix(self):
+        """2026-09-10 (opus review round 3, defect 1): a manifest entry
+        written under its RAW (un-normalized, double-space day padding) key
+        -- either by pre-fix code, or by hand-repair as happened for real in
+        firmware/KilnFW/build/elf_archive/manifest.json's 'Sep  9 2026
+        14:18:51' entry -- must still resolve once normalize_build_timestamp
+        is applied consistently. Seed the manifest file directly (bypassing
+        archive_kiln_elf, which now always writes normalized keys) to
+        reproduce the pre-existing-raw-key situation, then look it up both
+        ways."""
+        elf_path = os.path.join(self.archive_dir, "KilnCtrl-deadbeef0001.elf")
+        _write_fake_elf(elf_path, b"raw-key legacy entry")
+        os.makedirs(self.archive_dir, exist_ok=True)
+        raw_key = "Sep  9 2026 14:18:51"  # double space before single-digit day
+        manifest = {
+            raw_key: {
+                "elf_key": "deadbeef0001",
+                "identity": raw_key,
+                "seq": 1,
+                "archived_at": "2026-09-09T14:20:00Z",
+                "git_commit": "0dddd435",
+                "source": "test-seeded-raw-key",
+            }
+        }
+        elf_archive._write_manifest(self.archive_dir, manifest)
+
+        # Before the fix, find_kiln_elf_for_build normalized the lookup key
+        # but _load_manifest returned the raw key verbatim, so this exact
+        # reproduction (queried with either spacing) returned None.
+        path_norm, msg_norm = elf_archive.find_kiln_elf_for_build("Sep 9 2026 14:18:51")
+        self.assertIsNotNone(path_norm, msg_norm)
+        self.assertTrue(path_norm.endswith("KilnCtrl-deadbeef0001.elf"))
+
+        path_raw, msg_raw = elf_archive.find_kiln_elf_for_build(raw_key)
+        self.assertIsNotNone(path_raw, msg_raw)
+        self.assertEqual(path_raw, path_norm)
+
+    def test_negative_without_load_time_migration_raw_key_is_unreachable(self):
+        """Proves the migration in _load_manifest (not something incidental)
+        is what makes the previous test pass: monkeypatch _load_manifest
+        back to a raw passthrough (no key normalization -- the pre-fix
+        shape) and confirm the identical raw-keyed entry from the previous
+        test's setup becomes unreachable again, reproducing the live
+        incident this defect describes."""
+        elf_path = os.path.join(self.archive_dir, "KilnCtrl-deadbeef0002.elf")
+        _write_fake_elf(elf_path, b"raw-key legacy entry 2")
+        os.makedirs(self.archive_dir, exist_ok=True)
+        raw_key = "Sep  8 2026 09:00:00"
+        manifest = {
+            raw_key: {
+                "elf_key": "deadbeef0002",
+                "identity": raw_key,
+                "seq": 1,
+                "archived_at": "2026-09-08T09:01:00Z",
+                "git_commit": "cafefeed",
+                "source": "test-seeded-raw-key",
+            }
+        }
+        elf_archive._write_manifest(self.archive_dir, manifest)
+
+        def _raw_passthrough(archive_dir):
+            path = os.path.join(archive_dir, elf_archive.MANIFEST_NAME)
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+
+        with unittest.mock.patch.object(elf_archive, "_load_manifest", side_effect=_raw_passthrough):
+            path, message = elf_archive.find_kiln_elf_for_build("Sep 8 2026 09:00:00")
+        self.assertIsNone(path, "without key migration this lookup should miss, reproducing the incident")
+        self.assertIn("no archived ELF found", message)
+
+
+class SupersededIdentityTest(unittest.TestCase):
+    """2026-09-10 (opus review round 3, defect 4): firmware/KilnFW/build/
+    elf_archive/ held 60 real KilnCtrl-*.elf files against only 3 manifest
+    entries -- 57 files simultaneously unreachable by lookup (the manifest
+    never named them) and unprotected from _prune (only manifest-referenced
+    elf_keys survive pruning). Root cause reproduced here: two DIFFERENT
+    ELF contents can legitimately share one fw_build identity string when a
+    rebuild doesn't touch the translation unit embedding __DATE__/__TIME__.
+    archive_kiln_elf() used to just overwrite manifest[identity], stranding
+    the older elf_key. It now records the older entry in a superseded
+    registry that both _prune and find_kiln_elf_for_build consult."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.archive_dir = os.path.join(self._tmp.name, "elf_archive")
+        self._orig = elf_archive.kiln_archive_dir
+        elf_archive.kiln_archive_dir = lambda: self.archive_dir
+
+    def tearDown(self):
+        elf_archive.kiln_archive_dir = self._orig
+        self._tmp.cleanup()
+
+    def test_superseded_elf_is_recorded_and_protected_from_pruning(self):
+        elf_a = os.path.join(self._tmp.name, "a.elf")
+        elf_b = os.path.join(self._tmp.name, "b.elf")
+        _write_fake_elf(elf_a, b"first build, same fw_build identity")
+        _write_fake_elf(elf_b, b"second build, DIFFERENT content, same fw_build identity")
+
+        same_identity = "Sep 8 2026 16:02:17"
+        result_a = elf_archive.archive_kiln_elf(elf_a, same_identity, "commitA", "test")
+        result_b = elf_archive.archive_kiln_elf(elf_b, same_identity, "commitB", "test")
+        self.assertNotEqual(result_a.elf_key, result_b.elf_key)
+
+        # The manifest's live entry for this identity must be the most
+        # recently archived one (result_b) -- matches existing "flash just
+        # verified" recency semantics.
+        path, message = elf_archive.find_kiln_elf_for_build(same_identity)
+        self.assertEqual(path, result_b.archived_path)
+        # ... and the message must disclose that an older build shares this
+        # identity, rather than silently hiding the ambiguity.
+        self.assertIn(result_a.elf_key, message)
+
+        superseded = elf_archive._load_superseded(self.archive_dir)
+        self.assertIn(same_identity, superseded)
+        self.assertEqual(superseded[same_identity][0]["elf_key"], result_a.elf_key)
+
+        # The superseded file must still be ON DISK (not deleted) and must
+        # still exist so it can be recovered/inspected by hand.
+        self.assertTrue(os.path.isfile(result_a.archived_path))
+
+    def test_negative_without_superseded_tracking_older_elf_is_unprotected(self):
+        """Proves the tracking above is load-bearing for pruning, not just
+        cosmetic: with archive_dir's superseded file deleted right before a
+        prune that must evict something, the previously-superseded elf_key
+        is no longer in the protected set and can be deleted -- reproducing
+        the exact "unreachable AND unprotected" incident this defect
+        describes."""
+        orig_max = elf_archive.MAX_ARCHIVED_ELFS
+        orig_keep = elf_archive.KEEP_RECENT_ENTRIES
+        elf_archive.MAX_ARCHIVED_ELFS = 2
+        elf_archive.KEEP_RECENT_ENTRIES = 1
+        try:
+            elf_a = os.path.join(self._tmp.name, "a.elf")
+            elf_b = os.path.join(self._tmp.name, "b.elf")
+            _write_fake_elf(elf_a, b"first build, same fw_build identity")
+            _write_fake_elf(elf_b, b"second build, DIFFERENT content, same fw_build identity")
+            same_identity = "Sep 8 2026 16:02:17"
+            result_a = elf_archive.archive_kiln_elf(elf_a, same_identity, "commitA", "test")
+            result_b = elf_archive.archive_kiln_elf(elf_b, same_identity, "commitB", "test")
+            self.assertTrue(os.path.isfile(result_a.archived_path),
+                             "with tracking live, superseded elf_key must survive pruning")
+
+            # Now simulate "without superseded tracking" by wiping the
+            # registry right before a third, differently-identified build
+            # is archived -- that archive call's own _prune (loading a
+            # freshly-empty superseded registry) must evict something to
+            # stay at the MAX_ARCHIVED_ELFS=2 cap, and with no tracking the
+            # older same-identity build (result_a) is not in anyone's
+            # protected set.
+            os.remove(os.path.join(self.archive_dir, elf_archive.SUPERSEDED_NAME))
+            elf_c = os.path.join(self._tmp.name, "c.elf")
+            _write_fake_elf(elf_c, b"third build, different identity entirely")
+            elf_archive.archive_kiln_elf(elf_c, "Sep 9 2026 00:00:00", "commitC", "test")
+
+            self.assertFalse(
+                os.path.isfile(result_a.archived_path),
+                "without superseded protection the older same-identity build gets pruned -- "
+                "reproducing the incident",
+            )
+        finally:
+            elf_archive.MAX_ARCHIVED_ELFS = orig_max
+            elf_archive.KEEP_RECENT_ENTRIES = orig_keep
 
 
 class PruneRetentionTest(unittest.TestCase):
@@ -295,20 +460,58 @@ class CanonicalArchiveWriteGuardTest(unittest.TestCase):
         self.assertNotIn(self.MARKER_IDENTITY, manifest)
 
     def test_negative_removing_the_guard_reproduces_the_incident(self):
-        """Proves the guard test above is not vacuous: with
-        _guard_against_test_write patched to a no-op (simulating the
-        pre-fix code, which had no such call at all), the same call that
-        was just refused instead SUCCEEDS and writes into the real
-        canonical archive -- reproducing the exact contamination this
-        module's docstring and CLAUDE.md describe. Cleaned up in tearDown."""
+        """Proves the guard is not vacuous -- WITHOUT touching the real
+        canonical archive at all.
+
+        2026-09-10 (opus review round 3, defect 3): the original version of
+        this test achieved its proof by actually calling archive_kiln_elf()
+        against the real kiln_archive_dir() (only _guard_against_test_write
+        patched out), writing a fabricated 'REGRESSION-TEST-MARKER-DO-NOT-
+        TRUST' manifest entry and a fake ELF into
+        firmware/KilnFW/build/elf_archive/ on every single pytest run,
+        cleaned up only in tearDown. Three concrete failure modes followed
+        from that: a killed process (429 rate-limit kills are routine in
+        this environment) leaves the contamination permanently; tearDown's
+        read-modify-write of the manifest races another agent's concurrent
+        pytest run in this shared tree; and the marker entry consumed one of
+        the KEEP_RECENT_ENTRIES prune-protection slots, nudging a real entry
+        closer to eviction. None of that was necessary: the guard's job is
+        to refuse a write to the two CANONICAL directories, and that can be
+        proven with archive_dir pointed at a monkeypatched tmp dir the whole
+        time -- the guard itself decides refuse/allow purely from whether
+        its archive_dir argument matches _canonical_archive_dirs(), so
+        patching _canonical_archive_dirs() to include the tmp dir exercises
+        the exact same branch with zero real-archive side effects.
+        """
         with tempfile.TemporaryDirectory() as d:
+            fake_canonical_dir = os.path.join(d, "fake_canonical_elf_archive")
             elf_path = os.path.join(d, "KilnCtrl.elf")
             _write_fake_elf(elf_path, b"regression-test-fake-elf-content-2")
-            with unittest.mock.patch.object(elf_archive, "_guard_against_test_write", return_value=None):
-                result = elf_archive.archive_kiln_elf(elf_path, self.MARKER_IDENTITY, "deadbeef", "test")
-        self.assertTrue(os.path.isfile(result.archived_path))
-        manifest = elf_archive._load_manifest(elf_archive.kiln_archive_dir())
-        self.assertIn(self.MARKER_IDENTITY, manifest)  # ... which is exactly the bug -- cleaned up in tearDown
+            with unittest.mock.patch.object(
+                elf_archive, "_canonical_archive_dirs",
+                return_value={os.path.normpath(fake_canonical_dir)},
+            ), unittest.mock.patch.object(
+                elf_archive, "kiln_archive_dir", return_value=fake_canonical_dir,
+            ):
+                # Sanity: with the guard live and archive_dir now "canonical"
+                # (per the patched _canonical_archive_dirs), the call must
+                # still be refused -- same as the real canonical dirs.
+                with self.assertRaises(RuntimeError):
+                    elf_archive.archive_kiln_elf(elf_path, self.MARKER_IDENTITY, "deadbeef", "test")
+                self.assertFalse(os.path.isdir(fake_canonical_dir),
+                                  "guard must refuse before touching disk at all")
+
+                # Now remove the guard (simulating the pre-fix code, which had
+                # no such call) and confirm the SAME call that was just
+                # refused instead succeeds -- proving the guard, not
+                # something else, was what stood in the way.
+                with unittest.mock.patch.object(elf_archive, "_guard_against_test_write", return_value=None):
+                    result = elf_archive.archive_kiln_elf(elf_path, self.MARKER_IDENTITY, "deadbeef", "test")
+                self.assertTrue(os.path.isfile(result.archived_path))
+                manifest = elf_archive._load_manifest(fake_canonical_dir)
+                self.assertIn(self.MARKER_IDENTITY, manifest)
+        # fake_canonical_dir lived under the TemporaryDirectory the whole
+        # time and is gone with it -- nothing to clean up in the real archive.
 
 
 if __name__ == "__main__":

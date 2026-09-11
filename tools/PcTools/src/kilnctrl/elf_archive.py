@@ -51,6 +51,33 @@ on an ongoing basis rather than needing a separate cron/cleanup step.
 `firmware/KilnFW/.gitignore` / `firmware/SaftyFW/.gitignore` already exclude
 the whole `build/` tree (elf_archive included), confirmed by
 `git check-ignore -v`; nothing here needs to touch .gitignore.
+
+2026-09-10, opus review round 3 (four confirmed defects on this exact
+symbolization path, fixed together):
+  1. Manifest keys are now migrated to normalized form on every read
+     (`_load_manifest`), not just normalized on write/lookup -- a
+     pre-existing entry stored under its raw (un-normalized) key used to
+     become permanently unreachable once only the write/lookup sides were
+     normalized. Reproduced live against the real manifest before the fix.
+  2. Verified HEAD imports cleanly (`77eed9f2` already restored
+     `esp_app_desc.normalize_build_timestamp` as an ancestor of HEAD; no
+     further change needed).
+  3. `test_elf_archive.py`'s guard-negative-test no longer writes into the
+     real canonical archive under any code path -- it proves the same
+     refuse/allow branch against a monkeypatched `_canonical_archive_dirs()`
+     result instead.
+  4. Genuinely different ELF contents can share one fw_build identity (a
+     rebuild that doesn't touch the translation unit embedding
+     __DATE__/__TIME__) -- confirmed live: 11 such collisions across 60
+     real archived ELFs against only 3 manifest entries, leaving 57 files
+     simultaneously unreachable and unprotected from `_prune`. `_archive()`
+     now records a superseded elf_key (see `SUPERSEDED_NAME`) instead of
+     letting it silently fall out of the manifest; `_prune` protects those
+     too, and `find_kiln_elf_for_build` discloses them in its success
+     message rather than hiding the ambiguity. The real archive's manifest/
+     superseded files were reconstructed once, by hand, from each orphaned
+     ELF's own embedded esp_app_desc build timestamp, so every pre-existing
+     on-disk ELF is now either reachable or deliberately protected.
 """
 
 from __future__ import annotations
@@ -69,6 +96,18 @@ from .esp_app_desc import normalize_build_timestamp
 MAX_ARCHIVED_ELFS = 60
 KEEP_RECENT_ENTRIES = 10
 MANIFEST_NAME = "manifest.json"
+# 2026-09-10 (opus review round 3, defect 4): when a new archive call reuses
+# an fw_build identity that the manifest already maps to a DIFFERENT elf_key
+# (a rebuild that didn't touch the translation unit embedding __DATE__/
+# __TIME__, so two genuinely different ELFs report the identical fw_build
+# string -- confirmed live: 11 such collisions across the 60 ELFs sitting in
+# firmware/KilnFW/build/elf_archive/ against only 3 manifest entries), the
+# manifest keeps mapping that identity to the most-recently-archived elf_key
+# (matches existing "last write wins" behavior) but the superseded elf_key is
+# recorded here instead of being silently dropped -- unreachable by lookup
+# AND unprotected from _prune is exactly the state that let 57 genuine ELFs
+# sit one write away from deletion.
+SUPERSEDED_NAME = "superseded.json"
 
 
 def _repo_root() -> str:
@@ -149,9 +188,32 @@ def _load_manifest(archive_dir: str) -> dict:
     path = os.path.join(archive_dir, MANIFEST_NAME)
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            raw = json.load(f)
     except (OSError, json.JSONDecodeError):
         return {}
+    if not isinstance(raw, dict):
+        return {}
+    # 2026-09-10 (opus review round 3, defect 1): migrate raw (un-normalized)
+    # keys transparently on every read. archive_kiln_elf()/find_kiln_elf_for_
+    # build() both now key/look up on normalize_build_timestamp(fw_build),
+    # but entries written before that fix -- or hand-repaired directly, like
+    # the "Sep  9 2026 14:18:51" (double-space) entry this module's own
+    # incident produced -- are still stored under their raw key on disk.
+    # Without this, normalizing only the lookup side (and not what's already
+    # on disk) makes every such pre-existing entry permanently unreachable:
+    # find_kiln_elf_for_build('Sep  9 2026 14:18:51') looked up the
+    # normalized 'Sep 9 2026 14:18:51' and missed the raw-keyed entry
+    # entirely, reproduced live before this fix. Idempotent for
+    # already-normalized keys, and harmless for SaftyFW identity keys
+    # (commit_date_time, no internal whitespace runs to collapse).
+    manifest: dict = {}
+    for key, entry in raw.items():
+        norm_key = normalize_build_timestamp(key)
+        prior = manifest.get(norm_key)
+        if prior is not None and prior.get("seq", 0) > entry.get("seq", 0):
+            continue  # keep whichever raw/normalized duplicate is more recent
+        manifest[norm_key] = entry
+    return manifest
 
 
 def _write_manifest(archive_dir: str, manifest: dict) -> None:
@@ -159,6 +221,29 @@ def _write_manifest(archive_dir: str, manifest: dict) -> None:
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def _load_superseded(archive_dir: str) -> dict:
+    """identity -> list of manifest-shaped entries whose elf_key was bumped
+    out of the live manifest slot for that identity by a later archive call
+    that reused the same fw_build string for different content (see
+    SUPERSEDED_NAME's module-level comment). Kept so _prune can still
+    protect those files and find_kiln_elf_for_build can disclose them."""
+    path = os.path.join(archive_dir, SUPERSEDED_NAME)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_superseded(archive_dir: str, superseded: dict) -> None:
+    path = os.path.join(archive_dir, SUPERSEDED_NAME)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(superseded, f, indent=2, sort_keys=True)
     os.replace(tmp, path)
 
 
@@ -185,6 +270,19 @@ def _archive(elf_path: str, archive_dir: str, prefix: str, identity: str,
     shutil.copyfile(elf_path, latest)
 
     manifest = _load_manifest(archive_dir)
+    # 2026-09-10 (opus review round 3, defect 4): if this identity is already
+    # mapped to a DIFFERENT elf_key, that older entry is about to be
+    # overwritten below. Preserve it in the superseded registry instead of
+    # letting it silently fall out of the manifest -- unreachable by lookup
+    # (the manifest no longer names it) and unprotected from _prune (only
+    # manifest-referenced elf_keys survive pruning) at the same time.
+    superseded = _load_superseded(archive_dir)
+    prior = manifest.get(identity)
+    if prior is not None and prior.get("elf_key") != elf_key:
+        bucket = superseded.setdefault(identity, [])
+        if not any(s.get("elf_key") == prior.get("elf_key") for s in bucket):
+            bucket.append(prior)
+            _write_superseded(archive_dir, superseded)
     # A monotonic sequence number, not just the wall-clock "archived_at"
     # string: several archives can land within the same second (bench
     # scripts, or this module's own tests), and archived_at's second
@@ -204,16 +302,19 @@ def _archive(elf_path: str, archive_dir: str, prefix: str, identity: str,
     manifest[identity] = entry
     _write_manifest(archive_dir, manifest)
 
-    _prune(archive_dir, prefix, manifest)
+    _prune(archive_dir, prefix, manifest, superseded)
     return ArchiveResult(elf_key=elf_key, archived_path=dest, identity=identity,
                           newly_archived=newly_archived)
 
 
-def _prune(archive_dir: str, prefix: str, manifest: dict) -> None:
+def _prune(archive_dir: str, prefix: str, manifest: dict, superseded: Optional[dict] = None) -> None:
     """Caps the archive at MAX_ARCHIVED_ELFS files, deleting oldest-by-mtime
-    first. Never deletes `<prefix>-latest.elf`, and never deletes a file whose
+    first. Never deletes `<prefix>-latest.elf`, never deletes a file whose
     elf_key is referenced by one of the KEEP_RECENT_ENTRIES most-recently-
-    archived manifest entries."""
+    archived manifest entries, and never deletes a file whose elf_key is
+    recorded in `superseded` (an older build that shares its fw_build
+    identity with a newer one, see SUPERSEDED_NAME) -- those are exactly the
+    files that used to be neither reachable nor protected."""
     try:
         entries = sorted(
             (name for name in os.listdir(archive_dir)
@@ -230,6 +331,11 @@ def _prune(archive_dir: str, prefix: str, manifest: dict) -> None:
         key = entry.get("elf_key")
         if key:
             protected_keys.add(f"{prefix}-{key}.elf")
+    for bucket in (superseded or {}).values():
+        for entry in bucket:
+            key = entry.get("elf_key")
+            if key:
+                protected_keys.add(f"{prefix}-{key}.elf")
 
     full_paths = [os.path.join(archive_dir, name) for name in entries]
     full_paths.sort(key=lambda p: os.path.getmtime(p))  # oldest first
@@ -297,13 +403,17 @@ def find_kiln_elf_for_build(fw_build: str) -> tuple[Optional[str], str]:
     # padding differed textually from what was recorded, even though it was
     # the same build (build_timestamps_match() already tolerated exactly
     # this difference; the archive's own key/lookup did not).
-    entry = manifest.get(normalize_build_timestamp(fw_build))
+    norm_build = normalize_build_timestamp(fw_build)
+    entry = manifest.get(norm_build)
+    superseded = _load_superseded(archive_dir).get(norm_build, [])
     if entry is None:
         return None, (
             f"no archived ELF found for fw_build={fw_build!r} "
             f"({len(manifest)} entries in {archive_dir}/{MANIFEST_NAME}) -- "
             "this build was never flashed via flash_firmware() since this "
-            "mechanism was added, or the manifest entry was pruned"
+            "mechanism was added, the manifest entry was pruned, or (check "
+            f"{archive_dir}/{SUPERSEDED_NAME}) it was superseded by a later "
+            "archive call that reused the same fw_build identity"
         )
     path = os.path.join(archive_dir, f"KilnCtrl-{entry['elf_key']}.elf")
     if not os.path.isfile(path):
@@ -311,7 +421,18 @@ def find_kiln_elf_for_build(fw_build: str) -> tuple[Optional[str], str]:
             f"manifest has an entry for fw_build={fw_build!r} (elf_key={entry['elf_key']}) "
             f"but the file is missing on disk at {path} -- do not guess a substitute"
         )
-    return path, f"found {path} (archived {entry.get('archived_at')}, commit {entry.get('git_commit')})"
+    message = f"found {path} (archived {entry.get('archived_at')}, commit {entry.get('git_commit')})"
+    if superseded:
+        other_keys = ", ".join(s.get("elf_key", "?") for s in superseded)
+        message += (
+            f" -- NOTE: {len(superseded)} other build(s) share this exact fw_build "
+            f"identity but were superseded (elf_key(s): {other_keys} in "
+            f"{archive_dir}/{SUPERSEDED_NAME}); this happens when a rebuild doesn't "
+            "touch the translation unit embedding __DATE__/__TIME__, so fw_build "
+            "alone does not uniquely identify content -- if this ELF doesn't match "
+            "the panic under investigation, inspect the superseded ones directly"
+        )
+    return path, message
 
 
 def find_safty_elf_for_identity(commit: str, build_date: Optional[str] = None,
