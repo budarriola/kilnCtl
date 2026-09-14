@@ -16,7 +16,10 @@
 #include "nvs_report.h"
 #include "profiles_builtin.h"
 #include "profiles_http.h"
+#include "config_divergence.h"
+#include "readiness_gate.h"
 #include "safety_cfg_store.h"
+#include "safety_ceiling_sync.h"
 #include "web_encoding.h"
 #include "wifi_prov.h"
 #include "wifi_provision_http.h"
@@ -653,6 +656,48 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         }
         size_t before_o = o;
         o = append_item(json, item_cap, o, first, "safety_commissioned", "Safety processor commissioned", st,
+                        detail, "/safety/commissioning", &dropped);
+        if (o != before_o) {
+            first = false;
+        }
+    }
+
+    /* 10a2. Safety ceiling matches the ESP's. 2026-09-14 owner decision:
+     * "the Pico ceiling must ALWAYS equal the ESP's, there should never be
+     * a way that the pico is not armed" -- supersedes the older "never
+     * TIGHTER than the ESP" invariant (safety_ceiling_policy.h). The write
+     * path (safety_ceiling_sync_reconcile_on_link_up(), run every
+     * safety_poll_task tick) already keeps the two converged in the
+     * ordinary case; this item is the fail-safe backstop for every case it
+     * cannot cover synchronously -- a lowering reconcile that could not
+     * confirm (deliberately best-effort, non-blocking at the write layer),
+     * a Pico that has not been fetched yet this boot, or any other reason
+     * the two have drifted apart in EITHER direction. Divergence is
+     * reported here, not silently logged, and blocks a firing start the
+     * same way "Safety processor commissioned" already does. */
+    {
+        bool io_ready = false, thermo_ready = false, safety_ready = false;
+        dashboard_http_get_hw_ready(&io_ready, &thermo_ready, &safety_ready);
+
+        char divergence_reason[CONFIG_DIVERGENCE_REASON_MAX];
+        bool diverged = safety_ceiling_sync_is_diverged(divergence_reason, sizeof(divergence_reason));
+        readiness_status_t st = readiness_ceiling_match_status(safety_ready, diverged);
+        char detail[READINESS_DETAIL_MAX];
+        if (!diverged) {
+            snprintf(detail, sizeof(detail), "%s", "the safety processor's ceiling matches the ESP's zone config");
+        } else if (!safety_ready) {
+            snprintf(detail, sizeof(detail), "%s",
+                     "safety link is down -- cannot confirm the safety processor's ceiling");
+        } else {
+            /* Explicit width bound on the %s so the compiler can prove this
+             * fits `detail` -- divergence_reason is itself sized to
+             * CONFIG_DIVERGENCE_REASON_MAX (160), which combined with the
+             * fixed suffix below can exceed READINESS_DETAIL_MAX (192) and
+             * trips -Werror=format-truncation without the bound. */
+            snprintf(detail, sizeof(detail), "%.130s (MISMATCH, heaters disabled)", divergence_reason);
+        }
+        size_t before_o = o;
+        o = append_item(json, item_cap, o, first, "safety_ceiling_match", "Safety ceiling matches the ESP's", st,
                         detail, "/safety/commissioning", &dropped);
         if (o != before_o) {
             first = false;

@@ -341,6 +341,13 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # rule both implement.
                        "safety/safety_ceiling_policy.c"
                        "safety/safety_ceiling_sync.c"
+                       # 2026-09-14 owner decision ("if a config doesn't land
+                       # and match on both sides then alarm and dissable
+                       # heaters"): the reusable format-version+hash config
+                       # identity comparator safety_ceiling_sync.c's
+                       # enforcement calls, also intended for the planned
+                       # multi-kiln config-swap feature to build on.
+                       "safety/config_divergence.c"
                        "http/safety_cfg_http.c"
                        # GET /api/saftyfw_stack_margin -- surfaces
                        # safety_link_get_stack_margin() (SaftyFW's nine live

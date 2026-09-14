@@ -38,6 +38,7 @@
 #include "crash_report.h"
 #include "dashboard_http.h"
 #include "estop_verification.h"
+#include "safety_ceiling_sync.h"
 
 void readiness_gate_collect(readiness_gate_facts_t *out)
 {
@@ -60,4 +61,9 @@ void readiness_gate_collect(readiness_gate_facts_t *out)
     out->crash_acknowledged = out->crash_have_record && (rec.acknowledged != 0u);
 
     out->estop_verified = estop_verification_is_verified();
+
+    /* The SAME live verdict safety_ceiling_sync.c's enforcement is already
+     * acting on -- never recomputed here from raw values a second way (see
+     * readiness_ceiling_match_status()'s own doc comment on why). */
+    out->ceiling_diverged = safety_ceiling_sync_is_diverged(NULL, 0);
 }

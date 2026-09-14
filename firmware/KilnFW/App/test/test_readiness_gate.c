@@ -85,6 +85,9 @@ static void set_fully_ready(void)
     s_fake_facts.crash_have_record = false;
     s_fake_facts.crash_acknowledged = false;
     s_fake_facts.estop_verified = true;
+    /* 2026-09-14: the ceiling-match item, promoted into this gate the same
+     * way estop_verified was. Not diverged -- the two sides agree. */
+    s_fake_facts.ceiling_diverged = false;
 }
 
 /* ---- 2. the allowed case ------------------------------------------------- */
@@ -158,6 +161,26 @@ static void test_estop_unverified_alone_refuses(void)
     s_fake_facts.estop_verified = false;
     check_one_blocking_item("an unverified E-stop interlock refuses the start",
                             READINESS_GATE_BLOCK_ESTOP_VERIFIED, "E-STOP INTERLOCK");
+}
+
+static void test_ceiling_divergence_alone_refuses(void)
+{
+    /* 2026-09-14 owner decision, verbatim: "if a config doesn't land and
+     * match on both sides then alarm and dissable heaters" -- this gate's
+     * own item is the display/start-blocking half of that; the ACTIVE
+     * heaters-off half lives in safety_ceiling_sync.c's enforcement, driven
+     * by the exact same safety_ceiling_sync_is_diverged() verdict this
+     * fact is a stand-in for (config_divergence.h's format-version+hash
+     * identity check covers a numeric mismatch, an unconfirmed/"unarmed"
+     * Pico, and a hash/version mismatch all under this one boolean --
+     * config_divergence.h's own host tests cover those cases at the
+     * comparator level; this gate only needs to prove it reacts to the
+     * boolean correctly). */
+    TEST_SECTION("a safety config divergence alone refuses a start (the NEW 2026-09-14 enforcement)");
+    set_fully_ready();
+    s_fake_facts.ceiling_diverged = true;
+    check_one_blocking_item("a ceiling divergence refuses the start", READINESS_GATE_BLOCK_CEILING_MISMATCH,
+                            "ceiling");
 }
 
 /* ---- the cases that must NOT block --------------------------------------- */
@@ -238,16 +261,19 @@ static readiness_gate_block_t first_not_done_item(const readiness_gate_facts_t *
     if (readiness_estop_verification_status(f->estop_verified) == READY_NOT_DONE) {
         return READINESS_GATE_BLOCK_ESTOP_VERIFIED;
     }
+    if (readiness_ceiling_match_status(f->safety_link_up, f->ceiling_diverged) == READY_NOT_DONE) {
+        return READINESS_GATE_BLOCK_CEILING_MISMATCH;
+    }
     return READINESS_GATE_OK;
 }
 
 static void test_gate_and_display_agree_over_the_cross_product(void)
 {
-    TEST_SECTION("gate blocks item X <=> item X's DISPLAYED status is NOT_DONE (all 64 combinations)");
+    TEST_SECTION("gate blocks item X <=> item X's DISPLAYED status is NOT_DONE (all 128 combinations)");
     int mismatches = 0;
     int blocked = 0;
     int allowed = 0;
-    for (unsigned bits = 0; bits < 64u; bits++) {
+    for (unsigned bits = 0; bits < 128u; bits++) {
         readiness_gate_facts_t f;
         memset(&f, 0, sizeof(f));
         f.recovery_mode = (bits & 1u) != 0u;
@@ -256,6 +282,7 @@ static void test_gate_and_display_agree_over_the_cross_product(void)
         f.crash_have_record = (bits & 8u) != 0u;
         f.crash_acknowledged = (bits & 16u) != 0u;
         f.estop_verified = (bits & 32u) != 0u;
+        f.ceiling_diverged = (bits & 64u) != 0u;
 
         readiness_gate_block_t expect = first_not_done_item(&f);
         readiness_gate_block_t got = readiness_gate_evaluate(&f, NULL, 0);
@@ -285,6 +312,7 @@ static void test_gate_keys_match_the_api_item_keys(void)
     TEST_CHECK(strcmp(READINESS_GATE_KEY_SAFETY_TRIP, "safety_trip") == 0, "safety_trip key");
     TEST_CHECK(strcmp(READINESS_GATE_KEY_CRASH_REPORT, "crash_report") == 0, "crash_report key");
     TEST_CHECK(strcmp(READINESS_GATE_KEY_ESTOP, "estop_verified") == 0, "estop_verified key");
+    TEST_CHECK(strcmp(READINESS_GATE_KEY_CEILING_MATCH, "safety_ceiling_match") == 0, "safety_ceiling_match key");
 }
 
 /* dashboard_exec_http.c embeds these messages verbatim into a JSON body,
@@ -304,6 +332,7 @@ static void test_messages_are_json_safe(void)
         READINESS_GATE_BLOCK_SAFETY_TRIP,
         READINESS_GATE_BLOCK_CRASH_REPORT,
         READINESS_GATE_BLOCK_ESTOP_VERIFIED,
+        READINESS_GATE_BLOCK_CEILING_MISMATCH,
     };
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
         set_fully_ready();
@@ -311,6 +340,7 @@ static void test_messages_are_json_safe(void)
         case READINESS_GATE_BLOCK_RECOVERY_MODE: s_fake_facts.recovery_mode = true; break;
         case READINESS_GATE_BLOCK_SAFETY_TRIP: s_fake_facts.safety_trip_mask = 0x0040u; break;
         case READINESS_GATE_BLOCK_CRASH_REPORT: s_fake_facts.crash_have_record = true; break;
+        case READINESS_GATE_BLOCK_CEILING_MISMATCH: s_fake_facts.ceiling_diverged = true; break;
         default: s_fake_facts.estop_verified = false; break;
         }
         char msg[192];
@@ -336,6 +366,7 @@ int main(void)
     test_safety_trip_alone_refuses();
     test_crash_report_alone_refuses();
     test_estop_unverified_alone_refuses();
+    test_ceiling_divergence_alone_refuses();
     test_acknowledged_crash_does_not_block();
     test_link_down_is_not_this_gates_refusal();
     test_null_facts_are_not_a_green_light();

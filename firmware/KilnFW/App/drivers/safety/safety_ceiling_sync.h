@@ -97,6 +97,40 @@ bool safety_ceiling_sync_get_current_pico_ceiling(float *out_value);
  * (no fabricated ceiling from a zeroed default config). */
 void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link);
 
+/* 2026-09-14 owner decision, verbatim: "if a config doesn't land and match
+ * on both sides then alarm and dissable heaters." Every reconcile tick
+ * above already compares the ESP's target ceiling against the Pico's
+ * confirmed one (config_divergence.h's reusable comparator); on a
+ * divergence it must ACTIVELY disable heat, not merely log or block a
+ * future start.
+ *
+ * This file deliberately does NOT #include kiln_io_owner.h/profile_
+ * executor.h to reach kiln_io_owner_command_all_relays_off()/profile_
+ * executor_halt() directly: this .c is compiled into more than one host
+ * test executable (test_zones_http.c and others, see build_host_tests.ps1)
+ * alongside DIFFERENT fake ecosystems for those subsystems, and a hard
+ * dependency here would force every one of them to grow matching fakes for
+ * a whole owner-command/profile-executor surface this file does not
+ * otherwise need. Instead, the real ESP-side bring-up (main_control_
+ * bringup.c, after kiln_io_owner_start()) installs the two real actions
+ * once via this setter; a host test that wants to observe the enforcement
+ * installs its own tiny counters instead (test_safety_ceiling_sync_
+ * divergence.c). Defaults to NULL/no-op -- a build that never calls this
+ * setter (every existing host test) sees divergence detected and logged
+ * but takes no destructive action, which is the correct, safe default for
+ * a test binary that has no real relays to turn off. */
+typedef void (*safety_ceiling_disable_heat_fn)(void);
+void safety_ceiling_sync_set_disable_heat_hooks(safety_ceiling_disable_heat_fn all_relays_off,
+                                                 safety_ceiling_disable_heat_fn halt_run);
+
+/* True iff the most recent enforcement check found (and is still reporting)
+ * a divergence -- i.e. heat is currently being actively held disabled by
+ * this mechanism. `reason_out` (may be NULL) receives the same operator-
+ * facing message the ERROR log carries. Exposed so readiness_http.c/
+ * readiness_gate.c can surface the SAME live verdict this file is already
+ * acting on, rather than recomputing it from scratch a second way. */
+bool safety_ceiling_sync_is_diverged(char *reason_out, size_t reason_cap);
+
 #ifdef __cplusplus
 }
 #endif

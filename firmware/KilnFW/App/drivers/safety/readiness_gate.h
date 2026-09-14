@@ -78,9 +78,17 @@ typedef enum {
     READINESS_GATE_BLOCK_SAFETY_TRIP,
     READINESS_GATE_BLOCK_CRASH_REPORT,
     READINESS_GATE_BLOCK_ESTOP_VERIFIED,
+    /* 2026-09-14 owner decision: "the Pico ceiling must ALWAYS equal the
+     * ESP's ... divergence is a fault, not a quiet mismatch" -- promoted
+     * from advisory (readiness_http.c's "safety_ceiling_match" item) into
+     * this gate's blocking set, the same way estop_verified was promoted
+     * on 2026-09-09. Ordered last: the operator can only act on it once the
+     * safety link is actually up (the other four conditions are either
+     * link-independent or already surface a down link first). */
+    READINESS_GATE_BLOCK_CEILING_MISMATCH,
 } readiness_gate_block_t;
 
-/* The `key` strings /api/readiness uses for these same four items. The
+/* The `key` strings /api/readiness uses for these same items. The
  * agreement check greps readiness_http.c's append_item() calls for exactly
  * these, so an item renamed on one side and not the other fails the repo
  * checks rather than silently un-gating a firing. */
@@ -88,6 +96,7 @@ typedef enum {
 #define READINESS_GATE_KEY_SAFETY_TRIP   "safety_trip"
 #define READINESS_GATE_KEY_CRASH_REPORT  "crash_report"
 #define READINESS_GATE_KEY_ESTOP         "estop_verified"
+#define READINESS_GATE_KEY_CEILING_MATCH "safety_ceiling_match"
 
 /* The /api/readiness item key a refusal corresponds to, or NULL for
  * READINESS_GATE_OK. Exists so a refusal can hand the operator's browser the
@@ -103,6 +112,7 @@ static inline const char *readiness_gate_item_key(readiness_gate_block_t which)
     case READINESS_GATE_BLOCK_SAFETY_TRIP:   return READINESS_GATE_KEY_SAFETY_TRIP;
     case READINESS_GATE_BLOCK_CRASH_REPORT:  return READINESS_GATE_KEY_CRASH_REPORT;
     case READINESS_GATE_BLOCK_ESTOP_VERIFIED: return READINESS_GATE_KEY_ESTOP;
+    case READINESS_GATE_BLOCK_CEILING_MISMATCH: return READINESS_GATE_KEY_CEILING_MATCH;
     case READINESS_GATE_OK:
     default:
         return NULL;
@@ -121,6 +131,7 @@ typedef struct {
     bool     crash_have_record;  /* crash_report_get() returned true */
     bool     crash_acknowledged; /* that record's acknowledged flag */
     bool     estop_verified;     /* estop_verification_is_verified() */
+    bool     ceiling_diverged;  /* safety_ceiling_sync_is_diverged() -- the SAME verdict the enforcement acts on */
 } readiness_gate_facts_t;
 
 /* Reads the six facts above off the live board. Target-only
@@ -178,6 +189,10 @@ static inline readiness_gate_block_t readiness_gate_evaluate(const readiness_gat
         which = READINESS_GATE_BLOCK_ESTOP_VERIFIED;
         text = "refused -- the E-STOP INTERLOCK has not been verified on this board. Run the bench "
                "procedure, then confirm it on the Readiness page.";
+    } else if (readiness_ceiling_match_status(f->safety_link_up, f->ceiling_diverged) == READY_NOT_DONE) {
+        which = READINESS_GATE_BLOCK_CEILING_MISMATCH;
+        text = "refused -- the safety processor's ceiling does not match the ESP's zone config. Check "
+               "the Safety page (a raise may need the safety processor to be de-energized first).";
     }
 
     if (which != READINESS_GATE_OK && msg != NULL && cap > 0 && text != NULL) {

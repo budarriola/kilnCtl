@@ -19,10 +19,32 @@ extern "C" {
  * limit -- fail-safe, but a trap for an operator who did the sensible
  * thing in the UI and only found out at the kiln.
  *
- * STANDING INVARIANT, never to be violated: the Pico's ceiling must never
- * be TIGHTER than the highest ESP zone ceiling. It is the second set of
- * eyes -- a previous proposal to make it tighter was an explicit owner
- * rejection (see feedback_abs_max_same_or_looser.md). That invariant
+ * SUPERSEDED 2026-09-14 -- read this before trusting the rest of this
+ * comment block. The standing invariant below ("never TIGHTER") was the
+ * rule THIS FILE'S WRITE-ORDERING LOGIC implements and still correctly
+ * implements; it is not wrong about ordering. What changed is the
+ * DEFINITION OF COMPLIANT REST STATE: the owner's 2026-09-14 decision is
+ * "the Pico ceiling must ALWAYS equal the ESP's ... there should never be
+ * a way that the pico is not armed", which is strictly narrower than "never
+ * tighter" -- a Pico left WIDER than the ESP's target after a lowering
+ * reconcile fails to confirm (safety_ceiling_policy_apply_lower() below is
+ * deliberately best-effort/non-blocking, by design, and that design is
+ * UNCHANGED by this note) used to be reported as a fully compliant resting
+ * state; it no longer is. Detecting and failing safe on that persistent gap
+ * is NOT done in this file (this file stays pure decision logic with no
+ * new I/O) -- it is done by promoting a new advisory readiness item into
+ * the firing interlock: readiness_http.h's readiness_ceiling_match_status()
+ * (item key "safety_ceiling_match") is now one of readiness_gate.h's
+ * blocking items, exactly like estop_verified was promoted on 2026-09-09.
+ * See docs/audits/pico_ceiling_mirror_and_rate_guard_2026-09-14.md for the
+ * full design and docs/audits/safety_ceiling_sync_2026-09-10.md for the
+ * superseded rule's original rationale (still correct for the write-order
+ * question, wrong only about what counts as "done").
+ *
+ * ORIGINAL STANDING INVARIANT, never to be violated: the Pico's ceiling
+ * must never be TIGHTER than the highest ESP zone ceiling. It is the second
+ * set of eyes -- a previous proposal to make it tighter was an explicit
+ * owner rejection (see feedback_abs_max_same_or_looser.md). That invariant
  * dictates the ORDER of operations for any change that keeps it true:
  *
  *   RAISING (new zone max > current Pico ceiling): the Pico MUST be
@@ -89,6 +111,21 @@ extern "C" {
  * reference it, delete it in a later pass instead of leaving dead
  * ballast. */
 #define SAFETY_CEILING_HEADROOM_C 5.0f
+
+/* Small epsilon for float compares -- these values arrive via a %.9g wire
+ * round trip (safety_cfg_http.c's existing convention for every f32 param),
+ * so an exact `==` between "what we computed" and "what came back" is
+ * appropriate at the confirm layer (param_value_equal() there does a bit-
+ * for-bit memcmp on purpose) but NOT appropriate here, where we are
+ * comparing a value we just computed against one that arrived from a
+ * completely separate computation (or a live fetch) that may carry
+ * ordinary float rounding noise. 0.01 C is far below anything a real
+ * thermocouple channel or this UI resolves. Public (moved from
+ * safety_ceiling_policy.c 2026-09-14) so every caller that needs to decide
+ * "does the Pico's ceiling match the ESP's" -- safety_ceiling_sync.c's
+ * divergence enforcement, readiness_http.h's readiness_ceiling_match_status()
+ * -- uses this SAME number rather than each defining its own and drifting. */
+#define SAFETY_CEILING_EPSILON_C 0.01f
 
 /* Computes the Pico ceiling TARGET this policy wants for a given set of
  * zone `max_temp_c` values (`n` entries, one per configured zone).

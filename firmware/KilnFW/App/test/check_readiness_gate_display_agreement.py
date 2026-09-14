@@ -54,6 +54,11 @@ PAIRS = {
     "safety_trip": "readiness_safety_trip_status",
     "crash_report": "readiness_crash_report_status",
     "estop_verified": "readiness_estop_verification_status",
+    # 2026-09-14 owner decision: "the Pico ceiling must ALWAYS equal the
+    # ESP's ... there should never be a way that the pico is not armed" --
+    # divergence is a fault, not advisory, promoted into the gate the same
+    # way estop_verified was on 2026-09-09.
+    "safety_ceiling_match": "readiness_ceiling_match_status",
 }
 
 REPO_TEST_DIR = Path(__file__).resolve().parent

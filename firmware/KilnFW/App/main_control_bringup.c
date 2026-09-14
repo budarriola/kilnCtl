@@ -22,10 +22,30 @@
 #include "profile_executor.h"
 #include "autotune_engine.h"
 #include "relay_cycles.h"
+#include "safety_ceiling_sync.h"
 #include "safety_link.h"
 #include "uart_bridge.h"
 
 #include "main_internal.h"
+
+/* safety_ceiling_sync_set_disable_heat_hooks() wants a void(void) action --
+ * kiln_io_owner_command_all_relays_off() returns esp_err_t, so this adapts
+ * it rather than widening the hook type for one caller's return value,
+ * which nothing downstream of the enforcement call site would ever look at
+ * anyway (it is an unconditional "make it so", not a query). */
+static void main_control_bringup_all_relays_off_void(void)
+{
+    esp_err_t err = kiln_io_owner_command_all_relays_off();
+    if (err != ESP_OK) {
+        /* Deliberately does not repeat the callee's name in this string --
+         * tools/check_safety_call_results_checked.ps1 text-scans every LINE
+         * containing that literal function name for a captured return
+         * value, and a log line merely mentioning it in prose would
+         * otherwise be misread as a second, uncaptured call site. */
+        ESP_LOGE(MAIN_TAG, "config-divergence enforcement: forcing all relays off failed: %s",
+                 esp_err_to_name(err));
+    }
+}
 
 void main_control_bringup(main_boot_ctx_t *ctx)
 {
@@ -208,6 +228,20 @@ void main_control_bringup(main_boot_ctx_t *ctx)
     } else {
         ESP_LOGW(MAIN_TAG, "RECOVERY MODE: profile_executor_start() skipped -- no profile execution this boot");
     }
+
+    // 2026-09-14 owner decision ("if a config doesn't land and match on both
+    // sides then alarm and dissable heaters"): installs the two real
+    // heaters-off actions safety_ceiling_sync.c's divergence enforcement
+    // calls on every safety_poll_task tick that finds a mismatch. Installed
+    // here (not inside safety_ceiling_sync.c itself) so that file stays free
+    // of a kiln_io_owner.h/profile_executor.h dependency -- see safety_
+    // ceiling_sync.h's own doc comment on safety_ceiling_sync_set_disable_
+    // heat_hooks() for why. Installed unconditionally, including in RECOVERY
+    // MODE (profile_executor_halt() already tolerates being called before/
+    // without profile_executor_start(), see that function's own guard) --
+    // relays must still be forceable off even when no profile execution is
+    // running this boot.
+    safety_ceiling_sync_set_disable_heat_hooks(main_control_bringup_all_relays_off_void, profile_executor_halt);
 
     // ROADMAP.md M5 / LINK_PROTOCOL.md sec 4: gives the safety link's poll
     // task the two hardware pointers it needs to build SAFETY_CMD_PUSH_CONTEXT

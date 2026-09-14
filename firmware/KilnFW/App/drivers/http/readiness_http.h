@@ -217,6 +217,35 @@ static inline readiness_status_t readiness_guard_max_temp_status(uint8_t thermo_
     return (set_count == thermo_count) ? READY_OK : READY_DELIBERATELY_OFF;
 }
 
+/* 2026-09-14 owner decision: "the Pico ceiling must ALWAYS equal the ESP's,
+ * there should never be a way that the pico is not armed" and "if a config
+ * doesn't land and match on both sides then alarm and dissable heaters."
+ * Supersedes the older "Pico must never be TIGHTER than the ESP" standing
+ * invariant (safety_ceiling_policy.h, docs/audits/safety_ceiling_sync_
+ * 2026-09-10.md): equality (format version + hash match, config_
+ * divergence.h) is now the required state, not merely "wide enough".
+ *
+ * `diverged` is safety_ceiling_sync_is_diverged()'s own live verdict --
+ * deliberately NOT recomputed here from raw float values a second, parallel
+ * way (that would be exactly the "reset one side of a pair" class CLAUDE.md
+ * warns about: two independent implementations of "do they match" that can
+ * silently drift apart). The ENFORCEMENT (heaters actively disabled) and
+ * this DISPLAY read the exact same boolean, computed once, in one place.
+ * Already folds in every sub-case: no zone configured yet (not diverged,
+ * nothing to compare), the Pico never having confirmed a value (diverged --
+ * "an unarmed Pico is a divergence by definition"), and an outright hash
+ * mismatch. Link-down is reported CANNOT_YET rather than NOT_DONE (same
+ * "cannot tell uncommissioned from unread" reasoning readiness_
+ * commissioning_status() already uses) precisely because a bench operator
+ * cannot fix a dead link by taking a commissioning action. */
+static inline readiness_status_t readiness_ceiling_match_status(bool link_up, bool diverged)
+{
+    if (!diverged) {
+        return READY_OK;
+    }
+    return link_up ? READY_NOT_DONE : READY_CANNOT_YET;
+}
+
 /* Pure decision for the "Safety processor trip status" item (2026-09-08 live
  * dry run, docs/audits/setup_wizard_live_dryrun_2026-09-08.md): the old
  * "Hardware present and answering" item (dashboard_http_get_hw_ready()) only

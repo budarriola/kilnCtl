@@ -2,16 +2,10 @@
 
 #include <stdio.h>
 
-/* Small epsilon for float compares -- these values arrive via a %.9g wire
- * round trip (safety_cfg_http.c's existing convention for every f32 param),
- * so an exact `==` between "what we computed" and "what came back" is
- * appropriate at the confirm layer (param_value_equal() there does a bit-
- * for-bit memcmp on purpose) but NOT appropriate here, where we are
- * comparing a value we just computed against one that arrived from a
- * completely separate computation (or a live fetch) that may carry
- * ordinary float rounding noise. 0.01 C is far below anything a real
- * thermocouple channel or this UI resolves. */
-#define SAFETY_CEILING_EPSILON_C 0.01f
+/* SAFETY_CEILING_EPSILON_C is declared in safety_ceiling_policy.h (moved
+ * there 2026-09-14 so safety_ceiling_sync.c's divergence check can reuse
+ * the exact same tolerance rather than defining its own -- "matches" must
+ * mean the same thing in both places). */
 
 float safety_ceiling_policy_target_c(const float *max_temp_c, size_t n)
 {

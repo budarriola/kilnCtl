@@ -1,10 +1,12 @@
 #include "safety_ceiling_sync.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_log.h"
 
 #include "MAX31856.h"
+#include "config_divergence.h"
 #include "hal_time.h" /* hal_time_now_us() -- HAL_INCLUDE_BOUNDARY: this file must not include esp_timer.h directly */
 #include "safety_cfg_http.h"
 #include "safety_cfg_store.h"
@@ -29,6 +31,39 @@ static safety_ceiling_reconcile_backoff_t s_reconcile_backoff = { 0 };
 #define SAFETY_CEILING_SYNC_LOG_INTERVAL_US ((int64_t)30 * 1000 * 1000)
 static int64_t s_last_log_us = -SAFETY_CEILING_SYNC_LOG_INTERVAL_US; /* so the very first failure logs immediately */
 static uint32_t s_suppressed_log_count = 0;
+
+/* 2026-09-14 owner decision, verbatim: "if a config doesn't land and match
+ * on both sides then alarm and dissable heaters." Separate log cadence from
+ * the reconcile WARN above -- this is a distinct, louder condition (ERROR,
+ * not WARN) and must not be suppressed just because the reconcile's own log
+ * happens to be in its quiet window. Still rate-limited (same discipline as
+ * every other repeating log in this file) so a persistent divergence does
+ * not spam the log at ~2 Hz forever -- the ACTIVE enforcement below (all
+ * relays off, halt any run) happens on EVERY tick regardless of this log's
+ * cadence, since a skipped log line is merely a missed notification but a
+ * skipped enforcement call would be a real safety gap. */
+#define CONFIG_DIVERGENCE_LOG_INTERVAL_US ((int64_t)30 * 1000 * 1000)
+static int64_t s_divergence_last_log_us = -CONFIG_DIVERGENCE_LOG_INTERVAL_US;
+static bool s_divergence_active = false;
+static char s_divergence_reason[CONFIG_DIVERGENCE_REASON_MAX] = { 0 };
+
+static safety_ceiling_disable_heat_fn s_disable_all_relays_off = NULL;
+static safety_ceiling_disable_heat_fn s_disable_halt_run = NULL;
+
+void safety_ceiling_sync_set_disable_heat_hooks(safety_ceiling_disable_heat_fn all_relays_off,
+                                                 safety_ceiling_disable_heat_fn halt_run)
+{
+    s_disable_all_relays_off = all_relays_off;
+    s_disable_halt_run = halt_run;
+}
+
+bool safety_ceiling_sync_is_diverged(char *reason_out, size_t reason_cap)
+{
+    if (reason_out && reason_cap > 0) {
+        snprintf(reason_out, reason_cap, "%s", s_divergence_reason);
+    }
+    return s_divergence_active;
+}
 
 /* The writer callback safety_ceiling_policy.c calls. `ctx` is the
  * SafetyLinkClass* to write through (may be NULL -- handled below, callers
@@ -104,6 +139,94 @@ void safety_ceiling_sync_apply_lower(SafetyLinkClass *link, const float *new_max
                                        reason_out, reason_cap);
 }
 
+/* 2026-09-14 owner decision. Reads the SAME target/current-ceiling facts the
+ * reconcile above just computed (never re-derived independently -- exactly
+ * the "one owning function" discipline CLAUDE.md's "reset one side of a
+ * pair" note asks for) and runs them through config_divergence_check(), the
+ * reusable comparator. On divergence: logs ERROR (rate-limited, see above)
+ * and ACTIVELY disables heat -- kiln_io_owner_command_all_relays_off() (the
+ * one sanctioned "relays off now" entry point; see CLAUDE.md's "Bypassed
+ * owner module" note on why this must never be a direct relay write) and
+ * profile_executor_halt() (so a RUNNING firing does not immediately try to
+ * re-energize on its own next tick -- an all-relays-off with the executor
+ * still RUNNING is exactly the "reset one side, not the other" shape this
+ * function exists to avoid). Both calls are safe to make when nothing is
+ * running or already off -- see their own doc comments.
+ *
+ * There is no separate "clear the alarm" action: this function is called
+ * every tick and simply stops calling the disable path (and stops logging)
+ * the moment config_divergence_check() reports no divergence -- which can
+ * only happen once a live read-back confirms both sides agree, since
+ * `target_c`/`pico_c` here are exactly what the readiness page and the
+ * reconcile above just fetched/computed. There is nothing for an operator
+ * to dismiss; the condition cannot be masked, only actually fixed. */
+static void enforce_ceiling_divergence(float target_c, bool target_known, float pico_c, bool pico_known)
+{
+    if (!target_known) {
+        /* No zone has a positive max_temp_c -- the ESP itself has no
+         * ceiling opinion yet (a fresh/all-zero config). There is nothing
+         * to compare (same "do not invent a target" rule safety_ceiling_
+         * policy_target_c() already follows), so this is NOT a divergence
+         * -- a never-configured board must not alarm and disable heat on
+         * every tick before anyone has ever set a zone ceiling. Precision
+         * matters here: a check that fires on a benign, common state is
+         * exactly the "nuisance check gets switched off" the owner warned
+         * against. */
+        s_divergence_active = false;
+        s_divergence_reason[0] = '\0';
+        return;
+    }
+    /* ONE-FIELD identity set today (abs_max_temp_c only) -- see config_
+     * divergence.h's top comment on CONFIG_IDENTITY_FORMAT_VERSION for why
+     * a future caller adding fields must bump that constant rather than
+     * silently changing what this array means. `esp_fields` is this ESP's
+     * own live, authoritative target (freshly recomputed by the caller,
+     * never a cached push); `pico_fields` is the value most recently
+     * FETCHED from the Pico's own GET_CONFIG_PAGE report
+     * (safety_cfg_store's cache) -- never an echo of a value this file
+     * itself just wrote. See config_divergence.h's own doc comment on this
+     * distinction. */
+    config_identity_field_t esp_fields[1];
+    esp_fields[0].name = "abs_max_temp_c";
+    esp_fields[0].known = target_known;
+    esp_fields[0].value = target_c;
+
+    config_identity_field_t pico_fields[1];
+    pico_fields[0].name = "abs_max_temp_c";
+    pico_fields[0].known = pico_known;
+    pico_fields[0].value = pico_c;
+
+    char reason[CONFIG_DIVERGENCE_REASON_MAX];
+    bool diverged = config_divergence_check(esp_fields, pico_fields, 1, reason, sizeof(reason));
+    if (!diverged) {
+        s_divergence_active = false;
+        s_divergence_reason[0] = '\0';
+        return;
+    }
+
+    /* See safety_ceiling_sync.h's own doc comment on safety_ceiling_sync_
+     * set_disable_heat_hooks() for why these are injected function
+     * pointers rather than direct kiln_io_owner.h/profile_executor.h
+     * calls: this file is compiled into more than one host test executable
+     * with different fake ecosystems, and NULL (the default, e.g. every
+     * host test that never calls the setter) is the correct, safe no-op --
+     * a test binary has no real relays to turn off. */
+    if (s_disable_all_relays_off) {
+        s_disable_all_relays_off();
+    }
+    if (s_disable_halt_run) {
+        s_disable_halt_run();
+    }
+
+    snprintf(s_divergence_reason, sizeof(s_divergence_reason), "%s", reason);
+    int64_t now_us = (int64_t)hal_time_now_us();
+    if (!s_divergence_active || (now_us - s_divergence_last_log_us >= CONFIG_DIVERGENCE_LOG_INTERVAL_US)) {
+        ESP_LOGE(TAG, "ALARM: %s -- heaters disabled (all relays forced off, any run halted)", reason);
+        s_divergence_last_log_us = now_us;
+    }
+    s_divergence_active = true;
+}
+
 void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link)
 {
     if (!link) {
@@ -130,14 +253,6 @@ void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link)
      * for anything -- it is not one. */
     static int64_t now_us;
     now_us = (int64_t)hal_time_now_us();
-    if (!safety_ceiling_reconcile_should_attempt(&s_reconcile_backoff, now_us)) {
-        /* Backing off from a prior failed raise (most commonly the Pico
-         * reporting ARMED, its ordinary standing state) -- skip entirely,
-         * no UART round trip, no log line. See safety_ceiling_policy.h's
-         * safety_ceiling_reconcile_backoff_t comment for the full rationale
-         * and the window this leaves open. */
-        return;
-    }
 
     float new_max_temp_c[MAX31856_CHANNEL_COUNT];
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
@@ -145,6 +260,32 @@ void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link)
         zones_config_get_temp_limits(zi, &cur_max, &cur_min);
         new_max_temp_c[zi] = cur_max;
     }
+
+    /* Divergence enforcement runs UNCONDITIONALLY, before the backoff check
+     * below -- deliberately. The backoff exists only to bound the cost of
+     * RE-ATTEMPTING an expensive stage+commit+confirm UART write; it must
+     * never also suppress the cheap (cache-only, no wire I/O) divergence
+     * check and its active heaters-off enforcement. The single most likely
+     * divergent case -- the Pico is ARMED and refuses a raise -- is exactly
+     * the case the backoff spends most of its time in, and that is the ONE
+     * case this enforcement absolutely must not go quiet during. */
+    {
+        float target_c = safety_ceiling_policy_target_c(new_max_temp_c, MAX31856_CHANNEL_COUNT);
+        bool target_known = target_c > 0.0f;
+        float pico_c = 0.0f;
+        bool pico_known = safety_ceiling_sync_get_current_pico_ceiling(&pico_c);
+        enforce_ceiling_divergence(target_c, target_known, pico_c, pico_known);
+    }
+
+    if (!safety_ceiling_reconcile_should_attempt(&s_reconcile_backoff, now_us)) {
+        /* Backing off from a prior failed raise (most commonly the Pico
+         * reporting ARMED, its ordinary standing state) -- skip the retry
+         * itself, no UART round trip, no log line. See safety_ceiling_
+         * policy.h's safety_ceiling_reconcile_backoff_t comment for the
+         * full rationale and the window this leaves open. */
+        return;
+    }
+
     safety_ceiling_sync_result_t result = SAFETY_CEILING_SYNC_NONE;
     char reason[128] = { 0 };
     safety_ceiling_refusal_class_t refusal_class = SAFETY_CEILING_REFUSAL_NONE;
