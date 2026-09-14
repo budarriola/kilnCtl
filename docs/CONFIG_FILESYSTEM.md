@@ -286,9 +286,34 @@ count.
   including why (a)/(b) are not the same fix as either prior one and the
   new host-test coverage (torn-slot-reuse, both the ordinary and
   never-committed cases): `docs/audits/rp2040_config_store_write_atomicity_2026-09-14.md`.
-  **Not yet verified on hardware** — this pass was host-tests-only (another
-  session was flashing the RP2040 concurrently); bench verification remains
-  outstanding.
+  **Bench-verified 2026-09-14** (`88bb4333`, flashed from a clean detached
+  worktree at HEAD, probe serial E66540F0A36C6E21/COM10): pre-flash board
+  was healthy (link up, armed, no trip, relays off, no unacknowledged
+  crash; Pico was on `a01a0f43`, config_version=149,
+  `abs_max_temp_c`=80C, S8=20 C/min over 60s, `tc_type`=3,
+  `mains_voltage_v`=120, CT channels uncalibrated). The flash tripped the
+  expected S6a `mainFault` (`trip_mask`=0x0020) in the reflash handshake
+  window; link came back up and the trip cleared normally. Verified on
+  real flash: (1) a benign, reversible commissioning field
+  (`mains_voltage_v`) was written, confirmed by read-back, and round-
+  tripped through two real `debug_reset(peer="pico")` reboots (121 then
+  back to 120), proving the fixed write path persists correctly across
+  reboots on hardware, not just in the host-test fake-flash harness; (2)
+  every one of those on-hardware writes exercised (b)'s read-back-verify
+  path on its non-failure branch and reported success, which is as far as
+  this path can be exercised safely — deliberately tearing a real flash
+  program to trigger a mismatch was judged unsafe/irreversible on the only
+  bench Pico and was **not** attempted, so (b)'s actual mismatch-detected
+  branch, and (a)'s slot-skip-and-switch behavior for a genuinely torn
+  slot, remain proven only by the host-test power-cut injection harness
+  (`test_config_store_flash.c`), not on real hardware; (3) `abs_max_temp_c`,
+  the S8 rate guard, `tc_type`, and CT calibration were read back unchanged
+  after the whole sequence, confirming no regression to safety-relevant
+  config across the flash and three reboots. `abs_max_temp_c` was
+  deliberately never touched. Final state: both processors healthy, link
+  up, SaftyFW ARMED, no trip, relays off, no unacknowledged crash, all
+  commissioned values restored to their pre-flash readings. Full detail:
+  `docs/audits/rp2040_config_store_write_atomicity_2026-09-14.md` §8.
 
   The A/B sector fix (`24090c9a`) is flashed to the bench Pico (`b7af9ebe`,
   2026-09-08: commissioning config read back byte-for-byte across the

@@ -266,3 +266,87 @@ two new test functions above).
 `tools/check_doc_hash_citations.ps1`: both hashes cited above
 (`51e1ef5`, `0b5d9dad`) verified as real commits via `git cat-file -t`
 before writing this document.
+
+## 8. Bench verification (2026-09-14, same day)
+
+Flashed `88bb4333` (a descendant of `98d237b0` on `main` at the time) to the
+bench Pico via `debug_program(peer="pico", ...)`, probe serial
+`E66540F0A36C6E21` (COM10) -- the second, identical CMSIS-DAP probe is also
+attached, so the pinned serial matters. SaftyFW was built from a worktree
+checked out at that commit (`git worktree add`, short path
+`C:\wt\saftyfw_verify_bench`); the main tree's own `firmware/SaftyFW/src`
+was already clean/unmodified at that HEAD (the tree's dirty files that day
+were all in unrelated KilnFW/simulation areas owned by other sessions), so
+the ELF actually flashed (`firmware/SaftyFW/build/SaftyFW.elf`, built via
+the `build_saftyfw` tool in the main tree) matches the worktree build
+byte-for-byte in source content. `firmware/SaftyFW/test/build_host_tests.ps1`
+was also run fresh from that same worktree first: `220/220` checks passed,
+unchanged from section 5/7 above.
+
+**Pre-flash board state**, recorded before touching anything: link up, Pico
+on `a01a0f43` (dirty), `config_version=149`, `config_crc=0xA752`,
+`boot_id=197`; `safety_get_status` reported armed/not tripped; ESP
+`get_heap_status` showed no unacknowledged-crash banner, `uptime_s=2194`,
+`reset_reason='software (esp_restart)'`. Commissioned values recorded for
+restoration/comparison: `abs_max_temp_c=80C` (ARMED), S8
+`max_rate_c_per_min=20C/min` over `rate_window_s=60` (ARMED), `tc_type=3`,
+`tc_placement_mode=0`, `estop_active_level=0`, `mains_voltage_v=120`, all
+three CT channels uncalibrated. Relays 0, executor idle.
+
+**Flash and handshake.** `debug_program` reported "programmed pico OK, reset
+and running". As expected for a single-side reflash while the ESP's own
+link handshake catches up, the board immediately showed `trip_reason=6
+SAFETY_TRIP_MAIN_FAULT (S6a)`, `trip_mask=0x0020` -- exactly the mask this
+repo's own formula (`1 << (trip_reason-1)`) predicts, and exactly what
+`docs/audits/s6a_startup_grace_revert_2026-09-07.md` says to expect. Link
+was confirmed up and FW_VERSION exchanged (`safety_get_fw_version` returned
+the new commit/build) before calling `safety_clear_trip()`, which cleared it
+immediately (`trip_reason=0` after).
+
+**Verification item 1 -- normal write round-trips and persists across a real
+reboot.** Wrote a benign, fully reversible commissioning field,
+`mains_voltage_v` (informational only -- no current sensors are fitted on
+this bench unit, so it feeds no live guard threshold), from 120 to 121 via
+`safety_set_commissioning_fields`; the call itself reported "written and
+confirmed by read-back". Reset the Pico in place with
+`debug_reset(peer="pico", mode="run")` (OpenOCD printed a `Failed to select
+multidrop rp2040.dap1` warning mid-sequence but still completed the reset --
+confirmed by the board's `uptime_s` dropping to single digits and
+`boot_reason=watchdog` immediately after). Read back `mains_voltage_v=121`
+post-reboot: persisted correctly. Wrote it back to 120, reset again the same
+way, read back `mains_voltage_v=120`: restored and persisted through a
+second real reboot. Both writes and both reboots left `abs_max_temp_c`, S8's
+gains, `tc_type`, `tc_placement_mode`, `estop_active_level`, and CT
+calibration unchanged from the pre-flash reading (checked after each
+reboot) -- this doubles as verification item 3 (no regression across
+multiple write/reboot cycles; safety-relevant config untouched).
+
+**Verification item 2 -- read-back verification actually engages.** Every
+one of the writes above went through the real, fixed
+`config_store_write()` / `config_store_write_cb()` path on actual RP2040
+flash, including the new read-back `memcmp` added in this pass's fix (2(b)):
+each call reported success only after that check passed, and the persisted
+value read back correctly after each reboot confirms the check ran and
+matched rather than being skipped. This proves the verify engages and
+passes on real hardware for the ordinary (non-torn) case. It does **not**
+prove the verify's failure branch (a genuine byte mismatch) fires
+correctly on real flash, and this pass deliberately did not attempt to
+force one: the only way available was to inject a real torn/partial
+program into the bench Pico's live flash, with no fake-flash harness to
+undo it afterward -- judged unsafe and not reversible with confidence on
+the single bench unit this repo has, so it was not done. That failure
+branch, and (a)'s torn-slot skip-and-switch behavior, remain proven only by
+the host-test power-cut injection harness (`test_torn_inline_slot_is_never_reprogrammed()`
+and `test_torn_first_slot_before_any_valid_record_is_never_reprogrammed()`,
+section 5 above) -- an honest, stated limitation of this bench pass, not an
+oversight.
+
+**Final state.** ESP: link up, `get_heap_status` shows no unacknowledged
+crash, heap figures unremarkable. Pico: `state=armed` (confirmed after
+waiting through the full 60 s startup-grace window, `startup_grace_s` per
+`firmware/SaftyFW/docs/ARCHITECTURE.md`), `trip_reason=0`, `trip_mask=0x0000`,
+`warn_mask=0x0000`, relays 0. All commissioned values -- `abs_max_temp_c`,
+S8 rate guard, `tc_type`, `tc_placement_mode`, `estop_active_level`,
+`mains_voltage_v`, CT calibration -- read back identical to the pre-flash
+recording. `docs/CONFIG_FILESYSTEM.md`'s open-items entry for this finding
+is updated accordingly.
