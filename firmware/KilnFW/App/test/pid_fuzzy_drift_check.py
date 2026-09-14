@@ -77,7 +77,21 @@ TOLERANCE = 1e-4  # absolute, on gains that are themselves O(1e-2..1e0)
 TEST_DIR = Path(__file__).resolve().parent
 HARNESS_SRC = TEST_DIR / "pid_fuzzy_drift_harness.c"
 DRIVERS_DIR = TEST_DIR.parent / "drivers"
-BUILD_DIR = TEST_DIR / "build"
+# Private build dir, NOT the shared "build" directory build_host_tests.ps1
+# builds into (docs/audits/ki_refusal_truncation_and_drift_check_lock_2026-
+# 09-13.md). build_host_tests.ps1 serializes on tools/build_lock.ps1's named
+# Mutex before touching that shared tree; this check instead gets its own
+# directory so it never contends for that lock at all -- simpler than
+# plumbing a PowerShell-only Mutex helper into a Python subprocess (this
+# script has no PowerShell parent to dot-source build_lock.ps1 from, and
+# re-implementing a cross-process named Mutex in Python just to take the
+# SAME lock would add a second implementation of that primitive for no
+# benefit, since this check's own build never needs to interleave with the
+# host-test build it would otherwise be contending with). A run of two
+# `run_all_checks.ps1` invocations, or this check overlapping a host-test
+# build, can now proceed concurrently without either side's cl.exe/.obj
+# writes colliding.
+BUILD_DIR = TEST_DIR / "build_pid_fuzzy_drift"
 HARNESS_EXE = BUILD_DIR / "pid_fuzzy_drift_harness.exe"
 VCVARS = r"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
 

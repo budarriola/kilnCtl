@@ -834,6 +834,23 @@ static void test_ki_diagnosis_withholds_correction_when_zone_is_pid_fuzzy(void)
                        strstr(adaptive_tune_zones[1].ki_refusal_reason, "FUZZY") != NULL,
                    "R6: the refusal reason must name fuzzy as the cause, not read like an ordinary "
                    "no-correction-indicated verdict");
+        // K7 (docs/audits/ki_refusal_truncation_and_drift_check_lock_2026-09-13.md):
+        // the previous wording here was 163 bytes into the 96-byte
+        // ki_refusal_reason buffer and vsnprintf silently truncated it at
+        // "...not the stored " -- a plain strstr(..., "fuzzy") check above
+        // still passed because "fuzzy" lands at character 57, well inside
+        // the surviving prefix, so it never caught the loss of the whole
+        // actionable second half of the message. Guard against that class
+        // recurring: the formatted length must leave room for the NUL (a
+        // vsnprintf that filled/truncated the buffer writes bufsz-1 chars
+        // plus NUL), and a token that only appears in the END of the
+        // intended message must survive.
+        size_t reason_len = strlen(adaptive_tune_zones[1].ki_refusal_reason);
+        TEST_CHECK(reason_len < sizeof(adaptive_tune_zones[1].ki_refusal_reason) - 1,
+                   "R6/K7: fuzzy refusal reason must not fill (i.e. truncate into) its 96-byte buffer");
+        TEST_CHECK(strstr(adaptive_tune_zones[1].ki_refusal_reason, "reference") != NULL,
+                   "R6/K7: 'reference' (the actionable end of the message -- why the correction is "
+                   "withheld) must survive; its absence is exactly what the old 163-byte wording did");
     }
     TEST_CHECK_NEAR(s_fake_zone_cfg[1].ki, 1.0f, 1e-6,
                      "R6: 10 runs of the exact trace that ratchets a plain-PID zone past 3x baseline "

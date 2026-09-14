@@ -234,9 +234,19 @@ void adaptive_tune_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_
     float fuzzy_pct = 0.0f;
     if (zones_config_get_control_mode(zi, &ctrl_mode) && ctrl_mode == ZONE_CONTROL_MODE_PID_FUZZY &&
         zones_config_get_fuzzy_strength_pct(zi, &fuzzy_pct) && fuzzy_pct > 0.0f) {
+        // K7 (docs/audits/ki_refusal_truncation_and_drift_check_lock_2026-09-13.md):
+        // the previous wording here expanded to 163 bytes into this 96-byte
+        // buffer and silently truncated (vsnprintf, not snprintf-with-check)
+        // at "...not the stored ", losing the entire actionable half of the
+        // message. This wording is 94 bytes at fuzzy_pct=100 (the worst
+        // case) -- well inside the buffer -- while keeping both halves: what
+        // was withheld (the correction) and why (trace reflects fuzzy's
+        // effect, not the stored reference; applying it would ratchet that
+        // reference). See test_ki_refusal_reason_fuzzy_message_not_truncated()
+        // (test_adaptive_tune.c), which checks the full formatted length AND
+        // a token from the END of the message, not just a prefix grep.
         adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
-                   "zone is PID_FUZZY at strength %.0f%% -- dwell trace reflects fuzzy's effective Ki, not "
-                   "the stored reference; withholding correction to avoid ratcheting the reference",
+                   "zone is PID_FUZZY %.0f%%: withholding correction -- trace is fuzzy's effective Ki, not reference",
                    (double)fuzzy_pct);
         return;
     }
