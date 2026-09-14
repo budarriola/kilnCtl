@@ -131,15 +131,32 @@
 #define D_FILTER_TAU_S 30.0f
 #define SETPOINT_WEIGHT_B 1.0f
 #define PID_RANGE_C 25.0f
-// 2026-09-13 four-objective re-score: SETTLE_BAND_C changed 2.0 -> 0.5 to
-// match FIRING_SCORE_SETTLE_BAND_C (firing_score.h) exactly, per the opus
-// review appended to docs/audits/fuzzy_overshoot_measurement_2026-09-13.md
-// (Finding 2): at 2.0C -- 4x this project's own 0.5C materiality line -- the
-// settle-time ordering INVERTS (the "faster settle" arms actually settle
-// SLOWER once measured at 0.5C, because the aggressive arms have higher
-// steady-state RMS and cross a loose band early, then take longer to truly
-// converge). 0.5C is not this file's own choice; it is production's own
-// band, now available via firing_score.h's FIRING_SCORE_SETTLE_BAND_C.
+// 2026-09-14 RECONCILIATION (docs/audits/harness_settle_band_reconciliation_
+// 2026-09-14.md): this line does NOT hardcode a band value and never has a
+// literal to drift -- it is, and remains, a direct alias of production's own
+// FIRING_SCORE_SETTLE_BAND_C (firing_score.h), so this file's settle-time
+// number always matches whatever production currently scores against, with
+// no possibility of silent divergence (there is nothing here to diverge --
+// change the production #define and this file's next build picks it up).
+//
+// History, for anyone diffing this comment: on 2026-09-13 the opus review
+// appended to docs/audits/fuzzy_overshoot_measurement_2026-09-13.md (Finding
+// 2) reported that measuring at a 2.0C band inverted the settle-time
+// ordering vs. a 0.5C band. At the time, production's OWN band was 0.5C
+// (matching this project's materiality line), so 1c54b237 pointed this file
+// at 0.5C to match. Immediately afterward, 560cffe0 re-sized PRODUCTION's
+// band 0.5 -> 2.0 degC, having measured that 0.5C is held on only 0.02-0.31
+// of real dwell ticks across 33 dwell-zone instances while 2.0C is held on
+// 0.79-1.00 of them (firing_score.h's own "RE-SIZED FROM THE PLANT" comment)
+// -- so for a period this file's number and production's number used
+// different bands while looking identical (both named "SETTLE_BAND_C").
+// This alias closes that gap: the value now tracks production automatically,
+// and the Finding-2 ordering-inversion result must be read as describing a
+// band production has since abandoned, not the band scored today. Re-
+// measured at the current (2.0C) band as part of this reconciliation: see
+// the doc above for whether the specific 30.00s/25.0s derived-vs-absolute
+// settle figures from docs/audits/derived_bands_four_objective_score_2026-
+// 09-13.md survive.
 #define SETTLE_BAND_C FIRING_SCORE_SETTLE_BAND_C
 
 static void make_plant_cfg(sim_plant_cfg_t *out)
@@ -562,7 +579,10 @@ int main(void)
            "disturbance injection -- ordinary ramp-to-dwell transitions only.\n"
            "Primary sweep ramp rate: 100 degC/hr (arm separation was found by review to appear only\n"
            "at 100 degC/hr and above -- a second, compact pass at 300 degC/hr runs later in this\n"
-           "report to check rate-dependence explicitly).\n\n");
+           "report to check rate-dependence explicitly).\n"
+           "Settle-time band (SETTLE_BAND_C): %.1fC -- a direct alias of production's own\n"
+           "FIRING_SCORE_SETTLE_BAND_C (firing_score.h), not a local literal; see the #define's\n"
+           "comment for the 2026-09-14 reconciliation history.\n\n", (double)SETTLE_BAND_C);
 
     #define BASE_KP 0.0318f
     #define BASE_KI 0.0001f
@@ -610,7 +630,8 @@ int main(void)
     // surface that disagreement rather than silently pick one.
     //   ramp_lag_median_s (unsigned, ==FIRING_SUBSCORE_LAG_S)  -- objective 1
     //   ramp_lag_signed_median_s (~=FIRING_SUBSCORE_LAG_SIGNED_S, unfiltered) -- objective 1, signed
-    //   settle_ticks*DT_S (==FIRING_SUBSCORE_SETTLE_S's own algorithm, 0.5C band) -- objective 2
+    //   settle_ticks*DT_S (==FIRING_SUBSCORE_SETTLE_S's own algorithm, production's current
+    //   SETTLE_BAND_C -- see the #define above; NOT hardcoded to 0.5C) -- objective 2
     //   steady_rms_c (==FIRING_SUBSCORE_STEADY_RMS_C)          -- objective 3
     //   overshoot_c (==FIRING_SUBSCORE_ENTRY_PEAK_C)           -- objective 4a
     //   undershoot_signed_c (this file's own, unwindowed/unclamped -- see disagreement note) -- objective 4b
@@ -719,15 +740,17 @@ int main(void)
         { "[1] ramp-lag, UNSIGNED median (==FIRING_SUBSCORE_LAG_S)", lag_by_arm, TIME_MATERIALITY_S, "s", -1 },
         { "[1] ramp-lag, SIGNED median (~=FIRING_SUBSCORE_LAG_SIGNED_S, unfiltered; +=lagging, -=leading)",
           lag_signed_by_arm, TIME_MATERIALITY_S, "s", -1 },
-        { "[2] settle time (==FIRING_SUBSCORE_SETTLE_S's own algorithm, 0.5C band)",
+        { "[2] settle time (==FIRING_SUBSCORE_SETTLE_S's own algorithm; band is production's "
+          "current SETTLE_BAND_C, printed above -- not hardcoded here)",
           settle_s_by_arm, TIME_MATERIALITY_S, "s", -1 },
         { "[3] steady-state RMS error (==FIRING_SUBSCORE_STEADY_RMS_C)", steady_rms_by_arm, 0.5f, "C", -1 },
         { "[4a] overshoot, entry peak (==FIRING_SUBSCORE_ENTRY_PEAK_C) -- dwell 2 EXCLUDED, ramp-down "
           "residual, not overshoot", overshoot_by_arm, 0.5f, "C", 2 },
-        { "[4b] undershoot, SIGNED whole-dwell peak (this file's own, unwindowed -- see disagreement "
-          "note below)", undershoot_signed_by_arm, 0.5f, "C", -1 },
-        { "[disagreement only] undershoot, entry-window-only (==FIRING_SUBSCORE_ENTRY_UNDERSHOOT_C, "
-          "clamped+windowed)", undershoot_entry_windowed_by_arm, 0.5f, "C", -1 },
+        { "[4b] undershoot, PRIMARY: entry-window peak (==FIRING_SUBSCORE_ENTRY_UNDERSHOOT_C, "
+          "clamped+windowed -- this is the definition production actually votes with per 560cffe0)",
+          undershoot_entry_windowed_by_arm, 0.5f, "C", -1 },
+        { "[4b secondary] undershoot, SIGNED whole-dwell peak (this file's own, unwindowed -- see "
+          "disagreement note below; NOT what production scores)", undershoot_signed_by_arm, 0.5f, "C", -1 },
     };
     #define N_METRICS (int)(sizeof(metrics) / sizeof(metrics[0]))
 
@@ -737,10 +760,14 @@ int main(void)
            "FIRING_SCORE.C ITSELF, drops saturated-and-short ticks (exactly the worst-tracking\n"
            "ticks). This file's own ramp loop applies no such filter, so that second blind spot\n"
            "does not carry over to either row here.\n"
-           "DISAGREEMENT on [4b] vs the last row: this file's own undershoot_signed_c is unwindowed\n"
-           "(whole dwell, never suppressed by recovery); production's FIRING_SUBSCORE_ENTRY_\n"
-           "UNDERSHOOT_C is windowed to entry_window_s and clamped to >=0, same shape as overshoot.\n"
-           "Both are reported; see the doc for which one this task's verdict is built on and why.\n");
+           "DISAGREEMENT on [4b]'s two rows: the PRIMARY row (entry-window peak) exactly matches\n"
+           "production's FIRING_SUBSCORE_ENTRY_UNDERSHOOT_C -- windowed to entry_window_s and\n"
+           "clamped to >=0, same shape as overshoot -- and is the definition production's own\n"
+           "comparator votes with (560cffe0). The SECONDARY row is this file's own\n"
+           "undershoot_signed_c: unwindowed (whole dwell, never suppressed by recovery), kept only\n"
+           "so a controller that trades entry-window undershoot for a slower whole-dwell one is\n"
+           "still visible. Both are reported; the primary row is the one this task's verdict is\n"
+           "built on.\n");
     for (int m = 0; m < N_METRICS; m++) {
         printf("\n-- %s (bar: %.1f%s) --\n", metrics[m].name, (double)metrics[m].bar, metrics[m].unit);
         float max_50 = 0.0f, max_25 = 0.0f, max_derived_vs_absolute = 0.0f;
