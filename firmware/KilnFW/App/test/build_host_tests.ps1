@@ -1417,6 +1417,27 @@ try {
             "`"$(Join-Path $driversDir 'control/pid.c')`" `"$(Join-Path $driversDir 'control/pid_fuzzy.c')`""
     Invoke-HostTestExe -Name "sim_fuzzy_closedloop" -ExePath $exeFuzzyCl -BuildCmd $cmdFuzzyCl
 
+    # ---- sim_fuzzy_overshoot.exe: docs/audits/fuzzy_overshoot_measurement_
+    # 2026-09-13.md -- the owner correction that sim_fuzzy_closedloop.c's
+    # tracking scenario (IAE/MAE averaged over a whole run) is the wrong
+    # instrument for the fuzzy layer's actual stated purpose (reducing
+    # over/undershoot, a transient concentrated at dwell entry). A
+    # deliberately SEPARATE, standalone file (not an edit to sim_fuzzy_
+    # closedloop.c, which was mid-edit by another session this same day --
+    # see this file's own top comment) that runs ordinary ramp-to-dwell
+    # transitions (no synthetic disturbance injection) and reports peak
+    # overshoot/undershoot at dwell entry using firing_score.c's own
+    # FIRING_SUBSCORE_ENTRY_PEAK_C window/peak-tracking definition. Gates
+    # the build: its own assertions (strength_pct=0 bit-exact contract,
+    # every dwell's entry window actually reached) are deterministic and
+    # have a known-correct answer.
+    $exeFuzzyOv = Join-Path $outDir "kilnctl_sim_fuzzy_overshoot.exe"
+    $cmdFuzzyOv = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$outDir\\`" /Fe:`"$exeFuzzyOv`" `"$(Join-Path $testDir 'sim_fuzzy_overshoot.c')`" " +
+            "`"$(Join-Path $testDir 'sim_plant.c')`" " +
+            "`"$(Join-Path $driversDir 'control/pid.c')`" `"$(Join-Path $driversDir 'control/pid_fuzzy.c')`""
+    Invoke-HostTestExe -Name "sim_fuzzy_overshoot" -ExePath $exeFuzzyOv -BuildCmd $cmdFuzzyOv
+
     # ---- fuzzy_nine_cell_probe.exe: docs/FUZZY_CONTROLLER_PLAN.md sec 5
     # Stage 0 ("(v-a) offline rule-cell probe") -- a pure, no-plant,
     # no-board numerical probe of pid_fuzzy_adjust() at all 9 rule-table
@@ -1525,7 +1546,11 @@ try {
     # Invoke-HostTestExe call -- FUZZY_CONTROLLER_PLAN.md sec 5's Stage 0
     # offline 9-cell probe, reporting per-cell physical gain effects and
     # reachability verdicts (docs/audits/fuzzy_nine_cell_offline_probe_2026-09-11.md).
-    $totalExpected = 37
+    # 37 -> 38: this pass added sim_fuzzy_overshoot.c as its own 38th
+    # Invoke-HostTestExe call -- docs/audits/fuzzy_overshoot_measurement_
+    # 2026-09-13.md's re-measurement of the fuzzy layer on overshoot
+    # (its actual stated purpose) rather than IAE/MAE.
+    $totalExpected = 38
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the
