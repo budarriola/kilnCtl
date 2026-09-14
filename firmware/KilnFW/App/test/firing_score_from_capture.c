@@ -203,6 +203,9 @@ static const char *subscore_name(firing_subscore_t s)
         case FIRING_SUBSCORE_LAG_S: return "lag_s";
         case FIRING_SUBSCORE_ENTRY_PEAK_C: return "entry_peak_c";
         case FIRING_SUBSCORE_STEADY_RMS_C: return "steady_rms_c";
+        case FIRING_SUBSCORE_SETTLE_S: return "settle_s";
+        case FIRING_SUBSCORE_ENTRY_UNDERSHOOT_C: return "entry_undershoot_c";
+        case FIRING_SUBSCORE_LAG_SIGNED_S: return "lag_signed_s";
         default: return "?";
     }
 }

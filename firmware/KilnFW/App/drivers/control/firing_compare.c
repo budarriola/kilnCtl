@@ -8,13 +8,16 @@
 
 float firing_compare_bar1_floor(firing_subscore_t sub, float rate_c_per_s)
 {
-    if (sub == FIRING_SUBSCORE_LAG_S) {
+    if (sub == FIRING_SUBSCORE_LAG_S || sub == FIRING_SUBSCORE_LAG_SIGNED_S) {
         // 0.5 degC expressed as seconds of lag at this class's commanded
         // rate. A zero/absent rate cannot produce a lag sub-score at all
         // (firing_score.c only records lag for ramps), but return a finite
         // fallback rather than an infinity so no caller divides by it.
         if (rate_c_per_s > 0.0f) return FIRING_COMPARE_OWNER_FLOOR_C / rate_c_per_s;
         return FIRING_COMPARE_OWNER_FLOOR_C;
+    }
+    if (sub == FIRING_SUBSCORE_SETTLE_S) {
+        return FIRING_COMPARE_SETTLE_FLOOR_S;
     }
     return FIRING_COMPARE_OWNER_FLOOR_C;
 }

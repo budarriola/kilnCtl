@@ -62,6 +62,18 @@ extern "C" {
 #define FIRING_COMPARE_BAR2_MIN_N 5
 #define FIRING_COMPARE_BAR2_SIGN_FRACTION 0.75f
 
+// Bar-1 floor for FIRING_SUBSCORE_SETTLE_S, in seconds. The owner has not set
+// a materiality figure for a TIME sub-score (docs/audits/firing_score_four_
+// objective_scorecard_2026-09-13.md finding A), so 0.5 degC's own floor
+// cannot be reused directly -- 0.5 (as "0.5 seconds") would clear on any real
+// difference at all and make Bar 1 trivial for this axis. One PWM window (the
+// same 60 s already used elsewhere in this module family as the shortest
+// interval a dwell-entry statistic can mean anything over,
+// FIRING_SCORE_MIN_SCORED_TICKS at the 1 Hz executor tick) is used instead:
+// a settle-time difference smaller than one window is window-phase noise,
+// not a measured improvement.
+#define FIRING_COMPARE_SETTLE_FLOOR_S 60.0f
+
 // Veto arms only with this many matched pairs -- below it a single odd
 // segment could veto an otherwise good trial.
 #define FIRING_COMPARE_VETO_MIN_N 3

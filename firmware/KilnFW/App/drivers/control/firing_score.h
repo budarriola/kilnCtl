@@ -87,6 +87,34 @@ extern "C" {
 #define FIRING_SCORE_LAG_BINS 512
 #define FIRING_SCORE_LAG_BIN_S 2.0f
 
+// Signed-lag companion histogram (docs/audits/firing_score_four_objective_
+// scorecard_2026-09-13.md finding C). Same bin width as the unsigned
+// histogram, but split about zero: FIRING_SCORE_LAG_SIGNED_BINS/2 bins cover
+// "ahead of schedule" and the other half "behind schedule", +/-512 s at 2 s
+// resolution -- half the unsigned histogram's range each side, which is
+// plenty: a segment lagging/leading by more than 512 s at its own commanded
+// rate is already failing by any measure, and the median (not the tails) is
+// what this instrument reports.
+#define FIRING_SCORE_LAG_SIGNED_BINS 512
+#define FIRING_SCORE_LAG_SIGNED_BIN_S 2.0f
+#define FIRING_SCORE_LAG_SIGNED_CENTER_BIN (FIRING_SCORE_LAG_SIGNED_BINS / 2)
+
+// Settle-time band (finding A). Fixed at the project's 0.5 degC materiality
+// line (same value as FIRING_COMPARE_OWNER_FLOOR_C in firing_compare.h,
+// duplicated rather than shared because firing_score.h must stay free of any
+// dependency on firing_compare.h -- pure decision/measurement logic, same
+// posture as the header's own top-of-file note). A FRACTION of cfg.band_c
+// was the other option the audit named, but band_c is itself a per-profile,
+// per-zone configured tracking tolerance (5 degC default) chosen for
+// "captured vs not", not for "settled vs not" -- sizing the settle band off
+// it would make two firings with different band_c configs report
+// incomparable settle times for the identical physical trace. The 0.5 degC
+// floor is already the project-wide answer to "is this difference worth
+// caring about" (every other subscore's Bar-1 floor uses it too), so tying
+// settle time to the same constant keeps all four objectives judged against
+// one materiality standard instead of inventing a second one.
+#define FIRING_SCORE_SETTLE_BAND_C 0.5f
+
 // Fixed capacity of one firing's score set: 3 zones x 8 segment classes.
 #define FIRING_SCORE_MAX_ENTRIES 24
 
@@ -96,14 +124,37 @@ typedef enum {
     FIRING_SEG_DWELL = 2,
 } firing_seg_kind_t;
 
-// The three sub-scores of plan sec 2.2. All "lower is better". A RAMP
-// segment produces LAG only; a DWELL produces ENTRY_PEAK and STEADY_RMS.
-// That asymmetry is deliberate -- comparison is per sub-score.
+// The sub-scores (plan sec 2.2, extended 2026-09-13 -- see
+// docs/audits/firing_score_four_objective_scorecard_2026-09-13.md). All
+// "lower is better". A RAMP segment produces LAG_S and LAG_SIGNED_S only; a
+// DWELL produces ENTRY_PEAK_C, ENTRY_UNDERSHOOT_C, STEADY_RMS_C and
+// SETTLE_S. That asymmetry is deliberate -- comparison is per sub-score.
+//
+// Mapping onto the owner's four objectives:
+//   1. correct rate     -> LAG_S (unsigned, tuning-comparison instrument,
+//                          UNCHANGED -- see below) + LAG_SIGNED_S (signed,
+//                          includes saturated ticks; diagnostic companion)
+//   2. settle quickly    -> SETTLE_S (new)
+//   3. settle accurately -> STEADY_RMS_C (unchanged)
+//   4a. overshoot         -> ENTRY_PEAK_C (unchanged, per audit's explicit
+//                          direction to preserve it as-is)
+//   4b. undershoot        -> ENTRY_UNDERSHOOT_C (new)
+//
+// LAG_S is deliberately left byte-identical to its pre-2026-09-13 behaviour
+// (unsigned; drops ticks where the zone is saturated-high and still short of
+// target): it is the A1 acceptance bar's input
+// (check_sim_iter_tune_bars.ps1's pinned 24/660), and changing it in place
+// would move that pin. Its two known blind spots (unsigned; drops the
+// worst-tracking ticks) are addressed by the new LAG_SIGNED_S sub-score
+// instead of by editing LAG_S.
 typedef enum {
     FIRING_SUBSCORE_LAG_S = 0,
     FIRING_SUBSCORE_ENTRY_PEAK_C = 1,
     FIRING_SUBSCORE_STEADY_RMS_C = 2,
-    FIRING_SUBSCORE_COUNT = 3,
+    FIRING_SUBSCORE_SETTLE_S = 3,
+    FIRING_SUBSCORE_ENTRY_UNDERSHOOT_C = 4,
+    FIRING_SUBSCORE_LAG_SIGNED_S = 5,
+    FIRING_SUBSCORE_COUNT = 6,
 } firing_subscore_t;
 
 typedef struct {
@@ -150,10 +201,16 @@ typedef struct {
     uint32_t in_band_ticks;
     uint16_t lag_hist[FIRING_SCORE_LAG_BINS];
     uint32_t lag_samples;
+    uint16_t lag_signed_hist[FIRING_SCORE_LAG_SIGNED_BINS]; // ramps only; see LAG_SIGNED_S
+    uint32_t lag_signed_samples;
     bool  entry_seen;
     float entry_peak_c;
+    float entry_trough_c;      // most-negative err seen in the entry window; undershoot source
     uint32_t steady_ticks;
     double steady_sumsq;
+    bool  settle_have_tick;    // dwell only: at least one scored tick seen
+    float settle_last_outside_s; // elapsed_s of the last scored tick with |err| > settle band;
+                                  // -1.0 == never outside (settled at segment start)
 } firing_score_seg_t;
 
 // Classifies a commanded rate. |rate| < FIRING_SCORE_RAMP_MIN_RATE_C_PER_HR

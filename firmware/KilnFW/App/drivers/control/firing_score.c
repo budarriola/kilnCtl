@@ -53,6 +53,7 @@ void firing_score_seg_begin(firing_score_seg_t *seg, const firing_score_cfg_t *c
     // which a dwell-entry peak is even meaningful at a 60 s window.
     float w = dead_time_s + 2.0f * tau_s;
     seg->entry_window_s = (w > 0.0f) ? w : 60.0f;
+    seg->settle_last_outside_s = -1.0f;
 }
 
 void firing_score_seg_tick(firing_score_seg_t *seg, bool *zone_captured, float target_c, float actual_c,
@@ -76,6 +77,32 @@ void firing_score_seg_tick(firing_score_seg_t *seg, bool *zone_captured, float t
         }
     }
 
+    // Signed-lag companion (FIRING_SUBSCORE_LAG_SIGNED_S): fed on EVERY ramp
+    // tick that survives only the capture-transient exclusion above, i.e.
+    // BEFORE the infeasibility exclusion below and regardless of sign. This
+    // is deliberate -- it exists to see the two things LAG_S's own
+    // definition hides (docs/audits/firing_score_four_objective_scorecard_
+    // 2026-09-13.md finding C): which direction the error is on, and the
+    // saturated-and-short ticks that a heater-limited zone spends failing
+    // hardest to track. LAG_S itself is left untouched below, byte-identical
+    // to its pre-2026-09-13 behaviour, since it feeds the pinned A1 bar.
+    if (seg->kind != FIRING_SEG_DWELL && seg->rate_c_per_s > 0.0f) {
+        // Sign convention: positive == BEHIND schedule (the classic lag),
+        // negative == AHEAD of schedule (leading). For a ramp-up, behind
+        // means actual < target (err < 0), so signed lag = -err/rate. For a
+        // ramp-down, behind means actual > target (err > 0) since the zone
+        // has not cooled as far as commanded yet, so signed lag = +err/rate.
+        float lag_signed_s = (seg->kind == FIRING_SEG_RAMP_DOWN)
+                                  ? (err / seg->rate_c_per_s)
+                                  : (-err / seg->rate_c_per_s);
+        int sbin = (int)floorf(lag_signed_s / FIRING_SCORE_LAG_SIGNED_BIN_S) +
+                   FIRING_SCORE_LAG_SIGNED_CENTER_BIN;
+        if (sbin < 0) sbin = 0;
+        if (sbin >= FIRING_SCORE_LAG_SIGNED_BINS) sbin = FIRING_SCORE_LAG_SIGNED_BINS - 1;
+        if (seg->lag_signed_hist[sbin] < 0xffffu) seg->lag_signed_hist[sbin]++;
+        seg->lag_signed_samples++;
+    }
+
     // Infeasibility exclusion: saturated at full duty and still short of
     // target -- the heater is the limit, not the gains.
     if (saturated_high && err < 0.0f) return;
@@ -95,11 +122,30 @@ void firing_score_seg_tick(firing_score_seg_t *seg, bool *zone_captured, float t
             seg->lag_samples++;
         }
     } else {
+        // Settle-time tracking (FIRING_SUBSCORE_SETTLE_S): runs across the
+        // WHOLE dwell (entry window and steady phase both), on every scored
+        // tick. `settle_last_outside_s` is the elapsed time of the LAST tick
+        // seen outside the settle band -- if the zone re-enters and then
+        // leaves the band again later, this correctly moves forward to the
+        // later excursion, which is exactly "time until it enters and
+        // REMAINS inside the band". If the last scored tick of the segment
+        // is still outside the band, this value comes out equal to the
+        // segment's own duration -- the worst possible reading, not a good
+        // one, which is what makes the never-settles case visible instead of
+        // silently reading as instant settling (finding A).
+        seg->settle_have_tick = true;
+        if (abs_err > FIRING_SCORE_SETTLE_BAND_C) {
+            seg->settle_last_outside_s = seg->elapsed_s;
+        }
+
         if (seg->elapsed_s <= seg->entry_window_s) {
             if (!seg->entry_seen || err > seg->entry_peak_c) {
                 seg->entry_peak_c = err;
-                seg->entry_seen = true;
             }
+            if (!seg->entry_seen || err < seg->entry_trough_c) {
+                seg->entry_trough_c = err;
+            }
+            seg->entry_seen = true;
         } else {
             seg->steady_ticks++;
             seg->steady_sumsq += (double)err * (double)err;
@@ -139,18 +185,47 @@ bool firing_score_seg_finish(const firing_score_seg_t *seg, firing_segment_score
             out->has[FIRING_SUBSCORE_LAG_S] = true;
             out->value[FIRING_SUBSCORE_LAG_S] = ((float)bin + 0.5f) * FIRING_SCORE_LAG_BIN_S;
         }
+        if (seg->lag_signed_samples > 0) {
+            uint32_t half = (seg->lag_signed_samples + 1u) / 2u;
+            uint32_t cum = 0;
+            int bin = FIRING_SCORE_LAG_SIGNED_BINS - 1;
+            for (int i = 0; i < FIRING_SCORE_LAG_SIGNED_BINS; i++) {
+                cum += seg->lag_signed_hist[i];
+                if (cum >= half) { bin = i; break; }
+            }
+            out->has[FIRING_SUBSCORE_LAG_SIGNED_S] = true;
+            out->value[FIRING_SUBSCORE_LAG_SIGNED_S] =
+                ((float)(bin - FIRING_SCORE_LAG_SIGNED_CENTER_BIN) + 0.5f) * FIRING_SCORE_LAG_SIGNED_BIN_S;
+        }
     } else {
         if (seg->entry_seen) {
             out->has[FIRING_SUBSCORE_ENTRY_PEAK_C] = true;
             // Overshoot only: a dwell entered from below never overshoots, and
             // reporting a negative "overshoot" would let an undershooting
             // trial score better on the overshoot axis for the wrong reason.
+            // Left exactly as-is (2edbb6eb confirmed the raw-peak definition
+            // sound) -- undershoot now has its OWN axis below instead of
+            // being folded, sign-flipped, into this one.
             out->value[FIRING_SUBSCORE_ENTRY_PEAK_C] = (seg->entry_peak_c > 0.0f) ? seg->entry_peak_c : 0.0f;
+
+            out->has[FIRING_SUBSCORE_ENTRY_UNDERSHOOT_C] = true;
+            // Undershoot only, same anti-gaming shape as ENTRY_PEAK_C above
+            // but on its own axis: a perfect or over-shooting entry scores
+            // 0.0 here (never negative), and this value is NEVER cancelled
+            // by a later recovery -- it is the min error seen anywhere in
+            // the entry window, not the final one.
+            out->value[FIRING_SUBSCORE_ENTRY_UNDERSHOOT_C] =
+                (seg->entry_trough_c < 0.0f) ? -seg->entry_trough_c : 0.0f;
         }
         if (seg->steady_ticks > 0) {
             out->has[FIRING_SUBSCORE_STEADY_RMS_C] = true;
             out->value[FIRING_SUBSCORE_STEADY_RMS_C] =
                 (float)sqrt(seg->steady_sumsq / (double)seg->steady_ticks);
+        }
+        if (seg->settle_have_tick) {
+            out->has[FIRING_SUBSCORE_SETTLE_S] = true;
+            out->value[FIRING_SUBSCORE_SETTLE_S] =
+                (seg->settle_last_outside_s < 0.0f) ? 0.0f : seg->settle_last_outside_s;
         }
     }
     return true;

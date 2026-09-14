@@ -143,6 +143,221 @@ static void test_short_segment_dropped(void)
     TEST_CHECK(!firing_score_seg_finish(&seg, &s), "5 ticks < 10 min ticks");
 }
 
+// ---------------------------------------------- 2026-09-13 scorecard fixes
+// (docs/audits/firing_score_four_objective_scorecard_2026-09-13.md).
+
+// Objective 2 (settle quickly) previously had NO instrument: a quick,
+// clean settle and a long ring that decays before the entry window ends
+// scored identically. This proves SETTLE_S now distinguishes them.
+// Negative test: comment out the `seg->settle_last_outside_s = seg->elapsed_s;`
+// line in firing_score.c's dwell tick branch -> both segments below read
+// settle_s == 0.0 and this test goes red.
+static void test_settle_time_distinguishes_ringing_from_quick_settle(void)
+{
+    TEST_SECTION("firing_score: SETTLE_S sees a slow ring the old subscores could not");
+    firing_score_cfg_t cfg = mk_cfg();
+    firing_segment_score_t quick, ring;
+
+    // Quick settle: enters the 0.5C band immediately and never leaves.
+    {
+        firing_score_seg_t seg;
+        bool cap = true;
+        firing_score_seg_begin(&seg, &cfg, 0, 0.0f, 100.0f, 30.0f, 100.0f);
+        for (int t = 0; t < 500; t++) firing_score_seg_tick(&seg, &cap, 100.0f, 100.1f, false, 1.0f);
+        TEST_CHECK(firing_score_seg_finish(&seg, &quick), "quick-settle segment scored");
+    }
+    // Rings well outside the 0.5C band for the first ~190s (same peak
+    // magnitude as the quick case would never reach at all, and no worse
+    // eventual steady RMS), then settles cleanly for the remaining ~300s --
+    // exactly the case Finding A says the old three subscores cannot tell
+    // apart from a clean settle, since a peak/RMS-only view sees the same
+    // eventual quiet tail either way.
+    {
+        firing_score_seg_t seg;
+        bool cap = true;
+        firing_score_seg_begin(&seg, &cfg, 0, 0.0f, 100.0f, 30.0f, 100.0f);
+        for (int t = 0; t < 190; t++) {
+            float actual = 100.0f + ((t % 20 < 10) ? 1.0f : -1.0f); // +-1C, outside 0.5C band
+            firing_score_seg_tick(&seg, &cap, 100.0f, actual, false, 1.0f);
+        }
+        for (int t = 0; t < 300; t++) firing_score_seg_tick(&seg, &cap, 100.0f, 100.1f, false, 1.0f);
+        TEST_CHECK(firing_score_seg_finish(&seg, &ring), "ringing-then-settled segment scored");
+    }
+
+    TEST_CHECK(quick.has[FIRING_SUBSCORE_SETTLE_S], "quick settle has a settle time");
+    TEST_CHECK(ring.has[FIRING_SUBSCORE_SETTLE_S], "ringing segment has a settle time");
+    TEST_CHECK_NEAR(quick.value[FIRING_SUBSCORE_SETTLE_S], 0.0f, 2.0f, "quick settle is ~0 s");
+    TEST_CHECK(ring.value[FIRING_SUBSCORE_SETTLE_S] > 150.0f,
+               "ringing segment's settle time reflects the ~190s it spends outside band");
+    TEST_CHECK(ring.value[FIRING_SUBSCORE_SETTLE_S] > quick.value[FIRING_SUBSCORE_SETTLE_S] + 100.0f,
+               "SETTLE_S separates the two where peak/steady-RMS alone could not");
+}
+
+// A dwell that never comes to rest inside the settle band must NOT read as a
+// good (low/zero) settle time. Negative test: change the else-branch in
+// firing_score_seg_finish() to `out->value[...] = 0.0f` unconditionally ->
+// this test goes red (never_settles would report 0.0, same as "instant").
+static void test_settle_time_never_settling_reads_as_worst_not_zero(void)
+{
+    TEST_SECTION("firing_score: a dwell that never settles reads as the worst case, not a good one");
+    firing_score_cfg_t cfg = mk_cfg();
+    firing_score_seg_t seg;
+    bool cap = true;
+    firing_score_seg_begin(&seg, &cfg, 0, 0.0f, 100.0f, 30.0f, 100.0f);
+    // Stays 2C off target (outside the 0.5C settle band) for the whole
+    // 400-tick segment. captured=true from the start so none of this is
+    // discarded by the capture-transient exclusion.
+    for (int t = 0; t < 400; t++) firing_score_seg_tick(&seg, &cap, 100.0f, 102.0f, false, 1.0f);
+    firing_segment_score_t s;
+    TEST_CHECK(firing_score_seg_finish(&seg, &s), "segment scored");
+    TEST_CHECK(s.has[FIRING_SUBSCORE_SETTLE_S], "settle time is reported, not silently dropped");
+    TEST_CHECK(s.value[FIRING_SUBSCORE_SETTLE_S] > 390.0f,
+               "never-settled reads as ~full segment duration, the worst reading, not 0.0");
+}
+
+// Objective 4b (undershoot): a dwell entered from below must be measured,
+// and that measurement must NOT be cancelled by a later recovery. Negative
+// test: delete the `seg->entry_trough_c = err;` update (or force
+// ENTRY_UNDERSHOOT_C's value to 0.0f in firing_score_seg_finish()) -> red.
+static void test_undershoot_measured_and_not_cancelled_by_recovery(void)
+{
+    TEST_SECTION("firing_score: undershoot has its own axis and survives recovery");
+    firing_score_cfg_t cfg = mk_cfg();
+    firing_score_seg_t seg;
+    bool cap = true;
+    // dead_time=30, tau=20 -> entry_window_s = 70s.
+    firing_score_seg_begin(&seg, &cfg, 0, 0.0f, 100.0f, 30.0f, 20.0f);
+    // Enters 3C low, then recovers to a perfect track well inside the entry
+    // window, and stays perfect through the steady phase.
+    for (int t = 0; t < 20; t++) firing_score_seg_tick(&seg, &cap, 100.0f, 97.0f, false, 1.0f);
+    for (int t = 0; t < 50; t++) firing_score_seg_tick(&seg, &cap, 100.0f, 100.0f, false, 1.0f);
+    for (int t = 0; t < 200; t++) firing_score_seg_tick(&seg, &cap, 100.0f, 100.0f, false, 1.0f);
+    firing_segment_score_t s;
+    TEST_CHECK(firing_score_seg_finish(&seg, &s), "segment scored");
+    TEST_CHECK(s.has[FIRING_SUBSCORE_ENTRY_UNDERSHOOT_C], "undershoot is reported");
+    TEST_CHECK_NEAR(s.value[FIRING_SUBSCORE_ENTRY_UNDERSHOOT_C], 3.0f, 0.01f,
+                    "the 3C undershoot is measured, not erased by the recovery");
+    TEST_CHECK(s.has[FIRING_SUBSCORE_ENTRY_PEAK_C], "overshoot axis still reports (never entered from above)");
+    TEST_CHECK_NEAR(s.value[FIRING_SUBSCORE_ENTRY_PEAK_C], 0.0f, 0.01f,
+                    "overshoot axis stays 0 -- undershoot does not leak onto it");
+}
+
+// The accept-permissive gap this closes, proven through the real comparator:
+// before this change, an entry undershooting 3C and a perfect entry scored
+// IDENTICALLY on every subscore (both entry_peak_c == 0). With
+// ENTRY_UNDERSHOOT_C wired in, the undershooting trial must come out
+// strictly worse -- and with enough matched pairs, the no-degradation veto
+// fires on it, closing the "worse controller looks equal" gap Finding B
+// describes.
+static void test_undershoot_makes_a_worse_trial_score_worse(void)
+{
+    TEST_SECTION("firing_compare: an undershooting trial no longer scores equal to a clean one");
+    firing_score_cfg_t cfg = mk_cfg();
+    firing_score_set_t base_set, trial_set;
+    memset(&base_set, 0, sizeof(base_set));
+    memset(&trial_set, 0, sizeof(trial_set));
+
+    // Three DIFFERENT classes (by zone index), not three reps of one class --
+    // firing_score_set_add() merges same-key segments into a single averaged
+    // observation (by design, plan sec 2.2: repeats of one class in a firing
+    // are one observation, not several), so the veto's n >= 3 needs 3
+    // distinct classes here, not 3 repeats of the same one.
+    for (int zone = 0; zone < 3; zone++) {
+        // Baseline: perfect dwell entry.
+        {
+            firing_score_seg_t seg;
+            bool cap = true;
+            firing_score_seg_begin(&seg, &cfg, (uint8_t)zone, 0.0f, 100.0f, 30.0f, 20.0f);
+            for (int t = 0; t < 300; t++) firing_score_seg_tick(&seg, &cap, 100.0f, 100.0f, false, 1.0f);
+            TEST_CHECK(firing_score_set_finish_segment(&base_set, &seg), "baseline zone scored");
+        }
+        // Trial: same class, but enters 2C low and recovers.
+        {
+            firing_score_seg_t seg;
+            bool cap = true;
+            firing_score_seg_begin(&seg, &cfg, (uint8_t)zone, 0.0f, 100.0f, 30.0f, 20.0f);
+            for (int t = 0; t < 20; t++) firing_score_seg_tick(&seg, &cap, 100.0f, 98.0f, false, 1.0f);
+            for (int t = 0; t < 280; t++) firing_score_seg_tick(&seg, &cap, 100.0f, 100.0f, false, 1.0f);
+            TEST_CHECK(firing_score_set_finish_segment(&trial_set, &seg), "trial zone scored");
+        }
+    }
+
+    firing_compare_result_t r;
+    firing_compare_verdict_t v = firing_compare(&base_set, &trial_set, NULL, &r);
+    TEST_CHECK(r.sub[FIRING_SUBSCORE_ENTRY_UNDERSHOOT_C].n >= FIRING_COMPARE_VETO_MIN_N,
+               "undershoot axis has enough matched pairs to arm the veto");
+    TEST_CHECK(r.sub[FIRING_SUBSCORE_ENTRY_UNDERSHOOT_C].degraded,
+               "the undershooting trial is flagged as degraded on its OWN axis");
+    TEST_CHECK(v == FIRING_COMPARE_REJECT_DEGRADED,
+               "the comparator rejects a trial that only the old scorecard would have called equal");
+}
+
+// Finding C, part 1: LAG_S is unsigned, so converting a lag into an equal
+// lead reads as "no change". LAG_SIGNED_S must tell them apart while LAG_S
+// itself stays byte-identical (same |value| either way).
+static void test_lag_signed_distinguishes_lead_from_lag(void)
+{
+    TEST_SECTION("firing_score: LAG_SIGNED_S sees direction that LAG_S (unchanged) cannot");
+    firing_score_cfg_t cfg = mk_cfg();
+    firing_segment_score_t behind, ahead;
+
+    { // ramp-up, actual trails target the whole way -- BEHIND schedule.
+        firing_score_seg_t seg;
+        bool cap = true;
+        firing_score_seg_begin(&seg, &cfg, 0, 50.0f, 100.0f, 30.0f, 100.0f);
+        for (int t = 0; t < 200; t++) firing_score_seg_tick(&seg, &cap, 100.0f, 99.5f, false, 1.0f);
+        TEST_CHECK(firing_score_seg_finish(&seg, &behind), "behind-schedule ramp scored");
+    }
+    { // ramp-up, actual leads target the whole way -- AHEAD of schedule.
+        firing_score_seg_t seg;
+        bool cap = true;
+        firing_score_seg_begin(&seg, &cfg, 0, 50.0f, 100.0f, 30.0f, 100.0f);
+        for (int t = 0; t < 200; t++) firing_score_seg_tick(&seg, &cap, 100.0f, 100.5f, false, 1.0f);
+        TEST_CHECK(firing_score_seg_finish(&seg, &ahead), "ahead-of-schedule ramp scored");
+    }
+
+    // LAG_S (unsigned, UNCHANGED behaviour): both read the same magnitude --
+    // this is the blind spot, demonstrated on the untouched production axis.
+    TEST_CHECK_NEAR(behind.value[FIRING_SUBSCORE_LAG_S], ahead.value[FIRING_SUBSCORE_LAG_S], 2.0f,
+                    "LAG_S alone cannot tell a lag from an equal lead (unchanged, by design)");
+
+    // LAG_SIGNED_S: opposite signs, same magnitude.
+    TEST_CHECK(behind.has[FIRING_SUBSCORE_LAG_SIGNED_S] && ahead.has[FIRING_SUBSCORE_LAG_SIGNED_S],
+               "both ramps report a signed lag");
+    TEST_CHECK(behind.value[FIRING_SUBSCORE_LAG_SIGNED_S] > 0.0f, "behind-schedule is positive");
+    TEST_CHECK(ahead.value[FIRING_SUBSCORE_LAG_SIGNED_S] < 0.0f, "ahead-of-schedule is negative");
+    TEST_CHECK_NEAR(behind.value[FIRING_SUBSCORE_LAG_SIGNED_S], -ahead.value[FIRING_SUBSCORE_LAG_SIGNED_S], 2.0f,
+                    "same magnitude, opposite sign");
+}
+
+// Finding C, part 2: LAG_S drops exactly the ticks where a saturated zone is
+// still short of target -- the ticks where objective 1 is failing hardest.
+// LAG_SIGNED_S must see them. Negative test: gate the LAG_SIGNED_S feed in
+// firing_score_seg_tick() on `!(saturated_high && err < 0.0f)` (i.e. move it
+// after the infeasibility exclusion) -> lag_signed_samples drops to equal
+// lag_samples and this test goes red.
+static void test_lag_signed_includes_saturated_short_ticks(void)
+{
+    TEST_SECTION("firing_score: LAG_SIGNED_S is not blind to saturated-and-short ramp ticks");
+    firing_score_cfg_t cfg = mk_cfg();
+    firing_score_seg_t seg;
+    bool cap = true;
+    firing_score_seg_begin(&seg, &cfg, 0, 50.0f, 100.0f, 30.0f, 100.0f);
+    // 300 ticks saturated and far short of target (LAG_S drops these), then
+    // enough on-track ticks to clear min_scored_ticks so the segment is not
+    // dropped outright.
+    for (int t = 0; t < 300; t++) firing_score_seg_tick(&seg, &cap, 100.0f, 50.0f, true, 1.0f);
+    for (int t = 0; t < 50; t++) firing_score_seg_tick(&seg, &cap, 100.0f, 99.5f, false, 1.0f);
+    firing_segment_score_t s;
+    TEST_CHECK(firing_score_seg_finish(&seg, &s), "segment scored (the 50 on-track ticks clear min_scored_ticks)");
+    TEST_CHECK(s.has[FIRING_SUBSCORE_LAG_S] && s.has[FIRING_SUBSCORE_LAG_SIGNED_S], "both lag axes present");
+    // LAG_S saw only the 50 unsaturated ticks (all ~36s lag). LAG_SIGNED_S
+    // saw all 350 -- dominated by the 300 badly-behind saturated ticks, so
+    // its median must read far worse than LAG_S's.
+    TEST_CHECK(s.value[FIRING_SUBSCORE_LAG_SIGNED_S] > s.value[FIRING_SUBSCORE_LAG_S] + 100.0f,
+               "LAG_SIGNED_S reflects the saturated-short ticks LAG_S excludes");
+}
+
 // ---------------------------------------------------------------- compare
 
 static void add_seg(firing_score_set_t *set, uint8_t zone, firing_seg_kind_t kind, int16_t rate_bucket,
@@ -892,6 +1107,12 @@ void run_test_iter_tune(void)
     test_start_temperature_does_not_change_the_score();
     test_saturated_ticks_are_excluded();
     test_short_segment_dropped();
+    test_settle_time_distinguishes_ringing_from_quick_settle();
+    test_settle_time_never_settling_reads_as_worst_not_zero();
+    test_undershoot_measured_and_not_cancelled_by_recovery();
+    test_undershoot_makes_a_worse_trial_score_worse();
+    test_lag_signed_distinguishes_lead_from_lag();
+    test_lag_signed_includes_saturated_short_ticks();
     test_no_matched_pairs_is_first_class();
     test_different_profiles_still_compare();
     test_owner_floor_refuses_small_wins();
