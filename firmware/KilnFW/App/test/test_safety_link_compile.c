@@ -1255,6 +1255,10 @@ static const struct kilnlink_compat_frame s_compat_frames[] = {
     {"ROLLBACK_RESULT (0x25)", KILNLINK_ROLLBACK_RESULT_CMD, KILNLINK_ROLLBACK_RESULT_MIN_PROTOCOL,
      "8->9: \"new Pico -> ESP frame, SAFETY_CMD_ROLLBACK_RESULT (0x25)\" -- "
      "KILNLINK_MIN_COMPATIBLE NOT raised alongside this bump"},
+    {"STACK_MARGIN (0x2C)", KILNLINK_STACK_MARGIN_CMD, 13,
+     "12->13: new Pico -> ESP frame, SAFETY_CMD_STACK_MARGIN (0x2C), reply to "
+     "SAFETY_CMD_GET_STACK_MARGIN (0x2B) -- KILNLINK_MIN_COMPATIBLE NOT raised "
+     "alongside this bump, a pre-13 Pico simply never sends 0x2C"},
 };
 #define COMPAT_FRAME_COUNT (sizeof(s_compat_frames) / sizeof(s_compat_frames[0]))
 

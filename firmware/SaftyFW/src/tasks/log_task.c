@@ -21,6 +21,7 @@
 #include "console_uart.h"
 #include "link_task.h"
 #include "tx_watermark.h"
+#include "stack_margin_poller.h"
 
 // 2026-08-23, the CLEAR_TRIP-reboots-the-Pico investigation's final finding:
 // this was configMINIMAL_STACK_SIZE (256 words / 1KB) unmultiplied --
@@ -248,6 +249,17 @@ static void log_task_fn(void *arg)
                 }
             }
         }
+
+        // Live stack-margin poller: ONE task's high-water mark, once per
+        // this loop's own iteration (~500ms cadence, LOG_TASK_POLL_MS
+        // above) -- never more, per stack_margin_poller.h's own header
+        // comment on the 2026-08-23 watchdog-timing regression this is
+        // built to avoid repeating. Placed AFTER the log-processing block
+        // above and BEFORE this task's own watchdog check-in below, same
+        // ordering discipline as everything else in this loop: nothing
+        // here can block (stack_margin_poller_tick() is a single bounded
+        // FreeRTOS API call), so it cannot delay this check-in.
+        stack_margin_poller_tick();
 
         watchdog_task_checkin(WATCHDOG_CHECKIN_LOG_TASK);
     }

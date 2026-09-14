@@ -231,8 +231,52 @@
  * am about to reboot myself" notice, say), that change DOES need a bump
  * plus a link_frame_*_supported() gate like ROLLBACK_RESULT's -- the
  * argument above depends entirely on the request-triggered shape and does
- * not survive without it. */
-#define KILNLINK_PROTOCOL_VERSION 12
+ * not survive without it.
+ *
+ * 12 -> 13 (2026-09-14): SAFETY_CMD_GET_STACK_MARGIN (0x2B, ESP->Pico,
+ * kilnlink_get_stack_margin.h) and its reply SAFETY_CMD_STACK_MARGIN (0x2C,
+ * Pico->ESP, kilnlink_stack_margin.h) -- live per-task SaftyFW stack
+ * high-water marks, per docs/audits/saftyfw_live_stack_reporting_design_
+ * 2026-09-11.md and its impl audit
+ * docs/audits/saftyfw_live_stack_reporting_impl_2026-09-14.md.
+ *
+ * This pair is BUMPED, unlike the 12 (unbumped) REBOOT/REBOOT_RESULT
+ * precedent immediately above, because it fails that precedent's own test:
+ * "does an old peer, in either direction, ever receive a byte it does not
+ * know?" REBOOT/REBOOT_RESULT is request-triggered in both directions (an
+ * old Pico never emits 0x2A because it never understood a 0x29 to reply
+ * to). STACK_MARGIN is ALSO request-triggered (0x2C is only ever sent in
+ * reply to a 0x2B), so that half is fine on its own -- an old Pico simply
+ * never sends 0x2C. The break is the other direction: nothing here changed
+ * an EXISTING frame's shape, so a genuinely additive-only reading might
+ * suggest no bump is needed at all. But the actual hazard this project
+ * cares about (docs/LINK_PROTOCOL.md's "a peer would break" test) is not
+ * about frame length collisions here -- 0x2B/0x2C are brand-new ids an old
+ * peer's dispatch switch drops into its unrecognized-command default,
+ * exactly like an unbumped REBOOT would. It is bumped anyway, deliberately
+ * more conservative than the letter of that test, because this feature's
+ * whole purpose is safety-relevant stack-margin visibility during exactly
+ * the dual-reflash window (docs/MCP_SERVERS.md's flash section) where a
+ * skewed pair is already the single most common real-world failure mode in
+ * this codebase (project memory: "+121 crc/framing errors in 3 seconds" on
+ * a mismatched pair) -- a version-visible bump gives both
+ * flash_firmware()'s verification step and a human reading /api/status a
+ * cheap, explicit signal that the two processors were flashed together,
+ * rather than relying solely on absence-of-symptom (an old Pico silently
+ * never answering 0x2B) to notice the skew.
+ * KILNLINK_MIN_COMPATIBLE is NOT raised alongside this bump, same
+ * reasoning as every additive step above: a peer built against 7 through 12
+ * remains fully compatible with a 13-built peer for every frame that
+ * existed before this pass; it simply never receives the new stack-margin
+ * data (get_saftyfw_stack_margin()-style tooling on a 13 ESP talking to a
+ * pre-13 Pico gets NO_REPLY on 0x2B, exactly like any other unsupported
+ * request against an old peer, and must report absence honestly rather
+ * than a zero/fabricated reading).
+ * The separate UART LINK version (kilnlink_get_fw_version.h /
+ * KILNLINK_MIN_COMPATIBLE's sibling constant, currently 11) is UNCHANGED --
+ * this pass adds an application-level command pair; it does not touch the
+ * transport framing (start/length/CRC) at all. */
+#define KILNLINK_PROTOCOL_VERSION 13
 
 /* The oldest peer this build will talk to (docs/LINK_PROTOCOL.md section 4,
  * "What 'compatible' means"). Deliberately NOT bumped alongside the 5 -> 6

@@ -46,6 +46,8 @@
 #include "kilnlink/kilnlink_commit_config.h"
 #include "kilnlink/kilnlink_commit_config_rejected.h"
 #include "kilnlink/kilnlink_reboot_result.h"
+#include "kilnlink/kilnlink_stack_margin.h"
+#include "kilnlink/kilnlink_get_stack_margin.h"
 #include "kilnlink/kilnlink_rollback_result.h"
 #include "kilnlink/kilnlink_config_page.h"
 #include "kilnlink/kilnlink_context.h"
@@ -235,6 +237,10 @@ static void safety_count_cmd_byte(SafetyLinkClass *link, uint8_t cmd, uint8_t le
         link->stats.cmd_reboot_result_count++;
         link->stats.last_reboot_result_len = len;
         break;
+    case KILNLINK_STACK_MARGIN_CMD:
+        link->stats.cmd_stack_margin_count++;
+        link->stats.last_stack_margin_len = len;
+        break;
     default:
         /* Not counted here -- the switch in safety_drain_inbox_ex() below
          * already counts and records this exact case via
@@ -406,6 +412,18 @@ bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms, bool want_st
                     link->stashed_reboot_result = msg;
                     link->has_stashed_reboot_result = true;
                     link->stashed_reboot_result_tick = xTaskGetTickCount();
+                    safety_unlock(link);
+                }
+                break;
+            case KILNLINK_STACK_MARGIN_CMD: /* SAFETY_CMD_STACK_MARGIN (0x2C) -- the reply to
+                                              * SAFETY_CMD_GET_STACK_MARGIN (0x2B). ALWAYS stashed,
+                                              * same reasoning as REBOOT_RESULT/CT_AUTO_ZERO_STATUS
+                                              * above: one caller (safety_link_get_stack_margin()),
+                                              * serialized by xact_lock. */
+                if (msg.length == KILNLINK_STACK_MARGIN_LEN && safety_lock(link)) {
+                    link->stashed_stack_margin = msg;
+                    link->has_stashed_stack_margin = true;
+                    link->stashed_stack_margin_tick = xTaskGetTickCount();
                     safety_unlock(link);
                 }
                 break;
@@ -616,6 +634,27 @@ bool safety_take_stashed_reboot_result(SafetyLinkClass *link, uart_proto_message
             } else {
                 *out = link->stashed_reboot_result;
                 link->has_stashed_reboot_result = false;
+                took = true;
+            }
+        }
+        safety_unlock(link);
+    }
+    return took;
+}
+
+/* Takes the stashed STACK_MARGIN frame, same age-ceiling/take-once contract
+ * as safety_take_stashed_reboot_result() above. Consumed only by
+ * safety_link_get_stack_margin(). */
+bool safety_take_stashed_stack_margin(SafetyLinkClass *link, uart_proto_message_t *out)
+{
+    bool took = false;
+    if (safety_lock(link)) {
+        if (link->has_stashed_stack_margin) {
+            if (safety_elapsed_ms(link->stashed_stack_margin_tick) > SAFETY_STASHED_PAGE_MAX_AGE_MS) {
+                link->has_stashed_stack_margin = false; /* too old to be anyone's reply */
+            } else {
+                *out = link->stashed_stack_margin;
+                link->has_stashed_stack_margin = false;
                 took = true;
             }
         }

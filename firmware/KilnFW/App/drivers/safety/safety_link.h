@@ -160,6 +160,7 @@
 
 #include "kilnlink/kilnlink_frame.h"
 #include "kilnlink/kilnlink_ct_auto_zero_status.h"
+#include "kilnlink/kilnlink_stack_margin.h"
 #include "kilnlink/kilnlink_config_page.h"
 #include "kilnlink/kilnlink_param_value.h"
 #include "kilnlink/kilnlink_frame_a_offsets.h" /* KILNLINK_FRAME_A_* -- single source of truth for
@@ -1071,6 +1072,7 @@ typedef struct {
     uint32_t cmd_rollback_result_count;           /* KILNLINK_ROLLBACK_RESULT_CMD (0x25) */
     uint32_t cmd_ct_auto_zero_status_count;       /* KILNLINK_CT_AUTO_ZERO_STATUS_CMD (0x28) */
     uint32_t cmd_reboot_result_count;             /* KILNLINK_REBOOT_RESULT_CMD (0x2A) */
+    uint32_t cmd_stack_margin_count;              /* KILNLINK_STACK_MARGIN_CMD (0x2C) */
 
     /* 2026-08-23, size-window follow-up: the histogram above proves WHICH
      * cmd byte a dequeued frame carried, but says nothing about how LONG it
@@ -1098,6 +1100,7 @@ typedef struct {
     uint8_t last_rollback_result_len;
     uint8_t last_ct_auto_zero_status_len;
     uint8_t last_reboot_result_len;
+    uint8_t last_stack_margin_len;
 
     /* HW_ABSTRACTION.md "Still open", 2026-09-06: on-board ESP<->Pico link
      * reply latency, measured in safety_exchange() (safety_link_inbox.c)
@@ -1301,6 +1304,17 @@ typedef struct {
     uart_proto_message_t stashed_reboot_result;
     bool                 has_stashed_reboot_result;
     TickType_t           stashed_reboot_result_tick;
+
+    /* KILNLINK_STACK_MARGIN_CMD (0x2C) -- the reply to SAFETY_CMD_GET_STACK_
+     * MARGIN (0x2B, KILNLINK_PROTOCOL_VERSION 13). Same "always stashed, one
+     * caller (safety_link_get_stack_margin()), serialized by xact_lock"
+     * pattern as stashed_reboot_result above -- there is exactly one
+     * consumer and nothing to match a reply against beyond "most recent
+     * request", so the out-param plumbing safety_drain_inbox_ex() offers
+     * CT_CAL/CONFIG_PAGE/etc buys nothing here. */
+    uart_proto_message_t stashed_stack_margin;
+    bool                 has_stashed_stack_margin;
+    TickType_t           stashed_stack_margin_tick;
 
     safety_link_stats_t stats;
     /* Running sum backing stats.link_reply_us_mean -- kept outside
@@ -2265,6 +2279,44 @@ esp_err_t safety_link_send_set_ct_cal(SafetyLinkClass *link, uint8_t channel, bo
  * on success. */
 esp_err_t safety_link_get_ct_cal(SafetyLinkClass *link, uint8_t *out, size_t out_cap,
                                   size_t *out_len);
+
+/* SAFETY_CMD_GET_STACK_MARGIN (0x2B) / SAFETY_CMD_STACK_MARGIN (0x2C reply),
+ * KILNLINK_PROTOCOL_VERSION 13 -- docs/audits/saftyfw_live_stack_reporting_
+ * design_2026-09-11.md and its impl audit
+ * docs/audits/saftyfw_live_stack_reporting_impl_2026-09-14.md.
+ *
+ * Same request/reply/stash shape as safety_link_send_reboot() (one caller,
+ * serialized by xact_lock, reply always stashed rather than out-param
+ * plumbed -- see stashed_stack_margin's own comment above), NOT the CT_CAL
+ * shape (that one threads a want/got pair through safety_drain_inbox_ex()).
+ * Live, blocking round trip -- call from a bridge/app task (e.g. a future
+ * GET /api/saftyfw_stack_margin handler), never from anything latency-
+ * critical. This is expected to be polled SLOWLY (this data changes on the
+ * order of minutes/boots, not the ~1 Hz DIAG frame) -- there is no benefit
+ * to polling it any faster, and every call is a live round trip with no
+ * cache of its own.
+ *
+ * On success, decodes the Pico's KILNLINK_STACK_MARGIN_CMD reply into
+ * `out` (kilnlink_stack_margin_t, kilnlink_stack_margin.h). Units: WORDS,
+ * not bytes -- see that header's own "UNITS" section; ESP-IDF's own
+ * get_stack_margin() reports BYTES, so do not compare the two processors'
+ * numbers without converting one of them.
+ *
+ * FLOOR, NOT WORST CASE: every value is the tightest margin OBSERVED since
+ * the Pico's own boot, on whatever code paths it has actually taken --
+ * check `out->rounds_completed` before trusting every entry (0 means the
+ * poller has not finished its first full round-robin cycle and at least
+ * one entry is still KILNLINK_STACK_MARGIN_UNMEASURED). Any surfaced
+ * rendering of this data must repeat this caveat in its own text.
+ *
+ * Returns ESP_ERR_INVALID_ARG for a NULL link/out, ESP_ERR_INVALID_STATE if
+ * the driver isn't initialized, ESP_ERR_TIMEOUT if the request was never
+ * ACKed or no STACK_MARGIN reply arrived within SAFETY_LINK_REPLY_TIMEOUT_MS
+ * (including a peer built before protocol 13, which has no dispatch case
+ * for 0x2B at all and never replies -- silence, never a fabricated zero
+ * reading), ESP_FAIL if a reply arrived but failed to decode, ESP_OK on
+ * success. */
+esp_err_t safety_link_get_stack_margin(SafetyLinkClass *link, kilnlink_stack_margin_t *out);
 
 /* CT_COMMISSIONING_PLAN.md step 2 -- SAFETY_CMD_CT_AUTO_ZERO_BEGIN (0x26),
  * fire-and-forget, same contract as safety_link_send_set_ct_cal(): only

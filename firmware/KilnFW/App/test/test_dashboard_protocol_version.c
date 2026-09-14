@@ -1,7 +1,7 @@
 // test_dashboard_protocol_version.c -- proves dashboard_http.c's
 // GET /api/status field `self_protocol_version` reports this firmware's
 // ESP<->Pico kilnlink version (KILNLINK_PROTOCOL_VERSION, CommonFW's
-// kilnlink_version.h, currently 12), not the PC<->ESP benchproto UART
+// kilnlink_version.h, currently 13), not the PC<->ESP benchproto UART
 // version (UART_PROTOCOL_VERSION, uart_task_ids.h, currently 11).
 //
 // dashboard_http.h documents the field as paired with `peer_protocol_version`

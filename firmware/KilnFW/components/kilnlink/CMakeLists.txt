@@ -75,5 +75,10 @@ idf_component_register(
          "${KILNLINK_DIR}/src/kilnlink_ct_auto_zero_begin.c"
          "${KILNLINK_DIR}/src/kilnlink_get_ct_auto_zero.c"
          "${KILNLINK_DIR}/src/kilnlink_ct_auto_zero_status.c"
+         # SAFETY_CMD_GET_STACK_MARGIN (0x2B) / SAFETY_CMD_STACK_MARGIN (0x2C)
+         # -- live per-task SaftyFW stack high-water marks, KILNLINK_PROTOCOL_
+         # VERSION 13. docs/audits/saftyfw_live_stack_reporting_impl_2026-09-14.md.
+         "${KILNLINK_DIR}/src/kilnlink_get_stack_margin.c"
+         "${KILNLINK_DIR}/src/kilnlink_stack_margin.c"
     INCLUDE_DIRS "${KILNLINK_DIR}/include"
 )

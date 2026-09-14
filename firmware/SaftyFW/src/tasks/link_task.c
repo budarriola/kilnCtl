@@ -100,6 +100,9 @@
 #include "kilnlink/kilnlink_get_ct_auto_zero.h" // SAFETY_CMD_GET_CT_AUTO_ZERO (0x27), see link_task_handle_get_ct_auto_zero()
 #include "kilnlink/kilnlink_get_config_page.h" // SAFETY_CMD_GET_CONFIG_PAGE (0x24), see link_task_handle_get_config_page()
 #include "kilnlink/kilnlink_get_ct_cal.h" // SAFETY_CMD_GET_CT_CAL (0x22), see link_task_handle_get_ct_cal()
+#include "kilnlink/kilnlink_get_stack_margin.h" // SAFETY_CMD_GET_STACK_MARGIN (0x2B), see link_task_handle_get_stack_margin()
+#include "kilnlink/kilnlink_stack_margin.h" // SAFETY_CMD_STACK_MARGIN (0x2C) reply, see link_task_send_stack_margin()
+#include "stack_margin_poller.h"
 #include "kilnlink/kilnlink_get_param.h" // SAFETY_CMD_GET_PARAM (0x23), see link_task_handle_get_param()
 #include "kilnlink/kilnlink_inject_tc.h" // SAFETY_CMD_INJECT_TC (0x21), see link_task_handle_inject_tc()
 #include "kilnlink/kilnlink_param.h" // SAFETY_CMD_PARAM (0x1E reply), see link_task_send_param()
@@ -1605,6 +1608,43 @@ static void link_task_handle_get_ct_cal(const kilnlink_frame_t *frame)
     link_task_send_ct_cal();
 }
 
+// SAFETY_CMD_STACK_MARGIN (0x2C) reply -- sent in answer to
+// SAFETY_CMD_GET_STACK_MARGIN (link_task_handle_get_stack_margin() below).
+// KILNLINK_PROTOCOL_VERSION 13. Reports stack_margin_poller.c's CACHED
+// snapshot, never a fresh synchronous measurement -- see that module's own
+// header comment for why (the 2026-08-23 watchdog-timing regression this
+// design avoids repeating).
+static void link_task_send_stack_margin(void)
+{
+    kilnlink_stack_margin_t snapshot;
+    stack_margin_poller_snapshot(&snapshot);
+
+    uint8_t payload[KILNLINK_STACK_MARGIN_LEN];
+    kilnlink_stack_margin_status_t status;
+    size_t len = kilnlink_stack_margin_encode(&snapshot, payload, sizeof(payload), &status);
+    if (len == 0) {
+        return; // shouldn't happen for a well-formed frame built from a fixed-size local buffer
+    }
+    link_task_send_broadcast(payload, (uint8_t)len);
+}
+
+// SAFETY_CMD_GET_STACK_MARGIN (0x2B), request only -- CommonFW/docs/
+// LINK_PROTOCOL.md sec 4, KILNLINK_PROTOCOL_VERSION 13. Same shape as
+// SAFETY_CMD_GET_CT_CAL above: answer every copy seen (the ESP is the side
+// allowed to retry/poll at its own slow cadence), reply via
+// link_task_send_stack_margin() under the reply's own id (0x2C).
+static void link_task_handle_get_stack_margin(const kilnlink_frame_t *frame)
+{
+    kilnlink_get_stack_margin_t msg;
+    kilnlink_get_stack_margin_status_t dstatus =
+        kilnlink_get_stack_margin_decode(frame->payload, frame->length, &msg);
+    if (dstatus != KILNLINK_GET_STACK_MARGIN_OK) {
+        return; // malformed/wrong-length/wrong-cmd -- untrusted wire input
+    }
+    (void)msg; // no fields
+    link_task_send_stack_margin();
+}
+
 // SAFETY_CMD_CT_AUTO_ZERO_BEGIN (0x26), CT_COMMISSIONING_PLAN.md step 2.
 // Fire-and-forget, like SET_CT_CAL: never ACKed on the wire. Only ARMS
 // current_task.c's own accumulator (current_task_ct_auto_zero_begin()) --
@@ -2403,6 +2443,14 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
         // no arguments -- same convention as LINK_FRAME_FW_VERSION_CMD above.
         if (frame.length == 1) {
             link_task_handle_get_ct_cal(&frame);
+        }
+        break;
+    case LINK_FRAME_GET_STACK_MARGIN_CMD:
+        // Own id (0x2B), KILNLINK_PROTOCOL_VERSION 13. The ESP's request is
+        // exactly 1 byte, no arguments -- same convention as
+        // LINK_FRAME_GET_CT_CAL_CMD above.
+        if (frame.length == 1) {
+            link_task_handle_get_stack_margin(&frame);
         }
         break;
     case LINK_FRAME_CT_AUTO_ZERO_BEGIN_CMD:

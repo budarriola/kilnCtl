@@ -56,6 +56,8 @@
 #include "kilnlink/kilnlink_set_log_level.h"
 #include "kilnlink/kilnlink_set_param.h"
 #include "kilnlink/kilnlink_version.h"
+#include "kilnlink/kilnlink_stack_margin.h"
+#include "kilnlink/kilnlink_get_stack_margin.h"
 
 /* TODO.md owner-report item 3 (2026-08-21): zones_config_get_safety_tc_type()/
  * zones_config_is_valid() for safety_sync_tc_type() below. This is a real,
@@ -776,6 +778,88 @@ esp_err_t safety_link_send_reboot(SafetyLinkClass *link, safety_link_reboot_outc
     }
     ESP_LOGW(TAG, "reboot: REFUSED by the safety processor (reason=%u)", (unsigned)result.reason);
     *out_outcome = SAFETY_LINK_REBOOT_OUTCOME_REFUSED;
+    return ESP_OK;
+}
+
+/* SAFETY_CMD_GET_STACK_MARGIN (0x2B) / SAFETY_CMD_STACK_MARGIN (0x2C reply),
+ * KILNLINK_PROTOCOL_VERSION 13 -- see safety_link.h's doc comment for the
+ * full contract. Structured like safety_link_send_reboot() above (xact_lock,
+ * clear-any-stale-stash-first, drain, stashed-reply take), NOT like
+ * safety_link_get_ct_cal() (which threads a want/got pair through
+ * safety_drain_inbox_ex()) -- see stashed_stack_margin's own comment in
+ * safety_link.h for why. */
+esp_err_t safety_link_get_stack_margin(SafetyLinkClass *link, kilnlink_stack_margin_t *out)
+{
+    if (!link || !out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    kilnlink_get_stack_margin_t req = {0};
+    uint8_t request[KILNLINK_GET_STACK_MARGIN_LEN];
+    kilnlink_get_stack_margin_status_t req_status = KILNLINK_GET_STACK_MARGIN_OK;
+    size_t req_len = kilnlink_get_stack_margin_encode(&req, request, sizeof(request), &req_status);
+    if (req_len == 0) {
+        ESP_LOGE(TAG, "get_stack_margin: encode failed (status=%d)", (int)req_status);
+        return ESP_FAIL;
+    }
+
+    if (xSemaphoreTake(link->xact_lock, pdMS_TO_TICKS(SAFETY_XACT_LOCK_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGE(TAG, "get_stack_margin: timed out after %ums waiting for the safety link "
+                      "transaction lock", (unsigned)SAFETY_XACT_LOCK_TIMEOUT_MS);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    /* A reply stashed by a PRIOR request must never be read as this one's
+     * answer -- same reasoning as safety_link_send_reboot()'s own stale-take
+     * above. */
+    uart_proto_message_t stale;
+    (void)safety_take_stashed_stack_margin(link, &stale);
+    (void)safety_drain_inbox(link, 0);
+
+    if (safety_lock(link)) {
+        link->stats.frames_sent++;
+        safety_unlock(link);
+    }
+
+    esp_err_t err = uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY,
+                                                  UART_TASK_ID_SAFETY, UART_TASK_ID_SAFETY,
+                                                  request, req_len);
+    if (err != ESP_OK) {
+        if (safety_lock(link)) {
+            link->stats.timeouts++;
+            safety_unlock(link);
+        }
+        xSemaphoreGive(link->xact_lock);
+        return err;
+    }
+
+    (void)safety_drain_inbox(link, SAFETY_LINK_REPLY_TIMEOUT_MS);
+
+    uart_proto_message_t reply;
+    bool got_reply = safety_take_stashed_stack_margin(link, &reply);
+    xSemaphoreGive(link->xact_lock);
+
+    if (!got_reply) {
+        /* Silence -- a Pico too old to have a dispatch case for 0x2B, a lost
+         * reply, or a dead link. Never fabricate a reading. */
+        if (safety_lock(link)) {
+            link->stats.timeouts++;
+            safety_unlock(link);
+        }
+        ESP_LOGW(TAG, "get_stack_margin: no STACK_MARGIN reply within %ums (a safety processor "
+                      "predating KILNLINK_PROTOCOL_VERSION 13 answers exactly like this)",
+                 (unsigned)SAFETY_LINK_REPLY_TIMEOUT_MS);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    if (kilnlink_stack_margin_decode(reply.payload, reply.length, out) != KILNLINK_STACK_MARGIN_OK) {
+        ESP_LOGE(TAG, "get_stack_margin: a STACK_MARGIN-shaped frame arrived but failed to decode");
+        return ESP_FAIL;
+    }
+
     return ESP_OK;
 }
 

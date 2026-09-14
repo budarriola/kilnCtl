@@ -66,6 +66,8 @@ add_library(kilnlink STATIC
     src/kilnlink_ct_auto_zero_begin.c
     src/kilnlink_get_ct_auto_zero.c
     src/kilnlink_ct_auto_zero_status.c
+    src/kilnlink_get_stack_margin.c
+    src/kilnlink_stack_margin.c
 )
 target_include_directories(kilnlink PUBLIC include)
 set_target_properties(kilnlink PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
@@ -401,6 +403,24 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         target_compile_options(test_reboot_result PRIVATE -Wall -Wextra -Werror)
     endif()
     add_test(NAME test_reboot_result COMMAND test_reboot_result)
+
+    add_executable(test_get_stack_margin test/test_get_stack_margin.c)
+    target_link_libraries(test_get_stack_margin PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_get_stack_margin PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_get_stack_margin PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_get_stack_margin COMMAND test_get_stack_margin)
+
+    add_executable(test_stack_margin test/test_stack_margin.c)
+    target_link_libraries(test_stack_margin PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_stack_margin PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_stack_margin PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_stack_margin COMMAND test_stack_margin)
 
     add_executable(test_inject_tc test/test_inject_tc.c)
     target_link_libraries(test_inject_tc PRIVATE kilnlink)

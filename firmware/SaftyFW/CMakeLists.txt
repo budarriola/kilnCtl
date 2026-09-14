@@ -137,6 +137,10 @@ set(SAFTYFW_APP_SOURCES
     # flags.c) -- see link_diag_flags.h.
     src/link_diag_flags.c
     src/tasks/reboot_announce.c
+    # Live per-task stack high-water-mark round-robin sampler, KILNLINK_
+    # PROTOCOL_VERSION 13 (docs/audits/saftyfw_live_stack_reporting_impl_
+    # 2026-09-14.md) -- see stack_margin_poller.h for the design rationale.
+    src/tasks/stack_margin_poller.c
     src/tasks/log_task.c
     src/tasks/tx_watermark.c
     src/tasks/update_task.c

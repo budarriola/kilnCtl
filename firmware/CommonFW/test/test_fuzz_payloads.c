@@ -84,6 +84,8 @@
 #include "kilnlink/kilnlink_set_ct_cal.h"
 #include "kilnlink/kilnlink_set_log_level.h"
 #include "kilnlink/kilnlink_set_param.h"
+#include "kilnlink/kilnlink_get_stack_margin.h"
+#include "kilnlink/kilnlink_stack_margin.h"
 #include "kilnlink/kilnlink_status.h"
 #include "kilnlink/kilnlink_trip.h"
 
@@ -172,6 +174,8 @@ typedef struct {
         kilnlink_reboot_t reboot;
         kilnlink_reboot_result_t reboot_result;
         kilnlink_fw_version_t fw_version;
+        kilnlink_get_stack_margin_t get_stack_margin;
+        kilnlink_stack_margin_t stack_margin;
     } out;
     uint8_t post[CANARY_LEN];
 } guarded_out_t;
@@ -255,6 +259,8 @@ DECL_ADAPTER(rollback_result, KILNLINK_ROLLBACK_RESULT_LEN + 32);
 DECL_ADAPTER(reboot, KILNLINK_REBOOT_LEN + 32);
 DECL_ADAPTER(reboot_result, KILNLINK_REBOOT_RESULT_LEN + 32);
 DECL_ADAPTER(fw_version, KILNLINK_FW_VERSION_MAX_LEN + 32);
+DECL_ADAPTER(get_stack_margin, KILNLINK_GET_STACK_MARGIN_LEN + 32);
+DECL_ADAPTER(stack_margin, KILNLINK_STACK_MARGIN_LEN + 32);
 
 static int decode_context(const uint8_t *p, size_t len)
 {
@@ -479,6 +485,20 @@ static int decode_fw_version(const uint8_t *p, size_t len)
     arm_canaries(&g_fw_version);
     int rc = (int)kilnlink_fw_version_decode(p, len, &g_fw_version.out.fw_version);
     check_canaries(&g_fw_version, "kilnlink_fw_version_decode", ++g_fw_version_calls);
+    return rc;
+}
+static int decode_get_stack_margin(const uint8_t *p, size_t len)
+{
+    arm_canaries(&g_get_stack_margin);
+    int rc = (int)kilnlink_get_stack_margin_decode(p, len, &g_get_stack_margin.out.get_stack_margin);
+    check_canaries(&g_get_stack_margin, "kilnlink_get_stack_margin_decode", ++g_get_stack_margin_calls);
+    return rc;
+}
+static int decode_stack_margin(const uint8_t *p, size_t len)
+{
+    arm_canaries(&g_stack_margin);
+    int rc = (int)kilnlink_stack_margin_decode(p, len, &g_stack_margin.out.stack_margin);
+    check_canaries(&g_stack_margin, "kilnlink_stack_margin_decode", ++g_stack_margin_calls);
     return rc;
 }
 
@@ -782,6 +802,19 @@ static size_t build_valid_fw_version(uint8_t *out, size_t out_cap)
     kilnlink_fw_version_status_t st;
     return kilnlink_fw_version_encode(&msg, out, out_cap, &st);
 }
+static size_t build_valid_stack_margin(uint8_t *out, size_t out_cap)
+{
+    kilnlink_stack_margin_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.rounds_completed = 3;
+    for (unsigned i = 0; i < KILNLINK_STACK_MARGIN_NUM_TASKS; ++i) {
+        msg.entries[i].task_id = (uint8_t)i;
+        msg.entries[i].high_water_words = (uint16_t)(100 + i * 37);
+        msg.entries[i].stack_total_words = (uint16_t)(256 + i * 128);
+    }
+    kilnlink_stack_margin_status_t st;
+    return kilnlink_stack_margin_encode(&msg, out, out_cap, &st);
+}
 /* Fixed 1-byte "cmd only" frames -- no variable structure for a bit-flip/
  * truncate corpus to add beyond the length sweep. */
 static size_t build_valid_none(uint8_t *out, size_t out_cap)
@@ -852,6 +885,8 @@ static const decoder_case_t k_cases[] = {
     {"kilnlink_reboot_result_decode", decode_reboot_result, build_valid_reboot_result,
      reboot_result_MAX_LEN, 0},
     {"kilnlink_fw_version_decode", decode_fw_version, build_valid_fw_version, fw_version_MAX_LEN, 0},
+    {"kilnlink_get_stack_margin_decode", decode_get_stack_margin, build_valid_none, get_stack_margin_MAX_LEN, 0},
+    {"kilnlink_stack_margin_decode", decode_stack_margin, build_valid_stack_margin, stack_margin_MAX_LEN, 0},
 };
 
 #define NUM_CASES (sizeof(k_cases) / sizeof(k_cases[0]))

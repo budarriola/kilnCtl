@@ -45,6 +45,7 @@
       "kilnlink_get_ct_cal.h:KILNLINK_GET_CT_CAL_LEN=1u",
       "kilnlink_get_fw_version.h:KILNLINK_GET_FW_VERSION_LEN=1u",
       "kilnlink_get_param.h:KILNLINK_GET_PARAM_LEN=3u",
+      "kilnlink_get_stack_margin.h:KILNLINK_GET_STACK_MARGIN_LEN=1u",
       "kilnlink_inject_tc.h:KILNLINK_INJECT_TC_LEN=11u",
       "kilnlink_param.h:KILNLINK_PARAM_HDR_LEN=5u",
       "kilnlink_param.h:KILNLINK_PARAM_MAX_LEN=(KILNLINK_PARAM_HDR_LEN + 4u)",
@@ -61,6 +62,8 @@
       "kilnlink_set_log_level.h:KILNLINK_SET_LOG_LEVEL_LEN=2u",
       "kilnlink_set_param.h:KILNLINK_SET_PARAM_HDR_LEN=4u",
       "kilnlink_set_param.h:KILNLINK_SET_PARAM_MAX_LEN=(KILNLINK_SET_PARAM_HDR_LEN + 4u)",
+      "kilnlink_stack_margin.h:KILNLINK_STACK_MARGIN_ENTRY_LEN=5u",
+      "kilnlink_stack_margin.h:KILNLINK_STACK_MARGIN_LEN=(1u + 1u + KILNLINK_STACK_MARGIN_NUM_TASKS * KILNLINK_STACK_MARGIN_ENTRY_LEN)",
       "kilnlink_status.h:KILNLINK_STATUS_LEN=KILNLINK_STATUS_LEN_V1",
       "kilnlink_status.h:KILNLINK_STATUS_LEN_V1=23u",
       "kilnlink_status.h:KILNLINK_STATUS_LEN_V2=24u",
@@ -72,6 +75,7 @@
       "link_frame.h:LINK_FRAME_FW_VERSION_CMD=0x0Bu",
       "link_frame.h:LINK_FRAME_GET_CT_AUTO_ZERO_CMD=0x27u",
       "link_frame.h:LINK_FRAME_GET_CT_CAL_CMD=0x22u",
+      "link_frame.h:LINK_FRAME_GET_STACK_MARGIN_CMD=0x2Bu",
       "link_frame.h:LINK_FRAME_PUSH_CONTEXT_CMD=0x07u",
       "link_frame.h:LINK_FRAME_REBOOT_CMD=0x29u",
       "link_frame.h:LINK_FRAME_REBOOT_RESULT_CMD=0x2Au",
@@ -80,6 +84,7 @@
       "link_frame.h:LINK_FRAME_SET_CONFIG_CMD=0x16u",
       "link_frame.h:LINK_FRAME_SET_CT_CAL_CMD=0x19u",
       "link_frame.h:LINK_FRAME_SET_FIRING_CEILING_CMD=0x09u",
+      "link_frame.h:LINK_FRAME_STACK_MARGIN_CMD=0x2Cu",
       "link_frame.h:LINK_FRAME_STATUS_CMD=KILNLINK_FRAME_A_CMD",
       "link_frame.h:LINK_FRAME_UPDATE_ABORT_CMD=0x13u",
       "link_frame.h:LINK_FRAME_UPDATE_BEGIN_CMD=0x10u",
@@ -121,8 +126,8 @@
       "uart_task_ids.h:SAFETY_CMD_UPDATE_END=0x12u",
       "uart_task_ids.h:SAFETY_CMD_UPDATE_STATUS=0x14u"
     ],
-    "fingerprint": "f2b4a344ec289df0",
-    "version": 12
+    "fingerprint": "12442d5985bf6eb4",
+    "version": 13
   },
   "uart": {
     "defs": [

@@ -478,6 +478,21 @@ void link_frame_apply_set_ct_cal(const config_store_record_t *committed, uint8_t
 #define LINK_FRAME_REBOOT_CMD        0x29u
 #define LINK_FRAME_REBOOT_RESULT_CMD 0x2Au
 
+// SAFETY_CMD_GET_STACK_MARGIN (0x2B) / SAFETY_CMD_STACK_MARGIN (0x2C reply),
+// KILNLINK_PROTOCOL_VERSION 13 -- docs/audits/saftyfw_live_stack_reporting_
+// design_2026-09-11.md, impl audit docs/audits/saftyfw_live_stack_reporting_
+// impl_2026-09-14.md. Request-triggered in both directions, same "no old
+// peer can ever receive an id it does not know" shape as REBOOT/
+// REBOOT_RESULT above -- but this pair IS bumped (see kilnlink_version.h's
+// "12 -> 13" entry for why, a deliberate stricter-than-the-letter choice).
+// Answered by link_task_handle_get_stack_margin() -> stack_margin_poller.c's
+// cached snapshot, never measured synchronously inside the handler (see
+// that file's own header comment for why: measuring all nine tasks inside
+// one request-handling instant would repeat the 2026-08-23 watchdog-timing
+// regression this whole feature is designed to avoid).
+#define LINK_FRAME_GET_STACK_MARGIN_CMD 0x2Bu
+#define LINK_FRAME_STACK_MARGIN_CMD     0x2Cu
+
 // --- Update frames: SAFTYFW Phase 10, CommonFW/docs/UPDATE_PROTOCOL.md
 // section 4's frame table. Plain #define ids, same convention as every other
 // command byte in this file -- these are dispatched in src/tasks/link_task.c's
