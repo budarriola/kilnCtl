@@ -427,8 +427,19 @@ _ZONE_TUNING_READONLY_KEYS = {
 #: "no operating point recorded" sentinel (ZONE_MODEL_FIT_TEMP_UNKNOWN);
 #: read it as None-equivalent, never as a real 273-below fit.
 _ZONE_MODEL_FIT_READONLY_KEYS = {"model_fit_temp_c", "model_fit_ambient_c"}
+#: ZONES_CFG_VERSION 25->26 (docs/audits/zones_get_autotune_baseline_exposure_
+#: 2026-09-13.md): the K_dc adaptive_tune_refine_zone_locked() anchors its
+#: plausibility-ratio test and blend target to. zones_http_get.c now emits
+#: it unconditionally (previously write-only from the API's perspective),
+#: but zones_http_post_parse.c has no z%u_ key for it -- adaptive_tune.c is
+#: its only writer, and a whole-page POST must preserve whatever is stored.
+#: 0 means "no baseline recorded yet" (same sentinel convention as
+#: model_k_dc/hyst_c/coil_power_w) and is emitted raw. Same read-only class
+#: as the tuning_*/model_fit_* records above.
+_ZONE_AUTOTUNE_BASELINE_READONLY_KEYS = {"autotune_baseline_k_dc"}
 _ZONE_READONLY_KEYS = ({"index", "normal_current_measured", "normal_current_a"}
-                       | _ZONE_TUNING_READONLY_KEYS | _ZONE_MODEL_FIT_READONLY_KEYS)
+                       | _ZONE_TUNING_READONLY_KEYS | _ZONE_MODEL_FIT_READONLY_KEYS
+                       | _ZONE_AUTOTUNE_BASELINE_READONLY_KEYS)
 
 _TIMING_PROFILE_FIELD_FORM_KEY = {
     "name": "name",

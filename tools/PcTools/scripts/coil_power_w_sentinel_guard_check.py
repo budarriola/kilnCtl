@@ -70,6 +70,13 @@ ALLOWED_FILES = {
     "firmware/KilnFW/App/drivers/http/zones_http_post_parse.c",
     "firmware/KilnFW/App/drivers/control/zones_current_sweep_task.c",
     "firmware/KilnFW/App/drivers/control/zones_current_sweep_engine.c",
+    # 2026-09-14: test_zones_http.c's autotune_baseline_k_dc GET test
+    # mentions coil_power_w only in a comment, listing it alongside
+    # hyst_c/ease_off_window_mult as another 0-sentinel field on the same
+    # endpoint that must be emitted raw -- it does not read, write, or do
+    # arithmetic with the field. Reviewed: no new producer/consumer, no
+    # sentinel hazard.
+    "firmware/KilnFW/App/test/test_zones_http.c",
 }
 
 # The one file that actually consumes the value (does arithmetic with it,
