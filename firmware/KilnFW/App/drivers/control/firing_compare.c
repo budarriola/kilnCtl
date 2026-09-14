@@ -6,6 +6,12 @@
 #include <math.h>
 #include <string.h>
 
+bool firing_compare_subscore_votes(firing_subscore_t sub)
+{
+    if ((unsigned)sub >= (unsigned)FIRING_SUBSCORE_COUNT) return false;
+    return (FIRING_COMPARE_VOTING_MASK & (1u << (unsigned)sub)) != 0u;
+}
+
 float firing_compare_bar1_floor(firing_subscore_t sub, float rate_c_per_s)
 {
     if (sub == FIRING_SUBSCORE_LAG_S || sub == FIRING_SUBSCORE_LAG_SIGNED_S) {
@@ -101,10 +107,25 @@ firing_compare_verdict_t firing_compare(const firing_score_set_t *baseline, cons
         ss->n = (uint16_t)cnt[s];
         ss->improved = (uint16_t)improved[s];
         if (cnt[s] == 0) continue;
-        have_any_sample = true;
 
         ss->median_raw = median_of(raw[s], cnt[s]);
         ss->median_normalised = median_of(norm[s], cnt[s]);
+
+        // Measurement is unconditional above; ADJUDICATION happens only for
+        // axes explicitly enrolled in FIRING_COMPARE_VOTING_MASK. A
+        // report-only axis keeps its n/improved/medians (that is the whole
+        // point of measuring it) but cannot clear Bar 1, cannot fire the
+        // veto, cannot block an accept via degraded_untrusted, and stays out
+        // of the human composite so composites remain comparable with those
+        // recorded before any axis was added.
+        ss->votes = firing_compare_subscore_votes((firing_subscore_t)s);
+        if (!ss->votes) continue;
+
+        // NO_MATCHED_PAIRS means "this pair says nothing THE RULE can use".
+        // A report-only axis having samples does not change that, so this
+        // latch is set below the votes gate, not above it.
+        have_any_sample = true;
+
         composite_sum += ss->median_normalised;
         composite_n++;
 

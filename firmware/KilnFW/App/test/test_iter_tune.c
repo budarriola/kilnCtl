@@ -152,13 +152,17 @@ static void test_short_segment_dropped(void)
 // Negative test: comment out the `seg->settle_last_outside_s = seg->elapsed_s;`
 // line in firing_score.c's dwell tick branch -> both segments below read
 // settle_s == 0.0 and this test goes red.
+//
+// Excursion amplitudes here are sized against FIRING_SCORE_SETTLE_BAND_C,
+// which was re-sized from the plant (0.5 -> 2.0 degC) on 2026-09-14; see
+// docs/audits/firing_score_subscore_enrolment_2026-09-14.md.
 static void test_settle_time_distinguishes_ringing_from_quick_settle(void)
 {
     TEST_SECTION("firing_score: SETTLE_S sees a slow ring the old subscores could not");
     firing_score_cfg_t cfg = mk_cfg();
     firing_segment_score_t quick, ring;
 
-    // Quick settle: enters the 0.5C band immediately and never leaves.
+    // Quick settle: enters the settle band immediately and never leaves.
     {
         firing_score_seg_t seg;
         bool cap = true;
@@ -166,7 +170,7 @@ static void test_settle_time_distinguishes_ringing_from_quick_settle(void)
         for (int t = 0; t < 500; t++) firing_score_seg_tick(&seg, &cap, 100.0f, 100.1f, false, 1.0f);
         TEST_CHECK(firing_score_seg_finish(&seg, &quick), "quick-settle segment scored");
     }
-    // Rings well outside the 0.5C band for the first ~190s (same peak
+    // Rings well outside the settle band for the first ~190s (same peak
     // magnitude as the quick case would never reach at all, and no worse
     // eventual steady RMS), then settles cleanly for the remaining ~300s --
     // exactly the case Finding A says the old three subscores cannot tell
@@ -177,7 +181,7 @@ static void test_settle_time_distinguishes_ringing_from_quick_settle(void)
         bool cap = true;
         firing_score_seg_begin(&seg, &cfg, 0, 0.0f, 100.0f, 30.0f, 100.0f);
         for (int t = 0; t < 190; t++) {
-            float actual = 100.0f + ((t % 20 < 10) ? 1.0f : -1.0f); // +-1C, outside 0.5C band
+            float actual = 100.0f + ((t % 20 < 10) ? 3.0f : -3.0f); // +-3C, outside the settle band
             firing_score_seg_tick(&seg, &cap, 100.0f, actual, false, 1.0f);
         }
         for (int t = 0; t < 300; t++) firing_score_seg_tick(&seg, &cap, 100.0f, 100.1f, false, 1.0f);
@@ -193,26 +197,82 @@ static void test_settle_time_distinguishes_ringing_from_quick_settle(void)
                "SETTLE_S separates the two where peak/steady-RMS alone could not");
 }
 
-// A dwell that never comes to rest inside the settle band must NOT read as a
-// good (low/zero) settle time. Negative test: change the else-branch in
-// firing_score_seg_finish() to `out->value[...] = 0.0f` unconditionally ->
-// this test goes red (never_settles would report 0.0, same as "instant").
-static void test_settle_time_never_settling_reads_as_worst_not_zero(void)
+// A dwell that never comes to rest inside the settle band must not report a
+// NUMBER at all. Until 2026-09-14 it reported the segment's own duration,
+// which is the documented in-band-sentinel hazard: indistinguishable from a
+// slow-but-settled dwell, and consumed as a measurement by firing_compare's
+// plain difference. Measured consequence (audit R5): across six real
+// matched-condition captures the saturated readings for one dwell class
+// spread 131 s against a 60 s Bar-1 floor, i.e. the sentinel alone could
+// ACCEPT or REJECT between two identical-gain firings.
+//
+// Negative test: restore the old encoding (make seg_finish() report
+// settle_last_outside_s unconditionally, ignoring settle_outside_at_end)
+// -> has[SETTLE_S] becomes true with value ~= the duration and this goes red.
+static void test_settle_time_never_settling_reports_nothing_not_a_sentinel(void)
 {
-    TEST_SECTION("firing_score: a dwell that never settles reads as the worst case, not a good one");
+    TEST_SECTION("firing_score: a dwell that never settles reports NO settle time, not a sentinel");
     firing_score_cfg_t cfg = mk_cfg();
     firing_score_seg_t seg;
     bool cap = true;
     firing_score_seg_begin(&seg, &cfg, 0, 0.0f, 100.0f, 30.0f, 100.0f);
-    // Stays 2C off target (outside the 0.5C settle band) for the whole
-    // 400-tick segment. captured=true from the start so none of this is
-    // discarded by the capture-transient exclusion.
-    for (int t = 0; t < 400; t++) firing_score_seg_tick(&seg, &cap, 100.0f, 102.0f, false, 1.0f);
+    // Stays 4C off target (outside the settle band) for the whole 400-tick
+    // segment. captured=true from the start so none of this is discarded by
+    // the capture-transient exclusion.
+    for (int t = 0; t < 400; t++) firing_score_seg_tick(&seg, &cap, 100.0f, 104.0f, false, 1.0f);
     firing_segment_score_t s;
     TEST_CHECK(firing_score_seg_finish(&seg, &s), "segment scored");
-    TEST_CHECK(s.has[FIRING_SUBSCORE_SETTLE_S], "settle time is reported, not silently dropped");
-    TEST_CHECK(s.value[FIRING_SUBSCORE_SETTLE_S] > 390.0f,
-               "never-settled reads as ~full segment duration, the worst reading, not 0.0");
+    TEST_CHECK(!s.has[FIRING_SUBSCORE_SETTLE_S],
+               "never-settled reports has == false, the comparator's first-class 'nothing to say'");
+    TEST_CHECK(s.dwell_unsettled == 1,
+               "the FACT of not settling is still reported, out of band, for humans");
+
+    // A slow-but-settled dwell of the SAME length is now distinguishable: it
+    // reports a real number. Under the old encoding both read ~400 s.
+    firing_score_seg_t slow;
+    bool cap2 = true;
+    firing_score_seg_begin(&slow, &cfg, 0, 0.0f, 100.0f, 30.0f, 100.0f);
+    for (int t = 0; t < 395; t++) firing_score_seg_tick(&slow, &cap2, 100.0f, 104.0f, false, 1.0f);
+    for (int t = 0; t < 5; t++)   firing_score_seg_tick(&slow, &cap2, 100.0f, 100.1f, false, 1.0f);
+    firing_segment_score_t ss;
+    TEST_CHECK(firing_score_seg_finish(&slow, &ss), "slow-but-settled segment scored");
+    TEST_CHECK(ss.has[FIRING_SUBSCORE_SETTLE_S], "slow-but-settled DOES report a settle time");
+    TEST_CHECK(ss.dwell_unsettled == 0, "and is not counted as unsettled");
+}
+
+// A class merging a settled and an unsettled dwell must not let the settled
+// one's number stand in for the class -- that would resurrect the sentinel
+// one level up. Negative test: drop the `s == FIRING_SUBSCORE_SETTLE_S`
+// branch in firing_score_set_add()'s merge loop -> has becomes true and this
+// goes red.
+static void test_settle_merge_requires_both_dwells_to_have_settled(void)
+{
+    TEST_SECTION("firing_score: SETTLE_S merges only when BOTH same-class dwells settled");
+    firing_score_cfg_t cfg = mk_cfg();
+    firing_score_set_t set;
+    memset(&set, 0, sizeof(set));
+
+    // Settled dwell of this class.
+    {
+        firing_score_seg_t seg;
+        bool cap = true;
+        firing_score_seg_begin(&seg, &cfg, 0, 0.0f, 100.0f, 30.0f, 100.0f);
+        for (int t = 0; t < 300; t++) firing_score_seg_tick(&seg, &cap, 100.0f, 100.1f, false, 1.0f);
+        TEST_CHECK(firing_score_set_finish_segment(&set, &seg), "settled dwell added");
+    }
+    TEST_CHECK(set.entry[0].has[FIRING_SUBSCORE_SETTLE_S], "settled dwell alone reports a settle time");
+    // Same class, never settles.
+    {
+        firing_score_seg_t seg;
+        bool cap = true;
+        firing_score_seg_begin(&seg, &cfg, 0, 0.0f, 100.0f, 30.0f, 100.0f);
+        for (int t = 0; t < 300; t++) firing_score_seg_tick(&seg, &cap, 100.0f, 104.0f, false, 1.0f);
+        TEST_CHECK(firing_score_set_finish_segment(&set, &seg), "unsettled dwell merged into the class");
+    }
+    TEST_CHECK(set.count == 1, "both dwells are the same class");
+    TEST_CHECK(!set.entry[0].has[FIRING_SUBSCORE_SETTLE_S],
+               "the merged class reports no settle time once one of its dwells never settled");
+    TEST_CHECK(set.entry[0].dwell_unsettled == 1, "the unsettled count survives the merge");
 }
 
 // Objective 4b (undershoot): a dwell entered from below must be measured,
@@ -383,6 +443,111 @@ static void add_dwell(firing_score_set_t *set, int16_t temp_bucket, float entry,
     float v[FIRING_SUBSCORE_COUNT] = {0.0f, entry, steady};
     bool h[FIRING_SUBSCORE_COUNT] = {false, true, true};
     add_seg(set, 0, FIRING_SEG_DWELL, 0, temp_bucket, 0.0f, v, h, in_band);
+}
+
+// ------------------------------------- 2026-09-14 subscore-enrolment guards
+// (docs/audits/firing_score_subscore_enrolment_2026-09-14.md).
+//
+// THE REGRESSION THIS GUARDS. d41da85f added three sub-scores and raised
+// FIRING_SUBSCORE_COUNT 3 -> 6. Because firing_compare.c looped to
+// FIRING_SUBSCORE_COUNT in BOTH its accumulation and verdict loops, all
+// three were enrolled into Bar 1, the no-degradation veto, the low-n gate
+// and the composite by that increment alone -- no edit to firing_compare.c,
+// nothing in the commit message. Five of 660 A1 null comparisons flipped.
+// The two tests below fail if that ever happens again.
+
+// Guard 1: the voting set is pinned BY NAME. Adding a sub-score cannot
+// enrol it silently -- this test names every axis and its classification,
+// and firing_compare.h's _Static_assert refuses to compile an unclassified
+// one. Negative test: move FIRING_SUBSCORE_SETTLE_S from
+// FIRING_COMPARE_REPORT_ONLY_MASK to FIRING_COMPARE_VOTING_MASK -> red.
+static void test_subscore_vote_enrolment_is_explicit(void)
+{
+    TEST_SECTION("firing_compare: which sub-scores vote is an explicit, pinned list");
+
+    TEST_CHECK(firing_compare_subscore_votes(FIRING_SUBSCORE_LAG_S), "LAG_S votes");
+    TEST_CHECK(firing_compare_subscore_votes(FIRING_SUBSCORE_ENTRY_PEAK_C), "ENTRY_PEAK_C votes");
+    TEST_CHECK(firing_compare_subscore_votes(FIRING_SUBSCORE_STEADY_RMS_C), "STEADY_RMS_C votes");
+    TEST_CHECK(firing_compare_subscore_votes(FIRING_SUBSCORE_ENTRY_UNDERSHOOT_C), "ENTRY_UNDERSHOOT_C votes");
+
+    TEST_CHECK(!firing_compare_subscore_votes(FIRING_SUBSCORE_SETTLE_S),
+               "SETTLE_S is REPORT-ONLY (band just re-sized; not yet validated as a decision axis)");
+    TEST_CHECK(!firing_compare_subscore_votes(FIRING_SUBSCORE_LAG_SIGNED_S),
+               "LAG_SIGNED_S is REPORT-ONLY (signed: 'lower is better' cannot adjudicate it)");
+
+    // Exactly four voters, and every enum value classified exactly once.
+    int voters = 0;
+    for (int i = 0; i < FIRING_SUBSCORE_COUNT; i++) {
+        if (firing_compare_subscore_votes((firing_subscore_t)i)) voters++;
+    }
+    TEST_CHECK(voters == 4, "exactly four sub-scores vote -- a fifth is a deliberate act, not a side effect");
+    TEST_CHECK(FIRING_COMPARE_CLASSIFIED_MASK == FIRING_COMPARE_ALL_SUBSCORES_MASK,
+               "every sub-score is classified voting or report-only");
+    TEST_CHECK((FIRING_COMPARE_VOTING_MASK & FIRING_SUBSCORE_SIGNED_MASK) == 0u,
+               "no SIGNED sub-score is in the voting set");
+}
+
+// Guard 2: the behavioural half. A report-only axis is MEASURED (n, medians
+// all present) but cannot move a verdict in EITHER direction -- it can
+// neither manufacture an ACCEPT nor fire the veto, and it stays out of the
+// human composite. Negative test: delete the `if (!ss->votes) continue;`
+// line in firing_compare.c -> both halves go red.
+static void test_report_only_subscores_cannot_change_a_verdict(void)
+{
+    TEST_SECTION("firing_compare: a report-only sub-score is measured but never decides");
+
+    const float LAG_RATE = 100.0f / 3600.0f;   // 100 degC/hr ramp class
+    // Voting axes IDENTICAL in both sets; only the report-only axes differ.
+    for (int direction = 0; direction < 2; direction++) {
+        const float sign = (direction == 0) ? -1.0f : +1.0f; // "improvement" then "degradation"
+        firing_score_set_t base_set, trial_set;
+        memset(&base_set, 0, sizeof(base_set));
+        memset(&trial_set, 0, sizeof(trial_set));
+
+        for (uint8_t zone = 0; zone < 3; zone++) {
+            float vb[FIRING_SUBSCORE_COUNT] = {0};
+            bool  hb[FIRING_SUBSCORE_COUNT] = {0};
+            vb[FIRING_SUBSCORE_LAG_S] = 120.0f;             hb[FIRING_SUBSCORE_LAG_S] = true;
+            vb[FIRING_SUBSCORE_SETTLE_S] = 600.0f;          hb[FIRING_SUBSCORE_SETTLE_S] = true;
+            vb[FIRING_SUBSCORE_LAG_SIGNED_S] = 0.0f;        hb[FIRING_SUBSCORE_LAG_SIGNED_S] = true;
+            float vt[FIRING_SUBSCORE_COUNT];
+            bool  ht[FIRING_SUBSCORE_COUNT];
+            memcpy(vt, vb, sizeof(vt));
+            memcpy(ht, hb, sizeof(ht));
+            // Report-only axes moved by ~10 Bar-1 floors each (600 s against
+            // a 60 s settle floor; 180 s against the lag floor of
+            // 0.5/rate == 18 s).
+            vt[FIRING_SUBSCORE_SETTLE_S] = 600.0f + sign * 600.0f;
+            vt[FIRING_SUBSCORE_LAG_SIGNED_S] = sign * 180.0f;
+
+            add_seg(&base_set, zone, FIRING_SEG_RAMP_UP, 4, 4, LAG_RATE, vb, hb, 0.95f);
+            add_seg(&trial_set, zone, FIRING_SEG_RAMP_UP, 4, 4, LAG_RATE, vt, ht, 0.95f);
+        }
+
+        firing_compare_result_t r;
+        firing_compare_verdict_t v = firing_compare(&base_set, &trial_set, NULL, &r);
+
+        // Measured: both report-only axes have their full matched-pair
+        // statistics. This is not "excluded", it is "does not vote".
+        TEST_CHECK(r.sub[FIRING_SUBSCORE_SETTLE_S].n == 3, "SETTLE_S is still measured (n == 3)");
+        TEST_CHECK(r.sub[FIRING_SUBSCORE_LAG_SIGNED_S].n == 3, "LAG_SIGNED_S is still measured (n == 3)");
+        TEST_CHECK(!r.sub[FIRING_SUBSCORE_SETTLE_S].votes, "SETTLE_S is marked non-voting on the result");
+        TEST_CHECK(!r.sub[FIRING_SUBSCORE_LAG_SIGNED_S].votes, "LAG_SIGNED_S is marked non-voting");
+        TEST_CHECK(r.sub[FIRING_SUBSCORE_LAG_S].votes, "LAG_S is marked voting");
+
+        // Never decides: neither half of the verdict moves.
+        TEST_CHECK(!r.sub[FIRING_SUBSCORE_SETTLE_S].bar1_cleared, "a report-only axis never clears Bar 1");
+        TEST_CHECK(!r.sub[FIRING_SUBSCORE_LAG_SIGNED_S].bar1_cleared, "nor does the signed lag axis");
+        TEST_CHECK(!r.sub[FIRING_SUBSCORE_SETTLE_S].degraded, "a report-only axis never fires the veto");
+        TEST_CHECK(!r.sub[FIRING_SUBSCORE_LAG_SIGNED_S].degraded, "nor does the signed lag axis");
+        TEST_CHECK(!r.sub[FIRING_SUBSCORE_SETTLE_S].degraded_untrusted, "nor blocks an accept at low n");
+        TEST_CHECK(!r.sub[FIRING_SUBSCORE_LAG_SIGNED_S].degraded_untrusted, "nor does the signed lag axis");
+        TEST_CHECK(v == FIRING_COMPARE_INSUFFICIENT,
+                   "verdict is unchanged by a 10-floor swing on report-only axes alone");
+        // And the human composite stays comparable with pre-2026-09-13 ones.
+        TEST_CHECK_NEAR(r.composite_normalised, 0.0f, 0.001f,
+                        "the composite averages voting axes only");
+    }
 }
 
 static void test_no_matched_pairs_is_first_class(void)
@@ -1108,7 +1273,10 @@ void run_test_iter_tune(void)
     test_saturated_ticks_are_excluded();
     test_short_segment_dropped();
     test_settle_time_distinguishes_ringing_from_quick_settle();
-    test_settle_time_never_settling_reads_as_worst_not_zero();
+    test_settle_time_never_settling_reports_nothing_not_a_sentinel();
+    test_settle_merge_requires_both_dwells_to_have_settled();
+    test_subscore_vote_enrolment_is_explicit();
+    test_report_only_subscores_cannot_change_a_verdict();
     test_undershoot_measured_and_not_cancelled_by_recovery();
     test_undershoot_makes_a_worse_trial_score_worse();
     test_lag_signed_distinguishes_lead_from_lag();

@@ -58,6 +58,70 @@ extern "C" {
 // differences below 0.5 degC are explicitly not worth kiln time.
 #define FIRING_COMPARE_OWNER_FLOOR_C 0.5f
 
+// ---------------------------------------------------------------------------
+// WHICH SUB-SCORES VOTE (2026-09-14,
+// docs/audits/firing_score_subscore_enrolment_2026-09-14.md)
+//
+// Until this change both loops in firing_compare.c ran
+// `for (s = 0; s < FIRING_SUBSCORE_COUNT; s++)`, so the SIZE OF AN ENUM was
+// the decision rule: d41da85f raised FIRING_SUBSCORE_COUNT from 3 to 6 and
+// thereby enrolled three brand-new, unvalidated axes into Bar 1 (any one can
+// authorise a permanent gain change alone), the no-degradation veto, the
+// low-n degraded_untrusted gate and the human composite -- with no edit to
+// this file and no line in the commit message saying so. Five of 660 A1 null
+// comparisons flipped and A2's improvement count fell 6 -> 3 as a result.
+//
+// Enrolment is now an explicit, visible act: a sub-score votes if and only
+// if its bit is in FIRING_COMPARE_VOTING_MASK. Everything else is MEASURED
+// and REPORTED (n, medians, improved counts are all still computed for every
+// axis) but cannot move a verdict.
+//
+// Adding a sub-score without classifying it is a COMPILE ERROR, not a silent
+// enrolment: FIRING_COMPARE_CLASSIFIED_MASK must cover every enum value.
+//
+//   voting      -- validated axes with a magnitude definition this plant can
+//                  support: the three the pinned A1 bar was set against, plus
+//                  ENTRY_UNDERSHOOT_C (a correctly-signed magnitude closing a
+//                  measured accept-permissive gap, and measured never to fire
+//                  in the A1 null experiment).
+//   report-only -- SETTLE_S and LAG_SIGNED_S. SETTLE_S's band has just been
+//                  re-sized from the plant and its never-settles case
+//                  re-encoded; it votes again only once a matched-pair
+//                  measurement on real captures says it carries signal.
+//                  LAG_SIGNED_S is SIGNED, which no "lower is better"
+//                  comparator can adjudicate at all (see the static assert).
+#define FIRING_COMPARE_VOTING_MASK                                           \
+    ((1u << FIRING_SUBSCORE_LAG_S) | (1u << FIRING_SUBSCORE_ENTRY_PEAK_C) |  \
+     (1u << FIRING_SUBSCORE_STEADY_RMS_C) |                                  \
+     (1u << FIRING_SUBSCORE_ENTRY_UNDERSHOOT_C))
+
+#define FIRING_COMPARE_REPORT_ONLY_MASK                                      \
+    ((1u << FIRING_SUBSCORE_SETTLE_S) | (1u << FIRING_SUBSCORE_LAG_SIGNED_S))
+
+#define FIRING_COMPARE_CLASSIFIED_MASK \
+    (FIRING_COMPARE_VOTING_MASK | FIRING_COMPARE_REPORT_ONLY_MASK)
+
+#define FIRING_COMPARE_ALL_SUBSCORES_MASK ((1u << FIRING_SUBSCORE_COUNT) - 1u)
+
+// A new sub-score must be listed as voting OR report-only. If you just added
+// one to firing_subscore_t and landed here: decide, deliberately, whether it
+// may authorise a permanent gain change, and say so in the audit trail.
+_Static_assert(FIRING_COMPARE_CLASSIFIED_MASK == FIRING_COMPARE_ALL_SUBSCORES_MASK,
+               "every firing_subscore_t must be classified voting or report-only");
+// No axis may be in both.
+_Static_assert((FIRING_COMPARE_VOTING_MASK & FIRING_COMPARE_REPORT_ONLY_MASK) == 0u,
+               "a sub-score cannot be both voting and report-only");
+// A signed quantity cannot be adjudicated by an all-"lower is better"
+// comparator: "further ahead of schedule" would read as unbounded
+// improvement. See FIRING_SUBSCORE_SIGNED_MASK in firing_score.h.
+_Static_assert((FIRING_COMPARE_VOTING_MASK & FIRING_SUBSCORE_SIGNED_MASK) == 0u,
+               "a signed sub-score must never vote in a lower-is-better comparator");
+
+// True if this sub-score participates in Bar 1 / Bar 2 / the veto / the
+// composite. Exposed so tests and reporting can pin the voting set by name.
+bool firing_compare_subscore_votes(firing_subscore_t sub);
+// ---------------------------------------------------------------------------
+
 // Bar 2's minimum sample size and sign-consistency fraction (plan sec 3).
 #define FIRING_COMPARE_BAR2_MIN_N 5
 #define FIRING_COMPARE_BAR2_SIGN_FRACTION 0.75f
@@ -134,6 +198,9 @@ typedef struct {
     uint16_t improved;           // how many of those n were improvements (d < 0)
     float median_raw;            // median paired difference, sub-score's own units
     float median_normalised;     // median of d_i / bar1_floor_i; -1.0 == one owner floor better
+    bool  votes;                 // did this axis participate in the verdict at all?
+                                 // false == measured and reported only (see
+                                 // FIRING_COMPARE_VOTING_MASK).
     bool  bar1_cleared;
     bool  bar2_cleared;
     bool  degraded;              // median_normalised >= +1.0 with n >= VETO_MIN_N

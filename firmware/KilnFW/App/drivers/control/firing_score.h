@@ -99,21 +99,22 @@ extern "C" {
 #define FIRING_SCORE_LAG_SIGNED_BIN_S 2.0f
 #define FIRING_SCORE_LAG_SIGNED_CENTER_BIN (FIRING_SCORE_LAG_SIGNED_BINS / 2)
 
-// Settle-time band (finding A). Fixed at the project's 0.5 degC materiality
-// line (same value as FIRING_COMPARE_OWNER_FLOOR_C in firing_compare.h,
-// duplicated rather than shared because firing_score.h must stay free of any
-// dependency on firing_compare.h -- pure decision/measurement logic, same
-// posture as the header's own top-of-file note). A FRACTION of cfg.band_c
-// was the other option the audit named, but band_c is itself a per-profile,
-// per-zone configured tracking tolerance (5 degC default) chosen for
-// "captured vs not", not for "settled vs not" -- sizing the settle band off
-// it would make two firings with different band_c configs report
-// incomparable settle times for the identical physical trace. The 0.5 degC
-// floor is already the project-wide answer to "is this difference worth
-// caring about" (every other subscore's Bar-1 floor uses it too), so tying
-// settle time to the same constant keeps all four objectives judged against
-// one materiality standard instead of inventing a second one.
-#define FIRING_SCORE_SETTLE_BAND_C 0.5f
+// Settle-time band. RE-SIZED FROM THE PLANT, 2026-09-14
+// (docs/audits/firing_score_subscore_enrolment_2026-09-14.md). It was
+// 0.5 degC -- the project's materiality line -- which is the wrong quantity:
+// "differences below 0.5 degC are not worth chasing" says nothing about what
+// band this plant can HOLD, which is the only question a settle band asks.
+// Measured over every dwelling tick of the six logs/coupling/noise_floor_p7*
+// captures (33 dwell-zone instances), the fraction of ticks inside +/-0.5 degC
+// is 0.00-0.31 on every first dwell; inside +/-2.0 degC it is 0.79-1.00 on
+// every dwell-zone instance without exception, and 1.00 on all twelve of the
+// long second dwells. A band of 0.5 degC is therefore saturated at its worst
+// reading for essentially every real dwell (it carries no information); 2.0
+// degC is a band this plant demonstrably enters and remains inside, so the
+// elapsed time at which it does so is a measurement. 1.0/1.5 degC were also
+// evaluated (0.40-1.00 and 0.60-1.00 respectively) and rejected: both still
+// leave first-dwell z0 well short of holding.
+#define FIRING_SCORE_SETTLE_BAND_C 2.0f
 
 // Fixed capacity of one firing's score set: 3 zones x 8 segment classes.
 #define FIRING_SCORE_MAX_ENTRIES 24
@@ -157,6 +158,16 @@ typedef enum {
     FIRING_SUBSCORE_COUNT = 6,
 } firing_subscore_t;
 
+// WHICH SUB-SCORES ARE SIGNED. Every other sub-score is a non-negative
+// magnitude, which is what makes firing_compare.c's universal "lower is
+// better" contract meaningful. LAG_SIGNED_S is signed by construction
+// (negative == ahead of schedule), so under that contract running ever
+// further AHEAD of the commanded ramp would read as unbounded improvement.
+// That is a defect if such an axis ever votes, so firing_compare.h asserts
+// at COMPILE TIME that no signed sub-score is in its voting set. The mask
+// lives here, with the measurement, not with the adjudicator.
+#define FIRING_SUBSCORE_SIGNED_MASK (1u << FIRING_SUBSCORE_LAG_SIGNED_S)
+
 typedef struct {
     uint8_t zone_index;
     uint8_t kind;        // firing_seg_kind_t
@@ -172,6 +183,9 @@ typedef struct {
     float rate_c_per_s;   // |commanded rate|, so the comparator can size lag's Bar-1 floor
     uint32_t scored_ticks;
     uint16_t merged;      // how many same-key segments were folded into this entry
+    uint16_t dwell_unsettled; // dwells folded in here that NEVER settled (see SETTLE_S).
+                              // Reporting only: an unsettled dwell sets has[SETTLE_S]
+                              // = false rather than reporting an in-band sentinel value.
 } firing_segment_score_t;
 
 typedef struct {
@@ -211,6 +225,9 @@ typedef struct {
     bool  settle_have_tick;    // dwell only: at least one scored tick seen
     float settle_last_outside_s; // elapsed_s of the last scored tick with |err| > settle band;
                                   // -1.0 == never outside (settled at segment start)
+    bool  settle_outside_at_end; // the LAST scored tick was outside the band, i.e. this
+                                  // dwell never settled at all. Reported as
+                                  // has[SETTLE_S] = false, NOT as a number -- see .c
 } firing_score_seg_t;
 
 // Classifies a commanded rate. |rate| < FIRING_SCORE_RAMP_MIN_RATE_C_PER_HR

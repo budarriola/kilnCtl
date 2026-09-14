@@ -129,13 +129,19 @@ void firing_score_seg_tick(firing_score_seg_t *seg, bool *zone_captured, float t
         // leaves the band again later, this correctly moves forward to the
         // later excursion, which is exactly "time until it enters and
         // REMAINS inside the band". If the last scored tick of the segment
-        // is still outside the band, this value comes out equal to the
-        // segment's own duration -- the worst possible reading, not a good
-        // one, which is what makes the never-settles case visible instead of
-        // silently reading as instant settling (finding A).
+        // is still outside the band the dwell NEVER settled, and that is NOT
+        // reported as a number: `settle_outside_at_end` latches and
+        // seg_finish() clears has[SETTLE_S] instead. Reporting the segment
+        // duration there (as this did until 2026-09-14) is an in-band
+        // sentinel -- indistinguishable from a slow-but-settled dwell, and
+        // arithmetic downstream consumes it as a measurement. See
+        // docs/audits/firing_score_subscore_enrolment_2026-09-14.md R5.
         seg->settle_have_tick = true;
         if (abs_err > FIRING_SCORE_SETTLE_BAND_C) {
             seg->settle_last_outside_s = seg->elapsed_s;
+            seg->settle_outside_at_end = true;
+        } else {
+            seg->settle_outside_at_end = false;
         }
 
         if (seg->elapsed_s <= seg->entry_window_s) {
@@ -222,10 +228,18 @@ bool firing_score_seg_finish(const firing_score_seg_t *seg, firing_segment_score
             out->value[FIRING_SUBSCORE_STEADY_RMS_C] =
                 (float)sqrt(seg->steady_sumsq / (double)seg->steady_ticks);
         }
-        if (seg->settle_have_tick) {
+        if (seg->settle_have_tick && !seg->settle_outside_at_end) {
+            // Settled: the last scored tick was inside the band, so the
+            // elapsed time of the LAST excursion is a real settle time.
             out->has[FIRING_SUBSCORE_SETTLE_S] = true;
             out->value[FIRING_SUBSCORE_SETTLE_S] =
                 (seg->settle_last_outside_s < 0.0f) ? 0.0f : seg->settle_last_outside_s;
+        } else if (seg->settle_have_tick) {
+            // NEVER settled. has = false, the comparator's first-class
+            // "this pair has nothing to say about that sub-score" outcome --
+            // not a fabricated number that a difference can be taken of.
+            // The FACT is still reported, for humans, out of band:
+            out->dwell_unsettled = 1;
         }
     }
     return true;
@@ -251,11 +265,19 @@ bool firing_score_set_add(firing_score_set_t *set, const firing_segment_score_t 
         for (int s = 0; s < FIRING_SUBSCORE_COUNT; s++) {
             if (score->has[s] && e->has[s]) {
                 e->value[s] = (e->value[s] * w_old + score->value[s] * w_new) / w_tot;
+            } else if (s == FIRING_SUBSCORE_SETTLE_S) {
+                // SETTLE_S merges only when BOTH segments settled. Absence
+                // here means "one of these dwells never settled", which is
+                // information, not a missing sample: letting the settled
+                // one's number stand in for the class would resurrect the
+                // in-band sentinel one level up.
+                e->has[s] = false;
             } else if (score->has[s]) {
                 e->has[s] = true;
                 e->value[s] = score->value[s];
             }
         }
+        e->dwell_unsettled = (uint16_t)(e->dwell_unsettled + score->dwell_unsettled);
         e->in_band_frac = (e->in_band_frac * w_old + score->in_band_frac * w_new) / w_tot;
         e->scored_ticks += score->scored_ticks;
         e->merged = (uint16_t)(e->merged + score->merged);
