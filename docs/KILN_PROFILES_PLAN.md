@@ -161,7 +161,278 @@ Wi-Fi settings, or this controller's own logs and counters."*
 
 ---
 
+## 1a. REVISION 2026-09-14: one flash home, both processors run from RAM
+
+Owner, verbatim: *"The configs should exist in one of the esp flash zones and
+be run out of ram on both processors"*.
+
+This supersedes the storage model below wherever they conflict. **Section 2's
+storage arithmetic is restated in 1a.7; sections 1 (what is IN), 3
+(divergence), 5 (upload), 6 (missing-field rule) and 7 (surface) are
+unchanged.**
+
+### 1a.1 The good news: the Pico already runs from RAM
+
+This is not a change to the Pico's runtime architecture — it is already the
+architecture, and that is what makes this request cheap rather than a rewrite.
+
+- `config_store_flash.c:181` holds `static config_store_record_t s_cached_record`
+  — the **live RAM record**.
+- Every guard reads it through `config_store_seqlock_read()`
+  (`config_store_flash.c:408`), a seqlock with a writer-owned fallback double
+  buffer; `safety_core.c:1010` calls `safety_core_load_guard_cfg(&cfg_rec)` on
+  a **seqlock snapshot**, never on flash.
+- Flash is purely the *persistence* behind that RAM record: loaded once at
+  boot, rewritten on a commissioning commit.
+- `link_task.c` already has `s_staged_config`, a RAM staging buffer that
+  `SET_PARAM` accumulates into and `COMMIT_CONFIG` installs.
+
+So "run out of RAM on both processors" describes what already happens. **The
+owner's change is about persistence, not runtime**: the Pico stops being a
+second persistent home for profile config.
+
+### 1a.2 The bounded swap window is NOT needed — drop it
+
+I flagged, and the owner approved, an explicitly-marked bounded window in which
+the Pico is disarmed so config writes are accepted. **That approval should not
+be spent. The window is unnecessary under this model and must not be built.**
+
+The reason is precise and checkable in the code:
+`config_store_decide_write(relay_owner_get_state() == RELAY_OWNER_STATE_ARMED)`
+is called from inside **`config_store_write()`**
+(`firmware/SaftyFW/src/config_store_flash.c:978-980`) — the function that
+performs the **flash** write. It is not a gate on receiving, staging, or
+installing config; it is a gate on persisting it.
+
+Therefore: **a push that installs into `s_cached_record` and does not touch
+flash never reaches that refusal, and the Pico never has to leave ARMED.** That
+is strictly better than the approved window — the window's entire cost was a
+period in which the Pico was not armed, which is exactly what the owner's rule
+wants never to exist. Building an approved-but-unnecessary disarm mechanism
+would be adding the hazard back for no benefit.
+
+**Consequences for section 4:** section 4.1's contradiction dissolves (keep the
+section as the record of *why* no disarm is needed); section 4.2's steps 3, 5
+and 11 — disable heaters, disarm, re-arm — are **deleted**; item 5 is
+**unblocked**. Section 4.2's ordering (Pico first, read back, then ESP), the
+pending-swap marker, the rollback, and section 4.4's boot recovery all stand
+unchanged: they protect against a dropped push and a crash mid-transaction,
+which a RAM push does not make impossible. Refusing a swap during a firing
+(4.3) also stands — swapping a live kiln's tuning and guard thresholds out from
+under a running firing is wrong whether or not flash is involved.
+
+### 1a.3 The new wire operation
+
+One addition to kilnlink: **install the staged config into RAM without writing
+flash**. Either a flag on `COMMIT_CONFIG` or a sibling command
+(`APPLY_CONFIG_VOLATILE`); the flag is preferred because it reuses
+`COMMIT_CONFIG`'s existing staging, validation, rejection-reply and
+`current_task_reload_cal()` plumbing verbatim.
+
+Requirements on it:
+
+- It performs the **same** `config_params_set()` validation as today. A
+  volatile install is not a less-checked install.
+- It updates `s_cached_record` through `config_store_seqlock_write()` — never
+  by plain assignment. The seqlock exists because the trip path reads this
+  record concurrently (`config_store_flash.c:183-198`); bypassing it would hand
+  the trip path a torn record, which is precisely the defect the seqlock and
+  today's atomicity fix (`98d237b0`) exist to prevent. **This is the one place
+  a careless implementation would do real damage.**
+- It **bumps `config_version`/`config_crc`** exactly as a persisted commit
+  does. Section 3.1's identity check depends on the Pico's own CRC reflecting
+  its live record; a volatile install that left the CRC stale would make the
+  Pico report the *old* config's identity while running the new one — a token
+  that lies, which is the one thing section 3.1 exists to prevent.
+- It **requires no disarm**, and must be commented at the call site as
+  deliberately bypassing `config_store_write()` and therefore
+  `config_store_decide_write()`. A reader who does not know why will "fix" it.
+
+**The one genuine conflict with the code, named rather than forced:**
+`config_crc` is today computed by `config_store_record_crc()` over the *packed
+record* — the thing written to flash. Under a volatile install nothing is
+written, so the CRC must be computed over the packed form of the **in-RAM**
+record. That is the same function on the same bytes, not a new hash, but the
+code currently only calls it on the write path. **Cost: one small refactor**,
+and `test/test_config_store.c` already covers `config_store_record_crc()`
+directly, so it is testable at the host level. No other conflict was found —
+the seqlock, the commissioning flow and the way `config_store` feeds the guards
+all accommodate this without change.
+
+### 1a.4 What still persists on the Pico, and why `config_store` stays
+
+`config_store`'s flash machinery **stays**, reduced in role but not vestigial.
+It keeps exactly one job:
+
+> **Bring-up fallback**: hold the last known-good record so a Pico that boots
+> before the ESP has pushed is not running on nothing.
+
+It is no longer written by a profile apply as the authoritative act. It is
+written only by:
+
+1. **A confirmed profile apply**, *after* the volatile install has been read
+   back and verified — a deliberate "persist what is now proven live", written
+   opportunistically and **allowed to fail**. If the Pico is ARMED at that
+   moment the flash write is refused exactly as today; that refusal is logged
+   as `fallback_not_persisted` and is **not** a swap failure, because the RAM
+   config is already correct and verified. This is the only place the ARMED
+   refusal still appears, and it is now harmless.
+2. **Commissioning data that is genuinely a property of the safety board rather
+   than the kiln** — see the end of this section.
+
+**The fallback must not silently diverge from the active profile**, which is
+the obvious trap in giving it a second life. Three rules close it:
+
+- The persisted record carries the **`pkg_hash` of the profile it was persisted
+  from**. On boot the Pico reports that alongside `config_version`/`config_crc`.
+- At link-up the ESP compares the Pico's reported `pkg_hash` against the active
+  profile's. A mismatch is **not** an alarm — it means the Pico is running a
+  stale fallback — it triggers an **immediate push** of the active profile,
+  after which the normal identity check of section 3 applies.
+- If the fallback could not be persisted (case 1's ARMED refusal), the ESP
+  records that and knows a reboot will come up stale. That is fine: it
+  re-pushes.
+
+**What remains genuinely Pico-owned and does not travel in a profile:** nothing
+in `CONFIG_PARAM_TABLE`, as far as this review can tell — every one of the 68 is
+either a kiln property or a property of the CT/TC hardware, and section 5.3
+already handles the latter by refusing or invalidating a foreign calibration. If
+an implementer finds a param that is genuinely a property of *this safety board*
+(a board-specific ADC trim, say), it must be **named explicitly in this section
+and excluded from the profile**, not left to be discovered — the same discipline
+as section 1.4's exception list.
+
+### 1a.5 The unconfigured state, and boot ordering
+
+**This is now the critical path, and it is where a mistake is dangerous.**
+
+`safety_core_load_guard_cfg()` (`safety_core.c:333-334`) reads:
+
+```c
+s_guard_cfg.abs_max_temp_c =
+    (rec->fields_set & CONFIG_STORE_SET_ABS_MAX_TEMP_C) ? rec->abs_max_temp_c : 0.0f;
+```
+
+So an **unconfigured Pico has `abs_max_temp_c = 0.0f`, meaning S1 never
+trips.** Unconfigured is a **missed-trip** state, not a fail-safe one. That is
+deliberate and correct under `CONFIG_REFERENCE.md` section 7's "no default may
+be a guess dressed as a value" rule — but it means the safety of this whole
+model rests on one thing:
+
+> **UNCONFIGURED must never be ARMED.** A Pico with no profile installed — and,
+> with no persisted fallback, a fresh one has none — must not enter
+> `RELAY_OWNER_STATE_ARMED`, must hold the safety relay de-energized, and must
+> report itself unconfigured. This is the direct expression of both owner
+> rules: *"there should never be a way that the pico is not armed"* becomes
+> "an unarmed Pico is a fault state that alarms and disables heaters", and
+> *"if a config doesn't land and match on both sides then alarm and disable
+> heaters"* covers the case where the push never lands.
+
+| Pico state | condition | arming | what the ESP sees |
+|---|---|---|---|
+| `UNCONFIGURED` | no record in RAM: no push received this boot, and no valid flash fallback | **never arms**; relay de-energized | `config_crc == 0` (the existing documented "never commissioned" sentinel, `kilnlink_fw_version.h:77`) plus a new explicit unconfigured flag |
+| `FALLBACK` | running a persisted record whose `pkg_hash` differs from the ESP's active profile | arms — it has a real, complete, CRC-valid config | mismatched `pkg_hash` → ESP pushes immediately |
+| `CONFIGURED` | running a pushed profile, verified by read-back | arms | identity matches |
+
+**How the ESP notices a restarted Pico: `boot_id`, which already works.**
+`safety_link_frames.c` already parses the peer's `boot_id`, and its own comment
+(around lines 210–239) states the contract: the announce is *"re-sent whenever
+the Pico's boot_id changes"*. The `boot_id_changed` block is already the place
+where the 2026-08-27 audit cleared `trip_last_seq` for exactly this class of
+reason. **Hook the re-push there** — one existing, already-correct detector,
+not a new one (a second detector would be a sixth instance of
+`project_reset_one_side_bug_class`).
+
+Re-push is triggered by any of: a `boot_id` change, the unconfigured flag, a
+`pkg_hash` mismatch, or a `config_crc` mismatch against the recorded reference.
+All four converge on the same action — push the active profile, verify by
+read-back, record the new identity.
+
+### 1a.6 Link down at ESP boot, or dropped mid-push
+
+- **Pico configured, link drops**: the Pico holds its RAM config across the
+  outage and keeps guarding correctly. Loss of the link itself is already
+  S6b/`SAFETY_TRIP_LINK_DEAD`'s job; this feature adds nothing there. On
+  link-up the identity check runs and confirms, or re-pushes.
+- **Fresh/unconfigured Pico with a dead link**: it can never be configured.
+  **This must be a loud, safe state, not a wait.** The Pico stays
+  `UNCONFIGURED` and never arms. The ESP, seeing no link, raises
+  `CONFIG_DIVERGENCE` (an unarmed Pico is a divergence by section 3.5),
+  disables heaters, and reports *"safety processor is unconfigured and
+  unreachable — the kiln cannot fire"*. **No bounded wait and no
+  retry-forever spinner**: a timeout that silently expires into "proceed"
+  would be the worst outcome this feature could produce. It stays latched
+  until a push lands and verifies.
+- **Push drops mid-transfer**: staging accumulates but the install is one
+  seqlock write, so a dropped push leaves the Pico on its previous RAM record,
+  never a blend. The read-back at transaction step 7 fails and the transaction
+  rolls back or retries — the same failure `confirm_commit_landed()` ("never
+  trust a bare ACK") already handles.
+- **ESP boots, Pico already running and configured from a previous session**:
+  the `pkg_hash`/`config_crc` check confirms or re-pushes. Neither side needs a
+  reboot to reconcile.
+
+### 1a.7 Which ESP flash zone, and the revised arithmetic
+
+**`kiln_nvs`, with the `cfg` LittleFS dual-write — unchanged from section
+2.2**, with the Pico's half riding in the same `kiln_cfg_entry_t`. The zone
+choice is unchanged because the arithmetic still fits comfortably, and changing
+it would mean touching the boot path for no gain.
+
+Section 2.3 already sized the entry to include the Pico's half (640 B
+`kiln_pkg_safety_t` for the 68 params plus the ESP extras), so the totals barely
+move. Restated with this revision's one addition — each entry now also records
+the Pico identity it was last verified at (`config_version` 1 B + `config_crc`
+2 B + a persisted-fallback flag 1 B, padded to 4 B):
+
+```
+entry  = 928 (ESP half) + 640 (Pico half) + 4 (pkg_hash) + 2 (pkg_schema)
+       + 4 (recorded Pico identity)                     = 1578 B -> 1580 B
+10 slots                                                = 15 800 B
++ header + pending-swap record (one rollback package)   ~  1 700 B
+kiln_cfg_store_blob_t                                   ~ 17 500 B
+```
+
+`kiln_nvs` = `0x10000` = 65 536 B, ~56 KB usable after NVS overhead →
+**~3x headroom**. `cfg` = 512 KiB; the file is ~17.5 KB, ~24 KB across 4096 B
+blocks, ~48 KB peak during a copy-on-write commit → **9.4 % of the
+partition**. Both pass. **No partition is added, moved or resized.**
+
+Why not elsewhere, briefly: `nvs` (`0x6000`) is far too small and holds
+pre-existing live data; `profiles_nvs` belongs to the recipe library and mixing
+kiln identity into it would couple two things section 7.1 deliberately keeps
+apart; a new partition would mean editing `partitions.csv` above the
+append-only line, the one change this repo has consistently refused to make.
+
+### 1a.8 What remains of the divergence check
+
+Narrower, and still worth having. With one persistent store, two flash images
+can no longer disagree — that entire class of cause is gone. What remains:
+
+> **Does the Pico's live RAM state match what the ESP believes it pushed?**
+
+Still a real question with real failure modes: a push that was ACKed but
+dropped, a Pico that rebooted and came up unconfigured or on a stale fallback, a
+corrupted RAM record, a seqlock bug handing the guards a torn snapshot. The
+mechanism is unchanged and is section 3's: the Pico's own `config_version` +
+`config_crc`, computed over its own live record, compared against the pair the
+ESP recorded at the last verified read-back. **Each side still hashes its own
+live state; nothing is echoed.** The response is unchanged: alarm, disable
+heaters, name the differing fields, clear only on a verified match.
+
+Nothing is removed from section 3's *mechanism*. What is removed is a category
+of *causes* — two independently written flash stores drifting apart — which is
+a real simplification even though the check that would have caught them stays.
+
+---
+
 ## 2. Part B — storage, and the capacity arithmetic
+
+> **Superseded in part by section 1a.** Section 2.2's store and 2.3's
+> arithmetic stand (1a.7 restates them with the small identity addition);
+> section 2.1's reasoning is strengthened rather than changed — the active
+> config still stays where it is, and the Pico is now definitively not a second
+> persistent authority.
 
 ### 2.1 Decision: the active configuration stays exactly where it is
 
@@ -582,7 +853,14 @@ trust a write's return code here; read it back.**
 
 ## 4. Part C — making a swap atomic across two processors
 
-### 4.1 The hard constraint nobody has written down yet
+### 4.1 The hard constraint — RESOLVED by section 1a.2, kept as the record of why
+
+> **Status: no longer a blocker.** This section is retained because the
+> constraint is real and an implementer who does not know about it will
+> rediscover it the hard way. The resolution is section 1a.2: a volatile RAM
+> push never reaches `config_store_write()`, so the Pico never leaves ARMED and
+> no disarm window is built. The owner-approved bounded window is deliberately
+> **not** spent. Everything below is the original analysis.
 
 **The Pico refuses every config write while it is ARMED.**
 `config_store_decide_write()` (`firmware/SaftyFW/src/config_store.c:1121`)
@@ -634,7 +912,8 @@ APPLY(package P):
     pending-swap record (not a user slot), with P's id and marker = STAGED.
     This record is the crash-recovery anchor of section 4.4 and the ONLY
     thing that suppresses the section 3 divergence check during the swap.
- 3. Disable heaters and confirm they are off (kiln_io_owner, read back).
+ 3. [DELETED by section 1a.2 -- no heater disable / disarm is needed, because
+    a volatile RAM push never reaches config_store_decide_write().]
  4. CEILING ORDER, monotonically safe:
       if P.abs_max_temp_c >= current Pico ceiling:
           raise the Pico's ceiling FIRST
@@ -643,12 +922,14 @@ APPLY(package P):
     This is exactly safety_ceiling_sync_guard_raise() /
     safety_ceiling_sync_apply_lower()'s existing contract. Call them; do
     not re-derive the ordering.
- 5. Bring the Pico out of ARMED by the sanctioned route and CONFIRM it is
-    out by read-back (do not assume). Marker -> PICO_OPEN.
- 6. Write the Pico half: all 68 params via the existing batched
-    apply_pairs()/confirm_commit_landed() machinery, then
-    safety_cfg_http_set_and_confirm_f32() for abs_max_temp_c specifically.
-    Do NOT invent a second write path.
+ 5. [DELETED by section 1a.2 -- the Pico stays ARMED throughout.]
+    Marker -> PICO_OPEN (kept as the marker name: it now means "a push is in
+    flight", not "the Pico is disarmed").
+ 6. PUSH the Pico half VOLATILE: all 68 params staged via the existing
+    batched apply_pairs()/confirm_commit_landed() machinery, installed with
+    section 1a.3's volatile-install flag -- RAM only, no flash write, no
+    disarm. Then safety_cfg_http_set_and_confirm_f32() for abs_max_temp_c
+    specifically. Do NOT invent a second write path.
  7. READ BACK the Pico's whole config page; compare all 68 values against P
     field-by-field (section 3.1 layer 2). Any mismatch -> ROLLBACK.
     Record the Pico's reported (config_version, config_crc) pair into
@@ -662,11 +943,15 @@ APPLY(package P):
 10. Assert the ceiling identity: Pico abs_max_temp_c == the ESP's derived
     ceiling, read from BOTH sides live, not from either side's cache.
     Mismatch -> ROLLBACK.
-11. Let the Pico re-arm; confirm ARMED by read-back, bounded wait.
-    Failure to re-arm -> alarm and disable heaters (section 3), latched.
+11. [DELETED by section 1a.2 -- the Pico never left ARMED.] Instead: confirm
+    the Pico is ARMED and NOT reporting UNCONFIGURED (section 1a.5). Either
+    -> alarm and disable heaters (section 3), latched.
 12. Only now: active_id = P.id, clear the pending-swap record, persist,
     clear CONFIG_DIVERGENCE if it was latched. Marker -> NONE.
-13. Re-enable heaters only after 12 completes.
+13. Opportunistically persist the Pico's bring-up fallback (section 1a.4
+    case 1): write the now-verified record to the Pico's flash. ALLOWED TO
+    FAIL -- an ARMED refusal here is logged as fallback_not_persisted and is
+    NOT a swap failure. The swap is already complete at step 12.
 ```
 
 **"Pico confirms and the ESP fails"** (failure at step 8 or 9): ROLLBACK
@@ -1054,9 +1339,52 @@ differs; an upload with all 10 slots full is refused and allocates nothing.
 an unknown Pico param id, are both rejected, nothing is written, and the live
 config is verified unchanged afterward.
 
+**Item 15 — Volatile (RAM-only) config install on the Pico.**
+Section 1a.3: a flag on `COMMIT_CONFIG` that installs `s_staged_config` into
+`s_cached_record` through `config_store_seqlock_write()` **without** touching
+flash, running the same `config_params_set()` validation and bumping
+`config_version`/`config_crc` over the packed in-RAM record. Includes the small
+refactor that lets `config_store_record_crc()` be called off the write path.
+**Item 5 depends on this.** SaftyFW host tests (`test_config_store.c`,
+`test_config_page.c`) plus a `build_saftyfw_host_tests` run; remember the short
+worktree path (`C:\wt\...`) — the default overflows the MSVC command line.
+*Acceptance:* a volatile install changes the guards' live config (observable
+via `safety_core_load_guard_cfg()`'s output) and bumps `config_crc`, while the
+flash sector's byte content is unchanged; it succeeds **while ARMED**; a
+subsequent reboot comes back on the older persisted fallback, proving nothing
+was written.
+*Negative test, two parts:* (a) make the volatile install write
+`s_cached_record` by plain assignment instead of through the seqlock and assert
+a concurrent reader test observes a torn record — this proves the seqlock
+requirement is load-bearing, not decoration; restore by hand. (b) make the
+volatile install skip the `config_crc` bump and assert the divergence check
+(item 7) then reports a false match — the exact "token that lies" failure
+section 3.1 exists to prevent.
+
+**Item 16 — The UNCONFIGURED state and boot ordering.**
+Section 1a.5: the Pico never arms while unconfigured; the explicit unconfigured
+flag on the wire; `pkg_hash` carried in the persisted fallback and reported at
+boot; re-push hooked into the **existing** `boot_id_changed` block in
+`safety_link_frames.c` (not a new detector); section 1a.6's link-down
+behaviour.
+*Acceptance:* a Pico booted with an erased config sector never enters
+`RELAY_OWNER_STATE_ARMED` and reports `config_crc == 0` plus the unconfigured
+flag; the ESP pushes within one link-up cycle of a `boot_id` change; a Pico on a
+stale fallback (`pkg_hash` mismatch) is re-pushed **without** raising an alarm;
+an unconfigured Pico with no link leaves `CONFIG_DIVERGENCE` latched and heaters
+disabled indefinitely, with the message naming "unconfigured and unreachable".
+*Negative test:* force the unconfigured path to arm anyway and assert a test
+catches that S1's ceiling is then `0.0f` — i.e. that an armed unconfigured Pico
+is a missed-trip state, which is the whole reason for this item. Restore by
+hand. Also assert the no-link case never times out into "proceed" after any
+duration.
+
 **Item 5 — The two-processor apply transaction.**
-**BLOCKED on (a) the section 4.1 owner decision and (b) the ceiling-mirroring
-agent's work landing.** Implements section 4.2 **on a worker task, not the
+**Unblocked** (section 1a.2 dissolved the 4.1 constraint). **Depends on item 15
+and on the ceiling-mirroring agent's work landing.** Implements section 4.2
+**as revised by section 1a** — no heater disable, no disarm, no re-arm; steps
+3, 5 and 11 deleted, step 13 is the opportunistic fallback persist that is
+allowed to fail. Implements section 4.2 **on a worker task, not the
 httpd worker** (a 68-param round trip inside an HTTP handler risks the
 watchdog), with the persistent pending-swap record, using
 `safety_cfg_http_set_and_confirm_f32()` / `apply_pairs()` /
@@ -1197,17 +1525,21 @@ otherwise.
 
 ---
 
-**Ordering note.** Item 12 (the package hash) must land with or immediately
-after item 2 — items 3, 4, 13 and 14 all depend on it. Items 5 and 7 are the
-blocked ones. A sensible landing order is 1, 2, 12, 3, 4, 14, 13, 6, 9, 10,
-then 7 and 8 once the ceiling-mirroring work is in, then 5 once the section 4.1
-question is answered, then 11.
+**Ordering note (revised by section 1a).** Item 12 (the package hash) must land
+with or immediately after item 2 — items 3, 4, 13 and 14 all depend on it.
+Item 15 (volatile install) is the new prerequisite for item 5. Nothing is
+blocked on an owner decision any more; items 5 and 7 wait only on the
+ceiling-mirroring agent. A sensible landing order:
+
+> 1, 2, 12, 3, 4, 14, 13, 6, 9, 10 → then **15, 16** (SaftyFW side, independent
+> of the ESP work above and safely parallelisable) → then 7 and 8 once the
+> ceiling-mirroring work is in → then 5 → then 11.
 
 **Rough size.** Items 1, 3, 10, 11, 12 are small (under ~200 lines each). Items
-2, 4, 6, 8, 9, 13, 14 are moderate (~300–600 lines each including tests). Items
-5 and 7 are the large ones (~700–900 and ~500–700 lines respectively, plus the
-worker task) and carry all the risk. Total order of magnitude: **~5000 lines
-including tests, across 14 items.**
+2, 4, 6, 8, 9, 13, 14, 15, 16 are moderate (~300–600 lines each including
+tests). Items 5 and 7 are the large ones (~700–900 and ~500–700 lines
+respectively, plus the worker task) and carry most of the risk. Total order of
+magnitude: **~6000 lines including tests, across 16 items.**
 
 ---
 
@@ -1250,15 +1582,42 @@ including tests, across 14 items.**
 10. **Would not default a missing field** (section 6). Reject.
 11. **Would not "finish the swap" after a `PICO_DONE` crash** (section 4.4).
     Revert to the last consistent state.
+12. **Would not build the owner-approved bounded disarm window** (section
+    1a.2). It is approved but unnecessary, and building it would reintroduce
+    the exact hazard — a period with the Pico unarmed — that the owner's rule
+    wants never to exist. An approval is not an obligation.
+13. **Would not delete the Pico's `config_store` flash machinery** (section
+    1a.4). It keeps a real job as the bring-up fallback, and a Pico with no
+    fallback is one dropped push away from being unconfigured and unable to
+    fire.
+14. **Would not let an unconfigured Pico arm** under any circumstance, and
+    would not add a timeout that expires into "proceed" when a fresh Pico
+    cannot be reached (section 1a.6).
 
 **Risks, named:**
 
-- **The ARMED / always-armed contradiction (section 4.1) is unresolved and is
-  the single biggest risk in this plan.** If the owner's rule is literal, this
-  feature cannot write the Pico half at all, and "package both processors"
-  is infeasible without a firmware change on the Pico (a bounded, explicitly
-  requested disarm window with its own guard). **Escalate before implementing
-  item 5.**
+- **~~The ARMED / always-armed contradiction~~ — RESOLVED** by section 1a.2. A
+  volatile RAM push never reaches `config_store_decide_write()`. The
+  owner-approved disarm window is deliberately not built.
+- **An armed, unconfigured Pico is now the biggest safety risk in this plan**
+  (section 1a.5). `abs_max_temp_c` defaults to `0.0f` when its `fields_set` bit
+  is clear, so S1 never trips — unconfigured is a *missed-trip* state, not a
+  fail-safe one. The whole model rests on UNCONFIGURED never arming. Item 16's
+  negative test exists solely for this, and it is the one test in this plan I
+  would not let a reviewer wave through.
+- **Bypassing the seqlock on the volatile install** would hand the trip path a
+  torn record — the exact defect the seqlock and `98d237b0` exist to prevent,
+  and it would be intermittent and nearly unreproducible. Item 15's negative
+  test (a) is the guard.
+- **A volatile install that forgets to bump `config_crc`** makes the Pico
+  report the old config's identity while running the new one. Every check in
+  section 3 would then pass while the two sides disagreed. Item 15's negative
+  test (b) is the guard.
+- **The bring-up fallback silently diverging** from the active profile
+  (section 1a.4). Closed by carrying `pkg_hash` in the persisted record and
+  treating a mismatch as "push now", not as an alarm — but an implementer who
+  skips the `pkg_hash` and compares only `config_crc` will produce a fallback
+  that looks valid and is wrong.
 - **An over-eager divergence check gets disabled.** Section 3.2 enumerates the
   legitimate differences and item 7's negative test (a) exists specifically to
   prove the check is quiet when it should be. If that test is hard to make
