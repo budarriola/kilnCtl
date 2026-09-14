@@ -65,6 +65,32 @@ citing the review that overturns both numbers.** See §2(iv)'s 2026-09-14
 update, which withdraws this section's own 2026-09-13 note about a
 weakened "for" case.
 
+**Scope correction, same day.** State this finding as **"no demonstrated
+benefit under matched conditions on this bench"**, not "no demonstrated
+benefit," everywhere it is cited. Every measurement behind it — the
+~4 W bench fixture, a well-tuned PID, and a plant model matched to the
+plant it is fit against — is the single condition **least** likely to
+reveal a gain-adaptation layer's value, since such a layer earns its keep
+when the plant does NOT match what the PID was tuned for. This is weak
+evidence against the layer, not evidence for removing it: "untested under
+the conditions where it would matter" and "tested and found useless" are
+different claims, and only the first is supported. Untested conditions
+where a benefit would be expected: a changed thermal mass (load added or
+removed since the PID was tuned), a PID tune that was never good for the
+real plant, the high-temperature regime (`k`/`tau` roughly 20x lower than
+bench scale), and a thermocouple positioned close to the elements rather
+than at the load — which shortens apparent dead time and adds a fast mode
+the FOPDT fit does not represent, a plant/model mismatch of exactly the
+kind a gain-adaptation layer exists to absorb, and one the simulator
+cannot currently express at all. `docs/SCENARIO_SIMULATION_PLAN.md`
+(authored separately, in progress as of this note) is scoping simulation
+coverage of these conditions — cite it as in-progress only; no outcome
+exists yet. Separately, the owner has decided fuzzy constants, like PID
+gains, are to be **derived per kiln, not shipped** — bench values may be
+anything convenient precisely because they never ship, so no bench
+measurement in this document is evidence for or against a shipped
+default.
+
 ---
 
 ## 0.0 The objective is four-part, stated by the owner (2026-09-13) — governs everything below
@@ -434,19 +460,29 @@ statement.** See the plan header for the corrected figures. This does not
 strengthen (iv) either — it only removes a claim that would have weakened
 it — so treat the "for"/"against" case as unchanged from before 2026-09-13.
 
-**2026-09-14 update — the "weakened" framing above is WITHDRAWN.** A second,
-independent measurement against the owner's actual four-part objective
+**2026-09-14 update — the "weakened" framing above is WITHDRAWN, but this
+does NOT strengthen (iv) either.** A second, independent measurement against
+the owner's actual four-part objective
 (`docs/audits/fuzzy_overshoot_measurement_2026-09-13.md` + its `1570a65a`
 review, summarised in the plan header) found the same root cause on a
 different harness: the document's "equivalent fixed retune" comparison arm
 was fuzzy_50's centre-cell maximum, not its ramp-phase average, and a
 correctly-scaled flat rescale reproduces fuzzy_50 on all four objectives
 inside materiality. There is now no standing claim, from either harness,
-that fuzzy beats an equivalent flat retune on this bench model. **The "for"
-case for (iv) is therefore not weakened by anything measured to date — read
-it as originally written**, not as "unchanged from before 2026-09-13" (that
-phrasing described a wash; this update describes the wash resolving further
-in the same direction).
+that fuzzy beats an equivalent flat retune — **but every measurement behind
+that conclusion was taken under matched conditions on this bench (a
+well-tuned PID against a plant model matched to the plant), the single
+condition least likely to reveal a gain-adaptation layer's value.** The
+correct reading is **"no demonstrated benefit under matched conditions,"
+still untested where a benefit would plausibly show up** — changed thermal
+mass, a poorly-tuned PID, high-temperature `k`/`tau` scaling, or a
+thermocouple-placement plant/model mismatch (see the header's 2026-09-14
+scope correction) — **not "tested and found useless."** (iv)'s "for" case
+rests on the layer never having demonstrated value; that remains true, and
+the case is neither strengthened (nothing new was measured that favours
+deletion) nor weakened (the earlier IAE headline that would have counted
+against deletion is retracted) by anything landed today. Read it as
+originally written, with this scope qualification attached.
 
 **Against.** Deletion is irreversible on a hypothesis, and the hypothesis rests
 on `n=1` incomplete hardware arm in one of nine rule cells — we have not actually

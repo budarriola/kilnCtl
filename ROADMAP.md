@@ -19,11 +19,12 @@
 >   and strength, not the axis units. `docs/FUZZY_CONTROLLER_PLAN.md` §2(i)
 >   updated; `fuzzy_strength_pct = 0.0` on the live board still means this is
 >   UNVERIFIED ON HARDWARE.
-> - **The fuzzy layer has no demonstrated benefit — this is now measured
->   directly on the owner's four-part objective, not just IAE/MAE, and
->   survives adversarial review.** `docs/audits/fuzzy_overshoot_measurement_2026-09-13.md`
->   plus its appended review (`1570a65a`) found the document's "equivalent
->   fixed retune" comparison arm was actually fuzzy_50's centre-cell MAXIMUM
+> - **The fuzzy layer has no demonstrated benefit UNDER MATCHED CONDITIONS ON
+>   THIS BENCH — that scope qualifier is load-bearing, per an owner
+>   objection, and must travel with the finding everywhere it is cited.**
+>   `docs/audits/fuzzy_overshoot_measurement_2026-09-13.md` plus its
+>   appended review (`1570a65a`) found the document's "equivalent fixed
+>   retune" comparison arm was actually fuzzy_50's centre-cell MAXIMUM
 >   (reachable only at error=0/rate=0), not its time-average — fuzzy's real
 >   ramp-phase mean gain multipliers are roughly half that arm's. A plain
 >   static gain rescale at fuzzy's true ramp-phase average reproduces
@@ -32,12 +33,32 @@
 >   with no discontinuity at the inference boundary. The claimed 0.42 °C
 >   overshoot advantage came entirely from a ramp-down residual mislabelled
 >   as overshoot (real delta: fuzzy is +0.15 °C worse); the settle-time
->   claim inverts at a 0.5 °C band (vs. the document's chosen 2.0 °C).
+>   claim inverts at a 0.5 °C band (vs. the document's chosen 2.0 °C). **But
+>   every measurement behind this finding — a ~4 W bench, a well-tuned PID,
+>   a plant model matched to the plant — is the condition LEAST likely to
+>   reveal a gain-adaptation layer's value, since such a layer earns its
+>   keep precisely when the plant does not match what the PID was tuned
+>   for. This is weak evidence against the layer, not evidence for removing
+>   it — "untested where it would matter" is not "tested and found
+>   useless."** Untested conditions where a benefit would be expected: a
+>   changed thermal mass, a PID tune never good for the real plant, the
+>   high-temperature regime (`k`/`tau` ~20x lower), and a thermocouple
+>   placed near the elements rather than the load — shortening apparent
+>   dead time and adding a fast mode the FOPDT fit does not represent, a
+>   plant/model mismatch of exactly the kind this layer exists to absorb,
+>   which the simulator cannot currently express at all.
+>   `docs/SCENARIO_SIMULATION_PLAN.md` is being authored separately to scope
+>   coverage of these — cited here as in-progress only, no outcome exists.
+>   Owner principle, now decided: fuzzy constants, like PID gains, are
+>   **derived per kiln, not shipped** — bench values may be anything
+>   convenient precisely because they never ship, so no bench number in
+>   this finding is evidence for or against a shipped default.
 >   **`docs/FUZZY_CONTROLLER_PLAN.md` §2(iv)'s "for" case, previously noted
 >   as weakened by the (retracted) IAE headline, has that weakening
->   WITHDRAWN and stands as originally written.** Do not flatten the plan's
->   five-option structure — this corrects one option's argument, not the
->   ranking.
+>   WITHDRAWN and stands as originally written — but is NOT strengthened by
+>   today's finding either**, for the same matched-conditions reason. Do
+>   not flatten the plan's five-option structure — this corrects one
+>   option's argument, not the ranking.
 > - **Ramp tracking is CLOSED against the fuzzy layer** (`c002ceaf`): the two
 >   ramp-lag rule cells are `{kp +1, ki 0, kd 0}` while steady-state ramp
 >   error is set by `Kv = Ki·P(0)` — the wrong lever — and the layer has no
