@@ -1441,22 +1441,25 @@ try {
             "`"$(Join-Path $driversDir 'control/pid.c')`" `"$(Join-Path $driversDir 'control/pid_fuzzy.c')`""
     Invoke-HostTestExe -Name "sim_fuzzy_closedloop" -ExePath $exeFuzzyCl -BuildCmd $cmdFuzzyCl
 
-    # ---- sim_scenarios.exe: docs/SCENARIO_SIMULATION_PLAN.md WI-4 (runner
-    # skeleton, scenario table, arm selection -- S0/S1/S3, all six arms; see
+    # ---- sim_scenarios.exe: docs/SCENARIO_SIMULATION_PLAN.md WI-4/5/6/7
+    # (runner, scenario table S0-S12, arm selection, all six arms; see
     # sim_scenarios.c's own top comment for exactly what is and is not real
     # yet, e.g. SIM_ARM_PID_AT/SIM_ARM_FUZZY_AT are single-firing stand-ins
-    # until WI-8, SIM_ARM_STATIC_MATCHED's multipliers are pinned at 1.0
-    # until WI-5). Same gating posture as sim_fuzzy_closedloop.c immediately
-    # above: run automatically, DOES gate the build, deterministic, no
-    # external capture files. Negative-tested 2026-09-14 (zeroed
-    # SIM_SCENARIO_TABLE[0]'s model_k_dc by hand, confirmed
-    # SCENARIO_REFUSED + non-zero exit with no numeric row printed, restored
-    # by hand, forced a full rebuild, reconfirmed PASS -- see the commit
-    # this shipped in for the transcript).
+    # until WI-8). Same gating posture as sim_fuzzy_closedloop.c immediately
+    # above: run automatically (--shard 0 --of 1, the canonical unsharded
+    # pass), DOES gate the build, deterministic, no external capture files.
+    # The sharded (--of 4) determinism proof runs separately via
+    # run_sim_scenarios.ps1, not as part of this default build-time pass
+    # (WI-7). Negative-tested 2026-09-14 (zeroed SIM_SCENARIO_TABLE[0]'s
+    # model_k_dc by hand, confirmed SCENARIO_REFUSED + non-zero exit with no
+    # numeric row printed, restored by hand, forced a full rebuild,
+    # reconfirmed PASS -- see the commit this shipped in for the
+    # transcript).
     $exeScenarios = Join-Path $outDir "kilnctl_sim_scenarios.exe"
     $cmdScenarios = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$outDir\\`" /Fe:`"$exeScenarios`" `"$(Join-Path $testDir 'sim_scenarios.c')`" " +
             "`"$(Join-Path $testDir 'sim_scenario_table.c')`" `"$(Join-Path $testDir 'sim_plant.c')`" " +
+            "`"$(Join-Path $testDir 'sim_high_temp.c')`" `"$(Join-Path $testDir 'sim_mistune.c')`" " +
             "`"$(Join-Path $driversDir 'control/pid.c')`" `"$(Join-Path $driversDir 'control/pid_fuzzy.c')`" " +
             "`"$(Join-Path $driversDir 'control/pid_autotune.c')`" `"$(Join-Path $driversDir 'control/firing_score.c')`""
     Invoke-HostTestExe -Name "sim_scenarios" -ExePath $exeScenarios -BuildCmd $cmdScenarios

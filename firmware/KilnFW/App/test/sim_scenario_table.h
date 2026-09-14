@@ -70,6 +70,19 @@ typedef struct {
 
     bool sep_expected;           // plan's pinned SEP? column -- sec 5.3 #2
     const char *sep_reason;      // one-line reason, required whenever the pin is set or changed by hand
+
+    // WI-6 (S10/S11 only): dynamic s(T) conductance scaling and per-segment
+    // re-tuning. Both default false/0, which is a no-op for every S0-S9/S12
+    // row -- added as fields, not a branch on scenario id, per this file's
+    // own "adding a scenario needs no runner change" contract (the runner's
+    // dispatch is on these fields, present for every row, not on `id`).
+    bool high_temp_dynamic_scale; // apply sim_high_temp_scale_conductances() every tick using load_c
+    bool retune_per_segment;      // S11 only: recompute model_k_dc/tau_s (and derived bands/gains) at
+                                   // the START temperature of each of the 4 segments, via the same
+                                   // s(T) scale used for the plant -- an upper bound on what a perfect
+                                   // gain schedule buys. Requires high_temp_dynamic_scale.
+    float base_g_ea_w_per_c;      // T_REF-anchored (scale==1.0) base conductances the dynamic scale
+    float base_g_la_w_per_c;      // multiplies -- see sim_high_temp.h.
 } sim_scenario_t;
 
 // SIM_SCENARIO_COUNT_EXPECTED is pinned in the .c file next to the

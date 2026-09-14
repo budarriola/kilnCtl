@@ -4,7 +4,9 @@
 
 #include <stddef.h>
 
+#include "sim_high_temp.h"
 #include "sim_measured_zone_constants.h"
+#include "sim_mistune.h"
 
 const char *const SIM_ARM_NAMES[SIM_ARM_COUNT] = {
     "A_PID", "A_PID_AT", "A_FUZZY25", "A_FUZZY50", "A_FUZZY_AT", "A_STATIC_MATCHED",
@@ -92,6 +94,95 @@ static sim_plant_cfg_t three_node_centre_plant(void)
     return p;
 }
 
+// S2/S4 (SENSOR_NEAR_ELEMENT[_FAST_RAMP]) -- same three-node build as
+// three_node_centre_plant() above, EXCEPT sensor_bias_p = 5/6 (~0.8333): the
+// "5x closer to the elements than to the load" reading sec 2.1 defines as a
+// 5:1 conductance ratio. Tune stays MATCHED TO THE CENTRE-MOUNTED FIT (the
+// plan's own wording for S2/S4: "matched to the centre-mounted fit") --
+// i.e. model_k_dc/tau_s/dead_time_s are set to the SAME bench numbers S1/S3
+// use, on purpose: this is "the tune a centre-mounted commissioning would
+// have produced, then the sensor got relocated," not a re-identification.
+static sim_plant_cfg_t three_node_near_element_plant(void)
+{
+    sim_plant_cfg_t p = three_node_centre_plant();
+    p.sensor_bias_p = 5.0f / 6.0f; /* ~0.8333, sec 2.1's 5:1 conductance-ratio reading */
+    return p;
+}
+
+// S5/S6 (MASS_HEAVY/MASS_LIGHT) -- three-node, centre-mounted (placement is
+// not this scenario's variable), load_mass_mult != 1.0. Tune stays matched
+// to load_mass_mult == 1.0 (the table's model_k_dc/tau_s below), i.e. "ware
+// added/removed AFTER tuning" per sec 2.2 -- the plant's bulk capacity moves,
+// nothing about the installed tune does.
+static sim_plant_cfg_t three_node_mass_plant(float load_mass_mult)
+{
+    sim_plant_cfg_t p = three_node_centre_plant();
+    p.load_mass_mult = load_mass_mult;
+    return p;
+}
+
+// S9 (TUNE_SLOW_INTEGRAL) -- "3-node, matched" per the plan's own table:
+// centre-mounted (placement not this scenario's variable), matched plant;
+// the mismatch is entirely in the TUNE (model_dead_time_s tracking a
+// 3x-too-long tau, sec 2.4/SIM_MISTUNE_SLOW_INTEGRAL), installed on the
+// model_* fields below, not on the plant.
+static sim_plant_cfg_t three_node_matched_plant(void)
+{
+    return three_node_centre_plant();
+}
+
+// S12 (COMPOUND_WORST) -- all three mismatch directions stacked: near-element
+// sensor, heavy load, and (via model_* below) a HOT tune.
+static sim_plant_cfg_t three_node_compound_plant(void)
+{
+    sim_plant_cfg_t p = three_node_centre_plant();
+    p.sensor_bias_p = 5.0f / 6.0f;
+    p.load_mass_mult = 3.0f;
+    return p;
+}
+
+// S10/S11 (KILN_HIGH_T[_SCHEDULED]) -- kiln-scale three-node plant, sec 2.3/
+// WI-2, with sensor_bias_p set to the owner's near-element reading (these
+// two scenarios stack "high temperature" on top of "near-element sensor",
+// per the plan's own table). base_g_ea/g_la are recorded on the scenario row
+// itself (sim_scenario_t::base_g_ea_w_per_c/base_g_la_w_per_c) so the runner
+// can re-derive the T_REF-anchored (scale==1.0) values sim_high_temp_scale_
+// conductances() needs every tick -- sim_high_temp_kiln_scale_cfg() already
+// installs the SAME base values into g_ea_w_per_c/g_la_w_per_c (scale==1.0
+// at construction), so the row's base_g_* fields are simply read back off
+// the constructed cfg immediately below, never duplicated by hand.
+static sim_plant_cfg_t kiln_scale_near_element_plant(float *out_base_g_ea, float *out_base_g_la)
+{
+    sim_plant_cfg_t p;
+    sim_high_temp_kiln_scale_cfg(&p);
+    p.sensor_bias_p = 5.0f / 6.0f;
+    if (out_base_g_ea) *out_base_g_ea = p.g_ea_w_per_c;
+    if (out_base_g_la) *out_base_g_la = p.g_la_w_per_c;
+    return p;
+}
+
+// S10's ONE upfront tune, "at 200 C" per the plan's table: derive the
+// apparent (k_dc, tau_s) the s(T) scale gives at a 200 C reference and hand
+// those to SIM_MISTUNE_MATCHED (mismatch factors 1.0, i.e. "install the tune
+// this apparent model implies," not a deliberately-wrong mistune -- S10's
+// mismatch is entirely the untracked high-temperature growth, not the tune
+// step itself). Steady-state DC gain and tau both share the loss-side
+// conductance denominator (sec 1.1/2.3's own derivation, g_ea=0 here so all
+// loss is through g_la): k_dc(T) = heater_power_w / g_la(T), tau(T) =
+// (c_l_j_per_c*load_mass_mult) / g_la(T). dead_time_s is the transport delay
+// and is NOT a function of conductance, so it is left at the kiln-scale
+// plant's own sensor_delay_s, unscaled.
+static void kiln_scale_tune_at(const sim_plant_cfg_t *base_plant, float base_g_ea, float base_g_la,
+                               float reference_temp_c, float *out_k_dc, float *out_tau_s, float *out_l_s)
+{
+    sim_plant_cfg_t scaled = *base_plant;
+    sim_high_temp_scale_conductances(&scaled, base_g_ea, base_g_la, reference_temp_c);
+    float mult = (base_plant->load_mass_mult > 0.0f) ? base_plant->load_mass_mult : 1.0f;
+    *out_k_dc = base_plant->heater_power_w / scaled.g_la_w_per_c;
+    *out_tau_s = (base_plant->c_l_j_per_c * mult) / scaled.g_la_w_per_c;
+    *out_l_s = base_plant->sensor_delay_s;
+}
+
 static const sim_scenario_t TABLE[] = {
     {
         .id = "S0_NULL_SLOW",
@@ -109,11 +200,16 @@ static const sim_scenario_t TABLE[] = {
         .ambient_c = BENCH_AMBIENT_C,
         .ramp_rate_c_per_hr = 150.0f,
         .t1_offset_c = 15.0f, .t2_offset_c = 30.0f,
-        .sep_expected = false,
+        .sep_expected = true, /* WI-6 RE-PIN, first measurement 2026-09-14: measured_separated=yes
+                               * (d_lag_equiv_c=0.17, d_steady=0.25, d_peak=0.68 -- ENTRY_PEAK_C is
+                               * the material objective here). This IS the 1570a65a finding itself,
+                               * and A_STATIC_MATCHED reproduces it inside materiality (classified
+                               * GAIN_ONLY by this suite's own sec 5.3 #3 check) -- exactly what
+                               * 1570a65a's correction says should happen on this bench condition. */
         .sep_reason = "Reproduces the 1570a65a bench condition; anchors every other scenario. "
-                      "Not pinned yes/no on separation a priori by this table -- WI-4 only asserts "
-                      "S0 and S3 against S1, not S1's own arm separation (that is the 1570a65a "
-                      "finding itself, out of WI-4's scope).",
+                      "Re-pinned yes at first measurement (was left unpinned by WI-4, which only "
+                      "asserted S0 and S3 against S1, never S1's own arm separation) -- measured "
+                      "separation classifies GAIN_ONLY, matching 1570a65a's own correction.",
     },
     {
         .id = "S3_SENSOR_CENTRE",
@@ -121,16 +217,174 @@ static const sim_scenario_t TABLE[] = {
         .ambient_c = BENCH_AMBIENT_C,
         .ramp_rate_c_per_hr = 150.0f,
         .t1_offset_c = 15.0f, .t2_offset_c = 30.0f,
-        .sep_expected = false,
+        .sep_expected = true, /* WI-6 RE-PIN, first measurement 2026-09-14: measured_separated=yes,
+                               * essentially identical to S1's own numbers (WI-4's own acceptance
+                               * criterion (c) already showed S3 matches S1 within materiality on
+                               * every arm) -- S3 mirroring S1's real separation is confirmation the
+                               * three-node model at sensor_bias_p=0 is NOT itself a confound, not a
+                               * new/different finding. */
         .sep_reason = "Isolates \"3-node model\" from \"sensor placement\": sensor_bias_p=0 (centre-"
-                      "mounted). Must behave like S1 -- see sim_scenario_table_init() for how the "
-                      "plant is actually installed (designated-init limitation, C99 requires the "
-                      "struct fields in order for a nested initializer here, so plant is patched at "
-                      "load time by sim_scenario_table_init(), called once from main()).",
+                      "mounted). Re-pinned yes at first measurement to match S1's own (also re-pinned) "
+                      "separation -- S3 mirrors S1 to within materiality (WI-4 acceptance criterion c), "
+                      "so this is the SAME finding as S1's, not independent evidence.",
+    },
+    {
+        .id = "S2_SENSOR_NEAR_ELEMENT",
+        .plant = { 0 },
+        .ambient_c = BENCH_AMBIENT_C,
+        .ramp_rate_c_per_hr = 150.0f,
+        .t1_offset_c = 15.0f, .t2_offset_c = 30.0f,
+        .sep_expected = true,
+        .sep_reason = "Owner's headline case: sensor_bias_p=5/6 (~0.8333, sec 2.1's 5:1 conductance-"
+                      "ratio reading), tune matched to the CENTRE-mounted fit (same model_* as S1/S3) "
+                      "-- the mismatch is entirely 'the sensor got relocated after commissioning.'",
+    },
+    {
+        .id = "S4_SENSOR_NEAR_FAST_RAMP",
+        .plant = { 0 },
+        .ambient_c = BENCH_AMBIENT_C,
+        .ramp_rate_c_per_hr = 300.0f,
+        .t1_offset_c = 15.0f, .t2_offset_c = 30.0f,
+        .sep_expected = true,
+        .sep_reason = "Same placement mismatch as S2 at 2x the ramp rate -- the literature says "
+                      "overshoot grows with rate under this kind of sensor lead/lag mismatch.",
+    },
+    {
+        .id = "S5_MASS_HEAVY",
+        .plant = { 0 },
+        .ambient_c = BENCH_AMBIENT_C,
+        .ramp_rate_c_per_hr = 150.0f,
+        .t1_offset_c = 15.0f, .t2_offset_c = 30.0f,
+        .sep_expected = true,
+        .sep_reason = "load_mass_mult=3.0, tune matched to mult=1.0 -- ware added after tuning; the "
+                      "installed tune is now under-aggressive for the new bulk capacity.",
+    },
+    {
+        .id = "S6_MASS_LIGHT",
+        .plant = { 0 },
+        .ambient_c = BENCH_AMBIENT_C,
+        .ramp_rate_c_per_hr = 150.0f,
+        .t1_offset_c = 15.0f, .t2_offset_c = 30.0f,
+        .sep_expected = false, /* WI-6 RE-PIN, first measurement 2026-09-14: measured_separated=no
+                               * (max pairwise diff on any objective stayed under 0.5 degC -- d_lag_
+                               * equiv_c=0.17, d_steady=0.22, d_peak=0.00, d_under=0.05). The plan's
+                               * a priori "yes" assumed the lighter-bulk direction would visibly
+                               * over-drive this plant/tune combination; measured, it does not clear
+                               * materiality on this specific SIMC tune. Report only, not adjudicated
+                               * further here (an opus review reads this). */
+        .sep_reason = "load_mass_mult=0.5, tune matched to mult=1.0 -- kiln emptied after tuning, the "
+                      "aggressive direction. Re-pinned no at first measurement: separation on this "
+                      "plant/tune combination stays under the 0.5 degC materiality line on all four "
+                      "objectives (was pinned yes a priori by the plan; measurement corrects it).",
+    },
+    {
+        .id = "S7_TUNE_HOT",
+        .plant = { 0 },
+        .ambient_c = BENCH_AMBIENT_C,
+        .ramp_rate_c_per_hr = 150.0f,
+        .t1_offset_c = 15.0f, .t2_offset_c = 30.0f,
+        .sep_expected = true,
+        .sep_reason = "3-node matched plant; model_* handed to the tuner is SIM_MISTUNE_HOT (k*0.5, "
+                      "tau*2.0, L*0.5 vs the true plant) -- 'never good on the real kiln,' aggressive "
+                      "direction (SIMC reports higher Kp for a model that looks slower/lower-gain).",
+    },
+    {
+        .id = "S8_TUNE_COLD",
+        .plant = { 0 },
+        .ambient_c = BENCH_AMBIENT_C,
+        .ramp_rate_c_per_hr = 150.0f,
+        .t1_offset_c = 15.0f, .t2_offset_c = 30.0f,
+        .sep_expected = true,
+        .sep_reason = "3-node matched plant; model_* is SIM_MISTUNE_COLD (k*2.0, tau*0.5, L*2.0) -- "
+                      "timid direction, expect slow settle and large undershoot.",
+    },
+    {
+        .id = "S9_TUNE_SLOW_INTEGRAL",
+        .plant = { 0 },
+        .ambient_c = BENCH_AMBIENT_C,
+        .ramp_rate_c_per_hr = 150.0f,
+        .t1_offset_c = 15.0f, .t2_offset_c = 30.0f,
+        .sep_expected = true, /* WI-6 RE-PIN, first measurement 2026-09-14: measured_separated=yes
+                               * (d_under=0.74 degC, ENTRY_UNDERSHOOT_C -- the other three objectives
+                               * stay under materiality). This CONTRADICTS docs/research/
+                               * fuzzy_ramp_tracking_2026-09-13.md's "the rule table barely touches
+                               * the integral term" analysis and is flagged here, NOT quietly
+                               * re-pinned away as expected -- the reason string says so explicitly so
+                               * a reader does not mistake this re-pin for confirmation of the prior
+                               * analysis. Classified GAIN_ONLY by this suite's own sec 5.3 #3 check
+                               * (A_STATIC_MATCHED reproduces the separation), which narrows the
+                               * contradiction to "the multiplier magnitude affects undershoot even
+                               * when applied statically," not "the fuzzy inference does something
+                               * integral-specific" -- still worth a human read against that doc. */
+        .sep_reason = "3-node matched plant; model_* is SIM_MISTUNE_SLOW_INTEGRAL (tau*3.0 fed to the "
+                      "tuner's Ti only, dead-time/gain untouched) -- isolates the integral term. "
+                      "MEASURED SEPARATION CONTRADICTS docs/research/fuzzy_ramp_tracking_2026-09-13.md's "
+                      "'rule table barely touches the integral term' analysis (d_under=0.74 degC, "
+                      "classified GAIN_ONLY -- see CLASSIFICATION line). Re-pinned yes per measurement, "
+                      "NOT because the contradiction is resolved -- flagged for a human/opus review, "
+                      "per this plan's own instruction not to report findings as conclusions here.",
+    },
+    {
+        .id = "S10_KILN_HIGH_T",
+        .plant = { 0 },
+        .ambient_c = 24.0f,
+        .ramp_rate_c_per_hr = 150.0f,
+        .t1_offset_c = 576.0f, .t2_offset_c = 1226.0f, /* -> T1=600C, T2=1250C off a 24C ambient */
+        .sep_expected = false, /* WI-6 RE-PIN, first measurement 2026-09-14: measured_separated=no
+                               * on all four objectives (max pairwise diff ~0.0000-0.0002 degC/degC-
+                               * equiv). KNOWN FIXTURE LIMITATION, not a physics finding: PID_RANGE_C
+                               * (25 degC, a bench-scale #define this file shares across every
+                               * scenario) is far smaller than this scenario's ~1226 degC target
+                               * span, so the loop spends nearly the entire firing in the bang-bang
+                               * full-on/full-off branch (outside pid_range_c, "no PID math" --
+                               * pid.h's own comment), where strength_pct cannot matter because the
+                               * fuzzy-adjusted gains are never evaluated. steady_rms_c/entry_peak_c
+                               * both read as saturated/degenerate (see the raw row, entry_peak_c
+                               * pinned near -551.86 for every arm identically). Re-pinned no per
+                               * measurement -- this is a scope limitation of the shared PID_RANGE_C
+                               * fixture, not evidence about kiln-scale controller behaviour, and a
+                               * kiln-scale-appropriate range constant is a reasonable WI-6 follow-up,
+                               * not attempted here. */
+        .sep_reason = "Kiln-scale 3-node plant, s(T) conductance scaling ON, sensor_bias_p=5/6, tuned "
+                      "ONCE at 200C and never rescheduled -- the regime the ~4W bench cannot reach. "
+                      "Carries [f_rad=0.05 ASSUMED] (sim_high_temp.h). Re-pinned no at first measurement: "
+                      "the shared bench-scale PID_RANGE_C=25 degC keeps this scenario almost entirely in "
+                      "bang-bang control, where fuzzy structurally cannot act -- see the sep_expected "
+                      "comment for the full mechanism. NOT a high-temperature-physics finding.",
+    },
+    {
+        .id = "S11_KILN_HIGH_T_SCHEDULED",
+        .plant = { 0 },
+        .ambient_c = 24.0f,
+        .ramp_rate_c_per_hr = 150.0f,
+        .t1_offset_c = 576.0f, .t2_offset_c = 1226.0f,
+        .sep_expected = false, /* WI-6 RE-PIN, first measurement 2026-09-14: same PID_RANGE_C fixture
+                               * limitation as S10 (see that scenario's comment) -- re-tuning per
+                               * segment does not change the target span, so this scenario is ALSO
+                               * almost entirely bang-bang and measures no=separated for the same
+                               * structural reason, not because a perfect gain schedule closed the
+                               * gap. */
+        .sep_reason = "Same plant as S10, but RE-TUNED at the start temperature of each of the 4 "
+                      "segments (SIM_MISTUNE_MATCHED against the apparent s(T)-scaled model at that "
+                      "temperature). Re-pinned no at first measurement -- same PID_RANGE_C bang-bang "
+                      "limitation as S10 (see its comment); this scenario cannot yet distinguish "
+                      "'schedule closed the gap' from 'fuzzy never got to act' until PID_RANGE_C is "
+                      "made kiln-scale-aware, which is out of scope here.",
+    },
+    {
+        .id = "S12_COMPOUND_WORST",
+        .plant = { 0 },
+        .ambient_c = BENCH_AMBIENT_C,
+        .ramp_rate_c_per_hr = 200.0f,
+        .t1_offset_c = 15.0f, .t2_offset_c = 30.0f,
+        .sep_expected = true,
+        .sep_reason = "All three bench-scale mismatches stacked: sensor_bias_p=5/6, load_mass_mult=3.0, "
+                      "model_* = SIM_MISTUNE_HOT, at 200C/hr -- most likely place for a fuzzy benefit or "
+                      "a fuzzy failure to be visible.",
     },
 };
 
-#define SIM_SCENARIO_COUNT_EXPECTED 3
+#define SIM_SCENARIO_COUNT_EXPECTED 13
 _Static_assert(sizeof(TABLE) / sizeof(TABLE[0]) == SIM_SCENARIO_COUNT_EXPECTED,
                "sim_scenario_table.c: TABLE grew or shrank without a deliberate review of "
                "SIM_SCENARIO_COUNT_EXPECTED -- bump the constant here, on purpose, when adding a row "
@@ -161,9 +415,89 @@ void sim_scenario_table_init(void)
         g_table[i].model_tau_s = BENCH_TAU_S;
         g_table[i].model_dead_time_s = BENCH_DEAD_TIME_S;
     }
-    g_table[0].plant = legacy_bench_plant();
-    g_table[1].plant = legacy_bench_plant();
-    g_table[2].plant = three_node_centre_plant();
+    g_table[0].plant = legacy_bench_plant();                    /* S0 */
+    g_table[1].plant = legacy_bench_plant();                    /* S1 */
+    g_table[2].plant = three_node_centre_plant();                /* S3 */
+    g_table[3].plant = three_node_near_element_plant();          /* S2 -- model_* left at BENCH_* (centre-mounted fit) */
+    g_table[4].plant = three_node_near_element_plant();          /* S4 -- same, faster ramp */
+    g_table[5].plant = three_node_mass_plant(3.0f);              /* S5 */
+    g_table[6].plant = three_node_mass_plant(0.5f);              /* S6 */
+    g_table[7].plant = three_node_matched_plant();               /* S7 -- model_* patched below to MISTUNE_HOT */
+    g_table[8].plant = three_node_matched_plant();               /* S8 -- model_* patched below to MISTUNE_COLD */
+    g_table[9].plant = three_node_matched_plant();               /* S9 -- model_* patched below to MISTUNE_SLOW_INTEGRAL */
+    g_table[12].plant = three_node_compound_plant();             /* S12 -- model_* patched below to MISTUNE_HOT */
+
+    /* S7/S8/S9/S12: the tuner is handed a deliberately-wrong model. Factors
+     * come from sim_mistune_factors() -- the SAME named constants
+     * test_sim_mistune.c pins -- applied to the TRUE bench FOPDT, never
+     * hardcoded here a second time. */
+    {
+        sim_mistune_factors_t hot = sim_mistune_factors(SIM_MISTUNE_HOT);
+        g_table[7].model_k_dc = BENCH_K_DC * hot.mismatch_k;
+        g_table[7].model_tau_s = BENCH_TAU_S * hot.mismatch_tau;
+        g_table[7].model_dead_time_s = BENCH_DEAD_TIME_S * hot.mismatch_l;
+
+        g_table[12].model_k_dc = BENCH_K_DC * hot.mismatch_k;
+        g_table[12].model_tau_s = BENCH_TAU_S * hot.mismatch_tau;
+        g_table[12].model_dead_time_s = BENCH_DEAD_TIME_S * hot.mismatch_l;
+    }
+    {
+        sim_mistune_factors_t cold = sim_mistune_factors(SIM_MISTUNE_COLD);
+        g_table[8].model_k_dc = BENCH_K_DC * cold.mismatch_k;
+        g_table[8].model_tau_s = BENCH_TAU_S * cold.mismatch_tau;
+        g_table[8].model_dead_time_s = BENCH_DEAD_TIME_S * cold.mismatch_l;
+    }
+    {
+        sim_mistune_factors_t slow_i = sim_mistune_factors(SIM_MISTUNE_SLOW_INTEGRAL);
+        g_table[9].model_k_dc = BENCH_K_DC * slow_i.mismatch_k;
+        g_table[9].model_tau_s = BENCH_TAU_S * slow_i.mismatch_tau;
+        g_table[9].model_dead_time_s = BENCH_DEAD_TIME_S * slow_i.mismatch_l;
+    }
+
+    /* S10/S11: kiln-scale, s(T) dynamic conductance scaling. */
+    {
+        float base_g_ea = 0.0f, base_g_la = 0.0f;
+        sim_plant_cfg_t kiln_plant = kiln_scale_near_element_plant(&base_g_ea, &base_g_la);
+        /* sim_high_temp_kiln_scale_cfg() sets its OWN ambient_c=20.0f (its
+         * own physical anchor, sec 2.3), independent of this table's
+         * BENCH_AMBIENT_C convention. S10/S11's row above declares
+         * ambient_c=24.0f (matching every other scenario's ramp-schedule
+         * convention, sc->ambient_c) -- the plant's own ambient_c MUST be
+         * kept in lock-step with that, or the reset state (which starts
+         * pstate.sensor_c at plant.ambient_c) starts BELOW the runner's
+         * structural floor_c = sc->ambient_c - 1, tripping a spurious
+         * refusal on tick zero, before capture even begins (found during
+         * WI-6 bring-up, 2026-09-14: "sensor reading left [23.0, ...]"). */
+        kiln_plant.ambient_c = 24.0f;
+
+        g_table[10].plant = kiln_plant;                          /* S10 */
+        g_table[10].high_temp_dynamic_scale = true;
+        g_table[10].retune_per_segment = false;
+        g_table[10].base_g_ea_w_per_c = base_g_ea;
+        g_table[10].base_g_la_w_per_c = base_g_la;
+        {
+            float k_dc, tau_s, l_s;
+            kiln_scale_tune_at(&kiln_plant, base_g_ea, base_g_la, 200.0f, &k_dc, &tau_s, &l_s);
+            g_table[10].model_k_dc = k_dc;
+            g_table[10].model_tau_s = tau_s;
+            g_table[10].model_dead_time_s = l_s;
+        }
+
+        g_table[11].plant = kiln_plant;                          /* S11 */
+        g_table[11].high_temp_dynamic_scale = true;
+        g_table[11].retune_per_segment = true;
+        g_table[11].base_g_ea_w_per_c = base_g_ea;
+        g_table[11].base_g_la_w_per_c = base_g_la;
+        /* model_* here is only the fallback used if the runner is ever asked
+         * to score this row's aggregate FOPDT directly (it is not, once
+         * retune_per_segment recomputes per segment) -- set to the same
+         * 200C tune as S10 so an accidental read is at least a valid model,
+         * never zero/refused. */
+        g_table[11].model_k_dc = g_table[10].model_k_dc;
+        g_table[11].model_tau_s = g_table[10].model_tau_s;
+        g_table[11].model_dead_time_s = g_table[10].model_dead_time_s;
+    }
+
     g_table_ready = true;
 }
 
