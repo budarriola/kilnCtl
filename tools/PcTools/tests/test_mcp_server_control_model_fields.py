@@ -145,6 +145,46 @@ class DescribeModelFieldsTest(unittest.TestCase):
         self.assertIn("unavailable (field(s) missing", rendered)
         self.assertIn("missing", rendered)
 
+    def test_failed_diag_fetch_does_not_render_like_an_absent_field(self):
+        """Adversarial review 2026-09-14 (docs/audits/zones_diag_endpoint_
+        split_2026-09-14.md, Review section). The split made model_fit_temp_c/
+        model_fit_ambient_c come from a SECOND request; the original code
+        swallowed that request's failure with a bare `except ...: pass`, so a
+        404/unreachable /api/zones_diag rendered `fit_at=missing
+        (ambient=missing)` -- byte-identical to what a firmware that never
+        emitted the fields renders. A reader had no way to tell "this board
+        has no recorded fit" from "this tool call could not ask". Verified by
+        execution against a local HTTP server that 404s only the diag route.
+        The two renderings must stay distinguishable."""
+        # Realistic post-split shape: GET /api/zones no longer carries
+        # model_fit_* at all, so with the diag fetch failing nothing supplies
+        # them -- which is exactly the case that used to read "missing".
+        zone = _zone(0, k_dc=42.731, tau_s=305.2, dead_time_s=18.4, tuning_valid=True)
+        zone.pop("model_fit_temp_c")
+        zone.pop("model_fit_ambient_c")
+        zones_json = {"zones": [zone]}
+        p1, p2, p3, _p4 = _patch(zones_json)
+        failing_diag = unittest.mock.patch.object(
+            mc.zones_http_client, "get_zones_diag",
+            unittest.mock.Mock(side_effect=mc.zones_http_client.ZonesHttpError(
+                "GET /api/zones_diag failed: HTTP 404")),
+        )
+        with p1, p2, p3, failing_diag:
+            failed = mc.control_get_zones()
+        # The rest of the tool still renders -- graceful degradation is not
+        # regressed by carrying the reason.
+        self.assertIn("K_dc=42.7310 C/duty", failed)
+        self.assertIn("UNAVAILABLE(diag-fetch-failed)", failed)
+        self.assertIn("NOT READ this call", failed)
+        self.assertIn("404", failed)
+
+        # ... and the genuinely-absent-field rendering, which must NOT claim
+        # a fetch failed, still says plainly "missing".
+        absent = mc._describe_model_fields({"zones": [{"index": 0}]})
+        self.assertIn("missing", absent)
+        self.assertNotIn("UNAVAILABLE(diag-fetch-failed)", absent)
+        self.assertNotIn("NOT READ this call", absent)
+
     def test_control_get_zones_includes_plant_model_section(self):
         """End-to-end through control_get_zones() itself, not just the
         helper -- proves the section is actually wired into the tool's

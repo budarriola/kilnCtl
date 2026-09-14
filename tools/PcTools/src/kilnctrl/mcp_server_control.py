@@ -256,7 +256,7 @@ def _read_zone_model_fit_temp_unknown_sentinel() -> float:
     return -273.15
 
 
-def _describe_model_fields(zones_json: dict) -> str:
+def _describe_model_fields(zones_json: dict, diag_error: Optional[str] = None) -> str:
     """Render the identified-plant-model fields from a GET /api/zones JSON
     body: model_k_dc/model_tau_s/model_dead_time_s, tuning_valid,
     model_fit_temp_c/model_fit_ambient_c, and autotune_baseline_k_dc.
@@ -277,7 +277,19 @@ def _describe_model_fields(zones_json: dict) -> str:
     zones_http_post_parse.c but never emitted by zones_http_get.c) -- that's
     a firmware gap, not something this tool can surface by rendering
     differently, so it's reported explicitly as absent rather than silently
-    left out."""
+    left out.
+
+    `diag_error`, when set, is the reason the caller's SECOND request (GET
+    /api/zones_diag, which owns model_fit_temp_c/model_fit_ambient_c since
+    docs/audits/zones_diag_endpoint_split_2026-09-14.md) failed. It is
+    rendered explicitly, because "the board does not emit this field" and
+    "the second fetch failed" must NOT read identically -- the first is a
+    fact about the firmware, the second is a fact about this tool call, and
+    an engineer reading "missing" would otherwise have no way to tell which
+    happened. Adversarial review 2026-09-14 (see that audit doc's Review
+    section): before this parameter existed, pointing the client at a host
+    that 404s /api/zones_diag rendered exactly `fit_at=missing
+    (ambient=missing)`, indistinguishable from a genuine firmware gap."""
     unknown_temp = _read_zone_model_fit_temp_unknown_sentinel()
     zones = zones_json.get("zones", [])
     lines = ["plant model (identified via autotune; feeds feedforward/fuzzy bands):"]
@@ -304,14 +316,14 @@ def _describe_model_fields(zones_json: dict) -> str:
         elif isinstance(fit_temp_c, (int, float)):
             fit_temp_desc = f"{fit_temp_c:.2f}C"
         else:
-            fit_temp_desc = "missing"
+            fit_temp_desc = "missing" if diag_error is None else "UNAVAILABLE(diag-fetch-failed)"
 
         if isinstance(fit_ambient_c, (int, float)) and fit_ambient_c == unknown_temp:
             fit_ambient_desc = "UNKNOWN (never recorded)"
         elif isinstance(fit_ambient_c, (int, float)):
             fit_ambient_desc = f"{fit_ambient_c:.2f}C"
         else:
-            fit_ambient_desc = "missing"
+            fit_ambient_desc = "missing" if diag_error is None else "UNAVAILABLE(diag-fetch-failed)"
 
         valid_desc = (
             "missing" if tuning_valid is None else ("yes" if tuning_valid else "no")
@@ -320,6 +332,14 @@ def _describe_model_fields(zones_json: dict) -> str:
         lines.append(
             f"  z{i}: {model_desc}  fit_at={fit_temp_desc} (ambient={fit_ambient_desc})  "
             f"tuning_valid={valid_desc}"
+        )
+    if diag_error is not None:
+        lines.append(
+            "  model_fit_temp_c/model_fit_ambient_c: NOT READ this call -- the "
+            f"second request (GET /api/zones_diag) failed: {diag_error}. The "
+            "values above are unknown, NOT confirmed absent; retry before "
+            "drawing any conclusion about this board's recorded fit operating "
+            "points (docs/audits/zones_diag_endpoint_split_2026-09-14.md)."
         )
     lines.append(
         "  autotune_baseline_k_dc: NOT exposed by GET /api/zones as of "
@@ -353,8 +373,10 @@ def control_get_zones(host: Optional[str] = None) -> str:
     /api/zones_diag and merged back in by index (docs/audits/
     zones_diag_endpoint_split_2026-09-14.md -- these two moved off GET
     /api/zones once that endpoint ran low on response-buffer headroom); a
-    diag-fetch failure degrades those two fields to "missing" without
-    failing the rest of this tool. Host is auto-resolved the same way the
+    diag-fetch failure degrades those two fields to an explicitly labeled
+    "UNAVAILABLE(diag-fetch-failed)" plus a line naming the error -- NOT to
+    the plain "missing" a genuinely absent field renders (adversarial review
+    2026-09-14) -- without failing the rest of this tool. Host is auto-resolved the same way the
     OTA tools do (board's Wi-Fi station IP, falling back to the fallback-AP
     address); pass `host` explicitly for kilnctl.local or a board reachable
     only from a different network than this link. If the HTTP fetch fails
@@ -386,14 +408,20 @@ def control_get_zones(host: Optional[str] = None) -> str:
     # unchanged) rather than failing this whole tool call, since the PID/
     # coupling-matrix/HTTP-only-fields sections below have nothing to do
     # with this second endpoint and must still render.
+    diag_error: Optional[str] = None
     try:
         diag_json = zones_http_client.get_zones_diag(resolved_host)
         zones_json = zones_http_client.merge_zones_diag(zones_json, diag_json)
-    except zones_http_client.ZonesHttpError:
-        pass
+    except zones_http_client.ZonesHttpError as exc:
+        # Adversarial review 2026-09-14: still degrades gracefully (the PID/
+        # coupling/http-only sections have nothing to do with this endpoint
+        # and must still render), but the reason is now CARRIED, not
+        # swallowed -- a swallowed failure rendered "missing", which is also
+        # exactly what a firmware that never emitted the field renders.
+        diag_error = f"{exc} (host={resolved_host})"
     return (
         body
-        + "\n" + _describe_model_fields(zones_json)
+        + "\n" + _describe_model_fields(zones_json, diag_error)
         + "\n" + _describe_coupling_matrix(zones_json)
         + "\n" + _describe_http_only_zone_fields(zones_json)
     )
