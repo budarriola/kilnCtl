@@ -311,6 +311,25 @@ typedef struct {
     uint32_t trace_head;
     float    trace_elapsed_s;
 
+    // K8 (docs/audits/adaptive_tune_ki_guard_timing_and_failopen_2026-09-14.md,
+    // defect 1): the PID_FUZZY/fuzzy_strength_pct state relevant to THIS
+    // trace, snapshotted at DWELL ENTRY (adaptive_tune_zone_tick()'s
+    // dwell_just_entered branch, adaptive_tune.c -- the exact instant
+    // trace_count above is reset for this dwell) rather than read live at
+    // refine time (adaptive_tune_run_end(), which runs after the firing's
+    // interlocks -- the only thing that makes control_mode/fuzzy_strength_pct
+    // immutable mid-dwell today -- have already released). See
+    // adaptive_tune_refine_ki_locked()'s own comment for the full defect.
+    // trace_fuzzy_accessor_failed also covers defect 2 (fail-CLOSED): a
+    // zones_config_get_control_mode()/get_fuzzy_strength_pct() accessor
+    // failure at snapshot time sets this true, and the correction is
+    // withheld exactly like a genuinely-active fuzzy trace would be --
+    // never treated as "no fuzzy, proceed".
+    bool     trace_fuzzy_snapshot_valid;
+    bool     trace_fuzzy_accessor_failed;
+    bool     trace_fuzzy_active;
+    float    trace_fuzzy_pct;
+
     uint32_t joint_observations;
     bool     coupled_attempted;
     bool     coupled_applied;

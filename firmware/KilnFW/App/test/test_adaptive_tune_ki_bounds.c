@@ -857,3 +857,110 @@ static void test_ki_diagnosis_withholds_correction_when_zone_is_pid_fuzzy(void)
                      "(see the sibling cumulative-bound test) must leave a PID_FUZZY zone's reference Ki "
                      "COMPLETELY UNCHANGED -- any movement here is the effective-vs-reference loop closing");
 }
+
+// ---------------------------------------------------------------------
+// K8, defect 1 (docs/audits/adaptive_tune_ki_guard_timing_and_failopen_
+// 2026-09-14.md): the guard above must engage from the state the trace was
+// actually captured under, not whatever zones_config reports at refine
+// time. Proves the fix by reproducing exactly the failure the review
+// described: fuzzy is ON for the whole dwell that produces the trace, then
+// switched OFF (control_mode back to plain PID) before adaptive_tune_
+// run_end() ever runs. A refine-time read (the pre-fix behaviour) would see
+// plain PID and let the same constant-offset trace ratchet the reference
+// Ki, exactly like test_ki_diagnosis_runaway_under_constant_error_is_capped_
+// by_cumulative_bound() above proves it does for a genuinely-plain-PID
+// zone. The dwell-entry snapshot must still catch it.
+// ---------------------------------------------------------------------
+static void test_ki_diagnosis_withholds_when_fuzzy_active_during_capture_but_off_at_refine(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.0f; // keeps the model refine permanently un-due, same convention as
+                                      // the sibling PID_FUZZY test above
+    s_fake_zone_cfg[1].ki = 1.0f;
+
+    // Fuzzy ON for the ENTIRE dwell that generates this trace -- the
+    // dwell-entry snapshot (adaptive_tune_zone_tick()'s dwell_just_entered
+    // branch) must observe this and latch trace_fuzzy_active true.
+    s_fake_zone_cfg[1].control_mode = ZONE_CONTROL_MODE_PID_FUZZY;
+    s_fake_zone_cfg[1].fuzzy_strength_pct = 50.0f;
+    feed_settled_dwell(1, 25.0f, 22.0f, 0.5f, 20, DT_S);
+
+    // Switched OFF before refine -- a real board can only do this between
+    // firings (the interlocks this file's own guard comment cites refuse
+    // while firing/hot/heater-commanded), which is exactly the gap this
+    // fix closes: adaptive_tune_run_end() below runs with plain PID
+    // configured NOW, even though the trace it is about to diagnose was
+    // gathered entirely under fuzzy.
+    s_fake_zone_cfg[1].control_mode = ZONE_CONTROL_MODE_PID;
+    s_fake_zone_cfg[1].fuzzy_strength_pct = 0.0f;
+
+    profile_firing_run_record_t rec = make_clean_record(701, 1, 900);
+    rec.zones[1].stats.dwell_err_mean_c = 0.45f;
+    rec.zones[1].stats.dwell_err_max_c = 0.50f;
+    adaptive_tune_run_end(&rec, true);
+
+    TEST_CHECK(!adaptive_tune_zones[1].ki_applied,
+               "K8/defect1: fuzzy was active for the ENTIRE traced dwell -- the guard must still "
+               "withhold even though control_mode now reads plain PID at refine time");
+    TEST_CHECK(strstr(adaptive_tune_zones[1].ki_refusal_reason, "fuzzy") != NULL ||
+                   strstr(adaptive_tune_zones[1].ki_refusal_reason, "FUZZY") != NULL,
+               "K8/defect1: the refusal reason must still name fuzzy as the cause");
+    size_t reason_len = strlen(adaptive_tune_zones[1].ki_refusal_reason);
+    TEST_CHECK(reason_len < sizeof(adaptive_tune_zones[1].ki_refusal_reason) - 1,
+               "K8/defect1: fuzzy-at-capture refusal reason must not fill (truncate into) its 96-byte buffer");
+    TEST_CHECK(strstr(adaptive_tune_zones[1].ki_refusal_reason, "reference") != NULL,
+               "K8/defect1: 'reference' (the actionable end of the message) must survive");
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].ki, 1.0f, 1e-6,
+                     "K8/defect1: the reference Ki must be left completely unchanged -- a refine-time-only "
+                     "read would have let this exact trace ratchet it, same as the plain-PID runaway "
+                     "fixture");
+}
+
+// ---------------------------------------------------------------------
+// K8, defect 2 (same audit doc): a zones_config accessor failure at
+// snapshot time must withhold the correction (fail CLOSED), never let it
+// proceed as if fuzzy were simply not active. Uses the fail-injection
+// knobs added to the shared zones_config_get_control_mode()/
+// get_fuzzy_strength_pct() fakes (test_adaptive_tune.c) -- the ordinary
+// TEST_MAX_ZONES range check can never exercise this, since every real
+// zone index used in these tests is well inside that range.
+// ---------------------------------------------------------------------
+static void test_ki_diagnosis_withholds_when_control_mode_accessor_fails_at_capture(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.0f;
+    s_fake_zone_cfg[1].ki = 1.0f;
+    s_fake_zone_cfg[1].control_mode = ZONE_CONTROL_MODE_PID; // plain PID -- if the guard failed OPEN on
+                                                               // the accessor error, nothing else here
+                                                               // would stop the correction from applying
+    s_fake_zone_cfg[1].fuzzy_strength_pct = 0.0f;
+
+    s_fake_control_mode_fail = true; // forces the dwell-entry snapshot's accessor call to fail
+    feed_settled_dwell(1, 25.0f, 22.0f, 0.5f, 20, DT_S);
+    s_fake_control_mode_fail = false; // restore before run_end -- a live re-read must not paper over
+                                       // a failure that happened at capture time
+
+    profile_firing_run_record_t rec = make_clean_record(702, 1, 900);
+    rec.zones[1].stats.dwell_err_mean_c = 0.45f;
+    rec.zones[1].stats.dwell_err_max_c = 0.50f;
+    adaptive_tune_run_end(&rec, true);
+
+    TEST_CHECK(!adaptive_tune_zones[1].ki_applied,
+               "K8/defect2: a control-mode accessor failure at dwell-entry snapshot time must withhold "
+               "the correction, not let it proceed because the zone is (as far as anything else can "
+               "tell) plain PID");
+    TEST_CHECK(strstr(adaptive_tune_zones[1].ki_refusal_reason, "accessor") != NULL,
+               "K8/defect2: the refusal reason must name the accessor failure distinctly from the "
+               "ordinary fuzzy-active refusal");
+    TEST_CHECK(strstr(adaptive_tune_zones[1].ki_refusal_reason, "fail-closed") != NULL,
+               "K8/defect2: the refusal reason must say this is the fail-closed path");
+    size_t reason_len = strlen(adaptive_tune_zones[1].ki_refusal_reason);
+    TEST_CHECK(reason_len < sizeof(adaptive_tune_zones[1].ki_refusal_reason) - 1,
+               "K8/defect2: accessor-failure refusal reason must not fill (truncate into) its 96-byte "
+               "buffer");
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].ki, 1.0f, 1e-6,
+                     "K8/defect2: the reference Ki must be left completely unchanged when the accessor "
+                     "fails at capture time");
+}

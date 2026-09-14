@@ -150,15 +150,26 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
 // Defaults (control_mode 0 == ZONE_CONTROL_MODE_OFF, fuzzy_strength_pct 0)
 // keep every pre-existing test in this file off the guard unless a test
 // deliberately opts a zone into PID_FUZZY.
+// K8 (docs/audits/adaptive_tune_ki_guard_timing_and_failopen_2026-09-14.md,
+// defect 2): fail-injection knobs so a test can force either accessor to
+// report failure (return false) the way a real one legitimately can (a
+// zones_config read hitting an uninitialized/corrupt slot, say) -- the
+// index-range check above can never exercise this, since every real zone
+// index is well within TEST_MAX_ZONES. Both default false (existing tests
+// unaffected) and are reset by reset_module_state() below.
+static bool s_fake_control_mode_fail;
+static bool s_fake_fuzzy_pct_fail;
 bool zones_config_get_control_mode(uint8_t zone_index, zone_control_mode_t *out_mode)
 {
     if (zone_index >= TEST_MAX_ZONES) return false;
+    if (s_fake_control_mode_fail) return false;
     *out_mode = s_fake_zone_cfg[zone_index].control_mode;
     return true;
 }
 bool zones_config_get_fuzzy_strength_pct(uint8_t zone_index, float *out_pct)
 {
     if (zone_index >= TEST_MAX_ZONES) return false;
+    if (s_fake_fuzzy_pct_fail) return false;
     *out_pct = s_fake_zone_cfg[zone_index].fuzzy_strength_pct;
     return true;
 }
@@ -308,6 +319,8 @@ static void reset_module_state(void)
     memset(adaptive_tune_joint_last_rise_c, 0, sizeof(adaptive_tune_joint_last_rise_c));
     memset(adaptive_tune_joint_last_valid, 0, sizeof(adaptive_tune_joint_last_valid));
     adaptive_tune_joint_dwell_row_committed = false;
+    s_fake_control_mode_fail = false;
+    s_fake_fuzzy_pct_fail = false;
 }
 
 // Ticks a single settled dwell into zone zi: `ticks` ticks of dt_s seconds
@@ -492,6 +505,10 @@ void run_test_adaptive_tune(void)
     test_ki_diagnosis_runaway_under_constant_error_is_capped_by_cumulative_bound();
     test_ki_diagnosis_withholds_correction_when_zone_is_pid_fuzzy();
     test_ki_diagnosis_per_run_move_is_bounded_by_configured_fraction();
+
+    TEST_SECTION("adaptive_tune: Ki guard reads snapshot from capture time, fails closed on accessor error (K8)");
+    test_ki_diagnosis_withholds_when_fuzzy_active_during_capture_but_off_at_refine();
+    test_ki_diagnosis_withholds_when_control_mode_accessor_fails_at_capture();
     test_ki_diagnosis_decreasing_direction_stabilizes_at_cumulative_floor(); // P6
 
     TEST_SECTION("adaptive_tune: symmetric lower cumulative Ki bound (Q2)");

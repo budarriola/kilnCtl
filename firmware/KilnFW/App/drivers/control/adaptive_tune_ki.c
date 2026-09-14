@@ -230,24 +230,68 @@ void adaptive_tune_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_
     // mechanism with the same shape (e.g. a temperature-keyed gain
     // schedule) needs its own equivalent check here, this one does not
     // generalize to it automatically.
-    zone_control_mode_t ctrl_mode = ZONE_CONTROL_MODE_PID;
-    float fuzzy_pct = 0.0f;
-    if (zones_config_get_control_mode(zi, &ctrl_mode) && ctrl_mode == ZONE_CONTROL_MODE_PID_FUZZY &&
-        zones_config_get_fuzzy_strength_pct(zi, &fuzzy_pct) && fuzzy_pct > 0.0f) {
-        // K7 (docs/audits/ki_refusal_truncation_and_drift_check_lock_2026-09-13.md):
-        // the previous wording here expanded to 163 bytes into this 96-byte
-        // buffer and silently truncated (vsnprintf, not snprintf-with-check)
-        // at "...not the stored ", losing the entire actionable half of the
-        // message. This wording is 94 bytes at fuzzy_pct=100 (the worst
-        // case) -- well inside the buffer -- while keeping both halves: what
-        // was withheld (the correction) and why (trace reflects fuzzy's
-        // effect, not the stored reference; applying it would ratchet that
-        // reference). See test_ki_refusal_reason_fuzzy_message_not_truncated()
-        // (test_adaptive_tune.c), which checks the full formatted length AND
-        // a token from the END of the message, not just a prefix grep.
+    // K8 (docs/audits/adaptive_tune_ki_guard_timing_and_failopen_2026-09-14.md):
+    // this used to read zones_config_get_control_mode()/get_fuzzy_strength_
+    // pct() LIVE, right here, at refine time -- i.e. at run-end, after the
+    // firing's own interlocks (which are the only thing that make those two
+    // fields immutable mid-dwell) have already released. If fuzzy was active
+    // WHILE this dwell's trace (z->trace_actual_c[]/trace_duty[], read
+    // above) was captured, and is switched off before this function ever
+    // runs, this guard used to miss exactly the case it exists for and the
+    // reference-Ki ratchet described below was back. Both fields are now
+    // read once, at dwell ENTRY (adaptive_tune_zone_tick()'s dwell_
+    // just_entered branch, adaptive_tune.c), into z->trace_fuzzy_active/
+    // trace_fuzzy_pct/trace_fuzzy_accessor_failed -- the snapshot reflects
+    // the conditions this specific trace was actually gathered under, and is
+    // consulted here instead of re-querying zones_config.
+    //
+    // Can fuzzy toggle MID-firing, spanning both states within one trace?
+    // No, as things stand: zones_post_handler and backup_import.c (the only
+    // two writers of control_mode/fuzzy_strength_pct) both sit behind
+    // ota_http_check_interlocks(), which refuses while firing/hot/heater-
+    // commanded -- true for the whole duration a dwell is being traced --
+    // and POST /api/zones/pid (the one mid-firing config exception) has no
+    // key for either field. So today a single trace is always captured
+    // under one, unchanging mode, and dwell-entry vs. run-end would only
+    // ever disagree because of the OFF-dwell gap this fix closes (fuzzy
+    // switched off between the traced dwell ending and this function
+    // running). If that interlock coverage ever changes and a trace could
+    // genuinely span both states, the safe reading of "captured under
+    // fuzzy at any point during this trace" is still exactly what the
+    // dwell-entry snapshot gives: it was recorded before any tick of this
+    // trace ran, so it can never miss a fuzzy-then-off transition that
+    // happened inside the window it covers.
+    //
+    // Defect 2, fail CLOSED: trace_fuzzy_accessor_failed (set by the
+    // dwell-entry snapshot when either accessor call failed) withholds the
+    // correction exactly like a genuinely-active fuzzy trace would -- an
+    // accessor failure must never read as "not fuzzy, proceed". Reported
+    // through a message that names the failure distinctly from the normal
+    // fuzzy-active refusal below, so the two are distinguishable in the
+    // field. !trace_fuzzy_snapshot_valid is the same "we don't actually
+    // know" case (defensive only -- refine_ki_locked never runs without a
+    // dwell having entered first) and is folded into the same fail-closed
+    // branch for the identical reason.
+    if (!z->trace_fuzzy_snapshot_valid || z->trace_fuzzy_accessor_failed) {
         adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
-                   "zone is PID_FUZZY %.0f%%: withholding correction -- trace is fuzzy's effective Ki, not reference",
-                   (double)fuzzy_pct);
+                   "Ki accessor failed at dwell capture: withholding correction (fail-closed, not fuzzy)");
+        return;
+    }
+    if (z->trace_fuzzy_active) {
+        // K7 (docs/audits/ki_refusal_truncation_and_drift_check_lock_2026-09-13.md):
+        // ki_refusal_reason is only 96 bytes -- this wording is 85 bytes at
+        // trace_fuzzy_pct=100 (the worst case), well inside the buffer,
+        // while keeping both halves of the message: what was withheld (the
+        // correction) and why (trace reflects fuzzy's effect at capture
+        // time, not the stored reference). See
+        // test_ki_diagnosis_withholds_correction_when_zone_is_pid_fuzzy()
+        // and test_ki_diagnosis_withholds_when_fuzzy_active_during_capture_
+        // but_off_at_refine() (test_adaptive_tune_ki_bounds.c), which check
+        // the full formatted length AND a token from the END of the
+        // message, not just a prefix grep.
+        adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
+                   "zone PID_FUZZY %.0f%% at capture: withholding Ki -- trace reflects fuzzy, not reference",
+                   (double)z->trace_fuzzy_pct);
         return;
     }
 
