@@ -103,7 +103,9 @@ try {
         (Join-Path $testDir "test_zone_sweep_relay_off_wiring.c"),
         (Join-Path $testDir "test_approach_rate_cap.c"),
         (Join-Path $testDir "test_safety_ceiling_policy.c"),
+        (Join-Path $testDir "test_sim_high_temp.c"),
         (Join-Path $testDir "sim_plant.c"),
+        (Join-Path $testDir "sim_high_temp.c"),
         (Join-Path $driversDir "control/pid.c"),
         (Join-Path $driversDir "control/cone_table.c"),
         (Join-Path $driversDir "control/thermal_guard.c"),
@@ -1251,6 +1253,24 @@ try {
 
     Invoke-HostTestExe -Name "flash_worker_boot_order" -ExePath $exe36 -BuildCmd $cmd36
 
+    # ---- test_safety_stack_margin_http.c: its own THIRTY-SEVENTH, separate
+    # executable. GET /api/saftyfw_stack_margin (safety_stack_margin_http.c),
+    # the ESP-side surface for SaftyFW's nine live per-task stack marks
+    # (docs/audits/saftyfw_live_stack_reporting_impl_2026-09-14.md). Own
+    # executable, same "no other seam" reason as test_partition_info_http.c/
+    # test_safety_cfg_http.c: it #includes safety_stack_margin_http.c
+    # directly and defines its own fake safety_link_get_stack_margin()/
+    # wifi_provision_http_get_server()/httpd_register_uri_handler() bodies,
+    # which would multiply-define against test_safety_cfg_http.c's own
+    # fakes of the httpd symbols if linked together.
+    $exe37 = Join-Path $outDir "kilnctl_host_tests_safety_stack_margin_http.exe"
+    $ssmObjDir = Join-Path $outDir "ssm"
+    New-Item -ItemType Directory -Force -Path $ssmObjDir | Out-Null
+    $cmd37 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$ssmObjDir\\`" /Fe:`"$exe37`" `"$(Join-Path $testDir 'test_safety_stack_margin_http.c')`""
+
+    Invoke-HostTestExe -Name "safety_stack_margin_http" -ExePath $exe37 -BuildCmd $cmd37
+
     # ---- sim_iter_tune.exe / sim_wide_temp_sweep.exe: data-generating
     # harnesses (ITER_TUNE_REDESIGN_PLAN.md sec 6/7), not TEST_CHECK
     # pass/fail suites -- their stdout is the evidence for the audit docs
@@ -1551,7 +1571,10 @@ try {
     # Invoke-HostTestExe call -- docs/audits/fuzzy_overshoot_measurement_
     # 2026-09-13.md's re-measurement of the fuzzy layer on overshoot
     # (its actual stated purpose) rather than IAE/MAE.
-    $totalExpected = 38
+    # 38 -> 39: test_safety_stack_margin_http.c's own 39th Invoke-
+    # HostTestExe call -- docs/audits/saftyfw_live_stack_reporting_impl_
+    # 2026-09-14.md's HTTP surface for SaftyFW's nine live stack marks.
+    $totalExpected = 39
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the
