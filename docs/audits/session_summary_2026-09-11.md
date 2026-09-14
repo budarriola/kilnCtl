@@ -1,5 +1,10 @@
 # Session summary, 2026-09-11
 
+**Successor:** `docs/audits/session_summary_2026-09-13.md` covers what landed
+after this document, including the fuzzy-controller Stage 0 probe and the
+coupling flat-scale discriminator. Read that one for anything after
+2026-09-11.
+
 Independent end-of-day check on a long multi-agent session. Pointer document
 only — see the individual audits under `docs/audits/` for full detail.
 

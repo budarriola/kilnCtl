@@ -17,6 +17,36 @@ form. See §0.2.**
 No controller behaviour is changed by this document. No board was flashed and no
 heating run was performed. Board facts are live `kiln_call` reads.
 
+**Update, 2026-09-13: Stage 0 (the (v-a) offline rule-cell probe) has run,
+and its downstream comparison was then independently reviewed and partly
+overturned.** `ed854ac5` found the centre cell's exact effect — kp x0.75 /
+ki x1.25 / kd x0.75 at strength 50 (x0.875/x1.125/x0.875 at 25), the only
+cell ever observed on real hardware (100% of a 2178-sample mode-3 capture).
+Its headline "6 of 9 rule cells unreachable" claim rests on a ~0.083 degC/s
+"measured plant maximum" that a same-day adversarial review (`8a12521b`,
+`docs/audits/review_sim_fuzzy_commits_2026-09-13.md`) traced to an arithmetic
+conversion of a profile-rate setting (300 degC/hr / 3600), not a
+measurement — the same module's own header separately records a real
+measured peak of 0.110 degC/s, above the "maximum" the reachability count is
+built on, and the reachability test itself is a knife-edge 0.4% margin.
+**Do not cite a reachability count** (neither "6 of 9" nor any other split);
+the multiplier assertions (the centre-cell gain triple above) are sound and
+still citable. A follow-on comparison (`ba230bca`) then asked whether the
+centre-cell behaviour is doing anything beyond being a better fixed PID
+tuning, and originally reported yes (~7.8% IAE, 0.22 degC MAE) — **that
+result has since been retracted**: the same review found `ba230bca`'s
+fuzzy-ON arms were measured against a stale build compiled minutes earlier
+while `ed854ac5`'s negative test had the centre cell's rule sign inverted;
+the hand-restored source gave an empty `git diff`, but the poisoned binary
+was never rebuilt before being measured. Rebuilding from tracked sources
+reproduces `fbdc5bd0`'s original figures exactly (strength 50: IAE 12675.2 /
+MAE 3.0469), and against those, fuzzy vs. an equivalent flat retune is a
+**0.011 degC MAE** gap at strength 50 and reverses sign (flat retune
+slightly better) at strength 25 — indistinguishable from a fixed multiplier
+on this scenario, not a demonstrated inference benefit. See §2(iv) and §4.3
+for what this changes; do not describe fuzzy as beating a flat retune
+anywhere in this document.
+
 ---
 
 ## 0. Facts this plan rests on (each verified in this pass, not inherited)
@@ -257,6 +287,21 @@ is an hour not spent on the feedforward term, which
 `high_temperature_transfer_analysis:356-359` says is *currently wrong* and is
 forcing the integrator to do its job.
 
+**2026-09-13 update, this case stands as originally written.** The Stage 0
+probe (`ed854ac5`) plus a follow-on comparison (`ba230bca`) originally
+reported that switching the fuzzy layer in beats an equivalent always-on flat
+multiplier by ~7.8% IAE — which would have weakened this "for" case. An
+independent same-day review (`8a12521b`,
+`docs/audits/review_sim_fuzzy_commits_2026-09-13.md`) found that result was
+measured against a stale, sabotaged build and does not hold: rebuilt from
+source, fuzzy vs. an equivalent flat retune is a 0.011 degC MAE gap at
+strength 50 and reverses sign at strength 25 — indistinguishable from a fixed
+multiplier on this scenario. **"The layer has never demonstrably done
+anything on this board beyond a constant rescale" remains the accurate
+statement.** See the plan header for the corrected figures. This does not
+strengthen (iv) either — it only removes a claim that would have weakened
+it — so treat the "for"/"against" case as unchanged from before 2026-09-13.
+
 **Against.** Deletion is irreversible on a hypothesis, and the hypothesis rests
 on `n=1` incomplete hardware arm in one of nine rule cells — we have not actually
 shown fuzzy is useless, only that we have never observed it being useful.
@@ -355,7 +400,32 @@ a pre-existing shipped guess.
 
 - **(v-a) shows the 9 cells are individually sensible and `RULE_TABLE[1][1]`'s
   detune is small or defensible** then finding (A) weakens, (i) and (ii) both become
-  substantially more attractive, and (ii) becomes the lead option.
+  substantially more attractive, and (ii) becomes the lead option. **(v-a) has
+  now run (`ed854ac5`, 2026-09-13)** and confirmed the centre cell's detune
+  (kp x0.75/ki x1.25/kd x0.75 at strength 50), the only cell ever observed on
+  real hardware. Its claim that the other 6 of 9 cells are unreachable does
+  **not** hold — a same-day review (`8a12521b`) found the "measured plant
+  maximum" it rests on is an unmeasured profile-rate conversion, contradicted
+  by this plant's own real capture. This bullet stays open rather than
+  resolved: neither "sensible for all 9" nor "unreachable for 6 of 9" is
+  established by the evidence so far.
+- **A follow-on retune-vs-fuzzy comparison (`ba230bca`, 2026-09-13) originally
+  reported the centre cell's switching behaviour beats an equivalent flat,
+  always-on retune by ~7.8% IAE** — this would have weakened (iv)'s "never
+  shown to do anything" argument. That result has since been **retracted**
+  (`8a12521b`): it was measured against a stale build compiled while the
+  centre cell's rule was sabotaged for `ed854ac5`'s own negative test.
+  Rebuilt from source, fuzzy vs. an equivalent flat retune is a 0.011 degC
+  MAE gap at strength 50 and reverses sign at strength 25 —
+  indistinguishable from a fixed multiplier on this scenario. **Net effect:
+  no option in this section gains or loses support from either 2026-09-13
+  result** — the honest position is unchanged from before that date: nothing
+  measured on this bench clears the 0.5 degC materiality line, in either
+  direction, on any option. The deciding evidence for this design space
+  cannot come from this bench fixture: the plant is capped ~40 degC above
+  ambient with a real measured peak ramp rate (0.110 degC/s) still well under
+  the rate band the off-centre cells need, so no measurement taken here can
+  rule a larger effect in or out on the eventual installed kiln.
 - **A completed single-zone hardware A/B at `strength_pct > 0` shows a tracking
   improvement beyond the 0.5 degC floor** (`feedback_ignore_sub_half_degree_effects`)
   then fuzzy has demonstrated value for the first time; reopen (i)/(ii) properly.
@@ -384,6 +454,12 @@ error/rate spanning all 9 cells through `pid_fuzzy_drift_harness.c`; record the
 gain triple per cell at strength 50. This is pure math with no plant, so the
 refuted coupling model and the bench's range are both irrelevant. *Deliverable:*
 a 9-row table in an audit doc. *Stop:* none — this cannot fail, only inform.
+**DONE, 2026-09-13 (`ed854ac5`)** — centre cell's exact multiplier recorded
+(kp x0.75/ki x1.25/kd x0.75 at strength 50); its reachability-count claim was
+found unsupported by a same-day review (`8a12521b`) and must not be cited —
+see the plan header update and §4.3. A follow-on sim comparison beyond this
+stage's original scope (`ba230bca`) also ran, was later retracted by the same
+review, and is recorded in the same places.
 
 **Stage 1 — (v-b) fix finding (D).** *Entry:* stage 0 filed. Align or explicitly
 justify the fuzzy error axis vs `z->effective_target_c`. *Stop:* if aligning

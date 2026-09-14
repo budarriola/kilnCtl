@@ -1,9 +1,52 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-11, roadmap-upkeep audit
-> (thirteenth sweep) — doc-reconciliation pass over today's findings, no
-> hardware touched, no firmware behaviour changed. Verified against the
-> named commits and audit docs, not against this list's own prose.
+> **Status:** planning · **Last reviewed:** 2026-09-13, roadmap-upkeep audit
+> (fourteenth sweep) — doc-reconciliation pass over results that landed since
+> the thirteenth sweep, no hardware touched, no firmware behaviour changed.
+> Verified against the named commits, not against this list's own prose. A
+> concurrent pass is separately auditing dimensionless fuzzy bands,
+> adaptive_tune confidence/authority design, and gain-scheduling design as of
+> this sweep — work in progress, no outcome to report; not cited further here.
+> - **Fuzzy controller: Stage 0 of `docs/FUZZY_CONTROLLER_PLAN.md` has run,
+>   and its downstream comparison was independently reviewed and partly
+>   retracted the same day.** `ed854ac5`'s offline nine-cell probe recorded
+>   the centre cell's exact effect — kp x0.75/ki x1.25/kd x0.75 at strength
+>   50, the only cell ever observed on real hardware — but its "6 of 9 cells
+>   unreachable" claim rests on an unmeasured profile-rate conversion
+>   (`8a12521b`, `docs/audits/review_sim_fuzzy_commits_2026-09-13.md`) and
+>   must not be cited. `ba230bca` originally reported the centre cell's
+>   switching behaviour beating an equivalent flat, always-on retune by
+>   ~7.8% IAE; that figure was measured against a stale, sabotaged build and
+>   has been **retracted** by the same review — rebuilt from source, fuzzy
+>   vs. an equivalent flat retune is a 0.011 degC MAE gap at strength 50 and
+>   reverses sign at strength 25, indistinguishable from a fixed multiplier
+>   on this scenario. Net: neither result changes `docs/FUZZY_CONTROLLER_PLAN.md`'s
+>   standing position — no option is supported on materiality grounds, and
+>   the deciding evidence cannot come from this bench fixture. See the plan's
+>   §2(iv)/§4.3 for the current argument, not a copy here. A process finding
+>   worth carrying forward: a negative test that hand-restores source and
+>   proves an empty `git diff` can still leave a **built artifact** poisoned —
+>   a full rebuild must follow any negative test before anything downstream is
+>   measured against it.
+> - **Coupling model: a flat-scale discriminator was run; its PARTIAL verdict
+>   is itself overstated, pin unchanged.** `c9ce6b7c` tested section 9's
+>   hypothesis that a flat 1.173x multiplier on the constant coupling matrix
+>   would reproduce the level schedule's A1 regression, reporting a headline-
+>   count match (38/660) but a different cluster shape, and called the result
+>   PARTIAL. A same-day independent review (`8a12521b`,
+>   `docs/audits/review_sim_fuzzy_commits_2026-09-13.md`) ran the sampling
+>   statistics on all four factor readings against the pinned 24/660 rate and
+>   found {18, 20, 24} form one indistinguishable cluster (<=1.25 sd apart)
+>   and 38 is only marginally elevated (~1.8 sd, p~=0.07) — **not established
+>   as a real effect**, and the per-subscore cluster-signature argument (splits
+>   of 2-vs-11 and 22-vs-27) is below resolution the same way. The factor-1.0
+>   control did reproduce the pin exactly, so the experiment's mechanics are
+>   sound; its conclusion is not. Correct reading: **inconclusive**, not
+>   PARTIAL. The pin stays at 24/660 regardless, and the level-scheduled
+>   coupling class's "explain the reversal before retrying" gate is unchanged —
+>   if this question is worth resolving, a larger or paired-trial-level
+>   analysis is needed, not a re-read of the existing 660 trials.
+>
 > - **Coupling model class, not just the coefficients, is the defect** — this
 >   sharpens, not reopens, the eleventh sweep's refutation. `fd8d7b93`
 >   re-ran the 62-75 C under-prediction test against the fresh column-by-
@@ -127,6 +170,10 @@
 >   outcome here. Do not build a second bootstrap-and-adapt mechanism for
 >   fuzzy: extend `adaptive_tune` for (c) instead. Full analysis and options:
 >   `docs/FUZZY_CONTROLLER_PLAN.md`.
+> - **Superseded by the fourteenth sweep, above:** the plan's Stage 0 probe
+>   (listed as not-yet-run in earlier sweeps) has now run — see the
+>   2026-09-13 bullet at the top of this file and `docs/FUZZY_CONTROLLER_PLAN.md`
+>   directly rather than this paragraph, which predates that result.
 >
 > **Simulation fidelity — coupling-model replacement, in progress
 > elsewhere, do not describe an outcome.** Sources:
@@ -156,6 +203,11 @@
 >   on firm ground (single-column transport is measured linear); multi-zone
 >   sim is not, and a sim result there must never be reported as hardware
 >   evidence.
+>
+> - **Update, fourteenth sweep:** the flat-scale discriminator section 9 asked
+>   for has now been run (`c9ce6b7c`) and reviewed -- inconclusive under
+>   sampling statistics, not the PARTIAL result first recorded; see the
+>   2026-09-13 bullet at the top of this file. Pin and gate both unchanged.
 >
 > **Reviewed before that:** 2026-09-10, roadmap-upkeep audit
 > (twelfth sweep, updated in place after a same-day correction) — commits
