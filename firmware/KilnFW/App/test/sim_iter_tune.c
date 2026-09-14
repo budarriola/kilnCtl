@@ -512,6 +512,11 @@ static void report_run(const start_set_t *ss, const run_report_t *r)
 int main(int argc, char **argv)
 {
     int mc_runs = (argc > 1) ? atoi(argv[1]) : 40;
+    /* Catches a stale/mismatched build (leftover .obj, partial manual
+     * revert) before it can silently produce a wrong acceptance verdict --
+     * see sim_plant.h's SIM_PLANT_ASSERT_ABI_FRESH() comment and
+     * docs/audits/sim_iter_tune_stale_object_triage_2026-09-14.md. */
+    SIM_PLANT_ASSERT_ABI_FRESH();
     printf("# sim_iter_tune -- redesigned iter_tune closed-loop against sim_plant.c\n");
     printf("# Profile: 3 ramps (30/60/90 C/hr) + 3 dwells (26/31/36 C), 6 distinct segment classes.\n");
     printf("# Controller: real pid.c + heater_output.c (60 s PWM window) + zone_coupling_solve.c.\n");

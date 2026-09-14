@@ -487,6 +487,8 @@ static void run_firing2(float target_c, float ramp_c_per_hr, float dwell_s, floa
 
 int main(void)
 {
+    /* See sim_plant.h's SIM_PLANT_ASSERT_ABI_FRESH() comment. */
+    SIM_PLANT_ASSERT_ABI_FRESH();
     printf("# sim_wide_temp_sweep -- ITER_TUNE_REDESIGN_PLAN sec 6 gap closure + wide sweep\n");
     printf("# Results above ~62C are EXTRAPOLATION: radiative_coeff_w_per_k4 is NOT measured on this kiln.\n\n");
 

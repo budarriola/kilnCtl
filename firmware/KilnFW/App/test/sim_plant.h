@@ -11,6 +11,7 @@
 #define SIM_PLANT_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "max31856_codec.h" /* MAX31856_CHANNEL_COUNT, MAX31856_TC_TEMP_C_PER_LSB */
@@ -108,6 +109,37 @@ void sim_plant_step(sim_plant_state_t *state, const sim_plant_cfg_t *cfg, float 
  * so the MAX31856 quantiser/noise/fault paths downstream keep working
  * unchanged. */
 void sim_plant_three_node_step(sim_plant_state_t *state, const sim_plant_cfg_t *cfg, float duty, float dt_s);
+
+/* ---- ABI-freshness guard (added 2026-09-14, see
+ * docs/audits/sim_iter_tune_stale_object_triage_2026-09-14.md) ----
+ *
+ * WI-1 grew sim_plant_cfg_t/sim_plant_state_t. Every one of this file's
+ * consumers is passed pointers to these structs across a translation-unit
+ * boundary, so if any TU that touches them (a harness's .c file, or a
+ * leftover .obj from before WI-1) was compiled against a DIFFERENT
+ * sim_plant.h than sim_plant.c itself -- a stale object file, or a
+ * deliberate partial revert during investigation -- the mismatch is
+ * undefined behaviour: silently wrong numbers (a moved acceptance bar) or
+ * a crash, with no diagnostic pointing at the real cause. That exact shape
+ * cost an investigating agent a false "the baseline is broken" conclusion
+ * on 2026-09-14, when the actual fault was stale/mismatched objects from a
+ * partial manual rebuild, not any defect in firing_score.c/firing_compare.c.
+ *
+ * sim_plant_assert_abi_fresh_impl() is defined once, in sim_plant.c, and
+ * compares the sizes it computes locally (i.e. as sim_plant.c's own
+ * compilation sees these structs) against whatever the CALLING TU passes
+ * in via the macro below (i.e. as that TU's own compilation sees them). A
+ * mismatch means at least one of the linked .o files was built against a
+ * different version of this header -- exactly the class of bug this guard
+ * exists to catch -- and it aborts loudly naming both sizes rather than
+ * letting the program run on a corrupted struct. Call
+ * SIM_PLANT_ASSERT_ABI_FRESH() once near the top of main() in any host
+ * harness that links sim_plant.c together with other .c files that also
+ * touch these structs (sim_iter_tune.c, sim_wide_temp_sweep.c, the
+ * test_sim_plant_three_node.c / test_closed_loop.c host tests). */
+void sim_plant_assert_abi_fresh_impl(size_t caller_state_size, size_t caller_cfg_size, const char *caller_file);
+#define SIM_PLANT_ASSERT_ABI_FRESH() \
+    sim_plant_assert_abi_fresh_impl(sizeof(sim_plant_state_t), sizeof(sim_plant_cfg_t), __FILE__)
 
 /* ------------------------------------------------------------------------
  * sim_kiln -- N coupled zones plus injectable faults (TODO.md 6A.8's

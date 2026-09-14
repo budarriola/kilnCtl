@@ -1,7 +1,34 @@
 #include "sim_plant.h"
 
 #include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+/* See sim_plant.h's SIM_PLANT_ASSERT_ABI_FRESH() comment. sizeof() here is
+ * evaluated against THIS TU's own #include of sim_plant.h -- the reference
+ * every caller's own sizeof() (passed in via the macro) is checked against. */
+void sim_plant_assert_abi_fresh_impl(size_t caller_state_size, size_t caller_cfg_size, const char *caller_file)
+{
+    size_t here_state_size = sizeof(sim_plant_state_t);
+    size_t here_cfg_size = sizeof(sim_plant_cfg_t);
+    if (caller_state_size != here_state_size || caller_cfg_size != here_cfg_size) {
+        fprintf(stderr,
+            "FATAL: sim_plant ABI mismatch between %s and sim_plant.c's own build.\n"
+            "  sim_plant_state_t: caller sizeof=%zu, sim_plant.c sizeof=%zu\n"
+            "  sim_plant_cfg_t:   caller sizeof=%zu, sim_plant.c sizeof=%zu\n"
+            "This means at least one linked .obj was compiled against a DIFFERENT\n"
+            "sim_plant.h than the others -- a stale object file, an incremental link\n"
+            "against a leftover .obj, or a partial manual revert of sim_plant.c/.h\n"
+            "while other sources kept the post-WI-1 header. Delete every build/object\n"
+            "directory for this harness and rebuild from a fully clean state before\n"
+            "trusting any output. See\n"
+            "docs/audits/sim_iter_tune_stale_object_triage_2026-09-14.md.\n",
+            caller_file, caller_state_size, here_state_size, caller_cfg_size, here_cfg_size);
+        fflush(stderr);
+        abort();
+    }
+}
 
 void sim_plant_reset(sim_plant_state_t *state, const sim_plant_cfg_t *cfg)
 {

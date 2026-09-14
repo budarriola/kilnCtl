@@ -225,6 +225,9 @@ static void test_legacy_path_untouched(void)
 
 void run_test_sim_plant_three_node(void)
 {
+    /* Catches this TU being linked against a stale/mismatched sim_plant.o --
+     * see sim_plant.h's SIM_PLANT_ASSERT_ABI_FRESH() comment. */
+    SIM_PLANT_ASSERT_ABI_FRESH();
     test_sensor_leads_load_near_element();
     test_sensor_lags_load_centre_mounted();
     test_legacy_path_untouched();
