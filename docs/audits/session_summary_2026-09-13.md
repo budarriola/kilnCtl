@@ -6,6 +6,12 @@ convention: see the individual audits under `docs/audits/` for full detail.
 This entry covers what landed after that summary was written and brings
 `ROADMAP.md`/`docs/FUZZY_CONTROLLER_PLAN.md` up to date with it.
 
+**Superseded in part by `docs/audits/session_summary_2026-09-14.md`**, which
+folds in this sweep's "in flight" items (the fuzzy overshoot measurement and
+its review, the scorecard fix sequence) and records an owner decision on the
+autotune-derived fuzzy bands — read that document for the current state of
+anything this one marked open.
+
 ## Verification performed
 
 - `git cat-file -t` confirmed `c9ce6b7c`, `ed854ac5`, `ba230bca` and

@@ -1,12 +1,96 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-13, roadmap-upkeep audit
-> (fourteenth sweep) — doc-reconciliation pass over results that landed since
-> the thirteenth sweep, no hardware touched, no firmware behaviour changed.
-> Verified against the named commits, not against this list's own prose. A
-> concurrent pass is separately auditing dimensionless fuzzy bands,
-> adaptive_tune confidence/authority design, and gain-scheduling design as of
-> this sweep — work in progress, no outcome to report; not cited further here.
+> **Status:** planning · **Last reviewed:** 2026-09-14, roadmap-upkeep audit
+> (fifteenth sweep) — the second promised plan pass. Folds in results that
+> were "work in progress" as of the fourteenth sweep (dimensionless fuzzy
+> bands, the overshoot re-measurement and its review, the firing_score fix
+> sequence) and records an owner decision. No hardware touched, no firmware
+> behaviour changed. Verified against the named commits, not against this
+> list's own prose. Full detail: `docs/audits/session_summary_2026-09-14.md`
+> (successor to the 09-11/09-13 summaries).
+> - **OWNER DECISION: autotune-derived fuzzy bands ship.** `2c49465a` derives
+>   `rate_band_c_per_s = model_k_dc / model_tau_s` and
+>   `error_band_c = model_k_dc * 0.5` from each zone's own autotune model,
+>   with the previous absolute constants (20.0 °C / 0.5 °C/s) kept only as an
+>   explicitly-logged fallback for a never-autotuned zone. This meets the
+>   standing requirement that nothing ship guessed for, or tuned to, a kiln
+>   other than the installed one, at no material cost — orthogonal to the
+>   "no demonstrated benefit" finding below, which concerns the rule table
+>   and strength, not the axis units. `docs/FUZZY_CONTROLLER_PLAN.md` §2(i)
+>   updated; `fuzzy_strength_pct = 0.0` on the live board still means this is
+>   UNVERIFIED ON HARDWARE.
+> - **The fuzzy layer has no demonstrated benefit — this is now measured
+>   directly on the owner's four-part objective, not just IAE/MAE, and
+>   survives adversarial review.** `docs/audits/fuzzy_overshoot_measurement_2026-09-13.md`
+>   plus its appended review (`1570a65a`) found the document's "equivalent
+>   fixed retune" comparison arm was actually fuzzy_50's centre-cell MAXIMUM
+>   (reachable only at error=0/rate=0), not its time-average — fuzzy's real
+>   ramp-phase mean gain multipliers are roughly half that arm's. A plain
+>   static gain rescale at fuzzy's true ramp-phase average reproduces
+>   fuzzy_50 on all four objectives inside materiality, and the
+>   overshoot/undershoot penalty tracks gain-change magnitude monotonically
+>   with no discontinuity at the inference boundary. The claimed 0.42 °C
+>   overshoot advantage came entirely from a ramp-down residual mislabelled
+>   as overshoot (real delta: fuzzy is +0.15 °C worse); the settle-time
+>   claim inverts at a 0.5 °C band (vs. the document's chosen 2.0 °C).
+>   **`docs/FUZZY_CONTROLLER_PLAN.md` §2(iv)'s "for" case, previously noted
+>   as weakened by the (retracted) IAE headline, has that weakening
+>   WITHDRAWN and stands as originally written.** Do not flatten the plan's
+>   five-option structure — this corrects one option's argument, not the
+>   ranking.
+> - **Ramp tracking is CLOSED against the fuzzy layer** (`c002ceaf`): the two
+>   ramp-lag rule cells are `{kp +1, ki 0, kd 0}` while steady-state ramp
+>   error is set by `Kv = Ki·P(0)` — the wrong lever — and the layer has no
+>   access to `d(setpoint)/dt` at all. The feedforward climb term is the
+>   mechanism that targets this; unchanged from the 09-13 sweep.
+> - **The firing_score scorecard was accept-permissive on two of the four
+>   objectives, and is now fixed.** `2edbb6eb` found no settle-time
+>   instrument and a clamped-to-zero undershoot; `d41da85f` added both,
+>   raising `FIRING_SUBSCORE_COUNT` 3→6; `9a9afb25`'s review found that this
+>   **silently enrolled** the new axes into `firing_compare`'s verdict via a
+>   loop to `FIRING_SUBSCORE_COUNT`, moving the historical corpus REJECT
+>   21→26 and INSUFFICIENT 615→610 while ACCEPT held at 24 only by
+>   cancellation; `560cffe0` fixed the enrolment with an explicit voting
+>   mask and `_Static_assert`s making an unclassified or signed axis unable
+>   to silently vote. **A1 restored to the pinned 24/21/615.** The settle
+>   band used by the corpus fit is **2.0 °C**, chosen from 33 real
+>   dwell-zone instances — a different instrument from, and not to be
+>   confused with, the 0.5 °C materiality critique in the overshoot-
+>   measurement review above.
+> - **Ratchet fixes, and a new mutual-exclusion constraint.** `97288659`
+>   anchored the `adaptive_tune` K_dc ratchet to the original autotune
+>   baseline rather than the live adapted value; `36f88d62` stopped an
+>   ordinary whole-page zones save from silently zeroing that anchor;
+>   `e78fbc5b` closed a live Ki ratchet loop (effective-vs-reference
+>   divergence under `PID_FUZZY`, ~1.2x per run, 9 runs to the 5x
+>   plausibility bound) by withholding the Ki correction while fuzzy is
+>   active — **Ki adaptation and the fuzzy layer are now mutually exclusive
+>   by design**; `0dbd7c6d` exposed the anchor over `GET /api/zones`, closing
+>   the observability hole where the fix's own value could not be read back.
+> - **Open, no outcome asserted:** the coupling sign reversal remains
+>   unexplained (no literature reports one); the level-scheduled coupling
+>   class's do-not-retry gate is unchanged; the Pico heat-start reboots are
+>   closed-pending-recurrence, not root-caused; the `ease_off_window_mult`
+>   hardware A/B (`a57ca6f9`) was **INCONCLUSIVE** (within-run zone
+>   confound) so the shipped 2.0 default stands unchallenged; the RP2040
+>   fault-hook chain has never been observed end-to-end on hardware; and the
+>   zones JSON response has only **161 bytes** of headroom in its 7360-byte
+>   cap (`docs/audits/zones_json_headroom_plan_2026-09-14.md`, `375c9258`) —
+>   enlarging the buffer is forbidden.
+> - **Parked deliberately, not forgotten:** the fuzzy guard in
+>   `adaptive_tune_ki.c` reads `control_mode`/`fuzzy_strength_pct` at refine
+>   time rather than snapshotting at capture time (safe today only via
+>   another module's interlocks), and it fails open if
+>   `zones_config_get_control_mode()` returns false.
+> - **UNVERIFIED ON HARDWARE, unchanged:** `fuzzy_strength_pct = 0.0`,
+>   `approach_rate_cap_c_per_hr = 0.0`, and `adaptive_tune enabled=False` on
+>   all three live zones — every fuzzy-band, overshoot-measurement, ramp-
+>   tracking and ratchet finding above is a host-test/sim result only; none
+>   has run on the physical kiln.
+>
+> A concurrent pass is separately auditing a settle-band mismatch in
+> `sim_fuzzy_overshoot.c` as of this sweep — work in progress, no outcome to
+> report; not cited further here.
 > - **Fuzzy controller: Stage 0 of `docs/FUZZY_CONTROLLER_PLAN.md` has run,
 >   and its downstream comparison was independently reviewed and partly
 >   retracted the same day.** `ed854ac5`'s offline nine-cell probe recorded

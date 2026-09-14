@@ -47,6 +47,24 @@ on this scenario, not a demonstrated inference benefit. See §2(iv) and §4.3
 for what this changes; do not describe fuzzy as beating a flat retune
 anywhere in this document.
 
+**Update, 2026-09-14 (owner decision + second independent measurement):**
+the owner has decided the (i)-derived band normalisation SHIPS — see §2(i)'s
+update. Separately, `docs/audits/fuzzy_overshoot_measurement_2026-09-13.md`
+plus its appended review (`1570a65a`) re-ran finding (A) directly against the
+owner's four-part objective (not IAE/MAE) and reached the same conclusion by
+an independent route: that document's own "equivalent fixed retune" arm
+turned out to be fuzzy_50's centre-cell MAXIMUM (kp x0.75/ki x1.25/kd x0.75,
+reachable only at error=0/rate=0), not its measured ramp-phase average (kp
+x0.8684/ki x1.1618/kd x0.8382). A plain static gain rescale at that true
+average reproduces fuzzy_50 on all four objectives inside materiality, and
+the penalty tracks gain magnitude monotonically with no discontinuity at the
+inference boundary. **The fuzzy layer remains indistinguishable from a gain
+change of the same magnitude — do not cite that document's headline
+(0.42 degC overshoot advantage, 40-80 s settle improvement) without also
+citing the review that overturns both numbers.** See §2(iv)'s 2026-09-14
+update, which withdraws this section's own 2026-09-13 note about a
+weakened "for" case.
+
 ---
 
 ## 0.0 The objective is four-part, stated by the owner (2026-09-13) — governs everything below
@@ -323,6 +341,19 @@ fixture. The dimensionless constants `N` and `M` in the derivation are themselve
 new free parameters chosen by desk reasoning — the same defect one level up. It
 is by a wide margin the most machinery of any option here.
 
+**2026-09-14 update — OWNER DECISION: SHIP the band-derivation half of this
+option.** `2c49465a` implements the `error_band_c`/`rate_band_c_per_s`
+derivation from `model_k_dc`/`model_tau_s` described above, with the
+previous absolute constants retained only as an explicitly-logged fallback
+for a zone that has never been autotuned. The owner chose to keep this
+because it satisfies the standing requirement that nothing ship guessed for,
+or tuned to, a kiln other than the installed one, at no material cost — it
+does not add the 27 per-cell confidence values also proposed under this
+option, and does not change the "Against" paragraph's objection that finding
+(A) survives the fix untouched (see the header update and §2(iv) below):
+band-unit correctness and rule-table/strength-authority are separate axes.
+Do not read this decision as adopting (i) in full, only its band half.
+
 ### (ii) Keep the Mamdani structure, fit the rule table instead of hand-authoring it
 
 Retain 3x3 membership, replace `RULE_TABLE`'s 27 hand-written directions with
@@ -402,6 +433,20 @@ anything on this board beyond a constant rescale" remains the accurate
 statement.** See the plan header for the corrected figures. This does not
 strengthen (iv) either — it only removes a claim that would have weakened
 it — so treat the "for"/"against" case as unchanged from before 2026-09-13.
+
+**2026-09-14 update — the "weakened" framing above is WITHDRAWN.** A second,
+independent measurement against the owner's actual four-part objective
+(`docs/audits/fuzzy_overshoot_measurement_2026-09-13.md` + its `1570a65a`
+review, summarised in the plan header) found the same root cause on a
+different harness: the document's "equivalent fixed retune" comparison arm
+was fuzzy_50's centre-cell maximum, not its ramp-phase average, and a
+correctly-scaled flat rescale reproduces fuzzy_50 on all four objectives
+inside materiality. There is now no standing claim, from either harness,
+that fuzzy beats an equivalent flat retune on this bench model. **The "for"
+case for (iv) is therefore not weakened by anything measured to date — read
+it as originally written**, not as "unchanged from before 2026-09-13" (that
+phrasing described a wash; this update describes the wash resolving further
+in the same direction).
 
 **Against.** Deletion is irreversible on a hypothesis, and the hypothesis rests
 on `n=1` incomplete hardware arm in one of nine rule cells — we have not actually
