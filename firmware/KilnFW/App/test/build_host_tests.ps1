@@ -104,8 +104,10 @@ try {
         (Join-Path $testDir "test_approach_rate_cap.c"),
         (Join-Path $testDir "test_safety_ceiling_policy.c"),
         (Join-Path $testDir "test_sim_high_temp.c"),
+        (Join-Path $testDir "test_sim_mistune.c"),
         (Join-Path $testDir "sim_plant.c"),
         (Join-Path $testDir "sim_high_temp.c"),
+        (Join-Path $testDir "sim_mistune.c"),
         (Join-Path $driversDir "control/pid.c"),
         (Join-Path $driversDir "control/cone_table.c"),
         (Join-Path $driversDir "control/thermal_guard.c"),
@@ -695,7 +697,8 @@ try {
                  "kilnlink_reboot_result.c", "kilnlink_set_config.c", "kilnlink_set_ct_cal.c",
                  "kilnlink_set_log_level.c", "kilnlink_set_param.c", "kilnlink_frame.c", "kilnlink_crc.c",
                  "kilnlink_param.c", "kilnlink_param_value.c", "kilnlink_ct_auto_zero_begin.c",
-                 "kilnlink_get_ct_auto_zero.c", "kilnlink_ct_auto_zero_status.c") | ForEach-Object { "`"$(Join-Path $commonSrc $_)`"" }
+                 "kilnlink_get_ct_auto_zero.c", "kilnlink_ct_auto_zero_status.c",
+                 "kilnlink_stack_margin.c", "kilnlink_get_stack_margin.c") | ForEach-Object { "`"$(Join-Path $commonSrc $_)`"" }
     $cmd14 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$slObjDir\\`" /Fe:`"$exe14`" " +
             "`"$(Join-Path $testDir 'test_safety_link_compile.c')`" " +
