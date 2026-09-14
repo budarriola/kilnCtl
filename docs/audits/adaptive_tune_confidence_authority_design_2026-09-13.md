@@ -402,3 +402,272 @@ mechanism now, ahead of both preconditions, would produce host-tested code with 
 constants — exactly the "uncertain payoff, cannot be evidenced on this fixture" verdict
 `docs/FUZZY_CONTROLLER_PLAN.md` §8 already reached for the structurally identical fuzzy-layer
 proposal, for the same underlying reason.
+
+---
+
+## Review, 2026-09-13 — adversarial: the non-circularity claim (§1) is REFUTED AS SPECIFIED; the bounded-walk invariant SURVIVES a varying alpha
+
+Adversarial review of this document (`8c988093`) against the sources it cites. Design review
+only; no code was changed by this pass. Hashes checked with `git cat-file -t`: `8c988093`,
+`655da406`, `97288659`, `36f88d62` all resolve to commits.
+
+**What was verified against source versus taken on this document's word.** Verified by reading:
+`adaptive_tune_internal.h:114-145` (the constants and their values), `adaptive_tune_model.c:38-190`
+(the whole `adaptive_tune_refine_zone_locked()` guard chain, the baseline anchor, the blend and
+the clamps), `adaptive_tune.c:365-380` (the observation ring's write path), `adaptive_tune.c:421-460`
+(`reset_run_status_locked()` and the lifetime-latch carve-out), `adaptive_tune.c:536-600`
+(`adaptive_tune_run_end()`'s skip chain), `adaptive_tune_internal.h:279-320` (the per-zone state
+struct), and `zones_http_post_parse.c:400-500` and `:690-760` (the carry-through block and the
+model-field parse block). Taken on this document's word, not re-derived: the `sim_iter_tune.c`
+header quotation, the `docs/FUZZY_CONTROLLER_PLAN.md` §8 comparison, and the bench-physics facts
+in §8.
+
+### 1. Circularity (§1) — the argument is right in principle and wrong as written
+
+Two separate things are tangled in §1, and they deserve opposite verdicts.
+
+**The principle is sound, and more strongly than §1 argues it.** §1 defends the forward check by
+saying it compares plant observations rather than tracking error. That is true but understates
+the case. At a settled dwell, `profile_executor.c` zeroes the target rate, so duty is pure hold
+term, and integral action drives duty to whatever the *true* plant requires to hold that rise:
+`u ≈ rise / K_true`. The observed `(duty, rise)` pair is therefore set by the plant and the
+setpoint, **not** by the model. So the brief's specific worry — "can a model error bias duty into
+a region where the model happens to fit well" — is largely answered: within a settled dwell, a
+wrong model does not *relocate* the operating point, it only makes the transient to reach it
+worse. That is a genuine, checkable reason the loop is not closed, and it is stronger than the
+one §1 gives.
+
+**But the implementation §1 specifies is in-sample contaminated, and that is a load-bearing
+defect.** §1 says the residual is scored over "the settled-dwell observations
+`adaptive_tune_zone_tick()` records during run N+1 (the same (duty, rise-over-ambient) pairs
+already harvested for the ring, `adaptive_tune.c:319-355`)". **The ring is not per-run.**
+`adaptive_tune.c:365-380` is the only writer, and nothing anywhere in `adaptive_tune.c` ever
+clears `ring_count`/`ring_head` at a run boundary — the only `ring_count` references in that file
+are the append path and the status getter. It is a rolling 12-deep window (`ADAPTIVE_TUNE_RING_CAPACITY`)
+spanning however many runs it takes to fill, evicting oldest. Consequences:
+
+- At run N+1's end, the ring holds a *mixture* of run N+1's observations and run N's — the very
+  observations run N's `K_fit` was trained on. Scoring run N's model against that mixture is a
+  partly **in-sample** residual, which is exactly the self-validating shape §1 claims to avoid.
+  The contamination fraction is not small: if a firing contributes 3-4 dwell observations, a
+  majority of a 12-deep ring at run N+1's end is pre-N+1 data.
+- The reuse §1 relies on ("the same pairs already harvested") is therefore **not available as
+  stated**. A forward check needs per-run partitioning of the ring (a run-boundary marker, or a
+  separate per-run scoring buffer) that does not exist today. This is new bookkeeping the design
+  does not budget for, and it is a precondition for the residual to mean what §1 says it means.
+
+**The duty-spread gate does not close the general case — it closes almost nothing.** Two findings,
+both traced:
+
+- Under §1's own predictor, `predicted_rise = K_N * duty`, the residual is
+  `|K_N·u − K_true·u| / (K_true·u) = |K_N − K_true| / K_true` — **duty cancels**. For a linear
+  model the fractional residual is *independent of the duty at which it is measured*, so duty
+  spread contributes literally zero information to this signal. Spread only matters if the true
+  plant is nonlinear in duty, and `ADAPTIVE_TUNE_MIN_DUTY_SPREAD` is 0.05 — a 5-percentage-point
+  duty band (`adaptive_tune_internal.h:116`, checked at `adaptive_tune_model.c:53`). On a kiln
+  that is a sliver of the operating envelope. A single-purpose kiln firing the same profile every
+  time clears a 5% spread trivially while never leaving its regime — the precise case §1 says the
+  gate closes.
+- The gate is also computed over the *current ring only* (`adaptive_tune_model.c:45-56`,
+  `umin`/`umax` over `z->ring_count` entries), i.e. a rolling 12-sample window. §1 describes it as
+  applying "over the runs being scored" and speaks of "the historically-seen duty band" — a
+  cross-run coverage notion that has no representation in the code. The design reuses a named
+  constant while silently redefining its semantics. That is the same class of error this repo
+  logs as `project_unchanged_code_is_not_unchanged_behavior`.
+
+**The real residual leak §1 misses is selection, not location.** A badly wrong model degrades the
+approach to dwell; observations are only harvested once the settle gates pass
+(`ADAPTIVE_TUNE_SETTLE_MIN_S`, the slope floor, and the duty-stability gates), and a whole run can
+be dropped by `ADAPTIVE_TUNE_MAX_EXCLUDED_FRACTION` at `adaptive_tune.c:559-575`. So the *set* of
+observations that reaches the scorer is filtered by how well the current model is behaving:
+regimes where the model is worst are preferentially discarded, and §3's table scores those runs as
+"no change either direction". That is survivorship bias feeding a confidence estimator, and it
+biases confidence **upward** — the dangerous direction. It is a weaker loop than tracking-error
+self-scoring, but it is a loop, and the design does not name it.
+
+**Verdict on §1: the non-circularity argument is REFUTED as specified.** Not because
+forward-checking is wrong — it is the right idea and the settled-dwell reasoning above is a better
+defence than the one written — but because (a) the data source named is cross-run and would make
+the residual partly in-sample, (b) the gate leaned on to close the narrow case is duty-independent
+for this predictor and only 5 points wide, and (c) the actual leak is selection bias, unaddressed.
+None of the three is fatal to the concept; all three are fatal to building §1 as it currently
+reads.
+
+### 2. The floor-state safety claim (§4) — true only with a read-side clamp the design never states
+
+§4's claim, restated: "a bug in the NEW confidence-scoring code ... can only ever fail to RAISE
+authority ... it cannot on its own lower a guard below today's shipped values." This is asserted,
+not constructed. It holds **only** if the mapping from the persisted confidence field to `alpha`
+is clamped on read into `[0.15, alpha_max]`. The design never says so, and its persistence
+proposal makes the unclamped case reachable:
+
+- A corrupted, partially-migrated, or out-of-range field under a natural linear mapping
+  (`alpha = 0.15 + conf·(alpha_max − 0.15)/CONF_MAX`) yields `alpha < 0.15` for negative `conf`,
+  and `alpha < 0` for sufficiently negative `conf`. **A negative alpha is not merely "more
+  conservative" — it breaks the convexity premise of the ratchet invariant** (see §3 below):
+  `k_blended = k_dc + α(k_fit − k_dc)` with `α < 0` moves `k_dc` *away* from `k_fit`, so
+  `k_blended` is no longer in `[min(k_dc,k_fit), max(k_dc,k_fit)]`. The `±20%` clamp at
+  `adaptive_tune_model.c:158-160` is relative to the live `k_dc`, so it bounds the step but not
+  the walk: `k_dc` can then march 20% per run in a direction no `k_fit` ever pointed, out of the
+  `[baseline/5, 5·baseline]` envelope, stopping only at `ADAPTIVE_TUNE_K_DC_ABS_MAX`. So the
+  floor claim is not just wrong at the margins — its failure mode reaches through and destroys the
+  `97288659` lifetime bound. **Mandatory addition to this design: clamp on read, and treat any
+  out-of-range or non-finite confidence value as the floor, not as a value to map.**
+- §3 chooses to store confidence in `zone_cfg_t` "for the carry-through discipline". That is
+  reasonable, but it also puts confidence inside the struct that `POST /api/zones` rebuilds. The
+  design must state explicitly that confidence has **no** `z%u_` POST key — otherwise confidence
+  becomes operator-writable, and a config write silently becomes an authority grant with no
+  evidence behind it.
+- **The carry-through policy stated in §3 is mechanically right but wrong for one case.**
+  §3 prescribes `z->confidence = current_z->confidence;` on the `36f88d62` pattern. But
+  `zones_http_post_parse.c:490-493` shows this file already distinguishes two policies:
+  unconditional carry-through (`autotune_baseline_k_dc`, `model_fit_*`, `adaptive_tune_enabled`)
+  versus **carry-then-invalidate-on-actual-change** (`tuning_valid`, zeroed when
+  `|Δpid_kp|>0.0001` etc.). Confidence belongs in the *second* category, not the first: a
+  whole-page save that changes the PID gains has replaced the thing confidence was accumulated
+  about. As written, §3 would preserve a maxed-out confidence across an operator gain edit.
+
+### 3. The bounded-walk invariant under a varying alpha — IT SURVIVES
+
+Redone from `adaptive_tune_model.c:157-176`, not taken on the document's word.
+
+Let `B = autotune_baseline_k_dc`, `R = ADAPTIVE_TUNE_MAX_JUMP_RATIO = 5`, `I = [B/R, B·R]`.
+Invariant: `k_dc ∈ I` before a run ⟹ `k_dc ∈ I` after.
+1. `k_fit ∈ I` unconditionally — `adaptive_tune_model.c:125` refuses otherwise, and `B` is never
+   written by this function (only by `autotune_engine_guard.c`'s accept path and the one-shot
+   bootstrap at `:111-118`).
+2. `k_blended = k_dc + α(k_fit − k_dc)`. For **any** `α ∈ (0,1]` this is a convex combination, so
+   `k_blended ∈ [min(k_dc,k_fit), max(k_dc,k_fit)] ⊆ I`.
+3. The clamp at `:158-160` maps `k_blended` to within `k_dc ± 0.2·k_dc`, and since `k_blended` is
+   already on the `k_fit` side of `k_dc`, the clamp only ever moves it **toward** `k_dc` — an
+   interior point of `I`.
+
+Nothing in steps 1-3 uses the numeric value 0.15. **The invariant is a property of `α ∈ (0,1]`,
+not of `α = 0.15`.** It survives `alpha_max = 0.5`, and would survive `alpha_max = 1.0`. The
+`97288659` proof does **not** need re-deriving, and the §5 ceiling `alpha_max < 1.0` is justified
+by convergence and noise arguments — not by the envelope, which does not need it. §2's own
+statement ("bounded by construction ... cannot itself push K_dc outside `[K_fit, K_dc]`") is
+correct. This is the one load-bearing claim in the document I checked and could not break, and
+the design should say plainly that the bound is α-agnostic rather than leaving it implicit.
+
+**Two unadvertised side effects of modulating alpha, both traced, neither mentioned:**
+
+- **Ki-layer starvation via the D5 arbitration.** `adaptive_tune_run_end()`'s D5 rule
+  (`adaptive_tune.c:~590-615`) lets `adaptive_tune_refine_ki_locked()` run *only* on runs where
+  the model refine did not fire. Raising `alpha` makes `|k_blended − k_dc|` larger, so more runs
+  clear `ADAPTIVE_TUNE_MIN_MATERIAL_MOVE_FRAC` (`adaptive_tune_model.c:183-189`) and the model
+  refine fires more often — **which starves the Ki diagnosis of turns, precisely on the zones that
+  earned the most confidence.** Modulating alpha is therefore not a pure "act more eagerly" knob;
+  it silently reallocates authority between two layers.
+- **The two proposed knobs compound in the same direction, which is what §2 says it avoided.**
+  §2 declines to also modulate `ADAPTIVE_TUNE_MAX_FRACTIONAL_MOVE` because "modulating both at
+  once from the same confidence signal risks a compounding effect". But `MIN_OBSERVATIONS` and
+  `alpha` compound just as directly: per-run `K_dc` jitter scales roughly as `α·σ/√n`, so
+  `0.15 → 0.5` with `n: 4 → 2` is about a **4.7x increase in run-to-run gain jitter** — more trust
+  applied to a noisier estimate. At `n = 2` an OLS gain fit passes through its two points exactly
+  and rejects no noise at all. The §2 compounding argument is applied inconsistently; if it
+  disqualifies the per-run cap it also disqualifies relaxing `MIN_OBSERVATIONS` alongside alpha.
+  Recommendation: modulate `alpha` only in a first cut, and leave `MIN_OBSERVATIONS` at 4.
+
+### 4. The fall path — stale-state enumeration, three real gaps
+
+§3's table covers four reset triggers. Enumerating everything that goes stale when confidence
+resets, or that changes the model without resetting confidence:
+
+| State | Covered by §3? | Finding |
+|---|---|---|
+| The consecutive-good-run counter | Yes | — |
+| `K_dc_after_run_N` (the prediction being scored) | Not listed, but OK | Derivable from live `model_k_dc`, since this function is its only routine writer — *except* via the operator path below |
+| The observation ring (`ring`, `ring_count`, `ring_head`) | **No** | RAM-only, cross-run, never cleared. Two consequences: (a) after a reset triggered by a genuine plant change, the ring still holds pre-change observations and the next fit is trained on a mixture; (b) **after a reboot the ring is empty while persisted confidence is still high** — so a relaxed `MIN_OBSERVATIONS` would let the first 2 observations after a power cycle drive a max-alpha refinement. This is a textbook `project_reset_one_side_bug_class` pair: confidence persisted, its evidence base not |
+| Operator `POST /api/zones` writing `z%u_k` | **No** | `zones_http_post_parse.c:701-710` — `model_k_dc` **is** operator-writable, bounded only by `ZONE_MODEL_K_MAX`. An operator can replace the model by hand and confidence carries straight over |
+| Operator `POST /api/zones` **omitting** `z%u_k` | **No** | Same block, and this file's own comment calls it "this file's OWN documented sharp edge": omitting the key **deletes** the model (`z` is zero-initialised; 0 is the "no model" encoding). Refinement then refuses at `adaptive_tune_model.c:69-73`, but confidence sits latched at maximum until a model reappears — at which point full authority applies to a model with zero runs behind it |
+| Operator gain edit on the same page | **No** | See §2 above — must follow `tuning_valid`'s invalidate-on-change, not unconditional carry |
+| `model_fit_temp_c` / `model_fit_ambient_c` | **No** | The operating point each fit was taken at (and now `zone_model_at()`'s schedule seam, `5d3bc854`). If confidence is meant to be a statement about a model at an operating point, these are part of what goes stale |
+| `has_applied` / `prior_k_dc` / `applied_k_dc` / `last_delta_pct` | Partly | `adaptive_tune.c:440-447` (K2) documents these as **lifetime latches**, deliberately *not* reset on skip paths. Whether confidence is a lifetime latch or a per-episode counter must be stated; `adaptive_tune_revert()` clears `has_applied` (`:1065`) but the design does not say whether the revert reset is symmetric |
+| `ki_baseline` / `ki_baseline_valid` | **No** | Persisted in this module's own NVS blob, documented "latched once, never overwritten". A confidence reset on a new autotune Accept coexists with a Ki baseline that may or may not be re-latched — the design should say which |
+
+The `36f88d62`-class carry-through requirement itself is **correctly stated** as a mechanism (the
+line goes in `zones_http_post_parse.c`'s per-zone rebuild; the test extends `test_zones_http.c`;
+both in the same commit). The policy attached to it is wrong for the gain-change case, per §2.
+
+### 5. Validation (§7)
+
+**The `sim_iter_tune.c` judgement is correct** — an independent-trial Monte Carlo harness cannot
+exercise state whose whole point is accumulating across trials. A new chained single-zone harness
+is the right call, and the "link the real `.c`, do not mirror it" discipline
+(`project_binding_a_python_mirror_to_c`) is correctly invoked.
+
+The five scenarios are necessary but not sufficient. Add:
+
+- **(f) Reboot mid-sequence.** Drop the RAM-only ring while carrying persisted confidence forward,
+  and assert the first post-reboot run does not act at full authority on 2 observations. This is
+  the §4 gap above and it is the cheapest one to catch in a harness.
+- **(g) Operator whole-page `POST /api/zones` mid-sequence**, in both shapes: one that changes the
+  gains, and one that omits `z%u_k` and deletes the model. Assert confidence resets. `36f88d62`
+  is proof this call site is missed by inspection.
+- **(h) A quantized, noisy plant.** `project_idealized_test_input_bug_class` — a perfectly linear
+  noiseless `sim_plant.c` will produce shrinking residuals and a ratchet to the ceiling by
+  construction, proving nothing. The load-bearing test is that confidence does **not** reach the
+  ceiling on a plant whose apparent gain wanders only by sensor noise.
+- **(i) Recovery after a fall.** Every §3 row tests a drop; none tests that confidence then
+  climbs back correctly and by the right increments.
+- **(j) A negative test of the mapping itself.** `feedback_negative_test_every_check`: break the
+  confidence→alpha mapping in the *production* function (not a test-local copy —
+  `project_negative_test_on_a_mirror_is_vacuous`) and prove a scenario fails. Restore by hand,
+  never `git checkout --`.
+
+Scenario (e) as written cannot do its stated job while `ADAPTIVE_TUNE_MIN_DUTY_SPREAD` is the
+gate — per §1 above, a 5% within-ring spread is clearable by an invariant firing pattern, so the
+harness would show the gate passing and confidence ratcheting, which is the correct result for a
+gate that does not do what §1 claims. (e) should be rewritten to assert that outcome and force the
+design to specify a real coverage gate.
+
+### 6. Build-now-or-later — I agree with the verdict, but two of its three grounds are the weak ones
+
+Agreed: **do not build it yet.** But the reasoning should be re-ordered, because two of the three
+grounds would not survive a determined push-back.
+
+- Ground 1 ("zero observations on any zone today") is the weakest. It is self-imposed and
+  removable in one config write — `adaptive_tune_enabled` is a per-zone flag. "We have not turned
+  it on" is a schedule fact, not a design argument.
+- Ground 3 (the 0.5 C materiality floor) is close to circular in the other direction: it argues
+  that a mechanism for improving long-run model fidelity is not worth building because *current*
+  bench effects are small. That conflates the size of the effect with the size of the risk. This
+  mechanism's payoff is not 0.5 C of MAE on a bench; it is not drifting on a 1200 C kiln over
+  fifty firings. `feedback_ignore_sub_half_degree_effects` is about not *chasing* sub-0.5 C
+  effects, not about declining to bound a drift mechanism.
+- Ground 2 (the thresholds cannot be calibrated on a 40 C, 4 W fixture) is the real one, and it is
+  sufficient on its own. The good-agreement residual band, the consecutive-run threshold, and
+  `alpha_max` are all numbers that must be fitted to a plant, and fitting them to this bench would
+  be fitting noise.
+
+**And a fourth ground, which this review adds and which is stronger than 1 and 3: the design is
+not implementable as written.** §1's data source does not exist in the form it names (the ring is
+cross-run, `adaptive_tune.c:365-380`), so the residual it specifies would be in-sample. That must
+be resolved — per-run partitioning, a coverage gate that is not
+`ADAPTIVE_TUNE_MIN_DUTY_SPREAD`, and an explicit read-side clamp — before this document is a
+buildable design rather than a direction. **Do not pick this up off the shelf as-is when the two
+preconditions in §8 are met; §1, §3's reset table and §4's floor claim need the revisions above
+first.**
+
+### Summary of required changes before this design is buildable
+
+1. §1: partition the ring per run (or add a dedicated scoring buffer) so the forward residual is
+   genuinely out-of-sample. Not optional — it is the difference between the design's central claim
+   being true and false.
+2. §1: replace `ADAPTIVE_TUNE_MIN_DUTY_SPREAD` as the coverage gate. It is duty-independent for
+   this predictor, 5 points wide, and computed over a rolling 12-sample window. State the
+   selection-bias leak (non-settling runs excluded ⇒ confidence biased upward) explicitly.
+3. §4: mandate a read-side clamp of confidence into `[floor, ceiling]`, treating non-finite and
+   out-of-range as floor. Without it a corrupted field can produce `α ≤ 0` and break the
+   `97288659` envelope invariant outright.
+4. §3: confidence must have no `z%u_` POST key, and must follow `tuning_valid`'s
+   invalidate-on-actual-gain-change policy, not `autotune_baseline_k_dc`'s unconditional carry.
+5. §3: add reset triggers for operator `model_k_dc` write, operator `z%u_k` omission (which
+   deletes the model), and reboot-with-empty-ring; state confidence's relationship to
+   `has_applied`'s lifetime-latch semantics and to `ki_baseline`.
+6. §2: either modulate `alpha` alone, or apply the compounding argument consistently and explain
+   why `alpha × MIN_OBSERVATIONS` (≈4.7x jitter) is acceptable when `alpha × MAX_FRACTIONAL_MOVE`
+   is not. Note the D5 Ki-starvation side effect either way.
+7. §5: state that the envelope invariant is α-agnostic over `(0,1]` — the `alpha_max < 1.0`
+   ceiling is a convergence/noise choice, not a safety requirement.
