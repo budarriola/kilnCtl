@@ -304,25 +304,40 @@ static const sim_scenario_t TABLE[] = {
         .ambient_c = BENCH_AMBIENT_C,
         .ramp_rate_c_per_hr = 150.0f,
         .t1_offset_c = 15.0f, .t2_offset_c = 30.0f,
-        .sep_expected = true, /* WI-6 RE-PIN, first measurement 2026-09-14: measured_separated=yes
-                               * (d_under=0.74 degC, ENTRY_UNDERSHOOT_C -- the other three objectives
-                               * stay under materiality). This CONTRADICTS docs/research/
-                               * fuzzy_ramp_tracking_2026-09-13.md's "the rule table barely touches
-                               * the integral term" analysis and is flagged here, NOT quietly
-                               * re-pinned away as expected -- the reason string says so explicitly so
-                               * a reader does not mistake this re-pin for confirmation of the prior
-                               * analysis. Classified GAIN_ONLY by this suite's own sec 5.3 #3 check
-                               * (A_STATIC_MATCHED reproduces the separation), which narrows the
-                               * contradiction to "the multiplier magnitude affects undershoot even
-                               * when applied statically," not "the fuzzy inference does something
-                               * integral-specific" -- still worth a human read against that doc. */
+        .sep_expected = true, /* WI-6 RE-PIN, 2026-09-14, REVIEWED 2026-09-14 (PID_RANGE_C/S9-vs-
+                               * research pass): measured_separated=yes, driven by d_under=0.7414 degC
+                               * (ENTRY_UNDERSHOOT_C, dwell-entry transient) plus a borderline
+                               * d_lag_equiv_c=0.5833 degC-equiv (the max-PAIRWISE diff across all six
+                               * arms; the PID-vs-FUZZY50 pair alone reads exactly 0.5000, at the
+                               * materiality line, not over it). VERDICT (see this suite's
+                               * classification, not asserted as final): this is NOT actually a
+                               * contradiction of docs/research/fuzzy_ramp_tracking_2026-09-13.md.
+                               * That doc's claim is specifically about STEADY-STATE ramp-following lag
+                               * (governed by Kv=Ki*P(0), where the two axis-aligned "error large, rate
+                               * STEADY" cells leave Ki at x1.0). entry_undershoot_c is a DWELL-ENTRY
+                               * TRANSIENT metric -- exactly the step-response overshoot/undershoot case
+                               * the same doc says the Kp-push cells ARE the right/intended lever for.
+                               * The measured applied_ki_mult_mean here is x1.0635 (a real 6.35%
+                               * increase, not exactly 1.0), consistent with the doc's own caveat that
+                               * inference blends continuously across the 3x3 grid rather than snapping
+                               * to the two named axis cells -- some off-axis blending nudges Ki a
+                               * little even though the axis cells themselves do not. Classified
+                               * GAIN_ONLY by this suite's own sec 5.3 #3 check (A_STATIC_MATCHED
+                               * reproduces the separation): the effect is the ordinary Kp-driven
+                               * transient response to a slightly different trajectory approaching the
+                               * dwell (caused by the mistuned Ti), not the fuzzy layer doing anything
+                               * integral-specific. Still a re-pin per measurement, not a re-derivation
+                               * of the research doc -- flagged for a human/opus read to confirm this
+                               * reading, per this plan's own instruction not to report findings as
+                               * conclusions here. */
         .sep_reason = "3-node matched plant; model_* is SIM_MISTUNE_SLOW_INTEGRAL (tau*3.0 fed to the "
                       "tuner's Ti only, dead-time/gain untouched) -- isolates the integral term. "
-                      "MEASURED SEPARATION CONTRADICTS docs/research/fuzzy_ramp_tracking_2026-09-13.md's "
-                      "'rule table barely touches the integral term' analysis (d_under=0.74 degC, "
-                      "classified GAIN_ONLY -- see CLASSIFICATION line). Re-pinned yes per measurement, "
-                      "NOT because the contradiction is resolved -- flagged for a human/opus review, "
-                      "per this plan's own instruction not to report findings as conclusions here.",
+                      "Measured separation (d_under=0.7414 degC) traces to the DWELL-ENTRY TRANSIENT, "
+                      "not steady ramp-following lag -- see the sep_expected comment for why this reads "
+                      "as consistent with, not contradicting, docs/research/fuzzy_ramp_tracking_"
+                      "2026-09-13.md once the two are distinguished. Classified GAIN_ONLY -- see "
+                      "CLASSIFICATION line. Flagged for a human/opus review to confirm the reading, per "
+                      "this plan's own instruction not to report findings as conclusions here.",
     },
     {
         .id = "S10_KILN_HIGH_T",
@@ -330,27 +345,46 @@ static const sim_scenario_t TABLE[] = {
         .ambient_c = 24.0f,
         .ramp_rate_c_per_hr = 150.0f,
         .t1_offset_c = 576.0f, .t2_offset_c = 1226.0f, /* -> T1=600C, T2=1250C off a 24C ambient */
-        .sep_expected = false, /* WI-6 RE-PIN, first measurement 2026-09-14: measured_separated=no
-                               * on all four objectives (max pairwise diff ~0.0000-0.0002 degC/degC-
-                               * equiv). KNOWN FIXTURE LIMITATION, not a physics finding: PID_RANGE_C
-                               * (25 degC, a bench-scale #define this file shares across every
-                               * scenario) is far smaller than this scenario's ~1226 degC target
-                               * span, so the loop spends nearly the entire firing in the bang-bang
-                               * full-on/full-off branch (outside pid_range_c, "no PID math" --
-                               * pid.h's own comment), where strength_pct cannot matter because the
-                               * fuzzy-adjusted gains are never evaluated. steady_rms_c/entry_peak_c
-                               * both read as saturated/degenerate (see the raw row, entry_peak_c
-                               * pinned near -551.86 for every arm identically). Re-pinned no per
-                               * measurement -- this is a scope limitation of the shared PID_RANGE_C
-                               * fixture, not evidence about kiln-scale controller behaviour, and a
-                               * kiln-scale-appropriate range constant is a reasonable WI-6 follow-up,
-                               * not attempted here. */
+        .sep_expected = false, /* WI-6 RE-PIN, 2026-09-14; REVISED 2026-09-14 (PID_RANGE_C
+                               * investigation). The original re-pin blamed PID_RANGE_C (25 degC,
+                               * shared bench-scale #define) for near-total bang-bang saturation. That
+                               * diagnosis was WRONG: PID_RANGE_C mirrors the REAL production constant
+                               * PID_FUNCTIONAL_RANGE_C (profile_executor_internal.h) -- a genuine
+                               * controller parameter, fixed in absolute degrees C in shipped firmware
+                               * too, not a harness-only fixture, and not scaled to plant/tau by any
+                               * real installation either. Rescaling it in the harness to manufacture
+                               * separation would have tested a hypothetical firmware behaviour this
+                               * board does not have.
+                               *
+                               * The ACTUAL root cause was a TEST FIXTURE bug in sim_high_temp.h's
+                               * kiln-scale plant: c_l_j_per_c=2,000,000 J/C against
+                               * heater_power_w=2500 W gives a near-ambient full-duty heating rate of
+                               * only P/C_l = 4.5 C/hr -- over 30x slower than this scenario's own
+                               * 150 C/hr commanded ramp. A plant physically unable to keep up with its
+                               * own commanded ramp pins duty at 1.0 (pid.c's final u clamp fires
+                               * regardless of pid_range_c) for most of the firing, independent of
+                               * gains -- THAT is why every arm read identical. Fixed by rescaling every
+                               * capacity (c_e/c_l/c_s) down by the same 133.33x factor (steady-state
+                               * g_ea/g_la/heater_power_w untouched, so the documented ~1288 C full-duty
+                               * asymptote is unaffected) -- see sim_high_temp.c's own comment.
+                               *
+                               * Re-measured post-fix: saturated-duty fraction (SATFRAC, this suite's
+                               * new instrumentation) dropped from near-total to ~0.286, and the applied
+                               * gain multipliers now move substantially (x0.7589 Kp / x0.9623 Ki,
+                               * vs ~1.0000 uniformly before) -- fuzzy genuinely engages. Despite that,
+                               * measured_separated is STILL no on all four objectives (max pairwise
+                               * diff ~0.03-0.08 degC/degC-equiv) -- a materially different, no longer
+                               * degenerate result than before, but still not separating. Report as a
+                               * numeric finding, not a conclusion: with saturation no longer dominant,
+                               * a real 24% Kp / 4% Ki spread produces no measurable difference in
+                               * lag/steady/entry outcomes at kiln scale -- worth a human/opus read, not
+                               * resolved further here. */
         .sep_reason = "Kiln-scale 3-node plant, s(T) conductance scaling ON, sensor_bias_p=5/6, tuned "
                       "ONCE at 200C and never rescheduled -- the regime the ~4W bench cannot reach. "
-                      "Carries [f_rad=0.05 ASSUMED] (sim_high_temp.h). Re-pinned no at first measurement: "
-                      "the shared bench-scale PID_RANGE_C=25 degC keeps this scenario almost entirely in "
-                      "bang-bang control, where fuzzy structurally cannot act -- see the sep_expected "
-                      "comment for the full mechanism. NOT a high-temperature-physics finding.",
+                      "Carries [f_rad=0.05 ASSUMED] (sim_high_temp.h). Re-pinned no post-fixture-fix: "
+                      "saturated_duty_frac ~0.286 (down from near-total), gains now genuinely move "
+                      "(x0.76 Kp / x0.96 Ki), yet outcomes still do not separate beyond materiality -- "
+                      "see the sep_expected comment for the full mechanism and what changed 2026-09-14.",
     },
     {
         .id = "S11_KILN_HIGH_T_SCHEDULED",
@@ -358,18 +392,22 @@ static const sim_scenario_t TABLE[] = {
         .ambient_c = 24.0f,
         .ramp_rate_c_per_hr = 150.0f,
         .t1_offset_c = 576.0f, .t2_offset_c = 1226.0f,
-        .sep_expected = false, /* WI-6 RE-PIN, first measurement 2026-09-14: same PID_RANGE_C fixture
-                               * limitation as S10 (see that scenario's comment) -- re-tuning per
-                               * segment does not change the target span, so this scenario is ALSO
-                               * almost entirely bang-bang and measures no=separated for the same
-                               * structural reason, not because a perfect gain schedule closed the
-                               * gap. */
+        .sep_expected = false, /* WI-6 RE-PIN, 2026-09-14; REVISED 2026-09-14, same fixture fix as
+                               * S10 (see that scenario's comment for the full mechanism -- PID_RANGE_C
+                               * was NOT the cause, sim_high_temp.h's c_l_j_per_c/heater_power_w
+                               * mismatch was). Post-fix: saturated_duty_frac ~0.285 (was near-total),
+                               * gains move (x0.759 Kp / x0.962 Ki), re-tuning per segment does not
+                               * close the gap any more than S10's single upfront tune did -- still
+                               * measured_separated=no on all four objectives. This now genuinely
+                               * distinguishes "schedule vs. no schedule" (both non-degenerate) rather
+                               * than "fuzzy never got to act either way," and the answer is: neither
+                               * arrangement separates at kiln scale, for a reason this suite does not
+                               * resolve further -- flagged for a human/opus read alongside S10. */
         .sep_reason = "Same plant as S10, but RE-TUNED at the start temperature of each of the 4 "
                       "segments (SIM_MISTUNE_MATCHED against the apparent s(T)-scaled model at that "
-                      "temperature). Re-pinned no at first measurement -- same PID_RANGE_C bang-bang "
-                      "limitation as S10 (see its comment); this scenario cannot yet distinguish "
-                      "'schedule closed the gap' from 'fuzzy never got to act' until PID_RANGE_C is "
-                      "made kiln-scale-aware, which is out of scope here.",
+                      "temperature). Re-pinned no post-fixture-fix, same as S10 (see its comment) -- "
+                      "saturated_duty_frac ~0.285, gains genuinely move, per-segment retuning still "
+                      "does not produce separation from the single-tune S10.",
     },
     {
         .id = "S12_COMPOUND_WORST",

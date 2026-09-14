@@ -98,6 +98,15 @@ typedef struct {
     float applied_kd_mult_mean;
     bool  ki_withheld;
     int   refusals; /* structural-invariant violations counted, not just first-hit */
+
+    // WI-6 follow-up (2026-09-14, PID_RANGE_C/kiln-scale investigation):
+    // fraction of the WHOLE firing's ticks with duty >= 0.98 (the same
+    // saturated_high test the runner already computes per tick for
+    // capture-transient gating, sec 5.2). Reported so a scenario stuck in
+    // full-on/full-off for most of its run is VISIBLE in the output
+    // instead of only inferable from degenerate lag/steady/entry_peak
+    // columns -- see SATFRAC lines below the per-arm data row.
+    float sat_frac;
 } firing_result_t;
 
 static uint8_t arm_strength_pct(sim_arm_t arm)
@@ -225,6 +234,8 @@ static bool run_firing(const sim_scenario_t *sc, sim_arm_t arm, const float *sta
 
     double kp_mult_sum = 0.0, ki_mult_sum = 0.0, kd_mult_sum = 0.0;
     long ramp_tick_count = 0;
+    long sat_tick_count = 0;
+    long total_tick_count = 0;
     bool all_bitexact = true;
     bool nan_seen = false;
     float ceiling_c = ambient + sc->model_k_dc + 400.0f; /* widened for S10/S11's kiln-scale span; still a real bound */
@@ -352,6 +363,8 @@ static bool run_firing(const sim_scenario_t *sc, sim_arm_t arm, const float *sta
             if (pstate.sensor_c < floor_c || pstate.sensor_c > ceiling_c) bounds_ok = false;
 
             bool saturated_high = duty >= 0.98f;
+            total_tick_count++;
+            if (saturated_high) sat_tick_count++;
             bool was_captured = zone_captured;
             firing_score_seg_tick(&seg, &zone_captured, target_c, pstate.sensor_c, saturated_high, DT_S);
 
@@ -453,6 +466,8 @@ static bool run_firing(const sim_scenario_t *sc, sim_arm_t arm, const float *sta
         out->load_lag_s = load_lag_n ? (float)(load_lag_sum / load_lag_n) : 0.0f;
         out->load_peak_c = load_peak_n ? (float)(load_peak_sum / load_peak_n) : 0.0f;
     }
+
+    out->sat_frac = total_tick_count ? (float)((double)sat_tick_count / (double)total_tick_count) : 0.0f;
 
     out->applied_kp_mult_mean = ramp_tick_count ? (float)(kp_mult_sum / ramp_tick_count) : 1.0f;
     out->applied_ki_mult_mean = ramp_tick_count ? (float)(ki_mult_sum / ramp_tick_count) : 1.0f;
@@ -619,6 +634,12 @@ int main(int argc, char **argv)
                    fmt_val(bufg3, sizeof(bufg3), r.have_ground_truth, r.sensor_minus_load_c),
                    (double)r.applied_kp_mult_mean, (double)r.applied_ki_mult_mean, (double)r.applied_kd_mult_mean,
                    r.refusals, notes);
+            /* WI-6 follow-up: whole-firing saturated-duty fraction, printed
+             * as a SEPARATE informational line (never a new data-row
+             * column) so run_sim_scenarios.ps1's "^S(\d+)_\S*\t(\S+)\t"
+             * data-row regex and its byte-identical --of 1 vs --of N
+             * comparison are untouched. */
+            printf("SATFRAC %s %s: sat_frac=%.4f\n", sc->id, SIM_ARM_NAMES[ai], (double)r.sat_frac);
         }
 
         /* sec 5.3 #3: the inference-vs-gain verdict, reported as a
