@@ -4377,6 +4377,43 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
     s_last_resp_len = 0;
     esp_err_t err = zones_get_handler(&req);
     TEST_CHECK(err == ESP_OK, "zones_get_handler must return ESP_OK even at max field width");
+    /* json_cap itself (zones_http_get.c, zones_get_handler()) -- kept in
+     * sync by hand, same discipline as this file's own MINIMAL_TIMING_
+     * PROFILE_BODY macro; if that constant changes, update this literal
+     * alongside it. */
+    const size_t json_cap = 7360;
+    /* This message is built BEFORE either check below and used by both,
+     * because the realistic overflow shape is the handler's OWN
+     * APPEND-macro truncation firing mid-render (zones_http_get.c never lets
+     * `json` grow past json_cap, so it goes to its `truncated:` label and
+     * sends a short error body instead) -- s_last_resp_len then reads far
+     * UNDER json_cap despite the real content not fitting at all, so the
+     * length check below can never be the one that actually catches this in
+     * practice. Whichever check fires, the failure now names the measured
+     * headroom and points at the plan doc, rather than leaving the next
+     * person who adds a field to hit a bare "must fit"/"must not truncate"
+     * failure with no idea what to do about it
+     * (docs/audits/zones_json_headroom_plan_2026-09-14.md, task 5): as of
+     * that doc only 161 bytes of headroom remain in this 7360-byte
+     * json_cap, and the buffer must NOT simply be enlarged (this repo has
+     * two documented panics from oversized httpd-worker stack locals and a
+     * standing rule against growing httpd buffers) -- read the plan for
+     * ranked, consumer-checked savings and structural alternatives before
+     * touching json_cap. */
+    char headroom_msg[400];
+    snprintf(headroom_msg, sizeof(headroom_msg),
+             "max-width GET /api/zones must fit inside json_cap without hitting the "
+             "handler's own truncation path (rendered %zu bytes; json_cap is %zu bytes; "
+             "measured headroom before this field addition was 161 bytes; this attempt %s). "
+             "Do NOT enlarge json_cap (two documented httpd-worker-stack-local panics + a "
+             "standing rule against growing httpd buffers) -- see "
+             "docs/audits/zones_json_headroom_plan_2026-09-14.md for ranked, "
+             "consumer-checked savings and structural alternatives before adding another "
+             "field here.",
+             s_last_resp_len, json_cap,
+             (strstr(s_last_resp_body, "did not fit") != NULL)
+                 ? "overflowed mid-render and was truncated by the handler itself"
+                 : (s_last_resp_len < json_cap ? "still fit, but see the headroom above" : "exceeded json_cap outright"));
     /* zones_get_handler()'s own truncated: label sends a SHORT error body
      * ("...did not fit...firmware sizing bug...") on overflow, so a bare
      * s_last_resp_len < json_cap check would pass even in the failure case
@@ -4384,17 +4421,10 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
      * absence of that marker directly, so an actual overflow fails loudly
      * here instead of being masked by the small length of its own error
      * response. */
-    TEST_CHECK(strstr(s_last_resp_body, "did not fit") == NULL,
-              "max-width GET /api/zones must NOT hit the handler's own truncation path");
+    TEST_CHECK(strstr(s_last_resp_body, "did not fit") == NULL, headroom_msg);
     TEST_CHECK(strstr(s_last_resp_body, "\"zones\":[{") != NULL,
               "max-width GET /api/zones must actually render zone content, not an error body");
-    /* json_cap itself (zones_http_get.c, zones_get_handler()) -- kept in
-     * sync by hand, same discipline as this file's own MINIMAL_TIMING_
-     * PROFILE_BODY macro; if that constant changes, update this literal
-     * alongside it. */
-    const size_t json_cap = 7360;
-    TEST_CHECK(s_last_resp_len > 0 && s_last_resp_len < json_cap,
-              "max-width GET /api/zones response must fit inside json_cap with room to spare");
+    TEST_CHECK(s_last_resp_len > 0 && s_last_resp_len < json_cap, headroom_msg);
     printf("  GET /api/zones max-width render: %zu bytes, against json_cap=%zu -- measured "
           "headroom = %zd bytes\n",
           s_last_resp_len, json_cap, (ptrdiff_t)json_cap - (ptrdiff_t)s_last_resp_len);
