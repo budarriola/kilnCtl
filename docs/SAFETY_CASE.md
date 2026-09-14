@@ -433,6 +433,48 @@ here; none is copied from an unverified summary.
     changing within one report period. No explicit "refused, and here is why"
     signal exists today.
 
+12. **On/off zones (`ZONE_TYPE_ON_OFF`) have no welded-contactor detection on
+    the ESP — accepted coverage gap, added 2026-09-14.** Guard 3 (`RUNAWAY`)
+    infers a welded output from "temperature rising while the zone is
+    commanded off"; an on/off zone's channel cannot express that signature
+    (it may be driving a vent/damper/fan with no rise-while-off relationship
+    to its own duty at all), so guard 3 is disabled outright for this zone
+    type (`docs/ON_OFF_ZONE_PLAN.md` sec 1's guard table, guard 3 row). No
+    replacement runs on the ESP. The only welded-contactor coverage that
+    could apply to this output is CT-based (S14/S15 on the Pico) or physical
+    contactor feedback, both out of scope for this feature and, per item 4
+    above, **already structurally inert on this bench rig today**
+    (`ct_installed = 0`). This is an accepted, argued gap, not a defect: a
+    correctly-working on/off device's whole operating signature ("duty high,
+    measurement flat or falling") is indistinguishable from guard 3's own
+    trip condition, so no correct implementation of guard 3 could run on
+    this zone type without false-tripping on ordinary use. **Argued only —
+    no host test proves an absence, and no board on this bench has ever run
+    an on/off relay.**
+
+13. **`max_temp_c == 0` no longer unconditionally means "uncommissioned,
+    refuse to start" — the one relaxation ever made to that settled
+    semantics, added 2026-09-14.** For a `ZONE_TYPE_HEATER` zone, `max_temp_c
+    == 0` still means exactly what it always has: an unmeasured heating
+    ceiling is lethal, so the executor refuses to start
+    (`profile_executor_start.c`/`profile_executor_run.c`'s existing
+    `zone_needs_ceiling()` check). For a `ZONE_TYPE_ON_OFF` zone with **no
+    thermocouple assigned** (`thermo_mask == 0`, legal only for this zone
+    type per `docs/ON_OFF_ZONE_PLAN.md` sec 2), `max_temp_c == 0` does
+    **not** block the run — there is no measured channel for a ceiling to
+    apply to, so treating an unmeasured fan/damper the same as an unmeasured
+    heater would refuse a legitimate, harmless configuration for no safety
+    reason. The single predicate `zone_needs_ceiling(zi) = (zone_type ==
+    HEATER) || (thermo_mask != 0)` is the one place this distinction is
+    made, so a TC-equipped on/off zone (recommended whenever a temperature
+    trigger is used) is unaffected and still gets a ceiling requirement like
+    any measured channel. **Host-tested**: `test_zones_http.c:7174`'s
+    `test_zone_is_on_off_and_zone_needs_ceiling()` exercises `zone_needs_
+    ceiling()` directly for all three cases (HEATER always needs one, on/off
+    WITH a TC still needs one, on/off with NO TC does not). Not
+    hardware-verified — no on/off zone has ever actuated a physical relay
+    (step 9 of `docs/ON_OFF_ZONE_PLAN.md`, still open).
+
 ---
 
 ## 4. Evidence classification

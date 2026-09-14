@@ -74,6 +74,18 @@ static struct {
     float fuzzy_strength_pct;
 } s_fake_zone_cfg[TEST_MAX_ZONES];
 
+// zone_is_on_off() fake: real body lives in zones_config_accessors.c, not
+// linked into this executable (see file banner). Defaults every zone to
+// HEATER (false), same as the real accessor's zero-init default -- tests
+// that need an on/off zone flip the entry explicitly and restore it after,
+// same convention as test_profile_executor_prestart.c's g_stub_zone_is_on_off.
+static bool s_stub_zone_is_on_off[TEST_MAX_ZONES];
+bool zone_is_on_off(uint8_t zone_index)
+{
+    if (zone_index >= TEST_MAX_ZONES) return false;
+    return s_stub_zone_is_on_off[zone_index];
+}
+
 bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
 {
     if (zone_index >= TEST_MAX_ZONES) return false;
@@ -321,6 +333,7 @@ static void reset_module_state(void)
     adaptive_tune_joint_dwell_row_committed = false;
     s_fake_control_mode_fail = false;
     s_fake_fuzzy_pct_fail = false;
+    memset(s_stub_zone_is_on_off, 0, sizeof(s_stub_zone_is_on_off));
 }
 
 // Ticks a single settled dwell into zone zi: `ticks` ticks of dt_s seconds
@@ -433,6 +446,7 @@ void run_test_adaptive_tune(void)
     TEST_SECTION("adaptive_tune: opt-in default off");
     test_opt_in_default_off_records_nothing();
     test_run_end_skips_disabled_zone_even_with_ring_data_present(); // P3
+    test_run_end_skips_on_off_zone_even_with_ring_data_present(); // 2026-09-14 on/off gap
 
     TEST_SECTION("adaptive_tune: public accessor surface (same one adaptive_tune_http.c calls)");
     test_default_off_for_every_zone();

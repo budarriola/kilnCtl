@@ -63,6 +63,39 @@ static void test_run_end_skips_disabled_zone_even_with_ring_data_present(void)
                "end()'s `!z->enabled` skip check is removed");
 }
 
+// on/off zone gap closed 2026-09-14 (docs/audits/on_off_zone_decisions_2026-
+// 09-14.md sec 2, item 1): an on/off zone has no PID and no model, so
+// adaptive_tune must never train on one even if it is opted in, active in
+// the profile's zone mask, and carries a full, well-spread ring -- the same
+// shape as test_run_end_skips_disabled_zone_even_with_ring_data_present()
+// above but with the on/off flag as the ONLY thing standing between this
+// data and a refinement. MUST go red by mutation if adaptive_tune_run_end()'s
+// zone_is_on_off() skip check is removed.
+static void test_run_end_skips_on_off_zone_even_with_ring_data_present(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[0].enabled = true;
+    s_fake_zone_cfg[0].k_dc = 10.0f;
+    feed_settled_dwell(0, 22.0f + 10.0f * 0.30f, 22.0f, 0.30f, SETTLE_TICKS, DT_S);
+    feed_settled_dwell(0, 22.0f + 10.0f * 0.50f, 22.0f, 0.50f, SETTLE_TICKS, DT_S);
+    feed_settled_dwell(0, 22.0f + 10.0f * 0.70f, 22.0f, 0.70f, SETTLE_TICKS, DT_S);
+    feed_settled_dwell(0, 22.0f + 10.0f * 0.90f, 22.0f, 0.90f, SETTLE_TICKS, DT_S);
+    TEST_CHECK(adaptive_tune_zones[0].ring_count >= ADAPTIVE_TUNE_MIN_OBSERVATIONS,
+               "setup: enough dwell observations queued to clear the observation-count floor");
+
+    s_stub_zone_is_on_off[0] = true; // the only thing this test changes vs. the enabled/active case
+
+    profile_firing_run_record_t rec = make_clean_record(6, 0, 900);
+    adaptive_tune_run_end(&rec, true);
+
+    TEST_CHECK(!adaptive_tune_zones[0].has_applied,
+               "an on/off zone must never apply a refinement, even with a full, well-spread ring");
+    TEST_CHECK(s_fake_zone_cfg[0].k_dc == 10.0f, "the model must be untouched for an on/off zone");
+    TEST_CHECK(strstr(adaptive_tune_zones[0].last_refusal_reason, "on/off") != NULL,
+               "the refusal must name the on/off gate specifically, not the opt-in or active-mask guards "
+               "that would also explain a refusal on their own");
+}
+
 // Public accessor tests -- these exercise EXACTLY the surface
 // adaptive_tune_http.c's status/enable handlers call (adaptive_tune_get_
 // enabled/set_enabled/get_status), not the internal adaptive_tune_zones struct

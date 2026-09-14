@@ -570,6 +570,8 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
         char excluded_reason_buf[96]; // must outlive the chain below -- so skip_reason never dangles
         if (!z->enabled) {
             skip_reason = "zone not opted into adaptive tuning -- not used as training data";
+        } else if (zone_is_on_off(zi)) {
+            skip_reason = "on/off zone -- no PID, no model, not used as training data";
         } else if (!zr->active) {
             skip_reason = "zone not active in this profile's zone mask -- not used as training data";
         } else if (!clean) {

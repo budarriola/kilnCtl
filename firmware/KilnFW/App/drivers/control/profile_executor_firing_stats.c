@@ -19,6 +19,9 @@
 #include "hal_kv.h"
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- keeps esp_err_to_name() below meaningful */
 #include "nvs_key_check.h"
+#include "zones_config_accessors.h" /* zone_is_on_off() -- on/off zones have no target_c and no
+                                      * meaningful IAE; skip them here, see ON_OFF_ZONE_PLAN.md
+                                      * sec 1 "Firing stats / IAE" row */
 #include "firing_stats_cfg_fs.h" /* cfg-filesystem dual-write bridge, docs/FILESYSTEM_USER_DATA_PLAN.md
                                      section 5 item 7 */
 #include "cfg_fs_status.h" /* cfg_fs_status_item_diverged() -- firing_stats_get_dualwrite_status() below */
@@ -197,8 +200,12 @@ static void firing_stats_build_record(profile_firing_run_record_t *rec)
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         zone_runtime_t *z = &s_exec.zones[zi];
         profile_firing_zone_record_t *zr = &rec->zones[zi];
-        zr->active = z->active;
-        if (!z->active) continue;
+        // An on/off zone has no target_c, no PID and no meaningful IAE --
+        // report it as inactive here so no thermal-model statistic is ever
+        // derived from it downstream (adaptive_tune, comparators). See
+        // ON_OFF_ZONE_PLAN.md sec 1 "Firing stats / IAE" row.
+        zr->active = z->active && !zone_is_on_off(zi);
+        if (!zr->active) continue;
         firing_stats_snapshot(z, span, &zr->stats);
         if (z->control_mode == ZONE_CONTROL_MODE_PID || z->control_mode == ZONE_CONTROL_MODE_PID_FUZZY) {
             zr->kp = z->pid_cfg.kp;
