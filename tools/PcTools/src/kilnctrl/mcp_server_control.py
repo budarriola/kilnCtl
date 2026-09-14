@@ -216,24 +216,146 @@ def _describe_http_only_zone_fields(zones_json: dict) -> str:
     return "\n".join(lines)
 
 
+#: Sentinel for zone_cfg_t::model_fit_temp_c/model_fit_ambient_c
+#: (firmware/KilnFW/App/drivers/persist/zones_config_accessors.h,
+#: ZONE_MODEL_FIT_TEMP_UNKNOWN, ZONES_CFG_VERSION 23->24): -273.15 (absolute
+#: zero) is physically unreachable on a kiln, so it is used as "never
+#: recorded" rather than a real temperature. Read live off that header at
+#: call time (same discipline as
+#: _read_coupling_use_measured_diag_k_dc_compiled_value() above) so this
+#: never drifts from the firmware's own definition; falls back to the known
+#: literal only if the header can't be read/parsed, and says so.
+_ZONE_MODEL_FIT_TEMP_UNKNOWN_HEADER_PATH = (
+    _REPO_ROOT
+    / "firmware"
+    / "KilnFW"
+    / "App"
+    / "drivers"
+    / "persist"
+    / "zones_config_accessors.h"
+)
+_ZONE_MODEL_FIT_TEMP_UNKNOWN_RE = re.compile(
+    r"#define\s+ZONE_MODEL_FIT_TEMP_UNKNOWN\s+\(?\s*(-?[0-9.]+)f?\s*\)?"
+)
+
+
+def _read_zone_model_fit_temp_unknown_sentinel() -> float:
+    """Return the live ZONE_MODEL_FIT_TEMP_UNKNOWN sentinel value, read out
+    of firmware source rather than hardcoded here. Falls back to the known
+    literal (-273.15) only if the header is missing or its shape no longer
+    matches -- this fallback is a last resort, not a silent substitute for
+    reading the real thing, so a caller comparing against it should not
+    assume the firmware still agrees if this ever falls back."""
+    try:
+        text = _ZONE_MODEL_FIT_TEMP_UNKNOWN_HEADER_PATH.read_text(encoding="utf-8")
+        m = _ZONE_MODEL_FIT_TEMP_UNKNOWN_RE.search(text)
+        if m:
+            return float(m.group(1))
+    except OSError:
+        pass
+    return -273.15
+
+
+def _describe_model_fields(zones_json: dict) -> str:
+    """Render the identified-plant-model fields from a GET /api/zones JSON
+    body: model_k_dc/model_tau_s/model_dead_time_s, tuning_valid,
+    model_fit_temp_c/model_fit_ambient_c, and autotune_baseline_k_dc.
+
+    None of these are on the UART CONTROL wire (control_get_zones()'s
+    ZoneConfig has no model fields at all) -- this tool used to advertise
+    "PID/model config" in its docstring while actually never rendering the
+    model half of that claim (docs/audits/mcp_zone_model_fields_2026-09-13.md).
+
+    Every sentinel here is rendered as a labeled sentinel, never as a plain
+    number: model_fit_temp_c/model_fit_ambient_c's -273.15
+    (ZONE_MODEL_FIT_TEMP_UNKNOWN, read live from firmware source -- see
+    _read_zone_model_fit_temp_unknown_sentinel()) prints as "UNKNOWN (never
+    recorded)", and model_k_dc/model_tau_s/model_dead_time_s's 0.0 "no
+    model" sentinel prints as "no model identified" instead of "0.0000C".
+    autotune_baseline_k_dc is NOT currently present in the GET /api/zones
+    JSON body at all (confirmed 2026-09-13: it's written from POST bodies in
+    zones_http_post_parse.c but never emitted by zones_http_get.c) -- that's
+    a firmware gap, not something this tool can surface by rendering
+    differently, so it's reported explicitly as absent rather than silently
+    left out."""
+    unknown_temp = _read_zone_model_fit_temp_unknown_sentinel()
+    zones = zones_json.get("zones", [])
+    lines = ["plant model (identified via autotune; feeds feedforward/fuzzy bands):"]
+    for i, z in enumerate(zones):
+        k_dc = z.get("model_k_dc")
+        tau_s = z.get("model_tau_s")
+        dead_time_s = z.get("model_dead_time_s")
+        tuning_valid = z.get("tuning_valid")
+        fit_temp_c = z.get("model_fit_temp_c")
+        fit_ambient_c = z.get("model_fit_ambient_c")
+
+        if k_dc is None or tau_s is None or dead_time_s is None:
+            model_desc = "unavailable (field(s) missing from GET /api/zones response)"
+        elif k_dc == 0.0 and tau_s == 0.0 and dead_time_s == 0.0:
+            model_desc = "no model identified (all-zero sentinel)"
+        else:
+            model_desc = (
+                f"K_dc={k_dc:.4f} C/duty  tau={tau_s:.1f}s  "
+                f"dead_time={dead_time_s:.1f}s"
+            )
+
+        if isinstance(fit_temp_c, (int, float)) and fit_temp_c == unknown_temp:
+            fit_temp_desc = "UNKNOWN (never recorded)"
+        elif isinstance(fit_temp_c, (int, float)):
+            fit_temp_desc = f"{fit_temp_c:.2f}C"
+        else:
+            fit_temp_desc = "missing"
+
+        if isinstance(fit_ambient_c, (int, float)) and fit_ambient_c == unknown_temp:
+            fit_ambient_desc = "UNKNOWN (never recorded)"
+        elif isinstance(fit_ambient_c, (int, float)):
+            fit_ambient_desc = f"{fit_ambient_c:.2f}C"
+        else:
+            fit_ambient_desc = "missing"
+
+        valid_desc = (
+            "missing" if tuning_valid is None else ("yes" if tuning_valid else "no")
+        )
+
+        lines.append(
+            f"  z{i}: {model_desc}  fit_at={fit_temp_desc} (ambient={fit_ambient_desc})  "
+            f"tuning_valid={valid_desc}"
+        )
+    lines.append(
+        "  autotune_baseline_k_dc: NOT exposed by GET /api/zones as of "
+        "2026-09-13 -- accepted on POST (zones_http_post_parse.c) but never "
+        "emitted by zones_http_get.c; a real firmware gap, not a rendering "
+        "gap in this tool (docs/audits/mcp_zone_model_fields_2026-09-13.md)."
+    )
+    return "\n".join(lines)
+
+
 @_srv._tool()
 def control_get_zones(host: Optional[str] = None) -> str:
-    """Read every zone's current PID/model config, calibration offset and
-    temperature limits, plus the thermocouple and relay counts.
+    """Read every zone's current PID config, calibration offset and
+    temperature limits, plus the thermocouple and relay counts, over the
+    UART CONTROL wire.
 
-    Also fetches the per-zone coupling matrix (coupling_c0.., a first-class
-    control parameter -- which matrix is live measurably changes tracking
-    IAE), coupling_diag_k_dc, and the HTTP-only fields fuzzy_strength_pct,
-    ease_off_window_mult and approach_rate_cap_c_per_hr over HTTP GET
-    /api/zones, since none of these are on the UART CONTROL wire (they ARE
-    present in the board's raw HTTP response -- this tool used to fetch that
-    response and then silently drop everything but the coupling matrix from
-    it). Host is auto-resolved the same way the OTA tools do (board's Wi-Fi
-    station IP, falling back to the fallback-AP address); pass `host`
-    explicitly for kilnctl.local or a board reachable only from a different
-    network than this link. If the HTTP fetch fails the PID/model section
-    above is still returned, with the coupling matrix and HTTP-only-fields
-    sections noting why they're missing."""
+    Also fetches, over HTTP GET /api/zones (none of these are on the UART
+    CONTROL wire): the identified plant model (model_k_dc/model_tau_s/
+    model_dead_time_s, tuning_valid, model_fit_temp_c/model_fit_ambient_c --
+    see _describe_model_fields()'s docstring for why this section was added
+    2026-09-13 and how its sentinels are rendered), the per-zone coupling
+    matrix (coupling_c0.., a first-class control parameter -- which matrix
+    is live measurably changes tracking IAE), coupling_diag_k_dc, and the
+    HTTP-only fields fuzzy_strength_pct, ease_off_window_mult and
+    approach_rate_cap_c_per_hr (these ARE present in the board's raw HTTP
+    response -- this tool used to fetch that response and then silently
+    drop everything but the coupling matrix from it, and separately never
+    rendered the model fields at all despite this docstring's old text
+    claiming "PID/model config" -- see
+    docs/audits/mcp_zone_model_fields_2026-09-13.md). Host is auto-resolved
+    the same way the OTA tools do (board's Wi-Fi station IP, falling back to
+    the fallback-AP address); pass `host` explicitly for kilnctl.local or a
+    board reachable only from a different network than this link. If the
+    HTTP fetch fails the PID section above is still returned, with the
+    model/coupling-matrix/HTTP-only-fields sections noting why they're
+    missing."""
     try:
         thermo_count, relay_count, zones = _srv._control.get_zones()
     except ControlQueryError as exc:
@@ -247,9 +369,10 @@ def control_get_zones(host: Optional[str] = None) -> str:
     try:
         zones_json = zones_http_client.get_zones(resolved_host)
     except zones_http_client.ZonesHttpError as exc:
-        return body + f"\ncoupling matrix: unavailable ({exc}, host={resolved_host})"
+        return body + f"\nplant model / coupling matrix: unavailable ({exc}, host={resolved_host})"
     return (
         body
+        + "\n" + _describe_model_fields(zones_json)
         + "\n" + _describe_coupling_matrix(zones_json)
         + "\n" + _describe_http_only_zone_fields(zones_json)
     )
