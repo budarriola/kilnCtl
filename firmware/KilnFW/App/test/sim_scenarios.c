@@ -5,11 +5,23 @@
 // no runner change" contract.
 //
 // CURRENT SCOPE LIMITS (read before trusting a number this prints):
-//   - SIM_ARM_PID_AT / SIM_ARM_FUZZY_AT run ONE firing here, identical to
-//     SIM_ARM_PID / SIM_ARM_FUZZY50 respectively (adaptive_tune is never
-//     invoked). The 9-firing carried-state sequence is WI-8's job. Every row
-//     for these two arms carries the literal string "WI8_PENDING" in its
-//     notes column.
+//   - SIM_ARM_PID_AT / SIM_ARM_FUZZY_AT run ONE firing here, in THIS
+//     six-arm comparison table, identical to SIM_ARM_PID / SIM_ARM_FUZZY50
+//     respectively -- adaptive_tune is never invoked in this file. WI-8
+//     (docs/SCENARIO_SIMULATION_PLAN.md) is DONE, but as its own separate
+//     harness, sim_scenarios_adaptive.c/.exe: a chain of 9 firings per
+//     scenario with adaptation state carried across them, driving the REAL
+//     adaptive_tune_zone_tick()/adaptive_tune_run_end() against a
+//     zones_config test fake -- see that file's own header for the
+//     per-firing convergence numbers. It is a separate executable (not
+//     folded into this table) because adaptive_tune.c's link surface
+//     (hal_kv/esp_log/flash_worker_wait/a real FreeRTOS mutex) is much
+//     larger than this file's four-dependency posture, and because the
+//     comparison question this table answers ("how do six arms compare on
+//     one firing each") and the question sim_scenarios_adaptive.c answers
+//     ("does adaptation converge over many firings") are different
+//     questions. Every row for these two arms still carries a notes-column
+//     label saying they are single-firing snapshots here.
 //   - SIM_ARM_STATIC_MATCHED's multipliers are the RAMP-PHASE mean of
 //     A_FUZZY50's own applied/base gain ratio, RE-MEASURED per scenario in a
 //     first pass (WI-5) -- never the rule table's centre-cell maximum. Its
@@ -562,8 +574,9 @@ int main(int argc, char **argv)
            "KI_ACTIVE for every row as of 88bb4333 -- the fuzzy/Ki mutual exclusion is gone, and Ki now\n"
            "adapts (when adaptive_tune is enabled, WI-8) via adaptive_tune_model.c's SIMC path rather\n"
            "than the withdrawn Ki heuristic; ki_withheld is retained as a column for that day this\n"
-           "flips back, not because anything is withheld today. A_PID_AT/A_FUZZY_AT remain WI-8's\n"
-           "single-firing stand-ins here. shard=%d of=%d.\n\n", shard, of);
+           "flips back, not because anything is withheld today. A_PID_AT/A_FUZZY_AT are single-firing\n"
+           "snapshots in THIS table; see sim_scenarios_adaptive.exe (WI-8, done) for the 9-firing\n"
+           "chained-adaptation convergence proof. shard=%d of=%d.\n\n", shard, of);
 
     if (!self_check_strength_zero_contract()) {
         printf("=== sim_scenarios: FAIL (strength_pct==0 contract) ===\n");
@@ -616,7 +629,7 @@ int main(int argc, char **argv)
 
             char buf1[32], buf2[32], buf3[32], buf3b[32], buf4[32], buf5[32], buf6[32], bufg1[32], bufg2[32], bufg3[32];
             const char *notes = "";
-            if (arm_is_adaptive(arm)) notes = "WI8_PENDING:single-firing-stand-in,adaptive_tune-not-invoked";
+            if (arm_is_adaptive(arm)) notes = "WI8_DONE_SEPARATE_HARNESS:single-firing-snapshot-here,see-sim_scenarios_adaptive.exe-for-9-firing-chain";
             else if (arm_is_static_matched(arm)) notes = "WI5:multipliers=ramp-phase-measured-A_FUZZY50-mean-this-scenario";
 
             printf("%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.4f\t%.4f\t%.4f\t%d\t%s\n",
@@ -761,7 +774,8 @@ int main(int argc, char **argv)
         printf("\n=== sim_scenarios: FAIL ===\n");
         return 1;
     }
-    printf("\n=== sim_scenarios: PASS (S0-S12, all six arms; A_PID_AT/A_FUZZY_AT remain WI-8's\n"
-           "    single-firing stand-ins, notes column says so on every such row) ===\n");
+    printf("\n=== sim_scenarios: PASS (S0-S12, all six arms; A_PID_AT/A_FUZZY_AT are single-firing\n"
+           "    snapshots here, notes column says so -- see sim_scenarios_adaptive.exe for WI-8's\n"
+           "    9-firing chained-adaptation convergence proof) ===\n");
     return 0;
 }

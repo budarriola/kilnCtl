@@ -1,9 +1,13 @@
 # Scenario simulation plan: controller behaviour under plant/model mismatch
 
-Date: 2026-09-14. Status: PLAN. No production code is written by this
-document; it is the specification a sonnet agent implements and an opus agent
-reviews the result against. No board was flashed and no heating run was
-performed to produce it.
+Date: 2026-09-14. Status: IN PROGRESS -- WI-1 through WI-8 are DONE (see
+docs/audits/scenario_simulation_implementation_2026-09-14.md for status per
+work item); this document is the specification those passes implemented
+against and an opus agent reviews each result against. WI-9 is DROPPED (its
+premise -- a fuzzy/Ki mutual-exclusion guard to remove -- no longer exists:
+88bb4333 deleted the Ki write path entirely, not merely the guard). WI-10 is
+not started. No board was flashed and no heating run was performed for any
+of this.
 
 ---
 
@@ -1000,13 +1004,27 @@ persists across the sequence, driving real `adaptive_tune_zone_tick()` /
 `adaptive_tune_run_end()`. Per-firing rows, never only the endpoint. §4.1.
 *Acceptance:* (a) `A_PID_AT` on S7 (`TUNE_HOT`) shows the model/SIMC path
 moving gains toward the true plant across the 9 runs — the direction is
-asserted, the magnitude only reported; (b) every `A_FUZZY_AT` row carries
-`ki_state = KI_WITHHELD` and the report prints the §1.4 explanation; (c) the
-band-adaptation trajectory (§6.1) is reported per firing.
+asserted, the magnitude only reported; (b) **REWRITTEN 2026-09-14, in place
+of the original criterion below** — there is no `KI_WITHHELD` state any
+more (`88bb4333` deleted `adaptive_tune_ki.c`'s write path entirely, not
+merely the guard the original criterion assumed still existed); every
+`A_FUZZY_AT` row instead states plainly that it adapts via
+`adaptive_tune_model.c`'s SIMC path, and that SIMC's invariance to fuzzy is
+approximate (residual ~`0.003*tau`), not exact. ~~every `A_FUZZY_AT` row
+carries `ki_state = KI_WITHHELD` and the report prints the §1.4
+explanation~~ (stale, do not restore); (c) the band-adaptation trajectory
+(§6.1) is reported per firing. Implemented in `sim_scenarios_adaptive.c`.
 
-**WI-9 — Remove the fuzzy/Ki mutual exclusion. PREREQUISITE for the
+**WI-9 — DROPPED 2026-09-14. Its premise no longer exists: `88bb4333`
+deleted `adaptive_tune_ki.c`'s Ki write path entirely (not merely the guard
+below), so there is no mutual exclusion left to remove and no ratchet left
+to fix. Do not implement this item, and do not treat it as a prerequisite
+for anything (WI-8's `A_FUZZY_AT` arm does not need it and is done without
+it). Left below, struck through in spirit, for the historical record of
+what the guard used to do.**
+~~Remove the fuzzy/Ki mutual exclusion. PREREQUISITE for the
 combination arm to mean anything. Production code; do this last, and get it
-reviewed on its own.**
+reviewed on its own.~~
 `e78fbc5b`'s withholding is correct as a safety measure and wrong as an end
 state: the combination arm the owner wants cannot adapt Ki at all while it
 stands. The real fix is to make the inference operate **in the frame it

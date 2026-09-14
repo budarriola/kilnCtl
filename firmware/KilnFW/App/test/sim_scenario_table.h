@@ -30,12 +30,21 @@ extern "C" {
 // by this suite itself, not just cited).
 typedef enum {
     SIM_ARM_PID = 0,             // fuzzy off, adaptive_tune off. Baseline.
-    SIM_ARM_PID_AT,              // fuzzy off, adaptive_tune ON, N=9 (WI-8; WI-4 runs 1 firing, identical to SIM_ARM_PID, and says so in the notes column)
+    SIM_ARM_PID_AT,              // fuzzy off, adaptive_tune ON. In sim_scenarios.c's own six-arm table this
+                                  // still runs 1 firing, identical to SIM_ARM_PID (notes column says so); the
+                                  // real N=9 chained-adaptation sequence (WI-8, DONE) is a separate harness,
+                                  // sim_scenarios_adaptive.c/.exe -- see that file's header.
     SIM_ARM_FUZZY25,             // fuzzy strength 25, adaptive_tune off
     SIM_ARM_FUZZY50,             // fuzzy strength 50, adaptive_tune off
-    SIM_ARM_FUZZY_AT,            // fuzzy strength 50, adaptive_tune ON, N=9 (WI-8; WI-4 runs 1 firing, identical to SIM_ARM_FUZZY50). Ki path is
-                                  // KI_WITHHELD until WI-9 lands -- see sec 1.4. Driven from ONE flag,
-                                  // g_sim_ki_withheld (sim_scenarios.c), never hardcoded per row/arm.
+    SIM_ARM_FUZZY_AT,            // fuzzy strength 50, adaptive_tune ON (same 1-firing-here/9-firing-in-
+                                  // sim_scenarios_adaptive.exe split as SIM_ARM_PID_AT above). There is no
+                                  // Ki-withholding state any more -- 88bb4333 removed adaptive_tune_ki.c's
+                                  // write path entirely (z->ki_applied is hardcoded false), not merely a
+                                  // guard, so the WI-9 "remove the mutual exclusion" work item this comment
+                                  // used to point at no longer has a premise and is dropped. Ki now moves, if
+                                  // at all, only as a side effect of adaptive_tune_model.c's SIMC recompute
+                                  // against a refined K_dc. g_sim_ki_withheld (sim_scenarios.c) is kept as the
+                                  // single flag driving ki_state's label, currently always KI_ACTIVE.
     SIM_ARM_STATIC_MATCHED,      // fixed gain multipliers = A_FUZZY50's measured ramp-phase mean (WI-5).
                                   // WI-4 runs this arm with multipliers pinned at 1.0 (== SIM_ARM_PID) until
                                   // WI-5's instrumentation pass lands -- notes column says so explicitly,

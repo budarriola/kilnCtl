@@ -335,6 +335,12 @@ try {
             # this executable already links alongside its #included sources.
             "`"$(Join-Path $driversDir 'safety/safety_ceiling_policy.c')`" " +
             "`"$(Join-Path $driversDir 'safety/safety_ceiling_sync.c')`" " +
+            # 2026-09-14 owner decision: safety_ceiling_sync.c now calls
+            # config_divergence_check() (the reusable format-version+hash
+            # config identity comparator) for its alarm-and-disable-heat
+            # enforcement -- link the real object in, same convention as
+            # safety_ceiling_policy.c just above.
+            "`"$(Join-Path $driversDir 'safety/config_divergence.c')`" " +
             # 2026-09-10 opus review finding A: safety_ceiling_sync.c now calls
             # hal_time_now_us() (its own reconcile backoff timer, replacing a
             # direct esp_timer_get_time() call the HAL include-boundary check
@@ -450,7 +456,7 @@ try {
             "`"$(Join-Path $driversDir 'control/thermal_guard.c')`" `"$(Join-Path $driversDir 'control/heater_output.c')`" " +
             "`"$(Join-Path $driversDir 'control/thermo_combine.c')`" `"$(Join-Path $driversDir 'control/pid_autotune.c')`" " +
             "`"$(Join-Path $driversDir 'control/heat_enable.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`""
-    # stack_margin.c added DRAM_PSRAM_PLAN.md Phase 0 (4.2): autotune_engine.c's
+    # stack_margin.c added DRAM_PSRAM_STATUS.md Phase 0 (4.2): autotune_engine.c's
     # autotune_engine_start() now calls stack_margin_register() (registration
     # only, no size change), and this executable #includes autotune_engine.c
     # directly (same as test_profile_executor_prestart.c's cmd4 above, which
@@ -544,7 +550,7 @@ try {
     # hal_time migration (HW_ABSTRACTION.md item 5): ota_http_pico.c, one of
     # the files #included directly into test_ota_http.c above, now calls
     # hal_time_now_us() instead of esp_timer_get_time(); fake_time.c supplies it.
-    # stack_margin.c added DRAM_PSRAM_PLAN.md Phase 0 (4.2): ota_http.c's
+    # stack_margin.c added DRAM_PSRAM_STATUS.md Phase 0 (4.2): ota_http.c's
     # recovery-exit/rollback/pico-rollback reboot task starts now call
     # stack_margin_register() (registration only, no size change), and this
     # executable #includes ota_http.c directly.
@@ -618,7 +624,7 @@ try {
     # supplies it, same as every other executable that links the real kiln_io.c/
     # any hal_time_now_us() caller (see the "hal_time_now_us() instead of
     # esp_timer_get_time()" notes elsewhere in this file).
-    # stack_margin.c added DRAM_PSRAM_PLAN.md Phase 0 (4.2): kiln_io_owner.c's
+    # stack_margin.c added DRAM_PSRAM_STATUS.md Phase 0 (4.2): kiln_io_owner.c's
     # kiln_io_owner_start() now calls stack_margin_register() (registration
     # only, no size change), and this executable #includes kiln_io_owner.c
     # directly.
@@ -821,7 +827,7 @@ try {
     Invoke-HostTestExe -Name "event_log" -ExePath $exe18 -BuildCmd $cmd18
 
     # ---- test_run_state.c / test_relay_cycles.c: their own NINETEENTH executable
-    # DRAM_PSRAM_PLAN.md section 7 safety-net pass: both modules' persist_locked()
+    # DRAM_PSRAM_STATUS.md section 7 safety-net pass: both modules' persist_locked()
     # had no caller_stack_is_external() PSRAM-stack guard until this pass, despite
     # being reached directly from profile_executor's tick/halt path -- the same
     # task that plan section names as its highest-care relocation candidate. Own
@@ -1274,6 +1280,22 @@ try {
 
     Invoke-HostTestExe -Name "safety_stack_margin_http" -ExePath $exe37 -BuildCmd $cmd37
 
+    # ---- test_config_divergence.c: its own THIRTY-EIGHTH, separate
+    # executable. config_divergence.{h,c} (App/drivers/safety) is the
+    # 2026-09-14 owner decision's reusable "format version + hash" config
+    # identity comparator ("if a config doesn't land and match on both
+    # sides then alarm and dissable heaters"). Own executable: it is a
+    # small, fully self-contained pure module (<stdio.h>/<stdlib.h>/
+    # <string.h> only, no fakes) with no seam to share and no reason to
+    # collide with anything else already linked -- same rationale as
+    # exe35's s8_rate_guard_estimate.c.
+    $exe38 = Join-Path $outDir "kilnctl_host_tests_config_divergence.exe"
+    $cmd38 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$outDir\\`" /Fe:`"$exe38`" `"$(Join-Path $testDir 'test_config_divergence.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/config_divergence.c')`""
+
+    Invoke-HostTestExe -Name "config_divergence" -ExePath $exe38 -BuildCmd $cmd38
+
     # ---- sim_iter_tune.exe / sim_wide_temp_sweep.exe: data-generating
     # harnesses (ITER_TUNE_REDESIGN_PLAN.md sec 6/7), not TEST_CHECK
     # pass/fail suites -- their stdout is the evidence for the audit docs
@@ -1464,6 +1486,41 @@ try {
             "`"$(Join-Path $driversDir 'control/pid_autotune.c')`" `"$(Join-Path $driversDir 'control/firing_score.c')`""
     Invoke-HostTestExe -Name "sim_scenarios" -ExePath $exeScenarios -BuildCmd $cmdScenarios
 
+    # ---- sim_scenarios_adaptive.exe: docs/SCENARIO_SIMULATION_PLAN.md WI-8
+    # -- SIM_ARM_PID_AT/SIM_ARM_FUZZY_AT as a chain of 9 firings with
+    # adaptation state carried across them, driving the REAL adaptive_
+    # tune.c/adaptive_tune_model.c/adaptive_tune_ki.c (not a mirror) against
+    # a single-zone zones_config test fake. Own executable, same reason
+    # test_adaptive_tune.c's exe17 is (adaptive_tune.c's much larger link
+    # surface -- hal_kv/esp_log/flash_worker_wait/pref_cfg_fs/cfg_fs_status/
+    # a real FreeRTOS mutex against the host stub -- would multiply-define
+    # against sim_scenarios.c's own fakes if forced into one executable).
+    # Gates the build: a scenario/firing that cannot run refuses loudly, and
+    # WI-8 acceptance (a) (S7's belief_k_dc must move toward the true plant
+    # gain across the 9 runs) is a hard FAIL if violated. Negative-tested
+    # 2026-09-14 (broke ADAPTIVE_TUNE_BLEND_ALPHA to 0.0f in adaptive_tune_
+    # internal.h by hand -- refinement then never moves k_dc at all --
+    # confirmed S7_DIRECTION_CHECK FAIL and non-zero exit, restored by hand,
+    # forced a full rebuild, reconfirmed PASS -- see the commit this shipped
+    # in for the transcript).
+    $exeScenariosAdaptive = Join-Path $outDir "kilnctl_sim_scenarios_adaptive.exe"
+    $atsObjDir = Join-Path $outDir "atsim"
+    New-Item -ItemType Directory -Force -Path $atsObjDir | Out-Null
+    $cmdScenariosAdaptive = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$atsObjDir\\`" /Fe:`"$exeScenariosAdaptive`" " +
+            "`"$(Join-Path $testDir 'sim_scenarios_adaptive.c')`" " +
+            "`"$(Join-Path $testDir 'sim_scenario_table.c')`" `"$(Join-Path $testDir 'sim_plant.c')`" " +
+            "`"$(Join-Path $testDir 'sim_high_temp.c')`" `"$(Join-Path $testDir 'sim_mistune.c')`" " +
+            "`"$(Join-Path $driversDir 'control/pid.c')`" `"$(Join-Path $driversDir 'control/pid_fuzzy.c')`" " +
+            "`"$(Join-Path $driversDir 'control/pid_autotune.c')`" " +
+            "`"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+    Invoke-HostTestExe -Name "sim_scenarios_adaptive" -ExePath $exeScenariosAdaptive -BuildCmd $cmdScenariosAdaptive
+
     # ---- sim_fuzzy_overshoot.exe: docs/audits/fuzzy_overshoot_measurement_
     # 2026-09-13.md -- the owner correction that sim_fuzzy_closedloop.c's
     # tracking scenario (IAE/MAE averaged over a whole run) is the wrong
@@ -1604,7 +1661,11 @@ try {
     # HostTestExe call -- docs/SCENARIO_SIMULATION_PLAN.md WI-4's runner
     # skeleton (S0/S1/S3, all six arms), same gating posture as
     # sim_fuzzy_closedloop.c above (deterministic, no external captures).
-    $totalExpected = 40
+    # 40 -> 41: this pass added sim_scenarios_adaptive.c as its own 41st
+    # Invoke-HostTestExe call -- docs/SCENARIO_SIMULATION_PLAN.md WI-8's
+    # 9-firing chained-adaptation harness, driving the real adaptive_tune.c
+    # against a zones_config test fake (see that file's own header).
+    $totalExpected = 42
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the

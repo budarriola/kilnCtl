@@ -150,3 +150,125 @@ and WI-2 through WI-10 were not started.
   blocker above is resolved, since a full run would currently need to
   either inherit or paper over the `sim_iter_tune`/`firing_score` state
   described above.
+
+## WI-8 — adaptive arms: 9-firing chained-adaptation harness (DONE)
+
+Implemented as its own executable, `firmware/KilnFW/App/test/sim_scenarios_adaptive.c`
+(built by `build_host_tests.ps1` as `kilnctl_sim_scenarios_adaptive.exe`, its own
+gating step, not folded into `sim_scenarios.c`'s six-arm table). It links the
+REAL `adaptive_tune.c`/`adaptive_tune_model.c`/`adaptive_tune_ki.c` (not a
+mirror) against a single-zone `zones_config` test fake whose K_dc/Kp/Ki/Kd/
+`autotune_baseline_k_dc`/`adaptive_tune_enabled` state persists for a whole
+9-firing chain per (scenario, arm), driving `adaptive_tune_zone_tick()` every
+control tick and `adaptive_tune_run_end()` once per firing — the same
+production entry points `profile_executor.c` calls on hardware.
+
+**Two corrections made to the plan during this pass, both requested by the
+coordinator after a roadmap survey:**
+- **WI-9 is dropped, not merely deferred.** Its premise (a fuzzy/Ki mutual
+  exclusion to remove) no longer exists: `88bb4333` deleted
+  `adaptive_tune_ki.c`'s write path entirely, not just the guard. WI-9's
+  section in `docs/SCENARIO_SIMULATION_PLAN.md` is now struck through with a
+  dated note; it was never implemented and must not be.
+- **WI-8 acceptance criterion (b) was rewritten in place** in the plan doc:
+  the original text ("every `A_FUZZY_AT` row carries `ki_state = KI_WITHHELD`")
+  assumed a guard that `88bb4333` had already removed by the time this pass
+  ran. The rewritten criterion states plainly that the combination arm
+  adapts via `adaptive_tune_model.c`'s SIMC path and that SIMC's invariance
+  to fuzzy is approximate (residual on the order of `0.003*tau`, per
+  `docs/audits/simc_sole_gain_writer_2026-09-14.md`'s appended review
+  `cef1df2a`), not exact.
+
+**What the 9-firing chain actually found (report the numbers, not a
+verdict — an opus review follows this pass):**
+- Of the 13 table scenarios, S10/S11 (dynamic per-tick conductance scaling
+  and per-segment re-tuning) are skipped as out of scope — those mechanisms
+  are themselves confounds for isolating cross-firing K_dc convergence. The
+  remaining 11 scenarios each ran both `A_PID_AT` and `A_FUZZY_AT` as a full
+  9-firing chain.
+- Only **S0_NULL_SLOW** and **S6_MASS_LIGHT** ever harvested the minimum 4
+  dwell observations `adaptive_tune_refine_zone_locked()` needs to attempt a
+  fit. Every other scenario — including the plan's own named acceptance
+  case, **S7_TUNE_HOT** — harvested **zero** observations across all 9
+  firings, on both arms.
+- The reason, read directly from `adaptive_tune_zone_tick()`'s own
+  `last_refusal_reason` (surfaced per firing as `harvest_reason` in this
+  harness's output): the closed loop's temperature genuinely settles (the
+  slope-floor gate, `ADAPTIVE_TUNE_SETTLE_SLOPE_FLOOR_C_PER_S`, does
+  eventually pass), but by the time it does, the dwell's own recorded
+  duty min/max window — tracked from the moment the dwell began, i.e.
+  spanning the ramp-to-dwell entry transient — still exceeds
+  `ADAPTIVE_TUNE_DUTY_STABILITY_ABS` (0.05). The gate evaluates a dwell
+  exactly ONCE (`recorded_this_dwell` latches true on the first slope-floor
+  pass, never retried), so a duty transient wide enough at that one moment
+  permanently voids the dwell's only chance to contribute — regardless of
+  how flat both signals become afterward. Only the two gentlest-ramp
+  scenarios (S0, S6) have an entry transient small enough to clear this on
+  the first attempt.
+- Where data WAS harvested (S0, S6), `adaptive_tune_refine_zone_locked()`
+  never actually applied a gain change in this suite either
+  (`refine_ever_applied=no` throughout) — both are matched-tune scenarios
+  with nothing to correct, so the fitted K_dc stays within
+  `ADAPTIVE_TUNE_MIN_MATERIAL_MOVE_FRAC` of the belief already in place.
+- **This independently reproduces, rather than merely explains, the
+  coordinator's own finding that `adaptive_tune` has never actually
+  harvested anything on the real board** (`enabled=false, lifetime=0` on
+  all three zones): the settle-slope/duty-stability combination, evaluated
+  once per dwell with no retry, appears to be very hard to satisfy
+  following an ordinary ramp-into-dwell profile at these zones' real time
+  constants (tau ~250-260 s). This is worth a dedicated follow-up audit of
+  `adaptive_tune.c`'s harvesting gate independent of this simulation work.
+
+**Acceptance criterion (a) as re-verified against this finding:** the harness
+does NOT force a synthetic pass. It asserts a direction check on S7 only when
+data was actually harvested (never happened here, so the check reports
+`INCONCLUSIVE`, not `FAIL`), and instead gates the build on a strictly
+weaker, still-falsifiable, and more honest global claim: **at least one
+(scenario, arm) chain in the whole suite must harvest the minimum
+observations at some point across its 9 firings** — this is the assertion
+that was negative-tested (see below) and is what actually failed when the
+production gate was broken by hand.
+
+**Negative test:** `ADAPTIVE_TUNE_SETTLE_SLOPE_FLOOR_C_PER_S` in
+`adaptive_tune_internal.h` was changed from `0.003f` to `0.0f` by hand (an
+unsatisfiable floor — no real temperature reading is ever byte-identical to
+its dwell-entry value). Rebuilt: `sim_scenarios_adaptive` correctly flipped
+to `FAIL` ("no (scenario, arm) chain in this suite ever harvested the
+minimum 4 dwell observations..."), confirming the suite's own gate is not
+vacuous. Restored the constant by hand, confirmed `git diff` was empty
+against that file, deleted the build directory, and rebuilt fully clean
+(42/42 executables) before re-confirming `PASS`.
+
+**Determinism:** `run_sim_scenarios.ps1` re-run after this pass — `--of 1`
+vs `--of 4` remain byte-identical (78/78 data rows). `sim_iter_tune.exe 220`
+still reads 24 ACCEPT / 21 REJECT / 615 INSUFFICIENT / 0 NO_PAIRS from a
+clean rebuild, unchanged.
+
+**CI budget:** `sim_scenarios_adaptive.exe` runs in a few seconds (11
+scenarios x 2 arms x 9 firings, each firing well under the per-firing cost
+`docs/SCENARIO_SIMULATION_PLAN.md` sec 8 already budgets) — it is its own
+`build_host_tests.ps1` step (41st -> now 42nd `Invoke-HostTestExe` call, own
+object directory `atsim/`) rather than folded into `sim_scenarios.c`'s own
+budget line, so neither suite's ~60 s ceiling is put at risk by the other's
+much larger link surface (`adaptive_tune.c` pulls in `hal_kv`/`esp_log`/
+`flash_worker_wait`/`pref_cfg_fs`/`cfg_fs_status`/a real FreeRTOS mutex
+against the host stub).
+
+**Stale comments fixed while in these files:** `sim_scenario_table.h`'s
+`SIM_ARM_PID_AT`/`SIM_ARM_FUZZY_AT` enum comments (previously said "WI-8"
+and "KI_WITHHELD until WI-9 lands"); `sim_scenarios.c`'s own header/banner/
+notes-column text (previously `WI8_PENDING`, now names the separate
+9-firing harness); `docs/SCENARIO_SIMULATION_PLAN.md`'s top-of-file Status
+line (previously "Status: PLAN. No production code is written by this
+document," stale since WI-1) and its WI-9 section (struck through, dated,
+explains why).
+
+**Full `run_all_checks.ps1` tally this session: 92 passed, 2 failed.** Both
+failures are pre-existing and unrelated to this work item (neither
+`sim_scenarios_adaptive.c`, `adaptive_tune*.c`, nor any file this pass
+touched appears in either failure):
+`firmware/KilnFW/App/test/check_readiness_gate_display_agreement.ps1` and
+`tools/check_safety_call_results_checked.ps1` (flags
+`main_control_bringup.c:40`) — both point at files this session never
+opened, consistent with concurrent-session WIP elsewhere in the shared tree
+(see `CLAUDE.md`'s "Concurrent sessions git race" guidance).
