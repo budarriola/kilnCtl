@@ -90,6 +90,13 @@
 #define ERROR_BAND_C_DEFAULT 20.0f
 #define RATE_BAND_C_PER_S_DEFAULT 0.5f
 
+// Fraction of a zone's own full-duty steady-state rise (model_k_dc) treated
+// as a "large" error for membership purposes -- see pid_fuzzy_derive_bands()
+// in pid_fuzzy.h for the full dimensional derivation and
+// docs/audits/fuzzy_dimensionless_bands_2026-09-13.md for the per-zone
+// numbers this yields on the live bench board.
+#define ERROR_BAND_K_FRACTION 0.5f
+
 // Maximum fractional nudge any single gain may receive at strength_pct=100
 // and full rule membership (degree 1.0). 0.5 == the fuzzy layer may at most
 // halve or 1.5x a base gain -- a bounded adjustment, not a re-tune.
@@ -283,4 +290,49 @@ void pid_fuzzy_adjust(float error_c, float error_rate_c_per_s,
     *out_kp = clamp_gain(kp * (1.0f + scale * kp_dir));
     *out_ki = clamp_gain(ki * (1.0f + scale * ki_dir));
     *out_kd = clamp_gain(kd * (1.0f + scale * kd_dir));
+}
+
+// See pid_fuzzy.h's own header comment on this function for the dimensional
+// derivation. Pure math, no I/O -- same "no globals" discipline as the rest
+// of this file; the caller (profile_executor_pid_tick.c's pid_fuzzy_
+// prepare_gains()) owns fetching model_k_dc/model_tau_s via zone_model_at()
+// and logging a false return.
+bool pid_fuzzy_derive_bands(float model_k_dc, float model_tau_s,
+                             float *out_error_band_c, float *out_rate_band_c_per_s)
+{
+    bool model_valid = isfinite(model_k_dc) && isfinite(model_tau_s) &&
+                        model_k_dc > 0.0f && model_tau_s > 0.0f;
+
+    float error_band = ERROR_BAND_C_DEFAULT;
+    float rate_band = RATE_BAND_C_PER_S_DEFAULT;
+
+    if (model_valid) {
+        float candidate_error = model_k_dc * ERROR_BAND_K_FRACTION;
+        float candidate_rate = model_k_dc / model_tau_s;
+        /* Defend against a pathological fit (e.g. an absurdly small
+         * model_tau_s) producing a non-finite or non-positive candidate --
+         * same discipline as every other defensive check in this file.
+         * This should not happen (autotune_engine.c/adaptive_tune_model.c
+         * already reject implausible fits before they ever reach
+         * zones_config, per those modules' own validity checks), but this
+         * function does not get to assume its caller's caller was perfect
+         * either. Falls back to the absolute default, same as an invalid
+         * model, rather than propagate a bad derived band into the
+         * membership math. */
+        if (isfinite(candidate_error) && candidate_error > 0.0f &&
+            isfinite(candidate_rate) && candidate_rate > 0.0f) {
+            error_band = candidate_error;
+            rate_band = candidate_rate;
+        } else {
+            model_valid = false;
+        }
+    }
+
+    if (out_error_band_c) {
+        *out_error_band_c = error_band;
+    }
+    if (out_rate_band_c_per_s) {
+        *out_rate_band_c_per_s = rate_band;
+    }
+    return model_valid;
 }

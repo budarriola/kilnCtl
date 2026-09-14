@@ -11,6 +11,7 @@
 
 #include <math.h>
 
+#include "esp_log.h"
 #include "pid_fuzzy.h"
 #include "zones_config_accessors.h"
 #include "zones_config_json.h" /* zones_config_get_error_band_c()/_rate_band_c_per_s() */
@@ -308,6 +309,58 @@ float pid_family_zone_tick(zone_runtime_t *z, uint8_t zi, const pid_cfg_t *cfg,
  * tracks "effective Ki last tick" across the mode-change/reseed paths in
  * reload_zone_config()/resume() too, so this stays correct after any of
  * those discontinuities as well. */
+
+/* docs/audits/fuzzy_dimensionless_bands_2026-09-13.md: resolves this zone's
+ * fuzzy membership bands, preferring bands DERIVED from its own identified
+ * plant (zone_model_at()'s model_k_dc/model_tau_s -- the same seam profile_
+ * executor_feedforward.c already uses for feedforward) over the absolute
+ * config/firmware-default bands. pid_fuzzy_derive_bands() (pid_fuzzy.c)
+ * returns false, and writes the absolute ERROR_BAND_C_DEFAULT/RATE_BAND_
+ * C_PER_S_DEFAULT, only when this zone has never been autotuned (or the fit
+ * is pathological) -- that fallback is then further resolved through the
+ * operator-configurable zones_config_get_error_band_c()/_rate_band_c_per_s()
+ * accessors exactly as this call site did before this pass, so a never-
+ * autotuned zone's behaviour is unchanged. Computed at use time, not
+ * persisted, per this pass's own scope note -- no ZONES_CFG_VERSION bump
+ * needed.
+ *
+ * A separate function (not inlined into pid_fuzzy_prepare_gains() below) so
+ * fuzzy_gain_mirror_drift_check.py's statement-for-statement mirror
+ * comparison against test_closed_loop.c's hand-written fuzzy_tick() sees
+ * one call here, the same shape as the strength_pct resolution it already
+ * folds to a single token, instead of a multi-statement block with nested
+ * control flow the mirror (which has no zone_runtime_t/model concept at
+ * all) has no equivalent for. */
+static void resolve_fuzzy_bands(const zone_runtime_t *z, uint8_t zi,
+                                float *out_error_band_c, float *out_rate_band_c_per_s)
+{
+    float model_k_dc = 0.0f, model_tau_s = 0.0f, model_dead_time_s = 0.0f;
+    (void)zone_model_at(zi, z->actual_c, &model_k_dc, &model_tau_s, &model_dead_time_s);
+
+    bool bands_from_model = pid_fuzzy_derive_bands(model_k_dc, model_tau_s,
+                                                    out_error_band_c, out_rate_band_c_per_s);
+    if (!bands_from_model) {
+        (void)zones_config_get_error_band_c(zi, out_error_band_c);
+        (void)zones_config_get_rate_band_c_per_s(zi, out_rate_band_c_per_s);
+        /* Explicit, not silent (this pass's own requirement): a zone
+         * running the absolute desk-reasoning bands instead of its own
+         * measured plant scale should be visible, not indistinguishable
+         * from a zone deliberately configured that way. Logged once per
+         * zone per boot -- LOG_PRESTART_ONCE's own convention -- since this
+         * is a per-tick call path and the condition does not change tick to
+         * tick for a zone that has simply never been autotuned. */
+        static bool s_warned_fuzzy_bands_fallback[MAX31856_CHANNEL_COUNT];
+        if (zi < MAX31856_CHANNEL_COUNT && !s_warned_fuzzy_bands_fallback[zi]) {
+            s_warned_fuzzy_bands_fallback[zi] = true;
+            ESP_LOGW(PE_TAG, "zone %u: fuzzy membership bands falling back to the absolute "
+                     "config/firmware-default bands (%.2fC / %.4fC/s) -- no identified plant "
+                     "model yet (run Autotune to derive this zone's own bands) "
+                     "(further occurrences this boot are suppressed)",
+                     (unsigned)zi, (double)*out_error_band_c, (double)*out_rate_band_c_per_s);
+        }
+    }
+}
+
 void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, pid_cfg_t *out_cfg)
 {
     *out_cfg = z->pid_cfg; /* d_filter_tau_s/b/pid_range_c untouched -- only kp/ki/kd move */
@@ -354,21 +407,20 @@ void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, pid_cfg_t *out_cfg)
      * compile-time constants -- resolved here, the same tick this zone's
      * fuzzy strength is resolved.
      *
-     * The (void)-discarded bool return is deliberately safe, not a
-     * "consumer without producer" gap: these getters can only return false
-     * for zi >= MAX31856_CHANNEL_COUNT (zi is this loop's own zone index,
-     * always in range by construction, never user input), and the 0.0f the
-     * locals are pre-initialized to on that unreachable path is NOT a raw
-     * unhandled zero -- it is pid_fuzzy_adjust()'s OWN documented "non-
-     * positive band" sentinel (pid_fuzzy.c's `> 0.0f` check), which that
-     * function resolves to ERROR_BAND_C_DEFAULT/RATE_BAND_C_PER_S_DEFAULT
-     * (20.0/0.5) internally before touching the membership math. So even a
-     * hypothetical failed lookup here still reaches pid_fuzzy_adjust() with
-     * the documented firmware default, by the same mechanism the accessors
-     * themselves use, never with an unvalidated 0. */
+     * docs/audits/fuzzy_dimensionless_bands_2026-09-13.md: resolve_fuzzy_
+     * bands() (below) prefers bands DERIVED from this zone's own identified
+     * plant over the absolute config/firmware-default bands, falling back
+     * to (and logging, once per zone per boot) the config/firmware-default
+     * path exactly as this call site did before this pass when a zone has
+     * never been autotuned. Pulled into its own function (rather than
+     * inlined here) so fuzzy_gain_mirror_drift_check.py's mirror comparison
+     * -- which compares this function's body against test_closed_loop.c's
+     * hand-written fuzzy_tick() statement for statement -- sees one call,
+     * the same shape as the strength_pct/config-getter resolution already
+     * folded there, instead of a multi-statement block with its own nested
+     * control flow the mirror has no equivalent for. */
     float error_band_c = 0.0f, rate_band_c_per_s = 0.0f;
-    (void)zones_config_get_error_band_c(zi, &error_band_c);
-    (void)zones_config_get_rate_band_c_per_s(zi, &rate_band_c_per_s);
+    resolve_fuzzy_bands(z, zi, &error_band_c, &rate_band_c_per_s);
 
     float adj_kp = z->pid_cfg.kp, adj_ki = z->pid_cfg.ki, adj_kd = z->pid_cfg.kd;
     pid_fuzzy_adjust(error_c, error_rate_c_per_s, error_band_c, rate_band_c_per_s,

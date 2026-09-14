@@ -82,10 +82,27 @@
 // feeds back into anything pid_fuzzy_adjust() itself computes.
 #define MAX_NUDGE_FRACTION 0.5f
 
-// This plant's own measured envelope (established facts this task was
-// briefed with -- see pid_fuzzy.c's header comment for the ramp-rate figure
-// and project_bench_is_a_4w_test_fixture.md for the bench rise figure).
-#define MAX_REAL_RAMP_RATE_C_PER_S 0.083f
+// This plant's own measured envelope (project_bench_is_a_4w_test_fixture.md
+// for the bench rise figure).
+//
+// CORRECTED 2026-09-13 (docs/audits/review_sim_fuzzy_commits_2026-09-13.md,
+// 8a12521b): this file used to compute the reachability verdict below
+// against PROFILE_RATE_C_PER_S (300 degC/hr / 3600 = 0.083 degC/s) alone.
+// That figure is an INCIDENTAL UNIT CONVERSION of a commanded profile rate,
+// not a measured plant limit -- pid_fuzzy.c's own header comment records
+// the actual MEASURED peak rate from the one real mode-3 hardware capture
+// (fuzzy_ab_20260904d_s50_run1.jsonl) as 0.110 degC/s, 33% higher, and
+// ZONE_MAX_RAMP_C_PER_HR_MAX (zones_config_json.h) allows commanded ramps
+// up to 1000 degC/hr = 0.278 degC/s. Using the smaller, incidental 0.083
+// figure made "0.5 > 6*0.083" true by a 0.4% margin and produced an
+// overstated "8 of 9 cells need a disturbance" verdict; using the actual
+// MEASURED peak (0.110) makes that same inequality FALSE, i.e. even the
+// unmodified ABSOLUTE default bands were never as reachability-starved as
+// this file previously claimed. See the audit doc named above and
+// docs/audits/fuzzy_dimensionless_bands_2026-09-13.md for the corrected
+// analysis this file's own printed verdicts now reflect.
+#define PROFILE_RATE_C_PER_S 0.083f /* 300 degC/hr converted -- NOT a measured limit, kept only for comparison */
+#define MEASURED_PEAK_RATE_C_PER_S 0.110f /* the actual figure to reason about reachability against */
 #define MAX_BENCH_RISE_C 40.0f
 
 static int g_failures = 0;
@@ -142,7 +159,7 @@ int main(void)
 {
     printf("=== fuzzy_nine_cell_probe -- offline 9-cell rule-table probe (FUZZY_CONTROLLER_PLAN.md Stage 0) ===\n\n");
     printf("Bands: error_band_c=%.1f, rate_band_c_per_s=%.2f (documented firmware defaults)\n", ERROR_BAND_C, RATE_BAND_C_PER_S);
-    printf("Plant envelope: max real ramp rate ~%.3f degC/s, max bench rise ~%.0f degC\n\n", MAX_REAL_RAMP_RATE_C_PER_S, MAX_BENCH_RISE_C);
+    printf("Plant envelope: max real ramp rate ~%.3f degC/s, max bench rise ~%.0f degC\n\n", MEASURED_PEAK_RATE_C_PER_S, MAX_BENCH_RISE_C);
 
     const uint8_t strengths[2] = {25, 50};
 
@@ -192,28 +209,39 @@ int main(void)
                   c + 1, sp, (double)kd, (double)exp_kd);
         }
 
-        /* Reachability verdict, purely arithmetic against this plant's
-         * measured envelope (no simulation needed): a bucket at a
-         * non-zero rate edge requires |rate| >= RATE_BAND_C_PER_S, which is
-         * ~6x MAX_REAL_RAMP_RATE_C_PER_S -- ordinary ramps cannot reach it,
-         * only a genuine disturbance can (sim_fuzzy_closedloop.c's own
-         * coverage scenario had to inject +-6/+-8C jumps for exactly this
-         * reason). A bucket at a non-zero error edge (+-20 degC) sits well
-         * inside the ~40 degC bench rise and is reachable from an ordinary
-         * large setpoint gap (e.g. early in a ramp from ambient). */
-        int rate_needs_disturbance = (cell->rate_bucket != 1) &&
-            (RATE_BAND_C_PER_S > 6.0f * MAX_REAL_RAMP_RATE_C_PER_S);
+        /* Reachability verdict, against the MEASURED peak rate (corrected,
+         * see this file's header comment above -- NOT the incidental
+         * 0.083 profile-rate conversion this file used before). A cell at
+         * a non-zero rate edge fires at FULL weight only once |rate|
+         * reaches the band edge; report what fraction of that edge an
+         * ordinary firing's own measured peak rate reaches, rather than a
+         * brittle binary threshold. A bucket at a non-zero error edge
+         * (+-20 degC) sits well inside the ~40 degC bench rise and is
+         * reachable from an ordinary large setpoint gap (e.g. early in a
+         * ramp from ambient). */
+        float rate_membership_at_measured_peak = (cell->rate_bucket != 1)
+            ? fminf(1.0f, MEASURED_PEAK_RATE_C_PER_S / RATE_BAND_C_PER_S)
+            : 1.0f; /* STEADY bucket is always at/near full weight near rate=0 */
         int error_reachable = (cell->error_bucket == 1) ||
             (ERROR_BAND_C <= MAX_BENCH_RISE_C);
 
         const char *verdict;
-        if (!rate_needs_disturbance && error_reachable) {
-            verdict = "REACHABLE IN NORMAL OPERATION";
-        } else if (error_reachable) {
-            verdict = "REACHABLE ONLY UNDER DISTURBANCE (rate axis needs a fault/shock, not an ordinary ramp)";
-        } else {
+        if (cell->rate_bucket == 1) {
+            verdict = error_reachable ? "REACHABLE IN NORMAL OPERATION"
+                                       : "UNREACHABLE ON THIS PLANT (error axis exceeds the bench's own rise)";
+        } else if (!error_reachable) {
             verdict = "UNREACHABLE ON THIS PLANT (error axis exceeds the bench's own rise)";
+        } else if (rate_membership_at_measured_peak >= 0.5f) {
+            verdict = "REACHABLE IN NORMAL OPERATION (measured peak rate already gives substantial "
+                      "outer-bucket membership)";
+        } else if (rate_membership_at_measured_peak >= 0.1f) {
+            verdict = "PARTIALLY REACHABLE (measured peak rate gives some, but not dominant, outer-bucket "
+                      "membership -- a full-weight firing still needs a larger disturbance)";
+        } else {
+            verdict = "REACHABLE ONLY UNDER DISTURBANCE (measured peak rate gives negligible outer-bucket "
+                      "membership -- needs a fault/shock, not an ordinary ramp)";
         }
+        printf("  measured-peak rate membership in this bucket: %.0f%%\n", (double)(rate_membership_at_measured_peak * 100.0f));
         printf("  verdict: %s\n\n", verdict);
     }
 
@@ -235,6 +263,61 @@ int main(void)
         CHECK(fabsf(kp25 - 0.875f) < 1e-5f, "centre cell strength=25: kp factor %.6f != expected 0.875", (double)kp25);
         CHECK(fabsf(ki25 - 1.125f) < 1e-5f, "centre cell strength=25: ki factor %.6f != expected 1.125", (double)ki25);
         CHECK(fabsf(kd25 - 0.875f) < 1e-5f, "centre cell strength=25: kd factor %.6f != expected 0.875", (double)kd25);
+    }
+
+    /* docs/audits/fuzzy_dimensionless_bands_2026-09-13.md: the reachability
+     * verdicts above are all against the ABSOLUTE ERROR_BAND_C/RATE_BAND_
+     * C_PER_S_DEFAULT bands (20.0/0.5), which is what a never-autotuned
+     * zone still runs. This section re-derives the same verdict for each
+     * of this bench board's three autotuned zones, using the REAL,
+     * unmodified pid_fuzzy_derive_bands() -- not a re-implementation --
+     * against each zone's own model_k_dc/model_tau_s. Informational only
+     * (prints, does not assert): the reachability CRITERION itself is a
+     * judgment call about what "reachable in normal operation" means for a
+     * continuous membership degree, not a bit-exact contract the way the
+     * factor assertions above are, so it stays a print here and the
+     * verdict is stated with its own explicit reasoning in the audit doc. */
+    {
+        typedef struct {
+            const char *name;
+            float k_dc, tau_s;
+        } zone_spec_t;
+        /* Live bench board values as supplied for this task (docs/audits/
+         * fuzzy_dimensionless_bands_2026-09-13.md's provenance note --
+         * not independently re-read from the board this session). */
+        static const zone_spec_t ZONES[3] = {
+            {"z0", 42.731f, 255.6f},
+            {"z1", 32.397f, 258.9f},
+            {"z2", 33.849f, 247.1f},
+        };
+        printf("\n=== PER-ZONE DERIVED BANDS (pid_fuzzy_derive_bands(), the real function) ===\n");
+        for (int zi = 0; zi < 3; zi++) {
+            float error_band = 0.0f, rate_band = 0.0f;
+            bool from_model = pid_fuzzy_derive_bands(ZONES[zi].k_dc, ZONES[zi].tau_s,
+                                                       &error_band, &rate_band);
+            /* Degree of outer-bucket membership an ORDINARY ramp at this
+             * plant's own measured max rate (~0.083 degC/s) reaches against
+             * THIS zone's derived rate band -- triangular_memberships()'s
+             * own formula (|x|/band for |x| < band), reproduced here only
+             * for reporting (never fed back into a gain). */
+            float degree_at_max_ramp = (rate_band > 0.0f)
+                ? (MEASURED_PEAK_RATE_C_PER_S < rate_band ? MEASURED_PEAK_RATE_C_PER_S / rate_band : 1.0f)
+                : 0.0f;
+            printf("  %s: k_dc=%.3f tau_s=%.1f -> error_band_c=%.2f rate_band_c_per_s=%.4f "
+                   "(model_valid=%s)\n",
+                   ZONES[zi].name, (double)ZONES[zi].k_dc, (double)ZONES[zi].tau_s,
+                   (double)error_band, (double)rate_band, from_model ? "yes" : "NO");
+            printf("    measured peak rate (%.3f degC/s) reaches %.0f%% membership in the outer "
+                   "rate bucket (was %.0f%% against the absolute 0.5 default)\n",
+                   (double)MEASURED_PEAK_RATE_C_PER_S,
+                   (double)(degree_at_max_ramp * 100.0f),
+                   (double)(MEASURED_PEAK_RATE_C_PER_S / RATE_BAND_C_PER_S * 100.0f));
+        }
+        printf("\n  Reachability count (docs/audits/fuzzy_dimensionless_bands_2026-09-13.md's own\n"
+               "  criterion: >=10%% outer-bucket membership sustained through an ordinary ramp\n"
+               "  counts as reachable). See that doc for the full 9-cell table and the\n"
+               "  physical-sign argument for why the OPPOSITE-signed rate/error combinations\n"
+               "  stay disturbance-only even with a derived band.\n");
     }
 
     if (g_failures > 0) {

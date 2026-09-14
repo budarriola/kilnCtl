@@ -132,9 +132,19 @@
 #define D_FILTER_TAU_S 30.0f
 #define SETPOINT_WEIGHT_B 1.0f
 #define PID_RANGE_C 25.0f
-#define ERROR_BAND_C 20.0f
-#define RATE_BAND_C_PER_S 0.5f
 #define CELL_EPS 0.02f /* membership degree above which a bucket counts as "reached" for coverage */
+
+/* docs/audits/fuzzy_dimensionless_bands_2026-09-13.md: bands are now
+ * DERIVED from zone 0's own model_k_dc/model_tau_s (g_k_dc[0]/g_tau_s[0],
+ * sim_measured_zone_constants.h -- the same values make_plant_cfg() below
+ * already uses to build the plant model this harness runs against) via the
+ * real, unmodified pid_fuzzy_derive_bands(), rather than hardcoded at the
+ * absolute ERROR_BAND_C_DEFAULT/RATE_BAND_C_PER_S_DEFAULT (20.0/0.5) this
+ * file used before this pass. Computed once at startup into these globals
+ * (not #defines any more, since they now depend on a function call) so
+ * every call site below is unchanged syntactically. */
+static float g_error_band_c;
+static float g_rate_band_c_per_s;
 
 // ---------------------------------------------------------------------
 // Single-zone plant, built directly from zone 0's real measured FOPDT
@@ -185,8 +195,8 @@ static void classify_memberships(float x, float band, float deg[3])
 static void mark_cells(float error_c, float rate_c_per_s, int cell_hits[3][3])
 {
     float e_deg[3], r_deg[3];
-    classify_memberships(error_c, ERROR_BAND_C, e_deg);
-    classify_memberships(rate_c_per_s, RATE_BAND_C_PER_S, r_deg);
+    classify_memberships(error_c, g_error_band_c, e_deg);
+    classify_memberships(rate_c_per_s, g_rate_band_c_per_s, r_deg);
     for (int ei = 0; ei < 3; ei++) {
         if (e_deg[ei] < CELL_EPS) continue;
         for (int ri = 0; ri < 3; ri++) {
@@ -248,7 +258,7 @@ static float sim_tick(sim_plant_state_t *pstate, const sim_plant_cfg_t *pcfg,
                                                  * pid_fuzzy_prepare_gains() documents. */
 
     float adj_kp = BASE_KP, adj_ki = BASE_KI, adj_kd = BASE_KD;
-    pid_fuzzy_adjust(error_c, rate_c_per_s, ERROR_BAND_C, RATE_BAND_C_PER_S,
+    pid_fuzzy_adjust(error_c, rate_c_per_s, g_error_band_c, g_rate_band_c_per_s,
                      BASE_KP, BASE_KI, BASE_KD, strength_pct, &adj_kp, &adj_ki, &adj_kd);
 
     if (strength_pct == 0) {
@@ -420,6 +430,17 @@ int main(void)
     printf("See this file's top comment before reading anything below: single-zone by\n"
            "design (coupling model under revision elsewhere), and the tracking numbers\n"
            "are a RANKING TOOL ONLY, never a claim about hardware behaviour.\n\n");
+
+    /* docs/audits/fuzzy_dimensionless_bands_2026-09-13.md: bands derived
+     * from zone 0's own measured model, via the real pid_fuzzy_derive_
+     * bands(), instead of the absolute 20.0/0.5 defaults this file used to
+     * hardcode. */
+    bool bands_from_model = pid_fuzzy_derive_bands(g_k_dc[0], g_tau_s[0],
+                                                    &g_error_band_c, &g_rate_band_c_per_s);
+    printf("Bands: error_band_c=%.2f, rate_band_c_per_s=%.4f (derived from zone 0's own "
+           "model_k_dc=%.3f/model_tau_s=%.1f, from_model=%s)\n\n",
+           (double)g_error_band_c, (double)g_rate_band_c_per_s,
+           (double)g_k_dc[0], (double)g_tau_s[0], bands_from_model ? "yes" : "NO (fell back!)");
 
     bool overall_ok = true;
     const uint8_t strengths[] = {0, 25, 50};

@@ -33,6 +33,7 @@
 #ifndef PID_FUZZY_H
 #define PID_FUZZY_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -122,6 +123,53 @@ void pid_fuzzy_adjust(float error_c, float error_rate_c_per_s,
                       float base_kp, float base_ki, float base_kd,
                       uint8_t strength_pct,
                       float *out_kp, float *out_ki, float *out_kd);
+
+// pid_fuzzy_derive_bands() -- docs/audits/fuzzy_dimensionless_bands_2026-09-13.md.
+//
+// ERROR_BAND_C_DEFAULT/RATE_BAND_C_PER_S_DEFAULT above are ABSOLUTE
+// degC/degC-per-s constants the pid_fuzzy.c header comment already admits
+// were sized by desk reasoning about "a mid-size kiln," never measured on
+// any plant -- on THIS bench rig the rate default is ~6x the fastest ramp
+// this kiln can actually produce (0.5 vs the measured ~0.083 degC/s), which
+// is why 6 of the 9 rule cells were unreachable without an injected
+// synthetic disturbance. A real kiln reaching ~1200 C where radiation
+// dominates has a k_dc/tau_s an order of magnitude different again, so an
+// absolute constant is wrong differently on every installation.
+//
+// This function instead derives both membership-band half-widths from
+// THIS zone's own Autotune-identified FOPDT model (model_k_dc, degC at
+// duty=1.0; model_tau_s, s -- zone_model_at()'s own two outputs, already
+// used by the feedforward path):
+//
+//   rate_band_c_per_s = model_k_dc / model_tau_s
+//     -- the FOPDT step response's own initial slope, dT/dt|t=0+ = k/tau
+//     at a full (duty=1.0) step: the fastest rate THIS plant's own thermal
+//     response can physically produce. Units check: degC / s. A genuine
+//     disturbance (a stuck-open lid, a runaway element) can plausibly drive
+//     the plant at close to this bound; an ordinary commanded ramp, run at
+//     well under full duty, cannot -- so "large rate" keeps meaning "not a
+//     normal firing," the same intent ERROR_BAND_C_DEFAULT/RATE_BAND_C_PER_S_
+//     DEFAULT's own header comment states, just derived instead of guessed.
+//
+//   error_band_c = model_k_dc * ERROR_BAND_K_FRACTION
+//     -- half of the plant's own full-duty steady-state temperature rise:
+//     a "large" error is one on the order of what this zone's own actuator
+//     can correct, not an arbitrary degC figure that means something
+//     different on a 40 degC bench rig than on a 1200 degC kiln.
+//
+// Returns true and writes the derived bands when model_k_dc/model_tau_s are
+// both finite and > 0.0f (zone_model_at()'s own "0 means never identified"
+// convention, matching zone_load_model()'s validity check in profile_
+// executor_feedforward.c). Returns false and writes the documented absolute
+// ERROR_BAND_C_DEFAULT/RATE_BAND_C_PER_S_DEFAULT instead when the model is
+// missing or invalid -- the explicit, only-for-a-never-autotuned-zone
+// fallback this module still needs (there is no third option: a zone with
+// no model has no plant-derived scale to work from). Callers MUST log a
+// false return, not silently substitute the absolute default and move on --
+// this is the whole reason a zone's fuzzy bands would still be the
+// unmeasured desk-reasoning values, and that should be visible.
+bool pid_fuzzy_derive_bands(float model_k_dc, float model_tau_s,
+                             float *out_error_band_c, float *out_rate_band_c_per_s);
 
 #ifdef __cplusplus
 }

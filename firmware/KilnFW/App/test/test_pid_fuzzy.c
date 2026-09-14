@@ -479,4 +479,75 @@ void run_test_pid_fuzzy(void)
         TEST_CHECK(isfinite(kp) && kp > 0.0f, "huge base_kp nudged up: still finite and positive");
         TEST_CHECK(isfinite(kd) && kd > 0.0f, "huge base_kd nudged up: still finite and positive");
     }
+
+    /* pid_fuzzy_derive_bands() -- docs/audits/fuzzy_dimensionless_bands_
+     * 2026-09-13.md. A valid model (both k_dc and tau_s finite and > 0)
+     * must derive bands (return true) equal to k_dc/2 and k_dc/tau_s
+     * exactly -- this is the whole dimensional derivation, so it is
+     * asserted as an exact formula, not just "some plausible number." */
+    {
+        float error_band = 0.0f, rate_band = 0.0f;
+        bool from_model = pid_fuzzy_derive_bands(42.731f, 255.6f, &error_band, &rate_band);
+        TEST_CHECK(from_model, "valid model (k_dc=42.731, tau_s=255.6): derives bands, does not fall back");
+        TEST_CHECK(fabsf(error_band - 42.731f * 0.5f) < 1e-3f, "error band == k_dc * 0.5 exactly");
+        TEST_CHECK(fabsf(rate_band - (42.731f / 255.6f)) < 1e-5f, "rate band == k_dc / tau_s exactly");
+        /* Sanity anchor against this project's own measured plant envelope
+         * (pid_fuzzy.c's header comment / project_bench_is_a_4w_test_
+         * fixture.md): the derived rate band must be the SAME ORDER OF
+         * MAGNITUDE as the measured ~0.110 degC/s peak rate (the real mode-3
+         * hardware capture cited in pid_fuzzy.c's own header comment -- NOT the
+         * incidental 300 degC/hr/3600=0.083 profile-rate conversion, per
+         * docs/audits/review_sim_fuzzy_commits_2026-09-13.md), NOT
+         * ~6x it the way RATE_BAND_C_PER_S_DEFAULT (0.5) is. This is the
+         * task's own explicit sanity check -- if this ever regresses back
+         * toward 0.5, the whole point of deriving the band is defeated. */
+        TEST_CHECK(rate_band > 0.02f && rate_band < 0.3f,
+                  "derived rate band stays same-order-of-magnitude as the measured ~0.110 degC/s "
+                  "max ramp rate, not 6x it like the absolute default");
+    }
+
+    /* Same check against all three live bench zones (docs/audits/
+     * fuzzy_dimensionless_bands_2026-09-13.md's per-zone table) -- proves
+     * the formula is not tuned to one zone's numbers by accident. */
+    {
+        static const float k_dc[3]  = {42.731f, 32.397f, 33.849f};
+        static const float tau_s[3] = {255.6f, 258.9f, 247.1f};
+        for (int zi = 0; zi < 3; zi++) {
+            float error_band = 0.0f, rate_band = 0.0f;
+            bool from_model = pid_fuzzy_derive_bands(k_dc[zi], tau_s[zi], &error_band, &rate_band);
+            TEST_CHECK(from_model, "each of the three live bench zones has a valid model that derives bands");
+            TEST_CHECK(rate_band > 0.02f && rate_band < 0.3f,
+                      "each of the three live bench zones' derived rate band is same order as the "
+                      "measured ~0.110 degC/s peak rate");
+        }
+    }
+
+    /* No model (never autotuned): must fall back to the documented
+     * absolute defaults exactly, and report false so a caller can log the
+     * fallback -- this pass's own explicit requirement that the fallback
+     * stay visible, not silent. */
+    {
+        float error_band = 0.0f, rate_band = 0.0f;
+        bool from_model = pid_fuzzy_derive_bands(0.0f, 0.0f, &error_band, &rate_band);
+        TEST_CHECK(!from_model, "no model (k_dc=tau_s=0): reports false, not a silent success");
+        TEST_CHECK(error_band == 20.0f, "no model: falls back to the documented ERROR_BAND_C_DEFAULT (20.0)");
+        TEST_CHECK(rate_band == 0.5f, "no model: falls back to the documented RATE_BAND_C_PER_S_DEFAULT (0.5)");
+    }
+
+    /* A pathological/non-finite model must also fall back, never propagate
+     * NaN/inf or a negative band into the membership math -- same
+     * discipline as pid_fuzzy_adjust()'s own isfinite() defences. */
+    {
+        float error_band = 0.0f, rate_band = 0.0f;
+        bool from_model = pid_fuzzy_derive_bands(NAN, 100.0f, &error_band, &rate_band);
+        TEST_CHECK(!from_model, "NaN k_dc: reports false");
+        TEST_CHECK(error_band == 20.0f && rate_band == 0.5f, "NaN k_dc: falls back to absolute defaults");
+
+        from_model = pid_fuzzy_derive_bands(40.0f, 0.0f, &error_band, &rate_band);
+        TEST_CHECK(!from_model, "tau_s=0: reports false (would divide by zero)");
+        TEST_CHECK(error_band == 20.0f && rate_band == 0.5f, "tau_s=0: falls back to absolute defaults");
+
+        from_model = pid_fuzzy_derive_bands(-5.0f, 100.0f, &error_band, &rate_band);
+        TEST_CHECK(!from_model, "negative k_dc: reports false (a real plant never cools when duty is added)");
+    }
 }

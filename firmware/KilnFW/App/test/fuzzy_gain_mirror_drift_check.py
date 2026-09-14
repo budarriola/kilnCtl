@@ -197,6 +197,15 @@ PROD_ONLY_STMT_RES = [
     re.compile(r"^float error_band_c = 0\.0f, rate_band_c_per_s = 0\.0f$"),
     re.compile(r"^\(void\)zones_config_get_error_band_c\(zi, &error_band_c\)$"),
     re.compile(r"^\(void\)zones_config_get_rate_band_c_per_s\(zi, &rate_band_c_per_s\)$"),
+    # docs/audits/fuzzy_dimensionless_bands_2026-09-13.md: production now
+    # resolves error_band_c/rate_band_c_per_s through resolve_fuzzy_bands()
+    # (a zone-model-aware resolver, falling back to the two config getters
+    # above only for a never-autotuned zone) instead of calling those two
+    # getters directly. The mirror has no zone_runtime_t/model concept at
+    # all -- same "structurally required difference" as strength_pct's
+    # resolution above -- so this one-statement call is dropped entirely,
+    # matching how the whole strength_pct derivation block is dropped.
+    re.compile(r"^resolve_fuzzy_bands\(z, zi, &error_band_c, &rate_band_c_per_s\)$"),
     re.compile(r"^\*out_cfg = z->pid_cfg$"),  # mirror has no equivalent whole-struct copy statement
     # production initializes adj_kp/ki/kd from the base gains inline (belt
     # and braces against pid_fuzzy_adjust() not writing them); the mirror
