@@ -113,6 +113,9 @@
 
 #include "../drivers/control/pid.h"
 #include "../drivers/control/pid_fuzzy.h"
+#include "../drivers/control/firing_score.h" /* FIRING_SCORE_SETTLE_BAND_C only --
+                                              * no firing_score_seg_*() call, this
+                                              * file keeps its own orchestration */
 #include "sim_plant.h"
 
 #include <math.h>
@@ -128,9 +131,16 @@
 #define D_FILTER_TAU_S 30.0f
 #define SETPOINT_WEIGHT_B 1.0f
 #define PID_RANGE_C 25.0f
-#define SETTLE_BAND_C 2.0f /* independent of firing_score.c's default 5.0 band_c --
-                            * this file's own, tighter, stated explicitly since
-                            * "settle" is not a firing_score.c concept */
+// 2026-09-13 four-objective re-score: SETTLE_BAND_C changed 2.0 -> 0.5 to
+// match FIRING_SCORE_SETTLE_BAND_C (firing_score.h) exactly, per the opus
+// review appended to docs/audits/fuzzy_overshoot_measurement_2026-09-13.md
+// (Finding 2): at 2.0C -- 4x this project's own 0.5C materiality line -- the
+// settle-time ordering INVERTS (the "faster settle" arms actually settle
+// SLOWER once measured at 0.5C, because the aggressive arms have higher
+// steady-state RMS and cross a loose band early, then take longer to truly
+// converge). 0.5C is not this file's own choice; it is production's own
+// band, now available via firing_score.h's FIRING_SCORE_SETTLE_BAND_C.
+#define SETTLE_BAND_C FIRING_SCORE_SETTLE_BAND_C
 
 static void make_plant_cfg(sim_plant_cfg_t *out)
 {
@@ -191,7 +201,15 @@ static float sim_tick(sim_plant_state_t *pstate, const sim_plant_cfg_t *pcfg,
 // fuzzy rate band) -- this is deliberately an ORDINARY commanded ramp, not
 // a disturbance.
 // ---------------------------------------------------------------------
-#define RAMP_RATE_C_PER_S (100.0f / 3600.0f)
+// 2026-09-13 re-score: ramp rate is now a PARAMETER, not a #define. The opus
+// review appended to docs/audits/fuzzy_overshoot_measurement_2026-09-13.md
+// (Finding 5) found arm separation between bands/strengths appears ONLY at
+// 100 degC/hr and above -- at 25/50 degC/hr the arms converge and a
+// single-rate report would wrongly read as "no effect". main() now runs the
+// full arm/objective sweep at two rates so that dependency is visible rather
+// than hidden behind one hardcoded value.
+#define RAMP_RATE_100_C_PER_HR (100.0f / 3600.0f)
+#define RAMP_RATE_300_C_PER_HR (300.0f / 3600.0f)
 #define DWELL_TICKS 400 /* 2000s = 33.3 min; entry_window_s for zone 0 is
                          * dead_time_s+2*tau_s = 52.8+2*263.8 = 580.4s =
                          * 116 ticks, so 400 ticks covers the entry window
@@ -290,6 +308,20 @@ typedef struct {
                                 * does NOT erase it from this number. A
                                 * value >= 0 means the zone never dipped
                                 * below target at all during this dwell. */
+    float undershoot_entry_windowed_c; /* the OTHER definition, added
+                                * 2026-09-13 once FIRING_SUBSCORE_ENTRY_
+                                * UNDERSHOOT_C landed (d41da85f): production's
+                                * own undershoot instrument, unlike the one
+                                * this file shipped with, is NOT unwindowed --
+                                * it is the trough of (actual-target) WITHIN
+                                * entry_window_s only, same window as
+                                * overshoot, reported as a positive magnitude
+                                * (0 if it never went negative in that
+                                * window). Reported alongside
+                                * undershoot_signed_c so the two disagree
+                                * visibly rather than silently: a recovery
+                                * after entry_window_s elapses is invisible
+                                * here but not to undershoot_signed_c. */
     int   settle_ticks;  /* objective 2 (settles quickly). NOT a
                           * firing_score.c subscore -- firing_score.c HAS
                           * NO instrument for this objective at all
@@ -333,7 +365,19 @@ static float median_of(float *buf, int n)
     return 0.5f * (buf[n / 2 - 1] + buf[n / 2]);
 }
 
+// error_band_c/rate_band_c_per_s are now explicit PARAMETERS (2026-09-13
+// re-score) instead of always being internally derived via
+// pid_fuzzy_derive_bands() -- the derivation is still exercised (see main(),
+// which calls it once to compute the "derived" arms' band values), but this
+// function itself is agnostic to where the caller's bands came from, so it
+// can run BOTH the derived bands and the absolute ERROR_BAND_C_DEFAULT/
+// RATE_BAND_C_PER_S_DEFAULT (20.0/0.5) through the exact same scenario and
+// tick wiring -- the comparison this task asked for that the file's
+// previous revision could not make (it always derived internally, with no
+// way to select the absolute constants instead).
 static double run_overshoot_scenario(uint8_t strength_pct, float base_kp, float base_ki, float base_kd,
+                                     float error_band_c, float rate_band_c_per_s,
+                                     float ramp_rate_c_per_s,
                                      dwell_result_t out_results[N_PHASES], bool *out_bitexact_ok)
 {
     sim_plant_cfg_t pcfg;
@@ -345,9 +389,6 @@ static double run_overshoot_scenario(uint8_t strength_pct, float base_kp, float 
     pid_reset(&pid_state);
     float prev_effective_ki = 0.0f;
 
-    float error_band_c, rate_band_c_per_s;
-    pid_fuzzy_derive_bands(g_k_dc[0], g_tau_s[0], &error_band_c, &rate_band_c_per_s);
-
     float entry_window_s = g_dead_time_s[0] + 2.0f * g_tau_s[0];
 
     float target_c = AMBIENT_C;
@@ -358,7 +399,7 @@ static double run_overshoot_scenario(uint8_t strength_pct, float base_kp, float 
         float dwell_target = PHASES[p].dwell_target_c;
         float ramp_dir = (dwell_target > target_c) ? 1.0f : -1.0f;
 
-        // Ramp phase: step target_c toward dwell_target at RAMP_RATE_C_PER_S
+        // Ramp phase: step target_c toward dwell_target at ramp_rate_c_per_s
         // until reached. Tracks objective 1 (ramp-lag, FIRING_SUBSCORE_LAG_S)
         // -- entry-window/overshoot tracking still starts only once the
         // dwell itself begins, exactly as firing_score_seg_begin()/
@@ -366,7 +407,7 @@ static double run_overshoot_scenario(uint8_t strength_pct, float base_kp, float 
         int ramp_lag_n = 0;
         while ((ramp_dir > 0.0f && target_c < dwell_target) ||
                (ramp_dir < 0.0f && target_c > dwell_target)) {
-            target_c += ramp_dir * RAMP_RATE_C_PER_S * DT_S;
+            target_c += ramp_dir * ramp_rate_c_per_s * DT_S;
             if ((ramp_dir > 0.0f && target_c > dwell_target) ||
                 (ramp_dir < 0.0f && target_c < dwell_target)) {
                 target_c = dwell_target;
@@ -379,7 +420,7 @@ static double run_overshoot_scenario(uint8_t strength_pct, float base_kp, float 
             iae += fabs((double)error_c) * DT_S;
 
             // FIRING_SUBSCORE_LAG_S's own definition: lag_s = abs_err /
-            // rate_c_per_s, using the COMMANDED rate (RAMP_RATE_C_PER_S),
+            // rate_c_per_s, using the COMMANDED rate (ramp_rate_c_per_s),
             // not the plant's actual measured rate -- firing_score.c uses
             // seg->rate_c_per_s, set once at firing_score_seg_begin() from
             // the commanded segment rate, never re-measured per tick.
@@ -390,8 +431,8 @@ static double run_overshoot_scenario(uint8_t strength_pct, float base_kp, float 
             // of it -- this file's own signed complement to LAG_S's
             // unsigned blind spot (2edbb6eb Finding C).
             if (ramp_lag_n < MAX_RAMP_SAMPLES) {
-                g_ramp_lag_buf[ramp_lag_n] = fabsf(error_c) / RAMP_RATE_C_PER_S;
-                g_ramp_lag_signed_buf[ramp_lag_n] = error_c / (ramp_dir * RAMP_RATE_C_PER_S);
+                g_ramp_lag_buf[ramp_lag_n] = fabsf(error_c) / ramp_rate_c_per_s;
+                g_ramp_lag_signed_buf[ramp_lag_n] = error_c / (ramp_dir * ramp_rate_c_per_s);
                 ramp_lag_n++;
             }
         }
@@ -405,8 +446,21 @@ static double run_overshoot_scenario(uint8_t strength_pct, float base_kp, float 
         float min_actual_minus_target = 0.0f; /* clamped at 0: a value that never goes negative
                                                * reports as exactly 0.0 ("never dipped below"),
                                                * not some arbitrary small positive residual. */
-        bool settled = false;
-        int settle_start_tick = -1;
+        float min_actual_minus_target_entry = 0.0f; /* entry-window-only mirror,
+                                                      * production's own
+                                                      * FIRING_SUBSCORE_ENTRY_
+                                                      * UNDERSHOOT_C definition */
+        double last_outside_s = -1.0; /* FIRING_SUBSCORE_SETTLE_S's own
+                                       * definition (firing_score.c
+                                       * firing_score_seg_tick()): elapsed
+                                       * time of the LAST scored tick seen
+                                       * outside SETTLE_BAND_C, across the
+                                       * WHOLE dwell (entry+steady) -- moves
+                                       * forward again if the zone leaves the
+                                       * band after re-entering, so a later
+                                       * excursion is not hidden by an
+                                       * earlier settle. -1 here (converted to
+                                       * 0 below) means never seen outside. */
         double elapsed_s = 0.0;
         double steady_sumsq = 0.0;
         int steady_n = 0;
@@ -435,6 +489,9 @@ static double run_overshoot_scenario(uint8_t strength_pct, float base_kp, float 
             if (elapsed_s <= (double)entry_window_s) {
                 res->entry_seen = true;
                 if (actual_minus_target > res->overshoot_c) res->overshoot_c = actual_minus_target;
+                if (actual_minus_target < min_actual_minus_target_entry) {
+                    min_actual_minus_target_entry = actual_minus_target;
+                }
             } else {
                 // FIRING_SUBSCORE_STEADY_RMS_C's else-branch, exactly.
                 res->steady_seen = true;
@@ -442,81 +499,139 @@ static double run_overshoot_scenario(uint8_t strength_pct, float base_kp, float 
                 steady_n++;
             }
 
-            bool in_band = fabsf(actual_minus_target) <= SETTLE_BAND_C;
-            if (in_band) {
-                if (!settled) { settled = true; settle_start_tick = t; }
-            } else {
-                settled = false; /* left the band again -- a transient dip does not count */
+            // FIRING_SUBSCORE_SETTLE_S's own algorithm, exactly (firing_score.c
+            // firing_score_seg_tick()): record elapsed_s whenever OUTSIDE the
+            // band; never reset it back down on re-entry. If never outside,
+            // this stays at the sentinel and is reported as 0.0 (instant
+            // settle), same as production.
+            if (fabsf(actual_minus_target) > SETTLE_BAND_C) {
+                last_outside_s = elapsed_s;
             }
         }
-        res->settle_ticks = settled ? settle_start_tick : -1;
+        // -1 sentinel (assertion 4 below) means "recorded as never settling
+        // AT ALL inside this dwell's own DWELL_TICKS window" -- distinct from
+        // production's 0.0 "never seen outside" case, which this file maps
+        // onto settle_ticks=0 (elapsed_s of the first tick) rather than -1,
+        // since a same-tick settle is a real, reportable result, not a
+        // scenario-sizing failure.
+        if (last_outside_s < 0.0) {
+            res->settle_ticks = 0; /* first tick is already inside SETTLE_BAND_C
+                                    * for the whole dwell -- report as settled
+                                    * immediately (elapsed_s ~ DT_S), never as
+                                    * the -1 "never settled" sentinel. */
+        } else if (last_outside_s >= (double)DWELL_TICKS * (double)DT_S) {
+            res->settle_ticks = -1; /* still outside on the last scored tick --
+                                     * production's own worst-possible reading,
+                                     * this file's own -1 "never settled"
+                                     * convention (see assertion 4). */
+        } else {
+            res->settle_ticks = (int)((last_outside_s + (double)DT_S) / (double)DT_S);
+        }
         res->steady_rms_c = (steady_n > 0) ? (float)sqrt(steady_sumsq / (double)steady_n) : 0.0f;
         res->undershoot_signed_c = min_actual_minus_target; /* <= 0.0; 0.0 means never dipped below */
+        res->undershoot_entry_windowed_c =
+            (min_actual_minus_target_entry < 0.0f) ? -min_actual_minus_target_entry : 0.0f;
     }
 
     *out_bitexact_ok = all_bitexact;
     return iae;
 }
 
-static const char *ARM_NAMES[] = { "fuzzy_off (strength=0)", "fuzzy_25", "fuzzy_50", "fixed_retune_equivalent" };
+// 2026-09-13 re-score: the "fixed_retune_equivalent" arm this file shipped
+// with was REMOVED, not kept. An opus review (appended to docs/audits/
+// fuzzy_overshoot_measurement_2026-09-13.md, Finding 1) proved it applied
+// roughly TWICE fuzzy_50's own measured ramp-phase-average gain perturbation
+// (it used the rule table's CENTRE-CELL multiplier -- fuzzy_50's per-tick
+// MAXIMUM, not its typical effect during a ramp) -- so its "fuzzy regresses
+// overshoot/undershoot vs a plain retune" finding was an artifact of an
+// unfairly strong comparison arm, not a property of fuzzy inference. This
+// task's brief does not ask for a retune arm; the real open question this
+// task exists to answer -- derived bands vs absolute bands, both through
+// REAL fuzzy inference -- needs no retune arm to answer it, so it is not
+// reintroduced here.
+static const char *ARM_NAMES[] = { "fuzzy_off (strength=0)", "absolute_50 (20.0/0.5)",
+                                    "derived_50 (autotune bands)", "absolute_25 (20.0/0.5)",
+                                    "derived_25 (autotune bands)" };
+#define N_ARMS (int)(sizeof(ARM_NAMES) / sizeof(ARM_NAMES[0]))
 
 int main(void)
 {
     printf("=== sim_fuzzy_overshoot -- re-measuring the fuzzy layer on OVERSHOOT, not IAE/MAE ===\n");
     printf("See this file's top comment before reading anything below: single-zone,\n"
            "bench-scale (max ~40C above ambient vs a real kiln's ~1200C), no synthetic\n"
-           "disturbance injection -- ordinary ramp-to-dwell transitions only.\n\n");
+           "disturbance injection -- ordinary ramp-to-dwell transitions only.\n"
+           "Primary sweep ramp rate: 100 degC/hr (arm separation was found by review to appear only\n"
+           "at 100 degC/hr and above -- a second, compact pass at 300 degC/hr runs later in this\n"
+           "report to check rate-dependence explicitly).\n\n");
 
     #define BASE_KP 0.0318f
     #define BASE_KI 0.0001f
     #define BASE_KD 0.8401f
 
-    float error_band_c, rate_band_c_per_s;
-    bool bands_ok = pid_fuzzy_derive_bands(g_k_dc[0], g_tau_s[0], &error_band_c, &rate_band_c_per_s);
-    printf("Bands: error_band_c=%.2f, rate_band_c_per_s=%.4f (from_model=%s)\n\n",
-           (double)error_band_c, (double)rate_band_c_per_s, bands_ok ? "yes" : "NO (fell back!)");
+    float derived_error_band_c, derived_rate_band_c_per_s;
+    bool bands_ok = pid_fuzzy_derive_bands(g_k_dc[0], g_tau_s[0], &derived_error_band_c,
+                                            &derived_rate_band_c_per_s);
+    #define ABSOLUTE_ERROR_BAND_C 20.0f     /* pid_fuzzy.c ERROR_BAND_C_DEFAULT, quoted literally --
+                                             * this file has no access to that #define (it is
+                                             * pid_fuzzy.c-local), so it is restated here and this
+                                             * comment is the citation. */
+    #define ABSOLUTE_RATE_BAND_C_PER_S 0.5f /* pid_fuzzy.c RATE_BAND_C_PER_S_DEFAULT, same note. */
+    printf("Bands: derived (zone 0 autotune model) error_band_c=%.2f, rate_band_c_per_s=%.4f "
+           "(from_model=%s); absolute (pid_fuzzy.c defaults) error_band_c=%.1f, "
+           "rate_band_c_per_s=%.2f\n\n",
+           (double)derived_error_band_c, (double)derived_rate_band_c_per_s, bands_ok ? "yes" : "NO (fell back!)",
+           (double)ABSOLUTE_ERROR_BAND_C, (double)ABSOLUTE_RATE_BAND_C_PER_S);
 
     bool overall_ok = true;
 
-    // Four arms: strength 0/25/50 (fuzzy), plus one fixed-gain retune
-    // equivalent to strength_pct=50's typical effect direction (kp*0.75,
-    // ki*1.25, kd*0.75), run through strength_pct=0 so pid_fuzzy_adjust()
-    // is a pure no-op and the gain change comes ONLY from the retune,
-    // never from fuzzy inference -- this is what actually separates "fuzzy
-    // inference reduces overshoot" from "these particular gains reduce
-    // overshoot," the same distinction the poisoned-binary incident
-    // (8a12521b) got wrong on the tracking metric.
-    struct { uint8_t strength; float kp, ki, kd; } arms[4] = {
-        { 0,  BASE_KP, BASE_KI, BASE_KD },
-        { 25, BASE_KP, BASE_KI, BASE_KD },
-        { 50, BASE_KP, BASE_KI, BASE_KD },
-        { 0,  BASE_KP * 0.75f, BASE_KI * 1.25f, BASE_KD * 0.75f },
+    // Five arms: fuzzy_off (the safety-contract control), then absolute vs
+    // derived bands at strength 50 and 25 -- the actual question this task
+    // (docs/audits/derived_bands_four_objective_score_2026-09-13.md) exists
+    // to answer. NO fixed-gain retune arm here (see ARM_NAMES's comment
+    // above): this task's brief does not ask for one, and the prior
+    // revision's retune arm was shown by review to be mislabelled/confounded
+    // (roughly 2x fuzzy_50's own ramp-phase gain perturbation), so it would
+    // add noise, not signal, to the derived-vs-absolute question.
+    struct { uint8_t strength; float kp, ki, kd; float error_band_c, rate_band_c_per_s; } arms[N_ARMS] = {
+        { 0,  BASE_KP, BASE_KI, BASE_KD, ABSOLUTE_ERROR_BAND_C, ABSOLUTE_RATE_BAND_C_PER_S }, /* bands unused at strength=0 */
+        { 50, BASE_KP, BASE_KI, BASE_KD, ABSOLUTE_ERROR_BAND_C, ABSOLUTE_RATE_BAND_C_PER_S },
+        { 50, BASE_KP, BASE_KI, BASE_KD, derived_error_band_c, derived_rate_band_c_per_s },
+        { 25, BASE_KP, BASE_KI, BASE_KD, ABSOLUTE_ERROR_BAND_C, ABSOLUTE_RATE_BAND_C_PER_S },
+        { 25, BASE_KP, BASE_KI, BASE_KD, derived_error_band_c, derived_rate_band_c_per_s },
     };
 
     // Four independent metric tables, one per objective -- NEVER reduced to
     // one score (the owner's explicit correction: IAE/MAE's flaw is not
     // "wrong metric," it's "collapses four objectives into one number in
-    // which they can trade against each other invisibly").
+    // which they can trade against each other invisibly"). Plus a fifth,
+    // non-objective table (undershoot_entry_windowed) reported ONLY to show
+    // where this file's own instrument disagrees with production's
+    // FIRING_SUBSCORE_ENTRY_UNDERSHOOT_C, per this task's own instruction to
+    // surface that disagreement rather than silently pick one.
     //   ramp_lag_median_s (unsigned, ==FIRING_SUBSCORE_LAG_S)  -- objective 1
-    //   ramp_lag_signed_median_s (this file's own)             -- objective 1, signed
-    //   settle_ticks*DT_S (this file's own -- NO firing_score.c instrument exists) -- objective 2
-    //   steady_rms_c (==FIRING_SUBSCORE_STEADY_RMS_C, sound per 2edbb6eb)  -- objective 3
-    //   overshoot_c (==FIRING_SUBSCORE_ENTRY_PEAK_C, sound per 2edbb6eb)   -- objective 4a
-    //   undershoot_signed_c (this file's own, unwindowed/unclamped --
-    //     firing_score.c's own equivalent is a confirmed gap, 2edbb6eb Finding B) -- objective 4b
-    float lag_by_arm[4][N_PHASES];
-    float lag_signed_by_arm[4][N_PHASES];
-    float settle_s_by_arm[4][N_PHASES];
-    float steady_rms_by_arm[4][N_PHASES];
-    float overshoot_by_arm[4][N_PHASES];
-    float undershoot_signed_by_arm[4][N_PHASES];
+    //   ramp_lag_signed_median_s (~=FIRING_SUBSCORE_LAG_SIGNED_S, unfiltered) -- objective 1, signed
+    //   settle_ticks*DT_S (==FIRING_SUBSCORE_SETTLE_S's own algorithm, 0.5C band) -- objective 2
+    //   steady_rms_c (==FIRING_SUBSCORE_STEADY_RMS_C)          -- objective 3
+    //   overshoot_c (==FIRING_SUBSCORE_ENTRY_PEAK_C)           -- objective 4a
+    //   undershoot_signed_c (this file's own, unwindowed/unclamped -- see disagreement note) -- objective 4b
+    //   undershoot_entry_windowed_c (==FIRING_SUBSCORE_ENTRY_UNDERSHOOT_C, windowed/clamped)  -- disagreement only
+    float lag_by_arm[N_ARMS][N_PHASES];
+    float lag_signed_by_arm[N_ARMS][N_PHASES];
+    float settle_s_by_arm[N_ARMS][N_PHASES];
+    float steady_rms_by_arm[N_ARMS][N_PHASES];
+    float overshoot_by_arm[N_ARMS][N_PHASES];
+    float undershoot_signed_by_arm[N_ARMS][N_PHASES];
+    float undershoot_entry_windowed_by_arm[N_ARMS][N_PHASES];
 
-    for (int a = 0; a < 4; a++) {
-        printf("-- arm: %s (kp=%.5f ki=%.5f kd=%.5f) --\n", ARM_NAMES[a], (double)arms[a].kp,
-               (double)arms[a].ki, (double)arms[a].kd);
+    for (int a = 0; a < N_ARMS; a++) {
+        printf("-- arm: %s (kp=%.5f ki=%.5f kd=%.5f, error_band_c=%.2f rate_band_c_per_s=%.4f) --\n",
+               ARM_NAMES[a], (double)arms[a].kp, (double)arms[a].ki, (double)arms[a].kd,
+               (double)arms[a].error_band_c, (double)arms[a].rate_band_c_per_s);
         dwell_result_t results[N_PHASES];
         bool bitexact_ok;
         double iae = run_overshoot_scenario(arms[a].strength, arms[a].kp, arms[a].ki, arms[a].kd,
+                                            arms[a].error_band_c, arms[a].rate_band_c_per_s,
+                                            RAMP_RATE_100_C_PER_HR,
                                             results, &bitexact_ok);
 
         if (arms[a].strength == 0 && !bitexact_ok) {
@@ -533,13 +648,15 @@ int main(void)
             steady_rms_by_arm[a][p] = r->steady_rms_c;
             overshoot_by_arm[a][p] = r->overshoot_c;
             undershoot_signed_by_arm[a][p] = r->undershoot_signed_c;
+            undershoot_entry_windowed_by_arm[a][p] = r->undershoot_entry_windowed_c;
             printf("  dwell %d (target=%.1fC): [1]ramp_lag_median=%.1fs (signed=%+.1fs)  [2]settle=%s  "
-                   "[3]steady_rms=%.3fC  [4a]overshoot=%.3fC [4b]undershoot=%+.3fC  "
-                   "(entry_seen=%s steady_seen=%s)\n",
+                   "[3]steady_rms=%.3fC  [4a]overshoot=%.3fC [4b]undershoot(whole-dwell)=%+.3fC "
+                   "undershoot(entry-window)=%.3fC  (entry_seen=%s steady_seen=%s)\n",
                    p, (double)PHASES[p].dwell_target_c, (double)r->ramp_lag_median_s,
                    (double)r->ramp_lag_signed_median_s,
                    r->settle_ticks >= 0 ? "yes" : "NEVER",
                    (double)r->steady_rms_c, (double)r->overshoot_c, (double)r->undershoot_signed_c,
+                   (double)r->undershoot_entry_windowed_c,
                    r->entry_seen ? "yes" : "NO", r->steady_seen ? "yes" : "NO");
             if (r->settle_ticks >= 0) {
                 printf("      settle_time=%.0fs\n", (double)settle_s_by_arm[a][p]);
@@ -568,12 +685,9 @@ int main(void)
     }
 
     // Per-objective comparison, each against its OWN 0.5-unit-equivalent
-    // materiality line, and each SEPARATELY for the fuzzy arms vs the
-    // fixed-retune arm -- a fuzzy arm and the retune arm answer different
-    // questions (does fuzzy INFERENCE help vs do these particular gains
-    // help), so pooling them into one max() would hide a case where the
-    // retune arm regresses on one objective while a fuzzy arm improves it
-    // (or vice versa). Materiality line for lag/settle is stated in
+    // materiality line, absolute-band arms and derived-band arms reported
+    // SEPARATELY at both strengths so a strength-25 and strength-50 trade is
+    // never averaged away. Materiality line for lag/settle is stated in
     // SECONDS, not degC -- the 0.5 degC rule does not apply to a time axis,
     // so this file states its own bar for those two rather than
     // misapplying the degC one.
@@ -587,52 +701,136 @@ int main(void)
         float (*by_arm)[N_PHASES];
         float bar;
         const char *unit;
+        int exclude_dwell; /* -1 = none. Set to 2 for objective 4a: the opus
+                            * review (docs/audits/fuzzy_overshoot_measurement_
+                            * 2026-09-13.md, Finding 3) found dwell 2's
+                            * "overshoot" is a RAMP-DOWN RESIDUAL (the
+                            * measurement is still above target when a
+                            * ramp-down dwell begins), the exact mirror of the
+                            * artifact this file already disclosed for
+                            * undershoot at dwells 0/1 -- not real overshoot,
+                            * and the review found the previous revision's
+                            * headline "max fuzzy overshoot delta" figure came
+                            * entirely from this artifact. Excluded from the
+                            * max|diff| aggregation below; the raw per-dwell
+                            * row is still printed with an explicit flag. */
     } metric_t;
     metric_t metrics[] = {
-        { "[1] ramp-lag, UNSIGNED median (==FIRING_SUBSCORE_LAG_S)", lag_by_arm, TIME_MATERIALITY_S, "s" },
-        { "[1] ramp-lag, SIGNED median (this file's own; +=lagging, -=leading)",
-          lag_signed_by_arm, TIME_MATERIALITY_S, "s" },
-        { "[2] settle time (this file's own -- firing_score.c has NO instrument for this)",
-          settle_s_by_arm, TIME_MATERIALITY_S, "s" },
-        { "[3] steady-state RMS error (==FIRING_SUBSCORE_STEADY_RMS_C)", steady_rms_by_arm, 0.5f, "C" },
-        { "[4a] overshoot, entry peak (==FIRING_SUBSCORE_ENTRY_PEAK_C)", overshoot_by_arm, 0.5f, "C" },
-        { "[4b] undershoot, SIGNED whole-dwell peak (this file's own -- firing_score.c's "
-          "equivalent is clamped to 0 and windowed, a confirmed gap)", undershoot_signed_by_arm, 0.5f, "C" },
+        { "[1] ramp-lag, UNSIGNED median (==FIRING_SUBSCORE_LAG_S)", lag_by_arm, TIME_MATERIALITY_S, "s", -1 },
+        { "[1] ramp-lag, SIGNED median (~=FIRING_SUBSCORE_LAG_SIGNED_S, unfiltered; +=lagging, -=leading)",
+          lag_signed_by_arm, TIME_MATERIALITY_S, "s", -1 },
+        { "[2] settle time (==FIRING_SUBSCORE_SETTLE_S's own algorithm, 0.5C band)",
+          settle_s_by_arm, TIME_MATERIALITY_S, "s", -1 },
+        { "[3] steady-state RMS error (==FIRING_SUBSCORE_STEADY_RMS_C)", steady_rms_by_arm, 0.5f, "C", -1 },
+        { "[4a] overshoot, entry peak (==FIRING_SUBSCORE_ENTRY_PEAK_C) -- dwell 2 EXCLUDED, ramp-down "
+          "residual, not overshoot", overshoot_by_arm, 0.5f, "C", 2 },
+        { "[4b] undershoot, SIGNED whole-dwell peak (this file's own, unwindowed -- see disagreement "
+          "note below)", undershoot_signed_by_arm, 0.5f, "C", -1 },
+        { "[disagreement only] undershoot, entry-window-only (==FIRING_SUBSCORE_ENTRY_UNDERSHOOT_C, "
+          "clamped+windowed)", undershoot_entry_windowed_by_arm, 0.5f, "C", -1 },
     };
     #define N_METRICS (int)(sizeof(metrics) / sizeof(metrics[0]))
 
     printf("=== Per-objective comparison vs fuzzy_off (never pooled into one score) ===\n");
-    printf("CAVEAT on [1]'s two rows (docs/audits/reverted_control_decisions_reexamination_2026-\n"
-           "09-13.md, 2edbb6eb): FIRING_SUBSCORE_LAG_S -- which the unsigned row exactly reproduces\n"
-           "-- is UNSIGNED (a leading and a lagging tick score identically) and, IN FIRING_SCORE.C\n"
-           "ITSELF, drops saturated-and-short ticks (exactly the worst-tracking ticks). This file's\n"
-           "own ramp loop applies no such filter, so that second blind spot does not carry over to\n"
-           "either row here -- but the signed row exists specifically because the unsigned row alone\n"
-           "cannot distinguish 'lagging behind the ramp' from 'leading ahead of it,' and both are\n"
-           "objective-1 failures in opposite directions.\n");
+    printf("CAVEAT on [1]'s two rows: FIRING_SUBSCORE_LAG_S -- which the unsigned row exactly\n"
+           "reproduces -- is UNSIGNED (a leading and a lagging tick score identically) and, IN\n"
+           "FIRING_SCORE.C ITSELF, drops saturated-and-short ticks (exactly the worst-tracking\n"
+           "ticks). This file's own ramp loop applies no such filter, so that second blind spot\n"
+           "does not carry over to either row here.\n"
+           "DISAGREEMENT on [4b] vs the last row: this file's own undershoot_signed_c is unwindowed\n"
+           "(whole dwell, never suppressed by recovery); production's FIRING_SUBSCORE_ENTRY_\n"
+           "UNDERSHOOT_C is windowed to entry_window_s and clamped to >=0, same shape as overshoot.\n"
+           "Both are reported; see the doc for which one this task's verdict is built on and why.\n");
     for (int m = 0; m < N_METRICS; m++) {
         printf("\n-- %s (bar: %.1f%s) --\n", metrics[m].name, (double)metrics[m].bar, metrics[m].unit);
-        float max_fuzzy = 0.0f, max_retune = 0.0f;
+        float max_50 = 0.0f, max_25 = 0.0f, max_derived_vs_absolute = 0.0f;
         for (int p = 0; p < N_PHASES; p++) {
             float off = metrics[m].by_arm[0][p];
-            printf("  dwell %d: off=%.2f%s  f25=%.2f%s (d=%+.2f)  f50=%.2f%s (d=%+.2f)  "
-                   "retune=%.2f%s (d=%+.2f)\n",
-                   p, (double)off, metrics[m].unit,
+            printf("  dwell %d%s: off=%.2f%s  abs50=%.2f%s (d=%+.2f)  der50=%.2f%s (d=%+.2f)  "
+                   "abs25=%.2f%s (d=%+.2f)  der25=%.2f%s (d=%+.2f)\n",
+                   p, (p == metrics[m].exclude_dwell) ? " [EXCLUDED: ramp-down residual, not real "
+                   "overshoot -- see metric name]" : "",
+                   (double)off, metrics[m].unit,
                    (double)metrics[m].by_arm[1][p], metrics[m].unit, (double)(metrics[m].by_arm[1][p] - off),
                    (double)metrics[m].by_arm[2][p], metrics[m].unit, (double)(metrics[m].by_arm[2][p] - off),
-                   (double)metrics[m].by_arm[3][p], metrics[m].unit, (double)(metrics[m].by_arm[3][p] - off));
-            for (int a = 1; a <= 2; a++) {
+                   (double)metrics[m].by_arm[3][p], metrics[m].unit, (double)(metrics[m].by_arm[3][p] - off),
+                   (double)metrics[m].by_arm[4][p], metrics[m].unit, (double)(metrics[m].by_arm[4][p] - off));
+            if (p == metrics[m].exclude_dwell) continue; /* not real overshoot -- see comment above */
+            for (int a = 1; a < N_ARMS; a++) {
                 float d = fabsf(metrics[m].by_arm[a][p] - off);
-                if (d > max_fuzzy) max_fuzzy = d;
+                if (a == 1 || a == 2) { if (d > max_50) max_50 = d; }
+                if (a == 3 || a == 4) { if (d > max_25) max_25 = d; }
             }
-            float dr = fabsf(metrics[m].by_arm[3][p] - off);
-            if (dr > max_retune) max_retune = dr;
+            float d_derived_absolute_50 = fabsf(metrics[m].by_arm[2][p] - metrics[m].by_arm[1][p]);
+            float d_derived_absolute_25 = fabsf(metrics[m].by_arm[4][p] - metrics[m].by_arm[3][p]);
+            if (d_derived_absolute_50 > max_derived_vs_absolute) max_derived_vs_absolute = d_derived_absolute_50;
+            if (d_derived_absolute_25 > max_derived_vs_absolute) max_derived_vs_absolute = d_derived_absolute_25;
         }
-        printf("  max|diff| fuzzy(25/50) vs off: %.2f%s -- %s bar\n", (double)max_fuzzy,
-               metrics[m].unit, (max_fuzzy > metrics[m].bar) ? "EXCEEDS" : "does not exceed");
-        printf("  max|diff| retune vs off:       %.2f%s -- %s bar\n", (double)max_retune,
-               metrics[m].unit, (max_retune > metrics[m].bar) ? "EXCEEDS" : "does not exceed");
+        printf("  max|diff| strength-50 arms vs off: %.2f%s -- %s bar\n", (double)max_50,
+               metrics[m].unit, (max_50 > metrics[m].bar) ? "EXCEEDS" : "does not exceed");
+        printf("  max|diff| strength-25 arms vs off: %.2f%s -- %s bar\n", (double)max_25,
+               metrics[m].unit, (max_25 > metrics[m].bar) ? "EXCEEDS" : "does not exceed");
+        printf("  max|diff| DERIVED vs ABSOLUTE bands (same strength): %.2f%s -- %s bar "
+               "(THE question this task asks)\n", (double)max_derived_vs_absolute,
+               metrics[m].unit, (max_derived_vs_absolute > metrics[m].bar) ? "EXCEEDS" : "does not exceed");
     }
+    // 2026-09-13 addition, opus review Finding 5 (docs/audits/fuzzy_overshoot_
+    // measurement_2026-09-13.md): arm separation between bands/strengths was
+    // found to appear ONLY at 100 degC/hr and above -- at 25/50 degC/hr the
+    // arms converge and a single-rate report would wrongly read as "no
+    // effect". Everything above ran at 100 degC/hr, stated explicitly. This
+    // second, compact pass reruns ONLY the two headline arms this task cares
+    // about (absolute_50, derived_50) at 300 degC/hr (within
+    // ZONE_MAX_RAMP_C_PER_HR_MAX) to show whether the derived-vs-absolute
+    // gap grows, shrinks, or stays put as the ramp gets brisker -- not a
+    // full second sweep of all five arms/seven metrics, to keep this
+    // addition bounded.
+    printf("\n=== Rate sensitivity: absolute_50 vs derived_50 at 300 degC/hr (vs. this report's "
+           "primary 100 degC/hr) ===\n");
+    {
+        dwell_result_t res_abs300[N_PHASES], res_der300[N_PHASES];
+        bool ok_abs300, ok_der300;
+        run_overshoot_scenario(50, BASE_KP, BASE_KI, BASE_KD, ABSOLUTE_ERROR_BAND_C,
+                               ABSOLUTE_RATE_BAND_C_PER_S, RAMP_RATE_300_C_PER_HR, res_abs300, &ok_abs300);
+        run_overshoot_scenario(50, BASE_KP, BASE_KI, BASE_KD, derived_error_band_c,
+                               derived_rate_band_c_per_s, RAMP_RATE_300_C_PER_HR, res_der300, &ok_der300);
+        if (!ok_abs300 || !ok_der300) {
+            printf("  (skipped bit-exact re-verification here; strength=50 on both, already covered "
+                   "by the primary sweep's own assertion)\n");
+        }
+        float max_overshoot_d = 0.0f, max_undershoot_d = 0.0f, max_steady_d = 0.0f, max_settle_d = 0.0f;
+        for (int p = 0; p < N_PHASES; p++) {
+            if (p != 2) { /* dwell 2's overshoot is the same ramp-down-residual artifact here */
+                float d = fabsf(res_der300[p].overshoot_c - res_abs300[p].overshoot_c);
+                if (d > max_overshoot_d) max_overshoot_d = d;
+            }
+            float du = fabsf(res_der300[p].undershoot_signed_c - res_abs300[p].undershoot_signed_c);
+            if (du > max_undershoot_d) max_undershoot_d = du;
+            float ds = fabsf(res_der300[p].steady_rms_c - res_abs300[p].steady_rms_c);
+            if (ds > max_steady_d) max_steady_d = ds;
+            float abs_settle = (res_abs300[p].settle_ticks >= 0) ? (float)res_abs300[p].settle_ticks * DT_S : -1.0f;
+            float der_settle = (res_der300[p].settle_ticks >= 0) ? (float)res_der300[p].settle_ticks * DT_S : -1.0f;
+            if (abs_settle >= 0.0f && der_settle >= 0.0f) {
+                float dt_settle = fabsf(der_settle - abs_settle);
+                if (dt_settle > max_settle_d) max_settle_d = dt_settle;
+            }
+            printf("  dwell %d @300C/hr: abs50 overshoot=%.3fC undershoot=%+.3fC steady_rms=%.3fC "
+                   "settle=%.0fs | der50 overshoot=%.3fC undershoot=%+.3fC steady_rms=%.3fC settle=%.0fs\n",
+                   p, (double)res_abs300[p].overshoot_c, (double)res_abs300[p].undershoot_signed_c,
+                   (double)res_abs300[p].steady_rms_c, (double)abs_settle,
+                   (double)res_der300[p].overshoot_c, (double)res_der300[p].undershoot_signed_c,
+                   (double)res_der300[p].steady_rms_c, (double)der_settle);
+        }
+        printf("  max|der-abs| @300C/hr: overshoot(excl dwell2)=%.2fC undershoot=%.2fC steady_rms=%.2fC "
+               "settle=%.1fs -- overshoot/undershoot/steady %s 0.5C, settle %s 30s\n",
+               (double)max_overshoot_d, (double)max_undershoot_d, (double)max_steady_d, (double)max_settle_d,
+               (max_overshoot_d > 0.5f || max_undershoot_d > 0.5f || max_steady_d > 0.5f) ? "EXCEEDS" : "does not exceed",
+               (max_settle_d > 30.0f) ? "EXCEEDS" : "does not exceed");
+        printf("  Compare against this report's 100 degC/hr max|diff| DERIVED vs ABSOLUTE rows above: "
+               "if the 300 degC/hr gap is materially larger, the derived-vs-absolute conclusion is "
+               "RATE-DEPENDENT and must be reported as such, not as a single flat verdict.\n");
+    }
+
     printf("\nNOTE: check every metric above for a TRADE -- an improvement on one objective paired\n"
            "with a regression on another, at the same arm, is the actual finding the owner asked\n"
            "this file to surface, and it will NOT show up if these tables are skimmed for only the\n"
