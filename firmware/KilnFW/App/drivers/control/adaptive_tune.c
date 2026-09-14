@@ -235,34 +235,16 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
         z->trace_head = 0;
         z->trace_elapsed_s = 0.0f;
 
-        // K8 (docs/audits/adaptive_tune_ki_guard_timing_and_failopen_2026-
-        // 09-14.md, defect 1): snapshot the PID_FUZZY/fuzzy_strength_pct
-        // state for THIS dwell's trace right here, at dwell entry, rather
-        // than leaving adaptive_tune_refine_ki_locked() (adaptive_tune_ki.c)
-        // to read it live at run-end -- see that function's own comment for
-        // why refine-time was wrong (the trace was captured under whatever
-        // mode was live during the dwell, which run-end can no longer
-        // observe once the firing's interlocks release). Read unconditionally,
-        // like the rest of this branch, regardless of z->enabled -- a
-        // disabled zone's snapshot is simply never consulted, since
-        // adaptive_tune_refine_ki_locked() is never reached for a disabled
-        // zone either.
-        //
-        // Defect 2 (fail-CLOSED): an accessor failure here is recorded as
-        // trace_fuzzy_accessor_failed, which adaptive_tune_refine_ki_locked()
-        // treats as "withhold", not "proceed" -- see that function's own
-        // comment.
-        {
-            zone_control_mode_t snap_mode = ZONE_CONTROL_MODE_PID;
-            float snap_pct = 0.0f;
-            bool mode_ok = zones_config_get_control_mode(zone_index, &snap_mode);
-            bool pct_ok = zones_config_get_fuzzy_strength_pct(zone_index, &snap_pct);
-            z->trace_fuzzy_accessor_failed = !mode_ok || !pct_ok;
-            z->trace_fuzzy_active =
-                mode_ok && pct_ok && snap_mode == ZONE_CONTROL_MODE_PID_FUZZY && snap_pct > 0.0f;
-            z->trace_fuzzy_pct = (mode_ok && pct_ok) ? snap_pct : 0.0f;
-            z->trace_fuzzy_snapshot_valid = true;
-        }
+        // K9 (docs/audits/simc_sole_gain_writer_2026-09-14.md): this used to
+        // also snapshot PID_FUZZY/fuzzy_strength_pct here (K8, docs/audits/
+        // adaptive_tune_ki_guard_timing_and_failopen_2026-09-14.md) for
+        // adaptive_tune_refine_ki_locked()'s effective-vs-reference guard.
+        // That guard, and the write path it protected, are both gone now --
+        // adaptive_tune_ki.c is diagnostic-only and SIMC (adaptive_tune_
+        // model.c) is the sole gain writer, which is frame-independent of
+        // fuzzy by construction (see that file's own top comment) -- so
+        // there is nothing left here for a snapshot to protect. Removed
+        // rather than left as dead bookkeeping.
         // H4(c): this flag is shared MODULE-WIDE (see its own comment), so
         // ANY zone's dwell_just_entered -- including a DISABLED zone's, since
         // this branch runs unconditionally, before the z->enabled gate below

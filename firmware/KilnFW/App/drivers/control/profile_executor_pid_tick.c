@@ -360,7 +360,7 @@ static void log_fuzzy_disabled_no_model_once(uint8_t zi)
     }
 }
 
-void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, pid_cfg_t *out_cfg)
+void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, bool harvest_freeze, pid_cfg_t *out_cfg)
 {
     *out_cfg = z->pid_cfg; /* d_filter_tau_s/b/pid_range_c untouched -- only kp/ki/kd move */
 
@@ -434,6 +434,11 @@ void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, pid_cfg_t *out_cfg)
     bool bands_from_model = resolve_fuzzy_bands(z, zi, &error_band_c, &rate_band_c_per_s);
     if (!bands_from_model) strength_pct = 0;
     if (!bands_from_model) log_fuzzy_disabled_no_model_once(zi);
+    /* docs/audits/simc_sole_gain_writer_2026-09-14.md, Option B: same
+     * bit-for-bit-base-gains short-circuit, forced for the harvest window
+     * instead of for a missing model -- see this parameter's own doc
+     * comment (profile_executor_internal.h). */
+    if (harvest_freeze) strength_pct = 0;
 
     float adj_kp = z->pid_cfg.kp, adj_ki = z->pid_cfg.ki, adj_kd = z->pid_cfg.kd;
     pid_fuzzy_adjust(error_c, error_rate_c_per_s, error_band_c, rate_band_c_per_s,

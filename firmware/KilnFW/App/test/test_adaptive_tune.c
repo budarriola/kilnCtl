@@ -500,30 +500,18 @@ void run_test_adaptive_tune(void)
     test_run_status_fields_cleared_on_excluded_fraction_refusal();
     test_run_status_fields_cleared_when_zone_masked_out_of_profile();
 
-    TEST_SECTION("adaptive_tune: repeated Ki application is bounded under closed-loop feedback (H3)");
-    test_ki_diagnosis_converges_under_closed_loop_plant_feedback();
-    test_ki_diagnosis_runaway_under_constant_error_is_capped_by_cumulative_bound();
-    test_ki_diagnosis_withholds_correction_when_zone_is_pid_fuzzy();
-    test_ki_diagnosis_per_run_move_is_bounded_by_configured_fraction();
-
-    TEST_SECTION("adaptive_tune: Ki guard reads snapshot from capture time, fails closed on accessor error (K8)");
-    test_ki_diagnosis_withholds_when_fuzzy_active_during_capture_but_off_at_refine();
-    test_ki_diagnosis_withholds_when_control_mode_accessor_fails_at_capture();
-    test_ki_diagnosis_decreasing_direction_stabilizes_at_cumulative_floor(); // P6
-
-    TEST_SECTION("adaptive_tune: symmetric lower cumulative Ki bound (Q2)");
-    test_ki_diagnosis_cumulative_floor_binds_and_names_itself();
-    test_ki_diagnosis_cumulative_floor_does_not_block_legitimate_convergence();
+    TEST_SECTION("adaptive_tune: Ki diagnosis never applies any correction any more (K9, diagnostic-only)");
+    test_ki_diagnosis_never_applies_any_verdict();
 
     TEST_SECTION("adaptive_tune: dwell-entry bookkeeping survives invalid data / late enable (F3)");
     test_dwelling_prev_tracks_dwelling_state_even_when_data_is_invalid();
     test_enabling_zone_mid_dwell_does_not_reopen_committed_joint_row();
 
-    TEST_SECTION("adaptive_tune: Ki baseline survives a reboot, not re-latched from grown Ki (P1)");
+    TEST_SECTION("adaptive_tune: Ki baseline survives a reboot, latched by SIMC only now (P1/K9)");
     test_ki_baseline_survives_reboot_not_relatched_from_grown_ki();
 
-    TEST_SECTION("adaptive_tune: re-autotune actually clears the Ki-diagnosis baseline (Q3)");
-    test_clear_ki_baseline_lets_the_next_run_relatch_fresh();
+    TEST_SECTION("adaptive_tune: re-autotune actually clears the Ki-diagnosis baseline (Q3/K9)");
+    test_clear_ki_baseline_lets_the_next_refine_relatch_fresh();
 
     TEST_SECTION("adaptive_tune: accept-path clear_ki_baseline() does not re-enter the flash worker (R1)");
     test_accept_path_clear_ki_baseline_does_not_reenter_worker();
@@ -533,6 +521,9 @@ void run_test_adaptive_tune(void)
 
     TEST_SECTION("adaptive_tune: the model layer keeps the Ki baseline tracking its own SIMC output (Q4)");
     test_model_refine_relatches_ki_baseline_to_fresh_simc_ki();
+
+    TEST_SECTION("adaptive_tune: fuzzy + adaptive_tune run concurrently with no interlock, no ratchet (K9)");
+    test_ki_diagnosis_never_ratchets_with_fuzzy_and_adaptive_tune_concurrent();
 
     TEST_SECTION("adaptive_tune: U2 opt-in flag migration out of the old NVS namespace");
     test_migrate_pulls_old_mask_into_zone_config();

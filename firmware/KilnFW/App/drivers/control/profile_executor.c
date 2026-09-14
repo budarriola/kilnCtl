@@ -974,7 +974,19 @@ void executor_task_entry(void *arg)
                  * PID case above at the safe default -- same call, same
                  * shared body, only the gains it's given can differ. */
                 pid_cfg_t fuzzy_cfg;
-                pid_fuzzy_prepare_gains(z, zi, &fuzzy_cfg);
+                /* docs/audits/simc_sole_gain_writer_2026-09-14.md, Option B:
+                 * freeze fuzzy (force strength_pct to 0 for this tick) only
+                 * while this zone is BOTH dwelling and opted into adaptive
+                 * tuning -- s_exec.dwelling is the same single, module-wide
+                 * flag adaptive_tune.c's own dwell_just_entered detection
+                 * relies on (see that file's comment on why one shared flag
+                 * is a valid proxy for "this zone is in a dwell adaptive_
+                 * tune.c may harvest"), so this is exactly the window that
+                 * module's settle/observation logic can turn into a K_dc
+                 * training point. Fuzzy stays fully active on every ramp,
+                 * approach, and on any zone not opted into adaptive tuning. */
+                bool harvest_freeze = s_exec.dwelling && adaptive_tune_get_enabled(zi);
+                pid_fuzzy_prepare_gains(z, zi, harvest_freeze, &fuzzy_cfg);
                 duty = pid_family_zone_tick(z, zi, &fuzzy_cfg, sensor_ok[zi], dt_s, dt_ms,
                                             &want_relay_on[zi]);
                 break;

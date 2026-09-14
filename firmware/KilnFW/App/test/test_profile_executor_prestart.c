@@ -2740,7 +2740,7 @@ static void test_fuzzy_prepare_gains_zero_strength_is_base_gains_bit_exact(void)
 
     pid_cfg_t out;
     memset(&out, 0xAA, sizeof(out));
-    pid_fuzzy_prepare_gains(&z, 0, &out);
+    pid_fuzzy_prepare_gains(&z, 0, false, &out);
 
     TEST_CHECK(out.kp == 1.25f, "kp must be exactly base_kp at strength 0");
     TEST_CHECK(out.ki == 0.03f, "ki must be exactly base_ki at strength 0");
@@ -2775,7 +2775,7 @@ static void test_fuzzy_prepare_gains_matches_pid_fuzzy_adjust_directly(void)
 
     pid_cfg_t out;
     memset(&out, 0, sizeof(out));
-    pid_fuzzy_prepare_gains(&z, 0, &out);
+    pid_fuzzy_prepare_gains(&z, 0, false, &out);
 
     float model_error_band, model_rate_band;
     TEST_CHECK(pid_fuzzy_derive_bands(42.731f, 255.6f, &model_error_band, &model_rate_band),
@@ -2816,7 +2816,7 @@ static void test_fuzzy_prepare_gains_nan_strength_falls_back_to_base_not_large(v
 
     pid_cfg_t out;
     memset(&out, 0, sizeof(out));
-    pid_fuzzy_prepare_gains(&z, 0, &out);
+    pid_fuzzy_prepare_gains(&z, 0, false, &out);
 
     TEST_CHECK(out.kp == 1.0f, "a NaN configured strength must NOT be treated as a large strength -- kp "
                               "must stay at base_kp");
@@ -2859,12 +2859,47 @@ static void test_fuzzy_prepare_gains_no_model_forces_plain_pid_bit_exact(void)
 
     pid_cfg_t out;
     memset(&out, 0xAA, sizeof(out)); /* poison, same discipline as the strength=0 test above */
-    pid_fuzzy_prepare_gains(&z, 0, &out);
+    pid_fuzzy_prepare_gains(&z, 0, false, &out);
 
     TEST_CHECK(out.kp == 1.0f, "kp must be exactly base_kp -- no model means no fuzzy adjustment, "
                               "regardless of strength_pct");
     TEST_CHECK(out.ki == 0.02f, "ki must be exactly base_ki");
     TEST_CHECK(out.kd == 2.0f, "kd must be exactly base_kd");
+}
+
+// docs/audits/simc_sole_gain_writer_2026-09-14.md, Option B: harvest_freeze
+// must force the exact same bit-for-bit base-gains path as strength_pct==0
+// and the no-model case above, regardless of an identified model and a
+// large error/rate that would otherwise move the gains hard -- proves the
+// freeze parameter is load-bearing, not merely threaded through and
+// ignored.
+static void test_fuzzy_prepare_gains_harvest_freeze_forces_plain_pid_bit_exact(void)
+{
+    TEST_SECTION("pid_fuzzy_prepare_gains() -- harvest_freeze forces plain PID (bit-exact base gains) "
+                 "even with an identified model, strength_pct=100 and a large error/rate");
+    reset_fuzzy_gain_test_state();
+    s_test_fuzzy_strength_present = true;
+    s_test_fuzzy_strength_pct = 100.0f;
+    g_stub_model_k_dc[0] = 42.731f;
+    g_stub_model_tau_s[0] = 5177.0f;
+
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.pid_cfg.kp = 1.0f;
+    z.pid_cfg.ki = 0.02f;
+    z.pid_cfg.kd = 2.0f;
+    z.pid_state.d_filtered = 0.0f; /* large-POS/STEADY -- the cell that DOES move gains, unfrozen, above */
+    z.actual_c = 700.0f;
+    s_exec.target_c = 1000.0f;
+
+    pid_cfg_t out;
+    memset(&out, 0xAA, sizeof(out));
+    pid_fuzzy_prepare_gains(&z, 0, true, &out);
+
+    TEST_CHECK(out.kp == 1.0f, "harvest_freeze must reproduce base_kp exactly, same model/strength that "
+                               "moves gains hard when NOT frozen");
+    TEST_CHECK(out.ki == 0.02f, "harvest_freeze must reproduce base_ki exactly");
+    TEST_CHECK(out.kd == 2.0f, "harvest_freeze must reproduce base_kd exactly");
 }
 
 // Companion to the no-model test above: a zone WITH an identified model still
@@ -2915,7 +2950,7 @@ static void test_fuzzy_prepare_gains_with_model_uses_derived_bands_not_default(v
 
     pid_cfg_t out;
     memset(&out, 0, sizeof(out));
-    pid_fuzzy_prepare_gains(&z, 0, &out);
+    pid_fuzzy_prepare_gains(&z, 0, false, &out);
 
     float expect_kp, expect_ki, expect_kd;
     pid_fuzzy_adjust(15.0f, 0.0f, model_error_band, model_rate_band, 1.0f, 0.02f, 2.0f, 100,
@@ -2976,7 +3011,7 @@ static void test_fuzzy_prepare_gains_uses_zone_commanded_setpoint_when_capped(vo
 
     pid_cfg_t out;
     memset(&out, 0, sizeof(out));
-    pid_fuzzy_prepare_gains(&z, 0, &out);
+    pid_fuzzy_prepare_gains(&z, 0, false, &out);
 
     float model_error_band, model_rate_band;
     TEST_CHECK(pid_fuzzy_derive_bands(42.731f, 255.6f, &model_error_band, &model_rate_band),
@@ -5069,7 +5104,7 @@ static void test_hold_membership_change_resets_fuzzy_prev_effective_ki(void)
      * same reason setup_membership_transition_zone0()'s other callers do
      * this: the very first tick's own 0->real edge would otherwise be the
      * "membership change" this test means to isolate). */
-    pid_fuzzy_prepare_gains(z0, 0, &fuzzy_cfg);
+    pid_fuzzy_prepare_gains(z0, 0, false, &fuzzy_cfg);
     (void)pid_family_zone_tick(z0, 0, &fuzzy_cfg, true, 1.0f, 1000u, &want_relay_on);
     z0->pid_state.integral = 0.0f;
 
@@ -5078,7 +5113,7 @@ static void test_hold_membership_change_resets_fuzzy_prev_effective_ki(void)
      * TEST_CHECK below confirms is NOT z0->pid_cfg.ki (proving the strength
      * setting actually moved it, so the assertion after the reseed is
      * discriminating rather than coincidental). */
-    pid_fuzzy_prepare_gains(z0, 0, &fuzzy_cfg);
+    pid_fuzzy_prepare_gains(z0, 0, false, &fuzzy_cfg);
     float duty_before = pid_family_zone_tick(z0, 0, &fuzzy_cfg, true, 1.0f, 1000u, &want_relay_on);
     z0->duty = duty_before;
     float stale_ki_before_reseed = z0->fuzzy_prev_effective_ki;
@@ -5090,7 +5125,7 @@ static void test_hold_membership_change_resets_fuzzy_prev_effective_ki(void)
      * edge that fires the reseed at pid_family_zone_tick()'s
      * z->ff_membership_changed branch. */
     s_exec.zones[1].faulted = false;
-    pid_fuzzy_prepare_gains(z0, 0, &fuzzy_cfg);
+    pid_fuzzy_prepare_gains(z0, 0, false, &fuzzy_cfg);
     (void)pid_family_zone_tick(z0, 0, &fuzzy_cfg, true, 1.0f, 1000u, &want_relay_on);
 
     TEST_CHECK(z0->fuzzy_prev_effective_ki == z0->pid_cfg.ki, "the membership-change reseed must leave "
@@ -8243,6 +8278,7 @@ void run_test_profile_executor_prestart(void)
     test_fuzzy_prepare_gains_matches_pid_fuzzy_adjust_directly();
     test_fuzzy_prepare_gains_nan_strength_falls_back_to_base_not_large();
     test_fuzzy_prepare_gains_no_model_forces_plain_pid_bit_exact();
+    test_fuzzy_prepare_gains_harvest_freeze_forces_plain_pid_bit_exact();
     test_fuzzy_prepare_gains_with_model_uses_derived_bands_not_default();
     test_fuzzy_prepare_gains_uses_zone_commanded_setpoint_when_capped();
 

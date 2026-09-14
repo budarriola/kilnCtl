@@ -1110,7 +1110,20 @@ float pid_family_zone_tick(zone_runtime_t *z, uint8_t zi, const pid_cfg_t *cfg,
  * profile_executor.c's BANGBANG branch and thermal_guard_input_t.setpoint_c
  * feed, and internally by pid_family_zone_tick()/pid_fuzzy_prepare_gains(). */
 float zone_commanded_setpoint_c(const zone_runtime_t *z, uint8_t zi);
-void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, pid_cfg_t *out_cfg);
+/* harvest_freeze (docs/audits/simc_sole_gain_writer_2026-09-14.md, Option B):
+ * true while THIS zone is inside a dwell whose duty/rise observation
+ * adaptive_tune.c may harvest for its K_dc fit -- forces strength_pct to 0
+ * for the tick (the same bit-for-bit-base-gains path strength_pct==0/no-
+ * model already take), so fuzzy cannot bias WHICH dwells settle cleanly
+ * enough to be harvested (frame-independence is pointwise, not sample-wise
+ * -- see that audit doc's section 1.3). Caller-computed (s_exec.dwelling &&
+ * adaptive_tune_get_enabled(zi), profile_executor.c) rather than looked up
+ * in here, same "no globals reached into" discipline pid_fuzzy.c's own
+ * header comment states for this function's sibling. Fuzzy stays fully
+ * active on ramps/approaches and on any zone that is not opted into
+ * adaptive tuning -- this is a freeze of the harvest window only, not of
+ * the firing. */
+void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, bool harvest_freeze, pid_cfg_t *out_cfg);
 
 /* ---- ramp assist: sustained-lag detection + auto-stretch instrumentation
  * (profile_executor_ramp_assist.c) -- PID_EXPANSION_PLAN.md sec 7.1/7.2/7.4.

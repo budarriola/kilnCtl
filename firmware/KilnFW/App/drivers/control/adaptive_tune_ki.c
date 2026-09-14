@@ -159,10 +159,69 @@ bool adaptive_tune_diagnose_ki(const float *actual_c, const float *duty, uint32_
     return true;
 }
 
+// K9 (docs/audits/simc_sole_gain_writer_2026-09-14.md, owner decision
+// 2026-09-14 adopting options A+B of docs/audits/concurrent_fuzzy_pid_
+// adaptation_2026-09-14.md): this function is now DIAGNOSTIC ONLY. It
+// classifies the within-dwell trace exactly as before and publishes
+// ki_verdict/ki_correction_pct/ku_estimate/tu_estimate_s (the last two via
+// the verdict path, unused today but kept per that audit's section 4.1
+// recommendation for a future rebuild) -- but it NEVER writes zones_config
+// any more. adaptive_tune_refine_zone_locked() (adaptive_tune_model.c),
+// the K_dc/SIMC path, is now the SOLE writer of this zone's PID gains.
+//
+// Why: adaptive_tune_diagnose_ki() classifies TRACE SHAPE (amplitude, zero
+// crossings, steady offset) -- properties of the closed loop, i.e. of the
+// plant AND whatever gains were actually running -- then used to write a
+// correction relative to the STORED REFERENCE Ki, which is not necessarily
+// the Ki that produced the trace whenever something rescales Ki between
+// reference and effect (ZONE_CONTROL_MODE_PID_FUZZY's pid_fuzzy_adjust(),
+// concretely, per docs/audits/adaptive_tune_ki_effective_reference_loop_
+// 2026-09-13.md). That is a correction inferred from a transformed
+// observable, written back to the untransformed reference -- the same
+// generating fault as the K_dc ratchets fixed in 97288659/36f88d62 -- and it
+// is not a one-off: with fuzzy sitting in its centre rule cell (the
+// steady-state case), the same trace shape recurs run after run, so the
+// correction repeats and the reference ratchets ~20%/run (measured:
+// 4.2998x baseline over 10 runs with the guard disabled, see this file's
+// git history and the review appended to the 2026-09-13 audit doc).
+//
+// 2026-09-13/14 (e78fbc5b, then 83627343/ac5c26a3) fixed this with a guard
+// that withheld the correction specifically while PID_FUZZY was active,
+// snapshotted at dwell entry and failing closed on an accessor error. The
+// owner has since decided the fuzzy layer and the self-improving PID must
+// run CONCURRENTLY WITH NO INTERLOCK (docs/audits/concurrent_fuzzy_pid_
+// adaptation_2026-09-14.md) -- and per that document's section 1.1, the
+// K_dc/SIMC path is ALREADY frame-independent (it fits a settled dwell's
+// duty/rise, which a fixed point of a loop with integral action pins to the
+// plant and setpoint alone, regardless of what the gains were) while this
+// layer's shape-based inference is not and, per that document's section
+// 1.2, its correction magnitude is a bang-bang +/-20% classifier output
+// with no measurement content besides. With the fuzzy-conditional guard
+// withholding nothing left to correct (SIMC being the only writer, and
+// frame-independent by construction), the guard's own conditional --
+// "withhold only when PID_FUZZY at non-zero strength" -- became dead
+// machinery once generalized to "withhold always": rather than leave that
+// dead conditional (the dwell-entry snapshot, the fail-closed accessor
+// check, the two-worded refusal strings) in place, it is removed here along
+// with the write path it used to guard. This SUPERSEDES e78fbc5b/83627343/
+// ac5c26a3's guard -- not a revert-by-accident: those fixes closed a real
+// hole in a mechanism that no longer exists; the write path itself is what
+// is gone now, so there is nothing left for that guard to protect.
+//
+// What is UNCHANGED: the autotune_baseline_k_dc envelope (97288659/
+// 36f88d62) -- this function never touched it and still doesn't; the
+// strength_pct == 0 bit-for-bit contract (pid_fuzzy.c, 233ded79) and the
+// no-model-runs-plain-PID behaviour, neither of which this file has any
+// bearing on; and adaptive_tune_diagnose_ki()'s pure classification math
+// above, untouched, still host-tested directly and still exactly as
+// sensitive to trace shape as before -- only the APPLY half of this file
+// changed.
 void adaptive_tune_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_t *stats)
 {
     adaptive_tune_zone_t *z = &adaptive_tune_zones[zi];
-    z->ki_applied = false;
+    z->ki_applied = false; // K9: this layer never writes any more -- always false, kept as a field
+                            // (rather than removed) since adaptive_tune_get_status() still publishes
+                            // it and a reader should see "never applies" rather than a vanished field.
 
     if (z->trace_count < ADAPTIVE_TUNE_KI_MIN_SAMPLES) {
         z->ki_verdict = (uint8_t)ADAPTIVE_TUNE_KI_INSUFFICIENT;
@@ -201,220 +260,12 @@ void adaptive_tune_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_
         return;
     }
 
-    // EFFECTIVE-VS-REFERENCE GUARD (docs/audits/adaptive_tune_ki_effective_
-    // reference_loop_2026-09-13.md): the diagnosis above was computed from
-    // z->trace_actual_c[]/trace_duty[], the EFFECTIVE closed-loop behaviour
-    // this zone actually produced -- and below, `new_ki` is about to be
-    // written into zones_config's stored (REFERENCE) Ki via
-    // zones_config_set_pid(). Those two are the same value only when
-    // nothing rescales Ki between the reference read and its effect on the
-    // plant. ZONE_CONTROL_MODE_PID_FUZZY's pid_fuzzy_adjust()
-    // (profile_executor_pid_tick.c) is exactly such a rescale -- up to
-    // +/-MAX_NUDGE_FRACTION per tick, keyed on live error/rate, invisible
-    // to this function -- so a persistent fuzzy nudge (the centre rule
-    // cell, 100% of observed hardware samples per
-    // docs/audits/fuzzy_nine_cell_offline_probe_2026-09-11.md) shows up in
-    // the trace as a steady offset or a limit cycle this layer attributes
-    // to the REFERENCE Ki being wrong, then "corrects" by writing a fixed
-    // +/-ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE nudge onto the very reference
-    // fuzzy is scaling -- which does not change the divergence fuzzy caused,
-    // so next run's trace looks the same and the correction repeats,
-    // ratcheting the reference by a fixed ~20%/run until the cumulative
-    // bound below binds. Same generating fault as the K_dc ratchets fixed
-    // in 97288659/36f88d62: a correction inferred from a transformed
-    // observable, written back to the untransformed reference. Refusing
-    // here (rather than trying to divide the correction back out) is the
-    // "cheap and honest" shape named in that audit doc's R6 finding --
-    // scoped to fuzzy specifically because that is the only mechanism live
-    // today that rescales Ki between reference and effect; a future
-    // mechanism with the same shape (e.g. a temperature-keyed gain
-    // schedule) needs its own equivalent check here, this one does not
-    // generalize to it automatically.
-    // K8 (docs/audits/adaptive_tune_ki_guard_timing_and_failopen_2026-09-14.md):
-    // this used to read zones_config_get_control_mode()/get_fuzzy_strength_
-    // pct() LIVE, right here, at refine time -- i.e. at run-end, after the
-    // firing's own interlocks (which are the only thing that make those two
-    // fields immutable mid-dwell) have already released. If fuzzy was active
-    // WHILE this dwell's trace (z->trace_actual_c[]/trace_duty[], read
-    // above) was captured, and is switched off before this function ever
-    // runs, this guard used to miss exactly the case it exists for and the
-    // reference-Ki ratchet described below was back. Both fields are now
-    // read once, at dwell ENTRY (adaptive_tune_zone_tick()'s dwell_
-    // just_entered branch, adaptive_tune.c), into z->trace_fuzzy_active/
-    // trace_fuzzy_pct/trace_fuzzy_accessor_failed -- the snapshot reflects
-    // the conditions this specific trace was actually gathered under, and is
-    // consulted here instead of re-querying zones_config.
-    //
-    // Can fuzzy toggle MID-firing, spanning both states within one trace?
-    // No, as things stand: zones_post_handler and backup_import.c (the only
-    // two writers of control_mode/fuzzy_strength_pct) both sit behind
-    // ota_http_check_interlocks(), which refuses while firing/hot/heater-
-    // commanded -- true for the whole duration a dwell is being traced --
-    // and POST /api/zones/pid (the one mid-firing config exception) has no
-    // key for either field. So today a single trace is always captured
-    // under one, unchanging mode, and dwell-entry vs. run-end would only
-    // ever disagree because of the OFF-dwell gap this fix closes (fuzzy
-    // switched off between the traced dwell ending and this function
-    // running). If that interlock coverage ever changes and a trace could
-    // genuinely span both states, the safe reading of "captured under
-    // fuzzy at any point during this trace" is still exactly what the
-    // dwell-entry snapshot gives: it was recorded before any tick of this
-    // trace ran, so it can never miss a fuzzy-then-off transition that
-    // happened inside the window it covers.
-    //
-    // Defect 2, fail CLOSED: trace_fuzzy_accessor_failed (set by the
-    // dwell-entry snapshot when either accessor call failed) withholds the
-    // correction exactly like a genuinely-active fuzzy trace would -- an
-    // accessor failure must never read as "not fuzzy, proceed". Reported
-    // through a message that names the failure distinctly from the normal
-    // fuzzy-active refusal below, so the two are distinguishable in the
-    // field. !trace_fuzzy_snapshot_valid is the same "we don't actually
-    // know" case (defensive only -- refine_ki_locked never runs without a
-    // dwell having entered first) and is folded into the same fail-closed
-    // branch for the identical reason.
-    if (!z->trace_fuzzy_snapshot_valid || z->trace_fuzzy_accessor_failed) {
-        adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
-                   "Ki accessor failed at dwell capture: withholding correction (fail-closed, not fuzzy)");
-        return;
-    }
-    if (z->trace_fuzzy_active) {
-        // K7 (docs/audits/ki_refusal_truncation_and_drift_check_lock_2026-09-13.md):
-        // ki_refusal_reason is only 96 bytes -- this wording is 85 bytes at
-        // trace_fuzzy_pct=100 (the worst case), well inside the buffer,
-        // while keeping both halves of the message: what was withheld (the
-        // correction) and why (trace reflects fuzzy's effect at capture
-        // time, not the stored reference). See
-        // test_ki_diagnosis_withholds_correction_when_zone_is_pid_fuzzy()
-        // and test_ki_diagnosis_withholds_when_fuzzy_active_during_capture_
-        // but_off_at_refine() (test_adaptive_tune_ki_bounds.c), which check
-        // the full formatted length AND a token from the END of the
-        // message, not just a prefix grep.
-        adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
-                   "zone PID_FUZZY %.0f%% at capture: withholding Ki -- trace reflects fuzzy, not reference",
-                   (double)z->trace_fuzzy_pct);
-        return;
-    }
-
-    float kp, ki, kd;
-    if (!zones_config_get_pid(zi, &kp, &ki, &kd) || !(ki > 0.0f)) {
-        adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason), "no existing positive Ki to refine");
-        return;
-    }
-
-    // P1/K5: latch this zone's baseline the first time this layer reaches a
-    // live Ki for it -- see ki_baseline's struct comment (adaptive_tune_
-    // internal.h). RAM-only here on purpose: adaptive_tune_run_end()
-    // (adaptive_tune.c) snapshots adaptive_tune_zones[*].ki_baseline* AFTER this call
-    // returns, still under adaptive_tune_lock, and dispatches the actual NVS
-    // write to the flash worker only once the lock is released -- this
-    // function must never itself touch NVS (it runs with adaptive_tune_lock
-    // held, and a flash-worker wait must never happen under that lock, see
-    // adaptive_tune_set_enabled()'s identical reasoning).
-    //
-    // Q4: this is only ONE of the two places ki_baseline gets written now.
-    // The comment here used to call this "the autotuned baseline", which
-    // stopped being true the moment adaptive_tune_refine_zone_locked() (adaptive_tune_
-    // model.c) started rewriting Ki from a fresh SIMC recompute independent
-    // of this layer -- a zone whose SIMC refine legitimately raised Ki past
-    // 5x a stale value latched here would have its diagnosis muted
-    // permanently, with no escape (see adaptive_tune_run_end()'s D5 comment
-    // for why the two layers never both act in the same run, so this really
-    // could go stale for good). adaptive_tune_refine_zone_locked() now re-latches
-    // ki_baseline to its own freshly-written SIMC Ki every time it applies
-    // (see that function's own comment) -- so this `if (!z->ki_baseline_
-    // valid)` branch only ever fires for a zone this layer has NEVER reached
-    // through EITHER path yet; once either layer has touched it, the
-    // baseline tracks the more authoritative of the two (a direct SIMC
-    // refit beats this layer's own shape-based inference, same priority
-    // order D5 already applies to which correction gets to run at all).
-    if (!z->ki_baseline_valid) {
-        z->ki_baseline = ki;
-        z->ki_baseline_valid = true;
-    }
-
-    float cap_pct = ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE * 100.0f;
-    float capped_pct = diag.ki_correction_pct;
-    if (capped_pct > cap_pct) capped_pct = cap_pct;
-    if (capped_pct < -cap_pct) capped_pct = -cap_pct;
-    float new_ki = ki * (1.0f + capped_pct / 100.0f);
-    if (!(new_ki > 0.0f) || !isfinite(new_ki)) {
-        adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason), "corrected Ki %.5f is not a valid gain",
-                   (double)new_ki);
-        return;
-    }
-
-    // P2/K6: the operational bound this layer is accountable for -- see
-    // ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT's own comment (adaptive_tune_
-    // internal.h) for why 5x (not the original 50x) is the right figure and
-    // what the correct operator response is once it binds. Checked BEFORE
-    // the setter call so a bound refusal is reported as such, not as an
-    // ordinary rejection.
-    float cumulative_ceiling = z->ki_baseline * ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT;
-    if (new_ki > cumulative_ceiling) {
-        // Message deliberately short -- ki_refusal_reason is only 96 bytes
-        // (adaptive_tune_internal.h), and this needs to fit BOTH "cumulative
-        // bound" (the guard's own name, already asserted on by the pre-P2
-        // test) and "re-autotune" (P2's remediation hint) inside it.
-        // K6/Q6: %.6f, not the original %.4f -- realistic kiln Ki magnitudes
-        // (kc/ti) are order 1e-3, and at 4 decimal places every one of them
-        // rendered as the useless "(0.0000)". Still well inside the 96-byte
-        // buffer -- see this file's own length check in test_adaptive_tune.c.
-        adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
-                   "Ki %.6f > cumulative bound %.1fx baseline (%.6f) -- re-autotune this zone", (double)new_ki,
-                   (double)ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT, (double)z->ki_baseline);
-        return;
-    }
-
-    // Q2: the SYMMETRIC lower cumulative bound -- until now this layer only
-    // ever bounded GROWTH (the ceiling above); the only floor was `!(new_ki >
-    // 0.0f)` at the setter-input check above, which is not an operational
-    // bound at all (it only rejects the literal non-positive/non-finite
-    // case). A source of oscillation that does NOT scale with Ki -- coupling
-    // from a neighbouring zone, relay chatter, thermocouple noise sitting
-    // right above ADAPTIVE_TUNE_KI_NOISE_FLOOR_C -- decays Ki by up to
-    // ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE (20%) every run with nothing to
-    // stop it, and since P1 that decay now PERSISTS across reboots the same
-    // way runaway growth does (ki_baseline survives a power cycle). Reuses
-    // the same 5x figure as the ceiling -- see ADAPTIVE_TUNE_KI_CUMULATIVE_
-    // MAX_MULT's own comment for why 5x is the right figure in either
-    // direction: a zone that needs to shrink its Ki by more than 5x from its
-    // own autotuned/SIMC baseline is, by this file's own standard, telling
-    // us the FOPDT model is wrong, not that the integral term needs to keep
-    // shrinking. Named distinctly ("cumulative floor", not "cumulative
-    // bound") so the two refusal reasons are independently greppable/
-    // testable -- see test_ki_diagnosis_cumulative_floor_binds_and_names_
-    // itself() and test_ki_diagnosis_cumulative_floor_does_not_block_
-    // legitimate_convergence() (test_adaptive_tune.c).
-    float cumulative_floor = z->ki_baseline / ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT;
-    if (new_ki < cumulative_floor) {
-        adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
-                   "Ki %.6f < cumulative floor %.2fx baseline (%.6f) -- re-autotune this zone", (double)new_ki,
-                   (double)(1.0f / ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT), (double)z->ki_baseline);
-        return;
-    }
-
-    // U1: snapshot the PRE-change gains (kp/ki/kd, still the live values at
-    // this point) and model (fetched fresh -- this layer never touches
-    // K_dc/tau/dead_time itself, but a revert must still restore them to
-    // whatever they currently are, not silently zero them), plus the
-    // ki_baseline state AS OF right now -- which, if the `if (!z->ki_
-    // baseline_valid)` branch above just latched it fresh from this same
-    // `ki`, is exactly ki itself, so reverting Ki back to `ki` leaves the
-    // baseline still correctly describing the live value. See adaptive_
-    // tune_capture_revert_locked()'s own comment.
-    float cur_k_dc = 0.0f, cur_tau_s = 0.0f, cur_dead_time_s = 0.0f;
-    zones_config_get_model(zi, &cur_k_dc, &cur_tau_s, &cur_dead_time_s); // best-effort, same as adaptive_
-                                                                          // tune_model.c's identical call
-    adaptive_tune_capture_revert_locked(z, kp, ki, kd, cur_k_dc, cur_tau_s, cur_dead_time_s);
-
-    if (!zones_config_set_pid(zi, kp, new_ki, kd)) {
-        adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason), "zones_config_set_pid() rejected the corrected Ki");
-        z->revert_available = false; // nothing was actually written
-        return;
-    }
-
-    z->ki_applied = true;
-    z->ki_refusal_reason[0] = '\0';
-    ESP_LOGI(ADAPTIVE_TUNE_TAG, "zone %u: Ki %.5f -> %.5f (%.1f%%, verdict %u) from dwell trace diagnosis", (unsigned)zi,
-             (double)ki, (double)new_ki, (double)capped_pct, (unsigned)diag.verdict);
+    // K9: every remaining verdict (LIMIT_CYCLE/OSCILLATING/OFFSET_TOO_SMALL)
+    // DOES indicate a correction, by this layer's own classifier -- but this
+    // layer no longer writes it. Report the diagnosis (verdict/correction_pct
+    // above already published) and stop; SIMC (adaptive_tune_model.c) is the
+    // sole gain writer now.
+    adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
+               "diagnostic only (v%u %.0f%%) -- SIMC is the sole gain writer",
+               (unsigned)diag.verdict, (double)diag.ki_correction_pct);
 }

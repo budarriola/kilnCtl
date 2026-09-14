@@ -446,8 +446,11 @@ the cross-module dependency entirely rather than documenting it.
 2. Disabled the guard **in production code** by hand
    (`if (false && zones_config_get_control_mode(...`) -- the production
    function, not a test-local mirror. Rebuilt into a second, fresh
-   directory. Result: **19 failures**, including
-   `test_adaptive_tune_ki_bounds.c:841: ... (got 4.2998, want 1.0000 +/-0.0000)`.
+   directory. Result: **19 failures**, including a `test_adaptive_tune_ki_
+   bounds.c` assertion: `... (got 4.2998, want 1.0000 +/-0.0000)` (that
+   test itself was later removed by `docs/audits/simc_sole_gain_writer_
+   2026-09-14.md`, which supersedes this guard entirely -- the line number
+   this once sat at no longer exists in that file).
    The failure pattern also confirms section 3's run count independently:
    the `ki_applied` assertion fails on 8 runs (the ones that actually grow
    1.2x) and the reference stops at `1.2^8 = 4.2998`, with the 9th

@@ -298,7 +298,9 @@ The remaining 3 failures are unrelated to this task and pre-exist it, left
 untouched per this task's own file-ownership boundary (adaptive_tune*/
 sim_plant/scenario files are owned by concurrent sessions):
 `check_fuzzy_gain_mirror_drift.ps1` and `check_doc_citations.ps1` (a stale
-`test_adaptive_tune_ki_bounds.c:841` citation, file now 518 lines) both
+`test_adaptive_tune_ki_bounds.c` line-number citation, since fixed by
+`docs/audits/simc_sole_gain_writer_2026-09-14.md`, which also removed the
+guard that citation described) both
 trace to another session's in-progress, uncommitted edits under
 `adaptive_tune*`/`test_adaptive_tune*`; `check_test_c_files_wired.ps1`
 (`sim_scenario_table.c`/`sim_scenarios.c` not wired into any build path)

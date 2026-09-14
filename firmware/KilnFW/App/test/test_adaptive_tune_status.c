@@ -240,7 +240,13 @@ static void test_run_status_fields_cleared_on_faulted_run(void)
     rec2.zones[1].stats.dwell_err_max_c = 0.50f;
     adaptive_tune_run_end(&rec2, true);
     TEST_CHECK(adaptive_tune_zones[1].has_applied, "setup: has_applied must still be true (a latch) after run 2");
-    TEST_CHECK(adaptive_tune_zones[1].ki_applied, "setup: run 2 must have genuinely applied a Ki correction");
+    // K9 (docs/audits/simc_sole_gain_writer_2026-09-14.md): adaptive_tune_ki.c
+    // is diagnostic-only now -- ki_applied is always false. What this setup
+    // actually needs is a genuine, non-default Ki DIAGNOSIS this run (proving
+    // D5 really did hand the Ki layer its turn), which the reset-on-skip
+    // assertions below (run 3) then prove get cleared -- not that anything
+    // was ever applied.
+    TEST_CHECK(!adaptive_tune_zones[1].ki_applied, "K9: adaptive_tune_ki.c never applies a correction any more");
     TEST_CHECK(adaptive_tune_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL,
                "setup: run 2's Ki verdict must be real (OFFSET_TOO_SMALL), not a default");
     TEST_CHECK(adaptive_tune_zones[1].ki_correction_pct > 0.0f, "setup: run 2's Ki correction pct must be real and nonzero");
@@ -316,7 +322,10 @@ static void test_run_status_fields_cleared_on_excluded_fraction_refusal(void)
     rec2.zones[1].stats.dwell_err_mean_c = 0.45f;
     rec2.zones[1].stats.dwell_err_max_c = 0.50f;
     adaptive_tune_run_end(&rec2, true);
-    TEST_CHECK(adaptive_tune_zones[1].ki_applied, "setup: run 2 must have genuinely applied a Ki correction");
+    // K9: diagnostic-only now -- see the faulted-run test's identical comment above.
+    TEST_CHECK(!adaptive_tune_zones[1].ki_applied, "K9: adaptive_tune_ki.c never applies a correction any more");
+    TEST_CHECK(adaptive_tune_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL,
+               "setup: run 2's Ki verdict must be real (OFFSET_TOO_SMALL), not a default");
     TEST_CHECK(adaptive_tune_zones[1].coupled_applied, "setup: run 2's coupled solve must still be applying");
 
     profile_firing_run_record_t rec3 = make_clean_record(95, 1, 900);
@@ -358,7 +367,8 @@ static void test_run_status_fields_cleared_when_zone_masked_out_of_profile(void)
     rec1.zones[1].stats.dwell_err_mean_c = 0.45f;
     rec1.zones[1].stats.dwell_err_max_c = 0.50f;
     adaptive_tune_run_end(&rec1, true);
-    TEST_CHECK(adaptive_tune_zones[1].ki_applied, "setup: run 1 must have genuinely applied a Ki correction");
+    // K9: diagnostic-only now -- see test_run_status_fields_cleared_on_faulted_run()'s identical comment.
+    TEST_CHECK(!adaptive_tune_zones[1].ki_applied, "K9: adaptive_tune_ki.c never applies a correction any more");
     TEST_CHECK(adaptive_tune_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL, "setup: real verdict");
 
     // Run 2: zone 1 not touched by this profile at all (make_clean_record()

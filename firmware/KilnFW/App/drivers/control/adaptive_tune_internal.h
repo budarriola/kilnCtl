@@ -224,7 +224,19 @@ NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_KEY_KIBASE_REV);
 
 #define ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE 0.20f
 
-// P2/K6 (SUPERSEDES K5): K5 originally set this to 50.0f, justified against
+// K9 (docs/audits/simc_sole_gain_writer_2026-09-14.md): this bound is no
+// longer READ by any production code -- adaptive_tune_ki.c stopped writing
+// gains entirely (SIMC, adaptive_tune_model.c, is now the sole writer, and
+// its own plausibility envelope is autotune_baseline_k_dc/ADAPTIVE_TUNE_MAX_
+// JUMP_RATIO, a separate mechanism this constant never fed). Left defined,
+// not deleted: it is exactly the "5x an autotuned baseline is implausible"
+// reasoning below, independent of which layer would apply it, and the
+// audit's own section 4.1 recommends rebuilding a Ki corrector later on
+// ku_estimate/tu_estimate_s rather than deleting the file -- a rebuilt
+// corrector would want a plausibility bound of this same shape.
+//
+// P2/K6 (SUPERSEDES K5, historical -- see K9 above for current status): K5
+// originally set this to 50.0f, justified against
 // this file's OWN synthetic convergence test needing ~27x
 // (test_ki_diagnosis_converges_under_closed_loop_plant_feedback(), driven by
 // that test's arbitrary KI_TEST_ERR_K constant). An opus review correctly
@@ -311,24 +323,12 @@ typedef struct {
     uint32_t trace_head;
     float    trace_elapsed_s;
 
-    // K8 (docs/audits/adaptive_tune_ki_guard_timing_and_failopen_2026-09-14.md,
-    // defect 1): the PID_FUZZY/fuzzy_strength_pct state relevant to THIS
-    // trace, snapshotted at DWELL ENTRY (adaptive_tune_zone_tick()'s
-    // dwell_just_entered branch, adaptive_tune.c -- the exact instant
-    // trace_count above is reset for this dwell) rather than read live at
-    // refine time (adaptive_tune_run_end(), which runs after the firing's
-    // interlocks -- the only thing that makes control_mode/fuzzy_strength_pct
-    // immutable mid-dwell today -- have already released). See
-    // adaptive_tune_refine_ki_locked()'s own comment for the full defect.
-    // trace_fuzzy_accessor_failed also covers defect 2 (fail-CLOSED): a
-    // zones_config_get_control_mode()/get_fuzzy_strength_pct() accessor
-    // failure at snapshot time sets this true, and the correction is
-    // withheld exactly like a genuinely-active fuzzy trace would be --
-    // never treated as "no fuzzy, proceed".
-    bool     trace_fuzzy_snapshot_valid;
-    bool     trace_fuzzy_accessor_failed;
-    bool     trace_fuzzy_active;
-    float    trace_fuzzy_pct;
+    // K9 (docs/audits/simc_sole_gain_writer_2026-09-14.md): the K8 fuzzy-
+    // state snapshot fields that used to live here (trace_fuzzy_snapshot_
+    // valid/trace_fuzzy_accessor_failed/trace_fuzzy_active/trace_fuzzy_pct)
+    // are removed -- adaptive_tune_ki.c no longer writes gains, so there is
+    // nothing left for that guard to protect. See adaptive_tune_ki.c's own
+    // top comment.
 
     uint32_t joint_observations;
     bool     coupled_attempted;

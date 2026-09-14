@@ -80,7 +80,7 @@ MIRROR_REL = "firmware/KilnFW/App/test/test_closed_loop.c"
 # definition of pid_fuzzy_prepare_gains()) rather than a line number, per this
 # repo's standing rule that a line-number anchor IS the drift this class of
 # check exists to catch.
-PROD_SIG = "void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, pid_cfg_t *out_cfg)\n{\n"
+PROD_SIG = "void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, bool harvest_freeze, pid_cfg_t *out_cfg)\n{\n"
 
 MIRROR_SIG_RE = re.compile(
     r"static float fuzzy_tick\([^)]*\)\n\{\n(.*?)\n\}\n",
@@ -213,6 +213,14 @@ PROD_ONLY_STMT_RES = [
     re.compile(r"^bool bands_from_model = resolve_fuzzy_bands\(z, zi, &error_band_c, &rate_band_c_per_s\)$"),
     re.compile(r"^if \(!bands_from_model\) strength_pct = 0$"),
     re.compile(r"^if \(!bands_from_model\) log_fuzzy_disabled_no_model_once\(zi\)$"),
+    # docs/audits/simc_sole_gain_writer_2026-09-14.md, Option B: production
+    # now takes a harvest_freeze parameter (forces strength_pct to 0 while
+    # adaptive_tune.c may harvest this dwell's K_dc observation, same
+    # short-circuit shape as the no-model case immediately above) -- the
+    # mirror has no adaptive_tune/dwell concept at all, same "structurally
+    # required difference" as the no-model case, so this one-line `if` is
+    # dropped entirely rather than given a fake mirror equivalent.
+    re.compile(r"^if \(harvest_freeze\) strength_pct = 0$"),
     re.compile(r"^\*out_cfg = z->pid_cfg$"),  # mirror has no equivalent whole-struct copy statement
     # production initializes adj_kp/ki/kd from the base gains inline (belt
     # and braces against pid_fuzzy_adjust() not writing them); the mirror

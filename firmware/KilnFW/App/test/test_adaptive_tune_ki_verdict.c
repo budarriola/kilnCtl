@@ -262,15 +262,21 @@ static void test_ki_diagnosis_skipped_same_run_as_model_refine(void)
     // this fixture's dwells (SETTLE_TICKS=7 each) never clear
     // ADAPTIVE_TUNE_KI_MIN_SAMPLES on their own -- the "!ki_applied" check
     // was vacuous, only the "skipped" reason-string check was load-bearing.
-    // Prove this fixture is now genuinely capable of an applied Ki
-    // correction by calling adaptive_tune_refine_ki_locked() directly (this file
-    // #includes adaptive_tune.c, so its static functions are reachable),
-    // bypassing the D5 gate entirely, on the SAME trace/stats this run just
-    // produced.
+    // Prove this fixture is genuinely capable of triggering the Ki
+    // diagnosis's OFFSET_TOO_SMALL verdict (K9: no longer "an applied
+    // correction" -- adaptive_tune_refine_ki_locked() is diagnostic-only,
+    // see its own top comment) by calling it directly (this file #includes
+    // adaptive_tune.c, so its static functions are reachable), bypassing
+    // the D5 gate entirely, on the SAME trace/stats this run just produced.
     adaptive_tune_refine_ki_locked(1, &rec.zones[1].stats);
-    TEST_CHECK(adaptive_tune_zones[1].ki_applied, "setup: this fixture's trace/stats must genuinely trigger an applied Ki "
-                                       "correction when nothing skips it -- otherwise the !ki_applied check above "
-                                       "would pass regardless of whether the D5 gate does anything at all");
+    TEST_CHECK(!adaptive_tune_zones[1].ki_applied,
+               "K9: adaptive_tune_ki.c never applies a correction any more, D5 gate or not");
+    TEST_CHECK(adaptive_tune_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL,
+               "setup: this fixture's trace/stats must genuinely classify OFFSET_TOO_SMALL when nothing "
+               "skips it -- otherwise the D5 'skipped' check above would pass regardless of whether the "
+               "gate does anything at all");
+    TEST_CHECK(strstr(adaptive_tune_zones[1].ki_refusal_reason, "diagnostic only") != NULL,
+               "K9: a genuinely-indicated correction must still be reported as diagnostic-only, not applied");
 }
 
 // F1: adaptive_tune_refine_zone_locked() used to report "applied" on ANY nonzero
