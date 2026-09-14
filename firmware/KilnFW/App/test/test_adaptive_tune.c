@@ -42,6 +42,13 @@
 // down this file.
 #include "../drivers/control/profile_executor.h"
 
+// zone_control_mode_t/ZONE_CONTROL_MODE_* -- needed by s_fake_zone_cfg's
+// control_mode field and the zones_config_get_control_mode()/
+// zones_config_get_fuzzy_strength_pct() fakes below, ahead of adaptive_
+// tune.c's own #include of this header further down this file (same
+// reasoning as the MAX31856.h/profile_executor.h #includes just above).
+#include "../drivers/persist/zones_config_accessors.h"
+
 // Own executable (see this file's header comment).
 int g_test_failures = 0;
 int g_test_count = 0;
@@ -61,6 +68,10 @@ static struct {
     float k_dc, tau_s, dead_time_s;
     float kp, ki, kd;
     float autotune_baseline_k_dc; // 0 = "not recorded yet", same sentinel convention as k_dc
+    zone_control_mode_t control_mode; // defaults to ZONE_CONTROL_MODE_PID(=0)... actually OFF(=0); every
+                                       // existing test that never sets this explicitly stays off the
+                                       // effective-vs-reference fuzzy guard below (adaptive_tune_ki.c)
+    float fuzzy_strength_pct;
 } s_fake_zone_cfg[TEST_MAX_ZONES];
 
 bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
@@ -130,6 +141,25 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
     s_fake_zone_cfg[zone_index].kp = kp;
     s_fake_zone_cfg[zone_index].ki = ki;
     s_fake_zone_cfg[zone_index].kd = kd;
+    return true;
+}
+
+// Fakes for the effective-vs-reference guard adaptive_tune_ki.c added
+// 2026-09-13 (docs/audits/adaptive_tune_ki_effective_reference_loop_2026-09-13.md):
+// tiny in-RAM fields, same convention as every other s_fake_zone_cfg member.
+// Defaults (control_mode 0 == ZONE_CONTROL_MODE_OFF, fuzzy_strength_pct 0)
+// keep every pre-existing test in this file off the guard unless a test
+// deliberately opts a zone into PID_FUZZY.
+bool zones_config_get_control_mode(uint8_t zone_index, zone_control_mode_t *out_mode)
+{
+    if (zone_index >= TEST_MAX_ZONES) return false;
+    *out_mode = s_fake_zone_cfg[zone_index].control_mode;
+    return true;
+}
+bool zones_config_get_fuzzy_strength_pct(uint8_t zone_index, float *out_pct)
+{
+    if (zone_index >= TEST_MAX_ZONES) return false;
+    *out_pct = s_fake_zone_cfg[zone_index].fuzzy_strength_pct;
     return true;
 }
 
@@ -460,6 +490,7 @@ void run_test_adaptive_tune(void)
     TEST_SECTION("adaptive_tune: repeated Ki application is bounded under closed-loop feedback (H3)");
     test_ki_diagnosis_converges_under_closed_loop_plant_feedback();
     test_ki_diagnosis_runaway_under_constant_error_is_capped_by_cumulative_bound();
+    test_ki_diagnosis_withholds_correction_when_zone_is_pid_fuzzy();
     test_ki_diagnosis_per_run_move_is_bounded_by_configured_fraction();
     test_ki_diagnosis_decreasing_direction_stabilizes_at_cumulative_floor(); // P6
 

@@ -201,6 +201,46 @@ void adaptive_tune_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_
         return;
     }
 
+    // EFFECTIVE-VS-REFERENCE GUARD (docs/audits/adaptive_tune_ki_effective_
+    // reference_loop_2026-09-13.md): the diagnosis above was computed from
+    // z->trace_actual_c[]/trace_duty[], the EFFECTIVE closed-loop behaviour
+    // this zone actually produced -- and below, `new_ki` is about to be
+    // written into zones_config's stored (REFERENCE) Ki via
+    // zones_config_set_pid(). Those two are the same value only when
+    // nothing rescales Ki between the reference read and its effect on the
+    // plant. ZONE_CONTROL_MODE_PID_FUZZY's pid_fuzzy_adjust()
+    // (profile_executor_pid_tick.c) is exactly such a rescale -- up to
+    // +/-MAX_NUDGE_FRACTION per tick, keyed on live error/rate, invisible
+    // to this function -- so a persistent fuzzy nudge (the centre rule
+    // cell, 100% of observed hardware samples per
+    // docs/audits/fuzzy_nine_cell_offline_probe_2026-09-11.md) shows up in
+    // the trace as a steady offset or a limit cycle this layer attributes
+    // to the REFERENCE Ki being wrong, then "corrects" by writing a fixed
+    // +/-ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE nudge onto the very reference
+    // fuzzy is scaling -- which does not change the divergence fuzzy caused,
+    // so next run's trace looks the same and the correction repeats,
+    // ratcheting the reference by a fixed ~20%/run until the cumulative
+    // bound below binds. Same generating fault as the K_dc ratchets fixed
+    // in 97288659/36f88d62: a correction inferred from a transformed
+    // observable, written back to the untransformed reference. Refusing
+    // here (rather than trying to divide the correction back out) is the
+    // "cheap and honest" shape named in that audit doc's R6 finding --
+    // scoped to fuzzy specifically because that is the only mechanism live
+    // today that rescales Ki between reference and effect; a future
+    // mechanism with the same shape (e.g. a temperature-keyed gain
+    // schedule) needs its own equivalent check here, this one does not
+    // generalize to it automatically.
+    zone_control_mode_t ctrl_mode = ZONE_CONTROL_MODE_PID;
+    float fuzzy_pct = 0.0f;
+    if (zones_config_get_control_mode(zi, &ctrl_mode) && ctrl_mode == ZONE_CONTROL_MODE_PID_FUZZY &&
+        zones_config_get_fuzzy_strength_pct(zi, &fuzzy_pct) && fuzzy_pct > 0.0f) {
+        adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
+                   "zone is PID_FUZZY at strength %.0f%% -- dwell trace reflects fuzzy's effective Ki, not "
+                   "the stored reference; withholding correction to avoid ratcheting the reference",
+                   (double)fuzzy_pct);
+        return;
+    }
+
     float kp, ki, kd;
     if (!zones_config_get_pid(zi, &kp, &ki, &kd) || !(ki > 0.0f)) {
         adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason), "no existing positive Ki to refine");

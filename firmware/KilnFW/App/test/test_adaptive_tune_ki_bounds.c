@@ -777,3 +777,66 @@ static void test_model_refine_relatches_ki_baseline_to_fresh_simc_ki(void)
                      "zones_config_set_pid() was just called with -- not the old pre-refine Ki (0.01) it "
                      "replaced");
 }
+
+// ---------------------------------------------------------------------
+// R6 (opus review, gain_scheduling_design_2026-09-13.md, appended
+// 2026-09-13, docs/audits/adaptive_tune_ki_effective_reference_loop_
+// 2026-09-13.md): adaptive_tune_ki.c's diagnosis is computed from the
+// EFFECTIVE closed-loop trace (z->trace_actual_c[]/trace_duty[]), but its
+// correction is written into zones_config's REFERENCE Ki. When a zone runs
+// ZONE_CONTROL_MODE_PID_FUZZY with fuzzy_strength_pct > 0,
+// pid_fuzzy_adjust() rescales the tick's applied Ki away from that
+// reference -- so a persistent fuzzy nudge (the centre rule cell, where
+// 100% of one real hardware capture's samples land per
+// docs/audits/fuzzy_nine_cell_offline_probe_2026-09-11.md) shows up in the
+// trace as a steady offset this layer would otherwise "correct" by
+// ratcheting the reference by a fixed ~20%/run, forever, without ever
+// resolving the divergence fuzzy is causing -- structurally the same
+// generating fault the K_dc ratchets fixed in 97288659/36f88d62 (a
+// correction inferred from a transformed observable, written back to the
+// untransformed reference), now for Ki instead of K_dc.
+//
+// This proves the fix (adaptive_tune_ki.c's effective-vs-reference guard,
+// checked ahead of the OFFSET_TOO_SMALL apply path): with the zone in
+// PID_FUZZY at strength 50 and a CONSTANT offset trace that would
+// otherwise classify OFFSET_TOO_SMALL on every single run (same fixture
+// shape as test_ki_diagnosis_runaway_under_constant_error_is_capped_by_
+// cumulative_bound() above, which proves the OPPOSITE zone -- plain PID --
+// genuinely does apply and ratchet under this identical trace), the
+// reference Ki must not move across repeated runs, and the refusal reason
+// must name fuzzy so an operator is not left guessing.
+static void test_ki_diagnosis_withholds_correction_when_zone_is_pid_fuzzy(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.0f; // ring never reaches ADAPTIVE_TUNE_MIN_OBSERVATIONS -- same convention
+                                      // as this file's other closed-loop/runaway fixtures, keeps the model
+                                      // refine permanently un-due so the Ki diagnosis gets every run
+    s_fake_zone_cfg[1].ki = 1.0f;
+    s_fake_zone_cfg[1].control_mode = ZONE_CONTROL_MODE_PID_FUZZY;
+    s_fake_zone_cfg[1].fuzzy_strength_pct = 50.0f;
+
+    for (int run = 0; run < 10; run++) {
+        feed_settled_dwell(1, 25.0f, 22.0f, 0.5f, 20, DT_S);
+        profile_firing_run_record_t rec = make_clean_record(700 + run, 1, 900);
+        // Identical constant-offset shape to the plain-PID runaway fixture
+        // above -- this is the SAME evidence that genuinely ratchets a
+        // plain-PID zone; the only difference here is control_mode/
+        // fuzzy_strength_pct.
+        rec.zones[1].stats.dwell_err_mean_c = 0.45f;
+        rec.zones[1].stats.dwell_err_max_c = 0.50f;
+        adaptive_tune_run_end(&rec, true);
+
+        TEST_CHECK(!adaptive_tune_zones[1].ki_applied,
+                   "R6: a PID_FUZZY zone at non-zero strength must never have its reference Ki corrected by "
+                   "this layer -- the trace reflects fuzzy's effective Ki, not the stored reference");
+        TEST_CHECK(strstr(adaptive_tune_zones[1].ki_refusal_reason, "fuzzy") != NULL ||
+                       strstr(adaptive_tune_zones[1].ki_refusal_reason, "FUZZY") != NULL,
+                   "R6: the refusal reason must name fuzzy as the cause, not read like an ordinary "
+                   "no-correction-indicated verdict");
+    }
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].ki, 1.0f, 1e-6,
+                     "R6: 10 runs of the exact trace that ratchets a plain-PID zone past 3x baseline "
+                     "(see the sibling cumulative-bound test) must leave a PID_FUZZY zone's reference Ki "
+                     "COMPLETELY UNCHANGED -- any movement here is the effective-vs-reference loop closing");
+}
