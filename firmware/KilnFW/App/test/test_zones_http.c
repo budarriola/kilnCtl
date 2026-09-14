@@ -4163,12 +4163,73 @@ static void test_post_then_get_round_trips_new_fields(void)
      * JSON key, and zones_config_get_model_fit_context() had no production
      * caller -- so the recorded operating point could not be read off the
      * board at all and the retrospective-schedule use case that motivated
-     * the bump was unreachable. Read-only, like the tuning_* record: the
-     * POST above never sent these, and they must still appear. */
+     * the bump was unreachable. Read-only, like the tuning_* record. MOVED
+     * to GET /api/zones_diag 2026-09-14 (docs/audits/
+     * zones_diag_endpoint_split_2026-09-14.md) -- zones_get_handler() no
+     * longer emits either key at all now, confirmed here (a regression that
+     * brought them back onto /api/zones would eat back the headroom this
+     * split recovered), and the diag endpoint's own emission is checked by
+     * test_zones_diag_get_handler_round_trips_moved_fields() below. */
+    TEST_CHECK(strstr(s_last_resp_body, "\"model_fit_temp_c\":") == NULL,
+              "GET /api/zones must NOT emit model_fit_temp_c any more -- moved to /api/zones_diag");
+    TEST_CHECK(strstr(s_last_resp_body, "\"model_fit_ambient_c\":") == NULL,
+              "GET /api/zones must NOT emit model_fit_ambient_c any more -- moved to /api/zones_diag");
+    TEST_CHECK(strstr(s_last_resp_body, "\"coupling_tau_c") == NULL,
+              "GET /api/zones must NOT emit coupling_tau_c%u any more -- moved to /api/zones_diag");
+    TEST_CHECK(strstr(s_last_resp_body, "\"coupling_dead_time_c") == NULL,
+              "GET /api/zones must NOT emit coupling_dead_time_c%u any more -- moved to /api/zones_diag");
+
+    httpd_req_t diag_req;
+    memset(&diag_req, 0, sizeof(diag_req));
+    err = zones_diag_get_handler(&diag_req);
+    TEST_CHECK(err == ESP_OK, "zones_diag_get_handler must return ESP_OK");
     TEST_CHECK(strstr(s_last_resp_body, "\"model_fit_temp_c\":") != NULL,
-              "GET must emit model_fit_temp_c -- otherwise the fit's operating point is unreadable");
+              "GET /api/zones_diag must emit model_fit_temp_c -- otherwise the fit's operating "
+              "point is unreadable");
     TEST_CHECK(strstr(s_last_resp_body, "\"model_fit_ambient_c\":") != NULL,
-              "GET must emit model_fit_ambient_c too");
+              "GET /api/zones_diag must emit model_fit_ambient_c too");
+}
+
+// docs/audits/zones_diag_endpoint_split_2026-09-14.md: the fields moved off
+// GET /api/zones must still round-trip readably through GET /api/zones_diag
+// after a real POST, same discipline as test_post_then_get_round_trips_new_
+// fields above -- coupling_tau_c%u/coupling_dead_time_c%u have no POST field
+// of their own (autotune_engine.c's finalize_fit() is their only writer,
+// same as before the split), so this sets them directly on the live config
+// the way that writer would, then confirms the real zones_diag_get_handler()
+// reports them back exactly, indexed to line up with GET /api/zones' own
+// "index" per zone.
+static void test_zones_diag_get_handler_round_trips_moved_fields(void)
+{
+    TEST_SECTION("zones_diag_get_handler -- coupling_tau_c%u/coupling_dead_time_c%u/"
+                 "model_fit_temp_c/model_fit_ambient_c round-trip (docs/audits/"
+                 "zones_diag_endpoint_split_2026-09-14.md)");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = MAX31856_CHANNEL_COUNT;
+    s_zones.cfg.zones[0].coupling_tau_s[1] = 111.0f;
+    s_zones.cfg.zones[0].coupling_dead_time_s[1] = 22.0f;
+    s_zones.cfg.zones[0].model_fit_temp_c = 950.5f;
+    s_zones.cfg.zones[0].model_fit_ambient_c = 21.25f;
+    s_zones.cfg.zones[1].coupling_tau_s[0] = 333.0f;
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = zones_diag_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "zones_diag_get_handler must return ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, "\"index\":0") != NULL,
+              "zones_diag_get_handler emits a dense index per zone, same as GET /api/zones");
+    TEST_CHECK(strstr(s_last_resp_body, "\"coupling_tau_c1\":111.0") != NULL,
+              "zone 0's coupling_tau_c1 reports exactly what was set");
+    TEST_CHECK(strstr(s_last_resp_body, "\"coupling_dead_time_c1\":22.0") != NULL,
+              "zone 0's coupling_dead_time_c1 reports exactly what was set");
+    TEST_CHECK(strstr(s_last_resp_body, "\"model_fit_temp_c\":950.50") != NULL,
+              "zone 0's model_fit_temp_c reports exactly what was set");
+    TEST_CHECK(strstr(s_last_resp_body, "\"model_fit_ambient_c\":21.25") != NULL,
+              "zone 0's model_fit_ambient_c reports exactly what was set");
+    TEST_CHECK(strstr(s_last_resp_body, "\"coupling_tau_c0\":333.0") != NULL,
+              "zone 1's coupling_tau_c0 (a DIFFERENT cell, DIFFERENT zone) is not confused "
+              "with zone 0's -- an index-transposed bug would fail this");
 }
 
 // docs/audits/zones_get_autotune_baseline_exposure_2026-09-13.md: GET /api/
@@ -4394,20 +4455,28 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
      * person who adds a field to hit a bare "must fit"/"must not truncate"
      * failure with no idea what to do about it
      * (docs/audits/zones_json_headroom_plan_2026-09-14.md, task 5): as of
-     * that doc only 161 bytes of headroom remain in this 7360-byte
-     * json_cap, and the buffer must NOT simply be enlarged (this repo has
-     * two documented panics from oversized httpd-worker stack locals and a
-     * standing rule against growing httpd buffers) -- read the plan for
-     * ranked, consumer-checked savings and structural alternatives before
-     * touching json_cap. */
-    char headroom_msg[400];
+     * that doc only 161 bytes of headroom remained in this 7360-byte
+     * json_cap. docs/audits/zones_diag_endpoint_split_2026-09-14.md then
+     * implemented that plan's recommended split -- moving coupling_tau_c%u/
+     * coupling_dead_time_c%u and model_fit_temp_c/model_fit_ambient_c to the
+     * new GET /api/zones_diag route (test_zones_diag_get_handler_max_width_
+     * response_fits_json_cap() below covers ITS json_cap the same way) --
+     * which recovered headroom to 854 bytes, confirmed by this test. The
+     * buffer must still NOT simply be enlarged (this repo has two
+     * documented panics from oversized httpd-worker stack locals and a
+     * standing rule against growing httpd buffers) -- read the plan and the
+     * split doc for ranked, consumer-checked savings and structural
+     * alternatives before touching json_cap. */
+    char headroom_msg[500];
     snprintf(headroom_msg, sizeof(headroom_msg),
              "max-width GET /api/zones must fit inside json_cap without hitting the "
              "handler's own truncation path (rendered %zu bytes; json_cap is %zu bytes; "
-             "measured headroom before this field addition was 161 bytes; this attempt %s). "
+             "measured headroom after the 2026-09-14 zones_diag split was 854 bytes; this "
+             "attempt %s). "
              "Do NOT enlarge json_cap (two documented httpd-worker-stack-local panics + a "
              "standing rule against growing httpd buffers) -- see "
-             "docs/audits/zones_json_headroom_plan_2026-09-14.md for ranked, "
+             "docs/audits/zones_json_headroom_plan_2026-09-14.md and "
+             "docs/audits/zones_diag_endpoint_split_2026-09-14.md for ranked, "
              "consumer-checked savings and structural alternatives before adding another "
              "field here.",
              s_last_resp_len, json_cap,
@@ -4426,6 +4495,63 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
               "max-width GET /api/zones must actually render zone content, not an error body");
     TEST_CHECK(s_last_resp_len > 0 && s_last_resp_len < json_cap, headroom_msg);
     printf("  GET /api/zones max-width render: %zu bytes, against json_cap=%zu -- measured "
+          "headroom = %zd bytes\n",
+          s_last_resp_len, json_cap, (ptrdiff_t)json_cap - (ptrdiff_t)s_last_resp_len);
+}
+
+// docs/audits/zones_diag_endpoint_split_2026-09-14.md: GET /api/zones_diag is
+// a SECOND httpd handler with the identical buffer-sizing hazard class as
+// GET /api/zones above (a fixed heap_caps_malloc() json_cap that must fit
+// the true worst case or fall into its own truncated: path) -- it gets the
+// same max-width discipline, not a smaller one just because the buffer is
+// smaller. Every field this handler emits (coupling_tau_c%u/coupling_dead_
+// time_c%u/model_fit_temp_c/model_fit_ambient_c) is pinned at its documented
+// MAX bound, same ZONE_*_MAX constants the /api/zones sibling test uses.
+static void test_zones_diag_get_handler_max_width_response_fits_json_cap(void)
+{
+    TEST_SECTION("zones_diag_get_handler -- every field at its documented max width must still "
+                 "fit within its own json_cap (docs/audits/zones_diag_endpoint_split_2026-09-14.md)");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = MAX31856_CHANNEL_COUNT;
+    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        zone_cfg_t *z = &s_zones.cfg.zones[i];
+        for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+            z->coupling_tau_s[j] = ZONE_MODEL_TIME_MAX_S;
+            z->coupling_dead_time_s[j] = ZONE_MODEL_TIME_MAX_S;
+        }
+        z->model_fit_temp_c = ZONE_MAX_TEMP_C_MAX;
+        z->model_fit_ambient_c = ZONE_MAX_TEMP_C_MAX;
+    }
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    s_last_resp_body[0] = '\0';
+    s_last_resp_len = 0;
+    esp_err_t err = zones_diag_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "zones_diag_get_handler must return ESP_OK even at max field width");
+    /* json_cap itself (zones_http_get.c, zones_diag_get_handler()) -- kept in
+     * sync by hand, same discipline as the /api/zones sibling test above. */
+    const size_t json_cap = 1024;
+    char headroom_msg[500];
+    snprintf(headroom_msg, sizeof(headroom_msg),
+             "max-width GET /api/zones_diag must fit inside its json_cap without hitting the "
+             "handler's own truncation path (rendered %zu bytes; json_cap is %zu bytes; this "
+             "attempt %s). This is a NEW, small heap buffer (docs/audits/"
+             "zones_diag_endpoint_split_2026-09-14.md) -- do not grow it past what a real "
+             "measured worst case requires, same buffer-discipline reasoning as GET /api/zones' "
+             "own json_cap (two documented httpd-worker-stack-local panics + a standing rule "
+             "against growing httpd buffers casually) -- see "
+             "docs/audits/zones_diag_endpoint_split_2026-09-14.md before touching this json_cap.",
+             s_last_resp_len, json_cap,
+             (strstr(s_last_resp_body, "did not fit") != NULL)
+                 ? "overflowed mid-render and was truncated by the handler itself"
+                 : (s_last_resp_len < json_cap ? "still fit, but see the headroom above" : "exceeded json_cap outright"));
+    TEST_CHECK(strstr(s_last_resp_body, "did not fit") == NULL, headroom_msg);
+    TEST_CHECK(strstr(s_last_resp_body, "\"zones\":[{") != NULL,
+              "max-width GET /api/zones_diag must actually render zone content, not an error body");
+    TEST_CHECK(s_last_resp_len > 0 && s_last_resp_len < json_cap, headroom_msg);
+    printf("  GET /api/zones_diag max-width render: %zu bytes, against json_cap=%zu -- measured "
           "headroom = %zd bytes\n",
           s_last_resp_len, json_cap, (ptrdiff_t)json_cap - (ptrdiff_t)s_last_resp_len);
 }
@@ -10565,8 +10691,10 @@ void run_test_zones_http(void)
     test_post_settings_source_group_key_wins_over_legacy_scalar();
     test_post_settings_source_all_keys_omitted_preserves_every_group();
     test_post_then_get_round_trips_new_fields();
+    test_zones_diag_get_handler_round_trips_moved_fields();
     test_get_emits_autotune_baseline_k_dc();
     test_zones_get_handler_max_width_response_fits_json_cap();
+    test_zones_diag_get_handler_max_width_response_fits_json_cap();
     test_tuning_rec_body_len_strips_the_idf_appended_nul();
     test_zones_get_handler_malloc_failure_returns_clean_500();
     test_zones_get_handler_succeeds_when_malloc_does_not_fail();

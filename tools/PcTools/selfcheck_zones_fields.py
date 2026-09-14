@@ -49,6 +49,7 @@ from kilnctrl.zones_http_client import (
     _TOP_READONLY_OR_STRUCTURAL_KEYS,
     _ZONE_FIELD_FORM_KEY,
     _ZONE_READONLY_KEYS,
+    _ZONES_DIAG_MODEL_FIT_KEYS,
 )
 
 from selfcheck_common import check
@@ -260,12 +261,20 @@ def _slice_matching_braces(text: str, open_brace_pos: int) -> str:
     raise AssertionError("unbalanced braces slicing the zones GET per-zone loop")
 
 
-def _extract_get_per_zone_keys(text: str, source_path: pathlib.Path) -> set:
-    body = _function_body(text, "zones_get_handler", source_path)
+def _extract_get_per_zone_keys(text: str, source_path: pathlib.Path,
+                                handler_name: str = "zones_get_handler") -> set:
+    """Extract the per-zone JSON keys one GET handler's "zones":[ array
+    emits. `handler_name` defaults to zones_get_handler (GET /api/zones) but
+    is also used for zones_diag_get_handler (GET /api/zones_diag,
+    docs/audits/zones_diag_endpoint_split_2026-09-14.md) -- both handlers
+    share the same "zones":[ + `for (uint8_t i = 0; i < MAX31856_CHANNEL_
+    COUNT; i++) {` marker shape by construction, so the same extractor
+    covers both without duplicating this logic."""
+    body = _function_body(text, handler_name, source_path)
     m = _ZONE_LOOP_START_RE.search(body)
     if m is None:
         raise AssertionError(
-            f"per-zone loop marker not found in zones_get_handler() ({source_path}) -- "
+            f"per-zone loop marker not found in {handler_name}() ({source_path}) -- "
             "has the loop guard or the \"zones\":[ marker been renamed?"
         )
     loop_open_brace = m.end() - 1
@@ -302,21 +311,40 @@ def _function_body_c(text: str, name: str, source_path: pathlib.Path) -> str:
 
 
 def zones_per_zone_field_table_checks() -> None:
+    """Two endpoints now, since docs/audits/zones_diag_endpoint_split_2026-
+    09-14.md moved coupling_tau_c%u/coupling_dead_time_c%u and model_fit_
+    temp_c/model_fit_ambient_c off GET /api/zones (zones_get_handler) onto
+    GET /api/zones_diag (zones_diag_get_handler) -- both handlers live in the
+    same zones_http_get.c, so both are extracted from the one file read.
+    Each endpoint's real per-zone JSON keys are checked against ITS OWN
+    reference set below -- a field checked against the wrong endpoint's
+    reference set would show up as spurious "missing"/"extra" on both sides
+    rather than silently passing, so a future re-split (or a field moving
+    back) that isn't reflected here fails loudly rather than being missed."""
     get_text = _ZONES_GET_C_PATH.read_text(encoding="utf-8")
     post_text = _ZONES_POST_PARSE_C_PATH.read_text(encoding="utf-8")
 
-    fw_get_keys = _extract_get_per_zone_keys(get_text, _ZONES_GET_C_PATH)
+    fw_get_keys = _extract_get_per_zone_keys(get_text, _ZONES_GET_C_PATH, "zones_get_handler")
+    fw_diag_keys = _extract_get_per_zone_keys(get_text, _ZONES_GET_C_PATH, "zones_diag_get_handler")
     fw_post_suffixes = _extract_post_per_zone_suffixes(post_text, _ZONES_POST_PARSE_C_PATH)
 
     check("firmware per-zone GET extractor found keys", len(fw_get_keys) > 10, True)
+    check("firmware per-zone GET /api/zones_diag extractor found keys", len(fw_diag_keys) > 1, True)
     check("firmware per-zone POST extractor found suffixes", len(fw_post_suffixes) > 10, True)
 
-    # GET side: every real per-zone JSON key must be either a field this
-    # client can round-trip (_ZONE_FIELD_FORM_KEY), a known read-only key
-    # (_ZONE_READONLY_KEYS), or the settings_source_groups nested object
+    # GET /api/zones side: every real per-zone JSON key must be either a
+    # field this client can round-trip (_ZONE_FIELD_FORM_KEY), a known
+    # read-only key (_ZONE_READONLY_KEYS -- this still includes model_fit_
+    # temp_c/model_fit_ambient_c, since a caller that merge_zones_diag()'d
+    # them back onto a zone dict must still never try to repost them, but
+    # they are no longer expected to be found by THIS extractor since they
+    # moved off zones_get_handler -- excluded below by name, not by removing
+    # them from _ZONE_READONLY_KEYS, which stays the single source of truth
+    # for "never POST this"), or the settings_source_groups nested object
     # (handled by its own dedicated logic in _encode_zone(), not a flat
     # dict entry).
-    client_get_keys = set(_ZONE_FIELD_FORM_KEY) | set(_ZONE_READONLY_KEYS) | {"settings_source_groups"}
+    client_get_keys = ((set(_ZONE_FIELD_FORM_KEY) | set(_ZONE_READONLY_KEYS) | {"settings_source_groups"})
+                       - _ZONES_DIAG_MODEL_FIT_KEYS)
     missing_from_client_get = fw_get_keys - client_get_keys
     extra_in_client_get = client_get_keys - fw_get_keys
     check(
@@ -325,6 +353,24 @@ def zones_per_zone_field_table_checks() -> None:
         f"zones save: {sorted(missing_from_client_get)}, "
         f"extra in client: {sorted(extra_in_client_get)})",
         (missing_from_client_get, extra_in_client_get),
+        (set(), set()),
+    )
+
+    # GET /api/zones_diag side (docs/audits/zones_diag_endpoint_split_2026-
+    # 09-14.md): "index" plus exactly the fields the split moved here --
+    # coupling_tau_c%u/coupling_dead_time_c%u don't show up in this
+    # extraction at all (dynamic "coupling_tau_c%u" keys never match
+    # _IDENT_RE, same reason coupling_c%u never has on the /api/zones side --
+    # see this module's header comment), so only the two literal-identifier
+    # keys are checked here.
+    client_diag_keys = set(_ZONES_DIAG_MODEL_FIT_KEYS) | {"index"}
+    missing_from_client_diag = fw_diag_keys - client_diag_keys
+    extra_in_client_diag = client_diag_keys - fw_diag_keys
+    check(
+        "zones_diag per-zone GET keys: client's _ZONES_DIAG_MODEL_FIT_KEYS matches firmware "
+        f"(missing from client: {sorted(missing_from_client_diag)}, "
+        f"extra in client: {sorted(extra_in_client_diag)})",
+        (missing_from_client_diag, extra_in_client_diag),
         (set(), set()),
     )
 

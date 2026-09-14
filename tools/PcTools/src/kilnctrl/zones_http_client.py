@@ -155,6 +155,82 @@ def get_zones(host: str, timeout: float = ZONES_HTTP_TIMEOUT_S) -> dict:
         raise ZonesHttpError(f"GET /api/zones response was not valid JSON: {body_text!r}") from exc
 
 
+def get_zones_diag(host: str, timeout: float = ZONES_HTTP_TIMEOUT_S) -> dict:
+    """GET /api/zones_diag (docs/audits/zones_diag_endpoint_split_2026-09-14.md,
+    implementing docs/audits/zones_json_headroom_plan_2026-09-14.md sec 3a):
+    the read-only, tool/diagnostics-oriented per-zone fields split OFF
+    GET /api/zones once that endpoint ran low on json_cap headroom --
+    coupling_tau_c%u/coupling_dead_time_c%u and model_fit_temp_c/
+    model_fit_ambient_c. NOT included here: tuning_* -- that record stayed on
+    GET /api/zones because zones_page.html's renderTuningQuality() actually
+    renders it from the SAME /api/zones fetch (re-verified directly against
+    the page source before this split; the original headroom plan's claim
+    that tuning_* was diagnostics-only was wrong).
+
+    Response shape: {"zones": [{"index": N, "coupling_tau_c0": ..., "coupling_
+    dead_time_c0": ..., "model_fit_temp_c": ..., "model_fit_ambient_c": ...},
+    ...]}, indexed the same way GET /api/zones' own "zones" array is, so a
+    caller that wants the pre-split combined shape can zip the two by
+    "index" -- see merge_zones_diag() below for exactly that."""
+    req = urllib.request.Request(_url(host, "/api/zones_diag"), method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body_text = resp.read().decode("utf-8", errors="replace")
+    except Exception as exc:  # noqa: BLE001
+        status, detail = _http_error_detail(exc)
+        raise ZonesHttpError(f"GET /api/zones_diag failed: {detail}", status, detail) from exc
+    try:
+        return json.loads(body_text)
+    except Exception as exc:
+        raise ZonesHttpError(f"GET /api/zones_diag response was not valid JSON: {body_text!r}") from exc
+
+
+#: The fields GET /api/zones_diag emits per zone, alongside "index" -- kept
+#: as one place so merge_zones_diag() and any future consumer agree on
+#: exactly what moved. Mirrors _ZONE_MODEL_FIT_READONLY_KEYS plus the
+#: coupling_tau/dead_time cell pattern (_ZONE_COUPLING_TAU_DEAD_TIME_CELL_RE)
+#: -- both of those sets/regexes are UNCHANGED by the split (they still
+#: describe what these keys mean and how they're excluded from POST bodies),
+#: this is just "which keys does the diag response carry".
+_ZONES_DIAG_MODEL_FIT_KEYS = {"model_fit_temp_c", "model_fit_ambient_c"}
+
+
+def merge_zones_diag(zones_json: dict, diag_json: dict) -> dict:
+    """Merge a GET /api/zones_diag response's per-zone fields back into a
+    GET /api/zones response's zone dicts, by "index", so a caller that wants
+    the pre-2026-09-14-split combined shape (e.g. a renderer written before
+    the split, or a display tool with no reason to track which endpoint owns
+    which field) can get it back without duplicating the merge logic.
+    Returns a NEW dict (zones_json is not mutated) -- shallow-copies the
+    top-level dict and the zones list, but each zone dict is itself copied
+    before its diag fields are added, so callers holding a reference to the
+    original zones_json's zone dicts never see them mutated out from under
+    them.
+
+    Does nothing destructive if diag_json has no matching index (leaves that
+    zone as GET /api/zones reported it, un-merged) -- a partial/short
+    zones_diag response degrades to "diag fields missing for that zone", not
+    a crash."""
+    diag_by_index = {}
+    for dz in diag_json.get("zones", []):
+        idx = dz.get("index")
+        if idx is not None:
+            diag_by_index[idx] = dz
+    merged = dict(zones_json)
+    merged_zones = []
+    for z in zones_json.get("zones", []):
+        z2 = dict(z)
+        dz = diag_by_index.get(z.get("index"))
+        if dz is not None:
+            for k, v in dz.items():
+                if k == "index":
+                    continue
+                z2[k] = v
+        merged_zones.append(z2)
+    merged["zones"] = merged_zones
+    return merged
+
+
 def post_zones(host: str, body: str, timeout: float = ZONES_HTTP_TIMEOUT_S) -> str:
     """POST /api/zones with `body` (application/x-www-form-urlencoded, built
     by build_post_body()). Returns the response text -- "ok" on success
@@ -384,8 +460,10 @@ _ZONE_INT_FIELDS = {
 #: rather than trusting the GET payload always has 0 there.
 _ZONE_COUPLING_CELL_RE = re.compile(r"^coupling_c(\d+)$")
 #: ZONES_CFG_VERSION 11->12 (2026-08-31): coupling_tau_c%u/
-#: coupling_dead_time_c%u -- zones_get_handler() emits these (same orientation
-#: as coupling_c%u, [affected][stepped]), but parse_zone_fields() has NO
+#: coupling_dead_time_c%u -- MOVED 2026-09-14 (docs/audits/
+#: zones_diag_endpoint_split_2026-09-14.md) from GET /api/zones to GET
+#: /api/zones_diag (zones_diag_get_handler(), get_zones_diag() above; same
+#: orientation as coupling_c%u, [affected][stepped]), but parse_zone_fields() has NO
 #: z%u_coupling_tau_c%u / z%u_coupling_dead_time_c%u wire field at all: it
 #: unconditionally memcpy()s coupling_tau_s[]/coupling_dead_time_s[] from
 #: current_z regardless of what a POST body contains (see zones_http.c's own
@@ -421,11 +499,16 @@ _ZONE_TUNING_READONLY_KEYS = {
     "tuning_rise_inf_c", "tuning_seq",
 }
 #: ZONES_CFG_VERSION 23->24 (2026-09-09): the operating point a zone's plant
-#: model was fitted at. Same read-only class as the tuning_* record above --
-#: GET emits both unconditionally, parse_zone_fields() has no POST key for
-#: either and copies them through from current_z. -273.15 is the
-#: "no operating point recorded" sentinel (ZONE_MODEL_FIT_TEMP_UNKNOWN);
-#: read it as None-equivalent, never as a real 273-below fit.
+#: model was fitted at. Same read-only class as the tuning_* record above,
+#: but MOVED 2026-09-14 (docs/audits/zones_diag_endpoint_split_2026-09-14.md)
+#: from GET /api/zones to GET /api/zones_diag -- zones_page.html never
+#: rendered either key (grepped directly, zero hits), unlike tuning_*, which
+#: renderTuningQuality() does render from the same /api/zones fetch and so
+#: stayed put. Still listed here (and still excluded from POST bodies below)
+#: because a caller that has merge_zones_diag()'d a zones_diag response back
+#: onto its zones dict still must not try to repost these -- -273.15 is the
+#: "no operating point recorded" sentinel (ZONE_MODEL_FIT_TEMP_UNKNOWN); read
+#: it as None-equivalent, never as a real 273-below fit.
 _ZONE_MODEL_FIT_READONLY_KEYS = {"model_fit_temp_c", "model_fit_ambient_c"}
 #: ZONES_CFG_VERSION 25->26 (docs/audits/zones_get_autotune_baseline_exposure_
 #: 2026-09-13.md): the K_dc adaptive_tune_refine_zone_locked() anchors its

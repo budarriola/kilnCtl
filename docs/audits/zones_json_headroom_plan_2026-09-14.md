@@ -1,5 +1,17 @@
 # GET /api/zones JSON headroom plan (2026-09-14)
 
+**STATUS (2026-09-14, later same day): sec 3a implemented, partially.** See
+`docs/audits/zones_diag_endpoint_split_2026-09-14.md` for the full account. Summary: a new
+`GET /api/zones_diag` route was added and took `coupling_tau_c%u`/`coupling_dead_time_c%u` and
+`model_fit_temp_c`/`model_fit_ambient_c` off this endpoint, recovering headroom from 161 to 854
+bytes (not the ~1800 bytes this plan projected). **The `tuning_*` group (927 bytes, the single
+largest candidate below) was NOT moved** -- re-verifying this plan's own consumer claim against
+`zones_page.html` directly found `renderTuningQuality()` actually renders all 11 `tuning_*` keys
+from the operator page's single `/api/zones` fetch, contradicting sec 2c/3a's premise that this
+group was diagnostics-only. Section 6's "Implemented savings: None" below is superseded for the
+two groups that did move; the `tuning_*`/guard-threshold/`settings_source_groups` candidates
+below are still open for whoever picks up the next field addition.
+
 ## 1. Measurement
 
 `json_cap` in `zones_get_handler()` (`firmware/KilnFW/App/drivers/http/zones_http_get.c:93`)

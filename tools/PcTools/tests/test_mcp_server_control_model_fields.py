@@ -61,6 +61,23 @@ def _patch(zones_json):
         unittest.mock.patch.object(
             mc, "_control_resolve_host", unittest.mock.Mock(return_value="10.0.0.9"),
         ),
+        # docs/audits/zones_diag_endpoint_split_2026-09-14.md:
+        # control_get_zones() now also fetches GET /api/zones_diag and
+        # merges model_fit_temp_c/model_fit_ambient_c back in by index --
+        # mocked here to return the SAME zones_json's model-fit fields via
+        # merge_zones_diag() (the real merge path), so these tests keep
+        # exercising the real code between the two fetches rather than
+        # bypassing it by pre-populating model_fit_* directly on zones_json.
+        unittest.mock.patch.object(
+            mc.zones_http_client, "get_zones_diag",
+            unittest.mock.Mock(return_value={
+                "zones": [
+                    {"index": z.get("index"), "model_fit_temp_c": z.get("model_fit_temp_c"),
+                     "model_fit_ambient_c": z.get("model_fit_ambient_c")}
+                    for z in zones_json.get("zones", [])
+                ]
+            }),
+        ),
     )
 
 
@@ -135,8 +152,8 @@ class DescribeModelFieldsTest(unittest.TestCase):
         zones_json = {"zones": [_zone(0, k_dc=42.731, tau_s=305.2, dead_time_s=18.4,
                                        tuning_valid=True, fit_temp_c=110.5,
                                        fit_ambient_c=21.3)]}
-        p1, p2, p3 = _patch(zones_json)
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch(zones_json)
+        with p1, p2, p3, p4:
             result = mc.control_get_zones()
         self.assertIn("plant model", result)
         self.assertIn("K_dc=42.7310 C/duty", result)

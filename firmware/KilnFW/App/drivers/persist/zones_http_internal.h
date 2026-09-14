@@ -231,6 +231,11 @@ void zones_json_escape(const char *src, char *out, size_t out_cap);
 esp_err_t page_get_handler(httpd_req_t *req);
 esp_err_t safety_config_page_get_handler(httpd_req_t *req);
 esp_err_t zones_get_handler(httpd_req_t *req);
+/* GET /api/zones_diag (docs/audits/zones_diag_endpoint_split_2026-09-14.md) --
+ * the diagnostics-only per-zone fields split out of zones_get_handler() once
+ * GET /api/zones ran low on json_cap headroom; also defined in
+ * zones_http_get.c, registered from zones_http_start() alongside get_uri. */
+esp_err_t zones_diag_get_handler(httpd_req_t *req);
 bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count, uint8_t relay_count,
                                   uint8_t timing_profile_count, const zone_cfg_t *current_z, zone_cfg_t *z,
                                   const char **err_reason);

@@ -1227,5 +1227,73 @@ class CapturedLiveGetFixtureTest(unittest.TestCase):
         self.assertIn("tuning_snr_db_NOT_A_REAL_FIELD", str(ctx.exception))
 
 
+class GetZonesDiagTest(unittest.TestCase):
+    """docs/audits/zones_diag_endpoint_split_2026-09-14.md: GET /api/
+    zones_diag, added when coupling_tau_c%u/coupling_dead_time_c%u and
+    model_fit_temp_c/model_fit_ambient_c moved off GET /api/zones."""
+
+    def test_parses_json(self):
+        payload = {"zones": [{"index": 0, "model_fit_temp_c": 110.5,
+                               "model_fit_ambient_c": 21.3,
+                               "coupling_tau_c0": 0.0, "coupling_dead_time_c0": 0.0}]}
+        with _mock_get(payload):
+            result = zh.get_zones_diag("kiln.local")
+        self.assertEqual(len(result["zones"]), 1)
+        self.assertEqual(result["zones"][0]["model_fit_temp_c"], 110.5)
+
+    def test_rejects_non_json(self):
+        with unittest.mock.patch.object(zh.urllib.request, "urlopen",
+                                         return_value=_fake_response(b"not json")):
+            with self.assertRaises(zh.ZonesHttpError):
+                zh.get_zones_diag("kiln.local")
+
+    def test_unreachable_host_raises(self):
+        err = urllib.error.URLError("no route to host")
+        with unittest.mock.patch.object(zh.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(zh.ZonesHttpError):
+                zh.get_zones_diag("192.0.2.1")
+
+
+class MergeZonesDiagTest(unittest.TestCase):
+    def test_merges_moved_fields_back_by_index(self):
+        zones_json = {"thermo_count": 2, "zones": [
+            {"index": 0, "max_temp_c": 80.0},
+            {"index": 1, "max_temp_c": 90.0},
+        ]}
+        diag_json = {"zones": [
+            {"index": 0, "model_fit_temp_c": 110.5, "model_fit_ambient_c": 21.3,
+             "coupling_tau_c1": 111.0, "coupling_dead_time_c1": 22.0},
+            {"index": 1, "model_fit_temp_c": 95.0, "model_fit_ambient_c": 20.0,
+             "coupling_tau_c0": 333.0, "coupling_dead_time_c0": 44.0},
+        ]}
+        merged = zh.merge_zones_diag(zones_json, diag_json)
+        self.assertEqual(merged["thermo_count"], 2)
+        self.assertEqual(merged["zones"][0]["max_temp_c"], 80.0)
+        self.assertEqual(merged["zones"][0]["model_fit_temp_c"], 110.5)
+        self.assertEqual(merged["zones"][0]["coupling_tau_c1"], 111.0)
+        self.assertEqual(merged["zones"][1]["model_fit_temp_c"], 95.0)
+        self.assertEqual(merged["zones"][1]["coupling_tau_c0"], 333.0)
+        # zone 0 must never see zone 1's cells (an index-transposed merge
+        # bug would fail this) --
+        self.assertNotIn("coupling_tau_c0", merged["zones"][0])
+
+    def test_does_not_mutate_the_original_dicts(self):
+        zones_json = {"zones": [{"index": 0, "max_temp_c": 80.0}]}
+        diag_json = {"zones": [{"index": 0, "model_fit_temp_c": 110.5}]}
+        original_zone = zones_json["zones"][0]
+        zh.merge_zones_diag(zones_json, diag_json)
+        self.assertNotIn("model_fit_temp_c", original_zone)
+        self.assertNotIn("model_fit_temp_c", zones_json["zones"][0])
+
+    def test_missing_diag_index_leaves_zone_unmerged_not_a_crash(self):
+        zones_json = {"zones": [{"index": 0, "max_temp_c": 80.0},
+                                 {"index": 1, "max_temp_c": 90.0}]}
+        diag_json = {"zones": [{"index": 0, "model_fit_temp_c": 110.5}]}
+        merged = zh.merge_zones_diag(zones_json, diag_json)
+        self.assertEqual(merged["zones"][0]["model_fit_temp_c"], 110.5)
+        self.assertNotIn("model_fit_temp_c", merged["zones"][1])
+        self.assertEqual(merged["zones"][1]["max_temp_c"], 90.0)
+
+
 if __name__ == "__main__":
     unittest.main()

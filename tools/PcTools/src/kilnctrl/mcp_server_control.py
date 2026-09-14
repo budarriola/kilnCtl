@@ -338,24 +338,28 @@ def control_get_zones(host: Optional[str] = None) -> str:
 
     Also fetches, over HTTP GET /api/zones (none of these are on the UART
     CONTROL wire): the identified plant model (model_k_dc/model_tau_s/
-    model_dead_time_s, tuning_valid, model_fit_temp_c/model_fit_ambient_c --
-    see _describe_model_fields()'s docstring for why this section was added
-    2026-09-13 and how its sentinels are rendered), the per-zone coupling
-    matrix (coupling_c0.., a first-class control parameter -- which matrix
-    is live measurably changes tracking IAE), coupling_diag_k_dc, and the
-    HTTP-only fields fuzzy_strength_pct, ease_off_window_mult and
-    approach_rate_cap_c_per_hr (these ARE present in the board's raw HTTP
-    response -- this tool used to fetch that response and then silently
-    drop everything but the coupling matrix from it, and separately never
-    rendered the model fields at all despite this docstring's old text
-    claiming "PID/model config" -- see
-    docs/audits/mcp_zone_model_fields_2026-09-13.md). Host is auto-resolved
-    the same way the OTA tools do (board's Wi-Fi station IP, falling back to
-    the fallback-AP address); pass `host` explicitly for kilnctl.local or a
-    board reachable only from a different network than this link. If the
-    HTTP fetch fails the PID section above is still returned, with the
-    model/coupling-matrix/HTTP-only-fields sections noting why they're
-    missing."""
+    model_dead_time_s, tuning_valid -- see _describe_model_fields()'s
+    docstring for why this section was added 2026-09-13 and how its
+    sentinels are rendered), the per-zone coupling matrix (coupling_c0.., a
+    first-class control parameter -- which matrix is live measurably changes
+    tracking IAE), coupling_diag_k_dc, and the HTTP-only fields
+    fuzzy_strength_pct, ease_off_window_mult and approach_rate_cap_c_per_hr
+    (these ARE present in the board's raw HTTP response -- this tool used to
+    fetch that response and then silently drop everything but the coupling
+    matrix from it, and separately never rendered the model fields at all
+    despite this docstring's old text claiming "PID/model config" -- see
+    docs/audits/mcp_zone_model_fields_2026-09-13.md). model_fit_temp_c/
+    model_fit_ambient_c are ALSO fetched, over a second request to HTTP GET
+    /api/zones_diag and merged back in by index (docs/audits/
+    zones_diag_endpoint_split_2026-09-14.md -- these two moved off GET
+    /api/zones once that endpoint ran low on response-buffer headroom); a
+    diag-fetch failure degrades those two fields to "missing" without
+    failing the rest of this tool. Host is auto-resolved the same way the
+    OTA tools do (board's Wi-Fi station IP, falling back to the fallback-AP
+    address); pass `host` explicitly for kilnctl.local or a board reachable
+    only from a different network than this link. If the HTTP fetch fails
+    the PID section above is still returned, with the model/coupling-
+    matrix/HTTP-only-fields sections noting why they're missing."""
     try:
         thermo_count, relay_count, zones = _srv._control.get_zones()
     except ControlQueryError as exc:
@@ -370,6 +374,23 @@ def control_get_zones(host: Optional[str] = None) -> str:
         zones_json = zones_http_client.get_zones(resolved_host)
     except zones_http_client.ZonesHttpError as exc:
         return body + f"\nplant model / coupling matrix: unavailable ({exc}, host={resolved_host})"
+    # docs/audits/zones_diag_endpoint_split_2026-09-14.md: model_fit_temp_c/
+    # model_fit_ambient_c (rendered by _describe_model_fields() below) moved
+    # off GET /api/zones onto GET /api/zones_diag once the main endpoint ran
+    # low on json_cap headroom. Fetched as a SECOND request and merged back
+    # onto zones_json's zone dicts by index (merge_zones_diag()) so
+    # _describe_model_fields()/_describe_coupling_matrix() below don't need
+    # to know two endpoints exist -- they still just read zones_json["zones"].
+    # A diag fetch failure degrades gracefully: the model-fit fields simply
+    # read back "missing" (their existing "field(s) missing" rendering path,
+    # unchanged) rather than failing this whole tool call, since the PID/
+    # coupling-matrix/HTTP-only-fields sections below have nothing to do
+    # with this second endpoint and must still render.
+    try:
+        diag_json = zones_http_client.get_zones_diag(resolved_host)
+        zones_json = zones_http_client.merge_zones_diag(zones_json, diag_json)
+    except zones_http_client.ZonesHttpError:
+        pass
     return (
         body
         + "\n" + _describe_model_fields(zones_json)

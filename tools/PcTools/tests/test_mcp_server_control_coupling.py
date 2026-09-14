@@ -69,8 +69,8 @@ class ControlGetZonesCouplingTest(unittest.TestCase):
         zones_json["zones"][1]["fuzzy_strength_pct"] = 0.0
         zones_json["zones"][1]["ease_off_window_mult"] = 2.0
         zones_json["zones"][1]["approach_rate_cap_c_per_hr"] = 0.0
-        p1, p2, p3 = self._patch(zones_json)
-        with p1, p2, p3:
+        p1, p2, p3, p4 = self._patch(zones_json)
+        with p1, p2, p3, p4:
             result = mc.control_get_zones()
         self.assertIn("http-only fields", result)
         self.assertIn(
@@ -114,14 +114,23 @@ class ControlGetZonesCouplingTest(unittest.TestCase):
             unittest.mock.patch.object(
                 mc, "_control_resolve_host", unittest.mock.Mock(return_value="10.0.0.9"),
             ),
+            # docs/audits/zones_diag_endpoint_split_2026-09-14.md:
+            # control_get_zones() now also fetches GET /api/zones_diag --
+            # mocked here to fail fast (no real network call/8s timeout) and
+            # exercise the documented graceful-degradation path, same as a
+            # real board that's unreachable for the second request only.
+            unittest.mock.patch.object(
+                mc.zones_http_client, "get_zones_diag",
+                unittest.mock.Mock(side_effect=mc.zones_http_client.ZonesHttpError("mocked: no diag endpoint")),
+            ),
         )
 
     def test_coupling_matrix_appears_in_documented_orientation(self):
         """Positive case: the tool's output matches the confirmed-live
         board values, in [affected][stepped] orientation, next to a label
         naming that orientation."""
-        p1, p2, p3 = self._patch(_zones_json())
-        with p1, p2, p3:
+        p1, p2, p3, p4 = self._patch(_zones_json())
+        with p1, p2, p3, p4:
             result = mc.control_get_zones()
         self.assertIn("row i = AFFECTED zone, column j = STEPPED zone", result)
         self.assertIn("z0: [0, 27.32, 21.72]", result)
@@ -135,8 +144,8 @@ class ControlGetZonesCouplingTest(unittest.TestCase):
         (docs/audits/coupling_measured_diag_flag_audit_2026-09-11.md found
         exactly that mistake -- a hardcoded "compiled false" string survived
         the flag actually flipping true and moving files)."""
-        p1, p2, p3 = self._patch(_zones_json())
-        with p1, p2, p3, unittest.mock.patch.object(
+        p1, p2, p3, p4 = self._patch(_zones_json())
+        with p1, p2, p3, p4, unittest.mock.patch.object(
             mc, "_read_coupling_use_measured_diag_k_dc_compiled_value",
             unittest.mock.Mock(return_value=False),
         ):
@@ -152,8 +161,8 @@ class ControlGetZonesCouplingTest(unittest.TestCase):
         actually reads the live compiled value rather than always printing
         "false" -- flip the patched value to True and confirm the rendered
         text changes to match, instead of repeating the stale claim."""
-        p1, p2, p3 = self._patch(_zones_json())
-        with p1, p2, p3, unittest.mock.patch.object(
+        p1, p2, p3, p4 = self._patch(_zones_json())
+        with p1, p2, p3, p4, unittest.mock.patch.object(
             mc, "_read_coupling_use_measured_diag_k_dc_compiled_value",
             unittest.mock.Mock(return_value=True),
         ):

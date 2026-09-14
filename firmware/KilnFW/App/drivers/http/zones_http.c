@@ -768,6 +768,9 @@ esp_err_t zones_http_start(void)
     static const httpd_uri_t get_uri = {
         .uri = "/api/zones", .method = HTTP_GET, .handler = zones_get_handler,
     };
+    static const httpd_uri_t get_diag_uri = {
+        .uri = "/api/zones_diag", .method = HTTP_GET, .handler = zones_diag_get_handler,
+    };
     static const httpd_uri_t post_uri = {
         .uri = "/api/zones", .method = HTTP_POST, .handler = zones_post_handler,
     };
@@ -802,6 +805,11 @@ esp_err_t zones_http_start(void)
     err = httpd_register_uri_handler(server, &get_uri);
     if (err != ESP_OK) {
         ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(GET /api/zones) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &get_diag_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(GET /api/zones_diag) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &post_uri);

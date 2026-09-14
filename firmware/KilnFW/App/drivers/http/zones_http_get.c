@@ -91,7 +91,17 @@ esp_err_t zones_get_handler(httpd_req_t *req)
      * of the entire 8192-byte task stack. Freed on every return path
      * (success and truncated). */
     const size_t json_cap = 7360; /* heap buffer (heap_caps_malloc below, not
-                      * stack). STILL 7360 as of ZONES_CFG_VERSION 21->22
+                      * stack). STILL 7360 as of the 2026-09-14 zones_diag
+                      * split (docs/audits/zones_diag_endpoint_split_2026-09-
+                      * 14.md): coupling_tau_c%u/coupling_dead_time_c%u and
+                      * model_fit_temp_c/model_fit_ambient_c moved OFF this
+                      * handler onto GET /api/zones_diag (zones_diag_get_
+                      * handler() below, its own separate, smaller json_cap),
+                      * recovering headroom from 161 to 854 bytes -- confirmed
+                      * by test_zones_get_handler_max_width_response_fits_
+                      * json_cap(), not left at the stale pre-split figure the
+                      * rest of this comment chain still describes below.
+                      * STILL 7360 as of ZONES_CFG_VERSION 21->22
                       * (2026-09-06, progress_band_c, Opus review of
                       * 992f3954 item 3): the per-field comment chain below
                       * stopped being updated at v13, but every field added
@@ -452,19 +462,17 @@ esp_err_t zones_get_handler(httpd_req_t *req)
         for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
             APPEND("\"coupling_c%u\":%.4f,", j, (double)z->coupling_coeff[j]);
         }
-        /* ZONES_CFG_VERSION 11->12: coupling_tau_s[]/coupling_dead_time_s[],
-         * same orientation as coupling_c%u just above ([affected][stepped],
-         * i.e. row i = affected zone i's row -- NOT the transpose orientation
-         * /api/autotune_matrix uses for the RAM-only s_at.coupling matrix,
-         * see that endpoint's own comment for why it stays untouched by this
-         * pass). Key names deliberately echo model_tau_s/model_dead_time_s's
-         * own JSON key style rather than coupling_c%u's "_c" suffix, since
-         * these are the tau/L, not another gain. Always emitted, same
-         * always-emit/round-trip reasoning as coupling_c%u. */
-        for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-            APPEND("\"coupling_tau_c%u\":%.1f,\"coupling_dead_time_c%u\":%.1f,", j,
-                   (double)z->coupling_tau_s[j], j, (double)z->coupling_dead_time_s[j]);
-        }
+        /* ZONES_CFG_VERSION 11->12's coupling_tau_s[]/coupling_dead_time_s[]
+         * MOVED to GET /api/zones_diag (docs/audits/
+         * zones_diag_endpoint_split_2026-09-14.md, following the recommended
+         * path in docs/audits/zones_json_headroom_plan_2026-09-14.md sec 3a)
+         * -- consumer search found these six keys/zone rendered nowhere in
+         * zones_page.html, and zones_http_client.py already treats them as
+         * an opaque, never-reposted passthrough (_ZONE_COUPLING_TAU_DEAD_
+         * TIME_CELL_RE), so the operator page needed no second fetch to keep
+         * working. See zones_diag_get_handler() below for the real emission
+         * (same [affected][stepped] orientation, same always-emit
+         * convention, unchanged). */
         /* ZONES_CFG_VERSION 12->13: the tuning-quality record (set 1 -- see
          * zone_cfg_t::tuning_valid's own doc comment), read-only here (the
          * POST side never accepts these back -- see this endpoint's own
@@ -485,24 +493,14 @@ esp_err_t zones_get_handler(httpd_req_t *req)
                (double)z->tuning_raw_rise_c, (double)z->tuning_rise_inf_c, (unsigned)z->tuning_seq);
         /* ZONES_CFG_VERSION 23->24's model_fit_temp_c/model_fit_ambient_c --
          * the operating point the plant model in model_k_dc/model_tau_s/
-         * model_dead_time_s was actually fitted at. Read-only, same as the
-         * tuning_* record above (measured data, never operator-entered; the
-         * POST side carries the stored values through untouched rather than
-         * accepting them -- zones_http_post_parse.c).
-         *
-         * Added 2026-09-09 (opus review defect D): the schema bump that
-         * introduced these fields recorded them but exposed them NOWHERE --
-         * zones_config_get_model_fit_context() had no production caller and
-         * no JSON key existed -- so the retrospective gain-schedule use case
-         * that motivated the bump could not read its own data off the board.
-         * -273.15 is ZONE_MODEL_FIT_TEMP_UNKNOWN, "no operating point
-         * recorded" (zones_config_accessors.h); emitted verbatim, like every
-         * other raw sentinel on this endpoint, so a consumer can tell
-         * "unknown" from a real measurement rather than having a plausible
-         * number substituted for it. Always emitted, same always-emit
-         * convention as model_k_dc/tuning_* above. */
-        APPEND("\"model_fit_temp_c\":%.2f,\"model_fit_ambient_c\":%.2f,",
-               (double)z->model_fit_temp_c, (double)z->model_fit_ambient_c);
+         * model_dead_time_s was actually fitted at -- MOVED to GET
+         * /api/zones_diag (docs/audits/zones_diag_endpoint_split_2026-09-14.md):
+         * grepped as zero hits in zones_page.html, and mcp_server_control.py's
+         * _describe_model_fields() (the only tool consumer) now fetches the
+         * diag endpoint alongside GET /api/zones instead. See
+         * zones_diag_get_handler() below for the real emission (same
+         * -273.15 ZONE_MODEL_FIT_TEMP_UNKNOWN sentinel convention,
+         * unchanged, still emitted verbatim). */
         /* ZONES_CFG_VERSION 25->26's autotune_baseline_k_dc -- the K_dc
          * adaptive_tune_refine_zone_locked() anchors its plausibility ratio
          * test and blend target to (zones_config_accessors.h's own comment
@@ -572,6 +570,113 @@ truncated:
         esp_err_t ret = httpd_resp_sendstr(req,
                                   "{\"ok\":false,\"error\":\"zone config did not fit in the response "
                                   "buffer -- this is a firmware sizing bug, not a bad configuration\"}");
+        free(json);
+        return ret;
+    }
+}
+
+/* GET /api/zones_diag (docs/audits/zones_diag_endpoint_split_2026-09-14.md,
+ * implementing docs/audits/zones_json_headroom_plan_2026-09-14.md sec 3a):
+ * the read-only, tool/diagnostics-oriented per-zone fields that
+ * zones_get_handler() above used to always emit -- coupling_tau_c%u/
+ * coupling_dead_time_c%u and model_fit_temp_c/model_fit_ambient_c -- split
+ * into their own route once a consumer search (zones_page.html, grepped
+ * directly: zero hits for any of these six keys/zone) confirmed the
+ * operator-facing page never rendered them, only tools did
+ * (zones_http_client.py's opaque coupling_tau/dead_time passthrough,
+ * mcp_server_control.py's _describe_model_fields()). NOT split: tuning_*
+ * (11 keys/zone, the single biggest group by far) -- re-verifying the plan's
+ * own consumer claim found zones_page.html's renderTuningQuality()
+ * (data.zones from the SAME /api/zones fetch, no second request) actually
+ * renders every one of those 11 fields in a live table, so moving them
+ * would have broken the operator page or forced it into a second fetch on
+ * page load; the plan's "tuning_* is diagnostics-only" premise was wrong,
+ * caught by this task's own re-verification step rather than trusted from
+ * the doc. autotune_baseline_k_dc was left in place too -- not on the
+ * task's given move list, and moving it was not asked for here.
+ *
+ * Same buffer-sizing discipline as zones_get_handler(): a HEAP buffer (not
+ * an httpd-worker-stack local), sized against
+ * test_zones_diag_get_handler_max_width_response_fits_json_cap()
+ * (test_zones_http.c) rather than hand-estimated, same reasoning as that
+ * test's zones_get_handler sibling. This is a NEW, small buffer -- not an
+ * enlargement of the existing 7360-byte json_cap in zones_get_handler(),
+ * which stays untouched and must still never simply be grown (see that
+ * function's own json_cap comment for the two-panics/httpd-worker-stack
+ * history behind that rule). */
+esp_err_t zones_diag_get_handler(httpd_req_t *req)
+{
+    const size_t json_cap = 1024; /* measured worst case (MAX31856_CHANNEL_COUNT=3
+                      * zones, every coupling_tau_c%u/coupling_dead_time_c%u/
+                      * model_fit_temp_c/model_fit_ambient_c pinned at its
+                      * documented MAX bound) is confirmed by
+                      * test_zones_diag_get_handler_max_width_response_fits_
+                      * json_cap() (test_zones_http.c) -- see that test's own
+                      * printed headroom rather than trusting this comment's
+                      * arithmetic to stay in sync by hand. */
+    char *json = heap_caps_malloc(json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (json == NULL) {
+        ESP_LOGE(ZONES_HTTP_TAG, "GET /api/zones_diag: malloc(%u) failed for the response buffer",
+                 (unsigned)json_cap);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"error\":\"out of memory building the response\"}");
+    }
+    size_t o = 0;
+    int n;
+
+#define APPEND(...)                                                                              \
+    do {                                                                                          \
+        n = snprintf(json + o, json_cap - o, __VA_ARGS__);                                   \
+        if (n < 0 || (size_t)n >= json_cap - o) {                                             \
+            goto truncated;                                                                            \
+        }                                                                                          \
+        o += (size_t)n;                                                                            \
+    } while (0)
+
+    /* Dense over MAX31856_CHANNEL_COUNT, same "always emit, index-keyed"
+     * convention zones_get_handler() uses for its own "zones" array --
+     * "index" lets a consumer that only fetched this endpoint (no merge
+     * against GET /api/zones) still line the two arrays up by zone number. */
+    APPEND("{\"zones\":[");
+    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        const zone_cfg_t *z = &s_zones.cfg.zones[i];
+        APPEND("%s{\"index\":%u,", i == 0 ? "" : ",", i);
+        /* coupling_tau_c%u/coupling_dead_time_c%u: identical orientation,
+         * precision and always-emit-every-cell-including-the-diagonal
+         * convention as zones_get_handler()'s own former copy of this loop
+         * (see that function's comment on the field it left behind). */
+        for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+            APPEND("\"coupling_tau_c%u\":%.1f,\"coupling_dead_time_c%u\":%.1f,", j,
+                   (double)z->coupling_tau_s[j], j, (double)z->coupling_dead_time_s[j]);
+        }
+        /* model_fit_temp_c/model_fit_ambient_c: -273.15 (ZONE_MODEL_FIT_
+         * TEMP_UNKNOWN) still means "no operating point recorded", emitted
+         * verbatim, same sentinel convention as before the move. */
+        APPEND("\"model_fit_temp_c\":%.2f,\"model_fit_ambient_c\":%.2f}",
+               (double)z->model_fit_temp_c, (double)z->model_fit_ambient_c);
+    }
+    APPEND("]}");
+
+#undef APPEND
+
+    httpd_resp_set_type(req, "application/json");
+    {
+        esp_err_t ret = httpd_resp_send(req, json, o);
+        free(json);
+        return ret;
+    }
+
+truncated:
+    ESP_LOGE(ZONES_HTTP_TAG, "GET /api/zones_diag did not fit in %u bytes -- raise the buffer",
+             (unsigned)json_cap);
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    httpd_resp_set_type(req, "application/json");
+    {
+        esp_err_t ret = httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"error\":\"zone diagnostics config did not fit in "
+                                  "the response buffer -- this is a firmware sizing bug\"}");
         free(json);
         return ret;
     }
