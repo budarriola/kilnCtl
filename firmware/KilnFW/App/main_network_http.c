@@ -59,6 +59,7 @@
 #include "uart_protocol.h"
 #include "kiln_cfg_http.h"
 #include "safety_cfg_http.h"
+#include "safety_stack_margin_http.h"
 #include "safety_cfg_store.h"
 #include "kiln_cfg_store.h"
 #include "zones_http.h"
@@ -672,6 +673,22 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (safety_cfg_http_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "safety_cfg_http_start failed: %s -- no /safety/commissioning this boot",
                  esp_err_to_name(safety_cfg_http_err));
+    }
+
+    /* GET /api/saftyfw_stack_margin -- surfaces the Pico's nine live
+     * per-task stack high-water marks (safety_link_get_stack_margin(),
+     * docs/audits/saftyfw_live_stack_reporting_impl_2026-09-14.md). Its own
+     * route, not folded into /safety/commissioning or /api/zones* -- this
+     * is safety-processor task data, unrelated to either. Same
+     * `ctx->safety_err == ESP_OK ? &ctx->safety : NULL` link-or-null
+     * pattern as safety_cfg_http_start() just above, for the same reason:
+     * the route must exist and report link_up=false rather than vanish
+     * when the isolated fault line failed to come up this boot. */
+    esp_err_t safety_stack_margin_http_err =
+        safety_stack_margin_http_start(ctx->safety_err == ESP_OK ? &ctx->safety : NULL);
+    if (safety_stack_margin_http_err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "safety_stack_margin_http_start failed: %s -- no /api/saftyfw_stack_margin this boot",
+                 esp_err_to_name(safety_stack_margin_http_err));
     }
 
     // Development-only /api/sim (fault injection into the simulated plant).

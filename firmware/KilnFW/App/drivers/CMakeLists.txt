@@ -342,6 +342,13 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "safety/safety_ceiling_policy.c"
                        "safety/safety_ceiling_sync.c"
                        "http/safety_cfg_http.c"
+                       # GET /api/saftyfw_stack_margin -- surfaces
+                       # safety_link_get_stack_margin() (SaftyFW's nine live
+                       # per-task stack marks). Its own file, not folded into
+                       # safety_cfg_http.c: unrelated data (task stack
+                       # margins vs commissioning config), see its own
+                       # header comment.
+                       "http/safety_stack_margin_http.c"
                        # rules_http.c/rules_eval.c/rules_task.c (the "Relays &
                        # Rules" engine) were deleted 2026-08-27: relay/IO
                        # control moved into firing profiles as segments (see

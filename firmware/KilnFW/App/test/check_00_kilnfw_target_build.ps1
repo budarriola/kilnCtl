@@ -192,10 +192,29 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
 # publish step would not have prevented that.
 $lock = Enter-BuildLock -Name "kilnfw_checkbuild_worktree"
 try {
-    Write-Host "Mirroring current firmware/KilnFW and firmware/hwAbstraction into $WorktreePath ..."
+    Write-Host "Mirroring current firmware/KilnFW, firmware/hwAbstraction and firmware/CommonFW into $WorktreePath ..."
     Mirror-Tree (Join-Path $repoRoot "firmware\KilnFW") (Join-Path $WorktreePath "firmware\KilnFW") `
         @("build", "components\lvgl", ".git") @("sdkconfig")
     Mirror-Tree (Join-Path $repoRoot "firmware\hwAbstraction") (Join-Path $WorktreePath "firmware\hwAbstraction") `
+        @(".git") @()
+    # firmware/CommonFW (kilnlink) -- added 2026-09-14. The worktree's OWN git
+    # checkout is pinned to whatever $headCommit existed the FIRST time this
+    # persistent worktree was created (git worktree add above only runs once,
+    # guarded by Test-Path $WorktreePath) and is never advanced afterward, so
+    # anything reached only through the worktree's git history -- rather than
+    # mirrored like KilnFW/hwAbstraction above -- silently goes stale the
+    # moment CommonFW changes on a later run. This was invisible until now
+    # because CommonFW rarely changed; it broke the FIRST time it did
+    # (KILNLINK_PROTOCOL_VERSION 13's new kilnlink_stack_margin.c/kilnlink_
+    # get_stack_margin.c, docs/audits/saftyfw_live_stack_reporting_impl_2026-
+    # 09-14.md): "Cannot find source file ... CommonFW/src/kilnlink_get_
+    # stack_margin.c" -- a CMake configure failure, not a compile error, so
+    # it looked like a broken build rather than a stale mirror. KILNLINK_DIR
+    # (firmware/KilnFW/components/kilnlink/CMakeLists.txt) resolves to
+    # "$WorktreePath/firmware/CommonFW" via a relative path, which is exactly
+    # this worktree's own (stale) checkout unless mirrored the same way the
+    # other two trees are.
+    Mirror-Tree (Join-Path $repoRoot "firmware\CommonFW") (Join-Path $WorktreePath "firmware\CommonFW") `
         @(".git") @()
 
     Copy-Item -Path $MainSdkconfig -Destination $WorktreeSdkconfig -Force
@@ -255,7 +274,8 @@ try {
 
     $newestSourceTime = Get-NewestSourceTime @(
         (Join-Path $WorktreePath "firmware\KilnFW"),
-        (Join-Path $WorktreePath "firmware\hwAbstraction")
+        (Join-Path $WorktreePath "firmware\hwAbstraction"),
+        (Join-Path $WorktreePath "firmware\CommonFW")
     )
     if (-not $newestSourceTime) {
         Fail "could not determine a newest source mtime under $WorktreePath after mirroring -- refusing to grade artifact freshness with no signal to grade it against"

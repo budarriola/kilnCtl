@@ -1441,6 +1441,26 @@ try {
             "`"$(Join-Path $driversDir 'control/pid.c')`" `"$(Join-Path $driversDir 'control/pid_fuzzy.c')`""
     Invoke-HostTestExe -Name "sim_fuzzy_closedloop" -ExePath $exeFuzzyCl -BuildCmd $cmdFuzzyCl
 
+    # ---- sim_scenarios.exe: docs/SCENARIO_SIMULATION_PLAN.md WI-4 (runner
+    # skeleton, scenario table, arm selection -- S0/S1/S3, all six arms; see
+    # sim_scenarios.c's own top comment for exactly what is and is not real
+    # yet, e.g. SIM_ARM_PID_AT/SIM_ARM_FUZZY_AT are single-firing stand-ins
+    # until WI-8, SIM_ARM_STATIC_MATCHED's multipliers are pinned at 1.0
+    # until WI-5). Same gating posture as sim_fuzzy_closedloop.c immediately
+    # above: run automatically, DOES gate the build, deterministic, no
+    # external capture files. Negative-tested 2026-09-14 (zeroed
+    # SIM_SCENARIO_TABLE[0]'s model_k_dc by hand, confirmed
+    # SCENARIO_REFUSED + non-zero exit with no numeric row printed, restored
+    # by hand, forced a full rebuild, reconfirmed PASS -- see the commit
+    # this shipped in for the transcript).
+    $exeScenarios = Join-Path $outDir "kilnctl_sim_scenarios.exe"
+    $cmdScenarios = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$outDir\\`" /Fe:`"$exeScenarios`" `"$(Join-Path $testDir 'sim_scenarios.c')`" " +
+            "`"$(Join-Path $testDir 'sim_scenario_table.c')`" `"$(Join-Path $testDir 'sim_plant.c')`" " +
+            "`"$(Join-Path $driversDir 'control/pid.c')`" `"$(Join-Path $driversDir 'control/pid_fuzzy.c')`" " +
+            "`"$(Join-Path $driversDir 'control/pid_autotune.c')`" `"$(Join-Path $driversDir 'control/firing_score.c')`""
+    Invoke-HostTestExe -Name "sim_scenarios" -ExePath $exeScenarios -BuildCmd $cmdScenarios
+
     # ---- sim_fuzzy_overshoot.exe: docs/audits/fuzzy_overshoot_measurement_
     # 2026-09-13.md -- the owner correction that sim_fuzzy_closedloop.c's
     # tracking scenario (IAE/MAE averaged over a whole run) is the wrong
@@ -1577,7 +1597,11 @@ try {
     # 38 -> 39: test_safety_stack_margin_http.c's own 39th Invoke-
     # HostTestExe call -- docs/audits/saftyfw_live_stack_reporting_impl_
     # 2026-09-14.md's HTTP surface for SaftyFW's nine live stack marks.
-    $totalExpected = 39
+    # 39 -> 40: this pass added sim_scenarios.c as its own 40th Invoke-
+    # HostTestExe call -- docs/SCENARIO_SIMULATION_PLAN.md WI-4's runner
+    # skeleton (S0/S1/S3, all six arms), same gating posture as
+    # sim_fuzzy_closedloop.c above (deterministic, no external captures).
+    $totalExpected = 40
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the
