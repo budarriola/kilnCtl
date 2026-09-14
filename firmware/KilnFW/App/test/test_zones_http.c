@@ -4171,6 +4171,71 @@ static void test_post_then_get_round_trips_new_fields(void)
               "GET must emit model_fit_ambient_c too");
 }
 
+// docs/audits/zones_get_autotune_baseline_exposure_2026-09-13.md: GET /api/
+// zones never emitted autotune_baseline_k_dc even though POST accepts it
+// (preserved-only, no z%u_ key of its own -- adaptive_tune.c is its sole
+// writer) and it is persisted since ZONES_CFG_VERSION 26. Set it directly on
+// the live config (the same way adaptive_tune.c's only writer would, since
+// there is no POST field to drive it through parse_zone_fields()), then
+// confirm the real zones_get_handler() reports it back exactly -- proving
+// the ratchet-anchor value 97288659/36f88d62 depend on is now externally
+// observable, not just internally trusted.
+static void test_get_emits_autotune_baseline_k_dc(void)
+{
+    TEST_SECTION("zones_get_handler -- emits autotune_baseline_k_dc (docs/audits/"
+                 "zones_get_autotune_baseline_exposure_2026-09-13.md)");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.zones[0].autotune_baseline_k_dc = 12.5f;
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = zones_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "zones_get_handler must return ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, "\"autotune_baseline_k_dc\":12.5000") != NULL,
+              "GET reports the stored autotune_baseline_k_dc exactly -- previously this key "
+              "never appeared in the response at all");
+
+    /* The sentinel case: 0 means "no baseline recorded yet"
+     * (zones_config_accessors.h) and must be emitted RAW, not substituted or
+     * omitted, same convention as every other 0-sentinel field on this
+     * endpoint (hyst_c, coil_power_w, ease_off_window_mult, ...) -- a client
+     * cannot tell "not recorded" from "recorded as exactly 0" any other way. */
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    err = zones_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "zones_get_handler must return ESP_OK for the sentinel case too");
+    TEST_CHECK(strstr(s_last_resp_body, "\"autotune_baseline_k_dc\":0.0000") != NULL,
+              "GET reports the unrecorded sentinel (0) verbatim, never a substituted value");
+
+    /* Round-trip through the real POST path too: parse_zone_fields() has no
+     * z%u_ key for this field, so a whole-page POST must PRESERVE whatever
+     * is already stored (test_post_omitting_new_fields_preserves_stored_
+     * values already covers parse_zone_fields() directly) and the GET
+     * response after that POST must still show the preserved value -- this
+     * is the actual end-to-end path an operator/tool would observe. */
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.zones[0].autotune_baseline_k_dc = 33.75f;
+    char body[900];
+    snprintf(body, sizeof(body),
+             "thermo_count=1&relay_count=1&" MINIMAL_TIMING_PROFILE_BODY
+             "&z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&z0_timingprofile=0&"
+             "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=0&z0_sanity=0&z0_mode=3&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+             "z0_settings_source=255");
+    run_zones_post(body);
+    TEST_CHECK(s_test_ok_called && !s_test_err_called,
+              "the whole-page POST (no autotune_baseline_k_dc key at all) must be accepted");
+    err = zones_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "zones_get_handler must return ESP_OK after the round-trip POST");
+    TEST_CHECK(strstr(s_last_resp_body, "\"autotune_baseline_k_dc\":33.7500") != NULL,
+              "GET after an ordinary whole-page POST still reports the anchor PRESERVED, "
+              "exactly like the pre-POST value -- this is the observable proof that "
+              "36f88d62's zeroing fix actually holds end-to-end");
+}
+
 // Opus review of 992f3954 (zones v22, progress_band_c), item 3: json_cap in
 // zones_get_handler() (7360 bytes, heap_caps_malloc) has a hand-maintained
 // comment chain of every bump's worst-case reasoning, but that chain stopped
@@ -4299,6 +4364,11 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
          * max temperature and for the -273.15 UNKNOWN sentinel. */
         z->model_fit_temp_c = ZONE_MAX_TEMP_C_MAX;
         z->model_fit_ambient_c = ZONE_MAX_TEMP_C_MAX;
+        /* ZONES_CFG_VERSION 25->26's autotune_baseline_k_dc, now emitted by
+         * zones_get_handler() (docs/audits/zones_get_autotune_baseline_
+         * exposure_2026-09-13.md) -- pinned at its documented max, same
+         * discipline as model_k_dc/coupling_diag_k_dc above. */
+        z->autotune_baseline_k_dc = ZONE_AUTOTUNE_K_DC_MAX;
     }
 
     httpd_req_t req;
@@ -10465,6 +10535,7 @@ void run_test_zones_http(void)
     test_post_settings_source_group_key_wins_over_legacy_scalar();
     test_post_settings_source_all_keys_omitted_preserves_every_group();
     test_post_then_get_round_trips_new_fields();
+    test_get_emits_autotune_baseline_k_dc();
     test_zones_get_handler_max_width_response_fits_json_cap();
     test_tuning_rec_body_len_strips_the_idf_appended_nul();
     test_zones_get_handler_malloc_failure_returns_clean_500();

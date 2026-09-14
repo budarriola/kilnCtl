@@ -503,6 +503,26 @@ esp_err_t zones_get_handler(httpd_req_t *req)
          * convention as model_k_dc/tuning_* above. */
         APPEND("\"model_fit_temp_c\":%.2f,\"model_fit_ambient_c\":%.2f,",
                (double)z->model_fit_temp_c, (double)z->model_fit_ambient_c);
+        /* ZONES_CFG_VERSION 25->26's autotune_baseline_k_dc -- the K_dc
+         * adaptive_tune_refine_zone_locked() anchors its plausibility ratio
+         * test and blend target to (zones_config_accessors.h's own comment
+         * on this field). Accepted on POST only as a preserved passthrough
+         * (zones_http_post_parse.c has no z%u_ key for it -- adaptive_tune.c
+         * is its only writer), never emitted here until now
+         * (docs/audits/zones_get_autotune_baseline_exposure_2026-09-13.md):
+         * write-only from the API's perspective meant neither an operator
+         * nor a tool could read back what the ratchet anchor currently
+         * holds, so 36f88d62's "don't let a whole-page POST zero it" fix and
+         * 97288659's anchor itself were both unverifiable from outside the
+         * firmware. 0 means "no baseline recorded yet" (same sentinel
+         * convention model_k_dc/autotune_baseline_k_dc's own doc comment
+         * use) -- emitted RAW, verbatim, same "the page shows what is
+         * actually stored, 0 is a real round-trippable answer, never
+         * resolved into a substituted number" convention hyst_c/coil_power_w
+         * above use. %.4f matches model_k_dc's own precision -- same unit,
+         * same small-gain-zone concern. Always emitted, same always-emit
+         * convention as model_k_dc/model_fit_temp_c above. */
+        APPEND("\"autotune_baseline_k_dc\":%.4f,", (double)z->autotune_baseline_k_dc);
         /* ZONES_CFG_VERSION 24->25's coil_power_w -- per-coil nameplate
          * wattage override, 0 meaning "not overridden, use an equal share
          * of the whole-kiln max_expected_power_w nameplate sum" (see that
