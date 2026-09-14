@@ -17,9 +17,11 @@
       "kilnlink_context.h:KILNLINK_CONTEXT_MAX_LEN=(KILNLINK_CONTEXT_FIXED_LEN + KILNLINK_CONTEXT_MAX_ZONES * KILNLINK_CONTEXT_ZONE_BLOCK_LEN)",
       "kilnlink_context.h:KILNLINK_CONTEXT_ZONE_BLOCK_LEN=14u",
       "kilnlink_ct_auto_zero_begin.h:KILNLINK_CT_AUTO_ZERO_BEGIN_LEN=2u",
+      "kilnlink_ct_auto_zero_begin.h:KILNLINK_CT_AUTO_ZERO_NUM_CHANNELS=3u",
       "kilnlink_ct_auto_zero_status.h:KILNLINK_CT_AUTO_ZERO_STATUS_LEN=9u",
       "kilnlink_ct_cal.h:KILNLINK_CT_CAL_CHANNEL_LEN=9u",
       "kilnlink_ct_cal.h:KILNLINK_CT_CAL_LEN=(1u + KILNLINK_CT_CAL_NUM_CHANNELS * KILNLINK_CT_CAL_CHANNEL_LEN)",
+      "kilnlink_ct_cal.h:KILNLINK_CT_CAL_NUM_CHANNELS=3u",
       "kilnlink_diag.h:KILNLINK_DIAG_LEN=26u",
       "kilnlink_frame.h:KILNLINK_FRAME_CRC_LEN=2u",
       "kilnlink_frame.h:KILNLINK_FRAME_HEADER_LEN=8u",
@@ -59,11 +61,13 @@
       "kilnlink_set_clock.h:KILNLINK_SET_CLOCK_LEN=9u",
       "kilnlink_set_config.h:KILNLINK_SET_CONFIG_LEN=2u",
       "kilnlink_set_ct_cal.h:KILNLINK_SET_CT_CAL_LEN=11u",
+      "kilnlink_set_ct_cal.h:KILNLINK_SET_CT_CAL_NUM_CHANNELS=3u",
       "kilnlink_set_log_level.h:KILNLINK_SET_LOG_LEVEL_LEN=2u",
       "kilnlink_set_param.h:KILNLINK_SET_PARAM_HDR_LEN=4u",
       "kilnlink_set_param.h:KILNLINK_SET_PARAM_MAX_LEN=(KILNLINK_SET_PARAM_HDR_LEN + 4u)",
       "kilnlink_stack_margin.h:KILNLINK_STACK_MARGIN_ENTRY_LEN=5u",
-      "kilnlink_stack_margin.h:KILNLINK_STACK_MARGIN_LEN=(1u + 1u + KILNLINK_STACK_MARGIN_NUM_TASKS * KILNLINK_STACK_MARGIN_ENTRY_LEN)",
+      "kilnlink_stack_margin.h:KILNLINK_STACK_MARGIN_LEN=(1u + 1u + 4u + KILNLINK_STACK_MARGIN_NUM_TASKS * KILNLINK_STACK_MARGIN_ENTRY_LEN)",
+      "kilnlink_stack_margin.h:KILNLINK_STACK_MARGIN_NUM_TASKS=9u",
       "kilnlink_status.h:KILNLINK_STATUS_LEN=KILNLINK_STATUS_LEN_V1",
       "kilnlink_status.h:KILNLINK_STATUS_LEN_V1=23u",
       "kilnlink_status.h:KILNLINK_STATUS_LEN_V2=24u",
@@ -126,8 +130,8 @@
       "uart_task_ids.h:SAFETY_CMD_UPDATE_END=0x12u",
       "uart_task_ids.h:SAFETY_CMD_UPDATE_STATUS=0x14u"
     ],
-    "fingerprint": "12442d5985bf6eb4",
-    "version": 13
+    "fingerprint": "c60b2b77d26ac7a6",
+    "version": 14
   },
   "uart": {
     "defs": [

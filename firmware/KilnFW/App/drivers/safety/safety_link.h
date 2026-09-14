@@ -2281,9 +2281,9 @@ esp_err_t safety_link_get_ct_cal(SafetyLinkClass *link, uint8_t *out, size_t out
                                   size_t *out_len);
 
 /* SAFETY_CMD_GET_STACK_MARGIN (0x2B) / SAFETY_CMD_STACK_MARGIN (0x2C reply),
- * KILNLINK_PROTOCOL_VERSION 13 -- docs/audits/saftyfw_live_stack_reporting_
- * design_2026-09-11.md and its impl audit
- * docs/audits/saftyfw_live_stack_reporting_impl_2026-09-14.md.
+ * KILNLINK_PROTOCOL_VERSION 14 (payload grew a last_tick_ms freshness field
+ * 13 -> 14) -- docs/audits/saftyfw_live_stack_reporting_design_2026-09-11.md
+ * and its impl audit docs/audits/saftyfw_live_stack_reporting_impl_2026-09-14.md.
  *
  * Same request/reply/stash shape as safety_link_send_reboot() (one caller,
  * serialized by xact_lock, reply always stashed rather than out-param
@@ -2308,6 +2308,13 @@ esp_err_t safety_link_get_ct_cal(SafetyLinkClass *link, uint8_t *out, size_t out
  * poller has not finished its first full round-robin cycle and at least
  * one entry is still KILNLINK_STACK_MARGIN_UNMEASURED). Any surfaced
  * rendering of this data must repeat this caveat in its own text.
+ *
+ * FRESHNESS: `rounds_completed` saturates at 255 within ~2 minutes of Pico
+ * uptime and cannot indicate staleness past that point. Use `out->
+ * last_tick_ms` instead -- compare it across two calls; if it has not
+ * advanced (allowing for one u32 wrap), the poller has stalled. See
+ * kilnlink_stack_margin.h's own "last_tick_ms" section for the full
+ * contract.
  *
  * Returns ESP_ERR_INVALID_ARG for a NULL link/out, ESP_ERR_INVALID_STATE if
  * the driver isn't initialized, ESP_ERR_TIMEOUT if the request was never

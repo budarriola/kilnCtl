@@ -275,8 +275,36 @@
  * The separate UART LINK version (kilnlink_get_fw_version.h /
  * KILNLINK_MIN_COMPATIBLE's sibling constant, currently 11) is UNCHANGED --
  * this pass adds an application-level command pair; it does not touch the
- * transport framing (start/length/CRC) at all. */
-#define KILNLINK_PROTOCOL_VERSION 13
+ * transport framing (start/length/CRC) at all.
+ *
+ * 13 -> 14 (2026-09-14): SAFETY_CMD_STACK_MARGIN (0x2C)'s payload grows a
+ * `last_tick_ms` (u32 LE) field -- KILNLINK_STACK_MARGIN_LEN 47 -> 51 --
+ * per docs/audits/saftyfw_live_stack_reporting_impl_2026-09-14.md's review
+ * (defect 1): `rounds_completed` alone saturates at 255 within ~2 minutes of
+ * uptime and cannot serve as a freshness signal, so a stalled poller (log_task
+ * hung) was indistinguishable on the wire from a live one. `last_tick_ms` is
+ * a free-running tick count stamped on every poller tick (~500ms), letting a
+ * consumer detect "this cache stopped advancing" independent of
+ * `rounds_completed`.
+ *
+ * This is a REAL layout break of an EXISTING frame -- unlike the 12->13 step
+ * (brand-new ids), an old 47-byte-shaped decoder reading a new 51-byte frame,
+ * or a new decoder reading an old 47-byte frame, would misalign every entry
+ * field if length were not checked. It is NOT actually unsafe in practice
+ * only because `kilnlink_stack_margin_decode()` rejects any `len !=
+ * KILNLINK_STACK_MARGIN_LEN` before reading a single field (docs/audits/
+ * saftyfw_live_stack_reporting_impl_2026-09-14.md review sec 5) -- a skewed
+ * pair fails closed with ERR_LENGTH_MISMATCH, never a misparse, exactly the
+ * same safety property the Frame A growths (5->6, 9->10) relied on. Bumped
+ * anyway for the same visibility reason as 12->13: a version-visible signal
+ * beats relying on a length-mismatch log line to notice a dual-reflash skew.
+ * KILNLINK_MIN_COMPATIBLE is NOT raised: the length check alone is
+ * sufficient to prevent misparsing, and an old (13) Pico paired with a new
+ * (14) ESP, or vice versa, degrades to a clean, logged ERR_LENGTH_MISMATCH
+ * on this one frame -- every other frame on the link is completely
+ * unaffected, so refusing the whole link over this one payload's growth
+ * would be strictly worse than the status quo. */
+#define KILNLINK_PROTOCOL_VERSION 14
 
 /* The oldest peer this build will talk to (docs/LINK_PROTOCOL.md section 4,
  * "What 'compatible' means"). Deliberately NOT bumped alongside the 5 -> 6

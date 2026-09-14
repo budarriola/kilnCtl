@@ -50,6 +50,18 @@ extern "C" {
 // this poller's own first tick), that slot is silently skipped this round
 // and retried next time its turn comes up; it stays
 // KILNLINK_STACK_MARGIN_UNMEASURED until it succeeds at least once.
+//
+// The resolved handle is CACHED after the first successful lookup (see
+// stack_margin_poller.c's s_slots[].cached_handle) -- xTaskGetHandle()
+// suspends the scheduler and walks every task list by name, which is fine
+// once per task but wasteful to repeat on every ~500ms tick forever. This
+// is safe only because none of the nine target tasks is ever deleted or
+// recreated for the life of this firmware (no vTaskDelete() call exists
+// anywhere in firmware/SaftyFW/src, confirmed by grep) -- a cached handle
+// therefore never outlives the TCB it points at. If a future change gives
+// any of these nine tasks a restart/respawn path, that change must also
+// invalidate this cache (clear cached_handle when the task is torn down),
+// or this module must revert to resolving by name on every tick.
 void stack_margin_poller_tick(void);
 
 // Fills `out` with the current cached snapshot -- whatever

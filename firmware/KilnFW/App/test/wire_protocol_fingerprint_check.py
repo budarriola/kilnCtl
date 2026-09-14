@@ -165,7 +165,20 @@ def build_link_specs(root: Path):
             "version_file": root / "firmware/CommonFW/include/kilnlink/kilnlink_version.h",
             "version_macro": "KILNLINK_PROTOCOL_VERSION",
             "sources": [
-                (kilnlink_dir, "*.h", re.compile(r'^KILNLINK_.*(_LEN|_OFF)\w*$'),
+                # _LEN/_OFF cover fixed frame lengths/offsets directly; _NUM_/
+                # _COUNT cover the multiplicand macros a _LEN macro's own
+                # *text* can reference (e.g. KILNLINK_STACK_MARGIN_LEN is
+                # defined as "... NUM_TASKS * ENTRY_LEN") without that
+                # referenced macro's own name ending in _LEN/_OFF. Found
+                # missing 2026-09-14: KILNLINK_STACK_MARGIN_NUM_TASKS changing
+                # 9 -> 10 silently grows the wire frame 47 -> 52 bytes while
+                # every captured string stays byte-identical, since the
+                # fingerprint hashes the recorded #define TEXT, not its
+                # expanded/computed value -- see this file's own module
+                # docstring for why a text-level fingerprint was chosen over
+                # a value-level one, and negative-test proof in
+                # docs/audits/saftyfw_live_stack_reporting_impl_2026-09-14.md.
+                (kilnlink_dir, "*.h", re.compile(r'^KILNLINK_.*(_LEN|_OFF|_NUM_|_COUNT)\w*$'),
                  lambda p: p.name != "kilnlink_version.h"),
                 (uart_ids.parent, uart_ids.name, re.compile(r'^SAFETY_CMD_'), None),
                 (safaty_link_frame.parent, safaty_link_frame.name,

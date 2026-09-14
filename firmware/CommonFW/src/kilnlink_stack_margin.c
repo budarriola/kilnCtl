@@ -4,13 +4,15 @@
 /* Offsets, per docs/LINK_PROTOCOL.md sec 4:
  *   0                        u8  cmd (0x2C)
  *   1                        u8  rounds_completed
- *   2 + i*5 + 0              u8  entries[i].task_id
- *   2 + i*5 + 1              u16 entries[i].high_water_words
- *   2 + i*5 + 3              u16 entries[i].stack_total_words
+ *   2                        u32 last_tick_ms (LE)
+ *   6 + i*5 + 0              u8  entries[i].task_id
+ *   6 + i*5 + 1              u16 entries[i].high_water_words
+ *   6 + i*5 + 3              u16 entries[i].stack_total_words
  * for i in [0, KILNLINK_STACK_MARGIN_NUM_TASKS)
  */
 #define OFF_ROUNDS   1u
-#define OFF_ENTRIES  2u
+#define OFF_TICK     2u
+#define OFF_ENTRIES  6u
 
 size_t kilnlink_stack_margin_encode(const kilnlink_stack_margin_t *msg, uint8_t *out,
                                      size_t out_cap, kilnlink_stack_margin_status_t *status)
@@ -32,6 +34,7 @@ size_t kilnlink_stack_margin_encode(const kilnlink_stack_margin_t *msg, uint8_t 
 
     out[0] = KILNLINK_STACK_MARGIN_CMD;
     out[OFF_ROUNDS] = msg->rounds_completed;
+    kilnlink_put_u32le(out, OFF_TICK, msg->last_tick_ms);
 
     for (size_t i = 0; i < KILNLINK_STACK_MARGIN_NUM_TASKS; i++) {
         size_t base = OFF_ENTRIES + i * KILNLINK_STACK_MARGIN_ENTRY_LEN;
@@ -55,6 +58,7 @@ kilnlink_stack_margin_status_t kilnlink_stack_margin_decode(const uint8_t *paylo
 
     if (out) {
         out->rounds_completed = payload[OFF_ROUNDS];
+        out->last_tick_ms = kilnlink_get_u32le(payload, OFF_TICK);
         for (size_t i = 0; i < KILNLINK_STACK_MARGIN_NUM_TASKS; i++) {
             size_t base = OFF_ENTRIES + i * KILNLINK_STACK_MARGIN_ENTRY_LEN;
             out->entries[i].task_id = payload[base];

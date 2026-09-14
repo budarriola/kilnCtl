@@ -1,6 +1,7 @@
 /* Host-native test for kilnlink_stack_margin.{c,h} -- the Pico->ESP
  * SAFETY_CMD_STACK_MARGIN (0x2C) codec, reply to SAFETY_CMD_GET_STACK_MARGIN
- * (0x2B). docs/LINK_PROTOCOL.md sec 4, KILNLINK_PROTOCOL_VERSION 13.
+ * (0x2B). docs/LINK_PROTOCOL.md sec 4, KILNLINK_PROTOCOL_VERSION 14 (payload
+ * grew a last_tick_ms freshness field 13 -> 14, 47 -> 51 bytes).
  *
  * Covers: a full round trip with all 9 tasks fully measured, a round trip
  * with the KILNLINK_STACK_MARGIN_UNMEASURED sentinel still present
@@ -35,6 +36,7 @@ static void fill_all_measured(kilnlink_stack_margin_t *msg)
 {
     memset(msg, 0, sizeof(*msg));
     msg->rounds_completed = 3;
+    msg->last_tick_ms = 0x12345678u;
     /* Plausible-looking per-task words, distinct per entry so a transposed
      * field/entry bug would be caught rather than hidden behind repeated
      * values. */
@@ -58,7 +60,7 @@ static void test_round_trip_all_measured(void)
     kilnlink_stack_margin_status_t status;
     size_t n = kilnlink_stack_margin_encode(&msg, buf, sizeof(buf), &status);
     CHECK(status == KILNLINK_STACK_MARGIN_OK, "encode() reports OK");
-    CHECK(n == KILNLINK_STACK_MARGIN_LEN, "encode() always writes exactly 47 bytes");
+    CHECK(n == KILNLINK_STACK_MARGIN_LEN, "encode() always writes exactly 51 bytes");
     CHECK(buf[0] == KILNLINK_STACK_MARGIN_CMD, "encoded byte 0 is the command id (0x2C)");
 
     kilnlink_stack_margin_t decoded;
@@ -66,6 +68,7 @@ static void test_round_trip_all_measured(void)
     CHECK(kilnlink_stack_margin_decode(buf, n, &decoded) == KILNLINK_STACK_MARGIN_OK,
           "decode() reports OK for a just-encoded payload");
     CHECK(decoded.rounds_completed == 3, "decoded rounds_completed round-trips");
+    CHECK(decoded.last_tick_ms == 0x12345678u, "decoded last_tick_ms round-trips");
     for (size_t i = 0; i < KILNLINK_STACK_MARGIN_NUM_TASKS; i++) {
         CHECK(decoded.entries[i].task_id == msg.entries[i].task_id, "task_id round-trips per entry");
         CHECK(decoded.entries[i].high_water_words == msg.entries[i].high_water_words,
@@ -90,7 +93,7 @@ static void test_round_trip_unmeasured_sentinel(void)
     uint8_t buf[KILNLINK_STACK_MARGIN_LEN];
     kilnlink_stack_margin_status_t status;
     size_t n = kilnlink_stack_margin_encode(&msg, buf, sizeof(buf), &status);
-    CHECK(n == KILNLINK_STACK_MARGIN_LEN, "encode() of a partial-round message still writes 47 bytes");
+    CHECK(n == KILNLINK_STACK_MARGIN_LEN, "encode() of a partial-round message still writes 51 bytes");
 
     kilnlink_stack_margin_t decoded;
     CHECK(kilnlink_stack_margin_decode(buf, n, &decoded) == KILNLINK_STACK_MARGIN_OK,
@@ -107,12 +110,14 @@ static void test_vector(void)
     /* Fixed wire vector for two tasks, hand-computed little-endian, to
      * catch an offset/endianness regression that a self-consistent
      * round-trip test alone could miss. rounds_completed=1;
+     * last_tick_ms=0x01020304;
      * task0: id=0, hw=0x0010(16), total=0x0100(256);
      * task1: id=1, hw=0x0002(2),  total=0x0080(128);
      * remaining 7 entries zeroed. */
     kilnlink_stack_margin_t msg;
     memset(&msg, 0, sizeof(msg));
     msg.rounds_completed = 1;
+    msg.last_tick_ms = 0x01020304u;
     msg.entries[0].task_id = 0;
     msg.entries[0].high_water_words = 16;
     msg.entries[0].stack_total_words = 256;
@@ -123,11 +128,12 @@ static void test_vector(void)
     uint8_t buf[KILNLINK_STACK_MARGIN_LEN];
     kilnlink_stack_margin_status_t status;
     size_t n = kilnlink_stack_margin_encode(&msg, buf, sizeof(buf), &status);
-    CHECK(n == KILNLINK_STACK_MARGIN_LEN, "vector: encode() writes 47 bytes");
+    CHECK(n == KILNLINK_STACK_MARGIN_LEN, "vector: encode() writes 51 bytes");
 
     static const uint8_t expected_prefix[] = {
         0x2C,       /* cmd */
         0x01,       /* rounds_completed */
+        0x04, 0x03, 0x02, 0x01, /* last_tick_ms LE */
         0x00, 0x10, 0x00, 0x00, 0x01, /* entry 0: id, hw lo/hi, total lo/hi */
         0x01, 0x02, 0x00, 0x80, 0x00, /* entry 1: id, hw lo/hi, total lo/hi */
     };

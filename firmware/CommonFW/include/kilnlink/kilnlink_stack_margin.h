@@ -45,6 +45,29 @@ extern "C" {
  * (KILNLINK_STACK_MARGIN_UNMEASURED, 0xFFFF) and has never actually been
  * sampled yet -- a consumer must check this before treating every entry as
  * live data, and must NOT report an unmeasured entry as a real number.
+ * NOTE: `rounds_completed` saturates at 255 (~2 minutes of uptime at the
+ * ~4.5s/round cadence) and is USELESS as a freshness signal past that point
+ * -- do not use it to detect a stalled poller. Use `last_tick_ms` below.
+ *
+ * `last_tick_ms` is a free-running FreeRTOS tick count (converted to
+ * milliseconds, `xTaskGetTickCount() * portTICK_PERIOD_MS`), stamped every
+ * time `stack_margin_poller_tick()` runs -- i.e. every ~500ms, driven by
+ * log_task's own loop, independent of round completion. This is the
+ * feature's freshness signal: a consumer that polls this endpoint twice and
+ * sees `last_tick_ms` unchanged (or advancing by far less than the elapsed
+ * wall-clock time) knows the poller -- and by extension log_task -- has
+ * stalled, even though `rounds_completed` may already read 255 and every
+ * entry may already read `measured:true`. It wraps (u32 ms rolls over after
+ * ~49.7 days uptime); a consumer detects staleness by checking whether the
+ * value advanced at all across a poll interval much shorter than the wrap
+ * period, not by comparing it to wall-clock time, and must handle a single
+ * wrap (newer < older) as "still advancing," not as "went backwards and is
+ * therefore stale." Chosen over widening `rounds_completed` (would still
+ * saturate, just later, and the saturation itself is inherent to a bounded
+ * counter -- a plain counter can never DISPROVE staleness once saturated)
+ * and over a wrapping small counter (adds a second sentinel/wrap class for
+ * no benefit over a millisecond tick, which is already free-running FreeRTOS
+ * state with no extra bookkeeping).
  *
  * FLOOR, NOT WORST CASE -- docs/audits/saftyfw_live_stack_reporting_design_
  * 2026-09-11.md sec 4 and saftyfw_bare_minimum_stack_measurement_2026-09-11.md's
@@ -67,8 +90,9 @@ extern "C" {
 #define KILNLINK_STACK_MARGIN_NUM_TASKS 9u
 /* task_id u8(1) + high_water_words u16(2) + stack_total_words u16(2) */
 #define KILNLINK_STACK_MARGIN_ENTRY_LEN 5u
+/* cmd(1) + rounds_completed(1) + last_tick_ms(4) + 9*entry(5) */
 #define KILNLINK_STACK_MARGIN_LEN \
-    (1u + 1u + KILNLINK_STACK_MARGIN_NUM_TASKS * KILNLINK_STACK_MARGIN_ENTRY_LEN) /* 47 */
+    (1u + 1u + 4u + KILNLINK_STACK_MARGIN_NUM_TASKS * KILNLINK_STACK_MARGIN_ENTRY_LEN) /* 51 */
 
 /* Sentinel for an entry the poller has never sampled yet (startup, before
  * the first full round completes). Not a plausible real high-water-mark
@@ -107,13 +131,14 @@ typedef struct {
 } kilnlink_stack_margin_entry_t;
 
 typedef struct {
-    uint8_t                       rounds_completed; /* saturates at 255 */
+    uint8_t                       rounds_completed; /* saturates at 255 -- NOT a freshness signal, see above */
+    uint32_t                      last_tick_ms;     /* free-running, wraps -- see "last_tick_ms" above */
     kilnlink_stack_margin_entry_t entries[KILNLINK_STACK_MARGIN_NUM_TASKS];
 } kilnlink_stack_margin_t;
 
 /* Serializes `msg` (SAFETY_CMD_STACK_MARGIN payload, byte 0 = 0x2C included)
- * into `out`. Always exactly KILNLINK_STACK_MARGIN_LEN (47) bytes -- no
- * variable-length fields. Returns 47, or 0 on
+ * into `out`. Always exactly KILNLINK_STACK_MARGIN_LEN (51) bytes -- no
+ * variable-length fields. Returns 51, or 0 on
  * KILNLINK_STACK_MARGIN_ERR_BUFFER_TOO_SMALL. */
 size_t kilnlink_stack_margin_encode(const kilnlink_stack_margin_t *msg, uint8_t *out,
                                      size_t out_cap, kilnlink_stack_margin_status_t *status);

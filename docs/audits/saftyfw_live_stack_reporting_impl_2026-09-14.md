@@ -269,16 +269,23 @@ FLOORS -- see this file's own units/floor caveats above):
 All three tasks with a cited static prediction sit ABOVE it live, exactly
 as expected for a static `-fstack-usage` lower bound versus a live
 high-water floor that has actually run real code paths -- none of this is
-a red flag by itself. `link_task` is the one worth naming explicitly: it
-is both the largest live/static gap (136 B, vs 1 word for the other two)
-and the task this document's own design section already names as
-"historically the overflow suspect, and the prime suspect in the two
-unexplained heat-start reboots" -- this measurement does not explain those
-reboots, but it is a real, larger-than-predicted margin consumption on
-exactly the task under suspicion, worth carrying into that investigation
-rather than dismissed as noise. No task is anywhere near its configured
-total (`relay_owner` and `watchdog_task`, the tightest as fractions, are
-still at ~84%/76% FREE).
+a red flag by itself.
+
+**Correction (2026-09-14 review):** the paragraph originally here claimed
+`link_task`'s "136 B above its static lower bound" figure was worth tracking
+as a lead on the two unexplained heat-start reboots. **That figure is a
+single-boot reading and does not reproduce.** A later live read on a
+different boot (`88bb4333`, boot_id 115) gave `link_task` 1526 words free
+(1034 used) -- *below* the 1184-word static bound, the opposite direction
+from this table's 1342/1218. A high-water floor is per-boot and
+path-dependent by construction (see this document's own "FLOOR, NOT WORST
+CASE" section); one boot's 136 B gap is not a stable property of `link_task`
+and must not be quoted as one. The underlying, still-true observation is
+narrower: static `-fstack-usage` lower bounds are lower bounds, not
+predictions of the live figure, and live readings vary boot to boot -- that
+is expected and not itself informative about the heat-start reboots. No task
+is anywhere near its configured total (`relay_owner` and `watchdog_task`,
+the tightest as fractions, are still at ~84%/76% FREE).
 
 Actual JSON width on this board: 1101 bytes (measured via `curl | wc -c`),
 consistent with the host test's own worst-case-width assertions.
@@ -315,7 +322,16 @@ this one's own edits.
 both directions + fuzzed + negative-tested, from the earlier pass), the
 HTTP surface (`GET /api/saftyfw_stack_margin`, its own max-width-tested
 host test), both processors flashed and confirmed healthy at protocol 13,
-watchdog cadence measured before and after with no regression, all nine
+no watchdog reset observed in a ~40s pre-flash and ~60s post-flash window
+(corrected 2026-09-14: this is two no-reset observation windows using two
+different instruments on an already-healthy, non-reset-looping board, not a
+"cadence" measurement -- "cadence" describes the historical quantity, uptime
+*between* watchdog resets on a board that WAS reset-looping (~9s degrading to
+~1.1s during the 2026-08-23 regression); there was no resetting here to time
+between. The acceptance criterion this exists to satisfy -- the round-robin
+poller does not reintroduce that regression -- IS met, and is now far better
+evidenced by the 2026-09-14 review's ~36 minutes of continuous poller-live
+uptime with zero resets, see that review's section 1), all nine
 live per-task marks read and compared against the static lower bounds
 (one, `link_task`, flagged as worth tracking further), and two real,
 separate stale-build-recipe bugs found and fixed
@@ -620,3 +636,57 @@ Quality follow-up: cache the nine `TaskHandle_t`s instead of calling
 The three failures this document records (`check_fuzzy_gain_mirror_drift.ps1`,
 `check_doc_citations.ps1`, `check_test_c_files_wired.ps1`) have since been
 resolved by their owning sessions; all three pass now.
+
+## Follow-up pass, 2026-09-14 (later same day) — the three review defects fixed
+
+Addressed all three defects from the "Verdict" section above, in order:
+
+1. **Freshness.** Added `last_tick_ms` (u32 LE, free-running FreeRTOS tick
+   count in ms, stamped on every `stack_margin_poller_tick()` call --
+   independent of round completion) to the `SAFETY_CMD_STACK_MARGIN` wire
+   frame. `KILNLINK_STACK_MARGIN_LEN` 47 -> 51,
+   `KILNLINK_PROTOCOL_VERSION` 13 -> 14 (see `kilnlink_version.h`'s own
+   "13 -> 14" entry for the bump reasoning -- a real layout break of an
+   existing frame, made safe only by the length check, matching the Frame A
+   growth precedent). A timestamp was chosen over widening or wrapping
+   `rounds_completed`: a plain counter can saturate later but can never
+   *disprove* staleness once saturated, where a tick that stops advancing
+   proves a stall directly. A consumer detects staleness by polling twice and
+   checking whether `last_tick_ms` advanced (tolerating one u32 wrap), not by
+   comparing it to wall-clock time. `all_measured` in
+   `safety_stack_margin_build_json()` is now derived by scanning the nine
+   entries for the `UNMEASURED` sentinel, not from `rounds_completed > 0` --
+   it can no longer read `true` next to an entry whose own `measured` is
+   `false`. Both the wire header (`kilnlink_stack_margin.h`) and
+   `safety_link_get_stack_margin()`'s own doc comment restate the freshness
+   contract explicitly, per this project's own habit of never leaving a
+   correctness-relevant contract in only one place.
+
+2. **Fingerprint gap.** `wire_protocol_fingerprint_check.py`'s kilnlink
+   pattern widened from `^KILNLINK_.*(_LEN|_OFF)\w*$` to
+   `^KILNLINK_.*(_LEN|_OFF|_NUM_|_COUNT)\w*$`, so `KILNLINK_STACK_MARGIN_
+   NUM_TASKS` is now captured. Negative-tested against a clean, already-
+   reviewed baseline (manifest refreshed for the v14 bump first): changing
+   `KILNLINK_STACK_MARGIN_NUM_TASKS` 9 -> 10 in isolation now FAILS the check
+   (`FAIL [kilnlink]: wire-relevant declarations changed but
+   KILNLINK_PROTOCOL_VERSION did NOT move`), where before this fix the same
+   isolated change passed silently (confirmed by running `extract_defines()`
+   against the pre-fix regex and observing `NUM_TASKS` absent from the
+   captured set). Restored `NUM_TASKS` to 9 by hand afterward and reconfirmed
+   the check passes clean.
+
+3. **Poller handle-caching.** `stack_margin_poller.c`'s per-task
+   `TaskHandle_t` is now resolved via `xTaskGetHandle()` at most once per
+   task (cached in `stack_margin_slot_t.cached_handle`) instead of on every
+   ~500ms tick forever. Safe because none of the nine target tasks is ever
+   deleted or recreated for the life of this firmware (`grep -rn
+   vTaskDelete firmware/SaftyFW/src` returns nothing) -- a cached handle can
+   therefore never outlive the TCB it names. If a future change gives any of
+   these tasks a restart/respawn path, this cache must be invalidated
+   explicitly at that point (both `stack_margin_poller.c` and `.h` say so).
+
+All three fixes are host-tested (`test_stack_margin.c` round-trips
+`last_tick_ms`, updated wire vector; `test_safety_stack_margin_http.c` adds
+`test_all_measured_cannot_contradict_a_stuck_sentinel()`), and
+`wire_protocol_fingerprints.json` was regenerated via `--update` against the
+now-wider extraction pattern.

@@ -59,8 +59,9 @@ static const char *task_name(uint8_t task_id)
  * table), so a single stack buffer sized with real headroom -- not a
  * chunked response -- is appropriate here, same reasoning
  * build_commissioning_json() uses for its own fixed-shape body. Header/
- * trailer generously budgeted at 160 bytes. Real worst case is
- * 160 + 9*110 = 1150; this is comfortably over that. */
+ * trailer generously budgeted at 160 bytes (this also covers the added
+ * `"last_tick_ms":4294967295` field, ~28 bytes at its own worst case). Real
+ * worst case is 160 + 9*110 = 1150; this is comfortably over that. */
 #define STACK_MARGIN_JSON_MAX 1536u
 
 /* Pure/host-testable: takes only what it needs, no httpd_req_t/SafetyLinkClass,
@@ -94,8 +95,36 @@ size_t safety_stack_margin_build_json(bool link_up, esp_err_t link_result,
         return o;
     }
 
+    /* all_measured is derived by scanning the entries themselves for the
+     * UNMEASURED sentinel, NOT from rounds_completed > 0. rounds_completed
+     * advances even when a slot's xTaskGetHandle() lookup returns NULL (task
+     * not created yet, or -- more likely in practice -- a hand-maintained
+     * task-name string in stack_margin_poller.c has drifted from the real
+     * xTaskCreate() name), which can leave that one slot permanently at
+     * UNMEASURED while rounds_completed keeps climbing past 0. Deriving from
+     * rounds_completed alone would then report "all_measured":true next to
+     * that entry's own "measured":false -- a self-contradictory response.
+     * Scanning the entries is the only derivation that cannot disagree with
+     * what it is describing. */
+    bool all_measured = true;
+    for (size_t i = 0; i < KILNLINK_STACK_MARGIN_NUM_TASKS; i++) {
+        if (m->entries[i].high_water_words == KILNLINK_STACK_MARGIN_UNMEASURED) {
+            all_measured = false;
+            break;
+        }
+    }
+
     APPEND(",\"rounds_completed\":%u", (unsigned)m->rounds_completed);
-    APPEND(",\"all_measured\":%s", m->rounds_completed > 0 ? "true" : "false");
+    /* Freshness signal, not just a diagnostic value: a caller polling this
+     * endpoint repeatedly should compare last_tick_ms across polls -- if it
+     * stops advancing (allowing for one u32 wrap), the poller (and by
+     * extension the Pico's log_task) has stalled, even though
+     * rounds_completed may already read 255 (it saturates within ~2 minutes
+     * of uptime and cannot itself indicate staleness) and every entry may
+     * already read measured:true. See kilnlink_stack_margin.h's own
+     * "last_tick_ms" section. */
+    APPEND(",\"last_tick_ms\":%u", (unsigned)m->last_tick_ms);
+    APPEND(",\"all_measured\":%s", all_measured ? "true" : "false");
     APPEND(",\"tasks\":[");
     for (size_t i = 0; i < KILNLINK_STACK_MARGIN_NUM_TASKS; i++) {
         const kilnlink_stack_margin_entry_t *e = &m->entries[i];

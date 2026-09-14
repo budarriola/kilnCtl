@@ -75,6 +75,7 @@ static kilnlink_stack_margin_t make_fully_measured(void)
 {
     kilnlink_stack_margin_t m = {0};
     m.rounds_completed = 3;
+    m.last_tick_ms = 123456u;
     for (uint8_t i = 0; i < KILNLINK_STACK_MARGIN_NUM_TASKS; i++) {
         m.entries[i].task_id = i;
         m.entries[i].high_water_words = (uint16_t)(40u + i * 5u);
@@ -109,7 +110,8 @@ static void test_full_round_trip_all_nine(void)
     TEST_CHECK(len > 0, "full round trip build succeeded");
     TEST_CHECK(strstr(buf, "\"link_up\":true") != NULL, "reports link_up:true");
     TEST_CHECK(strstr(buf, "\"rounds_completed\":3") != NULL, "reports rounds_completed");
-    TEST_CHECK(strstr(buf, "\"all_measured\":true") != NULL, "all_measured true when rounds_completed>0");
+    TEST_CHECK(strstr(buf, "\"last_tick_ms\":123456") != NULL, "reports last_tick_ms (freshness signal)");
+    TEST_CHECK(strstr(buf, "\"all_measured\":true") != NULL, "all_measured true when every entry is measured");
     TEST_CHECK(strstr(buf, "\"units\":\"words\"") != NULL, "units field present and WORDS, not bytes");
     TEST_CHECK(strstr(buf, "\"name\":\"relay_owner\"") != NULL, "task 0 named relay_owner");
     TEST_CHECK(strstr(buf, "\"name\":\"watchdog_task\"") != NULL, "task 8 named watchdog_task");
@@ -152,6 +154,28 @@ static void test_unmeasured_sentinel_omits_fabricated_numbers(void)
     TEST_CHECK(strstr(buf, "65535") == NULL, "sentinel value never leaks into the JSON as a number");
 }
 
+// Reproduces the defect found by the 2026-09-14 review: the poller can
+// advance rounds_completed past 0 while one slot never resolved its
+// TaskHandle_t (a task-name drift, or a task not yet created) and therefore
+// stays at KILNLINK_STACK_MARGIN_UNMEASURED forever. Deriving all_measured
+// from rounds_completed alone would then report all_measured:true right
+// next to that entry's own measured:false -- self-contradictory. Proves
+// all_measured is now derived by scanning the entries themselves.
+static void test_all_measured_cannot_contradict_a_stuck_sentinel(void)
+{
+    kilnlink_stack_margin_t m = make_fully_measured();
+    m.rounds_completed = 200; // well past 0 -- the old, wrong signal for "all done"
+    m.entries[3].high_water_words = KILNLINK_STACK_MARGIN_UNMEASURED; // thermo_task stuck
+
+    char buf[STACK_MARGIN_JSON_MAX];
+    size_t len = safety_stack_margin_build_json(true, ESP_OK, &m, buf, sizeof(buf));
+    TEST_CHECK(len > 0, "stuck-sentinel-with-high-rounds build succeeded");
+    TEST_CHECK(strstr(buf, "\"all_measured\":false") != NULL,
+               "all_measured is false when ANY entry is still UNMEASURED, "
+               "regardless of how high rounds_completed has climbed");
+    TEST_CHECK(strstr(buf, "\"measured\":false") != NULL, "the stuck entry itself reports measured:false");
+}
+
 // Real worst-case width, per STACK_MARGIN_JSON_MAX's own comment: longest
 // task name (13 chars, "watchdog_task"/"discrete_task"), max 5-digit id
 // (impossible here since ids are 0-8, but high_water_words/stack_total_words
@@ -188,6 +212,7 @@ int main(void)
     test_link_down_reports_error_not_data();
     test_full_round_trip_all_nine();
     test_unmeasured_sentinel_omits_fabricated_numbers();
+    test_all_measured_cannot_contradict_a_stuck_sentinel();
     test_worst_case_width_fits_with_headroom();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
