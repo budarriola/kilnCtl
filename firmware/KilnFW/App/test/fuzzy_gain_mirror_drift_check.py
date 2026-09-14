@@ -40,15 +40,18 @@ required differences are normalized away:
     plain parameter, i.e. the already-resolved value. Both are folded to one
     token; the clamp itself is production-only config-loader plumbing, not
     part of the gain arithmetic this check exists to protect.
-  - production resolves error_band_c/rate_band_c_per_s from zones_config_
-    get_error_band_c()/get_rate_band_c_per_s() (falling back to pid_fuzzy.c's
-    own ERROR_BAND_C_DEFAULT/RATE_BAND_C_PER_S_DEFAULT, 20.0/0.5, on a
-    default config); the mirror passes those defaults as literals directly.
-    Both are folded to one token each -- this check does NOT verify the
-    default literals equal 20.0f/0.5f (that is a config-default concern, not
-    this call site's arithmetic), only that the same four values reach
-    pid_fuzzy_adjust() in the same argument positions, followed by the same
-    rescale/prev_ki-update/field-assignment sequence.
+  - production resolves error_band_c/rate_band_c_per_s exclusively from
+    resolve_fuzzy_bands() (this zone's own identified plant model) and, per
+    docs/audits/fuzzy_no_model_no_fuzzy_2026-09-14.md, forces strength_pct to
+    0 (dropping the call to pid_fuzzy_adjust() into its bit-exact-base-gains
+    short-circuit) rather than inventing a band when no model is identified;
+    the mirror has no model concept at all and passes 20.0f/0.5f as literals
+    directly, standing in for "some already-resolved band value", never
+    exercising the no-model path. Both are folded to one token each -- this
+    check does NOT verify the literals equal 20.0f/0.5f (a pid_fuzzy.c
+    internal-default concern, not this call site's arithmetic), only that the
+    same four values reach pid_fuzzy_adjust() in the same argument positions,
+    followed by the same rescale/prev_ki-update/field-assignment sequence.
 Everything else -- the error_c/error_rate_c_per_s computation, the
 pid_fuzzy_adjust() call's argument order, the pid_rescale_integral_for_new_ki()
 call and its argument order, the prev-Ki bookkeeping, and the final kp/ki/kd
@@ -195,17 +198,21 @@ PROD_ONLY_STMT_RES = [
     re.compile(r"^uint8_t strength_pct = \(!isfinite\(strength_pct_f\)\) \? 0 : \(strength_pct_f < 0\.0f\) \? 0 "
                r": \(strength_pct_f > 100\.0f\) \? 100 : \(uint8_t\)\(strength_pct_f \+ 0\.5f\)$"),
     re.compile(r"^float error_band_c = 0\.0f, rate_band_c_per_s = 0\.0f$"),
-    re.compile(r"^\(void\)zones_config_get_error_band_c\(zi, &error_band_c\)$"),
-    re.compile(r"^\(void\)zones_config_get_rate_band_c_per_s\(zi, &rate_band_c_per_s\)$"),
-    # docs/audits/fuzzy_dimensionless_bands_2026-09-13.md: production now
-    # resolves error_band_c/rate_band_c_per_s through resolve_fuzzy_bands()
-    # (a zone-model-aware resolver, falling back to the two config getters
-    # above only for a never-autotuned zone) instead of calling those two
-    # getters directly. The mirror has no zone_runtime_t/model concept at
-    # all -- same "structurally required difference" as strength_pct's
-    # resolution above -- so this one-statement call is dropped entirely,
-    # matching how the whole strength_pct derivation block is dropped.
-    re.compile(r"^resolve_fuzzy_bands\(z, zi, &error_band_c, &rate_band_c_per_s\)$"),
+    # docs/audits/fuzzy_no_model_no_fuzzy_2026-09-14.md (supersedes the
+    # fuzzy_dimensionless_bands_2026-09-13.md-era config-getter fallback this
+    # check used to fold above): production now resolves error_band_c/
+    # rate_band_c_per_s exclusively through resolve_fuzzy_bands(), a
+    # zone-model-aware resolver, and forces strength_pct to 0 (plain PID,
+    # reusing the existing strength_pct==0 short-circuit) rather than
+    # inventing a band when this zone has no identified plant model. The
+    # mirror has no zone_runtime_t/model concept at all -- same "structurally
+    # required difference" as strength_pct's own resolution above -- so this
+    # bool-returning call and the two model-gated one-line `if` statements
+    # that consume it are dropped entirely, matching how the whole
+    # strength_pct derivation block is dropped.
+    re.compile(r"^bool bands_from_model = resolve_fuzzy_bands\(z, zi, &error_band_c, &rate_band_c_per_s\)$"),
+    re.compile(r"^if \(!bands_from_model\) strength_pct = 0$"),
+    re.compile(r"^if \(!bands_from_model\) log_fuzzy_disabled_no_model_once\(zi\)$"),
     re.compile(r"^\*out_cfg = z->pid_cfg$"),  # mirror has no equivalent whole-struct copy statement
     # production initializes adj_kp/ki/kd from the base gains inline (belt
     # and braces against pid_fuzzy_adjust() not writing them); the mirror

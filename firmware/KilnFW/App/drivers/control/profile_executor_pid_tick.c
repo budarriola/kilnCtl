@@ -14,7 +14,7 @@
 #include "esp_log.h"
 #include "pid_fuzzy.h"
 #include "zones_config_accessors.h"
-#include "zones_config_json.h" /* zones_config_get_error_band_c()/_rate_band_c_per_s() */
+#include "zones_config_json.h" /* zones_config_get_fuzzy_strength_pct(), MAX31856_CHANNEL_COUNT */
 
 /* PID_EXPANSION_PLAN.md sec 3.6d / PER_ZONE_TARGET_DESIGN_STUDY.md option
  * (b): declared locally, same convention profile_executor_feedforward.c
@@ -310,19 +310,20 @@ float pid_family_zone_tick(zone_runtime_t *z, uint8_t zi, const pid_cfg_t *cfg,
  * reload_zone_config()/resume() too, so this stays correct after any of
  * those discontinuities as well. */
 
-/* docs/audits/fuzzy_dimensionless_bands_2026-09-13.md: resolves this zone's
- * fuzzy membership bands, preferring bands DERIVED from its own identified
- * plant (zone_model_at()'s model_k_dc/model_tau_s -- the same seam profile_
- * executor_feedforward.c already uses for feedforward) over the absolute
- * config/firmware-default bands. pid_fuzzy_derive_bands() (pid_fuzzy.c)
- * returns false, and writes the absolute ERROR_BAND_C_DEFAULT/RATE_BAND_
- * C_PER_S_DEFAULT, only when this zone has never been autotuned (or the fit
- * is pathological) -- that fallback is then further resolved through the
- * operator-configurable zones_config_get_error_band_c()/_rate_band_c_per_s()
- * accessors exactly as this call site did before this pass, so a never-
- * autotuned zone's behaviour is unchanged. Computed at use time, not
- * persisted, per this pass's own scope note -- no ZONES_CFG_VERSION bump
- * needed.
+/* docs/audits/fuzzy_no_model_no_fuzzy_2026-09-14.md (supersedes the
+ * config/firmware-default fallback documented in an earlier revision of this
+ * comment): resolves this zone's fuzzy membership bands EXCLUSIVELY from its
+ * own identified plant (zone_model_at()'s model_k_dc/model_tau_s -- the same
+ * seam profile_executor_feedforward.c already uses for feedforward).
+ * pid_fuzzy_derive_bands() (pid_fuzzy.c) returns false when this zone has
+ * never been autotuned (or the fit is pathological); this function now
+ * returns that same bool up to the caller instead of silently substituting
+ * ERROR_BAND_C_DEFAULT/RATE_BAND_C_PER_S_DEFAULT or the operator-configurable
+ * zones_config_get_error_band_c()/_rate_band_c_per_s() bands -- see
+ * pid_fuzzy_prepare_gains() below for what it does with a false return
+ * (forces strength_pct to 0, i.e. plain PID, rather than run the fuzzy layer
+ * on invented numbers). Computed at use time, not persisted -- no
+ * ZONES_CFG_VERSION bump needed.
  *
  * A separate function (not inlined into pid_fuzzy_prepare_gains() below) so
  * fuzzy_gain_mirror_drift_check.py's statement-for-statement mirror
@@ -331,33 +332,31 @@ float pid_family_zone_tick(zone_runtime_t *z, uint8_t zi, const pid_cfg_t *cfg,
  * folds to a single token, instead of a multi-statement block with nested
  * control flow the mirror (which has no zone_runtime_t/model concept at
  * all) has no equivalent for. */
-static void resolve_fuzzy_bands(const zone_runtime_t *z, uint8_t zi,
+static bool resolve_fuzzy_bands(const zone_runtime_t *z, uint8_t zi,
                                 float *out_error_band_c, float *out_rate_band_c_per_s)
 {
     float model_k_dc = 0.0f, model_tau_s = 0.0f, model_dead_time_s = 0.0f;
     (void)zone_model_at(zi, z->actual_c, &model_k_dc, &model_tau_s, &model_dead_time_s);
 
-    bool bands_from_model = pid_fuzzy_derive_bands(model_k_dc, model_tau_s,
-                                                    out_error_band_c, out_rate_band_c_per_s);
-    if (!bands_from_model) {
-        (void)zones_config_get_error_band_c(zi, out_error_band_c);
-        (void)zones_config_get_rate_band_c_per_s(zi, out_rate_band_c_per_s);
-        /* Explicit, not silent (this pass's own requirement): a zone
-         * running the absolute desk-reasoning bands instead of its own
-         * measured plant scale should be visible, not indistinguishable
-         * from a zone deliberately configured that way. Logged once per
-         * zone per boot -- LOG_PRESTART_ONCE's own convention -- since this
-         * is a per-tick call path and the condition does not change tick to
-         * tick for a zone that has simply never been autotuned. */
-        static bool s_warned_fuzzy_bands_fallback[MAX31856_CHANNEL_COUNT];
-        if (zi < MAX31856_CHANNEL_COUNT && !s_warned_fuzzy_bands_fallback[zi]) {
-            s_warned_fuzzy_bands_fallback[zi] = true;
-            ESP_LOGW(PE_TAG, "zone %u: fuzzy membership bands falling back to the absolute "
-                     "config/firmware-default bands (%.2fC / %.4fC/s) -- no identified plant "
-                     "model yet (run Autotune to derive this zone's own bands) "
-                     "(further occurrences this boot are suppressed)",
-                     (unsigned)zi, (double)*out_error_band_c, (double)*out_rate_band_c_per_s);
-        }
+    return pid_fuzzy_derive_bands(model_k_dc, model_tau_s, out_error_band_c, out_rate_band_c_per_s);
+}
+
+/* Logs, once per zone per boot (LOG_PRESTART_ONCE's own convention -- this is
+ * a per-tick call path and the condition does not change tick to tick for a
+ * zone that has simply never been autotuned), that this zone's fuzzy layer is
+ * disabled for lack of an identified plant model. A separate function for the
+ * same reason resolve_fuzzy_bands() above is one: keeps pid_fuzzy_prepare_
+ * gains()'s body free of the braced control flow fuzzy_gain_mirror_drift_
+ * check.py's statement splitter cannot tolerate (see that check's own
+ * split_statements() docstring). */
+static void log_fuzzy_disabled_no_model_once(uint8_t zi)
+{
+    static bool s_warned_fuzzy_disabled_no_model[MAX31856_CHANNEL_COUNT];
+    if (zi < MAX31856_CHANNEL_COUNT && !s_warned_fuzzy_disabled_no_model[zi]) {
+        s_warned_fuzzy_disabled_no_model[zi] = true;
+        ESP_LOGW(PE_TAG, "zone %u: fuzzy layer disabled, running plain PID -- no identified "
+                 "plant model yet (run Autotune to enable fuzzy gain scheduling for this zone) "
+                 "(further occurrences this boot are suppressed)", (unsigned)zi);
     }
 }
 
@@ -403,24 +402,38 @@ void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, pid_cfg_t *out_cfg)
                           : (uint8_t)(strength_pct_f + 0.5f);
 
     /* ZONES_CFG_VERSION 18->19 (PID_EXPANSION_PLAN.md sec 3.6g): the
-     * membership-band widths are now per-zone config, not pid_fuzzy.c's own
-     * compile-time constants -- resolved here, the same tick this zone's
-     * fuzzy strength is resolved.
+     * membership-band widths are derived per-zone from this zone's own
+     * identified plant -- resolved here, the same tick this zone's fuzzy
+     * strength is resolved.
      *
-     * docs/audits/fuzzy_dimensionless_bands_2026-09-13.md: resolve_fuzzy_
-     * bands() (below) prefers bands DERIVED from this zone's own identified
-     * plant over the absolute config/firmware-default bands, falling back
-     * to (and logging, once per zone per boot) the config/firmware-default
-     * path exactly as this call site did before this pass when a zone has
-     * never been autotuned. Pulled into its own function (rather than
-     * inlined here) so fuzzy_gain_mirror_drift_check.py's mirror comparison
-     * -- which compares this function's body against test_closed_loop.c's
-     * hand-written fuzzy_tick() statement for statement -- sees one call,
-     * the same shape as the strength_pct/config-getter resolution already
-     * folded there, instead of a multi-statement block with its own nested
-     * control flow the mirror has no equivalent for. */
+     * docs/audits/fuzzy_no_model_no_fuzzy_2026-09-14.md: resolve_fuzzy_bands()
+     * (above) returns false for a zone with no identified plant model (never
+     * autotuned, or a pathological fit). THE FIX this pass makes: that case
+     * no longer falls back to an invented absolute band (ERROR_BAND_C_DEFAULT/
+     * RATE_BAND_C_PER_S_DEFAULT, or the operator-configurable bands, both of
+     * which the plan's own audit found were desk reasoning, never measured on
+     * any plant) -- it forces strength_pct to 0 instead, i.e. plain PID,
+     * reusing the exact bit-for-bit-base-gains short-circuit pid_fuzzy_adjust()
+     * already implements and tests already cover for strength_pct == 0,
+     * rather than adding a second way to be inert. Fuzzy is an enhancement on
+     * top of Autotune's measured gains; a zone Autotune has never touched has
+     * nothing for the enhancement to be derived from, so it does not run --
+     * the same posture this codebase already takes toward PID gains
+     * themselves (autotune supplies them; nothing invents a substitute).
+     * Logged once per zone per boot so the operator can tell fuzzy is
+     * inactive and why (log_fuzzy_disabled_no_model_once() above), not
+     * silently indistinguishable from an operator-configured strength_pct=0.
+     *
+     * Both statements below are single-line `if` bodies (no braces) so
+     * fuzzy_gain_mirror_drift_check.py's split_statements() -- which assumes
+     * no nested compound statements in this fragment -- still sees plain
+     * ';'-terminated statements; the mirror has no model concept at all, so
+     * both are dropped entirely in that check's normalization (PROD_ONLY_
+     * STMT_RES), the same treatment strength_pct's own derivation gets. */
     float error_band_c = 0.0f, rate_band_c_per_s = 0.0f;
-    resolve_fuzzy_bands(z, zi, &error_band_c, &rate_band_c_per_s);
+    bool bands_from_model = resolve_fuzzy_bands(z, zi, &error_band_c, &rate_band_c_per_s);
+    if (!bands_from_model) strength_pct = 0;
+    if (!bands_from_model) log_fuzzy_disabled_no_model_once(zi);
 
     float adj_kp = z->pid_cfg.kp, adj_ki = z->pid_cfg.ki, adj_kd = z->pid_cfg.kd;
     pid_fuzzy_adjust(error_c, error_rate_c_per_s, error_band_c, rate_band_c_per_s,

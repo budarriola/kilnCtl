@@ -694,13 +694,24 @@ bool zones_config_get_progress_band_c(uint8_t zone_index, float *out_band_c)
     return true;
 }
 
+/* Settable (docs/audits/fuzzy_no_model_no_fuzzy_2026-09-14.md): defaults to
+ * the all-zero "never autotuned" sentinel every pre-existing test in this
+ * file implicitly assumed (zone_model_at()/pid_fuzzy_derive_bands() both
+ * treat 0/0/0 as "no model" -- zones_config_accessors.h's own documented
+ * convention), so nothing that predates this stub's settability changes
+ * behaviour. A test that wants to exercise the WITH-a-model path (fuzzy
+ * bands actually derived, fuzzy layer actually able to run) sets
+ * g_stub_model_k_dc[]/g_stub_model_tau_s[] to a real fit. */
+static float g_stub_model_k_dc[MAX31856_CHANNEL_COUNT];
+static float g_stub_model_tau_s[MAX31856_CHANNEL_COUNT];
 bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
 {
-    (void)zone_index;
-    if (out_k_dc) *out_k_dc = 0.0f;
-    if (out_tau_s) *out_tau_s = 0.0f;
+    float k_dc = (zone_index < MAX31856_CHANNEL_COUNT) ? g_stub_model_k_dc[zone_index] : 0.0f;
+    float tau_s = (zone_index < MAX31856_CHANNEL_COUNT) ? g_stub_model_tau_s[zone_index] : 0.0f;
+    if (out_k_dc) *out_k_dc = k_dc;
+    if (out_tau_s) *out_tau_s = tau_s;
     if (out_dead_time_s) *out_dead_time_s = 0.0f;
-    return false;
+    return (k_dc != 0.0f || tau_s != 0.0f); /* same "false means never identified" shape the real getter documents */
 }
 
 /* ROADMAP.md M15 "Mode-state sprawl": exec_mode_state_check() (profile_
@@ -2699,6 +2710,14 @@ static void reset_fuzzy_gain_test_state(void)
     memset(&s_exec, 0, sizeof(s_exec));
     s_test_fuzzy_strength_present = false;
     s_test_fuzzy_strength_pct = 0.0f;
+    /* docs/audits/fuzzy_no_model_no_fuzzy_2026-09-14.md: default every test
+     * to "zone 0 has never been autotuned" (the all-zero sentinel) unless it
+     * explicitly opts into the with-a-model path below -- this is now load-
+     * bearing, not just tidiness, since a stale model left over from an
+     * earlier test would silently let the fuzzy layer run when a test means
+     * to prove the no-model path. */
+    memset(g_stub_model_k_dc, 0, sizeof(g_stub_model_k_dc));
+    memset(g_stub_model_tau_s, 0, sizeof(g_stub_model_tau_s));
 }
 
 static void test_fuzzy_prepare_gains_zero_strength_is_base_gains_bit_exact(void)
@@ -2737,6 +2756,13 @@ static void test_fuzzy_prepare_gains_matches_pid_fuzzy_adjust_directly(void)
     reset_fuzzy_gain_test_state();
     s_test_fuzzy_strength_present = true;
     s_test_fuzzy_strength_pct = 100.0f;
+    /* docs/audits/fuzzy_no_model_no_fuzzy_2026-09-14.md: this test wants to
+     * exercise the fuzzy layer actually running at strength_pct=100, which
+     * since that pass requires an identified plant model -- without one,
+     * pid_fuzzy_prepare_gains() now forces plain PID regardless of the
+     * configured strength (see the dedicated no-model test below). */
+    g_stub_model_k_dc[0] = 42.731f;
+    g_stub_model_tau_s[0] = 255.6f;
 
     zone_runtime_t z;
     memset(&z, 0, sizeof(z));
@@ -2751,8 +2777,14 @@ static void test_fuzzy_prepare_gains_matches_pid_fuzzy_adjust_directly(void)
     memset(&out, 0, sizeof(out));
     pid_fuzzy_prepare_gains(&z, 0, &out);
 
+    float model_error_band, model_rate_band;
+    TEST_CHECK(pid_fuzzy_derive_bands(42.731f, 255.6f, &model_error_band, &model_rate_band),
+               "test setup sanity: this k_dc/tau_s pair must actually derive a model band, or this "
+               "test is not exercising what it claims to");
+
     float expect_kp, expect_ki, expect_kd;
-    pid_fuzzy_adjust(300.0f, 0.0f, 20.0f, 0.5f, 1.0f, 0.02f, 2.0f, 100, &expect_kp, &expect_ki, &expect_kd);
+    pid_fuzzy_adjust(300.0f, 0.0f, model_error_band, model_rate_band, 1.0f, 0.02f, 2.0f, 100,
+                     &expect_kp, &expect_ki, &expect_kd);
 
     TEST_CHECK(out.kp == expect_kp, "kp must equal a direct pid_fuzzy_adjust() call with the same inputs");
     TEST_CHECK(out.ki == expect_ki, "ki must equal a direct pid_fuzzy_adjust() call with the same inputs");
@@ -2792,6 +2824,111 @@ static void test_fuzzy_prepare_gains_nan_strength_falls_back_to_base_not_large(v
     TEST_CHECK(out.kd == 2.0f, "kd must stay at base_kd");
 }
 
+// docs/audits/fuzzy_no_model_no_fuzzy_2026-09-14.md: THE central regression
+// guard for this pass. A zone with no identified plant model (the all-zero
+// sentinel zone_model_at()/pid_fuzzy_derive_bands() both document) must run
+// plain PID -- bit-exact base gains -- REGARDLESS of a configured nonzero
+// strength_pct and regardless of how large the error/rate inputs are. Before
+// this pass, a never-autotuned zone at strength_pct=100 and a large error
+// DID move the gains (via the ERROR_BAND_C_DEFAULT/RATE_BAND_C_PER_S_DEFAULT
+// or operator-configured absolute-band fallback) -- this test fails on that
+// old behaviour, which is the point: it is the check that would catch anyone
+// reintroducing a shipped numeric default into this call site's band-
+// resolution path. Deliberately uses the same large-error/strength=100 setup
+// as test_fuzzy_prepare_gains_matches_pid_fuzzy_adjust_directly() above (which
+// now supplies a model, and IS moved by it) so the only variable between the
+// two tests is model presence.
+static void test_fuzzy_prepare_gains_no_model_forces_plain_pid_bit_exact(void)
+{
+    TEST_SECTION("pid_fuzzy_prepare_gains() -- a zone with no identified plant model runs plain PID "
+                 "(bit-exact base gains) even at strength_pct=100 and a large error/rate, per "
+                 "docs/audits/fuzzy_no_model_no_fuzzy_2026-09-14.md -- fuzzy is disabled, not run on "
+                 "invented desk-reasoning bands");
+    reset_fuzzy_gain_test_state(); /* leaves g_stub_model_k_dc/tau_s[0] at the all-zero "no model" default */
+    s_test_fuzzy_strength_present = true;
+    s_test_fuzzy_strength_pct = 100.0f;
+
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.pid_cfg.kp = 1.0f;
+    z.pid_cfg.ki = 0.02f;
+    z.pid_cfg.kd = 2.0f;
+    z.pid_state.d_filtered = 0.0f; /* same large-POS/STEADY case that DOES move gains with a model, above */
+    z.actual_c = 700.0f;
+    s_exec.target_c = 1000.0f;
+
+    pid_cfg_t out;
+    memset(&out, 0xAA, sizeof(out)); /* poison, same discipline as the strength=0 test above */
+    pid_fuzzy_prepare_gains(&z, 0, &out);
+
+    TEST_CHECK(out.kp == 1.0f, "kp must be exactly base_kp -- no model means no fuzzy adjustment, "
+                              "regardless of strength_pct");
+    TEST_CHECK(out.ki == 0.02f, "ki must be exactly base_ki");
+    TEST_CHECK(out.kd == 2.0f, "kd must be exactly base_kd");
+}
+
+// Companion to the no-model test above: a zone WITH an identified model still
+// gets bands DERIVED from it (not the config/firmware-default absolute
+// bands), and the fuzzy layer actually runs. Pins pid_fuzzy_derive_bands()'s
+// own return contract (true, non-default bands) reaches this call site,
+// rather than merely re-asserting what test_fuzzy_prepare_gains_matches_
+// pid_fuzzy_adjust_directly() already covers via a different angle: this one
+// checks resolve_fuzzy_bands()'s OUTPUT values directly against pid_fuzzy_
+// derive_bands()'s own answer for the same model, independent of the
+// downstream gain arithmetic.
+static void test_fuzzy_prepare_gains_with_model_uses_derived_bands_not_default(void)
+{
+    TEST_SECTION("pid_fuzzy_prepare_gains() -- a zone WITH an identified model gets fuzzy bands DERIVED "
+                 "from that model (pid_fuzzy_derive_bands()), not the pid_fuzzy.c firmware-default "
+                 "20.0C/0.5C-per-s bands a never-autotuned zone would have used before this pass");
+    reset_fuzzy_gain_test_state();
+    s_test_fuzzy_strength_present = true;
+    s_test_fuzzy_strength_pct = 100.0f;
+    g_stub_model_k_dc[0] = 42.731f;  /* live bench z0 fit, docs/audits/coupling_matrix_resolved.md */
+    g_stub_model_tau_s[0] = 255.6f;
+
+    float model_error_band, model_rate_band;
+    TEST_CHECK(pid_fuzzy_derive_bands(42.731f, 255.6f, &model_error_band, &model_rate_band),
+               "test setup sanity: this k_dc/tau_s pair must actually derive a model band");
+    TEST_CHECK(fabsf(model_error_band - 20.0f) > 0.5f,
+               "test setup sanity: the derived error band must differ meaningfully from the firmware "
+               "default (20.0C), or this test cannot discriminate derived-from-default");
+    TEST_CHECK(fabsf(model_rate_band - 0.5f) > 0.01f,
+               "test setup sanity: the derived rate band must differ meaningfully from the firmware "
+               "default (0.5C/s), or this test cannot discriminate derived-from-default");
+
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.pid_cfg.kp = 1.0f;
+    z.pid_cfg.ki = 0.02f;
+    z.pid_cfg.kd = 2.0f;
+    z.pid_state.d_filtered = 0.0f;
+    z.actual_c = 700.0f;
+    /* Pick an error strictly between the two candidate error bands (20.0
+     * default vs. ~21.37 derived) so the two bandwidths could plausibly
+     * disagree on rule-table membership if the wrong one were used -- for
+     * THIS particular k_dc/tau_s pair the two bands are close enough that a
+     * mid-band error does not actually flip the rule cell, so this test
+     * relies on the direct pid_fuzzy_adjust()-with-derived-bands comparison
+     * below (an exact, not merely cell-level, check) to catch drift. */
+    s_exec.target_c = 715.0f; /* 15C error */
+
+    pid_cfg_t out;
+    memset(&out, 0, sizeof(out));
+    pid_fuzzy_prepare_gains(&z, 0, &out);
+
+    float expect_kp, expect_ki, expect_kd;
+    pid_fuzzy_adjust(15.0f, 0.0f, model_error_band, model_rate_band, 1.0f, 0.02f, 2.0f, 100,
+                     &expect_kp, &expect_ki, &expect_kd);
+
+    TEST_CHECK(out.kp == expect_kp, "kp must match a direct pid_fuzzy_adjust() call using the "
+                                    "MODEL-DERIVED bands");
+    TEST_CHECK(out.ki == expect_ki, "ki must match a direct pid_fuzzy_adjust() call using the "
+                                    "MODEL-DERIVED bands");
+    TEST_CHECK(out.kd == expect_kd, "kd must match a direct pid_fuzzy_adjust() call using the "
+                                    "MODEL-DERIVED bands");
+}
+
 // docs/FUZZY_CONTROLLER_PLAN.md finding (D), fixed 2026-09-11: pid_fuzzy_
 // prepare_gains() used to schedule gains off the error against the shared
 // s_exec.target_c unconditionally, while pid_family_zone_tick()'s own
@@ -2821,6 +2958,11 @@ static void test_fuzzy_prepare_gains_uses_zone_commanded_setpoint_when_capped(vo
     s_test_fuzzy_strength_present = true;
     s_test_fuzzy_strength_pct = 100.0f;
     g_stub_approach_rate_cap_c_per_hr[0] = 30.0f; /* non-zero: zone 0 is capped */
+    /* docs/audits/fuzzy_no_model_no_fuzzy_2026-09-14.md: this test needs the
+     * fuzzy layer to actually run (strength_pct=100 alone is not enough
+     * since that pass) to discriminate the fix from the bug below. */
+    g_stub_model_k_dc[0] = 42.731f;
+    g_stub_model_tau_s[0] = 255.6f;
 
     zone_runtime_t z;
     memset(&z, 0, sizeof(z));
@@ -2836,11 +2978,17 @@ static void test_fuzzy_prepare_gains_uses_zone_commanded_setpoint_when_capped(vo
     memset(&out, 0, sizeof(out));
     pid_fuzzy_prepare_gains(&z, 0, &out);
 
+    float model_error_band, model_rate_band;
+    TEST_CHECK(pid_fuzzy_derive_bands(42.731f, 255.6f, &model_error_band, &model_rate_band),
+               "test setup sanity: this k_dc/tau_s pair must actually derive a model band");
+
     float expect_kp, expect_ki, expect_kd; /* CORRECT: error against effective_target_c (705-700=5) */
-    pid_fuzzy_adjust(5.0f, 0.0f, 20.0f, 0.5f, 1.0f, 0.02f, 2.0f, 100, &expect_kp, &expect_ki, &expect_kd);
+    pid_fuzzy_adjust(5.0f, 0.0f, model_error_band, model_rate_band, 1.0f, 0.02f, 2.0f, 100,
+                     &expect_kp, &expect_ki, &expect_kd);
 
     float wrong_kp, wrong_ki, wrong_kd; /* WRONG (unfixed behaviour): error against s_exec.target_c (1000-700=300) */
-    pid_fuzzy_adjust(300.0f, 0.0f, 20.0f, 0.5f, 1.0f, 0.02f, 2.0f, 100, &wrong_kp, &wrong_ki, &wrong_kd);
+    pid_fuzzy_adjust(300.0f, 0.0f, model_error_band, model_rate_band, 1.0f, 0.02f, 2.0f, 100,
+                     &wrong_kp, &wrong_ki, &wrong_kd);
 
     TEST_CHECK(fabsf(expect_kp - wrong_kp) > 0.01f,
                "test setup sanity: the two candidate error_c inputs land in different-enough rule-table "
@@ -2861,8 +3009,16 @@ static void test_fuzzy_prepare_gains_uses_zone_commanded_setpoint_when_capped(vo
      * reuse zone 0 and assume every zone reads uncapped, the default every
      * pre-existing test in this file predates this field's very existence)
      * does not silently inherit this test's cap and get zone_commanded_
-     * setpoint_c() answers it never asked for. */
+     * setpoint_c() answers it never asked for. Same reasoning for
+     * g_stub_model_k_dc/tau_s[0], set above to make the fuzzy layer actually
+     * run: reset_fuzzy_gain_test_state() clears these at the start of every
+     * fuzzy test, but a non-fuzzy test elsewhere in this file that happens to
+     * read zone 0's model (e.g. a feedforward test) runs with no such reset
+     * and must see the "never autotuned" default every pre-existing test in
+     * this file predates this stub's settability. */
     g_stub_approach_rate_cap_c_per_hr[0] = 0.0f;
+    g_stub_model_k_dc[0] = 0.0f;
+    g_stub_model_tau_s[0] = 0.0f;
 }
 
 // ---------------------------------------------------------------------------
@@ -4895,6 +5051,14 @@ static void test_hold_membership_change_resets_fuzzy_prev_effective_ki(void)
     s_test_fuzzy_strength_present = true;
     s_test_fuzzy_strength_pct = 60.0f; /* nonzero -- adj_ki must actually differ from base ki, or the
                                         * missing reset would be numerically invisible */
+    /* docs/audits/fuzzy_no_model_no_fuzzy_2026-09-14.md: a zone with no
+     * identified plant model now runs plain PID regardless of strength_pct
+     * (this pass's own fix), so this test -- which needs the fuzzy layer to
+     * actually move Ki -- must give zone 0 a model, or the sanity check just
+     * below would fail for the same reason this pass's own dedicated
+     * no-model test exists to prove. */
+    g_stub_model_k_dc[0] = 42.731f;
+    g_stub_model_tau_s[0] = 255.6f;
     s_exec.zones[1].faulted = true; /* start EXCLUDED -- the {0,2} 2-zone system, same setup as the
                                      * gaining-a-neighbor test above */
 
@@ -4934,6 +5098,14 @@ static void test_hold_membership_change_resets_fuzzy_prev_effective_ki(void)
               "(reload_zone_config() x2, resume()) set -- leaving it at the stale pre-reseed "
               "fuzzy-adjusted Ki instead means the very next tick rescales the freshly-seeded integral "
               "against the wrong ratio");
+
+    /* g_stub_model_k_dc/tau_s[0] is file-scope static, not cleared by this
+     * test's own setup helper -- restore zone 0 to "no model" so a later
+     * test elsewhere in this file that happens to read zone 0's model does
+     * not silently inherit this one's, same discipline as the fuzzy-gains
+     * tests' own approach_rate_cap/model cleanup above. */
+    g_stub_model_k_dc[0] = 0.0f;
+    g_stub_model_tau_s[0] = 0.0f;
 }
 
 // ---------------------------------------------------------------------------
@@ -8070,6 +8242,8 @@ void run_test_profile_executor_prestart(void)
     test_fuzzy_prepare_gains_zero_strength_is_base_gains_bit_exact();
     test_fuzzy_prepare_gains_matches_pid_fuzzy_adjust_directly();
     test_fuzzy_prepare_gains_nan_strength_falls_back_to_base_not_large();
+    test_fuzzy_prepare_gains_no_model_forces_plain_pid_bit_exact();
+    test_fuzzy_prepare_gains_with_model_uses_derived_bands_not_default();
     test_fuzzy_prepare_gains_uses_zone_commanded_setpoint_when_capped();
 
     test_feedforward_zero_coupling_is_bit_identical_to_no_coupling();
