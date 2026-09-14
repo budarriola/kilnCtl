@@ -58,30 +58,26 @@ failed, correctly naming `autotune_baseline_k_dc` as missing from the
 client. Restored by hand; check passes.
 
 **Status at the end of this pass:** the firmware side landed (verified in
-`zones_http_get.c`) and my client-side fix is correct and self-consistent —
-confirmed by running the check script directly against the committed
-firmware. However, **the live tree currently fails this check again**, for
-an unrelated reason: a different concurrent agent (owning `firing_score.c`
-et al. per the task's exclusion list — actually traced to the agent working
-on `test_zones_http.c`/`zones_http_get.c`) has, as of this writing, a
-**live, uncommitted negative test** injecting a field named
+`zones_http_get.c`) and my client-side fix is correct and self-consistent.
+Mid-pass, a full-suite run briefly showed this check red again for an
+unrelated reason: the agent working on `test_zones_http.c`/`zones_http_get.c`
+had a **live, uncommitted negative test** injecting a field named
 `NEGATIVE_TEST_OVERFLOW_FIELD_DELETE_ME` into `zones_http_get.c`'s GET
-response (confirmed via `git status --porcelain` showing both
-`zones_http_get.c` and `test_zones_http.c` modified, not yet committed).
-That is their in-progress negative-test scaffolding, not a defect in my
-fix or theirs — it will disappear when they restore by hand. I did not
-touch that file. Re-run `check_zones_per_zone_field_drift.ps1` /
-`tools/PcTools/selfcheck.py` once that agent's work lands to confirm both
-are green; as of the last check in this session they were still mid-test.
+response (visible via `git status --porcelain`). That was their in-progress
+negative-test scaffolding, not a defect in my fix — I did not touch that
+file. It has since been restored by hand and committed on their side
+(`560cffe0`, "firing_score: separate measurement from adjudication"); a
+re-run after that commit landed confirms `check_zones_per_zone_field_drift.ps1`
+is clean (exit 0, no field-set mismatch).
 
 ## 3. `tools\PcTools\selfcheck.py`
 
 **Diagnosis:** same root cause as (2), not independent. `selfcheck.py`
 runs `zones_per_zone_field_table_checks()` (from `selfcheck_zones_fields.py`)
-among its other sections; with my client fix applied and no other agent's
-WIP present, a direct run showed `all checks passed`. The only reason it
-now shows red in a full-suite run is the same transient
-`NEGATIVE_TEST_OVERFLOW_FIELD_DELETE_ME` collision described in (2).
+among its other sections; with my client fix applied it shows
+`all checks passed`. The mid-pass red was the same transient
+`NEGATIVE_TEST_OVERFLOW_FIELD_DELETE_ME` collision described in (2), now
+resolved on the other agent's side.
 
 ## 4. `firmware\KilnFW\App\test\check_sim_iter_tune_bars.ps1`
 
@@ -103,15 +99,17 @@ cross-agent timing noise (an in-flight negative test on a shared, unpushed
 tree), consistent with this repo's known concurrent-session hazards
 (`git commit -o`, never `git checkout --`/`stash`).
 
-## Final tally (this session's own checks, run in isolation)
+## Final tally
+
+All four originally-red checks confirmed PASS after this pass:
 
 - `tools\check_coil_power_w_sentinel_guard.ps1` — **PASS** (fixed, negative-tested).
-- `tools\PcTools\check_zones_per_zone_field_drift.ps1` — **PASS** in isolation
-  against committed/reviewed firmware; **red in the shared tree** only while
-  another agent's uncommitted negative test is live — not this fix's fault.
-- `tools\PcTools\selfcheck.py` — same as above, same root cause.
+- `tools\PcTools\check_zones_per_zone_field_drift.ps1` — **PASS** (fixed,
+  negative-tested; briefly red mid-pass from another agent's in-flight,
+  now-committed negative test, unrelated to this fix).
+- `tools\PcTools\selfcheck.py` — **PASS**, same root cause as above, now clean.
 - `firmware\KilnFW\App\test\check_sim_iter_tune_bars.ps1` — **PASS**, not
-  touched, attributed to the firing-score agent's in-progress work.
+  touched, attributed to the firing-score agent's landed commit `560cffe0`.
 
 Files changed by this pass:
 - `tools/PcTools/scripts/coil_power_w_sentinel_guard_check.py`
