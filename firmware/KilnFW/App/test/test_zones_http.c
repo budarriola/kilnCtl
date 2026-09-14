@@ -3943,6 +3943,69 @@ static void test_post_omitting_new_fields_preserves_stored_values(void)
                     "next accepted refinement bootstrap its anchor from the already-adapted value");
 }
 
+// docs/audits/zones_post_model_key_omission_2026-09-13.md: an opus design
+// review noted in passing (while looking at something else) that
+// model_k_dc/model_tau_s/model_dead_time_s are operator-writable via
+// z%u_k/z%u_tau/z%u_deadtime and that omitting them looked like it might
+// silently delete the identified plant model. zones_http_post_parse.c's own
+// comment right above the z%u_k block (this file's sharp edge, documented
+// since it was written) says omission is NOT preserve-on-omit for these
+// three -- it is delete-on-omit, deliberately, because z starts
+// zero-initialized and 0.0 is model_k_dc's own "no model" sentinel. This
+// test pins that DOCUMENTED behaviour down with a real assertion (nothing
+// exercised the omit case for these three fields directly before now) so a
+// future change to this block one way or the other has to touch a test,
+// not just a comment. post_body_with_extra()'s own base body (unlike
+// make_stored_zone(), which seeds a real measured triple) never includes
+// z0_k/z0_tau/z0_deadtime, so any call through it already exercises the
+// omit path -- this test names that explicitly instead of relying on it
+// being incidental.
+static void test_post_omitting_model_fields_deletes_them(void)
+{
+    TEST_SECTION("parse_zone_fields -- omitting z0_k/z0_tau/z0_deadtime DELETES the stored "
+                 "plant model (documented sharp edge, not preserve-on-omit)");
+    const char *reason = "unset";
+    zone_cfg_t out;
+
+    // make_stored_zone() (post_body_with_extra()'s `current`) seeds a real
+    // measured triple: model_k_dc=12.0, model_tau_s=300.0,
+    // model_dead_time_s=30.0. A whole-page body that never mentions any of
+    // the three z%u_ keys must still be ACCEPTED (they are optional, for
+    // pre-model clients) but reads back as all-zero, not the prior triple.
+    TEST_CHECK(post_body_with_extra("z0_kp=1", &reason, &out),
+              "a whole-page submission omitting z0_k/z0_tau/z0_deadtime entirely is still accepted");
+    TEST_CHECK_NEAR(out.model_k_dc, 0.0f, 1e-6,
+                    "model_k_dc reads back 0 (deleted), not the previously-stored 12.0 -- matches "
+                    "this file's own documented sharp edge, not the omit-preserves convention used "
+                    "by fuzzy_strength_pct/coupling_coeff/etc a few tests above");
+    TEST_CHECK_NEAR(out.model_tau_s, 0.0f, 1e-6, "model_tau_s likewise deleted, not preserved");
+    TEST_CHECK_NEAR(out.model_dead_time_s, 0.0f, 1e-6, "model_dead_time_s likewise deleted, not preserved");
+
+    // Positive control / sibling check: an EXPLICIT z0_k (with tau/deadtime
+    // still omitted) is honoured exactly as sent for the field that was
+    // present, and the omitted siblings are independently zeroed -- proving
+    // this is a true per-field "present -> parse, absent -> 0" rule, not a
+    // parse failure that happened to leave the struct zeroed.
+    TEST_CHECK(post_body_with_extra("z0_kp=1&z0_k=55.5", &reason, &out),
+              "an explicit z0_k alongside omitted z0_tau/z0_deadtime is accepted");
+    TEST_CHECK_NEAR(out.model_k_dc, 55.5f, 1e-6, "the explicitly posted z0_k is honoured exactly");
+    TEST_CHECK_NEAR(out.model_tau_s, 0.0f, 1e-6,
+                    "model_tau_s is still independently deleted -- each of the three keys is "
+                    "evaluated on its own presence, not as a single all-or-nothing group");
+
+    // A whole-page save that echoes every one of the three keys back
+    // (zones_page.html's actual behaviour -- see its own "Echoed back
+    // exactly as loaded" comment above the z0_k/_tau/_deadtime pushes) must
+    // round-trip the model unchanged. This is the reason the shipped UI
+    // does not hit the sharp edge above in practice.
+    TEST_CHECK(post_body_with_extra("z0_kp=1&z0_k=12&z0_tau=300&z0_deadtime=30", &reason, &out),
+              "explicitly re-posting all three model keys (the shipped page's own behaviour) "
+              "is accepted");
+    TEST_CHECK_NEAR(out.model_k_dc, 12.0f, 1e-6, "model_k_dc round-trips unchanged");
+    TEST_CHECK_NEAR(out.model_tau_s, 300.0f, 1e-6, "model_tau_s round-trips unchanged");
+    TEST_CHECK_NEAR(out.model_dead_time_s, 30.0f, 1e-6, "model_dead_time_s round-trips unchanged");
+}
+
 // Opus review of 5672719 (item 2): no host test posted a
 // z%u_settings_source_<group> key before this -- docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs's
 // per-group split (zones_http_post_parse.c's z%u_settings_source_%s block)
@@ -10394,6 +10457,7 @@ void run_test_zones_http(void)
     test_post_on_off_fields_optional_range_and_preserve();
     test_post_fuzzy_strength_out_of_range_refused_not_clamped();
     test_post_omitting_new_fields_preserves_stored_values();
+    test_post_omitting_model_fields_deletes_them();
     test_post_new_fields_present_but_unparseable_are_refused();
     test_post_coupling_diagonal_must_be_zero();
     test_post_settings_source_self_reference_refused();
