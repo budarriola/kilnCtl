@@ -3946,61 +3946,72 @@ static void test_post_omitting_new_fields_preserves_stored_values(void)
                     "next accepted refinement bootstrap its anchor from the already-adapted value");
 }
 
-// docs/audits/zones_post_model_key_omission_2026-09-13.md: an opus design
-// review noted in passing (while looking at something else) that
-// model_k_dc/model_tau_s/model_dead_time_s are operator-writable via
-// z%u_k/z%u_tau/z%u_deadtime and that omitting them looked like it might
-// silently delete the identified plant model. zones_http_post_parse.c's own
-// comment right above the z%u_k block (this file's sharp edge, documented
-// since it was written) says omission is NOT preserve-on-omit for these
-// three -- it is delete-on-omit, deliberately, because z starts
-// zero-initialized and 0.0 is model_k_dc's own "no model" sentinel. This
-// test pins that DOCUMENTED behaviour down with a real assertion (nothing
-// exercised the omit case for these three fields directly before now) so a
-// future change to this block one way or the other has to touch a test,
-// not just a comment. post_body_with_extra()'s own base body (unlike
-// make_stored_zone(), which seeds a real measured triple) never includes
-// z0_k/z0_tau/z0_deadtime, so any call through it already exercises the
-// omit path -- this test names that explicitly instead of relying on it
-// being incidental.
-static void test_post_omitting_model_fields_deletes_them(void)
+// docs/audits/zones_post_omit_preserves_model_2026-09-14.md: owner directive,
+// following a REAL casualty (docs/audits/plant_model_loss_investigation_
+// 2026-09-14.md -- all three bench zones' identified models genuinely
+// zeroed by a whole-page POST that omitted these keys, undetected for three
+// days). zones_http_post_parse.c's z%u_k/z%u_tau/z%u_deadtime block used to
+// delete the stored model on omission, deliberately and documented
+// (docs/audits/zones_post_model_key_omission_2026-09-13.md pinned that OLD
+// behaviour down as intentional the day before the real casualty was found).
+// THIS TEST IS THE ONE THAT WOULD HAVE CAUGHT THE ORIGINAL DEFECT: a
+// whole-page POST that omits all three model keys must now PRESERVE the
+// stored model, matching every other measured-quantity field on this page
+// (fuzzy_strength_pct, coupling_coeff[], coupling_diag_k_dc, etc).
+// post_body_with_extra()'s own base body (unlike make_stored_zone(), which
+// seeds a real measured triple) never includes z0_k/z0_tau/z0_deadtime, so
+// any call through it already exercises the omit path -- this test names
+// that explicitly instead of relying on it being incidental.
+static void test_post_omitting_model_fields_preserves_them(void)
 {
-    TEST_SECTION("parse_zone_fields -- omitting z0_k/z0_tau/z0_deadtime DELETES the stored "
-                 "plant model (documented sharp edge, not preserve-on-omit)");
+    TEST_SECTION("parse_zone_fields -- omitting z0_k/z0_tau/z0_deadtime PRESERVES the stored "
+                 "plant model (2026-09-14 contract change -- this is the regression test for "
+                 "the real plant-model-loss incident)");
     const char *reason = "unset";
     zone_cfg_t out;
 
     // make_stored_zone() (post_body_with_extra()'s `current`) seeds a real
     // measured triple: model_k_dc=12.0, model_tau_s=300.0,
     // model_dead_time_s=30.0. A whole-page body that never mentions any of
-    // the three z%u_ keys must still be ACCEPTED (they are optional, for
-    // pre-model clients) but reads back as all-zero, not the prior triple.
+    // the three z%u_ keys must be ACCEPTED (they are optional, for
+    // pre-model clients) AND must read back the prior triple unchanged --
+    // this is the exact scenario that zeroed the live board's models.
     TEST_CHECK(post_body_with_extra("z0_kp=1", &reason, &out),
               "a whole-page submission omitting z0_k/z0_tau/z0_deadtime entirely is still accepted");
-    TEST_CHECK_NEAR(out.model_k_dc, 0.0f, 1e-6,
-                    "model_k_dc reads back 0 (deleted), not the previously-stored 12.0 -- matches "
-                    "this file's own documented sharp edge, not the omit-preserves convention used "
-                    "by fuzzy_strength_pct/coupling_coeff/etc a few tests above");
-    TEST_CHECK_NEAR(out.model_tau_s, 0.0f, 1e-6, "model_tau_s likewise deleted, not preserved");
-    TEST_CHECK_NEAR(out.model_dead_time_s, 0.0f, 1e-6, "model_dead_time_s likewise deleted, not preserved");
+    TEST_CHECK_NEAR(out.model_k_dc, 12.0f, 1e-6,
+                    "model_k_dc must be PRESERVED, not deleted -- this is the exact field the live "
+                    "bench board lost for three days undetected (plant_model_loss_investigation_"
+                    "2026-09-14.md)");
+    TEST_CHECK_NEAR(out.model_tau_s, 300.0f, 1e-6, "model_tau_s likewise preserved, not zeroed");
+    TEST_CHECK_NEAR(out.model_dead_time_s, 30.0f, 1e-6, "model_dead_time_s likewise preserved, not zeroed");
 
-    // Positive control / sibling check: an EXPLICIT z0_k (with tau/deadtime
-    // still omitted) is honoured exactly as sent for the field that was
-    // present, and the omitted siblings are independently zeroed -- proving
-    // this is a true per-field "present -> parse, absent -> 0" rule, not a
-    // parse failure that happened to leave the struct zeroed.
+    // Per-field behaviour: an EXPLICIT z0_k (with tau/deadtime omitted) is
+    // honoured exactly as sent for the field that was present, and the
+    // omitted siblings are independently preserved from current_z -- proving
+    // this is a true per-field "present -> parse, absent -> preserve" rule,
+    // not an all-or-nothing group.
     TEST_CHECK(post_body_with_extra("z0_kp=1&z0_k=55.5", &reason, &out),
               "an explicit z0_k alongside omitted z0_tau/z0_deadtime is accepted");
     TEST_CHECK_NEAR(out.model_k_dc, 55.5f, 1e-6, "the explicitly posted z0_k is honoured exactly");
-    TEST_CHECK_NEAR(out.model_tau_s, 0.0f, 1e-6,
-                    "model_tau_s is still independently deleted -- each of the three keys is "
+    TEST_CHECK_NEAR(out.model_tau_s, 300.0f, 1e-6,
+                    "model_tau_s is independently preserved -- each of the three keys is "
                     "evaluated on its own presence, not as a single all-or-nothing group");
+    TEST_CHECK_NEAR(out.model_dead_time_s, 30.0f, 1e-6, "model_dead_time_s independently preserved too");
+
+    // Deliberate clear: sending all three keys explicitly as 0 still zeroes
+    // the model -- this is the one intentional way left to erase it (see
+    // this file's own comment above the z%u_k block). A client must KNOW
+    // about and explicitly choose this; mere omission can no longer do it.
+    TEST_CHECK(post_body_with_extra("z0_kp=1&z0_k=0&z0_tau=0&z0_deadtime=0", &reason, &out),
+              "explicitly posting all three model keys as 0 (deliberate clear) is accepted");
+    TEST_CHECK_NEAR(out.model_k_dc, 0.0f, 1e-6, "model_k_dc explicitly cleared when the operator asks");
+    TEST_CHECK_NEAR(out.model_tau_s, 0.0f, 1e-6, "model_tau_s explicitly cleared when the operator asks");
+    TEST_CHECK_NEAR(out.model_dead_time_s, 0.0f, 1e-6, "model_dead_time_s explicitly cleared when the operator asks");
 
     // A whole-page save that echoes every one of the three keys back
     // (zones_page.html's actual behaviour -- see its own "Echoed back
     // exactly as loaded" comment above the z0_k/_tau/_deadtime pushes) must
-    // round-trip the model unchanged. This is the reason the shipped UI
-    // does not hit the sharp edge above in practice.
+    // still round-trip the model unchanged, exactly as before this change.
     TEST_CHECK(post_body_with_extra("z0_kp=1&z0_k=12&z0_tau=300&z0_deadtime=30", &reason, &out),
               "explicitly re-posting all three model keys (the shipped page's own behaviour) "
               "is accepted");
@@ -4191,6 +4202,78 @@ static void test_post_then_get_round_trips_new_fields(void)
               "point is unreadable");
     TEST_CHECK(strstr(s_last_resp_body, "\"model_fit_ambient_c\":") != NULL,
               "GET /api/zones_diag must emit model_fit_ambient_c too");
+}
+
+// docs/audits/zones_post_omit_preserves_model_2026-09-14.md: end-to-end
+// regression test for the real plant-model-loss incident, through the ACTUAL
+// handlers (zones_post_handler() then zones_get_handler()), not just the
+// per-field parser. POST 1 establishes a real measured model. POST 2 is an
+// otherwise-ordinary whole-page save that omits all three model keys --
+// exactly the shape of the POST that zeroed the live bench board's models
+// for three days undetected. GET afterward must still report the model from
+// POST 1, and a follow-up explicit-zero POST must still be able to clear it
+// on purpose.
+static void test_post_then_get_round_trips_model_across_an_omitting_save(void)
+{
+    TEST_SECTION("zones_post_handler -> zones_get_handler -- a later whole-page save that omits "
+                 "z0_k/z0_tau/z0_deadtime must NOT erase an earlier real model (regression test "
+                 "for the live plant-model-loss incident, docs/audits/"
+                 "plant_model_loss_investigation_2026-09-14.md)");
+
+    char body[900];
+    snprintf(body, sizeof(body),
+             "thermo_count=1&relay_count=1&" MINIMAL_TIMING_PROFILE_BODY
+             "&z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&z0_timingprofile=0&"
+             "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=0&z0_sanity=0&z0_mode=3&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+             "z0_k=42.731&z0_tau=255.6&z0_deadtime=40.3");
+    run_zones_post(body);
+    TEST_CHECK(s_test_ok_called && !s_test_err_called, "POST 1 (establishes the model) must be accepted");
+    TEST_CHECK_NEAR(s_zones.cfg.zones[0].model_k_dc, 42.731, 1e-3, "model_k_dc landed as posted");
+
+    // POST 2: an ordinary whole-page save (e.g. only touching pid_kp) that
+    // never mentions z0_k/z0_tau/z0_deadtime at all -- the real-world shape
+    // of the POST that caused the incident.
+    snprintf(body, sizeof(body),
+             "thermo_count=1&relay_count=1&" MINIMAL_TIMING_PROFILE_BODY
+             "&z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&z0_timingprofile=0&"
+             "z0_cal=0&z0_kp=2&z0_ki=0&z0_kd=0&z0_ramp=0&z0_sanity=0&z0_mode=3&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0");
+    run_zones_post(body);
+    TEST_CHECK(s_test_ok_called && !s_test_err_called,
+              "POST 2 (omits the model keys entirely) must still be accepted");
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = zones_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "zones_get_handler must return ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, "\"model_k_dc\":42.7310") != NULL,
+              "GET after the omitting save must still report the ORIGINAL model_k_dc -- this is "
+              "the exact assertion that would have caught the live incident before it happened");
+    TEST_CHECK(strstr(s_last_resp_body, "\"model_tau_s\":255.6") != NULL,
+              "GET after the omitting save must still report the original model_tau_s");
+    TEST_CHECK(strstr(s_last_resp_body, "\"model_dead_time_s\":40.3") != NULL,
+              "GET after the omitting save must still report the original model_dead_time_s");
+    TEST_CHECK(strstr(s_last_resp_body, "\"pid_kp\":2.0000") != NULL,
+              "the field POST 2 actually changed (pid_kp) did take effect -- proves this is a real "
+              "per-field save, not a no-op");
+
+    // POST 3: the deliberate-clear path -- explicit 0 for all three keys --
+    // must still be able to erase the model on purpose.
+    snprintf(body, sizeof(body),
+             "thermo_count=1&relay_count=1&" MINIMAL_TIMING_PROFILE_BODY
+             "&z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&z0_timingprofile=0&"
+             "z0_cal=0&z0_kp=2&z0_ki=0&z0_kd=0&z0_ramp=0&z0_sanity=0&z0_mode=3&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+             "z0_k=0&z0_tau=0&z0_deadtime=0");
+    run_zones_post(body);
+    TEST_CHECK(s_test_ok_called && !s_test_err_called,
+              "POST 3 (deliberate explicit-zero clear) must be accepted");
+    memset(&req, 0, sizeof(req));
+    err = zones_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "zones_get_handler must return ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, "\"model_k_dc\":0.0000") != NULL,
+              "an explicit all-zero POST must still clear the model on purpose");
 }
 
 // docs/audits/zones_diag_endpoint_split_2026-09-14.md: the fields moved off
@@ -10879,7 +10962,7 @@ void run_test_zones_http(void)
     test_post_on_off_fields_optional_range_and_preserve();
     test_post_fuzzy_strength_out_of_range_refused_not_clamped();
     test_post_omitting_new_fields_preserves_stored_values();
-    test_post_omitting_model_fields_deletes_them();
+    test_post_omitting_model_fields_preserves_them();
     test_post_new_fields_present_but_unparseable_are_refused();
     test_post_coupling_diagonal_must_be_zero();
     test_post_settings_source_self_reference_refused();
@@ -10887,6 +10970,7 @@ void run_test_zones_http(void)
     test_post_settings_source_group_key_wins_over_legacy_scalar();
     test_post_settings_source_all_keys_omitted_preserves_every_group();
     test_post_then_get_round_trips_new_fields();
+    test_post_then_get_round_trips_model_across_an_omitting_save();
     test_zones_diag_get_handler_round_trips_moved_fields();
     test_get_emits_autotune_baseline_k_dc();
     test_get_emits_fuzzy_model_valid();

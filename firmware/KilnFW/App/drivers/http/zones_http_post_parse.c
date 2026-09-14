@@ -684,16 +684,44 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
      * that predates these fields -- pc_tools/MCP, the test harnesses --
      * must not start getting 400s for a field it has never heard of.
      *
-     * The whole-page-submit semantics have real teeth here, though. These
-     * numbers are NOT typed by an operator; they are measured by a
-     * multi-hour step test. A client that omits them silently deletes that
-     * measurement, because z is zero-initialized by the caller and zero is
-     * the "no model" encoding. That is the established behaviour of this
-     * endpoint and is left as-is rather than special-cased into a
-     * merge-on-omit, which would make this one field group behave unlike
-     * every other one on the page -- but it is why zones_page.html reads
-     * these back from GET and posts them straight through untouched, and
-     * why anything else driving this endpoint must do the same.
+     * CONTRACT CHANGED 2026-09-14 (owner directive, docs/audits/
+     * zones_post_omit_preserves_model_2026-09-14.md): omission now
+     * PRESERVES the stored model instead of deleting it. Until this date the
+     * comment here (see git history / the two audits below) documented the
+     * OPPOSITE, deliberate "omit deletes it" behaviour, on the theory that
+     * this field group should behave like every other one on the whole-page
+     * submit and that it was safe in practice because both shipped clients
+     * (zones_page.html, tools/PcTools/.../zones_http_client.py) always
+     * re-echo all three keys from the last GET. That premise held right up
+     * until it didn't: docs/audits/plant_model_loss_investigation_2026-09-14.md
+     * found all three bench zones' identified models genuinely zeroed by a
+     * whole-page POST that did NOT carry these keys (not a shipped-client
+     * save -- something else hit the endpoint directly), undetected for three
+     * days because no MCP tool surfaced the fields. See also
+     * docs/audits/zones_post_model_key_omission_2026-09-13.md, which had
+     * confirmed this was documented-intentional the day before the real
+     * casualty was found; this comment is the retraction of that document's
+     * conclusion, not a silent rewrite of it -- the old reasoning is named
+     * here rather than erased, per this repo's "a retraction hid a stale
+     * claim" lesson.
+     *
+     * These numbers are NOT typed by an operator; they are measured by a
+     * multi-hour step test, so they now get the same omit-PRESERVES
+     * convention every other measured-quantity field on this page already
+     * uses (z%u_fuzzy_strength, z%u_coupling_c%u, coupling_diag_k_dc, etc,
+     * just below) -- this field group is no longer the one documented
+     * exception.
+     *
+     * Deliberate clear: this endpoint has no separate "clear model" key or
+     * route. An explicit z%u_k=0&z%u_tau=0&z%u_deadtime=0 (all three,
+     * present) still zeroes the model -- 0.0 remains model_k_dc's own "no
+     * model" sentinel (zones_config_set_model()'s convention) -- but doing
+     * so now requires a client to KNOW about and explicitly send these keys
+     * with that value; a client that simply doesn't mention them (an old
+     * client, a partial/malformed POST, anything that predates this field)
+     * can no longer erase a real measurement by omission. That is
+     * deliberately harder to trigger by accident than the old behaviour,
+     * which erased on the mere absence of a key.
      *
      * Bounds are ZONE_MODEL_*_MAX so this path and zones_config_set_model()
      * accept exactly the same set of models; see their definition. Present
@@ -706,6 +734,8 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
                 *err_reason = "zone model K out of range";
                 return false;
             }
+        } else {
+            z->model_k_dc = current_z->model_k_dc;
         }
     }
     snprintf(key, sizeof(key), "z%u_tau", i);
@@ -716,6 +746,8 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
                 *err_reason = "zone model tau out of range";
                 return false;
             }
+        } else {
+            z->model_tau_s = current_z->model_tau_s;
         }
     }
     snprintf(key, sizeof(key), "z%u_deadtime", i);
@@ -726,6 +758,8 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
                 *err_reason = "zone model dead time out of range";
                 return false;
             }
+        } else {
+            z->model_dead_time_s = current_z->model_dead_time_s;
         }
     }
     /* PID_EXPANSION_PLAN.md Phase 2/4 (2026-08-30): the fuzzy-PID and
@@ -738,12 +772,13 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
      * coupling coefficient), and a whole-page save from a client that
      * predates this field (or simply didn't re-render every input) must not
      * silently delete a measurement/setting that took real effort to obtain
-     * -- the model_k_dc/model_tau_s/model_dead_time_s "omit deletes it" case
-     * above is this file's OWN documented sharp edge, not a precedent to
-     * repeat for a field with no compensating "the page always posts these
-     * back verbatim" guarantee behind it. Present but out of range is still
-     * an error, never silently clamped (PID_EXPANSION_PLAN.md's own "prove
-     * range checks refuse, not clamp" rule). */
+     * -- as of 2026-09-14 this is also the convention z%u_k/z%u_tau/
+     * z%u_deadtime use just above, after a real casualty (docs/audits/
+     * plant_model_loss_investigation_2026-09-14.md) proved that field group's
+     * old "omit deletes it" behaviour was not actually safe in practice.
+     * Present but out of range is still an error, never silently clamped
+     * (PID_EXPANSION_PLAN.md's own "prove range checks refuse, not clamp"
+     * rule). */
     snprintf(key, sizeof(key), "z%u_fuzzy_strength", i);
     {
         if (zones_config_json_field_present(body, key)) {
