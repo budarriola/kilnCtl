@@ -1294,6 +1294,31 @@ class MergeZonesDiagTest(unittest.TestCase):
         self.assertNotIn("model_fit_temp_c", merged["zones"][1])
         self.assertEqual(merged["zones"][1]["max_temp_c"], 90.0)
 
+    def test_generation_mismatch_is_refused_not_silently_merged(self):
+        # docs/audits/zones_field_sourcing_and_generation_2026-09-14.md
+        # defect 2: a config write (e.g. an autotune finalize) landing
+        # between the two GETs must be DETECTED, not silently merged into
+        # an impossible view pairing a new gain with an old fit point.
+        zones_json = {"generation": 5, "zones": [{"index": 0, "max_temp_c": 80.0}]}
+        diag_json = {"generation": 6, "zones": [{"index": 0, "model_fit_temp_c": 110.5}]}
+        with self.assertRaises(zh.ZonesHttpGenerationMismatchError):
+            zh.merge_zones_diag(zones_json, diag_json)
+
+    def test_matching_generation_merges_normally(self):
+        zones_json = {"generation": 5, "zones": [{"index": 0, "max_temp_c": 80.0}]}
+        diag_json = {"generation": 5, "zones": [{"index": 0, "model_fit_temp_c": 110.5}]}
+        merged = zh.merge_zones_diag(zones_json, diag_json)
+        self.assertEqual(merged["zones"][0]["model_fit_temp_c"], 110.5)
+
+    def test_missing_generation_on_either_side_is_not_a_mismatch(self):
+        # Pre-2026-09-14 firmware (or a partial/older cached response) never
+        # emits "generation" at all -- nothing to compare, so this must not
+        # regress every caller talking to older boards.
+        zones_json = {"zones": [{"index": 0, "max_temp_c": 80.0}]}
+        diag_json = {"generation": 5, "zones": [{"index": 0, "model_fit_temp_c": 110.5}]}
+        merged = zh.merge_zones_diag(zones_json, diag_json)
+        self.assertEqual(merged["zones"][0]["model_fit_temp_c"], 110.5)
+
 
 if __name__ == "__main__":
     unittest.main()

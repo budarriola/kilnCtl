@@ -121,6 +121,17 @@ class ZonesHttpUnknownFieldError(ZonesHttpError):
     real form-key name and omitted-value convention."""
 
 
+class ZonesHttpGenerationMismatchError(ZonesHttpError):
+    """Raised by merge_zones_diag() (docs/audits/
+    zones_field_sourcing_and_generation_2026-09-14.md) when /api/zones and
+    /api/zones_diag report different zones_config_generation() values -- a
+    config write landed between the two GETs, so the merge would pair a
+    gain from one config generation with an operating point from another.
+    Not a subclass distinction callers need to special-case for transport
+    reasons; it exists so "the merge is internally inconsistent" is a
+    distinct, catchable failure mode from "a request failed"."""
+
+
 def _url(host: str, path: str) -> str:
     return f"http://{host}{path}"
 
@@ -210,7 +221,37 @@ def merge_zones_diag(zones_json: dict, diag_json: dict) -> dict:
     Does nothing destructive if diag_json has no matching index (leaves that
     zone as GET /api/zones reported it, un-merged) -- a partial/short
     zones_diag response degrades to "diag fields missing for that zone", not
-    a crash."""
+    a crash.
+
+    docs/audits/zones_field_sourcing_and_generation_2026-09-14.md (opus
+    review, defect 2): the two GETs are separate HTTP requests with no
+    shared snapshot, and autotune_engine.c's finalize_fit() writes model_
+    k_dc/model_tau_s on /api/zones AND model_fit_temp_c/coupling_tau_c%u/
+    coupling_dead_time_c%u on /api/zones_diag -- a finalize landing between
+    the two requests can pair a NEW gain with an OLD fit operating point,
+    exactly the misattribution model_fit_temp_c exists to prevent. Both
+    responses now carry "generation" (zones_config_generation(), bumped by
+    every firmware config setter). RAISES ZonesHttpGenerationMismatchError
+    if the two disagree, rather than silently returning a merged view that
+    never existed on the board -- a caller that wants the old best-effort
+    behaviour can catch that specific exception and use zones_json
+    unmerged (it still carries every /api/zones field on its own). A
+    missing "generation" key on EITHER side (older, pre-2026-09-14
+    firmware) is NOT treated as a mismatch -- there is nothing to compare,
+    and refusing to merge against boards that predate this field would
+    regress every existing caller for no safety gain."""
+    zones_gen = zones_json.get("generation")
+    diag_gen = diag_json.get("generation")
+    if zones_gen is not None and diag_gen is not None and zones_gen != diag_gen:
+        raise ZonesHttpGenerationMismatchError(
+            "merge_zones_diag() refused: /api/zones generation "
+            f"{zones_gen} != /api/zones_diag generation {diag_gen} -- a config "
+            "write (e.g. an autotune finalize) landed between the two GETs, "
+            "so merging would pair a gain from one config generation with an "
+            "operating point from another. Re-fetch both, or handle "
+            "ZonesHttpGenerationMismatchError explicitly if a stale-but-"
+            "internally-consistent view of /api/zones alone is acceptable."
+        )
     diag_by_index = {}
     for dz in diag_json.get("zones", []):
         idx = dz.get("index")
@@ -593,6 +634,14 @@ _TOP_READONLY_OR_STRUCTURAL_KEYS = {
     # min_off_s fields (see _ZONE_FIELD_FORM_KEY) are what actually get
     # posted.
     "on_off_hyst_c_default", "on_off_min_on_off_s_default",
+    # docs/audits/zones_field_sourcing_and_generation_2026-09-14.md (opus
+    # review of the zones_diag split, defect 2): zones_config_generation()
+    # (firmware, bumped by every config setter) is now emitted on BOTH
+    # /api/zones and /api/zones_diag so merge_zones_diag() can detect a
+    # config write landing between the two GETs instead of silently pairing
+    # a new gain with an old fit operating point. Read-only telemetry, no
+    # POST field.
+    "generation",
 }
 
 

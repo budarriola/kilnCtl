@@ -8,6 +8,7 @@
 
 #include "zones_http_internal.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -248,7 +249,22 @@ esp_err_t zones_get_handler(httpd_req_t *req)
     float ceiling_pico_current_c = 0.0f;
     bool ceiling_pico_known = safety_ceiling_sync_get_current_pico_ceiling(&ceiling_pico_current_c);
 
-    APPEND("{\"thermo_count\":%u,\"relay_count\":%u,\"max_simultaneous_relays\":%u,"
+    /* docs/audits/zones_diag_endpoint_split_2026-09-14.md sec 2 (opus review,
+     * defect 2): /api/zones and /api/zones_diag are two separate requests
+     * with no shared snapshot, and autotune_engine.c's finalize_fit() writes
+     * BOTH sides of the pair (model_k_dc/model_tau_s here, model_fit_temp_c/
+     * coupling_tau/dead_time on the diag route) -- a finalize landing
+     * between the two GETs can pair a NEW gain with an OLD fit operating
+     * point, exactly the misattribution model_fit_temp_c exists to prevent.
+     * zones_config_generation() already exists and is already bumped by
+     * every setter (zones_config_accessors.c) for exactly this "did config
+     * change under me" purpose -- profile_executor.c already consumes it.
+     * It was on neither response; emitting it here (and on /api/zones_diag
+     * below) lets a client that fetches both detect the pair does not
+     * belong together, rather than silently merging an impossible view. */
+    uint32_t config_generation = zones_config_generation();
+    APPEND("{\"generation\":%u,"
+           "\"thermo_count\":%u,\"relay_count\":%u,\"max_simultaneous_relays\":%u,"
            "\"continue_on_zone_trip\":%s,\"safety_tc_type\":%u,"
            "\"pc_link_abort_silence_ms\":%.0f,"
            /* docs/ON_OFF_ZONE_PLAN.md step 6: the resolved-default numbers
@@ -284,6 +300,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
            "\"ct_warn_mask\":%u,"
            "\"safety_ceiling\":{\"target_c\":%.1f,\"pico_known\":%s,\"pico_current_c\":%.1f},"
            "\"relay_names\":[",
+           (unsigned)config_generation,
            s_zones.cfg.thermo_count, s_zones.cfg.relay_count, s_zones.cfg.max_simultaneous_relays,
            s_zones.cfg.continue_on_zone_trip ? "true" : "false", s_zones.cfg.safety_tc_type,
            (double)s_zones.cfg.pc_link_abort_silence_ms,
@@ -347,11 +364,38 @@ esp_err_t zones_get_handler(httpd_req_t *req)
          * noticing model_k_dc read 0 alongside a non-zero fuzzy_strength_pct.
          * This calls the EXACT SAME predicate profile_executor_pid_tick.c's
          * resolve_fuzzy_bands() uses at the control tick (pid_fuzzy_derive_
-         * bands()'s own model_valid check) against this zone's persisted
-         * model_k_dc/model_tau_s -- zone_model_at()'s T_c parameter is an
-         * unused passthrough today (zones_config_accessors.c), so the
-         * persisted fields read here are bit-for-bit what the live tick
-         * consults, not an approximation of it. Raw fact, not a verdict: a
+         * bands()'s own model_valid check).
+         *
+         * docs/audits/zones_diag_endpoint_split_2026-09-14.md sec 6 (opus
+         * review): this used to read z->model_k_dc/model_tau_s DIRECTLY and
+         * call pid_fuzzy_derive_bands() itself, which only agreed with the
+         * tick because zone_model_at() is (still, as of this fix) a
+         * passthrough that ignores its T_c argument (zones_config_
+         * accessors.c). `5d3bc854` added that seam specifically so T_c
+         * becomes load-bearing later (gain scheduling) -- the day it does, a
+         * direct read here would silently start answering a different
+         * question than the tick, an unexpressed contract between two
+         * pieces of state (this repo's "reset one side of a pair" class).
+         * Fixed by calling zone_model_at() itself, the SAME function
+         * resolve_fuzzy_bands() calls, so the two call sites can never
+         * disagree about the DEFINITION of "does this zone have a model" --
+         * routing through one owning function makes the equivalence
+         * structural, not true-for-now. NAN is passed for T_c: this call
+         * site has no live actual_c available (that lives in profile_
+         * executor's zone_runtime_t, another area's owned code, and is only
+         * meaningful while a run is active anyway -- outside a run there is
+         * no live tick for this HTTP field to match). zone_model_at()
+         * ignores T_c today so NAN is inert now, but it is deliberately NOT
+         * 0.0 or a fit temperature -- grepping `zone_model_at(i, NAN` finds
+         * this exact call site the day T_c stops being ignored, at which
+         * point it needs the zone's live temperature threaded in, not a
+         * placeholder. Side effect: zone_model_at() -> zones_config_
+         * get_model() returns false for zone_index >= thermo_count, so a
+         * zone past thermo_count (this loop runs MAX31856_CHANNEL_COUNT
+         * times) now reads false here exactly as the tick would, instead of
+         * a stale non-zero model_k_dc reading true -- closes the smaller,
+         * currently-inert divergence the same review section noted. Raw
+         * fact, not a verdict: a
          * client combines it with fuzzy_strength_pct itself (this file's
          * house convention throughout -- emit raw values, let the client
          * interpret) to show "fuzzy configured but inactive: no identified
@@ -363,7 +407,10 @@ esp_err_t zones_get_handler(httpd_req_t *req)
          * already lives. Always emitted, same always-emit reasoning as every
          * other field above -- an absent key and a "valid" client default
          * must never mean the same thing. */
-        bool fuzzy_model_valid = pid_fuzzy_derive_bands(z->model_k_dc, z->model_tau_s, NULL, NULL);
+        float ht_model_k_dc = 0.0f, ht_model_tau_s = 0.0f, ht_model_dead_time_s = 0.0f;
+        bool fuzzy_model_valid = zone_model_at(i, NAN, &ht_model_k_dc, &ht_model_tau_s,
+                                                &ht_model_dead_time_s) &&
+                                  pid_fuzzy_derive_bands(ht_model_k_dc, ht_model_tau_s, NULL, NULL);
         APPEND(
             "%s{\"index\":%u,\"name\":\"%s\",\"relay_mask\":%u,\"thermo_mask\":%u,\"cal_offset_c\":%.3f,"
             "\"pid_kp\":%.4f,\"pid_ki\":%.4f,\"pid_kd\":%.4f,\"max_ramp_c_per_hr\":%.2f,"
@@ -675,7 +722,12 @@ esp_err_t zones_diag_get_handler(httpd_req_t *req)
      * convention zones_get_handler() uses for its own "zones" array --
      * "index" lets a consumer that only fetched this endpoint (no merge
      * against GET /api/zones) still line the two arrays up by zone number. */
-    APPEND("{\"zones\":[");
+    /* "generation": same zones_config_generation() value /api/zones now also
+     * emits (see that handler's own comment) -- lets a client that fetches
+     * both endpoints detect a config write landed between the two requests
+     * instead of silently merging a gain from one generation with an
+     * operating point from another. */
+    APPEND("{\"generation\":%u,\"zones\":[", (unsigned)zones_config_generation());
     for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
         const zone_cfg_t *z = &s_zones.cfg.zones[i];
         APPEND("%s{\"index\":%u,", i == 0 ? "" : ",", i);

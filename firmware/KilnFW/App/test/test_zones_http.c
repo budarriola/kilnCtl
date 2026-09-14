@@ -4235,6 +4235,76 @@ static void test_zones_diag_get_handler_round_trips_moved_fields(void)
               "with zone 0's -- an index-transposed bug would fail this");
 }
 
+// docs/audits/zones_field_sourcing_and_generation_2026-09-14.md sec 2 (opus
+// review, defect 2): /api/zones and /api/zones_diag are two separate
+// requests with no shared snapshot; a config write landing between them can
+// pair a NEW gain with an OLD fit operating point. zones_config_generation()
+// is now emitted on BOTH responses so a client can detect that. This test
+// confirms both handlers report the SAME value for the SAME underlying
+// config generation, and that the value actually reflects a real write
+// (moves after a setter call) -- a client comparing two counters that never
+// moved could pass by construction, so the "before/after a real write"
+// wired-through check matters as much as the top-level presence.
+//
+// Negative test: delete the "\"generation\":%u," APPEND fragment (and its
+// config_generation/zones_config_generation() argument) from either handler
+// -> this test's strstr()-based TEST_CHECK for that handler goes red (the
+// literal "\"generation\":" substring disappears from the response).
+static void test_get_and_diag_emit_matching_generation(void)
+{
+    TEST_SECTION("zones_get_handler/zones_diag_get_handler -- both emit the SAME "
+                 "zones_config_generation() value (docs/audits/"
+                 "zones_field_sourcing_and_generation_2026-09-14.md sec 2)");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = MAX31856_CHANNEL_COUNT;
+
+    /* Bump the generation with a real setter (not a hand-poked struct field)
+     * so this test also proves the emitted value tracks an actual config
+     * write, not just a static default. */
+    zones_config_set_model(0, 10.0f, 100.0f, 5.0f);
+    uint32_t gen = zones_config_generation();
+
+    char gen_needle[48];
+    snprintf(gen_needle, sizeof(gen_needle), "\"generation\":%u,", (unsigned)gen);
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = zones_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "zones_get_handler must return ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, gen_needle) != NULL,
+              "GET /api/zones emits the current generation as a top-level key");
+
+    memset(&req, 0, sizeof(req));
+    err = zones_diag_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "zones_diag_get_handler must return ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, gen_needle) != NULL,
+              "GET /api/zones_diag emits the SAME generation value -- a client can "
+              "compare the two to detect a config write landing between the two GETs");
+
+    /* Bump again and confirm BOTH handlers move together -- proves this
+     * isn't two independently-initialised counters that happen to start
+     * equal (the exact "reset one side of a pair" shape this repo has hit
+     * before). */
+    zones_config_set_model(1, 20.0f, 200.0f, 8.0f);
+    uint32_t gen2 = zones_config_generation();
+    TEST_CHECK(gen2 > gen, "a second setter call bumps the generation again");
+    char gen2_needle[48];
+    snprintf(gen2_needle, sizeof(gen2_needle), "\"generation\":%u,", (unsigned)gen2);
+
+    memset(&req, 0, sizeof(req));
+    err = zones_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "zones_get_handler must return ESP_OK (2nd call)");
+    TEST_CHECK(strstr(s_last_resp_body, gen2_needle) != NULL,
+              "GET /api/zones reflects the bumped generation");
+
+    memset(&req, 0, sizeof(req));
+    err = zones_diag_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "zones_diag_get_handler must return ESP_OK (2nd call)");
+    TEST_CHECK(strstr(s_last_resp_body, gen2_needle) != NULL,
+              "GET /api/zones_diag reflects the SAME bumped generation");
+}
+
 // docs/audits/zones_get_autotune_baseline_exposure_2026-09-13.md: GET /api/
 // zones never emitted autotune_baseline_k_dc even though POST accepts it
 // (preserved-only, no z%u_ key of its own -- adaptive_tune.c is its sole
@@ -4356,6 +4426,55 @@ static void test_get_emits_fuzzy_model_valid(void)
                   "fuzzy_model_valid:false -- configured but inactive");
         TEST_CHECK(fmv1 && strncmp(fmv1, "\"fuzzy_model_valid\":true", 24) == 0,
                   "zone 1 (a real fit) reports fuzzy_model_valid:true");
+    }
+}
+
+// docs/audits/zones_field_sourcing_and_generation_2026-09-14.md sec 6 (opus
+// review, defect: "incidental, not structural"): fuzzy_model_valid used to
+// read z->model_k_dc/model_tau_s DIRECTLY and call pid_fuzzy_derive_bands()
+// itself, bypassing zone_model_at() -- the SAME function profile_executor_
+// pid_tick.c's resolve_fuzzy_bands() calls. This test targets exactly the
+// divergence that bypass caused: zone_model_at() -> zones_config_get_model()
+// returns false for zone_index >= thermo_count, so a zone past thermo_count
+// carrying a STALE non-zero model must read fuzzy_model_valid:false (matching
+// what the control tick would see, since that zone is not controlled), not
+// true (what a direct z->model_k_dc read would report). Before the fix this
+// zone read true; after it, false.
+//
+// Negative test: change the call site in zones_http_get.c back to `bool
+// fuzzy_model_valid = pid_fuzzy_derive_bands(z->model_k_dc, z->model_tau_s,
+// NULL, NULL);` (the pre-fix form) -> this test's TEST_CHECK goes red.
+static void test_get_fuzzy_model_valid_single_sourced_past_thermo_count(void)
+{
+    TEST_SECTION("zones_get_handler -- fuzzy_model_valid routes through zone_model_at() "
+                 "(single-sourced with the control tick), not a direct model_k_dc/"
+                 "model_tau_s read (docs/audits/zones_field_sourcing_and_generation_"
+                 "2026-09-14.md sec 6)");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 2;
+    /* Zone 2 is >= thermo_count (2) -- not a controlled zone -- but carries a
+     * STALE non-zero model from before thermo_count was lowered (or a config
+     * that was never cleared). zones_config_get_model() (and therefore the
+     * control tick's zone_model_at() call) refuses any zone_index >=
+     * thermo_count regardless of what is stored. */
+    s_zones.cfg.zones[2].model_k_dc = 42.0f;
+    s_zones.cfg.zones[2].model_tau_s = 260.0f;
+    s_zones.cfg.zones[2].fuzzy_strength_pct = 75.0f;
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = zones_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "zones_get_handler must return ESP_OK");
+
+    const char *zone2 = strstr(s_last_resp_body, "\"index\":2,");
+    TEST_CHECK(zone2 != NULL, "zone 2 object found");
+    if (zone2) {
+        const char *fmv2 = strstr(zone2, "\"fuzzy_model_valid\":");
+        TEST_CHECK(fmv2 && strncmp(fmv2, "\"fuzzy_model_valid\":false", 25) == 0,
+                  "zone 2 (>= thermo_count, stale non-zero model) reports "
+                  "fuzzy_model_valid:false, matching zone_model_at()'s thermo_count "
+                  "guard -- a direct model_k_dc read would wrongly report true");
     }
 }
 
@@ -10771,6 +10890,8 @@ void run_test_zones_http(void)
     test_zones_diag_get_handler_round_trips_moved_fields();
     test_get_emits_autotune_baseline_k_dc();
     test_get_emits_fuzzy_model_valid();
+    test_get_fuzzy_model_valid_single_sourced_past_thermo_count();
+    test_get_and_diag_emit_matching_generation();
     test_zones_get_handler_max_width_response_fits_json_cap();
     test_zones_diag_get_handler_max_width_response_fits_json_cap();
     test_tuning_rec_body_len_strips_the_idf_appended_nul();

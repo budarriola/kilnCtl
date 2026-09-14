@@ -47,6 +47,8 @@ import re
 from kilnctrl.zones_http_client import (
     _TOP_FIELD_FORM_KEY,
     _TOP_READONLY_OR_STRUCTURAL_KEYS,
+    _ZONE_COUPLING_CELL_RE,
+    _ZONE_COUPLING_TAU_DEAD_TIME_CELL_RE,
     _ZONE_FIELD_FORM_KEY,
     _ZONE_READONLY_KEYS,
     _ZONES_DIAG_MODEL_FIT_KEYS,
@@ -63,6 +65,21 @@ _ZONES_POST_C_PATH = _DRIVERS_DIR / "http" / "zones_http_post.c"
 _ZONES_POST_PARSE_C_PATH = _DRIVERS_DIR / "http" / "zones_http_post_parse.c"
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+#: docs/audits/zones_field_sourcing_and_generation_2026-09-14.md (opus
+#: review, "coupling-cell drift hole"): a dynamically-indexed per-cell key
+#: like "coupling_tau_c%u" never matches _IDENT_RE (the literal template
+#: token still has the %u in it before snprintf substitutes an index), so
+#: these keys have always silently dropped out of the drift extraction --
+#: on BOTH endpoints, not just the one that moved. This regex recovers just
+#: those "<ident>%u"-shaped template tokens (never %s -- no dynamic-suffix
+#: key in either handler is %s-indexed today) into a separate set so the
+#: per-zone checks below can assert the handful of KNOWN dynamic keys are
+#: still present, rather than leaving 558 of the 693 bytes that moved
+#: (12 coupling_tau_c%u/coupling_dead_time_c%u cells) checked on neither
+#: endpoint. Deliberately narrow (one placeholder shape) rather than a
+#: general dynamic-key parser -- see this module's header for why a
+#: broader mechanical check was rejected elsewhere in this codebase.
+_DYNAMIC_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)%u$")
 #: Between two adjacent (C-concatenated) string-literal fragments of one
 #: APPEND() call there can be arbitrary whitespace AND/OR a /* ... */ block
 #: comment -- e.g. the multi-line comment explaining relay_zone_owned_mask
@@ -91,11 +108,14 @@ def _function_body(text: str, name: str, source_path: pathlib.Path) -> str:
     return text[start:end]
 
 
-def _scan_template_keys(dequoted: str, depth: int, keys: set) -> int:
+def _scan_template_keys(dequoted: str, depth: int, keys: set, dynamic_keys: "set | None" = None) -> int:
     """Walk one dequoted JSON-template fragment, tracking brace/bracket
     depth, and record any ``"key":`` token seen at depth 1 into ``keys``.
-    Returns the depth at the end of the fragment, so callers can carry it
-    across consecutive APPEND() calls that jointly build one JSON stream."""
+    A token shaped ``<ident>%u`` (a dynamically-indexed per-cell key like
+    ``coupling_tau_c%u``) is recorded into ``dynamic_keys`` instead, if the
+    caller passed one -- see ``_DYNAMIC_KEY_RE``'s own comment. Returns the
+    depth at the end of the fragment, so callers can carry it across
+    consecutive APPEND() calls that jointly build one JSON stream."""
     i, n = 0, len(dequoted)
     while i < n:
         c = dequoted[i]
@@ -107,8 +127,13 @@ def _scan_template_keys(dequoted: str, depth: int, keys: set) -> int:
             k = j + 1
             while k < n and dequoted[k] in " \t":
                 k += 1
-            if depth == 1 and k < n and dequoted[k] == ":" and _IDENT_RE.match(token):
-                keys.add(token)
+            if depth == 1 and k < n and dequoted[k] == ":":
+                if _IDENT_RE.match(token):
+                    keys.add(token)
+                elif dynamic_keys is not None:
+                    dm = _DYNAMIC_KEY_RE.match(token)
+                    if dm:
+                        dynamic_keys.add(dm.group(1) + "%u")
             i = j + 1
         elif c in "{[":
             depth += 1
@@ -262,14 +287,19 @@ def _slice_matching_braces(text: str, open_brace_pos: int) -> str:
 
 
 def _extract_get_per_zone_keys(text: str, source_path: pathlib.Path,
-                                handler_name: str = "zones_get_handler") -> set:
+                                handler_name: str = "zones_get_handler") -> "tuple[set, set]":
     """Extract the per-zone JSON keys one GET handler's "zones":[ array
     emits. `handler_name` defaults to zones_get_handler (GET /api/zones) but
     is also used for zones_diag_get_handler (GET /api/zones_diag,
     docs/audits/zones_diag_endpoint_split_2026-09-14.md) -- both handlers
     share the same "zones":[ + `for (uint8_t i = 0; i < MAX31856_CHANNEL_
     COUNT; i++) {` marker shape by construction, so the same extractor
-    covers both without duplicating this logic."""
+    covers both without duplicating this logic. Returns (keys, dynamic_keys)
+    -- the second set holds ``<ident>%u``-shaped per-cell key templates
+    (e.g. ``coupling_tau_c%u``), which never match _IDENT_RE and so were
+    previously invisible to any drift check (docs/audits/
+    zones_field_sourcing_and_generation_2026-09-14.md, "coupling-cell drift
+    hole")."""
     body = _function_body(text, handler_name, source_path)
     m = _ZONE_LOOP_START_RE.search(body)
     if m is None:
@@ -280,13 +310,14 @@ def _extract_get_per_zone_keys(text: str, source_path: pathlib.Path,
     loop_open_brace = m.end() - 1
     loop_body = _slice_matching_braces(body, loop_open_brace)
     keys: set = set()
+    dynamic_keys: set = set()
     depth = 0
     for am in _APPEND_CALL_RE.finditer(loop_body):
         dequoted = "".join(
             part.replace('\\"', '"') for part in _STRING_LITERAL_RE.findall(am.group(1))
         )
-        depth = _scan_template_keys(dequoted, depth, keys)
-    return keys
+        depth = _scan_template_keys(dequoted, depth, keys, dynamic_keys)
+    return keys, dynamic_keys
 
 
 def _extract_post_per_zone_suffixes(text: str, source_path: pathlib.Path) -> set:
@@ -324,8 +355,10 @@ def zones_per_zone_field_table_checks() -> None:
     get_text = _ZONES_GET_C_PATH.read_text(encoding="utf-8")
     post_text = _ZONES_POST_PARSE_C_PATH.read_text(encoding="utf-8")
 
-    fw_get_keys = _extract_get_per_zone_keys(get_text, _ZONES_GET_C_PATH, "zones_get_handler")
-    fw_diag_keys = _extract_get_per_zone_keys(get_text, _ZONES_GET_C_PATH, "zones_diag_get_handler")
+    fw_get_keys, fw_get_dynamic_keys = _extract_get_per_zone_keys(
+        get_text, _ZONES_GET_C_PATH, "zones_get_handler")
+    fw_diag_keys, fw_diag_dynamic_keys = _extract_get_per_zone_keys(
+        get_text, _ZONES_GET_C_PATH, "zones_diag_get_handler")
     fw_post_suffixes = _extract_post_per_zone_suffixes(post_text, _ZONES_POST_PARSE_C_PATH)
 
     check("firmware per-zone GET extractor found keys", len(fw_get_keys) > 10, True)
@@ -372,6 +405,46 @@ def zones_per_zone_field_table_checks() -> None:
         f"extra in client: {sorted(extra_in_client_diag)})",
         (missing_from_client_diag, extra_in_client_diag),
         (set(), set()),
+    )
+
+    # docs/audits/zones_field_sourcing_and_generation_2026-09-14.md
+    # ("coupling-cell drift hole"): the dynamically-indexed per-cell keys
+    # neither per-zone check above can see -- coupling_c%u on /api/zones,
+    # coupling_tau_c%u/coupling_dead_time_c%u on /api/zones_diag (558 of the
+    # 693 bytes the 2026-09-14 split moved). Checked by NAME against a
+    # client-side regex's own pattern rather than a flat key set, so this
+    # stays tied to the actual matching logic (_ZONE_COUPLING_CELL_RE /
+    # _ZONE_COUPLING_TAU_DEAD_TIME_CELL_RE) rather than a second hand-typed
+    # copy of "which cells exist" that could itself drift.
+    expected_get_dynamic = {"coupling_c%u"}
+    check(
+        "zones per-zone GET dynamic (%u-indexed) keys: firmware matches expectation "
+        f"(missing: {sorted(expected_get_dynamic - fw_get_dynamic_keys)}, "
+        f"extra: {sorted(fw_get_dynamic_keys - expected_get_dynamic)})",
+        (expected_get_dynamic - fw_get_dynamic_keys, fw_get_dynamic_keys - expected_get_dynamic),
+        (set(), set()),
+    )
+    check(
+        "zones per-zone GET dynamic keys: client's _ZONE_COUPLING_CELL_RE "
+        "matches a concrete instance of each",
+        all(bool(_ZONE_COUPLING_CELL_RE.match(k.replace("%u", "0"))) for k in fw_get_dynamic_keys),
+        True,
+    )
+
+    expected_diag_dynamic = {"coupling_tau_c%u", "coupling_dead_time_c%u"}
+    check(
+        "zones_diag per-zone GET dynamic (%u-indexed) keys: firmware matches expectation "
+        f"(missing: {sorted(expected_diag_dynamic - fw_diag_dynamic_keys)}, "
+        f"extra: {sorted(fw_diag_dynamic_keys - expected_diag_dynamic)})",
+        (expected_diag_dynamic - fw_diag_dynamic_keys, fw_diag_dynamic_keys - expected_diag_dynamic),
+        (set(), set()),
+    )
+    check(
+        "zones_diag per-zone GET dynamic keys: client's "
+        "_ZONE_COUPLING_TAU_DEAD_TIME_CELL_RE matches a concrete instance of each",
+        all(bool(_ZONE_COUPLING_TAU_DEAD_TIME_CELL_RE.match(k.replace("%u", "0")))
+            for k in fw_diag_dynamic_keys),
+        True,
     )
 
     # POST side: every per-zone form-field suffix the firmware parses must be
