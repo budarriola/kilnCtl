@@ -85,7 +85,10 @@ typedef struct {
     uint8_t  ki_verdict;                // adaptive_tune_ki_verdict_t, cached as uint8_t so this header does not
                                         // need the enum's definition to compile against
     float    ki_correction_pct;         // signed suggested Ki move, before the per-run cap
-    bool     ki_applied;                // true once a Ki correction was actually written this run
+    bool     ki_applied;                // K9 (docs/audits/simc_sole_gain_writer_2026-09-14.md): this layer never
+                                        // writes any more -- always false. Kept (not removed) because
+                                        // adaptive_tune_get_status() still publishes it, and an operator should
+                                        // see an explicit "never applied" rather than a field that just vanished.
     char     ki_refusal_reason[96];     // why a nonzero diagnosis was not applied, if it was not
 
     // -- One-click revert (PID_EXPANSION_PLAN.md 3.3) --

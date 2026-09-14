@@ -241,8 +241,9 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
         // adaptive_tune_refine_ki_locked()'s effective-vs-reference guard.
         // That guard, and the write path it protected, are both gone now --
         // adaptive_tune_ki.c is diagnostic-only and SIMC (adaptive_tune_
-        // model.c) is the sole gain writer, which is frame-independent of
-        // fuzzy by construction (see that file's own top comment) -- so
+        // model.c) is the sole AUTOMATIC gain writer, which is
+        // frame-independent of fuzzy by construction (see that file's own
+        // top comment) -- so
         // there is nothing left here for a snapshot to protect. Removed
         // rather than left as dead bookkeeping.
         // H4(c): this flag is shared MODULE-WIDE (see its own comment), so

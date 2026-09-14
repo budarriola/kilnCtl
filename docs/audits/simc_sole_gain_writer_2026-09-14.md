@@ -464,3 +464,123 @@ cannot fail** for the reason it claims to, and this document's negative-test
 section says otherwise (R1). The real proof is
 `test_ki_diagnosis_never_applies_any_verdict()`, which I reproduced
 independently, numbers and all.
+
+---
+
+## Follow-up, 2026-09-14 -- R1 fixed; wording corrected; two minor items dispositioned
+
+A third session closed R1 and R4 above. Everything below is **[executed]**
+unless marked otherwise.
+
+### R1 fix: the anti-ratchet test now actually reaches the classifier
+
+Root cause confirmed independently, matching R1 exactly: `z->trace_count`
+resets to 0 on every fresh dwell entry
+(`adaptive_tune.c`'s `dwell_just_entered` branch), and
+`test_ki_diagnosis_never_ratchets_with_fuzzy_and_adaptive_tune_concurrent()`
+called `feed_settled_dwell()` four times per run, each starting a new dwell
+-- so only the LAST segment's tick count ever survived into the trace
+`adaptive_tune_refine_ki_locked()` reads. That segment used `SETTLE_TICKS`
+(7), one short of `ADAPTIVE_TUNE_KI_MIN_SAMPLES` (12).
+
+Reproduced by hand: reintroduced the removed write path in
+`adaptive_tune_refine_ki_locked()` (`zones_config_get_pid()` -> per-run
+`ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE`-capped correction ->
+`zones_config_set_pid()`, `ki_applied = true`), deleted
+`firmware/KilnFW/App/test/build`, rebuilt. Result: **102 failures**,
+including the exact 4.2998x-at-run-8 walk continuing to 46.0052, all from
+`test_ki_diagnosis_never_applies_any_verdict()` and the setup assertions in
+`test_adaptive_tune_ki_verdict.c`/`test_adaptive_tune_status.c` -- and, with
+the write path reintroduced, `test_ki_diagnosis_never_ratchets_with_fuzzy_
+and_adaptive_tune_concurrent()` itself still reported **0 failures**,
+confirming R1's diagnosis exactly.
+
+Fix applied: only the FINAL segment's tick count changed, from `SETTLE_TICKS`
+to `KI_RATCHET_TEST_FINAL_SETTLE_TICKS` (`ADAPTIVE_TUNE_KI_MIN_SAMPLES + 3`,
+a local `#define` scoped to this test, not a change to the shared
+`SETTLE_TICKS` constant other tests in this file rely on). The other three
+ramp segments are untouched -- they exist only to spread duty/rise pairs for
+the SIMC model fit, which does not read the trace. The test also gained an
+explicit `offset_too_small_seen` assertion (fails if the classifier is never
+genuinely reached) and a bit-exact check on the stored Ki specifically on
+runs where `ki_verdict == ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL` was actually
+observed, so a future regression that reintroduces INSUFFICIENT-only runs
+cannot silently go vacuous again.
+
+Re-ran the same reintroduction against the fixed test: **24 assertions
+failed** in `test_ki_diagnosis_never_ratchets_with_fuzzy_and_adaptive_tune_
+concurrent()` specifically (the "must never apply", "must leave the stored
+Ki bit-for-bit unchanged", and "must never move more than 5%" checks, at
+lines 525/547/561), on top of the pre-existing 102. Restored the write-path
+change **by hand** (confirmed `git diff` on `adaptive_tune_ki.c` empty
+afterward), deleted `build/` again, rebuilt clean: **adaptive_tune executable
+4963/4963 checks passed**, all 40 host-test executables built.
+
+### R4 wording fix applied
+
+`adaptive_tune_ki.c`'s top comment, its `adaptive_tune_refine_ki_locked()`
+doc comment, the operator-facing refusal string
+(`"diagnostic only (v%u %.0f%%) -- SIMC is the sole automatic gain writer"`,
+was `"... the sole gain writer"`), and the matching comment in
+`adaptive_tune.c`'s dwell-entry block now all say "sole AUTOMATIC gain
+writer" and name the five operator/import call sites
+(`adaptive_tune.c`'s revert, `autotune_engine_guard.c`'s accept,
+`zones_http_pid.c`'s `POST /api/zones/pid`, `backup_import.c`, and
+`uart_bridge_ext_control.c`'s bench UART bridge) that still call
+`zones_config_set_pid()` directly and are unaffected. The stale
+`adaptive_tune.h:88` comment on `ki_applied` ("true once a Ki correction was
+actually written this run", no longer possible) is corrected to describe the
+current always-false, kept-for-status-visibility behavior.
+
+`ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT`: confirmed **no remaining reader**
+[executed, grep over `firmware/KilnFW/App` excluding `test/`]. Decision:
+**retained**, not removed -- it is the plausibility figure `ki_baseline`'s
+own reasoning and two other files' comments
+(`adaptive_tune.c:844`, `test_adaptive_tune_model.c`'s ratio-based fixture
+derivation) point at, and the reasoning immediately above its definition
+(how far a Ki correction may plausibly move from an autotuned baseline
+before the MODEL, not the correction, is what's wrong) is exactly the shape
+a rebuilt Ki-diagnosis write path or a live `ki_baseline` plausibility check
+would need again. A one-line note at the `#define` now says this explicitly
+and points back here.
+
+### R2 (approximate invariance) -- already captured plainly above, reconfirmed
+
+R2's own text already states it as a plain instruction to future readers:
+*"Option B is what makes it safe, not the pointwise argument, since the
+freeze removes fuzzy from the whole window in which that residual is
+accumulated"* -- i.e. **the harvest freeze is load-bearing, not optional
+defense-in-depth**, and must not be removed as "redundant" with the
+frame-independence argument alone. No further doc change made; this
+follow-up confirms that sentence already says what it needs to.
+
+### R3's two minor items -- dispositioned, neither fixed
+
+1. **Freeze stays on for the whole dwell after the single observation is
+   recorded**, not just through the harvest window. Not fixed: tightening it
+   (gating `harvest_freeze` on the module's own `recorded_this_dwell` state
+   too) touches live control behavior in `profile_executor.c` on every
+   adaptive-tune-enabled, fuzzy-active zone, for a benefit that is purely
+   "fuzzy participates sooner in a dwell that can run for hours" -- not a
+   correctness defect, and not obviously small once the interaction with
+   `pid_rescale_integral_for_new_ki()`'s bumpless-Ki-step handling (R3 item 2
+   below) at the moment freeze lifts mid-dwell is worked through. Left as a
+   documented, non-blocking optimization opportunity, not applied here.
+2. **Harvested duty is one tick stale** (`z->duty` assigned in
+   `profile_executor.c` after `adaptive_tune_zone_tick()` runs). Not fixed:
+   R3 already establishes this is immaterial at 1 Hz ticks against a 180 s
+   settle window, and reordering the two statements is a change to a
+   correctly-functioning control loop's tick sequencing made for a
+   sub-1-tick effect with no measured symptom -- not "clearly correct and
+   small" by this pass's own bar for touching that file.
+
+### Verification tallies (this follow-up)
+
+- KilnFW host tests, full clean rebuild, negative test reverted by hand
+  before the final measurement: **40/40 executables built**; `adaptive_tune`
+  executable **4963/4963 checks passed**.
+- `git diff --stat` on `adaptive_tune_ki.c` after the hand-revert: empty
+  (byte-identical to before the negative test).
+- Commit hashes cited in this follow-up section: none new beyond what this
+  document already cited above, all previously confirmed via
+  `git cat-file -t`.

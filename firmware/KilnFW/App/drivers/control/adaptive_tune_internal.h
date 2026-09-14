@@ -275,6 +275,20 @@ NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_KEY_KIBASE_REV);
 // fixture re-derived to converge well inside 5x, not defined BY 5x -- see
 // that test's own comment on why KI_TEST_ERR_K's value no longer determines
 // what the guard permits).
+// K9 (docs/audits/simc_sole_gain_writer_2026-09-14.md): no production code
+// reads this any more -- adaptive_tune_refine_ki_locked() (the only caller
+// that used to enforce it) is diagnostic-only now, and never applies a
+// correction of any size. RETAINED, not removed: it is still the
+// plausibility figure ki_baseline's own doc comment and this file's
+// "reboot-durable baseline" reasoning point at (adaptive_tune.c:844,
+// test_adaptive_tune_model.c's ratio-based fixture derivation), and the
+// reasoning above this line -- how far a Ki correction may plausibly move
+// from an autotuned baseline before the MODEL, not the correction, is what's
+// wrong -- is exactly the shape a future rebuilt Ki-diagnosis write path (or
+// a live plausibility check on ki_baseline itself) would need. Removing the
+// constant now would either dangle those comments' cross-references or force
+// deleting reasoning this file already worked out once. Revisit if it is
+// still unread the next time this file gets a substantial pass.
 #define ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT 5.0f
 
 #define ADAPTIVE_TUNE_KI_RELAY_HYSTERESIS_C 0.0f

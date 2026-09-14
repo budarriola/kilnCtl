@@ -443,6 +443,33 @@ static void test_model_refine_relatches_ki_baseline_to_fresh_simc_ki(void)
 // measured the reference Ki walk to 4.2998x baseline over 10 runs. Fed on
 // every run here regardless of whether the SIMC refine also fires that
 // run, so the Ki diagnosis sees it on whichever runs D5 hands it the turn.
+//
+// R1 fix (docs/audits/simc_sole_gain_writer_2026-09-14.md's adversarial
+// review appended 2026-09-14): the first version of this test used
+// SETTLE_TICKS (7) for every one of its four ramp segments. Because
+// z->trace_count resets to 0 on every fresh dwell entry (adaptive_tune.c's
+// dwell_just_entered branch) and feed_settled_dwell() always starts a new
+// dwell, only the LAST segment's tick count ever survives into the trace
+// adaptive_tune_refine_ki_locked() reads -- 7 samples, one short of
+// ADAPTIVE_TUNE_KI_MIN_SAMPLES (12). Combined with the model refine
+// claiming the turn on the early runs (D5), the Ki layer's classifier was
+// NEVER actually reached: instrumenting confirmed ki_verdict ==
+// INSUFFICIENT on all 10 runs, for two different reasons (D5 skip on runs
+// 0-3, MIN_SAMPLES refusal on runs 4-9) -- so this test could not have
+// caught the write path it exists to guard. Reintroducing that write path
+// by hand left this test at 0 failures while the companion,
+// test_ki_diagnosis_never_applies_any_verdict(), failed 84 times with the
+// documented 4.2998x walk.
+//
+// Fix: give the FINAL segment (the one whose trace survives into the
+// classifier) enough ticks to clear MIN_SAMPLES, independent of
+// SETTLE_TICKS (which the other three segments keep, unchanged, since they
+// exist only to spread duty/rise pairs for the SIMC model fit, not to
+// leave a trace behind). The classifier is then genuinely reached on every
+// run where D5 does not hand the turn to the model refine instead, and
+// this test asserts that happened at least once (`offset_too_small_seen`)
+// rather than trusting the loop shape to make it so.
+#define KI_RATCHET_TEST_FINAL_SETTLE_TICKS (ADAPTIVE_TUNE_KI_MIN_SAMPLES + 3)
 static void test_ki_diagnosis_never_ratchets_with_fuzzy_and_adaptive_tune_concurrent(void)
 {
     reset_module_state();
@@ -458,6 +485,7 @@ static void test_ki_diagnosis_never_ratchets_with_fuzzy_and_adaptive_tune_concur
     float initial_ki = s_fake_zone_cfg[0].ki;
     bool simc_applied = false;
     float ki_after_first_simc_apply = initial_ki;
+    bool offset_too_small_seen = false;
 
     for (int run = 0; run < 10; run++) {
         // Same spread every run -- gives the SIMC refine enough observations
@@ -475,7 +503,13 @@ static void test_ki_diagnosis_never_ratchets_with_fuzzy_and_adaptive_tune_concur
         feed_settled_dwell(0, 22.0f + 10.5f * 0.30f, 22.0f, 0.30f, SETTLE_TICKS, DT_S);
         feed_settled_dwell(0, 22.0f + 10.5f * 0.50f, 22.0f, 0.50f, SETTLE_TICKS, DT_S);
         feed_settled_dwell(0, 22.0f + 10.5f * 0.70f, 22.0f, 0.70f, SETTLE_TICKS, DT_S);
-        feed_settled_dwell(0, 22.0f + 10.5f * 0.90f, 22.0f, 0.90f, SETTLE_TICKS, DT_S);
+        // FINAL segment only: KI_RATCHET_TEST_FINAL_SETTLE_TICKS (>=
+        // ADAPTIVE_TUNE_KI_MIN_SAMPLES), not SETTLE_TICKS -- this is the
+        // dwell whose trace survives into adaptive_tune_refine_ki_locked()
+        // (see this test's own header comment for why only the last
+        // segment's trace matters). duty stays 0.90, still clear of
+        // ADAPTIVE_TUNE_KI_FLOOR_DUTY_RAIL_BAND (0.05 from either rail).
+        feed_settled_dwell(0, 22.0f + 10.5f * 0.90f, 22.0f, 0.90f, KI_RATCHET_TEST_FINAL_SETTLE_TICKS, DT_S);
 
         float ki_before = s_fake_zone_cfg[0].ki;
         profile_firing_run_record_t rec = make_clean_record(800 + run, 0, 900);
@@ -491,6 +525,28 @@ static void test_ki_diagnosis_never_ratchets_with_fuzzy_and_adaptive_tune_concur
                    "K9: adaptive_tune_ki.c must never apply a correction, with fuzzy active or not");
 
         float ki_now = s_fake_zone_cfg[0].ki;
+
+        // The classifier must actually be reached on the runs D5 hands it
+        // the turn (model_refined false) -- this is the assertion that was
+        // missing before the fix above, and the one that catches the
+        // vacuity: with the trace too short, ki_verdict stayed INSUFFICIENT
+        // on every run and this branch never ran.
+        if (adaptive_tune_zones[0].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL) {
+            offset_too_small_seen = true;
+            TEST_CHECK(strstr(adaptive_tune_zones[0].ki_refusal_reason, "diagnostic only") != NULL,
+                       "K9: a genuinely-classified OFFSET_TOO_SMALL verdict must still refuse with the "
+                       "diagnostic-only reason, concurrent fuzzy or not");
+            // On a run where the classifier actually fires, SIMC did not
+            // also apply this same run (D5 is mutually exclusive) -- so the
+            // stored Ki reaching here bit-exact is a direct proof that a
+            // LIVE OFFSET_TOO_SMALL classification produced no write, not
+            // an artifact of the classifier never running at all.
+            TEST_CHECK_NEAR(ki_now, ki_before, 1e-6,
+                             "K9: a live OFFSET_TOO_SMALL classification (this exact trace ratcheted a "
+                             "plain-PID zone 1.2x/run under the removed write path) must leave the stored Ki "
+                             "bit-for-bit unchanged");
+        }
+
         // The FIRST SIMC apply is deliberately a big, one-time jump (ki
         // starts at 0.01, well off the SIMC-consistent value, precisely so
         // it is unmistakably genuine) -- the 5% per-run bound below only
@@ -513,6 +569,12 @@ static void test_ki_diagnosis_never_ratchets_with_fuzzy_and_adaptive_tune_concur
     TEST_CHECK(simc_applied, "setup: SIMC refinement must have genuinely occurred at least once across these "
                               "10 runs -- proving concurrent operation still adapts, not merely that it fails "
                               "to ratchet because nothing ever adapts at all");
+    TEST_CHECK(offset_too_small_seen,
+               "R1 fix: the Ki diagnosis classifier must have actually been reached and returned "
+               "OFFSET_TOO_SMALL on at least one run -- otherwise this test is vacuous (see this test's own "
+               "header comment): the trace must clear ADAPTIVE_TUNE_KI_MIN_SAMPLES on a run where D5 hands "
+               "the Ki layer a turn, not merely leave it perpetually INSUFFICIENT");
     (void)ki_after_first_simc_apply; // tracked for readability in the per-run loop above; no further check needed --
                                       // the per-run 5% bound already proves no run-over-run ratchet occurred
 }
+#undef KI_RATCHET_TEST_FINAL_SETTLE_TICKS

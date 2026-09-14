@@ -167,7 +167,17 @@ bool adaptive_tune_diagnose_ki(const float *actual_c, const float *duty, uint32_
 // the verdict path, unused today but kept per that audit's section 4.1
 // recommendation for a future rebuild) -- but it NEVER writes zones_config
 // any more. adaptive_tune_refine_zone_locked() (adaptive_tune_model.c),
-// the K_dc/SIMC path, is now the SOLE writer of this zone's PID gains.
+// the K_dc/SIMC path, is now the sole AUTOMATIC writer of this zone's PID
+// gains -- i.e. the only path that writes gains on its own initiative, from
+// trace data, with no operator in the loop. Five operator/import paths still
+// call zones_config_set_pid() directly and are unaffected by any of this:
+// the operator's one-click revert (adaptive_tune.c), autotune accept
+// (autotune_engine_guard.c), POST /api/zones/pid (zones_http_pid.c), backup
+// import (backup_import.c), and the bench UART control task
+// (uart_bridge_ext_control.c). "Sole gain writer" un-qualified (as this file
+// used to say, including in the operator-facing refusal string below) is
+// therefore over-stated -- corrected 2026-09-14 per the adversarial review's
+// R4 finding (docs/audits/simc_sole_gain_writer_2026-09-14.md).
 //
 // Why: adaptive_tune_diagnose_ki() classifies TRACE SHAPE (amplitude, zero
 // crossings, steady offset) -- properties of the closed loop, i.e. of the
@@ -264,8 +274,9 @@ void adaptive_tune_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_
     // DOES indicate a correction, by this layer's own classifier -- but this
     // layer no longer writes it. Report the diagnosis (verdict/correction_pct
     // above already published) and stop; SIMC (adaptive_tune_model.c) is the
-    // sole gain writer now.
+    // sole AUTOMATIC gain writer now (see this file's top comment -- five
+    // operator/import paths still call zones_config_set_pid() directly).
     adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
-               "diagnostic only (v%u %.0f%%) -- SIMC is the sole gain writer",
+               "diagnostic only (v%u %.0f%%) -- SIMC is the sole automatic gain writer",
                (unsigned)diag.verdict, (double)diag.ki_correction_pct);
 }
