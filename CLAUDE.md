@@ -367,6 +367,20 @@ widened from `static` even when the grep is clean — a same-named global can
 collide silently with an unrelated `static` elsewhere. See `b9a5112` for a
 worked example of both.
 
+A negative test must end with a **forced full rebuild**, not merely a hand-restore
+and an empty `git diff`. `ed854ac5`'s negative test flipped `RULE_TABLE[1][1]`'s
+Kp direction in `pid_fuzzy.c`, rebuilt all 37 host-test executables, confirmed
+failure, then restored the source by hand and confirmed an empty `git diff` — correct
+procedure by the letter, but the poisoned `kilnctl_sim_fuzzy_closedloop.exe` binary
+survived the revert sitting in the build directory. Ten minutes later `ba230bca`
+read that prebuilt `.exe` instead of rebuilding and measured six numbers from
+sabotaged code, which became a committed verdict and reached the project owner
+before `docs/audits/review_sim_fuzzy_commits_2026-09-13.md` (`8a12521b`)
+root-caused it. An empty `git diff` proves the *source* is restored; it says
+nothing about build artifacts. Never measure from a prebuilt binary whose
+provenance (what source state actually produced it) isn't established —
+rebuild first.
+
 KilnFW's `boot_guard.h` RECOVERY MODE deliberately skips starting subsystems
 (`profile_executor`, `autotune_engine`), so a task started unconditionally in
 `main_boot_early.c` must gate on `boot_guard_is_recovery_mode()` before calling

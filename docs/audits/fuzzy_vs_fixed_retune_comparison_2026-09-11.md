@@ -1,5 +1,54 @@
 # Fuzzy vs. fixed-gain retune: a controlled comparison in simulation (2026-09-11)
 
+> ## CORRECTION (2026-09-13) — Results table and Verdict 1 below are WRONG
+>
+> The (b)/(b25) fuzzy-ON numbers in the Results table were measured against a
+> **poisoned prebuilt binary**: `build_host_tests.ps1` had rebuilt
+> `kilnctl_sim_fuzzy_closedloop.exe` while `pid_fuzzy.c` was mid-negative-test for
+> `ed854ac5` (`RULE_TABLE[1][1]`'s Kp direction flipped), and this comparison ran
+> that stale `.exe` instead of rebuilding from source. Root-caused and reproduced
+> exactly (all six digits, both the sabotaged and the clean numbers) by
+> `docs/audits/review_sim_fuzzy_commits_2026-09-13.md` (commit `8a12521b`),
+> independently re-verified here.
+>
+> **Correct figures**, from a fresh build of tracked sources at HEAD (matches
+> `fbdc5bd0` exactly):
+>
+> | Arm | Config | IAE | MAE |
+> |---|---|---|---|
+> | (a) control | fuzzy OFF, current gains | 13749.7 | 3.3052 |
+> | (b) | fuzzy ON, strength 50 | **12675.2** (doc said 11796.0) | **3.0469** (doc said 2.8356) |
+> | (b25) | fuzzy ON, strength 25 | **13089.4** (doc said 12716.0) | **3.1465** (doc said 3.0567) |
+> | (c) decisive | flat x0.75/1.25/0.75 | 12721.1 | 3.0579 |
+> | (d) | flat x0.875/1.125/0.875 | 13033.7 | 3.1331 |
+>
+> Arms (c) and (d) were never affected and reproduce as originally published.
+>
+> With the corrected (b), (c) is 12721.1 vs (b) 12675.2 — the flat retune is
+> **0.36% worse**, MAE gap **0.011 degC**, not 7.8%/0.2223 degC. At strength 25 the
+> sign **reverses**: (d) 13033.7 is **better** than (b25) 13089.4 by 0.43%.
+>
+> **Verdict 1 below ("fuzzy switching does something a flat retune does not") is
+> REFUTED by this document's own method once the correct binary is used.** Its
+> "most likely mechanism" paragraph (ramp legs retaining the stronger original
+> kp/kd) explains an effect that does not exist — do not cite it. Verdict 2
+> (nothing here clears the 0.5 degC materiality bar) **survives and is
+> strengthened**: every corrected gap is 0.011-0.258 degC, roughly 2x-40x under
+> the line.
+>
+> The "Important discrepancy" paragraph in the original Results section below,
+> which speculated the *task brief's* numbers were "from a different run or a
+> stale/illustrative source," had it backwards — the brief's numbers (which match
+> `fbdc5bd0`) were correct, and this document's own freshly-run numbers were the
+> stale ones. The method itself (the `#define BASE_K{P,I,D}` pre-multiply
+> technique for arms (c)/(d)) was reviewed and found sound — `pid_rescale_integral_for_new_ki()`
+> early-returns when `ki` is unchanged, so those two arms were never affected by
+> the binary defect. Original numbers are preserved unchanged below for the
+> record; do not delete or silently edit them.
+>
+> See also: `CLAUDE.md`'s new negative-test rebuild rule, added as a direct
+> result of this incident.
+
 ## Question
 
 `docs/audits/fuzzy_nine_cell_offline_probe_2026-09-11.md` established that the

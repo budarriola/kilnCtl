@@ -1,3 +1,34 @@
+> ## CORRECTION (2026-09-13) — Section 10's PARTIAL verdict over-reads sampling noise
+>
+> Found by `docs/audits/review_sim_fuzzy_commits_2026-09-13.md` (`8a12521b`),
+> independently confirmed here. At the pin's own rate (24/660 = 0.0364), a
+> Bernoulli-trial sd across 660 samples is `sqrt(660 * 0.0364 * 0.9636) ~ 4.8`
+> counts. Under that noise floor:
+>
+> - 20 vs 24 (0.8 sd) and 18 vs 24 (1.25 sd) are **not separable** — {18, 20, 24}
+>   is one cluster, not three points on a trend.
+> - 38 vs 24 (difference 14, sd of the difference ~7.6) is **1.8 sd, p ~ 0.07** —
+>   suggestive, not established.
+> - The cluster-signature argument (section 10's "`ENTRY_PEAK_C` pinned, all
+>   growth on `LAG_S`, z2 newly implicated") rests on subcounts of 2 vs 11 and 22
+>   vs 27 — roughly 1-3 sd on Poisson counts this small — below what this
+>   experiment can resolve, and additionally compares against a *different*
+>   experiment's split (the schedule attempts, not a repeated flat-scale run).
+>
+> **Section 10's counts are not separable from sampling noise** at the trial
+> count run here. The honest reading is one indistinguishable cluster {18, 20,
+> 24} plus a single marginally-elevated point at 1.173 (~1.8 sd) — not a
+> monotone threshold effect, and not a confirmed shape-vs-magnitude
+> discrimination. This does **not** disturb section 7's actual outcome: the
+> **factor-1.0 control reproduced the 24/660 pin exactly**, confirming the
+> harness and the revert are sound, and the pin correctly stays at 24/660
+> regardless of how section 10's PARTIAL is read. Re-running at a materially
+> larger trial count is the cheap fix if this specific question is ever worth
+> resolving; it was not done here.
+>
+> See also: `CLAUDE.md`'s new negative-test rebuild rule, added as a direct
+> result of the same review's other finding (a different document, same day).
+
 # Adjudication: level-scheduled coupling gain (8cbd9d67) vs. the A1 false-accept pin
 
 **Date:** 2026-09-11
@@ -402,7 +433,7 @@ INSUFFICIENT (monotonically falling: 615 -> 611 -> 574 -> 588 — actually
 non-monotone here too, lowest at 1.173) and REJECT together are a more
 reliable read of "how much divergence is this perturbation injecting."
 
-### Verdict: PARTIAL — magnitude matters, but shape is not fungible with it
+### Verdict: PARTIAL — magnitude matters, but shape is not fungible with it — SEE CORRECTION AT TOP OF FILE: these counts are not separable from sampling noise (sd ~4.8 at n=660)
 
 Neither pure reading from section 8/9 holds cleanly:
 

@@ -1,5 +1,33 @@
 # Fuzzy controller: offline 9-cell rule-table probe (2026-09-11)
 
+> ## CORRECTION (2026-09-13) — Reachability column below is UNSUPPORTED
+>
+> The "Reachability" column and the "6 of 9 cells... reachable only under
+> disturbance" verdict rest on "~0.083 degC/s max real ramp rate," sourced from
+> `pid_fuzzy.c`'s header. That figure is **not a measurement** — it is
+> `300 degC/hr / 3600`, an arithmetic conversion of an assumed profile setting.
+> Found by `docs/audits/review_sim_fuzzy_commits_2026-09-13.md` (`8a12521b`),
+> independently confirmed here:
+>
+> - The same header also records a **measured** peak of 0.110 degC/s (the one
+>   real mode-3 capture, `fuzzy_ab_20260904d_s50_run1.jsonl`, 2178 samples) — 33%
+>   above the 0.083 figure this document treated as the plant's maximum.
+> - `ZONE_MAX_RAMP_C_PER_HR_MAX` is 1000 degC/hr = 0.278 degC/s, 3.3x higher than
+>   0.083 and nothing pins a firing to 300 degC/hr.
+> - The probe's own reachability test is `0.5 > 6.0 * 0.083` = `0.5 > 0.498`, a
+>   0.4% margin. Substituting the measured 0.110 flips it to `0.5 > 0.66` (false),
+>   which would print "REACHABLE IN NORMAL OPERATION" for all nine cells.
+>
+> **The reachability claim is not established in either direction** and should
+> not be cited as "6 of 9 cells need a disturbance" until `MAX_REAL_RAMP_RATE_C_PER_S`
+> is replaced with a figure derived from capture data. The **per-cell kp/ki/kd
+> multiplier table is unaffected** — it was hand-verified against `RULE_TABLE`
+> by the same review and stands as published, including the centre-cell numbers
+> and the negative-test result below.
+>
+> See also: `CLAUDE.md`'s new negative-test rebuild rule, added as a direct
+> result of the same review's other finding (a different document, same day).
+
 Stage 0 of `docs/FUZZY_CONTROLLER_PLAN.md` sec 5 ("(v-a) offline rule-cell
 probe") called for feeding synthetic error/rate through `pid_fuzzy_adjust()`
 covering all 9 cells and recording the gain triple per cell at strength 50,
@@ -66,7 +94,7 @@ finding (A) already argued from the hardware capture — this probe confirms
 the same number from the rule table's own math, independent of that one
 capture.
 
-## Reachability verdicts (against this plant's measured envelope)
+## Reachability verdicts (against this plant's measured envelope) — SEE CORRECTION ABOVE, this section's conclusion is unsupported
 
 - Max real ramp rate observed on this hardware: ~0.083 degC/s
   (`pid_fuzzy.c`'s own header comment; a brisk 300 degC/hr profile ramp).
