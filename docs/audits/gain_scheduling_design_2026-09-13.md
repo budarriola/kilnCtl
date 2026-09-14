@@ -478,3 +478,328 @@ the single-zone sim-to-hardware step in §6, and/or completion of the
 feedforward hold-term fix `high_temperature_transfer_analysis_2026-09-08.md`
 already calls a prerequisite, which this document does not own and does not
 claim is in progress or complete.
+
+---
+
+# Review, 2026-09-13 — adversarial; §3's "structurally guaranteed T_ref" and §3's justification for the bound are REFUTED, §2's "not independently re-derived" is unnecessary (the SIMC derivation closes exactly), and §5's composition argument misses a real persisted-Ki ratchet
+
+Adversarial review of `e9036127` by a separate agent. Design review only: no
+code was edited, no board flashed, no heating run performed. Everything below
+labelled "traced" was read in source at the cited path; everything labelled
+"taken on trust" was not independently re-derived. One live read of the bench
+board was performed (read-only, `GET /api/zones` and the kilnctrl MCP's
+`control_get_zones`).
+
+## R1. The seam-to-`pid_tick` gap is REAL — confirmed in source, and it is worse than §5 states
+
+Traced. `profile_executor_pid_tick.c`'s live Ki is `z->pid_cfg.ki`
+(`pid_fuzzy_prepare_gains()` line ~410: `float adj_kp = z->pid_cfg.kp,
+adj_ki = z->pid_cfg.ki, ...`). `z->pid_cfg.ki` is written in exactly one
+place in the whole control tree —
+`profile_executor_config_reload.c:96-104`, from
+`zones_config_get_pid(zi, &kp, &ki, &kd)`. That is the raw persisted gain.
+Neither `zone_model_at()` nor `coupling_at()` is anywhere on that path.
+§5's statement of the gap is correct.
+
+Two corrections to §1/§5's surrounding detail, both traced:
+
+- **`zone_model_at()` is now called from `profile_executor_pid_tick.c`
+  already** — line ~384, `(void)zone_model_at(zi, z->actual_c, &model_k_dc,
+  &model_tau_s, &model_dead_time_s)`, feeding `pid_fuzzy_derive_bands()`.
+  So the seam physically reaches the PID tick's function; what it does not
+  reach is the *gain*. That is a sharper statement of the gap than "a third
+  call site conversion" — the call site already exists, the data just is not
+  wired to Ki. (This call is another session's uncommitted working tree at
+  review time, per `docs/audits/fuzzy_dimensionless_bands_2026-09-13.md`.)
+- **"the two live call sites" is understated.** `autotune_engine.c:81`
+  also calls `zone_model_at(zone_index, actual_c, ...)`, and has since
+  `bd77ffd1` (2026-09-10) — i.e. before this document was written. §1's own
+  caveat that it "does not claim to have enumerated them exhaustively" covers
+  this, but the count in the text is wrong, not merely incomplete.
+
+**The MEASURED-not-setpoint claim SURVIVES, and extends.** Traced at all
+four sites: `profile_executor_feedforward.c:92` passes `z->actual_c`;
+`:488` passes `s_exec.zones[zi].actual_c`; `profile_feasibility.c:193/250`
+pass `t_c`/`start_c` (segment start temperature, not setpoint);
+`autotune_engine.c:81` and `profile_executor_pid_tick.c:384` both pass
+`actual_c`. No call site passes a setpoint. Recommendation 3 of the prior
+design is satisfied by construction at every existing site.
+
+**Effort consequence.** §7's estimate treats the gap as "an implementation
+detail that can be closed on paper." It is not a seam conversion: the
+`pid_cfg` path is a *cached copy* refreshed by `reload_zone_config()` only
+when the persisted gains change, with a deliberate `pid_seed_bumpless()`
+handshake on every change (`profile_executor_config_reload.c:91-110`). A
+temperature-keyed transform must be applied per tick *downstream* of that
+cache — i.e. inside `pid_fuzzy_prepare_gains()` alongside fuzzy, not at the
+config read — or the cache and the schedule become a two-copy pair of exactly
+the `project_paired_input_left_shared` shape. That is a different and larger
+change than converting a getter call, and the document should say so.
+
+## R2. Inert-by-default SURVIVES as a genuine bit-identity — with two conditions the document does not state
+
+Worked through against the actual reference implementation
+(`tools/PcTools/src/kilnctrl/plant_sim.py:268-290`):
+
+```
+s(T) = (1 - f_rad) + f_rad * ((T+273.15)/328.15)^4
+```
+
+At `f_rad = 0`: `cond_ref = 1.0f - 0.0f == 1.0f` exactly; `rad_now =
+0.0f * x` is exactly `+0.0f` for every finite `x`, and `x = powf(ratio, 4)`
+cannot be infinite for any representable temperature (overflow would need
+`ratio > 1.36e9`, i.e. `T` above 4.4e11 degC), so the `0 * inf = NaN` path is
+unreachable. `s = 1.0f + 0.0f == 1.0f` exactly, `s(T)/s(T_ref) == 1.0f/1.0f
+== 1.0f` exactly, and `ki * 1.0f == ki` bit-for-bit in IEEE-754 for every
+value of `ki` including zero, subnormals and signed zero. **The identity is
+real, not a value that happens to work.** §3's claim stands.
+
+Two conditions §3 omits:
+
+1. It is an identity *of the multiply form only*. Any implementation that
+   computes `ki_new = ki_ref * s(T) / s(T_ref)` as two separate operations
+   is still exact here (division by exactly 1.0f is exact), but an
+   implementation that instead re-derives Ki from scheduled `k_dc`/`tau_s`
+   through `pid_autotune_tune_from_fopdt()` would NOT be bit-identical — it
+   would round-trip the gain through SIMC and land on a nearby, different
+   float. Since §5 leaves open which of those two shapes the implementation
+   takes, "bit-identical to today" is only established for one of them.
+2. `s(T_ref)` is a divisor. It is zero only at `f_rad == 1.0` with
+   `T_ref == -273.15` — which is not hypothetical, see R3.
+
+## R3. `model_fit_temp_c` reads the UNKNOWN sentinel on ALL THREE zones of this bench — §3's "already guaranteed structurally" is REFUTED
+
+Live read, 2026-09-13, `GET http://192.168.1.156/api/zones`:
+
+| zone | model_k_dc | model_tau_s | model_dead_time_s | model_fit_temp_c | model_fit_ambient_c |
+|---|---|---|---|---|---|
+| 0 | 42.731 | 255.6 s | 40.3 s | **-273.15** | -273.15 |
+| 1 | 32.3969 | 258.9 s | 31.3 s | **-273.15** | -273.15 |
+| 2 | 33.8493 | 247.1 s | 26.0 s | **-273.15** | -273.15 |
+
+Every zone reads `ZONE_MODEL_FIT_TEMP_UNKNOWN`. All three models predate
+`5d3bc854` and were backfilled to the sentinel by
+`zones_config_migrate.c:1006`; no zone has been re-autotuned since, so the
+field that the whole schedule is normalised against is empty across the
+entire fixture. §3 says using `model_fit_temp_c` rather than a guessed
+constant makes correct `T_ref` "already guaranteed structurally." **It does
+not.** The one value it is guaranteed to hold today is the sentinel.
+
+What the sentinel actually does, worked through rather than assumed — and
+the answer is neither of the two the brief offered:
+
+- **Not a divide-by-zero** (except at `f_rad == 1`). `s(-273.15) =
+  (1-f_rad) + f_rad*0 = 1-f_rad`, a finite, plausible-looking 0.95 at the
+  repo default.
+- **Not a silent identity either.** It is a silent *wrong* schedule: every
+  ratio is inflated by `1/(1-f_rad)`, and — the part that matters — the
+  schedule then applies a non-unity correction at `T = T_fit`, the one
+  temperature at which it is supposed to apply none.
+- **Magnitude, stated honestly:** at `f_rad = 0.05` the error is a uniform
+  ~3.6-5% on Ki at every temperature. That is small — arguably below the
+  threshold this project cares about. The defect is therefore one of
+  *silence and principle*, not of present magnitude: a sentinel meaning "no
+  context recorded" is being consumed as a temperature of absolute zero,
+  which is the sentinel-as-value class this repo has hit repeatedly, and it
+  becomes singular as `f_rad -> 1`.
+- `zones_config_json.c:380-382` explicitly whitelists the sentinel past the
+  `[-50, 1300]` range validator, so nothing downstream stops it.
+
+**Required, not optional:** the schedule must test
+`T_ref == ZONE_MODEL_FIT_TEMP_UNKNOWN` and fall back to the identity. The
+design does not mention this. Secondary finding: because the field is unset
+on every zone, the "two fits at different temperatures give you `f_rad`"
+path in §3 is not merely waiting on a hot kiln — it is waiting on the first
+autotune run of any kind since `5d3bc854`, which is a cheap, bench-doable
+prerequisite the document does not identify.
+
+## R4. Scheduling Ki alone under SIMC is CORRECT — and §2's disclaimer is unnecessary
+
+§2 declines to re-derive the SIMC sensitivity, calling it "outside what this
+bench, or this task, can check." It is checkable, it is three lines, and it
+comes out in the design's favour. From `pid_autotune.c:493-510` (traced, the
+live SIMC branch of `pid_autotune_tune_from_fopdt()`):
+
+```
+lambda = 3L        (default, lambda_s = 0)
+Kc = tau / (K*(lambda+L)) = tau / (4*K*L)
+Ti = min(tau, 4*(lambda+L)) = min(tau, 16L)
+Td = L/2
+Kp = Kc,  Ki = Kc/Ti,  Kd = Kc*Td
+```
+
+With the analysis's own scaling (`K ∝ 1/s`, `tau ∝ C(T)/s`, `L` constant):
+
+- **Kp**: `Kc = tau/(4KL) ∝ (C/s)/(1/s) = C(T)`. The `1/s` cancels
+  **exactly**. "Do not schedule Kp" is not a simplification — it is the
+  exact SIMC answer, up to the specific-heat factor alone.
+- **Kd**: `= Kc*L/2 ∝ C(T)`. Same.
+- **Ki**: `= Kc/Ti`. While `tau < 16L`, `Ti = tau`, so
+  `Ki ∝ C(T)/(C(T)/s) = s(T)`. **Exactly `ki(T) = ki_ref * s(T)/s(T_ref)`,
+  with `C(T)` cancelling too.** The proposed functional form is not an
+  approximation of the SIMC result; it *is* the SIMC result.
+
+So the design is stronger than it claims on this axis. Two caveats it should
+carry:
+
+1. **Kp/Kd are not perfectly flat — they scale with `C(T)`.** The prior
+   analysis's own `C x1.4` figure means required Kp at cone 10 is ~1.4x the
+   bench value, i.e. an unscheduled Kp is ~30% too *low* at the top. That
+   direction is benign (sluggish, not oscillatory) and sits inside fuzzy's
+   own +-50% band, but "Kp needs no schedule" should be stated as "Kp is
+   correct to within the specific-heat factor," not as exact.
+2. **The `Ki ∝ s` identity depends on `Ti = tau`, i.e. on `tau < 16L`.**
+   Verified live on this bench: `tau = 255.6 s`, `16L = 645 s` — the
+   `min()` selects `tau`, and `tau` only falls with temperature, so the cap
+   never binds going up. But for a kiln with short dead time (`L < tau/16`),
+   `Ti` is pinned at `4(lambda+L)`, a constant, and then `Ki ∝ Kc ∝ C(T)` —
+   **the schedule would be applying a ~20x correction to a gain that should
+   barely move.** The schedule is only valid in the `tau < 4(lambda+L)`
+   regime, and the implementation should assert it rather than assume it.
+
+Sanity check that the above is the rule actually in force, not just the one
+in the header: for zone 0, `Kc = 255.6/(42.731*4*40.3) = 0.0371` and
+`Ki = 0.0371/255.6 = 0.000145`. The live board reports `Kp=0.0371`,
+`Ki=0.00015`. The SIMC path is what produced these gains.
+
+## R5. The `f_rad` bound as proposed is NOT justified — its stated hazard cannot occur, and the analogy it is drawn from would destroy the mechanism
+
+§3 adds "a clamp on `s(T)/s(T_ref)`, analogous to fuzzy's own
+`MAX_NUDGE_FRACTION`" and justifies it as: "a sufficiently large `f_rad`
+evaluated at a sufficiently large `T` could still drive `ki` toward zero or
+negative in principle."
+
+**That hazard does not exist in the form given.** `s(T) = (1-f_rad) +
+f_rad*x^4` with `x > 0` is bounded below by `1-f_rad > 0` for any
+`f_rad < 1`, and the ratio of two positives is positive. `ki` can therefore
+never go negative, and its *floor* is `ki_ref*(1-f_rad)/s(T_ref)`, strictly
+positive. Rising `T` drives the ratio *up*, not toward zero. The justifying
+sentence is refuted by the algebra the same section presents two paragraphs
+earlier.
+
+**Worse, the analogy is actively wrong for this mechanism.** Fuzzy's
+`MAX_NUDGE_FRACTION` is +-50%. The schedule's entire purpose is a ~20x
+(i.e. +2000%) ratio at cone 10. A bound "analogous to" fuzzy's would clamp
+the correction at 1.5x and render the feature inert in exactly the regime it
+was designed for — while looking like a safety improvement. This is the
+`project_bound_relative_to_persisted_state` failure in its purest form: a
+bound chosen by analogy to an unrelated constant rather than derived from
+the quantity being bounded.
+
+**Where "magnitude, not sign" actually stops being true**, since the
+document asserts a region without naming its edge: the sign of the schedule
+is safe for `f_rad` in `[0, 1)` and breaks at exactly `f_rad = 1`. At
+`f_rad = 1`, `s(T_ref) = 0` when `T_ref` is the sentinel (R3) — the
+divide-by-zero. For `f_rad > 1`, `cond_ref = 1-f_rad < 0` and `s(T)` is
+negative for all `T` below the crossover, flipping `ki`'s sign. So:
+
+> **The justified bound is `0 <= f_rad < 1` on the parameter, plus
+> `T_ref != ZONE_MODEL_FIT_TEMP_UNKNOWN`. Not a clamp on the ratio.**
+
+That bound is derived from the function's own algebra, applies to every
+temperature, and — unlike a ratio clamp — does not neuter the feature.
+
+## R6. The `adaptive_tune` interaction IS a ratchet — §5's "one writer each" is the wrong test
+
+This is the finding that most changes the design. §5 asks "must any pair be
+mutually exclusive?" and answers no, on the grounds that each mechanism owns
+exactly one piece of state. **State ownership is not the hazard here; a
+closed loop between two mechanisms is.** Traced:
+
+`adaptive_tune` has *two* Ki writers, not one, and they have opposite shapes:
+
+- `adaptive_tune_model.c:204` recomputes all three gains from a refitted
+  `K_dc` through `pid_autotune_tune_from_fopdt()`. This is an **absolute**
+  write: the new Ki is a function of identified plant parameters, not of the
+  previous Ki. A schedule scaling the applied Ki cannot bias `K_dc` (a
+  steady-state duty-vs-temperature identification), so **this path does not
+  compound.** §5's composition argument is correct for this writer.
+- `adaptive_tune_ki.c:245` is **relative and persisted**:
+  `float new_ki = ki * (1.0f + capped_pct/100.0f)`, where `ki` is the
+  *stored* gain and `capped_pct` is inferred from the **observed dwell
+  trace** — i.e. from the behaviour of the *effective* Ki. It is written
+  back with `zones_config_set_pid(zi, kp, new_ki, kd)` (line 316).
+
+Put the schedule under that and the loop closes:
+
+1. A run dwells at `T > T_ref`. The schedule divides the effective Ki by
+   `r = s(T)/s(T_ref)`, deliberately.
+2. `adaptive_tune_ki`'s diagnosis sees the resulting slow offset recovery,
+   attributes it to Ki, and returns a positive `ki_correction_pct`.
+3. It writes `ki_ref * (1+pct)` into the **unscheduled persisted
+   reference**.
+4. Next run at the same dwell, the schedule divides by `r` again. The
+   symptom is unchanged. Step 2 repeats.
+
+Ki ratchets upward run over run, bounded only by
+`ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT` (5.0x,
+`adaptive_tune_internal.h:266`) — and when that bound finally binds, its
+refusal text says "re-autotune this zone," pointing the operator at the
+wrong cause entirely. On the way down (a run dwelling *below* `T_ref`) the
+same loop runs in reverse into the symmetric cumulative floor. This is
+structurally the ratchet `97288659` and `36f88d62` just fixed for `K_dc`,
+re-created for Ki by a different route.
+
+The generating fault is the repo's own recurring shape: **a correction
+inferred from a transformed observable, written back to the untransformed
+reference.** `adaptive_tune_ki`'s input would be post-schedule; its output
+is pre-schedule. Nothing in the code relates the two.
+
+Fuzzy does not create this today because its nudge is bounded, symmetric
+about the centre cell, and unpersisted — and because the centre cell is
+where 100% of observed samples land. The schedule is different in exactly
+the way that matters: at a given dwell temperature its factor is a
+*constant bias*, not a symmetric nudge, so the diagnosis integrates it
+instead of averaging it away.
+
+**This must be resolved before the mechanism lands in any form, dormant or
+not.** Two shapes work: (a) `adaptive_tune_ki` divides its correction by the
+schedule factor evaluated at the dwell temperature, so it corrects the
+reference rather than the effective value; or (b) the Ki-diagnosis layer is
+hard-disabled whenever the schedule is non-inert. (a) is correct, (b) is
+cheap and honest. Silence is neither. §5 should also record that the
+`pid_rescale_integral_for_new_ki()` re-validation it calls for is the
+*lesser* of the two interaction concerns.
+
+## R7. Verdict: AGREE with defer — but for R1/R6's reasons, not §7's
+
+The document's own reasoning for deferring ("the motivating effect is
+outside this bench's range") is, on its face, an argument *for* landing the
+mechanism dormant, not against it: an effect you cannot measure is precisely
+one you ship inert and let a real kiln's owner parameterise. §7 does conflate
+"cannot validate the parameter" with "cannot land the mechanism." If that
+were the only consideration, land-dormant would be the better call.
+
+It is not the only consideration, and defer is still right:
+
+- **The mechanism does not exist to land.** Per R1, the design's Ki
+  transform has no identified write path; what §2 specifies could be landed
+  into `zone_model_at()` today, but that would schedule `k_dc`/`tau_s` for
+  feedforward, feasibility and fuzzy band derivation — a *different* change
+  from scheduling Ki, with its own unanalysed consequences. Landing "the
+  mechanism" dormant would mean landing the wrong mechanism dormant.
+- **Its non-inert path has a known, unresolved ratchet** (R6). Shipping
+  inert code whose one non-inert setting silently ratchets a persisted
+  safety-adjacent gain is how this repo produced
+  `project_fuzzy_ab_inert_control_mode` and the "consumer without producer"
+  class. A dormant footgun is still a footgun; the next session to flip the
+  flag will not re-derive R6.
+- **`T_ref` is empty on every zone** (R3), so even the dormant form would
+  ship with its reference input unpopulated and its sentinel unhandled.
+
+**What should land now, and is cheap:** (1) an autotune run on each zone, to
+populate `model_fit_temp_c` at all — this is bench-doable today and is a
+prerequisite for everything else, including a future `f_rad` fit; (2) the
+`ZONE_MODEL_FIT_TEMP_UNKNOWN` guard, wherever the seam eventually grows math;
+(3) the R6 decision recorded in `adaptive_tune`'s own documentation, since
+the hazard exists the moment anyone scales Ki at read time — including the
+fuzzy layer, if its bands ever become asymmetric.
+
+**Net on the document.** §1 (seam is real, carries measured temperature),
+§2's functional form, §3's inert-by-default identity, §4's refusal to
+declare a winner and §6's venue analysis all survive review — §4 in
+particular is unusually honest about a comparison that does not exist.
+§2's Ki-vs-Kp argument is *stronger* than the document claims (R4). Three
+things need correcting before implementation: §3's "structurally guaranteed"
+`T_ref` (refuted, R3), §3's bound and the reasoning behind it (refuted, R5),
+and §5's composition conclusion (incomplete in a way that matters, R6).
