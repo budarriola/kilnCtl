@@ -18,7 +18,7 @@ decisions; both are now resolved -- see §5.1 and §7.5 for the decisions, the
 reasoning, and what was applied vs. declined. §3 items 2 and 4 (previously
 recorded as "does not reproduce under the sweep") are covered; see §4.
 
-Companions: `FLASH_BUDGET.md`, `DRAM_PSRAM_PLAN.md`. All three are
+Companions: `FLASH_BUDGET.md`, `DRAM_PSRAM_STATUS.md`. All three are
 independent; none blocks another.
 
 ---

@@ -53,7 +53,7 @@ if a future change makes this task's own deepest path exceed it, that is
 exactly the signal this check exists to raise.
 
 UNMODELED_OVERHEAD_BYTES: this task's own live measurement is directly
-available (DRAM_PSRAM_PLAN.md, cited by the 2026-09-09 audit) --
+available (DRAM_PSRAM_STATUS.md, cited by the 2026-09-09 audit) --
 1388 B free of 4096 B during a real firing (2708 B used) against a
 deepest-TICK static path of 1488 B, i.e. ~1220 B of real, measured,
 unmodelled overhead (ISR window-spill, FreeRTOS scheduler cost on top of the

@@ -63,7 +63,7 @@ pass -- see feedback_negative_test_every_check.md)
 ------------------------------------------------------------------------
 None of these 28 tasks have a dedicated live high-water-mark measurement
 the way profile_executor's 1220 B or uart_log_bridge's 1032 B do (those
-were derived from a specific hardware DRAM_PSRAM_PLAN.md capture; no
+were derived from a specific hardware DRAM_PSRAM_STATUS.md capture; no
 equivalent capture exists yet for these tasks). Absent that,
 `UNMODELED_OVERHEAD_BYTES = 300` is used uniformly -- this is exactly
 check_system_uart_bridge_stack_budget.py's own precedent and its own

@@ -1,6 +1,16 @@
 # Filesystem plan
 
-> **WARNING (2026-09-08): do not flash commit `218f65f7`.** It panics
+> **RESOLVED (2026-09-14 roadmap truth-up).** The boot-hang blocker below is
+> closed: `3c36b7e1` (the `nvs_load_store_with_cfg_fs`/
+> `kiln_cfg_store_cfg_fs_load_raw` heap-move fix, see "`cfg` partition
+> re-flashed after stack-overflow fix, 2026-09-07" further down this file)
+> was built and flashed from a clean detached worktree, host tests 31/31
+> passed, and the board came up normally. This plan previously opened with
+> the banner below presented as a live, current blocker — it is history as
+> of 2026-09-07/08, kept for the record rather than deleted.
+>
+> **Original warning (2026-09-08), history only — do not act on this as
+> current status: do not flash commit `218f65f7`.** It panics
 > (`IllegalInstruction` on the `main` task) during early boot — before
 > Wi-Fi/HTTP/UART bring-up — after `117fc6f9`/`9d5da657` wired the `cfg`
 > LittleFS mount+auto-format-confirmation path into `main_boot_early.c`. The

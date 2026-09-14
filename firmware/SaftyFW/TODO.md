@@ -186,8 +186,13 @@ reasons; the link itself is no longer the blocker.
 - [ ] **0.7 Confirm the K4 → line-contactor interlock topology** and which J10
       pin is NO vs NC. `docs/HARDWARE.md` §3. **This is a system-wiring decision,
       not a firmware one, and it must be settled before any bench trip test.**
-- [ ] **0.8 Confirm the E-stop is wired normally-closed**, or fit a deliberate
-      jumper to `GND_Safty`. `docs/HARDWARE.md` §5.
+- [x] **0.8 Confirm the E-stop is wired normally-closed** — closed 2026-09-10,
+      owner decision: pole 1 stays permanently unwired on this fixture; the
+      requirement is that the software-visible pole (GPIO9, S7) be read,
+      debounced, tripped and relay-de-energized, which it is, pinned by
+      `firmware/SaftyFW/test/test_estop_deenergizes_relay.c` and
+      bench-verified (`estop_verified`). See ROADMAP's E-stop row and
+      `firmware/SaftyFW/docs/HARDWARE.md` §5.
 
 ## Phase 1 — `CommonFW`, before either firmware uses it
 

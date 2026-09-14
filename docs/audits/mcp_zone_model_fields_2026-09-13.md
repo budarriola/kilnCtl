@@ -54,17 +54,22 @@ Read the authoritative sentinel from firmware source rather than assuming:
   Rendered as `no model identified (all-zero sentinel)`, never as
   `K_dc=0.0000 C/duty`.
 * `autotune_baseline_k_dc` (`zones_config_accessors.h:185`, ZONES_CFG_VERSION
-  25->26): `0` = "no baseline recorded yet". **This field is not currently
-  emitted by `GET /api/zones` at all** -- confirmed by reading
-  `firmware/KilnFW/App/drivers/http/zones_http_get.c` end to end: no
-  `"autotune_baseline_k_dc"` literal anywhere in it. It IS read in
-  `zones_http_post_parse.c:466-478` (echoed back unchanged on every POST so
-  a whole-page-submit doesn't clobber it), but never written into a GET
-  response. That is a real firmware gap, not something this PC-side tool
-  can fix by rendering differently -- `control_get_zones()`'s new output
-  says so explicitly (`autotune_baseline_k_dc: NOT exposed by GET
-  /api/zones ...`) rather than silently omitting the field the way the old
-  tool silently omitted the other five.
+  25->26): `0` = "no baseline recorded yet". **CORRECTED 2026-09-14, roadmap
+  truth-up: this claim was wrong even at the time it was written for this
+  field, though right for the general pattern.** `0dbd7c6d` ("Expose
+  autotune_baseline_k_dc on GET /api/zones (was write-only)") added
+  `APPEND("\"autotune_baseline_k_dc\":%.4f,", (double)z->autotune_baseline_k_dc);`
+  to `firmware/KilnFW/App/drivers/http/zones_http_get.c:606` -- the field IS
+  emitted by `GET /api/zones` as of that commit. It is also still read in
+  `zones_http_post_parse.c` (echoed back unchanged on every POST so a
+  whole-page-submit doesn't clobber it), same as described above. The
+  PC-side `mcp_server_control.py` code (lines ~262-350 as of this note)
+  already checks for the key's presence dynamically (`if
+  "autotune_baseline_k_dc" not in z`) rather than hardcoding "not exposed",
+  so it should already render correctly against current firmware -- that
+  file is owned by another concurrent session's work and was not verified
+  or edited here; flagging only that the "real firmware gap" premise in this
+  audit is stale.
 
 ### Other tools in the same module
 

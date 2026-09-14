@@ -17,7 +17,7 @@ partition-table revision covering §5.1/§5.2 is closed: a live
 `GET /api/partitions` read on 2026-09-03 confirmed the on-chip table matches
 `partitions.csv`, 12/12 entries — see §8 item 3.
 
-Companion doc: `DRAM_PSRAM_PLAN.md` covers internal SRAM. The two are
+Companion doc: `DRAM_PSRAM_STATUS.md` covers internal SRAM. The two are
 independent — neither blocks the other, and neither should be justified by the
 other's numbers.
 
@@ -441,7 +441,7 @@ is a bad trade.
 
 The 261,777 B of embedded web assets in `libdrivers.a` are **not** a target —
 they are already gzipped, and they are the reason the pages cost zero RAM. See
-`DRAM_PSRAM_PLAN.md` section 1.
+`DRAM_PSRAM_STATUS.md` section 1.
 
 **Re-verified 2026-09-02, not reopened:** `App/drivers/CMakeLists.txt`
 pre-gzips every embedded page/`theme.css` at build time (`gzip.open(...,
@@ -497,7 +497,7 @@ history and are not hypothetical — each has already caused a problem here once
   uncounted permanent socket defeating `lru_purge_enable`'s recovery
   (`a5567ae`). Do not re-diagnose it as a memory problem.
 - **`TODO.md` §13** already began the stack candidate/classification work that
-  `DRAM_PSRAM_PLAN.md` §6 restates.
+  `DRAM_PSRAM_STATUS.md` §6 restates.
 - **`UPDATE_PROTOCOL.md` §3 and §7** own the OTA layout and its open items; §2.1
   above summarises but does not supersede them.
 

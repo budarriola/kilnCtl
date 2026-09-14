@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture one DRAM_PSRAM_PLAN.md section 4.3/7 stack-margin baseline reading
+"""Capture one DRAM_PSRAM_STATUS.md section 4.3/7 stack-margin baseline reading
 from a live board and record it where the plan can cite it.
 
 This is the "moment the board is reflashed" measurement step section 7's
@@ -8,7 +8,7 @@ get_stack_margin() reading, tag it with the build commit, and write it to
 firmware/KilnFW/docs/stack_margin_baseline/ so the plan's section 3.1 table
 can be regenerated from real files instead of hand-copied numbers.
 
-Run ONCE PER LOAD CONDITION -- DRAM_PSRAM_PLAN.md section 4.3 requires all
+Run ONCE PER LOAD CONDITION -- DRAM_PSRAM_STATUS.md section 4.3 requires all
 three before any candidate task's number means anything (see
 kilnctrl.stack_margin_baseline's module docstring for why each matters):
 
@@ -23,7 +23,7 @@ After all three are captured:
     uv run --project tools/PcTools python tools/PcTools/scripts/capture_stack_margin_baseline.py --report
 
 prints the combined worst-case-across-conditions table in the exact shape
-DRAM_PSRAM_PLAN.md section 3.1 uses, ready to paste in.
+DRAM_PSRAM_STATUS.md section 3.1 uses, ready to paste in.
 
 All the actual UART round trips happen in main() below; everything that
 decides what a "record" is and how to render one lives in
@@ -120,7 +120,7 @@ def report(out_dir: Path) -> int:
     if missing:
         print(
             f"WARNING: only have {sorted(conditions_seen)} -- missing "
-            f"{sorted(missing)}. DRAM_PSRAM_PLAN.md section 4.3 requires all "
+            f"{sorted(missing)}. DRAM_PSRAM_STATUS.md section 4.3 requires all "
             f"three before a candidate task's number is trustworthy; the table "
             f"below is still the worst-of-what's-here, not a full baseline.\n"
         )

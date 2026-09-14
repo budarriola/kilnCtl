@@ -532,6 +532,17 @@ rather than settles the delete/keep question.
 
 ### 4.1 Verdict
 
+**SUPERSEDED, 2026-09-14 (roadmap truth-up): the owner decided fuzzy is KEPT,
+not deleted — see the header's "2026-09-14 update — OWNER DECISION: SHIP the
+band-derivation half of this plan" note (line 370) and `2c49465a`
+(`rate_band_c_per_s`/`error_band_c` derived per-zone from the autotune model,
+shipped). The paragraph below, concluding "(iv) as the honest disposition of
+the fuzzy layer," is the plan's original conclusion and is now contradicted
+by that decision. Left in place rather than rewritten, per this repo's
+standing rule that a retraction must be visible, not silent
+(`project_retraction_hid_the_stale_claim`) — read it as history, not current
+guidance.**
+
 **Adopt (v) now; on its results, expect to land on (iii) as the answer to the
 owner's four requirements, with (iv) as the honest disposition of the fuzzy layer
 some cycles later.** Do not adopt (i). Requirements (a) and (b) are already

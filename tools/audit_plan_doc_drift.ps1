@@ -7,7 +7,7 @@
 #
 # WHY THIS EXISTS. Four confirmed instances in about a day, each costing a
 # full agent survey pass to discover the doc was stale:
-#   - DRAM_PSRAM_PLAN.md sec 4.1/4.2 listed as remaining work; commit a698dc0
+#   - DRAM_PSRAM_STATUS.md sec 4.1/4.2 listed as remaining work; commit a698dc0
 #     had already landed both (fixed by 409d157).
 #   - WEB_UI.md documented rules_http.c / POST /api/relay as live; both were
 #     deleted 2026-08-27 (fixed by 2316ac9).
@@ -328,7 +328,7 @@ foreach ($doc in $docs) {
 
         # --- D: "still open" language naming an artifact that already exists ---
         # The trigger phrase and the backtick-quoted artifact are frequently
-        # NOT on the same line -- DRAM_PSRAM_PLAN.md's real stale text was
+        # NOT on the same line -- DRAM_PSRAM_STATUS.md's real stale text was
         # "Remaining work, in full:" followed by a bulleted list naming
         # `heap_internal`, `dashboard_http.c`, `MALLOC_CAP_DMA` two-plus lines
         # down. Scan a forward block from the trigger line to the next blank
@@ -340,7 +340,7 @@ foreach ($doc in $docs) {
             # from the bulleted evidence that follows it (a markdown
             # paragraph break before a list) -- stop only on a heading or two
             # blank lines in a row (an actual section boundary), not the
-            # first blank line, or the DRAM_PSRAM_PLAN.md real-world shape
+            # first blank line, or the DRAM_PSRAM_STATUS.md real-world shape
             # ("Remaining work, in full:" <blank line> "- `heap_internal`...")
             # never reaches its own evidence.
             $blockEnd = $i

@@ -3,7 +3,7 @@
 allowlist below, have panicked real hardware three times: a PSRAM-stacked
 task's NVS write asserted esp_task_stack_is_sane_cache_disabled() (see
 kiln_cfg_store.c's/safety_cfg_store.c's caller_stack_is_external() guard
-comments and DRAM_PSRAM_PLAN.md section 7.2), and a handler already running
+comments and DRAM_PSRAM_STATUS.md section 7.2), and a handler already running
 ON the flash-safe worker deadlocked the whole board when it tried to
 dispatch a SECOND flash-safe call through the normal path (uart_bridge_ext.c
 commit 7c47683, see that file's "RE-ENTRANCY" comment). Host tests cannot

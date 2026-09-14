@@ -9,7 +9,15 @@ current NVS wear fine. The case is architectural: structured, inspectable,
 diffable, backup/restore-able user data with one file per thing instead of
 opaque `_Static_assert`-pinned C structs in KV blobs.
 
-Design is complete here; **nothing below is implemented.**
+Design is complete here. **STALE as of 2026-09-14 (roadmap truth-up): "nothing
+below is implemented" is no longer true.** Zones config, profiles, and
+preferences now dual-write to the `cfg` partition designed below (NVS stays
+authoritative and unconditional) — this is live and proven, not merely
+designed. `docs/CONFIG_FILESYSTEM.md` is the current, authoritative status
+doc for what has actually shipped and what remains open; treat this document
+as the design record it was written as, and `CONFIG_FILESYSTEM.md` as
+superseding it on implementation status (repo convention: newest doc wins on
+conflict).
 
 ---
 

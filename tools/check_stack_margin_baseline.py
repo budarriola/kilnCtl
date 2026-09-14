@@ -50,7 +50,7 @@ WHAT THIS CANNOT CATCH, AND WHY:
     tools/PcTools/src/kilnctrl/stack_margin_baseline.py's own docstring, a
     floor -- "the SMALLEST plausible worst case" -- not proof a task
     survives mid_firing or web_ui_open. This script does not enforce that
-    all three DRAM_PSRAM_PLAN.md conditions have ever been captured; it only
+    all three DRAM_PSRAM_STATUS.md conditions have ever been captured; it only
     grades whatever baseline files exist, now load-aware via check #4.
   - A task that was never registered with stack_margin_register() in the
     first place (see tools/check_stack_margin_registration.ps1, a

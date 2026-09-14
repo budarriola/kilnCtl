@@ -1,7 +1,7 @@
 # check_nvs_write_guard_coverage.ps1 -- keeps every NVS/flash write call
 # site inside this codebase's PSRAM-stack-guarded modules actually guarded.
 #
-# DRAM_PSRAM_PLAN.md section 9 (2026-09-02, write-path re-audit): the third
+# DRAM_PSRAM_STATUS.md section 9 (2026-09-02, write-path re-audit): the third
 # pass found run_state.c/relay_cycles.c/profile_executor_firing_stats.c
 # completely unguarded despite an earlier pass believing the write-side
 # hazard was closed. This pass re-checked that fix and found the SAME class
@@ -37,7 +37,7 @@
 # convention, not every NVS-writing file in the tree (adaptive_tune.c,
 # boot_guard.c, crash_report.c, ota_http.c, ota_record.c, profiles_builtin.c,
 # time_sync.c, touch_cal_store.c, unit_pref.c, watchdog_cfg.c, wifi_prov.c,
-# zones_config_store.c) -- DRAM_PSRAM_PLAN.md section 7.3's per-candidate
+# zones_config_store.c) -- DRAM_PSRAM_STATUS.md section 7.3's per-candidate
 # trace found none of those reachable from a relocation candidate task, so
 # adding the guard there is a different task's call, not this plan's. If a
 # future pass adds the guard to one of those files, add its path to
@@ -219,7 +219,7 @@ if ($failures.Count -gt 0) {
     foreach ($f in $failures) {
         Write-Host "    $f" -ForegroundColor Red
     }
-    throw "A write call site was added to a PSRAM-stack-guarded module (DRAM_PSRAM_PLAN.md section 7.2/9) without the caller_stack_is_external() refusal every other write path in that file already carries. Add the same guard this file's other write function(s) use, or explain in DRAM_PSRAM_PLAN.md why this specific call site is exempt."
+    throw "A write call site was added to a PSRAM-stack-guarded module (DRAM_PSRAM_STATUS.md section 7.2/9) without the caller_stack_is_external() refusal every other write path in that file already carries. Add the same guard this file's other write function(s) use, or explain in DRAM_PSRAM_STATUS.md why this specific call site is exempt."
 }
 
 Write-Host "NVS write-guard coverage check passed: every write call site in $($guardedFiles.Count) guarded file(s) is guarded." -ForegroundColor Green

@@ -3,7 +3,7 @@
 # uxTaskGetStackHighWaterMark() reading stays reachable, and keeps
 # STACK_MARGIN_MAX_TASKS ahead of the real registered-call-site count.
 #
-# DRAM_PSRAM_PLAN.md section 7 (2026-09-02, cap-raise pass): every one of
+# DRAM_PSRAM_STATUS.md section 7 (2026-09-02, cap-raise pass): every one of
 # that section's 7.3 relocation candidates (kiln_io_owner, thermo_owner,
 # spi_owner, i2c_owner, screen_idle) already had a stack_margin_register()
 # call site -- the actual blocker was STACK_MARGIN_MAX_TASKS sitting at
@@ -40,7 +40,7 @@
 # others) were never meant to be tracked here, and a blind create-vs-
 # register count would either misfire on that legitimate debt or force
 # this check to register tasks nobody asked this pass to touch. The
-# required list below is exactly DRAM_PSRAM_PLAN.md's own tracked set
+# required list below is exactly DRAM_PSRAM_STATUS.md's own tracked set
 # (stack_margin.h's header-comment enumeration plus the section 7.3
 # candidates this pass unblocked) -- the tasks this plan's own
 # documentation says must be measurable. A future pass extending that
@@ -139,7 +139,7 @@ function Get-CodeOnlyLines {
     return $result
 }
 
-# Every task DRAM_PSRAM_PLAN.md / stack_margin.h's own header comment tracks
+# Every task DRAM_PSRAM_STATUS.md / stack_margin.h's own header comment tracks
 # as needing a live stack_margin_register() call site. See this script's
 # top comment for why this is a named list rather than a blind create-vs-
 # register count.
@@ -220,7 +220,7 @@ $missing = @($requiredNames | Where-Object { -not $registeredSet.Contains($_) })
 if ($missing.Count -gt 0) {
     Write-Host "STACK MARGIN REGISTRATION CHECK FAILED:" -ForegroundColor Red
     Write-Host "  The following task(s) are in this script's required-registration list" -ForegroundColor Red
-    Write-Host "  (DRAM_PSRAM_PLAN.md section 7 / stack_margin.h's tracked set) but have" -ForegroundColor Red
+    Write-Host "  (DRAM_PSRAM_STATUS.md section 7 / stack_margin.h's tracked set) but have" -ForegroundColor Red
     Write-Host "  NO stack_margin_register(`"<name>`", ...) call site anywhere under" -ForegroundColor Red
     Write-Host "  $driversDir or $appDir (App/*.c, non-recursive) :" -ForegroundColor Red
     foreach ($name in $missing) {

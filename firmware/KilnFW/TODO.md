@@ -2393,7 +2393,7 @@ stacks above be resized, and the resize should update this entry with the
 measured numbers, the same way `dram_margin.h`'s own thresholds are kept
 current.
 
-**2026-09-02 follow-up — DRAM_PSRAM_PLAN.md Phase 0 (4.2), registration
+**2026-09-02 follow-up — DRAM_PSRAM_STATUS.md Phase 0 (4.2), registration
 completed for the rest of the long-lived tasks.** Before this pass:
 `profile_executor`/`profile_exec_wdt` (`profile_executor_start.c`),
 `safety_owner_task`/`safety_owner_evt`/`safety_proto_rx`/`safety_poll`
@@ -2407,7 +2407,7 @@ completed for the rest of the long-lived tasks.** Before this pass:
 `uart_owner`/`uart_proto` instance is registered" undersold it —
 `uart_proto_rx` for the PC link (`main.c:1579`) was in fact already
 registered by the 2026-08-24 pass this section describes, contradicting
-DRAM_PSRAM_PLAN.md section 7.1's claim that it was still uninstrumented
+DRAM_PSRAM_STATUS.md section 7.1's claim that it was still uninstrumented
 (that plan doc is stale on this point as of this writing; not corrected
 there per this project's own "code is truth, not the checkboxes" rule and
 the instruction not to edit firmware/KilnFW/docs/ from this pass). Nothing

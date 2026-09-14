@@ -1,4 +1,4 @@
-# check_sdkconfig_defaults_applied.ps1 -- DRAM_PSRAM_PLAN.md section 5.
+# check_sdkconfig_defaults_applied.ps1 -- DRAM_PSRAM_STATUS.md section 5.
 #
 # a0b8711 stepped CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL 16384 -> 8192 in
 # sdkconfig.defaults, believing that change was live on the board being
@@ -17,7 +17,7 @@
 # the generated sdkconfig, because those are exactly the changes someone
 # will believe are live when they are not.
 #
-# Add a line to $watchedKeys whenever a future phase of DRAM_PSRAM_PLAN.md
+# Add a line to $watchedKeys whenever a future phase of DRAM_PSRAM_STATUS.md
 # (or any other plan) deliberately changes a value in sdkconfig.defaults
 # that ESP-IDF's regenerate-on-value-present behavior can silently ignore.
 #
@@ -64,7 +64,7 @@ if (-not (Test-Path $DefaultsPath)) {
 # an entry just because it currently passes -- removing it re-opens exactly
 # the hole this script exists to close.
 $watchedKeys = @(
-    'CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL'  # DRAM_PSRAM_PLAN.md section 5, a0b8711: 16384 -> 8192
+    'CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL'  # DRAM_PSRAM_STATUS.md section 5, a0b8711: 16384 -> 8192
 )
 
 function Get-ConfigValue {
@@ -97,7 +97,7 @@ foreach ($key in $watchedKeys) {
 if ($missingFromDefaults.Count -gt 0) {
     Write-Host "CHECK FAILED: watched key(s) missing from $DefaultsPath :" -ForegroundColor Red
     foreach ($k in $missingFromDefaults) { Write-Host "  $k" -ForegroundColor Red }
-    throw "sdkconfig.defaults no longer sets $($missingFromDefaults.Count) watched key(s) -- see DRAM_PSRAM_PLAN.md section 5"
+    throw "sdkconfig.defaults no longer sets $($missingFromDefaults.Count) watched key(s) -- see DRAM_PSRAM_STATUS.md section 5"
 }
 
 if (-not (Test-Path $SdkconfigPath)) {
@@ -131,7 +131,7 @@ if ($mismatches.Count -gt 0) {
     foreach ($m in $mismatches) {
         Write-Host "  $m" -ForegroundColor Red
     }
-    throw "$($mismatches.Count) watched-key mismatch(es) between $DefaultsPath and $SdkconfigPath -- ESP-IDF's Kconfig defaults policy keeps the generated value over sdkconfig.defaults, so this plan step is not actually applied. See DRAM_PSRAM_PLAN.md section 5."
+    throw "$($mismatches.Count) watched-key mismatch(es) between $DefaultsPath and $SdkconfigPath -- ESP-IDF's Kconfig defaults policy keeps the generated value over sdkconfig.defaults, so this plan step is not actually applied. See DRAM_PSRAM_STATUS.md section 5."
 }
 
 Write-Host "sdkconfig-defaults-applied check passed: $($watchedKeys.Count) watched key(s) agree between sdkconfig.defaults and the generated sdkconfig:"

@@ -119,7 +119,7 @@ to this task specifically," inherited from the shared safety-link
 frame-send chain every UART bridge task pays — and it was accepted as the
 new ceiling rather than fixed, on 92 B of *estimated* honest margin (the
 checker's own 1220 B unmodelled-overhead figure is a **measured baseline
-from a different, lighter workload**: `DRAM_PSRAM_PLAN.md`'s number, not a
+from a different, lighter workload**: `DRAM_PSRAM_STATUS.md`'s number, not a
 guaranteed ceiling on ISR/scheduler cost).
 
 `profile_executor_halt()` (`profile_executor_status.c:59`) calls

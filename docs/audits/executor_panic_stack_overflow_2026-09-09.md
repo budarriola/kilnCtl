@@ -119,7 +119,7 @@ Two independent ways to turn 3504 B into a verdict, both agreeing:
   `UNMODELED_OVERHEAD_BYTES = 1800` for dispatch/ISR/window-spill the static
   walk cannot see. `4096 - 3504 = 592` naive free; `592 - 1800 =` **-1208 B**
   honest free.
-* **This board's own measurement.** `DRAM_PSRAM_PLAN.md`'s live baseline put
+* **This board's own measurement.** `DRAM_PSRAM_STATUS.md`'s live baseline put
   `profile_executor` at 1388 B free of 4096 during a real firing, i.e. 2708 B
   used, against a deepest *tick* path of 1488 B static — roughly 1220 B of
   real, measured, unmodelled overhead on this exact task. Add that to
