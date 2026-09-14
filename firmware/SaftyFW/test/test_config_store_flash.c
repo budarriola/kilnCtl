@@ -502,6 +502,133 @@ static void test_power_loss_between_erase_and_program_of_target_leaves_old_secto
                "sector A, never touched by this write, is still found and still valid");
 }
 
+// D2 fix (docs/audits/rp2040_config_store_write_atomicity_2026-09-14.md):
+// a torn write left behind by a power cut mid-program, INSIDE a sector that
+// still has room left (not the 8th-write/switch case above -- an ordinary
+// same-sector append), used to be silently reused by the very next write:
+// config_store_next_write_slot() picks latest_good+1 by arithmetic alone,
+// which is exactly the torn slot in this scenario. Programming a fresh
+// record on top of those non-erased bytes ANDs the new record against the
+// leftover torn bits (hal_flash_program()'s own doc comment), corrupting it
+// -- so THIS write would also silently fail to actually land, while every
+// flash call along the way still reports HAL_OK. The fix must detect the
+// target slot is not erased and switch sectors instead of reusing it.
+static void test_torn_inline_slot_is_never_reprogrammed(void)
+{
+    TEST_SECTION("config_store_flash: a torn write left mid-sector (not a switch) is "
+                 "never reprogrammed by the next write -- it switches sectors instead");
+    reset_all();
+    config_store_boot_load();
+
+    // Three good writes land in sector A slots 0, 1, 2.
+    write_default_with_tc_type(0x01u);
+    write_default_with_tc_type(0x02u);
+    write_default_with_tc_type(0x03u);
+    uint8_t last_good_tc_type = config_store_get_tc_type();
+    TEST_CHECK(last_good_tc_type == 0x03u, "setup: sector A slot 2 holds the last good record");
+
+    // Directly tear slot 3 of sector A (bypassing config_store_write(), same
+    // fixture technique test_power_loss_mid_program_of_target_leaves_old_
+    // sector_valid() above uses) -- models a power cut mid-program during
+    // what WOULD have been the 4th, ordinary, no-erase-needed append.
+    hal_flash_region_t region_a;
+    TEST_CHECK(hal_flash_region_init(&region_a, SAFTYFW_CONFIG_STORE_FLASH_OFFSET,
+                                      SAFTYFW_CONFIG_STORE_FLASH_SIZE) == HAL_OK,
+               "fixture can bind sector A's real region");
+    config_store_record_t torn;
+    config_store_default(&torn);
+    torn.tc_type = 0x09u;
+    torn.seq = 999u;
+    uint8_t torn_packed[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&torn, torn_packed);
+    TEST_CHECK(hal_flash_program(&region_a, 3u * CONFIG_STORE_RECORD_LEN, torn_packed,
+                                  HAL_FLASH_PROGRAM_SIZE) == HAL_OK,
+               "fixture tears slot 3: only its first page is programmed");
+    uint8_t slot3_after_tear[CONFIG_STORE_RECORD_LEN];
+    TEST_CHECK(hal_flash_read(&region_a, 3u * CONFIG_STORE_RECORD_LEN, slot3_after_tear,
+                               sizeof(slot3_after_tear)) == HAL_OK,
+               "fixture reads back the torn slot for later comparison");
+
+    // Simulated reboot: the arbiter finds slot 2 (last CRC-valid record);
+    // slot 3 fails CRC and is skipped, exactly like any other corrupt slot.
+    config_store_boot_load();
+    TEST_CHECK(config_store_get_tc_type() == last_good_tc_type,
+               "boot after the mid-sector tear still finds slot 2's valid record");
+
+    // The next write must NOT land back on slot 3. Before the D2 fix this
+    // would silently AND-corrupt slot 3 with the new record's bytes; now it
+    // must detect slot 3 is not erased and switch to sector B instead.
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_type = 0x07u;
+    const char *reason = NULL;
+    bool ok = config_store_write(&rec, &reason);
+    TEST_CHECK(ok == true, "the write itself succeeds (via a sector switch, not slot 3 reuse)");
+    TEST_CHECK(fake_flash_get_erase_count(SECTOR_B_INDEX) == 1,
+               "the write switched to (and erased) sector B rather than reusing torn slot 3");
+    TEST_CHECK(fake_flash_get_erase_count(SECTOR_A_INDEX) == 0,
+               "sector A -- still holding the one valid record at slot 2 -- was never erased");
+
+    uint8_t slot3_after_write[CONFIG_STORE_RECORD_LEN];
+    TEST_CHECK(hal_flash_read(&region_a, 3u * CONFIG_STORE_RECORD_LEN, slot3_after_write,
+                               sizeof(slot3_after_write)) == HAL_OK,
+               "fixture re-reads slot 3 after the write");
+    TEST_CHECK(memcmp(slot3_after_tear, slot3_after_write, CONFIG_STORE_RECORD_LEN) == 0,
+               "slot 3's torn bytes are byte-for-byte untouched -- the write never "
+               "reprogrammed over them");
+
+    TEST_CHECK(config_store_get_tc_type() == 0x07u,
+               "the new record is immediately visible after the switch");
+    config_store_boot_load(); // simulated reboot
+    TEST_CHECK(config_store_get_tc_type() == 0x07u,
+               "the value present after a simulated reboot matches what was last "
+               "successfully written (sector B's record), not slot 2's older one");
+}
+
+// Companion to the above from the NO_SLOT (never-committed) side: a torn
+// FIRST-EVER write (slot 0 of sector A, before any record ever validated)
+// must not be reprogrammed by the next write either.
+static void test_torn_first_slot_before_any_valid_record_is_never_reprogrammed(void)
+{
+    TEST_SECTION("config_store_flash: a torn FIRST write (no valid record ever committed) "
+                 "is never reprogrammed by the next write");
+    reset_all();
+    config_store_boot_load();
+    TEST_CHECK(config_store_is_config_rejected() == false,
+               "setup: a blank board is not the rejected case, just never-committed");
+
+    hal_flash_region_t region_a;
+    TEST_CHECK(hal_flash_region_init(&region_a, SAFTYFW_CONFIG_STORE_FLASH_OFFSET,
+                                      SAFTYFW_CONFIG_STORE_FLASH_SIZE) == HAL_OK,
+               "fixture can bind sector A's real region");
+    config_store_record_t torn;
+    config_store_default(&torn);
+    torn.tc_type = 0x09u;
+    torn.seq = 1u;
+    uint8_t torn_packed[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&torn, torn_packed);
+    TEST_CHECK(hal_flash_program(&region_a, 0, torn_packed, HAL_FLASH_PROGRAM_SIZE) == HAL_OK,
+               "fixture tears slot 0 of sector A: only its first page is programmed");
+
+    // Simulated reboot: nothing validates -- s_cached_slot == CONFIG_STORE_NO_SLOT.
+    config_store_boot_load();
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_type = 0x07u;
+    const char *reason = NULL;
+    bool ok = config_store_write(&rec, &reason);
+    TEST_CHECK(ok == true, "the write succeeds (sector A is erased first, reclaiming the torn slot)");
+    TEST_CHECK(fake_flash_get_erase_count(SECTOR_A_INDEX) == 1,
+               "the NO_SLOT case erases sector A itself before writing -- nothing valid "
+               "existed anywhere to protect");
+    TEST_CHECK(config_store_get_tc_type() == 0x07u,
+               "the new record is immediately visible");
+    config_store_boot_load();
+    TEST_CHECK(config_store_get_tc_type() == 0x07u,
+               "the value survives a simulated reboot");
+}
+
 static void test_migration_from_legacy_single_sector_layout(void)
 {
     TEST_SECTION("config_store_flash: migration -- a board running the OLD "
@@ -916,6 +1043,8 @@ int main(void)
     test_power_loss_mid_erase_of_target_leaves_old_sector_valid();
     test_power_loss_mid_program_of_target_leaves_old_sector_valid();
     test_power_loss_between_erase_and_program_of_target_leaves_old_sector_valid();
+    test_torn_inline_slot_is_never_reprogrammed();
+    test_torn_first_slot_before_any_valid_record_is_never_reprogrammed();
     test_migration_from_legacy_single_sector_layout();
     test_corrupt_active_sector_falls_back_to_other_sector();
     test_seqlock_concurrent_read_never_tears();

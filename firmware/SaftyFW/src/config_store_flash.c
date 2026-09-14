@@ -889,6 +889,30 @@ typedef struct {
                           // function below.
 } config_store_write_args_t;
 
+// Read-only check: are all CONFIG_STORE_RECORD_LEN bytes at `slot_index`
+// within `region` still erased (0xFF)? Used two ways below: (1) before
+// programming, to refuse writing over a torn/leftover slot instead of
+// silently AND-corrupting it (see hal_flash_program()'s doc comment on
+// AND-programming semantics); (2) is reused conceptually by the read-back
+// verify in config_store_write_cb(), which compares against the actual
+// intended bytes rather than merely "still erased". hal_flash_read() carries
+// no execution-context restriction (hal_flash.h), so this may be called from
+// ordinary task context, outside any hal_flash_safe_execute() callback.
+static bool config_store_flash_slot_is_erased(hal_flash_region_t *region, size_t slot_index)
+{
+    uint8_t buf[CONFIG_STORE_RECORD_LEN];
+    if (hal_flash_read(region, (uint32_t)slot_index * CONFIG_STORE_RECORD_LEN, buf,
+                        sizeof(buf)) != HAL_OK) {
+        return false; // fail closed: an unreadable slot is not provably erased
+    }
+    for (size_t i = 0; i < sizeof(buf); i++) {
+        if (buf[i] != 0xFFu) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void config_store_write_cb(void *param)
 {
     config_store_write_args_t *a = (config_store_write_args_t *)param;
@@ -902,6 +926,36 @@ static void config_store_write_cb(void *param)
     a->result = hal_flash_program(a->region,
                                    (uint32_t)a->next_write_slot * CONFIG_STORE_RECORD_LEN,
                                    a->record, CONFIG_STORE_RECORD_LEN);
+    if (a->result != HAL_OK) {
+        return;
+    }
+
+    // Read-back verify (D2 fix, docs/audits/
+    // rp2040_config_store_write_atomicity_2026-09-14.md): hal_flash_program()
+    // returning HAL_OK means only "the program instruction sequence ran", not
+    // "flash now holds the bytes we asked for" -- hal_flash_program()'s own
+    // AND-programming doc comment says a non-erased target byte silently
+    // becomes `existing & new`, and both hal_flash_program() and this
+    // callback would otherwise report success regardless. This is the same
+    // "a write's return code alone cannot be trusted" lesson
+    // boot_guard_mark_healthy() (main_boot_early.c) learned the hard way for
+    // an NVS write that reported HAL_OK while the persisted value never
+    // actually changed -- read-back verification is the fix there too.
+    // Compare against the exact record bytes just asked to be written, not
+    // merely "is this slot non-erased now": a partially-landed program can
+    // still leave some bits erased while others are wrong.
+    uint8_t verify[CONFIG_STORE_RECORD_LEN];
+    hal_status_t verify_status =
+        hal_flash_read(a->region, (uint32_t)a->next_write_slot * CONFIG_STORE_RECORD_LEN, verify,
+                       CONFIG_STORE_RECORD_LEN);
+    if (verify_status != HAL_OK || memcmp(verify, a->record, CONFIG_STORE_RECORD_LEN) != 0) {
+        // Do not claim success: the slot's on-flash bytes disagree with what
+        // was just asked to be written. HAL_IO is the existing catch-all
+        // config_store_flash_rc_reason() already maps to "insufficient
+        // resources" (see hal_status_to_config_store_flash_rc() above) -- the
+        // caller sees a real failure reason, not a silent "ok".
+        a->result = HAL_IO;
+    }
 }
 
 // Writes `rec` as the new current config record, refusing while ARMED
@@ -956,6 +1010,39 @@ bool config_store_write(const config_store_record_t *rec, const char **out_reaso
     // as `args.region`, so this callback cannot erase or reprogram it no
     // matter when a crash interrupts it.
     config_store_write_plan_t plan = config_store_plan_write(s_cached_sector, s_cached_slot);
+
+    // D2 fix (docs/audits/rp2040_config_store_write_atomicity_2026-09-14.md):
+    // config_store_plan_write()/config_store_next_write_slot() (config_store.c,
+    // pure) pick the next slot purely by arithmetic (latest+1, wrapping),
+    // trusting that a slot never yet written since the sector's last erase is
+    // still blank. A prior write torn by a power cut mid-program breaks that
+    // assumption: the torn slot fails its own CRC at the next boot scan (so
+    // config_store_find_latest_multi_ex() correctly skips it and s_cached_slot
+    // lands on the last GOOD slot before it), but the torn slot's bytes are
+    // still sitting there, non-erased. The very next write would then land
+    // back on that exact slot (latest_good + 1 == the torn one) and PROGRAM
+    // over it -- hal_flash_program()'s AND-programming semantics mean any bit
+    // the new record needs to be 1 that the torn write already cleared to 0
+    // stays 0, silently corrupting the new record while every flash call
+    // still reports HAL_OK. Guard against this here, not in the pure layer,
+    // because only this file can actually read flash to find out: if the
+    // plan does not already call for an erase, but the slot it is about to
+    // program into is not actually still erased, treat it exactly like the
+    // sector-full case -- switch to the OTHER sector and erase it first. The
+    // sector holding the current, still-valid record (s_cached_sector) is
+    // never the one erased here, so the same "never touch the sector holding
+    // the live record" atomicity guarantee this file's header comment
+    // describes for the ordinary 8th-write case holds for this path too. The
+    // s_cached_slot == CONFIG_STORE_NO_SLOT case (never a CRC-valid record
+    // anywhere) has no "other" sector to protect, so it simply erases sector
+    // 0, the only sector plan_write ever targets from NO_SLOT.
+    if (!plan.needs_erase &&
+        !config_store_flash_slot_is_erased(s_regions[plan.sector_index], plan.slot_index)) {
+        plan.sector_index =
+            (s_cached_slot == CONFIG_STORE_NO_SLOT) ? 0u : ((s_cached_sector == 0u) ? 1u : 0u);
+        plan.slot_index = 0;
+        plan.needs_erase = true;
+    }
 
     config_store_write_args_t args;
     args.region = s_regions[plan.sector_index];

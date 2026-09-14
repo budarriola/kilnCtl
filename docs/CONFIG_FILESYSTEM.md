@@ -266,6 +266,30 @@ count.
   either slot, into whichever is not currently active, flipping the index
   only after that write lands — readers never write shared state.
 
+  A fourth, distinct defect in the same file — write atomicity (finding D2,
+  `docs/audits/unreviewed_changes_review_2026-09-08.md`) — is now fixed too,
+  2026-09-14: `config_store_next_write_slot()` picked the next slot by
+  arithmetic alone (`latest_valid + 1`), trusting it was still blank. A slot
+  torn by a power cut mid-program fails its own CRC and is correctly skipped
+  by the boot scan, but its bytes stay non-erased — the very next write
+  landed back on that same slot and, per `hal_flash_program()`'s
+  AND-programming semantics, silently corrupted onto it while every flash
+  call still reported `HAL_OK`: the caller believed the write succeeded and
+  the RAM cache adopted the new value, both wrongly. Fixed by (a) checking
+  the target slot is actually still erased before programming into it —
+  switching to the other sector and erasing it first if not, same as the
+  natural 8th-write case — and (b) a read-back verify after every program,
+  so a mismatch is reported as a real write failure rather than silently
+  trusted. This is a THIRD defect distinct from both the A/B erase-window
+  fix and the RAM-cache seqlock above — neither of those ever inspected
+  whether the target flash slot was actually erased. Full detail,
+  including why (a)/(b) are not the same fix as either prior one and the
+  new host-test coverage (torn-slot-reuse, both the ordinary and
+  never-committed cases): `docs/audits/rp2040_config_store_write_atomicity_2026-09-14.md`.
+  **Not yet verified on hardware** — this pass was host-tests-only (another
+  session was flashing the RP2040 concurrently); bench verification remains
+  outstanding.
+
   The A/B sector fix (`24090c9a`) is flashed to the bench Pico (`b7af9ebe`,
   2026-09-08: commissioning config read back byte-for-byte across the
   migration, CRC unchanged). The seqlock fix (`b202fe56`/`5671ee03`/
