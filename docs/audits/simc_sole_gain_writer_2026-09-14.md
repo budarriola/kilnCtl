@@ -230,3 +230,237 @@ before anything else was measured or committed.
   `feed_oscillating_trace()` P6/Q2 header comment context is superseded by
   this document; the helper itself is still used by `test_adaptive_tune_ki_
   bounds.c`'s new diagnostic-only LIMIT_CYCLE proof, so it was kept.
+
+---
+
+## Review, 2026-09-14 -- adversarial: the flagship anti-ratchet test is VACUOUS (refuted); the narrow companion test is genuine, and the change itself holds
+
+Independent adversarial review of `88bb4333` by a second session. Everything
+below is labelled **[executed]** or **[read]**. No commit hash is cited that
+`git cat-file -t` did not confirm is a real commit (`88bb4333`, `e78fbc5b`,
+`83627343`, `ac5c26a3`, `652b5737`, `233ded79`, `97288659`, `36f88d62` --
+all checked **[executed]**).
+
+### R1. REFUTED: the anti-ratchet "deliverable" test does not catch the defect it exists for
+
+This document's *Negative test* section states that when the removed write
+path is reintroduced, "the anti-ratchet test failed on its `ki_applied`
+assertion on every run." **That is not what happens.** [executed]
+
+I reintroduced the removed write by hand in
+`adaptive_tune_refine_ki_locked()` (`zones_config_get_pid()` -> per-run
+`ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE` cap -> `zones_config_set_pid()`,
+`ki_applied = true`; no cumulative bound, matching what K9 deleted), deleted
+`build/at`, and rebuilt. Result: **84 failures**, and the reference-Ki walk
+reproduces *exactly* as claimed -- `1.2000, 1.4400, 1.7280, 2.0736, 2.4883,
+2.9860, 3.5831, 4.2998 ...` (the cited 4.2998x lands on run 8 of the
+30-run loop, continuing to 46.0052 with no bound left), and the LIMIT_CYCLE
+half decays `100 -> ... -> 13.4218 -> 10.7374`. Every one of those failures
+came from `test_ki_diagnosis_never_applies_any_verdict()` (the "narrower,
+single-module companion") and from the setup assertions in
+`test_adaptive_tune_ki_verdict.c` / `test_adaptive_tune_status.c`.
+
+`test_ki_diagnosis_never_ratchets_with_fuzzy_and_adaptive_tune_concurrent()`
+-- the test this document calls "the deliverable this task asked for" --
+reported **zero failures** under the reintroduced write path.
+
+Why, measured rather than guessed [executed]: I instrumented that test's
+loop with a temporary `fprintf` of `ki_verdict`/`ki_applied`/stored
+`ki`/`ki_refusal_reason` (removed by hand afterwards). Over its 10 runs:
+
+- runs 0-3: `reason = "Ki diagnosis skipped this run -- the model/PID
+  refinement already rewrote Ki from SIMC"` -- the D5 gate
+  (`if (!model_refined) adaptive_tune_refine_ki_locked(...)`,
+  `adaptive_tune.c`) never hands the Ki layer a turn, because the fixture's
+  four `feed_settled_dwell()` calls make the SIMC refine fire every one of
+  those runs;
+- runs 4-9: `reason = "only 7/12 within-dwell trace samples"` -- SIMC
+  stops applying, the Ki layer *does* get its turn, and is then refused at
+  the `trace_count < ADAPTIVE_TUNE_KI_MIN_SAMPLES` gate. The fixture's
+  final `feed_settled_dwell()` leaves only 7 trace samples.
+- `ki_verdict` is `0` (INSUFFICIENT) on **every** run. The
+  `dwell_err_mean_c = 0.45f` OFFSET_TOO_SMALL evidence the test is built
+  around is **never classified at all**, let alone applied.
+
+So `!ki_applied` holds in that test for reasons that have nothing to do with
+K9, and the `<=5%`-per-run Ki bound is measuring SIMC's own convergence
+(`0.001239 -> 0.001217`, then flat) against nothing. The
+`ZONE_CONTROL_MODE_PID_FUZZY` / `fuzzy_strength_pct = 50` configuration is
+decorative -- this document already says so -- but the test is decorative
+too. This is the repo's own "a green check that cannot fail" class, and the
+negative-test claim in the section above is the thing that was supposed to
+catch it; it was reported for the suite as a whole, not per-test.
+
+**Not a defect in the production change.** The invariant *is* genuinely
+proved, by `test_ki_diagnosis_never_applies_any_verdict()`, which I confirmed
+fails loudly and with the exact documented numbers. The defect is in the
+evidence: the test this document nominates as its proof is not sensitive to
+the ratchet. Fix (not applied here, to avoid colliding with concurrent work):
+give that test a fixture that actually reaches the classifier -- feed a
+trace of at least `ADAPTIVE_TUNE_KI_MIN_SAMPLES` samples, and assert
+`ki_verdict == OFFSET_TOO_SMALL` on the runs where D5 hands the Ki layer a
+turn, so "never applied" is an observation about a live classification and
+not about a gate upstream of it.
+
+### R2. SIMC's invariance to fuzzy is APPROXIMATE, not exact -- residual quantified
+
+The pointwise fixed-point argument ("with integral action the settled
+`(duty, rise)` pair is set by plant and setpoint, not gains") is only exact
+*at* the fixed point. What the harvest actually requires [read,
+`adaptive_tune.c` lines ~322-375] is weaker: `ADAPTIVE_TUNE_SETTLE_MIN_S`
+(180 s) elapsed, mean temperature slope `<= ADAPTIVE_TUNE_SETTLE_SLOPE_FLOOR_C_PER_S`
+(0.003 C/s), duty *range* over the window within
+`ADAPTIVE_TUNE_DUTY_STABILITY_ABS` (0.05) or 25% of duty, and
+`duty >= 0.03`. None of those is `error == 0`.
+
+A monotone, still-converging approach passes all of them. The bound: a
+first-order approach with remaining amplitude `A` and time constant `tau`
+has slope `A/tau`, so `A <= 0.003 * tau`. With this bench's measured
+`model_tau_s ~ 264 s` and `model_k_dc ~ 39 C/duty` (zone 0, printed by the
+host-test fixture) that is **up to ~0.8 C of un-converged rise at the
+harvest instant, i.e. ~0.02 of duty (~0.8/39)** -- against
+`ADAPTIVE_TUNE_MIN_MATERIAL_MOVE_FRAC` of 0.005. The gate-permitted
+residual is roughly **4x larger than the smallest move SIMC will act on**,
+and it is gain-dependent, because how far the loop has converged after
+180 s depends on the gains that were running. Note also that the
+duty-stability gate bounds duty's *variation*, never its *offset* from
+steady state, so a slow monotone drift is exactly the case it does not
+catch.
+
+This does not produce a ratchet: the bias is a bounded, roughly fixed
+offset, so SIMC converges to a slightly-biased fixed point rather than
+compounding. But "frame-independent by construction", as
+`adaptive_tune_ki.c`'s new top comment and this document both put it, is
+too strong on its own -- **Option B is what makes it safe**, not the
+pointwise argument, since the freeze removes fuzzy from the whole window
+in which that residual is accumulated. Recommend the wording be softened
+accordingly: exact at the fixed point, approximate at the gates, closed by
+the freeze.
+
+### R3. The freeze window is correctly bounded, and does not bias what it measures
+
+[read] `harvest_freeze = s_exec.dwelling && adaptive_tune_get_enabled(zi)`
+(`profile_executor.c:988`) and the harvest itself
+(`adaptive_tune_zone_tick(..., s_exec.dwelling, ...)`,
+`profile_executor.c:830`) read the **same flag on the same tick**, and
+`s_exec.dwelling = true` is set earlier in that tick (line 702) than
+either. So the freeze is on from the first dwelling tick -- before the
+settle window opens -- and no fuzzy-shaped tick can land inside a
+harvested window. The freeze does not start late.
+
+Three qualifications, all minor, none blocking:
+
+1. **It covers slightly more than the harvest window.** `recorded_this_dwell`
+   makes the observation one-per-dwell, so after the single observation is
+   taken the rest of a dwell -- potentially hours -- stays frozen for no
+   benefit, on exactly the zones an operator opted into tuning. Tightening
+   the condition with the module's own "this dwell is already recorded"
+   state would restore fuzzy for the remainder.
+2. **The dwell-entry discontinuity is bumpless in Ki but not in Kp/Kd.**
+   `pid_rescale_integral_for_new_ki()` (`profile_executor_pid_tick.c`, run
+   unconditionally after `pid_fuzzy_adjust()`) absorbs the Ki step, so there
+   is no integral bump -- but Kp/Kd step by fuzzy's multiplier at the
+   instant of entry, giving a one-tick proportional/derivative duty step
+   proportional to the entry error. That perturbs the approach transient.
+   It does **not** bias the harvested point beyond R2's bound: a step
+   disturbance raises the slope, which *delays* the settle gate rather than
+   passing it early (the elapsed-time denominator only grows, per that
+   gate's own comment). So the freeze does not change the thing it protects
+   in a way that matters; it can only postpone a harvest.
+3. **The harvested duty is one tick stale.** `z->duty` is assigned at
+   `profile_executor.c:1030`, *after* `adaptive_tune_zone_tick()` at line
+   830, so each harvest sees the previous tick's duty, and the first
+   dwelling tick seeds `settle_duty_min/max` from a still-fuzzy duty. At
+   1 s ticks against a 180 s window this is immaterial, but it means the
+   freeze is not quite airtight at the very first sample of the
+   duty-range tracker.
+
+### R4. No other path writes Ki automatically -- but "sole gain writer" is over-stated
+
+[executed, grep over all of `firmware/KilnFW/App` excluding tests] every
+caller of `zones_config_set_pid()` is: `adaptive_tune_model.c:229` (SIMC),
+`adaptive_tune.c:1055` (the operator's one-click revert, restoring a
+snapshot), `autotune_engine_guard.c:376` (operator accept of an autotune
+result), `zones_http_pid.c:137` (`POST /api/zones/pid`),
+`backup_import.c:985` (backup import), and
+`uart_bridge_ext_control.c:109` (the bench UART control task). [read]
+`adaptive_tune_ki.c` contains no setter call at all after this change, and
+the diagnostic-only path returns on every verdict.
+
+So the accurate claim is **"SIMC is the sole *automatic, trace-driven*
+writer of PID gains"**. `adaptive_tune_ki.c`'s new top comment says SIMC is
+"the SOLE writer of this zone's PID gains" unqualified, which is not true of
+the four operator/import paths above. Documentation wording only, no
+behavioural consequence -- but the unqualified phrase is also what the
+refusal string shown to operators says ("SIMC is the sole gain writer"),
+where it is likewise imprecise.
+
+Nothing depended on the removed cumulative bound/floor:
+`ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT` has no remaining reader [executed,
+grep], and `ki_baseline` is still written and re-latched by
+`adaptive_tune_model.c` [read], with host tests rewritten onto that path
+that I saw pass.
+
+### R5. No surface shows a diagnosis dressed as an action
+
+[read] `adaptive_tune_refine_ki_locked()` now sets `ki_refusal_reason` on
+*every* exit path, and `zones_page.html`'s `adaptiveTuneKiHtml()` only
+renders "(+N% applied)" behind `if (z.ki_applied)` -- permanently false --
+otherwise rendering `label + " -- " + ki_refusal`. So an operator sees e.g.
+"offset -- Ki too small -- diagnostic only (v2 20%) -- SIMC is the sole gain
+writer". That is honest. `/api/adaptive_tune` publishes `ki_applied:false`
+alongside the reason, and PcTools' MCP renderer prints `applied=False`.
+
+One stale comment: `adaptive_tune.h:88` still documents `ki_applied` as
+"true once a Ki correction was actually written this run", which can no
+longer happen. Worth a one-line correction.
+
+### R6. Contracts and the mirror checker, verified by execution
+
+- `strength_pct == 0` **bit-exact contract**: `pid_fuzzy.c`/`pid_fuzzy.h`
+  were not touched by `88bb4333` at all [executed, `git show --stat`], and
+  the pre-existing bit-exactness test plus the new
+  `...harvest_freeze_forces_plain_pid_bit_exact()` both pass in a clean
+  rebuild [executed].
+- **No-model-runs-plain-PID** and the `autotune_baseline_k_dc` envelope:
+  untouched by this commit [read, diff], their tests pass [executed].
+- **Mirror-drift checker is NOT vacuous** [executed]. Passing baseline:
+  exit 0. I then broke the mirror genuinely --
+  `test_closed_loop.c`'s `fuzzy_tick()` error sign flipped to
+  `measurement - setpoint` -- and got a named first-divergent-line failure,
+  **exit 1**. Restored by hand, exit 0 again. Separately, because a
+  checker *updated to accommodate a change* is the usual way these go
+  vacuous, I also inverted the production statement the update allowlisted
+  (`if (!harvest_freeze) strength_pct = 0`): the allowlist regex is an
+  exact literal, so the checker flagged it as a prod-only mismatch, **exit
+  1**. Restored by hand, exit 0.
+- Every break above was restored by hand (no `git checkout`/`restore`/
+  `stash`), confirmed by `git diff --stat` showing none of the touched
+  files, and the **entire** `firmware/KilnFW/App/test/build` directory was
+  deleted before the final measurement.
+
+### R7. Tallies
+
+- KilnFW host tests, full clean rebuild after all negative tests were
+  reverted by hand: **40/40 executables built and passed** [executed]
+  (`adaptive_tune` group 1637/1637).
+- `tools/run_all_checks.ps1`: **93 passed, 0 skipped, 1 failed**
+  [executed]. The one failure is `tools\check_no_duplicate_crc.ps1`,
+  which raced a concurrent session's transient negative-test scratch
+  directory (`firmware/hwAbstraction/test/_fakes_work_30556/fake_gpio_mutant.c`
+  deleted mid-scan). Re-run on its own immediately
+  afterwards: **PASS** [executed]. Nothing in `88bb4333` touches
+  `firmware/hwAbstraction`; effective tally **94/94**.
+
+### Summary
+
+The production change is sound and I found no defect in it. The invariance
+it rests on is approximate rather than exact (R2), which the freeze covers;
+the freeze is correctly bounded and does not bias what it measures (R3);
+no automatic path writes Ki any more (R4); no surface misreports a
+diagnosis as an action (R5). The load-bearing claim I refute is
+evidentiary: **the anti-ratchet test nominated as this pass's deliverable
+cannot fail** for the reason it claims to, and this document's negative-test
+section says otherwise (R1). The real proof is
+`test_ki_diagnosis_never_applies_any_verdict()`, which I reproduced
+independently, numbers and all.
