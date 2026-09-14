@@ -520,9 +520,20 @@ _ZONE_MODEL_FIT_READONLY_KEYS = {"model_fit_temp_c", "model_fit_ambient_c"}
 #: model_k_dc/hyst_c/coil_power_w) and is emitted raw. Same read-only class
 #: as the tuning_*/model_fit_* records above.
 _ZONE_AUTOTUNE_BASELINE_READONLY_KEYS = {"autotune_baseline_k_dc"}
+#: GAP 2, docs/audits/observability_gaps_closed_2026-09-14.md: whether THIS
+#: zone's fuzzy layer can actually run right now, independent of whether it
+#: is configured to (fuzzy_strength_pct > 0) -- derived server-side
+#: (pid_fuzzy_derive_bands()'s own model_valid predicate against this zone's
+#: model_k_dc/model_tau_s, the same check the live control tick makes) and
+#: emitted unconditionally, same always-emit convention as every field
+#: around it. Read-only: there is no z%u_ POST key for it, and there never
+#: should be -- it is not stored, it is computed fresh on every GET from
+#: fields that ARE already round-tripped (model_k_dc/model_tau_s).
+_ZONE_FUZZY_MODEL_VALID_READONLY_KEYS = {"fuzzy_model_valid"}
 _ZONE_READONLY_KEYS = ({"index", "normal_current_measured", "normal_current_a"}
                        | _ZONE_TUNING_READONLY_KEYS | _ZONE_MODEL_FIT_READONLY_KEYS
-                       | _ZONE_AUTOTUNE_BASELINE_READONLY_KEYS)
+                       | _ZONE_AUTOTUNE_BASELINE_READONLY_KEYS
+                       | _ZONE_FUZZY_MODEL_VALID_READONLY_KEYS)
 
 _TIMING_PROFILE_FIELD_FORM_KEY = {
     "name": "name",

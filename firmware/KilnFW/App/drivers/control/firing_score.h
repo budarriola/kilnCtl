@@ -183,9 +183,6 @@ typedef struct {
     float rate_c_per_s;   // |commanded rate|, so the comparator can size lag's Bar-1 floor
     uint32_t scored_ticks;
     uint16_t merged;      // how many same-key segments were folded into this entry
-    uint16_t dwell_unsettled; // dwells folded in here that NEVER settled (see SETTLE_S).
-                              // Reporting only: an unsettled dwell sets has[SETTLE_S]
-                              // = false rather than reporting an in-band sentinel value.
 } firing_segment_score_t;
 
 typedef struct {

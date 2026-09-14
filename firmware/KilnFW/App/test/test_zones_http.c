@@ -103,6 +103,9 @@ void relay_cycles_set_type(uint8_t relay, relay_type_t type, uint32_t rated_over
 #include "../drivers/http/zones_http.c"
 #include "../drivers/persist/zones_config_store.c"
 #include "../drivers/persist/zones_config_accessors.c"
+#include "../drivers/control/pid_fuzzy.c" /* pid_fuzzy_derive_bands() -- zones_http_get.c's
+                                            * fuzzy_model_valid call site (GAP 2,
+                                            * docs/audits/observability_gaps_closed_2026-09-14.md) */
 #include "../drivers/http/zones_http_get.c"
 #include "../drivers/http/zones_http_post_parse.c"
 #include "../drivers/http/zones_http_post.c"
@@ -4297,6 +4300,65 @@ static void test_get_emits_autotune_baseline_k_dc(void)
               "36f88d62's zeroing fix actually holds end-to-end");
 }
 
+// GAP 2, docs/audits/observability_gaps_closed_2026-09-14.md: fuzzy_
+// model_valid must track the SAME predicate the live control tick uses
+// (pid_fuzzy_derive_bands(), profile_executor_pid_tick.c's resolve_fuzzy_
+// bands()) against this zone's own persisted model_k_dc/model_tau_s -- a
+// zone never autotuned (both 0, the documented sentinel) must read false,
+// and a zone with a real fit must read true, independent of fuzzy_
+// strength_pct (this field reports whether fuzzy COULD run, not whether it
+// is configured to).
+//
+// Negative test: change the call site in zones_http_get.c to
+// `bool fuzzy_model_valid = true;` (or delete the field from the APPEND
+// call) -> the first TEST_CHECK below goes red.
+static void test_get_emits_fuzzy_model_valid(void)
+{
+    TEST_SECTION("zones_get_handler -- emits fuzzy_model_valid, tracking pid_fuzzy_derive_"
+                 "bands()'s own model_valid predicate (docs/audits/observability_gaps_closed_"
+                 "2026-09-14.md GAP 2)");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 2;
+    /* Zone 0: never autotuned -- model_k_dc/model_tau_s both 0, the
+     * documented "no identified plant" sentinel. Configured for fuzzy
+     * (strength 75%) but must read fuzzy_model_valid:false regardless --
+     * this is exactly the case an operator previously had to infer from
+     * model_k_dc alone. */
+    s_zones.cfg.zones[0].fuzzy_strength_pct = 75.0f;
+    /* Zone 1: a real fit. */
+    s_zones.cfg.zones[1].model_k_dc = 42.0f;
+    s_zones.cfg.zones[1].model_tau_s = 260.0f;
+    s_zones.cfg.zones[1].fuzzy_strength_pct = 75.0f;
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = zones_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "zones_get_handler must return ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body,
+                       "\"index\":0,\"name\":\"\"") != NULL ||
+               strstr(s_last_resp_body, "\"index\":0,") != NULL,
+              "zone 0 present in the response");
+    /* Locate each zone's own object rather than grep the whole body, so a
+     * false-true swap between zones cannot be masked by the OTHER zone's
+     * substring appearing first. */
+    const char *zone0 = strstr(s_last_resp_body, "\"index\":0,");
+    const char *zone1 = strstr(s_last_resp_body, "\"index\":1,");
+    TEST_CHECK(zone0 != NULL && zone1 != NULL, "both zone objects found");
+    if (zone0 && zone1) {
+        const char *fmv0 = strstr(zone0, "\"fuzzy_model_valid\":");
+        const char *fmv1 = strstr(zone1, "\"fuzzy_model_valid\":");
+        TEST_CHECK(fmv0 != NULL && fmv0 < zone1,
+                  "zone 0 emits fuzzy_model_valid within its own object");
+        TEST_CHECK(fmv1 != NULL, "zone 1 emits fuzzy_model_valid");
+        TEST_CHECK(fmv0 && strncmp(fmv0, "\"fuzzy_model_valid\":false", 25) == 0,
+                  "zone 0 (no identified model, but fuzzy_strength_pct=75) reports "
+                  "fuzzy_model_valid:false -- configured but inactive");
+        TEST_CHECK(fmv1 && strncmp(fmv1, "\"fuzzy_model_valid\":true", 24) == 0,
+                  "zone 1 (a real fit) reports fuzzy_model_valid:true");
+    }
+}
+
 // Opus review of 992f3954 (zones v22, progress_band_c), item 3: json_cap in
 // zones_get_handler() (7360 bytes, heap_caps_malloc) has a hand-maintained
 // comment chain of every bump's worst-case reasoning, but that chain stopped
@@ -4381,6 +4443,18 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
         z->timing_profile = 255;
         z->relay_type = ZONE_RELAY_TYPE_MAX;
         z->fuzzy_strength_pct = ZONE_FUZZY_STRENGTH_PCT_MAX;
+        /* fuzzy_model_valid (GAP 2, docs/audits/observability_gaps_closed_
+         * 2026-09-14.md) is DERIVED from model_k_dc/model_tau_s at render
+         * time (pid_fuzzy_derive_bands()), not its own stored field --
+         * model_k_dc/model_tau_s are set to ZONE_MODEL_K_MAX/ZONE_MODEL_TIME_
+         * MAX_S just below for THEIR OWN max-width coverage, and any values
+         * that large are necessarily > 0.0f, so this renders "true" (4
+         * chars) here. That is the true joint worst case, not an
+         * under-measurement: forcing "false" (5 chars, the wider literal)
+         * requires model_k_dc or model_tau_s to be non-positive, which
+         * shrinks THEIR OWN rendered width by far more than one byte -- the
+         * two fields cannot be independently maximised, and the combination
+         * that maximises the total is this one.  */
         for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
             z->coupling_coeff[j] = ZONE_COUPLING_COEFF_MAX;
             z->coupling_tau_s[j] = ZONE_MODEL_TIME_MAX_S;
@@ -4461,8 +4535,11 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
      * coupling_dead_time_c%u and model_fit_temp_c/model_fit_ambient_c to the
      * new GET /api/zones_diag route (test_zones_diag_get_handler_max_width_
      * response_fits_json_cap() below covers ITS json_cap the same way) --
-     * which recovered headroom to 854 bytes, confirmed by this test. The
-     * buffer must still NOT simply be enlarged (this repo has two
+     * which recovered headroom to 854 bytes. `fuzzy_model_valid` (GAP 2,
+     * docs/audits/observability_gaps_closed_2026-09-14.md) then spent 75 of
+     * those bytes (25 bytes/zone x MAX31856_CHANNEL_COUNT=3 for
+     * `"fuzzy_model_valid":true,`), leaving 779 bytes, confirmed by this
+     * test. The buffer must still NOT simply be enlarged (this repo has two
      * documented panics from oversized httpd-worker stack locals and a
      * standing rule against growing httpd buffers) -- read the plan and the
      * split doc for ranked, consumer-checked savings and structural
@@ -4471,7 +4548,7 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
     snprintf(headroom_msg, sizeof(headroom_msg),
              "max-width GET /api/zones must fit inside json_cap without hitting the "
              "handler's own truncation path (rendered %zu bytes; json_cap is %zu bytes; "
-             "measured headroom after the 2026-09-14 zones_diag split was 854 bytes; this "
+             "measured headroom after fuzzy_model_valid (2026-09-14) was 779 bytes; this "
              "attempt %s). "
              "Do NOT enlarge json_cap (two documented httpd-worker-stack-local panics + a "
              "standing rule against growing httpd buffers) -- see "
@@ -10693,6 +10770,7 @@ void run_test_zones_http(void)
     test_post_then_get_round_trips_new_fields();
     test_zones_diag_get_handler_round_trips_moved_fields();
     test_get_emits_autotune_baseline_k_dc();
+    test_get_emits_fuzzy_model_valid();
     test_zones_get_handler_max_width_response_fits_json_cap();
     test_zones_diag_get_handler_max_width_response_fits_json_cap();
     test_tuning_rec_body_len_strips_the_idf_appended_nul();

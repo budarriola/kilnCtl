@@ -234,13 +234,21 @@ bool firing_score_seg_finish(const firing_score_seg_t *seg, firing_segment_score
             out->has[FIRING_SUBSCORE_SETTLE_S] = true;
             out->value[FIRING_SUBSCORE_SETTLE_S] =
                 (seg->settle_last_outside_s < 0.0f) ? 0.0f : seg->settle_last_outside_s;
-        } else if (seg->settle_have_tick) {
-            // NEVER settled. has = false, the comparator's first-class
-            // "this pair has nothing to say about that sub-score" outcome --
-            // not a fabricated number that a difference can be taken of.
-            // The FACT is still reported, for humans, out of band:
-            out->dwell_unsettled = 1;
         }
+        // else: NEVER settled. has[SETTLE_S] stays false -- the comparator's
+        // first-class "this pair has nothing to say about that sub-score"
+        // outcome, not a fabricated number a difference can be taken of.
+        // A separate `dwell_unsettled` counter existed here from 2026-09-14
+        // to report this out of band "for humans"; it was removed the same
+        // day
+        // (docs/audits/observability_gaps_closed_2026-09-14.md GAP 1) because
+        // it had no consumer anywhere outside three test assertions --
+        // firing_score has no live production caller yet at all, so there is
+        // no real reader to surface it to, and has[SETTLE_S] == false already
+        // makes "never settled" structurally distinct from any settled
+        // value, with or without a count. Re-add a statistic like this only
+        // once an actual caller (iter_tune.c or an HTTP surface) needs it,
+        // shaped to what that caller actually consumes.
     }
     return true;
 }
@@ -277,7 +285,6 @@ bool firing_score_set_add(firing_score_set_t *set, const firing_segment_score_t 
                 e->value[s] = score->value[s];
             }
         }
-        e->dwell_unsettled = (uint16_t)(e->dwell_unsettled + score->dwell_unsettled);
         e->in_band_frac = (e->in_band_frac * w_old + score->in_band_frac * w_new) / w_tot;
         e->scored_ticks += score->scored_ticks;
         e->merged = (uint16_t)(e->merged + score->merged);

@@ -224,8 +224,6 @@ static void test_settle_time_never_settling_reports_nothing_not_a_sentinel(void)
     TEST_CHECK(firing_score_seg_finish(&seg, &s), "segment scored");
     TEST_CHECK(!s.has[FIRING_SUBSCORE_SETTLE_S],
                "never-settled reports has == false, the comparator's first-class 'nothing to say'");
-    TEST_CHECK(s.dwell_unsettled == 1,
-               "the FACT of not settling is still reported, out of band, for humans");
 
     // A slow-but-settled dwell of the SAME length is now distinguishable: it
     // reports a real number. Under the old encoding both read ~400 s.
@@ -237,7 +235,6 @@ static void test_settle_time_never_settling_reports_nothing_not_a_sentinel(void)
     firing_segment_score_t ss;
     TEST_CHECK(firing_score_seg_finish(&slow, &ss), "slow-but-settled segment scored");
     TEST_CHECK(ss.has[FIRING_SUBSCORE_SETTLE_S], "slow-but-settled DOES report a settle time");
-    TEST_CHECK(ss.dwell_unsettled == 0, "and is not counted as unsettled");
 }
 
 // A class merging a settled and an unsettled dwell must not let the settled
@@ -272,7 +269,6 @@ static void test_settle_merge_requires_both_dwells_to_have_settled(void)
     TEST_CHECK(set.count == 1, "both dwells are the same class");
     TEST_CHECK(!set.entry[0].has[FIRING_SUBSCORE_SETTLE_S],
                "the merged class reports no settle time once one of its dwells never settled");
-    TEST_CHECK(set.entry[0].dwell_unsettled == 1, "the unsettled count survives the merge");
 }
 
 // Objective 4b (undershoot): a dwell entered from below must be measured,

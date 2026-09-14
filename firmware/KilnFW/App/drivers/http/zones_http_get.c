@@ -14,6 +14,7 @@
 #include "esp_log.h"
 
 #include "MAX31856.h"
+#include "pid_fuzzy.h" /* pid_fuzzy_derive_bands() -- fuzzy_model_valid, see its call site below */
 #include "safety_ceiling_sync.h" /* owner request 2026-09-10 -- Pico abs_max_temp_c tracking display */
 #include "web_encoding.h"
 
@@ -91,7 +92,16 @@ esp_err_t zones_get_handler(httpd_req_t *req)
      * of the entire 8192-byte task stack. Freed on every return path
      * (success and truncated). */
     const size_t json_cap = 7360; /* heap buffer (heap_caps_malloc below, not
-                      * stack). STILL 7360 as of the 2026-09-14 zones_diag
+                      * stack). STILL 7360 as of `fuzzy_model_valid`
+                      * (2026-09-14, GAP 2, docs/audits/observability_gaps_
+                      * closed_2026-09-14.md): one new bool key/zone,
+                      * "fuzzy_model_valid":true, (25 bytes) x
+                      * MAX31856_CHANNEL_COUNT (3) = 75 bytes, spent out of
+                      * the 854-byte headroom the zones_diag split (below)
+                      * recovered, leaving 779 -- confirmed by
+                      * test_zones_get_handler_max_width_response_fits_
+                      * json_cap().
+                      * STILL 7360 as of the 2026-09-14 zones_diag
                       * split (docs/audits/zones_diag_endpoint_split_2026-09-
                       * 14.md): coupling_tau_c%u/coupling_dead_time_c%u and
                       * model_fit_temp_c/model_fit_ambient_c moved OFF this
@@ -328,6 +338,32 @@ esp_err_t zones_get_handler(httpd_req_t *req)
         float normal_a = 0.0f;
         bool normal_measured = false;
         zones_config_get_normal_current(i, &normal_a, &normal_measured);
+        /* GAP 2, docs/audits/observability_gaps_closed_2026-09-14.md: whether
+         * THIS zone's fuzzy layer can actually run, independent of whether it
+         * is CONFIGURED to (fuzzy_strength_pct > 0). 233ded79 made a zone
+         * with no identified plant model fall back to plain PID rather than
+         * run fuzzy on invented bands (docs/audits/fuzzy_no_model_no_fuzzy_
+         * 2026-09-14.md); until now an operator could only infer that by
+         * noticing model_k_dc read 0 alongside a non-zero fuzzy_strength_pct.
+         * This calls the EXACT SAME predicate profile_executor_pid_tick.c's
+         * resolve_fuzzy_bands() uses at the control tick (pid_fuzzy_derive_
+         * bands()'s own model_valid check) against this zone's persisted
+         * model_k_dc/model_tau_s -- zone_model_at()'s T_c parameter is an
+         * unused passthrough today (zones_config_accessors.c), so the
+         * persisted fields read here are bit-for-bit what the live tick
+         * consults, not an approximation of it. Raw fact, not a verdict: a
+         * client combines it with fuzzy_strength_pct itself (this file's
+         * house convention throughout -- emit raw values, let the client
+         * interpret) to show "fuzzy configured but inactive: no identified
+         * plant model" only when strength > 0 and this reads false.
+         * Belongs on /api/zones, not /api/zones_diag: this is operator-
+         * facing state that changes what the control loop is doing right
+         * now (same footing as fuzzy_strength_pct itself), not a diagnostic
+         * for engineering use, and /api/zones is where fuzzy_strength_pct
+         * already lives. Always emitted, same always-emit reasoning as every
+         * other field above -- an absent key and a "valid" client default
+         * must never mean the same thing. */
+        bool fuzzy_model_valid = pid_fuzzy_derive_bands(z->model_k_dc, z->model_tau_s, NULL, NULL);
         APPEND(
             "%s{\"index\":%u,\"name\":\"%s\",\"relay_mask\":%u,\"thermo_mask\":%u,\"cal_offset_c\":%.3f,"
             "\"pid_kp\":%.4f,\"pid_ki\":%.4f,\"pid_kd\":%.4f,\"max_ramp_c_per_hr\":%.2f,"
@@ -369,7 +405,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
              * this back and reposts it as z%u_relaytype (POST side:
              * zones_http_post_parse.c). */
             "\"relay_type\":%u,"
-            "\"fuzzy_strength_pct\":%.2f,",
+            "\"fuzzy_strength_pct\":%.2f,\"fuzzy_model_valid\":%s,",
             i == 0 ? "" : ",", i, name_escaped, z->relay_mask, z->thermo_mask, (double)z->cal_offset_c,
             (double)z->pid_kp, (double)z->pid_ki, (double)z->pid_kd, (double)z->max_ramp_c_per_hr,
             (double)z->sanity_rate_c_per_min, z->control_mode, (double)z->max_temp_c,
@@ -382,7 +418,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
             (double)z->cross_zone_max_delta_c, (double)z->model_k_dc,
             (double)z->model_tau_s, (double)z->model_dead_time_s, z->tc_type, z->ct_mask,
             z->timing_profile, normal_measured ? "true" : "false", (double)normal_a,
-            z->relay_type, (double)z->fuzzy_strength_pct);
+            z->relay_type, (double)z->fuzzy_strength_pct, fuzzy_model_valid ? "true" : "false");
         /* docs/ON_OFF_ZONE_PLAN.md step 6 (ZONES_CFG_VERSION 22->23's
          * zone_type/failsafe_state/hyst_c/min_on_s/min_off_s, unused by any
          * consumer until this pass): always emitted, same always-emit/
