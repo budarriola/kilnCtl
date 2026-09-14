@@ -174,6 +174,23 @@
 >   (listed as not-yet-run in earlier sweeps) has now run — see the
 >   2026-09-13 bullet at the top of this file and `docs/FUZZY_CONTROLLER_PLAN.md`
 >   directly rather than this paragraph, which predates that result.
+> - **The controller objective is four-part, stated by the owner
+>   (2026-09-13): rate/lag, settle speed, settle accuracy, over/undershoot —
+>   fuzzy's job is specifically the last one.** `docs/FUZZY_CONTROLLER_PLAN.md`
+>   §0.0 records this and the methodological fallout: every IAE/MAE figure in
+>   that plan (including the retracted-and-replaced centre-cell-vs-flat-retune
+>   comparison above) is an aggregate that collapses all four objectives into
+>   one number and needs re-scoring on `firing_score.c`'s per-objective
+>   subscores, not silent re-ranking. Ramp tracking (objective 1) is now
+>   **closed against the fuzzy layer** — `c002ceaf`
+>   (`docs/research/fuzzy_ramp_tracking_2026-09-13.md`) shows the two
+>   ramp-lag rule cells push `Kp`, not the `Ki` that actually governs
+>   ramp-following error, and the layer has no access to `d(setpoint)/dt` at
+>   all; the feedforward climb term remains the mechanism for objective 1,
+>   unchanged from before. A new, cheap, **NOT YET TESTED** candidate for
+>   objective 4 was also recorded: the setpoint-weight `b` in `pid.c`
+>   (hardcoded to 1.0, `PID_SETPOINT_WEIGHT_B`), one parameter, no rule-table
+>   change — see plan §0.0.2.
 >
 > **Simulation fidelity — coupling-model replacement, in progress
 > elsewhere, do not describe an outcome.** Sources:

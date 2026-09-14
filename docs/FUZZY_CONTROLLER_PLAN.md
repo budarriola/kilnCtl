@@ -49,6 +49,107 @@ anywhere in this document.
 
 ---
 
+## 0.0 The objective is four-part, stated by the owner (2026-09-13) — governs everything below
+
+The controller objective is not one thing to optimise. It is four separate
+objectives:
+
+1. reaches temperature **at the correct rate** (ramp-rate tracking / lag),
+2. **settles quickly**,
+3. **settles accurately** (steady-state error at dwell),
+4. minimal **over/undershoot**.
+
+The owner identified reducing over/undershoot (objective 4) as **the fuzzy
+layer's specific purpose** — PID alone is expected to handle settling to the
+correct temperature (objectives 2/3), and per §0.1 below, ramp tracking
+(objective 1) is the feedforward climb term's job, not fuzzy's.
+
+**Methodological consequence, retroactive:** IAE and MAE, used throughout §2
+and §4 of this document to score the centre-cell-vs-flat-retune comparison,
+are **aggregate metrics that collapse all four objectives into one number in
+which they trade invisibly.** A change that cuts overshoot by slowing the
+approach looks neutral-to-good on an aggregate error metric while regressing
+objectives 1 and 2, and the reverse is equally possible. Every IAE/MAE figure
+already in this document (the `fbdc5bd0`/`ba230bca` comparisons in the header
+and in §2(iv)/§4.3) was scored this way — **that evidence needs re-scoring
+against the four objectives separately, not silent re-ranking of the options
+it was used to compare.** This document does not redo that scoring; it flags
+where it is owed, per-option, in §2 and §4.3 below.
+
+The repo already has the right instrument for the re-score: `firing_score.c`'s
+per-objective subscores — `FIRING_SUBSCORE_LAG_S` for rate/lag (objective 1),
+a dwell-entry-peak subscore for overshoot (objective 4;
+`FIRING_SUBSCORE_ENTRY_PEAK_C`), and others for settle time/accuracy
+(objectives 2/3). Future controller work in this space should report all
+four separately and call out any trade explicitly, rather than reducing to
+one IAE/MAE number. The existing 0.5 degC materiality rule
+(`feedback_ignore_sub_half_degree_effects`) applies **per objective, to the
+quantity that objective actually measures** — a 0.5 degC change in dwell
+accuracy and a 0.5 degC change in overshoot are two separate findings, not
+one.
+
+### 0.0.1 Ramp tracking (objective 1) is closed against the fuzzy layer — do not modify the rule table for it
+
+`c002ceaf` (`docs/research/fuzzy_ramp_tracking_2026-09-13.md`, read and
+verified against source in this pass) answers the owner's question "can
+fuzzy also help ramp tracking?" **No, structurally, with its current
+inputs:**
+
+- The two ramp-lag rule cells — (error=NEG, rate=STEADY) and (error=POS,
+  rate=STEADY), `RULE_TABLE` rows 0/2, column 1 (`pid_fuzzy.c:149-162`) —
+  are both `{kp +1, ki 0, kd 0}`. They push on `Kp`. But for a PI(D) loop
+  against a plant with no free integrator (this project's FOPDT model),
+  steady-state ramp-following error is set by the velocity constant
+  `Kv = Ki * P(0)` — it depends on **Ki**, which those cells leave
+  untouched at any `strength_pct`. Raising `Kp` changes the transient, not
+  the asymptotic ramp lag. Wrong lever, not merely poorly tuned.
+- The layer's rate input is `-d(measurement)/dt` and has **no access to
+  `d(setpoint)/dt`** at all (`pid_fuzzy.c`'s own header). A well-tracked
+  ramp and a laggingly-tracked ramp differ almost entirely in steady
+  *error*, not its derivative, so the rate axis cannot discriminate them —
+  only the error axis can, and that reduces to "the ordinary large-error
+  cells fire," which is the overshoot machinery, not a ramp-tracking one.
+- The mechanism that structurally targets ramp lag is the existing
+  **feedforward climb term** (`pid.c`), and the surveyed literature
+  (abstract-only citations, see the research doc's §5) consistently assigns
+  feedforward to the ramp/trajectory role and fuzzy/PID adaptation to the
+  step/steady-state role — matching this project's existing architecture
+  rather than motivating a change to it.
+
+**Closed: do not modify `RULE_TABLE` or `pid_fuzzy.c`'s inputs for
+ramp-tracking purposes.** This does not touch options (i)-(v) below, all of
+which are about objective 4 (overshoot) and the bootstrap/adaptation
+requirements — it forecloses only a fuzzy-side ramp-tracking redesign that
+was never actually proposed in §2, so no option's ranking changes. Whether a
+variant of the feedforward climb term (e.g. the reverted dwell-entry decay)
+is worth retrying is a separate, explicitly out-of-scope question under
+active review elsewhere — no outcome to report.
+
+### 0.0.2 New, untested candidate for objective 4 (overshoot): setpoint weight `b`
+
+`pid.c`'s `p_term = kp * (b*setpoint - measurement)` has a setpoint-weight
+factor `b`, hardcoded to `1.0` via `PID_SETPOINT_WEIGHT_B`
+(`profile_executor_internal.h:251`) and never tuned. The literature
+(Visioli 1999, cited from its abstract only in `c002ceaf` — full text was not
+retrievable through IEEE Xplore, mark it as such) treats setpoint weighting
+specifically as a step-response/overshoot-vs-rise-time tool, which matches
+objective 4 directly and does not touch `Ki` (so, by the same `Kv` argument
+as §0.0.1, it should not move ramp-tracking lag materially — that is a
+prediction to verify, not an assumed fact).
+
+**Candidate, NOT YET TESTED:** sweep `b` in simulation (e.g. 0.4/0.6/0.8/1.0)
+on a single-zone ramp-into-dwell profile, scoring dwell-entry peak
+(overshoot, objective 4) and `FIRING_SUBSCORE_LAG_S` (objective 1, to confirm
+`b` does not regress ramp tracking) separately — never as a combined IAE/MAE
+number, per §0.0. One parameter, no rule-table change, no change to
+`pid_fuzzy.c` at all. This is additive to §2's option set, not a replacement
+for any of them — it competes with, and is far cheaper than, the fuzzy
+layer's own overshoot role, so any options weighing (ii)/(iv)/(v) should
+note this candidate as an unexplored cheaper alternative for the same
+objective.
+
+---
+
 ## 0. Facts this plan rests on (each verified in this pass, not inherited)
 
 | Fact | Source, verified |
@@ -425,7 +526,15 @@ a pre-existing shipped guess.
   cannot come from this bench fixture: the plant is capped ~40 degC above
   ambient with a real measured peak ramp rate (0.110 degC/s) still well under
   the rate band the off-centre cells need, so no measurement taken here can
-  rule a larger effect in or out on the eventual installed kiln.
+  rule a larger effect in or out on the eventual installed kiln. **Separately,
+  per §0.0: both the retracted 7.8% IAE figure and the 0.011 degC MAE gap
+  that replaced it are aggregate metrics over an objective (overshoot) the
+  owner has since split into four.** Neither number says anything about
+  which of the four objectives moved, or in which direction, or whether any
+  trade occurred between them. This evidence needs re-scoring on
+  `firing_score.c`'s per-objective subscores before it can support or
+  weaken any option here — it is not simply superseded by the retraction,
+  it was never measuring the right thing even before the retraction.
 - **A completed single-zone hardware A/B at `strength_pct > 0` shows a tracking
   improvement beyond the 0.5 degC floor** (`feedback_ignore_sub_half_degree_effects`)
   then fuzzy has demonstrated value for the first time; reopen (i)/(ii) properly.
@@ -535,6 +644,7 @@ work specifically* are listed.
 | (ii) | Days, plus the sim harness | Could fix finding (A) properly, but the fit is to the simulator |
 | (i) as scoped | Weeks. ~33 adapted values, 2 schema bumps, a multi-firing sim harness, a confidence estimator, suppression and revert paths | Uncertain. Does not address finding (A); 8 of 9 confidence values cannot be evidenced on this fixture |
 | (iv) | Days of deletion | Removes complexity; forecloses an untested option |
+| `b` sweep (§0.0.2, new) | Hours, single-zone sim only | Cheapest candidate for objective 4 (overshoot); NOT YET TESTED; does not compete for effort with (i)-(v) since it touches neither `pid_fuzzy.c` nor the rule table |
 
 **The honest conclusion on (i): the expected gain does not justify the
 complexity.** It is the largest body of work on the table, its headline
