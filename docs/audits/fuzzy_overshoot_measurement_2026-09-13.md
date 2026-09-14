@@ -324,3 +324,237 @@ All four held on every arm/dwell in this run (`38/38` executables built,
 task (it was another session's WIP throughout); its own IAE/MAE tracking
 scenario remains a separate, still-valid ranking tool for a different
 purpose, unaffected by anything in this report.
+
+---
+
+# Review, 2026-09-13 — HEADLINE REFUTED: the "equivalent fixed retune" is not equivalent, and objective 2 is a band artifact
+
+Adversarial review of `7ef487ff` (`firmware/KilnFW/App/test/sim_fuzzy_overshoot.c`
+and this document). Everything below marked **[executed]** was produced by
+running code on this machine during the review; everything marked **[read]**
+is from reading source. The review touched no production file — in
+particular `pid_fuzzy.c`, which is owned by another session and was already
+dirty (+52 lines) from that session's band-derivation work, was **not
+edited**; the negative test below was reproduced by compiling a *poisoned
+copy* of that same production source into a scratch build instead.
+
+## What reproduced cleanly
+
+**[executed]** The harness was rebuilt from source by the reviewer in an
+independent scratch build (own `cl` invocation, own object directory, no
+reuse of `App/test/build`) and run. **Every number in every table above
+reproduced exactly** — lag 183.46/183.53/198.79, settle 240/240/250,
+overshoot 0.000/0.000/6.475, undershoot −6.313/−6.314/0.000 for the control,
+and likewise for all three other arms. The tables in this document are a
+faithful transcription of the harness output. Exit code 0, `PASS`.
+
+**[executed]** The negative test is real, not print-only. A copy of
+`pid_fuzzy.c` with the `strength_pct == 0` short-circuit broken
+(`*out_kp = kp * 0.999f;`) was linked into the harness in place of the
+production translation unit. Result: `FAIL: strength_pct=0 did NOT reproduce
+base gains bit-for-bit` on both strength-0 arms, `=== sim_fuzzy_overshoot:
+FAIL ===`, **exit code 1**. Assertion 1 genuinely gates the build. Caveat on
+what this proves: it poisons a *copy* of the production source rather than
+the production file, so it is not quite the same act the commit message
+describes — but unlike a test-local mirror
+(`project_negative_test_on_a_mirror_is_vacuous.md`), the harness code path
+under test is untouched and it is the real `pid_fuzzy_adjust()` body being
+broken, so it does establish that the assertion fires on a real regression in
+that function.
+
+**[executed]** Cross-harness consistency with `ba230bca` holds. This
+harness's own IAE ranking (fuzzy_50 11388.2 vs retune 11771.3, retune 3.4%
+worse) is directionally the same as `ba230bca`'s 7.8% IAE gap. The two
+harnesses do **not** disagree on the control.
+
+## Finding 1 (decisive) — the "equivalent fixed retune" is fuzzy's centre-cell MAXIMUM, not its time-average
+
+**[read]** `pid_fuzzy.c`'s centre cell (`RULE_TABLE[1][1]`, error ZERO / rate
+STEADY) is `{kp −1, ki +1, kd −1}`, and `scale = (strength_pct/100) ·
+MAX_NUDGE_FRACTION = 0.50 · 0.5 = 0.25` at strength 50. So kp×0.75 /
+ki×1.25 / kd×0.75 is **exactly and only** what fuzzy_50 applies when error
+and rate are both at zero. It is the largest perturbation the layer can
+produce at that strength, not a typical one.
+
+**[executed]** Instrumenting fuzzy_50's actual per-tick multipliers over this
+document's own scenario:
+
+| | kp | ki | kd | n ticks |
+|---|---|---|---|---|
+| fuzzy_50, whole-scenario mean | ×0.7891 | ×1.2169 | ×0.7831 | 1546 |
+| fuzzy_50, **ramp-phase-only** mean | **×0.8684** | **×1.1618** | **×0.8382** | 346 |
+| this document's "equivalent" retune | ×0.7500 | ×1.2500 | ×0.7500 | — |
+
+The ramp phase is the one that matters: dwell-entry overshoot/undershoot is
+set by how the loop approaches the target, and during the ramp the error sits
+around +6.3 °C (≈0.32 of the 19.62 °C error band) with rate ≈ −0.028 °C/s
+(≈0.19 of the 0.1488 °C/s rate band), so the blend is nowhere near the centre
+cell. **The retune arm applies roughly twice fuzzy_50's kp/kd perturbation
+during the ramp.** It is mislabelled: it is not "the equivalent fixed
+retune", it is "a fixed retune about twice as strong as fuzzy_50 where it
+counts".
+
+**[executed]** The consequence. Adding a fifth arm — a plain, static,
+fuzzy-free gain rescale at fuzzy_50's own measured *ramp-phase average*
+(kp×0.8684, ki×1.1618, kd×0.8382, `strength_pct=0` so `pid_fuzzy_adjust()`
+is a pure no-op):
+
+| arm | overshoot d0/d1 | undershoot d2 | steady RMS d0 | settle@2 °C d0 |
+|---|---|---|---|---|
+| fuzzy_off | 0.000 | +0.000 | 0.140 | 240 s |
+| **fuzzy_50** | **0.148** | **−0.179** | **0.130** | **200 s** |
+| flat retune @ fuzzy_50's ramp average | 0.164 | −0.253 | 0.119 | 195 s |
+| flat retune @ fuzzy_50's whole-run average | 0.447 | −0.511 | 0.216 | 185 s |
+| this document's retune (centre cell) | 0.603 | −0.667 | 0.264 | 180 s |
+
+**A static gain rescale with no fuzzy inference anywhere in the path
+reproduces fuzzy_50 on all four objectives to well inside the 0.5 °C / 30 s
+materiality bars** (0.164 vs 0.148 °C overshoot; −0.253 vs −0.179 °C
+undershoot; 0.119 vs 0.130 °C steady RMS; 195 vs 200 s settle). The
+overshoot/undershoot penalty tracks the *magnitude* of the gain change
+monotonically across all five arms — 0.000 → 0.148 → 0.164 → 0.447 → 0.603 —
+and shows no discontinuity at the boundary between "inference" and "no
+inference".
+
+**Therefore the headline is refuted.** This document concludes that "the
+fuzzy inference captures most of the settle-speed benefit without the
+overshoot penalty a flat retune incurs." What the data actually show is that
+a flat retune of the *same effective strength* incurs the *same* (negligible)
+penalty. The +0.60 °C / −0.67 °C regression attributed to "a flat retune" is
+an artifact of the comparison arm being roughly twice as strong, exactly as
+suspected. On this evidence the fuzzy layer buys nothing on objective 4 that
+a correctly-scaled constant multiplier does not also buy.
+
+**[executed]** This is an inherited defect, not a new one: `ba230bca`'s own
+commit message describes its retune arm as "a fixed always-on application of
+the centre-cell's own multiplier triple". Both harnesses used the same
+mislabelled arm. The new harness did not diverge from the old one — it
+inherited the old one's confound and then built a headline on it.
+
+## Finding 2 — objective 2's instrument is a band-crossing timer, and the band is 4× the materiality line
+
+`SETTLE_BAND_C` is 2.0 °C on a plant whose materiality line is 0.5 °C. That
+band declares a zone "settled" at four times the error the owner calls
+material. **[executed]** Sweeping it:
+
+settle time (s), dwell 0, at bands 2.0 / 1.0 / 0.5 / 0.25 °C:
+
+| arm | 2.0 | 1.0 | 0.5 | 0.25 |
+|---|---|---|---|---|
+| fuzzy_off | 240 | 395 | 560 | 735 |
+| fuzzy_25 | 220 | 340 | 445 | 530 |
+| fuzzy_50 | 200 | 300 | 375 | **775** |
+| retune (this doc's) | 180 | 250 | **765** | **985** |
+
+**The reported ordering survives only at the chosen band.** At 0.5 °C — the
+owner's own materiality scale — the retune arm settles **205 s *slower*** than
+the control, inverting this document's "settles even faster (60–80 s)" claim
+into a large regression. At 0.25 °C fuzzy_50 also inverts, settling 40 s
+slower than the control. The reason is visible in this document's own
+objective-3 column: the aggressive arms have roughly double the steady-state
+RMS, so they cross a loose band early and then take far longer to actually
+converge. **Objectives 2 and 3 are in direct conflict here, and a 2 °C band
+is exactly wide enough to hide it.** At 100 °C/hr the approach error at dwell
+entry is −6.3 °C, so "time to reach ±2 °C" is overwhelmingly a measure of
+ramp-lag catch-up rate, not of settling.
+
+**[executed]** A second failure of the same instrument: at a 25 °C/hr ramp,
+every arm reports `settle = 0 s` — the measurement never leaves the 2 °C band
+at all, so objective 2 has *zero* discriminating power and the harness's
+assertion 4 does not catch it (it only rejects `settle_ticks < 0`, and 0
+passes). Objective 2's entire result is therefore conditional on the one
+ramp rate chosen.
+
+Verdict on this instrument: **not defensible as written.** It should be
+re-run at 0.5 °C, or relabelled "time to reach ±2 °C" and removed from the
+objective-2 claim.
+
+## Finding 3 — objective 4b's instrument is sound; objective 4a's dwell-2 numbers are mislabelled
+
+**[read/executed]** The unwindowed signed undershoot definition is a genuine
+improvement over `firing_score.c`'s clamped/windowed version and I found no
+bias in it — it is `min(actual − target)` over the dwell, clamped at 0 only
+in the "never dipped below" case, which is correctly documented. It does
+capture things that are not really undershoot (the ~−6.2 to −6.3 °C figures
+at dwells 0/1 are ramp-lag catch-up, not undershoot), but this document says
+so explicitly and does not build a claim on them. **Accepted.**
+
+The same artifact, however, is **not** flagged on objective 4a. Dwell 2's
+"overshoot = 6.47 °C" is a ramp-*down* residual — the measurement is still
+above target when the dwell begins — the exact mirror of the artifact
+disclosed for 4b. This document then quotes dwell 2's deltas (−0.21 / −0.42 /
+−0.34) as overshoot improvements, and the **0.42 °C figure the headline uses
+as "fuzzy's maximum overshoot delta" comes entirely from that artifact**.
+Fuzzy's real overshoot delta, at the two dwells where overshoot is actually
+overshoot, is +0.15 °C. This does not change the pass/fail verdict on the bar,
+but the number as labelled is wrong.
+
+## Finding 4 — the 30 s bar is self-chosen, and disclosed
+
+**[read]** `sim_fuzzy_overshoot.c`'s own comment states it plainly: "half of
+one `DT_S*6` — a round, stated, conservative bar; not derived from any prior
+finding". It is the reporting agent's own choice, derived from the
+*simulation's tick rate*, not from the plant, the owner, or any prior
+measurement — the `project_bound_relative_to_persisted_state.md` /
+"bound justified against a test constant" hazard. To its credit it is
+declared rather than smuggled in. It is moot in any case: Finding 2 shows the
+settle numbers it is applied to are band artifacts, so no bar applied to them
+means anything yet.
+
+## Finding 5 — effective n is 2 conditions, not 3 dwells, and the plant is noiseless
+
+**[executed]** Dwells 0 and 1 return effectively identical results on every
+arm and every metric (lag 183.46 vs 183.53 s; settle 240/240; overshoot
+0.148/0.148; steady RMS 0.130/0.130). The plant is linear and dwell 1 starts
+from dwell 0's settled state, so dwell 1 is the same experiment run a second
+time, not an independent replicate. **Effective coverage is two distinct
+conditions — one ramp-up, one ramp-down — at one ramp rate, on one zone.**
+
+Repetition would add nothing: `sim_plant.c` is deterministic with no noise,
+no sensor quantisation and no actuator quantisation, so repeat runs are
+bit-identical. The right question is not "how many runs" but "how much
+scenario coverage", and the answer is: very little. **[executed]** Sweeping
+ramp rate 25/50/100/200/300 °C/hr shows the result is rate-dependent —
+at 25 and 50 °C/hr fuzzy_50 and the retune converge (overshoot 0.149 vs
+0.182, and 0.230 vs 0.372, both arms under the bar, no separation to report);
+the separation this document reports appears only at 100 °C/hr and above.
+The qualitative "retune crosses the bar, fuzzy does not" does hold at
+100–300 °C/hr — but that is the same confounded arm from Finding 1.
+
+On generalisation: this is a bench FOPDT model topping out around
+ambient + 39 °C, with no radiation term, no multi-zone coupling, no relay
+PWM window, no thermocouple noise and no actuator saturation dynamics. A
+real kiln at ~1200 °C is radiation-dominated with an order-of-magnitude
+different `k_dc/tau`. **Nothing here transfers to kiln-scale magnitudes**, and
+this document's own scope-limits section says so correctly.
+
+## Finding 6 — the assertions are real but orthogonal to the headline
+
+**[read]** All four assertions are vacuity guards (bit-exact contract, entry
+window reached, steady portion reached, settled at all). None of them
+constrains the reported finding. `sim_fuzzy_overshoot: PASS` is therefore
+evidence that the harness ran, not evidence for any claim in this document —
+which is the correct design for a measurement harness, but is worth stating
+because the build tally above reads as corroboration and is not.
+
+## Verdict
+
+- **Headline: refuted.** The claim that fuzzy inference earns its place on
+  objective 4 rests on a comparison arm roughly twice as strong as fuzzy_50
+  during the ramp. A correctly-scaled flat retune matches fuzzy_50 on all
+  four objectives inside materiality.
+- **Objective 2 result: withdrawn pending re-measurement.** The 40–55 s and
+  60–80 s settle improvements invert at a 0.5 °C band and vanish at a
+  25 °C/hr ramp.
+- **Objectives 1 and 3: stand.** Small, sub-materiality, reproduced.
+- **Objective 4a/4b instruments: 4b accepted; 4a's dwell-2 numbers
+  mislabelled** (ramp-down residual, not overshoot).
+- **Reproducibility and negative test: both good.** No poisoned-binary or
+  stale-artifact problem was found; the harness is honestly built and the
+  assertions genuinely fail on a real regression.
+
+The harness is worth keeping — the per-objective decomposition is the right
+idea and the undershoot instrument is a real improvement. What it needs
+before any number from it drives planning: a comparison arm matched to
+fuzzy's measured ramp-phase average rather than its centre cell, a settle
+band at or below 0.5 °C, and at least a second ramp rate.
