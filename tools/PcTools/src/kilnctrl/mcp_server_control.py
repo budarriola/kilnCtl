@@ -272,12 +272,18 @@ def _describe_model_fields(zones_json: dict, diag_error: Optional[str] = None) -
     _read_zone_model_fit_temp_unknown_sentinel()) prints as "UNKNOWN (never
     recorded)", and model_k_dc/model_tau_s/model_dead_time_s's 0.0 "no
     model" sentinel prints as "no model identified" instead of "0.0000C".
-    autotune_baseline_k_dc is NOT currently present in the GET /api/zones
-    JSON body at all (confirmed 2026-09-13: it's written from POST bodies in
-    zones_http_post_parse.c but never emitted by zones_http_get.c) -- that's
-    a firmware gap, not something this tool can surface by rendering
-    differently, so it's reported explicitly as absent rather than silently
-    left out.
+    autotune_baseline_k_dc's presence is derived from the actual response
+    passed in, per zone, rather than asserted from a hardcoded claim about
+    firmware source that would go stale the same way the coupling-diag flag
+    string did (docs/audits/coupling_measured_diag_flag_audit_2026-09-11.md)
+    and the way THIS field's own docstring text did (it used to say "NOT
+    exposed by GET /api/zones as of 2026-09-13" -- true when written, false
+    since zones_http_get.c started emitting it in 0dbd7c6d; see
+    docs/audits/stale_mcp_server_window_recheck_2026-09-14.md). If the key is
+    absent from a zone's JSON object this prints "not present in this
+    response"; if present, its live value is rendered like the other model
+    fields (0.0 is a legal, common value here -- not a sentinel -- so it is
+    printed as a plain number, not specially flagged).
 
     `diag_error`, when set, is the reason the caller's SECOND request (GET
     /api/zones_diag, which owns model_fit_temp_c/model_fit_ambient_c since
@@ -329,9 +335,19 @@ def _describe_model_fields(zones_json: dict, diag_error: Optional[str] = None) -
             "missing" if tuning_valid is None else ("yes" if tuning_valid else "no")
         )
 
+        if "autotune_baseline_k_dc" not in z:
+            baseline_desc = "not present in this response"
+        else:
+            baseline_k_dc = z.get("autotune_baseline_k_dc")
+            baseline_desc = (
+                f"{baseline_k_dc:.4f}"
+                if isinstance(baseline_k_dc, (int, float))
+                else f"{baseline_k_dc!r} (unexpected type)"
+            )
+
         lines.append(
             f"  z{i}: {model_desc}  fit_at={fit_temp_desc} (ambient={fit_ambient_desc})  "
-            f"tuning_valid={valid_desc}"
+            f"tuning_valid={valid_desc}  autotune_baseline_k_dc={baseline_desc}"
         )
     if diag_error is not None:
         lines.append(
@@ -341,12 +357,6 @@ def _describe_model_fields(zones_json: dict, diag_error: Optional[str] = None) -
             "drawing any conclusion about this board's recorded fit operating "
             "points (docs/audits/zones_diag_endpoint_split_2026-09-14.md)."
         )
-    lines.append(
-        "  autotune_baseline_k_dc: NOT exposed by GET /api/zones as of "
-        "2026-09-13 -- accepted on POST (zones_http_post_parse.c) but never "
-        "emitted by zones_http_get.c; a real firmware gap, not a rendering "
-        "gap in this tool (docs/audits/mcp_zone_model_fields_2026-09-13.md)."
-    )
     return "\n".join(lines)
 
 

@@ -74,7 +74,7 @@ except ImportError:  # pragma: no cover - mcp 1.x
     from mcp.server.fastmcp import FastMCP as _McpServer
 
 from mcpkit import workbench
-from mcpkit.registry import collapse
+from mcpkit.registry import check_staleness, collapse
 from mcpkit.serve import serve
 
 from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
@@ -293,6 +293,68 @@ _action_ctx = actions.ActionContext(
 )
 
 
+#: Seconds a staleness verdict is reused before re-stat'ing the snapshot's
+#: files. This runs on EVERY tool call (see _tool()'s wrapper below), so it
+#: must stay cheap; 30s keeps the per-call cost effectively zero (a cache
+#: hit is a dict lookup and a time.time() call) while still surfacing a
+#: fresh edit within one interactive round-trip window -- staleness that
+#: matters here is measured in days (docs/audits/
+#: stale_mcp_server_window_recheck_2026-09-14.md: three days unrestarted),
+#: not seconds, so nothing is lost by not re-checking on every single call.
+_FRESHNESS_CACHE_INTERVAL_S = 30.0
+#: checked_at/banner: cache of the last computed banner text ("" when
+#: fresh). Module-level and unlocked -- a torn read under concurrent tool
+#: calls means at worst one extra recompute or one call sees a banner one
+#: interval late, never a crash or a wrong-server verdict, since
+#: check_staleness() itself is pure and idempotent.
+_freshness_cache: "dict[str, Any]" = {"checked_at": 0.0, "banner": ""}
+
+
+def _stale_banner() -> str:
+    """Cheap, cached per-tool-call staleness banner.
+
+    Background: this server ran unrestarted for three days on a stale
+    commit while ``kiln_help()`` and ``mcp_servers.ps1 status`` both already
+    had the fresh/stale answer available from ``/health`` -- nobody
+    consulted either, and every affected tool call (including
+    ``control_get_zones``) went out with no indication anything might be
+    stale (docs/audits/stale_mcp_server_window_recheck_2026-09-14.md,
+    recommendation: an inline per-tool-call banner). This reuses the exact
+    same ``mcpkit.registry.SourceSnapshot``/``check_staleness()`` machinery
+    that backs those two -- not a second, competing notion of staleness.
+
+    Deliberately does NOT auto-restart: a restart near an active firing is
+    exactly what this project avoids, and only a human (or a tool that
+    knows a firing is not active) should trigger one.
+
+    Silent when fresh, on purpose: a banner that prints unconditionally
+    becomes ignorable noise, which is the same failure mode being fixed
+    here just moved into the tool output instead of a status command
+    nobody runs. Loud (impossible to miss inline) only when actually stale.
+    """
+    snapshot = getattr(registry, "freshness", None) if "registry" in globals() else None
+    if snapshot is None:
+        return ""
+    now = time.time()
+    if now - _freshness_cache["checked_at"] < _FRESHNESS_CACHE_INTERVAL_S:
+        return _freshness_cache["banner"]
+    stale, changed = check_staleness(snapshot)
+    if stale:
+        plural = "" if changed == 1 else "s"
+        banner = (
+            f"\n\n[STALE MCP SERVER] {changed} file{plural} changed on disk "
+            f"since this process started serving (commit {snapshot.commit}, "
+            f"started {snapshot.started_at_human()}) -- this result may not "
+            "reflect current source. Restart when no firing is active: "
+            ".\\tools\\PcTools\\scripts\\mcp_servers.ps1 restart"
+        )
+    else:
+        banner = ""
+    _freshness_cache["checked_at"] = now
+    _freshness_cache["banner"] = banner
+    return banner
+
+
 def _tool():
     """The ``mcp.tool()`` registration plus a blanket "never raise" guard.
 
@@ -315,7 +377,7 @@ def _tool():
         @functools.wraps(fn)  # keeps the signature/docstring FastMCP builds the schema from
         def wrapper(*args, **kwargs):
             try:
-                return fn(*args, **kwargs)
+                result = fn(*args, **kwargs)
             except (
                 ThermoQueryError,
                 IoQueryError,
@@ -326,13 +388,28 @@ def _tool():
                 SystemQueryError,
                 BlitError,
             ) as exc:
-                return f"error: {exc}"
+                result = f"error: {exc}"
             except (ValueError, TypeError, OSError) as exc:
                 _session_log.error("%s: rejected: %s", fn.__name__, exc)
-                return f"error: {exc}"
+                result = f"error: {exc}"
             except Exception as exc:  # noqa: BLE001 - a tool must always answer
                 log.exception("unexpected error in tool %s", fn.__name__)
-                return f"error: unexpected {type(exc).__name__}: {exc}"
+                result = f"error: unexpected {type(exc).__name__}: {exc}"
+            # Applies to every tool through this one shared wrapper -- see
+            # _stale_banner()'s docstring for why that is deliberate rather
+            # than picked per-tool: every tool's result is produced by this
+            # server's own Python (formatting/validation/error-handling
+            # alone, even for tools that are mostly a passthrough), so any
+            # of them can be affected by code that changed since this
+            # process started. A cheap, cached, silent-when-fresh check at
+            # the one choke point every tool already passes through beats
+            # auditing which specific tools "depend on server code" (most
+            # of them do, and that classification would itself go stale).
+            if isinstance(result, str):
+                banner = _stale_banner()
+                if banner:
+                    result = result + banner
+            return result
 
         return register(wrapper)
 

@@ -41,6 +41,36 @@ def pytest_configure(config):
         "markers", "live_bench: needs the real bench board (set KILNCTRL_BENCH_HOST)")
 
 
+@pytest.fixture(autouse=True)
+def _no_stale_banner_leakage(monkeypatch):
+    """Isolate tests from mcp_server.py's inline per-tool-call staleness
+    banner (docs/audits/mcp_staleness_banner_2026-09-14.md).
+
+    That banner is a deliberate GLOBAL side effect, keyed off this
+    process's own real, mutable source tree (mcpkit.registry.SourceSnapshot/
+    check_staleness()). This suite writes real files under that tree as an
+    ordinary part of running -- config presets, session logs, generated
+    fixtures -- so without this fixture, an unrelated test asserting an
+    exact tool return string can start failing purely because SOME OTHER
+    test, earlier in the same run, happened to touch a file first (this was
+    observed directly: a full-suite run produced 4 unrelated failures from
+    exactly this coupling). Defaulting ``registry.freshness`` to ``None``
+    here makes ``_stale_banner()`` a no-op for every test unless a test
+    deliberately overrides ``mcp_server.registry`` itself --
+    ``test_mcp_server_stale_banner.py`` does exactly that inside its own
+    test bodies, which runs after this fixture's setup and so takes
+    precedence for those tests only.
+    """
+    try:
+        from kilnctrl import mcp_server
+    except Exception:
+        return
+    # Patch the registry's `freshness` ATTRIBUTE only -- other tests use
+    # `mcp_server.registry` itself (`.search()`, `.by_name`, ...) and must
+    # keep seeing the real, fully-populated object.
+    monkeypatch.setattr(mcp_server.registry, "freshness", None, raising=False)
+
+
 @pytest.fixture(scope="session")
 def bench_host_addr() -> str:
     host = bench_host()

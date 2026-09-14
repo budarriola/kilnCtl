@@ -129,15 +129,33 @@ class DescribeModelFieldsTest(unittest.TestCase):
         self.assertIn("tuning_valid=yes", lines["z0"])
         self.assertIn("tuning_valid=no", lines["z1"])
 
-    def test_autotune_baseline_k_dc_reported_as_not_exposed(self):
-        """autotune_baseline_k_dc is not currently emitted by GET /api/zones
-        at all (zones_http_get.c never writes it, only zones_http_post_parse.c
-        reads it back from a POST body) -- this is a firmware gap, and the
-        tool must say so explicitly rather than silently omitting it."""
+    def test_autotune_baseline_k_dc_absent_reported_as_not_present(self):
+        """autotune_baseline_k_dc's presence is now derived from the actual
+        response, per zone, rather than hardcoded (docs/audits/
+        stale_mcp_server_window_recheck_2026-09-14.md -- the old hardcoded
+        "NOT exposed by GET /api/zones as of 2026-09-13" string went stale
+        the moment zones_http_get.c started emitting the field in
+        0dbd7c6d). A response that genuinely omits the key must still be
+        reported plainly, without asserting anything about firmware."""
         zones_json = {"zones": [_zone(0)]}
         rendered = mc._describe_model_fields(zones_json)
-        self.assertIn("autotune_baseline_k_dc", rendered)
-        self.assertIn("NOT exposed by GET /api/zones", rendered)
+        self.assertIn("autotune_baseline_k_dc=not present in this response", rendered)
+        self.assertNotIn("NOT exposed by GET /api/zones", rendered)
+
+    def test_autotune_baseline_k_dc_present_renders_live_value(self):
+        """When the key IS present (as it is on live firmware today, reading
+        0.0 on all three zones), the tool must render the real value rather
+        than continuing to claim the field is absent."""
+        zone = _zone(0)
+        zone["autotune_baseline_k_dc"] = 0.0
+        rendered = mc._describe_model_fields({"zones": [zone]})
+        self.assertIn("autotune_baseline_k_dc=0.0000", rendered)
+        self.assertNotIn("not present in this response", rendered)
+
+        zone2 = _zone(0)
+        zone2["autotune_baseline_k_dc"] = 12.3456
+        rendered2 = mc._describe_model_fields({"zones": [zone2]})
+        self.assertIn("autotune_baseline_k_dc=12.3456", rendered2)
 
     def test_missing_fields_render_as_missing_not_crash(self):
         zones_json = {"zones": [{"index": 0}]}
