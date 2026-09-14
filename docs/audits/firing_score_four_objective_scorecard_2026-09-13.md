@@ -275,3 +275,277 @@ ceiling (unchanged wording, same caveat as before: this is not evidence the
 `FIRING_SUBSCORE_COUNT` went from 3 to 6. A1 (`check_sim_iter_tune_bars.ps1`)
 measured unchanged at 24/660 before and after. All 94 `run_all_checks.ps1`
 guards pass, including a full target build.
+
+---
+
+# Review, 2026-09-13
+
+Adversarial review of `d41da85f` by a second agent. Everything below marked
+**[measured]** was produced by running code in this session; everything marked
+**[read]** is from inspecting source. Two comparison runs of
+`check_sim_iter_tune_bars.ps1` were made from disposable git worktrees, one at
+`e78fbc5b` (this commit's parent) and one at `d41da85f`, so "before" and
+"after" are both re-measured here rather than quoted.
+
+## R1. The new axes ARE wired into the accept/reject veto, and verdicts DID move
+
+**[read]** `firing_compare.c` iterates `for (int s = 0; s < FIRING_SUBSCORE_COUNT; s++)`
+in both of its loops. Raising `FIRING_SUBSCORE_COUNT` from 3 to 6 therefore
+enrolls `SETTLE_S`, `ENTRY_UNDERSHOOT_C` and `LAG_SIGNED_S` -- automatically and
+without any other edit -- into:
+
+- **Bar 1** (`bar1_cleared` -> `any_bar1` -> `ACCEPT`): any one of the three new
+  axes can now, on its own, authorise a permanent gain change.
+- **the no-degradation veto** (`degraded` -> `REJECT_DEGRADED`).
+- **the low-n `degraded_untrusted` gate**, which downgrades an otherwise-clean
+  ACCEPT to INSUFFICIENT.
+- **`composite_normalised`**, now a mean over up to six axes instead of three,
+  so the human-facing composite is not comparable with any composite recorded
+  before this commit.
+
+So the answer to "stricter for the decision core, or only for whoever reads the
+numbers" is: **both, and it is not stated anywhere in the commit message, the
+header comments, or section 8 of this document.** `LAG_SIGNED_S`'s own header
+comment calls it a "diagnostic companion"; it is not one -- it decides.
+
+**[measured]** Same script, same n=220, same canonical configuration, run twice:
+
+| | ACCEPT | REJECT_DEGRADED | INSUFFICIENT |
+|---|---|---|---|
+| `e78fbc5b` (parent) | 24 | 21 | 615 |
+| `d41da85f` (this commit) | 24 | **26** | **610** |
+
+**Five of 660 null comparisons flipped INSUFFICIENT -> REJECT_DEGRADED.**
+Section 8's sentence *"The new subscores did not flip any of the 660 null
+comparisons from INSUFFICIENT/REJECT to ACCEPT or vice versa"* is **refuted**.
+The refuting number was printed on the same output line as the 24 that was
+quoted; only the ACCEPT column was compared against the pin.
+
+**[measured]** Part 3 (A2, 660 zone-runs over 220 mismatched plants) also moved:
+`better 6 -> better 3`, `unchanged 654 -> 657`. Both runs are deterministic
+(Parts 1 and 2 reproduced digit-for-digit), so this is a real 3-run change, not
+sampling noise. The stricter veto is suppressing improvements as well as false
+accepts.
+
+**[measured]** Attributing the verdicts (instrumented copy of `sim_iter_tune.c`
+in the disposable `d41da85f` worktree, printing which subscore index set
+`bar1_cleared`/`degraded`; the instrumented build reproduced 24/26/610 exactly,
+so the instrumentation itself is inert):
+
+- `SETTLE_S` (3) and `ENTRY_UNDERSHOOT_C` (4): **never** fired in the null
+  experiment -- the sim's dwells are all the same length and entered from above.
+- `LAG_SIGNED_S` (5): fired as the **sole** Bar-1 clearer on accepts, and as the
+  **sole** vetoing axis on rejects.
+
+That last point matters more than the unchanged total: **A1's 24 accepts are no
+longer the same 24.** Some accepts that previously came from `LAG_S`/`ENTRY_PEAK_C`
+are now vetoed by `LAG_SIGNED_S`, and new accepts arrive that clear Bar 1 on
+`LAG_SIGNED_S` alone. The pinned A1 figure is stable by cancellation, not by
+inertness, and it is no longer measuring the same quantity the pin was set
+against. This is exactly the "unchanged code is not unchanged behavior" shape
+already recorded in this repo -- here inverted: an unchanged *number* is not
+unchanged behaviour.
+
+## R2. `LAG_SIGNED_S` in an all-"lower is better" comparator is a sign error
+
+**[read]** `firing_score.h` states the comparator's universal contract: *"All
+'lower is better'."* `firing_compare.c` implements exactly that --
+`d = trial - baseline`, `d < 0` counts as `improved`, `median_normalised <= -1.0`
+clears Bar 1. Every other subscore is a non-negative magnitude, so that contract
+holds for them.
+
+`LAG_SIGNED_S` is signed by construction (negative == ahead of schedule). Under
+"lower is better", **running further ahead of the commanded ramp scores as an
+improvement without limit.** A trial that goes from perfectly on schedule (0 s)
+to 100 s ahead of schedule produces `d = -100`, clears Bar 1 at any realistic
+floor, and can ACCEPT -- even though racing the profile is a defect (it is the
+same overshoot `ENTRY_PEAK_C` exists to punish, one segment earlier). This is a
+new accept-permissive hole opened by a commit whose stated purpose was closing
+accept-permissive holes. It is also the mechanism behind the solo `LAG_SIGNED_S`
+accepts measured in R1.
+
+**[measured]** On real hardware data this is not hypothetical: every one of the
+12 real ramp classes scored in R4 reads `lag_signed_s` **negative** (-15 s to
+-91 s). This plant runs *ahead* of schedule as its normal condition, so the axis
+sits entirely in the half where "lower is better" is backwards.
+
+A signed diagnostic is a good idea; feeding it to a magnitude comparator is not.
+The fix is either to report `|lag_signed|` on the decision axis (keeping the sign
+for humans), or to exclude `LAG_SIGNED_S` from the decision loop.
+
+## R3. Feeding `LAG_SIGNED_S` before the infeasibility exclusion does score the kiln
+
+**[read]** The exclusion is `if (saturated_high && err < 0.0f) return;`, commented
+"saturated at full duty and still short of target -- the heater is the limit, not
+the gains." `LAG_SIGNED_S` is deliberately fed above it.
+
+As a *diagnostic* that is defensible and the audit's reasoning (finding C) is
+sound. As a *decision input* it inverts the exclusion's entire purpose: on a
+heater-limited ramp the median of `lag_signed_hist` is dominated by ticks whose
+error no gain can remove. This commit's own test
+`test_lag_signed_includes_saturated_short_ticks` demonstrates the magnitude --
+300 saturated ticks drag `LAG_SIGNED_S` more than 100 s above `LAG_S` on the same
+segment. Two firings that differ only in how long a zone spent heater-limited
+(which start temperature alone determines -- and the A1 null experiment randomises
+start temperature by +/-15 C for exactly this reason) will therefore differ on
+`LAG_SIGNED_S` by an amount that has nothing to do with the gains under test.
+**[measured]** In the null experiment `LAG_SIGNED_S` was the sole vetoing axis on
+some rejects -- i.e. it is already rejecting trials on its own, in an experiment
+where by construction there is nothing to reject.
+
+So: yes, it now scores the kiln rather than the gains, and unlike the original
+`LAG_S` defect this one has a vote.
+
+## R4. The 0.5 degC settle band is not achievable on this plant
+
+Checked against real bench captures, not reasoned about.
+
+**[measured]** Production `firing_score.c`/`firing_compare.c` (via
+`firmware/KilnFW/App/test/firing_score_from_capture.c`, built from the
+`d41da85f` worktree) run over `logs/coupling/noise_floor_p7_run1.jsonl` vs
+`logs/coupling/noise_floor_p7d_run3.jsonl` -- the same matched-condition pair the
+Bar-2 noise-floor work uses. All twelve dwell classes:
+
+| dwell class | baseline `settle_s` | trial `settle_s` | dwell length |
+|---|---|---|---|
+| z0 t1 | 480.5 | 480.5 | ~480 s |
+| z0 t2 | 485.7 | 485.7 | ~486 s |
+| z1 t1 | 480.5 | 480.5 | ~480 s |
+| z1 t2 | 407.3 | 485.7 | ~486 s |
+| z2 t1 | 480.5 | 480.5 | ~480 s |
+| z2 t2 | 355.1 | 475.3 | ~486 s |
+
+Ten of twelve read the **full segment duration** -- the never-settles sentinel.
+(The same run also reports `steady_rms_c n=0`: on real dwells the entry window
+covers the whole segment, so objective 3's instrument contributes nothing and
+`SETTLE_S` is not backed up by it.)
+
+**[measured]** An independent sweep of every `dwelling` run in all six
+`logs/coupling/noise_floor_p7*_run*.jsonl` captures (36 dwell-zone instances)
+found time-inside-a-0.5 degC-band ranging from **0% to 47%** of dwell ticks, and
+24 of 36 instances with the last out-of-band tick at the very last sample.
+A second sweep over `tools/PcTools/tests/fixtures/**` (the tuned `holdfix_clean`
+run included, 472 dwell ticks, the best steady-state trace in the repo) reached
+only 76-83% of ticks inside +/-0.5 degC, with p90 |err| of 1.0-1.35 degC.
+
+**Verdict: a 0.5 degC band is touched constantly but not *held*.** In the
+"enters and remains" sense `SETTLE_S` measures, this plant does not settle to
+0.5 degC, so the axis is saturated at its worst reading for essentially every
+real dwell. The justification ("the project's materiality line") does not
+transfer: the 0.5 degC rule says differences smaller than 0.5 degC are not worth
+chasing -- it says nothing about what band this plant can *hold*, which is the
+question a settle band asks. `band_c` was rejected as too
+configuration-dependent; that objection is fair, but the conclusion should have
+been a band measured from the plant (1.5-2 degC would be informative on the data
+above), not the 0.5 degC constant.
+
+## R5. The never-settles encoding is an in-band sentinel, and it is not inert
+
+**[read]** `firing_score_seg_finish()` reports `settle_last_outside_s`, which for
+a never-settling dwell equals the elapsed time of the last scored tick -- i.e.
+the segment duration. A genuinely-slow-but-settled dwell that last left the band
+one tick before the end reports `duration - 1`. **These are not distinguishable
+by any consumer**, and no consumer tries: `firing_compare.c` takes a plain
+difference. `scored_ticks` survives on `firing_segment_score_t` and could in
+principle be used to detect saturation, but `firing_score_set_add()` merges
+same-key segments by *averaging* `value[]` while *summing* `scored_ticks`, so
+even that correspondence is destroyed as soon as a class repeats. The commit's
+own test asserts the sentinel shape directly (`> 390.0f` on a 400 s segment),
+which is the hazard, not a guard against it.
+
+This is the documented in-band-sentinel hazard, and here it is load-bearing:
+
+**[measured]** Across the six real matched-condition captures, the *saturated*
+`settle_s` readings for the same dwell class still spread by **131 s** (z2, second
+dwell: 350 s .. 481 s) and **79 s** (z1, second dwell: 402 s .. 481 s). The Bar-1
+floor for this axis is **60 s**. So two firings of the *same profile with the same
+gains* can differ by more than two full owner floors on `SETTLE_S` -- enough to
+clear Bar 1 and ACCEPT, or to fire the veto and REJECT -- on a quantity that is
+not a measurement at all, only "where in the dwell the last noise excursion
+happened to land." The real capture pair above came within 0.0016 s of each other
+by luck; the wider sweep shows the luck is not general.
+
+Why A1 does not see this: the sim's dwell lengths are identical across arms and
+its plant settles far better than the real one, so `SETTLE_S` never fired there
+(R1). **The axis is inert in the only test that guards it and live on the
+hardware it will actually judge.** That combination is the defect to fix before
+this scorecard gates another decision.
+
+The class key (`zone/kind/rate_bucket/temp_bucket`) carries no duration term, so
+this also means two same-key dwells of different lengths -- legal, and merged by
+averaging -- contribute a `SETTLE_S` difference that is purely a difference in
+dwell length.
+
+## R6. Independent A1 re-measurement
+
+**[measured]** `check_sim_iter_tune_bars.ps1` at working-tree HEAD (`5d3bc854`;
+`firing_score.c`, `firing_compare.c` and `test_iter_tune.c` are byte-identical to
+`d41da85f` -- `git diff --stat` empty): **ACCEPT 24 / 660 (3.64%)**, REJECT 26,
+INSUFFICIENT 610, NO_PAIRS 0. A2/A5/A6 PASS, 0 cage violations. The 24/660 figure
+reproduces. See R1 for why it does not mean what section 8 says it means.
+
+## R7. Negative test independently reproduced
+
+**[measured]** In a disposable worktree at `d41da85f`, entry-trough tracking was
+disabled in production `firing_score.c` (the `entry_trough_c` update in
+`firing_score_seg_tick()` made unreachable). `build_host_tests.ps1`:
+
+- baseline (unmodified): **0** test failures.
+- trough disabled: **3** failures, exactly the three claimed --
+  `test_iter_tune.c:239` (undershoot measured), `:290` (degraded on its own
+  axis), `:292` (comparator rejects).
+- restored **by hand** (line rewritten, no `git checkout`/`restore`/`stash`),
+  `App/test/build/` **deleted** to force a full rebuild: **0** failures.
+
+`test_undershoot_makes_a_worse_trial_score_worse` is **not** self-asserting: it
+builds both score sets through the real `firing_score_seg_tick()` /
+`firing_score_set_finish_segment()` and calls the real `firing_compare()`; it
+went red when production was broken, which a test asserting on its own setup
+could not do. The `REJECT_DEGRADED` gap-closure claim is genuine.
+
+Pre-existing and unrelated: `sim_fuzzy_overshoot` fails to build at `d41da85f`
+(present identically in the baseline run, another session's in-flight file, not
+touched here).
+
+## R8. `ENTRY_PEAK_C` and `LAG_S` verified untouched
+
+**[read]** `git show d41da85f`:
+
+- `ENTRY_PEAK_C`: the value line
+  `(seg->entry_peak_c > 0.0f) ? seg->entry_peak_c : 0.0f` is unchanged; only
+  comments were added around it. **Confirmed untouched.**
+- `LAG_S`: neither its histogram feed, its exclusion, nor its median extraction
+  appears in any hunk. **Confirmed byte-identical.**
+- One real code move: `seg->entry_seen = true;` was lifted out of the peak-update
+  `if` and placed after both the peak and trough updates. **Behaviourally
+  identical** -- the first scored dwell tick always entered the old `if` via
+  `!entry_seen`, and the new trough `if` is evaluated before the flag is set, so
+  it still sees `!entry_seen` on that first tick. `entry_trough_c` has no
+  initialiser in `firing_score_seg_begin()` and relies on the caller's
+  zero-initialisation exactly as `entry_peak_c` already did.
+- `firing_compare_bar1_floor()` gained `LAG_SIGNED_S` and `SETTLE_S` branches;
+  the `LAG_S` branch itself is unchanged.
+
+## R9. What should change
+
+Ordered by how much a wrong verdict costs:
+
+1. **Decide, explicitly, which of the three new axes may vote.** If the intent
+   was instrumentation (the header calls `LAG_SIGNED_S` a companion/diagnostic),
+   the decision loops need an explicit "decision axes" set rather than
+   `FIRING_SUBSCORE_COUNT`, which silently enrolls every future axis too. If the
+   intent was a stricter rule, say so and re-pin A1 against the new composition.
+2. **Do not let a signed quantity vote in a "lower is better" comparator** (R2).
+3. **Re-size the settle band from measured plant behaviour, not from the 0.5 degC
+   materiality constant** (R4), and **make never-settles distinguishable** -- a
+   separate `settled` flag, or `has[SETTLE_S] = false` when the dwell never
+   settles, so the comparator reports "nothing to say" (already a first-class
+   outcome here, n == 0) instead of a fabricated number (R5).
+4. **Correct section 8** of this document: five null comparisons flipped, and A2's
+   improvement count fell from 6 to 3.
+
+Nothing in R1-R8 argues the *intent* was wrong. Objectives 2 and 4b genuinely
+had no instrument, and `ENTRY_UNDERSHOOT_C` (R7) is a clean, correctly-signed
+fix for 4b that does what it claims. The problem is that three axes were added
+to a struct whose size is the decision rule, without the commit noticing that
+this is what it was doing.
