@@ -322,3 +322,301 @@ separate stale-build-recipe bugs found and fixed
 (`check_00_kilnfw_target_build.ps1`'s worktree mirror; `test_safety_link_
 compile.c`'s own missing link sources). Nothing in this feature is left
 undone against this task's acceptance criteria.
+
+---
+
+## Review, 2026-09-14 — adversarial. Feature sound; the "watchdog cadence" claim is mislabelled (the acceptance criterion IS met, but by a different and now much stronger measurement)
+
+Adversarial review of `17de0d11` and `ec1e8666` (both confirmed commits via
+`git cat-file -t`, as are `5073eab9` and `88bb4333` cited below). Separate
+session, no files edited beyond this section. What was verified **by
+execution** is marked (E); **by reading** is marked (R).
+
+### 1. The cadence claim — REFUTED AS WORDED, but the underlying criterion is met (and now better evidenced)
+
+**The word "cadence" is wrong here, and the 40 s / 60 s figures are not
+cadences at all.** (R) The historical quantity is named exactly in
+`firmware/SaftyFW/src/tasks/watchdog_task.c:285-293`: the 2026-08-23
+instrumentation "drop[ped] measured uptime between watchdog resets from ~9 s
+to ~1.1 s". That is a **mean time between watchdog resets on a board that was
+already reset-looping**. A healthy board has no such quantity — it is
+undefined/infinite.
+
+What this pass actually measured, per its own "Hardware verification (this
+pass -- completed)" text, is two **observation windows** in which no reset
+occurred: ~40 s pre-flash (instrument: `safety_get_fw_version()`'s `boot_id`)
+and ~60 s post-flash (instrument: `safety_get_diag()`'s `uptime`, 152011 ms ->
+212011 ms). So:
+
+- **40 and 60 are not the same quantity measured before and after.** They are
+  window lengths, and they used two different instruments. The apparent
+  "50% change" is an artifact of the observer polling longer the second time,
+  nothing more. Reading them as a cadence lengthening 40 s -> 60 s is a
+  misreading the document's own headline wording invites.
+- **Neither figure is comparable to the design doc's ~9 s** for the same
+  reason: ~9 s was a reset interval on a broken board, not a nominal.
+- **The acceptance criterion — "does not reintroduce the 2026-08-23
+  regression" — is nevertheless genuinely met.** A 1.1 s reset interval would
+  be unmissable inside either window. The evidence supports the conclusion;
+  only the label on it is wrong.
+
+**Stronger evidence, obtained in this review (E):** the bench Pico is
+currently running `88bb4333`, whose `stack_margin_poller.c`, `log_task.c` and
+`kilnlink_stack_margin.c` are **byte-identical to `17de0d11`**
+(`git diff --stat 17de0d11 88bb4333 --` over those three paths returns empty).
+Two `safety_get_diag()` reads ~11 minutes apart showed `uptime` advancing
+monotonically 1 496 006 ms -> 2 160 006 ms with no `boot_id` change — i.e.
+**~36 minutes of continuous uptime with the poller live and zero watchdog
+resets**, roughly 36x the window this document claims. The poller is confirmed
+not to reintroduce the regression.
+
+**Recommended wording fix (not applied here — this section is the correction):**
+say "no watchdog reset observed in a ~40 s pre-flash and ~60 s post-flash
+window", never "watchdog cadence ~40 s / ~60 s".
+
+### 2. `log_task` headroom for the poller — adequate, but the doc omits the expensive half of the call
+
+(R) `log_task` is 512 words / 2048 B (`LOG_TASK_STACK_WORDS`, `log_task.c`),
+live floor 422 words free = 90 words (360 B) used. `stack_margin_poller_tick()`
+is called **sequentially** in `log_task_fn()`'s loop, not nested inside the
+log-send path, so it never stacks on top of that path's own ~1130-1180 B
+worst case (`log_task.c`'s own arithmetic). Even at that estimated peak,
+~870 B remains for the poller's own frame, which is a handful of scalars.
+**Headroom is sufficient.**
+
+Two caveats the document does not state:
+
+- **The 90-words-used floor is not evidence of comfort.** It means the
+  log-send branch (`xQueueReceive` returning `pdTRUE`) has essentially never
+  run since boot on this board — `LOG_LEVEL_WARN` default, quiet system. The
+  floor understates `log_task`'s real peak by roughly an order of magnitude.
+  This is the document's own floor-not-worst-case caveat applying to its own
+  tightest-looking number, and it should be said where that number is read.
+- **`stack_margin_poller_tick()` is not "a single bounded FreeRTOS API call"**
+  as `log_task.c`'s new comment asserts. It is **two**, and the one the
+  comment omits is the costly one: `xTaskGetHandle(slot->task_name)` calls
+  `vTaskSuspendAll()` and linearly walks all `configMAX_PRIORITIES` ready
+  lists plus the delayed, suspended and terminated lists doing name compares
+  before `xTaskResumeAll()`
+  (`C:\pico-tools\FreeRTOS-Kernel\tasks.c:4370-4400`, read directly (R)).
+  That is a **scheduler suspension every ~500 ms, forever**, on the safety
+  processor — precisely the category of cost this whole design exists to
+  avoid. `uxTaskGetStackHighWaterMark()` itself takes no lock; it is the name
+  lookup that does.
+  It is bounded and short (9 tasks, ~36 min of live evidence above shows it
+  is not hurting anything today), so this is a **quality finding, not a
+  defect** — but it is trivially avoidable: resolve each slot's
+  `TaskHandle_t` once, cache it, and skip `xTaskGetHandle()` on every
+  subsequent tick. Recommended.
+
+No interference with `link_task` mid-frame (R): the poller touches only its
+own file-static `s_slots[]`; `link_task` reads it solely through
+`stack_margin_poller_snapshot()`; there is no shared UART, buffer or lock
+between them, and the reply payload (47 B) does not change
+`link_task_send_broadcast_to()`'s stack shape — its `raw[263]`/`stuffed[528]`
+buffers are fixed-size regardless of payload.
+
+### 3. Units — no error found
+
+(R) Traced every boundary: `uxTaskGetStackHighWaterMark()` (words, vanilla
+FreeRTOS port) -> `s_slots[].high_water_words` -> `kilnlink_stack_margin_encode`
+(u16 LE, words) -> wire -> `kilnlink_stack_margin_decode` -> ESP
+`kilnlink_stack_margin_t` -> `safety_stack_margin_build_json()` ->
+`"units":"words"`, field names `high_water_words`/`stack_total_words`.
+**There is no conversion anywhere, and no display path that divides or
+multiplies by 4** — the words value travels end to end and is labelled at the
+only place it surfaces. That is the correct design given the deliberate
+ESP/Pico unit split, and it means the classic silent units defect cannot
+occur on this path. The document's own table's byte conversions check out
+arithmetically (link_task 1218 words = 4872 B; 4872 - 4736 = 136 B).
+
+### 4. Protocol bump — moved together; a v12 peer does NOT "fail loudly", by deliberate design
+
+(R/E) `KILNLINK_PROTOCOL_VERSION` is 13 at `kilnlink_version.h:279`, a single
+source of truth consumed by both firmwares and `CommonFW`; a repo-wide grep
+found **nothing still asserting 12** (`test_dashboard_protocol_version.c`'s
+comment was updated 12 -> 13 in `17de0d11`). The PC<->ESP
+`UART_PROTOCOL_VERSION` is correctly untouched at 11 — confirmed live (E):
+`get_board_state()` reports `fw_version.protocol_version: 11` and
+`safety_fw_version.protocol_version: 13` simultaneously, the two-numbers
+invariant holding on real hardware.
+
+**Correction to the review brief's premise:** a v12 peer meeting a v13 peer
+does **not** fail loudly, and is not supposed to.
+`KILNLINK_MIN_COMPATIBLE` is **7** (`kilnlink_version.h:332`), deliberately
+not raised, so `link_frame_versions_compatible()` passes the pair and the link
+comes up normally. The old peer simply has no dispatch case for `0x2B`, never
+replies, and `safety_link_get_stack_margin()` returns `ESP_ERR_TIMEOUT` with
+an explicit log line naming that exact cause — **silence, never a fabricated
+reading, never a misparse**. The "+121 crc/framing errors in 3 s" loud-failure
+behaviour belongs to a `MIN_COMPATIBLE`-raising (breaking) bump; this one is
+additive and correctly is not that. Both directions are additive: the ESP only
+ever *sends* `0x2B`, the Pico only ever *sends* `0x2C`, so no byte an old peer
+cannot handle is ever pushed at it unsolicited.
+
+**Fingerprint manifest — refreshed genuinely, but with one real gap (E).**
+`wire_protocol_fingerprints.json` gained four new entries and moved
+its fingerprint/version pair (a SHA-256 prefix of the wire-relevant defines,
+NOT a commit hash) from the old value at version 12 to a new one at version
+13 — a real recomputation, not a hand-edited number, and `check_wire_protocol_fingerprint.ps1` passes (E).
+**However:** the extraction regex for the kilnlink link is
+`^KILNLINK_.*(_LEN|_OFF)\w*$`. Running `extract_defines()` directly against
+`kilnlink_stack_margin.h` (E) returns only `KILNLINK_STACK_MARGIN_ENTRY_LEN`
+and `KILNLINK_STACK_MARGIN_LEN` — **`KILNLINK_STACK_MARGIN_NUM_TASKS` is not
+captured**, yet `KILNLINK_STACK_MARGIN_LEN`'s recorded *text* is
+`(1u + 1u + KILNLINK_STACK_MARGIN_NUM_TASKS * KILNLINK_STACK_MARGIN_ENTRY_LEN)`.
+Changing `NUM_TASKS` 9 -> 10 changes the wire frame length 47 -> 52 while
+leaving every fingerprinted string byte-identical, so the check **would pass a
+breaking layout change** — exactly the failure class its own docstring
+("Instance 1: the reply grew two bytes... with no version bump") exists to
+catch. This is the first kilnlink `_LEN` macro defined in terms of a symbol
+outside the captured set (`PARAM_MAX_LEN` and `STATUS_LEN` both reference
+macros that ARE captured), so the gap is newly introduced by this pass even
+though the regex is pre-existing. **Recommended fix:** widen the kilnlink
+source pattern to also capture `_NUM_`/`_COUNT` macros, and negative-test it
+by bumping `NUM_TASKS` and confirming a FAIL.
+
+### 5. Frame decode path — no input escapes validation
+
+(R) `kilnlink_stack_margin_decode()` rejects `len != 47` before touching the
+buffer, then rejects a wrong cmd byte; every subsequent read is at a fixed
+offset in `[0,46]` of a buffer proven to be exactly 47 bytes. There is no
+length-derived index, no caller-supplied count, no variable-length field —
+truncated, oversized and malformed inputs are all rejected by the same single
+equality test. `kilnlink_get_stack_margin_decode()` is the same shape at
+`len != 1`. **I could not construct a length or index that escapes
+validation.**
+
+Defence in depth on both ends is real, not nominal: the Pico gates
+`frame.length == 1` in `link_task_handle_raw_frame()` *before* calling the
+handler, which decodes again; the ESP gates `msg.length == KILNLINK_STACK_MARGIN_LEN`
+in `safety_drain_inbox_ex()` before stashing, and decodes again in
+`safety_link_get_stack_margin()`.
+
+Fuzz registration is genuine (R): both decoders appear in
+`test_fuzz_payloads.c`'s `k_cases[]` with canary-armed adapters and
+`MAX_LEN = LEN + 32`, so over-long inputs are actually generated.
+
+One nit, **not a new defect**: neither decoder null-checks `payload`, so
+`decode(NULL, 47, out)` would fault. This is the house convention across
+every kilnlink decoder (`kilnlink_ct_cal.c`, `kilnlink_reboot_result.c`
+verified (R) — `ct_cal` does not even guard `out`), the length contract is
+caller-side, and nothing reachable passes NULL. Flagged for completeness only.
+
+### 6. Partial rounds — cannot be misread as complete. Staleness — cannot be detected at all
+
+(R) **The partial-round guarantee holds, and the ordering is correct by
+construction.** `stack_margin_poller_snapshot()` reads
+`s_rounds_completed` *first*, then the entries. `s_rounds_completed` is only
+incremented after all nine slots have been visited, and a slot's value only
+ever transitions sentinel -> measured. So `rounds_completed >= 1` implies every
+slot was written before that counter moved; the only possible torn read is the
+*conservative* direction (`rounds_completed` read as 0 while entries are in
+fact all measured), which under-claims. **A partial round cannot be reported as
+complete.** Single-word aligned accesses on Cortex-M0+ make the individual
+field reads atomic, as the module comment claims.
+
+**Two real weaknesses the document does not state:**
+
+- **`all_measured` can lie in one reachable case.** The poller advances its
+  index and eventually increments `s_rounds_completed` even when
+  `xTaskGetHandle()` returns NULL (task never created, or — far more likely —
+  the hand-maintained `task_name` string drifted from the `xTaskCreate()`
+  name). That yields `rounds_completed > 0` with a slot still at
+  `UNMEASURED`, and `safety_stack_margin_http.c` derives
+  `"all_measured": rounds_completed > 0` **unconditionally**, so the JSON
+  would read `"all_measured":true` alongside that entry's own
+  `"measured":false`. Self-contradictory output. `kilnlink_stack_margin.h`'s
+  contract ("0 means at least one entry is still that sentinel") implies the
+  converse, which does not hold. **Recommended fix:** derive `all_measured`
+  by scanning the nine entries for the sentinel, not from `rounds_completed`.
+  This is the same hand-maintained-duplicate-table hazard the document already
+  names as a known limitation, surfacing a second time in a place it did not
+  anticipate.
+- **There is no freshness signal whatsoever.** `rounds_completed` saturates at
+  255 — confirmed live (E): the board reports `"rounds_completed":255`, so
+  after ~2 minutes of uptime the field is a constant and carries no
+  information beyond ">= 1". If `log_task` ever hung, the cache would freeze and
+  the endpoint would keep serving the last values with `all_measured:true` and
+  no indication they are minutes or hours stale. **A consumer cannot
+  distinguish a fresh set from a stale one.** For a diagnostic endpoint whose
+  entire purpose is to catch a task that is about to die, that is the wrong
+  failure mode. **Recommended:** carry a per-round timestamp or a free-running
+  tick alongside the snapshot (a u32 `last_tick_ms` would fit; the frame is
+  fixed-length and would need a version bump, so this is a follow-up, not a
+  correction).
+
+### 7. Incidental fixes — independently verified
+
+(R) `check_00_kilnfw_target_build.ps1` now calls `Mirror-Tree` on
+`firmware\CommonFW`, and `Mirror-Tree` uses `robocopy /MIR` — a true purging
+mirror, so a *removed* CommonFW file is removed from the worktree too, not
+just added ones copied. `firmware\CommonFW` is also added to
+`Get-NewestSourceTime`'s freshness scan. The stale-worktree failure mode is
+genuinely closed: CommonFW is now re-mirrored on **every** run rather than
+reached through the worktree's own pinned git checkout, so it cannot go stale
+at all — the original bug (worktree git ref frozen at first-creation commit)
+is structurally eliminated rather than papered over. (E) `check_00` is among
+the 94 passing checks below.
+
+(R) `test_safety_link_compile.c`'s link line gained the two missing
+`kilnlink_*stack_margin.c` sources in `build_host_tests.ps1`'s `$slExtra`, and
+its `s_compat_frames[]` gained a `min_version 13` row for
+`KILNLINK_STACK_MARGIN_CMD` — which is what actually proves
+`safety_drain_inbox_ex()` has a dispatch case for `0x2C`.
+
+Note for future readers: `$totalExpected` is now **40**, not the 39 this
+document records — another session's `sim_scenarios.c` landed as the 40th
+executable after `ec1e8666`.
+
+### 8. Live board — serving, plausible, correctly labelled (E)
+
+`curl http://192.168.1.156/api/saftyfw_stack_margin` returns **1102 bytes**
+(this document says 1101; a one-byte measurement difference, immaterial, and
+well inside the 1536 B budget). All nine tasks present, all `measured:true`,
+`units:"words"`, `floor_not_worst_case:true` and the prose `note` all present
+as claimed. Values are plausible and consistent with this document's table —
+`relay_owner` 214/256, `log_task` 422/512, `watchdog_task` 194/256,
+`thermo_task` 710/1024, `current_task` 1195/1536, `update_task` 1076/1536 are
+**identical**; `discrete_task` reads 728 (doc: 732) and `link_task` reads
+**1526** (doc: 1342) — both differences are in the safe direction (more free)
+and are expected: this is a different boot of a different build
+(`88bb4333`, boot_id 115), and a high-water floor is per-boot.
+
+Caveat worth recording: **`link_task`'s headline number in this document —
+1342 words free, 1218 used, "136 B above its static lower bound" — is a
+single-boot observation and does not reproduce on the current boot** (1526
+free / 1034 used, i.e. *below* the 1184-word static bound). The
+document's own framing of it as "worth carrying into that investigation" is
+still right, but it should not be quoted as a stable figure.
+
+Board left untouched and healthy: armed, `trip_reason 0`, `trip_mask 0x0000`,
+relays 0, `profiles_exec_status.state == 0`, no firing, no unacknowledged
+crash. Read-only access throughout; nothing was flashed by this review.
+
+### Verdict
+
+The feature is **sound and correctly built**. No units error, no frame input
+that escapes validation, no way to misread a partial round as complete, and
+the protocol bump is coherent across both firmwares with the UART version
+correctly left alone. Three things should be corrected in this document or in
+follow-up work, in order of importance:
+
+1. **The "watchdog cadence 40 s -> 60 s" framing is wrong** and should be
+   restated as two no-reset observation windows. The criterion is met; the
+   label is not. (Now superseded by ~36 min of continuous poller-live uptime
+   measured in this review.)
+2. **`all_measured` is derived from `rounds_completed` and can contradict its
+   own per-entry `measured` field**; and the endpoint carries no freshness
+   signal at all once `rounds_completed` saturates at 255.
+3. **The wire fingerprint check does not cover `KILNLINK_STACK_MARGIN_NUM_TASKS`**,
+   so a 9 -> 10 change would alter the frame length while the manifest still
+   passes.
+
+Quality follow-up: cache the nine `TaskHandle_t`s instead of calling
+`xTaskGetHandle()` — a scheduler suspension — every 500 ms forever.
+
+**Checks: `tools/run_all_checks.ps1` -> 94 passed, 0 skipped, 0 failed (E).**
+The three failures this document records (`check_fuzzy_gain_mirror_drift.ps1`,
+`check_doc_citations.ps1`, `check_test_c_files_wired.ps1`) have since been
+resolved by their owning sessions; all three pass now.
