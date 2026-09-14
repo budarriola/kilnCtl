@@ -22,21 +22,68 @@ extern "C" {
 
 #define SIM_PLANT_DELAY_MAX_STEPS 64
 
+/* SCENARIO_SIMULATION_PLAN.md WI-1: opt-in three-node model (element / bulk
+ * load / sensor tip), selected per-plant via sim_plant_cfg_t::node_model.
+ * SIM_NODE_LEGACY (0, the default) takes the ORIGINAL one-node code path in
+ * sim_plant_step() completely unchanged -- not a three-node model run with
+ * degenerate parameters, deliberately, because a "mathematically
+ * equivalent" reparameterisation would perturb floating-point results in
+ * the last bits and break sim_iter_tune's pinned 24/21/615 acceptance
+ * count. Every field below this comment is read ONLY by
+ * sim_plant_three_node_step() and is inert (need not even be initialized)
+ * under SIM_NODE_LEGACY. TEST FIXTURE constants only -- never shipped, never
+ * written into zones_config, a preset, or a firmware default. */
+typedef enum {
+    SIM_NODE_LEGACY = 0,
+    SIM_NODE_THREE = 1,
+} sim_node_model_t;
+
 typedef struct {
     float ambient_c;
     float thermal_mass_j_per_c;  /* how much energy raises the element 1C */
-    float heater_power_w;        /* power delivered at duty == 1.0 */
+    float heater_power_w;        /* power delivered at duty == 1.0 -- also used as P_max under SIM_NODE_THREE */
     float loss_coeff_w_per_c;    /* heat loss rate = loss_coeff * (T - ambient) */
     float sensor_delay_s;        /* transport delay between element and thermocouple reading */
     float sensor_lag_tau_s;      /* first-order lag on the thermocouple reading itself (thermal mass of the TC) */
+
+    /* -------- SIM_NODE_THREE only (SCENARIO_SIMULATION_PLAN.md sec 2.1/2.2) -------- */
+    sim_node_model_t node_model;  /* SIM_NODE_LEGACY (0) default */
+    float c_e_j_per_c;   /* element/near-element gas capacity C_e */
+    float c_l_j_per_c;   /* bulk load (ware + refractory) capacity C_l, before load_mass_mult */
+    float c_s_j_per_c;   /* sensor tip capacity C_s */
+    float g_el_w_per_c;  /* element<->load conductance G_el */
+    float g_ea_w_per_c;  /* element->ambient loss conductance G_ea */
+    float g_la_w_per_c;  /* load->ambient loss conductance G_la */
+    float sensor_tau_s;  /* sensor tip's OWN time constant (total conductance
+                           * G_s = c_s_j_per_c / sensor_tau_s); distinct from
+                           * sensor_lag_tau_s above, which is an ADDITIONAL
+                           * lag applied downstream of this node, same as legacy */
+    float sensor_bias_p; /* fraction of the tip's total conductance G_s that
+                           * goes to the element rather than the load, [0,1].
+                           * G_se = G_s*p, G_sl = G_s*(1-p). "5x closer to the
+                           * elements" is INTERPRETED as a 5:1 conductance
+                           * ratio, p = 5/6 ~= 0.8333 -- an interpretation,
+                           * not a measurement (sec 2.1). p=0 is the
+                           * centre-mounted reference case (sensor sees only
+                           * the bulk). */
+    float load_mass_mult; /* multiplies c_l_j_per_c only (sec 2.2); a value
+                            * of <= 0 is treated as 1.0 (unset), so a caller
+                            * building a SIM_NODE_THREE cfg that does not
+                            * care about this scenario need not set it. */
 } sim_plant_cfg_t;
 
 typedef struct {
-    float element_c;                 /* "true" temperature of the heated mass */
+    float element_c;                 /* "true" temperature of the heated mass (node E) */
     float sensor_c;                  /* lagged, delayed reading the thermocouple actually reports */
     float delay_ring[SIM_PLANT_DELAY_MAX_STEPS];
     int   delay_len;                 /* number of valid entries in delay_ring, growing to its capacity */
     int   delay_head;                /* next write position (ring buffer) */
+
+    /* SIM_NODE_THREE only. Always initialized to ambient_c by
+     * sim_plant_reset() regardless of node_model (harmless under
+     * SIM_NODE_LEGACY, which never reads them). */
+    float load_c;          /* bulk load node L -- ground truth no real installation can see */
+    float sensor_node_c;   /* sensor tip node S, BEFORE the transport delay/lag pipeline below is applied */
 } sim_plant_state_t;
 
 /* Starts both element_c and sensor_c at ambient_c, clears the delay ring. */
@@ -48,6 +95,19 @@ void sim_plant_reset(sim_plant_state_t *state, const sim_plant_cfg_t *cfg);
  * capacity -- fine for the tick rates this is meant to exercise (1-10s),
  * not a general-purpose variable-timestep integrator. */
 void sim_plant_step(sim_plant_state_t *state, const sim_plant_cfg_t *cfg, float duty, float dt_s);
+
+/* WI-1: the opt-in three-node step (SCENARIO_SIMULATION_PLAN.md sec 2.1).
+ * Only valid when cfg->node_model == SIM_NODE_THREE -- the caller is
+ * responsible for choosing which step function to call per plant; this file
+ * does not dispatch on node_model itself, so SIM_NODE_LEGACY plants must go
+ * through sim_plant_step() unchanged, preserving its bit-identical output.
+ * Advances E, L and S from one common snapshot (locals hold the deltas
+ * before any of the three state fields are mutated), so the order of the
+ * three balance equations cannot matter. Reuses the existing transport-delay
+ * ring and sensor_lag_tau_s first-order lag, applied to S instead of to E,
+ * so the MAX31856 quantiser/noise/fault paths downstream keep working
+ * unchanged. */
+void sim_plant_three_node_step(sim_plant_state_t *state, const sim_plant_cfg_t *cfg, float duty, float dt_s);
 
 /* ------------------------------------------------------------------------
  * sim_kiln -- N coupled zones plus injectable faults (TODO.md 6A.8's

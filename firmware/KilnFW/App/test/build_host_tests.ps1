@@ -46,6 +46,7 @@ try {
         (Join-Path $testDir "test_pid_autotune.c"),
         (Join-Path $testDir "test_pid_fuzzy.c"),
         (Join-Path $testDir "test_sim_kiln.c"),
+        (Join-Path $testDir "test_sim_plant_three_node.c"),
         (Join-Path $testDir "test_ota_auth.c"),
         (Join-Path $testDir "test_ota_interlock.c"),
         (Join-Path $testDir "test_heat_interlock.c"),

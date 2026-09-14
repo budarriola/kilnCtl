@@ -11,6 +11,9 @@ void sim_plant_reset(sim_plant_state_t *state, const sim_plant_cfg_t *cfg)
     for (int i = 0; i < SIM_PLANT_DELAY_MAX_STEPS; i++) {
         state->delay_ring[i] = cfg->ambient_c;
     }
+    /* WI-1: harmless under SIM_NODE_LEGACY, which never reads these. */
+    state->load_c = cfg->ambient_c;
+    state->sensor_node_c = cfg->ambient_c;
 }
 
 /* Sensor half of the model: transport delay then first-order lag, driven by
@@ -65,6 +68,45 @@ void sim_plant_step(sim_plant_state_t *state, const sim_plant_cfg_t *cfg, float 
     state->element_c += d_temp_c;
 
     sensor_pipeline_step(state, cfg, state->element_c, dt_s);
+}
+
+/* ------------------------------ WI-1 ------------------------------------
+ * Three-node model (SCENARIO_SIMULATION_PLAN.md sec 2.1). Opt-in via
+ * cfg->node_model == SIM_NODE_THREE; sim_plant_step() above is completely
+ * untouched and remains the SIM_NODE_LEGACY path. */
+void sim_plant_three_node_step(sim_plant_state_t *state, const sim_plant_cfg_t *cfg, float duty, float dt_s)
+{
+    if (duty < 0.0f) duty = 0.0f;
+    if (duty > 1.0f) duty = 1.0f;
+
+    float E = state->element_c;
+    float L = state->load_c;
+    float S = state->sensor_node_c;
+    float Tamb = cfg->ambient_c;
+
+    float c_l = cfg->c_l_j_per_c * ((cfg->load_mass_mult > 0.0f) ? cfg->load_mass_mult : 1.0f);
+
+    float g_s = (cfg->sensor_tau_s > 0.0f) ? (cfg->c_s_j_per_c / cfg->sensor_tau_s) : 0.0f;
+    float g_se = g_s * cfg->sensor_bias_p;
+    float g_sl = g_s * (1.0f - cfg->sensor_bias_p);
+
+    float p_in_w = duty * cfg->heater_power_w;
+
+    /* Computed from the common snapshot (E, L, S) above -- order of the
+     * three lines below cannot matter because none of them reads a field
+     * already mutated by another. */
+    float dE = (p_in_w - cfg->g_el_w_per_c * (E - L) - cfg->g_ea_w_per_c * (E - Tamb)) / cfg->c_e_j_per_c * dt_s;
+    float dL = (cfg->g_el_w_per_c * (E - L) - cfg->g_la_w_per_c * (L - Tamb)) / c_l * dt_s;
+    float dS = (g_se * (E - S) + g_sl * (L - S)) / cfg->c_s_j_per_c * dt_s;
+
+    state->element_c = E + dE;
+    state->load_c = L + dL;
+    state->sensor_node_c = S + dS;
+
+    /* Existing transport-delay ring + first-order sensor lag, reused
+     * unchanged, applied to the sensor NODE (S) rather than to the element,
+     * per sec 2.1's compatibility contract. */
+    sensor_pipeline_step(state, cfg, state->sensor_node_c, dt_s);
 }
 
 /* ---------------------------- sim_kiln ---------------------------------- */
