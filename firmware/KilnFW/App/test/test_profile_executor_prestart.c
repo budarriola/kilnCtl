@@ -64,6 +64,7 @@ int g_test_count = 0;
 // function body so the call inside it still reaches the real symbol instead
 // of recursing into itself.
 #include "../drivers/control/adaptive_tune.h"
+#include "../drivers/control/adaptive_tune_internal.h" /* adaptive_tune_zones[] -- sec 3 gate test setup */
 static int s_run_end_call_count = 0;
 static bool s_run_end_saw_clean_true = false;
 static void spy_adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
@@ -2718,6 +2719,26 @@ static void reset_fuzzy_gain_test_state(void)
      * to prove the no-model path. */
     memset(g_stub_model_k_dc, 0, sizeof(g_stub_model_k_dc));
     memset(g_stub_model_tau_s, 0, sizeof(g_stub_model_tau_s));
+    /* ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: adaptive_tune_zones[] is a
+     * real, linked-in global (not a per-test fixture) -- default every test
+     * to confidence_c=0 (the gate's own bootstrap-at-zero posture) unless it
+     * explicitly opts into full authority below, same reasoning as the
+     * model-stub reset immediately above. */
+    memset(adaptive_tune_zones, 0, sizeof(adaptive_tune_zones));
+}
+
+/* Full-authority test helper: sec 3's gate multiplies configured
+ * strength_pct by BOTH cap_L (from z->ff_dead_time_s/ff_tau_s) and the
+ * confidence counter (from adaptive_tune_zones[]) -- a test written before
+ * this gate existed, that wants to see the pre-gate fuzzy arithmetic run
+ * unimpeded, must now explicitly grant both a low L/tau and max confidence,
+ * or every such test would silently degrade to strength_pct=0 (exactly the
+ * central design point, just not what these particular tests are checking). */
+static void grant_full_fuzzy_confidence(zone_runtime_t *z)
+{
+    z->ff_dead_time_s = 1.0f;   /* L/tau = 1/500 = 0.002, well inside cap_L's full-authority region */
+    z->ff_tau_s = 500.0f;
+    adaptive_tune_zones[0].fuzzy_confidence_c = PID_FUZZY_CONFIDENCE_MAX_C;
 }
 
 static void test_fuzzy_prepare_gains_zero_strength_is_base_gains_bit_exact(void)
@@ -2740,7 +2761,7 @@ static void test_fuzzy_prepare_gains_zero_strength_is_base_gains_bit_exact(void)
 
     pid_cfg_t out;
     memset(&out, 0xAA, sizeof(out));
-    pid_fuzzy_prepare_gains(&z, 0, false, &out);
+    pid_fuzzy_prepare_gains(&z, 0, false, 1.0f, &out);
 
     TEST_CHECK(out.kp == 1.25f, "kp must be exactly base_kp at strength 0");
     TEST_CHECK(out.ki == 0.03f, "ki must be exactly base_ki at strength 0");
@@ -2772,18 +2793,27 @@ static void test_fuzzy_prepare_gains_matches_pid_fuzzy_adjust_directly(void)
     z.pid_state.d_filtered = 0.0f; /* POS/large error, STEADY rate -> rule table: Kp+, Ki=, Kd= */
     z.actual_c = 700.0f;
     s_exec.target_c = 1000.0f; /* 300C error -- "large" POS bucket */
+    grant_full_fuzzy_confidence(&z); /* sec 3 gate: full L/tau cap + max confidence, see helper's comment */
 
     pid_cfg_t out;
     memset(&out, 0, sizeof(out));
-    pid_fuzzy_prepare_gains(&z, 0, false, &out);
+    pid_fuzzy_prepare_gains(&z, 0, false, 1.0f, &out);
 
     float model_error_band, model_rate_band;
     TEST_CHECK(pid_fuzzy_derive_bands(42.731f, 255.6f, &model_error_band, &model_rate_band),
                "test setup sanity: this k_dc/tau_s pair must actually derive a model band, or this "
                "test is not exercising what it claims to");
 
+    /* ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: PID_FUZZY_CONFIDENCE_S_MAX_PCT
+     * (50) is a hard ceiling the gate applies even at full L/tau cap and max
+     * confidence -- grant_full_fuzzy_confidence() above buys this test full
+     * confidence, not an exemption from that ceiling. min(configured=100,
+     * gated=50) is 50, so this must compare against a direct pid_fuzzy_
+     * adjust() call at 50, not the raw configured 100, to still be checking
+     * "same inputs" rather than a stale pre-gate expectation. */
     float expect_kp, expect_ki, expect_kd;
-    pid_fuzzy_adjust(300.0f, 0.0f, model_error_band, model_rate_band, 1.0f, 0.02f, 2.0f, 100,
+    pid_fuzzy_adjust(300.0f, 0.0f, model_error_band, model_rate_band, 1.0f, 0.02f, 2.0f,
+                     PID_FUZZY_CONFIDENCE_S_MAX_PCT,
                      &expect_kp, &expect_ki, &expect_kd);
 
     TEST_CHECK(out.kp == expect_kp, "kp must equal a direct pid_fuzzy_adjust() call with the same inputs");
@@ -2816,7 +2846,7 @@ static void test_fuzzy_prepare_gains_nan_strength_falls_back_to_base_not_large(v
 
     pid_cfg_t out;
     memset(&out, 0, sizeof(out));
-    pid_fuzzy_prepare_gains(&z, 0, false, &out);
+    pid_fuzzy_prepare_gains(&z, 0, false, 1.0f, &out);
 
     TEST_CHECK(out.kp == 1.0f, "a NaN configured strength must NOT be treated as a large strength -- kp "
                               "must stay at base_kp");
@@ -2859,7 +2889,7 @@ static void test_fuzzy_prepare_gains_no_model_forces_plain_pid_bit_exact(void)
 
     pid_cfg_t out;
     memset(&out, 0xAA, sizeof(out)); /* poison, same discipline as the strength=0 test above */
-    pid_fuzzy_prepare_gains(&z, 0, false, &out);
+    pid_fuzzy_prepare_gains(&z, 0, false, 1.0f, &out);
 
     TEST_CHECK(out.kp == 1.0f, "kp must be exactly base_kp -- no model means no fuzzy adjustment, "
                               "regardless of strength_pct");
@@ -2894,7 +2924,7 @@ static void test_fuzzy_prepare_gains_harvest_freeze_forces_plain_pid_bit_exact(v
 
     pid_cfg_t out;
     memset(&out, 0xAA, sizeof(out));
-    pid_fuzzy_prepare_gains(&z, 0, true, &out);
+    pid_fuzzy_prepare_gains(&z, 0, true, 1.0f, &out);
 
     TEST_CHECK(out.kp == 1.0f, "harvest_freeze must reproduce base_kp exactly, same model/strength that "
                                "moves gains hard when NOT frozen");
@@ -2947,13 +2977,17 @@ static void test_fuzzy_prepare_gains_with_model_uses_derived_bands_not_default(v
      * relies on the direct pid_fuzzy_adjust()-with-derived-bands comparison
      * below (an exact, not merely cell-level, check) to catch drift. */
     s_exec.target_c = 715.0f; /* 15C error */
+    grant_full_fuzzy_confidence(&z); /* sec 3 gate: full L/tau cap + max confidence, see helper's comment */
 
     pid_cfg_t out;
     memset(&out, 0, sizeof(out));
-    pid_fuzzy_prepare_gains(&z, 0, false, &out);
+    pid_fuzzy_prepare_gains(&z, 0, false, 1.0f, &out);
 
+    /* sec 3 gate: PID_FUZZY_CONFIDENCE_S_MAX_PCT (50) is a hard ceiling even
+     * at full confidence -- see the identical note on the test above. */
     float expect_kp, expect_ki, expect_kd;
-    pid_fuzzy_adjust(15.0f, 0.0f, model_error_band, model_rate_band, 1.0f, 0.02f, 2.0f, 100,
+    pid_fuzzy_adjust(15.0f, 0.0f, model_error_band, model_rate_band, 1.0f, 0.02f, 2.0f,
+                     PID_FUZZY_CONFIDENCE_S_MAX_PCT,
                      &expect_kp, &expect_ki, &expect_kd);
 
     TEST_CHECK(out.kp == expect_kp, "kp must match a direct pid_fuzzy_adjust() call using the "
@@ -3008,21 +3042,29 @@ static void test_fuzzy_prepare_gains_uses_zone_commanded_setpoint_when_capped(vo
     z.actual_c = 700.0f;
     z.effective_target_c = 705.0f; /* this capped zone's OWN commanded setpoint: a small, near-ZERO error */
     s_exec.target_c = 1000.0f;     /* the shared, faster-moving destination: a large POS error */
+    grant_full_fuzzy_confidence(&z); /* sec 3 gate: full L/tau cap + max confidence, see helper's comment */
 
     pid_cfg_t out;
     memset(&out, 0, sizeof(out));
-    pid_fuzzy_prepare_gains(&z, 0, false, &out);
+    pid_fuzzy_prepare_gains(&z, 0, false, 1.0f, &out);
 
     float model_error_band, model_rate_band;
     TEST_CHECK(pid_fuzzy_derive_bands(42.731f, 255.6f, &model_error_band, &model_rate_band),
                "test setup sanity: this k_dc/tau_s pair must actually derive a model band");
 
+    /* sec 3 gate: PID_FUZZY_CONFIDENCE_S_MAX_PCT (50) is a hard ceiling even
+     * at full confidence (grant_full_fuzzy_confidence() above) -- both
+     * "expect"/"wrong" comparison points below must use it instead of the
+     * raw configured 100 to still be comparing against what production
+     * actually passes to pid_fuzzy_adjust() now. */
     float expect_kp, expect_ki, expect_kd; /* CORRECT: error against effective_target_c (705-700=5) */
-    pid_fuzzy_adjust(5.0f, 0.0f, model_error_band, model_rate_band, 1.0f, 0.02f, 2.0f, 100,
+    pid_fuzzy_adjust(5.0f, 0.0f, model_error_band, model_rate_band, 1.0f, 0.02f, 2.0f,
+                     PID_FUZZY_CONFIDENCE_S_MAX_PCT,
                      &expect_kp, &expect_ki, &expect_kd);
 
     float wrong_kp, wrong_ki, wrong_kd; /* WRONG (unfixed behaviour): error against s_exec.target_c (1000-700=300) */
-    pid_fuzzy_adjust(300.0f, 0.0f, model_error_band, model_rate_band, 1.0f, 0.02f, 2.0f, 100,
+    pid_fuzzy_adjust(300.0f, 0.0f, model_error_band, model_rate_band, 1.0f, 0.02f, 2.0f,
+                     PID_FUZZY_CONFIDENCE_S_MAX_PCT,
                      &wrong_kp, &wrong_ki, &wrong_kd);
 
     TEST_CHECK(fabsf(expect_kp - wrong_kp) > 0.01f,
@@ -3054,6 +3096,92 @@ static void test_fuzzy_prepare_gains_uses_zone_commanded_setpoint_when_capped(vo
     g_stub_approach_rate_cap_c_per_hr[0] = 0.0f;
     g_stub_model_k_dc[0] = 0.0f;
     g_stub_model_tau_s[0] = 0.0f;
+}
+
+/* ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3, N3: end-to-end demonstration that
+ * the confidence gate is actually WIRED and ACTIVE through the real
+ * pid_fuzzy_prepare_gains() (not the pure pid_fuzzy_confidence.c unit tests,
+ * which never touch a zone_runtime_t/adaptive_tune_zones[] at all) -- the
+ * "fuzzy A/B tested inert twice from the wrong control mode" caution in this
+ * plan's own task list means active wiring must be PROVEN here, never
+ * assumed from the pure-module tests passing in isolation. Two things are
+ * demonstrated on real output from the production function:
+ *   1. A firing with full confidence and a converging (non-oscillating)
+ *      error DOES run fuzzy (strength_pct stays 50 == S_MAX, i.e. gated but
+ *      nonzero -- the gate lets a healthy firing through) and out.kp differs
+ *      from the base gain -- fuzzy is not silently inert.
+ *   2. Feeding the SAME zone an oscillating error sequence (sign flips every
+ *      tick, the shape the plan's own N3 finding measured 29 crossings on
+ *      the real oscillating arm) trips the backstop within one 600s window,
+ *      forces strength_pct to 0 (out.kp collapses to bit-exact base kp) for
+ *      the REST of the firing even on ticks where the error stops
+ *      oscillating, and floors adaptive_tune_zones[0].fuzzy_confidence_c to
+ *      0 -- proving N3 fires from real pid_fuzzy_prepare_gains() calls, not
+ *      just from pid_fuzzy_confidence.c's own unit tests. */
+static void test_fuzzy_prepare_gains_oscillation_backstop_trips_and_stays_tripped(void)
+{
+    TEST_SECTION("pid_fuzzy_prepare_gains() -- N3 in-firing oscillation backstop: a converging error "
+                 "runs fuzzy at the gated (nonzero) strength; an oscillating error trips the backstop, "
+                 "collapses strength_pct to 0 (bit-exact base gains) for the rest of the firing, and "
+                 "floors the cross-firing confidence counter -- driven through the REAL production "
+                 "function, not a mirror or the pure pid_fuzzy_confidence.c unit tests alone");
+    reset_fuzzy_gain_test_state();
+    s_test_fuzzy_strength_present = true;
+    s_test_fuzzy_strength_pct = 100.0f;
+    g_stub_model_k_dc[0] = 42.731f;
+    g_stub_model_tau_s[0] = 255.6f;
+
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.pid_cfg.kp = 1.0f;
+    z.pid_cfg.ki = 0.02f;
+    z.pid_cfg.kd = 2.0f;
+    z.actual_c = 700.0f;
+    grant_full_fuzzy_confidence(&z);
+
+    pid_cfg_t out;
+    memset(&out, 0, sizeof(out));
+
+    /* Step 1: a single converging tick (error steady, no oscillation state
+     * built up yet) -- fuzzy must actually be running: out.kp must differ
+     * from the base 1.0f, proving the gate is not vacuously zeroing
+     * everything and this test can tell "active" from "inert". */
+    s_exec.target_c = 705.0f; /* small POS error, error_c = 5.0 */
+    pid_fuzzy_prepare_gains(&z, 0, false, 1.0f, &out);
+    TEST_CHECK(out.kp != z.pid_cfg.kp, "sanity/liveness: with full confidence and a converging error, "
+              "fuzzy must actually move kp away from base -- proves this test can distinguish active "
+              "fuzzy from an accidentally-always-inert gate");
+    TEST_CHECK(!z.fuzzy_osc.tripped_this_firing, "one steady tick must not trip the backstop");
+
+    /* Step 2: drive an oscillating error -- sign flips every tick, matching
+     * the plan's own N3 measurement shape. PID_FUZZY_CONFIDENCE_OSC_TRIP_
+     * COUNT crossings (chosen well below the plan's measured 29, see
+     * pid_fuzzy_confidence.c) must trip within the first several ticks, all
+     * well inside one 600s window at dt_s=1.0f. */
+    bool tripped = false;
+    for (int i = 0; i < 12 && !tripped; i++) {
+        s_exec.target_c = (i % 2 == 0) ? 705.0f : 695.0f; /* error_c flips +5 / -5 every tick */
+        pid_fuzzy_prepare_gains(&z, 0, false, 1.0f, &out);
+        if (z.fuzzy_osc.tripped_this_firing) tripped = true;
+    }
+    TEST_CHECK(tripped, "an oscillating error (sign flip every tick) must trip the N3 backstop within "
+              "12 ticks -- the plan measured 29 crossings on the real oscillating arm; this synthetic "
+              "sequence produces one crossing per tick, so tripping this fast is expected, not a lucky "
+              "coincidence");
+    TEST_CHECK(out.kp == z.pid_cfg.kp, "the tripping tick itself must already show bit-exact base kp "
+              "(strength_pct forced to 0 the same tick the trip is detected, not one tick later)");
+    TEST_CHECK(adaptive_tune_zones[0].fuzzy_confidence_c == 0, "a real trip must immediately floor the "
+              "cross-firing confidence counter, not wait for the next adaptive_tune_run_end()");
+
+    /* Step 3: sticky -- even a subsequent CONVERGING tick (no new crossing)
+     * must stay at bit-exact base gains for the rest of this firing, not
+     * silently re-arm the moment the error stops flipping. */
+    s_exec.target_c = 705.0f;
+    memset(&out, 0, sizeof(out));
+    pid_fuzzy_prepare_gains(&z, 0, false, 1.0f, &out);
+    TEST_CHECK(out.kp == z.pid_cfg.kp, "STICKY: a converging tick AFTER the trip must still show "
+              "bit-exact base kp for the rest of this firing, not re-arm just because the oscillation "
+              "stopped");
 }
 
 // ---------------------------------------------------------------------------
@@ -5094,6 +5222,7 @@ static void test_hold_membership_change_resets_fuzzy_prev_effective_ki(void)
      * no-model test exists to prove. */
     g_stub_model_k_dc[0] = 42.731f;
     g_stub_model_tau_s[0] = 255.6f;
+    grant_full_fuzzy_confidence(z0); /* sec 3 gate: full L/tau cap + max confidence, see helper's comment */
     s_exec.zones[1].faulted = true; /* start EXCLUDED -- the {0,2} 2-zone system, same setup as the
                                      * gaining-a-neighbor test above */
 
@@ -5104,7 +5233,7 @@ static void test_hold_membership_change_resets_fuzzy_prev_effective_ki(void)
      * same reason setup_membership_transition_zone0()'s other callers do
      * this: the very first tick's own 0->real edge would otherwise be the
      * "membership change" this test means to isolate). */
-    pid_fuzzy_prepare_gains(z0, 0, false, &fuzzy_cfg);
+    pid_fuzzy_prepare_gains(z0, 0, false, 1.0f, &fuzzy_cfg);
     (void)pid_family_zone_tick(z0, 0, &fuzzy_cfg, true, 1.0f, 1000u, &want_relay_on);
     z0->pid_state.integral = 0.0f;
 
@@ -5113,7 +5242,7 @@ static void test_hold_membership_change_resets_fuzzy_prev_effective_ki(void)
      * TEST_CHECK below confirms is NOT z0->pid_cfg.ki (proving the strength
      * setting actually moved it, so the assertion after the reseed is
      * discriminating rather than coincidental). */
-    pid_fuzzy_prepare_gains(z0, 0, false, &fuzzy_cfg);
+    pid_fuzzy_prepare_gains(z0, 0, false, 1.0f, &fuzzy_cfg);
     float duty_before = pid_family_zone_tick(z0, 0, &fuzzy_cfg, true, 1.0f, 1000u, &want_relay_on);
     z0->duty = duty_before;
     float stale_ki_before_reseed = z0->fuzzy_prev_effective_ki;
@@ -5125,7 +5254,7 @@ static void test_hold_membership_change_resets_fuzzy_prev_effective_ki(void)
      * edge that fires the reseed at pid_family_zone_tick()'s
      * z->ff_membership_changed branch. */
     s_exec.zones[1].faulted = false;
-    pid_fuzzy_prepare_gains(z0, 0, false, &fuzzy_cfg);
+    pid_fuzzy_prepare_gains(z0, 0, false, 1.0f, &fuzzy_cfg);
     (void)pid_family_zone_tick(z0, 0, &fuzzy_cfg, true, 1.0f, 1000u, &want_relay_on);
 
     TEST_CHECK(z0->fuzzy_prev_effective_ki == z0->pid_cfg.ki, "the membership-change reseed must leave "
@@ -8281,6 +8410,7 @@ void run_test_profile_executor_prestart(void)
     test_fuzzy_prepare_gains_harvest_freeze_forces_plain_pid_bit_exact();
     test_fuzzy_prepare_gains_with_model_uses_derived_bands_not_default();
     test_fuzzy_prepare_gains_uses_zone_commanded_setpoint_when_capped();
+    test_fuzzy_prepare_gains_oscillation_backstop_trips_and_stays_tripped();
 
     test_feedforward_zero_coupling_is_bit_identical_to_no_coupling();
     test_feedforward_hot_neighbor_subtracts_duty();

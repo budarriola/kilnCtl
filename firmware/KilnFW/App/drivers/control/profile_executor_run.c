@@ -571,6 +571,11 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         };
         pid_reset(&z->pid_state);
         z->fuzzy_prev_effective_ki = 0.0f;
+        /* ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3, N3: a limit cycle from a
+         * PREVIOUS firing must never carry a stale trip into this one --
+         * the "reset one side of a pair" class this project has hit before
+         * (see pid_fuzzy_oscillation_state_t's own header comment). */
+        pid_fuzzy_oscillation_reset(&z->fuzzy_osc);
 
         /* TODO.md 6A.2 feedforward: identified model or nothing. A zone that
          * has never been autotuned simply runs on feedback alone, as every

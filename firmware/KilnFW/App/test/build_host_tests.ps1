@@ -45,6 +45,7 @@ try {
         (Join-Path $testDir "test_closed_loop.c"),
         (Join-Path $testDir "test_pid_autotune.c"),
         (Join-Path $testDir "test_pid_fuzzy.c"),
+        (Join-Path $testDir "test_pid_fuzzy_confidence.c"),
         (Join-Path $testDir "test_sim_kiln.c"),
         (Join-Path $testDir "test_sim_plant_three_node.c"),
         (Join-Path $testDir "test_ota_auth.c"),
@@ -118,6 +119,7 @@ try {
         (Join-Path $driversDir "control/heater_output.c"),
         (Join-Path $driversDir "control/pid_autotune.c"),
         (Join-Path $driversDir "control/pid_fuzzy.c"),
+        (Join-Path $driversDir "control/pid_fuzzy_confidence.c"),
         (Join-Path $driversDir "net/ota_auth.c"),
         (Join-Path $driversDir "net/ota_interlock.c"),
         (Join-Path $driversDir "persist/ota_record.c"),
@@ -446,6 +448,7 @@ try {
             "`"$(Join-Path $driversDir 'control/pid.c')`" `"$(Join-Path $driversDir 'control/thermal_guard.c')`" " +
             "`"$(Join-Path $driversDir 'control/heater_output.c')`" `"$(Join-Path $driversDir 'control/thermo_combine.c')`" " +
             "`"$(Join-Path $driversDir 'control/heat_enable.c')`" `"$(Join-Path $driversDir 'control/pid_fuzzy.c')`" " +
+            "`"$(Join-Path $driversDir 'control/pid_fuzzy_confidence.c')`" " +
             "`"$(Join-Path $driversDir 'common/stack_margin.c')`" `"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`" " +
             "`"$(Join-Path $driversDir 'control/adaptive_tune.c')`" `"$(Join-Path $driversDir 'control/adaptive_tune_model.c')`" " +
             "`"$(Join-Path $driversDir 'control/adaptive_tune_ki.c')`" `"$(Join-Path $driversDir 'control/pid_autotune.c')`" " +

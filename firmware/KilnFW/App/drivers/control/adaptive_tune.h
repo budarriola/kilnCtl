@@ -263,6 +263,18 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean);
 bool adaptive_tune_set_enabled(uint8_t zone_index, bool enabled);
 bool adaptive_tune_get_enabled(uint8_t zone_index);
 
+// ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: the fuzzy confidence gate's
+// cross-firing "c" counter. adaptive_tune_get_fuzzy_confidence_c() is read
+// once per tick by pid_fuzzy_prepare_gains() (profile_executor_pid_tick.c);
+// an out-of-range zone_index reads back 0 (fail safe -- never a made-up
+// confident value). adaptive_tune_fuzzy_confidence_floor_now() is called by
+// the same tick when the in-firing oscillation backstop (N3) trips, and
+// takes the lock itself -- see its own definition (adaptive_tune.c) for why
+// this is safe to call from the control-tick path (short, non-blocking,
+// same lock pid_fuzzy_prepare_gains() never otherwise touches).
+uint8_t adaptive_tune_get_fuzzy_confidence_c(uint8_t zone_index);
+void adaptive_tune_fuzzy_confidence_floor_now(uint8_t zone_index);
+
 // Q3: clears this zone's persisted Ki-diagnosis baseline (RAM and NVS, via
 // the flash worker) so the NEXT adaptive_tune_refine_ki_locked()/adaptive_tune_
 // refine_zone_locked() call re-latches fresh -- the actual remedy the cumulative-bound

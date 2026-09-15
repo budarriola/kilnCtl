@@ -80,7 +80,7 @@ MIRROR_REL = "firmware/KilnFW/App/test/test_closed_loop.c"
 # definition of pid_fuzzy_prepare_gains()) rather than a line number, per this
 # repo's standing rule that a line-number anchor IS the drift this class of
 # check exists to catch.
-PROD_SIG = "void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, bool harvest_freeze, pid_cfg_t *out_cfg)\n{\n"
+PROD_SIG = "void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, bool harvest_freeze, float dt_s, pid_cfg_t *out_cfg)\n{\n"
 
 MIRROR_SIG_RE = re.compile(
     r"static float fuzzy_tick\([^)]*\)\n\{\n(.*?)\n\}\n",
@@ -221,6 +221,22 @@ PROD_ONLY_STMT_RES = [
     # required difference" as the no-model case, so this one-line `if` is
     # dropped entirely rather than given a fake mirror equivalent.
     re.compile(r"^if \(harvest_freeze\) strength_pct = 0$"),
+    # ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: the confidence gate (cap_L from
+    # this zone's identified L/tau, multiplied with the cross-firing model-
+    # quality counter) and the N3 in-firing oscillation backstop. Both are
+    # production-only -- the mirror has no zone_runtime_t/adaptive_tune/
+    # oscillation-state concept at all, same "structurally required
+    # difference" class as the no-model and harvest_freeze cases immediately
+    # above -- so every statement belonging to this gate is dropped entirely
+    # rather than given a fake mirror equivalent. See this plan section's
+    # implementation report for the full design rationale.
+    re.compile(r"^float cap_l = pid_fuzzy_confidence_cap_l\(z->ff_dead_time_s, z->ff_tau_s\)$"),
+    re.compile(r"^uint8_t confidence_c = adaptive_tune_get_fuzzy_confidence_c\(zi\)$"),
+    re.compile(r"^uint8_t gated_strength_pct = pid_fuzzy_confidence_strength_pct\(confidence_c, cap_l\)$"),
+    re.compile(r"^if \(gated_strength_pct < strength_pct\) strength_pct = gated_strength_pct$"),
+    re.compile(r"^bool osc_just_tripped = pid_fuzzy_oscillation_tick\(&z->fuzzy_osc, error_c, dt_s\)$"),
+    re.compile(r"^if \(osc_just_tripped\) adaptive_tune_fuzzy_confidence_floor_now\(zi\)$"),
+    re.compile(r"^if \(z->fuzzy_osc\.tripped_this_firing\) strength_pct = 0$"),
     re.compile(r"^\*out_cfg = z->pid_cfg$"),  # mirror has no equivalent whole-struct copy statement
     # production initializes adj_kp/ki/kd from the base gains inline (belt
     # and braces against pid_fuzzy_adjust() not writing them); the mirror

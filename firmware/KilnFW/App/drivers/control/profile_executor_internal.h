@@ -54,6 +54,7 @@
 #include "zone_coupling_solve.h"
 #include "autotune_engine.h"
 #include "on_off_trigger_decide.h"
+#include "pid_fuzzy_confidence.h"
 
 /* ---- shared log tag ------------------------------------------------------ */
 extern const char *PE_TAG;
@@ -341,6 +342,16 @@ typedef struct {
      * See zone_taper_climb_rate()'s doc comment. */
     float ff_dead_time_s;
     bool  ff_enabled;
+
+    /* ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3, N3: the in-firing error
+     * zero-crossing oscillation backstop's per-zone state. Reset at every
+     * firing start (profile_executor_run.c, alongside pid_reset()/
+     * fuzzy_prev_effective_ki above) -- NOT persisted across firings, unlike
+     * the confidence counter (adaptive_tune_zone_t::fuzzy_confidence_c),
+     * because a limit cycle is a property of THIS firing's control loop, not
+     * a durable statement about the plant model. See pid_fuzzy_confidence.h
+     * for the module this drives. */
+    pid_fuzzy_oscillation_state_t fuzzy_osc;
 
     /* Coupled-hold solve diagnostics (defect: steady-state hold used to
      * divide by this zone's own diagonal gain alone -- see
@@ -1123,7 +1134,7 @@ float zone_commanded_setpoint_c(const zone_runtime_t *z, uint8_t zi);
  * active on ramps/approaches and on any zone that is not opted into
  * adaptive tuning -- this is a freeze of the harvest window only, not of
  * the firing. */
-void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, bool harvest_freeze, pid_cfg_t *out_cfg);
+void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, bool harvest_freeze, float dt_s, pid_cfg_t *out_cfg);
 
 /* ---- ramp assist: sustained-lag detection + auto-stretch instrumentation
  * (profile_executor_ramp_assist.c) -- PID_EXPANSION_PLAN.md sec 7.1/7.2/7.4.

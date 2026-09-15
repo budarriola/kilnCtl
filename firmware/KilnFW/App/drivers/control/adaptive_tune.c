@@ -60,6 +60,7 @@
                              ADAPTIVE_TUNE_KIBASE_FILE_PATH comment for the simplified
                              (re-derivable) treatment this item gets. */
 
+#include "pid_fuzzy_confidence.h" // PID_FUZZY_CONFIDENCE_MAX_C -- ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3
 #include "zones_config_accessors.h" // zones_config_get/set_adaptive_tune_enabled/get_pid/set_pid/get_model/set_model --
                          // this file now writes the opt-in flag here too (U2) and reads/writes
                          // gains directly for adaptive_tune_revert() (U1)
@@ -678,6 +679,15 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
         }
         if (skip_reason) {
             reset_run_status_locked(z, skip_reason);
+            // ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: a run this module
+            // could not use as training data (disabled, on/off, inactive,
+            // faulted/dirty, or too many excluded samples) is not evidence
+            // the plant model is still good -- floor the confidence counter
+            // rather than leave a stale high count from an earlier, unrelated
+            // run standing. Asymmetric by design (floor immediately, rise
+            // only one step per accepted run below), matching the
+            // oscillation backstop's own asymmetry (N3).
+            z->fuzzy_confidence_c = 0;
             continue;
         }
         // D5: adaptive_tune_refine_zone_locked() rewrites Kp/Ki/Kd from a fresh SIMC
@@ -740,6 +750,29 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
         // valid and unchanged this run has nothing new to write.
         if (z->ki_baseline_valid && (!baseline_was_valid || z->ki_baseline != baseline_before)) {
             baseline_newly_latched = true;
+        }
+
+        // ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: cross-firing confidence
+        // counter. DISCLOSED SIMPLIFICATION (see fuzzy_confidence_c's own
+        // comment, adaptive_tune_internal.h) -- this is a scope-limited
+        // proxy for the plan's full forward-checked-residual signal, using
+        // what this module already computes: model_refined (a fit actually
+        // ran and passed its own eligibility/plausibility gates in
+        // adaptive_tune_refine_zone_locked()) and last_delta_pct (how much
+        // the fit moved from the prior accepted value). A refined model
+        // whose K_dc barely moved is read as agreement with the standing
+        // model -- one "good" run, rise by exactly one step (never jump
+        // straight to MAX_C on a single run, matching the plan's own
+        // "rate-limited... one step per accepted run" language). A refined
+        // model that moved a lot, or a run where refinement did not fire,
+        // is not evidence of a stable fit -- floor immediately rather than
+        // hold the previous count.
+        if (model_refined && fabsf(z->last_delta_pct) <= ADAPTIVE_TUNE_FUZZY_CONFIDENCE_STABLE_DELTA_PCT) {
+            if (z->fuzzy_confidence_c < PID_FUZZY_CONFIDENCE_MAX_C) {
+                z->fuzzy_confidence_c++;
+            }
+        } else {
+            z->fuzzy_confidence_c = 0;
         }
     }
 
@@ -1030,6 +1063,33 @@ bool adaptive_tune_get_enabled(uint8_t zone_index)
     bool en = adaptive_tune_zones[zone_index].enabled;
     xSemaphoreGive(adaptive_tune_lock);
     return en;
+}
+
+// ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: see adaptive_tune.h's own comment
+// on these two. Short, non-blocking, lock-protected reads/writes of a single
+// uint8_t -- no producer or blocking call happens under the lock here, same
+// discipline as adaptive_tune_get_enabled() above.
+uint8_t adaptive_tune_get_fuzzy_confidence_c(uint8_t zone_index)
+{
+    if (zone_index >= MAX31856_CHANNEL_COUNT) {
+        return 0;
+    }
+    adaptive_tune_ensure_lock();
+    xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
+    uint8_t c = adaptive_tune_zones[zone_index].fuzzy_confidence_c;
+    xSemaphoreGive(adaptive_tune_lock);
+    return c;
+}
+
+void adaptive_tune_fuzzy_confidence_floor_now(uint8_t zone_index)
+{
+    if (zone_index >= MAX31856_CHANNEL_COUNT) {
+        return;
+    }
+    adaptive_tune_ensure_lock();
+    xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
+    adaptive_tune_zones[zone_index].fuzzy_confidence_c = 0;
+    xSemaphoreGive(adaptive_tune_lock);
 }
 
 void adaptive_tune_get_status(uint8_t zone_index, adaptive_tune_zone_status_t *out)

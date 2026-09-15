@@ -986,7 +986,7 @@ void executor_task_entry(void *arg)
                  * training point. Fuzzy stays fully active on every ramp,
                  * approach, and on any zone not opted into adaptive tuning. */
                 bool harvest_freeze = s_exec.dwelling && adaptive_tune_get_enabled(zi);
-                pid_fuzzy_prepare_gains(z, zi, harvest_freeze, &fuzzy_cfg);
+                pid_fuzzy_prepare_gains(z, zi, harvest_freeze, dt_s, &fuzzy_cfg);
                 duty = pid_family_zone_tick(z, zi, &fuzzy_cfg, sensor_ok[zi], dt_s, dt_ms,
                                             &want_relay_on[zi]);
                 break;

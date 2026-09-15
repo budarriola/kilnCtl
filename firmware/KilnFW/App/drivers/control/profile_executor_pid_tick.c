@@ -12,7 +12,9 @@
 #include <math.h>
 
 #include "esp_log.h"
+#include "adaptive_tune.h" /* adaptive_tune_get_fuzzy_confidence_c()/_floor_now() -- sec 3 gate */
 #include "pid_fuzzy.h"
+#include "pid_fuzzy_confidence.h" /* pid_fuzzy_confidence_cap_l()/_strength_pct(), oscillation backstop */
 #include "zones_config_accessors.h"
 #include "zones_config_json.h" /* zones_config_get_fuzzy_strength_pct(), MAX31856_CHANNEL_COUNT */
 
@@ -360,7 +362,7 @@ static void log_fuzzy_disabled_no_model_once(uint8_t zi)
     }
 }
 
-void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, bool harvest_freeze, pid_cfg_t *out_cfg)
+void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, bool harvest_freeze, float dt_s, pid_cfg_t *out_cfg)
 {
     *out_cfg = z->pid_cfg; /* d_filter_tau_s/b/pid_range_c untouched -- only kp/ki/kd move */
 
@@ -439,6 +441,45 @@ void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, bool harvest_freeze,
      * instead of for a missing model -- see this parameter's own doc
      * comment (profile_executor_internal.h). */
     if (harvest_freeze) strength_pct = 0;
+
+    /* ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: the confidence gate. Central
+     * design point (sec 1.4) -- cap_L is keyed on L/tau (dead time / tau)
+     * ALONE, from this zone's identified plant (ff_dead_time_s/ff_tau_s,
+     * the same feedforward model cached at run start / zone_load_model()
+     * refresh, never the ramp-transient-identification module, which has
+     * zero callers and a known ambient-baseline defect -- see this plan
+     * section's implementation report for that check). It is multiplied
+     * with, never substituted for, the separate model-quality/consecutive-
+     * good-runs signal (c, from adaptive_tune's cross-firing counter): the
+     * 7 known limit-cycling cells are model-MATCHED (high c), so a gate
+     * keyed on fit quality alone would read confident exactly where fuzzy
+     * does harm. min() against the operator-configured strength_pct means
+     * this gate can only ever REDUCE authority below what was configured,
+     * never grant more.
+     *
+     * Low confidence means strength_pct == 0 -- bit-for-bit plain PID, the
+     * exact same short-circuit pid_fuzzy_adjust() already implements for
+     * strength_pct==0 (reused, not reinvented). */
+    float cap_l = pid_fuzzy_confidence_cap_l(z->ff_dead_time_s, z->ff_tau_s);
+    uint8_t confidence_c = adaptive_tune_get_fuzzy_confidence_c(zi);
+    uint8_t gated_strength_pct = pid_fuzzy_confidence_strength_pct(confidence_c, cap_l);
+    if (gated_strength_pct < strength_pct) strength_pct = gated_strength_pct;
+
+    /* N3: the in-firing error-zero-crossing oscillation backstop. Ticked
+     * every call (even when strength_pct is already 0 from the gate above,
+     * a missing model, or the harvest freeze) so a zone that starts
+     * oscillating under low-but-nonzero authority is still caught, and so
+     * fuzzy_osc's window/crossing bookkeeping stays continuous regardless
+     * of which other reason forced strength to 0 this tick. A newly-tripped
+     * or already-sticky-tripped state forces strength_pct to 0 for the rest
+     * of the firing AND immediately floors the cross-firing confidence
+     * counter (adaptive_tune_fuzzy_confidence_floor_now()) -- asymmetric by
+     * design: the counter's rise is rate-limited to one step per accepted
+     * run (adaptive_tune_run_end()), its fall on a real limit cycle is
+     * immediate, never waiting for the next run-end to notice. */
+    bool osc_just_tripped = pid_fuzzy_oscillation_tick(&z->fuzzy_osc, error_c, dt_s);
+    if (osc_just_tripped) adaptive_tune_fuzzy_confidence_floor_now(zi);
+    if (z->fuzzy_osc.tripped_this_firing) strength_pct = 0;
 
     float adj_kp = z->pid_cfg.kp, adj_ki = z->pid_cfg.ki, adj_kd = z->pid_cfg.kd;
     pid_fuzzy_adjust(error_c, error_rate_c_per_s, error_band_c, rate_band_c_per_s,

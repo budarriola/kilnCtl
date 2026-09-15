@@ -229,6 +229,15 @@ extern const char *ADAPTIVE_TUNE_TAG;
 
 #define ADAPTIVE_TUNE_MAX_EXCLUDED_FRACTION 0.05f
 
+// ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: how much a refined K_dc may move
+// (percent, either direction) from the prior accepted value and still count
+// as a "good" run toward the fuzzy confidence counter. CHOSEN, not measured
+// -- deliberately tighter than ADAPTIVE_TUNE_MIN_MATERIAL_MOVE_FRAC's 0.5%
+// "did anything material happen at all" bar above; this one asks "did the
+// fit move little enough to call it agreement," which is a different
+// question at a different (looser) tolerance.
+#define ADAPTIVE_TUNE_FUZZY_CONFIDENCE_STABLE_DELTA_PCT 10.0f
+
 #include "nvs_key_check.h" /* NVS_KEY_LEN_CHECK -- see that header */
 
 #define ADAPTIVE_TUNE_NVS_PARTITION "kiln_nvs"
@@ -506,6 +515,29 @@ typedef struct {
     float    revert_k_dc, revert_tau_s, revert_dead_time_s;
     bool     revert_ki_baseline_valid;
     float    revert_ki_baseline;
+
+    // ---------------------------------------------------------------------
+    // ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: the fuzzy confidence gate's
+    // cross-firing "c" counter (0..PID_FUZZY_CONFIDENCE_MAX_C), consulted by
+    // pid_fuzzy_prepare_gains() every tick via adaptive_tune_get_fuzzy_
+    // confidence_c() and updated only here, at run end. RAM-only, per-BOOT
+    // (same durability class as has_applied/revert_available above) --
+    // deliberately NOT persisted to NVS: the plan requires bootstrap-at-zero
+    // on every fresh boot (sec 4), not a resumed count from a previous
+    // session's plant.
+    //
+    // DISCLOSED SIMPLIFICATION: the plan's full sec 3.1 signal is a
+    // forward-checked residual/fit-stability measure this module does not
+    // compute today. adaptive_tune_run_end() (adaptive_tune.c) instead uses
+    // model_refined (adaptive_tune_refine_zone_locked()'s own return) and
+    // z->last_delta_pct (the fresh-vs-prior K_dc percent change already
+    // computed there) as a scope-limited proxy: a small, stable delta on a
+    // refined model counts as one "good" run (increment, capped at MAX_C);
+    // a skipped/excluded run or a large delta floors it to 0 immediately.
+    // This is an intentional divergence from the plan's literal residual-CV
+    // machinery, not an oversight -- see the ADAPTIVE_FUZZY_EVALUATION_PLAN
+    // sec 3 implementation report for the rationale.
+    uint8_t  fuzzy_confidence_c;
 } adaptive_tune_zone_t;
 
 extern adaptive_tune_zone_t adaptive_tune_zones[MAX31856_CHANNEL_COUNT];

@@ -14,6 +14,7 @@ void run_test_heater_output(void);
 void run_test_closed_loop(void);
 void run_test_pid_autotune(void);
 void run_test_pid_fuzzy(void);
+void run_test_pid_fuzzy_confidence(void);
 void run_test_sim_kiln(void);
 void run_test_sim_plant_three_node(void);
 void run_test_sim_high_temp(void);
@@ -105,6 +106,7 @@ int main(void)
     run_test_closed_loop();
     run_test_pid_autotune();
     run_test_pid_fuzzy();
+    run_test_pid_fuzzy_confidence();
     run_test_sim_kiln();
     run_test_sim_plant_three_node();
     run_test_sim_high_temp();
