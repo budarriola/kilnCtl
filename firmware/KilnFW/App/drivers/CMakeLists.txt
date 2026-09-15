@@ -320,6 +320,12 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "persist/zones_config_convert.c"
                        "persist/zones_config_migrate.c"
                        "persist/kiln_cfg_store.c"
+                       "persist/kiln_package.c"
+                       # docs/KILN_PROFILES_PLAN.md items 1/2/12 -- Pico-half
+                       # packaging and package-identity hash for kiln_cfg_
+                       # store.c's saved slots (walks the ESP-side mirror of
+                       # CONFIG_PARAM_TABLE via an injected accessor pair,
+                       # never a curated field list -- see kiln_package.h).
                        "persist/kiln_cfg_store_cfg_fs.c"
                        # kiln config slots filesystem move, 2026-09-07
                        # (docs/FILESYSTEM_USER_DATA_PLAN.md section 5, "kiln

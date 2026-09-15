@@ -278,8 +278,22 @@ static esp_err_t delete_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id missing or out of range");
         return ESP_OK;
     }
-    if (!kiln_cfg_store_delete(id)) {
-        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such kiln config");
+    /* H5 fix (docs/audits/kiln_profiles_robustness_2026-09-14.md):
+     * kiln_cfg_store_delete() now carries its own backstop interlock and
+     * refuses to delete the active config -- same ack-passthrough pattern
+     * apply_post_handler() above already uses. A pre-check here would be
+     * redundant, not load-bearing (the store's own check is the backstop),
+     * but the store no longer returns a bare false for "not found" either,
+     * so distinguish that case for the right HTTP status. */
+    const bool ack = ota_http_req_ack_no_safety(req);
+    char delete_reason[96];
+    delete_reason[0] = '\0';
+    if (!kiln_cfg_store_delete(id, ack, delete_reason, sizeof(delete_reason))) {
+        if (strcmp(delete_reason, "no saved kiln config with that id") == 0) {
+            httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such kiln config");
+        } else {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, delete_reason[0] ? delete_reason : "delete failed");
+        }
         return ESP_OK;
     }
     return httpd_resp_sendstr(req, "ok");

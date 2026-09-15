@@ -22,6 +22,7 @@
 #include <stdint.h>
 
 #include "kiln_cfg_store.h" /* KILN_CFG_NAME_MAX_LEN, KILN_CFG_MAX_COUNT */
+#include "kiln_package.h" /* kiln_pkg_safety_t, KILN_PKG_SAFETY_PARAM_CAP -- the Pico half, v3+ */
 #include "zones_config_accessors.h" /* ZONES_CONFIG_BLOB_MAX_SIZE */
 
 #ifdef __cplusplus
@@ -29,21 +30,47 @@ extern "C" {
 #endif
 
 /* Bump whenever kiln_cfg_store_blob_t's on-flash layout changes -- see
- * kiln_cfg_store.c's fuller comment (the version-1/2 migration chain lives
- * there, not here). Version 2 is current. */
-#define KILN_CFG_STORE_VERSION 2
+ * kiln_cfg_store.c's fuller comment (the version-1/2/3 migration chain lives
+ * there, not here). Version 3 is current: docs/KILN_PROFILES_PLAN.md items
+ * 1/2/12 raised KILN_CFG_MAX_COUNT 8 -> 10 and added each entry's Pico-half
+ * package (pico_populated/pkg_schema/pkg_hash/pico below) alongside the
+ * pre-existing ESP-only blob. */
+#define KILN_CFG_STORE_VERSION 3
 
 /* One saved kiln config slot. blob/blob_len hold whatever
  * zones_config_export_blob() produced at save time -- an opaque byte string
  * to this module, sized against zones_http.h's ZONES_CONFIG_BLOB_MAX_SIZE
  * ceiling so this struct's layout never has to change just because
- * zone_cfg_t grew a field. */
+ * zone_cfg_t grew a field.
+ *
+ * v3 additions (docs/KILN_PROFILES_PLAN.md items 1/2/12): the Pico's
+ * commissioning params, captured via kiln_package_capture_pico_half() at
+ * save/clone time, plus this entry's package identity.
+ *   pico_populated: 0 for a v2-migrated legacy slot that has not been
+ *     re-saved since the v2->v3 upgrade (migrate_store_v2_to_v3() cannot
+ *     retroactively know what the Pico held when that slot was originally
+ *     saved) -- NOT the same as "captured with the Pico reporting nothing
+ *     set", which is pico_populated=1 with every entries[].flags == 0.
+ *     kiln_cfg_store_apply() must not claim a Pico half exists for a
+ *     pico_populated==0 slot.
+ *   pkg_schema/pkg_hash: section 3.1.1/3.1.3's package identity, valid only
+ *     when pico_populated != 0 (both are 0 on a migrated-but-not-resaved
+ *     slot, which is never mistaken for a real hash -- 0 is not attainable
+ *     from kiln_package_compute_hash() at pkg_schema=KILN_PKG_SCHEMA_VERSION
+ *     unless the CRC of an all-zero/empty input genuinely happens to be 0,
+ *     an astronomically unlikely coincidence this module does not attempt to
+ *     special-case; pico_populated is the actual, authoritative "was this
+ *     ever computed" flag). */
 typedef struct {
     uint8_t in_use;
     int32_t id;
     char name[KILN_CFG_NAME_MAX_LEN + 1];
     uint16_t blob_len;
     uint8_t blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+    uint8_t pico_populated;
+    uint16_t pkg_schema;
+    uint32_t pkg_hash;
+    kiln_pkg_safety_t pico;
 } kiln_cfg_entry_t;
 
 typedef struct {

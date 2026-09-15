@@ -1,6 +1,7 @@
 #include "kiln_cfg_store.h"
 
 #include <ctype.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -15,6 +16,10 @@
 
 #include "kiln_cfg_store_internal.h"
 #include "kiln_cfg_store_cfg_fs.h"
+#include "kiln_package.h" /* kiln_package_capture_pico_half()/_compute_hash() -- explicit even
+                            * though kiln_cfg_store_internal.h already drags this in transitively,
+                            * since this file (not that header) is the one that actually calls
+                            * into it. */
 
 static const char *TAG = "kiln_cfg_store";
 
@@ -68,6 +73,20 @@ NVS_KEY_LEN_CHECK(NVS_KEY_STORE_REV);
  * Frozen here so the v1 layout can still be read and migrated. */
 #define KILN_CFG_STORE_BLOB_MAX_SIZE_V1 512u
 
+/* Both frozen layouts below hardcode 8, NEVER KILN_CFG_MAX_COUNT (now 10) --
+ * this is deliberate and load-bearing, not an oversight. KILN_CFG_MAX_COUNT
+ * bumped 8 -> 10 in this same change (docs/KILN_PROFILES_PLAN.md item 1); a
+ * frozen historical layout that silently tracked the live macro would grow
+ * out from under itself the moment the macro changed again, making the
+ * exact-size migration detection below (`stored_len == sizeof(kiln_cfg_
+ * store_blob_v1_t)` / `..._v2_t`) compare against the WRONG size and either
+ * mis-detect a v1/v2 blob as corrupt or, worse, misinterpret a differently-
+ * shaped blob as one of these. Every historical layout's slot count is a
+ * fact about bytes already on boards' flash, frozen at the value it was
+ * written with -- never re-derived from a macro that keeps changing. */
+#define KILN_CFG_STORE_V1_COUNT 8u
+#define KILN_CFG_STORE_V2_COUNT 8u
+
 /* ---- Frozen v1 on-flash layout -------------------------------------------
  * Used ONLY to reinterpret a stored v1 blob during migration. Never grown,
  * never reused: same discipline as zones_http.c's zone_cfg_v*_t snapshots,
@@ -85,43 +104,82 @@ typedef struct {
     uint8_t version;
     int32_t active_id;
     int32_t next_id;
-    kiln_cfg_entry_v1_t entries[KILN_CFG_MAX_COUNT];
+    kiln_cfg_entry_v1_t entries[KILN_CFG_STORE_V1_COUNT];
 } kiln_cfg_store_blob_v1_t;
 
+/* ---- Frozen v2 on-flash layout --------------------------------------------
+ * This WAS kiln_cfg_store_blob_t/kiln_cfg_entry_t before docs/KILN_PROFILES_
+ * PLAN.md items 1/2/12 (8 slots, ESP-only blob, no Pico half, no package
+ * identity). Frozen here, unchanged field-for-field, purely so a v2 blob
+ * already on a board's flash can still be read and migrated -- same
+ * discipline as the v1 layout just above. Uses ZONES_CONFIG_BLOB_MAX_SIZE
+ * (not a frozen numeric literal) because that ceiling has NOT changed
+ * between v2 and v3 -- only the slot count and the addition of new trailing
+ * fields did -- so tying it to the live macro here is correct, unlike the
+ * v1 blob-size macro above which WAS itself the thing that changed. */
+typedef struct {
+    uint8_t in_use;
+    int32_t id;
+    char name[KILN_CFG_NAME_MAX_LEN + 1];
+    uint16_t blob_len;
+    uint8_t blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+} kiln_cfg_entry_v2_t;
+
+typedef struct {
+    uint8_t version;
+    int32_t active_id;
+    int32_t next_id;
+    kiln_cfg_entry_v2_t entries[KILN_CFG_STORE_V2_COUNT];
+} kiln_cfg_store_blob_v2_t;
+
 /* Budget guard: kiln_cfg_store_blob_t is a permanent member of s_store
- * (static, BSS-resident) and kiln_cfg_store_blob_v1_t is heap-allocated only
- * transiently, on the once-ever v1-migration path in nvs_load_store() below
+ * (static, BSS-resident); the v1/v2 frozen structs are heap-allocated only
+ * transiently, on their once-ever migration paths in nvs_load_store() below
  * (malloc'd, freed before that function returns) -- neither is ever an
  * ordinary function-local/stack buffer, so this is no longer a stack budget.
  * What it actually bounds now: s_store's permanent BSS footprint plus the
- * transient heap high-water mark the migration path can hit, added together
- * as a single loose tripwire so a future ZONES_CONFIG_BLOB_MAX_SIZE widening
- * (or KILN_CFG_MAX_COUNT bump) gets caught here instead of silently growing
- * either cost. 16384 is deliberately loose, not a real budget -- the point
- * is only to force a human back to this comment and nvs_load_store()'s
- * reasoning before either struct doubles again. */
+ * transient heap high-water mark either migration path can hit, added
+ * together as a single loose tripwire so a future ZONES_CONFIG_BLOB_MAX_SIZE
+ * widening (or KILN_CFG_MAX_COUNT bump, or KILN_PKG_SAFETY_PARAM_CAP bump)
+ * gets caught here instead of silently growing the cost. Raised 16384 ->
+ * 40000 for v3's Pico-half addition (kiln_pkg_safety_t adds ~770B/entry *
+ * 10 slots) -- still deliberately loose, not a real budget; the point is
+ * only to force a human back to this comment before any of these structs
+ * doubles again. */
 /* Portable compile-time assert (not _Static_assert): this file is compiled
  * both by the ESP-IDF (xtensa-gcc, C11) build and, #included directly, by
  * this repo's MSVC host tests (test_kiln_cfg_store.c) which are not
  * necessarily invoked in C11 mode. A negative array size is a hard error in
  * every C standard this file has ever been built under. */
 typedef char kiln_cfg_store_blob_budget_check
-    [(sizeof(kiln_cfg_store_blob_t) + sizeof(kiln_cfg_store_blob_v1_t) < 16384) ? 1 : -1];
+    [(sizeof(kiln_cfg_store_blob_t) + sizeof(kiln_cfg_store_blob_v1_t) + sizeof(kiln_cfg_store_blob_v2_t) < 40000)
+         ? 1
+         : -1];
 
-/* Migrates a v1 store into the current layout: every field copied by name,
- * the shorter v1 blob copied into the wider array and the remainder left
+/* SAFETY_CFG_PARAM_COUNT must fit inside kiln_pkg_safety_t's fixed capacity
+ * -- see kiln_package.h's own comment on why the cap is deliberately larger
+ * than today's count. This is the forcing function: CONFIG_PARAM_TABLE
+ * growing past the cap fails this build loudly, at compile time, rather than
+ * kiln_package_capture_pico_half() silently refusing every save at runtime. */
+typedef char kiln_cfg_store_pico_cap_check[(SAFETY_CFG_PARAM_COUNT <= KILN_PKG_SAFETY_PARAM_CAP) ? 1 : -1];
+
+/* Migrates a v1 store into the v2 shape: every field copied by name, the
+ * shorter v1 blob copied into the wider array and the remainder left
  * zeroed. Lossless -- a v1 blob is a complete zones config that a v1-era
  * build wrote, and zones_http.c's own decoder handles its version separately
- * (it carries its own ZONES_CFG_VERSION inside those bytes). */
-static void migrate_store_v1_to_current(const kiln_cfg_store_blob_v1_t *src, kiln_cfg_store_blob_t *dst)
+ * (it carries its own ZONES_CFG_VERSION inside those bytes). Renamed from
+ * the old migrate_store_v1_to_current() now that "current" is v3, one step
+ * further along the chain -- this function's OWN target shape (v2) never
+ * changes regardless of where "current" moves next. */
+static void migrate_store_v1_to_v2(const kiln_cfg_store_blob_v1_t *src, kiln_cfg_store_blob_v2_t *dst)
 {
     memset(dst, 0, sizeof(*dst));
-    dst->version = KILN_CFG_STORE_VERSION;
+    dst->version = 2;
     dst->active_id = src->active_id;
     dst->next_id = src->next_id;
-    for (size_t i = 0; i < KILN_CFG_MAX_COUNT; i++) {
+    for (size_t i = 0; i < KILN_CFG_STORE_V1_COUNT && i < KILN_CFG_STORE_V2_COUNT; i++) {
         const kiln_cfg_entry_v1_t *se = &src->entries[i];
-        kiln_cfg_entry_t *de = &dst->entries[i];
+        kiln_cfg_entry_v2_t *de = &dst->entries[i];
         de->in_use = se->in_use;
         de->id = se->id;
         memcpy(de->name, se->name, sizeof(de->name));
@@ -132,6 +190,35 @@ static void migrate_store_v1_to_current(const kiln_cfg_store_blob_v1_t *src, kil
         }
         de->blob_len = n;
         memcpy(de->blob, se->blob, n);
+    }
+}
+
+/* Migrates a v2 store into the current (v3) layout: every ESP-side field
+ * copied by name, unchanged; the new v3-only fields (pico_populated,
+ * pkg_schema, pkg_hash, pico) are left zeroed -- pico_populated=0 explicitly
+ * marks these slots as "no Pico half captured" (see kiln_cfg_entry_t's own
+ * comment, kiln_cfg_store_internal.h) rather than fabricating one from
+ * nothing. The two NEW slots (index 8, 9) this bump adds are left zeroed/
+ * not-in-use, same as any other never-used slot. Lossless for every v2
+ * field: a user's existing 8 saved kiln configs, their names, ids, and
+ * active_id/next_id all survive this migration untouched. */
+static void migrate_store_v2_to_v3(const kiln_cfg_store_blob_v2_t *src, kiln_cfg_store_blob_t *dst)
+{
+    memset(dst, 0, sizeof(*dst));
+    dst->version = KILN_CFG_STORE_VERSION;
+    dst->active_id = src->active_id;
+    dst->next_id = src->next_id;
+    for (size_t i = 0; i < KILN_CFG_STORE_V2_COUNT && i < KILN_CFG_MAX_COUNT; i++) {
+        const kiln_cfg_entry_v2_t *se = &src->entries[i];
+        kiln_cfg_entry_t *de = &dst->entries[i];
+        de->in_use = se->in_use;
+        de->id = se->id;
+        memcpy(de->name, se->name, sizeof(de->name));
+        de->name[sizeof(de->name) - 1] = '\0';
+        de->blob_len = se->blob_len;
+        memcpy(de->blob, se->blob, sizeof(de->blob));
+        /* pico_populated/pkg_schema/pkg_hash/pico already zeroed by the
+         * memset above -- explicitly NOT set here. */
     }
 }
 
@@ -148,6 +235,37 @@ static kiln_cfg_store_blob_t s_store;
  * s_zones_cfg_rev: it is NOT reset by anything short of a real
  * nvs_load_store() resync. */
 static uint32_t s_kiln_cfg_rev = 0;
+
+/* ---- H3: corrupt-store quarantine ------------------------------------------
+ * docs/audits/kiln_profiles_robustness_2026-09-14.md finding H3: a corrupt
+ * store used to silently reset_to_defaults() with one ESP_LOGW, presenting
+ * itself as a legitimately empty store. The very next auto-save (plan item
+ * 13, not yet implemented, but nothing stops today's ordinary save/clone
+ * either) would then overwrite the ONLY copy of the operator's saved kiln
+ * configs -- both NVS and the `cfg` mirror -- with no operator action. That
+ * is strictly worse than not having this feature.
+ *
+ * DELIBERATELY IN-RAM ONLY, no separate persisted quarantine key: the
+ * corrupt bytes on flash are themselves what makes nvs_load_store()
+ * re-derive this same quarantined state on every boot -- there is nothing
+ * to keep in sync between two stores (the exact "reset one side of a pair"
+ * bug class CLAUDE.md warns about), because there is only one store. Once
+ * kiln_cfg_store_quarantine_clear() erases the blob key and writes a fresh,
+ * valid, empty one, the NEXT boot reads a legitimately valid store and
+ * never re-quarantines -- no flag to forget to clear alongside it. */
+static bool s_quarantined = false;
+static char s_quarantine_reason[128] = "";
+
+static void set_quarantine(const char *reason)
+{
+    s_quarantined = true;
+    strncpy(s_quarantine_reason, reason, sizeof(s_quarantine_reason) - 1);
+    s_quarantine_reason[sizeof(s_quarantine_reason) - 1] = '\0';
+    ESP_LOGE(TAG, "kiln_cfg_store QUARANTINED: %s -- every write (save/clone/rename/delete) is refused "
+                  "until an operator explicitly clears it (POST /api/kiln_configs/quarantine_clear); "
+                  "the live zones config on this board is UNAFFECTED",
+             s_quarantine_reason);
+}
 
 /* ---- NVS ------------------------------------------------------------------ */
 
@@ -191,6 +309,12 @@ static hal_status_t nvs_save_store(void);
 static bool nvs_load_store(void)
 {
     reset_to_defaults();
+    /* Re-derived fresh on every call -- see s_quarantined's own comment for
+     * why there is no separate persisted flag to fall out of sync with
+     * this. A board that boots cleanly after a previous quarantined boot
+     * (e.g. the operator cleared it) must not still report quarantined. */
+    s_quarantined = false;
+    s_quarantine_reason[0] = '\0';
 
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
@@ -209,20 +333,23 @@ static bool nvs_load_store(void)
 
     if (stored_len == sizeof(kiln_cfg_store_blob_v1_t)) {
         /* A board saved by a pre-2026-08-30 build. Its entries are the same
-         * data, just with a 512-byte blob array instead of 640. Migrate
-         * rather than discard: this is a user's named kiln configs.
+         * data, just with a 512-byte blob array instead of 640/896. Migrate
+         * rather than discard: this is a user's named kiln configs. Chains
+         * through v2 (kiln_cfg_entry_v2_t, matching this era's real
+         * on-flash shape) before reaching v3 -- migrate_store_v1_to_v2()'s
+         * OWN target shape never moves, so this chain does not need to
+         * change again the next time "current" advances past v3.
          *
          * Heap-allocated, not `static`/stack: sizeof(kiln_cfg_store_blob_v1_t)
-         * is 4396 bytes (KILN_CFG_MAX_COUNT=8 entries, each
-         * KILN_CFG_STORE_BLOB_MAX_SIZE_V1=512 blob + header/padding =~ 548
-         * bytes -- verified by hand against the struct layout above, not
-         * assumed). This branch runs at most once per board (the very next
-         * boot takes the fast, already-current-version path below), so it is
-         * not worth 4396 bytes of *permanent* BSS the other ~99.99% of boots
-         * never touch. malloc() failure is handled exactly like the
-         * "unreadable, defaults stand" branch a few lines below -- there is
-         * nothing special about running out of heap here versus any other
-         * read failure. */
+         * is ~4.4KB (KILN_CFG_STORE_V1_COUNT=8 entries, each
+         * KILN_CFG_STORE_BLOB_MAX_SIZE_V1=512 blob + header/padding). This
+         * branch runs at most once per board (the very next boot takes the
+         * fast, already-current-version path below), so it is not worth that
+         * many bytes of *permanent* BSS the other ~99.99% of boots never
+         * touch. malloc() failure is handled exactly like the "unreadable,
+         * defaults stand" branch a few lines below -- there is nothing
+         * special about running out of heap here versus any other read
+         * failure. */
         kiln_cfg_store_blob_v1_t *v1 = malloc(sizeof(*v1));
         if (!v1) {
             hal_kv_close(&h);
@@ -233,24 +360,80 @@ static bool nvs_load_store(void)
         err = hal_kv_get_blob(&h, NVS_KEY_STORE, v1, &v1_len);
         hal_kv_close(&h);
         if (err != HAL_OK || v1_len != sizeof(*v1)) {
-            ESP_LOGW(TAG, "kiln_cfg_store v1 blob could not be re-read -- defaults stand");
+            set_quarantine("a v1-sized kiln config blob existed but could not be fully re-read (truncated "
+                           "or corrupted on flash)");
             free(v1);
             return false;
         }
         if (v1->version != 1) {
-            ESP_LOGW(TAG, "kiln_cfg_store blob is v1-SIZED but claims version %u -- treating as corrupt",
+            char msg[128];
+            snprintf(msg, sizeof(msg),
+                     "kiln config blob is v1-SIZED but claims version %u, which is not a v1 blob",
                      (unsigned)v1->version);
+            set_quarantine(msg);
             free(v1);
             return false;
         }
-        migrate_store_v1_to_current(v1, &s_store);
+        kiln_cfg_store_blob_v2_t *v2 = malloc(sizeof(*v2));
+        if (!v2) {
+            free(v1);
+            ESP_LOGW(TAG, "kiln_cfg_store v1->v2 migration buffer alloc failed -- defaults stand");
+            return false;
+        }
+        migrate_store_v1_to_v2(v1, v2);
         free(v1);
-        ESP_LOGI(TAG, "kiln_cfg_store migrated v1 -> v%u (blob ceiling %u -> %u); saved kiln configs kept",
+        migrate_store_v2_to_v3(v2, &s_store);
+        free(v2);
+        ESP_LOGI(TAG, "kiln_cfg_store migrated v1 -> v%u (blob ceiling %u -> %u, %u -> %u slots); saved "
+                      "kiln configs kept, no Pico half (never captured by v1-era firmware)",
                  (unsigned)KILN_CFG_STORE_VERSION, (unsigned)KILN_CFG_STORE_BLOB_MAX_SIZE_V1,
-                 (unsigned)ZONES_CONFIG_BLOB_MAX_SIZE);
+                 (unsigned)ZONES_CONFIG_BLOB_MAX_SIZE, (unsigned)KILN_CFG_STORE_V1_COUNT,
+                 (unsigned)KILN_CFG_MAX_COUNT);
         hal_status_t save_err = nvs_save_store(); /* rewrite in the current layout so the next boot takes the fast path */
         if (save_err != HAL_OK) {
             ESP_LOGW(TAG, "kiln_cfg_store v1->v%u rewrite failed: %s -- will re-migrate next boot",
+                     (unsigned)KILN_CFG_STORE_VERSION, hal_status_to_name(save_err));
+        }
+        return true;
+    }
+
+    if (stored_len == sizeof(kiln_cfg_store_blob_v2_t)) {
+        /* A board saved by a pre-KILN_PROFILES_PLAN build (8 slots, ESP-only,
+         * no Pico half) -- docs/KILN_PROFILES_PLAN.md items 1/2/12. Same
+         * heap-not-BSS reasoning as the v1 branch above; this one runs at
+         * most once per board too. */
+        kiln_cfg_store_blob_v2_t *v2 = malloc(sizeof(*v2));
+        if (!v2) {
+            hal_kv_close(&h);
+            ESP_LOGW(TAG, "kiln_cfg_store v2 migration buffer alloc failed -- defaults stand");
+            return false;
+        }
+        size_t v2_len = sizeof(*v2);
+        err = hal_kv_get_blob(&h, NVS_KEY_STORE, v2, &v2_len);
+        hal_kv_close(&h);
+        if (err != HAL_OK || v2_len != sizeof(*v2)) {
+            set_quarantine("a v2-sized kiln config blob existed but could not be fully re-read (truncated "
+                           "or corrupted on flash)");
+            free(v2);
+            return false;
+        }
+        if (v2->version != 2) {
+            char msg[128];
+            snprintf(msg, sizeof(msg),
+                     "kiln config blob is v2-SIZED but claims version %u, which is not a v2 blob",
+                     (unsigned)v2->version);
+            set_quarantine(msg);
+            free(v2);
+            return false;
+        }
+        migrate_store_v2_to_v3(v2, &s_store);
+        free(v2);
+        ESP_LOGI(TAG, "kiln_cfg_store migrated v2 -> v%u (%u -> %u slots, Pico half added); saved kiln "
+                      "configs kept, no Pico half on migrated slots until re-saved",
+                 (unsigned)KILN_CFG_STORE_VERSION, (unsigned)KILN_CFG_STORE_V2_COUNT, (unsigned)KILN_CFG_MAX_COUNT);
+        hal_status_t save_err = nvs_save_store();
+        if (save_err != HAL_OK) {
+            ESP_LOGW(TAG, "kiln_cfg_store v2->v%u rewrite failed: %s -- will re-migrate next boot",
                      (unsigned)KILN_CFG_STORE_VERSION, hal_status_to_name(save_err));
         }
         return true;
@@ -274,10 +457,15 @@ static bool nvs_load_store(void)
     if (len != sizeof(s_store)) {
         /* Wrong size for ANY version's claimed layout is genuine corruption
          * -- a real blob is always written at exactly sizeof(s_store) (see
-         * nvs_save_store()). Nothing here is worth protecting; defaults
-         * stand, same as "nothing was ever saved." */
-        ESP_LOGW(TAG, "kiln_cfg_store blob is the wrong size -- treating as corrupt, resetting to an "
-                      "empty store rather than risking a half-understood layout");
+         * nvs_save_store()). H3 fix: this used to silently reset_to_
+         * defaults() -- now it QUARANTINES (see set_quarantine()'s own
+         * comment): the operator's saved configs are gone from the byte
+         * count alone, but the bytes on flash are left untouched and every
+         * write is refused until the operator explicitly discards them. */
+        char msg[128];
+        snprintf(msg, sizeof(msg), "kiln config blob is %u bytes, expected exactly %u for any known version",
+                 (unsigned)len, (unsigned)sizeof(s_store));
+        set_quarantine(msg);
         reset_to_defaults();
         return false;
     }
@@ -285,15 +473,17 @@ static bool nvs_load_store(void)
         return true; /* current version, right size -- happy path, s_store already holds it */
     }
     if (s_store.version < KILN_CFG_STORE_VERSION) {
-        /* Reachable only for a version between 1 (handled by the size-based
-         * migration branch above) and KILN_CFG_STORE_VERSION for which no
-         * migration chain has been written yet -- an older-version blob with
+        /* Reachable only for a version between 1 and 2 (both handled by the
+         * size-based migration branches above) and KILN_CFG_STORE_VERSION
+         * for which no migration chain has been written yet -- an older-version blob with
          * no defined conversion is exactly as unusable as a wrong-size one,
-         * not a case where the data is newer than this firmware understands,
-         * so it is treated as corrupt rather than refused. */
-        ESP_LOGW(TAG, "kiln_cfg_store blob is version %u, older than this firmware's %u, and no "
-                      "migration chain exists yet -- treating as corrupt, resetting to an empty store",
+         * so it is quarantined (H3) rather than silently reset. */
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "kiln config blob is version %u, older than this firmware's %u, and no migration chain "
+                 "exists for it",
                  (unsigned)s_store.version, (unsigned)KILN_CFG_STORE_VERSION);
+        set_quarantine(msg);
         reset_to_defaults();
         return false;
     }
@@ -313,9 +503,18 @@ static bool nvs_load_store(void)
      * would overwrite the newer blob on flash -- that write-back guard is
      * exactly why the distinct log message and this reasoning are written
      * down here rather than left for a future change to rediscover. */
-    ESP_LOGW(TAG, "kiln_cfg_store blob is version %u, newer than this firmware's %u -- refusing to "
-                  "load, flash data left untouched",
+    /* H3 fix: also quarantined, not only refused -- flash is left untouched
+     * either way (this function never writes), but WITHOUT quarantine an
+     * operator save on THIS boot would still stomp the newer blob via the
+     * next nvs_save_store(), which writes s_store (now defaults) over
+     * NVS_KEY_STORE unconditionally. Quarantining blocks exactly that
+     * write until the operator acts -- e.g. flashing the firmware that
+     * understands this version, or explicitly discarding it. */
+    char newer_msg[128];
+    snprintf(newer_msg, sizeof(newer_msg),
+             "kiln config blob is version %u, newer than this firmware's %u -- flash data left untouched",
              (unsigned)s_store.version, (unsigned)KILN_CFG_STORE_VERSION);
+    set_quarantine(newer_msg);
     reset_to_defaults();
     return false;
 }
@@ -473,6 +672,29 @@ static bool set_reason(char *reason_out, size_t reason_cap, const char *msg)
     return false;
 }
 
+/* H3: the one gate every mutating entry point (save/clone/rename/delete)
+ * calls FIRST -- refuses with a specific, actionable reason while
+ * s_quarantined is set, so a corrupt store's bytes are never overwritten by
+ * an operator action taken before they even know something is wrong. */
+static bool refuse_if_quarantined(char *reason_out, size_t reason_cap)
+{
+    if (!s_quarantined) {
+        return false;
+    }
+    /* Sized against s_quarantine_reason's own 128-byte cap plus the fixed
+     * template text (~240 bytes) -- GCC's -Werror=format-truncation caught
+     * the original 192-byte buffer as too small for the worst case at
+     * target-build time (the MSVC host build has no equivalent check). */
+    char msg[400];
+    snprintf(msg, sizeof(msg),
+             "kiln config store was unreadable at boot and is quarantined (%s); download a backup of "
+             "any other saved configs is not possible from this state -- clear the quarantine "
+             "(POST /api/kiln_configs/quarantine_clear) to start a fresh, empty store",
+             s_quarantine_reason);
+    set_reason(reason_out, reason_cap, msg);
+    return true;
+}
+
 /* Trims leading/trailing whitespace from `raw` and writes the result to
  * `out` (out_cap must be >= KILN_CFG_NAME_MAX_LEN + 1). Returns false --
  * `out` untouched -- if `raw` is NULL, or if the TRIMMED result is empty
@@ -483,6 +705,65 @@ static bool set_reason(char *reason_out, size_t reason_cap, const char *msg)
  * duplicate check below AND the same bytes end up on flash, so a stray space
  * typed at either end never produces a name that reads as a duplicate in the
  * picker but somehow isn't (or vice versa). */
+/* H9 fix (docs/audits/kiln_profiles_robustness_2026-09-14.md): validates
+ * the CHARACTER SET of an already-trimmed name span -- length/emptiness/
+ * duplicate checks stay normalize_name()'s job, this is only "is every
+ * byte in here safe to put on flash, into JSON, into an HTTP header, and
+ * on the LCD." Rejects:
+ *   - control bytes 0x00-0x1F and 0x7F (a name containing '\n'/'\t'/etc.
+ *     reaches the JSON export, a future Content-Disposition filename, and
+ *     the LCD -- isspace() only trims these at the EDGES, never in the
+ *     middle);
+ *   - '"' and '\\' (breaks a future JSON/HTTP-header quoting) and '/'
+ *     (hazardous in a filename; harmless in NVS but there is no reason to
+ *     allow it in an operator-facing kiln name either);
+ *   - invalid UTF-8, INCLUDING a multi-byte sequence truncated at the
+ *     23-byte length boundary -- the length limit is in bytes (it sizes a
+ *     flash field), so accepting a truncated final character would render
+ *     as a replacement glyph in the browser and garbage on the LCD, and
+ *     could make two visually-identical names compare as non-duplicates.
+ * A minimal, mechanical validator -- not full Unicode normalization -- is
+ * enough here: this only needs to catch "not well-formed enough to render
+ * safely everywhere", not validate that every code point is assigned. */
+static bool name_charset_and_utf8_valid(const char *s, size_t len)
+{
+    size_t i = 0;
+    while (i < len) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x20 || c == 0x7Fu || c == '"' || c == '\\' || c == '/') {
+            return false;
+        }
+        if (c < 0x80u) {
+            i++;
+            continue;
+        }
+        size_t extra;
+        unsigned char min_lead;
+        if ((c & 0xE0u) == 0xC0u) {
+            extra = 1;
+            min_lead = 0xC2u; /* 0xC0/0xC1 would only ever encode an overlong 1-byte value */
+        } else if ((c & 0xF0u) == 0xE0u) {
+            extra = 2;
+            min_lead = 0xE0u;
+        } else if ((c & 0xF8u) == 0xF0u) {
+            extra = 3;
+            min_lead = 0xF0u;
+        } else {
+            return false; /* a bare continuation byte, or a lead byte for a >4-byte sequence -- never valid UTF-8 */
+        }
+        if (c < min_lead || i + extra >= len) {
+            return false; /* overlong lead byte, or the sequence runs past the end -- TRUNCATED, not accepted */
+        }
+        for (size_t j = 1; j <= extra; j++) {
+            if (((unsigned char)s[i + j] & 0xC0u) != 0x80u) {
+                return false;
+            }
+        }
+        i += extra + 1;
+    }
+    return true;
+}
+
 static bool normalize_name(const char *raw, char *out, size_t out_cap)
 {
     if (!raw || out_cap == 0) {
@@ -499,6 +780,9 @@ static bool normalize_name(const char *raw, char *out, size_t out_cap)
     }
     size_t trimmed_len = end - start;
     if (trimmed_len == 0 || trimmed_len > KILN_CFG_NAME_MAX_LEN || trimmed_len >= out_cap) {
+        return false;
+    }
+    if (!name_charset_and_utf8_valid(raw + start, trimmed_len)) {
         return false;
     }
     memcpy(out, raw + start, trimmed_len);
@@ -561,6 +845,26 @@ esp_err_t kiln_cfg_store_init(void)
         return hal_status_to_esp_err(part_err);
     }
     nvs_load_store_with_cfg_fs();
+
+    /* H2 load-time invariant (docs/audits/kiln_profiles_robustness_2026-09-14.md):
+     * pico_populated=1 with pkg_hash==0 is a contradiction (0 is the
+     * documented "never computed" sentinel) that write-time now prevents
+     * from being newly created, but a blob written by a hypothetically
+     * buggy past build, or corrupted in a way that preserves the version/
+     * size checks, could still carry it. Never trust it: downgrade to
+     * "not yet captured" (same state a v2-migrated slot has) and log it,
+     * rather than letting a slot claim a valid Pico-half identity backed by
+     * a hash that was never actually computed. */
+    for (int i = 0; i < KILN_CFG_MAX_COUNT; i++) {
+        kiln_cfg_entry_t *e = &s_store.entries[i];
+        if (e->in_use && e->pico_populated && e->pkg_hash == 0) {
+            ESP_LOGW(TAG, "kiln config '%s' (id=%ld) claimed a captured Pico half with pkg_hash==0 -- "
+                          "treating as not-yet-captured, never a valid-but-zero hash",
+                     e->name, (long)e->id);
+            e->pico_populated = 0;
+            e->pkg_schema = 0;
+        }
+    }
 
     /* Boot-time active-config restore -- see kiln_cfg_store_init()'s doc
      * comment (kiln_cfg_store.h) for the exact three-outcome fallback this
@@ -645,12 +949,73 @@ bool kiln_cfg_store_get_name(int32_t id, char *out, size_t out_cap)
     return true;
 }
 
+/* Captures the Pico half (docs/KILN_PROFILES_PLAN.md items 1/2/12) into
+ * *e->pico by walking the ESP-side mirror of CONFIG_PARAM_TABLE
+ * (kiln_package.h's own header comment on why a table walk, never a curated
+ * field list) and computes this slot's package identity (pkg_schema +
+ * pkg_hash, section 3.1.1/3.1.3) over the just-written ESP blob plus that
+ * Pico half.
+ *
+ * Deliberately NEVER fails the caller's save/clone-from-live: this module's
+ * scope (see kiln_package.h's top comment) is capture-and-hash only, not the
+ * two-processor apply transaction, so a Pico-half capture problem (only
+ * possible if CONFIG_PARAM_TABLE ever outgrows KILN_PKG_SAFETY_PARAM_CAP --
+ * caught at compile time by kiln_cfg_store_pico_cap_check above, so this is
+ * defensive, not an expected runtime path) degrades to "this slot's Pico
+ * half is not yet captured" (pico_populated=0), an HONEST state this
+ * module's own header comment already defines and kiln_cfg_store_apply()
+ * must treat as "no Pico half to push" -- never a silently wrong or stale
+ * one. Losing the ESP-side save over a Pico-cache read glitch would be a
+ * worse failure than the one this guards against. */
+static void populate_pico_half_and_hash(kiln_cfg_entry_t *e, const uint8_t *esp_blob, uint16_t esp_blob_len)
+{
+    kiln_pkg_pico_source_t source = kiln_pkg_pico_source_default();
+    if (!kiln_package_capture_pico_half(&source, &e->pico)) {
+        memset(&e->pico, 0, sizeof(e->pico));
+        e->pico_populated = 0;
+        e->pkg_schema = 0;
+        e->pkg_hash = 0;
+        ESP_LOGW(TAG, "kiln_cfg_store: Pico-half capture failed for '%s' -- this slot's package "
+                      "identity reads as not-yet-captured, ESP half saved regardless",
+                 e->name);
+        return;
+    }
+    /* H2 fix (docs/audits/kiln_profiles_robustness_2026-09-14.md): pkg_hash
+     * == 0 is the documented "never computed" sentinel
+     * (kiln_cfg_store_internal.h), so a slot must never be left marked
+     * pico_populated=1 with pkg_hash==0 -- that combination would be
+     * indistinguishable from a genuinely-computed, astronomically-unlikely
+     * zero CRC and would let the divergence check (once it lands) compare
+     * against a hash that was never actually computed. Only mark
+     * pico_populated=1 AFTER a successful hash; a hash failure downgrades
+     * this slot to the same "not yet captured" state an unreachable capture
+     * failure already produces above, rather than a half-marked one. */
+    uint32_t hash = 0;
+    if (kiln_package_compute_hash(KILN_PKG_SCHEMA_VERSION, esp_blob, esp_blob_len, &e->pico, &hash) && hash != 0) {
+        e->pico_populated = 1;
+        e->pkg_schema = KILN_PKG_SCHEMA_VERSION;
+        e->pkg_hash = hash;
+    } else {
+        memset(&e->pico, 0, sizeof(e->pico));
+        e->pico_populated = 0;
+        e->pkg_schema = 0;
+        e->pkg_hash = 0;
+        ESP_LOGW(TAG, "kiln_cfg_store: package hash computation failed (or produced the reserved 0 "
+                      "sentinel) for '%s' -- this slot's package identity reads as not-yet-captured, "
+                      "ESP half saved regardless",
+                 e->name);
+    }
+}
+
 bool kiln_cfg_store_save_current(const char *name, int32_t id_or_negative, int32_t *out_id,
                                   char *reason_out, size_t reason_cap)
 {
+    if (refuse_if_quarantined(reason_out, reason_cap)) {
+        return false;
+    }
     char normalized[KILN_CFG_NAME_MAX_LEN + 1];
     if (!normalize_name(name, normalized, sizeof(normalized))) {
-        return set_reason(reason_out, reason_cap, "name missing or too long");
+        return set_reason(reason_out, reason_cap, "name missing, too long, or contains invalid characters");
     }
     /* Excluding id_or_negative itself (when >= 0, i.e. an overwrite-by-id)
      * means "re-save this config under the name it already has" is allowed
@@ -695,6 +1060,7 @@ bool kiln_cfg_store_save_current(const char *name, int32_t id_or_negative, int32
     memset(e->blob, 0, sizeof(e->blob));
     memcpy(e->blob, scratch, blob_size);
     e->blob_len = (uint16_t)blob_size;
+    populate_pico_half_and_hash(e, scratch, (uint16_t)blob_size);
 
     if (id_or_negative < 0) {
         /* A config just saved FROM the running kiln is, by construction,
@@ -719,9 +1085,12 @@ bool kiln_cfg_store_save_current(const char *name, int32_t id_or_negative, int32
 bool kiln_cfg_store_clone(int32_t src_id, const char *name, int32_t *out_id, char *reason_out,
                           size_t reason_cap)
 {
+    if (refuse_if_quarantined(reason_out, reason_cap)) {
+        return false;
+    }
     char normalized[KILN_CFG_NAME_MAX_LEN + 1];
     if (!normalize_name(name, normalized, sizeof(normalized))) {
-        return set_reason(reason_out, reason_cap, "name missing or too long");
+        return set_reason(reason_out, reason_cap, "name missing, too long, or contains invalid characters");
     }
     /* A clone always creates a brand-new entry/id, so there is no existing
      * entry to exempt from the collision check -- KILN_CFG_NO_ACTIVE_ID (-1)
@@ -767,6 +1136,9 @@ bool kiln_cfg_store_clone(int32_t src_id, const char *name, int32_t *out_id, cha
 bool kiln_cfg_store_apply(int32_t id, bool ack_no_safety_processor, char *reason_out,
                           size_t reason_cap)
 {
+    if (refuse_if_quarantined(reason_out, reason_cap)) {
+        return false;
+    }
     /* Backstop interlock -- see this function's SAFETY note
      * (kiln_cfg_store.h). Checked FIRST, before find_index_by_id() or
      * anything else touches the store, so a caller that forgets to
@@ -786,6 +1158,27 @@ bool kiln_cfg_store_apply(int32_t id, bool ack_no_safety_processor, char *reason
     if (idx < 0) {
         return set_reason(reason_out, reason_cap, "no saved kiln config with that id");
     }
+    /* H17 fix (docs/audits/kiln_profiles_robustness_2026-09-14.md): a slot
+     * with pico_populated==0 (a v2-migrated slot never re-saved since, or a
+     * hash-computation failure at save time -- see populate_pico_half_and_
+     * hash()) is a HALF-PACKAGE: a real ESP half, no Pico half at all. This
+     * function does not yet push anything to the Pico (docs/KILN_PROFILES_
+     * PLAN.md item 5, out of scope for this pass), but the whole point of
+     * refusing here NOW, before item 5 exists, is to make the future
+     * two-processor apply structurally unable to silently apply the ESP
+     * half while leaving the Pico on the PREVIOUS kiln's settings --
+     * exactly the "obvious implementation" the audit warns would recreate
+     * this plan's central defect. Refuse, do not best-effort; the operator
+     * completes the slot with an ordinary Save once the safety settings are
+     * checked/re-entered. */
+    if (!s_store.entries[idx].pico_populated) {
+        char msg[192];
+        snprintf(msg, sizeof(msg),
+                 "'%s' was saved before this firmware stored the safety processor's settings. Select it, "
+                 "check the safety settings, then press Save to complete it.",
+                 s_store.entries[idx].name);
+        return set_reason(reason_out, reason_cap, msg);
+    }
     /* zones_config_import_blob() does the actual all-or-nothing
      * version-check/re-validate/commit work; see its own doc comment
      * (zones_http.h). */
@@ -803,16 +1196,43 @@ bool kiln_cfg_store_apply(int32_t id, bool ack_no_safety_processor, char *reason
     return true;
 }
 
-bool kiln_cfg_store_delete(int32_t id)
+bool kiln_cfg_store_delete(int32_t id, bool ack_no_safety_processor, char *reason_out, size_t reason_cap)
 {
-    int idx = find_index_by_id(id);
-    if (idx < 0) {
+    if (refuse_if_quarantined(reason_out, reason_cap)) {
         return false;
     }
-    memset(&s_store.entries[idx], 0, sizeof(s_store.entries[idx]));
-    if (s_store.active_id == id) {
-        s_store.active_id = KILN_CFG_NO_ACTIVE_ID;
+    /* H5 fix -- backstop interlock, same pattern and same predicate as
+     * kiln_cfg_store_apply() (see this function's own SAFETY doc comment,
+     * kiln_cfg_store.h): checked FIRST, before find_index_by_id() or
+     * anything else touches the store. */
+    if (ota_http_check_interlocks(ack_no_safety_processor, reason_out, reason_cap) != OTA_INTERLOCK_OK) {
+        return false;
     }
+
+    int idx = find_index_by_id(id);
+    if (idx < 0) {
+        return set_reason(reason_out, reason_cap, "no saved kiln config with that id");
+    }
+    /* H5 fix, part 2: deleting the ACTIVE config is refused outright,
+     * unconditionally (not only while a firing is literally running) --
+     * it is the one stored copy of what this controller is running
+     * (including, under docs/KILN_PROFILES_PLAN.md's model, the Pico half
+     * the safety processor is currently running from RAM and the
+     * divergence check's recorded reference), and "Delete" is exactly one
+     * misclick away from "Apply a different config" in the same picker. */
+    if (s_store.active_id == id) {
+        /* Sized against KILN_CFG_NAME_MAX_LEN (23) plus the fixed template
+         * text -- 96 was too small for the worst case (GCC's -Werror=
+         * format-truncation catches this at target-build time; MSVC's host
+         * build does not). */
+        char msg[160];
+        snprintf(msg, sizeof(msg),
+                 "'%s' is the kiln config this controller is running; select another kiln config first, "
+                 "or use Save as to keep a copy",
+                 s_store.entries[idx].name);
+        return set_reason(reason_out, reason_cap, msg);
+    }
+    memset(&s_store.entries[idx], 0, sizeof(s_store.entries[idx]));
     hal_status_t err = nvs_save_store();
     if (err != HAL_OK) {
         ESP_LOGE(TAG, "nvs_save_store after delete failed: %s -- deleted live but will not survive a reboot",
@@ -823,6 +1243,12 @@ bool kiln_cfg_store_delete(int32_t id)
 
 bool kiln_cfg_store_rename(int32_t id, const char *name)
 {
+    if (s_quarantined) {
+        return false; /* H3 -- no reason_out on this function's signature; kiln_cfg_http.c's rename
+                       * handler should call kiln_cfg_store_is_quarantined() itself for a specific message,
+                       * same "store's own check is the backstop, callers may pre-check for a better
+                       * message" pattern used throughout this module. */
+    }
     char normalized[KILN_CFG_NAME_MAX_LEN + 1];
     if (!normalize_name(name, normalized, sizeof(normalized))) {
         return false;
@@ -843,6 +1269,69 @@ bool kiln_cfg_store_rename(int32_t id, const char *name)
     hal_status_t err = nvs_save_store();
     if (err != HAL_OK) {
         ESP_LOGE(TAG, "nvs_save_store after rename failed: %s -- renamed live but will not survive a reboot",
+                 hal_status_to_name(err));
+    }
+    return true;
+}
+
+bool kiln_cfg_store_get_package_identity(int32_t id, bool *out_pico_populated, uint16_t *out_pkg_schema,
+                                          uint32_t *out_pkg_hash)
+{
+    int idx = find_index_by_id(id);
+    if (idx < 0) {
+        return false;
+    }
+    const kiln_cfg_entry_t *e = &s_store.entries[idx];
+    if (out_pico_populated) {
+        *out_pico_populated = e->pico_populated != 0;
+    }
+    if (out_pkg_schema) {
+        *out_pkg_schema = e->pico_populated ? e->pkg_schema : 0;
+    }
+    if (out_pkg_hash) {
+        *out_pkg_hash = e->pico_populated ? e->pkg_hash : 0;
+    }
+    return true;
+}
+
+bool kiln_cfg_store_is_quarantined(char *reason_out, size_t reason_cap)
+{
+    if (!s_quarantined) {
+        return false;
+    }
+    if (reason_out && reason_cap) {
+        strncpy(reason_out, s_quarantine_reason, reason_cap - 1);
+        reason_out[reason_cap - 1] = '\0';
+    }
+    return true;
+}
+
+bool kiln_cfg_store_quarantine_clear(bool confirm_discard, char *reason_out, size_t reason_cap)
+{
+    if (!s_quarantined) {
+        return set_reason(reason_out, reason_cap, "kiln config store is not quarantined -- nothing to clear");
+    }
+    if (!confirm_discard) {
+        return set_reason(reason_out, reason_cap,
+                           "clearing the quarantine discards whatever kiln configs could not be read -- "
+                           "pass confirm_discard=1 to proceed");
+    }
+    ESP_LOGW(TAG, "kiln_cfg_store: operator confirmed discard of quarantined store (%s) -- starting a "
+                  "fresh, empty store",
+             s_quarantine_reason);
+    reset_to_defaults();
+    s_quarantined = false;
+    s_quarantine_reason[0] = '\0';
+    hal_status_t err = nvs_save_store();
+    if (err != HAL_OK) {
+        /* The in-RAM store is a clean, empty, valid one regardless -- this
+         * board can save fresh kiln configs starting now even if the write-
+         * back itself failed; it will just re-attempt on the next mutation
+         * (every mutating function's own nvs_save_store() call), same as
+         * every other "logged but not fatal" persistence failure in this
+         * module. */
+        ESP_LOGE(TAG, "nvs_save_store after quarantine clear failed: %s -- store is clean in RAM but may "
+                      "not survive a reboot yet",
                  hal_status_to_name(err));
     }
     return true;

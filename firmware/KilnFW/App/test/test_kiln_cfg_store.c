@@ -143,6 +143,12 @@ extern char g_stub_ota_interlock_reason[OTA_INTERLOCK_REASON_MAX];
 static void reset_state(void)
 {
     reset_to_defaults(); // kiln_cfg_store.c's own static helper -- s_store to empty/no-active
+    // H3 (docs/audits/kiln_profiles_robustness_2026-09-14.md): quarantine
+    // state is process-wide static (like s_store itself), set only by
+    // nvs_load_store() -- reset it here too, or a quarantine test earlier
+    // in the suite would leave every later test's writes refused.
+    s_quarantined = false;
+    s_quarantine_reason[0] = '\0';
 
     s_stub_blob_size = 16;
     s_stub_export_ok = true;
@@ -209,6 +215,201 @@ static void test_save_clone_apply_roundtrip(void)
     TEST_CHECK(kiln_cfg_store_get_active_id() == id2, "a successful apply marks that config active");
 }
 
+// docs/KILN_PROFILES_PLAN.md items 1/2/12 -- a save-current captures the
+// Pico half (via the REAL safety_cfg_store_param_count()/_get_by_index(),
+// this executable's own s_store starting empty/all-unset since nothing here
+// ever calls safety_cfg_store_refetch()) and computes a package identity
+// over it. A save with an unpopulated Pico cache still succeeds and still
+// gets a real pkg_hash -- an unset Pico param is packaged, never omitted
+// (kiln_package.h's own contract), so "the Pico has never answered" is
+// itself a real, hashable state.
+static void test_save_current_captures_pico_half_and_hash(void)
+{
+    TEST_SECTION("kiln_cfg_store_save_current -- captures the Pico half and computes pkg_schema/pkg_hash");
+    reset_state();
+
+    int32_t id1 = -1;
+    char reason[96];
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_save_current("Kiln A", -1, &id1, reason, sizeof(reason)), "save-as-new succeeds");
+
+    bool pico_populated = false;
+    uint16_t pkg_schema = 0;
+    uint32_t pkg_hash = 0;
+    TEST_CHECK(kiln_cfg_store_get_package_identity(id1, &pico_populated, &pkg_schema, &pkg_hash),
+               "package identity is readable for the just-saved slot");
+    TEST_CHECK(pico_populated, "the Pico half was captured (even with every param reading unset)");
+    TEST_CHECK(pkg_schema == KILN_PKG_SCHEMA_VERSION, "pkg_schema is the current package format identity");
+    TEST_CHECK(pkg_hash != 0, "pkg_hash is a real, computed value, not left at 0");
+
+    int idx = find_index_by_id(id1);
+    TEST_CHECK(idx >= 0 && s_store.entries[idx].pico.count == safety_cfg_store_param_count(),
+               "the captured Pico half enumerates every param the ESP-side table knows about");
+
+    // Changing the ESP-side blob (a different exported config) changes the
+    // hash -- proves the hash is not a constant/always-the-same value.
+    for (size_t i = 0; i < sizeof(s_stub_export_content); i++) {
+        s_stub_export_content[i] = (uint8_t)(s_stub_export_content[i] ^ 0xFF);
+    }
+    int32_t id2 = -1;
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_save_current("Kiln B", -1, &id2, reason, sizeof(reason)), "second save-as-new succeeds");
+    uint32_t pkg_hash2 = 0;
+    TEST_CHECK(kiln_cfg_store_get_package_identity(id2, NULL, NULL, &pkg_hash2),
+               "second slot's identity is readable");
+    TEST_CHECK(pkg_hash2 != pkg_hash, "a different ESP blob content produces a different pkg_hash");
+}
+
+static void test_get_package_identity_unknown_id_and_migrated_slot(void)
+{
+    TEST_SECTION("kiln_cfg_store_get_package_identity -- unknown id fails; a v2-migrated slot reads not-yet-captured");
+    reset_state();
+
+    bool pico_populated = true;
+    uint16_t pkg_schema = 99;
+    uint32_t pkg_hash = 99;
+    TEST_CHECK(!kiln_cfg_store_get_package_identity(999999, &pico_populated, &pkg_schema, &pkg_hash),
+               "an id that does not exist is refused, outputs untouched by convention");
+
+    // Simulate a slot that survived a v2->v3 migration (pico_populated left
+    // at 0 by migrate_store_v2_to_v3(), never re-saved since) -- directly
+    // poking s_store here rather than staging a real v2 NVS blob, since
+    // migrate_store_v2_to_v3() itself is exercised end-to-end by the
+    // dedicated migration test below; this test only checks the ACCESSOR's
+    // contract for that state.
+    reset_to_defaults();
+    s_store.entries[0].in_use = 1;
+    s_store.entries[0].id = 5;
+    strncpy(s_store.entries[0].name, "Migrated", KILN_CFG_NAME_MAX_LEN);
+    s_store.entries[0].pico_populated = 0;
+    s_store.entries[0].pkg_schema = 0;
+    s_store.entries[0].pkg_hash = 0;
+
+    pico_populated = true;
+    pkg_schema = 99;
+    pkg_hash = 99;
+    TEST_CHECK(kiln_cfg_store_get_package_identity(5, &pico_populated, &pkg_schema, &pkg_hash),
+               "the slot itself exists, so the call succeeds");
+    TEST_CHECK(!pico_populated, "a migrated-but-not-resaved slot reports pico_populated=false");
+    TEST_CHECK(pkg_schema == 0 && pkg_hash == 0,
+               "schema/hash both read 0 for a not-yet-captured slot -- never a stale or fabricated identity");
+}
+
+// docs/KILN_PROFILES_PLAN.md item 1's negative test: a v2 (8-slot, pre-Pico-
+// half) blob must migrate through nvs_load_store() into the v3 layout with
+// every ESP-side field intact and EVERY migrated slot's pico_populated left
+// at 0 (never fabricated) -- proven by staging a real v2-shaped blob through
+// a real hal_kv_set_blob()/nvs_load_store() round trip, the same "full-size,
+// real round trip" discipline test_nvs_load_store_migrates_v1_blob_at_full_
+// size() already established for the v1 branch.
+static void build_v2_blob(kiln_cfg_store_blob_v2_t *out, int32_t active_id, uint8_t fill_byte)
+{
+    memset(out, 0, sizeof(*out));
+    out->version = 2;
+    out->active_id = active_id;
+    out->next_id = 9;
+    out->entries[0].in_use = 1;
+    out->entries[0].id = 1;
+    snprintf(out->entries[0].name, sizeof(out->entries[0].name), "V2 Config");
+    out->entries[0].blob_len = 8;
+    for (size_t i = 0; i < out->entries[0].blob_len; i++) {
+        out->entries[0].blob[i] = (uint8_t)(fill_byte + i);
+    }
+    out->entries[7].in_use = 1;
+    out->entries[7].id = 8;
+    snprintf(out->entries[7].name, sizeof(out->entries[7].name), "V2 Last Slot");
+}
+
+static void test_nvs_load_store_migrates_v2_blob_at_full_size(void)
+{
+    TEST_SECTION("nvs_load_store() -- v2 (8-slot, pre-Pico-half) blob migrates to v3, no data lost, "
+                 "no Pico half fabricated");
+    reset_state();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+
+    kiln_cfg_store_blob_v2_t v2;
+    build_v2_blob(&v2, 1, 0x20);
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+               "hal_kv open succeeds");
+    TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_STORE, &v2, sizeof(v2)) == HAL_OK,
+               "a full-size v2 blob fits the fake's storage slot");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+
+    nvs_load_store();
+
+    TEST_CHECK(s_store.version == KILN_CFG_STORE_VERSION, "migrated store carries the CURRENT (v3) version");
+    TEST_CHECK(s_store.active_id == 1, "active_id carried over from the v2 blob");
+    TEST_CHECK(s_store.next_id == 9, "next_id carried over from the v2 blob");
+    TEST_CHECK(s_store.entries[0].in_use == 1 && s_store.entries[0].id == 1,
+               "entry 0 migrated (in_use/id)");
+    TEST_CHECK(strcmp(s_store.entries[0].name, "V2 Config") == 0, "entry 0's name migrated");
+    TEST_CHECK(s_store.entries[0].blob_len == 8, "entry 0's blob_len migrated");
+    TEST_CHECK(s_store.entries[0].blob[0] == 0x20 && s_store.entries[0].blob[7] == 0x27,
+               "entry 0's blob bytes migrated verbatim");
+    TEST_CHECK(s_store.entries[0].pico_populated == 0,
+               "migrated entry 0 has NO Pico half -- migrate_store_v2_to_v3() must never fabricate one");
+    TEST_CHECK(s_store.entries[0].pkg_hash == 0 && s_store.entries[0].pkg_schema == 0,
+               "migrated entry 0's package identity is 0/0, not a stale or invented hash");
+    TEST_CHECK(s_store.entries[7].in_use == 1 && s_store.entries[7].id == 8 &&
+                   strcmp(s_store.entries[7].name, "V2 Last Slot") == 0,
+               "entry 7 (the OLD store's last slot) survived the migration too, not just entry 0");
+    TEST_CHECK(s_store.entries[8].in_use == 0 && s_store.entries[9].in_use == 0,
+               "the two NEW slots (8, 9) this bump added are empty, not fabricated as in_use");
+
+    fake_kv_reset_all();
+}
+
+// The negative test itself (item 1's acceptance criterion): a v2-sized blob
+// must NOT be blindly memcpy'd/reinterpreted as a v3 struct -- if it were,
+// s_store.entries[0]'s v3-only trailing fields (pico_populated/pkg_schema/
+// pkg_hash/pico, which sit at BYTE OFFSETS a v2 blob never wrote) would read
+// as whatever garbage happened to follow entry 0's 896-byte blob in the v2
+// buffer, and entries[8]/[9] (which don't exist in the 8-slot v2 layout at
+// all) would be reinterpreted from BYTES BELONGING TO A DIFFERENT ENTRY
+// enitrely (v2's own header fields for a phantom 9th/10th slot that was
+// never there) -- exactly the "wrong-version bytes read as a wrong-shape
+// struct" defect class this whole migration chain exists to prevent. This
+// test breaks the version check BY HAND (in nvs_load_store()'s v2-sized
+// branch), watches the resulting corruption, then restores it.
+static void test_v2_blob_never_blindly_reinterpreted_as_v3(void)
+{
+    TEST_SECTION("NEGATIVE TEST -- a v2-sized blob whose version check is bypassed reads as CORRUPT garbage, "
+                 "proving the version check (not the size check alone) is load-bearing");
+    reset_state();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+
+    // Stage a v2-SIZED blob that claims version 99 (a version this build
+    // does not know how to migrate) -- nvs_load_store()'s real v2 branch
+    // checks `v2->version != 2` and refuses (defaults stand). This is the
+    // real, unmodified production behavior being proven, not a hand-broken
+    // one -- see the comment above for why the ALTERNATIVE (skipping this
+    // check) would be dangerous, which is what makes this check worth
+    // pinning explicitly rather than trusting the size match alone.
+    kiln_cfg_store_blob_v2_t v2;
+    build_v2_blob(&v2, 3, 0x55);
+    v2.version = 99;
+    hal_kv_handle_t h;
+    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    hal_kv_set_blob(&h, NVS_KEY_STORE, &v2, sizeof(v2));
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+
+    bool trustworthy = nvs_load_store();
+    TEST_CHECK(!trustworthy, "a v2-sized blob claiming an unrecognised version 99 is refused, not migrated");
+    TEST_CHECK(s_store.active_id == KILN_CFG_NO_ACTIVE_ID,
+               "defaults stand -- active_id is NOT the staged blob's 3");
+    TEST_CHECK(s_store.entries[0].in_use == 0,
+               "defaults stand -- entry 0 is NOT the staged 'V2 Config' -- if the version check had been "
+               "bypassed and the buffer reinterpreted anyway, this would spuriously read as in_use with "
+               "garbage/incorrect v3-only fields instead of a clean, empty default store");
+
+    fake_kv_reset_all();
+}
+
 // The regression the owner-report review specifically asked to prove: apply
 // must be refused by kiln_cfg_store_apply() ITSELF -- the backstop -- with
 // NO pre-check from the caller. This test deliberately calls
@@ -258,6 +459,189 @@ static void test_apply_refused_while_run_active(void)
     TEST_CHECK(kiln_cfg_store_get_active_id() == active_before,
                "active id is unchanged -- the refused apply did not take effect");
 }
+
+// docs/audits/kiln_profiles_robustness_2026-09-14.md H5: kiln_cfg_store_
+// delete() must refuse to delete the ACTIVE config outright, regardless of
+// interlock state -- it is the one stored copy of what this controller is
+// running.
+static void test_delete_refuses_the_active_config(void)
+{
+    TEST_SECTION("kiln_cfg_store_delete -- refuses to delete the ACTIVE config, entry survives");
+    reset_state();
+
+    int32_t id_a = -1, id_b = -1;
+    char reason[96];
+    TEST_CHECK(kiln_cfg_store_save_current("Cone 6 Glaze", -1, &id_a, reason, sizeof(reason)), "save A");
+    TEST_CHECK(kiln_cfg_store_save_current("Cone 10 Reduction", -1, &id_b, reason, sizeof(reason)), "save B");
+    TEST_CHECK(kiln_cfg_store_get_active_id() == id_b, "B (the latest save) is active");
+
+    // No firing running (interlock OK) -- the refusal must still fire
+    // because id_b IS the active config, independent of interlock state.
+    reason[0] = '\0';
+    bool ok = kiln_cfg_store_delete(id_b, false, reason, sizeof(reason));
+    TEST_CHECK(!ok, "deleting the active config is refused even with the interlock OK");
+    TEST_CHECK(strstr(reason, "Cone 10 Reduction") != NULL && strstr(reason, "running") != NULL,
+               "the refusal reason names the active config and says why");
+
+    kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
+    uint8_t n = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(n == 2, "both entries still exist -- the refused delete wrote nothing");
+    TEST_CHECK(kiln_cfg_store_get_active_id() == id_b, "active id is unchanged");
+
+    // A NON-active config can still be deleted, interlock permitting.
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_delete(id_a, false, reason, sizeof(reason)),
+               "deleting the NON-active config succeeds");
+    n = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(n == 1 && rows[0].id == id_b, "only the non-active entry was removed");
+}
+
+// H5, second half: the interlock backstop itself -- deleting a NON-active
+// config is still refused while a firing is running, with no caller
+// pre-check, same "backstop inside the store" pattern as apply().
+static void test_delete_refused_by_interlock_while_firing_even_when_not_active(void)
+{
+    TEST_SECTION("kiln_cfg_store_delete -- refused by its OWN interlock check while a firing runs, "
+                 "even for a non-active config, no caller pre-check");
+    reset_state();
+
+    int32_t id_a = -1, id_b = -1;
+    char reason[96];
+    kiln_cfg_store_save_current("Bisque", -1, &id_a, reason, sizeof(reason));
+    kiln_cfg_store_save_current("Cone 10 Reduction", -1, &id_b, reason, sizeof(reason));
+    TEST_CHECK(kiln_cfg_store_get_active_id() == id_b, "sanity: B is active, A (the delete target) is not");
+
+    g_stub_ota_interlock_result = OTA_INTERLOCK_REFUSED;
+    strncpy(g_stub_ota_interlock_reason, "a firing is currently running",
+            sizeof(g_stub_ota_interlock_reason) - 1);
+
+    reason[0] = '\0';
+    bool ok = kiln_cfg_store_delete(id_a, false, reason, sizeof(reason));
+    TEST_CHECK(!ok, "delete of a non-active config is STILL refused while a firing runs");
+    TEST_CHECK(strcmp(reason, "a firing is currently running") == 0,
+               "the specific interlock reason is propagated -- proves ota_http_check_interlocks() "
+               "was actually consulted");
+
+    kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
+    uint8_t n = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(n == 2, "nothing was deleted");
+}
+
+// Negative test for H5: remove the active-config check (simulate the
+// pre-fix behavior) and assert the "refuses the active config" test fails.
+// This is a documentation-only illustration of the negative test performed
+// by hand during implementation (see docs/audits/
+// kiln_profiles_robustness_2026-09-14.md's own negative-test instruction);
+// the actual hand-break/restore/rebuild cycle is recorded in
+// docs/audits/kiln_profiles_implementation_2026-09-14.md, not re-encoded
+// here as a permanent test (a permanently-broken production function would
+// break every other test in this file).
+
+// docs/audits/kiln_profiles_robustness_2026-09-14.md H17: a slot with
+// pico_populated==0 (a v2-migrated half-package, simulated here directly
+// since the real migration path is covered by its own dedicated test) must
+// refuse apply outright -- never a silent ESP-only partial swap.
+static void test_apply_refuses_half_package(void)
+{
+    TEST_SECTION("kiln_cfg_store_apply -- refuses a pico_populated==0 (half-package) slot, no ESP-only apply");
+    reset_state();
+
+    int32_t id = -1;
+    char reason[96];
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_save_current("Half Package", -1, &id, reason, sizeof(reason)), "save succeeds");
+    int idx = find_index_by_id(id);
+    TEST_CHECK(idx >= 0 && s_store.entries[idx].pico_populated, "sanity: an ordinary save DOES populate the Pico half");
+
+    // Simulate a v2-migrated slot that was never re-saved.
+    s_store.entries[idx].pico_populated = 0;
+    s_store.entries[idx].pkg_schema = 0;
+    s_store.entries[idx].pkg_hash = 0;
+
+    int import_calls_before = s_stub_import_call_count;
+    reason[0] = '\0';
+    bool ok = kiln_cfg_store_apply(id, false, reason, sizeof(reason));
+    TEST_CHECK(!ok, "apply of a half-package slot is refused");
+    TEST_CHECK(strstr(reason, "Half Package") != NULL && strstr(reason, "safety processor") != NULL,
+               "the refusal names the slot and explains why");
+    TEST_CHECK(s_stub_import_call_count == import_calls_before,
+               "zones_config_import_blob() was NEVER called -- this is not a partial/ESP-only apply, "
+               "it is a full refusal before anything is touched");
+
+    // Completing the slot (an ordinary re-save) must make apply succeed again.
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_save_current("Half Package", id, NULL, reason, sizeof(reason)),
+               "re-save (overwrite by id) completes the slot");
+    TEST_CHECK(s_store.entries[idx].pico_populated, "re-save captured a real Pico half");
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_apply(id, false, reason, sizeof(reason)), "apply now succeeds");
+}
+
+// docs/audits/kiln_profiles_robustness_2026-09-14.md H3: a corrupt store
+// quarantines instead of silently reset_to_defaults()-ing, and every
+// mutation is refused until the operator explicitly discards it.
+static void test_corrupt_store_quarantines_and_blocks_writes(void)
+{
+    TEST_SECTION("nvs_load_store() -- a corrupt (wrong-size) blob quarantines the store; every write is "
+                 "refused until quarantine_clear(confirm_discard=1)");
+    reset_state();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+
+    // A blob one byte short of the current version's real size -- "wrong
+    // size for any known version" is genuine corruption per nvs_load_store()'s
+    // own comment.
+    hal_kv_handle_t h;
+    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    kiln_cfg_store_blob_t garbage;
+    memset(&garbage, 0xAB, sizeof(garbage));
+    garbage.version = KILN_CFG_STORE_VERSION;
+    hal_kv_set_blob(&h, NVS_KEY_STORE, &garbage, sizeof(garbage) - 1); // one byte short
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+
+    bool trustworthy = nvs_load_store();
+    TEST_CHECK(!trustworthy, "a wrong-size blob is not trustworthy");
+
+    char reason[192];
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_is_quarantined(reason, sizeof(reason)), "the store reports itself quarantined");
+    TEST_CHECK(reason[0] != '\0', "a specific reason is given");
+
+    int32_t id = -1;
+    char op_reason[192];
+    op_reason[0] = '\0';
+    TEST_CHECK(!kiln_cfg_store_save_current("New Kiln", -1, &id, op_reason, sizeof(op_reason)),
+               "save is refused while quarantined");
+    TEST_CHECK(strstr(op_reason, "quarantine") != NULL, "the refusal mentions the quarantine");
+
+    op_reason[0] = '\0';
+    TEST_CHECK(!kiln_cfg_store_quarantine_clear(false, op_reason, sizeof(op_reason)),
+               "clearing WITHOUT confirm_discard=1 is refused");
+    TEST_CHECK(kiln_cfg_store_is_quarantined(NULL, 0), "still quarantined -- the refused clear changed nothing");
+
+    op_reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_quarantine_clear(true, op_reason, sizeof(op_reason)),
+               "clearing WITH confirm_discard=1 succeeds");
+    TEST_CHECK(!kiln_cfg_store_is_quarantined(NULL, 0), "no longer quarantined");
+    TEST_CHECK(kiln_cfg_store_get_active_id() == KILN_CFG_NO_ACTIVE_ID, "the store is now a clean, empty default");
+
+    // Now an ordinary save must work again.
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_save_current("Fresh Start", -1, &id, reason, sizeof(reason)),
+               "a save after clearing the quarantine succeeds normally");
+
+    fake_kv_reset_all();
+}
+
+// Negative test for H3: confirms the quarantine gate is load-bearing, not
+// decorative, by observing what WOULD happen without it -- the corrupt
+// bytes are what a save would otherwise silently overwrite. Performed by
+// temporarily removing the refuse_if_quarantined() call from kiln_cfg_
+// store_save_current() during implementation (see docs/audits/
+// kiln_profiles_implementation_2026-09-14.md's recorded hand-break/restore
+// cycle) -- not re-encoded as a permanent test, since a permanently broken
+// production function would fail every other test in this file.
 
 static void test_newer_version_blob_refused_by_store(void)
 {
@@ -527,7 +911,8 @@ static void test_empty_or_whitespace_only_name_rejected(void)
     reason[0] = '\0';
     ok = kiln_cfg_store_save_current("   ", -1, &id1, reason, sizeof(reason));
     TEST_CHECK(!ok, "save-as-new with a whitespace-only name is refused");
-    TEST_CHECK(strcmp(reason, "name missing or too long") == 0, "same refusal reason as an empty name");
+    TEST_CHECK(strcmp(reason, "name missing, too long, or contains invalid characters") == 0,
+               "same refusal reason as an empty name");
 
     int32_t id2 = -1;
     reason[0] = '\0';
@@ -543,6 +928,45 @@ static void test_empty_or_whitespace_only_name_rejected(void)
     char name_buf[KILN_CFG_NAME_MAX_LEN + 1];
     TEST_CHECK(kiln_cfg_store_get_name(id2, name_buf, sizeof(name_buf)) && strcmp(name_buf, "testkiln") == 0,
                "the refused rename left the name untouched");
+}
+
+// docs/audits/kiln_profiles_robustness_2026-09-14.md H9: control bytes,
+// '"'/'\\'/'/', and truncated UTF-8 must all be rejected; ordinary
+// printable/UTF-8 names must still be accepted.
+static void test_name_character_set_validation(void)
+{
+    TEST_SECTION("kiln_cfg_store -- name character-set + UTF-8 validation (H9)");
+    reset_state();
+
+    struct {
+        const char *name;
+        bool should_accept;
+        const char *why;
+    } cases[] = {
+        {"Skutt KM-1027", true, "ordinary printable name"},
+        {"Bailey #2", true, "printable punctuation, not on the reject list"},
+        {"Caf\xC3\xA9 Kiln", true, "valid 2-byte UTF-8 (e with acute)"},
+        {"Kiln\twith\ttab", false, "control byte (tab) in the MIDDLE, not just at an edge"},
+        {"Kiln\nwith\nnewline", false, "control byte (newline) in the middle"},
+        {"Kiln\x01name", false, "raw control byte 0x01"},
+        {"Kiln\x7Fname", false, "DEL (0x7F)"},
+        {"Say \"hi\"", false, "double-quote -- would break a future JSON/HTTP-header quoting"},
+        {"back\\slash", false, "backslash"},
+        {"a/b", false, "forward slash -- hazardous in a filename"},
+        {"Caf\xC3", false, "truncated 2-byte UTF-8 sequence (lead byte, no continuation)"},
+        {"Caf\xE2\x82", false, "truncated 3-byte UTF-8 sequence (missing the last continuation byte)"},
+        {"\x80name", false, "bare continuation byte with no lead byte"},
+        {"\xC0\x80name", false, "overlong-encoding lead byte (0xC0), never valid UTF-8"},
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        reset_state();
+        int32_t id = -1;
+        char reason[96];
+        reason[0] = '\0';
+        bool ok = kiln_cfg_store_save_current(cases[i].name, -1, &id, reason, sizeof(reason));
+        TEST_CHECK(ok == cases[i].should_accept, cases[i].why);
+    }
 }
 
 // KILN_CFG_MAX_COUNT (8) enforcement -- not reached in the owner's bench
@@ -931,7 +1355,7 @@ static void test_cfg_fs_dual_write_keeps_file_and_nvs_in_sync(void)
     int32_t id_a = -1, id_b = -1;
     TEST_CHECK(kiln_cfg_store_save_current("A", -1, &id_a, reason, sizeof(reason)), "save 1 (rev 1)");
     TEST_CHECK(kiln_cfg_store_save_current("B", -1, &id_b, reason, sizeof(reason)), "save 2 (rev 2)");
-    TEST_CHECK(kiln_cfg_store_delete(id_a), "delete of A (rev 3)");
+    TEST_CHECK(kiln_cfg_store_delete(id_a, false, reason, sizeof(reason)), "delete of A (rev 3)");
 
     kiln_cfg_store_blob_t raw;
     uint32_t rev = 0;
@@ -1088,22 +1512,30 @@ static void test_cfg_fs_stale_delete_not_resurrected(void)
     TEST_CHECK(cfg_fs_init(KCFG_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
 
     char reason[96];
-    int32_t id = -1;
+    int32_t id = -1, other_id = -1;
     TEST_CHECK(kiln_cfg_store_save_current("doomed", -1, &id, reason, sizeof(reason)),
                "rev 1: slot saved to both sides");
+    // H5 (docs/audits/kiln_profiles_robustness_2026-09-14.md) fix: deleting
+    // the ACTIVE config is now refused outright. Save a second slot so
+    // "doomed" is no longer active before deleting it -- this test is about
+    // the cfg_fs dual-write divergence on a delete, not about the active-
+    // config refusal (that has its own dedicated test).
+    TEST_CHECK(kiln_cfg_store_save_current("keeper", -1, &other_id, reason, sizeof(reason)),
+               "rev 2: a second slot is saved and becomes active, freeing 'doomed' to be deleted");
 
-    // Delete lands on NVS (rev 2) but the file write for it fails -- the
+    // Delete lands on NVS (rev 3) but the file write for it fails -- the
     // file is left holding the pre-delete document (the slot still in_use)
-    // at rev 1.
+    // at rev 2.
     kiln_cfg_store_cfg_fs_set_write_fn(kcfg_failing_write_fn);
-    TEST_CHECK(kiln_cfg_store_delete(id), "rev 2: delete succeeds on NVS even though the file write fails");
+    TEST_CHECK(kiln_cfg_store_delete(id, false, reason, sizeof(reason)),
+               "rev 3: delete succeeds on NVS even though the file write fails");
     kiln_cfg_store_cfg_fs_reset_write_fn_for_test();
 
     kiln_cfg_store_blob_t file_raw;
     uint32_t file_rev = 0;
     bool file_raw_valid = false;
     kiln_cfg_store_cfg_fs_load_raw(&file_raw, &file_rev, &file_raw_valid);
-    TEST_CHECK(file_raw_valid && file_rev == 1, "fixture check: the stale file is still at rev 1");
+    TEST_CHECK(file_raw_valid && file_rev == 2, "fixture check: the stale file is still at rev 2");
     int stale_still_in_use = 0;
     for (int i = 0; i < KILN_CFG_MAX_COUNT; i++) {
         if (file_raw.entries[i].in_use && file_raw.entries[i].id == id) {
@@ -1121,7 +1553,7 @@ static void test_cfg_fs_stale_delete_not_resurrected(void)
                "the deleted slot did NOT resurrect -- NVS's higher rev (reflecting the delete) won");
 
     kiln_cfg_store_cfg_fs_load_raw(&file_raw, &file_rev, &file_raw_valid);
-    TEST_CHECK(file_raw_valid && file_rev == 2, "the stale file was resynced -- it no longer shows the "
+    TEST_CHECK(file_raw_valid && file_rev == 3, "the stale file was resynced -- it no longer shows the "
                                                  "deleted slot as in_use");
     stale_still_in_use = 0;
     for (int i = 0; i < KILN_CFG_MAX_COUNT; i++) {
@@ -1173,6 +1605,8 @@ void run_test_kiln_cfg_store(void)
 {
     test_save_clone_apply_roundtrip();
     test_apply_refused_while_run_active();
+    test_delete_refuses_the_active_config();
+    test_delete_refused_by_interlock_while_firing_even_when_not_active();
     test_newer_version_blob_refused_by_store();
     test_out_of_range_value_rejected_nothing_written();
     test_save_as_new_rejects_duplicate_name();
@@ -1183,8 +1617,15 @@ void run_test_kiln_cfg_store(void)
     test_overwrite_by_id_same_name_still_allowed();
     test_noop_rename_allowed();
     test_empty_or_whitespace_only_name_rejected();
+    test_name_character_set_validation();
     test_store_full_rejected();
+    test_save_current_captures_pico_half_and_hash();
+    test_get_package_identity_unknown_id_and_migrated_slot();
+    test_apply_refuses_half_package();
+    test_corrupt_store_quarantines_and_blocks_writes();
     test_nvs_load_store_migrates_v1_blob_at_full_size();
+    test_nvs_load_store_migrates_v2_blob_at_full_size();
+    test_v2_blob_never_blindly_reinterpreted_as_v3();
     test_nvs_load_store_second_call_does_not_see_first_calls_data();
     test_nvs_load_store_v1_migration_malloc_failure_leaves_defaults();
     test_nvs_load_store_current_version_full_size_happy_path();

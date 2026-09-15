@@ -70,17 +70,19 @@ extern "C" {
  * generous a budget than those already do. */
 #define KILN_CFG_NAME_MAX_LEN 23
 
-/* How many named kiln configs this board can have saved at once. Sized
- * against kiln_nvs's budget: each stored entry is
- * (1 name + 1 id + 1 blob_len + ZONES_CONFIG_BLOB_MAX_SIZE=640 blob) bytes,
- * see kiln_cfg_store.c's sizeof(kiln_cfg_store_blob_t) comment for the exact
- * arithmetic -- 8 slots lands comfortably under 5KB total, a small slice of
- * the 64KB kiln_nvs partition that also holds zones_cfg (~380B),
- * rules_cfg, relay_cyc, and run_state (each well under 100B). Bump this if
- * an owner asks for more saved configs than 8, not preemptively -- widening
- * it grows every board's persisted blob whether or not the extra slots are
- * ever used. */
-#define KILN_CFG_MAX_COUNT 8
+/* How many named kiln configs this board can have saved at once. Raised
+ * 8 -> 10 (docs/KILN_PROFILES_PLAN.md item 1, owner request: "save up to 10
+ * separate complete kiln configurations") alongside KILN_CFG_STORE_VERSION
+ * 2 -> 3, which also added each entry's Pico-half package (kiln_pkg_safety_t,
+ * kiln_package.h) and its recorded pkg_schema/pkg_hash identity. See
+ * kiln_cfg_store.c's sizeof(kiln_cfg_store_blob_t) comment for the exact
+ * arithmetic against kiln_nvs's budget -- 10 slots at the v3 entry size still
+ * lands comfortably under kiln_nvs's usable ~56KB. Bump this again only on a
+ * further owner request for more than 10, not preemptively -- widening it
+ * grows every board's persisted blob whether or not the extra slots are ever
+ * used. A v2 (8-slot, ESP-only) blob is migrated in place at boot -- see
+ * migrate_store_v2_to_v3() -- so existing saved configs survive this bump. */
+#define KILN_CFG_MAX_COUNT 10
 
 /* No config is active (nothing has ever been applied/saved as the starting
  * point, or the previously-active one was deleted/failed validation at
@@ -247,8 +249,26 @@ bool kiln_cfg_store_apply(int32_t id, bool ack_no_safety_processor, char *reason
  * (deleting the saved snapshot a running kiln happened to be started from
  * does not change what is currently live; it only means there is no longer a
  * saved config to reapply later). Returns false (nothing changed) if `id`
- * does not exist. */
-bool kiln_cfg_store_delete(int32_t id);
+ * does not exist.
+ *
+ * SAFETY (docs/audits/kiln_profiles_robustness_2026-09-14.md finding H5):
+ * deleting the ACTIVE config is refused outright, via the SAME interlock
+ * backstop kiln_cfg_store_apply() uses (ota_http_check_interlocks(), NOT
+ * heat_interlock.c -- see this header's top comment) -- checked INSIDE this
+ * function, first, so a caller cannot bypass it by forgetting to pre-check,
+ * exactly the same "backstop, not a convention" reasoning apply's own
+ * comment gives. This did not exist before this fix: deleting the active
+ * slot mid-firing cleared active_id (harmless to the live zones config
+ * today, but under docs/KILN_PROFILES_PLAN.md's model it also destroys the
+ * one stored copy of the Pico half the Pico is currently running from RAM,
+ * and the divergence check's recorded reference). Refuses (nothing
+ * deleted) if `id` is the currently active config OR the interlock itself
+ * refuses (a running firing, heaters commanded, kiln hot); reason_out/
+ * reason_cap (may be NULL/0) carry the specific reason in both refusal
+ * cases, same convention as kiln_cfg_store_apply(). Deleting a NON-active
+ * config is unaffected by this change (no interlock applied -- there is
+ * nothing live to protect). */
+bool kiln_cfg_store_delete(int32_t id, bool ack_no_safety_processor, char *reason_out, size_t reason_cap);
 
 /* Renames saved config `id` in place -- does not touch its blob, its id, or
  * which config is active. Same name-length/emptiness/case-insensitive-
@@ -269,6 +289,52 @@ bool kiln_cfg_store_rename(int32_t id, const char *name);
  * itself is invalid -- that is a separate failure this predicate does not
  * report. */
 bool kiln_cfg_store_name_would_collide(const char *name, int32_t exclude_id);
+
+/* Package identity for slot `id` (docs/KILN_PROFILES_PLAN.md items 1/2/12) --
+ * *out_pico_populated (may be NULL) is false for a slot saved by pre-v3
+ * firmware and never re-saved since (kiln_cfg_entry_t's own "pico_populated"
+ * comment, kiln_cfg_store_internal.h); *out_pkg_schema and *out_pkg_hash (either
+ * may be NULL) are both 0 whenever *out_pico_populated is false -- neither is
+ * a real identity until a Pico half has actually been captured. Returns
+ * false (all outputs left untouched) if `id` does not exist. Read-only:
+ * exists so a future caller (the divergence check, upload/download, the
+ * picker UI) does not have to reach into this module's internal blob layout
+ * to answer "does this slot have a Pico half, and what is its hash" --
+ * exactly the same "public accessor over the opaque internal struct"
+ * convention kiln_cfg_store_get_name() already establishes. */
+bool kiln_cfg_store_get_package_identity(int32_t id, bool *out_pico_populated, uint16_t *out_pkg_schema,
+                                          uint32_t *out_pkg_hash);
+
+/* docs/audits/kiln_profiles_robustness_2026-09-14.md finding H3:
+ * true iff the store failed to load at boot (a wrong-size blob, a version
+ * this build cannot use or migrate, or a v1/v2-sized blob whose content
+ * disagrees with its claimed size) and is therefore QUARANTINED -- every
+ * save/clone/apply/delete is refused (rename too, though it has no
+ * reason_out of its own to report why) until kiln_cfg_store_quarantine_
+ * clear() is called. `reason_out`/`reason_cap` (may be NULL/0) receive the
+ * specific reason. Returns false (reason_out untouched) when the store is
+ * NOT quarantined -- including the ordinary "never saved anything" case,
+ * which is not an error at all. The live zones config on this board is
+ * UNAFFECTED by quarantine; only the SAVED-SLOTS store is refused writes. */
+bool kiln_cfg_store_is_quarantined(char *reason_out, size_t reason_cap);
+
+/* The ONE way out of quarantine: discards whatever bytes are on flash
+ * (never salvaged, never heuristically parsed -- see the audit doc's own
+ * "would not build a repair wizard" note) and starts a fresh, empty,
+ * valid store. Requires `confirm_discard=true` -- the whole point is that
+ * an operator, not the firmware, decides to accept the loss; passing false
+ * is refused with a reason explaining the confirmation is required, and
+ * changes nothing. On success (returns true): the NVS blob key and its
+ * `cfg` LittleFS mirror are both overwritten with an empty, current-
+ * version store (via the same nvs_save_store() every other mutation
+ * uses), the quarantine is cleared, and what was discarded is logged.
+ * Fails (returns false, nothing changed) if `confirm_discard` is false, or
+ * if the store was not actually quarantined (nothing to clear -- calling
+ * this on a healthy store is refused rather than silently accepted as a
+ * no-op, since a caller doing so has almost certainly misread the store's
+ * state). `reason_out`/`reason_cap` (may be NULL/0) carry the specific
+ * reason on failure. */
+bool kiln_cfg_store_quarantine_clear(bool confirm_discard, char *reason_out, size_t reason_cap);
 
 #ifdef __cplusplus
 }

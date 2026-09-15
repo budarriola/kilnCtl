@@ -82,16 +82,19 @@ extern "C" {
 #define FAKE_KV_MAX_KEY_LEN            16
 #define FAKE_KV_MAX_NAME_LEN           16
 /* 256 -> 8192 (HW_ABSTRACTION.md Phase 3 item 3, the nvs.h -> hal_kv.h
- * migration): kiln_cfg_store.c's host test (test_kiln_cfg_store.c) round-
- * trips a REAL full-size kiln_cfg_store_blob_t (5420+ bytes, grows with
- * ZONES_CONFIG_BLOB_MAX_SIZE) and kiln_cfg_store_blob_v1_t (4396 bytes)
- * through this fake to exercise nvs_load_store()'s migration path -- the
- * same value stubs/nvs.h's single-slot blob store (s_stub_nvs_blob) was
- * independently bumped to over several ZONES_CONFIG_BLOB_MAX_SIZE growth
- * spurts, for the identical reason: a slot too small to hold them just
- * makes that migration path silently untestable again (every set_blob call
- * returns HAL_INVALID_SIZE instead of actually storing anything). */
-#define FAKE_KV_MAX_VALUE_BYTES      8192
+ * migration) -> 20000 (docs/KILN_PROFILES_PLAN.md items 1/2/12: KILN_CFG_
+ * MAX_COUNT 8 -> 10 plus each entry's new Pico-half package pushed
+ * sizeof(kiln_cfg_store_blob_t) to ~17.1KB): kiln_cfg_store.c's host test
+ * (test_kiln_cfg_store.c) round-trips a REAL full-size kiln_cfg_store_
+ * blob_t through this fake to exercise nvs_load_store()'s migration path --
+ * the same value stubs/nvs.h's single-slot blob store (s_stub_nvs_blob) was
+ * independently bumped to over several growth spurts, for the identical
+ * reason: a slot too small to hold them just makes that migration path
+ * silently untestable again (every set_blob call returns HAL_INVALID_SIZE
+ * instead of actually storing anything). 20000 gives headroom above the
+ * measured ~17.1KB rather than fitting it exactly, same "loose headroom"
+ * discipline this constant's own history already follows. */
+#define FAKE_KV_MAX_VALUE_BYTES      20000
 #define FAKE_KV_MAX_HANDLES             8
 
 /* Clears every partition/namespace/key, all handles, all injected faults,
