@@ -1723,6 +1723,13 @@ typedef struct {
 
 void zones_get_safety_wiring(zone_safety_wiring_t *out);
 
+/* Live read-back of the Pico's actual configured tc_type, via safety_cfg_
+ * store's mirror (param_id 0x0105) -- NOT this module's own deprecated
+ * zones_config_get_safety_tc_type() cache above, which can be stale (see
+ * this function's doc comment in zones_current_sweep_task.c). Returns false
+ * (out_tc_type left at 0) if the Pico has never reported the param yet. */
+bool zones_get_safety_pico_tc_type(uint8_t *out_tc_type);
+
 #ifdef __cplusplus
 }
 #endif

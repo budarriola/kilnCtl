@@ -1204,9 +1204,18 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
             settings_source_dirty = true;
         }
     }
-    if (has_safety_tc) {
-        zones_config_set_safety_tc_type((uint8_t)dsafety); /* only fails on out-of-range, already checked above */
-    }
+    /* 2026-09-15 (Opus review item 3): safety_tc_type is no longer written
+     * here. Since the F3 rework (safety_link_poll.c's 2026-09-15 comment)
+     * the Pico's own commissioning page is the SOLE writer of its tc_type;
+     * this ESP-side field is a deprecated read-back-only mirror. A backup
+     * restore used to overwrite that mirror locally with whatever old value
+     * the backup captured, which the ESP would then serve back out (GET
+     * /api/zones) as if it were current -- exactly the staleness item 3
+     * fixes on the read side (see zones_get_safety_pico_tc_type()). Writing
+     * it here would just reintroduce the same staleness through a different
+     * door immediately after. has_safety_tc/dsafety are still parsed and
+     * range-checked above so an out-of-range value in an old backup still
+     * fails the import loudly, rather than being silently ignored. */
     if (settings_source_dirty && !zones_config_save_now()) {
         snprintf(err_msg, err_cap, "settings_source commit succeeded live but failed to persist to flash");
         return false;

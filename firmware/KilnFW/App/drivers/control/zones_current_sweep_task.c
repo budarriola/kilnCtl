@@ -1844,3 +1844,39 @@ void zones_get_safety_wiring(zone_safety_wiring_t *out)
     out->tc_is_separate_sensor = safety_tc_is_separate_physical_sensor(&st);
 }
 
+/* 2026-09-15 (Opus review item 3): the ESP's own zones_cfg_t::safety_tc_type
+ * is a deprecated, READ-BACK-ONLY mirror as of the F3 tc_type rework
+ * (safety_link_poll.c's 2026-09-15 comment) -- the Pico's own commissioning
+ * page is the sole writer now, and the ESP never pushes a value at it. The
+ * GET /api/zones handler used to serve that stale local field directly,
+ * which could read a value the Pico had already moved away from (e.g. a
+ * commissioning-page change made after this ESP's last successful mirror
+ * refresh, or simply before the very first refresh ever completed). This
+ * getter instead does a live linear scan of safety_cfg_store's cache -- the
+ * SAME param_id-0x0105 ("tc_type") mirror safety_ceiling_sync.c's standing-
+ * divergence comparator already reads independently (see
+ * safety_sync_cfg_cache()'s doc comment above) -- so the GET response always
+ * reflects what the Pico most recently reported, not what this ESP last
+ * wrote long ago. Returns false (out_tc_type left at 0) if the param has
+ * never been fetched from the Pico yet; callers must treat that the same as
+ * any other "never confirmed" mirror field, not as a real tc_type of 0. */
+bool zones_get_safety_pico_tc_type(uint8_t *out_tc_type)
+{
+    if (!out_tc_type) {
+        return false;
+    }
+    *out_tc_type = 0;
+    size_t count = safety_cfg_store_param_count();
+    for (size_t idx = 0; idx < count; idx++) {
+        safety_cfg_param_t row;
+        if (safety_cfg_store_get_by_index(idx, &row) && row.param_id == 0x0105u) {
+            if (!row.set || row.type != KILNLINK_PARAM_TYPE_U8) {
+                return false;
+            }
+            *out_tc_type = row.value.u8_val;
+            return true;
+        }
+    }
+    return false;
+}
+

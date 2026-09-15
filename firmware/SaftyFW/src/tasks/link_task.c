@@ -420,6 +420,16 @@ static bool s_valid_frame_seen = false;
 // 120s timers meaningful.
 #define LINK_UP_RECENCY_MS 1000u
 
+// Same threshold, and the same "stale context is no context" reasoning, as
+// safety_core.c's own CONTEXT_MAX_AGE_MS -- link_task.c cannot #include
+// safety_core.c (isolation runs the other direction: safety_core.c is
+// forbidden from including anything link-shaped, snapshots.h's own header
+// comment), so this is a deliberate duplicate of the same constant rather
+// than a shared one. Used only by link_task_heat_is_safe_for_tc_type_change()
+// below (2026-09-15 Opus review G2 fix) to decide whether the ESP's own
+// heat-enable/firing facts in the context frame are fresh enough to trust.
+#define LINK_TASK_CONTEXT_MAX_AGE_MS 5000u
+
 // S4's "commanded on throughout the correlation window" fact (snapshots.h's
 // link_task_get_relay_on_continuous_ms() doc comment) -- single-writer,
 // touched only from link_task_handle_push_context() below.
@@ -1486,23 +1496,77 @@ static void link_task_handle_clear_trip(const kilnlink_frame_t *frame)
 //      header comment already documents for output-status reads.
 // F1 (2026-09-15 owner decision on the Opus review): "as far as the Pico
 // can tell from its own inputs" that heat is not currently being
-// delivered -- s_relay_on_continuous is this file's own tracking of the
-// ESP's most recently reported relay_now_mask (context frames), and
-// current_any_present() (snapshots.h) is the Pico's own CT reading. Either
-// one true means treat heat as NOT safe to assume off. This is a
-// heuristic, not a guarantee (see current_task_get_snapshot()'s own
-// freshness caveats); config_store_decide_write_ex() only ever uses it to
-// widen a refusal into an acceptance for a tc_type-ONLY change, never to
-// grant anything else, and S5 still trips on a bad read of the new type
-// regardless of what this returned.
+// delivered.
+//
+// 2026-09-15 Opus review G2 fix: this used to be `!s_relay_on_continuous &&
+// !current_task_any_current_present()` -- s_relay_on_continuous tracks the
+// context frame's INSTANT relay_now_mask, which reads false in every PWM
+// off-window even mid-firing (a duty-cycled heater spends most ticks with
+// the relay actually open), so this read "safe" between pulses of a firing
+// that was very much still running. The owner rule is heat-enable off AND
+// no firing running -- both facts the ESP already reports explicitly, once
+// per context frame: CONTEXT_FLAG_HEAT_REQUESTED (the ESP's own commanded
+// heat-enable state, not the chopped relay output) and
+// CONTEXT_FLAG_PROFILE_RUNNING (a firing is actively executing). Basing the
+// decision on those instead closes the PWM-off-window gap; either flag set
+// means NOT safe.
+//
+// Stale or missing context data is treated as NOT safe, matching every
+// other context-consuming guard in this codebase (safety_core.c's own
+// context_valid: age >= LINK_TASK_CONTEXT_MAX_AGE_MS, never received this
+// boot, or link_task's own DEGRADED_NO_CONTEXT state, all collapse to the
+// conservative default) -- this function only ever WIDENS a refusal into an
+// acceptance, so any doubt about freshness must fail closed, never open.
+// s_relay_on_continuous and current_task_any_current_present() are kept as
+// additional, independent Pico-local heuristics on top of the ESP's own
+// report (defense in depth: an ESP that lies or glitches about
+// HEAT_REQUESTED/PROFILE_RUNNING still has to also fool the Pico's own
+// relay-mask tracking and its own CT reading) -- none of the three checks
+// is trusted exclusively.
+//
+// Reads only the handful of scalars this needs under s_context_lock,
+// deliberately not a whole context_snapshot_t copy via link_task_get_
+// context_snapshot() -- this sits on link_task's SET_CONFIG/COMMIT_CONFIG
+// call chain, and check_saftyfw_task_stack_budgets.py already grades
+// link_task against a tight regsp margin (see current_task_any_current_
+// present()'s own header comment for the same reasoning applied there).
 static bool link_task_heat_is_safe_for_tc_type_change(void)
 {
-    // current_task_any_current_present() (2026-09-15, stack-budget fix), not
-    // current_task_get_snapshot()+current_any_present() -- this sits on
-    // link_task's SET_CONFIG/COMMIT_CONFIG call chain, and a whole
-    // current_snapshot_t local here pushed link_task over
-    // check_saftyfw_task_stack_budgets.py's regsp-margin grading. See
-    // current_task_any_current_present()'s own header comment.
+    if (s_degraded_no_context) {
+        return false;
+    }
+    if (!s_context_lock || !s_context_published) {
+        return false; // no context ever received this boot -- unknown is not safe
+    }
+
+    bool     ctx_valid = false;
+    uint8_t  ctx_flags = 0;
+    uint32_t ctx_timestamp_ms = 0;
+    if (xSemaphoreTake(s_context_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return false; // could not confirm freshness -- not safe
+    }
+    ctx_valid = s_context_snapshot.valid;
+    ctx_flags = s_context_snapshot.flags;
+    ctx_timestamp_ms = s_context_snapshot.timestamp_ms;
+    xSemaphoreGive(s_context_lock);
+
+    if (!ctx_valid) {
+        return false;
+    }
+
+    // Same wraparound-safe unsigned subtraction as safety_core.c's own
+    // context_valid computation -- both operands come from the same
+    // to_ms_since_boot() clock.
+    uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    uint32_t age_ms = now_ms - ctx_timestamp_ms;
+    if (age_ms >= LINK_TASK_CONTEXT_MAX_AGE_MS) {
+        return false;
+    }
+
+    if (ctx_flags & (CONTEXT_FLAG_HEAT_REQUESTED | CONTEXT_FLAG_PROFILE_RUNNING)) {
+        return false;
+    }
+
     return !s_relay_on_continuous && !current_task_any_current_present();
 }
 
@@ -1552,8 +1616,20 @@ static void link_task_handle_set_config(const kilnlink_frame_t *frame)
         // policy_should_reapply() (2026-09-15 review, F5) so a SET_CONFIG
         // that leaves tc_type unchanged does not needlessly re-open the
         // verification window.
+        // 2026-09-15 Opus review G2: re-check immediately before the
+        // reconfigure, not just before the flash write above -- the flash
+        // write itself takes real time (config_store_flash.c's erase/program
+        // path), during which heat could become enabled. Reapplying the TC
+        // type mid-firing means max31856_configure() clears max31856_tc_
+        // type_verified() and reopens the verification window while heat may
+        // now be on, which this function exists specifically to prevent.
         if (tc_type_reapply_policy_should_reapply(committed.tc_type, rec.tc_type)) {
-            thermo_task_request_tc_type_reapply();
+            if (link_task_heat_is_safe_for_tc_type_change()) {
+                thermo_task_request_tc_type_reapply();
+            } else {
+                log_task_log(LOG_LEVEL_WARN, "set_config",
+                             "tc_type committed, reapply skipped: heat became enabled");
+            }
         }
     } else {
         log_task_log(LOG_LEVEL_WARN, "set_config", reason ? reason : "refused");
@@ -2257,8 +2333,16 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
         // all, so a type change from the UI took effect only at the next
         // boot. Same fail-safe reasoning as link_task_handle_set_config()'s
         // own call above.
+        // 2026-09-15 Opus review G2: same immediate re-check as link_task_
+        // handle_set_config()'s own call above -- see that comment for why
+        // the flash write's own duration makes this necessary, not redundant.
         if (tc_type_reapply_policy_should_reapply(prev_tc_type, to_write.tc_type)) {
-            thermo_task_request_tc_type_reapply();
+            if (link_task_heat_is_safe_for_tc_type_change()) {
+                thermo_task_request_tc_type_reapply();
+            } else {
+                log_task_log(LOG_LEVEL_WARN, "commit_config",
+                             "tc_type committed, reapply skipped: heat became enabled");
+            }
         }
     } else {
         log_task_log(LOG_LEVEL_WARN, "commit_config", reason ? reason : "refused");

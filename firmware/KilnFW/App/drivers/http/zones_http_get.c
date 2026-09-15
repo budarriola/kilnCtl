@@ -232,6 +232,15 @@ esp_err_t zones_get_handler(httpd_req_t *req)
     zones_get_safety_wiring(&safety_wiring);
     uint8_t ct_warn_mask = zones_ct_mapping_warn_mask();
 
+    /* 2026-09-15 (Opus review item 3): read the Pico's LIVE tc_type back
+     * through safety_cfg_store's mirror rather than serving this ESP's own
+     * possibly-stale s_zones.cfg.safety_tc_type -- see
+     * zones_get_safety_pico_tc_type()'s doc comment. Falls back to the local
+     * cache only if the Pico has never reported the param yet (never-
+     * fetched, not a real disagreement), so the field is never left blank. */
+    uint8_t live_pico_tc_type = s_zones.cfg.safety_tc_type;
+    (void)zones_get_safety_pico_tc_type(&live_pico_tc_type);
+
     /* Owner request 2026-09-10: "if i change the max temp in the web gui it
      * should change it in the pico too" -- surface the RELATIONSHIP, not
      * just the raise/lower outcome of the last save. `target_c` is what
@@ -302,7 +311,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
            "\"relay_names\":[",
            (unsigned)config_generation,
            s_zones.cfg.thermo_count, s_zones.cfg.relay_count, s_zones.cfg.max_simultaneous_relays,
-           s_zones.cfg.continue_on_zone_trip ? "true" : "false", s_zones.cfg.safety_tc_type,
+           s_zones.cfg.continue_on_zone_trip ? "true" : "false", live_pico_tc_type,
            (double)s_zones.cfg.pc_link_abort_silence_ms,
            (double)ZONE_HYST_C_DEFAULT, (unsigned)ZONE_MIN_ON_OFF_S_DEFAULT,
            zone_owned_relay_mask(&s_zones.cfg),
