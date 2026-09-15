@@ -85,9 +85,14 @@
 >   `e78fbc5b` closed a live Ki ratchet loop (effective-vs-reference
 >   divergence under `PID_FUZZY`, ~1.2x per run, 9 runs to the 5x
 >   plausibility bound) by withholding the Ki correction while fuzzy is
->   active — **Ki adaptation and the fuzzy layer are now mutually exclusive
->   by design**; `0dbd7c6d` exposed the anchor over `GET /api/zones`, closing
->   the observability hole where the fix's own value could not be read back.
+>   active — that mutual exclusivity has since been **superseded**: the owner
+>   decided fuzzy and the self-improving PID run concurrently with no
+>   interlock (`docs/audits/concurrent_fuzzy_pid_adaptation_2026-09-14.md`),
+>   and `88bb4333` removed the guard together with the Ki write path it
+>   protected, making `adaptive_tune_ki.c` diagnostic-only and SIMC
+>   (`adaptive_tune_model.c`) the sole AUTOMATIC gain writer; `0dbd7c6d`
+>   exposed the anchor over `GET /api/zones`, closing the observability hole
+>   where the fix's own value could not be read back.
 > - **Open, no outcome asserted:** the coupling sign reversal remains
 >   unexplained (no literature reports one); the level-scheduled coupling
 >   class's do-not-retry gate is unchanged; the Pico heat-start reboots are
@@ -98,11 +103,15 @@
 >   zones JSON response has only **161 bytes** of headroom in its 7360-byte
 >   cap (`docs/audits/zones_json_headroom_plan_2026-09-14.md`, `375c9258`) —
 >   enlarging the buffer is forbidden.
-> - **Parked deliberately, not forgotten:** the fuzzy guard in
->   `adaptive_tune_ki.c` reads `control_mode`/`fuzzy_strength_pct` at refine
->   time rather than snapshotting at capture time (safe today only via
->   another module's interlocks), and it fails open if
->   `zones_config_get_control_mode()` returns false.
+> - **CLOSED 2026-09-15 (was "parked deliberately"):** the two defects in
+>   `adaptive_tune_ki.c`'s fuzzy guard — reading
+>   `control_mode`/`fuzzy_strength_pct` at refine time instead of snapshotting
+>   at capture time, and failing open when `zones_config_get_control_mode()`
+>   returns false — were both fixed by `ac5c26a3` (dwell-entry snapshot +
+>   fail-closed), and the guard itself was then removed outright by `88bb4333`
+>   along with the Ki write path it protected. Neither defect exists at HEAD:
+>   the file no longer calls `zones_config_get_control_mode()` at all. This
+>   entry was stale, not open.
 > - **UNVERIFIED ON HARDWARE, unchanged:** `fuzzy_strength_pct = 0.0`,
 >   `approach_rate_cap_c_per_hr = 0.0`, and `adaptive_tune enabled=False` on
 >   all three live zones — every fuzzy-band, overshoot-measurement, ramp-
