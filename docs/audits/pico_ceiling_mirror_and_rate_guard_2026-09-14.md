@@ -241,13 +241,104 @@ full 42-executable suite rebuilt from scratch, all green.
 - `tools/run_all_checks.ps1`: see the final report for the tally; this
   session's own new checks are the ones listed above.
 
-## Board verification (SaftyFW/KilnFW state)
+## Board verification (SaftyFW/KilnFW state) -- completed 2026-09-14, follow-up session
 
-See the final session report for the live-board readback of
-`safety_get_rate_guard()` (expect `33.3 C/min`, 60 s window, ARMED) and
-`safety_get_commissioning()` (expect `abs_max_temp_c` matching the ESP's
-zone ceiling exactly, ARMED), plus link/trip/heap state after the ESP was
-brought current and both processors were confirmed to come back up cleanly.
+**Probe conflict.** `debug_reset(peer="pico")`'s earlier `Error: Failed to
+select multidrop rp2040.dap1` was NOT a stale OpenOCD process holding the
+adapter -- `tasklist /FI "IMAGENAME eq openocd.exe"` showed zero running
+instances before this session touched anything, so `kill_openocd_sessions()`
+was never called (nothing to kill, and the standing "never blanket-kill on
+this shared machine" rule made confirming that first the right move). Retrying
+`debug_reset(peer="pico")` succeeded on this session's first attempt: OpenOCD
+logged the same `Error: Failed to select multidrop rp2040.dap1` transiently
+during dual-core SWD examination, immediately re-examined `rp2040.core1`
+successfully, and completed the reset/shutdown normally. This looks like a
+transient RP2040 multidrop-DAP SWD glitch during dual-core enumeration
+(self-recovering, not adapter contention) rather than a probe-identity or
+stale-session problem -- the adapter-serial pinning to `E66540F0A36C6E21`
+(`debug_probe.py`) was already correct and unaffected. `safety_get_status()`
+/ `link_status()` immediately after showed link up, no trip.
+
+**S8 rate guard.** `safety_get_rate_guard()` read back the stale commissioned
+value first: `max_rate_c_per_min=20C/min (ARMED)`. `safety_set_rate_guard
+(max_rate_c_per_min=33.3, rate_window_s=60, confirm=true)` succeeded on the
+FIRST call with no GRACE-window maneuver needed (no `debug_reset` required) --
+this field's commissioning path accepts a write-and-confirm while ARMED
+directly through `confirm=true`; the earlier `debug_reset(peer="pico")`
+grace-window attempt was unnecessary. Read back and confirmed:
+`safety_get_rate_guard()` -> `max_rate_c_per_min=33.3C/min (ARMED) |
+rate_window_s=60`.
+
+**ESP brought to HEAD.** Main tree carried other sessions' uncommitted WIP
+(`adaptive_tune.c/.h`, `profile_executor_pid_tick.c`,
+`test_adaptive_tune_dwell.c`, several `tools/PcTools/src/kilnctrl/*.py`
+files, plus -- discovered only via `run_all_checks.ps1`, see below -- an
+in-progress, uncommitted, currently-broken rewrite of
+`firmware/KilnFW/App/drivers/persist/kiln_cfg_store.c`/`.h`/
+`kiln_cfg_store_internal.h` plus two new untracked files,
+`kiln_package.c`/`.h`, implementing `docs/KILN_PROFILES_PLAN.md`'s
+`KILN_CFG_MAX_COUNT` 8->10 bump). None of the dirty files matched
+`allow_sensitive_dirty`'s named config-schema/migration/safety patterns at
+the moment of the flash (`flash_firmware()` did not refuse and no override
+was needed), but per the CLAUDE.md-sanctioned path this build was made from a
+clean `git worktree add` at `HEAD` (`7adf191b`, later fast-forwarded in
+place to `c8f7506b` once another session landed a docs-only commit mid-build)
+rather than the dirty main tree, specifically so none of that WIP -- sensitive
+or not -- could ride along onto the board. `firmware/KilnFW/components/lvgl`
+(a submodule) had to be `git submodule update --init`'d in the fresh worktree,
+and the worktree's gitignored `sdkconfig` had to be copied over from the main
+tree (a fresh `idf.py` reconfigure otherwise silently defaults to
+`IDF_TARGET=esp32`, which fails to build against `esp32s3`-only driver
+symbols -- see `firmware/KilnFW/sdkconfig.defaults`'s own comment on why
+`sdkconfig` is gitignored/machine-local). Built clean, flashed via
+`flash_firmware(kiln_fw_root="C:\\wt\\kfw14\\firmware\\KilnFW")` --
+"flashed and verified OK (bootloader + partition table + app), board reset
+and running", provenance `HEAD c8f7506b, tree clean`. `get_fw_version()`
+confirmed `commit: c8f7506b, tree: clean, board/HEAD comparison: OK`. Only
+the ESP was reset (the Pico was not touched by this flash), so no dual-reflash
+S6a window occurred and none was expected; `safety_get_diag()` read back
+`trip_reason 0 [SAFETY_TRIP_NONE]`, `trip_mask 0x0000`, Pico uptime
+788008 ms (undisturbed) throughout.
+
+**Plant models -- confirmed survived intact** (`control_get_zones()` after
+the flash):
+- z0: `K_dc=42.7310 C/duty tau=255.6s dead_time=40.3s tuning_valid=yes`
+- z1: `K_dc=32.3969 C/duty tau=258.9s dead_time=31.3s tuning_valid=yes`
+- z2: `K_dc=33.8493 C/duty tau=247.1s dead_time=26.0s tuning_valid=yes`
+
+All three match the values recorded before the flash exactly (read from the
+named `model_k_dc`/`model_tau_s`/`model_dead_time_s` fields, not
+`coupling_diag_k_dc`, which is numerically similar but a different field).
+`fit_at` still reads `UNKNOWN (never recorded)` on all three zones after the
+flash -- this is unchanged from before the flash and is not a regression:
+these values were restored by hand in `137dea1a` (a manual write, not a fresh
+autotune fit), so no fit timestamp was ever recorded for them; `5d3bc854`'s
+`fit_at`/`zone_model_at()` schedule seam only records a timestamp going
+forward, on the next real fit, and does not backfill history. No unacknowledged
+crash banner from `get_heap_status()` on either processor; `reset_reason=
+'software (esp_restart)'`, `uptime_s=25` matches the just-completed flash,
+not a stray earlier reboot.
+
+**Final state, both processors:** link up, Pico ARMED (S1 `abs_max_temp_c=
+80C` matching the ESP's zone ceiling, S8 `33.3C/min`/60s), `trip_mask
+0x0000`, relays off (no firing running), no unacknowledged crash on either
+side, ESP running HEAD `c8f7506b` clean.
+
+**`run_all_checks.ps1`: 92 passed, 0 skipped, 2 failed** -- both failures
+attributable to the SAME pre-existing, uncommitted, unrelated WIP surfaced
+above, not to anything in this pass: `check_00_kilnfw_target_build.ps1`
+(target link failure, `undefined reference to kiln_pkg_pico_source_default`/
+`kiln_package_capture_pico_half`/`kiln_package_compute_hash`) and
+`check_c_files_in_cmakelists.ps1` (`kiln_package.c` not yet added to
+`App/drivers/CMakeLists.txt`), both rooted in the untracked, half-wired
+`kiln_package.c`/`.h` plus the in-progress `kiln_cfg_store.c` rewrite
+described above. This firmware work is NOT touched, fixed, or committed by
+this pass -- it belongs to whichever other session is mid-edit on
+`docs/KILN_PROFILES_PLAN.md`'s `KILN_CFG_MAX_COUNT` item, is exactly the kind
+of config-persistence/migration code this session's brief said to leave
+alone, and the flashed binary (built from a clean HEAD worktree) does not
+contain it. Last KNOWN-clean tally remains 94/94, from before this WIP
+landed uncommitted in the shared tree.
 
 ## No `ZONES_CFG_VERSION` bump
 
