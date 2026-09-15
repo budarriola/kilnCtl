@@ -135,6 +135,17 @@ _PEERS = {
         # mcp_server_flash.py's flash_firmware() pins its `adapter serial`
         # to -- rather than a second copy of the literal.
         adapter_serial=serial_link.MAIN_BOARD_JTAG_SERIAL,
+        # Xtensa toolchain's nm, used the same way arm-none-eabi-nm is for the
+        # Pico below (symbol_table()/read_symbol()/debug_list_symbols()). Not
+        # normally on PATH -- installed by the ESP-IDF tools installer under
+        # ~/.espressif/tools/xtensa-esp-elf/. symbol_table() falls back to
+        # _find_esp_nm_exe() (glob under that install layout, ESP_NM_EXE env
+        # override) when shutil.which() alone can't find it, mirroring
+        # _find_arm_nm_exe()'s resolution shape for the Pico. Before this fix,
+        # PEER_ESP had no nm_tool at all, so debug_read_symbol(peer="esp")
+        # failed outright with "has no nm tool configured" even on a machine
+        # where the toolchain was actually installed.
+        nm_tool="xtensa-esp-elf-nm",
     ),
     PEER_PICO: PeerConfig(
         cfg_args=["interface/cmsis-dap.cfg", "target/rp2040.cfg"],
@@ -155,6 +166,38 @@ _PEERS = {
         adapter_serial="E66540F0A36C6E21",
         nm_tool="arm-none-eabi-nm",
     ),
+}
+
+
+def _find_esp_nm_exe() -> Optional[str]:
+    """Locates the Xtensa toolchain's ``nm`` for the ESP peer, same resolution
+    shape as ``_find_arm_nm_exe()`` below: an env var override first, then
+    PATH, then the ESP-IDF tools installer's actual on-disk layout (glob,
+    since the version-numbered directory component changes across installer
+    updates)."""
+    env_path = os.environ.get("ESP_NM_EXE")
+    if env_path and os.path.isfile(env_path):
+        return env_path
+
+    which = shutil.which("xtensa-esp-elf-nm") or shutil.which("xtensa-esp32s3-elf-nm")
+    if which:
+        return which
+
+    home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    candidates = glob.glob(
+        os.path.join(home, ".espressif", "tools", "xtensa-esp-elf", "*", "xtensa-esp-elf", "bin", "xtensa-esp-elf-nm.exe")
+    )
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+#: Per-peer fallback finders, tried by symbol_table() when shutil.which(nm_tool)
+#: doesn't find it on PATH -- the toolchain binaries here are installed by
+#: their respective installers, not normally added to PATH.
+_NM_FALLBACK_FINDERS: "dict[str, Callable[[], Optional[str]]]" = {
+    PEER_ESP: _find_esp_nm_exe,
 }
 
 
@@ -189,6 +232,10 @@ def symbol_table(peer: str, elf_path: Optional[str] = None) -> "dict[str, tuple[
     if not os.path.isfile(elf):
         raise FileNotFoundError(f"ELF not found for symbol lookup: {elf}")
     nm = shutil.which(peer_cfg.nm_tool)
+    if nm is None:
+        fallback = _NM_FALLBACK_FINDERS.get(peer)
+        if fallback is not None:
+            nm = fallback()
     if nm is None:
         raise FileNotFoundError(
             f"{peer_cfg.nm_tool} not found on PATH -- needed to resolve symbol names for peer {peer!r}"
