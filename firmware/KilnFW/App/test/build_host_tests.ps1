@@ -74,7 +74,6 @@ try {
         (Join-Path $testDir "test_display_power_wiring.c"),
         (Join-Path $testDir "test_diagnostics_safety_tc_state.c"),
         (Join-Path $testDir "test_dashboard_protocol_version.c"),
-        (Join-Path $testDir "test_crash_report.c"),
         (Join-Path $testDir "test_estop_verification.c"),
         (Join-Path $testDir "test_dualwrite_window.c"),
         (Join-Path $testDir "test_watchdog_cfg.c"),
@@ -1383,6 +1382,29 @@ try {
 
     Invoke-HostTestExe -Name "safety_ceiling_sync_divergence" -ExePath $exe40 -BuildCmd $cmd40
 
+    # ---- test_crash_report.c: its own 41st, separate executable -----------
+    # 2026-09-15 MEDIUM/LOW fixes (review_crash_report_relay_gate_61765de7):
+    # crash_report_acknowledge()/crash_report_clear() now dispatch their NVS
+    # writes through uart_bridge_ext_run_on_flash_worker() (PSRAM-stack safety,
+    # same reasoning as relay_cycles.c/safety_cfg_store.c), so this file now
+    # needs stubs/bx_worker_stub.h's non-static uart_bridge_ext_run_on_flash_
+    # worker()/uart_bridge_ext_is_on_flash_worker() definitions. It used to be
+    # folded into the main $sources executable (which also links
+    # test_safety_cfg_store.c's OWN, differently-shaped, non-static definition
+    # of uart_bridge_ext_run_on_flash_worker() -- a real LNK2005 duplicate
+    # symbol once both were linked together, not merely a style question), so
+    # it now gets its own executable instead, same pattern as test_relay_
+    # cycles.c/test_run_state.c's exe19 above.
+    $exe41 = Join-Path $outDir "kilnctl_host_tests_crash_report.exe"
+    $crObjDir = Join-Path $outDir "cr"
+    New-Item -ItemType Directory -Force -Path $crObjDir | Out-Null
+    $cmd41 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$crObjDir\\`" /Fe:`"$exe41`" `"$(Join-Path $testDir 'test_crash_report.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "crash_report" -ExePath $exe41 -BuildCmd $cmd41
+
     # ---- sim_iter_tune.exe / sim_wide_temp_sweep.exe: data-generating
     # harnesses (ITER_TUNE_REDESIGN_PLAN.md sec 6/7), not TEST_CHECK
     # pass/fail suites -- their stdout is the evidence for the audit docs
@@ -1757,7 +1779,7 @@ try {
     # present before this pass touched the file -- not this pass' doing,
     # left as found rather than investigated further) plus this pass' own
     # 45th call, test_kiln_cfg_swap.c (docs/KILN_PROFILES_PLAN.md item 5).
-    $totalExpected = 45
+    $totalExpected = 46
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the

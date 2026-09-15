@@ -380,16 +380,40 @@ send:
 }
 
 /* POST /api/crash_report/ack -- operator has seen the record, stop showing
- * it as new. Does NOT erase the coredump/record -- see /clear for that. */
+ * it as new. Does NOT erase the coredump/record -- see /clear for that.
+ *
+ * 2026-09-15 audit fix (review_crash_report_relay_gate_61765de7_2026-09-15.md,
+ * LOW): crash_report_acknowledge() returns false for TWO different reasons
+ * -- no record exists to acknowledge, or a record exists but the NVS write
+ * failed -- and this handler used to collapse both into the same "409 no
+ * crash record to acknowledge" text. In the second case that message is
+ * simply wrong: a record DOES exist, the operator is genuinely locked out
+ * of manual relay control by relay_on_blocked(), and telling them "there is
+ * nothing to acknowledge" gives no path forward. Distinguish by checking
+ * presence with crash_report_get() BEFORE acknowledging (present read is a
+ * plain NVS get, not a cache-dependent call) so the two cases get their own
+ * status code and message. */
 static esp_err_t crash_report_ack_post_handler(httpd_req_t *req)
 {
+    crash_report_record_t rec;
+    bool present = crash_report_get(&rec);
     bool ok = crash_report_acknowledge();
-    const char *json = ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"no crash record to acknowledge\"}";
-    httpd_resp_set_type(req, "application/json");
-    if (!ok) {
+
+    char json[160];
+    int n;
+    if (ok) {
+        n = snprintf(json, sizeof(json), "{\"ok\":true}");
+    } else if (!present) {
+        n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"no crash record to acknowledge\"}");
         httpd_resp_set_status(req, "409 Conflict");
+    } else {
+        n = snprintf(json, sizeof(json),
+                     "{\"ok\":false,\"error\":\"failed to persist acknowledgement -- record still "
+                     "unacknowledged, try again\"}");
+        httpd_resp_set_status(req, "500 Internal Server Error");
     }
-    return httpd_resp_send(req, json, strlen(json));
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, (n > 0 && (size_t)n < sizeof(json)) ? (size_t)n : 0);
 }
 
 /* Chunk cap shared by both coredump endpoints below -- declared once, ahead

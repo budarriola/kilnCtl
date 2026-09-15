@@ -3,10 +3,18 @@
 // window"): 20 consecutive clean boots + one file-backed firing + one
 // verified restore round trip.
 //
-// dualwrite_window.c is #included directly (same convention as
-// test_crash_report.c's #include of crash_report.c) so this file can reach
-// its static helpers and exercise a genuine round trip through fake_kv.h's
-// RAM-backed hal_kv fake and fake_sysinfo.h's reset-reason fake.
+// dualwrite_window.c is #included directly so this file can reach its static
+// helpers and exercise a genuine round trip through fake_kv.h's RAM-backed
+// hal_kv fake and fake_sysinfo.h's reset-reason fake.
+//
+// crash_report_get() (dualwrite_window.c's crash_pending check) is stubbed
+// below, not linked from the real crash_report.c: that file (2026-09-15,
+// review_crash_report_relay_gate_61765de7 fix) now dispatches its NVS write
+// through uart_bridge_ext_run_on_flash_worker(), whose stub would collide
+// with test_safety_cfg_store.c's own definition of that same symbol in this
+// executable (same class of LNK2005 that gave test_crash_report.c its own
+// separate executable, see build_host_tests.ps1's "exe41" comment) -- no
+// test in this file exercises the crash-pending branch, so a stub is enough.
 //
 // NEGATIVE TEST: this file also carries a deliberate negative test of the
 // reset-on-unclean-boot logic (see test_apply_boot_negative_break()'s
@@ -20,6 +28,15 @@
 #include "esp_err.h"
 #include "fake_kv.h"
 #include "fake_sysinfo.h"
+
+#include "../drivers/safety/crash_report.h"
+
+// Stub, not the real crash_report.c -- see the file header comment above.
+bool crash_report_get(crash_report_record_t *out)
+{
+    (void)out;
+    return false;
+}
 
 #include "../drivers/persist/dualwrite_window.c"
 

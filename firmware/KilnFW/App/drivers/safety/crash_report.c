@@ -15,6 +15,27 @@
 
 static const char *TAG = "crash_report";
 
+/* Hand-declared rather than #include "uart_bridge.h" -- same reasoning as
+ * relay_cycles.c's/safety_cfg_store.c's identical block: that header pulls
+ * in ILI9488.h/screen_idle.h/kiln_io.h for hardware-bridge task
+ * declarations this file needs none of. Kept in sync by hand if either
+ * signature ever changes.
+ *
+ * WHY THIS MODULE NEEDS IT (added 2026-09-15,
+ * docs/audits/review_crash_report_relay_gate_61765de7_2026-09-15.md): once
+ * the LCD diagnostics page gained its own Acknowledge control, crash_report_
+ * acknowledge()/crash_report_clear()'s NVS writes (persist() below) could be
+ * reached from lvgl_task -- whose stack is PSRAM-backed (DRAM_PSRAM_
+ * PLAN.md) -- not just from diagnostics_http.c's httpd-task POST handlers.
+ * A flash write disables the flash cache, which makes PSRAM unreachable;
+ * ESP-IDF's own esp_task_stack_is_sane_cache_disabled() asserts (aborts the
+ * whole board) if the calling task's stack lives there. Routing every write
+ * in this file through the flash worker, with the same re-entrancy check
+ * relay_cycles_reset() uses, makes both callers safe without either one
+ * having to know which task it is running on. */
+esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
+bool uart_bridge_ext_is_on_flash_worker(void);
+
 /* Cached mirror of "have_record && !acknowledged" -- see crash_report.h's
  * crash_report_has_unacknowledged() doc comment. Defaults to false (matches
  * crash_report_get()'s own "nothing yet" default) and is only ever written
@@ -422,6 +443,22 @@ bool crash_report_has_unacknowledged(void)
     return s_have_unacked_crash;
 }
 
+/* The job run ON the flash worker's own internal-SRAM stack -- see
+ * relay_cycles.c's reset_persist_job()/safety_cfg_store.c's nvs_save_
+ * store_job() for the identical shape. `arg` points at a small struct owned
+ * by the calling task's own stack frame, safe because uart_bridge_ext_run_
+ * on_flash_worker() blocks the caller for the whole call. */
+typedef struct {
+    const crash_report_record_t *rec;
+    esp_err_t err;
+} crash_ack_persist_job_ctx_t;
+
+static void crash_ack_persist_job(void *arg)
+{
+    crash_ack_persist_job_ctx_t *ctx = (crash_ack_persist_job_ctx_t *)arg;
+    ctx->err = persist(ctx->rec);
+}
+
 bool crash_report_acknowledge(void)
 {
     crash_report_record_t rec;
@@ -434,21 +471,50 @@ bool crash_report_acknowledge(void)
     }
     rec.acknowledged = 1u;
     seal_crc(&rec);
-    esp_err_t err = persist(&rec);
-    if (err != ESP_OK) {
+
+    /* RE-ENTRANCY (flash_worker_lint.py's pattern 1, same guard relay_
+     * cycles_reset() uses): check whether we are already ON the flash worker
+     * before dispatching a second job onto it -- dispatching from inside an
+     * already-dispatched job deadlocks the real board. Both known callers
+     * (diagnostics_http.c's httpd-task POST handler, and 2026-09-15's LCD
+     * diagnostics-page Acknowledge control on lvgl_task) are not expected to
+     * already be on the worker, but the check is cheap and this is exactly
+     * the class of bug that stays invisible until a caller changes. */
+    crash_ack_persist_job_ctx_t ctx = { .rec = &rec, .err = ESP_FAIL };
+    if (uart_bridge_ext_is_on_flash_worker()) {
+        crash_ack_persist_job(&ctx);
+    } else {
+        esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker(crash_ack_persist_job, &ctx);
+        if (submit_err != ESP_OK) {
+            /* uart_bridge_ext_run_on_flash_worker() itself returning non-OK
+             * (worker not started, queue full) means the job never ran at
+             * all -- ctx.err is still its ESP_FAIL initializer, which is the
+             * right thing to report either way. */
+            ctx.err = submit_err;
+        }
+    }
+    if (ctx.err != ESP_OK) {
         ESP_LOGW(TAG, "could not persist crash-record acknowledgement: %s -- it will reappear after a reboot",
-                 esp_err_to_name(err));
+                 esp_err_to_name(ctx.err));
         return false;
     }
     s_have_unacked_crash = false;
     return true;
 }
 
-esp_err_t crash_report_clear(void)
+/* Same shape as crash_ack_persist_job() above -- the erase half of
+ * crash_report_clear() also touches flash (hal_kv_erase_key()/commit() and
+ * hal_sysinfo_coredump_erase()), so it needs the identical flash-worker
+ * dispatch. Bundled into one job so both erases happen in a single
+ * dispatch/wait round trip rather than two. */
+typedef struct {
+    hal_status_t kv_err;
+    hal_status_t coredump_err;
+} crash_clear_job_ctx_t;
+
+static void crash_clear_job(void *arg)
 {
-    /* Acknowledge first: even if the coredump erase below fails, the operator
-     * has already asked to stop being shown this record. */
-    crash_report_acknowledge();
+    crash_clear_job_ctx_t *ctx = (crash_clear_job_ctx_t *)arg;
 
     hal_kv_handle_t h;
     hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
@@ -459,13 +525,47 @@ esp_err_t crash_report_clear(void)
         }
         hal_kv_close(&h);
     }
-    if (kv_err != HAL_OK && kv_err != HAL_NOT_FOUND) {
-        ESP_LOGW(TAG, "could not erase crash record from NVS: %s", hal_status_to_name(kv_err));
+    ctx->kv_err = kv_err;
+    ctx->coredump_err = hal_sysinfo_coredump_erase();
+}
+
+esp_err_t crash_report_clear(void)
+{
+    /* Acknowledge first: even if the coredump erase below fails, the operator
+     * has already asked to stop being shown this record. crash_report_
+     * acknowledge() does its own flash-worker dispatch (including the
+     * re-entrancy check), so this call is safe from any task. */
+    crash_report_acknowledge();
+
+    crash_clear_job_ctx_t ctx = { .kv_err = HAL_IO, .coredump_err = HAL_IO };
+    if (uart_bridge_ext_is_on_flash_worker()) {
+        crash_clear_job(&ctx);
+    } else {
+        esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker(crash_clear_job, &ctx);
+        if (submit_err != ESP_OK) {
+            ctx.kv_err = HAL_IO;
+            ctx.coredump_err = HAL_IO;
+        }
     }
 
-    hal_status_t erase_status = hal_sysinfo_coredump_erase();
-    if (erase_status != HAL_OK) {
-        esp_err_t erase_err = hal_status_to_esp_err(erase_status);
+    if (ctx.kv_err != HAL_OK && ctx.kv_err != HAL_NOT_FOUND) {
+        ESP_LOGW(TAG, "could not erase crash record from NVS: %s", hal_status_to_name(ctx.kv_err));
+    }
+
+    /* LOW fix (2026-09-15 audit): re-derive s_have_unacked_crash from disk
+     * rather than trusting crash_report_acknowledge()'s own outcome above --
+     * if THAT write failed but the NVS erase just above still succeeded
+     * (ctx.kv_err is HAL_OK/HAL_NOT_FOUND, i.e. the record is genuinely
+     * gone), the old code left s_have_unacked_crash stuck true until the
+     * next reboot even though load() now correctly reports "no record".
+     * refresh_unacked_cache() is the one function that is allowed to read
+     * NVS to decide the flag (see its own doc comment) and a plain read is
+     * safe to call from any task (no cache-disabling flash operation),
+     * unlike the writes above. */
+    refresh_unacked_cache();
+
+    if (ctx.coredump_err != HAL_OK) {
+        esp_err_t erase_err = hal_status_to_esp_err(ctx.coredump_err);
         ESP_LOGW(TAG, "hal_sysinfo_coredump_erase failed: %s", esp_err_to_name(erase_err));
         return erase_err;
     }

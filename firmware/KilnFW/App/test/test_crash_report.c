@@ -28,6 +28,18 @@
 #include "esp_err.h"
 #include "fake_kv.h"
 
+// crash_report.c (2026-09-15 audit fix) hand-declares
+// uart_bridge_ext_run_on_flash_worker()/uart_bridge_ext_is_on_flash_worker()
+// (same "declared by hand, not via uart_bridge.h" reasoning as
+// relay_cycles.c/safety_cfg_store.c) for crash_report_acknowledge()'s/
+// crash_report_clear()'s flash-worker dispatch -- this shared stub,
+// included before crash_report.c below, supplies their definitions and the
+// same busy/re-entrancy modeling test_relay_cycles.c already relies on.
+#include "stubs/bx_worker_stub.h"
+
+int g_test_failures = 0;
+int g_test_count = 0;
+
 #include "../drivers/safety/crash_report.c"
 
 #include "fake_sysinfo.h"
@@ -199,6 +211,50 @@ static void test_acknowledge_with_no_record_fails(void)
 
     TEST_CHECK(crash_report_acknowledge() == false, "no stored record -- acknowledge reports failure, "
                                                      "not a silent no-op success");
+}
+
+// 2026-09-15 audit fix (review_crash_report_relay_gate_61765de7_2026-09-15.md,
+// LOW #5, "add tests for ... the ack-failure path"): a real record IS
+// present, but the flash write scripted to fail (fake_kv_script_next_write_
+// status, HAL_IO) -- distinct from test_acknowledge_with_no_record_fails()
+// above, which fails for the opposite reason (nothing to acknowledge at
+// all). Also proves the cache is NOT wrongly cleared on a failed write, and
+// that the acknowledge call reaches the flash worker (crash_report.c's PSRAM-
+// safety fix) rather than writing inline.
+static void test_acknowledge_write_failure_path(void)
+{
+    TEST_SECTION("crash_report_acknowledge -- an NVS write failure on a REAL record reports failure, "
+                 "leaves the record (and the unacked cache) unchanged, and still routes through the "
+                 "flash worker");
+    reset_all();
+
+    crash_report_record_t rec = make_sample_record();
+    rec.acknowledged = 0;
+    seal_crc(&rec);
+    TEST_CHECK(persist(&rec) == ESP_OK, "seed an unacknowledged record");
+    refresh_unacked_cache();
+    TEST_CHECK(crash_report_has_unacknowledged() == true, "setup: cache shows unacknowledged before the attempt");
+
+    fake_kv_script_next_write_status(HAL_IO); // the ack's persist() call fails on its very next write
+    bool ok = crash_report_acknowledge();
+
+    TEST_CHECK(ok == false, "acknowledge() reports failure when the underlying NVS write fails, "
+                            "not a silent success");
+    TEST_CHECK(crash_report_has_unacknowledged() == true,
+              "a failed ack write must NOT clear the cache -- the record genuinely is still "
+              "unacknowledged on disk, so the relay gate must keep refusing manual relay-ON");
+
+    crash_report_record_t loaded;
+    TEST_CHECK(load(&loaded), "the record still loads");
+    TEST_CHECK(loaded.acknowledged == 0,
+              "the on-disk record is untouched by the failed write -- still acknowledged=0");
+
+    // NEGATIVE-TEST PROOF: with the write failure no longer scripted, the
+    // exact same call succeeds -- proves the failure above was really the
+    // scripted write, not some other latent defect that always refuses.
+    TEST_CHECK(crash_report_acknowledge() == true,
+              "with the scripted failure cleared, acknowledge() succeeds against the same record");
+    TEST_CHECK(crash_report_has_unacknowledged() == false, "and the cache clears once it actually did");
 }
 
 // ---------------------------------------------------------------------------
@@ -425,6 +481,41 @@ static void test_init_reaches_summary_fetch_when_coredump_present(void)
     fake_sysinfo_reset_all();
 }
 
+static void test_clear_reflag_survives_ack_write_failure(void)
+{
+    TEST_SECTION("crash_report_clear -- LOW fix (review_crash_report_relay_gate_61765de7_2026-09-15): "
+                 "if the internal acknowledge() write fails but the NVS erase right after it still "
+                 "succeeds, the unacked cache must not be left stuck true -- clear() re-derives it "
+                 "from disk after the erase rather than trusting acknowledge()'s own (failed) outcome");
+    reset_all();
+
+    crash_report_record_t rec = make_sample_record();
+    rec.acknowledged = 0;
+    seal_crc(&rec);
+    TEST_CHECK(persist(&rec) == ESP_OK, "seed an unacknowledged record");
+    refresh_unacked_cache();
+    TEST_CHECK(crash_report_has_unacknowledged() == true, "setup: cache shows unacknowledged");
+
+    // Fail exactly the ONE write crash_report_clear()'s internal
+    // crash_report_acknowledge() call makes (its persist()); the erase call
+    // right after it is a separate hal_kv_erase_key()/commit() sequence and
+    // is not consumed by this single scripted failure, so it still succeeds.
+    fake_kv_script_next_write_status(HAL_IO);
+    esp_err_t err = crash_report_clear();
+
+    TEST_CHECK(err == ESP_OK, "crash_report_clear() still reports success -- the coredump/NVS erase, "
+                              "which is what the caller actually asked for, went through even though "
+                              "the internal acknowledge() write failed");
+    TEST_CHECK(crash_report_get(&(crash_report_record_t){0}) == false,
+               "the record is genuinely gone from disk -- the erase succeeded");
+    TEST_CHECK(crash_report_has_unacknowledged() == false,
+               "NEGATIVE-TEST PROOF target: the cache must read false here. With the pre-fix code "
+               "(clear() trusting only crash_report_acknowledge()'s failed return and never calling "
+               "refresh_unacked_cache() itself), this would still read true -- an operator's LCD/web "
+               "acknowledge would look like it did nothing, and the manual relay-ON gate would keep "
+               "refusing forever despite the record being genuinely erased from flash.");
+}
+
 static void test_clear_erases_coredump_via_hal_sysinfo(void)
 {
     TEST_SECTION("crash_report_clear -- hal_sysinfo_coredump_erase() clears fake coredump presence");
@@ -529,14 +620,23 @@ void run_test_crash_report(void)
     test_version_mismatch_rejected();
     test_acknowledge_sets_flag_and_survives_reload();
     test_acknowledge_with_no_record_fails();
+    test_acknowledge_write_failure_path();
     test_has_unacknowledged_cache_tracks_persisted_state();
     test_second_boot_same_dump_id_does_not_overwrite();
     test_get_with_no_record();
     test_dump_id_ignores_padding_bytes();
     test_init_reaches_summary_fetch_when_coredump_present();
+    test_clear_reflag_survives_ack_write_failure();
     test_clear_erases_coredump_via_hal_sysinfo();
     test_exception_registers_round_trip();
     test_frame_trustworthy_rejects_pc_of_zero();
 
     fake_kv_reset_all(); // leave shared fake state as every other test file in this binary expects
+}
+
+int main(void)
+{
+    run_test_crash_report();
+    printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
+    return g_test_failures == 0 ? 0 : 1;
 }

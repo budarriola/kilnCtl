@@ -124,14 +124,26 @@ esp_err_t SX1509_scan(i2c_master_bus_handle_t bus, uint8_t *out_addrs, size_t ma
     (void)bus; (void)out_addrs; (void)max_addrs; if (out_count) *out_count = 0; return ESP_OK;
 }
 
-bool danger_mode_active(void) { return false; }
+// Mutable (not hardcoded false), same reasoning as s_stub_crash_unacked below:
+// test_relay_on_blocked_precedence_with_multiple_gates_active() and
+// test_relay_on_blocked_danger_mode_bypasses_every_gate() below need to drive
+// each of danger_mode/safety/updating independently to prove
+// relay_on_blocked()'s precedence order (danger bypasses all; else safety
+// beats updating beats crash_unack) against the REAL static function.
+static bool s_stub_danger_mode = false;
+bool danger_mode_active(void) { return s_stub_danger_mode; }
+static bool s_stub_updating = false;
 bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap)
 {
-    (void)reason_out; (void)reason_cap; return false;
+    (void)reason_out; (void)reason_cap; return s_stub_updating;
 }
+static bool s_stub_safety_blocked = false;
+static uint32_t s_stub_safety_sources = 0;
 bool relay_authority_on_blocked(SafetyLinkClass *safety, uint32_t *out_sources)
 {
-    (void)safety; if (out_sources) *out_sources = 0; return false;
+    (void)safety;
+    if (out_sources) *out_sources = s_stub_safety_blocked ? s_stub_safety_sources : 0;
+    return s_stub_safety_blocked;
 }
 bool relay_authority_manual_blocked_by_owner(uint8_t relay_index) { (void)relay_index; return false; }
 // Mutable (not hardcoded false) so test_relay_on_blocked_gates_on_unacknowledged_crash_report()
@@ -237,6 +249,100 @@ static void test_relay_on_blocked_gates_on_unacknowledged_crash_report(void)
     s_stub_crash_unacked = false; // leave the stub in its default state for any test after this one
 }
 
+// 2026-09-15 audit fix (review_crash_report_relay_gate_61765de7_2026-09-15.md,
+// LOW #5, "add tests for refusal-code precedence with multiple gates"): with
+// safety/updating/crash-unack all simultaneously true, relay_on_blocked()
+// must report the highest-precedence reason (safety, via *out_sources being
+// nonzero and the true return -- handle_set_relay()/handle_set_relay_mask()
+// map that to ERR_SAFETY before ever consulting out_updating/out_crash_unack)
+// and must NOT also claim the lower-precedence reasons.
+static void test_relay_on_blocked_precedence_with_multiple_gates_active(void)
+{
+    TEST_SECTION("relay_on_blocked() -- refusal-code precedence: safety beats updating beats crash_unack");
+
+    uint32_t sources;
+    bool updating;
+    bool crash_unack;
+
+    // All three gates tripped at once -- safety must win.
+    s_stub_danger_mode = false;
+    s_stub_safety_blocked = true;
+    s_stub_safety_sources = 0x04u;
+    s_stub_updating = true;
+    s_stub_crash_unacked = true;
+
+    sources = 0;
+    updating = false;
+    crash_unack = false;
+    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack) == true, "any gate tripped -> blocked");
+    TEST_CHECK(sources == 0x04u, "the safety-fault sources are reported when safety is the highest-precedence gate");
+    TEST_CHECK(updating == false,
+               "relay_on_blocked() returns as soon as the safety gate trips -- out_updating is never touched");
+    TEST_CHECK(crash_unack == false,
+               "relay_on_blocked() returns as soon as the safety gate trips -- out_crash_unack is never touched");
+
+    // Safety clear, updating + crash_unack both tripped -- updating must win.
+    s_stub_safety_blocked = false;
+    s_stub_safety_sources = 0;
+    s_stub_updating = true;
+    s_stub_crash_unacked = true;
+
+    sources = 0;
+    updating = false;
+    crash_unack = false;
+    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack) == true, "updating+crash_unack -> blocked");
+    TEST_CHECK(updating == true, "with safety clear, an in-progress update takes precedence over crash_unack");
+    TEST_CHECK(crash_unack == false, "out_crash_unack is never touched once the updating gate already blocked");
+
+    // Only crash_unack tripped -- the lowest-precedence gate is still reached
+    // and reported when nothing above it is blocking.
+    s_stub_updating = false;
+    s_stub_crash_unacked = true;
+
+    sources = 0;
+    updating = false;
+    crash_unack = false;
+    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack) == true, "crash_unack alone -> blocked");
+    TEST_CHECK(crash_unack == true, "with safety and updating both clear, crash_unack is reached and reported");
+
+    // Reset every stub to its default for any test after this one.
+    s_stub_danger_mode = false;
+    s_stub_safety_blocked = false;
+    s_stub_safety_sources = 0;
+    s_stub_updating = false;
+    s_stub_crash_unacked = false;
+}
+
+// 2026-09-15 audit fix, LOW #5, "add tests for ... the danger-mode bypass":
+// danger_mode_active() must skip EVERY gate below it, regardless of how many
+// of them would otherwise have blocked -- the diagnostics page's explicit
+// accept-risk bench-test path (see relay_on_blocked()'s doc comment).
+static void test_relay_on_blocked_danger_mode_bypasses_every_gate(void)
+{
+    TEST_SECTION("relay_on_blocked() -- danger mode bypasses every gate, even with all three tripped");
+
+    s_stub_danger_mode = true;
+    s_stub_safety_blocked = true;
+    s_stub_safety_sources = 0x04u;
+    s_stub_updating = true;
+    s_stub_crash_unacked = true;
+
+    uint32_t sources = 0;
+    bool updating = false;
+    bool crash_unack = false;
+    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack) == false,
+               "danger mode bypasses safety+updating+crash_unack all at once -- relay-ON is NOT blocked");
+    TEST_CHECK(updating == false, "danger mode's early return never touches out_updating");
+    TEST_CHECK(crash_unack == false, "danger mode's early return never touches out_crash_unack");
+
+    // Reset every stub to its default for any test after this one.
+    s_stub_danger_mode = false;
+    s_stub_safety_blocked = false;
+    s_stub_safety_sources = 0;
+    s_stub_updating = false;
+    s_stub_crash_unacked = false;
+}
+
 int main(void)
 {
     TEST_SECTION("kiln_io_owner relay-pin gates");
@@ -247,6 +353,8 @@ int main(void)
     test_mask_gate_refuses_any_mask_that_touches_a_relay_bit();
     test_mask_gate_allows_masks_that_never_touch_a_relay_bit();
     test_relay_on_blocked_gates_on_unacknowledged_crash_report();
+    test_relay_on_blocked_precedence_with_multiple_gates_active();
+    test_relay_on_blocked_danger_mode_bypasses_every_gate();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;

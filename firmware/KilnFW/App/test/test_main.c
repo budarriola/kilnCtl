@@ -57,7 +57,9 @@ void run_test_setup_wizard_progress(void);
 void run_test_display_power_wiring(void);
 void run_test_diagnostics_safety_tc_state(void);
 void run_test_dashboard_protocol_version(void);
-void run_test_crash_report(void);
+/* run_test_crash_report() moved to its own executable, see build_host_tests.ps1's
+ * "exe41" comment (2026-09-15, uart_bridge_ext_run_on_flash_worker() stub collision
+ * with test_safety_cfg_store.c's own definition) -- not called from this main(). */
 void run_test_estop_verification(void);
 void run_test_dualwrite_window(void);
 void run_test_watchdog_cfg(void);
@@ -149,7 +151,6 @@ int main(void)
     run_test_display_power_wiring();
     run_test_diagnostics_safety_tc_state();
     run_test_dashboard_protocol_version();
-    run_test_crash_report();
     run_test_estop_verification();
     run_test_dualwrite_window();
     run_test_watchdog_cfg();

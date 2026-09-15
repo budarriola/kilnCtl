@@ -371,7 +371,12 @@ static void relay_toggle_cb(lv_event_t *e)
         snprintf(msg, sizeof(msg), "Relay %u refused -- firmware update in progress", UI_RELAY_DISPLAY(ctx->relay_index));
         break;
     case DASHBOARD_RELAY_ERR_CRASH_UNACK:
-        snprintf(msg, sizeof(msg), "Relay %u refused -- unacknowledged crash report", UI_RELAY_DISPLAY(ctx->relay_index));
+        /* 2026-09-15 MEDIUM fix (review_crash_report_relay_gate_61765de7):
+         * name WHERE to clear this, not just why -- the Diagnostics ->
+         * Crash Report page's Acknowledge button now exists for exactly
+         * this. msg is char[64]; this string is 61 chars incl. NUL, fits. */
+        snprintf(msg, sizeof(msg), "Relay %u refused -- unacked crash, ack on Diagnostics",
+                 UI_RELAY_DISPLAY(ctx->relay_index));
         break;
     case DASHBOARD_RELAY_ERR_IO_FAIL:
     default:

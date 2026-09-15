@@ -9,6 +9,7 @@
 #include "esp_heap_caps.h"
 #include "esp_ota_ops.h" /* esp_ota_get_state_partition()/esp_ota_img_states_t -- not covered by hal_sysinfo, see build_firmware_statics() */
 #include "esp_partition.h"
+#include "esp_log.h" /* ESP_LOGW(TAG, ...) -- crash_ack_btn_clicked_cb() below */
 #include "hal_time.h" /* hal_time_now_us() -- format_uptime() below, was esp_timer_get_time() */
 
 #include <string.h>
@@ -17,6 +18,7 @@
 #include "hal_sysinfo.h" /* hal_sysinfo_reset_reason()/_get_build_info()/_get_running_partition() */
 #include "MAX31856.h"
 #include "board_temps.h"
+#include "crash_report.h" /* 2026-09-15 MEDIUM fix: LCD acknowledge control, see Crash Report page below */
 #include "dashboard_http.h"
 #include "relay_cycles.h" /* RELAY_LIFE_BUDGET.md -- the Relay Life page below */
 #include "safety_cfg_store.h" /* CT_COMMISSIONING_PLAN.md step 4 -- ct_topology (0x031F) */
@@ -252,7 +254,15 @@ static const char *TAG __attribute__((unused)) = "ui_page_diagnostics";
  * showing type/cycles/percent and a two-tap "Reset" button, same paged
  * pattern as every other page here. */
 #define UI_PAGE_DIAGNOSTICS_PAGE_RELAY_LIFE 6
-#define UI_PAGE_DIAGNOSTICS_PAGE_COUNT (UI_PAGE_DIAGNOSTICS_PAGE_RELAY_LIFE + 1)
+/* 2026-09-15 MEDIUM fix (docs/audits/review_crash_report_relay_gate_61765de7_2026-09-15.md):
+ * an operator at the LCD had no way to see or clear an unacknowledged crash
+ * report -- crash_report_has_unacknowledged() gates manual relay-ON
+ * (kiln_io_owner.c's relay_on_blocked()) but nothing on this board's own
+ * screen let the operator review or acknowledge it, only the web UI could.
+ * One summary row (build_full_text_row_accent()) plus a two-tap Acknowledge
+ * button, same shape as the Relay Life Reset button above. */
+#define UI_PAGE_DIAGNOSTICS_PAGE_CRASH_REPORT 7
+#define UI_PAGE_DIAGNOSTICS_PAGE_COUNT (UI_PAGE_DIAGNOSTICS_PAGE_CRASH_REPORT + 1)
 
 /* Two-tap confirm window (RELAY_LIFE_BUDGET.md's "Reset" design: "press
  * Reset, button turns into Confirm? for 5 s"). No dialog widget exists on
@@ -346,6 +356,21 @@ _Static_assert(UI_PAGE_DIAGNOSTICS_RELAY_LIFE_WORST_CASE_HEIGHT_PX <= UI_THEME_P
                "ui_page_diagnostics.c: RELAY_CYCLES_COUNT relay-life rows' worst-case content "
                "exceeds UI_THEME_PAGE_CONTENT_BUDGET_PX -- split across more pages, don't scroll.");
 
+/* Crash Report page: one wrapped full-text summary row (up to
+ * UI_PAGE_DIAGNOSTICS_CRASH_SUMMARY_MAX_LINES lines) plus one
+ * build_stat_row()-height Acknowledge-button row. Same proof shape as the
+ * other pages above. */
+#define UI_PAGE_DIAGNOSTICS_CRASH_SUMMARY_MAX_LINES 4
+#define UI_PAGE_DIAGNOSTICS_CRASH_SUMMARY_ROW_CONTENT_PX \
+    ((UI_PAGE_DIAGNOSTICS_CRASH_SUMMARY_MAX_LINES * UI_THEME_FONT_LINE_HEIGHT_PX) + \
+     ((UI_THEME_PADDING_PX / 2) * 2))
+#define UI_PAGE_DIAGNOSTICS_CRASH_REPORT_WORST_CASE_HEIGHT_PX \
+    (UI_PAGE_DIAGNOSTICS_CRASH_SUMMARY_ROW_CONTENT_PX + (UI_THEME_PADDING_PX / 2) + \
+     UI_PAGE_DIAGNOSTICS_STAT_ROW_HEIGHT_PX)
+_Static_assert(UI_PAGE_DIAGNOSTICS_CRASH_REPORT_WORST_CASE_HEIGHT_PX <= UI_THEME_PAGE_CONTENT_BUDGET_PX,
+               "ui_page_diagnostics.c: Crash Report page's summary + Acknowledge rows exceed "
+               "UI_THEME_PAGE_CONTENT_BUDGET_PX -- split across more pages, don't scroll.");
+
 static ui_topbar_t s_topbar;
 static lv_obj_t *s_pages[UI_PAGE_DIAGNOSTICS_PAGE_COUNT];
 static uint8_t s_page_index;
@@ -429,12 +454,20 @@ static lv_obj_t *s_rl_reset_btn[RELAY_CYCLES_COUNT];
 static lv_obj_t *s_rl_reset_label[RELAY_CYCLES_COUNT];
 static int64_t   s_rl_confirm_deadline_us[RELAY_CYCLES_COUNT];
 
+/* --- Page 8: Crash Report -- 2026-09-15 MEDIUM fix. s_cr_ack_deadline_us is
+ * the same one-button two-tap-confirm state s_rl_confirm_deadline_us[] holds
+ * per relay, just for the single Acknowledge button here. */
+static lv_obj_t *s_cr_summary_label;
+static lv_obj_t *s_cr_ack_btn;
+static lv_obj_t *s_cr_ack_label;
+static int64_t   s_cr_ack_deadline_us;
+
 static void update_title(void)
 {
     static const char *page_names[UI_PAGE_DIAGNOSTICS_PAGE_COUNT] = {
         "Firmware", "Internal RAM", "PSRAM & storage",
         "Safety & Board Health", "Thermocouple Faults", "Trip Detail",
-        "Relay Life",
+        "Relay Life", "Crash Report",
     };
     char buf[48];
     snprintf(buf, sizeof(buf), "Diagnostics: %s  %u of %u", page_names[s_page_index],
@@ -1165,6 +1198,44 @@ static void refresh_cb(lv_timer_t *timer)
                                                                              UI_THEME_COLOR_TEXT_SECONDARY,
                                      0);
     }
+
+    /* Crash Report page -- 2026-09-15 MEDIUM fix. Revert an expired
+     * Acknowledge confirm-arm the same way the Relay Life loop above does. */
+    if (s_cr_ack_deadline_us != 0 && rl_now >= s_cr_ack_deadline_us) {
+        s_cr_ack_deadline_us = 0;
+        lv_label_set_text(s_cr_ack_label, "Acknowledge");
+    }
+    crash_report_record_t cr_rec;
+    bool cr_present = crash_report_get(&cr_rec);
+    bool cr_unacked = crash_report_has_unacknowledged();
+    char cr_buf[160];
+    if (!cr_present) {
+        snprintf(cr_buf, sizeof(cr_buf), "No crash report on record.");
+    } else if (!cr_unacked) {
+        snprintf(cr_buf, sizeof(cr_buf), "Last crash (acknowledged): %s in task %s, reset: %s",
+                 cr_rec.exc_cause_str, cr_rec.exc_task, cr_rec.reset_reason);
+    } else {
+        snprintf(cr_buf, sizeof(cr_buf),
+                 "UNACKNOWLEDGED crash: %s in task %s, reset: %s -- acknowledge below to allow "
+                 "manual relay-ON",
+                 cr_rec.exc_cause_str, cr_rec.exc_task, cr_rec.reset_reason);
+    }
+    lv_label_set_text(s_cr_summary_label, cr_buf);
+    lv_obj_set_style_text_color(s_cr_summary_label,
+                                 cr_unacked ? UI_THEME_ACCENT_5 : UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    /* Nothing to confirm once there's no unacknowledged record any more --
+     * hide the button rather than leave a live Acknowledge control armed
+     * against a record that already cleared (e.g. the web UI acknowledged it
+     * first; both paths go through the same crash_report_acknowledge()). */
+    if (cr_unacked) {
+        lv_obj_remove_flag(s_cr_ack_btn, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_cr_ack_btn, LV_OBJ_FLAG_HIDDEN);
+        if (s_cr_ack_deadline_us != 0) {
+            s_cr_ack_deadline_us = 0;
+            lv_label_set_text(s_cr_ack_label, "Acknowledge");
+        }
+    }
 }
 
 static lv_obj_t *build_stat_row(lv_obj_t *parent, const char *name, lv_color_t accent)
@@ -1377,6 +1448,81 @@ static void build_relay_life_row(lv_obj_t *parent, unsigned relay, const char *n
 #undef UI_PAGE_DIAGNOSTICS_RELAY_ROW_BTN_W_PX
 #undef UI_PAGE_DIAGNOSTICS_RELAY_ROW_BTN_H_PX
 
+/* Acknowledge button tap -- same two-tap confirm shape as
+ * relay_reset_btn_clicked_cb() above. Second tap calls
+ * crash_report_acknowledge() directly: that function already dispatches its
+ * own NVS write onto the flash worker internally (see crash_report.c,
+ * fixed 2026-09-15) and is safe to call from this LVGL-task callback for the
+ * exact same reason relay_cycles_reset() is -- this file must NEVER write
+ * NVS directly from a callback running on the (PSRAM-backed) LVGL task,
+ * per DRAM_PSRAM_PLAN.md section 7.2. This is also the SAME acknowledge
+ * path the web /api/crash_report/ack route uses, so acknowledging here or
+ * from the browser clears the same unacked cache either way. */
+#define UI_PAGE_DIAGNOSTICS_CRASH_ACK_CONFIRM_US (5 * 1000 * 1000)
+static void crash_ack_btn_clicked_cb(lv_event_t *e)
+{
+    (void)e;
+    int64_t now = (int64_t)hal_time_now_us();
+    bool armed = s_cr_ack_deadline_us != 0 && now < s_cr_ack_deadline_us;
+
+    if (armed) {
+        s_cr_ack_deadline_us = 0;
+        lv_label_set_text(s_cr_ack_label, "Acknowledge");
+        if (!crash_report_acknowledge()) {
+            ESP_LOGW(TAG, "LCD: crash_report_acknowledge() failed -- record still unacknowledged, "
+                          "try again");
+        }
+    } else {
+        s_cr_ack_deadline_us = now + UI_PAGE_DIAGNOSTICS_CRASH_ACK_CONFIRM_US;
+        lv_label_set_text(s_cr_ack_label, "Confirm?");
+    }
+}
+
+/* Summary row + Acknowledge button for the Crash Report page. Same
+ * row/button shapes as build_relay_life_row() above, minus the value label
+ * (the summary text row above this one covers that job). */
+#define UI_PAGE_DIAGNOSTICS_CRASH_ACK_BTN_W_PX 110
+#define UI_PAGE_DIAGNOSTICS_CRASH_ACK_BTN_H_PX 22
+static void build_crash_report_ack_row(lv_obj_t *parent)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_set_width(row, lv_pct(100));
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(row, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(row, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_set_style_pad_all(row, UI_THEME_PADDING_PX / 2, 0);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_border_width(row, 3, 0);
+    lv_obj_set_style_border_side(row, LV_BORDER_SIDE_LEFT, 0);
+    lv_obj_set_style_border_color(row, UI_THEME_ACCENT_5, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *name_label = lv_label_create(row);
+    lv_obj_set_style_text_color(name_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(name_label, "Unacknowledged crash");
+
+    lv_obj_t *btn = lv_button_create(row);
+    lv_obj_set_size(btn, UI_PAGE_DIAGNOSTICS_CRASH_ACK_BTN_W_PX, UI_PAGE_DIAGNOSTICS_CRASH_ACK_BTN_H_PX);
+    lv_obj_set_style_bg_color(btn, UI_THEME_ACCENT_5, 0);
+    lv_obj_set_style_radius(btn, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_set_style_pad_all(btn, 0, 0);
+    lv_obj_add_event_cb(btn, crash_ack_btn_clicked_cb, LV_EVENT_CLICKED, NULL);
+    s_cr_ack_btn = btn;
+
+    lv_obj_t *btn_label = lv_label_create(btn);
+    lv_obj_set_style_text_color(btn_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(btn_label, "Acknowledge");
+    lv_obj_center(btn_label);
+    s_cr_ack_label = btn_label;
+
+    lv_obj_update_layout(btn);
+    ui_theme_apply_touch_area(btn, true);
+}
+#undef UI_PAGE_DIAGNOSTICS_CRASH_ACK_BTN_W_PX
+#undef UI_PAGE_DIAGNOSTICS_CRASH_ACK_BTN_H_PX
+
 /* One page: a non-scrollable flex column of stat rows, sized to fill
  * whatever `content` has left. Same "create once, toggle HIDDEN" pattern as
  * ui_page_config.c's build_hub_page() -- see this file's header comment for
@@ -1527,6 +1673,12 @@ lv_obj_t *ui_page_diagnostics_build(void)
         build_relay_life_row(relay_life_page, r, name, rl_accents[r % 4]);
     }
     build_relay_life_row(relay_life_page, RELAY_CYCLES_SAFETY_INDEX, "Safety (K4)", UI_THEME_ACCENT_5);
+
+    /* Page 8: Crash Report -- 2026-09-15 MEDIUM fix. */
+    lv_obj_t *crash_report_page = s_pages[UI_PAGE_DIAGNOSTICS_PAGE_CRASH_REPORT];
+    s_cr_summary_label = build_full_text_row_accent(crash_report_page, "No crash report on record.",
+                                                      UI_THEME_ACCENT_1);
+    build_crash_report_ack_row(crash_report_page);
 
     /* MUST come after content exists -- ui_topbar.h's own usage note: the
      * icon proxy overlaps whatever's beneath it, and LVGL resolves

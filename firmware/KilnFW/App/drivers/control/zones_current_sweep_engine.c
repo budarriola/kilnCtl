@@ -727,7 +727,8 @@ static zone_sweep_zone_outcome_t zone_sweep_run_one_zone(uint8_t zi, uint8_t rel
                                                           const zone_sweep_zone_deps_t *deps,
                                                           float *out_avg_current_a,
                                                           float *out_per_ch_avg_a,
-                                                          uint32_t *out_energize_refused_sources)
+                                                          uint32_t *out_energize_refused_sources,
+                                                          kiln_io_owner_relay_result_t *out_energize_refused_result)
 {
     if (relay_mask == 0) {
         return ZONE_SWEEP_ZONE_SKIPPED; /* nothing wired to this zone -- nothing to measure */
@@ -740,6 +741,16 @@ static zone_sweep_zone_outcome_t zone_sweep_run_one_zone(uint8_t zi, uint8_t rel
     if (rr != KILN_IO_OWNER_RELAY_OK) {
         deps->force_off(deps->ctx); /* choke point -- nothing was left on, but be explicit */
         if (out_energize_refused_sources) *out_energize_refused_sources = safety_sources;
+        /* 2026-09-15 audit fix (review_crash_report_relay_gate_61765de7_
+         * 2026-09-15.md, LOW): out_energize_refused_sources alone cannot
+         * distinguish a refusal with no SAFETY_FAULT_SRC_* bit set at all
+         * (ERR_UPDATING/ERR_CRASH_UNACK, both of which leave *out_sources at
+         * its caller-supplied 0 -- see kiln_io_owner.c's relay_on_blocked()
+         * doc comment) from a genuine safety fault whose sources happen to
+         * decode to nothing. Passing the raw kiln_io_owner_relay_result_t up
+         * too lets the message builder below name the REAL reason instead of
+         * printing "sources 0x00". */
+        if (out_energize_refused_result) *out_energize_refused_result = rr;
         return ZONE_SWEEP_ZONE_ENERGIZE_REFUSED;
     }
 
@@ -974,8 +985,10 @@ void zone_sweep_run_all_zones(uint8_t zones_total, const zone_sweep_zone_deps_t 
         float avg_a = NAN; /* stays NaN unless zone_sweep_run_one_zone() got >=1 sample */
         float per_ch_avg_a[ZONE_CT_CHANNEL_COUNT];
         uint32_t refused_sources = 0;
+        kiln_io_owner_relay_result_t refused_result = KILN_IO_OWNER_RELAY_OK;
         zone_sweep_zone_outcome_t outcome =
-            zone_sweep_run_one_zone(zi, relay_mask, deps, &avg_a, per_ch_avg_a, &refused_sources);
+            zone_sweep_run_one_zone(zi, relay_mask, deps, &avg_a, per_ch_avg_a, &refused_sources,
+                                     &refused_result);
 
         switch (outcome) {
         case ZONE_SWEEP_ZONE_SKIPPED:
@@ -1026,7 +1039,22 @@ void zone_sweep_run_all_zones(uint8_t zones_total, const zone_sweep_zone_deps_t 
              * word actually is: "zone " + 3 + " energize refused: " + 16 +
              * " (+more)" = 5 + 3 + 19 + 16 + 8 = 51 bytes, plus the NUL,
              * fits in 64. */
-            {
+            /* 2026-09-15 audit fix (review_crash_report_relay_gate_61765de7_
+             * 2026-09-15.md, LOW "sources 0x00"): ERR_UPDATING and
+             * ERR_CRASH_UNACK both leave refused_sources at 0 (they are not
+             * SAFETY_FAULT_SRC_* bitmask reasons), so decoding
+             * refused_sources alone made every such refusal print an empty
+             * "sources 0x00" reason. refused_result now carries the real
+             * kiln_io_owner_relay_result_t up from the energize() call, so
+             * name the non-bitmask reasons directly and keep the existing
+             * decode only for genuine ERR_SAFETY. */
+            if (refused_result == KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK) {
+                snprintf(out->reason, sizeof(out->reason),
+                         "zone %u energize refused: unacknowledged crash report", zi);
+            } else if (refused_result == KILN_IO_OWNER_RELAY_ERR_UPDATING) {
+                snprintf(out->reason, sizeof(out->reason),
+                         "zone %u energize refused: firmware update in progress", zi);
+            } else {
                 char src_words[160];
                 safety_fault_source_words(refused_sources, src_words, sizeof(src_words));
                 char *comma = strchr(src_words, ',');
