@@ -363,6 +363,17 @@ void run_test_ramp_transient_ident(void)
             rti_fit_t fit;
             rti_result_t r = rti_fit(seg, N, k, T_AMB, 100.0f, 0.0f, &fit);
             TEST_CHECK(r == RTI_OK, "E2 ramp-rate sweep: expected OK");
+            // Absolute anchor as well as the mutual-flatness checks below. A
+            // pure "are the three estimates close to each other" assertion
+            // passes VACUOUSLY when a broken estimator saturates all three at
+            // the same search bound -- demonstrated 2026-09-15 by a sabotage
+            // that made every fit return 1200 s, which E1 caught and E2 did
+            // not. Flatness is only evidence when the flat value is also right.
+            if (r == RTI_OK) {
+                TEST_CHECK_NEAR(fit.tau_s, tau_true, tau_true * 0.15f,
+                                 "E2 ramp-rate sweep: each estimate is also individually near the true "
+                                 "plant tau, not merely equal to its siblings");
+            }
             fitted[idx] = (r == RTI_OK) ? fit.tau_s : -1.0f;
         }
         if (fitted[0] > 0.0f && fitted[1] > 0.0f && fitted[2] > 0.0f) {
@@ -371,6 +382,62 @@ void run_test_ramp_transient_ident(void)
             TEST_CHECK_NEAR(fitted[2], fitted[1], tau_true * 0.10f,
                              "E2 ramp-rate sweep: estimate flat across a 5.5x ramp-rate change (220 vs 100C/hr)");
         }
+    }
+
+    // --- RTI_INVALID_AMBIENT: a non-finite caller ambient must be refused for
+    // the CALLER's reason, not the segment's. Before this gate existed, a NaN
+    // ambient poisoned every candidate SSE to NaN; every "is this better"
+    // comparison against NaN is false, so the tau search never updated its
+    // running best and the module fell out of the bottom reporting
+    // RTI_NO_IMPROVEMENT -- "this segment tells us nothing the existing model
+    // doesn't already predict" -- about a perfectly informative segment.
+    // (2026-09-15 adversarial re-review.)
+    {
+        static rti_sample_t seg[TRACE_MAX];
+        const float k = 200.0f;
+        build_closed_loop_ramp(seg, N, DT, T_AMB, RAMP_RATE, k, 280.0f, k, 100.0f, 0.02f, 0.0006f);
+        rti_fit_t fit;
+        TEST_CHECK(rti_fit(seg, N, k, NAN, 100.0f, 0.0f, &fit) == RTI_INVALID_AMBIENT,
+                   "ambient_c=NaN: refused as INVALID_AMBIENT, not blamed on the segment");
+        TEST_CHECK(fit.valid == false, "ambient_c=NaN: not reported valid");
+        TEST_CHECK(rti_fit(seg, N, k, INFINITY, 100.0f, 0.0f, &fit) == RTI_INVALID_AMBIENT,
+                   "ambient_c=+Inf: refused as INVALID_AMBIENT");
+        TEST_CHECK(rti_fit(seg, N, k, -INFINITY, 100.0f, 0.0f, &fit) == RTI_INVALID_AMBIENT,
+                   "ambient_c=-Inf: refused as INVALID_AMBIENT");
+        // Same treatment for a non-finite gain, which previously slipped past
+        // the `<= 0.0f` test (NaN compares false against everything).
+        TEST_CHECK(rti_fit(seg, N, NAN, T_AMB, 100.0f, 0.0f, &fit) == RTI_INVALID_GAIN,
+                   "k_gain=NaN: refused as INVALID_GAIN");
+        // A FINITE but wrong ambient is deliberately NOT gated -- it cannot be,
+        // see the header's accuracy-contract block. Pinned here so a future
+        // reader does not mistake the gate above for protection against it:
+        // ambient overstated by 5C returns a confident, badly wrong tau.
+        rti_fit_t wrong;
+        rti_result_t rw = rti_fit(seg, N, k, T_AMB + 5.0f, 100.0f, 0.0f, &wrong);
+        TEST_CHECK(rw == RTI_OK, "ambient overstated by 5C: still accepted (documented, unfixable here)");
+        if (rw == RTI_OK) {
+            TEST_CHECK(wrong.tau_s > 280.0f * 1.5f,
+                       "ambient overstated by 5C: fitted tau inflates past +50% with every gate passing -- "
+                       "this is the caller-contract hazard the header documents, not a gate failure");
+        }
+    }
+
+    // --- RTI_TAU_AT_SEARCH_BOUND: a fit that settles ON the tau search
+    // ceiling is the bound, not a measurement. Reached here from a plausible
+    // input -- a caller gain overstated by 3x (K from a stale prior fit) --
+    // which before this gate returned RTI_OK, valid=true, tau=1200.0 and an
+    // empty refusal_reason. (2026-09-15 adversarial re-review.)
+    {
+        static rti_sample_t seg[TRACE_MAX];
+        const float k_true = 200.0f;
+        build_closed_loop_ramp(seg, N, DT, T_AMB, RAMP_RATE, k_true, 280.0f, k_true, 100.0f, 0.02f, 0.0006f);
+        rti_fit_t fit;
+        rti_result_t r = rti_fit(seg, N, /*k_gain overstated 3x=*/600.0f, T_AMB, 100.0f, 0.0f, &fit);
+        TEST_CHECK(r == RTI_TAU_AT_SEARCH_BOUND,
+                   "overstated caller gain driving the fit to the tau ceiling: refused at the search bound "
+                   "instead of reporting tau=RTI_TAU_MAX_S as a confident answer");
+        TEST_CHECK(fit.valid == false, "search-bound refusal: not reported valid");
+        TEST_CHECK(fit.refusal_reason[0] != '\0', "search-bound refusal: carries a refusal reason");
     }
 
     // --- out must not be left uninitialized/stale on refusal ---------------

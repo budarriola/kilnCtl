@@ -199,9 +199,23 @@ rti_result_t rti_fit(const rti_sample_t *samples, uint32_t n, float k_gain_c_per
         set_reason(out, "span %.1fs below minimum %.1fs", (double)duration, (double)RTI_MIN_DURATION_S);
         return out->result;
     }
-    if (k_gain_c_per_duty <= 0.0f) {
+    if (!isfinite(k_gain_c_per_duty) || k_gain_c_per_duty <= 0.0f) {
         out->result = RTI_INVALID_GAIN;
-        set_reason(out, "k_gain_c_per_duty=%.4f must be > 0", (double)k_gain_c_per_duty);
+        set_reason(out, "k_gain_c_per_duty=%.4f must be finite and > 0", (double)k_gain_c_per_duty);
+        return out->result;
+    }
+    // A non-finite ambient makes every simulate_sse() return NaN, and every
+    // "is this SSE better" comparison against NaN is false, so the tau search
+    // silently never updates its running best and the module used to fall out
+    // of the bottom as RTI_NO_IMPROVEMENT -- blaming the SEGMENT for carrying
+    // no information when in fact the CALLER handed over a broken reference.
+    // Refuse for the actual reason instead. (ambient_c's VALUE cannot be
+    // checked here -- see the header's accuracy-contract block.)
+    if (!isfinite(ambient_c)) {
+        out->result = RTI_INVALID_AMBIENT;
+        set_reason(out, "ambient_c=%.4f must be finite -- a non-finite relaxation target poisons every "
+                        "candidate SSE to NaN and the tau search cannot rank them",
+                   (double)ambient_c);
         return out->result;
     }
 
@@ -341,6 +355,24 @@ rti_result_t rti_fit(const rti_sample_t *samples, uint32_t n, float k_gain_c_per
         set_reason(out, "best-fit SSE is %.1f%% of the current-model SSE (need <= %.0f%%) -- this "
                         "segment tells us nothing the existing model doesn't already predict",
                    ratio * 100.0, (double)RTI_MAX_SSE_RATIO_VS_NULL * 100.0);
+        return out->result;
+    }
+
+    // Search-bound gate. An optimum sitting ON a search bound is not a
+    // measurement of tau, it is a report that the true minimum lies outside
+    // [RTI_TAU_MIN_S, RTI_TAU_MAX_S] (or that the objective is monotone across
+    // it) -- and the returned number says nothing about how far outside. Every
+    // saturated row of the 2026-09-14 ambient-defect table returned exactly
+    // RTI_TAU_MAX_S with valid=true and an empty refusal reason; so does a
+    // caller gain overstated by >=50%. The review recommended this gate and
+    // deliberately withheld it, because at that time it would have silenced the
+    // loud saturated rows while leaving the quiet 31-255% wrong ones in place.
+    // With the ambient defect fixed that objection no longer applies.
+    if (best_tau >= RTI_TAU_MAX_S * 0.999f || best_tau <= RTI_TAU_MIN_S * 1.001f) {
+        out->result = RTI_TAU_AT_SEARCH_BOUND;
+        set_reason(out, "best-fit tau=%.1fs sits on the search bound [%.0f,%.0f] -- that is the bound, "
+                        "not a measurement; the true optimum is outside the searched range",
+                   (double)best_tau, (double)RTI_TAU_MIN_S, (double)RTI_TAU_MAX_S);
         return out->result;
     }
 

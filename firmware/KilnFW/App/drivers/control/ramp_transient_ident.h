@@ -66,7 +66,13 @@ typedef enum {
     RTI_OK = 0,
     RTI_TOO_FEW_SAMPLES,          // n below RTI_MIN_SAMPLES
     RTI_TOO_SHORT_DURATION,       // t_s span below RTI_MIN_DURATION_S
-    RTI_INVALID_GAIN,             // caller's k_gain_c_per_duty <= 0
+    RTI_INVALID_GAIN,             // caller's k_gain_c_per_duty <= 0 or non-finite
+    RTI_INVALID_AMBIENT,          // caller's ambient_c is NaN/infinite. Without this check a non-finite
+                                   // ambient poisons every SSE to NaN, the tau search never updates its
+                                   // running best (every NaN comparison is false), and the module fell out
+                                   // of the bottom as RTI_NO_IMPROVEMENT with a refusal reason that blamed
+                                   // the SEGMENT ("tells us nothing the existing model doesn't already
+                                   // predict") rather than the caller -- refused for the right reason now.
     RTI_INSUFFICIENT_DUTY_EXCITATION, // whole-segment duty std/range below floor -- a flat/held
                                        // duty (pure dwell) carries no tau information at all
     RTI_TREND_RESIDUAL_TOO_LARGE, // pre-segment window is not close to linear -- plant was still
@@ -83,6 +89,14 @@ typedef enum {
     RTI_NO_IMPROVEMENT,           // best fit's SSE is not enough better than simulating with the
                                    // caller's current (tau, L) -- this segment tells us nothing the
                                    // existing model doesn't already predict
+    RTI_TAU_AT_SEARCH_BOUND,      // the optimiser settled on RTI_TAU_MIN_S or RTI_TAU_MAX_S itself. An
+                                   // optimum sitting exactly on a search bound is not a measurement, it is
+                                   // the bound: the true minimum is outside the searched interval (or the
+                                   // objective is monotone across it), so the returned number carries no
+                                   // information about how far outside. Recommended by the 2026-09-14 review
+                                   // and deliberately withheld there because it would have masked the loud
+                                   // saturated rows of the ambient defect while leaving the quiet wrong ones;
+                                   // with that defect fixed the objection is void and this is strictly a gain.
 } rti_result_t;
 
 typedef struct {
@@ -111,7 +125,46 @@ typedef struct {
 // segment's own starting temperature) -- the model's relaxation target;
 // getting this right is what distinguishes a segment starting well above
 // ambient (the common case) from the misdiagnosed-as-rare case of segment
-// 1 of a firing. current_tau_s/current_dead_time_s are the model's
+// 1 of a firing.
+//
+// *** ambient_c ACCURACY IS THE CALLER'S OBLIGATION AND IS NOT CHECKABLE HERE. ***
+// Only ambient_c's FINITENESS is gated (RTI_INVALID_AMBIENT). Its VALUE cannot be
+// policed from inside this function, and the sensitivity is severe: the fitted-tau
+// error is a function of the ambient error alone, independent of segment start
+// (measured 2026-09-15, true tau 280 s, K 200, true ambient 25 C, three different
+// segment starts giving identical rows, all four gates passing with RTI_OK at
+// every accepted row):
+//
+//    ambient_c error   -5.0   -2.5    0.0   +2.5   +5.0  +10.0  +15.0  (degC)
+//    fitted tau          (*)  190.1  279.8  368.8  456.6  635.5  811.4  (s)
+//    error vs true       --   -32%   -0.1%   +32%   +63%  +127%  +190%
+//    (*) -5.0 C happened to be refused NO_IMPROVEMENT on those traces -- luck, not a gate.
+//
+// No gate can catch this because tau and ambient are very nearly DEGENERATE over
+// a ramp segment: both enter only through the standing heat balance
+// K*duty - (T - ambient), so an ambient error is absorbed by tau at roughly 12%
+// of tau per degC while the model still explains the data. Measured
+// whole-segment RMS residual rises only 0.029 C -> 0.060 C across that entire
+// 0 to +15 C ambient sweep, i.e. it stays within about 2x the 0.1 C telemetry
+// quantization floor -- there is no residual threshold that separates "right
+// ambient" from "+15 C ambient" without also rejecting good fits.
+//
+// A caller must therefore supply a genuinely MEASURED ambient. KilnFW's producer
+// is profile_executor's s_exec.ambient_c (a MAX31856 cold-junction reading
+// captured at run start), which carries s_exec.ambient_from_cj -- false meaning
+// FALLBACK_AMBIENT_C was substituted. A harvester must refuse to run at all when
+// that flag is false: a fallback constant is exactly the several-degC-class error
+// this table prices.
+//
+// k_gain_c_per_duty carries the same degeneracy from the other side (+5% K gave
+// +43%..+61% tau on the same traces, also RTI_OK), but unlike ambient it IS
+// visible in the absolute residual (RMS 0.029 C -> 0.86 C at +5% K, a 30x
+// signal). See docs/RAMP_TRANSIENT_IDENT_DESIGN.md's "Sensitivity to the two
+// caller-supplied constants" for the proposed absolute-residual gate that would
+// close the overstated-K hole, deliberately left unimplemented because its
+// threshold must be calibrated against real telemetry noise, not guessed.
+//
+// current_tau_s/current_dead_time_s are the model's
 // EXISTING parameters, used only for the improvement-over-null gate
 // (RTI_NO_IMPROVEMENT) -- pass the same values adaptive_tune/zones_config
 // would otherwise use. out must not be NULL; *out is always fully

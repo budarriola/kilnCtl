@@ -110,6 +110,29 @@ All four must pass, matching `ramp_ident.c`'s "all five must pass"
 convention and its fixed-buffer refusal-reason reporting
 (`rti_result_t out->refusal_reason`).
 
+Reachability correction, 2026-09-15: gate 3's "understated by 20x" above is
+the *tested* case, not the boundary. An independent sweep of the caller gain
+against a true `K` of 200 found `RTI_FLAT_COST` firing continuously from
+`k_gain` = 10 all the way up to 170, i.e. for any understatement of roughly
+15% or more. The gate is genuinely non-vacuous and not a contrivance â€” but it
+is strictly **one-sided**: every *overstated* gain passes all four gates and
+returns a badly wrong tau (see "Sensitivity to the two caller-supplied
+constants" below).
+
+Two further gates were added 2026-09-15, outside the "four" above because
+neither judges the segment â€” both judge the caller and the search:
+
+5. **`RTI_INVALID_AMBIENT`** â€” `ambient_c` must be finite. A NaN or infinite
+   ambient makes every `simulate_sse()` return NaN; every "is this candidate
+   better" comparison against NaN is false, so the tau search never updates
+   its running best and the module used to fall out of the bottom as
+   `RTI_NO_IMPROVEMENT`, with a refusal reason blaming the SEGMENT for
+   carrying no information when in fact the CALLER handed over a broken
+   reference. Only finiteness is checkable here; `ambient_c`'s VALUE is a
+   caller contract (next section).
+6. **`RTI_TAU_AT_SEARCH_BOUND`** â€” see its own section below. Runs LAST, so
+   the more specific diagnoses (notably `RTI_FLAT_COST`) still speak first.
+
 ## Ambient reference — the correctness-critical parameter
 
 `rti_fit()` takes an explicit `ambient_c` parameter: the plant's TRUE
@@ -131,12 +154,30 @@ decay tail is not a confound:
 
 | segment start above ambient | fitted tau (defect) | fitted tau (fixed) |
 |---|---|---|
-| 0 C | 278.1 | 278.1 |
-| 5 C | 367.0 (+31%) | ~280 |
-| 10.2 C | 455.9 (+63%) | ~280 |
-| 20 C | 640.0 (+129%) | ~280 |
-| 35 C | 994.7 (+255%) | ~280 |
-| 65 C | 1200.0 (search ceiling, saturated) | ~280 |
+| 0 C | 278.1 | 279.8 |
+| +2.5 C | 367.0 (+31%) | 279.8 |
+| +5 C | 455.9 (+63%) | 279.8 |
+| +10.2 C | 640.0 (+129%) | 279.8 |
+| +20 C | 994.7 (+255%) | 279.8 |
+| +35 C | 1200.0 (search ceiling, saturated) | 279.8 |
+| +65 C | 1200.0 (saturated) | 280.0 |
+
+*(Offsets corrected 2026-09-15. The version of this table committed with the
+fix, and the fix's own commit message, shifted every row one step — reading
+the source review's table of absolute segment-start temperatures as if they
+were offsets above a 25 C ambient, so `+5 C` was credited with the `+2.5 C`
+row's error. Re-measured directly: each offset costs roughly twice what the
+shifted table claimed. Both the defect and the fixed columns above are from
+a fresh run of the production function at each listed offset, sabotaged
+copy vs. current source.)*
+
+The "fixed" column was also extended past the review's +65 C: the estimate
+stays at 279.8 s out to +100 C of start-above-ambient, and holds for
+segments starting *below* ambient (−1, −2, −5, −10, −20 C: 279.8, 279.8,
+276.8, 279.0, 279.9). Past about +125 C the synthetic plant's own duty
+saturates at 1.0 and the segment is correctly refused
+`RTI_INSUFFICIENT_DUTY_EXCITATION` — a property of a `K=200` plant asked to
+hold more than `K` above ambient, not of the estimator.
 
 All four acceptance gates returned `RTI_OK` with an empty refusal reason at
 every row on the left — curvature and improvement-over-null both actively
@@ -203,6 +244,92 @@ substitute for a caller-side minimum QUIET period (no significant duty
 change) immediately before the segment starts, which this module cannot
 see on its own (it only sees the segment it's handed); that remains
 recommended future work for any real integration, not solved here.
+
+## Sensitivity to the two caller-supplied constants
+
+Added 2026-09-15 after an adversarial re-review of the ambient fix. The fix
+above is correct and complete for what it set out to do, but it moves the
+failure from a *hardcoded* wrong reference to a *caller-supplied* one, and
+that reference is now the single most accuracy-critical input in the module.
+Both caller-supplied constants — `ambient_c` and `k_gain_c_per_duty` — enter
+the model only through the standing heat balance `K*duty − (T − ambient)`,
+so an error in either is absorbed almost entirely by `tau`.
+
+Measured on the same closed-loop traces (true `tau` 280 s, `K` 200, true
+ambient 25 C, 0.1 C quantized, 3000 s). Every row marked `RTI_OK` passed all
+four gates with an empty refusal reason:
+
+| `ambient_c` error | fitted tau | error | result | curvature (floor 0.05) |
+|---|---|---|---|---|
+| −5.0 C | — | — | `NO_IMPROVEMENT` | 20.7 |
+| −2.5 C | 190.1 | −32% | **`RTI_OK`** | 489 |
+| 0 | 279.8 | −0.1% | `RTI_OK` | 2385 |
+| +2.5 C | 368.8 | **+32%** | **`RTI_OK`** | 2793 |
+| +5.0 C | 456.6 | **+63%** | **`RTI_OK`** | 2730 |
+| +10.0 C | 635.5 | **+127%** | **`RTI_OK`** | 2853 |
+| +15.0 C | 811.4 | **+190%** | **`RTI_OK`** | 3126 |
+
+| `k_gain_c_per_duty` error | fitted tau | error | result |
+|---|---|---|---|
+| −25% | — | — | `FLAT_COST` |
+| −15% | — | — | `FLAT_COST` |
+| −10% | — | — | `NO_IMPROVEMENT` |
+| −5% | 186.9 | −33% | **`RTI_OK`** |
+| 0 | 279.8 | −0.1% | `RTI_OK` |
+| +5% | 365.7 | **+31%** | **`RTI_OK`** |
+| +10% | 451.4 | **+61%** | **`RTI_OK`** |
+| +20% | 621.2 | **+122%** | **`RTI_OK`** |
+| +50% | 1110.6 | +297% | **`RTI_OK`** |
+| +60% | 1200.0 | saturated | `TAU_AT_SEARCH_BOUND` (new gate) |
+
+Two conclusions, which are *different* from each other:
+
+**1. A wrong `ambient_c` is not detectable from inside this module, at all.**
+`tau` and ambient are very nearly degenerate over a ramp segment: the model
+still explains the data. Whole-segment RMS residual rises only 0.029 C →
+0.060 C across the full 0 → +15 C ambient sweep, i.e. it stays within about
+2x the 0.1 C telemetry quantization floor. No residual threshold, curvature
+floor or null-comparison can separate "right ambient" from "+15 C ambient"
+without also rejecting good fits — and note the curvature gate reads *higher*
+on the wrong rows than on the right one, so it is not merely blind here, it
+is anti-correlated. This is therefore a **caller contract**, documented on
+`rti_fit()` in the header: a harvester must supply a genuinely measured
+ambient (`profile_executor`'s `s_exec.ambient_c`) and must refuse to harvest
+when `s_exec.ambient_from_cj` is false, because the `FALLBACK_AMBIENT_C`
+substitution is exactly the several-degC error this table prices.
+
+**2. A wrong `k_gain_c_per_duty` IS detectable, and is currently only half
+gated.** `RTI_FLAT_COST` genuinely fires for gains understated by ~15% or
+more (verified independently — the gate is not vacuous, and its reachability
+is much wider than "understated by 20x"), but the entire *overstated* side
+passes every gate. Unlike ambient, this one leaves a signal: the absolute
+whole-segment RMS residual goes 0.029 C → 0.86 C at only +5% gain error and
+1.55 C at +10%, a 30–50x separation from the quantization floor. **A proposed
+absolute-residual gate** — refuse when `sqrt(best_sse/(n−1))` exceeds a few
+multiples of the telemetry noise floor — would close this hole cleanly. It is
+deliberately **not implemented here** because its threshold must be
+calibrated against real telemetry noise on a real firing, and a constant
+picked to make a synthetic test pass would be a guard justified against a
+test constant (`project_bound_relative_to_persisted_state`). This is listed
+as required work for anyone wiring the module up, alongside the ambient
+contract above.
+
+## Search-bound gate (`RTI_TAU_AT_SEARCH_BOUND`)
+
+Added 2026-09-15. A fit that settles exactly on `RTI_TAU_MIN_S` or
+`RTI_TAU_MAX_S` is not a measurement of `tau`; it is the bound, and it says
+nothing about how far outside the searched interval the true optimum lies.
+Before this gate, such a fit returned `RTI_OK`, `valid=true`,
+`tau_s=1200.0` and an *empty* `refusal_reason`. The 2026-09-14 review
+recommended this gate and then deliberately withheld it, on the grounds that
+adding it while the ambient defect stood would silence that defect's loud
+saturated rows while leaving its quiet 31–255%-wrong rows untouched — making
+the module look safer without being safer. With the ambient defect fixed that
+objection is void, so the gate is now in. It runs **last**, after curvature
+and improvement-over-null, so the more specific diagnoses (notably
+`RTI_FLAT_COST` for a badly understated gain, whose optimum also lands on a
+bound) still speak first. It is exercised by a test driving a 3x-overstated
+caller gain to the ceiling, and negative-tested by removing the gate.
 
 ## Guard 1 / profiles_stop interaction — deliberately avoided
 
