@@ -638,6 +638,32 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
                           "ESP readback did not match what was committed -- rolled back cleanly");
     }
 
+    /* step 12 moved up here, right after readback proves the live zones
+     * config genuinely IS target_id's (MEDIUM finding 3, adversarial review
+     * 2026-09-15, docs/audits/review_autosave_slot_fix_a93ee77b_2026-09-15.md):
+     * a short override window around step 8's import alone left active_id
+     * stale (still naming the outgoing kiln) all the way through the
+     * ceiling/arming divergence check below -- including on the "diverged"
+     * exit, which used to return with that mismatch in place until a retry
+     * or reboot. Any ordinary nvs_save() in that window (a zones POST, an
+     * autotune write) would still have overwritten the OUTGOING kiln's
+     * slot, override or not, since the override had already been cleared.
+     * Moving the assignment here instead of leaving it at the bottom closes
+     * the gap at its root: active_id now tracks "what zones config is
+     * actually loaded", which readback above already proved is target_id's,
+     * independent of whether the Pico ceiling cross-check below passes. */
+    char final_reason[KILN_CFG_SWAP_REASON_MAX];
+    final_reason[0] = '\0';
+    kiln_cfg_store_lock();
+    bool finalized = kiln_cfg_store_set_active_id_raw(target_id, final_reason, sizeof(final_reason));
+    kiln_cfg_store_unlock();
+    if (!finalized) {
+        /* Content is correct on both sides; only the bookkeeping id write
+         * failed -- log loudly but do not treat this as a failed swap (the
+         * live config genuinely IS target_id's on both sides regardless). */
+        ESP_LOGE(TAG, "swap content landed and verified, but recording active_id failed: %s", final_reason);
+    }
+
     /* step 10/11: ceiling identity + arming, reusing item 7's existing
      * divergence primitive rather than a second detector (see this file's
      * header comment). A failure here does NOT roll back -- both halves
@@ -661,24 +687,14 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
         if (out_diverged) {
             *out_diverged = true;
         }
+        /* active_id was already moved to target_id above, right after
+         * readback proved the content match -- this alarm is reported
+         * against a store that already correctly reflects what's live. */
         snprintf(reason_out, reason_cap,
                  "both halves committed and matched, but the post-swap ceiling/arming check failed (%s) -- "
                  "heaters disabled and alarmed, config left pending for retry",
                  div_reason);
         return false;
-    }
-
-    /* step 12: finalize */
-    char final_reason[KILN_CFG_SWAP_REASON_MAX];
-    final_reason[0] = '\0';
-    kiln_cfg_store_lock();
-    bool finalized = kiln_cfg_store_set_active_id_raw(target_id, final_reason, sizeof(final_reason));
-    kiln_cfg_store_unlock();
-    if (!finalized) {
-        /* Content is correct on both sides; only the bookkeeping id write
-         * failed -- log loudly but do not report this as a failed swap
-         * (the live config genuinely IS P on both sides). */
-        ESP_LOGE(TAG, "swap content landed and verified, but recording active_id failed: %s", final_reason);
     }
 
     /* step 13: best-effort Pico flash-fallback persist (item 15's "persist

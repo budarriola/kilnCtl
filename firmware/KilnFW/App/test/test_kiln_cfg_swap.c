@@ -655,7 +655,18 @@ static void test_diverged_ceiling_does_not_finalize(void)
     bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
     TEST_CHECK(!ok, "swap does not report success when the ceiling/arming check fails");
     TEST_CHECK(diverged, "out_diverged is set");
-    TEST_CHECK(s_active_id == KILN_CFG_NO_ACTIVE_ID, "active_id NOT finalized");
+    // MEDIUM finding 3, adversarial review 2026-09-15 (docs/audits/
+    // review_autosave_slot_fix_a93ee77b_2026-09-15.md): active_id now moves
+    // to target_id right after readback proves the content match, BEFORE
+    // this ceiling/arming check runs -- not at the end on full success only.
+    // Content genuinely IS target_id's on both sides by this point
+    // regardless of the ceiling/arming outcome, so leaving active_id stale
+    // here (as the old code did) is itself the bug this finding named: any
+    // ordinary autosave firing in that gap would have overwritten the
+    // OUTGOING kiln's slot with content that was already live as the
+    // incoming one.
+    TEST_CHECK(s_active_id == 7, "active_id finalized to target_id -- content is proven live regardless of "
+                                 "the ceiling/arming alarm below");
     TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_ESP_DONE,
                "pending record left at ESP_DONE for boot recovery to retry");
     TEST_CHECK(s_zones_import_call_count == 1, "both halves DID land -- this is not a rollback case");
@@ -842,8 +853,16 @@ static void test_pico_reboot_before_flash_fallback_caught_by_existing_check(void
     bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
     TEST_CHECK(!ok, "swap does NOT report success once the post-install divergence check fails");
     TEST_CHECK(diverged, "out_diverged is set -- caller can distinguish this from an ordinary refusal");
-    TEST_CHECK(s_active_id == KILN_CFG_NO_ACTIVE_ID, "active_id NOT finalized -- never trust an unconfirmed "
-                                                     "post-reboot state");
+    // Same reordering as test_diverged_ceiling_does_not_finalize() above
+    // (MEDIUM finding 3, adversarial review 2026-09-15): active_id moved to
+    // target_id right after the ESP readback proved content match, which
+    // happened before this reboot-triggered divergence was even detected.
+    // The ESP's own zones config genuinely IS target_id's; what is
+    // unconfirmed here is only the PICO's post-reboot state, which is a
+    // separate, already-alarmed condition (out_diverged/ESP_DONE below) --
+    // it does not make the ESP-side active_id wrong.
+    TEST_CHECK(s_active_id == 7, "active_id finalized to target_id -- the ESP-side content is proven live; "
+                                 "only the Pico's post-reboot state is unconfirmed");
     TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_ESP_DONE,
                "pending record left at ESP_DONE -- boot recovery's 'verify then finish' path (or a later "
                "reconcile once the Pico is unarmed) gets another chance, rather than the reboot being "
