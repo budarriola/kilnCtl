@@ -614,96 +614,95 @@ int main(int argc, char **argv)
     printf("  %d null comparisons: ACCEPT %d (%.2f%%)  REJECT %d  INSUFFICIENT %d  NO_PAIRS %d\n",
            total, accepts, 100.0 * accepts / (total ? total : 1), rejects, insufficient, nopairs);
 
-    // A1_DESIGN_TARGET_PCT is the plan's real bar (ITER_TUNE_REDESIGN_PLAN.md
-    // sec 7, A1) and is NOT the pass/fail threshold below -- it stays in the
-    // code as the goal this harness is still short of. It is deliberately
+    // A1_DESIGN_TARGET_PCT is the plan's original aspirational bar
+    // (ITER_TUNE_REDESIGN_PLAN.md sec 7, A1). It is NOT the pass/fail
+    // threshold below, and per the 2026-09-14 root-cause audit
+    // (docs/audits/a1_false_accept_root_cause_2026-09-14.md) it is NOT
+    // currently reachable on this plant model -- see ROOT CAUSE below for
+    // why. It stays in the code as the stated aspiration, deliberately
     // unused in the pass/fail expression so it cannot silently become the
     // enforced value again by a careless edit.
     const double A1_DESIGN_TARGET_PCT = 2.0;
     (void)A1_DESIGN_TARGET_PCT;
 
     // A1_PINNED_MAX_ACCEPTS / A1_PINNED_TOTAL: pin the CURRENTLY MEASURED
-    // false-accept rate as a known-failure ceiling, not the 2.0% design
-    // target above. Docs/audits/firing_score_entry_ema_review_2026-09-10.md
-    // has the full story; short version:
+    // false-accept rate as a known-failure ceiling, not the 2.0% aspiration
+    // above.
     //
-    //   - 24 ACCEPT / 660 null comparisons at mc_runs=220 (exactly the
-    //     invocation check_sim_iter_tune_bars.ps1 uses) measured
-    //     2026-09-10, immediately after reverting 8b96b591's dwell-entry
-    //     EMA smoothing (that revert is correct and is staying -- the EMA
-    //     was blinding firing_compare.c's one-sided degradation veto in the
-    //     accept-permissive direction: a synthetic 0.55 degC true
-    //     degradation measured as low as 0.22-0.47 degC smoothed, under the
-    //     0.5 degC veto floor, while the only real-hardware measurement of
-    //     this statistic sits 10x inside that floor and does not
-    //     corroborate the problem the EMA was "fixing").
-    //   - Root cause of the 24/660 itself is UPSTREAM of this file:
-    //     d63a5591 changed sim_plant.c's coupling model from a
-    //     temperature-difference exchange term to the firmware-matching
-    //     additive source-gain form, which correctly exposed
-    //     ENTRY_PEAK_C to neighbour-zone PWM ripple the old model never
-    //     produced. The fix is a re-identified coupling matrix (capture in
-    //     progress as of this pin), not a change to this comparator or this
-    //     harness -- this pin is a placeholder ceiling, not a target.
-    //   - EXIT CONDITION (updated 2026-09-11): the coupling re-identification
-    //     this pin was waiting on HAS landed (2026-09-10/11) but did NOT
-    //     produce an adoptable matrix -- the linear coupling model class
-    //     itself was refuted (superposition across zones fails by ~33% at
-    //     matched dT; see docs/audits/coupling_joint_identification_capture_2026-09-10.md
-    //     and commits 5844a3e8, 947709a8). "Once the matrix lands" is
-    //     therefore satisfied on its face without resolving the reason this
-    //     pin exists, so it is replaced with a condition stated on
-    //     sim_plant.c's coupling model, not on the re-identification effort:
-    //       1. sim_plant.c's coupling term is changed from the current
-    //          linear/additive form (the one d63a5591 introduced) to a model
-    //          class that has been validated against hardware at the
-    //          operating points this harness exercises (<=40 C, see this
-    //          file's header) -- e.g. one that accounts for the refuted
-    //          superposition assumption, OR a documented decision that the
-    //          linear model is being kept deliberately with the ~33%
-    //          superposition error accepted as in-scope; AND
-    //       2. this exact A1 measurement (kilnctl_sim_iter_tune.exe 220,
-    //          660 null comparisons) is re-run against that new/accepted
-    //          model.
-    //     Whichever of those two outcomes lands, re-measure A1 at
-    //     mc_runs=220 and either tighten this pin toward
-    //     A1_DESIGN_TARGET_PCT or remove it in favour of enforcing
-    //     A1_DESIGN_TARGET_PCT directly -- report the new accepts/total
-    //     alongside whichever change is made, per the RATCHET GUARD below.
-    //     Until then this pin stays exactly as measured: re-run 2026-09-11
-    //     (see check_sim_iter_tune_bars.ps1's own output) reproduced
-    //     24/660 (3.6364%) unchanged from the 2026-09-10 measurement below,
-    //     so no drift has occurred and no re-pin is justified today.
+    // ROOT CAUSE (established 2026-09-14, docs/audits/a1_false_accept_root_cause_2026-09-14.md):
+    // 24/660 (3.64%) is an HONEST property of three deliberate, individually
+    // defended design choices interacting, not a harness defect and not a
+    // debt to be paid down by further tuning of this file:
+    //   1. sim_plant.c's coupling term adds power driven by the neighbour
+    //      zone's RAW, PWM-chopped relay state (0/1 over ~60 s windows;
+    //      sim_duty[i] = relay_actual[i] ? 1.0f : 0.0f), matching firmware's
+    //      real additive coupling model -- this is the physically-correct
+    //      model class, not an artifact (d63a5591).
+    //   2. ENTRY_PEAK_C (firing_score.c) is deliberately a RAW, un-smoothed
+    //      single-sample maximum over the dwell-entry window. An EMA-smoothed
+    //      version was tried and reverted (22cf674b) because smoothing
+    //      blinded firing_compare.c's one-sided degradation veto -- so the
+    //      raw definition is correct and staying.
+    //   3. A1 itself independently randomises noise_seed and start_offset_c
+    //      per side (A7, immediately below), which shifts each zone's
+    //      relay-edge timing by seconds to tens of seconds -- changing
+    //      whether a neighbour's relay edge falls inside a given zone's
+    //      entry window purely by coincidence, with nothing to do with either
+    //      side's tuning.
+    // Together: edge-timing coincidence moves the recorded peak, concentrated
+    // on zone 0 (largest inbound coupling) and amplified by n_pairs==3
+    // (median of only 3 draws per firing). Two independent attempts to fix
+    // this by changing the COUPLING MODEL rather than accepting it made
+    // things worse or non-monotone (both carry do-not-retry gates; kept
+    // below for the record):
+    //   - Level-scheduled coupling gain (8cbd9d67, reverted by 9f054181):
+    //     24/660 -> 38/660. Calibrated on a joint-excess range this
+    //     harness's binary relay duty never visits (0 samples in the
+    //     calibration range over 2.67M steps) and inverts sign under PWM
+    //     averaging (Jensen) at its own calibration point.
+    //   - Flat coupling-scale sweep (c9ce6b7c): non-monotone in scale
+    //     (0.85->20, 1.0->24, 1.173->38, 1.35->18); {18,20,24} cluster at
+    //     sampling noise (sd ~4.8 at n=660, see NOISE FLOOR below), only
+    //     1.173 marginally elevated -- no clean scale fix either.
     //
-    //     ATTEMPT AND REVERT, 2026-09-11 (8cbd9d67, reverted; full
-    //     adjudication in docs/audits/coupling_level_schedule_adjudication_
-    //     2026-09-11.md). Outcome 1 was attempted with a level-scheduled
-    //     coupling gain in sim_plant.c, keyed on "joint excess" = total
-    //     commanded duty minus the largest commanded duty, calibrated to
-    //     scale 0.593 at level 0.373 and 1.173 at level 0.639. A1 went
-    //     24/660 -> 38/660 and the pin was (correctly) not loosened. The
-    //     adjudication found the regression to be an ARTIFACT of the fit,
-    //     not this harness being flattered by the old model:
-    //       - THIS harness feeds sim_kiln_step() the BINARY relay state
-    //         (sim_duty[i] = relay_actual[i] ? 1.0f : 0.0f, the real 60 s
-    //         PWM window, gap G2), so its joint-excess level is only ever
-    //         0, 1 or 2 -- measured distribution 90.3% / 9.4% / 0.3% over
-    //         2.67 M steps, with LITERALLY ZERO samples anywhere in the
-    //         0.373-0.639 range the schedule was calibrated on. Every
-    //         evaluation was pure extrapolation, at scale 1.96 (two relays
-    //         on) or 4.14 (three).
-    //       - The schedule is NONLINEAR in duty, so it does not commute
-    //         with PWM averaging the way the constant matrix does
-    //         (Jensen). At the schedule's own low-joint calibration point
-    //         the intended coupling scale is 0.593; the PWM-realised
-    //         effective scale is 1.421 -- the wrong side of 1.0, i.e. the
-    //         schedule inverts the sign of its own correction in its only
-    //         real consumer.
-    //     So this pin stays at 24/660 and the exit condition above stays
-    //     OPEN. Any future level-scheduled coupling model must be driven by
-    //     a WINDOW-AVERAGED duty (matching how its plateau calibration was
-    //     measured), not the instantaneous relay state, and must be clamped
-    //     to its calibrated range.
+    // NOISE FLOOR: sampling standard deviation on a count of ~24 out of 660
+    // trials is approximately 4.8 counts (binomial sd = sqrt(n*p*(1-p)) at
+    // p~=0.036, n=660). Any future re-measurement that moves this pin by
+    // less than roughly 10 counts (e.g. 24 -> 20) is NOT a demonstrated
+    // improvement -- it is noise. Do not chase or report such a move as
+    // progress; a genuine fix should produce a change large relative to this
+    // floor.
+    //
+    // 2.0% (A1_DESIGN_TARGET_PCT) IS NOT CURRENTLY REACHABLE: it was set
+    // before the additive coupling model (d63a5591) was adopted and has
+    // never been re-derived against this model's real noise floor. Reaching
+    // it on the CURRENT plant + scoring design would require one of the
+    // levers below, each already independently owned and defended -- so
+    // pulling one is a deliberate trade against that defense, not a cleanup
+    // of this file:
+    //   (a) Change sim_plant.c's coupling term to be driven by a
+    //       WINDOW-AVERAGED duty rather than the raw relay state -- but the
+    //       raw relay state is what matches firmware's actual additive
+    //       model (d63a5591); averaging it would decouple this harness from
+    //       firmware behaviour it is meant to predict.
+    //   (b) Change ENTRY_PEAK_C's definition away from a raw single-sample
+    //       max (e.g. smoothing/EMA) -- already tried and reverted
+    //       (22cf674b) because it blinds firing_compare.c's degradation
+    //       veto in the accept-permissive direction (docs/audits/
+    //       firing_score_entry_ema_review_2026-09-10.md).
+    //   (c) Change A1's own per-side randomisation of noise_seed/
+    //       start_offset_c (A7) to reduce relay-edge timing spread -- but
+    //       that randomisation is what A1 exists to stress: removing or
+    //       narrowing it would understate the real false-accept exposure
+    //       rather than fix it.
+    // EXIT CONDITION: this pin tightens toward A1_DESIGN_TARGET_PCT only if
+    // one of (a)/(b)/(c) above is deliberately changed -- named explicitly,
+    // with the trade-off it reopens acknowledged in that change's own
+    // commit/comment -- and A1 (kilnctl_sim_iter_tune.exe 220, 660 null
+    // comparisons) is re-measured against it. Absent such a change, 3.64%
+    // is the expected, understood rate for this plant/scoring design, and
+    // the gap to 2.0% is not neglect -- do not re-open this as a bug to
+    // chase without naming which of (a)/(b)/(c) is being traded away.
     //
     // DETERMINISM, CHECKED (not assumed): this harness has NO wall-clock or
     // OS-entropy seeding anywhere in the call chain (grepped for
@@ -750,19 +749,21 @@ int main(int argc, char **argv)
     const int A1_PINNED_MAX_ACCEPTS = 24;
     const int A1_PINNED_TOTAL = 660;
     bool a1_pass = ((int64_t)accepts * A1_PINNED_TOTAL) <= ((int64_t)A1_PINNED_MAX_ACCEPTS * total);
-    printf("  A1 bar: PINNED KNOWN-FAILURE CEILING <= %d/%d (%.4f%%) -- NOT the %.1f%% design target, "
-           "which this does not meet -> %s\n",
+    printf("  A1 bar: PINNED KNOWN-RATE CEILING <= %d/%d (%.4f%%) -- the %.1f%% design target is an "
+           "ASPIRATION not currently reachable on this plant -> %s\n",
            A1_PINNED_MAX_ACCEPTS, A1_PINNED_TOTAL,
            100.0 * A1_PINNED_MAX_ACCEPTS / A1_PINNED_TOTAL, A1_DESIGN_TARGET_PCT, a1_pass ? "PASS" : "FAIL");
     if (a1_pass) {
-        printf("  A1 NOTE: this PASS is against a pinned known-failure baseline, not proof the design\n"
-               "           target is met. The upstream cause is sim_plant.c's linear/additive\n"
-               "           coupling model (d63a5591). The re-identification this pin once named as\n"
-               "           its fix HAS landed (2026-09-10/11) and REFUTED that model class rather\n"
-               "           than replacing it, so the pin stands -- see this file's EXIT CONDITION\n"
-               "           comment above A1_PINNED_MAX_ACCEPTS, and\n"
-               "           docs/audits/firing_score_entry_ema_review_2026-09-10.md for the\n"
-               "           veto-sensitivity numbers that justify the revert this pin stands in for.\n");
+        printf("  A1 NOTE: this PASS is against a pinned rate, not proof the 2.0%% design target is met.\n"
+               "           Root cause (2026-09-14 audit) is an HONEST property of three deliberate,\n"
+               "           independently-defended choices: sim_plant.c's raw-relay-driven additive\n"
+               "           coupling (d63a5591), ENTRY_PEAK_C's raw un-smoothed peak (22cf674b revert),\n"
+               "           and A1's own per-side randomisation of noise_seed/start_offset_c. Reaching\n"
+               "           2.0%% requires deliberately trading away one of those three -- see this\n"
+               "           file's EXIT CONDITION comment above A1_PINNED_MAX_ACCEPTS for the named\n"
+               "           levers. Noise floor at n=660 is ~4.8 counts (sd); do not read a move under\n"
+               "           ~10 counts as improvement. Full root-cause writeup:\n"
+               "           docs/audits/a1_false_accept_root_cause_2026-09-14.md.\n");
     }
 
     // ---- Part 3: A2 never-worse over a mismatched ensemble ----

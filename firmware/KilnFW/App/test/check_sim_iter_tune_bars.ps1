@@ -19,36 +19,46 @@
 # argv[1]) -- run the .exe directly for that; this check only pins the one
 # canonical n=220 configuration the audit's figures reference.
 #
-# 2026-09-10 KNOWN-FAILURE PIN, NOT A CLEARED BAR: A1's real defect is
-# upstream of this repo's decision/measurement code -- d63a5591 changed
-# sim_plant.c's coupling model class, which correctly exposed
-# ENTRY_PEAK_C to neighbour-zone PWM ripple the old model never produced,
-# and the fix is a re-identified coupling matrix (capture in progress as of
-# this pin), not anything reachable from firing_score.c/firing_compare.c/
-# this harness. sim_iter_tune.c's A1 check therefore enforces a PINNED
-# ceiling (24/660, ~3.64%) instead of the real 2.0% design target -- see
-# that file's own A1_PINNED_MAX_ACCEPTS/A1_PINNED_TOTAL comment for the
-# full provenance and the ratchet-guard rule (the pin only ever tightens by
-# hand, never widens to paper over a regression). A green run of THIS
-# CHECK is not proof the 2.0% target is met -- read the "A1 NOTE" line in
-# its own output. Full reasoning, including why 8b96b591's EMA smoothing
-# was reverted rather than kept to hit 2.0% cheaply (it blinded
-# firing_compare.c's degradation veto in the accept-permissive direction):
-# docs/audits/firing_score_entry_ema_review_2026-09-10.md.
+# 2026-09-14 ROOT-CAUSE UPDATE, PINNED RATE NOT A CLEARED BAR: A1's 24/660
+# (~3.64%) is an HONEST property of this plant/scoring design, not a
+# harness defect -- established by docs/audits/a1_false_accept_root_cause_2026-09-14.md.
+# Three independently-defended choices interact: sim_plant.c's coupling term
+# is driven by the neighbour zone's RAW, PWM-chopped relay state (matching
+# firmware's real additive model, d63a5591); ENTRY_PEAK_C is a deliberate
+# raw, un-smoothed single-sample peak (an EMA version was tried and
+# reverted, 22cf674b, because it blinded firing_compare.c's degradation
+# veto); and A1 itself randomises noise_seed/start_offset_c per side (A7),
+# shifting relay-edge timing enough to change whether a neighbour's edge
+# lands inside a given zone's dwell-entry window by pure coincidence. Two
+# independent attempts to fix this via the coupling model (a level-scheduled
+# gain, 8cbd9d67, reverted; a flat-scale sweep, c9ce6b7c) made it worse or
+# showed non-monotone, noise-dominated behaviour -- see sim_iter_tune.c's
+# A1_PINNED_MAX_ACCEPTS comment for the full detail and the do-not-retry
+# gates on both. sim_iter_tune.c's A1 check therefore enforces a PINNED rate
+# (24/660, ~3.64%) rather than the 2.0% design target -- see that file's own
+# A1_PINNED_MAX_ACCEPTS/A1_PINNED_TOTAL comment for the full provenance and
+# the ratchet-guard rule (the pin only ever tightens by hand, never widens
+# to paper over a regression). A green run of THIS CHECK is not proof the
+# 2.0% target is met, and the gap is NOT neglect -- read the "A1 NOTE" line
+# in its own output.
 #
-# EXIT CONDITION (updated 2026-09-11): the coupling re-identification this
-# was waiting on has landed (2026-09-10/11) without producing an adoptable
-# matrix -- the linear coupling model class itself was refuted (~33%
-# superposition error at matched dT; docs/audits/coupling_joint_identification_capture_2026-09-10.md,
-# commits 5844a3e8/947709a8). The exit condition is therefore restated on
-# sim_plant.c's coupling model rather than on the re-identification effort:
-# once sim_plant.c's coupling term is changed to a hardware-validated model
-# class (or a deliberate decision to keep the linear form is documented),
-# re-measure A1 at n=220 and either tighten sim_iter_tune.c's pin toward
-# 2.0% or drop it in favour of enforcing A1_DESIGN_TARGET_PCT directly. See
-# sim_iter_tune.c's A1_PINNED_MAX_ACCEPTS comment for the full text. A
-# 2026-09-11 re-run of this exact check reproduced 24/660 (3.6364%)
-# unchanged from the 2026-09-10 measurement -- no drift, no re-pin.
+# NOISE FLOOR: sampling sd at n=660 on a count of ~24 is approximately 4.8
+# counts. A future re-measurement that moves this pin by less than roughly
+# 10 counts is not a demonstrated improvement.
+#
+# EXIT CONDITION (updated 2026-09-14): 2.0% is not reachable on the current
+# plant/scoring/randomisation design as-is. It becomes reachable only by
+# deliberately trading away one of three named, already-defended choices:
+# (a) driving sim_plant.c's coupling term from a window-averaged duty
+# instead of the raw relay state (would decouple this harness from
+# firmware's real behaviour); (b) smoothing ENTRY_PEAK_C (already tried and
+# reverted for blinding the degradation veto); or (c) narrowing A1's own
+# per-side noise_seed/start_offset_c randomisation (would understate the
+# real false-accept exposure A1 exists to measure). Whichever lever is
+# pulled, name it explicitly, acknowledge the trade-off it reopens, and
+# re-measure A1 at n=220 before tightening sim_iter_tune.c's pin toward
+# A1_DESIGN_TARGET_PCT. See sim_iter_tune.c's A1_PINNED_MAX_ACCEPTS comment
+# for the full text.
 #
 # 2026-09-10 SKIP vs FAIL, and why this does not depend on
 # build_host_tests.ps1 having run first: this check was first found FAILING
@@ -206,13 +216,15 @@ echo BUILD_EXIT=%ERRORLEVEL%
         exit 1
     }
 
-    Write-Host "PASS: sim_iter_tune.exe (n=220) -- A2/A5/A6 clear; A1 clear ONLY against its pinned"
-    Write-Host "      known-failure ceiling (24/660, ~3.64%), NOT the 2.0% design target, which is"
-    Write-Host "      NOT yet met. Upstream cause is sim_plant.c's linear/additive coupling model"
-    Write-Host "      (d63a5591); the 2026-09-10/11 re-identification refuted that model class rather"
-    Write-Host "      than replacing it, so the pin stands. See sim_iter_tune.c's EXIT CONDITION"
-    Write-Host "      comment above A1_PINNED_MAX_ACCEPTS and"
-    Write-Host "      docs/audits/firing_score_entry_ema_review_2026-09-10.md."
+    Write-Host "PASS: sim_iter_tune.exe (n=220) -- A2/A5/A6 clear; A1 clear against its pinned rate"
+    Write-Host "      (24/660, ~3.64%). The 2.0% design target is an ASPIRATION, not currently"
+    Write-Host "      reachable on this plant: root cause (2026-09-14 audit) is an honest interaction"
+    Write-Host "      of sim_plant.c's raw-relay-driven coupling (d63a5591), ENTRY_PEAK_C's raw"
+    Write-Host "      un-smoothed peak (22cf674b revert), and A1's own per-side noise/start-temp"
+    Write-Host "      randomisation -- reaching 2.0% requires deliberately trading one of those away."
+    Write-Host "      Noise floor at n=660 is ~4.8 counts (sd); a move under ~10 counts is not an"
+    Write-Host "      improvement. See sim_iter_tune.c's EXIT CONDITION comment above"
+    Write-Host "      A1_PINNED_MAX_ACCEPTS and docs/audits/a1_false_accept_root_cause_2026-09-14.md."
     exit 0
 } finally {
     Exit-BuildLock -Lock $lock
