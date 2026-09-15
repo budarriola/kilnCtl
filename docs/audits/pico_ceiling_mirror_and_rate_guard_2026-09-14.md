@@ -349,3 +349,267 @@ Nothing in this pass touches zone persistence schema, `target_c`/
 a new, independent, in-memory-only version number belonging solely to
 `config_divergence.h`'s own comparator, not persisted anywhere and not on
 the wire.
+
+---
+
+# Review, 2026-09-14 (adversarial) -- claims hold; three real findings, none refuting the design
+
+Independent adversarial review of `7adf191b` by a second session. **No
+load-bearing claim in the sections above is refuted.** Three real findings
+are recorded below (one missing test file the header itself cites, one
+latent message defect proved by execution, one behavioural coupling created
+by calling blocking hooks from the safety poll task), plus several claims
+confirmed. Method is stated per item: **[EXEC]** = verified by running code,
+**[READ]** = verified by reading source. Nothing here was flashed and no
+board state was written -- another session owns the bench.
+
+## 1. Locking around the two heat-disable hooks -- [READ], no deadlock, but a real coupling
+
+Call chain traced end to end:
+
+- `safety_link_poll.c`'s `safety_update_health()` takes the link lock
+  (`safety_lock(link)`), copies out the facts it needs, and calls
+  `safety_unlock(link)` **before** the `if (up) { ... }` block that invokes
+  `safety_ceiling_sync_reconcile_on_link_up()` (`safety_link_poll.c:297`).
+  **The safety link lock is NOT held when the hooks fire.** This is the
+  single most important thing to get right here, and it is right.
+- `enforce_ceiling_divergence()` itself holds no lock of its own -- its
+  state is plain file-scope statics touched only from `safety_poll_task`.
+- `profile_executor_halt()` (`profile_executor_status.c:23`) takes
+  `s_exec.lock` with `portMAX_DELAY`, i.e. **an unbounded blocking wait**,
+  and then (when not IDLE) performs `force_all_relays_off()`,
+  `io_segs_force_all_off()`, `relay_authority_release_mask()` and
+  `heat_enable_release()` *while holding that lock*.
+- `kiln_io_owner_command_all_relays_off()` is `post_and_wait()`
+  (`kiln_io_owner.c:557`): a queue post plus `xSemaphoreTake(..., 200 ms)`
+  (`KILN_IO_OWNER_WAIT_MS`) cross-task RPC -- **bounded**, but up to 200 ms.
+
+**No AB-BA deadlock exists.** The order this pass introduces on
+`safety_poll_task` is `s_exec.lock` -> (later, in `guard_raise`) the link
+lock. For a deadlock the executor would have to hold `s_exec.lock` and then
+block on the safety link lock; the executor reads link state only through
+`safety_link_get_fault_sources()`/`safety_link_get_status()`, and the io-owner
+task takes neither lock. Traced, not assumed.
+
+**What IS new is a coupling.** `safety_poll_task` is documented in
+`safety_link_poll.c:371`'s own comment as the **ESP->Pico liveness
+heartbeat** -- the thing whose absence trips the Pico's S6b LINK_DEAD guard.
+Every diverged tick now blocks that task on `s_exec.lock` (unbounded) plus
+one 200 ms owner RPC. The executor tick holds `s_exec.lock` across its own
+relay work, so the wait is not nominally short. This does not violate
+CLAUDE.md's "never hold a module lock across producer calls" -- `safety_ceiling_sync.c`
+holds nothing -- but it does make the heartbeat's latency a
+function of the executor's lock hold time. **Failure direction is safe**: a
+delayed heartbeat trips S6b, which cuts heat, and the state that triggers it
+is one in which heat is already being forced off deliberately. So this is a
+nuisance-trip risk, not a hazard. Worth a bounded take (`pdMS_TO_TICKS`)
+inside `profile_executor_halt()` if anyone revisits it -- flagged, not
+fixed, since `profile_executor.c` is outside this review's write scope.
+
+**Reentrancy: none.** `safety_ceiling_sync_reconcile_on_link_up()` has
+exactly one caller (`safety_link_poll.c:297`, on `safety_poll_task`); neither
+the executor nor the io-owner task calls back into this file. The halt path
+cannot re-enter the reconcile. [READ]
+
+**Divergence persisting every tick**: `profile_executor_halt()` early-returns
+on `PROFILE_EXEC_IDLE`, so after the first halt it is cheap.
+`kiln_io_owner_command_all_relays_off()` does **not** short-circuit -- a permanently
+diverged board issues one full owner RPC per poll tick, forever. Deliberate
+per the section above ("enforcement is NOT rate-limited"), and correct for
+safety; noted so nobody later mistakes the steady owner-queue traffic for a
+fault.
+
+## 2. The injected-hook pattern -- a real, bounded window, and a silent no-op that should not be silent
+
+`main_control_bringup()` calls `safety_link_start(&ctx->safety)` (which
+starts `safety_poll_task`) near its top, and installs the hooks at
+`main_control_bringup.c:244` -- **after** `profile_executor_start()`.
+`safety_poll_task` is therefore live, and can run
+`enforce_ceiling_divergence()`, before either hook exists. [READ]
+
+Mitigating facts, all verified: the hooks are installed
+**unconditionally**, including in RECOVERY MODE (so the three-time
+"subsystem started before its dependency" brick shape is avoided); and
+`s_divergence_active`/`s_divergence_reason` are set **regardless** of whether
+the hooks are NULL, so the readiness gate's verdict is correct even inside
+the window. The window is short and precedes any path that can start a
+firing (HTTP is not up yet).
+
+**Finding (low, real):** a divergence detected with NULL hooks logs
+`ALARM: ... -- heaters disabled (all relays forced off, any run halted)`
+while in fact doing neither. That is the "logging unchecked success" shape
+CLAUDE.md already names. A one-shot `ESP_LOGE` when
+`diverged && (!s_disable_all_relays_off || !s_disable_halt_run)` would close it.
+
+**Finding (low, real):** `safety_ceiling_sync.h`'s doc comment on
+`safety_ceiling_sync_set_disable_heat_hooks()` cites
+`test_safety_ceiling_sync_divergence.c` as where a host test installs
+counters to observe the enforcement. **That file does not exist** (`ls
+App/test/ | grep ceiling` returns only `test_safety_ceiling_policy.c`).
+`test_config_divergence.c` covers the pure comparator only; **the
+enforcement path -- the hook firing, the `s_divergence_active` latch, the
+`target_known` exclusion -- has no test at all.** Either write that file or
+correct the comment; a header citing a test that was never written is how a
+future reader concludes coverage exists.
+
+Separately: the verdict **fails open before its first evaluation**
+(`s_divergence_active` initialises to `false`), and the reconcile early-
+returns on `!link` and `!zones_config_is_valid()`, leaving the last verdict
+latched. Correct in every case traced (link-down blocks heat independently,
+via `profile_executor_run.c`'s "heat is blocked ... usually the safety link
+down" precheck), but it means "not diverged" can mean "not yet checked".
+
+## 3. Can an unknown field wedge the system into permanent divergence? Confirmed true, and confirmed intentional -- with an exit
+
+**The claim "an identity with any unknown field never matches" is true.**
+[EXEC] `config_identity_matches()` returns false on `!a->known || !b->known`
+before reaching the hash; a standalone harness linking the real
+`config_divergence.c` confirms unknown-vs-unknown, with byte-identical
+sentinel hashes, does not match.
+
+Field sets today: **one field on each side**, `abs_max_temp_c`. ESP side is
+`safety_ceiling_policy_target_c()` over the live zone maxima, `known =
+target_c > 0.0f`; Pico side is
+`safety_ceiling_sync_get_current_pico_ceiling()`, `known` = `safety_cfg_store`'s
+`row.set` for param `0x0104`, refreshed from the Pico's own `GET_CONFIG_PAGE`.
+There is no field either side can carry that the other does not know about,
+so **the "one side legitimately carries a field the other does not" wedge is
+not reachable today**. [READ]
+
+The reachable "permanent divergence" is an uncommissioned/unconfirmed Pico
+-- which is the owner's stated intent ("an unarmed Pico is a divergence by
+definition") and **has an exit**: commission the Pico. Not a wedge.
+
+**Latent finding (medium, for the multi-kiln feature):** if *every* field is
+unknown on *both* sides, `format_first_field_difference()` finds no culprit
+(its "both unknown -> not the culprit" branch) and the fallback message
+fires. [EXEC] the actual string produced is:
+
+```
+config divergence: identity mismatch (format_version 1 vs 1, hash 0xBE20868A vs 0xBE20868A)
+```
+
+-- an alarm that disables heaters while reporting **identical versions and
+identical hashes**, i.e. a message that flatly contradicts itself and gives
+an operator nothing to act on. Unreachable today only because n==1 and the
+ESP side is always `known` by the time the check runs (`!target_known`
+returns early). It becomes reachable the moment the planned config-swap
+feature supplies a field the ESP itself may not know. The fallback should
+name the unknown-field case explicitly.
+
+## 4. Float normalisation -- [EXEC], verified, no spurious-mismatch risk found
+
+A standalone harness was compiled (MSVC, same `/std:c11` as the host suite)
+linking the **real** `firmware/KilnFW/App/drivers/safety/config_divergence.c`
+-- not a mirror of it. It pushed values through an actual
+`snprintf("%.9g")`/`strtof()` round trip, then a second round trip (the
+set-and-confirm shape), and compared identities:
+
+| value | round-trip raw bits | identity matches |
+|---|---|---|
+| 80.0 (the live board's ceiling) | identical | yes |
+| 33.3 (the S8 rate guard) | identical | yes |
+| 1200.0, 1093.3, 62.5, 2.0, 0.1, 1/3 | identical | yes |
+| JSON `double` 33.3 narrowed to f32, then wire | identical | yes |
+| `(float)(0.8*100.0)` vs `80.0f` | identical | yes |
+
+All eight round trips and both cross-representation cases **matched**; a
+real 80.00-vs-80.01 difference was still caught. The longest realistic reason
+string measured **65 of 160 bytes** -- no truncation. `%.9g` is exact for
+f32 so normalisation is belt-and-braces here rather than load-bearing, but
+it is correct and it costs nothing. **No spurious-mismatch path found.**
+
+One observation, benign today: two NaN identities **match** (identical bit
+patterns hash identically). The ESP side cannot be NaN (`target_known` is
+`target_c > 0.0f`, false for NaN), so a NaN can only appear on the Pico side
+and will mismatch a real ESP value. No action needed; recorded so it is not
+rediscovered as a surprise.
+
+## 5. One verdict, or two? -- [READ], the claim holds
+
+`readiness_gate.c:68` sets
+`out->ceiling_diverged = safety_ceiling_sync_is_diverged(NULL, 0)`;
+`readiness_http.c:683` calls the same function. Both then
+feed the **same pure predicate** `readiness_ceiling_match_status()`. There is
+no second float-epsilon recomputation anywhere. **Claim confirmed.**
+
+One nuance the doc does not state: the predicate's *other* input differs by
+source -- the gate passes `f->safety_link_up` (from
+`dashboard_http_get_safety_trip()`), the HTTP item passes `safety_ready`
+(from `dashboard_http_get_hw_ready()`). Traced: both reduce to
+`s_dash.safety != NULL && safety_link_get_status(...) == ESP_OK && sl.link_up`
+(`dashboard_safety_ready()`, `dashboard_http.h:56`). **Equivalent by
+construction, not shared** -- fine today, and consistent with how the other
+readiness items are wired.
+
+Blocking behaviour confirmed: `readiness_gate.h:192` blocks with
+`READINESS_GATE_BLOCK_CEILING_MISMATCH` and the reason text **names the
+ceiling mismatch specifically** ("the safety processor's ceiling does not
+match the ESP's zone config"), not a generic refusal. Note that link-down
+maps to `READY_CANNOT_YET`, which does **not** block -- deliberate per the
+predicate's own comment, and covered independently by the heat-blocked
+precheck in `profile_executor_run.c`.
+
+## 6. Negative test reproduced -- [EXEC]
+
+`config_identity_matches()`'s `return a->hash == b->hash;` was replaced with
+`return true;`. `build_host_tests.ps1` produced **`RUN FAILURES (1):
+config_divergence`** -- the claimed RED reproduces exactly.
+
+Restored **by hand** (textual reverse-replace; `git diff` on the file is
+empty, confirming byte-identical to `7adf191b`), `App/test/build` deleted,
+and the whole suite rebuilt from scratch: `config_divergence` green.
+
+The clean rebuild surfaced **`RUN FAILURES (1): main`** -- three assertions
+in `test_kiln_cfg_store.c:396-402` (unrecognised-version-99 blob). **Not this
+commit's**: owned by the concurrent `kiln_cfg_store`/`kiln_package` work,
+and notably *masked* on the earlier incremental build by a stale object file.
+
+`tools/run_all_checks.ps1`: **92 passed, 0 skipped, 2 failed**. Both failures
+are the same concurrent work -- `check_00_kilnfw_target_build.ps1` fails on
+`kiln_cfg_store.h:278: error: '/*' within comment [-Werror=comment]`, and
+`check_c_files_in_cmakelists.ps1` fails on `kiln_package.c` not being
+referenced. Nothing in `7adf191b`'s own file set fails any check.
+
+## 7. The `safety_core.c:333` deferral -- [READ], the claim is CORRECT
+
+The doc's claim that heating is still independently refused via
+`commissioning_gate.h` was verified in SaftyFW source, not taken on trust:
+
+- `safety_core_load_guard_cfg()` (`firmware/SaftyFW/src/tasks/safety_core.c`,
+  the `:333` line) does default `s_guard_cfg.abs_max_temp_c` to `0.0f` when
+  `CONFIG_STORE_SET_ABS_MAX_TEMP_C` is clear, so S1 indeed never trips on an
+  uncommissioned board.
+- `safety_core_request_enable()` (`safety_core.c:1636`) calls
+  `commissioning_gate_energize_allowed(enable, &cfg_rec)` on the **ON
+  direction** and returns false when it refuses, logging
+  `"refused: safety processor not commissioned"`.
+- `commissioning_gate_is_commissioned()` requires BOTH the stored
+  `calibration_missing == false` AND `config_params_all_required_set()`
+  recomputed from `fields_set` -- and `abs_max_temp_c` is one of the
+  no-safe-default fields in that set. So an unconfigured `abs_max_temp_c`
+  makes the board uncommissioned **by definition**, which refuses enable.
+- `relay_owner_command_energize()` has exactly **one** caller outside its own
+  file: `safety_core.c:1648`, immediately after that refusal. There is no
+  second path to energize. (`grep` over `firmware/SaftyFW/src`.)
+
+**The deferral is safe today.** An unconfigured Pico cannot energize at all,
+so "S1 never trips" is moot -- the heaters were never granted. The hazard the
+owner's rule targets is not open. The stronger fix remains worth doing for
+the reasons `7adf191b`'s message gives, but nothing is exposed while it
+waits.
+
+## Summary of findings
+
+| # | Sev | Finding |
+|---|---|---|
+| A | med | `safety_ceiling_sync.h` cites `test_safety_ceiling_sync_divergence.c`, which does not exist; the enforcement path (hooks, latch, `target_known` exclusion) is untested. |
+| B | med (latent) | All-fields-unknown produces a self-contradicting alarm message naming equal versions and equal hashes. Unreachable at n==1; reachable for the planned multi-field caller. |
+| C | low | A divergence found before `main_control_bringup.c:244` installs the hooks logs "heaters disabled" while doing neither. Add a one-shot ESP_LOGE on NULL hooks. |
+| D | info | `profile_executor_halt()`'s `portMAX_DELAY` take couples the ESP->Pico heartbeat's latency to the executor's lock hold time. Fails safe (S6b trips, heat off); a bounded take would be tidier. |
+
+Claims confirmed: no lock held across the hooks; no deadlock; no reentrancy;
+unknown-field gate real and escapable; float normalisation sound under
+execution; one verdict shared by gate and display; negative test reproduces;
+`safety_core.c:333` deferral genuinely safe.
+
