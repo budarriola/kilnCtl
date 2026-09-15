@@ -78,6 +78,7 @@ void run_test_unit_pref(void);
 void run_test_esp_spi_owner(void);
 void run_test_touch_dev(void);
 void run_test_ramp_ident(void);
+void run_test_ramp_transient_ident(void);
 void run_test_bx_worker_reentrancy(void);
 void run_test_gpio_probe(void);
 void run_test_iter_tune(void);
@@ -168,6 +169,7 @@ int main(void)
     run_test_esp_spi_owner();
     run_test_touch_dev();
     run_test_ramp_ident();
+    run_test_ramp_transient_ident();
     run_test_bx_worker_reentrancy();
     run_test_gpio_probe();
     run_test_iter_tune();

@@ -95,6 +95,7 @@ try {
         (Join-Path $testDir "test_esp_spi_owner.c"),
         (Join-Path $testDir "test_touch_dev.c"),
         (Join-Path $testDir "test_ramp_ident.c"),
+        (Join-Path $testDir "test_ramp_transient_ident.c"),
         (Join-Path $testDir "test_bx_worker_reentrancy.c"),
         (Join-Path $testDir "test_gpio_probe.c"),
         (Join-Path $testDir "test_iter_tune.c"),
@@ -169,6 +170,7 @@ try {
         (Join-Path $driversDir "persist/kiln_package.c"),
         (Join-Path $driversDir "hw/touch_dev.c"),
         (Join-Path $driversDir "control/ramp_ident.c"),
+        (Join-Path $driversDir "control/ramp_transient_ident.c"),
         (Join-Path $driversDir "control/iter_tune.c"),
         (Join-Path $driversDir "control/firing_score.c"),
         (Join-Path $driversDir "control/firing_compare.c"),
@@ -1337,9 +1339,17 @@ try {
     # via test_safety_cfg_store.c -- linking it again here would multiply-
     # define every safety_cfg_store_* symbol, same reasoning exe3's own
     # comment gives for safety_cfg_http.c). Own executable, fake table only.
+    # 2026-09-14 (docs/KILN_PROFILES_PLAN.md items 3/4/9/14, "finish upload/
+    # download"): kiln_package.c now also builds/parses the section 5.1 JSON
+    # envelope via backup_json.c's hand-rolled reader (the same one
+    # backup_import.c already links) -- added as a second source file here,
+    # not #included by test_kiln_package.c itself, so its own symbols are
+    # compiled exactly once and this stays consistent with exe38's own
+    # multi-source-file shape above.
     $exe39 = Join-Path $outDir "kilnctl_host_tests_kiln_package.exe"
     $cmd39 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
-            "/Fo:`"$outDir\\`" /Fe:`"$exe39`" `"$(Join-Path $testDir 'test_kiln_package.c')`""
+            "/Fo:`"$outDir\\`" /Fe:`"$exe39`" `"$(Join-Path $testDir 'test_kiln_package.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/backup_json.c')`""
 
     Invoke-HostTestExe -Name "kiln_package" -ExePath $exe39 -BuildCmd $cmd39
 
