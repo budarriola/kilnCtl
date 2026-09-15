@@ -187,8 +187,21 @@ bool profile_executor_resume(void)
      * profile_executor_pause()'s comment. */
     relay_authority_claim_mask(s_exec.claimed_relay_mask, RELAY_OWNER_PROFILE);
     /* Re-ask for K4, released on pause -- see profile_executor_pause()'s
-     * comment. Same "not a reason to refuse" handling as the start path. */
-    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+     * comment. Same "not a reason to refuse" handling as the start path.
+     *
+     * 2026-09-15 (review of 1c8d7f6e, finding MEDIUM-3): this used to run
+     * right here, under s_exec.lock -- and since heat_enable_acquire() may
+     * now itself flush a still-pending release (a blocking link exchange)
+     * before its own enable=true exchange, that put up to TWO sequential
+     * blocking link round-trips under this lock, which safety_poll_task
+     * (via profile_executor_get_status()) and the HTTP status handlers all
+     * block on every tick. Moved below the unlock: the state transition to
+     * RUNNING and this call now happen in the same order as before from
+     * every caller's point of view (state flips, then heat is asked for),
+     * just without the lock held across the wire exchange. A request that
+     * fails here is already tolerated -- see the start path's identical
+     * comment -- heat_blocked/heat_block_sources report it and
+     * heat_enable_reconcile() (watchdog task) retries. */
     /* Shared ramp/dwell state (target_c, segment_elapsed_s) is untouched by
      * pause -- the control task simply doesn't tick it while PAUSED, so
      * there's nothing to un-shift on resume (unlike the old tick-delta-
@@ -221,6 +234,7 @@ bool profile_executor_resume(void)
     run_snapshot_buf_t resume_snap;
     capture_run_snapshot(&resume_snap);
     xSemaphoreGive(s_exec.lock);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
 
     /* Back to "in progress" -- and it must be written now rather than left to
      * the periodic refresh, or a brownout minutes after a resume would show

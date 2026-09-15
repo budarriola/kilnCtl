@@ -3,8 +3,19 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 static const char *TAG = "heat_enable";
+
+/* Bound on how long send_enable() will wait for an owed release to clear the
+ * wire before it gives up and defers the enable=true instead of risking a
+ * reorder -- see he_flush_release_blocking() below. 20 x 10 ms = 200 ms,
+ * comfortably under SAFETY_XACT_LOCK_TIMEOUT_MS/SAFETY_LINK_REPLY_TIMEOUT_MS
+ * (safety_link.c), so a healthy link's own release exchange always finishes
+ * inside this window; a link that is not healthy fails the release exchange
+ * itself quickly rather than hanging it. */
+#define HE_FLUSH_MAX_ATTEMPTS 20
+#define HE_FLUSH_RETRY_MS     10
 
 typedef struct {
     SemaphoreHandle_t lock;
@@ -15,9 +26,17 @@ typedef struct {
     uint32_t          enable_sends;
     uint32_t          release_sends;
     bool              warned_pending; /* throttles the reconcile-retry warning */
-    bool              release_pending; /* a REQUEST_ENABLE(false) is owed to the wire but not
-                                         * yet sent -- see heat_enable_release()/
-                                         * heat_enable_service_pending_release(). */
+    bool              release_pending; /* a REQUEST_ENABLE(false) is owed to the wire -- set the
+                                         * instant the last claimant lets go, cleared ONLY once a
+                                         * servicer's send of it actually succeeds (2026-09-15
+                                         * review fix: a failed attempt used to drop this
+                                         * unconditionally -- see heat_enable_service_pending_
+                                         * release()). */
+    bool              release_inflight; /* a servicer is between "picked this up" and "the send
+                                         * returned" -- the mutual-exclusion half of the same fix:
+                                         * without it, two callers (safety_poll_task's drain and a
+                                         * concurrent send_enable() flush) could both decide
+                                         * nothing is pending and neither waits for the other. */
 } heat_enable_ctx_t;
 
 static heat_enable_ctx_t s_he;
@@ -71,6 +90,46 @@ void heat_enable_init(SafetyLinkClass *safety_or_null)
     s_he.pending = false;
     s_he.warned_pending = false;
     s_he.release_pending = false;
+    s_he.release_inflight = false;
+}
+
+/* Reset-one-side guard (2026-09-15 review of 1c8d7f6e, finding HIGH-1): a
+ * re-enable must never overtake a release that is still owed to the wire OR
+ * currently being sent by someone else. The old fix here just called
+ * heat_enable_service_pending_release() once, trusting that if nothing was
+ * pending there was nothing to wait for -- but that flag is cleared the
+ * instant a servicer PICKS UP the release, before the (blocking) send
+ * actually completes. A safety_poll_task drain that cleared the flag and
+ * then blocked on xact_lock left this exact window open: send_enable() would
+ * see release_pending==false, send enable=true first, and the drain's
+ * enable=false would land after it -- Pico disabled, ESP believing it is
+ * granted, nothing left to retry.
+ *
+ * Fixed with release_inflight as the second half of the same guard: it is
+ * set the moment a servicer commits to the send and cleared only once that
+ * send returns. This function waits, bounded, for BOTH release_pending and
+ * release_inflight to read false -- driving the drain itself each iteration
+ * so it does not depend on some other task's schedule to make progress.
+ * Returns false (without having sent enable=true) if the wait times out;
+ * the caller must treat that exactly like a down link -- do not send, mark
+ * pending, let heat_enable_reconcile() retry. Never holds s_he.lock across
+ * the wait or the blocking send it drives. */
+static bool he_flush_release_blocking(void)
+{
+    for (int attempt = 0; attempt < HE_FLUSH_MAX_ATTEMPTS; attempt++) {
+        bool taken = he_lock();
+        bool outstanding = s_he.release_pending || s_he.release_inflight;
+        he_unlock(taken);
+        if (!outstanding) {
+            return true;
+        }
+        heat_enable_service_pending_release();
+        vTaskDelay(pdMS_TO_TICKS(HE_FLUSH_RETRY_MS));
+    }
+    bool taken = he_lock();
+    bool outstanding = s_he.release_pending || s_he.release_inflight;
+    he_unlock(taken);
+    return !outstanding;
 }
 
 /* Sends REQUEST_ENABLE(true) and folds the result back into the state.
@@ -79,12 +138,25 @@ void heat_enable_init(SafetyLinkClass *safety_or_null)
  * landed. */
 static bool send_enable(const char *why)
 {
-    /* Reset-one-side guard: a re-enable must never overtake a release that is
-     * still owed to the wire (heat_enable_release() defers the actual send --
-     * see below). Flushing it first, synchronously, here rather than relying
-     * on safety_poll_task's drain to have already run keeps the two directions
-     * strictly ordered no matter which task calls acquire() next. */
-    heat_enable_service_pending_release();
+    if (!he_flush_release_blocking()) {
+        /* A release is still stuck in flight or pending after the bounded
+         * wait above -- sending enable=true now would be the exact reorder
+         * this guard exists to prevent. Defer instead: mark pending (same
+         * shape as a down link) so heat_enable_reconcile() retries this
+         * claim once the release has actually cleared. */
+        bool taken = he_lock();
+        bool warn = !s_he.warned_pending;
+        s_he.pending = true;
+        s_he.warned_pending = true;
+        he_unlock(taken);
+        if (warn) {
+            ESP_LOGE(TAG, "heat-enable request (%s) DEFERRED: a release is still in flight on the "
+                          "wire and did not clear within %d ms -- retried once it does (or by the "
+                          "watchdog's reconcile)",
+                     why, HE_FLUSH_MAX_ATTEMPTS * HE_FLUSH_RETRY_MS);
+        }
+        return false;
+    }
 
     esp_err_t err = safety_link_request_enable(s_he.safety, true);
 
@@ -182,6 +254,15 @@ void heat_enable_release(heat_enable_claimant_t who)
         return;
     }
 
+    /* 2026-09-15 review of 1c8d7f6e, finding HIGH-1's "second, smaller
+     * window": this used to be two separate lock sections -- the bookkeeping
+     * above, then an unlock, then a second lock just to set release_pending.
+     * An acquire arriving in the gap between them saw had_request already
+     * cleared and release_pending not yet set, and could send enable=true
+     * with nothing yet flagged to flush it against. Folded into one section
+     * so release_pending becomes true in the SAME critical section that
+     * clears granted/pending -- there is no window left for a concurrent
+     * acquire to observe. */
     bool taken = he_lock();
     bool was_held = (s_he.held_mask & bit) != 0u;
     s_he.held_mask &= ~bit;
@@ -191,6 +272,9 @@ void heat_enable_release(heat_enable_claimant_t who)
         s_he.granted = false;
         s_he.pending = false;
         s_he.warned_pending = false;
+        if (had_request) {
+            s_he.release_pending = true;
+        }
     }
     he_unlock(taken);
 
@@ -213,35 +297,49 @@ void heat_enable_release(heat_enable_claimant_t who)
      * contributor to four recurring stack-smash panics on that task. The
      * bookkeeping above (granted/pending/held_mask, all under s_he.lock) is
      * unaffected -- heat_enable_is_granted()/is_held() already flip
-     * synchronously, right here, before any frame goes on the wire, exactly
-     * as before. Only the deep UART call itself is deferred, mirroring
-     * safety_link.h's existing reannounce_pending/boot_clear_pending pattern:
-     * flagged here under lock, drained by safety_link_poll.c's safety_poll_
-     * task (8192 B, ample headroom) once per loop iteration via
-     * heat_enable_service_pending_release() below. A missed release can never
-     * be lost -- release_pending stays set (this module never clears it
-     * without having actually sent the frame) until a servicer call actually
-     * attempts the send; a re-enable can never race ahead of it either --
-     * send_enable() flushes any pending release first, synchronously, before
-     * asking for enable=true. No module lock is held across the deferred
-     * call in either place. */
-    bool t2 = he_lock();
-    s_he.release_pending = true;
-    he_unlock(t2);
+     * synchronously, right here (release_pending was already set in the
+     * SAME critical section above), before any frame goes on the wire,
+     * exactly as before. Only the deep UART call itself is deferred,
+     * mirroring safety_link.h's existing reannounce_pending/boot_clear_
+     * pending pattern: drained by safety_link_poll.c's safety_poll_task
+     * (8192 B, ample headroom) once per loop iteration via heat_enable_
+     * service_pending_release() below. A missed or failed release can never
+     * be lost -- release_pending is now cleared ONLY on a successful send
+     * (2026-09-15 review fix, finding LOW-5) -- and a re-enable can never
+     * race ahead of a release that is still owed or in flight either --
+     * send_enable() waits, bounded, for both to clear before it will send
+     * enable=true (finding HIGH-1; see he_flush_release_blocking()). No
+     * module lock is held across any deferred/blocking call in either
+     * place. */
 }
 
 /* Drains a release owed to the wire, if any. Never called with s_he.lock (or
  * any other module's lock) held by the caller -- takes and releases it only
  * for the small bookkeeping steps, exactly like send_enable() does for the
  * enable=true side. Safe and cheap to call unconditionally every tick from a
- * task with real stack headroom (safety_poll_task); also called synchronously
- * from send_enable() to flush a pending release before a re-enable, and
- * directly by host tests in place of a real safety_poll_task. */
+ * task with real stack headroom (safety_poll_task); also called from
+ * he_flush_release_blocking() (driven by send_enable(), to make progress on
+ * its own wait rather than depending on some other task's schedule), and
+ * directly by host tests in place of a real safety_poll_task.
+ *
+ * 2026-09-15 review of 1c8d7f6e: this used to clear release_pending BEFORE
+ * attempting the send, unconditionally -- a failed send was logged and then
+ * forgotten (finding LOW-5), and the pre-clear-then-block-on-the-wire shape
+ * was exactly what let a concurrent send_enable() decide nothing was
+ * pending while this call was still in flight (finding HIGH-1). Both are
+ * fixed together: release_inflight now covers the in-flight window (so a
+ * concurrent caller waits instead of racing ahead), and release_pending is
+ * cleared ONLY once the send actually succeeds, so a failed attempt stays
+ * queued and gets retried the next time anything calls this -- on target,
+ * that is every safety_poll_task loop iteration, so a transient failure
+ * self-heals within one poll period without any caller having to notice. */
 void heat_enable_service_pending_release(void)
 {
     bool taken = he_lock();
-    bool go = s_he.release_pending;
-    s_he.release_pending = false;
+    bool go = s_he.release_pending && !s_he.release_inflight;
+    if (go) {
+        s_he.release_inflight = true;
+    }
     he_unlock(taken);
     if (!go) {
         return;
@@ -258,11 +356,15 @@ void heat_enable_service_pending_release(void)
     esp_err_t rel_err = safety_link_request_enable(s_he.safety, false);
     bool t2 = he_lock();
     s_he.release_sends++;
+    s_he.release_inflight = false;
+    if (rel_err == ESP_OK) {
+        s_he.release_pending = false;
+    }
     he_unlock(t2);
     if (rel_err != ESP_OK) {
         ESP_LOGE(TAG, "heat-enable release FAILED: %s -- the safety processor may still believe "
                       "heating is permitted (K4); relays are already off, but do not assume the "
-                      "enable line dropped",
+                      "enable line dropped -- will retry",
                  esp_err_to_name(rel_err));
     } else {
         ESP_LOGW(TAG, "heat-enable released: safety processor asked to drop heating (K4)");
@@ -299,6 +401,20 @@ bool heat_enable_retry_pending(void)
 
 void heat_enable_reconcile(void)
 {
+    /* 2026-09-15 review of 1c8d7f6e, finding HIGH-1/MEDIUM-4: give a stuck
+     * release a SECOND, independent driver. safety_poll_task normally drains
+     * release_pending every loop iteration, but review finding 4 notes there
+     * is no fallback sender if that task wedges -- before this fix a wedged
+     * poll task meant a release could sit owed forever. This module's own
+     * watchdog caller (profile_exec_wdt, WATCHDOG_CHECK_PERIOD_MS) already
+     * polls this function on a task independent of safety_poll_task, so
+     * driving the release drain from here too is a free second chance: a
+     * no-op when nothing is owed or another servicer already has it in
+     * flight (release_inflight), and otherwise it makes the same attempt
+     * safety_poll_task would have. This does NOT lengthen safety_poll_task's
+     * own loop -- that task's blocking behaviour is unchanged. */
+    heat_enable_service_pending_release();
+
     bool taken = he_lock();
     bool want_retry = s_he.pending && s_he.held_mask != 0u && !s_he.granted;
     he_unlock(taken);

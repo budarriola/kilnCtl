@@ -113,13 +113,29 @@ void heat_enable_release(heat_enable_claimant_t who);
 // heat_enable_release()'s OWN caller's stack (profile_executor's 4096 B task,
 // implicated in four recurring stack-smash panics, see
 // docs/audits/profile_executor_coredump_2026-09-15.md) instead runs on
-// safety_poll_task's 8192 B stack. A pending release is never dropped: it is
-// only cleared here, immediately before the send is actually attempted, and
-// heat_enable_acquire()/send_enable() also call this first to flush any
-// still-pending release before asking for enable=true, so a re-enable can
-// never race ahead of a release that has not gone out yet. Safe to call with
-// no module lock held (and this function never acquires any lock but its
-// own); safe to call from a host test in place of a real safety_poll_task.
+// safety_poll_task's 8192 B stack.
+//
+// A pending release is attempted, not silently dropped: (2026-09-15 review
+// of 1c8d7f6e, finding LOW-5) an earlier version of this comment claimed a
+// pending release "is never dropped" because the flag was cleared right
+// before the send; that was true only in the sense of "attempted exactly
+// once" -- a send that then FAILED left nothing queued to retry. The flag is
+// now cleared only once the send actually succeeds, so a failure keeps the
+// release queued and it is retried the next time this function runs (on
+// target: safety_poll_task's next loop iteration, plus a second, independent
+// chance from heat_enable_reconcile() -- see its own comment).
+//
+// heat_enable_acquire()/send_enable() also call this first, and then wait
+// (bounded; see he_flush_release_blocking() in heat_enable.c) for both this
+// flag and the in-flight-send window to clear before sending enable=true, so
+// a re-enable can never race ahead of a release that has not gone out yet --
+// including the window where a release has been PICKED UP by a servicer but
+// its send has not yet returned (finding HIGH-1; the earlier version of this
+// fix only guarded the "still flagged" case, not the "already picked up,
+// mid-send" case, which is the one the review found a real reorder through).
+// Safe to call with no module lock held (and this function never acquires
+// any lock but its own); safe to call from a host test in place of a real
+// safety_poll_task.
 void heat_enable_service_pending_release(void);
 
 // True if `who` currently holds a claim (whether or not it was granted).
@@ -141,6 +157,11 @@ bool heat_enable_retry_pending(void);
 // watchdog task calls it every WATCHDOG_CHECK_PERIOD_MS. Deliberately does
 // NOT re-assert an already-granted request: a granted request is sent once
 // per run, not once per tick.
+//
+// 2026-09-15 (review of 1c8d7f6e, findings HIGH-1/MEDIUM-4): also drives a
+// stuck release drain (heat_enable_service_pending_release()) -- a no-op
+// when nothing is owed, and this module's second, independent chance to
+// send an owed release if safety_poll_task (the normal drainer) is wedged.
 void heat_enable_reconcile(void);
 
 // Diagnostics/host-test counters: how many REQUEST_ENABLE(true) frames were

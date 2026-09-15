@@ -49,6 +49,19 @@ static bool g_last_enable_value = false;
 // release rather than casting it to (void) and logging success regardless
 // (the exact seed-bug shape from danger_mode.c, commit 2bcdc2d).
 static bool g_release_should_fail = false;
+// Deterministic reorder-race hook (2026-09-15 review of 1c8d7f6e, finding
+// HIGH-1): host tests are single-threaded, so a real concurrent
+// safety_poll_task/resume interleaving cannot be reproduced directly. This
+// fake stands in for it by acting AS the blocking exchange: while
+// heat_enable_service_pending_release() is inside its (blocked, in the real
+// world) call to send enable=false, this hook reenters heat_enable_acquire()
+// right here, synchronously, before returning -- exactly modelling "a resume
+// runs on another task while the release's wire exchange is still in
+// flight". Whether that reentrant acquire can jump the queue and land
+// enable=true first is exactly the race the review found.
+static bool g_reenter_acquire_during_release = false;
+static bool g_reentrant_acquire_result;
+static bool g_reentrant_acquire_ran = false;
 
 esp_err_t safety_link_request_enable(SafetyLinkClass *link, bool enable)
 {
@@ -61,6 +74,10 @@ esp_err_t safety_link_request_enable(SafetyLinkClass *link, bool enable)
     }
     // safety_link.c: the fail-safe direction is always attempted.
     g_enable_false_calls++;
+    if (g_reenter_acquire_during_release && !g_reentrant_acquire_ran) {
+        g_reentrant_acquire_ran = true;
+        g_reentrant_acquire_result = heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    }
     return g_release_should_fail ? ESP_ERR_TIMEOUT : ESP_OK;
 }
 
@@ -76,6 +93,9 @@ static void reset_all(bool link_up)
     g_enable_true_calls = 0;
     g_enable_false_calls = 0;
     g_release_should_fail = false;
+    g_reenter_acquire_during_release = false;
+    g_reentrant_acquire_result = false;
+    g_reentrant_acquire_ran = false;
     heat_enable_init((SafetyLinkClass *)0x1);
     g_base_enable_sends = heat_enable_enable_send_count();
     g_base_release_sends = heat_enable_release_send_count();
@@ -392,6 +412,79 @@ static void test_reenable_never_races_ahead_of_a_pending_release(void)
     TEST_CHECK(enable_sends() == 2, "and the re-enable itself still goes out (1 initial + 1 after)");
 }
 
+static void test_reenable_cannot_overtake_an_inflight_release(void)
+{
+    TEST_SECTION("heat_enable -- 2026-09-15 review of 1c8d7f6e (HIGH-1): a re-enable arriving while "
+                 "a release's wire exchange is still IN FLIGHT (not merely flagged) must not overtake "
+                 "it -- the reorder that left the Pico disabled with the ESP believing it was granted, "
+                 "and nothing left to retry");
+
+    reset_all(true);
+    TEST_CHECK(heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE) == true, "sanity: first acquire lands");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(release_sends() == 0, "sanity: the release is only pending so far");
+
+    // Arm the hook: while the drain's safety_link_request_enable(false) is
+    // "in flight" (release_inflight is already true by the time this fires,
+    // set by heat_enable_service_pending_release() before it calls out), a
+    // re-enable reenters right here -- modelling profile_executor_resume()
+    // running on a different task while safety_poll_task's drain is blocked
+    // on the wire, which is exactly the scenario the review traced.
+    g_reenter_acquire_during_release = true;
+    heat_enable_service_pending_release();
+
+    TEST_CHECK(g_reentrant_acquire_ran, "sanity: the reentrant acquire actually fired mid-release");
+    TEST_CHECK(g_reentrant_acquire_result == false,
+               "MUST GO RED if a re-enable can land while a release is still in flight -- it must "
+               "defer instead of sending enable=true ahead of the release that has not landed yet");
+    TEST_CHECK(g_enable_true_calls == 1,
+               "the reentrant acquire must NOT have put a second enable=true on the wire -- only the "
+               "original acquire's frame is on it");
+    TEST_CHECK(release_sends() == 1, "the release itself still went out exactly once");
+    TEST_CHECK(!heat_enable_is_granted(),
+               "NOT granted -- the dangerous outcome this fix exists to avoid is granted=true with "
+               "the Pico actually left disabled");
+    TEST_CHECK(heat_enable_retry_pending(), "the deferred re-enable is visible as a pending retry");
+
+    // Recovery: the deferred request is not lost -- reconcile() (the
+    // watchdog task, independent of safety_poll_task) picks it up once the
+    // release has actually cleared.
+    heat_enable_reconcile();
+    TEST_CHECK(heat_enable_is_granted(), "reconcile lands the deferred re-enable once the release cleared");
+    TEST_CHECK(!heat_enable_retry_pending(), "no longer pending");
+    TEST_CHECK(enable_sends() == 2, "exactly one more enable=true frame -- the recovered retry");
+}
+
+static void test_failed_release_is_retried_not_dropped(void)
+{
+    TEST_SECTION("heat_enable -- 2026-09-15 review of 1c8d7f6e (LOW-5): a release send that FAILS "
+                 "stays queued and is retried, rather than being dropped after one attempt (the "
+                 "header used to claim 'never dropped' while actually meaning 'attempted once')");
+
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+
+    g_release_should_fail = true;
+    heat_enable_service_pending_release();
+    TEST_CHECK(release_sends() == 1, "the first (failing) attempt is still made");
+
+    // A second drain call, still failing, must ATTEMPT AGAIN -- if the flag
+    // had been dropped after the first failure (the old behaviour), this
+    // would be a silent no-op and release_sends() would not move.
+    heat_enable_service_pending_release();
+    TEST_CHECK(release_sends() == 2,
+               "MUST GO RED if a failed release is dropped instead of retried -- a second drain call "
+               "must attempt it again");
+
+    // Once the link recovers, the very next drain succeeds and stops retrying.
+    g_release_should_fail = false;
+    heat_enable_service_pending_release();
+    TEST_CHECK(release_sends() == 3, "the retry lands once the link is healthy again");
+    heat_enable_service_pending_release();
+    TEST_CHECK(release_sends() == 3, "and nothing more is sent once it has actually gone out");
+}
+
 static void test_bad_claimant(void)
 {
     TEST_SECTION("heat_enable -- an out-of-range claimant is refused, not indexed");
@@ -413,5 +506,7 @@ void run_test_heat_enable(void)
     test_release_failure_is_checked_and_logged();
     test_release_defers_the_wire_send_off_the_callers_stack();
     test_reenable_never_races_ahead_of_a_pending_release();
+    test_reenable_cannot_overtake_an_inflight_release();
+    test_failed_release_is_retried_not_dropped();
     test_bad_claimant();
 }

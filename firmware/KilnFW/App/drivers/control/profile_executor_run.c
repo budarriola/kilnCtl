@@ -929,13 +929,24 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * that is down, which apply_relay()'s relay_authority_zone_blocked()
      * check already reports per zone through heat_blocked/
      * heat_blocked_sources and which heat_enable_reconcile() (called from
-     * the watchdog task) retries. heat_enable.c logs the failure loudly. */
-    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
-
+     * the watchdog task) retries. heat_enable.c logs the failure loudly.
+     *
+     * 2026-09-15 (review of 1c8d7f6e, finding MEDIUM-3): the actual call is
+     * made AFTER s_exec.lock is released below, not here -- heat_enable_
+     * acquire() can now block on up to two sequential link exchanges (a
+     * flush of any still-pending release, then this enable=true), and
+     * holding s_exec.lock across that stalls every other task that blocks
+     * on it (safety_poll_task via profile_executor_get_status(), the HTTP
+     * status handlers). The commit-point ordering guarantee this comment
+     * describes is unaffected: nothing below this point can un-commit the
+     * run, so asking for heat a few instructions later, lock-free, is the
+     * same "definitely RUNNING, ask for K4" sequence from every caller's
+     * point of view. */
     s_exec.state = PROFILE_EXEC_RUNNING;
     run_snapshot_buf_t start_snap;
     capture_run_snapshot(&start_snap);
     xSemaphoreGive(s_exec.lock);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
 
     /* First write of this run's breadcrumb, and the one that overwrites any
      * previous run's record in flash. From here on the stored record says a
