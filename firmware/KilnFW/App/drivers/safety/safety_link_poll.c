@@ -11,7 +11,7 @@
 // only mechanical change is linkage: safety_poll_task() is now referenced
 // from safety_link.c's safety_link_start() (xTaskCreatePinnedToCoreWithCaps
 // takes its address) and so dropped `static` and gained a declaration in
-// safety_link_internal.h. safety_sync_cfg_cache()
+// safety_link_internal.h. safety_sync_tc_type(), safety_sync_cfg_cache()
 // and safety_update_health() are called only from safety_poll_task() in
 // this same file and stay exactly as private as they always were.
 #include "safety_link.h"
@@ -51,10 +51,15 @@
 #include "kilnlink/kilnlink_set_param.h"
 #include "kilnlink/kilnlink_version.h"
 
-/* 2026-09-15 (Opus review F3): this used to pull zones_config_get_safety_
- * tc_type() for a since-removed push to the Pico (see safety_update_health()'s
- * own comment below) -- the include stays because other zones_config_
- * accessors.h getters (zones_config_is_valid()) are still used in this file. */
+/* TODO.md owner-report item 3 (2026-08-21): zones_config_get_safety_tc_type()/
+ * zones_config_is_valid() for safety_sync_tc_type() below. This is a real,
+ * deliberate cross-module dependency (this driver otherwise knows nothing
+ * about the zones/thermocouple settings page) -- see safety_sync_tc_type()'s
+ * comment for why it lives here instead of being pushed from zones_http.c:
+ * that file has no reference to the SafetyLinkClass instance (main.c holds
+ * the only one, as a local static, and main.c is off-limits this pass), so
+ * the poll task that already runs here and already knows link_up/down
+ * transitions is the natural place to pull the desired setting from instead. */
 #include "zones_config_accessors.h"
 
 /* TODO owner-report (2026-08-21 follow-up), docs/COMMISSIONING.md sec 3: the
@@ -106,23 +111,90 @@ static const char *TAG = "safety_link";
  * "governed the same way a dead link is," including the bench override
  * (safety_link_fault_on_link_loss(link, false)) that already exists for
  * boards with no Pico fitted. */
-/* 2026-09-15 owner decision (Opus review F3, "the commissioning page owns
- * the type"): this file used to push zones_cfg_t::safety_tc_type to the
- * Pico here (safety_sync_tc_type(), edge- and level-triggered, on every
- * poll tick and forced again on reconnect) and mark it "synced" the instant
- * the local UART enqueue returned ESP_OK -- never confirmed by the Pico.
- * The Pico's own commissioning page (SET_PARAM/COMMIT_CONFIG,
- * safety_commissioning_page.html) is now the sole writer of its tc_type
- * (SaftyFW's config_store.h); the ESP's zones config keeps the field
- * (deprecated, see zones_config_json.h's own comment on it, so no
- * ZONES_CFG_VERSION bump is needed) purely to READ BACK and DISPLAY what
- * the Pico last reported, never to push a value at it. Removing this
- * function does not touch safety_ceiling_sync.c's broadened-field
- * divergence check (safety_ceiling_sync_is_standing_diverged() and
- * friends): that comparator already reads the Pico's own reported value
- * independently via safety_cfg_store_get_by_index(), never through
- * tc_type_last_sent, so it keeps detecting a real ESP/Pico tc_type
- * mismatch exactly as before. */
+/* TODO.md owner-report item 3 (2026-08-21): keeps the RP2040 safety
+ * processor's own, independent MAX31856 thermocouple type in agreement with
+ * whatever the operator last saved on the Thermocouples & Zones page --
+ * zones_cfg_t::safety_tc_type, a setting SEPARATE from any main-board zone's
+ * own tc_type (see that field's comment in zones_http.c for why: the safety
+ * processor's sensor is different, physically independent hardware that has
+ * no reason to match any particular zone's channel).
+ *
+ * DESIGN DECISION, stated plainly because the task asked for it explicitly:
+ * this is a level-triggered sync, not an edge-triggered "send once when the
+ * operator clicks Save" push, because zones_http.c (which owns the setting
+ * and the web form) has no reference to the SafetyLinkClass instance to push
+ * through -- only main.c does, as a local static, and main.c is off-limits
+ * for this pass (see the include comment above). Instead, this function runs
+ * on every safety_poll_task() tick (SAFETY_POLL_PERIOD_MS, typically a few
+ * hundred ms) and compares the persisted desired value against
+ * link->tc_type_last_sent, the last value THIS driver believes it
+ * successfully broadcast:
+ *   - Operator changes the setting while the link is up: picked up and sent
+ *     within one poll period -- not instant, but no operator is watching a
+ *     sub-second deadline on a config write.
+ *   - Link is down when the setting changes: safety_link_send_set_config()
+ *     still gets called (it always tries), fails silently exactly as every
+ *     other fire-and-forget SAFETY_CMD_* does when nothing is listening, and
+ *     tc_type_last_sent is only updated on ESP_OK -- so it is left stale and
+ *     this function retries on every subsequent poll until the link comes
+ *     back and a send actually succeeds. THE CHANGE IS NEVER SILENTLY
+ *     DROPPED: it is re-applied automatically the moment the link recovers,
+ *     which is the "safe answer" TODO.md's task description asked for.
+ *   - Link drops and recovers with tc_type_last_sent already matching the
+ *     desired value: safety_update_health()'s down->up transition (see its
+ *     caller below) resets tc_type_last_sent to the 0xFF sentinel first, so
+ *     this function resends unconditionally on the very next poll after a
+ *     reconnect. This is deliberate belt-and-suspenders: a Pico that dropped
+ *     off the link and came back may have rebooted in between (a genuine
+ *     reboot is indistinguishable, from this side, from a link glitch that
+ *     self-heals -- see LINK_PROTOCOL.md), and a rebooted Pico's
+ *     config_store.h may not have persisted whatever was last pushed to it.
+ *     Re-sending costs one harmless broadcast; NOT re-sending risks running
+ *     with the two processors silently disagreeing about thermocouple type,
+ *     which is exactly the failure TODO.md's task description warns
+ *     against ("if the two processors disagree ... they will disagree about
+ *     temperature, which defeats the whole point of an independent
+ *     cross-check").
+ *
+ * Gated on zones_config_is_valid(): a board that has never loaded a real
+ * zones config has zones_config_get_safety_tc_type() reading its zeroed
+ * default (THERMO_TC_B, not THERMO_TC_K -- see that getter's comment), and
+ * broadcasting that fabricated value to the Pico would be worse than
+ * sending nothing. Nothing is sent at all until a real config exists,
+ * matching zones_http.c's own "gate hardware effects on validity, not
+ * merely on having read some bytes" discipline (s_zones_config_valid).
+ *
+ * UNTESTED, same as every other safety_link.c path this bench cannot
+ * exercise right now: the optocouplers between the ESP and the Pico are
+ * currently non-functional (see this task's own hard rules), so this
+ * function has never observed a real link-down/link-up transition, only
+ * been read against the header comments and the existing down_logged
+ * edge-detect pattern it reuses. */
+static void safety_sync_tc_type(SafetyLinkClass *link)
+{
+    if (!zones_config_is_valid()) {
+        return;
+    }
+    uint8_t desired = 0;
+    if (!zones_config_get_safety_tc_type(&desired)) {
+        return; /* NULL out-pointer only; cannot happen with a local above,
+                  * kept for the same "never trust a getter blindly" reason
+                  * every other safety_link.c caller of an external getter
+                  * follows. */
+    }
+    if (desired == link->tc_type_last_sent) {
+        return; /* already sent this value and nothing has forced a resend */
+    }
+    esp_err_t err = safety_link_send_set_config(link, desired);
+    if (err == ESP_OK) {
+        link->tc_type_last_sent = desired;
+        ESP_LOGI(TAG, "safety tc_type sync: sent %u", (unsigned)desired);
+    }
+    /* On failure, tc_type_last_sent is left as it was -- the next poll tries
+     * again. No log spam here: safety_link_send_set_config() and the
+     * link-down warning safety_update_health() already emits below cover
+     * why this failed. */
+}
 
 /* docs/COMMISSIONING.md sec 3's fetch-on-change trigger: "every FW_VERSION
  * frame carries the Pico's config_crc... the ESP refetches only when that
@@ -131,12 +203,11 @@ static const char *TAG = "safety_link";
  * comment) -- no opinion until a FW_VERSION frame has actually reached
  * config_crc, so a Pico that predates this frame's tail (or hasn't answered
  * yet) never triggers a fetch attempt that could only time out. Called only
- * when the link is up (safety_update_health()'s own gate) -- same
- * "don't even try while nothing is listening" discipline the removed
- * safety_sync_tc_type() used to follow for SET_CONFIG (see the 2026-09-15
- * comment above). safety_cfg_store_maybe_refetch() itself is the actual
- * no-UART-traffic-unless-changed check -- this function only supplies the
- * live CRC to compare against. */
+ * when the link is up (safety_update_health()'s own gate), same
+ * "don't even try while nothing is listening" discipline safety_sync_tc_
+ * type() follows for SET_CONFIG. safety_cfg_store_maybe_refetch() itself is
+ * the actual no-UART-traffic-unless-changed check -- this function only
+ * supplies the live CRC to compare against. */
 static void safety_sync_cfg_cache(SafetyLinkClass *link)
 {
     bool known = false;
@@ -198,7 +269,14 @@ static void safety_update_health(SafetyLinkClass *link)
         if (link->down_logged) {
             ESP_LOGI(TAG, "safety processor link is up again");
             link->down_logged = false;
+            /* TODO.md owner-report item 3: force a tc_type resend on
+             * reconnect -- see safety_sync_tc_type()'s comment for why a
+             * link recovery is treated as "the Pico may have rebooted and
+             * lost this" rather than trusted to still hold whatever was
+             * last successfully sent. */
+            link->tc_type_last_sent = 0xFFu;
         }
+        safety_sync_tc_type(link);
         safety_sync_cfg_cache(link);
         /* 2026-09-10 opus review: the raise-guard in zones_http_post.c only
          * runs from that one POST handler, and treats a NULL link as
@@ -208,7 +286,7 @@ static void safety_update_health(SafetyLinkClass *link)
          * operator happens to POST the zones page again. Deliberately
          * called unconditionally here, every tick the link is up -- same
          * level-triggered, "keep retrying, never silently drop it"
-         * discipline safety_sync_cfg_cache() above follows, not gated on
+         * discipline as safety_sync_tc_type() above, not gated on
          * link->down_logged, so this also covers the very first tick after
          * boot when the link comes up before ever having been observed
          * down (down_logged starts false, so a down_logged-gated call would
