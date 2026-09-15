@@ -42,8 +42,10 @@ matching PID_EXPANSION_PLAN.md 3.3's scope):
    forward Euler at the trace's own sample spacing) over the ENTIRE segment,
    driven by the segment's own recorded duty at every sample — not a
    windowed step-and-response slice, not an assumed step shape. `T_amb` is
-   taken from the segment's own first sample (this identifies the segment's
-   own transient, not an absolute ambient).
+   the CALLER-SUPPLIED true ambient (`rti_fit()`'s `ambient_c` parameter),
+   not derived from the segment at all — see "Ambient reference" below for
+   why using the segment's own start temperature here was a real defect,
+   found and fixed 2026-09-14.
 2. **Fit** `(tau, L)` by least squares: grid search `tau` over a broad
    physically-plausible range with a golden-section refinement pass, `L`
    over a small integer-sample range (dead time this small relative to tau
@@ -76,23 +78,28 @@ fit almost equally well). Four checks, all required:
 2. **Minimum duration** — segment must span enough time to plausibly
    contain a real transient (`RTI_MIN_DURATION_S`), same rationale as
    `ramp_ident.c`.
-3. **Cost-curvature (identifiability) check** — the discriminator this gate
-   actually rests on. After finding the best-fit `tau*`, re-evaluate the
-   objective at `tau* * (1±RTI_PERTURB_FRAC)` and require the SSE to rise by
-   at least `RTI_MIN_CURVATURE_FRAC` relative to the minimum. A flat or
-   near-flat cost surface in `tau` means the segment does not actually
-   distinguish candidate values — exactly the failure mode a two-point
-   crossing method cannot detect (it always returns *a* crossing time
-   whether or not the data constrains it). This is the check that would
-   have caught `ramp_ident.c`'s failure directly, had it been run against
-   the closed-form artifact: that artifact's "response" is arithmetic on
-   known quantities, not a simulated plant, so it has no cost surface to
-   test in the first place — this whole gate only exists because the new
-   method actually builds one.
+3. **Cost-curvature (identifiability) check** — after finding the best-fit
+   `tau*`, re-evaluate the objective at `tau* * (1±RTI_PERTURB_FRAC)` and
+   require the SSE to rise by at least `RTI_MIN_CURVATURE_FRAC` relative to
+   the minimum. A flat or near-flat cost surface in `tau` means the segment
+   does not actually distinguish candidate values. In practice, over a
+   whole-segment simulation of thousands of samples this is hard to trip
+   from segment *shape* alone — a 2026-09-14 review swept 1200 constructed
+   no-information segments (tau, duration, duty amplitude, dead time) and
+   found none flat enough. It IS reachable, and reliably, when the
+   CALLER-SUPPLIED `k_gain_c_per_duty` is itself badly wrong (e.g.
+   understated by 20x): every candidate tau then fits about equally badly,
+   because the dominant residual term is the gain mismatch, not a tau
+   mismatch, so perturbing tau barely moves the SSE (`test_ramp_transient_
+   ident.c`'s "badly understated caller gain" case; curvature fraction
+   ~0.0001 against the 0.05 floor). This is the gate's real, tested
+   reachability story — treat "does this discriminate tau" and "is my
+   assumed gain even approximately right" as the two things it actually
+   catches, not solely the latter.
 4. **Improvement-over-null gate** — compare the best fit's SSE against the
    SSE of simulating with the CALLER-SUPPLIED current `(tau, L)` (the model
-   already in use). Require a relative SSE reduction of at least
-   `RTI_MIN_IMPROVEMENT_FRAC`. This is the direct answer to "does this
+   already in use). Require a relative SSE ratio of at most
+   `RTI_MAX_SSE_RATIO_VS_NULL`. This is the direct answer to "does this
    segment carry anything the current model doesn't already know" — a
    segment where the current model already predicts the trace this well is
    refused regardless of what number the grid search nominally reports,
@@ -103,39 +110,72 @@ All four must pass, matching `ramp_ident.c`'s "all five must pass"
 convention and its fixed-buffer refusal-reason reporting
 (`rti_result_t out->refusal_reason`).
 
-## Non-rested bias — quantified, not just flagged
+## Ambient reference — the correctness-critical parameter
 
-Autotune's own bias (`project_autotune_needs_rested_baseline`) comes from
-fitting an equilibrium-relative model against a plant carrying residual
-heat: the fitted gain comes out low because part of the observed rise is
-"free" (already-stored heat continuing to diffuse) rather than driven by
-the commanded duty. This estimator inherits the identical failure mode
-whenever `T_amb` (sample 0 of the segment) is not actually at rest: any
-non-zero `dT/dt` already present at t=0 that this model doesn't attribute
-to `duty[0]` gets folded into the fitted `tau` as spurious "response."
+`rti_fit()` takes an explicit `ambient_c` parameter: the plant's TRUE
+ambient, used as the fixed relaxation target `T_free` inside `simulate_sse`
+(`dT/dt = (K*duty_delayed - (T - ambient_c))/tau`). **This is not
+interchangeable with the segment's own starting temperature, and an earlier
+version of this module (`83e04785`) got this wrong** — it relaxed toward
+`trend_intercept` (the segment's own near-start temperature, from the
+pre-segment trend fit below) instead of true ambient. A 2026-09-14 opus
+review (`docs/audits/ramp_transient_ident_review_2026-09-14.md`) found and
+root-caused this: writing `T = T_start + x`, a segment starting above true
+ambient has true dynamics `dx/dt = (K*(u - u_hold) - x)/tau`, where
+`u_hold = (T_start - ambient)/K` is the duty already needed just to HOLD
+`T_start`. Relaxing toward `T_start` instead of ambient feeds the model the
+FULL duty `u` rather than the excess `u - u_hold`, leaving a constant
+phantom heating term of `K*u_hold/tau` that only `tau` can absorb. Measured
+effect, real plant `tau_true=280s`, rested/zero-curvature segments so the
+decay tail is not a confound:
 
-Correction implemented, revised after measurement (see below): fit a short
-linear trend over the first `RTI_TREND_SAMPLES` samples and use its
-INTERCEPT (a fixed offset, not extrapolated forward) as the free-response
-baseline `T_free`, replacing a flat `T_amb`. An earlier version of this
-design fed the fitted SLOPE into the dynamics as well
-(`T_free(t) = intercept + slope*t`, extrapolated across the whole segment)
-— this was implemented, and then measured to be a real bug, not just an
-approximation: extrapolating a slope fit over only `RTI_TREND_SAMPLES`
-points linearly across an entire multi-thousand-second segment amplifies
-any small fitted slope into tens of degrees of spurious drift by the
-segment's end (a measured 0.014 C/s slope, fit over 6 points near t=0,
-reached +43 C of extrapolated "baseline drift" by t=3000s and corrupted the
-whole fit — recovered tau came out at the search's upper bound, 1000-1200s,
-regardless of the true value). Reverted to a fixed intercept; the slope is
-still computed and still drives the rested-baseline GATE below, it just no
-longer feeds the simulated dynamics.
+| segment start above ambient | fitted tau (defect) | fitted tau (fixed) |
+|---|---|---|
+| 0 C | 278.1 | 278.1 |
+| 5 C | 367.0 (+31%) | ~280 |
+| 10.2 C | 455.9 (+63%) | ~280 |
+| 20 C | 640.0 (+129%) | ~280 |
+| 35 C | 994.7 (+255%) | ~280 |
+| 65 C | 1200.0 (search ceiling, saturated) | ~280 |
+
+All four acceptance gates returned `RTI_OK` with an empty refusal reason at
+every row on the left — curvature and improvement-over-null both actively
+endorsed the wrong answer, because the null model was evaluated against the
+same broken baseline. Fixed by threading the caller's true ambient through
+as an explicit parameter instead of deriving a reference from the segment;
+see `test_ramp_transient_ident.c`'s "Ambient-reference regression" sweep,
+which pins this table as a regression. **Practical reach:** only segment 1
+of a firing starts at true ambient — every later segment starts hot, so
+this was wrong on most real segments, not an edge case.
+
+## Pre-segment trend — GATE input only, not a dynamics input
+
+Independent of the ambient fix above: fit a short linear trend over the
+first `RTI_TREND_SAMPLES` samples and use its max residual (how far the
+window departs from a straight line) as the rested-baseline GATE's input
+(`RTI_TREND_RESIDUAL_TOO_LARGE` below). The trend's INTERCEPT and SLOPE are
+NOT fed into the simulated dynamics — an earlier version of this design fed
+the intercept in as `T_free` (the ambient-reference defect above) and, even
+earlier still, fed the fitted SLOPE in as well
+(`T_free(t) = intercept + slope*t`, extrapolated across the whole segment).
+That slope-extrapolation attempt was implemented and then measured to be a
+real bug: extrapolating a slope fit over only `RTI_TREND_SAMPLES` points
+linearly across an entire multi-thousand-second segment amplifies any small
+fitted slope into tens of degrees of spurious drift by the segment's end (a
+measured 0.014 C/s slope, fit over 6 points near t=0, reached +43 C of
+extrapolated "baseline drift" by t=3000s and corrupted the whole fit).
+Reverted; the trend's slope is not read anywhere today (`fit_trend()`
+accepts a nullable `out_slope` for exactly this reason — `rti_fit()` passes
+`NULL`), and the residual is the ONLY thing the trend fit contributes.
 
 **Gate, and its measured limitation.** `RTI_TREND_RESIDUAL_TOO_LARGE`
 rejects a segment whose pre-segment window is not close to linear — the
 sign of curvature a still-decaying (non-rested) start produces. This
 converts a rested-baseline requirement into a "was the plant on a locally
-LINEAR trend, not curving, when the segment starts" requirement. **Measured
+LINEAR trend, not curving, when the segment starts" requirement, and is
+non-vacuous: `test_ramp_transient_ident.c` trips it directly with a step
+inside the trend window (residual > the 0.6 C floor), reproducing the
+2026-09-14 review's independent confirmation (2.971 C). **Measured
 limitation, not merely theorized:** this gate detects a FAST, high-curvature
 non-rested start (a step within the trend window itself) but does **not**
 detect a SLOW one. A segment built with `tau_true=280s` starting 30s after a
@@ -145,18 +185,24 @@ the trend window is 4, 6, 10, or 16 samples wide — an exponential decay's
 curvature over a window this short relative to `tau` is genuinely,
 measurably almost-linear, so no window size threshold can catch it without
 also rejecting ordinary linear ramps. That segment is NOT refused by this
-gate, and its recovered tau comes out at 658s against the true 280s (+135%,
-biased HIGH here — opposite direction from autotune's low-biased gain from
-residual heat, because this bias enters through the dynamics' time constant
-rather than through steady-state gain). **Practical implication:** the
-trend gate is real protection against a ramp immediately following another
-zone's step or this zone's own very recent duty change (the fast case), but
-is not a complete defense against a slow multi-minute decay tail from an
-earlier transient — a caller wiring this up for real use should additionally
-require a minimum QUIET period (no significant duty change) immediately
-before the segment starts, which this module does not have visibility into
-on its own (it only sees the segment it's handed). This is flagged as
-required future work for any real integration, not solved here.
+gate. **Previously misdiagnosed:** an earlier version of this doc reported
+this exact segment's recovered tau as 658s against the true 280s and
+attributed the +135% error to this slow-decay gap. The 2026-09-14 review
+showed that attribution was wrong — removing the decay tail entirely and
+starting a segment at the same ~35C-above-ambient offset reproduces ~640s
+on its own, so the decay contributed essentially nothing; the ambient-
+reference defect above was the actual cause. With that defect fixed, this
+same segment now recovers tau within roughly 25% of true (see
+`test_ramp_transient_ident.c`'s "mid-decay start — corrected regression").
+**Practical implication, restated honestly:** the trend gate is real
+protection against a ramp immediately following another zone's step or
+this zone's own very recent duty change (the fast case), and — now that the
+ambient reference is fixed — a slow decay tail it cannot see no longer
+produces a gross tau error, only a modest one. It is still not a complete
+substitute for a caller-side minimum QUIET period (no significant duty
+change) immediately before the segment starts, which this module cannot
+see on its own (it only sees the segment it's handed); that remains
+recommended future work for any real integration, not solved here.
 
 ## Guard 1 / profiles_stop interaction — deliberately avoided
 
@@ -202,11 +248,31 @@ explicitly extrapolation.
 2. **Negative / no-information case**: a flat dwell segment (duty constant,
    plant already at steady state) is rejected at the duty-excitation gate
    (duty std/range is exactly 0) before any fit runs.
-3. **Negative / flat-cost case**: a segment with realistic sensor
-   quantization (0.1 C) but a duty trace whose variation is dominated by
-   the controller's own reference-following (near-zero net excitation once
-   detrended) is rejected at the curvature gate — confirms the gate fires
-   on cost-surface flatness, not merely on duty range.
+3. **Negative / current-model-replay case**: a segment simulated to be
+   EXACTLY the current model's own prediction (same duty, same `(tau, L)`)
+   is rejected via `RTI_NO_IMPROVEMENT`, not `RTI_FLAT_COST` — an earlier
+   version of this doc mislabeled this as the flat-cost case; corrected
+   2026-09-14 after a review found the claim false (`grep` over the test
+   directory found zero references to `RTI_FLAT_COST` at the time).
+4. **Negative / flat-cost case, now genuinely covered**: caller-supplied
+   `k_gain_c_per_duty` badly understated relative to the true plant gain —
+   see "Cost-curvature (identifiability) check" above. `RTI_FLAT_COST` was
+   unreachable across a 1200-combination sweep of segment shape/duration/
+   amplitude alone; a wrong caller gain reaches it directly.
+5. **Positive / ambient-reference regression**: segment start temperature
+   swept from true ambient to +65 C above it (ambient held fixed and
+   supplied correctly) — fitted tau stays within ~20% of true at every
+   offset. Pins the fix for the defect described in "Ambient reference"
+   above.
+6. **Negative / trend-residual case**: a fast step inside the pre-segment
+   trend window trips `RTI_TREND_RESIDUAL_TOO_LARGE` — previously
+   documented as reachable but untested; now has a real test.
+7. **Regression / command- and plant-invariance**: E1 (true plant tau swept
+   80/280/700s, command fixed) confirms the fit still tracks the real
+   plant; E2 (true plant fixed, commanded ramp rate swept 40/100/220 C/hr)
+   confirms the estimate stays flat rather than becoming a disguised
+   function of the commanded ramp rate. Both properties were verified not
+   to have regressed from the ambient-reference fix.
 
 All synthetic traces use 0.1 C quantization on `actual_c`, per this repo's
 documented idealized-input bug class

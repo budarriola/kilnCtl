@@ -52,6 +52,39 @@ static uint32_t build_closed_loop_ramp(rti_sample_t *out, uint32_t n, float dt_s
     return n;
 }
 
+// Same as build_closed_loop_ramp, but the segment's OWN starting
+// temperature (start_c) is independent of the true ambient the plant
+// relaxes toward (t_amb) -- every segment past the first one of a real
+// firing starts hot, not at ambient. The commanded ramp continues upward
+// from start_c (a genuine mid-firing continuation), while the true plant
+// dynamics still relax toward t_amb. This is the axis the whole original
+// test suite held constant (project review 2026-09-14) and the one that
+// exposed the ambient-reference defect.
+static uint32_t build_closed_loop_ramp_from(rti_sample_t *out, uint32_t n, float dt_s, float t_amb, float start_c,
+                                             float ramp_rate, float k_true, float tau_true, float k_model,
+                                             float tau_model, float kp, float ki)
+{
+    float T = start_c;
+    float integ = 0.0f;
+    for (uint32_t i = 0; i < n; i++) {
+        float t = (float)i * dt_s;
+        float target = start_c + ramp_rate * t;
+        float err = target - T;
+        integ += err * dt_s;
+        float ff = (target - t_amb) / k_model + ramp_rate * tau_model / k_model;
+        float duty = ff + kp * err + ki * integ;
+        if (duty < 0.0f) duty = 0.0f;
+        if (duty > 1.0f) duty = 1.0f;
+        out[i].t_s = t;
+        out[i].target_c = target;
+        out[i].actual_c = quantize_c(T);
+        out[i].duty = duty;
+        float dT = (k_true * duty - (T - t_amb)) / tau_true;
+        T = T + dT * dt_s;
+    }
+    return n;
+}
+
 void run_test_ramp_transient_ident(void)
 {
     const float DT = 1.0f;
@@ -69,7 +102,7 @@ void run_test_ramp_transient_ident(void)
         build_closed_loop_ramp(seg, N, DT, T_AMB, RAMP_RATE, /*k_true=*/200.0f, /*tau_true=*/280.0f,
                                 /*k_model=*/200.0f, /*tau_model=*/100.0f, /*kp=*/0.02f, /*ki=*/0.0006f);
         rti_fit_t fit;
-        rti_result_t r = rti_fit(seg, N, 200.0f, /*current_tau=*/100.0f, /*current_dead_time=*/0.0f, &fit);
+        rti_result_t r = rti_fit(seg, N, 200.0f, T_AMB, /*current_tau=*/100.0f, /*current_dead_time=*/0.0f, &fit);
         TEST_CHECK(r == RTI_OK, "mistuned closed-loop ramp: expected OK");
         if (fit.valid) {
             TEST_CHECK_NEAR(fit.tau_s, 280.0f, 280.0f * 0.15f,
@@ -88,7 +121,7 @@ void run_test_ramp_transient_ident(void)
         static rti_sample_t seg[TRACE_MAX];
         build_closed_loop_ramp(seg, N, DT, T_AMB, RAMP_RATE, 200.0f, 280.0f, 200.0f, 280.0f, 0.02f, 0.0006f);
         rti_fit_t fit;
-        rti_result_t r = rti_fit(seg, N, 200.0f, 280.0f, 0.0f, &fit);
+        rti_result_t r = rti_fit(seg, N, 200.0f, T_AMB, 280.0f, 0.0f, &fit);
         // Matched-model closed-loop tracking is near-perfect (tracking error
         // ~1e-14C in the prototype), which starves the improvement-over-null
         // gate of anything to improve on -- NO_IMPROVEMENT is the CORRECT
@@ -119,7 +152,7 @@ void run_test_ramp_transient_ident(void)
             T = T + dT * DT;
         }
         rti_fit_t fit;
-        rti_result_t r = rti_fit(seg, N, k, tau, 0.0f, &fit);
+        rti_result_t r = rti_fit(seg, N, k, T_AMB, tau, 0.0f, &fit);
         TEST_CHECK(r == RTI_INSUFFICIENT_DUTY_EXCITATION, "flat dwell: refused at duty-excitation gate");
         TEST_CHECK(fit.tau_s == 0.0f, "flat dwell: tau_s left at 0 on refusal");
     }
@@ -152,7 +185,7 @@ void run_test_ramp_transient_ident(void)
             T = T + dT * DT;
         }
         rti_fit_t fit;
-        rti_result_t r = rti_fit(seg, N, k, tau, 0.0f, &fit);
+        rti_result_t r = rti_fit(seg, N, k, T_AMB, tau, 0.0f, &fit);
         TEST_CHECK(r == RTI_NO_IMPROVEMENT,
                    "segment IS the current model's own prediction: refused via NO_IMPROVEMENT rather than "
                    "reporting some other confident tau");
@@ -163,7 +196,7 @@ void run_test_ramp_transient_ident(void)
         rti_sample_t seg[8];
         build_closed_loop_ramp(seg, 8, DT, T_AMB, RAMP_RATE, 200.0f, 280.0f, 200.0f, 100.0f, 0.02f, 0.0006f);
         rti_fit_t fit;
-        rti_result_t r = rti_fit(seg, 8, 200.0f, 100.0f, 0.0f, &fit);
+        rti_result_t r = rti_fit(seg, 8, 200.0f, T_AMB, 100.0f, 0.0f, &fit);
         TEST_CHECK(r == RTI_TOO_FEW_SAMPLES, "8 samples: TOO_FEW_SAMPLES");
     }
 
@@ -172,7 +205,7 @@ void run_test_ramp_transient_ident(void)
         static rti_sample_t seg[64];
         build_closed_loop_ramp(seg, 40, 1.0f, T_AMB, RAMP_RATE, 200.0f, 280.0f, 200.0f, 100.0f, 0.02f, 0.0006f);
         rti_fit_t fit;
-        rti_result_t r = rti_fit(seg, 40, 200.0f, 100.0f, 0.0f, &fit); // 39s span
+        rti_result_t r = rti_fit(seg, 40, 200.0f, T_AMB, 100.0f, 0.0f, &fit); // 39s span
         TEST_CHECK(r == RTI_TOO_SHORT_DURATION, "39s span: TOO_SHORT_DURATION");
     }
 
@@ -181,24 +214,53 @@ void run_test_ramp_transient_ident(void)
         static rti_sample_t seg[TRACE_MAX];
         build_closed_loop_ramp(seg, N, DT, T_AMB, RAMP_RATE, 200.0f, 280.0f, 200.0f, 100.0f, 0.02f, 0.0006f);
         rti_fit_t fit;
-        TEST_CHECK(rti_fit(seg, N, 0.0f, 100.0f, 0.0f, &fit) == RTI_INVALID_GAIN, "K=0: INVALID_GAIN");
-        TEST_CHECK(rti_fit(seg, N, -5.0f, 100.0f, 0.0f, &fit) == RTI_INVALID_GAIN, "K<0: INVALID_GAIN");
+        TEST_CHECK(rti_fit(seg, N, 0.0f, T_AMB, 100.0f, 0.0f, &fit) == RTI_INVALID_GAIN, "K=0: INVALID_GAIN");
+        TEST_CHECK(rti_fit(seg, N, -5.0f, T_AMB, 100.0f, 0.0f, &fit) == RTI_INVALID_GAIN, "K<0: INVALID_GAIN");
     }
 
-    // --- Non-rested baseline, SLOW-decay case (documents a KNOWN,
-    // MEASURED limitation -- see docs/RAMP_TRANSIENT_IDENT_DESIGN.md's
-    // "Non-rested bias" section). A segment starting 30s after an earlier
-    // step, decay far from complete, is NOT caught by the trend-residual
-    // gate: an exponential decay's curvature over a window this short
-    // relative to tau is genuinely almost-linear (~0.04C residual
-    // regardless of window size 4-16 samples, measured directly), so no
-    // threshold on this gate alone can catch it without also rejecting
-    // ordinary linear ramps. This test asserts the MEASURED outcome (fit
-    // accepted, tau biased to roughly 2-3x true) rather than a false
-    // guarantee of rejection -- a real integration needs an independent
-    // "quiet period before this segment" check this module cannot provide
-    // on its own, which is exactly why this stays unwired (see the design
-    // doc's "Guard 1 / profiles_stop interaction" section).
+    // --- Ambient-reference regression: segment start temperature swept from
+    // true ambient to +65C above it, ambient held fixed and passed
+    // correctly. Before the ambient-reference fix (opus review
+    // docs/audits/ramp_transient_ident_review_2026-09-14.md), fitted tau
+    // inflated from ~280s (correct) to 1200s (search-ceiling saturated) as
+    // this offset grew -- because the old code relaxed the model toward the
+    // SEGMENT's own start temperature instead of true ambient. This is the
+    // one axis (segment start vs. ambient, varied independently) the entire
+    // original test suite held constant, which is why the defect shipped
+    // green. Every one of these starts a genuine mid-firing ramp -- only
+    // segment 1 of a real firing starts at ambient.
+    {
+        const float offsets[] = {0.0f, 5.0f, 10.2f, 20.0f, 35.0f, 65.0f};
+        const float k = 200.0f, tau_true = 280.0f;
+        for (size_t idx = 0; idx < sizeof(offsets) / sizeof(offsets[0]); idx++) {
+            static rti_sample_t seg[TRACE_MAX];
+            float start_c = T_AMB + offsets[idx];
+            build_closed_loop_ramp_from(seg, N, DT, T_AMB, start_c, RAMP_RATE, k, tau_true, k, 100.0f, 0.02f,
+                                         0.0006f);
+            rti_fit_t fit;
+            rti_result_t r = rti_fit(seg, N, k, T_AMB, 100.0f, 0.0f, &fit);
+            TEST_CHECK(r == RTI_OK, "ambient sweep: expected OK regardless of start-above-ambient offset");
+            if (r == RTI_OK) {
+                TEST_CHECK_NEAR(fit.tau_s, tau_true, tau_true * 0.20f,
+                                 "ambient sweep: fitted tau stays within 20% of true 280s at every start "
+                                 "offset above ambient -- the ambient-reference defect inflated this to "
+                                 "31%-255% wrong (and the search ceiling entirely) as offset grew");
+            }
+        }
+    }
+
+    // --- Non-rested baseline, SLOW-decay case -- corrected regression.
+    // This is the same segment the design doc used to (mis)document as a
+    // "slow decay tail the trend gate can't see" limitation. The 2026-09-14
+    // review showed the tau=658s/true=280s result it pinned was NOT the
+    // decay tail (removing the decay entirely and starting at the same
+    // 35.2C-above-ambient offset reproduces ~640s) -- it was this same
+    // ambient-reference defect wearing a different label. With the fix,
+    // this segment (prior 30s decay step, genuinely non-rested, trend
+    // residual still not flagged by RTI_TREND_RESIDUAL_TOO_LARGE for the
+    // reasons the doc gives) now recovers tau close to the true value: the
+    // remaining "quiet period" gap the doc calls out is real but small,
+    // not the 2-3x bias previously measured and previously misattributed.
     {
         static rti_sample_t seg[TRACE_MAX];
         float k = 200.0f, tau_true = 280.0f;
@@ -211,36 +273,103 @@ void run_test_ramp_transient_ident(void)
             float dT = (k * prior_duty - (T - T_AMB)) / tau_true;
             T = T + dT * 1.0f;
         }
-        build_closed_loop_ramp(seg, N, DT, T_AMB, RAMP_RATE, k, tau_true, k, 100.0f, 0.02f, 0.0006f);
-        // Overwrite the segment's actual starting temperature/trend with
-        // the mid-decay value so the pre-segment window is curved.
-        float T2 = T;
-        float integ = 0.0f;
-        for (uint32_t i = 0; i < N; i++) {
-            float t = (float)i * DT;
-            float target = T_AMB + RAMP_RATE * t;
-            float err = target - T2;
-            integ += err * DT;
-            float ff = (target - T_AMB) / k + RAMP_RATE * 100.0f / k;
-            float duty = ff + 0.02f * err + 0.0006f * integ;
-            if (duty < 0.0f) duty = 0.0f;
-            if (duty > 1.0f) duty = 1.0f;
-            seg[i].t_s = t;
-            seg[i].target_c = target;
-            seg[i].actual_c = quantize_c(T2);
-            seg[i].duty = duty;
-            float dT = (k * duty - (T2 - T_AMB)) / tau_true;
-            T2 = T2 + dT * DT;
-        }
+        // Ramp continues from the decayed (non-rested) starting point, true
+        // ambient unchanged.
+        build_closed_loop_ramp_from(seg, N, DT, T_AMB, T, RAMP_RATE, k, tau_true, k, 100.0f, 0.02f, 0.0006f);
         rti_fit_t fit;
-        rti_result_t r = rti_fit(seg, N, k, 100.0f, 0.0f, &fit);
-        TEST_CHECK(r == RTI_OK,
-                   "mid-decay start: measured limitation -- trend gate does not catch a slow decay tail, "
-                   "fit is accepted (documents the gap, does not claim it is caught)");
+        rti_result_t r = rti_fit(seg, N, k, T_AMB, 100.0f, 0.0f, &fit);
+        TEST_CHECK(r == RTI_OK, "mid-decay start: still accepted (trend gate genuinely can't see a slow "
+                                 "decay this shallow), but no longer badly wrong now ambient is correct");
         if (r == RTI_OK) {
-            TEST_CHECK(fit.tau_s > tau_true * 1.5f && fit.tau_s < tau_true * 4.0f,
-                       "mid-decay start: fitted tau lands in the measured biased-high range (roughly "
-                       "2-3x true) -- NOT a claim this is acceptable, a pinned regression of the known gap");
+            TEST_CHECK_NEAR(fit.tau_s, tau_true, tau_true * 0.25f,
+                             "mid-decay start: fitted tau now close to true 280s (previously 640-658s, "
+                             "a 2-3x bias from the ambient-reference defect, not the decay tail)");
+        }
+    }
+
+    // --- RTI_FLAT_COST, made reachable: caller-supplied k_gain badly
+    // UNDERSTATED. Curvature was found unreachable across 1200 constructed
+    // no-information segments in the 2026-09-14 review when only segment
+    // shape/duration/amplitude were varied -- but a badly wrong CALLER gain
+    // (a real possibility: K comes from a prior, possibly stale, fit) makes
+    // every candidate tau fit the trace about equally (badly), because the
+    // dominant residual is the gain mismatch, not a tau mismatch, so
+    // perturbing tau barely moves the SSE. Confirmed by direct simulation
+    // before this test was written (K=10 against a true K=200: curvature
+    // fraction ~0.0001, four orders of magnitude below the 0.05 floor).
+    {
+        static rti_sample_t seg[TRACE_MAX];
+        float k_true = 200.0f, tau_true = 280.0f;
+        build_closed_loop_ramp(seg, N, DT, T_AMB, RAMP_RATE, k_true, tau_true, k_true, 100.0f, 0.02f, 0.0006f);
+        rti_fit_t fit;
+        rti_result_t r = rti_fit(seg, N, /*k_gain (badly wrong)=*/10.0f, T_AMB, 100.0f, 0.0f, &fit);
+        TEST_CHECK(r == RTI_FLAT_COST, "badly understated caller gain: refused via FLAT_COST -- the cost "
+                                        "surface genuinely does not distinguish tau values when K itself "
+                                        "is this wrong");
+    }
+
+    // --- RTI_TREND_RESIDUAL_TOO_LARGE, given real coverage. A fast step
+    // INSIDE the trend window (the case the gate is designed to catch, per
+    // its own doc comment) must trip it. Reproduces the review's
+    // independent confirmation (residual 2.971C against the 0.6C floor) on
+    // the unmodified production function.
+    {
+        static rti_sample_t seg[TRACE_MAX];
+        float k = 200.0f, tau_true = 280.0f;
+        build_closed_loop_ramp(seg, N, DT, T_AMB, RAMP_RATE, k, tau_true, k, 100.0f, 0.02f, 0.0006f);
+        // Inject a sharp step into the first RTI_TREND_SAMPLES(=6) samples
+        // themselves so the pre-segment window is visibly curved/stepped,
+        // not just non-rested-but-locally-linear like the decay case above.
+        seg[2].actual_c = quantize_c(seg[2].actual_c + 6.0f);
+        seg[3].actual_c = quantize_c(seg[3].actual_c + 6.0f);
+        seg[4].actual_c = quantize_c(seg[4].actual_c + 6.0f);
+        rti_fit_t fit;
+        rti_result_t r = rti_fit(seg, N, k, T_AMB, 100.0f, 0.0f, &fit);
+        TEST_CHECK(r == RTI_TREND_RESIDUAL_TOO_LARGE,
+                   "step inside the trend window: refused via TREND_RESIDUAL_TOO_LARGE");
+        TEST_CHECK(fit.trend_residual_c > 0.6f, "step inside trend window: measured residual exceeds the floor");
+    }
+
+    // --- E1 regression: command fixed, TRUE plant varied. Confirms the fix
+    // did not disturb the estimator's core property -- it tracks the real
+    // plant across a wide tau range, not merely a fixed value.
+    {
+        const float taus[] = {80.0f, 280.0f, 700.0f};
+        const float k = 200.0f;
+        for (size_t idx = 0; idx < sizeof(taus) / sizeof(taus[0]); idx++) {
+            static rti_sample_t seg[TRACE_MAX];
+            build_closed_loop_ramp(seg, N, DT, T_AMB, RAMP_RATE, k, taus[idx], k, 100.0f, 0.02f, 0.0006f);
+            rti_fit_t fit;
+            rti_result_t r = rti_fit(seg, N, k, T_AMB, 100.0f, 0.0f, &fit);
+            TEST_CHECK(r == RTI_OK, "E1 plant sweep: expected OK");
+            if (r == RTI_OK) {
+                TEST_CHECK_NEAR(fit.tau_s, taus[idx], taus[idx] * 0.15f,
+                                 "E1 plant sweep: fitted tau tracks the true plant across a wide range");
+            }
+        }
+    }
+
+    // --- E2 regression: TRUE plant fixed, commanded ramp rate swept. The
+    // estimate must stay flat -- it should not be a disguised function of
+    // the commanded ramp rate (that was ramp_ident.c's defect).
+    {
+        const float ramp_rates_per_hr[] = {40.0f, 100.0f, 220.0f};
+        const float k = 200.0f, tau_true = 280.0f;
+        float fitted[3];
+        for (size_t idx = 0; idx < sizeof(ramp_rates_per_hr) / sizeof(ramp_rates_per_hr[0]); idx++) {
+            static rti_sample_t seg[TRACE_MAX];
+            build_closed_loop_ramp(seg, N, DT, T_AMB, ramp_rates_per_hr[idx] / 3600.0f, k, tau_true, k, 100.0f,
+                                    0.02f, 0.0006f);
+            rti_fit_t fit;
+            rti_result_t r = rti_fit(seg, N, k, T_AMB, 100.0f, 0.0f, &fit);
+            TEST_CHECK(r == RTI_OK, "E2 ramp-rate sweep: expected OK");
+            fitted[idx] = (r == RTI_OK) ? fit.tau_s : -1.0f;
+        }
+        if (fitted[0] > 0.0f && fitted[1] > 0.0f && fitted[2] > 0.0f) {
+            TEST_CHECK_NEAR(fitted[0], fitted[1], tau_true * 0.10f,
+                             "E2 ramp-rate sweep: estimate flat across a 5.5x ramp-rate change (40 vs 100C/hr)");
+            TEST_CHECK_NEAR(fitted[2], fitted[1], tau_true * 0.10f,
+                             "E2 ramp-rate sweep: estimate flat across a 5.5x ramp-rate change (220 vs 100C/hr)");
         }
     }
 
@@ -256,7 +385,7 @@ void run_test_ramp_transient_ident(void)
         }
         rti_fit_t fit;
         memset(&fit, 0xAB, sizeof(fit));
-        rti_result_t r = rti_fit(seg, N, 200.0f, 280.0f, 0.0f, &fit);
+        rti_result_t r = rti_fit(seg, N, 200.0f, T_AMB, 280.0f, 0.0f, &fit);
         TEST_CHECK(r == RTI_INSUFFICIENT_DUTY_EXCITATION, "poisoned out struct: still refused correctly");
         TEST_CHECK(fit.tau_s == 0.0f, "poisoned out struct: tau_s reset to 0 on refusal");
         TEST_CHECK(fit.valid == false, "poisoned out struct: valid reset to false on refusal");

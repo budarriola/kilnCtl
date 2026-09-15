@@ -19,13 +19,22 @@
 // -- Method summary (full detail in the design doc) -------------------------
 //
 // Given one segment's (t, target, actual, duty) trace, simulate a candidate
-// FOPDT model (dT/dt = (K*duty_delayed(t-L) - (T-T0))/tau, forward Euler at
-// the trace's own spacing) driven by the segment's OWN recorded duty over
+// FOPDT model (dT/dt = (K*duty_delayed(t-L) - (T-T_amb))/tau, forward Euler
+// at the trace's own spacing) driven by the segment's OWN recorded duty over
 // the WHOLE segment -- not a windowed step-and-response slice -- and fit
 // (tau, L) by least squares against the residual. K is caller-supplied and
-// never re-fitted (same scope as ramp_ident.c). T0 is corrected for a
-// linear pre-segment trend (see RTI_TREND_SAMPLES) to reduce, though not
-// eliminate, the same non-rested bias autotune has.
+// never re-fitted (same scope as ramp_ident.c). The dynamics relax toward
+// the CALLER-SUPPLIED true ambient (`ambient_c`), not the segment's own
+// starting temperature -- a segment that starts above ambient (i.e. every
+// segment but the first of a firing) needs only the EXCESS duty over the
+// steady-state hold duty to explain its motion; feeding the model the full
+// duty while relaxing it toward its own start temperature leaves a phantom
+// heating term that only `tau` can absorb, inflating it (see
+// docs/RAMP_TRANSIENT_IDENT_DESIGN.md's "Ambient reference" section and
+// docs/audits/ramp_transient_ident_review_2026-09-14.md). The pre-segment
+// trend fit (see RTI_TREND_SAMPLES) is used only for the rested-baseline
+// GATE below (RTI_TREND_RESIDUAL_TOO_LARGE) -- it no longer supplies the
+// dynamics' reference temperature.
 //
 // Four gates must ALL pass before a fit is reported valid: duty excitation
 // floor, minimum duration, cost-curvature (identifiability) around the
@@ -65,8 +74,12 @@ typedef enum {
                                    // doc's "non-rested bias" section
     RTI_FLAT_COST,                // best-fit tau found, but perturbing it by +-RTI_PERTURB_FRAC does
                                    // not raise the SSE by RTI_MIN_CURVATURE_FRAC -- the segment does
-                                   // not actually distinguish candidate tau values (closed-loop
-                                   // identifiability failure); THE central negative-case gate
+                                   // not actually distinguish candidate tau values. Reachable in
+                                   // practice when the CALLER'S supplied k_gain_c_per_duty is badly
+                                   // wrong (understated): the model then fits equally (badly) at every
+                                   // tau because the dominant residual is the gain mismatch, not a
+                                   // tau mismatch -- see test_ramp_transient_ident.c's
+                                   // "gain badly mismatched" case and the design doc.
     RTI_NO_IMPROVEMENT,           // best fit's SSE is not enough better than simulating with the
                                    // caller's current (tau, L) -- this segment tells us nothing the
                                    // existing model doesn't already predict
@@ -94,16 +107,20 @@ typedef struct {
 // Attempts to re-identify tau/dead-time from one ramp segment via
 // whole-segment output-error simulation. samples must be sorted ascending
 // by t_s. k_gain_c_per_duty is the zone's current model gain (never
-// re-fitted). current_tau_s/current_dead_time_s are the model's EXISTING
-// parameters, used only for the improvement-over-null gate (RTI_NO_
-// IMPROVEMENT) -- pass the same values adaptive_tune/zones_config would
-// otherwise use. out must not be NULL; *out is always fully populated
-// (result, refusal_reason, and whichever diagnostics were reached) even on
-// refusal.
+// re-fitted). ambient_c is the plant's TRUE ambient reference (not the
+// segment's own starting temperature) -- the model's relaxation target;
+// getting this right is what distinguishes a segment starting well above
+// ambient (the common case) from the misdiagnosed-as-rare case of segment
+// 1 of a firing. current_tau_s/current_dead_time_s are the model's
+// EXISTING parameters, used only for the improvement-over-null gate
+// (RTI_NO_IMPROVEMENT) -- pass the same values adaptive_tune/zones_config
+// would otherwise use. out must not be NULL; *out is always fully
+// populated (result, refusal_reason, and whichever diagnostics were
+// reached) even on refusal.
 //
 // Returns the same value as out->result.
-rti_result_t rti_fit(const rti_sample_t *samples, uint32_t n, float k_gain_c_per_duty, float current_tau_s,
-                      float current_dead_time_s, rti_fit_t *out);
+rti_result_t rti_fit(const rti_sample_t *samples, uint32_t n, float k_gain_c_per_duty, float ambient_c,
+                      float current_tau_s, float current_dead_time_s, rti_fit_t *out);
 
 #ifdef __cplusplus
 }

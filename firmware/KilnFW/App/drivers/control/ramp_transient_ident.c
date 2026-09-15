@@ -76,7 +76,9 @@ static void reset_out(rti_fit_t *out)
 // Ordinary least-squares fit of actual_c = slope*t + intercept over
 // samples [0, count), t measured from samples[0].t_s. Also reports the max
 // absolute residual over that window (the "how linear is this really"
-// check).
+// check). out_slope may be NULL -- the slope is only an intermediate of the
+// fit itself (used to compute out_max_residual); nothing downstream reads
+// it (see RTI_TREND_RESIDUAL_TOO_LARGE, which gates on out_max_residual).
 static void fit_trend(const rti_sample_t *s, uint32_t count, float *out_slope, float *out_intercept,
                        float *out_max_residual)
 {
@@ -106,27 +108,43 @@ static void fit_trend(const rti_sample_t *s, uint32_t count, float *out_slope, f
             max_res = res;
         }
     }
-    *out_slope = (float)slope;
+    if (out_slope) {
+        *out_slope = (float)slope;
+    }
     *out_intercept = (float)intercept;
     *out_max_residual = (float)max_res;
 }
 
 // Simulates the FOPDT model driven by the segment's own duty trace over
 // its ENTIRE span (forward Euler at each sample's own dt), and returns the
-// sum-of-squared residual against the actual trace. T_free is a FIXED
-// (not extrapolated) free-response baseline -- the pre-segment trend's
-// intercept, i.e. "what temperature the plant was at, corrected for the
-// tiny near-start bias fit_trend() measures" -- so the model being fit is
-// dT/dt = (K*duty_delayed - (T - T_free))/tau. Deliberately NOT
-// trend_intercept + trend_slope*t: extrapolating even a tiny fitted slope
-// (fit over only RTI_TREND_SAMPLES points) linearly across an entire
-// multi-thousand-second segment blows up into tens of degrees of spurious
-// baseline drift by the end of the segment -- confirmed empirically during
-// development (a 0.014 C/s slope, fit over 6 points near t=0, extrapolated
-// to +43C by t=3000s and corrupted the whole fit). The trend-residual GATE
-// (RTI_TREND_RESIDUAL_TOO_LARGE, checked separately) is what actually
-// polices "was this segment rested" -- it does not need the slope fed into
-// the dynamics to do that job.
+// sum-of-squared residual against the actual trace. t_free is a FIXED
+// (not extrapolated) free-response baseline the model relaxes toward, i.e.
+// the model being fit is dT/dt = (K*duty_delayed - (T - t_free))/tau.
+//
+// t_free MUST be the plant's true ambient, not the segment's own starting
+// temperature (that was this module's ambient-reference defect -- see
+// docs/audits/ramp_transient_ident_review_2026-09-14.md and the design
+// doc's "Ambient reference" section, fixed after 83e04785 shipped it
+// wrong). Writing T = T_start + x, a segment starting above true ambient
+// has true dynamics dx/dt = (K*(u - u_hold) - x)/tau, where
+// u_hold = (T_start - ambient)/K is the standing duty already needed just
+// to HOLD T_start. Relaxing toward T_start instead of ambient feeds the
+// model the FULL duty u rather than the excess (u - u_hold), so it sees a
+// constant phantom heating term of K*u_hold/tau that only tau can absorb
+// -- confirmed to inflate tau by +31% to +255% (and saturate the search
+// ceiling entirely) as segment-start-above-ambient grows from 5C to 65C,
+// with all four acceptance gates still endorsing the result.
+//
+// Deliberately NOT ambient + trend_slope*t: extrapolating even a tiny
+// fitted slope (fit over only RTI_TREND_SAMPLES points) linearly across an
+// entire multi-thousand-second segment blows up into tens of degrees of
+// spurious baseline drift by the end of the segment -- confirmed
+// empirically during development (a 0.014 C/s slope, fit over 6 points
+// near t=0, extrapolated to +43C by t=3000s and corrupted the whole fit).
+// The trend-residual GATE (RTI_TREND_RESIDUAL_TOO_LARGE, checked
+// separately, using the pre-segment trend's own intercept/residual, never
+// fed into these dynamics) is what actually polices "was this segment
+// rested".
 static double simulate_sse(const rti_sample_t *s, uint32_t n, float k_gain, float tau_s, uint32_t dead_samples,
                             float t_free)
 {
@@ -165,8 +183,8 @@ static double best_sse_over_dead_times(const rti_sample_t *s, uint32_t n, float 
     return best;
 }
 
-rti_result_t rti_fit(const rti_sample_t *samples, uint32_t n, float k_gain_c_per_duty, float current_tau_s,
-                      float current_dead_time_s, rti_fit_t *out)
+rti_result_t rti_fit(const rti_sample_t *samples, uint32_t n, float k_gain_c_per_duty, float ambient_c,
+                      float current_tau_s, float current_dead_time_s, rti_fit_t *out)
 {
     reset_out(out);
 
@@ -214,8 +232,8 @@ rti_result_t rti_fit(const rti_sample_t *samples, uint32_t n, float k_gain_c_per
     if (trend_n > n) {
         trend_n = n;
     }
-    float trend_slope = 0.0f, trend_intercept = 0.0f, trend_residual = 0.0f;
-    fit_trend(samples, trend_n, &trend_slope, &trend_intercept, &trend_residual);
+    float trend_intercept = 0.0f, trend_residual = 0.0f;
+    fit_trend(samples, trend_n, NULL, &trend_intercept, &trend_residual);
     out->trend_residual_c = trend_residual;
     if (trend_residual > RTI_MAX_TREND_RESIDUAL_C) {
         out->result = RTI_TREND_RESIDUAL_TOO_LARGE;
@@ -224,7 +242,12 @@ rti_result_t rti_fit(const rti_sample_t *samples, uint32_t n, float k_gain_c_per
                    (double)trend_residual, (double)RTI_MAX_TREND_RESIDUAL_C);
         return out->result;
     }
-    float t_free = trend_intercept;
+    // The dynamics relax toward the caller's true ambient, NOT
+    // trend_intercept (the segment's own near-start temperature) -- see
+    // simulate_sse()'s doc comment for why using the latter was this
+    // module's ambient-reference defect. trend_intercept/trend_residual
+    // above remain solely the rested-baseline GATE's inputs.
+    float t_free = ambient_c;
 
     // Coarse grid search over tau, best dead-time at each tau.
     double best_sse = -1.0;
