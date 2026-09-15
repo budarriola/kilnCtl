@@ -79,12 +79,30 @@ try {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $of1Raw = & $exe --shard 0 --of 1
     $sw.Stop()
-    if ($LASTEXITCODE -ne 0) { throw "sim_factorial_driver --of 1 exited $LASTEXITCODE." }
+    # Exit-code discipline, matching sim_factorial_driver.c's main():
+    #   0 = all plan sec 7 gates passed
+    #   2 = a sec 7 GATE failed -- an analysis verdict about the feature, not a
+    #       broken harness. The run's data is still written and the determinism
+    #       proof is still executed (they are independent of the verdict), but
+    #       this script exits non-zero at the end so a gate failure can never be
+    #       mistaken for a pass.
+    #   1 = an operational failure -- stop immediately, the data is not usable.
+    $of1Exit = $LASTEXITCODE
+    if ($of1Exit -ne 0 -and $of1Exit -ne 2) { throw "sim_factorial_driver --of 1 exited $of1Exit (operational failure)." }
+    $gateFailed = ($of1Exit -eq 2)
     $of1Raw | Out-File -FilePath (Join-Path $OutDir "factorial_of1.tsv") -Encoding utf8
     Write-Host ("--of 1 runtime: {0:N1} s" -f $sw.Elapsed.TotalSeconds)
+    if ($gateFailed) {
+        Write-Host ""
+        Write-Host "*** PLAN SEC 7 GATE FAILURE (driver exit 2). The gate lines are in the --of 1 output"
+        Write-Host "*** above and in factorial_of1.tsv. This script will finish the determinism proof and"
+        Write-Host "*** then exit non-zero. Do NOT tally sec 8 on a run whose gates failed."
+        Write-Host ""
+    }
 
     if ($SkipDeterminism) {
         Write-Host "SkipDeterminism set -- not running the sharded comparison."
+        if ($gateFailed) { exit 2 }
         exit 0
     }
 
@@ -123,10 +141,17 @@ try {
     }
     $procs | ForEach-Object { $_.WaitForExit() }
     for ($i = 0; $i -lt $Shards; $i++) {
+        # A shard exiting 2 is a per-shard gate verdict (each shard adjudicates
+        # over its own cells and says so in its output). That is expected
+        # whenever the canonical --of 1 run also failed its gates, and it must
+        # not abort the determinism comparison -- the comparison is exactly what
+        # proves the two runs saw the same data. An exit of 1 is operational and
+        # still aborts.
+        if ($procs[$i].ExitCode -eq 2) { $gateFailed = $true; continue }
         if ($procs[$i].ExitCode -ne 0) {
             Write-Host "shard $i exited $($procs[$i].ExitCode):"
             Get-Content $shardOutFiles[$i]
-            throw "sim_factorial_driver shard $i/$Shards failed."
+            throw "sim_factorial_driver shard $i/$Shards failed (operational)."
         }
     }
     $ofNRaw = @()
@@ -155,6 +180,10 @@ try {
         exit 1
     }
     Write-Host "PASS: --of 1 and --of $Shards data rows are byte-identical ($($of1Rows.Count) rows compared)."
+    if ($gateFailed) {
+        Write-Host "FAIL: determinism passed, but at least one plan sec 7 gate FAILED (see the gate lines above)."
+        exit 2
+    }
     exit 0
 } finally {
     Exit-BuildLock -Lock $buildLock

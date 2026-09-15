@@ -817,6 +817,82 @@ static void print_cell_row(const sim_factorial_cell_t *cell, const char *arm_lab
     s_rows_emitted++;
 }
 
+/* ==================================================================
+ * Plan sec 7's registered gate constants. These are REGISTERED IN
+ * ADVANCE (ADAPTIVE_FUZZY_EVALUATION_PLAN.md, commit 5387ff52) and must
+ * not be re-tuned because a run comes out inconveniently. If one of them
+ * is believed wrong, say so in the report and leave the number alone.
+ * ================================================================== */
+
+/* Gate 1, activity. */
+#define GATE1_MIN_ACTIVE_CELL_FRAC   0.30f  /* >= 30% of cells reach strength > 0 */
+#define GATE1_MIN_DIFFER_CELL_FRAC   0.10f  /* >= 10% of cells differ from the control at F9 */
+#define MATERIALITY_FLOOR_C          0.5f   /* per OBJECTIVE, not aggregate (plan sec 8) */
+
+/* Gate 3, the limit-cycle regression fixture: the seven cells the fixed-gain
+ * run showed a converged, bounded limit cycle in. All seven are A6 = MATCHED
+ * -- that is precisely why cap_L keys on L/tau and not on model agreement. */
+static const char *const GATE3_PINNED_CELLS[] = {
+    "ST1-049", "ST1-057", "ST1-113", "ST1-121", "ST1-177", "ST1-241", "ST1-249",
+};
+#define GATE3_PINNED_COUNT ((int)(sizeof(GATE3_PINNED_CELLS) / sizeof(GATE3_PINNED_CELLS[0])))
+
+/* The three objectives this gate adjudicates on, per the dispatch:
+ * STEADY_RMS_C, ENTRY_PEAK_C and LAG_SIGNED_C. LAG_SIGNED_C is lag_signed_s
+ * converted to degrees by THIS cell's own ramp rate, exactly as
+ * scenario_factorial_results_2026-09-14.md sec 3 defines it
+ * (lag_signed_s * a5_ramp_rate_c_per_hr / 3600) -- the raw column is
+ * seconds, and comparing seconds against a 0.5 degC floor would be a unit
+ * error. ENTRY_UNDERSHOOT_C is the fourth objective in plan sec 8; it is
+ * REPORTED below as a non-decisive extra and deliberately kept out of the
+ * gate, which is the conservative direction (fewer ways to look active). */
+typedef enum { OBJ_STEADY_RMS = 0, OBJ_ENTRY_PEAK, OBJ_LAG_SIGNED, OBJ_GATE_COUNT,
+               OBJ_ENTRY_UNDERSHOOT = OBJ_GATE_COUNT, OBJ_TOTAL_COUNT } gate_obj_t;
+static const char *const GATE_OBJ_NAMES[OBJ_TOTAL_COUNT] = {
+    "STEADY_RMS_C", "ENTRY_PEAK_C", "LAG_SIGNED_C", "ENTRY_UNDERSHOOT_C",
+};
+
+/* Returns false when this objective is not available for this firing (e.g. a
+ * cell with no lag segment) -- an unavailable objective can never contribute
+ * a difference, which again is the conservative direction. */
+static bool objective_value_c(const cell_firing_result_t *r, const sim_factorial_cell_t *cell,
+                               gate_obj_t obj, float *out_c)
+{
+    switch (obj) {
+    case OBJ_STEADY_RMS:
+        if (!r->have_steady) return false;
+        *out_c = r->steady_rms_c;
+        return true;
+    case OBJ_ENTRY_PEAK:
+        if (!r->have_entry_peak) return false;
+        *out_c = r->entry_peak_c;
+        return true;
+    case OBJ_LAG_SIGNED:
+        if (!r->have_lag_signed) return false;
+        *out_c = r->lag_signed_s * cell->a5_ramp_rate_c_per_hr / 3600.0f;
+        return true;
+    case OBJ_ENTRY_UNDERSHOOT:
+        if (!r->have_entry_under) return false;
+        *out_c = r->entry_undershoot_c;
+        return true;
+    default:
+        return false;
+    }
+}
+
+/* Per-(cell, arm) chain outcome, the raw material plan sec 7's gates are
+ * adjudicated from. Gates are decided in main() over the whole shard, never
+ * inside the chain -- one place, one verdict, one process exit. */
+typedef struct {
+    bool chain_ok;                  /* all N_FIRINGS completed */
+    bool have_f1, have_f9;
+    cell_firing_result_t f1, f9;
+    bool any_strength_gt_0;         /* any tick, any firing, strength_pct > 0 */
+    long dwell_crossings_total;     /* summed over the chain's firings */
+    long dwell_crossings_max_firing;
+    int  firings_completed;
+} chain_summary_t;
+
 /* ------------------------------------------------------------------
  * Plan sec 5: one adaptive chain = N_FIRINGS sequential firings for ONE
  * (cell, arm) pair, with adaptation state carried across them.
@@ -828,13 +904,16 @@ static void print_cell_row(const sim_factorial_cell_t *cell, const char *arm_lab
  * campaign exists to produce, so every arm-instance that does not emit a
  * data row emits a refusal line instead -- one or the other, always.
  *
- * out_firing1 (optional) receives firing 1's result, which main() uses for
- * the sec 7 gate-2 floor-identity comparison between the two arms.
+ * out (required) accumulates the chain's sec 7 gate material: firing 1 (gate
+ * 2, floor identity), firing 9 (gate 1's differs-from-control half and sec
+ * 8's primary comparison), whether ANY tick of ANY firing carried non-zero
+ * fuzzy strength (gate 1's activity half), and the dwell zero-crossing counts
+ * (gate 3). Counted here, adjudicated only in main().
  * ------------------------------------------------------------------ */
 static bool run_cell_chain(const sim_factorial_cell_t *cell, const sim_plant_cfg_t *plant,
                             float model_k_dc, float model_tau_s, float model_dead_time_s,
                             float ambient_c, float t1_off, float t2_off, float true_k_dc,
-                            cell_arm_t arm, cell_firing_result_t *out_firing1)
+                            cell_arm_t arm, chain_summary_t *out)
 {
     const char *arm_name = CELL_ARM_NAMES[arm];
     bool fuzzy = (arm == CELL_ARM_FUZZY_AT);
@@ -871,6 +950,7 @@ static bool run_cell_chain(const sim_factorial_cell_t *cell, const sim_plant_cfg
             printf("CELL_REFUSED %s %s_F%d: initial SIMC tune refused: %s\n",
                    cell->cell_id, arm_name, fi, g0.refusal_reason);
         }
+        out->chain_ok = false;
         return false;
     }
     s_fake_zone_cfg[0].kp = g0.kp;
@@ -886,6 +966,7 @@ static bool run_cell_chain(const sim_factorial_cell_t *cell, const sim_plant_cfg
                 printf("CELL_REFUSED %s %s_F%d: zones_config test fake returned false\n",
                        cell->cell_id, arm_name, j);
             }
+            out->chain_ok = false;
             return false;
         }
 
@@ -906,6 +987,7 @@ static bool run_cell_chain(const sim_factorial_cell_t *cell, const sim_plant_cfg
                 printf("CELL_REFUSED %s %s_F%d: %s%s\n", cell->cell_id, arm_name, j, r.refusal_reason,
                        (j > fi) ? " (chain cannot continue past the refused firing)" : "");
             }
+            out->chain_ok = false;
             return false;
         }
 
@@ -947,8 +1029,15 @@ static bool run_cell_chain(const sim_factorial_cell_t *cell, const sim_plant_cfg
                (st.has_applied && st.last_applied_profile_id == (uint8_t)fi) ? "yes" : "no",
                (double)st.last_delta_pct);
 
-        if (fi == 1 && out_firing1) *out_firing1 = r;
+        if (fi == 1) { out->f1 = r; out->have_f1 = true; }
+        if (fi == N_FIRINGS) { out->f9 = r; out->have_f9 = true; }
+        out->firings_completed = fi;
+        if (ad.ticks_with_strength_gt_0 > 0) out->any_strength_gt_0 = true;
+        out->dwell_crossings_total += ad.dwell_zero_crossings;
+        if (ad.dwell_zero_crossings > out->dwell_crossings_max_firing)
+            out->dwell_crossings_max_firing = ad.dwell_zero_crossings;
     }
+    out->chain_ok = true;
     return true;
 }
 
@@ -986,6 +1075,19 @@ int main(int argc, char **argv)
 
     long cells_refused = 0;
     long floor_identity_checked = 0, floor_identity_failures = 0;
+
+    /* plan sec 7 gate accumulators */
+    long g1_eligible_cells = 0, g1_active_cells = 0, g1_differ_cells = 0;
+    long g1_obj_differ_cells[OBJ_TOTAL_COUNT];
+    memset(g1_obj_differ_cells, 0, sizeof(g1_obj_differ_cells));
+    bool g3_seen[GATE3_PINNED_COUNT], g3_chain_ok[GATE3_PINNED_COUNT];
+    long g3_fuzzy_crossings[GATE3_PINNED_COUNT], g3_fuzzy_max_firing[GATE3_PINNED_COUNT];
+    long g3_pid_crossings[GATE3_PINNED_COUNT];
+    memset(g3_seen, 0, sizeof(g3_seen));
+    memset(g3_chain_ok, 0, sizeof(g3_chain_ok));
+    memset(g3_fuzzy_crossings, 0, sizeof(g3_fuzzy_crossings));
+    memset(g3_fuzzy_max_firing, 0, sizeof(g3_fuzzy_max_firing));
+    memset(g3_pid_crossings, 0, sizeof(g3_pid_crossings));
 
     for (size_t ci = 0; ci < n; ci++) {
         if ((ci % (size_t)of) != (size_t)shard) continue;
@@ -1060,14 +1162,48 @@ int main(int argc, char **argv)
          * chains over this same cell. They depend on NOTHING from the three
          * single-firing arms above (unlike A_STATIC_MATCHED, which replays
          * A_FUZZY50's multipliers) and so run even when those refused. ---- */
-        cell_firing_result_t pid_at_f1, fuzzy_at_f1;
-        memset(&pid_at_f1, 0, sizeof(pid_at_f1));
-        memset(&fuzzy_at_f1, 0, sizeof(fuzzy_at_f1));
+        chain_summary_t pid_at, fuzzy_at;
+        memset(&pid_at, 0, sizeof(pid_at));
+        memset(&fuzzy_at, 0, sizeof(fuzzy_at));
         bool pid_at_ok = run_cell_chain(cell, &plant, model_k_dc, model_tau_s, model_dead_time_s,
-                                         ambient_c, t1_off, t2_off, true_k_dc, CELL_ARM_PID_AT, &pid_at_f1);
+                                         ambient_c, t1_off, t2_off, true_k_dc, CELL_ARM_PID_AT, &pid_at);
         bool fuzzy_at_ok = run_cell_chain(cell, &plant, model_k_dc, model_tau_s, model_dead_time_s,
-                                           ambient_c, t1_off, t2_off, true_k_dc, CELL_ARM_FUZZY_AT, &fuzzy_at_f1);
+                                           ambient_c, t1_off, t2_off, true_k_dc, CELL_ARM_FUZZY_AT, &fuzzy_at);
         if (!pid_at_ok || !fuzzy_at_ok) cell_ok = false;
+
+        /* ---- plan sec 7 gate material, accumulated per CELL (never per
+         * (cell, objective) pair -- per-pair counting inverted the previous
+         * verdict, 286 vs 233, and plan sec 8 pins per-cell in advance).
+         * Nothing is adjudicated here; every verdict is computed once,
+         * after the loop, in one place. ---- */
+        if (pid_at_ok && fuzzy_at_ok && pid_at.have_f9 && fuzzy_at.have_f9) {
+            g1_eligible_cells++;
+            if (fuzzy_at.any_strength_gt_0) g1_active_cells++;
+
+            bool differs = false;
+            for (int o = 0; o < OBJ_TOTAL_COUNT; o++) {
+                float a = 0.0f, b = 0.0f;
+                if (!objective_value_c(&fuzzy_at.f9, cell, (gate_obj_t)o, &a)) continue;
+                if (!objective_value_c(&pid_at.f9, cell, (gate_obj_t)o, &b)) continue;
+                float d = a - b;
+                if (!(d > MATERIALITY_FLOOR_C || d < -MATERIALITY_FLOOR_C)) continue;
+                g1_obj_differ_cells[o]++;
+                if (o < OBJ_GATE_COUNT) differs = true;
+            }
+            if (differs) g1_differ_cells++;
+        }
+
+        /* Gate 3: the seven pinned cells. PRESENCE is tracked as well as
+         * crossings -- a pinned cell that never ran must not read as a pass
+         * (this repo has shipped a check that was green with zero coverage). */
+        for (int pi = 0; pi < GATE3_PINNED_COUNT; pi++) {
+            if (strcmp(cell->cell_id, GATE3_PINNED_CELLS[pi]) != 0) continue;
+            g3_seen[pi] = true;
+            g3_chain_ok[pi] = fuzzy_at_ok;
+            g3_fuzzy_crossings[pi] = fuzzy_at.dwell_crossings_total;
+            g3_fuzzy_max_firing[pi] = fuzzy_at.dwell_crossings_max_firing;
+            g3_pid_crossings[pi] = pid_at.dwell_crossings_total;   /* context only, never decisive */
+        }
 
         /* Plan sec 7 gate 2, the FLOOR-IDENTITY gate: with the confidence
          * counter starting at 0, firing 1 of A_FUZZY_AT must be bit-for-bit
@@ -1076,8 +1212,8 @@ int main(int argc, char **argv)
          * result struct (zeroed at entry, so padding compares clean) rather
          * than a tolerance on selected fields: the claim registered in the
          * plan is bit-identity, so the check must be bit-identity. */
-        if (pid_at_ok && fuzzy_at_ok) {
-            if (memcmp(&pid_at_f1, &fuzzy_at_f1, sizeof(pid_at_f1)) != 0) {
+        if (pid_at_ok && fuzzy_at_ok && pid_at.have_f1 && fuzzy_at.have_f1) {
+            if (memcmp(&pid_at.f1, &fuzzy_at.f1, sizeof(pid_at.f1)) != 0) {
                 printf("FLOOR_IDENTITY_FAIL %s: A_FUZZY_AT_F1 differs from A_PID_AT_F1 -- fuzzy authority was "
                        "non-zero before any confidence was earned (plan sec 7 gate 2)\n", cell->cell_id);
                 floor_identity_failures++;
@@ -1093,12 +1229,131 @@ int main(int argc, char **argv)
            "rulecell_center_frac_range=[%.4f,%.4f] ===\n",
            shard, of, s_rows_emitted, cells_refused,
            (double)(s_occ_max < 0.0f ? 0.0f : s_occ_min), (double)(s_occ_max < 0.0f ? 0.0f : s_occ_max));
-    printf("=== floor-identity (plan sec 7 gate 2): %ld cells checked, %ld FAILED ===\n",
-           floor_identity_checked, floor_identity_failures);
-    if (floor_identity_failures > 0) {
-        printf("FAIL: plan sec 7 gate 2 violated -- see the FLOOR_IDENTITY_FAIL lines above. This is a "
-               "non-zero process exit, never a printed-only verdict.\n");
-        return 1;
+
+    /* ==============================================================
+     * Plan sec 7's three mechanical gates, adjudicated in ONE place.
+     *
+     * Exit code discipline:
+     *   0 = every gate passed
+     *   2 = a sec 7 GATE failed (an analysis verdict about the feature)
+     *   1 = an OPERATIONAL failure (bad arguments, generator mismatch)
+     * A gate never prints a verdict and exits 0 -- that is precisely the
+     * sim_iter_tune printf-only-accept-bar failure this project already
+     * shipped once.
+     * ============================================================== */
+    int gate_failures = 0;
+
+    if (of > 1) {
+        printf("\nNOTE: shard %d/%d -- the gates below are adjudicated over THIS SHARD's cells only. "
+               "The registered run is --of 1; a sharded run's gate verdict is indicative, and gate 3's "
+               "pinned-cell coverage is necessarily partial.\n", shard, of);
     }
+
+    /* ---------------- Gate 1: activity ---------------- */
+    printf("\n=== plan sec 7 gate 1 (ACTIVITY) ===\n");
+    double active_frac = g1_eligible_cells ? (double)g1_active_cells / (double)g1_eligible_cells : 0.0;
+    double differ_frac = g1_eligible_cells ? (double)g1_differ_cells / (double)g1_eligible_cells : 0.0;
+    printf("eligible cells (both adaptive chains completed all %d firings): %ld\n", N_FIRINGS, g1_eligible_cells);
+    printf("A_FUZZY_AT reached strength_pct > 0 on >= 1 tick in %ld cells (%.1f%%), threshold >= %.0f%%\n",
+           g1_active_cells, active_frac * 100.0, (double)(GATE1_MIN_ACTIVE_CELL_FRAC * 100.0f));
+    printf("A_FUZZY_AT_F%d differs from A_PID_AT_F%d by > %.1f degC on >= 1 of the three gate objectives "
+           "in %ld cells (%.1f%%), threshold >= %.0f%%\n",
+           N_FIRINGS, N_FIRINGS, (double)MATERIALITY_FLOOR_C, g1_differ_cells, differ_frac * 100.0,
+           (double)(GATE1_MIN_DIFFER_CELL_FRAC * 100.0f));
+    for (int o = 0; o < OBJ_TOTAL_COUNT; o++) {
+        printf("  per-objective cells past the %.1f degC floor: %-19s %ld%s\n",
+               (double)MATERIALITY_FLOOR_C, GATE_OBJ_NAMES[o], g1_obj_differ_cells[o],
+               (o >= OBJ_GATE_COUNT) ? "   (reported, NOT part of the gate)" : "");
+    }
+    if (g1_eligible_cells == 0) {
+        printf("GATE1_FAIL: no eligible cells at all -- nothing was measured, so the arm cannot be shown "
+               "active. An unmeasured run is not a passing run.\n");
+        gate_failures++;
+    } else if (active_frac < (double)GATE1_MIN_ACTIVE_CELL_FRAC ||
+               differ_frac < (double)GATE1_MIN_DIFFER_CELL_FRAC) {
+        printf("GATE1_FAIL: the adaptive fuzzy arm is INERT under this geometry -- it did not do enough "
+               "for the run to be interpretable. This is NOT a pass and must NOT be read as "
+               "'adaptive fuzzy is safe'; it is 'adaptive fuzzy is INDISTINGUISHABLE FROM PLAIN ADAPTIVE "
+               "PID here', exactly the mode-2 inert-campaign failure this gate was registered to catch. "
+               "Escalate rather than tallying sec 8 on this data.\n");
+        gate_failures++;
+    } else {
+        printf("GATE1_PASS\n");
+    }
+
+    /* ---------------- Gate 2: floor identity ---------------- */
+    printf("\n=== plan sec 7 gate 2 (FLOOR IDENTITY) ===\n");
+    printf("%ld cells checked, %ld FAILED\n", floor_identity_checked, floor_identity_failures);
+    if (floor_identity_failures > 0) {
+        printf("GATE2_FAIL: see the FLOOR_IDENTITY_FAIL lines above -- fuzzy authority was non-zero "
+               "before any confidence was earned.\n");
+        gate_failures++;
+    } else if (floor_identity_checked == 0) {
+        printf("GATE2_FAIL: zero cells were actually compared, so this gate proved nothing.\n");
+        gate_failures++;
+    } else {
+        printf("GATE2_PASS\n");
+    }
+
+    /* ---------------- Gate 3: limit-cycle regression ----------------
+     * STANDALONE and independent of every tally (plan sec 9 criterion 4):
+     * any crossing in any of the nine A_FUZZY_AT firings on any pinned cell
+     * condemns the feature regardless of how the sec 8 counts come out. */
+    printf("\n=== plan sec 7 gate 3 (LIMIT-CYCLE REGRESSION, %d pinned cells) ===\n", GATE3_PINNED_COUNT);
+    int g3_missing = 0, g3_failures = 0;
+    for (int pi = 0; pi < GATE3_PINNED_COUNT; pi++) {
+        if (!g3_seen[pi]) {
+            g3_missing++;
+            printf("  %s  NOT IN THIS SHARD\n", GATE3_PINNED_CELLS[pi]);
+            continue;
+        }
+        printf("  %s  chain_ok=%s  A_FUZZY_AT dwell zero-crossings: total=%ld worst_firing=%ld"
+               "   [context, not decisive: A_PID_AT total=%ld]\n",
+               GATE3_PINNED_CELLS[pi], g3_chain_ok[pi] ? "yes" : "NO",
+               g3_fuzzy_crossings[pi], g3_fuzzy_max_firing[pi], g3_pid_crossings[pi]);
+        if (!g3_chain_ok[pi]) {
+            printf("GATE3_FAIL %s: the pinned chain did not complete, so zero crossings were NOT "
+                   "demonstrated -- an unrun fixture is a failure, not a pass.\n", GATE3_PINNED_CELLS[pi]);
+            g3_failures++;
+        } else if (g3_fuzzy_crossings[pi] != 0) {
+            printf("GATE3_FAIL %s: %ld dwell error zero-crossings in A_FUZZY_AT. Plan sec 7 gate 3 "
+                   "registered ZERO. This gate is standalone: it removes the feature even if every "
+                   "tally passes.\n", GATE3_PINNED_CELLS[pi], g3_fuzzy_crossings[pi]);
+            g3_failures++;
+        }
+    }
+    if (g3_missing > 0 && of == 1) {
+        printf("GATE3_FAIL: %d of the %d pinned cells were not present in a full --of 1 run. The fixture "
+               "is pinned by cell id; if an id no longer exists the fixture is stale and the gate is "
+               "vacuous -- fix the fixture, do not ignore the line.\n", g3_missing, GATE3_PINNED_COUNT);
+        g3_failures++;
+    }
+    if (g3_failures == 0) printf("GATE3_PASS\n");
+    gate_failures += g3_failures;
+
+    /* ------- separately fatal (plan sec 7's closing paragraph) -------
+     * any cell refusal, any NaN, any delay-ring truncation. The latter two
+     * reach here THROUGH the refusal path: run_cell_firing() refuses on a
+     * NaN and on sim_plant's sticky delay_truncated flag, so this single
+     * counter covers all three. */
+    printf("\n=== plan sec 7 integrity (cell refusals / NaN / delay-ring truncation) ===\n");
+    if (cells_refused > 0) {
+        printf("INTEGRITY_FAIL: %ld cells carry at least one refusal. Plan sec 7 makes this separately "
+               "fatal. KNOWN AND DISCLOSED: commit 4891a6fb's kiln-scaled dead time makes three kiln-span "
+               "cells (A2=TIGHT, A6=HOT) legitimately refuse on bounds-exceeded, so a full --of 1 run is "
+               "expected to report 3 here and therefore to FAIL this gate as the plan registered it. That "
+               "conflict is deliberately NOT papered over with an allowlist -- resolving it is a plan "
+               "amendment for the owner, not a threshold this driver may quietly re-tune.\n",
+               cells_refused);
+        gate_failures++;
+    } else {
+        printf("INTEGRITY_PASS: 0 refusals.\n");
+    }
+
+    if (gate_failures > 0) {
+        printf("\n=== FAIL: %d plan sec 7 gate failure(s). Exiting 2 (gate verdict). ===\n", gate_failures);
+        return 2;
+    }
+    printf("\n=== PASS: all plan sec 7 gates. ===\n");
     return 0;
 }

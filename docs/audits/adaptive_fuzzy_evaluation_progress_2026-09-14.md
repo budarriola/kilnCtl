@@ -65,13 +65,9 @@ re-derive scope:
    per the plan's standing procedure.
 3. ~~**§5's two new factorial arms (`A_PID_AT`, `A_FUZZY_AT`) are
    unbuilt.**~~ **DONE — see "§5 implementation (this session)" below.**
-4. **§7's three mechanical gates: one of three built.** The
-   **floor-identity** gate is built and enforced (non-zero process exit,
-   negative-tested). The **activity** gate and the **limit-cycle
-   regression** gate on the seven pinned cells are **not** built — §7's raw
-   instrumentation for both is now emitted per firing (`ADAPTIVE_DIAG`
-   lines), but nothing adjudicates it yet. The driver still reports
-   numbers and never verdicts.
+4. ~~**§7's three mechanical gates: one of three built.**~~ **DONE — all
+   three gates plus the integrity gate are built, adjudicated and
+   negative-tested. See "§7 implementation" below.**
 5. **No factorial run against the adaptive arms has been performed**, so
    §8/§9's tallies (`D_adapt_combo`, per-cell improved/degraded counts,
    the four removal criteria, the seven pinned limit-cycle cells) are
@@ -227,3 +223,164 @@ left untouched and is not related to this change — none of this session's
 edits touch that file or KilnFW production code at all (only
 `firmware/KilnFW/App/test/sim_plant.h`, `sim_plant.c`,
 `sim_factorial_driver.c`, `sim_scenarios.c`, all host-test-only fixtures).
+
+---
+
+# §7 implementation (2026-09-15 session)
+
+**Status: §7 DONE.** All three registered gates are adjudicated mechanically
+in `sim_factorial_driver.c`'s `main()`, each capable of failing the process,
+each negative-tested. §8/§9 remain **NOT DONE** and no tally was computed or
+is reported here — the dispatch for this session explicitly excluded them, and
+in any case §7 gate 1 FAILS on the current geometry, which makes an §8 tally
+uninterpretable by the plan's own registered logic.
+
+No board was flashed, no heating run was started, no `debug_*` tool was
+called, no `.kicad_*` file was touched, no builtin schedule value and no
+dwell geometry was changed. `pid_fuzzy_confidence.c/.h`,
+`profile_executor_pid_tick.c`, `ramp_transient_ident.*`, `kiln_cfg_store.c`
+and `kiln_package.c` were not touched.
+
+## What was built
+
+All in `firmware/KilnFW/App/test/sim_factorial_driver.c` (host-test fixture),
+plus exit-code handling in `run_sim_factorial.ps1`:
+
+- `chain_summary_t` — one struct per (cell, arm) chain carrying firing 1,
+  firing 9, "did ANY tick of ANY firing have strength > 0", and the dwell
+  zero-crossing totals. The chain counts; **`main()` alone adjudicates**, so
+  there is exactly one place a verdict is produced.
+- **Exit-code discipline.** `0` = all gates passed, `2` = a §7 **gate**
+  failed (a verdict about the feature), `1` = an **operational** failure
+  (bad args, generator mismatch). `run_sim_factorial.ps1` distinguishes the
+  two: an operational failure aborts, a gate failure still completes the
+  `--of 1` vs `--of 4` determinism proof and then exits 2. (Gate 2
+  previously returned 1; it now returns 2 with the rest.)
+- **Gate 1 (activity).** Per CELL: `A_FUZZY_AT` reached `strength_pct > 0`
+  on ≥ 1 tick in ≥ 30 % of cells, AND `A_FUZZY_AT_F9` differs from
+  `A_PID_AT_F9` by > 0.5 °C on ≥ 1 objective in ≥ 10 % of cells. Objectives
+  are `STEADY_RMS_C`, `ENTRY_PEAK_C` and `LAG_SIGNED_C`; the last is
+  converted from `lag_signed_s` by that cell's own ramp rate
+  (`* a5 / 3600`), exactly as `scenario_factorial_results_2026-09-14.md` §3
+  defines it — comparing raw seconds against a 0.5 °C floor would be a unit
+  error. `ENTRY_UNDERSHOOT_C` is reported but deliberately left OUT of the
+  gate (fewer ways to look active = the conservative direction).
+  A zero-eligible-cell run FAILS rather than passing vacuously.
+- **Gate 2 (floor identity).** Unchanged in substance, re-plumbed onto
+  `chain_summary_t`; additionally FAILS if **zero** cells were compared.
+- **Gate 3 (limit-cycle regression).** The seven pinned cells. Zero
+  `A_FUZZY_AT` dwell zero-crossings across all nine firings, per cell.
+  **Presence is checked as well as crossings**: a pinned cell missing from a
+  full `--of 1` run FAILS (a stale fixture is a vacuous gate), and a pinned
+  chain that did not complete FAILS rather than counting as zero crossings.
+  `A_PID_AT`'s crossing count is printed alongside as **context only**,
+  never decisive.
+- **Integrity (§7's closing paragraph).** Any cell refusal is fatal. NaN and
+  delay-ring truncation reach this counter *through* the refusal path
+  (`run_cell_firing()` refuses on both), so one counter covers all three.
+
+## Negative tests (every gate proven able to fail AND able to pass)
+
+Each poison was applied by hand, built into a **fresh** output directory, run,
+then **reversed by hand** (no `git checkout`/`restore`/`stash` — other agents
+have live uncommitted work in this tree) and the file confirmed byte-restored
+by md5 (`e6f38410942ac28eb260864604168932` before and after the poisons).
+
+| Gate | Direction proven | How | Result |
+|---|---|---|---|
+| 1 activity | can PASS | forced `any_strength_gt_0` and a +5 °C `steady_rms_c` offset on F9 | `GATE1_PASS`, 260/260 cells active |
+| 1 activity | can FAIL | real data | `GATE1_FAIL`, 14/260 active |
+| 2 floor identity | can FAIL | `+1.0` added to `sat_frac` of `A_FUZZY_AT` firing 1 | `GATE2_FAIL`, 260 `FLOOR_IDENTITY_FAIL` lines, exit 2 |
+| 2 floor identity | can PASS | real data | `GATE2_PASS`, 260 checked |
+| 3 limit cycle | can PASS | pinned crossings forced to 0 | `GATE3_PASS` |
+| 3 limit cycle | can FAIL (crossings) | real data | `GATE3_FAIL` on all seven |
+| 3 limit cycle | can FAIL (stale fixture) | one pinned id renamed to `ST1-999-NOPE` | `GATE3_FAIL: 1 of the 7 pinned cells were not present` |
+| integrity | can PASS | `cells_refused` forced to 0 | `INTEGRITY_PASS` |
+| integrity | can FAIL | real data | `INTEGRITY_FAIL: 3 cells` |
+
+Every number reported below was then re-measured from a **forced full rebuild
+into a fresh output directory** after the restore — an empty diff proves the
+source restored, not the binary (`ba230bca`'s lesson).
+
+## What the gates say on the current tree (gate output, NOT an §8 tally)
+
+`--of 1`, clean build, 260/263 cells, 10140 rows, `--of 1` vs `--of 4`
+byte-identical:
+
+- **GATE 1: FAIL.** `A_FUZZY_AT` reached non-zero strength in **14 of 260
+  cells (5.4 %)** against a 30 % bar, and differs materially from
+  `A_PID_AT` at firing 9 in **5 cells (1.9 %)** against a 10 % bar.
+  Per-objective cells past the 0.5 °C floor: `STEADY_RMS_C` 0,
+  `ENTRY_PEAK_C` 5, `LAG_SIGNED_C` 4, `ENTRY_UNDERSHOOT_C` 3 (non-gate).
+  This is the registered **INERT** reading — "indistinguishable from plain
+  adaptive PID", *not* "adaptive fuzzy is safe". The cause is already
+  documented above: the factorial dwell is `6*tau` while `adaptive_tune`
+  needs `16*tau` to harvest, so confidence almost never leaves 0.
+- **GATE 2: PASS.** 260 cells, 0 failures.
+- **GATE 3: FAIL on all seven pinned cells** (crossing totals 9, 162, 9,
+  153, 9, 9, 153).
+- **INTEGRITY: FAIL**, 3 refusals.
+
+## Two registered criteria I believe are wrong — implemented anyway
+
+Per the dispatch: implement what was registered, say so if you disagree.
+
+1. **Gate 3 as registered cannot distinguish a limit cycle from ordinary
+   settling, and the data proves it.** On every one of the seven pinned
+   cells the `A_PID_AT` **control** arm has the *identical* crossing count
+   (9/9, 162/162, 153/153, …). The gate therefore condemns adaptive fuzzy
+   for behaviour that plain adaptive PID exhibits in exactly the same
+   amount — an error signal crossing zero as a dwell settles is not a limit
+   cycle. The plan's own evidence for the criterion was a **contrast** (29
+   crossings in the oscillating arm vs **0** in both stable arms); the
+   registered gate kept only the "0" and dropped the contrast. A criterion
+   with the contrast restored — e.g. `A_FUZZY_AT` crossings must not exceed
+   `A_PID_AT`'s — would fail cleanly on the original finding and pass here.
+   **I did not make that change**: it is a registered criterion and changing
+   it now, on the run that decides the feature, is precisely the pressure
+   the pre-registration exists to resist. The `A_PID_AT` column is printed
+   next to every pinned cell so the owner can see the comparison and amend
+   the plan if they agree.
+2. **The "any cell refusal is fatal" integrity rule conflicts with a
+   committed change.** `4891a6fb`'s kiln-scaled dead time makes three
+   kiln-span cells (`A2=TIGHT`, `A6=HOT`) legitimately refuse on
+   bounds-exceeded — documented above as expected, not a defect. As
+   registered, that refusal is separately fatal, so a full run can never
+   pass this gate. Implemented as written, with the conflict named in the
+   failure message rather than papered over with an allowlist; resolving it
+   is a plan amendment for the owner, not a threshold this driver may
+   quietly re-tune.
+
+## Other findings
+
+- **`ST1-214` is build-sensitive.** An early, provenance-murky build (an
+  incremental rebuild over objects from a failed compile) produced different
+  `A_FUZZY_AT` values for firings 7–9 of `ST1-214` than two independent
+  clean builds, which agree with each other byte-for-byte. The cell is one
+  of the 14 where fuzzy is active, so it sits near a bifurcation. The
+  practical effect is small (the gate-1 "differs" count moved 6 → 5 of 260)
+  but it means **marginal counts from this suite must come from a clean
+  build**, and it is one more instance of "never measure from a binary whose
+  provenance is not established".
+- The `oscillation_tripped = yes` on 2314/4680 firings flagged by the §5
+  session is untouched here and still outstanding; the gates do not read
+  that flag, so this session's verdicts do not depend on it.
+- `tools/check_doc_hash_citations.ps1` gained one entry: the md5
+  `1be73e04757beb9c9499e05875057f8f` cited at line 152 of this document is a
+  build-artifact checksum, not a git SHA, and was being reported as an
+  unresolvable commit hash (same false-positive class `6449a3a6` handled for
+  the other md5 in this file).
+
+## What could NOT be verified
+
+- **No §8/§9 tally was computed** — out of scope, and gate 1's INERT verdict
+  makes one uninterpretable by the plan's own rule.
+- The gates are adjudicated over a **shard's** cells when `--of > 1`; the
+  driver says so in its output. Only `--of 1` is the registered run.
+- `tools/run_all_checks.ps1` (`-ExecutionPolicy Bypass`): **93 passed, 0
+  skipped, 1 failed**. The one failure is
+  `check_uart_log_bridge_stack_budget.ps1`, which aborts on
+  `xtensa-esp32s3-elf-objdump` returning non-zero against the shared
+  `firmware/KilnFW/build/KilnCtrl.elf` — another session's build directory
+  mid-flight, unrelated to this change (no production code, no new task,
+  host-test fixtures only).
