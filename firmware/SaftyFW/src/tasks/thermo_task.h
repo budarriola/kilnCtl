@@ -83,6 +83,35 @@ void thermo_task_inject_clear(void);
 // reading is never mistaken for a real one downstream.
 bool thermo_task_injection_active(void);
 
+// --- Live tc_type reapply, SAFETY_CMD_SET_CONFIG (link_task.c) ------------
+// Requests that thermo_task_fn() call max31856_configure(config_store_get_
+// tc_type()) again on its own next loop iteration, picking up a tc_type that
+// link_task_handle_set_config() just committed to config_store while this
+// task was already running with the OLD type verified. Without this, a live
+// SET_CONFIG tc_type change would sit inert until the next reboot -- the
+// existing max31856_reconfig_retry.h cadence only re-attempts configure()
+// while max31856_tc_type_verified() is ALREADY false, which an old,
+// still-verified type never is.
+//
+// Deliberately just a request flag, not a direct max31856_configure() call
+// from link_task.c's own task context: the MAX31856 SPI bus is owned by
+// thermo_task_fn()'s loop alone (see max31856.c's module comment), so any
+// reconfigure has to happen there, not from whichever task decoded the wire
+// frame.
+//
+// Safe by construction, not merely by policy: max31856_configure() clears
+// max31856_tc_type_verified() unconditionally at entry (see its own header
+// comment) before it does anything else, so from the instant thermo_task_fn()
+// picks this request up, every snapshot published from that point (including
+// while the reconfigure/CR1-readback is in flight) is already reported
+// invalid through the existing "!verified -> invalid" downgrade -- the exact
+// same fail-safe path a boot-time reconfig retry already uses. Readings only
+// become valid again once the readback confirms the NEW type. This never
+// touches relay/arm state, so it cannot itself disarm the Pico; a reapply
+// that leaves tc_type unverified simply reports the sensor invalid, which
+// S5 already treats as a trip condition like any other dead/unplugged part.
+void thermo_task_request_tc_type_reapply(void);
+
 #ifdef __cplusplus
 }
 #endif

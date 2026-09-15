@@ -173,6 +173,21 @@ static max31856_reconfig_retry_state_t s_reconfig_retry;
 static volatile uint32_t s_reconfig_retries = 0;
 static volatile bool s_reconfig_gave_up = false;
 
+// Live tc_type reapply request (thermo_task.h's thermo_task_request_tc_type_
+// reapply()). Set from link_task.c's task context after a SET_CONFIG write
+// commits a new tc_type to config_store; consumed here, from thermo_task_fn's
+// own loop, on its very next iteration. A plain volatile bool is sufficient:
+// the only writer sets it true, the only reader (this task) clears it after
+// reading, and a request arriving twice before it is consumed just costs one
+// extra (harmless, idempotent) configure() attempt -- no lock needed for a
+// single sticky flag with these single-writer/single-clearer semantics.
+static volatile bool s_force_tc_reconfigure = false;
+
+void thermo_task_request_tc_type_reapply(void)
+{
+    s_force_tc_reconfigure = true;
+}
+
 // Before the MAX31856 is configured (or if it never comes up --
 // docs/ARCHITECTURE.md section 5 step 6: "failure is logged, not fatal"),
 // max31856_conversion_time_ms() returns 0. Wait a bounded, conservative
@@ -401,7 +416,19 @@ static void thermo_task_fn(void *arg)
         // already latched stays latched regardless.
         uint32_t retry_now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
         bool verified_before_retry = max31856_tc_type_verified();
-        if (max31856_reconfig_retry_should_attempt(&s_reconfig_retry, verified_before_retry,
+        // A live reapply request (thermo_task_request_tc_type_reapply(), see
+        // thermo_task.h) forces a configure() attempt even though the OLD
+        // type is still currently verified -- should_attempt() alone would
+        // never return true in that case ("already verified, nothing to
+        // retry"), which is exactly the gap a SET_CONFIG tc_type change
+        // while running would otherwise fall into. Consumed (cleared) here,
+        // once, regardless of what the attempt below finds.
+        bool forced_reconfigure = s_force_tc_reconfigure;
+        if (forced_reconfigure) {
+            s_force_tc_reconfigure = false;
+        }
+        if (forced_reconfigure ||
+            max31856_reconfig_retry_should_attempt(&s_reconfig_retry, verified_before_retry,
                                                     retry_now_ms)) {
             (void)max31856_configure(config_store_get_tc_type());
             bool verified_after_retry = max31856_tc_type_verified();

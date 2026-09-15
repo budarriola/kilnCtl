@@ -357,7 +357,13 @@ CEILING_BYTES = {
     # Re-pinned to the new measured value, same "pinned at measured, not a
     # padded guess" convention this table's own header comment describes.
     "safety_core": 2168,
-    "thermo_task": 1216,
+    # Live tc_type reapply (thermo_task_request_tc_type_reapply(), 2026-09-15):
+    # thermo_task_fn()'s loop gained two locals (verified_before_retry,
+    # forced_reconfigure) around the reconfig-retry gate, moving the measured
+    # total 1216 -> 1224 B. Re-pinned to the new measured value, same
+    # "pinned at measured, not a padded guess" convention this table's own
+    # header comment describes.
+    "thermo_task": 1224,
     "update_task": 2536,
     "watchdog_task": 304,
 }

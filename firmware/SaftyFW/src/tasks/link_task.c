@@ -1517,6 +1517,16 @@ static void link_task_handle_set_config(const kilnlink_frame_t *frame)
     bool written = config_store_write(&rec, &reason);
     if (written) {
         log_task_log(LOG_LEVEL_INFO, "set_config", "accepted");
+        // Take effect immediately, not after a reboot -- thermo_task.c's own
+        // comment on thermo_task_request_tc_type_reapply() explains the
+        // fail-safe path this rides: max31856_configure() clears
+        // max31856_tc_type_verified() unconditionally at entry, so every
+        // snapshot published between now and a confirmed CR1 readback of the
+        // NEW type is already reported invalid, the same way a dead/unplugged
+        // part would be. config_store_write() above has already refused this
+        // whole call if the relay is armed, so this can only run while the
+        // Pico is not currently firing.
+        thermo_task_request_tc_type_reapply();
     } else {
         log_task_log(LOG_LEVEL_WARN, "set_config", reason ? reason : "refused");
     }
@@ -1584,8 +1594,9 @@ static void link_task_handle_set_ct_cal(const kilnlink_frame_t *frame)
         log_task_log(LOG_LEVEL_INFO, "set_ct_cal", "accepted");
         // Take effect immediately, not after a reboot -- current_task.c's
         // own comment on current_task_reload_ct_cal() explains why a live
-        // commissioning session needs this, unlike tc_type (which only ever
-        // takes effect via max31856_configure() at boot today).
+        // commissioning session needs this. tc_type now gets the same
+        // treatment via thermo_task_request_tc_type_reapply(), see
+        // link_task_handle_set_config() above.
         current_task_reload_ct_cal();
     } else {
         log_task_log(LOG_LEVEL_WARN, "set_ct_cal", reason ? reason : "refused");
