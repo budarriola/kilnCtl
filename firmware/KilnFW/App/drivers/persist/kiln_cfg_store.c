@@ -1474,7 +1474,7 @@ bool kiln_cfg_store_get_full_package(int32_t id, uint8_t *blob_out, uint16_t cap
     }
     const kiln_cfg_entry_t *e = &s_store.entries[idx];
     if (pico_out && !e->pico_populated) {
-        char msg[192];
+        char msg[256];
         snprintf(msg, sizeof(msg),
                  "'%s' was saved before this firmware stored the safety processor's settings -- "
                  "it is a half-package and cannot be swapped to. Select it, check the safety "

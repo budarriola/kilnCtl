@@ -142,7 +142,13 @@ DEFAULT_BAUD_RATE = 921600
 #: entry -- uart_task_ids.h's Version 11 note has the full breaking-change
 #: rationale). Caught after the firmware-side pagination change
 #: (commit 4f61604) had already landed without a version bump.
-UART_PROTOCOL_VERSION = 11
+#:
+#: 11 -> 12 (2026-09-14): SAFETY_CMD_APPLY_CONFIG_VOLATILE (0x2D) added to
+#: uart_task_ids.h purely for enumeration -- lives entirely on the isolated
+#: ESP<->Pico link (KILNLINK_PROTOCOL_VERSION 14->15) and has no PC<->ESP
+#: wire change. Bumped anyway per uart_task_ids.h's Version 12 note, so this
+#: mirror must match it too or selfcheck.py's cross-language pin fails.
+UART_PROTOCOL_VERSION = 12
 
 
 class Device(enum.IntEnum):
