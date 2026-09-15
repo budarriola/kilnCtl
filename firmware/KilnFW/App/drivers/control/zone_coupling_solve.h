@@ -288,13 +288,22 @@ coupling_solve_reason_t zone_coupling_gauss_solve_partial_pivot_vec(uint8_t n,
  * the identical function. Every solver-failure fallback
  * (COUPLING_SOLVE_FALLBACK_SINGULAR / _NONFINITE / _OUT_OF_RANGE /
  * _UNQUALIFIED / _NO_NEIGHBORS) now lands on the SAME source a genuine
- * solve moments earlier would have used, not a different one. Safe on every
- * board shipping today: the helper degrades to `z_ff_k_dc` whenever the
- * flag is off (the shipped default, `s_coupling_use_measured_diag_k_dc =
- * false`) or `coupling_diag_k_dc` is unset/non-finite/<=0 -- i.e. this
- * change is a no-op everywhere except a board that both flips the flag on
- * AND has `coupling_diag_k_dc` populated for zi, same rollout gate sec 3.2
- * already established for the matrix path. See
+ * solve moments earlier would have used, not a different one. The helper
+ * degrades to `z_ff_k_dc` whenever the flag is off or `coupling_diag_k_dc`
+ * is unset/non-finite/<=0, so the behavioural change is confined to a board
+ * that has the flag on AND `coupling_diag_k_dc` populated for zi -- the same
+ * rollout gate sec 3.2 already established for the matrix path.
+ *
+ * STALE-COMMENT CORRECTION, 2026-09-15: this paragraph used to describe the
+ * flag as "off (the shipped default, `s_coupling_use_measured_diag_k_dc =
+ * false`)" and therefore called the change "a no-op everywhere". That was
+ * true only until 587a34ae flipped the constant false -> true; 2026-09-10's
+ * move of the constant into zone_coupling_solve.c as
+ * zone_coupling_use_measured_diag_k_dc() carried the `true` across ("Same
+ * value", that function's own comment) but did not update this text. The
+ * SHIPPED DEFAULT IS `true`. The constant was checked against its history
+ * and is correct as written -- only this comment was wrong, so only this
+ * comment changed; no behaviour was touched. See
  * test_zone_coupling_solve.c's fallback-diagonal cases (n==1 and
  * out-of-range/unqualified paths, flag on vs off, measured vs unmeasured). */
 /* Shared provenance gate for a coupling matrix: refuses the matrix outright

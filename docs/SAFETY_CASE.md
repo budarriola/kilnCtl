@@ -336,9 +336,19 @@ here; none is copied from an unverified summary.
       energize a heater relay. `kiln_io_owner.c`'s `relay_on_blocked()` names
       itself "the ONE choke point every MANUAL relay-ON command reaches":
       `kiln_io_owner_command_set_relay()`/`_set_relay_mask()`, reached from
-      POST `/api/relay`, the LCD's manual override (`ui_page_temperature.c`),
-      and the benchproto `SET_RELAY`/`SET_RELAY_MASK` commands
-      (`uart_bridge_io.c`). `zones_current_sweep_engine.c`'s CT-calibration
+      the LCD's manual override (`ui_page_temperature.c`), the benchproto
+      `SET_RELAY`/`SET_RELAY_MASK` commands (`uart_bridge_io.c`), and — only
+      while danger mode is armed — POST `/api/diagnostics/danger/relay`
+      (`diagnostics_http.c`).
+
+      **Re-verified 2026-09-15, one route name corrected.** This bullet
+      previously named POST `/api/relay` as a live manual-relay route. That
+      endpoint does **not** exist at HEAD: `relay_post_handler()` was deleted
+      2026-08-27 together with its only caller `manual_page.html`
+      (`dashboard_http.c`, the comment block where the handler used to be).
+      The shared gate + write it called, `dashboard_set_relay()`, is
+      untouched and still shared — only the HTTP door is gone. The surviving
+      manual-relay surface is the three callers named above. `zones_current_sweep_engine.c`'s CT-calibration
       sweep (`zone_sweep_hw_energize()`) also drives relays directly, through
       `kiln_io_owner_command_set_relay_mask()`, outside both
       `profile_executor_run()` and `autotune_begin_run_locked()`.
@@ -352,9 +362,15 @@ here; none is copied from an unverified summary.
       that safety-trip/OTA gate, by design, so an operator can bench-test a
       relay/contactor with nothing fighting the test — this is pre-existing,
       documented behavior (`danger_mode.h`), not a gap introduced here.
-      This is a real, currently-open gap: an unverified E-stop or an
-      unacknowledged crash report will refuse a firing or an autotune run
-      but will NOT refuse a manual `/api/relay` command or a CT-sweep. Raised
+      This is a real, currently-open gap, **re-confirmed in code at HEAD
+      2026-09-15**: an unverified E-stop or an unacknowledged crash report
+      will refuse a firing or an autotune run but will NOT refuse a manual
+      relay-ON (LCD override, benchproto `SET_RELAY`, or the danger-mode
+      route) or a CT-sweep (`zones_current_sweep_start()`,
+      `zones_current_sweep_task.c`, whose refusal set covers hardware
+      presence, zones config, a running profile/autotune, safety link
+      up/tripped, relays already on and CT topology — and none of the three
+      readiness conditions). Raised
       here rather than silently left for a future reader to rediscover;
       closing it (if the owner wants manual relay control gated the same
       way) is follow-up work, not part of this pass.
