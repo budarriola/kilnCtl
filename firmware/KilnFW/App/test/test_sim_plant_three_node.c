@@ -223,6 +223,199 @@ static void test_legacy_path_untouched(void)
                "sim_plant_step() sensor_c must be bit-identical regardless of the (unused) three-node fields");
 }
 
+/* ------------------------------------------------------------------------
+ * WI-1's decomposition helper (docs/audits/three_node_decomposition_helper_2026-09-14.md).
+ * Verification method: sim_plant_decompose_three_node() picks C so the
+ * DOMINANT (slow) pole of the (E,L) linear system lands exactly on the
+ * target tau -- an algebraic fact, not an approximation -- so it is
+ * verified here by forward-simulating the resulting plant's LOAD node
+ * step response and reading the dominant mode back out of the TAIL of
+ * the trajectory (well past the fast pole's own decay), rather than by a
+ * fixed-fraction rise-time metric that the fast pole would contaminate at
+ * the smaller Bi-separation ratios this design deliberately covers (see
+ * the doc's pole-separation table). K is read from the trajectory's own
+ * converged endpoint (duty is a constant 1.0 for the whole run, so
+ * steady state is reached well inside the 8*tau horizon used below). */
+#define DECOMP_HORIZON_TAU 8.0f
+#define DECOMP_STEPS 16000
+
+/* Runs the decomposed plant's LOAD-node step response (E,L only; sensor
+ * fields are left zeroed -- out of scope for this helper, see sim_plant.h)
+ * for DECOMP_STEPS ticks spanning DECOMP_HORIZON_TAU*tau_s, and reads the
+ * dominant mode back out of two tail samples. Returns false if the
+ * decompose call itself refused. */
+static bool decompose_measure(float k, float tau_s, float bi, float phi,
+                               float *k_meas, float *tau_meas)
+{
+    sim_plant_decompose_req_t req = { .k = k, .tau_s = tau_s, .bi = bi, .phi = phi };
+    sim_plant_cfg_t cfg = {0};
+    if (!sim_plant_decompose_three_node(&req, &cfg)) return false;
+
+    cfg.node_model = SIM_NODE_THREE;
+    cfg.ambient_c = 0.0f;   /* theta == absolute value here; simplifies residual math below */
+    cfg.load_mass_mult = 1.0f;
+    /* Sensor fields deliberately left at 0 -- out of scope, see sim_plant.h;
+     * g_s == 0 so the sensor node never diverges and is simply unread here. */
+
+    TEST_CHECK(cfg.heater_power_w > 0.0f && cfg.c_e_j_per_c > 0.0f && cfg.c_l_j_per_c > 0.0f &&
+               cfg.g_el_w_per_c > 0.0f && cfg.g_ea_w_per_c >= 0.0f && cfg.g_la_w_per_c >= 0.0f,
+               "decompose must produce finite, strictly positive capacities/element conductance");
+
+    float dt = tau_s / (DECOMP_STEPS / DECOMP_HORIZON_TAU); /* dt = tau/2000 */
+    sim_plant_state_t st;
+    sim_plant_reset(&st, &cfg);
+
+    /* Three EQUALLY spaced tail samples (3*tau, 5*tau, 7*tau -- span 2*tau
+     * each), fit to y(t) = A - B*exp(-t/tau) via the standard 3-point
+     * exponential-fit identity below. Deliberately does NOT treat the
+     * horizon endpoint as "the" steady state -- at only 1*tau past the last
+     * sample, the slow mode alone still has ~37% of its own residual left,
+     * which upstream (an earlier version of this test) turned into a ~13%
+     * systematic tau bias by understating every residual by a near-constant
+     * amount. Fitting A directly from three tail points removes that
+     * requirement entirely; it needs no independent "already converged"
+     * point at all, only that the FAST mode has decayed by t1 (checked by
+     * the round-trip tolerance itself: any residual fast-mode contribution
+     * left at t1 would need to fit an inconsistent decay ratio between the
+     * two spans, showing up as a tau miss). */
+    int idx_t1 = (int)((3.0f * tau_s) / dt);
+    int idx_t2 = (int)((5.0f * tau_s) / dt);
+    int idx_t3 = (int)((7.0f * tau_s) / dt);
+    float y1 = 0.0f, y2 = 0.0f, y3 = 0.0f;
+    for (int i = 0; i < DECOMP_STEPS; i++) {
+        sim_plant_three_node_step(&st, &cfg, 1.0f, dt);
+        if (i == idx_t1) y1 = st.load_c;
+        if (i == idx_t2) y2 = st.load_c;
+        if (i == idx_t3) y3 = st.load_c;
+    }
+
+    /* y(t)=A-B*exp(-t/tau), samples evenly spaced by span=2*tau:
+     *   (y3-y2)/(y2-y1) = exp(-span/tau)  ->  tau = span/ln((y2-y1)/(y3-y2))
+     *   A = y1 + (y2-y1)/(1 - exp(-span/tau))                              */
+    float d1 = y2 - y1;
+    float d2 = y3 - y2;
+    TEST_CHECK(d1 > 0.0f && d2 > 0.0f && d1 > d2,
+               "tail increments must be positive and shrinking (monotone approach to steady state)");
+    if (!(d1 > 0.0f && d2 > 0.0f && d1 > d2)) { *k_meas = -1.0f; *tau_meas = -1.0f; return true; }
+
+    float span = (float)(idx_t2 - idx_t1) * dt;
+    *tau_meas = span / logf(d1 / d2);
+    float r = expf(-span / *tau_meas); /* == d2/d1, recomputed for clarity */
+    *k_meas = y1 + d1 / (1.0f - r);
+    return true;
+}
+
+static void check_decompose_roundtrip(float k, float tau_s, float bi, float phi,
+                                       float tol_k_frac, float tol_tau_frac, const char *label)
+{
+    float k_meas = 0.0f, tau_meas = 0.0f;
+    bool ok = decompose_measure(k, tau_s, bi, phi, &k_meas, &tau_meas);
+    TEST_CHECK(ok, "decompose must succeed for a physical (Bi,phi)");
+    if (!ok) return;
+
+    float k_err = fabsf(k_meas - k) / k;
+    float tau_err = fabsf(tau_meas - tau_s) / tau_s;
+    printf("  %s: Bi=%.3f phi=%.3f  k target=%.4f measured=%.4f (err %.3f%%)  tau target=%.2f measured=%.2f (err %.3f%%)\n",
+           label, (double)bi, (double)phi, (double)k, (double)k_meas, (double)(k_err * 100.0f),
+           (double)tau_s, (double)tau_meas, (double)(tau_err * 100.0f));
+    TEST_CHECK(k_err <= tol_k_frac, "round-trip K must match target within tolerance");
+    TEST_CHECK(tau_err <= tol_tau_frac, "round-trip tau must match target within tolerance");
+}
+
+/* Round-trip at the bench anchor (z0: k=42.731, tau=255.6, per the factorial
+ * design doc) across the corners of the (Bi,phi) design space, and at a
+ * kiln-scale anchor (order-of-magnitude derived from plant_sim.py's PHYS_*
+ * constants -- P_max=2500W/zone, a linear (non-radiative) steady-state
+ * conductance from PHYS_WALL_R_K_PER_W + 1/(PHYS_OUTER_H_W_PER_M2K*A), and
+ * PHYS_THERMAL_MASS_J_PER_K -- giving k~=4480, tau~=90200s; TEST FIXTURE,
+ * not a literal port of plant_sim.py's nonlinear model, only its magnitude).
+ * Tolerance: 1% on K (an exact algebraic DC-gain match; the only error
+ * source is forward-Euler discretization at dt=tau/2000) and 3% on tau (the
+ * tail-fit is exact in the continuous-time limit; 3% covers discretization
+ * plus the residual fast-mode contamination still present at 4*tau even at
+ * this design's least-separated pole ratios, see decompose_measure()'s
+ * comment). */
+static void test_decompose_roundtrip(void)
+{
+    TEST_SECTION("decompose_three_node: round-trip (K,tau) at bench and kiln scale");
+
+    const float bench_k = 42.731f, bench_tau = 255.6f;
+    const float kiln_k = 4480.0f, kiln_tau = 90200.0f;
+    const float bi_lo = 0.3f, bi_hi = 1.5f;    /* design doc's A8 levels */
+    const float phi_lo = 0.25f, phi_mid = 0.5f, phi_hi = 0.75f; /* A7 levels + anchor */
+
+    check_decompose_roundtrip(bench_k, bench_tau, bi_lo, phi_lo, 0.01f, 0.03f, "bench Bi=lo phi=lo");
+    check_decompose_roundtrip(bench_k, bench_tau, bi_lo, phi_hi, 0.01f, 0.03f, "bench Bi=lo phi=hi");
+    check_decompose_roundtrip(bench_k, bench_tau, bi_hi, phi_lo, 0.01f, 0.03f, "bench Bi=hi phi=lo");
+    check_decompose_roundtrip(bench_k, bench_tau, bi_hi, phi_hi, 0.01f, 0.03f, "bench Bi=hi phi=hi");
+    check_decompose_roundtrip(bench_k, bench_tau, bi_hi, phi_mid, 0.01f, 0.03f, "bench Bi=hi phi=mid (anchor)");
+
+    check_decompose_roundtrip(kiln_k, kiln_tau, bi_lo, phi_lo, 0.01f, 0.03f, "kiln Bi=lo phi=lo");
+    check_decompose_roundtrip(kiln_k, kiln_tau, bi_hi, phi_hi, 0.01f, 0.03f, "kiln Bi=hi phi=hi");
+}
+
+/* The property the factorial actually depends on: two DIFFERENT (Bi,phi)
+ * decompositions of the SAME (k,tau) must produce plants whose aggregate
+ * step responses agree, even though their internal (E,L) split and
+ * fast/slow amplitude weighting differ. Compared in the tail (t >= 4*tau),
+ * past the fast mode -- the two decompositions' fast poles sit at different
+ * absolute rates, so an early-time comparison would correctly show them
+ * disagreeing and that is not a defect. */
+static void test_decompose_invariance(void)
+{
+    TEST_SECTION("decompose_three_node: two (Bi,phi) decompositions of the same (K,tau) agree in the tail");
+
+    const float k = 42.731f, tau_s = 255.6f;
+    float k1, tau1, k2, tau2;
+    bool ok1 = decompose_measure(k, tau_s, 0.3f, 0.25f, &k1, &tau1);
+    bool ok2 = decompose_measure(k, tau_s, 1.5f, 0.75f, &k2, &tau2);
+    TEST_CHECK(ok1 && ok2, "both decompositions must succeed");
+    if (!ok1 || !ok2) return;
+
+    printf("  decomp A (Bi=0.3,phi=0.25): k=%.4f tau=%.2f | decomp B (Bi=1.5,phi=0.75): k=%.4f tau=%.2f\n",
+           (double)k1, (double)tau1, (double)k2, (double)tau2);
+    TEST_CHECK(fabsf(k1 - k2) / k <= 0.01f,
+               "two decompositions of the same target must agree on measured K within 1%");
+    TEST_CHECK(fabsf(tau1 - tau2) / tau_s <= 0.03f,
+               "two decompositions of the same target must agree on measured tau within 3%");
+}
+
+/* Degenerate/non-physical inputs must be REFUSED (false, *out untouched),
+ * never silently clamped -- a clamped cell would look valid and quietly
+ * test something other than what it claims (task requirement). */
+static void test_decompose_refuses_degenerate_inputs(void)
+{
+    TEST_SECTION("decompose_three_node: degenerate inputs are refused, not clamped");
+
+    sim_plant_cfg_t out;
+    sim_plant_decompose_req_t req;
+
+    req = (sim_plant_decompose_req_t){ .k = 42.731f, .tau_s = 255.6f, .bi = 0.0f, .phi = 0.5f };
+    TEST_CHECK(!sim_plant_decompose_three_node(&req, &out), "Bi == 0 must be refused (g_el would be infinite)");
+
+    req = (sim_plant_decompose_req_t){ .k = 42.731f, .tau_s = 255.6f, .bi = -1.0f, .phi = 0.5f };
+    TEST_CHECK(!sim_plant_decompose_three_node(&req, &out), "Bi < 0 must be refused");
+
+    req = (sim_plant_decompose_req_t){ .k = 42.731f, .tau_s = 255.6f, .bi = 1.0f, .phi = -0.1f };
+    TEST_CHECK(!sim_plant_decompose_three_node(&req, &out), "phi < 0 must be refused");
+
+    req = (sim_plant_decompose_req_t){ .k = 42.731f, .tau_s = 255.6f, .bi = 1.0f, .phi = 1.1f };
+    TEST_CHECK(!sim_plant_decompose_three_node(&req, &out), "phi > 1 must be refused");
+
+    req = (sim_plant_decompose_req_t){ .k = 0.0f, .tau_s = 255.6f, .bi = 1.0f, .phi = 0.5f };
+    TEST_CHECK(!sim_plant_decompose_three_node(&req, &out), "k <= 0 must be refused");
+
+    req = (sim_plant_decompose_req_t){ .k = 42.731f, .tau_s = 0.0f, .bi = 1.0f, .phi = 0.5f };
+    TEST_CHECK(!sim_plant_decompose_three_node(&req, &out), "tau <= 0 must be refused");
+
+    /* phi at the exact boundaries (0, 1) IS physical (all loss on one node)
+     * and must succeed -- only outside [0,1] is refused. */
+    req = (sim_plant_decompose_req_t){ .k = 42.731f, .tau_s = 255.6f, .bi = 1.0f, .phi = 0.0f };
+    TEST_CHECK(sim_plant_decompose_three_node(&req, &out), "phi == 0.0 (boundary) must succeed, not be refused");
+    req = (sim_plant_decompose_req_t){ .k = 42.731f, .tau_s = 255.6f, .bi = 1.0f, .phi = 1.0f };
+    TEST_CHECK(sim_plant_decompose_three_node(&req, &out), "phi == 1.0 (boundary) must succeed, not be refused");
+}
+
 void run_test_sim_plant_three_node(void)
 {
     /* Catches this TU being linked against a stale/mismatched sim_plant.o --
@@ -231,4 +424,7 @@ void run_test_sim_plant_three_node(void)
     test_sensor_leads_load_near_element();
     test_sensor_lags_load_centre_mounted();
     test_legacy_path_untouched();
+    test_decompose_roundtrip();
+    test_decompose_invariance();
+    test_decompose_refuses_degenerate_inputs();
 }

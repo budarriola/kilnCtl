@@ -142,6 +142,58 @@ void sim_plant_assert_abi_fresh_impl(size_t caller_state_size, size_t caller_cfg
     sim_plant_assert_abi_fresh_impl(sizeof(sim_plant_state_t), sizeof(sim_plant_cfg_t), __FILE__)
 
 /* ------------------------------------------------------------------------
+ * WI-1's decomposition helper (docs/audits/scenario_factorial_design_2026-09-14.md
+ * sec 9, docs/audits/three_node_decomposition_helper_2026-09-14.md) -- given
+ * a measured aggregate FOPDT (k, tau) and a target (Bi, phi), solves for the
+ * three-node LOSS/CAPACITY network (heater_power_w, c_e_j_per_c, c_l_j_per_c,
+ * g_el_w_per_c, g_ea_w_per_c, g_la_w_per_c) whose aggregate step response
+ * reproduces that same (k, tau). Exact closed form, not a numerical solve --
+ * see the doc for the derivation. Scope: the (E,L) subsystem only. The
+ * sensor node (c_s_j_per_c, sensor_tau_s, sensor_bias_p) and the transport
+ * pipeline (sensor_delay_s, sensor_lag_tau_s) are OUT OF SCOPE and untouched
+ * by this call -- S has no feedback into dE/dt or dL/dt, so it cannot affect
+ * (k, tau) at all; set those fields on *out yourself for axis A3/dead-time,
+ * independently of this call. ambient_c, node_model and load_mass_mult are
+ * likewise untouched (load_mass_mult multiplies c_l_j_per_c at STEP time,
+ * not at decomposition time -- decompose first, then apply the A1 multiplier
+ * on top if that scenario axis is in play; the whole point of matching
+ * (k, tau) here is at load_mass_mult's implicit unity baseline).
+ *
+ * Convention pinning the one remaining degree of freedom: c_e_j_per_c ==
+ * c_l_j_per_c (equal-capacity split). (Bi, phi) plus the k-DC-gain equation
+ * pin (g_el, g_ea, g_la) up to the single overall conductance scale, which
+ * the k equation then pins exactly; that leaves the (C_e, C_l) split as the
+ * only remaining freedom against the single tau equation -- one equation,
+ * one convention, zero remaining slack. See the doc for why C_e=C_l was
+ * chosen over the alternatives considered.
+ *
+ * Refuses (returns false, leaves *out unmodified) rather than silently
+ * clamping, per the design doc's degenerate-case requirement, when:
+ *   - req->bi <= 0 (Bi -> 0 makes g_el_w_per_c infinite -- the isothermal
+ *     limit is a real regime but is not representable as a finite
+ *     conductance; callers wanting near-isothermal behaviour should pick a
+ *     small but strictly positive Bi, e.g. 0.05, not zero);
+ *   - req->phi < 0 or req->phi > 1 (a loss split outside [0,1] would require
+ *     a negative g_ea_w_per_c or g_la_w_per_c);
+ *   - req->k or req->tau_s is non-finite or <= 0.
+ * The resulting g_el/g_ea/g_la/c_e/c_l are always finite and strictly
+ * positive when this returns true -- proven in the doc, not just asserted
+ * here (the discriminant of the pole equation is a sum of squares, so the
+ * two-pole system is guaranteed real and stable for every admissible
+ * (Bi, phi), and the dominant-pole magnitude is always < the fast pole's).
+ */
+typedef struct {
+    float k;      /* target aggregate steady-state gain, same units as heater_power_w
+                    * (matches sim_plant_from_zone_cfg()'s convention: heater_power_w = k,
+                    * i.e. the free loss scale h = 1 -- see that function's own comment) */
+    float tau_s;  /* target aggregate DOMINANT (slow) time constant, seconds */
+    float bi;     /* Bi = (G_ea+G_la)/G_el, external-loss vs internal-transport resistance; > 0 */
+    float phi;    /* phi = G_ea/(G_ea+G_la), element-side share of total ambient loss; in [0,1] */
+} sim_plant_decompose_req_t;
+
+bool sim_plant_decompose_three_node(const sim_plant_decompose_req_t *req, sim_plant_cfg_t *out);
+
+/* ------------------------------------------------------------------------
  * sim_kiln -- N coupled zones plus injectable faults (TODO.md 6A.8's
  * "N coupled zones, inter-zone conductance, a radiative loss term,
  * injectable faults" bullet).

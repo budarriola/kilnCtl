@@ -136,6 +136,67 @@ void sim_plant_three_node_step(sim_plant_state_t *state, const sim_plant_cfg_t *
     sensor_pipeline_step(state, cfg, state->sensor_node_c, dt_s);
 }
 
+/* -------------------- WI-1 decomposition helper -------------------------
+ * See sim_plant.h's sim_plant_decompose_three_node() comment and
+ * docs/audits/three_node_decomposition_helper_2026-09-14.md for the
+ * derivation. Summary of the algebra:
+ *
+ * Steady state of the (E,L) pair at duty=1, Tamb=0 (WLOG, since the model is
+ * linear in theta=T-Tamb): with G_a = G_ea+G_la, G_ea=phi*G_a, G_la=(1-phi)*G_a,
+ * G_el = G_a/Bi:
+ *
+ *   K = Pmax / [ G_a * (1 + phi*(1-phi)*Bi) ]
+ *
+ * Fixing Pmax = k (same free-scale convention as sim_plant_from_zone_cfg())
+ * pins G_a = 1 / (1 + phi*(1-phi)*Bi).
+ *
+ * With C_e = C_l = C, the (E,L) state matrix's characteristic equation in
+ * x = C*lambda is:
+ *
+ *   x^2 + (2*G_el+G_a)*x + (G_el*G_a + G_ea*G_la) = 0
+ *
+ * whose discriminant reduces algebraically to 4*G_el^2 + (G_ea-G_la)^2 -- a
+ * sum of squares, so always >= 0 (real poles, no complex/oscillatory case to
+ * refuse) and strictly less than (2*G_el+G_a)^2 whenever G_el>0 (so both
+ * roots are strictly negative -- stable). The larger (less negative) root
+ * x_slow is the dominant pole; C = -x_slow * tau_s pins the capacity that
+ * makes that pole land exactly on the target tau. */
+bool sim_plant_decompose_three_node(const sim_plant_decompose_req_t *req, sim_plant_cfg_t *out)
+{
+    if (!req || !out) return false;
+    if (!isfinite(req->k) || !isfinite(req->tau_s) || req->k <= 0.0f || req->tau_s <= 0.0f) return false;
+    if (!(req->bi > 0.0f) || !isfinite(req->bi)) return false; /* Bi<=0 -> g_el infinite; refuse, don't clamp */
+    if (!isfinite(req->phi) || req->phi < 0.0f || req->phi > 1.0f) return false;
+
+    double bi = (double)req->bi;
+    double phi = (double)req->phi;
+    double k = (double)req->k;
+    double tau = (double)req->tau_s;
+
+    double g_a = 1.0 / (1.0 + phi * (1.0 - phi) * bi);
+    double g_el = g_a / bi;
+    double g_ea = phi * g_a;
+    double g_la = (1.0 - phi) * g_a;
+
+    double b = 2.0 * g_el + g_a;
+    double disc = 4.0 * g_el * g_el + (g_ea - g_la) * (g_ea - g_la); /* == b^2 - 4*(g_el*g_a+g_ea*g_la) */
+    if (disc < 0.0) return false; /* unreachable given the algebra above; defence in depth */
+    double sqrt_disc = sqrt(disc);
+    double x_slow = (-b + sqrt_disc) / 2.0;
+    if (!(x_slow < 0.0)) return false; /* unreachable given g_el>0; defence in depth */
+
+    double c = -x_slow * tau;
+    if (!(c > 0.0) || !isfinite(c)) return false;
+
+    out->heater_power_w = (float)k;
+    out->c_e_j_per_c = (float)c;
+    out->c_l_j_per_c = (float)c;
+    out->g_el_w_per_c = (float)g_el;
+    out->g_ea_w_per_c = (float)g_ea;
+    out->g_la_w_per_c = (float)g_la;
+    return true;
+}
+
 /* ---------------------------- sim_kiln ---------------------------------- */
 
 /* What a thermocouple that fell out of the kiln body but is still wired up
