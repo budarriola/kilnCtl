@@ -332,7 +332,16 @@ static bool rollback(SafetyLinkClass *link, const kiln_cfg_swap_pending_t *p, bo
     }
     if (esp_was_committed) {
         kiln_cfg_store_lock();
+        /* Defect 1, same rationale as kiln_cfg_swap_apply()'s step 8: this
+         * re-import is restoring p->previous_active_id's config, but
+         * active_id itself is not restored to previous_active_id until
+         * below (kiln_cfg_store_set_active_id_raw()) -- without the
+         * override, this import's autosave would target whatever slot is
+         * CURRENTLY marked active (the swap's target_id) instead of the
+         * slot this blob actually belongs to. */
+        kiln_cfg_store_set_autosave_target_override(p->previous_active_id);
         bool imported = zones_config_import_blob(p->rollback_blob, p->rollback_blob_len, sub, sizeof(sub));
+        kiln_cfg_store_set_autosave_target_override(KILN_CFG_AUTOSAVE_OVERRIDE_NONE);
         kiln_cfg_store_unlock();
         if (!imported) {
             snprintf(reason_out, reason_cap, "ROLLBACK FAILED (ESP would not re-accept the previous config): %.136s",
@@ -580,7 +589,17 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
     char esp_reason[KILN_CFG_SWAP_REASON_MAX];
     esp_reason[0] = '\0';
     kiln_cfg_store_lock();
+    /* Defect 1 (docs/audits/kiln_profiles_feature_review_2026-09-15.md):
+     * active_id still names the OUTGOING kiln here -- it only moves to
+     * target_id at step 12, below -- so without this override the autosave
+     * this import's nvs_save() dispatches would write the INCOMING config
+     * over the OUTGOING kiln's saved slot. The config landing right now
+     * belongs to target_id; say so explicitly. Cleared unconditionally
+     * right after, on both the success and failure path, per this override's
+     * own contract (kiln_cfg_store.h). */
+    kiln_cfg_store_set_autosave_target_override(target_id);
     bool esp_ok = zones_config_import_blob(target_blob, target_blob_len, esp_reason, sizeof(esp_reason));
+    kiln_cfg_store_set_autosave_target_override(KILN_CFG_AUTOSAVE_OVERRIDE_NONE);
     kiln_cfg_store_unlock();
     if (!esp_ok) {
         char roll_reason[KILN_CFG_SWAP_REASON_MAX];

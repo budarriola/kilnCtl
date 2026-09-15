@@ -61,6 +61,21 @@
 #include "esp_err.h"
 #include "kiln_package.h" /* kiln_pkg_safety_t -- kiln_cfg_store_get_full_package()'s pico_out, item 5 */
 
+/* Forward-declared, NOT #included: kiln_cfg_store_capture_expected_pico_
+ * fields() below only needs a POINTER to this type in its prototype, and
+ * this file is #included (directly or via kiln_cfg_store.c) by more host
+ * test executables than any single one of them fakes safety_ceiling_sync.h
+ * (which itself pulls in safety_link.h/safety_ceiling_policy.h) -- a hard
+ * #include here would force every one of them to grow matching fakes for a
+ * whole safety-processor-link surface most of them do not otherwise need.
+ * safety_ceiling_sync.h itself declares this same tag as `struct
+ * safety_ceiling_expected_param { ... }` (deliberately not anonymous) so
+ * this forward declaration and that header's real definition are a
+ * compatible redeclaration if a translation unit ever includes both (e.g.
+ * main_control_bringup.c). */
+struct safety_ceiling_expected_param;
+typedef struct safety_ceiling_expected_param safety_ceiling_expected_param_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -404,6 +419,33 @@ bool kiln_cfg_store_import_package_json(const char *json, int32_t *out_id, char 
  * current() itself can hit), never for the active-config-absent no-op. */
 bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap);
 
+/* docs/audits/kiln_profiles_feature_review_2026-09-15.md Defect 1: during a
+ * kiln swap (kiln_cfg_swap.c), the ESP half of the INCOMING package is
+ * committed via zones_config_import_blob() -> nvs_save() -> this module's
+ * own autosave dispatch WHILE s_store.active_id still names the OUTGOING
+ * kiln (active_id only moves to the new kiln at the swap's own step 12,
+ * after the import already ran) -- so, unguarded,
+ * kiln_cfg_store_autosave_from_live() writes the just-imported INCOMING
+ * config over the OUTGOING kiln's saved slot. The same is true of
+ * rollback()'s re-import of the pre-swap blob: active_id has not yet been
+ * restored to previous_active_id when that import's autosave fires, so it
+ * would target whatever slot is CURRENTLY marked active (the swap's target)
+ * instead of the slot the just-imported blob actually belongs to.
+ *
+ * This override lets kiln_cfg_swap.c (the only caller) tell the autosave
+ * dispatch which slot the config it is about to import via
+ * zones_config_import_blob() actually belongs to, for the duration of that
+ * one call -- kiln_cfg_store_autosave_from_live() consults this instead of
+ * s_store.active_id whenever it is set. `id` may be KILN_CFG_NO_ACTIVE_ID
+ * (autosave becomes a no-op, matching "nothing active" semantics) or any
+ * valid slot id. Pass KILN_CFG_AUTOSAVE_OVERRIDE_NONE to clear it and go
+ * back to reading s_store.active_id normally -- callers MUST clear this
+ * again immediately after the guarded call returns (both the success and
+ * failure paths), never leave it set across any other code. Not reentrant
+ * and not stacked: kiln_cfg_swap.c never nests two guarded imports. */
+#define KILN_CFG_AUTOSAVE_OVERRIDE_NONE INT32_MIN
+void kiln_cfg_store_set_autosave_target_override(int32_t id_or_none_sentinel);
+
 /* ---- Swap-transaction support (docs/KILN_PROFILES_PLAN.md item 5, the
  * two-processor apply transaction; implemented in kiln_cfg_swap.c, a
  * SEPARATE module from this one so the transaction's crash-recovery state
@@ -459,6 +501,28 @@ bool kiln_cfg_store_set_active_id_raw(int32_t id, char *reason_out, size_t reaso
 void kiln_cfg_store_lock(void);
 void kiln_cfg_store_unlock(void);
 uint32_t kiln_cfg_store_generation(void);
+
+/* ---- Standing ESP/Pico config-divergence fix (docs/audits/
+ * kiln_profiles_feature_review_2026-09-15.md Defect 2) -- the real
+ * implementation of safety_ceiling_sync.h's safety_ceiling_expected_pico_
+ * fields_fn seam. Kept separate from every call above: this is the ONLY
+ * function in this file that exists purely to be wired into another
+ * module's seam, never called directly by kiln_cfg_http.c/the LCD/kiln_cfg_
+ * swap.c.
+ *
+ * Decodes the ACTIVE slot's captured Pico half (kiln_cfg_store_get_full_
+ * package(), same call kiln_cfg_swap.c's own snapshot step uses, with
+ * blob_out=NULL since only the Pico half is needed here) into `out`,
+ * skipping unset entries (KILN_PKG_PARAM_FLAG_SET clear) and
+ * SAFETY_PARAM_ID_ABS_MAX_TEMP_C (that field stays the existing dedicated
+ * comparison in safety_ceiling_sync.c, never duplicated here). Returns 0
+ * (no fields written) if there is no active slot, the slot has no populated
+ * Pico half (legacy half-package), or `cap` is 0 -- all treated as "nothing
+ * to broaden the check with," never an error safety_ceiling_sync.c needs to
+ * react to; the abs_max_temp_c-only comparison it already performs
+ * unconditionally is the correct fallback for a board that has never saved
+ * a kiln-config slot yet. */
+size_t kiln_cfg_store_capture_expected_pico_fields(safety_ceiling_expected_param_t *out, size_t cap);
 
 #ifdef __cplusplus
 }

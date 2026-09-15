@@ -17,6 +17,7 @@
 // exercising the actual NVS-shaped read/write/CRC path, not a second mock
 // of it.
 #include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -136,6 +137,23 @@ void kiln_cfg_store_lock(void) { s_lock_depth++; }
 void kiln_cfg_store_unlock(void) { s_lock_depth--; }
 uint32_t kiln_cfg_store_generation(void) { return s_generation; }
 int32_t kiln_cfg_store_get_active_id(void) { return s_active_id; }
+
+// docs/audits/kiln_profiles_feature_review_2026-09-15.md Defect 1: the
+// autosave-target override kiln_cfg_swap.c must set before, and clear
+// after, each zones_config_import_blob() call whose autosave should NOT
+// target whatever s_active_id happens to be at that moment. s_autosave_
+// override tracks the currently-set value; zones_config_import_blob()'s
+// fake below (its "current live value" at the moment it is called) latches
+// it into s_import_time_autosave_override so a test can assert what was in
+// effect DURING the import, not just before/after kiln_cfg_swap_apply()
+// returns.
+#define KILN_CFG_AUTOSAVE_OVERRIDE_NONE INT32_MIN
+static int32_t s_autosave_override = KILN_CFG_AUTOSAVE_OVERRIDE_NONE;
+static int32_t s_import_time_autosave_override = KILN_CFG_AUTOSAVE_OVERRIDE_NONE;
+void kiln_cfg_store_set_autosave_target_override(int32_t id_or_none_sentinel)
+{
+    s_autosave_override = id_or_none_sentinel;
+}
 
 // -- kiln_package.h --
 kiln_pkg_pico_source_t kiln_pkg_pico_source_default(void)
@@ -385,6 +403,7 @@ static int s_zones_import_call_count = 0;
 bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, size_t reason_cap)
 {
     s_zones_import_call_count++;
+    s_import_time_autosave_override = s_autosave_override;
     if (s_zones_import_should_fail) {
         if (reason_out && reason_cap) {
             snprintf(reason_out, reason_cap, "forced import failure");
@@ -442,6 +461,8 @@ static void reset_state(void)
     s_active_id = KILN_CFG_NO_ACTIVE_ID;
     s_generation = 1;
     s_lock_depth = 0;
+    s_autosave_override = KILN_CFG_AUTOSAVE_OVERRIDE_NONE;
+    s_import_time_autosave_override = KILN_CFG_AUTOSAVE_OVERRIDE_NONE;
 
     memset(s_slot_blob, 0xAB, sizeof(s_slot_blob));
     s_slot_blob_len = 32;
@@ -510,6 +531,32 @@ static void test_clean_swap_applies_both_halves(void)
     TEST_CHECK(s_lock_depth == 0, "store lock is balanced (never left held)");
 }
 
+static void test_apply_autosave_targets_incoming_slot_not_outgoing(void)
+{
+    // docs/audits/kiln_profiles_feature_review_2026-09-15.md Defect 1: at
+    // step 8 the ESP half of the INCOMING config (target_id=7) is imported
+    // while active_id still names the OUTGOING kiln (3) -- active_id only
+    // moves to 7 at step 12, after the import already ran. Unguarded, the
+    // import's autosave dispatch would target active_id (3, the outgoing
+    // kiln) with the just-imported INCOMING (7's) content -- clobbering
+    // kiln 3's own saved slot with kiln 7's data. The override must name
+    // the slot the content being imported actually belongs to (7) during
+    // the call, and must be cleared again once the swap is done.
+    TEST_SECTION("apply's autosave override names the incoming slot, not the still-active outgoing one");
+    reset_state();
+    s_active_id = 3; // outgoing kiln, active before the swap starts
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    TEST_CHECK(ok, "swap reports success");
+    TEST_CHECK(s_import_time_autosave_override == 7,
+              "autosave override during the ESP import named the INCOMING slot (7), not the outgoing "
+              "active slot (3) that was still current at that moment");
+    TEST_CHECK(s_autosave_override == KILN_CFG_AUTOSAVE_OVERRIDE_NONE,
+              "override cleared again once the swap finished -- never left set for some later, unrelated "
+              "nvs_save() to pick up");
+}
+
 static void test_pico_failure_leaves_esp_untouched(void)
 {
     TEST_SECTION("Pico push failure -- ESP never touched, rollback restores Pico");
@@ -569,6 +616,32 @@ static void test_esp_readback_mismatch_rolls_back(void)
     TEST_CHECK(s_active_id == KILN_CFG_NO_ACTIVE_ID, "active_id never finalized");
     TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_NONE,
                "rolled back cleanly, record cleared");
+    s_import_writes_wrong_bytes = false;
+}
+
+static void test_rollback_autosave_targets_previous_slot_not_target(void)
+{
+    // docs/audits/kiln_profiles_feature_review_2026-09-15.md Defect 1,
+    // rollback side: the readback mismatch below forces rollback() to
+    // re-import the PRE-swap (previous_active_id=3) blob over the ESP half,
+    // while active_id STILL reads target_id (7) at that moment --
+    // set_active_id_raw(previous_active_id) only runs after this reimport.
+    // Unguarded, that reimport's autosave would target active_id (7)
+    // with kiln 3's own pre-swap content -- clobbering kiln 7's slot.
+    TEST_SECTION("rollback's autosave override names the slot being restored, not the still-active target");
+    reset_state();
+    s_active_id = 3; // outgoing/previous kiln
+    s_import_writes_wrong_bytes = true; // forces the readback-mismatch -> rollback(esp_was_committed=true) path
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    TEST_CHECK(!ok, "swap refused (readback mismatch), rolled back");
+    TEST_CHECK(s_zones_import_call_count == 2, "one import for the forward commit, one for the rollback reimport");
+    TEST_CHECK(s_import_time_autosave_override == 3,
+              "autosave override during the ROLLBACK's reimport named the slot being restored (3), not "
+              "the still-active target slot (7) that had not been un-finalized yet");
+    TEST_CHECK(s_autosave_override == KILN_CFG_AUTOSAVE_OVERRIDE_NONE,
+              "override cleared again after the rollback's reimport");
     s_import_writes_wrong_bytes = false;
 }
 
@@ -801,10 +874,12 @@ static void test_negative_generation_check_is_load_bearing(void)
 int main(void)
 {
     test_clean_swap_applies_both_halves();
+    test_apply_autosave_targets_incoming_slot_not_outgoing();
     test_pico_failure_leaves_esp_untouched();
     test_half_package_refused();
     test_swap_during_firing_refused();
     test_esp_readback_mismatch_rolls_back();
+    test_rollback_autosave_targets_previous_slot_not_target();
     test_diverged_ceiling_does_not_finalize();
     test_generation_race_forces_rollback();
     test_swap_completes_with_pico_armed_never_disarmed();

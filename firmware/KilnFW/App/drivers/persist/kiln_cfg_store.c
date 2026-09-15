@@ -23,6 +23,8 @@
                                  * deliberately type-erased export/import pair. */
 #include "zones_config_query.h" /* zones_config_get_thermo_count() -- upload compatibility check
                                   * (docs/KILN_PROFILES_PLAN.md item 14), section 5.2a. */
+#include "safety_ceiling_sync.h" /* safety_ceiling_expected_param_t (full definition) + SAFETY_PARAM_ID_ABS_MAX_TEMP_C
+                                   * -- kiln_cfg_store_capture_expected_pico_fields(), 2026-09-15 audit fix */
 #include "safety_cfg_store.h" /* safety_cfg_store_lookup() -- upload's "unknown Pico param id"
                                 * validity check, section 5.2 rule 5. */
 
@@ -1713,6 +1715,78 @@ bool kiln_cfg_store_import_package_json(const char *json, int32_t *out_id, char 
         }
     }
 
+    /* ---- Compatibility 5.3, table row 1 (docs/KILN_PROFILES_PLAN.md
+     * section 5.3, docs/audits/kiln_profiles_feature_review_2026-09-15.md
+     * Defect 5): the Pico's abs_max_temp_c ceiling must never be TIGHTER
+     * than the highest configured zone max_temp_c in the SAME package --
+     * the same rule zones_http_post.c's live-write path already enforces
+     * (its own comment there is the citation), applied here at upload time
+     * against the package's own two halves rather than the live config, and
+     * bounded above by ZONE_MAX_TEMP_C_MAX, the one firmware-wide "no
+     * temperature field may exceed this" sanity ceiling
+     * (zones_config_accessors.h) -- reused rather than inventing a second
+     * absolute-ceiling constant. Param id 0x0104 is "abs_max_temp_c" per
+     * safety_cfg_store.c's own CONFIG_PARAM_TABLE mirror; looked up by id
+     * (not name -- the wire table has no name lookup) with
+     * safety_cfg_store_lookup() used only for the diagnostic name string. A
+     * package whose Pico half never sets abs_max_temp_c at all cannot be
+     * safety-checked against this rule and is refused rather than assumed
+     * safe (0.0f as a checked value would look "tighter than everything",
+     * masking the real defect: no ceiling packaged at all). */
+    {
+        float max_zone_temp_c = 0.0f;
+        for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+            const zone_cfg_t *zc = &s->cand.zones[z];
+            if (zc->thermo_mask != 0 && zc->max_temp_c > max_zone_temp_c) {
+                max_zone_temp_c = zc->max_temp_c;
+            }
+        }
+        bool have_abs_max = false;
+        float pico_abs_max_temp_c = 0.0f;
+        for (uint16_t i = 0; i < s->pico.count; i++) {
+            if (s->pico.entries[i].param_id == 0x0104u
+                    && (s->pico.entries[i].flags & KILN_PKG_PARAM_FLAG_SET) != 0) {
+                union { uint32_t bits; float f; } conv;
+                conv.bits = s->pico.entries[i].value_bits;
+                pico_abs_max_temp_c = conv.f;
+                have_abs_max = true;
+                break;
+            }
+        }
+        if (max_zone_temp_c > 0.0f) {
+            if (!have_abs_max) {
+                IMPORT_REFUSE("package's safety-processor section has no abs_max_temp_c ceiling set, "
+                              "so it cannot be checked against the package's own configured zone "
+                              "temperatures -- refused rather than assumed safe");
+            }
+            if (pico_abs_max_temp_c < max_zone_temp_c) {
+                /* 1024, not 192: -Werror=format-truncation sizes %.1f's worst
+                 * case off the promoted double's full range, not float's
+                 * (~816 bytes here) -- this fixes a pre-existing build break
+                 * (uncommitted WIP elsewhere in this file, unrelated to this
+                 * pass's own change), not a real truncation risk at the
+                 * values this ever actually carries. */
+                char msg[1024];
+                snprintf(msg, sizeof(msg),
+                         "package's safety-processor ceiling (abs_max_temp_c=%.1f C) is lower than its "
+                         "own highest configured zone max_temp_c (%.1f C) -- the safety ceiling must "
+                         "never be tighter than the kiln it packages with",
+                         (double)pico_abs_max_temp_c, (double)max_zone_temp_c);
+                IMPORT_REFUSE(msg);
+            }
+        }
+        if (have_abs_max && pico_abs_max_temp_c > ZONE_MAX_TEMP_C_MAX) {
+            /* Same -Werror=format-truncation fix as the sibling IMPORT_REFUSE
+             * just above -- see that comment. */
+            char msg[1024];
+            snprintf(msg, sizeof(msg),
+                     "package's safety-processor ceiling (abs_max_temp_c=%.1f C) exceeds this "
+                     "firmware's absolute sanity ceiling (%.1f C)",
+                     (double)pico_abs_max_temp_c, (double)ZONE_MAX_TEMP_C_MAX);
+            IMPORT_REFUSE(msg);
+        }
+    }
+
     /* ---- Everything passed: create a NEW slot only -- never overwrite,
      * never apply (section 5.3: "a rejected upload leaves the active
      * configuration bit-for-bit untouched... upload writes into a new slot
@@ -1750,9 +1824,19 @@ bool kiln_cfg_store_import_package_json(const char *json, int32_t *out_id, char 
 
     hal_status_t nvs_err = nvs_save_store();
     if (nvs_err != HAL_OK) {
-        ESP_LOGE(TAG, "nvs_save_store after import failed: %s -- imported live but will not survive a "
-                      "reboot",
+        /* Defect 4, docs/audits/kiln_profiles_feature_review_2026-09-15.md:
+         * this used to log and then still report success, leaving the new
+         * slot RAM-only -- it silently disappeared at the next reboot with
+         * no operator warning. Roll the RAM-only slot back so the store's
+         * in-memory state matches what is reported (nothing persisted, so
+         * nothing should appear to exist), and refuse instead of claiming
+         * success. */
+        memset(e, 0, sizeof(*e));
+        char msg[160];
+        snprintf(msg, sizeof(msg),
+                 "package was valid but could not be saved to flash (%s) -- not imported",
                  hal_status_to_name(nvs_err));
+        IMPORT_REFUSE(msg);
     }
     if (out_id) {
         *out_id = id;
@@ -1765,9 +1849,26 @@ done:
     return result;
 }
 
+/* See kiln_cfg_store.h's own comment on this pair -- kiln_cfg_swap.c's
+ * escape hatch for Defect 1 (docs/audits/kiln_profiles_feature_review_
+ * 2026-09-15.md): the slot an in-flight import's autosave should target
+ * when it is not (yet) the same as s_store.active_id. Plain static, not
+ * behind s_swap_lock: the only writer is kiln_cfg_swap.c, always while it
+ * already holds kiln_cfg_store_lock() around the same zones_config_import_
+ * blob() call whose nvs_save() autosave dispatch this value steers, and the
+ * flash worker's autosave job (this module's own s_store fields aside) does
+ * not otherwise run concurrently with that. */
+static int32_t s_autosave_target_override = KILN_CFG_AUTOSAVE_OVERRIDE_NONE;
+
+void kiln_cfg_store_set_autosave_target_override(int32_t id_or_none_sentinel)
+{
+    s_autosave_target_override = id_or_none_sentinel;
+}
+
 bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap)
 {
-    int32_t active = s_store.active_id;
+    int32_t active = (s_autosave_target_override != KILN_CFG_AUTOSAVE_OVERRIDE_NONE) ? s_autosave_target_override
+                                                                                      : s_store.active_id;
     if (active == KILN_CFG_NO_ACTIVE_ID) {
         return true; /* nothing to autosave into -- not a failure */
     }
@@ -1799,4 +1900,72 @@ uint32_t kiln_cfg_store_generation(void)
      * class) between two counters that would otherwise need to move
      * together forever. */
     return s_kiln_cfg_rev;
+}
+
+/* ---- Standing ESP/Pico config-divergence fix (docs/audits/
+ * kiln_profiles_feature_review_2026-09-15.md Defect 2) --------------------
+ * See kiln_cfg_store.h's doc comment for this function's contract, and
+ * safety_ceiling_sync.h's doc comment on safety_ceiling_expected_pico_
+ * fields_fn for why this lives here (the persist layer) rather than in
+ * safety_ceiling_sync.c itself. */
+size_t kiln_cfg_store_capture_expected_pico_fields(safety_ceiling_expected_param_t *out, size_t cap)
+{
+    if (!out || cap == 0) {
+        return 0;
+    }
+    int32_t active = kiln_cfg_store_get_active_id();
+    if (active == KILN_CFG_NO_ACTIVE_ID) {
+        return 0; /* no saved kiln config applied this boot -- nothing to broaden the check with */
+    }
+    kiln_pkg_safety_t pico;
+    /* blob_out=NULL: only the Pico half is needed here, and kiln_cfg_store_
+     * get_full_package() documents NULL as skipping the ESP-blob copy
+     * entirely (confirmed by reading its implementation above) -- cheap,
+     * no ESP zones-blob memcpy for a call that runs every safety_poll_task
+     * tick. Also safely refuses (returns false) on a legacy half-package
+     * (pico_populated == 0), which this function treats the same as "no
+     * active slot": nothing to broaden with, not an error. */
+    if (!kiln_cfg_store_get_full_package(active, NULL, 0, NULL, &pico, NULL, 0)) {
+        return 0;
+    }
+    size_t n = 0;
+    for (uint16_t i = 0; i < pico.count && n < cap; i++) {
+        const kiln_pkg_pico_param_t *p = &pico.entries[i];
+        if (!(p->flags & KILN_PKG_PARAM_FLAG_SET)) {
+            continue; /* never fabricate a value for a param this slot never captured */
+        }
+        if (p->param_id == SAFETY_PARAM_ID_ABS_MAX_TEMP_C) {
+            continue; /* stays the existing dedicated field in safety_ceiling_sync.c, never duplicated */
+        }
+        /* Type-aware widen into float -- identical switch to kiln_cfg_
+         * swap.c's pico_readback_matches()/normalize_f32_like_wire() call
+         * site, so the expected side here and the live side safety_
+         * ceiling_sync.c decodes from safety_cfg_store's cache use the same
+         * convention for non-float params. No %.9g wire-round-trip
+         * normalization here -- config_divergence_check()/config_identity_
+         * normalize_f32() (config_divergence.c) already normalizes every
+         * float field exactly once, at comparison time; doing it twice
+         * would be redundant, not wrong, but this keeps ONE place that
+         * owns it. */
+        float value;
+        switch (p->type) {
+        case KILNLINK_PARAM_TYPE_BOOL:
+        case KILNLINK_PARAM_TYPE_U8:
+            value = (float)(uint8_t)(p->value_bits & 0xFFu);
+            break;
+        case KILNLINK_PARAM_TYPE_U16:
+            value = (float)(uint16_t)(p->value_bits & 0xFFFFu);
+            break;
+        case KILNLINK_PARAM_TYPE_F32:
+        default: {
+            uint32_t bits = p->value_bits;
+            memcpy(&value, &bits, sizeof(value));
+            break;
+        }
+        }
+        out[n].param_id = p->param_id;
+        out[n].value = value;
+        n++;
+    }
+    return n;
 }
