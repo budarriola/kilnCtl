@@ -59,7 +59,51 @@ param(
     [switch]$ListOnly,
 
     # Skip the discovery floor. Only for a deliberate partial tree.
-    [switch]$AllowFewerChecks
+    [switch]$AllowFewerChecks,
+
+    # Run only checks whose repo-relative path matches this regex (-match).
+    # Combines with -Skip (Only is applied first, then Skip removes from
+    # what's left). For iterating on a single check without paying for the
+    # whole suite.
+    [string]$Only,
+
+    # Exclude checks whose repo-relative path matches this regex (-match).
+    [string]$Skip,
+
+    # Skip ONLY the two full target builds (check_00_kilnfw_target_build.ps1,
+    # check_00_saftyfw_target_build.ps1) -- for a caller that just ran
+    # build_kilnfw/build_saftyfw (or equivalent) itself and wants the rest of
+    # the suite without paying to redo the target build. Every other check,
+    # including the two checks that read the target ELFs, still runs. This is
+    # NOT a general "skip slow checks" switch -- everything else in the
+    # default run still runs, because weakening any of it is exactly the
+    # failure mode this whole exercise is trying to avoid.
+    [switch]$Fast,
+
+    # How many checks to run at once in the (large) parallel phase. Default
+    # is a conservative fraction of the core count: most of these checks are
+    # short-lived powershell/python processes, not itself CPU-bound work, but
+    # a handful DO shell out to ninja/cmake with their own -j, and running too
+    # many of those at once thrashes rather than helps. Checks that touch a
+    # shared build directory already serialize themselves via
+    # tools/build_lock.ps1's named mutex, so raising this is safe from a
+    # correctness standpoint -- it only trades wall clock for CPU contention.
+    [int]$MaxParallel = 8,
+
+    # 2026-09-15: commit 9507918e made six KilnFW stack-budget checkers print
+    # SKIP when the target ELF is 0 bytes -- i.e. a build is still writing it.
+    # Parallelizing this runner makes that race MORE likely to actually
+    # happen (a checker starting while check_00_*_target_build.ps1's publish
+    # step is mid-write), so a SKIP is no longer safely ignorable the way an
+    # honest "no toolchain on this machine" SKIP is: it can now mean "this
+    # check's coverage silently didn't run, on THIS machine, because of how
+    # this very script scheduled it." Default posture is therefore: any SKIP
+    # fails the overall run (exit 1), loudly listing which checks and why,
+    # same as a FAIL. Pass -AllowSkips to opt back into the old "skips don't
+    # fail the suite" behavior for a machine that genuinely lacks a
+    # prerequisite (no node/toolchain installed) and is not expected to ever
+    # pass those checks.
+    [switch]$AllowSkips
 )
 
 # param() must be the first statement in the script, so this assignment --
@@ -248,6 +292,23 @@ if ($checks.Count -lt $MinimumChecks -and -not $AllowFewerChecks) {
     exit 2
 }
 
+# -Only / -Skip / -Fast filtering happens AFTER the discovery floor check
+# above, deliberately -- a broken glob must still be caught even when the
+# caller is filtering down to one check, rather than a typo'd -Only silently
+# hiding a discovery regression too.
+if ($Only) {
+    $checks = $checks | Where-Object { $_.FullName.Substring($repoRoot.Length + 1) -match $Only }
+}
+if ($Skip) {
+    $checks = $checks | Where-Object { $_.FullName.Substring($repoRoot.Length + 1) -notmatch $Skip }
+}
+if ($Fast) {
+    $checks = $checks | Where-Object {
+        $_.FullName -notmatch 'check_00_kilnfw_target_build\.ps1$' -and
+        $_.FullName -notmatch 'check_00_saftyfw_target_build\.ps1$'
+    }
+}
+
 if ($ListOnly) {
     Write-Host "$($checks.Count) check scripts discovered:"
     foreach ($c in $checks) {
@@ -257,71 +318,189 @@ if ($ListOnly) {
 }
 
 Write-Host ""
-Write-Host "Running $($checks.Count) guard scripts from $repoRoot"
+Write-Host "Running $($checks.Count) guard scripts from $repoRoot (parallel, throttle $MaxParallel)"
 Write-Host ""
 
 $failed = @()
 $passed = @()
 $skipped = @()
 
-foreach ($c in $checks) {
-    $rel = $c.FullName.Substring($repoRoot.Length + 1)
+# Scratch dir for redirected stdout/stderr of each parallel check process.
+# Keyed by PID so two concurrent run_all_checks.ps1 invocations (different
+# sessions/agents, same machine) never collide on the same files.
+$scratchDir = Join-Path $env:TEMP "kilnctl_run_all_checks_$PID"
+New-Item -ItemType Directory -Path $scratchDir -Force | Out-Null
 
+function Start-CheckAsync {
+    param($Check, [string]$RepoRoot, [string]$SelfcheckPy, [string]$SelfcheckPython, [string]$ScratchDir)
+
+    $rel = $Check.FullName.Substring($RepoRoot.Length + 1)
     # Each check is run from ITS OWN directory's parent project, because
     # several resolve paths relative to $PSScriptRoot and at least one
     # (check_uri_handler_cap.ps1) recounts from source trees it locates that
     # way. Running them all from the repository root would have worked today
     # and broken silently the first time one of them changed how it resolves.
-    $checkDir = Split-Path -Parent $c.FullName
+    $checkDir = Split-Path -Parent $Check.FullName
 
-    # Run in a child powershell so that a check calling `exit` cannot terminate
-    # this aggregator, and so $ErrorActionPreference = "Stop" inside one check
-    # cannot leak out. The exit code is the whole contract.
-    Push-Location $checkDir
-    try {
-        # $ErrorActionPreference is dropped to Continue for exactly this call.
-        # Under "Stop", ANY line a child process writes to stderr is promoted to
-        # a terminating NativeCommandError -- so the first failing check would
-        # abort this aggregator and the remaining checks would never run, while
-        # the output still looked like a report. A runner that stops at the
-        # first failure is a runner that hides every failure after it.
-        $prev = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
-        if ($c.FullName -eq $selfcheckPy) {
-            # selfcheck.py (see above) -- run under the PcTools venv's own
-            # interpreter, not `powershell -File`, which cannot execute it.
-            $output = & $selfcheckPython $c.FullName 2>&1
-        } elseif ($c.Extension -eq ".py") {
-            # The SaftyFW orphan negative tests (see above) -- no special
-            # venv needed, same interpreter unittest is invoked with
-            # directly during development.
-            $output = & python $c.FullName 2>&1
-        } else {
-            $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $c.FullName 2>&1
-        }
-        $code = $LASTEXITCODE
-        $ErrorActionPreference = $prev
-    } finally {
-        Pop-Location
+    if ($Check.FullName -eq $SelfcheckPy) {
+        # selfcheck.py -- run under the PcTools venv's own interpreter, not
+        # `powershell -File`, which cannot execute it.
+        $exe = $SelfcheckPython
+        $procArgs = @($Check.FullName)
+    } elseif ($Check.Extension -eq ".py") {
+        # The SaftyFW orphan negative tests -- no special venv needed, same
+        # interpreter unittest is invoked with directly during development.
+        $exe = "python"
+        $procArgs = @($Check.FullName)
+    } else {
+        $exe = "powershell"
+        $procArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $Check.FullName)
     }
 
+    $tag = ($rel -replace '[\\/:]', '_')
+    $outFile = Join-Path $ScratchDir "$tag.out.txt"
+    $errFile = Join-Path $ScratchDir "$tag.err.txt"
+
+    # Start-Process launches a genuinely separate process (same isolation the
+    # original in-process `&` call to a child powershell already relied on --
+    # a check calling `exit` cannot terminate this aggregator either way), and
+    # -- unlike the original `& ... 2>&1` under $ErrorActionPreference =
+    # "Stop" -- a child writing to stderr can never be promoted into a
+    # terminating NativeCommandError here, since Start-Process is not a
+    # PowerShell-native invocation at all. So the Continue/Stop dance the
+    # serial version needed is simply not a hazard for this path.
+    $proc = Start-Process -FilePath $exe -ArgumentList $procArgs -WorkingDirectory $checkDir `
+        -RedirectStandardOutput $outFile -RedirectStandardError $errFile -PassThru -NoNewWindow
+
+    # Well-known Start-Process/-PassThru gotcha: with output redirected, the
+    # returned Process object's ExitCode reads back $null forever -- even
+    # after WaitForExit() -- unless something first touches .Handle, which
+    # forces .NET to reopen the process with a full-access handle instead of
+    # the limited one Start-Process obtains by default. Confirmed by hand
+    # while writing this: without this line, ExitCode was $null on every
+    # single check, which silently misfiled every PASS as a FAIL with a
+    # blank "(exit )" -- caught only because the negative-test pass for this
+    # change ran the happy path first and it was already all-red.
+    $null = $proc.Handle
+
+    return [pscustomobject]@{
+        Rel     = $rel
+        Proc    = $proc
+        OutFile = $outFile
+        ErrFile = $errFile
+    }
+}
+
+function Complete-CheckResult {
+    param($Running, [int]$SkipExitCode)
+
+    # .NET's Process.ExitCode has a well-known gotcha with Start-Process
+    # -PassThru: HasExited can read true before ExitCode is reliably
+    # populated on the same object. An explicit WaitForExit() (a no-op if it
+    # already exited) forces the property to settle before we read it --
+    # without this, ExitCode intermittently came back $null here, and $null
+    # -eq 0 is false, so a genuine PASS was misfiled as a FAIL with a blank
+    # "(exit )" in testing during this change.
+    $Running.Proc.WaitForExit()
+    $code = $Running.Proc.ExitCode
+    $outText = ""
+    foreach ($f in @($Running.OutFile, $Running.ErrFile)) {
+        if (Test-Path $f) { $outText += (Get-Content -Raw -ErrorAction SilentlyContinue $f) }
+    }
+    Remove-Item -ErrorAction SilentlyContinue $Running.OutFile, $Running.ErrFile
+
     if ($code -eq 0) {
-        $passed += $rel
-        Write-Host "  PASS  $rel" -ForegroundColor Green
+        Write-Host "  PASS  $($Running.Rel)" -ForegroundColor Green
+        return [pscustomobject]@{ Bucket = "pass"; Path = $Running.Rel }
     } elseif ($code -eq $SkipExitCode) {
-        # Pull the check's own stated reason back out of its output (see the
-        # SKIP contract in this file's header) rather than inventing one --
-        # the check is the authority on why it couldn't run.
-        $outText = ($output | Out-String)
         $reasonLine = ($outText -split "`r?`n" | Where-Object { $_ -match 'SKIP' } | Select-Object -First 1)
         if (-not $reasonLine) {
             $reasonLine = "(no SKIP reason line found in output -- check violates the SKIP contract, see header)"
         }
-        $skipped += [pscustomobject]@{ Path = $rel; Reason = $reasonLine.Trim() }
-        Write-Host "  SKIP  $rel" -ForegroundColor Yellow
+        Write-Host "  SKIP  $($Running.Rel)" -ForegroundColor Yellow
+        return [pscustomobject]@{ Bucket = "skip"; Path = $Running.Rel; Reason = $reasonLine.Trim() }
     } else {
-        $failed += [pscustomobject]@{ Path = $rel; Code = $code; Output = ($output | Out-String) }
-        Write-Host "  FAIL  $rel (exit $code)" -ForegroundColor Red
+        Write-Host "  FAIL  $($Running.Rel) (exit $code)" -ForegroundColor Red
+        return [pscustomobject]@{ Bucket = "fail"; Path = $Running.Rel; Code = $code; Output = $outText }
+    }
+}
+
+function Invoke-ChecksParallel {
+    param($ChecksToRun, [int]$MaxParallel, [string]$RepoRoot, [string]$SelfcheckPy, [string]$SelfcheckPython, [string]$ScratchDir, [int]$SkipExitCode)
+
+    $pending = New-Object System.Collections.Generic.Queue[object]
+    foreach ($c in $ChecksToRun) { $pending.Enqueue($c) }
+    $running = @()
+    $results = @()
+
+    while ($pending.Count -gt 0 -or $running.Count -gt 0) {
+        while ($running.Count -lt $MaxParallel -and $pending.Count -gt 0) {
+            $c = $pending.Dequeue()
+            $running += Start-CheckAsync -Check $c -RepoRoot $RepoRoot -SelfcheckPy $SelfcheckPy -SelfcheckPython $SelfcheckPython -ScratchDir $ScratchDir
+        }
+        Start-Sleep -Milliseconds 200
+        $stillRunning = @()
+        foreach ($r in $running) {
+            if ($r.Proc.HasExited) {
+                $results += Complete-CheckResult -Running $r -SkipExitCode $SkipExitCode
+            } else {
+                $stillRunning += $r
+            }
+        }
+        $running = $stillRunning
+    }
+    return $results
+}
+
+# TWO PHASES, not one flat parallel batch, to preserve a guarantee the
+# original strict-alphabetical serial order gave for free: check_00_kilnfw_
+# target_build.ps1 and check_00_saftyfw_target_build.ps1 must both FINISH
+# (and publish their ELFs into the shared firmware/*/build/ directories)
+# before anything that reads those artifacts runs (the stack-budget checks,
+# compile_esp_backends.ps1/compile_pico_backends.ps1, check_saftyfw_task_
+# count.ps1, etc.) -- those consumers only SKIP on a MISSING elf, not a
+# STALE one, so if they ran concurrently with a build in flight they could
+# silently grade a leftover artifact from a previous run instead of this
+# one, same failure shape check_00_kilnfw_target_build.ps1's own header
+# documents. The two target builds are independent of each other (separate
+# toolchains, separate build dirs, separate build_lock.ps1 mutex names) so
+# they still run concurrently with each other in phase 1; everything else
+# (all lint/drift/mirror/host-test checks, which don't touch either target
+# build's output) runs throttled in phase 2. Checks that DO share a build
+# directory among themselves (e.g. two build_lock.ps1 users) still serialize
+# correctly within phase 2 via that same named mutex -- they just queue
+# instead of racing, exactly as build_lock.ps1's own header describes for
+# two concurrent manual runs.
+$buildChecks = $checks | Where-Object {
+    $_.FullName -match 'check_00_kilnfw_target_build\.ps1$' -or
+    $_.FullName -match 'check_00_saftyfw_target_build\.ps1$'
+}
+$restChecks = $checks | Where-Object {
+    $_.FullName -notmatch 'check_00_kilnfw_target_build\.ps1$' -and
+    $_.FullName -notmatch 'check_00_saftyfw_target_build\.ps1$'
+}
+
+$results = @()
+if ($buildChecks.Count -gt 0) {
+    Write-Host "Phase 1/2: target builds ($($buildChecks.Count))" -ForegroundColor Cyan
+    $results += Invoke-ChecksParallel -ChecksToRun $buildChecks -MaxParallel ([Math]::Max(1, $buildChecks.Count)) `
+        -RepoRoot $repoRoot -SelfcheckPy $selfcheckPy -SelfcheckPython $selfcheckPython -ScratchDir $scratchDir -SkipExitCode $SkipExitCode
+}
+if ($restChecks.Count -gt 0) {
+    Write-Host "Phase 2/2: remaining checks ($($restChecks.Count))" -ForegroundColor Cyan
+    $results += Invoke-ChecksParallel -ChecksToRun $restChecks -MaxParallel $MaxParallel `
+        -RepoRoot $repoRoot -SelfcheckPy $selfcheckPy -SelfcheckPython $selfcheckPython -ScratchDir $scratchDir -SkipExitCode $SkipExitCode
+}
+
+Remove-Item -ErrorAction SilentlyContinue -Recurse -Force $scratchDir
+
+foreach ($r in $results) {
+    if ($r.Bucket -eq "pass") {
+        $passed += $r.Path
+    } elseif ($r.Bucket -eq "skip") {
+        $skipped += [pscustomobject]@{ Path = $r.Path; Reason = $r.Reason }
+    } else {
+        $failed += [pscustomobject]@{ Path = $r.Path; Code = $r.Code; Output = $r.Output }
     }
 }
 
@@ -348,14 +527,30 @@ if ($failed.Count -gt 0) {
     exit 1
 }
 
-# A skip is deliberately NOT a suite failure -- these are documented,
-# environment-dependent non-failures (missing `node`, no build directory
-# yet), and forcing every developer machine without the full toolchain
-# installed to show a red run_all_checks.ps1 would make the failure signal
-# noisier, not clearer. But it must never be silently indistinguishable from
-# a full pass either (that was exactly this mechanism's reason for existing)
-# -- so the summary line always states the skip count explicitly, never
-# folds it into "passed", and the per-check SKIP lines above always print
-# even on an otherwise-green run.
+# A skip is never silently folded into "passed" -- the summary line always
+# states the skip count explicitly and the per-check SKIP lines above always
+# print, even on an otherwise-green run. Whether a skip fails the SUITE is
+# now controlled by -AllowSkips (default: it does).
+#
+# 2026-09-15: this used to unconditionally exit 0 here on the theory that a
+# skip is always a documented, environment-dependent non-failure (missing
+# `node`, no build directory yet) -- forcing every developer machine without
+# the full toolchain to show red would make the signal noisier, not clearer.
+# That reasoning stopped holding once commit 9507918e made six KilnFW
+# stack-budget checkers SKIP on a genuinely bad signal (a 0-byte ELF, i.e. a
+# build still in flight) rather than only on a missing prerequisite -- and
+# parallelizing this very runner made that race more likely, not less, since
+# a checker and a build can now genuinely be scheduled close together. A
+# runner that still called that combination a clean pass would be exactly
+# the "green with zero coverage" trap this file's own header has warned
+# about since its first revision. Default posture: any SKIP fails the run;
+# -AllowSkips opts back into the old behavior for a machine that genuinely,
+# permanently lacks a prerequisite.
+if ($skipped.Count -gt 0 -and -not $AllowSkips) {
+    Write-Host "$($passed.Count) passed, $($skipped.Count) skipped, $($failed.Count) failed." -ForegroundColor Red
+    Write-Host "FAILED: $($skipped.Count) check(s) skipped and -AllowSkips was not passed -- a skip is not a pass." -ForegroundColor Red
+    exit 1
+}
+
 Write-Host "$($passed.Count) passed, $($skipped.Count) skipped, $($failed.Count) failed." -ForegroundColor Green
 exit 0

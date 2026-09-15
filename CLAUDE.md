@@ -345,6 +345,19 @@ script fails to load, and the Bash tool still reports exit 0 for the wrapper
 host-test builds need a short worktree path (e.g. `C:\wt\...`); the default
 `.claude/worktrees/...` path overflows the MSVC command line.
 
+As of 2026-09-15 it runs its ~94 checks in two phases — the two full target
+builds (`check_00_kilnfw_target_build.ps1`, `check_00_saftyfw_target_build.ps1`)
+concurrently, then everything else throttled in parallel (`-MaxParallel`,
+default 8) — so a full run finishes in under 3 minutes on this 24-core
+machine instead of exceeding the 600s tool timeout. `-Only <regex>`/`-Skip
+<regex>` filter by repo-relative path for iterating on one check; `-Fast`
+skips only the two target builds for a caller that just ran one itself,
+never any other check. A SKIP now **fails the overall run by default**
+(some KilnFW stack-budget checkers SKIP on a 0-byte/in-flight ELF, which
+parallel execution can make more likely, so a skip is no longer safely
+ignorable) — pass `-AllowSkips` to opt back into treating skips as
+non-fatal on a machine that genuinely and permanently lacks a prerequisite.
+
 A 2026-09-04 panic (`safety_poll`, `IllegalInstruction`, `exc_addr 0x0`) ran
 five hours unnoticed before `get_heap_status` was fixed to surface it (see
 the flash/OTA section above). `exc_addr 0x0` was a red herring: the real
