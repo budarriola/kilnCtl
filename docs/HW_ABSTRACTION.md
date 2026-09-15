@@ -63,6 +63,58 @@ the goal, tree shape, decisions, changelog, and remaining open items.
   pre-HAL paper figures (345 ms reply window, ≈40 ms flight) and the
   contaminated MCP-timed `safety_ping` (~592 ms, client/HTTP overhead
   included) above — do not treat this paragraph itself as that measurement.
+
+  **2026-09-14 hardware measurement, item CLOSES.** Board at `c8f7506b`
+  (3 commits behind then-HEAD `bc55f4e5`, tree clean; Pico `d957d5fd`,
+  dirty, protocol v14), `reset_reason='software (esp_restart)'`,
+  uptime 1536-1821 s over the run, S8 rate guard commissioned 33.3 C/min
+  (armed), no trip, no unacknowledged crash on either processor throughout.
+
+  Confirmed the span first: `link_reply_us` is timestamped in
+  `safety_exchange()` from send to matched reply, entirely inside the ESP —
+  it does NOT fire on the routine cached-status background poll that backs
+  `safety_get_status`/`safety_get_diag` (watched `link_reply_us.count` hold
+  flat across 25+ s of normal cached-status polling while the link's own
+  cmd histogram kept advancing underneath it). It DOES fire, one sample per
+  call, on `safety_ping()` ("force an immediate poll"), which is the only
+  MCP-reachable trigger for a live `safety_exchange()`. So the number is
+  genuinely link+ESP-dispatch time with the MCP/HTTP client's own overhead
+  excluded (unlike the 2026-09-06 ~592 ms `safety_ping`-timed-by-the-client
+  figure) — confirmed, not assumed, and the fix for the reason the earlier
+  measurement was reachable via MCP but not truly comparable.
+
+  Traffic: baseline `count=1926` (accumulated since this boot before any
+  MCP-driven `safety_ping`) plus ~213 more MCP-forced samples this session
+  (`count` end `2139`), for `n=2139` since this boot — over the requested
+  1000. Board-reported distribution at end of run: `min=6507 last=182565
+  max=321187 mean=134633 timeouts=3` (µs; 3 timeouts out of 2503 `sent`
+  per `safety_get_link_stats`, all arising from this session's own
+  back-to-back `safety_ping` bursts — a call rate far above the link's
+  normal 500 ms poll cadence — not from an ordinary caller). The firmware
+  struct carries no percentile field; a hand-collected subsample of 22
+  distinct individual `last` readings taken across the run (sorted, µs):
+  56639, 62411, 107109, 110554, 111855, 123605, 126142, 126627, 126805,
+  131965, 140179, 144278, 152937, 170986, 182565, 212234, 214374, 214746,
+  221155, 221596, 255502, 321187 — median ≈142 ms, p90 ≈222 ms (20th of 22),
+  p99/max ≈321 ms (subsample mean 161 ms, somewhat above the board's
+  all-since-boot mean of 135 ms because the subsample over-represents the
+  back-to-back-`safety_ping` bursts used to drive traffic).
+
+  Judged against the 345 ms budget: mean (135 ms) sits comfortably inside
+  it, but the observed max (321 ms, 93% of budget) does not — it climbed
+  from 203 ms (pre-session baseline) to 321 ms specifically as this
+  session's `safety_ping` call rate rose, i.e. tail latency is a function
+  of link contention/queueing, not a fixed constant, and does not have
+  much headroom left under stress. This is worse than the ≈40 ms paper
+  flight estimate by roughly 8x even at the mean, confirming the paper
+  figure was never a like-for-like number either. **Item closes** in the
+  sense the doc asked for — link-only reply latency is now isolated from
+  client overhead and measured on hardware, all samples observed stayed
+  under budget, and no trip/crash resulted — but the margin is thin enough
+  under load that a caller issuing back-to-back forced polls (rather than
+  the normal 500 ms cadence) should not be treated as free of budget risk.
+  A production consumer of `link_reply_us` should alarm on `max`, not
+  `mean`, if this is ever used as a live health signal.
 - ~~Remaining SaftyFW hardware/ includes~~ — closed 2026-09-06:
   `main.c`, `console_uart.c`, `thermo_task.c` re-reviewed line by line.
   `main.c`'s GPIO6-low latch/direction pair matches `hal_gpio_init_out()`'s
