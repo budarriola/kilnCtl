@@ -78,6 +78,12 @@ static void *kiln_cfg_store_test_malloc(size_t n)
 
 #include "../drivers/persist/kiln_cfg_store.c"
 
+// Shared mutable stub state, defined in test_profile_feasibility.c and
+// declared extern (ad-hoc, same convention as test_backup_import.c) so this
+// TU can pin a known live_thermo_count before an import that must pass the
+// 5.2a hardware-compatibility check.
+extern void test_stub_zones_set_thermo_count(uint8_t n);
+
 // ---------------------------------------------------------------------------
 // zones_http.h stub state -- controllable export/import behavior.
 // ---------------------------------------------------------------------------
@@ -91,6 +97,20 @@ static char s_stub_import_reason[96] = "";
 static int s_stub_import_call_count = 0;
 static uint8_t s_stub_import_last_bytes[ZONES_CONFIG_BLOB_MAX_SIZE];
 static size_t s_stub_import_last_len = 0;
+
+// Adversarial review 2026-09-15 (docs/audits/review_autosave_slot_fix_
+// a93ee77b_2026-09-15.md, MEDIUM finding 4): production's real nvs_save()
+// dispatches an autosave synchronously from INSIDE zones_config_import_
+// blob() (via the flash worker, which blocks the caller) -- this stub does
+// not model that by default (see H1's own reasoning above for why this file
+// avoids linking the real zones_http.c). When a test needs to exercise the
+// REAL kiln_cfg_store_autosave_from_live() branch threaded through a REAL
+// kiln_cfg_store_apply()/kiln_cfg_swap.c call (not a fake setter, per this
+// finding), it sets this flag so the stub calls the real
+// kiln_cfg_store_autosave_from_live() itself, at the same point in the call
+// sequence production does: while the override that call set is still live
+// and active_id has not yet moved.
+static bool s_stub_autosave_during_import = false;
 
 size_t zones_config_blob_size(void)
 {
@@ -120,6 +140,17 @@ bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, si
     if (reason_out && reason_cap) {
         strncpy(reason_out, s_stub_import_reason, reason_cap - 1);
         reason_out[reason_cap - 1] = '\0';
+    }
+    if (s_stub_import_result && s_stub_autosave_during_import) {
+        // Model production's real nvs_save()->autosave dispatch, which fires
+        // synchronously from inside this call, before the caller's next
+        // statement (active_id = id) ever runs. The live "export" content is
+        // whatever the caller already set up as s_stub_export_content --
+        // real firmware's live zones config is genuinely the imported bytes
+        // by this point, since zones_config_import_blob() already committed
+        // them to RAM before nvs_save() dispatches.
+        char sub[96] = {0};
+        kiln_cfg_store_autosave_from_live(sub, sizeof(sub));
     }
     return s_stub_import_result;
 }
@@ -1821,6 +1852,247 @@ static void test_import_refuses_hash_mismatch_nothing_written(void)
     free(json);
 }
 
+static void test_import_reports_failure_when_persist_fails(void)
+{
+    TEST_SECTION("kiln_cfg_store_import_package_json -- Defect 4 "
+                 "(docs/audits/kiln_profiles_feature_review_2026-09-15.md): reports FAILURE, not success, "
+                 "when the store cannot be persisted to flash, and does not leave a phantom RAM-only slot");
+    reset_state();
+
+    int32_t id1 = -1;
+    char reason[200] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Original", -1, &id1, reason, sizeof(reason)), "save succeeds");
+
+    char *json = (char *)malloc(KILN_CFG_EXPORT_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    TEST_CHECK(kiln_cfg_store_export_package_json(id1, json, KILN_CFG_EXPORT_JSON_MAX_LEN, &len, reason,
+                                                  sizeof(reason)),
+               "export succeeds");
+    char *name_digit = strstr(json, "\"name\":\"Original\"");
+    TEST_CHECK(name_digit != NULL, "found the name field to rename before import");
+    if (name_digit) {
+        // Same length, different name so it does not collide with "Original".
+        memcpy(name_digit, "\"name\":\"Imported\"", strlen("\"name\":\"Imported\""));
+    }
+
+    kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
+    uint8_t before = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+
+    fake_kv_set_write_safe_here(false); // simulate the NVS write failing (same hook the
+                                         // PSRAM-stack guard test above uses)
+    int32_t new_id = -1;
+    reason[0] = '\0';
+    bool ok = kiln_cfg_store_import_package_json(json, &new_id, reason, sizeof(reason));
+    fake_kv_set_write_safe_here(true); // restore for every later test
+
+    TEST_CHECK(!ok, "a persist failure is reported as FAILURE, not claimed success (this is the fix -- "
+                    "the pre-fix code returned true here)");
+    TEST_CHECK(reason[0] != '\0', "a specific reason is given, not silence");
+    TEST_CHECK(new_id == -1, "out_id is left untouched/at its initial value on failure, never a phantom id");
+
+    uint8_t after = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(after == before, "no slot is left behind in RAM when the persist failed -- a slot that "
+                                "cannot survive a reboot must not appear to exist either");
+
+    // Bookkeeping check, not just a count coincidence (docs/audits/
+    // review_autosave_slot_fix_a93ee77b_2026-09-15.md): the failed import's
+    // slot-allocation bookkeeping (e->in_use in particular) must be fully
+    // reversed, not merely "the count happens to still add up" -- prove it
+    // by showing a SUBSEQUENT, succeeding import can still find and use a
+    // free slot rather than seeing the store as full/corrupted from the
+    // failed attempt's leftovers.
+    int32_t retry_id = -1;
+    reason[0] = '\0';
+    bool retry_ok = kiln_cfg_store_import_package_json(json, &retry_id, reason, sizeof(reason));
+    TEST_CHECK(retry_ok, "a later import (persist now working) succeeds -- the failed attempt's slot "
+                         "bookkeeping did not leave the store thinking that slot is still occupied");
+    TEST_CHECK(retry_id > 0, "the retry got a real slot id");
+    uint8_t after_retry = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(after_retry == before + 1, "exactly one NEW slot exists after the retry -- not two (which "
+                                          "would mean the failed attempt's slot was still occupied "
+                                          "alongside the retry's own) and not zero");
+
+    free(json);
+}
+
+static void test_import_refuses_abs_max_temp_c_tighter_than_zone_max(void)
+{
+    TEST_SECTION("kiln_cfg_store_import_package_json -- section 5.3 table row 1: refuses a package whose "
+                 "Pico abs_max_temp_c ceiling is lower than its own highest configured zone max_temp_c");
+    reset_state();
+    test_stub_zones_set_thermo_count(1); // so zone 0's thermo_mask bit 0 passes the 5.2a hardware check
+
+    zones_cfg_t cand;
+    memset(&cand, 0, sizeof(cand));
+    cand.zones[0].thermo_mask = 0x01;
+    cand.zones[0].max_temp_c = 1200.0f;
+    TEST_CHECK(sizeof(cand) <= sizeof(s_stub_export_content), "test assumption: zones_cfg_t fits the stub "
+                                                              "content buffer");
+    s_stub_blob_size = sizeof(cand); // governs both the stub export/canonical size AND, below,
+                                     // the size kiln_cfg_store_import_package_json() re-derives
+                                     // the canonical form at (via the same stub)
+
+    kiln_pkg_safety_t pico;
+    memset(&pico, 0, sizeof(pico));
+    pico.count = 1;
+    pico.entries[0].param_id = 0x0104u; // "abs_max_temp_c", safety_cfg_store.c's own table
+    pico.entries[0].type = KILNLINK_PARAM_TYPE_F32;
+    pico.entries[0].flags = KILN_PKG_PARAM_FLAG_SET;
+    union { uint32_t bits; float f; } conv;
+    conv.f = 500.0f; // tighter than the package's own 1200 C zone ceiling
+    pico.entries[0].value_bits = conv.bits;
+
+    uint32_t hash = 0;
+    TEST_CHECK(kiln_package_compute_hash(1, (const uint8_t *)&cand, (uint16_t)sizeof(cand), &pico, &hash),
+               "test setup: hash computation");
+
+    char *json = (char *)malloc(KILN_PKG_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    TEST_CHECK(kiln_package_export_json("TooHot", 1, (const uint8_t *)&cand, (uint16_t)sizeof(cand), &pico,
+                                        hash, json, KILN_PKG_JSON_MAX_LEN, &len),
+               "test setup: package JSON built");
+
+    kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
+    uint8_t before = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    int32_t new_id = -1;
+    char reason[200] = {0};
+    bool ok = kiln_cfg_store_import_package_json(json, &new_id, reason, sizeof(reason));
+    TEST_CHECK(!ok, "refuses a Pico ceiling tighter than the package's own zone max_temp_c");
+    TEST_CHECK(strstr(reason, "abs_max_temp_c") != NULL, "reason names the field");
+    uint8_t after = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(after == before, "no slot was allocated on refusal");
+
+    free(json);
+}
+
+static void test_import_refuses_abs_max_temp_c_above_firmware_ceiling(void)
+{
+    TEST_SECTION("kiln_cfg_store_import_package_json -- section 5.3 table row 1: refuses a Pico "
+                 "abs_max_temp_c above this firmware's absolute sanity ceiling (ZONE_MAX_TEMP_C_MAX)");
+    reset_state();
+    test_stub_zones_set_thermo_count(1);
+
+    zones_cfg_t cand;
+    memset(&cand, 0, sizeof(cand));
+    cand.zones[0].thermo_mask = 0x01;
+    cand.zones[0].max_temp_c = 1200.0f;
+    s_stub_blob_size = sizeof(cand);
+
+    kiln_pkg_safety_t pico;
+    memset(&pico, 0, sizeof(pico));
+    pico.count = 1;
+    pico.entries[0].param_id = 0x0104u;
+    pico.entries[0].type = KILNLINK_PARAM_TYPE_F32;
+    pico.entries[0].flags = KILN_PKG_PARAM_FLAG_SET;
+    union { uint32_t bits; float f; } conv;
+    conv.f = ZONE_MAX_TEMP_C_MAX + 1.0f; // over this firmware's absolute ceiling
+    pico.entries[0].value_bits = conv.bits;
+
+    uint32_t hash = 0;
+    TEST_CHECK(kiln_package_compute_hash(1, (const uint8_t *)&cand, (uint16_t)sizeof(cand), &pico, &hash),
+               "test setup: hash computation");
+
+    char *json = (char *)malloc(KILN_PKG_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    TEST_CHECK(kiln_package_export_json("WayTooHot", 1, (const uint8_t *)&cand, (uint16_t)sizeof(cand), &pico,
+                                        hash, json, KILN_PKG_JSON_MAX_LEN, &len),
+               "test setup: package JSON built");
+
+    kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
+    uint8_t before = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    int32_t new_id = -1;
+    char reason[200] = {0};
+    bool ok = kiln_cfg_store_import_package_json(json, &new_id, reason, sizeof(reason));
+    TEST_CHECK(!ok, "refuses a Pico ceiling above this firmware's absolute sanity ceiling");
+    TEST_CHECK(strstr(reason, "abs_max_temp_c") != NULL, "reason names the field");
+    uint8_t after = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(after == before, "no slot was allocated on refusal");
+
+    free(json);
+}
+
+static void test_import_refuses_missing_abs_max_temp_c_when_zone_configured(void)
+{
+    TEST_SECTION("kiln_cfg_store_import_package_json -- section 5.3 table row 1: refuses a package with a "
+                 "configured zone but no Pico abs_max_temp_c at all, rather than assuming it is safe");
+    reset_state();
+    test_stub_zones_set_thermo_count(1);
+
+    zones_cfg_t cand;
+    memset(&cand, 0, sizeof(cand));
+    cand.zones[0].thermo_mask = 0x01;
+    cand.zones[0].max_temp_c = 1200.0f;
+    s_stub_blob_size = sizeof(cand);
+
+    kiln_pkg_safety_t pico;
+    memset(&pico, 0, sizeof(pico)); // count == 0 -- no abs_max_temp_c entry packaged at all
+
+    uint32_t hash = 0;
+    TEST_CHECK(kiln_package_compute_hash(1, (const uint8_t *)&cand, (uint16_t)sizeof(cand), &pico, &hash),
+               "test setup: hash computation");
+
+    char *json = (char *)malloc(KILN_PKG_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    TEST_CHECK(kiln_package_export_json("NoCeiling", 1, (const uint8_t *)&cand, (uint16_t)sizeof(cand), &pico,
+                                        hash, json, KILN_PKG_JSON_MAX_LEN, &len),
+               "test setup: package JSON built");
+
+    int32_t new_id = -1;
+    char reason[200] = {0};
+    bool ok = kiln_cfg_store_import_package_json(json, &new_id, reason, sizeof(reason));
+    TEST_CHECK(!ok, "refuses rather than assuming a missing ceiling is safe");
+    TEST_CHECK(strstr(reason, "abs_max_temp_c") != NULL, "reason names the field");
+
+    free(json);
+}
+
+static void test_import_accepts_abs_max_temp_c_at_or_above_zone_max(void)
+{
+    TEST_SECTION("kiln_cfg_store_import_package_json -- section 5.3 table row 1: a Pico ceiling AT OR ABOVE "
+                 "the package's own zone max is accepted (the rule is >=, not >)");
+    reset_state();
+    test_stub_zones_set_thermo_count(1);
+
+    zones_cfg_t cand;
+    memset(&cand, 0, sizeof(cand));
+    cand.zones[0].thermo_mask = 0x01;
+    cand.zones[0].max_temp_c = 1200.0f;
+    s_stub_blob_size = sizeof(cand);
+
+    kiln_pkg_safety_t pico;
+    memset(&pico, 0, sizeof(pico));
+    pico.count = 1;
+    pico.entries[0].param_id = 0x0104u;
+    pico.entries[0].type = KILNLINK_PARAM_TYPE_F32;
+    pico.entries[0].flags = KILN_PKG_PARAM_FLAG_SET;
+    union { uint32_t bits; float f; } conv;
+    conv.f = 1200.0f; // exactly equal -- must not be refused
+    pico.entries[0].value_bits = conv.bits;
+
+    uint32_t hash = 0;
+    TEST_CHECK(kiln_package_compute_hash(1, (const uint8_t *)&cand, (uint16_t)sizeof(cand), &pico, &hash),
+               "test setup: hash computation");
+
+    char *json = (char *)malloc(KILN_PKG_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    TEST_CHECK(kiln_package_export_json("JustRight", 1, (const uint8_t *)&cand, (uint16_t)sizeof(cand), &pico,
+                                        hash, json, KILN_PKG_JSON_MAX_LEN, &len),
+               "test setup: package JSON built");
+
+    int32_t new_id = -1;
+    char reason[200] = {0};
+    bool ok = kiln_cfg_store_import_package_json(json, &new_id, reason, sizeof(reason));
+    TEST_CHECK(ok, "an equal ceiling is accepted, not refused");
+    TEST_CHECK(new_id > 0, "a real slot was allocated");
+
+    free(json);
+}
+
 static void test_autosave_from_live_noop_with_no_active_config(void)
 {
     TEST_SECTION("kiln_cfg_store_autosave_from_live -- no-op (success, nothing written) with no active config");
@@ -1868,6 +2140,77 @@ static void test_autosave_from_live_updates_active_slot_and_hash(void)
     TEST_CHECK(hash_after != hash_before, "pkg_hash was recomputed over the new content");
 }
 
+static void test_apply_autosave_targets_incoming_slot_via_real_override(void)
+{
+    TEST_SECTION("kiln_cfg_store_apply -- REAL kiln_cfg_store_set_autosave_target_override()/"
+                 "kiln_cfg_store_autosave_from_live() branch protects the INCOMING slot, not the "
+                 "outgoing active one (HIGH finding 1 / MEDIUM finding 4, "
+                 "docs/audits/review_autosave_slot_fix_a93ee77b_2026-09-15.md)");
+    reset_state();
+
+    // Slot A ("Outgoing"): saved and left active.
+    for (size_t i = 0; i < sizeof(s_stub_export_content); i++) {
+        s_stub_export_content[i] = (uint8_t)(i + 1);
+    }
+    int32_t id_a = -1;
+    char reason[96] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Outgoing", -1, &id_a, reason, sizeof(reason)),
+               "test setup: save slot A");
+    TEST_CHECK(kiln_cfg_store_get_active_id() == id_a, "test setup: A is active");
+
+    // Slot B ("Incoming"): a clone of A (clone never touches active_id, per
+    // kiln_cfg_store_clone()'s own header comment) with its content then
+    // overwritten via an overwrite-by-id save_current(id_b, ...), which also
+    // does not touch active_id -- so A stays active going into the apply
+    // below, exactly like a real "apply a different saved kiln" would.
+    int32_t id_b = -1;
+    TEST_CHECK(kiln_cfg_store_clone(id_a, "Incoming", &id_b, reason, sizeof(reason)),
+               "test setup: clone A into a second, currently-inactive slot B");
+    for (size_t i = 0; i < sizeof(s_stub_export_content); i++) {
+        s_stub_export_content[i] = (uint8_t)(i + 100);
+    }
+    TEST_CHECK(kiln_cfg_store_save_current("Incoming", id_b, NULL, reason, sizeof(reason)),
+               "test setup: overwrite B's content in place (does not move active_id)");
+    TEST_CHECK(kiln_cfg_store_get_active_id() == id_a, "test setup: A is still active, B is not");
+
+    uint8_t blob_a_before[ZONES_CONFIG_BLOB_MAX_SIZE];
+    uint16_t blob_a_before_len = 0;
+    TEST_CHECK(kiln_cfg_store_get_full_package(id_a, blob_a_before, sizeof(blob_a_before), &blob_a_before_len,
+                                               NULL, NULL, 0),
+               "test setup: read A's original bytes");
+
+    // Now apply B. Production's real sequence inside kiln_cfg_store_apply():
+    // set override(B) -> zones_config_import_blob(B's bytes) [autosave fires
+    // HERE, live config already reads as B, active_id is STILL A] -> clear
+    // override -> active_id = B. The stub fires the REAL autosave_from_live()
+    // at exactly that point, with the live "export" content already reading
+    // as B's bytes below.
+    for (size_t i = 0; i < sizeof(s_stub_export_content); i++) {
+        s_stub_export_content[i] = (uint8_t)(i + 100); // B's bytes, matching what B was saved with
+    }
+    s_stub_autosave_during_import = true;
+    bool applied = kiln_cfg_store_apply(id_b, /*ack_no_safety_processor=*/true, reason, sizeof(reason));
+    s_stub_autosave_during_import = false;
+    TEST_CHECK(applied, "apply succeeds");
+    TEST_CHECK(kiln_cfg_store_get_active_id() == id_b, "active_id moved to B after apply returned");
+
+    uint8_t blob_a_after[ZONES_CONFIG_BLOB_MAX_SIZE];
+    uint16_t blob_a_after_len = 0;
+    TEST_CHECK(kiln_cfg_store_get_full_package(id_a, blob_a_after, sizeof(blob_a_after), &blob_a_after_len,
+                                               NULL, NULL, 0),
+               "read A's bytes after the apply+in-flight autosave");
+    TEST_CHECK(blob_a_before_len == blob_a_after_len && memcmp(blob_a_before, blob_a_after, blob_a_before_len) == 0,
+               "slot A (outgoing) was NOT touched by the autosave that fired mid-apply");
+
+    uint8_t blob_b_after[ZONES_CONFIG_BLOB_MAX_SIZE];
+    uint16_t blob_b_after_len = 0;
+    TEST_CHECK(kiln_cfg_store_get_full_package(id_b, blob_b_after, sizeof(blob_b_after), &blob_b_after_len,
+                                               NULL, NULL, 0),
+               "read B's bytes after the apply+in-flight autosave");
+    TEST_CHECK(blob_b_after_len > 0 && blob_b_after[0] == 100,
+               "slot B (incoming) is the one the in-flight autosave protected/refreshed");
+}
+
 void run_test_kiln_cfg_store(void)
 {
     test_save_clone_apply_roundtrip();
@@ -1912,8 +2255,14 @@ void run_test_kiln_cfg_store(void)
     test_import_refuses_malformed();
     test_import_refuses_newer_pkg_schema_nothing_written();
     test_import_refuses_hash_mismatch_nothing_written();
+    test_import_reports_failure_when_persist_fails();
+    test_import_refuses_abs_max_temp_c_tighter_than_zone_max();
+    test_import_refuses_abs_max_temp_c_above_firmware_ceiling();
+    test_import_refuses_missing_abs_max_temp_c_when_zone_configured();
+    test_import_accepts_abs_max_temp_c_at_or_above_zone_max();
     test_autosave_from_live_noop_with_no_active_config();
     test_autosave_from_live_updates_active_slot_and_hash();
+    test_apply_autosave_targets_incoming_slot_via_real_override();
 
     cfg_fs_deinit();
 }
