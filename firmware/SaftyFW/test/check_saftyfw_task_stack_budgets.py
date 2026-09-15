@@ -351,7 +351,12 @@ CEILING_BYTES = {
     "link_task": 9472,      # measured 4736 B, unresolved regsp -- 2x margin
     "log_task": 472,
     "relay_owner": 224,
-    "safety_core": 2160,
+    # KILN_PROFILES_PLAN.md item 16: safety_core_task's tick gained one bool
+    # local (abs_max_temp_c_unconfigured) and a short branch for the
+    # unconfigured-ARMED backstop, moving the measured total 2160 -> 2168 B.
+    # Re-pinned to the new measured value, same "pinned at measured, not a
+    # padded guess" convention this table's own header comment describes.
+    "safety_core": 2168,
     "thermo_task": 1216,
     "update_task": 2536,
     "watchdog_task": 304,

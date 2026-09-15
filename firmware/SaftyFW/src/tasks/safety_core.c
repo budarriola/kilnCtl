@@ -288,6 +288,11 @@ static bool    s_borrowed_sample_counter_known[CONTEXT_SNAPSHOT_MAX_ZONES];
 // standing mismatch is exactly as true on tick 2 as it was on tick 1.
 static bool s_borrowed_type_mismatch_warned;
 
+// KILN_PROFILES_PLAN.md item 16 -- same "log once on the transition, not
+// every tick" idiom as s_borrowed_type_mismatch_warned just above, for the
+// ARMED-while-unconfigured backstop below.
+static bool s_unconfigured_armed_warned;
+
 // Cached alongside s_guard_cfg by apply_config_to_guard_cfg(), for the same
 // reason: recomputed only when the commissioned record changes, read every
 // tick. See that function's comment for why S9 needs it. False until a
@@ -1008,6 +1013,46 @@ static safety_guard_input_t safety_core_build_input(void)
     // could not fire at any temperature -- see
     // safety_core_load_guard_cfg()'s own doc comment.
     safety_core_load_guard_cfg(&cfg_rec);
+
+    // KILN_PROFILES_PLAN.md item 16, defence in depth -- NOT the primary
+    // interlock. The primary refusal already lives in safety_core_request_
+    // enable() (commissioning_gate_energize_allowed(), checked BEFORE
+    // relay_owner_command_energize(true) is ever called) and in relay_owner
+    // itself (opus review d22431d0: an uncommissioned Pico fails the
+    // commissioning gate, so the ON direction is refused before ARMED is
+    // ever reachable -- confirmed not exploitable today). This is a second,
+    // independent backstop at the one place every tick already passes
+    // through regardless of how ARMED was reached, in case a future change
+    // to relay_owner or the commissioning gate ever defeats that primary
+    // path without anyone noticing here.
+    //
+    // Do NOT "fix" this by inventing a default for abs_max_temp_c --
+    // CONFIG_REFERENCE.md section 7's "no default may be a guess dressed as
+    // a value" is exactly why S1 itself stays at "0 = never trips" for an
+    // unconfigured board (safety_guards.c/.h, deliberate). This check does
+    // not touch S1 or safety_guards.c at all: it is a separate, blunt
+    // circuit breaker that de-energizes directly through relay_owner (the
+    // one module that owns the safety relay -- never a raw GPIO write, same
+    // as every other call site here) the instant it observes the specific
+    // combination the owner said must never exist: ARMED while the ceiling
+    // that is supposed to be enforced was never actually commissioned.
+    // "Unconfigured" here uses the SAME fields_set bit safety_core_load_
+    // guard_cfg() just used two lines above, so this cannot drift from what
+    // S1 itself considers unconfigured (project_reset_one_side_bug_class --
+    // two places deriving the same fact independently is exactly how that
+    // class of bug starts; this reads the identical bit instead).
+    bool abs_max_temp_c_unconfigured = (cfg_rec.fields_set & CONFIG_STORE_SET_ABS_MAX_TEMP_C) == 0u;
+    if (abs_max_temp_c_unconfigured && relay_owner_get_state() == RELAY_OWNER_STATE_ARMED) {
+        if (!s_unconfigured_armed_warned) {
+            log_task_log(LOG_LEVEL_ERROR, "safety_core",
+                         "unreachable state observed: ARMED with abs_max_temp_c unconfigured -- "
+                         "forcing de-energize (KILN_PROFILES_PLAN.md item 16 backstop)");
+        }
+        s_unconfigured_armed_warned = true;
+        (void)relay_owner_command_energize(false);
+    } else {
+        s_unconfigured_armed_warned = false;
+    }
 
     // "CTs are optional hardware" pass. cts_disabled is true ONLY on the
     // explicit answer -- the CONFIG_STORE_SET_CT_INSTALLED bit present AND
