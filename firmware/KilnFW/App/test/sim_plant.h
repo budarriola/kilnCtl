@@ -21,7 +21,15 @@
 extern "C" {
 #endif
 
-#define SIM_PLANT_DELAY_MAX_STEPS 64
+/* Raised 64 -> 128 (ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 6.1): at dt=1s the
+ * old 64-step capacity silently truncated any sensor_delay_s > 63s (e.g. the
+ * kiln-scaled 76.9s dead time collapsed to 64s), which produced a
+ * byte-identical row against an unrelated 64.0s cell and looked like proof
+ * of a numerical artifact when it was actually the ring running out of room.
+ * See sim_plant_state_t::delay_truncated below -- the fix is not just the
+ * larger capacity, it's making any remaining truncation loud rather than
+ * silent. */
+#define SIM_PLANT_DELAY_MAX_STEPS 128
 
 /* SCENARIO_SIMULATION_PLAN.md WI-1: opt-in three-node model (element / bulk
  * load / sensor tip), selected per-plant via sim_plant_cfg_t::node_model.
@@ -79,6 +87,13 @@ typedef struct {
     float delay_ring[SIM_PLANT_DELAY_MAX_STEPS];
     int   delay_len;                 /* number of valid entries in delay_ring, growing to its capacity */
     int   delay_head;                /* next write position (ring buffer) */
+    /* Set (sticky -- never cleared by sim_plant_reset()'s memset-then-set-up
+     * path clears it at the START of a new run, but sensor_pipeline_step()
+     * sets it again on any tick that truncates) whenever cfg->sensor_delay_s
+     * exceeds the ring's capacity (sec 6.1). Every driver MUST check this
+     * after a run and refuse the cell rather than silently proceeding on a
+     * shortened dead time -- do not weaken this to a log line. */
+    bool  delay_truncated;
 
     /* SIM_NODE_THREE only. Always initialized to ambient_c by
      * sim_plant_reset() regardless of node_model (harmless under
@@ -92,9 +107,11 @@ void sim_plant_reset(sim_plant_state_t *state, const sim_plant_cfg_t *cfg);
 
 /* Advances the model by dt_s using heater duty in [0,1]. dt_s must stay
  * small and constant enough for SIM_PLANT_DELAY_MAX_STEPS * dt_s to cover
- * cfg->sensor_delay_s, or the delay is silently clamped to the ring's
- * capacity -- fine for the tick rates this is meant to exercise (1-10s),
- * not a general-purpose variable-timestep integrator. */
+ * cfg->sensor_delay_s, or the delay is clamped to the ring's capacity AND
+ * state->delay_truncated is set (sec 6.1) -- the caller must check that flag
+ * and refuse the cell rather than silently proceeding on a shortened dead
+ * time. Fine for the tick rates this is meant to exercise (1-10s), not a
+ * general-purpose variable-timestep integrator. */
 void sim_plant_step(sim_plant_state_t *state, const sim_plant_cfg_t *cfg, float duty, float dt_s);
 
 /* WI-1: the opt-in three-node step (SCENARIO_SIMULATION_PLAN.md sec 2.1).

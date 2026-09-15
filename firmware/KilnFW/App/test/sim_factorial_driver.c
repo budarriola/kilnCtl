@@ -358,6 +358,16 @@ static bool run_cell_firing(const sim_plant_cfg_t *plant_cfg_in, float model_k_d
         }
     }
 
+    if (pstate.delay_truncated) {
+        /* sec 6.1: the sensor delay ring ran out of capacity and silently
+         * shortened the effective dead time -- the exact DT_S-trap mechanism
+         * that once made a 76.9s cell look byte-identical to an unrelated
+         * 64.0s one. Refuse loudly rather than measure a wrong dead time. */
+        snprintf(out->refusal_reason, sizeof(out->refusal_reason),
+                 "sensor delay ring truncated (sensor_delay_s=%.2f exceeds SIM_PLANT_DELAY_MAX_STEPS*dt=%.2f)",
+                 (double)plant_cfg_in->sensor_delay_s, (double)(SIM_PLANT_DELAY_MAX_STEPS * DT_S));
+        return false;
+    }
     if (nan_seen) {
         snprintf(out->refusal_reason, sizeof(out->refusal_reason), "NaN observed in plant state");
         return false;

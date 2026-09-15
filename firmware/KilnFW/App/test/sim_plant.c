@@ -57,7 +57,12 @@ static void sensor_pipeline_step(sim_plant_state_t *state, const sim_plant_cfg_t
      * logic, not modeling transport delay with precision). */
     int delay_steps = (dt_s > 0.0f) ? (int)(cfg->sensor_delay_s / dt_s + 0.5f) : 0;
     if (delay_steps < 0) delay_steps = 0;
-    if (delay_steps >= SIM_PLANT_DELAY_MAX_STEPS) delay_steps = SIM_PLANT_DELAY_MAX_STEPS - 1;
+    if (delay_steps >= SIM_PLANT_DELAY_MAX_STEPS) {
+        delay_steps = SIM_PLANT_DELAY_MAX_STEPS - 1;
+        /* sec 6.1: make the clamp loud. Sticky for the run -- a driver
+         * checks this once at run end, not every tick. */
+        state->delay_truncated = true;
+    }
 
     state->delay_ring[state->delay_head] = source_c;
     if (state->delay_len < SIM_PLANT_DELAY_MAX_STEPS) {

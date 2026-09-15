@@ -441,6 +441,7 @@ static bool run_firing(const sim_scenario_t *sc, sim_arm_t arm, const float *sta
         }
     }
 
+    if (pstate.delay_truncated) { out->refusals++; snprintf(out->refusal_reason, sizeof(out->refusal_reason), "sensor delay ring truncated (sensor_delay_s=%.2f exceeds SIM_PLANT_DELAY_MAX_STEPS*dt=%.2f)", (double)sc->plant.sensor_delay_s, (double)(SIM_PLANT_DELAY_MAX_STEPS * DT_S)); }
     if (nan_seen) { out->refusals++; snprintf(out->refusal_reason, sizeof(out->refusal_reason), "NaN observed in plant state"); }
     if (!bounds_ok) { out->refusals++; snprintf(out->refusal_reason, sizeof(out->refusal_reason), "sensor reading left [%.1f, %.1f]", (double)floor_c, (double)ceiling_c); }
     if (strength_pct == 0 && !static_matched && !all_bitexact) {
