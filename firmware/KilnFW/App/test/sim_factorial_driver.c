@@ -521,7 +521,21 @@ int main(int argc, char **argv)
                 ok = true;
             } else {
                 const float *mult_arg = (arm == CELL_ARM_STATIC_MATCHED) ? measured_mult : NULL;
-                if (arm == CELL_ARM_STATIC_MATCHED && !have_fuzzy50) continue; /* nothing to match against */
+                if (arm == CELL_ARM_STATIC_MATCHED && !have_fuzzy50) {
+                    /* A_STATIC_MATCHED's whole purpose is to replay A_FUZZY50's measured
+                     * effective gain multipliers with fuzzy math bypassed -- it has no
+                     * independent gain definition of its own, so when A_FUZZY50 refuses
+                     * there is nothing for it to match and it cannot be run at all (not
+                     * "run with defaults", which would silently compare against a
+                     * different, unintended control arm). Print a refusal line for the
+                     * dependent arm too rather than dropping it with no trace, so the
+                     * per-cell arm tally the fuzzy keep/remove decision depends on never
+                     * loses a row silently. */
+                    printf("CELL_REFUSED %s A_STATIC_MATCHED: dependent on A_FUZZY50, which refused: %s\n",
+                           cell->cell_id, r_fuzzy50.refusal_reason);
+                    cell_ok = false;
+                    continue;
+                }
                 ok = run_cell_firing(&plant, model_k_dc, model_tau_s, model_dead_time_s, ambient_c, t1_off, t2_off,
                                       cell->a5_ramp_rate_c_per_hr, arm, mult_arg, &r);
             }
