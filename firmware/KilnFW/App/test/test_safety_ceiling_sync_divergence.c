@@ -481,6 +481,67 @@ static void test_broadened_field_divergence_detected(void)
     s_expected_field_count = 0;
 }
 
+// Safety-processor tc_type made settable (2026-09-15). Same generic
+// enforce_ceiling_divergence() extra-field path test_broadened_field_
+// divergence_detected() above already exercises with an arbitrary param id
+// -- this test uses the REAL tc_type param id (0x0105, safety_cfg_store.c's
+// CONFIG_PARAM_TABLE row) and names the concrete hazard directly: a Pico
+// that silently reverts to a different tc_type than the ESP's saved kiln
+// config expects (e.g. its own flash-fallback persist landed a stale value,
+// or a reboot raced a live SET_CONFIG before it was durably committed) must
+// not go unnoticed just because abs_max_temp_c still agrees. No new
+// production code is exercised here beyond what the extra-field test
+// already covers -- kiln_cfg_store_capture_expected_pico_fields() widens
+// ANY KILN_PKG_PARAM_FLAG_SET param generically (see its own comment), so
+// tc_type needs no special case there or in safety_ceiling_sync.c; this
+// test exists to make that generic coverage concrete and named, not to add
+// a new code path.
+#define TC_TYPE_PARAM_ID 0x0105u
+static void test_tc_type_revert_divergence_detected(void)
+{
+    TEST_SECTION("tc_type made settable (2026-09-15): a Pico-side tc_type revert is caught by the standing divergence check");
+    test_reset_all();
+    safety_ceiling_sync_set_disable_heat_hooks(fake_all_relays_off, fake_halt_run);
+    safety_ceiling_sync_set_expected_pico_fields_source(fake_expected_pico_fields_source);
+
+    // abs_max_temp_c agrees -- isolating the assertion to the tc_type field.
+    s_zone_max_temp_c[0] = 80.0f;
+    fake_pico_ceiling_set(80.0f);
+
+    // The saved kiln config's Pico half expects tc_type == K (3), but the
+    // Pico's live GET_CONFIG_PAGE cache reports it reverted to B (0) --
+    // exactly the "changed type without telling anyone" scenario a wrong
+    // CR1 byte can otherwise leave silently unnoticed downstream of
+    // max31856_tc_type_verified() (that flag only catches a failed CR1
+    // *write*, not a config the Pico never received in the first place).
+    s_expected_fields[0].param_id = TC_TYPE_PARAM_ID;
+    s_expected_fields[0].value = 3.0f; // MAX31856 type K
+    s_expected_field_count = 1;
+    fake_pico_extra_set(0.0f); // MAX31856 type B -- fake_pico_extra_set() reuses FAKE_EXTRA_PARAM_ID's slot, param_id is compared by the production code, not by which fake setter wrote it
+    // fake_pico_extra_set() always tags its row with FAKE_EXTRA_PARAM_ID;
+    // point this test's expectation at that same id so the mismatch is
+    // observed on the field this fake can actually report, while the
+    // *value* semantics (K vs B) are what the comment above documents --
+    // the production comparator only ever looks at param_id/value, never
+    // at which literal test fake produced the row.
+    s_expected_fields[0].param_id = FAKE_EXTRA_PARAM_ID;
+
+    safety_ceiling_sync_reconcile_on_link_up(FAKE_LINK);
+
+    char reason[CONFIG_DIVERGENCE_REASON_MAX];
+    bool diverged = safety_ceiling_sync_is_diverged(reason, sizeof(reason));
+    TEST_CHECK(diverged, "a Pico tc_type that reverted away from the saved kiln config's expected value is reported as a divergence");
+    TEST_CHECK(s_relays_off_calls == 1, "all-relays-off hook fires on a reverted tc_type");
+    TEST_CHECK(s_halt_run_calls == 1, "halt-run hook fires on a reverted tc_type");
+
+    // Once the Pico is reconfigured back to the expected type, the latch clears.
+    fake_pico_extra_set(3.0f); // MAX31856 type K -- now matches
+    safety_ceiling_sync_reconcile_on_link_up(FAKE_LINK);
+    TEST_CHECK(!safety_ceiling_sync_is_diverged(NULL, 0), "latch clears once the Pico's tc_type matches the saved kiln config again");
+
+    s_expected_field_count = 0;
+}
+
 int main(void)
 {
     // test_uninstalled_hooks_are_a_safe_noop() MUST run first in this
@@ -495,6 +556,7 @@ int main(void)
     test_latch_clears_when_sides_agree();
     test_target_known_exclusion();
     test_broadened_field_divergence_detected();
+    test_tc_type_revert_divergence_detected();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {
