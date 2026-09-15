@@ -20,6 +20,7 @@
 #include "dashboard_http.h"
 #include "display_power_cfg.h"
 #include "hal_kv.h"
+#include "hal_sysinfo.h" /* hal_sysinfo_coredump_get_info()/_read() -- coredump_{info,chunk}_get_handler() below */
 #include "http_form.h"
 #include "kiln_cfg_store.h"
 #include "kiln_io.h"
@@ -389,6 +390,89 @@ static esp_err_t crash_report_ack_post_handler(httpd_req_t *req)
         httpd_resp_set_status(req, "409 Conflict");
     }
     return httpd_resp_send(req, json, strlen(json));
+}
+
+/* Chunk cap shared by both coredump endpoints below -- declared once, ahead
+ * of both handlers, so coredump_info_get_handler() can report the same
+ * number coredump_chunk_get_handler() actually enforces. */
+#define COREDUMP_HTTP_CHUNK_MAX 4096u
+
+/* GET /api/coredump/info -- whether a coredump image is present, its
+ * self-reported length, and the fixed partition size, so a PC-side tool can
+ * decide how many chunks to fetch before calling /api/coredump/chunk at all.
+ * Docs: docs/audits/esp_coredump_http_reader_2026-09-14.md. */
+static esp_err_t coredump_info_get_handler(httpd_req_t *req)
+{
+    hal_sysinfo_coredump_info_t info;
+    hal_status_t st = hal_sysinfo_coredump_get_info(&info);
+    char json[160];
+    int n;
+    if (st != HAL_OK) {
+        n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", hal_status_to_name(st));
+        httpd_resp_set_status(req, "500 Internal Server Error");
+    } else {
+        n = snprintf(json, sizeof(json),
+                     "{\"ok\":true,\"present\":%s,\"data_len\":%lu,\"partition_size\":%lu,\"chunk_size\":%u}",
+                     info.present ? "true" : "false", (unsigned long)info.data_len,
+                     (unsigned long)info.partition_size, (unsigned)COREDUMP_HTTP_CHUNK_MAX);
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, (n > 0 && (size_t)n < sizeof(json)) ? (size_t)n : 0);
+}
+
+/* GET /api/coredump/chunk?offset=N&len=M -- bounded raw bytes from the
+ * `coredump` partition, application/octet-stream. `len` is capped at
+ * COREDUMP_HTTP_CHUNK_MAX (4096) regardless of what the caller asks for --
+ * this repo has two documented panics from oversized locals on the shared
+ * httpd task stack (docs note: "httpd stack blob class"), so the transfer
+ * buffer here is heap-allocated (freed before every return) rather than a
+ * stack array, on top of being small. A caller wanting the whole ~1 MB
+ * partition is expected to call this in a loop -- see the PC-side fetch
+ * tool, which does exactly that. */
+static esp_err_t coredump_chunk_get_handler(httpd_req_t *req)
+{
+    char query[64];
+    char off_str[16];
+    char len_str[16];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "offset", off_str, sizeof(off_str)) != ESP_OK ||
+        httpd_query_key_value(query, "len", len_str, sizeof(len_str)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "offset and len query params required");
+        return ESP_FAIL;
+    }
+    char *endp = NULL;
+    unsigned long offset_ul = strtoul(off_str, &endp, 10);
+    if (!endp || *endp != '\0') {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "offset must be a decimal integer");
+        return ESP_FAIL;
+    }
+    endp = NULL;
+    unsigned long len_ul = strtoul(len_str, &endp, 10);
+    if (!endp || *endp != '\0' || len_ul == 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "len must be a positive decimal integer");
+        return ESP_FAIL;
+    }
+    if (len_ul > COREDUMP_HTTP_CHUNK_MAX) {
+        len_ul = COREDUMP_HTTP_CHUNK_MAX; /* clamp, never refuse -- caller just gets a smaller chunk than asked */
+    }
+
+    uint8_t *buf = malloc((size_t)len_ul);
+    if (!buf) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory for chunk buffer");
+        return ESP_FAIL;
+    }
+    hal_status_t st = hal_sysinfo_coredump_read((uint32_t)offset_ul, buf, (uint32_t)len_ul);
+    if (st != HAL_OK) {
+        free(buf);
+        char errmsg[96];
+        snprintf(errmsg, sizeof(errmsg), "coredump read failed: %s", hal_status_to_name(st));
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, errmsg);
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/octet-stream");
+    esp_err_t send_err = httpd_resp_send(req, (const char *)buf, (size_t)len_ul);
+    free(buf);
+    return send_err;
 }
 
 /* POST /api/crash_report/clear -- acknowledge AND erase the coredump image
@@ -1481,6 +1565,12 @@ esp_err_t diagnostics_http_start(SafetyLinkClass *safety)
     static const httpd_uri_t cfgfs_file_post_uri = {
         .uri = "/api/cfgfs/file", .method = HTTP_POST, .handler = cfgfs_file_post_handler,
     };
+    static const httpd_uri_t coredump_info_api_uri = {
+        .uri = "/api/coredump/info", .method = HTTP_GET, .handler = coredump_info_get_handler,
+    };
+    static const httpd_uri_t coredump_chunk_api_uri = {
+        .uri = "/api/coredump/chunk", .method = HTTP_GET, .handler = coredump_chunk_get_handler,
+    };
     static const httpd_uri_t crash_report_ack_uri = {
         .uri = "/api/crash_report/ack", .method = HTTP_POST, .handler = crash_report_ack_post_handler,
     };
@@ -1548,6 +1638,16 @@ esp_err_t diagnostics_http_start(SafetyLinkClass *safety)
     err = httpd_register_uri_handler(server, &crash_report_api_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/crash_report) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &coredump_info_api_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/coredump/info) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &coredump_chunk_api_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/coredump/chunk) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &cfgfs_status_api_uri);

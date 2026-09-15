@@ -20,7 +20,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, capability_preflight, config_presets, debug_probe, devices, elf_archive, esp_app_desc, flash_provenance, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, capability_preflight, config_presets, coredump_fetch, debug_probe, devices, elf_archive, esp_app_desc, flash_provenance, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -947,6 +947,66 @@ def find_crash_elf(host: Optional[str] = None, fw_build: Optional[str] = None) -
     if path is None:
         return f"error: {message}"
     return message
+
+
+@_srv._tool()
+def read_esp_coredump(host: Optional[str] = None, out_path: Optional[str] = None,
+                       elf_path: Optional[str] = None, symbolize: bool = True) -> str:
+    """Reads the ESP's coredump partition over HTTP (diagnostics_http.c's
+    `/api/coredump/info` + `/api/coredump/chunk`, 2026-09-14) -- no JTAG, no
+    OpenOCD, nothing that touches the board's execution state. This is the
+    sanctioned replacement for probing the coredump over a debug interface:
+    see docs/audits/esp_coredump_extraction_2026-09-14.md for the incident
+    (a believed-read-only OpenOCD flash-bank query loaded an on-target
+    flasher stub, hung, tripped the interrupt watchdog, and reset the board)
+    that this tool exists to make unnecessary.
+
+    Fetches into `out_path` (default: a coredump_<host>.bin file under the
+    OS temp dir) and, if `symbolize` (default True), also finds the matching
+    archived ELF via `find_crash_elf()` and runs espcoredump against both.
+    Fails LOUD -- never a plausible-looking wrong backtrace -- on: no
+    coredump present, a truncated transfer, no archived ELF found for the
+    board's reported fw_build, or an ELF that does not match the coredump
+    (espcoredump's own SHA256 check, propagated verbatim). Pass `elf_path`
+    to symbolize against a specific ELF instead of looking one up.
+    Pass `symbolize=False` to only fetch the raw file (e.g. no ESP-IDF
+    toolchain available on this machine) -- still gets you the coredump off
+    the board and onto disk, uninspected."""
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
+    resolved = _ota_resolve_host(host)
+
+    if out_path is None:
+        import tempfile
+        safe_host = resolved.replace(":", "_").replace("/", "_")
+        out_path = os.path.join(tempfile.gettempdir(), f"coredump_{safe_host}.bin")
+
+    try:
+        n = coredump_fetch.fetch_coredump_over_http(resolved, out_path)
+    except coredump_fetch.CoredumpFetchError as exc:
+        return f"error: {exc}"
+
+    result = f"fetched coredump: {n} bytes from {resolved} -> {out_path}"
+    if not symbolize:
+        return result
+
+    fw_build = None
+    if elf_path is None:
+        try:
+            info = capability_preflight.get_board_info(resolved)
+        except Exception as exc:  # noqa: BLE001 - report as a normal tool error, not a crash
+            return f"{result}\nerror: could not query board at {resolved} for fw_build to find a matching ELF: {exc}"
+        fw_build = info.fw_build
+        if not fw_build:
+            return f"{result}\nerror: board at {resolved} did not report fw_build in /api/status -- pass elf_path explicitly"
+        elf_path, message = elf_archive.find_kiln_elf_for_build(fw_build)
+        if elf_path is None:
+            return f"{result}\nerror: {message}"
+
+    try:
+        symbolized = coredump_fetch.symbolize_coredump(out_path, elf_path, fw_build=fw_build or "<given explicitly>")
+    except coredump_fetch.CoredumpSymbolizeError as exc:
+        return f"{result}\nerror: {exc}"
+    return f"{result}\nelf={elf_path}\n{symbolized}"
 
 
 @_srv._tool()

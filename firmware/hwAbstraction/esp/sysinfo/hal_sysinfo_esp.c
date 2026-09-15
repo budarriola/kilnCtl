@@ -214,3 +214,53 @@ hal_status_t hal_sysinfo_coredump_erase(void) {
     esp_err_t err = esp_core_dump_image_erase();
     return hal_esp_err_to_status(err);
 }
+
+/* espcoredump's on-flash image stores its own total length as a little-
+ * endian uint32_t at partition offset 0 (core_dump_flash.c's
+ * BLANK_COREDUMP_SIZE == 0xFFFFFFFF sentinel for "never written", same
+ * constant crash_report.c's neighbor core_dump_flash.c compares against).
+ * Reading it directly here (rather than adding a second, competing
+ * "core-dump summary" abstraction) keeps this file's one job -- raw
+ * partition bytes -- separate from crash_report.c's parsed-summary job. */
+#define KILNCTL_COREDUMP_BLANK_LEN 0xFFFFFFFFu
+
+static const esp_partition_t *find_coredump_partition(void) {
+    return esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, NULL);
+}
+
+hal_status_t hal_sysinfo_coredump_get_info(hal_sysinfo_coredump_info_t *out) {
+    if (!out) {
+        return HAL_INVALID_ARG;
+    }
+    memset(out, 0, sizeof(*out));
+
+    const esp_partition_t *part = find_coredump_partition();
+    if (!part) {
+        return HAL_IO; /* no coredump partition in the partition table at all */
+    }
+    out->partition_size = (uint32_t)part->size;
+    out->present = hal_sysinfo_coredump_present();
+
+    uint32_t data_len = KILNCTL_COREDUMP_BLANK_LEN;
+    esp_err_t err = esp_partition_read(part, 0, &data_len, sizeof(data_len));
+    if (err != ESP_OK) {
+        return hal_esp_err_to_status(err);
+    }
+    out->data_len = data_len;
+    return HAL_OK;
+}
+
+hal_status_t hal_sysinfo_coredump_read(uint32_t offset, void *buf, uint32_t len) {
+    if (!buf || len == 0) {
+        return HAL_INVALID_ARG;
+    }
+    const esp_partition_t *part = find_coredump_partition();
+    if (!part) {
+        return HAL_IO;
+    }
+    if ((uint64_t)offset + (uint64_t)len > (uint64_t)part->size) {
+        return HAL_INVALID_ARG; /* refuse an out-of-range span outright, never truncate silently */
+    }
+    esp_err_t err = esp_partition_read(part, offset, buf, len);
+    return hal_esp_err_to_status(err);
+}

@@ -184,6 +184,37 @@ bool hal_sysinfo_coredump_present(void);
  * call, made once the crash report built from it has been consumed. */
 hal_status_t hal_sysinfo_coredump_erase(void);
 
+/* Raw coredump-partition access for coredump_http.c's chunked HTTP reader
+ * (docs/audits/esp_coredump_http_reader_2026-09-14.md). Deliberately separate
+ * from the presence/erase pair above, which this header's top comment
+ * documents as the ONLY core-dump surface the original plan called for --
+ * this addition is scoped narrowly (raw bytes only, no summary parsing) so it
+ * does not reopen that scope decision.
+ *
+ * `hal_sysinfo_coredump_get_info` reports the coredump PARTITION's total
+ * size (`partition_size`, fixed at build time by partitions.csv) and the
+ * coredump IMAGE's own declared length (`data_len`, the little-endian
+ * uint32_t stored at partition offset 0 by espcoredump's on-flash format --
+ * 0xFFFFFFFF/`BLANK_COREDUMP_SIZE` when no dump has ever been written).
+ * `present` mirrors hal_sysinfo_coredump_present() so a caller does not have
+ * to reason about the difference between "blank" and "unreadable" itself.
+ *
+ * `hal_sysinfo_coredump_read` reads `len` bytes starting at byte `offset`
+ * (relative to the partition, i.e. the same coordinate space as `data_len`
+ * above) into caller-owned `buf`. Bounds are the caller's responsibility to
+ * keep within `partition_size` -- esp_partition_read() itself already
+ * refuses an out-of-range span, and that failure is passed through as
+ * HAL_IO rather than silently truncated, so a caller cannot mistake a
+ * refused read for a short, valid one. */
+typedef struct {
+    bool     present;         /* hal_sysinfo_coredump_present()'s own check */
+    uint32_t data_len;        /* image's self-reported length; BLANK (0xFFFFFFFF) if never written */
+    uint32_t partition_size;  /* whole `coredump` partition, from partitions.csv */
+} hal_sysinfo_coredump_info_t;
+
+hal_status_t hal_sysinfo_coredump_get_info(hal_sysinfo_coredump_info_t *out);
+hal_status_t hal_sysinfo_coredump_read(uint32_t offset, void *buf, uint32_t len);
+
 #ifdef __cplusplus
 }
 #endif

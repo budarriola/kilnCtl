@@ -76,6 +76,7 @@ GROUP_OVERRIDES = {
     "debug_check_partition_table": "debug",
     "find_crash_elf": "debug",
     "find_safty_crash_elf": "debug",
+    "read_esp_coredump": "debug",
     "sw_reset_esp": "ota",
     # LVGL page interaction.
     "list_buttons": "ui",
@@ -147,6 +148,9 @@ KEYWORDS = {
                        "crash", "fw_build", "which elf", "matching build"),
     "find_safty_crash_elf": ("symbolize", "backtrace", "panic", "rp2040", "pico",
                              "saftyfw", "elf_archive", "commit", "which elf"),
+    "read_esp_coredump": ("coredump", "core dump", "panic", "crash", "partition",
+                          "esp_partition_read", "chunk", "http", "no jtag",
+                          "read-only", "espcoredump", "fetch", "download"),
     "sw_reset_esp": ("reboot", "reset both", "restart", "grace window",
                      "config_store", "commission while armed"),
     "saleae_capture": ("logic", "analyzer", "trace", "waveform", "timing"),
