@@ -132,6 +132,11 @@ static float s_pico_extra_c = 0.0f;
 static uint16_t s_pico_extra_param_id = FAKE_EXTRA_PARAM_ID;
 static uint8_t s_pico_extra_type = KILNLINK_PARAM_TYPE_F32;
 
+// 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md,
+// MEDIUM 5): controllable fake for the stale-cache accessor. Defaults false
+// (fresh cache, matches every existing test in this file unless it opts in).
+static bool s_cache_stale = false;
+
 static void fake_pico_ceiling_reset(void)
 {
     s_pico_ceiling_set = false;
@@ -140,6 +145,7 @@ static void fake_pico_ceiling_reset(void)
     s_pico_extra_c = 0.0f;
     s_pico_extra_param_id = FAKE_EXTRA_PARAM_ID;
     s_pico_extra_type = KILNLINK_PARAM_TYPE_F32;
+    s_cache_stale = false;
 }
 
 static void fake_pico_ceiling_set(float value)
@@ -171,6 +177,11 @@ size_t safety_cfg_store_param_count(void)
     size_t n = s_pico_ceiling_set ? 1u : 0u;
     n += s_pico_extra_set ? 1u : 0u;
     return n;
+}
+
+bool safety_cfg_store_cache_is_stale(void)
+{
+    return s_cache_stale;
 }
 
 bool safety_cfg_store_get_by_index(size_t index, safety_cfg_param_t *out)
@@ -525,6 +536,65 @@ static void test_broadened_field_divergence_detected(void)
     s_expected_field_count = 0;
 }
 
+// 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md,
+// MEDIUM 5): a stale cache (config_crc known to disagree with the live
+// Pico's, e.g. right after a Pico reboot) must not hide a real revert on the
+// broadened/extra field set. This test proves the fix by constructing the
+// exact hazard the audit named: the extra field's cache VALUE still equals
+// the expected value (a stale, pre-reboot snapshot that happens to look
+// right), but the cache is marked stale -- with the old code that would
+// have read as "still agrees"; the fix must report it as unknown/diverged
+// instead, since a stale cache proves nothing about what the Pico currently
+// holds.
+static void test_stale_cache_does_not_hide_a_revert(void)
+{
+    TEST_SECTION("2026-09-15 fix, MEDIUM 5 (review_divergence_check_561efa3b_2026-09-15.md): a stale "
+                 "cache (config_crc known to disagree with the live Pico's, refetch not yet caught up) "
+                 "must not be read as still agreeing on the broadened/extra field set -- an unrefreshed "
+                 "field is UNKNOWN, not a match, so a real revert during the stale window is never hidden");
+    test_reset_all();
+    safety_ceiling_sync_set_disable_heat_hooks(fake_all_relays_off, fake_halt_run);
+    safety_ceiling_sync_set_expected_pico_fields_source(fake_expected_pico_fields_source);
+
+    // Ceiling agrees throughout -- this fix is scoped to the broadened
+    // fields only, never the ceiling field (which keeps its own pre-existing,
+    // separately-tracked staleness weakness per the audit's own note).
+    s_zone_max_temp_c[0] = 80.0f;
+    fake_pico_ceiling_set(80.0f);
+
+    s_expected_fields[0].param_id = FAKE_EXTRA_PARAM_ID;
+    s_expected_fields[0].value = 42.0f;
+    s_expected_field_count = 1;
+    // The cache's VALUE agrees byte-for-byte with what is expected...
+    fake_pico_extra_set(42.0f);
+    // ...but it is a stale snapshot: safety_cfg_store_maybe_refetch() has
+    // seen the live config_crc disagree and has not yet caught up.
+    s_cache_stale = true;
+
+    safety_ceiling_sync_reconcile_on_link_up(FAKE_LINK);
+
+    char reason[CONFIG_DIVERGENCE_REASON_MAX];
+    bool warned = safety_ceiling_sync_is_standing_diverged(reason, sizeof(reason));
+    TEST_CHECK(warned,
+               "a value that only APPEARS to agree, read off a cache known to be stale, is reported as "
+               "diverged (unknown), not silently accepted as a match -- the pre-fix code would have "
+               "reported no warning at all here");
+    TEST_CHECK(!safety_ceiling_sync_is_diverged(NULL, 0),
+               "still never promoted to the heat-disabling verdict -- HIGH 2 interim scope is unchanged "
+               "by this fix");
+
+    // Once the cache is no longer stale (the refetch caught up), the SAME
+    // agreeing value clears the warning -- proving the warning above was
+    // really about staleness, not some other side effect of this test setup.
+    s_cache_stale = false;
+    safety_ceiling_sync_reconcile_on_link_up(FAKE_LINK);
+    TEST_CHECK(!safety_ceiling_sync_is_standing_diverged(NULL, 0),
+               "the identical agreeing value clears the warning once the cache is fresh again");
+
+    s_expected_field_count = 0;
+    s_cache_stale = false;
+}
+
 // Safety-processor tc_type made settable (2026-09-15). Same generic
 // enforce_ceiling_divergence() extra-field path test_broadened_field_
 // divergence_detected() above already exercises with an arbitrary param id
@@ -611,6 +681,7 @@ int main(void)
     test_target_known_exclusion();
     test_broadened_field_divergence_detected();
     test_tc_type_revert_divergence_detected();
+    test_stale_cache_does_not_hide_a_revert();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

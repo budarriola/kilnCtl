@@ -105,7 +105,26 @@ esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char
     (void)r; (void)error; (void)msg; return ESP_OK;
 }
 esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status) { (void)r; (void)status; return ESP_OK; }
-int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len) { (void)r; (void)buf; (void)buf_len; return 0; }
+/* Controllable request body -- most callers leave content_len==0 (read_body()
+ * refuses that outright, so httpd_req_recv() is never reached), but the
+ * commissioning_post_handler() tests below need a real body delivered. */
+static const char *s_stub_req_body = NULL;
+static size_t s_stub_req_body_sent = 0;
+int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
+{
+    (void)r;
+    if (!s_stub_req_body) {
+        return 0;
+    }
+    size_t remaining = strlen(s_stub_req_body) - s_stub_req_body_sent;
+    size_t n = (buf_len < remaining) ? buf_len : remaining;
+    if (n == 0) {
+        return 0;
+    }
+    memcpy(buf, s_stub_req_body + s_stub_req_body_sent, n);
+    s_stub_req_body_sent += n;
+    return (int)n;
+}
 esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s) { (void)r; (void)s; return ESP_OK; }
 
 httpd_handle_t wifi_provision_http_get_server(void) { return NULL; }
@@ -573,17 +592,28 @@ void profile_executor_get_status(profile_exec_status_t *out)
 {
     if (out) memset(out, 0, sizeof(*out));
 }
-/* 2026-09-15 review HIGH 3 fix: safety_cfg_http.c's commissioning_post_
- * handler() now calls this after a confirmed commit to keep the active
- * kiln-config slot's captured Pico half in sync. This file never links the
- * real kiln_cfg_store.c (that pulls in NVS/cfg-filesystem machinery this
- * executable has no fakes for), so a no-op stub satisfies the link; no test
- * here exercises the interaction between the two files, which lives in
- * kiln_cfg_store.c's own test executable instead. */
-bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap)
+/* 2026-09-15 review (review_divergence_rework_c1d2c526_2026-09-15.md,
+ * MEDIUM 3 / HIGH 3 race): safety_cfg_http.c's commissioning_post_handler()
+ * calls kiln_cfg_store_recapture_pico_half_confirmed() (NOT the ordinary
+ * kiln_cfg_store_autosave_from_live() -- that path is divergence-gated and
+ * would deadlock exactly this caller, see that function's own doc comment)
+ * after a confirmed commit, to keep the active kiln-config slot's captured
+ * Pico half in sync. This file never links the real kiln_cfg_store.c (that
+ * pulls in NVS/cfg-filesystem machinery this executable has no fakes for),
+ * so a controllable stub satisfies the link -- test_kiln_cfg_store.c's own
+ * executable covers the REAL function's behavior; this stub only lets this
+ * file's tests confirm the handler calls it (and checks/logs the result)
+ * at the right point, via s_stub_recapture_calls/s_stub_recapture_result. */
+static int s_stub_recapture_calls = 0;
+static bool s_stub_recapture_result = true;
+static const char *s_stub_recapture_reason = NULL;
+bool kiln_cfg_store_recapture_pico_half_confirmed(char *reason_out, size_t reason_cap)
 {
-    if (reason_out && reason_cap > 0) reason_out[0] = '\0';
-    return true;
+    s_stub_recapture_calls++;
+    if (reason_out && reason_cap > 0) {
+        snprintf(reason_out, reason_cap, "%s", s_stub_recapture_reason ? s_stub_recapture_reason : "");
+    }
+    return s_stub_recapture_result;
 }
 
 esp_err_t safety_link_get_peer_build_status(SafetyLinkClass *link, bool *out_known, bool *out_dirty,
@@ -673,6 +703,12 @@ static void reset_all(void)
     s_stub_set_ct_cal_input_zc = 0;
     s_stub_set_ct_cal_input_calls = 0;
     s_stub_estop_verif_clear_calls = 0;
+    s_stub_recapture_calls = 0;
+    s_stub_recapture_result = true;
+    s_stub_recapture_reason = NULL;
+    s_stub_req_body = NULL;
+    s_stub_req_body_sent = 0;
+    memset(s_stub_last_httpd_resp, 0, sizeof(s_stub_last_httpd_resp));
 }
 
 static void test_parse_single_pair_no_commit(void)
@@ -2089,6 +2125,104 @@ static void test_rate_guard_auto_get_handler_never_writes(void)
     TEST_CHECK(s_stub_rate_guard_meta_set_calls == 0, "GET never tags provenance");
 }
 
+// 2026-09-15 review (review_divergence_rework_c1d2c526_2026-09-15.md,
+// MEDIUM 3 / MEDIUM 4): commissioning_post_handler() must call
+// kiln_cfg_store_recapture_pico_half_confirmed() -- NOT the divergence-gated
+// kiln_cfg_store_autosave_from_live() -- exactly once after a committed AND
+// confirmed write, and must never discard its result: a failure there is
+// logged (ESP_LOGW), never silently swallowed the way the original `(void)`
+// cast did. This is the negative-test-shaped proof: breaking the fix by hand
+// (reverting to `(void)kiln_cfg_store_autosave_from_live(...)`, or calling
+// the recapture function but discarding its result again) makes
+// s_stub_recapture_calls read 0, the exact inversion of what this asserts.
+static void test_commissioning_post_confirmed_commit_calls_recapture(void)
+{
+    TEST_SECTION("commissioning_post_handler -- a committed and confirmed write recaptures the active "
+                 "slot's Pico half via kiln_cfg_store_recapture_pico_half_confirmed(), never the "
+                 "divergence-gated autosave path, and checks the result rather than discarding it");
+    reset_all();
+    s_stub_lookup_type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_lookup_name = "stub_field";
+    s_stub_params[0].param_id = 0x0104u;
+    s_stub_params[0].type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_params[0].set = true;
+    s_stub_params[0].value.f32_val = 120.0f; // read-back value confirm_commit_landed() will see
+
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    s_link = &fake_link;
+
+    static char body[128];
+    snprintf(body, sizeof(body), "id=260&value=120.0&commit=1"); // 0x0104 == 260
+    s_stub_req_body = body;
+    s_stub_req_body_sent = 0;
+    httpd_req_t req = { .content_len = (int)strlen(body) };
+    esp_err_t err = commissioning_post_handler(&req);
+    s_link = NULL;
+
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strstr(s_stub_last_httpd_resp, "\"ok\":true") != NULL, "reports success");
+    TEST_CHECK(s_stub_recapture_calls == 1,
+               "exactly one confirmed-push Pico-half recapture was performed after the committed write");
+}
+
+static void test_commissioning_post_stage_only_does_not_recapture(void)
+{
+    TEST_SECTION("commissioning_post_handler -- a stage-only submission (no commit=1) changes nothing "
+                 "on the Pico, so it must NOT trigger a Pico-half recapture either");
+    reset_all();
+    s_stub_lookup_type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_lookup_name = "stub_field";
+
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    s_link = &fake_link;
+
+    static char body[128];
+    snprintf(body, sizeof(body), "id=260&value=120.0"); // no commit=1
+    s_stub_req_body = body;
+    s_stub_req_body_sent = 0;
+    httpd_req_t req = { .content_len = (int)strlen(body) };
+    esp_err_t err = commissioning_post_handler(&req);
+    s_link = NULL;
+
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(s_stub_recapture_calls == 0, "no recapture for a stage-only (uncommitted) submission");
+}
+
+static void test_commissioning_post_failed_recapture_still_reports_ok(void)
+{
+    TEST_SECTION("commissioning_post_handler -- a failed Pico-half recapture is logged (ESP_LOGW), never "
+                 "swallowed, but must not fail the HTTP response -- the Pico write itself already landed "
+                 "and confirmed by the time the recapture is attempted");
+    reset_all();
+    s_stub_lookup_type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_lookup_name = "stub_field";
+    s_stub_params[0].param_id = 0x0104u;
+    s_stub_params[0].type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_params[0].set = true;
+    s_stub_params[0].value.f32_val = 120.0f;
+    s_stub_recapture_result = false;
+    s_stub_recapture_reason = "simulated recapture failure";
+
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    s_link = &fake_link;
+
+    static char body[128];
+    snprintf(body, sizeof(body), "id=260&value=120.0&commit=1");
+    s_stub_req_body = body;
+    s_stub_req_body_sent = 0;
+    httpd_req_t req = { .content_len = (int)strlen(body) };
+    esp_err_t err = commissioning_post_handler(&req);
+    s_link = NULL;
+
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK even though the recapture failed");
+    TEST_CHECK(strstr(s_stub_last_httpd_resp, "\"ok\":true") != NULL,
+               "the Pico write itself succeeded and confirmed -- the HTTP response still reports success");
+    TEST_CHECK(s_stub_recapture_calls == 1, "the recapture was still attempted and its result observed");
+}
+
 int main(void)
 {
     test_rate_guard_gather_no_zone_identified_is_no_data();
@@ -2148,6 +2282,10 @@ int main(void)
     test_ct_auto_zero_precheck_k4_check_is_not_vacuous();
     test_ct_auto_zero_counts_to_mv_at_two_probe_ratings();
     test_ct_auto_zero_100mv_refusal_uses_quantized_counts();
+
+    test_commissioning_post_confirmed_commit_calls_recapture();
+    test_commissioning_post_stage_only_does_not_recapture();
+    test_commissioning_post_failed_recapture_still_reports_ok();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

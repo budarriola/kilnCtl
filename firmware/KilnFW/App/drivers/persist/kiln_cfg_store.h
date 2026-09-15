@@ -419,6 +419,45 @@ bool kiln_cfg_store_import_package_json(const char *json, int32_t *out_id, char 
  * current() itself can hit), never for the active-config-absent no-op. */
 bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap);
 
+/* 2026-09-15 review (review_divergence_rework_c1d2c526_2026-09-15.md, HIGH 1):
+ * true iff the most recent autosave attempt deferred recapturing the active
+ * slot's Pico half because an ESP/Pico config divergence (ceiling or
+ * standing) was latched at the time -- the ESP half is still saved
+ * regardless (see kiln_cfg_store_autosave_from_live()'s own comment for why
+ * the two are split). Cleared once the deferred recapture actually
+ * completes, via either a later kiln_cfg_store_autosave_from_live() call
+ * that finds the divergence cleared, or kiln_cfg_store_recapture_pico_half_
+ * confirmed() below. This module never polls its own dirty flag -- it has
+ * no task of its own and must not dispatch to the flash worker on a timer
+ * it owns -- so a caller with its own safe (non-PSRAM-stacked) polling
+ * context (the web status handler and/or LCD refresh callback are the
+ * intended consumers, both already httpd/LVGL-task-stacked, never safety_
+ * poll_task) is expected to check this and retry kiln_cfg_store_autosave_
+ * from_live() once the divergence-visibility surface (safety_ceiling_sync_
+ * is_diverged()/is_standing_diverged()) reports clear. */
+bool kiln_cfg_store_pico_half_recapture_pending(void);
+
+/* 2026-09-15 review (review_divergence_rework_c1d2c526_2026-09-15.md,
+ * MEDIUM 3 / HIGH3 race): for a caller that has JUST performed and confirmed
+ * (via readback) its own push of the active slot's expected Pico fields to
+ * the real Pico -- e.g. safety_cfg_http.c's commissioning handler,
+ * immediately after its own set+commit+confirm sequence -- and therefore
+ * needs the active slot's captured Pico half to be recaptured to match RIGHT
+ * NOW, without waiting for (or being blocked by) whatever the standing-
+ * divergence latch currently reads. Unlike kiln_cfg_store_autosave_from_
+ * live(), this function does NOT check safety_ceiling_sync_is_diverged()/
+ * is_standing_diverged() before recapturing -- gating it on that latch would
+ * deadlock exactly this caller, since the confirmed push this function is
+ * meant to record is often the very thing that would clear the divergence.
+ * A freshly-confirmed push cannot be laundering a stale/reverted value the
+ * way an ordinary unrelated-edit autosave could. Still honors the swap-
+ * pending gate (a swap transaction mid-flight is an unrelated reason to
+ * defer) and still targets the active slot. Clears the pending-recapture
+ * flag above on success. Returns false only on an actual failed re-save
+ * (the same failure modes kiln_cfg_store_save_current() itself can hit);
+ * callers should check and log the result rather than discard it. */
+bool kiln_cfg_store_recapture_pico_half_confirmed(char *reason_out, size_t reason_cap);
+
 /* docs/audits/kiln_profiles_feature_review_2026-09-15.md Defect 1: during a
  * kiln swap (kiln_cfg_swap.c), the ESP half of the INCOMING package is
  * committed via zones_config_import_blob() -> nvs_save() -> this module's

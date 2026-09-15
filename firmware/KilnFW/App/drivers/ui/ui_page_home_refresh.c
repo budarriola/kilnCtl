@@ -9,6 +9,9 @@
 #include "ui_page_home_internal.h"
 #include "relay_cycles.h"
 #include "kiln_cfg_store.h" /* docs/KILN_PROFILES_PLAN.md section 7.4 -- "Kiln: <name>" line */
+#include "safety_ceiling_sync.h" /* 2026-09-15 review (review_divergence_rework_c1d2c526_2026-09-15.md,
+                                   * HIGH 2): safety_ceiling_sync_is_standing_diverged() surfaced on the LCD. */
+#include "config_divergence.h" /* CONFIG_DIVERGENCE_REASON_MAX */
 
 void ui_home_refresh_cb(lv_timer_t *timer)
 {
@@ -181,6 +184,30 @@ void ui_home_refresh_cb(lv_timer_t *timer)
      * doc comment. profile_exec_status_t's fields are read whether or not a
      * run is active -- all false/0 while IDLE, so this is a no-op then. */
     if (s_ui_home_lag_notice != NULL) {
+        /* 2026-09-15 review (review_divergence_rework_c1d2c526_2026-09-15.md,
+         * HIGH 2 -- "warning invisible"): a standing (non-ceiling) config
+         * divergence between the ESP's expected safety-processor config and
+         * the Pico's live one previously had no on-screen surface at all,
+         * so autosave could be silently blocked forever with no operator
+         * ever seeing why. Reuses this same WARNING-styled widget (not the
+         * ALARM-styled trip strip above -- a standing divergence never
+         * disables heat) and takes priority over the ramp-lag notice below:
+         * a config mismatch is rarer and more consequential than a lagging
+         * ramp, and this label (like the trip strip) must not scroll on the
+         * 480x320 LCD, so only one message can occupy it per tick. No new
+         * httpd/zones-JSON buffers are touched -- this reads the existing
+         * in-RAM divergence latch directly. */
+        char diverge_reason[CONFIG_DIVERGENCE_REASON_MAX];
+        bool standing_diverged = safety_ceiling_sync_is_standing_diverged(diverge_reason, sizeof(diverge_reason));
+        if (standing_diverged) {
+            char notice_buf[160];
+            snprintf(notice_buf, sizeof(notice_buf), "Config mismatch (Pico): %.130s", diverge_reason);
+            lv_label_set_text(s_ui_home_lag_notice, notice_buf);
+            lv_obj_remove_flag(s_ui_home_lag_notice, LV_OBJ_FLAG_HIDDEN);
+            s_ui_home_lag_notice_ticks = ui_page_home_lag_notice_tick(st.ramp_lock_held, s_ui_home_lag_notice_ticks);
+            goto lag_notice_done;
+        }
+
         s_ui_home_lag_notice_ticks = ui_page_home_lag_notice_tick(st.ramp_lock_held, s_ui_home_lag_notice_ticks);
 
         bool any_sustained = false;
@@ -253,6 +280,7 @@ void ui_home_refresh_cb(lv_timer_t *timer)
             lv_label_set_text(s_ui_home_lag_notice, notice_buf);
             lv_obj_remove_flag(s_ui_home_lag_notice, LV_OBJ_FLAG_HIDDEN);
         }
+lag_notice_done:;
     }
 
     /* Compact home chart -- see this file's header comment ("DESIRED SERIES

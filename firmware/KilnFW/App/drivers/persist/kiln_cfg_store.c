@@ -13,6 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h" /* kiln_cfg_store_lock()/_unlock() -- H6, docs/KILN_PROFILES_PLAN.md item 5 */
 
+#include "hal_time.h" /* hal_time_now_us() -- rate-limited deferred-autosave WARN, HIGH 1 fix */
 #include "cfg_fs_status.h"
 #include "ota_state.h"
 #include "zones_config_accessors.h"
@@ -982,8 +983,54 @@ bool kiln_cfg_store_get_name(int32_t id, char *out, size_t out_cap)
  * must treat as "no Pico half to push" -- never a silently wrong or stale
  * one. Losing the ESP-side save over a Pico-cache read glitch would be a
  * worse failure than the one this guards against. */
-static void populate_pico_half_and_hash(kiln_cfg_entry_t *e, const zones_cfg_t *cfg)
+/* 2026-09-15 review (review_divergence_rework_c1d2c526_2026-09-15.md, finding
+ * 1): `recapture_pico_half` lets a caller (kiln_cfg_store_autosave_from_live()
+ * while a standing divergence is latched) recompute this slot's package
+ * identity over its EXISTING, already-captured e->pico half instead of
+ * re-snapshotting safety_cfg_store's live cache -- i.e. "save the ESP-side
+ * edit, but do not touch what this slot believes the Pico holds." Re-
+ * snapshotting from the live cache while the two processors are known to
+ * disagree is exactly the "reset one side of a pair" bug class the standing-
+ * divergence check exists to catch: the live cache could be a Pico's own
+ * post-reboot REVERT, and capturing it here would silently launder that
+ * revert into a freshly "confirmed" expected value. `false` leaves e->pico/
+ * e->pico_populated/e->pkg_schema untouched (whatever this slot already
+ * held) and only recomputes e->pkg_hash over the (possibly changed) ESP
+ * canonical bytes plus that UNCHANGED Pico half -- the hash must still track
+ * the ESP-side edit even when the Pico half is deliberately held back. */
+static void populate_pico_half_and_hash(kiln_cfg_entry_t *e, const zones_cfg_t *cfg, bool recapture_pico_half)
 {
+    if (!recapture_pico_half) {
+        if (!e->pico_populated) {
+            /* Nothing captured yet to keep (a brand-new slot, or one already
+             * downgraded to "not yet captured") -- there is no honest hash to
+             * compute over an empty Pico half, so this slot stays exactly
+             * that: not yet captured. Never silently invent a Pico half here. */
+            e->pkg_hash = 0;
+            e->pkg_schema = 0;
+            return;
+        }
+        uint8_t canonical[ZONES_CONFIG_BLOB_MAX_SIZE];
+        size_t canonical_len = 0;
+        if (!zones_config_export_canonical(cfg, canonical, sizeof(canonical), &canonical_len)) {
+            ESP_LOGW(TAG, "kiln_cfg_store: canonical ESP-half encoding failed for '%s' while keeping "
+                          "the existing Pico half -- package hash left unchanged",
+                     e->name);
+            return;
+        }
+        uint32_t hash = 0;
+        if (kiln_package_compute_hash(KILN_PKG_SCHEMA_VERSION, canonical, (uint16_t)canonical_len, &e->pico, &hash) &&
+            hash != 0) {
+            e->pkg_schema = KILN_PKG_SCHEMA_VERSION;
+            e->pkg_hash = hash;
+        } else {
+            ESP_LOGW(TAG, "kiln_cfg_store: package hash recomputation failed (kept existing Pico half) "
+                          "for '%s' -- package hash left unchanged",
+                     e->name);
+        }
+        return;
+    }
+
     kiln_pkg_pico_source_t source = kiln_pkg_pico_source_default();
     if (!kiln_package_capture_pico_half(&source, &e->pico)) {
         memset(&e->pico, 0, sizeof(e->pico));
@@ -1047,8 +1094,13 @@ static void populate_pico_half_and_hash(kiln_cfg_entry_t *e, const zones_cfg_t *
     }
 }
 
-bool kiln_cfg_store_save_current(const char *name, int32_t id_or_negative, int32_t *out_id,
-                                  char *reason_out, size_t reason_cap)
+/* Shared body for kiln_cfg_store_save_current() (public, always recaptures
+ * the Pico half -- an explicit operator save/clone-from-live is a deliberate
+ * "snapshot everything live right now" action) and the autosave paths below
+ * that may need to hold the Pico half back (see populate_pico_half_and_hash()'s
+ * own doc comment on `recapture_pico_half`). */
+static bool kiln_cfg_store_save_current_ex(const char *name, int32_t id_or_negative, int32_t *out_id,
+                                            bool recapture_pico_half, char *reason_out, size_t reason_cap)
 {
     if (refuse_if_quarantined(reason_out, reason_cap)) {
         return false;
@@ -1112,7 +1164,7 @@ bool kiln_cfg_store_save_current(const char *name, int32_t id_or_negative, int32
     zones_cfg_t scratch_cfg;
     memset(&scratch_cfg, 0, sizeof(scratch_cfg));
     memcpy(&scratch_cfg, scratch, blob_size);
-    populate_pico_half_and_hash(e, &scratch_cfg);
+    populate_pico_half_and_hash(e, &scratch_cfg, recapture_pico_half);
 
     if (id_or_negative < 0) {
         /* A config just saved FROM the running kiln is, by construction,
@@ -1132,6 +1184,17 @@ bool kiln_cfg_store_save_current(const char *name, int32_t id_or_negative, int32
         *out_id = id;
     }
     return true;
+}
+
+bool kiln_cfg_store_save_current(const char *name, int32_t id_or_negative, int32_t *out_id,
+                                  char *reason_out, size_t reason_cap)
+{
+    /* Public entry point always recaptures the Pico half -- see kiln_cfg_
+     * store_save_current_ex()'s own doc comment above for why an explicit
+     * operator save/clone-from-live is exempt from the autosave paths'
+     * divergence hold-back. */
+    return kiln_cfg_store_save_current_ex(name, id_or_negative, out_id, /*recapture_pico_half=*/true, reason_out,
+                                           reason_cap);
 }
 
 bool kiln_cfg_store_clone(int32_t src_id, const char *name, int32_t *out_id, char *reason_out,
@@ -1889,6 +1952,17 @@ done:
  * practice race, not a proven-impossible one (LOW finding 5, same review). */
 static int32_t s_autosave_target_override = KILN_CFG_AUTOSAVE_OVERRIDE_NONE;
 
+/* 2026-09-15 review (review_divergence_rework_c1d2c526_2026-09-15.md,
+ * HIGH 1): true whenever an autosave deferred the active slot's Pico-half
+ * recapture because a divergence was latched at the time -- see
+ * kiln_cfg_store_autosave_from_live()'s own comment. Cleared the next time
+ * either that function or kiln_cfg_store_recapture_pico_half_confirmed()
+ * successfully performs the deferred recapture. Exposed read-only via
+ * kiln_cfg_store_pico_half_recapture_pending() for a non-PSRAM-stacked,
+ * NVS-capable caller to poll and retry -- this module itself has no polling
+ * task of its own. */
+static bool s_pico_half_dirty = false;
+
 void kiln_cfg_store_set_autosave_target_override(int32_t id_or_none_sentinel)
 {
     s_autosave_target_override = id_or_none_sentinel;
@@ -1939,17 +2013,38 @@ bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap)
      * comment (kiln_cfg_store.h) for the exact race this closes: the swap
      * moves active_id to target_id before its own divergence check runs,
      * and a recapture racing into that same window is what would clear the
-     * latch, so the latch alone cannot be trusted to have caught it yet. */
+     * latch, so the latch alone cannot be trusted to have caught it yet.
+     *
+     * 2026-09-15 review (review_divergence_rework_c1d2c526_2026-09-15.md,
+     * HIGH 1): the block above used to suppress the WHOLE save (ESP half
+     * included) while EITHER verdict was latched, and reported that as
+     * success (`return true`). A standing (non-ceiling) divergence has no
+     * self-clearing trigger anywhere in this codebase -- nothing re-arms an
+     * autosave attempt once one is skipped -- so any ordinary standing
+     * mismatch left autosave silently, permanently off: every later zones/
+     * autotune/coupling edit kept being "saved" (callers saw `true`, no
+     * warning) while the slot's on-disk blob silently stopped tracking live
+     * state. Fix: only the PICO-HALF RECAPTURE is skipped while diverged
+     * (still the correct call -- see the "reset one side of a pair" comment
+     * above, unchanged), not the ESP-half export/persist. The ESP half is
+     * always safe to save regardless of Pico divergence; it is the Pico
+     * half specifically that must not be re-snapshotted from a cache known
+     * to disagree with what was last confirmed pushed. A skipped Pico-half
+     * recapture sets a dirty flag; the very next call that finds the
+     * divergence cleared performs the deferred recapture (kiln_cfg_store_
+     * save_current_ex's `recapture_pico_half=true` path) and clears the
+     * flag, logged at INFO. Every call that must defer logs a rate-limited
+     * WARNING (never merely a debug line -- HIGH 2 above already means the
+     * divergence itself is visible; this is the SEPARATE "your saved
+     * profile may now be behind the live Pico expectation" signal) and
+     * ALWAYS fills reason_out describing the deferral -- this function must
+     * never report a silent, unqualified success while a recapture was
+     * actually skipped. */
     char div_reason[CONFIG_DIVERGENCE_REASON_MAX];
     bool ceiling_diverged = safety_ceiling_sync_is_diverged(div_reason, sizeof(div_reason));
     bool standing_diverged = !ceiling_diverged && safety_ceiling_sync_is_standing_diverged(div_reason, sizeof(div_reason));
-    if (ceiling_diverged || standing_diverged) {
-        if (reason_out && reason_cap > 0) {
-            snprintf(reason_out, reason_cap,
-                     "autosave suppressed: ESP/Pico config divergence latched (%s)", div_reason);
-        }
-        return true; /* not a failure -- see comment above */
-    }
+    bool diverged = ceiling_diverged || standing_diverged;
+
     if (autosave_blocked_by_swap_pending()) {
         if (reason_out && reason_cap > 0) {
             snprintf(reason_out, reason_cap, "autosave suppressed: a kiln config swap transaction is pending");
@@ -1969,14 +2064,95 @@ bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap)
          * autosave into; not this function's job to repair active_id. */
         return true;
     }
+
+    if (diverged) {
+        static int64_t s_last_deferred_log_us = 0;
+        int64_t now_us = (int64_t)hal_time_now_us();
+        if (now_us - s_last_deferred_log_us >= 60000000LL) {
+            ESP_LOGW(TAG,
+                     "kiln_cfg_store: autosave of '%s' deferred (ESP half only) -- Pico-half "
+                     "recapture skipped while ESP/Pico config divergence is latched (%s); "
+                     "will retry once cleared",
+                     name, div_reason);
+            s_last_deferred_log_us = now_us;
+        }
+        s_pico_half_dirty = true;
+    } else if (s_pico_half_dirty) {
+        ESP_LOGI(TAG,
+                 "kiln_cfg_store: divergence cleared -- catching up deferred Pico-half recapture "
+                 "for '%s'",
+                 name);
+    }
+
     /* Re-saves OVER the active slot -- id_or_negative == active means
-     * kiln_cfg_store_save_current() overwrites entry `active` in place
+     * kiln_cfg_store_save_current_ex() overwrites entry `active` in place
      * rather than allocating a new one, and (since id_or_negative >= 0)
      * does NOT touch active_id itself, which is already correct. This is
      * the exact "export blob / recapture Pico half / recompute pkg_hash /
      * persist" sequence section 2.4 asks for, reusing rather than
-     * re-implementing it. */
-    return kiln_cfg_store_save_current(name, active, NULL, reason_out, reason_cap);
+     * re-implementing it -- except the Pico-half recapture step is skipped
+     * (existing captured half kept) while `diverged` is true. */
+    bool ok = kiln_cfg_store_save_current_ex(name, active, NULL, /*recapture_pico_half=*/!diverged, reason_out,
+                                              reason_cap);
+    if (ok && !diverged) {
+        s_pico_half_dirty = false;
+    }
+    if (ok && diverged && reason_out && reason_cap > 0) {
+        /* save_current_ex() succeeded and filled reason_out with nothing (it
+         * only fills it on failure) -- overwrite with the deferral notice so
+         * a caller inspecting reason_out never sees an empty string next to
+         * a bare `true` while a recapture was actually skipped. */
+        snprintf(reason_out, reason_cap,
+                 "autosave: ESP half saved, Pico-half recapture deferred -- ESP/Pico config "
+                 "divergence latched (%s)",
+                 div_reason);
+    }
+    return ok;
+}
+
+bool kiln_cfg_store_pico_half_recapture_pending(void)
+{
+    return s_pico_half_dirty;
+}
+
+bool kiln_cfg_store_recapture_pico_half_confirmed(char *reason_out, size_t reason_cap)
+{
+    /* 2026-09-15 review (review_divergence_rework_c1d2c526_2026-09-15.md,
+     * MEDIUM 3 / HIGH3 race): callers of this function have JUST performed
+     * and confirmed (via readback) their own push to the Pico -- e.g.
+     * safety_cfg_http.c's commissioning handler, right after its own
+     * set+commit+confirm sequence. A freshly-confirmed push cannot be
+     * "laundering" a stale/reverted value the way an ordinary autosave
+     * triggered by an unrelated zones/autotune edit could, so this entry
+     * point deliberately bypasses the standing-diverged gate that
+     * kiln_cfg_store_autosave_from_live() enforces above -- gating THIS
+     * call on that same latch would deadlock: the commissioning push is
+     * often the very thing that would clear the divergence once its Pico
+     * half is recaptured, so "wait for divergence to clear before
+     * recapturing" can never resolve for this caller. Still respects the
+     * swap-pending gate (a swap transaction mid-flight is a real reason to
+     * defer, unrelated to divergence) and still targets the active slot,
+     * same as the ordinary autosave path. */
+    if (autosave_blocked_by_swap_pending()) {
+        if (reason_out && reason_cap > 0) {
+            snprintf(reason_out, reason_cap, "recapture suppressed: a kiln config swap transaction is pending");
+        }
+        return true; /* not a failure -- see comment above */
+    }
+    int32_t active = (s_autosave_target_override != KILN_CFG_AUTOSAVE_OVERRIDE_NONE) ? s_autosave_target_override
+                                                                                      : s_store.active_id;
+    if (active == KILN_CFG_NO_ACTIVE_ID) {
+        return true;
+    }
+    char name[KILN_CFG_NAME_MAX_LEN + 1];
+    if (!kiln_cfg_store_get_name(active, name, sizeof(name))) {
+        return true;
+    }
+    bool ok = kiln_cfg_store_save_current_ex(name, active, NULL, /*recapture_pico_half=*/true, reason_out, reason_cap);
+    if (ok) {
+        s_pico_half_dirty = false;
+    }
+    return ok;
 }
 
 uint32_t kiln_cfg_store_generation(void)

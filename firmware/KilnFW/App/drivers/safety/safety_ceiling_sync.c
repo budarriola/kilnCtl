@@ -335,11 +335,25 @@ static void enforce_ceiling_divergence(float target_c, bool target_known, float 
          * only at swap time. */
         bool live_known = false;
         float live_value = 0.0f;
+        /* 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md,
+         * MEDIUM 5): a stale cache (config_crc known to disagree with the
+         * live Pico's, refetch not yet caught up -- e.g. right after a Pico
+         * reboot, or mid-backoff on a bad link) must never be read as if it
+         * still agrees. safety_cfg_store_refetch_locked() leaves the
+         * PREVIOUS cache contents in place on a failed fetch, so every row
+         * would otherwise keep reporting the pre-reboot/pre-revert value as
+         * confidently SET forever, silently hiding a real revert instead of
+         * flagging it as the unknown it actually is. Scoped to this
+         * broadened/extra (WARNING-only) field set only -- the ceiling field
+         * above has the identical weakness but predates this fix and is left
+         * alone here, per the audit's own note that it is a pre-existing,
+         * separate issue. */
+        bool cache_stale = safety_cfg_store_cache_is_stale();
         size_t count = safety_cfg_store_param_count();
         for (size_t idx = 0; idx < count; idx++) {
             safety_cfg_param_t row;
             if (safety_cfg_store_get_by_index(idx, &row) && row.param_id == param_id) {
-                if (row.set) {
+                if (row.set && !cache_stale) {
                     live_known = true;
                     /* Type-aware decode -- same switch kiln_cfg_swap.c's
                      * pico_readback_matches() uses; non-float params are

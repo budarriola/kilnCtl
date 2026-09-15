@@ -2179,14 +2179,16 @@ static void test_autosave_from_live_updates_active_slot_and_hash(void)
 
 static void test_autosave_from_live_suppressed_while_diverged(void)
 {
-    TEST_SECTION("kiln_cfg_store_autosave_from_live -- HIGH 1 fix (review_divergence_check_561efa3b_"
-                 "2026-09-15.md): suppressed while CONFIG_DIVERGENCE is latched, ceiling-off or "
-                 "standing-warning, per plan sec 2.4 rule 6 -- must not launder a known ESP/Pico "
-                 "disagreement into a 'consistent' saved state");
+    TEST_SECTION("kiln_cfg_store_autosave_from_live -- HIGH 1 rework (review_divergence_rework_c1d2c526_"
+                 "2026-09-15.md): a latched divergence (ceiling or standing) defers only the PICO-HALF "
+                 "recapture, never the ESP half -- full suppression would leave autosave off forever "
+                 "with no self-clear trigger. The dirty flag records the deferred recapture and it must "
+                 "never report a silent, unqualified success while one is outstanding");
     reset_state();
     int32_t id1 = -1;
     char reason[96] = {0};
     TEST_CHECK(kiln_cfg_store_save_current("Live Kiln", -1, &id1, reason, sizeof(reason)), "save succeeds");
+    TEST_CHECK(!kiln_cfg_store_pico_half_recapture_pending(), "no recapture pending right after an explicit save");
     uint32_t hash_before = 0;
     kiln_cfg_store_get_package_identity(id1, NULL, NULL, &hash_before);
 
@@ -2194,37 +2196,43 @@ static void test_autosave_from_live_suppressed_while_diverged(void)
         s_stub_export_content[i] = (uint8_t)(i + 100);
     }
 
-    // Ceiling-off divergence latched: autosave must report success (skip,
-    // not failure) but must NOT touch the slot.
+    // Ceiling-off divergence latched: the ESP half is still saved (the slot
+    // must keep tracking live zones/autotune/coupling edits regardless of
+    // Pico divergence) and reason_out explains the deferred Pico-half
+    // recapture; the dirty flag records it.
     s_stub_ceiling_diverged = true;
     s_stub_standing_diverged = false;
     reason[0] = '\0';
     TEST_CHECK(kiln_cfg_store_autosave_from_live(reason, sizeof(reason)),
-               "reports success (a suppressed autosave is not an error)");
+               "reports success (a deferred recapture is not a failure)");
     uint32_t hash_after_ceiling = 0;
     kiln_cfg_store_get_package_identity(id1, NULL, NULL, &hash_after_ceiling);
-    TEST_CHECK(hash_after_ceiling == hash_before,
-               "slot was NOT overwritten while ceiling divergence is latched");
-    TEST_CHECK(reason[0] != '\0', "reason explains the suppression");
+    TEST_CHECK(hash_after_ceiling != hash_before,
+               "the ESP half WAS saved (and pkg_hash recomputed) while ceiling divergence is latched -- "
+               "only the Pico-half recapture is deferred, per the HIGH 1 fix");
+    TEST_CHECK(reason[0] != '\0', "reason explains the deferred recapture, never a silent empty string");
+    TEST_CHECK(kiln_cfg_store_pico_half_recapture_pending(),
+               "the dirty flag now records a deferred Pico-half recapture");
 
-    // Standing (non-ceiling) warning alone must ALSO suppress -- the plan's
-    // rule 6 covers any known disagreement, not only the heat-disabling one.
+    // Standing (non-ceiling) warning alone must ALSO defer the recapture --
+    // the plan's rule 6 covers any known disagreement, not only the
+    // heat-disabling one.
     s_stub_ceiling_diverged = false;
     s_stub_standing_diverged = true;
     reason[0] = '\0';
     TEST_CHECK(kiln_cfg_store_autosave_from_live(reason, sizeof(reason)), "reports success while standing-diverged");
-    uint32_t hash_after_standing = 0;
-    kiln_cfg_store_get_package_identity(id1, NULL, NULL, &hash_after_standing);
-    TEST_CHECK(hash_after_standing == hash_before,
-               "slot was NOT overwritten while a standing (non-ceiling) divergence warning is active");
+    TEST_CHECK(reason[0] != '\0', "reason explains the deferred recapture");
+    TEST_CHECK(kiln_cfg_store_pico_half_recapture_pending(), "recapture still pending under a standing divergence");
 
-    // Once both clear, autosave proceeds normally.
+    // Once both clear, the very next autosave call self-clears the dirty
+    // flag -- this is the "retry once divergence clears" behavior the HIGH 1
+    // fix requires, with no separate poller needed inside this module.
     s_stub_ceiling_diverged = false;
     s_stub_standing_diverged = false;
+    reason[0] = '\0';
     TEST_CHECK(kiln_cfg_store_autosave_from_live(reason, sizeof(reason)), "autosave succeeds once agreement resumes");
-    uint32_t hash_after_clear = 0;
-    kiln_cfg_store_get_package_identity(id1, NULL, NULL, &hash_after_clear);
-    TEST_CHECK(hash_after_clear != hash_before, "slot IS updated once no divergence is latched");
+    TEST_CHECK(!kiln_cfg_store_pico_half_recapture_pending(),
+               "the deferred Pico-half recapture caught up and cleared the dirty flag");
 
     s_stub_ceiling_diverged = false;
     s_stub_standing_diverged = false;
@@ -2268,6 +2276,75 @@ static void test_autosave_from_live_suppressed_while_swap_pending(void)
     kiln_cfg_store_get_package_identity(id1, NULL, NULL, &hash_after_clear);
     TEST_CHECK(hash_after_clear != hash_before, "slot IS updated once no swap is pending and no divergence "
                                                  "is latched");
+
+    kiln_cfg_store_set_swap_pending_source(NULL);
+    s_stub_swap_pending = false;
+}
+
+static void test_recapture_pico_half_confirmed_bypasses_divergence_gate(void)
+{
+    TEST_SECTION("kiln_cfg_store_recapture_pico_half_confirmed -- MEDIUM 3 fix (review_divergence_rework_"
+                 "c1d2c526_2026-09-15.md, HIGH3 race in safety_cfg_http.c's commissioning handler): a "
+                 "caller that has just confirmed its OWN push to the Pico must be able to recapture the "
+                 "active slot's Pico half immediately, even while the standing-diverged latch still reads "
+                 "true (the very push being confirmed is often what would clear it) -- gating this call on "
+                 "that latch the way the ordinary autosave path does would deadlock this caller");
+    reset_state();
+    int32_t id1 = -1;
+    char reason[96] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Live Kiln", -1, &id1, reason, sizeof(reason)), "save succeeds");
+    uint32_t hash_before = 0;
+    kiln_cfg_store_get_package_identity(id1, NULL, NULL, &hash_before);
+
+    for (size_t i = 0; i < sizeof(s_stub_export_content); i++) {
+        s_stub_export_content[i] = (uint8_t)(i + 100);
+    }
+
+    // Simulate the exact HIGH3 race: a poll tick landed in the gap and set
+    // standing divergence between the commissioning handler's own Pico
+    // cache refresh and its NVS write/autosave call.
+    s_stub_ceiling_diverged = false;
+    s_stub_standing_diverged = true;
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_recapture_pico_half_confirmed(reason, sizeof(reason)),
+               "confirmed-push recapture succeeds despite the standing-diverged latch reading true");
+    uint32_t hash_after = 0;
+    kiln_cfg_store_get_package_identity(id1, NULL, NULL, &hash_after);
+    TEST_CHECK(hash_after != hash_before,
+               "the slot WAS updated (ESP half + recaptured Pico half) -- unlike the ordinary autosave "
+               "path, this entry point does not defer on a latched divergence");
+    TEST_CHECK(!kiln_cfg_store_pico_half_recapture_pending(),
+               "no recapture is left pending after a successful confirmed recapture");
+
+    s_stub_ceiling_diverged = false;
+    s_stub_standing_diverged = false;
+}
+
+static void test_recapture_pico_half_confirmed_suppressed_while_swap_pending(void)
+{
+    TEST_SECTION("kiln_cfg_store_recapture_pico_half_confirmed -- still honors the swap-pending gate, "
+                 "which is an unrelated reason to defer (a kiln_cfg_swap.c transaction mid-flight), not "
+                 "the divergence latch this function is deliberately built to bypass");
+    reset_state();
+    int32_t id1 = -1;
+    char reason[96] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Live Kiln", -1, &id1, reason, sizeof(reason)), "save succeeds");
+    uint32_t hash_before = 0;
+    kiln_cfg_store_get_package_identity(id1, NULL, NULL, &hash_before);
+
+    for (size_t i = 0; i < sizeof(s_stub_export_content); i++) {
+        s_stub_export_content[i] = (uint8_t)(i + 100);
+    }
+
+    kiln_cfg_store_set_swap_pending_source(stub_swap_is_pending);
+    s_stub_swap_pending = true;
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_recapture_pico_half_confirmed(reason, sizeof(reason)),
+               "reports success (a suppressed recapture is not an error) while a swap is pending");
+    uint32_t hash_after = 0;
+    kiln_cfg_store_get_package_identity(id1, NULL, NULL, &hash_after);
+    TEST_CHECK(hash_after == hash_before, "slot was NOT overwritten while a swap record is pending");
+    TEST_CHECK(reason[0] != '\0', "reason explains the suppression");
 
     kiln_cfg_store_set_swap_pending_source(NULL);
     s_stub_swap_pending = false;
@@ -2397,6 +2474,8 @@ void run_test_kiln_cfg_store(void)
     test_autosave_from_live_updates_active_slot_and_hash();
     test_autosave_from_live_suppressed_while_diverged();
     test_autosave_from_live_suppressed_while_swap_pending();
+    test_recapture_pico_half_confirmed_bypasses_divergence_gate();
+    test_recapture_pico_half_confirmed_suppressed_while_swap_pending();
     test_apply_autosave_targets_incoming_slot_via_real_override();
 
     cfg_fs_deinit();

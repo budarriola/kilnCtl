@@ -27,6 +27,9 @@
 #include "relay_cycles.h"
 #include "run_state.h"
 #include "safety_cfg_store.h" /* CT_COMMISSIONING_PLAN.md step 4 -- ct_topology (0x031F) */
+#include "safety_ceiling_sync.h" /* 2026-09-15 review (review_divergence_rework_c1d2c526_2026-09-15.md,
+                                   * HIGH 2) -- safety_ceiling_sync_is_standing_diverged() */
+#include "config_divergence.h" /* CONFIG_DIVERGENCE_REASON_MAX */
 #include "safety_trip_words.h"
 #include "sim_backend.h"
 #include "uart_task_ids.h"
@@ -486,6 +489,26 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
      * diag_trip_reason/trip_reason are the single "the" reason and now DO
      * get decoded cause/remedy text below, via safety_trip_words.h's shared
      * table (2026-08-27 scope change). */
+    /* 2026-09-15 review (review_divergence_rework_c1d2c526_2026-09-15.md,
+     * HIGH 2 -- "warning invisible"): surface the WARNING-only standing
+     * (non-ceiling) divergence here too -- previously only the heat-
+     * disabling ceiling divergence was visible anywhere (readiness_http.c's
+     * "safety_ceiling_match" item). Without this, autosave could be
+     * silently blocked forever (kiln_cfg_store.c's autosave gate) with no
+     * operator-visible symptom at all. Truncated to a short prefix of the
+     * full reason -- this buffer already runs close to its budget (see this
+     * file's own header comment on DASHBOARD_JSON_STATUS_BUF_SIZE
+     * headroom), and a short summary is enough to point an operator at
+     * /safety/commissioning for the full detail. */
+    {
+        char standing_reason[CONFIG_DIVERGENCE_REASON_MAX];
+        bool standing_diverged = safety_ceiling_sync_is_standing_diverged(standing_reason, sizeof(standing_reason));
+        APPEND(",\"safety_standing_diverged\":%s", standing_diverged ? "true" : "false");
+        if (standing_diverged) {
+            APPEND(",\"safety_standing_diverged_reason\":\"%.80s\"", standing_reason);
+        }
+    }
+
     APPEND(",\"diag_ever_received\":%s", ds->diag_ever_received ? "true" : "false");
     if (ds->diag_ever_received) {
         APPEND(",\"diag_trip_reason\":%u", (unsigned)ds->diag_trip_reason);

@@ -10,6 +10,8 @@
 #include "http_form.h"
 #include "kiln_cfg_store.h"
 #include "ota_http.h"
+#include "safety_ceiling_sync.h" /* 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md,
+                                   * LOW) -- warn on an explicit save while diverged */
 #include "wifi_provision_http.h"
 
 static const char *TAG = "kiln_cfg_http";
@@ -167,8 +169,37 @@ static esp_err_t save_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    char resp[64];
-    int len = snprintf(resp, sizeof(resp), "{\"id\":%ld}", (long)new_id);
+    /* 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md,
+     * LOW -- gate/warn on explicit save while diverged): an operator-
+     * initiated "save over slot" here is NOT blocked by a config divergence
+     * -- unlike the autosave path, this is a deliberate action the operator
+     * chose to take, and refusing it would just make the divergence harder
+     * to clear. But the operator should know the slot they just saved was
+     * taken while the Pico's live safety config disagreed with what the ESP
+     * expects, since that snapshot may not be what the Pico is actually
+     * enforcing right now. ESP_LOGW so it is visible in the boot log even
+     * if the web client never reads the response body's warning field. */
+    char divergence_reason[96];
+    bool diverged = safety_ceiling_sync_is_diverged(divergence_reason, sizeof(divergence_reason)) ||
+                     safety_ceiling_sync_is_standing_diverged(divergence_reason, sizeof(divergence_reason));
+    if (diverged) {
+        ESP_LOGW(TAG,
+                 "save_post_handler: kiln config slot %ld saved while the Pico's safety config is "
+                 "diverged: %s",
+                 (long)new_id, divergence_reason);
+    }
+
+    char resp[192];
+    int len;
+    if (diverged) {
+        char reason_escaped[96];
+        json_escape(divergence_reason, reason_escaped, sizeof(reason_escaped));
+        len = snprintf(resp, sizeof(resp),
+                       "{\"id\":%ld,\"warning\":\"saved while the safety processor's config is diverged: %s\"}",
+                       (long)new_id, reason_escaped);
+    } else {
+        len = snprintf(resp, sizeof(resp), "{\"id\":%ld}", (long)new_id);
+    }
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
 }

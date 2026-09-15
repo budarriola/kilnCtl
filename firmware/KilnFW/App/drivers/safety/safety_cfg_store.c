@@ -1124,6 +1124,26 @@ uint16_t safety_cfg_store_cached_crc(void)
     return s_store.config_crc;
 }
 
+/* 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md,
+ * MEDIUM 5): true whenever the cache is KNOWN to disagree with the live
+ * Pico's config_crc and a refetch has not yet caught up -- set the instant
+ * safety_cfg_store_maybe_refetch() sees the mismatch (even while it is still
+ * backing off, not just while a fetch is actually in flight), cleared only
+ * once a refetch actually lands. A refetch failure (bad link, a Pico reboot)
+ * leaves the PREVIOUS cache contents in place (safety_cfg_store_refetch_
+ * locked()'s own "stage into scratch first" comment), which is exactly the
+ * MEDIUM 5 hazard: those stale values keep reading as confidently SET long
+ * after they stopped being true. A caller comparing against the live Pico
+ * (safety_ceiling_sync.c's broadened standing-divergence fields) must treat
+ * every entry as UNKNOWN, not "still matching", while this reads true --
+ * see that file's own use of this accessor. */
+static bool s_cache_stale = false;
+
+bool safety_cfg_store_cache_is_stale(void)
+{
+    return s_cache_stale;
+}
+
 uint32_t safety_cfg_store_fetched_ms_ago(void)
 {
     if (s_fetched_at_us < 0) {
@@ -1559,8 +1579,13 @@ static uint16_t s_retry_crc = 0;
 bool safety_cfg_store_maybe_refetch(SafetyLinkClass *link, uint16_t live_config_crc)
 {
     if (s_store.config_crc == live_config_crc) {
+        s_cache_stale = false;
         return false; /* steady state -- no UART traffic at all, by design */
     }
+    /* MEDIUM 5 fix: mark stale the instant a mismatch is seen -- including
+     * while still backing off below -- not only while a fetch attempt is
+     * actually in flight. */
+    s_cache_stale = true;
 
     int64_t now_us = (int64_t)hal_time_now_us();
     if (live_config_crc != s_retry_crc) {
@@ -1579,6 +1604,7 @@ bool safety_cfg_store_maybe_refetch(SafetyLinkClass *link, uint16_t live_config_
     if (safety_cfg_store_refetch_nonblocking(link, live_config_crc)) {
         s_retry_delay_ms = SAFETY_CFG_STORE_RETRY_MIN_MS;
         s_retry_not_before_us = 0;
+        s_cache_stale = false;
         return true;
     }
 

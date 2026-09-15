@@ -1262,24 +1262,36 @@ static esp_err_t commissioning_post_handler(httpd_req_t *req)
             }
         }
 
-        /* 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md,
-         * HIGH 3): a committed-and-CONFIRMED (apply_pairs() above already ran
-         * confirm_commit_landed()'s readback) Pico safety param write never
-         * touched the active kiln-config slot's captured Pico half, so the
-         * slot went stale relative to a legitimate live change -- the
-         * standing divergence check (safety_ceiling_sync.c) would then
-         * compare the slot's now-stale "expected" value against the Pico's
-         * new (correct) live value and report a divergence for a perfectly
-         * ordinary commissioning write. Re-snapshot the live Pico cache into
-         * the active slot right after a confirmed commit, exactly as any
-         * other live-config change would via kiln_cfg_store_autosave_from_
-         * live() -- itself now suppressed (HIGH 1 fix) if some OTHER, real
-         * divergence is latched, so this can never launder an unrelated
-         * disagreement. Best-effort: a failure here is logged by that
-         * function's own callers elsewhere and must not fail this HTTP
-         * response -- the Pico write itself already landed and confirmed. */
+        /* 2026-09-15 review (review_divergence_rework_c1d2c526_2026-09-15.md,
+         * MEDIUM 3 / HIGH 3 race): a committed-and-CONFIRMED (apply_pairs()
+         * above already ran confirm_commit_landed()'s readback) Pico safety
+         * param write never touched the active kiln-config slot's captured
+         * Pico half, so the slot went stale relative to a legitimate live
+         * change -- the standing divergence check (safety_ceiling_sync.c)
+         * would then compare the slot's now-stale "expected" value against
+         * the Pico's new (correct) live value and report a divergence for a
+         * perfectly ordinary commissioning write.
+         *
+         * The original fix called kiln_cfg_store_autosave_from_live() here,
+         * discarding its result with (void) -- and that call is racy: a
+         * safety_poll_task tick landing in the gap between apply_pairs()'s
+         * own confirm-by-readback and this line can latch the SAME
+         * divergence this write is meant to clear, which made the ordinary
+         * (divergence-gated) autosave path skip the very recapture that
+         * would resolve it, silently, with the discarded return value
+         * hiding the skip entirely. kiln_cfg_store_recapture_pico_half_
+         * confirmed() is the fix: it is for exactly this caller -- one that
+         * has JUST confirmed its own push -- and does not gate on the
+         * divergence latch at all, so the race window above cannot suppress
+         * it. Checked and logged, never discarded: the Pico write itself
+         * already landed and confirmed, so a failed recapture here must not
+         * fail this HTTP response, but it must not go unnoticed either. */
         char autosave_reason[128];
-        (void)kiln_cfg_store_autosave_from_live(autosave_reason, sizeof(autosave_reason));
+        if (!kiln_cfg_store_recapture_pico_half_confirmed(autosave_reason, sizeof(autosave_reason))) {
+            ESP_LOGW(TAG,
+                     "commissioning_post_handler: Pico-half recapture after confirmed push failed: %s",
+                     autosave_reason);
+        }
     }
 
     char resp[256];

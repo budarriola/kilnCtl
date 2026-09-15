@@ -741,6 +741,16 @@ size_t safety_cfg_store_param_count(void)
 {
     return s_cfg_row_count;
 }
+// 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md,
+// MEDIUM 5): safety_ceiling_sync.c (linked for real, see above) now calls
+// this too, from the same broadened standing-divergence path. This
+// executable never links safety_cfg_store.c for real, so it needs its own
+// stub -- always "fresh" (false) here since none of this file's existing
+// tests exercise a stale-cache scenario.
+bool safety_cfg_store_cache_is_stale(void)
+{
+    return false;
+}
 uint32_t safety_cfg_store_fetched_ms_ago(void)
 {
     return s_cfg_fetched_ms_ago;

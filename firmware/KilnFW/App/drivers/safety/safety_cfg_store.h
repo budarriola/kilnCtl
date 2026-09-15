@@ -221,6 +221,19 @@ bool safety_cfg_store_refetch_nonblocking(SafetyLinkClass *link, uint16_t config
  * applies a fresh FW_VERSION frame (see this header's top comment). */
 bool safety_cfg_store_maybe_refetch(SafetyLinkClass *link, uint16_t live_config_crc);
 
+/* 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md,
+ * MEDIUM 5): true whenever safety_cfg_store_maybe_refetch() has seen the
+ * cached config_crc disagree with the live Pico's and a refetch has not yet
+ * landed -- including while backing off between retries, not only while a
+ * fetch attempt is actually in flight. A failed refetch (bad link, a Pico
+ * reboot) leaves the cache's PREVIOUS contents in place, so every entry in it
+ * keeps reading as confidently SET even though the Pico may have reverted.
+ * A caller that compares individual param values against this cache (e.g.
+ * safety_ceiling_sync.c's broadened standing-divergence fields) must treat
+ * every entry as UNKNOWN, not "still agrees", while this reads true -- never
+ * let a stale cache silently hide a real revert. */
+bool safety_cfg_store_cache_is_stale(void);
+
 /* 2026-08-23 panic fix: the actual NVS write safety_cfg_store_refetch() used
  * to make directly (nvs_save_store()) now only ever runs via this function,
  * which hands it to uart_bridge_ext.c's internal-SRAM-stack flash-safe
