@@ -116,15 +116,22 @@ static void test_release_on_stop(void)
     reset_all(true);
     (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
     heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
-    TEST_CHECK(release_sends() == 1, "exactly one REQUEST_ENABLE(false) on the wire");
-    TEST_CHECK(g_last_enable_value == false, "the last thing sent was a release");
-    TEST_CHECK(!heat_enable_is_granted(), "no longer granted");
+    // 2026-09-15 fix: the wire send is now deferred off heat_enable_release()'s
+    // own caller -- nothing lands until a servicer (safety_poll_task on
+    // target; called by hand here, standing in for it) actually drains it.
+    TEST_CHECK(release_sends() == 0, "the release send is deferred, not sent from this call's own stack");
+    TEST_CHECK(!heat_enable_is_granted(), "no longer granted -- bookkeeping flips synchronously either way");
     TEST_CHECK(!heat_enable_is_held(HEAT_ENABLE_CLAIMANT_PROFILE), "the claim is gone");
+
+    heat_enable_service_pending_release();
+    TEST_CHECK(release_sends() == 1, "exactly one REQUEST_ENABLE(false) on the wire once drained");
+    TEST_CHECK(g_last_enable_value == false, "the last thing sent was a release");
 
     // The per-tick backstop case: both callers call release on EVERY tick
     // they spend in a non-running state. That must be free.
     for (int i = 0; i < 50; i++) {
         heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+        heat_enable_service_pending_release();
     }
     TEST_CHECK(release_sends() == 1, "50 further releases sent nothing (backstop is free)");
 
@@ -133,6 +140,7 @@ static void test_release_on_stop(void)
     // started a run.
     reset_all(true);
     heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_service_pending_release();
     TEST_CHECK(release_sends() == 0, "releasing a claim that was never taken sends nothing");
 }
 
@@ -146,11 +154,13 @@ static void test_two_claimants_refcount(void)
     TEST_CHECK(enable_sends() == 1, "the second claimant did not send a second request");
 
     heat_enable_release(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
+    heat_enable_service_pending_release();
     TEST_CHECK(release_sends() == 0, "one of two claimants leaving sends no release");
     TEST_CHECK(heat_enable_is_granted(), "heat is still requested for the remaining claimant");
     TEST_CHECK(!heat_enable_is_held(HEAT_ENABLE_CLAIMANT_AUTOTUNE), "the leaver's claim is gone");
 
     heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_service_pending_release();
     TEST_CHECK(release_sends() == 1, "the last claimant leaving sends the release");
     TEST_CHECK(!heat_enable_is_granted(), "no longer granted");
 }
@@ -206,11 +216,13 @@ static void test_release_after_failed_request_still_sends(void)
     reset_all(false);
     (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
     heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(!heat_enable_retry_pending(), "the pending retry is cancelled by the release synchronously, "
+                                             "even before the deferred wire send below is drained");
+    heat_enable_service_pending_release();
     // enable=false is the fail-safe direction and safety_link.c attempts it
     // whether or not the link looks up -- refusing it because the link looks
     // down is the one refusal that could leave heat on.
     TEST_CHECK(release_sends() == 1, "the release still goes out on a down link");
-    TEST_CHECK(!heat_enable_retry_pending(), "and the pending retry is cancelled by the release");
     heat_enable_reconcile();
     TEST_CHECK(g_enable_true_calls == 1, "reconcile does not resurrect a released claim");
 }
@@ -258,6 +270,7 @@ static void test_release_failure_is_checked_and_logged(void)
     (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
     g_release_should_fail = true;
     heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_service_pending_release();
     TEST_CHECK(release_sends() == 1, "the release is still attempted even though it will fail");
     TEST_CHECK(g_last_enable_value == false, "the attempted send was still enable=false");
 
@@ -303,6 +316,82 @@ static void test_release_failure_is_checked_and_logged(void)
     free(text);
 }
 
+static void test_release_defers_the_wire_send_off_the_callers_stack(void)
+{
+    TEST_SECTION("heat_enable -- 2026-09-15 fix: heat_enable_release() itself never calls "
+                 "safety_link_request_enable() -- the deep UART chain that smashed profile_executor's "
+                 "4096 B stack four times (docs/audits/profile_executor_coredump_2026-09-15.md) must "
+                 "run on a servicer's stack, not the caller's");
+
+    // Behavioral half, already exercised above (test_release_on_stop): a
+    // release with nobody draining it leaves release_sends() at 0. Pinned
+    // again here, directly, as the property this whole fix exists for.
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(release_sends() == 0,
+               "MUST GO RED if heat_enable_release() goes back to sending synchronously -- an "
+               "un-drained release must leave nothing on the wire yet");
+    heat_enable_service_pending_release();
+    TEST_CHECK(release_sends() == 1, "sanity: it does still go out once actually drained");
+
+    // Structural half: heat_enable_release()'s own function body must not
+    // contain the call. A source-text scan rather than a call-graph tool
+    // because that is this suite's existing precedent for pinning "this
+    // exact function does/doesn't call that exact function" (see
+    // test_release_failure_is_checked_and_logged() just above).
+    char *text = heat_enable_read_source();
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/heat_enable.c to source-scan");
+        return;
+    }
+    const char *fn = strstr(text, "void heat_enable_release(heat_enable_claimant_t who)");
+    TEST_CHECK(fn != NULL, "sanity: heat_enable_release()'s definition must be findable in the source");
+    if (fn != NULL) {
+        const char *next_fn = strstr(fn + 1, "\nvoid heat_enable_service_pending_release(void)");
+        TEST_CHECK(next_fn != NULL, "sanity: the next function boundary must be findable");
+        if (next_fn != NULL) {
+            size_t body_len = (size_t)(next_fn - fn);
+            char *body = (char *)malloc(body_len + 1);
+            if (body) {
+                memcpy(body, fn, body_len);
+                body[body_len] = '\0';
+                TEST_CHECK(strstr(body, "safety_link_request_enable(") == NULL,
+                           "heat_enable_release()'s own function body must not call "
+                           "safety_link_request_enable() -- if this matches, the synchronous send "
+                           "came back onto profile_executor_status.c's/profile_executor.c's caller "
+                           "stacks, recreating the 2026-09-15 panic");
+                free(body);
+            }
+        }
+    }
+    free(text);
+}
+
+static void test_reenable_never_races_ahead_of_a_pending_release(void)
+{
+    TEST_SECTION("heat_enable -- a re-enable can never overtake a still-pending release "
+                 "(reset-one-side class: CLAUDE.md)");
+
+    reset_all(true);
+    TEST_CHECK(heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE) == true, "sanity: first acquire lands");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    // Nothing drained the pending release yet -- exactly the state a
+    // safety_poll_task tick hasn't caught up to.
+    TEST_CHECK(release_sends() == 0, "sanity: the release is still only pending");
+
+    // A re-enable arrives before any servicer ran (e.g. profile_executor_
+    // resume() right after profile_executor_pause()). send_enable() must
+    // flush the pending release BEFORE asking for enable=true, or the two
+    // frames could reorder on the wire and leave the safety processor
+    // seeing enable-then-disable when this side intended disable-then-enable.
+    TEST_CHECK(heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE) == true, "the re-enable lands");
+    TEST_CHECK(release_sends() == 1,
+               "MUST GO RED if a re-enable can be sent while a release is still pending -- the "
+               "pending release must be flushed first, not left stranded behind a fresh enable");
+    TEST_CHECK(enable_sends() == 2, "and the re-enable itself still goes out (1 initial + 1 after)");
+}
+
 static void test_bad_claimant(void)
 {
     TEST_SECTION("heat_enable -- an out-of-range claimant is refused, not indexed");
@@ -322,5 +411,7 @@ void run_test_heat_enable(void)
     test_reconcile_retries_then_stops();
     test_release_after_failed_request_still_sends();
     test_release_failure_is_checked_and_logged();
+    test_release_defers_the_wire_send_off_the_callers_stack();
+    test_reenable_never_races_ahead_of_a_pending_release();
     test_bad_claimant();
 }

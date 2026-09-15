@@ -97,7 +97,30 @@ bool heat_enable_acquire(heat_enable_claimant_t who);
 // Only the release of the LAST claimant sends REQUEST_ENABLE(false).
 //
 // Call AFTER the relays are already off. Never before, never instead.
+//
+// 2026-09-15: the actual SAFETY_CMD_REQUEST_ENABLE(false) wire exchange is
+// NOT sent synchronously on this call's own stack any more (see
+// heat_enable_service_pending_release() below) -- it is flagged here and
+// drained off a task with real stack headroom. heat_enable_is_granted()/
+// heat_enable_is_held() still flip synchronously, before this call returns,
+// exactly as before; only the deep UART send is deferred.
 void heat_enable_release(heat_enable_claimant_t who);
+
+// Drains one release owed to the wire, if any (no-op otherwise). Called once
+// per loop iteration by safety_poll_task (safety_link_poll.c) -- the same
+// pattern safety_link.h's reannounce_pending/boot_clear_pending use -- so the
+// deep safety_link_request_enable(false) call this used to make on
+// heat_enable_release()'s OWN caller's stack (profile_executor's 4096 B task,
+// implicated in four recurring stack-smash panics, see
+// docs/audits/profile_executor_coredump_2026-09-15.md) instead runs on
+// safety_poll_task's 8192 B stack. A pending release is never dropped: it is
+// only cleared here, immediately before the send is actually attempted, and
+// heat_enable_acquire()/send_enable() also call this first to flush any
+// still-pending release before asking for enable=true, so a re-enable can
+// never race ahead of a release that has not gone out yet. Safe to call with
+// no module lock held (and this function never acquires any lock but its
+// own); safe to call from a host test in place of a real safety_poll_task.
+void heat_enable_service_pending_release(void);
 
 // True if `who` currently holds a claim (whether or not it was granted).
 bool heat_enable_is_held(heat_enable_claimant_t who);

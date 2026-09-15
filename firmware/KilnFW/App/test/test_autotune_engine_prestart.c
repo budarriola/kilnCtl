@@ -3122,6 +3122,7 @@ static void test_autotune_guard_trip_releases_heat_enable(void)
     s_req_enable_false_calls = 0;
 
     run_bad_sensor_ticks(/*n_ticks=*/10);
+    heat_enable_service_pending_release(); /* 2026-09-15 fix: deferred send, drained by hand here */
 
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "sanity: the trip landed");
     TEST_CHECK(s_req_enable_false_calls == 1,
@@ -3137,6 +3138,7 @@ static void test_autotune_manual_abort_releases_heat_enable(void)
     s_req_enable_false_calls = 0;
 
     autotune_engine_abort("operator cancelled");
+    heat_enable_service_pending_release(); /* 2026-09-15 fix: deferred send, drained by hand here */
 
     TEST_CHECK(s_req_enable_false_calls == 1, "abort_locked() -> force_relays_off() must release it");
     TEST_CHECK(!heat_enable_is_granted(), "nothing left standing");
@@ -3146,6 +3148,7 @@ static void test_autotune_manual_abort_releases_heat_enable(void)
      * frame on the wire per tick. */
     heat_enable_release(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
     heat_enable_release(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
+    heat_enable_service_pending_release();
     TEST_CHECK(s_req_enable_false_calls == 1, "the per-tick backstop is free after the first release");
 }
 

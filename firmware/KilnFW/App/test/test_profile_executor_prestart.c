@@ -2145,6 +2145,12 @@ static void test_guard_trip_releases_heat_enable(void)
     s_exec.claimed_relay_mask = 0x03;
 
     (void)escalate_guard_trip(0, THERMAL_GUARD_TRIP_MAX_TEMP, "over-temp");
+    // 2026-09-15 fix: the REQUEST_ENABLE(false) send is now deferred off
+    // this call's own stack (see test_heat_enable.c's dedicated tests for
+    // that property) -- drain it by hand here, standing in for the real
+    // safety_poll_task, so this file's existing wire-count assertions still
+    // hold.
+    heat_enable_service_pending_release();
 
     TEST_CHECK(g_request_enable_false_calls == 1,
                "a guard trip must send exactly one REQUEST_ENABLE(false) -- a fault path that skips "
@@ -2163,6 +2169,7 @@ static void test_halt_releases_heat_enable(void)
     s_exec.claimed_relay_mask = 0x0F;
 
     profile_executor_halt();
+    heat_enable_service_pending_release(); /* deferred send -- see 2026-09-15 fix note above */
 
     TEST_CHECK(g_request_enable_false_calls == 1, "an operator halt must release the heat-enable request");
     TEST_CHECK(!heat_enable_is_granted(), "nothing left standing");
@@ -2170,6 +2177,7 @@ static void test_halt_releases_heat_enable(void)
     /* halt() is also how a DONE/FAULTED run is dismissed, and dismissing one
      * twice must not put a second frame on the wire. */
     profile_executor_halt();
+    heat_enable_service_pending_release();
     TEST_CHECK(g_request_enable_false_calls == 1, "a second halt sends nothing more");
 }
 
@@ -2231,6 +2239,7 @@ static void test_pause_releases_heat_enable_and_resume_reacquires(void)
     s_exec.claimed_relay_mask = 0x05;
 
     TEST_CHECK(profile_executor_pause(), "sanity: pause() succeeds from RUNNING");
+    heat_enable_service_pending_release(); /* deferred send -- see 2026-09-15 fix note above */
     TEST_CHECK(g_request_enable_false_calls == 1,
                "pause must release K4 -- unlike the relay claim, which pause deliberately KEEPS "
                "(handed to MANUAL), leaving the safety processor permitting heat across a pause of "
@@ -2256,6 +2265,7 @@ static void test_heat_enable_release_survives_a_down_link(void)
     s_exec.claimed_relay_mask = 0x01;
 
     profile_executor_halt();
+    heat_enable_service_pending_release(); /* deferred send -- see 2026-09-15 fix note above */
 
     TEST_CHECK(g_request_enable_false_calls == 1, "the release is still attempted on a down link");
     TEST_CHECK(!heat_enable_is_granted(), "and the request is not left standing");

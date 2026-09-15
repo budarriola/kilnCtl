@@ -97,12 +97,22 @@ bool zones_config_is_valid(void) { return true; }
  * getters and safety_cfg_http.c's UART exchange machinery -- outside what
  * this executable links (it exists to compile-check safety_link.c's own
  * logic, same "everything else is faked" convention as every other stub on
- * this page). Faked as a no-op, same as safety_sync_tc_type()'s own
- * zones_config_get_safety_tc_type()/zones_config_is_valid() dependencies
- * just above -- this file is not the place ceiling-sync behaviour is
+ * this page). Faked as a no-op; the zones_config_get_safety_tc_type()/
+ * zones_config_is_valid() stubs just above now serve only backup_export.c's
+ * read-back use of the field (the removed safety_sync_tc_type()'s own use
+ * of them is gone) -- this file is not the place ceiling-sync behaviour is
  * tested (that is test_safety_ceiling_policy.c at the pure-logic layer and
  * test_zones_http.c's test_reconcile_on_link_up_*() at the ESP-glue layer). */
 void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link) { (void)link; }
+
+// heat_enable_service_pending_release() -- 2026-09-15 fix
+// (docs/audits/profile_executor_coredump_2026-09-15.md): safety_link_poll.c's
+// safety_poll_task() now drains a pending heat_enable release once per loop,
+// same "cross-module dependency, don't drag in its own state machine"
+// convention as the fakes above -- heat_enable.c's own behaviour is tested by
+// test_heat_enable.c, not here; this file only needs safety_poll_task() to
+// link and call something.
+void heat_enable_service_pending_release(void) { /* not exercised by this file's tests */ }
 
 // relay_cycles_note_safety_edge() -- RELAY_LIFE_BUDGET.md.
 // safety_apply_status() (safety_link_frames.c) now calls this once per

@@ -15,6 +15,9 @@ typedef struct {
     uint32_t          enable_sends;
     uint32_t          release_sends;
     bool              warned_pending; /* throttles the reconcile-retry warning */
+    bool              release_pending; /* a REQUEST_ENABLE(false) is owed to the wire but not
+                                         * yet sent -- see heat_enable_release()/
+                                         * heat_enable_service_pending_release(). */
 } heat_enable_ctx_t;
 
 static heat_enable_ctx_t s_he;
@@ -67,6 +70,7 @@ void heat_enable_init(SafetyLinkClass *safety_or_null)
     s_he.granted = false;
     s_he.pending = false;
     s_he.warned_pending = false;
+    s_he.release_pending = false;
 }
 
 /* Sends REQUEST_ENABLE(true) and folds the result back into the state.
@@ -75,6 +79,13 @@ void heat_enable_init(SafetyLinkClass *safety_or_null)
  * landed. */
 static bool send_enable(const char *why)
 {
+    /* Reset-one-side guard: a re-enable must never overtake a release that is
+     * still owed to the wire (heat_enable_release() defers the actual send --
+     * see below). Flushing it first, synchronously, here rather than relying
+     * on safety_poll_task's drain to have already run keeps the two directions
+     * strictly ordered no matter which task calls acquire() next. */
+    heat_enable_service_pending_release();
+
     esp_err_t err = safety_link_request_enable(s_he.safety, true);
 
     bool taken = he_lock();
@@ -191,14 +202,59 @@ void heat_enable_release(heat_enable_claimant_t who)
         return;
     }
 
+    /* 2026-09-15 fix (docs/audits/profile_executor_coredump_2026-09-15.md):
+     * the actual REQUEST_ENABLE(false) safety-link exchange used to happen
+     * right here, synchronously, on WHATEVER task called heat_enable_release()
+     * -- for profile_executor_status.c's halt()/pause() and
+     * profile_executor.c's escalate_guard_trip() path, that is
+     * profile_executor's own 4096 B task stack, and the measured worst-case
+     * depth through this exact chain (safety_exchange -> uart_protocol_send_
+     * broadcast -> ... -> uart_enable_tx_write_fifo) was the single deepest
+     * contributor to four recurring stack-smash panics on that task. The
+     * bookkeeping above (granted/pending/held_mask, all under s_he.lock) is
+     * unaffected -- heat_enable_is_granted()/is_held() already flip
+     * synchronously, right here, before any frame goes on the wire, exactly
+     * as before. Only the deep UART call itself is deferred, mirroring
+     * safety_link.h's existing reannounce_pending/boot_clear_pending pattern:
+     * flagged here under lock, drained by safety_link_poll.c's safety_poll_
+     * task (8192 B, ample headroom) once per loop iteration via
+     * heat_enable_service_pending_release() below. A missed release can never
+     * be lost -- release_pending stays set (this module never clears it
+     * without having actually sent the frame) until a servicer call actually
+     * attempts the send; a re-enable can never race ahead of it either --
+     * send_enable() flushes any pending release first, synchronously, before
+     * asking for enable=true. No module lock is held across the deferred
+     * call in either place. */
+    bool t2 = he_lock();
+    s_he.release_pending = true;
+    he_unlock(t2);
+}
+
+/* Drains a release owed to the wire, if any. Never called with s_he.lock (or
+ * any other module's lock) held by the caller -- takes and releases it only
+ * for the small bookkeeping steps, exactly like send_enable() does for the
+ * enable=true side. Safe and cheap to call unconditionally every tick from a
+ * task with real stack headroom (safety_poll_task); also called synchronously
+ * from send_enable() to flush a pending release before a re-enable, and
+ * directly by host tests in place of a real safety_poll_task. */
+void heat_enable_service_pending_release(void)
+{
+    bool taken = he_lock();
+    bool go = s_he.release_pending;
+    s_he.release_pending = false;
+    he_unlock(taken);
+    if (!go) {
+        return;
+    }
+
     /* Unconditional attempt, exactly like danger_mode_stop()'s: enable=false
      * is the fail-safe direction and safety_link.c attempts it whether or
      * not the link looks up. The relays are already off by the time any
-     * caller reaches here -- see heat_enable.h's ordering rule -- but this
-     * used to cast the result to (void) and print "released" regardless,
-     * which is the exact seed bug (danger_mode.c, commit 2bcdc2d): an
-     * owner-queue/link failure looked identical in the log to a confirmed
-     * release. Surface the disagreement instead. */
+     * caller reaches heat_enable_release() -- see heat_enable.h's ordering
+     * rule -- but this used to cast the result to (void) and print
+     * "released" regardless, which is the exact seed bug (danger_mode.c,
+     * commit 2bcdc2d): an owner-queue/link failure looked identical in the
+     * log to a confirmed release. Surface the disagreement instead. */
     esp_err_t rel_err = safety_link_request_enable(s_he.safety, false);
     bool t2 = he_lock();
     s_he.release_sends++;
