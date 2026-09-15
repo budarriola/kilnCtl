@@ -178,9 +178,32 @@ def build_link_specs(root: Path):
                 # docstring for why a text-level fingerprint was chosen over
                 # a value-level one, and negative-test proof in
                 # docs/audits/saftyfw_live_stack_reporting_impl_2026-09-14.md.
-                (kilnlink_dir, "*.h", re.compile(r'^KILNLINK_.*(_LEN|_OFF|_NUM_|_COUNT)\w*$'),
+                #
+                # _CMD covers this link's own opcode constants (e.g.
+                # KILNLINK_ANNOUNCE_REBOOT_CMD, kilnlink_announce_reboot.h) --
+                # every PC<->ESP command already has its own KILNLINK_*_CMD
+                # definition in this directory, so that is this fingerprint's
+                # correct, self-contained source of truth for "did a
+                # kilnlink opcode change" and it never needs to reach into
+                # uart_task_ids.h's SAFETY_CMD_ list (that list belongs
+                # entirely to the isolated ESP<->Pico link -- see the "uart"
+                # spec below). Scoping fixed 2026-09-14
+                # (docs/audits/pico_volatile_install_and_unconfigured_ceiling_2026-09-14.md
+                # Finding B): before this, both specs read uart_task_ids.h's
+                # SAFETY_CMD_ prefix without distinguishing which link a
+                # given entry belonged to, so a purely isolated-link addition
+                # (SAFETY_CMD_APPLY_CONFIG_VOLATILE) moved BOTH fingerprints
+                # and forced an UART_PROTOCOL_VERSION bump that had nothing
+                # to do with the PC link.
+                (kilnlink_dir, "*.h", re.compile(r'^KILNLINK_.*(_LEN|_OFF|_NUM_|_COUNT|_CMD)\w*$'),
                  lambda p: p.name != "kilnlink_version.h"),
-                (uart_ids.parent, uart_ids.name, re.compile(r'^SAFETY_CMD_'), None),
+                # LINK_FRAME_*_CMD (SaftyFW's own dispatch-id redefinitions,
+                # e.g. LINK_FRAME_CLEAR_TRIP_CMD) are deliberately pinned to
+                # the same numeric value as their KILNLINK_*_CMD counterpart
+                # by convention (see link_frame.h's own comments) -- this is
+                # the one place that cross-link value agreement is checked,
+                # so it stays part of the kilnlink fingerprint rather than
+                # the isolated-link one.
                 (safaty_link_frame.parent, safaty_link_frame.name,
                  re.compile(r'^LINK_FRAME_.*_CMD$'), None),
             ],
@@ -189,6 +212,10 @@ def build_link_specs(root: Path):
             "version_file": uart_ids,
             "version_macro": "UART_PROTOCOL_VERSION",
             "sources": [
+                # SAFETY_CMD_ is the isolated ESP<->Pico link's own opcode
+                # enumeration and belongs ONLY here -- see the "kilnlink"
+                # spec's comment above for why it is no longer also read
+                # into the kilnlink fingerprint.
                 (uart_ids.parent, uart_ids.name,
                  re.compile(r'^UART_TASK_ID_|^SAFETY_CMD_|^[A-Z0-9]+_CMD_'), None),
                 (max_payload_hdr.parent, max_payload_hdr.name,
