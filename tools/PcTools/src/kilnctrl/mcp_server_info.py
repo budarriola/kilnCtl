@@ -333,14 +333,41 @@ def get_fw_version() -> str:
     except Exception as exc:  # noqa: BLE001 - this line is a bonus, not the tool's job
         lines.append(f"board/HEAD comparison: error computing it ({exc})")
     try:
-        # M1 (2026-09-15 review): flash_provenance.json moved out of
-        # build/ -- see elf_archive.kiln_provenance_path()'s docstring.
-        prov = flash_provenance.read_provenance_json(elf_archive.kiln_provenance_path())
-        warning = flash_provenance.format_last_flash_warning(prov)
+        warning = _read_last_flash_warning()
         if warning:
             lines.append(warning)
     except Exception as exc:  # noqa: BLE001 - same, bonus info
         lines.append(f"(could not check last flash outcome: {exc})")
     return "\n".join(lines)
+
+
+def _read_last_flash_warning() -> Optional[str]:
+    """Reads flash_provenance.json and formats the last-flash warning line
+    (if any) -- factored out of get_fw_version() so it can be unit tested
+    without a live board/link.
+
+    M1 (2026-09-15 review): flash_provenance.json moved out of build/ -- see
+    elf_archive.kiln_provenance_path()'s docstring.
+
+    L3 (2026-09-15 fixes review): a file left behind at the OLD path (from
+    before that move, or from a stale server still writing there -- see
+    CLAUDE.md "Stale-server self-announcing") used to go completely unread
+    once the new path was checked exclusively, silently dropping the
+    last-flash warning. Migrate it into place if present; if that can't
+    happen (e.g. guarded during a test), fall back to reading the legacy
+    path directly rather than reporting nothing."""
+    from . import elf_archive, flash_provenance  # local import: avoids a circular import with mcp_server_flash.py
+    prov_path = elf_archive.kiln_provenance_path()
+    if not os.path.isfile(prov_path):
+        try:
+            elf_archive.migrate_legacy_provenance()
+        except Exception:  # noqa: BLE001 - migration is best-effort here
+            pass
+    if os.path.isfile(prov_path):
+        prov = flash_provenance.read_provenance_json(prov_path)
+    else:
+        legacy_path = elf_archive.legacy_kiln_provenance_path()
+        prov = flash_provenance.read_provenance_json(legacy_path) if os.path.isfile(legacy_path) else None
+    return flash_provenance.format_last_flash_warning(prov)
 
 

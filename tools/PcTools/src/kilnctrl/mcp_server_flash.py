@@ -616,6 +616,14 @@ def flash_firmware(
     # kiln_archive_dir(), regardless of kiln_fw_root.
     provenance_path = elf_archive.kiln_provenance_path()
     elf_archive._guard_against_test_write(provenance_path)
+    # L3 (2026-09-15 fixes review): pick up a file left behind at the OLD
+    # (pre-2026-09-15) build/flash_provenance.json path -- see
+    # elf_archive.migrate_legacy_provenance()'s docstring. Best-effort: a
+    # write below always follows regardless of whether this moved anything.
+    try:
+        elf_archive.migrate_legacy_provenance()
+    except Exception:  # noqa: BLE001 - migration must never block a flash
+        pass
     # An override tree's own git identity, not the main tree's: kiln_fw_root
     # is expected to be `<some-tree-root>/firmware/KilnFW`, so its tree root
     # is two levels up. See flash_firmware()'s `kiln_fw_root` docstring.

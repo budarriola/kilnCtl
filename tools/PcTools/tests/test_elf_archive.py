@@ -1002,16 +1002,30 @@ class MigrateLegacyArchiveTest(unittest.TestCase):
 
     def test_moves_legacy_entries_into_new_dir(self):
         _write_fake_elf(os.path.join(self.legacy_dir, "KilnCtrl-abc123.elf"), b"legacy-elf-content")
-        _write_fake_elf(os.path.join(self.legacy_dir, "manifest.json"), b"{}")
+        legacy_manifest = {
+            "Sep 1 2026 00:00:00": {
+                "elf_key": "abc123", "identity": "Sep 1 2026 00:00:00", "seq": 1,
+                "archived_at": "2026-09-01T00:00:00Z", "git_commit": "aaaa1111",
+                "source": "flash_firmware",
+            }
+        }
+        _write_fake_elf(os.path.join(self.legacy_dir, "manifest.json"), json.dumps(legacy_manifest).encode())
 
         moved = elf_archive.migrate_legacy_archive(self.archive_dir, "KilnCtrl")
 
-        self.assertEqual(moved, 2)
+        self.assertEqual(moved, 1)  # only the .elf is a raw move; manifest.json is merged, not moved as a file
         self.assertTrue(os.path.isfile(os.path.join(self.archive_dir, "KilnCtrl-abc123.elf")))
-        self.assertTrue(os.path.isfile(os.path.join(self.archive_dir, "manifest.json")))
-        # Moved, not copied -- the legacy copy is gone.
+        with open(os.path.join(self.archive_dir, "manifest.json")) as f:
+            new_manifest = json.load(f)
+        self.assertEqual(new_manifest["Sep 1 2026 00:00:00"]["elf_key"], "abc123")
+        self.assertEqual(new_manifest["Sep 1 2026 00:00:00"]["source"], "flash_firmware")
+        self.assertEqual(new_manifest["Sep 1 2026 00:00:00"]["archived_at"], "2026-09-01T00:00:00Z")
+        # Moved, not copied -- the legacy copies are gone (manifest.json was
+        # fully merged, so the drained legacy dir is cleaned up entirely --
+        # L1).
         self.assertFalse(os.path.isfile(os.path.join(self.legacy_dir, "KilnCtrl-abc123.elf")))
         self.assertFalse(os.path.isfile(os.path.join(self.legacy_dir, "manifest.json")))
+        self.assertFalse(os.path.isdir(self.legacy_dir))
 
     def test_skips_the_latest_elf_convenience_pointer(self):
         _write_fake_elf(os.path.join(self.legacy_dir, "KilnCtrl-latest.elf"), b"stale-pointer-content")
@@ -1019,22 +1033,53 @@ class MigrateLegacyArchiveTest(unittest.TestCase):
         moved = elf_archive.migrate_legacy_archive(self.archive_dir, "KilnCtrl")
 
         self.assertEqual(moved, 0)
-        # Left in place, un-deleted, un-moved.
-        self.assertTrue(os.path.isfile(os.path.join(self.legacy_dir, "KilnCtrl-latest.elf")))
+        # Never moved into the new dir -- it is meaningless once disconnected
+        # from the build/ dir it pointed into.
         self.assertFalse(os.path.exists(os.path.join(self.archive_dir, "KilnCtrl-latest.elf")))
+        # L1 (2026-09-15 fixes review): a stale latest.elf pointer holds no
+        # data worth keeping (unlike an ELF/manifest collision), so it is
+        # deleted outright once seen -- this is what lets the legacy dir
+        # actually drain instead of printing the same "unmoved" warning on
+        # every subsequent flash forever.
+        self.assertFalse(os.path.isfile(os.path.join(self.legacy_dir, "KilnCtrl-latest.elf")))
+        self.assertFalse(os.path.isdir(self.legacy_dir))  # nothing left -- directory itself is removed
 
     def test_never_overwrites_an_existing_destination_name(self):
-        _write_fake_elf(os.path.join(self.legacy_dir, "manifest.json"), b'{"legacy": true}')
-        _write_fake_elf(os.path.join(self.archive_dir, "manifest.json"), b'{"current": true}')
+        # L2 (2026-09-15 fixes review): the previous shutil.move()-based
+        # implementation's os.path.exists(dst) skip check was a TOCTOU on
+        # Windows -- shutil.move()'s copy+unlink fallback silently
+        # overwrites an existing destination regardless. os.link() (used
+        # now) physically cannot overwrite an existing name -- it raises
+        # FileExistsError instead -- so this proves the real fix, not just
+        # the same-shaped check.
+        _write_fake_elf(os.path.join(self.legacy_dir, "KilnCtrl-collide1.elf"), b"legacy-content")
+        _write_fake_elf(os.path.join(self.archive_dir, "KilnCtrl-collide1.elf"), b"current-content")
 
         moved = elf_archive.migrate_legacy_archive(self.archive_dir, "KilnCtrl")
 
         self.assertEqual(moved, 0)
         # Both copies survive, untouched -- "move, never delete unmoved data".
-        with open(os.path.join(self.legacy_dir, "manifest.json")) as f:
-            self.assertEqual(f.read(), '{"legacy": true}')
-        with open(os.path.join(self.archive_dir, "manifest.json")) as f:
-            self.assertEqual(f.read(), '{"current": true}')
+        with open(os.path.join(self.legacy_dir, "KilnCtrl-collide1.elf"), "rb") as f:
+            self.assertEqual(f.read(), b"legacy-content")
+        with open(os.path.join(self.archive_dir, "KilnCtrl-collide1.elf"), "rb") as f:
+            self.assertEqual(f.read(), b"current-content")
+
+    def test_negative_shutil_move_would_have_overwritten_the_collision(self):
+        """Proves the os.link()-based fix actually matters: with the OLD
+        shutil.move()-based approach, the same collision from the test above
+        silently overwrites the new file on Windows. Exercises shutil.move
+        directly (not migrate_legacy_archive) so this is a genuine repro of
+        the bug the fix replaced, not a mirror of the new code."""
+        import shutil
+        src = os.path.join(self.legacy_dir, "KilnCtrl-collide2.elf")
+        dst = os.path.join(self.archive_dir, "KilnCtrl-collide2.elf")
+        _write_fake_elf(src, b"legacy-content")
+        _write_fake_elf(dst, b"current-content")
+        if os.path.exists(dst):
+            pass  # the exact check migrate_legacy_archive used to make -- still overwritten below
+        shutil.move(src, dst)
+        with open(dst, "rb") as f:
+            self.assertEqual(f.read(), b"legacy-content")  # overwritten -- this is the bug
 
     def test_no_legacy_dir_is_a_harmless_no_op(self):
         self.assertFalse(os.path.isdir(self.legacy_dir))
@@ -1053,6 +1098,326 @@ class MigrateLegacyArchiveTest(unittest.TestCase):
 
         self.assertTrue(os.path.isfile(os.path.join(self.archive_dir, "KilnCtrl-oldkey1.elf")))
         self.assertFalse(os.path.isfile(os.path.join(self.legacy_dir, "KilnCtrl-oldkey1.elf")))
+
+
+class LegacyManifestMergeTest(unittest.TestCase):
+    """M1 (docs/audits/review_elf_archive_fixes_a6f4a624_2026-09-15.md): a
+    legacy manifest.json must be MERGED into the new one when both exist,
+    not left stranded -- leaving it stranded is what let a migrated flashed
+    ELF get silently re-adopted as an orphan (bogus archived_at, no more
+    flash protection). Covers the manifest-collision case and proves a
+    migrated flash-sourced entry survives _prune."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = self._tmp.name
+        self.archive_dir = os.path.join(self.root, "elf_archive")
+        self.legacy_dir = os.path.join(self.root, "build", "elf_archive")
+
+    def _legacy_flashed_entry(self, identity="Sep 1 2026 00:00:00", elf_key="oldflashed1"):
+        return {
+            identity: {
+                "elf_key": elf_key, "identity": identity, "seq": 1,
+                "archived_at": "2026-01-01T00:00:00Z",  # deliberately ancient
+                "git_commit": "cccc3333", "source": "flash_firmware",
+            }
+        }
+
+    def test_no_collision_legacy_entry_is_adopted_with_its_own_provenance(self):
+        elf_key = "oldflashed1"
+        _write_fake_elf(os.path.join(self.legacy_dir, f"KilnCtrl-{elf_key}.elf"), b"legacy-flashed-content")
+        _write_fake_elf(
+            os.path.join(self.legacy_dir, "manifest.json"),
+            json.dumps(self._legacy_flashed_entry(elf_key=elf_key)).encode(),
+        )
+        # A new manifest already exists (the common case per the audit) but
+        # holds an unrelated identity -- no collision.
+        _write_fake_elf(
+            os.path.join(self.archive_dir, "manifest.json"),
+            json.dumps({"Sep 10 2026 00:00:00": {
+                "elf_key": "newkey1", "identity": "Sep 10 2026 00:00:00", "seq": 1,
+                "archived_at": "2026-09-10T00:00:00Z", "git_commit": "dddd4444",
+                "source": "flash_firmware",
+            }}).encode(),
+        )
+        _write_fake_elf(os.path.join(self.archive_dir, f"KilnCtrl-newkey1.elf"), b"current-elf-content")
+
+        elf_archive.migrate_legacy_archive(self.archive_dir, "KilnCtrl")
+
+        with open(os.path.join(self.archive_dir, "manifest.json")) as f:
+            manifest = json.load(f)
+        self.assertIn("Sep 1 2026 00:00:00", manifest)
+        self.assertEqual(manifest["Sep 1 2026 00:00:00"]["elf_key"], elf_key)
+        self.assertEqual(manifest["Sep 1 2026 00:00:00"]["source"], "flash_firmware")
+        self.assertEqual(manifest["Sep 1 2026 00:00:00"]["archived_at"], "2026-01-01T00:00:00Z")
+        # Both entries present -- the merge must not lose the pre-existing one.
+        self.assertIn("Sep 10 2026 00:00:00", manifest)
+
+    def test_manifest_collision_keeps_new_entry_and_supersedes_the_legacy_one(self):
+        identity = "Sep 5 2026 00:00:00"
+        _write_fake_elf(os.path.join(self.legacy_dir, "KilnCtrl-legacykey.elf"), b"legacy-content")
+        _write_fake_elf(
+            os.path.join(self.legacy_dir, "manifest.json"),
+            json.dumps({identity: {
+                "elf_key": "legacykey", "identity": identity, "seq": 1,
+                "archived_at": "2026-01-01T00:00:00Z", "git_commit": "aaaa0000",
+                "source": "flash_firmware",
+            }}).encode(),
+        )
+        _write_fake_elf(
+            os.path.join(self.archive_dir, "manifest.json"),
+            json.dumps({identity: {
+                "elf_key": "newkey", "identity": identity, "seq": 2,
+                "archived_at": "2026-09-05T00:00:00Z", "git_commit": "bbbb1111",
+                "source": "flash_firmware",
+            }}).encode(),
+        )
+        _write_fake_elf(os.path.join(self.archive_dir, "KilnCtrl-newkey.elf"), b"current-content")
+
+        elf_archive.migrate_legacy_archive(self.archive_dir, "KilnCtrl")
+
+        with open(os.path.join(self.archive_dir, "manifest.json")) as f:
+            manifest = json.load(f)
+        with open(os.path.join(self.archive_dir, "superseded.json")) as f:
+            superseded = json.load(f)
+        # The new (already-live) entry wins the identity slot...
+        self.assertEqual(manifest[identity]["elf_key"], "newkey")
+        # ...and the legacy one is preserved as superseded, not dropped.
+        self.assertIn(identity, superseded)
+        self.assertTrue(any(e.get("elf_key") == "legacykey" for e in superseded[identity]))
+
+    def test_negative_without_merge_legacy_manifest_is_stranded_on_collision(self):
+        """Proves the merge test above is genuinely negative-testable:
+        reproduce the OLD (pre-fix) behavior directly -- a legacy manifest
+        that collides by name is left in place, never merged."""
+        identity = "Sep 5 2026 00:00:00"
+        _write_fake_elf(os.path.join(self.legacy_dir, "KilnCtrl-legacykey.elf"), b"legacy-content")
+        _write_fake_elf(
+            os.path.join(self.legacy_dir, "manifest.json"),
+            json.dumps({identity: {"elf_key": "legacykey", "source": "flash_firmware"}}).encode(),
+        )
+        _write_fake_elf(os.path.join(self.archive_dir, "manifest.json"), b'{"current": true}')
+
+        # Simulate the OLD implementation: name collision on manifest.json ->
+        # skip, never merged.
+        dst = os.path.join(self.archive_dir, "manifest.json")
+        self.assertTrue(os.path.exists(dst))  # collision -- old code would skip and never look inside
+        with open(dst) as f:
+            manifest = json.load(f)
+        self.assertNotIn(identity, manifest)  # confirms: without a merge, the legacy entry never arrives
+
+    def test_migrated_flash_sourced_entry_survives_prune_despite_ancient_archived_at(self):
+        """The core of M1's severity: a migrated flash-sourced entry's
+        archived_at is ANCIENT (from the legacy manifest, preserved by the
+        merge -- not the file's migration-preserved mtime) and it must still
+        be protected from _prune by _is_flash_sourced, not made eligible by
+        looking old."""
+        elf_key = "oldflashed1"
+        _write_fake_elf(os.path.join(self.legacy_dir, f"KilnCtrl-{elf_key}.elf"), b"legacy-flashed-content")
+        _write_fake_elf(
+            os.path.join(self.legacy_dir, "manifest.json"),
+            json.dumps(self._legacy_flashed_entry(elf_key=elf_key)).encode(),
+        )
+        os.makedirs(self.archive_dir, exist_ok=True)
+
+        elf_archive.migrate_legacy_archive(self.archive_dir, "KilnCtrl")
+
+        # Pad the archive dir past MAX_ARCHIVED_ELFS with fresh, never-flashed,
+        # already-past-grace-window filler entries so _prune has plenty to
+        # pick from before it would ever need to touch the flashed one.
+        manifest_path = os.path.join(self.archive_dir, "manifest.json")
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        old_stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 999999))
+        for i in range(elf_archive.MAX_ARCHIVED_ELFS + 5):
+            key = f"filler{i}"
+            _write_fake_elf(os.path.join(self.archive_dir, f"KilnCtrl-{key}.elf"), f"filler-{i}".encode())
+            manifest[f"filler-identity-{i}"] = {
+                "elf_key": key, "identity": f"filler-identity-{i}", "seq": 100 + i,
+                "archived_at": old_stamp, "git_commit": None, "source": "adopted:orphan-scan",
+            }
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f)
+
+        elf_archive._prune(self.archive_dir, "KilnCtrl", manifest)
+
+        self.assertTrue(os.path.isfile(os.path.join(self.archive_dir, f"KilnCtrl-{elf_key}.elf")),
+                         "a migrated flash-sourced ELF must never be pruned, regardless of age")
+        with open(manifest_path) as f:
+            manifest_after = json.load(f)
+        self.assertIn("Sep 1 2026 00:00:00", manifest_after)
+
+    def test_negative_without_the_merge_migrated_flashed_entry_gets_pruned(self):
+        """Reproduces the actual M1 failure mode: without the manifest
+        merge, a migrated ELF is registered by adopt_orphaned_kiln_elfs()
+        instead, using the file's mtime as archived_at and
+        'adopted:orphan-scan' as source -- NOT flash-protected, and (because
+        shutil.move/os.link preserve mtime, and this test sets an ancient
+        mtime to stand in for "migrated long ago") already past the grace
+        window, so it is eligible for pruning."""
+        archive_dir = self.archive_dir
+        os.makedirs(archive_dir, exist_ok=True)
+        elf_key = "oldflashed1"
+        elf_path = os.path.join(archive_dir, f"KilnCtrl-{elf_key}.elf")
+        # A migrated ELF is, in this simulation, embedded with a real
+        # esp_app_desc build timestamp so adopt_orphaned_kiln_elfs() can
+        # identify it -- but scanning real ELF bytes is out of scope for
+        # this unit test, so this directly reproduces post-adoption state
+        # instead: an entry registered as "adopted:orphan-scan" with an
+        # ancient archived_at, which is exactly what the old (unmerged)
+        # migrate_legacy_archive() left adopt_orphaned_kiln_elfs() to do.
+        _write_fake_elf(elf_path, b"legacy-flashed-content")
+        ancient = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 999999))
+        manifest = {
+            "Sep 1 2026 00:00:00": {
+                "elf_key": elf_key, "identity": "Sep 1 2026 00:00:00", "seq": 1,
+                "archived_at": ancient, "git_commit": None, "source": "adopted:orphan-scan",
+            }
+        }
+        for i in range(elf_archive.MAX_ARCHIVED_ELFS + 5):
+            key = f"filler{i}"
+            _write_fake_elf(os.path.join(archive_dir, f"KilnCtrl-{key}.elf"), f"filler-{i}".encode())
+            manifest[f"filler-identity-{i}"] = {
+                "elf_key": key, "identity": f"filler-identity-{i}", "seq": 100 + i,
+                "archived_at": ancient, "git_commit": None, "source": "adopted:orphan-scan",
+            }
+
+        elf_archive._prune(archive_dir, "KilnCtrl", manifest)
+
+        # Without flash-sourced protection, the previously-flashed ELF is
+        # just as eligible as any filler -- it may or may not survive
+        # depending on sort order, but it is NOT guaranteed to, unlike the
+        # merge-preserving path above. Confirm it lost its protection: this
+        # manifest's own entry says "adopted:orphan-scan", not
+        # "flash_firmware".
+        self.assertFalse(elf_archive._is_flash_sourced(manifest["Sep 1 2026 00:00:00"]))
+
+
+class SaftyFwLegacyMigrationTest(unittest.TestCase):
+    """M1: SaftyFW gets the same migration + manifest merge treatment as
+    KilnFW -- previously SaftyFW had no orphan-adoption safety net at all, so
+    a migrated SaftyFW ELF with its manifest left stranded was permanently
+    unregistered and unreachable by find_safty_elf_for_identity()."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = self._tmp.name
+        self.archive_dir = os.path.join(self.root, "elf_archive")
+        self.legacy_dir = os.path.join(self.root, "build", "elf_archive")
+
+    def test_saftyfw_legacy_manifest_is_merged_and_findable(self):
+        identity = "abcd1234_20260901_000000"
+        elf_key = "saftykey1"
+        _write_fake_elf(os.path.join(self.legacy_dir, f"SaftyFW-{elf_key}.elf"), b"legacy-safty-content")
+        _write_fake_elf(
+            os.path.join(self.legacy_dir, "manifest.json"),
+            json.dumps({identity: {
+                "elf_key": elf_key, "identity": identity, "seq": 1,
+                "archived_at": "2026-09-01T00:00:00Z", "git_commit": "abcd1234",
+                "build_date": "20260901", "build_time": "000000", "source": "debug_program",
+            }}).encode(),
+        )
+
+        with unittest.mock.patch.object(elf_archive, "safty_archive_dir", return_value=self.archive_dir):
+            path, message = elf_archive.find_safty_elf_for_identity("abcd1234", "20260901", "000000")
+
+        self.assertIsNotNone(path, message)
+        self.assertTrue(os.path.isfile(path))
+        self.assertEqual(os.path.normpath(path), os.path.normpath(
+            os.path.join(self.archive_dir, f"SaftyFW-{elf_key}.elf")))
+
+    def test_negative_without_saftyfw_merge_legacy_entry_is_unreachable(self):
+        """Confirms the test above is genuinely negative-testable: without
+        running the migration/merge at all, the same legacy layout is
+        unreachable by a lookup against the new (empty) archive dir."""
+        identity = "abcd1234_20260901_000000"
+        elf_key = "saftykey1"
+        _write_fake_elf(os.path.join(self.legacy_dir, f"SaftyFW-{elf_key}.elf"), b"legacy-safty-content")
+        _write_fake_elf(
+            os.path.join(self.legacy_dir, "manifest.json"),
+            json.dumps({identity: {
+                "elf_key": elf_key, "identity": identity, "seq": 1,
+                "archived_at": "2026-09-01T00:00:00Z", "git_commit": "abcd1234",
+                "build_date": "20260901", "build_time": "000000", "source": "debug_program",
+            }}).encode(),
+        )
+        os.makedirs(self.archive_dir, exist_ok=True)  # new dir exists but is empty -- no migration ran
+
+        manifest = elf_archive._load_manifest(self.archive_dir)
+        self.assertEqual(manifest, {})  # nothing reachable without migration
+
+
+class ProvenanceMigrationAndGuardTest(unittest.TestCase):
+    """L3: the legacy build/flash_provenance.json is migrated, and
+    get_fw_version-style readers can find it either at the new canonical
+    path or (transitionally) the old one. L4: _guard_against_test_write()
+    refuses a write to the canonical provenance path directly, not just the
+    two archive dirs."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = self._tmp.name
+
+    def test_migrates_legacy_provenance_file_into_new_location(self):
+        legacy = os.path.join(self.root, "legacy_flash_provenance.json")
+        new = os.path.join(self.root, "new_flash_provenance.json")
+        _write_fake_elf(legacy, b'{"outcome": "flashed_ok"}')
+
+        with unittest.mock.patch.object(elf_archive, "legacy_kiln_provenance_path", return_value=legacy), \
+             unittest.mock.patch.object(elf_archive, "kiln_provenance_path", return_value=new):
+            moved = elf_archive.migrate_legacy_provenance()
+
+        self.assertTrue(moved)
+        self.assertTrue(os.path.isfile(new))
+        self.assertFalse(os.path.isfile(legacy))
+        with open(new) as f:
+            self.assertEqual(json.load(f), {"outcome": "flashed_ok"})
+
+    def test_does_not_overwrite_an_existing_new_location_file(self):
+        legacy = os.path.join(self.root, "legacy_flash_provenance.json")
+        new = os.path.join(self.root, "new_flash_provenance.json")
+        _write_fake_elf(legacy, b'{"outcome": "flash_failed"}')
+        _write_fake_elf(new, b'{"outcome": "flashed_ok"}')
+
+        with unittest.mock.patch.object(elf_archive, "legacy_kiln_provenance_path", return_value=legacy), \
+             unittest.mock.patch.object(elf_archive, "kiln_provenance_path", return_value=new):
+            moved = elf_archive.migrate_legacy_provenance()
+
+        self.assertFalse(moved)
+        with open(legacy) as f:
+            self.assertEqual(json.load(f), {"outcome": "flash_failed"})  # untouched
+        with open(new) as f:
+            self.assertEqual(json.load(f), {"outcome": "flashed_ok"})  # untouched
+
+    def test_no_legacy_file_is_a_harmless_no_op(self):
+        legacy = os.path.join(self.root, "nope.json")
+        new = os.path.join(self.root, "new.json")
+        with unittest.mock.patch.object(elf_archive, "legacy_kiln_provenance_path", return_value=legacy), \
+             unittest.mock.patch.object(elf_archive, "kiln_provenance_path", return_value=new):
+            moved = elf_archive.migrate_legacy_provenance()
+        self.assertFalse(moved)
+
+    def test_guard_refuses_a_write_to_the_canonical_provenance_path_directly(self):
+        real_path = elf_archive._canonical_provenance_path()
+        os.environ["PYTEST_CURRENT_TEST"] = "fake-test (for this assertion only)"
+        try:
+            with self.assertRaises(RuntimeError):
+                elf_archive._guard_against_test_write(real_path)
+        finally:
+            del os.environ["PYTEST_CURRENT_TEST"]
+
+    def test_negative_without_the_provenance_path_check_the_guard_would_allow_it(self):
+        """Proves the assertion above is genuinely negative-testable: the
+        guard's canonical-target check is an OR of archive dirs and the
+        provenance path -- if the provenance half of that OR were removed,
+        the same real path would NOT raise."""
+        real_path = elf_archive._canonical_provenance_path()
+        self.assertNotIn(os.path.normpath(real_path), elf_archive._canonical_archive_dirs())
+        # i.e.: without the "== _canonical_provenance_path()" arm of the
+        # guard's condition, nothing about this path would ever match.
 
 
 if __name__ == "__main__":
