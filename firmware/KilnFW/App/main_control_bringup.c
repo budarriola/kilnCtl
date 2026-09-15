@@ -82,16 +82,48 @@ void main_control_bringup(main_boot_ctx_t *ctx)
         safety_link_mark_boot_clean();
     }
 
-    // danger_mode (diagnostics page's explicit-accept relay-override
-    // section) needs the safety link handle to request/release
-    // SAFETY_CMD_REQUEST_ENABLE -- see danger_mode.h. `&ctx->safety` is valid
-    // even when safety_err != ESP_OK (safety_link_request_enable() itself
-    // refuses cleanly on an uninitialized link); must run before
-    // kiln_io_owner_start() below, whose relay_on_blocked() calls
-    // danger_mode_active(). Also safe before profile_executor_start() has
-    // run, same guarantee boot_button_start() (main_boot_early.c) already
-    // relies on: danger_mode_request_start() only reads
-    // profile_executor_get_status(), which answers cleanly pre-start.
+    // 2026-09-14 owner decision ("if a config doesn't land and match on both
+    // sides then alarm and dissable heaters"): installs the two real
+    // heaters-off actions safety_ceiling_sync.c's divergence enforcement
+    // calls on every safety_poll_task tick that finds a mismatch. Installed
+    // here (not inside safety_ceiling_sync.c itself) so that file stays free
+    // of a kiln_io_owner.h/profile_executor.h dependency -- see safety_
+    // ceiling_sync.h's own doc comment on safety_ceiling_sync_set_disable_
+    // heat_hooks() for why.
+    //
+    // MOVED HERE 2026-09-14 (opus review, defect 2): this call used to sit
+    // right before safety_link_set_context_sources() below, well after
+    // safety_link_start() above -- kiln_io_owner_start(), profile_executor_
+    // start() and several other steps ran in between. safety_poll_task
+    // (started inside safety_link_start()) can observe link-up and run
+    // safety_ceiling_sync_reconcile_on_link_up() the instant the link comes
+    // up, i.e. during that whole window, and a divergence found there used
+    // to log "heaters disabled (all relays forced off, any run halted)"
+    // while s_disable_all_relays_off/s_disable_halt_run were still NULL --
+    // both hooks a no-op. The verdict (safety_ceiling_sync_is_diverged(),
+    // which readiness_gate.h/readiness_http.c actually gate on) was never
+    // wrong, and the window is short and entirely pre-HTTP -- so this was a
+    // truthfulness defect (logging an action not taken), not a safety hole
+    // -- but it is a real instance of this repo's "logging unchecked
+    // success" shape (docs -- project_safety_calls_logging_unchecked_
+    // success), so it is fixed rather than merely noted.
+    //
+    // Fix chosen: install the hooks as early as they CAN be installed,
+    // rather than teach safety_ceiling_sync.c to log accurately about an
+    // absent hook. Both real actions already tolerate being called before
+    // their own subsystem starts -- kiln_io_owner_command_all_relays_off()
+    // (via main_control_bringup_all_relays_off_void() above) fails closed
+    // through post_and_wait()'s NULL-queue check the same way every other
+    // kiln_io_owner_command_*() call already does before kiln_io_owner_
+    // start() runs, and profile_executor_halt() is documented to tolerate
+    // being called before/without profile_executor_start() (see its own
+    // guard, and the RECOVERY MODE note near this function's profile_
+    // executor_start() call below) -- so moving the install earlier costs no
+    // new failure mode; it just closes the gap between "the link can
+    // observe divergence" and "the hooks that act on it exist." An
+    // accurate-log alternative (ESP_LOGE once on a NULL hook, per defect 2's
+    // other option) was rejected: it would still let a real divergence
+    // enforcement no-op during bring-up, merely honestly.
     danger_mode_init(&ctx->safety);
 
     // heat_enable (heat_enable.h): the shared, refcounted holder of the
@@ -103,6 +135,8 @@ void main_control_bringup(main_boot_ctx_t *ctx)
     // reason it must run before anything that can start a firing or an
     // autotune (profile_executor_start()/autotune_engine_start(), below).
     heat_enable_init(&ctx->safety);
+
+    safety_ceiling_sync_set_disable_heat_hooks(main_control_bringup_all_relays_off_void, profile_executor_halt);
 
     // kiln_io_owner (TODO.md 10.14 Phase 1): the single task that writes
     // relay/expander state from here on -- must start before anything that
@@ -229,19 +263,14 @@ void main_control_bringup(main_boot_ctx_t *ctx)
         ESP_LOGW(MAIN_TAG, "RECOVERY MODE: profile_executor_start() skipped -- no profile execution this boot");
     }
 
-    // 2026-09-14 owner decision ("if a config doesn't land and match on both
-    // sides then alarm and dissable heaters"): installs the two real
-    // heaters-off actions safety_ceiling_sync.c's divergence enforcement
-    // calls on every safety_poll_task tick that finds a mismatch. Installed
-    // here (not inside safety_ceiling_sync.c itself) so that file stays free
-    // of a kiln_io_owner.h/profile_executor.h dependency -- see safety_
-    // ceiling_sync.h's own doc comment on safety_ceiling_sync_set_disable_
-    // heat_hooks() for why. Installed unconditionally, including in RECOVERY
-    // MODE (profile_executor_halt() already tolerates being called before/
-    // without profile_executor_start(), see that function's own guard) --
-    // relays must still be forceable off even when no profile execution is
-    // running this boot.
-    safety_ceiling_sync_set_disable_heat_hooks(main_control_bringup_all_relays_off_void, profile_executor_halt);
+    // (safety_ceiling_sync_set_disable_heat_hooks() itself is installed much
+    // earlier now, right after safety_link_start() above -- see the 2026-09-14
+    // "MOVED HERE (opus review, defect 2)" comment near the top of this
+    // function. profile_executor_halt() tolerates being called before/
+    // without profile_executor_start() -- see that function's own guard --
+    // so RECOVERY MODE above does not need to special-case it: relays must
+    // still be forceable off even when no profile execution is running this
+    // boot.)
 
     // ROADMAP.md M5 / LINK_PROTOCOL.md sec 4: gives the safety link's poll
     // task the two hardware pointers it needs to build SAFETY_CMD_PUSH_CONTEXT

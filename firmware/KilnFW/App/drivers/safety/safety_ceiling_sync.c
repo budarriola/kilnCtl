@@ -159,7 +159,40 @@ void safety_ceiling_sync_apply_lower(SafetyLinkClass *link, const float *new_max
  * only happen once a live read-back confirms both sides agree, since
  * `target_c`/`pico_c` here are exactly what the readiness page and the
  * reconcile above just fetched/computed. There is nothing for an operator
- * to dismiss; the condition cannot be masked, only actually fixed. */
+ * to dismiss; the condition cannot be masked, only actually fixed.
+ *
+ * RECORDED, NOT A DEFECT (2026-09-14 opus review,
+ * docs/audits/pico_ceiling_mirror_and_rate_guard_2026-09-14.md item D, and
+ * docs/audits/divergence_message_and_enforcement_test_2026-09-14.md):
+ *
+ *  1. This function runs on EVERY tick of safety_ceiling_sync_reconcile_
+ *     on_link_up(), which runs on EVERY tick of safety_poll_task -- the
+ *     ESP->Pico liveness heartbeat. A board stuck permanently diverged
+ *     therefore issues one relays-off/halt-run owner RPC per tick, forever,
+ *     for as long as the divergence persists. Deliberate: the alternative
+ *     (calling the disable path only on the diverged->not-diverged edge)
+ *     would leave a WINDOW after some other code path re-energizes relays
+ *     mid-divergence with nothing to immediately re-disable them until the
+ *     next edge. A steady stream of "make it so" RPCs to an owner that is
+ *     almost always already in the requested state is judged an acceptable
+ *     cost against that gap.
+ *  2. profile_executor_halt() (like kiln_io_owner_command_all_relays_off())
+ *     is invoked from inside this call chain, which importantly means a
+ *     persistently diverged board blocks safety_poll_task itself on
+ *     whatever lock profile_executor_halt() takes (profile_executor.c's
+ *     `s_exec.lock`, a portMAX_DELAY/blocking take) for as long as that
+ *     lock is held elsewhere. Since safety_poll_task is also the ESP side
+ *     of the safety link's liveness heartbeat, a late heartbeat during that
+ *     window can trip the Pico's own S6b (link-dead) guard.
+ *
+ * BOTH judged deliberate and fail-safe, not bugs: heat is already forced
+ * off by the very divergence that is doing the blocking, so a heartbeat
+ * that arrives late (or an S6b trip that cuts power independently) cannot
+ * make anything less safe than it already is -- it can only ever add a
+ * second, independent reason heat stays off. Recorded here explicitly so
+ * neither is later mistaken for an unnoticed fault: a diverged board that
+ * ALSO shows S6b trips, or that logs late/dropped heartbeats, is not a new
+ * symptom to chase -- it is this coupling working as designed. */
 static void enforce_ceiling_divergence(float target_c, bool target_known, float pico_c, bool pico_known)
 {
     if (!target_known) {

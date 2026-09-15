@@ -155,6 +155,16 @@ try {
         # bridge, so this executable needs it linked in as a plain separate
         # .c file, same convention as cfg_fs.c/pref_cfg_fs.c just above.
         (Join-Path $driversDir "persist/kiln_cfg_store_cfg_fs.c"),
+        # docs/KILN_PROFILES_PLAN.md items 1/2/12 -- kiln_cfg_store.c now calls
+        # kiln_package_capture_pico_half()/_compute_hash() to package the
+        # Pico's commissioning params alongside the ESP blob. Pure logic, no
+        # store/link dependency of its own (it takes its Pico-table accessor
+        # as an injected function-pointer pair, kiln_pkg_pico_source_t --
+        # see kiln_package.h's own header comment), so it is linked in for
+        # real here rather than faked -- same "no reason to fake pure logic"
+        # convention safety_cfg_http.c's s8_rate_guard_estimate.c linkage
+        # documents in this same file, further down.
+        (Join-Path $driversDir "persist/kiln_package.c"),
         (Join-Path $driversDir "hw/touch_dev.c"),
         (Join-Path $driversDir "control/ramp_ident.c"),
         (Join-Path $driversDir "control/iter_tune.c"),
@@ -1295,6 +1305,47 @@ try {
             "`"$(Join-Path $driversDir 'safety/config_divergence.c')`""
 
     Invoke-HostTestExe -Name "config_divergence" -ExePath $exe38 -BuildCmd $cmd38
+
+    # ---- test_kiln_package.c: its own THIRTY-NINTH, separate executable.
+    # docs/KILN_PROFILES_PLAN.md items 1/2/12 -- kiln_package.c walks the
+    # ESP-side mirror of CONFIG_PARAM_TABLE via an INJECTED accessor pair
+    # (kiln_pkg_pico_source_t), specifically so it never needs the real
+    # safety_cfg_store.c (already linked for real into the MAIN executable
+    # via test_safety_cfg_store.c -- linking it again here would multiply-
+    # define every safety_cfg_store_* symbol, same reasoning exe3's own
+    # comment gives for safety_cfg_http.c). Own executable, fake table only.
+    $exe39 = Join-Path $outDir "kilnctl_host_tests_kiln_package.exe"
+    $cmd39 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$outDir\\`" /Fe:`"$exe39`" `"$(Join-Path $testDir 'test_kiln_package.c')`""
+
+    Invoke-HostTestExe -Name "kiln_package" -ExePath $exe39 -BuildCmd $cmd39
+
+    # ---- test_safety_ceiling_sync_divergence.c: its own FORTIETH, separate
+    # executable. 2026-09-14 opus review defect 3
+    # (docs/audits/pico_ceiling_mirror_and_rate_guard_2026-09-14.md):
+    # safety_ceiling_sync.h cited this exact file name as covering the
+    # divergence-enforcement path (hooks firing, the latch, the
+    # target_known exclusion) since that feature landed, but the file did
+    # not exist -- this closes that gap. Own executable: it #includes
+    # safety_ceiling_sync.h and links the REAL safety_ceiling_sync.c/
+    # safety_ceiling_policy.c/config_divergence.c, but supplies its OWN
+    # fake bodies for zones_config_is_valid()/_get_temp_limits(),
+    # safety_cfg_store_param_count()/_get_by_index() and safety_cfg_http_
+    # set_and_confirm_f32() -- linking the REAL zones_config_store.c/
+    # safety_cfg_store.c/safety_cfg_http.c would pull in NVS/httpd
+    # machinery this enforcement-only test has no need of, and would
+    # multiply-define against exe2 (test_zones_http.c)'s own real links of
+    # those same files if ever combined into one binary. fake_time.c
+    # supplies hal_time_now_us(), same convention as exe2's own link of it.
+    $exe40 = Join-Path $outDir "kilnctl_host_tests_safety_ceiling_sync_divergence.exe"
+    $cmd40 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$outDir\\`" /Fe:`"$exe40`" `"$(Join-Path $testDir 'test_safety_ceiling_sync_divergence.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/safety_ceiling_sync.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/safety_ceiling_policy.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/config_divergence.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`""
+
+    Invoke-HostTestExe -Name "safety_ceiling_sync_divergence" -ExePath $exe40 -BuildCmd $cmd40
 
     # ---- sim_iter_tune.exe / sim_wide_temp_sweep.exe: data-generating
     # harnesses (ITER_TUNE_REDESIGN_PLAN.md sec 6/7), not TEST_CHECK

@@ -152,15 +152,85 @@ bool config_divergence_check(const config_identity_field_t *esp_fields, const co
         return true;
     }
     /* Every individual field agreed and yet the identities still failed to
-     * match -- can only happen if a caller passed mismatched format
-     * versions in some other way, or an FNV collision (astronomically
-     * unlikely for this field count). Name it honestly rather than staying
-     * silent about a real "true" return. */
+     * match. Two distinct causes land here, and they must not share one
+     * message: format_version really can differ even though every field's
+     * VALUE happens to agree (a caller comparing across versions), which is
+     * a real, nameable mismatch -- but format_first_field_difference()
+     * above also returns false, with format_version equal on both sides,
+     * whenever EVERY field is unknown on both sides at once (each field's
+     * `e->known != p->known` test is false, and the `!e->known` branch
+     * marks it "not the culprit" instead of a difference) -- and in that
+     * case config_identity_t.known is false on both identities, which is
+     * exactly why config_identity_matches() refused to call them equal
+     * despite the hashes matching (see that function's own comment). Opus
+     * review 2026-09-14 (defect 1): the OLD text here printed
+     * "identity mismatch (format_version 1 vs 1, hash 0xBE20868A vs
+     * 0xBE20868A)" for that all-unknown case -- an alarm that disables
+     * heaters while reporting IDENTICAL versions and IDENTICAL hashes, an
+     * operator has no way to act on and would reasonably read as the
+     * system being broken rather than the config. Latent only because
+     * today's one-field identity set can never actually be all-unknown in
+     * a way that reaches this branch in practice from this file's own
+     * caller (safety_ceiling_sync.c's target_known gate short-circuits
+     * first) -- but the multi-kiln profile feature is adding fields to
+     * this SAME identity right now, and a caller with several fields, none
+     * yet confirmed on one side, reaches exactly this branch. Report what
+     * is actually true instead: state plainly that one or more fields are
+     * unknown, and name every unknown one, rather than a version/hash
+     * comparison that reads as a contradiction. */
     if (reason_out && reason_cap > 0) {
-        snprintf(reason_out, reason_cap,
-                 "config divergence: identity mismatch (format_version %u vs %u, hash 0x%08X vs 0x%08X)",
-                 (unsigned)esp_id.format_version, (unsigned)pico_id.format_version, (unsigned)esp_id.hash,
-                 (unsigned)pico_id.hash);
+        if (esp_id.format_version != pico_id.format_version) {
+            snprintf(reason_out, reason_cap,
+                     "config divergence: identity format version mismatch (ESP format_version %u vs Pico "
+                     "format_version %u) -- values cannot be compared across versions",
+                     (unsigned)esp_id.format_version, (unsigned)pico_id.format_version);
+        } else if (!esp_id.known || !pico_id.known) {
+            /* Build "field_a, field_b" naming every field unknown on
+             * either side, bounded by reason_cap so a long field list
+             * cannot overflow the caller's buffer -- snprintf's own
+             * truncation-safe return-length contract does that for us; the
+             * assertion below just proves the whole message still fit. */
+            char names[CONFIG_DIVERGENCE_REASON_MAX];
+            size_t names_len = 0;
+            names[0] = '\0';
+            bool any_known_gap = false;
+            for (size_t i = 0; i < n; i++) {
+                bool unk = !esp_fields[i].known || !pico_fields[i].known;
+                if (!unk) {
+                    continue;
+                }
+                const char *nm = esp_fields[i].name ? esp_fields[i].name : "(unnamed)";
+                int written =
+                    snprintf(names + names_len, sizeof(names) - names_len, "%s%s", any_known_gap ? ", " : "", nm);
+                if (written > 0) {
+                    size_t advance = (size_t)written;
+                    names_len += (advance < sizeof(names) - names_len) ? advance : sizeof(names) - names_len - 1;
+                }
+                any_known_gap = true;
+            }
+            int len = snprintf(reason_out, reason_cap,
+                                "config divergence: one or more fields not yet confirmed on both sides (%s) -- "
+                                "cannot confirm the configs match",
+                                any_known_gap ? names : "(unnamed)");
+            /* 2026-09-14 opus review: this file's own header cites the
+             * ki_refusal_reason 162-into-96-byte silent truncation as the
+             * reason every message length here must be checked, not
+             * assumed to fit -- so assert rather than trust snprintf's
+             * return value went unexamined. */
+            if (len < 0 || (size_t)len >= reason_cap) {
+                abort();
+            }
+        } else {
+            /* Neither version nor known-ness differ and yet the hash still
+             * disagreed -- can only be an FNV collision (astronomically
+             * unlikely for this field count) or an internal inconsistency
+             * in this file. Name it honestly rather than staying silent
+             * about a real "true" return. */
+            snprintf(reason_out, reason_cap,
+                     "config divergence: identity hash mismatch with matching version/known-ness (hash 0x%08X "
+                     "vs 0x%08X) -- possible hash collision",
+                     (unsigned)esp_id.hash, (unsigned)pico_id.hash);
+        }
     }
     return true;
 }

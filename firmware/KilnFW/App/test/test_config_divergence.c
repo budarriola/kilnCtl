@@ -189,6 +189,42 @@ static void test_reason_buffer_is_never_truncated(void)
                "no poison byte survives past the written message");
 }
 
+// ---------------------------------------------------------------------
+// 2026-09-14 opus review, defect 1: with every field unknown on BOTH
+// sides, the OLD fallback message read "identity mismatch (format_version
+// 1 vs 1, hash 0xBE20868A vs 0xBE20868A)" -- an alarm naming IDENTICAL
+// versions and IDENTICAL hashes, which an operator has no way to act on.
+// Proves the fixed message instead states plainly that fields are unknown,
+// names them, and still fits CONFIG_DIVERGENCE_REASON_MAX.
+// ---------------------------------------------------------------------
+static void test_all_unknown_message_is_honest(void)
+{
+    TEST_SECTION("all fields unknown on both sides: message names the gap, not a fake version/hash mismatch");
+    config_identity_field_t esp_f[2] = {
+        { .name = "abs_max_temp_c", .known = false, .value = 0.0f },
+        { .name = "max_rate_c_per_min", .known = false, .value = 0.0f },
+    };
+    config_identity_field_t pico_f[2] = {
+        { .name = "abs_max_temp_c", .known = false, .value = 0.0f },
+        { .name = "max_rate_c_per_min", .known = false, .value = 0.0f },
+    };
+    char reason[CONFIG_DIVERGENCE_REASON_MAX];
+    memset(reason, 'X', sizeof(reason));
+    bool diverged = config_divergence_check(esp_f, pico_f, 2, reason, sizeof(reason));
+    TEST_CHECK(diverged, "still reported as a mismatch -- an all-unknown identity never 'matches'");
+    TEST_CHECK(strstr(reason, "format_version 1 vs 1") == NULL,
+               "does NOT print the old self-contradicting 'format_version 1 vs 1' text");
+    TEST_CHECK(strstr(reason, "hash 0x") == NULL || strstr(reason, "not yet confirmed") != NULL,
+               "does not present a hash comparison as the reason when the real issue is unknown fields");
+    TEST_CHECK(strstr(reason, "abs_max_temp_c") != NULL, "names the first unknown field");
+    TEST_CHECK(strstr(reason, "max_rate_c_per_min") != NULL, "names the second unknown field too");
+    size_t len = strlen(reason);
+    printf("    (measured length: %zu of %d bytes)\n", len, CONFIG_DIVERGENCE_REASON_MAX);
+    TEST_CHECK(len < sizeof(reason) - 1, "message fits CONFIG_DIVERGENCE_REASON_MAX without truncation");
+    TEST_CHECK(reason[sizeof(reason) - 1] != 'X' || len < sizeof(reason) - 1,
+               "no poison byte survives past the written message");
+}
+
 int main(void)
 {
     test_identical_fields_match();
@@ -200,6 +236,7 @@ int main(void)
     test_wire_round_trip_normalises_identically();
     test_normalize_collapses_different_bit_patterns();
     test_reason_buffer_is_never_truncated();
+    test_all_unknown_message_is_honest();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {
         printf("%d FAILURE(S)\n", g_test_failures);
