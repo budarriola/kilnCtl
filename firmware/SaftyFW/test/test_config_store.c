@@ -2691,10 +2691,35 @@ static void test_config_params_commit_refused_while_armed(void)
     const char *rule = NULL;
     TEST_CHECK(config_params_validate(&rec, &field, &rule), "this staged record passes validation on its own");
 
-    // The real link_task_handle_commit_config() calls config_store_write()
-    // unconditionally after validate() passes -- config_store_write()'s own
-    // internal config_store_decide_write() call is what refuses while
-    // ARMED, exactly this decision:
+    // 2026-09-15 correction (Opus review item 5): this comment used to say
+    // the real link_task_handle_commit_config() calls config_store_write()
+    // unconditionally -- stale since the F1/F2 rework: it actually calls
+    // config_store_write_ex(&to_write, link_task_heat_is_safe_for_tc_type_
+    // change(), &reason) (link_task.c), so the tc_type-only-while-ARMED
+    // carve-out below IS reachable from COMMIT_CONFIG, not just SET_CONFIG.
+    // Composing rec/tc_type_only_change here (not a bare `false`/`true`
+    // literal) so this test documents which fields differing, not merely
+    // the fact of ARMED, drives each outcome:
+    config_store_record_t persisted = rec;
+    persisted.tc_type = (uint8_t)((rec.tc_type + 1u) % (CONFIG_STORE_TC_TYPE_MAX_REAL + 1u));
+    bool tc_type_only = config_store_only_tc_type_differs(&persisted, &rec);
+    TEST_CHECK(tc_type_only, "fixture differs from `persisted` in tc_type only");
+
+    TEST_CHECK(config_store_decide_write_ex(true, tc_type_only, false) == CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON,
+               "COMMIT_CONFIG while ARMED: a tc_type-only change is refused with the "
+               "specific HEAT_ON reason, not the generic ARMED one, when heat is not "
+               "confirmed safe (link_task_heat_is_safe_for_tc_type_change() false)");
+    TEST_CHECK(config_store_decide_write_ex(true, tc_type_only, true) == CONFIG_STORE_WRITE_OK,
+               "COMMIT_CONFIG while ARMED: the same tc_type-only change IS accepted "
+               "once heat is confirmed safe -- the Pico never disarms to take it");
+    TEST_CHECK(config_store_decide_write_ex(true, false, true) == CONFIG_STORE_WRITE_REFUSED_ARMED,
+               "COMMIT_CONFIG while ARMED: the staged record above (tc_source/"
+               "tc_placement_mode changed, not tc_type) is refused with the generic "
+               "ARMED reason regardless of heat state -- the carve-out is tc_type-only");
+
+    // The plain (non-tc_type-aware) decision this test originally covered,
+    // kept for regression coverage of config_store_decide_write()'s own
+    // ARMED/not-ARMED split:
     TEST_CHECK(config_store_decide_write(true) == CONFIG_STORE_WRITE_REFUSED_ARMED,
                "ARMED refuses the write regardless of validate()'s own outcome -- "
                "nothing this module computes can override the store's own ARMED gate");

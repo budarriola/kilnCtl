@@ -1208,6 +1208,9 @@ const char *config_store_write_decision_reason(config_store_write_decision_t dec
         case CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON:
             return "refused: relay is ARMED and heat is on (or a firing may be running) -- "
                    "tc_type may only be changed while ARMED when heat is off";
+        case CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_UNKNOWN:
+            return "refused: relay is ARMED and this write path did not determine heat state -- "
+                   "tc_type may only be changed while ARMED via a caller that confirms heat is off";
         default:
             return "unknown";
     }

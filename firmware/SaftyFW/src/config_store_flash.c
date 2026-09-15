@@ -180,6 +180,26 @@ static bool ensure_region(void)
 
 static config_store_record_t s_cached_record;
 
+// 2026-09-15 (Opus review item 4): the last record actually LANDED IN FLASH
+// -- distinct from s_cached_record above, which config_store_write_volatile()
+// (item 15) also updates for a RAM-only install while ARMED. Before this,
+// config_store_write_ex()'s "is this a tc_type-ONLY change" comparison ran
+// against s_cached_record, so a prior volatile install's other (non-tc_type)
+// param changes were already sitting in s_cached_record; a SUBSEQUENT
+// tc_type-only-looking write compared against that RAM state instead of what
+// is actually on flash, so config_store_only_tc_type_differs() saw no other
+// difference and let the write through while ARMED -- silently persisting
+// the earlier volatile install's other params to flash under the ARMED
+// tc_type-only carve-out, which exists ONLY for tc_type. Updated in exactly
+// two places: config_store_boot_load() (seeded from what boot actually
+// found on flash) and config_store_write_ex() on a confirmed successful
+// flash write (never by config_store_write_volatile(), never on a refused/
+// failed write) -- so this always reflects flash truth, never RAM-only
+// state. Same single-writer contract as s_cached_record (link_task, core 0
+// only); read only from that same context, so no seqlock is needed for it
+// either -- nothing on SAFTYFW_CORE_TRIP_PATH ever reads this.
+static config_store_record_t s_persisted_record;
+
 // --- Seqlock for s_cached_record (2026-09-09) -------------------------------
 //
 // Why: config_store_write() (called only from link_task, pinned to
@@ -672,6 +692,7 @@ void config_store_boot_load(void)
 
     s_cached_slot = read_latest_or_default(&s_cached_record, &s_cached_sector, &reject_info);
     s_load_rejected = (s_cached_slot == CONFIG_STORE_NO_SLOT) && reject_info.rejected;
+    s_persisted_record = s_cached_record; // opus review item 4: seed flash-truth from what boot found
 
     // Opus review finding B (2026-09-09): seed the writer-owned fallback
     // buffer from the boot-time record instead of leaving s_fallback_valid
@@ -1010,13 +1031,36 @@ static void config_store_write_cb(void *param)
 // was true only when Phase 9's first pass landed and has been stale since).
 bool config_store_write(const config_store_record_t *rec, const char **out_reason)
 {
+    // 2026-09-15 (Opus review item 6): this overload has no heat_safe input
+    // at all -- it must never delegate an ARMED tc_type-only-looking change
+    // to config_store_write_ex(rec, false, out_reason), since that `false`
+    // would be read by config_store_decide_write_ex() as "heat state
+    // checked and found NOT safe," producing CONFIG_STORE_WRITE_REFUSED_
+    // ARMED_HEAT_ON -- a specific safety claim ("heat is on") this path
+    // never actually determined. Checked here, ahead of the delegation, so
+    // that specific case gets its own honest, distinct refusal reason
+    // instead. Every other case (not ARMED, or ARMED with more than just
+    // tc_type differing) is unaffected by heat_safe's value either way, so
+    // delegating below is still correct for them.
+    bool armed = relay_owner_get_state() == RELAY_OWNER_STATE_ARMED;
+    bool tc_type_only_change = config_store_only_tc_type_differs(&s_persisted_record, rec);
+    if (armed && tc_type_only_change) {
+        if (out_reason != NULL) {
+            *out_reason = config_store_write_decision_reason(CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_UNKNOWN);
+        }
+        return false;
+    }
     return config_store_write_ex(rec, false, out_reason);
 }
 
 bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, const char **out_reason)
 {
     bool armed = relay_owner_get_state() == RELAY_OWNER_STATE_ARMED;
-    bool tc_type_only_change = config_store_only_tc_type_differs(&s_cached_record, rec);
+    // Opus review item 4: compare against what is actually persisted on
+    // flash, not s_cached_record -- see s_persisted_record's own doc comment
+    // for why the RAM record can already carry an unpersisted volatile
+    // install's other param changes at this point.
+    bool tc_type_only_change = config_store_only_tc_type_differs(&s_persisted_record, rec);
     config_store_write_decision_t decision =
         config_store_decide_write_ex(armed, tc_type_only_change, heat_safe);
     if (decision != CONFIG_STORE_WRITE_OK) {
@@ -1128,6 +1172,7 @@ bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, con
     config_store_seqlock_write(&to_write);
     s_cached_slot = plan.slot_index;
     s_cached_sector = plan.sector_index;
+    s_persisted_record = to_write; // opus review item 4: this landed in flash -- update flash-truth
     if (out_reason != NULL) {
         *out_reason = "ok";
     }

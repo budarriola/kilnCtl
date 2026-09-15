@@ -1011,6 +1011,15 @@ typedef enum {
     // field, or tc_type bundled with another field change) is still the
     // plain CONFIG_STORE_WRITE_REFUSED_ARMED above.
     CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON,
+    // 2026-09-15 (Opus review item 6): config_store_write() (the no-heat-
+    // state overload) hitting an ARMED tc_type-only-looking change. It has
+    // no heat_safe input at all -- routing that through config_store_
+    // decide_write_ex(armed, true, false) would report CONFIG_STORE_WRITE_
+    // REFUSED_ARMED_HEAT_ON, falsely claiming heat was checked and found on
+    // when heat state was simply never passed. Distinct reason so a caller
+    // (and a log line) never reports a specific safety fact ("heat is on")
+    // that was never actually determined.
+    CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_UNKNOWN,
 } config_store_write_decision_t;
 
 // Pure decision: given whether the relay is currently ARMED (relay_owner's

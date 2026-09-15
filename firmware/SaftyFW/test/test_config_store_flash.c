@@ -173,22 +173,23 @@ static void test_write_refused_while_armed(void)
     config_store_default(&rec);
     rec.tc_type = 0x07u;
 
-    // 2026-09-15 owner decision (Opus review F1): this record differs from
-    // the cached one ONLY in tc_type, and config_store_write() always passes
-    // heat_safe=false (it is the plain, non-"_ex" wrapper -- see its own
-    // header comment). config_store_write_ex()'s heat-on-specific refusal
-    // (CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON) therefore fires here
-    // instead of the generic CONFIG_STORE_WRITE_REFUSED_ARMED -- the whole
-    // point of F1's relaxation is that a tc_type-only change gets its OWN,
-    // more specific refusal reason so a caller can tell "heat is on" apart
-    // from "some other field changed while ARMED".
+    // 2026-09-15 (Opus review item 6): this record differs from the cached
+    // one ONLY in tc_type, but config_store_write() (the plain, non-"_ex"
+    // wrapper) never determines heat state at all -- it must NOT claim
+    // CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON, since that specifically
+    // asserts "heat was checked and found on," a fact this path never
+    // established. It gets its own honest CONFIG_STORE_WRITE_REFUSED_ARMED_
+    // HEAT_UNKNOWN reason instead -- still distinct from the generic
+    // CONFIG_STORE_WRITE_REFUSED_ARMED so a caller can tell "tc_type-only
+    // change, heat unknown" apart from "some other field changed while
+    // ARMED".
     const char *reason = NULL;
     bool ok = config_store_write(&rec, &reason);
     TEST_CHECK(ok == false, "write refused while ARMED");
     TEST_CHECK(reason != NULL &&
-                   reason == config_store_write_decision_reason(CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON),
-               "refusal reason is the tc_type/heat-on-specific one (F1), not the generic ARMED "
-               "reason and not a flash-layer reason");
+                   reason == config_store_write_decision_reason(CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_UNKNOWN),
+               "refusal reason is the tc_type/heat-unknown-specific one (item 6), not the "
+               "heat-on-specific, generic ARMED, or flash-layer reason");
 
     // No sector was touched: config_store_write() must refuse BEFORE
     // scheduling any hal_flash_erase()/hal_flash_program() -- confirmed here
@@ -288,6 +289,50 @@ static void test_write_volatile_repeated_then_flash_commit_still_gated(void)
                "config_store_write() still refuses while ARMED even after volatile installs ran");
     TEST_CHECK(config_store_get_tc_type() == 0x02u,
                "the refused flash write does not disturb the volatile record already live");
+}
+
+// 2026-09-15 (Opus review item 4): config_store_write_ex()/config_store_write()
+// must classify "does this candidate differ from flash-truth in tc_type
+// only" against what is actually PERSISTED on flash, not against
+// s_cached_record -- the RAM record a prior volatile install already left
+// mutated in some OTHER field too. Comparing against the RAM record instead
+// would misclassify this scenario as "more than tc_type changed" and give
+// the generic CONFIG_STORE_WRITE_REFUSED_ARMED, silently losing the
+// tc_type-only carve-out's more specific refusal reason precisely when a
+// volatile install happens to be live.
+static void test_write_uses_persisted_record_not_ram_after_volatile_install(void)
+{
+    TEST_SECTION("config_store_flash: tc_type-only comparison uses the persisted (flash) record, "
+                 "not a RAM record already mutated by a volatile install (opus review item 4)");
+    reset_all();
+    config_store_boot_load(); // persisted record: all-default, uncommissioned
+
+    // A neutral volatile install while NOT armed: allowed, and it leaves
+    // s_cached_record differing from the persisted/flash record in
+    // mains_voltage_v -- but flash itself is untouched.
+    config_store_record_t volatile_rec;
+    config_store_default(&volatile_rec);
+    volatile_rec.mains_voltage_v = 240.0f;
+    TEST_CHECK(config_store_write_volatile(&volatile_rec, NULL) == true,
+               "fixture: neutral volatile install accepted while not armed");
+
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
+
+    // This candidate differs from the PERSISTED/flash record in tc_type
+    // ONLY -- but differs from the current RAM record (s_cached_record) in
+    // BOTH tc_type and mains_voltage_v, since the volatile install above
+    // only touched RAM.
+    config_store_record_t candidate;
+    config_store_default(&candidate);
+    candidate.tc_type = 0x07u;
+    const char *reason = NULL;
+    bool ok = config_store_write(&candidate, &reason);
+    TEST_CHECK(ok == false, "write refused while ARMED");
+    TEST_CHECK(reason != NULL &&
+                   reason == config_store_write_decision_reason(CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_UNKNOWN),
+               "classified as tc_type-only against the PERSISTED record (item 4) -- comparing "
+               "against the volatile-mutated RAM record instead would report the generic "
+               "CONFIG_STORE_WRITE_REFUSED_ARMED here");
 }
 
 // 2026-09-14 review, Finding A -- config_store_write_volatile() must refuse
@@ -1248,6 +1293,7 @@ int main(void)
     test_write_refused_while_armed();
     test_write_volatile_installs_while_armed_and_bumps_identity();
     test_write_volatile_repeated_then_flash_commit_still_gated();
+    test_write_uses_persisted_record_not_ram_after_volatile_install();
     test_write_volatile_refuses_loosening_while_armed();
     test_seq_increments_and_survives_wraparound();
     test_safe_execute_timeout_is_reported_and_leaves_cache_unchanged();
