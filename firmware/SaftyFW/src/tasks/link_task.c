@@ -2233,12 +2233,22 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
 // finalize_i_present_a(), same calibration_missing recomputation) -- a
 // volatile install is not a less-checked install, it is the same checked
 // install with config_store_write_volatile() in place of config_store_
-// write() as the last step. That substitution is also the ONLY difference:
-// there is no ARMED refusal branch here at all, because config_store_write_
-// volatile() never calls config_store_decide_write() (see its own header
-// comment) -- the Pico never has to leave ARMED to accept this frame, which
-// is the entire reason this sibling command exists instead of a flag that
-// would have to thread an ARMED-bypass through config_store_write() itself.
+// write() as the last step. config_store_write_volatile() never calls
+// config_store_decide_write() -- the Pico never has to leave ARMED to
+// accept an ordinary kiln-package swap via this frame, which is the entire
+// reason this sibling command exists instead of a flag that would have to
+// thread an ARMED-bypass through config_store_write() itself.
+//
+// CORRECTION (2026-09-14 review, Finding A): this comment used to say "there
+// is no ARMED refusal branch here at all" -- that was true of the flash-
+// stall gate, but config_store_write_volatile() now DOES refuse a narrow
+// class of installs while ARMED (raising/clearing abs_max_temp_c or
+// max_rate_c_per_min, or any tc_type change -- see that function's own doc
+// comment in config_store.h). This handler now has to check its return
+// value for exactly that reason, reported on the existing SAFETY_CMD_
+// COMMIT_CONFIG_REJECTED frame with KILNLINK_COMMIT_CONFIG_REJECT_ARMED --
+// no new wire value, no protocol bump: that reason already existed for
+// COMMIT_CONFIG and was simply unreachable via this path until now.
 static void link_task_handle_apply_config_volatile(const kilnlink_frame_t *frame)
 {
     kilnlink_apply_config_volatile_t msg;
@@ -2271,12 +2281,18 @@ static void link_task_handle_apply_config_volatile(const kilnlink_frame_t *frame
     config_params_finalize_i_present_a(&to_write);
     to_write.calibration_missing = !config_params_all_required_set(&to_write);
 
-    // No `written` check, no ARMED/STORAGE rejection branch: config_store_
-    // write_volatile() has no failure mode (see its own header comment) --
-    // it cannot refuse ARMED (never checks it) and cannot fail flash I/O
-    // (never touches flash), so the only way this handler can fail to
-    // install is the validation refusal already handled above.
-    config_store_write_volatile(&to_write);
+    // config_store_write_volatile() can still fail for exactly one reason
+    // now (Finding A's ARMED-loosening carve-out): it cannot fail flash I/O
+    // (never touches flash), so any refusal here is that carve-out, never a
+    // storage failure -- report it the same way COMMIT_CONFIG's ARMED
+    // refusal is reported.
+    const char *reason = NULL;
+    if (!config_store_write_volatile(&to_write, &reason)) {
+        log_task_log(LOG_LEVEL_WARN, "apply_config_volatile",
+                     reason ? reason : "refused: would loosen a safety threshold while ARMED");
+        link_task_send_commit_config_rejected(CONFIG_PARAMS_NO_PARAM_ID, KILNLINK_COMMIT_CONFIG_REJECT_ARMED);
+        return; // writes NOTHING -- s_staged_config is untouched
+    }
     s_staged_config = to_write; // becomes the new baseline for the next SET_PARAM
     log_task_log(LOG_LEVEL_INFO, "apply_config_volatile", "accepted (volatile, no flash write)");
     // Same "take effect immediately" reasoning as link_task_handle_commit_

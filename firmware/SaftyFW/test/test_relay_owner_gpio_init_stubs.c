@@ -85,11 +85,16 @@ void config_store_get_ct_cal(config_store_ct_channel_cal_t out[CONFIG_STORE_CT_C
     }
 }
 
-void config_store_get_full_record(config_store_record_t *out)
+// Return type changed void -> bool 2026-09-14 (config_store.h/config_store_
+// flash.c, review Finding C) -- this stub always reports "no real snapshot"
+// (false), matching its own always-zeroed body, which is honest: it never
+// actually reads anything.
+bool config_store_get_full_record(config_store_record_t *out)
 {
     if (out) {
         memset(out, 0, sizeof(*out));
     }
+    return false;
 }
 
 TickType_t xTaskGetTickCount(void)

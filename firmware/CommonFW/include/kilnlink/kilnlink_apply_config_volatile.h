@@ -23,21 +23,32 @@ extern "C" {
  * (kilnlink_set_param.h) exactly as COMMIT_CONFIG does, and on success
  * install it into the Pico's live in-RAM config record (config_store_
  * write_volatile(), config_store_flash.c) WITHOUT writing flash and WITHOUT
- * the ARMED refusal that gates the ordinary flash path (config_store_
- * write()'s config_store_decide_write() call) -- see config_store_flash.h's
- * own doc comment on config_store_write_volatile() for why this is safe:
- * the Pico never has to leave RELAY_OWNER_STATE_ARMED to accept a kiln
- * package swap, because nothing here ever reaches the flash write that
- * gate protects.
+ * the flash-stall half of the ARMED refusal that gates the ordinary flash
+ * path (config_store_write()'s config_store_decide_write() call) -- the
+ * Pico never has to leave RELAY_OWNER_STATE_ARMED to accept an ordinary
+ * kiln package swap, because nothing here ever reaches the flash write that
+ * half of the gate protects.
  *
  * Same fire-and-forget refusal reporting as COMMIT_CONFIG: a validation
  * failure is reported on the existing SAFETY_CMD_COMMIT_CONFIG_REJECTED
  * (0x20) frame (kilnlink_commit_config_rejected.h) -- a volatile install is
  * not a second, less-checked kind of install, so it is not given a second
- * kind of rejection reply either. There is no ARMED rejection reason for
- * this path (KILNLINK_COMMIT_CONFIG_REJECT_ARMED is unreachable here by
- * construction, not merely by convention), only STORAGE (validation/
- * finalize failure) and the existing per-field reasons.
+ * kind of rejection reply either.
+ *
+ * CORRECTION (2026-09-14 review, Finding A): this comment used to claim
+ * KILNLINK_COMMIT_CONFIG_REJECT_ARMED was "unreachable here by
+ * construction, not merely by convention" -- that was true only of the
+ * flash-stall reason the ARMED gate also serves; it ignored the gate's
+ * OTHER documented purpose (ARCHITECTURE.md sec 7/8, CONFIG_REFERENCE.md
+ * sec 210, COMMISSIONING.md sec 2: "retuning a safety threshold during a
+ * firing is not a supported operation"), which this path had silently
+ * stopped enforcing. config_store_write_volatile() now DOES refuse a
+ * narrow class of installs while ARMED -- raising or clearing
+ * abs_max_temp_c (S1) or max_rate_c_per_min (S8), or any tc_type change --
+ * and IS reported with KILNLINK_COMMIT_CONFIG_REJECT_ARMED on this same
+ * frame. An ordinary kiln-package swap (PID/profile-shaped params) is
+ * unaffected, since a swap is already refused during a firing by its own
+ * separate interlock and never needs to touch these fields anyway.
  *
  * Freestanding C11, no allocation, no I/O, no globals, every decoder
  * bounds-checked -- CommonFW/README.md rules 1-6. */

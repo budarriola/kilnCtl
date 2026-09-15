@@ -735,3 +735,227 @@ Finding B2 (the bump was avoidable, and is the 4th instance of the class
 `check_uart_version_independence.ps1` exists to prevent) stands: the two
 numbers still move together for a change that touched only the isolated link's
 wire, and nothing mechanical would catch the next one.
+
+---
+
+## Fix pass, 2026-09-14 (Findings A and C implemented; scope: config_store_flash.c, safety_core.c, link_task.c, kilnlink_apply_config_volatile.h)
+
+Both load-bearing findings above are now addressed. Scope per the
+coordinating session's ownership split: SaftyFW's `config_store_flash.c`,
+`safety_core.c`, `link_task.c` and their tests, plus the one CommonFW header
+comment (`kilnlink_apply_config_volatile.h`) that documented the now-stale
+claim. `kiln_cfg_swap.{c,h}`/`safety_cfg_http.c`, `sim_factorial*`, and the
+coredump reader were not touched, per the standing ownership split noted at
+the top of this document. No board was flashed, no `debug_*` tool was
+called, no heating run was performed (a coredump investigation was reported
+live at the start of this pass).
+
+### Finding A -- the ARMED-loosening carve-out
+
+`config_store_write_volatile()` (`firmware/SaftyFW/src/config_store_flash.c`)
+now refuses a narrow class of installs while `relay_owner_get_state() ==
+RELAY_OWNER_STATE_ARMED`, via a new pure helper,
+`config_store_volatile_would_loosen_safety()`, evaluated against the live
+`s_cached_record` as `cur` and the caller's proposed record as `next`.
+**Exact gating condition: `RELAY_OWNER_STATE_ARMED`, not "is this a kiln
+package swap" and not any broader firing-in-progress flag.** This is
+deliberate, and is the crux the review asked to get precise:
+
+- ARMED is entered ONLY by an actual energize request
+  (`safety_core_request_enable()` -> `relay_owner_command_energize(true)`,
+  itself gated by `commissioning_gate_energize_allowed()`) -- it is not set
+  merely because a kiln package was swapped, and an ordinary swap performed
+  while de-energized never sees this gate at all.
+- A kiln-package swap is already refused during an actual firing by its own
+  separate interlock (KILN_PROFILES_PLAN.md); this carve-out does not need
+  to duplicate that refusal, only to cover the case that interlock does
+  NOT cover -- a volatile install arriving while the relay happens to be
+  live for any reason.
+- ARMED is a one-way latch within a run (never demotes back to un-armed
+  mid-firing) but it DOES clear at the start of the NEXT run/boot cycle
+  before a swap for that next firing is staged -- so gating on ARMED
+  (rather than, say, a broader "any firing was ever started" flag that
+  never resets) does not refuse a legitimate swap prepared between firings.
+  A swap prepared WHILE still ARMED from a still-live prior firing is
+  exactly the case Finding A exists to refuse.
+
+What counts as "loosening", decided per field, matching the review's ask
+for explicit per-field answers:
+
+| Field | Unset -> set (first commissioning) | Set, value lowered/same TC type | Set, value raised | Set -> unset | Set, TC type changed |
+|---|---|---|---|---|---|
+| `abs_max_temp_c` (S1) | allowed (tightening) | allowed | **refused** | **refused** | n/a |
+| `max_rate_c_per_min` (S8) | allowed (tightening) | allowed | **refused** | **refused** | n/a |
+| `tc_type` | allowed (tightening) | allowed (unchanged) | n/a | n/a | **refused** |
+
+Reasoning: `abs_max_temp_c`/`max_rate_c_per_min` are fields_set-gated with a
+documented "unset == never trips / rate check disabled" meaning
+(CONFIG_REFERENCE.md sec 7, config_store.h's own field comments) -- unset IS
+the loosest possible state, not a neutral default, so clearing a
+commissioned value is exactly as much a loosening as raising it, and both
+are refused; going the other way (committing a real value where none
+existed) can only add a bound, so it is always a tightening and always
+allowed. `tc_type` has the same fields_set-gated unset/set split (2026-08-24
+addition, `CONFIG_STORE_SET_TC_TYPE`) but, once commissioned, has no
+ordering between types the way a numeric threshold does -- it rescales what
+`abs_max_temp_c`'s own already-validated bound means
+(`TC_MAX_C_BY_TYPE[tc_type]`) and feeds the borrowed/main-board
+type-mismatch guards -- so ANY change away from an already-committed type,
+including clearing it, is treated as loosening; a first commissioning of
+tc_type (unset -> any type) is still a tightening.
+
+Every other field (PID/profile-shaped params, CT cal, `mains_voltage_v`,
+etc.) is untouched by this carve-out -- an ordinary kiln-package swap still
+never has to unarm the Pico for the other ~65 params, matching the plan's
+section 1a.2 requirement the review itself reaffirmed.
+
+Refusal is reported on the wire via the EXISTING
+`KILNLINK_COMMIT_CONFIG_REJECT_ARMED` reason on the existing
+`SAFETY_CMD_COMMIT_CONFIG_REJECTED` (0x20) frame
+(`link_task_handle_apply_config_volatile()`, `firmware/SaftyFW/src/tasks/link_task.c`)
+-- **no new wire value, no protocol bump.** That reason already existed for
+COMMIT_CONFIG's own ARMED refusal; APPLY_CONFIG_VOLATILE's rejected reply
+already carries the same reason byte, it was simply unreachable via this
+path until now. `kilnlink_apply_config_volatile.h`'s comment claiming that
+reason was "unreachable here by construction" is corrected in place.
+
+Constraints honored: no change to the divergence enforcement, the
+readiness-gate interlock, or the `autotune_baseline_k_dc` envelope (none of
+this pass's files touch any of those); no `ZONES_CFG_VERSION` bump; the
+identity bump (`config_version`/`config_crc` tracking the installed record)
+is unaffected -- both are still pure functions of `s_cached_record`, and the
+carve-out runs BEFORE the seqlock write, so a refusal never bumps identity
+at all (confirmed by test: `test_write_volatile_refuses_loosening_while_armed`'s
+each-refused-case sequence leaves the live record exactly as the last
+SUCCESSFUL install left it).
+
+### Finding C -- the backstop no longer trusts a failed read as "unconfigured"
+
+`config_store_get_full_record()` (`config_store_flash.c`/`config_store.h`)
+now returns `bool`: `true` when `*out` is a genuine snapshot
+(`config_store_seqlock_read()` succeeded), `false` when it fell back to
+`config_store_default()` for EITHER reason that can produce that fallback --
+`!s_loaded` (boot_load hasn't run) or a retry-exhausted seqlock read (the
+review's Finding C scenario). The bytes written to `*out` are unchanged in
+both cases (still `config_store_default()`'s shape) -- only the return
+value is new, so every pre-existing call site (`current_task.c`,
+`link_task.c` x6, `thermo_task.c` x2, `safety_core.c`'s other, unrelated
+call at line ~1657) compiles and behaves identically by simply ignoring it,
+which is correct for all of them: falling back to the safe default on a
+failed read was already their intended behavior.
+
+The ONE call site that needed to tell the two apart -- `safety_core.c`'s
+item-16 backstop -- now captures the return value as `cfg_read_ok` and
+gates on it explicitly: `if (!cfg_read_ok) { /* decline, no action */ }
+else if (abs_max_temp_c_unconfigured && ARMED) { de-energize }`. A failed
+read makes the backstop decline to act in EITHER direction for that tick --
+it does not clear the warn-latch (so a genuinely stuck condition is not
+silently un-latched by one bad read) and does not de-energize (so a
+transient retry-exhaustion window on a healthy, commissioned, firing board
+no longer trips a spurious shutdown). The backstop's actual target case --
+a board that is REALLY stuck ARMED-and-unconfigured -- keeps re-triggering
+on every tick that DOES get a real snapshot (which is the overwhelming
+majority of ticks even under the pathological condition Finding C
+demonstrated), so declining on a failed read does not weaken the backstop's
+coverage of the case it exists for.
+
+The two retry-bound comments (`CONFIG_STORE_SEQLOCK_MAX_RETRIES`,
+`CONFIG_STORE_FALLBACK_SEQLOCK_MAX_RETRIES`, and their three other
+"ARMED-refused-anyway" references in `config_store_flash.c`) are corrected:
+they no longer claim a write is rare BECAUSE ARMED refuses it (false since
+item 15), only that it is rare because it is one seqlock write per wire
+frame, never a burst -- the retry-exhaustion analysis those comments support
+was already about write FREQUENCY, not about ARMED, so it is unaffected by
+the correction.
+
+`config_store_seqlock_write()`'s comment ("called only from
+config_store_write()") is corrected to name both callers.
+
+### Also fixed: a stub redefinition caught by the build itself
+
+`firmware/SaftyFW/test/test_relay_owner_gpio_init_stubs.c`'s
+`config_store_get_full_record()` test double still declared `void` after
+the signature change, which MSVC's `warning C4142` (treated as error by
+this project's build) caught immediately on the first host-test build
+attempt -- fixed to `bool`, returning `false` (honest: this stub always
+zero-fills, it never reads anything real).
+
+### Is the UART protocol bump necessary? (addendum ask)
+
+No new wire value and no protocol bump were needed for THIS pass's fix --
+`KILNLINK_COMMIT_CONFIG_REJECT_ARMED` already existed on the wire from
+COMMIT_CONFIG's original landing, and is simply reused, unmodified, on
+APPLY_CONFIG_VOLATILE's existing rejected-reply frame. Confirms Finding B2's
+own conclusion: the ONLY genuinely required bump in `17740e47` was
+`KILNLINK_PROTOCOL_VERSION` 14->15 for the new frame id itself;
+`UART_PROTOCOL_VERSION` 11->12 remains, on inspection, avoidable, and it
+would have stayed avoidable under this pass's fix too, since no wire shape
+changed. Whether `check_uart_version_independence.ps1` can be strengthened
+to catch a hand-written bump of this shape: yes, in principle -- scoping
+`wire_protocol_fingerprint_check.py`'s "uart" fingerprint spec to exclude
+isolated-link `SAFETY_CMD_` entries (i.e. match only entries that also
+appear in a PC-link-facing header) would stop a purely-isolated-link
+addition from moving the PC-facing fingerprint at all, which removes the
+version-bump PRESSURE at its source rather than trying to detect a
+hand-written bump after the fact. That change lives in
+`firmware/KilnFW/App/test/wire_protocol_fingerprint_check.py`, outside this
+pass's SaftyFW-scoped ownership, and is not made here -- flagged as a
+follow-up for whoever owns that file next. Doc citation nit already
+corrected by the review above: the check is
+`firmware/KilnFW/App/test/wire_protocol_fingerprint_check.py`, not
+`tools/check_wire_protocol_fingerprint.ps1`.
+
+### Negative tests (hand-broken, hand-restored, full rebuild)
+
+1. **Finding A's carve-out disabled**
+   (`config_store_flash.c`: `if (relay_owner_get_state() == ...` changed to
+   `if (false && relay_owner_get_state() == ...`): **5 failures**, exactly
+   the 5 new assertions in `test_write_volatile_refuses_loosening_while_armed`
+   that expect a refusal (raise abs_max, clear abs_max, raise S8 rate,
+   change tc_type, and the refusal-reason check) -- the 3 assertions
+   expecting SUCCESS (lowering, and the neutral-field case) correctly kept
+   passing, since disabling the carve-out only removes refusals, it does not
+   add any. Restored by hand; full rebuild (`-OutDir` deleted and recreated)
+   confirmed 2515/2515 + 56/56 + 255/255 clean again.
+2. **Finding C's read-ok capture defeated**
+   (`safety_core.c`: `bool cfg_read_ok = config_store_get_full_record(&cfg_rec);`
+   changed to a discarded call plus `bool cfg_read_ok = true;` -- i.e. the
+   backstop always believes the read succeeded, exactly the pre-fix
+   behavior): **1 failure**,
+   `test_backstop_gates_on_a_real_snapshot_not_just_fields_set` ("return
+   value is captured (not discarded) as cfg_read_ok"). Restored by hand;
+   full rebuild confirmed 2515/2515 + 56/56 + 255/255 clean again.
+
+After restoring both by hand and a full clean rebuild:
+**2515/2515 + 56/56 + 255/255, all passed, script exit 0.**
+
+### Verification
+
+- `firmware/SaftyFW` host tests, fresh private `-OutDir` under `C:\wt\...`
+  via the bash tool each run (per the standing short-worktree-path
+  instruction): baseline after the fix **2515/2515 + 56/56 + 255/255**;
+  identical after both negative-test restores.
+- `firmware/SaftyFW` target build (`check_00_saftyfw_target_build.ps1`):
+  **PASS**, all three slot ELFs (`SaftyFW.elf`/`_slotA`/`_slotB`) linked
+  including the new carve-out helper and the backstop's `cfg_read_ok` gate.
+- `check_saftyfw_task_stack_budgets.ps1`: **PASS** -- `safety_core` still
+  measures exactly 2168 B (the prior pass's pinned ceiling); the extra
+  `bool cfg_read_ok` local did not move it further.
+- `firmware/KilnFW` target build (`check_00_kilnfw_target_build.ps1`):
+  **PASS** -- this pass's files are not linked into KilnFW at all (SaftyFW/
+  CommonFW-only change plus one CommonFW header comment), so this was
+  expected to be unaffected, and was.
+- `tools/run_all_checks.ps1`: **94 passed, 0 skipped, 0 failed** -- a clean
+  board, unlike the two prior passes' 88-90/94 (their remaining reds traced
+  to `kiln_cfg_swap.c`/`safety_cfg_http.c`/`sim_*`, owned by other sessions,
+  and have since been resolved by those owners).
+- `tools/check_doc_hash_citations.ps1`: passes as part of the 94/94 above;
+  every hash cited in this addendum (`67a21e62`, `17740e47`, `3d2c5413`,
+  `d2671675`, `5a07116b`, `c2c9eff2`) already appears earlier in this same
+  document and was previously verified to resolve.
+
+No `ZONES_CFG_VERSION` bump. No protocol version bump (neither
+`KILNLINK_PROTOCOL_VERSION` nor `UART_PROTOCOL_VERSION` moved in this pass
+-- the reused `KILNLINK_COMMIT_CONFIG_REJECT_ARMED` reason needed no wire
+change). No board flashed, no `debug_*` tool called, no heating run
+performed.

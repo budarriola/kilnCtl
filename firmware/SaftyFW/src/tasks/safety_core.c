@@ -965,7 +965,12 @@ static safety_guard_input_t safety_core_build_input(void)
     // read AFTER sample_counter_advancing below) because that producer now
     // needs cfg_rec.borrowed_zone_index too.
     config_store_record_t cfg_rec;
-    config_store_get_full_record(&cfg_rec);
+    // Return value used ONLY by the item-16 backstop below (cfg_read_ok) --
+    // every other reader of cfg_rec in this tick keeps the pre-existing
+    // "a missing part must not abort a guard tick" behavior of falling back
+    // to config_store_default() either way, so ignoring it for them is
+    // correct, not an oversight.
+    bool cfg_read_ok = config_store_get_full_record(&cfg_rec);
     bool safety_tc_not_installed_declared = (cfg_rec.safety_tc_installed == 0u);
 
     // S13's sample_counter_advancing. GUARD_TEST_MATRIX.md section 6 (row
@@ -1041,8 +1046,34 @@ static safety_guard_input_t safety_core_build_input(void)
     // S1 itself considers unconfigured (project_reset_one_side_bug_class --
     // two places deriving the same fact independently is exactly how that
     // class of bug starts; this reads the identical bit instead).
+    //
+    // CORRECTION (2026-09-14 review, Finding C): cfg_read_ok (above) gates
+    // this whole block now. config_store_get_full_record() fails CLOSED to
+    // config_store_default() -- fields_set == 0, byte-identical to a
+    // genuinely never-commissioned record -- whenever config_store_
+    // seqlock_read() exhausts both its primary and fallback retries. Proven
+    // by execution (standalone harness against the real sources, scratchpad
+    // only): a COMMISSIONED, ARMED board driven into that degraded-read
+    // state presents this backstop's exact trigger and would have been
+    // spuriously force-de-energized mid-firing -- a real availability
+    // regression, always in the fail-safe direction, but not the "dead code
+    // by construction" this backstop was believed to be. `cfg_read_ok ==
+    // false` means "I could not confirm what is commissioned this tick," not
+    // "nothing is commissioned" -- those are different claims, and only the
+    // second one justifies pulling the relay. On a failed read this backstop
+    // now DECLINES to act (skips both the de-energize and the warn-latch
+    // update) rather than guessing either way; a genuinely stuck ARMED-and-
+    // unconfigured board keeps re-triggering on every tick that DOES get a
+    // real snapshot, so this does not weaken the backstop's actual target
+    // case, only stops it from misfiring on a transient it was never meant
+    // to interpret.
     bool abs_max_temp_c_unconfigured = (cfg_rec.fields_set & CONFIG_STORE_SET_ABS_MAX_TEMP_C) == 0u;
-    if (abs_max_temp_c_unconfigured && relay_owner_get_state() == RELAY_OWNER_STATE_ARMED) {
+    if (!cfg_read_ok) {
+        // Declined: see the correction above. Leave s_unconfigured_armed_
+        // warned exactly as it was so a real, already-latched condition is
+        // not silently cleared by one bad read, and so a real transition is
+        // still reported once a stable snapshot resumes.
+    } else if (abs_max_temp_c_unconfigured && relay_owner_get_state() == RELAY_OWNER_STATE_ARMED) {
         if (!s_unconfigured_armed_warned) {
             log_task_log(LOG_LEVEL_ERROR, "safety_core",
                          "unreachable state observed: ARMED with abs_max_temp_c unconfigured -- "

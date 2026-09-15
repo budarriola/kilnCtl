@@ -207,10 +207,12 @@ static void test_write_volatile_installs_while_armed_and_bumps_identity(void)
     rec.tc_type = 0x07u; // MAX31856_TC_TYPE_T
     rec.calibration_missing = false;
 
-    config_store_write_volatile(&rec);
+    const char *reason = NULL;
+    TEST_CHECK(config_store_write_volatile(&rec, &reason) == true,
+               "a tc_type-only install off an unconfigured (fields_set==0) baseline is a "
+               "tightening/neutral change, never refused, even while ARMED");
 
-    // Visible immediately, with no ARMED refusal of any kind -- there is no
-    // return value to check because this function cannot refuse.
+    // Visible immediately.
     TEST_CHECK(config_store_get_tc_type() == 0x07u,
                "volatile install is visible to getters immediately");
     TEST_CHECK(config_store_is_calibration_missing() == false,
@@ -248,13 +250,15 @@ static void test_write_volatile_repeated_then_flash_commit_still_gated(void)
 
     config_store_record_t rec;
     config_store_default(&rec);
-    rec.tc_type = 0x01u;
-    config_store_write_volatile(&rec);
+    rec.tc_type = 0x01u; // fields_set stays 0 -- tc_type left uncommissioned throughout this test
+    TEST_CHECK(config_store_write_volatile(&rec, NULL) == true, "fixture: first volatile install accepted");
     uint8_t version_1 = config_store_get_config_version();
     uint16_t crc_1 = config_store_get_config_crc();
 
     rec.tc_type = 0x02u;
-    config_store_write_volatile(&rec);
+    TEST_CHECK(config_store_write_volatile(&rec, NULL) == true,
+               "a repeated install of an uncommissioned (fields_set==0) tc_type is never refused, "
+               "not even while later ARMED (checked below)");
     uint8_t version_2 = config_store_get_config_version();
     uint16_t crc_2 = config_store_get_config_crc();
 
@@ -274,6 +278,115 @@ static void test_write_volatile_repeated_then_flash_commit_still_gated(void)
                "config_store_write() still refuses while ARMED even after volatile installs ran");
     TEST_CHECK(config_store_get_tc_type() == 0x02u,
                "the refused flash write does not disturb the volatile record already live");
+}
+
+// 2026-09-14 review, Finding A -- config_store_write_volatile() must refuse
+// a narrow class of installs while ARMED: raising or clearing an already-
+// commissioned abs_max_temp_c/max_rate_c_per_min, or changing an already-
+// commissioned tc_type. Everything else -- first commissioning of any of
+// those three (unset -> set), lowering an already-commissioned threshold,
+// or touching any other field -- must still install while ARMED, exactly as
+// before this fix, since the whole point of the volatile path is that an
+// ordinary kiln-package swap never has to unarm the Pico.
+static void test_write_volatile_refuses_loosening_while_armed(void)
+{
+    TEST_SECTION("config_store_flash: write_volatile refuses a LOOSENING install while ARMED, "
+                 "allows tightening/neutral ones");
+    reset_all();
+    config_store_boot_load();
+
+    // Commission a real baseline (NOT ARMED yet) -- abs_max_temp_c 1100C,
+    // max_rate_c_per_min 20, tc_type K -- so there is something to loosen.
+    config_store_record_t baseline;
+    config_store_default(&baseline);
+    baseline.fields_set |= (uint16_t)(CONFIG_STORE_SET_ABS_MAX_TEMP_C | CONFIG_STORE_SET_MAX_RATE_C_PER_MIN |
+                                       CONFIG_STORE_SET_TC_TYPE);
+    baseline.abs_max_temp_c = 1100.0f;
+    baseline.max_rate_c_per_min = 20.0f;
+    baseline.tc_type = 0x03u; // MAX31856_TC_TYPE_K
+
+    // Each sub-case re-establishes the SAME baseline while de-energized
+    // (allowed unconditionally -- config_store_write_volatile() never checks
+    // ARMED for a re-install of an unchanged/tightening record), THEN arms,
+    // THEN attempts one mutation -- so every case is judged against the same
+    // known "currently live" record, not against whatever a PRIOR case's
+    // successful install left behind.
+#define REARM_FROM_BASELINE()                                                                        \
+    do {                                                                                              \
+        config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_INIT); /* not ARMED */          \
+        TEST_CHECK(config_store_write_volatile(&baseline, NULL) == true, "fixture: baseline restored"); \
+        config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);                        \
+    } while (0)
+
+    REARM_FROM_BASELINE();
+    // 1. Raising abs_max_temp_c while ARMED: refused.
+    {
+        config_store_record_t rec = baseline;
+        rec.abs_max_temp_c = 1372.0f; // type-K max -- exactly the review's own example
+        const char *reason = NULL;
+        TEST_CHECK(config_store_write_volatile(&rec, &reason) == false,
+                   "raising a commissioned abs_max_temp_c ceiling while ARMED is refused");
+        TEST_CHECK(reason != NULL &&
+                       reason == config_store_write_decision_reason(CONFIG_STORE_WRITE_REFUSED_ARMED),
+                   "refusal reason is the ARMED one");
+    }
+
+    REARM_FROM_BASELINE();
+    // 2. Clearing abs_max_temp_c (back to "never trips") while ARMED: refused.
+    {
+        config_store_record_t rec = baseline;
+        rec.fields_set = (uint16_t)(rec.fields_set & ~(uint32_t)CONFIG_STORE_SET_ABS_MAX_TEMP_C);
+        TEST_CHECK(config_store_write_volatile(&rec, NULL) == false,
+                   "un-committing abs_max_temp_c while ARMED is refused (loosens back to 'never trips')");
+    }
+
+    REARM_FROM_BASELINE();
+    // 3. Lowering abs_max_temp_c while ARMED: allowed (tightening).
+    {
+        config_store_record_t rec = baseline;
+        rec.abs_max_temp_c = 900.0f;
+        TEST_CHECK(config_store_write_volatile(&rec, NULL) == true,
+                   "lowering a commissioned abs_max_temp_c ceiling while ARMED is allowed");
+        config_store_record_t live;
+        config_store_get_full_record(&live);
+        TEST_CHECK(live.abs_max_temp_c == 900.0f, "the lowering install actually landed");
+    }
+
+    REARM_FROM_BASELINE();
+    // 4. Raising max_rate_c_per_min (S8) while ARMED: refused.
+    {
+        config_store_record_t rec = baseline;
+        rec.max_rate_c_per_min = 50.0f;
+        TEST_CHECK(config_store_write_volatile(&rec, NULL) == false,
+                   "raising a commissioned S8 rate cap while ARMED is refused");
+    }
+
+    REARM_FROM_BASELINE();
+    // 5. Changing an already-commissioned tc_type while ARMED: refused.
+    {
+        config_store_record_t rec = baseline;
+        rec.tc_type = 0x07u; // MAX31856_TC_TYPE_T
+        TEST_CHECK(config_store_write_volatile(&rec, NULL) == false,
+                   "changing an already-commissioned tc_type while ARMED is refused (no 'safer' "
+                   "direction between TC types)");
+    }
+
+    REARM_FROM_BASELINE();
+    // 6. A neutral change (no safety field touched) while ARMED: allowed --
+    // an ordinary kiln-package swap must not have to unarm the Pico.
+    {
+        config_store_record_t rec = baseline;
+        rec.mains_voltage_v = 240.0f;
+        TEST_CHECK(config_store_write_volatile(&rec, NULL) == true,
+                   "a non-safety-field change while ARMED is never refused by the carve-out");
+        config_store_record_t live;
+        config_store_get_full_record(&live);
+        TEST_CHECK(live.mains_voltage_v == 240.0f, "the neutral install actually landed");
+    }
+
+#undef REARM_FROM_BASELINE
+    TEST_CHECK(relay_owner_get_state() == RELAY_OWNER_STATE_ARMED,
+               "a refusal never itself changes relay state -- it just declines to write");
 }
 
 static void test_seq_increments_and_survives_wraparound(void)
@@ -1125,6 +1238,7 @@ int main(void)
     test_write_refused_while_armed();
     test_write_volatile_installs_while_armed_and_bumps_identity();
     test_write_volatile_repeated_then_flash_commit_still_gated();
+    test_write_volatile_refuses_loosening_while_armed();
     test_seq_increments_and_survives_wraparound();
     test_safe_execute_timeout_is_reported_and_leaves_cache_unchanged();
     test_program_failure_is_not_masked_by_safe_execute_ok();

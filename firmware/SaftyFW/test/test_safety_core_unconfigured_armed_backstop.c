@@ -122,8 +122,85 @@ static void test_backstop_uses_the_same_fields_set_bit_as_s1(void)
     free(text);
 }
 
+// 2026-09-14 review, Finding C: config_store_get_full_record() fails CLOSED
+// to config_store_default() (fields_set == 0, byte-identical to a genuinely
+// unconfigured record) whenever the seqlock read exhausts its retries -- a
+// state proven reachable on a COMMISSIONED, ARMED board, not only a
+// never-committed one. The backstop must gate on the function's return
+// value (whether a REAL snapshot was obtained) in addition to the
+// fields_set bit, or a transient read failure on a healthy, firing board
+// reads identically to "genuinely never commissioned" and forces a
+// spurious de-energize. Pins that the `!cfg_read_ok` branch exists ahead of
+// the ARMED/unconfigured check, and that it does NOT call relay_owner_
+// command_energize() itself (a failed read must decline to act, not assume
+// either direction).
+static void test_backstop_gates_on_a_real_snapshot_not_just_fields_set(void)
+{
+    TEST_SECTION("safety_core.c: backstop distinguishes a FAILED read from a "
+                 "genuinely unconfigured record (2026-09-14 review Finding C)");
+    char *text = read_source();
+    TEST_CHECK(text != NULL, "safety_core.c source is readable");
+    if (!text) {
+        return;
+    }
+
+    // The read call this tick's cfg_rec comes from -- its return value must
+    // be captured into a named variable, not discarded, for the backstop to
+    // have anything to gate on.
+    const char *get_full_record_call = strstr(text, "config_store_get_full_record(&cfg_rec)");
+    TEST_CHECK(get_full_record_call != NULL,
+               "fixture: safety_core.c still reads cfg_rec via config_store_get_full_record()");
+    TEST_CHECK(strstr(text, "cfg_read_ok = config_store_get_full_record(&cfg_rec)") != NULL,
+               "config_store_get_full_record()'s return value is captured (not discarded) as "
+               "cfg_read_ok -- the signal the backstop needs to tell a failed read apart from a "
+               "genuinely unconfigured record");
+
+    const char *block = find_backstop_block(text);
+    TEST_CHECK(block != NULL, "fixture: backstop block located");
+    if (!block) {
+        free(text);
+        return;
+    }
+
+    size_t window = 2400;
+    size_t avail = strlen(block);
+    size_t len = (avail < window) ? avail : window;
+    char *window_buf = (char *)malloc(len + 1);
+    TEST_CHECK(window_buf != NULL, "fixture: window buffer allocated");
+    if (!window_buf) {
+        free(text);
+        return;
+    }
+    memcpy(window_buf, block, len);
+    window_buf[len] = '\0';
+
+    const char *not_ok_branch = strstr(window_buf, "!cfg_read_ok");
+    TEST_CHECK(not_ok_branch != NULL,
+               "backstop checks cfg_read_ok before trusting abs_max_temp_c_unconfigured");
+
+    const char *unconfigured_check = strstr(window_buf, "abs_max_temp_c_unconfigured &&");
+    TEST_CHECK(not_ok_branch != NULL && unconfigured_check != NULL && not_ok_branch < unconfigured_check,
+               "the !cfg_read_ok check comes BEFORE the unconfigured-and-ARMED check, i.e. it "
+               "gates entry into it rather than merely being checked somewhere in the file");
+
+    // A failed read must DECLINE to act, not de-energize -- confirm the
+    // energize call in this window is not reachable from the !cfg_read_ok
+    // branch alone by checking it sits in a later else-if, not directly
+    // under the !cfg_read_ok condition's own braces. The cheapest reliable
+    // text-level proxy: the energize call appears strictly after the
+    // unconfigured_check, not between not_ok_branch and unconfigured_check.
+    const char *energize_call = strstr(window_buf, "relay_owner_command_energize(false)");
+    TEST_CHECK(energize_call != NULL && unconfigured_check != NULL && energize_call > unconfigured_check,
+               "relay_owner_command_energize(false) is reached only via the unconfigured-and-ARMED "
+               "branch, never directly from the !cfg_read_ok branch");
+
+    free(window_buf);
+    free(text);
+}
+
 void run_test_safety_core_unconfigured_armed_backstop(void)
 {
     test_backstop_declared_and_reachable();
     test_backstop_uses_the_same_fields_set_bit_as_s1();
+    test_backstop_gates_on_a_real_snapshot_not_just_fields_set();
 }

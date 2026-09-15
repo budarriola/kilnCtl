@@ -1103,7 +1103,23 @@ void config_store_get_ct_cal(config_store_ct_channel_cal_t out[CONFIG_STORE_CT_C
 // enforced record, not a caller's in-progress edits). Same "safe default
 // before boot_load()" contract as every other getter here: if called before
 // config_store_boot_load(), `*out` is config_store_default()'s record.
-void config_store_get_full_record(config_store_record_t *out);
+//
+// Returns true iff `*out` is a genuine snapshot of a loaded record (from
+// config_store_seqlock_read() succeeding), false when it fell back to
+// config_store_default() -- either because boot_load() has not run yet, OR
+// because config_store_seqlock_read() exhausted both its primary and
+// fallback retries (2026-09-14 review finding C: this is reachable on a
+// COMMISSIONED, ARMED board under a pathological retry-exhaustion window,
+// not only on a genuinely never-committed one). `*out`'s bytes are
+// IDENTICAL in both cases (config_store_default()'s fields_set == 0) -- a
+// caller that needs to tell "unconfigured" apart from "could not read right
+// now" MUST check this return value, not just `out->fields_set`. Most
+// callers correctly don't care (a missing part must not abort boot/a guard
+// tick, so falling back to the safe default is fine either way); the one
+// call site that DOES care is safety_core.c's item-16 backstop, precisely
+// because treating a failed read as "unconfigured" there forces a spurious
+// de-energize of a possibly live, correctly-commissioned firing.
+bool config_store_get_full_record(config_store_record_t *out);
 
 // Writes `rec` as the new current config record, refusing while ARMED (see
 // config_store_decide_write()). Returns false and fills `*out_reason` (if
@@ -1155,11 +1171,50 @@ bool config_store_write(const config_store_record_t *rec, const char **out_reaso
 // what is now proven live", plan section 1a.4) still lands in the correct
 // next slot relative to that unchanged position.
 //
-// Always succeeds once `rec` is handed to it (no ARMED check, no flash I/O
-// to fail) -- the only way this function can be prevented from installing
-// is for the caller to refuse to call it, which is exactly where
-// config_params_validate_ex()'s refusal belongs.
-void config_store_write_volatile(const config_store_record_t *rec);
+// 2026-09-14 review (docs/audits/pico_volatile_install_and_unconfigured_
+// ceiling_2026-09-14.md, Finding A): "no ARMED check" was correct about the
+// FLASH half of config_store_decide_write()'s gate, but that gate is also
+// documented in three places (ARCHITECTURE.md sec 7/8, CONFIG_REFERENCE.md
+// sec 210, COMMISSIONING.md sec 2) as a SAFETY rule -- "retuning a safety
+// threshold during a firing is not a supported operation" -- and this
+// function, being the store's own second write path, is exactly the
+// "future second caller" COMMISSIONING.md sec 2 warned would forget it.
+// Now DOES refuse, ARMED-only, a specific narrow class: a volatile install
+// that would LOOSEN a trip threshold while the relay is
+// RELAY_OWNER_STATE_ARMED (config_store_volatile_would_loosen_safety_while_
+// armed(), config_store_flash.c) -- raising abs_max_temp_c (S1), raising
+// max_rate_c_per_min (S8), clearing either back to "unconfigured" (fields_
+// set-gated fields are their OWN loosest state, per CONFIG_REFERENCE.md sec
+// 7 -- "never trips" -- so un-setting one while ARMED loosens it exactly
+// like raising it does), or changing an ALREADY-commissioned tc_type to a
+// different type or back to unset (it rescales what abs_max_temp_c's
+// already-validated bound means, and there is no ordering between TC types
+// that maps to "safer" -- but a board's FIRST commissioning of tc_type,
+// same as the two numeric fields above, is a tightening and stays allowed). Deliberately gates on ARMED, not
+// on "is this an ordinary kiln-package swap": a swap is already refused
+// during a firing by its own separate interlock (KILN_PROFILES_PLAN.md),
+// so this carve-out only has to bite for the ARMED-and-firing case the
+// review named, and RELAY_OWNER_STATE_ARMED is exactly that state -- never
+// entered except by an actual energize request, and (unlike the trip latch
+// state machine elsewhere in this codebase) not held across an ordinary
+// swap performed while de-energized. Tightening or neutral changes (PID/
+// profile-shaped params, or any change that only lowers/holds a threshold)
+// are unaffected -- the plan's requirement that "a package swap must not
+// have to unarm the Pico" still holds for everything except the narrow set
+// of changes this file's own safety docs already said must not happen
+// during a firing.
+//
+// Returns false and fills `*out_reason` (if non-NULL, same shape as
+// config_store_write()'s own contract) when refused by the ARMED-loosening
+// carve-out above; the caller (link_task_handle_apply_config_volatile())
+// reports this the same way it reports any other rejection, reusing the
+// existing KILNLINK_COMMIT_CONFIG_REJECT_ARMED wire reason -- no new wire
+// value, no protocol bump, since APPLY_CONFIG_VOLATILE's rejected reply
+// already carries that reason's slot, it was simply never reachable via
+// this path before now. Still cannot fail for any OTHER reason (no flash
+// I/O, no ARMED check outside the carve-out above) -- true, unconditional
+// success remains the only other outcome.
+bool config_store_write_volatile(const config_store_record_t *rec, const char **out_reason);
 
 // TEST-ONLY instrumentation (opus review 2026-09-09): counts how many times
 // config_store_seqlock_read() has fallen through to the writer-owned
