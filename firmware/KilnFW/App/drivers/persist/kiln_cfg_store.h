@@ -446,6 +446,27 @@ bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap);
 #define KILN_CFG_AUTOSAVE_OVERRIDE_NONE INT32_MIN
 void kiln_cfg_store_set_autosave_target_override(int32_t id_or_none_sentinel);
 
+/* 2026-09-15 review (review_autosave_rework_5bc9afb5_2026-09-15.md, MEDIUM):
+ * kiln_cfg_swap.c moves active_id to target_id right after content is
+ * proven live on both sides, BEFORE its own ceiling/arming divergence check
+ * runs (and, on that check's failure, active_id stays at target_id with the
+ * pending record left at ESP_DONE for boot recovery to retry). An ordinary
+ * autosave landing in that window recaptures the Pico's CURRENT (possibly
+ * still-old/reverted) live values into target_id's slot, which is exactly
+ * the value the divergence check is about to compare against as "expected"
+ * -- making them match and clearing the latch before boot recovery ever
+ * gets a real answer, so it later "matches", finalizes, and pushes the
+ * wrong config to Pico flash. Checking is_diverged()/is_standing_diverged()
+ * alone is not enough: this window can occur BEFORE either flag has even
+ * been recomputed for the current transaction, or a racing recapture can
+ * itself be what clears an already-latched flag. A pending swap record is
+ * true for the WHOLE transaction regardless of when divergence is computed,
+ * so kiln_cfg_store_autosave_from_live() also consults this seam (set by
+ * kiln_cfg_swap.c at bring-up, avoiding a circular #include between the two
+ * persist-layer modules) and suppresses autosave whenever it reports true,
+ * exactly like an active divergence latch. */
+void kiln_cfg_store_set_swap_pending_source(bool (*fn)(void));
+
 /* ---- Swap-transaction support (docs/KILN_PROFILES_PLAN.md item 5, the
  * two-processor apply transaction; implemented in kiln_cfg_swap.c, a
  * SEPARATE module from this one so the transaction's crash-recovery state

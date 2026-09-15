@@ -645,7 +645,7 @@ static void test_rollback_autosave_targets_previous_slot_not_target(void)
     s_import_writes_wrong_bytes = false;
 }
 
-static void test_diverged_ceiling_does_not_finalize(void)
+static void test_diverged_ceiling_moves_active_id_but_leaves_pending(void)
 {
     TEST_SECTION("post-swap ceiling/arming divergence -- both halves matched, but NOT finalized, alarmed");
     reset_state();
@@ -853,7 +853,7 @@ static void test_pico_reboot_before_flash_fallback_caught_by_existing_check(void
     bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
     TEST_CHECK(!ok, "swap does NOT report success once the post-install divergence check fails");
     TEST_CHECK(diverged, "out_diverged is set -- caller can distinguish this from an ordinary refusal");
-    // Same reordering as test_diverged_ceiling_does_not_finalize() above
+    // Same reordering as test_diverged_ceiling_moves_active_id_but_leaves_pending() above
     // (MEDIUM finding 3, adversarial review 2026-09-15): active_id moved to
     // target_id right after the ESP readback proved content match, which
     // happened before this reboot-triggered divergence was even detected.
@@ -899,7 +899,7 @@ int main(void)
     test_swap_during_firing_refused();
     test_esp_readback_mismatch_rolls_back();
     test_rollback_autosave_targets_previous_slot_not_target();
-    test_diverged_ceiling_does_not_finalize();
+    test_diverged_ceiling_moves_active_id_but_leaves_pending();
     test_generation_race_forces_rollback();
     test_swap_completes_with_pico_armed_never_disarmed();
     test_flash_fallback_attempted_after_finalize_but_optional();

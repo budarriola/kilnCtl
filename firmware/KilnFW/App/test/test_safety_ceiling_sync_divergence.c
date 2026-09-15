@@ -119,6 +119,18 @@ static float s_pico_ceiling_c = 0.0f;
 #define FAKE_EXTRA_PARAM_ID 0x0201u
 static bool s_pico_extra_set = false;
 static float s_pico_extra_c = 0.0f;
+// 2026-09-15 review (F6): the extra row's param_id/type used to be
+// hardcoded to FAKE_EXTRA_PARAM_ID/F32, which is why the first cut of
+// test_tc_type_revert_divergence_detected() below had to overwrite its
+// expectation's param_id to FAKE_EXTRA_PARAM_ID right before the assertion
+// to make the fake and the expectation agree on an id -- a test that
+// would pass identically even if tc_type were never captured at all.
+// Parametrizing these two lets a test drive the REAL tc_type id (0x0105,
+// U8) through safety_cfg_store_get_by_index() and have the production
+// comparator (safety_ceiling_sync.c's type-aware switch) actually decode
+// it as a U8, not merely echo an F32 under a borrowed id.
+static uint16_t s_pico_extra_param_id = FAKE_EXTRA_PARAM_ID;
+static uint8_t s_pico_extra_type = KILNLINK_PARAM_TYPE_F32;
 
 static void fake_pico_ceiling_reset(void)
 {
@@ -126,6 +138,8 @@ static void fake_pico_ceiling_reset(void)
     s_pico_ceiling_c = 0.0f;
     s_pico_extra_set = false;
     s_pico_extra_c = 0.0f;
+    s_pico_extra_param_id = FAKE_EXTRA_PARAM_ID;
+    s_pico_extra_type = KILNLINK_PARAM_TYPE_F32;
 }
 
 static void fake_pico_ceiling_set(float value)
@@ -134,8 +148,20 @@ static void fake_pico_ceiling_set(float value)
     s_pico_ceiling_c = value;
 }
 
+// Default-id/type extra-field setter, unchanged behaviour for the existing
+// test_broadened_field_divergence_detected() below.
 static void fake_pico_extra_set(float value)
 {
+    s_pico_extra_set = true;
+    s_pico_extra_c = value;
+}
+
+// Extra-field setter that also picks which param_id/type the fake reports
+// it under -- see the comment on s_pico_extra_param_id above.
+static void fake_pico_extra_set_ex(uint16_t param_id, uint8_t type, float value)
+{
+    s_pico_extra_param_id = param_id;
+    s_pico_extra_type = type;
     s_pico_extra_set = true;
     s_pico_extra_c = value;
 }
@@ -171,9 +197,20 @@ bool safety_cfg_store_get_by_index(size_t index, safety_cfg_param_t *out)
         if (index == i) {
             if (out) {
                 memset(out, 0, sizeof(*out));
-                out->param_id = FAKE_EXTRA_PARAM_ID;
-                out->type = KILNLINK_PARAM_TYPE_F32;
-                out->value.f32_val = s_pico_extra_c;
+                out->param_id = s_pico_extra_param_id;
+                out->type = s_pico_extra_type;
+                // s_pico_extra_c is always stored as a float regardless of
+                // the reported type -- for KILNLINK_PARAM_TYPE_U8 (tc_type's
+                // real wire type) it is decoded into u8_val the same way
+                // safety_cfg_store.c's real mirror table would report an
+                // actual byte value, so the production comparator's
+                // type-aware switch (safety_ceiling_sync.c) sees a real U8
+                // row, not an F32 row wearing tc_type's param_id.
+                if (s_pico_extra_type == KILNLINK_PARAM_TYPE_U8) {
+                    out->value.u8_val = (uint8_t)s_pico_extra_c;
+                } else {
+                    out->value.f32_val = s_pico_extra_c;
+                }
                 out->set = true;
             }
             return true;
@@ -443,7 +480,12 @@ static size_t fake_expected_pico_fields_source(safety_ceiling_expected_param_t *
 
 static void test_broadened_field_divergence_detected(void)
 {
-    TEST_SECTION("2026-09-15 fix: an extra (non-ceiling) field mismatch is detected and enforced");
+    TEST_SECTION("2026-09-15 fix, HIGH 2 interim (review_divergence_check_561efa3b_2026-09-15.md): "
+                 "an extra (non-ceiling) field mismatch is detected and reported as a WARNING, "
+                 "never as heat-off (kiln_cfg_store_apply() does not yet push/confirm this field "
+                 "set to the Pico, so treating it as heat-disabling would false-trip on an "
+                 "ordinary apply -- see safety_ceiling_sync.h's own doc comment on "
+                 "safety_ceiling_sync_is_standing_diverged())");
     test_reset_all();
     safety_ceiling_sync_set_disable_heat_hooks(fake_all_relays_off, fake_halt_run);
     safety_ceiling_sync_set_expected_pico_fields_source(fake_expected_pico_fields_source);
@@ -464,15 +506,17 @@ static void test_broadened_field_divergence_detected(void)
     safety_ceiling_sync_reconcile_on_link_up(FAKE_LINK);
 
     char reason[CONFIG_DIVERGENCE_REASON_MAX];
-    bool diverged = safety_ceiling_sync_is_diverged(reason, sizeof(reason));
-    TEST_CHECK(diverged, "a mismatch confined to a non-ceiling field is still reported as a divergence");
-    TEST_CHECK(s_relays_off_calls == 1, "all-relays-off hook fires on a non-ceiling-only divergence");
-    TEST_CHECK(s_halt_run_calls == 1, "halt-run hook fires on a non-ceiling-only divergence");
+    bool warned = safety_ceiling_sync_is_standing_diverged(reason, sizeof(reason));
+    TEST_CHECK(warned, "a mismatch confined to a non-ceiling field is reported as a standing warning");
+    TEST_CHECK(!safety_ceiling_sync_is_diverged(NULL, 0),
+               "a non-ceiling-only mismatch does NOT set the heat-disabling verdict (HIGH 2 interim)");
+    TEST_CHECK(s_relays_off_calls == 0, "all-relays-off hook does NOT fire on a non-ceiling-only divergence");
+    TEST_CHECK(s_halt_run_calls == 0, "halt-run hook does NOT fire on a non-ceiling-only divergence");
 
-    // Now the extra field also agrees -- the latch must clear.
+    // Now the extra field also agrees -- the warning must clear.
     fake_pico_extra_set(42.0f);
     safety_ceiling_sync_reconcile_on_link_up(FAKE_LINK);
-    TEST_CHECK(!safety_ceiling_sync_is_diverged(NULL, 0), "latch clears once the extra field also agrees");
+    TEST_CHECK(!safety_ceiling_sync_is_standing_diverged(NULL, 0), "warning clears once the extra field also agrees");
 
     // Cleanup: leave the seam installed but pointed at zero fields, so it
     // cannot leak a stale expectation into any test added after this one in
@@ -484,18 +528,25 @@ static void test_broadened_field_divergence_detected(void)
 // Safety-processor tc_type made settable (2026-09-15). Same generic
 // enforce_ceiling_divergence() extra-field path test_broadened_field_
 // divergence_detected() above already exercises with an arbitrary param id
-// -- this test uses the REAL tc_type param id (0x0105, safety_cfg_store.c's
-// CONFIG_PARAM_TABLE row) and names the concrete hazard directly: a Pico
-// that silently reverts to a different tc_type than the ESP's saved kiln
-// config expects (e.g. its own flash-fallback persist landed a stale value,
-// or a reboot raced a live SET_CONFIG before it was durably committed) must
-// not go unnoticed just because abs_max_temp_c still agrees. No new
-// production code is exercised here beyond what the extra-field test
-// already covers -- kiln_cfg_store_capture_expected_pico_fields() widens
-// ANY KILN_PKG_PARAM_FLAG_SET param generically (see its own comment), so
-// tc_type needs no special case there or in safety_ceiling_sync.c; this
-// test exists to make that generic coverage concrete and named, not to add
-// a new code path.
+// -- this test uses the REAL tc_type param id (0x0105, U8,
+// safety_cfg_store.c's CONFIG_PARAM_TABLE row) THROUGH THE ASSERTION and
+// names the concrete hazard directly: a Pico that silently reverts to a
+// different tc_type than the ESP's saved kiln config expects (e.g. its own
+// flash-fallback persist landed a stale value, or a reboot raced a live
+// SET_CONFIG before it was durably committed) must not go unnoticed just
+// because abs_max_temp_c still agrees.
+//
+// 2026-09-15 review (F6): the first cut of this test built its fake row
+// under FAKE_EXTRA_PARAM_ID (0x0201, F32) and then overwrote its own
+// expectation's param_id to match right before the assertion -- so it ran
+// through the exact same code path, with the exact same ids, as
+// test_broadened_field_divergence_detected() above, and would have passed
+// identically even if tc_type (0x0105) were never captured into the
+// record at all. fake_pico_extra_set_ex() (added for this fix) lets this
+// test report its fake row under the REAL 0x0105/U8 pair, so the
+// production comparator's type-aware switch actually decodes a U8 row
+// under tc_type's own id -- this test now fails if 0x0105 is ever excluded
+// or mis-typed, which is the coverage the review asked for.
 #define TC_TYPE_PARAM_ID 0x0105u
 static void test_tc_type_revert_divergence_detected(void)
 {
@@ -514,30 +565,33 @@ static void test_tc_type_revert_divergence_detected(void)
     // CR1 byte can otherwise leave silently unnoticed downstream of
     // max31856_tc_type_verified() (that flag only catches a failed CR1
     // *write*, not a config the Pico never received in the first place).
+    // Both sides now agree on the SAME id (0x0105) and the SAME type (U8).
     s_expected_fields[0].param_id = TC_TYPE_PARAM_ID;
     s_expected_fields[0].value = 3.0f; // MAX31856 type K
     s_expected_field_count = 1;
-    fake_pico_extra_set(0.0f); // MAX31856 type B -- fake_pico_extra_set() reuses FAKE_EXTRA_PARAM_ID's slot, param_id is compared by the production code, not by which fake setter wrote it
-    // fake_pico_extra_set() always tags its row with FAKE_EXTRA_PARAM_ID;
-    // point this test's expectation at that same id so the mismatch is
-    // observed on the field this fake can actually report, while the
-    // *value* semantics (K vs B) are what the comment above documents --
-    // the production comparator only ever looks at param_id/value, never
-    // at which literal test fake produced the row.
-    s_expected_fields[0].param_id = FAKE_EXTRA_PARAM_ID;
+    fake_pico_extra_set_ex(TC_TYPE_PARAM_ID, KILNLINK_PARAM_TYPE_U8, 0.0f); // MAX31856 type B
 
     safety_ceiling_sync_reconcile_on_link_up(FAKE_LINK);
 
+    // 2026-09-15 review HIGH 2 interim (review_divergence_check_561efa3b_
+    // 2026-09-15.md, landed after this test): tc_type is one of the ~60
+    // broadened (non-ceiling) fields, and kiln_cfg_store_apply() does not
+    // yet push/confirm that field set to the Pico -- so, same as every
+    // other non-ceiling field, a mismatch here is reported as a WARNING,
+    // never as heat-off, until a confirmed push path exists. Still fully
+    // detected and named -- nothing about this scenario goes unnoticed.
     char reason[CONFIG_DIVERGENCE_REASON_MAX];
-    bool diverged = safety_ceiling_sync_is_diverged(reason, sizeof(reason));
-    TEST_CHECK(diverged, "a Pico tc_type that reverted away from the saved kiln config's expected value is reported as a divergence");
-    TEST_CHECK(s_relays_off_calls == 1, "all-relays-off hook fires on a reverted tc_type");
-    TEST_CHECK(s_halt_run_calls == 1, "halt-run hook fires on a reverted tc_type");
+    bool warned = safety_ceiling_sync_is_standing_diverged(reason, sizeof(reason));
+    TEST_CHECK(warned, "a Pico tc_type that reverted away from the saved kiln config's expected value is reported as a standing warning");
+    TEST_CHECK(!safety_ceiling_sync_is_diverged(NULL, 0),
+               "a reverted tc_type alone does NOT set the heat-disabling verdict (HIGH 2 interim)");
+    TEST_CHECK(s_relays_off_calls == 0, "all-relays-off hook does NOT fire on a reverted tc_type alone");
+    TEST_CHECK(s_halt_run_calls == 0, "halt-run hook does NOT fire on a reverted tc_type alone");
 
-    // Once the Pico is reconfigured back to the expected type, the latch clears.
-    fake_pico_extra_set(3.0f); // MAX31856 type K -- now matches
+    // Once the Pico is reconfigured back to the expected type, the warning clears.
+    fake_pico_extra_set_ex(TC_TYPE_PARAM_ID, KILNLINK_PARAM_TYPE_U8, 3.0f); // MAX31856 type K -- now matches
     safety_ceiling_sync_reconcile_on_link_up(FAKE_LINK);
-    TEST_CHECK(!safety_ceiling_sync_is_diverged(NULL, 0), "latch clears once the Pico's tc_type matches the saved kiln config again");
+    TEST_CHECK(!safety_ceiling_sync_is_standing_diverged(NULL, 0), "warning clears once the Pico's tc_type matches the saved kiln config again");
 
     s_expected_field_count = 0;
 }

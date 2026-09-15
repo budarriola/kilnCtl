@@ -175,6 +175,18 @@ kiln_cfg_swap_marker_t kiln_cfg_swap_get_marker(int32_t *out_target_id, int32_t 
     return (kiln_cfg_swap_marker_t)p.marker;
 }
 
+/* 2026-09-15 review (review_autosave_rework_5bc9afb5_2026-09-15.md, MEDIUM):
+ * registered with kiln_cfg_store.c via kiln_cfg_store_set_swap_pending_
+ * source() so kiln_cfg_store_autosave_from_live() can suppress a recapture
+ * for the WHOLE duration of a transaction, not only once its own divergence
+ * check has actually run -- see that seam's doc comment (kiln_cfg_store.h)
+ * for the exact race. Plain wrapper over the same marker this file's own
+ * boot-recovery and status-reporting callers already read. */
+bool kiln_cfg_swap_is_pending(void)
+{
+    return kiln_cfg_swap_get_marker(NULL, NULL) != KILN_CFG_SWAP_MARKER_NONE;
+}
+
 /* ---- field-by-field Pico readback compare (section 4.2 step 7 / 3.1's
  * "field-by-field, not hash-only" rule, P7) --------------------------------
  *

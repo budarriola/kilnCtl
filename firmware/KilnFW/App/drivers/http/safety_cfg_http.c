@@ -16,6 +16,8 @@
 #include "freertos/task.h" // vTaskDelay/pdMS_TO_TICKS -- ct_auto_zero_post_handler()'s poll loop
 
 #include "http_form.h"
+#include "kiln_cfg_store.h" /* kiln_cfg_store_autosave_from_live() -- 2026-09-15 review HIGH 3,
+                              * commissioning_post_handler()'s own comment below */
 #include "kiln_package.h" /* kiln_pkg_safety_t -- safety_cfg_http_apply_package_and_confirm(), item 5 */
 #include "kilnlink/kilnlink_commit_config_rejected.h"
 #include "safety_ceiling_sync.h" /* SAFETY_PARAM_ID_ABS_MAX_TEMP_C -- apply_package_and_confirm()'s
@@ -1259,6 +1261,25 @@ static esp_err_t commissioning_post_handler(httpd_req_t *req)
                 break;
             }
         }
+
+        /* 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md,
+         * HIGH 3): a committed-and-CONFIRMED (apply_pairs() above already ran
+         * confirm_commit_landed()'s readback) Pico safety param write never
+         * touched the active kiln-config slot's captured Pico half, so the
+         * slot went stale relative to a legitimate live change -- the
+         * standing divergence check (safety_ceiling_sync.c) would then
+         * compare the slot's now-stale "expected" value against the Pico's
+         * new (correct) live value and report a divergence for a perfectly
+         * ordinary commissioning write. Re-snapshot the live Pico cache into
+         * the active slot right after a confirmed commit, exactly as any
+         * other live-config change would via kiln_cfg_store_autosave_from_
+         * live() -- itself now suppressed (HIGH 1 fix) if some OTHER, real
+         * divergence is latched, so this can never launder an unrelated
+         * disagreement. Best-effort: a failure here is logged by that
+         * function's own callers elsewhere and must not fail this HTTP
+         * response -- the Pico write itself already landed and confirmed. */
+        char autosave_reason[128];
+        (void)kiln_cfg_store_autosave_from_live(autosave_reason, sizeof(autosave_reason));
     }
 
     char resp[256];

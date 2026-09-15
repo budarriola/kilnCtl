@@ -573,6 +573,18 @@ void profile_executor_get_status(profile_exec_status_t *out)
 {
     if (out) memset(out, 0, sizeof(*out));
 }
+/* 2026-09-15 review HIGH 3 fix: safety_cfg_http.c's commissioning_post_
+ * handler() now calls this after a confirmed commit to keep the active
+ * kiln-config slot's captured Pico half in sync. This file never links the
+ * real kiln_cfg_store.c (that pulls in NVS/cfg-filesystem machinery this
+ * executable has no fakes for), so a no-op stub satisfies the link; no test
+ * here exercises the interaction between the two files, which lives in
+ * kiln_cfg_store.c's own test executable instead. */
+bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap)
+{
+    if (reason_out && reason_cap > 0) reason_out[0] = '\0';
+    return true;
+}
 
 esp_err_t safety_link_get_peer_build_status(SafetyLinkClass *link, bool *out_known, bool *out_dirty,
                                              uint8_t *commit_buf, uint8_t *out_commit_len,

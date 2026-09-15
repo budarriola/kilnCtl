@@ -208,6 +208,14 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
  * that only want "is a swap in flight". */
 kiln_cfg_swap_marker_t kiln_cfg_swap_get_marker(int32_t *out_target_id, int32_t *out_previous_active_id);
 
+/* true iff a swap transaction has a pending record (marker != NONE) --
+ * a plain wrapper over kiln_cfg_swap_get_marker(), meant to be registered
+ * with kiln_cfg_store_set_swap_pending_source() (kiln_cfg_store.h) at
+ * bring-up, matching the existing kiln_cfg_store_capture_expected_pico_
+ * fields()/safety_ceiling_sync_set_expected_pico_fields_source() wiring
+ * pattern in main_control_bringup.c. */
+bool kiln_cfg_swap_is_pending(void);
+
 #ifdef __cplusplus
 }
 #endif

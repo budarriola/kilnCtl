@@ -80,9 +80,10 @@ bool safety_ceiling_sync_get_current_pico_ceiling(float *out_value);
  * here, not the Pico.
  *
  * Call this on every safety_poll_task() tick while the link is up (same
- * call site and same level-triggered discipline as safety_sync_tc_type()
- * in safety_link_poll.c -- see the comment at its call site for why this
- * is level-triggered rather than gated on the down->up edge alone: a
+ * call site and same level-triggered discipline the removed
+ * safety_sync_tc_type() used to follow in safety_link_poll.c -- see the
+ * comment there for why this is level-triggered rather than gated on the
+ * down->up edge alone: a
  * down_logged-gated call would miss the very first tick after boot, when
  * the link can come up before ever having been observed down). It reads
  * the live zones_cfg_t, builds the same per-zone max_temp_c array
@@ -93,8 +94,9 @@ bool safety_ceiling_sync_get_current_pico_ceiling(float *out_value);
  * write, logged either way. Never blocks heat or fails the boot: a failed
  * reconcile here is logged and left for the next tick or the next
  * interactive zones POST to retry, same "never silently drop it, keep
- * retrying" convention as safety_sync_tc_type(). Requires zones_config_
- * is_valid() internally, same gate as that function, for the same reason
+ * retrying" convention the removed safety_sync_tc_type() used to follow.
+ * Requires zones_config_is_valid() internally, same gate that function
+ * used, for the same reason
  * (no fabricated ceiling from a zeroed default config). */
 void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link);
 
@@ -180,6 +182,17 @@ void safety_ceiling_sync_set_expected_pico_fields_source(safety_ceiling_expected
  * readiness_gate.c can surface the SAME live verdict this file is already
  * acting on, rather than recomputing it from scratch a second way. */
 bool safety_ceiling_sync_is_diverged(char *reason_out, size_t reason_cap);
+
+/* 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md, HIGH 2):
+ * interim scope choice, stated explicitly -- heat-off enforcement above stays
+ * scoped to abs_max_temp_c only (kiln_cfg_store_apply() does not yet push the
+ * broadened ~60-field Pico record, so treating a mismatch there as
+ * heat-disabling would false-trip on every ordinary apply). A mismatch
+ * confined to that broadened field set is still detected every tick and
+ * reported here as a WARNING -- true iff currently reporting one -- never as
+ * a reason to disable heat. `reason_out` (may be NULL) receives the same
+ * operator-facing message the WARN log carries. */
+bool safety_ceiling_sync_is_standing_diverged(char *reason_out, size_t reason_cap);
 
 #ifdef __cplusplus
 }

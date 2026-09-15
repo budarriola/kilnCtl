@@ -47,6 +47,30 @@ static int64_t s_divergence_last_log_us = -CONFIG_DIVERGENCE_LOG_INTERVAL_US;
 static bool s_divergence_active = false;
 static char s_divergence_reason[CONFIG_DIVERGENCE_REASON_MAX] = { 0 };
 
+/* 2026-09-15 review (docs/audits/review_divergence_check_561efa3b_2026-09-15.md,
+ * HIGH 2): kiln_cfg_store_apply() imports only the ESP half and switches the
+ * active slot without ever pushing the Pico half over kilnlink -- there is no
+ * production path today that confirms a push of the ~60 broadened fields the
+ * way the dedicated abs_max_temp_c field is confirmed by pico_ceiling_writer()
+ * above (stage+commit+readback). Until that push path exists (0x2D/
+ * APPLY_CONFIG_VOLATILE has no success ACK; kiln_cfg_swap_apply() does confirm
+ * by readback but is not yet the caller of an ordinary apply), enforcing
+ * heat-off on a mismatch in those broadened fields would trip on every
+ * ordinary apply whose captured Pico half merely predates the live Pico
+ * value -- a false positive, not a real divergence. Interim scope, explicitly
+ * chosen over the "push properly" alternative because that push is a
+ * substantially larger change: heat-off enforcement (this flag,
+ * s_divergence_active/`safety_ceiling_sync_is_diverged()`) stays SCOPED TO
+ * abs_max_temp_c ONLY, exactly as before the broadened check landed. A
+ * mismatch confined to the broadened (non-ceiling) field set is still
+ * detected and reported -- see s_standing_warning_active below -- as a
+ * WARNING, never as a heat-disabling condition. This narrowing never disarms
+ * the Pico and never changes the abs_max_temp_c-must-match rule; it only
+ * changes which mismatch is severe enough to force heat off. */
+static bool s_standing_warning_active = false;
+static char s_standing_warning_reason[CONFIG_DIVERGENCE_REASON_MAX] = { 0 };
+static int64_t s_standing_warning_last_log_us = -CONFIG_DIVERGENCE_LOG_INTERVAL_US;
+
 static safety_ceiling_disable_heat_fn s_disable_all_relays_off = NULL;
 static safety_ceiling_disable_heat_fn s_disable_halt_run = NULL;
 
@@ -74,6 +98,23 @@ bool safety_ceiling_sync_is_diverged(char *reason_out, size_t reason_cap)
         snprintf(reason_out, reason_cap, "%s", s_divergence_reason);
     }
     return s_divergence_active;
+}
+
+/* 2026-09-15 review HIGH 2 interim (see s_standing_warning_active's own doc
+ * comment above): true iff the broadened (non-ceiling) field set currently
+ * disagrees, even though abs_max_temp_c itself still matches and heat is NOT
+ * being forced off for this reason. Exposed so a caller that wants the fuller
+ * picture (kiln_cfg_store.c's autosave gate, per plan sec 2.4 rule 6 --
+ * autosave must not launder ANY known disagreement into a "consistent" saved
+ * state, not only a heat-disabling one) can see this without the readiness/
+ * enforcement callers above (which intentionally only ever asked about the
+ * heat-disabling ceiling verdict) having their contract changed under them. */
+bool safety_ceiling_sync_is_standing_diverged(char *reason_out, size_t reason_cap)
+{
+    if (reason_out && reason_cap > 0) {
+        snprintf(reason_out, reason_cap, "%s", s_standing_warning_reason);
+    }
+    return s_standing_warning_active;
 }
 
 /* The writer callback safety_ceiling_policy.c calls. `ctx` is the
@@ -218,6 +259,8 @@ static void enforce_ceiling_divergence(float target_c, bool target_known, float 
          * against. */
         s_divergence_active = false;
         s_divergence_reason[0] = '\0';
+        s_standing_warning_active = false;
+        s_standing_warning_reason[0] = '\0';
         return;
     }
     /* abs_max_temp_c is field 0, always present -- see config_divergence.h's
@@ -329,35 +372,68 @@ static void enforce_ceiling_divergence(float target_c, bool target_known, float 
         n++;
     }
 
-    char reason[CONFIG_DIVERGENCE_REASON_MAX];
-    bool diverged = config_divergence_check(esp_fields, pico_fields, n, reason, sizeof(reason));
-    if (!diverged) {
+    /* HIGH 2 interim (see s_standing_warning_active's doc comment): heat-off
+     * enforcement is decided from the CEILING FIELD ALONE (esp_fields[0]/
+     * pico_fields[0], n==1) -- exactly the pre-broadening comparison -- never
+     * from the full n-field set. The full set still feeds the broadened
+     * WARNING below. */
+    char ceiling_reason[CONFIG_DIVERGENCE_REASON_MAX];
+    bool ceiling_diverged = config_divergence_check(esp_fields, pico_fields, 1, ceiling_reason, sizeof(ceiling_reason));
+    int64_t now_us = (int64_t)hal_time_now_us();
+
+    if (!ceiling_diverged) {
         s_divergence_active = false;
         s_divergence_reason[0] = '\0';
-        return;
+    } else {
+        /* See safety_ceiling_sync.h's own doc comment on safety_ceiling_sync_
+         * set_disable_heat_hooks() for why these are injected function
+         * pointers rather than direct kiln_io_owner.h/profile_executor.h
+         * calls: this file is compiled into more than one host test executable
+         * with different fake ecosystems, and NULL (the default, e.g. every
+         * host test that never calls the setter) is the correct, safe no-op --
+         * a test binary has no real relays to turn off. */
+        if (s_disable_all_relays_off) {
+            s_disable_all_relays_off();
+        }
+        if (s_disable_halt_run) {
+            s_disable_halt_run();
+        }
+
+        snprintf(s_divergence_reason, sizeof(s_divergence_reason), "%s", ceiling_reason);
+        if (!s_divergence_active || (now_us - s_divergence_last_log_us >= CONFIG_DIVERGENCE_LOG_INTERVAL_US)) {
+            ESP_LOGE(TAG, "ALARM: %s -- heaters disabled (all relays forced off, any run halted)", ceiling_reason);
+            s_divergence_last_log_us = now_us;
+        }
+        s_divergence_active = true;
     }
 
-    /* See safety_ceiling_sync.h's own doc comment on safety_ceiling_sync_
-     * set_disable_heat_hooks() for why these are injected function
-     * pointers rather than direct kiln_io_owner.h/profile_executor.h
-     * calls: this file is compiled into more than one host test executable
-     * with different fake ecosystems, and NULL (the default, e.g. every
-     * host test that never calls the setter) is the correct, safe no-op --
-     * a test binary has no real relays to turn off. */
-    if (s_disable_all_relays_off) {
-        s_disable_all_relays_off();
+    /* Broadened (non-ceiling) fields, fields[1..n): run the SAME comparator
+     * over the whole set (including the ceiling field -- config_divergence.h's
+     * hash covers the array it is given, and re-including field 0 costs
+     * nothing and keeps this a single, easily-audited call shape identical to
+     * the ceiling-only one above) purely to decide whether anything beyond
+     * the ceiling disagrees. A mismatch here is reported as a WARNING only --
+     * see this function's own top-of-file doc comment on why heat-off is not
+     * yet wired to it (HIGH 2 interim, no confirmed push path for these
+     * fields exists in production today). */
+    char standing_reason[CONFIG_DIVERGENCE_REASON_MAX];
+    bool standing_diverged = config_divergence_check(esp_fields, pico_fields, n, standing_reason, sizeof(standing_reason));
+    bool non_ceiling_diverged = standing_diverged && !ceiling_diverged;
+    if (!non_ceiling_diverged) {
+        s_standing_warning_active = false;
+        s_standing_warning_reason[0] = '\0';
+    } else {
+        snprintf(s_standing_warning_reason, sizeof(s_standing_warning_reason), "%s", standing_reason);
+        if (!s_standing_warning_active ||
+            (now_us - s_standing_warning_last_log_us >= CONFIG_DIVERGENCE_LOG_INTERVAL_US)) {
+            ESP_LOGW(TAG,
+                     "standing config divergence (non-ceiling): %s -- heat NOT disabled for this "
+                     "(HIGH 2 interim; see safety_ceiling_sync.h)",
+                     standing_reason);
+            s_standing_warning_last_log_us = now_us;
+        }
+        s_standing_warning_active = true;
     }
-    if (s_disable_halt_run) {
-        s_disable_halt_run();
-    }
-
-    snprintf(s_divergence_reason, sizeof(s_divergence_reason), "%s", reason);
-    int64_t now_us = (int64_t)hal_time_now_us();
-    if (!s_divergence_active || (now_us - s_divergence_last_log_us >= CONFIG_DIVERGENCE_LOG_INTERVAL_US)) {
-        ESP_LOGE(TAG, "ALARM: %s -- heaters disabled (all relays forced off, any run halted)", reason);
-        s_divergence_last_log_us = now_us;
-    }
-    s_divergence_active = true;
 }
 
 void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link)
@@ -366,7 +442,7 @@ void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link)
         return; /* nothing to reconcile against */
     }
     if (!zones_config_is_valid()) {
-        return; /* same gate safety_sync_tc_type() uses -- no real config to derive a target from yet */
+        return; /* same gate the removed safety_sync_tc_type() used -- no real config to derive a target from yet */
     }
 
     /* 2026-09-10 opus review finding: the comment this replaces claimed

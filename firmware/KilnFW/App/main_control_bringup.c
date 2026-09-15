@@ -21,6 +21,8 @@
 #include "kiln_cfg_store.h" /* kiln_cfg_store_capture_expected_pico_fields() -- safety_ceiling_sync's
                               * standing divergence-check seam, docs/audits/kiln_profiles_feature_review_
                               * 2026-09-15.md Defect 2 */
+#include "kiln_cfg_swap.h" /* kiln_cfg_swap_is_pending() -- kiln_cfg_store_autosave_from_live()'s
+                             * swap-pending seam, review_autosave_rework_5bc9afb5_2026-09-15.md MEDIUM */
 #include "kiln_io_owner.h"
 #include "profile_executor.h"
 #include "autotune_engine.h"
@@ -145,6 +147,10 @@ void main_control_bringup(main_boot_ctx_t *ctx)
      * captured Pico record -- see safety_ceiling_sync.h's doc comment on
      * this seam. */
     safety_ceiling_sync_set_expected_pico_fields_source(kiln_cfg_store_capture_expected_pico_fields);
+
+    /* review_autosave_rework_5bc9afb5_2026-09-15.md MEDIUM: see kiln_cfg_
+     * store_set_swap_pending_source()'s doc comment (kiln_cfg_store.h). */
+    kiln_cfg_store_set_swap_pending_source(kiln_cfg_swap_is_pending);
 
     // kiln_io_owner (TODO.md 10.14 Phase 1): the single task that writes
     // relay/expander state from here on -- must start before anything that

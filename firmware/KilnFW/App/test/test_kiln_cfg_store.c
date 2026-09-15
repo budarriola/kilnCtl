@@ -215,6 +215,43 @@ bool zones_config_json_validate(const zones_cfg_t *cand, const char **err_reason
 }
 
 // ---------------------------------------------------------------------------
+// safety_ceiling_sync.h stub -- 2026-09-15 review (review_divergence_check_
+// 561efa3b_2026-09-15.md, HIGH 1): kiln_cfg_store_autosave_from_live() now
+// gates on divergence (plan sec 2.4 rule 6). This executable does not link
+// the real safety_ceiling_sync.c, so both predicates need a body here.
+// Off by default, matching this file's other fakes -- tests that need
+// autosave suppressed under divergence flip these flags explicitly.
+// ---------------------------------------------------------------------------
+static bool s_stub_ceiling_diverged = false;
+static bool s_stub_standing_diverged = false;
+
+bool safety_ceiling_sync_is_diverged(char *reason_out, size_t reason_cap)
+{
+    if (reason_out && reason_cap > 0) {
+        reason_out[0] = '\0';
+    }
+    return s_stub_ceiling_diverged;
+}
+
+bool safety_ceiling_sync_is_standing_diverged(char *reason_out, size_t reason_cap)
+{
+    if (reason_out && reason_cap > 0) {
+        reason_out[0] = '\0';
+    }
+    return s_stub_standing_diverged;
+}
+
+// review_autosave_rework_5bc9afb5_2026-09-15.md MEDIUM: a real kiln_cfg_swap_
+// is_pending() predicate for tests to register via kiln_cfg_store_set_swap_
+// pending_source(), to prove the gate does not key on the divergence latch
+// alone.
+static bool s_stub_swap_pending = false;
+static bool stub_swap_is_pending(void)
+{
+    return s_stub_swap_pending;
+}
+
+// ---------------------------------------------------------------------------
 // ota_http.h stub -- only ota_http_check_interlocks() is ever called from
 // kiln_cfg_store.c. The function BODY lives in test_backup_import.c (also
 // linked into this executable) -- exactly one definition may exist
@@ -2140,6 +2177,102 @@ static void test_autosave_from_live_updates_active_slot_and_hash(void)
     TEST_CHECK(hash_after != hash_before, "pkg_hash was recomputed over the new content");
 }
 
+static void test_autosave_from_live_suppressed_while_diverged(void)
+{
+    TEST_SECTION("kiln_cfg_store_autosave_from_live -- HIGH 1 fix (review_divergence_check_561efa3b_"
+                 "2026-09-15.md): suppressed while CONFIG_DIVERGENCE is latched, ceiling-off or "
+                 "standing-warning, per plan sec 2.4 rule 6 -- must not launder a known ESP/Pico "
+                 "disagreement into a 'consistent' saved state");
+    reset_state();
+    int32_t id1 = -1;
+    char reason[96] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Live Kiln", -1, &id1, reason, sizeof(reason)), "save succeeds");
+    uint32_t hash_before = 0;
+    kiln_cfg_store_get_package_identity(id1, NULL, NULL, &hash_before);
+
+    for (size_t i = 0; i < sizeof(s_stub_export_content); i++) {
+        s_stub_export_content[i] = (uint8_t)(i + 100);
+    }
+
+    // Ceiling-off divergence latched: autosave must report success (skip,
+    // not failure) but must NOT touch the slot.
+    s_stub_ceiling_diverged = true;
+    s_stub_standing_diverged = false;
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_autosave_from_live(reason, sizeof(reason)),
+               "reports success (a suppressed autosave is not an error)");
+    uint32_t hash_after_ceiling = 0;
+    kiln_cfg_store_get_package_identity(id1, NULL, NULL, &hash_after_ceiling);
+    TEST_CHECK(hash_after_ceiling == hash_before,
+               "slot was NOT overwritten while ceiling divergence is latched");
+    TEST_CHECK(reason[0] != '\0', "reason explains the suppression");
+
+    // Standing (non-ceiling) warning alone must ALSO suppress -- the plan's
+    // rule 6 covers any known disagreement, not only the heat-disabling one.
+    s_stub_ceiling_diverged = false;
+    s_stub_standing_diverged = true;
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_autosave_from_live(reason, sizeof(reason)), "reports success while standing-diverged");
+    uint32_t hash_after_standing = 0;
+    kiln_cfg_store_get_package_identity(id1, NULL, NULL, &hash_after_standing);
+    TEST_CHECK(hash_after_standing == hash_before,
+               "slot was NOT overwritten while a standing (non-ceiling) divergence warning is active");
+
+    // Once both clear, autosave proceeds normally.
+    s_stub_ceiling_diverged = false;
+    s_stub_standing_diverged = false;
+    TEST_CHECK(kiln_cfg_store_autosave_from_live(reason, sizeof(reason)), "autosave succeeds once agreement resumes");
+    uint32_t hash_after_clear = 0;
+    kiln_cfg_store_get_package_identity(id1, NULL, NULL, &hash_after_clear);
+    TEST_CHECK(hash_after_clear != hash_before, "slot IS updated once no divergence is latched");
+
+    s_stub_ceiling_diverged = false;
+    s_stub_standing_diverged = false;
+}
+
+static void test_autosave_from_live_suppressed_while_swap_pending(void)
+{
+    TEST_SECTION("kiln_cfg_store_autosave_from_live -- MEDIUM fix (review_autosave_rework_5bc9afb5_"
+                 "2026-09-15.md): suppressed while a kiln_cfg_swap.c transaction has a pending record, "
+                 "even with BOTH divergence flags reading false -- the latch alone is not enough because "
+                 "the swap moves active_id to the target kiln before its own divergence check runs, and a "
+                 "racing recapture is what would clear that latch");
+    reset_state();
+    int32_t id1 = -1;
+    char reason[96] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Live Kiln", -1, &id1, reason, sizeof(reason)), "save succeeds");
+    uint32_t hash_before = 0;
+    kiln_cfg_store_get_package_identity(id1, NULL, NULL, &hash_before);
+
+    for (size_t i = 0; i < sizeof(s_stub_export_content); i++) {
+        s_stub_export_content[i] = (uint8_t)(i + 100);
+    }
+
+    kiln_cfg_store_set_swap_pending_source(stub_swap_is_pending);
+    s_stub_swap_pending = true;
+    s_stub_ceiling_diverged = false;
+    s_stub_standing_diverged = false;
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_autosave_from_live(reason, sizeof(reason)),
+               "reports success (a suppressed autosave is not an error) while a swap is pending");
+    uint32_t hash_after_pending = 0;
+    kiln_cfg_store_get_package_identity(id1, NULL, NULL, &hash_after_pending);
+    TEST_CHECK(hash_after_pending == hash_before, "slot was NOT overwritten while a swap record is pending, "
+                                                   "even though neither divergence flag is set");
+    TEST_CHECK(reason[0] != '\0', "reason explains the suppression");
+
+    s_stub_swap_pending = false;
+    TEST_CHECK(kiln_cfg_store_autosave_from_live(reason, sizeof(reason)),
+               "autosave succeeds once the pending swap record clears");
+    uint32_t hash_after_clear = 0;
+    kiln_cfg_store_get_package_identity(id1, NULL, NULL, &hash_after_clear);
+    TEST_CHECK(hash_after_clear != hash_before, "slot IS updated once no swap is pending and no divergence "
+                                                 "is latched");
+
+    kiln_cfg_store_set_swap_pending_source(NULL);
+    s_stub_swap_pending = false;
+}
+
 static void test_apply_autosave_targets_incoming_slot_via_real_override(void)
 {
     TEST_SECTION("kiln_cfg_store_apply -- REAL kiln_cfg_store_set_autosave_target_override()/"
@@ -2262,6 +2395,8 @@ void run_test_kiln_cfg_store(void)
     test_import_accepts_abs_max_temp_c_at_or_above_zone_max();
     test_autosave_from_live_noop_with_no_active_config();
     test_autosave_from_live_updates_active_slot_and_hash();
+    test_autosave_from_live_suppressed_while_diverged();
+    test_autosave_from_live_suppressed_while_swap_pending();
     test_apply_autosave_targets_incoming_slot_via_real_override();
 
     cfg_fs_deinit();

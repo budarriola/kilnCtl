@@ -23,6 +23,7 @@
                                  * deliberately type-erased export/import pair. */
 #include "zones_config_query.h" /* zones_config_get_thermo_count() -- upload compatibility check
                                   * (docs/KILN_PROFILES_PLAN.md item 14), section 5.2a. */
+#include "config_divergence.h" /* CONFIG_DIVERGENCE_REASON_MAX -- HIGH 1 autosave-suppression check */
 #include "safety_ceiling_sync.h" /* safety_ceiling_expected_param_t (full definition) + SAFETY_PARAM_ID_ABS_MAX_TEMP_C
                                    * -- kiln_cfg_store_capture_expected_pico_fields(), 2026-09-15 audit fix */
 #include "safety_cfg_store.h" /* safety_cfg_store_lookup() -- upload's "unknown Pico param id"
@@ -1893,8 +1894,69 @@ void kiln_cfg_store_set_autosave_target_override(int32_t id_or_none_sentinel)
     s_autosave_target_override = id_or_none_sentinel;
 }
 
+/* 2026-09-15 review (review_autosave_rework_5bc9afb5_2026-09-15.md, MEDIUM)
+ * -- see this function's own doc comment in kiln_cfg_store.h. Registered by
+ * kiln_cfg_swap.c at bring-up; NULL (never registered, or a host test that
+ * doesn't need it) reads as "no swap pending", matching every other
+ * off-by-default seam in this file. */
+static bool (*s_swap_pending_fn)(void) = NULL;
+
+void kiln_cfg_store_set_swap_pending_source(bool (*fn)(void))
+{
+    s_swap_pending_fn = fn;
+}
+
+static bool autosave_blocked_by_swap_pending(void)
+{
+    return s_swap_pending_fn ? s_swap_pending_fn() : false;
+}
+
 bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap)
 {
+    /* 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md,
+     * HIGH 1 / docs/KILN_PROFILES_PLAN.md sec 2.4 rule 6): "Suppressed while
+     * CONFIG_DIVERGENCE is latched. Writing a package hash while the two
+     * processors are known to disagree would launder the divergence into a
+     * 'consistent' saved state." Before this check, an ordinary zones/
+     * autotune/coupling autosave after a Pico reboot-revert would re-snapshot
+     * the Pico's OWN (reverted) live cache back into the active slot via
+     * populate_pico_half_and_hash() -> kiln_package_capture_pico_half(),
+     * silently making the slot's "expected" record agree with the reverted
+     * value and clearing the standing-divergence alarm on the very next save
+     * -- the "reset one side of a pair" bug class. Checked against BOTH the
+     * ceiling-enforcing verdict and the broadened (HIGH 2 interim,
+     * warning-only) verdict: a known disagreement in either is a real
+     * disagreement between the two processors' configs and must not be
+     * laundered by this function, regardless of which one currently forces
+     * heat off. This is a skip, not a failure -- the dirty flag this function
+     * was called to flush simply persists until the next opportunity, same
+     * as rule 5's apply-transaction/firing-tick suppression already does.
+     *
+     * 2026-09-15 review (review_autosave_rework_5bc9afb5_2026-09-15.md,
+     * MEDIUM): also suppressed while a kiln_cfg_swap.c transaction has a
+     * pending record (marker != NONE), NOT only while the latch already
+     * reads diverged -- see kiln_cfg_store_set_swap_pending_source()'s doc
+     * comment (kiln_cfg_store.h) for the exact race this closes: the swap
+     * moves active_id to target_id before its own divergence check runs,
+     * and a recapture racing into that same window is what would clear the
+     * latch, so the latch alone cannot be trusted to have caught it yet. */
+    char div_reason[CONFIG_DIVERGENCE_REASON_MAX];
+    bool ceiling_diverged = safety_ceiling_sync_is_diverged(div_reason, sizeof(div_reason));
+    bool standing_diverged = !ceiling_diverged && safety_ceiling_sync_is_standing_diverged(div_reason, sizeof(div_reason));
+    if (ceiling_diverged || standing_diverged) {
+        if (reason_out && reason_cap > 0) {
+            snprintf(reason_out, reason_cap,
+                     "autosave suppressed: ESP/Pico config divergence latched (%s)", div_reason);
+        }
+        return true; /* not a failure -- see comment above */
+    }
+    if (autosave_blocked_by_swap_pending()) {
+        if (reason_out && reason_cap > 0) {
+            snprintf(reason_out, reason_cap, "autosave suppressed: a kiln config swap transaction is pending");
+        }
+        return true; /* not a failure -- see comment above */
+    }
+
     int32_t active = (s_autosave_target_override != KILN_CFG_AUTOSAVE_OVERRIDE_NONE) ? s_autosave_target_override
                                                                                       : s_store.active_id;
     if (active == KILN_CFG_NO_ACTIVE_ID) {
