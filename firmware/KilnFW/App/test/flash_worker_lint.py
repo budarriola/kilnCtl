@@ -177,6 +177,19 @@ ALLOWLIST = {
     "factory_reset.c",
     # Pattern 2 (local caller_stack_is_external() guard): nvs_save_store().
     "kiln_cfg_store.c",
+    # Pattern 2 (local caller_stack_is_external() guard, via the SAME shared
+    # hal_kv_write_safe_here() predicate kiln_cfg_store.c's entry above
+    # uses -- not a re-derived copy): save_pending()'s hal_kv_set_blob()/
+    # hal_kv_commit() calls (the pending-swap crash-recovery record, docs/
+    # audits/kiln_swap_transaction_2026-09-14.md H6/H10) are guarded by
+    # `if (!hal_kv_write_safe_here()) { ... refuse ... }` as the very first
+    # thing save_pending() does, same shape as kiln_cfg_store.c's own
+    # nvs_save_store(). kiln_cfg_swap_apply() itself is documented (see its
+    # own header's TASK PLACEMENT note) to run on a dedicated, internal-
+    # SRAM-stacked worker task, never the httpd worker or the flash worker
+    # itself -- this guard is the defensive backstop if that is ever
+    # violated, not the primary safety argument.
+    "kiln_cfg_swap.c",
     # Pattern 3 (init-time / recovery path): ota_http.c's pico-firmware
     # esp_partition_erase_range()/esp_partition_write() calls run from the
     # single-threaded OTA apply sequence, not a PSRAM-stacked handler task.

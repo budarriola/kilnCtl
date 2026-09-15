@@ -179,13 +179,37 @@ static bool g_bump_gen_on_push = false; // H6 test hook: simulate a racing write
 // Simulates the Pico's committed state after a (fake) push -- what the
 // readback stub below reports.
 static kiln_pkg_safety_t s_pico_committed;
+// item 15: records whether the LAST push/rollback used the volatile path
+// (0x2D) or the flash path (COMMIT_CONFIG) -- what the "never disarm"/
+// "rollback uses the same mechanism" tests assert against.
+static bool s_last_push_was_volatile = false;
+static int s_volatile_push_count = 0;
+static int s_flash_push_count = 0;
+// ARMED simulation: when true, any call with volatile_install=false (the
+// flash path) is refused exactly like the real Pico's config_store_decide_
+// write() refuses COMMIT_CONFIG while ARMED -- volatile_install=true calls
+// are NEVER refused by this flag, mirroring config_store_write_volatile()
+// never calling config_store_decide_write() at all.
+static bool s_pico_armed = false;
 bool safety_cfg_http_apply_package_and_confirm(SafetyLinkClass *link, const kiln_pkg_safety_t *pkg,
-                                                char *reason_out, size_t reason_cap, void *out_class)
+                                                bool volatile_install, char *reason_out, size_t reason_cap,
+                                                void *out_class)
 {
     (void)out_class;
     if (!link) {
         snprintf(reason_out, reason_cap, "no link");
         return false;
+    }
+    s_last_push_was_volatile = volatile_install;
+    if (volatile_install) {
+        s_volatile_push_count++;
+    } else {
+        s_flash_push_count++;
+        if (s_pico_armed) {
+            snprintf(reason_out, reason_cap, "commit rejected: relay is ARMED -- config writes are refused "
+                                              "while ARMED -- values were staged but NOT written");
+            return false;
+        }
     }
     if (s_pico_push_should_fail) {
         snprintf(reason_out, reason_cap, "%s", s_pico_push_fail_reason);
@@ -206,16 +230,46 @@ bool safety_cfg_http_apply_package_and_confirm(SafetyLinkClass *link, const kiln
 
 static bool s_ceiling_set_should_fail = false;
 static float s_pico_ceiling = 1200.0f;
+static bool s_last_ceiling_set_was_volatile = false;
 bool safety_cfg_http_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_id, float value, char *reason_out,
                                           size_t reason_cap, void *out_class)
 {
     (void)out_class;
+    s_last_ceiling_set_was_volatile = false;
     if (!link) {
         snprintf(reason_out, reason_cap, "no link");
         return false;
     }
+    s_flash_push_count++;
+    if (s_pico_armed) {
+        snprintf(reason_out, reason_cap, "commit rejected: relay is ARMED -- config writes are refused while "
+                                          "ARMED -- values were staged but NOT written");
+        return false;
+    }
     if (s_ceiling_set_should_fail) {
         snprintf(reason_out, reason_cap, "ceiling raise refused (ARMED)");
+        return false;
+    }
+    if (param_id == SAFETY_PARAM_ID_ABS_MAX_TEMP_C) {
+        s_pico_ceiling = value;
+    }
+    return true;
+}
+
+bool safety_cfg_http_set_and_confirm_f32_volatile(SafetyLinkClass *link, uint16_t param_id, float value,
+                                                   char *reason_out, size_t reason_cap, void *out_class)
+{
+    (void)out_class;
+    s_last_ceiling_set_was_volatile = true;
+    s_volatile_push_count++;
+    if (!link) {
+        snprintf(reason_out, reason_cap, "no link");
+        return false;
+    }
+    /* Never refused for ARMED -- config_store_write_volatile() never checks
+     * it, see this fake's own header comment on s_pico_armed. */
+    if (s_ceiling_set_should_fail) {
+        snprintf(reason_out, reason_cap, "ceiling raise refused (validation)");
         return false;
     }
     if (param_id == SAFETY_PARAM_ID_ABS_MAX_TEMP_C) {
@@ -419,6 +473,11 @@ static void reset_state(void)
     memset(&s_pico_committed, 0, sizeof(s_pico_committed));
     s_ceiling_set_should_fail = false;
     s_pico_ceiling = 1000.0f;
+    s_last_push_was_volatile = false;
+    s_volatile_push_count = 0;
+    s_flash_push_count = 0;
+    s_pico_armed = false;
+    s_last_ceiling_set_was_volatile = false;
     s_refetch_should_fail = false;
     s_cached_crc = 1;
     s_ceiling_get_current_should_fail = false;
@@ -613,6 +672,114 @@ static void test_boot_recovery_corrupt_marker_stays_alarmed(void)
                "the record is STILL unreadable after boot_recover() -- it was never cleared/overwritten");
 }
 
+static void test_swap_completes_with_pico_armed_never_disarmed(void)
+{
+    TEST_SECTION("item 15: a swap completes end-to-end with the Pico ARMED throughout -- never disarmed");
+    reset_state();
+    s_pico_armed = true; // the Pico's ordinary running state -- would refuse EVERY flash (COMMIT_CONFIG) write
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    TEST_CHECK(ok, "swap succeeds even though every flash-writing call this fake models is refused while ARMED");
+    TEST_CHECK(!diverged, "not reported as an alarm/divergence");
+    TEST_CHECK(s_active_id == 7, "active_id finalized");
+    TEST_CHECK(s_pico_ceiling == 1300.0f, "ceiling raised to the target's -- via the volatile path, not flash");
+    TEST_CHECK(s_volatile_push_count >= 2, "both the ceiling raise (step 4) and the bulk push (step 6/7) went "
+                                          "through SAFETY_CMD_APPLY_CONFIG_VOLATILE (0x2D), never COMMIT_CONFIG");
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_NONE, "pending record cleared");
+    // step 13's flash-fallback IS attempted (best-effort persistence), and
+    // is REFUSED by this fake's ARMED simulation -- proving that refusal
+    // does not undo or fail the swap the fake already reported as
+    // successful above.
+    TEST_CHECK(s_flash_push_count > 0, "step 13's flash-fallback persist was attempted");
+}
+
+static void test_flash_fallback_attempted_after_finalize_but_optional(void)
+{
+    TEST_SECTION("step 13: flash-fallback persist runs after a successful swap and is allowed to fail");
+    reset_state();
+    s_pico_armed = false; // NOT armed this time -- the flash fallback should actually land
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    TEST_CHECK(ok, "swap succeeds");
+    TEST_CHECK(s_flash_push_count > 0, "the flash-fallback bulk push was attempted (unarmed -- this fake lets "
+                                       "it land)");
+    // Both the ceiling flash-set and the bulk flash-push in persist_pico_
+    // flash_fallback() run through this file's OWN fakes -- s_pico_ceiling/
+    // s_pico_committed end up holding whatever the LAST call wrote, which is
+    // the flash-fallback's own re-push of the identical target values (not a
+    // different value), so this does not corrupt the already-verified state.
+    TEST_CHECK(s_pico_ceiling == 1300.0f, "ceiling still reads as the target's after the fallback re-push");
+}
+
+static void test_rollback_after_volatile_install_uses_volatile_too(void)
+{
+    TEST_SECTION("item 15 (task item 4): rollback after a successful volatile install ALSO uses the volatile "
+                 "mechanism -- an armed Pico can still be rolled back");
+    reset_state();
+    s_pico_armed = true; // the Pico never leaves ARMED, forward push or rollback
+    s_zones_import_should_fail = true; // forces failure AFTER the Pico has already been volatile-installed
+                                        // (step 6/7 succeeds, step 8's ESP commit is what fails)
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    TEST_CHECK(!ok, "swap refused (ESP commit failed)");
+    TEST_CHECK(!diverged, "a clean rollback is not reported as a divergence/alarm -- proves the rollback, "
+                          "not merely the forward push, is what is under test here");
+    TEST_CHECK(s_active_id == KILN_CFG_NO_ACTIVE_ID, "active_id never finalized");
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_NONE,
+               "rolled back cleanly despite the Pico being ARMED throughout");
+    // The LAST push this fake recorded is the rollback's own re-push of R --
+    // confirm it went through the volatile path, exactly like the forward
+    // push that preceded it, and that it actually landed (not refused).
+    TEST_CHECK(s_last_push_was_volatile, "rollback's Pico restore used SAFETY_CMD_APPLY_CONFIG_VOLATILE, "
+                                        "the SAME mechanism as the forward push -- never the flash path, "
+                                        "which this fake's ARMED simulation would have refused");
+    TEST_CHECK(s_last_ceiling_set_was_volatile, "rollback's ceiling restore also used the volatile path");
+    TEST_CHECK(s_pico_ceiling == 1000.0f, "Pico's ceiling actually restored to R's (1000), not left at P's "
+                                          "(1300) or unrestored");
+    float restored;
+    memcpy(&restored, &s_pico_committed.entries[0].value_bits, sizeof(restored));
+    // (entries[0] is abs_max_temp_c in this fake's own set_pico_param() convention --
+    // included in the pushed package even though the bulk-push production code
+    // always skips applying it; this only proves WHICH package (R vs P) was pushed.)
+    TEST_CHECK(restored == 1000.0f, "the package pushed back to the Pico during rollback was R (ceiling 1000), "
+                                    "not P (ceiling 1300)");
+}
+
+static void test_pico_reboot_before_flash_fallback_caught_by_existing_check(void)
+{
+    TEST_SECTION("task item 5: a Pico reboot between a verified volatile install and step 13's flash-fallback "
+                 "landing is a real divergence, caught by the EXISTING ceiling/arming check -- not a new one");
+    reset_state();
+    s_pico_armed = true; // the Pico stays armed the whole time -- this is why step 13 could not land yet
+    // Simulate the outcome of a Pico reboot happening in the gap between
+    // step 7 (verified volatile install) and step 13 (flash fallback, not
+    // yet run): the Pico's live record has reverted to its OLD flashed
+    // ceiling, so the standing divergence primitive
+    // (safety_ceiling_sync_is_diverged(), reused verbatim -- see this
+    // module's own header comment on why no second detector was added)
+    // reports true the next time it is consulted at step 10/11, exactly as
+    // it would on real hardware reacting to the reboot's own link-down/up
+    // transition.
+    s_diverged = true;
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    TEST_CHECK(!ok, "swap does NOT report success once the post-install divergence check fails");
+    TEST_CHECK(diverged, "out_diverged is set -- caller can distinguish this from an ordinary refusal");
+    TEST_CHECK(s_active_id == KILN_CFG_NO_ACTIVE_ID, "active_id NOT finalized -- never trust an unconfirmed "
+                                                     "post-reboot state");
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_ESP_DONE,
+               "pending record left at ESP_DONE -- boot recovery's 'verify then finish' path (or a later "
+               "reconcile once the Pico is unarmed) gets another chance, rather than the reboot being "
+               "silently treated as a successful, complete swap");
+    // step 13 (flash fallback) must NEVER be reached on this path -- the
+    // swap already returned false before finalize/step 13 run.
+    TEST_CHECK(s_flash_push_count == 0, "step 13 never ran -- the swap did not reach finalize");
+}
+
 static void test_negative_generation_check_is_load_bearing(void)
 {
     TEST_SECTION("negative test: removing the generation re-check lets a race slip through silently");
@@ -640,6 +807,10 @@ int main(void)
     test_esp_readback_mismatch_rolls_back();
     test_diverged_ceiling_does_not_finalize();
     test_generation_race_forces_rollback();
+    test_swap_completes_with_pico_armed_never_disarmed();
+    test_flash_fallback_attempted_after_finalize_but_optional();
+    test_rollback_after_volatile_install_uses_volatile_too();
+    test_pico_reboot_before_flash_fallback_caught_by_existing_check();
     test_boot_recovery_staged_discards();
     test_boot_recovery_pico_done_reapplies_rollback();
     test_boot_recovery_corrupt_marker_stays_alarmed();

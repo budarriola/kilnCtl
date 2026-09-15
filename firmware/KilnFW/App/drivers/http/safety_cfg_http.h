@@ -61,22 +61,49 @@ bool safety_cfg_http_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_i
                                           char *reason_out, size_t reason_cap,
                                           safety_ceiling_refusal_class_t *out_class);
 
+/* Volatile-install sibling of the above -- docs/KILN_PROFILES_PLAN.md item 15
+ * (SAFETY_CMD_APPLY_CONFIG_VOLATILE, 0x2D) reached the wire 2026-09-14; this
+ * is the ONE caller allowed to use it for the ceiling field, and it exists
+ * ONLY for kiln_cfg_swap.c's step 4 ("raise-first"), NEVER for the standing
+ * safety_ceiling_sync.c reconcile loop, which keeps calling the FLASH-
+ * writing sibling above unchanged. Reason for the split: kiln_cfg_swap.c's
+ * owner rule is "the Pico never leaves ARMED, ever" for the whole two-
+ * processor transaction -- raising the ceiling via the ordinary flash path
+ * would refuse outright while ARMED (the Pico's ordinary running state) and
+ * abort the swap before it even reaches the bulk push, exactly the failure
+ * mode docs/audits/kiln_swap_transaction_2026-09-14.md documented as "safe
+ * but blocks the feature" before item 15 existed. This function can never
+ * be refused for ARMED (config_store_write_volatile() never calls config_
+ * store_decide_write()) but also never reaches flash, so the raised value
+ * does NOT survive a Pico reboot on its own -- kiln_cfg_swap.c's best-effort
+ * flash-fallback step (after the whole swap verifies) is what gives it a
+ * chance to persist; see that module's own doc comment for the ordering and
+ * docs/audits/kiln_swap_volatile_wiring_2026-09-14.md for why a reboot
+ * between those two steps is still caught, not silently lost. */
+bool safety_cfg_http_set_and_confirm_f32_volatile(SafetyLinkClass *link, uint16_t param_id, float value,
+                                                   char *reason_out, size_t reason_cap,
+                                                   safety_ceiling_refusal_class_t *out_class);
+
 /* Bulk sibling of the above -- docs/KILN_PROFILES_PLAN.md item 5's two-
  * processor apply transaction (kiln_cfg_swap.c), step 6. Stages every SET
  * entry of `pkg` EXCEPT the ceiling field (SAFETY_PARAM_ID_ABS_MAX_TEMP_C --
- * always driven separately via safety_ceiling_sync_guard_raise()/
- * _apply_lower(), see this function's own .c-file doc comment for why),
- * commits once, and confirms by live read-back exactly like every other
- * write in this file. `link` may be NULL -- returns false, same convention.
+ * always driven separately via kiln_cfg_swap.c's own raise-first/lower-last
+ * calls, see this function's own .c-file doc comment for why), commits
+ * once, and confirms by live read-back exactly like every other write in
+ * this file. `link` may be NULL -- returns false, same convention.
  *
- * ITEM 15 NOTE (also in the .c file, repeated here since this is the public
- * contract kiln_cfg_swap.c is written against): as of this function,
- * SaftyFW's volatile RAM-only install is not landed, so the commit this
- * function forces writes FLASH and is refused outright while the Pico is
- * ARMED. Callers must treat that refusal as an ordinary "nothing landed"
- * failure -- not a bug in this function -- and roll back rather than
- * retry-forever or treat it as success. */
+ * `volatile_install`: true sends SAFETY_CMD_APPLY_CONFIG_VOLATILE (0x2D,
+ * item 15) instead of COMMIT_CONFIG -- installs into the Pico's live RAM
+ * record, never refused for ARMED, never reaches flash. kiln_cfg_swap.c
+ * passes true for the swap's own forward push and rollback-restore (the
+ * owner's "Pico never leaves ARMED" rule) and false only for its own
+ * best-effort, allowed-to-fail flash-fallback persist step, run AFTER a
+ * swap has already verified -- see docs/audits/kiln_swap_volatile_wiring_
+ * 2026-09-14.md for the full ordering and why a Pico reboot between the two
+ * is still caught by the existing ceiling/arming divergence check rather
+ * than silently lost. */
 bool safety_cfg_http_apply_package_and_confirm(SafetyLinkClass *link, const kiln_pkg_safety_t *pkg,
+                                                bool volatile_install,
                                                 char *reason_out, size_t reason_cap,
                                                 safety_ceiling_refusal_class_t *out_class);
 

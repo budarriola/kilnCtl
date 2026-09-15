@@ -36,6 +36,8 @@
 
 #include "kilnlink/kilnlink_announce.h"
 #include "kilnlink/kilnlink_announce_reboot.h"
+#include "kilnlink/kilnlink_apply_config_volatile.h" /* SAFETY_CMD_APPLY_CONFIG_VOLATILE (0x2D), item 15 --
+                                                       * safety_link_send_apply_config_volatile() */
 #include "kilnlink/kilnlink_clear_trip.h"
 #include "kilnlink/kilnlink_commit_config.h"
 #include "kilnlink/kilnlink_commit_config_rejected.h"
@@ -1300,6 +1302,89 @@ esp_err_t safety_link_send_commit_config(SafetyLinkClass *link, uint16_t *out_pa
 
     xSemaphoreGive(link->xact_lock);
     ESP_LOGI(TAG, "commit_config: %s", err == ESP_OK ? "ACKed by the safety processor" : esp_err_to_name(err));
+    return err;
+}
+
+/* SAFETY_CMD_APPLY_CONFIG_VOLATILE (0x2D, docs/KILN_PROFILES_PLAN.md item 15)
+ * -- byte-for-byte the same shape as safety_link_send_commit_config() just
+ * above (own xact_lock hold, pre-send drain, BROADCAST send, then a
+ * SAFETY_LINK_REPLY_TIMEOUT_MS window for a possible COMMIT_CONFIG_REJECTED
+ * reply -- link_task_handle_apply_config_volatile() on the Pico reuses
+ * link_task_send_commit_config_rejected() verbatim for its own validation
+ * refusal, so this side's rejection decode/stash handling needs no changes
+ * of its own). The only difference is the command byte on the wire and what
+ * it causes on the Pico: this frame is never refused for ARMED (config_
+ * store_write_volatile() never calls config_store_decide_write()) and never
+ * reaches flash, so it does not survive a Pico reboot -- see this function's
+ * own header comment in safety_link.h for what that means for callers. */
+esp_err_t safety_link_send_apply_config_volatile(SafetyLinkClass *link, uint16_t *out_param_id,
+                                                  uint8_t *out_reason, bool *out_rejected)
+{
+    if (out_rejected) {
+        *out_rejected = false;
+    }
+    if (!link) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Same reasoning as safety_link_send_commit_config()'s own call: a
+     * rejection stashed by a PRIOR commit/volatile-install must never be
+     * mistaken for THIS one's outcome. */
+    safety_clear_stashed_commit_rejected(link);
+
+    kilnlink_apply_config_volatile_t msg = {0};
+    uint8_t payload[KILNLINK_APPLY_CONFIG_VOLATILE_LEN];
+    kilnlink_apply_config_volatile_status_t status = KILNLINK_APPLY_CONFIG_VOLATILE_OK;
+    size_t len = kilnlink_apply_config_volatile_encode(&msg, payload, sizeof(payload), &status);
+    if (len == 0) {
+        ESP_LOGE(TAG, "apply_config_volatile: encode failed (status=%d)", (int)status);
+        return ESP_FAIL;
+    }
+
+    if (xSemaphoreTake(link->xact_lock, pdMS_TO_TICKS(SAFETY_XACT_LOCK_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGE(TAG, "apply_config_volatile: timed out waiting for the safety link transaction lock");
+        return ESP_ERR_TIMEOUT;
+    }
+    (void)safety_drain_inbox(link, 0);
+    if (safety_lock(link)) {
+        link->stats.frames_sent++;
+        safety_unlock(link);
+    }
+    /* BROADCAST, not the ACK'd DATA transport -- same fix and same reason as
+     * safety_link_send_commit_config()'s own send just above: an ACK'd DATA
+     * request is discarded before it reaches command dispatch on the Pico. */
+    esp_err_t err = uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY,
+                                                  UART_TASK_ID_SAFETY, UART_TASK_ID_SAFETY,
+                                                  payload, len);
+    if (err != ESP_OK && safety_lock(link)) {
+        link->stats.timeouts++;
+        safety_unlock(link);
+    }
+
+    if (err == ESP_OK) {
+        uart_proto_message_t rejected_msg;
+        bool got_rejected = false;
+        (void)safety_drain_inbox_ex(link, SAFETY_LINK_REPLY_TIMEOUT_MS, false, NULL, NULL, NULL, NULL, &rejected_msg,
+                                     &got_rejected, NULL, NULL);
+        if (got_rejected) {
+            kilnlink_commit_config_rejected_t rejected;
+            if (kilnlink_commit_config_rejected_decode(rejected_msg.payload, rejected_msg.length, &rejected) ==
+                KILNLINK_COMMIT_CONFIG_REJECTED_OK) {
+                if (out_rejected) *out_rejected = true;
+                if (out_param_id) *out_param_id = rejected.param_id;
+                if (out_reason) *out_reason = rejected.reason;
+                ESP_LOGW(TAG, "apply_config_volatile: REJECTED by the safety processor (param_id=0x%04X, reason=%u)",
+                         (unsigned)rejected.param_id, (unsigned)rejected.reason);
+            }
+        }
+    }
+
+    xSemaphoreGive(link->xact_lock);
+    ESP_LOGI(TAG, "apply_config_volatile: %s",
+             err == ESP_OK ? "ACKed by the safety processor" : esp_err_to_name(err));
     return err;
 }
 

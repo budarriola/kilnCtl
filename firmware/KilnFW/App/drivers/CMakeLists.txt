@@ -321,6 +321,16 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "persist/zones_config_migrate.c"
                        "persist/kiln_cfg_store.c"
                        "persist/kiln_package.c"
+                       # docs/KILN_PROFILES_PLAN.md item 5 -- the two-processor
+                       # kiln-config apply transaction (docs/audits/kiln_swap_
+                       # transaction_2026-09-14.md, wired to item 15's volatile
+                       # install in docs/audits/kiln_swap_volatile_wiring_
+                       # 2026-09-14.md). Host-tested since c2c9eff2 but never
+                       # linked into the target build until now -- see this
+                       # repo's tools/check_c_files_in_cmakelists.ps1 for why
+                       # that gap is caught rather than silently shipping a
+                       # host-only module.
+                       "persist/kiln_cfg_swap.c"
                        # docs/KILN_PROFILES_PLAN.md items 1/2/12 -- Pico-half
                        # packaging and package-identity hash for kiln_cfg_
                        # store.c's saved slots (walks the ESP-side mirror of

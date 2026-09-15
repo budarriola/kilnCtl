@@ -257,13 +257,33 @@ static bool pico_readback_matches(const kiln_pkg_safety_t *expected, uint16_t sk
     return true;
 }
 
-static bool push_and_verify_pico(SafetyLinkClass *link, const kiln_pkg_safety_t *pkg, char *reason_out,
-                                 size_t reason_cap)
+/* `volatile_install` (item 15): true for both the forward swap push and the
+ * rollback restore -- the owner's "the Pico never leaves ARMED" rule (see
+ * this file's header comment) means neither of those two may ever go
+ * through the flash-writing COMMIT_CONFIG path, which is unconditionally
+ * refused while ARMED. false is reserved for kiln_cfg_swap_apply()'s own
+ * step-13 best-effort flash-fallback persist (kiln_cfg_swap_persist_pico_
+ * fallback()), run only AFTER a swap has already verified via the volatile
+ * path -- see that function's own doc comment. */
+static bool push_and_verify_pico(SafetyLinkClass *link, const kiln_pkg_safety_t *pkg, bool volatile_install,
+                                 char *reason_out, size_t reason_cap)
 {
     char push_reason[KILN_CFG_SWAP_REASON_MAX];
     push_reason[0] = '\0';
-    if (!safety_cfg_http_apply_package_and_confirm(link, pkg, push_reason, sizeof(push_reason), NULL)) {
-        snprintf(reason_out, reason_cap, "Pico push failed: %s", push_reason);
+    if (!safety_cfg_http_apply_package_and_confirm(link, pkg, volatile_install, push_reason, sizeof(push_reason),
+                                                    NULL)) {
+        /* Precision cap (.181s), not a magic number: GCC's -Werror=format-
+         * truncation can prove push_reason's DECLARED size (KILN_CFG_SWAP_
+         * REASON_MAX, a fixed-size local array) is up to 199 bytes, and
+         * cannot otherwise prove this snprintf into a caller-sized
+         * reason_out/reason_cap never truncates -- this class is real (a
+         * long inner reason CAN be cut off here) but truncation itself is
+         * harmless (snprintf always NUL-terminates); the precision only
+         * makes the WORST case provable to the compiler instead of merely
+         * true in practice. Same fix applied at every other site in this
+         * file GCC's constant-propagation flagged (rollback()'s two
+         * ROLLBACK FAILED messages). */
+        snprintf(reason_out, reason_cap, "Pico push failed: %.181s", push_reason);
         return false;
     }
     /* Force a FRESH GET_CONFIG_PAGE round trip -- never trust the cache
@@ -293,8 +313,21 @@ static bool rollback(SafetyLinkClass *link, const kiln_cfg_swap_pending_t *p, bo
 {
     char sub[KILN_CFG_SWAP_REASON_MAX];
     sub[0] = '\0';
-    if (!push_and_verify_pico(link, &p->rollback_pico, sub, sizeof(sub))) {
-        snprintf(reason_out, reason_cap, "ROLLBACK FAILED (Pico would not accept the previous config): %s", sub);
+    /* Item 15: rollback uses the SAME mechanism as the forward push
+     * (volatile_install=true) -- the owner's "never a way that the Pico is
+     * not armed" rule applies just as much to undoing a swap as to doing
+     * one. Before item 15 existed, this restore went through the same
+     * flash-writing COMMIT_CONFIG path the forward push did and would have
+     * been refused while ARMED exactly like the forward push -- routing
+     * only the forward path through 0x2D and leaving this one on flash
+     * would have left the single most likely failure case (a forward push
+     * that fails partway and needs undoing) unable to actually roll back on
+     * an armed board. */
+    if (!push_and_verify_pico(link, &p->rollback_pico, /*volatile_install=*/true, sub, sizeof(sub))) {
+        /* Precision cap -- see push_and_verify_pico()'s identical comment
+         * above for why (GCC -Werror=format-truncation, provable via `sub`'s
+         * fixed KILN_CFG_SWAP_REASON_MAX declared size). */
+        snprintf(reason_out, reason_cap, "ROLLBACK FAILED (Pico would not accept the previous config): %.138s", sub);
         return false;
     }
     if (esp_was_committed) {
@@ -302,17 +335,42 @@ static bool rollback(SafetyLinkClass *link, const kiln_cfg_swap_pending_t *p, bo
         bool imported = zones_config_import_blob(p->rollback_blob, p->rollback_blob_len, sub, sizeof(sub));
         kiln_cfg_store_unlock();
         if (!imported) {
-            snprintf(reason_out, reason_cap, "ROLLBACK FAILED (ESP would not re-accept the previous config): %s",
+            snprintf(reason_out, reason_cap, "ROLLBACK FAILED (ESP would not re-accept the previous config): %.136s",
                      sub);
             return false;
         }
     }
-    /* Ceiling: restore R's own recorded value on whichever side it needs
-     * moving, direction determined the same "raise if higher, else lower"
-     * way as the forward path -- best-effort each, exactly like the
-     * forward path's own step 10 (safety_ceiling_sync_apply_lower()'s
-     * documented contract: never blocks, never a failure the caller must
-     * act on). */
+    /* Ceiling: push_and_verify_pico() above (like the forward path's own
+     * push) always excludes SAFETY_PARAM_ID_ABS_MAX_TEMP_C -- restore R's
+     * own recorded ceiling directly here, via the SAME volatile mechanism,
+     * rather than leaving it to the standing reconcile-on-link-up's
+     * eventual (flash-writing, ARMED-backoff-gated) lower/raise. This is
+     * what makes the rollback deterministic and immediate instead of
+     * dependent on a background retry cadence the owner's "never disarm"
+     * rule was specifically written against. Best-effort: a failure here is
+     * logged, not treated as rollback failure -- the two sides' non-ceiling
+     * content and the Pico's ceiling identity are what the caller's own
+     * post-rollback state actually depends on, and the standing reconcile
+     * call right after this still runs as a second attempt/verification. */
+    for (uint16_t i = 0; i < p->rollback_pico.count; i++) {
+        if (p->rollback_pico.entries[i].param_id == SAFETY_PARAM_ID_ABS_MAX_TEMP_C &&
+            (p->rollback_pico.entries[i].flags & KILN_PKG_PARAM_FLAG_SET)) {
+            float r_ceiling = 0.0f;
+            memcpy(&r_ceiling, &p->rollback_pico.entries[i].value_bits, sizeof(r_ceiling));
+            char ceiling_reason[KILN_CFG_SWAP_REASON_MAX];
+            ceiling_reason[0] = '\0';
+            if (!safety_cfg_http_set_and_confirm_f32_volatile(link, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, r_ceiling,
+                                                              ceiling_reason, sizeof(ceiling_reason), NULL)) {
+                ESP_LOGW(TAG, "rollback: could not restore the Pico's pre-swap ceiling directly (%s) -- "
+                              "the standing reconcile-on-link-up call below is a second attempt",
+                         ceiling_reason);
+            }
+            break;
+        }
+    }
+    /* Best-effort second pass / verification, exactly like the forward
+     * path's own step 10 (safety_ceiling_sync_apply_lower()'s documented
+     * contract: never blocks, never a failure the caller must act on). */
     safety_ceiling_sync_reconcile_on_link_up(link);
     if (!kiln_cfg_store_set_active_id_raw(p->previous_active_id, sub, sizeof(sub))) {
         ESP_LOGW(TAG, "rollback: restoring previous active_id bookkeeping failed: %s -- live config is "
@@ -328,6 +386,62 @@ static bool rollback(SafetyLinkClass *link, const kiln_cfg_swap_pending_t *p, bo
      * fact, cleanly refused with nothing changed. */
     clear_pending();
     return true;
+}
+
+/* ---- step 13: best-effort Pico flash-fallback persist ---------------------
+ *
+ * Runs ONLY after kiln_cfg_swap_apply() has already decided the swap
+ * succeeded (both halves committed, read back, and verified matching, and
+ * the post-swap ceiling/arming check passed) -- this function's job is
+ * purely "since we are here anyway, try to make it survive a reboot too",
+ * never a precondition for the swap's own result. It re-pushes the SAME
+ * `target_pico` fields that were already volatile-installed and verified,
+ * but through the flash-writing COMMIT_CONFIG path
+ * (volatile_install=false) -- i.e. section 1a.4's case 1, "persist what is
+ * now proven live". Ceiling is pushed too (this is the one place a flash
+ * write of the ceiling is attempted for a swap; the flash-writing single-
+ * field wrapper is safety_cfg_http_set_and_confirm_f32(), unchanged, NOT
+ * the volatile variant this module otherwise uses).
+ *
+ * ALLOWED TO FAIL, always, with only a log line -- an ARMED refusal here
+ * (the Pico's ordinary running state; this call is expected to fail on
+ * essentially every armed board) is not a swap failure and never alarms.
+ * The swap is already complete: content is proven live and verified on
+ * both processors before this function is ever called. What this function
+ * does NOT do -- and item 15's plan section 1a.4 describes but this pass
+ * does not implement -- is the `pkg_hash` bookkeeping a future boot-time
+ * FALLBACK/CONFIGURED/UNCONFIGURED state machine would need to know WHICH
+ * package a successful flash-fallback write came from; no such field
+ * exists in config_store_record_t or on the wire today, and adding one
+ * is out of this pass's scope (no ZONES_CFG_VERSION bump, no new wire
+ * field). A flash write that lands here simply becomes the Pico's ordinary
+ * flashed record, exactly as if an operator had pushed it while unarmed --
+ * indistinguishable from any other COMMIT_CONFIG, which is a reasonable
+ * bring-up fallback on its own even without the hash bookkeeping. */
+static void persist_pico_flash_fallback(SafetyLinkClass *link, const kiln_pkg_safety_t *target_pico,
+                                        float target_ceiling, bool have_target_ceiling)
+{
+    if (have_target_ceiling) {
+        char ceiling_reason[KILN_CFG_SWAP_REASON_MAX];
+        ceiling_reason[0] = '\0';
+        if (!safety_cfg_http_set_and_confirm_f32(link, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, target_ceiling,
+                                                 ceiling_reason, sizeof(ceiling_reason), NULL)) {
+            ESP_LOGI(TAG, "step 13 (flash fallback): ceiling flash persist did not land (%s) -- expected "
+                          "while ARMED, swap already succeeded via the volatile install, not a failure",
+                     ceiling_reason);
+        }
+    }
+    char push_reason[KILN_CFG_SWAP_REASON_MAX];
+    push_reason[0] = '\0';
+    if (!safety_cfg_http_apply_package_and_confirm(link, target_pico, /*volatile_install=*/false, push_reason,
+                                                    sizeof(push_reason), NULL)) {
+        ESP_LOGI(TAG, "step 13 (flash fallback): config flash persist did not land (%s) -- expected while "
+                      "ARMED, swap already succeeded via the volatile install, not a failure",
+                 push_reason);
+    } else {
+        ESP_LOGI(TAG, "step 13 (flash fallback): the just-verified swap also landed on Pico flash -- "
+                      "will survive a Pico reboot");
+    }
 }
 
 bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *reason_out, size_t reason_cap,
@@ -389,7 +503,13 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
 
     /* step 4: ceiling raise-first (lower-last is handled at step 10 via
      * safety_ceiling_sync_reconcile_on_link_up(), see this file's header
-     * comment). */
+     * comment). Item 15: goes through the volatile install
+     * (safety_cfg_http_set_and_confirm_f32_volatile()), NEVER the flash-
+     * writing safety_cfg_http_set_and_confirm_f32() the standing ceiling-
+     * reconcile loop still uses -- this raise is part of a swap the owner's
+     * rule requires to never disarm the Pico, and the flash path is
+     * unconditionally refused while ARMED (the Pico's ordinary running
+     * state). */
     float target_ceiling = 0.0f;
     bool have_target_ceiling = false;
     for (uint16_t i = 0; i < target_pico.count; i++) {
@@ -406,8 +526,8 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
     if (raise_first) {
         char sub[KILN_CFG_SWAP_REASON_MAX];
         sub[0] = '\0';
-        if (!safety_cfg_http_set_and_confirm_f32(link, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, target_ceiling, sub,
-                                                 sizeof(sub), NULL)) {
+        if (!safety_cfg_http_set_and_confirm_f32_volatile(link, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, target_ceiling, sub,
+                                                          sizeof(sub), NULL)) {
             clear_pending();
             snprintf(reason_out, reason_cap, "could not raise the Pico's ceiling before the swap: %s", sub);
             return false; /* nothing else touched yet -- safe to just discard the STAGED record */
@@ -417,10 +537,12 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
     /* step 5 */
     persist_marker(&p, KILN_CFG_SWAP_MARKER_PICO_OPEN);
 
-    /* step 6/7: push everything except the ceiling, read back, compare */
+    /* step 6/7: push everything except the ceiling, read back, compare.
+     * Item 15: volatile_install=true -- the owner's "Pico never leaves
+     * ARMED" rule; see push_and_verify_pico()'s own doc comment. */
     char push_reason[KILN_CFG_SWAP_REASON_MAX];
     push_reason[0] = '\0';
-    if (!push_and_verify_pico(link, &target_pico, push_reason, sizeof(push_reason))) {
+    if (!push_and_verify_pico(link, &target_pico, /*volatile_install=*/true, push_reason, sizeof(push_reason))) {
         char roll_reason[KILN_CFG_SWAP_REASON_MAX];
         roll_reason[0] = '\0';
         if (!rollback(link, &p, /*esp_was_committed=*/false, roll_reason, sizeof(roll_reason))) {
@@ -539,6 +661,13 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
          * (the live config genuinely IS P on both sides). */
         ESP_LOGE(TAG, "swap content landed and verified, but recording active_id failed: %s", final_reason);
     }
+
+    /* step 13: best-effort Pico flash-fallback persist (item 15's "persist
+     * what is now proven live" case). See this function's own doc comment
+     * for why this is allowed to fail and never affects the swap's own
+     * result, which is already decided above. */
+    persist_pico_flash_fallback(link, &target_pico, target_ceiling, have_target_ceiling);
+
     clear_pending();
     return true;
 }
@@ -647,6 +776,20 @@ void kiln_cfg_swap_boot_recover(void)
             kiln_cfg_store_lock();
             kiln_cfg_store_set_active_id_raw(p.target_id, sub, sizeof(sub));
             kiln_cfg_store_unlock();
+            /* step 13, same as kiln_cfg_swap_apply()'s own -- best-effort,
+             * allowed to fail, never affects the outcome already decided
+             * above. */
+            float target_ceiling = 0.0f;
+            bool have_target_ceiling = false;
+            for (uint16_t i = 0; i < target_pico.count; i++) {
+                if (target_pico.entries[i].param_id == SAFETY_PARAM_ID_ABS_MAX_TEMP_C &&
+                    (target_pico.entries[i].flags & KILN_PKG_PARAM_FLAG_SET)) {
+                    memcpy(&target_ceiling, &target_pico.entries[i].value_bits, sizeof(target_ceiling));
+                    have_target_ceiling = true;
+                    break;
+                }
+            }
+            persist_pico_flash_fallback(link, &target_pico, target_ceiling, have_target_ceiling);
             clear_pending();
             ESP_LOGW(TAG, "boot: ESP_DONE swap confirmed complete on both sides -- finished");
         } else {

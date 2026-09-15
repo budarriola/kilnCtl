@@ -2383,6 +2383,33 @@ esp_err_t safety_link_send_set_param(SafetyLinkClass *link, uint16_t param_id, u
 esp_err_t safety_link_send_commit_config(SafetyLinkClass *link, uint16_t *out_param_id,
                                           uint8_t *out_reason, bool *out_rejected);
 
+/* SAFETY_CMD_APPLY_CONFIG_VOLATILE (0x2D, docs/KILN_PROFILES_PLAN.md item 15,
+ * kilnlink_apply_config_volatile.h) -- the RAM-only sibling of
+ * safety_link_send_commit_config() above. Same shape, byte for byte: same
+ * xact_lock hold, same pre-send drain, same BROADCAST send (the Pico's
+ * link_task_handle_raw_frame() drops anything else, identical reasoning to
+ * commit_config's own comment), same "wait SAFETY_LINK_REPLY_TIMEOUT_MS for a
+ * possible COMMIT_CONFIG_REJECTED reply" window -- link_task_handle_apply_
+ * config_volatile() on the Pico reuses link_task_send_commit_config_
+ * rejected() verbatim for its own validation-refusal reply, so this side's
+ * rejection handling (out_param_id/out_reason/out_rejected, and the stash
+ * safety_link_take_stashed_commit_rejected() drains) is identical to
+ * COMMIT_CONFIG's.
+ *
+ * The ONLY difference from safety_link_send_commit_config() is which command
+ * byte goes on the wire and which validation-independent outcome it causes
+ * on the Pico: this one installs into the Pico's live RAM record
+ * (config_store_write_volatile()) and can NEVER be refused for ARMED --
+ * config_store_write_volatile() does not call config_store_decide_write() at
+ * all (see that function's own header comment), so there is no ARMED
+ * rejection reason this call can ever report. It also never reaches flash,
+ * so it does not survive a Pico reboot -- callers that need the change to
+ * survive a reboot must separately persist it via safety_link_send_commit_
+ * config() when/if that is expected to succeed (kiln_cfg_swap.c's
+ * best-effort flash-fallback step is the intended caller of that half). */
+esp_err_t safety_link_send_apply_config_volatile(SafetyLinkClass *link, uint16_t *out_param_id,
+                                                  uint8_t *out_reason, bool *out_rejected);
+
 /* Consumes a COMMIT_CONFIG_REJECTED frame that arrived too late for
  * safety_link_send_commit_config()'s own reply window and was stashed
  * instead of dropped (SafetyLinkClass::stashed_commit_rejected). Returns

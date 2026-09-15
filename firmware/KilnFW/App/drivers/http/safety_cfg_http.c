@@ -896,9 +896,20 @@ static safety_ceiling_refusal_class_t reject_reason_to_refusal_class(uint8_t rea
  * wrapper just below, which always passes false (unchanged blocking
  * behaviour); only safety_cfg_http_set_and_confirm_f32() (the ceiling-
  * reconcile writer, called from safety_poll_task) calls this function
- * directly with true. */
+ * directly with true.
+ *
+ * `volatile_install` (item 15, added 2026-09-14): when true, the commit leg
+ * sends SAFETY_CMD_APPLY_CONFIG_VOLATILE (0x2D) instead of COMMIT_CONFIG --
+ * installs into the Pico's live RAM record, never refused for ARMED, never
+ * reaches flash. confirm_commit_landed() below needs no changes for this:
+ * it only ever forces a live GET_CONFIG_PAGE re-fetch and compares values,
+ * which is identical regardless of which command produced the live state.
+ * Every existing caller passes false (unchanged behaviour); only kiln_cfg_
+ * swap.c's swap-transaction callers (routed through safety_cfg_http_set_
+ * and_confirm_f32_volatile()/apply_package_and_confirm(..., true, ...))
+ * pass true. */
 static bool apply_pairs_ex(SafetyLinkClass *link, const safety_cfg_post_pair_t *pairs, int n_pairs,
-                            bool commit, char *reason_out, size_t reason_cap,
+                            bool commit, bool volatile_install, char *reason_out, size_t reason_cap,
                             safety_ceiling_refusal_class_t *out_class, bool nonblocking_refetch)
 {
     if (out_class) {
@@ -937,7 +948,9 @@ static bool apply_pairs_ex(SafetyLinkClass *link, const safety_cfg_post_pair_t *
         uint16_t reject_param_id = 0;
         uint8_t reject_reason = 0;
         bool rejected = false;
-        esp_err_t err = safety_link_send_commit_config(link, &reject_param_id, &reject_reason, &rejected);
+        esp_err_t err = volatile_install
+                            ? safety_link_send_apply_config_volatile(link, &reject_param_id, &reject_reason, &rejected)
+                            : safety_link_send_commit_config(link, &reject_param_id, &reject_reason, &rejected);
         if (err != ESP_OK) {
             snprintf(reason_out, reason_cap, "the safety processor did not acknowledge the commit "
                                               "(%s) -- values were staged but NOT written",
@@ -1026,7 +1039,8 @@ static bool apply_pairs(SafetyLinkClass *link, const safety_cfg_post_pair_t *pai
                          bool commit, char *reason_out, size_t reason_cap,
                          safety_ceiling_refusal_class_t *out_class)
 {
-    return apply_pairs_ex(link, pairs, n_pairs, commit, reason_out, reason_cap, out_class, /*nonblocking_refetch=*/false);
+    return apply_pairs_ex(link, pairs, n_pairs, commit, /*volatile_install=*/false, reason_out, reason_cap,
+                           out_class, /*nonblocking_refetch=*/false);
 }
 
 /* Public single-field stage+commit+confirm wrapper -- owner request
@@ -1062,8 +1076,31 @@ bool safety_cfg_http_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_i
      * httpd worker. See confirm_commit_landed()'s doc comment for the rule
      * this must never violate: safety_poll_task may not block on
      * s_store_lock behind an httpd commissioning POST. */
-    return apply_pairs_ex(link, &pair, 1, /*commit=*/true, reason_out, reason_cap, out_class,
-                           /*nonblocking_refetch=*/true);
+    return apply_pairs_ex(link, &pair, 1, /*commit=*/true, /*volatile_install=*/false, reason_out, reason_cap,
+                           out_class, /*nonblocking_refetch=*/true);
+}
+
+/* See this function's own doc comment in safety_cfg_http.h -- kiln_cfg_
+ * swap.c's step 4 (raise-first) is the ONLY intended caller. Always blocking
+ * (nonblocking_refetch=false): this always runs from a swap's own dedicated
+ * worker task (see kiln_cfg_swap.h's TASK PLACEMENT note), never from
+ * safety_poll_task, so the rule that function's doc comment states does not
+ * apply here. */
+bool safety_cfg_http_set_and_confirm_f32_volatile(SafetyLinkClass *link, uint16_t param_id, float value,
+                                                   char *reason_out, size_t reason_cap,
+                                                   safety_ceiling_refusal_class_t *out_class)
+{
+    if (out_class) {
+        *out_class = SAFETY_CEILING_REFUSAL_OTHER;
+    }
+    if (!reason_out || reason_cap == 0) {
+        return false;
+    }
+    safety_cfg_post_pair_t pair;
+    pair.param_id = param_id;
+    snprintf(pair.value_text, sizeof(pair.value_text), "%.9g", (double)value);
+    return apply_pairs_ex(link, &pair, 1, /*commit=*/true, /*volatile_install=*/true, reason_out, reason_cap,
+                           out_class, /*nonblocking_refetch=*/false);
 }
 
 /* Public bulk stage+commit+confirm wrapper -- docs/KILN_PROFILES_PLAN.md
@@ -1083,25 +1120,18 @@ bool safety_cfg_http_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_i
  * same "set" discipline COMMISSIONING.md sec 3.1 states for the wire
  * itself).
  *
- * ITEM 15 DEPENDENCY, STATED EXPLICITLY: as of this function, SaftyFW's
- * volatile (RAM-only) config install (docs/KILN_PROFILES_PLAN.md item 15)
- * is not landed -- KILNLINK_COMMIT_CONFIG_LEN is still 1 byte with no
- * volatile-install flag (kilnlink_commit_config.h). The `commit=true` this
- * function forces therefore goes through the SAME COMMIT_CONFIG ->
- * config_store_write() path every other commissioning write in this file
- * uses today: a REAL FLASH WRITE, unconditionally refused while the Pico is
- * ARMED (config_store_decide_write(), no per-field carve-out). On real
- * hardware, with the Pico armed (its ordinary running state), this call is
- * therefore EXPECTED TO FAIL until item 15 lands -- and that is the SAFE
- * outcome, not a defect: kiln_cfg_swap.c treats any failure here as
- * "nothing landed on the Pico" and rolls back / refuses the whole swap,
- * never a partial application. The interface this function is built
- * against is "stage N params, commit once, read back and confirm, exactly
- * like every other write in this file" -- once item 15 adds a
- * volatile-install flag to COMMIT_CONFIG, the one-line change belongs
- * inside confirm_commit_landed()/apply_pairs_ex()'s encode call, not here
- * or in kiln_cfg_swap.c. */
+ * ITEM 15 LANDED 2026-09-14: `volatile_install` selects which command this
+ * function's forced commit sends -- true for SAFETY_CMD_APPLY_CONFIG_
+ * VOLATILE (0x2D, installs into the Pico's live RAM record, never refused
+ * for ARMED, never reaches flash), false for the original COMMIT_CONFIG ->
+ * config_store_write() flash path (still unconditionally refused while the
+ * Pico is ARMED). kiln_cfg_swap.c passes true for the swap's own forward
+ * push and rollback-restore (the owner's "Pico never leaves ARMED" rule)
+ * and false only for its own best-effort, allowed-to-fail flash-fallback
+ * persist step run after a swap has already verified -- see docs/audits/
+ * kiln_swap_volatile_wiring_2026-09-14.md for the full ordering. */
 bool safety_cfg_http_apply_package_and_confirm(SafetyLinkClass *link, const kiln_pkg_safety_t *pkg,
+                                                bool volatile_install,
                                                 char *reason_out, size_t reason_cap,
                                                 safety_ceiling_refusal_class_t *out_class)
 {
@@ -1165,8 +1195,8 @@ bool safety_cfg_http_apply_package_and_confirm(SafetyLinkClass *link, const kiln
     if (n == 0) {
         return true; /* nothing set to push -- not an error, just a no-op bulk write */
     }
-    return apply_pairs_ex(link, s_bulk_pairs, n, /*commit=*/true, reason_out, reason_cap, out_class,
-                           /*nonblocking_refetch=*/false);
+    return apply_pairs_ex(link, s_bulk_pairs, n, /*commit=*/true, volatile_install, reason_out, reason_cap,
+                           out_class, /*nonblocking_refetch=*/false);
 }
 
 static esp_err_t commissioning_post_handler(httpd_req_t *req)

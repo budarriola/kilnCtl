@@ -482,6 +482,27 @@ esp_err_t safety_link_send_commit_config(SafetyLinkClass *link, uint16_t *out_pa
     return s_stub_commit_result;
 }
 
+// item 15 (2026-09-14): SAFETY_CMD_APPLY_CONFIG_VOLATILE (0x2D) --
+// apply_pairs_ex()'s volatile_install=true leg. This file's own tests do
+// not yet exercise volatile_install=true (that is kiln_cfg_swap.c's own
+// job, tested in test_kiln_cfg_swap.c against its OWN fake of the public
+// wrappers this file exposes) -- this stub only needs to exist so
+// safety_cfg_http.c links, and shares the same result/rejection knobs as
+// the commit_config stub above so a future test that DOES flip
+// volatile_install can drive it identically.
+static int s_stub_apply_volatile_calls = 0;
+
+esp_err_t safety_link_send_apply_config_volatile(SafetyLinkClass *link, uint16_t *out_param_id, uint8_t *out_reason,
+                                                  bool *out_rejected)
+{
+    (void)link;
+    s_stub_apply_volatile_calls++;
+    if (out_rejected) *out_rejected = s_stub_commit_rejected;
+    if (out_param_id) *out_param_id = s_stub_commit_reject_param_id;
+    if (out_reason) *out_reason = s_stub_commit_reject_reason;
+    return s_stub_commit_result;
+}
+
 // ---------------------------------------------------------------------------
 // estop_verification.h stub bodies. This is its own separate host-test
 // executable (test_safety_cfg_http.c #includes safety_cfg_http.c directly),

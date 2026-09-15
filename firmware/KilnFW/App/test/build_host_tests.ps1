@@ -729,6 +729,7 @@ try {
     $slObjDir = Join-Path $outDir "sl"
     New-Item -ItemType Directory -Force -Path $slObjDir | Out-Null
     $slExtra = @("kilnlink_config_page.c", "kilnlink_announce.c", "kilnlink_announce_reboot.c",
+                 "kilnlink_apply_config_volatile.c",
                  "kilnlink_clear_trip.c", "kilnlink_commit_config.c", "kilnlink_commit_config_rejected.c",
                  "kilnlink_context.c", "kilnlink_get_config_page.c", "kilnlink_get_ct_cal.c",
                  "kilnlink_rollback.c", "kilnlink_rollback_result.c", "kilnlink_reboot.c",

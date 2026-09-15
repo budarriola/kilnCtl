@@ -99,6 +99,11 @@
 #     nothing. Allowlisted by path, not by widening the regex, for the same
 #     reason as the bootloader/config_store entries above: an exemption a
 #     reader cannot audit is how a check becomes decorative.
+#     2026-09-14: two more of the same shape added when this pass wired
+#     kiln_cfg_swap.c into the target build -- kiln_cfg_swap.c's own
+#     pending_crc() (esp_crc32_le() over the pending-swap record) and
+#     test_kiln_cfg_swap.c's fake safety_cfg_store_cached_crc() stub (plain
+#     accessor, computes nothing) -- see their own entries below for detail.
 #
 # uart_protocol.c no longer needs an entry here: as of 2026-08-27 it calls
 # kilnlink_crc16_ccitt_false()/kilnlink_stuff() directly at every use site
@@ -203,6 +208,17 @@ $allowlistPaths = @(
     (Join-Path $firmwareRoot "KilnFW\App\drivers\persist\zones_config_store.c"),
     (Join-Path $firmwareRoot "KilnFW\App\drivers\safety\safety_cfg_store.c"),
     (Join-Path $firmwareRoot "KilnFW\App\drivers\safety\safety_cfg_store.h"),
+    # kiln_cfg_swap.c's pending_crc() (2026-09-14, docs/audits/kiln_swap_
+    # transaction_2026-09-14.md's H10) -- same class as every other entry in
+    # this list: esp_crc32_le() record-integrity over its OWN NVS blob (the
+    # pending-swap crash-recovery record, a SEPARATE key from kiln_cfg_
+    # store's own), zeroing the crc32 field first, nothing to do with the
+    # link's CRC16-CCITT-FALSE. test_kiln_cfg_swap.c's fake safety_cfg_
+    # store_cached_crc() stub is the SAME "plain accessor named crc, computes
+    # nothing" shape as test_safety_cfg_http.c's identical stub two entries
+    # below -- allowlisted alongside it for the same reason.
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\persist\kiln_cfg_swap.c"),
+    (Join-Path $firmwareRoot "KilnFW\App\test\test_kiln_cfg_swap.c"),
     (Join-Path $firmwareRoot "KilnFW\App\test\test_safety_cfg_http.c"),
     (Join-Path $firmwareRoot "KilnFW\App\test\stubs\esp_crc.h"),
     (Join-Path $firmwareRoot "KilnFW\App\test\stubs\esp_rom_crc.h"),

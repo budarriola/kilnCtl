@@ -19,11 +19,15 @@
 //   2. snapshot the CURRENT live state (R) and persist it into the pending-
 //      swap record, marker=STAGED. This is the crash-recovery anchor.
 //   4. if P's ceiling is >= the Pico's CURRENT ceiling: raise it now, before
-//      touching anything else (safety_cfg_http_set_and_confirm_f32()).
+//      touching anything else, via safety_cfg_http_set_and_confirm_f32_
+//      volatile() (item 15, SAFETY_CMD_APPLY_CONFIG_VOLATILE/0x2D -- NEVER
+//      the flash-writing safety_cfg_http_set_and_confirm_f32() the standing
+//      ceiling-reconcile loop still uses; see docs/audits/kiln_swap_
+//      volatile_wiring_2026-09-14.md for why).
 //   5. marker=PICO_OPEN, persist.
-//   6. push every OTHER Pico param (safety_cfg_http_apply_package_and_
-//      confirm() -- see its own doc comment for the item-15 dependency this
-//      is built against and currently stubbed against).
+//   6. push every OTHER Pico param, also volatile (safety_cfg_http_apply_
+//      package_and_confirm(..., volatile_install=true, ...)) -- the Pico
+//      never leaves ARMED for the whole transaction, forward or rollback.
 //   7. read back (that same call's confirm-by-readback) and compare field-
 //      by-field against P. Mismatch -> ROLLBACK. Success -> marker=PICO_DONE.
 //   8. commit the ESP half (zones_config_import_blob(), already all-or-
@@ -51,12 +55,22 @@
 //      SAME "verify then finish" path (section 4.4's ESP_DONE row).
 //  12. finalize: kiln_cfg_store_set_active_id_raw(P.id), clear the pending
 //      record (marker=NONE).
-//  13. best-effort Pico flash-fallback persist -- STUBBED, see kiln_cfg_
-//      swap_persist_pico_fallback_stub()'s own comment: this is item 15's
-//      "persist what is now proven live" case-1 write, which cannot exist
-//      until item 15's volatile install lands. Never called from a place
-//      where its absence could be mistaken for a failed swap -- the swap is
-//      already complete at step 12 regardless of whether this step runs.
+//  13. best-effort Pico flash-fallback persist (persist_pico_flash_
+//      fallback(), .c file) -- item 15's "persist what is now proven live"
+//      case-1 write: re-pushes the SAME just-verified fields through the
+//      flash-writing COMMIT_CONFIG path so they survive a Pico reboot too.
+//      ALLOWED TO FAIL (an ARMED refusal here is ordinary and expected,
+//      logged not alarmed) -- the swap's own result was already decided at
+//      step 12, before this ever runs. A Pico reboot between a successful
+//      step 6/7 volatile install and this step landing leaves the Pico on
+//      its OLD flashed config while the ESP believes the swap succeeded;
+//      this is a real divergence, and it is caught by the SAME standing
+//      ceiling/arming check step 10/11 already uses (safety_ceiling_sync's
+//      reconcile-on-link-up, which reacts to the reboot independently of
+//      this module) -- see docs/audits/kiln_swap_volatile_wiring_2026-09-
+//      14.md for the coverage argument and its one named caveat (a swap
+//      whose target ceiling is IDENTICAL to the pre-swap ceiling has no
+//      ceiling-side signal of a lost non-ceiling field).
 //
 // LOCKING (H6): kiln_cfg_store_lock()/_unlock() bracket ONLY the snapshot-R
 // step (2) and the finalize/rollback-commit steps (8/9/12 and their
