@@ -18,6 +18,7 @@ void run_test_sim_kiln(void);
 void run_test_sim_plant_three_node(void);
 void run_test_sim_high_temp(void);
 void run_test_sim_mistune(void);
+void run_test_sim_factorial_design(void);
 void run_test_ota_auth(void);
 void run_test_ota_interlock(void);
 void run_test_heat_interlock(void);
@@ -107,6 +108,7 @@ int main(void)
     run_test_sim_plant_three_node();
     run_test_sim_high_temp();
     run_test_sim_mistune();
+    run_test_sim_factorial_design();
     run_test_ota_auth();
     run_test_ota_interlock();
     run_test_heat_interlock();
