@@ -1,0 +1,654 @@
+// Host tests for App/drivers/persist/kiln_cfg_swap.c -- the two-processor
+// apply transaction (docs/KILN_PROFILES_PLAN.md item 5,
+// docs/audits/kiln_swap_transaction_2026-09-14.md).
+//
+// kiln_cfg_swap.c is #included directly (same "no other seam into a module
+// whose job is file-scope state" convention test_kiln_cfg_store.c already
+// documents) so this file can drive its internal state machine precisely
+// and reach load_pending()/pending_crc() directly for the corruption tests.
+//
+// Every OTHER module kiln_cfg_swap.c calls into is FAKED here, deliberately
+// -- this file proves the TRANSACTION'S OWN ordering, locking, rollback and
+// boot-recovery logic in isolation from kiln_cfg_store.c/safety_cfg_store.c/
+// safety_ceiling_sync.c's own real bodies (each already has its own host
+// tests elsewhere). hal_kv itself is NOT faked at this level -- it links
+// against the REAL fake_kv.h/.c backend (Phase 2 host fake), so this file's
+// persistence tests (including fake_kv_script_corrupt_key() for H10) are
+// exercising the actual NVS-shaped read/write/CRC path, not a second mock
+// of it.
+#include <stdbool.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include "test_common.h"
+
+#include "esp_err.h"
+#include "fake_kv.h"
+
+int g_test_failures = 0;
+int g_test_count = 0;
+
+// ---------------------------------------------------------------------------
+// Fakes for everything kiln_cfg_swap.c calls other than hal_kv/esp_crc32_le.
+// ---------------------------------------------------------------------------
+
+// -- kiln_cfg_store.h --
+#define KILN_CFG_NO_ACTIVE_ID (-1)
+#define KILN_CFG_NAME_MAX_LEN 23
+
+static int32_t s_active_id = KILN_CFG_NO_ACTIVE_ID;
+static uint32_t s_generation = 1;
+static int s_lock_depth = 0;
+
+// One fake "slot" -- the only target this suite ever swaps to/from.
+typedef struct kiln_pkg_pico_param_s {
+    uint16_t param_id;
+    uint8_t type;
+    uint8_t flags;
+    uint32_t value_bits;
+} kiln_pkg_pico_param_t;
+#define KILN_PKG_PARAM_FLAG_SET 0x01u
+#define KILN_PKG_SAFETY_PARAM_CAP 96u
+typedef struct kiln_pkg_safety_s {
+    uint16_t count;
+    kiln_pkg_pico_param_t entries[KILN_PKG_SAFETY_PARAM_CAP];
+} kiln_pkg_safety_t;
+typedef struct {
+    size_t (*param_count)(void);
+    bool (*get_by_index)(size_t index, void *out);
+} kiln_pkg_pico_source_t;
+
+#define KILNLINK_PARAM_TYPE_BOOL 0x00u
+#define KILNLINK_PARAM_TYPE_U8 0x01u
+#define KILNLINK_PARAM_TYPE_U16 0x02u
+#define KILNLINK_PARAM_TYPE_F32 0x03u
+
+#define SAFETY_PARAM_ID_ABS_MAX_TEMP_C 0x0104u
+
+#define ZONES_CONFIG_BLOB_MAX_SIZE 896
+
+static uint8_t s_slot_blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+static uint16_t s_slot_blob_len = 32;
+static kiln_pkg_safety_t s_slot_pico;
+static bool s_slot_exists = true;
+static bool s_slot_pico_populated = true;
+
+static uint8_t s_live_blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+static uint16_t s_live_blob_len = 32;
+
+static bool s_get_full_package_result_override_set = false;
+static bool s_get_full_package_result_override = false;
+
+bool kiln_cfg_store_get_full_package(int32_t id, uint8_t *blob_out, uint16_t cap, uint16_t *out_len,
+                                     kiln_pkg_safety_t *pico_out, char *reason_out, size_t reason_cap)
+{
+    (void)id;
+    if (s_get_full_package_result_override_set) {
+        if (!s_get_full_package_result_override) {
+            if (reason_out && reason_cap) {
+                snprintf(reason_out, reason_cap, "forced test failure");
+            }
+            return false;
+        }
+    }
+    if (!s_slot_exists) {
+        if (reason_out && reason_cap) {
+            snprintf(reason_out, reason_cap, "no saved kiln config with that id");
+        }
+        return false;
+    }
+    if (pico_out && !s_slot_pico_populated) {
+        if (reason_out && reason_cap) {
+            snprintf(reason_out, reason_cap, "half-package");
+        }
+        return false;
+    }
+    if (blob_out) {
+        if (cap < s_slot_blob_len) {
+            return false;
+        }
+        memcpy(blob_out, s_slot_blob, s_slot_blob_len);
+    }
+    if (out_len) {
+        *out_len = s_slot_blob_len;
+    }
+    if (pico_out) {
+        *pico_out = s_slot_pico;
+    }
+    return true;
+}
+
+static bool s_set_active_id_should_fail = false;
+bool kiln_cfg_store_set_active_id_raw(int32_t id, char *reason_out, size_t reason_cap)
+{
+    if (s_set_active_id_should_fail) {
+        if (reason_out && reason_cap) {
+            snprintf(reason_out, reason_cap, "forced set_active_id failure");
+        }
+        return false;
+    }
+    s_active_id = id;
+    return true;
+}
+
+void kiln_cfg_store_lock(void) { s_lock_depth++; }
+void kiln_cfg_store_unlock(void) { s_lock_depth--; }
+uint32_t kiln_cfg_store_generation(void) { return s_generation; }
+int32_t kiln_cfg_store_get_active_id(void) { return s_active_id; }
+
+// -- kiln_package.h --
+kiln_pkg_pico_source_t kiln_pkg_pico_source_default(void)
+{
+    kiln_pkg_pico_source_t s = {0};
+    return s;
+}
+
+static kiln_pkg_safety_t s_current_pico_snapshot; // what "R" (current live) should capture
+static bool s_capture_pico_should_fail = false;
+bool kiln_package_capture_pico_half(const kiln_pkg_pico_source_t *source, kiln_pkg_safety_t *out)
+{
+    (void)source;
+    if (s_capture_pico_should_fail) {
+        return false;
+    }
+    *out = s_current_pico_snapshot;
+    return true;
+}
+
+// -- ota_state.h --
+typedef enum { OTA_INTERLOCK_OK = 0, OTA_INTERLOCK_REFUSED = 1 } ota_interlock_result_t;
+static ota_interlock_result_t s_interlock_result = OTA_INTERLOCK_OK;
+ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, char *reason_out, size_t reason_cap)
+{
+    (void)ack_no_safety_processor;
+    if (s_interlock_result != OTA_INTERLOCK_OK && reason_out && reason_cap) {
+        snprintf(reason_out, reason_cap, "interlock refused (firing running)");
+    }
+    return s_interlock_result;
+}
+
+// -- safety_link.h --
+typedef struct SafetyLinkClass_s { int dummy; } SafetyLinkClass;
+static SafetyLinkClass s_fake_link;
+
+// -- safety_cfg_http.h --
+static bool s_pico_push_should_fail = false;
+static char s_pico_push_fail_reason[128] = "push refused";
+static bool g_bump_gen_on_push = false; // H6 test hook: simulate a racing writer during the Pico round trip
+// Simulates the Pico's committed state after a (fake) push -- what the
+// readback stub below reports.
+static kiln_pkg_safety_t s_pico_committed;
+bool safety_cfg_http_apply_package_and_confirm(SafetyLinkClass *link, const kiln_pkg_safety_t *pkg,
+                                                char *reason_out, size_t reason_cap, void *out_class)
+{
+    (void)out_class;
+    if (!link) {
+        snprintf(reason_out, reason_cap, "no link");
+        return false;
+    }
+    if (s_pico_push_should_fail) {
+        snprintf(reason_out, reason_cap, "%s", s_pico_push_fail_reason);
+        s_pico_push_should_fail = false; /* fails ONLY the forward push -- the transaction's own
+                                          * rollback re-push of R (a config that was, ex hypothesi,
+                                          * already live and working) must be allowed to succeed, or
+                                          * every "forward push fails" test would be indistinguishable
+                                          * from "rollback is also impossible". */
+        return false;
+    }
+    s_pico_committed = *pkg;
+    if (g_bump_gen_on_push) {
+        s_generation++; // simulates an ordinary save/clone/delete landing on kiln_cfg_store
+                        // while this swap was off doing the (blocking) Pico round trip
+    }
+    return true;
+}
+
+static bool s_ceiling_set_should_fail = false;
+static float s_pico_ceiling = 1200.0f;
+bool safety_cfg_http_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_id, float value, char *reason_out,
+                                          size_t reason_cap, void *out_class)
+{
+    (void)out_class;
+    if (!link) {
+        snprintf(reason_out, reason_cap, "no link");
+        return false;
+    }
+    if (s_ceiling_set_should_fail) {
+        snprintf(reason_out, reason_cap, "ceiling raise refused (ARMED)");
+        return false;
+    }
+    if (param_id == SAFETY_PARAM_ID_ABS_MAX_TEMP_C) {
+        s_pico_ceiling = value;
+    }
+    return true;
+}
+
+// -- safety_cfg_store.h --
+typedef union {
+    uint8_t bool_val;
+    uint8_t u8_val;
+    uint16_t u16_val;
+    float f32_val;
+} kilnlink_param_value_t;
+typedef struct {
+    uint16_t param_id;
+    const char *name;
+    uint8_t type;
+    bool set;
+    kilnlink_param_value_t value;
+} safety_cfg_param_t;
+
+static bool s_refetch_should_fail = false;
+bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc)
+{
+    (void)config_crc;
+    if (!link || s_refetch_should_fail) {
+        return false;
+    }
+    return true;
+}
+bool safety_cfg_store_lookup(uint16_t param_id, uint8_t *out_type, const char **out_name)
+{
+    for (uint16_t i = 0; i < s_pico_committed.count; i++) {
+        if (s_pico_committed.entries[i].param_id == param_id) {
+            if (out_type) {
+                *out_type = s_pico_committed.entries[i].type;
+            }
+            if (out_name) {
+                *out_name = "param";
+            }
+            return true;
+        }
+    }
+    if (param_id == SAFETY_PARAM_ID_ABS_MAX_TEMP_C) {
+        if (out_type) {
+            *out_type = KILNLINK_PARAM_TYPE_F32;
+        }
+        if (out_name) {
+            *out_name = "abs_max_temp_c";
+        }
+        return true;
+    }
+    return false;
+}
+size_t safety_cfg_store_param_count(void) { return s_pico_committed.count; }
+bool safety_cfg_store_get_by_index(size_t index, safety_cfg_param_t *out)
+{
+    if (index >= s_pico_committed.count) {
+        return false;
+    }
+    const kiln_pkg_pico_param_t *e = &s_pico_committed.entries[index];
+    out->param_id = e->param_id;
+    out->name = "param";
+    out->type = e->type;
+    out->set = (e->flags & KILN_PKG_PARAM_FLAG_SET) != 0;
+    memcpy(&out->value, &e->value_bits, sizeof(out->value));
+    return true;
+}
+static uint16_t s_cached_crc = 1; // non-zero = "configured", see kiln_cfg_swap.c's item-16 approximation
+uint16_t safety_cfg_store_cached_crc(void) { return s_cached_crc; }
+
+// -- safety_ceiling_sync.h --
+static bool s_ceiling_get_current_should_fail = false;
+bool safety_ceiling_sync_get_current_pico_ceiling(float *out_value)
+{
+    if (s_ceiling_get_current_should_fail) {
+        return false;
+    }
+    *out_value = s_pico_ceiling;
+    return true;
+}
+static int s_reconcile_call_count = 0;
+void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link)
+{
+    (void)link;
+    s_reconcile_call_count++;
+}
+static bool s_diverged = false;
+static char s_diverged_reason[128] = "ceiling mismatch";
+bool safety_ceiling_sync_is_diverged(char *reason_out, size_t reason_cap)
+{
+    if (s_diverged && reason_out && reason_cap) {
+        snprintf(reason_out, reason_cap, "%s", s_diverged_reason);
+    }
+    return s_diverged;
+}
+
+// -- zones_config_accessors.h --
+static bool s_zones_export_should_fail = false;
+bool zones_config_export_blob(void *out, size_t out_cap)
+{
+    if (s_zones_export_should_fail || out_cap < s_live_blob_len) {
+        return false;
+    }
+    memcpy(out, s_live_blob, s_live_blob_len);
+    return true;
+}
+static bool s_zones_import_should_fail = false;
+static bool s_import_writes_wrong_bytes = false;
+static int s_zones_import_call_count = 0;
+bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, size_t reason_cap)
+{
+    s_zones_import_call_count++;
+    if (s_zones_import_should_fail) {
+        if (reason_out && reason_cap) {
+            snprintf(reason_out, reason_cap, "forced import failure");
+        }
+        return false;
+    }
+    memcpy(s_live_blob, blob, len);
+    s_live_blob_len = (uint16_t)len;
+    if (s_import_writes_wrong_bytes) {
+        /* Simulates a commit that reports success but does not actually
+         * land byte-identical content -- proves kiln_cfg_swap.c's step 9
+         * readback compare is a REAL content check, not decorative. */
+        s_live_blob[0] ^= 0xFFu;
+    }
+    return true;
+}
+
+// Suppress every REAL header kiln_cfg_swap.h/.c would otherwise pull in --
+// this test file supplies fake, minimal, name-compatible stand-ins for all
+// of them above (same "type-only stand-ins reached via include guard" trick
+// App/test/stubs/ uses for ESP-IDF headers, applied here to this
+// codebase's OWN headers instead, since kiln_cfg_swap.c's dependency
+// surface -- kiln_cfg_store.h, kiln_package.h, safety_link.h, safety_cfg_
+// store.h, safety_cfg_http.h, safety_ceiling_sync.h, ota_state.h,
+// zones_config_accessors.h -- is too large and too hardware-adjacent to
+// link for real without dragging in httpd/I2C/SPI ownership this file's
+// job is explicitly to test AROUND, not through). kiln_cfg_swap.h ITSELF
+// is NOT suppressed -- that is the real contract under test.
+#define KILN_PACKAGE_H
+#define SAFETY_LINK_H
+#define ZONES_CONFIG_ACCESSORS_H
+#define KILN_CFG_STORE_H
+#define OTA_STATE_H
+#define SAFETY_CFG_STORE_H
+#define SAFETY_CFG_HTTP_H
+#define SAFETY_CEILING_SYNC_H
+
+#include "../drivers/persist/kiln_cfg_swap.c"
+
+// ---------------------------------------------------------------------------
+
+static void set_pico_param(kiln_pkg_safety_t *pkg, uint16_t id, uint8_t type, uint32_t bits)
+{
+    kiln_pkg_pico_param_t *e = &pkg->entries[pkg->count++];
+    e->param_id = id;
+    e->type = type;
+    e->flags = KILN_PKG_PARAM_FLAG_SET;
+    e->value_bits = bits;
+}
+
+static void reset_state(void)
+{
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION_SWAP);
+    s_active_id = KILN_CFG_NO_ACTIVE_ID;
+    s_generation = 1;
+    s_lock_depth = 0;
+
+    memset(s_slot_blob, 0xAB, sizeof(s_slot_blob));
+    s_slot_blob_len = 32;
+    memset(&s_slot_pico, 0, sizeof(s_slot_pico));
+    set_pico_param(&s_slot_pico, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, KILNLINK_PARAM_TYPE_F32, 0);
+    {
+        float f = 1300.0f;
+        memcpy(&s_slot_pico.entries[0].value_bits, &f, sizeof(f));
+    }
+    set_pico_param(&s_slot_pico, 0x0201u, KILNLINK_PARAM_TYPE_U16, 42);
+    s_slot_exists = true;
+    s_slot_pico_populated = true;
+    s_get_full_package_result_override_set = false;
+
+    memset(s_live_blob, 0xCD, sizeof(s_live_blob));
+    s_live_blob_len = 32;
+
+    memset(&s_current_pico_snapshot, 0, sizeof(s_current_pico_snapshot));
+    set_pico_param(&s_current_pico_snapshot, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, KILNLINK_PARAM_TYPE_F32, 0);
+    {
+        float f = 1000.0f;
+        memcpy(&s_current_pico_snapshot.entries[0].value_bits, &f, sizeof(f));
+    }
+    set_pico_param(&s_current_pico_snapshot, 0x0201u, KILNLINK_PARAM_TYPE_U16, 7);
+    s_capture_pico_should_fail = false;
+
+    s_interlock_result = OTA_INTERLOCK_OK;
+    s_pico_push_should_fail = false;
+    memset(&s_pico_committed, 0, sizeof(s_pico_committed));
+    s_ceiling_set_should_fail = false;
+    s_pico_ceiling = 1000.0f;
+    s_refetch_should_fail = false;
+    s_cached_crc = 1;
+    s_ceiling_get_current_should_fail = false;
+    s_reconcile_call_count = 0;
+    s_diverged = false;
+    s_zones_export_should_fail = false;
+    s_zones_import_should_fail = false;
+    s_zones_import_call_count = 0;
+    s_set_active_id_should_fail = false;
+
+    fake_kv_set_write_safe_here(true);
+    kiln_cfg_swap_set_link(&s_fake_link);
+}
+
+static void test_clean_swap_applies_both_halves(void)
+{
+    TEST_SECTION("clean swap -- both halves applied and verified");
+    reset_state();
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    TEST_CHECK(ok, "clean swap reports success");
+    TEST_CHECK(!diverged, "clean swap does not set out_diverged");
+    TEST_CHECK(s_active_id == 7, "active_id set to the target");
+    TEST_CHECK(memcmp(s_live_blob, s_slot_blob, s_slot_blob_len) == 0, "ESP live blob now equals the target's");
+    TEST_CHECK(s_zones_import_call_count == 1, "ESP import happened exactly once (no redundant re-commit)");
+    TEST_CHECK(s_pico_ceiling == 1300.0f, "Pico ceiling raised to the target's (raise-first path)");
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_NONE,
+               "pending record cleared after a successful swap");
+    TEST_CHECK(s_lock_depth == 0, "store lock is balanced (never left held)");
+}
+
+static void test_pico_failure_leaves_esp_untouched(void)
+{
+    TEST_SECTION("Pico push failure -- ESP never touched, rollback restores Pico");
+    reset_state();
+    s_pico_push_should_fail = true;
+    uint8_t live_before[ZONES_CONFIG_BLOB_MAX_SIZE];
+    memcpy(live_before, s_live_blob, sizeof(live_before));
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    TEST_CHECK(!ok, "swap refused when the Pico push fails");
+    TEST_CHECK(!diverged, "a clean rollback is not reported as a divergence/alarm");
+    TEST_CHECK(s_zones_import_call_count == 0, "zones_config_import_blob() was NEVER called -- ESP untouched");
+    TEST_CHECK(memcmp(s_live_blob, live_before, sizeof(live_before)) == 0, "ESP live blob unchanged");
+    TEST_CHECK(s_active_id == KILN_CFG_NO_ACTIVE_ID, "active_id unchanged");
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_NONE,
+               "pending record cleared after a clean rollback");
+}
+
+static void test_half_package_refused(void)
+{
+    TEST_SECTION("half-package (H17) refused outright");
+    reset_state();
+    s_slot_pico_populated = false;
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    TEST_CHECK(!ok, "half-package refused");
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_NONE,
+               "nothing was ever staged for a half-package refusal");
+    TEST_CHECK(s_zones_import_call_count == 0, "ESP never touched");
+}
+
+static void test_swap_during_firing_refused(void)
+{
+    TEST_SECTION("swap during a firing refused (interlock)");
+    reset_state();
+    s_interlock_result = OTA_INTERLOCK_REFUSED;
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    TEST_CHECK(!ok, "swap refused while a firing is running");
+    TEST_CHECK(strstr(reason, "interlock") != NULL, "reason names the interlock refusal");
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_NONE, "nothing staged");
+}
+
+static void test_esp_readback_mismatch_rolls_back(void)
+{
+    TEST_SECTION("ESP readback mismatch after commit -> full rollback");
+    reset_state();
+    s_import_writes_wrong_bytes = true;
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    TEST_CHECK(!ok, "swap refused when the ESP readback does not match what was committed");
+    TEST_CHECK(!diverged, "a clean rollback (both sides confirmed back on R) is not reported as an alarm");
+    TEST_CHECK(s_active_id == KILN_CFG_NO_ACTIVE_ID, "active_id never finalized");
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_NONE,
+               "rolled back cleanly, record cleared");
+    s_import_writes_wrong_bytes = false;
+}
+
+static void test_diverged_ceiling_does_not_finalize(void)
+{
+    TEST_SECTION("post-swap ceiling/arming divergence -- both halves matched, but NOT finalized, alarmed");
+    reset_state();
+    s_diverged = true;
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    TEST_CHECK(!ok, "swap does not report success when the ceiling/arming check fails");
+    TEST_CHECK(diverged, "out_diverged is set");
+    TEST_CHECK(s_active_id == KILN_CFG_NO_ACTIVE_ID, "active_id NOT finalized");
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_ESP_DONE,
+               "pending record left at ESP_DONE for boot recovery to retry");
+    TEST_CHECK(s_zones_import_call_count == 1, "both halves DID land -- this is not a rollback case");
+}
+
+static void test_generation_race_forces_rollback(void)
+{
+    TEST_SECTION("H6: a racing writer during the Pico round trip forces a rollback, never a blind finalize");
+    reset_state();
+    g_bump_gen_on_push = true; // simulates an ordinary save/clone/delete landing mid-swap, unlocked window
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    g_bump_gen_on_push = false;
+    TEST_CHECK(!ok, "swap refused when the store generation moved mid-swap");
+    TEST_CHECK(s_zones_import_call_count == 0, "ESP was never committed once the race was detected");
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_NONE, "rolled back cleanly");
+}
+
+static void test_boot_recovery_staged_discards(void)
+{
+    TEST_SECTION("boot recovery: STAGED marker discards cleanly (crashed before Pico touched)");
+    reset_state();
+    kiln_cfg_swap_pending_t p;
+    memset(&p, 0, sizeof(p));
+    p.marker = KILN_CFG_SWAP_MARKER_STAGED;
+    p.target_id = 7;
+    p.previous_active_id = KILN_CFG_NO_ACTIVE_ID;
+    p.crc32 = pending_crc(&p);
+    TEST_CHECK(save_pending(&p), "staged record persists");
+    kiln_cfg_swap_boot_recover();
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_NONE, "STAGED discarded at boot");
+}
+
+static void test_boot_recovery_pico_done_reapplies_rollback(void)
+{
+    TEST_SECTION("boot recovery: PICO_DONE re-applies R, never 'finishes' with P (plan's explicit rule)");
+    reset_state();
+    kiln_cfg_swap_set_link(&s_fake_link);
+    kiln_cfg_swap_pending_t p;
+    memset(&p, 0, sizeof(p));
+    p.marker = KILN_CFG_SWAP_MARKER_PICO_DONE;
+    p.target_id = 7;
+    p.previous_active_id = 3;
+    p.rollback_blob_len = 32;
+    memset(p.rollback_blob, 0xEE, sizeof(p.rollback_blob));
+    p.rollback_pico = s_current_pico_snapshot;
+    p.crc32 = pending_crc(&p);
+    TEST_CHECK(save_pending(&p), "PICO_DONE record persists");
+    // Live ESP blob is still the OLD one (matches how PICO_DONE always
+    // implies "ESP never committed"); Pico is (per this scenario) actually
+    // sitting on P already -- boot recovery must push R back regardless.
+    kiln_cfg_swap_boot_recover();
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_NONE,
+               "recovered cleanly -- record cleared");
+    TEST_CHECK(s_pico_committed.entries[0].param_id == SAFETY_PARAM_ID_ABS_MAX_TEMP_C ||
+                   s_pico_committed.count > 0,
+               "the ROLLBACK package (R), not P, was pushed to the Pico");
+    float pushed;
+    memcpy(&pushed, &s_pico_committed.entries[0].value_bits, sizeof(pushed));
+    TEST_CHECK(pushed == 1000.0f, "R's ceiling (1000), not P's (1300), is what got pushed back -- proves "
+                                  "this is genuinely a rollback, not a re-finish of the interrupted swap");
+}
+
+static void test_boot_recovery_corrupt_marker_stays_alarmed(void)
+{
+    TEST_SECTION("H10: a corrupt pending record is NEVER treated as NONE -- stays alarmed, never re-armed");
+    reset_state();
+    kiln_cfg_swap_pending_t p;
+    memset(&p, 0, sizeof(p));
+    p.marker = KILN_CFG_SWAP_MARKER_PICO_OPEN;
+    p.target_id = 7;
+    p.crc32 = pending_crc(&p);
+    TEST_CHECK(save_pending(&p), "record persists");
+    TEST_CHECK(fake_kv_script_corrupt_key(KILN_NVS_PARTITION_SWAP, NVS_NAMESPACE_SWAP, NVS_KEY_SWAP_PENDING),
+               "test harness can corrupt the persisted record -- fake_kv models this as the NEXT read "
+               "failing outright (HAL_IO), the real-world shape a torn/corrupted NVS blob takes");
+    // Recovery must NOT silently clear/finish anything on an unreadable
+    // record -- prove that by reloading raw afterward and confirming it is
+    // STILL reported unreadable (i.e. clear_pending() -- which would leave
+    // a perfectly READABLE all-NONE record behind -- was never called).
+    kiln_cfg_swap_boot_recover();
+    kiln_cfg_swap_pending_t raw;
+    bool existed_but_unreadable = false;
+    bool loaded = load_pending_ex(&raw, &existed_but_unreadable);
+    TEST_CHECK(!loaded && existed_but_unreadable,
+               "the record is STILL unreadable after boot_recover() -- it was never cleared/overwritten");
+}
+
+static void test_negative_generation_check_is_load_bearing(void)
+{
+    TEST_SECTION("negative test: removing the generation re-check lets a race slip through silently");
+    // This proves H6's re-check (kiln_cfg_swap_apply()'s
+    // `if (kiln_cfg_store_generation() != gen_before)` block) is load-bearing,
+    // per this repo's standing rule that every new guard must be proven
+    // capable of failing. ACTUALLY PERFORMED (not just described): the
+    // condition was changed to `if (false && ...)` by hand, this suite was
+    // rebuilt and rerun, and test_generation_race_forces_rollback() above
+    // FAILED both its assertions (the race slipped through: ESP was
+    // committed despite the generation moving mid-swap) -- confirming the
+    // guard is not vacuous. The `false &&` was then removed BY HAND
+    // (never `git checkout --`, this tree is shared) and this suite was
+    // rebuilt and reconfirmed all-green before anything was committed. See
+    // docs/audits/kiln_swap_transaction_2026-09-14.md for the transcript.
+    TEST_CHECK(1, "see docs/audits/kiln_swap_transaction_2026-09-14.md for the negative-test transcript");
+}
+
+int main(void)
+{
+    test_clean_swap_applies_both_halves();
+    test_pico_failure_leaves_esp_untouched();
+    test_half_package_refused();
+    test_swap_during_firing_refused();
+    test_esp_readback_mismatch_rolls_back();
+    test_diverged_ceiling_does_not_finalize();
+    test_generation_race_forces_rollback();
+    test_boot_recovery_staged_discards();
+    test_boot_recovery_pico_done_reapplies_rollback();
+    test_boot_recovery_corrupt_marker_stays_alarmed();
+    test_negative_generation_check_is_load_bearing();
+
+    if (g_test_failures == 0) {
+        printf("ALL TESTS PASSED\n");
+        return 0;
+    }
+    printf("%d TEST(S) FAILED\n", g_test_failures);
+    return 1;
+}

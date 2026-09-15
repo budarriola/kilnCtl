@@ -16,7 +16,11 @@
 #include "freertos/task.h" // vTaskDelay/pdMS_TO_TICKS -- ct_auto_zero_post_handler()'s poll loop
 
 #include "http_form.h"
+#include "kiln_package.h" /* kiln_pkg_safety_t -- safety_cfg_http_apply_package_and_confirm(), item 5 */
 #include "kilnlink/kilnlink_commit_config_rejected.h"
+#include "safety_ceiling_sync.h" /* SAFETY_PARAM_ID_ABS_MAX_TEMP_C -- apply_package_and_confirm()'s
+                                  * ceiling-field exclusion, item 5. No cycle: safety_ceiling_sync.h
+                                  * only includes safety_ceiling_policy.h/safety_link.h, never this file. */
 #include "safety_ceiling_policy.h" /* safety_ceiling_refusal_class_t -- 2026-09-10 opus review finding */
 #include "safety_cfg_store.h"
 #include "s8_rate_guard_estimate.h" // S8 rate-guard auto-calc write path (docs/audits/s8_auto_calc_design_2026-09-09.md)
@@ -1060,6 +1064,109 @@ bool safety_cfg_http_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_i
      * s_store_lock behind an httpd commissioning POST. */
     return apply_pairs_ex(link, &pair, 1, /*commit=*/true, reason_out, reason_cap, out_class,
                            /*nonblocking_refetch=*/true);
+}
+
+/* Public bulk stage+commit+confirm wrapper -- docs/KILN_PROFILES_PLAN.md
+ * item 5 (kiln_cfg_swap.c), built for the two-processor apply transaction's
+ * step 6 ("PUSH the Pico half ... all 68 params staged via the existing
+ * batched apply_pairs()/confirm_commit_landed() machinery"). Reuses
+ * apply_pairs_ex() verbatim -- no second write path.
+ *
+ * DELIBERATELY EXCLUDES the ceiling field (SAFETY_PARAM_ID_ABS_MAX_TEMP_C,
+ * 0x0104) from the bulk push, always, regardless of its value in `pkg` --
+ * kiln_cfg_swap.c drives that one field itself through safety_ceiling_
+ * sync_guard_raise()/_apply_lower(), because the owner's "never a window
+ * where the Pico's ceiling is below the ESP's" rule needs it ordered
+ * relative to the ESP-side commit, which this bulk call has no visibility
+ * into. Skips any entry without KILN_PKG_PARAM_FLAG_SET (never fetched on
+ * the side that captured `pkg` -- nothing to push, not a fabricated 0/false,
+ * same "set" discipline COMMISSIONING.md sec 3.1 states for the wire
+ * itself).
+ *
+ * ITEM 15 DEPENDENCY, STATED EXPLICITLY: as of this function, SaftyFW's
+ * volatile (RAM-only) config install (docs/KILN_PROFILES_PLAN.md item 15)
+ * is not landed -- KILNLINK_COMMIT_CONFIG_LEN is still 1 byte with no
+ * volatile-install flag (kilnlink_commit_config.h). The `commit=true` this
+ * function forces therefore goes through the SAME COMMIT_CONFIG ->
+ * config_store_write() path every other commissioning write in this file
+ * uses today: a REAL FLASH WRITE, unconditionally refused while the Pico is
+ * ARMED (config_store_decide_write(), no per-field carve-out). On real
+ * hardware, with the Pico armed (its ordinary running state), this call is
+ * therefore EXPECTED TO FAIL until item 15 lands -- and that is the SAFE
+ * outcome, not a defect: kiln_cfg_swap.c treats any failure here as
+ * "nothing landed on the Pico" and rolls back / refuses the whole swap,
+ * never a partial application. The interface this function is built
+ * against is "stage N params, commit once, read back and confirm, exactly
+ * like every other write in this file" -- once item 15 adds a
+ * volatile-install flag to COMMIT_CONFIG, the one-line change belongs
+ * inside confirm_commit_landed()/apply_pairs_ex()'s encode call, not here
+ * or in kiln_cfg_swap.c. */
+bool safety_cfg_http_apply_package_and_confirm(SafetyLinkClass *link, const kiln_pkg_safety_t *pkg,
+                                                char *reason_out, size_t reason_cap,
+                                                safety_ceiling_refusal_class_t *out_class)
+{
+    if (out_class) {
+        *out_class = SAFETY_CEILING_REFUSAL_OTHER;
+    }
+    if (!reason_out || reason_cap == 0) {
+        return false;
+    }
+    if (!pkg) {
+        snprintf(reason_out, reason_cap, "no package to push");
+        return false;
+    }
+    if (pkg->count > SAFETY_CFG_POST_MAX_PAIRS) {
+        snprintf(reason_out, reason_cap, "package has %u params, this build's bulk-push buffer holds %u",
+                 (unsigned)pkg->count, (unsigned)SAFETY_CFG_POST_MAX_PAIRS);
+        return false;
+    }
+    /* static, not stack -- SAFETY_CFG_POST_MAX_PAIRS (68) * sizeof(safety_
+     * cfg_post_pair_t) is a few KB, and this file's httpd handlers already
+     * avoid exactly this class of large local (see build_commissioning_
+     * json()'s own EXT_RAM_BSS_ATTR scratch buffer comment above). The
+     * transaction this feeds is single-flight by construction
+     * (kiln_cfg_swap.c serializes swaps through kiln_cfg_store_lock()'s
+     * generation check), so a single process-wide scratch buffer is safe --
+     * it is never touched by two callers at once. */
+    static safety_cfg_post_pair_t s_bulk_pairs[SAFETY_CFG_POST_MAX_PAIRS];
+    int n = 0;
+    for (uint16_t i = 0; i < pkg->count; i++) {
+        const kiln_pkg_pico_param_t *e = &pkg->entries[i];
+        if (e->param_id == SAFETY_PARAM_ID_ABS_MAX_TEMP_C) {
+            continue;
+        }
+        if (!(e->flags & KILN_PKG_PARAM_FLAG_SET)) {
+            continue;
+        }
+        s_bulk_pairs[n].param_id = e->param_id;
+        switch (e->type) {
+        case KILNLINK_PARAM_TYPE_BOOL:
+        case KILNLINK_PARAM_TYPE_U8:
+            snprintf(s_bulk_pairs[n].value_text, sizeof(s_bulk_pairs[n].value_text), "%u",
+                     (unsigned)(e->value_bits & 0xFFu));
+            break;
+        case KILNLINK_PARAM_TYPE_U16:
+            snprintf(s_bulk_pairs[n].value_text, sizeof(s_bulk_pairs[n].value_text), "%u",
+                     (unsigned)(e->value_bits & 0xFFFFu));
+            break;
+        case KILNLINK_PARAM_TYPE_F32: {
+            float f;
+            memcpy(&f, &e->value_bits, sizeof(f));
+            snprintf(s_bulk_pairs[n].value_text, sizeof(s_bulk_pairs[n].value_text), "%.9g", (double)f);
+            break;
+        }
+        default:
+            snprintf(reason_out, reason_cap, "package param id %u has an unknown wire type %u",
+                     (unsigned)e->param_id, (unsigned)e->type);
+            return false;
+        }
+        n++;
+    }
+    if (n == 0) {
+        return true; /* nothing set to push -- not an error, just a no-op bulk write */
+    }
+    return apply_pairs_ex(link, s_bulk_pairs, n, /*commit=*/true, reason_out, reason_cap, out_class,
+                           /*nonblocking_refetch=*/false);
 }
 
 static esp_err_t commissioning_post_handler(httpd_req_t *req)

@@ -13,6 +13,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "kiln_package.h" /* kiln_pkg_safety_t -- apply_package_and_confirm()'s pkg */
 #include "safety_ceiling_policy.h" /* safety_ceiling_refusal_class_t -- set_and_confirm_f32()'s out_class */
 #include "safety_link.h"
 #include "kiln_io.h" /* CT_COMMISSIONING_PLAN.md step 2 -- ct_auto_zero_post_handler()'s
@@ -59,6 +60,25 @@ esp_err_t safety_cfg_http_start(SafetyLinkClass *link_or_null, kiln_io_t *io_or_
 bool safety_cfg_http_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_id, float value,
                                           char *reason_out, size_t reason_cap,
                                           safety_ceiling_refusal_class_t *out_class);
+
+/* Bulk sibling of the above -- docs/KILN_PROFILES_PLAN.md item 5's two-
+ * processor apply transaction (kiln_cfg_swap.c), step 6. Stages every SET
+ * entry of `pkg` EXCEPT the ceiling field (SAFETY_PARAM_ID_ABS_MAX_TEMP_C --
+ * always driven separately via safety_ceiling_sync_guard_raise()/
+ * _apply_lower(), see this function's own .c-file doc comment for why),
+ * commits once, and confirms by live read-back exactly like every other
+ * write in this file. `link` may be NULL -- returns false, same convention.
+ *
+ * ITEM 15 NOTE (also in the .c file, repeated here since this is the public
+ * contract kiln_cfg_swap.c is written against): as of this function,
+ * SaftyFW's volatile RAM-only install is not landed, so the commit this
+ * function forces writes FLASH and is refused outright while the Pico is
+ * ARMED. Callers must treat that refusal as an ordinary "nothing landed"
+ * failure -- not a bug in this function -- and roll back rather than
+ * retry-forever or treat it as success. */
+bool safety_cfg_http_apply_package_and_confirm(SafetyLinkClass *link, const kiln_pkg_safety_t *pkg,
+                                                char *reason_out, size_t reason_cap,
+                                                safety_ceiling_refusal_class_t *out_class);
 
 #ifdef __cplusplus
 }

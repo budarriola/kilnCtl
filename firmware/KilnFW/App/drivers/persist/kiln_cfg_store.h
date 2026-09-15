@@ -59,6 +59,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "kiln_package.h" /* kiln_pkg_safety_t -- kiln_cfg_store_get_full_package()'s pico_out, item 5 */
 
 #ifdef __cplusplus
 extern "C" {
@@ -335,6 +336,62 @@ bool kiln_cfg_store_is_quarantined(char *reason_out, size_t reason_cap);
  * state). `reason_out`/`reason_cap` (may be NULL/0) carry the specific
  * reason on failure. */
 bool kiln_cfg_store_quarantine_clear(bool confirm_discard, char *reason_out, size_t reason_cap);
+
+/* ---- Swap-transaction support (docs/KILN_PROFILES_PLAN.md item 5, the
+ * two-processor apply transaction; implemented in kiln_cfg_swap.c, a
+ * SEPARATE module from this one so the transaction's crash-recovery state
+ * machine and its host tests don't bloat this file's own already-large
+ * test surface). These four calls exist ONLY for kiln_cfg_swap.c -- every
+ * ordinary caller (kiln_cfg_http.c, the LCD) keeps using
+ * kiln_cfg_store_apply() above, which is unchanged and still the whole
+ * story for an ESP-only apply. */
+
+/* Copies stored entry `id`'s raw ESP blob into `blob_out` (cap must be >=
+ * ZONES_CONFIG_BLOB_MAX_SIZE) and its length into *out_len, and its
+ * captured Pico half into *pico_out (may be NULL to skip). Returns false
+ * (nothing written) if `id` does not exist, or if `pico_out` is non-NULL
+ * and the slot's pico_populated is false (H17 -- kiln_cfg_swap.c must
+ * refuse a half-package outright rather than treat an unpopulated Pico
+ * half as "empty but fine"; reason_out names this explicitly so the
+ * refusal at the transaction layer reads the same as kiln_cfg_store_
+ * apply()'s own H17 message). */
+bool kiln_cfg_store_get_full_package(int32_t id, uint8_t *blob_out, uint16_t cap, uint16_t *out_len,
+                                     kiln_pkg_safety_t *pico_out, char *reason_out, size_t reason_cap);
+
+/* Records which id the CURRENTLY LIVE zones config corresponds to, without
+ * importing or validating anything itself -- used only by kiln_cfg_swap.c's
+ * finalize/rollback steps, which have ALREADY committed the live config via
+ * zones_config_import_blob() directly (not through kiln_cfg_store_apply(),
+ * so the transaction can order the ESP commit, the Pico round trip, and the
+ * ceiling ordering the way docs/KILN_PROFILES_PLAN.md section 4.2
+ * specifies, which kiln_cfg_store_apply()'s own fixed internal order does
+ * not support). `id` may be KILN_CFG_NO_ACTIVE_ID. Persists immediately.
+ * Returns false (nothing changed) if `id` is neither KILN_CFG_NO_ACTIVE_ID
+ * nor an existing entry -- this is a bookkeeping call, never a way to point
+ * active_id at a nonexistent slot. */
+bool kiln_cfg_store_set_active_id_raw(int32_t id, char *reason_out, size_t reason_cap);
+
+/* H6 (docs/audits/kiln_profiles_robustness_2026-09-14.md): this module has
+ * one mutex protecting `s_store`, taken internally by every existing
+ * mutating call above. kiln_cfg_swap.c is a SECOND writer (the swap
+ * transaction reads/snapshots/finalizes this same store around a Pico round
+ * trip that can take hundreds of milliseconds) and must serialize its own
+ * store-touching steps against an ordinary save/clone/rename/delete/apply
+ * landing mid-transaction -- but must NEVER hold this lock across that Pico
+ * round trip (project_flash_worker_reentrancy's sibling hazard: this
+ * codebase has a standing rule, and a bricked-board incident behind it,
+ * against holding a module lock across a producer/blocking call --
+ * project_screen_idle_brick_real_cause). Take/release ONLY around the
+ * snapshot-R and finalize/rollback-commit steps in kiln_cfg_swap.c; never
+ * across safety_cfg_http_apply_param_pairs()/safety_cfg_store_refetch().
+ * kiln_cfg_store_generation() lets a caller notice a store mutation that
+ * happened during its own unlocked window (e.g. an operator deleting or
+ * re-saving the very slot mid-swap) -- kiln_cfg_swap.c re-checks it right
+ * before finalizing and refuses to finalize (rolling back instead) if it
+ * moved, rather than blindly writing active_id over whatever is there now. */
+void kiln_cfg_store_lock(void);
+void kiln_cfg_store_unlock(void);
+uint32_t kiln_cfg_store_generation(void);
 
 #ifdef __cplusplus
 }

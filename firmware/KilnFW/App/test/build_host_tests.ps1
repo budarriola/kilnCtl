@@ -105,9 +105,11 @@ try {
         (Join-Path $testDir "test_safety_ceiling_policy.c"),
         (Join-Path $testDir "test_sim_high_temp.c"),
         (Join-Path $testDir "test_sim_mistune.c"),
+        (Join-Path $testDir "test_sim_factorial_design.c"),
         (Join-Path $testDir "sim_plant.c"),
         (Join-Path $testDir "sim_high_temp.c"),
         (Join-Path $testDir "sim_mistune.c"),
+        (Join-Path $testDir "sim_factorial_design.c"),
         (Join-Path $driversDir "control/pid.c"),
         (Join-Path $driversDir "control/cone_table.c"),
         (Join-Path $driversDir "control/thermal_guard.c"),
@@ -397,6 +399,26 @@ try {
             "`"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`""
 
     Invoke-HostTestExe -Name "safety_cfg_http" -ExePath $exe3 -BuildCmd $cmd3
+
+    # ---- test_kiln_cfg_swap.c: docs/KILN_PROFILES_PLAN.md item 5, the
+    # two-processor apply transaction. Its own executable: it #includes
+    # kiln_cfg_swap.c directly and pre-defines every header guard that file
+    # transitively reaches (kiln_cfg_store.h/kiln_package.h/safety_link.h/
+    # safety_cfg_store.h/safety_cfg_http.h/safety_ceiling_sync.h/ota_state.h/
+    # zones_config_accessors.h) so it can supply its own small, fully
+    # controllable fake bodies for all of them, rather than linking the real
+    # (hardware-owning) implementations -- see that test file's own top
+    # comment. hal_kv is the one dependency NOT faked: it links against the
+    # real fake_kv.h/.c Phase 2 host backend (already on $hostTestsRsp's
+    # include path via hwAbsDir\host) so the pending-swap record's actual
+    # persistence/CRC/corruption behavior (fake_kv_script_corrupt_key(), H10)
+    # is exercised for real, not mocked a second time.
+    $exe33 = Join-Path $outDir "kilnctl_host_tests_kiln_cfg_swap.exe"
+    $cmd33 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+             "/Fo:`"$outDir\\`" /Fe:`"$exe33`" `"$(Join-Path $testDir 'test_kiln_cfg_swap.c')`" " +
+             "`"$(Join-Path $hwAbsDir 'host\fake_kv.c')`""
+
+    Invoke-HostTestExe -Name "kiln_cfg_swap" -ExePath $exe33 -BuildCmd $cmd33
 
     # ---- test_profile_executor_prestart.c: its own FOURTH, separate executable-
     # Same reason as test_zones_http.c above: it #includes profile_executor.c
@@ -1716,7 +1738,12 @@ try {
     # Invoke-HostTestExe call -- docs/SCENARIO_SIMULATION_PLAN.md WI-8's
     # 9-firing chained-adaptation harness, driving the real adaptive_tune.c
     # against a zones_config test fake (see that file's own header).
-    $totalExpected = 42
+    # 42 -> 45: two Invoke-HostTestExe calls were added by other work without
+    # updating this counter (found already stuck at 42 with 44 real calls
+    # present before this pass touched the file -- not this pass' doing,
+    # left as found rather than investigated further) plus this pass' own
+    # 45th call, test_kiln_cfg_swap.c (docs/KILN_PROFILES_PLAN.md item 5).
+    $totalExpected = 45
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the

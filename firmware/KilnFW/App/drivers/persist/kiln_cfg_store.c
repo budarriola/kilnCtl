@@ -10,6 +10,9 @@
 #include "hal_kv.h"
 #include "nvs_key_check.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h" /* kiln_cfg_store_lock()/_unlock() -- H6, docs/KILN_PROFILES_PLAN.md item 5 */
+
 #include "cfg_fs_status.h"
 #include "ota_state.h"
 #include "zones_config_accessors.h"
@@ -1456,4 +1459,91 @@ void kiln_cfg_store_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, b
 
     free(f_blob);
     free(n_blob);
+}
+
+/* ---- Swap-transaction support (docs/KILN_PROFILES_PLAN.md item 5) --------- */
+/* See kiln_cfg_store.h's own doc comments for the contract of each of these
+ * four calls; kiln_cfg_swap.c is their only caller. */
+
+bool kiln_cfg_store_get_full_package(int32_t id, uint8_t *blob_out, uint16_t cap, uint16_t *out_len,
+                                     kiln_pkg_safety_t *pico_out, char *reason_out, size_t reason_cap)
+{
+    int idx = find_index_by_id(id);
+    if (idx < 0) {
+        return set_reason(reason_out, reason_cap, "no saved kiln config with that id");
+    }
+    const kiln_cfg_entry_t *e = &s_store.entries[idx];
+    if (pico_out && !e->pico_populated) {
+        char msg[192];
+        snprintf(msg, sizeof(msg),
+                 "'%s' was saved before this firmware stored the safety processor's settings -- "
+                 "it is a half-package and cannot be swapped to. Select it, check the safety "
+                 "settings, then press Save to complete it.",
+                 e->name);
+        return set_reason(reason_out, reason_cap, msg);
+    }
+    if (blob_out) {
+        if (cap < e->blob_len) {
+            return set_reason(reason_out, reason_cap, "caller buffer too small for this slot's ESP blob");
+        }
+        memcpy(blob_out, e->blob, e->blob_len);
+    }
+    if (out_len) {
+        *out_len = e->blob_len;
+    }
+    if (pico_out) {
+        *pico_out = e->pico;
+    }
+    return true;
+}
+
+bool kiln_cfg_store_set_active_id_raw(int32_t id, char *reason_out, size_t reason_cap)
+{
+    if (id != KILN_CFG_NO_ACTIVE_ID && find_index_by_id(id) < 0) {
+        return set_reason(reason_out, reason_cap, "cannot mark a nonexistent id active");
+    }
+    s_store.active_id = id;
+    hal_status_t err = nvs_save_store();
+    if (err != HAL_OK) {
+        ESP_LOGE(TAG, "nvs_save_store after set_active_id_raw failed: %s -- active id set live but "
+                      "will not survive a reboot",
+                 hal_status_to_name(err));
+    }
+    return true;
+}
+
+/* Lazily created, same "single process-wide dummy on the host stub, a real
+ * mutex on target" convention relay_cycles.c's ensure_lock() already
+ * establishes -- see this header's own doc comment for the lock-ordering
+ * rule (never held across the Pico round trip). */
+static SemaphoreHandle_t s_swap_lock;
+
+void kiln_cfg_store_lock(void)
+{
+    if (!s_swap_lock) {
+        s_swap_lock = xSemaphoreCreateMutex();
+    }
+    if (s_swap_lock) {
+        xSemaphoreTake(s_swap_lock, portMAX_DELAY);
+    }
+}
+
+void kiln_cfg_store_unlock(void)
+{
+    if (s_swap_lock) {
+        xSemaphoreGive(s_swap_lock);
+    }
+}
+
+uint32_t kiln_cfg_store_generation(void)
+{
+    /* s_kiln_cfg_rev already IS this store's generation counter -- bumped
+     * exactly once inside nvs_save_store(), the single choke-point every
+     * mutating public function (save/clone/apply/delete/rename, and this
+     * file's own two swap-support writers above) already funnels through.
+     * Reusing it rather than adding a second counter avoids a second
+     * "reset one side, not the other" hazard (project_reset_one_side_bug_
+     * class) between two counters that would otherwise need to move
+     * together forever. */
+    return s_kiln_cfg_rev;
 }
