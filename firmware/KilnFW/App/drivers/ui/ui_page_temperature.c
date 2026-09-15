@@ -370,6 +370,9 @@ static void relay_toggle_cb(lv_event_t *e)
     case DASHBOARD_RELAY_ERR_UPDATING:
         snprintf(msg, sizeof(msg), "Relay %u refused -- firmware update in progress", UI_RELAY_DISPLAY(ctx->relay_index));
         break;
+    case DASHBOARD_RELAY_ERR_CRASH_UNACK:
+        snprintf(msg, sizeof(msg), "Relay %u refused -- unacknowledged crash report", UI_RELAY_DISPLAY(ctx->relay_index));
+        break;
     case DASHBOARD_RELAY_ERR_IO_FAIL:
     default:
         snprintf(msg, sizeof(msg), "Relay %u: command failed", UI_RELAY_DISPLAY(ctx->relay_index));

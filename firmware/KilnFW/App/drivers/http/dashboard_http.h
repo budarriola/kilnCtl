@@ -519,6 +519,13 @@ typedef enum {
      * uart_bridge.c has its own, separate translation directly off
      * kiln_io_owner_relay_result_t, not off this type. */
     DASHBOARD_RELAY_ERR_UPDATING,
+    /* 2026-09-15 (docs/audits/manual_relay_readiness_gating_options_2026-09-15.md,
+     * option B): mirrors kiln_io_owner.h's new
+     * KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK -- refused because an
+     * unacknowledged crash report is stored, not because of a live safety
+     * fault. Same "must not read as ERR_SAFETY" reasoning as ERR_UPDATING
+     * above; appended for the same reason. */
+    DASHBOARD_RELAY_ERR_CRASH_UNACK,
 } dashboard_relay_result_t;
 
 /* TODO.md 10.1a's shared-backend seam, extracted from the old POST /api/relay

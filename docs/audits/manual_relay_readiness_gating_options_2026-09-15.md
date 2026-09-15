@@ -1,6 +1,20 @@
 # Manual relay control vs. the readiness gate — options for an owner decision (2026-09-15)
 
-**Status: OPEN — owner decision needed. No safety behaviour was changed.**
+**Status: DECIDED and IMPLEMENTED, 2026-09-15 — owner chose Option B (§8).**
+`relay_on_blocked()` (`firmware/KilnFW/App/drivers/owners/kiln_io_owner.c`) now
+refuses every manual relay-ON write (LCD override, benchproto `SET_RELAY`/
+`SET_RELAY_MASK`, the danger relay route, the CT sweep's per-write energize)
+while `crash_report_has_unacknowledged()` reads true — a cached, no-I/O flag
+(`firmware/KilnFW/App/drivers/safety/crash_report.c`/`.h`) kept in sync by
+`crash_report_init()` (valid before `kiln_io_owner_start()` ever runs, in
+RECOVERY MODE included) and by `crash_report_acknowledge()`/
+`crash_report_clear()`. Danger mode still bypasses this gate, logged the same
+way it logs bypassing the OTA-update interlock. `recovery_mode` and
+`estop_verified` were deliberately left ungated on manual control, per §8.
+New refusal result: `KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK` /
+`DASHBOARD_RELAY_ERR_CRASH_UNACK` (mirrors `..._ERR_UPDATING`, distinct from
+`..._ERR_SAFETY`). See `docs/SAFETY_CASE.md` item 10 for the safety-case
+record.
 
 Question: should `recovery_mode`, `crash_report` and `estop_verified` (which
 refuse a firing and an autotune run) also refuse manual relay-ON commands and

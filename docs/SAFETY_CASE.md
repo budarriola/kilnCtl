@@ -363,18 +363,30 @@ here; none is copied from an unverified summary.
       that safety-trip/OTA gate, by design, so an operator can bench-test a
       relay/contactor with nothing fighting the test — this is pre-existing,
       documented behavior (`danger_mode.h`), not a gap introduced here.
-      This is a real, currently-open gap, **re-confirmed in code at HEAD
-      2026-09-15**: an unverified E-stop or an unacknowledged crash report
-      will refuse a firing or an autotune run but will NOT refuse a manual
-      relay-ON (LCD override, benchproto `SET_RELAY`, or the danger-mode
-      route) or a CT-sweep (`zones_current_sweep_start()`,
-      `zones_current_sweep_task.c`, whose refusal set covers hardware
-      presence, zones config, a running profile/autotune, safety link
-      up/tripped, relays already on and CT topology — and none of the three
-      readiness conditions). Raised
-      here rather than silently left for a future reader to rediscover;
-      closing it (if the owner wants manual relay control gated the same
-      way) is follow-up work, not part of this pass.
+      This was a real gap, **re-confirmed in code at HEAD 2026-09-15**: an
+      unverified E-stop or an unacknowledged crash report would refuse a
+      firing or an autotune run but would NOT refuse a manual relay-ON (LCD
+      override, benchproto `SET_RELAY`, or the danger-mode route) or a
+      CT-sweep write. Raised in
+      `docs/audits/manual_relay_readiness_gating_options_2026-09-15.md`,
+      which laid out four options; **the owner chose Option B the same day,
+      and it has now been implemented.** `relay_on_blocked()` gains a fourth
+      check, `crash_report_has_unacknowledged()` — a cached, no-I/O flag
+      (`App/drivers/safety/crash_report.c`/`.h`) kept valid from
+      `crash_report_init()` in early boot (before `boot_guard_init()`, before
+      `kiln_io_owner_start()` — including throughout RECOVERY MODE) and
+      refreshed by `crash_report_acknowledge()`/`crash_report_clear()`. It
+      refuses with a distinct `KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK` /
+      `DASHBOARD_RELAY_ERR_CRASH_UNACK` result (same pattern as
+      `..._ERR_UPDATING`) so callers do not misreport it as a live safety
+      fault, and covers the LCD, benchproto and CT-sweep paths in this one
+      choke point. Danger mode still bypasses it, logged the same way it
+      already logs bypassing the OTA-update interlock. **`recovery_mode` and
+      `estop_verified` remain deliberately ungated on manual control** — the
+      owner's stated reasoning (option doc §8): `recovery_mode` names the
+      exact situation manual control exists for, and gating
+      `estop_verified` risks locking an operator out of the procedure that
+      sets it. Relay-OFF is never blocked by any of this.
     - **NO OVERRIDE.** There is deliberately no password bypass, no
       confirm-dialog escape and no `force` parameter. If the E-stop interlock
       is unverified, the board does not fire. This was the owner's explicit

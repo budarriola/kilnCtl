@@ -642,6 +642,10 @@ dashboard_relay_result_t dashboard_set_relay(uint8_t relay_index, bool on, uint3
             }
         }
         return DASHBOARD_RELAY_ERR_UPDATING;
+    case KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK:
+        ESP_LOGW(DASH_TAG, "dashboard: relay %u ON refused -- an unacknowledged crash report is stored",
+                 (unsigned)relay_index);
+        return DASHBOARD_RELAY_ERR_CRASH_UNACK;
     case KILN_IO_OWNER_RELAY_ERR_IO_FAIL:
     case KILN_IO_OWNER_RELAY_ERR_TIMEOUT:
     default:

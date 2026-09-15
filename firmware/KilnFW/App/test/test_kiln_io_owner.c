@@ -134,6 +134,10 @@ bool relay_authority_on_blocked(SafetyLinkClass *safety, uint32_t *out_sources)
     (void)safety; if (out_sources) *out_sources = 0; return false;
 }
 bool relay_authority_manual_blocked_by_owner(uint8_t relay_index) { (void)relay_index; return false; }
+// Mutable (not hardcoded false) so test_relay_on_blocked_gates_on_unacknowledged_crash_report()
+// below can drive relay_on_blocked() through both states -- see that test.
+static bool s_stub_crash_unacked = false;
+bool crash_report_has_unacknowledged(void) { return s_stub_crash_unacked; }
 
 // -----------------------------------------------------------------------------
 
@@ -195,6 +199,44 @@ static void test_mask_gate_allows_masks_that_never_touch_a_relay_bit(void)
     TEST_CHECK(!sx_mask_touches_relay(0x0010u), "mask touching only IO_1's bit (bit 4, 0x0010) is NOT refused");
 }
 
+// -----------------------------------------------------------------------------
+// relay_on_blocked() -- the crash_report gate added 2026-09-15 (docs/audits/
+// manual_relay_readiness_gating_options_2026-09-15.md, option B). Calls the
+// REAL static relay_on_blocked() (reachable because this file #includes
+// kiln_io_owner.c directly), driving the crash_report_has_unacknowledged()
+// stub above through both states.
+// -----------------------------------------------------------------------------
+static void test_relay_on_blocked_gates_on_unacknowledged_crash_report(void)
+{
+    TEST_SECTION("relay_on_blocked() -- unacknowledged crash report refuses manual relay-ON, "
+                 "reported via out_crash_unack, and clears once acknowledged");
+
+    uint32_t sources = 0;
+    bool updating = false;
+    bool crash_unack = false;
+
+    s_stub_crash_unacked = false;
+    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack) == false,
+               "no unacknowledged crash report, no other gate tripped -- relay-ON is NOT blocked");
+    TEST_CHECK(crash_unack == false, "out_crash_unack stays false when nothing was refused");
+
+    updating = false;
+    crash_unack = false;
+    s_stub_crash_unacked = true;
+    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack) == true,
+               "an unacknowledged crash report alone blocks manual relay-ON");
+    TEST_CHECK(crash_unack == true, "out_crash_unack is set so the caller reports ERR_CRASH_UNACK, not ERR_SAFETY");
+    TEST_CHECK(updating == false, "out_updating is untouched by the crash-report gate");
+
+    // Back to acknowledged -- the gate must clear, not latch.
+    crash_unack = false;
+    s_stub_crash_unacked = false;
+    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack) == false,
+               "once acknowledged, relay-ON is unblocked again on the very next call");
+
+    s_stub_crash_unacked = false; // leave the stub in its default state for any test after this one
+}
+
 int main(void)
 {
     TEST_SECTION("kiln_io_owner relay-pin gates");
@@ -204,6 +246,7 @@ int main(void)
     test_led_driver_still_works_on_a_genuine_led_pin();
     test_mask_gate_refuses_any_mask_that_touches_a_relay_bit();
     test_mask_gate_allows_masks_that_never_touch_a_relay_bit();
+    test_relay_on_blocked_gates_on_unacknowledged_crash_report();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;

@@ -15,6 +15,15 @@
 
 static const char *TAG = "crash_report";
 
+/* Cached mirror of "have_record && !acknowledged" -- see crash_report.h's
+ * crash_report_has_unacknowledged() doc comment. Defaults to false (matches
+ * crash_report_get()'s own "nothing yet" default) and is only ever written
+ * from refresh_unacked_cache()/crash_report_acknowledge()/crash_report_clear()
+ * below, each after an NVS operation, never read from inside one -- the
+ * point of this flag is that kiln_io_owner.c's relay path can read it
+ * without touching NVS at all. */
+static bool s_have_unacked_crash = false;
+
 /* Same namespace as run_state.c/ota_record.c/relay_cycles.c, own key -- see
  * run_state.c's header comment for why a shared blob is the wrong move here
  * too: a corrupt/rejected crash record must never be able to take another
@@ -288,6 +297,18 @@ static bool load(crash_report_record_t *out)
     return true;
 }
 
+/* Refreshes s_have_unacked_crash from whatever is currently persisted.
+ * Called once from crash_report_init() (covers the "no new coredump this
+ * boot, but an old unacknowledged record still exists" case, not just a
+ * freshly captured one) and is the only place that reads NVS to decide the
+ * flag -- crash_report_acknowledge()/crash_report_clear() below update it
+ * directly from their own known outcome instead of re-loading. */
+static void refresh_unacked_cache(void)
+{
+    crash_report_record_t rec;
+    s_have_unacked_crash = load(&rec) && !rec.acknowledged;
+}
+
 /* ---------------------------------------------------------------------------
  * Public API
  * ------------------------------------------------------------------------- */
@@ -300,6 +321,14 @@ void crash_report_init(void)
                  KILN_NVS_PARTITION, esp_err_to_name(part_err));
         return;
     }
+
+    /* Reflects whatever is ALREADY persisted before deciding whether there is
+     * a NEW coredump to capture this boot -- an old unacknowledged record
+     * from a previous boot must show up in the cache even on a boot with no
+     * fresh coredump at all (the branch just below returns early in that
+     * case). Recomputed again below only if a new record actually gets
+     * captured. */
+    refresh_unacked_cache();
 
     if (!hal_sysinfo_coredump_present()) {
         /* No coredump present (the ordinary case) or unreadable -- nothing
@@ -360,6 +389,10 @@ void crash_report_init(void)
         ESP_LOGE(TAG, "could not persist new crash record: %s", esp_err_to_name(err));
         return;
     }
+    /* Freshly captured record is always acknowledged=0 -- recompute from
+     * disk anyway (rather than just setting the flag true directly) so this
+     * stays the one code path that decides the cache, not two. */
+    refresh_unacked_cache();
     ESP_LOGW(TAG, "crash record captured: task='%s' cause=%lu (%s) pc=0x%08lx addr=0x%08lx a0=0x%08lx "
                   "a1(sp)=0x%08lx frames=%u",
              rec.exc_task, (unsigned long)rec.exc_cause, rec.exc_cause_str,
@@ -384,6 +417,11 @@ bool crash_report_get(crash_report_record_t *out)
     return load(out);
 }
 
+bool crash_report_has_unacknowledged(void)
+{
+    return s_have_unacked_crash;
+}
+
 bool crash_report_acknowledge(void)
 {
     crash_report_record_t rec;
@@ -391,6 +429,7 @@ bool crash_report_acknowledge(void)
         return false;
     }
     if (rec.acknowledged) {
+        s_have_unacked_crash = false; /* defensive -- keep the cache honest even if it had drifted */
         return true; /* already acknowledged -- nothing to do, not a failure */
     }
     rec.acknowledged = 1u;
@@ -401,6 +440,7 @@ bool crash_report_acknowledge(void)
                  esp_err_to_name(err));
         return false;
     }
+    s_have_unacked_crash = false;
     return true;
 }
 

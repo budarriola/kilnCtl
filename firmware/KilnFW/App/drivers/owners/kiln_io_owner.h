@@ -153,6 +153,16 @@ typedef enum {
      * anyway costs nothing and rules the question out for good rather than
      * relying on that "checked, currently true" fact staying true forever. */
     KILN_IO_OWNER_RELAY_ERR_UPDATING,
+    /* 2026-09-15 (docs/audits/manual_relay_readiness_gating_options_2026-09-15.md,
+     * option B): refused because an unacknowledged crash report exists
+     * (crash_report_has_unacknowledged()) -- danger mode still bypasses this,
+     * same as every other gate in relay_on_blocked(). Distinct from
+     * ERR_SAFETY for the same reason ERR_UPDATING is: no SAFETY_FAULT_SRC_*
+     * bit is set, so a caller must not translate this into "safety fault"
+     * text. Appended, not inserted, for the same "this enum has no explicit
+     * numeric values and crosses neither the UART wire nor NVS" reasoning as
+     * ERR_UPDATING's own comment above. */
+    KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK,
 } kiln_io_owner_relay_result_t;
 
 typedef enum {

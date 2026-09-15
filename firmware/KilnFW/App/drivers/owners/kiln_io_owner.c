@@ -13,6 +13,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "crash_report.h" /* crash_report_has_unacknowledged() -- see relay_on_blocked() below */
 #include "danger_mode.h" /* danger_mode_active() -- see relay_on_blocked() below */
 #include "heat_interlock.h" /* HEAT_INTERLOCK_REASON_MAX -- previously transitive via ota_http.h */
 #include "ota_state.h" /* ota_http_heat_blocked_by_update() -- see relay_on_blocked() below */
@@ -176,8 +177,24 @@ static SemaphoreHandle_t s_slot_lock;
  * the flag only after seeing "blocked" at all never has to worry about a
  * stale true from a previous call bleeding through: every call site below
  * zero-initializes owner_result_t (memset in owner_task()) before calling
- * this, so the default is always a clean false. */
-static bool relay_on_blocked(uint32_t *out_sources, bool *out_updating)
+ * this, so the default is always a clean false.
+ *
+ * out_crash_unack works the same way as out_updating just above, for the
+ * SAME reason: 2026-09-15 (docs/audits/
+ * manual_relay_readiness_gating_options_2026-09-15.md, option B -- the owner
+ * decision) added an unacknowledged-crash-report refusal here, one of the
+ * three readiness-gate conditions (readiness_gate.h) that gate a firing/
+ * autotune but did not, until now, gate a manual relay-ON. `recovery_mode`
+ * and `estop_verified` are DELIBERATELY NOT gated here -- see that audit's
+ * sections 5 and 8: recovery mode is exactly when an operator needs manual
+ * relay control to diagnose the board, and estop_verified is an
+ * operator-confirmed record whose own bench procedure may need a relay
+ * energized to set. Reads a cached, no-I/O flag
+ * (crash_report_has_unacknowledged()) rather than crash_report_get() itself
+ * -- this function runs on owner_task with no lock held across it, but it is
+ * still the single choke point for every relay-ON in the system, so it must
+ * never block on NVS I/O the way crash_report_get() would. */
+static bool relay_on_blocked(uint32_t *out_sources, bool *out_updating, bool *out_crash_unack)
 {
     /* diagnostics page's explicit-accept danger-mode section (danger_mode.h)
      * -- an operator who ticked the accept-risk box gets every gate below
@@ -190,7 +207,8 @@ static bool relay_on_blocked(uint32_t *out_sources, bool *out_updating)
     if (danger_mode_active()) {
         char skipped_reason[HEAT_INTERLOCK_REASON_MAX];
         if (relay_authority_on_blocked(s_safety, out_sources) ||
-            ota_http_heat_blocked_by_update(skipped_reason, sizeof(skipped_reason))) {
+            ota_http_heat_blocked_by_update(skipped_reason, sizeof(skipped_reason)) ||
+            crash_report_has_unacknowledged()) {
             ESP_LOGW(TAG, "relay-on: danger mode bypassing a gate that would otherwise have blocked this");
         }
         return false;
@@ -203,6 +221,14 @@ static bool relay_on_blocked(uint32_t *out_sources, bool *out_updating)
         ESP_LOGW(TAG, "relay-on refused: %s", reason);
         if (out_updating) {
             *out_updating = true;
+        }
+        return true;
+    }
+    if (crash_report_has_unacknowledged()) {
+        ESP_LOGW(TAG, "relay-on refused: an unacknowledged crash report is stored -- review it on the "
+                      "Diagnostics page and acknowledge it before manual relay control");
+        if (out_crash_unack) {
+            *out_crash_unack = true;
         }
         return true;
     }
@@ -231,7 +257,7 @@ static bool sx_write_reg_touches_relay_on(uint8_t reg, uint8_t new_byte, uint32_
      * callers specifically), so this call site keeps discarding the
      * updating-vs-safety distinction rather than half-wiring it through a
      * result type that has nowhere to carry it yet. */
-    return relay_on_blocked(out_sources, NULL);
+    return relay_on_blocked(out_sources, NULL, NULL);
 }
 
 /* Generalized from the direction-only sx_set_dir_touches_relay() this
@@ -295,9 +321,11 @@ static void handle_set_relay(const owner_cmd_t *cmd, owner_result_t *r)
     }
     if (on) {
         bool updating = false;
-        if (relay_on_blocked(&r->safety_sources, &updating)) {
-            r->relay_result = updating ? KILN_IO_OWNER_RELAY_ERR_UPDATING
-                                        : KILN_IO_OWNER_RELAY_ERR_SAFETY;
+        bool crash_unack = false;
+        if (relay_on_blocked(&r->safety_sources, &updating, &crash_unack)) {
+            r->relay_result = updating       ? KILN_IO_OWNER_RELAY_ERR_UPDATING
+                               : crash_unack  ? KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK
+                                              : KILN_IO_OWNER_RELAY_ERR_SAFETY;
             return;
         }
     }
@@ -319,9 +347,11 @@ static void handle_set_relay_mask(const owner_cmd_t *cmd, owner_result_t *r)
     bool any_on = (mask & value) != 0;
     if (any_on) {
         bool updating = false;
-        if (relay_on_blocked(&r->safety_sources, &updating)) {
-            r->relay_result = updating ? KILN_IO_OWNER_RELAY_ERR_UPDATING
-                                        : KILN_IO_OWNER_RELAY_ERR_SAFETY;
+        bool crash_unack = false;
+        if (relay_on_blocked(&r->safety_sources, &updating, &crash_unack)) {
+            r->relay_result = updating       ? KILN_IO_OWNER_RELAY_ERR_UPDATING
+                               : crash_unack  ? KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK
+                                              : KILN_IO_OWNER_RELAY_ERR_SAFETY;
             return;
         }
     }

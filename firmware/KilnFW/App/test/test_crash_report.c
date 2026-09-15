@@ -250,6 +250,64 @@ static void test_second_boot_same_dump_id_does_not_overwrite(void)
 }
 
 // ---------------------------------------------------------------------------
+// crash_report_has_unacknowledged() -- the cached, no-I/O flag
+// kiln_io_owner.c's relay_on_blocked() reads (2026-09-15,
+// docs/audits/manual_relay_readiness_gating_options_2026-09-15.md option B).
+// ---------------------------------------------------------------------------
+
+static void test_has_unacknowledged_cache_tracks_persisted_state(void)
+{
+    TEST_SECTION("crash_report_has_unacknowledged() -- mirrors have_record && !acknowledged, and "
+                 "crash_report_acknowledge()/crash_report_clear() keep it in sync without a caller "
+                 "having to call refresh_unacked_cache() itself");
+    reset_all();
+
+    // s_have_unacked_crash is a plain static, not reset by reset_all() (it
+    // is not part of the fake_kv store) -- establish a known baseline the
+    // same way crash_report_init() would on a real boot with nothing
+    // persisted yet.
+    refresh_unacked_cache();
+    TEST_CHECK(crash_report_has_unacknowledged() == false,
+               "no record persisted -- cache reads false, same default crash_report_get() returns");
+
+    crash_report_record_t rec = make_sample_record();
+    rec.acknowledged = 0;
+    seal_crc(&rec);
+    TEST_CHECK(persist(&rec) == ESP_OK, "seed an unacknowledged record");
+
+    // NEGATIVE-TEST PROOF: prove the cache is not hardcoded false by showing
+    // it actually flips once a real unacknowledged record exists.
+    TEST_CHECK(crash_report_has_unacknowledged() == false,
+               "persisting alone does NOT update the cache -- only refresh_unacked_cache() (called "
+               "from crash_report_init()) or acknowledge()/clear() do, proving this is a real cache "
+               "and not just re-deriving the answer from disk on every call");
+    refresh_unacked_cache();
+    TEST_CHECK(crash_report_has_unacknowledged() == true,
+               "after a refresh, an unacknowledged record on disk reads as unacknowledged");
+
+    TEST_CHECK(crash_report_acknowledge() == true, "acknowledge succeeds");
+    TEST_CHECK(crash_report_has_unacknowledged() == false,
+               "crash_report_acknowledge() alone -- with no explicit refresh call -- already cleared "
+               "the cache, which is the entire point: kiln_io_owner.c's relay path only ever reads "
+               "the cache, never crash_report_get() directly, so a stale true here would wrongly "
+               "refuse every manual relay-ON forever after an operator acknowledges the record");
+
+    // Seed a second unacknowledged record and prove crash_report_clear()
+    // (which acknowledges internally, then erases) also leaves the cache
+    // clear.
+    crash_report_record_t rec2 = make_sample_record();
+    rec2.dump_id = rec.dump_id + 1u;
+    rec2.acknowledged = 0;
+    seal_crc(&rec2);
+    TEST_CHECK(persist(&rec2) == ESP_OK, "seed a second unacknowledged record");
+    refresh_unacked_cache();
+    TEST_CHECK(crash_report_has_unacknowledged() == true, "second record shows unacknowledged again");
+    TEST_CHECK(crash_report_clear() == ESP_OK, "crash_report_clear() succeeds");
+    TEST_CHECK(crash_report_has_unacknowledged() == false,
+               "crash_report_clear() also leaves the cache clear, with no explicit refresh");
+}
+
+// ---------------------------------------------------------------------------
 // crash_report_get() on an empty store
 // ---------------------------------------------------------------------------
 
@@ -471,6 +529,7 @@ void run_test_crash_report(void)
     test_version_mismatch_rejected();
     test_acknowledge_sets_flag_and_survives_reload();
     test_acknowledge_with_no_record_fails();
+    test_has_unacknowledged_cache_tracks_persisted_state();
     test_second_boot_same_dump_id_does_not_overwrite();
     test_get_with_no_record();
     test_dump_id_ignores_padding_bytes();

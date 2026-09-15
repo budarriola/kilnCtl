@@ -113,6 +113,26 @@ void crash_report_init(void);
 // doesn't recognize.
 bool crash_report_get(crash_report_record_t *out);
 
+// Cached, no-I/O version of "have_record && !acknowledged" (the same
+// condition readiness_crash_report_status() gates a firing on -- see
+// readiness_http.h). Added 2026-09-15 (docs/audits/
+// manual_relay_readiness_gating_options_2026-09-15.md, option B) so
+// kiln_io_owner.c's relay_on_blocked() -- the single choke point for every
+// MANUAL relay-ON write (LCD override, benchproto SET_RELAY, the danger
+// relay route, the CT sweep) -- can refuse while an unacknowledged crash
+// report exists WITHOUT doing NVS I/O from inside the relay path: unlike
+// crash_report_get() above, this reads an in-RAM flag maintained by
+// crash_report_init() (set once at boot, before kiln_io_owner_start() is
+// ever called -- see main_boot_early.c's call order) and refreshed by
+// crash_report_acknowledge()/crash_report_clear() whenever either succeeds.
+// Reads false before crash_report_init() has run (including throughout
+// RECOVERY MODE boot, which still calls it -- boot_guard_init() runs AFTER
+// crash_report_init() in main_boot_early.c) -- the same "no record yet"
+// default crash_report_get() itself returns, never a stale true left over
+// from a previous boot's cache. Never does I/O; safe to call from any task,
+// with no lock held.
+bool crash_report_has_unacknowledged(void);
+
 // True only if the exception frame this record was built from looks
 // self-consistent enough that exc_pc/exc_addr may be reasoned about.
 //

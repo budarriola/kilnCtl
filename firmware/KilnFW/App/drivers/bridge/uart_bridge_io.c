@@ -235,6 +235,17 @@ static void io_bridge_task(void *arg)
                     rejected = true;
                     break;
                 }
+                if (rr == KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK) {
+                    /* 2026-09-15: distinct from ERR_SAFETY above -- an
+                     * unacknowledged crash report is stored, not a live
+                     * safety fault (kiln_io_owner.h's
+                     * KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK comment). */
+                    ESP_LOGW(TAG, "io: subcmd 0x%02X refused -- relay %u ON: unacknowledged crash "
+                                  "report", subcmd, msg.payload[1]);
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "crash_unacked");
+                    rejected = true;
+                    break;
+                }
                 err = (rr == KILN_IO_OWNER_RELAY_OK) ? ESP_OK : ESP_FAIL;
                 break;
             }
@@ -290,6 +301,14 @@ static void io_bridge_task(void *arg)
                                  msg.payload[2]);
                     }
                     bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "updating");
+                    rejected = true;
+                    break;
+                }
+                if (rr == KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK) {
+                    /* Same distinction as IO_CMD_SET_RELAY above. */
+                    ESP_LOGW(TAG, "io: subcmd 0x%02X refused -- mask 0x%02X/value 0x%02X: "
+                                  "unacknowledged crash report", subcmd, msg.payload[1], msg.payload[2]);
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "crash_unacked");
                     rejected = true;
                     break;
                 }

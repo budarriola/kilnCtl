@@ -145,6 +145,7 @@ $KnownNonHashFalsePositives = @(
     @{ File = 'hardware/mainBoard/todo.md'; Hash = '74269244182' }          # ferrite bead MPN
     @{ File = 'docs/audits/adaptive_fuzzy_evaluation_progress_2026-09-14.md'; Hash = 'de5743fda54bab70b61d32b7d6d06722' }  # md5 of a build artifact (factorial_of1.tsv), not a git commit
     @{ File = 'docs/audits/adaptive_fuzzy_evaluation_progress_2026-09-14.md'; Hash = '1be73e04757beb9c9499e05875057f8f' }  # md5 of a build artifact (factorial_of1.tsv, three-arm inertness proof), not a git commit
+    @{ File = 'docs/audits/adaptive_fuzzy_evaluation_progress_2026-09-14.md'; Hash = 'e6f38410942ac28eb260864604168932' }  # md5 of a build artifact (factorial_of1.tsv, before/after poison comparison), not a git commit
 )
 
 $hashPattern = '(\b(?i:fabricated)\s+)?(?:\b(?i:sub):([A-Za-z0-9_.\-]+))?`([0-9a-f]{7,40})`'
