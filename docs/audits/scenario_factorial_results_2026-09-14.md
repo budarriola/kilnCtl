@@ -442,3 +442,437 @@ files outside its owned prefix.
   this run). `run_all_checks.ps1` 93/94 passed; the one failure
   (`check_no_duplicate_crc.ps1`) is outside this dispatch's scope and not
   investigated here.
+
+---
+
+# Review by execution (2026-09-14, second pass)
+
+**Method.** Every number below was recomputed from a fresh run, not read from
+the prose above. `run_sim_factorial.ps1 -OutDir C:\wt\fx_review
+-SkipDeterminism` was re-run (2.2 s, 789 rows, 0 refusals,
+`rulecell_center_frac` range `[0.0574, 1.0000]` — identical to the run this
+document reports). A separate instrumented copy of `sim_factorial_driver.c`
+(scratchpad only, never committed, never in the repo) was built from the same
+sources to dump per-tick trajectories and to override individual fixture
+constants; **it reproduces all 789 committed data rows with zero differing
+rows**, so every trajectory claim below is about the same code path that
+produced the table above.
+
+## Verdict on the seven-cell harm claim: **REAL (within the model), and the magnitude is UNDER-stated, not inflated**
+
+The claim is confirmed against all four of the failure modes it had to survive.
+
+**Not a divergence — a converged, bounded limit cycle.** Tracing `ST1-049`:
+
+| arm | sensor min/max | final-dwell error range | error zero-crossings | duty==1.0 ticks | duty==0.0 ticks |
+|---|---|---|---|---|---|
+| `A_FUZZY50` | 25.0 / 1516.9 | −211.3 … +266.9 | 29 | 2850 | 3664 |
+| `A_STATIC_MATCHED` | 25.0 / 1249.99 | −6.89 … −0.007 | 0 | 0 | 0 |
+| `A_PID` | 25.0 / 1249.95 | −8.48 … −0.049 | 0 | 0 | 0 |
+
+The fuzzy arm's oscillation envelope is **flat**: peak-to-peak error is
+478.21 °C in the first quarter of the final dwell and 477.57 °C in the last
+quarter. That is a sustained limit cycle, not a blow-up. Nothing is
+non-finite (the driver refuses on NaN and none fired), and nothing approaches
+the bounds check — `ceiling_c = ambient + model_k_dc + 400` = 2925 °C for
+these cells versus an observed maximum of 1516.9 °C. The two comparison arms
+never saturate duty at all; the fuzzy arm is in full bang-bang for 18% of its
+ticks.
+
+**Not a numerical-integration artifact.** The production control loop runs at
+1 Hz (`PROFILE_EXECUTOR_TICK_MS 1000`, `profile_executor.h:345`), so the
+driver's `DT_S 1.0f` is the correct *controller* period and must not be
+refined. Refining only the *plant* ODE, with the controller held at 1 Hz and
+the transport delay held at 1 s resolution:
+
+| ODE sub-steps | ODE dt (s) | `A_FUZZY50` `steady_rms_c` | `A_STATIC_MATCHED` |
+|---|---|---|---|
+| 1 | 1.0 | 84.1958 | 0.0446 |
+| 4 | 0.25 | 82.3241 | 0.0454 |
+| 16 | 0.0625 | 81.9848 | 0.0480 |
+| 64 | 0.0156 | 81.2336 | 0.0628 |
+
+A 64x refinement moves the result by 3.5%. The limit cycle is converged.
+
+> **A trap worth recording.** Naively sweeping `DT_S` itself *does* collapse the
+> effect (84.2 to 9.9 as dt goes 1.0 to 0.1), which looks exactly like an
+> integration artifact. It is not. `sensor_pipeline_step()`
+> (`sim_plant.c`) clamps `delay_steps` to `SIM_PLANT_DELAY_MAX_STEPS - 1` = 63
+> **silently**, so shrinking dt silently shortens the effective transport delay
+> (40.3 s to 31.5 to 15.75 to 6.3 s). The apparent dt-convergence is entirely
+> that clamp, and the effect is monotone in dead time (see below). Anyone
+> re-testing this must hold the delay fixed or they will conclude "artifact"
+> incorrectly.
+
+**Not an arm-comparison error, and not a gain-level effect.** The static arm
+does receive exactly the multipliers the TSV reports (`measured_mult` is
+passed straight through). Forcing `A_STATIC_MATCHED` to a range of fixed
+multipliers spanning and exceeding everything fuzzy realises:
+
+| forced (kp, ki, kd) multiplier | `steady_rms_c` | `sat_frac` |
+|---|---|---|
+| (0.7575, 1.2352, 0.7648) — the committed match | 0.0446 | 0.0000 |
+| (0.9158, 1.5, 0.8822) — fuzzy's dwell maximum | 0.0284 | 0.0000 |
+| (0.5, 1.5, 0.5) | 0.0076 | 0.0000 |
+| (1.0, 1.0, 1.0) | 0.2314 | 0.0000 |
+| (0.7575, 5.0, 0.7648) | 0.0068 | 0.0000 |
+
+**Every fixed gain is stable; only the time-varying schedule limit-cycles.**
+This rules out the "wrong gains installed" and "unfair match" hypotheses
+completely, and identifies the mechanism precisely: a gain-scheduling-induced
+limit cycle, in which the trajectory modulates the gains and the modulated
+gains move the trajectory, closed through a large transport delay.
+
+**Not a measurement artifact.** `STEADY_RMS_C = 84.2` is an honest RMS of a
+real ±250 °C oscillation; `ENTRY_PEAK_C = 134` is its real first peak. The
+metric is integrating over an oscillation, not over a divergence.
+
+One caveat belongs on the record: at these cells the *load* node only reaches
+441 °C while the sensor reads 1250 °C (true in the stable arms too). The
+near-element sensor at `p = 0.8333` plus `phi = 0.25` plus 20.7x
+high-temperature loss scaling puts the controlled variable almost entirely on
+the element node. That is an unusual physical situation, but it is a
+consequence of the cell's own factor levels, not a control artifact.
+
+## The crux: fixed bench tau and dead time **cannot** be creating the instability
+
+This document flags fixed sensor-node tau and fixed dead time as possibly
+having "inflated a real-but-smaller effect into an extreme one". Tested
+directly on `ST1-049` by overriding each fixture constant for kiln-span cells:
+
+| fixture | `A_FUZZY50` `steady_rms_c` | `entry_peak_c` |
+|---|---|---|
+| committed (tau 15 s, dead time 40.3 s) | 84.20 | 134.09 |
+| sensor tau to 28.6 s (kiln-scaled by 488/255.6) | 85.91 | 132.72 |
+| dead time to 64 s (ring maximum) | 117.78 | 192.45 |
+| **both kiln-scaled** | **119.61** | **191.54** |
+| dead time to 0 s | 9.63 | 0.47 |
+| dead time 10 / 20 / 30 s | 22.24 / 46.24 / 64.46 | 37.2 / 72.7 / 103.5 |
+| sensor tau to 5 / 60 / 120 s | 74.52 / 78.74 / 63.43 | 127.3 / 119.6 / 97.6 |
+| `c_s` to 5000 J/°C (10x) | 84.1958 (bit-identical) | 134.0922 |
+
+Three conclusions, all the opposite of this document's hedge:
+
+1. **Dead time is the dominant driver, and the fixture value is too SMALL.**
+   The effect is monotone in dead time. The bench value (40.3 s) is *below*
+   the kiln-scaled value (76.9 s), so holding it at the bench value
+   **under-states** the harm. Correcting it raises `steady_rms_c` from 84.2
+   to at least 117.8.
+2. **Sensor tau is nearly irrelevant, and kiln-scaling it also makes things
+   slightly worse** (84.20 to 85.91). It is not the source.
+3. **`c_s_j_per_c` is provably inert** — a 10x change is bit-identical,
+   because only `c_s/sensor_tau_s` enters `dS` and it cancels. This document
+   names `c_s = 500` as part of assumption 2; it can be struck.
+
+So the honest split is not "existence trusted, magnitude not". It is:
+**existence, location AND direction are trusted, and the magnitude is a lower
+bound.** A fixture-valued time constant in a kiln-sized plant is indeed
+physically inconsistent — but correcting the inconsistency makes the finding
+worse, so the inconsistency cannot be what creates it.
+
+One real harness limitation does cap the correction: at `dt = 1 s` the delay
+ring cannot represent more than 63 s, so the kiln-scaled 76.9 s silently
+becomes 64 s (the 76.9 s and 64.0 s rows above are byte-identical, which is
+how this was detected). The kiln-scaled magnitude is therefore **bounded
+below by 117.8**, not measured at it. Raising `SIM_PLANT_DELAY_MAX_STEPS`
+would be needed to measure it properly.
+
+## Six versus seven: it is **seven cells**, and the text is simply a miscount
+
+The region predicate — `A3=0.8333`, `A4=20.7`, `A6=MATCHED`, `A7=0.25`,
+`A8=1.5` — leaves `A1`, `A2`, `A5` free: 2^3 = 8 combinations, of which
+exactly one (`A1=heavy` x `A2=TIGHT` x `A5=fast`, raw index 185) is removed by
+the feasibility mask. **Seven cells remain, all seven are present in the
+sweep, and all seven show the effect.** Enumerated from the run:
+
+| cell | `D_inference` `STEADY_RMS_C` | `D_inference` `ENTRY_PEAK_C` | `sat_frac` (fuzzy) |
+|---|---|---|---|
+| ST1-049 | +84.151 | +133.472 | 0.0808 |
+| ST1-057 | +83.682 | +133.439 | 0.1008 |
+| ST1-113 | +151.755 | +247.485 | 0.0625 |
+| ST1-121 | +151.811 | +247.201 | 0.0782 |
+| ST1-177 | +80.196 | +130.389 | 0.0808 |
+| ST1-241 | +150.428 | +242.982 | 0.0618 |
+| ST1-249 | +150.410 | +242.886 | 0.0784 |
+
+The table earlier in this document collapses ST1-241 and ST1-249 into one
+row, which is where "six" came from. It is a presentation error, not a data
+error — no cell is missing and no number changes. Every occurrence of "six
+cells" in this document should read "seven cells".
+
+## A claim in this document that its own data contradicts
+
+The "Answering the decisive question" section states that "the low-occupancy
+end of that range is this exact six-cell region". **It is not.**
+`rulecell_center_frac = 1.0000` for all seven cells — the *maximum* of the
+range, which the region table three sections earlier states correctly. The
+actual minimum (0.0574) is `ST1-047` (`A_PID` arm), a bench-span,
+`A6=HOT`, `A7=0.75` cell that is not in the region and is not harmed. The
+sentence inverts the finding and should be struck; nothing else in the
+document depends on it.
+
+## P8: **confirmed exactly as reported**
+
+| Objective | below materiality | total | percentage |
+|---|---|---|---|
+| `LAG_SIGNED_C` | 225 | 259 | 86.9% |
+| `STEADY_RMS_C` | 212 | 263 | 80.6% |
+| `ENTRY_PEAK_C` | 197 | 263 | 74.9% |
+| `ENTRY_UNDERSHOOT_C` | 198 | 263 | 75.3% |
+| **combined (strict, all four)** | **155** | **263** | **58.9%** |
+
+Every figure reproduces to the digit, including the 4 cells with no lag
+segment. The one sensitivity worth noting: the strict combined count treats a
+missing (`NA`) objective as "below materiality"; counting `NA` as a failure
+instead gives 154/263 = 58.6%. The verdict is unaffected. **P8 does not hold
+as stated — confirmed.**
+
+## P11: **NOT EVALUABLE, not refuted**
+
+The two-factor numbers reproduce, with one convention caveat:
+
+| Response | `A3` main | `A3:A2` (pooled) | `A3:A2` (balanced) | doc | `A7` main | `A3:A7` | doc |
+|---|---|---|---|---|---|---|---|
+| `LAG_SIGNED_C` | −0.1726 | −0.0824 | −0.0617 | −0.062 | +0.0814 | +0.0292 | 0.028 |
+| `STEADY_RMS_C` | +7.5185 | +3.3681 | +2.3419 | 2.342 | −7.9681 | −7.5271 | −7.527 |
+| `ENTRY_PEAK_C` | +13.0477 | +5.4636 | +3.6747 | 3.675 | −13.4953 | −11.4602 | −11.460 |
+| `ENTRY_UNDERSHOOT_C` | +0.5135 | +0.0338 | −0.0403 | −0.040 | −0.6317 | −0.5431 | −0.543 |
+
+The `A3:A7` numbers agree to every quoted digit. The `A3:A2` numbers initially
+did not — resolved: `A2` is the **unbalanced** factor (128 hi / 96 lo, because
+the feasibility mask removes 32 cells all from the TIGHT side), and this
+document used the balanced cell-mean contrast while a pooled product-sign
+contrast gives a different number. Both are defensible; the document's choice
+is the better one for an unbalanced design, and it is internally consistent.
+**No error.** The P11 direction is the same under either convention
+(|−0.1726| > |−0.0824| and > |−0.0617|), so the arithmetic conclusion is
+robust.
+
+**But the arithmetic conclusion cannot carry a refutation.** This document
+states the case against itself and then does not follow it: `LAG_SIGNED_C` is
+the only objective the guard clears, and on it every quantity in the
+comparison — main effects and interactions alike — lies between 0.03 and
+0.17 °C, i.e. **three to sixteen times below the 0.5 °C materiality floor the
+design itself set**. Comparing two immaterial numbers to each other cannot
+refute a prediction about which is larger; the ordering is not distinguishable
+from noise at a scale the design already declared beneath notice, and the
+project's own standing rule is not to chase sub-0.5 °C effects. On the two
+objectives where the quantities *are* material, the guard fired, which is
+exactly the statement that the two-factor machinery P11 is phrased in is
+unreliable there.
+
+So there is no objective on which P11 is both measurable and material.
+**P11's verdict should be "not evaluable from this design", not "not
+confirmed".** The distinction matters: "not confirmed" invites the reader to
+treat the interaction as smaller than the main effect, whereas the truthful
+statement is that this suite cannot tell. The document's own §6.3 escape
+clause ("interpretation must be redone") is the right disposition and should
+be the headline verdict rather than a subordinate remark.
+
+## Higher-order guard: magnitudes confirmed, and the rule **was** honoured
+
+| Objective | max abs 3FI | at | reported |
+|---|---|---|---|
+| `LAG_SIGNED_C` | 0.2519 | `A4:A7:A8` | 0.25 ok |
+| `STEADY_RMS_C` | **8.1344** | `A3:A4:A6` | 8.13 ok |
+| `ENTRY_PEAK_C` | **13.4409** | `A4:A7:A8` | 13.44 ok |
+| `ENTRY_UNDERSHOOT_C` | 0.7440 | `A4:A6:A8` | 0.74 ok |
+
+All four reproduce, at the named factor triples, over all `C(8,3) = 56`
+combinations. And the design **did** honour its own rule: for the two fired
+objectives it names cells and does not print a 36-number table. The failure
+mode this review was asked to look for — firing the guard and then quoting the
+table anyway — **did not occur**. Two smaller notes: the four guard-flagged
+`STEADY_RMS_C`/`ENTRY_PEAK_C` rows that do appear in the P11 table are
+explicitly asterisked "indicative only" and are not used to reach a verdict,
+which is within the rule; and `ENTRY_UNDERSHOOT_C` at 0.74 °C is *above* the
+0.5 °C threshold, so by the letter of the rule that objective's guard fired
+too and its two-factor numbers should carry the same "name cells" treatment
+rather than the softer "indicative, not exact" wording used above.
+
+## Negative test: both parts reproduced exactly
+
+1. **Perturbation.** Bumping `ST1-021`'s `A_FUZZY50` `entry_peak_c` by +10.0
+   in a copy of the TSV moved `main[A2]` on `ENTRY_PEAK_C` (`D_inference`)
+   from `3.4780382812500004` to `3.3738716145833334` — a shift of
+   `−0.10416666666...`, i.e. **exactly −10/96**, not −10/112. Group sizes
+   confirmed independently as hi = 128, lo = 96. The unbalanced-group
+   arithmetic is right, and the document's "matched to 4 decimal places" is an
+   understatement; it matches to machine precision.
+2. **Sign-flip injection.** Flipping `main_effect()`'s return from `mh - ml`
+   to `ml - mh` took `main[A7]` on `ENTRY_PEAK_C` from
+   `-13.495250892857143` to `+13.495250892857143` — the exact values quoted.
+   Confirmed the injection **reached the classifier and did not fail early**:
+   both `main[A2]` and `main[A7]` were computed and returned normally, merely
+   negated, so the corruption propagates silently into every
+   materiality-direction conclusion — which is precisely the failure the test
+   is meant to catch. The restored value matches the pre-injection value
+   bit-for-bit.
+
+Both tests are real. No production or test C file was modified by this review;
+the instrumented driver is a scratchpad copy and the analysis scripts are
+standalone.
+
+## Recommendation: **REMOVE** (fuzzy as currently shipped), under the owner's net-harm rule
+
+The owner's rule is: if fuzzy is harmful more often than it helps, remove it.
+Counts below are per cell, at the 0.5 °C materiality floor, over all 263
+cells. The decision-relevant comparison is **`A_FUZZY50` vs `A_PID`** — that
+is literally the before/after of deleting the feature. (`D_inference` against
+`A_STATIC_MATCHED` answers a different question: *why* fuzzy differs, not
+whether to keep it.)
+
+| Objective | improved > 0.5 °C | degraded > 0.5 °C | within floor | verdict |
+|---|---|---|---|---|
+| `LAG_SIGNED_C` | 79 | 49 | 131 (+4 n/a) | improves more |
+| `STEADY_RMS_C` | 61 | 29 | 173 | improves more |
+| **`ENTRY_PEAK_C`** | **53** | **108** | 102 | **degrades more, 2:1** |
+| `ENTRY_UNDERSHOOT_C` | 93 | 47 | 123 | improves more |
+
+Per-cell, counting each cell once:
+
+- improved on >= 1 objective and degraded on none: **49**
+- degraded on >= 1 objective and improved on none: **96**
+- mixed (both): 79 — so degraded on >= 1 objective: **175**; improved on
+  >= 1: **128**
+- entirely within the floor on all four: 39
+
+**Degraded cells outnumber improved cells, 175 to 128 (or 96 to 49 counting
+only unambiguous cells).** The rule selects REMOVE.
+
+Three things sharpen rather than soften that:
+
+1. **Fuzzy fails on its own stated purpose.** The feature exists to cut
+   overshoot. `ENTRY_PEAK_C` is the one objective where it degrades roughly
+   twice as many cells as it improves (108 vs 53), and correcting the fixture
+   toward kiln values makes that worse (122 vs 52).
+2. **The cells we can most trust are the worst.** The 151 bench-span cells are
+   the only regime where the bench-valued tau and dead time are correct by
+   construction — zero fixture exposure. There: improved-only **9**,
+   degraded-only **91**; `ENTRY_PEAK_C` improved **1**, degraded **71**.
+3. **Artifact exclusions: zero, and excluding more would strengthen the case.**
+   No cell was excluded as an artifact of bench-valued sensor tau or dead
+   time, because correcting those values *increases* the harm rather than
+   removing it (see the crux section above). The 112 kiln-span cells carry a
+   different, unresolved credibility problem — they are extrapolation far
+   beyond a ~4 W bench fixture, the delay ring cannot represent their correct
+   dead time, and their load node never approaches setpoint — and they are the
+   **only** subset that favours fuzzy (261 improved vs 101 degraded
+   objective-pairs). Excluding them moves the tally further toward REMOVE, not
+   away from it.
+
+**The one honest counter-argument**, recorded so the owner is not misled:
+counting (cell, objective) *pairs* rather than cells, the full 263-cell sweep
+favours fuzzy 286 to 233. That inversion is driven entirely by the kiln-span
+cells in (3). Per-cell is the decision-relevant unit — fuzzy is enabled per
+plant, not per objective — and bench-span is the only regime with hardware
+corroboration, so both of the more trustworthy readings say REMOVE. But the
+verdict is not unanimous across every way of slicing the data, and it rests on
+simulation.
+
+**Scoping caveat that must not be lost: this suite tests FIXED fuzzy only.**
+The arms are `A_PID`, `A_FUZZY50` and `A_STATIC_MATCHED`; as this document
+states, there is no adaptive arm, so `D_adapt`/`D_combo` are not computable.
+The standing owner decision that fuzzy is kept and must *learn* (combined with
+adaptive PID) is therefore **not** addressed by this evidence. What is
+established is that fuzzy at fixed 50% strength harms more plants than it
+helps. If the intent is still to pursue a learning variant, the correct
+disposition is to remove the fixed-strength feature and re-evaluate the
+adaptive one on its own evidence — not to read this as a verdict on adaptive
+fuzzy.
+
+### Removal scope (survey only — nothing removed)
+
+**Clean deletions.** `pid_fuzzy.c` / `pid_fuzzy.h` (the public API is only
+`pid_fuzzy_adjust()` and `pid_fuzzy_derive_bands()`);
+`firmware/KilnFW/App/test/`: `test_pid_fuzzy.c`, `fuzzy_nine_cell_probe.c`,
+`pid_fuzzy_drift_harness.c`, `pid_fuzzy_drift_check.py`,
+`fuzzy_gain_mirror_drift_check.py`, `check_pid_fuzzy_drift.ps1`,
+`check_fuzzy_gain_mirror_drift.ps1`, `sim_fuzzy_closedloop.c`,
+`sim_fuzzy_overshoot.c`; PcTools `fuzzy_band_probe.py`, `fuzzy_load_sweep.py`,
+`scripts/fuzzy_ab_analyze.py` and their tests (`test_fuzzy_band_probe.py`,
+`test_fuzzy_load_sweep.py`, `test_fuzzy_ab_analyze.py`); the `fuzzy_ab_*`
+config presets and `logs/coupling/fuzzy_ab_*` state files.
+
+**Call-site edits.** `profile_executor.c` (the `fuzzy_cfg` second
+`pid_family_zone_tick()` branch), `profile_executor_pid_tick.c`,
+`profile_executor_config_reload.c`, `profile_executor_firing_stats.c`,
+`profile_executor_run.c`, `profile_executor_status.c`,
+`profile_executor_internal.h`, `profile_executor_state.h`, `pid.c`/`pid.h`,
+`adaptive_tune.c` / `adaptive_tune_ki.c` / `adaptive_tune_internal.h`,
+`zone_coupling_solve.c`, `zones_http*.c`, `backup_export.c`,
+`backup_import.c`, `zones_page.html`, `setup_wizard_page.html`. Host tests
+that reference fuzzy indirectly: `test_closed_loop.c`, `test_pid.c`,
+`test_zones_http.c`, `test_backup_import.c`,
+`test_profile_executor_prestart.c`, `test_ramp_lock_onesided.c`,
+`test_adaptive_tune*.c`, `test_main.c`, plus `build_host_tests.ps1` and the
+`tools/check_test_c_files_wired.ps1` / `check_test_has_assertions.ps1`
+allowlists (see the standing "splits break filename-keyed checks" hazard —
+every path-keyed list must be revisited).
+
+**MCP / PC tooling.** `mcp_server_control.py` (the `fuzzy_strength_pct` gate
+field and the plant-model help text), `gate_fields.py`,
+`zones_http_client.py`, `pid_ab_compare.py`, `run_queue.py`, `plant_sim.py`,
+`gui_wifi_firing.py`, `http_capture_log.py`, `load_mass_sweep.py`,
+`bd_reachability_check.py`, `capture_pool_provenance.py`, and their tests.
+
+**Web/API surface.** JSON field names `fuzzy_strength_pct`,
+`fuzzy_model_valid`, and the form key `fuzzystrength`. Removing
+`fuzzy_model_valid` from `GET /api/zones/config` is a client-visible response
+change.
+
+**Cannot be removed cleanly — flagged.**
+
+- **`zone_cfg_t::fuzzy_strength_pct` is persisted on the bench board and
+  frozen into every historical on-flash layout from v10 through v26.**
+  `zones_config_json.h` carries `zone_cfg_v16_t` / `v17_t` / `v18_t` with
+  `_Static_assert(offsetof(..., fuzzy_strength_pct) == 108)` pins. Those
+  historical structs are on-flash contracts and **must not be touched** — they
+  exist so old blobs still decode. Only the *live* `zone_cfg_t` can drop the
+  field, and that is a `ZONES_CFG_VERSION` **26 -> 27 bump**, with every
+  migration step reading and discarding the field.
+- **The per-zone fuzzy band fields `error_band_c` / `rate_band_c_per_s`**
+  (added at v18 -> v19 specifically for `pid_fuzzy.c`'s membership half-widths)
+  are in the same position and the same bump.
+- **The version bump re-arms the documented OTA rollback hazard**: firmware
+  older than v27 will refuse a v27 blob and run that boot on firmware-default
+  PID gains. `control_get_zones` must be read back before any heating run
+  following a rollback.
+- **`safety_cfg_store.c`** references fuzzy and touches the RP2040 side —
+  check whether the safety processor's config schema needs a matching bump.
+- **Board backups** under `tools/PcTools/board-backups/` and the
+  `backup_import.c` path contain `fuzzy_strength_pct`; import must keep
+  accepting and ignoring it or every existing backup becomes unrestorable.
+- **Documentation** with substantive fuzzy content:
+  `docs/FUZZY_CONTROLLER_PLAN.md` (delete or mark closed),
+  `docs/research/fuzzy_ramp_tracking_2026-09-13.md`,
+  `firmware/KilnFW/docs/PID_CONTROL.md`, `PID_EXPANSION_PLAN.md`,
+  `AB_EXPERIMENT_CHECKLIST.md`, `PROJECT_STATUS.md`, `UI_PLAN.md`,
+  `PER_ZONE_TARGET_DESIGN_STUDY.md`, `ROADMAP.md`, `CREDITS.md`,
+  `docs/SCENARIO_SIMULATION_PLAN.md`, `docs/ITER_TUNE_REDESIGN_PLAN.md`,
+  `docs/SETUP_WIZARD.md`, `CLAUDE.md`.
+- **Do not delete this factorial suite** (`sim_factorial_*`,
+  `run_sim_factorial.ps1`) as part of a fuzzy removal — it is the evidence for
+  the decision, and its `A_PID` arm remains useful.
+
+Removal was **not performed**; this is a survey only.
+
+## Checks
+
+- `run_sim_factorial.ps1` (private `-OutDir C:\wt\fx_review`): 789/789 rows,
+  0 refusals, occupancy `[0.0574, 1.0000]` — reproduces the committed run.
+- Instrumented driver vs committed TSV: **0 differing rows of 789**.
+- `tools\check_doc_hash_citations.ps1`: pass (2133 citations, 593 unique
+  hashes, every one resolving).
+- `tools\run_all_checks.ps1` (foreground, `-ExecutionPolicy Bypass`):
+  **93 passed, 0 skipped, 1 failed.** The failure is
+  `check_00_kilnfw_target_build.ps1` — two `-Werror` breaks in
+  `App/drivers/persist/kiln_package.c` (`use-after-free` at :233,
+  `format-truncation` at :299). That file is **uncommitted working-tree work
+  from a concurrent session** (`git status` shows it modified; last commit
+  touching it is `beb2c84e`) and is outside this review's scope — this pass
+  changed only this document. Note that this is a *different* failure from the
+  `check_no_duplicate_crc.ps1` one the pass above reported, so the identical
+  93/1 tally is a coincidence, not the same state.
+- No board was flashed, no heating run was performed, no `debug_*` tool was
+  called, and no `.kicad_*` file was touched during this review.
