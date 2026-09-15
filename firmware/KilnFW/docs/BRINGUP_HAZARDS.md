@@ -63,7 +63,8 @@ python C:\esp\v6.0.2\esp-idf\components\espcoredump\espcoredump.py `
 ```
 Notes: `-p COM3` is the USB-Serial-JTAG port (VID:PID 303A:1001), not the
 CH340 PC-link port. The ELF must be the exact crashing image — every link
-archives its ELF to `build/elf_archive/KilnCtrl-<hash>.elf` for this reason.
+archives its ELF to `elf_archive/KilnCtrl-<hash>.elf` (a sibling of `build/`,
+since 2026-09-15) for this reason.
 Do not decode while the board is crash-looping (a fresh panic corrupts the
 partition mid-read). PowerShell reports nonzero exit because esptool writes
 progress to stderr — redirect and check the output file, not `$LASTEXITCODE`.

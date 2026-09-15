@@ -27,6 +27,13 @@ build/
 # Still never committed -- manifest.json/superseded.json are generated
 # indices, and *.elf below already covers the binaries themselves.
 elf_archive/
+
+# flash_provenance.json (kilnctrl flash_provenance.py/elf_archive.py) -- same
+# reasoning as elf_archive/ above: a sibling of build/, not inside it, since
+# the M1 fix in docs/audits/review_elf_archive_move_a347e726_2026-09-15.md
+# (was itself inside build/ and lost with it). Machine-generated, never
+# committed. See elf_archive.kiln_provenance_path().
+flash_provenance.json
 *.o
 *.a
 *.out

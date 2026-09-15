@@ -514,8 +514,10 @@ def flash_firmware(
     shared working tree means the risk is not limited to KilnFW/CommonFW --
     and reports it in the result so an operator can see exactly what rode
     along, dirty tree or not. That capture is ALSO persisted to
-    KilnFW/build/flash_provenance.json so "what was actually on the board at
-    <time>" is answerable later from disk.
+    KilnFW/flash_provenance.json (a sibling of KilnFW/elf_archive/ and
+    KilnFW/build/, since 2026-09-15 -- see elf_archive.kiln_provenance_path())
+    so "what was actually on the board at <time>" is answerable later from
+    disk, even after a `build/` wipe.
 
     This does NOT refuse on an ordinary dirty tree -- several sessions
     sharing one working tree is this project's normal state (CLAUDE.md), so
@@ -542,8 +544,10 @@ def flash_firmware(
     record and the sensitive-dirty-file guard are evaluated against THAT
     tree (its own `git status --porcelain`/HEAD, taken as two levels above
     this path), not the main tree, and the persisted
-    `flash_provenance.json` (still written under the override's own
-    `build/`) records `kiln_fw_root_override` so a later reader knows this
+    `flash_provenance.json` (always the MAIN tree's, per
+    elf_archive.kiln_provenance_path() -- never the override worktree's,
+    since that worktree and its build/ can be deleted right after flashing)
+    records `kiln_fw_root_override` so a later reader knows this
     flash did not come from the ordinary path. Post-flash verification
     (`verify=True`) compares against THAT tree's `.bin`, unchanged
     otherwise.
@@ -600,7 +604,18 @@ def flash_firmware(
     if adapter_refusal:
         return adapter_refusal
 
-    provenance_path = os.path.join(build_dir, "flash_provenance.json")
+    # M1 (2026-09-15 review): flash_provenance.json used to live at
+    # <build_dir>/flash_provenance.json -- inside build/, exactly like the
+    # ELF archive was before the a347e726 move, and just as vulnerable to
+    # being silently wiped by an `idf.py fullclean`/reconfigure of build/
+    # (see kiln_archive_dir()'s docstring for the incident this class of bug
+    # caused for the ELF archive itself). It also lived under the OVERRIDE
+    # tree's own build/ when kiln_fw_root was used, so it was deleted along
+    # with that worktree -- see elf_archive.kiln_provenance_path()'s
+    # docstring. Always the MAIN tree's location now, a sibling of
+    # kiln_archive_dir(), regardless of kiln_fw_root.
+    provenance_path = elf_archive.kiln_provenance_path()
+    elf_archive._guard_against_test_write(provenance_path)
     # An override tree's own git identity, not the main tree's: kiln_fw_root
     # is expected to be `<some-tree-root>/firmware/KilnFW`, so its tree root
     # is two levels up. See flash_firmware()'s `kiln_fw_root` docstring.

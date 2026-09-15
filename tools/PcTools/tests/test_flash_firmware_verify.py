@@ -175,6 +175,16 @@ class FlashFirmwareVerifyWiringTest(unittest.TestCase):
         self._provenance_write_patch.start()
         self.addCleanup(self._provenance_write_patch.stop)
 
+        # M1 (2026-09-15 review): flash_provenance.json's path is now
+        # elf_archive.kiln_provenance_path(), guarded like the ELF archive
+        # dirs -- unpatched under pytest this raises. write_provenance_json
+        # is mocked above anyway, so a fake path is harmless.
+        self._provenance_path_patch = unittest.mock.patch.object(
+            mf.elf_archive, "kiln_provenance_path", return_value="FAKE-flash_provenance.json"
+        )
+        self._provenance_path_patch.start()
+        self.addCleanup(self._provenance_path_patch.stop)
+
         self._isfile_patch = unittest.mock.patch.object(mf.os.path, "isfile", return_value=True)
         self._isfile_patch.start()
         self.addCleanup(self._isfile_patch.stop)
@@ -562,6 +572,19 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         self._archive_patch.start()
         self.addCleanup(self._archive_patch.stop)
 
+        # M1 (2026-09-15 review): flash_provenance.json now lives at
+        # elf_archive.kiln_provenance_path() -- always the MAIN tree's, a
+        # sibling of kiln_archive_dir(), regardless of kiln_fw_root. This
+        # class exercises real capture_tree_state()/write_provenance_json(),
+        # so point the path at a tmp file instead of the real main-tree
+        # location (which the guard would refuse anyway under pytest).
+        self.prov_path = os.path.join(self.tmp_root, "flash_provenance.json")
+        self._provenance_path_patch = unittest.mock.patch.object(
+            mf.elf_archive, "kiln_provenance_path", return_value=self.prov_path
+        )
+        self._provenance_path_patch.start()
+        self.addCleanup(self._provenance_path_patch.stop)
+
     def test_missing_kiln_fw_root_path_is_refused(self):
         result = mf.flash_firmware(kiln_fw_root=os.path.join(self.tmp_root, "does-not-exist"), verify=False)
         self.assertTrue(result.startswith("error:"))
@@ -596,8 +619,7 @@ class KilnFwRootOverrideTest(unittest.TestCase):
 
     def test_provenance_json_records_the_override_path(self):
         mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
-        prov_path = os.path.join(self.build_dir, "flash_provenance.json")
-        prov = mf.flash_provenance.read_provenance_json(prov_path)
+        prov = mf.flash_provenance.read_provenance_json(self.prov_path)
         self.assertIsNotNone(prov)
         self.assertEqual(prov["kiln_fw_root_override"], self.override_kiln_fw_root)
         self.assertEqual(prov["outcome"], mf.flash_provenance.OUTCOME_FLASHED_OK)
@@ -607,8 +629,7 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         # field is not just always the main tree's path by accident.
         with unittest.mock.patch.object(mf, "_kiln_fw_root", return_value=self.override_kiln_fw_root):
             mf.flash_firmware(verify=False)
-        prov_path = os.path.join(self.build_dir, "flash_provenance.json")
-        prov = mf.flash_provenance.read_provenance_json(prov_path)
+        prov = mf.flash_provenance.read_provenance_json(self.prov_path)
         self.assertIsNotNone(prov)
         self.assertIsNone(prov["kiln_fw_root_override"])
 

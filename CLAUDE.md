@@ -143,7 +143,8 @@ now refuses to start a run on a board with an unacknowledged crash regardless
 of what the run needs.
 
 `flash_firmware()` also records `git status --porcelain`/HEAD at flash time
-(reported in the result, persisted to `KilnFW/build/flash_provenance.json`)
+(reported in the result, persisted to `KilnFW/flash_provenance.json`, a
+sibling of `build/` since 2026-09-15 -- not inside it)
 and refuses — naming the files — if the dirty set touches config-schema/
 migration/safety code (e.g. `zones_config_*`), since this tree is normally
 shared across sessions. An ordinary dirty tree is never refused. Override
@@ -315,7 +316,9 @@ replicates routing already drawn on one instance of a repeated block onto its si
 Symbolize a crash against the ELF that matches the RUNNING image, not
 `build/KilnCtrl.elf` — that path is whatever was built most recently and
 produces confident, wrong line numbers once the board is running an older
-flash. Use `build/elf_archive/KilnCtrl-<hash>.elf`, matched by embedded build
+flash. Use `KilnFW/elf_archive/KilnCtrl-<hash>.elf` (a sibling of `build/`,
+since 2026-09-15 -- not inside it, so an `idf.py fullclean` can't wipe it),
+matched by embedded build
 timestamp against the board's `fw_build` — `find_crash_elf()` does this
 lookup for you. As of 2026-09-11 the archive only ever contains ELFs a board
 was actually flashed with: `archive_elf.cmake`'s POST_BUILD step used to also

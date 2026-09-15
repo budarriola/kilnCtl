@@ -213,10 +213,12 @@ def write_provenance_json(
     detail: Optional[str] = None,
     kiln_fw_root_override: Optional[str] = None,
 ) -> None:
-    """Persists the capture alongside the build output (e.g.
-    KilnFW/build/flash_provenance.json) so "what was actually on the board
-    at 14:53" is answerable later from disk, not just from a chat
-    transcript. Overwrites -- this is a point-in-time snapshot of the LAST
+    """Persists the capture to `out_path` (the caller decides the path; see
+    elf_archive.kiln_provenance_path() -- since 2026-09-15 this is
+    KilnFW/flash_provenance.json, a sibling of build/, not inside it) so
+    "what was actually on the board at 14:53" is answerable later from disk,
+    not just from a chat transcript. Overwrites -- this is a point-in-time
+    snapshot of the LAST
     flash ATTEMPT from this build dir, not a log; the session log captures
     the running history via the normal _srv._session_log calls at each call
     site. Best-effort: a write failure must not block or fail the flash.

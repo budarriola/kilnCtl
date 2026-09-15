@@ -122,6 +122,16 @@ class FlashFirmwareAdapterPinningTest(unittest.TestCase):
         self._provenance_write_patch.start()
         self.addCleanup(self._provenance_write_patch.stop)
 
+        # M1 (2026-09-15 review): flash_provenance.json's path is now
+        # elf_archive.kiln_provenance_path(), guarded the same way as the ELF
+        # archive dirs -- unpatched under pytest this raises. Point it at a
+        # harmless fake path (write_provenance_json above is mocked anyway).
+        self._provenance_path_patch = unittest.mock.patch.object(
+            mf.elf_archive, "kiln_provenance_path", return_value="FAKE-flash_provenance.json"
+        )
+        self._provenance_path_patch.start()
+        self.addCleanup(self._provenance_path_patch.stop)
+
         self._isfile_patch = unittest.mock.patch.object(mf.os.path, "isfile", return_value=True)
         self._isfile_patch.start()
         self.addCleanup(self._isfile_patch.stop)

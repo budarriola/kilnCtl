@@ -4,7 +4,9 @@ it up.
 
 Why this exists (2026-09-10): an ESP panic could not be symbolized because no
 ELF matching the running firmware (commit 0dddd435) existed anywhere. The
-`firmware/KilnFW/build/elf_archive/` directory already existed and IS
+`firmware/KilnFW/elf_archive/` directory (2026-09-15: moved here from
+`firmware/KilnFW/build/elf_archive/`, a sibling of `build/` rather than a
+child of it -- see `kiln_archive_dir()`'s docstring) already existed and IS
 populated -- by `archive_elf.cmake`, invoked as a POST_BUILD step on every
 `idf.py build` (see that file), keyed by a SHA256 of the linked ELF. That
 mechanism works for the ordinary build-in-place workflow. It has one gap:
@@ -18,8 +20,9 @@ This module closes that gap from the FLASH side rather than the build side:
 `flash_firmware()` (and `debug_program(peer="pico")`) call `archive_kiln_elf`/
 `archive_safty_elf` after a confirmed-successful flash, copying whatever ELF
 was actually just flashed into the CANONICAL archive location (always under
-the main tree's firmware/<KilnFW|SaftyFW>/build/elf_archive/, never the
-override's own build dir) and recording a manifest entry keyed by the
+the main tree's firmware/<KilnFW|SaftyFW>/elf_archive/, a sibling of that
+project's build/ directory, never the override's own build dir) and recording
+a manifest entry keyed by the
 identity the board can report about itself later:
   - KilnFW: the embedded esp_app_desc build timestamp (the same string
     dashboard_http.c reports as `fw_build`), plus git commit for context.
@@ -257,7 +260,8 @@ def _parse_archived_at(entry: dict) -> Optional[float]:
 # (a rebuild that didn't touch the translation unit embedding __DATE__/
 # __TIME__, so two genuinely different ELFs report the identical fw_build
 # string -- confirmed live: 11 such collisions across the 60 ELFs sitting in
-# firmware/KilnFW/build/elf_archive/ against only 3 manifest entries), the
+# firmware/KilnFW/elf_archive/ (build/elf_archive/ at the time) against only
+# 3 manifest entries), the
 # manifest keeps mapping that identity to the most-recently-archived elf_key
 # (matches existing "last write wins" behavior) but the superseded elf_key is
 # recorded here instead of being silently dropped -- unreachable by lookup
@@ -298,6 +302,29 @@ def safty_archive_dir() -> str:
     return os.path.join(_repo_root(), "firmware", "SaftyFW", "elf_archive")
 
 
+def kiln_provenance_path() -> str:
+    """Canonical location of flash_provenance.json -- always the MAIN tree's,
+    a sibling of kiln_archive_dir() (both live directly under
+    firmware/KilnFW/, never inside build/), regardless of any kiln_fw_root
+    override used to build/flash.
+
+    2026-09-15 (M1, docs/audits/review_elf_archive_move_a347e726_2026-09-15.md):
+    this file used to live at KilnFW/build/flash_provenance.json -- the exact
+    "durable" archive location that kiln_archive_dir()'s docstring already
+    explains is not durable at all, since a clean/fresh-configure of build/
+    (idf.py fullclean or equivalent) silently deletes it. The commit that
+    moved the ELF archive out of build/ (a347e726) left this one file behind
+    by mistake, so the provenance record of what dirty tree state actually
+    got flashed could still be wiped out from under a later `idf.py
+    fullclean`, exactly the failure mode the archive move was fixing.  Moved
+    here, alongside the archive, for the same reason -- still gitignored (see
+    firmware/KilnFW/.gitignore's build/ exclusion; this file is directly
+    under firmware/KilnFW/, not under build/, but is equally never
+    committed -- add an explicit ignore entry if one does not already cover
+    it)."""
+    return os.path.join(_repo_root(), "firmware", "KilnFW", "flash_provenance.json")
+
+
 def _canonical_archive_dirs() -> set[str]:
     """The two real archive directories, computed directly from _repo_root()
     rather than through kiln_archive_dir()/safty_archive_dir() -- those two
@@ -310,7 +337,14 @@ def _canonical_archive_dirs() -> set[str]:
     }
 
 
-def _guard_against_test_write(archive_dir: str) -> None:
+def _canonical_provenance_path() -> str:
+    """The one real flash_provenance.json path, computed directly from
+    _repo_root() -- same "don't read it back through the patchable function"
+    rationale as _canonical_archive_dirs()."""
+    return os.path.normpath(os.path.join(_repo_root(), "firmware", "KilnFW", "flash_provenance.json"))
+
+
+def _guard_against_test_write(target: str) -> None:
     """2026-09-10: a host test (test_flash_board_pinning.py /
     test_flash_firmware_verify.py) drove flash_firmware() end-to-end while
     mocking OpenOCD, stale_check and flash_provenance -- but not elf_archive
@@ -324,26 +358,30 @@ def _guard_against_test_write(archive_dir: str) -> None:
     this module (the exact thing that failed here), make it structurally
     impossible: refuse loudly, before touching disk, whenever pytest is
     running (PYTEST_CURRENT_TEST is set by pytest for the duration of every
-    test) and the archive_dir in play is one of the two real ones. A test
-    that correctly monkeypatches kiln_archive_dir()/safty_archive_dir() (as
-    test_elf_archive.py does) is unaffected -- its archive_dir is a temp
-    path and never matches. KILNCTL_ALLOW_TEST_ARCHIVE_WRITE=1 is the
-    explicit, deliberate escape hatch for a test that really means to
-    exercise the canonical path (none does today)."""
+    test) and `target` -- an archive directory OR the provenance file path
+    (2026-09-15: the same class of accident is just as possible for
+    flash_provenance.json, see kiln_provenance_path()) -- is one of the real
+    ones. A test that correctly monkeypatches kiln_archive_dir()/
+    safty_archive_dir()/kiln_provenance_path() (as test_elf_archive.py does)
+    is unaffected -- its target is a temp path and never matches.
+    KILNCTL_ALLOW_TEST_ARCHIVE_WRITE=1 is the explicit, deliberate escape
+    hatch for a test that really means to exercise the canonical path."""
     if not os.environ.get("PYTEST_CURRENT_TEST"):
         return
     if os.environ.get("KILNCTL_ALLOW_TEST_ARCHIVE_WRITE"):
         return
-    if os.path.normpath(archive_dir) in _canonical_archive_dirs():
+    normalized = os.path.normpath(target)
+    if normalized in _canonical_archive_dirs() or normalized == _canonical_provenance_path():
         raise RuntimeError(
-            "elf_archive: refusing to write to the CANONICAL archive "
-            f"({archive_dir}) from inside a pytest run (PYTEST_CURRENT_TEST is "
-            "set). This directory holds real symbolization data for real "
-            "hardware panics. The calling test must monkeypatch "
-            "elf_archive.kiln_archive_dir() / elf_archive.safty_archive_dir() "
-            "to point at a temp directory (see test_elf_archive.py), or patch "
-            "elf_archive.archive_kiln_elf / elf_archive.archive_safty_elf "
-            "directly if it does not need real archiving behavior. Set "
+            "elf_archive: refusing to write to the CANONICAL archive/provenance "
+            f"location ({target}) from inside a pytest run (PYTEST_CURRENT_TEST "
+            "is set). This holds real symbolization/provenance data for real "
+            "hardware flashes. The calling test must monkeypatch "
+            "elf_archive.kiln_archive_dir() / elf_archive.safty_archive_dir() / "
+            "elf_archive.kiln_provenance_path() to point at a temp path (see "
+            "test_elf_archive.py), or patch elf_archive.archive_kiln_elf / "
+            "elf_archive.archive_safty_elf / flash_provenance.write_provenance_json "
+            "directly if it does not need real behavior. Set "
             "KILNCTL_ALLOW_TEST_ARCHIVE_WRITE=1 only if a test deliberately "
             "needs to exercise the canonical path."
         )
@@ -604,6 +642,80 @@ def adopt_orphaned_kiln_elfs(archive_dir: str) -> tuple[int, list[str]]:
     return adopted, unresolved
 
 
+def migrate_legacy_archive(archive_dir: str, prefix: str) -> int:
+    """One-time migration (L1, docs/audits/review_elf_archive_move_a347e726_2026-09-15.md):
+    a347e726 moved the canonical archive from firmware/<KilnFW|SaftyFW>/build/
+    elf_archive/ to firmware/<KilnFW|SaftyFW>/elf_archive/ but never moved
+    what was already sitting in the old location -- nothing reads that old
+    directory any more, so on any clone/worktree whose old build/elf_archive
+    still holds genuinely-flashed entries, find_kiln_elf_for_build/
+    find_safty_elf_for_identity would report "no match" for a build that WAS
+    archived, with no hint the entry is sitting one directory level away.
+
+    Moves (never deletes) every file the old directory holds into the new
+    one: a name that already exists at the destination is left alone in BOTH
+    places (never overwritten, never deleted un-moved -- "move, never delete
+    unmoved data") rather than guessed about, and the `<prefix>-latest.elf`
+    convenience pointer is skipped outright -- it is meaningless once
+    disconnected from the build/ directory it was a pointer INTO, and
+    carrying a stale one across risks exactly the "hand-symbolize against the
+    wrong ELF" mistake CLAUDE.md's firmware-gotchas section warns about for
+    that file. manifest.json/superseded.json are ordinary files here and are
+    moved like any other name UNLESS a manifest/superseded.json already
+    exists at the destination (the common case, since a normal flash already
+    created one there) -- in that case the OLD manifest is left in place
+    rather than clobbering the new one; its entries are recovered on a
+    best-effort basis by the existing adopt_orphaned_kiln_elfs() path once
+    their .elf files land in the new directory (a legacy manifest is not
+    itself merged -- only its referenced ELF files are of any lasting value,
+    and adoption already knows how to identify a bare ELF from its own
+    embedded build info).
+
+    Called automatically, cheaply, at the top of every _archive() call (both
+    KilnFW and SaftyFW) -- a fast no-op once the old directory is empty,
+    absent, or has already been drained."""
+    legacy_dir = os.path.join(os.path.dirname(archive_dir), "build", "elf_archive")
+    if not os.path.isdir(legacy_dir):
+        return 0
+    latest_name = f"{prefix}-latest.elf"
+    try:
+        names = os.listdir(legacy_dir)
+    except OSError:
+        return 0
+    if not names:
+        return 0
+    os.makedirs(archive_dir, exist_ok=True)
+    moved = 0
+    skipped: list[str] = []
+    for name in names:
+        if name == latest_name:
+            continue
+        src = os.path.join(legacy_dir, name)
+        if not os.path.isfile(src):
+            continue
+        dst = os.path.join(archive_dir, name)
+        if os.path.exists(dst):
+            # Never overwrite the new location, and never delete the
+            # un-moved legacy copy either -- both stay, side by side, for a
+            # human to reconcile if it matters (identical-content ELFs are
+            # harmless duplicates; a manifest/superseded.json name collision
+            # is the one case worth a human's attention).
+            skipped.append(name)
+            continue
+        try:
+            shutil.move(src, dst)
+            moved += 1
+        except OSError as exc:
+            print(f"elf_archive: WARNING -- could not migrate legacy entry {src} -> {dst}: {exc}")
+    if moved:
+        print(f"elf_archive: migrated {moved} legacy entry(ies) from {legacy_dir} into "
+              f"{archive_dir} (one-time move to the post-2026-09-15 archive location).")
+    if skipped:
+        print(f"elf_archive: left {len(skipped)} legacy entry(ies) in {legacy_dir} unmoved "
+              f"(name already exists in {archive_dir}, never overwritten): {', '.join(skipped)}")
+    return moved
+
+
 @dataclass
 class ArchiveResult:
     elf_key: str
@@ -625,6 +737,11 @@ def _archive(elf_path: str, archive_dir: str, prefix: str, identity: str,
         shutil.copyfile(elf_path, dest)
     latest = os.path.join(archive_dir, f"{prefix}-latest.elf")
     shutil.copyfile(elf_path, latest)
+
+    # L1 (2026-09-15 review): drain any pre-existing entries from the OLD
+    # build/elf_archive location before this call adds its own -- see
+    # migrate_legacy_archive()'s docstring. Cheap no-op once drained.
+    migrate_legacy_archive(archive_dir, prefix)
 
     if prefix == "KilnCtrl":
         # 2026-09-10 (opus review round 4, defect 1): adopt any orphans left

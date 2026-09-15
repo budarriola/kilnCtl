@@ -900,33 +900,159 @@ class ArchiveDirSurvivesBuildWipeTest(unittest.TestCase):
         """End-to-end proof: archive a fake ELF, delete everything that
         would exist under a real build/ directory (bin/elf outputs,
         CMakeCache.txt, the whole ESP-IDF/pico-sdk build tree), and confirm
-        the archived copy + manifest entry are both still there afterward."""
+        the archived copy + manifest entry are both still there afterward.
+
+        L3 (2026-09-15 review): the previous version of this test patched
+        `kiln_archive_dir` directly to a hand-built sibling path, so it never
+        called the production path-computing logic at all and would have
+        passed even against the pre-fix code (real `kiln_archive_dir()`
+        still returning a `build/`-nested path). Fixed to patch `_repo_root`
+        instead -- the real `kiln_archive_dir()` then computes the path from
+        that fake root, exercising the exact function under test. Since
+        `_canonical_archive_dirs()`/`_canonical_provenance_path()` also
+        derive from `_repo_root()`, the guard would now see this fake path as
+        "canonical" and refuse -- KILNCTL_ALLOW_TEST_ARCHIVE_WRITE=1 is the
+        documented escape hatch for exactly this case (a test deliberately
+        exercising the canonical-path logic against a fake root)."""
         with tempfile.TemporaryDirectory() as tmp:
             fake_repo_root = tmp
             fake_build_dir = os.path.join(fake_repo_root, "firmware", "KilnFW", "build")
-            fake_archive_dir = os.path.join(fake_repo_root, "firmware", "KilnFW", "elf_archive")
             elf_path = os.path.join(fake_build_dir, "KilnCtrl.elf")
             _write_fake_elf(elf_path, b"build-wipe-survival-fake-elf-content")
 
-            with unittest.mock.patch.object(elf_archive, "kiln_archive_dir", return_value=fake_archive_dir):
-                result = elf_archive.archive_kiln_elf(elf_path, "Sep 14 2026 23:55:17", "c8f7506b", "test")
-                self.assertTrue(os.path.isfile(result.archived_path))
+            os.environ["KILNCTL_ALLOW_TEST_ARCHIVE_WRITE"] = "1"
+            try:
+                with unittest.mock.patch.object(elf_archive, "_repo_root", return_value=fake_repo_root):
+                    fake_archive_dir = elf_archive.kiln_archive_dir()
+                    result = elf_archive.archive_kiln_elf(elf_path, "Sep 14 2026 23:55:17", "c8f7506b", "test")
+                    self.assertTrue(os.path.isfile(result.archived_path))
+                    self.assertEqual(os.path.dirname(result.archived_path),
+                                      os.path.normpath(fake_archive_dir))
 
-                # Simulate `idf.py fullclean`: the entire build/ directory
-                # (and everything under it) is removed. If the archive were
-                # still nested inside build/ (the pre-fix layout), this
-                # would delete it too.
-                import shutil
-                shutil.rmtree(fake_build_dir)
-                self.assertFalse(os.path.isdir(fake_build_dir))
+                    # Simulate `idf.py fullclean`: the entire build/ directory
+                    # (and everything under it) is removed. If the archive were
+                    # still nested inside build/ (the pre-fix layout), this
+                    # would delete it too.
+                    import shutil
+                    shutil.rmtree(fake_build_dir)
+                    self.assertFalse(os.path.isdir(fake_build_dir))
 
-                # The archive, being a sibling of build/ rather than a
-                # descendant, must be untouched.
-                self.assertTrue(os.path.isfile(result.archived_path),
-                                 "archived ELF was deleted by a build/ wipe -- the archive "
-                                 "is still nested inside build/")
-                path, message = elf_archive.find_kiln_elf_for_build("Sep 14 2026 23:55:17")
-                self.assertEqual(path, result.archived_path, message)
+                    # The archive, being a sibling of build/ rather than a
+                    # descendant, must be untouched.
+                    self.assertTrue(os.path.isfile(result.archived_path),
+                                     "archived ELF was deleted by a build/ wipe -- the archive "
+                                     "is still nested inside build/")
+                    path, message = elf_archive.find_kiln_elf_for_build("Sep 14 2026 23:55:17")
+                    self.assertEqual(path, result.archived_path, message)
+            finally:
+                del os.environ["KILNCTL_ALLOW_TEST_ARCHIVE_WRITE"]
+
+    def test_cmake_outdir_matches_kiln_archive_dir(self):
+        """L3: nothing previously enforced that archive_elf.cmake's OUTDIR
+        literal (${CMAKE_CURRENT_LIST_DIR}/elf_archive, set in
+        firmware/KilnFW/CMakeLists.txt) actually matches what
+        kiln_archive_dir() computes -- that pairing was enforced only by
+        comments. CMAKE_CURRENT_LIST_DIR for CMakeLists.txt is the directory
+        containing it (firmware/KilnFW/), so the CMake-side path is
+        structurally firmware/KilnFW/elf_archive -- assert both the
+        CMakeLists.txt literal is present and that kiln_archive_dir() ends
+        with that exact same relative path."""
+        repo_root = elf_archive._repo_root()
+        cmakelists_path = os.path.join(repo_root, "firmware", "KilnFW", "CMakeLists.txt")
+        with open(cmakelists_path, "r", encoding="utf-8") as f:
+            contents = f.read()
+        self.assertIn("-DOUTDIR=${CMAKE_CURRENT_LIST_DIR}/elf_archive", contents,
+                       "archive_elf.cmake's OUTDIR literal moved or changed shape -- "
+                       "update this test (and re-check it still matches "
+                       "kiln_archive_dir()) alongside it")
+        expected = os.path.normpath(os.path.join(repo_root, "firmware", "KilnFW", "elf_archive"))
+        self.assertEqual(os.path.normpath(elf_archive.kiln_archive_dir()), expected)
+
+
+class CanonicalArchiveDirsMatchTest(unittest.TestCase):
+    """L4: _canonical_archive_dirs() deliberately rebuilds both archive paths
+    by hand (see its own docstring -- it must not read them back through the
+    patchable kiln_archive_dir()/safty_archive_dir(), or the guard would be
+    blind exactly when a test has monkeypatched those). That leaves a second
+    copy of the same path contract, the very pair that broke in a347e726 --
+    this pins the two copies equal, unpatched, against real production
+    functions (pure path-string computation, no disk I/O, safe to call
+    directly)."""
+
+    def test_canonical_archive_dirs_equals_kiln_and_safty_archive_dir(self):
+        expected = {
+            os.path.normpath(elf_archive.kiln_archive_dir()),
+            os.path.normpath(elf_archive.safty_archive_dir()),
+        }
+        self.assertEqual(elf_archive._canonical_archive_dirs(), expected)
+
+
+class MigrateLegacyArchiveTest(unittest.TestCase):
+    """L1: migrate_legacy_archive() moves entries left behind in the old
+    build/elf_archive/ location into the new canonical archive dir -- move,
+    never delete unmoved data; skip the <prefix>-latest.elf convenience
+    pointer."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = self._tmp.name
+        self.archive_dir = os.path.join(self.root, "elf_archive")
+        self.legacy_dir = os.path.join(self.root, "build", "elf_archive")
+
+    def test_moves_legacy_entries_into_new_dir(self):
+        _write_fake_elf(os.path.join(self.legacy_dir, "KilnCtrl-abc123.elf"), b"legacy-elf-content")
+        _write_fake_elf(os.path.join(self.legacy_dir, "manifest.json"), b"{}")
+
+        moved = elf_archive.migrate_legacy_archive(self.archive_dir, "KilnCtrl")
+
+        self.assertEqual(moved, 2)
+        self.assertTrue(os.path.isfile(os.path.join(self.archive_dir, "KilnCtrl-abc123.elf")))
+        self.assertTrue(os.path.isfile(os.path.join(self.archive_dir, "manifest.json")))
+        # Moved, not copied -- the legacy copy is gone.
+        self.assertFalse(os.path.isfile(os.path.join(self.legacy_dir, "KilnCtrl-abc123.elf")))
+        self.assertFalse(os.path.isfile(os.path.join(self.legacy_dir, "manifest.json")))
+
+    def test_skips_the_latest_elf_convenience_pointer(self):
+        _write_fake_elf(os.path.join(self.legacy_dir, "KilnCtrl-latest.elf"), b"stale-pointer-content")
+
+        moved = elf_archive.migrate_legacy_archive(self.archive_dir, "KilnCtrl")
+
+        self.assertEqual(moved, 0)
+        # Left in place, un-deleted, un-moved.
+        self.assertTrue(os.path.isfile(os.path.join(self.legacy_dir, "KilnCtrl-latest.elf")))
+        self.assertFalse(os.path.exists(os.path.join(self.archive_dir, "KilnCtrl-latest.elf")))
+
+    def test_never_overwrites_an_existing_destination_name(self):
+        _write_fake_elf(os.path.join(self.legacy_dir, "manifest.json"), b'{"legacy": true}')
+        _write_fake_elf(os.path.join(self.archive_dir, "manifest.json"), b'{"current": true}')
+
+        moved = elf_archive.migrate_legacy_archive(self.archive_dir, "KilnCtrl")
+
+        self.assertEqual(moved, 0)
+        # Both copies survive, untouched -- "move, never delete unmoved data".
+        with open(os.path.join(self.legacy_dir, "manifest.json")) as f:
+            self.assertEqual(f.read(), '{"legacy": true}')
+        with open(os.path.join(self.archive_dir, "manifest.json")) as f:
+            self.assertEqual(f.read(), '{"current": true}')
+
+    def test_no_legacy_dir_is_a_harmless_no_op(self):
+        self.assertFalse(os.path.isdir(self.legacy_dir))
+        moved = elf_archive.migrate_legacy_archive(self.archive_dir, "KilnCtrl")
+        self.assertEqual(moved, 0)
+
+    def test_wired_into_archive_kiln_elf_automatically(self):
+        """Confirms the migration runs as a side effect of an ordinary
+        archive_kiln_elf() call, not just when called directly."""
+        _write_fake_elf(os.path.join(self.legacy_dir, "KilnCtrl-oldkey1.elf"), b"legacy-elf-content")
+        elf_path = os.path.join(self.root, "KilnCtrl.elf")
+        _write_fake_elf(elf_path, b"freshly-flashed-elf-content")
+
+        with unittest.mock.patch.object(elf_archive, "kiln_archive_dir", return_value=self.archive_dir):
+            elf_archive.archive_kiln_elf(elf_path, "Sep 15 2026 10:00:00", "deadbeef", "test")
+
+        self.assertTrue(os.path.isfile(os.path.join(self.archive_dir, "KilnCtrl-oldkey1.elf")))
+        self.assertFalse(os.path.isfile(os.path.join(self.legacy_dir, "KilnCtrl-oldkey1.elf")))
 
 
 if __name__ == "__main__":

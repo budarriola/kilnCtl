@@ -281,7 +281,8 @@ mismatch on `/api/zones` that blocks `load_config_preset` for every preset).
    not just KilnFW/CommonFW the way `stale_check.py`'s staleness comparison
    is scoped, because the risk is cross-session) and HEAD at the moment of
    the flash. This is reported in the tool result and persisted to
-   `KilnFW/build/flash_provenance.json`, so "what was actually on the board
+   `KilnFW/flash_provenance.json` (a sibling of `build/` since 2026-09-15,
+   not inside it -- see `elf_archive.kiln_provenance_path()`), so "what was actually on the board
    at `<time>`" is answerable from disk later, not just from a chat
    transcript that may have scrolled away.
 2. **Refuses only when the dirty set touches a narrow, named sensitive

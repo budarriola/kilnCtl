@@ -327,15 +327,15 @@ def get_fw_version() -> str:
     # five hours because nothing compared what the board reports against
     # what the tree actually has, and the refusal itself left no durable
     # trace. Both checks are best-effort and must never break this tool.
-    from . import flash_provenance  # local import: avoids a circular import with mcp_server_flash.py
+    from . import elf_archive, flash_provenance  # local import: avoids a circular import with mcp_server_flash.py
     try:
         lines.append(flash_provenance.describe_head_gap(version.commit))
     except Exception as exc:  # noqa: BLE001 - this line is a bonus, not the tool's job
         lines.append(f"board/HEAD comparison: error computing it ({exc})")
     try:
-        prov = flash_provenance.read_provenance_json(
-            os.path.join(debug_probe._kiln_fw_root(), "build", "flash_provenance.json")
-        )
+        # M1 (2026-09-15 review): flash_provenance.json moved out of
+        # build/ -- see elf_archive.kiln_provenance_path()'s docstring.
+        prov = flash_provenance.read_provenance_json(elf_archive.kiln_provenance_path())
         warning = flash_provenance.format_last_flash_warning(prov)
         if warning:
             lines.append(warning)
