@@ -514,12 +514,13 @@ int main(void)
     //
     // tc_type: config_store_get_tc_type() (Phase 9) -- reads the cache
     // config_store_boot_load() (step 4, above) already populated, real or
-    // safe-default K. This is a real per-installation commissioning read
-    // now, not a hard-coded placeholder -- but there is still no
-    // commissioning UI/wire command that ever WRITES a non-default tc_type
-    // (see config_store.h's header comment), so on every board built so far
-    // this still evaluates to K in practice, honestly, via the same safe-
-    // default path as a blank sector rather than a special-cased constant.
+    // safe-default K. This is a real per-installation commissioning read.
+    // 2026-09-15: the commissioning web page (safety_commissioning_page.html)
+    // and SAFETY_CMD_SET_CONFIG/COMMIT_CONFIG/APPLY_CONFIG_VOLATILE can all
+    // now WRITE a non-default tc_type -- see tc_type_reapply_policy.h and
+    // link_task.c's three config-write handlers for how a change made while
+    // this task is already running takes effect live, not just at the next
+    // boot this read happens on.
     bool max31856_ok = spi_owner_ok && max31856_init(SAFTYFW_PIN_SPI0_CS0,
                                                        SAFTYFW_PIN_THERMO_FAULT) &&
                         max31856_configure(config_store_get_tc_type());

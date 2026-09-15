@@ -1120,7 +1120,75 @@ bool config_store_next_write_needs_erase(size_t latest_slot_index)
 
 config_store_write_decision_t config_store_decide_write(bool armed)
 {
-    return armed ? CONFIG_STORE_WRITE_REFUSED_ARMED : CONFIG_STORE_WRITE_OK;
+    return config_store_decide_write_ex(armed, false, false);
+}
+
+config_store_write_decision_t config_store_decide_write_ex(bool armed, bool tc_type_only_change,
+                                                              bool heat_safe)
+{
+    // 2026-09-15 owner decision on the Opus review's F1: while ARMED, a
+    // tc_type-only change is accepted when the Pico's own inputs say heat
+    // is not currently being delivered (heat_safe) -- the Pico stays ARMED
+    // throughout, never disarms or drops to GRACE. Every other change (a
+    // record differing in ANY other field, or a tc_type change bundled with
+    // other field changes) keeps the original unconditional ARMED refusal --
+    // there is still no "this field is harmless" carve-out for anything
+    // else, matching this codebase's general preference for a simple,
+    // honest rule.
+    if (!armed) {
+        return CONFIG_STORE_WRITE_OK;
+    }
+    if (tc_type_only_change) {
+        return heat_safe ? CONFIG_STORE_WRITE_OK : CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON;
+    }
+    return CONFIG_STORE_WRITE_REFUSED_ARMED;
+}
+
+bool config_store_only_tc_type_differs(const config_store_record_t *current,
+                                        const config_store_record_t *candidate)
+{
+    if (current->tc_type == candidate->tc_type) {
+        return false; // not a tc_type change at all -- nothing to relax for
+    }
+
+    // Pack both records and neutralize exactly the bytes a legitimate
+    // tc_type-only change is allowed to touch: format_version/seq (always
+    // caller-overwritten before a real write, never operator content),
+    // tc_type itself, and fields_set's CONFIG_STORE_SET_TC_TYPE bit (a
+    // board's first-ever commissioning of tc_type sets this bit alongside
+    // the value). Comparing the rest of the packed bytes (excluding the
+    // trailing CRC, which depends on all of the above) is more robust than
+    // a hand-written field-by-field comparison: it cannot silently miss a
+    // newly added struct field the way a manually maintained comparator
+    // could.
+    // static, not on-stack: config_store_write_ex() (this function's only
+    // caller, config_store_flash.c) is documented single-writer -- link_task
+    // is the only task that ever calls config_store_write()/_ex() (see that
+    // function's own header comment) -- so two on-stack CONFIG_STORE_RECORD_LEN
+    // buffers here is pure stack cost with no reentrancy to protect against.
+    // Added 2026-09-15 (stack-budget fix, see check_saftyfw_task_stack_budgets.py):
+    // this function alone was the single largest contributor to link_task's
+    // deepest call-chain frame, and 1040 B of on-stack buffers here pushed
+    // link_task over that checker's regsp-margin grading against its
+    // declared stack. Not thread-safe against a second concurrent caller --
+    // do not add one without revisiting this.
+    static uint8_t a[CONFIG_STORE_RECORD_LEN];
+    static uint8_t b[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(current, a);
+    config_store_pack(candidate, b);
+
+    put_u16_le(&a[REC_OFF_FORMAT_VERSION], 0);
+    put_u16_le(&b[REC_OFF_FORMAT_VERSION], 0);
+    put_u32_le(&a[REC_OFF_SEQ], 0);
+    put_u32_le(&b[REC_OFF_SEQ], 0);
+    a[REC_OFF_TC_TYPE] = 0;
+    b[REC_OFF_TC_TYPE] = 0;
+    uint16_t fields_set_a = get_u16_le(&a[REC_OFF_FIELDS_SET]) | CONFIG_STORE_SET_TC_TYPE;
+    uint16_t fields_set_b = get_u16_le(&b[REC_OFF_FIELDS_SET]) | CONFIG_STORE_SET_TC_TYPE;
+    put_u16_le(&a[REC_OFF_FIELDS_SET], fields_set_a);
+    put_u16_le(&b[REC_OFF_FIELDS_SET], fields_set_b);
+
+    return memcmp(a, b, REC_OFF_CRC) == 0;
 }
 
 uint32_t config_store_record_crc(const config_store_record_t *rec)
@@ -1137,6 +1205,9 @@ const char *config_store_write_decision_reason(config_store_write_decision_t dec
             return "ok";
         case CONFIG_STORE_WRITE_REFUSED_ARMED:
             return "refused: relay is ARMED, config writes are refused while ARMED";
+        case CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON:
+            return "refused: relay is ARMED and heat is on (or a firing may be running) -- "
+                   "tc_type may only be changed while ARMED when heat is off";
         default:
             return "unknown";
     }

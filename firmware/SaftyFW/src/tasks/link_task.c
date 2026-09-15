@@ -91,6 +91,7 @@
 #include "kilnlink/kilnlink_clear_trip.h"
 #include "kilnlink/kilnlink_commit_config.h" // SAFETY_CMD_COMMIT_CONFIG (0x1D), see link_task_handle_commit_config()
 #include "kilnlink/kilnlink_apply_config_volatile.h" // SAFETY_CMD_APPLY_CONFIG_VOLATILE (0x2D), KILN_PROFILES_PLAN.md item 15 -- see link_task_handle_apply_config_volatile()
+#include "tc_type_reapply_policy.h" // tc_type_reapply_policy_should_reapply(), see all three config-write handlers below
 #include "kilnlink/kilnlink_commit_config_rejected.h" // SAFETY_CMD_COMMIT_CONFIG_REJECTED (0x20), see link_task_send_commit_config_rejected()
 #include "kilnlink/kilnlink_config_page.h" // SAFETY_CMD_CONFIG_PAGE reply, see link_task_send_config_page()
 #include "kilnlink/kilnlink_ct_cal.h" // SAFETY_CMD_CT_CAL reply, see link_task_send_ct_cal()
@@ -1483,6 +1484,28 @@ static void link_task_handle_clear_trip(const kilnlink_frame_t *frame)
 //      that legitimately depends on relay_owner, the same "safety_core
 //      already legitimately depends on relay_owner" carve-out this file's
 //      header comment already documents for output-status reads.
+// F1 (2026-09-15 owner decision on the Opus review): "as far as the Pico
+// can tell from its own inputs" that heat is not currently being
+// delivered -- s_relay_on_continuous is this file's own tracking of the
+// ESP's most recently reported relay_now_mask (context frames), and
+// current_any_present() (snapshots.h) is the Pico's own CT reading. Either
+// one true means treat heat as NOT safe to assume off. This is a
+// heuristic, not a guarantee (see current_task_get_snapshot()'s own
+// freshness caveats); config_store_decide_write_ex() only ever uses it to
+// widen a refusal into an acceptance for a tc_type-ONLY change, never to
+// grant anything else, and S5 still trips on a bad read of the new type
+// regardless of what this returned.
+static bool link_task_heat_is_safe_for_tc_type_change(void)
+{
+    // current_task_any_current_present() (2026-09-15, stack-budget fix), not
+    // current_task_get_snapshot()+current_any_present() -- this sits on
+    // link_task's SET_CONFIG/COMMIT_CONFIG call chain, and a whole
+    // current_snapshot_t local here pushed link_task over
+    // check_saftyfw_task_stack_budgets.py's regsp-margin grading. See
+    // current_task_any_current_present()'s own header comment.
+    return !s_relay_on_continuous && !current_task_any_current_present();
+}
+
 static void link_task_handle_set_config(const kilnlink_frame_t *frame)
 {
     kilnlink_set_config_t msg;
@@ -1514,7 +1537,7 @@ static void link_task_handle_set_config(const kilnlink_frame_t *frame)
     link_frame_apply_set_config(&committed, msg.tc_type, &rec);
 
     const char *reason = NULL;
-    bool written = config_store_write(&rec, &reason);
+    bool written = config_store_write_ex(&rec, link_task_heat_is_safe_for_tc_type_change(), &reason);
     if (written) {
         log_task_log(LOG_LEVEL_INFO, "set_config", "accepted");
         // Take effect immediately, not after a reboot -- thermo_task.c's own
@@ -1525,8 +1548,13 @@ static void link_task_handle_set_config(const kilnlink_frame_t *frame)
         // NEW type is already reported invalid, the same way a dead/unplugged
         // part would be. config_store_write() above has already refused this
         // whole call if the relay is armed, so this can only run while the
-        // Pico is not currently firing.
-        thermo_task_request_tc_type_reapply();
+        // Pico is not currently firing. Gated through tc_type_reapply_
+        // policy_should_reapply() (2026-09-15 review, F5) so a SET_CONFIG
+        // that leaves tc_type unchanged does not needlessly re-open the
+        // verification window.
+        if (tc_type_reapply_policy_should_reapply(committed.tc_type, rec.tc_type)) {
+            thermo_task_request_tc_type_reapply();
+        }
     } else {
         log_task_log(LOG_LEVEL_WARN, "set_config", reason ? reason : "refused");
     }
@@ -2206,8 +2234,10 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
     config_params_finalize_i_present_a(&to_write); // CT_COMMISSIONING_PLAN.md step 3
     to_write.calibration_missing = !config_params_all_required_set(&to_write);
 
+    uint8_t prev_tc_type = config_store_get_tc_type(); // captured BEFORE the write, see tc_type_reapply_policy.h
     const char *reason = NULL;
-    bool written = config_store_write(&to_write, &reason);
+    bool written =
+        config_store_write_ex(&to_write, link_task_heat_is_safe_for_tc_type_change(), &reason);
     if (written) {
         s_staged_config = to_write; // becomes the new baseline for the next SET_PARAM
         log_task_log(LOG_LEVEL_INFO, "commit_config", "accepted");
@@ -2220,6 +2250,16 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
         // needs current_task_reload_cal() -- current_task_fn()'s own boot
         // sequence is the only other caller.
         current_task_reload_cal();
+        // 2026-09-15 review (F2, HIGH): this is the path the owner's
+        // commissioning web page actually uses to set tc_type
+        // (safety_commissioning_page.html field 261 -> SET_PARAM + this
+        // COMMIT_CONFIG) -- it previously never called the live reapply at
+        // all, so a type change from the UI took effect only at the next
+        // boot. Same fail-safe reasoning as link_task_handle_set_config()'s
+        // own call above.
+        if (tc_type_reapply_policy_should_reapply(prev_tc_type, to_write.tc_type)) {
+            thermo_task_request_tc_type_reapply();
+        }
     } else {
         log_task_log(LOG_LEVEL_WARN, "commit_config", reason ? reason : "refused");
         // Not field-specific -- config_store_write()'s own refusal is either
@@ -2297,6 +2337,7 @@ static void link_task_handle_apply_config_volatile(const kilnlink_frame_t *frame
     // (never touches flash), so any refusal here is that carve-out, never a
     // storage failure -- report it the same way COMMIT_CONFIG's ARMED
     // refusal is reported.
+    uint8_t prev_tc_type = config_store_get_tc_type(); // captured BEFORE the write, see tc_type_reapply_policy.h
     const char *reason = NULL;
     if (!config_store_write_volatile(&to_write, &reason)) {
         log_task_log(LOG_LEVEL_WARN, "apply_config_volatile",
@@ -2310,6 +2351,15 @@ static void link_task_handle_apply_config_volatile(const kilnlink_frame_t *frame
     // config()'s own call: CT cal / i_present_a etc. must be live the moment
     // this returns, not after a reboot.
     current_task_reload_cal();
+    // 2026-09-15 review (F4, MEDIUM): a volatile install landing a new
+    // tc_type into the RAM cache without this call left the MAX31856
+    // configured for the OLD type while max31856_tc_type_verified() stayed
+    // true -- "plausible and wrong" readings linearized under the wrong
+    // curve, exactly what that flag exists to prevent. Same policy gate and
+    // fail-safe reasoning as the other two config-write handlers above.
+    if (tc_type_reapply_policy_should_reapply(prev_tc_type, to_write.tc_type)) {
+        thermo_task_request_tc_type_reapply();
+    }
 }
 
 // SAFETY_CMD_PARAM (0x1E) reply -- sent in answer to SAFETY_CMD_GET_PARAM

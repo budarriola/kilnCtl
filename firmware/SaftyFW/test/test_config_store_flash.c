@@ -173,12 +173,22 @@ static void test_write_refused_while_armed(void)
     config_store_default(&rec);
     rec.tc_type = 0x07u;
 
+    // 2026-09-15 owner decision (Opus review F1): this record differs from
+    // the cached one ONLY in tc_type, and config_store_write() always passes
+    // heat_safe=false (it is the plain, non-"_ex" wrapper -- see its own
+    // header comment). config_store_write_ex()'s heat-on-specific refusal
+    // (CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON) therefore fires here
+    // instead of the generic CONFIG_STORE_WRITE_REFUSED_ARMED -- the whole
+    // point of F1's relaxation is that a tc_type-only change gets its OWN,
+    // more specific refusal reason so a caller can tell "heat is on" apart
+    // from "some other field changed while ARMED".
     const char *reason = NULL;
     bool ok = config_store_write(&rec, &reason);
     TEST_CHECK(ok == false, "write refused while ARMED");
     TEST_CHECK(reason != NULL &&
-                   reason == config_store_write_decision_reason(CONFIG_STORE_WRITE_REFUSED_ARMED),
-               "refusal reason is the ARMED one, not a flash-layer reason");
+                   reason == config_store_write_decision_reason(CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON),
+               "refusal reason is the tc_type/heat-on-specific one (F1), not the generic ARMED "
+               "reason and not a flash-layer reason");
 
     // No sector was touched: config_store_write() must refuse BEFORE
     // scheduling any hal_flash_erase()/hal_flash_program() -- confirmed here

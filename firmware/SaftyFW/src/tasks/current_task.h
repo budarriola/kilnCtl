@@ -25,6 +25,17 @@ bool current_task_start(void);
 // once that lands.
 void current_task_get_snapshot(current_snapshot_t *out);
 
+// Cheap alternative to current_task_get_snapshot() + current_any_present()
+// for a caller that only needs the one bool and does not want a whole
+// current_snapshot_t (~32+ B) parked on its own stack frame -- added
+// 2026-09-15 (Opus review F1) for link_task.c's link_task_heat_is_safe_
+// for_tc_type_change(), which sits on link_task's SET_CONFIG/COMMIT_CONFIG
+// call chain right next to the config_store_write_ex()/flash-write branch
+// check_saftyfw_task_stack_budgets.py already grades against link_task's
+// declared stack; avoiding the extra local here (not raising the ceiling)
+// is what keeps that check's regsp-margin grading passing.
+bool current_task_any_current_present(void);
+
 // Copies out the most recent published power-estimate quantities
 // (docs/CURRENT_SENSE.md section 3b). Safe to call from any task. Intended
 // consumer is Phase 8's SAFETY_CMD_POWER telemetry frame, not a guard --

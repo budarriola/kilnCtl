@@ -1003,6 +1003,14 @@ bool config_store_next_write_needs_erase(size_t latest_slot_index);
 typedef enum {
     CONFIG_STORE_WRITE_OK = 0,
     CONFIG_STORE_WRITE_REFUSED_ARMED, // TODO.md Phase 9: "Config writes refused while ARMED"
+    // 2026-09-15 (Opus review F1): distinct from the plain ARMED refusal
+    // above so the caller can surface a clear, specific reason -- this is a
+    // tc_type-only change that WOULD have been allowed through while ARMED,
+    // but heat is currently on (or a firing may be running), so the Pico's
+    // own inputs say it isn't safe yet. Every other ARMED refusal (any other
+    // field, or tc_type bundled with another field change) is still the
+    // plain CONFIG_STORE_WRITE_REFUSED_ARMED above.
+    CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON,
 } config_store_write_decision_t;
 
 // Pure decision: given whether the relay is currently ARMED (relay_owner's
@@ -1014,6 +1022,30 @@ typedef enum {
 // matching this codebase's general preference for a simple, honest rule
 // over a permissive one that has to be reasoned about per field.
 config_store_write_decision_t config_store_decide_write(bool armed);
+
+// 2026-09-15 owner decision (Opus review F1): the same decision as
+// config_store_decide_write() above, except a tc_type-ONLY change (see
+// config_store_only_tc_type_differs() below) is allowed through while ARMED
+// when `heat_safe` is true -- the caller's own answer to "as far as the
+// Pico can tell from its own inputs, is heat currently NOT being
+// delivered" (link_task.c: no relay reported on by the ESP AND no CT
+// current sensed). The Pico stays ARMED throughout this path; it never
+// disarms or drops to GRACE to accept the change. Every other field, and a
+// tc_type change bundled with any other field change, is still refused
+// unconditionally while ARMED -- config_store_decide_write(armed) is
+// exactly config_store_decide_write_ex(armed, false, false).
+config_store_write_decision_t config_store_decide_write_ex(bool armed, bool tc_type_only_change,
+                                                              bool heat_safe);
+
+// True iff `candidate` differs from `current` ONLY in tc_type (plus the
+// fields_set CONFIG_STORE_SET_TC_TYPE bit, which legitimately flips
+// alongside a board's first-ever commissioning of the value) -- false if
+// tc_type is unchanged (nothing to relax for) or if ANY other field also
+// differs. Pure, host-tested; the single caller is config_store_write_ex()
+// deciding whether F1's ARMED relaxation above can even apply to a given
+// write.
+bool config_store_only_tc_type_differs(const config_store_record_t *current,
+                                        const config_store_record_t *candidate);
 
 // Human-readable reason for a config_store_write_decision_t, for surfacing
 // over HTTP/PC UART the same way other refusal reasons in this codebase are
@@ -1130,6 +1162,17 @@ bool config_store_get_full_record(config_store_record_t *out);
 // Wired to SAFETY_CMD_SET_CONFIG (0x16, LINK_PROTOCOL.md sec 4) via
 // link_task_handle_set_config() (src/tasks/link_task.c).
 bool config_store_write(const config_store_record_t *rec, const char **out_reason);
+
+// F1 (2026-09-15 owner decision): same contract as config_store_write()
+// above, except a tc_type-only change is not unconditionally refused while
+// ARMED -- config_store_decide_write_ex() decides, using `heat_safe`
+// exactly as documented on that function. config_store_write(rec,
+// out_reason) is exactly config_store_write_ex(rec, false, out_reason).
+// The two SAFTYFW_CMD_SET_CONFIG/COMMIT_CONFIG handlers (link_task.c) are
+// the only callers that pass a `heat_safe` computed from live inputs;
+// SET_CT_CAL and every other config_store_write() call site keeps calling
+// the plain wrapper, which can never relax the ARMED refusal.
+bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, const char **out_reason);
 
 // KILN_PROFILES_PLAN.md item 15 -- installs `rec` into the live in-RAM
 // record (config_store_get_full_record()/every guard's seqlock snapshot)

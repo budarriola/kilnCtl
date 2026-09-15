@@ -157,6 +157,15 @@ void current_task_get_snapshot(current_snapshot_t *out)
     taskEXIT_CRITICAL();
 }
 
+bool current_task_any_current_present(void)
+{
+    taskENTER_CRITICAL();
+    bool any = s_published_snapshot.present[0] || s_published_snapshot.present[1] ||
+               s_published_snapshot.present[2];
+    taskEXIT_CRITICAL();
+    return any;
+}
+
 void current_task_get_power(current_sense_power_t *out)
 {
     taskENTER_CRITICAL();

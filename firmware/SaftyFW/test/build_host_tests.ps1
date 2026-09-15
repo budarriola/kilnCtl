@@ -126,6 +126,8 @@ try {
         (Join-Path $testDir "test_estop_deenergizes_relay.c"),
         (Join-Path $testDir "test_update_task_relay_wiring.c"),
         (Join-Path $testDir "test_reboot_in_place_wiring.c"),
+        (Join-Path $srcDir "tasks\tc_type_reapply_policy.c"),
+        (Join-Path $testDir "test_tc_type_reapply_policy.c"),
         (Join-Path $srcDir "tasks\update_task_reboot_policy.c"),
         (Join-Path $testDir "test_update_task_reboot_policy.c"),
         (Join-Path $srcDir "clear_trip_diag_codec.c"),

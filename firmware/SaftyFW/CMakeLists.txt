@@ -128,6 +128,10 @@ set(SAFTYFW_APP_SOURCES
     # see thermo_task_drdy_recovery.h.
     src/tasks/thermo_task_drdy_recovery.c
     src/tasks/thermo_task.c
+    # Pure tc_type-change reapply decision, split out of thermo_task.c/
+    # link_task.c so it is host-testable (test/test_tc_type_reapply_
+    # policy.c) -- see tc_type_reapply_policy.h.
+    src/tasks/tc_type_reapply_policy.c
     src/tasks/current_task.c
     src/tasks/console_uart.c
     src/tasks/link_frame.c

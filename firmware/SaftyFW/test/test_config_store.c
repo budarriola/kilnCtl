@@ -567,6 +567,105 @@ static void test_decide_write(void)
     TEST_CHECK(strcmp(ok_reason, refused_reason) != 0, "OK and refused reasons differ");
 }
 
+static void test_decide_write_ex_tc_type_armed_relaxation(void)
+{
+    TEST_SECTION("config_store_decide_write_ex -- 2026-09-15 owner decision F1: tc_type-only "
+                 "change allowed through while ARMED, but only when heat is safe");
+
+    // config_store_decide_write(armed) must be EXACTLY config_store_decide_write_ex(armed, false, false)
+    // -- the header's own documented contract.
+    TEST_CHECK(config_store_decide_write(false) == config_store_decide_write_ex(false, false, false),
+               "decide_write(false) matches decide_write_ex(false, false, false)");
+    TEST_CHECK(config_store_decide_write(true) == config_store_decide_write_ex(true, false, false),
+               "decide_write(true) matches decide_write_ex(true, false, false)");
+
+    // Not ARMED at all: always OK, regardless of tc_type_only_change/heat_safe.
+    TEST_CHECK(config_store_decide_write_ex(false, true, false) == CONFIG_STORE_WRITE_OK,
+               "not ARMED: tc_type-only change allowed even if heat_safe is false");
+    TEST_CHECK(config_store_decide_write_ex(false, true, true) == CONFIG_STORE_WRITE_OK,
+               "not ARMED: tc_type-only change allowed with heat_safe true too");
+
+    // ARMED, tc_type-only change, heat safe (off): the F1 relaxation -- allowed.
+    TEST_CHECK(config_store_decide_write_ex(true, true, true) == CONFIG_STORE_WRITE_OK,
+               "ARMED + tc_type-only change + heat safe: allowed (F1)");
+
+    // ARMED, tc_type-only change, heat NOT safe (on, or a firing may be running): refused,
+    // with the distinct, clearly-named reason -- not the generic ARMED refusal.
+    TEST_CHECK(config_store_decide_write_ex(true, true, false) == CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON,
+               "ARMED + tc_type-only change + heat NOT safe: refused with the heat-on-specific reason");
+
+    // ARMED, NOT a tc_type-only change (some other field, or tc_type bundled with another
+    // field change) -- refused unconditionally, regardless of heat_safe. This is the "every
+    // other param keeps the existing ARMED refusal" requirement.
+    TEST_CHECK(config_store_decide_write_ex(true, false, true) == CONFIG_STORE_WRITE_REFUSED_ARMED,
+               "ARMED + NOT tc_type-only + heat safe: still refused (only tc_type gets the relaxation)");
+    TEST_CHECK(config_store_decide_write_ex(true, false, false) == CONFIG_STORE_WRITE_REFUSED_ARMED,
+               "ARMED + NOT tc_type-only + heat not safe: still refused");
+
+    // The two decisions must have distinguishable, non-empty reason strings.
+    const char *armed_reason = config_store_write_decision_reason(CONFIG_STORE_WRITE_REFUSED_ARMED);
+    const char *heat_on_reason =
+        config_store_write_decision_reason(CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON);
+    TEST_CHECK(armed_reason != NULL && strlen(armed_reason) > 0, "plain ARMED reason is non-empty");
+    TEST_CHECK(heat_on_reason != NULL && strlen(heat_on_reason) > 0, "heat-on reason is non-empty");
+    TEST_CHECK(strcmp(armed_reason, heat_on_reason) != 0,
+               "the heat-on refusal has its OWN distinct reason string, not the generic ARMED one");
+}
+
+static void test_only_tc_type_differs(void)
+{
+    TEST_SECTION("config_store_only_tc_type_differs -- pure comparator behind F1's relaxation");
+
+    config_store_record_t a;
+    memset(&a, 0, sizeof(a));
+    a.format_version = CONFIG_STORE_FORMAT_VERSION;
+    a.seq = 5;
+    a.tc_type = 0x03u; // MAX31856_TC_TYPE_K
+    a.abs_max_temp_c = 1200.0f;
+    a.fields_set = 0;
+
+    config_store_record_t b = a;
+
+    // Identical records: not a tc_type change at all (nothing differs).
+    TEST_CHECK(!config_store_only_tc_type_differs(&a, &b), "identical records: not a tc_type-only change");
+
+    // Only tc_type differs -- true, even across format_version/seq staleness (those are
+    // caller-overwritten before a real write and must be neutralized by the comparator).
+    b = a;
+    b.tc_type = 0x07u; // MAX31856_TC_TYPE_S
+    TEST_CHECK(config_store_only_tc_type_differs(&a, &b), "tc_type alone differs: true");
+
+    b = a;
+    b.tc_type = 0x07u;
+    b.format_version = (uint16_t)(a.format_version + 1u);
+    b.seq = a.seq + 1u;
+    TEST_CHECK(config_store_only_tc_type_differs(&a, &b),
+               "tc_type differs, format_version/seq also differ (caller-overwritten, not operator "
+               "content): still counts as tc_type-only");
+
+    // tc_type differs AND the CONFIG_STORE_SET_TC_TYPE fields_set bit flips too (legitimate
+    // first-time commissioning) -- still counts as tc_type-only.
+    b = a;
+    b.tc_type = 0x07u;
+    b.fields_set = a.fields_set | CONFIG_STORE_SET_TC_TYPE;
+    TEST_CHECK(config_store_only_tc_type_differs(&a, &b),
+               "tc_type differs, CONFIG_STORE_SET_TC_TYPE bit also flips: still tc_type-only");
+
+    // tc_type differs, but so does an unrelated field: NOT tc_type-only.
+    b = a;
+    b.tc_type = 0x07u;
+    b.abs_max_temp_c = 1300.0f;
+    TEST_CHECK(!config_store_only_tc_type_differs(&a, &b),
+               "tc_type differs AND another field differs: NOT tc_type-only -- no relaxation");
+
+    // tc_type unchanged, but another field differs: false (not a tc_type change at all --
+    // the short-circuit at the top of the function, regardless of what else differs).
+    b = a;
+    b.abs_max_temp_c = 1300.0f;
+    TEST_CHECK(!config_store_only_tc_type_differs(&a, &b),
+               "tc_type unchanged, another field differs: false (no tc_type change to relax for)");
+}
+
 static void test_record_crc(void)
 {
     TEST_SECTION("config_store_record_crc -- matches the packed record's trailing CRC");
@@ -2717,6 +2816,8 @@ void run_test_config_store(void)
     test_plan_write();
     test_find_latest_multi();
     test_decide_write();
+    test_decide_write_ex_tc_type_armed_relaxation();
+    test_only_tc_type_differs();
     test_record_crc();
     test_ct_cal_defaults_on_blank();
     test_ct_cal_corrupt_or_unknown_version();

@@ -1010,8 +1010,15 @@ static void config_store_write_cb(void *param)
 // was true only when Phase 9's first pass landed and has been stale since).
 bool config_store_write(const config_store_record_t *rec, const char **out_reason)
 {
+    return config_store_write_ex(rec, false, out_reason);
+}
+
+bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, const char **out_reason)
+{
+    bool armed = relay_owner_get_state() == RELAY_OWNER_STATE_ARMED;
+    bool tc_type_only_change = config_store_only_tc_type_differs(&s_cached_record, rec);
     config_store_write_decision_t decision =
-        config_store_decide_write(relay_owner_get_state() == RELAY_OWNER_STATE_ARMED);
+        config_store_decide_write_ex(armed, tc_type_only_change, heat_safe);
     if (decision != CONFIG_STORE_WRITE_OK) {
         if (out_reason != NULL) {
             *out_reason = config_store_write_decision_reason(decision);
