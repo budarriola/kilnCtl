@@ -115,6 +115,25 @@ the goal, tree shape, decisions, changelog, and remaining open items.
   the normal 500 ms cadence) should not be treated as free of budget risk.
   A production consumer of `link_reply_us` should alarm on `max`, not
   `mean`, if this is ever used as a live health signal.
+
+  **2026-09-14 correction, read this before trusting the paragraph above as
+  a transport measurement:** `docs/audits/
+  link_reply_latency_composition_2026-09-14.md` traces the shape of this
+  distribution (min near zero, mean/median near half the spread) back to
+  source and confirms it — `safety_exchange()`'s own comment
+  (`safety_link_inbox.c:810-822`) already says so — that `link_reply_us` is
+  100% phase-wait for the Pico's free-running 500 ms `STATUS` push, not a
+  measured round trip: `SAFETY_CMD_GET_STATUS` has no dispatch case on the
+  Pico, and every sample in this counter comes from one of exactly two
+  `expect_status=true` call sites, both sending `GET_STATUS`. So "93% of
+  budget" above is not a transport-margin finding, the number cannot
+  respond to transport changes at all, and a health alarm on it (mean or
+  max) would be alarming on poll phase, not link health — see that audit's
+  Section 5 for what to alarm on instead (`safety_get_link_stats()`'s
+  `timeouts`, which is phase-independent). The 345 ms budget and the
+  instrumentation are unchanged by this note; retargeting `link_reply_us`
+  to a genuinely reply-matched command, or renaming/relabeling it, is left
+  as an open decision for whoever owns this counter next.
 - ~~Remaining SaftyFW hardware/ includes~~ — closed 2026-09-06:
   `main.c`, `console_uart.c`, `thermo_task.c` re-reviewed line by line.
   `main.c`'s GPIO6-low latch/direction pair matches `hal_gpio_init_out()`'s
