@@ -411,6 +411,27 @@ static bool bx_run_on_internal_stack(bx_job_fn fn, void *arg)
         }
         return true;
     }
+    /* LOW-2 (docs/audits/review_crash_gate_followups_62e95bbd_2026-09-15.md):
+     * this blocks portMAX_DELAY on s_bx_lock and then s_bx_done, with no
+     * timeout. Since 2026-09-15 this can be reached from lvgl_task (crash_
+     * report.c's LCD Acknowledge control), i.e. from under the LVGL port
+     * lock -- if the worker is busy with a long job (a profile/autotune save,
+     * or a CONTROL message), the whole LCD stalls for that long. This is the
+     * same shape relay_cycles_reset() (Relay Life Reset, also called from
+     * lvgl_task under the LVGL lock) has already accepted: no flash-worker
+     * job today takes the LVGL lock (nothing under drivers/bridge, control/
+     * profile*, or control/autotune* calls lvgl_port_lock), so there is no
+     * deadlock, only a bounded-by-"how long the current job takes" UI
+     * freeze. That invariant is not enforced by anything, though -- a future
+     * flash-worker job that calls into lvgl_port_lock (directly or via a
+     * callback) WOULD deadlock the whole board the same way the re-entrancy
+     * case above does. If an LVGL-lock caller of this function ever needs a
+     * bound, the fix is a deferred job plus a result flag polled by the
+     * caller's own refresh timer (crash_report.c's refresh_cb is already
+     * polling every 2 s), not a timeout here -- a timed-out xSemaphoreTake
+     * on s_bx_done would leave `job` still sitting in the queue for the
+     * worker to run later against a stack frame the caller has already
+     * unwound. */
     xSemaphoreTake(s_bx_lock, portMAX_DELAY);
     bx_job_t job = { .fn = fn, .arg = arg };
     bool ok = (xQueueSend(s_bx_jobs, &job, portMAX_DELAY) == pdTRUE);

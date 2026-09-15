@@ -236,7 +236,19 @@ static void test_acknowledge_write_failure_path(void)
     TEST_CHECK(crash_report_has_unacknowledged() == true, "setup: cache shows unacknowledged before the attempt");
 
     fake_kv_script_next_write_status(HAL_IO); // the ack's persist() call fails on its very next write
+    unsigned dispatch_before = s_stub_dispatch_count;
     bool ok = crash_report_acknowledge();
+
+    // LOW-1 fix (docs/audits/review_crash_gate_followups_62e95bbd_2026-09-15.md):
+    // the section title above claims this "still routes through the flash
+    // worker" -- actually check that, rather than only checking the write
+    // outcome. A hypothetical direct/non-dispatched write (bypassing
+    // uart_bridge_ext_run_on_flash_worker() entirely) would still make
+    // ok == false here via the same scripted HAL_IO, so this assertion is
+    // the only thing in this test that would catch that regression.
+    TEST_CHECK(s_stub_dispatch_count == dispatch_before + 1,
+              "acknowledge() dispatched exactly once through uart_bridge_ext_run_on_flash_worker() "
+              "-- not a direct/inline write bypassing the flash worker");
 
     TEST_CHECK(ok == false, "acknowledge() reports failure when the underlying NVS write fails, "
                             "not a silent success");
@@ -252,8 +264,11 @@ static void test_acknowledge_write_failure_path(void)
     // NEGATIVE-TEST PROOF: with the write failure no longer scripted, the
     // exact same call succeeds -- proves the failure above was really the
     // scripted write, not some other latent defect that always refuses.
+    dispatch_before = s_stub_dispatch_count;
     TEST_CHECK(crash_report_acknowledge() == true,
               "with the scripted failure cleared, acknowledge() succeeds against the same record");
+    TEST_CHECK(s_stub_dispatch_count == dispatch_before + 1,
+              "the successful retry also dispatched through the flash worker, not inline");
     TEST_CHECK(crash_report_has_unacknowledged() == false, "and the cache clears once it actually did");
 }
 
@@ -516,6 +531,61 @@ static void test_clear_reflag_survives_ack_write_failure(void)
                "refusing forever despite the record being genuinely erased from flash.");
 }
 
+// LOW-3 fix (docs/audits/review_crash_gate_followups_62e95bbd_2026-09-15.md):
+// an LCD Acknowledge and a web /clear both dispatch to the single flash-
+// worker task, which drains its queue one job at a time -- but the OLD
+// crash_report_acknowledge() called load() in the CALLER's task, before
+// dispatch, and only the modify+persist ran inside the job. So a clear that
+// erased the record between the caller's load() and the ack job actually
+// running would still see the ack job write the operator's stale,
+// already-loaded copy back to disk with acknowledged=1, resurrecting a
+// record the operator had just cleared. The fix moved load() itself inside
+// the job (crash_ack_job()), so whichever job the worker runs LATER always
+// sees whatever the earlier job actually left on disk. This test proves
+// that: it drives crash_ack_job() directly (as the worker would run it)
+// against a record that was already erased -- standing in for "a clear won
+// the race and ran first" -- and checks it does NOT resurrect anything.
+static void test_ack_job_does_not_resurrect_after_concurrent_clear(void)
+{
+    TEST_SECTION("crash_ack_job -- an ack job that runs AFTER a concurrent clear erased the record "
+                 "must see 'no record' and do nothing, not resurrect a stale caller-side copy");
+    reset_all();
+
+    crash_report_record_t rec = make_sample_record();
+    rec.acknowledged = 0;
+    seal_crc(&rec);
+    TEST_CHECK(persist(&rec) == ESP_OK, "seed an unacknowledged record");
+    refresh_unacked_cache();
+    TEST_CHECK(crash_report_has_unacknowledged() == true, "setup: cache shows unacknowledged");
+
+    // Simulate "the web /clear's erase job won the race and already ran" --
+    // this is exactly what crash_clear_job() does to disk, run directly
+    // rather than via crash_report_clear() so this test does not also
+    // depend on that function's own internal acknowledge() call.
+    crash_clear_job_ctx_t clear_ctx = { .kv_err = HAL_IO, .coredump_err = HAL_IO };
+    crash_clear_job(&clear_ctx);
+    TEST_CHECK(clear_ctx.kv_err == HAL_OK || clear_ctx.kv_err == HAL_NOT_FOUND, "setup: erase job succeeded");
+    refresh_unacked_cache();
+    TEST_CHECK(crash_report_has_unacknowledged() == false, "setup: cache reflects the erase");
+
+    // NEGATIVE-TEST PROOF target: now run the ack job -- standing in for the
+    // LCD's Acknowledge, queued before the clear but executed after it on the
+    // worker's single serial queue. With the pre-fix shape (load() outside
+    // the job, a pre-loaded rec pointer passed in) this would blindly persist
+    // acknowledged=1 and bring the record back. With load() inside the job,
+    // it must see "no record" and do nothing.
+    crash_ack_job_ctx_t ack_ctx = { .err = ESP_FAIL, .had_record = false, .already_acked = false };
+    crash_ack_job(&ack_ctx);
+
+    TEST_CHECK(ack_ctx.had_record == false,
+              "the ack job saw no record at execution time -- it does not resurrect a record "
+              "that a concurrent clear already erased");
+    crash_report_record_t loaded;
+    TEST_CHECK(load(&loaded) == false, "the record is still genuinely absent from disk after the ack job ran");
+    TEST_CHECK(crash_report_has_unacknowledged() == false,
+              "the cache still reads false -- no resurrection visible to the relay gate or the LCD/web either");
+}
+
 static void test_clear_erases_coredump_via_hal_sysinfo(void)
 {
     TEST_SECTION("crash_report_clear -- hal_sysinfo_coredump_erase() clears fake coredump presence");
@@ -627,6 +697,7 @@ void run_test_crash_report(void)
     test_dump_id_ignores_padding_bytes();
     test_init_reaches_summary_fetch_when_coredump_present();
     test_clear_reflag_survives_ack_write_failure();
+    test_ack_job_does_not_resurrect_after_concurrent_clear();
     test_clear_erases_coredump_via_hal_sysinfo();
     test_exception_registers_round_trip();
     test_frame_trustworthy_rejects_pc_of_zero();

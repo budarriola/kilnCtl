@@ -270,6 +270,16 @@ static const char *TAG __attribute__((unused)) = "ui_page_diagnostics";
  * swap instead of a modal. */
 #define UI_PAGE_DIAGNOSTICS_RELAY_RESET_CONFIRM_US (5 * 1000 * 1000)
 
+/* LOW-4 fix (docs/audits/review_crash_gate_followups_62e95bbd_2026-09-15.md):
+ * minimum gap a confirm tap must arrive after the arming tap, for every
+ * two-tap confirm button on this page (Relay Life Reset and Crash Report
+ * Acknowledge). Without this, a touch bounce or a release/press glitch from
+ * the FT6336U panel can deliver two LV_EVENT_CLICKED events milliseconds
+ * apart from a single physical tap, which arms AND confirms in one touch --
+ * defeating the two-tap confirm's whole purpose. 300 ms is comfortably above
+ * any observed bounce interval and well under a deliberate second tap. */
+#define UI_PAGE_DIAGNOSTICS_CONFIRM_DEBOUNCE_US (300 * 1000)
+
 /* ---- No-scroll budget proofs --------------------------------------------
  * Compile-time mirrors of this file's own header-comment arithmetic, same
  * style ui_page_temperature.c/ui_page_network.c use (check_ui_budget_asserts.ps1
@@ -458,6 +468,7 @@ static int64_t   s_rl_confirm_deadline_us[RELAY_CYCLES_COUNT];
  * the same one-button two-tap-confirm state s_rl_confirm_deadline_us[] holds
  * per relay, just for the single Acknowledge button here. */
 static lv_obj_t *s_cr_summary_label;
+static lv_obj_t *s_cr_ack_row; /* LOW-5 fix: the whole row, hidden as a unit -- see refresh_cb() */
 static lv_obj_t *s_cr_ack_btn;
 static lv_obj_t *s_cr_ack_label;
 static int64_t   s_cr_ack_deadline_us;
@@ -1200,36 +1211,58 @@ static void refresh_cb(lv_timer_t *timer)
     }
 
     /* Crash Report page -- 2026-09-15 MEDIUM fix. Revert an expired
-     * Acknowledge confirm-arm the same way the Relay Life loop above does. */
+     * Acknowledge confirm-arm the same way the Relay Life loop above does.
+     * This is cheap (RAM-only) and kept unconditional so a confirm window
+     * armed while the page was visible still reverts on schedule even if
+     * the operator navigates away before it expires.
+     *
+     * INFO fix (docs/audits/review_crash_gate_followups_62e95bbd_2026-09-15.md):
+     * the actual crash_report_get() call below is a blocking NVS read, and
+     * used to run every UI_PAGE_DIAGNOSTICS_REFRESH_MS tick regardless of
+     * which page was visible. Gate it on the Crash Report page actually
+     * being shown -- crash_report_has_unacknowledged() below is the cached,
+     * I/O-free flag and stays cheap enough to leave unconditional, but the
+     * full record is only needed to paint cr_buf/s_cr_summary_label while
+     * that page is on screen. */
     if (s_cr_ack_deadline_us != 0 && rl_now >= s_cr_ack_deadline_us) {
         s_cr_ack_deadline_us = 0;
         lv_label_set_text(s_cr_ack_label, "Acknowledge");
     }
-    crash_report_record_t cr_rec;
-    bool cr_present = crash_report_get(&cr_rec);
     bool cr_unacked = crash_report_has_unacknowledged();
-    char cr_buf[160];
-    if (!cr_present) {
-        snprintf(cr_buf, sizeof(cr_buf), "No crash report on record.");
-    } else if (!cr_unacked) {
-        snprintf(cr_buf, sizeof(cr_buf), "Last crash (acknowledged): %s in task %s, reset: %s",
-                 cr_rec.exc_cause_str, cr_rec.exc_task, cr_rec.reset_reason);
-    } else {
-        snprintf(cr_buf, sizeof(cr_buf),
-                 "UNACKNOWLEDGED crash: %s in task %s, reset: %s -- acknowledge below to allow "
-                 "manual relay-ON",
-                 cr_rec.exc_cause_str, cr_rec.exc_task, cr_rec.reset_reason);
+    if (s_page_index == UI_PAGE_DIAGNOSTICS_PAGE_CRASH_REPORT) {
+        crash_report_record_t cr_rec;
+        bool cr_present = crash_report_get(&cr_rec);
+        char cr_buf[160];
+        if (!cr_present) {
+            snprintf(cr_buf, sizeof(cr_buf), "No crash report on record.");
+        } else if (!cr_unacked) {
+            snprintf(cr_buf, sizeof(cr_buf), "Last crash (acknowledged): %s in task %s, reset: %s",
+                     cr_rec.exc_cause_str, cr_rec.exc_task, cr_rec.reset_reason);
+        } else {
+            snprintf(cr_buf, sizeof(cr_buf),
+                     "UNACKNOWLEDGED crash: %s in task %s, reset: %s -- acknowledge below to allow "
+                     "manual relay-ON",
+                     cr_rec.exc_cause_str, cr_rec.exc_task, cr_rec.reset_reason);
+        }
+        lv_label_set_text(s_cr_summary_label, cr_buf);
+        lv_obj_set_style_text_color(s_cr_summary_label,
+                                     cr_unacked ? UI_THEME_ACCENT_5 : UI_THEME_COLOR_TEXT_SECONDARY, 0);
     }
-    lv_label_set_text(s_cr_summary_label, cr_buf);
-    lv_obj_set_style_text_color(s_cr_summary_label,
-                                 cr_unacked ? UI_THEME_ACCENT_5 : UI_THEME_COLOR_TEXT_SECONDARY, 0);
-    /* Nothing to confirm once there's no unacknowledged record any more --
-     * hide the button rather than leave a live Acknowledge control armed
-     * against a record that already cleared (e.g. the web UI acknowledged it
-     * first; both paths go through the same crash_report_acknowledge()). */
+    /* LOW-5 fix: hide the WHOLE row (name label + button) as a unit once
+     * there's no unacknowledged record any more, not just the button --
+     * the row's name label is fixed "Unacknowledged crash" text, so leaving
+     * it visible while only the button hid showed a red-accented card
+     * claiming an unacknowledged crash existed when none did (or one had
+     * already been acknowledged/cleared, e.g. by the web UI, which shares
+     * the same crash_report_acknowledge() path). This check stays
+     * unconditional (not gated on page visibility) so the row is correctly
+     * shown/hidden the instant the operator turns to this page, rather than
+     * only after the next tick following a page switch. */
     if (cr_unacked) {
+        lv_obj_remove_flag(s_cr_ack_row, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_cr_ack_btn, LV_OBJ_FLAG_HIDDEN);
     } else {
+        lv_obj_add_flag(s_cr_ack_row, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_cr_ack_btn, LV_OBJ_FLAG_HIDDEN);
         if (s_cr_ack_deadline_us != 0) {
             s_cr_ack_deadline_us = 0;
@@ -1365,7 +1398,18 @@ static void relay_reset_btn_clicked_cb(lv_event_t *e)
     }
 
     int64_t now = (int64_t)hal_time_now_us();
+    /* LOW-4 debounce: the arm tap set the deadline to now_arm + CONFIRM_US,
+     * so a confirm tap counts only once at least DEBOUNCE_US has elapsed
+     * since that arm -- i.e. once `now` is past (deadline - CONFIRM_US +
+     * DEBOUNCE_US). A tap inside the debounce window is silently ignored
+     * (treated as neither an arm nor a confirm) rather than re-arming, since
+     * a bounce pair from a single physical tap should not restart the
+     * window either. */
     bool armed = s_rl_confirm_deadline_us[relay] != 0 && now < s_rl_confirm_deadline_us[relay];
+    if (armed && now < s_rl_confirm_deadline_us[relay] - UI_PAGE_DIAGNOSTICS_RELAY_RESET_CONFIRM_US
+                        + UI_PAGE_DIAGNOSTICS_CONFIRM_DEBOUNCE_US) {
+        return;
+    }
 
     if (armed) {
         s_rl_confirm_deadline_us[relay] = 0;
@@ -1463,7 +1507,14 @@ static void crash_ack_btn_clicked_cb(lv_event_t *e)
 {
     (void)e;
     int64_t now = (int64_t)hal_time_now_us();
+    /* LOW-4 debounce -- same reasoning as relay_reset_btn_clicked_cb() above:
+     * ignore a confirm tap that arrives less than DEBOUNCE_US after the arm
+     * tap, so a touch bounce cannot arm-and-confirm from one physical tap. */
     bool armed = s_cr_ack_deadline_us != 0 && now < s_cr_ack_deadline_us;
+    if (armed && now < s_cr_ack_deadline_us - UI_PAGE_DIAGNOSTICS_CRASH_ACK_CONFIRM_US
+                         + UI_PAGE_DIAGNOSTICS_CONFIRM_DEBOUNCE_US) {
+        return;
+    }
 
     if (armed) {
         s_cr_ack_deadline_us = 0;
@@ -1499,9 +1550,17 @@ static void build_crash_report_ack_row(lv_obj_t *parent)
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
+    /* LOW-5 fix (docs/audits/review_crash_gate_followups_62e95bbd_2026-09-15.md):
+     * this label used to be fixed text, and refresh_cb() only hid the
+     * button once acknowledged/absent -- so a board with no crash record, or
+     * an already-acknowledged one, still showed a red-accented card reading
+     * "Unacknowledged crash". s_cr_ack_row (the whole row, this object's
+     * parent) is now hidden/shown as a unit by refresh_cb() instead, so the
+     * label's fixed text is only ever visible while it is actually true. */
     lv_obj_t *name_label = lv_label_create(row);
     lv_obj_set_style_text_color(name_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
     lv_label_set_text(name_label, "Unacknowledged crash");
+    s_cr_ack_row = row;
 
     lv_obj_t *btn = lv_button_create(row);
     lv_obj_set_size(btn, UI_PAGE_DIAGNOSTICS_CRASH_ACK_BTN_W_PX, UI_PAGE_DIAGNOSTICS_CRASH_ACK_BTN_H_PX);

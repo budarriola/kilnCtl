@@ -22,17 +22,26 @@ static const char *TAG = "crash_report";
  * signature ever changes.
  *
  * WHY THIS MODULE NEEDS IT (added 2026-09-15,
- * docs/audits/review_crash_report_relay_gate_61765de7_2026-09-15.md): once
- * the LCD diagnostics page gained its own Acknowledge control, crash_report_
- * acknowledge()/crash_report_clear()'s NVS writes (persist() below) could be
- * reached from lvgl_task -- whose stack is PSRAM-backed (DRAM_PSRAM_
- * PLAN.md) -- not just from diagnostics_http.c's httpd-task POST handlers.
- * A flash write disables the flash cache, which makes PSRAM unreachable;
- * ESP-IDF's own esp_task_stack_is_sane_cache_disabled() asserts (aborts the
- * whole board) if the calling task's stack lives there. Routing every write
- * in this file through the flash worker, with the same re-entrancy check
- * relay_cycles_reset() uses, makes both callers safe without either one
- * having to know which task it is running on. */
+ * docs/audits/review_crash_report_relay_gate_61765de7_2026-09-15.md, comment
+ * corrected 2026-09-15 per docs/audits/review_crash_gate_followups_62e95bbd_
+ * 2026-09-15.md LOW-2): once the LCD diagnostics page gained its own
+ * Acknowledge control, crash_report_acknowledge()/crash_report_clear()'s NVS
+ * writes (persist() below) could be reached from lvgl_task, not just from
+ * diagnostics_http.c's httpd-task POST handlers. `lvgl_task`'s stack is
+ * actually static internal SRAM (lvgl_port.c's s_lvgl_task_stack, since the
+ * 2026-08-21 "REVERTED TO INTERNAL SRAM" fix) -- NOT PSRAM as an earlier
+ * version of this comment claimed -- so the cache-disabled-PSRAM-stack abort
+ * this comment used to warn about does not actually apply to that caller.
+ * The dispatch is kept anyway for two real reasons: (1) it is still needed
+ * for any future/other caller whose stack genuinely is PSRAM-backed, and (2)
+ * routing every write through the single flash-worker task also SERIALIZES
+ * all NVS load-modify-store sequences against each other (see crash_ack_job()
+ * below, LOW-3 fix), which a direct write from either caller's own task would
+ * not. The re-entrancy check matches relay_cycles_reset()'s. Known callers:
+ * diagnostics_http.c's httpd-task POST handlers, and the LCD diagnostics-page
+ * Acknowledge control on lvgl_task -- routing both through one worker means
+ * neither has to know which task it is running on, and their reads/writes of
+ * the crash record can never interleave. */
 esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
 bool uart_bridge_ext_is_on_flash_worker(void);
 
@@ -447,31 +456,46 @@ bool crash_report_has_unacknowledged(void)
  * relay_cycles.c's reset_persist_job()/safety_cfg_store.c's nvs_save_
  * store_job() for the identical shape. `arg` points at a small struct owned
  * by the calling task's own stack frame, safe because uart_bridge_ext_run_
- * on_flash_worker() blocks the caller for the whole call. */
+ * on_flash_worker() blocks the caller for the whole call.
+ *
+ * LOW-3 fix (docs/audits/review_crash_gate_followups_62e95bbd_2026-09-15.md):
+ * the load() used to happen in the CALLER's task, before dispatch -- so an
+ * LCD Acknowledge could load() a record, then a concurrent web /clear could
+ * erase it, and the LCD's stale, already-loaded copy would still get written
+ * back by its persist job, resurrecting an acknowledged record after the
+ * operator had just cleared it. Doing the load INSIDE the job means the
+ * whole read-modify-write happens on the flash worker's single serial task,
+ * so it can never interleave with a concurrent crash_clear_job() (or another
+ * crash_ack_job()) -- whichever job actually runs later simply sees whatever
+ * the previous one left on disk. */
 typedef struct {
-    const crash_report_record_t *rec;
     esp_err_t err;
-} crash_ack_persist_job_ctx_t;
+    bool had_record;
+    bool already_acked;
+} crash_ack_job_ctx_t;
 
-static void crash_ack_persist_job(void *arg)
+static void crash_ack_job(void *arg)
 {
-    crash_ack_persist_job_ctx_t *ctx = (crash_ack_persist_job_ctx_t *)arg;
-    ctx->err = persist(ctx->rec);
+    crash_ack_job_ctx_t *ctx = (crash_ack_job_ctx_t *)arg;
+    crash_report_record_t rec;
+    if (!load(&rec)) {
+        ctx->had_record = false;
+        ctx->err = ESP_OK;
+        return;
+    }
+    ctx->had_record = true;
+    if (rec.acknowledged) {
+        ctx->already_acked = true;
+        ctx->err = ESP_OK;
+        return;
+    }
+    rec.acknowledged = 1u;
+    seal_crc(&rec);
+    ctx->err = persist(&rec);
 }
 
 bool crash_report_acknowledge(void)
 {
-    crash_report_record_t rec;
-    if (!load(&rec)) {
-        return false;
-    }
-    if (rec.acknowledged) {
-        s_have_unacked_crash = false; /* defensive -- keep the cache honest even if it had drifted */
-        return true; /* already acknowledged -- nothing to do, not a failure */
-    }
-    rec.acknowledged = 1u;
-    seal_crc(&rec);
-
     /* RE-ENTRANCY (flash_worker_lint.py's pattern 1, same guard relay_
      * cycles_reset() uses): check whether we are already ON the flash worker
      * before dispatching a second job onto it -- dispatching from inside an
@@ -480,11 +504,11 @@ bool crash_report_acknowledge(void)
      * diagnostics-page Acknowledge control on lvgl_task) are not expected to
      * already be on the worker, but the check is cheap and this is exactly
      * the class of bug that stays invisible until a caller changes. */
-    crash_ack_persist_job_ctx_t ctx = { .rec = &rec, .err = ESP_FAIL };
+    crash_ack_job_ctx_t ctx = { .err = ESP_FAIL, .had_record = false, .already_acked = false };
     if (uart_bridge_ext_is_on_flash_worker()) {
-        crash_ack_persist_job(&ctx);
+        crash_ack_job(&ctx);
     } else {
-        esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker(crash_ack_persist_job, &ctx);
+        esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker(crash_ack_job, &ctx);
         if (submit_err != ESP_OK) {
             /* uart_bridge_ext_run_on_flash_worker() itself returning non-OK
              * (worker not started, queue full) means the job never ran at
@@ -492,6 +516,13 @@ bool crash_report_acknowledge(void)
              * right thing to report either way. */
             ctx.err = submit_err;
         }
+    }
+    if (!ctx.had_record) {
+        return false;
+    }
+    if (ctx.already_acked) {
+        s_have_unacked_crash = false; /* defensive -- keep the cache honest even if it had drifted */
+        return true; /* already acknowledged -- nothing to do, not a failure */
     }
     if (ctx.err != ESP_OK) {
         ESP_LOGW(TAG, "could not persist crash-record acknowledgement: %s -- it will reappear after a reboot",

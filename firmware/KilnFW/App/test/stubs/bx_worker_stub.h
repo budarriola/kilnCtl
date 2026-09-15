@@ -59,8 +59,19 @@
 static bool s_stub_bx_busy = false;
 static bool s_stub_on_flash_worker = false;
 
+// LOW-1 fix (docs/audits/review_crash_gate_followups_62e95bbd_2026-09-15.md):
+// counts real dispatches through this stub, so a test can assert that a
+// write it expects to be flash-worker-routed actually went through here
+// rather than as a direct call from the caller's own task -- a docstring
+// claiming "still routes through the flash worker" with nothing checking
+// it would pass just as well for a hypothetical direct write. Not reset
+// automatically; a test that cares about a delta should snapshot this
+// before and after the call under test.
+static unsigned s_stub_dispatch_count = 0;
+
 esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
 {
+    s_stub_dispatch_count++;
     if (s_stub_bx_busy) {
         // Models the real deadlock: a caller re-entering the worker while a
         // job is already in flight. On hardware this blocks forever; here
