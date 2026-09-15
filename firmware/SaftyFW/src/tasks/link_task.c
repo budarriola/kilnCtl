@@ -90,6 +90,7 @@
 #include "kilnlink/kilnlink_ceiling.h" // SAFETY_CMD_SET_FIRING_CEILING, see link_task_handle_set_firing_ceiling()
 #include "kilnlink/kilnlink_clear_trip.h"
 #include "kilnlink/kilnlink_commit_config.h" // SAFETY_CMD_COMMIT_CONFIG (0x1D), see link_task_handle_commit_config()
+#include "kilnlink/kilnlink_apply_config_volatile.h" // SAFETY_CMD_APPLY_CONFIG_VOLATILE (0x2D), KILN_PROFILES_PLAN.md item 15 -- see link_task_handle_apply_config_volatile()
 #include "kilnlink/kilnlink_commit_config_rejected.h" // SAFETY_CMD_COMMIT_CONFIG_REJECTED (0x20), see link_task_send_commit_config_rejected()
 #include "kilnlink/kilnlink_config_page.h" // SAFETY_CMD_CONFIG_PAGE reply, see link_task_send_config_page()
 #include "kilnlink/kilnlink_ct_cal.h" // SAFETY_CMD_CT_CAL reply, see link_task_send_ct_cal()
@@ -2225,6 +2226,65 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
     }
 }
 
+// SAFETY_CMD_APPLY_CONFIG_VOLATILE (0x2D), KILN_PROFILES_PLAN.md item 15 --
+// the RAM-only sibling of link_task_handle_commit_config() just above.
+// Deliberately mirrors that function's validation steps 1-3 EXACTLY (same
+// config_params_validate_ex(), same finalize_ct_channel_map()/
+// finalize_i_present_a(), same calibration_missing recomputation) -- a
+// volatile install is not a less-checked install, it is the same checked
+// install with config_store_write_volatile() in place of config_store_
+// write() as the last step. That substitution is also the ONLY difference:
+// there is no ARMED refusal branch here at all, because config_store_write_
+// volatile() never calls config_store_decide_write() (see its own header
+// comment) -- the Pico never has to leave ARMED to accept this frame, which
+// is the entire reason this sibling command exists instead of a flag that
+// would have to thread an ARMED-bypass through config_store_write() itself.
+static void link_task_handle_apply_config_volatile(const kilnlink_frame_t *frame)
+{
+    kilnlink_apply_config_volatile_t msg;
+    kilnlink_apply_config_volatile_status_t dstatus =
+        kilnlink_apply_config_volatile_decode(frame->payload, frame->length, &msg);
+    if (dstatus != KILNLINK_APPLY_CONFIG_VOLATILE_OK) {
+        // Malformed/wrong-length/wrong-cmd -- untrusted wire input, discarded
+        // silently like every other decode failure in this file.
+        return;
+    }
+    (void)msg; // no fields
+
+    link_task_ensure_staged_config();
+
+    const char *field = NULL;
+    const char *rule = NULL;
+    config_params_reject_reason_t validate_reason = CONFIG_PARAMS_REJECT_NONE;
+    if (!config_params_validate_ex(&s_staged_config, &field, &rule, &validate_reason)) {
+        log_task_log(LOG_LEVEL_WARN, "apply_config_volatile", rule ? rule : "refused, validation failed");
+        kilnlink_commit_config_reject_reason_t wire_reason =
+            (validate_reason == CONFIG_PARAMS_REJECT_CONTRADICTION) ? KILNLINK_COMMIT_CONFIG_REJECT_CONTRADICTION
+            : (validate_reason == CONFIG_PARAMS_REJECT_RANGE)       ? KILNLINK_COMMIT_CONFIG_REJECT_RANGE
+                                                                     : KILNLINK_COMMIT_CONFIG_REJECT_UNKNOWN;
+        link_task_send_commit_config_rejected(config_params_id_for_field_name(field), wire_reason);
+        return; // writes NOTHING -- s_staged_config is untouched by validate_ex()
+    }
+
+    config_store_record_t to_write = s_staged_config;
+    config_params_finalize_ct_channel_map(&to_write);
+    config_params_finalize_i_present_a(&to_write);
+    to_write.calibration_missing = !config_params_all_required_set(&to_write);
+
+    // No `written` check, no ARMED/STORAGE rejection branch: config_store_
+    // write_volatile() has no failure mode (see its own header comment) --
+    // it cannot refuse ARMED (never checks it) and cannot fail flash I/O
+    // (never touches flash), so the only way this handler can fail to
+    // install is the validation refusal already handled above.
+    config_store_write_volatile(&to_write);
+    s_staged_config = to_write; // becomes the new baseline for the next SET_PARAM
+    log_task_log(LOG_LEVEL_INFO, "apply_config_volatile", "accepted (volatile, no flash write)");
+    // Same "take effect immediately" reasoning as link_task_handle_commit_
+    // config()'s own call: CT cal / i_present_a etc. must be live the moment
+    // this returns, not after a reboot.
+    current_task_reload_cal();
+}
+
 // SAFETY_CMD_PARAM (0x1E) reply -- sent in answer to SAFETY_CMD_GET_PARAM
 // (0x23, its own id since KILNLINK_PROTOCOL_VERSION 7; link_task_handle_
 // get_param() below). Reports the
@@ -2472,6 +2532,9 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
         break;
     case KILNLINK_COMMIT_CONFIG_CMD:
         link_task_handle_commit_config(&frame);
+        break;
+    case KILNLINK_APPLY_CONFIG_VOLATILE_CMD:
+        link_task_handle_apply_config_volatile(&frame);
         break;
     case KILNLINK_GET_PARAM_CMD:
         // Own id (0x23) since KILNLINK_PROTOCOL_VERSION 7 -- no longer

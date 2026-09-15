@@ -1092,3 +1092,34 @@ bool config_store_write(const config_store_record_t *rec, const char **out_reaso
     }
     return true;
 }
+
+// KILN_PROFILES_PLAN.md item 15 -- see config_store.h's own doc comment on
+// this function for the full contract. Deliberately does NOT call
+// config_store_decide_write() (no ARMED check -- that is the entire point:
+// this path never reaches config_store_write()'s flash I/O, so it never
+// needs relay_owner_get_state() at all) and does NOT touch s_regions/
+// hal_flash_safe_execute()/s_cached_slot/s_cached_sector -- nothing here is
+// persisted. The only side effect is the seqlock-guarded update of
+// s_cached_record, exactly the field every guard and every config_store_
+// get_*()/config_store_confirm_crc_ok() reader already treats as "the
+// live config" regardless of whether it came from flash or from here.
+void config_store_write_volatile(const config_store_record_t *rec)
+{
+    if (rec == NULL) {
+        return;
+    }
+
+    config_store_record_t to_write = *rec;
+    to_write.format_version = CONFIG_STORE_FORMAT_VERSION;
+    to_write.seq = s_cached_record.seq + 1u;
+
+    // Seqlock write, not a plain struct assignment -- identical reasoning to
+    // config_store_write()'s own call just above: every reader of
+    // s_cached_record runs on the other core with no other synchronisation
+    // against this update. Bypassing the seqlock here would hand the trip
+    // path a torn record, precisely the defect 98d237b0 fixed for the flash
+    // path -- this function exists so that fix's guarantee also covers the
+    // RAM-only path, not so it can be quietly skipped for one of the two
+    // writers.
+    config_store_seqlock_write(&to_write);
+}

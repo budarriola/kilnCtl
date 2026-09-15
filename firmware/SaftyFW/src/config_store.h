@@ -1115,6 +1115,52 @@ void config_store_get_full_record(config_store_record_t *out);
 // link_task_handle_set_config() (src/tasks/link_task.c).
 bool config_store_write(const config_store_record_t *rec, const char **out_reason);
 
+// KILN_PROFILES_PLAN.md item 15 -- installs `rec` into the live in-RAM
+// record (config_store_get_full_record()/every guard's seqlock snapshot)
+// WITHOUT writing flash and WITHOUT config_store_decide_write()'s ARMED
+// refusal: this is the whole point of the volatile path, since a swap that
+// stayed on config_store_write() would have to unarm the Pico for the
+// duration of 68 param writes, which the plan's section 1a.2 explicitly
+// rules out. Bypassing that gate is safe here BECAUSE this function never
+// reaches the flash write it protects -- there is nothing downstream of it
+// that a torn or half-applied write could corrupt on disk. Never call
+// config_store_seqlock_write() directly from any other new call site
+// instead of going through this function or config_store_write(): both of
+// them are the only two places allowed to touch it (config_store_flash.c's
+// own file header comment), and adding a third, uncommented bypass is
+// exactly the mistake this function's own header comment (config_store_
+// flash.c) warns a careless implementation would make.
+//
+// Same validation contract as config_store_write(): the CALLER (link_task's
+// SAFETY_CMD_APPLY_CONFIG_VOLATILE handler) must run config_params_
+// validate_ex() and config_params_finalize_*() over the staged record
+// first, exactly as it does before config_store_write() -- this function
+// does not re-validate, matching config_store_write()'s own contract (it
+// trusts its caller's `rec` too). A volatile install is not a
+// less-checked install; it is the same checked install with a different
+// persistence policy.
+//
+// `rec->format_version` is overwritten to CONFIG_STORE_FORMAT_VERSION and
+// `rec->seq` to `s_cached_record.seq + 1u`, exactly as config_store_write()
+// does -- this is what makes config_store_get_config_version()/_get_config_
+// crc() (both already derived from the live seqlock snapshot, not from a
+// separately-tracked "last flashed" value) report the NEW identity the
+// instant this returns, with no second step required: the Pico's FW_VERSION/
+// telemetry `config_version`/`config_crc` fields bump on their own the next
+// time either is read, because both are pure functions of s_cached_record.
+//
+// `s_cached_slot`/`s_cached_sector` are left UNCHANGED -- nothing was
+// flashed, so the position of the last-persisted (fallback) record on disk
+// has not moved. A later, deliberate config_store_write() (e.g. "persist
+// what is now proven live", plan section 1a.4) still lands in the correct
+// next slot relative to that unchanged position.
+//
+// Always succeeds once `rec` is handed to it (no ARMED check, no flash I/O
+// to fail) -- the only way this function can be prevented from installing
+// is for the caller to refuse to call it, which is exactly where
+// config_params_validate_ex()'s refusal belongs.
+void config_store_write_volatile(const config_store_record_t *rec);
+
 // TEST-ONLY instrumentation (opus review 2026-09-09): counts how many times
 // config_store_seqlock_read() has fallen through to the writer-owned
 // fallback double buffer (i.e. the primary seqlock's

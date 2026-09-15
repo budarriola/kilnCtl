@@ -171,8 +171,24 @@
  * the new optional start_index request byte is read as 0, same as always,
  * by firmware built before this version; see build_stack_margin_reply()'s
  * own comment.) The exact-match gate this constant drives is what turns
- * that silent corruption into a refused connection instead. */
-#define UART_PROTOCOL_VERSION ((uint16_t)11)
+ * that silent corruption into a refused connection instead.
+ *
+ * Version 12 (2026-09-14): SAFETY_CMD_APPLY_CONFIG_VOLATILE (0x2D) added,
+ * purely for enumeration -- same "defined again here so this file's
+ * SAFETY_CMD_* list stays the one place every subcommand on the isolated
+ * link is enumerated" reason SAFETY_CMD_CLEAR_TRIP/SAFETY_CMD_PUSH_CONTEXT
+ * already establish above. This command lives entirely on the isolated
+ * ESP<->Pico link (KILNLINK_PROTOCOL_VERSION, bumped 14 -> 15 alongside
+ * this) and has no PC<->ESP counterpart or caller yet -- nothing about the
+ * PC link's own frames changed. Bumped anyway because this constant and
+ * wire_protocol_fingerprint_check.py's "uart" fingerprint spec both key off
+ * uart_task_ids.h's SAFETY_CMD_ prefix without distinguishing which link a
+ * given SAFETY_CMD_ entry actually belongs to (both specs already treat
+ * SAFETY_CMD_CLEAR_TRIP/SAFETY_CMD_PUSH_CONTEXT the same way) -- moving
+ * only KILNLINK_PROTOCOL_VERSION would leave the "uart" fingerprint
+ * drifted with no version bump to explain it, exactly the failure class
+ * that check exists to catch. */
+#define UART_PROTOCOL_VERSION ((uint16_t)12)
 
 #define UART_TASK_ID_THERMO   1u  /* MAX31856 x3 on the thermocouple board (J6) */
 #define UART_TASK_ID_IO       2u  /* SX1509 expander: relays, digital I/O, DRDY */
@@ -791,6 +807,22 @@
  * its own cached Pico DIAG state rather than trusting one supplied over the
  * PC link, see safety_link_send_clear_trip()'s doc comment for why. */
 #define SAFETY_CMD_CLEAR_TRIP 0x0Au
+
+/* ESP->Pico, KILN_PROFILES_PLAN.md item 15. Same value as kilnlink_apply_
+ * config_volatile.h's KILNLINK_APPLY_CONFIG_VOLATILE_CMD, defined again here
+ * for the same "one place every subcommand on this wire is enumerated"
+ * reason SAFETY_CMD_CLEAR_TRIP/SAFETY_CMD_PUSH_CONTEXT are just above --
+ * see that header's own doc comment for the frame's full contract (a
+ * COMMIT_CONFIG-sibling that installs the staged config into the Pico's
+ * live RAM record without a flash write and without the ARMED refusal that
+ * gates the flash path). No ESP caller exists yet (the kiln-package apply
+ * transaction that will send this is a later item in that plan) -- kept
+ * enumerated here now, same as SAFETY_CMD_ANNOUNCE_VERSION's own reserved-
+ * but-not-yet-driving-a-feature precedent, so the isolated link's own wire-
+ * protocol fingerprint (wire_protocol_fingerprint_check.py) tracks this
+ * command id from the moment it exists rather than only from whenever an
+ * ESP-side sender is finally added. */
+#define SAFETY_CMD_APPLY_CONFIG_VOLATILE 0x2Du
 
 /* Pico -> ESP telemetry, Frame B (CommonFW/docs/LINK_PROTOCOL.md sec 6):
  * "Everything the 23-byte [status] frame has no room for" -- trip/warn

@@ -49,6 +49,14 @@ idf_component_register(
          "${KILNLINK_DIR}/src/kilnlink_param_value.c"
          "${KILNLINK_DIR}/src/kilnlink_set_param.c"
          "${KILNLINK_DIR}/src/kilnlink_commit_config.c"
+         # SAFETY_CMD_APPLY_CONFIG_VOLATILE (0x2D) -- KILN_PROFILES_PLAN.md
+         # item 15's RAM-only install sibling to COMMIT_CONFIG above. Not yet
+         # sent from anywhere on the ESP (the kiln-package apply transaction
+         # that will call it is a later item in that plan); listed here now
+         # so the ESP build links the codec the moment a caller is added,
+         # same "add it here or the ESP-IDF build never sees it" reason as
+         # every other entry in this SRCS list.
+         "${KILNLINK_DIR}/src/kilnlink_apply_config_volatile.c"
          "${KILNLINK_DIR}/src/kilnlink_get_config_page.c"
          "${KILNLINK_DIR}/src/kilnlink_config_page.c"
          # SET_LOG_LEVEL now has a real ESP caller (safety_link.c's

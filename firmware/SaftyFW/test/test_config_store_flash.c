@@ -188,6 +188,94 @@ static void test_write_refused_while_armed(void)
                "sector unchanged by a refused write -- still uncommissioned");
 }
 
+// KILN_PROFILES_PLAN.md item 15 -- config_store_write_volatile() must land
+// in the live record (visible to every getter/guard) while ARMED, must bump
+// config_version/config_crc exactly as a flash commit does, and must never
+// touch flash (a reload must NOT see it -- it was never persisted).
+static void test_write_volatile_installs_while_armed_and_bumps_identity(void)
+{
+    TEST_SECTION("config_store_flash: write_volatile lands in RAM, bumps identity, stays ARMED");
+    reset_all();
+    config_store_boot_load();
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
+
+    TEST_CHECK(config_store_get_config_crc() == 0, "fixture: uncommissioned before the volatile install");
+    uint8_t version_before = config_store_get_config_version();
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_type = 0x07u; // MAX31856_TC_TYPE_T
+    rec.calibration_missing = false;
+
+    config_store_write_volatile(&rec);
+
+    // Visible immediately, with no ARMED refusal of any kind -- there is no
+    // return value to check because this function cannot refuse.
+    TEST_CHECK(config_store_get_tc_type() == 0x07u,
+               "volatile install is visible to getters immediately");
+    TEST_CHECK(config_store_is_calibration_missing() == false,
+               "volatile install's calibration_missing is visible immediately");
+    TEST_CHECK(config_store_get_config_crc() != 0,
+               "volatile install bumps config_crc off the 'never commissioned' 0 sentinel");
+    TEST_CHECK(config_store_get_config_version() != version_before,
+               "volatile install bumps config_version");
+
+    // Still ARMED: nothing about this call path ever consulted, or needed
+    // to consult, relay_owner_get_state().
+    TEST_CHECK(relay_owner_get_state() == RELAY_OWNER_STATE_ARMED,
+               "the Pico never left ARMED across a volatile install");
+
+    // Never reached flash: a fresh boot_load (simulated reboot) must see the
+    // sector exactly as boot-loaded before the volatile install -- still
+    // uncommissioned, not the volatile record.
+    config_store_boot_load();
+    TEST_CHECK(config_store_get_config_crc() == 0,
+               "a volatile install never lands in flash -- a reload sees the pre-install state");
+    TEST_CHECK(config_store_get_tc_type() != 0x07u,
+               "a reload does not see the volatile tc_type either");
+}
+
+// A second volatile install must keep bumping the identity pair further
+// (not just once off the zero sentinel), and stacking a real flash commit
+// on top of a volatile install must still work normally (config_store_
+// write()'s own ARMED gate is independent and unaffected by the volatile
+// path having run first).
+static void test_write_volatile_repeated_then_flash_commit_still_gated(void)
+{
+    TEST_SECTION("config_store_flash: repeated write_volatile, then an ARMED flash commit still refuses");
+    reset_all();
+    config_store_boot_load();
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_type = 0x01u;
+    config_store_write_volatile(&rec);
+    uint8_t version_1 = config_store_get_config_version();
+    uint16_t crc_1 = config_store_get_config_crc();
+
+    rec.tc_type = 0x02u;
+    config_store_write_volatile(&rec);
+    uint8_t version_2 = config_store_get_config_version();
+    uint16_t crc_2 = config_store_get_config_crc();
+
+    TEST_CHECK(version_2 != version_1, "a second volatile install bumps the version again");
+    TEST_CHECK(crc_2 != crc_1, "a second volatile install bumps the CRC again (different bytes)");
+    TEST_CHECK(config_store_get_tc_type() == 0x02u, "the second volatile install's value wins");
+
+    // config_store_write()'s ARMED gate is untouched by any of this -- it is
+    // a completely separate function with its own check.
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
+    config_store_record_t flash_rec;
+    config_store_default(&flash_rec);
+    flash_rec.tc_type = 0x03u;
+    const char *reason = NULL;
+    bool ok = config_store_write(&flash_rec, &reason);
+    TEST_CHECK(ok == false,
+               "config_store_write() still refuses while ARMED even after volatile installs ran");
+    TEST_CHECK(config_store_get_tc_type() == 0x02u,
+               "the refused flash write does not disturb the volatile record already live");
+}
+
 static void test_seq_increments_and_survives_wraparound(void)
 {
     TEST_SECTION("config_store_flash: seq/CRC log across a full 8-slot wraparound");
@@ -1035,6 +1123,8 @@ int main(void)
     test_write_then_reload_round_trips();
     test_fallback_seeded_at_boot_before_any_write();
     test_write_refused_while_armed();
+    test_write_volatile_installs_while_armed_and_bumps_identity();
+    test_write_volatile_repeated_then_flash_commit_still_gated();
     test_seq_increments_and_survives_wraparound();
     test_safe_execute_timeout_is_reported_and_leaves_cache_unchanged();
     test_program_failure_is_not_masked_by_safe_execute_ok();

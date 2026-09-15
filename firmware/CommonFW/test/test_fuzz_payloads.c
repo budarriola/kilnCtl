@@ -59,6 +59,7 @@
 #include "kilnlink/kilnlink_clear_trip.h"
 #include "kilnlink/kilnlink_commit_config.h"
 #include "kilnlink/kilnlink_commit_config_rejected.h"
+#include "kilnlink/kilnlink_apply_config_volatile.h"
 #include "kilnlink/kilnlink_config_page.h"
 #include "kilnlink/kilnlink_context.h"
 #include "kilnlink/kilnlink_ct_cal.h"
@@ -165,6 +166,7 @@ typedef struct {
         kilnlink_set_param_t set_param;
         kilnlink_commit_config_t commit_config;
         kilnlink_commit_config_rejected_t commit_config_rejected;
+        kilnlink_apply_config_volatile_t apply_config_volatile;
         kilnlink_inject_tc_t inject_tc;
         kilnlink_get_param_t get_param;
         kilnlink_param_t param;
@@ -249,6 +251,7 @@ DECL_ADAPTER(set_log_level, KILNLINK_SET_LOG_LEVEL_LEN + 32);
 DECL_ADAPTER(set_param, KILNLINK_SET_PARAM_MAX_LEN + 32);
 DECL_ADAPTER(commit_config, KILNLINK_COMMIT_CONFIG_LEN + 32);
 DECL_ADAPTER(commit_config_rejected, KILNLINK_COMMIT_CONFIG_REJECTED_LEN + 32);
+DECL_ADAPTER(apply_config_volatile, KILNLINK_APPLY_CONFIG_VOLATILE_LEN + 32);
 DECL_ADAPTER(inject_tc, KILNLINK_INJECT_TC_LEN + 32);
 DECL_ADAPTER(get_param, KILNLINK_GET_PARAM_LEN + 32);
 DECL_ADAPTER(param, KILNLINK_PARAM_MAX_LEN + 32);
@@ -414,6 +417,14 @@ static int decode_commit_config(const uint8_t *p, size_t len)
     arm_canaries(&g_commit_config);
     int rc = (int)kilnlink_commit_config_decode(p, len, &g_commit_config.out.commit_config);
     check_canaries(&g_commit_config, "kilnlink_commit_config_decode", ++g_commit_config_calls);
+    return rc;
+}
+static int decode_apply_config_volatile(const uint8_t *p, size_t len)
+{
+    arm_canaries(&g_apply_config_volatile);
+    int rc = (int)kilnlink_apply_config_volatile_decode(p, len, &g_apply_config_volatile.out.apply_config_volatile);
+    check_canaries(&g_apply_config_volatile, "kilnlink_apply_config_volatile_decode",
+                    ++g_apply_config_volatile_calls);
     return rc;
 }
 static int decode_commit_config_rejected(const uint8_t *p, size_t len)
@@ -871,6 +882,8 @@ static const decoder_case_t k_cases[] = {
     {"kilnlink_set_log_level_decode", decode_set_log_level, build_valid_set_log_level, set_log_level_MAX_LEN, 0},
     {"kilnlink_set_param_decode", decode_set_param, build_valid_set_param, set_param_MAX_LEN, 0},
     {"kilnlink_commit_config_decode", decode_commit_config, build_valid_none, commit_config_MAX_LEN, 0},
+    {"kilnlink_apply_config_volatile_decode", decode_apply_config_volatile, build_valid_none,
+     apply_config_volatile_MAX_LEN, 0},
     {"kilnlink_commit_config_rejected_decode", decode_commit_config_rejected,
      build_valid_commit_config_rejected, commit_config_rejected_MAX_LEN, 0},
     {"kilnlink_inject_tc_decode", decode_inject_tc, build_valid_inject_tc, inject_tc_MAX_LEN, 0},

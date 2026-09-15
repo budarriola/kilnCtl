@@ -6,6 +6,7 @@
       "kilnlink_announce.h:KILNLINK_ANNOUNCE_MAX_DATETIME_LEN=32u",
       "kilnlink_announce.h:KILNLINK_ANNOUNCE_MAX_LEN=(KILNLINK_ANNOUNCE_FIXED_LEN + KILNLINK_ANNOUNCE_MAX_COMMIT_LEN +              KILNLINK_ANNOUNCE_MAX_DATETIME_LEN)",
       "kilnlink_announce_reboot.h:KILNLINK_ANNOUNCE_REBOOT_LEN=1u",
+      "kilnlink_apply_config_volatile.h:KILNLINK_APPLY_CONFIG_VOLATILE_LEN=1u",
       "kilnlink_ceiling.h:KILNLINK_CEILING_LEN=5u",
       "kilnlink_clear_trip.h:KILNLINK_CLEAR_TRIP_LEN=3u",
       "kilnlink_commit_config.h:KILNLINK_COMMIT_CONFIG_LEN=1u",
@@ -97,6 +98,7 @@
       "link_frame.h:LINK_FRAME_UPDATE_STATUS_CMD=0x14u",
       "uart_task_ids.h:SAFETY_CMD_ANNOUNCE_REBOOT=0x18u",
       "uart_task_ids.h:SAFETY_CMD_ANNOUNCE_VERSION=0x0Fu",
+      "uart_task_ids.h:SAFETY_CMD_APPLY_CONFIG_VOLATILE=0x2Du",
       "uart_task_ids.h:SAFETY_CMD_CLEAR_TRIP=0x0Au",
       "uart_task_ids.h:SAFETY_CMD_COMMIT_CONFIG=0x1Du",
       "uart_task_ids.h:SAFETY_CMD_COMMIT_CONFIG_REJECTED=0x20u",
@@ -130,8 +132,8 @@
       "uart_task_ids.h:SAFETY_CMD_UPDATE_END=0x12u",
       "uart_task_ids.h:SAFETY_CMD_UPDATE_STATUS=0x14u"
     ],
-    "fingerprint": "c60b2b77d26ac7a6",
-    "version": 14
+    "fingerprint": "d95c34124b5c1c92",
+    "version": 15
   },
   "uart": {
     "defs": [
@@ -193,6 +195,7 @@
       "uart_task_ids.h:PROFILES_CMD_STOP=0x07u",
       "uart_task_ids.h:SAFETY_CMD_ANNOUNCE_REBOOT=0x18u",
       "uart_task_ids.h:SAFETY_CMD_ANNOUNCE_VERSION=0x0Fu",
+      "uart_task_ids.h:SAFETY_CMD_APPLY_CONFIG_VOLATILE=0x2Du",
       "uart_task_ids.h:SAFETY_CMD_CLEAR_TRIP=0x0Au",
       "uart_task_ids.h:SAFETY_CMD_COMMIT_CONFIG=0x1Du",
       "uart_task_ids.h:SAFETY_CMD_COMMIT_CONFIG_REJECTED=0x20u",
@@ -267,7 +270,7 @@
       "uart_task_ids.h:WIFI_CMD_SET_AP_IDENTITY=0x05u",
       "uart_task_ids.h:WIFI_CMD_SET_MODE=0x04u"
     ],
-    "fingerprint": "a70f0322179f7608",
-    "version": 11
+    "fingerprint": "1def8545026afc9f",
+    "version": 12
   }
 }

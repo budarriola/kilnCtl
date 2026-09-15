@@ -303,8 +303,15 @@
  * (14) ESP, or vice versa, degrades to a clean, logged ERR_LENGTH_MISMATCH
  * on this one frame -- every other frame on the link is completely
  * unaffected, so refusing the whole link over this one payload's growth
- * would be strictly worse than the status quo. */
-#define KILNLINK_PROTOCOL_VERSION 14
+ * would be strictly worse than the status quo.
+ *
+ * 14 -> 15 (2026-09-14): SAFETY_CMD_APPLY_CONFIG_VOLATILE (0x2D) added --
+ * docs/KILN_PROFILES_PLAN.md item 15's RAM-only sibling to COMMIT_CONFIG
+ * (0x1D). Purely additive: a whole new frame neither side is required to
+ * send or understand to keep every existing frame working, same shape as
+ * the 8 -> 9 and 11 -> 12 steps above, so KILNLINK_MIN_COMPATIBLE is NOT
+ * raised alongside it (see that constant's own comment). */
+#define KILNLINK_PROTOCOL_VERSION 15
 
 /* The oldest peer this build will talk to (docs/LINK_PROTOCOL.md section 4,
  * "What 'compatible' means"). Deliberately NOT bumped alongside the 5 -> 6
@@ -334,6 +341,14 @@
  * DIAG/POWER/TRIP_EVENT/...) against a peer whose only actual gap is one
  * reply's honesty about an unset field -- a strictly worse outcome than the
  * targeted, self-diagnosing failure this staying at 7 already produces.
+ *
+ * NOT bumped alongside the 14 -> 15 step below either, same shape as
+ * 8 -> 9 / 11 -> 12: one brand-new, wholly additive frame (SAFETY_CMD_
+ * APPLY_CONFIG_VOLATILE, 0x2D, docs/KILN_PROFILES_PLAN.md item 15), nothing
+ * existing changed shape or meaning, so a peer built against 7 through 14
+ * remains fully compatible with a 15-built peer for everything it already
+ * knew how to speak -- it simply has no caller for the one new command yet,
+ * same as any other peer that predates a purely additive frame.
  *
  * NOT bumped alongside the 8 -> 9 step above either, same shape of reason
  * as the 5 -> 6 step: that step is purely additive (a whole new frame
