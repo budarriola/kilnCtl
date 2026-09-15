@@ -723,3 +723,15 @@ After restoring all three by hand and a full clean rebuild:
   rebuilt).
 - Anything about `c2c9eff2` (the ESP-side apply transaction) beyond the two seams
   it exposed in `17740e47`.
+
+### Addendum, same evening: B1 is now committed
+
+While this review was being written, a concurrent session committed the
+PcTools mirror as `67a21e62` ("Fix target-build regression and PC/firmware
+protocol-version drift; triage check suite"), so
+`tools/PcTools/src/kilnctrl/protocol.py`'s `UART_PROTOCOL_VERSION` now reads 12
+in a commit rather than only in an uncommitted edit. **Finding B1 is closed.**
+Finding B2 (the bump was avoidable, and is the 4th instance of the class
+`check_uart_version_independence.ps1` exists to prevent) stands: the two
+numbers still move together for a change that touched only the isolated link's
+wire, and nothing mechanical would catch the next one.
