@@ -47,8 +47,15 @@
 >   dead time and adding a fast mode the FOPDT fit does not represent, a
 >   plant/model mismatch of exactly the kind this layer exists to absorb,
 >   which the simulator cannot currently express at all.
->   `docs/SCENARIO_SIMULATION_PLAN.md` is being authored separately to scope
->   coverage of these — cited here as in-progress only, no outcome exists.
+>   `docs/SCENARIO_SIMULATION_PLAN.md` was being authored separately to scope
+>   coverage of these. **Corrected 2026-09-15 roadmap claim audit: that plan
+>   now exists and has partly run** — its own status line reads WI-1 through
+>   WI-8 DONE (per-item status in
+>   `docs/audits/scenario_simulation_implementation_2026-09-14.md`), WI-9
+>   DROPPED (its premise, the fuzzy/Ki mutual-exclusion guard, was deleted by
+>   `88bb4333`, not merely disabled), WI-10 not started. Read that plan and
+>   its implementation audit directly rather than this line; the
+>   "no outcome exists" framing here was stale.
 >   Owner principle, now decided: fuzzy constants, like PID gains, are
 >   **derived per kiln, not shipped** — bench values may be anything
 >   convenient precisely because they never ship, so no bench number in
@@ -112,7 +119,23 @@
 >   along with the Ki write path it protected. Neither defect exists at HEAD:
 >   the file no longer calls `zones_config_get_control_mode()` at all. This
 >   entry was stale, not open.
-> - **UNVERIFIED ON HARDWARE, unchanged:** `fuzzy_strength_pct = 0.0`,
+>
+> **Claim audit, 2026-09-15** (`docs/audits/roadmap_claim_audit_2026-09-15.md`).
+> Every claim in this file re-checked against code at HEAD and git history, not
+> against this file's own prose. All 206 cited commit hashes resolve and no
+> spot-checked commit was misdescribed. Six stale claims corrected in place
+> (each marked "corrected 2026-09-15 roadmap claim audit" where it sits), two
+> moved file paths fixed, and one **safety-evidence misattribution** corrected:
+> the guard-evidence row named the E-stop polarity fix as hardware-verified
+> when `docs/SAFETY_CASE.md` Â§4 classes it host-tested. The dominant shape was
+> the one the 2026-09-04 audit predicted â€” shipped work still described as
+> pending. Nothing was flashed, no board read, no `debug_*` call made, no
+> production code changed. Seven topics could NOT be resolved without hardware
+> or an owner decision and are left standing, marked, in that audit's
+> "Undetermined" section.
+> - **UNVERIFIED ON HARDWARE, unchanged â€” and NOT checkable by the 2026-09-15
+>   claim audit either, which was forbidden to read the board:**
+>   `fuzzy_strength_pct = 0.0`,
 >   `approach_rate_cap_c_per_hr = 0.0`, and `adaptive_tune enabled=False` on
 >   all three live zones — every fuzzy-band, overshoot-measurement, ramp-
 >   tracking and ratchet finding above is a host-test/sim result only; none
@@ -173,10 +196,19 @@
 >   column sweep reached 1.48x the joint case's total power with a flat
 >   response — refutes any gamma>1 for this signature). The surviving
 >   signature is that the deficit tracks **how power is split across zones,
->   not the total power drawn**. Also found in the same pass: `coil_power_w`
+>   not the total power drawn**. ~~Also found in the same pass: `coil_power_w`
 >   is `0.0f`/unset everywhere in the firmware, so total power in watts
 >   cannot be evaluated at all today — a "consumer without producer"
->   instance, not yet fixed. Net effect on the eighth-through-twelfth
+>   instance, not yet fixed.~~ **Corrected 2026-09-15 roadmap claim audit:
+>   this was already superseded on the day it was written.** `dbd8ff52`
+>   (2026-09-10) added the per-coil nameplate wattage override
+>   (`ZONES_CFG_VERSION` 24->25) the day before `fd8d7b93` recorded the
+>   claim; the producer chain is complete at HEAD (`zones_http_post_parse.c`
+>   parses it, `zones_config_set_coil_power_w()` stores it,
+>   `zones_http_get.c` reports it), and `0.0` is a documented sentinel
+>   meaning "use an equal share of the nameplate sum", whose own producer is
+>   `ZONE_MAX_POWER_PARAM_ID`. Whether the LIVE BOARD has either value set is
+>   a hardware question this audit could not check. Net effect on the eighth-through-twelfth
 >   sweeps' buoyancy hypothesis (z0 fitted exponent 1.366, "leading
 >   hypothesis: buoyant transport into the top zone, superlinear in
 >   delta-T", still stated further down this file): buoyancy was already
@@ -203,8 +235,9 @@
 > - **Fuzzy controller: confirmed still running plain PID on the bench**
 >   (`7e669c18`) — `control_mode=3` but `fuzzy_strength_pct=0.0` on all
 >   three live zones, which per `pid_fuzzy_adjust()`'s own contract
->   reproduces base PID bit-for-bit. No closed-loop simulation exercises the
->   fuzzy path at all. The one hardware capture that did exercise it
+>   reproduces base PID bit-for-bit. ~~No closed-loop simulation exercises the
+>   fuzzy path at all.~~ (Superseded `fbdc5bd0`/`7ef487ff`/`65fc6be9` — see
+>   the corrected blocking-prerequisite bullet below.) The one hardware capture that did exercise it
 >   (`fuzzy_ab_20260904d` arm B1, referenced in §3.6f below) is a single,
 >   unpaired-A-arm run with 100% of its samples falling in one of the rule
 >   table's nine cells — insufficient to characterize the layer, not just
@@ -262,10 +295,17 @@
 >   over subsequent heat cycles; (c) authority must grow with **measured
 >   confidence**, driving the existing `strength_pct` up from zero rather
 >   than through a new mechanism.
-> - Blocking prerequisite: **no closed-loop sim exercises the fuzzy path at
+> - ~~Blocking prerequisite: **no closed-loop sim exercises the fuzzy path at
 >   all** — neither `sim_iter_tune.c` nor `sim_credibility_gate_closedloop.c`
 >   calls `pid_fuzzy_adjust()`. Nothing here is testable on the sim-first
->   requirement until that harness exists.
+>   requirement until that harness exists.~~ **NO LONGER BLOCKING, corrected
+>   2026-09-15 roadmap claim audit.** The narrow half is still true (neither
+>   of those two files mentions `pid_fuzzy` at HEAD), but the harness exists:
+>   `fbdc5bd0` (2026-09-11) added `sim_fuzzy_closedloop.c`, a single-zone
+>   closed-loop harness for `pid_fuzzy_adjust()`; `7ef487ff` added
+>   `sim_fuzzy_overshoot.c`; `65fc6be9` added `sim_factorial_driver.c`. The
+>   sweeps at the top of this file already cite results measured with those
+>   harnesses, so this bullet contradicted them.
 > - Baseline data is insufficient, not merely thin: one mode-3 capture,
 >   unpaired A-arm, 100% of its samples in one of nine rule cells.
 > - **Requirements (a) and (b) above are already met in code by
@@ -820,7 +860,7 @@ open is short:
 | **S** | **Display items needing the owner's own hands/eyes, 2026-09-04.** Three separate (touch corner accuracy CLOSED `f028e2f` — see M1): (1) a residual blue tint on the ST7796 panel with every firmware cause eliminated by measurement — needs the owner's eye, or a colorimeter, or a second unit; (2) wake-on-touch, first-touch-swallow and error-dismissal behaviour on display power, which need a finger on the actual glass; (3) the STOP-block 5V I2C hazard measurement at meter-module pins 10/12, still not taken. | `DISPLAY_ST7796_PLAN.md` §4 |
 | **M** | ~~Field-update hardware exercise~~ — **ESP half done 2026-09-05**: OTA into `ota_0` + rollback both verified on the bench (PID gains byte-identical before/after, no heat, no firing). **Pico half attempted 2026-09-06**: a raw `.bin` (`arm-none-eabi-objcopy -O binary` on `SaftyFW_slotA.elf`, no header-packaging step needed — the ESP builds `UPDATE_BEGIN`'s header itself) staged and the relay started, but the Pico refused `UPDATE_BEGIN` ("a safety trip is pending") before any flash write — a real Pico-side interlock the ESP's own cached status did not show. The actual over-the-wire transfer, and whatever the bootloader/metadata gap noted in `SaftyFW/TODO.md` Phase 10 implies for a completed one, remain unexercised. See `firmware/CommonFW/docs/UPDATE_PROTOCOL.md` "Hardware exercise 2026-09-05". | M8 |
 | XL | **Two accepted risks in `docs/SAFETY_CASE.md`, new 2026-09-04: nothing currently mitigates either.** (1) Whether the two processors' independently-"healthy" verdicts are actually *correct* rather than merely self-consistent — e.g. both could be reading a shared, physically-faulted thermocouple wire. (2) Whatever sits downstream of both relays (a mechanical failure past K4) has no mitigation beyond K4 itself. Not a code gap — no reproducer exists and none is proposed; owner decision on whether/how to mitigate | `docs/SAFETY_CASE.md` H5, H9 |
-| — | **Guard evidence is mostly host-tested, not hardware-verified.** Of ~20 tracked guard-level claims, 19 are host-tested and only **3** are hardware-verified (S5's sensor fit/masking finding, KilnFW thermal_guard guard 6, the E-stop polarity fix) — everything else, including all of S1–S4/S6–S14's trip logic and KilnFW guards 1/2/3/4/5/7/9, has never been provoked on real silicon | `docs/SAFETY_CASE.md` §4 rollup; `GUARD_TEST_MATRIX.md` §3 |
+| — | **Guard evidence is mostly host-tested, not hardware-verified.** Of ~20 tracked guard-level claims, 19 are host-tested and only **3** are hardware-verified (**corrected 2026-09-15 roadmap claim audit** — the three rows are S5's *hardware fit*, S5's *masking-before-fit* finding, and KilnFW thermal_guard guard 6. The E-stop polarity fix was named here as the third and is **not** one: `SAFETY_CASE.md` §4 classes S7 as host-tested and negative-tested. The count was right, the attribution was wrong, and it credited the E-stop path with evidence it does not have) — everything else, including all of S1–S4/S6–S14's trip logic and KilnFW guards 1/2/3/4/5/7/9, has never been provoked on real silicon | `docs/SAFETY_CASE.md` §4 rollup; `GUARD_TEST_MATRIX.md` §3 |
 
 **Current owner-dependent items, 2026-09-09 sweep** (nothing in the code can close these; listed together so they don't have to be re-derived per session):
 
@@ -936,7 +976,12 @@ Two consequences that need to be read together:
   this is now a concrete instance of it, not a hypothetical.
 - **Only ONE processor is enforcing that limit.** The safety processor's
   `abs_max_temp_c` reads `set: true, value: 0`, and 0 on that field means
-  *never trip*. So the independent overtemperature guard is not armed, and the
+  *never trip*. **(Corrected 2026-09-15 roadmap claim audit: this 2026-08-28
+  snapshot is superseded by work recorded higher in this file —
+  `safety_ceiling_sync.c` pushes the ESP's configured ceiling to S1 on every
+  link-up tick, and `c99356f8` makes that an exact hard cutoff with no added
+  headroom, bench-verified in both directions. The present live value is a
+  hardware reading this audit was not permitted to take.)** So the independent overtemperature guard is not armed, and the
   ceiling is enforced by the same processor that commands the heat. Note the
   reporting trap that hid this: `/api/readiness` says "all 58 safety
   parameters have values", which counts a zero as a value — the field next to
@@ -1481,7 +1526,7 @@ under both pico-sdk and ESP-IDF, both firmwares consume the same codecs for
 every `LINK_PROTOCOL.md` sec 4/6 command, `pc_tools` cross-checks the same
 byte vectors, and a CI grep (`tools/check_no_duplicate_crc.ps1`) keeps a
 second CRC/framing implementation from reappearing outside `CommonFW`. Detail
-in `firmware/CommonFW/README.md` and `docs/LINK_PROTOCOL.md`.
+in `firmware/CommonFW/README.md` and `firmware/CommonFW/docs/LINK_PROTOCOL.md`.
 
 ## M3 — Safety processor to first trustworthy reading
 
@@ -1734,7 +1779,7 @@ and fixed during a full hardware test pass** — profile/readiness reporting,
 the LCD no-scroll rewrite, captive-portal DNS hijack, gzip content
 negotiation, the Digital Fire built-in schedules, a thermocouple-fault page,
 web DHCP/static-IP toggle, and others. Full list, and the ongoing ledger, is
-in `firmware/KilnFW/TODO.md` and `docs/UI_PLAN.md`; two hazards worth reuse
+in `firmware/KilnFW/TODO.md` and `firmware/KilnFW/docs/UI_PLAN.md`; two hazards worth reuse
 were promoted to the decisions table below (internal-SRAM exhaustion at task
 creation, and the UART owner's per-transfer heap churn).
 
@@ -2057,7 +2102,14 @@ surface usable rather than merely correct:
       skipped rather than tripped. `build_saftyfw_host_tests` passes 1891/1891
       including its coverage. Checkbox was stale; verified 2026-08-28. **Not
       the same as arming it**: S14 still can't be armed until `ct_channel_map`
-      has a real producer — see the item above
+      has a real producer — see the item above. **Corrected 2026-09-15
+      roadmap claim audit: superseded.** `b5cb83a4` exempted the summed-CT
+      topology from the `ct_channel_map` commissioning requirement, and
+      `c0729e1e` added the `i_normal_a` write path; `/api/readiness` now
+      reports exactly three missing parameters, `i_normal_a[0..2]`, with
+      `ct_channel_map` no longer counted (eleventh sweep, above). The
+      remaining blocker for arming S14/S15 is the uncalibrated CT and
+      `i_normal_a`, not `ct_channel_map`
 
 **Answered and closed, recorded so they are not re-asked:** every relay is to
 be rated for 100% duty cycle and inrush is negligible — the board is designed
@@ -2177,7 +2229,7 @@ external timer). Everything else named as unmigrated in the plan
 `firmware/UnitTestFw` stays untouched throughout (owner decision, do not
 re-propose folding it in).
 
-Gates: `build_kilnfw` + all 23 host executables green after every commit;
+Gates: `build_kilnfw` + all host-test executables green after every commit (the "23" recorded here was stale by 2026-09-15 — `build_host_tests.ps1` builds well over thirty; read its own summary rather than a number frozen in this file);
 every check script proven able to go red after the move (nine of twelve
 prior splits broke one silently); safety-link reply timing re-measured on
 hardware after Phase 1b. Land-alone diffs — coordinate with any other
