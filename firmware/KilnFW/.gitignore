@@ -19,6 +19,14 @@
 # Build artifacts and directories
 **/build/
 build/
+
+# ELF archive (kilnctrl elf_archive.py) -- deliberately a SIBLING of build/,
+# not inside it, so `idf.py fullclean`/a build-dir wipe can never take the
+# only symbolizable copy of a flashed ELF with it (see kiln_archive_dir()'s
+# 2026-09-15 docstring note and docs/audits/profile_executor_coredump_2026-09-15.md).
+# Still never committed -- manifest.json/superseded.json are generated
+# indices, and *.elf below already covers the binaries themselves.
+elf_archive/
 *.o
 *.a
 *.out

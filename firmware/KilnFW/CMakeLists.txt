@@ -45,7 +45,8 @@ project(KilnCtrl)
 # The real archiving happens on the FLASH side, not here: flash_firmware()/
 # debug_program() call tools/PcTools/src/kilnctrl/elf_archive.py's
 # archive_kiln_elf() after a confirmed flash, which copies the ELF into
-# build/elf_archive/ keyed by content hash AND registers it in manifest.json
+# elf_archive/ (a sibling of build/, NOT inside it -- see 2026-09-15 note
+# below) keyed by content hash AND registers it in manifest.json
 # under the identity the board's own /api/status will later report
 # (`fw_build`) -- that registration is what makes retention (see
 # elf_archive.py's MAX_ARCHIVED_ELFS policy) and lookup (find_crash_elf)
@@ -56,12 +57,31 @@ project(KilnCtrl)
 # that were never on any board, found and removed 2026-09-10) and no longer
 # does.
 #
+# 2026-09-15: OUTDIR moved from ${CMAKE_BINARY_DIR}/elf_archive (i.e.
+# build/elf_archive) to ${CMAKE_CURRENT_LIST_DIR}/elf_archive (a sibling of
+# build/), matching elf_archive.py's kiln_archive_dir()/safty_archive_dir().
+# The board's 2026-09-14 23:55:17Z flash (commit c8f7506b) was archived
+# correctly at flash time (manifest entry KilnCtrl-0965ca5755c1.elf, per
+# docs/audits/profile_executor_panic_recurrence_2026-09-14.md) but was gone
+# by the next day's symbolization attempt
+# (docs/audits/profile_executor_coredump_2026-09-15.md): manifest.json,
+# flash_provenance.json and the archived ELF were ALL missing at once, and
+# build/'s own CMakeCache.txt/config.env timestamps show the directory was
+# reconfigured from scratch shortly before that flash -- i.e. a clean/
+# fresh-configure of build/ (idf.py fullclean, or an equivalent manual wipe)
+# silently took the "durable" archive out with it, because it lived inside
+# the one directory a clean is specifically supposed to empty. Moving it
+# outside build/ (still gitignored, still never committed) is the actual
+# fix; nothing else -- not _prune, not a kiln_fw_root override -- was
+# responsible this time, and the lost ELF could not be recovered from any
+# worktree on disk (searched, no match on content or embedded build string).
+#
 # POST_BUILD on the app target rather than a separate target: it must run
 # every time the ELF is relinked, including when nothing else changed.
 add_custom_command(TARGET ${CMAKE_PROJECT_NAME}.elf POST_BUILD
     COMMAND ${CMAKE_COMMAND}
         -DELF=$<TARGET_FILE:${CMAKE_PROJECT_NAME}.elf>
-        -DOUTDIR=${CMAKE_BINARY_DIR}/elf_archive
+        -DOUTDIR=${CMAKE_CURRENT_LIST_DIR}/elf_archive
         -P ${CMAKE_CURRENT_LIST_DIR}/archive_elf.cmake
     VERBATIM
 )

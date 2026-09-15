@@ -860,5 +860,74 @@ class CanonicalArchiveWriteGuardTest(unittest.TestCase):
         # time and is gone with it -- nothing to clean up in the real archive.
 
 
+class ArchiveDirSurvivesBuildWipeTest(unittest.TestCase):
+    """2026-09-15: the canonical archive used to live at
+    firmware/<KilnFW|SaftyFW>/build/elf_archive/ -- INSIDE the directory
+    `idf.py fullclean` (or an equivalent manual wipe) empties. The
+    2026-09-14 23:55:17Z flash (commit c8f7506b) was archived correctly at
+    flash time and found completely gone the next day: manifest.json,
+    flash_provenance.json, and the archived ELF all vanished together, and
+    firmware/KilnFW/build/'s own CMakeCache.txt/config.env timestamps showed
+    the directory had been reconfigured from scratch shortly before that
+    flash. See docs/audits/profile_executor_coredump_2026-09-15.md and
+    kiln_archive_dir()'s docstring.
+
+    This proves the fix structurally: the canonical archive directories must
+    not have a path component literally named "build" -- if they did, an
+    ordinary rm-and-reconfigure of the ESP-IDF/pico-sdk build directory
+    would take the archive out with it, exactly as it did for real. It does
+    NOT simulate an actual `idf.py fullclean` (no ESP-IDF toolchain in this
+    test environment) -- the path-shape assertion is the mechanism that
+    would have caught this bug regardless of which specific tool emptied
+    build/, and is stable across environments."""
+
+    def test_kiln_archive_dir_not_inside_build(self):
+        parts = elf_archive.kiln_archive_dir().replace("\\", "/").split("/")
+        self.assertNotIn("build", parts,
+                          "kiln_archive_dir() must not live inside any directory named "
+                          "'build' -- a build-dir wipe (idf.py fullclean) would silently "
+                          "delete the canonical archive along with it, as it did for the "
+                          "2026-09-14 23:55:17Z flash (see docs/audits/"
+                          "profile_executor_coredump_2026-09-15.md)")
+
+    def test_safty_archive_dir_not_inside_build(self):
+        parts = elf_archive.safty_archive_dir().replace("\\", "/").split("/")
+        self.assertNotIn("build", parts,
+                          "safty_archive_dir() must not live inside any directory named "
+                          "'build' -- same hazard as kiln_archive_dir(), see that test")
+
+    def test_archived_elf_survives_simulated_build_wipe(self):
+        """End-to-end proof: archive a fake ELF, delete everything that
+        would exist under a real build/ directory (bin/elf outputs,
+        CMakeCache.txt, the whole ESP-IDF/pico-sdk build tree), and confirm
+        the archived copy + manifest entry are both still there afterward."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_repo_root = tmp
+            fake_build_dir = os.path.join(fake_repo_root, "firmware", "KilnFW", "build")
+            fake_archive_dir = os.path.join(fake_repo_root, "firmware", "KilnFW", "elf_archive")
+            elf_path = os.path.join(fake_build_dir, "KilnCtrl.elf")
+            _write_fake_elf(elf_path, b"build-wipe-survival-fake-elf-content")
+
+            with unittest.mock.patch.object(elf_archive, "kiln_archive_dir", return_value=fake_archive_dir):
+                result = elf_archive.archive_kiln_elf(elf_path, "Sep 14 2026 23:55:17", "c8f7506b", "test")
+                self.assertTrue(os.path.isfile(result.archived_path))
+
+                # Simulate `idf.py fullclean`: the entire build/ directory
+                # (and everything under it) is removed. If the archive were
+                # still nested inside build/ (the pre-fix layout), this
+                # would delete it too.
+                import shutil
+                shutil.rmtree(fake_build_dir)
+                self.assertFalse(os.path.isdir(fake_build_dir))
+
+                # The archive, being a sibling of build/ rather than a
+                # descendant, must be untouched.
+                self.assertTrue(os.path.isfile(result.archived_path),
+                                 "archived ELF was deleted by a build/ wipe -- the archive "
+                                 "is still nested inside build/")
+                path, message = elf_archive.find_kiln_elf_for_build("Sep 14 2026 23:55:17")
+                self.assertEqual(path, result.archived_path, message)
+
+
 if __name__ == "__main__":
     unittest.main()

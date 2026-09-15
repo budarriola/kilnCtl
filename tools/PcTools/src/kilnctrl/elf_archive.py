@@ -273,12 +273,29 @@ def _repo_root() -> str:
 
 def kiln_archive_dir() -> str:
     """Canonical KilnFW ELF archive dir -- always the MAIN tree's, regardless
-    of any kiln_fw_root override used to build/flash."""
-    return os.path.join(_repo_root(), "firmware", "KilnFW", "build", "elf_archive")
+    of any kiln_fw_root override used to build/flash.
+
+    2026-09-15: this used to be firmware/KilnFW/build/elf_archive, i.e.
+    INSIDE the ESP-IDF build directory. That made the archive only as
+    durable as build/ itself: the 2026-09-14 23:55:17Z flash (commit
+    c8f7506b) was archived correctly at flash time, then found completely
+    gone the next day (manifest.json, flash_provenance.json AND the
+    archived ELF all missing at once) -- build/'s own CMakeCache.txt/
+    config.env timestamps showed the directory had been reconfigured from
+    scratch shortly before that flash, meaning a clean/fresh-configure of
+    build/ (idf.py fullclean, or an equivalent manual wipe) silently deletes
+    this "durable" archive along with it. See
+    docs/audits/profile_executor_coredump_2026-09-15.md. Moved to a sibling
+    of build/ (firmware/KilnFW/elf_archive) so nothing that legitimately
+    empties build/ can take it out. Still gitignored, still never
+    committed -- see firmware/KilnFW/.gitignore's elf_archive/ entry."""
+    return os.path.join(_repo_root(), "firmware", "KilnFW", "elf_archive")
 
 
 def safty_archive_dir() -> str:
-    return os.path.join(_repo_root(), "firmware", "SaftyFW", "build", "elf_archive")
+    """See kiln_archive_dir()'s 2026-09-15 note -- same fix, same reason,
+    moved out from under firmware/SaftyFW/build/."""
+    return os.path.join(_repo_root(), "firmware", "SaftyFW", "elf_archive")
 
 
 def _canonical_archive_dirs() -> set[str]:
@@ -288,8 +305,8 @@ def _canonical_archive_dirs() -> set[str]:
     that read them back would be blind precisely when it needs to fire."""
     root = _repo_root()
     return {
-        os.path.normpath(os.path.join(root, "firmware", "KilnFW", "build", "elf_archive")),
-        os.path.normpath(os.path.join(root, "firmware", "SaftyFW", "build", "elf_archive")),
+        os.path.normpath(os.path.join(root, "firmware", "KilnFW", "elf_archive")),
+        os.path.normpath(os.path.join(root, "firmware", "SaftyFW", "elf_archive")),
     }
 
 

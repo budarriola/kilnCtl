@@ -403,8 +403,17 @@ def _archive_flashed_elf(build_dir: str, app_bin_path: str, tree_state,
         result = elf_archive.archive_kiln_elf(elf_path, app_desc.build_timestamp, tree_state.head, source)
         return f"\nelf archived: {result.archived_path} (key {result.elf_key})"
     except Exception as exc:  # noqa: BLE001 - archiving is a diagnostic convenience, never fail the flash over it
+        # 2026-09-15: this used to log-only and return "" -- a failed archive
+        # call was then indistinguishable, in the tool's own returned result,
+        # from one that succeeded silently. The 2026-09-14 23:55:17Z flash's
+        # ELF went missing from the archive by the next day for an unrelated
+        # reason (build/ itself got wiped, see kiln_archive_dir()'s docstring),
+        # but an archiving failure at flash time would have looked identical
+        # to a clean success in the result text either way. Surface it in the
+        # returned message so a failed archive is never mistaken for one that
+        # worked.
         _srv._session_log.warning("flash_firmware: elf archiving failed (non-fatal): %s", exc)
-        return ""
+        return f"\nWARNING: elf archiving FAILED (flash itself succeeded): {exc}"
 
 
 @_srv._tool()
@@ -918,7 +927,8 @@ def find_crash_elf(host: Optional[str] = None, fw_build: Optional[str] = None) -
     of `build/KilnCtrl.elf` (whatever was built most recently -- confidently
     wrong once the board is running an older flash, per CLAUDE.md's firmware
     gotchas). One call in place of hunting through
-    `firmware/KilnFW/build/elf_archive/` by hand.
+    `firmware/KilnFW/elf_archive/` (a sibling of build/, not inside it --
+    see elf_archive.kiln_archive_dir()'s 2026-09-15 note) by hand.
 
     Looks up `elf_archive`'s manifest (populated by every flash_firmware()
     call -- see elf_archive.py -- plus archive_elf.cmake's own POST_BUILD

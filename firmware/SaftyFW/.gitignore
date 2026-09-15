@@ -1,4 +1,10 @@
 build/
+
+# ELF archive (kilnctrl elf_archive.py) -- a SIBLING of build/, not inside
+# it, so a build-dir wipe can never take it out. See KilnFW/.gitignore's
+# matching entry and kiln_archive_dir()'s 2026-09-15 docstring note.
+elf_archive/
+
 *.obj
 *.exe
 *.ilk
