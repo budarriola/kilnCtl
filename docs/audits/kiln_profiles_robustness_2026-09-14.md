@@ -21,7 +21,7 @@ that might be written. Those are marked **LIVE DEFECT**.
 
 | # | finding | risk | status |
 |---|---|---|---|
-| **H1** | `zones_config_export_blob()` is a raw struct `memcpy`, so `pkg_hash` hashes compiler padding. A JSON round trip cannot reproduce it. Download → upload of an unmodified package will mismatch its own hash. | **HIGH — ships the feature broken and kills the divergence check** | LIVE DEFECT |
+| **H1** | `zones_config_export_blob()` is a raw struct `memcpy`, so `pkg_hash` hashes compiler padding. A JSON round trip cannot reproduce it. Download → upload of an unmodified package will mismatch its own hash. | **HIGH — ships the feature broken and kills the divergence check** | **FIXED 2026-09-14** — see `docs/audits/kiln_package_canonical_serializer_2026-09-14.md`. `zones_config_export_canonical()`/`_import_canonical()` (X-macro field tables + compile-time shadow-struct completeness proof) replace the raw blob as `kiln_package_compute_hash()`'s ESP-half input; round-trip byte-identity and the `0xA5`-poisoned negative test both pass. `zones_cfg_t::crc32` has the same defect and is NOT fixed by this pass — named follow-up in that doc. |
 | **H2** | `kiln_package_compute_hash()` returns `0` on three failure paths, and `0` is the store's documented "hash never computed" sentinel. A failed hash is indistinguishable from an absent one. | **HIGH — an unverified config can be certified** | LIVE DEFECT |
 | **H3** | A corrupt store silently `reset_to_defaults()` — all 10 slots gone, one `ESP_LOGW`, no operator-visible signal, and the next save overwrites the `cfg` mirror too. The only copy of a kiln's identity is destroyed without anyone being told. | **HIGH — this is the "worse than no feature" case** | LIVE DEFECT |
 | **H4** | Auto-save's dirty-flag fan-in is the plan's largest new surface for the `137dea1a` defect class, and one live writer path (`zones_config_import_blob()` via apply) is itself a whole-struct write. Four paths enumerated in §10. | **HIGH** | plan item 13 |
@@ -251,7 +251,7 @@ a test detects the Pico retaining the old ceiling. Restore by hand.
 
 ## 3. Round-trip fidelity (H1, H2, H14) — the highest-risk finding
 
-### 3.1 H1: the hash includes compiler padding — LIVE DEFECT
+### 3.1 H1: the hash includes compiler padding — FIXED 2026-09-14, see `docs/audits/kiln_package_canonical_serializer_2026-09-14.md`
 
 `kiln_package_compute_hash()` (`kiln_package.c:105`) does the Pico half
 correctly: it packs `{param_id, type, flags, value_bits}` field by field, in

@@ -168,28 +168,20 @@ bool kiln_package_capture_pico_half(const kiln_pkg_pico_source_t *source, kiln_p
  * KILN_PKG_SAFETY_PARAM_CAP ceilings) -- NEVER silently hashes a truncated
  * buffer.
  *
- * KNOWN LIMITATION, not yet fixed (H1, same audit doc): `esp_blob` is
- * expected to be zones_config_export_blob()'s raw output, which is a whole-
- * struct memcpy of zones_cfg_t -- so this hash currently covers whatever
- * bytes the compiler put in that struct's padding. On THIS pass's actual
- * delivered surface (kiln_cfg_store.c saves/clones/applies -- no JSON
- * transport exists yet) that is harmless: the only "reconstruction" of
- * zones_cfg_t is the live, zero-initialized static s_zones.cfg
- * (zones_config_accessors.c) being memcpy'd, so padding is always zero and
- * the hash is fully reproducible for every comparison this pass actually
- * makes. It becomes UNSAFE the moment a package is rebuilt from JSON
- * (docs/KILN_PROFILES_PLAN.md items 3/4, upload) into a NOT-necessarily-
- * zeroed destination -- whoever implements that must either (a) add a
- * canonical, padding-free, field-by-field zones_cfg_t serializer (the
- * plan's own section 3.1.3 rule 3) built by walking the struct's OWN
- * declaration mechanically (never a hand-written, forgettable field list --
- * the same "un-forgettable memcpy" property this module's Pico-half
- * packing already has via CONFIG_PARAM_TABLE's enumerable count/get-by-
- * index), or (b) memset(0) every JSON-reconstructed zones_cfg_t before
- * populating it AND prove via a test that fills the destination with a
- * poison byte (0xA5) first that the resulting hash still matches a live
- * board's own compute -- see the audit doc's own negative-test note. Do
- * NOT ship upload/download against this function without one of those. */
+ * H1 FIXED (docs/audits/kiln_profiles_robustness_2026-09-14.md,
+ * docs/audits/kiln_package_canonical_serializer_2026-09-14.md): `esp_blob`
+ * is no longer expected to be zones_config_export_blob()'s raw (padding-
+ * including) struct memcpy. Every caller now passes
+ * zones_config_export_canonical()'s output instead (kiln_cfg_store.c's
+ * populate_pico_half_and_hash()) -- a fixed, declaration-order, padding-free
+ * encoding of zones_cfg_t built from an X-macro field table with a
+ * compile-time completeness proof (see zones_config_accessors.c's own
+ * comment on ZONE_CFG_FIELDS/ZONES_CFG_FIELDS for the "cannot silently
+ * forget a field" argument, the same property this module's own Pico-half
+ * table walk already has via CONFIG_PARAM_TABLE's enumerable count/get-by-
+ * index). This function itself is unchanged -- it still just hashes
+ * whatever bytes `esp_blob` hands it -- so this is a caller-contract note,
+ * not a code change here. */
 bool kiln_package_compute_hash(uint16_t pkg_schema, const uint8_t *esp_blob, uint16_t esp_blob_len,
                                 const kiln_pkg_safety_t *pico, uint32_t *out_hash);
 

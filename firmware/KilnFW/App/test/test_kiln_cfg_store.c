@@ -124,6 +124,38 @@ bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, si
     return s_stub_import_result;
 }
 
+// H1 (docs/audits/kiln_profiles_robustness_2026-09-14.md,
+// docs/audits/kiln_package_canonical_serializer_2026-09-14.md):
+// populate_pico_half_and_hash() now feeds kiln_package_compute_hash()'s ESP
+// half through zones_config_export_canonical() instead of the raw blob --
+// this file stubs that function the same way it already stubs
+// zones_config_export_blob() above, rather than linking the real
+// zones_config_accessors.c (which would drag in the whole zones_http.c
+// hardware-owning surface this file's own header comment explains it
+// deliberately avoids). Passed `cfg` here is populate_pico_half_and_hash()'s
+// own `scratch_cfg` -- a zeroed zones_cfg_t with s_stub_export_content's
+// bytes copied over its front s_stub_blob_size bytes (see
+// kiln_cfg_store.c's own save-path code) -- so copying its first N raw bytes
+// out preserves this file's existing "a different ESP blob content produces
+// a different pkg_hash" contract (test_kiln_cfg_store_save_current_
+// captures_pico_and_hash below) without this stub needing to know
+// zones_cfg_t's real layout at all. */
+size_t zones_config_canonical_max_size(void)
+{
+    return ZONES_CONFIG_BLOB_MAX_SIZE;
+}
+
+bool zones_config_export_canonical(const void *cfg, uint8_t *out, size_t out_cap, size_t *out_len)
+{
+    if (!cfg || !out || !out_len) {
+        return false;
+    }
+    size_t n = s_stub_blob_size <= out_cap ? s_stub_blob_size : out_cap;
+    memcpy(out, cfg, n);
+    *out_len = n;
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // ota_http.h stub -- only ota_http_check_interlocks() is ever called from
 // kiln_cfg_store.c. The function BODY lives in test_backup_import.c (also

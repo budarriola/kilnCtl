@@ -1379,6 +1379,95 @@ bool zones_config_export_blob(void *out, size_t out_cap);
  * and nothing was changed. */
 bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, size_t reason_cap);
 
+/* ---- Canonical (padding-free) serialization -- H1, docs/audits/
+ * kiln_profiles_robustness_2026-09-14.md ------------------------------------
+ *
+ * zones_config_export_blob() above is a raw memcpy of zones_cfg_t, including
+ * whatever bytes the compiler put in its padding. kiln_package_compute_hash()
+ * (kiln_package.c) used to hash that raw blob for its ESP half -- fine as
+ * long as the only "reconstruction" of zones_cfg_t was another memcpy from a
+ * zero-initialized static (always-zero padding), but UNSAFE the moment a
+ * package is rebuilt field-by-field from JSON into a not-necessarily-zeroed
+ * destination: the recomputed hash would depend on padding bytes the JSON
+ * round trip cannot reproduce, refusing an upload of a file the same board
+ * produced minutes earlier.
+ *
+ * zones_config_export_canonical()/zones_config_import_canonical() are the
+ * fix: a fixed, declaration-order, field-by-field binary encoding with NO
+ * padding, floats emitted as their IEEE-754 bit pattern (-0.0 flushed to
+ * +0.0 first) in little-endian, integers little-endian, char arrays copied
+ * verbatim. `crc32` is deliberately EXCLUDED from the canonical stream (a
+ * whole-struct CRC field cannot canonicalize itself). `zones_cfg_t::crc32`
+ * ITSELF is a second instance of the same padding-exposure defect (a
+ * whole-struct CRC computed over memcpy'd bytes, field zeroed first) --
+ * tracked as a named follow-up in docs/audits/
+ * kiln_package_canonical_serializer_2026-09-14.md, NOT fixed by this pair,
+ * since today nothing reconstructs a zones_cfg_t from JSON and then
+ * recomputes/checks that CRC (zones_config_import_blob() only ever sees a
+ * blob that was itself a memcpy of a real board's struct).
+ *
+ * WHY THIS CANNOT SILENTLY FORGET A FIELD, THE SAME "UN-FORGETTABLE" PROPERTY
+ * kiln_package.c's Pico-half table walk already has (see that module's own
+ * header comment): the encoder/decoder are generated from ONE X-macro field
+ * table per struct (ZONE_TIMING_PROFILE_FIELDS/ZONE_CFG_FIELDS/
+ * ZONES_CFG_FIELDS in zones_config_accessors.c), which ALSO generates a
+ * "shadow" mirror struct with the identical field list, and a block of
+ * _Static_assert()s proving, per field AND for the struct's total size, that
+ * the shadow struct's layout is byte-for-byte identical to the real one. A
+ * field added to zone_cfg_t/zones_cfg_t/zone_timing_profile_t without adding
+ * it to the matching table is NOT silently skipped by the encoder -- it
+ * changes the real struct's size and/or the offset of every field after the
+ * insertion point, which the shadow-struct comparison catches at COMPILE
+ * TIME (a linker-free, always-run static assertion, not a test that must be
+ * remembered and invoked) with a message naming the field table to update.
+ * See that file's own comment for the one theoretical gap this leaves (a
+ * forgotten field whose size exactly consumes an existing alignment-padding
+ * gap without moving anything after it) and why it does not occur for any
+ * field type this codebase actually uses. */
+
+/* Upper bound on zones_config_export_canonical()'s output for ANY
+ * zones_cfg_t this build can hold -- the canonical form carries strictly
+ * fewer bytes than the raw struct (no padding, crc32 excluded), so
+ * ZONES_CONFIG_BLOB_MAX_SIZE (already the raw-blob ceiling kiln_cfg_store.c
+ * sizes its scratch buffers against) is always a safe, if slightly generous,
+ * bound -- no separate ceiling macro to keep in sync. */
+size_t zones_config_canonical_max_size(void);
+
+/* Encodes `cfg` (any zones_cfg_t instance -- the live s_zones.cfg via
+ * zones_config_export_blob()'s sibling accessor, or a candidate built while
+ * importing/validating an uploaded package) into `out`. `out_cap` must be >=
+ * zones_config_canonical_max_size(); on success `*out_len` is the exact
+ * number of bytes written. Never partial -- on any failure (`cfg`/`out`/
+ * `out_len` NULL, or `out_cap` too small) nothing is written and `*out_len`
+ * is left untouched. */
+/* `cfg` is a `const zones_cfg_t *` -- `const void *` here for the same
+ * reason zones_config_export_blob() above takes `void *out` rather than
+ * `zones_cfg_t *`: this header deliberately does not #include
+ * zones_config_json.h (zones_cfg_t's home), so the type is not visible in
+ * every translation unit that includes this header. */
+bool zones_config_export_canonical(const void *cfg, uint8_t *out, size_t out_cap, size_t *out_len);
+
+/* Inverse of the above. `out` is memset(0) FIRST, unconditionally, before any
+ * field is written -- H1's "zero-fill on reconstruction" requirement, so a
+ * caller's poisoned or garbage-filled destination buffer can never leave
+ * stray bytes behind (there is no padding in `out` this format skips, since
+ * the whole struct is populated field-by-field below, but zero-fill-first is
+ * the same cheap-insurance convention zones_config_convert.c's own migration
+ * paths already use, and it is what makes the round trip byte-identical
+ * regardless of what `out` held beforehand).
+ *
+ * `len` must equal EXACTLY this build's own encoder output length for a
+ * fully-populated struct (from zones_config_canonical_max_size() this is not
+ * derivable up front since the true encoded length is fixed, not up-to a
+ * cap -- callers get the real number back from zones_config_export_canonical()
+ * itself). A mismatched length is refused outright (`out` left zeroed,
+ * nothing partially decoded) rather than guessed at -- the same "no partial
+ * write" discipline as kiln_package_capture_pico_half(). `cfg->crc32` is left
+ * at 0; recompute it via the caller's own means if the result will be fed
+ * back through a CRC-checking path (zones_config_import_blob() already does
+ * this on the raw-blob path and does not use this function). */
+bool zones_config_import_canonical(const uint8_t *buf, size_t len, void *out);
+
 
 /* ---- Task 1: per-zone normal (steady-state) current measurement --------- */
 

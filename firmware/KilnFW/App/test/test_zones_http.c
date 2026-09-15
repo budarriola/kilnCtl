@@ -10886,6 +10886,313 @@ static void test_validate_rejects_out_of_range_sanity_rate(void)
     }
 }
 
+// ---------------------------------------------------------------------------
+// H1 -- zones_config_export_canonical()/zones_config_import_canonical()
+// (docs/audits/kiln_profiles_robustness_2026-09-14.md,
+// docs/audits/kiln_package_canonical_serializer_2026-09-14.md). See
+// zones_config_accessors.h/.c's own comments on this pair for the full
+// rationale; these tests prove the round-trip contract and the two
+// negative-test requirements the audit doc calls out by name.
+// ---------------------------------------------------------------------------
+
+/* Fills every field this canonical format carries with a distinctive,
+ * non-zero, non-default value -- deliberately including an awkward decimal
+ * float (123456.789f, chosen because it is NOT exactly representable and
+ * %.4f would lose precision %.9g would not -- the plan's own "%.9g, never
+ * backup_export.c's %.4f" requirement, checked here at the binary level
+ * rather than through a text format at all, since this canonical form never
+ * goes through printf). Every array element gets a distinct value too (zone
+ * index folded in) so a bug that only shows up on element 1 or 2 cannot
+ * hide behind element 0 alone. */
+/* `poison` fills the struct BEFORE any field is set (instead of the usual
+ * zero-fill) -- every field this canonical format tracks is then set
+ * explicitly below regardless, so the only bytes that keep `poison` are
+ * padding and crc32 (deliberately excluded from the canonical format). This
+ * is what lets test_canonical_negative_MEMCPY_INSTEAD_OF_CANONICAL_breaks_
+ * the_round_trip() build two structs that are LOGICALLY identical but
+ * differ only in padding -- exactly the scenario a JSON reconstruction into
+ * an arbitrary (non-zeroed) heap allocation would produce. */
+static void make_fully_populated_cfg_poisoned(zones_cfg_t *cfg, uint8_t poison)
+{
+    memset(cfg, poison, sizeof(*cfg));
+    cfg->version = ZONES_CFG_VERSION;
+    cfg->thermo_count = MAX31856_CHANNEL_COUNT;
+    cfg->relay_count = MAX31856_CHANNEL_COUNT;
+    cfg->max_simultaneous_relays = 2;
+    cfg->continue_on_zone_trip = 1;
+    cfg->safety_tc_type = 3;
+    cfg->timing_profile_count = MAX31856_CHANNEL_COUNT;
+    cfg->pc_link_abort_silence_ms = 30000.5f;
+
+    for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+        zone_cfg_t *zc = &cfg->zones[z];
+        memset(zc->name, 0, sizeof(zc->name)); /* production always zero-pads this field via
+                                                 * strncpy(dst, src, ZONE_NAME_MAX_LEN) on an
+                                                 * already-zeroed struct (zones_config_accessors.c's
+                                                 * name setter, zones_http_post_parse.c) -- explicit
+                                                 * here since this struct started from `poison`, not
+                                                 * zero, and snprintf() alone does not clear bytes
+                                                 * past the terminator the way strncpy's own padding
+                                                 * behavior does. */
+        snprintf(zc->name, sizeof(zc->name), "Z%u", (unsigned)z);
+        zc->cal_offset_c = 123456.789f; /* the awkward decimal float */
+        zc->pid_kp = 1.5f + (float)z;
+        zc->pid_ki = 0.02f + (float)z;
+        zc->pid_kd = 3.0f + (float)z;
+        zc->max_ramp_c_per_hr = 100.0f + (float)z;
+        zc->sanity_rate_c_per_min = 5.0f + (float)z;
+        zc->max_temp_c = 1300.0f + (float)z;
+        zc->min_temp_c = -10.0f - (float)z;
+        zc->heater_window_ms = 1000.0f + (float)z;
+        zc->heater_min_on_ms = 50.0f + (float)z;
+        zc->heater_min_off_ms = 60.0f + (float)z;
+        zc->guard_wrong_dir_window_s = 10.0f + (float)z;
+        zc->guard_wrong_dir_rate_c_per_min = 1.0f + (float)z;
+        zc->guard_off_settle_s = 2.0f + (float)z;
+        zc->guard_runaway_rate_c_per_min = 20.0f + (float)z;
+        zc->guard_runaway_margin_c = 3.0f + (float)z;
+        zc->guard_drift_period_s = 30.0f + (float)z;
+        zc->guard_sensor_fault_debounce_ticks = 4.0f + (float)z;
+        zc->guard_frozen_window_s = 40.0f + (float)z;
+        zc->cross_zone_max_delta_c = 5.0f + (float)z;
+        zc->model_k_dc = 6.0f + (float)z;
+        zc->model_tau_s = 700.0f + (float)z;
+        zc->model_dead_time_s = 8.0f + (float)z;
+        zc->fuzzy_strength_pct = 9.0f + (float)z;
+        for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+            zc->coupling_coeff[j] = 0.1f * (float)(z + 1) + 0.01f * (float)j;
+            zc->coupling_tau_s[j] = 100.0f * (float)(z + 1) + (float)j;
+            zc->coupling_dead_time_s[j] = 1.0f * (float)(z + 1) + 0.1f * (float)j;
+        }
+        zc->relay_mask = (uint8_t)(0x01u << z);
+        zc->control_mode = (uint8_t)(1 + z);
+        zc->tc_type = (uint8_t)(2 + z);
+        zc->thermo_mask = (uint8_t)(0x01u << z);
+        zc->ct_mask = (uint8_t)(0x01u << z);
+        zc->timing_profile = z;
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            zc->settings_source[g] = (uint8_t)((g + z) % 4);
+        }
+        zc->tuning_valid = 1;
+        zc->tuning_method = 1;
+        zc->tuning_rule = 2;
+        zc->tuning_settled = 1;
+        zc->tuning_extrapolation_converged = 1;
+        zc->tuning_tau_consistent = 1;
+        zc->tuning_baseline_c = 21.0f + (float)z;
+        zc->tuning_step_ambient_c = 22.0f + (float)z;
+        zc->tuning_raw_rise_c = 23.0f + (float)z;
+        zc->tuning_rise_inf_c = 24.0f + (float)z;
+        zc->tuning_seq = 1000u + z;
+        zc->adaptive_tune_enabled = 1;
+        zc->coupling_diag_k_dc = 25.0f + (float)z;
+        zc->ease_off_window_mult = 1.1f + 0.01f * (float)z;
+        zc->approach_rate_cap_c_per_hr = 200.0f + (float)z;
+        zc->error_band_c = 2.5f + (float)z;
+        zc->rate_band_c_per_s = 0.5f + (float)z;
+        zc->relay_type = 1;
+        zc->progress_band_c = 3.5f + (float)z;
+        zc->zone_type = 0;
+        zc->failsafe_state = 0;
+        zc->hyst_c = 2.0f + (float)z;
+        zc->min_on_s = (uint16_t)(30 + z);
+        zc->min_off_s = (uint16_t)(30 + z);
+        zc->model_fit_temp_c = 500.0f + (float)z;
+        zc->model_fit_ambient_c = 20.0f + (float)z;
+        zc->coil_power_w = 1500.0f + (float)z;
+        zc->autotune_baseline_k_dc = 6.5f + (float)z;
+    }
+    for (uint8_t t = 0; t < MAX31856_CHANNEL_COUNT; t++) {
+        zone_timing_profile_t *tp = &cfg->timing_profiles[t];
+        memset(tp->name, 0, sizeof(tp->name)); /* see the matching comment on zc->name above */
+        snprintf(tp->name, sizeof(tp->name), "TP%u", (unsigned)t);
+        tp->guard_progress_duty_min = 0.1f + (float)t;
+        tp->guard_progress_window_s = 60.0f + (float)t;
+        tp->guard_drift_hysteresis_c = 1.0f + (float)t;
+        tp->guard_frozen_eps_c = 0.2f + (float)t;
+        tp->guard_cross_zone_period_s = 30.0f + (float)t;
+        tp->bangbang_hysteresis_c = 2.0f + (float)t;
+        tp->cooling_limited_margin_c = 3.0f + (float)t;
+        tp->cooling_limited_hold_s = 40.0f + (float)t;
+        tp->ramp_lock_band_c = 25.0f + (float)t;
+    }
+    /* crc32 is left at `poison`, never explicitly set -- the canonical
+     * format excludes it entirely, so this is deliberate, not an oversight. */
+}
+
+static void make_fully_populated_cfg(zones_cfg_t *cfg)
+{
+    make_fully_populated_cfg_poisoned(cfg, 0x00);
+}
+
+static void test_canonical_round_trip_byte_identical_and_hash_stable(void)
+{
+    TEST_SECTION("zones_config_export_canonical/_import_canonical -- serialize -> deserialize -> "
+                 "serialize is byte-identical, and the CRC over the canonical bytes is stable "
+                 "(H1 round-trip fidelity, docs/audits/kiln_profiles_robustness_2026-09-14.md)");
+
+    zones_cfg_t original;
+    make_fully_populated_cfg(&original);
+
+    uint8_t buf_a[ZONES_CONFIG_BLOB_MAX_SIZE];
+    size_t len_a = 0;
+    TEST_CHECK(zones_config_export_canonical(&original, buf_a, sizeof(buf_a), &len_a),
+               "first export succeeds");
+    TEST_CHECK(len_a > 0 && len_a <= sizeof(buf_a), "export reports a sane length");
+    uint32_t crc_a = esp_crc32_le(0, buf_a, (uint32_t)len_a);
+
+    /* Deserialize into a struct DELIBERATELY poisoned with 0xA5 first --
+     * this is the load-bearing negative-test-shaped check the audit doc
+     * calls out: a decode into an already-zeroed destination would pass
+     * trivially even if zero-fill-on-reconstruction were silently removed,
+     * because the destination was already zero. Poisoning first proves the
+     * zero-fill in zones_config_import_canonical() is actually happening. */
+    zones_cfg_t roundtripped;
+    memset(&roundtripped, 0xA5, sizeof(roundtripped));
+    TEST_CHECK(zones_config_import_canonical(buf_a, len_a, &roundtripped), "import succeeds");
+    TEST_CHECK(roundtripped.crc32 == 0,
+               "crc32 -- never carried by this format -- reads back as 0, not the 0xA5 poison, "
+               "proving the destination was zero-filled rather than merely overwritten field-by-field");
+
+    uint8_t buf_b[ZONES_CONFIG_BLOB_MAX_SIZE];
+    size_t len_b = 0;
+    TEST_CHECK(zones_config_export_canonical(&roundtripped, buf_b, sizeof(buf_b), &len_b),
+               "second export (of the round-tripped struct) succeeds");
+    TEST_CHECK(len_a == len_b, "re-exported length matches the original export exactly");
+    TEST_CHECK(len_a == len_b && memcmp(buf_a, buf_b, len_a) == 0,
+               "serialize -> deserialize -> serialize is BYTE-IDENTICAL");
+
+    uint32_t crc_b = esp_crc32_le(0, buf_b, (uint32_t)len_b);
+    TEST_CHECK(crc_a == crc_b, "a CRC over the canonical bytes (kiln_package_compute_hash()'s own "
+                               "ESP-half input) is stable across the round trip");
+
+    /* Field-level spot checks -- not just "the bytes matched", but that the
+     * awkward decimal float and an array element actually survived exactly. */
+    TEST_CHECK(roundtripped.zones[0].cal_offset_c == original.zones[0].cal_offset_c,
+               "the awkward decimal float (123456.789f) round-trips bit-exact");
+    TEST_CHECK(roundtripped.zones[2].coupling_coeff[1] == original.zones[2].coupling_coeff[1],
+               "a non-zero-index array element round-trips exactly");
+    TEST_CHECK(strcmp(roundtripped.timing_profiles[1].name, original.timing_profiles[1].name) == 0,
+               "a char-array field round-trips exactly");
+}
+
+static void test_canonical_import_zero_fills_even_when_buf_shorter_than_a_poisoned_struct(void)
+{
+    TEST_SECTION("zones_config_import_canonical -- refuses a length mismatch outright, leaving "
+                 "`out` fully zeroed rather than partially decoded");
+
+    zones_cfg_t cfg;
+    make_fully_populated_cfg(&cfg);
+    uint8_t buf[ZONES_CONFIG_BLOB_MAX_SIZE];
+    size_t len = 0;
+    TEST_CHECK(zones_config_export_canonical(&cfg, buf, sizeof(buf), &len), "export succeeds");
+
+    zones_cfg_t dst;
+    memset(&dst, 0xA5, sizeof(dst));
+    TEST_CHECK(!zones_config_import_canonical(buf, len - 1, &dst),
+               "one byte short of the real length is refused, not silently truncated");
+    uint8_t zero_block[sizeof(dst)];
+    memset(zero_block, 0, sizeof(zero_block));
+    TEST_CHECK(memcmp(&dst, zero_block, sizeof(dst)) == 0,
+               "`out` is left fully zeroed on refusal, never partially decoded or left poisoned");
+
+    memset(&dst, 0xA5, sizeof(dst));
+    TEST_CHECK(!zones_config_import_canonical(buf, len + 1, &dst), "one byte too many is also refused");
+    TEST_CHECK(memcmp(&dst, zero_block, sizeof(dst)) == 0, "still fully zeroed, not partially decoded");
+
+    TEST_CHECK(!zones_config_import_canonical(NULL, 0, &dst), "a NULL buffer is refused");
+    TEST_CHECK(memcmp(&dst, zero_block, sizeof(dst)) == 0, "and still leaves `out` zeroed, not untouched poison");
+}
+
+static void test_canonical_negative_MEMCPY_INSTEAD_OF_CANONICAL_breaks_the_round_trip(void)
+{
+    TEST_SECTION("NEGATIVE TEST -- proves test_canonical_round_trip_byte_identical_and_hash_stable() "
+                 "actually exercises the padding-free encoder, by simulating the OLD H1 defect "
+                 "(a raw struct memcpy with poisoned padding) and confirming THAT fails the same "
+                 "byte-identity check this file's positive test relies on. This is the audit doc's "
+                 "own required negative-test shape (0xA5-poisoned destination, "
+                 "docs/audits/kiln_profiles_robustness_2026-09-14.md section 3.1) reproduced against "
+                 "a hand-built stand-in for the pre-fix code, since the real pre-fix code no longer "
+                 "exists to break by hand.");
+
+    /* Two structs holding the EXACT SAME logical config (identical field
+     * values, built by the identical assignment sequence), but poisoned
+     * with DIFFERENT byte patterns before those fields were set -- so only
+     * the padding (and crc32, deliberately excluded from the canonical
+     * format) differs between them. This is exactly what a JSON
+     * reconstruction into two different, non-zeroed heap allocations would
+     * produce: same logical content, unrelated padding. */
+    zones_cfg_t cfg_a, cfg_b;
+    make_fully_populated_cfg_poisoned(&cfg_a, 0xA5);
+    make_fully_populated_cfg_poisoned(&cfg_b, 0x5A);
+
+    /* OLD, defective path stand-in: zones_config_export_blob()'s own raw
+     * memcpy (still exists, still used for the on-flash blob -- see its own
+     * header comment) hashed directly, padding included -- exactly
+     * kiln_package_compute_hash()'s ESP-half input before H1. */
+    uint32_t old_style_crc_a = esp_crc32_le(0, (const uint8_t *)&cfg_a, (uint32_t)sizeof(cfg_a));
+    uint32_t old_style_crc_b = esp_crc32_le(0, (const uint8_t *)&cfg_b, (uint32_t)sizeof(cfg_b));
+    TEST_CHECK(old_style_crc_a != old_style_crc_b,
+               "OLD defect reproduced: hashing the raw struct gives a DIFFERENT hash for the "
+               "IDENTICAL logical config, purely because of differently-poisoned padding -- this is "
+               "exactly the failure H1's canonical serializer must not have, and the reason this "
+               "assertion needs a poisoned (not zeroed) buffer to be non-vacuous");
+
+    /* NEW path: encode both via the canonical (padding-free) serializer
+     * instead of a raw memcpy, and confirm they agree despite the same
+     * differing padding poison -- this is the fix, and the assertion below
+     * is the one that would FAIL if the canonical serializer were ever
+     * replaced by a raw memcpy again. */
+    uint8_t canon_a[ZONES_CONFIG_BLOB_MAX_SIZE];
+    uint8_t canon_b[ZONES_CONFIG_BLOB_MAX_SIZE];
+    size_t canon_a_len = 0, canon_b_len = 0;
+    TEST_CHECK(zones_config_export_canonical(&cfg_a, canon_a, sizeof(canon_a), &canon_a_len),
+               "canonical export A succeeds");
+    TEST_CHECK(zones_config_export_canonical(&cfg_b, canon_b, sizeof(canon_b), &canon_b_len),
+               "canonical export B succeeds");
+    TEST_CHECK(canon_a_len == canon_b_len && memcmp(canon_a, canon_b, canon_a_len) == 0,
+               "the NEW canonical encoding is IDENTICAL for the same logical config regardless of "
+               "differing padding poison");
+}
+
+static void test_canonical_flushes_negative_zero_to_positive_zero(void)
+{
+    TEST_SECTION("zones_config_export_canonical -- -0.0f and +0.0f encode identically (plan sec "
+                 "3.1.3 rule 4)");
+
+    zones_cfg_t cfg_neg;
+    make_fully_populated_cfg(&cfg_neg);
+    cfg_neg.zones[0].cal_offset_c = -0.0f;
+    cfg_neg.pc_link_abort_silence_ms = -0.0f;
+
+    zones_cfg_t cfg_pos;
+    make_fully_populated_cfg(&cfg_pos);
+    cfg_pos.zones[0].cal_offset_c = 0.0f;
+    cfg_pos.pc_link_abort_silence_ms = 0.0f;
+
+    uint8_t buf_neg[ZONES_CONFIG_BLOB_MAX_SIZE], buf_pos[ZONES_CONFIG_BLOB_MAX_SIZE];
+    size_t len_neg = 0, len_pos = 0;
+    TEST_CHECK(zones_config_export_canonical(&cfg_neg, buf_neg, sizeof(buf_neg), &len_neg), "export -0.0 succeeds");
+    TEST_CHECK(zones_config_export_canonical(&cfg_pos, buf_pos, sizeof(buf_pos), &len_pos), "export +0.0 succeeds");
+    TEST_CHECK(len_neg == len_pos && memcmp(buf_neg, buf_pos, len_neg) == 0,
+               "-0.0f and +0.0f produce byte-identical canonical output -- a zone that happens to "
+               "carry a negative zero hashes the same as one that does not");
+}
+
+static void test_canonical_max_size_is_a_safe_upper_bound(void)
+{
+    TEST_SECTION("zones_config_canonical_max_size -- always >= a real export's actual length");
+    zones_cfg_t cfg;
+    make_fully_populated_cfg(&cfg);
+    uint8_t buf[ZONES_CONFIG_BLOB_MAX_SIZE];
+    size_t len = 0;
+    TEST_CHECK(zones_config_export_canonical(&cfg, buf, sizeof(buf), &len), "export succeeds");
+    TEST_CHECK(len <= zones_config_canonical_max_size(),
+               "the real encoded length never exceeds the published upper bound");
+    TEST_CHECK(len < sizeof(zones_cfg_t),
+               "the canonical (padding-free, crc32-excluded) form is strictly smaller than the raw struct");
+}
+
 void run_test_zones_http(void)
 {
     test_out_of_range_zone_preserves_stored_fields();
@@ -11126,6 +11433,12 @@ void run_test_zones_http(void)
     test_reconcile_on_link_up_null_link_is_a_noop();
     test_reconcile_on_link_up_invalid_config_is_a_noop();
     test_reconcile_on_link_up_raises_when_pico_ceiling_is_unknown();
+
+    test_canonical_round_trip_byte_identical_and_hash_stable();
+    test_canonical_import_zero_fills_even_when_buf_shorter_than_a_poisoned_struct();
+    test_canonical_negative_MEMCPY_INSTEAD_OF_CANONICAL_breaks_the_round_trip();
+    test_canonical_flushes_negative_zero_to_positive_zero();
+    test_canonical_max_size_is_a_safe_upper_bound();
 }
 
 /* test_zones_config_cfg_fs.c -- separate TU, same executable (see that

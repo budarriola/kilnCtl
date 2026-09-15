@@ -13,6 +13,11 @@
 #include "cfg_fs_status.h"
 #include "ota_state.h"
 #include "zones_config_accessors.h"
+#include "zones_config_json.h" /* zones_cfg_t -- needed by populate_pico_half_and_hash()'s H1
+                                 * canonical-hash path (zones_config_export_canonical()); every
+                                 * other function in this file only ever touched zones_cfg_t as an
+                                 * opaque `void *`/`uint8_t[]` blob via zones_config_accessors.h's
+                                 * deliberately type-erased export/import pair. */
 
 #include "kiln_cfg_store_internal.h"
 #include "kiln_cfg_store_cfg_fs.h"
@@ -967,7 +972,7 @@ bool kiln_cfg_store_get_name(int32_t id, char *out, size_t out_cap)
  * must treat as "no Pico half to push" -- never a silently wrong or stale
  * one. Losing the ESP-side save over a Pico-cache read glitch would be a
  * worse failure than the one this guards against. */
-static void populate_pico_half_and_hash(kiln_cfg_entry_t *e, const uint8_t *esp_blob, uint16_t esp_blob_len)
+static void populate_pico_half_and_hash(kiln_cfg_entry_t *e, const zones_cfg_t *cfg)
 {
     kiln_pkg_pico_source_t source = kiln_pkg_pico_source_default();
     if (!kiln_package_capture_pico_half(&source, &e->pico)) {
@@ -977,6 +982,30 @@ static void populate_pico_half_and_hash(kiln_cfg_entry_t *e, const uint8_t *esp_
         e->pkg_hash = 0;
         ESP_LOGW(TAG, "kiln_cfg_store: Pico-half capture failed for '%s' -- this slot's package "
                       "identity reads as not-yet-captured, ESP half saved regardless",
+                 e->name);
+        return;
+    }
+    /* H1 fix (docs/audits/kiln_profiles_robustness_2026-09-14.md,
+     * docs/audits/kiln_package_canonical_serializer_2026-09-14.md): the ESP
+     * half fed into kiln_package_compute_hash() is now
+     * zones_config_export_canonical()'s padding-free, declaration-order
+     * encoding of `cfg` -- NOT the raw memcpy'd blob this file already keeps
+     * in e->blob for on-flash storage. A JSON-reconstructed candidate
+     * (upload path, not yet wired up) can reproduce this encoding exactly
+     * regardless of what padding its own zones_cfg_t happened to hold, so a
+     * package downloaded and re-uploaded unmodified now hashes identically.
+     * e->blob itself is UNCHANGED -- still the raw struct, still what
+     * kiln_cfg_store_apply() hands to zones_config_import_blob(), which does
+     * its own CRC/version checking independently of this hash. */
+    uint8_t canonical[ZONES_CONFIG_BLOB_MAX_SIZE];
+    size_t canonical_len = 0;
+    if (!zones_config_export_canonical(cfg, canonical, sizeof(canonical), &canonical_len)) {
+        memset(&e->pico, 0, sizeof(e->pico));
+        e->pico_populated = 0;
+        e->pkg_schema = 0;
+        e->pkg_hash = 0;
+        ESP_LOGW(TAG, "kiln_cfg_store: canonical ESP-half encoding failed for '%s' -- this slot's "
+                      "package identity reads as not-yet-captured, ESP half saved regardless",
                  e->name);
         return;
     }
@@ -991,7 +1020,8 @@ static void populate_pico_half_and_hash(kiln_cfg_entry_t *e, const uint8_t *esp_
      * this slot to the same "not yet captured" state an unreachable capture
      * failure already produces above, rather than a half-marked one. */
     uint32_t hash = 0;
-    if (kiln_package_compute_hash(KILN_PKG_SCHEMA_VERSION, esp_blob, esp_blob_len, &e->pico, &hash) && hash != 0) {
+    if (kiln_package_compute_hash(KILN_PKG_SCHEMA_VERSION, canonical, (uint16_t)canonical_len, &e->pico, &hash) &&
+        hash != 0) {
         e->pico_populated = 1;
         e->pkg_schema = KILN_PKG_SCHEMA_VERSION;
         e->pkg_hash = hash;
@@ -1060,7 +1090,19 @@ bool kiln_cfg_store_save_current(const char *name, int32_t id_or_negative, int32
     memset(e->blob, 0, sizeof(e->blob));
     memcpy(e->blob, scratch, blob_size);
     e->blob_len = (uint16_t)blob_size;
-    populate_pico_half_and_hash(e, scratch, (uint16_t)blob_size);
+    /* Reinterpret the raw-exported bytes as a real zones_cfg_t for the H1
+     * canonical hash path below -- via a properly-aligned struct copy, never
+     * a cast of `scratch` (a plain uint8_t[] has no alignment guarantee
+     * matching zones_cfg_t's, and aliasing a byte array as a struct pointer
+     * is undefined behavior regardless). zero-init first so any bytes beyond
+     * blob_size (only possible if a future older/shorter blob_size existed)
+     * read as a defined, zeroed extension rather than stack garbage --
+     * harmless today since blob_size == sizeof(zones_cfg_t) always, but
+     * cheap insurance against that changing. */
+    zones_cfg_t scratch_cfg;
+    memset(&scratch_cfg, 0, sizeof(scratch_cfg));
+    memcpy(&scratch_cfg, scratch, blob_size);
+    populate_pico_half_and_hash(e, &scratch_cfg);
 
     if (id_or_negative < 0) {
         /* A config just saved FROM the running kiln is, by construction,

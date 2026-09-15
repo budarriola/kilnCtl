@@ -1750,3 +1750,507 @@ bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, si
     return true;
 }
 
+
+/* ---- Canonical (padding-free) serialization -- H1 -------------------------
+ * docs/audits/kiln_profiles_robustness_2026-09-14.md,
+ * docs/audits/kiln_package_canonical_serializer_2026-09-14.md.
+ * See zones_config_accessors.h's own comment on this pair for the "why" and
+ * the round-trip contract. This block is the "how", and specifically how it
+ * is made impossible to silently forget a field.
+ *
+ * THE CONSTRUCTION: one X-macro field-descriptor TABLE per struct --
+ * ZONE_TIMING_PROFILE_FIELDS / ZONE_CFG_FIELDS / ZONES_CFG_FIELDS just below
+ * -- each entry `F(KIND, NAME, COUNT)` naming one field's wire kind, its
+ * member name, and its element count (1 for a scalar). Each table is
+ * expanded FOUR times, by four different consumers of the SAME list:
+ *   1. ZCFG_SHADOW_DECL -- declares a "shadow" struct with an identical
+ *      field list, in the identical order, using ordinary (non-packed) C
+ *      struct declarations -- so the compiler lays it out with the exact
+ *      same alignment rules as the real struct.
+ *   2. The _Static_assert block right after each shadow struct -- proves,
+ *      per field AND for total size, that the shadow struct's layout is
+ *      byte-for-byte identical to the corresponding real struct
+ *      (zone_timing_profile_t / zone_cfg_t / zones_cfg_t). This is the
+ *      completeness guard: a real-struct field that is NOT in the table is
+ *      not in the shadow struct either, so from that field's position
+ *      onward either an offsetof() comparison mismatches or (if the missing
+ *      field is the very last one) the whole-struct sizeof() comparison
+ *      mismatches. EITHER WAY THE BUILD FAILS, naming this comment block.
+ *      No hand-computed literal offsets anywhere in this proof -- every
+ *      number comes from the compiler comparing two structs it just laid
+ *      out itself, so there is no transcription-typo risk the way a
+ *      hardcoded `offsetof(...) == 188` style assert (used elsewhere in
+ *      this codebase for FROZEN historical layouts, where the numbers are
+ *      deliberately pinned forever) would have.
+ *   3. ZCFG_EMIT -- the encoder: walks the table in order, calling one
+ *      zcfg_emit_KIND() helper per entry against the REAL struct's own
+ *      field (never the shadow struct, which exists only for the
+ *      compile-time proof above and is otherwise unused).
+ *   4. ZCFG_PARSE_KIND -- the decoder, symmetric.
+ * A field that exists in the table but is wired up wrong (wrong KIND, wrong
+ * COUNT) is caught by ordinary C type errors in the emit/parse expansion or
+ * by the round-trip fidelity test; a field that exists in the real struct
+ * but is MISSING from the table is caught by #2 above, at compile time,
+ * before any test can even run. This is the same "un-forgettable" property
+ * kiln_package_capture_pico_half() already has via CONFIG_PARAM_TABLE's own
+ * enumerable count/get-by-index -- here achieved by making the struct itself
+ * the enumeration authority, checked by reconstruction, since zone_cfg_t has
+ * no equivalent runtime introspection table to walk.
+ *
+ * THE ONE GAP THIS DOES NOT CLOSE, STATED PLAINLY: a field inserted into the
+ * real struct whose size exactly fills an existing alignment-padding gap
+ * WITHOUT changing the offset of any field after it, and without changing
+ * the struct's total size, would not be caught -- the shadow struct would
+ * still match byte-for-byte because the "extra" field lives entirely inside
+ * bytes neither struct's field list claims. This cannot happen for any field
+ * type this codebase actually declares in these structs: every gap in
+ * zone_cfg_t/zones_cfg_t is 0-3 bytes (this struct's largest alignment
+ * requirement is 4, for uint32_t/float), and every field this project has
+ * ever added is itself >= 1 byte with the SAME alignment as its neighbours
+ * (uint8_t/uint16_t/uint32_t/float, never a sub-byte bitfield) -- inserting
+ * a real field always either exactly fills a small gap AND shifts every
+ * following field (still caught, because the assert chain covers every
+ * field after the insertion point) or grows the struct (caught by the tail
+ * size assert). The only way to defeat this proof is to insert a field
+ * whose own size, in isolation, happens to equal the gap AND to insert it as
+ * the struct's textually LAST field where there is nothing after it to
+ * shift -- but a gap can only exist BETWEEN two fields (alignment padding
+ * has no reason to exist after the last field beyond the struct's own
+ * trailing alignment, which the tail assert already covers), so this case
+ * does not arise in practice. Documented here rather than silently assumed,
+ * per this task's own "say plainly how yours fails loudly" requirement.
+ *
+ * Byte order: everything little-endian. Multi-byte integers via
+ * zcfg_put_u16/zcfg_put_u32; floats via zcfg_put_f32, which flushes -0.0f to
+ * +0.0f FIRST (plan section 3.1.3 rule 4) so a zone whose float happens to
+ * be negative zero hashes identically to the same zone with an ordinary
+ * +0.0f -- the two are numerically and operationally identical, and a hash
+ * that distinguished them would treat an unmeasurable non-difference as a
+ * divergence. */
+
+#define ZONE_TIMING_PROFILE_FIELDS(F)                                    \
+    F(CHARARR, name, (TIMING_PROFILE_NAME_MAX_LEN + 1))                  \
+    F(F32, guard_progress_duty_min, 1)                                   \
+    F(F32, guard_progress_window_s, 1)                                   \
+    F(F32, guard_drift_hysteresis_c, 1)                                  \
+    F(F32, guard_frozen_eps_c, 1)                                        \
+    F(F32, guard_cross_zone_period_s, 1)                                 \
+    F(F32, bangbang_hysteresis_c, 1)                                     \
+    F(F32, cooling_limited_margin_c, 1)                                  \
+    F(F32, cooling_limited_hold_s, 1)                                    \
+    F(F32, ramp_lock_band_c, 1)
+
+/* Field order below is a verbatim transcription of zone_cfg_t's own
+ * declaration order in zones_config_json.h (checked field-for-field against
+ * that header while writing this table) -- crc32 has no per-zone analogue,
+ * so there is nothing to exclude here the way ZONES_CFG_FIELDS excludes
+ * zones_cfg_t::crc32 below. */
+#define ZONE_CFG_FIELDS(F)                                                \
+    F(CHARARR, name, (ZONE_NAME_MAX_LEN + 1))                            \
+    F(F32, cal_offset_c, 1)                                              \
+    F(F32, pid_kp, 1)                                                    \
+    F(F32, pid_ki, 1)                                                    \
+    F(F32, pid_kd, 1)                                                    \
+    F(F32, max_ramp_c_per_hr, 1)                                         \
+    F(F32, sanity_rate_c_per_min, 1)                                     \
+    F(F32, max_temp_c, 1)                                                \
+    F(F32, min_temp_c, 1)                                                \
+    F(F32, heater_window_ms, 1)                                          \
+    F(F32, heater_min_on_ms, 1)                                          \
+    F(F32, heater_min_off_ms, 1)                                         \
+    F(F32, guard_wrong_dir_window_s, 1)                                  \
+    F(F32, guard_wrong_dir_rate_c_per_min, 1)                            \
+    F(F32, guard_off_settle_s, 1)                                        \
+    F(F32, guard_runaway_rate_c_per_min, 1)                              \
+    F(F32, guard_runaway_margin_c, 1)                                    \
+    F(F32, guard_drift_period_s, 1)                                      \
+    F(F32, guard_sensor_fault_debounce_ticks, 1)                         \
+    F(F32, guard_frozen_window_s, 1)                                     \
+    F(F32, cross_zone_max_delta_c, 1)                                    \
+    F(F32, model_k_dc, 1)                                                \
+    F(F32, model_tau_s, 1)                                               \
+    F(F32, model_dead_time_s, 1)                                         \
+    F(F32, fuzzy_strength_pct, 1)                                        \
+    F(F32ARR, coupling_coeff, MAX31856_CHANNEL_COUNT)                    \
+    F(F32ARR, coupling_tau_s, MAX31856_CHANNEL_COUNT)                    \
+    F(F32ARR, coupling_dead_time_s, MAX31856_CHANNEL_COUNT)              \
+    F(U8, relay_mask, 1)                                                 \
+    F(U8, control_mode, 1)                                               \
+    F(U8, tc_type, 1)                                                    \
+    F(U8, thermo_mask, 1)                                                \
+    F(U8, ct_mask, 1)                                                    \
+    F(U8, timing_profile, 1)                                             \
+    F(U8ARR, settings_source, SRC_GROUP_COUNT)                           \
+    F(U8, tuning_valid, 1)                                               \
+    F(U8, tuning_method, 1)                                              \
+    F(U8, tuning_rule, 1)                                                \
+    F(U8, tuning_settled, 1)                                             \
+    F(U8, tuning_extrapolation_converged, 1)                             \
+    F(U8, tuning_tau_consistent, 1)                                      \
+    F(F32, tuning_baseline_c, 1)                                         \
+    F(F32, tuning_step_ambient_c, 1)                                     \
+    F(F32, tuning_raw_rise_c, 1)                                         \
+    F(F32, tuning_rise_inf_c, 1)                                         \
+    F(U32, tuning_seq, 1)                                                \
+    F(U8, adaptive_tune_enabled, 1)                                      \
+    F(F32, coupling_diag_k_dc, 1)                                        \
+    F(F32, ease_off_window_mult, 1)                                      \
+    F(F32, approach_rate_cap_c_per_hr, 1)                                \
+    F(F32, error_band_c, 1)                                              \
+    F(F32, rate_band_c_per_s, 1)                                         \
+    F(U8, relay_type, 1)                                                 \
+    F(F32, progress_band_c, 1)                                           \
+    F(U8, zone_type, 1)                                                  \
+    F(U8, failsafe_state, 1)                                             \
+    F(F32, hyst_c, 1)                                                    \
+    F(U16, min_on_s, 1)                                                  \
+    F(U16, min_off_s, 1)                                                 \
+    F(F32, model_fit_temp_c, 1)                                          \
+    F(F32, model_fit_ambient_c, 1)                                       \
+    F(F32, coil_power_w, 1)                                              \
+    F(F32, autotune_baseline_k_dc, 1)
+
+/* zones_cfg_t's own top-level fields, verbatim declaration order. `zones`
+ * and `timing_profiles` are arrays of the two structs above and are encoded
+ * by RECURSING into encode_zone_cfg()/encode_zone_timing_profile() per
+ * element -- their own completeness is already proven by their own tables
+ * above, so this table does not need to (and must not) re-enumerate their
+ * internals. `crc32` is the true tail field and is DELIBERATELY EXCLUDED --
+ * see this file's and the header's comments on why (H1 rule 1: a struct
+ * hash cannot include itself, and zones_cfg_t::crc32 is out of this pair's
+ * scope as its own separate, named follow-up). Because crc32 is excluded,
+ * the completeness assert for zones_cfg_t below intentionally compares
+ * against the shadow struct's size PLUS sizeof(uint32_t) -- see that assert
+ * for the exact statement -- rather than a bare sizeof() equality, so this
+ * table's deliberate omission of the true tail field does not itself trip
+ * the very guard meant to catch an ACCIDENTAL omission. */
+#define ZONES_CFG_FIELDS(F)                                               \
+    F(U8, version, 1)                                                    \
+    F(U8, thermo_count, 1)                                               \
+    F(U8, relay_count, 1)                                                \
+    F(U8, max_simultaneous_relays, 1)                                    \
+    F(U8, continue_on_zone_trip, 1)                                      \
+    F(U8, safety_tc_type, 1)                                             \
+    F(ZONEARR, zones, MAX31856_CHANNEL_COUNT)                            \
+    F(U8, timing_profile_count, 1)                                       \
+    F(TPARR, timing_profiles, MAX31856_CHANNEL_COUNT)                    \
+    F(F32, pc_link_abort_silence_ms, 1)
+
+/* ---- 1. Shadow structs -- ordinary (non-packed) mirrors of the field
+ * tables above, used ONLY for the compile-time completeness proof in
+ * section 2. Never instantiated at runtime. */
+#define ZCFG_SHADOW_DECL(KIND, NAME, COUNT) ZCFG_SHADOW_DECL_##KIND(NAME, COUNT)
+#define ZCFG_SHADOW_DECL_CHARARR(NAME, COUNT) char NAME[COUNT];
+#define ZCFG_SHADOW_DECL_U8(NAME, COUNT) uint8_t NAME;
+#define ZCFG_SHADOW_DECL_U8ARR(NAME, COUNT) uint8_t NAME[COUNT];
+#define ZCFG_SHADOW_DECL_U16(NAME, COUNT) uint16_t NAME;
+#define ZCFG_SHADOW_DECL_U32(NAME, COUNT) uint32_t NAME;
+#define ZCFG_SHADOW_DECL_F32(NAME, COUNT) float NAME;
+#define ZCFG_SHADOW_DECL_F32ARR(NAME, COUNT) float NAME[COUNT];
+#define ZCFG_SHADOW_DECL_ZONEARR(NAME, COUNT) zone_cfg_t NAME[COUNT];
+#define ZCFG_SHADOW_DECL_TPARR(NAME, COUNT) zone_timing_profile_t NAME[COUNT];
+
+typedef struct {
+    ZONE_TIMING_PROFILE_FIELDS(ZCFG_SHADOW_DECL)
+} zone_timing_profile_shadow_t;
+
+typedef struct {
+    ZONE_CFG_FIELDS(ZCFG_SHADOW_DECL)
+} zone_cfg_shadow_t;
+
+typedef struct {
+    ZONES_CFG_FIELDS(ZCFG_SHADOW_DECL)
+} zones_cfg_shadow_t; /* deliberately has NO crc32 member -- see ZONES_CFG_FIELDS's comment */
+
+/* ---- 2. The completeness proof -- see this block's own top-of-file
+ * comment for the full explanation. Every _Static_assert below compares two
+ * structs the compiler just laid out; no literal numbers. */
+#define ZCFG_ASSERT_TP(KIND, NAME, COUNT)                                                                 \
+    _Static_assert(offsetof(zone_timing_profile_t, NAME) == offsetof(zone_timing_profile_shadow_t, NAME), \
+                   "zone_timing_profile_t::" #NAME                                                        \
+                   " offset drifted from ZONE_TIMING_PROFILE_FIELDS -- a field was added, removed, "      \
+                   "reordered, or retyped without updating that table (zones_config_accessors.c)");
+ZONE_TIMING_PROFILE_FIELDS(ZCFG_ASSERT_TP)
+_Static_assert(sizeof(zone_timing_profile_t) == sizeof(zone_timing_profile_shadow_t),
+               "zone_timing_profile_t's total size does not match ZONE_TIMING_PROFILE_FIELDS -- a field "
+               "was added or removed without updating that table (zones_config_accessors.c)");
+
+#define ZCFG_ASSERT_ZC(KIND, NAME, COUNT)                                                 \
+    _Static_assert(offsetof(zone_cfg_t, NAME) == offsetof(zone_cfg_shadow_t, NAME),       \
+                   "zone_cfg_t::" #NAME                                                   \
+                   " offset drifted from ZONE_CFG_FIELDS -- a field was added, removed, " \
+                   "reordered, or retyped without updating that table (zones_config_accessors.c)");
+ZONE_CFG_FIELDS(ZCFG_ASSERT_ZC)
+_Static_assert(sizeof(zone_cfg_t) == sizeof(zone_cfg_shadow_t),
+               "zone_cfg_t's total size does not match ZONE_CFG_FIELDS -- a field was added or "
+               "removed without updating that table (zones_config_accessors.c)");
+
+#define ZCFG_ASSERT_ZONES(KIND, NAME, COUNT)                                                \
+    _Static_assert(offsetof(zones_cfg_t, NAME) == offsetof(zones_cfg_shadow_t, NAME),       \
+                   "zones_cfg_t::" #NAME                                                    \
+                   " offset drifted from ZONES_CFG_FIELDS -- a field was added, removed, "  \
+                   "reordered, or retyped without updating that table (zones_config_accessors.c)");
+ZONES_CFG_FIELDS(ZCFG_ASSERT_ZONES)
+/* zones_cfg_t's true tail is crc32 (uint32_t), deliberately excluded from
+ * the table (see that macro's comment) -- so the whole-struct proof is
+ * "shadow struct size + one trailing uint32_t == real struct size", not a
+ * bare equality, and additionally pins crc32 itself to be the immediate,
+ * only, four-byte tail so nothing else could be hiding after
+ * pc_link_abort_silence_ms other than that one named, excluded field. */
+_Static_assert(offsetof(zones_cfg_t, crc32) == sizeof(zones_cfg_shadow_t),
+               "zones_cfg_t::crc32 is no longer the field immediately after everything "
+               "ZONES_CFG_FIELDS enumerates -- a field was added, removed, or reordered "
+               "without updating that table (zones_config_accessors.c)");
+_Static_assert(offsetof(zones_cfg_t, crc32) + sizeof(((zones_cfg_t *)0)->crc32) == sizeof(zones_cfg_t),
+               "zones_cfg_t has a field after crc32 that ZONES_CFG_FIELDS does not know about "
+               "(zones_config_accessors.c)");
+
+/* ---- 3. Byte-level primitives -- little-endian, -0.0 flushed to +0.0. ---- */
+
+static void zcfg_put_u8(uint8_t **p, uint8_t v)
+{
+    *(*p)++ = v;
+}
+
+static void zcfg_put_u16(uint8_t **p, uint16_t v)
+{
+    *(*p)++ = (uint8_t)(v & 0xFFu);
+    *(*p)++ = (uint8_t)((v >> 8) & 0xFFu);
+}
+
+static void zcfg_put_u32(uint8_t **p, uint32_t v)
+{
+    *(*p)++ = (uint8_t)(v & 0xFFu);
+    *(*p)++ = (uint8_t)((v >> 8) & 0xFFu);
+    *(*p)++ = (uint8_t)((v >> 16) & 0xFFu);
+    *(*p)++ = (uint8_t)((v >> 24) & 0xFFu);
+}
+
+static void zcfg_put_f32(uint8_t **p, float v)
+{
+    if (v == 0.0f) {
+        v = 0.0f; /* flush -0.0f to +0.0f -- plan sec 3.1.3 rule 4; see this
+                   * block's top comment for why this is correct and not a
+                   * silent numeric change. */
+    }
+    union {
+        float f;
+        uint32_t bits;
+    } c;
+    c.f = v;
+    zcfg_put_u32(p, c.bits);
+}
+
+static uint8_t zcfg_get_u8(const uint8_t **p)
+{
+    return *(*p)++;
+}
+
+static uint16_t zcfg_get_u16(const uint8_t **p)
+{
+    uint16_t v = (uint16_t)((*p)[0] | ((*p)[1] << 8));
+    *p += 2;
+    return v;
+}
+
+static uint32_t zcfg_get_u32(const uint8_t **p)
+{
+    uint32_t v = (uint32_t)(*p)[0] | ((uint32_t)(*p)[1] << 8) | ((uint32_t)(*p)[2] << 16) |
+                 ((uint32_t)(*p)[3] << 24);
+    *p += 4;
+    return v;
+}
+
+static float zcfg_get_f32(const uint8_t **p)
+{
+    union {
+        float f;
+        uint32_t bits;
+    } c;
+    c.bits = zcfg_get_u32(p);
+    return c.f;
+}
+
+/* ---- 4. Encoders/decoders, generated from the SAME field tables that were
+ * just proven complete above. ---------------------------------------------- */
+
+static void encode_zone_timing_profile(uint8_t **p, const zone_timing_profile_t *src);
+static void encode_zone_cfg(uint8_t **p, const zone_cfg_t *src);
+static void decode_zone_timing_profile(const uint8_t **p, zone_timing_profile_t *dst);
+static void decode_zone_cfg(const uint8_t **p, zone_cfg_t *dst);
+
+static void zcfg_emit_CHARARR(uint8_t **p, const char *v, size_t n)
+{
+    memcpy(*p, v, n);
+    *p += n;
+}
+static void zcfg_emit_U8(uint8_t **p, uint8_t v, size_t n)
+{
+    (void)n;
+    zcfg_put_u8(p, v);
+}
+static void zcfg_emit_U8ARR(uint8_t **p, const uint8_t *v, size_t n)
+{
+    memcpy(*p, v, n);
+    *p += n;
+}
+static void zcfg_emit_U16(uint8_t **p, uint16_t v, size_t n)
+{
+    (void)n;
+    zcfg_put_u16(p, v);
+}
+static void zcfg_emit_U32(uint8_t **p, uint32_t v, size_t n)
+{
+    (void)n;
+    zcfg_put_u32(p, v);
+}
+static void zcfg_emit_F32(uint8_t **p, float v, size_t n)
+{
+    (void)n;
+    zcfg_put_f32(p, v);
+}
+static void zcfg_emit_F32ARR(uint8_t **p, const float *v, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        zcfg_put_f32(p, v[i]);
+    }
+}
+static void zcfg_emit_ZONEARR(uint8_t **p, const zone_cfg_t *v, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        encode_zone_cfg(p, &v[i]);
+    }
+}
+static void zcfg_emit_TPARR(uint8_t **p, const zone_timing_profile_t *v, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        encode_zone_timing_profile(p, &v[i]);
+    }
+}
+
+#define ZCFG_EMIT(KIND, NAME, COUNT) zcfg_emit_##KIND(p, src->NAME, (size_t)(COUNT));
+
+static void encode_zone_timing_profile(uint8_t **p, const zone_timing_profile_t *src)
+{
+    ZONE_TIMING_PROFILE_FIELDS(ZCFG_EMIT)
+}
+
+static void encode_zone_cfg(uint8_t **p, const zone_cfg_t *src)
+{
+    ZONE_CFG_FIELDS(ZCFG_EMIT)
+}
+
+static void encode_zones_cfg(uint8_t **p, const zones_cfg_t *src)
+{
+    ZONES_CFG_FIELDS(ZCFG_EMIT)
+    /* crc32 intentionally not emitted -- see ZONES_CFG_FIELDS's comment. */
+}
+
+/* Parse needs per-kind addressing: a scalar destination needs `&dst->NAME`
+ * (write-through a pointer to one field); an array destination is already a
+ * pointer once it decays, so it must be passed as `dst->NAME` -- taking its
+ * address would produce a pointer-to-array, not the pointer-to-element every
+ * zcfg_get_* (or memcpy) helper expects. Same table, per-kind macro instead of
+ * one generic macro, purely for this addressing difference -- the
+ * completeness proof above does not depend on this macro at all, so this
+ * asymmetry cannot reintroduce the "forgettable field" risk. */
+#define ZCFG_PARSE_CHARARR(NAME, COUNT)                        \
+    do {                                                       \
+        memcpy(dst->NAME, *p, (size_t)(COUNT));                \
+        *p += (size_t)(COUNT);                                 \
+    } while (0);
+#define ZCFG_PARSE_U8(NAME, COUNT) dst->NAME = zcfg_get_u8(p);
+#define ZCFG_PARSE_U8ARR(NAME, COUNT)                           \
+    do {                                                        \
+        memcpy(dst->NAME, *p, (size_t)(COUNT));                 \
+        *p += (size_t)(COUNT);                                  \
+    } while (0);
+#define ZCFG_PARSE_U16(NAME, COUNT) dst->NAME = zcfg_get_u16(p);
+#define ZCFG_PARSE_U32(NAME, COUNT) dst->NAME = zcfg_get_u32(p);
+#define ZCFG_PARSE_F32(NAME, COUNT) dst->NAME = zcfg_get_f32(p);
+#define ZCFG_PARSE_F32ARR(NAME, COUNT)                            \
+    for (size_t zcfg_i = 0; zcfg_i < (size_t)(COUNT); zcfg_i++) { \
+        dst->NAME[zcfg_i] = zcfg_get_f32(p);                      \
+    }
+#define ZCFG_PARSE_ZONEARR(NAME, COUNT)                           \
+    for (size_t zcfg_i = 0; zcfg_i < (size_t)(COUNT); zcfg_i++) { \
+        decode_zone_cfg(p, &dst->NAME[zcfg_i]);                   \
+    }
+#define ZCFG_PARSE_TPARR(NAME, COUNT)                             \
+    for (size_t zcfg_i = 0; zcfg_i < (size_t)(COUNT); zcfg_i++) { \
+        decode_zone_timing_profile(p, &dst->NAME[zcfg_i]);        \
+    }
+#define ZCFG_PARSE(KIND, NAME, COUNT) ZCFG_PARSE_##KIND(NAME, COUNT)
+
+static void decode_zone_timing_profile(const uint8_t **p, zone_timing_profile_t *dst)
+{
+    ZONE_TIMING_PROFILE_FIELDS(ZCFG_PARSE)
+}
+
+static void decode_zone_cfg(const uint8_t **p, zone_cfg_t *dst)
+{
+    ZONE_CFG_FIELDS(ZCFG_PARSE)
+}
+
+static void decode_zones_cfg(const uint8_t **p, zones_cfg_t *dst)
+{
+    ZONES_CFG_FIELDS(ZCFG_PARSE)
+    /* crc32 intentionally not parsed -- left at 0 from the caller's
+     * memset(0); see zones_config_import_canonical()'s own comment. */
+}
+
+/* ---- 5. Public entry points ------------------------------------------------ */
+
+size_t zones_config_canonical_max_size(void)
+{
+    /* See this pair's header comment: the canonical form has no padding and
+     * excludes crc32, so it is always strictly smaller than
+     * sizeof(zones_cfg_t), which is itself already bounded by
+     * ZONES_CONFIG_BLOB_MAX_SIZE (asserted just above
+     * zones_config_export_blob()). Reusing that ceiling means no second cap
+     * to keep in sync as the struct grows. */
+    return ZONES_CONFIG_BLOB_MAX_SIZE;
+}
+
+bool zones_config_export_canonical(const void *cfg, uint8_t *out, size_t out_cap, size_t *out_len)
+{
+    if (!cfg || !out || !out_len || out_cap < zones_config_canonical_max_size()) {
+        return false;
+    }
+    uint8_t *p = out;
+    encode_zones_cfg(&p, (const zones_cfg_t *)cfg);
+    *out_len = (size_t)(p - out);
+    return true;
+}
+
+bool zones_config_import_canonical(const uint8_t *buf, size_t len, void *out)
+{
+    if (!out) {
+        return false;
+    }
+    memset(out, 0, sizeof(zones_cfg_t)); /* H1's zero-fill-on-reconstruction requirement --
+                                           * see the header comment; also makes a refusal
+                                           * below leave `out` in a defined, all-zero state
+                                           * rather than whatever it held on entry. */
+    if (!buf) {
+        return false;
+    }
+    /* Compute this build's own encoder length for a fully-populated struct
+     * and refuse anything else outright -- same "no partial write" rule
+     * kiln_package_capture_pico_half() uses. A throwaway scratch encode of
+     * an all-zero zones_cfg_t is cheap (this runs once per import, never a
+     * hot path) and avoids maintaining a second, hand-computed length
+     * constant that could itself drift from the field tables above. */
+    static uint8_t s_scratch[ZONES_CONFIG_BLOB_MAX_SIZE];
+    zones_cfg_t zero_cfg;
+    memset(&zero_cfg, 0, sizeof(zero_cfg));
+    uint8_t *scratch_p = s_scratch;
+    encode_zones_cfg(&scratch_p, &zero_cfg);
+    size_t expected_len = (size_t)(scratch_p - s_scratch);
+    if (len != expected_len) {
+        return false;
+    }
+    const uint8_t *p = buf;
+    decode_zones_cfg(&p, (zones_cfg_t *)out);
+    return true;
+}
