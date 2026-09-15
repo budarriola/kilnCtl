@@ -68,6 +68,53 @@
 //                                  <noise_floor.json>
 // All three paths are gitignored/local-only; if any is absent this prints
 // what is missing and exits 3.
+//
+// ===================================================================
+// DO NOT CLOSE THE DWELL-OFFSET BAR WITH THE `cplval75` ROW SCALARS
+// (1.12 / 1.19 / 1.31). This was adjudicated and REJECTED on
+// 2026-09-14 -- docs/audits/credibility_gate_scalar_adoption_2026-09-14.md.
+// ===================================================================
+// Those three numbers are a DATED EMPIRICAL OBSERVATION about the
+// currently adopted coupling matrix, measured on plateaus at 62-75 C
+// (docs/audits/cplval75_coupling_verdict_2026-09-10.md). They are NOT
+// identified physics, and multiplying them into model_k_dc / the
+// coupling rows here does close this gate's dwell-offset bar -- which
+// is exactly why the temptation needs a warning rather than a shrug.
+// Four measured reasons not to, all from THIS gate's own two captures:
+//
+//   1. This gate's two dwell segments sit at delta-T ~17 C and ~32.5 C.
+//      z0's residual sign crossing is at delta-T ~23 C, so these dwells
+//      STRADDLE it. Reduced over each dwell's final 40%, z0's DC
+//      residual (G*u - delta-T_observed) is +1.006 / +1.143 at seg0 and
+//      -1.749 / -2.615 at seg1 -- it CHANGES SIGN inside this gate's own
+//      data, on both captures independently. A per-row scale cannot
+//      produce a sign change. The shape is wrong for z0, not the size.
+//   2. The per-cell scale z0 actually asks for is 0.944 / 1.057 / 0.938 /
+//      1.086 -- it straddles 1.0, and 1.12 is outside every cell.
+//      Applying 1.12 takes z0's seg0 DC residual from +1.0 to +3.1 C
+//      (CALIBRATION) and +1.1 to +3.3 C (HOLD-OUT): a ~3x DEGRADATION
+//      of settled accuracy over half this gate's own range.
+//   3. The pooled dwell_offset[z] below averages BOTH segments into one
+//      number, so a sign change between them is invisible to the bar.
+//      z0's hold-out cell already PASSES at scale 1 (-1.412); with the
+//      scalars it becomes +1.473, marginally FURTHER from zero, while
+//      its seg0 cell goes -0.287 -> +1.759 (6x worse). z0 contributes
+//      nothing to closing this gate; z1 and z2 close it.
+//   4. Adopting for z1/z2 ONLY does not work either: measured at
+//      (1.00, 1.19, 1.31), z0 stays at -2.104 on CALIBRATION and this
+//      gate STILL FAILS. And the published scalars are hotter than every
+//      one of the twelve cells here asks for (z1 wants 1.11-1.16, z2
+//      wants 1.21-1.30), so they are not even the best scale-class fit.
+//
+// Re-deriving a correction from THESE captures instead is worse: it
+// destroys the non-circularity posture described at the top of this file
+// and turns a failing independent check into a passing tautology.
+//
+// The gate closes when the coupling matrix is RE-IDENTIFIED ON HARDWARE
+// (docs/COUPLING_JOINT_IDENTIFICATION_CAPTURE.md's column-by-column
+// procedure -- joint holds cannot see z0's row, since >80% of z0's rise
+// is neighbour heat) and this gate passes with NOTHING applied on top.
+// Until then it is meant to fail, and iter_tune steps 6-9 stay gated.
 
 #include "../drivers/control/heater_output.h"
 #include "../drivers/hw/max31856_codec.h"
