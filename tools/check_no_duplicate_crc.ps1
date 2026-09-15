@@ -89,7 +89,14 @@ $excludeDirs = @(
     # al.) whose CRC_HandleTypeDef code legitimately matches the 0x1021
     # polynomial -- reference/demo material this project doesn't build or
     # own, not a second implementation of kilnlink's link-framing CRC.
-    '\\firmware\\KilnFW\\Datasheets\\4\.0inch_SPI_Module_ST7796_MSP4030_MSP4031_V1\.0\\'
+    '\\firmware\\KilnFW\\Datasheets\\4\.0inch_SPI_Module_ST7796_MSP4030_MSP4031_V1\.0\\',
+    # Transient scratch/work dirs left behind by concurrent agent sessions
+    # (e.g. firmware/hwAbstraction/test/_fakes_work_5988/...). These are
+    # untracked, throwaway, and can vanish mid-scan out from under another
+    # session's cleanup -- not a real source hit, and reading them at all
+    # this check no longer does (it scans only git-tracked files, see below),
+    # but the pattern is kept here too as a second line of defense.
+    '_fakes_work_'
 )
 
 # Known, already-tracked pre-migration duplicates (see header above).
@@ -126,21 +133,46 @@ $allowlist = @(
 
 $searchExtensions = @('*.c', '*.h', '*.cpp', '*.hpp', '*.py')
 
-$files = Get-ChildItem -Path $root -Recurse -File -Include $searchExtensions -ErrorAction SilentlyContinue |
-    Where-Object {
-        $full = $_.FullName
-        if ($full -like (Join-Path $root "firmware\CommonFW") + "*") { return $false }
-        foreach ($ex in $excludeDirs) {
-            if ($full -match $ex) { return $false }
-        }
-        return $true
+# Scan only git-tracked files. This is the key robustness fix: an agent
+# session's leftover untracked scratch/work directory (e.g.
+# firmware/hwAbstraction/test/_fakes_work_5988/...) is never a real source
+# hit -- it isn't committed, isn't built, and can be created, mutated, or
+# deleted by another concurrent session at any moment. Walking the working
+# tree with Get-ChildItem picked those up and could crash outright when a
+# file it just enumerated vanished before Select-String got to read it.
+# `git ls-files` only ever lists what's actually tracked, which sidesteps
+# both problems at once.
+Push-Location $root
+try {
+    $trackedRel = git ls-files -- $searchExtensions
+} finally {
+    Pop-Location
+}
+
+$files = foreach ($rel in $trackedRel) {
+    $full = Join-Path $root ($rel -replace '/', '\')
+    $skip = $false
+    if ($full -like (Join-Path $root "firmware\CommonFW") + "*") { $skip = $true }
+    foreach ($ex in $excludeDirs) {
+        if ($full -match $ex) { $skip = $true; break }
     }
+    if (-not $skip) { [PSCustomObject]@{ FullName = $full; Rel = $rel } }
+}
 
 $violations = @()
 foreach ($f in $files) {
-    $matched = Select-String -Path $f.FullName -Pattern '0x1021' -SimpleMatch:$false -Quiet
+    # A tracked path can still vanish out from under this scan (another
+    # session mid-checkout, a rebase, etc.) -- treat that as "nothing to
+    # match" rather than letting the check crash.
+    if (-not (Test-Path -LiteralPath $f.FullName -PathType Leaf)) { continue }
+    $matched = $null
+    try {
+        $matched = Select-String -LiteralPath $f.FullName -Pattern '0x1021' -SimpleMatch:$false -Quiet -ErrorAction Stop
+    } catch {
+        continue
+    }
     if ($matched) {
-        $rel = $f.FullName.Substring($root.Length + 1) -replace '\\', '/'
+        $rel = $f.Rel
         if ($allowlist -notcontains $rel) {
             $violations += $rel
         }
