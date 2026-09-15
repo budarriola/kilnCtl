@@ -107,6 +107,52 @@ extern const char *ADAPTIVE_TUNE_TAG;
 #define ADAPTIVE_TUNE_DUTY_STABILITY_ABS 0.05f
 #define ADAPTIVE_TUNE_DUTY_STABILITY_FRAC 0.25f
 
+// 2026-09-14 (docs/audits/adaptive_tune_harvest_gate_2026-09-14.md): the duty
+// range above used to be tracked over the SAME window as the temperature
+// settle check -- i.e. accumulated from the moment this dwell was entered,
+// with min/max that can only ever widen. A dwell whose ENTRY is a large
+// step (any mistuned zone, since a bigger initial error drives a bigger
+// initial duty swing while the loop fights its way to the new setpoint)
+// permanently poisons that accumulator: the duty extremes seen in the first
+// few ticks of the dwell never leave it, so ADAPTIVE_TUNE_DUTY_STABILITY_ABS/
+// FRAC above can never pass again for the rest of the dwell, no matter how
+// flat duty later becomes. Combined with "recorded_this_dwell" being latched
+// on the FIRST evaluation regardless of outcome (adaptive_tune_zone_tick()),
+// this made the duty-stability check a one-shot coin flip decided almost
+// entirely by how rough the dwell's entry was -- exactly backwards from its
+// purpose (see that constant's own comment above): a rough entry is the
+// scenario adaptation exists to correct, and it is precisely the one this
+// combination could never harvest from.
+//
+// Fix: the duty-range check below now reads from a TUMBLING trailing window
+// (reset every ADAPTIVE_TUNE_DUTY_STABILITY_WINDOW_S seconds to the CURRENT
+// duty, not accumulated since dwell entry), and a duty_unstable verdict no
+// longer latches recorded_this_dwell -- the dwell keeps re-evaluating every
+// tick (cheap: two float compares) until either the trailing window is
+// genuinely flat or the dwell ends. This does not touch the TEMPERATURE
+// settle gate at all (ADAPTIVE_TUNE_SETTLE_MIN_S/_SLOPE_FLOOR_C_PER_S,
+// real-hardware constants, untouched) -- a rough entry still has to fully
+// decay out of the temperature slope's own elapsed-since-entry window before
+// that gate passes, so the ~0.003*tau steady-state residual this module's
+// invariance depends on (cef1df2a) is unaffected: this change only lets a
+// dwell that has ALREADY satisfied the unchanged temperature gate also pass
+// the duty gate on the strength of its CURRENT behaviour, instead of being
+// vetoed forever by a transient that is long over. If anything this is
+// tighter than before: "duty has been flat for the last WINDOW_S seconds"
+// is a more honest reading of "duty is presently steady" than "duty has
+// never once moved since a dwell that may have started 20+ minutes ago,"
+// which is not what steady state means. WINDOW_S is picked LONGER than
+// ADAPTIVE_TUNE_SETTLE_MIN_S (180s) -- a real steady-state duty verdict
+// should not be trusted from a slice shorter than the temperature gate's own
+// settle requirement -- and short enough that a genuinely long dwell (a
+// mistuned zone's dwell runs for many multiples of its own tau, often
+// 1000+ seconds -- see sim_scenarios_adaptive.c's own dwell-length comment)
+// ages a stale entry-transient extreme out of the window well before the
+// dwell ends: 300s tumbles roughly 14 times over a ~70-minute mistuned
+// dwell (16*tau at tau~264s), each tumble forgetting whatever entry
+// excursion the previous window remembered.
+#define ADAPTIVE_TUNE_DUTY_STABILITY_WINDOW_S 300.0f
+
 #define ADAPTIVE_TUNE_MIN_DUTY_FOR_OBSERVATION 0.03f
 
 #define ADAPTIVE_TUNE_RING_CAPACITY 12
@@ -316,6 +362,19 @@ typedef struct {
     // FRAC's own comment for why this exists and what it catches.
     float settle_duty_min;
     float settle_duty_max;
+
+    // Trailing (tumbling) duty-stability window -- see ADAPTIVE_TUNE_DUTY_
+    // STABILITY_WINDOW_S's own comment above for why this is separate from
+    // settle_duty_min/max above (which still spans the whole dwell and is
+    // otherwise unused for the stability verdict as of this pass, kept only
+    // because nothing outside this file reads it and there was no reason to
+    // rip it out along with the fields it feeds). settle_window_start_s is
+    // an offset into settle_elapsed_s, not a standalone clock -- so it needs
+    // no separate reset-to-zero handling beyond mirroring settle_elapsed_s's
+    // own resets.
+    float settle_window_start_s;
+    float settle_window_duty_min;
+    float settle_window_duty_max;
 
     adaptive_tune_obs_t ring[ADAPTIVE_TUNE_RING_CAPACITY];
     uint32_t ring_count;

@@ -270,6 +270,7 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
         z->settle_start_valid = false;
         z->settle_elapsed_s = 0.0f;
         z->recorded_this_dwell = false;
+        z->settle_window_start_s = 0.0f;
     }
 
     if (!z->enabled || !actual_valid || isnan(ambient_c)) {
@@ -295,6 +296,9 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
         z->settle_start_c = actual_c;
         z->settle_duty_min = duty;
         z->settle_duty_max = duty;
+        z->settle_window_start_s = 0.0f;
+        z->settle_window_duty_min = duty;
+        z->settle_window_duty_max = duty;
     }
     z->settle_elapsed_s += dt_s;
     if (duty < z->settle_duty_min) {
@@ -302,6 +306,24 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
     }
     if (duty > z->settle_duty_max) {
         z->settle_duty_max = duty;
+    }
+    // Trailing duty-stability window (ADAPTIVE_TUNE_DUTY_STABILITY_WINDOW_S's
+    // own comment, adaptive_tune_internal.h): FOLD the current sample into
+    // the window every tick, unconditionally -- the actual tumble (starting
+    // a fresh window) is decided and applied FURTHER DOWN, AFTER this tick's
+    // stability verdict has already been read from the window this fold
+    // produces. Deliberately NOT tumbled here: tumbling here, before the
+    // verdict, would let a tick that happens to land exactly on a WINDOW_S
+    // boundary see a freshly-reset, single-sample window (range == 0) and
+    // pass trivially regardless of how unstable duty genuinely is -- proven
+    // by test_persistent_duty_oscillation_never_harvests() in test_adaptive_
+    // tune_dwell.c, which is exactly the fixture that would slip through a
+    // tumble-then-evaluate ordering on this tick.
+    if (duty < z->settle_window_duty_min) {
+        z->settle_window_duty_min = duty;
+    }
+    if (duty > z->settle_window_duty_max) {
+        z->settle_window_duty_max = duty;
     }
 
     // Trace append happens on EVERY dwelling tick, not gated on settle --
@@ -338,21 +360,41 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
         return;
     }
 
-    // Settled. One observation per dwell, regardless of outcome below --
-    // recorded_this_dwell is set on every path out from here so a marginal
-    // (too-low-duty, implausible) dwell does not get re-evaluated every
-    // tick for the rest of its length.
-    z->recorded_this_dwell = true;
-
-    // Duty-stability check -- see ADAPTIVE_TUNE_DUTY_STABILITY_ABS/FRAC's
-    // own comment (adaptive_tune_internal.h) for the real-hardware defect
-    // this closes. A temperature slope passing this file's floor is not
+    // Settled on TEMPERATURE. Duty-stability check next -- see ADAPTIVE_TUNE_
+    // DUTY_STABILITY_ABS/FRAC/_WINDOW_S's own comments (adaptive_tune_
+    // internal.h) for the real-hardware defect this closes and the 2026-09-14
+    // fix to it. A temperature slope passing this file's floor is not
     // sufficient evidence of steady state on an under-damped zone; duty
-    // itself must also have stayed put over the same window.
+    // itself must also have stayed put, over its OWN trailing window (not
+    // the whole dwell -- an entry transient must not veto every later tick).
+    //
+    // recorded_this_dwell is deliberately NOT set for a duty_unstable
+    // verdict: unlike the too-low-duty/bad-rise cases below (which reflect a
+    // property of the dwell's operating point that will not change for the
+    // rest of it), duty being unstable RIGHT NOW says nothing about whether
+    // it will still be unstable next tick -- the whole point of the trailing
+    // window is that it can and does resolve as the entry transient ages out
+    // of it. Re-evaluating every tick is cheap (two float compares) and is
+    // exactly what the unchanged temperature-slope retry a few lines above
+    // already does for the identical reason.
     {
-        float duty_range = z->settle_duty_max - z->settle_duty_min;
+        float duty_range = z->settle_window_duty_max - z->settle_window_duty_min;
         bool duty_unstable = duty_range > ADAPTIVE_TUNE_DUTY_STABILITY_ABS ||
                               (duty > 0.0f && duty_range > ADAPTIVE_TUNE_DUTY_STABILITY_FRAC * duty);
+
+        // Tumble now, AFTER the verdict above was read -- see the fold
+        // comment further up for why this ordering matters. Applied
+        // regardless of the verdict: a STABLE window's dwell is about to
+        // lock in an observation anyway (recorded_this_dwell below), so
+        // tumbling it is moot; an UNSTABLE window must still tumble so the
+        // NEXT tick's fold starts from the current instant, not from
+        // whatever aged the current window out in the first place.
+        if ((z->settle_elapsed_s - z->settle_window_start_s) >= ADAPTIVE_TUNE_DUTY_STABILITY_WINDOW_S) {
+            z->settle_window_start_s = z->settle_elapsed_s;
+            z->settle_window_duty_min = duty;
+            z->settle_window_duty_max = duty;
+        }
+
         if (duty_unstable) {
             // Distinct refusal string (task requirement: an operator must be
             // able to tell "no data yet" from "data rejected as unsettled")
@@ -365,6 +407,14 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
             return;
         }
     }
+
+    // Settled on both temperature and duty. From here on, every path
+    // terminates this dwell's observation attempt one way or another, so
+    // recorded_this_dwell is set on every remaining path out -- a marginal
+    // (too-low-duty, implausible-rise) dwell does not get re-evaluated every
+    // tick for the rest of its length, since those two verdicts reflect the
+    // dwell's operating point, not a transient that can still resolve.
+    z->recorded_this_dwell = true;
 
     if (duty < ADAPTIVE_TUNE_MIN_DUTY_FOR_OBSERVATION) {
         xSemaphoreGive(adaptive_tune_lock);

@@ -442,6 +442,8 @@ void run_test_adaptive_tune(void)
     test_settled_dwell_is_recorded();
     test_oscillating_duty_flat_temperature_is_refused();
     test_genuinely_steady_duty_is_still_accepted();
+    test_overshooting_entry_dwell_still_harvests(); // 2026-09-14 harvest-gate fix
+    test_persistent_duty_oscillation_never_harvests(); // 2026-09-14 harvest-gate fix
 
     TEST_SECTION("adaptive_tune: opt-in default off");
     test_opt_in_default_off_records_nothing();

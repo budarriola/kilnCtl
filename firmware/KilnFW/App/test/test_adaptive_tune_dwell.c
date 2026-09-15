@@ -78,6 +78,77 @@ static void test_genuinely_steady_duty_is_still_accepted(void)
                "duty-stability check must not reject everything indiscriminately");
 }
 
+// 2026-09-14 (docs/audits/adaptive_tune_harvest_gate_2026-09-14.md): the
+// harvest-gate fix's own positive case. A dwell whose ENTRY is rough (a big
+// duty swing, exactly what a mistuned zone produces fighting its way onto a
+// new setpoint) but which genuinely settles down for the back half of a long
+// dwell must still be able to harvest an observation -- this is precisely
+// the shape the pre-fix code could never harvest from (see this test's own
+// negative sibling below, and the WHOLE-DWELL min/max this replaces in
+// ADAPTIVE_TUNE_DUTY_STABILITY_WINDOW_S's own comment).
+//
+// 20 ticks * DT_S(30s) = 600s: long enough for ADAPTIVE_TUNE_DUTY_STABILITY_
+// WINDOW_S (300s) to tumble past the entry transient (ticks 0-3) at least
+// once before the dwell ends, and long enough for ADAPTIVE_TUNE_SETTLE_MIN_S
+// (180s) to have elapsed by the time that happens. Temperature stays flat
+// throughout (isolates the duty gate, same convention as this file's other
+// duty-stability fixtures).
+static void test_overshooting_entry_dwell_still_harvests(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[0].enabled = true;
+    const int ticks = 20;
+    const float duties[20] = {
+        // Entry transient: wide, fast swings -- the ramp-to-dwell fight.
+        0.05f, 0.95f, 0.10f, 0.85f,
+        // Genuinely settled for the remaining 16 ticks: ~0.50 +/- 0.01,
+        // same realistic ripple as test_genuinely_steady_duty_is_still_
+        // accepted() above.
+        0.50f, 0.49f, 0.51f, 0.50f, 0.49f, 0.51f, 0.50f, 0.49f,
+        0.51f, 0.50f, 0.49f, 0.51f, 0.50f, 0.49f, 0.51f, 0.50f,
+    };
+    feed_flat_temp_oscillating_duty_dwell(0, 100.0f, 22.0f, duties, ticks, DT_S);
+    TEST_CHECK(adaptive_tune_zones[0].ring_count == 1,
+               "a dwell with a rough entry that genuinely settles for its back half must still harvest one "
+               "observation -- this is the WI-8/S7 defect this pass fixes");
+    if (adaptive_tune_zones[0].ring_count == 1) {
+        // Quality check (task requirement, not just quantity): the harvested
+        // point must reflect the SETTLED value, not a relic of the entry
+        // transient -- duty near 0.50, rise_c == target - ambient == 78.0
+        // (temperature was flat the whole dwell, so this is exact regardless
+        // of when the observation was actually taken).
+        float recorded_duty = adaptive_tune_zones[0].ring[adaptive_tune_zones[0].ring_head].duty;
+        float recorded_rise = adaptive_tune_zones[0].ring[adaptive_tune_zones[0].ring_head].rise_c;
+        TEST_CHECK(fabsf(recorded_duty - 0.50f) < 0.05f,
+                   "the harvested duty must reflect the settled ~0.50 value, not one of the entry transient's "
+                   "0.05/0.95/0.10/0.85 extremes");
+        TEST_CHECK(fabsf(recorded_rise - 78.0f) < 0.1f,
+                   "rise_c must be actual_c - ambient_c at the settled instant (100 - 22 == 78)");
+    }
+}
+
+// 2026-09-14: the negative sibling -- duty that keeps genuinely oscillating
+// for the WHOLE dwell (a real, persistent limit cycle, not just a decaying
+// entry transient) must still never harvest, no matter how many times the
+// trailing window tumbles: each fresh window just samples a different slice
+// of the same ongoing swing. Proves the trailing-window fix did not turn the
+// duty-stability gate into a rubber stamp that eventually passes everything
+// given enough ticks.
+static void test_persistent_duty_oscillation_never_harvests(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[0].enabled = true;
+    const int ticks = 40; // 40*30s == 1200s: several full WINDOW_S(300s) tumbles
+    float duties[40];
+    for (int i = 0; i < ticks; i++) {
+        duties[i] = (i % 2 == 0) ? 0.20f : 0.80f; // persistent limit cycle, every tick
+    }
+    feed_flat_temp_oscillating_duty_dwell(0, 100.0f, 22.0f, duties, ticks, DT_S);
+    TEST_CHECK(adaptive_tune_zones[0].ring_count == 0,
+               "duty that never actually settles -- oscillating every tick for the whole dwell, tumbling window "
+               "after tumbling window -- must never be recorded as a steady-state observation");
+}
+
 // F3: dwelling_prev (and everything gated on it -- the settle window,
 // trace reset, and adaptive_tune_joint_dwell_row_committed) must reflect whether a zone
 // is PHYSICALLY dwelling, independent of whether any given tick's data
