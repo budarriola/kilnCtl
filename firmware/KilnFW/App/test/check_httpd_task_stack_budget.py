@@ -202,7 +202,14 @@ def main():
         print(f"check_httpd_task_stack_budget: FAIL -- no '.handler = ...' registrations found under {HTTP_DIR}")
         return 1
 
-    frames, calls = base.parse(objdump, args.elf)
+    try:
+        frames, calls = base.parse(objdump, args.elf)
+    except base.ElfParseError as exc:
+        if exc.skip:
+            print(f"check_httpd_task_stack_budget: SKIP: {exc}")
+            return 3
+        print(f"check_httpd_task_stack_budget: FAIL -- {exc}")
+        return 1
 
     ceiling = args.ceiling_bytes or CEILING_BYTES
     overhead = args.overhead_bytes if args.overhead_bytes is not None else UNMODELED_OVERHEAD_BYTES

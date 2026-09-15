@@ -108,7 +108,14 @@ def main():
               "(set XTENSA_OBJDUMP). Unmeasured, not passing.")
         return 3
 
-    frames, calls = base.parse(objdump, args.elf)
+    try:
+        frames, calls = base.parse(objdump, args.elf)
+    except base.ElfParseError as exc:
+        if exc.skip:
+            print(f"check_uart_log_bridge_stack_budget: SKIP: {exc}")
+            return 3
+        print(f"check_uart_log_bridge_stack_budget: FAIL -- {exc}")
+        return 1
     if ROOT not in frames:
         print(f"check_uart_log_bridge_stack_budget: FAIL -- {ROOT} not found in {args.elf} "
               "(has uart_log_bridge_task been renamed?)")

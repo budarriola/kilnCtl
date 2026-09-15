@@ -142,8 +142,52 @@ class ParsedElf:
                                        # cannot resolve a target address for at all)
 
 
+class ElfParseError(RuntimeError):
+    """Raised when objdump cannot disassemble the given ELF at all -- an
+    empty (0-byte, e.g. mid-write from a concurrent build) or otherwise
+    corrupt/truncated file. Callers must catch this and report a clear
+    SKIP/FAIL (see each check's main()), never let it propagate as a raw
+    CalledProcessError traceback -- that reads as a crash, not a verdict,
+    and this repo has been burned before by a check that looked broken
+    instead of naming what was actually wrong (docs/audits/
+    check_independence_2026-09-07.md).
+
+    `skip` is True only for the 0-byte placeholder case (a build plausibly
+    still in progress) -- callers branch on this attribute, NOT on a
+    substring of the message (a message that legitimately mentions a size
+    like "(200 bytes)" contains the literal substring "0 bytes" too, which
+    is exactly the false-SKIP bug a substring check produced here on
+    2026-09-15). Any other parse failure (objdump itself errors on a
+    non-empty file) is a genuine FAIL, never a SKIP."""
+
+    def __init__(self, message, skip=False):
+        super().__init__(message)
+        self.skip = skip
+
+
 def parse(objdump, elf):
-    out = subprocess.run([objdump, "-d", elf], capture_output=True, text=True, check=True).stdout
+    try:
+        size = os.path.getsize(elf)
+    except OSError as exc:
+        raise ElfParseError(f"could not stat {elf}: {exc}") from exc
+    if size == 0:
+        raise ElfParseError(
+            f"{elf} is 0 bytes -- looks like a build in progress wrote a placeholder/truncated "
+            "file (e.g. a concurrent `idf.py build`/flash_firmware() still writing it), not a "
+            "genuinely broken build. Re-run once the build that owns this ELF has finished.",
+            skip=True,
+        )
+    try:
+        result = subprocess.run([objdump, "-d", elf], capture_output=True, text=True)
+    except OSError as exc:
+        raise ElfParseError(f"could not run {objdump} on {elf}: {exc}") from exc
+    if result.returncode != 0:
+        raise ElfParseError(
+            f"{objdump} -d {elf} exited {result.returncode} -- the ELF is present ({size} bytes) "
+            f"but objdump could not disassemble it (corrupt/truncated/wrong format). objdump "
+            f"stderr:\n{result.stderr.strip()}"
+        )
+    out = result.stdout
     frames, calls, names, name_addrs, indirect = {}, {}, {}, {}, {}
     seen_entry = set()
     cur = None

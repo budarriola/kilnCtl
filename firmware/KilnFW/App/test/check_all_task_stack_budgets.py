@@ -439,7 +439,14 @@ def main():
         return 3
     addr2line = lib.find_addr2line()
 
-    parsed = lib.parse(objdump, args.elf)
+    try:
+        parsed = lib.parse(objdump, args.elf)
+    except lib.ElfParseError as exc:
+        if exc.skip:
+            print(f"check_all_task_stack_budgets: SKIP: {exc}")
+            return 3
+        print(f"check_all_task_stack_budgets: FAIL -- {exc}")
+        return 1
 
     results = []
     errors = []
