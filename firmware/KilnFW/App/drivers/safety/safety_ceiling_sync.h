@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "safety_ceiling_policy.h"
 #include "safety_link.h"
@@ -122,6 +123,55 @@ void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link);
 typedef void (*safety_ceiling_disable_heat_fn)(void);
 void safety_ceiling_sync_set_disable_heat_hooks(safety_ceiling_disable_heat_fn all_relays_off,
                                                  safety_ceiling_disable_heat_fn halt_run);
+
+/* 2026-09-15 audit fix (docs/audits/kiln_profiles_feature_review_2026-09-15.md
+ * Defect 2): the divergence check above compared ONLY abs_max_temp_c, so a
+ * Pico reboot that silently reverts to its flash-persisted record (the
+ * kiln-profiles swap installs the Pico half via APPLY_CONFIG_VOLATILE only
+ * -- RAM-only, never flash-written, per the owner's "Pico must never leave
+ * ARMED" rule -- COMMIT_CONFIG is unconditionally refused while ARMED) went
+ * undetected on every OTHER commissioning parameter as long as the ceiling
+ * happened to still match. This seam broadens the standing (every-tick)
+ * comparison to the full record WITHOUT this file taking a hard dependency
+ * on kiln_cfg_store.h/kiln_package.h -- same rationale as the disable-heat
+ * hooks above: this .c links into host test executables (test_zones_http.c
+ * and others) that do not also link kiln_cfg_store.c/kiln_package.c, and a
+ * hard #include here would force every one of them to grow matching fakes
+ * for a whole persist-layer surface this file does not otherwise need.
+ *
+ * The real implementation (kiln_cfg_store_capture_expected_pico_fields(),
+ * kiln_cfg_store.c) decodes the ACTIVE kiln-config slot's captured Pico half
+ * (kiln_pkg_safety_t, itself populated at save/import time by snapshotting
+ * safety_cfg_store's cache) into this array -- i.e. "what the last-applied
+ * profile expects the Pico to hold." safety_ceiling_sync.c compares each
+ * entry against safety_cfg_store's LIVE cache (refreshed automatically by
+ * safety_cfg_store_maybe_refetch() whenever the Pico's config_crc changes,
+ * e.g. on a reboot that reverts to flash) -- never a second wire round trip
+ * of its own. abs_max_temp_c is excluded from this set (it stays the
+ * existing dedicated field above, never duplicated) and no kilnlink protocol
+ * change is required: GET_CONFIG_PAGE already carries the full record.
+ *
+ * Wired once, for real, by main_control_bringup.c
+ * (safety_ceiling_sync_set_expected_pico_fields_source(kiln_cfg_store_
+ * capture_expected_pico_fields)). Defaults to NULL/no-op -- a build that
+ * never calls this setter (every existing host test) keeps comparing
+ * abs_max_temp_c only, exactly as before this fix. Returns the number of
+ * fields written (0..cap); `out_fields`/`cap` follow the same "caller-owned
+ * buffer, no allocation" convention as the rest of this codebase's seams. */
+#define SAFETY_CEILING_SYNC_MAX_STANDING_FIELDS 96u
+/* Tagged (not anonymous) deliberately: kiln_cfg_store.h forward-declares
+ * this same tag (`struct safety_ceiling_expected_param;`) rather than
+ * #including this whole header, to avoid pulling safety_link.h/safety_
+ * ceiling_policy.h into every host-test executable that already includes
+ * kiln_cfg_store.h without faking those two -- an anonymous struct would
+ * make that forward declaration impossible (two independently-anonymous
+ * struct typedefs of the same name are NOT a compatible redeclaration). */
+typedef struct safety_ceiling_expected_param {
+    uint16_t param_id;
+    float value;
+} safety_ceiling_expected_param_t;
+typedef size_t (*safety_ceiling_expected_pico_fields_fn)(safety_ceiling_expected_param_t *out_fields, size_t cap);
+void safety_ceiling_sync_set_expected_pico_fields_source(safety_ceiling_expected_pico_fields_fn fn);
 
 /* True iff the most recent enforcement check found (and is still reporting)
  * a divergence -- i.e. heat is currently being actively held disabled by

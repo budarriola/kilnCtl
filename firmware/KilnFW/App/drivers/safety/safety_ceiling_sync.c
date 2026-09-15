@@ -57,6 +57,17 @@ void safety_ceiling_sync_set_disable_heat_hooks(safety_ceiling_disable_heat_fn a
     s_disable_halt_run = halt_run;
 }
 
+/* See safety_ceiling_sync.h's doc comment on this seam for the full
+ * rationale (2026-09-15 audit fix, Defect 2). NULL/no-op default -- every
+ * existing host test leaves this unset and keeps comparing abs_max_temp_c
+ * only, unchanged from before this fix. */
+static safety_ceiling_expected_pico_fields_fn s_expected_pico_fields_source = NULL;
+
+void safety_ceiling_sync_set_expected_pico_fields_source(safety_ceiling_expected_pico_fields_fn fn)
+{
+    s_expected_pico_fields_source = fn;
+}
+
 bool safety_ceiling_sync_is_diverged(char *reason_out, size_t reason_cap)
 {
     if (reason_out && reason_cap > 0) {
@@ -209,28 +220,117 @@ static void enforce_ceiling_divergence(float target_c, bool target_known, float 
         s_divergence_reason[0] = '\0';
         return;
     }
-    /* ONE-FIELD identity set today (abs_max_temp_c only) -- see config_
-     * divergence.h's top comment on CONFIG_IDENTITY_FORMAT_VERSION for why
-     * a future caller adding fields must bump that constant rather than
-     * silently changing what this array means. `esp_fields` is this ESP's
-     * own live, authoritative target (freshly recomputed by the caller,
-     * never a cached push); `pico_fields` is the value most recently
-     * FETCHED from the Pico's own GET_CONFIG_PAGE report
+    /* abs_max_temp_c is field 0, always present -- see config_divergence.h's
+     * top comment on CONFIG_IDENTITY_FORMAT_VERSION. `esp_fields` is this
+     * ESP's own live, authoritative target (freshly recomputed by the
+     * caller, never a cached push); `pico_fields` is the value most
+     * recently FETCHED from the Pico's own GET_CONFIG_PAGE report
      * (safety_cfg_store's cache) -- never an echo of a value this file
      * itself just wrote. See config_divergence.h's own doc comment on this
-     * distinction. */
-    config_identity_field_t esp_fields[1];
+     * distinction.
+     *
+     * 2026-09-15 audit fix (Defect 2): fields 1.. are the OTHER ~60+
+     * commissioning params, broadened in via the injected safety_ceiling_
+     * sync_set_expected_pico_fields_source() seam so this file keeps no
+     * hard dependency on the kiln-profiles persist layer (see that seam's
+     * doc comment in the header). `static` (file-scope), not stack-local:
+     * these two arrays are ~1.5KB combined (96 config_identity_field_t
+     * entries x 2, each holding a `const char *name` + bool + float) and
+     * this function is provably only ever called from safety_poll_task
+     * (see safety_ceiling_sync_reconcile_on_link_up()'s own comment on
+     * `now_us` for the identical single-caller/no-reentrancy reasoning) --
+     * a stack local of this size risks tripping check_httpd_task_stack_
+     * budget/check_executor_task_stack_budget the way the audit's rejected
+     * hazard-1 fix attempt did. */
+    static config_identity_field_t esp_fields[1 + SAFETY_CEILING_SYNC_MAX_STANDING_FIELDS];
+    static config_identity_field_t pico_fields[1 + SAFETY_CEILING_SYNC_MAX_STANDING_FIELDS];
+    static safety_ceiling_expected_param_t expected[SAFETY_CEILING_SYNC_MAX_STANDING_FIELDS];
+    /* Field names must outlive config_divergence_check()'s call below --
+     * these are static storage too, one small fixed-width buffer per
+     * possible extra field, formatted once per tick from the live param
+     * table (safety_cfg_store_lookup() names are compile-time string
+     * literals themselves, but a param this build's mirror table does not
+     * recognize still needs SOME name for the reason string). */
+    static char extra_names[SAFETY_CEILING_SYNC_MAX_STANDING_FIELDS][24];
+
     esp_fields[0].name = "abs_max_temp_c";
     esp_fields[0].known = target_known;
     esp_fields[0].value = target_c;
 
-    config_identity_field_t pico_fields[1];
     pico_fields[0].name = "abs_max_temp_c";
     pico_fields[0].known = pico_known;
     pico_fields[0].value = pico_c;
 
+    size_t n = 1;
+    size_t extra_count = s_expected_pico_fields_source
+                             ? s_expected_pico_fields_source(expected, SAFETY_CEILING_SYNC_MAX_STANDING_FIELDS)
+                             : 0;
+    if (extra_count > SAFETY_CEILING_SYNC_MAX_STANDING_FIELDS) {
+        extra_count = SAFETY_CEILING_SYNC_MAX_STANDING_FIELDS; /* defensive; the seam's own contract already caps this */
+    }
+    for (size_t i = 0; i < extra_count; i++) {
+        uint16_t param_id = expected[i].param_id;
+        if (param_id == SAFETY_PARAM_ID_ABS_MAX_TEMP_C) {
+            continue; /* never duplicate the dedicated field above */
+        }
+        uint8_t type;
+        const char *name = NULL;
+        bool known_by_table = safety_cfg_store_lookup(param_id, &type, &name);
+        if (known_by_table && name) {
+            snprintf(extra_names[n - 1], sizeof(extra_names[n - 1]), "%s", name);
+        } else {
+            snprintf(extra_names[n - 1], sizeof(extra_names[n - 1]), "param_0x%04x", (unsigned)param_id);
+        }
+
+        esp_fields[n].name = extra_names[n - 1];
+        esp_fields[n].known = true;
+        esp_fields[n].value = expected[i].value;
+
+        /* Live value: linear scan of safety_cfg_store's cache, same pattern
+         * kiln_cfg_swap.c's pico_readback_matches() already uses at swap
+         * time -- this is that same comparator, run every tick instead of
+         * only at swap time. */
+        bool live_known = false;
+        float live_value = 0.0f;
+        size_t count = safety_cfg_store_param_count();
+        for (size_t idx = 0; idx < count; idx++) {
+            safety_cfg_param_t row;
+            if (safety_cfg_store_get_by_index(idx, &row) && row.param_id == param_id) {
+                if (row.set) {
+                    live_known = true;
+                    /* Type-aware decode -- same switch kiln_cfg_swap.c's
+                     * pico_readback_matches() uses; non-float params are
+                     * widened into `float` for the shared identity
+                     * comparator, matching how kiln_cfg_store_capture_
+                     * expected_pico_fields() (the expected side) already
+                     * widens them from kiln_pkg_pico_param_t.value_bits. */
+                    switch (row.type) {
+                    case KILNLINK_PARAM_TYPE_BOOL:
+                        live_value = (float)row.value.bool_val;
+                        break;
+                    case KILNLINK_PARAM_TYPE_U8:
+                        live_value = (float)row.value.u8_val;
+                        break;
+                    case KILNLINK_PARAM_TYPE_U16:
+                        live_value = (float)row.value.u16_val;
+                        break;
+                    case KILNLINK_PARAM_TYPE_F32:
+                    default:
+                        live_value = row.value.f32_val;
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+        pico_fields[n].name = extra_names[n - 1];
+        pico_fields[n].known = live_known;
+        pico_fields[n].value = live_value;
+        n++;
+    }
+
     char reason[CONFIG_DIVERGENCE_REASON_MAX];
-    bool diverged = config_divergence_check(esp_fields, pico_fields, 1, reason, sizeof(reason));
+    bool diverged = config_divergence_check(esp_fields, pico_fields, n, reason, sizeof(reason));
     if (!diverged) {
         s_divergence_active = false;
         s_divergence_reason[0] = '\0';

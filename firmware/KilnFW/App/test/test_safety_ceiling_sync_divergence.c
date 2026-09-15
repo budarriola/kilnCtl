@@ -113,10 +113,19 @@ bool zones_config_get_temp_limits(uint8_t zone_index, float *out_max_temp_c, flo
 static bool s_pico_ceiling_set = false;
 static float s_pico_ceiling_c = 0.0f;
 
+// 2026-09-15 audit fix (Defect 2): a second, independent fake row for the
+// "extra" (non-ceiling) broadened field -- id chosen arbitrarily, distinct
+// from SAFETY_PARAM_ID_ABS_MAX_TEMP_C.
+#define FAKE_EXTRA_PARAM_ID 0x0201u
+static bool s_pico_extra_set = false;
+static float s_pico_extra_c = 0.0f;
+
 static void fake_pico_ceiling_reset(void)
 {
     s_pico_ceiling_set = false;
     s_pico_ceiling_c = 0.0f;
+    s_pico_extra_set = false;
+    s_pico_extra_c = 0.0f;
 }
 
 static void fake_pico_ceiling_set(float value)
@@ -125,22 +134,67 @@ static void fake_pico_ceiling_set(float value)
     s_pico_ceiling_c = value;
 }
 
+static void fake_pico_extra_set(float value)
+{
+    s_pico_extra_set = true;
+    s_pico_extra_c = value;
+}
+
 size_t safety_cfg_store_param_count(void)
 {
-    return s_pico_ceiling_set ? 1u : 0u;
+    size_t n = s_pico_ceiling_set ? 1u : 0u;
+    n += s_pico_extra_set ? 1u : 0u;
+    return n;
 }
 
 bool safety_cfg_store_get_by_index(size_t index, safety_cfg_param_t *out)
 {
-    if (!s_pico_ceiling_set || index != 0) {
-        return false;
+    // Index 0 is the ceiling row (if set), index 1 (or 0 if the ceiling is
+    // unset) is the extra row (if set) -- mirrors this fake's own
+    // param_count() above; order does not matter to the production code
+    // under test, which scans by param_id, not by index.
+    size_t i = 0;
+    if (s_pico_ceiling_set) {
+        if (index == i) {
+            if (out) {
+                memset(out, 0, sizeof(*out));
+                out->param_id = SAFETY_PARAM_ID_ABS_MAX_TEMP_C;
+                out->type = KILNLINK_PARAM_TYPE_F32;
+                out->value.f32_val = s_pico_ceiling_c;
+                out->set = true;
+            }
+            return true;
+        }
+        i++;
     }
-    if (out) {
-        memset(out, 0, sizeof(*out));
-        out->param_id = SAFETY_PARAM_ID_ABS_MAX_TEMP_C;
-        out->type = KILNLINK_PARAM_TYPE_F32;
-        out->value.f32_val = s_pico_ceiling_c;
-        out->set = true;
+    if (s_pico_extra_set) {
+        if (index == i) {
+            if (out) {
+                memset(out, 0, sizeof(*out));
+                out->param_id = FAKE_EXTRA_PARAM_ID;
+                out->type = KILNLINK_PARAM_TYPE_F32;
+                out->value.f32_val = s_pico_extra_c;
+                out->set = true;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+// 2026-09-15 audit fix (Defect 2): safety_ceiling_sync.c's broadened
+// enforce_ceiling_divergence() calls safety_cfg_store_lookup() to name any
+// EXTRA (non-ceiling) field in the human-readable reason string. Trivial
+// fake -- this file's own extra-field tests below supply the name they
+// expect directly and don't depend on a real mirror table.
+bool safety_cfg_store_lookup(uint16_t param_id, uint8_t *out_type, const char **out_name)
+{
+    (void)param_id;
+    if (out_type) {
+        *out_type = KILNLINK_PARAM_TYPE_F32;
+    }
+    if (out_name) {
+        *out_name = "extra_field";
     }
     return true;
 }
@@ -367,6 +421,66 @@ static void test_target_known_exclusion(void)
     TEST_CHECK(s_relays_off_calls == 0 && s_halt_run_calls == 0, "hooks still not called: no target yet");
 }
 
+// ---------------------------------------------------------------------
+// 5. 2026-09-15 audit fix (Defect 2): the broadened seam. With the
+//    expected-pico-fields source installed and an EXTRA (non-ceiling)
+//    field mismatched while abs_max_temp_c itself agrees, this must still
+//    be reported and enforced as a divergence -- proving the fix for the
+//    exact defect: before this change, a mismatch confined to any field
+//    other than abs_max_temp_c was invisible to this check.
+// ---------------------------------------------------------------------
+static safety_ceiling_expected_param_t s_expected_fields[1];
+static size_t s_expected_field_count = 0;
+
+static size_t fake_expected_pico_fields_source(safety_ceiling_expected_param_t *out_fields, size_t cap)
+{
+    size_t n = s_expected_field_count < cap ? s_expected_field_count : cap;
+    for (size_t i = 0; i < n; i++) {
+        out_fields[i] = s_expected_fields[i];
+    }
+    return n;
+}
+
+static void test_broadened_field_divergence_detected(void)
+{
+    TEST_SECTION("2026-09-15 fix: an extra (non-ceiling) field mismatch is detected and enforced");
+    test_reset_all();
+    safety_ceiling_sync_set_disable_heat_hooks(fake_all_relays_off, fake_halt_run);
+    safety_ceiling_sync_set_expected_pico_fields_source(fake_expected_pico_fields_source);
+
+    // abs_max_temp_c AGREES on both sides -- the pre-fix check would see no
+    // divergence at all here.
+    s_zone_max_temp_c[0] = 80.0f;
+    fake_pico_ceiling_set(80.0f);
+
+    // The extra field DISAGREES: the active kiln-config slot expects 42.0,
+    // but the Pico's live cache (e.g. reverted to a flash-persisted value
+    // after a reboot) reports 7.0.
+    s_expected_fields[0].param_id = FAKE_EXTRA_PARAM_ID;
+    s_expected_fields[0].value = 42.0f;
+    s_expected_field_count = 1;
+    fake_pico_extra_set(7.0f);
+
+    safety_ceiling_sync_reconcile_on_link_up(FAKE_LINK);
+
+    char reason[CONFIG_DIVERGENCE_REASON_MAX];
+    bool diverged = safety_ceiling_sync_is_diverged(reason, sizeof(reason));
+    TEST_CHECK(diverged, "a mismatch confined to a non-ceiling field is still reported as a divergence");
+    TEST_CHECK(s_relays_off_calls == 1, "all-relays-off hook fires on a non-ceiling-only divergence");
+    TEST_CHECK(s_halt_run_calls == 1, "halt-run hook fires on a non-ceiling-only divergence");
+
+    // Now the extra field also agrees -- the latch must clear.
+    fake_pico_extra_set(42.0f);
+    safety_ceiling_sync_reconcile_on_link_up(FAKE_LINK);
+    TEST_CHECK(!safety_ceiling_sync_is_diverged(NULL, 0), "latch clears once the extra field also agrees");
+
+    // Cleanup: leave the seam installed but pointed at zero fields, so it
+    // cannot leak a stale expectation into any test added after this one in
+    // the same process (safety_ceiling_sync.c's seam pointer, like its hook
+    // pointers, has no unset-to-NULL entry point by design).
+    s_expected_field_count = 0;
+}
+
 int main(void)
 {
     // test_uninstalled_hooks_are_a_safe_noop() MUST run first in this
@@ -380,6 +494,7 @@ int main(void)
     test_latch_persists_while_diverged();
     test_latch_clears_when_sides_agree();
     test_target_known_exclusion();
+    test_broadened_field_divergence_detected();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

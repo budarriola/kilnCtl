@@ -756,6 +756,24 @@ bool safety_cfg_store_get_by_index(size_t index, safety_cfg_param_t *out)
     return true;
 }
 
+// 2026-09-15 audit fix (docs/audits/kiln_profiles_feature_review_2026-09-15.md
+// Defect 2): safety_ceiling_sync.c (linked for real into this executable, see
+// safety_ceiling_sync_guard_raise()/_apply_lower() above) now calls
+// safety_cfg_store_lookup() from its broadened standing-divergence path.
+// This executable never links safety_cfg_store.c for real (same reasoning as
+// s_cfg_rows above), so it needs its own stub -- same convention as
+// test_safety_cfg_http.c's/test_kiln_cfg_swap.c's own stubs of this name.
+// This test never installs safety_ceiling_sync_set_expected_pico_fields_
+// source(), so the broadened path is never actually exercised here; this stub
+// only needs to exist to satisfy the link.
+bool safety_cfg_store_lookup(uint16_t param_id, uint8_t *out_type, const char **out_name)
+{
+    (void)param_id;
+    if (out_type) { *out_type = KILNLINK_PARAM_TYPE_F32; }
+    if (out_name) { *out_name = "stub_param"; }
+    return false;
+}
+
 // CT_COMMISSIONING_PLAN.md steps 1/3 -- a programmable stand-in for
 // safety_cfg_store's ct_cal record, same "empty by default, a test that
 // wants it populates it explicitly" convention as s_cfg_rows above.

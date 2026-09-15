@@ -70,7 +70,12 @@ extern "C" {
  * test_config_divergence.c against a value that has actually been through
  * that wire round trip, not just an idealised one. */
 
-#define CONFIG_IDENTITY_FORMAT_VERSION 1u
+/* Bumped 1 -> 2 2026-09-15: safety_ceiling_sync.c's standing divergence check
+ * broadened its field SET from abs_max_temp_c alone to the full captured
+ * Pico-config record (docs/audits/kiln_profiles_feature_review_2026-09-15.md
+ * Defect 2) -- per this header's own rule above, any change to which fields
+ * are compared bumps this constant. */
+#define CONFIG_IDENTITY_FORMAT_VERSION 2u
 
 typedef struct {
     /* Short, stable, human-meaningful name -- goes into the operator-facing

@@ -1232,9 +1232,24 @@ bool kiln_cfg_store_apply(int32_t id, bool ack_no_safety_processor, char *reason
     }
     /* zones_config_import_blob() does the actual all-or-nothing
      * version-check/re-validate/commit work; see its own doc comment
-     * (zones_http.h). */
-    if (!zones_config_import_blob(s_store.entries[idx].blob, s_store.entries[idx].blob_len, reason_out,
-                                  reason_cap)) {
+     * (zones_http.h). HIGH finding 1, adversarial review 2026-09-15
+     * (docs/audits/review_autosave_slot_fix_a93ee77b_2026-09-15.md): this is
+     * the production apply path (kiln_cfg_http.c's POST handler) -- the
+     * commit that first fixed Defect 1 (a93ee77b) only guarded
+     * kiln_cfg_swap.c's two-processor swap, which has no production caller,
+     * and missed this one. active_id does not move to `id` until the
+     * statement right after this import returns, so without the same
+     * override this import's nvs_save() would still dispatch an autosave
+     * that writes the incoming config over the OUTGOING kiln's saved slot.
+     * kiln_cfg_store_lock() is the same s_swap_lock kiln_cfg_swap.c already
+     * serializes this override through. */
+    kiln_cfg_store_lock();
+    kiln_cfg_store_set_autosave_target_override(id);
+    bool import_ok = zones_config_import_blob(s_store.entries[idx].blob, s_store.entries[idx].blob_len,
+                                              reason_out, reason_cap);
+    kiln_cfg_store_set_autosave_target_override(KILN_CFG_AUTOSAVE_OVERRIDE_NONE);
+    kiln_cfg_store_unlock();
+    if (!import_ok) {
         return false;
     }
     s_store.active_id = id;
@@ -1760,29 +1775,35 @@ bool kiln_cfg_store_import_package_json(const char *json, int32_t *out_id, char 
                               "temperatures -- refused rather than assumed safe");
             }
             if (pico_abs_max_temp_c < max_zone_temp_c) {
-                /* 1024, not 192: -Werror=format-truncation sizes %.1f's worst
-                 * case off the promoted double's full range, not float's
-                 * (~816 bytes here) -- this fixes a pre-existing build break
-                 * (uncommitted WIP elsewhere in this file, unrelated to this
-                 * pass's own change), not a real truncation risk at the
-                 * values this ever actually carries. */
-                char msg[1024];
+                /* Pass the FLOAT expressions directly, not cast to (double):
+                 * varargs promotes float to double either way, but an
+                 * explicit (double) cast changes the expression's STATIC
+                 * type as GCC's -Wformat-truncation sees it, which then sizes
+                 * %.1f's worst case off double's full range (~1024 bytes for
+                 * two substitutions) instead of float's (~192 bytes) --
+                 * autotune_engine_step_identify.c's identify-duty refusal
+                 * documents the same rule. No stack growth this way, per the
+                 * project's httpd-stack-blob rule (never enlarge these
+                 * buffers). */
+                char msg[256];
                 snprintf(msg, sizeof(msg),
                          "package's safety-processor ceiling (abs_max_temp_c=%.1f C) is lower than its "
                          "own highest configured zone max_temp_c (%.1f C) -- the safety ceiling must "
                          "never be tighter than the kiln it packages with",
-                         (double)pico_abs_max_temp_c, (double)max_zone_temp_c);
+                         pico_abs_max_temp_c, max_zone_temp_c);
                 IMPORT_REFUSE(msg);
             }
         }
         if (have_abs_max && pico_abs_max_temp_c > ZONE_MAX_TEMP_C_MAX) {
-            /* Same -Werror=format-truncation fix as the sibling IMPORT_REFUSE
-             * just above -- see that comment. */
-            char msg[1024];
+            /* Same float-not-double fix as the sibling IMPORT_REFUSE just
+             * above -- see that comment. ZONE_MAX_TEMP_C_MAX is a float
+             * literal (2500.0f), so this substitution stays float-sized
+             * too. */
+            char msg[256];
             snprintf(msg, sizeof(msg),
                      "package's safety-processor ceiling (abs_max_temp_c=%.1f C) exceeds this "
                      "firmware's absolute sanity ceiling (%.1f C)",
-                     (double)pico_abs_max_temp_c, (double)ZONE_MAX_TEMP_C_MAX);
+                     pico_abs_max_temp_c, (float)ZONE_MAX_TEMP_C_MAX);
             IMPORT_REFUSE(msg);
         }
     }
@@ -1849,15 +1870,22 @@ done:
     return result;
 }
 
-/* See kiln_cfg_store.h's own comment on this pair -- kiln_cfg_swap.c's
- * escape hatch for Defect 1 (docs/audits/kiln_profiles_feature_review_
- * 2026-09-15.md): the slot an in-flight import's autosave should target
- * when it is not (yet) the same as s_store.active_id. Plain static, not
- * behind s_swap_lock: the only writer is kiln_cfg_swap.c, always while it
- * already holds kiln_cfg_store_lock() around the same zones_config_import_
- * blob() call whose nvs_save() autosave dispatch this value steers, and the
- * flash worker's autosave job (this module's own s_store fields aside) does
- * not otherwise run concurrently with that. */
+/* See kiln_cfg_store.h's own comment on this pair -- the escape hatch for
+ * Defect 1 (docs/audits/kiln_profiles_feature_review_2026-09-15.md): the
+ * slot an in-flight import's autosave should target when it is not (yet)
+ * the same as s_store.active_id. Plain static, not behind s_swap_lock: the
+ * two writers are kiln_cfg_swap.c and this file's own kiln_cfg_store_apply()
+ * (adversarial review 2026-09-15,
+ * docs/audits/review_autosave_slot_fix_a93ee77b_2026-09-15.md's HIGH finding
+ * 1 -- the swap module has no production caller, kiln_cfg_store_apply() is
+ * the one every real POST/LCD apply goes through), always while already
+ * holding kiln_cfg_store_lock() around the same zones_config_import_blob()
+ * call whose nvs_save() autosave dispatch this value steers. That shared
+ * lock is what keeps the two writers from interleaving with each other; it
+ * does NOT cover every other nvs_save() caller in the system (an ordinary
+ * zones POST, an autotune write) -- one of those queuing onto the flash
+ * worker while this override is set is a narrow, believed-unreachable-in-
+ * practice race, not a proven-impossible one (LOW finding 5, same review). */
 static int32_t s_autosave_target_override = KILN_CFG_AUTOSAVE_OVERRIDE_NONE;
 
 void kiln_cfg_store_set_autosave_target_override(int32_t id_or_none_sentinel)
