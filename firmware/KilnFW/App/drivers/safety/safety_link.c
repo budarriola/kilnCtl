@@ -64,16 +64,10 @@
 #include "kilnlink/kilnlink_set_param.h"
 #include "kilnlink/kilnlink_version.h"
 
-/* TODO.md owner-report item 3 (2026-08-21): zones_config_get_safety_tc_type()/
- * zones_config_is_valid() for safety_sync_tc_type() below. This is a real,
- * deliberate cross-module dependency (this driver otherwise knows nothing
- * about the zones/thermocouple settings page) -- see safety_sync_tc_type()'s
- * comment for why it lives here instead of being pushed from zones_http.c:
- * that file has no reference to the SafetyLinkClass instance (main.c holds
- * the only one, as a local static, and main.c is off-limits this pass), so
- * the poll task that already runs here and already knows link_up/down
- * transitions is the natural place to pull the desired setting from instead. */
-#include "zones_config_accessors.h"
+/* 2026-09-15 (Opus review F3): removed a dead zones_config_accessors.h
+ * include here -- leftover from a stale, duplicated comment about
+ * safety_sync_tc_type() (removed; see safety_link_poll.c). This file made
+ * no accessor call of its own. */
 
 /* TODO owner-report (2026-08-21 follow-up), docs/COMMISSIONING.md sec 3: the
  * ESP-side commissioning cache. Same real, deliberate cross-module dependency
@@ -342,15 +336,12 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
     link->fault_io = SAFETY_FAULT_IO;
     link->poll_period_ms = (uint16_t)SAFETY_POLL_PERIOD_MS;
     link->fault_on_link_loss = true; /* fail-safe; see safety_link.h */
-    /* TODO.md owner-report item 3 (2026-08-21): 0xFF, not 0 -- 0 is a real
-     * thermocouple type (THERMO_TC_B) this driver could legitimately need to
-     * send, and memset above already zeroed it, so this must be set
-     * explicitly to mean "nothing sent yet" -- see
-     * SafetyLinkClass::tc_type_last_sent's comment and safety_sync_tc_type()
-     * below. */
-    link->tc_type_last_sent = 0xFFu;
-    /* Same "memset zeroed it, but 0 is not the honest starting value"
-     * reasoning as tc_type_last_sent just above -- a real min_us of 0 would
+    /* 2026-09-15 (Opus review F3): SafetyLinkClass::tc_type_last_sent and its
+     * "0xFF means nothing sent yet" init used to live here, for the now-
+     * removed safety_sync_tc_type() push (safety_link_poll.c). Removed along
+     * with it -- the field is gone entirely, not merely unused. */
+    /* memset above zeroed link_reply_us_min, but 0 is not the honest starting
+     * value -- a real min_us of 0 would
      * misreport a legitimate reply as taking no time at all, and would
      * never be overwritten by safety_exchange()'s "if elapsed < min" check
      * once latched at 0. See safety_link_stats_t::link_reply_us_min's doc

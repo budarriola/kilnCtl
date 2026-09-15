@@ -22,8 +22,9 @@
 // already agree, transfers nothing. safety_link.c's poll task is the intended
 // caller (right after it applies a fresh FW_VERSION frame), mirroring the
 // same "one module calls into another it doesn't otherwise depend on, because
-// that's where the trigger naturally fires" precedent safety_link.c's
-// safety_sync_tc_type() already set for zones_http.h.
+// that's where the trigger naturally fires" precedent safety_link_poll.c's
+// safety_sync_tc_type() (removed 2026-09-15, Opus review F3) once set for
+// zones_http.h.
 //
 // THE CRC IS THE AUTHORITY, NEVER THIS CACHE: safety_cfg_store_get_all() and
 // safety_cfg_store_cached_crc() report exactly what was fetched and when --

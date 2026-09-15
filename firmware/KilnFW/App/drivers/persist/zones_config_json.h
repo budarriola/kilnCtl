@@ -2228,12 +2228,20 @@ typedef struct {
      * cross-check -- see docs/HARDWARE.md and SaftyFW's own thermocouple
      * wiring). Defaults to THERMO_TC_K, matching what MAX31856.c has always
      * hardcoded for the main board's own channels, so a board that has never
-     * touched this setting keeps behaving exactly as it does today. Mirrored
-     * to the Pico by safety_link.c's poll task, not sent directly from this
-     * file -- see that file's safety_sync_tc_type() for why (this module has
-     * no reference to the SafetyLinkClass instance; main.c, which does, is
-     * off-limits this pass) and for the "link was down when this changed"
-     * re-apply-on-reconnect handling. */
+     * touched this setting keeps behaving exactly as it does today.
+     *
+     * DEPRECATED as a write path, 2026-09-15 (owner decision, Opus review
+     * F3, "the commissioning page owns the type"): this field used to be
+     * mirrored to the Pico by safety_link.c's poll task
+     * (safety_sync_tc_type(), removed). The Pico's own commissioning page
+     * (SET_PARAM/COMMIT_CONFIG) is now the sole writer of its tc_type; this
+     * field is kept, parsed, and still round-tripped through zones config
+     * JSON purely so the ESP can READ BACK and DISPLAY what the Pico last
+     * reported (see backup_export.c) -- it must never again be treated as a
+     * value to push at the Pico. Left in place, unrenamed and at the same
+     * offset, specifically to avoid a ZONES_CFG_VERSION bump for a field
+     * that already round-trips correctly; do not add a new write path for
+     * it without revisiting this decision. */
     uint8_t safety_tc_type;
     zone_cfg_t zones[MAX31856_CHANNEL_COUNT];
     /* 2026-08-27 (ZONES_CFG_VERSION 8->9): how many of timing_profiles[]

@@ -39,11 +39,17 @@ body from the preset alone.
 NOT every field on this endpoint uses the omitted-means-zero convention --
 knowing which convention a given field uses matters, because getting it
 backwards is its own hazard in either direction:
-  * z%u_tctype / safety_tc_type / pc_link_abort_silence_ms: OMITTED MEANS
-    KEEP THE CURRENT VALUE (falls back to the live s_zones.cfg value in
-    zones_http.c). Sent explicitly here anyway (echoed from the GET), same
-    as every other field, so this module's behavior does not depend on
-    memorizing which fields are safe to omit.
+  * z%u_tctype / pc_link_abort_silence_ms: OMITTED MEANS KEEP THE CURRENT
+    VALUE (falls back to the live s_zones.cfg value in zones_http.c). Sent
+    explicitly here anyway (echoed from the GET), same as every other
+    field, so this module's behavior does not depend on memorizing which
+    fields are safe to omit.
+  * safety_tc_type: DEPRECATED as a write path, 2026-09-15 (owner decision,
+    "the commissioning page owns the type" -- Opus review F3). ANY
+    submitted value is now ignored by zones_http_post.c -- the live value
+    always wins, submitted or omitted alike. This module treats it as
+    read-only (see _TOP_READONLY_OR_STRUCTURAL_KEYS below), never sends it
+    in a POST body, and only ever surfaces the value GET reports.
   * relay<N>_name (relay_names_cfg_t, a SEPARATE struct from zones_cfg_t):
     the OPPOSITE convention on purpose -- omitted means "keep the current
     name," specifically so that /settings/safety's whole-page save (which
@@ -598,7 +604,6 @@ _TOP_FIELD_FORM_KEY = {
     "relay_count": "relay_count",
     "max_simultaneous_relays": "max_simultaneous_relays",
     "continue_on_zone_trip": "continue_on_zone_trip",
-    "safety_tc_type": "safety_tc_type",
     "pc_link_abort_silence_ms": "pc_link_abort_silence_ms",
     # ease_off_window_mult was HERE (ZONES_CFG_VERSION 15->16) -- REMOVED at
     # 16->17 (2026-09-04): the field moved per-zone (see _ZONE_FIELD_FORM_KEY's
@@ -608,7 +613,7 @@ _TOP_FIELD_FORM_KEY = {
     # that still lets an OLD preset using this now-removed top-level scalar
     # apply -- to every zone, not silently dropped.
 }
-_TOP_INT_FIELDS = {"thermo_count", "relay_count", "max_simultaneous_relays", "safety_tc_type"}
+_TOP_INT_FIELDS = {"thermo_count", "relay_count", "max_simultaneous_relays"}
 #: Top-level keys GET emits that this module deliberately never echoes back:
 #: relay_names/timing_profiles/zones are handled by their own dedicated
 #: logic below (not this scalar map), and the rest are read-only telemetry
@@ -616,6 +621,17 @@ _TOP_INT_FIELDS = {"thermo_count", "relay_count", "max_simultaneous_relays", "sa
 #: field at all.
 _TOP_READONLY_OR_STRUCTURAL_KEYS = {
     "relay_zone_owned_mask", "safety_wiring", "ct_warn_mask",
+    # safety_tc_type (owner decision 2026-09-15, "the commissioning page owns
+    # the type" -- Opus review F3): moved OUT of _TOP_FIELD_FORM_KEY here.
+    # zones_http_post.c no longer reads an operator-submitted safety_tc_type
+    # at all -- it always echoes the current live value regardless of what a
+    # form submission carries (see that file's own comment) -- so this
+    # module must not send it as a POST override either: doing so would
+    # look like a working control that silently never reaches the Pico. GET
+    # still reports it (read back from the Pico, see zones_http_get.c) and
+    # this module still surfaces that read-only value the same way
+    # safety_ceiling below does.
+    "safety_tc_type",
     # safety_ceiling (owner request 2026-09-10): read-only telemetry --
     # {target_c, pico_known, pico_current_c} showing what the Pico's
     # abs_max_temp_c ceiling should be (from the zone maxima,

@@ -226,37 +226,17 @@ esp_err_t zones_post_handler(httpd_req_t *req)
         }
     }
 
-    /* 2026-08-21, TODO.md owner-report item 3: the safety processor's own
-     * thermocouple type (see zones_cfg_t::safety_tc_type's comment for why
-     * this is a separate global setting rather than any zone's tc_type).
-     * OPTIONAL, falling back to the current live value on omit -- same
-     * "cannot silently relinearize a channel against the wrong type"
-     * reasoning as z%u_tctype above, and for the identical reason: an older
-     * client that predates this field must not zero a real, physically
-     * meaningful setting just by doing an otherwise-ordinary whole-page
-     * save. Bounds match ZONE_TC_TYPE_MAX_REAL -- the safety processor's own
-     * MAX31856 is the same part with the same eight real thermocouple types;
-     * see that macro's comment. */
-    {
-        char val[8];
-        int len = http_form_find_field(body, "safety_tc_type", val, sizeof(val));
-        if (len > 0) {
-            char *end = NULL;
-            long v = strtol(val, &end, 10);
-            /* *end != '\0' rejects trailing garbage, same gap as the other
-             * numeric parsers in this file -- see zones_config_json_parse_u8_field()'s comment. */
-            if (end == val || *end != '\0' || v < 0 || v > ZONE_TC_TYPE_MAX_REAL) {
-                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                                    "safety_tc_type must be a real thermocouple type (0-7: "
-                                    "B/E/J/K/N/R/S/T), not a voltage-input mode");
-                free(body);
-                return ESP_OK;
-            }
-            tmp.safety_tc_type = (uint8_t)v;
-        } else {
-            tmp.safety_tc_type = s_zones.cfg.safety_tc_type;
-        }
-    }
+    /* DEPRECATED as a write path, 2026-09-15 (owner decision, Opus review F3,
+     * "the commissioning page owns the type"): this used to accept an
+     * operator-submitted safety_tc_type and push it to the Pico (see
+     * zones_cfg_t::safety_tc_type's own comment). The Pico's own
+     * commissioning page is now the sole writer of its tc_type; this ESP
+     * field is read-only from the web form's point of view -- ALWAYS keep
+     * the current live value (last value read back from the Pico),
+     * regardless of what a submission carries, rather than accepting an
+     * operator-typed value that would never actually reach the Pico and
+     * would silently desync the displayed value from the real one. */
+    tmp.safety_tc_type = s_zones.cfg.safety_tc_type;
 
     /* The one global v8 override. OPTIONAL, and on omit it keeps the CURRENT
      * live value rather than resetting to 0 -- the same reasoning as

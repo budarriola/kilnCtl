@@ -1122,24 +1122,29 @@ static void test_zones_post_max_simultaneous_relays_rejects_trailing_garbage(voi
     "tp0_name=Default&tp0_progressduty=0&tp0_progresswindow=0&tp0_drifthyst=0&" \
     "tp0_frozeneps=0&tp0_xzoneperiod=0&tp0_bbhyst=0&tp0_coolmargin=0&tp0_coolhold=0&tp0_ramplock=0"
 
-static void test_zones_post_safety_tc_type_rejects_trailing_garbage(void)
+static void test_zones_post_safety_tc_type_is_ignored_even_when_garbage(void)
 {
-    TEST_SECTION("zones_post_handler -- safety_tc_type trailing garbage rejected (FIX 2, inline strtol site 2)");
+    TEST_SECTION("zones_post_handler -- safety_tc_type is a read-only echo field now (2026-09-15, Opus review "
+                 "F3): garbage in it must not reject the submission or change the stored value");
+    s_zones.cfg.safety_tc_type = 3;
     run_zones_post("thermo_count=0&relay_count=0&" MINIMAL_TIMING_PROFILE_BODY "&safety_tc_type=3Q");
-    TEST_CHECK(s_test_err_called, "\"3Q\" must be rejected, not silently accepted as 3");
-    TEST_CHECK(!s_test_ok_called, "must not report success for a rejected submission");
-    TEST_CHECK(strstr(s_test_err_msg, "safety_tc_type") != NULL,
-              "must be rejected FOR safety_tc_type specifically, not for an unrelated missing "
-              "timing profile -- proves this test still exercises the code path it claims to");
+    TEST_CHECK(!s_test_err_called, "safety_tc_type is no longer parsed at all, so garbage in it must not reject "
+              "an otherwise-clean submission -- the Pico's commissioning page is the only writer now");
+    TEST_CHECK(s_test_ok_called, "an otherwise-clean submission must still report success");
+    TEST_CHECK(s_zones.cfg.safety_tc_type == 3, "the stored value must be untouched by the submitted field");
 }
 
 static void test_zones_post_accepts_clean_minimal_body(void)
 {
-    TEST_SECTION("zones_post_handler -- positive control: clean values on the same two fields are still accepted");
+    TEST_SECTION("zones_post_handler -- positive control: a clean submission on the other field is still accepted, "
+                 "and a submitted safety_tc_type never overwrites the current live value");
+    s_zones.cfg.safety_tc_type = 7;
     run_zones_post("thermo_count=0&relay_count=0&" MINIMAL_TIMING_PROFILE_BODY
                    "&max_simultaneous_relays=2&safety_tc_type=3");
     TEST_CHECK(!s_test_err_called, "a clean submission must not be rejected");
     TEST_CHECK(s_test_ok_called, "a clean submission must report success");
+    TEST_CHECK(s_zones.cfg.safety_tc_type == 7, "submitted safety_tc_type=3 must be ignored -- the live value (7) "
+              "must survive, since the ESP no longer writes this field");
 }
 
 // A single per-zone body block, shared by the whole-page cross-zone cycle
@@ -8409,7 +8414,7 @@ static void test_zone_sweep_run_one_zone_skips_unwired_zone(void)
     deps.ctx = &ctx;
 
     float avg = NAN;
-    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, /* relay_mask */ 0, &deps, &avg, NULL, NULL);
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, /* relay_mask */ 0, &deps, &avg, NULL, NULL, NULL);
 
     TEST_CHECK(outcome == ZONE_SWEEP_ZONE_SKIPPED, "relay_mask == 0 -> SKIPPED, nothing measured");
     TEST_CHECK(strlen(ctx.call_log) == 0, "a skipped zone touches NO relay call at all -- not even an off");
@@ -8427,7 +8432,7 @@ static void test_zone_sweep_run_one_zone_abort_before_energize_never_turns_relay
     s_zones.cfg.thermo_count = 1;
 
     float avg = NAN;
-    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL);
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL, NULL);
 
     TEST_CHECK(outcome == ZONE_SWEEP_ZONE_ABORTED, "abort already requested -> ABORTED");
     // H3's specific claim: an operator Abort must be able to stop a zone from
@@ -8472,7 +8477,7 @@ static void test_zone_sweep_run_one_zone_normal_completion_sequencing(void)
     s_zones.cfg.zones[0].max_temp_c = 500.0f; /* configured ceiling, far above the fake's 20C/999C readings */
 
     float avg = NAN;
-    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL);
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL, NULL);
 
     TEST_CHECK(outcome == ZONE_SWEEP_ZONE_OK, "no abort/ceiling/link-loss -> runs to completion, OK");
     TEST_CHECK(strcmp(ctx.call_log, "on,off") == 0,
@@ -8494,7 +8499,7 @@ static void test_zone_sweep_run_one_zone_abort_mid_run_still_forces_off(void)
     s_zones.cfg.zones[0].max_temp_c = 500.0f;
 
     float avg = NAN;
-    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL);
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL, NULL);
 
     TEST_CHECK(outcome == ZONE_SWEEP_ZONE_ABORTED, "abort mid-poll-loop -> ABORTED");
     TEST_CHECK(strcmp(ctx.call_log, "on,off") == 0,
@@ -8515,7 +8520,7 @@ static void test_zone_sweep_run_one_zone_ceiling_hit_forces_off(void)
     s_zones.cfg.zones[0].max_temp_c = 500.0f;
 
     float avg = NAN;
-    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL);
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL, NULL);
 
     TEST_CHECK(outcome == ZONE_SWEEP_ZONE_CEILING_HIT, "reading reaches the ceiling -> CEILING_HIT");
     TEST_CHECK(strcmp(ctx.call_log, "on,off") == 0, "the ceiling abort is also a choke-point exit: on, then off");
@@ -8534,7 +8539,7 @@ static void test_zone_sweep_run_one_zone_link_loss_forces_off(void)
     s_zones.cfg.zones[0].max_temp_c = 500.0f;
 
     float avg = NAN;
-    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL);
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL, NULL);
 
     TEST_CHECK(outcome == ZONE_SWEEP_ZONE_LINK_LOST, "the safety link drops mid-poll -> LINK_LOST");
     TEST_CHECK(strcmp(ctx.call_log, "on,off") == 0, "the link-loss exit is also a choke-point exit: on, then off");
@@ -8558,7 +8563,7 @@ static void test_zone_sweep_run_one_zone_energize_refused_is_a_choke_point_exit_
 
     float avg = NAN;
     uint32_t refused_sources = 0;
-    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, &refused_sources);
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, &refused_sources, NULL);
 
     TEST_CHECK(outcome == ZONE_SWEEP_ZONE_ENERGIZE_REFUSED,
               "B1: an owner refusal (e.g. a safety fault asserting mid-sweep) is its own outcome, "
@@ -8568,6 +8573,37 @@ static void test_zone_sweep_run_one_zone_energize_refused_is_a_choke_point_exit_
     // was actually left energized, but the choke point is unconditional).
     TEST_CHECK(strcmp(ctx.call_log, "on,off") == 0,
               "a refused energize is STILL followed by the choke point -- no path skips it");
+}
+
+// 2026-09-15 audit fix (review_crash_report_relay_gate_61765de7_2026-09-15.md,
+// LOW "sources 0x00"): out_energize_refused_sources alone cannot distinguish
+// ERR_CRASH_UNACK/ERR_UPDATING (both leave the sources word at 0) from a
+// genuine ERR_SAFETY refusal that happens to decode to no bits. Prove the new
+// out_energize_refused_result out-param carries the real
+// kiln_io_owner_relay_result_t up so the caller (zone_sweep_run_all_zones())
+// can name the actual reason instead of an empty bitmask decode.
+static void test_zone_sweep_run_one_zone_reports_refused_result_for_crash_unack(void)
+{
+    fake_sweep_ctx_t ctx;
+    fake_sweep_ctx_reset(&ctx);
+    ctx.energize_result = KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK;
+    zone_sweep_zone_deps_t deps = s_fake_sweep_deps;
+    deps.ctx = &ctx;
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.zones[0].max_temp_c = 500.0f;
+
+    float avg = NAN;
+    uint32_t refused_sources = 0xFFFFFFFFu; /* poison -- must not be trusted for this reason */
+    kiln_io_owner_relay_result_t refused_result = KILN_IO_OWNER_RELAY_OK;
+    zone_sweep_zone_outcome_t outcome =
+        zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, &refused_sources, &refused_result);
+
+    TEST_CHECK(outcome == ZONE_SWEEP_ZONE_ENERGIZE_REFUSED,
+              "an unacknowledged-crash-report refusal is still ENERGIZE_REFUSED");
+    TEST_CHECK(refused_result == KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK,
+              "the real refusal reason (ERR_CRASH_UNACK) reaches the caller, not just the (zero) sources word");
 }
 
 // N1 (opus review, 2026-08-28): the ceiling abort is inert while
@@ -8588,7 +8624,7 @@ static void test_zone_sweep_run_one_zone_temp_lost_forces_off(void)
     s_zones.cfg.zones[0].max_temp_c = 500.0f;
 
     float avg = NAN;
-    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL);
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL, NULL);
 
     TEST_CHECK(outcome == ZONE_SWEEP_ZONE_TEMP_LOST,
               "N1: two consecutive invalid thermocouple reads -> TEMP_LOST, not a silent 5s unsupervised run");
@@ -8613,7 +8649,7 @@ static void test_zone_sweep_run_one_zone_single_invalid_poll_does_not_abort(void
     s_zones.cfg.zones[0].max_temp_c = 500.0f;
 
     float avg = NAN;
-    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL);
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL, NULL);
 
     TEST_CHECK(outcome == ZONE_SWEEP_ZONE_OK,
               "N1: a single invalid poll surrounded by valid ones must not itself trip TEMP_LOST -- the "
@@ -8747,7 +8783,7 @@ static void test_zone_sweep_run_one_zone_trip_latched_forces_off(void)
     s_zones.cfg.zones[0].max_temp_c = 500.0f;
 
     float avg = NAN;
-    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL);
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL, NULL);
 
     TEST_CHECK(outcome == ZONE_SWEEP_ZONE_TRIP_LATCHED, "N10: a safety trip latching mid-zone -> TRIP_LATCHED");
     TEST_CHECK(strcmp(ctx.call_log, "on,off") == 0, "N10: the trip-latched exit is also a choke-point exit: on, then off");
@@ -8820,11 +8856,20 @@ static bool s_all_overlap_detected = false;
  * out->reason build path (the actual call site being tested). */
 static bool s_all_refuse_with_safety = false;
 static uint32_t s_all_refuse_sources = 0;
+/* 2026-09-15 audit fix (review_crash_report_relay_gate_61765de7_2026-09-15.md,
+ * LOW "sources 0x00"): a separate refuse flag for the non-bitmask
+ * ERR_CRASH_UNACK reason, so a test can drive it without also implying a
+ * (nonexistent) safety-fault-source mask. */
+static bool s_all_refuse_with_crash_unack = false;
 
 static kiln_io_owner_relay_result_t fake_all_energize(void *ctx, uint8_t relay_mask, uint32_t *out_safety_sources)
 {
     (void)ctx;
     (void)relay_mask;
+    if (s_all_refuse_with_crash_unack) {
+        if (out_safety_sources) *out_safety_sources = 0;
+        return KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK;
+    }
     if (s_all_refuse_with_safety) {
         if (out_safety_sources) *out_safety_sources = s_all_refuse_sources;
         return KILN_IO_OWNER_RELAY_ERR_SAFETY;
@@ -9017,6 +9062,46 @@ static void test_zone_sweep_run_all_zones_energize_refused_reason_decodes_fault_
     TEST_CHECK(strstr(result.reason, "main-board") != NULL,
               "the decoded fault-source word (\"main-board...\", from safety_fault_source_words()) is in "
               "the reason string, not just the raw mask");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+}
+
+/* 2026-09-15 audit fix (review_crash_report_relay_gate_61765de7_2026-09-15.md,
+ * LOW "sources 0x00"): before this fix, an unacknowledged-crash-report
+ * refusal mid-sweep decoded an empty safety_sources word (ERR_CRASH_UNACK
+ * carries no SAFETY_FAULT_SRC_* bits) and produced "zone 0 energize refused:
+ * " with nothing useful after the colon. Prove the reason now names the real
+ * cause. */
+static void test_zone_sweep_run_all_zones_energize_refused_reason_names_crash_unack(void)
+{
+    TEST_SECTION("zone_sweep_run_all_zones() -- ENERGIZE_REFUSED reason names the crash-report reason "
+                 "instead of an empty sources mask (audit 2026-09-15)");
+    fake_all_ctx_t actx;
+    memset(&actx, 0, sizeof(actx));
+    actx.relay_masks[0] = 0x01;
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.zones[0].max_temp_c = 500.0f;
+
+    zone_sweep_zone_deps_t deps = s_fake_all_zone_deps;
+    zone_sweep_all_hooks_t hooks = s_fake_all_hooks;
+    hooks.ctx = &actx;
+
+    s_all_any_relay_on = false;
+    s_all_overlap_detected = false;
+    s_all_refuse_with_crash_unack = true;
+
+    zone_sweep_all_result_t result;
+    zone_sweep_run_all_zones(1, &deps, &hooks, &result);
+
+    s_all_refuse_with_crash_unack = false;
+
+    TEST_CHECK(result.state == ZONE_SWEEP_FAILED, "a crash-unack refusal fails the sweep, same as a safety refusal");
+    TEST_CHECK(strstr(result.reason, "sources 0x00") == NULL && strstr(result.reason, "0x00") == NULL,
+              "RED before this fix: an empty safety_sources decode left a bare/empty hex mask in the reason");
+    TEST_CHECK(strstr(result.reason, "crash report") != NULL,
+              "the reason names the unacknowledged crash report, not a decoded-empty bitmask");
 
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
 }
@@ -9647,7 +9732,7 @@ static void test_reconcile_on_link_up_invalid_config_is_a_noop(void)
 
     TEST_CHECK(s_ceiling_writer_calls == 0,
               "an invalid (never-loaded) zones config must never be used to derive a Pico target -- "
-              "same gate safety_sync_tc_type() uses");
+              "same gate the removed safety_sync_tc_type() used");
     reconcile_test_reset();
 }
 
@@ -11300,7 +11385,7 @@ void run_test_zones_http(void)
     test_parse_float_field_rejects_unit_suffix();
     test_parse_float_field_accepts_clean_value();
     test_zones_post_max_simultaneous_relays_rejects_trailing_garbage();
-    test_zones_post_safety_tc_type_rejects_trailing_garbage();
+    test_zones_post_safety_tc_type_is_ignored_even_when_garbage();
     test_zones_post_accepts_clean_minimal_body();
     test_post_whole_page_cross_zone_cycle_refused();
     test_post_whole_page_cross_zone_legal_chain_accepted();
@@ -11459,6 +11544,7 @@ void run_test_zones_http(void)
     test_zone_sweep_run_one_zone_ceiling_hit_forces_off();
     test_zone_sweep_run_one_zone_link_loss_forces_off();
     test_zone_sweep_run_one_zone_energize_refused_is_a_choke_point_exit_too();
+    test_zone_sweep_run_one_zone_reports_refused_result_for_crash_unack();
     test_zone_sweep_run_one_zone_temp_lost_forces_off();
     test_zone_sweep_run_one_zone_single_invalid_poll_does_not_abort();
     test_zone_sweep_run_one_zone_trip_latched_forces_off();
@@ -11471,6 +11557,7 @@ void run_test_zones_http(void)
     test_zone_sweep_run_all_zones_never_energizes_two_zones_at_once();
     test_zone_sweep_run_all_zones_skipped_zone_records_nothing();
     test_zone_sweep_run_all_zones_energize_refused_reason_decodes_fault_words();
+    test_zone_sweep_run_all_zones_energize_refused_reason_names_crash_unack();
     test_zone_normals_get_set_round_trip();
 
     test_zone_sweep_summed_normal_a_basic();
