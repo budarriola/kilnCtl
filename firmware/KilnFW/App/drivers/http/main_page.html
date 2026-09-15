@@ -477,6 +477,13 @@
       <div class="kc-manage-row">
         <button id="kcDeleteBtn" type="button" class="run-btn">Delete selected</button>
       </div>
+      <div class="kc-manage-row">
+        <button id="kcDownloadBtn" type="button" class="run-btn">Download selected (.json)</button>
+      </div>
+      <div class="kc-manage-row">
+        <input type="file" id="kcUploadFile" accept="application/json,.json">
+        <button id="kcUploadBtn" type="button" class="run-btn">Upload / import</button>
+      </div>
     </div>
   </details>
 </div>
@@ -1488,6 +1495,65 @@ document.getElementById('kcDeleteBtn').addEventListener('click', function () {
   if (!confirm('Delete kiln config "' + cfg.name + '"? This cannot be undone.')) return;
   kcPost('/api/kiln_configs/delete', 'id=' + encodeURIComponent(cfg.id))
     .then(function (result) { kcHandleResult(result, 'Deleted "' + cfg.name + '".'); });
+});
+
+// Download: GET the export envelope as a blob and save it client-side --
+// a normal page load, so no special ESP-side streaming is needed. Filename
+// mirrors the server's own Content-Disposition naming (kiln_<id>.kilnpkg.json)
+// since fetch() doesn't expose that header value back to script by default.
+document.getElementById('kcDownloadBtn').addEventListener('click', function () {
+  var cfg = kcSelectedConfig();
+  if (!cfg) return;
+  kcSetMsg('Preparing download...', false);
+  fetch('/api/kiln_configs/export?id=' + encodeURIComponent(cfg.id)).then(function (r) {
+    if (!r.ok) return r.text().then(function (t) { throw new Error(t || ('HTTP ' + r.status)); });
+    return r.blob();
+  }).then(function (blob) {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'kiln_' + cfg.id + '.kilnpkg.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    kcSetMsg('Downloaded "' + cfg.name + '".', false);
+  }).catch(function (e) {
+    kcSetMsg('Download failed: ' + (e && e.message ? e.message : 'error'), true);
+  });
+});
+
+// Upload: read the chosen file as text and POST its raw bytes to the import
+// endpoint -- it always creates a NEW slot (never applies), so the result is
+// just "here's the new id" or the server's own refusal text, surfaced
+// verbatim rather than paraphrased (import validity/compatibility errors are
+// meant to be read by the operator, not summarized away).
+document.getElementById('kcUploadBtn').addEventListener('click', function () {
+  var input = document.getElementById('kcUploadFile');
+  var file = input.files && input.files[0];
+  if (!file) { kcSetMsg('Choose a file first.', true); return; }
+  kcSetMsg('Uploading...', false);
+  file.text().then(function (text) {
+    return window.kcFetchWithSafetyAck('/api/kiln_configs/import', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text,
+    });
+  }).then(function (r) {
+    return r.text().then(function (t) {
+      var body = {};
+      try { body = JSON.parse(t); } catch (e) { /* non-JSON error body -- fall through to raw text */ }
+      return { httpOk: r.ok, body: body, raw: t };
+    });
+  }).then(function (result) {
+    if (!result.httpOk || result.body.error) {
+      kcSetMsg(result.body.error || result.raw || ('Import failed (HTTP status).'), true);
+      return;
+    }
+    kcSetMsg('Imported as a new kiln config (id ' + result.body.id + ').', false);
+    input.value = '';
+    loadKilnConfigs();
+  }).catch(function (e) {
+    kcSetMsg('Upload failed: ' + (e && e.message ? e.message : 'error'), true);
+  });
 });
 
 function fmtDuration(s) {
