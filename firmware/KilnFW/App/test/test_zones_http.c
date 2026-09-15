@@ -2001,6 +2001,49 @@ static void test_nvs_load_from_failed_validation_is_rejected(void)
 // Round-trip: nvs_save() then nvs_load() (the real save/load pair, not just
 // nvs_load_from() in isolation) must hand back every field identical,
 // including the newly-added crc32-stamping behavior itself.
+/* Item 13 (kiln-config auto-save): a successful nvs_save() must dispatch the
+ * kiln-config auto-save hook. Without this the whole "changing the current
+ * config auto-saves to the current slot and recalculates the hash" requirement
+ * has no test coverage at all -- deleting the dispatch call from
+ * zones_config_store.c's nvs_save() used to leave every host test green. */
+static void test_nvs_save_dispatches_the_kiln_config_autosave(void)
+{
+    TEST_SECTION("nvs_save -- dispatches the kiln-config auto-save hook");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.relay_count = 1;
+    s_zones.cfg.max_simultaneous_relays = 1;
+    s_zones.cfg.timing_profile_count = 1;
+    strncpy(s_zones.cfg.timing_profiles[0].name, "Default", TIMING_PROFILE_NAME_MAX_LEN);
+    snprintf(s_zones.cfg.zones[0].name, sizeof(s_zones.cfg.zones[0].name), "Z0");
+    s_zones.cfg.zones[0].relay_mask = 0x01u;
+    s_zones.cfg.zones[0].thermo_mask = 0x01u;
+    s_zones.cfg.zones[0].max_temp_c = 1200.0f;
+
+    g_stub_autosave_called = false;
+    g_stub_autosave_result = true;
+
+    TEST_CHECK(nvs_save() == ESP_OK, "nvs_save() must succeed against the stub");
+    TEST_CHECK(g_stub_autosave_called,
+              "nvs_save() must dispatch kiln_cfg_store_autosave_from_live() -- a zones-config "
+              "change that never reaches the active kiln slot silently desynchronises the stored "
+              "package (and its pkg_hash) from the live config");
+
+    // An auto-save that REFUSES must not turn the zones-config save itself into
+    // a failure: the zones write is authoritative and already committed.
+    g_stub_autosave_called = false;
+    g_stub_autosave_result = false;
+    TEST_CHECK(nvs_save() == ESP_OK,
+              "a refused kiln-config auto-save must not fail the zones-config save that triggered it");
+    TEST_CHECK(g_stub_autosave_called, "the auto-save hook must still have been attempted");
+
+    g_stub_autosave_result = true;
+    g_stub_autosave_called = false;
+}
+
 static void test_nvs_save_load_round_trip_current_version(void)
 {
     TEST_SECTION("nvs_save/nvs_load -- round trip: every field identical after save then load back");
@@ -11277,6 +11320,7 @@ void run_test_zones_http(void)
     test_nvs_load_from_bad_crc_is_rejected();
     test_nvs_load_from_failed_validation_is_rejected();
     test_nvs_save_load_round_trip_current_version();
+    test_nvs_save_dispatches_the_kiln_config_autosave();
     test_nvs_load_from_v1_blob_upconverts_fields_correctly();
     test_nvs_load_from_v2_blob_upconverts_fields_correctly();
     test_nvs_load_from_v3_blob_upconverts_guard_thresholds_correctly();
