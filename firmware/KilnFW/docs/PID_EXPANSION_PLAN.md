@@ -2440,7 +2440,14 @@ same document's own 2026-08-29/30 bench sections contradict.
       weakened.**
       (The confirming run this paragraph called for has since happened —
       see the top of this item.)
-- [ ] **The fuzzy layer has never run above `strength_pct = 0`** on hardware.
+- [x] **The fuzzy layer has never run above `strength_pct = 0`** on hardware.
+      **Done 2026-09-14**: profile #7, all three zones at 50%, full
+      completion — see `docs/audits/fuzzy_first_hardware_run_2026-09-14.md`
+      for overshoot/undershoot/settle/steady-state results per zone, the
+      reconstructed rule-cell occupancy (still ~95-96% centre cell), and an
+      ESP panic found during run teardown (same open `exc_addr 0x0`
+      signature as `project_profile_executor_panic_at_stop.md`, not fixed
+      here). Original text below is left for context.
       Every measurement in §2 is with it effectively off. A hardware run was
       being set up as of the original writing, blocked briefly by a
       `zones_http_client` field-mapping bug: firmware emits the JSON key
