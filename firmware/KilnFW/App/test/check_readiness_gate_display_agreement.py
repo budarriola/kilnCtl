@@ -90,7 +90,7 @@ def extract_evaluate_body(text: str) -> str | None:
 
 def check_gate(drop: str | None) -> list[str]:
     """Every blocking branch in the gate must be `<predicate>(...) == READY_NOT_DONE`,
-    the four predicates must all appear, and no OTHER readiness_*_status()
+    the five predicates must all appear, and no OTHER readiness_*_status()
     predicate may appear (an advisory item silently promoted to blocking)."""
     problems: list[str] = []
     if not GATE_H.is_file():
@@ -122,8 +122,8 @@ def check_gate(drop: str | None) -> list[str]:
     extra = called - set(PAIRS.values())
     for pred in sorted(extra):
         problems.append(
-            f"the gate consults {pred}(), which is not one of the four items the owner made blocking "
-            f"(2026-09-09) -- adding an advisory item to the interlock is an owner decision, not a "
+            f"the gate consults {pred}(), which is not one of the five items the owner made blocking "
+            f"(2026-09-09/2026-09-14) -- adding an advisory item to the interlock is an owner decision, not a "
             f"refactor; update PAIRS here deliberately if that is what was intended"
         )
     return problems

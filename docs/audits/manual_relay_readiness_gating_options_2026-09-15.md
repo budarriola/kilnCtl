@@ -23,9 +23,10 @@ plus HTTP legibility duplicates (same call, for a 409 naming the item) at
 It blocks on **five** items (`readiness_gate_block_t`): `recovery_mode`,
 `safety_trip`, `crash_report`, `estop_verified`, and `safety_ceiling_match`
 (added 2026-09-14). By its own header it has **no override**, by owner
-instruction. Note: `SAFETY_CASE.md` item 10 and two comments in
-`readiness_gate.h` still say "four" — stale since the ceiling item landed;
-not corrected here.
+instruction. `SAFETY_CASE.md` item 10 and the stale "four" comments in
+`readiness_gate.h`/`check_readiness_gate_display_agreement.py` (both counted
+five blocking items in the code but still said "four" in prose) were
+corrected 2026-09-15; no behaviour changed.
 
 ## 2. What each manual heat surface checks
 

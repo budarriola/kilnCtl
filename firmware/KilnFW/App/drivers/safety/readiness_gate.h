@@ -45,7 +45,7 @@
 // checklist item is a whole-board summary and would refuse firings the
 // guard-5 check correctly allows. Adding an item to readiness_http.c does
 // NOT add it here -- that is intentional, and the agreement check above only
-// binds the four keys named in READINESS_GATE_KEY_* below.
+// binds the five keys named in READINESS_GATE_KEY_* below.
 //
 // LAYERING: this header is PURE (facts in, decision out) so it can be
 // host-tested and so profile_executor_run.c can call it without dragging in
@@ -104,7 +104,7 @@ typedef enum {
  * and letting them find it: main_page.html's start handler puts this in the
  * response as "readiness_item". Returning the SAME constants the page renders
  * is the point -- check_readiness_gate_display_agreement.ps1 holds both ends
- * of that to the same four keys. */
+ * of that to the same five keys. */
 static inline const char *readiness_gate_item_key(readiness_gate_block_t which)
 {
     switch (which) {
@@ -119,7 +119,7 @@ static inline const char *readiness_gate_item_key(readiness_gate_block_t which)
     }
 }
 
-/* Every board fact the four blocking items need, and nothing else. Passed by
+/* Every board fact the five blocking items need, and nothing else. Passed by
  * value rather than read from globals inside the decision so the decision
  * itself is pure and the full cross product is testable. Field meanings are
  * exactly the arguments of the readiness_*_status() predicates they feed --
@@ -134,7 +134,7 @@ typedef struct {
     bool     ceiling_diverged;  /* safety_ceiling_sync_is_diverged() -- the SAME verdict the enforcement acts on */
 } readiness_gate_facts_t;
 
-/* Reads the six facts above off the live board. Target-only
+/* Reads the seven facts above off the live board. Target-only
  * (readiness_gate.c); host tests define their own body. Safe to call before
  * any of the modules it reads have been started -- each underlying accessor
  * documents its own not-yet-started answer, and every one of them fails in
@@ -142,7 +142,7 @@ typedef struct {
 void readiness_gate_collect(readiness_gate_facts_t *out);
 
 /* The decision. Returns the FIRST blocking item (there is no value in
- * listing all four: the operator has to clear them one at a time anyway, and
+ * listing all five: the operator has to clear them one at a time anyway, and
  * a truncating LCD dialog cannot show more than one), or READINESS_GATE_OK.
  *
  * When something blocks and msg/cap are non-NULL, writes an operator-facing

@@ -303,17 +303,18 @@ here; none is copied from an unverified summary.
    `firmware/KilnFW/docs/SAFETY_MODEL.md` for the full correction.
 
 10. **`/api/readiness` is a REAL interlock, on both firing and autotune, for
-    four of its items; advisory for the rest** (owner decision 2026-09-09,
-    firing gate implemented first, autotune gate extended the same day;
-    supersedes this item's previous text, which stated that readiness gated
-    nothing at all — that was accurate when written and is no longer, and a
-    version of this item that named only the firing path would itself now be
-    stale).
+    five of its items; advisory for the rest** (owner decision 2026-09-09,
+    firing gate implemented first, autotune gate extended the same day, a
+    fifth item — `safety_ceiling_match` — promoted into the same blocking set
+    2026-09-14; supersedes this item's previous text, which stated that
+    readiness gated nothing at all — that was accurate when written and is no
+    longer, and a version of this item that named only the firing path would
+    itself now be stale).
 
-    - **What changed.** `App/drivers/safety/readiness_gate.h` turns four
+    - **What changed.** `App/drivers/safety/readiness_gate.h` turns five
       checklist items into a refusal on every firing-start path AND every
-      autotune-start path: `recovery_mode`, `safety_trip`, `crash_report` and
-      `estop_verified`. There is exactly one decision function
+      autotune-start path: `recovery_mode`, `safety_trip`, `crash_report`,
+      `estop_verified` and `safety_ceiling_match`. There is exactly one decision function
       (`readiness_gate_refuses_start()`), called from two choke points:
       - `profile_executor_run()` — the single choke point all firing-start
         paths funnel through (POST `/api/profile_exec/start`, both LCD start
@@ -354,7 +355,7 @@ here; none is copied from an unverified summary.
       `profile_executor_run()` and `autotune_begin_run_locked()`.
       **Neither path calls `readiness_gate_refuses_start()`.** Both are gated
       only by `relay_authority_on_blocked()` (a latched safety trip — one of
-      the four items, enforced here independently of the readiness checklist)
+      the five items, enforced here independently of the readiness checklist)
       and the OTA-update interlock — `recovery_mode`, `crash_report` and
       `estop_verified` do not block either one. Manual relay control is
       additionally the one place `danger_mode_active()` (the diagnostics
@@ -426,7 +427,7 @@ here; none is copied from an unverified summary.
       `/api/readiness` key as `readiness_item`, and the dashboard shows the
       message and links straight to that row on the readiness page, for both
       the firing and the autotune start endpoints. The readiness page itself
-      states which four items refuse a firing (not yet reworded to also
+      states which five items refuse a firing (not yet reworded to also
       mention autotune explicitly — the wording predates this extension).
     - **Interaction with the reboot/S6a sequence.** Rebooting reliably latches
       an S6a main-fault trip (see `sw_reset_http.c` and the Reboot section of
