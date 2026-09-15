@@ -319,6 +319,169 @@ static void test_hash_rejects_oversized_input_never_truncated_hash(void)
     free(big);
 }
 
+// ---------------------------------------------------------------------------
+// Section 5.1 envelope -- kiln_package_export_json()/_import_json()
+// (docs/KILN_PROFILES_PLAN.md items 3/4/9/14, 2026-09-14 upload/download
+// follow-up). These three refusal-reason tests are the ones the dispatch
+// prompt asked for explicitly: malformed, unknown-newer version, hash
+// mismatch.
+// ---------------------------------------------------------------------------
+
+static bool build_sample_package(char *json_out, size_t json_cap, uint32_t *out_hash)
+{
+    reset_fake_table();
+    kilnlink_param_value_t v;
+    v.f32_val = 1285.0f;
+    fake_add(0x0104, KILNLINK_PARAM_TYPE_F32, true, v);
+    v.u8_val = 1;
+    fake_add(0x0101, KILNLINK_PARAM_TYPE_U8, true, v);
+
+    kiln_pkg_safety_t pico;
+    kiln_pkg_pico_source_t src = fake_source();
+    if (!kiln_package_capture_pico_half(&src, &pico)) {
+        return false;
+    }
+    uint8_t esp_blob[16];
+    for (size_t i = 0; i < sizeof(esp_blob); i++) {
+        esp_blob[i] = (uint8_t)(i * 3 + 1);
+    }
+    uint32_t hash = 0;
+    if (!kiln_package_compute_hash(KILN_PKG_SCHEMA_VERSION, esp_blob, sizeof(esp_blob), &pico, &hash)) {
+        return false;
+    }
+    size_t len = 0;
+    if (!kiln_package_export_json("Test Kiln", KILN_PKG_SCHEMA_VERSION, esp_blob, sizeof(esp_blob), &pico,
+                                  hash, json_out, json_cap, &len)) {
+        return false;
+    }
+    if (out_hash) {
+        *out_hash = hash;
+    }
+    return true;
+}
+
+static void test_export_import_round_trip(void)
+{
+    TEST_SECTION("kiln_package_export_json/_import_json -- round trip is field-for-field identical");
+    char json[KILN_PKG_JSON_MAX_LEN];
+    uint32_t hash = 0;
+    TEST_CHECK(build_sample_package(json, sizeof(json), &hash), "sample package builds");
+
+    char name[32];
+    uint16_t schema = 0;
+    uint8_t esp_blob_out[16];
+    uint16_t esp_len = 0;
+    kiln_pkg_safety_t pico_out;
+    uint32_t declared_hash = 0;
+    char reason[160] = {0};
+    bool ok = kiln_package_import_json(json, name, sizeof(name), &schema, esp_blob_out, sizeof(esp_blob_out),
+                                       &esp_len, &pico_out, &declared_hash, reason, sizeof(reason));
+    TEST_CHECK(ok, "import succeeds on a package this module just built");
+    TEST_CHECK(strcmp(name, "Test Kiln") == 0, "name round-trips");
+    TEST_CHECK(schema == KILN_PKG_SCHEMA_VERSION, "pkg_schema round-trips");
+    TEST_CHECK(esp_len == 16, "esp_blob_len round-trips");
+    for (size_t i = 0; i < 16; i++) {
+        if (esp_blob_out[i] != (uint8_t)(i * 3 + 1)) {
+            TEST_CHECK(false, "esp_blob byte round-trips exactly");
+            break;
+        }
+    }
+    TEST_CHECK(pico_out.count == 2, "pico entry count round-trips");
+    TEST_CHECK(pico_out.entries[0].param_id == 0x0101, "pico entries round-trip sorted (0x0101 first)");
+    TEST_CHECK(pico_out.entries[1].param_id == 0x0104, "pico entries round-trip sorted (0x0104 second)");
+    TEST_CHECK(declared_hash == hash, "declared pkg_hash round-trips exactly");
+}
+
+static void test_import_refuses_malformed_kind(void)
+{
+    TEST_SECTION("kiln_package_import_json -- refuses a file with the wrong/missing \"kind\" (malformed)");
+    const char *bad = "{\"pkg_schema\":1,\"name\":\"x\",\"esp_blob_len\":1,\"esp_blob_hex\":\"ab\","
+                      "\"pico\":[],\"pkg_hash\":\"0x00000000\"}";
+    char name[32];
+    uint16_t schema;
+    uint8_t esp_blob_out[16];
+    uint16_t esp_len;
+    kiln_pkg_safety_t pico_out;
+    uint32_t declared_hash;
+    char reason[160] = {0};
+    bool ok = kiln_package_import_json(bad, name, sizeof(name), &schema, esp_blob_out, sizeof(esp_blob_out),
+                                       &esp_len, &pico_out, &declared_hash, reason, sizeof(reason));
+    TEST_CHECK(!ok, "refuses a package with no recognisable \"kind\"");
+    TEST_CHECK(strstr(reason, "kind") != NULL || strstr(reason, "not a kiln package") != NULL,
+               "refusal reason names the problem, not a generic error");
+}
+
+static void test_import_refuses_newer_pkg_schema(void)
+{
+    TEST_SECTION("kiln_package_import_json -- refuses a pkg_schema newer than this firmware knows");
+    char json[KILN_PKG_JSON_MAX_LEN];
+    uint32_t hash = 0;
+    TEST_CHECK(build_sample_package(json, sizeof(json), &hash), "sample package builds");
+
+    // Tamper the schema number upward -- KILN_PKG_SCHEMA_VERSION is 1 today,
+    // so "2" is unambiguously "newer than this firmware knows".
+    char *p = strstr(json, "\"pkg_schema\":1");
+    TEST_CHECK(p != NULL, "found pkg_schema field to tamper");
+    if (p) {
+        p[strlen("\"pkg_schema\":")] = '2';
+    }
+
+    char name[32];
+    uint16_t schema;
+    uint8_t esp_blob_out[16];
+    uint16_t esp_len;
+    kiln_pkg_safety_t pico_out;
+    uint32_t declared_hash;
+    char reason[160] = {0};
+    bool ok = kiln_package_import_json(json, name, sizeof(name), &schema, esp_blob_out, sizeof(esp_blob_out),
+                                       &esp_len, &pico_out, &declared_hash, reason, sizeof(reason));
+    TEST_CHECK(!ok, "refuses a newer-than-known pkg_schema outright, never best-effort parsed");
+    TEST_CHECK(strstr(reason, "newer") != NULL, "refusal reason says WHY (newer format version)");
+}
+
+static void test_export_json_detects_hash_mismatch_downstream(void)
+{
+    // kiln_package_import_json() itself does not verify the hash (see its
+    // own header comment -- that requires the canonical re-derivation only
+    // kiln_cfg_store.c can do). This test proves the PRIMITIVE this
+    // downstream check depends on: a package tampered after export still
+    // decodes cleanly (envelope-valid) but its declared pkg_hash provably
+    // no longer matches a hash recomputed over the tampered bytes -- i.e.
+    // the tamper is real and detectable, which is exactly what
+    // kiln_cfg_store_import_package_json()'s hash-comparison step (host-
+    // tested separately, since it needs zones_config_json.h) relies on.
+    TEST_SECTION("tampering the ESP blob after export is detectable by recomputing the hash");
+    char json[KILN_PKG_JSON_MAX_LEN];
+    uint32_t original_hash = 0;
+    TEST_CHECK(build_sample_package(json, sizeof(json), &original_hash), "sample package builds");
+
+    // Flip one hex nibble inside esp_blob_hex -- a single-byte tamper, the
+    // "hand-edited or truncated in transit" case section 5.1 exists for.
+    char *hexval = strstr(json, "\"esp_blob_hex\":\"");
+    TEST_CHECK(hexval != NULL, "found esp_blob_hex to tamper");
+    if (hexval) {
+        char *digit = hexval + strlen("\"esp_blob_hex\":\"");
+        *digit = (*digit == 'a') ? 'b' : 'a';
+    }
+
+    char name[32];
+    uint16_t schema;
+    uint8_t esp_blob_out[16];
+    uint16_t esp_len;
+    kiln_pkg_safety_t pico_out;
+    uint32_t declared_hash;
+    char reason[160] = {0};
+    bool ok = kiln_package_import_json(json, name, sizeof(name), &schema, esp_blob_out, sizeof(esp_blob_out),
+                                       &esp_len, &pico_out, &declared_hash, reason, sizeof(reason));
+    TEST_CHECK(ok, "envelope itself still decodes -- the tamper is inside a valid hex field, not garbage");
+    uint32_t recomputed = 0;
+    TEST_CHECK(kiln_package_compute_hash(schema, esp_blob_out, esp_len, &pico_out, &recomputed),
+               "recompute over the tampered bytes succeeds");
+    TEST_CHECK(recomputed != declared_hash,
+               "recomputed hash no longer matches the declared pkg_hash -- the tamper is caught");
+    TEST_CHECK(declared_hash == original_hash, "declared pkg_hash itself is untouched by the tamper");
+}
+
 int main(void)
 {
     test_capture_sorts_ascending_by_param_id();
@@ -329,6 +492,10 @@ int main(void)
     test_hash_changes_with_any_pico_field();
     test_hash_reproduces_documented_canonical_layout();
     test_hash_rejects_oversized_input_never_truncated_hash();
+    test_export_import_round_trip();
+    test_import_refuses_malformed_kind();
+    test_import_refuses_newer_pkg_schema();
+    test_export_json_detects_hash_mismatch_downstream();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

@@ -17,6 +17,8 @@
  * through hal_kv_*() instead. */
 #include "nvs_flash.h"
 
+#include "kiln_cfg_store.h" /* kiln_cfg_store_autosave_from_live() -- docs/KILN_PROFILES_PLAN.md
+                             * section 2.4, item 13. */
 #include "kiln_io.h"
 #include "relay_cycles.h" /* RELAY_LIFE_BUDGET.md: relay_cycles_set_type() push
                             * on load, zones_config_push_relay_type()/_push_all_relay_types()
@@ -321,6 +323,30 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
     return err;
 }
 
+/* Hand-declared, same convention relay_cycles.c/safety_cfg_store.c/
+ * factory_reset.c/diagnostics_http.c already use (see flash_worker.h's own
+ * doc comment) -- avoids pulling in the whole UART bridge API for one call.
+ */
+esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
+
+/* Job body for nvs_save()'s auto-save dispatch, immediately below --
+ * `arg` is unused (kiln_cfg_store_autosave_from_live() reads the live
+ * config itself; there is nothing to pass in), and any failure is logged
+ * here rather than surfaced through uart_bridge_ext_run_on_flash_worker()'s
+ * own ESP_OK/fail return, which only reports whether the job was
+ * DISPATCHED, not whether the job itself succeeded. */
+static void zones_autosave_job(void *arg)
+{
+    (void)arg;
+    char reason[96];
+    reason[0] = '\0';
+    if (!kiln_cfg_store_autosave_from_live(reason, sizeof(reason))) {
+        ESP_LOGW(ZONES_HTTP_TAG, "kiln config autosave failed: %s -- the active kiln package was NOT "
+                      "updated with this change, though the change itself was saved",
+                 reason[0] ? reason : "(no reason given)");
+    }
+}
+
 esp_err_t nvs_save(void)
 {
     s_zones.cfg.version = ZONES_CFG_VERSION;
@@ -355,6 +381,42 @@ esp_err_t nvs_save(void)
         err = hal_kv_commit(&h);
     }
     hal_kv_close(&h);
+
+    /* docs/KILN_PROFILES_PLAN.md section 2.4 (2026-09-14 "finish upload/
+     * download" follow-up, item 13 -- auto-save): every zones-config write
+     * that reaches here is, by construction, "the user made a change" --
+     * this is the SINGLE choke point every setter/POST-commit/import
+     * already funnels through (see this function's own header comment).
+     *
+     * DISPATCHED onto the flash-safe worker via zones_autosave_job() below,
+     * NEVER called directly from here -- kiln_cfg_store_save_current()'s own
+     * stack frame is ~2.8 KB (its scratch[ZONES_CONFIG_BLOB_MAX_SIZE] +
+     * zones_cfg_t locals), and this function (nvs_save()) is reachable from
+     * dozens of callers across the whole zones/adaptive-tune/profile-
+     * executor surface -- calling it inline here would add that ~2.8 KB to
+     * EVERY one of those callers' own worst-case stack depth, which is
+     * exactly how check_executor_task_stack_budget.ps1/check_httpd_task_
+     * stack_budget.ps1 caught this on the first attempt (revert_post_handler
+     * and executor_task_entry both went over budget with a direct call
+     * here). Dispatching through a function pointer (zones_autosave_job)
+     * moves that frame onto the flash worker's OWN dedicated stack instead
+     * -- invisible to every caller's static stack-depth measurement, the
+     * same reason relay_cycles.c's own persist path uses this pattern.
+     * uart_bridge_ext_run_on_flash_worker() is not reachable on-worker from
+     * here: nvs_save() is called from ordinary httpd/executor/adaptive-tune
+     * contexts, never from a job already running on the flash worker
+     * itself, so no is_on_flash_worker() re-entrancy guard is needed (see
+     * flash_worker_lint.py's own header comment for this justification
+     * phrase's precedent). Best-effort: a dispatch/autosave failure is
+     * logged, never turned into this function's own return value -- the
+     * zones write ITSELF already fully succeeded by this point. */
+    esp_err_t autosave_dispatch_err = uart_bridge_ext_run_on_flash_worker(zones_autosave_job, NULL);
+    if (autosave_dispatch_err != ESP_OK) {
+        ESP_LOGW(ZONES_HTTP_TAG, "kiln config autosave could not be dispatched: %s -- the active kiln "
+                      "package was NOT updated with this change, though the change itself was saved",
+                 esp_err_to_name(autosave_dispatch_err));
+    }
+
     return hal_status_to_esp_err(err);
 }
 

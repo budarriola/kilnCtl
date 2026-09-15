@@ -1,5 +1,6 @@
 #include "kiln_package.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -7,6 +8,9 @@
                        * already use for their own CRC32s (host-testable via
                        * test/stubs/esp_crc.h, a real CRC32 not a fake -- see that stub's
                        * header comment). */
+#include "backup_json.h" /* hand-rolled JSON reader already used by backup_import.c -- see
+                           * this file's own header comment on why there is no general JSON
+                           * library in this codebase. */
 
 /* Reinterprets `value` (tagged by `type`) as a plain uint32_t bit pattern --
  * never a numeric conversion, always a byte-for-byte reinterpretation via a
@@ -156,4 +160,244 @@ bool kiln_package_compute_hash(uint16_t pkg_schema, const uint8_t *esp_blob, uin
     free(buf);
     *out_hash = crc;
     return true;
+}
+
+/* ---- Section 5.1 envelope -------------------------------------------- */
+
+static const char HEX_DIGITS[] = "0123456789abcdef";
+
+static void hex_encode(const uint8_t *src, size_t len, char *out)
+{
+    for (size_t i = 0; i < len; i++) {
+        out[i * 2] = HEX_DIGITS[(src[i] >> 4) & 0xF];
+        out[i * 2 + 1] = HEX_DIGITS[src[i] & 0xF];
+    }
+    out[len * 2] = '\0';
+}
+
+static int hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Decodes exactly `out_cap` bytes' worth of hex text (2*out_cap hex chars)
+ * from a NUL-terminated string of unknown length. Fails on any non-hex
+ * character, an odd count, or a length that does not match `out_len`
+ * exactly -- never a partial/truncated decode (same "no partial write"
+ * discipline as kiln_package_capture_pico_half()). */
+static bool hex_decode_exact(const char *src, size_t src_len, uint8_t *out, size_t out_len)
+{
+    if (src_len != out_len * 2) {
+        return false;
+    }
+    for (size_t i = 0; i < out_len; i++) {
+        int hi = hex_nibble(src[i * 2]);
+        int lo = hex_nibble(src[i * 2 + 1]);
+        if (hi < 0 || lo < 0) {
+            return false;
+        }
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return true;
+}
+
+bool kiln_package_export_json(const char *name, uint16_t pkg_schema, const uint8_t *esp_blob,
+                               uint16_t esp_blob_len, const kiln_pkg_safety_t *pico, uint32_t pkg_hash,
+                               char *out, size_t out_cap, size_t *out_len)
+{
+    if (!name || !esp_blob || !pico || !out || !out_len) {
+        return false;
+    }
+    if (pico->count > KILN_PKG_SAFETY_PARAM_CAP) {
+        return false;
+    }
+
+    /* Hex scratch for the ESP blob -- heap, sized exactly, never a fixed
+     * stack buffer (this function is reachable from an httpd export
+     * handler). */
+    char *esp_hex = (char *)malloc((size_t)esp_blob_len * 2 + 1);
+    if (!esp_hex) {
+        return false;
+    }
+    hex_encode(esp_blob, esp_blob_len, esp_hex);
+
+    /* esp_hex is freed exactly ONCE, at this single `done`/`fail` exit,
+     * never inside the APPEND macro itself -- an earlier version freed it
+     * from within the macro's own failure branch, which is textually
+     * expanded at every APPEND call site and made GCC's -Werror=use-after-
+     * free (correctly) unable to prove the later, unconditional free()
+     * could never run on an already-freed pointer, even though the actual
+     * control flow (an early `return false` on every failure branch) makes
+     * that impossible. A single cleanup point removes the ambiguity for
+     * both the compiler and the next reader. */
+    size_t o = 0;
+    int w;
+    bool ok = true;
+#define APPEND(...)                                                                                             \
+    do {                                                                                                         \
+        w = snprintf(out + o, o < out_cap ? out_cap - o : 0, __VA_ARGS__);                                       \
+        if (w < 0) {                                                                                             \
+            ok = false;                                                                                          \
+            goto done;                                                                                          \
+        }                                                                                                        \
+        o += (size_t)w;                                                                                          \
+    } while (0)
+
+    APPEND("{\"kind\":\"%s\",\"pkg_schema\":%u,\"name\":\"", KILN_PKG_KIND, (unsigned)pkg_schema);
+    /* Name is an operator-entered label already length-bounded and
+     * character-restricted by kiln_cfg_store.c's normalize_name() before it
+     * ever reaches a saved slot -- no separate JSON-escaping pass needed
+     * here (same assumption kiln_cfg_http.c's own json_escape() call sites
+     * make explicit for OTHER surfaces; this one relies on the store's own
+     * character restriction instead of re-escaping). */
+    APPEND("%s", name);
+    APPEND("\",\"esp_blob_len\":%u,\"esp_blob_hex\":\"%s\",\"pico\":[", (unsigned)esp_blob_len, esp_hex);
+
+    for (uint16_t i = 0; i < pico->count; i++) {
+        const kiln_pkg_pico_param_t *e = &pico->entries[i];
+        APPEND("%s{\"id\":%u,\"type\":%u,\"flags\":%u,\"value_bits\":%u}", i == 0 ? "" : ",",
+               (unsigned)e->param_id, (unsigned)e->type, (unsigned)e->flags, (unsigned)e->value_bits);
+    }
+    APPEND("],\"pkg_hash\":\"0x%08x\"}", (unsigned)pkg_hash);
+#undef APPEND
+
+done:
+    free(esp_hex);
+    if (!ok || o >= out_cap) {
+        /* Truncated -- refuse outright rather than hand back a JSON blob
+         * that looks complete but silently isn't (the exact class of defect
+         * kiln_cfg_store.c's own format-truncation note warns about). */
+        return false;
+    }
+    *out_len = o;
+    return true;
+}
+
+bool kiln_package_import_json(const char *json, char *name_out, size_t name_cap, uint16_t *out_pkg_schema,
+                               uint8_t *esp_blob_out, size_t esp_blob_cap, uint16_t *out_esp_blob_len,
+                               kiln_pkg_safety_t *pico_out, uint32_t *out_declared_hash, char *reason_out,
+                               size_t reason_cap)
+{
+#define REFUSE(msg)                                                                                              \
+    do {                                                                                                         \
+        if (reason_out && reason_cap) {                                                                          \
+            snprintf(reason_out, reason_cap, "%s", (msg));                                                       \
+        }                                                                                                        \
+        return false;                                                                                            \
+    } while (0)
+
+    if (!json || !name_out || !out_pkg_schema || !esp_blob_out || !out_esp_blob_len || !pico_out ||
+        !out_declared_hash) {
+        REFUSE("internal error: NULL argument to package parser");
+    }
+
+    char kind[32];
+    if (!backup_json_field_str(json, "kind", kind, sizeof(kind)) || strcmp(kind, KILN_PKG_KIND) != 0) {
+        REFUSE("not a kiln package file (missing or wrong \"kind\")");
+    }
+
+    double schema_d;
+    if (!backup_json_field_num(json, "pkg_schema", &schema_d) || schema_d < 0 || schema_d > 65535) {
+        REFUSE("not a kiln package file (missing or malformed \"pkg_schema\")");
+    }
+    uint16_t pkg_schema = (uint16_t)schema_d;
+    if (pkg_schema > KILN_PKG_SCHEMA_VERSION) {
+        char msg[160];
+        snprintf(msg, sizeof(msg),
+                 "this package's format version (%u) is newer than this firmware knows (%u) -- refused, "
+                 "not best-effort parsed; update the firmware first",
+                 (unsigned)pkg_schema, (unsigned)KILN_PKG_SCHEMA_VERSION);
+        REFUSE(msg);
+    }
+    /* pkg_schema == 0 is not a real version this module has ever emitted
+     * (KILN_PKG_SCHEMA_VERSION starts at 1) -- refuse it as malformed rather
+     * than silently accepting it as "very old". */
+    if (pkg_schema == 0) {
+        REFUSE("not a kiln package file (pkg_schema is 0)");
+    }
+
+    if (!backup_json_field_str(json, "name", name_out, name_cap)) {
+        REFUSE("not a kiln package file (missing \"name\")");
+    }
+
+    double esp_len_d;
+    if (!backup_json_field_num(json, "esp_blob_len", &esp_len_d) || esp_len_d < 0 || esp_len_d > 65535) {
+        REFUSE("not a kiln package file (missing or malformed \"esp_blob_len\")");
+    }
+    uint16_t esp_blob_len = (uint16_t)esp_len_d;
+    if (esp_blob_len == 0 || (size_t)esp_blob_len > esp_blob_cap) {
+        REFUSE("package's ESP configuration section is missing, empty, or too large for this firmware");
+    }
+
+    const char *esp_hex_val = backup_json_obj_find(json, "esp_blob_hex");
+    if (!esp_hex_val || *esp_hex_val != '"') {
+        REFUSE("not a kiln package file (missing \"esp_blob_hex\")");
+    }
+    /* Decode straight out of the source text -- esp_blob_hex can be up to
+     * ZONES_CONFIG_BLOB_MAX_SIZE*2 (1792) hex chars, well past any stack
+     * buffer this codebase's own rule allows, so this walks the source
+     * string directly rather than copying it to a local buffer first. */
+    const char *hstart = esp_hex_val + 1;
+    const char *hend = hstart;
+    while (*hend && *hend != '"') {
+        hend++;
+    }
+    if (*hend != '"' || !hex_decode_exact(hstart, (size_t)(hend - hstart), esp_blob_out, esp_blob_len)) {
+        REFUSE("package's ESP configuration section is not valid hex, or its length does not match "
+               "esp_blob_len -- file is truncated or corrupted");
+    }
+    *out_esp_blob_len = esp_blob_len;
+    *out_pkg_schema = pkg_schema;
+
+    const char *pico_arr = backup_json_obj_find(json, "pico");
+    if (!pico_arr) {
+        REFUSE("package is missing its safety-processor (\"pico\") section -- a half-package cannot be "
+               "used");
+    }
+    memset(pico_out, 0, sizeof(*pico_out));
+    uint16_t count = 0;
+    const char *elem = backup_json_arr_first(pico_arr);
+    while (elem) {
+        if (count >= KILN_PKG_SAFETY_PARAM_CAP) {
+            REFUSE("package's safety-processor section has more parameters than this firmware supports");
+        }
+        double id_d, type_d, flags_d, vb_d;
+        if (!backup_json_field_num(elem, "id", &id_d) || id_d < 0 || id_d > 65535 ||
+            !backup_json_field_num(elem, "type", &type_d) || type_d < 0 || type_d > 255 ||
+            !backup_json_field_num(elem, "flags", &flags_d) || flags_d < 0 || flags_d > 255 ||
+            !backup_json_field_num(elem, "value_bits", &vb_d) || vb_d < 0 || vb_d > 4294967295.0) {
+            REFUSE("package's safety-processor section has a malformed parameter entry");
+        }
+        uint8_t type = (uint8_t)type_d;
+        if (type != KILNLINK_PARAM_TYPE_BOOL && type != KILNLINK_PARAM_TYPE_U8 &&
+            type != KILNLINK_PARAM_TYPE_U16 && type != KILNLINK_PARAM_TYPE_F32) {
+            REFUSE("package's safety-processor section names a parameter type this firmware does not "
+                   "recognise -- refused, not skipped");
+        }
+        kiln_pkg_pico_param_t *dst = &pico_out->entries[count];
+        dst->param_id = (uint16_t)id_d;
+        dst->type = type;
+        dst->flags = (uint8_t)flags_d;
+        dst->value_bits = (uint32_t)vb_d;
+        count++;
+        elem = backup_json_arr_next(elem);
+    }
+    pico_out->count = count;
+
+    char hash_hex[16];
+    if (!backup_json_field_str(json, "pkg_hash", hash_hex, sizeof(hash_hex))) {
+        REFUSE("not a kiln package file (missing \"pkg_hash\")");
+    }
+    char *end = NULL;
+    unsigned long hv = strtoul(hash_hex, &end, 16);
+    if (end == hash_hex || *end != '\0') {
+        REFUSE("not a kiln package file (malformed \"pkg_hash\")");
+    }
+    *out_declared_hash = (uint32_t)hv;
+
+    return true;
+#undef REFUSE
 }

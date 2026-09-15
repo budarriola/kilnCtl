@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #include "http_form.h"
@@ -335,6 +336,116 @@ static esp_err_t rename_post_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "ok");
 }
 
+/* ---- GET /api/kiln_configs/export?id=N -- docs/KILN_PROFILES_PLAN.md
+ * items 3/9. Streams one slot as the section 5.1 JSON envelope with a
+ * download filename, so the browser's own "Save As" offers a sensible name
+ * instead of the route path. HEAP buffer only (KILN_CFG_EXPORT_JSON_MAX_LEN
+ * -- up to ~6 KB) -- never stack, per this feature's own httpd-stack rule
+ * (project_httpd_stack_blob_class). */
+static esp_err_t export_get_handler(httpd_req_t *req)
+{
+    char query[32];
+    char id_str[16];
+    int32_t id;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "id", id_str, sizeof(id_str)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id query parameter missing");
+        return ESP_OK;
+    }
+    char *end = NULL;
+    long v = strtol(id_str, &end, 10);
+    if (end == id_str || *end != '\0' || v < 0 || v > INT32_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id out of range");
+        return ESP_OK;
+    }
+    id = (int32_t)v;
+
+    char *json = (char *)heap_caps_malloc(KILN_CFG_EXPORT_JSON_MAX_LEN, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_OK;
+    }
+    size_t len = 0;
+    char reason[160];
+    reason[0] = '\0';
+    if (!kiln_cfg_store_export_package_json(id, json, KILN_CFG_EXPORT_JSON_MAX_LEN, &len, reason,
+                                            sizeof(reason))) {
+        free(json);
+        /* "no saved kiln config with that id" is the only 404-shaped
+         * reason this call can produce; anything else (half-package, too
+         * large) is a 400. */
+        if (strstr(reason, "no saved kiln config")) {
+            httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, reason[0] ? reason : "no such kiln config");
+        } else {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, reason[0] ? reason : "export failed");
+        }
+        return ESP_OK;
+    }
+
+    char name[KILN_CFG_NAME_MAX_LEN + 1];
+    kiln_cfg_store_get_name(id, name, sizeof(name));
+    char disp[80];
+    snprintf(disp, sizeof(disp), "attachment; filename=\"kiln_%ld.kilnpkg.json\"", (long)id);
+    (void)name; /* the filename uses the id, not the (unescaped) operator name, to stay a safe HTTP header value */
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Content-Disposition", disp);
+    esp_err_t err = httpd_resp_send(req, json, len);
+    free(json);
+    return err;
+}
+
+/* ---- POST /api/kiln_configs/import -- docs/KILN_PROFILES_PLAN.md items
+ * 4/9/14. Body is a section 5.1 package JSON. Creates a NEW slot only, never
+ * applies (section 5.3) -- HEAP body buffer (PSRAM preferred), same shape
+ * as backup_import.c's own upload handler. */
+#define KILN_CFG_IMPORT_BODY_MAX (KILN_CFG_EXPORT_JSON_MAX_LEN + 512u)
+
+static esp_err_t import_post_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || (size_t)req->content_len > KILN_CFG_IMPORT_BODY_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
+        return ESP_OK;
+    }
+    char *body = (char *)heap_caps_malloc((size_t)req->content_len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!body) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_OK;
+    }
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int ret = httpd_req_recv(req, body + received, (size_t)req->content_len - received);
+        if (ret <= 0) {
+            free(body);
+            ESP_LOGW(TAG, "kiln config import body read failed/short: %d", ret);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "upload incomplete or connection dropped");
+            return ESP_OK;
+        }
+        received += (size_t)ret;
+    }
+    body[received] = '\0';
+
+    int32_t new_id = -1;
+    char reason[200];
+    reason[0] = '\0';
+    bool ok = kiln_cfg_store_import_package_json(body, &new_id, reason, sizeof(reason));
+    free(body);
+
+    if (!ok) {
+        char resp[256];
+        json_escape(reason[0] ? reason : "upload refused", resp, sizeof(resp) - 32);
+        char out[288];
+        int n = snprintf(out, sizeof(out), "{\"error\":\"%s\"}", resp);
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, out, n > 0 && (size_t)n < sizeof(out) ? (size_t)n : strlen(out));
+    }
+
+    char resp[64];
+    int len = snprintf(resp, sizeof(resp), "{\"id\":%ld}", (long)new_id);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
+}
+
 esp_err_t kiln_cfg_http_start(void)
 {
     httpd_handle_t server = wifi_provision_http_get_server();
@@ -361,8 +472,15 @@ esp_err_t kiln_cfg_http_start(void)
     static const httpd_uri_t rename_uri = {
         .uri = "/api/kiln_configs/rename", .method = HTTP_POST, .handler = rename_post_handler,
     };
+    static const httpd_uri_t export_uri = {
+        .uri = "/api/kiln_configs/export", .method = HTTP_GET, .handler = export_get_handler,
+    };
+    static const httpd_uri_t import_uri = {
+        .uri = "/api/kiln_configs/import", .method = HTTP_POST, .handler = import_post_handler,
+    };
 
-    const httpd_uri_t *uris[] = { &list_uri, &save_uri, &clone_uri, &apply_uri, &delete_uri, &rename_uri };
+    const httpd_uri_t *uris[] = { &list_uri,   &save_uri,  &clone_uri,  &apply_uri,
+                                 &delete_uri, &rename_uri, &export_uri, &import_uri };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         esp_err_t err = httpd_register_uri_handler(server, uris[i]);
         if (err != ESP_OK) {

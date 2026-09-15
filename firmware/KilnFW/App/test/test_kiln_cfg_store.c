@@ -157,6 +157,33 @@ bool zones_config_export_canonical(const void *cfg, uint8_t *out, size_t out_cap
 }
 
 // ---------------------------------------------------------------------------
+// 2026-09-14 follow-up (docs/KILN_PROFILES_PLAN.md items 3/4/14, "finish
+// upload/download"): kiln_cfg_store_import_package_json() also calls
+// zones_config_json_validate() and (for the section 5.2a compatibility
+// checks) zones_config_get_relay_count()/zones_config_get_thermo_count().
+// The latter two are ALREADY faked, non-static, in test_backup_import.c/
+// test_profile_feasibility.c -- both linked into this same main executable
+// -- so this file must NOT redefine them (MSVC's LNK2005 caught exactly
+// that on the first attempt). Their real values don't matter for these
+// tests anyway: s_stub_blob_size is 16 here, so a decoded candidate's
+// zones[] array (which starts well past byte 16 of zones_cfg_t) is always
+// left at zeroed relay_mask/thermo_mask by memset(&cand, 0, ...) --
+// compatibility trivially passes regardless of live counts. Only
+// zones_config_json_validate() needs a fake here (test_zones_http.c's own
+// copy is a SEPARATE executable, no collision). */
+static bool s_stub_validate_result = true;
+static const char *s_stub_validate_err = "stub validation failure";
+
+bool zones_config_json_validate(const zones_cfg_t *cand, const char **err_reason)
+{
+    (void)cand;
+    if (!s_stub_validate_result && err_reason) {
+        *err_reason = s_stub_validate_err;
+    }
+    return s_stub_validate_result;
+}
+
+// ---------------------------------------------------------------------------
 // ota_http.h stub -- only ota_http_check_interlocks() is ever called from
 // kiln_cfg_store.c. The function BODY lives in test_backup_import.c (also
 // linked into this executable) -- exactly one definition may exist
@@ -196,6 +223,9 @@ static void reset_state(void)
 
     g_stub_ota_interlock_result = OTA_INTERLOCK_OK;
     g_stub_ota_interlock_reason[0] = '\0';
+
+    s_stub_validate_result = true;
+    s_stub_validate_err = "stub validation failure";
 }
 
 // ---------------------------------------------------------------------------
@@ -1633,6 +1663,211 @@ static void test_cfg_fs_interrupted_write_leaves_old_or_new(void)
                "is invisible through the real read path");
 }
 
+// ---------------------------------------------------------------------------
+// Download/upload (docs/KILN_PROFILES_PLAN.md items 3/4/14, 2026-09-14
+// "finish upload/download" follow-up). Three refusal-reason tests requested
+// explicitly: malformed, unknown-newer version, hash mismatch -- each
+// asserts nothing is written (store count unchanged) and the live config
+// (s_stub_export_content, read via kiln_cfg_store_save_current() itself
+// never being called again) is untouched.
+// ---------------------------------------------------------------------------
+
+static void test_export_import_new_slot_round_trip(void)
+{
+    TEST_SECTION("kiln_cfg_store_export_package_json/_import_package_json -- round trip into a NEW slot, "
+                 "never overwrites, never applies");
+    reset_state();
+
+    int32_t id1 = -1;
+    char reason[160];
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_save_current("Skutt KM-1027", -1, &id1, reason, sizeof(reason)), "save succeeds");
+
+    char *json = (char *)malloc(KILN_CFG_EXPORT_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    TEST_CHECK(kiln_cfg_store_export_package_json(id1, json, KILN_CFG_EXPORT_JSON_MAX_LEN, &len, reason,
+                                                  sizeof(reason)),
+               "export succeeds for a fully-populated (pico_populated) slot");
+
+    // A saved slot's own name always collides with itself (same rule
+    // kiln_cfg_store_clone() already enforces -- "a saved kiln config
+    // already has that name" is a real, deliberate refusal, not a bug this
+    // test should paper over). Simulate the realistic "importing this
+    // package onto a DIFFERENT controller, or after renaming" case by
+    // giving it a distinct (but SAME-LENGTH, for a trivial in-place
+    // overwrite) name before import, exactly as an operator would via the
+    // upload UI's name field.
+    char *name_digit = strstr(json, "\"name\":\"Skutt KM-1027\"");
+    TEST_CHECK(name_digit != NULL, "found the name field to rename before import");
+    if (name_digit) {
+        name_digit[strlen("\"name\":\"Skutt KM-102")] = '8'; // "...1027" -> "...1028", same length
+    }
+
+    int32_t id2 = -1;
+    reason[0] = '\0';
+    bool ok = kiln_cfg_store_import_package_json(json, &id2, reason, sizeof(reason));
+    TEST_CHECK(ok, "import of the just-exported package succeeds");
+    TEST_CHECK(id2 > 0 && id2 != id1, "import allocates a BRAND NEW slot, never overwrites id1");
+    TEST_CHECK(kiln_cfg_store_get_active_id() == id1, "import never changes which config is active");
+
+    kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
+    uint8_t n = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(n == 2, "exactly two slots now exist -- the original plus the imported copy");
+
+    uint8_t blob1[ZONES_CONFIG_BLOB_MAX_SIZE], blob2[ZONES_CONFIG_BLOB_MAX_SIZE];
+    uint16_t len1 = 0, len2 = 0;
+    kiln_pkg_safety_t pico1, pico2;
+    TEST_CHECK(kiln_cfg_store_get_full_package(id1, blob1, sizeof(blob1), &len1, &pico1, NULL, 0),
+               "read back original");
+    TEST_CHECK(kiln_cfg_store_get_full_package(id2, blob2, sizeof(blob2), &len2, &pico2, NULL, 0),
+               "read back imported copy");
+    TEST_CHECK(len1 == len2 && memcmp(blob1, blob2, len1) == 0, "ESP half is byte-for-byte identical");
+    TEST_CHECK(pico1.count == pico2.count && memcmp(pico1.entries, pico2.entries,
+                                                    sizeof(pico1.entries[0]) * pico1.count) == 0,
+               "Pico half is byte-for-byte identical");
+
+    free(json);
+}
+
+static void test_import_refuses_malformed(void)
+{
+    TEST_SECTION("kiln_cfg_store_import_package_json -- refuses a malformed file, writes nothing");
+    reset_state();
+    kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
+    uint8_t before = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+
+    int32_t new_id = -1;
+    char reason[160] = {0};
+    bool ok = kiln_cfg_store_import_package_json("{ this is not json at all", &new_id, reason, sizeof(reason));
+    TEST_CHECK(!ok, "refuses garbage input");
+    TEST_CHECK(reason[0] != '\0', "a specific reason is given, not silence");
+
+    uint8_t after = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(after == before, "no slot was allocated on refusal");
+}
+
+static void test_import_refuses_newer_pkg_schema_nothing_written(void)
+{
+    TEST_SECTION("kiln_cfg_store_import_package_json -- refuses a pkg_schema newer than this firmware "
+                 "knows, writes nothing");
+    reset_state();
+    int32_t id1 = -1;
+    char reason[160] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Original", -1, &id1, reason, sizeof(reason)), "save succeeds");
+
+    char *json = (char *)malloc(KILN_CFG_EXPORT_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    TEST_CHECK(kiln_cfg_store_export_package_json(id1, json, KILN_CFG_EXPORT_JSON_MAX_LEN, &len, reason,
+                                                  sizeof(reason)),
+               "export succeeds");
+
+    char *p = strstr(json, "\"pkg_schema\":1");
+    TEST_CHECK(p != NULL, "found pkg_schema to tamper (KILN_PKG_SCHEMA_VERSION is 1 today)");
+    if (p) {
+        p[strlen("\"pkg_schema\":")] = '9'; // unambiguously newer than known
+    }
+
+    kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
+    uint8_t before = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    int32_t new_id = -1;
+    reason[0] = '\0';
+    bool ok = kiln_cfg_store_import_package_json(json, &new_id, reason, sizeof(reason));
+    TEST_CHECK(!ok, "refuses the newer-than-known pkg_schema");
+    TEST_CHECK(strstr(reason, "newer") != NULL, "reason names WHY (newer format version)");
+    uint8_t after = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(after == before, "no slot was allocated on refusal");
+
+    free(json);
+}
+
+static void test_import_refuses_hash_mismatch_nothing_written(void)
+{
+    TEST_SECTION("kiln_cfg_store_import_package_json -- refuses a package whose declared pkg_hash does not "
+                 "match its contents, writes nothing");
+    reset_state();
+    int32_t id1 = -1;
+    char reason[160] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Original", -1, &id1, reason, sizeof(reason)), "save succeeds");
+
+    char *json = (char *)malloc(KILN_CFG_EXPORT_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    TEST_CHECK(kiln_cfg_store_export_package_json(id1, json, KILN_CFG_EXPORT_JSON_MAX_LEN, &len, reason,
+                                                  sizeof(reason)),
+               "export succeeds");
+
+    // Flip one hex nibble inside esp_blob_hex -- envelope stays well-formed
+    // (same length, still valid hex), so this exercises the HASH check
+    // specifically, not the envelope parser.
+    char *hexval = strstr(json, "\"esp_blob_hex\":\"");
+    TEST_CHECK(hexval != NULL, "found esp_blob_hex to tamper");
+    if (hexval) {
+        char *digit = hexval + strlen("\"esp_blob_hex\":\"");
+        *digit = (*digit == '0') ? '1' : '0';
+    }
+
+    kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
+    uint8_t before = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    int32_t new_id = -1;
+    reason[0] = '\0';
+    bool ok = kiln_cfg_store_import_package_json(json, &new_id, reason, sizeof(reason));
+    TEST_CHECK(!ok, "refuses the tampered package on hash mismatch");
+    TEST_CHECK(strstr(reason, "hash") != NULL, "reason names the hash mismatch specifically");
+    uint8_t after = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(after == before, "no slot was allocated on refusal");
+
+    free(json);
+}
+
+static void test_autosave_from_live_noop_with_no_active_config(void)
+{
+    TEST_SECTION("kiln_cfg_store_autosave_from_live -- no-op (success, nothing written) with no active config");
+    reset_state();
+    kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
+    uint8_t before = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    char reason[96] = {0};
+    TEST_CHECK(kiln_cfg_store_autosave_from_live(reason, sizeof(reason)), "reports success, not a failure");
+    uint8_t after = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(after == before, "nothing was allocated -- there is no active slot to autosave into");
+}
+
+static void test_autosave_from_live_updates_active_slot_and_hash(void)
+{
+    TEST_SECTION("kiln_cfg_store_autosave_from_live -- re-saves the live config over the ACTIVE slot and "
+                 "recomputes pkg_hash");
+    reset_state();
+    int32_t id1 = -1;
+    char reason[96] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Live Kiln", -1, &id1, reason, sizeof(reason)), "save succeeds");
+    uint32_t hash_before = 0;
+    kiln_cfg_store_get_package_identity(id1, NULL, NULL, &hash_before);
+
+    // Simulate "the user made a change" -- the live config (this test's
+    // stub) now exports different bytes.
+    for (size_t i = 0; i < sizeof(s_stub_export_content); i++) {
+        s_stub_export_content[i] = (uint8_t)(i + 100);
+    }
+
+    TEST_CHECK(kiln_cfg_store_autosave_from_live(reason, sizeof(reason)), "autosave succeeds");
+    TEST_CHECK(kiln_cfg_store_get_active_id() == id1, "autosave does not change which slot is active");
+
+    kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
+    TEST_CHECK(kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT) == 1,
+               "autosave overwrote the existing slot -- it did not allocate a second one");
+
+    uint8_t blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+    uint16_t blob_len = 0;
+    TEST_CHECK(kiln_cfg_store_get_full_package(id1, blob, sizeof(blob), &blob_len, NULL, NULL, 0),
+               "read back the autosaved slot");
+    TEST_CHECK(blob[0] == 100, "the autosaved slot now holds the NEW live bytes, not the original ones");
+
+    uint32_t hash_after = 0;
+    kiln_cfg_store_get_package_identity(id1, NULL, NULL, &hash_after);
+    TEST_CHECK(hash_after != hash_before, "pkg_hash was recomputed over the new content");
+}
+
 void run_test_kiln_cfg_store(void)
 {
     test_save_clone_apply_roundtrip();
@@ -1672,6 +1907,13 @@ void run_test_kiln_cfg_store(void)
     test_cfg_fs_equal_rev_divergence_adopts_nvs_not_the_stale_file();
     test_cfg_fs_stale_delete_not_resurrected();
     test_cfg_fs_interrupted_write_leaves_old_or_new();
+
+    test_export_import_new_slot_round_trip();
+    test_import_refuses_malformed();
+    test_import_refuses_newer_pkg_schema_nothing_written();
+    test_import_refuses_hash_mismatch_nothing_written();
+    test_autosave_from_live_noop_with_no_active_config();
+    test_autosave_from_live_updates_active_slot_and_hash();
 
     cfg_fs_deinit();
 }

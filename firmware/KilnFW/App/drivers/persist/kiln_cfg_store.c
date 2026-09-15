@@ -21,6 +21,10 @@
                                  * other function in this file only ever touched zones_cfg_t as an
                                  * opaque `void *`/`uint8_t[]` blob via zones_config_accessors.h's
                                  * deliberately type-erased export/import pair. */
+#include "zones_config_query.h" /* zones_config_get_thermo_count() -- upload compatibility check
+                                  * (docs/KILN_PROFILES_PLAN.md item 14), section 5.2a. */
+#include "safety_cfg_store.h" /* safety_cfg_store_lookup() -- upload's "unknown Pico param id"
+                                * validity check, section 5.2 rule 5. */
 
 #include "kiln_cfg_store_internal.h"
 #include "kiln_cfg_store_cfg_fs.h"
@@ -1533,6 +1537,255 @@ void kiln_cfg_store_unlock(void)
     if (s_swap_lock) {
         xSemaphoreGive(s_swap_lock);
     }
+}
+
+/* ---- Download / upload (docs/KILN_PROFILES_PLAN.md items 3/4/14) -------- */
+
+bool kiln_cfg_store_export_package_json(int32_t id, char *out, size_t out_cap, size_t *out_len,
+                                        char *reason_out, size_t reason_cap)
+{
+    if (!out || !out_len) {
+        return set_reason(reason_out, reason_cap, "internal error: NULL output buffer");
+    }
+
+    uint8_t blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+    uint16_t blob_len = 0;
+    kiln_pkg_safety_t pico;
+    /* kiln_cfg_store_get_full_package() already refuses a half-package
+     * (pico_populated == 0) with a specific, operator-facing reason -- reuse
+     * that message verbatim rather than inventing a second one for the same
+     * fact. */
+    if (!kiln_cfg_store_get_full_package(id, blob, sizeof(blob), &blob_len, &pico, reason_out, reason_cap)) {
+        return false;
+    }
+    char name[KILN_CFG_NAME_MAX_LEN + 1];
+    if (!kiln_cfg_store_get_name(id, name, sizeof(name))) {
+        return set_reason(reason_out, reason_cap, "no saved kiln config with that id");
+    }
+    uint16_t pkg_schema = 0;
+    uint32_t pkg_hash = 0;
+    kiln_cfg_store_get_package_identity(id, NULL, &pkg_schema, &pkg_hash);
+
+    if (!kiln_package_export_json(name, pkg_schema, blob, blob_len, &pico, pkg_hash, out, out_cap, out_len)) {
+        return set_reason(reason_out, reason_cap, "package too large to encode, or an internal error");
+    }
+    return true;
+}
+
+/* Bundles every large local kiln_cfg_store_import_package_json() needs --
+ * HEAP-allocated (never stack) as ONE malloc, freed at its single `done`
+ * exit. Added after check_httpd_task_stack_budget.ps1 caught the first
+ * version of this function (everything as plain locals) pushing
+ * import_post_handler to 5024 B of the shared 8192 B httpd_worker stack,
+ * over its 4832 B ceiling -- the exact "no stack buffer may grow for this
+ * feature" rule this plan's own HTTP section states
+ * (project_httpd_stack_blob_class). ~2283 (zones_cfg_t) + 896 (esp_blob) +
+ * 896 (canonical) + ~770 (pico) bytes, all now off the caller's stack. */
+typedef struct {
+    zones_cfg_t cand;
+    uint8_t esp_blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+    uint8_t canonical[ZONES_CONFIG_BLOB_MAX_SIZE];
+    kiln_pkg_safety_t pico;
+} kiln_cfg_import_scratch_t;
+
+bool kiln_cfg_store_import_package_json(const char *json, int32_t *out_id, char *reason_out,
+                                        size_t reason_cap)
+{
+    if (refuse_if_quarantined(reason_out, reason_cap)) {
+        return false;
+    }
+
+    kiln_cfg_import_scratch_t *s = (kiln_cfg_import_scratch_t *)malloc(sizeof(*s));
+    if (!s) {
+        return set_reason(reason_out, reason_cap, "out of memory");
+    }
+    bool result = false;
+    char name[KILN_CFG_NAME_MAX_LEN + 1];
+    uint16_t pkg_schema = 0;
+    uint16_t esp_blob_len = 0;
+    uint32_t declared_hash = 0;
+#define IMPORT_REFUSE(...)                                                                                      \
+    do {                                                                                                         \
+        set_reason(reason_out, reason_cap, __VA_ARGS__);                                                        \
+        goto done;                                                                                              \
+    } while (0)
+
+    if (!kiln_package_import_json(json, name, sizeof(name), &pkg_schema, s->esp_blob, sizeof(s->esp_blob),
+                                  &esp_blob_len, &s->pico, &declared_hash, reason_out, reason_cap)) {
+        goto done; /* reason already filled by kiln_package_import_json() */
+    }
+
+    /* ---- Validity 5.2 rule 3: decode the ESP half and let
+     * zones_config_json_validate() -- the single source of truth -- judge
+     * it, before anything else touches it. */
+    /* Same "zero-init first, then copy whatever the real export produced"
+     * pattern kiln_cfg_store_save_current()'s own scratch_cfg construction
+     * above uses -- esp_blob_len is always exactly sizeof(zones_cfg_t) on a
+     * real board (zones_config_blob_size()'s own contract), but this does
+     * not hard-require equality so a byte-identical construction is
+     * host-testable against a stubbed, deliberately-shorter blob size
+     * without weakening anything: a package larger than this firmware's own
+     * zones_cfg_t cannot possibly be one of its fields (only whole-struct
+     * copies are ever produced), so oversized is still refused outright. */
+    if (esp_blob_len > sizeof(zones_cfg_t)) {
+        IMPORT_REFUSE("package's ESP configuration section is larger than this firmware's own "
+                      "configuration -- likely from an incompatible build");
+    }
+    memset(&s->cand, 0, sizeof(s->cand));
+    memcpy(&s->cand, s->esp_blob, esp_blob_len);
+    const char *val_err = NULL;
+    if (!zones_config_json_validate(&s->cand, &val_err)) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "package's kiln configuration is not valid: %s",
+                 val_err ? val_err : "unspecified");
+        IMPORT_REFUSE(msg);
+    }
+
+    /* ---- Validity 5.2 rule 4/5: every Pico param id must be one this
+     * firmware's own table recognises -- an unknown id is refused, not
+     * skipped. This is a MIRROR of the Pico's own config_params_set()
+     * range/id table (project_negative_test_on_a_mirror_is_vacuous) --
+     * it catches the obvious case cheaply; a value this mirror wrongly
+     * accepts is still subject to the Pico's own authoritative check at
+     * apply time (kiln_cfg_swap.c), which this function never bypasses
+     * since upload never applies. */
+    for (uint16_t i = 0; i < s->pico.count; i++) {
+        uint8_t known_type = 0;
+        const char *known_name = NULL;
+        if (!safety_cfg_store_lookup(s->pico.entries[i].param_id, &known_type, &known_name)) {
+            char msg[128];
+            snprintf(msg, sizeof(msg),
+                     "package's safety-processor section names parameter id %u, which this firmware "
+                     "does not recognise -- refused, not skipped",
+                     (unsigned)s->pico.entries[i].param_id);
+            IMPORT_REFUSE(msg);
+        }
+    }
+
+    /* ---- Hash (section 5.1: "one CRC over the whole package"). Recomputed
+     * from the CANONICAL ESP form (H1) plus the decoded Pico half -- the
+     * exact same two ingredients populate_pico_half_and_hash() feeds
+     * kiln_package_compute_hash() for an ordinary save, so a package
+     * downloaded and re-uploaded unmodified hashes identically. */
+    size_t canonical_len = 0;
+    if (!zones_config_export_canonical(&s->cand, s->canonical, sizeof(s->canonical), &canonical_len)) {
+        IMPORT_REFUSE("internal error: could not canonicalize package for hash verification");
+    }
+    uint32_t recomputed = 0;
+    if (!kiln_package_compute_hash(pkg_schema, s->canonical, (uint16_t)canonical_len, &s->pico, &recomputed)) {
+        IMPORT_REFUSE("internal error: hash computation failed");
+    }
+    if (recomputed != declared_hash) {
+        IMPORT_REFUSE("package hash does not match its contents -- the file is corrupted, was "
+                      "hand-edited, or was truncated in transit");
+    }
+
+    /* ---- Compatibility 5.2a: properties of THIS CONTROLLER, reported
+     * distinctly from the validity checks above. A package that is merely
+     * DIFFERENT (different names/gains/a CT-less package on a CT-equipped
+     * controller) is accepted -- only what this hardware cannot run at all
+     * is refused. */
+    uint8_t live_relay_count = zones_config_get_relay_count();
+    uint8_t live_thermo_count = zones_config_get_thermo_count();
+    for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+        const zone_cfg_t *zc = &s->cand.zones[z];
+        for (uint8_t bit = 0; bit < 8; bit++) {
+            if ((zc->relay_mask & (1u << bit)) && (uint8_t)(bit + 1) > live_relay_count) {
+                char msg[160];
+                snprintf(msg, sizeof(msg),
+                         "package configures zone %u on relay %u; this controller has only %u relay(s) "
+                         "-- refused, not truncated",
+                         (unsigned)z + 1, (unsigned)bit + 1, (unsigned)live_relay_count);
+                IMPORT_REFUSE(msg);
+            }
+        }
+        if (zc->thermo_mask != 0 && live_thermo_count > 0) {
+            for (uint8_t bit = 0; bit < 8; bit++) {
+                if ((zc->thermo_mask & (1u << bit)) && (uint8_t)(bit + 1) > live_thermo_count) {
+                    char msg[160];
+                    snprintf(msg, sizeof(msg),
+                             "package configures zone %u on thermocouple channel %u; this controller "
+                             "has only %u channel(s) -- refused, not truncated",
+                             (unsigned)z + 1, (unsigned)bit + 1, (unsigned)live_thermo_count);
+                    IMPORT_REFUSE(msg);
+                }
+            }
+        }
+    }
+
+    /* ---- Everything passed: create a NEW slot only -- never overwrite,
+     * never apply (section 5.3: "a rejected upload leaves the active
+     * configuration bit-for-bit untouched... upload writes into a new slot
+     * only and never applies"). Since every check above already ran against
+     * `cand`/`pico`, this is the same shape as kiln_cfg_store_save_current()
+     * but sourcing its blob from the UPLOADED candidate rather than the
+     * live config -- so it duplicates that function's slot-allocation and
+     * persistence tail rather than routing the live config through it. */
+    char normalized[KILN_CFG_NAME_MAX_LEN + 1];
+    if (!normalize_name(name, normalized, sizeof(normalized))) {
+        IMPORT_REFUSE("package's name is missing, too long, or invalid");
+    }
+    if (name_collides(normalized, KILN_CFG_NO_ACTIVE_ID)) {
+        /* Same treatment save/clone already give a name collision -- append
+         * nothing automatically; the operator renames afterward. */
+        IMPORT_REFUSE("a saved kiln config already has that name -- rename it and upload again");
+    }
+    int idx = find_free_slot();
+    if (idx < 0) {
+        IMPORT_REFUSE("kiln config store is full");
+    }
+    int32_t id = s_store.next_id++;
+    kiln_cfg_entry_t *e = &s_store.entries[idx];
+    e->in_use = 1;
+    e->id = id;
+    strncpy(e->name, normalized, KILN_CFG_NAME_MAX_LEN);
+    e->name[KILN_CFG_NAME_MAX_LEN] = '\0';
+    memset(e->blob, 0, sizeof(e->blob));
+    memcpy(e->blob, s->esp_blob, esp_blob_len);
+    e->blob_len = esp_blob_len;
+    e->pico = s->pico;
+    e->pico_populated = 1;
+    e->pkg_schema = pkg_schema;
+    e->pkg_hash = recomputed;
+
+    hal_status_t nvs_err = nvs_save_store();
+    if (nvs_err != HAL_OK) {
+        ESP_LOGE(TAG, "nvs_save_store after import failed: %s -- imported live but will not survive a "
+                      "reboot",
+                 hal_status_to_name(nvs_err));
+    }
+    if (out_id) {
+        *out_id = id;
+    }
+    result = true;
+
+done:
+#undef IMPORT_REFUSE
+    free(s);
+    return result;
+}
+
+bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap)
+{
+    int32_t active = s_store.active_id;
+    if (active == KILN_CFG_NO_ACTIVE_ID) {
+        return true; /* nothing to autosave into -- not a failure */
+    }
+    char name[KILN_CFG_NAME_MAX_LEN + 1];
+    if (!kiln_cfg_store_get_name(active, name, sizeof(name))) {
+        /* active_id points at a slot that no longer exists (deleted out from
+         * under it, or a corrupt/never-persisted store) -- nothing sane to
+         * autosave into; not this function's job to repair active_id. */
+        return true;
+    }
+    /* Re-saves OVER the active slot -- id_or_negative == active means
+     * kiln_cfg_store_save_current() overwrites entry `active` in place
+     * rather than allocating a new one, and (since id_or_negative >= 0)
+     * does NOT touch active_id itself, which is already correct. This is
+     * the exact "export blob / recapture Pico half / recompute pkg_hash /
+     * persist" sequence section 2.4 asks for, reusing rather than
+     * re-implementing it. */
+    return kiln_cfg_store_save_current(name, active, NULL, reason_out, reason_cap);
 }
 
 uint32_t kiln_cfg_store_generation(void)

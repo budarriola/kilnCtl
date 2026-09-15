@@ -100,6 +100,39 @@ void relay_cycles_set_type(uint8_t relay, relay_type_t type, uint32_t rated_over
 // mix still resolves exactly the way it does in the real, separately-
 // compiled firmware build, and reach every `static` internal directly.
 // Order matches the original file's top-to-bottom order.
+// docs/KILN_PROFILES_PLAN.md section 2.4 (2026-09-14 "finish upload/
+// download" follow-up, item 13): zones_config_store.c's nvs_save() now
+// calls kiln_cfg_store_autosave_from_live() as its own single choke-point
+// auto-save hook. This file never links the real kiln_cfg_store.c (a much
+// larger module with its own NVS/mutex/quarantine machinery this test suite
+// has no reason to pull in) -- fake it, controllable, so a test can prove
+// nvs_save() calls it without needing a real kiln config store underneath.
+bool g_stub_autosave_called = false;
+bool g_stub_autosave_result = true;
+bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap)
+{
+    g_stub_autosave_called = true;
+    if (reason_out && reason_cap) {
+        reason_out[0] = '\0';
+    }
+    return g_stub_autosave_result;
+}
+
+// nvs_save() dispatches the autosave call above through this (see
+// zones_config_store.c's own comment on why it is dispatched rather than
+// called directly -- the stack-budget fix). Host-test fake runs the job
+// synchronously, same shape as test_autotune_engine_prestart.c's/
+// test_ota_http.c's/test_safety_cfg_store.c's identical fakes of this
+// function.
+esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
+{
+    if (!fn) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    fn(arg);
+    return ESP_OK;
+}
+
 #include "../drivers/http/zones_http.c"
 #include "../drivers/persist/zones_config_store.c"
 #include "../drivers/persist/zones_config_accessors.c"

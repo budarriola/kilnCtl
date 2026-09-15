@@ -9,12 +9,24 @@
 // list, plus the package-identity hash (pkg_schema + pkg_hash, section
 // 3.1.1/3.1.3). It deliberately does NOT implement: the two-processor apply
 // transaction (plan item 5), the volatile Pico RAM install (item 15), the
-// UNCONFIGURED boot-ordering fix (item 16), the standing divergence alarm
-// (item 7), or upload/download (items 3/4/9/14). Those are safety-critical
-// or depend on work in flight elsewhere -- see the plan's own section 8
-// ordering note. This module only captures what the ESP already has cached
-// from the Pico (safety_cfg_store.c) and hashes it; it never talks to the
-// Pico itself and never pushes anything.
+// UNCONFIGURED boot-ordering fix (item 16), and the standing divergence
+// alarm (item 7). Those are safety-critical or depend on work in flight
+// elsewhere -- see the plan's own section 8 ordering note. This module only
+// captures what the ESP already has cached from the Pico (safety_cfg_store.c)
+// and hashes it; it never talks to the Pico itself and never pushes anything.
+//
+// 2026-09-14 follow-up (plan items 3/4/9/14, "finish upload/download"): this
+// module now ALSO owns the section 5.1 JSON envelope's encode/decode
+// (kiln_package_export_json()/kiln_package_import_json() below) -- the
+// generic "wrap the already-hashed halves as portable text" step. It
+// deliberately still does NOT know what a valid zones_cfg_t looks like or
+// what this controller's hardware can run: kiln_cfg_store.c (which already
+// includes zones_config_json.h/zones_config_accessors.h) is what calls
+// zones_config_json_validate() and the section 5.2a hardware-compatibility
+// checks against the blob this module hands back. Keeping that split means
+// this module never has to be touched when a zone field or a compatibility
+// rule changes -- same reasoning as kiln_cfg_store.h's own "never touched
+// when a zone field is added" note.
 //
 // WHY A TABLE WALK, NOT A FIELD LIST: KILN_PROFILES_PLAN.md section 1.3 is
 // explicit that a curated list of "the Pico params that matter" is exactly
@@ -184,6 +196,76 @@ bool kiln_package_capture_pico_half(const kiln_pkg_pico_source_t *source, kiln_p
  * not a code change here. */
 bool kiln_package_compute_hash(uint16_t pkg_schema, const uint8_t *esp_blob, uint16_t esp_blob_len,
                                 const kiln_pkg_safety_t *pico, uint32_t *out_hash);
+
+/* ---- Section 5.1 envelope: download/upload's portable JSON wrapper ------
+ *
+ * { "kind": "kilnctl_kiln_package", "pkg_schema": 1, "name": "...",
+ *   "esp_blob_hex": "<hex of zones_config_export_blob()'s raw bytes>",
+ *   "pico": [ {"id":N,"type":T,"flags":F,"value_bits":V}, ... ],
+ *   "pkg_hash": "0xXXXXXXXX" }
+ *
+ * `esp_blob_hex` carries the SAME raw bytes kiln_cfg_store.c already keeps
+ * in kiln_cfg_entry_t::blob (zones_config_export_blob()'s own output) --
+ * hex, not base64, because this codebase has no base64 encoder anywhere
+ * (see backup_json.h's own header comment on why there is no general JSON
+ * library either) and a hand-rolled hex codec is four lines and cannot get
+ * padding/alphabet edge cases wrong the way a hand-rolled base64 one could.
+ * `pkg_hash` is carried as a hex string (not a JSON number) so a 32-bit
+ * value near/above 2^31 round-trips exactly through every JSON reader,
+ * including this file's own hand-rolled one, without a signed/unsigned
+ * boundary surprise. */
+#define KILN_PKG_KIND "kilnctl_kiln_package"
+
+/* Upper bound on kiln_package_export_json()'s output for the largest ESP
+ * blob (ZONES_CONFIG_BLOB_MAX_SIZE, hex-doubled) and a fully-populated Pico
+ * half (KILN_PKG_SAFETY_PARAM_CAP entries, hex-doubled), plus name/envelope
+ * overhead -- generous, not tight; callers heap-allocate this, never stack
+ * it (project_httpd_stack_blob_class). */
+#define KILN_PKG_JSON_MAX_LEN 6144u
+
+/* Builds the envelope above into `out` (out_cap >= KILN_PKG_JSON_MAX_LEN).
+ * `esp_blob`/`esp_blob_len` are the RAW bytes (zones_config_export_blob()'s
+ * output, i.e. kiln_cfg_entry_t::blob/blob_len) -- NOT the canonical form
+ * kiln_package_compute_hash() hashes; the hash itself is supplied by the
+ * caller (`pkg_hash`, already computed the H1 canonical way by
+ * kiln_cfg_store.c) rather than recomputed here, so this function never has
+ * to know about zones_config_export_canonical() at all. Fails (nothing
+ * written) if any pointer is NULL, `pico->count` exceeds
+ * KILN_PKG_SAFETY_PARAM_CAP, or the encoded text would not fit `out_cap`. */
+bool kiln_package_export_json(const char *name, uint16_t pkg_schema, const uint8_t *esp_blob,
+                               uint16_t esp_blob_len, const kiln_pkg_safety_t *pico, uint32_t pkg_hash,
+                               char *out, size_t out_cap, size_t *out_len);
+
+/* Parses `json` (NUL-terminated) back into its parts. Checks performed HERE
+ * (envelope-level only -- section 5.2 rules 1/2/4/5; rule 3, the ESP-half
+ * field validation, is the caller's job, see this header's own banner):
+ *   - `kind` must equal KILN_PKG_KIND exactly.
+ *   - `pkg_schema` must be present and <= KILN_PKG_SCHEMA_VERSION -- a
+ *     package from a NEWER firmware is refused here, before any field is
+ *     decoded (section 5.1: "rejected, never best-effort parsed").
+ *   - `esp` and `pico` must both be present and well-formed (missing either
+ *     half is refused -- "package both processors together" means a
+ *     half-package is not a kiln package).
+ *   - every pico entry's `type` must be one of the four KILNLINK_PARAM_TYPE_*
+ *     values this build knows; an unrecognised type is the same class of
+ *     failure as an unknown param id (section 5.2 rule 5) and is refused,
+ *     never skipped.
+ *   - `pkg_hash` is decoded but NOT verified here -- verifying it requires
+ *     re-deriving the ESP half's CANONICAL form (zones_config_export_
+ *     canonical()), which this module deliberately does not link against;
+ *     the caller (kiln_cfg_store_import_package_json()) does that
+ *     comparison immediately after this call succeeds, before anything is
+ *     written. *out_declared_hash is always populated on success so the
+ *     caller has something to compare against.
+ * `esp_blob_out`/`esp_blob_cap`/`out_esp_blob_len` receive the raw (not
+ * canonical) ESP-half bytes, sized identically to what
+ * kiln_package_export_json() was given. On any failure, reason_out (if
+ * non-NULL/non-zero) is filled with a specific reason and nothing else is
+ * touched. */
+bool kiln_package_import_json(const char *json, char *name_out, size_t name_cap, uint16_t *out_pkg_schema,
+                               uint8_t *esp_blob_out, size_t esp_blob_cap, uint16_t *out_esp_blob_len,
+                               kiln_pkg_safety_t *pico_out, uint32_t *out_declared_hash, char *reason_out,
+                               size_t reason_cap);
 
 #ifdef __cplusplus
 }

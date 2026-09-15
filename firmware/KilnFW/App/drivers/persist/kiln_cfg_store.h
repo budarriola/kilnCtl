@@ -337,6 +337,73 @@ bool kiln_cfg_store_is_quarantined(char *reason_out, size_t reason_cap);
  * reason on failure. */
 bool kiln_cfg_store_quarantine_clear(bool confirm_discard, char *reason_out, size_t reason_cap);
 
+/* ---- Download / upload (docs/KILN_PROFILES_PLAN.md items 3/4/14) --------
+ *
+ * Both build on kiln_package.c's envelope codec (kiln_package.h) plus the
+ * SAME zones_config_json_validate()/zones_config_export_canonical() this
+ * file's own populate_pico_half_and_hash()/kiln_cfg_store_apply() already
+ * use -- no bound is duplicated, per docs/KILN_PROFILES_PLAN.md section
+ * 5.2 rule 3's "single source of truth" instruction. */
+
+/* Upper bound on kiln_cfg_store_export_package_json()'s output -- see
+ * kiln_package.h's KILN_PKG_JSON_MAX_LEN, whose budget this mirrors
+ * (nothing added at this layer beyond the envelope itself). Callers heap-
+ * allocate this; it is never a stack buffer. */
+#define KILN_CFG_EXPORT_JSON_MAX_LEN 6144u
+
+/* Streams slot `id` out as the section 5.1 JSON envelope into `out`
+ * (out_cap >= KILN_CFG_EXPORT_JSON_MAX_LEN, heap-allocated by the caller).
+ * Refuses (nothing written) a half-package slot (pico_populated == 0) with
+ * the same message kiln_cfg_store_get_full_package() already uses for that
+ * case -- a config saved before this firmware tracked the Pico half is not
+ * "everything", and downloading it would silently produce a package an
+ * upload elsewhere would treat as complete. */
+bool kiln_cfg_store_export_package_json(int32_t id, char *out, size_t out_cap, size_t *out_len,
+                                        char *reason_out, size_t reason_cap);
+
+/* Validates `json` (a section 5.1 envelope) and, only if EVERY check below
+ * passes, creates a brand-new slot for it -- never overwrites an existing
+ * one, never applies it to the live config (section 5.3: "Upload writes
+ * into a new slot only, and never applies"). On any refusal, nothing is
+ * written and reason_out names the SPECIFIC reason (envelope-level via
+ * kiln_package_import_json(), or one of the checks below):
+ *   - hash: the declared pkg_hash must match kiln_package_compute_hash()
+ *     recomputed from the decoded ESP half's CANONICAL form (H1) and the
+ *     decoded Pico half, in that order (section 5.1's "one CRC over the
+ *     whole package").
+ *   - ESP-half validity: zones_config_json_validate() on the decoded
+ *     candidate -- the single source of truth for "is this a valid
+ *     zones_cfg_t", never re-derived here.
+ *   - Pico-half validity: every param id must be one this firmware's own
+ *     CONFIG_PARAM_TABLE mirror (safety_cfg_store_lookup()) recognises --
+ *     an unknown id is refused, never silently skipped (section 5.2 rule 5).
+ *   - Compatibility (section 5.2a, a DISTINCT reported failure from the
+ *     validity checks above): every zone's thermo channel index must be
+ *     < this build's MAX31856_CHANNEL_COUNT, and every `relay_mask` bit
+ *     must be < this build's live relay_count -- both name the property,
+ *     the package's value, and this controller's value.
+ * A package that is merely DIFFERENT (different names/gains/a CT-less
+ * package on a CT-equipped controller) is accepted -- only a property this
+ * hardware genuinely cannot satisfy is refused (section 5.2a's own
+ * "over-strict compatibility check... will be worked around" warning). */
+bool kiln_cfg_store_import_package_json(const char *json, int32_t *out_id, char *reason_out,
+                                        size_t reason_cap);
+
+/* Section 2.4's auto-save, in its simplest correct form: if a kiln config is
+ * currently marked active, re-saves the CURRENTLY LIVE zones config over
+ * that same slot (id unchanged, name unchanged) via the existing, already
+ * flash-worker-safe kiln_cfg_store_save_current() path -- the identical
+ * "export blob, recapture Pico half, recompute pkg_hash, persist" sequence
+ * a manual re-save already performs, just triggered automatically. This is
+ * why it needs no new NVS write path of its own and adds no new
+ * flash_worker_lint.py allowlist entry: it is a new CALLER of an already-
+ * reviewed function, not a new write. No-ops (returns true, nothing
+ * touched) when no config is currently active -- the common case before an
+ * operator has saved a first kiln identity. `reason_out` is filled only on
+ * an actual failed re-save (the same failure modes kiln_cfg_store_save_
+ * current() itself can hit), never for the active-config-absent no-op. */
+bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap);
+
 /* ---- Swap-transaction support (docs/KILN_PROFILES_PLAN.md item 5, the
  * two-processor apply transaction; implemented in kiln_cfg_swap.c, a
  * SEPARATE module from this one so the transaction's crash-recovery state
