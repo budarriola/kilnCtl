@@ -46,10 +46,26 @@ try {
     [System.IO.File]::WriteAllText($rsp, ($rspLines -join "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
 
     $exe = Join-Path $OutDir "kilnctl_sim_factorial_driver.exe"
+    # The last eight entries below arrived with ADAPTIVE_FUZZY_EVALUATION_PLAN.md
+    # sec 5's two adaptive arms: sim_factorial_driver.c now #includes
+    # adaptive_tune.c/_model.c/_ki.c directly into its own TU (same one-TU
+    # convention sim_scenarios_adaptive.c and test_adaptive_tune.c use, so
+    # those three are NOT listed here), which drags in that module's much
+    # larger link surface -- zone_coupling_solve, the cfg_fs/pref_cfg_fs
+    # persistence pair, flash_worker_wait, hal_kv's host fake and hal_status.
+    # pid_fuzzy_confidence.c is the sec 3 confidence gate, linked for real
+    # rather than mirrored.
     $sourceArgs = "`"$(Join-Path $testDir 'sim_factorial_driver.c')`" `"$(Join-Path $testDir 'sim_factorial_design.c')`" " +
             "`"$(Join-Path $testDir 'sim_plant.c')`" `"$(Join-Path $testDir 'sim_high_temp.c')`" " +
             "`"$(Join-Path $driversDir 'control/pid.c')`" `"$(Join-Path $driversDir 'control/pid_fuzzy.c')`" " +
-            "`"$(Join-Path $driversDir 'control/pid_autotune.c')`" `"$(Join-Path $driversDir 'control/firing_score.c')`""
+            "`"$(Join-Path $driversDir 'control/pid_autotune.c')`" `"$(Join-Path $driversDir 'control/firing_score.c')`" " +
+            "`"$(Join-Path $driversDir 'control/pid_fuzzy_confidence.c')`" " +
+            "`"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
     $cmd = "call `"$vcvars`" x64 >nul && cl @`"$rsp`" /std:c11 /Fo:`"$OutDir\\`" /Fe:`"$exe`" $sourceArgs"
 
     Write-Host "=== building sim_factorial_driver.exe into $OutDir ==="
@@ -77,6 +93,15 @@ try {
         foreach ($line in $rawLines) {
             if ($line -match '^(ST\d[\w-]*)\t\d+\t.*\t(A_\S+)\t') {
                 $rows += [PSCustomObject]@{ CellId = $Matches[1]; Arm = $Matches[2]; Line = $line }
+            }
+            # The adaptive arms' sec 7 instrumentation rides on its own line
+            # shape (see sim_factorial_driver.c's ADAPTIVE_DIAG printf). It is
+            # compared here too: it carries the per-firing state that decides
+            # whether an adaptive arm did anything at all, so leaving it out of
+            # the determinism check would let the arms' behaviour diverge
+            # between --of 1 and --of N without failing anything.
+            elseif ($line -match '^ADAPTIVE_DIAG\t(ST\d[\w-]*)\t(A_\S+)\t') {
+                $rows += [PSCustomObject]@{ CellId = $Matches[1]; Arm = "ZZDIAG_" + $Matches[2]; Line = $line }
             }
         }
         return $rows | Sort-Object CellId, Arm | ForEach-Object { $_.Line }
