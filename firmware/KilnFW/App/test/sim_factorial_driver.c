@@ -63,11 +63,21 @@
 // full-duty asymptote ~1288C) for exactly this reason; this driver reuses
 // its two headline numbers (K, tau) as the kiln-span decomposition target
 // rather than inventing new ones, and still runs every cell through the
-// SAME decompose-then-vary-Bi/phi/p pipeline as the bench cells. Dead time
-// is held at the bench value across both spans (a TEST FIXTURE
-// simplification -- see the audit doc). */
+// SAME decompose-then-vary-Bi/phi/p pipeline as the bench cells. Sensor-node
+// dead time and tau are now KILN-SCALED for kiln-span cells (plan sec 6:
+// KILN_L0_S/KILN_SENSOR_TAU_S below, scaled 488/255.6 off the bench values)
+// -- bench-span cells are unchanged. */
 #define KILN_K0_C_PER_DUTY 2500.0f
 #define KILN_TAU0_S 488.0f
+
+// ---- Sec 6: kiln-scaled sensor-node dead time and tau, applied only to
+// kiln-span (A4=KILN_SPAN) cells -- bench-span cells keep BENCH_L0_S /
+// FIXTURE_SENSOR_TAU_S unchanged (mandatory bit-identical regression, sec
+// 6.1). Scale factor is KILN_TAU0_S/BENCH_TAU0_S = 488/255.6; c_s_j_per_c is
+// left at the fixture bench value everywhere -- doc sec 6 shows it is
+// provably inert (only c_s/sensor_tau_s enters dS, and it cancels).
+#define KILN_L0_S 76.9f
+#define KILN_SENSOR_TAU_S 28.6f
 
 // ---- [ASSUMED] fixture constants not pinned by the design doc's §3/§9,
 // resolved once here so no reader has to guess (see the audit doc's
@@ -77,8 +87,11 @@
 // TIGHT does for the same commanded ramp. 1.5x is a round, documented guess.
 #define A2_AMPLE_HEADROOM_MULT 1.5f
 // Sensor-node three-node parameters (c_s, its own tau) are OUT OF the
-// decomposition helper's scope (sim_plant.h says so explicitly) -- held
-// fixed across every cell; only sensor_bias_p (A3) varies.
+// decomposition helper's scope (sim_plant.h says so explicitly). c_s_j_per_c
+// is held fixed across every cell (provably inert per plan sec 6). Bench
+// sensor tau/dead-time (below, FIXTURE_SENSOR_TAU_S / BENCH_L0_S) are the
+// bench-span values; kiln-span cells use KILN_SENSOR_TAU_S / KILN_L0_S
+// instead (see build_cell_plant()). Only sensor_bias_p (A3) is a design factor.
 #define FIXTURE_SENSOR_C_S_J_PER_C 500.0f
 #define FIXTURE_SENSOR_TAU_S 15.0f
 // A4 bench/kiln absolute spans (design doc sec 3's "bench 24->60" / "kiln
@@ -174,11 +187,13 @@ static bool build_cell_plant(const sim_factorial_cell_t *cell, sim_plant_cfg_t *
         return false;
     }
 
+    float sensor_delay_s = kiln_span ? KILN_L0_S : BENCH_L0_S;
+
     plant.node_model = SIM_NODE_THREE;
     plant.c_s_j_per_c = FIXTURE_SENSOR_C_S_J_PER_C;
-    plant.sensor_tau_s = FIXTURE_SENSOR_TAU_S;
+    plant.sensor_tau_s = kiln_span ? KILN_SENSOR_TAU_S : FIXTURE_SENSOR_TAU_S;
     plant.sensor_bias_p = cell->a3_sensor_bias_p;
-    plant.sensor_delay_s = BENCH_L0_S;
+    plant.sensor_delay_s = sensor_delay_s;
     plant.sensor_lag_tau_s = 0.0f;
     plant.load_mass_mult = cell->a1_load_mass_mult;
 
@@ -189,7 +204,7 @@ static bool build_cell_plant(const sim_factorial_cell_t *cell, sim_plant_cfg_t *
     *out_plant = plant;
     *out_model_k_dc = true_k * tm.m_k;
     *out_model_tau_s = true_tau * tm.m_tau;
-    *out_model_dead_time_s = BENCH_L0_S * tm.m_l;
+    *out_model_dead_time_s = sensor_delay_s * tm.m_l;
     *out_ambient_c = plant.ambient_c;
     *out_t1_offset_c = kiln_span ? KILN_T1_OFFSET_C : BENCH_T1_OFFSET_C;
     *out_t2_offset_c = kiln_span ? KILN_T2_OFFSET_C : BENCH_T2_OFFSET_C;
