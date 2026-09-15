@@ -414,9 +414,19 @@ static profile_firing_run_record_t make_clean_record(uint8_t profile_id, uint8_t
     return rec;
 }
 
-// 30s ticks, 7 ticks = 210s > ADAPTIVE_TUNE_SETTLE_MIN_S (180s).
+// 30s ticks. 2026-09-14 correction (docs/audits/adaptive_tune_harvest_gate_
+// 2026-09-14.md): SETTLE_TICKS was 7 (210s), enough to clear ADAPTIVE_TUNE_
+// SETTLE_MIN_S (180s) alone, back when the duty-stability check had no
+// minimum-history requirement of its own. It now does: the duty-stability
+// window is a bucketed sliding window (ADAPTIVE_TUNE_DUTY_WINDOW_BUCKET_S *
+// _NUM_BUCKETS == 300s) that refuses a verdict outright until it holds a
+// full span of history, so ANY fixture that expects a harvested observation
+// must run long enough to mature that window too, not just the temperature
+// gate. 11 ticks * 30s == 330s comfortably clears both (300s duty-window
+// maturity, with one tick of margin against the exact boundary; 180s
+// temperature settle was already satisfied by tick 6).
 #define DT_S 30.0f
-#define SETTLE_TICKS 7
+#define SETTLE_TICKS 11
 
 // ---------------------------------------------------------------------
 // Test bodies -- split across sibling files (2026-09-01) to keep this file
@@ -444,6 +454,7 @@ void run_test_adaptive_tune(void)
     test_genuinely_steady_duty_is_still_accepted();
     test_overshooting_entry_dwell_still_harvests(); // 2026-09-14 harvest-gate fix
     test_persistent_duty_oscillation_never_harvests(); // 2026-09-14 harvest-gate fix
+    test_window_aligned_sawtooth_never_harvests(); // 2026-09-14 sliding-window correction
 
     TEST_SECTION("adaptive_tune: opt-in default off");
     test_opt_in_default_off_records_nothing();

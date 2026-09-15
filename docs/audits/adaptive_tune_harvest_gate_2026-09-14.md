@@ -174,6 +174,14 @@ failure.
 already green before this pass (S0/S6 alone satisfied it) and remain green; the qualitative change
 is that 8 of 11 scenarios now harvest at all, versus 2 of 11 before.
 
+**[CORRECTED 2026-09-14, third pass -- see "Correction" section at the end of this document.] This
+"8 of 11" headline is wrong on two counts, both established below: (1) the table above this
+paragraph itself shows 10 of 11 non-zero, not 8; and (2) of those, S2/S4/S7/S12 harvested only via
+a same-day-discovered defect in this pass's own trailing window (a verdict readable from a single
+sample), not via the entry-transient fix this section credits. The corrected, honest count after
+fixing that defect is 6 of 11 (S0/S1/S3/S5/S6/S9). Treat every harvest-count claim in this section
+as superseded by the Correction section.**
+
 ## Tests
 
 Added to `firmware/KilnFW/App/test/test_adaptive_tune_dwell.c` (registered in `test_adaptive_tune.c`'s
@@ -459,3 +467,209 @@ improved observation quality; on the measurement taken here, quality got worse.
   comment [-Werror=comment]`, and `check_c_files_in_cmakelists.ps1` fails on
   `firmware/KilnFW/App/drivers/persist/kiln_package.c: not referenced by
   .../drivers/CMakeLists.txt`. Same two owners the reviewed commit named.
+
+---
+
+# Correction, 2026-09-14, third pass -- the trailing window replaced with a bucketed sliding
+# window; honest re-measurement
+
+A third same-day pass (separate task, `adaptive_tune*` files only) fixed the defect the review
+above proved: the single-`(min,max)`-pair tumbling window that could read a verdict from a window
+as young as one tick. This section is a **dated correction appended to the document, not a rewrite**
+-- every claim above (both the original pass's and the review's) stands as its own historical
+record; the "8 of 11" and "if anything this is tighter than before" claims from the first pass are
+superseded by what follows, and the review's own attribution finding (section 3 above) is what
+this fix was built to satisfy.
+
+## Independent verification of the review's mechanism
+
+Read `adaptive_tune_zone_tick()` and the review's own reasoning directly (not re-run its probe
+blind): confirmed the tumble seeds `settle_window_duty_min = settle_window_duty_max = duty` on a
+single sample, so the very next tick's fold produces a window whose range is `|duty(t+1) -
+duty(t)|` -- a `dt_s`-wide window, not a `WINDOW_S`-wide one. The measured 86%/1-tick-old /
+duty=0.70-peak counter-example in the review's section 1 is a direct, unavoidable consequence of
+that shape, not an edge case. Agreed with the review's diagnosis without reservation.
+
+## The fix: a bucketed sliding window, not a single pair
+
+Replaced `settle_window_start_s`/`settle_window_duty_min`/`settle_window_duty_max` with a ring of
+`ADAPTIVE_TUNE_DUTY_WINDOW_NUM_BUCKETS` (10) buckets, each spanning
+`ADAPTIVE_TUNE_DUTY_WINDOW_BUCKET_S` (30s), covering the same `ADAPTIVE_TUNE_DUTY_STABILITY_
+WINDOW_S` (300s, unchanged) in total. Every tick folds the current duty into the currently-OPEN
+bucket's own running (min, max); a bucket closes and rotates to the next ring slot after 30s,
+**overwriting** (evicting) whatever the ring held at that slot 300s ago. A verdict combines the
+min/max of every bucket the ring currently holds (all `NUM_BUCKETS` slots once
+`duty_win_closed_count` has saturated, including the still-open one) and is **refused outright**
+("duty window still gathering history (N/10 buckets closed)") until `duty_win_closed_count` reaches
+10 -- i.e. until the window has genuinely accumulated a full 300s of history, never a fresh single
+sample. This closes the defect by construction: the currently-open bucket can never be the ring's
+*only* contributor to a verdict, because a verdict is refused until 9 OTHER buckets have already
+closed and still sit in the ring (eviction only removes the OLDEST of the 10, one at a time, never
+all 10 at once). The combined range therefore always reflects between `(NUM_BUCKETS-1)*BUCKET_S`
+(270s) and `NUM_BUCKETS*BUCKET_S+` (300s+) of trailing history, never fewer than 270s and never one
+tick.
+
+**Cost.** A raw per-tick sample ring covering 300s at production's 1Hz cadence would need 300
+`{t_s, duty}` entries/zone (8 bytes/entry = 2400 bytes/zone, 7.2KB across `THERMO_CHANNEL_COUNT`=3
+zones) just to answer a min/max-over-window query -- a real concern given this project's own
+DRAM-exhaustion history (`project_esp_internal_dram_exhaustion`). The bucketed ring answers the
+identical question by keeping only a running `(min, max)` pair PER BUCKET: `10 buckets * 2 floats *
+4 bytes * 3 zones = 240 bytes` total (plus 3 small scalar fields per zone: an index, an elapsed-time
+float, a closed-count, well under 100 bytes more) -- roughly a **30x reduction** versus the raw-ring
+alternative, at the cost of eviction granularity coarsening from one sample to one bucket (30s):
+the combined range can lag a true continuous sliding window by up to one bucket width when an old
+extreme is aging out, which is immaterial next to the window's own 300s span.
+
+**A genuine subtlety found and fixed during this pass, before any host-test run:**
+`ADAPTIVE_TUNE_DUTY_WINDOW_NUM_BUCKETS` was first written as `((int)(ADAPTIVE_TUNE_DUTY_STABILITY_
+WINDOW_S / ADAPTIVE_TUNE_DUTY_WINDOW_BUCKET_S))` (a derived constant, to keep it mechanically tied
+to WINDOW_S/BUCKET_S) -- this **fails the real ESP-IDF target build** with `-Werror`:
+`error: variably modified 'duty_win_bucket_min' at file scope`, because a cast of a float division
+is not an integer CONSTANT expression in C even though it folds at compile time, and this array is
+declared at file scope. Fixed by making `NUM_BUCKETS` a plain integer literal (10) with a
+comment explaining why, plus a **runtime `assert()` in `adaptive_tune_init()`** checking
+`NUM_BUCKETS * BUCKET_S == WINDOW_S` so a future edit that breaks the relationship fails loudly at
+boot instead of silently mis-sizing the window (a `_Static_assert` cannot check this either, for
+the identical reason the `#define` itself could not use the division). This was caught by
+`check_00_kilnfw_target_build.ps1` (the real ESP-IDF/gcc target build, not the host-test MSVC
+build, which does not share gcc's stricter file-scope VLA diagnostic) -- host tests alone would not
+have caught it.
+
+## Both original fixes from `163d653a` preserved
+
+1. **The duty range is no longer accumulated from dwell entry and monotonically widening.** The
+   sliding window (bucketed or otherwise) only ever reflects the trailing `WINDOW_S`, never the
+   whole dwell.
+2. **`recorded_this_dwell` is still NOT latched on a `duty_unstable` (or now also an
+   immature-window) verdict** -- only on the genuinely terminal outcomes (too-low duty,
+   non-positive rise, or a successful commit). Confirmed by the chain re-run below:
+   `ring_count` still advances by exactly 2 per firing (one observation per one of the firing's two
+   dwells), matching the review's own "attacks that found nothing" confirmation of this property.
+
+## Honest re-measurement, 9 chained firings x 2 arms
+
+Re-ran `sim_scenarios_adaptive.exe` (`build_host_tests.ps1`) after the fix, clean build:
+
+| Scenario | PID_AT max_ring_count | FUZZY_AT max_ring_count |
+|---|---:|---:|
+| S0_NULL_SLOW | 12 | 12 |
+| S1_BASELINE | 12 | 12 |
+| S3_SENSOR_CENTRE | 12 | 12 |
+| S2_SENSOR_NEAR_ELEMENT | 0 | 0 |
+| S4_SENSOR_NEAR_FAST_RAMP | 0 | 0 |
+| S5_MASS_HEAVY | 12 | 12 |
+| S6_MASS_LIGHT | 12 | 12 |
+| S7_TUNE_HOT | 0 | 0 |
+| S8_TUNE_COLD | 0 | 0 |
+| S9_TUNE_SLOW_INTEGRAL | 12 | 12 |
+| S12_COMPOUND_WORST | 0 | 0 |
+
+**6 of 11 scenarios harvest (S0, S1, S3, S5, S6, S9), both arms, all at the ring's full 12-slot
+capacity.** This reproduces the review's own "mature-window probe" attribution table (section 3)
+almost exactly, confirming the review's finding: S2/S4/S7/S12's harvests in the shipped `163d653a`
+code were an artifact of the 1-tick-immature-window defect, not the entry-transient fix, and do not
+survive a correct window. `S7_TUNE_HOT` (the plan's own named acceptance case) returns to
+`S7_DIRECTION_CHECK: INCONCLUSIVE (never harvested 0/4)`, its pre-`163d653a` state.
+
+**This is an honest 6, not a dishonest 8 (or the table's actual 10).** It is a real improvement
+over the pre-`163d653a` baseline (2 of 11: S0, S6 only) -- S1, S3, S5, S9 are new, genuine harvests
+from the entry-transient fix, verified against a window that actually holds 300s of history. S2,
+S4, S7, S8, S12 remain unable to harvest under this mechanism; per the review's own framing, this
+is a legitimate and important result about the harvest gate's real limits under sensor-noise and
+mistuned-gain conditions, not evidence the fix failed.
+
+## Window age and duty range at harvest (task requirement: assert quality, not just count)
+
+Instrumented the ring-commit point (temporary `printf`, added then fully removed after use -- not
+left in production code) to print `duty_win_closed_count` (window maturity, capped at 10) at the
+instant of every harvest. Rebuilt the full host-test suite with it in place:
+
+```
+2782 harvest events total (every adaptive_tune_zone_tick()-driven test/fixture in the host
+     suite that reaches a ring commit, not just the sim chain)
+2782 at duty_win_closed_count=10 (fully mature, >=270s of ring history)
+   0 at any duty_win_closed_count < 10
+```
+
+**Caveat, stated plainly:** the sim_scenarios_adaptive.exe chain itself could not be rebuilt with
+the probe in place -- a concurrent session was mid-edit on `zones_config_accessors.h` at the time
+(a torn read produced transient `error C2143`/`C2371` syntax errors around line 1440, in a comment
+block neither this pass nor the concurrent edit's final state has any defect in; retried twice,
+both attempts hit the same file mid-write), which this pass does not own and did not touch. The
+2782-count above is therefore drawn from the OTHER 41 host-test executables (including
+`test_adaptive_tune.c`'s own 1661 checks, which exercise `adaptive_tune_zone_tick()` directly
+across dozens of fixtures), not from the specific 9-firing x 2-arm chain. The per-scenario table
+above (6 of 11 harvest, all at ring capacity 12) was measured separately, on a clean, uninstrumented
+build made before the concurrent edit began (`host_test_final3.txt`/`host_test_v2.txt` in this
+session's own log, both 44/42 executables, 0 failures, `sim_scenarios_adaptive: PASS`) -- that
+result is not in question, only the additional per-observation closed_count breakdown specific to
+the chain was not obtainable within this pass's time budget without the sim-chain build reliably
+succeeding.
+
+No harvest observed anywhere in the 2782 reached an immature window -- the class of defect the
+review found (86% of harvests at `window_age_s<=1`) does not recur here: `window_age_s` is not a
+field this design tracks directly (there is no single window "start" once buckets rotate
+independently), so maturity is reported via `duty_win_closed_count` instead, which is the direct,
+load-bearing gate the fix depends on -- `duty_win_closed_count < 10` refuses unconditionally
+regardless of how small the in-window range happens to be, which is exactly the property the
+review's counter-example (section 1) proved the previous shape lacked.
+
+## Negative test (this pass)
+
+Broke production code by reading the verdict from ONLY the currently-open bucket's own `(min,max)`
+(`z->duty_win_bucket_min[z->duty_win_bucket_open_idx]`/`...max[...]` with the ring-combine loop
+removed) instead of combining the whole ring -- i.e. reproduced the reviewed defect's shape
+directly inside the new bucketed design. Rebuilt (`build_host_tests.ps1`, prior build directory
+deleted first): **6 FAILURE(S)**, including the new
+`test_window_aligned_sawtooth_never_harvests()` (a sawtooth whose period exactly matches
+`WINDOW_S`, deliberately aligned with where the old tumble would land) and the pre-existing
+`test_oscillating_duty_flat_temperature_is_refused()`/`test_persistent_duty_oscillation_never_
+harvests()`, and `sim_scenarios_adaptive: FAIL`. Restored the combine loop BY HAND (re-typed, not
+`git checkout`/`restore`/`stash`), deleted `firmware/KilnFW/App/test/build/` entirely, and rebuilt
+from scratch: **0 FAILURE(S)**, `sim_scenarios_adaptive: PASS`.
+
+## New test added
+
+`test_window_aligned_sawtooth_never_harvests()` (`test_adaptive_tune_dwell.c`): a 30-tick (900s)
+sawtooth, period exactly `WINDOW_S` (10 ticks at this file's 30s cadence), amplitude 0.30-0.66 --
+deliberately shaped so the step between any two adjacent samples is small (~0.04), the exact shape
+a 1-sample window reads as "stable" (this is the review's counter-example, reproduced at test
+cadence rather than production cadence). Asserts `ring_count == 0` AND that the refusal reason
+names duty instability specifically (not an immature-window refusal, which would mean the window
+never got the chance to see the swing at all). Also strengthened
+`test_persistent_duty_oscillation_never_harvests()` (previously reached the harvest path without
+asserting which gate refused it, per the review's own weakness finding) to assert the same.
+
+`SETTLE_TICKS` (shared fixture constant, `test_adaptive_tune.c`) was raised from 7 (210s) to 11
+(330s): the duty-stability window now REQUIRES 300s of real history before any verdict, so any
+fixture expecting a harvested observation must run long enough to mature it, not just clear the
+180s temperature-settle floor. This is a deliberate, correct consequence of the fix, not a
+loosening -- it is inherent to what "a verdict backed by 300s of history" means. The two
+fixed-size `duties[SETTLE_TICKS]` arrays in `test_adaptive_tune_dwell.c` were extended from 7 to 11
+elements, continuing each fixture's original character (the coupid6-derived oscillating trajectory
+kept oscillating; the steady ~0.50+/-0.01 ripple stayed steady).
+
+## Check tally for this correction pass
+
+- `firmware/KilnFW/App/test/build_host_tests.ps1` (PowerShell, `-ExecutionPolicy Bypass`, clean
+  output directory both before and after the negative-test restore): **0 test failures**, 44/42
+  executables built (the pre-existing `MISMATCH` is the concurrent session's `test_kiln_package.c`
+  addition, unrelated to `adaptive_tune`, matching the review's own note).
+- `firmware/KilnFW/App/test/check_00_kilnfw_target_build.ps1` (the real ESP-IDF/gcc target build):
+  initially **failed** on this pass's own `-Werror` regression (variably-modified array at file
+  scope, see above) -- fixed, then re-run **clean, PASS** (`KilnCtrl.bin` produced, 28% flash
+  free). The concurrent `kiln_cfg_store.h:278` `-Werror=comment` failure the review recorded is no
+  longer present as of this pass's run -- fixed by whichever session owns that file in the
+  meantime, not by this pass.
+- `tools/run_all_checks.ps1`: **94 passed, 0 skipped, 0 failed.**
+- `tools/check_doc_hash_citations.ps1`: **PASS.**
+
+## Constraints respected (unchanged from the original pass)
+
+- `ADAPTIVE_TUNE_SETTLE_MIN_S`/`_SLOPE_FLOOR_C_PER_S` untouched.
+- No `ZONES_CFG_VERSION` bump (still 26).
+- `MIN_DUTY_FOR_OBSERVATION` untouched.
+- Only `adaptive_tune*.{c,h}` and their own tests were edited; `kiln_cfg_store.{c,h}`,
+  `kiln_package.{c,h}`, `config_divergence.{c,h}`, `safety_ceiling_sync.{c,h}`, and every `sim_*`
+  scenario file (including `sim_scenarios_adaptive.c`, read-only per this task's own instruction)
+  were left alone.

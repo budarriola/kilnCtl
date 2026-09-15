@@ -33,21 +33,21 @@ static void test_settled_dwell_is_recorded(void)
 // under-damped-plant failure mode ADAPTIVE_TUNE_DUTY_STABILITY_ABS/FRAC
 // exists to catch, not an idealized synthetic swing). Temperature is fed
 // perfectly flat (slope == 0, well under the floor) across all
-// SETTLE_TICKS*DT_S == 210s > ADAPTIVE_TUNE_SETTLE_MIN_S, and every value is
-// 0.1C-quantized like the rest of this file's fixtures -- so the ONLY thing
-// standing between this fixture and a recorded observation is the duty-
-// stability check. MUST fail (go red) if that check is removed: with only
-// the slope test, this dwell settles trivially (flat temperature) on the
-// very first eligible tick.
+// SETTLE_TICKS*DT_S == 330s > ADAPTIVE_TUNE_SETTLE_MIN_S and the 300s duty-
+// window maturity requirement, and every value is 0.1C-quantized like the
+// rest of this file's fixtures -- so the ONLY thing standing between this
+// fixture and a recorded observation is the duty-stability check. MUST fail
+// (go red) if that check is removed: with only the slope test, this dwell
+// settles trivially (flat temperature) on the very first eligible tick.
 static void test_oscillating_duty_flat_temperature_is_refused(void)
 {
     reset_module_state();
     adaptive_tune_zones[0].enabled = true;
-    // Real coupid6 zone-0/46C trajectory, extended to SETTLE_TICKS (7)
+    // Real coupid6 zone-0/46C trajectory, extended to SETTLE_TICKS (11)
     // samples: the measured 0.023 -> 0.19 -> 0.144 sequence, then continuing
     // to oscillate around ~0.15 rather than settling -- duty never comes to
     // rest within the window, same as measured on hardware.
-    const float duties[SETTLE_TICKS] = {0.023f, 0.19f, 0.144f, 0.10f, 0.17f, 0.12f, 0.16f};
+    const float duties[SETTLE_TICKS] = {0.023f, 0.19f, 0.144f, 0.10f, 0.17f, 0.12f, 0.16f, 0.11f, 0.15f, 0.13f, 0.16f};
     feed_flat_temp_oscillating_duty_dwell(0, 46.0f, 22.0f, duties, SETTLE_TICKS, DT_S);
     TEST_CHECK(adaptive_tune_zones[0].ring_count == 0,
                "a flat-temperature dwell whose duty is still swinging ~89% of its own value must NOT be "
@@ -71,7 +71,7 @@ static void test_genuinely_steady_duty_is_still_accepted(void)
     // fractional floor and the 0.05 absolute floor) -- what a real PID loop
     // actually at steady state looks like, not a mathematically exact
     // constant.
-    const float duties[SETTLE_TICKS] = {0.50f, 0.49f, 0.51f, 0.50f, 0.49f, 0.51f, 0.50f};
+    const float duties[SETTLE_TICKS] = {0.50f, 0.49f, 0.51f, 0.50f, 0.49f, 0.51f, 0.50f, 0.49f, 0.51f, 0.50f, 0.49f};
     feed_flat_temp_oscillating_duty_dwell(0, 100.0f, 22.0f, duties, SETTLE_TICKS, DT_S);
     TEST_CHECK(adaptive_tune_zones[0].ring_count == 1,
                "a genuinely steady dwell (small realistic duty ripple) must still be recorded -- the "
@@ -147,6 +147,55 @@ static void test_persistent_duty_oscillation_never_harvests(void)
     TEST_CHECK(adaptive_tune_zones[0].ring_count == 0,
                "duty that never actually settles -- oscillating every tick for the whole dwell, tumbling window "
                "after tumbling window -- must never be recorded as a steady-state observation");
+    // 2026-09-14 review finding: the previous version of this test reached
+    // the harvest path but did not ASSERT which gate refused it, so a later
+    // regression that moved the refusal upstream (or admitted the reading
+    // through an unrelated path) would leave this test green and silent.
+    // Assert the refusal is specifically the duty-instability verdict, not
+    // e.g. an immature-window refusal (which would mean the window never
+    // even got a chance to see this persistent swing) or a blank reason.
+    TEST_CHECK(strstr(adaptive_tune_zones[0].last_refusal_reason, "duty") != NULL &&
+               strstr(adaptive_tune_zones[0].last_refusal_reason, "oscillat") != NULL,
+               "must be refused specifically as duty instability (a MATURE window correctly reading an unstable "
+               "range), not an immature-window or unrelated refusal");
+}
+
+// 2026-09-14 correction (docs/audits/adaptive_tune_harvest_gate_2026-09-14.md,
+// "Review" section): the FIRST shipped fix (a single (min,max) pair that
+// tumbles to a fresh single-sample seed every ADAPTIVE_TUNE_DUTY_STABILITY_
+// WINDOW_S) admitted a verdict from a window as young as ONE tick immediately
+// after every tumble -- 86% of the whole sim suite's harvested observations
+// came from a 1-tick-old window, including a duty=0.70 (cycle peak, 40%
+// error) admission from a 600s production-cadence triangle whose true 300s
+// range was 0.40. This test reproduces that exact failure shape at this
+// file's 30s test cadence: a sawtooth whose period is exactly ADAPTIVE_TUNE_
+// DUTY_STABILITY_WINDOW_S (300s == 10 ticks here) -- i.e. deliberately
+// ALIGNED with where the old single-window tumble would land -- so that the
+// tick immediately after every would-be tumble sees only a small (~0.04)
+// step from its immediate predecessor, exactly the shape a 1-sample window
+// reads as "stable". A correct sliding window must never be fooled by this:
+// no verdict may ever be read from fewer than (NUM_BUCKETS-1)*BUCKET_S
+// seconds of real history, so the full ~0.36-0.40 sawtooth range must always
+// be visible once the window is mature, on every tick, not just at bucket
+// boundaries.
+static void test_window_aligned_sawtooth_never_harvests(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[0].enabled = true;
+    const int ticks = 30; // 900s: 3 full period cycles, several bucket rotations
+    float duties[30];
+    for (int i = 0; i < ticks; i++) {
+        duties[i] = 0.30f + 0.04f * (float)(i % 10); // period 10 ticks == 300s, sawtooth 0.30..0.66
+    }
+    feed_flat_temp_oscillating_duty_dwell(0, 100.0f, 22.0f, duties, ticks, DT_S);
+    TEST_CHECK(adaptive_tune_zones[0].ring_count == 0,
+               "a sawtooth whose period exactly matches the duty-stability window must never harvest, even on "
+               "the tick immediately after a bucket boundary where a naive single-sample window would read a "
+               "trivially small step");
+    TEST_CHECK(strstr(adaptive_tune_zones[0].last_refusal_reason, "duty") != NULL &&
+               strstr(adaptive_tune_zones[0].last_refusal_reason, "oscillat") != NULL,
+               "must be refused as duty instability from a MATURE window (the sawtooth's full ~0.36 range), not "
+               "waved through as an immature-window false pass");
 }
 
 // F3: dwelling_prev (and everything gated on it -- the settle window,

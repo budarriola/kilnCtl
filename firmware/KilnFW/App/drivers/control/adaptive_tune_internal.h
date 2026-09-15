@@ -124,34 +124,78 @@ extern const char *ADAPTIVE_TUNE_TAG;
 // scenario adaptation exists to correct, and it is precisely the one this
 // combination could never harvest from.
 //
-// Fix: the duty-range check below now reads from a TUMBLING trailing window
-// (reset every ADAPTIVE_TUNE_DUTY_STABILITY_WINDOW_S seconds to the CURRENT
-// duty, not accumulated since dwell entry), and a duty_unstable verdict no
-// longer latches recorded_this_dwell -- the dwell keeps re-evaluating every
-// tick (cheap: two float compares) until either the trailing window is
-// genuinely flat or the dwell ends. This does not touch the TEMPERATURE
-// settle gate at all (ADAPTIVE_TUNE_SETTLE_MIN_S/_SLOPE_FLOOR_C_PER_S,
-// real-hardware constants, untouched) -- a rough entry still has to fully
-// decay out of the temperature slope's own elapsed-since-entry window before
-// that gate passes, so the ~0.003*tau steady-state residual this module's
-// invariance depends on (cef1df2a) is unaffected: this change only lets a
-// dwell that has ALREADY satisfied the unchanged temperature gate also pass
-// the duty gate on the strength of its CURRENT behaviour, instead of being
-// vetoed forever by a transient that is long over. If anything this is
-// tighter than before: "duty has been flat for the last WINDOW_S seconds"
-// is a more honest reading of "duty is presently steady" than "duty has
-// never once moved since a dwell that may have started 20+ minutes ago,"
-// which is not what steady state means. WINDOW_S is picked LONGER than
-// ADAPTIVE_TUNE_SETTLE_MIN_S (180s) -- a real steady-state duty verdict
-// should not be trusted from a slice shorter than the temperature gate's own
-// settle requirement -- and short enough that a genuinely long dwell (a
-// mistuned zone's dwell runs for many multiples of its own tau, often
-// 1000+ seconds -- see sim_scenarios_adaptive.c's own dwell-length comment)
-// ages a stale entry-transient extreme out of the window well before the
-// dwell ends: 300s tumbles roughly 14 times over a ~70-minute mistuned
-// dwell (16*tau at tau~264s), each tumble forgetting whatever entry
-// excursion the previous window remembered.
+// Fix (2026-09-14, first pass, 163d653a): the duty-range check below was
+// changed to read from a TUMBLING trailing window (reset every
+// ADAPTIVE_TUNE_DUTY_STABILITY_WINDOW_S seconds to the CURRENT duty, not
+// accumulated since dwell entry), and a duty_unstable verdict no longer
+// latches recorded_this_dwell. **That tumbling-window shape was itself
+// defective and has been replaced** -- see the correction below.
+//
+// CORRECTION (docs/audits/adaptive_tune_harvest_gate_2026-09-14.md, "Review"
+// section, second pass): a same-day adversarial review proved the tumbling
+// window seeds itself with a SINGLE sample on every tumble
+// (settle_window_duty_min = settle_window_duty_max = duty), so the tick
+// immediately after a tumble reads its verdict from a two-sample,
+// one-`dt_s`-wide window -- trivially "stable" almost regardless of actual
+// duty behaviour. Measured at production cadence (1 Hz): 86% of every
+// observation the 11-scenario sim suite harvested came from a window
+// exactly 1 tick old; a 600s 0.30<->0.70 duty triangle (flat temperature)
+// harvested at duty=0.70, the cycle PEAK, a ~40% error on the sole input to
+// the automatic K_dc writer, while the module's OWN refusal string for the
+// same instant read "57% of value" oscillation. The after-tumble-read
+// ordering does not prevent this; it only moves the trivial pass from the
+// tumbling tick to the tick after it.
+//
+// Fix (this pass): the trailing window is now a BUCKETED sliding window,
+// not a single min/max pair that tumbles to a single sample. See
+// ADAPTIVE_TUNE_DUTY_WINDOW_BUCKET_S/_NUM_BUCKETS below and adaptive_tune_
+// zone_t's own duty_win_* fields for the shape. A verdict is refused
+// outright (posture: "still gathering window history", same non-latching
+// retry as duty_unstable) until at least ADAPTIVE_TUNE_DUTY_WINDOW_NUM_
+// BUCKETS buckets have closed -- i.e. until the window has genuinely
+// accumulated a full ADAPTIVE_TUNE_DUTY_STABILITY_WINDOW_S seconds of
+// history, never a fresh single sample. This does not touch the
+// TEMPERATURE settle gate at all (ADAPTIVE_TUNE_SETTLE_MIN_S/_SLOPE_FLOOR_
+// C_PER_S, real-hardware constants, untouched) -- the ~0.003*tau residual
+// (cef1df2a) is unaffected.
+//
+// WINDOW_S is picked LONGER than ADAPTIVE_TUNE_SETTLE_MIN_S (180s) -- a real
+// steady-state duty verdict should not be trusted from a slice shorter than
+// the temperature gate's own settle requirement -- and short enough that a
+// genuinely long dwell (a mistuned zone's dwell runs for many multiples of
+// its own tau, often 1000+ seconds -- see sim_scenarios_adaptive.c's own
+// dwell-length comment) ages a stale entry-transient extreme out of the
+// window well before the dwell ends.
 #define ADAPTIVE_TUNE_DUTY_STABILITY_WINDOW_S 300.0f
+
+// Bucket width for the sliding duty-stability window above. Chosen so the
+// window is a ring of ADAPTIVE_TUNE_DUTY_WINDOW_NUM_BUCKETS (10) buckets of
+// 30s each rather than a raw per-tick sample ring: at production's 1 Hz
+// cadence a raw ring covering 300s would need 300 entries/zone (2400 bytes
+// at 8 bytes/sample for {t_s, duty}, 7.2 KB across THERMO_CHANNEL_COUNT=3
+// zones) purely to answer a min/max query. The bucketed ring answers the
+// SAME question -- min/max duty over the trailing window -- by keeping only
+// a running (min, max) pair PER BUCKET: 10 buckets * 2 floats * 3 zones =
+// 240 bytes total, a ~30x reduction, with a worst-case eviction granularity
+// of one bucket (30s) instead of one sample: the combined min/max always
+// reflects between (NUM_BUCKETS-1)*BUCKET_S = 270s and 300s+ of trailing
+// history, never fewer than 270s and never a single fresh sample -- the
+// defect above (a verdict from 1s of history) cannot recur by construction,
+// since the current (open) bucket alone can never be the sole contributor:
+// a verdict is refused until NUM_BUCKETS buckets have actually closed.
+#define ADAPTIVE_TUNE_DUTY_WINDOW_BUCKET_S 30.0f
+// A plain integer literal, NOT a float-division expression: an array
+// dimension at file scope (adaptive_tune_zone_t's duty_win_bucket_min/max[]
+// below) must be an integer CONSTANT expression in C, and a cast of a float
+// division does not qualify even though it folds to a compile-time constant
+// -- gcc's ESP-IDF target build (-Werror) correctly rejected `((int)(300.0f
+// / 30.0f))` here as "variably modified at file scope". MUST be kept in sync
+// BY HAND with WINDOW_S/BUCKET_S above (a float division is not an integer
+// constant expression, so it cannot drive a _Static_assert either) --
+// adaptive_tune_init() asserts the product at startup so a future edit that
+// breaks the relationship fails loudly instead of silently mis-sizing the
+// window.
+#define ADAPTIVE_TUNE_DUTY_WINDOW_NUM_BUCKETS 10
 
 #define ADAPTIVE_TUNE_MIN_DUTY_FOR_OBSERVATION 0.03f
 
@@ -363,18 +407,34 @@ typedef struct {
     float settle_duty_min;
     float settle_duty_max;
 
-    // Trailing (tumbling) duty-stability window -- see ADAPTIVE_TUNE_DUTY_
-    // STABILITY_WINDOW_S's own comment above for why this is separate from
-    // settle_duty_min/max above (which still spans the whole dwell and is
-    // otherwise unused for the stability verdict as of this pass, kept only
-    // because nothing outside this file reads it and there was no reason to
-    // rip it out along with the fields it feeds). settle_window_start_s is
-    // an offset into settle_elapsed_s, not a standalone clock -- so it needs
-    // no separate reset-to-zero handling beyond mirroring settle_elapsed_s's
-    // own resets.
-    float settle_window_start_s;
-    float settle_window_duty_min;
-    float settle_window_duty_max;
+    // Trailing SLIDING duty-stability window -- see ADAPTIVE_TUNE_DUTY_
+    // WINDOW_BUCKET_S/_NUM_BUCKETS' own comment above (adaptive_tune_
+    // internal.h) for why this replaced a single tumbling (min,max) pair
+    // (2026-09-14 correction: that shape could read a verdict from a
+    // 1-sample window). This is separate from settle_duty_min/max above
+    // (which still spans the whole dwell and is otherwise unused for the
+    // stability verdict, kept only because nothing outside this file reads
+    // it and there was no reason to rip it out along with the fields it
+    // feeds).
+    //
+    // duty_win_bucket_min/max[i] holds the running min/max of the samples
+    // folded into bucket i so far; duty_win_bucket_open_idx is the index of
+    // the currently-accumulating (not yet closed) bucket; duty_win_bucket_
+    // elapsed_s is the time accumulated in that open bucket (closes and
+    // rotates to the next slot at ADAPTIVE_TUNE_DUTY_WINDOW_BUCKET_S);
+    // duty_win_bucket_has_sample tracks whether the open bucket has been
+    // seeded yet (first fold of a bucket sets min=max=duty rather than
+    // comparing against a stale previous occupant's extremes); duty_win_
+    // closed_count is the number of buckets that have ever closed, SATURATED
+    // at ADAPTIVE_TUNE_DUTY_WINDOW_NUM_BUCKETS -- a verdict is refused until
+    // this reaches NUM_BUCKETS, i.e. until the window holds a genuine full
+    // span of history, never a freshly-seeded partial one.
+    float    duty_win_bucket_min[ADAPTIVE_TUNE_DUTY_WINDOW_NUM_BUCKETS];
+    float    duty_win_bucket_max[ADAPTIVE_TUNE_DUTY_WINDOW_NUM_BUCKETS];
+    uint32_t duty_win_bucket_open_idx;
+    float    duty_win_bucket_elapsed_s;
+    bool     duty_win_bucket_has_sample;
+    uint32_t duty_win_closed_count;
 
     adaptive_tune_obs_t ring[ADAPTIVE_TUNE_RING_CAPACITY];
     uint32_t ring_count;

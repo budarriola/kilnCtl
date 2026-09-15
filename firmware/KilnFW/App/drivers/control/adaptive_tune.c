@@ -41,6 +41,7 @@
 // which is not PSRAM-stacked.
 #include "adaptive_tune_internal.h"
 
+#include <assert.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -270,7 +271,10 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
         z->settle_start_valid = false;
         z->settle_elapsed_s = 0.0f;
         z->recorded_this_dwell = false;
-        z->settle_window_start_s = 0.0f;
+        z->duty_win_bucket_open_idx = 0;
+        z->duty_win_bucket_elapsed_s = 0.0f;
+        z->duty_win_bucket_has_sample = false;
+        z->duty_win_closed_count = 0;
     }
 
     if (!z->enabled || !actual_valid || isnan(ambient_c)) {
@@ -296,9 +300,10 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
         z->settle_start_c = actual_c;
         z->settle_duty_min = duty;
         z->settle_duty_max = duty;
-        z->settle_window_start_s = 0.0f;
-        z->settle_window_duty_min = duty;
-        z->settle_window_duty_max = duty;
+        z->duty_win_bucket_open_idx = 0;
+        z->duty_win_bucket_elapsed_s = 0.0f;
+        z->duty_win_bucket_has_sample = false;
+        z->duty_win_closed_count = 0;
     }
     z->settle_elapsed_s += dt_s;
     if (duty < z->settle_duty_min) {
@@ -307,23 +312,40 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
     if (duty > z->settle_duty_max) {
         z->settle_duty_max = duty;
     }
-    // Trailing duty-stability window (ADAPTIVE_TUNE_DUTY_STABILITY_WINDOW_S's
-    // own comment, adaptive_tune_internal.h): FOLD the current sample into
-    // the window every tick, unconditionally -- the actual tumble (starting
-    // a fresh window) is decided and applied FURTHER DOWN, AFTER this tick's
-    // stability verdict has already been read from the window this fold
-    // produces. Deliberately NOT tumbled here: tumbling here, before the
-    // verdict, would let a tick that happens to land exactly on a WINDOW_S
-    // boundary see a freshly-reset, single-sample window (range == 0) and
-    // pass trivially regardless of how unstable duty genuinely is -- proven
-    // by test_persistent_duty_oscillation_never_harvests() in test_adaptive_
-    // tune_dwell.c, which is exactly the fixture that would slip through a
-    // tumble-then-evaluate ordering on this tick.
-    if (duty < z->settle_window_duty_min) {
-        z->settle_window_duty_min = duty;
+    // Trailing SLIDING duty-stability window (ADAPTIVE_TUNE_DUTY_WINDOW_
+    // BUCKET_S/_NUM_BUCKETS' own comment, adaptive_tune_internal.h): fold
+    // the current sample into the OPEN bucket every tick, unconditionally.
+    // Bucket closure/rotation happens AFTER the fold, same "verdict reads
+    // from what was just folded" discipline the previous (defective) single-
+    // window tumble used, but here closing one bucket never discards the
+    // other NUM_BUCKETS-1 already-closed buckets, so the combined min/max a
+    // verdict is read from (further down) can never come from fewer than
+    // (NUM_BUCKETS-1)*BUCKET_S seconds of history once the window is mature.
+    if (!z->duty_win_bucket_has_sample) {
+        z->duty_win_bucket_min[z->duty_win_bucket_open_idx] = duty;
+        z->duty_win_bucket_max[z->duty_win_bucket_open_idx] = duty;
+        z->duty_win_bucket_has_sample = true;
+    } else {
+        if (duty < z->duty_win_bucket_min[z->duty_win_bucket_open_idx]) {
+            z->duty_win_bucket_min[z->duty_win_bucket_open_idx] = duty;
+        }
+        if (duty > z->duty_win_bucket_max[z->duty_win_bucket_open_idx]) {
+            z->duty_win_bucket_max[z->duty_win_bucket_open_idx] = duty;
+        }
     }
-    if (duty > z->settle_window_duty_max) {
-        z->settle_window_duty_max = duty;
+    z->duty_win_bucket_elapsed_s += dt_s;
+    if (z->duty_win_bucket_elapsed_s >= ADAPTIVE_TUNE_DUTY_WINDOW_BUCKET_S) {
+        // Close the open bucket and rotate to the next ring slot, seeding it
+        // fresh (has_sample=false) -- the OLD occupant of that slot, if any,
+        // is now overwritten, which is exactly the eviction of the oldest
+        // bucket a ring is supposed to perform.
+        if (z->duty_win_closed_count < (uint32_t)ADAPTIVE_TUNE_DUTY_WINDOW_NUM_BUCKETS) {
+            z->duty_win_closed_count++;
+        }
+        z->duty_win_bucket_open_idx =
+            (z->duty_win_bucket_open_idx + 1) % (uint32_t)ADAPTIVE_TUNE_DUTY_WINDOW_NUM_BUCKETS;
+        z->duty_win_bucket_elapsed_s = 0.0f;
+        z->duty_win_bucket_has_sample = false;
     }
 
     // Trace append happens on EVERY dwelling tick, not gated on settle --
@@ -361,39 +383,56 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
     }
 
     // Settled on TEMPERATURE. Duty-stability check next -- see ADAPTIVE_TUNE_
-    // DUTY_STABILITY_ABS/FRAC/_WINDOW_S's own comments (adaptive_tune_
-    // internal.h) for the real-hardware defect this closes and the 2026-09-14
-    // fix to it. A temperature slope passing this file's floor is not
-    // sufficient evidence of steady state on an under-damped zone; duty
-    // itself must also have stayed put, over its OWN trailing window (not
-    // the whole dwell -- an entry transient must not veto every later tick).
+    // DUTY_STABILITY_ABS/FRAC/_WINDOW_S and _WINDOW_BUCKET_S/_NUM_BUCKETS'
+    // own comments (adaptive_tune_internal.h) for the real-hardware defect
+    // this closes, the 2026-09-14 fix, and that same day's correction of the
+    // fix. A temperature slope passing this file's floor is not sufficient
+    // evidence of steady state on an under-damped zone; duty itself must
+    // also have stayed put, over its OWN trailing window (not the whole
+    // dwell -- an entry transient must not veto every later tick, and not a
+    // single fresh sample either -- a verdict from 1 tick of history is not
+    // steady-state evidence, see the correction comment above).
     //
-    // recorded_this_dwell is deliberately NOT set for a duty_unstable
-    // verdict: unlike the too-low-duty/bad-rise cases below (which reflect a
-    // property of the dwell's operating point that will not change for the
-    // rest of it), duty being unstable RIGHT NOW says nothing about whether
-    // it will still be unstable next tick -- the whole point of the trailing
-    // window is that it can and does resolve as the entry transient ages out
-    // of it. Re-evaluating every tick is cheap (two float compares) and is
-    // exactly what the unchanged temperature-slope retry a few lines above
-    // already does for the identical reason.
+    // recorded_this_dwell is deliberately NOT set for either an immature-
+    // window or a duty_unstable verdict: neither says anything permanent
+    // about the dwell's operating point -- "not enough window history yet"
+    // resolves itself purely by more time passing, and "unstable right now"
+    // can resolve as the entry transient ages out of the window -- so both
+    // retry every tick, exactly like the unchanged temperature-slope retry
+    // a few lines above for the identical reason.
+    if (z->duty_win_closed_count < (uint32_t)ADAPTIVE_TUNE_DUTY_WINDOW_NUM_BUCKETS) {
+        adaptive_tune_set_refusal(z,
+            "duty window still gathering history (%lu/%d buckets closed) -- not a steady-state observation",
+            (unsigned long)z->duty_win_closed_count, ADAPTIVE_TUNE_DUTY_WINDOW_NUM_BUCKETS);
+        xSemaphoreGive(adaptive_tune_lock);
+        return;
+    }
     {
-        float duty_range = z->settle_window_duty_max - z->settle_window_duty_min;
+        // Combine every bucket currently held in the ring (there are always
+        // exactly NUM_BUCKETS slots once duty_win_closed_count has saturated,
+        // including the CURRENTLY OPEN one, which contributes only the
+        // samples folded into it so far) into one min/max pair. This can
+        // never be read from fewer than (NUM_BUCKETS-1)*BUCKET_S seconds of
+        // closed-bucket history, regardless of how little time has elapsed
+        // in the currently-open bucket -- unlike the single-pair tumble this
+        // replaces, there is no instant at which the combined range reflects
+        // only the open bucket's contents.
+        float win_min = z->duty_win_bucket_has_sample ? z->duty_win_bucket_min[z->duty_win_bucket_open_idx] : duty;
+        float win_max = z->duty_win_bucket_has_sample ? z->duty_win_bucket_max[z->duty_win_bucket_open_idx] : duty;
+        for (int bi = 0; bi < ADAPTIVE_TUNE_DUTY_WINDOW_NUM_BUCKETS; bi++) {
+            if (bi == (int)z->duty_win_bucket_open_idx) {
+                continue; // already folded in above (open bucket, may be empty)
+            }
+            if (z->duty_win_bucket_min[bi] < win_min) {
+                win_min = z->duty_win_bucket_min[bi];
+            }
+            if (z->duty_win_bucket_max[bi] > win_max) {
+                win_max = z->duty_win_bucket_max[bi];
+            }
+        }
+        float duty_range = win_max - win_min;
         bool duty_unstable = duty_range > ADAPTIVE_TUNE_DUTY_STABILITY_ABS ||
                               (duty > 0.0f && duty_range > ADAPTIVE_TUNE_DUTY_STABILITY_FRAC * duty);
-
-        // Tumble now, AFTER the verdict above was read -- see the fold
-        // comment further up for why this ordering matters. Applied
-        // regardless of the verdict: a STABLE window's dwell is about to
-        // lock in an observation anyway (recorded_this_dwell below), so
-        // tumbling it is moot; an UNSTABLE window must still tumble so the
-        // NEXT tick's fold starts from the current instant, not from
-        // whatever aged the current window out in the first place.
-        if ((z->settle_elapsed_s - z->settle_window_start_s) >= ADAPTIVE_TUNE_DUTY_STABILITY_WINDOW_S) {
-            z->settle_window_start_s = z->settle_elapsed_s;
-            z->settle_window_duty_min = duty;
-            z->settle_window_duty_max = duty;
-        }
 
         if (duty_unstable) {
             // Distinct refusal string (task requirement: an operator must be
@@ -1174,6 +1213,14 @@ adaptive_tune_revert_result_t adaptive_tune_revert(uint8_t zone_index, char *rea
 
 void adaptive_tune_init(void)
 {
+    // ADAPTIVE_TUNE_DUTY_WINDOW_NUM_BUCKETS is a plain integer literal (see
+    // its own comment, adaptive_tune_internal.h) that MUST equal WINDOW_S /
+    // BUCKET_S -- a float division can't drive a _Static_assert, so this
+    // runtime check is what catches a future edit that breaks the
+    // relationship (rather than silently mis-sizing the sliding window).
+    assert((float)ADAPTIVE_TUNE_DUTY_WINDOW_NUM_BUCKETS * ADAPTIVE_TUNE_DUTY_WINDOW_BUCKET_S ==
+           ADAPTIVE_TUNE_DUTY_STABILITY_WINDOW_S);
+
     adaptive_tune_ensure_lock();
     memset(adaptive_tune_zones, 0, sizeof(adaptive_tune_zones));
 
