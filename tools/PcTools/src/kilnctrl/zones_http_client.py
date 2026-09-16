@@ -632,6 +632,13 @@ _TOP_READONLY_OR_STRUCTURAL_KEYS = {
     # this module still surfaces that read-only value the same way
     # safety_ceiling below does.
     "safety_tc_type",
+    # safety_tc_type_known (2026-09-15, Opus re-review N5): whether the
+    # safety_tc_type value above has actually been fetched from the Pico
+    # this boot, as opposed to zones_http_get.c falling back to the ESP's
+    # own possibly-stale zones.cfg.safety_tc_type before the first Pico
+    # readback lands -- see that file's own comment. Read-only telemetry,
+    # same as safety_tc_type itself: no POST field.
+    "safety_tc_type_known",
     # safety_ceiling (owner request 2026-09-10): read-only telemetry --
     # {target_c, pico_known, pico_current_c} showing what the Pico's
     # abs_max_temp_c ceiling should be (from the zone maxima,
