@@ -32,6 +32,9 @@
 #include "freertos/idf_additions.h"
 #include "settings.h"
 #include "uart_task_ids.h"
+#include "kiln_cfg_store.h"
+#include "config_divergence.h" /* CONFIG_DIVERGENCE_REASON_MAX */
+#include "safety_ceiling_sync.h"
 
 #include "kilnlink/kilnlink_announce.h"
 #include "kilnlink/kilnlink_announce_reboot.h"
@@ -291,6 +294,92 @@ static void safety_update_health(SafetyLinkClass *link)
     }
 }
 
+/* Hand-declared, same convention safety_cfg_store.c/relay_cycles.c/
+ * factory_reset.c/zones_config_store.c already use for the flash worker
+ * (see flash_worker.h's own doc comment) -- avoids pulling in the whole
+ * UART bridge API for one call. The BOUNDED variant deliberately: this task
+ * drives the safety link's own liveness heartbeat, and blocking it for the
+ * unbounded duration of some other caller's flash job (a profile import, a
+ * cfg_fs write) would stall the GET_STATUS poll the Pico's S6b LINK_DEAD
+ * guard watches for. */
+esp_err_t uart_bridge_ext_run_on_flash_worker_timeout(void (*fn)(void *arg), void *arg,
+                                                       uint32_t timeout_ms);
+
+/* How long to wait for the shared flash worker to come free. Short on
+ * purpose -- see the bounded-dispatch note above. A miss is not an error:
+ * the pending flag stays set and the next poll below retries. */
+#define SAFETY_POLL_RECAPTURE_DISPATCH_TIMEOUT_MS 50u
+
+/* How often to even look at the pending flag. The recapture is a
+ * housekeeping write, not a safety deadline, and safety_poll_task's own loop
+ * runs at roughly 2 Hz -- checking every iteration would add a pointless
+ * lock take per tick. */
+#define SAFETY_POLL_RECAPTURE_INTERVAL_MS 5000u
+
+/* 2026-09-15 review follow-up (review_divergence_wiring_60d6552f_2026-09-15.md,
+ * HIGH 1 and items A/B/C): the deferred Pico-half recapture poll used to run
+ * on the home page's 1 Hz LVGL refresh timer. That timer is created inside
+ * ui_page_home.c's lazy build(), so on a boot that never opens the home page
+ * (a touch_cal boot, say) the poll simply did not exist; it was also nested
+ * inside a widget-non-NULL check and died with the page. A divergence
+ * detector must not depend on which screen the operator opened, so it lives
+ * here now: safety_poll_task always runs, is display-independent, and is
+ * already the task that drives the divergence evaluation this recapture is
+ * gated on.
+ *
+ * Reachability: this is not reachable on-worker. safety_poll_task is created
+ * by safety_link_start() and is never bx_flash_worker, so the dispatch below
+ * can never re-enter the worker from itself (flash_worker.h's re-entrancy
+ * rule).
+ *
+ * The dispatch is mandatory, not stylistic: safety_poll_task's 8192 B stack
+ * is PSRAM-backed, and kiln_cfg_store_autosave_from_live()'s deferred-
+ * recapture path performs an NVS write, which aborts outright from a
+ * PSRAM stack (project memory: "PSRAM stack + NVS = panic"). */
+static void safety_poll_pico_half_recapture_job(void *arg)
+{
+    (void)arg;
+    char reason[CONFIG_DIVERGENCE_REASON_MAX];
+    reason[0] = '\0';
+    if (!kiln_cfg_store_autosave_from_live(reason, sizeof(reason))) {
+        ESP_LOGW("safety_poll", "deferred Pico-half recapture autosave failed: %s",
+                 reason[0] ? reason : "(no reason given)");
+    }
+}
+
+static void safety_poll_service_pico_half_recapture(void)
+{
+    static TickType_t s_last_check_ticks = 0;
+    static bool s_checked_once = false;
+
+    TickType_t now = xTaskGetTickCount();
+    if (s_checked_once &&
+        (now - s_last_check_ticks) < pdMS_TO_TICKS(SAFETY_POLL_RECAPTURE_INTERVAL_MS)) {
+        return;
+    }
+    s_last_check_ticks = now;
+    s_checked_once = true;
+
+    /* Never recapture while still diverged -- autosave_from_live() would
+     * just re-defer and re-log. The recapture exists to clear a flag that
+     * was deferred BECAUSE of a divergence, once that divergence is gone. */
+    if (safety_ceiling_sync_is_standing_diverged(NULL, 0)) {
+        return;
+    }
+    if (!kiln_cfg_store_pico_half_recapture_pending()) {
+        return;
+    }
+
+    /* Backpressure here is a bounded wait, not a freeze and not a dropped
+     * job: if the worker is busy, this returns ESP_ERR_TIMEOUT after at most
+     * SAFETY_POLL_RECAPTURE_DISPATCH_TIMEOUT_MS, the pending flag is still
+     * set, and the next poll (SAFETY_POLL_RECAPTURE_INTERVAL_MS later)
+     * genuinely retries. That retry is what makes ignoring the return value
+     * correct -- it is not fire-and-forget. */
+    (void)uart_bridge_ext_run_on_flash_worker_timeout(safety_poll_pico_half_recapture_job, NULL,
+                                                       SAFETY_POLL_RECAPTURE_DISPATCH_TIMEOUT_MS);
+}
+
 void safety_poll_task(void *arg)
 {
     SafetyLinkClass *link = (SafetyLinkClass *)arg;
@@ -356,6 +445,7 @@ void safety_poll_task(void *arg)
          * the same way boot_clear_pending is deferred off safety_apply_diag's.
          * No-op whenever nothing is pending; safe with no module lock held. */
         heat_enable_service_pending_release();
+        safety_poll_service_pico_half_recapture();
 
         if (period == 0u) {
             /* Polling off: still drain anything the peer pushes unsolicited,

@@ -295,8 +295,20 @@ static hal_status_t nvs_partition_init(const char *partition)
     return hal_kv_init_partition(partition);
 }
 
+/* Forward decl -- see the full doc comment on the second declaration further
+ * down, next to kiln_cfg_store_set_active_id_raw(). Declared this early
+ * because the 2026-09-15 review's LOW 7 follow-up found five OTHER writers
+ * of s_store.active_id above that point, all of which must drop a pending
+ * per-slot recapture flag owned by the slot they are moving away from. */
+static void pico_half_dirty_drop_if_owned_by(int32_t slot);
+
 static void reset_to_defaults(void)
 {
+    /* LOW 7 (2026-09-15 review follow-up): s_pico_half_dirty/_slot are
+     * file statics, NOT part of s_store, so the memset below does not clear
+     * them -- a pending recapture would survive a reset-to-defaults and then
+     * apply to whatever slot became active later. Drop it first. */
+    pico_half_dirty_drop_if_owned_by(s_store.active_id);
     memset(&s_store, 0, sizeof(s_store));
     s_store.version = KILN_CFG_STORE_VERSION;
     s_store.active_id = KILN_CFG_NO_ACTIVE_ID;
@@ -893,6 +905,9 @@ esp_err_t kiln_cfg_store_init(void)
             ESP_LOGW(TAG, "active kiln config id=%ld no longer exists -- clearing it, keeping "
                           "whatever zones config already loaded",
                      (long)s_store.active_id);
+            /* LOW 7: the slot is going away, so any recapture pending
+             * against it must go with it. */
+            pico_half_dirty_drop_if_owned_by(s_store.active_id);
             s_store.active_id = KILN_CFG_NO_ACTIVE_ID;
             hal_status_t clear_err = nvs_save_store();
             if (clear_err != HAL_OK) {
@@ -907,6 +922,8 @@ esp_err_t kiln_cfg_store_init(void)
                 ESP_LOGW(TAG, "active kiln config id=%ld failed validation at boot (%s) -- clearing "
                               "it, keeping whatever zones config already loaded",
                          (long)s_store.active_id, reason);
+                /* LOW 7, same reasoning as the missing-id branch above. */
+                pico_half_dirty_drop_if_owned_by(s_store.active_id);
                 s_store.active_id = KILN_CFG_NO_ACTIVE_ID;
                 hal_status_t clear_err = nvs_save_store();
                 if (clear_err != HAL_OK) {
@@ -1172,6 +1189,14 @@ static bool kiln_cfg_store_save_current_ex(const char *name, int32_t id_or_negat
          * fact, not applying anything. Overwriting an existing entry
          * (id_or_negative >= 0) does NOT do this -- see this function's own
          * header comment. */
+        /* LOW 7: drop a recapture still owed by the slot we are leaving.
+         * Ordering matters -- populate_pico_half_and_hash() just above may
+         * have set a fresh pending flag against the NEW slot `id`, and
+         * drop_if_owned_by() only clears a flag whose owner matches, so the
+         * new one survives. */
+        if (s_store.active_id != id) {
+            pico_half_dirty_drop_if_owned_by(s_store.active_id);
+        }
         s_store.active_id = id;
     }
 
@@ -1315,6 +1340,11 @@ bool kiln_cfg_store_apply(int32_t id, bool ack_no_safety_processor, char *reason
     kiln_cfg_store_unlock();
     if (!import_ok) {
         return false;
+    }
+    /* LOW 7: same choke-point drop kiln_cfg_store_set_active_id_raw() does
+     * -- this apply path changes the active slot without going through it. */
+    if (s_store.active_id != id) {
+        pico_half_dirty_drop_if_owned_by(s_store.active_id);
     }
     s_store.active_id = id;
     hal_status_t err = nvs_save_store();

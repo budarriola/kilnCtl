@@ -1155,6 +1155,35 @@ uint32_t safety_cfg_store_cache_generation(void)
     return s_cache_generation;
 }
 
+/* 2026-09-15 review follow-up (item G): moved here from safety_cfg_http.c.
+ * It lived there because the HTTP commissioning handler is what observes the
+ * refusal, but its only READER is safety_ceiling_sync.c -- a safety/ module,
+ * which had to include an http/ header to reach it (a layering inversion,
+ * and a fake every host-test executable linking safety_ceiling_sync.c then
+ * had to supply). This module is the natural owner: it already holds the
+ * ESP's view of the Pico's config state, and both sides already depend on
+ * it. Writer: safety_cfg_http.c's commissioning_post_handler(). Reader:
+ * safety_ceiling_sync.c's standing-divergence warning.
+ *
+ * Window-bounded (not "ever, since boot") so a long-past refusal the
+ * operator already acted on does not keep claiming to explain a NEW,
+ * unrelated divergence. A plain int64_t read/write with no lock: a torn read
+ * on either side can only mis-date the hint text in a warning string, never
+ * affect an enforcement decision. */
+#define SAFETY_CFG_STORE_ARMED_REFUSAL_WINDOW_US ((int64_t)5 * 60 * 1000 * 1000)
+static int64_t s_last_armed_refusal_us = -SAFETY_CFG_STORE_ARMED_REFUSAL_WINDOW_US;
+
+void safety_cfg_store_note_armed_refusal(void)
+{
+    s_last_armed_refusal_us = (int64_t)hal_time_now_us();
+}
+
+bool safety_cfg_store_recent_armed_refusal(void)
+{
+    int64_t now_us = (int64_t)hal_time_now_us();
+    return (now_us - s_last_armed_refusal_us) < SAFETY_CFG_STORE_ARMED_REFUSAL_WINDOW_US;
+}
+
 uint32_t safety_cfg_store_fetched_ms_ago(void)
 {
     if (s_fetched_at_us < 0) {

@@ -203,7 +203,7 @@ uint32_t safety_cfg_store_cache_generation(void)
 // refusal by default -- the one test that needs the hint text sets this via
 // s_stub_recent_armed_refusal below.
 static bool s_stub_recent_armed_refusal = false;
-bool safety_cfg_http_recent_armed_refusal(void)
+bool safety_cfg_store_recent_armed_refusal(void)
 {
     return s_stub_recent_armed_refusal;
 }

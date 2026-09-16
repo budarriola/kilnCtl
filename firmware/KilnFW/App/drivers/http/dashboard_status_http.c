@@ -495,29 +495,35 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
      * disabling ceiling divergence was visible anywhere (readiness_http.c's
      * "safety_ceiling_match" item). Without this, autosave could be
      * silently blocked forever (kiln_cfg_store.c's autosave gate) with no
-     * operator-visible symptom at all. Truncated to a short prefix of the
-     * full reason -- this buffer already runs close to its budget (see this
-     * file's own header comment on DASHBOARD_JSON_STATUS_BUF_SIZE
-     * headroom), and a short summary is enough to point an operator at
-     * /safety/commissioning for the full detail. */
+     * The reason STRING is deliberately not emitted here at all -- see
+     * the sizing note on the emit below. */
     {
-        /* 2026-09-15 review (review_divergence_fixes_b2e7017f_2026-09-15.md,
-         * MEDIUM 5/6): `static` -- off this httpd worker's stack, same
-         * single-caller convention as commit_esc/datetime_esc above
-         * (esp_http_server's HTTPD_DEFAULT_CONFIG() runs one worker task, so
-         * this handler is never reentered) -- shrinks this handler's stack
-         * frame (already-LOW headroom, must not grow) instead of adding to
-         * it, and lets the escaped copy be sized for the FULL reason rather
-         * than truncated. json_escape() doubles worst case (every char
-         * escaped), same sizing rule as commit_esc/datetime_esc. */
-        static char standing_reason[CONFIG_DIVERGENCE_REASON_MAX];
-        static char standing_reason_esc[CONFIG_DIVERGENCE_REASON_MAX * 2 + 1];
-        bool standing_diverged = safety_ceiling_sync_is_standing_diverged(standing_reason, sizeof(standing_reason));
-        APPEND(",\"safety_standing_diverged\":%s", standing_diverged ? "true" : "false");
-        if (standing_diverged) {
-            json_escape(standing_reason, standing_reason_esc, sizeof(standing_reason_esc));
-            APPEND(",\"safety_standing_diverged_reason\":\"%s\"", standing_reason_esc);
-        }
+        /* 2026-09-15 review follow-up (item E). This field set used to be a
+         * boolean PLUS the divergence reason string, escaped. That was worth
+         * up to 321 escaped bytes, in a buffer whose own sizing test
+         * (test_dashboard_json.c) asserts a 50-byte minimum headroom.
+         * Overflowing it does not degrade the field: it takes the APPEND
+         * macro's `goto truncated` path and returns HTTP 500 for the WHOLE
+         * status document, so an operator loses the entire dashboard because
+         * a divergence reason got long.
+         *
+         * The buffer is deliberately NOT enlarged to fix this -- this repo
+         * has had two panics from big locals on the shared 8 KB httpd stack,
+         * and DASHBOARD_JSON_STATUS_BUF_SIZE has already been raised four
+         * times. Bounding the content instead was re-derived against the
+         * mirror's measurement and the arithmetic does not close: with the
+         * reason present at ANY length the document exceeds the buffer, and
+         * even the boolean alone under its old, longer key left only 45
+         * bytes of headroom against the required 50. So the reason string is
+         * dropped from /api/status entirely and the key shortened to
+         * `safety_diverged`; the full reason remains available from
+         * GET /api/safety/commissioning, on the LCD notice, and in
+         * readiness_http.c's "safety_ceiling_match" item. No web asset read
+         * the old keys (grepped repo-wide) -- only audit prose mentions them.
+         * Any field added back here must be mirrored in
+         * test_dashboard_json.c's render_worst_case_status_json(). */
+        bool standing_diverged = safety_ceiling_sync_is_standing_diverged(NULL, 0);
+        APPEND(",\"safety_diverged\":%s", standing_diverged ? "true" : "false");
     }
 
     APPEND(",\"diag_ever_received\":%s", ds->diag_ever_received ? "true" : "false");

@@ -867,21 +867,16 @@ static const char *commit_reject_reason_words(uint8_t reason)
  * numeric code exists on this side of the link -- reuse it, do not
  * re-derive a classification from prose anywhere else. */
 /* 2026-09-15 review (review_divergence_fixes_b2e7017f_2026-09-15.md,
- * HIGH 2): see safety_cfg_http_recent_armed_refusal()'s doc comment
- * (safety_cfg_http.h). Set only by commissioning_post_handler below, the
+ * HIGH 2): the armed-refusal timestamp this handler records now lives in
+ * safety_cfg_store (safety_cfg_store_note_armed_refusal() /
+ * _recent_armed_refusal()) -- see item G in
+ * review_divergence_wiring_60d6552f_2026-09-15.md for why it moved out of
+ * this file. It is still set ONLY by commissioning_post_handler below, the
  * operator-facing entry point this is meant to explain -- not by every
  * internal apply_pairs()/confirm_commit_landed() caller (e.g.
  * safety_ceiling_sync.c's own ceiling-raise retries back off on ARMED as a
  * matter of course and must not spuriously claim to explain an unrelated
  * standing-field mismatch). */
-#define SAFETY_CFG_HTTP_ARMED_REFUSAL_WINDOW_US ((int64_t)5 * 60 * 1000 * 1000)
-static int64_t s_last_commissioning_armed_refusal_us = -SAFETY_CFG_HTTP_ARMED_REFUSAL_WINDOW_US;
-
-bool safety_cfg_http_recent_armed_refusal(void)
-{
-    int64_t now_us = (int64_t)hal_time_now_us();
-    return (now_us - s_last_commissioning_armed_refusal_us) < SAFETY_CFG_HTTP_ARMED_REFUSAL_WINDOW_US;
-}
 
 static safety_ceiling_refusal_class_t reject_reason_to_refusal_class(uint8_t reason)
 {
@@ -1292,7 +1287,7 @@ static esp_err_t commissioning_post_handler(httpd_req_t *req)
      * reporting a bare, actionless mismatch -- see safety_cfg_http_recent_
      * armed_refusal()'s doc comment. */
     if (!ok && refusal_class == SAFETY_CEILING_REFUSAL_ARMED) {
-        s_last_commissioning_armed_refusal_us = (int64_t)hal_time_now_us();
+        safety_cfg_store_note_armed_refusal();
     }
 
     /* S8 rate-guard write provenance -- this generic endpoint is how an
@@ -1305,6 +1300,35 @@ static esp_err_t commissioning_post_handler(httpd_req_t *req)
      * same "verify before tagging" discipline the auto-apply endpoint uses.
      * A stage-only (commit=false) submission changes nothing on the Pico
      * yet, so it must not touch this record either. */
+    /* 2026-09-15 review, HIGH 2 -- DOCUMENTED, NOT FIXED. The review's
+     * complaint is that this gate is `ok && commit`, so a submission that
+     * REACHED the Pico but was refused never updates the captured Pico half,
+     * leaving a standing divergence the operator cannot clear. That is
+     * accurate, and it is deliberate. Recapturing on a refusal is not
+     * available to us here, for two independent reasons:
+     *
+     * 1. Nothing landed. apply_pairs_ex() stages every pair first and only
+     *    then commits; a commit refusal writes NOTHING (its own reason text
+     *    says "values were staged but NOT written"), and a staging failure
+     *    returns before commit is ever reached. So a refusal creates no new
+     *    divergence -- it can only fail to clear a PRE-EXISTING one.
+     *
+     * 2. Clearing it anyway would launder the fault. The captured Pico half
+     *    is the ESP's record of what the Pico is supposed to hold. Rewriting
+     *    it from an intent the Pico rejected would make the mismatch
+     *    disappear from every surface (the LCD notice, /api/status, the
+     *    readiness item) while the Pico still holds the old value --
+     *    converting a visible, actionable fault into a silent one. Project
+     *    policy is the opposite: "a config divergence is a fault", alarm and
+     *    never silently reconcile.
+     *
+     * The owner constraint that makes this unavoidable rather than merely
+     * preferable: the refusal this most often concerns is the ARMED refusal,
+     * and the governing rule is "there should never be a way that the pico is
+     * not armed". The remedy is therefore an operator action (disarm, retry),
+     * which the standing-divergence warning now names explicitly -- see
+     * safety_cfg_store_recent_armed_refusal() and its reader in
+     * safety_ceiling_sync.c. Do not "fix" this by widening the gate. */
     if (ok && commit) {
         for (int i = 0; i < n; i++) {
             if (pairs[i].param_id == 0x0204) {

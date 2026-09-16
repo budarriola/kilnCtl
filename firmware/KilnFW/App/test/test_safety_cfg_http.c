@@ -178,6 +178,13 @@ bool safety_cfg_store_lookup(uint16_t param_id, uint8_t *out_type, const char **
     return true;
 }
 
+// 2026-09-15 review follow-up (item G): the armed-refusal timestamp moved
+// out of safety_cfg_http.c (which this file #includes) into
+// safety_cfg_store, so the #included production code now calls this. Same
+// "own stub, real header" convention as every other safety_cfg_store_*
+// fake in this file.
+void safety_cfg_store_note_armed_refusal(void) { }
+bool safety_cfg_store_recent_armed_refusal(void) { return false; }
 uint16_t safety_cfg_store_cached_crc(void) { return 0; }
 uint32_t safety_cfg_store_fetched_ms_ago(void) { return UINT32_MAX; }
 

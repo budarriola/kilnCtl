@@ -13,6 +13,24 @@
 #include "MAX31856.h"
 #include "config_divergence.h"
 #include "hal_time.h" /* hal_time_now_us() -- HAL_INCLUDE_BOUNDARY: this file must not include esp_timer.h directly */
+/* 2026-09-15 review follow-up (item G), PARTIALLY closed. The finding was
+ * that a safety/ module including an http/ header is a layering inversion.
+ * The part that could honestly be fixed was the recent-ARMED-refusal
+ * timestamp: it was a bare file static in safety_cfg_http.c read through
+ * this header, and it now lives in safety_cfg_store (which this file
+ * already depends on, and which is the natural owner of Pico-config state
+ * -- the HTTP handler writes it, this file reads it).
+ *
+ * The include itself must STAY: ceiling_writer() below genuinely calls
+ * safety_cfg_http_set_and_confirm_f32(), the stage/commit/confirm-by-read-
+ * back machinery this file must not reimplement. Removing the include was
+ * tried and is a live defect, not a cosmetic one -- with no prototype, C
+ * assumes "extern returning int", the float target is passed under default
+ * argument promotion, and the Pico ceiling gets written as 0. It was caught
+ * by test_zones_http.c'"'"'s reconcile test (target read back 0.0 instead of
+ * 1200.0), NOT by the compiler, which only emits a warning. Untangling that
+ * dependency properly means moving the write machinery out of http/, which
+ * is a larger refactor than this review item. */
 #include "safety_cfg_http.h"
 #include "safety_cfg_store.h"
 #include "zones_config_accessors.h"
@@ -82,11 +100,28 @@ static int64_t s_standing_warning_last_log_us = -CONFIG_DIVERGENCE_LOG_INTERVAL_
  * enforce_ceiling_divergence(), after both latches above have been
  * (re)computed against whatever safety_cfg_store cache generation was
  * current at the top of that same call. */
+/* 2026-09-15 review follow-up (item F): this stamp is part of the same
+ * published snapshot as the two latches -- a reader compares it against
+ * safety_cfg_store_cache_generation() to decide whether the latch it just
+ * read was evaluated against the current cache. Writing it outside the lock
+ * that publishes the latches let a reader observe a NEW stamp beside an OLD
+ * latch pair (or the reverse), which is exactly the staleness the stamp
+ * exists to rule out. It is now written and read under
+ * s_divergence_state_lock like everything else in the snapshot. */
 static uint32_t s_latch_evaluated_generation = 0;
+
+/* Forward decls -- defined with the rest of the lock machinery just below.
+ * Needed here because the accessor above them must take the lock too (item
+ * F). */
+static void divergence_state_lock_take(void);
+static void divergence_state_lock_give(void);
 
 uint32_t safety_ceiling_sync_latch_evaluated_generation(void)
 {
-    return s_latch_evaluated_generation;
+    divergence_state_lock_take();
+    uint32_t gen = s_latch_evaluated_generation;
+    divergence_state_lock_give();
+    return gen;
 }
 
 static safety_ceiling_disable_heat_fn s_disable_all_relays_off = NULL;
@@ -319,8 +354,10 @@ static void enforce_ceiling_divergence(float target_c, bool target_known, float 
         s_divergence_reason[0] = '\0';
         s_standing_warning_active = false;
         s_standing_warning_reason[0] = '\0';
-        divergence_state_lock_give();
+        /* Item F: stamped inside the same critical section that publishes
+         * the latches above, so the pair is always mutually consistent. */
         s_latch_evaluated_generation = cache_gen_at_entry;
+        divergence_state_lock_give();
         return;
     }
     /* abs_max_temp_c is field 0, always present -- see config_divergence.h's
@@ -518,28 +555,43 @@ static void enforce_ceiling_divergence(float target_c, bool target_known, float 
          * this warning ignored or silenced) into "disarm and retry", an
          * actionable instruction. Appended, not substituted, so the
          * underlying field/value detail from config_divergence_check() is
-         * never lost. safety_cfg_http_recent_armed_refusal() is a plain
+         * never lost. safety_cfg_store_recent_armed_refusal() is a plain
          * timestamp read (no lock of its own), safe to call before taking
          * the divergence-state lock below. */
-        bool armed_refusal = safety_cfg_http_recent_armed_refusal();
+        bool armed_refusal = safety_cfg_store_recent_armed_refusal();
         bool should_log = false;
         divergence_state_lock_take();
         if (armed_refusal) {
-            /* standing_reason and s_standing_warning_reason are both sized
-             * CONFIG_DIVERGENCE_REASON_MAX, so appending a fixed suffix can
-             * legitimately need to truncate the reason text -- an accepted,
-             * cosmetic truncation (never a correctness issue: the operator
-             * still gets the ARMED hint plus as much of the field/value
-             * detail as fits), not a real overflow. -Wformat-truncation
-             * cannot see that this is intentional and bounded, hence
-             * -Werror flagging it as a build break unrelated to this
-             * review's own changes (coordinator note, 2026-09-15) -- silence
-             * just this one call rather than the whole file. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wformat-truncation"
-            snprintf(s_standing_warning_reason, sizeof(s_standing_warning_reason),
-                     "%s (re-push refused: relay is ARMED -- disarm and retry commissioning)", standing_reason);
-#pragma GCC diagnostic pop
+            /* 2026-09-15 review follow-up (item H): this used to be an
+             * snprintf("%s <fixed suffix>") wrapped in a -Wformat-truncation
+             * pragma push/pop, because standing_reason and
+             * s_standing_warning_reason are both CONFIG_DIVERGENCE_REASON_MAX
+             * and the suffix cannot always fit. Suppressing the warning hid a
+             * real weakness in that formulation: snprintf truncates the TAIL,
+             * so a long reason would have silently dropped the ARMED hint --
+             * the entire point of this branch -- rather than the field detail.
+             * Built explicitly instead: truncate the reason text to whatever
+             * leaves room, then always append the full suffix. No diagnostic
+             * needs silencing because nothing can truncate unexpectedly. */
+            static const char kArmedSuffix[] =
+                " (re-push refused: relay is ARMED -- disarm and retry commissioning)";
+            const size_t cap = sizeof(s_standing_warning_reason);
+            const size_t suffix_len = sizeof(kArmedSuffix) - 1u;
+            if (cap > suffix_len) {
+                size_t head_cap = cap - suffix_len - 1u;
+                size_t head_len = strlen(standing_reason);
+                if (head_len > head_cap) {
+                    head_len = head_cap;
+                }
+                memcpy(s_standing_warning_reason, standing_reason, head_len);
+                memcpy(s_standing_warning_reason + head_len, kArmedSuffix, suffix_len);
+                s_standing_warning_reason[head_len + suffix_len] = '\0';
+            } else {
+                /* Unreachable with today's sizes (160 vs ~68); kept so a
+                 * future shrink of CONFIG_DIVERGENCE_REASON_MAX degrades to
+                 * "hint only" rather than overflowing. */
+                snprintf(s_standing_warning_reason, cap, "%s", kArmedSuffix);
+            }
         } else {
             snprintf(s_standing_warning_reason, sizeof(s_standing_warning_reason), "%s", standing_reason);
         }
@@ -558,7 +610,12 @@ static void enforce_ceiling_divergence(float target_c, bool target_known, float 
         }
     }
 
+    /* Item F: same reasoning as the early-return stamp above -- published
+     * under the lock so the stamp and the latches are never observed out of
+     * step with each other. */
+    divergence_state_lock_take();
     s_latch_evaluated_generation = cache_gen_at_entry;
+    divergence_state_lock_give();
 }
 
 void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link)

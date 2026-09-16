@@ -247,6 +247,26 @@ bool safety_cfg_store_cache_is_stale(void);
  * events" race described in that finding without adding a cross-module lock. */
 uint32_t safety_cfg_store_cache_generation(void);
 
+/* 2026-09-15 review follow-up (item G): moved here from safety_cfg_http.h,
+ * where a safety/ reader had to include an http/ header to reach it.
+ *
+ * note(): called by safety_cfg_http.c's commissioning_post_handler() and
+ * ONLY by it -- the operator-facing entry point whose refusal this is meant
+ * to explain, never by internal apply_pairs()/confirm_commit_landed()
+ * callers (safety_ceiling_sync.c's own ceiling-raise retries back off on
+ * ARMED as a matter of course and must not spuriously claim to explain an
+ * unrelated standing-field mismatch).
+ *
+ * recent(): true iff such a refusal happened within roughly the last
+ * SAFETY_CFG_STORE_ARMED_REFUSAL_WINDOW_US. Window-bounded (not "ever, since
+ * boot") so a long-past refusal the operator already acted on does not keep
+ * claiming to explain a NEW, unrelated divergence. Lets the standing-
+ * divergence warning name the ACTUAL reason a mismatch cannot currently be
+ * corrected ("relay is ARMED -- disarm and retry") rather than reporting a
+ * bare, actionless mismatch. */
+void safety_cfg_store_note_armed_refusal(void);
+bool safety_cfg_store_recent_armed_refusal(void);
+
 /* 2026-08-23 panic fix: the actual NVS write safety_cfg_store_refetch() used
  * to make directly (nvs_save_store()) now only ever runs via this function,
  * which hands it to uart_bridge_ext.c's internal-SRAM-stack flash-safe

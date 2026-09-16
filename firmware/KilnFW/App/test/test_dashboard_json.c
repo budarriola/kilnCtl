@@ -808,6 +808,22 @@ static bool render_worst_case_status_json(char *json, size_t cap, size_t channel
         STATUS_APPEND(",\"safety_config_crc\":%u", 65535u);
     }
 
+    /* 2026-09-15 review follow-up (item E): MEDIUM 6 added a divergence
+     * boolean AND an escaped reason string to dashboard_status_http.c
+     * without adding either here, so this file'"'"'s headroom assertion had
+     * stopped covering the real document -- exactly the field-creep failure
+     * test_status_json_mutation_field_creep_goes_red() exists to catch,
+     * missed because the mirror was not updated.
+     *
+     * Mirroring them revealed the document no longer fits: 5400 bytes
+     * against DASHBOARD_JSON_STATUS_BUF_SIZE=5248, i.e. -152 bytes of
+     * headroom, which in production is an HTTP 500 for the whole status
+     * document. The handler now emits only the bare flag, under a shorter
+     * key, and no reason string -- see its own comment for why the buffer
+     * was not enlarged instead. "false" is the wider of the two boolean
+     * renderings, so it is the worst case. */
+    STATUS_APPEND(",\"safety_diverged\":%s", "false");
+
     STATUS_APPEND(",\"nvs_sections\":[");
     for (size_t i = 0; i < 4; i++) {
         STATUS_APPEND("%s{\"name\":\"%s\",\"present\":%s,\"mounted\":%s}", i == 0 ? "" : ",",

@@ -105,6 +105,31 @@ bool zones_config_is_valid(void) { return true; }
  * test_zones_http.c's test_reconcile_on_link_up_*() at the ESP-glue layer). */
 void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link) { (void)link; }
 
+/* 2026-09-15 (item HIGH1 of review_divergence_wiring_60d6552f_2026-09-15.md):
+ * safety_link_poll.c (#included below) now also owns the deferred Pico-half
+ * recapture poll that used to live in ui_page_home_refresh.c. That pulls in
+ * the persist/ config store and the flash-worker dispatch, neither of which
+ * this compile-check executable links -- same "everything else is faked"
+ * convention as the stubs above. The poll's real behaviour is not tested
+ * here; this file only needs safety_poll_task() to link. */
+bool safety_ceiling_sync_is_standing_diverged(char *reason_out, size_t reason_cap)
+{
+    if (reason_out && reason_cap > 0) { reason_out[0] = 0; }
+    return false;
+}
+bool kiln_cfg_store_pico_half_recapture_pending(void) { return false; }
+bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap)
+{
+    if (reason_out && reason_cap > 0) { reason_out[0] = 0; }
+    return true;
+}
+esp_err_t uart_bridge_ext_run_on_flash_worker_timeout(void (*fn)(void *arg), void *arg,
+                                                       uint32_t timeout_ms)
+{
+    (void)fn; (void)arg; (void)timeout_ms;
+    return ESP_OK;
+}
+
 // heat_enable_service_pending_release() -- 2026-09-15 fix
 // (docs/audits/profile_executor_coredump_2026-09-15.md): safety_link_poll.c's
 // safety_poll_task() now drains a pending heat_enable release once per loop,

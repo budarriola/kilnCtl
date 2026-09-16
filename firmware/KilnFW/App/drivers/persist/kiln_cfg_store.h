@@ -429,12 +429,27 @@ bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap);
  * that finds the divergence cleared, or kiln_cfg_store_recapture_pico_half_
  * confirmed() below. This module never polls its own dirty flag -- it has
  * no task of its own and must not dispatch to the flash worker on a timer
- * it owns -- so a caller with its own safe (non-PSRAM-stacked) polling
- * context (the web status handler and/or LCD refresh callback are the
- * intended consumers, both already httpd/LVGL-task-stacked, never safety_
- * poll_task) is expected to check this and retry kiln_cfg_store_autosave_
- * from_live() once the divergence-visibility surface (safety_ceiling_sync_
- * is_diverged()/is_standing_diverged()) reports clear. */
+ * it owns -- so an external periodic caller is expected to check this and
+ * retry kiln_cfg_store_autosave_from_live() once the divergence-visibility
+ * surface (safety_ceiling_sync_is_diverged()/is_standing_diverged())
+ * reports clear.
+ *
+ * That poller is safety_poll_task (safety_link_poll.c's
+ * safety_poll_service_pico_half_recapture()), as of the 2026-09-15
+ * review follow-up (review_divergence_wiring_60d6552f_2026-09-15.md,
+ * HIGH 1). This comment previously named "the web status handler and/or
+ * LCD refresh callback ... never safety_poll_task", on the grounds that
+ * safety_poll_task's stack is PSRAM-backed and an NVS write from a
+ * PSRAM stack aborts. That reasoning applies to calling
+ * kiln_cfg_store_autosave_from_live() INLINE, and the poller does not do
+ * that: it dispatches onto bx_flash_worker's internal-SRAM stack, which
+ * is the sanctioned pattern for exactly this situation (flash_worker.h)
+ * and which the httpd/LVGL callers need too -- autosave_from_live()'s
+ * call depth already exceeded the LVGL task's own fixed stack budget.
+ * The LCD refresh callback was a worse owner for an unrelated and more
+ * serious reason: its timer is created inside the home page's lazy
+ * build(), so on a boot that never opens that page the poll did not
+ * exist at all. */
 bool kiln_cfg_store_pico_half_recapture_pending(void);
 
 /* 2026-09-15 review (review_divergence_rework_c1d2c526_2026-09-15.md,
