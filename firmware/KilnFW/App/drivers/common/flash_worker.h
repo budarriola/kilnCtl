@@ -69,6 +69,45 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
 esp_err_t uart_bridge_ext_run_on_flash_worker_timeout(void (*fn)(void *arg), void *arg,
                                                        uint32_t timeout_ms);
 
+/* NON-BLOCKING post of a job onto the same worker -- added 2026-09-16 for
+ * safety_poll_task's deferred Pico-half recapture (HIGH 1 of the adversarial
+ * review of 60d6552f). Use this, and NOT either function above, when the
+ * calling task must never be stalled by flash work of ANY duration.
+ *
+ * Why the two functions above cannot serve that caller: both await the job
+ * with xSemaphoreTake(s_bx_done, portMAX_DELAY). `timeout_ms` above bounds
+ * ONLY the wait to acquire the worker; once acquired, the caller is blocked
+ * for the whole job, which is why that function's contract demands a short
+ * job by inspection. safety_poll_task is the sole sender of the ESP->Pico
+ * GET_STATUS heartbeat the Pico's S6b LINK_DEAD guard watches, and it
+ * dispatches an NVS autosave -- not a short job. A slow write there stalls
+ * the heartbeat past link_timeout_s (10.0 s default) and trips S6b.
+ *
+ * This call returns immediately in all cases. `fn` runs LATER on
+ * bx_flash_worker's own internal-SRAM stack (same task, same flash-safety
+ * property as the two functions above, serialized against their jobs), so
+ * the result is NOT available to the caller and `fn` must report its own
+ * outcome (a log line, module state a later tick reads). There is
+ * deliberately no `arg`: nobody awaits a posted job, so a pointer into the
+ * poster's stack frame would dangle by the time the worker ran it -- a
+ * posted fn takes its inputs from module state.
+ *
+ * Exactly ONE post may be outstanding at a time. This is a coalescing slot,
+ * not a queue: the callers it serves re-derive their own pending state and
+ * retry on a later tick, so a refused post is a "not yet", not a lost job.
+ *
+ * Unlike the two functions above, this is safe to call from a job already
+ * running ON the worker (nothing blocks, nothing is awaited, so the
+ * RE-ENTRANCY HAZARD above does not apply) -- the posted job simply runs on
+ * a later loop iteration.
+ *
+ * Returns ESP_OK if the post was accepted; ESP_ERR_INVALID_STATE if a
+ * previous post is still outstanding; ESP_ERR_TIMEOUT if the slot's lock
+ * was momentarily contended; ESP_ERR_INVALID_ARG if fn is NULL; ESP_FAIL if
+ * the worker is not started. As with the bounded function above, a caller
+ * must surface a refusal as a real "busy, try again" outcome, not silence. */
+esp_err_t uart_bridge_ext_post_on_flash_worker(void (*fn)(void *arg));
+
 #ifdef __cplusplus
 }
 #endif

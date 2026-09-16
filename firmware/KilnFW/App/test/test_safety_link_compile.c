@@ -117,17 +117,67 @@ bool safety_ceiling_sync_is_standing_diverged(char *reason_out, size_t reason_ca
     if (reason_out && reason_cap > 0) { reason_out[0] = 0; }
     return false;
 }
-bool kiln_cfg_store_pico_half_recapture_pending(void) { return false; }
+/* 2026-09-16 (HIGH 1 of the adversarial review of 60d6552f): these three
+ * stubs are no longer inert. safety_poll_task is the SOLE sender of the
+ * ESP->Pico GET_STATUS heartbeat the Pico's S6b LINK_DEAD guard watches, and
+ * the recapture service call sits immediately before that send. If the
+ * recapture blocks the poll task for longer than link_timeout_s (10.0 s
+ * default) the Pico trips S6b and ruins a firing. The stubs below model a
+ * SLOW flash job by advancing the fake clock from inside the dispatch --
+ * simulating a stuck NVS write rather than waiting on a real one -- so the
+ * test at the bottom of this file can measure how much time the poll task
+ * itself loses to it. */
+static bool s_stub_recapture_pending = false;
+static int s_stub_autosave_calls = 0;
+
+/* How long a pathologically slow flash job takes, in fake microseconds.
+ * Deliberately longer than the 10.0 s link_timeout_s default and a
+ * non-round number (fake_time.h: idealized round steps hide bugs). */
+#define STUB_SLOW_FLASH_JOB_US 11987003ull
+
+bool kiln_cfg_store_pico_half_recapture_pending(void) { return s_stub_recapture_pending; }
 bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap)
 {
     if (reason_out && reason_cap > 0) { reason_out[0] = 0; }
+    s_stub_autosave_calls++;
     return true;
 }
+
+/* Await-the-job dispatch. The real one ends in xSemaphoreTake(s_bx_done,
+ * portMAX_DELAY) -- `timeout_ms` bounds ONLY acquiring the worker, never the
+ * job itself (flash_worker.h). So the caller really does pay the whole job
+ * duration, which is what advancing the clock here models. */
 esp_err_t uart_bridge_ext_run_on_flash_worker_timeout(void (*fn)(void *arg), void *arg,
                                                        uint32_t timeout_ms)
 {
-    (void)fn; (void)arg; (void)timeout_ms;
+    (void)timeout_ms;
+    fake_time_advance_us(STUB_SLOW_FLASH_JOB_US);
+    if (fn) { fn(arg); }
     return ESP_OK;
+}
+
+/* NON-BLOCKING post. Returns immediately; the job is held for the worker to
+ * run on one of its own later loop iterations. */
+static void (*s_stub_posted_fn)(void *arg) = NULL;
+esp_err_t uart_bridge_ext_post_on_flash_worker(void (*fn)(void *arg))
+{
+    if (!fn) { return ESP_ERR_INVALID_ARG; }
+    if (s_stub_posted_fn) { return ESP_ERR_INVALID_STATE; }
+    s_stub_posted_fn = fn;
+    return ESP_OK;
+}
+
+/* Runs whatever is posted the way bx_worker_task would -- on the WORKER's
+ * time, not the poster's. The clock advance is inside here precisely to show
+ * the cost landed on the worker instead of on safety_poll_task. */
+static void stub_run_posted_job_as_the_worker_would(void)
+{
+    void (*fn)(void *arg) = s_stub_posted_fn;
+    s_stub_posted_fn = NULL;
+    if (fn) {
+        fake_time_advance_us(STUB_SLOW_FLASH_JOB_US);
+        fn(NULL);
+    }
 }
 
 // heat_enable_service_pending_release() -- 2026-09-15 fix
@@ -1611,6 +1661,62 @@ static void test_exchange_timeout_is_reported_even_when_link_reads_up(void)
                "a miss is reported as a timeout regardless of the link's age-based liveness state");
 }
 
+// HIGH 1 of the adversarial review of 60d6552f: the deferred Pico-half
+// recapture must not be able to stall the safety-link heartbeat.
+//
+// safety_poll_task is the SOLE sender of the ESP->Pico GET_STATUS heartbeat
+// (safety_poll_task()'s "DO NOT DELETE THIS SEND" comment), and
+// safety_poll_service_pico_half_recapture() is called immediately before that
+// send. Whatever time the service call consumes is time the heartbeat is
+// late. The Pico's S6b LINK_DEAD guard fires at link_timeout_s, 10.0 s by
+// default, so any recapture path that can hold this task for longer than that
+// can spuriously trip a firing.
+//
+// The stubs at the top of this file model a pathologically slow flash job
+// (STUB_SLOW_FLASH_JOB_US, ~11.99 s of fake time) rather than waiting on a
+// real NVS write. On the parent commit the service call dispatched with
+// uart_bridge_ext_run_on_flash_worker_timeout() and AWAITED the job -- the
+// 50 ms cap there bounds only acquiring the worker, never the job itself --
+// so the whole 11.99 s landed on this task and the first check below fails.
+// With the non-blocking post it lands on bx_flash_worker instead.
+#define SAFETY_LINK_DEAD_BUDGET_US 10000000ull
+
+static void test_recapture_cannot_stall_the_heartbeat_task(void)
+{
+    TEST_SECTION("safety_poll: deferred recapture must not stall the S6b heartbeat (HIGH 1)");
+
+    fake_time_reset_all();
+    s_stub_recapture_pending = true;
+    s_stub_autosave_calls = 0;
+    s_stub_posted_fn = NULL;
+
+    uint64_t before = fake_time_now_us();
+    safety_poll_service_pico_half_recapture();
+    uint64_t elapsed = fake_time_now_us() - before;
+
+    TEST_CHECK(elapsed < SAFETY_LINK_DEAD_BUDGET_US,
+               "servicing the deferred Pico-half recapture must not hold safety_poll_task for "
+               "anything approaching link_timeout_s (10.0 s) -- this task is the only sender of "
+               "the GET_STATUS heartbeat, and the send is the very next thing it does, so time "
+               "spent here is heartbeat latency and trips S6b LINK_DEAD");
+    TEST_CHECK(elapsed == 0,
+               "the recapture dispatch must be genuinely fire-and-forget: the poll task must pay "
+               "NO part of the flash job's duration, not merely less than the S6b budget");
+    TEST_CHECK(s_stub_autosave_calls == 0,
+               "the autosave must NOT have run on safety_poll_task -- it is an NVS write, and this "
+               "task's 8192 B stack is PSRAM-backed (PSRAM stack + NVS = panic)");
+
+    // The work is deferred, not dropped: the worker runs it on its own time.
+    TEST_CHECK(s_stub_posted_fn != NULL,
+               "the recapture job must have been posted to the flash worker, not silently skipped");
+    stub_run_posted_job_as_the_worker_would();
+    TEST_CHECK(s_stub_autosave_calls == 1,
+               "the posted job still performs exactly one recapture autosave, on the flash worker's "
+               "own internal-SRAM stack");
+
+    s_stub_recapture_pending = false;
+}
+
 int g_test_failures = 0;
 int g_test_count = 0;
 
@@ -1646,6 +1752,7 @@ int main(void)
     test_link_reply_us_records_a_matched_exchange();
     test_link_reply_us_not_recorded_when_nothing_answers();
     test_exchange_timeout_is_reported_even_when_link_reads_up();
+    test_recapture_cannot_stall_the_heartbeat_task();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;
