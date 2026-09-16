@@ -154,6 +154,22 @@ relay_budget_tier_t relay_cycles_max_budget_tier(void);
  * does. */
 bool relay_cycles_reset(unsigned relay);
 
+/* Bounded-wait sibling of relay_cycles_reset() above -- for a caller (the
+ * LCD diagnostics page's Relay Life Reset control, lvgl_task) that must not
+ * block indefinitely behind some OTHER caller's long flash-worker job, same
+ * hazard and same fix shape as crash_report_acknowledge_timeout()
+ * (docs/audits/review_crash_gate_medium_fixes_aa2c484d_2026-09-15.md).
+ * `timeout_ms` bounds only ACQUIRING the flash worker (see uart_bridge_ext_
+ * run_on_flash_worker_timeout()'s doc comment) -- once acquired, the persist
+ * itself runs to completion same as the unbounded version. `*out_timed_out`
+ * (if non-NULL) is set true only when the worker could not be acquired in
+ * time, i.e. nothing was read or written -- distinct from every other
+ * false-returning outcome (a dispatched write that failed), which the
+ * caller should treat the same way relay_cycles_reset()'s failure is
+ * treated today. Same relay-index/return-value contract as relay_cycles_
+ * reset() otherwise, and the same internal-SRAM-stack task requirement. */
+bool relay_cycles_reset_timeout(unsigned relay, uint32_t timeout_ms, bool *out_timed_out);
+
 /* Restores all RELAY_CYCLES_COUNT counts from a backup (e.g.
  * /api/status.relay_counts previously captured by full_board_backup.py),
  * validates every value against a sanity ceiling BEFORE writing anything

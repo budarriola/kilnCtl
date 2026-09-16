@@ -280,6 +280,13 @@ static const char *TAG __attribute__((unused)) = "ui_page_diagnostics";
  * any observed bounce interval and well under a deliberate second tap. */
 #define UI_PAGE_DIAGNOSTICS_CONFIRM_DEBOUNCE_US (300 * 1000)
 
+/* Bound on ACQUIRING the flash worker for the Relay Life Reset control --
+ * same value and reasoning as UI_PAGE_DIAGNOSTICS_CRASH_ACK_WAIT_MS below
+ * (not the write itself, which is this caller's own short job): 300 ms is
+ * comfortably longer than any of today's flash-worker jobs normally take
+ * but short enough that a genuine freeze reads as a momentary pause. */
+#define UI_PAGE_DIAGNOSTICS_RELAY_RESET_WAIT_MS 300u
+
 /* ---- No-scroll budget proofs --------------------------------------------
  * Compile-time mirrors of this file's own header-comment arithmetic, same
  * style ui_page_temperature.c/ui_page_network.c use (check_ui_budget_asserts.ps1
@@ -527,12 +534,26 @@ static void show_page(uint8_t index)
      * refresh_cb(NULL) once, with s_page_index still 0), so navigating
      * straight to Crash Report showed an empty/placeholder summary under a
      * correctly shown-or-hidden Acknowledge row, for up to one refresh tick.
-     * refresh_cb() is cheap when the page it cares most about (Crash Report)
-     * isn't the one just switched to -- the per-page work above already
-     * gates its own expensive part (the blocking crash_report_get() read) on
-     * s_page_index, so calling it here on every show_page() is not a new
-     * per-page-switch I/O cost for pages that don't need it. */
-    refresh_cb(NULL);
+     *
+     * MEDIUM fix (docs/audits/review_crash_gate_medium_fixes_aa2c484d_2026-09-15.md):
+     * the first cut of this fix called refresh_cb(NULL) unconditionally on
+     * EVERY show_page(), which is NOT cheap for the other seven pages --
+     * refresh_cb()'s very first line is dashboard_get_status(), a
+     * cross-task kiln_io_owner_command_read() (bounded by
+     * KILN_IO_OWNER_WAIT_MS but still a real wait), plus MAX31856 SPI reads
+     * and interrupts-disabled heap walks, none of which any page but
+     * Safety & Board Health / Thermocouple Faults / Trip Detail actually
+     * displays. Only the Crash Report page's own paint (the gated,
+     * s_page_index == UI_PAGE_DIAGNOSTICS_PAGE_CRASH_REPORT block inside
+     * refresh_cb(), which does crash_report_get()) needs to run on page-in;
+     * every other page is left to the existing periodic 2 s timer tick, the
+     * same way it worked before this LOW 3 fix was ever added. Gating the
+     * call on the destination page being Crash Report keeps the original
+     * LOW 3 fix (no blank/stale summary on landing) without dragging
+     * dashboard_get_status() onto the other seven page switches. */
+    if (index == UI_PAGE_DIAGNOSTICS_PAGE_CRASH_REPORT) {
+        refresh_cb(NULL);
+    }
 }
 
 static void prev_cb(lv_event_t *e)
@@ -1433,7 +1454,7 @@ static void relay_reset_btn_clicked_cb(lv_event_t *e)
     if (armed) {
         s_rl_confirm_deadline_us[relay] = 0;
         lv_label_set_text(s_rl_reset_label[relay], "Reset");
-        /* relay_cycles_reset() dispatches its own NVS write onto the
+        /* relay_cycles_reset_timeout() dispatches its own NVS write onto the
          * flash-safe worker (see that function's header comment) and blocks
          * this LVGL-task callback until the write lands -- this file must
          * NOT call anything in relay_cycles.c that writes NVS directly.
@@ -1447,12 +1468,26 @@ static void relay_reset_btn_clicked_cb(lv_event_t *e)
          * for a different reason: it SERIALIZES this write against every
          * other flash-worker job (including a concurrent crash-report ack or
          * web write), not because this task's own stack is unsafe under a
-         * cache-disabled flash op. A failed persist still zeroes the count in RAM
-         * (relay_cycles_reset()'s documented contract) and is retried by the
-         * next periodic persist -- ESP_LOGW from inside that function
-         * already says so, nothing further to show the operator here beyond
-         * the row simply reading 0 on the next refresh either way. */
-        (void)relay_cycles_reset(relay);
+         * cache-disabled flash op.
+         *
+         * LOW fix (docs/audits/review_crash_gate_medium_fixes_aa2c484d_
+         * 2026-09-15.md): this used to call the UNBOUNDED relay_cycles_
+         * reset(), on the very same lvgl_task the Crash Report page's
+         * Acknowledge control was already bounded for -- a long job queued
+         * by some OTHER caller (a profile/package import, a cfg_fs write)
+         * could freeze this control (and the whole LCD) for as long as that
+         * job takes. Bounded the same way, with the same "Busy" distinct
+         * result on a timed-out acquire (nothing read or written) rather
+         * than silently behaving like a normal reset. A failed/timed-out
+         * persist still zeroes the count in RAM (relay_cycles_reset_
+         * timeout()'s documented contract) and is retried by the next
+         * periodic persist -- its own ESP_LOGW already says so. */
+        bool timed_out = false;
+        bool ok = relay_cycles_reset_timeout(relay, UI_PAGE_DIAGNOSTICS_RELAY_RESET_WAIT_MS, &timed_out);
+        if (timed_out) {
+            lv_label_set_text(s_rl_reset_label[relay], "Busy");
+        }
+        (void)ok;
     } else {
         s_rl_confirm_deadline_us[relay] = now + UI_PAGE_DIAGNOSTICS_RELAY_RESET_CONFIRM_US;
         lv_label_set_text(s_rl_reset_label[relay], "Confirm?");

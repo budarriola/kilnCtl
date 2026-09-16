@@ -40,6 +40,10 @@ static bool s_migration_worker_wait_deferred = false;
  * persist_locked() directly any more than relay_cycles_flush() can. */
 esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
 bool uart_bridge_ext_is_on_flash_worker(void);
+/* Bounded-wait sibling (flash_worker.h) used by relay_cycles_reset_timeout()
+ * below -- same hand-declaration reasoning as the unbounded call above. */
+esp_err_t uart_bridge_ext_run_on_flash_worker_timeout(void (*fn)(void *arg), void *arg,
+                                                       uint32_t timeout_ms);
 
 /* Same namespace as the rest of this board's configuration (zones_http.c,
  * rules_http.c) but its own key -- deliberately NOT folded into the
@@ -734,6 +738,55 @@ static void reset_persist_job(void *arg)
     ctx->err = hal_status_to_esp_err(persist_snapshot(ctx->snap));
 }
 
+/* Shared tail for relay_cycles_reset()/relay_cycles_reset_timeout() below --
+ * both take the same snapshot-then-dispatch path and only differ in HOW they
+ * dispatch (unbounded vs. bounded wait). `submit_err` is the dispatch call's
+ * own return value; a bounded caller passes ESP_ERR_TIMEOUT through here so
+ * the "worker was busy, nothing ran" case gets the same RAM-only-zeroed
+ * bookkeeping as any other dispatch failure, distinguished for the caller
+ * via `out_timed_out`. */
+static bool relay_cycles_reset_finish(unsigned relay, const reset_persist_job_arg_t *snap,
+                                       reset_persist_job_ctx_t *ctx, esp_err_t submit_err,
+                                       bool *out_timed_out)
+{
+    if (out_timed_out) {
+        *out_timed_out = false;
+    }
+    esp_err_t err = (submit_err != ESP_OK) ? submit_err : ctx->err;
+
+    if (err == ESP_OK) {
+        xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+        s_rc.rev = snap->rev;
+        xSemaphoreGive(s_rc.lock);
+        ESP_LOGI(TAG, "relay_cycles_reset(%u): count reset to 0", relay);
+        return true;
+    }
+
+    /* The write failed (or was never dispatched): re-arm `dirty` so the next
+     * periodic persist retries it. A concurrent add()/note_safety_edge()
+     * during the dispatch already set dirty=true itself under the lock (see
+     * relay_cycles_reset()'s own comment) -- this is a plain assignment, not
+     * a clear-then-set, so it cannot un-set a flag a racing writer just
+     * set. */
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    s_rc.dirty = true;
+    xSemaphoreGive(s_rc.lock);
+
+    if (submit_err == ESP_ERR_TIMEOUT) {
+        if (out_timed_out) {
+            *out_timed_out = true;
+        }
+        ESP_LOGW(TAG, "relay_cycles_reset(%u): flash worker busy, timed out -- count zeroed in RAM "
+                      "only, try again", relay);
+        return false;
+    }
+
+    ESP_LOGW(TAG, "relay_cycles_reset(%u): persist failed (%s) -- count zeroed in RAM only; "
+                  "this is lost on reboot unless something calls relay_cycles_maybe_persist() "
+                  "again first (it will not tick in RECOVERY MODE)", relay, esp_err_to_name(err));
+    return false;
+}
+
 bool relay_cycles_reset(unsigned relay)
 {
     if (relay >= RELAY_CYCLES_COUNT || !ensure_lock()) {
@@ -758,10 +811,8 @@ bool relay_cycles_reset(unsigned relay)
      * write itself failed" case -- a concurrent add() has already left
      * dirty=true on its own and this must not paper over that by
      * unconditionally forcing it back to whatever it was pre-snapshot. */
-    uint32_t old_count = 0;
     reset_persist_job_arg_t snap;
     xSemaphoreTake(s_rc.lock, portMAX_DELAY);
-    old_count = s_rc.counts[relay];
     s_rc.counts[relay] = 0;
     memcpy(snap.counts, s_rc.counts, sizeof(snap.counts));
     memcpy(snap.types, s_rc.types, sizeof(snap.types));
@@ -780,49 +831,60 @@ bool relay_cycles_reset(unsigned relay)
      * today, but the check is cheap and this is exactly the class of bug
      * that stays invisible until a caller changes. */
     reset_persist_job_ctx_t ctx = { .snap = &snap, .err = ESP_FAIL };
-    esp_err_t err;
+    esp_err_t submit_err = ESP_OK;
     if (uart_bridge_ext_is_on_flash_worker()) {
         reset_persist_job(&ctx);
-        err = ctx.err;
     } else {
-        esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker(reset_persist_job, &ctx);
-        /* uart_bridge_ext_run_on_flash_worker() itself returning non-OK
-         * (worker not started/queue busy) means reset_persist_job() never
-         * ran and ctx.err was never written -- report submit_err in that
-         * case rather than the uninitialized-in-effect ctx.err. */
-        err = (submit_err != ESP_OK) ? submit_err : ctx.err;
+        submit_err = uart_bridge_ext_run_on_flash_worker(reset_persist_job, &ctx);
     }
 
-    if (err == ESP_OK) {
-        xSemaphoreTake(s_rc.lock, portMAX_DELAY);
-        s_rc.rev = snap.rev;
-        xSemaphoreGive(s_rc.lock);
-    } else {
-        /* The write failed: re-arm `dirty` so the next periodic persist
-         * retries it. A concurrent add()/note_safety_edge() during the
-         * dispatch already set dirty=true itself under the lock (see the
-         * comment above) -- this is a plain assignment, not a clear-then-set,
-         * so it cannot un-set a flag a racing writer just set. */
-        xSemaphoreTake(s_rc.lock, portMAX_DELAY);
-        s_rc.dirty = true;
-        xSemaphoreGive(s_rc.lock);
-        /* opus review finding: "will retry on the next periodic persist" is
-         * only true when something is actually ticking relay_cycles_maybe_
-         * persist() -- boot_guard.h's RECOVERY MODE deliberately does not
-         * start profile_executor/autotune_engine, and this codebase has no
-         * other periodic caller of that function (grep confirms), so a
-         * failed persist while the board is in recovery mode is RAM-only
-         * until the next successful boot/persist and is lost on a reboot in
-         * the meantime. Say so rather than promise a retry that may not
-         * happen. */
-        ESP_LOGW(TAG, "relay_cycles_reset(%u): persist failed (%s) -- count zeroed in RAM only; "
-                      "this is lost on reboot unless something calls relay_cycles_maybe_persist() "
-                      "again first (it will not tick in RECOVERY MODE)", relay, esp_err_to_name(err));
+    return relay_cycles_reset_finish(relay, &snap, &ctx, submit_err, NULL);
+}
+
+/* Bounded-wait sibling of relay_cycles_reset() above -- for the LCD Relay
+ * Life Reset control (lvgl_task), which must not block the whole UI
+ * indefinitely behind some OTHER caller's long flash-worker job (LOW finding,
+ * docs/audits/review_crash_gate_medium_fixes_aa2c484d_2026-09-15.md: this
+ * function's unbounded sibling is the exact hazard crash_report_acknowledge_
+ * timeout() was already added to close for the Crash Report page's
+ * Acknowledge control, one page away on the same task). diagnostics_http.c's
+ * httpd-task POST handler keeps using the unbounded relay_cycles_reset()
+ * above -- an HTTP request has no equivalent "freeze the whole UI" hazard.
+ *
+ * `*out_timed_out` (if non-NULL) is set true only when the worker could not
+ * be acquired within timeout_ms -- i.e. nothing was read or written at all,
+ * as distinct from every other false-returning outcome (a dispatched write
+ * that failed), which are reported the normal way through the return value
+ * and relay_cycles_reset_finish()'s own logging. The caller (ui_page_
+ * diagnostics.c) uses this to show a distinct "busy, try again" result
+ * rather than the generic failure text -- same convention as crash_report.c's
+ * identical split. */
+bool relay_cycles_reset_timeout(unsigned relay, uint32_t timeout_ms, bool *out_timed_out)
+{
+    if (out_timed_out) {
+        *out_timed_out = false;
+    }
+    if (relay >= RELAY_CYCLES_COUNT || !ensure_lock()) {
         return false;
     }
 
-    ESP_LOGI(TAG, "relay_cycles_reset(%u): count reset from %lu to 0", relay, (unsigned long)old_count);
-    return true;
+    reset_persist_job_arg_t snap;
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    s_rc.counts[relay] = 0;
+    memcpy(snap.counts, s_rc.counts, sizeof(snap.counts));
+    memcpy(snap.types, s_rc.types, sizeof(snap.types));
+    memcpy(snap.rated_overrides, s_rc.rated_overrides, sizeof(snap.rated_overrides));
+    snap.rev = s_rc.rev + 1;
+    s_rc.dirty = false;
+    xSemaphoreGive(s_rc.lock);
+
+    reset_persist_job_ctx_t ctx = { .snap = &snap, .err = ESP_FAIL };
+    if (uart_bridge_ext_is_on_flash_worker()) {
+        reset_persist_job(&ctx);
+        return relay_cycles_reset_finish(relay, &snap, &ctx, ESP_OK, out_timed_out);
+    }
+    esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker_timeout(reset_persist_job, &ctx, timeout_ms);
+    return relay_cycles_reset_finish(relay, &snap, &ctx, submit_err, out_timed_out);
 }
 
 /* Backup/restore support (2026-09-07 backup-gate pass): full_board_backup.py

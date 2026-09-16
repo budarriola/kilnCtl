@@ -480,6 +480,28 @@ static bool bx_run_on_internal_stack_timeout(bx_job_fn fn, void *arg, TickType_t
     bx_job_t job = { .fn = fn, .arg = arg };
     bool ok = (xQueueSend(s_bx_jobs, &job, portMAX_DELAY) == pdTRUE);
     if (ok) {
+        /* UNBOUNDED wait -- LOW finding (docs/audits/review_crash_gate_
+         * medium_fixes_aa2c484d_2026-09-15.md): the bound above applies only
+         * to ACQUIRING s_bx_lock (waiting behind some OTHER caller's job);
+         * once THIS caller's own `fn` is accepted, it is awaited to
+         * completion no matter how long it takes, same as the unbounded
+         * bx_run_on_internal_stack() above. That is safe today ONLY because
+         * every known caller of the *_timeout() entry point dispatches a
+         * short, bounded-in-practice job -- crash_ack_job() (one NVS load
+         * plus one persist) and relay_cycles.c's reset_persist_job()
+         * (identical shape) -- never a long-running one. Nothing here
+         * mechanically enforces that: a future *_timeout() caller that
+         * dispatches something slow (a large import, a multi-key migration)
+         * would silently turn its "bounded" wait back into an unbounded one
+         * from the caller's perspective, defeating the whole point of this
+         * function. If a genuinely long job ever needs a bounded caller,
+         * this wait needs its own timeout -- which reintroduces the hazard
+         * bx_run_on_internal_stack()'s comment above already describes (a
+         * timed-out xSemaphoreTake here would leave the job queued against a
+         * caller stack frame that has already unwound) and would need a
+         * cancellation/ownership scheme, not just a raw timeout, to fix
+         * safely. Keep every *_timeout() caller's job short by inspection
+         * until that exists. */
         xSemaphoreTake(s_bx_done, portMAX_DELAY);
     }
     xSemaphoreGive(s_bx_lock);

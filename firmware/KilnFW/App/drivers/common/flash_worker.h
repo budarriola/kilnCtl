@@ -47,9 +47,15 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
  * become the next job in line. Once that wait succeeds, `fn(arg)` is
  * dispatched and awaited exactly like uart_bridge_ext_run_on_flash_worker()
  * (unbounded), because at that point `fn` is the caller's OWN job -- for the
- * known callers (crash-record ack, an NVS load+store) that is a short,
- * bounded-in-practice write, not the long job this timeout exists to skip
- * past. This is deliberately NOT a timeout on `arg`'s lifetime: if the
+ * known callers (crash-record ack, an NVS load+store; relay-cycle reset, the
+ * same shape) that is a short, bounded-in-practice write, not the long job
+ * this timeout exists to skip past -- nothing here MECHANICALLY enforces
+ * that a *_timeout() caller's job stays short (see uart_bridge_ext.c's own
+ * comment on the `xSemaphoreTake(s_bx_done, portMAX_DELAY)` inside this
+ * function's implementation for why bounding that wait too is not a safe
+ * fix on its own). A future caller of this function MUST dispatch a short
+ * job for the same reason today's callers do, or add real enforcement
+ * first. This is deliberately NOT a timeout on `arg`'s lifetime: if the
  * worker-acquire wait itself timed out, `fn` was never enqueued, so there is
  * no risk of the queued job running later against a stack frame the caller
  * has already unwound (see bx_run_on_internal_stack()'s own comment on why
