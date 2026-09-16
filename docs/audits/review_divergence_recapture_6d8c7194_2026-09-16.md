@@ -118,7 +118,26 @@ Mitigation, and why this is not a blocking finding:
 `SAFETY_PARAM_ID_ABS_MAX_TEMP_C` and `SAFETY_PARAM_ID_TC_TYPE`, so this staleness
 cannot desynchronize `abs_max_temp_c`.
 
-## Items B, C and HIGH1 — bounded acquisition is not a bounded job
+## Finding 3 (bounded acquisition) — CLOSED 2026-09-16, `c616391d`
+
+Fixed same-day by `c616391d` ("Stop the S6b heartbeat stalling behind a flash
+write (HIGH 1 of the 60d6552f review)"), an ancestor of `origin/main` as of
+this note. `safety_poll_service_pico_half_recapture()`
+(`firmware/KilnFW/App/drivers/safety/safety_link_poll.c`) no longer calls
+`uart_bridge_ext_run_on_flash_worker_timeout()` (bounded acquire, unbounded
+`xSemaphoreTake(s_bx_done, portMAX_DELAY)` await) in front of the GET_STATUS
+heartbeat send. It now calls `uart_bridge_ext_post_on_flash_worker()`, which
+posts the job and returns immediately without waiting for completion; the
+job (`safety_poll_pico_half_recapture_job`) runs later on `bx_flash_worker`'s
+own stack. The pending flag stays set until the posted job actually
+completes, so a refused/busy post is retried
+`SAFETY_POLL_RECAPTURE_INTERVAL_MS` (5 s) later rather than being silently
+dropped — the file's own comments name this exact review and finding as the
+motivation. `safety_poll_task` can therefore no longer be stalled by the
+autosave's NVS write, closing the S6b LINK_DEAD spurious-trip risk this
+finding described. No further action needed here.
+
+## Items B, C and HIGH1 — bounded acquisition is not a bounded job (superseded, see above)
 
 `firmware/KilnFW/App/drivers/common/flash_worker.h` states that the `_timeout()`
 bound applies **only to acquiring the worker**; once acquired, `fn(arg)` is
