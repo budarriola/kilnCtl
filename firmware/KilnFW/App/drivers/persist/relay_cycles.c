@@ -738,14 +738,41 @@ static void reset_persist_job(void *arg)
     ctx->err = hal_status_to_esp_err(persist_snapshot(ctx->snap));
 }
 
+/* Shared snapshot head for relay_cycles_reset()/relay_cycles_reset_timeout()
+ * below (review docs/audits/review_crash_gate_followups_f07ad24d_2026-09-15.md
+ * N3): both callers need the identical zero-then-snapshot-under-lock
+ * sequence, so it is extracted here rather than left duplicated -- a future
+ * field added to reset_persist_job_arg_t now only has one call site to
+ * update, not two the compiler cannot cross-check. Returns the pre-reset
+ * count (relay is already validated by both callers) so the finish helper
+ * below can still log it. See relay_cycles_reset()'s own comment for why the
+ * lock is released before dispatch rather than held across it. */
+static uint32_t relay_cycles_reset_snapshot(unsigned relay, reset_persist_job_arg_t *snap)
+{
+    uint32_t old_count;
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    old_count = s_rc.counts[relay];
+    s_rc.counts[relay] = 0;
+    memcpy(snap->counts, s_rc.counts, sizeof(snap->counts));
+    memcpy(snap->types, s_rc.types, sizeof(snap->types));
+    memcpy(snap->rated_overrides, s_rc.rated_overrides, sizeof(snap->rated_overrides));
+    snap->rev = s_rc.rev + 1;
+    s_rc.dirty = false;
+    xSemaphoreGive(s_rc.lock);
+    return old_count;
+}
+
 /* Shared tail for relay_cycles_reset()/relay_cycles_reset_timeout() below --
  * both take the same snapshot-then-dispatch path and only differ in HOW they
  * dispatch (unbounded vs. bounded wait). `submit_err` is the dispatch call's
  * own return value; a bounded caller passes ESP_ERR_TIMEOUT through here so
  * the "worker was busy, nothing ran" case gets the same RAM-only-zeroed
  * bookkeeping as any other dispatch failure, distinguished for the caller
- * via `out_timed_out`. */
-static bool relay_cycles_reset_finish(unsigned relay, const reset_persist_job_arg_t *snap,
+ * via `out_timed_out`. `old_count` is logged on success only -- it is the one
+ * surviving record of a wear count that is about to be irreversibly zeroed
+ * (review N1: a prior refactor dropped this from the log). */
+static bool relay_cycles_reset_finish(unsigned relay, uint32_t old_count,
+                                       const reset_persist_job_arg_t *snap,
                                        reset_persist_job_ctx_t *ctx, esp_err_t submit_err,
                                        bool *out_timed_out)
 {
@@ -758,7 +785,8 @@ static bool relay_cycles_reset_finish(unsigned relay, const reset_persist_job_ar
         xSemaphoreTake(s_rc.lock, portMAX_DELAY);
         s_rc.rev = snap->rev;
         xSemaphoreGive(s_rc.lock);
-        ESP_LOGI(TAG, "relay_cycles_reset(%u): count reset to 0", relay);
+        ESP_LOGI(TAG, "relay_cycles_reset(%u): count reset from %lu to 0", relay,
+                 (unsigned long)old_count);
         return true;
     }
 
@@ -812,14 +840,7 @@ bool relay_cycles_reset(unsigned relay)
      * dirty=true on its own and this must not paper over that by
      * unconditionally forcing it back to whatever it was pre-snapshot. */
     reset_persist_job_arg_t snap;
-    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
-    s_rc.counts[relay] = 0;
-    memcpy(snap.counts, s_rc.counts, sizeof(snap.counts));
-    memcpy(snap.types, s_rc.types, sizeof(snap.types));
-    memcpy(snap.rated_overrides, s_rc.rated_overrides, sizeof(snap.rated_overrides));
-    snap.rev = s_rc.rev + 1;
-    s_rc.dirty = false;
-    xSemaphoreGive(s_rc.lock);
+    uint32_t old_count = relay_cycles_reset_snapshot(relay, &snap);
 
     /* RE-ENTRANCY (flash_worker_lint.py's pattern 1): check whether we are
      * already ON the flash worker before dispatching a second job onto it --
@@ -838,7 +859,7 @@ bool relay_cycles_reset(unsigned relay)
         submit_err = uart_bridge_ext_run_on_flash_worker(reset_persist_job, &ctx);
     }
 
-    return relay_cycles_reset_finish(relay, &snap, &ctx, submit_err, NULL);
+    return relay_cycles_reset_finish(relay, old_count, &snap, &ctx, submit_err, NULL);
 }
 
 /* Bounded-wait sibling of relay_cycles_reset() above -- for the LCD Relay
@@ -869,22 +890,15 @@ bool relay_cycles_reset_timeout(unsigned relay, uint32_t timeout_ms, bool *out_t
     }
 
     reset_persist_job_arg_t snap;
-    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
-    s_rc.counts[relay] = 0;
-    memcpy(snap.counts, s_rc.counts, sizeof(snap.counts));
-    memcpy(snap.types, s_rc.types, sizeof(snap.types));
-    memcpy(snap.rated_overrides, s_rc.rated_overrides, sizeof(snap.rated_overrides));
-    snap.rev = s_rc.rev + 1;
-    s_rc.dirty = false;
-    xSemaphoreGive(s_rc.lock);
+    uint32_t old_count = relay_cycles_reset_snapshot(relay, &snap);
 
     reset_persist_job_ctx_t ctx = { .snap = &snap, .err = ESP_FAIL };
     if (uart_bridge_ext_is_on_flash_worker()) {
         reset_persist_job(&ctx);
-        return relay_cycles_reset_finish(relay, &snap, &ctx, ESP_OK, out_timed_out);
+        return relay_cycles_reset_finish(relay, old_count, &snap, &ctx, ESP_OK, out_timed_out);
     }
     esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker_timeout(reset_persist_job, &ctx, timeout_ms);
-    return relay_cycles_reset_finish(relay, &snap, &ctx, submit_err, out_timed_out);
+    return relay_cycles_reset_finish(relay, old_count, &snap, &ctx, submit_err, out_timed_out);
 }
 
 /* Backup/restore support (2026-09-07 backup-gate pass): full_board_backup.py

@@ -1453,7 +1453,6 @@ static void relay_reset_btn_clicked_cb(lv_event_t *e)
 
     if (armed) {
         s_rl_confirm_deadline_us[relay] = 0;
-        lv_label_set_text(s_rl_reset_label[relay], "Reset");
         /* relay_cycles_reset_timeout() dispatches its own NVS write onto the
          * flash-safe worker (see that function's header comment) and blocks
          * this LVGL-task callback until the write lands -- this file must
@@ -1481,13 +1480,31 @@ static void relay_reset_btn_clicked_cb(lv_event_t *e)
          * than silently behaving like a normal reset. A failed/timed-out
          * persist still zeroes the count in RAM (relay_cycles_reset_
          * timeout()'s documented contract) and is retried by the next
-         * periodic persist -- its own ESP_LOGW already says so. */
+         * periodic persist -- its own ESP_LOGW already says so.
+         *
+         * N2 fix (docs/audits/review_crash_gate_followups_f07ad24d_2026-09-15.md):
+         * this used to set the label back to "Reset" unconditionally before
+         * dispatching, then discard `ok` with a (void) cast -- a non-timeout
+         * persist failure logged nothing and left the button reading "Reset"
+         * exactly as if it had succeeded, while the RAM count was already
+         * zeroed and s_rc.dirty left set. Matched to crash_ack_btn_clicked_
+         * cb()'s precedent above: label is only set to "Reset" in the
+         * non-timeout branch (mirroring that function restoring "Acknowledge"
+         * there), and a non-timeout failure gets its own ESP_LOGW so it is
+         * not silent. */
         bool timed_out = false;
         bool ok = relay_cycles_reset_timeout(relay, UI_PAGE_DIAGNOSTICS_RELAY_RESET_WAIT_MS, &timed_out);
         if (timed_out) {
             lv_label_set_text(s_rl_reset_label[relay], "Busy");
+            ESP_LOGW(TAG, "LCD: relay_cycles_reset_timeout(%u) timed out waiting for the flash "
+                          "worker -- try again", relay);
+        } else {
+            lv_label_set_text(s_rl_reset_label[relay], "Reset");
+            if (!ok) {
+                ESP_LOGW(TAG, "LCD: relay_cycles_reset_timeout(%u) failed -- count zeroed in RAM "
+                              "only, try again", relay);
+            }
         }
-        (void)ok;
     } else {
         s_rl_confirm_deadline_us[relay] = now + UI_PAGE_DIAGNOSTICS_RELAY_RESET_CONFIRM_US;
         lv_label_set_text(s_rl_reset_label[relay], "Confirm?");

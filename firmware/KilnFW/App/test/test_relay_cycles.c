@@ -338,6 +338,79 @@ static void test_reset_runs_inline_when_already_on_flash_worker(void)
     TEST_CHECK(s_rc.counts[3] == 0, "the count was actually reset via the inline path");
 }
 
+// docs/audits/review_crash_gate_followups_f07ad24d_2026-09-15.md: neither
+// relay_cycles_reset_timeout() nor its crash_report.c precedent had any test
+// coverage at all -- the busy-worker/timeout path is routine (any profile
+// save or config write occupies the flash worker) and nothing in this file
+// would have caught a defect in it. Against the parent (f07ad24d) this test
+// fails for a behavioural reason, not an API-missing reason: the busy-worker
+// branch must return false/timed_out=true/dispatch_count unchanged, and a
+// broken tail (e.g. one that still tries to persist on a busy worker, or
+// that clears `dirty` on a timeout) would show up as a wrong value here, not
+// a compile error.
+static void test_reset_timeout_busy_worker_reports_timeout(void)
+{
+    TEST_SECTION("relay_cycles_reset_timeout -- a busy flash worker is reported as a timeout: "
+                 "nothing is dispatched, the in-RAM count is still zeroed from the snapshot, and "
+                 "dirty is left set so a later flush still persists it");
+    reset_all();
+    s_rc.counts[2] = 123;
+
+    s_stub_bx_busy = true; // model the worker already running someone else's job
+    unsigned dispatch_before = s_stub_dispatch_count;
+
+    bool timed_out = false;
+    bool ok = relay_cycles_reset_timeout(2, 300, &timed_out);
+
+    s_stub_bx_busy = false; // leave shared stub state as every other test expects
+
+    TEST_CHECK(ok == false, "a timed-out acquire must not report success");
+    TEST_CHECK(timed_out == true, "the caller must be told this was specifically a timeout, not "
+                                   "some other persist failure");
+    TEST_CHECK(s_rc.counts[2] == 0, "the count is zeroed in RAM by the snapshot step, which runs "
+                                     "BEFORE the bounded dispatch attempt, independent of whether "
+                                     "the dispatch itself ever ran");
+    TEST_CHECK(s_rc.dirty == true, "dirty must be left set -- the write never happened, so the "
+                                    "next periodic persist must still retry it");
+    TEST_CHECK(s_stub_dispatch_count == dispatch_before, "a busy worker must mean NOTHING was "
+                                                          "dispatched -- if this incremented, the "
+                                                          "bounded stub ran the job anyway instead "
+                                                          "of reporting ESP_ERR_TIMEOUT");
+}
+
+static void test_reset_timeout_idle_worker_succeeds(void)
+{
+    TEST_SECTION("relay_cycles_reset_timeout -- an idle flash worker dispatches and persists "
+                 "exactly like the unbounded relay_cycles_reset(), pinning the shared tail "
+                 "against N1-style drift (a lost log field or a wrong dirty/rev update)");
+    reset_all();
+    s_rc.counts[2] = 123;
+
+    s_stub_bx_busy = false;
+    unsigned dispatch_before = s_stub_dispatch_count;
+
+    bool timed_out = false;
+    bool ok = relay_cycles_reset_timeout(2, 300, &timed_out);
+
+    TEST_CHECK(ok == true, "an idle worker must let the reset actually succeed");
+    TEST_CHECK(timed_out == false, "a successful dispatch is not a timeout");
+    TEST_CHECK(s_rc.counts[2] == 0, "the count is zeroed");
+    TEST_CHECK(s_rc.dirty == false, "the dispatched persist actually landed (dirty cleared) -- "
+                                     "the same postcondition relay_cycles_reset() itself has");
+    TEST_CHECK(s_stub_dispatch_count == dispatch_before + 1, "exactly one job was dispatched "
+                                                              "through the flash worker");
+
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
+               "the fake store must be reachable for readback");
+    relay_cycles_blob_t blob;
+    size_t len = sizeof(blob);
+    TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_CYCLES, &blob, &len) == HAL_OK && len == sizeof(blob),
+               "readback of the persisted blob succeeds");
+    TEST_CHECK(blob.counts[2] == 0, "the zeroed count actually reached the store, not just RAM");
+    hal_kv_close(&h);
+}
+
 // opus review (MEDIUM, follow-up audit): relay_cycles_reset() used to hold
 // s_rc.lock across the ENTIRE flash-worker dispatch, which correctly avoided
 // losing a concurrent relay_cycles_add() but stalled every other lock holder
@@ -974,6 +1047,8 @@ void run_test_relay_cycles(void)
     test_reset_zeroes_count_and_persists();
     test_reset_rejects_out_of_range_relay();
     test_reset_runs_inline_when_already_on_flash_worker();
+    test_reset_timeout_busy_worker_reports_timeout();
+    test_reset_timeout_idle_worker_succeeds();
     test_reset_does_not_lose_a_concurrent_add();
     test_restore_all_sets_every_count_and_persists();
     test_restore_all_is_idempotent();
