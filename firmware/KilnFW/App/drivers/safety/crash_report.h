@@ -150,6 +150,19 @@ bool crash_report_frame_trustworthy(const crash_report_record_t *rec);
 // false if there is no valid record to acknowledge.
 bool crash_report_acknowledge(void);
 
+// Bounded-wait sibling of crash_report_acknowledge(), for a caller (the LCD
+// diagnostics page's Acknowledge control, on lvgl_task) that must not block
+// indefinitely behind some OTHER caller's long flash-worker job -- see
+// crash_report.c's own doc comment (MEDIUM 1,
+// docs/audits/review_crash_gate_low_fixes_c534a0df_2026-09-15.md). Waits at
+// most timeout_ms to become the next job on the flash worker; if that wait
+// itself times out, returns false and sets *out_timed_out (if non-NULL) to
+// true, distinct from every other false-returning case (no record; a
+// dispatched write that failed) -- nothing was read or written in the
+// timeout case. Every other caller (diagnostics_http.c) should keep using
+// the unbounded crash_report_acknowledge() above.
+bool crash_report_acknowledge_timeout(uint32_t timeout_ms, bool *out_timed_out);
+
 // Acknowledges (see above) AND erases the underlying coredump image via
 // esp_core_dump_image_erase(), freeing the `coredump` partition slot for the
 // next crash, then erases this module's own NVS record too so a stale

@@ -91,6 +91,33 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
     return ESP_OK;
 }
 
+// Bounded-wait sibling stub for uart_bridge_ext_run_on_flash_worker_timeout()
+// (MEDIUM 1, docs/audits/review_crash_gate_low_fixes_c534a0df_2026-09-15.md
+// -- crash_report_acknowledge_timeout()'s dispatch). `timeout_ms` is ignored
+// here (host tests have no clock-driven busy window to model): a busy
+// worker (s_stub_bx_busy) is reported as a timeout immediately rather than
+// asserting like the unbounded stub above does, since a bounded caller
+// hitting a busy worker is the exact non-deadlock case this function
+// exists to handle, not a bug to catch. Counted in the SAME s_stub_
+// dispatch_count as the unbounded stub -- a test asserting "dispatched
+// through the flash worker" should not have to know which of the two
+// entry points was used.
+esp_err_t uart_bridge_ext_run_on_flash_worker_timeout(void (*fn)(void *arg), void *arg, uint32_t timeout_ms)
+{
+    (void)timeout_ms;
+    if (s_stub_bx_busy) {
+        return ESP_ERR_TIMEOUT;
+    }
+    s_stub_dispatch_count++;
+    s_stub_bx_busy = true;
+    bool prev_on_worker = s_stub_on_flash_worker;
+    s_stub_on_flash_worker = true;
+    fn(arg);
+    s_stub_on_flash_worker = prev_on_worker;
+    s_stub_bx_busy = false;
+    return ESP_OK;
+}
+
 // Stands in for "is the calling task bx_flash_worker" -- see uart_bridge_
 // ext.c's real uart_bridge_ext_is_on_flash_worker(), which this host build
 // does not link (it reads a FreeRTOS task handle). Driven automatically by

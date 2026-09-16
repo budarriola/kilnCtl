@@ -411,28 +411,72 @@ static bool bx_run_on_internal_stack(bx_job_fn fn, void *arg)
         }
         return true;
     }
-    /* LOW-2 (docs/audits/review_crash_gate_followups_62e95bbd_2026-09-15.md):
-     * this blocks portMAX_DELAY on s_bx_lock and then s_bx_done, with no
-     * timeout. Since 2026-09-15 this can be reached from lvgl_task (crash_
-     * report.c's LCD Acknowledge control), i.e. from under the LVGL port
-     * lock -- if the worker is busy with a long job (a profile/autotune save,
-     * or a CONTROL message), the whole LCD stalls for that long. This is the
-     * same shape relay_cycles_reset() (Relay Life Reset, also called from
-     * lvgl_task under the LVGL lock) has already accepted: no flash-worker
-     * job today takes the LVGL lock (nothing under drivers/bridge, control/
-     * profile*, or control/autotune* calls lvgl_port_lock), so there is no
-     * deadlock, only a bounded-by-"how long the current job takes" UI
-     * freeze. That invariant is not enforced by anything, though -- a future
-     * flash-worker job that calls into lvgl_port_lock (directly or via a
-     * callback) WOULD deadlock the whole board the same way the re-entrancy
-     * case above does. If an LVGL-lock caller of this function ever needs a
-     * bound, the fix is a deferred job plus a result flag polled by the
-     * caller's own refresh timer (crash_report.c's refresh_cb is already
-     * polling every 2 s), not a timeout here -- a timed-out xSemaphoreTake
-     * on s_bx_done would leave `job` still sitting in the queue for the
-     * worker to run later against a stack frame the caller has already
-     * unwound. */
+    /* Blocks portMAX_DELAY on s_bx_lock and then s_bx_done, with no timeout.
+     * Since 2026-09-15 this can be reached from lvgl_task (crash_report.c's
+     * LCD Acknowledge control) -- if the worker is busy with a long job (a
+     * profile/autotune save, or a CONTROL message), the whole LCD stalls for
+     * that long with no bound and no operator feedback (MEDIUM 1,
+     * docs/audits/review_crash_gate_low_fixes_c534a0df_2026-09-15.md). This
+     * is the same shape relay_cycles_reset() (Relay Life Reset, also called
+     * from lvgl_task) has already accepted as a bounded-by-"how long the
+     * current job takes" freeze rather than fixed.
+     *
+     * The REAL invariant this relies on -- corrected 2026-09-15, the
+     * previous wording named a symbol (`lvgl_port_lock`) that exists nowhere
+     * in this tree: no flash-worker job may ever block on anything lvgl_task
+     * itself must produce (an LVGL-serviced queue, a UI-thread callback, a
+     * future LVGL mutex). Today nothing under drivers/bridge, control/
+     * profile*, or control/autotune* does that, so this function's stall
+     * ends when the current job's own flash I/O finishes, never sooner and
+     * never later -- not a deadlock, but also not proven safe against a
+     * FUTURE flash-worker job that waits on something lvgl_task produces;
+     * that combination WOULD deadlock the whole board the same way the
+     * re-entrancy case above does. Not enforced by anything mechanical yet
+     * (a candidate: teach flash_worker_lint.py this pattern).
+     *
+     * A caller that cannot accept an unbounded wait here (lvgl_task via
+     * crash_report.c) now goes through uart_bridge_ext_run_on_flash_worker_
+     * timeout() below instead of this path -- see that function's own
+     * comment for why a bound on s_bx_lock (not on s_bx_done) is the safe
+     * place to put a timeout: a timed-out xSemaphoreTake on s_bx_done would
+     * leave `job` still sitting in the queue for the worker to run later
+     * against a stack frame the caller has already unwound. */
     xSemaphoreTake(s_bx_lock, portMAX_DELAY);
+    bx_job_t job = { .fn = fn, .arg = arg };
+    bool ok = (xQueueSend(s_bx_jobs, &job, portMAX_DELAY) == pdTRUE);
+    if (ok) {
+        xSemaphoreTake(s_bx_done, portMAX_DELAY);
+    }
+    xSemaphoreGive(s_bx_lock);
+    return ok;
+}
+
+/* Bounded-wait sibling of bx_run_on_internal_stack() above -- see flash_
+ * worker.h's uart_bridge_ext_run_on_flash_worker_timeout() doc comment for
+ * the full rationale (MEDIUM 1, docs/audits/review_crash_gate_low_fixes_
+ * c534a0df_2026-09-15.md). Only the wait to ACQUIRE the worker (s_bx_lock)
+ * is bounded; once acquired, `fn` is this caller's own job and is dispatched
+ * and awaited unbounded, exactly like the sibling above -- `job` is only
+ * ever placed on the queue after the bounded wait already succeeded, so
+ * there is no window where a timed-out caller leaves a stale stack-frame
+ * pointer sitting in the queue. */
+static bool bx_run_on_internal_stack_timeout(bx_job_fn fn, void *arg, TickType_t wait_ticks, bool *out_timed_out)
+{
+    *out_timed_out = false;
+    if (!s_bx_jobs || !s_bx_done || !s_bx_lock) {
+        ESP_LOGE(UART_BRIDGE_EXT_TAG, "flash-safe worker not started -- job dropped");
+        return false;
+    }
+    if (bx_caller_is_worker_task(s_bx_worker_task_handle, xTaskGetCurrentTaskHandle())) {
+        if (fn) {
+            fn(arg);
+        }
+        return true;
+    }
+    if (xSemaphoreTake(s_bx_lock, wait_ticks) != pdTRUE) {
+        *out_timed_out = true;
+        return false;
+    }
     bx_job_t job = { .fn = fn, .arg = arg };
     bool ok = (xQueueSend(s_bx_jobs, &job, portMAX_DELAY) == pdTRUE);
     if (ok) {
@@ -460,6 +504,20 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
         return ESP_ERR_INVALID_ARG;
     }
     return bx_run_on_internal_stack(fn, arg) ? ESP_OK : ESP_FAIL;
+}
+
+/* See flash_worker.h's doc comment. */
+esp_err_t uart_bridge_ext_run_on_flash_worker_timeout(void (*fn)(void *arg), void *arg, uint32_t timeout_ms)
+{
+    if (!fn) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    bool timed_out = false;
+    bool ok = bx_run_on_internal_stack_timeout(fn, arg, pdMS_TO_TICKS(timeout_ms), &timed_out);
+    if (timed_out) {
+        return ESP_ERR_TIMEOUT;
+    }
+    return ok ? ESP_OK : ESP_FAIL;
 }
 
 /* Lets a caller that is ABOUT to dispatch onto this worker check first

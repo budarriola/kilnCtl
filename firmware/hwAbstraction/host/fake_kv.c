@@ -118,6 +118,12 @@ static bool key_logically_present(const fake_kv_key_slot_t *k)
     return k->committed_valid;
 }
 
+/* Counts every do_get() call regardless of outcome -- see fake_kv_get_call_
+ * count()'s doc comment. Reset by fake_kv_reset_all(). Declared here (ahead
+ * of do_get() and fake_kv_reset_all(), both below) since this file has no
+ * header of its own for internal statics and forward declarations. */
+static unsigned s_get_call_count = 0;
+
 void fake_kv_reset_all(void)
 {
     memset(s_partitions, 0, sizeof(s_partitions));
@@ -128,6 +134,21 @@ void fake_kv_reset_all(void)
     s_lossy_uncommitted = false;
     s_silent_erase_noops = 0u;
     s_silent_set_noops = 0u;
+    s_get_call_count = 0u;
+}
+
+/* Total hal_kv_get_blob()/hal_kv_get_str() calls since the last reset,
+ * regardless of outcome (found/not-found/error all count). Added 2026-09-15
+ * (INFO finding, docs/audits/review_crash_gate_low_fixes_c534a0df_2026-09-15.md)
+ * so a test can snapshot this around a call under test and assert NO read
+ * happened outside a specific place -- e.g. proving crash_report_acknowledge()
+ * performs no load() in the caller's own task before dispatching onto the
+ * flash worker, which the dispatch-count assertion alone cannot catch (a
+ * caller-side load() plus a dispatched job would both count as "one
+ * dispatch" and give the same answer). */
+unsigned fake_kv_get_call_count(void)
+{
+    return s_get_call_count;
 }
 
 bool fake_kv_handle_is_live(const hal_kv_handle_t *h)
@@ -345,6 +366,7 @@ hal_status_t hal_kv_commit(hal_kv_handle_t *h)
 static hal_status_t do_get(fake_kv_handle_slot_t *hs, const char *key, bool want_str,
                             void *buf, size_t *out_len)
 {
+    s_get_call_count++;
     if (!hs) return HAL_NOT_READY;
     if (key == NULL || out_len == NULL) return HAL_INVALID_ARG;
     /* Matches the real backend: ESP_ERR_NVS_KEY_TOO_LONG has no explicit

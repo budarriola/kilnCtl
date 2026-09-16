@@ -103,6 +103,12 @@ void fake_kv_reset_all(void);
 
 bool fake_kv_handle_is_live(const hal_kv_handle_t *h);
 
+/* Total hal_kv_get_blob()/hal_kv_get_str() calls since the last reset,
+ * regardless of outcome. Snapshot before/after a call under test to prove
+ * a read happened (or did not) at a specific point -- see fake_kv.c's doc
+ * comment on the counter itself for the motivating case. */
+unsigned fake_kv_get_call_count(void);
+
 /* True if `partition` (NULL means the default partition, matching
  * hal_kv_open's shape) has at least one key whose pending write has not
  * been merged in by hal_kv_commit(). Returns false for a partition never

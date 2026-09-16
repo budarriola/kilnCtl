@@ -385,6 +385,11 @@ static ui_topbar_t s_topbar;
 static lv_obj_t *s_pages[UI_PAGE_DIAGNOSTICS_PAGE_COUNT];
 static uint8_t s_page_index;
 
+/* Forward declaration -- refresh_cb() is defined further down (it needs the
+ * page's widgets, built after show_page() in this file), but show_page()
+ * itself needs to call it (LOW 3 fix below). */
+static void refresh_cb(lv_timer_t *timer);
+
 /* --- Page 1: Firmware (mostly static -- the user explicitly said
  * non-updating values are fine) -------------------------------------------- */
 static lv_obj_t *s_fw_version_label;
@@ -514,6 +519,20 @@ static void show_page(uint8_t index)
      * expected behavior for a paging page. */
     ui_topbar_set_prev_enabled(&s_topbar, index > 0);
     ui_topbar_set_next_enabled(&s_topbar, index + 1 < UI_PAGE_DIAGNOSTICS_PAGE_COUNT);
+
+    /* LOW 3 fix (docs/audits/review_crash_gate_low_fixes_c534a0df_2026-09-15.md):
+     * without this, the Crash Report page's summary label kept whatever
+     * refresh_cb()'s last 2 s tick painted -- on the very first visit that
+     * was the label's build-time placeholder text (build() below only runs
+     * refresh_cb(NULL) once, with s_page_index still 0), so navigating
+     * straight to Crash Report showed an empty/placeholder summary under a
+     * correctly shown-or-hidden Acknowledge row, for up to one refresh tick.
+     * refresh_cb() is cheap when the page it cares most about (Crash Report)
+     * isn't the one just switched to -- the per-page work above already
+     * gates its own expensive part (the blocking crash_report_get() read) on
+     * s_page_index, so calling it here on every show_page() is not a new
+     * per-page-switch I/O cost for pages that don't need it. */
+    refresh_cb(NULL);
 }
 
 static void prev_cb(lv_event_t *e)
@@ -1417,9 +1436,18 @@ static void relay_reset_btn_clicked_cb(lv_event_t *e)
         /* relay_cycles_reset() dispatches its own NVS write onto the
          * flash-safe worker (see that function's header comment) and blocks
          * this LVGL-task callback until the write lands -- this file must
-         * NOT call anything in relay_cycles.c that writes NVS directly, per
-         * DRAM_PSRAM_PLAN.md section 7.2 (the LVGL task's stack is
-         * PSRAM-backed). A failed persist still zeroes the count in RAM
+         * NOT call anything in relay_cycles.c that writes NVS directly.
+         * lvgl_task's own stack is actually static internal SRAM (lvgl_
+         * port.c's s_lvgl_task_stack, since the 2026-08-21 "REVERTED TO
+         * INTERNAL SRAM" fix), NOT PSRAM as DRAM_PSRAM_PLAN.md section 7.2
+         * and an earlier version of this comment both claimed (corrected
+         * 2026-09-15 to match crash_report.c's identical correction,
+         * docs/audits/review_crash_gate_low_fixes_c534a0df_2026-09-15.md LOW
+         * 4) -- routing through the flash worker here is still required, but
+         * for a different reason: it SERIALIZES this write against every
+         * other flash-worker job (including a concurrent crash-report ack or
+         * web write), not because this task's own stack is unsafe under a
+         * cache-disabled flash op. A failed persist still zeroes the count in RAM
          * (relay_cycles_reset()'s documented contract) and is retried by the
          * next periodic persist -- ESP_LOGW from inside that function
          * already says so, nothing further to show the operator here beyond
@@ -1493,16 +1521,30 @@ static void build_relay_life_row(lv_obj_t *parent, unsigned relay, const char *n
 #undef UI_PAGE_DIAGNOSTICS_RELAY_ROW_BTN_H_PX
 
 /* Acknowledge button tap -- same two-tap confirm shape as
- * relay_reset_btn_clicked_cb() above. Second tap calls
- * crash_report_acknowledge() directly: that function already dispatches its
- * own NVS write onto the flash worker internally (see crash_report.c,
- * fixed 2026-09-15) and is safe to call from this LVGL-task callback for the
- * exact same reason relay_cycles_reset() is -- this file must NEVER write
- * NVS directly from a callback running on the (PSRAM-backed) LVGL task,
- * per DRAM_PSRAM_PLAN.md section 7.2. This is also the SAME acknowledge
- * path the web /api/crash_report/ack route uses, so acknowledging here or
- * from the browser clears the same unacked cache either way. */
+ * relay_reset_btn_clicked_cb() above. Second tap calls crash_report_
+ * acknowledge_timeout(), not crash_report_acknowledge(): that function
+ * dispatches its own NVS write onto the flash worker internally (see
+ * crash_report.c) and is safe to call from this LVGL-task callback -- this
+ * file must never write NVS directly from a callback running on lvgl_task
+ * -- but the UNBOUNDED version blocks this whole LCD for as long as
+ * whatever OTHER job the flash worker happens to be running takes (a
+ * profile/package import, a cfg_fs write), with no bound and no operator
+ * feedback (MEDIUM 1, docs/audits/review_crash_gate_low_fixes_c534a0df_
+ * 2026-09-15.md). The _timeout() sibling bounds only the wait to become the
+ * next job in line; a timeout there means nothing was read or written, so
+ * it is shown as a distinct "Busy - retry" result rather than silently
+ * reverting to "Acknowledge" as if the tap had never happened. This is also
+ * the SAME underlying acknowledge path the web /api/crash_report/ack route
+ * uses (crash_report_acknowledge() calls the identical crash_ack_job()),
+ * so acknowledging here or from the browser clears the same unacked cache
+ * either way. */
 #define UI_PAGE_DIAGNOSTICS_CRASH_ACK_CONFIRM_US (5 * 1000 * 1000)
+/* Bound on ACQUIRING the flash worker (not on the ack write itself, which is
+ * this caller's own short job) -- see uart_bridge_ext_run_on_flash_worker_
+ * timeout()'s doc comment. 300 ms is comfortably longer than any of today's
+ * flash-worker jobs normally take (a single NVS blob write/read) but short
+ * enough that a genuine freeze reads as a momentary pause, not a hang. */
+#define UI_PAGE_DIAGNOSTICS_CRASH_ACK_WAIT_MS 300u
 static void crash_ack_btn_clicked_cb(lv_event_t *e)
 {
     (void)e;
@@ -1518,10 +1560,27 @@ static void crash_ack_btn_clicked_cb(lv_event_t *e)
 
     if (armed) {
         s_cr_ack_deadline_us = 0;
-        lv_label_set_text(s_cr_ack_label, "Acknowledge");
-        if (!crash_report_acknowledge()) {
-            ESP_LOGW(TAG, "LCD: crash_report_acknowledge() failed -- record still unacknowledged, "
+        bool timed_out = false;
+        bool ok = crash_report_acknowledge_timeout(UI_PAGE_DIAGNOSTICS_CRASH_ACK_WAIT_MS, &timed_out);
+        if (timed_out) {
+            /* Visible, distinct result (MEDIUM 1 fix): the flash worker was
+             * busy with someone else's job and the bounded wait gave up --
+             * nothing was read or written, so this is not "acknowledge
+             * failed", it is "try again in a moment". Left showing until the
+             * next arm tap overwrites it with "Confirm?" (refresh_cb() only
+             * ever touches this label on an expired arm, which s_cr_ack_
+             * deadline_us == 0 here already rules out) -- an operator who
+             * reads "Busy" and taps again gets a fresh attempt, and one who
+             * walks away leaves a truthful, not misleading, label. */
+            lv_label_set_text(s_cr_ack_label, "Busy");
+            ESP_LOGW(TAG, "LCD: crash-record acknowledge timed out waiting for the flash worker -- "
                           "try again");
+        } else {
+            lv_label_set_text(s_cr_ack_label, "Acknowledge");
+            if (!ok) {
+                ESP_LOGW(TAG, "LCD: crash_report_acknowledge_timeout() failed -- record still "
+                              "unacknowledged, try again");
+            }
         }
     } else {
         s_cr_ack_deadline_us = now + UI_PAGE_DIAGNOSTICS_CRASH_ACK_CONFIRM_US;

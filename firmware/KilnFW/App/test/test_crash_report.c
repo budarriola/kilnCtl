@@ -586,6 +586,50 @@ static void test_ack_job_does_not_resurrect_after_concurrent_clear(void)
               "the cache still reads false -- no resurrection visible to the relay gate or the LCD/web either");
 }
 
+// INFO fix (docs/audits/review_crash_gate_low_fixes_c534a0df_2026-09-15.md):
+// test_ack_job_does_not_resurrect_after_concurrent_clear() above drives
+// crash_ack_job() directly, so it pins the load-inside-the-job shape but
+// cannot fail if a future change moves load() back OUT of the job and into
+// crash_report_acknowledge() itself while leaving crash_ack_job() untouched
+// -- that regression would still pass every assertion above, since the job
+// would still see the record correctly if nothing raced it. This test
+// closes that gap by driving crash_report_acknowledge() (the real caller
+// entry point) and asserting NO hal_kv read happens before the dispatch --
+// fake_kv_get_call_count() (added alongside this test) is the only way to
+// see that from outside, since the stub's own dispatch counter (LOW-1) does
+// not distinguish "one dispatch, zero caller-side reads" from "one
+// caller-side read plus one dispatch".
+static void test_acknowledge_reads_only_inside_the_dispatched_job(void)
+{
+    TEST_SECTION("crash_report_acknowledge -- performs no hal_kv read in the caller's own task before "
+                 "dispatching onto the flash worker (load() must live inside crash_ack_job())");
+    reset_all();
+
+    crash_report_record_t rec = make_sample_record();
+    rec.acknowledged = 0;
+    seal_crc(&rec);
+    TEST_CHECK(persist(&rec) == ESP_OK, "seed an unacknowledged record");
+
+    // persist() above and its own internal reads are done -- snapshot AFTER
+    // setup, right before the call under test.
+    unsigned reads_before = fake_kv_get_call_count();
+    unsigned dispatch_before = s_stub_dispatch_count;
+
+    TEST_CHECK(crash_report_acknowledge() == true, "acknowledge succeeds against the seeded record");
+
+    // Exactly one dispatch, and the ONLY hal_kv_get_blob() call attributable
+    // to this whole call happened inside crash_ack_job() (load() once), not
+    // one extra caller-side load() before the dispatch. If a future change
+    // moved load() back out to the caller, this would see 2 (or more) get
+    // calls for the same single dispatch, since the caller's own load()
+    // would be counted too.
+    TEST_CHECK(s_stub_dispatch_count == dispatch_before + 1,
+              "exactly one dispatch through the flash worker");
+    TEST_CHECK(fake_kv_get_call_count() == reads_before + 1,
+              "exactly one hal_kv read total -- the job's own load(), and nothing read by the "
+              "caller before dispatch");
+}
+
 static void test_clear_erases_coredump_via_hal_sysinfo(void)
 {
     TEST_SECTION("crash_report_clear -- hal_sysinfo_coredump_erase() clears fake coredump presence");
@@ -698,6 +742,7 @@ void run_test_crash_report(void)
     test_init_reaches_summary_fetch_when_coredump_present();
     test_clear_reflag_survives_ack_write_failure();
     test_ack_job_does_not_resurrect_after_concurrent_clear();
+    test_acknowledge_reads_only_inside_the_dispatched_job();
     test_clear_erases_coredump_via_hal_sysinfo();
     test_exception_registers_round_trip();
     test_frame_trustworthy_rejects_pc_of_zero();

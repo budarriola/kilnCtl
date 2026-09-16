@@ -44,6 +44,11 @@ static const char *TAG = "crash_report";
  * the crash record can never interleave. */
 esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
 bool uart_bridge_ext_is_on_flash_worker(void);
+/* Bounded-wait sibling used ONLY by crash_report_acknowledge_timeout() below
+ * (the LCD Acknowledge path) -- see flash_worker.h's own doc comment for the
+ * full rationale (MEDIUM 1, docs/audits/review_crash_gate_low_fixes_
+ * c534a0df_2026-09-15.md). */
+esp_err_t uart_bridge_ext_run_on_flash_worker_timeout(void (*fn)(void *arg), void *arg, uint32_t timeout_ms);
 
 /* Cached mirror of "have_record && !acknowledged" -- see crash_report.h's
  * crash_report_has_unacknowledged() doc comment. Defaults to false (matches
@@ -494,6 +499,44 @@ static void crash_ack_job(void *arg)
     ctx->err = persist(&rec);
 }
 
+/* Shared tail for crash_report_acknowledge()/crash_report_acknowledge_
+ * timeout() below -- both dispatch crash_ack_job() the same way and only
+ * differ in HOW they dispatch (unbounded vs. bounded wait). `submit_err` is
+ * the dispatch call's own return value (ESP_OK if the job ran at all,
+ * whatever it reports otherwise if it never ran).
+ *
+ * LOW 1 fix (docs/audits/review_crash_gate_low_fixes_c534a0df_2026-09-15.md):
+ * a failed dispatch (submit_err != ESP_OK) now logs its OWN distinct warning
+ * before the `!had_record` check below can return silently -- pre-fix, a
+ * dispatch failure left ctx.had_record at its false initializer and fell
+ * straight into that check with no log at all, indistinguishable from the
+ * genuine "nothing to acknowledge" case. Both are diagnosability fixes, not
+ * safety ones: the gate stays blocking (s_have_unacked_crash untouched)
+ * either way. */
+static bool crash_ack_finish(crash_ack_job_ctx_t *ctx, esp_err_t submit_err)
+{
+    if (submit_err != ESP_OK) {
+        ESP_LOGW(TAG, "crash-record acknowledge: could not dispatch to the flash worker: %s -- "
+                      "nothing was read or written, try again",
+                 esp_err_to_name(submit_err));
+        return false;
+    }
+    if (!ctx->had_record) {
+        return false;
+    }
+    if (ctx->already_acked) {
+        s_have_unacked_crash = false; /* defensive -- keep the cache honest even if it had drifted */
+        return true; /* already acknowledged -- nothing to do, not a failure */
+    }
+    if (ctx->err != ESP_OK) {
+        ESP_LOGW(TAG, "could not persist crash-record acknowledgement: %s -- it will reappear after a reboot",
+                 esp_err_to_name(ctx->err));
+        return false;
+    }
+    s_have_unacked_crash = false;
+    return true;
+}
+
 bool crash_report_acknowledge(void)
 {
     /* RE-ENTRANCY (flash_worker_lint.py's pattern 1, same guard relay_
@@ -505,32 +548,50 @@ bool crash_report_acknowledge(void)
      * already be on the worker, but the check is cheap and this is exactly
      * the class of bug that stays invisible until a caller changes. */
     crash_ack_job_ctx_t ctx = { .err = ESP_FAIL, .had_record = false, .already_acked = false };
+    esp_err_t submit_err = ESP_OK;
     if (uart_bridge_ext_is_on_flash_worker()) {
         crash_ack_job(&ctx);
     } else {
-        esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker(crash_ack_job, &ctx);
-        if (submit_err != ESP_OK) {
-            /* uart_bridge_ext_run_on_flash_worker() itself returning non-OK
-             * (worker not started, queue full) means the job never ran at
-             * all -- ctx.err is still its ESP_FAIL initializer, which is the
-             * right thing to report either way. */
-            ctx.err = submit_err;
+        submit_err = uart_bridge_ext_run_on_flash_worker(crash_ack_job, &ctx);
+    }
+    return crash_ack_finish(&ctx, submit_err);
+}
+
+/* Bounded-wait sibling of crash_report_acknowledge() -- for the LCD
+ * Acknowledge control (lvgl_task), which must not block the whole UI
+ * indefinitely behind some OTHER caller's long flash-worker job (MEDIUM 1,
+ * docs/audits/review_crash_gate_low_fixes_c534a0df_2026-09-15.md). Every
+ * other caller (diagnostics_http.c's httpd-task POST handler) keeps using
+ * the unbounded crash_report_acknowledge() above -- an HTTP request has no
+ * equivalent "freeze the whole UI" hazard.
+ *
+ * `*out_timed_out` (if non-NULL) is set true only when the worker could not
+ * be acquired within timeout_ms -- i.e. nothing was read or written at all,
+ * as distinct from every other false-returning outcome (no record, or a
+ * dispatched write that failed), which are reported the normal way through
+ * the return value and crash_ack_finish()'s own logging. The caller (ui_
+ * page_diagnostics.c) uses this to show a distinct "busy, try again" result
+ * rather than the generic failure text. */
+bool crash_report_acknowledge_timeout(uint32_t timeout_ms, bool *out_timed_out)
+{
+    if (out_timed_out) {
+        *out_timed_out = false;
+    }
+    crash_ack_job_ctx_t ctx = { .err = ESP_FAIL, .had_record = false, .already_acked = false };
+    if (uart_bridge_ext_is_on_flash_worker()) {
+        crash_ack_job(&ctx);
+        return crash_ack_finish(&ctx, ESP_OK);
+    }
+    esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker_timeout(crash_ack_job, &ctx, timeout_ms);
+    if (submit_err == ESP_ERR_TIMEOUT) {
+        if (out_timed_out) {
+            *out_timed_out = true;
         }
-    }
-    if (!ctx.had_record) {
+        ESP_LOGW(TAG, "crash-record acknowledge: flash worker busy, timed out after %lu ms -- try again",
+                 (unsigned long)timeout_ms);
         return false;
     }
-    if (ctx.already_acked) {
-        s_have_unacked_crash = false; /* defensive -- keep the cache honest even if it had drifted */
-        return true; /* already acknowledged -- nothing to do, not a failure */
-    }
-    if (ctx.err != ESP_OK) {
-        ESP_LOGW(TAG, "could not persist crash-record acknowledgement: %s -- it will reappear after a reboot",
-                 esp_err_to_name(ctx.err));
-        return false;
-    }
-    s_have_unacked_crash = false;
-    return true;
+    return crash_ack_finish(&ctx, submit_err);
 }
 
 /* Same shape as crash_ack_persist_job() above -- the erase half of

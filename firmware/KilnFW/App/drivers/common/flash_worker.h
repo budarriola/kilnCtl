@@ -1,6 +1,8 @@
 #ifndef KILNFW_FLASH_WORKER_H
 #define KILNFW_FLASH_WORKER_H
 
+#include <stdint.h>
+
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -32,6 +34,34 @@ extern "C" {
  * check uart_bridge_ext_is_on_flash_worker() (declared in uart_bridge.h)
  * first and run their work inline instead of dispatching again. */
 esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
+
+/* Bounded-wait sibling of the above, for a caller that must not block
+ * indefinitely -- added 2026-09-15 for crash_report.c's LCD Acknowledge
+ * path (docs/audits/review_crash_gate_low_fixes_c534a0df_2026-09-15.md
+ * MEDIUM 1): lvgl_task calling the unbounded version above can freeze the
+ * whole LCD for as long as some OTHER caller's job (a profile/package
+ * import, a cfg_fs write) takes, with no bound and no operator feedback.
+ *
+ * The bound applies ONLY to acquiring the worker (waiting for a job already
+ * in flight to finish) -- `timeout_ms` is the most this call will wait to
+ * become the next job in line. Once that wait succeeds, `fn(arg)` is
+ * dispatched and awaited exactly like uart_bridge_ext_run_on_flash_worker()
+ * (unbounded), because at that point `fn` is the caller's OWN job -- for the
+ * known callers (crash-record ack, an NVS load+store) that is a short,
+ * bounded-in-practice write, not the long job this timeout exists to skip
+ * past. This is deliberately NOT a timeout on `arg`'s lifetime: if the
+ * worker-acquire wait itself timed out, `fn` was never enqueued, so there is
+ * no risk of the queued job running later against a stack frame the caller
+ * has already unwound (see bx_run_on_internal_stack()'s own comment on why
+ * a raw xSemaphoreTake(s_bx_done, timeout) would be unsafe there -- this
+ * function does not do that).
+ *
+ * Returns ESP_ERR_TIMEOUT if the worker could not be acquired within
+ * timeout_ms (fn was never run -- caller must show that as a real "busy,
+ * try again" outcome, not silence); ESP_ERR_INVALID_ARG if fn is NULL;
+ * otherwise the same ESP_OK/ESP_FAIL as the unbounded version. */
+esp_err_t uart_bridge_ext_run_on_flash_worker_timeout(void (*fn)(void *arg), void *arg,
+                                                       uint32_t timeout_ms);
 
 #ifdef __cplusplus
 }
