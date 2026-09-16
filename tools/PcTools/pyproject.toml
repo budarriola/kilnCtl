@@ -20,6 +20,16 @@ dependencies = [
     # pinout PNG deliberately uses tk.PhotoImage instead.
     "pillow>=10.0",
     "pyyaml>=6.0",
+    # A hard runtime dependency, not a test-only one: plant_sim.py,
+    # coupled_ident.py, load_estimator.py, ramp_assist.py, tuning_campaign.py
+    # and friends import numpy at module scope, and mcp_server.py star-imports
+    # the mcp_server_* wrappers around them, so the live MCP server drags numpy
+    # in at import time. Four of those modules are also declared console
+    # scripts. Undeclared until 2026-09-15, when a clean worktree turned up 35
+    # pytest collection errors that were all this one missing line. The main
+    # tree's venv runs 2.5.2; the floor is kept at 2.0 so the declared
+    # requires-python >=3.10 stays resolvable.
+    "numpy>=2.0",
 ]
 
 [dependency-groups]
