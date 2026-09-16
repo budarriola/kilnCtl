@@ -109,9 +109,17 @@ void relay_cycles_set_type(uint8_t relay, relay_type_t type, uint32_t rated_over
 // nvs_save() calls it without needing a real kiln config store underneath.
 bool g_stub_autosave_called = false;
 bool g_stub_autosave_result = true;
-bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap)
+// 2026-09-16 cross-task autosave-override fix: nvs_save() now dispatches the
+// identity-carrying entry point, passing the DISPATCHING TASK's handle through
+// uart_bridge_ext_run_on_flash_worker()'s existing `arg`. Recorded here so the
+// test below can prove the handle actually arrives, rather than only that some
+// autosave ran.
+void *g_stub_autosave_dispatcher = NULL;
+bool kiln_cfg_store_autosave_from_live_for_dispatcher(void *dispatcher_task, char *reason_out,
+                                                      size_t reason_cap)
 {
     g_stub_autosave_called = true;
+    g_stub_autosave_dispatcher = dispatcher_task;
     if (reason_out && reason_cap) {
         reason_out[0] = '\0';
     }
@@ -2073,8 +2081,18 @@ static void test_nvs_save_dispatches_the_kiln_config_autosave(void)
 
     g_stub_autosave_called = false;
     g_stub_autosave_result = true;
+    g_stub_autosave_dispatcher = NULL;
 
     TEST_CHECK(nvs_save() == ESP_OK, "nvs_save() must succeed against the stub");
+    // 2026-09-16 cross-task autosave-override fix. Dispatching the autosave is
+    // no longer enough on its own: the DISPATCHING TASK's identity has to reach
+    // the autosave, or an unrelated task's concurrent zones write is again free
+    // to be steered into an in-flight import's incoming slot. Passing NULL here
+    // (or dropping the `arg`) would silently re-open that window while leaving
+    // the "was it dispatched" check above green.
+    TEST_CHECK(g_stub_autosave_dispatcher == (void *)xTaskGetCurrentTaskHandle(),
+              "nvs_save() must carry the DISPATCHING TASK's handle into the autosave -- without it the "
+              "autosave target override cannot tell an import's own autosave from an interloper's");
     TEST_CHECK(g_stub_autosave_called,
               "nvs_save() must dispatch kiln_cfg_store_autosave_from_live() -- a zones-config "
               "change that never reaches the active kiln slot silently desynchronises the stored "

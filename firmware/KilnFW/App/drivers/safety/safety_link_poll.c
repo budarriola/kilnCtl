@@ -338,12 +338,22 @@ esp_err_t uart_bridge_ext_post_on_flash_worker(void (*fn)(void *arg));
  * is PSRAM-backed, and kiln_cfg_store_autosave_from_live()'s deferred-
  * recapture path performs an NVS write, which aborts outright from a
  * PSRAM stack (project memory: "PSRAM stack + NVS = panic"). */
+/* Posted through uart_bridge_ext_post_on_flash_worker(), which carries no
+ * `arg` at all -- so this job can never be the task that set an autosave
+ * target override, and the NULL dispatcher below says exactly that.
+ * Calling the identity-carrying entry point directly, rather than the
+ * plain wrapper that would forward NULL for us, is deliberate on two
+ * counts: it states the "not the override owner" property at the call
+ * site instead of leaving it implicit, and it keeps the wrapper's frame
+ * off the DEEPEST enumerated bx_flash_worker dispatch target -- this job.
+ * That frame measured +32 B and pushed bx_flash_worker's lower bound from
+ * 3792 B to 3824 B, over its ceiling in check_all_task_stack_budgets.py. */
 static void safety_poll_pico_half_recapture_job(void *arg)
 {
     (void)arg;
     char reason[CONFIG_DIVERGENCE_REASON_MAX];
     reason[0] = '\0';
-    if (!kiln_cfg_store_autosave_from_live(reason, sizeof(reason))) {
+    if (!kiln_cfg_store_autosave_from_live_for_dispatcher(NULL, reason, sizeof(reason))) {
         ESP_LOGW("safety_poll", "deferred Pico-half recapture autosave failed: %s",
                  reason[0] ? reason : "(no reason given)");
     }

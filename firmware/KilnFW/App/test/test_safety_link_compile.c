@@ -136,9 +136,12 @@ static int s_stub_autosave_calls = 0;
 #define STUB_SLOW_FLASH_JOB_US 11987003ull
 
 bool kiln_cfg_store_pico_half_recapture_pending(void) { return s_stub_recapture_pending; }
-bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap)
+void *g_stub_autosave_dispatcher = (void *)-1;
+bool kiln_cfg_store_autosave_from_live_for_dispatcher(void *dispatcher_task, char *reason_out,
+                                                      size_t reason_cap)
 {
     if (reason_out && reason_cap > 0) { reason_out[0] = 0; }
+    g_stub_autosave_dispatcher = dispatcher_task;
     s_stub_autosave_calls++;
     return true;
 }
@@ -1713,6 +1716,11 @@ static void test_recapture_cannot_stall_the_heartbeat_task(void)
     TEST_CHECK(s_stub_autosave_calls == 1,
                "the posted job still performs exactly one recapture autosave, on the flash worker's "
                "own internal-SRAM stack");
+    TEST_CHECK(g_stub_autosave_dispatcher == NULL,
+               "the POSTED recapture job must pass a NULL dispatcher identity: it is posted through "
+               "the no-arg uart_bridge_ext_post_on_flash_worker() path, so it is by construction "
+               "not the task that set an autosave target override -- passing any non-NULL handle "
+               "here could steer this unrelated autosave into an in-flight import's incoming slot");
 
     s_stub_recapture_pending = false;
 }

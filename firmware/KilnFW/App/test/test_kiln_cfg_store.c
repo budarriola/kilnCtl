@@ -149,8 +149,13 @@ bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, si
         // real firmware's live zones config is genuinely the imported bytes
         // by this point, since zones_config_import_blob() already committed
         // them to RAM before nvs_save() dispatches.
+        // Carries the DISPATCHING TASK's handle, exactly as production's
+        // zones_config_store.c nvs_save() now does via zones_autosave_job()'s
+        // `arg` -- the import's OWN autosave is the one case that legitimately
+        // honors the autosave target override (2026-09-16 cross-task fix).
         char sub[96] = {0};
-        kiln_cfg_store_autosave_from_live(sub, sizeof(sub));
+        kiln_cfg_store_autosave_from_live_for_dispatcher((void *)xTaskGetCurrentTaskHandle(), sub,
+                                                         sizeof(sub));
     }
     return s_stub_import_result;
 }
@@ -2158,6 +2163,169 @@ static void test_import_accepts_abs_max_temp_c_at_or_above_zone_max(void)
     free(json);
 }
 
+// ---------------------------------------------------------------------------
+// Cross-task autosave-override race -- LOW finding 5 of
+// docs/audits/review_autosave_slot_fix_a93ee77b_2026-09-15.md ("cross-task
+// observation"), re-affirmed by review_autosave_rework_5bc9afb5_2026-09-15.md.
+//
+// kiln_cfg_store_apply() and kiln_cfg_swap.c set s_autosave_target_override
+// around zones_config_import_blob(), which commits the RAM config and only
+// THEN calls nvs_save() -- a window spanning a blob decode, a JSON validate
+// and an O(groups x zones) inheritance-cycle scan. An UNRELATED task's zones
+// write landing in that window (confirmed reachable: uart_bridge_ext_control.c
+// dispatches control_handle_message onto bx_flash_worker, and
+// CONTROL_CMD_SET_ZONE_PID / SET_ZONE_MODEL both end in nvs_save()) read the
+// override and wrote the OUTGOING config into the INCOMING slot, with
+// populate_pico_half_and_hash() certifying it with a correct pkg_hash --
+// silent, and not hash-detectable.
+//
+// The interloper is modelled exactly as it reaches this module: through the
+// PLAIN entry point, carrying no dispatcher identity, while an override set
+// by another task is live. It must land in the ACTIVE slot -- and it must
+// still be WRITTEN. Suppressing it was explicitly rejected: that trades
+// silent corruption for a silently dropped operator save.
+static void test_autosave_override_ignores_a_foreign_dispatcher(void)
+{
+    TEST_SECTION("kiln_cfg_store autosave target override -- an UNRELATED task's autosave during an "
+                 "in-flight import targets the ACTIVE slot, never the import's override slot, and is "
+                 "still written rather than suppressed");
+    reset_state();
+
+    int32_t id_outgoing = -1;
+    int32_t id_incoming = -1;
+    char reason[96] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Outgoing Kiln", -1, &id_outgoing, reason, sizeof(reason)),
+               "test setup: the OUTGOING (active) slot exists");
+    s_stub_export_content[0] = 0x5A;
+    TEST_CHECK(kiln_cfg_store_save_current("Incoming Kiln", -1, &id_incoming, reason, sizeof(reason)),
+               "test setup: the INCOMING slot (the one an apply() is importing into) exists");
+    TEST_CHECK(id_outgoing != id_incoming, "test setup: two distinct slots");
+    s_store.active_id = id_outgoing;
+
+    // The interloper's live bytes -- distinct from anything saved so far.
+    for (size_t i = 0; i < sizeof(s_stub_export_content); i++) {
+        s_stub_export_content[i] = (uint8_t)(i + 200);
+    }
+
+    // An import is in flight on ANOTHER task: the override names the slot
+    // that import belongs to.
+    kiln_cfg_store_set_autosave_target_override(id_incoming);
+    bool ok = kiln_cfg_store_autosave_from_live(reason, sizeof(reason));
+    kiln_cfg_store_set_autosave_target_override(KILN_CFG_AUTOSAVE_OVERRIDE_NONE);
+    TEST_CHECK(ok, "the interloper's own save reports success");
+
+    uint8_t blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+    uint16_t blob_len = 0;
+    TEST_CHECK(kiln_cfg_store_get_full_package(id_incoming, blob, sizeof(blob), &blob_len, NULL, NULL, 0),
+               "read back the INCOMING slot");
+    TEST_CHECK(blob[0] != 200,
+               "the interloper's config was NOT written into the in-flight import's incoming slot -- this "
+               "is the silent, hash-certified cross-slot corruption the dispatcher-identity fix closes");
+
+    TEST_CHECK(kiln_cfg_store_get_full_package(id_outgoing, blob, sizeof(blob), &blob_len, NULL, NULL, 0),
+               "read back the ACTIVE (outgoing) slot");
+    TEST_CHECK(blob[0] == 200,
+               "the interloper's save landed in the ACTIVE slot -- it was neither dropped nor deferred, "
+               "which is the branch the owner explicitly rejected");
+}
+
+// The other direction: the import's OWN autosave, carrying the identity of
+// the task that set the override, must still be steered by it -- otherwise
+// the fix above would have simply disabled the override and re-opened
+// Defect 1 (an import's autosave overwriting the OUTGOING kiln's slot).
+static void test_autosave_override_applies_to_its_own_dispatcher(void)
+{
+    TEST_SECTION("kiln_cfg_store autosave target override -- the IMPORT'S OWN autosave, dispatched by the "
+                 "task that set the override, still targets the override slot (Defect 1 stays fixed)");
+    reset_state();
+
+    int32_t id_outgoing = -1;
+    int32_t id_incoming = -1;
+    char reason[96] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Outgoing Kiln", -1, &id_outgoing, reason, sizeof(reason)),
+               "test setup: the OUTGOING (active) slot exists");
+    s_stub_export_content[0] = 0x5A;
+    TEST_CHECK(kiln_cfg_store_save_current("Incoming Kiln", -1, &id_incoming, reason, sizeof(reason)),
+               "test setup: the INCOMING slot exists");
+    s_store.active_id = id_outgoing;
+
+    for (size_t i = 0; i < sizeof(s_stub_export_content); i++) {
+        s_stub_export_content[i] = (uint8_t)(i + 200);
+    }
+
+    // Same task sets the override and dispatches the autosave -- exactly the
+    // shape zones_config_store.c's nvs_save() produces for an import.
+    kiln_cfg_store_set_autosave_target_override(id_incoming);
+    bool ok = kiln_cfg_store_autosave_from_live_for_dispatcher((void *)xTaskGetCurrentTaskHandle(), reason,
+                                                               sizeof(reason));
+    kiln_cfg_store_set_autosave_target_override(KILN_CFG_AUTOSAVE_OVERRIDE_NONE);
+    TEST_CHECK(ok, "the import's own autosave succeeds");
+
+    uint8_t blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+    uint16_t blob_len = 0;
+    TEST_CHECK(kiln_cfg_store_get_full_package(id_incoming, blob, sizeof(blob), &blob_len, NULL, NULL, 0),
+               "read back the INCOMING slot");
+    TEST_CHECK(blob[0] == 200,
+               "the import's own autosave DID follow the override into the incoming slot");
+
+    TEST_CHECK(kiln_cfg_store_get_full_package(id_outgoing, blob, sizeof(blob), &blob_len, NULL, NULL, 0),
+               "read back the OUTGOING slot");
+    TEST_CHECK(blob[0] != 200,
+               "the OUTGOING kiln's slot was left alone -- Defect 1 is still fixed");
+}
+
+// A FOREIGN, NON-NULL dispatcher: the interloper is itself a dispatched flash-
+// worker job (the PC control bridge's SET_ZONE_PID reaches nvs_save() from
+// bx_flash_worker), so it arrives with a perfectly valid task handle that is
+// simply NOT the one that set the override. Distinguishing "non-NULL" from
+// "the owner" is the entire content of the fix -- a check that only rejected
+// NULL would still mis-steer this save into the in-flight import's slot.
+static void test_autosave_override_ignores_a_foreign_nonnull_dispatcher(void)
+{
+    TEST_SECTION("kiln_cfg_store autosave target override -- a FOREIGN but non-NULL dispatcher is not the "
+                 "owner, so the override does not apply to it");
+    reset_state();
+
+    int32_t id_outgoing = -1;
+    int32_t id_incoming = -1;
+    char reason[96] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Outgoing Kiln", -1, &id_outgoing, reason, sizeof(reason)),
+               "test setup: the OUTGOING (active) slot exists");
+    s_stub_export_content[0] = 0x5A;
+    TEST_CHECK(kiln_cfg_store_save_current("Incoming Kiln", -1, &id_incoming, reason, sizeof(reason)),
+               "test setup: the INCOMING slot exists");
+    s_store.active_id = id_outgoing;
+
+    for (size_t i = 0; i < sizeof(s_stub_export_content); i++) {
+        s_stub_export_content[i] = (uint8_t)(i + 200);
+    }
+
+    // The owner is whatever xTaskGetCurrentTaskHandle() returns under the host
+    // stubs; this handle is deliberately a different, non-NULL value.
+    void *foreign_task = (void *)0x7E57F0F0u;
+    TEST_CHECK(foreign_task != (void *)xTaskGetCurrentTaskHandle(),
+               "test setup: the foreign handle really is a different task than the override's owner");
+
+    kiln_cfg_store_set_autosave_target_override(id_incoming);
+    bool ok = kiln_cfg_store_autosave_from_live_for_dispatcher(foreign_task, reason, sizeof(reason));
+    kiln_cfg_store_set_autosave_target_override(KILN_CFG_AUTOSAVE_OVERRIDE_NONE);
+    TEST_CHECK(ok, "the interloper's own save still reports success");
+
+    uint8_t blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+    uint16_t blob_len = 0;
+    TEST_CHECK(kiln_cfg_store_get_full_package(id_incoming, blob, sizeof(blob), &blob_len, NULL, NULL, 0),
+               "read back the INCOMING slot");
+    TEST_CHECK(blob[0] != 200,
+               "a foreign NON-NULL dispatcher must NOT be steered into the in-flight import's incoming "
+               "slot -- rejecting only NULL would leave this silent cross-slot corruption wide open");
+
+    TEST_CHECK(kiln_cfg_store_get_full_package(id_outgoing, blob, sizeof(blob), &blob_len, NULL, NULL, 0),
+               "read back the OUTGOING (active) slot");
+    TEST_CHECK(blob[0] == 200,
+               "the foreign dispatcher's save landed in the genuinely ACTIVE slot -- neither dropped nor "
+               "deferred, the branch the owner explicitly rejected");
+}
+
 static void test_autosave_from_live_noop_with_no_active_config(void)
 {
     TEST_SECTION("kiln_cfg_store_autosave_from_live -- no-op (success, nothing written) with no active config");
@@ -2629,6 +2797,9 @@ void run_test_kiln_cfg_store(void)
     test_import_accepts_abs_max_temp_c_at_or_above_zone_max();
     test_autosave_from_live_noop_with_no_active_config();
     test_autosave_from_live_updates_active_slot_and_hash();
+    test_autosave_override_ignores_a_foreign_dispatcher();
+    test_autosave_override_applies_to_its_own_dispatcher();
+    test_autosave_override_ignores_a_foreign_nonnull_dispatcher();
     test_autosave_from_live_suppressed_while_diverged();
     test_autosave_from_live_suppressed_while_swap_pending();
     test_recapture_pico_half_confirmed_bypasses_divergence_gate();

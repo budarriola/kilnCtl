@@ -500,6 +500,55 @@ bool kiln_cfg_store_recapture_pico_half_confirmed(char *reason_out, size_t reaso
 #define KILN_CFG_AUTOSAVE_OVERRIDE_NONE INT32_MIN
 void kiln_cfg_store_set_autosave_target_override(int32_t id_or_none_sentinel);
 
+/* 2026-09-16 -- LOW finding 5 of docs/audits/review_autosave_slot_fix_
+ * a93ee77b_2026-09-15.md ("cross-task observation"), re-affirmed by
+ * docs/audits/review_autosave_rework_5bc9afb5_2026-09-15.md. The override
+ * above is a plain static, read by whichever task happens to run the next
+ * autosave, so an UNRELATED task's zones write landing between
+ * set_autosave_target_override(id) and the matching clear used to be
+ * steered by it: the interloper's autosave wrote the OUTGOING config into
+ * the INCOMING slot, and populate_pico_half_and_hash() then certified that
+ * slot with a freshly computed, entirely correct pkg_hash -- which is why
+ * the corruption is silent rather than hash-detectable. The window is not
+ * instantaneous: zones_config_import_blob() commits the RAM config and only
+ * then calls nvs_save(), with a blob decode, a JSON validate and an
+ * O(groups x zones) inheritance-cycle scan in between. The interloper is
+ * confirmed reachable -- uart_bridge_ext_control.c dispatches
+ * control_handle_message onto bx_flash_worker, and CONTROL_CMD_SET_ZONE_PID
+ * / SET_ZONE_MODEL both end in the zones config's nvs_save().
+ *
+ * The fix is dispatcher identity, NOT suppression. Suppressing (or
+ * deferring) an interloper's save for the duration of the window would
+ * trade silent corruption for a silently DROPPED save: an operator's
+ * SET_ZONE_PID would report success and not persist. These entry points let
+ * the dispatching code state WHICH task dispatched the autosave, and the
+ * override is honored only when that task is the same one that set it.
+ *
+ * Two fixes that look obvious here are DISPROVEN, do not re-attempt either:
+ * taking kiln_cfg_store_lock()/s_swap_lock in the reader DEADLOCKS the board
+ * (kiln_cfg_store_apply() holds that lock across the import, whose nvs_save()
+ * dispatches to the flash worker and blocks awaiting it, so a worker job
+ * waiting on the lock deadlocks against its own waiter); and gating on
+ * zones_config_generation() advancing is unsound, because an interloping
+ * SET_ZONE_PID bumps that counter itself before calling nvs_save().
+ *
+ * `dispatcher_task` is a FreeRTOS TaskHandle_t, typed void * so callers and
+ * host tests need no task.h. It is a HANDLE VALUE, never a pointer into the
+ * dispatching frame, so it is equally safe on the awaited dispatch branch
+ * and on uart_bridge_ext_run_on_flash_worker()'s on-worker INLINE branch
+ * (which is exactly the SET_ZONE_PID path).
+ *
+ * The plain-named functions above pass NULL and therefore NEVER honor the
+ * override. That is what makes the no-`arg` POSTED flash-worker path
+ * (uart_bridge_ext_post_on_flash_worker(), safety_poll_task's deferred
+ * Pico-half recapture) correct by construction rather than by inspection: a
+ * posted job has nowhere to carry a dispatcher, and must not be steered by
+ * some other task's in-flight import. */
+bool kiln_cfg_store_autosave_from_live_for_dispatcher(void *dispatcher_task, char *reason_out,
+                                                      size_t reason_cap);
+bool kiln_cfg_store_recapture_pico_half_confirmed_for_dispatcher(void *dispatcher_task, char *reason_out,
+                                                                 size_t reason_cap);
+
 /* 2026-09-15 review (review_autosave_rework_5bc9afb5_2026-09-15.md, MEDIUM):
  * kiln_cfg_swap.c moves active_id to target_id right after content is
  * proven live on both sides, BEFORE its own ceiling/arming divergence check

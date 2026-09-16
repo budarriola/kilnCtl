@@ -12,6 +12,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h" /* kiln_cfg_store_lock()/_unlock() -- H6, docs/KILN_PROFILES_PLAN.md item 5 */
+#include "freertos/task.h"   /* xTaskGetCurrentTaskHandle() -- autosave-override owner identity, 2026-09-16 */
 
 #include "hal_time.h" /* hal_time_now_us() -- rate-limited deferred-autosave WARN, HIGH 1 fix */
 #include "cfg_fs_status.h"
@@ -1994,6 +1995,46 @@ done:
  * practice race, not a proven-impossible one (LOW finding 5, same review). */
 static int32_t s_autosave_target_override = KILN_CFG_AUTOSAVE_OVERRIDE_NONE;
 
+/* The task that set the override above; NULL whenever no override is set.
+ * 2026-09-16 cross-task fix -- see kiln_cfg_store.h's doc comment on
+ * kiln_cfg_store_autosave_from_live_for_dispatcher() for the defect, the
+ * confirmed trigger, and the two disproven alternative fixes. Written only
+ * by kiln_cfg_store_set_autosave_target_override() below, which both
+ * writers call while already holding kiln_cfg_store_lock(); read only
+ * through autosave_active_target(). A single aligned pointer compare, so no
+ * second lock is taken here -- one would deadlock against apply()'s own
+ * s_swap_lock, which is held across an import whose nvs_save() blocks on
+ * the flash worker. */
+static void *s_autosave_target_override_owner = NULL;
+
+/* Which slot an autosave dispatched by `dispatcher_task` must target.
+ *
+ * The override applies ONLY to the task that set it. Why that is both
+ * sufficient and necessary:
+ *   - Different task: an interloper (the PC control bridge's SET_ZONE_PID,
+ *     running on bx_flash_worker) never matches, so it saves into
+ *     s_store.active_id. Its save still HAPPENS -- it is merely no longer
+ *     mis-steered. Nothing is dropped, suppressed or deferred.
+ *   - Same task: the only way to be the owner task is to be inside the
+ *     owner's own call chain, i.e. to BE the import's own autosave.
+ *   - Owner == bx_flash_worker (an apply() reached from a job already
+ *     running on the worker): still sound. The worker is a single task
+ *     running jobs strictly one at a time, so while apply() is that job no
+ *     other job can interleave at all -- there is no second "worker"
+ *     dispatcher to collide with.
+ *   - dispatcher_task == NULL (the plain entry points, and every caller
+ *     reached through the posted fire-and-forget path, which has no `arg`
+ *     to carry identity in): never matches, so such a job can never be
+ *     steered by someone else's in-flight import. */
+static int32_t autosave_active_target(void *dispatcher_task)
+{
+    if (s_autosave_target_override != KILN_CFG_AUTOSAVE_OVERRIDE_NONE && dispatcher_task != NULL &&
+        dispatcher_task == s_autosave_target_override_owner) {
+        return s_autosave_target_override;
+    }
+    return s_store.active_id;
+}
+
 /* 2026-09-15 review (review_divergence_rework_c1d2c526_2026-09-15.md,
  * HIGH 1): true whenever an autosave deferred the active slot's Pico-half
  * recapture because a divergence was latched at the time -- see
@@ -2094,6 +2135,12 @@ static void pico_half_dirty_drop_if_owned_by(int32_t slot)
 void kiln_cfg_store_set_autosave_target_override(int32_t id_or_none_sentinel)
 {
     s_autosave_target_override = id_or_none_sentinel;
+    /* Owner recorded and cleared in the SAME statement pair as the value it
+     * guards -- "reset one side of a pair" (CLAUDE.md): these two must never
+     * be able to move apart, so there is deliberately no separate setter for
+     * the owner. */
+    s_autosave_target_override_owner =
+        (id_or_none_sentinel != KILN_CFG_AUTOSAVE_OVERRIDE_NONE) ? (void *)xTaskGetCurrentTaskHandle() : NULL;
 }
 
 /* 2026-09-15 review (review_autosave_rework_5bc9afb5_2026-09-15.md, MEDIUM)
@@ -2113,7 +2160,8 @@ static bool autosave_blocked_by_swap_pending(void)
     return s_swap_pending_fn ? s_swap_pending_fn() : false;
 }
 
-bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap)
+bool kiln_cfg_store_autosave_from_live_for_dispatcher(void *dispatcher_task, char *reason_out,
+                                                      size_t reason_cap)
 {
     /* 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md,
      * HIGH 1 / docs/KILN_PROFILES_PLAN.md sec 2.4 rule 6): "Suppressed while
@@ -2207,8 +2255,7 @@ bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap)
         return true; /* not a failure -- see comment above */
     }
 
-    int32_t active = (s_autosave_target_override != KILN_CFG_AUTOSAVE_OVERRIDE_NONE) ? s_autosave_target_override
-                                                                                      : s_store.active_id;
+    int32_t active = autosave_active_target(dispatcher_task);
     if (active == KILN_CFG_NO_ACTIVE_ID) {
         return true; /* nothing to autosave into -- not a failure */
     }
@@ -2270,7 +2317,8 @@ bool kiln_cfg_store_pico_half_recapture_pending(void)
     return pico_half_dirty_get(NULL);
 }
 
-bool kiln_cfg_store_recapture_pico_half_confirmed(char *reason_out, size_t reason_cap)
+bool kiln_cfg_store_recapture_pico_half_confirmed_for_dispatcher(void *dispatcher_task, char *reason_out,
+                                                                 size_t reason_cap)
 {
     /* 2026-09-15 review (review_divergence_rework_c1d2c526_2026-09-15.md,
      * MEDIUM 3 / HIGH3 race): callers of this function have JUST performed
@@ -2294,8 +2342,7 @@ bool kiln_cfg_store_recapture_pico_half_confirmed(char *reason_out, size_t reaso
         }
         return true; /* not a failure -- see comment above */
     }
-    int32_t active = (s_autosave_target_override != KILN_CFG_AUTOSAVE_OVERRIDE_NONE) ? s_autosave_target_override
-                                                                                      : s_store.active_id;
+    int32_t active = autosave_active_target(dispatcher_task);
     if (active == KILN_CFG_NO_ACTIVE_ID) {
         return true;
     }
@@ -2308,6 +2355,21 @@ bool kiln_cfg_store_recapture_pico_half_confirmed(char *reason_out, size_t reaso
         pico_half_dirty_clear();
     }
     return ok;
+}
+
+/* Plain entry points: no dispatcher identity, so the autosave-target
+ * override is never honored (kiln_cfg_store.h explains why that default is
+ * the safe one). Every caller that is NOT an in-flight import's own
+ * autosave -- safety_poll_task's POSTED deferred recapture, safety_cfg_http.c's
+ * commissioning recapture, the LVGL poller -- goes through these. */
+bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap)
+{
+    return kiln_cfg_store_autosave_from_live_for_dispatcher(NULL, reason_out, reason_cap);
+}
+
+bool kiln_cfg_store_recapture_pico_half_confirmed(char *reason_out, size_t reason_cap)
+{
+    return kiln_cfg_store_recapture_pico_half_confirmed_for_dispatcher(NULL, reason_out, reason_cap);
 }
 
 uint32_t kiln_cfg_store_generation(void)

@@ -17,6 +17,8 @@
  * through hal_kv_*() instead. */
 #include "nvs_flash.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h" /* xTaskGetCurrentTaskHandle() -- autosave dispatcher identity, 2026-09-16 */
 #include "kiln_cfg_store.h" /* kiln_cfg_store_autosave_from_live() -- docs/KILN_PROFILES_PLAN.md
                              * section 2.4, item 13. */
 #include "kiln_io.h"
@@ -337,10 +339,19 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
  * DISPATCHED, not whether the job itself succeeded. */
 static void zones_autosave_job(void *arg)
 {
-    (void)arg;
+    /* `arg` carries the DISPATCHING TASK's handle, not a pointer -- 2026-09-16
+     * cross-task autosave-override fix, see kiln_cfg_store.h's doc comment on
+     * kiln_cfg_store_autosave_from_live_for_dispatcher(). It is a handle
+     * VALUE, so it is safe on both dispatch branches: the awaited one (the
+     * caller is blocked anyway) and the on-worker INLINE one (nothing is
+     * queued at all). Passing it is what lets an in-flight import's OWN
+     * autosave honor the target override while an unrelated task's
+     * concurrent zones write -- the PC control bridge's SET_ZONE_PID, which
+     * reaches this very function from bx_flash_worker -- does not, and is
+     * still saved into the genuinely active slot rather than dropped. */
     char reason[96];
     reason[0] = '\0';
-    if (!kiln_cfg_store_autosave_from_live(reason, sizeof(reason))) {
+    if (!kiln_cfg_store_autosave_from_live_for_dispatcher(arg, reason, sizeof(reason))) {
         ESP_LOGW(ZONES_HTTP_TAG, "kiln config autosave failed: %s -- the active kiln package was NOT "
                       "updated with this change, though the change itself was saved",
                  reason[0] ? reason : "(no reason given)");
@@ -410,7 +421,8 @@ esp_err_t nvs_save(void)
      * phrase's precedent). Best-effort: a dispatch/autosave failure is
      * logged, never turned into this function's own return value -- the
      * zones write ITSELF already fully succeeded by this point. */
-    esp_err_t autosave_dispatch_err = uart_bridge_ext_run_on_flash_worker(zones_autosave_job, NULL);
+    esp_err_t autosave_dispatch_err =
+        uart_bridge_ext_run_on_flash_worker(zones_autosave_job, (void *)xTaskGetCurrentTaskHandle());
     if (autosave_dispatch_err != ESP_OK) {
         ESP_LOGW(ZONES_HTTP_TAG, "kiln config autosave could not be dispatched: %s -- the active kiln "
                       "package was NOT updated with this change, though the change itself was saved",
