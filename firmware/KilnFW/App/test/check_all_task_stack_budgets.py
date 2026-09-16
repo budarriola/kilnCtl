@@ -128,6 +128,16 @@ All three make this an UNDER-estimate of true worst-case depth, never an
 over-estimate: anything this reports as too deep genuinely is too deep, and
 an INDETERMINATE task's true depth may be worse than what is printed.
 
+KCONFIG-GATED TASKS: two rows (gpio_probe, backlight_pwm) name a `kconfig`
+symbol because their task body is #if'd out when that option is off. Such a
+row is adjudicated against the sdkconfig belonging to the ELF being measured
+(--elf's ../sdkconfig, NOT the repo root's -- `sdkconfig` is gitignored and
+the shared main tree's differs from any clean worktree's): option on => the
+row is measured normally and a vanished root still FAILS; option off => the
+root is REQUIRED to be absent and is reported as excluded-by-config, and a
+root that resolves anyway FAILS as an ELF/sdkconfig disagreement. It is not
+a SKIP: the run still measures and grades every other row.
+
 EXIT CODES: 0 OK (all ceiling-graded tasks within budget; INDETERMINATE tasks
 are noted, not failed, as long as their own known lower bound is within
 budget), 1 FAIL (at least one task over its ceiling, honest-negative, or
@@ -189,17 +199,55 @@ def extract_local_macro(rel_path, define_pattern, usage_pattern):
 
 _SDKCONFIG_CACHE = {}
 
+# The sdkconfig that produced the ELF being measured. `sdkconfig` is
+# gitignored, so it differs between the shared main working tree (where a
+# bench operator may have toggled a debug option on) and any clean worktree
+# (where idf.py regenerates it from sdkconfig.defaults + Kconfig defaults).
+# Reading the wrong one is how a Kconfig-gated task's presence gets
+# mis-adjudicated -- so resolve it from --elf (build/KilnCtrl.elf ->
+# ../sdkconfig), not from the repo root, whenever the caller points this
+# check at another build.
+SDKCONFIG_PATH = DEFAULT_SDKCONFIG
+
+
+def use_sdkconfig_for_elf(elf):
+    """Point sdkconfig reads at the config belonging to `elf`'s own build."""
+    global SDKCONFIG_PATH
+    cand = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(elf)),
+                                        os.pardir, "sdkconfig"))
+    SDKCONFIG_PATH = cand if os.path.isfile(cand) else DEFAULT_SDKCONFIG
+    _SDKCONFIG_CACHE.clear()
+    return SDKCONFIG_PATH
+
+
+def _load_sdkconfig():
+    if _SDKCONFIG_CACHE:
+        return
+    if not os.path.isfile(SDKCONFIG_PATH):
+        raise ValueError(f"no sdkconfig at {SDKCONFIG_PATH} (build the project first)")
+    for line in open(SDKCONFIG_PATH, encoding="utf-8", errors="replace"):
+        if line.startswith("#"):
+            continue  # "# CONFIG_X is not set" -- absence IS the 'n' value
+        if "=" in line:
+            k, _, v = line.strip().partition("=")
+            _SDKCONFIG_CACHE[k] = v
+
 
 def _sdkconfig_value(key):
-    if not _SDKCONFIG_CACHE:
-        if os.path.isfile(DEFAULT_SDKCONFIG):
-            for line in open(DEFAULT_SDKCONFIG, encoding="utf-8", errors="replace"):
-                if "=" in line:
-                    k, _, v = line.strip().partition("=")
-                    _SDKCONFIG_CACHE[k] = v
+    _load_sdkconfig()
     if key not in _SDKCONFIG_CACHE:
-        raise ValueError(f"{key} not found in {DEFAULT_SDKCONFIG}")
+        raise ValueError(f"{key} not found in {SDKCONFIG_PATH}")
     return int(_SDKCONFIG_CACHE[key])
+
+
+def sdkconfig_bool(key):
+    """True iff `key` is set to y in the ELF's own sdkconfig. A bool left at
+    n is written as a "# CONFIG_X is not set" comment (or omitted), so
+    absence means disabled -- but a MISSING sdkconfig file raises instead,
+    because "I could not read the config" must never be mistaken for "that
+    option is off"."""
+    _load_sdkconfig()
+    return _SDKCONFIG_CACHE.get(key) == "y"
 
 
 def extract_sdkconfig_macro(rel_path, usage_pattern, sdkconfig_key):
@@ -227,6 +275,12 @@ TASKS = [
          stack=lambda: extract_int_literal("drivers/bridge/boot_button.c",
              r'xTaskCreate\(boot_button_task,\s*"boot_button",\s*(\d+)')),
     dict(name="gpio_probe", root="gpio_probe_task",
+         # Whole task is #if CONFIG_KILNCTL_ENABLE_GPIO_PROBE'd out
+         # (gpio_probe.c:7). That option defaults to n, so it is COMPILED OUT
+         # of every clean-worktree build and present only where someone has
+         # turned it on locally for bench work -- see the `kconfig` handling
+         # in main().
+         kconfig="CONFIG_KILNCTL_ENABLE_GPIO_PROBE",
          stack=lambda: extract_int_literal("drivers/bridge/gpio_probe.c",
              r'xTaskCreatePinnedToCoreWithCaps\(gpio_probe_task,\s*"gpio_probe",\s*(\d+)')),
     dict(name="link_watchdog", root="link_watchdog_task",
@@ -267,6 +321,13 @@ TASKS = [
          stack=lambda: extract_int_literal("drivers/http/ota_http_recovery.c",
              r'xTaskCreate\(ota_recovery_exit_reboot_task,\s*"recovery_exit_reboot",\s*(\d+)')),
     dict(name="backlight_pwm", root="backlight_pwm_task",
+         # backlight_pwm.c:57's #if CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE wraps
+         # both the task and its xTaskCreate (a no-op stub is compiled in its
+         # place). Unlike gpio_probe this defaults to y -- so it is normally
+         # present -- but a board without the backlight flying wire fitted is
+         # explicitly told by that Kconfig help text to turn it off, and this
+         # check must stay correct on such a board too.
+         kconfig="CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE",
          stack=lambda: extract_int_literal("drivers/hw/backlight_pwm.c",
              r'xTaskCreate\(backlight_pwm_task,\s*"backlight_pwm",\s*(\d+)')),
     dict(name="i2c_owner_ns2009", root="i2c_owner_task",
@@ -426,6 +487,8 @@ def main():
         k, _, v = item.partition("=")
         forced_ceilings[k] = int(v)
 
+    use_sdkconfig_for_elf(args.elf)
+
     if not os.path.isfile(args.elf):
         print("check_all_task_stack_budgets: SKIP: no ELF at " + args.elf)
         print("  Build KilnFW (build_kilnfw / idf.py build, or check_00_kilnfw_target_build.ps1) and "
@@ -450,8 +513,48 @@ def main():
 
     results = []
     errors = []
+    excluded = []
     for task in TASKS:
         tname = task["name"]
+        # KCONFIG-GATED ROWS. A task whose whole body is #if CONFIG_X'd out is
+        # legitimately absent from a build with X off -- failing on that would
+        # make this check unrunnable in any clean worktree (which regenerates
+        # sdkconfig from sdkconfig.defaults + Kconfig defaults, where
+        # CONFIG_KILNCTL_ENABLE_GPIO_PROBE is n). But "absent because its
+        # option is off" and "absent because somebody renamed or deleted it"
+        # must stay distinguishable, so this is NOT a skip and NOT a blanket
+        # "missing roots are fine":
+        #   * option ON  -> measured exactly as any other row; a vanished root
+        #                   is still a hard FAIL.
+        #   * option OFF -> the root is REQUIRED to be absent, and that is
+        #                   asserted here. If it resolves anyway, the ELF and
+        #                   the sdkconfig disagree (stale build, or the #if no
+        #                   longer matches the symbol this table names) and
+        #                   that is a FAIL too.
+        #   * sdkconfig unreadable -> FAIL, never "assume off".
+        # Every row without a `kconfig` key keeps the original unconditional
+        # behaviour: absent root == FAIL.
+        kcfg = task.get("kconfig")
+        if kcfg is not None:
+            try:
+                enabled = sdkconfig_bool(kcfg)
+            except ValueError as e:
+                errors.append(f"{tname}: cannot adjudicate {kcfg}: {e}")
+                continue
+            if not enabled:
+                try:
+                    lib.resolve_root(parsed, task["root"], args.elf, addr2line,
+                                     task.get("expect_path"))
+                except ValueError:
+                    excluded.append((tname, kcfg))
+                    continue
+                errors.append(
+                    f"{tname}: {kcfg} is not set in {SDKCONFIG_PATH}, so root symbol "
+                    f"{task['root']!r} must not exist in this build -- but it resolves in "
+                    f"{args.elf}. Either the ELF is stale with respect to that sdkconfig, or "
+                    "the #if gating around that task no longer matches the Kconfig symbol "
+                    "this table names.")
+                continue
         try:
             root_addr = lib.resolve_root(parsed, task["root"], args.elf, addr2line,
                                           task.get("expect_path"))
@@ -515,6 +618,13 @@ def main():
             print(f'    "{r["task"]["name"]}": {r["total"]},')
         print("}")
         return 0
+
+    for tname, kcfg in excluded:
+        print(f"-- {tname}: NOT MEASURED, compiled out of THIS build ({kcfg} is not set in "
+              f"{SDKCONFIG_PATH}); its root symbol was confirmed absent from the ELF, which is "
+              "exactly what that option being off should produce.")
+    if excluded:
+        print()
 
     print(f"{len(results)} registered tasks measured (objdump: {objdump})")
     print(f"unmodeled-overhead allowance applied to every task: {UNMODELED_OVERHEAD_BYTES} B "
@@ -607,6 +717,11 @@ def main():
               "for what remains unresolved and why (unresolved indirect/function-pointer dispatch).")
     else:
         print(f"check_all_task_stack_budgets: OK -- all {len(results)} tasks measured and within budget.")
+    if excluded:
+        names = ", ".join("%s (%s)" % (t, k) for t, k in excluded)
+        print(f"  {len(excluded)} table row(s) not measured because their Kconfig option is off in "
+              f"this build: {names}. Each was verified ABSENT from the ELF, not merely unmeasured "
+              "-- turn the option on to have it measured here.")
     return 0
 
 
