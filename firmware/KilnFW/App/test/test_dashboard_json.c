@@ -1016,6 +1016,207 @@ static void test_status_json_mutation_field_creep_goes_red(void)
               "mutation test is vacuous");
 }
 
+/* ---------------------------------------------------------------------------
+ * Mirror discipline for the standalone `?diag=1` document.
+ *
+ * status_get_handler() answers GET /api/status?diag=1 with a separate, much
+ * smaller document built into the SAME json[DASHBOARD_JSON_STATUS_BUF_SIZE]
+ * allocation and through the same APPEND() macro, so the same `goto truncated`
+ * turns any overflow into an HTTP 500 for the whole document. Nothing else in
+ * this repo can render that shape on the host -- dashboard_http.c pulls in
+ * lvgl_port.h -- so, exactly as for the default document, this hand-mirror is
+ * the only thing policing its size and its field set.
+ *
+ * Keep render_diag_json() byte-for-byte in step with the `if (want_diag_detail)`
+ * block of status_get_handler(): same keys, same order, same format specifiers.
+ * A field added there and not here makes the size assertion below vacuous --
+ * which is precisely the defect class that let the default document overflow.
+ * ------------------------------------------------------------------------ */
+
+#define DIAG_APPEND(...)                                                       \
+    do {                                                                       \
+        int n_ = snprintf(json + o, cap - o, __VA_ARGS__);                     \
+        if (n_ < 0 || (size_t)n_ >= cap - o) { return false; }                 \
+        o += (size_t)n_;                                                       \
+    } while (0)
+
+/* Renders the `?diag=1` body into json[cap]. Returns false -- mirroring the
+ * handler's own `goto truncated` -- the instant any append would not fit. */
+static bool render_diag_json(char *json, size_t cap, bool ever_received,
+                             unsigned boot_reason, unsigned long frames_ok,
+                             unsigned long frames_bad, unsigned long tx_dropped,
+                             bool extra_field, size_t *out_len)
+{
+    size_t o = 0;
+
+    DIAG_APPEND("{\"ok\":true,\"diag_ever_received\":%s",
+                ever_received ? "true" : "false");
+    if (ever_received) {
+        DIAG_APPEND(",\"diag_boot_reason\":%u", boot_reason);
+        DIAG_APPEND(",\"diag_context_frames_ok\":%lu", frames_ok);
+        DIAG_APPEND(",\"diag_context_frames_bad\":%lu", frames_bad);
+        DIAG_APPEND(",\"diag_tx_frames_dropped\":%lu", tx_dropped);
+    }
+    /* Not emitted by the handler -- the mutation test's stand-in for a field
+     * added to the diag document without checking that it still fits. */
+    if (extra_field) {
+        DIAG_APPEND(",\"diag_future_counter\":%lu", 4294967295UL);
+    }
+    DIAG_APPEND("}");
+
+    if (out_len) { *out_len = o; }
+    return true;
+}
+
+#undef DIAG_APPEND
+
+/* Widest the diag document can ever be: every numeric field at the maximum
+ * width its C type admits (diag_boot_reason is uint8_t, the three counters are
+ * uint32_t -- dashboard_http.h:293,306-308), and the gate true. The gate-false
+ * literal is one byte longer but omits four fields, so gate-true is the worst
+ * case; the size test below asserts that relationship rather than assuming it. */
+static bool render_worst_case_diag_json(char *json, size_t cap, bool extra_field,
+                                        size_t *out_len)
+{
+    return render_diag_json(json, cap, /*ever_received=*/true, 255u,
+                            4294967295UL, 4294967295UL, 4294967295UL,
+                            extra_field, out_len);
+}
+
+static void test_diag_json_worst_case_render_fits_documented_buffer(void)
+{
+    char json[DASHBOARD_JSON_STATUS_BUF_SIZE];
+    size_t worst_len = 0;
+    bool ok = render_worst_case_diag_json(json, sizeof(json), /*extra_field=*/false,
+                                          &worst_len);
+    TEST_CHECK(ok, "the worst-case ?diag=1 render must not truncate inside "
+              "DASHBOARD_JSON_STATUS_BUF_SIZE -- the handler shares that one buffer "
+              "with the default document");
+
+    /* The gate-false shape must also fit, and must be the shorter of the two.
+     * If it ever grows past the gate-true shape the worst case has moved and
+     * the measurement below stops being a worst case. */
+    size_t gate_false_len = 0;
+    bool ok_false = render_diag_json(json, sizeof(json), /*ever_received=*/false,
+                                     255u, 4294967295UL, 4294967295UL, 4294967295UL,
+                                     /*extra_field=*/false, &gate_false_len);
+    TEST_CHECK(ok_false, "the diag_ever_received=false ?diag=1 render must also fit");
+    TEST_CHECK(gate_false_len < worst_len,
+              "the diag_ever_received=false shape must stay shorter than the true "
+              "shape, or this file measures the wrong branch as the worst case");
+
+    printf("  [diag] worst-case ?diag=1 render: %zu bytes, buffer %d, headroom %ld "
+           "(gate-false shape: %zu bytes)\n",
+           worst_len, (int)DASHBOARD_JSON_STATUS_BUF_SIZE,
+           (long)DASHBOARD_JSON_STATUS_BUF_SIZE - (long)worst_len, gate_false_len);
+
+    TEST_CHECK(worst_len < DASHBOARD_JSON_STATUS_BUF_SIZE,
+              "the real worst-case ?diag=1 render must fit the documented buffer");
+    TEST_CHECK((long)DASHBOARD_JSON_STATUS_BUF_SIZE - (long)worst_len >= 50,
+              "?diag=1 headroom has shrunk below this file's own 50-byte minimum "
+              "margin -- raise DASHBOARD_JSON_STATUS_BUF_SIZE in dashboard_json.h");
+}
+
+static void test_diag_json_content_is_complete_and_correctly_valued(void)
+{
+    char json[DASHBOARD_JSON_STATUS_BUF_SIZE];
+    size_t len = 0;
+
+    /* Distinctive, non-round values: a mis-wired field would have to coincide
+     * with one of these to pass by accident. */
+    bool ok = render_diag_json(json, sizeof(json), /*ever_received=*/true,
+                               /*boot_reason=*/37u,
+                               /*frames_ok=*/123456789UL,
+                               /*frames_bad=*/7UL,
+                               /*tx_dropped=*/4294967295UL,
+                               /*extra_field=*/false, &len);
+    TEST_CHECK(ok, "the populated ?diag=1 document must render");
+    TEST_CHECK(len == strlen(json), "the reported length must match the rendered string");
+    TEST_CHECK(len > 0 && json[0] == '{' && json[len - 1] == '}',
+              "the ?diag=1 document must be a single brace-delimited object");
+
+    /* Every field the diag handler emits, present AND correctly valued. */
+    TEST_CHECK(strstr(json, "\"ok\":true") != NULL,
+              "?diag=1 must carry the ok envelope flag the dashboard checks");
+    TEST_CHECK(strstr(json, "\"diag_ever_received\":true") != NULL,
+              "diag_ever_received must be present and true here");
+    TEST_CHECK(strstr(json, "\"diag_boot_reason\":37") != NULL,
+              "diag_boot_reason must be present and carry its own value -- it is the "
+              "only surface left for the Pico's last-boot reason now that the three "
+              "decoded booleans are gone");
+    TEST_CHECK(strstr(json, "\"diag_context_frames_ok\":123456789") != NULL,
+              "diag_context_frames_ok must be present and correctly valued");
+    TEST_CHECK(strstr(json, "\"diag_context_frames_bad\":7") != NULL,
+              "diag_context_frames_bad must be present and correctly valued");
+    TEST_CHECK(strstr(json, "\"diag_tx_frames_dropped\":4294967295") != NULL,
+              "diag_tx_frames_dropped must be present and correctly valued at the "
+              "full uint32_t width");
+
+    /* The removed decodes must not silently come back as re-added bytes. */
+    TEST_CHECK(strstr(json, "diag_boot_stack_overflow") == NULL,
+              "diag_boot_stack_overflow was removed as a pure bit-decode of "
+              "diag_boot_reason -- it must not reappear");
+    TEST_CHECK(strstr(json, "diag_boot_malloc_failed") == NULL,
+              "diag_boot_malloc_failed was removed as a pure bit-decode -- it must "
+              "not reappear");
+    TEST_CHECK(strstr(json, "diag_boot_assert_failed") == NULL,
+              "diag_boot_assert_failed was removed as a pure bit-decode -- it must "
+              "not reappear");
+
+    /* The gate: with no DIAG frame ever received the four detail fields are
+     * absent entirely, not zero-valued -- safety_page.html must be able to tell
+     * "never received" from "received, counters are zero". */
+    size_t gated_len = 0;
+    bool gated_ok = render_diag_json(json, sizeof(json), /*ever_received=*/false,
+                                     37u, 123456789UL, 7UL, 4294967295UL,
+                                     /*extra_field=*/false, &gated_len);
+    TEST_CHECK(gated_ok, "the gated ?diag=1 document must render");
+    TEST_CHECK(strstr(json, "\"diag_ever_received\":false") != NULL,
+              "the gated document must still report diag_ever_received:false");
+    TEST_CHECK(strstr(json, "diag_boot_reason") == NULL,
+              "diag_boot_reason must be absent when no DIAG frame has been received");
+    TEST_CHECK(strstr(json, "diag_context_frames_ok") == NULL,
+              "diag_context_frames_ok must be absent when the gate is false");
+    TEST_CHECK(strstr(json, "diag_context_frames_bad") == NULL,
+              "diag_context_frames_bad must be absent when the gate is false");
+    TEST_CHECK(strstr(json, "diag_tx_frames_dropped") == NULL,
+              "diag_tx_frames_dropped must be absent when the gate is false");
+}
+
+/* Proves the size assertion above is load-bearing: a field added to the diag
+ * document with the buffer shrunk to the current worst case must fail to
+ * render, exactly as the handler's APPEND() would `goto truncated`. */
+static void test_diag_json_mutation_field_creep_goes_red(void)
+{
+    char probe[DASHBOARD_JSON_STATUS_BUF_SIZE];
+    size_t worst_len_before = 0;
+    bool ok0 = render_worst_case_diag_json(probe, sizeof(probe), /*extra_field=*/false,
+                                           &worst_len_before);
+    TEST_CHECK(ok0, "baseline worst-case ?diag=1 render must succeed");
+
+    /* Budget exactly the current worst case (+1 for the NUL) and add a field. */
+    char tight[DASHBOARD_JSON_STATUS_BUF_SIZE];
+    size_t got = 0;
+    bool ok1 = render_worst_case_diag_json(tight, worst_len_before + 1,
+                                           /*extra_field=*/true, &got);
+    printf("  [diag] RED (expected): adding one plausible new field (~%d bytes) with "
+           "no headroom past the %zu-byte worst case returned %s\n",
+           (int)strlen(",\"diag_future_counter\":4294967295"), worst_len_before,
+           ok1 ? "true (BUG -- diag field creep would go undetected)" : "false");
+    TEST_CHECK(!ok1, "a field added to the ?diag=1 document with no headroom left "
+              "must be caught, not silently truncated into an HTTP 500");
+
+    /* Positive control: the same field must genuinely add bytes once the buffer
+     * budgets for it, or the mutation above proves nothing. */
+    size_t got2 = 0;
+    bool ok2 = render_worst_case_diag_json(tight, sizeof(tight), /*extra_field=*/true,
+                                           &got2);
+    TEST_CHECK(ok2, "the new diag field must render once the buffer budgets for it");
+    TEST_CHECK(got2 > worst_len_before,
+              "the new diag field must actually add bytes, or this mutation test is "
+              "vacuous");
+}
+
 static void run_test_dashboard_json(void)
 {
     test_json_escape_doubles_every_quote_and_backslash();
@@ -1029,6 +1230,9 @@ static void run_test_dashboard_json(void)
     test_status_json_worst_case_render_fits_documented_buffer();
     test_status_json_mutation_shrink_buffer_goes_red();
     test_status_json_mutation_field_creep_goes_red();
+    test_diag_json_worst_case_render_fits_documented_buffer();
+    test_diag_json_content_is_complete_and_correctly_valued();
+    test_diag_json_mutation_field_creep_goes_red();
 }
 
 int main(void)
