@@ -1373,6 +1373,32 @@ void adaptive_tune_init(void)
     //
     // No httpd registration here any more -- call adaptive_tune_http_start()
     // separately once the shared httpd server is up (see adaptive_tune_http.c).
+
+    // Coupled-solve breadcrumb check, once per boot (see docs/audits/
+    // profile_executor_stop_panic_static_narrowing_2026-09-16.md): the
+    // breadcrumb lives in RTC_NOINIT_ATTR storage, so it survives exactly
+    // the kind of software reset (panic/watchdog) this module is trying to
+    // catch, but NOT a power cycle -- a cold-booted board reads it as
+    // magic-mismatched (false) below, same as "never ran", which is
+    // correct and not a false negative worth chasing. adaptive_tune_init()
+    // runs once per profile_executor_start() call, not once per physical
+    // boot, so the static guard below is what limits this to one log line
+    // per boot rather than once per firing.
+    {
+        static bool s_coupled_bc_checked_this_boot = false;
+        if (!s_coupled_bc_checked_this_boot) {
+            s_coupled_bc_checked_this_boot = true;
+            adaptive_tune_coupled_breadcrumb_t bc;
+            if (adaptive_tune_coupled_breadcrumb_get(&bc) && adaptive_tune_coupled_breadcrumb_is_mid_solve(&bc)) {
+                ESP_LOGE(ADAPTIVE_TUNE_TAG,
+                         "PREVIOUS BOOT RESET WHILE A COUPLED SOLVE WAS IN PROGRESS -- zone=%lu stage=%lu "
+                         "joint_obs=%lu solve_row=%lu stack_hwm=%lu bytes (seq=%lu); see docs/audits/"
+                         "profile_executor_stop_panic_static_narrowing_2026-09-16.md",
+                         (unsigned long)bc.zone_index, (unsigned long)bc.stage, (unsigned long)bc.joint_observations,
+                         (unsigned long)bc.solve_row, (unsigned long)bc.stack_hwm, (unsigned long)bc.seq);
+            }
+        }
+    }
 }
 
 bool adaptive_tune_kibase_migration_worker_wait_deferred(void)

@@ -298,6 +298,70 @@ NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_KEY_KIBASE_REV);
 
 #define ADAPTIVE_TUNE_COUPLING_BLEND_ALPHA ADAPTIVE_TUNE_BLEND_ALPHA
 
+// ---------------------------------------------------------------------
+// Coupled-solve breadcrumb (docs/audits/profile_executor_stop_panic_static_
+// narrowing_2026-09-16.md Appendix A/section 9): adaptive_tune_refine_
+// coupled_locked() and adaptive_tune_coupled_fit() are the deepest stack path
+// this file has (measured ~1776 B, section 6) and the one path the
+// profile_executor panic's four historical instances have never been
+// hardware-confirmed to run through or clear of. A crash landing here
+// reboots before any periodic stack-margin poll (stack_margin.c) gets to
+// read the low-water mark that was live at the moment of the fault, and the
+// crash_report/coredump summary's single-frame heuristic has already been
+// caught giving a saved PC of exactly zero -- not trustworthy on its own.
+//
+// This breadcrumb is a handful of RTC_NOINIT_ATTR words (adaptive_tune_
+// model.c), written at each checkpoint along that call chain: no I/O, no
+// lock, cheap enough to leave enabled on every ordinary firing, and -- like
+// boot_guard.c's own s_bg_rtc -- it SURVIVES a software reset (panic,
+// watchdog, esp_restart), unlike every other piece of RAM state that call
+// chain touches. The NEXT boot reads back the LAST checkpoint recorded
+// before whatever produced that boot, independent of whether the coredump
+// for that reset is symbolizable at all.
+typedef enum {
+    ADAPTIVE_TUNE_COUPLED_BC_IDLE = 0,           // no coupled solve has ever run this boot, or the last one returned cleanly
+    ADAPTIVE_TUNE_COUPLED_BC_ENTERED,             // adaptive_tune_refine_coupled_locked() entered, duty_obs/rise_obs on stack
+    ADAPTIVE_TUNE_COUPLED_BC_RING_COPIED,         // joint ring copied into duty_obs/rise_obs
+    ADAPTIVE_TUNE_COUPLED_BC_BEFORE_FIT,          // about to call adaptive_tune_coupled_fit()
+    ADAPTIVE_TUNE_COUPLED_BC_BEFORE_GAUSS_SOLVE,  // about to call zone_coupling_gauss_solve_partial_pivot_vec() for solve_row
+    ADAPTIVE_TUNE_COUPLED_BC_AFTER_GAUSS_SOLVE,   // that call returned for solve_row
+    ADAPTIVE_TUNE_COUPLED_BC_AFTER_FIT,           // adaptive_tune_coupled_fit() returned to refine_coupled_locked()
+    ADAPTIVE_TUNE_COUPLED_BC_RETURNED,            // refine_coupled_locked() reached one of its own return points
+} adaptive_tune_coupled_breadcrumb_stage_t;
+
+typedef struct {
+    uint32_t magic;               // ADAPTIVE_TUNE_COUPLED_BC_MAGIC; anything else means "not written this power-on"
+    uint32_t seq;                 // increments every mark() call -- distinguishes "never advanced" from "wrapped stage 0"
+    uint32_t stage;               // adaptive_tune_coupled_breadcrumb_stage_t
+    uint32_t zone_index;
+    uint32_t joint_observations;
+    uint32_t solve_row;           // valid only for the two GAUSS_SOLVE stages
+    uint32_t stack_hwm;           // uxTaskGetStackHighWaterMark(NULL) at this checkpoint (bytes, this port -- see
+                                   // stack_margin_calc.h's own comment on why no unit conversion is needed here)
+} adaptive_tune_coupled_breadcrumb_t;
+
+#define ADAPTIVE_TUNE_COUPLED_BC_MAGIC 0x41544342u // "ATCB"
+
+// Records one checkpoint. Defined in adaptive_tune_model.c (owns the
+// RTC_NOINIT_ATTR storage); called from both adaptive_tune_refine_coupled_
+// locked() and adaptive_tune_coupled_fit() in that same file.
+void adaptive_tune_coupled_breadcrumb_mark(adaptive_tune_coupled_breadcrumb_stage_t stage, uint8_t zone_index,
+                                            uint32_t joint_observations, uint32_t solve_row);
+
+// Copies out whatever the RTC memory currently holds. Returns false if the
+// magic doesn't match (power-on reset, or this binary has never run the
+// coupled solve since flashing) -- exactly the same "garbage after a
+// power-on is rejected" posture as boot_guard.c's s_bg_rtc.
+bool adaptive_tune_coupled_breadcrumb_get(adaptive_tune_coupled_breadcrumb_t *out);
+
+// Pure predicate over a breadcrumb snapshot, host-testable with no RTC/RTOS
+// dependency: true iff it shows the coupled solve was entered but never
+// reached its own RETURNED checkpoint -- i.e. whatever produced the CURRENT
+// boot happened while this call chain was still on the stack. Read once,
+// early, at the first adaptive_tune_init() of a boot (see that function);
+// deliberately NOT read-and-clear, so a later diagnostics read still sees it.
+bool adaptive_tune_coupled_breadcrumb_is_mid_solve(const adaptive_tune_coupled_breadcrumb_t *bc);
+
 #define ADAPTIVE_TUNE_COUPLING_IMPLAUSIBLE_ABS 50.0f
 #define ADAPTIVE_TUNE_COUPLING_PRIOR_NEAR_ZERO 1e-3f
 

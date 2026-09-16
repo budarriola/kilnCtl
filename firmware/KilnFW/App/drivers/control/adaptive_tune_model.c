@@ -10,7 +10,10 @@
 #include <string.h>
 #include <time.h>
 
+#include "esp_attr.h"  // RTC_NOINIT_ATTR -- adaptive_tune_coupled_breadcrumb_mark()'s storage below
 #include "esp_log.h"
+#include "freertos/task.h" // uxTaskGetStackHighWaterMark() -- same call stack_margin.c makes, see
+                            // stack_margin_calc.h's comment for why the result needs no unit conversion here
 
 #include "pid_autotune.h"
 #include "zone_coupling_solve.h" // zone_coupling_gauss_solve_partial_pivot_vec() -- the ONLY thing of this
@@ -355,6 +358,48 @@ static adaptive_tune_coupled_result_t adaptive_tune_matrix_plausible(
     return ADAPTIVE_TUNE_COUPLED_OK;
 }
 
+// RTC_NOINIT_ATTR: deliberately NOT zeroed by the startup code, so it
+// survives a software reset (panic, watchdog, esp_restart) -- same pattern
+// and same reasoning as boot_guard.c's s_bg_rtc. Garbage after a power-on
+// reset is rejected by the magic check in adaptive_tune_coupled_breadcrumb_
+// get() below. See adaptive_tune_internal.h's own comment on this type for
+// why this exists.
+RTC_NOINIT_ATTR static adaptive_tune_coupled_breadcrumb_t s_coupled_bc;
+
+void adaptive_tune_coupled_breadcrumb_mark(adaptive_tune_coupled_breadcrumb_stage_t stage, uint8_t zone_index,
+                                            uint32_t joint_observations, uint32_t solve_row)
+{
+    s_coupled_bc.magic = ADAPTIVE_TUNE_COUPLED_BC_MAGIC;
+    s_coupled_bc.seq++;
+    s_coupled_bc.stage = (uint32_t)stage;
+    s_coupled_bc.zone_index = zone_index;
+    s_coupled_bc.joint_observations = joint_observations;
+    s_coupled_bc.solve_row = solve_row;
+    s_coupled_bc.stack_hwm = (uint32_t)uxTaskGetStackHighWaterMark(NULL);
+}
+
+bool adaptive_tune_coupled_breadcrumb_get(adaptive_tune_coupled_breadcrumb_t *out)
+{
+    if (!out) {
+        return false;
+    }
+    if (s_coupled_bc.magic != ADAPTIVE_TUNE_COUPLED_BC_MAGIC) {
+        memset(out, 0, sizeof(*out));
+        return false;
+    }
+    *out = s_coupled_bc;
+    return true;
+}
+
+bool adaptive_tune_coupled_breadcrumb_is_mid_solve(const adaptive_tune_coupled_breadcrumb_t *bc)
+{
+    if (!bc || bc->magic != ADAPTIVE_TUNE_COUPLED_BC_MAGIC) {
+        return false;
+    }
+    return bc->stage != (uint32_t)ADAPTIVE_TUNE_COUPLED_BC_IDLE &&
+           bc->stage != (uint32_t)ADAPTIVE_TUNE_COUPLED_BC_RETURNED;
+}
+
 adaptive_tune_coupled_result_t adaptive_tune_coupled_fit(
     const float duty_obs[][MAX31856_CHANNEL_COUNT], const float rise_obs[][MAX31856_CHANNEL_COUNT], uint32_t m,
     uint8_t n, float out_C[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT])
@@ -403,7 +448,9 @@ adaptive_tune_coupled_result_t adaptive_tune_coupled_fit(
             AtR[a] = (float)s;
         }
         float x[MAX31856_CHANNEL_COUNT];
+        adaptive_tune_coupled_breadcrumb_mark(ADAPTIVE_TUNE_COUPLED_BC_BEFORE_GAUSS_SOLVE, 0xFF, m, i);
         coupling_solve_reason_t reason = zone_coupling_gauss_solve_partial_pivot_vec(n, AtA, AtR, x);
+        adaptive_tune_coupled_breadcrumb_mark(ADAPTIVE_TUNE_COUPLED_BC_AFTER_GAUSS_SOLVE, 0xFF, m, i);
         if (reason != COUPLING_SOLVE_OK) {
             return ADAPTIVE_TUNE_COUPLED_ILL_CONDITIONED;
         }
@@ -433,10 +480,12 @@ void adaptive_tune_refine_coupled_locked(uint8_t zi)
 
     const uint8_t n = MAX31856_CHANNEL_COUNT;
     uint32_t min_obs = (uint32_t)n + ADAPTIVE_TUNE_COUPLED_OBS_MARGIN;
+    adaptive_tune_coupled_breadcrumb_mark(ADAPTIVE_TUNE_COUPLED_BC_ENTERED, zi, adaptive_tune_joint_ring_count, 0);
     if (adaptive_tune_joint_ring_count < min_obs) {
         adaptive_tune_set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
                    "only %u/%u joint dwell observations for coupled solve", (unsigned)adaptive_tune_joint_ring_count,
                    (unsigned)min_obs);
+        adaptive_tune_coupled_breadcrumb_mark(ADAPTIVE_TUNE_COUPLED_BC_RETURNED, zi, adaptive_tune_joint_ring_count, 0);
         return;
     }
 
@@ -450,17 +499,22 @@ void adaptive_tune_refine_coupled_locked(uint8_t zi)
         memcpy(duty_obs[k], adaptive_tune_joint_ring[idx].duty, sizeof(duty_obs[k]));
         memcpy(rise_obs[k], adaptive_tune_joint_ring[idx].rise_c, sizeof(rise_obs[k]));
     }
+    adaptive_tune_coupled_breadcrumb_mark(ADAPTIVE_TUNE_COUPLED_BC_RING_COPIED, zi, adaptive_tune_joint_ring_count, 0);
 
     float C[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
+    adaptive_tune_coupled_breadcrumb_mark(ADAPTIVE_TUNE_COUPLED_BC_BEFORE_FIT, zi, adaptive_tune_joint_ring_count, 0);
     adaptive_tune_coupled_result_t r = adaptive_tune_coupled_fit(duty_obs, rise_obs, adaptive_tune_joint_ring_count, n, C);
+    adaptive_tune_coupled_breadcrumb_mark(ADAPTIVE_TUNE_COUPLED_BC_AFTER_FIT, zi, adaptive_tune_joint_ring_count, 0);
     if (r == ADAPTIVE_TUNE_COUPLED_TOO_FEW_OBSERVATIONS) {
         adaptive_tune_set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
                    "joint observation set degenerate for a determined solve");
+        adaptive_tune_coupled_breadcrumb_mark(ADAPTIVE_TUNE_COUPLED_BC_RETURNED, zi, adaptive_tune_joint_ring_count, 0);
         return;
     }
     if (r == ADAPTIVE_TUNE_COUPLED_ILL_CONDITIONED) {
         adaptive_tune_set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
                    "joint duty matrix ill-conditioned (cond above ~1e4, zone_coupling_solve.h's own pivot floor)");
+        adaptive_tune_coupled_breadcrumb_mark(ADAPTIVE_TUNE_COUPLED_BC_RETURNED, zi, adaptive_tune_joint_ring_count, 0);
         return;
     }
     // Distinct reason string from ILL_CONDITIONED above on purpose -- an
@@ -474,6 +528,7 @@ void adaptive_tune_refine_coupled_locked(uint8_t zi)
         adaptive_tune_set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
                    "fitted coupling matrix is physically implausible (negative coefficient or a row not "
                    "dominated by its own zone) -- determinable by conditioning alone but not trustworthy");
+        adaptive_tune_coupled_breadcrumb_mark(ADAPTIVE_TUNE_COUPLED_BC_RETURNED, zi, adaptive_tune_joint_ring_count, 0);
         return;
     }
 
@@ -481,6 +536,7 @@ void adaptive_tune_refine_coupled_locked(uint8_t zi)
     if (!zones_config_get_coupling(zi, prior_row)) {
         adaptive_tune_set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
                    "no existing coupling row to refine");
+        adaptive_tune_coupled_breadcrumb_mark(ADAPTIVE_TUNE_COUPLED_BC_RETURNED, zi, adaptive_tune_joint_ring_count, 0);
         return;
     }
     float tau_row[MAX31856_CHANNEL_COUNT], dead_row[MAX31856_CHANNEL_COUNT];
@@ -552,4 +608,5 @@ void adaptive_tune_refine_coupled_locked(uint8_t zi)
         adaptive_tune_set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
                    "coupled solve succeeded but every off-diagonal cell was implausible or rejected");
     }
+    adaptive_tune_coupled_breadcrumb_mark(ADAPTIVE_TUNE_COUPLED_BC_RETURNED, zi, adaptive_tune_joint_ring_count, 0);
 }
