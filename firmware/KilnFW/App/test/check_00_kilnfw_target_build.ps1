@@ -418,6 +418,49 @@ public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFile
     Publish-BuildArtifact -SourcePath $elfPath -TempPath $elfTmp -FinalPath (Join-Path $mainBuildDir "KilnCtrl.elf")
     Publish-BuildArtifact -SourcePath $binPath -TempPath $binTmp -FinalPath (Join-Path $mainBuildDir "KilnCtrl.bin")
     Write-Host "Published fresh KilnCtrl.elf/.bin to $mainBuildDir"
+
+    # ALSO PUBLISH compile_commands.json (2026-09-15). check_compile_esp_backends.ps1
+    # (firmware/hwAbstraction/test/compile_esp_backends.ps1) and check_duplicate_symbols.ps1
+    # (tools/check_duplicate_symbols.ps1) both CONSUME build output that only this
+    # check ever produces, but before this fix this script published nothing for
+    # either of them -- a genuinely fresh worktree with no prior hand-triggered
+    # build_kilnfw run therefore FAILED the first (missing compile_commands.json)
+    # and SKIPPED the second (missing object-file tree) even after a fully clean,
+    # fully green run_all_checks.ps1 pass of THIS check. Multiple agents hit this
+    # independently. Fix: publish both artifacts these checks actually read, the
+    # same way the elf/bin are published above.
+    $ccPath = Join-Path $WorktreePath "firmware\KilnFW\build\compile_commands.json"
+    if (Test-Path $ccPath) {
+        $ccTmp = Join-Path $mainBuildDir "compile_commands.json.tmp_$PID"
+        Publish-BuildArtifact -SourcePath $ccPath -TempPath $ccTmp -FinalPath (Join-Path $mainBuildDir "compile_commands.json")
+        Write-Host "Published fresh compile_commands.json to $mainBuildDir"
+    } else {
+        Write-Host "NOTE: idf.py build did not produce $ccPath -- check_compile_esp_backends.ps1 will report its own missing-file error." -ForegroundColor Yellow
+    }
+
+    # check_duplicate_symbols.ps1 walks this project's own component object
+    # directories (esp-idf\{App,drivers,kilnlink,hwabstraction_esp}\CMakeFiles\...)
+    # under firmware\KilnFW\build\ in the MAIN tree -- not in this check's own
+    # persistent worktree -- so those .obj trees have to be mirrored out here too,
+    # the same way Mirror-Tree already copies source trees IN above. This is
+    # read-only input for a downstream check (nm inspection), never rebuilt from
+    # it, so a plain /MIR mirror (last-writer-wins, no lock beyond the one this
+    # whole try block already holds) is sufficient.
+    $objComponentDirs = @(
+        "esp-idf\App\CMakeFiles\__idf_App.dir",
+        "esp-idf\drivers\CMakeFiles\__idf_drivers.dir",
+        "esp-idf\kilnlink\CMakeFiles\__idf_kilnlink.dir",
+        "esp-idf\hwabstraction_esp\CMakeFiles\__idf_hwabstraction_esp.dir"
+    )
+    foreach ($rel in $objComponentDirs) {
+        $srcObjDir = Join-Path $WorktreePath "firmware\KilnFW\build\$rel"
+        if (Test-Path $srcObjDir) {
+            $dstObjDir = Join-Path $mainBuildDir $rel
+            New-Item -ItemType Directory -Force -Path $dstObjDir | Out-Null
+            Mirror-Tree $srcObjDir $dstObjDir @() @()
+        }
+    }
+    Write-Host "Published object-file trees for check_duplicate_symbols.ps1 to $mainBuildDir\esp-idf\*"
 } finally {
     # Belt-and-suspenders: Publish-BuildArtifact already removes its own temp
     # file on a MoveFileEx failure, but an unexpected exception elsewhere in

@@ -35,8 +35,38 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $mcpDir = Join-Path $repoRoot "tools\mykicadMcp"
 $venvPython = Join-Path $mcpDir ".venv\Scripts\python.exe"
 
+# SELF-PROVISION (2026-09-15). A fresh worktree has no tools/mykicadMcp/.venv
+# at all -- it is gitignored, per-machine, and nothing before this fix ever
+# created it automatically. Three separate agents independently hit this same
+# FAIL in a clean-worktree run_all_checks.ps1 pass and had to hand-provision
+# around it. The golden suite's own dependencies are small (mcp + pytest/
+# pytest-xdist; requirements-mcp.txt's kicad-python is optional/best-effort),
+# so create the venv here rather than only naming a command to run by hand --
+# but if provisioning itself fails (no python on PATH, no network, pip
+# failure), FAIL loudly with the exact command to run instead of silently
+# skipping: this check exists specifically to catch "the golden suite quietly
+# stopped running", so it must never itself become a silent no-op.
 if (-not (Test-Path $venvPython)) {
-    throw "check_mykicad_golden_suite_runs: venv python not found at $venvPython -- cannot run the suite at all."
+    Write-Host "No venv found at $venvPython -- provisioning one now (first run in this worktree) ..." -ForegroundColor Yellow
+
+    $pythonExe = (Get-Command python -ErrorAction SilentlyContinue).Source
+    if (-not $pythonExe) { $pythonExe = (Get-Command py -ErrorAction SilentlyContinue).Source }
+    if (-not $pythonExe) {
+        throw "check_mykicad_golden_suite_runs: no venv at $venvPython and no 'python'/'py' on PATH to create one. Fix: install Python 3, then run:`n  cd $mcpDir; python -m venv .venv; .\.venv\Scripts\python.exe -m pip install -r requirements-mcp.txt -r requirements-dev.txt"
+    }
+
+    & $pythonExe -m venv (Join-Path $mcpDir ".venv") 2>&1 | Write-Host
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $venvPython)) {
+        throw "check_mykicad_golden_suite_runs: 'python -m venv' failed to create $venvPython. Fix by hand:`n  cd $mcpDir; python -m venv .venv; .\.venv\Scripts\python.exe -m pip install -r requirements-mcp.txt -r requirements-dev.txt"
+    }
+
+    $reqMcp = Join-Path $mcpDir "requirements-mcp.txt"
+    $reqDev = Join-Path $mcpDir "requirements-dev.txt"
+    & $venvPython -m pip install --disable-pip-version-check -q -r $reqMcp -r $reqDev 2>&1 | Write-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "check_mykicad_golden_suite_runs: 'pip install -r requirements-mcp.txt -r requirements-dev.txt' failed in the newly-created venv. Fix by hand:`n  cd $mcpDir; .\.venv\Scripts\python.exe -m pip install -r requirements-mcp.txt -r requirements-dev.txt`nThen re-run this check. (Not deleting the partially-provisioned .venv -- inspect the pip output above first.)"
+    }
+    Write-Host "Provisioned $venvPython." -ForegroundColor Green
 }
 
 # The real-board golden files: anything using the `kiln_project_path` fixture.

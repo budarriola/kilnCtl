@@ -102,6 +102,57 @@ You still need, installed yourself:
 - **pico-sdk and arm-none-eabi-gcc** — for `SaftyFW`, once it exists. Not yet
   discovered by the script, because there is nothing to build
 
+## Verifying from a clean worktree
+
+`tools/run_all_checks.ps1` is the sanctioned way to prove a commit is good, and
+it is meant to be run from a **disposable `git worktree`**, not only the one
+long-lived main tree every session shares (which accumulates provisioning no
+fresh checkout has). `tools/setup.ps1` does not run this sequence for you
+today — do this by hand once per worktree:
+
+```powershell
+git worktree add C:\wt\<name> origin/main        # short path: avoids MSVC/xtensa cmdline overflow
+cd C:\wt\<name>
+git submodule update --init --recursive
+
+# KilnFW needs a real sdkconfig -- gitignored, and defaults to plain "esp32"
+# (not esp32s3) without this, which fails in hal_sysinfo_esp.c with a
+# confusing, unrelated-looking error:
+cd firmware\KilnFW
+idf.py set-target esp32s3
+cd ..\..
+
+# PcTools venv:
+cd tools\PcTools
+uv sync
+cd ..\..
+
+powershell -ExecutionPolicy Bypass -File tools\run_all_checks.ps1
+```
+
+As of 2026-09-15, `check_00_kilnfw_target_build.ps1` (the check that actually
+builds KilnFW) publishes `compile_commands.json` and this project's own
+object-file trees into the worktree's `firmware\KilnFW\build\` alongside the
+`.elf`/`.bin` it already published, so `check_compile_esp_backends`/
+`compile_esp_backends.ps1` and `check_duplicate_symbols.ps1` — both of which
+only ever *consume* that build output, never produce it — now have real input
+on the very first `run_all_checks.ps1` pass in a fresh worktree, with no
+separate manual `build_kilnfw` step required first. `idf.py set-target`
+above already produces `compile_commands.json` via its CMake configure step
+on its own, before `run_all_checks.ps1` even runs it; the check's own publish
+step is what makes `check_duplicate_symbols.ps1` (which needs real *object
+files*, not just the CMake configure) work without a hand-triggered build.
+
+`check_mykicad_golden_suite_runs.ps1` self-provisions `tools/mykicadMcp/.venv`
+(via `python -m venv` + `pip install -r requirements-mcp.txt -r
+requirements-dev.txt`) the first time it runs in a worktree that doesn't have
+one yet, so no separate manual step is needed for it either. If provisioning
+itself fails (no `python`/`py` on PATH, no network), the check FAILS naming
+the exact command to run by hand rather than silently skipping.
+
+Remove the worktree when done: `git worktree remove C:\wt\<name>` (add
+`--force` only if it reports uncommitted changes you intend to discard).
+
 ## Verifying the clone
 
 ```powershell
