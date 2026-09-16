@@ -520,3 +520,16 @@ CONFIG_APP_ROLLBACK_ENABLE=y
 # there means a clean clone builds a different binary -- here, one whose
 # chart labels silently fall back to the 14px font and overlap.
 CONFIG_LV_FONT_MONTSERRAT_10=y
+
+# CONFIG_IDF_TARGET: without this line a fresh worktree with no generated
+# sdkconfig defaults to plain `esp32`, and the build then fails deep inside
+# ESP-IDF rather than anywhere in this repo -- the observed symptom is
+# `TEMPERATURE_SENSOR_CLK_SRC_DEFAULT undeclared` out of
+# esp_driver_tsens/include/driver/temperature_sensor.h while compiling
+# firmware/hwAbstraction/esp/sysinfo/hal_sysinfo_esp.c, whose compiler line
+# reads xtensa-esp32-elf-gcc. That error names an ESP-IDF header and no repo
+# file, so it reads convincingly as a pre-existing mainline break; it has
+# already cost more than one session a full investigation. The board is an
+# ESP32-S3 and always has been, so pin it here rather than relying on every
+# fresh tree remembering an explicit `idf.py set-target esp32s3`.
+CONFIG_IDF_TARGET="esp32s3"

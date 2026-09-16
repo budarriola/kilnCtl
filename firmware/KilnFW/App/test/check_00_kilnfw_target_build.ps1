@@ -113,21 +113,53 @@ if (-not (Test-Path $IdfProfile)) {
     exit 3
 }
 
+# BUILD DIRECTORY IS PER-INVOKING-TREE (2026-09-15).
+# --------------------------------------------------
 # Short path is required: the default .claude\worktrees\... path overflows
 # the MSVC/xtensa command line on this project (see CLAUDE.md). Persistent
 # across runs on purpose -- see the cost discussion above.
-$WorktreePath = "C:\wt\checkbuild"
-$MainSdkconfig = Join-Path $repoRoot "firmware\KilnFW\sdkconfig"
-$WorktreeSdkconfig = Join-Path $WorktreePath "firmware\KilnFW\sdkconfig"
-
+#
+# Until this revision that path was one fixed string, "C:\wt\checkbuild", no
+# matter which tree invoked the check. The mirror step below always did read
+# the INVOKING tree ($repoRoot is derived from $PSScriptRoot, never
+# hardcoded), so a run from a private worktree genuinely compiled that
+# worktree's source -- that part was never broken, and a claim that this
+# check "always builds the main tree" is false. What WAS broken is that every
+# concurrent session on this machine mirrored its own source over the same
+# shared destination. Two consequences, both demonstrated 2026-09-15:
+#   * Cross-tree destruction. Mirroring from a tree whose lvgl submodule was
+#     not initialised EMPTIED the shared worktree's lvgl checkout (see the
+#     exclude-path defect fixed in Mirror-Tree below). The next session's run
+#     then died with "Failed to resolve component 'lvgl': unknown name" -- a
+#     CMake configure error indistinguishable, to whoever reads it, from a
+#     real break in their own source.
+#   * Thrash, and readers seeing someone else's build. With CCACHE_DISABLE=1
+#     two trees alternating through one build directory recompile essentially
+#     everything each time, and anything reading the artifacts mid-run is
+#     reading a build that was grading a different tree's source -- one
+#     documented source of the transiently-incomplete-ELF readings that have
+#     produced a phantom regression report here before.
+#
+# Fix: the build directory is a function of the invoking tree. The main
+# worktree keeps the historical "C:\wt\checkbuild" exactly as before (same
+# path, same lock name, same already-warm build directory -- no behaviour
+# change and no extra disk for the common case); any other tree gets
+# "C:\wt\checkbuild_<10 hex of SHA256 of that tree's path>" plus its own
+# build-lock name, so concurrent invocations from different trees neither
+# share a directory nor queue behind one another.
+#
+# DISK. One persistent ESP-IDF build directory per tree that has ever run
+# this check, ~425 MB each (measured 2026-09-15). They do not accumulate:
+# each carries a .checkbuild_source marker naming the tree it belongs to, and
+# every run prunes any sibling C:\wt\checkbuild_<hex> whose recorded tree no
+# longer exists on disk -- which is exactly what happens when a throwaway
+# agent worktree is removed. Only directories that BOTH match that naming
+# scheme AND carry the marker are ever removed, so the hand-made worktrees
+# under C:\wt\ and check_01's own checkbuild_origin_kilnfw are never touched.
 function Fail([string]$msg) {
     Write-Host ""
     Write-Host "FAILED: $msg" -ForegroundColor Red
     exit 1
-}
-
-if (-not (Test-Path $MainSdkconfig)) {
-    Fail "main tree has no firmware\KilnFW\sdkconfig -- this is the board-tuned config this check must not regenerate from Kconfig defaults; run the IDE workspace setup or copy a known-good sdkconfig into the main tree first."
 }
 
 $headCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
@@ -135,20 +167,113 @@ if (-not $headCommit) {
     Fail "could not resolve HEAD in $repoRoot"
 }
 
+# Which tree am I? The MAIN worktree is always the first entry of
+# `git worktree list --porcelain`; every other entry is a linked worktree.
+# Comparing the invoking $repoRoot against it is how this check decides
+# between the historical shared path and a private per-tree one -- see the
+# "BUILD DIRECTORY IS PER-INVOKING-TREE" block at the top of this file.
+$repoRootFull = ([System.IO.Path]::GetFullPath($repoRoot.Path)).TrimEnd('\')
+$mainWorktreeRaw = (((& git -C $repoRoot worktree list --porcelain) | Select-Object -First 1) -replace '^worktree\s+', '').Trim()
+if (-not $mainWorktreeRaw) {
+    Fail "could not determine the main worktree path ('git worktree list --porcelain' produced nothing for $repoRoot) -- refusing to guess which build directory this tree owns."
+}
+$mainWorktreeFull = ([System.IO.Path]::GetFullPath($mainWorktreeRaw.Replace('/', '\'))).TrimEnd('\')
+
+if ([string]::Equals($repoRootFull, $mainWorktreeFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+    $WorktreePath = "C:\wt\checkbuild"
+    $LockName = "kilnfw_checkbuild_worktree"
+} else {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hashBytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($repoRootFull.ToLowerInvariant()))
+    } finally {
+        $sha.Dispose()
+    }
+    $treeTag = (($hashBytes | ForEach-Object { $_.ToString("x2") }) -join "").Substring(0, 10)
+    $WorktreePath = "C:\wt\checkbuild_$treeTag"
+    $LockName = "kilnfw_checkbuild_worktree_$treeTag"
+}
+$WorktreeSdkconfig = Join-Path $WorktreePath "firmware\KilnFW\sdkconfig"
+$MarkerFile = Join-Path $WorktreePath ".checkbuild_source"
+Write-Host "Invoking tree:   $repoRootFull"
+Write-Host "Build worktree:  $WorktreePath"
+
+# SDKCONFIG PROVISIONING FOR A FRESH WORKTREE (2026-09-15).
+# ---------------------------------------------------------
+# sdkconfig is gitignored (board-specific, hand-tuned), so a freshly created
+# worktree -- exactly the clean-worktree-at-origin/main workflow this project
+# treats as standing practice -- has none of its own. Regenerating one from
+# Kconfig defaults is not an option: it is KNOWN to diverge from what the
+# board actually runs (CLAUDE.md's "gitignored config hides mismatch", which
+# is how the FT6336U/NS2009 touch-panel mismatch was found), and
+# sdkconfig.defaults additionally pins no CONFIG_IDF_TARGET, so a regenerated
+# config silently targets plain esp32 instead of esp32s3 and dies on
+# esp32s3-only code. Copying a real board-tuned sdkconfig is therefore not a
+# convenience this check takes -- it is the only truthful config available to
+# it, and it is most of why this check can build a clean worktree at all.
+# Prefer the invoking tree's own sdkconfig; fall back to the main worktree's
+# and SAY SO. If neither exists there is no honest config to build against:
+# FAIL, never SKIP (run_all_checks.ps1 fails the run on a SKIP by default,
+# and a missing board config is a provisioning defect to fix, not an absent
+# toolchain to shrug at).
+$MainSdkconfig = Join-Path $repoRoot "firmware\KilnFW\sdkconfig"
+if (-not (Test-Path $MainSdkconfig)) {
+    $fallbackSdkconfig = Join-Path $mainWorktreeFull "firmware\KilnFW\sdkconfig"
+    if (Test-Path $fallbackSdkconfig) {
+        Write-Host "NOTE: $repoRootFull has no firmware\KilnFW\sdkconfig (gitignored; absent in a fresh worktree) -- using the main worktree's board-tuned config at $fallbackSdkconfig" -ForegroundColor Yellow
+        $MainSdkconfig = $fallbackSdkconfig
+    } else {
+        Fail "no firmware\KilnFW\sdkconfig in the invoking tree ($repoRootFull) and none in the main worktree ($mainWorktreeFull) either. This is the board-tuned config this check must not regenerate from Kconfig defaults (sdkconfig.defaults pins no CONFIG_IDF_TARGET, so a regenerated config would silently target esp32, not esp32s3). Run the IDE workspace setup, or copy a known-good sdkconfig into the main tree, before this check can say anything truthful."
+    }
+}
+
+# Prune per-tree build worktrees whose owning tree is gone (a removed agent
+# worktree). Deliberately narrow: a directory is only ever removed if its
+# name matches the <hex> scheme this script itself generates AND it carries
+# the marker file this script itself writes AND the tree named in that marker
+# no longer exists. C:\wt holds many hand-made worktrees belonging to other
+# sessions, plus check_01's checkbuild_origin_kilnfw; none of those can match
+# all three conditions.
+foreach ($stale in (Get-ChildItem -Path "C:\wt" -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^checkbuild_[0-9a-f]{10}$' })) {
+    if ([string]::Equals($stale.FullName, $WorktreePath, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+    $staleMarker = Join-Path $stale.FullName ".checkbuild_source"
+    if (-not (Test-Path $staleMarker)) { continue }
+    $owner = (Get-Content $staleMarker -Raw -ErrorAction SilentlyContinue)
+    if (-not $owner) { continue }
+    $owner = $owner.Trim()
+    if (Test-Path $owner) { continue }
+    Write-Host "Pruning stale build worktree $($stale.FullName) -- its tree '$owner' no longer exists"
+    & git -C $repoRoot worktree remove --force $stale.FullName 2>&1 | Write-Host
+    if (Test-Path $stale.FullName) {
+        Remove-Item -Recurse -Force $stale.FullName -ErrorAction SilentlyContinue
+    }
+    & git -C $repoRoot worktree prune 2>&1 | Write-Host
+}
+
 if (-not (Test-Path $WorktreePath)) {
-    Write-Host "Setting up persistent build worktree at $WorktreePath (first run) ..."
-    & git -C $repoRoot worktree add $WorktreePath $headCommit 2>&1 | Write-Host
+    Write-Host "Setting up persistent build worktree at $WorktreePath (first run for this tree) ..."
+    & git -C $repoRoot worktree add --detach $WorktreePath $headCommit 2>&1 | Write-Host
     if ($LASTEXITCODE -ne 0) {
         Fail "git worktree add failed (exit $LASTEXITCODE)"
     }
 }
 
+# CONTENT test, not merely the presence of the .git file: a /MIR with a
+# mis-specified exclude has emptied this directory before while leaving .git
+# behind, and the resulting downstream failure ("Failed to resolve component
+# 'lvgl'") reads as a broken build rather than a broken checkout. Re-init
+# whenever the component is not actually THERE.
 $lvglGitFile = Join-Path $WorktreePath "firmware\KilnFW\components\lvgl\.git"
-if (-not (Test-Path $lvglGitFile)) {
+$lvglCMake = Join-Path $WorktreePath "firmware\KilnFW\components\lvgl\CMakeLists.txt"
+if (-not (Test-Path $lvglGitFile) -or -not (Test-Path $lvglCMake)) {
     Write-Host "Initializing lvgl submodule in worktree ..."
-    & git -C $WorktreePath submodule update --init firmware/KilnFW/components/lvgl 2>&1 | Write-Host
+    & git -C $WorktreePath submodule update --init --force firmware/KilnFW/components/lvgl 2>&1 | Write-Host
     if ($LASTEXITCODE -ne 0) {
         Fail "git submodule update --init for lvgl failed (exit $LASTEXITCODE)"
+    }
+    if (-not (Test-Path $lvglCMake)) {
+        Fail "git submodule update --init for lvgl reported success (exit 0) but $lvglCMake is still missing -- refusing to build against an incomplete component tree."
     }
 }
 
@@ -159,11 +284,29 @@ if (-not (Test-Path $lvglGitFile)) {
 # the whole point of keeping it) are excluded so this never touches them;
 # sdkconfig is excluded here because it is copied and hash-verified
 # separately below, not mirrored blindly.
-function Mirror-Tree([string]$src, [string]$dst, [string[]]$excludeDirs, [string[]]$excludeFiles) {
-    $args = @($src, $dst, "/MIR", "/NFL", "/NDL", "/NJH", "/NJS", "/NP")
-    if ($excludeDirs.Count -gt 0) { $args += "/XD"; $args += $excludeDirs }
-    if ($excludeFiles.Count -gt 0) { $args += "/XF"; $args += $excludeFiles }
-    & robocopy @args | Out-Null
+# EXCLUDED SUBDIRECTORIES MUST BE ABSOLUTE, AND GIVEN FOR BOTH SIDES
+# (2026-09-15). robocopy's /XD resolves a RELATIVE argument against the
+# current directory, not against the source or destination root, so the
+# "components\lvgl" that used to be passed here excluded nothing whatsoever
+# and /MIR duly deleted the destination's lvgl checkout as an "extra"
+# directory. ("build" survived only because robocopy also accepts a bare NAME
+# containing no separator.) Demonstrated 2026-09-15: a run from a tree whose
+# own lvgl submodule was uninitialised emptied the shared build worktree's
+# lvgl, and the following run there failed with "Failed to resolve component
+# 'lvgl'". Expanding each excluded subdirectory against BOTH roots removes
+# the ambiguity. ($args is also an automatic variable in PowerShell -- the
+# local array is named $roboArgs now so it does not shadow it.)
+function Mirror-Tree([string]$src, [string]$dst, [string[]]$excludeSubdirs, [string[]]$excludeFiles) {
+    $roboArgs = @($src, $dst, "/MIR", "/NFL", "/NDL", "/NJH", "/NJS", "/NP")
+    if ($excludeSubdirs.Count -gt 0) {
+        $roboArgs += "/XD"
+        foreach ($rel in $excludeSubdirs) {
+            $roboArgs += (Join-Path $src $rel)
+            $roboArgs += (Join-Path $dst $rel)
+        }
+    }
+    if ($excludeFiles.Count -gt 0) { $roboArgs += "/XF"; $roboArgs += $excludeFiles }
+    & robocopy @roboArgs | Out-Null
     # robocopy exit codes 0-7 are all success variants; 8+ is a real error.
     if ($LASTEXITCODE -ge 8) {
         Fail "robocopy mirror of $src failed (exit $LASTEXITCODE)"
@@ -183,14 +326,17 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
     if (Test-Path "Env:$v") { Remove-Item "Env:$v" }
 }
 
-# The whole mirror -> build -> verify -> publish sequence operates on the ONE
-# shared, persistent worktree/build dir (C:\wt\checkbuild and the main tree's
-# firmware\KilnFW\build\), so the lock must span all of it, not just the
-# final publish copy -- two concurrent runs building into the same worktree
-# at once would race ninja/cmake exactly like the two check_bootloader_builds.ps1
-# runs documented in build_lock.ps1's header, and a lock that only wrapped the
-# publish step would not have prevented that.
-$lock = Enter-BuildLock -Name "kilnfw_checkbuild_worktree"
+# The whole mirror -> build -> verify -> publish sequence operates on this
+# tree's persistent worktree/build dir ($WorktreePath) and on this tree's own
+# firmware\KilnFW\build\, so the lock must span all of it, not just the final
+# publish copy -- two concurrent runs FROM THE SAME TREE building into the
+# same worktree at once would race ninja/cmake exactly like the two
+# check_bootloader_builds.ps1 runs documented in build_lock.ps1's header, and
+# a lock that only wrapped the publish step would not have prevented that.
+# The lock NAME is per-tree for the same reason the directory is: runs from
+# different trees now touch disjoint directories, so making them queue behind
+# one global mutex would serialize work that cannot actually collide.
+$lock = Enter-BuildLock -Name $LockName
 try {
     Write-Host "Mirroring current firmware/KilnFW, firmware/hwAbstraction and firmware/CommonFW into $WorktreePath ..."
     Mirror-Tree (Join-Path $repoRoot "firmware\KilnFW") (Join-Path $WorktreePath "firmware\KilnFW") `
@@ -216,6 +362,42 @@ try {
     # other two trees are.
     Mirror-Tree (Join-Path $repoRoot "firmware\CommonFW") (Join-Path $WorktreePath "firmware\CommonFW") `
         @(".git") @()
+
+    # DID THE MIRROR ACTUALLY DELIVER THIS TREE'S SOURCE? A check that cannot
+    # see the source it was invoked to grade must FAIL loudly, never quietly
+    # build whatever the previous run happened to leave behind. exit 3/SKIP is
+    # deliberately NOT used for any of these: run_all_checks.ps1 fails the
+    # whole run on a SKIP by default now, and more to the point a broken
+    # mirror is a defect in this check's own setup, not an absent
+    # prerequisite. Comparing content hashes (not just existence) is what
+    # makes this an assertion about WHICH tree got built.
+    $verifiedPairs = 0
+    foreach ($rel in @(
+        "firmware\KilnFW\CMakeLists.txt",
+        "firmware\KilnFW\App\CMakeLists.txt",
+        "firmware\CommonFW\CMakeLists.txt"
+    )) {
+        $srcFile = Join-Path $repoRoot $rel
+        $dstFile = Join-Path $WorktreePath $rel
+        if (-not (Test-Path $srcFile)) { continue }
+        if (-not (Test-Path $dstFile)) {
+            Fail "the mirror step did not deliver $dstFile from the invoking tree's $srcFile -- the build worktree does not contain the source this check was invoked to grade."
+        }
+        if ((Get-FileHash $srcFile -Algorithm SHA256).Hash -ne (Get-FileHash $dstFile -Algorithm SHA256).Hash) {
+            Fail "after mirroring, $dstFile still differs from the invoking tree's $srcFile -- refusing to grade a build of source that is not this tree's."
+        }
+        $verifiedPairs++
+    }
+    if ($verifiedPairs -lt 2) {
+        Fail "only $verifiedPairs mirror sentinel file(s) could be verified under $repoRoot -- refusing to report on a mirror whose success could not be confirmed (a vacuous assertion is the failure mode this block exists to prevent)."
+    }
+    if (-not (Test-Path $lvglCMake)) {
+        Fail "$lvglCMake is missing after the mirror step -- the lvgl component has been deleted out of the build worktree. Downstream this surfaces as a confusing 'Failed to resolve component lvgl' CMake error rather than as the checkout problem it actually is."
+    }
+
+    # Record which tree owns this build directory, for the pruning pass above
+    # (and so anyone finding a C:\wt\checkbuild_<hex> can tell whose it is).
+    Set-Content -Path $MarkerFile -Value $repoRootFull -Encoding ascii
 
     Copy-Item -Path $MainSdkconfig -Destination $WorktreeSdkconfig -Force
     $mainHash = (Get-FileHash $MainSdkconfig -Algorithm SHA256).Hash
