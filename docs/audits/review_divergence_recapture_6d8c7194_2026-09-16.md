@@ -245,7 +245,8 @@ RUN FAILURES (1): main
 ```
 
 Restored by hand (no `git checkout --`, `git restore` or `git stash`), confirmed
-`git hash-object` = `76630ccadd80a24556b2e0cfbf9f7d86bedcf4ef`, identical to
+the restored file's `git hash-object` blob id was
+`blob 76630ccadd80a24556b2e0cfbf9f7d86bedcf4ef` -- identical to
 `git rev-parse 6d8c7194:firmware/KilnFW/App/drivers/persist/kiln_cfg_store.c`, with
 an empty `git diff`, then forced a full rebuild into a purged directory before any
 further measurement: `Built: 47/47`, all passed, headroom back to 52 bytes. The
