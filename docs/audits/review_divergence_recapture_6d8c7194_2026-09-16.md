@@ -11,39 +11,6 @@ reproduction experiment, and `tools/run_all_checks.ps1 -ExecutionPolicy Bypass
 -AllowFewerChecks` run in the foreground against both trees. No claim below rests
 on `check_00`.
 
-**Status as of 2026-09-16 (follow-up pass): finding 1 / item E is CLOSED.** It was
-closed by `adff1595` ("Bound /api/status: its size mirror was blind to five fields
-it emits") and `d459d124` ("Extend the /api/status mirror discipline to the ?diag=1
-document"), both of which landed on `main` AFTER this review was written. This
-section is retained as the historical record of a real defect; do not re-open it
-from the prose below without re-measuring first.
-
-Re-verified against `main` at `200bc0ae` in a clean worktree:
-
-- The five fields this review named are all accounted for.
-  `safety_tc_is_separate_sensor` is now mirrored (`test_dashboard_json.c:693`)
-  against the handler at `dashboard_status_http.c:467`.
-  `diag_boot_stack_overflow`/`_malloc_failed`/`_assert_failed` were removed from
-  the firmware outright as pure bit-decodes, and three tests now assert they do
-  not reappear. `diag_boot_reason` moved to a separate small `?diag=1` document,
-  which has its own mirror (`render_diag_json()`).
-- Measured, not argued: `/api/status` worst-case render is **5124 bytes against
-  DASHBOARD_JSON_STATUS_BUF_SIZE=5248 -- headroom +124**, and the `?diag=1`
-  document is 169 bytes (headroom 5079). The buffer was NOT enlarged; it is still
-  5248. The remedy was bounding content, as this review required.
-- A mechanical key set-diff of every `APPEND()`/`STATUS_APPEND()`/`DIAG_APPEND()`
-  emit in the handler and the mirror finds zero handler-only keys in either
-  document. The only mirror-only keys are the deliberate mutation probes
-  (`mock_new_stat_us`, `mock_new_stat_max_us`, `diag_future_counter`).
-- Negative test reproducing this review's own experiment: re-adding the four moved
-  fields to the mirror measures **5256 bytes, -8 bytes of headroom**, and goes red
-  at `test_dashboard_json.c:939` and `:946`, `2 FAILURE(S)`,
-  `RUN FAILURES (1): dashboard_json`. So the guard is load-bearing, and this
-  review's 5353-byte finding was correct when written.
-
-The other ranked findings (2-7) below are NOT affected by this note and remain
-open as written.
-
 ## Verdicts
 
 | Item | Claim | Verdict |
@@ -297,8 +264,8 @@ RUN FAILURES (1): main
 ```
 
 Restored by hand (no `git checkout --`, `git restore` or `git stash`), confirmed
-the restored file's `git hash-object` blob id was
-`blob 76630ccadd80a24556b2e0cfbf9f7d86bedcf4ef` -- identical to
+`git hash-object` = 76630ccadd80a24556b2e0cfbf9f7d86bedcf4ef (a blob hash, not a
+commit), identical to
 `git rev-parse 6d8c7194:firmware/KilnFW/App/drivers/persist/kiln_cfg_store.c`, with
 an empty `git diff`, then forced a full rebuild into a purged directory before any
 further measurement: `Built: 47/47`, all passed, headroom back to 52 bytes. The
@@ -329,84 +296,23 @@ inspection, but a future edit to `kArmedSuffix` or to
 
 1. **Item E is not closed.** The status document still overflows its buffer with
    only `diag_ever_received` true; five handler-emitted fields are missing from the
-   mirror. Fix by bounding content, never by enlarging the buffer. Out of scope
-   for the 2026-09-16 follow-up pass below by explicit instruction (already
-   re-investigated once at real cost) — status unchanged by that pass.
-2. **CLOSED, 2026-09-16 follow-up pass.** HIGH2's stated justification was false as
-   originally written. `9237fb93` ("Correct the false leg of the HIGH2 rationale
-   over `if (ok && commit)`") already corrects the comment in place at
-   `firmware/KilnFW/App/drivers/http/safety_cfg_http.c` (the `if (ok && commit)`
-   gate in `commissioning_post_handler()`): it documents both post-commit failure
-   paths named above, explains why the gate is nevertheless still correct (the
-   CRC-driven refetch in `safety_ceiling_sync.c` re-derives and surfaces the
-   staleness on the very next tick, so nothing is silently lost), and reconfirms
-   the `abs_max_temp_c` exclusion by two independent paths. No further code change
-   needed or made; re-verified present against `origin/main` in this pass.
-3. **A bounded acquisition is not a bounded job.** Out of scope for the
-   2026-09-16 follow-up pass (assigned to a concurrent session working
-   `kiln_cfg_store.c`, `uart_bridge_ext.c` and `safety_link_poll.c`) — not
-   re-investigated, status unchanged.
-4. **CLOSED.** `firmware/KilnFW/CMakeLists.txt` now carries
-   `idf_build_set_property(COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:C>:-Werror=implicit-function-declaration>" APPEND)`,
-   and the `zones_config_convert.c:656` `snprintf` site now has `#include <stdio.h>`
-   with a comment naming exactly this class. Landed in `3e0b2fa4` ("Move the
-   safety-link write machinery out of drivers/http/ into drivers/safety/"),
-   confirmed present in the 2026-09-16 follow-up pass's `origin/main` checkout.
-5. **CLOSED.** `firmware/KilnFW/App/test/check_all_task_stack_budgets.py`'s
-   `bx_flash_worker` entry now carries an `extra_roots` list enumerating every job
-   function ever dispatched onto that worker (`control_handle_message`,
-   `profiles_handle_message`, `autotune_handle_message`, `coupling_persist_job`,
-   `save_kibase_job`, `zones_autosave_job`, the `cfg_fs_*` job runners,
-   `log_store_job_run`, `reset_persist_job`, `nvs_save_store_job`, the
-   `crash_*_job` pair, `cfgfs_file_write_job`, `execute_scope_job`, and
-   `safety_poll_pico_half_recapture_job`), each measured as its own root and
-   folded into the worker's depth, with an explicit comment instructing that a
-   new dispatch target must be added to the same list. Confirmed present in the
-   2026-09-16 follow-up pass's `origin/main` checkout; not re-measured against
-   target hardware in that pass (no target build was performed).
-6. **Was live; fixed in the 2026-09-16 follow-up pass.** No test in
-   `test_safety_ceiling_sync_divergence.c` ever set
-   `s_stub_recent_armed_refusal = true` with a reason long enough to reach the
-   `head_cap = cap - suffix_len - 1` truncation boundary in
-   `safety_ceiling_sync.c`'s ARMED-refusal branch, so the boundary math itself was
-   unpinned exactly as this finding said. Added
-   `test_armed_refusal_appends_suffix_and_truncates_long_reason()`: it forces a
-   long `standing_reason` (via `%.2f`-formatted near-`FLT_MAX` ESP/Pico values,
-   not a long field name — the `extra_names[][24]` buffer caps names too short to
-   reach the boundary on their own) with `s_stub_recent_armed_refusal` true, and
-   asserts the ARMED suffix survives byte-for-byte at the tail. Verified as a real
-   regression pin: reverting `safety_ceiling_sync.c`'s explicit head-truncation
-   back to the pre-item-H single tail-truncating `snprintf("%s%s", ...)` shape
-   fails this test (`40/41 checks passed, 1 FAILURE(S)`) while the current shape
-   passes (`41/41`).
-7. **CLOSED.** `check_main_task_stack_budget.py` no longer resolves `sdkconfig`
-   itself; it now imports the same terminal, ELF-relative resolution
-   `check_all_task_stack_budgets.py` already uses (ordered: `--sdkconfig`, then a
-   config published next to `--elf`, then the ELF's build-directory parent), so a
-   clean worktree with no build yet reports a plain
-   `SKIP: no ELF at ...` instead of the old
-   `could not read CONFIG_ESP_MAIN_TASK_STACK_SIZE from sdkconfig` failure.
-   Reproduced directly in a fresh `C:\wt\` worktree with no build performed: the
-   script now exits with that SKIP message, not the old failure.
-
-## 2026-09-16 follow-up pass (findings 2, 4, 5, 6, 7)
-
-Worked as a separate, later pass over this same document, against a fresh
-`origin/main` worktree. Finding 1 was explicitly out of scope (already
-re-investigated once at real cost — see the top of this pass's instructions,
-not reproduced here). Finding 3 was explicitly out of scope (a concurrent
-session was holding the three files it touches). Of the remaining five,
-**four (2, 4, 5, 7) were already closed on `origin/main`** by commits made
-after this document's original findings were written, and only **finding 6**
-was still live; it is fixed by this pass with the regression-pin test
-described above. Neither invariant (`abs_max_temp_c` parity, Pico always
-arm-able) is touched by this pass: finding 6's fix is test-only, and findings
-2/4/5/7 were verified read-only against already-landed code.
+   mirror. Fix by bounding content, never by enlarging the buffer.
+2. **HIGH2's stated justification is false.** Two post-commit failure paths create
+   exactly the divergence the comment says cannot occur. Not `abs_max_temp_c`, so
+   not blocking.
+3. **A bounded acquisition is not a bounded job.** The autosave now sits in front
+   of the safety link's own heartbeat; past `link_timeout_s` (10 s) it trips S6b.
+4. **`-Werror=implicit-function-declaration` is absent and addable**, with one
+   production site (`zones_config_convert.c:656`) to fix first.
+5. **`bx_flash_worker`'s stack is unmeasured** (48 B lower bound) while this commit
+   routes more work through it.
+6. Item H has no regression pin.
+7. `check_main_task_stack_budget` fails in a clean worktree in both trees.
 
 ## Is this safe to stop iterating on?
 
-Finding 1 still needs another pass, per its own note above (out of scope for
-the 2026-09-16 follow-up, not re-investigated here). Finding 3 is real (as of
-the original review) but bounded, assigned to a concurrent session, and not
-re-investigated here. Findings 2, 4, 5, 6 and 7 are now closed. Neither
-invariant is breached, so nothing here blocks flashing.
+No. Finding 1 needs another pass: the status endpoint returns HTTP 500 for the
+whole document under ordinary conditions, and the check that was supposed to prove
+otherwise still measures a mirror that is not self-contained. Findings 2 and 3 are
+real but bounded and can be scheduled. Neither invariant is breached, so nothing
+here blocks flashing.
