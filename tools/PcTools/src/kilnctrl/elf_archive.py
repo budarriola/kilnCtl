@@ -709,27 +709,47 @@ def adopt_orphaned_kiln_elfs(archive_dir: str) -> tuple[int, list[str]]:
 
 
 # M2 (docs/audits/review_elf_migration_fixes_065d51ac_2026-09-15.md), revised
-# per docs/audits/review_elf_lock_fixes_da6667f3_2026-09-15.md (HIGH-1/2/3): a
-# lock file whose mtime is older than this AND was never refreshed by a live
-# holder's heartbeat is treated as abandoned. The previous version measured
-# "how long the holder has been working" instead of "how long ago it died",
-# because nothing ever refreshed the mtime -- M1 widened the locked region to
-# include adopt_orphaned_kiln_elfs() (whole-file reads of up to 60 multi-MB
-# ELFs) and _prune(), comfortably over the old 10s threshold on a real
-# critical section, not just a crashed one. The holder now touches the lock
-# file every `_LOCK_HEARTBEAT_SECONDS` while it works (see `_LockHeartbeat`
-# below), so this threshold only needs to exceed one heartbeat interval by a
-# comfortable margin, not the whole critical section's worst case.
-_LOCK_HEARTBEAT_SECONDS = 2.0
-_LOCK_STALE_SECONDS = 6.0
+# per docs/audits/review_elf_lock_fixes_da6667f3_2026-09-15.md (HIGH-1/2/3) and
+# again per docs/audits/review_elf_lock_fixes_7653717f_2026-09-15.md (HIGH-2
+# b/c/d): a lock file whose mtime is older than this AND was never refreshed
+# by a live holder's heartbeat is treated as abandoned. The previous version
+# measured "how long the holder has been working" instead of "how long ago it
+# died", because nothing ever refreshed the mtime -- M1 widened the locked
+# region to include adopt_orphaned_kiln_elfs() (whole-file reads of up to 60
+# multi-MB ELFs) and _prune(), comfortably over the old 10s threshold on a
+# real critical section, not just a crashed one. The holder now touches the
+# lock file every `_LOCK_HEARTBEAT_SECONDS` while it works (see
+# `_LockHeartbeat` below). The 7653717f review found the first version of this
+# margin (2.0s / 6.0s, three intervals) too thin on a OneDrive-backed tree
+# under 8-way-parallel load, and combined with the (now-fixed) HIGH-2 (c) gap
+# that made a false staleness call destructive rather than a wasted retry --
+# widened to ten intervals of margin instead of three. Tradeoff, called out
+# per the fb3d2e22 review: this also lengthens how long a waiter takes to
+# recover a GENUINELY dead lock (crashed holder, no heartbeat ever coming)
+# from ~6s worst case to ~10s worst case -- accepted deliberately, since a
+# false-positive reclaim (stealing a live holder's lock) is a correctness
+# bug, while a slower recovery from a real crash is only a latency cost.
+_LOCK_HEARTBEAT_SECONDS = 1.0
+_LOCK_STALE_SECONDS = 10.0
 
 
 class _LockHeartbeat:
-    """Refreshes a lock file's mtime (and re-affirms its owner token) every
-    `_LOCK_HEARTBEAT_SECONDS` for as long as this process holds it, so a
-    waiter's staleness check (HIGH-2) reflects whether the holder is still
-    alive, not how long its critical section has been running. Runs on a
-    daemon thread so a hang here never blocks process exit."""
+    """Refreshes a lock file's mtime every `_LOCK_HEARTBEAT_SECONDS` for as
+    long as this process holds it, so a waiter's staleness check (HIGH-2)
+    reflects whether the holder is still alive, not how long its critical
+    section has been running. Runs on a daemon thread so a hang here never
+    blocks process exit.
+
+    7653717f review, HIGH-2 (b): the first version of this class refreshed
+    whatever file sat at `lock_path`, not specifically the file it created --
+    after a reclaim replaced that file with a NEW holder's lock, this thread
+    kept refreshing the new holder's mtime under the old holder's identity,
+    which meant no waiter could ever declare the new holder's lock stale even
+    after IT died (demonstrated: a mismatched holder's heartbeat advanced a
+    reclaimed file's mtime by 1.16s across a 1.2s window). `_run` now re-reads
+    the on-disk token before every refresh and stops the moment it no longer
+    matches `self._token` -- refreshing only a lock this thread's own process
+    still legitimately owns."""
 
     def __init__(self, lock_path: str, token: str):
         self._lock_path = lock_path
@@ -740,6 +760,8 @@ class _LockHeartbeat:
     def _run(self):
         while not self._stop.wait(_LOCK_HEARTBEAT_SECONDS):
             try:
+                if _read_lock_token(self._lock_path) != self._token:
+                    return  # reclaimed out from under us -- not ours to refresh any more
                 os.utime(self._lock_path, None)
             except OSError:
                 return  # lock file gone (removed by us on exit, racing shutdown) -- stop quietly
@@ -812,7 +834,32 @@ def _archive_lock(archive_dir: str, timeout_s: float = 30.0, required: bool = Tr
       called from `find_kiln_elf_for_build`/`find_safty_elf_for_identity`)
       passes `required=False`: a lookup must never raise or block past its
       own short timeout (M3), and skipping an opportunistic legacy-merge is
-      harmless -- the next successful acquisition merges it just the same."""
+      harmless -- the next successful acquisition merges it just the same.
+
+    Revised again per docs/audits/review_elf_lock_fixes_7653717f_2026-09-15.md:
+
+    - HIGH-2 (c): the reclaim path's "did the holder touch this since our
+      stat" guard compared owner TOKENS, but a heartbeat's `os.utime` never
+      changes file content -- so a lock refreshed microseconds earlier still
+      compared token-equal and got removed anyway, deleting a live, freshly-
+      heartbeated holder's lock. Re-STATS the mtime immediately before
+      removing instead: if it is no longer stale, the holder is alive and the
+      removal is abandoned.
+    - MED-1 (a): `required=False` used to still run the ENTIRE critical
+      section unlocked on timeout (only the `_archive()` caller, which passes
+      `required=True`, actually got skip-on-failure) -- demonstrated
+      performing a full unlocked manifest write concurrently with a live
+      holder. `required=False` now raises the private `_LockNotAcquired`
+      instead of yielding, so the `with` block's body never runs at all;
+      `migrate_legacy_archive` (the only `required=False` caller) catches it
+      and returns 0, exactly the "skip this opportunistic merge, the next
+      successful acquisition catches it" behavior the docstring already
+      claimed.
+    - Residual LOW on HIGH-1: a successful reclaim used to still fall through
+      to the same `deadline` check as a failed one, so a short-`timeout_s`
+      caller could raise/give-up on the very iteration that freed the lock.
+      A successful reclaim now retries the exclusive-create immediately,
+      bypassing that iteration's deadline check."""
     os.makedirs(archive_dir, exist_ok=True)
     lock_path = os.path.join(archive_dir, ".archive.lock")
     my_token = f"{os.getpid()}:{uuid.uuid4()}"
@@ -823,29 +870,54 @@ def _archive_lock(archive_dir: str, timeout_s: float = 30.0, required: bool = Tr
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.write(fd, my_token.encode("utf-8"))
             break
-        except FileExistsError:
+        except OSError as exc:
+            # fb3d2e22 review: only FileExistsError used to be caught here --
+            # any OTHER OSError (a transient sharing violation on an
+            # OneDrive-backed tree under parallel builds is not hypothetical)
+            # bypassed the acquire-failure contract entirely and propagated
+            # as a raw OSError, which a `required=False` caller is explicitly
+            # told it never has to catch. Treat any OSError here the same way:
+            # retry until `deadline`, then fail through the normal
+            # TimeoutError/_LockNotAcquired paths -- never let a transient
+            # filesystem error escape uncaught.
+            if not isinstance(exc, FileExistsError):
+                if time.time() > deadline:
+                    if required:
+                        raise TimeoutError(
+                            f"elf_archive: could not acquire lock {lock_path} within "
+                            f"{timeout_s}s (last attempt failed with {exc!r}).") from exc
+                    print(f"elf_archive: WARNING -- lock {lock_path} could not be created "
+                          f"({exc!r}), giving up without running the locked operation.")
+                    raise _LockNotAcquired(lock_path) from exc
+                time.sleep(0.05)
+                continue
             try:
                 age = time.time() - os.path.getmtime(lock_path)
             except OSError:
                 age = None  # lock vanished between the failed create and this stat -- just retry
+            reclaimed = False
             if age is not None and age > _LOCK_STALE_SECONDS:
-                stale_token = _read_lock_token(lock_path)
                 print(f"elf_archive: WARNING -- lock {lock_path} is {age:.1f}s old with no "
                       f"heartbeat (> {_LOCK_STALE_SECONDS}s), treating as abandoned by a "
                       "crashed process and attempting to clear it.")
                 try:
-                    # Re-check the token immediately before removing: if the
-                    # holder's heartbeat (or a different waiter's successful
-                    # reclaim) touched/replaced the file since our stat above,
-                    # this is no longer the lock we judged stale -- leave it
-                    # alone (HIGH-3). Best-effort either way: two waiters can
-                    # still both pass this check for the same dead lock, which
-                    # is fine, since removing an already-removed file is a
-                    # no-op error we swallow.
-                    if _read_lock_token(lock_path) == stale_token:
+                    # Re-stat the mtime immediately before removing (HIGH-2 c):
+                    # a token comparison cannot see a heartbeat, since
+                    # os.utime() never changes file content -- only a fresh
+                    # mtime proves the holder (or a different waiter's
+                    # reclaim) is still alive/active since our stat above.
+                    # Best-effort either way: two waiters can still both pass
+                    # this check for the same dead lock, which is fine, since
+                    # removing an already-removed file is a no-op error we
+                    # swallow.
+                    fresh_age = time.time() - os.path.getmtime(lock_path)
+                    if fresh_age > _LOCK_STALE_SECONDS:
                         os.remove(lock_path)
+                        reclaimed = True
                 except OSError:
                     pass
+            if reclaimed:
+                continue  # just freed it -- retry the create now, regardless of `deadline`
             if time.time() > deadline:
                 if required:
                     raise TimeoutError(
@@ -854,34 +926,41 @@ def _archive_lock(archive_dir: str, timeout_s: float = 30.0, required: bool = Tr
                         "refusing to proceed unlocked against a manifest "
                         "read-modify-write).")
                 print(f"elf_archive: WARNING -- lock {lock_path} held past {timeout_s}s and "
-                      f"not yet stale (age < {_LOCK_STALE_SECONDS}s), proceeding WITHOUT the "
-                      "lock rather than stealing it from what may be a live holder.")
-                fd = None
-                break
+                      f"not yet stale (age < {_LOCK_STALE_SECONDS}s) -- giving up without "
+                      "running the locked operation, rather than stealing it from what may "
+                      "be a live holder or running it unlocked.")
+                raise _LockNotAcquired(lock_path)
             time.sleep(0.05)
-    heartbeat = None
-    if fd is not None:
-        heartbeat = _LockHeartbeat(lock_path, my_token)
-        heartbeat.start()
+    heartbeat = _LockHeartbeat(lock_path, my_token)
+    heartbeat.start()
     try:
         yield
     finally:
-        if heartbeat is not None:
-            heartbeat.stop()
+        heartbeat.stop()
         _release_lock(lock_path, fd, my_token)
 
 
-def _release_lock(lock_path: str, fd: Optional[int], my_token: str) -> None:
+class _LockNotAcquired(Exception):
+    """Raised by `_archive_lock(..., required=False)` when `timeout_s`
+    elapses without acquiring the lock. Never raised when `required=True`
+    (that path raises `TimeoutError` instead). Callers that pass
+    `required=False` MUST catch this -- letting it propagate defeats the
+    point of asking for a non-required lock."""
+
+
+def _release_lock(lock_path: str, fd: int, my_token: str) -> None:
     """The exit half of `_archive_lock`, split out so it can be exercised
-    (and, in tests, compared against the pre-HIGH-3 behavior) directly.
-    `fd is None` means this call never held the lock (gave up in the
-    give-up-without-stealing branch) and must do nothing at all. Otherwise,
-    only remove the lock file if the token currently on disk still matches
-    the one THIS call wrote (HIGH-3) -- a reclaim elsewhere could have
-    replaced the file while this call worked, and removing that replacement
-    would strip protection from whoever now legitimately holds it."""
-    if fd is None:
-        return
+    directly by tests. `fd` is always a real, open file descriptor here --
+    `_archive_lock` only ever reaches the `yield` (and thus this `finally`)
+    after a genuine acquisition, never on a give-up/timeout path -- so this
+    no longer advertises (or accepts) `Optional[int]` (fb3d2e22 review: the
+    previous `Optional[int]` annotation raised `TypeError` from `os.close`
+    on the `None` it claimed to accept, since nothing ever actually passed
+    `None` any more). Only remove the lock file if the token currently on
+    disk still matches the one THIS call wrote (HIGH-3) -- a reclaim
+    elsewhere could have replaced the file while this call worked, and
+    removing that replacement would strip protection from whoever now
+    legitimately holds it."""
     try:
         os.close(fd)
     except OSError:
@@ -889,26 +968,6 @@ def _release_lock(lock_path: str, fd: Optional[int], my_token: str) -> None:
     try:
         if _read_lock_token(lock_path) == my_token:
             os.remove(lock_path)
-    except OSError:
-        pass
-
-
-def _release_lock_pre_high3(lock_path: str, fd: Optional[int]) -> None:
-    """The exact da6667f3 release logic (M2, before the
-    docs/audits/review_elf_lock_fixes_da6667f3_2026-09-15.md HIGH-3 fix):
-    removes the lock file whenever `fd is not None`, with no check that the
-    file at `lock_path` is still the one this call created. Kept only so
-    `ArchiveLockTest`'s negative test can demonstrate the cascade this
-    module now prevents, by calling this instead of `_release_lock` against
-    an identical precondition -- never called from production code."""
-    if fd is None:
-        return
-    try:
-        os.close(fd)
-    except OSError:
-        pass
-    try:
-        os.remove(lock_path)
     except OSError:
         pass
 
@@ -1104,10 +1163,29 @@ def migrate_legacy_archive(archive_dir: str, prefix: str, lock_timeout_s: float 
     which `_archive()` also calls directly while it already holds the same
     lock for its own manifest read-modify-write -- see that function's
     docstring for why the lock previously covering only the migration half
-    of `_archive()` was not enough."""
+    of `_archive()` was not enough.
+
+    Returns the count of ELFs actually moved (0 if the legacy directory was
+    empty/absent/already-drained -- a genuine "nothing to migrate"), or `-1`
+    (fb3d2e22 review) if the lock could not be acquired within
+    `lock_timeout_s` and the attempt was skipped outright -- these used to
+    both come back as `0`, so a caller had no way to distinguish "there was
+    nothing to do" from "contention meant we never even looked". `-1` is
+    used rather than `None` so existing `int`-typed callers that only ever
+    checked truthiness/count keep working unchanged; a caller that cares
+    about the distinction should check for the negative value explicitly."""
     _guard_against_test_write(archive_dir)
-    with _archive_lock(archive_dir, timeout_s=lock_timeout_s, required=False):
-        return _migrate_legacy_archive_locked(archive_dir, prefix)
+    try:
+        with _archive_lock(archive_dir, timeout_s=lock_timeout_s, required=False):
+            return _migrate_legacy_archive_locked(archive_dir, prefix)
+    except _LockNotAcquired:
+        # MED-1 (a), 7653717f review: skip the merge outright rather than
+        # running it unlocked -- the next successful acquisition (from here
+        # or from _archive()) merges it just the same, and this function is
+        # called opportunistically from both flash and lookup paths.
+        print(f"elf_archive: WARNING -- skipping legacy-archive migration for "
+              f"{archive_dir} this call (lock unavailable within {lock_timeout_s}s).")
+        return -1
 
 
 def _migrate_legacy_archive_locked(archive_dir: str, prefix: str) -> int:

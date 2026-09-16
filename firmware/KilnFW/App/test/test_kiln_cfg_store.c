@@ -241,6 +241,23 @@ bool safety_ceiling_sync_is_standing_diverged(char *reason_out, size_t reason_ca
     return s_stub_standing_diverged;
 }
 
+// 2026-09-15 review (review_divergence_fixes_b2e7017f_2026-09-15.md, MEDIUM
+// 3): kiln_cfg_store_autosave_from_live() also compares safety_cfg_store's
+// REAL cache generation (safety_cfg_store.c is linked for real into this
+// executable via test_safety_cfg_store.c's #include -- see this file's own
+// top comment and the MEDIUM 4 test below) against safety_ceiling_sync's
+// latch-evaluated generation to detect a refetch racing in between the
+// latch's last evaluation and this autosave call. safety_ceiling_sync.c
+// itself is NOT linked here, so only its half needs a controllable stub.
+// Zero by default; the one test that exercises the race sets it explicitly
+// against the real generation counter's own value.
+static uint32_t s_stub_latch_evaluated_generation = 0;
+
+uint32_t safety_ceiling_sync_latch_evaluated_generation(void)
+{
+    return s_stub_latch_evaluated_generation;
+}
+
 // review_autosave_rework_5bc9afb5_2026-09-15.md MEDIUM: a real kiln_cfg_swap_
 // is_pending() predicate for tests to register via kiln_cfg_store_set_swap_
 // pending_source(), to prove the gate does not key on the divergence latch
@@ -262,6 +279,13 @@ static bool stub_swap_is_pending(void)
 
 extern ota_interlock_result_t g_stub_ota_interlock_result;
 extern char g_stub_ota_interlock_reason[OTA_INTERLOCK_REASON_MAX];
+
+// test_safety_cfg_store.c's staging helper, see its own comment on why this
+// is the one crossing point into that file's static fake safety_link_get_
+// config_page() page state (MEDIUM 4 test below).
+extern void test_safety_cfg_store_stage_page_for_kiln_cfg_store_test(size_t page_idx, bool more,
+                                                                       const uint16_t *ids, const uint16_t *vals,
+                                                                       size_t n);
 
 // ---------------------------------------------------------------------------
 // Test scaffolding
@@ -294,6 +318,10 @@ static void reset_state(void)
 
     s_stub_validate_result = true;
     s_stub_validate_err = "stub validation failure";
+
+    s_stub_ceiling_diverged = false;
+    s_stub_standing_diverged = false;
+    s_stub_latch_evaluated_generation = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -2350,6 +2378,135 @@ static void test_recapture_pico_half_confirmed_suppressed_while_swap_pending(voi
     s_stub_swap_pending = false;
 }
 
+static void test_autosave_defers_when_cache_generation_moved_since_latch_evaluated(void)
+{
+    TEST_SECTION("kiln_cfg_store_autosave_from_live -- MEDIUM 3 fix (review_divergence_fixes_b2e7017f_"
+                 "2026-09-15.md): both divergence latches reading clear is not enough -- if safety_cfg_"
+                 "store's cache generation has moved past what the latch last evaluated, a refetch is "
+                 "racing in and the latch's 'not diverged' verdict proves nothing about the value about "
+                 "to be captured, so autosave must defer the Pico-half recapture exactly as if diverged");
+    reset_state();
+    int32_t id1 = -1;
+    char reason[96] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Live Kiln", -1, &id1, reason, sizeof(reason)), "save succeeds");
+    uint32_t hash_before = 0;
+    kiln_cfg_store_get_package_identity(id1, NULL, NULL, &hash_before);
+
+    for (size_t i = 0; i < sizeof(s_stub_export_content); i++) {
+        s_stub_export_content[i] = (uint8_t)(i + 100);
+    }
+
+    // Both latches clear, but the cache generation has moved on since the
+    // latch was last evaluated against it -- simulates a refetch landing in
+    // the exact window between safety_link_poll.c's maybe_refetch() and its
+    // own enforce_ceiling_divergence() call, same task, same tick. The
+    // generation counter is REAL (safety_cfg_store.c is linked for real into
+    // this executable, see this file's own top comment and the MEDIUM 4 test
+    // below), so the latch is pinned BEHIND it by actually performing one
+    // real refetch here, rather than by writing an arbitrary stub number.
+    s_stub_ceiling_diverged = false;
+    s_stub_standing_diverged = false;
+    uint32_t gen_before_refetch = safety_cfg_store_cache_generation();
+    s_stub_latch_evaluated_generation = gen_before_refetch; // latch last saw the PRE-race generation
+    uint16_t seed_ids2[] = { 0x0203u };
+    uint16_t seed_vals2[] = { 45u };
+    test_safety_cfg_store_stage_page_for_kiln_cfg_store_test(0, false, seed_ids2, seed_vals2, 1);
+    SafetyLinkClass fake_link2;
+    memset(&fake_link2, 0, sizeof(fake_link2));
+    TEST_CHECK(safety_cfg_store_refetch(&fake_link2, 0x00DD), "the racing refetch itself succeeds");
+    uint32_t gen_after_refetch = safety_cfg_store_cache_generation();
+    TEST_CHECK(gen_after_refetch != gen_before_refetch, "the real refetch actually bumped the generation");
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_autosave_from_live(reason, sizeof(reason)),
+               "reports success (a deferred recapture is not a failure)");
+    uint32_t hash_after_race = 0;
+    kiln_cfg_store_get_package_identity(id1, NULL, NULL, &hash_after_race);
+    TEST_CHECK(hash_after_race != hash_before, "the ESP half still saves even while the recapture defers");
+    TEST_CHECK(kiln_cfg_store_pico_half_recapture_pending(),
+               "the generation mismatch alone defers the Pico-half recapture, exactly like a real "
+               "divergence would, even though both latches read false");
+    TEST_CHECK(reason[0] != '\0', "reason explains the deferral");
+
+    // Once the latch catches up to the same generation the cache is on, the
+    // deferred recapture proceeds on the next call.
+    s_stub_latch_evaluated_generation = gen_after_refetch;
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_autosave_from_live(reason, sizeof(reason)), "autosave succeeds once caught up");
+    TEST_CHECK(!kiln_cfg_store_pico_half_recapture_pending(),
+               "the deferred recapture clears once the latch's evaluated generation matches the cache's");
+
+    s_stub_ceiling_diverged = false;
+    s_stub_standing_diverged = false;
+    s_stub_latch_evaluated_generation = 0;
+}
+
+static void test_capture_expected_pico_fields_excludes_abs_max_and_tc_type(void)
+{
+    TEST_SECTION("kiln_cfg_store_capture_expected_pico_fields -- MEDIUM 4 fix (review_divergence_fixes_"
+                 "b2e7017f_2026-09-15.md): tc_type (0x0105) must be excluded from the broadened standing-"
+                 "divergence field set, same as abs_max_temp_c (0x0104) -- the commissioning page owns tc_"
+                 "type and the ESP has no push path for it, so including it would count every Pico-side tc_"
+                 "type change (including a post-reboot default) as a standing divergence the ESP can never "
+                 "clear, wedging the deferred-recapture autosave gate forever");
+    reset_state();
+    int32_t id1 = -1;
+    char reason[96] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Live Kiln", -1, &id1, reason, sizeof(reason)), "save succeeds");
+
+    // Seed the REAL safety_cfg_store cache (linked for real into this same
+    // executable via test_safety_cfg_store.c's #include, see this file's own
+    // top-of-file comment) with abs_max_temp_c, tc_type, and one ordinary
+    // broadened field, all reported SET by the (fake) Pico -- then recapture
+    // via the confirmed entry point (bypasses the divergence gate, same as
+    // test_recapture_pico_half_confirmed_bypasses_divergence_gate above) so
+    // kiln_package_capture_pico_half() packages exactly these three fields
+    // through the real capture path, not a fabricated package.
+    uint16_t seed_ids[] = { 0x0104u, 0x0105u, 0x0203u }; // abs_max_temp_c, tc_type, overshoot_time_s
+    uint16_t seed_vals[] = { 1250u, 2u, 30u };
+    test_safety_cfg_store_stage_page_for_kiln_cfg_store_test(0, false, seed_ids, seed_vals, 3);
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    TEST_CHECK(safety_cfg_store_refetch(&fake_link, 0x00CC), "seeding refetch succeeds");
+
+    TEST_CHECK(kiln_cfg_store_recapture_pico_half_confirmed(reason, sizeof(reason)), "recapture succeeds");
+
+    safety_ceiling_expected_param_t out[SAFETY_CEILING_SYNC_MAX_STANDING_FIELDS];
+    size_t n = kiln_cfg_store_capture_expected_pico_fields(out, sizeof(out) / sizeof(out[0]));
+    TEST_CHECK(n == 1, "exactly one field survives -- abs_max_temp_c and tc_type are both excluded");
+    if (n == 1) {
+        TEST_CHECK(out[0].param_id == 0x0203u, "the surviving field is the ordinary broadened one");
+    }
+}
+
+static void test_set_active_id_raw_drops_pending_flag_owned_by_old_slot(void)
+{
+    TEST_SECTION("kiln_cfg_store_set_active_id_raw -- LOW 7 fix (review_divergence_fixes_b2e7017f_"
+                 "2026-09-15.md): a pending Pico-half recapture flag records WHICH slot it is owed for, "
+                 "and switching active_id away from that slot drops the flag rather than silently letting "
+                 "it apply to the new slot or leaving it orphaned forever");
+    reset_state();
+    int32_t id1 = -1, id2 = -1;
+    char reason[96] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Kiln A", -1, &id1, reason, sizeof(reason)), "save A succeeds");
+    TEST_CHECK(kiln_cfg_store_save_current("Kiln B", -1, &id2, reason, sizeof(reason)), "save B succeeds");
+    TEST_CHECK(kiln_cfg_store_set_active_id_raw(id1, reason, sizeof(reason)), "active id set back to A");
+
+    // Defer a recapture while A is active.
+    s_stub_ceiling_diverged = true;
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_autosave_from_live(reason, sizeof(reason)), "autosave defers under divergence");
+    TEST_CHECK(kiln_cfg_store_pico_half_recapture_pending(), "recapture is pending, owed to slot A");
+
+    // Switch active_id to B -- the flag was owed to A, which is no longer
+    // active, so it must be dropped rather than silently later applying to
+    // B once B's own recapture path runs.
+    TEST_CHECK(kiln_cfg_store_set_active_id_raw(id2, reason, sizeof(reason)), "active id switches to B");
+    TEST_CHECK(!kiln_cfg_store_pico_half_recapture_pending(),
+               "the pending flag was dropped -- it was owed to slot A, not B, and A is no longer active");
+
+    s_stub_ceiling_diverged = false;
+}
+
 static void test_apply_autosave_targets_incoming_slot_via_real_override(void)
 {
     TEST_SECTION("kiln_cfg_store_apply -- REAL kiln_cfg_store_set_autosave_target_override()/"
@@ -2477,6 +2634,9 @@ void run_test_kiln_cfg_store(void)
     test_recapture_pico_half_confirmed_bypasses_divergence_gate();
     test_recapture_pico_half_confirmed_suppressed_while_swap_pending();
     test_apply_autosave_targets_incoming_slot_via_real_override();
+    test_autosave_defers_when_cache_generation_moved_since_latch_evaluated();
+    test_capture_expected_pico_fields_excludes_abs_max_and_tc_type();
+    test_set_active_id_raw_drops_pending_flag_owned_by_old_slot();
 
     cfg_fs_deinit();
 }
