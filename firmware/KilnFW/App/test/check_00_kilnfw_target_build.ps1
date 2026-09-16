@@ -99,16 +99,28 @@ $ErrorActionPreference = "Stop"
 # $LASTEXITCODE explicitly instead.
 $ErrorActionPreference = "Continue"
 
-# Shared with check_bootloader_builds.ps1: a global named mutex so that
-# publishing into the shared firmware/KilnFW/build/ directory below never
-# races another concurrent build/check touching that same tree.
+# A global named mutex (the shared build_lock.ps1 helper) so that building in
+# this tree's persistent build worktree, and publishing into this tree's
+# firmware/KilnFW/build/ directory, never races another concurrent run.
+#
+# NOT shared with check_bootloader_builds.ps1 (corrected 2026-09-16, D6 of
+# docs/audits/review_check00_per_tree_build_2026-09-15.md -- the previous
+# wording here claimed it was). That script takes "saftyfw_bootloader_build";
+# nothing else in the repo takes the "kilnfw_checkbuild_worktree[_<hex>]" names
+# this script uses. The lock is real and load-bearing, just not shared with
+# that script: the runs it actually serializes are two invocations of THIS
+# check from the same tree, and (see the prune below) this check's prune pass
+# against another tree's build directory.
 . (Join-Path $PSScriptRoot "..\..\..\..\tools\build_lock.ps1")
 
 # This file lives at firmware/KilnFW/App/test/ -- four levels below repo root.
-$repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..\..")
+# -LiteralPath: Resolve-Path glob-expands otherwise, so a tree path containing
+# [ or ] would fail to resolve here (same bug class as the prune's Test-Path,
+# D1 below -- every path predicate in this file takes the literal form).
+$repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..\..\..")
 $IdfProfile = "C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1"
 
-if (-not (Test-Path $IdfProfile)) {
+if (-not (Test-Path -LiteralPath $IdfProfile)) {
     Write-Host "SKIP: ESP-IDF profile script not found at $IdfProfile -- toolchain not installed on this machine" -ForegroundColor Yellow
     exit 3
 }
@@ -217,9 +229,9 @@ Write-Host "Build worktree:  $WorktreePath"
 # and a missing board config is a provisioning defect to fix, not an absent
 # toolchain to shrug at).
 $MainSdkconfig = Join-Path $repoRoot "firmware\KilnFW\sdkconfig"
-if (-not (Test-Path $MainSdkconfig)) {
+if (-not (Test-Path -LiteralPath $MainSdkconfig)) {
     $fallbackSdkconfig = Join-Path $mainWorktreeFull "firmware\KilnFW\sdkconfig"
-    if (Test-Path $fallbackSdkconfig) {
+    if (Test-Path -LiteralPath $fallbackSdkconfig) {
         Write-Host "NOTE: $repoRootFull has no firmware\KilnFW\sdkconfig (gitignored; absent in a fresh worktree) -- using the main worktree's board-tuned config at $fallbackSdkconfig" -ForegroundColor Yellow
         $MainSdkconfig = $fallbackSdkconfig
     } else {
@@ -234,30 +246,86 @@ if (-not (Test-Path $MainSdkconfig)) {
 # no longer exists. C:\wt holds many hand-made worktrees belonging to other
 # sessions, plus check_01's checkbuild_origin_kilnfw; none of those can match
 # all three conditions.
-foreach ($stale in (Get-ChildItem -Path "C:\wt" -Directory -ErrorAction SilentlyContinue |
+#
+# THE OWNER-EXISTS TEST MUST BE LITERAL (2026-09-16, D1 of
+# docs/audits/review_check00_per_tree_build_2026-09-15.md).
+# `Test-Path $owner` glob-expands its argument. For an existing directory whose
+# path contains [ or ] -- e.g. C:\wt\tree[1] -- `Test-Path` returns FALSE while
+# [System.IO.Directory]::Exists() returns TRUE. A live session whose worktree
+# happens to be named that way would therefore have been read as "gone" and its
+# build directory `git worktree remove --force`d and `Remove-Item -Recurse`d out
+# from under a running build. No bracketed worktree existed when this was found,
+# so it never fired; it is closed here rather than left latent. The literal
+# .NET predicate is used instead of `Test-Path -LiteralPath` so the marker's
+# `-Encoding ascii` `?` substitution for a non-ASCII path can no longer be
+# rescued by `?` being a single-character wildcard: a marker that does not name
+# a path that literally exists now fails the test honestly rather than by luck.
+#
+# AND IT MUST NOT RACE THE VICTIM'S OWN BUILD. This loop deliberately runs
+# OUTSIDE the $LockName lock taken further down -- and moving it inside would
+# not help, because that lock is THIS tree's, while every directory this loop
+# can delete belongs to a DIFFERENT tree holding a DIFFERENT per-tree lock. So
+# the prune takes the victim's own lock (derivable from its directory name,
+# which is exactly how $LockName is derived above) with a zero timeout: if the
+# owning tree's check is running right now, the directory is left alone and a
+# later run prunes it. The owner-is-gone condition is permanent, so deferring
+# costs nothing but disk until the next invocation.
+foreach ($stale in (Get-ChildItem -LiteralPath "C:\wt" -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match '^checkbuild_[0-9a-f]{10}$' })) {
     if ([string]::Equals($stale.FullName, $WorktreePath, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
     $staleMarker = Join-Path $stale.FullName ".checkbuild_source"
-    if (-not (Test-Path $staleMarker)) { continue }
-    $owner = (Get-Content $staleMarker -Raw -ErrorAction SilentlyContinue)
+    if (-not (Test-Path -LiteralPath $staleMarker)) { continue }
+    $owner = (Get-Content -LiteralPath $staleMarker -Raw -ErrorAction SilentlyContinue)
     if (-not $owner) { continue }
     $owner = $owner.Trim()
-    if (Test-Path $owner) { continue }
-    Write-Host "Pruning stale build worktree $($stale.FullName) -- its tree '$owner' no longer exists"
-    & git -C $repoRoot worktree remove --force $stale.FullName 2>&1 | Write-Host
-    if (Test-Path $stale.FullName) {
-        Remove-Item -Recurse -Force $stale.FullName -ErrorAction SilentlyContinue
+    if ([System.IO.Directory]::Exists($owner) -or [System.IO.File]::Exists($owner)) { continue }
+
+    $staleTag = $stale.Name.Substring("checkbuild_".Length)
+    $staleMutex = New-Object System.Threading.Mutex($false, "Global\kilnCtl_buildlock_kilnfw_checkbuild_worktree_$staleTag")
+    $staleHeld = $false
+    try {
+        try {
+            $staleHeld = $staleMutex.WaitOne(0)
+        } catch [System.Threading.AbandonedMutexException] {
+            # Previous holder died without releasing; we own it now.
+            $staleHeld = $true
+        }
+        if (-not $staleHeld) {
+            Write-Host "Not pruning $($stale.FullName): its owning tree '$owner' is gone, but its build lock is currently HELD -- a run is still using that directory. Leaving it for a later invocation rather than deleting a directory mid-build." -ForegroundColor Yellow
+            continue
+        }
+        Write-Host "Pruning stale build worktree $($stale.FullName) -- its tree '$owner' no longer exists"
+        & git -C $repoRoot worktree remove --force $stale.FullName 2>&1 | Write-Host
+        if ([System.IO.Directory]::Exists($stale.FullName)) {
+            Remove-Item -LiteralPath $stale.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        & git -C $repoRoot worktree prune 2>&1 | Write-Host
+    } finally {
+        if ($staleHeld) {
+            try { $staleMutex.ReleaseMutex() } catch { }
+        }
+        $staleMutex.Dispose()
     }
-    & git -C $repoRoot worktree prune 2>&1 | Write-Host
 }
 
-if (-not (Test-Path $WorktreePath)) {
+if (-not (Test-Path -LiteralPath $WorktreePath)) {
     Write-Host "Setting up persistent build worktree at $WorktreePath (first run for this tree) ..."
     & git -C $repoRoot worktree add --detach $WorktreePath $headCommit 2>&1 | Write-Host
     if ($LASTEXITCODE -ne 0) {
         Fail "git worktree add failed (exit $LASTEXITCODE)"
     }
 }
+
+# WRITE THE OWNERSHIP MARKER IMMEDIATELY (2026-09-16, D5 of the same review).
+# Until now the marker was written far below, after the mirror and the sentinel
+# block. Any run that died in between -- a mirror failure, a sentinel failure,
+# a killed process -- left a ~425 MB checkbuild_<hex> with NO marker, and the
+# prune above skips markerless directories unconditionally (by design: that is
+# what keeps it away from hand-made worktrees). Such a directory was therefore
+# unreclaimable forever. Writing the marker here, the moment the directory is
+# known to exist and before anything that can fail, means every directory this
+# script creates is prunable from its first instant.
+Set-Content -LiteralPath $MarkerFile -Value $repoRootFull -Encoding ascii
 
 # CONTENT test, not merely the presence of the .git file: a /MIR with a
 # mis-specified exclude has emptied this directory before while leaving .git
@@ -266,13 +334,13 @@ if (-not (Test-Path $WorktreePath)) {
 # whenever the component is not actually THERE.
 $lvglGitFile = Join-Path $WorktreePath "firmware\KilnFW\components\lvgl\.git"
 $lvglCMake = Join-Path $WorktreePath "firmware\KilnFW\components\lvgl\CMakeLists.txt"
-if (-not (Test-Path $lvglGitFile) -or -not (Test-Path $lvglCMake)) {
+if (-not (Test-Path -LiteralPath $lvglGitFile) -or -not (Test-Path -LiteralPath $lvglCMake)) {
     Write-Host "Initializing lvgl submodule in worktree ..."
     & git -C $WorktreePath submodule update --init --force firmware/KilnFW/components/lvgl 2>&1 | Write-Host
     if ($LASTEXITCODE -ne 0) {
         Fail "git submodule update --init for lvgl failed (exit $LASTEXITCODE)"
     }
-    if (-not (Test-Path $lvglCMake)) {
+    if (-not (Test-Path -LiteralPath $lvglCMake)) {
         Fail "git submodule update --init for lvgl reported success (exit 0) but $lvglCMake is still missing -- refusing to build against an incomplete component tree."
     }
 }
@@ -339,10 +407,22 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
 $lock = Enter-BuildLock -Name $LockName
 try {
     Write-Host "Mirroring current firmware/KilnFW, firmware/hwAbstraction and firmware/CommonFW into $WorktreePath ..."
+    # NESTED build\ DIRECTORIES MUST BE NAMED EXPLICITLY (2026-09-16, D4 of
+    # docs/audits/review_check00_per_tree_build_2026-09-15.md). Making the /XD
+    # arguments absolute (the 2026-09-15 fix above, which was necessary and is
+    # kept) silently narrowed their scope at the same time: robocopy treats a
+    # bare NAME like "build" as "any directory with that name at any depth",
+    # but an absolute path as "exactly that one directory". So the host-test
+    # output trees -- firmware\KilnFW\App\test\build (418 files, ~22 MB in the
+    # main tree) and firmware\CommonFW\test\build -- stopped being excluded and
+    # have been mirrored into the build worktree on every run since, pure
+    # wasted I/O carrying host .obj/.exe artifacts that the target build has no
+    # use for. They are listed here so the absolute form covers what the bare
+    # name used to, without giving back the ambiguity the bare name had.
     Mirror-Tree (Join-Path $repoRoot "firmware\KilnFW") (Join-Path $WorktreePath "firmware\KilnFW") `
-        @("build", "components\lvgl", ".git") @("sdkconfig")
+        @("build", "App\test\build", "components\lvgl", ".git") @("sdkconfig")
     Mirror-Tree (Join-Path $repoRoot "firmware\hwAbstraction") (Join-Path $WorktreePath "firmware\hwAbstraction") `
-        @(".git") @()
+        @("test\build", ".git") @()
     # firmware/CommonFW (kilnlink) -- added 2026-09-14. The worktree's OWN git
     # checkout is pinned to whatever $headCommit existed the FIRST time this
     # persistent worktree was created (git worktree add above only runs once,
@@ -361,7 +441,7 @@ try {
     # this worktree's own (stale) checkout unless mirrored the same way the
     # other two trees are.
     Mirror-Tree (Join-Path $repoRoot "firmware\CommonFW") (Join-Path $WorktreePath "firmware\CommonFW") `
-        @(".git") @()
+        @("test\build", ".git") @()
 
     # DID THE MIRROR ACTUALLY DELIVER THIS TREE'S SOURCE? A check that cannot
     # see the source it was invoked to grade must FAIL loudly, never quietly
@@ -379,11 +459,11 @@ try {
     )) {
         $srcFile = Join-Path $repoRoot $rel
         $dstFile = Join-Path $WorktreePath $rel
-        if (-not (Test-Path $srcFile)) { continue }
-        if (-not (Test-Path $dstFile)) {
+        if (-not (Test-Path -LiteralPath $srcFile)) { continue }
+        if (-not (Test-Path -LiteralPath $dstFile)) {
             Fail "the mirror step did not deliver $dstFile from the invoking tree's $srcFile -- the build worktree does not contain the source this check was invoked to grade."
         }
-        if ((Get-FileHash $srcFile -Algorithm SHA256).Hash -ne (Get-FileHash $dstFile -Algorithm SHA256).Hash) {
+        if ((Get-FileHash -LiteralPath $srcFile -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $dstFile -Algorithm SHA256).Hash) {
             Fail "after mirroring, $dstFile still differs from the invoking tree's $srcFile -- refusing to grade a build of source that is not this tree's."
         }
         $verifiedPairs++
@@ -391,17 +471,68 @@ try {
     if ($verifiedPairs -lt 2) {
         Fail "only $verifiedPairs mirror sentinel file(s) could be verified under $repoRoot -- refusing to report on a mirror whose success could not be confirmed (a vacuous assertion is the failure mode this block exists to prevent)."
     }
-    if (-not (Test-Path $lvglCMake)) {
+
+    # NEWEST-SOURCE WITNESS (2026-09-16, D3 of
+    # docs/audits/review_check00_per_tree_build_2026-09-15.md).
+    # The three sentinels above are all CMakeLists.txt files, which change
+    # rarely, and they are compared source-against-destination. If the mirror
+    # silently no-ops, the destination still holds an identical copy from the
+    # PREVIOUS run, so all three pairs match while every .c file in the tree is
+    # stale. The floor is genuinely enforced and every exit above is a Fail, so
+    # the assertion is not vacuous -- but it proves "these three files agree",
+    # not "this tree's source got mirrored", which is what the failure text
+    # claims. This closes that gap by additionally pinning the ONE file whose
+    # staleness the mirror is actually there to prevent: the most recently
+    # modified mirrored source file in the invoking tree. That is by
+    # construction the edit a no-op mirror would have failed to deliver -- the
+    # uncommitted change this check exists to catch before it is even
+    # committed. An unchanged tree passes trivially (the copy is already
+    # correct, which is the legitimate no-op case the freshness signal below
+    # also accommodates); a tree carrying a fresh edit cannot pass unless that
+    # edit physically arrived in the build worktree.
+    #
+    # The exclusions mirror Mirror-Tree's own: anything under a build\ tree,
+    # the lvgl submodule, .git, and sdkconfig (handled separately by the
+    # hash-verified copy below, and excluded from the mirror via /XF).
+    $witness = $null
+    foreach ($rel in @("firmware\KilnFW", "firmware\hwAbstraction", "firmware\CommonFW")) {
+        $srcRoot = Join-Path $repoRoot $rel
+        if (-not (Test-Path -LiteralPath $srcRoot)) { continue }
+        $cand = Get-ChildItem -LiteralPath $srcRoot -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.FullName -notmatch '\\build\\' -and
+                $_.FullName -notmatch '\\components\\lvgl\\' -and
+                $_.FullName -notmatch '\\\.git\\' -and
+                $_.Name -ne 'sdkconfig'
+            } |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($cand -and ((-not $witness) -or ($cand.LastWriteTime -gt $witness.LastWriteTime))) { $witness = $cand }
+    }
+    if (-not $witness) {
+        Fail "could not identify any mirrored source file under $repoRoot to use as the newest-source mirror witness -- refusing to report on a mirror whose success could not be confirmed."
+    }
+    $witnessRel = $witness.FullName.Substring($repoRootFull.Length).TrimStart('\')
+    $witnessDst = Join-Path $WorktreePath $witnessRel
+    if (-not (Test-Path -LiteralPath $witnessDst)) {
+        Fail "the mirror step did not deliver $witnessDst -- $witnessRel is the most recently modified source file in the invoking tree (mtime $($witness.LastWriteTime)), i.e. precisely the edit this check exists to grade, and it is absent from the build worktree."
+    }
+    if ((Get-FileHash -LiteralPath $witness.FullName -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $witnessDst -Algorithm SHA256).Hash) {
+        Fail "after mirroring, $witnessDst still differs from the invoking tree's $witnessRel -- that is the most recently modified source file in this tree (mtime $($witness.LastWriteTime)), so the build worktree is grading source older than this tree's newest edit."
+    }
+    Write-Host "Mirror witness: $witnessRel (newest-modified source, $($witness.LastWriteTime)) is present and byte-identical in the build worktree."
+    if (-not (Test-Path -LiteralPath $lvglCMake)) {
         Fail "$lvglCMake is missing after the mirror step -- the lvgl component has been deleted out of the build worktree. Downstream this surfaces as a confusing 'Failed to resolve component lvgl' CMake error rather than as the checkout problem it actually is."
     }
 
-    # Record which tree owns this build directory, for the pruning pass above
-    # (and so anyone finding a C:\wt\checkbuild_<hex> can tell whose it is).
-    Set-Content -Path $MarkerFile -Value $repoRootFull -Encoding ascii
+    # (The .checkbuild_source ownership marker used to be written HERE. It is
+    # now written immediately after the worktree directory is created, well
+    # before anything that can fail -- see D5 at that site. Writing it at this
+    # point left every run that died earlier with an unreclaimable ~425 MB
+    # markerless directory.)
 
-    Copy-Item -Path $MainSdkconfig -Destination $WorktreeSdkconfig -Force
-    $mainHash = (Get-FileHash $MainSdkconfig -Algorithm SHA256).Hash
-    $worktreeHash = (Get-FileHash $WorktreeSdkconfig -Algorithm SHA256).Hash
+    Copy-Item -LiteralPath $MainSdkconfig -Destination $WorktreeSdkconfig -Force
+    $mainHash = (Get-FileHash -LiteralPath $MainSdkconfig -Algorithm SHA256).Hash
+    $worktreeHash = (Get-FileHash -LiteralPath $WorktreeSdkconfig -Algorithm SHA256).Hash
     if ($mainHash -ne $worktreeHash) {
         Fail "sdkconfig copy did not verify (hash mismatch) -- refusing to build against an unconfirmed config"
     }
@@ -443,8 +574,8 @@ try {
     function Get-NewestSourceTime([string[]] $roots) {
         $newest = $null
         foreach ($root in $roots) {
-            if (-not (Test-Path $root)) { continue }
-            $candidate = Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue |
+            if (-not (Test-Path -LiteralPath $root)) { continue }
+            $candidate = Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue |
                 Where-Object { $_.FullName -notmatch '\\build\\' -and $_.FullName -notmatch '\\components\\lvgl\\' } |
                 Measure-Object -Property LastWriteTime -Maximum
             if ($candidate.Maximum -and (-not $newest -or $candidate.Maximum -gt $newest)) {
@@ -480,7 +611,7 @@ try {
         Fail "idf.py build failed (exit $buildExit) -- see output above. This is exactly the class of break check_00_kilnfw_target_build.ps1 exists to catch (e.g. commit 9bc155ea's -Werror=format-truncation in readiness_http.c)."
     }
 
-    if (-not (Test-Path $binPath) -or -not (Test-Path $elfPath)) {
+    if (-not (Test-Path -LiteralPath $binPath) -or -not (Test-Path -LiteralPath $elfPath)) {
         Fail "idf.py build reported success (exit 0) but $binPath / $elfPath does not exist -- refusing to report PASS without a real build artifact."
     }
 
@@ -491,8 +622,8 @@ try {
     # circuit) must FAIL loudly here rather than be mistaken for a fresh
     # build; an elf/bin that is merely older than "now" but already reflects
     # every current source file (the legitimate no-op case) must PASS.
-    $binTime = (Get-Item $binPath).LastWriteTime
-    $elfTime = (Get-Item $elfPath).LastWriteTime
+    $binTime = (Get-Item -LiteralPath $binPath).LastWriteTime
+    $elfTime = (Get-Item -LiteralPath $elfPath).LastWriteTime
     # Small negative tolerance for filesystem timestamp granularity/clock skew.
     $tolerance = [TimeSpan]::FromSeconds(2)
     if (($binTime -lt $newestSourceTime.Subtract($tolerance)) -or ($elfTime -lt $newestSourceTime.Subtract($tolerance))) {
@@ -577,7 +708,7 @@ public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFile
 
     function Publish-BuildArtifact {
         param([string]$SourcePath, [string]$TempPath, [string]$FinalPath)
-        Copy-Item -Path $SourcePath -Destination $TempPath -Force
+        Copy-Item -LiteralPath $SourcePath -Destination $TempPath -Force
         $attempts = 0
         $maxAttempts = 5
         $lastErr = 0
@@ -591,7 +722,7 @@ public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFile
         # Publish did not complete -- clean up the temp file so it is never
         # left as an orphan, and fail loudly instead of silently leaving the
         # previous (stale) $FinalPath in place with no signal.
-        Remove-Item -Path $TempPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $TempPath -Force -ErrorAction SilentlyContinue
         Fail "Could not publish $FinalPath -- MoveFileEx failed after $maxAttempts attempts with Win32 error $lastErr (5=ERROR_ACCESS_DENIED usually means another process has $FinalPath open; find and close it, e.g. a stuck objdump/nm/readelf). The stale existing $FinalPath was left untouched; refusing to report PASS with an unpublished build."
     }
 
@@ -612,7 +743,7 @@ public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFile
     # independently. Fix: publish both artifacts these checks actually read, the
     # same way the elf/bin are published above.
     $ccPath = Join-Path $WorktreePath "firmware\KilnFW\build\compile_commands.json"
-    if (Test-Path $ccPath) {
+    if (Test-Path -LiteralPath $ccPath) {
         $ccTmp = Join-Path $mainBuildDir "compile_commands.json.tmp_$PID"
         Publish-BuildArtifact -SourcePath $ccPath -TempPath $ccTmp -FinalPath (Join-Path $mainBuildDir "compile_commands.json")
         Write-Host "Published fresh compile_commands.json to $mainBuildDir"
@@ -657,7 +788,7 @@ public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFile
     )
     foreach ($rel in $objComponentDirs) {
         $srcObjDir = Join-Path $WorktreePath "firmware\KilnFW\build\$rel"
-        if (Test-Path $srcObjDir) {
+        if (Test-Path -LiteralPath $srcObjDir) {
             $dstObjDir = Join-Path $mainBuildDir $rel
             New-Item -ItemType Directory -Force -Path $dstObjDir | Out-Null
             Mirror-Tree $srcObjDir $dstObjDir @() @()
@@ -673,8 +804,8 @@ public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFile
     # $PID is this script's own process id, so this only ever removes a temp
     # file this run itself could have created, never another process's.
     $mainBuildDirCleanup = Join-Path $repoRoot "firmware\KilnFW\build"
-    Remove-Item -Path (Join-Path $mainBuildDirCleanup "KilnCtrl.elf.tmp_$PID") -Force -ErrorAction SilentlyContinue
-    Remove-Item -Path (Join-Path $mainBuildDirCleanup "KilnCtrl.bin.tmp_$PID") -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $mainBuildDirCleanup "KilnCtrl.elf.tmp_$PID") -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $mainBuildDirCleanup "KilnCtrl.bin.tmp_$PID") -Force -ErrorAction SilentlyContinue
     Exit-BuildLock -Lock $lock
 }
 
