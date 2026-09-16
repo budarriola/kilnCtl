@@ -1420,6 +1420,27 @@ class ProvenanceMigrationAndGuardTest(unittest.TestCase):
         # guard's condition, nothing about this path would ever match.
 
 
+def _release_lock_pre_high3(lock_path, fd):
+    """Test-local hand-written analog of the exact da6667f3 release logic
+    (M2, before the docs/audits/review_elf_lock_fixes_da6667f3_2026-09-15.md
+    HIGH-3 fix): removes the lock file whenever `fd is not None`, with no
+    check that the file at `lock_path` is still the one this call created.
+    Kept HERE, not in production source (docs/audits/review_elf_lock_fixes_
+    7653717f_2026-09-15.md, LOW), purely so
+    test_negative_reproduces_the_lock_steal_without_the_owner_check can
+    demonstrate the cascade the real, current `_release_lock` prevents."""
+    if fd is None:
+        return
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    try:
+        os.remove(lock_path)
+    except OSError:
+        pass
+
+
 class ArchiveLockTest(unittest.TestCase):
     """M2 (docs/audits/review_elf_migration_fixes_065d51ac_2026-09-15.md):
     _archive_lock() had no test coverage at all -- neither contention, nor
@@ -1494,9 +1515,11 @@ class ArchiveLockTest(unittest.TestCase):
 
         # timeout_s shorter than _LOCK_STALE_SECONDS so the waiter times out
         # via the "give up, don't steal" branch, not the staleness branch --
-        # required=False mirrors the lookup-side caller (M3).
-        with elf_archive._archive_lock(self.archive_dir, timeout_s=0.2, required=False):
-            pass
+        # required=False mirrors the lookup-side caller (M3): it must raise
+        # _LockNotAcquired rather than enter the `with` body at all.
+        with self.assertRaises(elf_archive._LockNotAcquired):
+            with elf_archive._archive_lock(self.archive_dir, timeout_s=0.2, required=False):
+                self.fail("required=False must not enter the critical section on timeout")
 
         # The live holder's lock must still be there, untouched: the waiter
         # above gave up without ever owning it.
@@ -1530,7 +1553,10 @@ class ArchiveLockTest(unittest.TestCase):
         # Run the exact pre-HIGH-3 release logic directly (bypassing the real
         # generator entirely, so its FIXED finally never runs and can't mask
         # the old bug), against the identical real fd/precondition A holds.
-        elf_archive._release_lock_pre_high3(self.lock_path, fd)
+        # This is a hand-written analog of the da6667f3 release logic kept
+        # HERE, in the test, rather than in production source (7653717f
+        # review, LOW) purely so this test can call it.
+        _release_lock_pre_high3(self.lock_path, fd)
 
         self.assertFalse(os.path.isfile(self.lock_path),
                           "expected the old unconditional-remove behavior to delete "
@@ -1633,8 +1659,9 @@ class ArchiveLockTest(unittest.TestCase):
 
         start = time.time()
         with unittest.mock.patch.object(os, "remove", side_effect=remove_fails_only_for_lock):
-            with elf_archive._archive_lock(self.archive_dir, timeout_s=0.5, required=False):
-                pass
+            with self.assertRaises(elf_archive._LockNotAcquired):
+                with elf_archive._archive_lock(self.archive_dir, timeout_s=0.5, required=False):
+                    self.fail("a lock that can never be reclaimed must not be entered")
         elapsed = time.time() - start
 
         self.assertLess(elapsed, 3.0,
@@ -1668,17 +1695,154 @@ class ArchiveLockTest(unittest.TestCase):
             # while the heartbeat keeps refreshing the lock's mtime.
             time.sleep(1.0)
 
+            holder_token = elf_archive._read_lock_token(self.lock_path)
+
             # A waiter must still find the lock genuinely held -- not steal
             # it just because more than _LOCK_STALE_SECONDS has passed since
-            # it was CREATED.
-            with elf_archive._archive_lock(self.archive_dir, timeout_s=0.2, required=False):
-                still_holder_token = elf_archive._read_lock_token(self.lock_path)
-            self.assertIsNotNone(still_holder_token,
-                                  "the live holder's lock was wrongly reclaimed as stale "
-                                  "despite an active heartbeat")
+            # it was CREATED. required=False now raises _LockNotAcquired
+            # rather than entering the critical section on a timeout, so the
+            # correct-behavior assertion is that it raises while leaving the
+            # SAME token (not merely "a" token -- a weaker version of this
+            # assertion would also pass if a different process's lock were
+            # sitting there) on disk afterward.
+            with self.assertRaises(elf_archive._LockNotAcquired):
+                with elf_archive._archive_lock(self.archive_dir, timeout_s=0.2, required=False):
+                    self.fail("a genuinely live, heartbeating holder must not be entered")
+            self.assertEqual(elf_archive._read_lock_token(self.lock_path), holder_token,
+                              "the live holder's lock was wrongly reclaimed as stale "
+                              "despite an active heartbeat")
 
             release_holder.set()
             t.join(timeout=5.0)
+
+    def test_heartbeat_stops_refreshing_a_lock_it_no_longer_owns(self):
+        """HIGH-2 (b), 7653717f review: the first heartbeat implementation
+        refreshed whatever file sat at `lock_path`, not specifically the file
+        it created -- so once A's lock was reclaimed and replaced by B, A's
+        surviving heartbeat thread kept refreshing B's mtime under A's
+        identity, and no future waiter could ever declare B's lock stale even
+        after B died. Drives a real `_LockHeartbeat` directly (rather than
+        the full `_archive_lock`, since the point here is the heartbeat
+        thread's own behavior once its target file is replaced), forces one
+        refresh tick against A's own file to prove the heartbeat is live, then
+        replaces the file with B's token and proves the NEXT tick leaves B's
+        mtime and token alone."""
+        os.makedirs(self.archive_dir, exist_ok=True)
+        a_token = "A-TOKEN"
+        fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, a_token.encode("utf-8"))
+        os.close(fd)
+
+        with unittest.mock.patch.object(elf_archive, "_LOCK_HEARTBEAT_SECONDS", 0.05):
+            hb = elf_archive._LockHeartbeat(self.lock_path, a_token)
+            hb.start()
+            try:
+                old = time.time() - 5.0
+                os.utime(self.lock_path, (old, old))
+                time.sleep(0.2)
+                self.assertGreater(os.path.getmtime(self.lock_path), old,
+                                    "heartbeat never refreshed its own live lock")
+
+                # B reclaims: file replaced with B's token.
+                os.remove(self.lock_path)
+                b_fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(b_fd, b"B-TOKEN")
+                os.close(b_fd)
+                b_old = time.time() - 5.0
+                os.utime(self.lock_path, (b_old, b_old))
+
+                time.sleep(0.2)
+                self.assertLess(os.path.getmtime(self.lock_path), b_old + 1.0,
+                                 "A's heartbeat kept refreshing B's lock after losing ownership")
+                self.assertEqual(elf_archive._read_lock_token(self.lock_path), "B-TOKEN",
+                                  "A's heartbeat altered B's lock content")
+            finally:
+                hb.stop()
+        os.remove(self.lock_path)
+
+    def test_reclaim_does_not_delete_a_lock_refreshed_by_a_heartbeat(self):
+        """HIGH-2 (c), 7653717f review: the reclaim path's guard compared
+        owner TOKENS, but `os.utime` (what a heartbeat calls) never changes
+        file content -- so a lock refreshed a moment earlier still compared
+        token-equal and got deleted anyway. Sets an old mtime, then -- from
+        inside a patched `os.path.getmtime` that refreshes the file's mtime
+        to "now" on its first call (simulating a heartbeat tick landing
+        between the reclaim path's staleness stat and its pre-removal
+        recheck) -- drives `_archive_lock`'s reclaim branch directly and
+        proves the now-fresh lock survives."""
+        os.makedirs(self.archive_dir, exist_ok=True)
+        token = "LIVE-HOLDER-TOKEN"
+        fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, token.encode("utf-8"))
+        os.close(fd)
+        ancient = time.time() - (elf_archive._LOCK_STALE_SECONDS + 5.0)
+        os.utime(self.lock_path, (ancient, ancient))
+
+        real_getmtime = os.path.getmtime
+        calls = []
+
+        def getmtime_with_heartbeat_race(path):
+            result = real_getmtime(path)
+            calls.append(path)
+            if len(calls) == 1 and os.path.normpath(path) == os.path.normpath(self.lock_path):
+                # Simulate a heartbeat tick landing right after the first
+                # (staleness-detecting) stat: the holder is alive and just
+                # refreshed the file.
+                os.utime(self.lock_path, None)
+            return result
+
+        with unittest.mock.patch.object(os.path, "getmtime", side_effect=getmtime_with_heartbeat_race):
+            with self.assertRaises(elf_archive._LockNotAcquired):
+                with elf_archive._archive_lock(self.archive_dir, timeout_s=0.3, required=False):
+                    self.fail("a lock heartbeated between the two staleness stats must survive")
+
+        self.assertEqual(elf_archive._read_lock_token(self.lock_path), token,
+                          "the reclaim path deleted a lock a heartbeat had just refreshed")
+        os.remove(self.lock_path)
+
+    def test_required_false_skips_the_migration_entirely_on_timeout(self):
+        """MED-1 (a), 7653717f review: `required=False` used to still run the
+        ENTIRE critical section unlocked once `timeout_s` elapsed -- only
+        `_archive()` (required=True) actually skipped on failure. Demonstrated
+        against `migrate_legacy_archive` directly (the only required=False
+        caller): with a real holder inside the critical section, the call
+        must neither write nor delete anything in the legacy or new archive
+        dirs, and must return 0 (nothing migrated) rather than raising."""
+        import threading
+
+        legacy_dir = os.path.join(os.path.dirname(self.archive_dir), "build", "elf_archive")
+        _write_fake_elf(os.path.join(legacy_dir, "KilnCtrl-legacyabc.elf"), b"legacy-content")
+        legacy_manifest = os.path.join(legacy_dir, "manifest.json")
+        _write_fake_elf(legacy_manifest, json.dumps({
+            "Sep 15 2026 10:00:00": {"elf_key": "legacyabc", "identity": "Sep 15 2026 10:00:00",
+                                      "seq": 1, "source": "flash_firmware"},
+        }).encode())
+
+        holder_in = threading.Event()
+        release_holder = threading.Event()
+
+        def hold():
+            with elf_archive._archive_lock(self.archive_dir, timeout_s=5.0):
+                holder_in.set()
+                release_holder.wait(timeout=5.0)
+
+        t = threading.Thread(target=hold)
+        t.start()
+        self.addCleanup(lambda: (release_holder.set(), t.join(timeout=5.0)))
+        self.assertTrue(holder_in.wait(timeout=5.0), "holder never acquired the lock")
+
+        result = elf_archive.migrate_legacy_archive(self.archive_dir, "KilnCtrl", lock_timeout_s=0.3)
+
+        self.assertEqual(result, 0, "a lock-unavailable migration must report nothing migrated")
+        self.assertTrue(os.path.isfile(legacy_manifest),
+                         "the legacy manifest was mutated/deleted despite never holding the lock")
+        self.assertTrue(os.path.isfile(os.path.join(legacy_dir, "KilnCtrl-legacyabc.elf")),
+                         "the legacy ELF was moved despite never holding the lock")
+        self.assertFalse(os.path.isfile(os.path.join(self.archive_dir, "manifest.json")),
+                          "a new manifest.json was written unlocked while another holder was active")
+
+        release_holder.set()
+        t.join(timeout=5.0)
 
 
 class LookupTimeMigrationNeverRaisesOrGuessesTest(unittest.TestCase):
