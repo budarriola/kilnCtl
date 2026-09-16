@@ -36,6 +36,22 @@ typedef enum {
     KILNLINK_CONTEXT_FLAG_HEAT_REQUESTED = 0x04u,
     KILNLINK_CONTEXT_FLAG_CONTEXT_VALID = 0x08u,
     KILNLINK_CONTEXT_FLAG_SIM_PLANT = 0x10u,
+    /* 2026-09-15 Opus re-review N1: KILNLINK_CONTEXT_FLAG_HEAT_REQUESTED
+     * above is the LITERAL, instantaneous "is a zone relay commanded on
+     * right now" state -- true PWM chopping means it reads false in every
+     * off-window of a running firing. This flag instead means "the ESP
+     * currently believes SOME heat owner holds (or is about to hold) a
+     * claim, whether or not that claim is chopping the relay this instant":
+     * the profile executor RUNNING or PAUSED, autotune (which also covers
+     * CT sweep / relay-identification -- both route through
+     * HEAT_ENABLE_CLAIMANT_AUTOTUNE, see heat_enable.h), or danger mode's
+     * own K4 request. Set in safety_link_frames.c. Anything the ESP cannot
+     * positively rule out is folded into "active" there, not left unset --
+     * this flag exists to be OR'd into a fail-closed gate, never trusted
+     * exclusively (see link_task.c's link_task_heat_is_safe_for_tc_type_
+     * change() for the Pico-side consumer and its own independent,
+     * Pico-local ground-truth checks). */
+    KILNLINK_CONTEXT_FLAG_HEAT_OWNER_ACTIVE = 0x20u,
 } kilnlink_context_flag_t;
 
 /* Per-zone flags byte (zone block offset 1). */

@@ -92,6 +92,8 @@
 #include "kiln_io.h"
 #include "profile_executor_state.h"
 #include "thermo_owner.h"
+#include "heat_enable.h"
+#include "danger_mode.h"
 
 /* Real build identity (git commit/dirty/build timestamp), generated fresh
  * every build by gen_build_info.cmake into this component's binary dir --
@@ -493,6 +495,23 @@ void safety_build_and_send_context(SafetyLinkClass *link)
 
     if (pstat.state == PROFILE_EXEC_RUNNING) {
         ctx.flags |= KILNLINK_CONTEXT_FLAG_PROFILE_RUNNING;
+    }
+    /* 2026-09-15 Opus re-review N1: "no active heat owner" for the Pico's
+     * tc-type heat-safety gate, as distinct from HEAT_REQUESTED's literal
+     * instantaneous relay state above. RUNNING or PAUSED (a paused firing
+     * can resume heat at any moment without a fresh operator commit);
+     * either heat_enable claimant held (autotune's claimant also covers CT
+     * sweep / relay-identification, see heat_enable.h's own comment on
+     * HEAT_ENABLE_CLAIMANT_AUTOTUNE); or danger mode active/requesting --
+     * danger_mode_active() alone is folded in too, not just its own
+     * heat-requested flag, since danger mode's manual diagnostics bypass
+     * calls safety_link_request_enable() directly and can flip K4 on a
+     * separate cadence from its own heat_requested bookkeeping. */
+    if (pstat.state == PROFILE_EXEC_RUNNING || pstat.state == PROFILE_EXEC_PAUSED ||
+        heat_enable_is_held(HEAT_ENABLE_CLAIMANT_PROFILE) ||
+        heat_enable_is_held(HEAT_ENABLE_CLAIMANT_AUTOTUNE) ||
+        danger_mode_active()) {
+        ctx.flags |= KILNLINK_CONTEXT_FLAG_HEAT_OWNER_ACTIVE;
     }
     if (any_zone_faulted) {
         ctx.flags |= KILNLINK_CONTEXT_FLAG_ANY_ZONE_FAULTED;
