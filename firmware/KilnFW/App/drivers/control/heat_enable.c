@@ -87,8 +87,20 @@ typedef struct {
                                          * concurrent send_enable() flush) could both decide
                                          * nothing is pending and neither waits for the other. */
     uint32_t          release_epoch[HEAT_ENABLE_CLAIMANT_COUNT];
-                                        /* Bumped once per REAL release of that claimant (one it
-                                         * actually held). Lets a caller that decided to acquire
+                                        /* STOP GENERATION, per claimant. Advanced by every real
+                                         * stop/pause/abort transition (heat_enable_release()), and
+                                         * by an idle-backstop tick
+                                         * (heat_enable_release_backstop()) only when that tick was
+                                         * itself the teardown.
+                                         *
+                                         * 2026-09-16: it used to advance ONLY when the claimant's
+                                         * bit was actually set, which made the whole mechanism
+                                         * inert -- at every acquire_since() call site the bit is
+                                         * CLEAR when the epoch is sampled, so a stop landing in the
+                                         * window advanced nothing and the stale claim was accepted.
+                                         * See heat_enable.h's
+                                         * heat_enable_release_backstop() comment.
+                                         * Lets a caller that decided to acquire
                                          * while holding its OWN module lock detect that the claim
                                          * was released in the gap between that decision and the
                                          * unlocked acquire call -- see heat_enable_acquire_since().
@@ -428,14 +440,19 @@ bool heat_enable_acquire(heat_enable_claimant_t who)
     return heat_enable_acquire_since(who, heat_enable_claim_epoch(who));
 }
 
-void heat_enable_release(heat_enable_claimant_t who)
-{
-    uint32_t bit = claim_bit(who);
-    if (bit == 0u) {
-        return;
-    }
-
-    /* 2026-09-15 review of 1c8d7f6e, finding HIGH-1's "second, smaller
+/* Shared body of heat_enable_release() and heat_enable_release_backstop().
+ * `bit` is already validated non-zero by both wrappers, so `who` is in range
+ * and indexing release_epoch[] is safe. `stop_transition` is the
+ * discriminator: true for a real stop/pause/abort, false for the
+ * unconditional per-tick idle backstop. heat_enable.h's
+ * heat_enable_release_backstop() comment explains why that distinction, and
+ * not "was it held", is the one that matters.
+ *
+ * Kept as ONE body rather than duplicated so the source-text scans in
+ * test_heat_enable.c keep covering the real code, and so a later edit cannot
+ * fix one path and silently miss the other.
+ *
+ * 2026-09-15 review of 1c8d7f6e, finding HIGH-1's "second, smaller
      * window": this used to be two separate lock sections -- the bookkeeping
      * above, then an unlock, then a second lock just to set release_pending.
      * An acquire arriving in the gap between them saw had_request already
@@ -444,16 +461,26 @@ void heat_enable_release(heat_enable_claimant_t who)
      * so release_pending becomes true in the SAME critical section that
      * clears granted/pending -- there is no window left for a concurrent
      * acquire to observe. */
+static void he_release_common(heat_enable_claimant_t who, uint32_t bit, bool stop_transition)
+{
     bool taken = he_lock();
     bool was_held = (s_he.held_mask & bit) != 0u;
     s_he.held_mask &= ~bit;
-    if (was_held) {
-        /* Bumped in the SAME critical section that clears the bit, so a
+    if (stop_transition || was_held) {
+        /* Advanced in the SAME critical section that clears the bit, so a
          * concurrent heat_enable_acquire_since() can never observe the bit
          * gone and the epoch unchanged (which would let it re-acquire on
-         * behalf of the run this release just ended). Only a release of a
-         * claim actually held counts -- a no-op release must not invalidate
-         * a legitimate in-flight acquire. */
+         * behalf of the run this release just ended).
+         *
+         * `stop_transition` is what makes this mechanism work at all
+         * (2026-09-16): a real stop must advance the generation whether or not
+         * the claim was held, because the claimant's bit is CLEAR at every
+         * acquire_since() call site at the moment the epoch is sampled -- a
+         * start has not acquired yet, a resume's pause already released.
+         * `was_held` is kept alongside it so an idle-backstop tick that IS the
+         * teardown still counts. A backstop tick with nothing held advances
+         * nothing, which is what keeps a passing idle tick from refusing a
+         * legitimate in-flight acquire. */
         s_he.release_epoch[who]++;
     }
     bool last_out = (s_he.held_mask == 0u);
@@ -501,6 +528,33 @@ void heat_enable_release(heat_enable_claimant_t who)
      * enable=true (finding HIGH-1; see he_flush_release_blocking()). No
      * module lock is held across any deferred/blocking call in either
      * place. */
+}
+
+void heat_enable_release(heat_enable_claimant_t who)
+{
+    uint32_t bit = claim_bit(who);
+    if (bit == 0u) {
+        return;
+    }
+    /* A REAL stop/pause/abort transition: always advances the stop generation,
+     * so an acquire that sampled it before this call refuses instead of
+     * resurrecting the claim. heat_enable.h explains why this, and not the
+     * backstop form, is the default spelling. */
+    he_release_common(who, bit, true);
+}
+
+void heat_enable_release_backstop(heat_enable_claimant_t who)
+{
+    uint32_t bit = claim_bit(who);
+    if (bit == 0u) {
+        return;
+    }
+    /* The unconditional per-tick idle backstop (profile_executor.c's and
+     * autotune_engine.c's "not running" branches). Advances the stop
+     * generation only if this tick was itself the teardown -- an idle tick
+     * with nothing held must not invalidate an acquire that is merely in
+     * flight. */
+    he_release_common(who, bit, false);
 }
 
 /* Drains a release owed to the wire, if any. Never called with s_he.lock (or

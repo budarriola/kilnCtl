@@ -858,7 +858,7 @@ static void task_entry(void *arg)
              * s_at.lock for consistency with the acquire side above, even
              * though heat_enable_release() itself only defers bookkeeping
              * and never blocks -- see heat_enable.c. */
-            heat_enable_release(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
+            heat_enable_release_backstop(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
             continue;
         }
     }

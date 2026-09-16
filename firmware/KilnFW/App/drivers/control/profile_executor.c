@@ -350,7 +350,7 @@ void executor_task_entry(void *arg)
              * on the last-claimant edge, so every tick after the first is
              * free rather than a release frame per tick. PAUSED lands here too, which is what a pause is
              * supposed to mean -- see profile_executor_pause(). */
-            heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+            heat_enable_release_backstop(HEAT_ENABLE_CLAIMANT_PROFILE);
             /* PID_EXPANSION_PLAN.md Phase 7a: the moment a run first lands
              * in DONE or FAULTED, persist its firing stats -- this is the
              * "run completion" write, not waiting on the operator to press
