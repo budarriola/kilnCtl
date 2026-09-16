@@ -89,6 +89,34 @@ def _current_head_short(repo_root: str) -> Optional[str]:
     return out.strip() if out else None
 
 
+def _is_ancestor(repo_root: str, ancestor: str, descendant: str) -> Optional[bool]:
+    """True if `ancestor` is reachable from `descendant` (i.e. `descendant`
+    is `ancestor` or a strict descendant of it). None if git couldn't answer
+    (e.g. `ancestor` unknown to this repo_root -- a rewritten/rebased history,
+    or a commit that only exists in a different clone/worktree)."""
+    try:
+        out = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+            cwd=repo_root, capture_output=True, text=True, timeout=10,
+        )
+    except Exception:  # noqa: BLE001 - must not crash the flash tool
+        return None
+    if out.returncode == 0:
+        return True
+    if out.returncode == 1:
+        return False
+    return None  # e.g. 128: unknown revision
+
+
+def _files_changed_between(repo_root: str, rev_a: str, rev_b: str, scoped_paths: list[str]) -> Optional[list[str]]:
+    """Paths (repo-relative) that differ between rev_a and rev_b, scoped to
+    scoped_paths. None if git couldn't answer."""
+    out = _git(["diff", "--name-only", f"{rev_a}..{rev_b}", "--", *scoped_paths], repo_root)
+    if out is None:
+        return None
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
 def _changed_files(repo_root: str, scoped_paths: list[str]) -> list[str]:
     """Absolute paths of files `git status --porcelain` reports as changed
     (modified, staged, or untracked) under any of scoped_paths. Content-diff
@@ -128,6 +156,7 @@ def check_stale(
     commit_macro: str,
     binary_path: str,
     project_dirs: list[str],
+    repo_root: Optional[str] = None,
 ) -> StaleResult:
     """Core check, shared by the ESP and Pico paths.
 
@@ -139,8 +168,14 @@ def check_stale(
       (KilnCtrl.bin / SaftyFW.elf).
     project_dirs: absolute paths git status/dirty is scoped to -- the
       firmware's own project dir AND firmware/CommonFW.
+    repo_root: the git worktree the binary was actually built from. Callers
+      that support a `kiln_fw_root`/`safty_fw_root` override MUST resolve
+      this to that override's own worktree root (not the main tree) -- see
+      the module docstring addendum below on why. Defaults to the main tree
+      (this file's own repo) when the caller has no override in play.
     """
-    repo_root = _repo_root()
+    if repo_root is None:
+        repo_root = _repo_root()
 
     if not os.path.isfile(header_path):
         return StaleResult(
@@ -168,12 +203,38 @@ def check_stale(
         )
 
     if recorded_commit != current_commit:
-        return StaleResult(
-            True,
-            f"binary was built from commit {recorded_commit}, but HEAD is now "
-            f"{current_commit} -- source has moved on since this build. Rebuild, "
-            "or pass the stale-flash opt-out if this is deliberate.",
-        )
+        # Not an equality check on purpose: "different commit" and "stale"
+        # are different questions. A build recorded at an OLDER commit than
+        # the current HEAD of the *same* root is not automatically stale --
+        # only if source relevant to this firmware actually moved between
+        # the two. (A build recorded at a commit not reachable from HEAD at
+        # all -- rebase, reset, or a commit that belongs to some other
+        # repo/worktree entirely -- is unconditionally stale; ancestry can't
+        # even be evaluated.)
+        ancestor = _is_ancestor(repo_root, recorded_commit, current_commit)
+        if ancestor is not True:
+            return StaleResult(
+                True,
+                f"binary was built from commit {recorded_commit}, which is not an "
+                f"ancestor of current HEAD {current_commit} in this tree -- source "
+                "has moved on (or history was rewritten) since this build. Rebuild, "
+                "or pass the stale-flash opt-out if this is deliberate.",
+            )
+        changed_between = _files_changed_between(repo_root, recorded_commit, current_commit, project_dirs)
+        if changed_between is None or changed_between:
+            detail = ", ".join(changed_between[:5]) if changed_between else "unknown (git diff failed)"
+            return StaleResult(
+                True,
+                f"binary was built from commit {recorded_commit}; HEAD has since advanced to "
+                f"{current_commit} and touched files this firmware depends on ({detail}) -- "
+                "rebuild, or pass the stale-flash opt-out if this is deliberate.",
+            )
+        # current_commit is a descendant of recorded_commit, but nothing in
+        # project_dirs changed between them (e.g. commits elsewhere in the
+        # repo, or in this same firmware's docs) -- the built binary still
+        # reflects the code that would be built from HEAD today. Fall
+        # through to the dirty-tree check below rather than treating this as
+        # a mismatch.
 
     changed = _changed_files(repo_root, project_dirs)
     if not changed:
@@ -203,21 +264,43 @@ def check_stale(
     )
 
 
+def _tree_root_for_project(project_root: str) -> str:
+    """Resolves the git worktree a `firmware/KilnFW`- or `firmware/SaftyFW`-
+    shaped `project_root` actually lives in, by walking two levels up --
+    the same convention flash_provenance.py already uses for
+    `provenance_repo_root` in mcp_server_flash.py (kiln_fw_root override is
+    always `<some-tree-root>/firmware/KilnFW`).
+
+    This is what makes `kiln_fw_root`/`safty_fw_root` overrides "just work"
+    without a separate override flag: an ordinary call passes the main
+    tree's own firmware dir, and two levels up from THAT is the main tree's
+    own root -- identical to the old hardcoded `_repo_root()`. An override
+    call passes a *different* tree's firmware dir, and two levels up from
+    that is that tree's own root. Deriving it from the path that was
+    actually used to find the binaries -- rather than always trusting this
+    module's own on-disk location -- is the fix: comparing a build's
+    recorded commit against the wrong repo's HEAD is exactly the bug this
+    module existed to prevent flashing tools from producing."""
+    return os.path.normpath(os.path.join(project_root, "..", ".."))
+
+
 def check_kilnfw_stale(kiln_fw_root: str) -> StaleResult:
-    repo_root = _repo_root()
+    tree_root = _tree_root_for_project(kiln_fw_root)
     return check_stale(
         header_path=os.path.join(kiln_fw_root, "build", "esp-idf", "drivers", "build_info.h"),
         commit_macro="FW_GIT_COMMIT",
         binary_path=os.path.join(kiln_fw_root, "build", "KilnCtrl.bin"),
-        project_dirs=[kiln_fw_root, os.path.join(repo_root, "firmware", "CommonFW")],
+        project_dirs=[kiln_fw_root, os.path.join(tree_root, "firmware", "CommonFW")],
+        repo_root=tree_root,
     )
 
 
 def check_saftyfw_stale(safty_fw_root: str) -> StaleResult:
-    repo_root = _repo_root()
+    tree_root = _tree_root_for_project(safty_fw_root)
     return check_stale(
         header_path=os.path.join(safty_fw_root, "build", "saftyfw_build_info.h"),
         commit_macro="SAFTYFW_GIT_COMMIT",
         binary_path=os.path.join(safty_fw_root, "build", "SaftyFW.elf"),
-        project_dirs=[safty_fw_root, os.path.join(repo_root, "firmware", "CommonFW")],
+        project_dirs=[safty_fw_root, os.path.join(tree_root, "firmware", "CommonFW")],
+        repo_root=tree_root,
     )
