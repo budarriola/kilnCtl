@@ -331,6 +331,7 @@ static void test_reset_all(void)
     fake_zones_reset();
     fake_pico_ceiling_reset();
     hook_counters_reset();
+    s_stub_recent_armed_refusal = false;
 }
 
 // ---------------------------------------------------------------------
@@ -560,6 +561,66 @@ static void test_broadened_field_divergence_detected(void)
     s_expected_field_count = 0;
 }
 
+// 2026-09-16 (item H regression pin, docs/audits/review_divergence_
+// recapture_6d8c7194_2026-09-16.md finding 6): safety_ceiling_sync.c's
+// ARMED-refusal branch builds s_standing_warning_reason by truncating the
+// TAIL of the formatted divergence reason to make room, then always
+// appending kArmedSuffix in full -- specifically so a long reason drops
+// field detail rather than silently dropping the ARMED hint itself (the
+// whole point of the branch). Until this test, nothing in the suite ever
+// set s_stub_recent_armed_refusal true with a reason long enough to reach
+// that truncation boundary, so the boundary math (`head_cap = cap -
+// suffix_len - 1`) was unpinned -- the review named this explicitly ("a
+// future edit to kArmedSuffix or to sizeof(s_standing_warning_reason)
+// would not be caught").
+static void test_armed_refusal_appends_suffix_and_truncates_long_reason(void)
+{
+    TEST_SECTION("2026-09-16 item H regression pin: an ARMED refusal's suffix is appended IN FULL "
+                 "even when the underlying reason must be truncated to make room");
+    test_reset_all();
+    safety_ceiling_sync_set_disable_heat_hooks(fake_all_relays_off, fake_halt_run);
+    safety_ceiling_sync_set_expected_pico_fields_source(fake_expected_pico_fields_source);
+
+    // Ceiling agrees -- only the broadened/extra field diverges, same shape
+    // as test_broadened_field_divergence_detected() above, but with the
+    // ESP/Pico values chosen so format_first_field_difference()'s "%.2f"
+    // rendering of each side (config_divergence.c) is tens of characters
+    // long on its own (a huge float prints its full integer part), which is
+    // enough by itself -- with the fixed field name -- to push the
+    // formatted "config divergence: <name> ESP=<v> Pico=<v>" reason past
+    // this file's `head_cap` (cap - suffix_len - 1 = 160 - 68 - 1 = 91
+    // bytes), forcing the truncation branch this test exists to pin.
+    s_zone_max_temp_c[0] = 80.0f;
+    fake_pico_ceiling_set(80.0f);
+
+    s_expected_fields[0].param_id = FAKE_EXTRA_PARAM_ID;
+    s_expected_fields[0].value = 3.4028235e38f; /* near FLT_MAX -- "%.2f" is ~44 chars */
+    s_expected_field_count = 1;
+    fake_pico_extra_set(-3.4028235e38f);
+
+    s_stub_recent_armed_refusal = true;
+
+    safety_ceiling_sync_reconcile_on_link_up(FAKE_LINK);
+
+    char reason[CONFIG_DIVERGENCE_REASON_MAX];
+    bool warned = safety_ceiling_sync_is_standing_diverged(reason, sizeof(reason));
+    TEST_CHECK(warned, "still reports a standing divergence with a long field name");
+
+    static const char kArmedSuffix[] =
+        " (re-push refused: relay is ARMED -- disarm and retry commissioning)";
+    size_t reason_len = strlen(reason);
+    size_t suffix_len = sizeof(kArmedSuffix) - 1u;
+    TEST_CHECK(reason_len < sizeof(reason), "reason never overflows its own buffer");
+    TEST_CHECK(reason_len >= suffix_len && strcmp(reason + (reason_len - suffix_len), kArmedSuffix) == 0,
+               "the ARMED suffix survives IN FULL at the tail even though the reason had to be truncated "
+               "to make room for it -- this is the exact guarantee item H's fix claims and the negative "
+               "test below disproves for the old snprintf-tail-truncation shape");
+
+    // Cleanup, same discipline as test_broadened_field_divergence_detected().
+    s_expected_field_count = 0;
+    s_stub_recent_armed_refusal = false;
+}
+
 // 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md,
 // MEDIUM 5): a stale cache (config_crc known to disagree with the live
 // Pico's, e.g. right after a Pico reboot) must not hide a real revert on the
@@ -704,6 +765,7 @@ int main(void)
     test_latch_clears_when_sides_agree();
     test_target_known_exclusion();
     test_broadened_field_divergence_detected();
+    test_armed_refusal_appends_suffix_and_truncates_long_reason();
     test_tc_type_revert_divergence_detected();
     test_stale_cache_does_not_hide_a_revert();
 
