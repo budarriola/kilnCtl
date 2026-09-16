@@ -196,3 +196,61 @@ the UI path (N2), a duplicated snapshot head that re-creates the hazard the refa
 meant to remove (N3), and no test coverage at all for the new entry point or the
 precedent it copies. None of these is a correctness bug on the happy path; all three
 would make a real field failure harder to see.
+
+## Closure record — N1, N2 and N3 (added 2026-09-15)
+
+All three regressions raised above were fixed by `120bba6f` and independently
+re-reviewed, adversarially, in
+`docs/audits/review_crash_gate_n1n3_120bba6f_2026-09-15.md`. This section exists so this
+document no longer reads as if they are open.
+
+| Finding | Verdict |
+|---|---|
+| N1 — success log lost the pre-reset count | **Closed** |
+| N2 — `(void)ok` discarded the result, two missing `ESP_LOGW` | **Closed**, one LOW residual |
+| N3 — duplicated snapshot-under-lock head | **Closed for the named pair**, partial in spirit |
+
+- **N1.** `relay_cycles_reset_snapshot()` reads `old_count` under the same lock and
+  *before* the zeroing, and logs it only on success — genuinely the pre-reset value, not a
+  post-reset re-read. All three call sites of the widened `relay_cycles_reset_finish()`
+  signature were updated; it is `static`, so there are no callers in tests or tools, and
+  nothing anywhere parses the old log string.
+- **N2.** The cast is gone and both `ESP_LOGW` calls are present, matching
+  `crash_ack_btn_clicked_cb()`'s precedent. **LOW residual:** on a non-timeout persist
+  failure the label is still set to `"Reset"`, textually identical to success — the
+  silence is fixed, the visual ambiguity named in N2's own wording is not. The precedent
+  has the same weakness, so this is a consistency choice; a third label state would need
+  an owner decision.
+- **N3.** The shared helper is genuinely used by **both** call sites, unconditionally,
+  before any branching — including the inline already-on-worker path. No private copy and
+  no bypass. **Partial in spirit:** the same verbatim snapshot head still exists in
+  `relay_cycles_restore_all()` and `persist_snapshot_now()` in the same file, so a new
+  `reset_persist_job_arg_t` field must still be threaded through 3 sites, not 1. Those
+  were outside this finding's wording and are pre-existing.
+
+**New finding, LOW-1.** `relay_cycles_reset_snapshot()` writes `s_rc.counts[relay]` with
+no bounds check, relying on a comment ("relay is already validated by both callers"). Both
+current callers do validate, so there is no live defect, but the extraction moved the
+write away from the guard that used to sit in the same function. A third caller added
+later gets an out-of-bounds write with nothing to stop it.
+
+**On the test evidence.** The poison test reported in `120bba6f`'s message reproduces
+exactly: flipping the `ESP_ERR_TIMEOUT` check fails one check, at
+`test_relay_cycles.c:369`, behaviourally (all 47 executables still built and linked — not
+a compile or API-existence error), 170/171. Clean rebuild after a by-hand restore:
+`171/171`, `47/47`, 0 failures, 19752/19752 aggregate across 39 suites.
+`test_reset_timeout_idle_worker_succeeds()`, however, is **coverage, not the regression
+pin the commit message calls it** — it caught nothing under either mutation, including a
+second one (bounded dispatch swapped for the unbounded sibling) that failed two checks in
+the busy test alone. Its assertions are already made by
+`test_reset_zeroes_count_and_persists()` through the same shared tail.
+
+**Two methodology cautions from that pass**, both instances of this repo's
+poisoned-binary class, recorded in full in the linked document: (1) piping a build/test
+script through an early-terminating pipeline element (`Select-Object -First N`) killed the
+script at 983 of ~3100 lines before the test under study ever ran, while still exiting
+non-zero — tee to a file and grep the file instead; (2) a restore-by-string after a
+negative test silently corrupted two *unrelated* call sites that matched the same text,
+caught only by an md5 comparison against the committed blob plus a compile error. A hand
+restore needs an identity check against the committed blob, not just an edit that looks
+like it worked.
