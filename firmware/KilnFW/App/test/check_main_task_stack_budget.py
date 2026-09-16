@@ -56,7 +56,31 @@ import sys
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
 DEFAULT_ELF = os.path.join(REPO_ROOT, "firmware", "KilnFW", "build", "KilnCtrl.elf")
-DEFAULT_SDKCONFIG = os.path.join(REPO_ROOT, "firmware", "KilnFW", "sdkconfig")
+
+# sdkconfig RESOLUTION IS NOT OURS -- it is check_all_task_stack_budgets.py's,
+# imported rather than reimplemented (2026-09-16).
+#
+# This file used to hardcode `<repo root>/firmware/KilnFW/sdkconfig`
+# unconditionally. `sdkconfig` is gitignored, so that path exists only in a
+# tree where somebody has run a build: in EVERY clean worktree this check
+# failed with "could not read CONFIG_ESP_MAIN_TASK_STACK_SIZE from sdkconfig"
+# -- an environment gap wearing a budget-violation's clothes, repeatedly
+# misread as a regression in whatever commit was under review. Worse, in the
+# shared main tree it read whichever config that tree happens to hold right
+# now, which is not necessarily the config that produced --elf.
+#
+# check_all_task_stack_budgets.py solved exactly this: ordered, terminal
+# resolution relative to --elf (--sdkconfig, then a config published in the
+# ELF's own directory, then the ELF's build-directory parent), no silent
+# repo-root fallback, archived ELFs refused rather than graded against the
+# live config, and a usability gate (key count + CONFIG_IDF_TARGET) so an
+# empty or truncated file FAILs instead of reading as "every option off".
+# Two checkers resolving the same file by two different rules is how this bug
+# class returns, so the logic is SHARED, not copied: the sibling is a plain
+# module in this same directory with no import-time side effects, and the two
+# other stack-budget checkers already import this one the same way.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import check_all_task_stack_budgets as stack_budget_common  # noqa: E402
 
 # The measured path is an under-estimate (see LIMITS above) and says nothing
 # about interrupt frames pushed onto whatever task happens to be running, so
@@ -98,13 +122,21 @@ def find_objdump():
     return hits[-1] if hits else None
 
 
-def stack_size_from_sdkconfig(path):
-    if not os.path.isfile(path):
-        return None
-    for line in open(path, encoding="utf-8", errors="replace"):
-        if line.startswith("CONFIG_ESP_MAIN_TASK_STACK_SIZE="):
-            return int(line.split("=", 1)[1].strip())
-    return None
+def main_stack_bytes_for_elf(elf, explicit_sdkconfig=None):
+    """CONFIG_ESP_MAIN_TASK_STACK_SIZE out of the sdkconfig belonging to `elf`.
+
+    Returns (stack_bytes, path, origin). Raises ValueError -- naming the file
+    it tried and why -- if nothing resolves, if the resolved file is not a
+    usable sdkconfig (empty/truncated/not an sdkconfig), or if the key is
+    absent. There is deliberately NO assumed default: silently assuming a
+    stack size is how a gitignored config produces a green check that proved
+    nothing, and this budget is a fraction of that number, so a wrong value
+    silently moves the bar this check exists to hold.
+    """
+    path, origin = stack_budget_common.use_sdkconfig_for_elf(elf, explicit_sdkconfig)
+    # _sdkconfig_value() applies the sibling's USABLE gate and raises with
+    # SDKCONFIG_ORIGIN's explanation when resolution itself failed.
+    return stack_budget_common._sdkconfig_value("CONFIG_ESP_MAIN_TASK_STACK_SIZE"), path, origin
 
 
 class ElfParseError(RuntimeError):
@@ -221,6 +253,11 @@ def main():
     ap.add_argument("--root", default="app_main")
     ap.add_argument("--stack-bytes", type=int, default=None,
                     help="override CONFIG_ESP_MAIN_TASK_STACK_SIZE (used by the negative test)")
+    ap.add_argument("--sdkconfig", default=None,
+                    help="the sdkconfig that produced --elf. Normally inferred from --elf "
+                         "(see main_stack_bytes_for_elf, which shares check_all_task_stack_"
+                         "budgets.py's ordered resolution); REQUIRED for an ELF in elf_archive/, "
+                         "which is deliberately never resolved against the live config.")
     args = ap.parse_args()
 
     if not os.path.isfile(args.elf):
@@ -237,10 +274,20 @@ def main():
               "(set XTENSA_OBJDUMP). Unmeasured, not passing.")
         return 3
 
-    stack = args.stack_bytes or stack_size_from_sdkconfig(DEFAULT_SDKCONFIG)
+    if args.stack_bytes:
+        stack = args.stack_bytes
+        print(f"check_main_task_stack_budget: stack size: {stack} B supplied with "
+              "--stack-bytes (sdkconfig not consulted)")
+    else:
+        try:
+            stack, sdk_path, sdk_origin = main_stack_bytes_for_elf(args.elf, args.sdkconfig)
+        except ValueError as exc:
+            print(f"check_main_task_stack_budget: FAIL -- {exc}")
+            return 1
+        print(f"check_main_task_stack_budget: sdkconfig: {sdk_path} ({sdk_origin})")
     if not stack:
-        print("check_main_task_stack_budget: FAIL -- could not read "
-              "CONFIG_ESP_MAIN_TASK_STACK_SIZE from sdkconfig")
+        print("check_main_task_stack_budget: FAIL -- the resolved sdkconfig yielded no usable "
+              "CONFIG_ESP_MAIN_TASK_STACK_SIZE")
         return 1
     budget = int(stack * HEADROOM_FRACTION)
 
