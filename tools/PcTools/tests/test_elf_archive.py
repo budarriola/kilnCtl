@@ -1833,7 +1833,9 @@ class ArchiveLockTest(unittest.TestCase):
 
         result = elf_archive.migrate_legacy_archive(self.archive_dir, "KilnCtrl", lock_timeout_s=0.3)
 
-        self.assertEqual(result, 0, "a lock-unavailable migration must report nothing migrated")
+        self.assertEqual(result, -1,
+                         "a lock-unavailable migration must be distinguishable (fb3d2e22 "
+                         "review) from a genuine nothing-to-migrate (0)")
         self.assertTrue(os.path.isfile(legacy_manifest),
                          "the legacy manifest was mutated/deleted despite never holding the lock")
         self.assertTrue(os.path.isfile(os.path.join(legacy_dir, "KilnCtrl-legacyabc.elf")),

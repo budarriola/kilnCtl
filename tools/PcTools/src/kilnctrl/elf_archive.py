@@ -723,7 +723,12 @@ def adopt_orphaned_kiln_elfs(archive_dir: str) -> tuple[int, list[str]]:
 # margin (2.0s / 6.0s, three intervals) too thin on a OneDrive-backed tree
 # under 8-way-parallel load, and combined with the (now-fixed) HIGH-2 (c) gap
 # that made a false staleness call destructive rather than a wasted retry --
-# widened to ten intervals of margin instead of three.
+# widened to ten intervals of margin instead of three. Tradeoff, called out
+# per the fb3d2e22 review: this also lengthens how long a waiter takes to
+# recover a GENUINELY dead lock (crashed holder, no heartbeat ever coming)
+# from ~6s worst case to ~10s worst case -- accepted deliberately, since a
+# false-positive reclaim (stealing a live holder's lock) is a correctness
+# bug, while a slower recovery from a real crash is only a latency cost.
 _LOCK_HEARTBEAT_SECONDS = 1.0
 _LOCK_STALE_SECONDS = 10.0
 
@@ -865,7 +870,27 @@ def _archive_lock(archive_dir: str, timeout_s: float = 30.0, required: bool = Tr
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.write(fd, my_token.encode("utf-8"))
             break
-        except FileExistsError:
+        except OSError as exc:
+            # fb3d2e22 review: only FileExistsError used to be caught here --
+            # any OTHER OSError (a transient sharing violation on an
+            # OneDrive-backed tree under parallel builds is not hypothetical)
+            # bypassed the acquire-failure contract entirely and propagated
+            # as a raw OSError, which a `required=False` caller is explicitly
+            # told it never has to catch. Treat any OSError here the same way:
+            # retry until `deadline`, then fail through the normal
+            # TimeoutError/_LockNotAcquired paths -- never let a transient
+            # filesystem error escape uncaught.
+            if not isinstance(exc, FileExistsError):
+                if time.time() > deadline:
+                    if required:
+                        raise TimeoutError(
+                            f"elf_archive: could not acquire lock {lock_path} within "
+                            f"{timeout_s}s (last attempt failed with {exc!r}).") from exc
+                    print(f"elf_archive: WARNING -- lock {lock_path} could not be created "
+                          f"({exc!r}), giving up without running the locked operation.")
+                    raise _LockNotAcquired(lock_path) from exc
+                time.sleep(0.05)
+                continue
             try:
                 age = time.time() - os.path.getmtime(lock_path)
             except OSError:
@@ -923,9 +948,15 @@ class _LockNotAcquired(Exception):
     point of asking for a non-required lock."""
 
 
-def _release_lock(lock_path: str, fd: Optional[int], my_token: str) -> None:
+def _release_lock(lock_path: str, fd: int, my_token: str) -> None:
     """The exit half of `_archive_lock`, split out so it can be exercised
-    directly by tests. Only remove the lock file if the token currently on
+    directly by tests. `fd` is always a real, open file descriptor here --
+    `_archive_lock` only ever reaches the `yield` (and thus this `finally`)
+    after a genuine acquisition, never on a give-up/timeout path -- so this
+    no longer advertises (or accepts) `Optional[int]` (fb3d2e22 review: the
+    previous `Optional[int]` annotation raised `TypeError` from `os.close`
+    on the `None` it claimed to accept, since nothing ever actually passed
+    `None` any more). Only remove the lock file if the token currently on
     disk still matches the one THIS call wrote (HIGH-3) -- a reclaim
     elsewhere could have replaced the file while this call worked, and
     removing that replacement would strip protection from whoever now
@@ -1132,7 +1163,17 @@ def migrate_legacy_archive(archive_dir: str, prefix: str, lock_timeout_s: float 
     which `_archive()` also calls directly while it already holds the same
     lock for its own manifest read-modify-write -- see that function's
     docstring for why the lock previously covering only the migration half
-    of `_archive()` was not enough."""
+    of `_archive()` was not enough.
+
+    Returns the count of ELFs actually moved (0 if the legacy directory was
+    empty/absent/already-drained -- a genuine "nothing to migrate"), or `-1`
+    (fb3d2e22 review) if the lock could not be acquired within
+    `lock_timeout_s` and the attempt was skipped outright -- these used to
+    both come back as `0`, so a caller had no way to distinguish "there was
+    nothing to do" from "contention meant we never even looked". `-1` is
+    used rather than `None` so existing `int`-typed callers that only ever
+    checked truthiness/count keep working unchanged; a caller that cares
+    about the distinction should check for the negative value explicitly."""
     _guard_against_test_write(archive_dir)
     try:
         with _archive_lock(archive_dir, timeout_s=lock_timeout_s, required=False):
@@ -1144,7 +1185,7 @@ def migrate_legacy_archive(archive_dir: str, prefix: str, lock_timeout_s: float 
         # called opportunistically from both flash and lookup paths.
         print(f"elf_archive: WARNING -- skipping legacy-archive migration for "
               f"{archive_dir} this call (lock unavailable within {lock_timeout_s}s).")
-        return 0
+        return -1
 
 
 def _migrate_legacy_archive_locked(archive_dir: str, prefix: str) -> int:
