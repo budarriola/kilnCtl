@@ -78,6 +78,7 @@ from __future__ import annotations
 
 import os
 import random
+import shutil
 import struct
 import subprocess
 import sys
@@ -89,7 +90,19 @@ from _drivers_layout import DriverFileError, resolve_driver_file  # noqa: E402
 TEST_DIR = Path(__file__).resolve().parent
 HARNESS_SRC = TEST_DIR / "heater_output_pwm_drift_harness.c"
 DRIVERS_DIR = TEST_DIR.parent / "drivers"
-BUILD_DIR = TEST_DIR / "build"
+# Own private build directory, NOT the shared App/test/build that
+# build_host_tests.ps1 writes into. Both compile the real
+# drivers/control/heater_output.c, so both emit an object file named
+# heater_output.obj, and this check additionally wrote a fixed-name
+# _heater_output_pwm_drift_build.bat and harness .exe there. Two
+# concurrent runs (several agents run the suite against one checkout
+# here) clobbered each other: one side hit
+# "LNK1104: cannot open file ...heater_output_pwm_drift_harness.exe"
+# while the other's finally-clause unlink of the shared .bat made its
+# own cmd.exe raise FileNotFoundError. Same defect, same fix, as
+# check_pid_fuzzy_drift.ps1's build_pid_fuzzy_drift/ and
+# check_sim_iter_tune_bars.ps1's build_sim_iter_tune_bars_obj/.
+BUILD_DIR = TEST_DIR / "build_heater_output_pwm_drift" / f"run_{os.getpid()}"
 HARNESS_EXE = BUILD_DIR / "heater_output_pwm_drift_harness.exe"
 VCVARS = r"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
 
@@ -327,6 +340,10 @@ def main(argv=None):
     except RuntimeError as exc:
         sys.stderr.write(f"HEATER_OUTPUT PWM DRIFT CHECK: {exc}\n")
         return 1
+    finally:
+        # Per-process scratch directory: remove it so repeated runs
+        # do not accumulate one run_<pid> tree per invocation.
+        shutil.rmtree(BUILD_DIR, ignore_errors=True)
 
     n_ticks_checked = 0
     for vi, ((window_ms, min_on_ms, min_off_ms, duty, dt_ms, n_ticks), c_ticks) in enumerate(
