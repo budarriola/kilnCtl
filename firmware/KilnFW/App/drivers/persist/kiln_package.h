@@ -141,6 +141,14 @@ bool kiln_package_capture_pico_half(const kiln_pkg_pico_source_t *source, kiln_p
  * canonical serialization changes in a way that would change the hash of an
  * unchanged config -- see kiln_package_compute_hash()'s rules. */
 #define KILN_PKG_SCHEMA_VERSION 1
+/* NOT bumped for the 2026-09-16 `source_board_id` envelope field (plan
+ * section 5.3 rows 2/3): it is envelope-only metadata, never an input to
+ * kiln_package_compute_hash()'s canonical serialization (see that
+ * function's own ruling comment below), and it is OPTIONAL on import --
+ * an old pkg_schema==1 file with no such field parses exactly as before.
+ * A schema bump exists to say "the hashed content shape changed"; this
+ * addition changes neither the hash inputs nor what a schema-1 reader must
+ * do to stay correct, so bumping it here would be a false signal. */
 
 /* Section 3.1.3's canonical binary serialization and CRC-32, computed over:
  *   pkg_schema (2B LE)
@@ -180,6 +188,33 @@ bool kiln_package_capture_pico_half(const kiln_pkg_pico_source_t *source, kiln_p
  * KILN_PKG_SAFETY_PARAM_CAP ceilings) -- NEVER silently hashes a truncated
  * buffer.
  *
+ * RULING, 2026-09-16 (docs/KILN_PROFILES_PLAN.md section 5.3 rows 2/3):
+ * `source_board_id` (the envelope field below) is deliberately NOT one of
+ * this function's inputs. This hash exists to answer one question --
+ * "is this file's content exactly what was declared, uncorrupted, not
+ * hand-edited, not truncated in transit" -- verified by recomputing it
+ * from the SAME two ingredients on ANY board and comparing against the
+ * declared value carried in the same file. Board identity answers a
+ * different, later question -- "is this content safe to trust HERE" --
+ * which is exactly why kiln_cfg_store.c checks it as a separate,
+ * downstream step (alongside abs_max_temp_c, relay/thermo counts, etc.),
+ * never folded into the hash. Two structural reasons besides that
+ * separation-of-concerns argument: (1) this feature's whole point is
+ * moving a package between boards ("upload a profile you saved on kiln A
+ * onto kiln B"), so the hash MUST verify identically regardless of which
+ * board is doing the verifying -- if source_board_id were a hash input, a
+ * legitimate cross-board upload could only ever verify by recomputing with
+ * the ORIGINAL board's id, which is just the (unauthenticated) declared
+ * `source_board_id` field again, adding no integrity value over comparing
+ * it directly; and (2) kiln_cfg_store.c's own "unmodified round-trip
+ * download/re-upload rehashes identically" invariant (this header's H1
+ * comment) must keep holding when the SAME board re-imports its own
+ * export, which it does automatically as long as source_board_id stays
+ * outside the hash -- folding it in would add nothing (the id does not
+ * change on a same-board round trip either) while creating a second field
+ * whose presence/absence rules would have to be reasoned about alongside
+ * pkg_schema/esp_blob/pico's own.
+ *
  * H1 FIXED (docs/audits/kiln_profiles_robustness_2026-09-14.md,
  * docs/audits/kiln_package_canonical_serializer_2026-09-14.md): `esp_blob`
  * is no longer expected to be zones_config_export_blob()'s raw (padding-
@@ -201,6 +236,7 @@ bool kiln_package_compute_hash(uint16_t pkg_schema, const uint8_t *esp_blob, uin
  *
  * { "kind": "kilnctl_kiln_package", "pkg_schema": 1, "name": "...",
  *   "esp_blob_hex": "<hex of zones_config_export_blob()'s raw bytes>",
+ *   "source_board_id": "0xXXXXXXXX",
  *   "pico": [ {"id":N,"type":T,"flags":F,"value_bits":V}, ... ],
  *   "pkg_hash": "0xXXXXXXXX" }
  *
@@ -213,7 +249,20 @@ bool kiln_package_compute_hash(uint16_t pkg_schema, const uint8_t *esp_blob, uin
  * `pkg_hash` is carried as a hex string (not a JSON number) so a 32-bit
  * value near/above 2^31 round-trips exactly through every JSON reader,
  * including this file's own hand-rolled one, without a signed/unsigned
- * boundary surprise. */
+ * boundary surprise.
+ *
+ * `source_board_id` (added 2026-09-16, docs/KILN_PROFILES_PLAN.md section
+ * 5.3 rows 2/3): kiln_board_identity_get()'s value on the board that
+ * EXPORTED this package, same hex-string encoding as `pkg_hash` and for the
+ * same reason. Deliberately OUTSIDE `pkg_hash`'s input set -- see
+ * kiln_package_compute_hash()'s own RULING comment above. A package written
+ * before this field existed simply omits it; kiln_package_import_json()
+ * reports that via `*out_has_source_board = false` rather than refusing
+ * (this module never retroactively demands a field of files it did not
+ * write), and the caller (kiln_cfg_store.c) treats an absent field as "this
+ * board cannot be confirmed the source" -- the same fail-safe direction as
+ * an outright id mismatch, not a free pass; see that caller's own comment
+ * for the full reasoning. */
 #define KILN_PKG_KIND "kilnctl_kiln_package"
 
 /* Upper bound on kiln_package_export_json()'s output for the largest ESP
@@ -234,7 +283,7 @@ bool kiln_package_compute_hash(uint16_t pkg_schema, const uint8_t *esp_blob, uin
  * KILN_PKG_SAFETY_PARAM_CAP, or the encoded text would not fit `out_cap`. */
 bool kiln_package_export_json(const char *name, uint16_t pkg_schema, const uint8_t *esp_blob,
                                uint16_t esp_blob_len, const kiln_pkg_safety_t *pico, uint32_t pkg_hash,
-                               char *out, size_t out_cap, size_t *out_len);
+                               uint32_t source_board_id, char *out, size_t out_cap, size_t *out_len);
 
 /* Parses `json` (NUL-terminated) back into its parts. Checks performed HERE
  * (envelope-level only -- section 5.2 rules 1/2/4/5; rule 3, the ESP-half
@@ -259,12 +308,18 @@ bool kiln_package_export_json(const char *name, uint16_t pkg_schema, const uint8
  *     caller has something to compare against.
  * `esp_blob_out`/`esp_blob_cap`/`out_esp_blob_len` receive the raw (not
  * canonical) ESP-half bytes, sized identically to what
- * kiln_package_export_json() was given. On any failure, reason_out (if
- * non-NULL/non-zero) is filled with a specific reason and nothing else is
- * touched. */
+ * kiln_package_export_json() was given. `*out_has_source_board`/
+ * `*out_source_board_id` report `source_board_id` (see this header's own
+ * envelope-format comment) -- `*out_has_source_board = false` (with
+ * `*out_source_board_id` left at 0) if the field is simply absent (an
+ * older package, not a malformed one); a PRESENT-but-malformed
+ * `source_board_id` (not a valid hex string) IS refused, same as any other
+ * malformed field. On any failure, reason_out (if non-NULL/non-zero) is
+ * filled with a specific reason and nothing else is touched. */
 bool kiln_package_import_json(const char *json, char *name_out, size_t name_cap, uint16_t *out_pkg_schema,
                                uint8_t *esp_blob_out, size_t esp_blob_cap, uint16_t *out_esp_blob_len,
-                               kiln_pkg_safety_t *pico_out, uint32_t *out_declared_hash, char *reason_out,
+                               kiln_pkg_safety_t *pico_out, uint32_t *out_declared_hash,
+                               bool *out_has_source_board, uint32_t *out_source_board_id, char *reason_out,
                                size_t reason_cap);
 
 #ifdef __cplusplus

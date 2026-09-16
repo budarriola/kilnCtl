@@ -327,6 +327,13 @@ static void test_hash_rejects_oversized_input_never_truncated_hash(void)
 // mismatch.
 // ---------------------------------------------------------------------------
 
+// Fixed stand-in board id for tests that don't care about the board-identity
+// path specifically (round trip, malformed-kind, newer-schema, hash-tamper)
+// -- kiln_board_identity.c lives in kiln_cfg_store.c's test executable, not
+// this one (this file never includes it), so this module has no board-id
+// concept of its own; a plain constant plays that role here.
+#define TEST_SOME_BOARD_ID 0x11223344u
+
 static bool build_sample_package(char *json_out, size_t json_cap, uint32_t *out_hash)
 {
     reset_fake_table();
@@ -351,7 +358,7 @@ static bool build_sample_package(char *json_out, size_t json_cap, uint32_t *out_
     }
     size_t len = 0;
     if (!kiln_package_export_json("Test Kiln", KILN_PKG_SCHEMA_VERSION, esp_blob, sizeof(esp_blob), &pico,
-                                  hash, json_out, json_cap, &len)) {
+                                  hash, TEST_SOME_BOARD_ID, json_out, json_cap, &len)) {
         return false;
     }
     if (out_hash) {
@@ -373,9 +380,12 @@ static void test_export_import_round_trip(void)
     uint16_t esp_len = 0;
     kiln_pkg_safety_t pico_out;
     uint32_t declared_hash = 0;
+    bool has_source_board = false;
+    uint32_t source_board_id = 0;
     char reason[160] = {0};
     bool ok = kiln_package_import_json(json, name, sizeof(name), &schema, esp_blob_out, sizeof(esp_blob_out),
-                                       &esp_len, &pico_out, &declared_hash, reason, sizeof(reason));
+                                       &esp_len, &pico_out, &declared_hash, &has_source_board, &source_board_id,
+                                       reason, sizeof(reason));
     TEST_CHECK(ok, "import succeeds on a package this module just built");
     TEST_CHECK(strcmp(name, "Test Kiln") == 0, "name round-trips");
     TEST_CHECK(schema == KILN_PKG_SCHEMA_VERSION, "pkg_schema round-trips");
@@ -390,6 +400,8 @@ static void test_export_import_round_trip(void)
     TEST_CHECK(pico_out.entries[0].param_id == 0x0101, "pico entries round-trip sorted (0x0101 first)");
     TEST_CHECK(pico_out.entries[1].param_id == 0x0104, "pico entries round-trip sorted (0x0104 second)");
     TEST_CHECK(declared_hash == hash, "declared pkg_hash round-trips exactly");
+    TEST_CHECK(has_source_board, "source_board_id round-trips as present");
+    TEST_CHECK(source_board_id == TEST_SOME_BOARD_ID, "source_board_id round-trips exactly");
 }
 
 static void test_import_refuses_malformed_kind(void)
@@ -403,9 +415,12 @@ static void test_import_refuses_malformed_kind(void)
     uint16_t esp_len;
     kiln_pkg_safety_t pico_out;
     uint32_t declared_hash;
+    bool has_source_board = false;
+    uint32_t source_board_id = 0;
     char reason[160] = {0};
     bool ok = kiln_package_import_json(bad, name, sizeof(name), &schema, esp_blob_out, sizeof(esp_blob_out),
-                                       &esp_len, &pico_out, &declared_hash, reason, sizeof(reason));
+                                       &esp_len, &pico_out, &declared_hash, &has_source_board, &source_board_id,
+                                       reason, sizeof(reason));
     TEST_CHECK(!ok, "refuses a package with no recognisable \"kind\"");
     TEST_CHECK(strstr(reason, "kind") != NULL || strstr(reason, "not a kiln package") != NULL,
                "refusal reason names the problem, not a generic error");
@@ -432,9 +447,12 @@ static void test_import_refuses_newer_pkg_schema(void)
     uint16_t esp_len;
     kiln_pkg_safety_t pico_out;
     uint32_t declared_hash;
+    bool has_source_board = false;
+    uint32_t source_board_id = 0;
     char reason[160] = {0};
     bool ok = kiln_package_import_json(json, name, sizeof(name), &schema, esp_blob_out, sizeof(esp_blob_out),
-                                       &esp_len, &pico_out, &declared_hash, reason, sizeof(reason));
+                                       &esp_len, &pico_out, &declared_hash, &has_source_board, &source_board_id,
+                                       reason, sizeof(reason));
     TEST_CHECK(!ok, "refuses a newer-than-known pkg_schema outright, never best-effort parsed");
     TEST_CHECK(strstr(reason, "newer") != NULL, "refusal reason says WHY (newer format version)");
 }
@@ -470,9 +488,12 @@ static void test_export_json_detects_hash_mismatch_downstream(void)
     uint16_t esp_len;
     kiln_pkg_safety_t pico_out;
     uint32_t declared_hash;
+    bool has_source_board = false;
+    uint32_t source_board_id = 0;
     char reason[160] = {0};
     bool ok = kiln_package_import_json(json, name, sizeof(name), &schema, esp_blob_out, sizeof(esp_blob_out),
-                                       &esp_len, &pico_out, &declared_hash, reason, sizeof(reason));
+                                       &esp_len, &pico_out, &declared_hash, &has_source_board, &source_board_id,
+                                       reason, sizeof(reason));
     TEST_CHECK(ok, "envelope itself still decodes -- the tamper is inside a valid hex field, not garbage");
     uint32_t recomputed = 0;
     TEST_CHECK(kiln_package_compute_hash(schema, esp_blob_out, esp_len, &pico_out, &recomputed),
@@ -480,6 +501,132 @@ static void test_export_json_detects_hash_mismatch_downstream(void)
     TEST_CHECK(recomputed != declared_hash,
                "recomputed hash no longer matches the declared pkg_hash -- the tamper is caught");
     TEST_CHECK(declared_hash == original_hash, "declared pkg_hash itself is untouched by the tamper");
+}
+
+static void test_hash_independent_of_source_board_id(void)
+{
+    // Ruling, kiln_package.h (2026-09-16): source_board_id is envelope-only
+    // metadata, deliberately NEVER an input to kiln_package_compute_hash()'s
+    // canonical serialization. Prove it directly: two exports of the SAME
+    // pico/esp content but DIFFERENT source_board_id values must produce the
+    // identical declared pkg_hash (the hash argument itself is computed
+    // once, up front, independent of export -- this proves export doesn't
+    // fold the board id in some other way, e.g. by re-hashing internally).
+    TEST_SECTION("kiln_package_compute_hash() output does not depend on source_board_id");
+    reset_fake_table();
+    kilnlink_param_value_t v;
+    v.f32_val = 1285.0f;
+    fake_add(0x0104, KILNLINK_PARAM_TYPE_F32, true, v);
+    kiln_pkg_safety_t pico;
+    kiln_pkg_pico_source_t src = fake_source();
+    TEST_CHECK(kiln_package_capture_pico_half(&src, &pico), "pico half captures");
+    uint8_t esp_blob[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    uint32_t hash = 0;
+    TEST_CHECK(kiln_package_compute_hash(KILN_PKG_SCHEMA_VERSION, esp_blob, sizeof(esp_blob), &pico, &hash),
+               "hash computes");
+
+    char json_a[KILN_PKG_JSON_MAX_LEN];
+    char json_b[KILN_PKG_JSON_MAX_LEN];
+    size_t len_a = 0, len_b = 0;
+    TEST_CHECK(kiln_package_export_json("X", KILN_PKG_SCHEMA_VERSION, esp_blob, sizeof(esp_blob), &pico, hash,
+                                        0x00000001u, json_a, sizeof(json_a), &len_a),
+               "export with board id 0x00000001 succeeds");
+    TEST_CHECK(kiln_package_export_json("X", KILN_PKG_SCHEMA_VERSION, esp_blob, sizeof(esp_blob), &pico, hash,
+                                        0xFFFFFFFFu, json_b, sizeof(json_b), &len_b),
+               "export with board id 0xFFFFFFFF succeeds");
+
+    char name_a[32], name_b[32];
+    uint16_t schema_a, schema_b;
+    uint8_t blob_a[8], blob_b[8];
+    uint16_t elen_a, elen_b;
+    kiln_pkg_safety_t pico_a, pico_b;
+    uint32_t hash_a, hash_b;
+    bool has_a = false, has_b = false;
+    uint32_t sb_a = 0, sb_b = 0;
+    char reason[160] = {0};
+    TEST_CHECK(kiln_package_import_json(json_a, name_a, sizeof(name_a), &schema_a, blob_a, sizeof(blob_a),
+                                        &elen_a, &pico_a, &hash_a, &has_a, &sb_a, reason, sizeof(reason)),
+               "re-import of A succeeds");
+    TEST_CHECK(kiln_package_import_json(json_b, name_b, sizeof(name_b), &schema_b, blob_b, sizeof(blob_b),
+                                        &elen_b, &pico_b, &hash_b, &has_b, &sb_b, reason, sizeof(reason)),
+               "re-import of B succeeds");
+    TEST_CHECK(has_a && sb_a == 0x00000001u, "A's source_board_id round-trips");
+    TEST_CHECK(has_b && sb_b == 0xFFFFFFFFu, "B's source_board_id round-trips");
+    TEST_CHECK(hash_a == hash_b, "declared pkg_hash is IDENTICAL across differing source_board_id");
+    TEST_CHECK(hash_a == hash, "declared pkg_hash matches the independently-computed hash");
+}
+
+static void test_import_source_board_id_absent(void)
+{
+    // Backward compatibility ruling (kiln_package.h): a package with no
+    // "source_board_id" field at all (an old file, or one from firmware
+    // before this field existed) must parse successfully with
+    // *out_has_source_board == false -- absence is not a parse error, only
+    // kiln_cfg_store.c's caller decides what absence MEANS (fail-safe
+    // "foreign").
+    TEST_SECTION("kiln_package_import_json -- \"source_board_id\" absent is not an error");
+    char json[KILN_PKG_JSON_MAX_LEN];
+    uint32_t hash = 0;
+    TEST_CHECK(build_sample_package(json, sizeof(json), &hash), "sample package builds");
+
+    // Strip the field this test file's own build_sample_package() just
+    // added, simulating an old-format file.
+    char *field = strstr(json, "\"source_board_id\":\"0x11223344\",");
+    TEST_CHECK(field != NULL, "found source_board_id field to remove");
+    if (field) {
+        size_t field_len = strlen("\"source_board_id\":\"0x11223344\",");
+        memmove(field, field + field_len, strlen(field + field_len) + 1);
+    }
+
+    char name[32];
+    uint16_t schema;
+    uint8_t esp_blob_out[16];
+    uint16_t esp_len;
+    kiln_pkg_safety_t pico_out;
+    uint32_t declared_hash;
+    bool has_source_board = true; // deliberately pre-set to the WRONG value
+    uint32_t source_board_id = 0xDEADBEEFu;
+    char reason[160] = {0};
+    bool ok = kiln_package_import_json(json, name, sizeof(name), &schema, esp_blob_out, sizeof(esp_blob_out),
+                                       &esp_len, &pico_out, &declared_hash, &has_source_board, &source_board_id,
+                                       reason, sizeof(reason));
+    TEST_CHECK(ok, "import still succeeds with the field entirely absent");
+    TEST_CHECK(!has_source_board, "has_source_board is explicitly cleared to false, not left stale");
+    TEST_CHECK(source_board_id == 0, "source_board_id is explicitly zeroed, not left stale");
+}
+
+static void test_import_source_board_id_malformed_refuses(void)
+{
+    // Present-but-malformed is a REFUSAL, not a silent "treat as absent" --
+    // a field that exists but cannot be trusted is worse than one that was
+    // never written (same asymmetry kiln_package.h's ruling states).
+    TEST_SECTION("kiln_package_import_json -- \"source_board_id\" present but malformed is refused");
+    char json[KILN_PKG_JSON_MAX_LEN];
+    uint32_t hash = 0;
+    TEST_CHECK(build_sample_package(json, sizeof(json), &hash), "sample package builds");
+
+    char *field = strstr(json, "\"source_board_id\":\"0x11223344\"");
+    TEST_CHECK(field != NULL, "found source_board_id field to tamper");
+    if (field) {
+        // Corrupt one hex digit into a non-hex character.
+        char *digit = field + strlen("\"source_board_id\":\"0x");
+        *digit = 'z';
+    }
+
+    char name[32];
+    uint16_t schema;
+    uint8_t esp_blob_out[16];
+    uint16_t esp_len;
+    kiln_pkg_safety_t pico_out;
+    uint32_t declared_hash;
+    bool has_source_board = false;
+    uint32_t source_board_id = 0;
+    char reason[160] = {0};
+    bool ok = kiln_package_import_json(json, name, sizeof(name), &schema, esp_blob_out, sizeof(esp_blob_out),
+                                       &esp_len, &pico_out, &declared_hash, &has_source_board, &source_board_id,
+                                       reason, sizeof(reason));
+    TEST_CHECK(!ok, "refuses outright rather than silently treating malformed as absent");
+    TEST_CHECK(strstr(reason, "source_board_id") != NULL, "refusal reason names the field");
 }
 
 int main(void)
@@ -496,6 +643,9 @@ int main(void)
     test_import_refuses_malformed_kind();
     test_import_refuses_newer_pkg_schema();
     test_export_json_detects_hash_mismatch_downstream();
+    test_hash_independent_of_source_board_id();
+    test_import_source_board_id_absent();
+    test_import_source_board_id_malformed_refuses();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

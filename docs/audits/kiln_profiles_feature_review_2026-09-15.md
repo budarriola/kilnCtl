@@ -112,6 +112,78 @@ in RAM only; it disappears at the next boot with no warning. Reported.
 `abs_max_temp_c >= max zone max_temp_c` rule, no `ack_hardware_differs`.
 Reported.
 
+**Closed 2026-09-16.** All three named gaps are now implemented in
+`kiln_cfg_store.c`'s import path, plus one owner-approved extension beyond
+what this defect originally asked for:
+
+- Foreign-`source_board` reset (`ct_cal[].calibrated` forced `SET`+`false`,
+  `i_normal_a[]` forced `UNSET`) at param ids 0x0316/0x0317/0x0318 and
+  0x031A/0x031B/0x031C. `foreign` is `!has_source_board ||
+  (source_board_id != kiln_board_identity_get())` -- an OLDER package with no
+  `source_board_id` field at all is treated as foreign too, fail-safe by
+  construction, not merely by convention. Covered by
+  `test_import_cross_board_forces_calibration_reset()` (cross-board triggers
+  the reset), `test_import_matching_board_preserves_calibration()` (same
+  board does not), and
+  `test_import_absent_source_board_id_forces_calibration_reset()` (an
+  absent field is treated as foreign, never as "trust it").
+- `abs_max_temp_c >= max zone max_temp_c` at import time was already landed
+  in an earlier pass (`test_import_accepts_abs_max_temp_c_at_or_above_zone_max`).
+  **New this pass:** the same ceiling is now re-checked a SECOND time, at
+  **apply** time, against the controller's LIVE `safety_cfg_store` cache --
+  not only the package's own captured-at-save-time value already checked at
+  import. This closes a real gap: nothing previously re-verified an applied
+  package's zones against what the Pico is actually configured for right
+  now, only against what the package itself claimed when it was saved. It
+  is inert today (`kiln_cfg_store_apply()` pushes no Pico half yet, so there
+  is nothing live to fall out of step with), and skips (does not refuse)
+  when the live cache has no `abs_max_temp_c` SET yet -- "not yet
+  commissioned" is not "unsafe", same convention the ack-gate below uses.
+  Added now, while still inert, specifically so it is not a missing gate
+  discovered under pressure the day `apply()` starts pushing a Pico half.
+  See `docs/KILN_PROFILES_PLAN.md` section 5.3's new row. Covered by
+  `test_apply_refuses_live_ceiling_tighter_than_zone_max()` (refuses even
+  WITH `ack_hardware_differs=true` -- no ack bypasses a ceiling check) and
+  `test_apply_skips_live_ceiling_check_when_live_unset()` (non-regression:
+  an uncommissioned board is not refused).
+- `ack_hardware_differs` gate (`apply_hardware_differs()`, param ids
+  0x0109/0x031F/0x0211 -- `ct_installed`/`ct_topology`/`safety_tc_installed`
+  only) refuses `kiln_cfg_store_apply()` on a hardware mismatch unless the
+  caller explicitly acks it. **Stated loudly, per the original task
+  brief:** this gate's scope is those three ids ONLY. `relay_count` and
+  `thermo_count` are NOT covered by it and never will be by this gate --
+  they are separately hard-refused at import time, unconditionally, with no
+  ack path at all, because a relay/thermocouple COUNT mismatch is a wiring
+  fact no acknowledgement can make safe to import. Covered by
+  `test_apply_refuses_hardware_mismatch_without_ack()` and
+  `test_apply_allows_hardware_mismatch_with_ack()`.
+
+Section 5.3's `ct_cal[].gain`/`.offset`/`k_ct_v_per_a[]` row was already
+closed in an earlier pass (`calibrated` forced false cross-board, above).
+The `a_fs`/`zero_mv` range-check half of that same row is recorded in
+`docs/KILN_PROFILES_PLAN.md` as **unimplementable as written**: those two
+fields are plain ESP-side `safety_cfg_store` fields, never Pico
+`CONFIG_PARAM_TABLE` entries, so they are not present in `kiln_pkg_safety_t`
+and never travel in the package at all -- there is nothing to range-check
+on import.
+
+Bears on the Pico-arming invariant as follows. The board-id reset and the
+apply-time live-ceiling recheck both exist to keep the Pico's
+`abs_max_temp_c` from ever silently drifting looser than what the kiln
+actually needs (a foreign calibration, or a since-changed live ceiling,
+laundered through an import/apply that nobody re-checked) -- neither can
+make the Pico's ceiling tighter than the ESP's either, since both are pure
+refusals, never writers of a new ceiling value. The `ack_hardware_differs`
+gate never touches `abs_max_temp_c` at all (0x0109/0x031F/0x0211 only) and
+does not bypass the live-ceiling recheck (proven by
+`test_apply_refuses_live_ceiling_tighter_than_zone_max` passing `ack=true`
+and still refusing) -- so no combination of these changes creates a path
+where the Pico ends up unarmed or carrying a ceiling that disagrees with
+the ESP's. `kiln_cfg_store_apply()` still pushes nothing to the Pico, so
+none of this is reachable in production yet; all of it is validated against
+a heap-allocated candidate `zones_cfg_t` (never stack), consistent with this
+codebase's httpd-reachable-path stack discipline.
+
 **6. No Download/Upload control in the web UI.** Reported (see the table).
 
 ## What held up

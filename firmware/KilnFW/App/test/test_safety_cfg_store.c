@@ -203,6 +203,46 @@ void test_safety_cfg_store_stage_page_for_kiln_cfg_store_test(size_t page_idx, b
     stage_page(page_idx, more, ids, vals, n);
 }
 
+// Second non-static crossing point, added for the apply-time live-ceiling
+// re-check test (owner decision 2026-09-16, docs/KILN_PROFILES_PLAN.md
+// section 5.3 row 1's apply-time sibling): stage_page() above always encodes
+// its wire values as KILNLINK_PARAM_TYPE_U16 with the union's upper 16 bits
+// left zeroed by stage_page()'s own memset -- fine for the BOOL/U8 fields
+// every existing caller seeds (a truthy/low-byte readback survives), but
+// useless for a real F32 abs_max_temp_c reading (the result is an unusable
+// denormal). This sets the single entry's declared type to F32 and its
+// union's f32_val directly, so a test can seed a REAL, comparable ceiling
+// value into the live safety_cfg_store cache via the same
+// safety_cfg_store_refetch(&fake_link, crc) install path.
+// Third crossing point: resets the live safety_cfg_store cache to its
+// boot-time empty state (reset_to_defaults(), this file's own static
+// helper). test_kiln_cfg_store.c's reset_state() calls this at the top of
+// EVERY test -- without it, a live-cache seed staged by one board-id/
+// ack_hardware_differs/live-ceiling test (owner decisions 2026-09-16) would
+// silently leak into the next test that assumes a fresh, uncommissioned
+// cache (the same assumption most pre-existing apply tests in that file
+// already make).
+void test_safety_cfg_store_reset_for_kiln_cfg_store_test(void)
+{
+    reset_to_defaults();
+}
+
+void test_safety_cfg_store_stage_f32_for_kiln_cfg_store_test(size_t page_idx, uint16_t id, float value)
+{
+    kilnlink_config_page_t *p = &s_stub_pages[page_idx];
+    memset(p, 0, sizeof(*p));
+    p->page_index = (uint8_t)page_idx;
+    p->entry_count = 1;
+    p->more = 0;
+    p->entries[0].param_id = id;
+    p->entries[0].type = KILNLINK_PARAM_TYPE_F32;
+    p->entries[0].value.f32_val = value;
+    p->entries[0].set = true;
+    if (page_idx + 1 > s_stub_page_count) {
+        s_stub_page_count = page_idx + 1;
+    }
+}
+
 // Same as stage_page(), but the ONE entry at `unset_index` (0-based within
 // this page) is staged with set=false -- simulates a Pico reporting a
 // no-safe-default field (e.g. abs_max_temp_c) that has never been

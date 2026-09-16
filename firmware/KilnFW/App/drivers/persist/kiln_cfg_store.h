@@ -256,9 +256,21 @@ bool kiln_cfg_store_clone(int32_t src_id, const char *name, int32_t *out_id, cha
  * applied, active id unchanged) if the interlock refuses, `id` does not
  * exist, or zones_config_import_blob() refuses the stored blob; reason_out/
  * reason_cap (may be NULL/0) carry the specific reason in every failure
- * case. */
-bool kiln_cfg_store_apply(int32_t id, bool ack_no_safety_processor, char *reason_out,
-                          size_t reason_cap);
+ * case.
+ *
+ * `ack_hardware_differs` (2026-09-16, plan section 5.3 table row 4, same
+ * ack-header pattern as `ack_no_safety_processor`): required whenever `id`'s
+ * saved safety-processor fields (`ct_installed`/`ct_topology`/
+ * `safety_tc_installed`) disagree with what this controller's live
+ * safety_cfg_store cache currently reports -- refused, naming the field,
+ * unless true. Scope note: the plan's row 4 also names `relay_count`/
+ * `thermo_count`, but those are not package fields at all (they are live
+ * zones_config_accessors.h queries against this firmware's own compiled-in
+ * hardware shape) and are already HARD-refused at import time, before a
+ * slot can even be created, whenever a package's own zone assignments
+ * exceed them -- this parameter deliberately does not re-cover them. */
+bool kiln_cfg_store_apply(int32_t id, bool ack_no_safety_processor, bool ack_hardware_differs,
+                          char *reason_out, size_t reason_cap);
 
 /* Deletes saved config `id`. If it was the active one, the active id is
  * cleared to KILN_CFG_NO_ACTIVE_ID -- the LIVE zones config is untouched

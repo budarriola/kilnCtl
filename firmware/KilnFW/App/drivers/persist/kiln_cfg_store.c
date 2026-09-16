@@ -37,6 +37,9 @@
                             * though kiln_cfg_store_internal.h already drags this in transitively,
                             * since this file (not that header) is the one that actually calls
                             * into it. */
+#include "kiln_board_identity.h" /* kiln_board_identity_get() -- section 5.3 rows 2/3 (mint/compare
+                                   * a board id for cross-board CT-calibration invalidation) and
+                                   * row 4 (ack_hardware_differs), 2026-09-16. */
 
 static const char *TAG = "kiln_cfg_store";
 
@@ -1274,8 +1277,109 @@ bool kiln_cfg_store_clone(int32_t src_id, const char *name, int32_t *out_id, cha
     return true;
 }
 
-bool kiln_cfg_store_apply(int32_t id, bool ack_no_safety_processor, char *reason_out,
-                          size_t reason_cap)
+/* Section 5.3 table row 4 helper: looks up param `id`'s current live value
+ * (via the safety_cfg_store cache this controller already keeps, not a
+ * fresh Pico round trip) as a bit pattern, mirroring how kiln_pkg_pico_
+ * param_t stores its own value_bits so the two are directly comparable.
+ * Returns false (value left untouched) if the live table does not currently
+ * have this id SET -- "not commissioned yet" is not the same as "differs",
+ * so callers must treat a false return as "cannot compare, skip this id"
+ * rather than as a mismatch. */
+static bool live_pico_param_bits(uint16_t param_id, uint32_t *out_bits)
+{
+    size_t n = safety_cfg_store_param_count();
+    for (size_t i = 0; i < n; i++) {
+        safety_cfg_param_t row;
+        if (!safety_cfg_store_get_by_index(i, &row)) {
+            continue;
+        }
+        if (row.param_id != param_id || !row.set) {
+            continue;
+        }
+        union {
+            float f;
+            uint32_t bits;
+        } conv;
+        switch (row.type) {
+        case KILNLINK_PARAM_TYPE_BOOL:
+            *out_bits = (uint32_t)row.value.bool_val;
+            return true;
+        case KILNLINK_PARAM_TYPE_U8:
+            *out_bits = (uint32_t)row.value.u8_val;
+            return true;
+        case KILNLINK_PARAM_TYPE_U16:
+            *out_bits = (uint32_t)row.value.u16_val;
+            return true;
+        case KILNLINK_PARAM_TYPE_F32:
+            conv.f = row.value.f32_val;
+            *out_bits = conv.bits;
+            return true;
+        default:
+            return false;
+        }
+    }
+    return false;
+}
+
+/* Section 5.3 table row 4 (plan section 5.3, docs/audits/kiln_profiles_
+ * feature_review_2026-09-15.md Defect 5): `ct_installed`, `ct_topology`,
+ * `safety_tc_installed` are the three of row 4's five named fields that
+ * are literal Pico CONFIG_PARAM_TABLE entries captured into a package's
+ * pico half (0x0109, 0x031F, 0x0211) -- `relay_count`/`thermo_count` are
+ * NOT package fields at all (they are live zones_config_accessors.h
+ * queries against THIS firmware's own compiled-in hardware shape, already
+ * hard-refused above at import time in kiln_cfg_store_import_package_json()
+ * whenever a package's zone assignments exceed what this board reports),
+ * so this gate deliberately covers only the three that a saved slot can
+ * actually disagree with the live board about. Named loudly here, not
+ * fixed silently: a scope decision, not an oversight -- see this
+ * function's own report to the caller. Returns true (and fills `msg`) the
+ * first time a comparable id's packaged value differs from the live
+ * value; an id neither side has a SET value for is skipped, never treated
+ * as a mismatch (an unset field cannot "differ"). */
+static bool apply_hardware_differs(const kiln_pkg_safety_t *pico, char *msg, size_t msg_cap)
+{
+    static const struct {
+        uint16_t param_id;
+        const char *label;
+    } kFields[] = {
+        {0x0109u, "ct_installed"},
+        {0x031Fu, "ct_topology"},
+        {0x0211u, "safety_tc_installed"},
+    };
+    for (size_t f = 0; f < sizeof(kFields) / sizeof(kFields[0]); f++) {
+        uint32_t pkg_bits = 0;
+        bool pkg_has = false;
+        for (uint16_t i = 0; i < pico->count; i++) {
+            if (pico->entries[i].param_id == kFields[f].param_id &&
+                (pico->entries[i].flags & KILN_PKG_PARAM_FLAG_SET) != 0) {
+                pkg_bits = pico->entries[i].value_bits;
+                pkg_has = true;
+                break;
+            }
+        }
+        if (!pkg_has) {
+            continue;
+        }
+        uint32_t live_bits = 0;
+        if (!live_pico_param_bits(kFields[f].param_id, &live_bits)) {
+            continue;
+        }
+        if (pkg_bits != live_bits) {
+            if (msg && msg_cap) {
+                snprintf(msg, msg_cap,
+                         "this saved config's '%s' differs from what this controller currently reports "
+                         "-- confirm the hardware shape matches before applying",
+                         kFields[f].label);
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+bool kiln_cfg_store_apply(int32_t id, bool ack_no_safety_processor, bool ack_hardware_differs,
+                          char *reason_out, size_t reason_cap)
 {
     if (refuse_if_quarantined(reason_out, reason_cap)) {
         return false;
@@ -1319,6 +1423,79 @@ bool kiln_cfg_store_apply(int32_t id, bool ack_no_safety_processor, char *reason
                  "check the safety settings, then press Save to complete it.",
                  s_store.entries[idx].name);
         return set_reason(reason_out, reason_cap, msg);
+    }
+    /* Section 5.3 table row 4: refuse unless the caller explicitly
+     * acknowledges a hardware-shape mismatch. Checked after pico_populated
+     * (a half-package is refused outright above, for a different reason)
+     * and before anything touches zones_config_import_blob() or the store
+     * -- same "refuse before mutating anything" discipline as every other
+     * gate in this function. */
+    if (!ack_hardware_differs) {
+        char hw_msg[192];
+        if (apply_hardware_differs(&s_store.entries[idx].pico, hw_msg, sizeof(hw_msg))) {
+            return set_reason(reason_out, reason_cap, hw_msg);
+        }
+    }
+    /* Section 5.3 table row 1, re-checked again HERE at apply time
+     * (docs/KILN_PROFILES_PLAN.md, owner decision 2026-09-16): the slot's
+     * configured zone ceilings were already checked against the PACKAGE's
+     * own captured abs_max_temp_c at import time (see the "Compatibility
+     * 5.3, table row 1" block in kiln_cfg_store_import_package_json()
+     * below -- this block mirrors its zone-max-temp derivation exactly).
+     * That is not the same thing as the LIVE board's current
+     * safety_cfg_store abs_max_temp_c reading, which is what actually
+     * arms the Pico. Inert today -- this function pushes no Pico half
+     * (H17 above), so the live cache's abs_max_temp_c cannot have moved
+     * since the slot was saved/imported on THIS board -- but added now,
+     * unconditionally (no ack bypass; a ceiling mismatch is never a
+     * "hardware shape differs, operator confirmed" situation), so the day
+     * apply() starts pushing a Pico half this re-check is not a gap
+     * discovered under pressure. live_pico_param_bits() returns false when
+     * the live cache has no abs_max_temp_c reading yet -- SKIP, do not
+     * refuse, same "not yet commissioned is not unsafe" convention
+     * apply_hardware_differs() already uses; this keeps every existing
+     * apply test (whose live cache starts empty) non-regressive. The
+     * zones_cfg_t decode is HEAP-allocated, never a stack local -- same
+     * stack-budget discipline as kiln_cfg_import_scratch_t above (a prior
+     * checker caught a 5024 B vs 4832 B overflow on this same shared
+     * 8192 B httpd_worker stack from exactly this class of plain-local). */
+    {
+        uint32_t live_bits = 0;
+        if (live_pico_param_bits(0x0104u, &live_bits)) {
+            union { uint32_t bits; float f; } conv;
+            conv.bits = live_bits;
+            float live_abs_max_temp_c = conv.f;
+
+            zones_cfg_t *cand = (zones_cfg_t *)malloc(sizeof(*cand));
+            if (!cand) {
+                return set_reason(reason_out, reason_cap, "out of memory");
+            }
+            memset(cand, 0, sizeof(*cand));
+            size_t copy_len = s_store.entries[idx].blob_len;
+            if (copy_len > sizeof(*cand)) {
+                copy_len = sizeof(*cand);
+            }
+            memcpy(cand, s_store.entries[idx].blob, copy_len);
+
+            float max_zone_temp_c = 0.0f;
+            for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+                const zone_cfg_t *zc = &cand->zones[z];
+                if (zc->thermo_mask != 0 && zc->max_temp_c > max_zone_temp_c) {
+                    max_zone_temp_c = zc->max_temp_c;
+                }
+            }
+            free(cand);
+
+            if (max_zone_temp_c > 0.0f && live_abs_max_temp_c < max_zone_temp_c) {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                         "this controller's live safety-processor ceiling (abs_max_temp_c=%.1f C) is "
+                         "lower than this kiln's highest configured zone max_temp_c (%.1f C) -- the "
+                         "safety ceiling must never be tighter than the kiln it is armed for",
+                         live_abs_max_temp_c, max_zone_temp_c);
+                return set_reason(reason_out, reason_cap, msg);
+            }
+        }
     }
     /* zones_config_import_blob() does the actual all-or-nothing
      * version-check/re-validate/commit work; see its own doc comment
@@ -1690,7 +1867,8 @@ bool kiln_cfg_store_export_package_json(int32_t id, char *out, size_t out_cap, s
     uint32_t pkg_hash = 0;
     kiln_cfg_store_get_package_identity(id, NULL, &pkg_schema, &pkg_hash);
 
-    if (!kiln_package_export_json(name, pkg_schema, blob, blob_len, &pico, pkg_hash, out, out_cap, out_len)) {
+    if (!kiln_package_export_json(name, pkg_schema, blob, blob_len, &pico, pkg_hash,
+                                  kiln_board_identity_get(), out, out_cap, out_len)) {
         return set_reason(reason_out, reason_cap, "package too large to encode, or an internal error");
     }
     return true;
@@ -1728,6 +1906,8 @@ bool kiln_cfg_store_import_package_json(const char *json, int32_t *out_id, char 
     uint16_t pkg_schema = 0;
     uint16_t esp_blob_len = 0;
     uint32_t declared_hash = 0;
+    bool has_source_board = false;
+    uint32_t source_board_id = 0;
 #define IMPORT_REFUSE(...)                                                                                      \
     do {                                                                                                         \
         set_reason(reason_out, reason_cap, __VA_ARGS__);                                                        \
@@ -1735,7 +1915,8 @@ bool kiln_cfg_store_import_package_json(const char *json, int32_t *out_id, char 
     } while (0)
 
     if (!kiln_package_import_json(json, name, sizeof(name), &pkg_schema, s->esp_blob, sizeof(s->esp_blob),
-                                  &esp_blob_len, &s->pico, &declared_hash, reason_out, reason_cap)) {
+                                  &esp_blob_len, &s->pico, &declared_hash, &has_source_board, &source_board_id,
+                                  reason_out, reason_cap)) {
         goto done; /* reason already filled by kiln_package_import_json() */
     }
 
@@ -1802,6 +1983,57 @@ bool kiln_cfg_store_import_package_json(const char *json, int32_t *out_id, char 
     if (recomputed != declared_hash) {
         IMPORT_REFUSE("package hash does not match its contents -- the file is corrupted, was "
                       "hand-edited, or was truncated in transit");
+    }
+
+    /* ---- Compatibility 5.3, table rows 2/3 (plan section 5.3,
+     * docs/audits/kiln_profiles_feature_review_2026-09-15.md Defect 5):
+     * `ct_cal[].calibrated` is a property of the CT sensor physically wired
+     * to ONE controller -- it means nothing, and is actively dangerous
+     * (project_negative_test_on_a_mirror_is_vacuous's sibling hazard: a
+     * fabricated-looking "calibrated" reading is worse than an honest
+     * "uncalibrated" one), on any OTHER controller. A package is "foreign"
+     * -- and its calibration is force-cleared -- whenever `source_board_id`
+     * is either ABSENT (an old package, or one from firmware that predates
+     * this field: fail-safe treats "unknown" the same as "different", never
+     * the same as "same") or present and numerically different from this
+     * board's own id. Only an exact match leaves calibration untouched.
+     * `source_board_id` itself is never written into a slot and never
+     * enters the hash (see kiln_package.h's ruling comment on
+     * kiln_package_compute_hash()) -- it is consumed here, once, at import
+     * time, and its only effect is this mutation. */
+    bool foreign = !has_source_board || (source_board_id != kiln_board_identity_get());
+    if (foreign) {
+        for (uint16_t i = 0; i < s->pico.count; i++) {
+            kiln_pkg_pico_param_t *e = &s->pico.entries[i];
+            if (e->param_id == 0x0316u || e->param_id == 0x0317u || e->param_id == 0x0318u) {
+                /* ct_cal[0..2].calibrated -- force to a SET, false value
+                 * rather than leaving it unset: an explicit "known false"
+                 * is a stronger, more auditable signal than "we don't
+                 * know", and matches what a fresh commissioning run would
+                 * report before the CT sweep has ever executed. */
+                e->flags = KILN_PKG_PARAM_FLAG_SET;
+                e->value_bits = 0; /* BOOL false */
+            } else if (e->param_id == 0x031Au || e->param_id == 0x031Bu || e->param_id == 0x031Cu) {
+                /* i_normal_a[0..2] -- forced UNSET (not zeroed-but-set): a
+                 * S14/S15 "normal current" baseline of exactly 0.0 A read as
+                 * SET would look like a real, trusted commissioning value
+                 * rather than the absence of one -- the same "reading a
+                 * fabricated current is worse than no reading" rule this
+                 * plan states for ct_cal itself. */
+                e->flags = 0;
+                e->value_bits = 0;
+            }
+        }
+        /* Re-hash: the mutation above changed the pico half's content, so
+         * the hash stored in the new slot must cover what was ACTUALLY
+         * stored, not the pre-mutation declared_hash -- otherwise a later
+         * re-export/re-import round trip would fail its own hash check
+         * against a slot whose content this function itself just edited.
+         * `recomputed` is intentionally reassigned in place: everything
+         * downstream (e->pkg_hash = recomputed) already expects this name. */
+        if (!kiln_package_compute_hash(pkg_schema, s->canonical, (uint16_t)canonical_len, &s->pico, &recomputed)) {
+            IMPORT_REFUSE("internal error: hash computation failed after cross-board calibration reset");
+        }
     }
 
     /* ---- Compatibility 5.2a: properties of THIS CONTROLLER, reported

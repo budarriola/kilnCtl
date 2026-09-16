@@ -322,6 +322,11 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "persist/zones_config_migrate.c"
                        "persist/kiln_cfg_store.c"
                        "persist/kiln_package.c"
+                       # docs/KILN_PROFILES_PLAN.md section 5.3 rows 2/3
+                       # (2026-09-16) -- mints/compares a board id (eFuse MAC)
+                       # for cross-board CT-calibration invalidation on
+                       # kiln_cfg_store.c's package import.
+                       "persist/kiln_board_identity.c"
                        # docs/KILN_PROFILES_PLAN.md item 5 -- the two-processor
                        # kiln-config apply transaction (docs/audits/kiln_swap_
                        # transaction_2026-09-14.md, wired to item 15's volatile

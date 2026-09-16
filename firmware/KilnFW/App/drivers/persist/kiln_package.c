@@ -206,7 +206,7 @@ static bool hex_decode_exact(const char *src, size_t src_len, uint8_t *out, size
 
 bool kiln_package_export_json(const char *name, uint16_t pkg_schema, const uint8_t *esp_blob,
                                uint16_t esp_blob_len, const kiln_pkg_safety_t *pico, uint32_t pkg_hash,
-                               char *out, size_t out_cap, size_t *out_len)
+                               uint32_t source_board_id, char *out, size_t out_cap, size_t *out_len)
 {
     if (!name || !esp_blob || !pico || !out || !out_len) {
         return false;
@@ -254,7 +254,8 @@ bool kiln_package_export_json(const char *name, uint16_t pkg_schema, const uint8
      * make explicit for OTHER surfaces; this one relies on the store's own
      * character restriction instead of re-escaping). */
     APPEND("%s", name);
-    APPEND("\",\"esp_blob_len\":%u,\"esp_blob_hex\":\"%s\",\"pico\":[", (unsigned)esp_blob_len, esp_hex);
+    APPEND("\",\"esp_blob_len\":%u,\"esp_blob_hex\":\"%s\",\"source_board_id\":\"0x%08x\",\"pico\":[",
+           (unsigned)esp_blob_len, esp_hex, (unsigned)source_board_id);
 
     for (uint16_t i = 0; i < pico->count; i++) {
         const kiln_pkg_pico_param_t *e = &pico->entries[i];
@@ -278,7 +279,8 @@ done:
 
 bool kiln_package_import_json(const char *json, char *name_out, size_t name_cap, uint16_t *out_pkg_schema,
                                uint8_t *esp_blob_out, size_t esp_blob_cap, uint16_t *out_esp_blob_len,
-                               kiln_pkg_safety_t *pico_out, uint32_t *out_declared_hash, char *reason_out,
+                               kiln_pkg_safety_t *pico_out, uint32_t *out_declared_hash,
+                               bool *out_has_source_board, uint32_t *out_source_board_id, char *reason_out,
                                size_t reason_cap)
 {
 #define REFUSE(msg)                                                                                              \
@@ -386,6 +388,33 @@ bool kiln_package_import_json(const char *json, char *name_out, size_t name_cap,
         elem = backup_json_arr_next(elem);
     }
     pico_out->count = count;
+
+    /* source_board_id: OPTIONAL field (added after pkg_schema 1 shipped
+     * without it -- KILN_PKG_SCHEMA_VERSION is NOT bumped for this, see
+     * kiln_package.h's ruling comment). Absent entirely -> *out_has_source_
+     * board=false, caller treats that as "foreign" (fail-safe, see
+     * kiln_cfg_store.c). Present but malformed hex -> REFUSE outright, same
+     * as a malformed pkg_hash -- a field that exists but cannot be trusted
+     * is worse than one that was never written. */
+    if (out_has_source_board && out_source_board_id) {
+        const char *sb_val = backup_json_obj_find(json, "source_board_id");
+        if (!sb_val) {
+            *out_has_source_board = false;
+            *out_source_board_id = 0;
+        } else {
+            char sb_hex[16];
+            if (!backup_json_field_str(json, "source_board_id", sb_hex, sizeof(sb_hex))) {
+                REFUSE("package's \"source_board_id\" is present but malformed");
+            }
+            char *sb_end = NULL;
+            unsigned long sbv = strtoul(sb_hex, &sb_end, 16);
+            if (sb_end == sb_hex || *sb_end != '\0') {
+                REFUSE("package's \"source_board_id\" is present but malformed");
+            }
+            *out_has_source_board = true;
+            *out_source_board_id = (uint32_t)sbv;
+        }
+    }
 
     char hash_hex[16];
     if (!backup_json_field_str(json, "pkg_hash", hash_hex, sizeof(hash_hex))) {

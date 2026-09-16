@@ -169,6 +169,13 @@ try {
         # convention safety_cfg_http.c's s8_rate_guard_estimate.c linkage
         # documents in this same file, further down.
         (Join-Path $driversDir "persist/kiln_package.c"),
+        # docs/KILN_PROFILES_PLAN.md section 5.3 rows 2/3 (2026-09-16) --
+        # kiln_cfg_store.c now calls kiln_board_identity_get() to mint/compare
+        # a board id for cross-board CT-calibration invalidation on import.
+        # Linked for real, same "pure logic, no reason to fake" convention as
+        # kiln_package.c immediately above; test/stubs/esp_mac.h supplies the
+        # host-side esp_efuse_mac_get_default() it calls.
+        (Join-Path $driversDir "persist/kiln_board_identity.c"),
         (Join-Path $driversDir "hw/touch_dev.c"),
         (Join-Path $driversDir "control/ramp_ident.c"),
         (Join-Path $driversDir "control/ramp_transient_ident.c"),

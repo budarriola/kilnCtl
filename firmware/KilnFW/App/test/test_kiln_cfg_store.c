@@ -292,6 +292,15 @@ extern void test_safety_cfg_store_stage_page_for_kiln_cfg_store_test(size_t page
                                                                        const uint16_t *ids, const uint16_t *vals,
                                                                        size_t n);
 
+// test_safety_cfg_store.c's SECOND staging helper (owner decision
+// 2026-09-16), for seeding a real F32 value -- see its own comment.
+extern void test_safety_cfg_store_stage_f32_for_kiln_cfg_store_test(size_t page_idx, uint16_t id, float value);
+
+// test_safety_cfg_store.c's THIRD staging helper (owner decisions
+// 2026-09-16): resets the live safety_cfg_store cache to empty, so a seed
+// staged by one test cannot leak into the next.
+extern void test_safety_cfg_store_reset_for_kiln_cfg_store_test(void);
+
 // ---------------------------------------------------------------------------
 // Test scaffolding
 // ---------------------------------------------------------------------------
@@ -299,6 +308,26 @@ extern void test_safety_cfg_store_stage_page_for_kiln_cfg_store_test(size_t page
 static void reset_state(void)
 {
     reset_to_defaults(); // kiln_cfg_store.c's own static helper -- s_store to empty/no-active
+    test_safety_cfg_store_reset_for_kiln_cfg_store_test(); // safety_cfg_store.c's live cache, real
+                                                            // module linked once -- see that seam's
+                                                            // own comment (owner decisions 2026-09-16)
+    // reset_to_defaults() above does NOT (and must not) reset safety_cfg_
+    // store.c's own s_cache_generation -- that counter is a real,
+    // monotonic, whole-run value (bumped once per successful refetch) and
+    // is not part of the cache contents reset_to_defaults() clears. But
+    // s_stub_latch_evaluated_generation (this file's stand-in for
+    // safety_ceiling_sync's own latch-evaluated generation, see its
+    // comment above) defaults to 0 and is untouched by reset_to_defaults()
+    // too -- once any test in the run calls safety_cfg_store_refetch() the
+    // real counter moves past 0 permanently, and every LATER test that
+    // relies on kiln_cfg_store_autosave_from_live()'s "no race" path (stub
+    // generation == real generation) would then spuriously read as
+    // diverged forever, since nothing ever re-syncs the two. Re-sync here,
+    // every test, to the real counter's CURRENT value: this is the "no
+    // race, matches what was just evaluated" baseline every test other
+    // than the one race test explicitly wants, and it is what all these
+    // tests got for free before board-id tests started calling refetch().
+    s_stub_latch_evaluated_generation = safety_cfg_store_cache_generation();
     // H3 (docs/audits/kiln_profiles_robustness_2026-09-14.md): quarantine
     // state is process-wide static (like s_store itself), set only by
     // nvs_load_store() -- reset it here too, or a quarantine test earlier
@@ -326,7 +355,10 @@ static void reset_state(void)
 
     s_stub_ceiling_diverged = false;
     s_stub_standing_diverged = false;
-    s_stub_latch_evaluated_generation = 0;
+    // NOT zeroed -- re-synced to the real (whole-run, monotonic) generation
+    // counter earlier in this function instead; see that assignment's own
+    // comment. Zeroing it here unconditionally used to silently re-break
+    // that sync on every call (this line ran AFTER it).
 }
 
 // ---------------------------------------------------------------------------
@@ -369,7 +401,7 @@ static void test_save_clone_apply_roundtrip(void)
     // Applying the clone should feed zones_config_import_blob() the SAME
     // bytes the clone copied from the source (proving the clone really did
     // copy the blob, not just the name).
-    ok = kiln_cfg_store_apply(id2, false, reason, sizeof(reason));
+    ok = kiln_cfg_store_apply(id2, false, false, reason, sizeof(reason));
     TEST_CHECK(ok, "apply of the clone succeeds (interlock OK, stub import accepts)");
     TEST_CHECK(s_stub_import_call_count == 1, "zones_config_import_blob() was called exactly once");
     TEST_CHECK(s_stub_import_last_len == s_stub_blob_size &&
@@ -610,7 +642,7 @@ static void test_apply_refused_while_run_active(void)
     // a backup restore path, a factory-reset routine) would do. The
     // assertion below only holds if the check lives INSIDE
     // kiln_cfg_store_apply() itself.
-    bool ok = kiln_cfg_store_apply(id, false, reason, sizeof(reason));
+    bool ok = kiln_cfg_store_apply(id, false, false, reason, sizeof(reason));
 
     TEST_CHECK(!ok, "apply is refused while a firing is running, even with no caller pre-check");
     TEST_CHECK(strcmp(reason, "a firing is currently running") == 0,
@@ -723,7 +755,7 @@ static void test_apply_refuses_half_package(void)
 
     int import_calls_before = s_stub_import_call_count;
     reason[0] = '\0';
-    bool ok = kiln_cfg_store_apply(id, false, reason, sizeof(reason));
+    bool ok = kiln_cfg_store_apply(id, false, false, reason, sizeof(reason));
     TEST_CHECK(!ok, "apply of a half-package slot is refused");
     TEST_CHECK(strstr(reason, "Half Package") != NULL && strstr(reason, "safety processor") != NULL,
                "the refusal names the slot and explains why");
@@ -737,7 +769,7 @@ static void test_apply_refuses_half_package(void)
                "re-save (overwrite by id) completes the slot");
     TEST_CHECK(s_store.entries[idx].pico_populated, "re-save captured a real Pico half");
     reason[0] = '\0';
-    TEST_CHECK(kiln_cfg_store_apply(id, false, reason, sizeof(reason)), "apply now succeeds");
+    TEST_CHECK(kiln_cfg_store_apply(id, false, false, reason, sizeof(reason)), "apply now succeeds");
 }
 
 // docs/audits/kiln_profiles_robustness_2026-09-14.md H3: a corrupt store
@@ -822,7 +854,7 @@ static void test_newer_version_blob_refused_by_store(void)
             sizeof(s_stub_import_reason) - 1);
 
     reason[0] = '\0';
-    bool ok = kiln_cfg_store_apply(id, false, reason, sizeof(reason));
+    bool ok = kiln_cfg_store_apply(id, false, false, reason, sizeof(reason));
 
     TEST_CHECK(!ok, "apply is refused when the stored blob is newer than this firmware understands");
     TEST_CHECK(strstr(reason, "newer firmware") != NULL, "the specific refusal reason is propagated");
@@ -849,7 +881,7 @@ static void test_out_of_range_value_rejected_nothing_written(void)
     strncpy(s_stub_import_reason, "zone max_temp_c out of range", sizeof(s_stub_import_reason) - 1);
 
     reason[0] = '\0';
-    bool ok = kiln_cfg_store_apply(id_a, false, reason, sizeof(reason));
+    bool ok = kiln_cfg_store_apply(id_a, false, false, reason, sizeof(reason));
 
     TEST_CHECK(!ok, "apply is refused when a stored field fails re-validation");
     TEST_CHECK(strcmp(reason, "zone max_temp_c out of range") == 0, "the specific field reason is propagated");
@@ -2021,7 +2053,7 @@ static void test_import_refuses_abs_max_temp_c_tighter_than_zone_max(void)
     TEST_CHECK(json != NULL, "test scratch alloc");
     size_t len = 0;
     TEST_CHECK(kiln_package_export_json("TooHot", 1, (const uint8_t *)&cand, (uint16_t)sizeof(cand), &pico,
-                                        hash, json, KILN_PKG_JSON_MAX_LEN, &len),
+                                        hash, 0x11223344u, json, KILN_PKG_JSON_MAX_LEN, &len),
                "test setup: package JSON built");
 
     kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
@@ -2068,7 +2100,7 @@ static void test_import_refuses_abs_max_temp_c_above_firmware_ceiling(void)
     TEST_CHECK(json != NULL, "test scratch alloc");
     size_t len = 0;
     TEST_CHECK(kiln_package_export_json("WayTooHot", 1, (const uint8_t *)&cand, (uint16_t)sizeof(cand), &pico,
-                                        hash, json, KILN_PKG_JSON_MAX_LEN, &len),
+                                        hash, 0x11223344u, json, KILN_PKG_JSON_MAX_LEN, &len),
                "test setup: package JSON built");
 
     kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
@@ -2108,7 +2140,7 @@ static void test_import_refuses_missing_abs_max_temp_c_when_zone_configured(void
     TEST_CHECK(json != NULL, "test scratch alloc");
     size_t len = 0;
     TEST_CHECK(kiln_package_export_json("NoCeiling", 1, (const uint8_t *)&cand, (uint16_t)sizeof(cand), &pico,
-                                        hash, json, KILN_PKG_JSON_MAX_LEN, &len),
+                                        hash, 0x11223344u, json, KILN_PKG_JSON_MAX_LEN, &len),
                "test setup: package JSON built");
 
     int32_t new_id = -1;
@@ -2151,7 +2183,7 @@ static void test_import_accepts_abs_max_temp_c_at_or_above_zone_max(void)
     TEST_CHECK(json != NULL, "test scratch alloc");
     size_t len = 0;
     TEST_CHECK(kiln_package_export_json("JustRight", 1, (const uint8_t *)&cand, (uint16_t)sizeof(cand), &pico,
-                                        hash, json, KILN_PKG_JSON_MAX_LEN, &len),
+                                        hash, 0x11223344u, json, KILN_PKG_JSON_MAX_LEN, &len),
                "test setup: package JSON built");
 
     int32_t new_id = -1;
@@ -2161,6 +2193,392 @@ static void test_import_accepts_abs_max_temp_c_at_or_above_zone_max(void)
     TEST_CHECK(new_id > 0, "a real slot was allocated");
 
     free(json);
+}
+
+// ---------------------------------------------------------------------------
+// Section 5.3 rows 2/3/4 at the kiln_cfg_store.c level (owner decisions
+// 2026-09-16, Defect 5): the source_board_id-driven calibration reset and
+// the ack_hardware_differs apply gate, both already covered at the
+// kiln_package.c contract level (test_kiln_package.c), exercised here
+// through the REAL kiln_cfg_store_save_current()/_export_package_json()/
+// _import_package_json()/_apply() pipeline.
+// ---------------------------------------------------------------------------
+
+// Seeds the live safety_cfg_store cache (real module, linked once via
+// test_safety_cfg_store.c's #include, see this file's top-of-file comment)
+// with ct_cal[0].calibrated=true and i_normal_a[0] SET to a real, nonzero
+// value, then a bool/topology triple all set, so kiln_cfg_store_save_current()
+// -> kiln_package_capture_pico_half() captures a slot whose pico half has
+// something for the foreign-board reset to actually clear.
+static void seed_live_pico_for_board_id_tests(void)
+{
+    uint16_t seed_ids[] = { 0x0316u, 0x0109u, 0x031Fu, 0x0211u }; // ct_cal[0].calibrated, ct_installed,
+                                                                  // ct_topology, safety_tc_installed
+    uint16_t seed_vals[] = { 1u, 1u, 0u, 1u };
+    test_safety_cfg_store_stage_page_for_kiln_cfg_store_test(0, /*more=*/true, seed_ids, seed_vals, 4);
+    test_safety_cfg_store_stage_f32_for_kiln_cfg_store_test(1, 0x031Au, 5.5f); // i_normal_a[0], page 1 --
+                                                                               // page 0 above must say
+                                                                               // more=true or refetch()
+                                                                               // stops before reading it
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    TEST_CHECK(safety_cfg_store_refetch(&fake_link, 0x00DDu), "test setup: live pico seed refetch succeeds");
+}
+
+// Looks up one param id's flags/value_bits in a captured kiln_pkg_safety_t --
+// test-local helper, not production code.
+static bool pico_find(const kiln_pkg_safety_t *pico, uint16_t param_id, uint8_t *flags_out,
+                       uint32_t *value_bits_out)
+{
+    for (uint16_t i = 0; i < pico->count; i++) {
+        if (pico->entries[i].param_id == param_id) {
+            if (flags_out) {
+                *flags_out = pico->entries[i].flags;
+            }
+            if (value_bits_out) {
+                *value_bits_out = pico->entries[i].value_bits;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+static void test_import_cross_board_forces_calibration_reset(void)
+{
+    TEST_SECTION("kiln_cfg_store_import_package_json -- section 5.3 rows 2/3: a package whose "
+                 "source_board_id differs from THIS board's own id has ct_cal[].calibrated forced to "
+                 "SET/false and i_normal_a[] forced UNSET on the resulting new slot");
+    reset_state();
+    kiln_board_identity_set_test_override(true, 0xAAAAAAAAu);
+    seed_live_pico_for_board_id_tests();
+
+    int32_t id1 = -1;
+    char reason[200] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("BoardA Kiln", -1, &id1, reason, sizeof(reason)), "save on board A "
+                                                                                              "succeeds");
+
+    char *json = (char *)malloc(KILN_CFG_EXPORT_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    TEST_CHECK(kiln_cfg_store_export_package_json(id1, json, KILN_CFG_EXPORT_JSON_MAX_LEN, &len, reason,
+                                                  sizeof(reason)),
+               "export from board A succeeds, embedding board A's own id as source_board_id");
+    char *name_digit = strstr(json, "\"name\":\"BoardA Kiln\"");
+    TEST_CHECK(name_digit != NULL, "found the name field to rename before import");
+    if (name_digit) {
+        memcpy(name_digit, "\"name\":\"BoardB Kiln\"", strlen("\"name\":\"BoardB Kiln\""));
+    }
+
+    // Switch to a DIFFERENT board identity before importing -- exactly the
+    // "upload this package on a different controller" scenario.
+    kiln_board_identity_set_test_override(true, 0xBBBBBBBBu);
+    int32_t id2 = -1;
+    reason[0] = '\0';
+    bool ok = kiln_cfg_store_import_package_json(json, &id2, reason, sizeof(reason));
+    TEST_CHECK(ok, "import onto a different board still succeeds -- the mismatch degrades calibration, "
+                   "it does not refuse the whole package");
+    TEST_CHECK(id2 > 0, "a real slot was allocated");
+
+    uint8_t blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+    uint16_t blob_len = 0;
+    kiln_pkg_safety_t pico2;
+    TEST_CHECK(kiln_cfg_store_get_full_package(id2, blob, sizeof(blob), &blob_len, &pico2, NULL, 0),
+               "read back the imported slot's pico half");
+    uint8_t cal_flags = 0;
+    uint32_t cal_bits = 0xFFFFFFFFu;
+    TEST_CHECK(pico_find(&pico2, 0x0316u, &cal_flags, &cal_bits), "ct_cal[0].calibrated is present");
+    TEST_CHECK((cal_flags & KILN_PKG_PARAM_FLAG_SET) != 0, "ct_cal[0].calibrated is SET (an explicit "
+                                                            "known-false, not left unknown)");
+    TEST_CHECK(cal_bits == 0, "ct_cal[0].calibrated's value is false");
+    uint8_t i_normal_flags = 0xFF;
+    TEST_CHECK(pico_find(&pico2, 0x031Au, &i_normal_flags, NULL), "i_normal_a[0] is present");
+    TEST_CHECK((i_normal_flags & KILN_PKG_PARAM_FLAG_SET) == 0, "i_normal_a[0] is forced UNSET, not "
+                                                                 "zeroed-but-set");
+
+    kiln_board_identity_set_test_override(false, 0);
+    free(json);
+}
+
+static void test_import_matching_board_preserves_calibration(void)
+{
+    TEST_SECTION("kiln_cfg_store_import_package_json -- section 5.3 rows 2/3: a package whose "
+                 "source_board_id MATCHES this board's own id leaves ct_cal[].calibrated and i_normal_a[] "
+                 "untouched");
+    reset_state();
+    kiln_board_identity_set_test_override(true, 0xCCCCCCCCu);
+    seed_live_pico_for_board_id_tests();
+
+    int32_t id1 = -1;
+    char reason[200] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Same Board Kiln", -1, &id1, reason, sizeof(reason)),
+               "save succeeds");
+
+    char *json = (char *)malloc(KILN_CFG_EXPORT_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    TEST_CHECK(kiln_cfg_store_export_package_json(id1, json, KILN_CFG_EXPORT_JSON_MAX_LEN, &len, reason,
+                                                  sizeof(reason)),
+               "export succeeds");
+    char *name_digit = strstr(json, "\"name\":\"Same Board Kiln\"");
+    TEST_CHECK(name_digit != NULL, "found the name field to rename before import");
+    if (name_digit) {
+        memcpy(name_digit, "\"name\":\"Same Board Kil2\"", strlen("\"name\":\"Same Board Kil2\""));
+    }
+
+    // Board identity is UNCHANGED -- still 0xCCCCCCCCu -- when importing.
+    int32_t id2 = -1;
+    reason[0] = '\0';
+    bool ok = kiln_cfg_store_import_package_json(json, &id2, reason, sizeof(reason));
+    TEST_CHECK(ok, "import succeeds");
+    TEST_CHECK(id2 > 0, "a real slot was allocated");
+
+    uint8_t blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+    uint16_t blob_len = 0;
+    kiln_pkg_safety_t pico1, pico2;
+    TEST_CHECK(kiln_cfg_store_get_full_package(id1, blob, sizeof(blob), &blob_len, &pico1, NULL, 0),
+               "read back the original slot's pico half");
+    TEST_CHECK(kiln_cfg_store_get_full_package(id2, blob, sizeof(blob), &blob_len, &pico2, NULL, 0),
+               "read back the imported slot's pico half");
+
+    uint8_t cal_flags1 = 0, cal_flags2 = 0;
+    uint32_t cal_bits1 = 0, cal_bits2 = 0xFFFFFFFFu;
+    TEST_CHECK(pico_find(&pico1, 0x0316u, &cal_flags1, &cal_bits1), "original: ct_cal[0].calibrated present");
+    TEST_CHECK(pico_find(&pico2, 0x0316u, &cal_flags2, &cal_bits2), "imported: ct_cal[0].calibrated present");
+    TEST_CHECK(cal_flags1 == cal_flags2 && cal_bits1 == cal_bits2, "calibrated is unchanged by a same-board "
+                                                                    "round trip");
+    TEST_CHECK((cal_flags2 & KILN_PKG_PARAM_FLAG_SET) != 0 && cal_bits2 != 0, "and it is still the TRUE "
+                                                                               "calibration this test seeded, "
+                                                                               "not incidentally false");
+
+    uint8_t inorm_flags1 = 0, inorm_flags2 = 0;
+    TEST_CHECK(pico_find(&pico1, 0x031Au, &inorm_flags1, NULL), "original: i_normal_a[0] present");
+    TEST_CHECK(pico_find(&pico2, 0x031Au, &inorm_flags2, NULL), "imported: i_normal_a[0] present");
+    TEST_CHECK((inorm_flags1 & KILN_PKG_PARAM_FLAG_SET) != 0, "original: i_normal_a[0] is SET (test setup "
+                                                               "sanity)");
+    TEST_CHECK(inorm_flags1 == inorm_flags2, "i_normal_a[0]'s SET-ness is unchanged by a same-board round "
+                                              "trip");
+
+    kiln_board_identity_set_test_override(false, 0);
+    free(json);
+}
+
+static void test_import_absent_source_board_id_forces_calibration_reset(void)
+{
+    TEST_SECTION("kiln_cfg_store_import_package_json -- section 5.3 rows 2/3, fail-safe half: a package "
+                 "with NO source_board_id field at all (an older package) is treated as foreign too, even "
+                 "when the importing board's identity happens to equal the ORIGINAL exporting board's id");
+    reset_state();
+    kiln_board_identity_set_test_override(true, 0xDDDDDDDDu);
+    seed_live_pico_for_board_id_tests();
+
+    int32_t id1 = -1;
+    char reason[200] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Old Package Kiln", -1, &id1, reason, sizeof(reason)),
+               "save succeeds");
+
+    char *json = (char *)malloc(KILN_CFG_EXPORT_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    TEST_CHECK(kiln_cfg_store_export_package_json(id1, json, KILN_CFG_EXPORT_JSON_MAX_LEN, &len, reason,
+                                                  sizeof(reason)),
+               "export succeeds");
+    char *name_digit = strstr(json, "\"name\":\"Old Package Kiln\"");
+    TEST_CHECK(name_digit != NULL, "found the name field to rename before import");
+    if (name_digit) {
+        memcpy(name_digit, "\"name\":\"Old Package Kil2\"", strlen("\"name\":\"Old Package Kil2\""));
+    }
+
+    // String-surgically remove the source_board_id field entirely -- same
+    // technique test_kiln_package.c's test_import_source_board_id_absent()
+    // uses at the kiln_package.c contract level, exercised here through the
+    // real kiln_cfg_store.c import pipeline instead.
+    char field[64];
+    snprintf(field, sizeof(field), "\"source_board_id\":\"0x%08x\",", (unsigned)0xDDDDDDDDu);
+    char *f = strstr(json, field);
+    TEST_CHECK(f != NULL, "found source_board_id field to remove");
+    if (f) {
+        size_t field_len = strlen(field);
+        memmove(f, f + field_len, strlen(f + field_len) + 1);
+        len -= field_len;
+    }
+
+    // Board identity STAYS at 0xDDDDDDDDu -- the same id the package was
+    // originally exported from -- so the only thing that can make this
+    // import "foreign" is the field's absence, never a numeric mismatch.
+    int32_t id2 = -1;
+    reason[0] = '\0';
+    bool ok = kiln_cfg_store_import_package_json(json, &id2, reason, sizeof(reason));
+    TEST_CHECK(ok, "import succeeds despite the missing field -- absence degrades calibration, it does not "
+                   "refuse the package");
+    TEST_CHECK(id2 > 0, "a real slot was allocated");
+
+    uint8_t blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+    uint16_t blob_len = 0;
+    kiln_pkg_safety_t pico2;
+    TEST_CHECK(kiln_cfg_store_get_full_package(id2, blob, sizeof(blob), &blob_len, &pico2, NULL, 0),
+               "read back the imported slot's pico half");
+    uint8_t cal_flags = 0;
+    uint32_t cal_bits = 0xFFFFFFFFu;
+    TEST_CHECK(pico_find(&pico2, 0x0316u, &cal_flags, &cal_bits), "ct_cal[0].calibrated is present");
+    TEST_CHECK((cal_flags & KILN_PKG_PARAM_FLAG_SET) != 0 && cal_bits == 0, "calibrated was fail-safe reset "
+                                                                            "to a known false, same as the "
+                                                                            "cross-board case, purely because "
+                                                                            "the field was absent");
+    uint8_t inorm_flags = 0xFF;
+    TEST_CHECK(pico_find(&pico2, 0x031Au, &inorm_flags, NULL), "i_normal_a[0] is present");
+    TEST_CHECK((inorm_flags & KILN_PKG_PARAM_FLAG_SET) == 0, "i_normal_a[0] is forced UNSET on an absent "
+                                                              "source_board_id too");
+
+    kiln_board_identity_set_test_override(false, 0);
+    free(json);
+}
+
+static void test_apply_refuses_hardware_mismatch_without_ack(void)
+{
+    TEST_SECTION("kiln_cfg_store_apply -- section 5.3 table row 4: refuses when a saved slot's packaged "
+                 "ct_installed/ct_topology/safety_tc_installed differs from what this controller's live "
+                 "safety_cfg_store cache currently reports, unless ack_hardware_differs is true");
+    reset_state();
+    kiln_board_identity_set_test_override(true, 0xEEEEEEEEu);
+
+    // Seed the live cache with ct_installed=1 (SET), matching what the
+    // about-to-be-saved slot's own pico half will also capture (both come
+    // from the SAME live cache at save time) -- then, AFTER saving, change
+    // the LIVE cache's ct_installed to 0, simulating a real hardware-shape
+    // change discovered later (a CT unplugged, a board reconfigured), so the
+    // saved slot and the live board now genuinely disagree.
+    uint16_t seed_ids[] = { 0x0109u, 0x031Fu, 0x0211u };
+    uint16_t seed_vals[] = { 1u, 0u, 1u };
+    test_safety_cfg_store_stage_page_for_kiln_cfg_store_test(0, false, seed_ids, seed_vals, 3);
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    TEST_CHECK(safety_cfg_store_refetch(&fake_link, 0x00EEu), "test setup: initial live seed refetch succeeds");
+
+    int32_t id1 = -1;
+    char reason[200] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("HW Kiln", -1, &id1, reason, sizeof(reason)), "save succeeds, "
+                                                                                          "capturing "
+                                                                                          "ct_installed=1");
+
+    // Now the live board's ct_installed changes to 0 -- a real disagreement.
+    uint16_t seed_vals2[] = { 0u, 0u, 1u };
+    test_safety_cfg_store_stage_page_for_kiln_cfg_store_test(0, false, seed_ids, seed_vals2, 3);
+    TEST_CHECK(safety_cfg_store_refetch(&fake_link, 0x00EFu), "test setup: changed live seed refetch "
+                                                               "succeeds");
+
+    reason[0] = '\0';
+    bool refused = kiln_cfg_store_apply(id1, /*ack_no_safety_processor=*/true, /*ack_hardware_differs=*/false,
+                                        reason, sizeof(reason));
+    TEST_CHECK(!refused, "apply is refused without the ack");
+    TEST_CHECK(strstr(reason, "ct_installed") != NULL, "reason names the specific differing field");
+
+    kiln_board_identity_set_test_override(false, 0);
+}
+
+static void test_apply_allows_hardware_mismatch_with_ack(void)
+{
+    TEST_SECTION("kiln_cfg_store_apply -- section 5.3 table row 4: the SAME real mismatch as the refuse-"
+                 "direction test succeeds once ack_hardware_differs is true -- the gate is a confirmation, "
+                 "not a hard refusal");
+    reset_state();
+    kiln_board_identity_set_test_override(true, 0xFFFFFFF1u);
+
+    uint16_t seed_ids[] = { 0x0109u, 0x031Fu, 0x0211u };
+    uint16_t seed_vals[] = { 1u, 0u, 1u };
+    test_safety_cfg_store_stage_page_for_kiln_cfg_store_test(0, false, seed_ids, seed_vals, 3);
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    TEST_CHECK(safety_cfg_store_refetch(&fake_link, 0x00F0u), "test setup: initial live seed refetch "
+                                                               "succeeds");
+
+    int32_t id1 = -1;
+    char reason[200] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("HW Kiln 2", -1, &id1, reason, sizeof(reason)), "save succeeds");
+
+    uint16_t seed_vals2[] = { 0u, 0u, 1u };
+    test_safety_cfg_store_stage_page_for_kiln_cfg_store_test(0, false, seed_ids, seed_vals2, 3);
+    TEST_CHECK(safety_cfg_store_refetch(&fake_link, 0x00F1u), "test setup: changed live seed refetch "
+                                                               "succeeds");
+
+    reason[0] = '\0';
+    bool applied = kiln_cfg_store_apply(id1, /*ack_no_safety_processor=*/true, /*ack_hardware_differs=*/true,
+                                        reason, sizeof(reason));
+    TEST_CHECK(applied, "apply succeeds despite the real mismatch, because the caller explicitly "
+                        "acknowledged it");
+    TEST_CHECK(kiln_cfg_store_get_active_id() == id1, "the slot is now active");
+
+    kiln_board_identity_set_test_override(false, 0);
+}
+
+static void test_apply_refuses_live_ceiling_tighter_than_zone_max(void)
+{
+    TEST_SECTION("kiln_cfg_store_apply -- owner decision 2026-09-16: the apply-time live-ceiling re-check "
+                 "refuses when THIS controller's LIVE safety_cfg_store abs_max_temp_c is lower than the "
+                 "slot's highest configured zone max_temp_c, even though the slot's own PACKAGED "
+                 "abs_max_temp_c (checked at import time) was fine");
+    reset_state();
+    test_stub_zones_set_thermo_count(1);
+    zones_cfg_t cand;
+    memset(&cand, 0, sizeof(cand));
+    cand.zones[0].thermo_mask = 0x01;
+    cand.zones[0].max_temp_c = 1200.0f;
+    TEST_CHECK(sizeof(cand) <= sizeof(s_stub_export_content), "test assumption: zones_cfg_t fits the stub "
+                                                              "content buffer");
+    memcpy(s_stub_export_content, &cand, sizeof(cand));
+    s_stub_blob_size = sizeof(cand);
+
+    int32_t id1 = -1;
+    char reason[200] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Ceiling Kiln", -1, &id1, reason, sizeof(reason)), "save succeeds, "
+                                                                                              "capturing a "
+                                                                                              "1200 C zone "
+                                                                                              "ceiling");
+
+    // The LIVE board's own abs_max_temp_c is now (re-)commissioned to
+    // something LOWER than 1200 C -- e.g. a safety-processor firmware/
+    // config change made after this slot was saved.
+    test_safety_cfg_store_stage_f32_for_kiln_cfg_store_test(0, 0x0104u, 900.0f);
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    TEST_CHECK(safety_cfg_store_refetch(&fake_link, 0x0100u), "test setup: live ceiling seed refetch "
+                                                              "succeeds");
+
+    reason[0] = '\0';
+    bool applied = kiln_cfg_store_apply(id1, /*ack_no_safety_processor=*/true, /*ack_hardware_differs=*/true,
+                                        reason, sizeof(reason));
+    TEST_CHECK(!applied, "apply is refused -- the live ceiling is tighter than the kiln's own zone max, "
+                         "and NO ack bypasses this (it is never a confirmable hardware-shape difference)");
+    TEST_CHECK(strstr(reason, "abs_max_temp_c") != NULL, "reason names the ceiling field");
+}
+
+static void test_apply_skips_live_ceiling_check_when_live_unset(void)
+{
+    TEST_SECTION("kiln_cfg_store_apply -- owner decision 2026-09-16: non-regression -- when the live "
+                 "safety_cfg_store cache has no abs_max_temp_c reading at all (not yet commissioned, the "
+                 "state every OTHER apply test in this file already runs under), the new re-check is "
+                 "SKIPPED, never treated as a refusal");
+    reset_state();
+    test_stub_zones_set_thermo_count(1);
+    zones_cfg_t cand;
+    memset(&cand, 0, sizeof(cand));
+    cand.zones[0].thermo_mask = 0x01;
+    cand.zones[0].max_temp_c = 1200.0f;
+    memcpy(s_stub_export_content, &cand, sizeof(cand));
+    s_stub_blob_size = sizeof(cand);
+
+    int32_t id1 = -1;
+    char reason[200] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Uncommissioned Kiln", -1, &id1, reason, sizeof(reason)),
+               "save succeeds");
+
+    // No live seed/refetch at all -- the live cache starts and stays empty,
+    // exactly like every pre-existing apply test in this file.
+    reason[0] = '\0';
+    bool applied = kiln_cfg_store_apply(id1, /*ack_no_safety_processor=*/true, /*ack_hardware_differs=*/true,
+                                        reason, sizeof(reason));
+    TEST_CHECK(applied, "apply succeeds -- an uncommissioned live board is not treated as a ceiling "
+                        "violation");
 }
 
 // ---------------------------------------------------------------------------
@@ -2724,7 +3142,7 @@ static void test_apply_autosave_targets_incoming_slot_via_real_override(void)
         s_stub_export_content[i] = (uint8_t)(i + 100); // B's bytes, matching what B was saved with
     }
     s_stub_autosave_during_import = true;
-    bool applied = kiln_cfg_store_apply(id_b, /*ack_no_safety_processor=*/true, reason, sizeof(reason));
+    bool applied = kiln_cfg_store_apply(id_b, /*ack_no_safety_processor=*/true, false, reason, sizeof(reason));
     s_stub_autosave_during_import = false;
     TEST_CHECK(applied, "apply succeeds");
     TEST_CHECK(kiln_cfg_store_get_active_id() == id_b, "active_id moved to B after apply returned");
@@ -2795,6 +3213,13 @@ void run_test_kiln_cfg_store(void)
     test_import_refuses_abs_max_temp_c_above_firmware_ceiling();
     test_import_refuses_missing_abs_max_temp_c_when_zone_configured();
     test_import_accepts_abs_max_temp_c_at_or_above_zone_max();
+    test_import_cross_board_forces_calibration_reset();
+    test_import_matching_board_preserves_calibration();
+    test_import_absent_source_board_id_forces_calibration_reset();
+    test_apply_refuses_hardware_mismatch_without_ack();
+    test_apply_allows_hardware_mismatch_with_ack();
+    test_apply_refuses_live_ceiling_tighter_than_zone_max();
+    test_apply_skips_live_ceiling_check_when_live_unset();
     test_autosave_from_live_noop_with_no_active_config();
     test_autosave_from_live_updates_active_slot_and_hash();
     test_autosave_override_ignores_a_foreign_dispatcher();

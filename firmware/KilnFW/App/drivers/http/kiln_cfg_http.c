@@ -17,6 +17,24 @@
 
 static const char *TAG = "kiln_cfg_http";
 
+/* Section 5.3 table row 4 (2026-09-16): same per-request header-ack shape as
+ * ota_http.c's OTA_ACK_NO_SAFETY_HEADER/ota_http_req_ack_no_safety() --
+ * deliberately not a new shape, per that function's own precedent, and not
+ * covered by the request HMAC for the same reason ota_http.c's header
+ * documents theirs isn't: this only relaxes a LOCAL policy check
+ * (kiln_cfg_store_apply()'s own hardware-shape comparison), never a
+ * safety-link/authentication decision. */
+#define KILN_CFG_ACK_HW_DIFFERS_HEADER "X-Kiln-Ack-Hardware-Differs"
+
+static bool req_ack_hardware_differs(httpd_req_t *req)
+{
+    char val[8];
+    if (httpd_req_get_hdr_value_str(req, KILN_CFG_ACK_HW_DIFFERS_HEADER, val, sizeof(val)) != ESP_OK) {
+        return false;
+    }
+    return val[0] == '1';
+}
+
 /* Small bodies only -- id=<int>[&name=<str up to KILN_CFG_NAME_MAX_LEN>].
  * Generous headroom over what a legitimate request needs, same discipline
  * as every other small-form handler in this codebase (profiles_http.c's
@@ -299,7 +317,8 @@ static esp_err_t apply_post_handler(httpd_req_t *req)
 
     char apply_reason[96];
     apply_reason[0] = '\0';
-    if (!kiln_cfg_store_apply(id, ack, apply_reason, sizeof(apply_reason))) {
+    const bool ack_hw = req_ack_hardware_differs(req);
+    if (!kiln_cfg_store_apply(id, ack, ack_hw, apply_reason, sizeof(apply_reason))) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, apply_reason[0] ? apply_reason : "apply failed");
         return ESP_OK;
     }
