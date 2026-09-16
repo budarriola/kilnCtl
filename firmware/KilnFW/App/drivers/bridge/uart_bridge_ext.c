@@ -311,6 +311,32 @@ static TaskHandle_t      s_bx_worker_task_handle;
 static bx_job_fn         s_bx_posted_fn;
 static SemaphoreHandle_t s_bx_post_lock;
 
+/* ONE-POSTER INVARIANT (2026-09-16, deliberately omitted from c616391d only
+ * to keep that commit byte-identical with its pre-rebase original).
+ *
+ * Coalescing this slot to a single outstanding post is content-safe TODAY
+ * only by accident of who uses it: the one poster's job carries no content
+ * (flash_worker.h: "a posted fn takes its inputs from module state") and
+ * re-reads that state when it finally runs, so collapsing two posts of the
+ * SAME fn loses nothing.
+ *
+ * The failure mode that is NOT guarded by that argument, and which this
+ * repo has lost data to before: a SECOND poster whose pending work is
+ * encoded in module state that a coalesced post overwrites -- or, more
+ * simply, two posters whose jobs are different functions, where the second
+ * post is refused with ESP_ERR_INVALID_STATE and the first poster's job is
+ * the only one that ever runs. Each poster's own retry loop then looks
+ * healthy while one of them silently never executes.
+ *
+ * So the slot remembers the fn of the first accepted post and REFUSES a
+ * different one loudly rather than silently coalescing across posters. This
+ * is a tripwire, not a feature: a genuine second poster is not forbidden
+ * forever, it just has to come here, read the paragraph above, and give the
+ * slot a real per-poster identity (or a small queue) first. Refusing while
+ * logging every attempt is the failure shape this codebase prefers -- loud
+ * and repeated, never silent. */
+static bx_job_fn         s_bx_post_owner_fn;
+
 /* Claims the posted job, if any, and clears the slot. s_bx_post_lock is
  * held ONLY across the pointer swap, never across the job itself -- this
  * repo's standing "never hold a lock across a producer or blocking call"
@@ -632,7 +658,16 @@ esp_err_t uart_bridge_ext_post_on_flash_worker(void (*fn)(void *arg))
          * state and retry on a later tick, so coalescing to one outstanding
          * post is correct and keeps this slot O(1). */
         err = ESP_ERR_INVALID_STATE;
+    } else if (s_bx_post_owner_fn && s_bx_post_owner_fn != fn) {
+        /* ONE-POSTER INVARIANT above. Not a coalescing refusal -- a second
+         * distinct poster, which this slot cannot serve safely. */
+        ESP_LOGE(UART_BRIDGE_EXT_TAG,
+                 "posted-job slot has exactly one poster (%p); a SECOND poster (%p) was refused -- see the "
+                 "ONE-POSTER INVARIANT comment in uart_bridge_ext.c before adding one",
+                 (void *)s_bx_post_owner_fn, (void *)fn);
+        err = ESP_ERR_NOT_SUPPORTED;
     } else {
+        s_bx_post_owner_fn = fn;
         s_bx_posted_fn = fn;
         err = ESP_OK;
     }
