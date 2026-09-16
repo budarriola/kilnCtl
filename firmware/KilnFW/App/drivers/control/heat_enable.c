@@ -7,13 +7,23 @@
 
 static const char *TAG = "heat_enable";
 
-/* Bound on how long send_enable() will wait for an owed release to clear the
- * wire before it gives up and defers the enable=true instead of risking a
- * reorder -- see he_flush_release_blocking() below. 20 x 10 ms = 200 ms,
- * comfortably under SAFETY_XACT_LOCK_TIMEOUT_MS/SAFETY_LINK_REPLY_TIMEOUT_MS
- * (safety_link.c), so a healthy link's own release exchange always finishes
- * inside this window; a link that is not healthy fails the release exchange
- * itself quickly rather than hanging it. */
+/* Passive-poll budget for he_flush_release_blocking(): HE_FLUSH_MAX_ATTEMPTS x
+ * HE_FLUSH_RETRY_MS = 200 ms of lock-check-and-sleep, spent waiting for a
+ * release that is ALREADY in flight (someone else's send) to land.
+ *
+ * 2026-09-15 review of 059a896e, HIGH-1: this comment used to claim 200 ms
+ * was the function's TOTAL bound, which was wrong -- the old loop body called
+ * heat_enable_service_pending_release() itself every iteration, and that call
+ * runs the blocking link exchange, not a poll. The true worst case is ONE
+ * such exchange -- bounded by SAFETY_XACT_LOCK_TIMEOUT_MS (5000 ms,
+ * safety_link_internal.h) plus a reply wait of about 345 ms
+ * (SAFETY_LINK_REPLY_TIMEOUT_MS, safety_link.h) -- plus this 200 ms passive
+ * poll on top, i.e. roughly 5.5 s, not 200 ms. That whole worst case now runs
+ * on whichever task calls heat_enable_acquire() (httpd, the UART bridge, or
+ * profile_executor/autotune_engine's own tick), because he_flush_release_
+ * blocking() is only ever allowed to DRIVE the blocking exchange once per
+ * call -- see its own comment. This constant only bounds the passive-poll
+ * remainder. */
 #define HE_FLUSH_MAX_ATTEMPTS 20
 #define HE_FLUSH_RETRY_MS     10
 
@@ -113,21 +123,50 @@ void heat_enable_init(SafetyLinkClass *safety_or_null)
  * Returns false (without having sent enable=true) if the wait times out;
  * the caller must treat that exactly like a down link -- do not send, mark
  * pending, let heat_enable_reconcile() retry. Never holds s_he.lock across
- * the wait or the blocking send it drives. */
+ * the wait or the blocking send it drives.
+ *
+ * 2026-09-15 review of 059a896e, HIGH-1: the retry loop used to call
+ * heat_enable_service_pending_release() -- the BLOCKING send -- on every one
+ * of its up to HE_FLUSH_MAX_ATTEMPTS iterations. Each of those can itself
+ * take a full link exchange, so the real worst case was attempts x exchange
+ * time, not the "200 ms" the old comment claimed; it also meant a caller
+ * could stack several ~5.3 s blocking exchanges back to back on its own
+ * stack. Fixed by driving the exchange AT MOST ONCE per call: if nothing is
+ * already in flight, drive it ourselves up front, then only PASSIVELY poll
+ * (lock-check-and-sleep, no send) for up to HE_FLUSH_MAX_ATTEMPTS x
+ * HE_FLUSH_RETRY_MS for it (or a concurrent servicer's own attempt) to clear.
+ * True worst case is now one exchange (~5.3 s) plus the 200 ms poll budget --
+ * see HE_FLUSH_MAX_ATTEMPTS's own comment -- never attempts x exchange. */
 static bool he_flush_release_blocking(void)
 {
+    bool taken = he_lock();
+    bool outstanding = s_he.release_pending || s_he.release_inflight;
+    bool other_inflight = s_he.release_inflight;
+    he_unlock(taken);
+    if (!outstanding) {
+        return true;
+    }
+
+    if (!other_inflight) {
+        /* Nobody else has committed to this send -- drive it ourselves,
+         * exactly once. If a concurrent servicer already owns it
+         * (other_inflight), driving it again here would just be a second
+         * caller racing the same exchange for no benefit, so skip straight
+         * to polling for their result instead. */
+        heat_enable_service_pending_release();
+    }
+
     for (int attempt = 0; attempt < HE_FLUSH_MAX_ATTEMPTS; attempt++) {
-        bool taken = he_lock();
-        bool outstanding = s_he.release_pending || s_he.release_inflight;
+        taken = he_lock();
+        outstanding = s_he.release_pending || s_he.release_inflight;
         he_unlock(taken);
         if (!outstanding) {
             return true;
         }
-        heat_enable_service_pending_release();
         vTaskDelay(pdMS_TO_TICKS(HE_FLUSH_RETRY_MS));
     }
-    bool taken = he_lock();
-    bool outstanding = s_he.release_pending || s_he.release_inflight;
+    taken = he_lock();
+    outstanding = s_he.release_pending || s_he.release_inflight;
     he_unlock(taken);
     return !outstanding;
 }
@@ -151,8 +190,8 @@ static bool send_enable(const char *why)
         he_unlock(taken);
         if (warn) {
             ESP_LOGE(TAG, "heat-enable request (%s) DEFERRED: a release is still in flight on the "
-                          "wire and did not clear within %d ms -- retried once it does (or by the "
-                          "watchdog's reconcile)",
+                          "wire and did not clear after a driven exchange plus %d ms of polling -- "
+                          "retried once it does (or by the watchdog's reconcile)",
                      why, HE_FLUSH_MAX_ATTEMPTS * HE_FLUSH_RETRY_MS);
         }
         return false;
@@ -195,21 +234,32 @@ static bool send_enable(const char *why)
         esp_err_t rel_err = safety_link_request_enable(s_he.safety, false);
         bool t2 = he_lock();
         s_he.release_sends++;
-        he_unlock(t2);
+        /* 2026-09-15 review of 059a896e, HIGH-3: this used to drop a failed
+         * compensating release on the floor -- exactly the LOW-5 defect the
+         * commit fixed for heat_enable_service_pending_release(), left
+         * unfixed here in the direction that matters most (heat left
+         * ENABLED, ESP believing it released). Queue it the same way:
+         * release_pending stays/becomes true, so safety_poll_task's next
+         * loop (or heat_enable_reconcile()'s own drain, once HIGH-2 restores
+         * it) retries via heat_enable_service_pending_release() instead of
+         * this failure being final. This was also a fire-and-forget (void)
+         * cast that logged the same "released again" line unconditionally --
+         * exactly the shape danger_mode.c's seed bug had; the relay is
+         * already off by this point (heat_enable.h's ordering rule), but the
+         * safety processor's own enable line can still be standing if this
+         * send failed, so name the failure rather than asserting it landed. */
         if (rel_err != ESP_OK) {
-            /* This was a fire-and-forget (void) cast that logged the same
-             * "released again" line unconditionally -- exactly the shape
-             * danger_mode.c's seed bug had. The relay is already off by this
-             * point (heat_enable.h's ordering rule), but the safety
-             * processor's own enable line can still be standing if this send
-             * failed, so name the failure rather than asserting it landed. */
-            ESP_LOGE(TAG, "heat-enable request (%s) landed after its last claimant let go -- "
-                          "release FAILED: %s -- the safety processor may still believe heating "
-                          "is permitted",
-                     why, esp_err_to_name(rel_err));
-        } else {
+            s_he.release_pending = true;
+        }
+        he_unlock(t2);
+        if (rel_err == ESP_OK) {
             ESP_LOGW(TAG, "heat-enable request (%s) landed after its last claimant let go -- released again",
                      why);
+        } else {
+            ESP_LOGE(TAG, "heat-enable request (%s) landed after its last claimant let go -- "
+                          "release FAILED: %s -- the safety processor may still believe heating "
+                          "is permitted -- queued for retry",
+                     why, esp_err_to_name(rel_err));
         }
         return false;
     }
@@ -401,19 +451,30 @@ bool heat_enable_retry_pending(void)
 
 void heat_enable_reconcile(void)
 {
-    /* 2026-09-15 review of 1c8d7f6e, finding HIGH-1/MEDIUM-4: give a stuck
-     * release a SECOND, independent driver. safety_poll_task normally drains
-     * release_pending every loop iteration, but review finding 4 notes there
-     * is no fallback sender if that task wedges -- before this fix a wedged
-     * poll task meant a release could sit owed forever. This module's own
-     * watchdog caller (profile_exec_wdt, WATCHDOG_CHECK_PERIOD_MS) already
-     * polls this function on a task independent of safety_poll_task, so
-     * driving the release drain from here too is a free second chance: a
-     * no-op when nothing is owed or another servicer already has it in
-     * flight (release_inflight), and otherwise it makes the same attempt
-     * safety_poll_task would have. This does NOT lengthen safety_poll_task's
-     * own loop -- that task's blocking behaviour is unchanged. */
-    heat_enable_service_pending_release();
+    /* 2026-09-15 review of 059a896e, HIGH-2: this function used to call
+     * heat_enable_service_pending_release() here as a "second, independent
+     * driver" for a stuck release (see the prior review's MEDIUM-4). That
+     * puts the full blocking UART release chain -- safety_exchange() and
+     * everything under it -- on profile_exec_wdt's stack, which is the SAME
+     * 4096 B size as profile_executor's, the exact task whose suspected
+     * stack overflow 1c8d7f6e existed to stop putting that chain on. The
+     * static checker cannot clear this: profile_exec_wdt is INDETERMINATE
+     * (unresolved indirect calls), so there was no headroom argument to fall
+     * back on, only the fact that nothing had blown up yet.
+     *
+     * Removed rather than kept "because it hasn't paniced" -- reconcile()
+     * goes back to what it did before 059a896e: retrying a STUCK ENABLE via
+     * send_enable() below (which is the shallow, mostly-bookkeeping path
+     * unless it actually has to drive a release flush -- see he_flush_
+     * release_blocking()'s own comment on why that is now bounded to at most
+     * one exchange). The gap this reopens -- no fallback driver for a stuck
+     * *release* if safety_poll_task itself wedges -- is the SAME gap that
+     * existed before 059a896e (prior review's MEDIUM-4); it is not made
+     * worse by this revert, and closing it belongs on a task with real
+     * headroom (safety_poll_task's own 8192 B, which already drains
+     * release_pending every loop) or a dedicated low-priority task, not on
+     * the watchdog. See docs/audits/review_executor_race_fix_059a896e_
+     * 2026-09-15.md finding HIGH-2. */
 
     bool taken = he_lock();
     bool want_retry = s_he.pending && s_he.held_mask != 0u && !s_he.granted;

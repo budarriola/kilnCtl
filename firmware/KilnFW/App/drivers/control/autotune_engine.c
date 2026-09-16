@@ -840,22 +840,27 @@ static void task_entry(void *arg)
         bool other_zone_active_hint = any_other_zone_profile_active(s_at.zone_index);
 
         xSemaphoreTake(s_at.lock, portMAX_DELAY);
-        if (!state_is_running(s_at.state)) {
+        bool not_running = !state_is_running(s_at.state);
+        if (!not_running) {
+            s_at.other_zone_profile_active_hint = other_zone_active_hint;
+            autotune_engine_tick_locked();
+        }
+        xSemaphoreGive(s_at.lock);
+
+        if (not_running) {
             /* Backstop, same shape and reasoning as profile_executor.c's in
              * its own not-RUNNING branch: a state that is not running must
              * not be holding the safety processor's permission to heat,
              * whether or not the transition that got here remembered to
              * release it. Sends at most one frame -- heat_enable_release()
-             * only puts anything on the wire on the last-claimant edge. */
+             * only puts anything on the wire on the last-claimant edge.
+             * 2026-09-15 review of 059a896e, MEDIUM-4: moved outside
+             * s_at.lock for consistency with the acquire side above, even
+             * though heat_enable_release() itself only defers bookkeeping
+             * and never blocks -- see heat_enable.c. */
             heat_enable_release(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
-            xSemaphoreGive(s_at.lock);
             continue;
         }
-
-        s_at.other_zone_profile_active_hint = other_zone_active_hint;
-        autotune_engine_tick_locked();
-
-        xSemaphoreGive(s_at.lock);
     }
 }
 
@@ -1332,20 +1337,23 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
     thermal_guard_reset(&s_at.guard_state);
 
     /* Ask the safety processor to permit heating -- i.e. close K4. Missing
-     * until 2026-08-29 (see heat_enable.h): every autotune this firmware has
-     * ever run drove its own zone relay against an open K4, so the element
-     * never carried current and every fit was made against a trace of a kiln
-     * that was never heated. Placed here, at the end of autotune_begin_run_locked(),
-     * because every refusal above has already returned and both callers
-     * (autotune_engine_run/_run_relay) go straight from here to setting a
-     * running state.
+     * until 2026-08-29 (see heat_enable.h), and NOT done here since the
+     * 2026-09-15 adversarial review of 059a896e (MEDIUM-4): this call used to
+     * happen right here, under s_at.lock, and heat_enable_acquire() can now
+     * run a blocking link exchange of its own (HIGH-1's he_flush_release_
+     * blocking(), ~5.5s worst case) -- holding s_at.lock across that is
+     * exactly the "never hold a module lock across a blocking call" rule this
+     * file's own lock-order comment elsewhere enforces. Every caller of
+     * autotune_begin_run_locked() (autotune_engine_run(), autotune_engine_
+     * run_to_target()) now calls heat_enable_acquire() itself, AFTER its own
+     * xSemaphoreGive(s_at.lock) -- see each call site's comment.
      *
-     * The return is not checked, and that is not the danger_mode.c mistake
-     * repeated: the ONLY failure is a down safety link, which
-     * relay_authority_on_blocked() above already refused this start over, and
-     * heat_enable_reconcile() (profile_executor.c's watchdog task) retries a
-     * link that drops and returns mid-run. heat_enable.c logs it loudly. */
-    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
+     * The return is still not checked there, and that is not the
+     * danger_mode.c mistake repeated: the ONLY failure is a down safety link,
+     * which relay_authority_on_blocked() above already refused this start
+     * over, and heat_enable_reconcile() (profile_executor.c's watchdog task)
+     * retries a link that drops and returns mid-run. heat_enable.c logs it
+     * loudly. */
 
     TickType_t now = xTaskGetTickCount();
     s_at.phase_start_tick = now;
@@ -1401,6 +1409,11 @@ bool autotune_engine_run(uint8_t zone_index, float step_duty, autotune_rule_t ru
     s_at.state = AUTOTUNE_ENGINE_SETTLING;
     bool no_ceiling = !(s_at.guard_cfg.max_temp_c > 0.0f);
     xSemaphoreGive(s_at.lock);
+
+    /* 2026-09-15 review of 059a896e, MEDIUM-4: moved out from under s_at.lock
+     * (see autotune_begin_run_locked()'s comment) -- this can now block for
+     * seconds. */
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
 
     ESP_LOGI(AT_TAG, "autotune zone %u starting: settling %us at duty 0 before stepping to %.2f", zone_index,
              AUTOTUNE_ENGINE_SETTLE_S, (double)step_duty);
@@ -1505,6 +1518,11 @@ bool autotune_engine_run_to_target(uint8_t zone_index, float target_c, autotune_
     s_at.guard_cfg.progress_duty_min = AUTOTUNE_PROGRESS_DUTY_MIN_FOR_STEP_TEST;
     s_at.state = AUTOTUNE_ENGINE_SETTLING;
     xSemaphoreGive(s_at.lock);
+
+    /* 2026-09-15 review of 059a896e, MEDIUM-4: moved out from under s_at.lock
+     * (see autotune_begin_run_locked()'s comment) -- this can now block for
+     * seconds. */
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
 
     ESP_LOGI(AT_TAG, "autotune zone %u starting target-temperature run: settling %us before probing at duty "
                   "%.2f, target %.1fC",

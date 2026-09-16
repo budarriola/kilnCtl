@@ -485,6 +485,108 @@ static void test_failed_release_is_retried_not_dropped(void)
     TEST_CHECK(release_sends() == 3, "and nothing more is sent once it has actually gone out");
 }
 
+static void test_flush_drives_the_exchange_at_most_once(void)
+{
+    TEST_SECTION("heat_enable -- 2026-09-15 review of 059a896e, HIGH-1: he_flush_release_blocking() "
+                 "must drive heat_enable_service_pending_release() at most ONCE per call, not once "
+                 "per retry iteration -- the old shape made HE_FLUSH_MAX_ATTEMPTS*HE_FLUSH_RETRY_MS "
+                 "a delay budget, not a wall-clock bound, since each of up to 20 iterations could "
+                 "itself run the full blocking safety_exchange() (SAFETY_XACT_LOCK_TIMEOUT_MS plus "
+                 "the reply wait) on the caller's own stack -- httpd or the UART bridge.");
+
+    char *text = heat_enable_read_source();
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/heat_enable.c to source-scan");
+        return;
+    }
+    const char *fn = strstr(text, "static bool he_flush_release_blocking(void)");
+    TEST_CHECK(fn != NULL, "sanity: he_flush_release_blocking()'s definition must be findable");
+    if (fn != NULL) {
+        const char *next_fn = strstr(fn + 1, "\nstatic bool send_enable(");
+        TEST_CHECK(next_fn != NULL, "sanity: the next function boundary must be findable");
+        if (next_fn != NULL) {
+            size_t body_len = (size_t)(next_fn - fn);
+            char *body = (char *)malloc(body_len + 1);
+            if (body) {
+                memcpy(body, fn, body_len);
+                body[body_len] = '\0';
+
+                int drive_calls = 0;
+                const char *p = body;
+                while ((p = strstr(p, "heat_enable_service_pending_release()")) != NULL) {
+                    drive_calls++;
+                    p += 1;
+                }
+                TEST_CHECK(drive_calls == 1,
+                           "MUST GO RED if he_flush_release_blocking() calls the blocking exchange "
+                           "zero times (nothing would ever drive a stuck release) or more than once "
+                           "(the retry loop would go back to driving the exchange on every "
+                           "iteration, recreating HIGH-1's unbounded caller-stack stall)");
+
+                // The one drive call, if present, must not be textually inside the
+                // "for (" retry loop -- i.e. it must appear before the loop's
+                // opening brace, not between it and its matching close. This
+                // suite's existing precedent (test_release_defers_the_wire_send_
+                // off_the_callers_stack()) already source-scans by function body;
+                // this pins the finer-grained "which half of the body" property a
+                // whole-body substring search can't distinguish.
+                const char *for_loop = strstr(body, "for (int attempt");
+                const char *drive_call = strstr(body, "heat_enable_service_pending_release()");
+                TEST_CHECK(for_loop != NULL, "sanity: the retry loop must be findable");
+                TEST_CHECK(drive_call != NULL && for_loop != NULL && drive_call < for_loop,
+                           "MUST GO RED if the single drive call moved to at or after the retry "
+                           "loop's start -- it must run once, before the passive-poll loop begins, "
+                           "not from inside it");
+
+                free(body);
+            }
+        }
+    }
+    free(text);
+}
+
+static void test_reconcile_never_drives_the_blocking_exchange_unconditionally(void)
+{
+    TEST_SECTION("heat_enable -- 2026-09-15 review of 059a896e, HIGH-2: heat_enable_reconcile() "
+                 "must not unconditionally call heat_enable_service_pending_release() (or "
+                 "he_flush_release_blocking()) on every watchdog tick -- that put the deep UART "
+                 "release chain on profile_exec_wdt's stack, the SAME 4096 B size as "
+                 "profile_executor's, the exact hazard 1c8d7f6e existed to remove, just relocated "
+                 "onto the guard task.");
+
+    char *text = heat_enable_read_source();
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/heat_enable.c to source-scan");
+        return;
+    }
+    const char *fn = strstr(text, "void heat_enable_reconcile(void)");
+    TEST_CHECK(fn != NULL, "sanity: heat_enable_reconcile()'s definition must be findable");
+    if (fn != NULL) {
+        const char *next_fn = strstr(fn + 1, "\nuint32_t heat_enable_enable_send_count(void)");
+        TEST_CHECK(next_fn != NULL, "sanity: the next function boundary must be findable");
+        if (next_fn != NULL) {
+            size_t body_len = (size_t)(next_fn - fn);
+            char *body = (char *)malloc(body_len + 1);
+            if (body) {
+                memcpy(body, fn, body_len);
+                body[body_len] = '\0';
+                // Skip past this function's own explanatory header comment
+                // (which, by necessity, names the very call it explains is no
+                // longer made here) before scanning the executable code.
+                char *code = strstr(body, "*/");
+                code = code ? code + 2 : body;
+                TEST_CHECK(strstr(code, "heat_enable_service_pending_release()") == NULL,
+                           "MUST GO RED if heat_enable_reconcile() goes back to calling "
+                           "heat_enable_service_pending_release() directly -- that call must only "
+                           "be reachable from here (if at all) conditionally, through send_enable()'s "
+                           "own retry path, never unconditionally on every tick");
+                free(body);
+            }
+        }
+    }
+    free(text);
+}
+
 static void test_bad_claimant(void)
 {
     TEST_SECTION("heat_enable -- an out-of-range claimant is refused, not indexed");
@@ -508,5 +610,7 @@ void run_test_heat_enable(void)
     test_reenable_never_races_ahead_of_a_pending_release();
     test_reenable_cannot_overtake_an_inflight_release();
     test_failed_release_is_retried_not_dropped();
+    test_flush_drives_the_exchange_at_most_once();
+    test_reconcile_never_drives_the_blocking_exchange_unconditionally();
     test_bad_claimant();
 }

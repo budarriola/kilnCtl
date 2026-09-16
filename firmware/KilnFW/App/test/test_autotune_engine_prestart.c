@@ -6289,8 +6289,75 @@ static void test_readiness_skips_a_zone_with_no_valid_reading_this_tick(void)
               "an unreadable zone must be skipped, not treated as a refusal-worthy hot zone");
 }
 
+static char *autotune_engine_read_source(void)
+{
+    static const char *const candidates[] = {
+        "../drivers/control/autotune_engine.c",
+        "App/drivers/control/autotune_engine.c",
+        "firmware/KilnFW/App/drivers/control/autotune_engine.c",
+    };
+    return test_read_source_anchored(__FILE__, "../drivers/control/autotune_engine.c", candidates,
+                                      sizeof(candidates) / sizeof(candidates[0]));
+}
+
+static bool source_scan_function_lacks(const char *text, const char *fn_sig, const char *next_fn_sig,
+                                        const char *forbidden, const char **out_reason)
+{
+    const char *fn = strstr(text, fn_sig);
+    if (!fn) {
+        *out_reason = "sanity: function definition not findable";
+        return false;
+    }
+    const char *next_fn = strstr(fn + 1, next_fn_sig);
+    if (!next_fn) {
+        *out_reason = "sanity: next function boundary not findable";
+        return false;
+    }
+    size_t body_len = (size_t)(next_fn - fn);
+    char *body = (char *)malloc(body_len + 1);
+    if (!body) {
+        *out_reason = "sanity: OOM";
+        return false;
+    }
+    memcpy(body, fn, body_len);
+    body[body_len] = '\0';
+    bool ok = (strstr(body, forbidden) == NULL);
+    free(body);
+    *out_reason = NULL;
+    return ok;
+}
+
+static void test_heat_enable_acquire_never_called_under_s_at_lock(void)
+{
+    TEST_SECTION("autotune_engine -- 2026-09-15 review of 059a896e, MEDIUM-4: heat_enable_acquire() "
+                 "must never be called from inside autotune_begin_run_locked() (which runs with "
+                 "s_at.lock already held) -- that call can now block for seconds (HIGH-1's real "
+                 "worst case), and CLAUDE.md's rule is never to hold a module lock across a "
+                 "blocking call. Each caller must acquire it itself, after releasing s_at.lock.");
+
+    char *text = autotune_engine_read_source();
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/control/autotune_engine.c to source-scan");
+        return;
+    }
+
+    const char *reason = NULL;
+    bool ok = source_scan_function_lacks(text, "bool autotune_begin_run_locked(uint8_t zone_index",
+                                          "\nbool autotune_engine_run(uint8_t zone_index",
+                                          "heat_enable_acquire(HEAT_ENABLE_CLAIMANT_AUTOTUNE)", &reason);
+    if (reason) {
+        TEST_CHECK(false, reason);
+    } else {
+        TEST_CHECK(ok, "MUST GO RED if autotune_begin_run_locked() calls heat_enable_acquire() "
+                       "again while s_at.lock is held -- move it back out to each caller");
+    }
+
+    free(text);
+}
+
 void run_test_autotune_engine_prestart(void)
 {
+    test_heat_enable_acquire_never_called_under_s_at_lock();
     test_run_refuses_before_start();
     test_run_relay_refuses_before_start();
     test_begin_run_refused_by_readiness_recovery_mode();
