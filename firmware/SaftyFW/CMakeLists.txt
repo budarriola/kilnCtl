@@ -135,6 +135,10 @@ set(SAFTYFW_APP_SOURCES
     src/tasks/current_task.c
     src/tasks/console_uart.c
     src/tasks/link_frame.c
+    # Pure tc-type heat-safety gate decision, split out of link_task.c's
+    # link_task_heat_is_safe_for_tc_type_change() so it is host-testable
+    # (test/test_link_task_tc_type_gate.c) -- see link_task_tc_type_gate.h.
+    src/tasks/link_task_tc_type_gate.c
     src/tasks/link_task.c
     # Pure Frame B (DIAG) `flags` byte assembly, split out of link_task.c's
     # link_task_send_diag() so it is host-testable (test/test_link_diag_

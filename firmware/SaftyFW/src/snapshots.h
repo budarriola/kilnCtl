@@ -109,6 +109,12 @@ typedef struct {
 #define CONTEXT_FLAG_HEAT_REQUESTED   0x04u
 #define CONTEXT_FLAG_CONTEXT_VALID    0x08u
 #define CONTEXT_FLAG_SIM_PLANT        0x10u
+// 2026-09-15 Opus re-review N1 -- mirrors kilnlink_context.h's
+// KILNLINK_CONTEXT_FLAG_HEAT_OWNER_ACTIVE (see that header for the full
+// definition of what this bit means). "reset one side of a pair" class:
+// this file's flag values are a hand-kept mirror of kilnlink_context.h's,
+// not a shared type -- any new bit added there must be added here too.
+#define CONTEXT_FLAG_HEAT_OWNER_ACTIVE 0x20u
 
 // Per-zone flags byte (wire offset 1 of each 14-byte zone block).
 #define CONTEXT_ZONE_FLAG_MEASURED_VALID 0x01u
