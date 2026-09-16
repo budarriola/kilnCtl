@@ -22,33 +22,47 @@
 # against a worktree checked out EXACTLY at that fetched ref -- no
 # uncommitted edits, no local-tree mirroring of tracked files.
 #
-# ONE DELIBERATE EXCEPTION, and the claim above is overstated without saying
-# so (2026-09-10, opus review round 2): `sdkconfig` is gitignored (see
-# docs/CONFIG_FILESYSTEM.md and the "gitignored config hides mismatch"
-# lesson elsewhere in this repo's history) and is NOT part of what a fresh
-# `git pull` on origin/main hands another session at all -- ESP-IDF cannot
-# build without one, so this check copies a real board-tuned sdkconfig into
-# the worktree below (hash-verified after the copy) rather than fabricating
-# a default one: the invoking tree's own if it has one, otherwise the main
-# worktree's (see the seed-resolution block further down -- this paragraph
-# claimed "the MAIN TREE's" while the code in fact read only the invoking
-# tree's and skipped outright when it was absent). That means this check does NOT actually prove
-# "a fresh clone of origin/main builds" -- it proves "origin/main's SOURCE
-# builds against whatever board config happens to be sitting in the machine
-# running this check". A push that changes a Kconfig default, or that
-# depends on a config symbol this machine's sdkconfig happens to set but a
-# fresh `idf.py menuconfig` would not, still passes here even though it
-# would not build cleanly for another session starting from scratch.
-# Seeding from somewhere is unavoidable (a bare origin/main checkout has no
-# sdkconfig at all, and idf.py cannot proceed without one) and the main
-# tree's own committed-adjacent, board-tuned config is the least-wrong
-# available source -- but the exception is real, not merely theoretical:
-# see feedback_gitignored_config_hides_mismatch.md's FT6336U incident. A
-# stronger version of this check would build against a MINIMAL/default
-# sdkconfig (`idf.py set-target` + whatever `sdkconfig.defaults` this repo
-# commits, if any) as a SECOND, separate run, specifically to catch a
-# Kconfig-default drift this seeded-config run cannot see by construction --
-# not attempted here today; flagged as a real gap, not "not applicable".
+# NO SDKCONFIG SEEDING, AND WHY THAT IS NOW CORRECT (2026-09-16).
+# Earlier revisions of this check copied a board-tuned `sdkconfig` from the
+# invoking tree (later, falling back to the main worktree's) into the build
+# worktree below, on the stated grounds that `sdkconfig` is gitignored, that
+# ESP-IDF cannot build without one, and -- critically -- that regenerating
+# one from Kconfig defaults would silently target plain `esp32` because
+# `firmware/KilnFW/sdkconfig.defaults` pinned no CONFIG_IDF_TARGET.
+#
+# THAT LAST PREMISE WAS FALSE WHEN IT WAS WRITTEN. 827dd887 added
+# CONFIG_IDF_TARGET="esp32s3" to sdkconfig.defaults, and 827dd887 is an
+# ANCESTOR of e15ad517, the commit that wrote the justification quoting it
+# (`git merge-base --is-ancestor 827dd887 e15ad517` exits 0). The target has
+# been pinned in committed, tracked content this whole time.
+#
+# Verified directly rather than reasoned about, 2026-09-16: a fresh
+# `git worktree add` at origin/main with NO sdkconfig of any kind, lvgl
+# initialized and nothing else provisioned, runs `idf.py build` to exit 0,
+# compiles with xtensa-esp32s3-elf-gcc ("Building ESP-IDF components for
+# target esp32s3"), and the sdkconfig it generates contains
+# CONFIG_IDF_TARGET="esp32s3". No other setting in the main tree's sdkconfig
+# proved load-bearing for the build.
+#
+# So the seed is not merely unnecessary -- it was the thing standing between
+# this check and the stronger check the old header itself wished for. With it
+# gone, this check now builds against nothing but committed content plus
+# `sdkconfig.defaults`, which is exactly what a fresh clone of origin/main
+# gets. It therefore DOES now prove "a fresh clone of origin/main builds",
+# and it catches the Kconfig-default drift the seeded run could not see by
+# construction (feedback_gitignored_config_hides_mismatch.md's FT6336U
+# incident is that class). Three defects went with the seed: a SHA256
+# "integrity" comparison taken AFTER the copy, comparing the copy against its
+# own source (a source file caught mid-write hashed identically on both sides
+# and passed); a cross-worktree read reaching outside this check's own
+# hermetic inputs; and a missing-sdkconfig FAIL that reported a purely local
+# provisioning gap in this check's own origin/main-is-broken language.
+#
+# What this check still does NOT prove: that the binary it produces matches
+# what the bench board runs. The board's own tuned sdkconfig may differ from
+# sdkconfig.defaults, and catching THAT divergence is check_00's job (it
+# mirrors the local tree and deliberately uses the board-tuned config), not
+# this one's. The two checks are now complementary rather than redundant.
 #
 # FAILURE MESSAGE CONTRACT: this check's FAILED text always says
 # "origin/main (commit <sha>) does not build" and points at investigating
@@ -86,20 +100,20 @@
 # SKIP CONTRACT: exit 3 with a line containing "SKIP" if there is no
 # network path to `git fetch origin`, no `origin` remote configured, or the
 # ESP-IDF toolchain profile script is not present. Any other failure to
-# actually invoke the compiler (worktree setup, sdkconfig mismatch,
-# submodule init) is a FAIL, never a silent PASS -- same contract as
-# check_00.
+# actually invoke the compiler (worktree setup, submodule init) is a FAIL,
+# never a silent PASS -- same contract as check_00.
 #
-# A MISSING sdkconfig IS NOT ON THAT LIST, deliberately (2026-09-16). It
-# used to be, in the code but never in this paragraph -- the code exited 3
-# for it while this contract described only the three prerequisites above.
-# Since sdkconfig is gitignored that skip fired in every clean worktree,
-# which is where this project verifies every commit, and a SKIP fails the
-# whole run_all_checks.ps1 run by default. It is now resolved against the
-# main worktree (see the seed-resolution block below) and, if genuinely
-# absent everywhere on the machine, is a FAIL: an absent board config is a
-# provisioning defect somebody must fix, not an absent toolchain to shrug
-# at.
+# sdkconfig is no longer on that list in either direction: this check does
+# not read, copy, or require one (see the no-seeding block above). The build
+# worktree generates its own from the committed sdkconfig.defaults.
+#
+# FAILURE ATTRIBUTION: not every FAIL here is origin/main's fault. A failed
+# `git worktree add` or a failed lvgl `submodule update --init` is a defect
+# in THIS machine's environment, and reporting it in this check's
+# "origin/main is broken, stop pulling it" language is actively harmful --
+# that is the one message that stops a whole team pulling. Such failures go
+# through Fail-Local, which says so plainly; only a genuine compile/link/
+# artifact failure against the fetched ref goes through Fail.
 
 $ErrorActionPreference = "Stop"
 $ErrorActionPreference = "Continue"
@@ -121,70 +135,34 @@ function Fail([string]$msg) {
     exit 1
 }
 
+# A local/environment failure -- this check could not SET UP a build, so it
+# never found out anything about origin/main. It must NOT inherit Fail's
+# "stop pulling origin/main" footer: that message is the one that halts
+# everyone else's work, and emitting it for a broken local git state or a
+# submodule that would not clone is a false accusation against the pushed
+# ref. Still exit 1, not 3 -- a machine that cannot set up this build is a
+# provisioning defect somebody must fix, not a prerequisite to shrug at.
+function Fail-Local([string]$msg) {
+    Write-Host ""
+    Write-Host "FAILED: could not set up the origin/main build -- $msg" -ForegroundColor Red
+    Write-Host "        This is a LOCAL/ENVIRONMENT failure, NOT a statement about" -ForegroundColor Red
+    Write-Host "        origin/main: this check never got as far as compiling it, so it" -ForegroundColor Red
+    Write-Host "        says nothing either way about whether the pushed ref builds." -ForegroundColor Red
+    Write-Host "        Fix this machine; do not treat it as a reason to stop pulling." -ForegroundColor Red
+    exit 1
+}
+
 if (-not (Test-Path $IdfProfile)) {
     Write-Host "SKIP: ESP-IDF profile script not found at $IdfProfile -- toolchain not installed on this machine" -ForegroundColor Yellow
     exit 3
 }
 
-# SDKCONFIG SEED RESOLUTION (2026-09-16).
-# ---------------------------------------
-# Until this revision this block looked ONLY at the INVOKING tree's
-# firmware\KilnFW\sdkconfig and exited 3 (SKIP) when it was absent -- while
-# saying "in the main tree", which is not the path it tested. Two problems,
-# both real:
-#
-#   * sdkconfig is gitignored, so a fresh worktree never has one. A clean
-#     worktree at origin/main is where every commit in this repo is actually
-#     verified, so this check SKIPped in exactly the situation it matters
-#     most -- and run_all_checks.ps1 fails the whole run on a SKIP by
-#     default, so an otherwise-green verification run exited non-zero and
-#     had to be explained away by hand every time.
-#   * The message sent the reader to the main tree to look for a file whose
-#     absence had been detected somewhere else entirely.
-#
-# Fix, the same one check_00_kilnfw_target_build.ps1 already makes for its
-# own identical need: prefer the invoking tree's own sdkconfig, fall back to
-# the MAIN worktree's board-tuned config and SAY SO, and if neither exists
-# FAIL rather than SKIP.
-#
-# WHY THE FALLBACK IS HONEST HERE SPECIFICALLY, not merely precedented.
-# This check's build worktree is reset --hard to the fetched origin/main
-# every run, so the SOURCE it compiles is byte-for-byte the pushed ref no
-# matter which tree invoked the check -- the invoking tree contributes
-# nothing to it. The seed config is the single exception, and the header
-# above already documents at length that this check proves "origin/main's
-# source builds against whatever board config is sitting on the machine
-# running this check", not "a fresh clone builds". Reaching that same
-# machine's same board-tuned file by a second path when the invoking tree
-# is a fresh worktree does not widen that exception by one bit: it is the
-# identical file, and the alternative on offer is not a stricter check but
-# no check at all. The genuine gap -- a Kconfig-default drift a seeded
-# config cannot see -- is unchanged by this, and is still flagged unfixed
-# in the header's ONE DELIBERATE EXCEPTION paragraph.
-#
-# Regenerating a config from Kconfig defaults instead is NOT an option, and
-# this is the reason a pinned-defaults answer was rejected rather than
-# merely not chosen: sdkconfig.defaults pins no CONFIG_IDF_TARGET, so a
-# regenerated config silently targets plain esp32 rather than esp32s3 and
-# dies on esp32s3-only code -- it would convert this check from a skip into
-# a red herring.
-$repoRootFull = ([System.IO.Path]::GetFullPath($repoRoot.Path)).TrimEnd('\')
-$mainWorktreeRaw = (((& git -C $repoRoot worktree list --porcelain) | Select-Object -First 1) -replace '^worktree\s+', '').Trim()
-if (-not $mainWorktreeRaw) {
-    Fail "could not determine the main worktree path ('git worktree list --porcelain' produced nothing for $repoRoot) -- refusing to guess where the board-tuned sdkconfig seed lives."
-}
-$mainWorktreeFull = ([System.IO.Path]::GetFullPath($mainWorktreeRaw.Replace('/', '\'))).TrimEnd('\')
-
-$MainSdkconfig = Join-Path $repoRoot "firmware\KilnFW\sdkconfig"
-if (-not (Test-Path -LiteralPath $MainSdkconfig)) {
-    $fallbackSdkconfig = Join-Path $mainWorktreeFull "firmware\KilnFW\sdkconfig"
-    if (Test-Path -LiteralPath $fallbackSdkconfig) {
-        Write-Host "NOTE: $repoRootFull has no firmware\KilnFW\sdkconfig (gitignored; absent in a fresh worktree) -- seeding this build from the main worktree's board-tuned config at $fallbackSdkconfig" -ForegroundColor Yellow
-        $MainSdkconfig = $fallbackSdkconfig
-    } else {
-        Fail "no firmware\KilnFW\sdkconfig in the invoking tree ($repoRootFull) and none in the main worktree ($mainWorktreeFull) either. This is the board-tuned config this check must not regenerate from Kconfig defaults (sdkconfig.defaults pins no CONFIG_IDF_TARGET, so a regenerated config would silently target esp32, not esp32s3). Run the IDE workspace setup, or copy a known-good sdkconfig into the main tree, before this check can say anything truthful about whether origin/main builds."
-    }
-}
+# NO SDKCONFIG SEED RESOLUTION HAPPENS HERE ANY MORE, deliberately: the
+# whole block that used to sit at this point is gone. See the no-seeding
+# section in the header for the evidence (827dd887 pinned
+# CONFIG_IDF_TARGET="esp32s3" in sdkconfig.defaults, and a fresh worktree
+# with no sdkconfig builds for esp32s3 at exit 0). Nothing outside this
+# check's own build worktree is read.
 
 # Fetch origin/main. A network-absent machine or a repo with no `origin`
 # remote is a missing prerequisite -- SKIP, not FAIL.
@@ -201,25 +179,16 @@ if (-not $originSha) {
     exit 3
 }
 
+# ONE SHARED BUILD WORKTREE IS CORRECT HERE, unlike check_00.
+# check_00 moved to a per-invoking-tree build directory in 0facf63e because
+# its build worktree MIRRORS the invoking tree, so two trees genuinely need
+# two directories. This check's worktree is reset --hard to the fetched
+# origin/main every run: its content is a pure function of origin/main and
+# is identical no matter who invokes it. Two concurrent runs therefore want
+# the SAME directory, serialized -- not two copies of it at ~425 MB each.
+# Serialization is the build lock below, which is why creating this worktree
+# now happens INSIDE that lock (see there).
 $WorktreePath = "C:\wt\checkbuild_origin_kilnfw"
-$WorktreeSdkconfig = Join-Path $WorktreePath "firmware\KilnFW\sdkconfig"
-
-if (-not (Test-Path $WorktreePath)) {
-    Write-Host "Setting up persistent origin/main build worktree at $WorktreePath (first run) ..."
-    & git -C $repoRoot worktree add --detach $WorktreePath $originSha 2>&1 | Write-Host
-    if ($LASTEXITCODE -ne 0) {
-        Fail "git worktree add failed (exit $LASTEXITCODE)"
-    }
-}
-
-$lvglGitFile = Join-Path $WorktreePath "firmware\KilnFW\components\lvgl\.git"
-if (-not (Test-Path $lvglGitFile)) {
-    Write-Host "Initializing lvgl submodule in worktree ..."
-    & git -C $WorktreePath submodule update --init firmware/KilnFW/components/lvgl 2>&1 | Write-Host
-    if ($LASTEXITCODE -ne 0) {
-        Fail "git submodule update --init for lvgl failed (exit $LASTEXITCODE)"
-    }
-}
 
 foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", "MSYS", "MSYS2_PATH_TYPE")) {
     if (Test-Path "Env:$v") { Remove-Item "Env:$v" }
@@ -227,6 +196,29 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
 
 $lock = Enter-BuildLock -Name "kilnfw_checkbuild_origin_worktree"
 try {
+    # CREATION IS INSIDE THE LOCK (2026-09-16). It used to sit above, outside
+    # it, so two concurrent first-runs from different trees both saw
+    # "directory absent" and both ran `git worktree add` at the same path --
+    # one of them failing, and taking a red check_01 with it, for a reason
+    # that had nothing to do with origin/main. The same applied to the lvgl
+    # submodule init. Both are now serialized with the build itself.
+    if (-not (Test-Path $WorktreePath)) {
+        Write-Host "Setting up persistent origin/main build worktree at $WorktreePath (first run) ..."
+        & git -C $repoRoot worktree add --detach $WorktreePath $originSha 2>&1 | Write-Host
+        if ($LASTEXITCODE -ne 0) {
+            Fail-Local "git worktree add at $WorktreePath failed (exit $LASTEXITCODE)"
+        }
+    }
+
+    $lvglGitFile = Join-Path $WorktreePath "firmware\KilnFW\components\lvgl\.git"
+    if (-not (Test-Path $lvglGitFile)) {
+        Write-Host "Initializing lvgl submodule in worktree ..."
+        & git -C $WorktreePath submodule update --init firmware/KilnFW/components/lvgl 2>&1 | Write-Host
+        if ($LASTEXITCODE -ne 0) {
+            Fail-Local "git submodule update --init for lvgl failed (exit $LASTEXITCODE)"
+        }
+    }
+
     Write-Host "Checking out origin/main ($originSha) in $WorktreePath, discarding any prior state there ..."
     # This worktree is dedicated to this check alone -- nothing else ever
     # writes into it deliberately -- so a hard reset to the fetched ref is
@@ -244,13 +236,19 @@ try {
     if ($LASTEXITCODE -ne 0) {
         Fail "git reset --hard $originSha in worktree failed (exit $LASTEXITCODE)"
     }
-    & git -C $WorktreePath clean -fdx -e build -e "components/lvgl" -e sdkconfig 2>&1 | Write-Host
+    # `sdkconfig` is no longer excluded from the clean, and any sdkconfig left
+    # behind by an older, seeding revision of this check is removed outright.
+    # Leaving one in place would silently keep this build running on a
+    # cross-worktree seed forever: idf.py reuses an existing sdkconfig and
+    # would never regenerate from sdkconfig.defaults, so the strengthening
+    # this change is for would be inert on exactly the machines that had run
+    # the old version -- i.e. all of them.
+    & git -C $WorktreePath clean -fdx -e build -e "components/lvgl" 2>&1 | Write-Host
 
-    Copy-Item -Path $MainSdkconfig -Destination $WorktreeSdkconfig -Force
-    $mainHash = (Get-FileHash $MainSdkconfig -Algorithm SHA256).Hash
-    $worktreeHash = (Get-FileHash $WorktreeSdkconfig -Algorithm SHA256).Hash
-    if ($mainHash -ne $worktreeHash) {
-        Fail "sdkconfig copy did not verify (hash mismatch) -- refusing to build against an unconfirmed config"
+    $WorktreeSdkconfig = Join-Path $WorktreePath "firmware\KilnFW\sdkconfig"
+    if (Test-Path -LiteralPath $WorktreeSdkconfig) {
+        Write-Host "Removing a pre-existing $WorktreeSdkconfig (leftover seed from an older revision of this check) so it is regenerated from the committed sdkconfig.defaults ..."
+        Remove-Item -LiteralPath $WorktreeSdkconfig -Force
     }
 
     # Same freshness signal as check_00: newest tracked-source mtime versus

@@ -48,29 +48,60 @@
   that does not resolve in an INITIALIZED named submodule, are reported as
   failures -- never silently swallowed.
 
-  UNINITIALIZED SUBMODULES ARE SKIPPED, NOT FAILED. A `sub:` tag naming a
-  submodule that .gitmodules declares but that is not checked out in this
-  worktree cannot be graded either way: there is no history present to
-  resolve the hash against. That is an environment gap, not a documentation
-  defect, and it fired on every clean-worktree verification run (the normal
-  state of a fresh worktree is: no submodules initialized), where it was
-  misreported as a real documentation regression more than once. Such
-  citations are now reported individually as SKIP lines naming the file,
-  line, hash, submodule and the `git submodule update --init` command that
-  would let them be graded, and they do not affect the exit code.
+  UNINITIALIZED SUBMODULES ARE UNGRADED, AND UNGRADED IS NOT A PASS
+  (corrected 2026-09-16). A `sub:` tag naming a submodule that .gitmodules
+  declares but that is not checked out in this worktree cannot be graded
+  either way: there is no history present to resolve the hash against. That
+  is an environment gap, not a documentation defect, and it fired on every
+  clean-worktree verification run, where it was misreported as a real
+  documentation regression more than once. Such citations are reported
+  individually as SKIP lines naming the file, line, hash, submodule and the
+  `git submodule update --init` command that would let them be graded.
 
-  Two boundaries this skip deliberately does NOT cross:
-    * It skips only the unresolvable CITATIONS, never the whole check. The
-      script still grades every parent-repo citation and still exits 0 only
-      if those all pass. Exiting 3 (the runner's whole-check SKIP status)
-      would be wrong here and actively harmful: per tools/run_all_checks.ps1's
-      header a SKIP fails the overall run by default, so skipping the whole
-      check would both fail the run AND stop grading the ~2,300 citations
-      that are perfectly gradeable in a clean worktree.
-    * It never swallows a bad citation. An INITIALIZED submodule whose
-      citation does not resolve is still a hard FAIL, and a `sub:` name that
-      is not declared in .gitmodules at all is still a hard FAIL -- the skip
-      path is reachable only for a name .gitmodules itself declares.
+  WHAT WAS WRONG, AND HOW. The revision that added this skip also asserted,
+  immediately below, that it "never swallows a bad citation". It did. The
+  skip branch did not affect the exit code at all, so the script printed its
+  green PASS line -- "every cited hash resolves to a commit in the repository
+  it names" -- and exited 0 while holding citations it had never checked.
+  Demonstrated: a fabricated 7-hex-char hash tagged sub:mykicadMcp, planted
+  in docs/REPO_LAYOUT.md in a worktree where that submodule is uninitialized,
+  produced exit 0 and PASS, visible only as one SKIP line among the output.
+  `tools/mykicadMcp` is uninitialized in every fresh clone and on every CI
+  runner, so that was the NORMAL case, not an edge case.
+
+  THE FIX, AND WHY THIS DIRECTION. Ungraded `sub:` citations now set the exit
+  code to 3 -- the runner's "could not grade" status -- unless
+  -AllowUngradedSubmodules is passed, which restores the old exit-0 behaviour
+  for a caller that has deliberately accepted the gap. The alternative the
+  review named, resolving `sub:` citations against the submodule's declared
+  REMOTE instead of its on-disk clone, was rejected: `git ls-remote` cannot
+  test an arbitrary commit's existence (it lists refs, and a cited commit is
+  usually not itself a ref tip), so actually grading that way means fetching
+  each submodule's history over the network from inside a check that is run
+  dozens of times a day, turning a fast offline check into a slow, flaky,
+  network-dependent one -- and still failing closed exactly when the network
+  is down, which is the same exit-3 outcome by a much more expensive route.
+  Exit 3, not exit 1: the citation is not known to be BAD, only unchecked,
+  and exit 1's "these hashes do not resolve" is a claim this script has not
+  earned. tools/run_all_checks.ps1 already fails the overall run on a SKIP by
+  default (with -AllowSkips to opt out), so the two knobs compose: the
+  default is honest at both levels, and either level can be relaxed
+  deliberately.
+
+  The earlier revision's argument against exit 3 -- that it "would both fail
+  the run AND stop grading the ~2,300 citations that are perfectly gradeable"
+  -- was half right and wholly the wrong conclusion. This script still grades
+  every one of those citations and still reports every real failure as exit
+  1; only the final status changes. Failing the run is the POINT when a
+  citation went unchecked. And the cost is avoidable rather than endured: the
+  single genuine sub: citation in this repo names `lvgl`, which a KilnFW
+  worktree must initialize to build anyway, so a properly provisioned tree
+  has zero ungraded citations and this check is green by default.
+
+  One boundary is unchanged: an INITIALIZED submodule whose citation does not
+  resolve is still a hard FAIL (exit 1), and a `sub:` name that is not
+  declared in .gitmodules at all is still a hard FAIL -- the ungraded path is
+  reachable only for a name .gitmodules itself declares.
   The `sub:` token requires a `\b` word boundary before it (so "notsub:lvgl"
   does NOT trigger it -- same widening class as the fabricated-marker fix
   below) and must sit with NO whitespace between the name and the backtick
@@ -145,8 +176,23 @@
 
 .NOTES
   Registered for discovery by tools/run_all_checks.ps1 (matches check_*.ps1).
-  Exit code 0 = all cited hashes resolve. Exit code 1 = one or more do not.
+  Exit code 0 = every citation was graded and all of them resolve.
+  Exit code 1 = one or more cited hashes do not resolve.
+  Exit code 3 = every graded citation resolved, but one or more `sub:`
+                citations could not be graded because the named submodule is
+                not checked out here. Pass -AllowUngradedSubmodules to treat
+                that as exit 0 instead.
+
+.PARAMETER AllowUngradedSubmodules
+  Restore the pre-2026-09-16 behaviour of exiting 0 when `sub:` citations
+  naming an uninitialized submodule were skipped. Only pass this when the
+  caller has deliberately accepted that those citations go unchecked -- the
+  default refuses to report PASS over citations it never looked at.
 #>
+
+param(
+    [switch]$AllowUngradedSubmodules
+)
 
 $ErrorActionPreference = 'Continue'
 
@@ -317,8 +363,9 @@ Write-Host "check_doc_hash_citations: $totalCitations citations, $($uniqueChecke
 Write-Host "  resolved: $resolvedInParent in parent repo; via sub: tag: $subSummary."
 
 if ($skippedUninitialized.Count -gt 0) {
-    # NOT exit 3, and NOT a failure -- see header. Every other citation above
-    # was still graded; only these individual ones could not be.
+    # These citations were NEVER CHECKED. Reporting PASS/exit 0 over them is
+    # what let a fabricated sub:mykicadMcp hash sail through -- see header,
+    # "UNINITIALIZED SUBMODULES ARE UNGRADED, AND UNGRADED IS NOT A PASS".
     $bySub = ($skippedUninitialized | Group-Object Sub | Sort-Object Name | ForEach-Object {
         "$($_.Count) naming sub:$($_.Name)"
     }) -join ', '
@@ -335,6 +382,15 @@ if ($failures.Count -gt 0) {
         Write-Host ("      {0}" -f $f.Text) -ForegroundColor Red
     }
     exit 1
+}
+
+if ($skippedUninitialized.Count -gt 0) {
+    if ($AllowUngradedSubmodules) {
+        Write-Host ("PASS (with {0} ungraded submodule citation(s), allowed by -AllowUngradedSubmodules): every citation this run actually graded resolves to a commit in the repository it names." -f $skippedUninitialized.Count) -ForegroundColor Green
+        exit 0
+    }
+    Write-Host ("SKIP: {0} citation(s) were NOT graded (listed above). Every citation that was graded resolves, but this check will not report PASS over citations it never checked -- an ungraded citation is exactly how a fabricated hash passes unnoticed. Initialize the named submodule(s) to grade them, or pass -AllowUngradedSubmodules to accept the gap deliberately." -f $skippedUninitialized.Count) -ForegroundColor Yellow
+    exit 3
 }
 
 Write-Host "PASS: every cited hash resolves to a commit in the repository it names (parent by default, or the declared sub: submodule)." -ForegroundColor Green

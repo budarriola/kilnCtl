@@ -217,12 +217,25 @@ Write-Host "Build worktree:  $WorktreePath"
 # treats as standing practice -- has none of its own. Regenerating one from
 # Kconfig defaults is not an option: it is KNOWN to diverge from what the
 # board actually runs (CLAUDE.md's "gitignored config hides mismatch", which
-# is how the FT6336U/NS2009 touch-panel mismatch was found), and
-# sdkconfig.defaults additionally pins no CONFIG_IDF_TARGET, so a regenerated
-# config silently targets plain esp32 instead of esp32s3 and dies on
-# esp32s3-only code. Copying a real board-tuned sdkconfig is therefore not a
-# convenience this check takes -- it is the only truthful config available to
-# it, and it is most of why this check can build a clean worktree at all.
+# is how the FT6336U/NS2009 touch-panel mismatch was found).
+#
+# CORRECTION (2026-09-16): this paragraph also used to claim that
+# "sdkconfig.defaults additionally pins no CONFIG_IDF_TARGET, so a
+# regenerated config silently targets plain esp32". THAT IS FALSE, and was
+# false when written -- 827dd887, the very commit that introduced the
+# surrounding per-tree build-directory scheme, ADDED
+# CONFIG_IDF_TARGET="esp32s3" to sdkconfig.defaults. Verified directly
+# 2026-09-16: a fresh worktree with no sdkconfig at all builds to exit 0
+# under xtensa-esp32s3-elf-gcc and generates CONFIG_IDF_TARGET="esp32s3".
+# The wrong-target argument is therefore NOT a reason to copy anything, and
+# check_01_kilnfw_pushed_build.ps1 has dropped its own copy entirely on the
+# strength of that evidence.
+#
+# The copy stays HERE, for the one reason that survives: this check exists to
+# answer "does MY tree build the way the BOARD is configured", uncommitted
+# edits included. Building against sdkconfig.defaults instead would answer a
+# different question -- the one check_01 now answers -- and would stop this
+# check from ever seeing a board-config-dependent break.
 # Prefer the invoking tree's own sdkconfig; fall back to the main worktree's
 # and SAY SO. If neither exists there is no honest config to build against:
 # FAIL, never SKIP (run_all_checks.ps1 fails the run on a SKIP by default,
@@ -235,7 +248,7 @@ if (-not (Test-Path -LiteralPath $MainSdkconfig)) {
         Write-Host "NOTE: $repoRootFull has no firmware\KilnFW\sdkconfig (gitignored; absent in a fresh worktree) -- using the main worktree's board-tuned config at $fallbackSdkconfig" -ForegroundColor Yellow
         $MainSdkconfig = $fallbackSdkconfig
     } else {
-        Fail "no firmware\KilnFW\sdkconfig in the invoking tree ($repoRootFull) and none in the main worktree ($mainWorktreeFull) either. This is the board-tuned config this check must not regenerate from Kconfig defaults (sdkconfig.defaults pins no CONFIG_IDF_TARGET, so a regenerated config would silently target esp32, not esp32s3). Run the IDE workspace setup, or copy a known-good sdkconfig into the main tree, before this check can say anything truthful."
+        Fail "no firmware\KilnFW\sdkconfig in the invoking tree ($repoRootFull) and none in the main worktree ($mainWorktreeFull) either. This check must build against the BOARD-TUNED config rather than one regenerated from Kconfig defaults -- a regenerated config does build correctly for esp32s3 (sdkconfig.defaults pins CONFIG_IDF_TARGET), but it answers check_01's question, 'does a fresh clone of origin/main build', instead of this check's, 'does this tree build the way the board is actually configured'. Run the IDE workspace setup, or copy a known-good sdkconfig into the main tree, before this check can say anything truthful."
     }
 }
 
