@@ -431,7 +431,52 @@ TASKS = [
     dict(name="bx_flash_worker", root="bx_worker_task",
          stack=lambda: extract_local_macro("drivers/bridge/uart_bridge_ext.c",
              r'#define BX_WORKER_STACK\s+(\d+)',
-             r'xTaskCreatePinnedToCore\(bx_worker_task,\s*"bx_flash_worker",\s*BX_WORKER_STACK')),
+             r'xTaskCreatePinnedToCore\(bx_worker_task,\s*"bx_flash_worker",\s*BX_WORKER_STACK'),
+         # 2026-09-16 (HIGH 2 of the adversarial review of 60d6552f: this
+         # task's stack was unmeasured while that commit routed more work
+         # through it). bx_worker_task's own body is a queue receive plus
+         # `job.fn(job.arg)` -- an indirect call the static walk cannot
+         # follow -- so the bare walk reported 48 B, which is the depth of
+         # the dispatch loop itself and not a measurement of anything this
+         # task actually does.
+         #
+         # Unlike LVGL's internal callback dispatch, this task's target set
+         # is ENUMERABLE from source: every job it can ever run is a function
+         # passed to uart_bridge_ext_run_on_flash_worker(),
+         # uart_bridge_ext_run_on_flash_worker_timeout() or
+         # uart_bridge_ext_post_on_flash_worker(). Those call sites are
+         # listed below, measured as their own roots; the deepest is added
+         # onto the loop's own depth (only one job runs at a time -- the
+         # worker is single-threaded by construction, which is the point of
+         # it).
+         #
+         # ADDING A DISPATCH TARGET MEANS ADDING IT HERE: a new job function
+         # deeper than every one below grows this task's real depth, and
+         # nothing else in the repo would notice.
+         #
+         # Still INDETERMINATE, honestly: the jobs themselves call into NVS/
+         # esp_partition/LittleFS, whose internals dispatch indirectly. This
+         # is a real, source-derived lower bound over the actual work the
+         # task performs, not a full measurement, and it is reported as such.
+         extra_roots=[
+             ("control_handle_message", "uart_bridge_ext_control.c"),
+             ("profiles_handle_message", "uart_bridge_ext_control.c"),
+             ("autotune_handle_message", "uart_bridge_ext_autotune.c"),
+             ("coupling_persist_job", "autotune_engine_step_identify.c"),
+             ("save_kibase_job", "adaptive_tune.c"),
+             ("zones_autosave_job", "zones_config_store.c"),
+             ("cfg_fs_auto_format_job_run", "cfg_fs_mount.c"),
+             ("cfg_fs_write_job_run", "cfg_fs_mount.c"),
+             ("cfg_fs_confirm_format_job_run", "cfg_fs_mount.c"),
+             ("log_store_job_run", "log_store_mount.c"),
+             ("reset_persist_job", "relay_cycles.c"),
+             ("nvs_save_store_job", "safety_cfg_store.c"),
+             ("crash_ack_job", "crash_report.c"),
+             ("crash_clear_job", "crash_report.c"),
+             ("cfgfs_file_write_job", "diagnostics_http.c"),
+             ("execute_scope_job", "factory_reset.c"),
+             ("safety_poll_pico_half_recapture_job", "safety_link_poll.c"),
+         ]),
     dict(name="info_uart_bridge", root="info_bridge_task",
          stack=lambda: extract_int_literal("drivers/bridge/uart_bridge_info.c",
              r'xTaskCreatePinnedToCoreWithCaps\(info_bridge_task,\s*"info_uart_bridge",\s*(\d+)')),
@@ -559,7 +604,17 @@ CEILING_BYTES = {
     "boot_button": 1552,
     "gpio_probe": 3376,
     "link_watchdog": 160,
-    "bx_flash_worker": 48,
+    # 3792 = 48 (bx_worker_task's own dispatch loop) + 3744 (the deepest of
+    # the enumerated dispatch targets, safety_poll_pico_half_recapture_job --
+    # see TASKS["bx_flash_worker"]'s extra_roots comment for why that set is
+    # enumerable here and is NOT enumerable for lvgl). Measured 2026-09-16
+    # against a KilnCtrl.elf freshly built by check_00_kilnfw_target_build.ps1.
+    # The previous 48 was the loop alone: it ceilinged the dispatch, not the
+    # work, so every job this task has ever run sat above an unmeasured, and
+    # unmeasuring, tripwire. Honest free at this number: 4100 B (50.0%) of the
+    # declared 8192 B. Still a LOWER BOUND (NVS/LittleFS internals dispatch
+    # indirectly) and still reported INDETERMINATE, never a pass.
+    "bx_flash_worker": 3792,
     "info_uart_bridge": 2208,
     "io_uart_bridge": 2256,
     "safety_uart_bridge": 2912,

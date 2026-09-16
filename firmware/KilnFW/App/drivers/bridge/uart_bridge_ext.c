@@ -268,18 +268,88 @@ static SemaphoreHandle_t s_bx_done;
 static SemaphoreHandle_t s_bx_lock;
 static TaskHandle_t      s_bx_worker_task_handle;
 
+/* ---- POSTED (fire-and-forget) JOB SLOT ---------------------------------
+ * 2026-09-16 (HIGH 1, docs/audits/review_divergence_wiring_60d6552f_
+ * 2026-09-15.md's own follow-up review 49c9beb7): a SECOND way to get work
+ * onto this task, for the one caller shape neither dispatch function above
+ * can serve -- a task that must never block at all.
+ *
+ * The problem this exists for: both bx_run_on_internal_stack() and its
+ * *_timeout() sibling end in xSemaphoreTake(s_bx_done, portMAX_DELAY), so
+ * the CALLER is blocked for the entire duration of its own job. The
+ * timeout bounds only the wait to ACQUIRE the worker, never the job (see
+ * flash_worker.h and that function's own comment). safety_poll_task is the
+ * sole sender of the ESP->Pico GET_STATUS liveness heartbeat the Pico's S6b
+ * LINK_DEAD guard watches, and it dispatches a config autosave -- an NVS
+ * write, not the "short job by inspection" those functions require. A slow
+ * or stuck write therefore stalls the heartbeat for as long as it takes,
+ * and past link_timeout_s (10.0 s default) the Pico trips S6b and ruins a
+ * firing. Fails safe, but spuriously.
+ *
+ * Why a separate slot rather than a bound on s_bx_done: bx_run_on_internal_
+ * stack()'s comment already explains why bounding that take is unsafe (the
+ * job stays queued and runs later against a caller stack frame that has
+ * already unwound, which needs a cancellation/ownership scheme, not a raw
+ * timeout). And it cannot share s_bx_jobs either: the worker gives s_bx_
+ * done after every queued job, so a job that snuck in without holding
+ * s_bx_lock would hand a spurious completion to the NEXT awaiting caller,
+ * which would then return before its own job had run. This slot is
+ * therefore entirely disjoint from the queue/s_bx_done/s_bx_lock
+ * machinery -- it changes nothing about either dispatch path's semantics.
+ *
+ * `arg` is deliberately NOT part of this API: nobody awaits a posted job,
+ * so a pointer into the poster's stack frame would dangle by the time the
+ * worker ran it. A posted fn takes its inputs from module state instead.
+ *
+ * Serialization comes free: posted jobs run on bx_worker_task, the same
+ * single task that drains the queue, so a posted job and a queued job can
+ * never overlap. Latency is up to BX_POST_POLL_MS plus however long the
+ * job currently in flight takes -- fine for the housekeeping writes this
+ * is for, and the poster pays none of it. */
+#define BX_POST_POLL_MS 100u
+
+static bx_job_fn         s_bx_posted_fn;
+static SemaphoreHandle_t s_bx_post_lock;
+
+/* Claims the posted job, if any, and clears the slot. s_bx_post_lock is
+ * held ONLY across the pointer swap, never across the job itself -- this
+ * repo's standing "never hold a lock across a producer or blocking call"
+ * rule, and also what keeps uart_bridge_ext_post_on_flash_worker()'s
+ * zero-tick take below from ever finding the lock held for a meaningful
+ * length of time. */
+static bx_job_fn bx_take_posted_job(void)
+{
+    if (!s_bx_post_lock) {
+        return NULL;
+    }
+    if (xSemaphoreTake(s_bx_post_lock, portMAX_DELAY) != pdTRUE) {
+        return NULL;
+    }
+    bx_job_fn fn = s_bx_posted_fn;
+    s_bx_posted_fn = NULL;
+    xSemaphoreGive(s_bx_post_lock);
+    return fn;
+}
+
 static void bx_worker_task(void *arg)
 {
     (void)arg;
     while (true) {
+        /* Bounded receive rather than portMAX_DELAY so the posted slot is
+         * serviced on an otherwise idle worker. A timeout is the ordinary
+         * idle case here, not an error -- it just means "no queued job;
+         * check the posted slot and go back to waiting". */
         bx_job_t job;
-        if (xQueueReceive(s_bx_jobs, &job, portMAX_DELAY) != pdTRUE) {
-            continue;
+        if (xQueueReceive(s_bx_jobs, &job, pdMS_TO_TICKS(BX_POST_POLL_MS)) == pdTRUE) {
+            if (job.fn) {
+                job.fn(job.arg);
+            }
+            xSemaphoreGive(s_bx_done);
         }
-        if (job.fn) {
-            job.fn(job.arg);
+        bx_job_fn posted = bx_take_posted_job();
+        if (posted) {
+            posted(NULL);
         }
-        xSemaphoreGive(s_bx_done);
     }
 }
 
@@ -312,7 +382,8 @@ bool uart_bridge_ext_worker_ensure_started(void)
     s_bx_jobs = xQueueCreate(1, sizeof(bx_job_t));
     s_bx_done = xSemaphoreCreateBinary();
     s_bx_lock = xSemaphoreCreateMutex();
-    if (!s_bx_jobs || !s_bx_done || !s_bx_lock) {
+    s_bx_post_lock = xSemaphoreCreateMutex();
+    if (!s_bx_jobs || !s_bx_done || !s_bx_lock || !s_bx_post_lock) {
         ESP_LOGE(UART_BRIDGE_EXT_TAG, "flash-safe worker: queue/semaphore allocation failed");
         goto fail;
     }
@@ -350,6 +421,7 @@ fail:
     if (s_bx_jobs) { vQueueDelete(s_bx_jobs); s_bx_jobs = NULL; }
     if (s_bx_done) { vSemaphoreDelete(s_bx_done); s_bx_done = NULL; }
     if (s_bx_lock) { vSemaphoreDelete(s_bx_lock); s_bx_lock = NULL; }
+    if (s_bx_post_lock) { vSemaphoreDelete(s_bx_post_lock); s_bx_post_lock = NULL; }
     s_bx_worker_task_handle = NULL;
     return false;
 }
@@ -526,6 +598,46 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
         return ESP_ERR_INVALID_ARG;
     }
     return bx_run_on_internal_stack(fn, arg) ? ESP_OK : ESP_FAIL;
+}
+
+/* See flash_worker.h's doc comment, and the POSTED JOB SLOT block above for
+ * the full rationale. Never blocks: the only wait here is a ZERO-tick take
+ * on s_bx_post_lock, which is held by anyone else only for a single pointer
+ * assignment. That is the whole point -- the caller this exists for
+ * (safety_poll_task, sole sender of the safety-link heartbeat) must not be
+ * stalled by ANY duration of flash work, bounded or not.
+ *
+ * Safe to call from the worker itself: nothing here blocks or waits on the
+ * worker, so a posted job dispatched from a job already running on
+ * bx_flash_worker simply runs on a later loop iteration. That is strictly
+ * weaker than the re-entrancy hazard the two run_on_flash_worker()
+ * functions carry (flash_worker.h's RE-ENTRANCY HAZARD block) -- there is
+ * no lock to deadlock on and no completion to await. */
+esp_err_t uart_bridge_ext_post_on_flash_worker(void (*fn)(void *arg))
+{
+    if (!fn) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_bx_post_lock || !s_bx_started) {
+        ESP_LOGE(UART_BRIDGE_EXT_TAG, "flash-safe worker not started -- posted job dropped");
+        return ESP_FAIL;
+    }
+    if (xSemaphoreTake(s_bx_post_lock, 0) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t err;
+    if (s_bx_posted_fn) {
+        /* A previous post has not been picked up yet. Deliberately NOT a
+         * queue: the callers this serves all re-derive their own pending
+         * state and retry on a later tick, so coalescing to one outstanding
+         * post is correct and keeps this slot O(1). */
+        err = ESP_ERR_INVALID_STATE;
+    } else {
+        s_bx_posted_fn = fn;
+        err = ESP_OK;
+    }
+    xSemaphoreGive(s_bx_post_lock);
+    return err;
 }
 
 /* See flash_worker.h's doc comment. */

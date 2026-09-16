@@ -118,6 +118,48 @@ esp_err_t uart_bridge_ext_run_on_flash_worker_timeout(void (*fn)(void *arg), voi
     return ESP_OK;
 }
 
+// Non-blocking post stub for uart_bridge_ext_post_on_flash_worker()
+// (2026-09-16, HIGH 1 of the adversarial review of 60d6552f). The real call
+// never runs fn() on the caller's task and never waits: it parks fn in a
+// single coalescing slot that bx_flash_worker drains on a later loop
+// iteration. Modeled the same way here -- the slot is remembered, and a test
+// that wants the job to actually run calls bx_stub_run_posted_job(). Running
+// fn() inline from this stub would be wrong in exactly the way the fix is
+// about: it would hand the job's cost back to the poster.
+//
+// Counted in s_stub_dispatch_count only when the job actually RUNS, for the
+// same reason: a post that was merely accepted has performed no flash work.
+static void (*s_stub_posted_fn)(void *arg) = NULL;
+
+esp_err_t uart_bridge_ext_post_on_flash_worker(void (*fn)(void *arg))
+{
+    if (!fn) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_stub_posted_fn) {
+        return ESP_ERR_INVALID_STATE; // one outstanding post at a time
+    }
+    s_stub_posted_fn = fn;
+    return ESP_OK;
+}
+
+// Drains the posted slot the way bx_worker_task's own loop does. Returns
+// true if there was something to run.
+static bool bx_stub_run_posted_job(void)
+{
+    void (*fn)(void *arg) = s_stub_posted_fn;
+    s_stub_posted_fn = NULL;
+    if (!fn) {
+        return false;
+    }
+    s_stub_dispatch_count++;
+    bool prev_on_worker = s_stub_on_flash_worker;
+    s_stub_on_flash_worker = true;
+    fn(NULL);
+    s_stub_on_flash_worker = prev_on_worker;
+    return true;
+}
+
 // Stands in for "is the calling task bx_flash_worker" -- see uart_bridge_
 // ext.c's real uart_bridge_ext_is_on_flash_worker(), which this host build
 // does not link (it reads a FreeRTOS task handle). Driven automatically by

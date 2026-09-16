@@ -302,13 +302,15 @@ static void safety_update_health(SafetyLinkClass *link)
  * unbounded duration of some other caller's flash job (a profile import, a
  * cfg_fs write) would stall the GET_STATUS poll the Pico's S6b LINK_DEAD
  * guard watches for. */
-esp_err_t uart_bridge_ext_run_on_flash_worker_timeout(void (*fn)(void *arg), void *arg,
-                                                       uint32_t timeout_ms);
+esp_err_t uart_bridge_ext_post_on_flash_worker(void (*fn)(void *arg));
 
-/* How long to wait for the shared flash worker to come free. Short on
- * purpose -- see the bounded-dispatch note above. A miss is not an error:
- * the pending flag stays set and the next poll below retries. */
-#define SAFETY_POLL_RECAPTURE_DISPATCH_TIMEOUT_MS 50u
+/* How often to log a refused post. A refusal is a normal "not yet", and the
+ * poll below runs every SAFETY_POLL_RECAPTURE_INTERVAL_MS, so logging every
+ * one would spam the console for as long as the worker stayed busy --
+ * but logging none of them is exactly the silence flash_worker.h forbids.
+ * Log the first, then at most one summary a minute carrying the suppressed
+ * count, so a genuinely stuck worker stays visible without flooding. */
+#define SAFETY_POLL_RECAPTURE_LOG_INTERVAL_MS 60000u
 
 /* How often to even look at the pending flag. The recapture is a
  * housekeeping write, not a safety deadline, and safety_poll_task's own loop
@@ -370,14 +372,55 @@ static void safety_poll_service_pico_half_recapture(void)
         return;
     }
 
-    /* Backpressure here is a bounded wait, not a freeze and not a dropped
-     * job: if the worker is busy, this returns ESP_ERR_TIMEOUT after at most
-     * SAFETY_POLL_RECAPTURE_DISPATCH_TIMEOUT_MS, the pending flag is still
-     * set, and the next poll (SAFETY_POLL_RECAPTURE_INTERVAL_MS later)
-     * genuinely retries. That retry is what makes ignoring the return value
-     * correct -- it is not fire-and-forget. */
-    (void)uart_bridge_ext_run_on_flash_worker_timeout(safety_poll_pico_half_recapture_job, NULL,
-                                                       SAFETY_POLL_RECAPTURE_DISPATCH_TIMEOUT_MS);
+    /* POST, not dispatch-and-await (2026-09-16, HIGH 1 of the adversarial
+     * review of 60d6552f). This used to call uart_bridge_ext_run_on_flash_
+     * worker_timeout() with a 50 ms cap, on the belief that the cap bounded
+     * how long this task could be held up. It does not: that cap bounds only
+     * the wait to ACQUIRE the worker -- once acquired, the job is awaited
+     * with xSemaphoreTake(s_bx_done, portMAX_DELAY), unbounded (see
+     * flash_worker.h, and uart_bridge_ext.c's own comment on that take). The
+     * job here is kiln_cfg_store_autosave_from_live(), an NVS write, not the
+     * "short job by inspection" that contract requires.
+     *
+     * Why that mattered on THIS task specifically: the GET_STATUS send a few
+     * lines below is the ESP->Pico liveness heartbeat, and safety_poll_task
+     * is its only sender. This call sits immediately before it, so a slow or
+     * stuck flash write delayed the heartbeat by exactly its own duration --
+     * past link_timeout_s (10.0 s default) the Pico trips S6b LINK_DEAD and
+     * ruins a firing. Fails safe, but spuriously.
+     *
+     * uart_bridge_ext_post_on_flash_worker() returns immediately in every
+     * case; the job runs later on bx_flash_worker's own internal-SRAM stack,
+     * which is what satisfies the PSRAM-stack hazard described above. NOW it
+     * is genuinely fire-and-forget, and the retry path below is what makes
+     * that correct: the pending flag stays set until the job actually
+     * completes, so a refused post is picked up SAFETY_POLL_RECAPTURE_
+     * INTERVAL_MS later. */
+    esp_err_t post_err = uart_bridge_ext_post_on_flash_worker(safety_poll_pico_half_recapture_job);
+
+    /* Never silence (flash_worker.h: a refusal "must be shown as a real
+     * 'busy, try again' outcome, not silence"). The previous code (void)-cast
+     * this away entirely, so a worker stuck for hours looked identical to a
+     * recapture that had succeeded. */
+    static TickType_t s_last_log_ticks = 0;
+    static bool s_logged_once = false;
+    static uint32_t s_suppressed = 0;
+    if (post_err != ESP_OK) {
+        bool due = !s_logged_once ||
+                   (now - s_last_log_ticks) >= pdMS_TO_TICKS(SAFETY_POLL_RECAPTURE_LOG_INTERVAL_MS);
+        if (due) {
+            ESP_LOGW("safety_poll",
+                     "deferred Pico-half recapture not posted to the flash worker: %s "
+                     "(still pending, retrying in %u ms; %u earlier refusal(s) suppressed)",
+                     esp_err_to_name(post_err), (unsigned)SAFETY_POLL_RECAPTURE_INTERVAL_MS,
+                     (unsigned)s_suppressed);
+            s_last_log_ticks = now;
+            s_logged_once = true;
+            s_suppressed = 0;
+        } else {
+            s_suppressed++;
+        }
+    }
 }
 
 void safety_poll_task(void *arg)
