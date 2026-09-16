@@ -747,6 +747,7 @@ try {
             "`"$(Join-Path $testDir 'test_safety_link_compile.c')`" " +
             "`"$(Join-Path $driversDir 'common/stack_margin.c')`" `"$(Join-Path $driversDir 'safety/safety_trip_decision.c')`" " +
             "`"$(Join-Path $driversDir 'safety/safety_link_frame.c')`" " +
+            "`"$(Join-Path $testDir 'fake_danger_mode_for_safety_link.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_gpio.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" " +
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
