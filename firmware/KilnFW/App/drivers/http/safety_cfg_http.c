@@ -625,13 +625,61 @@ static esp_err_t commissioning_post_handler(httpd_req_t *req)
      * REACHED the Pico but was refused never updates the captured Pico half,
      * leaving a standing divergence the operator cannot clear. That is
      * accurate, and it is deliberate. Recapturing on a refusal is not
-     * available to us here, for two independent reasons:
+     * available to us here. Reason 2 below is the one that does the work;
+     * reason 1 as originally written was proved FALSE by a later review and
+     * is corrected in place rather than deleted, so nobody re-derives it:
      *
-     * 1. Nothing landed. apply_pairs_ex() stages every pair first and only
-     *    then commits; a commit refusal writes NOTHING (its own reason text
-     *    says "values were staged but NOT written"), and a staging failure
-     *    returns before commit is ever reached. So a refusal creates no new
-     *    divergence -- it can only fail to clear a PRE-EXISTING one.
+     * 1. CORRECTED 2026-09-16 (docs/audits/review_divergence_recapture_
+     *    6d8c7194_2026-09-16.md, HIGH2). This slot used to read "Nothing
+     *    landed -- apply_pairs_ex() stages every pair first and only then
+     *    commits, so a refusal writes NOTHING". As a general statement that
+     *    is FALSE. Two paths in safety_cfg_write.c return ok=false AFTER the
+     *    Pico has already committed:
+     *      - confirm_commit_landed()'s refetch failure -- "the safety
+     *        processor accepted the commit but this board could not read the
+     *        config back to confirm it -- treating the write as UNCONFIRMED,
+     *        not successful"; and
+     *      - estop_verification_clear() failing on a committed
+     *        SAFETY_PARAM_ID_ESTOP_ACTIVE_LEVEL, whose own comment states
+     *        "the commit DID land".
+     *    Both reach this gate with ok=false and commit=true, so the
+     *    recapture is skipped while the Pico genuinely changed. What
+     *    survives of the old claim is only the narrower version: a STAGING
+     *    failure, and a commit the Pico explicitly REJECTED ("values were
+     *    staged but NOT written"), really do write nothing.
+     *    "committed-but-unconfirmed" is a THIRD state, and this gate does
+     *    not distinguish it.
+     *
+     *    Why the gate is nevertheless still correct -- i.e. why this was a
+     *    comment fix and not a code fix. Reason 2 below is independently
+     *    sufficient on its own, and the resulting staleness is DETECTED, not
+     *    silent: safety_ceiling_sync.c re-derives the whole ESP/Pico
+     *    comparison from scratch on every safety_poll_task tick, comparing
+     *    the active slot's captured expected fields against safety_cfg_
+     *    store's LIVE cache -- a cache safety_cfg_store_maybe_refetch()
+     *    refills whenever the Pico's config_crc changes ("the only way this
+     *    function ever talks to the Pico is a CRC mismatch", safety_cfg_
+     *    store.h). A commit that actually landed moves that CRC, so the next
+     *    tick refetches and the standing-divergence latch raises itself. No
+     *    explicit latch-raise is owed at this call site, and the fault stays
+     *    visible and actionable, which is precisely what reason 2 demands.
+     *    There is consequently no behavioural difference to pin with a test
+     *    here: the corrected text describes the same execution this gate
+     *    already performs.
+     *
+     *    CONTAINMENT, independently re-confirmed 2026-09-16: this staleness
+     *    can never move abs_max_temp_c, so it cannot breach the standing
+     *    "the Pico's abs_max_temp_c must ALWAYS equal the ESP's" invariant.
+     *    Two independent exclusions, either one sufficient: kiln_cfg_store_
+     *    capture_expected_pico_fields() skips SAFETY_PARAM_ID_ABS_MAX_TEMP_C
+     *    outright (pinned by test_kiln_cfg_store.c's test_capture_expected_
+     *    pico_fields_excludes_abs_max_and_tc_type), and safety_ceiling_
+     *    sync.c skips it a SECOND time when folding those fields in.
+     *    abs_max_temp_c is instead field 0 of the divergence comparison,
+     *    re-derived every tick from zones_config_get_temp_limits() through
+     *    safety_ceiling_policy_target_c() on the ESP side and from the
+     *    Pico's own live ceiling report on the other -- neither side reads
+     *    the captured Pico half at all.
      *
      * 2. Clearing it anyway would launder the fault. The captured Pico half
      *    is the ESP's record of what the Pico is supposed to hold. Rewriting
