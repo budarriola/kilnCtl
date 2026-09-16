@@ -27,19 +27,6 @@ extern "C" {
  * follows the identical convention). */
 #define SAFETY_PARAM_ID_ABS_MAX_TEMP_C 0x0104u
 
-/* param_id 0x0105 -- tc_type, same table, same duplication convention as
- * above. 2026-09-15 review (review_divergence_fixes_b2e7017f_2026-09-15.md,
- * MEDIUM 4): the commissioning page owns the safety thermocouple type; the
- * ESP only ever READS it back and has no push path for it (owner decision --
- * do not re-propose ESP ownership here). kiln_cfg_store.c's expected-field
- * capture excludes this id from the broadened standing-divergence set for
- * exactly that reason: a param the ESP cannot push can never be corrected by
- * anything on the ESP side, so counting it as a standing mismatch only ever
- * produces a warning the operator has no ESP-side action to resolve, and (via
- * kiln_cfg_store.c's autosave gate) can wedge the deferred Pico-half
- * recapture forever. */
-#define SAFETY_PARAM_ID_TC_TYPE 0x0105u
-
 /* Call BEFORE committing a proposed new zones_cfg_t -- i.e. before the
  * line that overwrites the live config (zones_http_post.c's `s_zones.cfg =
  * tmp;`). `link` may be NULL (no safety processor this boot): treated as
@@ -206,20 +193,6 @@ bool safety_ceiling_sync_is_diverged(char *reason_out, size_t reason_cap);
  * a reason to disable heat. `reason_out` (may be NULL) receives the same
  * operator-facing message the WARN log carries. */
 bool safety_ceiling_sync_is_standing_diverged(char *reason_out, size_t reason_cap);
-
-/* 2026-09-15 review (review_divergence_fixes_b2e7017f_2026-09-15.md,
- * MEDIUM 3): the safety_cfg_store_cache_generation() value as of the most
- * recent enforce_ceiling_divergence() evaluation. A caller about to
- * snapshot the live Pico-config cache into a persisted "expected" record
- * (kiln_cfg_store.c's autosave) can compare this against
- * safety_cfg_store_cache_generation() right before capturing: if they
- * differ, a refetch has landed since the divergence latches above were last
- * recomputed, so "not diverged" cannot yet be trusted for the CURRENT cache
- * contents and the capture must be deferred. Starts at 0, matching the
- * cache generation's own "never fetched" starting value, so a board that
- * has never evaluated the check at all reads as "in sync" (0 == 0) rather
- * than spuriously deferring forever. */
-uint32_t safety_ceiling_sync_latch_evaluated_generation(void);
 
 #ifdef __cplusplus
 }

@@ -12,32 +12,6 @@
 #include "safety_ceiling_sync.h" /* 2026-09-15 review (review_divergence_rework_c1d2c526_2026-09-15.md,
                                    * HIGH 2): safety_ceiling_sync_is_standing_diverged() surfaced on the LCD. */
 #include "config_divergence.h" /* CONFIG_DIVERGENCE_REASON_MAX */
-#include "esp_log.h"
-
-/* Hand-declared, same convention safety_cfg_store.c/relay_cycles.c/
- * factory_reset.c/zones_config_store.c already use for this one call (see
- * flash_worker.h's own doc comment) -- avoids pulling in the whole UART
- * bridge API for one call. */
-esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
-
-/* 2026-09-15 review follow-up: job body for the HIGH-1 deferred-recapture
- * dispatch below, run on bx_flash_worker rather than the LVGL task's own
- * stack (see the call site's doc comment). `arg` is unused --
- * kiln_cfg_store_autosave_from_live() reads the live config itself -- and
- * any failure is only logged here, the same pattern
- * zones_config_store.c's zones_autosave_job() uses, since
- * uart_bridge_ext_run_on_flash_worker()'s own return only reports whether
- * the job was dispatched, not whether it succeeded. */
-static void ui_home_pico_half_recapture_job(void *arg)
-{
-    (void)arg;
-    char reason[CONFIG_DIVERGENCE_REASON_MAX];
-    reason[0] = '\0';
-    if (!kiln_cfg_store_autosave_from_live(reason, sizeof(reason))) {
-        ESP_LOGW("ui_home", "deferred Pico-half recapture autosave failed: %s",
-                 reason[0] ? reason : "(no reason given)");
-    }
-}
 
 void ui_home_refresh_cb(lv_timer_t *timer)
 {
@@ -225,40 +199,6 @@ void ui_home_refresh_cb(lv_timer_t *timer)
          * in-RAM divergence latch directly. */
         char diverge_reason[CONFIG_DIVERGENCE_REASON_MAX];
         bool standing_diverged = safety_ceiling_sync_is_standing_diverged(diverge_reason, sizeof(diverge_reason));
-
-        /* 2026-09-15 review (review_divergence_fixes_b2e7017f_2026-09-15.md,
-         * HIGH 1): kiln_cfg_store_pico_half_recapture_pending() had zero
-         * production callers -- the header names "the web status handler
-         * and/or LCD refresh callback" as the intended pollers, but neither
-         * actually polled it, so a deferred Pico-half recapture could sit
-         * pending forever even once the divergence that deferred it cleared.
-         * This 1 Hz LVGL tick is a safe driver: the task runs on a static,
-         * internal-DRAM stack (lvgl_port.c, already stack-margin-registered
-         * as "lvgl"), unlike safety_poll_task's PSRAM-backed stack, from
-         * which an NVS write panics (project memory: "PSRAM stack + NVS =
-         * panic") -- kiln_cfg_store_autosave_from_live()'s own deferred-
-         * recapture path performs exactly that NVS write when it finds the
-         * divergence cleared. Only bother calling in when a recapture is
-         * actually owed, and never while still diverged (the same call
-         * would just re-defer and re-log). */
-        /* 2026-09-15 review follow-up (check_all_task_stack_budgets.ps1
-         * FAIL, lvgl 7104 B > 4880 B ceiling): kiln_cfg_store_autosave_from_
-         * live()'s own call depth (persist + cfg_fs + flash) is too deep for
-         * the LVGL task's tight, fixed stack -- calling it inline here from
-         * ui_home_refresh_cb() re-adds exactly the class of risk
-         * 51e1ef5/CLAUDE.md's "PSRAM stack + NVS = panic" note warns about
-         * for a shallow/tight stack, just on the internal-DRAM side instead
-         * of PSRAM. Dispatch the recapture onto bx_flash_worker instead, the
-         * same established convention every other deep/flash-touching
-         * caller in this tree uses (see flash_worker.h,
-         * uart_bridge_ext_run_on_flash_worker()'s own doc comment) --
-         * fire-and-forget is correct here: this is a periodic 1 Hz poll, so
-         * a dispatch failure (worker busy/full) just means the next tick
-         * tries again, and the LVGL task must not block waiting for it. */
-        if (!standing_diverged && kiln_cfg_store_pico_half_recapture_pending()) {
-            (void)uart_bridge_ext_run_on_flash_worker(ui_home_pico_half_recapture_job, NULL);
-        }
-
         if (standing_diverged) {
             char notice_buf[160];
             snprintf(notice_buf, sizeof(notice_buf), "Config mismatch (Pico): %.130s", diverge_reason);

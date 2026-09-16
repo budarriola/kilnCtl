@@ -501,22 +501,11 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
      * headroom), and a short summary is enough to point an operator at
      * /safety/commissioning for the full detail. */
     {
-        /* 2026-09-15 review (review_divergence_fixes_b2e7017f_2026-09-15.md,
-         * MEDIUM 5/6): `static` -- off this httpd worker's stack, same
-         * single-caller convention as commit_esc/datetime_esc above
-         * (esp_http_server's HTTPD_DEFAULT_CONFIG() runs one worker task, so
-         * this handler is never reentered) -- shrinks this handler's stack
-         * frame (already-LOW headroom, must not grow) instead of adding to
-         * it, and lets the escaped copy be sized for the FULL reason rather
-         * than truncated. json_escape() doubles worst case (every char
-         * escaped), same sizing rule as commit_esc/datetime_esc. */
-        static char standing_reason[CONFIG_DIVERGENCE_REASON_MAX];
-        static char standing_reason_esc[CONFIG_DIVERGENCE_REASON_MAX * 2 + 1];
+        char standing_reason[CONFIG_DIVERGENCE_REASON_MAX];
         bool standing_diverged = safety_ceiling_sync_is_standing_diverged(standing_reason, sizeof(standing_reason));
         APPEND(",\"safety_standing_diverged\":%s", standing_diverged ? "true" : "false");
         if (standing_diverged) {
-            json_escape(standing_reason, standing_reason_esc, sizeof(standing_reason_esc));
-            APPEND(",\"safety_standing_diverged_reason\":\"%s\"", standing_reason_esc);
+            APPEND(",\"safety_standing_diverged_reason\":\"%.80s\"", standing_reason);
         }
     }
 

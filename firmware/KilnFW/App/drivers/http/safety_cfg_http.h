@@ -107,19 +107,6 @@ bool safety_cfg_http_apply_package_and_confirm(SafetyLinkClass *link, const kiln
                                                 char *reason_out, size_t reason_cap,
                                                 safety_ceiling_refusal_class_t *out_class);
 
-/* 2026-09-15 review (review_divergence_fixes_b2e7017f_2026-09-15.md,
- * HIGH 2): true iff a commissioning push was refused because the safety
- * relay is ARMED (KILNLINK_COMMIT_CONFIG_REJECT_ARMED) within roughly the
- * last SAFETY_CFG_HTTP_ARMED_REFUSAL_WINDOW_US -- see this function's .c
- * doc comment. Lets safety_ceiling_sync.c's standing-divergence warning
- * name the ACTUAL reason a mismatch cannot currently be corrected ("relay
- * is ARMED") instead of reporting only the bare mismatch, which is the
- * "config mismatch, no visible remedy" shape that most invites a chronic
- * warning getting ignored/switched off. Window-bounded (not "ever, since
- * boot") so a long-past refusal that the operator already acted on does not
- * keep claiming to explain a NEW, unrelated divergence. */
-bool safety_cfg_http_recent_armed_refusal(void);
-
 #ifdef __cplusplus
 }
 #endif

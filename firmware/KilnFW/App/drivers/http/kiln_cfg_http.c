@@ -7,7 +7,6 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
-#include "config_divergence.h" /* CONFIG_DIVERGENCE_REASON_MAX */
 #include "http_form.h"
 #include "kiln_cfg_store.h"
 #include "ota_http.h"
@@ -180,15 +179,7 @@ static esp_err_t save_post_handler(httpd_req_t *req)
      * expects, since that snapshot may not be what the Pico is actually
      * enforcing right now. ESP_LOGW so it is visible in the boot log even
      * if the web client never reads the response body's warning field. */
-    /* 2026-09-15 review (review_divergence_fixes_b2e7017f_2026-09-15.md,
-     * MEDIUM 6): `static` -- off this httpd worker's stack (esp_http_server's
-     * HTTPD_DEFAULT_CONFIG() runs one worker task, so this handler is never
-     * reentered, same convention as other single-caller statics in this
-     * file/dashboard_status_http.c) -- shrinks this handler's already-LOW-
-     * headroom stack frame instead of growing it, and lets divergence_reason
-     * hold the FULL CONFIG_DIVERGENCE_REASON_MAX (160 B) reason instead of
-     * the previous 96-byte buffer that silently truncated it. */
-    static char divergence_reason[CONFIG_DIVERGENCE_REASON_MAX];
+    char divergence_reason[96];
     bool diverged = safety_ceiling_sync_is_diverged(divergence_reason, sizeof(divergence_reason)) ||
                      safety_ceiling_sync_is_standing_diverged(divergence_reason, sizeof(divergence_reason));
     if (diverged) {
@@ -198,10 +189,10 @@ static esp_err_t save_post_handler(httpd_req_t *req)
                  (long)new_id, divergence_reason);
     }
 
-    static char resp[CONFIG_DIVERGENCE_REASON_MAX * 2 + 96];
+    char resp[192];
     int len;
     if (diverged) {
-        static char reason_escaped[CONFIG_DIVERGENCE_REASON_MAX * 2 + 1];
+        char reason_escaped[96];
         json_escape(divergence_reason, reason_escaped, sizeof(reason_escaped));
         len = snprintf(resp, sizeof(resp),
                        "{\"id\":%ld,\"warning\":\"saved while the safety processor's config is diverged: %s\"}",
