@@ -243,7 +243,32 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
      * These two locals are 64 + 8 bytes on the shared 8 KB httpd worker
      * stack. The standing prohibition here is on BIG stack locals (the
      * response buffer itself is heap/PSRAM, see above) -- a bounded query
-     * parse is not that. */
+     * parse is not that.
+     *
+     * Truncation, and why query[64] is NOT being enlarged (2026-09-16).
+     * httpd_req_get_url_query_str() returns ESP_ERR_HTTPD_RESULT_TRUNC, not
+     * ESP_OK, for a query string that does not fit. The guard below is
+     * "== ESP_OK", so a truncated query leaves want_diag_detail false and
+     * this handler serves the DEFAULT document. That is the safe direction,
+     * and it is the direction by construction rather than by luck: a
+     * truncated query can never silently MATCH "diag=1" and send the wrong
+     * document -- it can only silently fail to match and send the ordinary
+     * one. The cost is a real, if narrow, blind spot: a client that pushes
+     * the query past 63 characters -- a browser cache-buster appended to
+     * "?diag=1" is the realistic case -- gets the default document, and
+     * safety_page.html's diag card then reports its detail rows as
+     * UNAVAILABLE with nothing anywhere explaining why. No kilnCtl page
+     * appends one today (safety_page.html fetches the bare
+     * "/api/status?diag=1", 22 characters), so the blind spot is reachable
+     * only from a hand-typed URL or a future caller.
+     * Enlarging this to 96 B would close it, and is deliberately NOT done
+     * here: this is the shared 8 KB httpd worker stack that oversized locals
+     * have panicked this board on twice, and nobody has measured this
+     * handler's actual high-water mark, so even a 32-byte bump would be
+     * traded against an unknown margin. Record the limit instead. If a
+     * caller ever genuinely needs a longer query here, measure the handler's
+     * stack high-water first and quote the number in the commit that raises
+     * it. */
     bool want_diag_detail = false;
     {
         char query[64];
