@@ -131,6 +131,8 @@ try {
         (Join-Path $testDir "test_tc_type_reapply_policy.c"),
         (Join-Path $srcDir "tasks\link_task_tc_type_gate.c"),
         (Join-Path $testDir "test_link_task_tc_type_gate.c"),
+        (Join-Path $srcDir "tasks\link_task_commit_reject.c"),
+        (Join-Path $testDir "test_link_task_commit_reject.c"),
         (Join-Path $srcDir "tasks\update_task_reboot_policy.c"),
         (Join-Path $testDir "test_update_task_reboot_policy.c"),
         (Join-Path $srcDir "clear_trip_diag_codec.c"),
@@ -352,6 +354,11 @@ try {
         (Join-Path $testDir "fake_log_task.c"),
         (Join-Path $srcDir "config_store_flash.c"),
         (Join-Path $srcDir "config_params.c"),
+        # Pure decision -> wire-reason mapping. Linked here as well as into
+        # the main exe because test_config_store_flash.c's own MIXED-refusal
+        # test (re-review defect 1) drives it with the REAL persisted/cached
+        # records this executable's fake_flash backing produces.
+        (Join-Path $srcDir "tasks\link_task_commit_reject.c"),
         (Join-Path $bootDir "crc32.c"),
         (Join-Path $commonSrcDir "kilnlink_commit_config_rejected.c"),
         (Join-Path $hwAbstractionHostDir "fake_flash.c"),

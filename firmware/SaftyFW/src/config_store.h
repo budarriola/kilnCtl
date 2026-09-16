@@ -1083,6 +1083,29 @@ void config_store_boot_load(void);
 // CONFIG_STORE_DEFAULT_TC_TYPE if called before config_store_boot_load().
 uint8_t config_store_get_tc_type(void);
 
+// The tc_type that is actually PERSISTED ON FLASH -- distinct from
+// config_store_get_tc_type() above, which reads the RAM cache that
+// config_store_write_volatile() also updates for a RAM-only install. See
+// config_store_flash.c's s_persisted_record doc comment (the "item 15"
+// block) for why the two can legitimately disagree.
+//
+// Added 2026-09-15 (Opus adversarial re-review of d43e96b2, defect 1):
+// link_task_handle_commit_config() classifies a refused ARMED write as
+// MIXED-or-plain by asking whether the candidate changes the thermocouple
+// type, and must ask that against the same record config_store_write_ex()
+// asked it against when it built the matching log sentence -- otherwise the
+// wire reason and the Pico's own log line disagree about one single
+// refusal. Use this getter for any comparison that must agree with a
+// config_store_write()/_ex() classification; use config_store_get_tc_type()
+// for anything that must match what the chip is currently configured for.
+//
+// Same single-writer contract as s_persisted_record itself: written only by
+// config_store_boot_load() and by a confirmed successful
+// config_store_write_ex(), both on link_task/core 0, so this needs no
+// seqlock and must not be called from SAFTYFW_CORE_TRIP_PATH. Returns
+// CONFIG_STORE_DEFAULT_TC_TYPE if called before config_store_boot_load().
+uint8_t config_store_get_persisted_tc_type(void);
+
 // The cached tc_offset_c -- a calibration correction to be ADDED to the
 // safety board's own MAX31856 hot-junction reading (thermo_task.c is the one
 // caller, applied to reading.tc_temperature_c before anything else -- fault

@@ -31,6 +31,10 @@
 #include "config_store_flash_host_stubs.h"
 #include "discrete_pin_policy.h"
 #include "fake_flash.h"
+// The production decision -> wire-reason mapping, exercised here against a
+// REAL fake_flash-backed store so the cached/persisted disagreement is a
+// genuine one rather than two hand-picked byte values (re-review defect 1).
+#include "tasks/link_task_commit_reject.h"
 #include "tasks/relay_owner.h"
 
 int g_test_failures = 0;
@@ -333,6 +337,108 @@ static void test_write_uses_persisted_record_not_ram_after_volatile_install(void
                "classified as tc_type-only against the PERSISTED record (item 4) -- comparing "
                "against the volatile-mutated RAM record instead would report the generic "
                "CONFIG_STORE_WRITE_REFUSED_ARMED here");
+}
+
+// 2026-09-15, adversarial re-review of d43e96b2, defect 1 -- THE case that
+// distinguishes a correct F2 fix from the one that shipped.
+//
+// F2 labels a refused ARMED commit as ARMED_MIXED (rather than plain ARMED)
+// when the refused write ALSO changes the thermocouple type. The question is
+// which record "also changes" is measured against. config_store_write_ex()
+// measures it against s_persisted_record -- flash truth -- and builds its log
+// sentence from that. The shipped F2 measured it against the CACHED record
+// (config_store_get_tc_type()), which is precisely the read the "item 15" fix
+// removed from this comparison one layer down, because a prior
+// config_store_write_volatile() install leaves the cache carrying values that
+// are not on flash.
+//
+// So this test deliberately constructs the disagreement: a volatile install
+// moves the CACHED tc_type away from the PERSISTED one, and the refused
+// candidate is then chosen to match the cached value and differ from the
+// persisted one. The two inputs give opposite answers, and only the persisted
+// one agrees with the sentence config_store_write_ex() itself logged. A test
+// that does not construct this disagreement passes against the defect.
+static void test_mixed_armed_refusal_wire_reason_uses_persisted_not_cached_tc_type(void)
+{
+    TEST_SECTION("config_store_flash: a MIXED ARMED refusal's wire reason is derived from the "
+                 "PERSISTED tc_type and agrees with its own log sentence (re-review defect 1)");
+    reset_all();
+    config_store_boot_load(); // persisted record: all-default, uncommissioned
+
+    const uint8_t persisted_type_before = config_store_get_persisted_tc_type();
+    // Any valid type code that is not the persisted one -- derived, not
+    // hardcoded, so a change to CONFIG_STORE_DEFAULT_TC_TYPE cannot silently
+    // collapse this test's two values into one and make it vacuous.
+    const uint8_t other_type = (persisted_type_before == 0x06u) ? 0x02u : 0x06u;
+
+    // Step 1: pollute the RAM cache while NOT armed. A volatile install
+    // lands in RAM only -- flash, and therefore s_persisted_record, is
+    // untouched.
+    config_store_record_t volatile_rec;
+    config_store_default(&volatile_rec);
+    volatile_rec.fields_set |= (uint16_t)CONFIG_STORE_SET_TC_TYPE;
+    volatile_rec.tc_type = other_type;
+    TEST_CHECK(config_store_write_volatile(&volatile_rec, NULL) == true,
+               "fixture: volatile install accepted while not armed");
+
+    // Step 2: the cached and persisted types now genuinely DISAGREE. Without
+    // this, every input below would give the same answer and the test would
+    // prove nothing.
+    TEST_CHECK(config_store_get_tc_type() == other_type,
+               "fixture: the CACHED tc_type is the volatile install's value");
+    TEST_CHECK(config_store_get_persisted_tc_type() == persisted_type_before,
+               "fixture: the PERSISTED tc_type is still flash truth, unmoved by the volatile "
+               "install");
+    TEST_CHECK(config_store_get_tc_type() != config_store_get_persisted_tc_type(),
+               "fixture: cached and persisted tc_type DISAGREE -- this is the case that "
+               "separates a correct F2 from the shipped one");
+
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
+
+    // Step 3: a candidate that is MIXED against FLASH (tc_type differs AND
+    // mains_voltage_v differs) but whose tc_type MATCHES the polluted cache.
+    config_store_record_t candidate;
+    config_store_default(&candidate);
+    candidate.fields_set |= (uint16_t)CONFIG_STORE_SET_TC_TYPE;
+    candidate.tc_type = other_type;
+    candidate.mains_voltage_v = 240.0f;
+
+    const char *reason = NULL;
+    config_store_write_decision_t decision = CONFIG_STORE_WRITE_OK;
+    // heat_safe = true: a tc_type-ONLY change would be ACCEPTED here, so the
+    // refusal below is caused purely by the other changed field, which is
+    // exactly what "MIXED" is supposed to tell the operator.
+    bool written = config_store_write_ex(&candidate, true, &reason, &decision);
+
+    TEST_CHECK(written == false, "the mixed change is refused while ARMED");
+    TEST_CHECK(decision == CONFIG_STORE_WRITE_REFUSED_ARMED,
+               "the decision is the plain ARMED refusal (MIXED is a label on it, not a separate "
+               "decision)");
+    TEST_CHECK(reason != NULL && strstr(reason, "other than thermocouple type") != NULL,
+               "config_store_write_ex() logged the MIXED sentence -- it classified this as a "
+               "mixed change against the PERSISTED record");
+
+    // Step 4: the wire reason the production mapping produces from the
+    // PERSISTED type agrees with that sentence.
+    kilnlink_commit_config_reject_reason_t wire_from_persisted =
+        link_task_commit_config_reject_reason_for(decision, config_store_get_persisted_tc_type(),
+                                                   candidate.tc_type);
+    TEST_CHECK(wire_from_persisted == KILNLINK_COMMIT_CONFIG_REJECT_ARMED_MIXED,
+               "the wire reason built from the PERSISTED tc_type is ARMED_MIXED -- it AGREES "
+               "with the log sentence above");
+
+    // Step 5: and the defect's input gives the contradicting answer. This
+    // assertion is what makes the two records' disagreement load-bearing
+    // rather than decorative.
+    kilnlink_commit_config_reject_reason_t wire_from_cached =
+        link_task_commit_config_reject_reason_for(decision, config_store_get_tc_type(),
+                                                   candidate.tc_type);
+    TEST_CHECK(wire_from_cached == KILNLINK_COMMIT_CONFIG_REJECT_ARMED,
+               "the wire reason built from the CACHED tc_type is the plain ARMED reason -- the "
+               "shipped F2's input, and it CONTRADICTS the log sentence for this one refusal");
+    TEST_CHECK(wire_from_persisted != wire_from_cached,
+               "the two inputs genuinely diverge on this case (guards against a future change "
+               "that makes them identical and quietly turns this test vacuous)");
 }
 
 // 2026-09-14 review, Finding A -- config_store_write_volatile() must refuse
@@ -1294,6 +1400,7 @@ int main(void)
     test_write_volatile_installs_while_armed_and_bumps_identity();
     test_write_volatile_repeated_then_flash_commit_still_gated();
     test_write_uses_persisted_record_not_ram_after_volatile_install();
+    test_mixed_armed_refusal_wire_reason_uses_persisted_not_cached_tc_type();
     test_write_volatile_refuses_loosening_while_armed();
     test_seq_increments_and_survives_wraparound();
     test_safe_execute_timeout_is_reported_and_leaves_cache_unchanged();

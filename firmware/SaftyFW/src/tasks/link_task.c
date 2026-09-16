@@ -74,6 +74,7 @@
 #include "max31856.h" // MAX31856_TC_TYPE_* range check, see link_task_handle_set_config()
 #include "reboot_announce.h" // SAFETY_CMD_ANNOUNCE_REBOOT (0x18), see link_task_handle_announce_reboot()
 #include "safety_core.h"
+#include "link_task_commit_reject.h" // pure write-decision -> wire-reason mapping, see link_task_handle_commit_config()
 #include "link_task_tc_type_gate.h"
 #include "snapshots.h"
 #include "thermo_task.h"
@@ -2473,35 +2474,25 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
         // match caught only the plain ARMED case and silently collapsed
         // both HEAT_ON and HEAT_UNKNOWN (and any future new reason) into
         // the generic STORAGE bucket, hiding the real cause from the page.
-        kilnlink_commit_config_reject_reason_t wire_reason;
-        switch (decision) {
-        case CONFIG_STORE_WRITE_REFUSED_ARMED:
-            // 2026-09-15 (Opus adversarial re-review, F2): a MIXED change
-            // (tc_type differs AND at least one other field also differs)
-            // lands here too -- config_store_write_ex()'s own out_reason
-            // already builds the specific sentence for it
-            // (config_store_flash.c), but until this fix it never left the
-            // Pico's console log because the wire frame collapsed it into
-            // the same plain ARMED reason as every other ARMED refusal.
-            // Same "tc_type differs from what's persisted" test config_
-            // store_flash.c uses to decide whether to build that sentence.
-            wire_reason = (prev_tc_type != to_write.tc_type) ? KILNLINK_COMMIT_CONFIG_REJECT_ARMED_MIXED
-                                                              : KILNLINK_COMMIT_CONFIG_REJECT_ARMED;
-            break;
-        case CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON:
-            wire_reason = KILNLINK_COMMIT_CONFIG_REJECT_ARMED_HEAT_ON;
-            break;
-        case CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_UNKNOWN:
-            wire_reason = KILNLINK_COMMIT_CONFIG_REJECT_ARMED_HEAT_UNKNOWN;
-            break;
-        case CONFIG_STORE_WRITE_FLASH_FAILURE:
-            wire_reason = KILNLINK_COMMIT_CONFIG_REJECT_STORAGE;
-            break;
-        case CONFIG_STORE_WRITE_OK: // unreachable: written was false
-        default:
-            wire_reason = KILNLINK_COMMIT_CONFIG_REJECT_UNKNOWN;
-            break;
-        }
+        // 2026-09-15 (Opus adversarial re-review of d43e96b2, defect 1):
+        // the mapping moved wholesale into link_task_commit_reject.c so it
+        // is host-testable (test_link_task_commit_reject.c) -- it was
+        // previously an untestable switch inside this FreeRTOS/pico-sdk
+        // translation unit, which is why F2's original form shipped with a
+        // wrong input and no test.
+        //
+        // The MIXED classification is fed the PERSISTED tc_type, NOT
+        // `prev_tc_type` (which is config_store_get_tc_type(), the RAM
+        // cache a prior config_store_write_volatile() install can have
+        // moved off flash truth). config_store_write_ex() built its own
+        // MIXED log sentence by comparing s_persisted_record.tc_type
+        // against rec->tc_type; feeding this mapping anything else lets
+        // the wire reason and that log line contradict each other for one
+        // single refusal. `prev_tc_type` stays correct for the reapply
+        // policy above, which genuinely wants the live/cached value.
+        kilnlink_commit_config_reject_reason_t wire_reason =
+            link_task_commit_config_reject_reason_for(decision, config_store_get_persisted_tc_type(),
+                                                       to_write.tc_type);
         link_task_send_commit_config_rejected(CONFIG_PARAMS_NO_PARAM_ID, wire_reason);
     }
     safety_core_set_tc_type_apply_in_progress(false);

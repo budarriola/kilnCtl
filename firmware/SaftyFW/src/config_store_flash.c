@@ -773,6 +773,21 @@ uint8_t config_store_get_tc_type(void)
     return snap.tc_type;
 }
 
+uint8_t config_store_get_persisted_tc_type(void)
+{
+    if (!s_loaded) {
+        // Same defensive default as config_store_get_tc_type() above, and
+        // for the same reason: before boot_load() s_persisted_record is
+        // zeroed and 0 is not a valid MAX31856_TC_TYPE_*.
+        return CONFIG_STORE_DEFAULT_TC_TYPE;
+    }
+    // No seqlock, unlike config_store_get_tc_type() above: s_persisted_
+    // record is link_task/core-0-only by the single-writer contract
+    // documented at its declaration, and nothing on SAFTYFW_CORE_TRIP_PATH
+    // reads it.
+    return s_persisted_record.tc_type;
+}
+
 float config_store_get_tc_offset_c(void)
 {
     if (!s_loaded) {

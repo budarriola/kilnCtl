@@ -49,6 +49,7 @@ void run_test_update_task_relay_wiring(void);
 void run_test_reboot_in_place_wiring(void);
 void run_test_tc_type_reapply_policy(void);
 void run_test_link_task_tc_type_gate(void);
+void run_test_link_task_commit_reject(void);
 void run_test_update_task_reboot_policy(void);
 void run_test_relay_owner_gpio_init(void);
 void run_test_current_sense_hal_adc(void);
@@ -105,6 +106,7 @@ int main(void)
     run_test_reboot_in_place_wiring();
     run_test_tc_type_reapply_policy();
     run_test_link_task_tc_type_gate();
+    run_test_link_task_commit_reject();
     run_test_update_task_reboot_policy();
     run_test_relay_owner_gpio_init();
     run_test_current_sense_hal_adc();

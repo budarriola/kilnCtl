@@ -1200,6 +1200,21 @@ bool config_store_only_tc_type_differs(const config_store_record_t *current,
         // "not a tc_type-only change", which routes the caller into the
         // existing unconditional ARMED refusal (see the non-tc_type-only
         // branch above) instead of resetting the chip.
+        //
+        // Not host-tested, and the reason matters: it is NOT that a
+        // file-local static is unreachable from a test (the 2026-09-15
+        // re-review of d43e96b2 corrected that claim -- the house pattern
+        // of #include-ing the production .c directly into a test is used
+        // elsewhere in this repo, and `s_call_in_progress` is in any case
+        // function-local, so even that would not reach it). The real
+        // reason is that there is NO RE-ENTRY SEAM: everything executed
+        // between setting and clearing the flag -- config_store_pack(),
+        // the little-endian accessors, memcmp() -- is same-translation-
+        // unit or libc, so no test can interpose a call that re-enters
+        // this function. Reaching this branch would require adding a seam
+        // to production code purely to test a defence-in-depth trip-wire,
+        // which is not worth the production risk. If a seam ever appears
+        // here for another reason, test this branch then.
         log_task_log(LOG_LEVEL_ERROR, "config_store",
                      "config_store_only_tc_type_differs re-entered -- refusing "
                      "as not-tc_type-only, chip stays armed");
