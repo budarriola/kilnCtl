@@ -15,6 +15,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h" // vTaskDelay/pdMS_TO_TICKS -- ct_auto_zero_post_handler()'s poll loop
 
+#include "hal_time.h" /* hal_time_now_us() -- HAL_INCLUDE_BOUNDARY: this file must not include esp_timer.h
+                        * directly, same convention safety_ceiling_sync.c's own include documents */
 #include "http_form.h"
 #include "kiln_cfg_store.h" /* kiln_cfg_store_autosave_from_live() -- 2026-09-15 review HIGH 3,
                               * commissioning_post_handler()'s own comment below */
@@ -832,6 +834,25 @@ static const char *commit_reject_reason_words(uint8_t reason)
     case KILNLINK_COMMIT_CONFIG_REJECT_CONTRADICTION: return "contradicts another staged field";
     case KILNLINK_COMMIT_CONFIG_REJECT_ARMED: return "relay is ARMED -- config writes are refused while ARMED";
     case KILNLINK_COMMIT_CONFIG_REJECT_STORAGE: return "the safety processor's flash write failed";
+    /* 2026-09-15 (Opus adversarial re-review, F1): these two reject reasons
+     * (link_task.c's tc_type heat-safety gate) existed on the wire since
+     * a2384dd5 with no ESP-side case here, so they fell to the generic
+     * default below -- readable as "unrecognised reason" instead of the
+     * correct, actionable sentence. Both sentences deliberately contain
+     * "ARMED" so the commissioning page's /ARMED/i match
+     * (commissioning_shared.js, safety_commissioning_page.html) recognises
+     * them as ARMED-family refusals too. */
+    case KILNLINK_COMMIT_CONFIG_REJECT_ARMED_HEAT_ON:
+        return "relay is ARMED and heat is on right now -- turn heat off and retry";
+    case KILNLINK_COMMIT_CONFIG_REJECT_ARMED_HEAT_UNKNOWN:
+        return "relay is ARMED and heat state is not currently known -- retry once it is";
+    /* 2026-09-15 (Opus adversarial re-review, F2): the N4 "mixed change
+     * while ARMED" sentence (config_store_flash.c) never reached the wire
+     * until this reason existed -- see kilnlink_commit_config_rejected.h's
+     * own comment on this value. */
+    case KILNLINK_COMMIT_CONFIG_REJECT_ARMED_MIXED:
+        return "relay is ARMED and this change also modifies field(s) other than "
+               "thermocouple type -- only thermocouple type may change while ARMED";
     default: return "refused (unrecognised reason)";
     }
 }
@@ -845,6 +866,23 @@ static const char *commit_reject_reason_words(uint8_t reason)
  * (never a guessed ARMED) whenever it is not. This is the one place that
  * numeric code exists on this side of the link -- reuse it, do not
  * re-derive a classification from prose anywhere else. */
+/* 2026-09-15 review (review_divergence_fixes_b2e7017f_2026-09-15.md,
+ * HIGH 2): see safety_cfg_http_recent_armed_refusal()'s doc comment
+ * (safety_cfg_http.h). Set only by commissioning_post_handler below, the
+ * operator-facing entry point this is meant to explain -- not by every
+ * internal apply_pairs()/confirm_commit_landed() caller (e.g.
+ * safety_ceiling_sync.c's own ceiling-raise retries back off on ARMED as a
+ * matter of course and must not spuriously claim to explain an unrelated
+ * standing-field mismatch). */
+#define SAFETY_CFG_HTTP_ARMED_REFUSAL_WINDOW_US ((int64_t)5 * 60 * 1000 * 1000)
+static int64_t s_last_commissioning_armed_refusal_us = -SAFETY_CFG_HTTP_ARMED_REFUSAL_WINDOW_US;
+
+bool safety_cfg_http_recent_armed_refusal(void)
+{
+    int64_t now_us = (int64_t)hal_time_now_us();
+    return (now_us - s_last_commissioning_armed_refusal_us) < SAFETY_CFG_HTTP_ARMED_REFUSAL_WINDOW_US;
+}
+
 static safety_ceiling_refusal_class_t reject_reason_to_refusal_class(uint8_t reason)
 {
     switch (reason) {
@@ -852,6 +890,15 @@ static safety_ceiling_refusal_class_t reject_reason_to_refusal_class(uint8_t rea
     case KILNLINK_COMMIT_CONFIG_REJECT_STORAGE: return SAFETY_CEILING_REFUSAL_STORAGE;
     case KILNLINK_COMMIT_CONFIG_REJECT_RANGE: return SAFETY_CEILING_REFUSAL_RANGE;
     case KILNLINK_COMMIT_CONFIG_REJECT_CONTRADICTION: return SAFETY_CEILING_REFUSAL_CONTRADICTION;
+    /* 2026-09-15 (Opus adversarial re-review, F1): both are ARMED-family
+     * refusals (the tc_type heat-safety gate refusing while ARMED for a
+     * more specific reason than the plain ARMED case) -- classify them
+     * that way so safety_ceiling_reconcile_record_result() uses the ARMED
+     * fixed backoff instead of the generic OTHER retry backoff, which
+     * otherwise retries sooner than intended. */
+    case KILNLINK_COMMIT_CONFIG_REJECT_ARMED_HEAT_ON: return SAFETY_CEILING_REFUSAL_ARMED;
+    case KILNLINK_COMMIT_CONFIG_REJECT_ARMED_HEAT_UNKNOWN: return SAFETY_CEILING_REFUSAL_ARMED;
+    case KILNLINK_COMMIT_CONFIG_REJECT_ARMED_MIXED: return SAFETY_CEILING_REFUSAL_ARMED;
     default: return SAFETY_CEILING_REFUSAL_OTHER;
     }
 }
@@ -1237,7 +1284,16 @@ static esp_err_t commissioning_post_handler(httpd_req_t *req)
     }
 
     char reason[160];
-    bool ok = apply_pairs(s_link, pairs, n, commit, reason, sizeof(reason), NULL);
+    safety_ceiling_refusal_class_t refusal_class = SAFETY_CEILING_REFUSAL_NONE;
+    bool ok = apply_pairs(s_link, pairs, n, commit, reason, sizeof(reason), &refusal_class);
+    /* 2026-09-15 review (HIGH 2): record an ARMED refusal so the standing-
+     * divergence warning (safety_ceiling_sync.c) can name the actual reason
+     * a broadened-field mismatch cannot currently be corrected, instead of
+     * reporting a bare, actionless mismatch -- see safety_cfg_http_recent_
+     * armed_refusal()'s doc comment. */
+    if (!ok && refusal_class == SAFETY_CEILING_REFUSAL_ARMED) {
+        s_last_commissioning_armed_refusal_us = (int64_t)hal_time_now_us();
+    }
 
     /* S8 rate-guard write provenance -- this generic endpoint is how an
      * operator hand-enters max_rate_c_per_min (0x0204) today, so a

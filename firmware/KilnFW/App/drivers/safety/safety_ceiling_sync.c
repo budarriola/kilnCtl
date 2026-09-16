@@ -4,6 +4,11 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h" /* MEDIUM 5 -- s_standing_warning_active/_reason (and the ceiling-
+                               * divergence pair alongside them) are written by safety_poll_task
+                               * and read lock-free by the httpd and LVGL tasks; same lazy-mutex
+                               * convention as kiln_cfg_store.c's s_swap_lock. */
 
 #include "MAX31856.h"
 #include "config_divergence.h"
@@ -71,6 +76,19 @@ static bool s_standing_warning_active = false;
 static char s_standing_warning_reason[CONFIG_DIVERGENCE_REASON_MAX] = { 0 };
 static int64_t s_standing_warning_last_log_us = -CONFIG_DIVERGENCE_LOG_INTERVAL_US;
 
+/* 2026-09-15 review (review_divergence_fixes_b2e7017f_2026-09-15.md,
+ * MEDIUM 3): see safety_ceiling_sync_latch_evaluated_generation()'s own doc
+ * comment (safety_ceiling_sync.h). Updated ONLY at the bottom of
+ * enforce_ceiling_divergence(), after both latches above have been
+ * (re)computed against whatever safety_cfg_store cache generation was
+ * current at the top of that same call. */
+static uint32_t s_latch_evaluated_generation = 0;
+
+uint32_t safety_ceiling_sync_latch_evaluated_generation(void)
+{
+    return s_latch_evaluated_generation;
+}
+
 static safety_ceiling_disable_heat_fn s_disable_all_relays_off = NULL;
 static safety_ceiling_disable_heat_fn s_disable_halt_run = NULL;
 
@@ -92,12 +110,41 @@ void safety_ceiling_sync_set_expected_pico_fields_source(safety_ceiling_expected
     s_expected_pico_fields_source = fn;
 }
 
+/* MEDIUM 5 -- lazily-created lock guarding the four divergence-state fields
+ * (s_divergence_active/_reason, s_standing_warning_active/_reason) against
+ * the cross-task read/write race: safety_poll_task writes them (via
+ * enforce_ceiling_divergence() below), while the httpd task
+ * (dashboard_status_http.c) and the LVGL task (ui_page_home_refresh.c) read
+ * them lock-free today. Never held across a producer or blocking call --
+ * every critical section below is a plain snprintf/bool copy. */
+static SemaphoreHandle_t s_divergence_state_lock;
+
+static void divergence_state_lock_take(void)
+{
+    if (!s_divergence_state_lock) {
+        s_divergence_state_lock = xSemaphoreCreateMutex();
+    }
+    if (s_divergence_state_lock) {
+        xSemaphoreTake(s_divergence_state_lock, portMAX_DELAY);
+    }
+}
+
+static void divergence_state_lock_give(void)
+{
+    if (s_divergence_state_lock) {
+        xSemaphoreGive(s_divergence_state_lock);
+    }
+}
+
 bool safety_ceiling_sync_is_diverged(char *reason_out, size_t reason_cap)
 {
+    divergence_state_lock_take();
     if (reason_out && reason_cap > 0) {
         snprintf(reason_out, reason_cap, "%s", s_divergence_reason);
     }
-    return s_divergence_active;
+    bool active = s_divergence_active;
+    divergence_state_lock_give();
+    return active;
 }
 
 /* 2026-09-15 review HIGH 2 interim (see s_standing_warning_active's own doc
@@ -111,10 +158,13 @@ bool safety_ceiling_sync_is_diverged(char *reason_out, size_t reason_cap)
  * heat-disabling ceiling verdict) having their contract changed under them. */
 bool safety_ceiling_sync_is_standing_diverged(char *reason_out, size_t reason_cap)
 {
+    divergence_state_lock_take();
     if (reason_out && reason_cap > 0) {
         snprintf(reason_out, reason_cap, "%s", s_standing_warning_reason);
     }
-    return s_standing_warning_active;
+    bool active = s_standing_warning_active;
+    divergence_state_lock_give();
+    return active;
 }
 
 /* The writer callback safety_ceiling_policy.c calls. `ctx` is the
@@ -247,6 +297,13 @@ void safety_ceiling_sync_apply_lower(SafetyLinkClass *link, const float *new_max
  * symptom to chase -- it is this coupling working as designed. */
 static void enforce_ceiling_divergence(float target_c, bool target_known, float pico_c, bool pico_known)
 {
+    /* Snapshot the cache generation BEFORE reading any live safety_cfg_store
+     * rows below -- see safety_ceiling_sync_latch_evaluated_generation()'s
+     * doc comment. Recorded even on the early "no target yet" return path
+     * (still stamped just above that return) so a caller never observes an
+     * artificially stale generation number while genuinely nothing has
+     * changed. */
+    uint32_t cache_gen_at_entry = safety_cfg_store_cache_generation();
     if (!target_known) {
         /* No zone has a positive max_temp_c -- the ESP itself has no
          * ceiling opinion yet (a fresh/all-zero config). There is nothing
@@ -257,10 +314,13 @@ static void enforce_ceiling_divergence(float target_c, bool target_known, float 
          * matters here: a check that fires on a benign, common state is
          * exactly the "nuisance check gets switched off" the owner warned
          * against. */
+        divergence_state_lock_take();
         s_divergence_active = false;
         s_divergence_reason[0] = '\0';
         s_standing_warning_active = false;
         s_standing_warning_reason[0] = '\0';
+        divergence_state_lock_give();
+        s_latch_evaluated_generation = cache_gen_at_entry;
         return;
     }
     /* abs_max_temp_c is field 0, always present -- see config_divergence.h's
@@ -396,8 +456,10 @@ static void enforce_ceiling_divergence(float target_c, bool target_known, float 
     int64_t now_us = (int64_t)hal_time_now_us();
 
     if (!ceiling_diverged) {
+        divergence_state_lock_take();
         s_divergence_active = false;
         s_divergence_reason[0] = '\0';
+        divergence_state_lock_give();
     } else {
         /* See safety_ceiling_sync.h's own doc comment on safety_ceiling_sync_
          * set_disable_heat_hooks() for why these are injected function
@@ -405,7 +467,10 @@ static void enforce_ceiling_divergence(float target_c, bool target_known, float 
          * calls: this file is compiled into more than one host test executable
          * with different fake ecosystems, and NULL (the default, e.g. every
          * host test that never calls the setter) is the correct, safe no-op --
-         * a test binary has no real relays to turn off. */
+         * a test binary has no real relays to turn off. Called OUTSIDE the
+         * divergence-state lock below (MEDIUM 5) -- never hold that lock
+         * across these hook calls, which may themselves take other modules'
+         * locks or do real I/O. */
         if (s_disable_all_relays_off) {
             s_disable_all_relays_off();
         }
@@ -413,12 +478,18 @@ static void enforce_ceiling_divergence(float target_c, bool target_known, float 
             s_disable_halt_run();
         }
 
+        bool should_log = false;
+        divergence_state_lock_take();
         snprintf(s_divergence_reason, sizeof(s_divergence_reason), "%s", ceiling_reason);
         if (!s_divergence_active || (now_us - s_divergence_last_log_us >= CONFIG_DIVERGENCE_LOG_INTERVAL_US)) {
-            ESP_LOGE(TAG, "ALARM: %s -- heaters disabled (all relays forced off, any run halted)", ceiling_reason);
+            should_log = true;
             s_divergence_last_log_us = now_us;
         }
         s_divergence_active = true;
+        divergence_state_lock_give();
+        if (should_log) {
+            ESP_LOGE(TAG, "ALARM: %s -- heaters disabled (all relays forced off, any run halted)", ceiling_reason);
+        }
     }
 
     /* Broadened (non-ceiling) fields, fields[1..n): run the SAME comparator
@@ -434,20 +505,60 @@ static void enforce_ceiling_divergence(float target_c, bool target_known, float 
     bool standing_diverged = config_divergence_check(esp_fields, pico_fields, n, standing_reason, sizeof(standing_reason));
     bool non_ceiling_diverged = standing_diverged && !ceiling_diverged;
     if (!non_ceiling_diverged) {
+        divergence_state_lock_take();
         s_standing_warning_active = false;
         s_standing_warning_reason[0] = '\0';
+        divergence_state_lock_give();
     } else {
-        snprintf(s_standing_warning_reason, sizeof(s_standing_warning_reason), "%s", standing_reason);
+        /* 2026-09-15 review (HIGH 2): a mismatch here often cannot be
+         * corrected right now because a commissioning re-push was refused
+         * while the relay is ARMED -- see safety_cfg_http_recent_armed_
+         * refusal()'s doc comment. Naming that explicitly turns "config
+         * mismatch, no visible remedy" (the shape most likely to end with
+         * this warning ignored or silenced) into "disarm and retry", an
+         * actionable instruction. Appended, not substituted, so the
+         * underlying field/value detail from config_divergence_check() is
+         * never lost. safety_cfg_http_recent_armed_refusal() is a plain
+         * timestamp read (no lock of its own), safe to call before taking
+         * the divergence-state lock below. */
+        bool armed_refusal = safety_cfg_http_recent_armed_refusal();
+        bool should_log = false;
+        divergence_state_lock_take();
+        if (armed_refusal) {
+            /* standing_reason and s_standing_warning_reason are both sized
+             * CONFIG_DIVERGENCE_REASON_MAX, so appending a fixed suffix can
+             * legitimately need to truncate the reason text -- an accepted,
+             * cosmetic truncation (never a correctness issue: the operator
+             * still gets the ARMED hint plus as much of the field/value
+             * detail as fits), not a real overflow. -Wformat-truncation
+             * cannot see that this is intentional and bounded, hence
+             * -Werror flagging it as a build break unrelated to this
+             * review's own changes (coordinator note, 2026-09-15) -- silence
+             * just this one call rather than the whole file. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+            snprintf(s_standing_warning_reason, sizeof(s_standing_warning_reason),
+                     "%s (re-push refused: relay is ARMED -- disarm and retry commissioning)", standing_reason);
+#pragma GCC diagnostic pop
+        } else {
+            snprintf(s_standing_warning_reason, sizeof(s_standing_warning_reason), "%s", standing_reason);
+        }
         if (!s_standing_warning_active ||
             (now_us - s_standing_warning_last_log_us >= CONFIG_DIVERGENCE_LOG_INTERVAL_US)) {
+            should_log = true;
+            s_standing_warning_last_log_us = now_us;
+        }
+        s_standing_warning_active = true;
+        divergence_state_lock_give();
+        if (should_log) {
             ESP_LOGW(TAG,
                      "standing config divergence (non-ceiling): %s -- heat NOT disabled for this "
                      "(HIGH 2 interim; see safety_ceiling_sync.h)",
                      standing_reason);
-            s_standing_warning_last_log_us = now_us;
         }
-        s_standing_warning_active = true;
     }
+
+    s_latch_evaluated_generation = cache_gen_at_entry;
 }
 
 void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link)

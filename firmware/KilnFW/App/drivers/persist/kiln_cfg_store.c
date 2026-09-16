@@ -1582,10 +1582,22 @@ bool kiln_cfg_store_get_full_package(int32_t id, uint8_t *blob_out, uint16_t cap
     return true;
 }
 
+/* Forward decl -- defined with the rest of the pico-half-dirty machinery
+ * below; this is the single choke point for runtime active-slot changes
+ * (kiln_cfg_swap.c's only three call sites), so it is where a pending
+ * recapture flag that no longer matches the new active slot gets dropped
+ * (LOW 7: "reset one side of a pair" -- a per-slot flag must not silently
+ * keep applying to whichever slot happens to be active later, nor get
+ * orphaned forever once its owning slot stops being active). */
+static void pico_half_dirty_drop_if_owned_by(int32_t slot);
+
 bool kiln_cfg_store_set_active_id_raw(int32_t id, char *reason_out, size_t reason_cap)
 {
     if (id != KILN_CFG_NO_ACTIVE_ID && find_index_by_id(id) < 0) {
         return set_reason(reason_out, reason_cap, "cannot mark a nonexistent id active");
+    }
+    if (id != s_store.active_id) {
+        pico_half_dirty_drop_if_owned_by(s_store.active_id);
     }
     s_store.active_id = id;
     hal_status_t err = nvs_save_store();
@@ -1959,9 +1971,95 @@ static int32_t s_autosave_target_override = KILN_CFG_AUTOSAVE_OVERRIDE_NONE;
  * either that function or kiln_cfg_store_recapture_pico_half_confirmed()
  * successfully performs the deferred recapture. Exposed read-only via
  * kiln_cfg_store_pico_half_recapture_pending() for a non-PSRAM-stacked,
- * NVS-capable caller to poll and retry -- this module itself has no polling
- * task of its own. */
+ * NVS-capable caller to poll and retry -- wired up to ui_page_home_refresh.c's
+ * LVGL tick (2026-09-15 review HIGH 1 fix); this module itself still has no
+ * polling task of its own.
+ *
+ * 2026-09-15 review (review_divergence_fixes_b2e7017f_2026-09-15.md,
+ * LOW 7/8): now three tasks can touch this pair (the flash worker via
+ * kiln_cfg_store_autosave_from_live(), the httpd task via kiln_cfg_store_
+ * recapture_pico_half_confirmed(), and the LVGL task via the new poller
+ * above) -- s_pico_half_dirty_lock (a lazily-created mutex, same convention
+ * as s_swap_lock just below) serializes every read/write of both fields so
+ * no update can be lost. s_pico_half_dirty_slot records WHICH slot the
+ * pending recapture belongs to ("reset one side of a pair" -- CLAUDE.md):
+ * if the active slot changes (kiln swap, revert) while a recapture is
+ * still owed, the flag must not silently get applied to the NEW slot, nor
+ * leave the OLD slot's stale Pico half stuck forever with no flag pointing
+ * at it -- kiln_cfg_store_set_active_id_raw() below drops a pending flag
+ * that no longer matches when active_id changes away from the owing slot. */
 static bool s_pico_half_dirty = false;
+static int32_t s_pico_half_dirty_slot = KILN_CFG_NO_ACTIVE_ID;
+static SemaphoreHandle_t s_pico_half_dirty_lock;
+
+static void pico_half_dirty_lock_take(void)
+{
+    if (!s_pico_half_dirty_lock) {
+        s_pico_half_dirty_lock = xSemaphoreCreateMutex();
+    }
+    if (s_pico_half_dirty_lock) {
+        xSemaphoreTake(s_pico_half_dirty_lock, portMAX_DELAY);
+    }
+}
+
+static void pico_half_dirty_lock_give(void)
+{
+    if (s_pico_half_dirty_lock) {
+        xSemaphoreGive(s_pico_half_dirty_lock);
+    }
+}
+
+static void pico_half_dirty_set(int32_t slot)
+{
+    pico_half_dirty_lock_take();
+    s_pico_half_dirty = true;
+    s_pico_half_dirty_slot = slot;
+    pico_half_dirty_lock_give();
+}
+
+/* Clears unconditionally -- callers that just performed the recapture for
+ * `slot` already know it matches (they read the slot alongside the pending
+ * flag first); this helper is also reused by kiln_cfg_store_set_active_id_
+ * raw() to drop a flag that no longer applies to any slot the caller cares
+ * about. */
+static void pico_half_dirty_clear(void)
+{
+    pico_half_dirty_lock_take();
+    s_pico_half_dirty = false;
+    s_pico_half_dirty_slot = KILN_CFG_NO_ACTIVE_ID;
+    pico_half_dirty_lock_give();
+}
+
+/* Returns whether a recapture is pending AND, if `out_slot` is non-NULL,
+ * the slot it is owed for. */
+static bool pico_half_dirty_get(int32_t *out_slot)
+{
+    pico_half_dirty_lock_take();
+    bool dirty = s_pico_half_dirty;
+    int32_t slot = s_pico_half_dirty_slot;
+    pico_half_dirty_lock_give();
+    if (out_slot) {
+        *out_slot = slot;
+    }
+    return dirty;
+}
+
+/* LOW 7 support -- called from kiln_cfg_store_set_active_id_raw() above
+ * (forward-declared there) whenever active_id is about to change away from
+ * `slot`. Drops the pending flag ONLY if it still points at the slot that
+ * is losing active-id status; a flag already re-owned by (or never owned
+ * by) that slot is left untouched. Prevents both halves of LOW 7/LOW 8: a
+ * flag silently surviving to apply to the wrong slot, and one orphaned
+ * forever once its slot can never become active again to clear it. */
+static void pico_half_dirty_drop_if_owned_by(int32_t slot)
+{
+    pico_half_dirty_lock_take();
+    if (s_pico_half_dirty && s_pico_half_dirty_slot == slot) {
+        s_pico_half_dirty = false;
+        s_pico_half_dirty_slot = KILN_CFG_NO_ACTIVE_ID;
+    }
+    pico_half_dirty_lock_give();
+}
 
 void kiln_cfg_store_set_autosave_target_override(int32_t id_or_none_sentinel)
 {
@@ -2040,10 +2138,37 @@ bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap)
      * ALWAYS fills reason_out describing the deferral -- this function must
      * never report a silent, unqualified success while a recapture was
      * actually skipped. */
+    /* 2026-09-15 review (review_divergence_fixes_b2e7017f_2026-09-15.md,
+     * MEDIUM 3): the divergence latches above are updated once per
+     * safety_poll_task tick, on a different task than this one. Reading
+     * "not diverged" here proves only that the LATCH was clear as of its
+     * last evaluation -- not that the safety_cfg_store cache this function
+     * is about to snapshot into the "expected" record hasn't since been
+     * refreshed by a refetch racing in on that other task. Bracket the
+     * divergence read with the cache's generation counter (bumped exactly
+     * once per successful refetch, safety_cfg_store.c) and treat "the
+     * generation moved while we were deciding" the same as "diverged" --
+     * defer the Pico-half recapture rather than risk capturing a value one
+     * refetch newer than what the divergence check actually evaluated. This
+     * closes the window without a cross-module lock (never hold a lock
+     * across the producer/blocking calls this function already avoids). */
     char div_reason[CONFIG_DIVERGENCE_REASON_MAX];
     bool ceiling_diverged = safety_ceiling_sync_is_diverged(div_reason, sizeof(div_reason));
     bool standing_diverged = !ceiling_diverged && safety_ceiling_sync_is_standing_diverged(div_reason, sizeof(div_reason));
     bool diverged = ceiling_diverged || standing_diverged;
+    if (!diverged && safety_cfg_store_cache_generation() != safety_ceiling_sync_latch_evaluated_generation()) {
+        /* The Pico-config cache has been refreshed (a refetch landed) more
+         * recently than the divergence latch above was last recomputed
+         * against it -- e.g. safety_poll_task's own maybe_refetch() just ran
+         * this tick but enforce_ceiling_divergence() has not yet re-evaluated
+         * against the new cache contents (same tick, sequential, but this
+         * task can be preempted in between). The latch reading "not
+         * diverged" here proves nothing about the value we are about to
+         * snapshot; treat it as diverged and defer, same as an actual
+         * mismatch would. */
+        diverged = true;
+        snprintf(div_reason, sizeof(div_reason), "Pico config cache refreshed since the divergence check last ran");
+    }
 
     if (autosave_blocked_by_swap_pending()) {
         if (reason_out && reason_cap > 0) {
@@ -2076,8 +2201,8 @@ bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap)
                      name, div_reason);
             s_last_deferred_log_us = now_us;
         }
-        s_pico_half_dirty = true;
-    } else if (s_pico_half_dirty) {
+        pico_half_dirty_set(active);
+    } else if (pico_half_dirty_get(NULL)) {
         ESP_LOGI(TAG,
                  "kiln_cfg_store: divergence cleared -- catching up deferred Pico-half recapture "
                  "for '%s'",
@@ -2095,7 +2220,7 @@ bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap)
     bool ok = kiln_cfg_store_save_current_ex(name, active, NULL, /*recapture_pico_half=*/!diverged, reason_out,
                                               reason_cap);
     if (ok && !diverged) {
-        s_pico_half_dirty = false;
+        pico_half_dirty_clear();
     }
     if (ok && diverged && reason_out && reason_cap > 0) {
         /* save_current_ex() succeeded and filled reason_out with nothing (it
@@ -2112,7 +2237,7 @@ bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap)
 
 bool kiln_cfg_store_pico_half_recapture_pending(void)
 {
-    return s_pico_half_dirty;
+    return pico_half_dirty_get(NULL);
 }
 
 bool kiln_cfg_store_recapture_pico_half_confirmed(char *reason_out, size_t reason_cap)
@@ -2150,7 +2275,7 @@ bool kiln_cfg_store_recapture_pico_half_confirmed(char *reason_out, size_t reaso
     }
     bool ok = kiln_cfg_store_save_current_ex(name, active, NULL, /*recapture_pico_half=*/true, reason_out, reason_cap);
     if (ok) {
-        s_pico_half_dirty = false;
+        pico_half_dirty_clear();
     }
     return ok;
 }
@@ -2202,6 +2327,16 @@ size_t kiln_cfg_store_capture_expected_pico_fields(safety_ceiling_expected_param
         }
         if (p->param_id == SAFETY_PARAM_ID_ABS_MAX_TEMP_C) {
             continue; /* stays the existing dedicated field in safety_ceiling_sync.c, never duplicated */
+        }
+        if (p->param_id == SAFETY_PARAM_ID_TC_TYPE) {
+            /* 2026-09-15 review (MEDIUM 4): the ESP has no push path for
+             * tc_type (commissioning-page-owned, ESP read-only) -- see
+             * SAFETY_PARAM_ID_TC_TYPE's own doc comment. Including it here
+             * would count every Pico-side tc_type change (including a
+             * post-reboot default) as a standing divergence the ESP can
+             * never clear, which wedges the deferred recapture via the
+             * autosave gate above. */
+            continue;
         }
         /* Type-aware widen into float -- identical switch to kiln_cfg_
          * swap.c's pico_readback_matches()/normalize_f32_like_wire() call

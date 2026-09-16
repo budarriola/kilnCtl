@@ -399,7 +399,13 @@ try {
     $cmd3 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$outDir\\`" /Fe:`"$exe3`" `"$(Join-Path $testDir 'test_safety_cfg_http.c')`" " +
             "`"$(Join-Path $driversDir 'control/s8_rate_guard_estimate.c')`" " +
-            "`"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`""
+            "`"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`" " +
+            # 2026-09-15 review (review_divergence_fixes_b2e7017f_2026-09-15.md):
+            # safety_cfg_http.c (#included above) now calls hal_time_now_us()
+            # (armed-refusal-recency tracking) -- fake_time.c supplies it here,
+            # same convention as safety_ceiling_sync.c's own callers elsewhere
+            # in this script.
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`""
 
     Invoke-HostTestExe -Name "safety_cfg_http" -ExePath $exe3 -BuildCmd $cmd3
 
@@ -1406,6 +1412,27 @@ try {
 
     Invoke-HostTestExe -Name "crash_report" -ExePath $exe41 -BuildCmd $cmd41
 
+    # ---- test_heat_owner_active_decide.c: its own 42nd, separate executable --
+    # 2026-09-15 (Opus adversarial re-review, F6: docs/audits/review_tc_type_
+    # fixes_a2384dd5_2026-09-15.md). HEAT_OWNER_ACTIVE's producer
+    # (safety_build_and_send_context() in safety_link_frames.c) had no test at
+    # all -- the only host executable that links safety_link_frame.c
+    # (singular; this new one links neither that file nor safety_link_frames.c,
+    # plural, so there is no overlap) fakes heat_enable_is_held()/
+    # danger_mode_active() fixed false, so nothing ever asserted the flag
+    # flips true for PAUSED, a held claimant, or danger mode. Pulled the
+    # decision into heat_owner_active_decide.c, a pure function taking the
+    # executor state plus three bools, so it can be host-tested directly
+    # without linking heat_enable.c/danger_mode.c/profile_executor.c. Own
+    # executable, minimal deps (profile_executor_state.h + libc only).
+    $exe42 = Join-Path $outDir "kilnctl_host_tests_heat_owner_active_decide.exe"
+    $hoadObjDir = Join-Path $outDir "hoad"
+    New-Item -ItemType Directory -Force -Path $hoadObjDir | Out-Null
+    $cmd42 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$hoadObjDir\\`" /Fe:`"$exe42`" `"$(Join-Path $testDir 'test_heat_owner_active_decide.c')`""
+
+    Invoke-HostTestExe -Name "heat_owner_active_decide" -ExePath $exe42 -BuildCmd $cmd42
+
     # ---- sim_iter_tune.exe / sim_wide_temp_sweep.exe: data-generating
     # harnesses (ITER_TUNE_REDESIGN_PLAN.md sec 6/7), not TEST_CHECK
     # pass/fail suites -- their stdout is the evidence for the audit docs
@@ -1780,7 +1807,12 @@ try {
     # present before this pass touched the file -- not this pass' doing,
     # left as found rather than investigated further) plus this pass' own
     # 45th call, test_kiln_cfg_swap.c (docs/KILN_PROFILES_PLAN.md item 5).
-    $totalExpected = 46
+    # 46 -> 47: this pass (F6, docs/audits/review_tc_type_fixes_a2384dd5_
+    # 2026-09-15.md) added test_heat_owner_active_decide.c as its own 47th
+    # Invoke-HostTestExe call -- counted by grep against the actual file at
+    # edit time (47), not by incrementing the stale prior value by one, since
+    # this counter had already drifted before (see the 42->45 note above).
+    $totalExpected = 47
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the

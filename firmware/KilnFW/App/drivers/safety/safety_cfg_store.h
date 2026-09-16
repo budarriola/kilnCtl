@@ -234,6 +234,19 @@ bool safety_cfg_store_maybe_refetch(SafetyLinkClass *link, uint16_t live_config_
  * let a stale cache silently hide a real revert. */
 bool safety_cfg_store_cache_is_stale(void);
 
+/* 2026-09-15 review (review_divergence_fixes_b2e7017f_2026-09-15.md,
+ * MEDIUM 3): bumped exactly once, inside safety_cfg_store_refetch_locked(),
+ * every time a fetch actually lands and s_store is replaced -- never on a
+ * failed/backing-off attempt (those leave the cache untouched, so nothing
+ * "new" has been observed). A caller that captures a value derived from this
+ * cache (e.g. kiln_cfg_store.c's autosave, capturing the Pico half as the new
+ * "expected" record) can compare a generation it read BEFORE doing anything
+ * slow/blocking against the current value returned here AFTER: if they
+ * differ, a refetch landed in between and the captured value may already be
+ * stale, closing the "cache refresh and divergence-latch update are separate
+ * events" race described in that finding without adding a cross-module lock. */
+uint32_t safety_cfg_store_cache_generation(void);
+
 /* 2026-08-23 panic fix: the actual NVS write safety_cfg_store_refetch() used
  * to make directly (nvs_save_store()) now only ever runs via this function,
  * which hands it to uart_bridge_ext.c's internal-SRAM-stack flash-safe

@@ -751,6 +751,21 @@ bool safety_cfg_store_cache_is_stale(void)
 {
     return false;
 }
+// 2026-09-15 review (review_divergence_fixes_b2e7017f_2026-09-15.md, MEDIUM
+// 3 / MEDIUM 5 follow-ups): enforce_ceiling_divergence() (in the real
+// safety_ceiling_sync.c linked above) also reads the cache generation
+// counter (to detect a refetch racing the latch) and the armed-refusal-hint
+// flag. This executable links neither safety_cfg_store.c nor safety_cfg_
+// http.c for real, same reasoning as safety_cfg_store_cache_is_stale() just
+// above -- fixed values, since none of this file's tests exercise either.
+uint32_t safety_cfg_store_cache_generation(void)
+{
+    return 0;
+}
+bool safety_cfg_http_recent_armed_refusal(void)
+{
+    return false;
+}
 uint32_t safety_cfg_store_fetched_ms_ago(void)
 {
     return s_cfg_fetched_ms_ago;

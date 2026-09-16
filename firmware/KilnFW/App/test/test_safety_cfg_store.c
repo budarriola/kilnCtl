@@ -189,6 +189,20 @@ static void stage_page(size_t page_idx, bool more, const uint16_t *ids, const ui
     }
 }
 
+// Non-static wrapper for test_kiln_cfg_store.c (same main test executable,
+// see build_host_tests.ps1's comment on linking safety_cfg_store.c for real
+// only once): review_divergence_fixes_b2e7017f_2026-09-15.md MEDIUM 4's test
+// needs to seed this file's fake safety_link_get_config_page() with real
+// param ids/values so kiln_cfg_store_recapture_pico_half_confirmed() ->
+// kiln_package_capture_pico_half() -> safety_cfg_store_get_by_index() (all
+// real, all linked once, right here) actually reports them SET. stage_page()
+// itself stays static/file-local; this is the one crossing point.
+void test_safety_cfg_store_stage_page_for_kiln_cfg_store_test(size_t page_idx, bool more, const uint16_t *ids,
+                                                                const uint16_t *vals, size_t n)
+{
+    stage_page(page_idx, more, ids, vals, n);
+}
+
 // Same as stage_page(), but the ONE entry at `unset_index` (0-based within
 // this page) is staged with set=false -- simulates a Pico reporting a
 // no-safe-default field (e.g. abs_max_temp_c) that has never been
@@ -1158,6 +1172,51 @@ static void test_ct_cal_set_reports_nvs_failure_via_out_param(void)
     fake_kv_reset_all();
 }
 
+// 2026-09-15 review (review_divergence_fixes_b2e7017f_2026-09-15.md, LOW 9/
+// LOW 10): s_cache_stale used to be cleared only inside maybe_refetch()'s own
+// CRC-match/success branches, so a caller that reaches a successful refetch
+// via safety_cfg_store_refetch() directly (e.g. confirm_commit_landed() in
+// safety_cfg_http.c, which never goes through maybe_refetch() at all) could
+// leave the stale flag set even though the cache is now fresh -- a transient
+// false "stale" warning right after a commissioning commit. The fix moved
+// the clear into safety_cfg_store_refetch_locked()'s single success choke
+// point, which every entry point (maybe_refetch, refetch, refetch_
+// nonblocking) funnels through. This test drives that choke point directly,
+// bypassing maybe_refetch() entirely, and also checks the MEDIUM 3 generation
+// counter bumps alongside it (both are set at the same choke point).
+static void test_cache_stale_cleared_by_direct_refetch_not_only_maybe_refetch(void)
+{
+    TEST_SECTION("s_cache_stale/generation set/clear lifecycle -- direct refetch() must clear "
+                 "staleness too, not only maybe_refetch()'s own CRC-match branch");
+    reset_all();
+
+    TEST_CHECK(!safety_cfg_store_cache_is_stale(), "freshly reset cache starts NOT stale");
+    uint32_t gen_before = safety_cfg_store_cache_generation();
+
+    // Manually force the stale flag on, simulating the state left behind by
+    // an in-flight mismatch that maybe_refetch() had already flagged (line
+    // "s_cache_stale = true" above) before this direct, non-maybe_refetch
+    // caller runs its own successful refetch.
+    s_cache_stale = true;
+
+    uint16_t ids[] = { 0x0203 }; // overshoot_time_s (U16)
+    uint16_t vals[] = { 77 };
+    stage_page(0, false, ids, vals, 1);
+
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    bool ok = safety_cfg_store_refetch(&fake_link, 0x00AA);
+
+    TEST_CHECK(ok, "the direct refetch() call itself succeeds");
+    TEST_CHECK(!safety_cfg_store_cache_is_stale(),
+               "LOW 9/10: a successful refetch() -- NOT routed through maybe_refetch() -- still "
+               "clears the stale flag, because the clear lives at refetch_locked()'s single "
+               "success choke point, not duplicated (and easily missed) in every caller");
+    TEST_CHECK(safety_cfg_store_cache_generation() == gen_before + 1,
+               "the generation counter bumps exactly once per successful refetch, regardless of "
+               "which entry point reached it");
+}
+
 void run_test_safety_cfg_store(void)
 {
     test_index_for_id_finds_known_and_rejects_unknown();
@@ -1189,4 +1248,5 @@ void run_test_safety_cfg_store(void)
     test_ct_cal_manual_wins_over_sweep();
     test_ct_cal_set_rejects_out_of_range_channel_and_value();
     test_ct_cal_set_reports_nvs_failure_via_out_param();
+    test_cache_stale_cleared_by_direct_refetch_not_only_maybe_refetch();
 }

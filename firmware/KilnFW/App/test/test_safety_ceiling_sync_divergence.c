@@ -184,6 +184,30 @@ bool safety_cfg_store_cache_is_stale(void)
     return s_cache_stale;
 }
 
+// 2026-09-15 review (review_divergence_fixes_b2e7017f_2026-09-15.md, MEDIUM
+// 3): enforce_ceiling_divergence() now latches the cache generation at entry
+// (cache_gen_at_entry) so kiln_cfg_store.c's autosave gate can tell whether a
+// refetch raced in between. This file does not link the real safety_cfg_
+// store.c, so a controllable stub is needed here too, same convention as
+// test_kiln_cfg_store.c's own copy. Fixed (not moving) is fine -- none of
+// this file's tests exercise the race itself, only that enforce_ceiling_
+// divergence() calls this and does not crash.
+uint32_t safety_cfg_store_cache_generation(void)
+{
+    return 0;
+}
+
+// Same review, MEDIUM 5 follow-up: enforce_ceiling_divergence() reads this to
+// decide whether to append the "an operator refused an unsafe change" hint
+// to the standing-warning reason (HIGH 2's REJECT_ARMED path). No armed
+// refusal by default -- the one test that needs the hint text sets this via
+// s_stub_recent_armed_refusal below.
+static bool s_stub_recent_armed_refusal = false;
+bool safety_cfg_http_recent_armed_refusal(void)
+{
+    return s_stub_recent_armed_refusal;
+}
+
 bool safety_cfg_store_get_by_index(size_t index, safety_cfg_param_t *out)
 {
     // Index 0 is the ceiling row (if set), index 1 (or 0 if the ceiling is

@@ -1144,6 +1144,17 @@ bool safety_cfg_store_cache_is_stale(void)
     return s_cache_stale;
 }
 
+/* 2026-09-15 review (review_divergence_fixes_b2e7017f_2026-09-15.md,
+ * MEDIUM 3): see safety_cfg_store_cache_generation()'s own doc comment
+ * (safety_cfg_store.h) -- bumped only at the single successful-refetch
+ * choke point in safety_cfg_store_refetch_locked(), never here. */
+static uint32_t s_cache_generation = 0;
+
+uint32_t safety_cfg_store_cache_generation(void)
+{
+    return s_cache_generation;
+}
+
 uint32_t safety_cfg_store_fetched_ms_ago(void)
 {
     if (s_fetched_at_us < 0) {
@@ -1462,6 +1473,19 @@ static bool safety_cfg_store_refetch_locked(SafetyLinkClass *link, uint16_t conf
 
     s_store = *scratch;
     free(scr);
+    /* 2026-09-15 review (LOW 9): clear the staleness flag at the single
+     * choke point every successful refetch (maybe_refetch, refetch,
+     * refetch_nonblocking) funnels through, not only inside
+     * safety_cfg_store_maybe_refetch()'s own CRC-match branch. Previously a
+     * direct safety_cfg_http.c confirm_commit_landed() refetch (bypassing
+     * maybe_refetch entirely) left s_cache_stale set until the NEXT poll
+     * tick's maybe_refetch happened to observe matching CRCs, producing a
+     * transient false "cache stale" standing-divergence warning in the exact
+     * window right after a confirmed commissioning commit. Also bumps the
+     * generation counter (MEDIUM 3) so a caller can detect "a fetch landed
+     * since I last checked" without a lock. */
+    s_cache_stale = false;
+    s_cache_generation++;
     s_fetched_at_us = (int64_t)hal_time_now_us();
     /* 2026-08-23 fix: no longer nvs_save_store() directly -- this function
      * runs on safety_poll_task, whose stack is PSRAM (safety_link.c:1636-
