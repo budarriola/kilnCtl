@@ -20,6 +20,58 @@ set(EXTRA_COMPONENT_DIRS
 )
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+
+# --- Hard-error the missing-declaration class, TREE-WIDE -------------------
+#
+# 3e0b2fa4 added -Werror=implicit-function-declaration / -implicit-int /
+# -int-conversion to the App and App/drivers components via
+# target_compile_options(${COMPONENT_LIB} PRIVATE ...). That guard is not
+# theoretical: an adversarial review proved end to end that without it, a call
+# to an unprototyped function with a float argument compiles with only a
+# warning and silently writes the Pico's abs_max_temp_c ceiling as 0.0.
+#
+# But per-component opt-in means a component is unguarded by OMISSION, and
+# silently so. Two first-party components were already outside it: kilnlink
+# (the ESP<->Pico link-protocol code, firmware/CommonFW/src) and
+# hwabstraction_esp (firmware/hwAbstraction/esp) -- 42 translation units
+# compiling with no guard at all, including the very link code that carries
+# the safety ceiling.
+#
+# 3e0b2fa4's rationale for NOT using this tree-wide lever was that it would
+# also hit vendored/managed components (lvgl, espressif__mdns,
+# joltwallet__littlefs) "which are not ours to patch and would fail the
+# build". MEASURED 2026-09-16 -- that is not what happens:
+#
+#   * Applied UNGUARDED, the build does fail (exit 2) -- but on none of those.
+#     It fails on ESP-IDF's own nvs_flash, on all 14 of its C++ translation
+#     units, with:
+#         cc1plus.exe: error: '-Werror=' argument
+#         '-Werror=implicit-function-declaration' is not valid for C++ [-Werror]
+#     All three diagnostics are C-only, so ANY C++ translation unit anywhere
+#     in the build rejects them outright. lvgl/mdns/littlefs are C and were
+#     never the problem; the language mismatch was.
+#
+#   * Guarded to C with $<COMPILE_LANGUAGE:C>, the full target build is clean:
+#     exit 0, zero failed targets, zero implicit-declaration diagnostics
+#     anywhere -- vendored and managed components included. Nothing needed
+#     patching and nothing needed excluding.
+#
+# So the guard lives here, once, and covers every component that exists today
+# or is added later: there is no list to maintain and nothing to remember.
+# That is the whole point -- it closes the omission hole rather than moving it.
+#
+# The per-component target_compile_options() blocks in App/CMakeLists.txt and
+# App/drivers/CMakeLists.txt are now redundant. They are left in place
+# deliberately, as local in-file documentation of the rule for anyone reading
+# those components; specifying the same -Werror= twice is a no-op, so they
+# cannot conflict with this.
+#
+# Placement is load-bearing: this MUST precede project(), because the
+# COMPILE_OPTIONS build property is consumed as each component registers and
+# project() is what triggers that registration.
+idf_build_set_property(COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:C>:-Werror=implicit-function-declaration>" APPEND)
+idf_build_set_property(COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:C>:-Werror=implicit-int>" APPEND)
+idf_build_set_property(COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:C>:-Werror=int-conversion>" APPEND)
 project(KilnCtrl)
 
 # --- Keep the ELF a board was actually flashed with, so a coredump from it

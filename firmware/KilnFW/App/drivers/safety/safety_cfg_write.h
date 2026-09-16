@@ -21,6 +21,7 @@
 
 #include "kiln_package.h"          /* kiln_pkg_safety_t -- apply_package_and_confirm()'s pkg */
 #include "kilnlink/kilnlink_param_value.h" /* kilnlink_param_value_t */
+#include "safety_cfg_store.h"      /* SAFETY_CFG_PARAM_COUNT -- SAFETY_CFG_POST_MAX_PAIRS below */
 #include "safety_ceiling_policy.h" /* safety_ceiling_refusal_class_t */
 #include "safety_link.h"
 
