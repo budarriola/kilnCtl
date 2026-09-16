@@ -357,6 +357,25 @@ def migrate_legacy_provenance() -> bool:
     try:
         os.link(legacy, new)
     except FileExistsError:
+        # L5 (docs/audits/review_elf_migration_fixes_065d51ac_2026-09-15.md):
+        # both files existing can mean a stale server wrote to the legacy
+        # path AFTER a newer server already migrated it -- previously this
+        # branch silently returned False with no signal that a newer record
+        # might be sitting, unread, at the legacy path (get_fw_version()'s
+        # reader only ever looks at `new`). Never guess which one is
+        # authoritative and never auto-merge, but at least warn loudly when
+        # the ignored file is the newer of the two, so a real refused-flash
+        # record isn't missed silently.
+        try:
+            if os.path.getmtime(legacy) > os.path.getmtime(new):
+                print(f"elf_archive: WARNING -- both {legacy} (legacy) and {new} "
+                      "(current) flash_provenance.json exist, and the LEGACY file "
+                      "is newer -- its record is being silently ignored by every "
+                      "reader that only looks at the new path. Not auto-merged "
+                      "(never guess which record is authoritative); inspect both "
+                      "files by hand.")
+        except OSError:
+            pass
         return False
     except OSError as exc:
         print(f"elf_archive: WARNING -- could not migrate legacy provenance {legacy} -> {new}: {exc}")
@@ -687,6 +706,14 @@ def adopt_orphaned_kiln_elfs(archive_dir: str) -> tuple[int, list[str]]:
     return adopted, unresolved
 
 
+# M2 (docs/audits/review_elf_migration_fixes_065d51ac_2026-09-15.md): a lock
+# file older than this is treated as abandoned (left by a crashed holder) and
+# a waiter may attempt to clear it -- this module's own critical sections are
+# all sub-second (a few small JSON files and, at most, one hardlink), so this
+# is a generous multiple of that, never a plausible age for a live holder.
+_LOCK_STALE_SECONDS = 10.0
+
+
 @contextlib.contextmanager
 def _archive_lock(archive_dir: str, timeout_s: float = 30.0):
     """L2 (docs/audits/review_elf_archive_fixes_a6f4a624_2026-09-15.md): a
@@ -697,11 +724,29 @@ def _archive_lock(archive_dir: str, timeout_s: float = 30.0):
     writes the merged manifest; A's later write, based on its now-stale read,
     clobbers B's merge). Exclusive-create (`O_CREAT | O_EXCL`) is atomic
     against other processes on both Windows and POSIX, unlike a
-    check-then-write pattern. A lock held past `timeout_s` is treated as
-    stale (a crashed process that never cleaned up) rather than blocking
-    forever -- every write this module makes is already itself atomic
-    (`os.replace`), so proceeding without the lock risks the same narrow
-    race this exists to close, not corruption."""
+    check-then-write pattern.
+
+    M2 (2026-09-15 migration-fixes review): the original version of this
+    function unconditionally `os.remove(lock_path)`'d in its `finally` block,
+    even on the timeout branch where `fd is None` -- so a waiter that gave up
+    after `timeout_s` deleted a LIVE holder's lock file out from under it, and
+    a third caller could then acquire the lock while the first was still
+    inside its critical section (three concurrent writers, not two). Fixed by
+    only ever removing the lock file in the branch that actually created it
+    (`fd is not None`) -- a timed-out waiter that never held the lock must
+    never delete it, full stop.
+
+    Separately, waiting the full `timeout_s` (30s) before treating a lock as
+    stale made every stale-lock recovery (the ordinary "a crashed process
+    left this behind" case) a 30s stall inside `flash_firmware()` or a crash
+    lookup, and gave a caller with a real deadline (a lookup, which must
+    never block) no way to fail fast. A lock file's mtime older than
+    `_LOCK_STALE_SECONDS` is now treated as abandoned and a waiter attempts to
+    clear it directly rather than waiting out the full timeout -- this can
+    still race two waiters into both trying the same removal, which is why
+    the removal itself is best-effort (`OSError` ignored) and followed by a
+    retry of the acquire loop rather than an assumption that the removal
+    succeeded or was needed."""
     os.makedirs(archive_dir, exist_ok=True)
     lock_path = os.path.join(archive_dir, ".archive.lock")
     deadline = time.time() + timeout_s
@@ -711,26 +756,45 @@ def _archive_lock(archive_dir: str, timeout_s: float = 30.0):
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             break
         except FileExistsError:
+            try:
+                age = time.time() - os.path.getmtime(lock_path)
+            except OSError:
+                age = None  # lock vanished between the failed create and this stat -- just retry
+            if age is not None and age > _LOCK_STALE_SECONDS:
+                print(f"elf_archive: WARNING -- lock {lock_path} is {age:.1f}s old "
+                      f"(> {_LOCK_STALE_SECONDS}s), treating as abandoned by a crashed "
+                      "process and attempting to clear it.")
+                try:
+                    os.remove(lock_path)
+                except OSError:
+                    pass  # another waiter may have already cleared it, or a live holder
+                          # rewrote it -- either way, loop and retry the exclusive create
+                continue
             if time.time() > deadline:
-                print(f"elf_archive: WARNING -- lock {lock_path} held past {timeout_s}s, "
-                      "proceeding without it (likely stale, left by a crashed process).")
+                print(f"elf_archive: WARNING -- lock {lock_path} held past {timeout_s}s and "
+                      f"not yet stale (age < {_LOCK_STALE_SECONDS}s), proceeding WITHOUT the "
+                      "lock rather than stealing it from what may be a live holder.")
+                fd = None
                 break
             time.sleep(0.05)
     try:
         yield
     finally:
         if fd is not None:
+            # Only the process that actually created this lock file may
+            # remove it -- a waiter that gave up above (fd is None) never
+            # owned it and must leave it alone.
             try:
                 os.close(fd)
             except OSError:
                 pass
-        try:
-            os.remove(lock_path)
-        except OSError:
-            pass
+            try:
+                os.remove(lock_path)
+            except OSError:
+                pass
 
 
-def _merge_legacy_manifest(archive_dir: str, legacy_dir: str) -> set[str]:
+def _merge_legacy_manifest(archive_dir: str, legacy_dir: str, prefix: str) -> set[str]:
     """M1 (docs/audits/review_elf_archive_fixes_a6f4a624_2026-09-15.md): merges
     the legacy manifest.json/superseded.json (if any) into the new ones --
     called BEFORE any ELF file is moved and before adopt_orphaned_kiln_elfs()
@@ -754,7 +818,31 @@ def _merge_legacy_manifest(archive_dir: str, legacy_dir: str) -> set[str]:
     superseded), so migrate_legacy_archive() can tell "every entry the
     legacy manifest/superseded.json held now has a home" (safe to delete
     those files, L1) from "some entry could not be placed" (leave them
-    alone -- never delete unmoved data)."""
+    alone -- never delete unmoved data).
+
+    L2 (2026-09-15 migration-fixes review): an entry is only merged (and only
+    counted into the returned `merged_keys`) once its ELF file actually
+    exists somewhere -- either already at `archive_dir` (a prior partial
+    migration) or still sitting in `legacy_dir` (about to be moved by the
+    caller). Previously every legacy manifest entry was merged and counted
+    regardless of whether its file was ever found, so a legacy entry whose
+    link later failed with a non-`FileExistsError` `OSError` still had its
+    manifest entry merged in (and the legacy manifest deleted, since its
+    elf_key was in `merged_keys`) -- producing a live manifest entry that
+    named a file nowhere on disk. Leaving such an entry OUT of the merge (and
+    out of `merged_keys`) means the legacy manifest.json is correctly kept
+    around too (see migrate_legacy_archive's cleanup, which requires every
+    raw entry's elf_key to be in `merged_keys` before deleting it) -- "never
+    delete unmoved data" now also covers the file a manifest entry points at,
+    not just the manifest entry itself.
+
+    L3 (2026-09-15 migration-fixes review): legacy `seq` numbers are never
+    kept verbatim -- they can duplicate or interleave with the destination's
+    own sequence, since the two were assigned independently. Every merged
+    entry is renumbered monotonically, continuing from the destination's
+    current maximum `seq`, in a stable order derived from the legacy `seq`
+    values (so relative legacy ordering survives even though the absolute
+    numbers don't)."""
     legacy_manifest_path = os.path.join(legacy_dir, MANIFEST_NAME)
     legacy_superseded_path = os.path.join(legacy_dir, SUPERSEDED_NAME)
     if not os.path.isfile(legacy_manifest_path) and not os.path.isfile(legacy_superseded_path):
@@ -770,27 +858,67 @@ def _merge_legacy_manifest(archive_dir: str, legacy_dir: str) -> set[str]:
     superseded_dirty = False
     merged_keys: set[str] = set()
 
-    for identity, entry in legacy_manifest.items():
-        merged_keys.add(entry.get("elf_key"))
+    def _elf_present(elf_key: Optional[str]) -> bool:
+        if not elf_key:
+            return False
+        name = f"{prefix}-{elf_key}.elf"
+        return (os.path.isfile(os.path.join(archive_dir, name))
+                or os.path.isfile(os.path.join(legacy_dir, name)))
+
+    next_seq = 1 + max(
+        [e.get("seq", 0) for e in manifest.values() if isinstance(e, dict)]
+        + [e.get("seq", 0) for bucket in superseded.values() for e in bucket if isinstance(e, dict)],
+        default=0,
+    )
+
+    def _renumber(entry: dict) -> dict:
+        nonlocal next_seq
+        entry = dict(entry)
+        entry["seq"] = next_seq
+        next_seq += 1
+        return entry
+
+    legacy_manifest_items = sorted(
+        legacy_manifest.items(),
+        key=lambda kv: kv[1].get("seq", 0) if isinstance(kv[1], dict) else 0,
+    )
+    for identity, entry in legacy_manifest_items:
+        elf_key = entry.get("elf_key") if isinstance(entry, dict) else None
+        if not _elf_present(elf_key):
+            print(f"elf_archive: WARNING -- legacy manifest entry {identity!r} "
+                  f"(elf_key={elf_key}) in {legacy_dir} has no ELF file at the legacy "
+                  "or new location; not merging it (would create a manifest entry "
+                  "pointing at a missing file).")
+            continue
+        merged_keys.add(elf_key)
         prior = manifest.get(identity)
         if prior is None:
-            manifest[identity] = entry
+            manifest[identity] = _renumber(entry)
             manifest_dirty = True
-        elif prior.get("elf_key") != entry.get("elf_key"):
+        elif prior.get("elf_key") != elf_key:
             bucket = superseded.setdefault(identity, [])
-            if not any(s.get("elf_key") == entry.get("elf_key") for s in bucket):
-                bucket.append(entry)
+            if not any(s.get("elf_key") == elf_key for s in bucket):
+                bucket.append(_renumber(entry))
                 superseded_dirty = True
         # else: identical content already the live entry -- nothing to do,
         # but its elf_key is still "accounted for" (merged_keys above).
 
-    for identity, bucket in legacy_superseded.items():
+    legacy_superseded_items = sorted(
+        ((identity, entry) for identity, bucket in legacy_superseded.items() for entry in bucket),
+        key=lambda kv: kv[1].get("seq", 0) if isinstance(kv[1], dict) else 0,
+    )
+    for identity, entry in legacy_superseded_items:
+        elf_key = entry.get("elf_key") if isinstance(entry, dict) else None
+        if not _elf_present(elf_key):
+            print(f"elf_archive: WARNING -- legacy superseded entry {identity!r} "
+                  f"(elf_key={elf_key}) in {legacy_dir} has no ELF file at the legacy "
+                  "or new location; not merging it.")
+            continue
+        merged_keys.add(elf_key)
         dest_bucket = superseded.setdefault(identity, [])
-        for entry in bucket:
-            merged_keys.add(entry.get("elf_key"))
-            if not any(s.get("elf_key") == entry.get("elf_key") for s in dest_bucket):
-                dest_bucket.append(entry)
-                superseded_dirty = True
+        if not any(s.get("elf_key") == elf_key for s in dest_bucket):
+            dest_bucket.append(_renumber(entry))
+            superseded_dirty = True
 
     if manifest_dirty:
         _write_manifest(archive_dir, manifest)
@@ -803,7 +931,7 @@ def _merge_legacy_manifest(archive_dir: str, legacy_dir: str) -> set[str]:
     return merged_keys
 
 
-def migrate_legacy_archive(archive_dir: str, prefix: str) -> int:
+def migrate_legacy_archive(archive_dir: str, prefix: str, lock_timeout_s: float = 30.0) -> int:
     """One-time migration (L1, docs/audits/review_elf_archive_move_a347e726_2026-09-15.md):
     a347e726 moved the canonical archive from firmware/<KilnFW|SaftyFW>/build/
     elf_archive/ to firmware/<KilnFW|SaftyFW>/elf_archive/ but never moved
@@ -850,112 +978,151 @@ def migrate_legacy_archive(archive_dir: str, prefix: str) -> int:
     (`find_kiln_elf_for_build`/`find_safty_elf_for_identity`, M2, 2026-09-15
     review) so a legacy entry is reachable by a lookup immediately, not only
     after the next flash -- a fast no-op once the old directory is empty,
-    absent, or has already been drained."""
+    absent, or has already been drained.
+
+    M1 (2026-09-15 migration-fixes review): this function now only ever
+    ACQUIRES the lock; the actual work is `_migrate_legacy_archive_locked`,
+    which `_archive()` also calls directly while it already holds the same
+    lock for its own manifest read-modify-write -- see that function's
+    docstring for why the lock previously covering only the migration half
+    of `_archive()` was not enough."""
     _guard_against_test_write(archive_dir)
+    with _archive_lock(archive_dir, timeout_s=lock_timeout_s):
+        return _migrate_legacy_archive_locked(archive_dir, prefix)
+
+
+def _migrate_legacy_archive_locked(archive_dir: str, prefix: str) -> int:
+    """The body of migrate_legacy_archive() -- assumes the caller already
+    holds `_archive_lock(archive_dir)`. Split out so `_archive()` (M1,
+    2026-09-15 migration-fixes review) can run this AND its own manifest
+    read-modify-write under a single lock acquisition instead of two separate
+    ones with an unlocked gap in between -- see `_archive`'s docstring for
+    the race that gap allowed."""
     legacy_dir = os.path.join(os.path.dirname(archive_dir), "build", "elf_archive")
     if not os.path.isdir(legacy_dir):
         return 0
-    with _archive_lock(archive_dir):
-        os.makedirs(archive_dir, exist_ok=True)
-        merged_keys = _merge_legacy_manifest(archive_dir, legacy_dir)
+    os.makedirs(archive_dir, exist_ok=True)
+    merged_keys = _merge_legacy_manifest(archive_dir, legacy_dir, prefix)
 
-        latest_name = f"{prefix}-latest.elf"
+    latest_name = f"{prefix}-latest.elf"
+    try:
+        names = os.listdir(legacy_dir)
+    except OSError:
+        return 0
+    moved = 0
+    skipped: list[str] = []
+    for name in names:
+        if name == latest_name or name in (MANIFEST_NAME, SUPERSEDED_NAME):
+            continue  # latest.elf: meaningless once moved, see above; manifest/superseded: handled by the merge above
+        src = os.path.join(legacy_dir, name)
+        if not os.path.isfile(src):
+            continue
+        dst = os.path.join(archive_dir, name)
         try:
-            names = os.listdir(legacy_dir)
-        except OSError:
-            return 0
-        moved = 0
-        skipped: list[str] = []
-        for name in names:
-            if name == latest_name or name in (MANIFEST_NAME, SUPERSEDED_NAME):
-                continue  # latest.elf: meaningless once moved, see above; manifest/superseded: handled by the merge above
-            src = os.path.join(legacy_dir, name)
-            if not os.path.isfile(src):
-                continue
-            dst = os.path.join(archive_dir, name)
+            os.link(src, dst)
+        except FileExistsError:
+            # L1 (2026-09-15 migration-fixes review): ELF names are
+            # content-addressed (<prefix>-<sha12>.elf), so a name collision
+            # where both files hash the same is byte-identical content that
+            # simply already made it across by some other path -- safe to
+            # drop the legacy copy outright rather than leaving it "for a
+            # human to reconcile" forever, which previously meant `skipped`
+            # (and therefore `remaining`, and therefore the "left N legacy
+            # entry(ies) unmoved" warning) never went empty, so that warning
+            # printed on every subsequent lookup and flash indefinitely. A
+            # genuine content mismatch under the same name (should not
+            # happen for a content-addressed name, but never assume it) is
+            # still left alone in both places, exactly as before.
             try:
-                os.link(src, dst)
-            except FileExistsError:
-                # Never overwrite the new location, and never delete the
-                # un-moved legacy copy either -- both stay, side by side, for
-                # a human to reconcile if it matters.
-                skipped.append(name)
-                continue
-            except OSError as exc:
-                print(f"elf_archive: WARNING -- could not migrate legacy entry {src} -> {dst}: {exc}")
-                continue
-            try:
-                os.remove(src)
-            except OSError as exc:
-                print(f"elf_archive: WARNING -- migrated {src} -> {dst} but could not remove "
-                      f"the legacy copy (now duplicated in both places): {exc}")
-            moved += 1
-        if moved:
-            print(f"elf_archive: migrated {moved} legacy entry(ies) from {legacy_dir} into "
-                  f"{archive_dir} (one-time move to the post-2026-09-15 archive location).")
-        if skipped:
-            print(f"elf_archive: left {len(skipped)} legacy entry(ies) in {legacy_dir} unmoved "
-                  f"(name already exists in {archive_dir}, never overwritten): {', '.join(skipped)}")
+                identical = _sha256_key(src) == _sha256_key(dst)
+            except OSError:
+                identical = False
+            if identical:
+                try:
+                    os.remove(src)
+                    moved += 0  # already present at the destination; not a new move, just drained
+                    continue
+                except OSError as exc:
+                    print(f"elf_archive: WARNING -- {src} is byte-identical to {dst} but could "
+                          f"not remove the legacy copy: {exc}")
+            skipped.append(name)
+            continue
+        except OSError as exc:
+            print(f"elf_archive: WARNING -- could not migrate legacy entry {src} -> {dst}: {exc}")
+            continue
+        try:
+            os.remove(src)
+        except OSError as exc:
+            print(f"elf_archive: WARNING -- migrated {src} -> {dst} but could not remove "
+                  f"the legacy copy (now duplicated in both places): {exc}")
+        moved += 1
+    if moved:
+        print(f"elf_archive: migrated {moved} legacy entry(ies) from {legacy_dir} into "
+              f"{archive_dir} (one-time move to the post-2026-09-15 archive location).")
+    if skipped:
+        print(f"elf_archive: left {len(skipped)} legacy entry(ies) in {legacy_dir} unmoved "
+              f"(name already exists in {archive_dir} with DIFFERENT content, never "
+              f"overwritten): {', '.join(skipped)}")
 
-        # L1: clean up what is now fully drained so this warning/no-op check
-        # doesn't keep firing forever -- but only ever delete a file once its
-        # own content has a proven home elsewhere; a skipped ELF or an
-        # un-mergeable manifest keeps the directory (and its own file)
-        # exactly as "never delete unmoved data" requires.
+    # L1: clean up what is now fully drained so this warning/no-op check
+    # doesn't keep firing forever -- but only ever delete a file once its
+    # own content has a proven home elsewhere; a skipped ELF or an
+    # un-mergeable manifest keeps the directory (and its own file)
+    # exactly as "never delete unmoved data" requires.
+    try:
+        remaining = set(os.listdir(legacy_dir))
+    except OSError:
+        remaining = set()
+    if latest_name in remaining:
         try:
-            remaining = set(os.listdir(legacy_dir))
+            os.remove(os.path.join(legacy_dir, latest_name))
+            remaining.discard(latest_name)
         except OSError:
-            remaining = set()
-        if latest_name in remaining:
+            pass
+    # Deliberately re-reads the raw JSON here rather than going through
+    # _load_manifest()/_load_superseded() -- those tolerate/skip a
+    # malformed entry (logging a warning) so ordinary lookups keep
+    # working, but that tolerance would make an entry that could NOT be
+    # merged (not a dict, missing elf_key) look "accounted for" once it's
+    # silently dropped, and this delete must never fire on data that
+    # merging genuinely couldn't place -- "never delete unmoved data".
+    if MANIFEST_NAME in remaining:
+        try:
+            with open(os.path.join(legacy_dir, MANIFEST_NAME), "r", encoding="utf-8") as f:
+                raw_manifest = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            raw_manifest = None
+        if isinstance(raw_manifest, dict) and all(
+            isinstance(v, dict) and v.get("elf_key") in merged_keys for v in raw_manifest.values()
+        ):
             try:
-                os.remove(os.path.join(legacy_dir, latest_name))
-                remaining.discard(latest_name)
+                os.remove(os.path.join(legacy_dir, MANIFEST_NAME))
+                remaining.discard(MANIFEST_NAME)
             except OSError:
                 pass
-        # Deliberately re-reads the raw JSON here rather than going through
-        # _load_manifest()/_load_superseded() -- those tolerate/skip a
-        # malformed entry (logging a warning) so ordinary lookups keep
-        # working, but that tolerance would make an entry that could NOT be
-        # merged (not a dict, missing elf_key) look "accounted for" once it's
-        # silently dropped, and this delete must never fire on data that
-        # merging genuinely couldn't place -- "never delete unmoved data".
-        if MANIFEST_NAME in remaining:
+    if SUPERSEDED_NAME in remaining:
+        try:
+            with open(os.path.join(legacy_dir, SUPERSEDED_NAME), "r", encoding="utf-8") as f:
+                raw_superseded = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            raw_superseded = None
+        if isinstance(raw_superseded, dict) and all(
+            isinstance(bucket, list) and all(
+                isinstance(e, dict) and e.get("elf_key") in merged_keys for e in bucket
+            )
+            for bucket in raw_superseded.values()
+        ):
             try:
-                with open(os.path.join(legacy_dir, MANIFEST_NAME), "r", encoding="utf-8") as f:
-                    raw_manifest = json.load(f)
-            except (OSError, json.JSONDecodeError):
-                raw_manifest = None
-            if isinstance(raw_manifest, dict) and all(
-                isinstance(v, dict) and v.get("elf_key") in merged_keys for v in raw_manifest.values()
-            ):
-                try:
-                    os.remove(os.path.join(legacy_dir, MANIFEST_NAME))
-                    remaining.discard(MANIFEST_NAME)
-                except OSError:
-                    pass
-        if SUPERSEDED_NAME in remaining:
-            try:
-                with open(os.path.join(legacy_dir, SUPERSEDED_NAME), "r", encoding="utf-8") as f:
-                    raw_superseded = json.load(f)
-            except (OSError, json.JSONDecodeError):
-                raw_superseded = None
-            if isinstance(raw_superseded, dict) and all(
-                isinstance(bucket, list) and all(
-                    isinstance(e, dict) and e.get("elf_key") in merged_keys for e in bucket
-                )
-                for bucket in raw_superseded.values()
-            ):
-                try:
-                    os.remove(os.path.join(legacy_dir, SUPERSEDED_NAME))
-                    remaining.discard(SUPERSEDED_NAME)
-                except OSError:
-                    pass
-        if not remaining:
-            try:
-                os.rmdir(legacy_dir)
+                os.remove(os.path.join(legacy_dir, SUPERSEDED_NAME))
+                remaining.discard(SUPERSEDED_NAME)
             except OSError:
                 pass
-        return moved
+    if not remaining:
+        try:
+            os.rmdir(legacy_dir)
+        except OSError:
+            pass
+    return moved
 
 
 @dataclass
@@ -968,6 +1135,21 @@ class ArchiveResult:
 
 def _archive(elf_path: str, archive_dir: str, prefix: str, identity: str,
              extra: dict) -> ArchiveResult:
+    """M1 (docs/audits/review_elf_migration_fixes_065d51ac_2026-09-15.md): the
+    migrate-then-merge step and the manifest read/write/prune step below are
+    now performed under a SINGLE `_archive_lock` acquisition, not two
+    separate ones. Previously `migrate_legacy_archive()` took and released
+    the lock on its own, and this function's own manifest read (`_load_
+    manifest`, just below) ran AFTER that lock was already released --
+    a concurrent caller (most plausibly `find_kiln_elf_for_build`'s own
+    lookup-time migration) could take the lock in between, merge a legacy
+    manifest in, write it, and delete the legacy manifest.json as fully
+    drained, all before this call's own (now-stale) read/write pair
+    clobbered that merge with a copy that never saw it -- silently losing a
+    just-migrated flashed entry's provenance, permanently, since the legacy
+    source that would have let a later run re-merge it is already gone.
+    Holding the lock across migrate+adopt+load+write+prune closes that gap:
+    nothing else can observe or mutate this archive's manifest in between."""
     _guard_against_test_write(archive_dir)
     if not os.path.isfile(elf_path):
         raise FileNotFoundError(f"elf_archive: no ELF at {elf_path} to archive")
@@ -980,53 +1162,58 @@ def _archive(elf_path: str, archive_dir: str, prefix: str, identity: str,
     latest = os.path.join(archive_dir, f"{prefix}-latest.elf")
     shutil.copyfile(elf_path, latest)
 
-    # L1 (2026-09-15 review): drain any pre-existing entries from the OLD
-    # build/elf_archive location before this call adds its own -- see
-    # migrate_legacy_archive()'s docstring. Cheap no-op once drained.
-    migrate_legacy_archive(archive_dir, prefix)
+    with _archive_lock(archive_dir):
+        # L1 (2026-09-15 review): drain any pre-existing entries from the OLD
+        # build/elf_archive location before this call adds its own -- see
+        # migrate_legacy_archive()'s docstring. Cheap no-op once drained.
+        # Calls the already-locked core directly (M1) since this whole block
+        # already holds `_archive_lock`; calling `migrate_legacy_archive()`
+        # here would try to acquire the same non-reentrant lock again and
+        # deadlock.
+        _migrate_legacy_archive_locked(archive_dir, prefix)
 
-    if prefix == "KilnCtrl":
-        # 2026-09-10 (opus review round 4, defect 1): adopt any orphans left
-        # behind by archive_elf.cmake's POST_BUILD copy (which never
-        # registers what it writes) before this call adds its own entry --
-        # keeps the backlog from growing between flashes and self-heals the
-        # existing one over time. See adopt_orphaned_kiln_elfs's docstring.
-        adopt_orphaned_kiln_elfs(archive_dir)
+        if prefix == "KilnCtrl":
+            # 2026-09-10 (opus review round 4, defect 1): adopt any orphans left
+            # behind by archive_elf.cmake's POST_BUILD copy (which never
+            # registers what it writes) before this call adds its own entry --
+            # keeps the backlog from growing between flashes and self-heals the
+            # existing one over time. See adopt_orphaned_kiln_elfs's docstring.
+            adopt_orphaned_kiln_elfs(archive_dir)
 
-    manifest = _load_manifest(archive_dir)
-    # 2026-09-10 (opus review round 3, defect 4): if this identity is already
-    # mapped to a DIFFERENT elf_key, that older entry is about to be
-    # overwritten below. Preserve it in the superseded registry instead of
-    # letting it silently fall out of the manifest -- unreachable by lookup
-    # (the manifest no longer names it) and unprotected from _prune (only
-    # manifest-referenced elf_keys survive pruning) at the same time.
-    superseded = _load_superseded(archive_dir)
-    prior = manifest.get(identity)
-    if prior is not None and prior.get("elf_key") != elf_key:
-        bucket = superseded.setdefault(identity, [])
-        if not any(s.get("elf_key") == prior.get("elf_key") for s in bucket):
-            bucket.append(prior)
-            _write_superseded(archive_dir, superseded)
-    # A monotonic sequence number, not just the wall-clock "archived_at"
-    # string: several archives can land within the same second (bench
-    # scripts, or this module's own tests), and archived_at's second
-    # resolution can't order those deterministically -- retention below needs
-    # an unambiguous "most recent N" to protect.
-    next_seq = 1 + max((e.get("seq", 0) for e in manifest.values()), default=0)
-    entry = {
-        "elf_key": elf_key,
-        "identity": identity,
-        "seq": next_seq,
-        "archived_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        **extra,
-    }
-    # Keyed by identity so a lookup is one dict access; elf_key kept inside
-    # the entry too so pruning can find the file regardless of which key
-    # style is used to inspect the manifest by hand.
-    manifest[identity] = entry
-    _write_manifest(archive_dir, manifest)
+        manifest = _load_manifest(archive_dir)
+        # 2026-09-10 (opus review round 3, defect 4): if this identity is already
+        # mapped to a DIFFERENT elf_key, that older entry is about to be
+        # overwritten below. Preserve it in the superseded registry instead of
+        # letting it silently fall out of the manifest -- unreachable by lookup
+        # (the manifest no longer names it) and unprotected from _prune (only
+        # manifest-referenced elf_keys survive pruning) at the same time.
+        superseded = _load_superseded(archive_dir)
+        prior = manifest.get(identity)
+        if prior is not None and prior.get("elf_key") != elf_key:
+            bucket = superseded.setdefault(identity, [])
+            if not any(s.get("elf_key") == prior.get("elf_key") for s in bucket):
+                bucket.append(prior)
+                _write_superseded(archive_dir, superseded)
+        # A monotonic sequence number, not just the wall-clock "archived_at"
+        # string: several archives can land within the same second (bench
+        # scripts, or this module's own tests), and archived_at's second
+        # resolution can't order those deterministically -- retention below needs
+        # an unambiguous "most recent N" to protect.
+        next_seq = 1 + max((e.get("seq", 0) for e in manifest.values()), default=0)
+        entry = {
+            "elf_key": elf_key,
+            "identity": identity,
+            "seq": next_seq,
+            "archived_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            **extra,
+        }
+        # Keyed by identity so a lookup is one dict access; elf_key kept inside
+        # the entry too so pruning can find the file regardless of which key
+        # style is used to inspect the manifest by hand.
+        manifest[identity] = entry
+        _write_manifest(archive_dir, manifest)
 
-    _prune(archive_dir, prefix, manifest, superseded)
+        _prune(archive_dir, prefix, manifest, superseded)
     return ArchiveResult(elf_key=elf_key, archived_path=dest, identity=identity,
                           newly_archived=newly_archived)
 
@@ -1231,7 +1418,22 @@ def find_kiln_elf_for_build(fw_build: str) -> tuple[Optional[str], str]:
     # until the NEXT flash -- a board panicking on an image archived under
     # the old layout got a false "no archived ELF found" here, with no hint
     # it was one directory away. Cheap no-op once already drained.
-    migrate_legacy_archive(archive_dir, "KilnCtrl")
+    #
+    # M3 (docs/audits/review_elf_migration_fixes_065d51ac_2026-09-15.md): a
+    # crash lookup must never raise or block for long -- this used to call
+    # migrate_legacy_archive() bare, so a read-only/locked archive directory
+    # (a OneDrive sync lock, a permissions issue) turned a symbolization
+    # lookup into an uncaught exception where before it cleanly returned "no
+    # match", and a stale lock stalled the lookup for up to 30s. Wrapped in
+    # try/except with a short lock timeout, the same way flash_firmware()
+    # already wraps migrate_legacy_provenance() -- degrade to the
+    # non-migrating path (an existing legacy entry just stays invisible
+    # until the condition clears) rather than failing the whole lookup.
+    try:
+        migrate_legacy_archive(archive_dir, "KilnCtrl", lock_timeout_s=3.0)
+    except Exception as exc:  # noqa: BLE001 -- lookups must never raise on this
+        print(f"elf_archive: WARNING -- lookup-time legacy migration failed for "
+              f"{archive_dir}: {exc}; continuing with the existing manifest.")
     manifest = _load_manifest(archive_dir)
     # 2026-09-10 fix (opus review round 2, defect D): normalize the lookup
     # key the same way archive_kiln_elf() now normalizes the stored key --
@@ -1278,7 +1480,13 @@ def find_safty_elf_for_identity(commit: str, build_date: Optional[str] = None,
     # M2 (2026-09-15 review): same rationale as find_kiln_elf_for_build's
     # call above -- a legacy SaftyFW entry must be reachable by a lookup
     # immediately, not only after the next flash.
-    migrate_legacy_archive(archive_dir, "SaftyFW")
+    # M3: same never-raise/never-block-long treatment as the KilnFW lookup
+    # above.
+    try:
+        migrate_legacy_archive(archive_dir, "SaftyFW", lock_timeout_s=3.0)
+    except Exception as exc:  # noqa: BLE001 -- lookups must never raise on this
+        print(f"elf_archive: WARNING -- lookup-time legacy migration failed for "
+              f"{archive_dir}: {exc}; continuing with the existing manifest.")
     manifest = _load_manifest(archive_dir)
     if build_date and build_time:
         identity = f"{commit}_{build_date}_{build_time}"

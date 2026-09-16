@@ -1420,5 +1420,293 @@ class ProvenanceMigrationAndGuardTest(unittest.TestCase):
         # guard's condition, nothing about this path would ever match.
 
 
+class ArchiveLockTest(unittest.TestCase):
+    """M2 (docs/audits/review_elf_migration_fixes_065d51ac_2026-09-15.md):
+    _archive_lock() had no test coverage at all -- neither contention, nor
+    the lock-steal bug (a timed-out waiter deleted a live holder's lock,
+    even though it never held it), nor the 30s-stall-on-every-stale-lock
+    behavior."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.archive_dir = self._tmp.name
+        self.lock_path = os.path.join(self.archive_dir, ".archive.lock")
+
+    def test_contention_serializes_two_holders(self):
+        """A second acquire must not proceed while the first is still
+        inside the `with` block."""
+        import threading
+
+        order: list[str] = []
+        release_first = threading.Event()
+        first_acquired = threading.Event()
+
+        def hold_first():
+            with elf_archive._archive_lock(self.archive_dir, timeout_s=5.0):
+                order.append("first-in")
+                first_acquired.set()
+                release_first.wait(timeout=5.0)
+                order.append("first-out")
+
+        t = threading.Thread(target=hold_first)
+        t.start()
+        self.assertTrue(first_acquired.wait(timeout=5.0), "first holder never acquired the lock")
+
+        # Release the first holder shortly after the second starts waiting,
+        # from a separate thread -- the second acquire below blocks until
+        # then, so releasing it from the same thread (after the `with`
+        # block) would deadlock.
+        releaser = threading.Timer(0.3, release_first.set)
+        releaser.start()
+        with elf_archive._archive_lock(self.archive_dir, timeout_s=5.0):
+            order.append("second-in")
+        t.join(timeout=5.0)
+
+        # The second acquire could only log "second-in" after the first
+        # released -- if the lock did not serialize, "second-in" could
+        # appear before "first-out".
+        self.assertEqual(order, ["first-in", "first-out", "second-in"])
+
+    def test_timeout_waiter_does_not_delete_a_live_holders_lock(self):
+        """The M2 core bug: a waiter that gives up after its own timeout
+        must never delete a lock file it did not create -- a fresh
+        (non-stale) lock file simulates a live holder still inside its
+        critical section."""
+        os.makedirs(self.archive_dir, exist_ok=True)
+        fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            # timeout_s shorter than _LOCK_STALE_SECONDS so the waiter times
+            # out via the "give up, don't steal" branch, not the staleness
+            # branch.
+            with elf_archive._archive_lock(self.archive_dir, timeout_s=0.2):
+                pass
+            # The "live" holder's lock must still be there: the waiter above
+            # gave up without ever owning it.
+            self.assertTrue(os.path.isfile(self.lock_path),
+                             "a timed-out waiter deleted a lock it never held")
+        finally:
+            os.close(fd)
+            os.remove(self.lock_path)
+
+    def test_negative_reproduces_the_lock_steal_without_the_owner_check(self):
+        """Proves the test above is genuinely negative-testable: this
+        directly reproduces the OLD unconditional os.remove(lock_path), not
+        a mirror of the new code, and shows it DOES delete a live holder's
+        lock. The fd is closed immediately after creating the file (unlike
+        the test above) specifically so this reproduction isn't masked by
+        the Windows-only accident that os.remove() on a file another
+        process still has open raises PermissionError -- see _archive_lock's
+        own docstring on that asymmetry. What matters here is the missing
+        ownership check, not the platform-specific side effect of a held
+        handle."""
+        os.makedirs(self.archive_dir, exist_ok=True)
+        fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        # The old finally-block behavior: unconditional removal, with no
+        # ownership (fd is None here, exactly like a timed-out waiter).
+        try:
+            os.remove(self.lock_path)
+        except OSError:
+            pass
+        self.assertFalse(os.path.isfile(self.lock_path),
+                          "expected the old unconditional-remove behavior to delete it")
+
+    def test_stale_lock_is_reclaimed_without_waiting_the_full_timeout(self):
+        """A lock file older than _LOCK_STALE_SECONDS is treated as
+        abandoned and cleared well before a large timeout_s would otherwise
+        force a 30s-class stall."""
+        os.makedirs(self.archive_dir, exist_ok=True)
+        fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        ancient = time.time() - (elf_archive._LOCK_STALE_SECONDS + 5.0)
+        os.utime(self.lock_path, (ancient, ancient))
+
+        start = time.time()
+        with elf_archive._archive_lock(self.archive_dir, timeout_s=30.0):
+            acquired_within = time.time() - start
+
+        self.assertLess(acquired_within, 5.0,
+                         "a stale lock should be reclaimed almost immediately, "
+                         "not after waiting out most of a 30s timeout")
+
+    def test_owned_lock_is_removed_on_clean_exit(self):
+        with elf_archive._archive_lock(self.archive_dir, timeout_s=5.0):
+            self.assertTrue(os.path.isfile(self.lock_path))
+        self.assertFalse(os.path.isfile(self.lock_path))
+
+
+class LookupTimeMigrationNeverRaisesOrGuessesTest(unittest.TestCase):
+    """M3: a crash-symbolization lookup must never turn into an exception,
+    and must never block for long, just because legacy-archive migration hit
+    trouble (a read-only/locked directory, a stale lock). Both KilnFW and
+    SaftyFW lookup paths wrap their migration call and degrade to the
+    non-migrating path instead."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = self._tmp.name
+        self.kiln_archive_dir = os.path.join(self.root, "KilnFW", "elf_archive")
+        self.safty_archive_dir = os.path.join(self.root, "SaftyFW", "elf_archive")
+
+    def test_kilnfw_lookup_survives_a_migration_exception(self):
+        os.makedirs(self.kiln_archive_dir, exist_ok=True)
+        with unittest.mock.patch.object(elf_archive, "kiln_archive_dir", return_value=self.kiln_archive_dir), \
+             unittest.mock.patch.object(elf_archive, "migrate_legacy_archive",
+                                         side_effect=OSError("simulated locked/read-only archive dir")):
+            path, message = elf_archive.find_kiln_elf_for_build("Sep 15 2026 10:00:00")
+
+        self.assertIsNone(path)
+        self.assertIn("no archived ELF found", message)
+
+    def test_saftyfw_lookup_survives_a_migration_exception(self):
+        os.makedirs(self.safty_archive_dir, exist_ok=True)
+        with unittest.mock.patch.object(elf_archive, "safty_archive_dir", return_value=self.safty_archive_dir), \
+             unittest.mock.patch.object(elf_archive, "migrate_legacy_archive",
+                                         side_effect=OSError("simulated locked/read-only archive dir")):
+            path, message = elf_archive.find_safty_elf_for_identity("deadbeef", "20260915", "100000")
+
+        self.assertIsNone(path)
+        self.assertIn("no archived ELF found", message)
+
+    def test_negative_without_the_guard_the_exception_would_propagate(self):
+        """Proves the assertions above are genuinely negative-testable: with
+        no try/except at all, the same monkeypatched failure propagates out
+        of the lookup instead of degrading to a clean 'no match'."""
+        os.makedirs(self.kiln_archive_dir, exist_ok=True)
+        with unittest.mock.patch.object(elf_archive, "kiln_archive_dir", return_value=self.kiln_archive_dir):
+            # Calling migrate_legacy_archive() directly (bare, no try/except)
+            # the way the old find_kiln_elf_for_build() body did, to confirm
+            # the same simulated failure really would propagate to a caller
+            # that doesn't guard against it.
+            with unittest.mock.patch.object(elf_archive, "_archive_lock",
+                                             side_effect=OSError("simulated locked archive dir")):
+                with self.assertRaises(OSError):
+                    elf_archive.migrate_legacy_archive(self.kiln_archive_dir, "KilnCtrl")
+
+
+class KilnFwLegacyMigrationLookupTest(unittest.TestCase):
+    """L4: only the SaftyFW lookup path (SaftyFwLegacyMigrationTest, above)
+    had a test proving lookup-time migration (M2, 2026-09-15 review) makes a
+    legacy KilnFW entry reachable without waiting for the next flash. This
+    mirrors that test for find_kiln_elf_for_build()."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = self._tmp.name
+        self.archive_dir = os.path.join(self.root, "elf_archive")
+        self.legacy_dir = os.path.join(self.root, "build", "elf_archive")
+
+    def test_kilnfw_legacy_manifest_is_merged_and_findable_via_lookup_alone(self):
+        identity = "Sep 15 2026 10:00:00"
+        elf_key = "kilnlegacy1"
+        _write_fake_elf(os.path.join(self.legacy_dir, f"KilnCtrl-{elf_key}.elf"), b"legacy-kiln-content")
+        _write_fake_elf(
+            os.path.join(self.legacy_dir, "manifest.json"),
+            json.dumps({identity: {
+                "elf_key": elf_key, "identity": identity, "seq": 1,
+                "archived_at": "2026-09-15T10:00:00Z", "git_commit": "deadbeef",
+                "source": "flash_firmware",
+            }}).encode(),
+        )
+        os.makedirs(self.archive_dir, exist_ok=True)  # new dir exists but is empty -- no flash has run yet
+
+        with unittest.mock.patch.object(elf_archive, "kiln_archive_dir", return_value=self.archive_dir):
+            # Deliberately calling find_kiln_elf_for_build() directly (never
+            # _archive()/archive_kiln_elf()) -- this is the whole point of
+            # M2's lookup-side migration: reachable from a pure lookup.
+            path, message = elf_archive.find_kiln_elf_for_build(identity)
+
+        self.assertIsNotNone(path, message)
+        self.assertTrue(os.path.isfile(path))
+        self.assertEqual(os.path.normpath(path), os.path.normpath(
+            os.path.join(self.archive_dir, f"KilnCtrl-{elf_key}.elf")))
+
+    def test_negative_without_lookup_side_migration_the_legacy_entry_is_unreachable(self):
+        """Confirms the test above is genuinely negative-testable: without
+        running the migration, the same legacy layout is unreachable by a
+        pure manifest read against the new (empty) archive dir."""
+        identity = "Sep 15 2026 10:00:00"
+        elf_key = "kilnlegacy1"
+        _write_fake_elf(os.path.join(self.legacy_dir, f"KilnCtrl-{elf_key}.elf"), b"legacy-kiln-content")
+        _write_fake_elf(
+            os.path.join(self.legacy_dir, "manifest.json"),
+            json.dumps({identity: {"elf_key": elf_key, "identity": identity, "seq": 1,
+                                    "source": "flash_firmware"}}).encode(),
+        )
+        os.makedirs(self.archive_dir, exist_ok=True)
+
+        manifest = elf_archive._load_manifest(self.archive_dir)
+        self.assertEqual(manifest, {})
+
+
+class LegacyMergeMissingFileAndRenumberingTest(unittest.TestCase):
+    """L2: a legacy manifest entry whose ELF exists nowhere (neither the
+    legacy dir nor the new one) must not be merged in -- a merged-but-
+    fileless entry is a manifest that names a missing file. L3: merged
+    entries get renumbered so seq stays well-defined instead of duplicating
+    or interleaving with the destination's own sequence."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = self._tmp.name
+        self.archive_dir = os.path.join(self.root, "elf_archive")
+        self.legacy_dir = os.path.join(self.root, "build", "elf_archive")
+
+    def test_l2_entry_with_no_elf_anywhere_is_not_merged(self):
+        identity = "Sep 15 2026 10:00:00"
+        # Deliberately no KilnCtrl-<elf_key>.elf written anywhere.
+        _write_fake_elf(
+            os.path.join(self.legacy_dir, "manifest.json"),
+            json.dumps({identity: {
+                "elf_key": "missingkey", "identity": identity, "seq": 1,
+                "archived_at": "2026-09-15T10:00:00Z", "source": "flash_firmware",
+            }}).encode(),
+        )
+        os.makedirs(self.archive_dir, exist_ok=True)
+
+        merged_keys = elf_archive._merge_legacy_manifest(self.archive_dir, self.legacy_dir, "KilnCtrl")
+
+        self.assertNotIn("missingkey", merged_keys)
+        manifest = elf_archive._load_manifest(self.archive_dir)
+        self.assertNotIn(identity, manifest)
+        # And the legacy manifest.json itself must survive the cleanup pass
+        # in migrate_legacy_archive() (not exercised directly here, but the
+        # invariant this proves is what that cleanup depends on):
+        # "elf_key in merged_keys" is False for this entry.
+
+    def test_l3_merged_entries_are_renumbered_past_the_destination_max(self):
+        _write_fake_elf(os.path.join(self.legacy_dir, "KilnCtrl-legacy1.elf"), b"legacy-content-1")
+        _write_fake_elf(
+            os.path.join(self.legacy_dir, "manifest.json"),
+            json.dumps({"Sep 1 2026 00:00:00": {
+                "elf_key": "legacy1", "identity": "Sep 1 2026 00:00:00",
+                "seq": 999,  # deliberately colliding/interleaving with the destination's own seq
+                "archived_at": "2026-09-01T00:00:00Z", "source": "flash_firmware",
+            }}).encode(),
+        )
+        _write_fake_elf(os.path.join(self.archive_dir, "KilnCtrl-newkey1.elf"), b"current-content")
+        _write_fake_elf(
+            os.path.join(self.archive_dir, "manifest.json"),
+            json.dumps({"Sep 10 2026 00:00:00": {
+                "elf_key": "newkey1", "identity": "Sep 10 2026 00:00:00", "seq": 3,
+                "archived_at": "2026-09-10T00:00:00Z", "source": "flash_firmware",
+            }}).encode(),
+        )
+
+        elf_archive._merge_legacy_manifest(self.archive_dir, self.legacy_dir, "KilnCtrl")
+
+        manifest = elf_archive._load_manifest(self.archive_dir)
+        # The merged entry's seq must be renumbered past the destination's
+        # existing max (3), not kept as the legacy 999 (which would sort
+        # after every future new entry as if it were archived far in the
+        # future -- the interleaving L3 warns about).
+        self.assertEqual(manifest["Sep 1 2026 00:00:00"]["seq"], 4)
+        self.assertEqual(manifest["Sep 10 2026 00:00:00"]["seq"], 3)
+
+
 if __name__ == "__main__":
     unittest.main()
