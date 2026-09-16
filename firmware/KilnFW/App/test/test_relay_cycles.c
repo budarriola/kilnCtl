@@ -1033,6 +1033,52 @@ static void test_relay_cycles_init_deferred_flag_clear_when_worker_already_up(vo
                "worker was up throughout -- nothing was deferred/dropped this boot");
 }
 
+// LOW-1, docs/audits/review_crash_gate_n1n3_120bba6f_2026-09-15.md: the shared
+// snapshot head writes s_rc.counts[relay], and before this test's companion
+// change it had no bounds check of its own -- it relied on a comment saying
+// both of its callers validate first. Both DO, so the public entry points
+// cannot reach the unguarded write and no public-API test can cover this;
+// this file #includes relay_cycles.c, so the static helper is probed directly
+// here, which is the only way to cover the guard that a THIRD caller added
+// later would depend on.
+//
+// Asserted on s_rc.dirty / counts / rev rather than on memory past
+// s_rc.counts[] deliberately: an out-of-bounds write is undefined behavior
+// and its blast radius is not something a test can pin down. Clearing
+// `dirty` is the deterministic, layout-independent consequence of the
+// snapshot head having run at all, and it is also the one with real
+// consequences -- a cleared `dirty` silently discards a pending persist.
+static void test_reset_snapshot_refuses_out_of_range_relay(void)
+{
+    TEST_SECTION("relay_cycles_reset_snapshot -- an out-of-range relay is refused by the snapshot "
+                 "helper itself, not only by its callers");
+    reset_all();
+
+    s_rc.dirty = true; // a persist is pending; a refused snapshot must not eat it
+    uint32_t before[RELAY_CYCLES_COUNT];
+    memcpy(before, s_rc.counts, sizeof(before));
+    uint32_t rev_before = s_rc.rev;
+
+    reset_persist_job_arg_t snap;
+    uint32_t old_count = 0xA5A5A5A5u;
+
+    TEST_CHECK(relay_cycles_reset_snapshot(RELAY_CYCLES_COUNT, &snap, &old_count) == false,
+               "index == COUNT is refused by the snapshot helper itself");
+    TEST_CHECK(old_count == 0xA5A5A5A5u,
+               "the out param is left untouched on the refusal path");
+    TEST_CHECK(s_rc.dirty == true,
+               "a refused snapshot must not clear `dirty` -- that would silently discard a pending persist");
+    TEST_CHECK(memcmp(before, s_rc.counts, sizeof(before)) == 0,
+               "no count was modified by the refused call");
+    TEST_CHECK(s_rc.rev == rev_before,
+               "no dual-write rev was consumed by the refused call");
+
+    TEST_CHECK(relay_cycles_reset_snapshot((unsigned)RELAY_CYCLES_COUNT + 10, &snap, &old_count) == false,
+               "well past COUNT is also refused");
+    TEST_CHECK(s_rc.dirty == true,
+               "still pending after the second refusal");
+}
+
 void run_test_relay_cycles(void)
 {
     g_test_stub_semaphore_take_default = 1; // pdTRUE -- see comment above test_maybe_persist_skips_...
@@ -1046,6 +1092,7 @@ void run_test_relay_cycles(void)
     test_v1_blob_migrates_to_v2();
     test_reset_zeroes_count_and_persists();
     test_reset_rejects_out_of_range_relay();
+    test_reset_snapshot_refuses_out_of_range_relay();
     test_reset_runs_inline_when_already_on_flash_worker();
     test_reset_timeout_busy_worker_reports_timeout();
     test_reset_timeout_idle_worker_succeeds();

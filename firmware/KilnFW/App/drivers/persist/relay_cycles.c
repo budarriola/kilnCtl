@@ -738,28 +738,70 @@ static void reset_persist_job(void *arg)
     ctx->err = hal_status_to_esp_err(persist_snapshot(ctx->snap));
 }
 
-/* Shared snapshot head for relay_cycles_reset()/relay_cycles_reset_timeout()
- * below (review docs/audits/review_crash_gate_followups_f07ad24d_2026-09-15.md
- * N3): both callers need the identical zero-then-snapshot-under-lock
- * sequence, so it is extracted here rather than left duplicated -- a future
- * field added to reset_persist_job_arg_t now only has one call site to
- * update, not two the compiler cannot cross-check. Returns the pre-reset
- * count (relay is already validated by both callers) so the finish helper
- * below can still log it. See relay_cycles_reset()'s own comment for why the
- * lock is released before dispatch rather than held across it. */
-static uint32_t relay_cycles_reset_snapshot(unsigned relay, reset_persist_job_arg_t *snap)
+/* THE one owning copy of this module's snapshot head, shared by EVERY writer
+ * here: relay_cycles_reset(), relay_cycles_reset_timeout(),
+ * relay_cycles_restore_all() and persist_snapshot_now().
+ *
+ * review docs/audits/review_crash_gate_followups_f07ad24d_2026-09-15.md N3
+ * extracted it for the reset()/reset_timeout() pair; the follow-up review
+ * (review_crash_gate_n1n3_120bba6f_2026-09-15.md) recorded that the same
+ * verbatim body -- three memcpys, rev + 1, dirty = false -- was still copied
+ * into restore_all() and persist_snapshot_now(), so a field added to
+ * reset_persist_job_arg_t still had three sites to be threaded through and
+ * the compiler could cross-check none of them. That is exactly the "reset
+ * one side of a pair" class CLAUDE.md names: the copies stay internally
+ * consistent while the relationship between them breaks silently. All four
+ * sites now route through this function, so there is one place to change.
+ *
+ * MUST be called with s_rc.lock HELD, and deliberately does not take the
+ * lock itself: it reads live s_rc and clears s_rc.dirty, which is precisely
+ * the work that lock serializes, and its callers need the critical section
+ * to span more than this body -- restore_all() mutates s_rc.counts inside
+ * the SAME section, and persist_snapshot_now() holds s_rc.persist_lock
+ * around it (lock order persist_lock -> s_rc.lock, never the reverse).
+ *
+ * relay_cycles_reset_snapshot() below is the reset-specific wrapper: it adds
+ * the bounds check and the zero-the-one-count step, then calls this. */
+static void relay_cycles_fill_snapshot_locked(reset_persist_job_arg_t *snap)
 {
-    uint32_t old_count;
-    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
-    old_count = s_rc.counts[relay];
-    s_rc.counts[relay] = 0;
     memcpy(snap->counts, s_rc.counts, sizeof(snap->counts));
     memcpy(snap->types, s_rc.types, sizeof(snap->types));
     memcpy(snap->rated_overrides, s_rc.rated_overrides, sizeof(snap->rated_overrides));
+    /* Strictly-increasing cfg-filesystem dual-write rev -- never re-used,
+     * never reset, so whatever this snapshot writes always outranks the
+     * stale file/NVS content before it. Taken under the same lock as the
+     * rest of the snapshot so it can never be observed ahead of the blob it
+     * belongs to. */
     snap->rev = s_rc.rev + 1;
     s_rc.dirty = false;
+}
+
+static bool relay_cycles_reset_snapshot(unsigned relay, reset_persist_job_arg_t *snap,
+                                        uint32_t *out_old_count)
+{
+    /* LOW-1, docs/audits/review_crash_gate_n1n3_120bba6f_2026-09-15.md: the
+     * s_rc.counts[relay] write below used to rely entirely on a comment
+     * saying both callers validate `relay` first. They do, so there was no
+     * live defect -- but extracting this code out of the two functions that
+     * held the guard left the guard and the write in different functions,
+     * and a third caller added later would get an out-of-bounds write into
+     * s_rc with nothing to stop it. Refuse instead, and report it: the
+     * caller must NOT go on to dispatch a persist of a snapshot that was
+     * never taken. Nothing is touched on this path -- in particular
+     * s_rc.dirty is left as-is, so a caller bug can never silently discard
+     * a pending persist. */
+    if (relay >= RELAY_CYCLES_COUNT) {
+        ESP_LOGE(TAG, "relay_cycles_reset_snapshot: REFUSING -- relay %u out of range (valid 0..%u); "
+                      "no counts changed, nothing snapshotted, nothing persisted",
+                 relay, (unsigned)(RELAY_CYCLES_COUNT - 1));
+        return false;
+    }
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    *out_old_count = s_rc.counts[relay];
+    s_rc.counts[relay] = 0;
+    relay_cycles_fill_snapshot_locked(snap);
     xSemaphoreGive(s_rc.lock);
-    return old_count;
+    return true;
 }
 
 /* Shared tail for relay_cycles_reset()/relay_cycles_reset_timeout() below --
@@ -840,7 +882,10 @@ bool relay_cycles_reset(unsigned relay)
      * dirty=true on its own and this must not paper over that by
      * unconditionally forcing it back to whatever it was pre-snapshot. */
     reset_persist_job_arg_t snap;
-    uint32_t old_count = relay_cycles_reset_snapshot(relay, &snap);
+    uint32_t old_count = 0;
+    if (!relay_cycles_reset_snapshot(relay, &snap, &old_count)) {
+        return false; /* out of range -- nothing snapshotted, so nothing to persist */
+    }
 
     /* RE-ENTRANCY (flash_worker_lint.py's pattern 1): check whether we are
      * already ON the flash worker before dispatching a second job onto it --
@@ -890,7 +935,10 @@ bool relay_cycles_reset_timeout(unsigned relay, uint32_t timeout_ms, bool *out_t
     }
 
     reset_persist_job_arg_t snap;
-    uint32_t old_count = relay_cycles_reset_snapshot(relay, &snap);
+    uint32_t old_count = 0;
+    if (!relay_cycles_reset_snapshot(relay, &snap, &old_count)) {
+        return false; /* out of range -- nothing snapshotted, so nothing to persist */
+    }
 
     reset_persist_job_ctx_t ctx = { .snap = &snap, .err = ESP_FAIL };
     if (uart_bridge_ext_is_on_flash_worker()) {
@@ -931,17 +979,14 @@ bool relay_cycles_restore_all(const uint32_t counts[RELAY_CYCLES_COUNT])
     reset_persist_job_arg_t snap;
     xSemaphoreTake(s_rc.lock, portMAX_DELAY);
     memcpy(s_rc.counts, counts, sizeof(s_rc.counts));
-    memcpy(snap.counts, s_rc.counts, sizeof(snap.counts));
-    memcpy(snap.types, s_rc.types, sizeof(snap.types));
-    memcpy(snap.rated_overrides, s_rc.rated_overrides, sizeof(snap.rated_overrides));
     /* Restore composes with the cfg-filesystem bridge the same way it composes
-     * with NVS: a strictly-increasing rev (never re-used, never reset) means
-     * a restored value always outranks whatever stale file/NVS content came
-     * before it, exactly like an ordinary save -- restore is not a parallel
-     * persistence path, it drives the SAME rev-then-write mechanism this
-     * module's other writers use. */
-    snap.rev = s_rc.rev + 1;
-    s_rc.dirty = false;
+     * with NVS -- it is not a parallel persistence path, it drives the SAME
+     * rev-then-write mechanism this module's other writers use, which is why
+     * it takes its snapshot through the one shared head above rather than
+     * carrying its own copy of it. The new counts are memcpy'd into s_rc
+     * FIRST, inside the same critical section, so the snapshot the head
+     * takes is the restored state, not the pre-restore state. */
+    relay_cycles_fill_snapshot_locked(&snap);
     xSemaphoreGive(s_rc.lock);
 
     reset_persist_job_ctx_t ctx = { .snap = &snap, .err = ESP_FAIL };
@@ -1047,11 +1092,7 @@ static hal_status_t persist_snapshot_now(TickType_t persist_lock_wait_ticks)
 
     reset_persist_job_arg_t snap;
     xSemaphoreTake(s_rc.lock, portMAX_DELAY);
-    memcpy(snap.counts, s_rc.counts, sizeof(snap.counts));
-    memcpy(snap.types, s_rc.types, sizeof(snap.types));
-    memcpy(snap.rated_overrides, s_rc.rated_overrides, sizeof(snap.rated_overrides));
-    snap.rev = s_rc.rev + 1;
-    s_rc.dirty = false;
+    relay_cycles_fill_snapshot_locked(&snap);
     xSemaphoreGive(s_rc.lock);
 
     /* Same re-entrancy guard as relay_cycles_reset(): run inline if already

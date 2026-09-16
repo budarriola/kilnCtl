@@ -44,9 +44,33 @@
   `sub:lvgl`85aa60d1``, where `<name>` is a submodule's leaf directory name
   (`lvgl`, `mykicadMcp`, `TFT35-SPI` as of this writing -- derived from
   .gitmodules, not hardcoded). Only that named submodule is tried; there is
-  no other-submodule or parent fallback. An unknown `sub:` name, an
-  uninitialized/missing submodule, or a hash that does not resolve in the
-  named submodule are all reported as failures -- never silently swallowed.
+  no other-submodule or parent fallback. An unknown `sub:` name, or a hash
+  that does not resolve in an INITIALIZED named submodule, are reported as
+  failures -- never silently swallowed.
+
+  UNINITIALIZED SUBMODULES ARE SKIPPED, NOT FAILED. A `sub:` tag naming a
+  submodule that .gitmodules declares but that is not checked out in this
+  worktree cannot be graded either way: there is no history present to
+  resolve the hash against. That is an environment gap, not a documentation
+  defect, and it fired on every clean-worktree verification run (the normal
+  state of a fresh worktree is: no submodules initialized), where it was
+  misreported as a real documentation regression more than once. Such
+  citations are now reported individually as SKIP lines naming the file,
+  line, hash, submodule and the `git submodule update --init` command that
+  would let them be graded, and they do not affect the exit code.
+
+  Two boundaries this skip deliberately does NOT cross:
+    * It skips only the unresolvable CITATIONS, never the whole check. The
+      script still grades every parent-repo citation and still exits 0 only
+      if those all pass. Exiting 3 (the runner's whole-check SKIP status)
+      would be wrong here and actively harmful: per tools/run_all_checks.ps1's
+      header a SKIP fails the overall run by default, so skipping the whole
+      check would both fail the run AND stop grading the ~2,300 citations
+      that are perfectly gradeable in a clean worktree.
+    * It never swallows a bad citation. An INITIALIZED submodule whose
+      citation does not resolve is still a hard FAIL, and a `sub:` name that
+      is not declared in .gitmodules at all is still a hard FAIL -- the skip
+      path is reachable only for a name .gitmodules itself declares.
   The `sub:` token requires a `\b` word boundary before it (so "notsub:lvgl"
   does NOT trigger it -- same widening class as the fabricated-marker fix
   below) and must sit with NO whitespace between the name and the backtick
@@ -156,17 +180,33 @@ $uniqueChecked = @{}
 $resolvedInParent = 0
 $resolvedInSubmodule = @{}
 
-# Submodule paths (only ones actually initialized/checked out on disk are
-# usable as a resolution target). See header, "SUBMODULE HASHES". Keyed by
-# leaf directory name (what a `sub:<name>` tag names), not full path.
+# Citations that name a declared-but-not-checked-out submodule. Reported, but
+# never counted as failures -- see header, "UNINITIALIZED SUBMODULES ARE
+# SKIPPED, NOT FAILED".
+$skippedUninitialized = @()
+
+# Submodule paths, keyed by leaf directory name (what a `sub:<name>` tag
+# names), not full path. TWO maps, because "names a submodule that is not
+# checked out here" and "names something that is not a submodule at all" are
+# different outcomes -- see header, "SUBMODULE HASHES".
+#   $declaredSubmodulesByName -- every submodule .gitmodules declares, checked
+#     out or not. A sub: tag naming one of these in a worktree where it is
+#     absent is SKIPPED (an environment gap, not a doc defect).
+#   $submodulesByName -- only those actually present on disk, i.e. the ones a
+#     hash can genuinely be resolved against. A sub: tag naming one of THESE
+#     that does not resolve is still a hard FAIL.
+# A sub: tag in neither map is an unknown name and is still a hard FAIL.
+$declaredSubmodulesByName = @{}
 $submodulesByName = @{}
 if (Test-Path '.gitmodules') {
     (git config -f .gitmodules --get-regexp '\.path$') |
         ForEach-Object { ($_ -split '\s+', 2)[1] } |
-        Where-Object { Test-Path (Join-Path $_ '.git') } |
         ForEach-Object {
-            $leaf = Split-Path -Leaf $_
-            $submodulesByName[$leaf.ToLowerInvariant()] = $_
+            $leaf = (Split-Path -Leaf $_).ToLowerInvariant()
+            $declaredSubmodulesByName[$leaf] = $_
+            if (Test-Path (Join-Path $_ '.git')) {
+                $submodulesByName[$leaf] = $_
+            }
         }
 }
 
@@ -201,13 +241,37 @@ foreach ($file in $files) {
                 # fallback to the parent repo or any other submodule.
                 $subPath = $submodulesByName[$subName.ToLowerInvariant()]
                 if (-not $subPath) {
-                    $known = ($submodulesByName.Keys | Sort-Object) -join ', '
+                    $declaredPath = $declaredSubmodulesByName[$subName.ToLowerInvariant()]
+                    if ($declaredPath) {
+                        # .gitmodules declares this submodule, but it is not
+                        # checked out here, so there is no history to resolve
+                        # the hash against and this ONE citation cannot be
+                        # graded either way. Skip it and keep grading every
+                        # other citation -- see header. Note this branch is
+                        # reachable only for a name .gitmodules itself
+                        # declares: an unknown name still falls through to
+                        # the failure below, and a submodule that IS present
+                        # never reaches here at all.
+                        $skippedUninitialized += [PSCustomObject]@{
+                            File = $file
+                            Line = $lineNum
+                            Hash = $hash
+                            Sub  = $subName
+                            Path = $declaredPath
+                        }
+                        continue
+                    }
+                    # Unknown name -- list every DECLARED submodule, not just
+                    # the initialized ones, so the hint is useful in a clean
+                    # worktree (where the initialized set is typically empty).
+                    $known = ($declaredSubmodulesByName.Keys | Sort-Object) -join ', '
+                    if (-not $known) { $known = '(none declared in .gitmodules)' }
                     $failures += [PSCustomObject]@{
                         File = $file
                         Line = $lineNum
                         Hash = $hash
                         Text = $line.Trim()
-                        Reason = "unknown sub: name '$subName' (known submodules: $known)"
+                        Reason = "unknown sub: name '$subName' (declared submodules: $known)"
                     }
                     continue
                 }
@@ -251,6 +315,18 @@ $subSummary = if ($resolvedInSubmodule.Count -gt 0) {
 }
 Write-Host "check_doc_hash_citations: $totalCitations citations, $($uniqueChecked.Count) unique hashes checked, $excludedFabricated excluded (marked fabricated)."
 Write-Host "  resolved: $resolvedInParent in parent repo; via sub: tag: $subSummary."
+
+if ($skippedUninitialized.Count -gt 0) {
+    # NOT exit 3, and NOT a failure -- see header. Every other citation above
+    # was still graded; only these individual ones could not be.
+    $bySub = ($skippedUninitialized | Group-Object Sub | Sort-Object Name | ForEach-Object {
+        "$($_.Count) naming sub:$($_.Name)"
+    }) -join ', '
+    Write-Host ("SKIP: {0} submodule citation(s) not graded ({1}) -- the named submodule is declared in .gitmodules but is not checked out in this worktree, so there is no history here to resolve them against. This is an environment gap, not a documentation defect." -f $skippedUninitialized.Count, $bySub) -ForegroundColor Yellow
+    foreach ($s in $skippedUninitialized) {
+        Write-Host ("  SKIP {0}:{1}: hash {2} declared sub:{3} -- submodule not initialized at {4}; run 'git submodule update --init -- {4}' to grade this citation." -f $s.File, $s.Line, $s.Hash, $s.Sub, $s.Path) -ForegroundColor Yellow
+    }
+}
 
 if ($failures.Count -gt 0) {
     Write-Host "FAIL: $($failures.Count) cited hash(es) do not resolve to a commit:" -ForegroundColor Red
