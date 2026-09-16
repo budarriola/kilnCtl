@@ -416,7 +416,26 @@ if the Pico's diagnostics are too stale to trust.</p>
     }
   }
   function poll() {
-    fetch('/api/status').then(function (r) { return r.json(); }).then(function (j) {
+    // 2026-09-16: the safety-link frame counters (diag_context_frames_ok/_bad,
+    // diag_tx_frames_dropped) and diag_boot_reason moved OFF the default
+    // /api/status document and behind ?diag=1, which returns a small
+    // diag-only document. The default document had overflowed
+    // DASHBOARD_JSON_STATUS_BUF_SIZE, which made /api/status answer 500 for
+    // the WHOLE document -- this page included. This page is the only
+    // consumer of those counters, so it fetches both and merges. The diag
+    // fetch is best-effort: if it fails, every other row on this page still
+    // renders rather than the page going stale over a diagnostic extra.
+    Promise.all([
+      fetch('/api/status').then(function (r) { return r.json(); }),
+      fetch('/api/status?diag=1').then(function (r) { return r.json(); })
+        .catch(function () { return null; })
+    ]).then(function (res) {
+      var j = res[0];
+      if (res[1]) {
+        for (var k in res[1]) {
+          if (k !== 'ok' && Object.prototype.hasOwnProperty.call(res[1], k)) j[k] = res[1][k];
+        }
+      }
       render(j);
       lastGoodAt = Date.now();
       failCount = 0;

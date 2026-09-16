@@ -205,6 +205,56 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
      * that macro's own doc comment) -- this local name is kept so every
      * other reference in this function below did not need touching. */
 #define DASHBOARD_STATUS_JSON_BUF_SIZE DASHBOARD_JSON_STATUS_BUF_SIZE
+
+    /* ?diag=1 -- opt-in safety-link diagnostic detail (2026-09-16).
+     *
+     * Why this exists: the default document had grown PAST this buffer. The
+     * sizing check in test_dashboard_json.c reported 52 bytes of headroom,
+     * but its mirror never emitted five fields this handler emits
+     * (safety_tc_is_separate_sensor, unconditionally, plus the four
+     * diag_boot_* fields inside the diag_ever_received branch the mirror set
+     * true and then did not render). With those five added the real render is
+     * 5353 bytes against a 5248-byte buffer: -105. The only precondition is
+     * diag_ever_received, i.e. a safety link that has ever spoken -- ordinary
+     * operation -- and the failure mode is the `truncated:` path below, a 500
+     * for the WHOLE document, every consumer of /api/status included.
+     *
+     * The remedy REDUCES bytes; the buffer is NOT raised. Two parts:
+     *   1. diag_boot_stack_overflow/_malloc_failed/_assert_failed are gone
+     *      (-97 bytes). They are pure bit-decodes of diag_boot_reason, which
+     *      is still served, and a mechanical scan of every key this handler
+     *      emits against every reader in the repo found they are the only
+     *      /api/status keys with no consumer anywhere at all.
+     *   2. diag_boot_reason and the three link frame counters move to the
+     *      small diag-only document served below (-132 bytes from the
+     *      default). safety_page.html is their sole consumer and now merges
+     *      a second ?diag=1 fetch.
+     * Default document worst case: 5124 bytes, 124 bytes of headroom.
+     *
+     * Why a separate small document rather than extra fields on the full one:
+     * a ?diag=1 response that CARRIED the full document plus the extras would
+     * be the 5353-byte document that does not fit -- gating alone would only
+     * move the 500 onto safety_page.html. Every other consumer of the prose
+     * fields (main_page.html's trip banner, safety_page.html's own cause and
+     * remedy rows) rules out shrinking the full document by dropping those
+     * instead. diag_state, diag_age_ms and the diag_trip_reason* family stay
+     * in the DEFAULT document for exactly that reason.
+     *
+     * These two locals are 64 + 8 bytes on the shared 8 KB httpd worker
+     * stack. The standing prohibition here is on BIG stack locals (the
+     * response buffer itself is heap/PSRAM, see above) -- a bounded query
+     * parse is not that. */
+    bool want_diag_detail = false;
+    {
+        char query[64];
+        if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+            char diag_val[8];
+            if (httpd_query_key_value(query, "diag", diag_val, sizeof(diag_val)) == ESP_OK) {
+                want_diag_detail = (diag_val[0] == '1');
+            }
+        }
+    }
+
     char *json = heap_caps_malloc(DASHBOARD_STATUS_JSON_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (json == NULL) {
         ESP_LOGE(DASH_TAG, "GET /api/status: malloc(%u) failed for the response buffer",
@@ -244,6 +294,30 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
                                   "{\"ok\":false,\"error\":\"out of memory building the response\"}");
     }
     dashboard_get_status(ds);
+
+    /* ?diag=1: the diagnostic-only document, a few hundred bytes at its
+     * widest -- see want_diag_detail's comment above for why this is a
+     * separate document and not extra fields on the one below. Same buffer,
+     * same APPEND/`truncated:` discipline, same free-after-send convention as
+     * the success path at the end of this function. */
+    if (want_diag_detail) {
+        APPEND("{\"ok\":true,\"diag_ever_received\":%s",
+               ds->diag_ever_received ? "true" : "false");
+        if (ds->diag_ever_received) {
+            APPEND(",\"diag_boot_reason\":%u", (unsigned)ds->diag_boot_reason);
+            APPEND(",\"diag_context_frames_ok\":%lu", (unsigned long)ds->diag_context_frames_ok);
+            APPEND(",\"diag_context_frames_bad\":%lu", (unsigned long)ds->diag_context_frames_bad);
+            APPEND(",\"diag_tx_frames_dropped\":%lu", (unsigned long)ds->diag_tx_frames_dropped);
+        }
+        APPEND("}");
+        free(ds);
+        httpd_resp_set_type(req, "application/json");
+        {
+            esp_err_t diag_send_err = httpd_resp_send(req, json, o);
+            free(json);
+            return diag_send_err;
+        }
+    }
 
     APPEND("{\"io_ready\":%s", ds->io_ready ? "true" : "false");
 
@@ -543,18 +617,16 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
          * which line asserted) is NOT on this wire -- see kilnlink_diag.h's
          * comment on these bits -- only on SaftyFW's own boot-time console
          * UART banner (main.c) or via SWD. */
-        APPEND(",\"diag_boot_reason\":%u", (unsigned)ds->diag_boot_reason);
-        APPEND(",\"diag_boot_stack_overflow\":%s",
-               (ds->diag_boot_reason & SAFETY_LINK_DIAG_BOOT_STACK_OVERFLOW) ? "true" : "false");
-        APPEND(",\"diag_boot_malloc_failed\":%s",
-               (ds->diag_boot_reason & SAFETY_LINK_DIAG_BOOT_MALLOC_FAILED) ? "true" : "false");
-        APPEND(",\"diag_boot_assert_failed\":%s",
-               (ds->diag_boot_reason & SAFETY_LINK_DIAG_BOOT_ASSERT_FAILED) ? "true" : "false");
+        /* diag_boot_reason moved to the ?diag=1 document (2026-09-16), and its
+         * three decoded booleans were REMOVED outright -- they are bit tests
+         * of that same byte and nothing in this repo read them. Do not add
+         * them back here: this branch is the one that overflowed the buffer,
+         * and test_dashboard_json.c now measures this document honestly. */
         APPEND(",\"diag_age_ms\":%u", (unsigned)ds->diag_age_ms);
         APPEND(",\"diag_context_age_100ms\":%u", (unsigned)ds->diag_context_age_100ms);
-        APPEND(",\"diag_context_frames_ok\":%lu", (unsigned long)ds->diag_context_frames_ok);
-        APPEND(",\"diag_context_frames_bad\":%lu", (unsigned long)ds->diag_context_frames_bad);
-        APPEND(",\"diag_tx_frames_dropped\":%lu", (unsigned long)ds->diag_tx_frames_dropped);
+        /* The three link frame counters moved to the ?diag=1 document
+         * (2026-09-16); safety_page.html, their sole consumer, merges a
+         * second ?diag=1 fetch. */
     }
 
     APPEND(",\"trip_event_ever_received\":%s", ds->trip_event_ever_received ? "true" : "false");

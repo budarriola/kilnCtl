@@ -687,6 +687,10 @@ static bool render_worst_case_status_json(char *json, size_t cap, size_t channel
     STATUS_APPEND(",\"zones_config_valid\":%s", "false");
 
     STATUS_APPEND(",\"safety_temp_c\":%.2f", -1234.56);
+    /* Emitted UNCONDITIONALLY by dashboard_status_http.c and missing from this
+     * mirror entirely until the 2026-09-16 review -- "false" is the wider of
+     * the two boolean renderings, so it is the worst case. */
+    STATUS_APPEND(",\"safety_tc_is_separate_sensor\":%s", "false");
     STATUS_APPEND(",\"enclosure_temp_c\":%.2f", -1234.56);
     STATUS_APPEND(",\"power_w\":%.1f", -1234.5);
 
@@ -745,11 +749,19 @@ static bool render_worst_case_status_json(char *json, size_t cap, size_t channel
         STATUS_APPEND(",\"diag_warn_mask\":%u", 65535u);
         STATUS_APPEND(",\"diag_trip_mask\":%u", 65535u);
         STATUS_APPEND(",\"diag_state\":%u", 255u);
+        /* 2026-09-16: this mirror models the DEFAULT /api/status document.
+         * diag_boot_reason and the three link frame counters
+         * (diag_context_frames_ok/_bad, diag_tx_frames_dropped) are no longer
+         * part of it -- they moved to the small ?diag=1 document -- and
+         * diag_boot_stack_overflow/_malloc_failed/_assert_failed were removed
+         * from the firmware outright. That is what bounds this document: the
+         * honest render of the old field list was 5353 bytes against a
+         * 5248-byte buffer. If any of them is ever served from the default
+         * document again, it MUST be added back here in the same breath, or
+         * this file goes back to reporting headroom the firmware does not
+         * have. */
         STATUS_APPEND(",\"diag_age_ms\":%u", 65535u);
         STATUS_APPEND(",\"diag_context_age_100ms\":%u", 255u);
-        STATUS_APPEND(",\"diag_context_frames_ok\":%lu", (unsigned long)0xFFFFFFFFu);
-        STATUS_APPEND(",\"diag_context_frames_bad\":%lu", (unsigned long)0xFFFFFFFFu);
-        STATUS_APPEND(",\"diag_tx_frames_dropped\":%lu", (unsigned long)0xFFFFFFFFu);
     }
 
     STATUS_APPEND(",\"trip_event_ever_received\":%s", "true");
