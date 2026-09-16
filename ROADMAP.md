@@ -934,6 +934,7 @@ open is short:
 | [`docs/SYSTEM_ARCHITECTURE.md`](docs/SYSTEM_ARCHITECTURE.md) | The system level spanning both processors: end-to-end command/trip paths, the board-to-board interface, power domains and GND crossings, cross-processor boot/shutdown ordering. Written 2026-09-04 |
 | [`docs/REPO_LAYOUT.md`](docs/REPO_LAYOUT.md) | The hardware/software reorganisation and its blockers |
 | [`docs/SETUP.md`](docs/SETUP.md) | Fresh-clone setup: what is machine-specific, and how `tools/setup.ps1` handles it |
+| [`docs/RELEASE_HARDENING_PLAN.md`](docs/RELEASE_HARDENING_PLAN.md) | What has to be true before this controls a real kiln unattended: coredump readback for the open `profile_executor` panic, a release-gate audit against this repo's own vacuous-pass history, long-duration soak with a machine-checked verdict, guard provocation on hardware split into what the 4 W bench can and cannot ever close, failure injection, OTA/recovery mechanics, and the first-firing checklist. Risk-ordered, blockers marked. **Starts once `docs/KILN_PROFILES_PLAN.md` is finished** |
 
 ---
 
