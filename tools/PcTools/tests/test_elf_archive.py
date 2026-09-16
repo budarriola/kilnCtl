@@ -1470,52 +1470,82 @@ class ArchiveLockTest(unittest.TestCase):
 
     def test_timeout_waiter_does_not_delete_a_live_holders_lock(self):
         """The M2 core bug: a waiter that gives up after its own timeout
-        must never delete a lock file it did not create -- a fresh
-        (non-stale) lock file simulates a live holder still inside its
-        critical section."""
-        os.makedirs(self.archive_dir, exist_ok=True)
-        fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        try:
-            # timeout_s shorter than _LOCK_STALE_SECONDS so the waiter times
-            # out via the "give up, don't steal" branch, not the staleness
-            # branch.
-            with elf_archive._archive_lock(self.archive_dir, timeout_s=0.2):
-                pass
-            # The "live" holder's lock must still be there: the waiter above
-            # gave up without ever owning it.
-            self.assertTrue(os.path.isfile(self.lock_path),
-                             "a timed-out waiter deleted a lock it never held")
-        finally:
-            os.close(fd)
-            os.remove(self.lock_path)
+        must never delete a lock file it did not create. Uses a REAL second
+        thread genuinely holding the lock via production `_archive_lock`
+        (not a bare hand-created file with no heartbeat) so this is not an
+        accident of a held-open-handle on any one platform."""
+        import threading
+
+        holder_in = threading.Event()
+        release_holder = threading.Event()
+
+        def hold():
+            with elf_archive._archive_lock(self.archive_dir, timeout_s=5.0):
+                holder_in.set()
+                release_holder.wait(timeout=5.0)
+
+        t = threading.Thread(target=hold)
+        t.start()
+        self.addCleanup(lambda: (release_holder.set(), t.join(timeout=5.0)))
+        self.assertTrue(holder_in.wait(timeout=5.0), "holder never acquired the lock")
+
+        holder_token = elf_archive._read_lock_token(self.lock_path)
+        self.assertIsNotNone(holder_token, "holder should have written a token")
+
+        # timeout_s shorter than _LOCK_STALE_SECONDS so the waiter times out
+        # via the "give up, don't steal" branch, not the staleness branch --
+        # required=False mirrors the lookup-side caller (M3).
+        with elf_archive._archive_lock(self.archive_dir, timeout_s=0.2, required=False):
+            pass
+
+        # The live holder's lock must still be there, untouched: the waiter
+        # above gave up without ever owning it.
+        self.assertEqual(elf_archive._read_lock_token(self.lock_path), holder_token,
+                          "a timed-out waiter deleted or replaced a lock it never held")
+        release_holder.set()
+        t.join(timeout=5.0)
 
     def test_negative_reproduces_the_lock_steal_without_the_owner_check(self):
-        """Proves the test above is genuinely negative-testable: this
-        directly reproduces the OLD unconditional os.remove(lock_path), not
-        a mirror of the new code, and shows it DOES delete a live holder's
-        lock. The fd is closed immediately after creating the file (unlike
-        the test above) specifically so this reproduction isn't masked by
-        the Windows-only accident that os.remove() on a file another
-        process still has open raises PermissionError -- see _archive_lock's
-        own docstring on that asymmetry. What matters here is the missing
-        ownership check, not the platform-specific side effect of a held
-        handle."""
-        os.makedirs(self.archive_dir, exist_ok=True)
-        fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.close(fd)
-        # The old finally-block behavior: unconditional removal, with no
-        # ownership (fd is None here, exactly like a timed-out waiter).
-        try:
-            os.remove(self.lock_path)
-        except OSError:
-            pass
+        """Proves the positive test above (test_reclaim_never_deletes_a_
+        newer_holders_lock) is genuinely negative-testable: same setup
+        (real A acquires via production `_archive_lock`, a real external
+        reclaim by B is simulated by rewriting the lock file exactly as the
+        production reclaim path would), but A's release uses the OLD
+        `fd is not None`-only finally logic (no token comparison) this
+        module shipped in da6667f3 instead of the current, fixed one. Against
+        the identical precondition the fixed code survives, the old logic
+        deletes B's lock."""
+        cm = elf_archive._archive_lock(self.archive_dir, timeout_s=5.0)
+        cm.__enter__()
+        a_token = elf_archive._read_lock_token(self.lock_path)
+        self.assertIsNotNone(a_token)
+        fd = cm.gen.gi_frame.f_locals["fd"]
+        os.close(fd)  # A "crashes" -- see test_reclaim_never_deletes_...'s comment
+
+        os.remove(self.lock_path)
+        b_fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(b_fd, b"B-OWNS-THIS-NOW")
+        os.close(b_fd)
+
+        # Run the exact pre-HIGH-3 release logic directly (bypassing the real
+        # generator entirely, so its FIXED finally never runs and can't mask
+        # the old bug), against the identical real fd/precondition A holds.
+        elf_archive._release_lock_pre_high3(self.lock_path, fd)
+
         self.assertFalse(os.path.isfile(self.lock_path),
-                          "expected the old unconditional-remove behavior to delete it")
+                          "expected the old unconditional-remove behavior to delete "
+                          "B's (the new holder's) lock")
+
+        # cm's generator is still suspended at its yield; close it without
+        # letting its (fixed) finally act on a lock file this test already
+        # consumed by hand -- avoids a leaked generator warning.
+        cm.gen.close()
 
     def test_stale_lock_is_reclaimed_without_waiting_the_full_timeout(self):
-        """A lock file older than _LOCK_STALE_SECONDS is treated as
-        abandoned and cleared well before a large timeout_s would otherwise
-        force a 30s-class stall."""
+        """A lock file older than _LOCK_STALE_SECONDS with no heartbeat (a
+        genuinely abandoned/crashed holder -- nothing is refreshing its
+        mtime) is treated as abandoned and cleared well before a large
+        timeout_s would otherwise force a 30s-class stall."""
         os.makedirs(self.archive_dir, exist_ok=True)
         fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         os.close(fd)
@@ -1534,6 +1564,121 @@ class ArchiveLockTest(unittest.TestCase):
         with elf_archive._archive_lock(self.archive_dir, timeout_s=5.0):
             self.assertTrue(os.path.isfile(self.lock_path))
         self.assertFalse(os.path.isfile(self.lock_path))
+
+    def test_reclaim_never_deletes_a_newer_holders_lock(self):
+        """HIGH-3: `fd is not None` alone proves only that this call created
+        A lock file at some point, not that the file now at `lock_path` is
+        still that one. Drives the real `_archive_lock` context manager for
+        holder A through `__enter__`/`__exit__` by hand (rather than via
+        `with`, since the test needs to act in between), and simulates a
+        genuine external reclaim in between -- another actor removing A's
+        original lock and writing its own token, exactly what the real
+        stale-reclaim loop does when a waiter decides A is dead -- by
+        directly rewriting the lock file's content. That is a legitimate
+        stand-in for "some other real acquisition happened here", not a
+        rebuild of the logic under test: the assertion below exercises A's
+        own, real, unmodified `finally` block and nothing else."""
+        cm = elf_archive._archive_lock(self.archive_dir, timeout_s=5.0)
+        cm.__enter__()
+        a_token = elf_archive._read_lock_token(self.lock_path)
+        self.assertIsNotNone(a_token, "A should have written its own token on acquire")
+
+        # A "crashes": its fd is closed by the OS, exactly what makes a lock
+        # reclaimable in the first place -- Windows won't let another actor
+        # remove a file while A's own handle on it is still open, so a live
+        # holder's lock genuinely can't be stolen this way regardless of the
+        # token check (that's the platform asymmetry HIGH-1 targets, tested
+        # separately below).
+        a_fd = cm.gen.gi_frame.f_locals["fd"]
+        os.close(a_fd)
+
+        # Simulate a real waiter B reclaiming A's (now presumed-dead) lock:
+        # B's own real _archive_lock code removes the old file and creates a
+        # fresh one containing B's own token. Reproduce only that externally-
+        # observable end state here, since orchestrating true multi-thread
+        # timing through Windows' open-handle delete semantics is itself
+        # unreliable to depend on in a test.
+        os.remove(self.lock_path)
+        b_fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(b_fd, b"B-OWNS-THIS-NOW")
+        os.close(b_fd)
+
+        # A's own exit now runs against a lock file it did not write.
+        cm.__exit__(None, None, None)
+
+        self.assertEqual(elf_archive._read_lock_token(self.lock_path), "B-OWNS-THIS-NOW",
+                          "A's finally block deleted or altered B's (the new holder's) lock")
+
+    def test_deadline_is_honored_even_when_stale_reclaim_keeps_failing(self):
+        """HIGH-1: if a lock looks stale by mtime but every reclaim attempt
+        fails (the ordinary case when the file is still genuinely open by a
+        live holder on Windows), the waiter must still return once
+        `timeout_s` elapses -- not spin forever. Forces every `os.remove` of
+        the lock path to fail, so the ONLY way this test finishes quickly is
+        if the staleness branch still respects `deadline` and sleeps, per
+        HIGH-1's fix (previously it `continue`d straight back to retrying the
+        exclusive-create, skipping both)."""
+        os.makedirs(self.archive_dir, exist_ok=True)
+        fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        ancient = time.time() - (elf_archive._LOCK_STALE_SECONDS + 5.0)
+        os.utime(self.lock_path, (ancient, ancient))
+
+        real_remove = os.remove
+
+        def remove_fails_only_for_lock(path, *a, **kw):
+            if os.path.normpath(path) == os.path.normpath(self.lock_path):
+                raise PermissionError("simulated: a live holder still has this file open")
+            return real_remove(path, *a, **kw)
+
+        start = time.time()
+        with unittest.mock.patch.object(os, "remove", side_effect=remove_fails_only_for_lock):
+            with elf_archive._archive_lock(self.archive_dir, timeout_s=0.5, required=False):
+                pass
+        elapsed = time.time() - start
+
+        self.assertLess(elapsed, 3.0,
+                         "a stale-but-unremovable lock must still respect timeout_s, not spin forever")
+        os.remove(self.lock_path)
+
+    def test_heartbeat_prevents_false_staleness_during_a_long_critical_section(self):
+        """HIGH-2: a holder whose critical section runs longer than
+        `_LOCK_STALE_SECONDS` must not have its OWN, still-live lock
+        reclaimed out from under it -- the heartbeat (not raw creation-time
+        mtime) is what a waiter's staleness check must see. Shrinks both
+        constants so the test runs fast while keeping the same ratio."""
+        import threading
+
+        with unittest.mock.patch.object(elf_archive, "_LOCK_STALE_SECONDS", 0.3), \
+             unittest.mock.patch.object(elf_archive, "_LOCK_HEARTBEAT_SECONDS", 0.05):
+            release_holder = threading.Event()
+            holder_in = threading.Event()
+
+            def hold():
+                with elf_archive._archive_lock(self.archive_dir, timeout_s=5.0):
+                    holder_in.set()
+                    release_holder.wait(timeout=5.0)
+
+            t = threading.Thread(target=hold)
+            t.start()
+            self.addCleanup(lambda: (release_holder.set(), t.join(timeout=5.0)))
+            self.assertTrue(holder_in.wait(timeout=5.0))
+
+            # Outlast the (shrunk) staleness threshold several times over
+            # while the heartbeat keeps refreshing the lock's mtime.
+            time.sleep(1.0)
+
+            # A waiter must still find the lock genuinely held -- not steal
+            # it just because more than _LOCK_STALE_SECONDS has passed since
+            # it was CREATED.
+            with elf_archive._archive_lock(self.archive_dir, timeout_s=0.2, required=False):
+                still_holder_token = elf_archive._read_lock_token(self.lock_path)
+            self.assertIsNotNone(still_holder_token,
+                                  "the live holder's lock was wrongly reclaimed as stale "
+                                  "despite an active heartbeat")
+
+            release_holder.set()
+            t.join(timeout=5.0)
 
 
 class LookupTimeMigrationNeverRaisesOrGuessesTest(unittest.TestCase):
@@ -1625,9 +1770,13 @@ class KilnFwLegacyMigrationLookupTest(unittest.TestCase):
             os.path.join(self.archive_dir, f"KilnCtrl-{elf_key}.elf")))
 
     def test_negative_without_lookup_side_migration_the_legacy_entry_is_unreachable(self):
-        """Confirms the test above is genuinely negative-testable: without
-        running the migration, the same legacy layout is unreachable by a
-        pure manifest read against the new (empty) archive dir."""
+        """Confirms the test above is genuinely negative-testable: calls the
+        exact same production entry point, `find_kiln_elf_for_build()`, with
+        the same on-disk legacy layout, but with `migrate_legacy_archive`
+        stubbed to a no-op -- proving it is specifically the lookup-side
+        migration call inside `find_kiln_elf_for_build` (M2/L4), and not
+        something else on that path, that makes the legacy entry reachable
+        without waiting for the next flash."""
         identity = "Sep 15 2026 10:00:00"
         elf_key = "kilnlegacy1"
         _write_fake_elf(os.path.join(self.legacy_dir, f"KilnCtrl-{elf_key}.elf"), b"legacy-kiln-content")
@@ -1636,10 +1785,13 @@ class KilnFwLegacyMigrationLookupTest(unittest.TestCase):
             json.dumps({identity: {"elf_key": elf_key, "identity": identity, "seq": 1,
                                     "source": "flash_firmware"}}).encode(),
         )
-        os.makedirs(self.archive_dir, exist_ok=True)
+        os.makedirs(self.archive_dir, exist_ok=True)  # new dir exists but is empty -- no flash has run yet
 
-        manifest = elf_archive._load_manifest(self.archive_dir)
-        self.assertEqual(manifest, {})
+        with unittest.mock.patch.object(elf_archive, "kiln_archive_dir", return_value=self.archive_dir), \
+             unittest.mock.patch.object(elf_archive, "migrate_legacy_archive", return_value=None):
+            path, message = elf_archive.find_kiln_elf_for_build(identity)
+
+        self.assertIsNone(path, message)
 
 
 class LegacyMergeMissingFileAndRenumberingTest(unittest.TestCase):

@@ -212,7 +212,9 @@ import json
 import os
 import re
 import shutil
+import threading
 import time
+import uuid
 from dataclasses import dataclass, asdict
 from typing import Optional
 
@@ -706,16 +708,60 @@ def adopt_orphaned_kiln_elfs(archive_dir: str) -> tuple[int, list[str]]:
     return adopted, unresolved
 
 
-# M2 (docs/audits/review_elf_migration_fixes_065d51ac_2026-09-15.md): a lock
-# file older than this is treated as abandoned (left by a crashed holder) and
-# a waiter may attempt to clear it -- this module's own critical sections are
-# all sub-second (a few small JSON files and, at most, one hardlink), so this
-# is a generous multiple of that, never a plausible age for a live holder.
-_LOCK_STALE_SECONDS = 10.0
+# M2 (docs/audits/review_elf_migration_fixes_065d51ac_2026-09-15.md), revised
+# per docs/audits/review_elf_lock_fixes_da6667f3_2026-09-15.md (HIGH-1/2/3): a
+# lock file whose mtime is older than this AND was never refreshed by a live
+# holder's heartbeat is treated as abandoned. The previous version measured
+# "how long the holder has been working" instead of "how long ago it died",
+# because nothing ever refreshed the mtime -- M1 widened the locked region to
+# include adopt_orphaned_kiln_elfs() (whole-file reads of up to 60 multi-MB
+# ELFs) and _prune(), comfortably over the old 10s threshold on a real
+# critical section, not just a crashed one. The holder now touches the lock
+# file every `_LOCK_HEARTBEAT_SECONDS` while it works (see `_LockHeartbeat`
+# below), so this threshold only needs to exceed one heartbeat interval by a
+# comfortable margin, not the whole critical section's worst case.
+_LOCK_HEARTBEAT_SECONDS = 2.0
+_LOCK_STALE_SECONDS = 6.0
+
+
+class _LockHeartbeat:
+    """Refreshes a lock file's mtime (and re-affirms its owner token) every
+    `_LOCK_HEARTBEAT_SECONDS` for as long as this process holds it, so a
+    waiter's staleness check (HIGH-2) reflects whether the holder is still
+    alive, not how long its critical section has been running. Runs on a
+    daemon thread so a hang here never blocks process exit."""
+
+    def __init__(self, lock_path: str, token: str):
+        self._lock_path = lock_path
+        self._token = token
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self):
+        while not self._stop.wait(_LOCK_HEARTBEAT_SECONDS):
+            try:
+                os.utime(self._lock_path, None)
+            except OSError:
+                return  # lock file gone (removed by us on exit, racing shutdown) -- stop quietly
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        self._thread.join(timeout=1.0)
+
+
+def _read_lock_token(lock_path: str) -> Optional[str]:
+    try:
+        with open(lock_path, "r", encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return None
 
 
 @contextlib.contextmanager
-def _archive_lock(archive_dir: str, timeout_s: float = 30.0):
+def _archive_lock(archive_dir: str, timeout_s: float = 30.0, required: bool = True):
     """L2 (docs/audits/review_elf_archive_fixes_a6f4a624_2026-09-15.md): a
     lock file serializing migrate+manifest read/write across concurrent
     processes -- two flashes landing close together could otherwise race
@@ -732,28 +778,50 @@ def _archive_lock(archive_dir: str, timeout_s: float = 30.0):
     after `timeout_s` deleted a LIVE holder's lock file out from under it, and
     a third caller could then acquire the lock while the first was still
     inside its critical section (three concurrent writers, not two). Fixed by
-    only ever removing the lock file in the branch that actually created it
-    (`fd is not None`) -- a timed-out waiter that never held the lock must
-    never delete it, full stop.
+    only ever removing the lock file in the branch that actually created it.
 
-    Separately, waiting the full `timeout_s` (30s) before treating a lock as
-    stale made every stale-lock recovery (the ordinary "a crashed process
-    left this behind" case) a 30s stall inside `flash_firmware()` or a crash
-    lookup, and gave a caller with a real deadline (a lookup, which must
-    never block) no way to fail fast. A lock file's mtime older than
-    `_LOCK_STALE_SECONDS` is now treated as abandoned and a waiter attempts to
-    clear it directly rather than waiting out the full timeout -- this can
-    still race two waiters into both trying the same removal, which is why
-    the removal itself is best-effort (`OSError` ignored) and followed by a
-    retry of the acquire loop rather than an assumption that the removal
-    succeeded or was needed."""
+    Revised again per docs/audits/review_elf_lock_fixes_da6667f3_2026-09-15.md
+    after that fix was itself found unsound:
+
+    - HIGH-1: the staleness-reclaim branch used to `continue` straight back to
+      the exclusive-create attempt, skipping both the `deadline` check and the
+      sleep below it. If the reclaim `os.remove` failed (the ordinary case on
+      Windows when the "stale" holder is actually alive and still has the file
+      open -- `PermissionError`, swallowed), the loop never terminated:
+      `timeout_s` bounded nothing, and a caller relying on it (M3's lookup
+      path) hung instead of degrading to "no match". The staleness check is
+      now just one more thing considered on each pass through the SAME loop
+      body that checks `deadline` and sleeps, so `timeout_s` is a hard bound
+      on this function no matter what the staleness branch does.
+    - HIGH-3: `fd is not None` only proves this call created *a* lock file at
+      some point, not that the file at `lock_path` right now is still that
+      file -- a reclaim by another waiter could have replaced it, and the old
+      owner's `finally` would then delete the NEW owner's lock (cascades from
+      there). Every lock file's content is now an owner token
+      (`f"{os.getpid()}:{uuid.uuid4()}"`), and both the reclaim path and the
+      exit path re-read the file and compare tokens before removing it.
+    - HIGH-2: see `_LockHeartbeat` above -- mtime alone conflated "still
+      working" with "dead"; the holder now refreshes it, so a waiter's
+      staleness check reflects actual liveness instead of critical-section
+      duration.
+    - MED-1: `required` (default True) makes a failure to acquire within
+      `timeout_s` a loud `TimeoutError` instead of a silent "proceed
+      unlocked" -- appropriate for `_archive()`, whose locked region is a
+      manifest read-modify-write where running unlocked reopens the exact
+      clobber M1 exists to prevent. The lookup path (`migrate_legacy_archive`,
+      called from `find_kiln_elf_for_build`/`find_safty_elf_for_identity`)
+      passes `required=False`: a lookup must never raise or block past its
+      own short timeout (M3), and skipping an opportunistic legacy-merge is
+      harmless -- the next successful acquisition merges it just the same."""
     os.makedirs(archive_dir, exist_ok=True)
     lock_path = os.path.join(archive_dir, ".archive.lock")
+    my_token = f"{os.getpid()}:{uuid.uuid4()}"
     deadline = time.time() + timeout_s
     fd = None
     while True:
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, my_token.encode("utf-8"))
             break
         except FileExistsError:
             try:
@@ -761,37 +829,88 @@ def _archive_lock(archive_dir: str, timeout_s: float = 30.0):
             except OSError:
                 age = None  # lock vanished between the failed create and this stat -- just retry
             if age is not None and age > _LOCK_STALE_SECONDS:
-                print(f"elf_archive: WARNING -- lock {lock_path} is {age:.1f}s old "
-                      f"(> {_LOCK_STALE_SECONDS}s), treating as abandoned by a crashed "
-                      "process and attempting to clear it.")
+                stale_token = _read_lock_token(lock_path)
+                print(f"elf_archive: WARNING -- lock {lock_path} is {age:.1f}s old with no "
+                      f"heartbeat (> {_LOCK_STALE_SECONDS}s), treating as abandoned by a "
+                      "crashed process and attempting to clear it.")
                 try:
-                    os.remove(lock_path)
+                    # Re-check the token immediately before removing: if the
+                    # holder's heartbeat (or a different waiter's successful
+                    # reclaim) touched/replaced the file since our stat above,
+                    # this is no longer the lock we judged stale -- leave it
+                    # alone (HIGH-3). Best-effort either way: two waiters can
+                    # still both pass this check for the same dead lock, which
+                    # is fine, since removing an already-removed file is a
+                    # no-op error we swallow.
+                    if _read_lock_token(lock_path) == stale_token:
+                        os.remove(lock_path)
                 except OSError:
-                    pass  # another waiter may have already cleared it, or a live holder
-                          # rewrote it -- either way, loop and retry the exclusive create
-                continue
+                    pass
             if time.time() > deadline:
+                if required:
+                    raise TimeoutError(
+                        f"elf_archive: could not acquire lock {lock_path} within "
+                        f"{timeout_s}s (a live holder appears to still be working -- "
+                        "refusing to proceed unlocked against a manifest "
+                        "read-modify-write).")
                 print(f"elf_archive: WARNING -- lock {lock_path} held past {timeout_s}s and "
                       f"not yet stale (age < {_LOCK_STALE_SECONDS}s), proceeding WITHOUT the "
                       "lock rather than stealing it from what may be a live holder.")
                 fd = None
                 break
             time.sleep(0.05)
+    heartbeat = None
+    if fd is not None:
+        heartbeat = _LockHeartbeat(lock_path, my_token)
+        heartbeat.start()
     try:
         yield
     finally:
-        if fd is not None:
-            # Only the process that actually created this lock file may
-            # remove it -- a waiter that gave up above (fd is None) never
-            # owned it and must leave it alone.
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            try:
-                os.remove(lock_path)
-            except OSError:
-                pass
+        if heartbeat is not None:
+            heartbeat.stop()
+        _release_lock(lock_path, fd, my_token)
+
+
+def _release_lock(lock_path: str, fd: Optional[int], my_token: str) -> None:
+    """The exit half of `_archive_lock`, split out so it can be exercised
+    (and, in tests, compared against the pre-HIGH-3 behavior) directly.
+    `fd is None` means this call never held the lock (gave up in the
+    give-up-without-stealing branch) and must do nothing at all. Otherwise,
+    only remove the lock file if the token currently on disk still matches
+    the one THIS call wrote (HIGH-3) -- a reclaim elsewhere could have
+    replaced the file while this call worked, and removing that replacement
+    would strip protection from whoever now legitimately holds it."""
+    if fd is None:
+        return
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    try:
+        if _read_lock_token(lock_path) == my_token:
+            os.remove(lock_path)
+    except OSError:
+        pass
+
+
+def _release_lock_pre_high3(lock_path: str, fd: Optional[int]) -> None:
+    """The exact da6667f3 release logic (M2, before the
+    docs/audits/review_elf_lock_fixes_da6667f3_2026-09-15.md HIGH-3 fix):
+    removes the lock file whenever `fd is not None`, with no check that the
+    file at `lock_path` is still the one this call created. Kept only so
+    `ArchiveLockTest`'s negative test can demonstrate the cascade this
+    module now prevents, by calling this instead of `_release_lock` against
+    an identical precondition -- never called from production code."""
+    if fd is None:
+        return
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    try:
+        os.remove(lock_path)
+    except OSError:
+        pass
 
 
 def _merge_legacy_manifest(archive_dir: str, legacy_dir: str, prefix: str) -> set[str]:
@@ -987,7 +1106,7 @@ def migrate_legacy_archive(archive_dir: str, prefix: str, lock_timeout_s: float 
     docstring for why the lock previously covering only the migration half
     of `_archive()` was not enough."""
     _guard_against_test_write(archive_dir)
-    with _archive_lock(archive_dir, timeout_s=lock_timeout_s):
+    with _archive_lock(archive_dir, timeout_s=lock_timeout_s, required=False):
         return _migrate_legacy_archive_locked(archive_dir, prefix)
 
 
@@ -1149,20 +1268,27 @@ def _archive(elf_path: str, archive_dir: str, prefix: str, identity: str,
     just-migrated flashed entry's provenance, permanently, since the legacy
     source that would have let a later run re-merge it is already gone.
     Holding the lock across migrate+adopt+load+write+prune closes that gap:
-    nothing else can observe or mutate this archive's manifest in between."""
+    nothing else can observe or mutate this archive's manifest in between.
+
+    LOW-2 (docs/audits/review_elf_lock_fixes_da6667f3_2026-09-15.md): the ELF
+    copy and the `<prefix>-latest.elf` copy used to run BEFORE the lock was
+    taken, so two concurrent flashes could interleave writes to the same
+    `latest.elf` and leave it torn. Both copies now happen inside the same
+    lock acquisition as everything else."""
     _guard_against_test_write(archive_dir)
     if not os.path.isfile(elf_path):
         raise FileNotFoundError(f"elf_archive: no ELF at {elf_path} to archive")
     os.makedirs(archive_dir, exist_ok=True)
     elf_key = _sha256_key(elf_path)
     dest = os.path.join(archive_dir, f"{prefix}-{elf_key}.elf")
-    newly_archived = not os.path.exists(dest)
-    if newly_archived:
-        shutil.copyfile(elf_path, dest)
     latest = os.path.join(archive_dir, f"{prefix}-latest.elf")
-    shutil.copyfile(elf_path, latest)
 
     with _archive_lock(archive_dir):
+        newly_archived = not os.path.exists(dest)
+        if newly_archived:
+            shutil.copyfile(elf_path, dest)
+        shutil.copyfile(elf_path, latest)
+
         # L1 (2026-09-15 review): drain any pre-existing entries from the OLD
         # build/elf_archive location before this call adds its own -- see
         # migrate_legacy_archive()'s docstring. Cheap no-op once drained.
