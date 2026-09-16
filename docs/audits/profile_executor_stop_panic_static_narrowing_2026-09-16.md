@@ -353,3 +353,219 @@ acknowledge or clear a crash report, or restart an MCP server.
 No firmware change is committed by this pass. The mechanism is narrowed, not
 proved, and per the brief a plausible-sounding patch to a panic nobody
 understands is worse than the open bug.
+
+---
+
+# Appendix A (2026-09-16, same day): the hardware experiment of section 9, executed
+
+Section 9 asked for exactly one thing: flash a build at or past `b38b1498` and
+run a firing to a `profiles_stop()`. That was done. This appendix records the
+result, one correction to section 6's worst-case path, and an honest statement
+of what six clean stops does and does not establish.
+
+## A.1 What was flashed, and the provenance
+
+Built from a clean git worktree at `origin/main`, passed to `flash_firmware()`
+via `kiln_fw_root`. Flashed commit `d459d124`, factory partition only,
+`verify=True`. Verification passed on the tool's own check: RUNNING partition
+`factory`, board `fw_build` "Sep 16 2026 11:45:29" matching the binary's
+embedded `esp_app_desc_t` build time. Both preconditions confirmed by
+`git merge-base --is-ancestor`: `b38b1498` is an ancestor of `d459d124`, and so
+is `1c8d7f6e`. This is the first hardware exposure of `1c8d7f6e`.
+
+A protocol version mismatch noted pre-flash (board v11 against PC tools v12,
+"device commands will be refused") was resolved by the flash; the board reports
+v12 afterwards.
+
+**A tooling defect found in the process.** `flash_firmware()` refused the first
+attempt as stale: "binary was built from commit d459d124, but HEAD is now
+49c9beb7 -- source has moved on since this build." That comparison is against
+the *main tree's* HEAD and ignores the `kiln_fw_root` override, so the sanctioned
+clean-worktree workflow always trips it. The refusal was demonstrably backwards
+here: `git merge-base --is-ancestor 49c9beb7 d459d124` succeeds, i.e. the build
+was six commits *newer* than the HEAD it was accused of lagging. Worked around
+with the documented `allow_stale=True` opt-out, but the stale check should
+compare against the HEAD of whichever tree it actually built from.
+
+## A.2 The fourth instance was preserved before anything else
+
+The board arrived with an unacknowledged crash report -- the fourth instance,
+and the one section 8 records as unreadable. It was captured in full before any
+other action: the report JSON, and then, once the flash had put
+`GET /api/coredump/info` on the board, the raw coredump image itself, 748032
+bytes of a 1048576-byte partition. Section 8 predicted both inputs were gone;
+one of them is now recovered. The dump is still **not** symbolizable -- no
+archived ELF matches the pre-flash image -- but the bytes are on disk rather
+than one panic away from being overwritten.
+
+Acknowledging was unavoidable: `dashboard_http.c`'s
+`KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK` refuses every relay-ON while a crash
+report is unacknowledged, so no firing can run until it is acknowledged.
+`POST /api/crash_report/ack` was used and `POST /api/crash_report/clear`
+deliberately was not, since clear also erases the coredump image. Confirmed
+afterwards that the dump is still present at 748032 bytes.
+
+The report's own contents are unchanged from the record in the prior audits:
+`IllegalInstruction`, task `profile_executo`, `exc_addr` 0x00000000,
+`exc_a1_sp` 0x3fcb3ae4, `frame_trustworthy` false, and a saved PC of exactly
+zero (`CRASH_REPORT_PC_OF_ZERO`).
+
+## A.3 A correction to section 6: the deepest path is unreachable from a manual stop
+
+Section 6 measures the deepest path from `profile_executor_halt` at 1632 B, and
+routes it through `adaptive_tune_refine_coupled_locked` into the coupled
+Gaussian solve. That figure is a sound *static* over-approximation, but it is
+dynamically unreachable from `profiles_stop()`, and the source says so
+explicitly.
+
+`profile_executor_status.c:92` calls `adaptive_tune_run_end(&fs_rec, false)`
+with a comment stating `clean` is "always false here ... Never 'true' from this
+call site." Inside `adaptive_tune_run_end()`, the per-zone loop tests `!clean`
+in its skip chain and takes `reset_run_status_locked()` plus `continue` *before*
+reaching the `adaptive_tune_refine_coupled_locked(zi)` call that follows. So an
+operator stop can never enter the coupled solve. The only call site that can is
+`profile_executor.c:380`, reached from the tick teardown branch with
+`at_clean_run` true -- that is, a natural `PROFILE_EXEC_DONE` completion.
+
+This was confirmed live. Every one of the six stops below logged, once per zone:
+
+```
+adaptive_tune: run was faulted or stopped early -- not used as training data
+```
+
+Consequence for section 9's framing: arranging for adaptive tune to have real
+state at stop time does give the executor live per-zone trace state, but it does
+**not** put the coupled solve on the stack at an operator stop. A manual stop
+exercises a strictly shallower path than section 6's worst case. If the
+surviving hypothesis is a depth-driven overflow, the experiment that stresses it
+hardest is a natural completion, not a stop.
+
+## A.4 A second obstacle: the coupled solve cannot arm on this fixture
+
+Independently of `clean`, the coupled solve needs
+`adaptive_tune_joint_ring_count` to reach `MAX31856_CHANNEL_COUNT +
+ADAPTIVE_TUNE_COUPLED_OBS_MARGIN` = 5 joint rows. Across this session's runs it
+never left zero, and the board reports why: the duty-stability gate refused
+every dwell observation, e.g.
+
+```
+duty still oscillating (range 0.137, 81% of 0.170) -- not a steady-state observation
+```
+
+Full ten-minute dwells at 30 C, 38 C and 46 C all ended with
+`observation_count: 0` and `joint_observations: 0`; the measured duty range
+wandered (0.110, 0.100, 0.084, 0.059, 0.091, 0.092, 0.137, 0.210) without ever
+settling inside the band. On a ~4 W fixture the PWM duty does not reach steady
+state within a dwell of this length. So the deepest stack path in this firmware
+is not reachable on this bench at all today, by either route. Anyone planning a
+follow-up that targets that path needs to solve this first -- longer dwells, or
+a deliberate priming of the joint ring.
+
+## A.5 The firing, and the six stop cycles
+
+Existing user profile #3 'coupid6' was used unmodified (zone_mask 0x7, six
+segments at 30/38/46/54/62/70 C, 120 C/hr, 10 min dwells). No builtin schedule
+table entry was touched, and no profile was created or overwritten. It was
+chosen because all three zones are in the mask -- a prerequisite for any joint
+row to commit -- and because its early segments are feasible from 24.9 C ambient
+on this fixture. Adaptive tune was enabled on zones 0, 1 and 2 so the executor
+would carry real per-zone state into each stop.
+
+Six stops, every one through `profiles_stop()`, chosen to vary the state the
+stop lands from:
+
+| # | State at stop | Detail |
+|---|---|---|
+| 1 | RUNNING, ramping | segment 1, 110 s into the ramp, after a completed 600 s dwell in segment 0 |
+| 2 | RUNNING, dwelling | segment 1, 177 s into the dwell |
+| 3 | PAUSED | segment 1, paused at 203 s elapsed, a distinct `state_at_halt` branch |
+| 4 | RUNNING, immediately after start | stop issued in the same batch as the start |
+| 5 | RUNNING, deep dwell | segment 1, 304 s into the dwell |
+| 6 | RUNNING, later segment dwell | segment 2, 124 s into the dwell, after two completed segments and a segment transition |
+
+**None of the six panicked.** Evidence, checked after every stop:
+
+* `uptime_s` rose monotonically across the whole session, 266 s to 3232 s, with
+  no discontinuity. A panic-reboot would have reset it.
+* `reset_reason` stayed `software (esp_restart)` throughout -- the flash's own
+  reset, never `PANIC`.
+* No new crash report appeared. `GET /api/crash_report` continued to return the
+  preserved fourth instance with `acknowledged: true`.
+* The executor reached `state=0` and logged "profile executor halted" on each
+  stop, preceded by "firing stats persisted" and the three per-zone
+  `adaptive_tune` skip lines -- the stop path ran to completion, it was not
+  merely quiet. The final stop logged "firing stats persisted for profile 3
+  (coupid6), 5/5 history entries" and then the K4 heat-enable release.
+* `heap_internal` `min_free` held at 27259 B from boot to the last stop, i.e. no
+  stop cycle produced a new internal-DRAM low-water mark.
+* `safety_diverged` false and `diag_trip_mask` 0 throughout.
+
+Safety parity, checked before the flash, after the flash and after the final
+stop: Pico S1 `abs_max_temp_c` = 80 C, ARMED; ESP per-zone range 0..80 C. Equal
+at every check. S8 armed at 33.3 C/min throughout. No S6a trip occurred, since
+only the ESP was reset. One observation not explained here: the Pico's
+`config_crc` moved from 17058 to 27984 and `config_version` from 156 to 157
+across the flash, while `abs_max_temp_c` and the S8 rate were identical either
+side. A second, probably benign: `safety_get_link_stats` ended the session with
+187 timeouts against 5662 sent, with crc/framing errors 0, resync 0 and routed
+nowhere 0 -- accumulated during heavy concurrent HTTP polling, not during the
+stops specifically.
+
+## A.6 What this establishes, and what it does not
+
+**Establishes.** The signature is not trivially reproducible on `d459d124`. Six
+`profiles_stop()` calls, from six different executor states including a paused
+one and a deep dwell, all completed the stop path cleanly on a build that
+contains `1c8d7f6e`. Section 6's claim that the named UART frame-send mechanism
+is gone is consistent with every observation here. The coredump endpoint is now
+on the board, so a recurrence will yield a real backtrace rather than a fifth
+round of inference.
+
+**Does not establish.** Six clean stops does not show the defect is fixed. The
+four historical instances accumulated across months of operation, not across six
+consecutive stops, so the pre-fix per-stop probability was plausibly a few
+percent or less -- well below what six trials can detect. By the rule of three,
+zero events in N trials bounds the per-stop rate at roughly 3/N with 95%
+confidence: N = 6 bounds it only at about 0.39, which excludes nothing
+interesting. To bound the per-stop rate below 5% takes about 60 clean stops, and
+below 1% about 300. Neither was attempted here.
+
+Worse, section A.3 shows these six stops did not exercise the deepest path at
+all. So this is not even six samples of the worst case -- it is six samples of a
+shallower one.
+
+**Therefore: it is not safe to stop iterating, and this item should stay open.**
+Section 6's elimination of the named mechanism remains the strongest evidence in
+the file; this appendix adds that the fix has now at least been exposed to
+hardware without immediate recurrence, which the record previously could not
+claim at all.
+
+## A.7 The next experiment
+
+Run a profile to a **natural `PROFILE_EXEC_DONE` completion**, not a stop. That
+is the only route to `profile_executor.c:380` with `at_clean_run` true, and
+therefore the only way to put `adaptive_tune_refine_coupled_locked` and the
+coupled solve -- section 6's actual measured worst case, 1776 B with 1100 B
+honest headroom -- on the executor stack on real hardware. A short two-segment
+profile within this fixture's reach would do it, and it can be repeated cheaply
+for sample count.
+
+That run should first clear the A.4 obstacle, or it will reach the coupled
+solve's threshold check and refuse before descending into the solve itself,
+which would look like a pass while testing nothing. Either lengthen the dwells
+until the duty-stability gate is satisfied, or accept that the joint ring must
+be primed some other way.
+
+## A.8 What this pass did and did not do
+
+Did: capture and preserve the fourth crash report and its coredump; flash
+`d459d124` from a clean worktree with verification; enable adaptive tune on
+three zones; run four firings of profile #3; issue six `profiles_stop()` calls;
+check safety parity before, during and after.
+
+Did **not**: modify any firmware source, alter any builtin schedule table entry,
+write a relay outside `kiln_io_owner`, clear the crash report or the coredump,
+restart any MCP server, or change any profile definition.
+
+No firmware change is committed by this pass either. The mechanism is still not
+proved.
