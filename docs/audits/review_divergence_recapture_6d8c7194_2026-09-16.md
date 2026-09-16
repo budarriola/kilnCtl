@@ -11,6 +11,39 @@ reproduction experiment, and `tools/run_all_checks.ps1 -ExecutionPolicy Bypass
 -AllowFewerChecks` run in the foreground against both trees. No claim below rests
 on `check_00`.
 
+**Status as of 2026-09-16 (follow-up pass): finding 1 / item E is CLOSED.** It was
+closed by `adff1595` ("Bound /api/status: its size mirror was blind to five fields
+it emits") and `d459d124` ("Extend the /api/status mirror discipline to the ?diag=1
+document"), both of which landed on `main` AFTER this review was written. This
+section is retained as the historical record of a real defect; do not re-open it
+from the prose below without re-measuring first.
+
+Re-verified against `main` at `200bc0ae` in a clean worktree:
+
+- The five fields this review named are all accounted for.
+  `safety_tc_is_separate_sensor` is now mirrored (`test_dashboard_json.c:693`)
+  against the handler at `dashboard_status_http.c:467`.
+  `diag_boot_stack_overflow`/`_malloc_failed`/`_assert_failed` were removed from
+  the firmware outright as pure bit-decodes, and three tests now assert they do
+  not reappear. `diag_boot_reason` moved to a separate small `?diag=1` document,
+  which has its own mirror (`render_diag_json()`).
+- Measured, not argued: `/api/status` worst-case render is **5124 bytes against
+  DASHBOARD_JSON_STATUS_BUF_SIZE=5248 -- headroom +124**, and the `?diag=1`
+  document is 169 bytes (headroom 5079). The buffer was NOT enlarged; it is still
+  5248. The remedy was bounding content, as this review required.
+- A mechanical key set-diff of every `APPEND()`/`STATUS_APPEND()`/`DIAG_APPEND()`
+  emit in the handler and the mirror finds zero handler-only keys in either
+  document. The only mirror-only keys are the deliberate mutation probes
+  (`mock_new_stat_us`, `mock_new_stat_max_us`, `diag_future_counter`).
+- Negative test reproducing this review's own experiment: re-adding the four moved
+  fields to the mirror measures **5256 bytes, -8 bytes of headroom**, and goes red
+  at `test_dashboard_json.c:939` and `:946`, `2 FAILURE(S)`,
+  `RUN FAILURES (1): dashboard_json`. So the guard is load-bearing, and this
+  review's 5353-byte finding was correct when written.
+
+The other ranked findings (2-7) below are NOT affected by this note and remain
+open as written.
+
 ## Verdicts
 
 | Item | Claim | Verdict |
