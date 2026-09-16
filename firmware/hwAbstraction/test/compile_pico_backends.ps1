@@ -102,7 +102,15 @@ $sources = @(
 )
 
 $failed = $false
-$rspPath = Join-Path $env:TEMP "hal_pico_backend_compile.rsp"
+# PID-keyed response file. A fixed $env:TEMP name is machine-global, and
+# run_all_checks.ps1 runs checks in parallel: two concurrent copies of this
+# script rewrite the same .rsp inside the per-source loop. Reproduced at
+# A exit=1 B exit=1 with "ld.exe: cannot find @...hal_pico_backend_compile
+# .rsp: Invalid argument". The more dangerous shape is silent: one instance
+# can read the OTHER instance's .rsp and syntax-check the wrong source while
+# still reporting OK for the source it named.
+$rspPath = Join-Path $env:TEMP "hal_pico_backend_compile_$PID.rsp"
+try {
 foreach ($src in $sources) {
     Write-Host "== syntax-checking $src =="
     $srcFwd = $src -replace '\\', '/'
@@ -116,7 +124,9 @@ foreach ($src in $sources) {
         Write-Host "OK: $src" -ForegroundColor Green
     }
 }
-Remove-Item -Path $rspPath -ErrorAction SilentlyContinue
+} finally {
+    Remove-Item -Path $rspPath -Force -ErrorAction SilentlyContinue
+}
 
 if ($failed) {
     exit 1

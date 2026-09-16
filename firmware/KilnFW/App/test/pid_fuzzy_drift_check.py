@@ -65,6 +65,7 @@ Exit 1: the harness failed to build/run, or at least one vector diverged
 """
 import math
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -91,7 +92,14 @@ DRIVERS_DIR = TEST_DIR.parent / "drivers"
 # `run_all_checks.ps1` invocations, or this check overlapping a host-test
 # build, can now proceed concurrently without either side's cl.exe/.obj
 # writes colliding.
-BUILD_DIR = TEST_DIR / "build_pid_fuzzy_drift"
+# Per-process scratch directory. A private build_pid_fuzzy_drift/ alone is
+# NOT enough: run_all_checks.ps1 dispatches ~95 checks in parallel, and two
+# concurrent copies of THIS check still collide on the fixed pid_fuzzy.obj /
+# pid_fuzzy_drift_harness.exe / _pid_fuzzy_drift_build.bat names inside it
+# ("fatal error C1083: Cannot open compiler generated file: ...\\pid_fuzzy.obj: Permission denied", reproduced at A exit=1 B exit=1).
+# Same defect and same pid-keyed fix as heater_output_pwm_drift_check.py's
+# build_heater_output_pwm_drift/run_<pid>/.
+BUILD_DIR = TEST_DIR / "build_pid_fuzzy_drift" / f"run_{os.getpid()}"
 HARNESS_EXE = BUILD_DIR / "pid_fuzzy_drift_harness.exe"
 VCVARS = r"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
 
@@ -249,4 +257,9 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    finally:
+        # Per-process scratch directory: remove it so repeated runs do not
+        # accumulate one run_<pid> tree per invocation.
+        shutil.rmtree(BUILD_DIR, ignore_errors=True)

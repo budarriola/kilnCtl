@@ -92,7 +92,11 @@ $sources = @(
 )
 
 $failed = $false
-$rspPath = Join-Path $env:TEMP "hal_esp_backend_compile.rsp"
+# PID-keyed response file -- see compile_pico_backends.ps1 for the full
+# rationale. Reproduced here too, at A exit=1 B exit=1 C exit=1, with
+# "ld.exe: cannot find @...hal_esp_backend_compile.rsp: Invalid argument".
+$rspPath = Join-Path $env:TEMP "hal_esp_backend_compile_$PID.rsp"
+try {
 foreach ($src in $sources) {
     Write-Host "== syntax-checking $src =="
     # gcc-style response file (@file) sidesteps cmd.exe's 8191-char command
@@ -110,7 +114,9 @@ foreach ($src in $sources) {
         Write-Host "OK: $src" -ForegroundColor Green
     }
 }
-Remove-Item -Path $rspPath -ErrorAction SilentlyContinue
+} finally {
+    Remove-Item -Path $rspPath -Force -ErrorAction SilentlyContinue
+}
 
 if ($failed) {
     exit 1

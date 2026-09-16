@@ -53,6 +53,37 @@
 #              from a Python check, or any other exit code.
 # A check that can never legitimately skip should simply never exit 3; there
 # is no opt-in required beyond using this exit code correctly.
+# THE FIXED-SHARED-SCRATCH-PATH RACE CLASS (swept 2026-09-16; read this
+# before writing a check that compiles, links, or generates a file).
+# Because this runner dispatches checks in PARALLEL, a check that writes a
+# FIXED path races a second copy of itself and any sibling writing the same
+# path. Four separate fixes now exist for this (143ff6af's
+# build_heater_output_pwm_drift/run_<pid>/ and the sweep that followed it),
+# and the sweep found instances in two shapes:
+#   WRITER vs WRITER -- a fixed build directory, a fixed .obj/.exe name, a
+#     fixed generated .bat, or a fixed $env:TEMP response file. A PRIVATE
+#     directory is NOT sufficient: two copies of the same check still
+#     collide inside it. Key the path on $PID (PowerShell) or os.getpid()
+#     (Python) and delete it in a finally block.
+#   WRITER vs SCANNER -- several checks recursively enumerate a source tree
+#     and then read each file. A scratch file another check creates and
+#     deletes in that tree can vanish between the enumeration and the read,
+#     which is fatal under $ErrorActionPreference = "Stop". Two rules:
+#     put scratch OUTSIDE any scanned source tree ($env:TEMP, $PID-keyed),
+#     and enumerate git-tracked files rather than walking the working tree
+#     (check_no_duplicate_crc.ps1 and check_stack_margin_registration.ps1
+#     both do this).
+# NO MECHANICAL CHECK ENFORCES THIS, deliberately. The instances have no
+# unifying syntactic shape -- a Path join, a Join-Path, a response-file
+# name, a Get-ChildItem -Recurse with no write of its own -- and a rule
+# general enough to catch all of them would flag the large majority of
+# correct code, since most fixed paths in this repo are read-only inputs or
+# are already serialized by tools/build_lock.ps1's named mutex. (That mutex
+# is keyed by NAME, not by directory: two scripts writing one directory
+# under different lock names are NOT serialized -- check before relying on
+# it.) This mirrors the reasoning CLAUDE.md records for the "reset one side
+# of a pair" class, which was rejected for a mechanical check for the same
+# reason. Review by hand instead, using the two rules above.
 param(
     # Print what would run, run nothing. For confirming the glob sees what you
     # expect after moving a directory.

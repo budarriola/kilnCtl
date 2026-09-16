@@ -376,7 +376,25 @@ $ownerFileNames = @(
 $hwAbstractionRoot = Join-Path $root "..\firmware\hwAbstraction"
 if (Test-Path $hwAbstractionRoot) {
     $hwAbstractionRootResolved = (Resolve-Path $hwAbstractionRoot).Path
-    $hwAbstractionFiles = @(Get-ChildItem -Path $hwAbstractionRootResolved -Recurse -File -Include "*.c", "*.h")
+    # Scan only git-tracked files. An untracked scratch/work directory left
+    # by a concurrent check (test_host_fakes.ps1's mutant sources,
+    # compile_headers.ps1's dummy backends) is never a real source hit, and
+    # walking the working tree made this check fail spuriously in parallel
+    # runs while passing under -Only: a file enumerated here can vanish
+    # before Get-CodeOnlyLines reads it, which is fatal under
+    # $ErrorActionPreference = "Stop" (9 of 10 runs against a churning
+    # scratch dir). check_no_duplicate_crc.ps1 already solved the identical
+    # problem this way; same fix, same reason.
+    Push-Location $hwAbstractionRootResolved
+    try {
+        $hwTrackedRel = @(git ls-files -- "*.c" "*.h")
+    } finally {
+        Pop-Location
+    }
+    $hwAbstractionFiles = @($hwTrackedRel |
+        ForEach-Object { Join-Path $hwAbstractionRootResolved ($_ -replace '/', '\') } |
+        Where-Object { Test-Path -LiteralPath $_ } |
+        ForEach-Object { Get-Item -LiteralPath $_ })
 
     $hwAbstractionViolations = @()
     $accessorPattern = '\bhal_[a-z0-9_]+_get_task_handle\b'

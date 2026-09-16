@@ -46,7 +46,17 @@ $commonDir = Join-Path (Split-Path -Parent $here) "common"
 # line 207 during run_all_checks.ps1, when one instance's cleanup deleted
 # files the other instance was still using). Each instance gets its own
 # directory and cleans up only that one.
-$workDir = Join-Path $here "_fakes_work_$PID"
+# OUTSIDE the repo tree, and PID-keyed. PID-keying alone fixed this script
+# against itself, but the scratch directory still sat under
+# firmware/hwAbstraction/test/, which sibling checks scan recursively for
+# *.c/*.h while this script creates and deletes mutant sources there.
+# check_stack_margin_registration.ps1 failed 9 of 10 runs against a churning
+# scratch directory in this tree ("Get-ChildItem : Could not find item
+# ...churn_2.c"), and check_no_duplicate_crc.ps1 names this same
+# _fakes_work_<pid> directory in its own fix comment. A writer that stays
+# out of the scanned tree closes the class for every present and future
+# scanner, not just today's.
+$workDir = Join-Path $env:TEMP "kilnctl_fakes_work_$PID"
 if (Test-Path $workDir) { Remove-Item -Recurse -Force $workDir }
 New-Item -ItemType Directory -Path $workDir | Out-Null
 

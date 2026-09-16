@@ -29,7 +29,11 @@ $ErrorActionPreference = "Stop"
 $here = $PSScriptRoot
 $ifaceDir = Join-Path (Split-Path -Parent $here) "interface"
 $commonDir = Join-Path (Split-Path -Parent $here) "common"
-$workDir = Join-Path $here "_work"
+# OUTSIDE the repo tree, and PID-keyed -- same reasoning as
+# test_host_fakes.ps1's scratch directory: a fixed _work under
+# firmware/hwAbstraction/test/ collides with a second copy of this script
+# and is also visible to sibling checks that scan this tree for *.c/*.h.
+$workDir = Join-Path $env:TEMP "kilnctl_hal_headers_work_$PID"
 if (Test-Path $workDir) { Remove-Item -Recurse -Force $workDir }
 New-Item -ItemType Directory -Path $workDir | Out-Null
 
