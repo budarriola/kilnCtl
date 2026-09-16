@@ -94,6 +94,7 @@
 #include "thermo_owner.h"
 #include "heat_enable.h"
 #include "danger_mode.h"
+#include "heat_owner_active_decide.h"
 
 /* Real build identity (git commit/dirty/build timestamp), generated fresh
  * every build by gen_build_info.cmake into this component's binary dir --
@@ -507,10 +508,9 @@ void safety_build_and_send_context(SafetyLinkClass *link)
      * heat-requested flag, since danger mode's manual diagnostics bypass
      * calls safety_link_request_enable() directly and can flip K4 on a
      * separate cadence from its own heat_requested bookkeeping. */
-    if (pstat.state == PROFILE_EXEC_RUNNING || pstat.state == PROFILE_EXEC_PAUSED ||
-        heat_enable_is_held(HEAT_ENABLE_CLAIMANT_PROFILE) ||
-        heat_enable_is_held(HEAT_ENABLE_CLAIMANT_AUTOTUNE) ||
-        danger_mode_active()) {
+    if (heat_owner_active_decide(pstat.state, heat_enable_is_held(HEAT_ENABLE_CLAIMANT_PROFILE),
+                                  heat_enable_is_held(HEAT_ENABLE_CLAIMANT_AUTOTUNE),
+                                  danger_mode_active())) {
         ctx.flags |= KILNLINK_CONTEXT_FLAG_HEAT_OWNER_ACTIVE;
     }
     if (any_zone_faulted) {

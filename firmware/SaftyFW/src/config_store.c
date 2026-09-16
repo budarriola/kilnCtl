@@ -6,7 +6,7 @@
                                 // byte carries; one shared definition rather
                                 // than a duplicated 0/1 convention
 
-#include <stdlib.h> // abort() -- config_store_only_tc_type_differs()'s reentrancy trip-wire
+#include "tasks/log_task.h" // log_task_log() -- config_store_only_tc_type_differs()'s reentrancy trip-wire logs instead of aborting (2026-09-15, F3)
 #include <string.h>
 
 #include "config_params.h" // config_params_validate_ranges() -- load-time re-check, see config_store_unpack()
@@ -1187,11 +1187,23 @@ bool config_store_only_tc_type_differs(const config_store_record_t *current,
     // from a different task, not a race that needs a lock to detect.
     static volatile bool s_call_in_progress = false;
     if (s_call_in_progress) {
-        // Written as an explicit abort(), not assert() -- this file builds
-        // with -DNDEBUG on the RP2040 target (assert() compiles to nothing
-        // there), and this check must fire in that build too, not only in
-        // host tests.
-        abort();
+        // 2026-09-15 (Opus adversarial re-review, F3): this was an abort()
+        // until this fix. abort() resets the whole RP2040 -- on this board
+        // that drops K4 (heat-enable output) and leaves the safety processor
+        // unarmed until it reboots and clears GRACE, which is exactly what
+        // the owner's hard line forbids ("there should never be a way that
+        // the pico is not armed"), traded for a condition this function's
+        // own header comment says is not reachable today (single caller,
+        // single task) and that `s_call_in_progress` -- a plain volatile
+        // bool, not a lock -- could not reliably detect anyway if it ever
+        // did happen concurrently. Fail closed instead: log it and report
+        // "not a tc_type-only change", which routes the caller into the
+        // existing unconditional ARMED refusal (see the non-tc_type-only
+        // branch above) instead of resetting the chip.
+        log_task_log(LOG_LEVEL_ERROR, "config_store",
+                     "config_store_only_tc_type_differs re-entered -- refusing "
+                     "as not-tc_type-only, chip stays armed");
+        return false;
     }
     s_call_in_progress = true;
     config_store_pack(current, a);

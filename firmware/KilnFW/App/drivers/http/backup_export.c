@@ -398,8 +398,23 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
     }
     backup_stream_printf(&s, "]");
 
+    /* 2026-09-15 (Opus adversarial re-review, F6): this used to read
+     * zones_config_get_safety_tc_type() -- the ESP's own cached copy, which
+     * N5 already found and fixed on the GET-page path (zones_http_get.c),
+     * but this export path was missed. The commissioning page owns
+     * tc_type; the Pico is authoritative. A backup taken before the first
+     * Pico read-back (or after a Pico-side change the ESP hasn't yet
+     * polled) would otherwise capture a stale value. Same live read-back
+     * as zones_http_get.c, with the same "0 only when known" convention --
+     * import never writes this field back to the Pico either way, so the
+     * only consequence of getting it wrong is a misleading backup file, not
+     * a wrong device, but there is no reason to keep shipping the stale
+     * one when the live getter already exists. */
     uint8_t safety_tc_type = 0;
-    zones_config_get_safety_tc_type(&safety_tc_type); /* only fails on NULL out-pointer -- never here */
+    bool safety_tc_type_known = zones_get_safety_pico_tc_type(&safety_tc_type);
+    if (!safety_tc_type_known) {
+        safety_tc_type = 0;
+    }
     backup_stream_printf(&s, ",\"safety_tc_type\":%u}", safety_tc_type);
 
     backup_stream_flush(&s);

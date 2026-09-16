@@ -1568,9 +1568,19 @@ static void link_task_handle_clear_trip(const kilnlink_frame_t *frame)
 // match (heat became enabled in the write-to-reapply window) -- the flash
 // record and the chip are diverged at that point. link_task_fn()'s main loop
 // calls link_task_retry_pending_tc_type_reapply() every poll to keep trying
-// the reapply until it verifies, instead of leaving the divergence stranded
-// silently forever. single-writer: only link_task's own task context ever
-// touches these two (set in the two handlers above, cleared only here).
+// until heat is safe again and the reapply is actually re-requested, instead
+// of leaving the divergence stranded silently forever. single-writer: only
+// link_task's own task context ever touches these two (set in the two
+// handlers above, cleared only here).
+//
+// 2026-09-15 (Opus adversarial re-review, F5): this flag clears as soon as
+// the reapply is re-requested (thermo_task_request_tc_type_reapply(), which
+// only sets s_force_tc_reconfigure), NOT when the chip is confirmed
+// reconfigured -- it is a "retry was dispatched" latch, not a "verified"
+// latch. What actually finishes the job is thermo_task's own retry loop:
+// a failed max31856_configure() leaves max31856_tc_type_verified() false,
+// and max31856_reconfig_retry_should_attempt() keeps retrying independently
+// of this flag.
 static bool s_tc_type_reapply_pending = false;
 static uint8_t s_tc_type_reapply_pending_value = 0;
 
@@ -1625,11 +1635,14 @@ static bool link_task_heat_is_safe_for_tc_type_change(void)
 
 // 2026-09-15 Opus re-review N2: called every poll from link_task_fn()'s main
 // loop. While s_tc_type_reapply_pending is set, the persisted flash record
-// and the physically configured MAX31856 are diverged -- keep retrying the
-// reapply, loudly, until heat is confirmed safe again and the reconfigure
-// actually goes out, rather than the one-shot skip silently stranding the
-// divergence for the rest of this boot (the review's "keep retrying the
-// reapply until it is verified, and report it" option).
+// and the physically configured MAX31856 may be diverged -- keep retrying
+// the *request* until heat is confirmed safe again, rather than the
+// one-shot skip silently stranding the divergence for the rest of this boot
+// (the review's "keep retrying the reapply, and report it" option). This
+// function only re-requests the reapply once heat is safe; it does not by
+// itself confirm the chip actually picked it up -- see the comment on
+// s_tc_type_reapply_pending above (F5) and thermo_task's own
+// verified/retry-should-attempt loop for that.
 static void link_task_retry_pending_tc_type_reapply(void)
 {
     if (!s_tc_type_reapply_pending) {
@@ -1639,7 +1652,8 @@ static void link_task_retry_pending_tc_type_reapply(void)
         return; // still diverged -- try again next poll
     }
     log_task_log(LOG_LEVEL_WARN, "tc_type_reapply",
-                 "retry: heat now safe, applying previously-skipped tc_type reapply");
+                 "retry: heat now safe, re-requesting previously-skipped tc_type reapply "
+                 "(thermo_task's own verify/retry loop confirms the chip picked it up)");
     thermo_task_request_tc_type_reapply();
     (void)s_tc_type_reapply_pending_value; // carried only for future diagnostics/logging
     s_tc_type_reapply_pending = false;
@@ -2462,7 +2476,17 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
         kilnlink_commit_config_reject_reason_t wire_reason;
         switch (decision) {
         case CONFIG_STORE_WRITE_REFUSED_ARMED:
-            wire_reason = KILNLINK_COMMIT_CONFIG_REJECT_ARMED;
+            // 2026-09-15 (Opus adversarial re-review, F2): a MIXED change
+            // (tc_type differs AND at least one other field also differs)
+            // lands here too -- config_store_write_ex()'s own out_reason
+            // already builds the specific sentence for it
+            // (config_store_flash.c), but until this fix it never left the
+            // Pico's console log because the wire frame collapsed it into
+            // the same plain ARMED reason as every other ARMED refusal.
+            // Same "tc_type differs from what's persisted" test config_
+            // store_flash.c uses to decide whether to build that sentence.
+            wire_reason = (prev_tc_type != to_write.tc_type) ? KILNLINK_COMMIT_CONFIG_REJECT_ARMED_MIXED
+                                                              : KILNLINK_COMMIT_CONFIG_REJECT_ARMED;
             break;
         case CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON:
             wire_reason = KILNLINK_COMMIT_CONFIG_REJECT_ARMED_HEAT_ON;

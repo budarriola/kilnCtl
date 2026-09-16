@@ -334,6 +334,12 @@ static zone_write_t s_writes[STUB_ZONE_COUNT];
 static uint8_t s_relay_count = 4;
 static bool s_safety_tc_set;
 static uint8_t s_safety_tc_type;
+// 2026-09-15 (Opus adversarial re-review, F6): declared here, ahead of
+// reset_stub_state() below which seeds it, rather than down by the
+// zones_get_safety_pico_tc_type() stub itself -- moved up from an initial
+// placement that put the declaration AFTER reset_stub_state()'s use of it.
+static uint8_t s_pico_tc_type;
+static bool s_pico_tc_type_known = true;
 static int g_total_write_calls;
 static int g_profile_save_calls;
 static uint8_t g_last_saved_profile_id;
@@ -367,6 +373,8 @@ static void reset_stub_state(void)
     s_relay_count = 4;
     s_safety_tc_set = false;
     s_safety_tc_type = 0;
+    s_pico_tc_type = 0;
+    s_pico_tc_type_known = true;
     g_total_write_calls = 0;
     g_profile_save_calls = 0;
     g_last_saved_profile_id = 0;
@@ -671,6 +679,27 @@ bool zones_config_get_safety_tc_type(uint8_t *out_tc_type)
         return false;
     }
     *out_tc_type = s_safety_tc_type;
+    return true;
+}
+
+// 2026-09-15 (Opus adversarial re-review, F6): backup_export.c now reads the
+// Pico's live tc_type via this getter instead of the ESP's own possibly-
+// stale zones_config_get_safety_tc_type() cache above -- deliberately a
+// SEPARATE stub value (s_pico_tc_type != s_safety_tc_type by default in
+// reset_all()) so a test can prove the export path actually switched
+// getters rather than happening to read the same number from both.
+// (s_pico_tc_type/s_pico_tc_type_known are declared earlier, alongside
+// s_safety_tc_type, so reset_stub_state() can seed them.)
+bool zones_get_safety_pico_tc_type(uint8_t *out_tc_type)
+{
+    if (!out_tc_type) {
+        return false;
+    }
+    if (!s_pico_tc_type_known) {
+        *out_tc_type = 0;
+        return false;
+    }
+    *out_tc_type = s_pico_tc_type;
     return true;
 }
 
@@ -1780,6 +1809,44 @@ static void test_export_emits_expected_keys_and_values_for_a_known_config(void)
     }
 }
 
+// 2026-09-15 (Opus adversarial re-review, F6): before this fix,
+// backup_export.c read zones_config_get_safety_tc_type() -- the ESP's own
+// cache, which can be stale relative to the Pico's actual configured
+// value (exactly the class of bug N5 already fixed on the GET-page path).
+// This proves the export path was actually switched to the live getter:
+// the two stubs are seeded with DIFFERENT values, and only the live one
+// may appear in the emitted JSON.
+static void test_export_emits_live_pico_tc_type_not_stale_esp_cache(void)
+{
+    TEST_SECTION("backup_export_get_handler -- emits the LIVE Pico tc_type, not the possibly-stale "
+                 "ESP-side cache (F6)");
+    reset_stub_state();
+    s_safety_tc_type = 3;  // stale ESP cache -- must NOT appear
+    s_pico_tc_type = 9;    // live Pico read-back -- must appear
+    s_pico_tc_type_known = true;
+
+    esp_err_t err = run_export();
+
+    TEST_CHECK(err == ESP_OK, "backup_export_get_handler must return ESP_OK");
+    TEST_CHECK(strstr(s_export_body, "\"safety_tc_type\":9") != NULL,
+              "the live Pico value (9) is emitted");
+    TEST_CHECK(strstr(s_export_body, "\"safety_tc_type\":3") == NULL,
+              "the stale ESP-cached value (3) must not be emitted");
+
+    // Unknown (never fetched from the Pico yet) must not fabricate a
+    // plausible-looking value either -- same "0 only when known" convention
+    // zones_http_get.c uses.
+    reset_stub_state();
+    s_safety_tc_type = 3;
+    s_pico_tc_type = 9;
+    s_pico_tc_type_known = false;
+    err = run_export();
+    TEST_CHECK(err == ESP_OK, "backup_export_get_handler must still return ESP_OK when unknown");
+    TEST_CHECK(strstr(s_export_body, "\"safety_tc_type\":0") != NULL,
+              "an unknown live value is emitted as 0, not the stale ESP cache (3) nor the "
+              "stub's own unknown-but-set value (9)");
+}
+
 // The round trip: export a known config, then feed the SAME emitted JSON
 // back into backup_import_apply() (real handler, real reader, same as any
 // other test in this file) against a DIFFERENT starting state, and check the
@@ -2005,6 +2072,7 @@ void run_test_backup_import(void)
     test_settings_source_commit_failure_restores_pre_import_values();
 
     test_export_emits_expected_keys_and_values_for_a_known_config();
+    test_export_emits_live_pico_tc_type_not_stale_esp_cache();
     test_export_round_trips_through_import_to_identical_config();
 
     test_v4_coupling_tau_dead_time_round_trip_asymmetric_per_pair();

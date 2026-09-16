@@ -1433,6 +1433,42 @@ static void test_apply_pairs_rejected_commit_names_field_and_reason(void)
                "a not-field-specific rejection does not fabricate a field name");
 }
 
+// 2026-09-15 (Opus adversarial re-review, F1/F2): before this fix, the tc_
+// type heat-safety gate's ARMED_HEAT_ON/ARMED_HEAT_UNKNOWN reasons (wire
+// values 5/6, added by N3) and the mixed-change ARMED_MIXED reason (wire
+// value 7, added by F2) all fell through commit_reject_reason_words()'s
+// default case to "refused (unrecognised reason)" -- unreadable to the
+// operator and missed the commissioning page's /ARMED/i match. This proves
+// all three now render an actionable, ARMED-family sentence instead.
+static void test_apply_pairs_rejected_commit_new_tc_type_reasons_are_readable(void)
+{
+    TEST_SECTION("apply_pairs -- ARMED_HEAT_ON/ARMED_HEAT_UNKNOWN/ARMED_MIXED render real "
+                 "sentences, not \"unrecognised reason\"");
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    safety_cfg_post_pair_t pairs[1] = { { .param_id = 0x0104u, .value_text = "500" } };
+    char reason[160];
+
+    const uint8_t reasons[] = {
+        KILNLINK_COMMIT_CONFIG_REJECT_ARMED_HEAT_ON,
+        KILNLINK_COMMIT_CONFIG_REJECT_ARMED_HEAT_UNKNOWN,
+        KILNLINK_COMMIT_CONFIG_REJECT_ARMED_MIXED,
+    };
+    for (size_t i = 0; i < sizeof(reasons) / sizeof(reasons[0]); ++i) {
+        reset_all();
+        s_stub_commit_rejected = true;
+        s_stub_commit_reject_param_id = KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID;
+        s_stub_commit_reject_reason = reasons[i];
+        reason[0] = '\0';
+        bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
+        TEST_CHECK(ok == false, "the rejection is reported as a failure");
+        TEST_CHECK(strstr(reason, "ARMED") != NULL,
+                   "the sentence names ARMED (matches the page's /ARMED/i test)");
+        TEST_CHECK(strstr(reason, "unrecognised reason") == NULL,
+                   "the reason is NOT the generic unrecognised-reason fallback");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CT_COMMISSIONING_PLAN.md step 2 -- ct_auto_zero_check_preconditions() and
 // the counts<->mV/100mV-refusal decision, tested directly (pure functions,
@@ -2266,6 +2302,7 @@ int main(void)
     test_apply_pairs_unknown_id_is_refused_and_named();
     test_apply_pairs_refused_commit_surfaces_reason();
     test_apply_pairs_rejected_commit_names_field_and_reason();
+    test_apply_pairs_rejected_commit_new_tc_type_reasons_are_readable();
     test_apply_pairs_readback_mismatch_fails_even_when_acked_and_not_rejected();
     test_apply_pairs_tc_offset_c_readback_mismatch_fails();
     test_set_and_confirm_f32_uses_nonblocking_refetch();
