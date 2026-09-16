@@ -587,6 +587,198 @@ static void test_reconcile_never_drives_the_blocking_exchange_unconditionally(vo
     free(text);
 }
 
+/* Last match, not first. Source-text scans that assert "X appears before Y"
+ * are trivially satisfied by a #define or a comment near the top of the file
+ * -- see test_reconcile_runs_last_in_the_watchdog_loop()'s own note on the
+ * vacuous first version of exactly that check. */
+static const char *last_occurrence(const char *hay, const char *needle)
+{
+    const char *found = NULL;
+    const char *p = hay;
+    while ((p = strstr(p, needle)) != NULL) {
+        found = p;
+        p += 1;
+    }
+    return found;
+}
+
+static char *profile_executor_read_source(void)
+{
+    /* Same idiom as heat_enable_read_source() above -- anchored to this test
+     * file's own location first, literal candidates as a fallback. */
+    static const char *const candidates[] = {
+        "../drivers/control/profile_executor.c",
+        "App/drivers/control/profile_executor.c",
+        "firmware/KilnFW/App/drivers/control/profile_executor.c",
+    };
+    return test_read_source_anchored(__FILE__, "../drivers/control/profile_executor.c", candidates,
+                                      sizeof(candidates) / sizeof(candidates[0]));
+}
+
+static void test_stale_claim_is_not_resurrected(void)
+{
+    TEST_SECTION("heat_enable -- an acquire whose claim was released after the caller committed to "
+                 "it (operator halt in the window between unlocking s_exec.lock and the unlocked "
+                 "acquire call) REFUSES instead of re-claiming heat for a run that no longer "
+                 "exists (2026-09-15 review of 8813bedd, MEDIUM-5)");
+
+    /* The real sequence: a run acquires, samples nothing; an operator halt
+     * releases; a start path that sampled its epoch BEFORE that release then
+     * calls acquire_since with the stale value. */
+    reset_all(true);
+    uint32_t epoch = heat_enable_claim_epoch(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_PROFILE, epoch) == true,
+               "a fresh epoch acquires normally");
+    TEST_CHECK(enable_sends() == 1, "and it put exactly one REQUEST_ENABLE(true) on the wire");
+
+    /* The halt. This bumps the epoch, so the value captured above is stale. */
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_service_pending_release();
+
+    uint32_t sends_before = enable_sends();
+    TEST_CHECK(heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_PROFILE, epoch) == false,
+               "the stale-epoch acquire is REFUSED");
+    TEST_CHECK(enable_sends() == sends_before,
+               "and it sent no REQUEST_ENABLE(true) -- K4 was not asked for on behalf of a run "
+               "that had already stopped");
+    TEST_CHECK(heat_enable_is_held(HEAT_ENABLE_CLAIMANT_PROFILE) == false,
+               "and the claim was NOT resurrected -- held_mask stays clear, so "
+               "heat_owner_active_decide() does not report a heat owner to the Pico either");
+    TEST_CHECK(heat_enable_is_granted() == false, "and nothing reads as granted");
+
+    /* The refusal must be scoped to the claimant that was released: a global
+     * epoch would make an unrelated autotune release refuse a legitimate
+     * firing start, which is strictly worse than the window it closes. */
+    reset_all(true);
+    uint32_t prof_epoch = heat_enable_claim_epoch(HEAT_ENABLE_CLAIMANT_PROFILE);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
+    heat_enable_service_pending_release();
+    TEST_CHECK(heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_PROFILE, prof_epoch) == true,
+               "an autotune release does NOT invalidate a profile's pending acquire");
+    TEST_CHECK(heat_enable_is_held(HEAT_ENABLE_CLAIMANT_PROFILE) == true, "the firing holds its claim");
+
+    /* A release of a claim that was never held is a no-op and must not bump
+     * the epoch -- otherwise the per-tick backstop callers
+     * (profile_executor's "state is not RUNNING" branch) would invalidate
+     * every in-flight acquire. */
+    reset_all(true);
+    uint32_t e2 = heat_enable_claim_epoch(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_PROFILE, e2) == true,
+               "a no-op release does not invalidate a legitimate acquire");
+
+    /* Plain heat_enable_acquire() must remain an explicit opt-out that always
+     * proceeds -- callers not carrying an earlier decision are unaffected. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_service_pending_release();
+    TEST_CHECK(heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE) == true,
+               "plain acquire() still acquires after a release -- it samples a fresh epoch");
+}
+
+static void test_reconcile_runs_last_in_the_watchdog_loop(void)
+{
+    TEST_SECTION("profile_executor -- heat_enable_reconcile() is the LAST statement in the guard-9 "
+                 "watchdog loop body, not the first: it can block ~5.2 s and every liveness check "
+                 "in that body sits behind it (2026-09-15 review of 8813bedd)");
+
+    char *text = profile_executor_read_source();
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/control/profile_executor.c -- update the "
+                           "candidate paths in this test if the build layout moved");
+        return;
+    }
+
+    const char *call = strstr(text, "heat_enable_reconcile();");
+    TEST_CHECK(call != NULL, "the watchdog loop still calls heat_enable_reconcile()");
+    if (!call) {
+        free(text);
+        return;
+    }
+    TEST_CHECK(strstr(call + 1, "heat_enable_reconcile();") == NULL,
+               "exactly one call site -- a second one would need its own ordering argument");
+
+    /* The stale-tick test is the guard-9 check whose latency the call used to
+     * push out; it must run BEFORE the reconcile call.
+     *
+     * Anchor on the LAST occurrence of each marker, not the first. The first
+     * version of this test used strstr() (first match) for
+     * WATCHDOG_TICK_DEAD_MS, which finds its #define near the top of the
+     * file -- always far above the call site whether the call sits first or
+     * last in the loop body. That made the test vacuous, and it was caught by
+     * actually running it against the parent commit, where it passed while
+     * the call was still FIRST in the loop. The last occurrence is the
+     * in-loop use, which is the thing whose ordering matters. */
+    const char *stale = last_occurrence(text, "WATCHDOG_TICK_DEAD_MS");
+    TEST_CHECK(stale != NULL, "the loop still has its stale-tick deadline check");
+    if (stale) {
+        TEST_CHECK(stale < call,
+                   "the stale-tick (guard 9) check runs BEFORE heat_enable_reconcile() -- if this "
+                   "fails, the blocking retry was moved back ahead of the liveness checks and "
+                   "guard 9's detection latency grew by up to a full ~5.2 s link timeout");
+    }
+
+    /* Second, independent anchor on the far end of the loop body: the
+     * faulted-run breadcrumb is the last real work the body does. The
+     * reconcile call must come after it, which is only true if it is genuinely
+     * last rather than merely after the stale-tick check. */
+    const char *tail = last_occurrence(text, "run_state_note(RUN_STATE_PHASE_FAULTED");
+    TEST_CHECK(tail != NULL, "the loop still writes the faulted-run breadcrumb");
+    if (tail) {
+        TEST_CHECK(tail < call,
+                   "heat_enable_reconcile() comes after the loop body's final breadcrumb write -- "
+                   "i.e. it is genuinely the LAST statement in the body, not just after the "
+                   "stale-tick check");
+    }
+
+    /* Nothing may be reintroduced after it that reads heat-enable state: the
+     * move is only safe because nothing in the body depends on the reconcile
+     * having already run this tick. */
+    TEST_CHECK(strstr(call + strlen("heat_enable_reconcile();"), "heat_enable_") == NULL,
+               "no heat_enable_* use follows the reconcile call -- if this fails, something was "
+               "added after it that may depend on it having run, which is the ordering the move "
+               "was checked against");
+    free(text);
+}
+
+static void test_flush_bound_comment_is_correctly_derived(void)
+{
+    TEST_SECTION("heat_enable -- the worst-case timing comment names the term that actually "
+                 "blocks (xact_lock) and not a reply timeout that does not exist on a "
+                 "fire-and-forget broadcast (2026-09-15 review of 8813bedd)");
+
+    char *text = heat_enable_read_source();
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/control/heat_enable.c");
+        return;
+    }
+
+    /* REQUEST_ENABLE goes out via safety_exchange(..., expect_status=false),
+     * and safety_link_inbox.c only enters the SAFETY_LINK_REPLY_TIMEOUT_MS
+     * wait inside `if (expect_status)`. Quoting that constant as part of this
+     * path's bound is the mis-derivation the review found. */
+    TEST_CHECK(strstr(text, "SAFETY_LINK_REPLY_TIMEOUT_MS, safety_link.h") == NULL,
+               "the bound must not be derived from SAFETY_LINK_REPLY_TIMEOUT_MS -- REQUEST_ENABLE "
+               "is a broadcast with no reply to wait for");
+    TEST_CHECK(strstr(text, "roughly 5.5 s") == NULL,
+               "the discredited ~5.5 s figure (which included that phantom reply term) is gone");
+    TEST_CHECK(strstr(text, "SAFETY_XACT_LOCK_TIMEOUT_MS") != NULL,
+               "the bound names SAFETY_XACT_LOCK_TIMEOUT_MS, which is the term that actually "
+               "blocks");
+    TEST_CHECK(strstr(text, "5.2 s") != NULL, "and quotes the corrected ~5.2 s worst case");
+
+    /* A 5.2 s block exceeds the 5 s panic-on-expiry Task WDT period. The only
+     * reason that is survivable is that no task is subscribed. Whoever first
+     * calls esp_task_wdt_add() must find that out here. */
+    TEST_CHECK(strstr(text, "esp_task_wdt_add()") != NULL,
+               "the blocking site names its dependency on there being ZERO esp_task_wdt_add() "
+               "call sites in the tree -- without that note, the first task subscribed to the "
+               "Task WDT learns about this 5.2 s block from a panic reset instead");
+    free(text);
+}
+
 static void test_bad_claimant(void)
 {
     TEST_SECTION("heat_enable -- an out-of-range claimant is refused, not indexed");
@@ -612,5 +804,8 @@ void run_test_heat_enable(void)
     test_failed_release_is_retried_not_dropped();
     test_flush_drives_the_exchange_at_most_once();
     test_reconcile_never_drives_the_blocking_exchange_unconditionally();
+    test_stale_claim_is_not_resurrected();
+    test_reconcile_runs_last_in_the_watchdog_loop();
+    test_flush_bound_comment_is_correctly_derived();
     test_bad_claimant();
 }

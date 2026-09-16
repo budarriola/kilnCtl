@@ -945,8 +945,13 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     s_exec.state = PROFILE_EXEC_RUNNING;
     run_snapshot_buf_t start_snap;
     capture_run_snapshot(&start_snap);
+    /* Sampled under s_exec.lock, spent after it is dropped: if an operator
+     * halt runs the whole stop path in the gap below, the acquire refuses
+     * rather than requesting K4 for a firing that no longer exists. See
+     * heat_enable.h's release-epoch section. */
+    uint32_t he_epoch = heat_enable_claim_epoch(HEAT_ENABLE_CLAIMANT_PROFILE);
     xSemaphoreGive(s_exec.lock);
-    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    (void)heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_PROFILE, he_epoch);
 
     /* First write of this run's breadcrumb, and the one that overwrites any
      * previous run's record in flash. From here on the stored record says a

@@ -90,6 +90,39 @@ void heat_enable_init(SafetyLinkClass *safety_or_null);
 // loudly, which this function does.
 bool heat_enable_acquire(heat_enable_claimant_t who);
 
+// Release-epoch pair, added 2026-09-15 (review of 8813bedd, finding MEDIUM-5).
+//
+// THE WINDOW THESE CLOSE. Every caller of acquire in this firmware decides to
+// acquire while holding its OWN module lock (s_exec.lock / s_at.lock), then
+// releases that lock and calls acquire unlocked -- it must, because acquire
+// can block for seconds on the safety link and no module lock may be held
+// across a blocking call. In that gap an operator halt can run the whole
+// stop path, including heat_enable_release(). Plain heat_enable_acquire()
+// would then re-set the claim bit for a run that no longer exists: K4
+// requested on behalf of nobody, with heat_owner_active_decide()
+// (safety_link_frames.c) reading the same mask and telling the Pico a heat
+// owner is active to match. send_enable()'s orphaned-request check cannot
+// catch this -- the mask is non-zero by construction in that window; see its
+// comment in heat_enable.c.
+//
+// USE: sample heat_enable_claim_epoch(who) WHILE STILL HOLDING your own lock
+// (it takes only this module's own leaf mutex and never blocks on anything
+// else, so the nesting is lock-order-safe), then pass it to
+// heat_enable_acquire_since(who, epoch) after unlocking. If `who`'s claim was
+// released in between, the acquire REFUSES -- records nothing, sends nothing,
+// logs loudly -- instead of resurrecting the claim. The caller's own exit
+// path has already run by then, so there is nothing left for it to undo.
+//
+// Scoped PER CLAIMANT on purpose: a single global epoch would let an
+// unrelated autotune release refuse a legitimate firing start, leaving a run
+// heating with K4 never requested -- worse than the window being closed.
+//
+// heat_enable_acquire() above is now exactly acquire_since() with a
+// just-sampled epoch, i.e. an explicit opt-out of the check. That is correct
+// for any caller not carrying a decision made earlier under another lock.
+uint32_t heat_enable_claim_epoch(heat_enable_claimant_t who);
+bool heat_enable_acquire_since(heat_enable_claimant_t who, uint32_t epoch);
+
 // Give back `who`'s claim. Best-effort and unconditional: safe to call when
 // `who` never held a claim (no-op, sends nothing), safe to call repeatedly
 // (only the first one after a real claim sends anything), and safe to call
@@ -158,10 +191,21 @@ bool heat_enable_retry_pending(void);
 // NOT re-assert an already-granted request: a granted request is sent once
 // per run, not once per tick.
 //
-// 2026-09-15 (review of 1c8d7f6e, findings HIGH-1/MEDIUM-4): also drives a
-// stuck release drain (heat_enable_service_pending_release()) -- a no-op
-// when nothing is owed, and this module's second, independent chance to
-// send an owed release if safety_poll_task (the normal drainer) is wedged.
+// CORRECTION 2026-09-15 (review of 8813bedd): this comment used to say the
+// function "also drives a stuck release drain
+// (heat_enable_service_pending_release()) ... this module's second,
+// independent chance to send an owed release if safety_poll_task is wedged".
+// That has not been true since 059a896e's HIGH-2 fix removed the drain call
+// -- it put the full blocking UART release chain on profile_exec_wdt's
+// stack, the exact task class 1c8d7f6e existed to keep it off. reconcile()
+// retries a stuck ENABLE and nothing else; a stuck RELEASE has exactly one
+// driver, safety_poll_task. See heat_enable_reconcile()'s body comment.
+//
+// NOT CHEAP IN THE WORST CASE, despite "cheap and a no-op" above: when it
+// does have a retry to make it calls send_enable(), which can block for
+// ~5.2 s on safety-link xact_lock contention. Callers on a periodic task
+// must run it LAST in their loop body, never ahead of liveness checks --
+// profile_executor.c's watchdog loop documents why at its call site.
 void heat_enable_reconcile(void);
 
 // Diagnostics/host-test counters: how many REQUEST_ENABLE(true) frames were

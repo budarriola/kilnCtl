@@ -125,7 +125,61 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
      * fix, not just a bigger constant -- the next boot's stack_margin read
      * should confirm the new worst case lands in the same ballpark as
      * profile_executor's own. Unflashed as of this commit -- the board is
-     * mid-firing; this needs the same reboot §7's cap raise is waiting on. */
+     * mid-firing; this needs the same reboot §7's cap raise is waiting on.
+     *
+     * THE THREE NUMBERS, RECONCILED 2026-09-15 (review of 8813bedd). Three
+     * different figures for this one task were in circulation, each true of
+     * something different, which together read as a safety argument that was
+     * never actually made. They are:
+     *
+     *   4096 B  -- the DECLARED size: the literal below and its matching
+     *              stack_margin_register() literal. This is the allocation.
+     *   2496 B  -- the CEILING_BYTES entry in App/test/check_all_task_stack_
+     *              budgets.py. This is not a measurement of this task's worst
+     *              case; it is a 2026-09-09 baseline capture used as a
+     *              regression tripwire, and that capture's run never entered
+     *              the deep path below.
+     *   1696 B  -- the static checker's computed lower bound, which it
+     *              reports as INDETERMINATE, not as a pass. The checker's own
+     *              docstring says every modelling limitation makes its number
+     *              an UNDER-estimate, and profile_exec_wdt specifically hits
+     *              unresolved indirect calls (ESP-IDF's UART driver is
+     *              function-pointer dispatched), so the walk stops short of
+     *              the deepest chain rather than costing it.
+     *
+     * THE DEEP PATH IS heat_enable_reconcile() -> send_enable() ->
+     * he_flush_release_blocking() -> safety_link_request_enable() ->
+     * safety_exchange() -> uart_protocol_send_broadcast() -> ... -- the same
+     * chain whose depth on profile_executor's own equally-sized 4096 B stack
+     * was the single largest contributor to four recurring stack-smash panics
+     * (docs/audits/profile_executor_coredump_2026-09-15.md). It is entered
+     * only when a heat-enable request is outstanding AND failed, which is
+     * why no high-water-mark capture taken so far has touched it.
+     *
+     * STATED PLAINLY, BECAUSE IT CANNOT BE SHOWN SAFE: this task's worst-case
+     * stack depth is UNMEASURED AND UNBOUNDED BY ANALYSIS. Measuring it needs
+     * the deep path driven on real hardware with a high-water-mark read after
+     * it; bounding it analytically is not available while the chain ends in
+     * indirect calls the checker cannot resolve. Neither has been done. The
+     * 4096 B declaration is therefore a HOPE informed by profile_executor's
+     * own measured ~2200 B on a shallower path -- not a proof, and the 2496 B
+     * tripwire and the 1696 B INDETERMINATE lower bound are not evidence for
+     * it either. Do not quote any of the three as "the" number; they answer
+     * different questions.
+     *
+     * NOT CHANGED, deliberately: the 2496 B ceiling is left where it is
+     * rather than raised (raising it to make the numbers agree would be
+     * exactly the "papering over" its own table comment forbids), and the
+     * 4096 B declaration is left where it is rather than lowered toward
+     * either smaller figure (neither is an upper bound on anything).
+     *
+     * THE REAL FIX, follow-up: move the reconcile retry drive off this task
+     * entirely, onto safety_poll_task's 8192 B stack -- which already drains
+     * release_pending every loop iteration and is where this module's other
+     * blocking send already runs. That removes the deep path from guard 9's
+     * task instead of arguing about how much of it fits. Not done here: it
+     * is a second restructuring on top of this commit's epoch change, and
+     * stacking both at once on the heat path is not worth the risk. */
     ok = xTaskCreatePinnedToCore(watchdog_task_entry, "profile_exec_wdt", 4096, NULL, 5,
                                  &s_exec.watchdog_task, tskNO_AFFINITY);
     if (ok != pdPASS) {

@@ -1603,16 +1603,6 @@ void watchdog_task_entry(void *arg)
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(WATCHDOG_CHECK_PERIOD_MS));
 
-        /* Retry a heat-enable request that never landed (heat_enable.h). A
-         * no-op unless a run is holding a claim whose REQUEST_ENABLE was
-         * refused -- which is exactly the "started while the safety link was
-         * down, link came back mid-run" case that would otherwise leave a
-         * firing running to completion with K4 open. This task, not the
-         * control task: it is the one that already runs at a slow fixed
-         * period and does not hold s_exec.lock here, and a blocking link
-         * exchange must not sit inside the control tick. */
-        heat_enable_reconcile();
-
         /* LINK_PROTOCOL.md sec 8 / ROADMAP.md M6: "30 s silence aborts a
          * firing" -- distinct from, and much larger than, the 1.5 s
          * SAFETY_FAULT_SRC_SAFETY_LINK check safety_update_health() already
@@ -1808,6 +1798,42 @@ void watchdog_task_entry(void *arg)
         if (wdt_faulted) {
             run_state_note(RUN_STATE_PHASE_FAULTED, &wdt_snap.snap);
         }
+
+        /* Retry a heat-enable request that never landed (heat_enable.h). A
+         * no-op unless a run is holding a claim whose REQUEST_ENABLE was
+         * refused -- which is exactly the "started while the safety link was
+         * down, link came back mid-run" case that would otherwise leave a
+         * firing running to completion with K4 open. This task, not the
+         * control task: it is the one that already runs at a slow fixed
+         * period and does not hold s_exec.lock here, and a blocking link
+         * exchange must not sit inside the control tick.
+         *
+         * LAST in the loop body, deliberately, and this ordering is
+         * load-bearing (2026-09-15 review of 8813bedd, finding HIGH-2).
+         * It used to be FIRST, immediately after the vTaskDelay(). That call
+         * can block for ~5.2 s in the worst case -- send_enable("retry") ->
+         * he_flush_release_blocking() -> the safety link's xact_lock timeout
+         * (see heat_enable.c's HE_FLUSH_MAX_ATTEMPTS comment for the
+         * derivation) -- and every guard-9 check in this body sits BEHIND it:
+         * the WATCHDOG_TICK_DEAD_MS (10 s) stale-tick test, the 30 s
+         * safety-link silence abort, and the safety-processor trip check. A
+         * worst-case block at the top of the body therefore pushed guard 9's
+         * effective detection latency from roughly 10-12 s toward roughly
+         * 15 s -- on the one task whose entire purpose is to still work when
+         * the control task does not.
+         *
+         * Moving it here costs nothing: nothing in this loop body reads or
+         * writes heat-enable state, so no computation above depends on the
+         * reconcile having already run this tick, and the retry itself is
+         * level-triggered (it re-examines s_he.pending/held_mask/granted from
+         * scratch every call), not edge-triggered -- so running it one tick
+         * "late" relative to the old position is indistinguishable from
+         * running it at the old position one tick later. Everything above is
+         * either loop-local (pc_link_*, s_idle_trip_logged) or read fresh
+         * from safety_link/s_exec under their own locks. Keep it last: a new
+         * blocking call must not be put ahead of the staleness checks either.
+         */
+        heat_enable_reconcile();
     }
 }
 

@@ -423,6 +423,17 @@ CEILING_BYTES = {
     "thermo_uart_bridge": 2160,
     "touch_uart_bridge": 2176,
     "autotune_engine": 2944,
+    # profile_exec_wdt: this 2496 is a 2026-09-09 baseline capture used as a
+    # regression tripwire -- NOT a measured worst case. The task's deep path
+    # (heat_enable_reconcile -> send_enable -> safety_exchange -> the UART
+    # send chain) was never entered on the run that produced it, and the
+    # static walk reports the task INDETERMINATE because that chain ends in
+    # unresolved indirect calls. Its declared size is 4096 (profile_executor_
+    # start.c). Those three numbers answer three different questions and the
+    # task's true worst case is unmeasured -- see that file's "THE THREE
+    # NUMBERS, RECONCILED" comment before quoting any of them as safe.
+    # Deliberately NOT raised to reconcile them: that is what this table's
+    # own comment above calls papering over a regression.
     "profile_exec_wdt": 2496,
     "ota_rollback_reboot": 1216,
     "ota_pico_rollback": 2736,

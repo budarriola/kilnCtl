@@ -15,10 +15,49 @@ static const char *TAG = "heat_enable";
  * was the function's TOTAL bound, which was wrong -- the old loop body called
  * heat_enable_service_pending_release() itself every iteration, and that call
  * runs the blocking link exchange, not a poll. The true worst case is ONE
- * such exchange -- bounded by SAFETY_XACT_LOCK_TIMEOUT_MS (5000 ms,
- * safety_link_internal.h) plus a reply wait of about 345 ms
- * (SAFETY_LINK_REPLY_TIMEOUT_MS, safety_link.h) -- plus this 200 ms passive
- * poll on top, i.e. roughly 5.5 s, not 200 ms. That whole worst case now runs
+ * such exchange, plus this 200 ms passive poll on top -- not 200 ms.
+ *
+ * DERIVATION, corrected 2026-09-15 (review of 8813bedd, finding on the
+ * timing comment). The previous version of this text put the bound at
+ * "~5.5 s = 5000 ms xact_lock + ~345 ms reply + 200 ms poll". The ~345 ms
+ * reply term DOES NOT EXIST on this path, and the number was never
+ * reachable. Traced through the source rather than taken on trust:
+ *
+ *   safety_link_request_enable()  (safety_link.c:652) ends with
+ *       return safety_exchange(link, request, sizeof(request), false);
+ *   -- note expect_status == false.
+ *   safety_exchange()             (safety_link_inbox.c:745) takes xact_lock
+ *   with SAFETY_XACT_LOCK_TIMEOUT_MS, drains the inbox with a 0 ms wait,
+ *   calls uart_protocol_send_broadcast(), and enters the
+ *   SAFETY_LINK_REPLY_TIMEOUT_MS wait ONLY inside `if (expect_status)`.
+ *
+ * SAFETY_CMD_REQUEST_ENABLE is a fire-and-forget BROADCAST: no ACK, no
+ * reply, nothing to wait for. So the only blocking term is the xact_lock
+ * acquisition, SAFETY_XACT_LOCK_TIMEOUT_MS = 5000 ms
+ * (safety_link_internal.h:46). True worst case:
+ *
+ *      5000 ms (xact_lock timeout) + 200 ms (this passive poll) = ~5.2 s
+ *
+ * entirely lock contention. For scale, the longest holder that contention
+ * can actually be waiting behind is the rollback burst in
+ * safety_link_commands.c (SAFETY_LINK_ROLLBACK_SEND_REPEATS 4 x
+ * SAFETY_LINK_ROLLBACK_SEND_REPEAT_GAP_MS 250, plus one reply wait, about
+ * 1345 ms), not an ordinary exchange -- so 5.2 s is the TIMEOUT bound, not a
+ * routinely-observed duration. Quote 5.2 s, not 5.5 s, and do not
+ * reintroduce a reply term for a command that has no reply.
+ *
+ * TASK WDT DEPENDENCY, named here deliberately: a 5.2 s block is LONGER than
+ * this project's Task WDT period (CONFIG_ESP_TASK_WDT_TIMEOUT_S = 5, with
+ * CONFIG_ESP_TASK_WDT_PANIC=y -- expiry PANICS, it does not merely warn).
+ * The only reason that is not a reset today is that there are currently ZERO
+ * esp_task_wdt_add() call sites anywhere in this tree, so no task is
+ * subscribed and no task's silence is being timed. That is a property of the
+ * tree, not a safety argument. WHOEVER FIRST SUBSCRIBES A TASK TO THE TASK
+ * WDT must check whether that task can reach this path (today: any caller of
+ * heat_enable_acquire*() or heat_enable_reconcile() -- httpd, the UART
+ * bridge, profile_exec_wdt, autotune) and either exclude it, feed the
+ * watchdog across this wait, or move the blocking call off that task. Found
+ * here is far cheaper than found from a panic. That whole worst case now runs
  * on whichever task calls heat_enable_acquire() (httpd, the UART bridge, or
  * profile_executor/autotune_engine's own tick), because he_flush_release_
  * blocking() is only ever allowed to DRIVE the blocking exchange once per
@@ -47,6 +86,19 @@ typedef struct {
                                          * without it, two callers (safety_poll_task's drain and a
                                          * concurrent send_enable() flush) could both decide
                                          * nothing is pending and neither waits for the other. */
+    uint32_t          release_epoch[HEAT_ENABLE_CLAIMANT_COUNT];
+                                        /* Bumped once per REAL release of that claimant (one it
+                                         * actually held). Lets a caller that decided to acquire
+                                         * while holding its OWN module lock detect that the claim
+                                         * was released in the gap between that decision and the
+                                         * unlocked acquire call -- see heat_enable_acquire_since().
+                                         * Per-claimant, not global, deliberately: a global counter
+                                         * would let an autotune release spuriously refuse a
+                                         * legitimate firing start, which would leave a run heating
+                                         * with K4 open -- strictly worse than the window it
+                                         * closes. Free-running; wrap is harmless, only equality is
+                                         * ever tested and a full 2^32 wrap inside one unlocked
+                                         * call window is not physically reachable. */
 } heat_enable_ctx_t;
 
 static heat_enable_ctx_t s_he;
@@ -101,6 +153,9 @@ void heat_enable_init(SafetyLinkClass *safety_or_null)
     s_he.warned_pending = false;
     s_he.release_pending = false;
     s_he.release_inflight = false;
+    for (unsigned i = 0; i < (unsigned)HEAT_ENABLE_CLAIMANT_COUNT; i++) {
+        s_he.release_epoch[i] = 0u;
+    }
 }
 
 /* Reset-one-side guard (2026-09-15 review of 1c8d7f6e, finding HIGH-1): a
@@ -130,12 +185,15 @@ void heat_enable_init(SafetyLinkClass *safety_or_null)
  * of its up to HE_FLUSH_MAX_ATTEMPTS iterations. Each of those can itself
  * take a full link exchange, so the real worst case was attempts x exchange
  * time, not the "200 ms" the old comment claimed; it also meant a caller
- * could stack several ~5.3 s blocking exchanges back to back on its own
+ * could stack several ~5.2 s blocking exchanges back to back on its own
  * stack. Fixed by driving the exchange AT MOST ONCE per call: if nothing is
  * already in flight, drive it ourselves up front, then only PASSIVELY poll
  * (lock-check-and-sleep, no send) for up to HE_FLUSH_MAX_ATTEMPTS x
  * HE_FLUSH_RETRY_MS for it (or a concurrent servicer's own attempt) to clear.
- * True worst case is now one exchange (~5.3 s) plus the 200 ms poll budget --
+ * True worst case is now one exchange plus the 200 ms poll budget, ~5.2 s in
+ * total and all of it xact_lock contention (the "~5.3 s" this comment used to
+ * quote came from a reply-timeout term that does not exist on a fire-and-
+ * forget broadcast) --
  * see HE_FLUSH_MAX_ATTEMPTS's own comment -- never attempts x exchange. */
 static bool he_flush_release_blocking(void)
 {
@@ -222,7 +280,39 @@ static bool send_enable(const char *why)
      * operator halting a firing in the same millisecond it started). Leaving
      * a granted request standing with nobody holding it is the one outcome
      * this module must never produce, so undo it right here rather than
-     * waiting for a release that has already been and gone. */
+     * waiting for a release that has already been and gone.
+     *
+     * WHAT THIS BRANCH DOES AND DOES NOT COVER (corrected 2026-09-15, review
+     * of 8813bedd, finding MEDIUM-5 -- the comments here previously described
+     * a guarantee this code does not provide):
+     *
+     *   COVERED: a release that arrives after this send began and is not
+     *   followed by a re-acquire. held_mask reads 0 here, the branch fires,
+     *   the orphaned grant is undone and compensated on the wire.
+     *
+     *   NOT COVERED, BY CONSTRUCTION: the release-then-re-acquire window.
+     *   heat_enable_acquire*() sets held_mask |= bit BEFORE calling into
+     *   here, so from this evaluation's point of view the mask is non-zero
+     *   for the whole of that window -- the test cannot fire, no matter how
+     *   long the exchange blocks. This is not a race that sometimes loses;
+     *   it is unreachable. Note the mask CANNOT simply be written after the
+     *   send instead: this send is on behalf of a caller that does hold the
+     *   claim, and a mask that reads 0 during its own exchange would make
+     *   every ordinary acquire look orphaned and immediately self-release.
+     *
+     *   CONSEQUENCE while that window is open: heat_owner_active_decide()
+     *   (safety_link_frames.c) derives KILNLINK_CONTEXT_FLAG_HEAT_OWNER_
+     *   ACTIVE from this SAME held_mask, so the Pico is told "a heat owner is
+     *   active" throughout -- both sides agree, so nothing alarms, and it
+     *   self-heals silently one tick later. No relay is energized by this
+     *   (zone relays are gated separately, via kiln_io_owner/relay_authority);
+     *   what is briefly lost is the second interlock pole, not heat.
+     *
+     * The window itself is closed one level up rather than here, by
+     * heat_enable_acquire_since(): a caller that committed to acquiring while
+     * holding its own lock passes the epoch it saw, and an intervening
+     * release makes the acquire REFUSE instead of resurrecting the claim.
+     * See that function and heat_enable_claim_epoch(). */
     bool orphaned = (err == ESP_OK) && (s_he.held_mask == 0);
     if (orphaned) {
         s_he.granted = false;
@@ -240,9 +330,12 @@ static bool send_enable(const char *why)
          * unfixed here in the direction that matters most (heat left
          * ENABLED, ESP believing it released). Queue it the same way:
          * release_pending stays/becomes true, so safety_poll_task's next
-         * loop (or heat_enable_reconcile()'s own drain, once HIGH-2 restores
-         * it) retries via heat_enable_service_pending_release() instead of
-         * this failure being final. This was also a fire-and-forget (void)
+         * loop retries via heat_enable_service_pending_release() instead of
+         * this failure being final. (This used to add "or heat_enable_
+         * reconcile()'s own drain, once HIGH-2 restores it" -- corrected
+         * 2026-09-15 (review of 8813bedd): HIGH-2 deliberately did NOT
+         * restore that drain and is not going to, so safety_poll_task is the
+         * only driver of an owed release.) This was also a fire-and-forget (void)
          * cast that logged the same "released again" line unconditionally --
          * exactly the shape danger_mode.c's seed bug had; the relay is
          * already off by this point (heat_enable.h's ordering rule), but the
@@ -276,7 +369,18 @@ static bool send_enable(const char *why)
     return true;
 }
 
-bool heat_enable_acquire(heat_enable_claimant_t who)
+uint32_t heat_enable_claim_epoch(heat_enable_claimant_t who)
+{
+    if (claim_bit(who) == 0u) {
+        return 0u;
+    }
+    bool taken = he_lock();
+    uint32_t epoch = s_he.release_epoch[who];
+    he_unlock(taken);
+    return epoch;
+}
+
+bool heat_enable_acquire_since(heat_enable_claimant_t who, uint32_t epoch)
 {
     uint32_t bit = claim_bit(who);
     if (bit == 0u) {
@@ -284,9 +388,28 @@ bool heat_enable_acquire(heat_enable_claimant_t who)
     }
 
     bool taken = he_lock();
-    s_he.held_mask |= bit;
+    uint32_t now_epoch = s_he.release_epoch[who];
+    bool stale = (now_epoch != epoch);
+    if (!stale) {
+        s_he.held_mask |= bit;
+    }
     bool already_granted = s_he.granted;
     he_unlock(taken);
+
+    if (stale) {
+        /* The claim was released between the caller committing to this
+         * acquire and this call actually running. Recording it now would
+         * resurrect a claim for a run that no longer exists -- K4 requested
+         * on behalf of nobody, with heat_owner_active_decide() reporting a
+         * heat owner to the Pico to match. Refuse instead; the caller's own
+         * exit path has already run, so there is nothing left to tear down. */
+        ESP_LOGE(TAG, "heat-enable acquire (%s) REFUSED: the claim was released between the caller "
+                      "committing to it and this call (epoch %u -> %u) -- the run that asked for "
+                      "heat no longer exists, so the safety processor was NOT asked to close K4",
+                 who == HEAT_ENABLE_CLAIMANT_PROFILE ? "firing" : "autotune",
+                 (unsigned)epoch, (unsigned)now_epoch);
+        return false;
+    }
 
     if (already_granted) {
         /* Nothing to send: the request is standing. This is the branch that
@@ -295,6 +418,14 @@ bool heat_enable_acquire(heat_enable_claimant_t who)
         return true;
     }
     return send_enable(who == HEAT_ENABLE_CLAIMANT_PROFILE ? "firing" : "autotune");
+}
+
+bool heat_enable_acquire(heat_enable_claimant_t who)
+{
+    /* Thin wrapper: sample the epoch and immediately spend it, i.e. opt out
+     * of the staleness check. Correct for any caller that is not holding a
+     * decision made earlier under some other lock. */
+    return heat_enable_acquire_since(who, heat_enable_claim_epoch(who));
 }
 
 void heat_enable_release(heat_enable_claimant_t who)
@@ -316,6 +447,15 @@ void heat_enable_release(heat_enable_claimant_t who)
     bool taken = he_lock();
     bool was_held = (s_he.held_mask & bit) != 0u;
     s_he.held_mask &= ~bit;
+    if (was_held) {
+        /* Bumped in the SAME critical section that clears the bit, so a
+         * concurrent heat_enable_acquire_since() can never observe the bit
+         * gone and the epoch unchanged (which would let it re-acquire on
+         * behalf of the run this release just ended). Only a release of a
+         * claim actually held counts -- a no-op release must not invalidate
+         * a legitimate in-flight acquire. */
+        s_he.release_epoch[who]++;
+    }
     bool last_out = (s_he.held_mask == 0u);
     bool had_request = s_he.granted || s_he.pending;
     if (last_out) {

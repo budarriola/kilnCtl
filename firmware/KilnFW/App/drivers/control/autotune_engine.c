@@ -1408,12 +1408,15 @@ bool autotune_engine_run(uint8_t zone_index, float step_duty, autotune_rule_t ru
     s_at.guard_cfg.progress_duty_min = AUTOTUNE_PROGRESS_DUTY_MIN_FOR_STEP_TEST;
     s_at.state = AUTOTUNE_ENGINE_SETTLING;
     bool no_ceiling = !(s_at.guard_cfg.max_temp_c > 0.0f);
+    uint32_t he_epoch = heat_enable_claim_epoch(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
     xSemaphoreGive(s_at.lock);
 
     /* 2026-09-15 review of 059a896e, MEDIUM-4: moved out from under s_at.lock
      * (see autotune_begin_run_locked()'s comment) -- this can now block for
-     * seconds. */
-    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
+     * seconds. Which is exactly why the epoch above is sampled while the lock
+     * is still held: an abort landing in that window must make this refuse,
+     * not re-claim heat for a run that has already stopped (heat_enable.h). */
+    (void)heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_AUTOTUNE, he_epoch);
 
     ESP_LOGI(AT_TAG, "autotune zone %u starting: settling %us at duty 0 before stepping to %.2f", zone_index,
              AUTOTUNE_ENGINE_SETTLE_S, (double)step_duty);
@@ -1517,12 +1520,14 @@ bool autotune_engine_run_to_target(uint8_t zone_index, float target_c, autotune_
      * are exactly the case this exists for. */
     s_at.guard_cfg.progress_duty_min = AUTOTUNE_PROGRESS_DUTY_MIN_FOR_STEP_TEST;
     s_at.state = AUTOTUNE_ENGINE_SETTLING;
+    uint32_t he_epoch = heat_enable_claim_epoch(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
     xSemaphoreGive(s_at.lock);
 
     /* 2026-09-15 review of 059a896e, MEDIUM-4: moved out from under s_at.lock
      * (see autotune_begin_run_locked()'s comment) -- this can now block for
-     * seconds. */
-    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
+     * seconds. Epoch sampled under the lock for the same reason as the plain
+     * duty path above -- see its comment and heat_enable.h. */
+    (void)heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_AUTOTUNE, he_epoch);
 
     ESP_LOGI(AT_TAG, "autotune zone %u starting target-temperature run: settling %us before probing at duty "
                   "%.2f, target %.1fC",

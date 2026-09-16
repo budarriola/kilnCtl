@@ -45,7 +45,8 @@
 # file set, not a single hardcoded name, the same fix already applied to
 # check_bridge_reject_reason.ps1 for the uart_bridge.c split. autotune_engine.c
 # was not split and stays a single file.
-#   1. it calls heat_enable_acquire() at least once;
+#   1. it calls heat_enable_acquire() or heat_enable_acquire_since() at
+#      least once;
 #   2. it calls heat_enable_release() at least once;
 #   3. it does NOT call safety_link_request_enable() directly -- the whole
 #      point of heat_enable.c is that this logic (check the result, track our
@@ -112,7 +113,14 @@ foreach ($mod in $heatModules) {
         # paren and exclude a line whose first non-space characters are a
         # comment marker.
         $lines = Get-Content -Path $f.FullName
-        $acquireCalls += @($lines | Where-Object { $_ -match 'heat_enable_acquire\s*\(' -and $_ -notmatch '^\s*(\*|//|/\*)' })
+        # heat_enable_acquire() and heat_enable_acquire_since() both count:
+        # since 2026-09-15 the epoch-checked form is the one the firing paths
+        # actually call (heat_enable_acquire() is now a thin wrapper that
+        # samples an epoch and spends it). Matching only the bare name would
+        # have reported both modules unwired the moment the call sites moved
+        # to the _since spelling -- a false alarm, but the same regex would
+        # equally have gone blind had the wrapper been the one retired.
+        $acquireCalls += @($lines | Where-Object { $_ -match 'heat_enable_acquire(_since)?\s*\(' -and $_ -notmatch '^\s*(\*|//|/\*)' })
         $releaseCalls += @($lines | Where-Object { $_ -match 'heat_enable_release\s*\(' -and $_ -notmatch '^\s*(\*|//|/\*)' })
         $directCalls  += @($lines | Where-Object { $_ -match 'safety_link_request_enable\s*\(' -and $_ -notmatch '^\s*(\*|//|/\*)' })
         if ((Get-Content -Raw -Path $f.FullName) -match '#include\s+"heat_enable\.h"') {
@@ -121,7 +129,7 @@ foreach ($mod in $heatModules) {
     }
 
     if ($acquireCalls.Count -lt 1) {
-        $violations += "$name (scanned $($files.Count) file(s) matching '$($mod.Glob)') -- no heat_enable_acquire() call. This module can command heat; without the request, K4 on the safety processor never closes and NO ELEMENT CURRENT FLOWS, while the run looks completely normal. This is the exact defect of 2026-08-29."
+        $violations += "$name (scanned $($files.Count) file(s) matching '$($mod.Glob)') -- no heat_enable_acquire()/heat_enable_acquire_since() call. This module can command heat; without the request, K4 on the safety processor never closes and NO ELEMENT CURRENT FLOWS, while the run looks completely normal. This is the exact defect of 2026-08-29."
     }
     if ($releaseCalls.Count -lt 1) {
         $violations += "$name (scanned $($files.Count) file(s) matching '$($mod.Glob)') -- no heat_enable_release() call. Every exit path (completion, operator stop, pause, fault/trip) must give K4 back; a request left standing outlives the run that made it."

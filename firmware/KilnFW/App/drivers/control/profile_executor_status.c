@@ -233,8 +233,12 @@ bool profile_executor_resume(void)
     s_exec.state = PROFILE_EXEC_RUNNING;
     run_snapshot_buf_t resume_snap;
     capture_run_snapshot(&resume_snap);
+    /* Epoch sampled under s_exec.lock -- a halt landing between this unlock
+     * and the acquire makes the acquire refuse instead of re-claiming heat
+     * for a run that was just stopped. See heat_enable.h. */
+    uint32_t he_epoch = heat_enable_claim_epoch(HEAT_ENABLE_CLAIMANT_PROFILE);
     xSemaphoreGive(s_exec.lock);
-    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    (void)heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_PROFILE, he_epoch);
 
     /* Back to "in progress" -- and it must be written now rather than left to
      * the periodic refresh, or a brownout minutes after a resume would show
