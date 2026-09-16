@@ -64,6 +64,14 @@ typedef enum {
      * maps directly onto these two wire values. */
     KILNLINK_COMMIT_CONFIG_REJECT_ARMED_HEAT_ON = 5,
     KILNLINK_COMMIT_CONFIG_REJECT_ARMED_HEAT_UNKNOWN = 6,
+    /* 2026-09-15 (Opus adversarial re-review, F2): N4 asked for the operator
+     * to be told a MIXED change (tc_type differs AND at least one other
+     * field also differs) while ARMED is refused because of the OTHER
+     * field, not tc_type -- config_store_write_ex() already builds that
+     * exact sentence (config_store_flash.c), but it never left the Pico's
+     * console log because the wire frame previously only ever carried the
+     * plain ARMED reason with the NO_PARAM_ID sentinel for this case. */
+    KILNLINK_COMMIT_CONFIG_REJECT_ARMED_MIXED = 7,
 } kilnlink_commit_config_reject_reason_t;
 
 typedef enum {
