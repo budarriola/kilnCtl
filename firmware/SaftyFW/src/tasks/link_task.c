@@ -74,6 +74,7 @@
 #include "max31856.h" // MAX31856_TC_TYPE_* range check, see link_task_handle_set_config()
 #include "reboot_announce.h" // SAFETY_CMD_ANNOUNCE_REBOOT (0x18), see link_task_handle_announce_reboot()
 #include "safety_core.h"
+#include "link_task_tc_type_gate.h"
 #include "snapshots.h"
 #include "thermo_task.h"
 #include "update_task.h" // Phase 10 -- UPDATE_BEGIN/_DATA/_END/_ABORT dispatch, see the switch below
@@ -1503,26 +1504,57 @@ static void link_task_handle_clear_trip(const kilnlink_frame_t *frame)
 // context frame's INSTANT relay_now_mask, which reads false in every PWM
 // off-window even mid-firing (a duty-cycled heater spends most ticks with
 // the relay actually open), so this read "safe" between pulses of a firing
-// that was very much still running. The owner rule is heat-enable off AND
-// no firing running -- both facts the ESP already reports explicitly, once
-// per context frame: CONTEXT_FLAG_HEAT_REQUESTED (the ESP's own commanded
-// heat-enable state, not the chopped relay output) and
-// CONTEXT_FLAG_PROFILE_RUNNING (a firing is actively executing). Basing the
-// decision on those instead closes the PWM-off-window gap; either flag set
-// means NOT safe.
+// that was very much still running.
 //
-// Stale or missing context data is treated as NOT safe, matching every
-// other context-consuming guard in this codebase (safety_core.c's own
+// 2026-09-15 Opus RE-review N1 fix: G2's fix based the gate on
+// CONTEXT_FLAG_HEAT_REQUESTED/PROFILE_RUNNING -- both still literal/narrow:
+// HEAT_REQUESTED is STILL the instant relay-commanded state (same PWM-chop
+// problem, one level up: the ESP sets it from the same relay_commanded_on
+// bits), so it read false in every off-window too, and it does not cover
+// autotune, a PAUSED firing, danger-mode K4 requests, or the deferred-
+// release window (heat_enable_release() flips heat_enable_is_granted() to
+// false SYNCHRONOUSLY, before the wire REQUEST_ENABLE(false) send that
+// actually asks the Pico to drop K4 -- see heat_enable.h's own doc comment
+// on heat_enable_service_pending_release()). The owner rule per that
+// review: "the Pico owns that pole" -- base the gate on the Pico's OWN
+// K4-grant ground truth, not on trying to infer the ESP's instantaneous
+// relay state from a wire flag that shares its literal-snapshot problem.
+//
+// The gate is now three independent, ALL-must-pass checks, none trusted
+// exclusively (defense in depth, same philosophy as the s_relay_on_
+// continuous/current_task_any_current_present() heuristics below):
+//   1. safety_core_get_output_status()'s relay_energized -- is GPIO6
+//      ACTUALLY high right now. This is the Pico's own hardware ground
+//      truth, immune to any ESP-side bookkeeping race.
+//   2. safety_core_ms_since_last_enable_true_request() -- did THIS
+//      processor accept a REQUEST_ENABLE(true) recently. relay_owner_
+//      command_energize() is a queued command (relay_owner.c drains it on
+//      its own tick), so there is a real window, right after an accepted
+//      enable request, where check 1 can still read false even though the
+//      Pico has committed to energizing -- "treat a pending or recent
+//      enable as not safe" (the review's own wording). ENABLE_RECENT_
+//      SAFE_WINDOW_MS below is chosen well above one relay_owner tick
+//      period so a genuinely-settled disable clears it.
+//   3. The ESP's CONTEXT_FLAG_HEAT_OWNER_ACTIVE (kilnlink_context.h) --
+//      "no active heat owner", ORing together executor RUNNING/PAUSED,
+//      either heat_enable claimant (autotune's claimant also covers CT
+//      sweep / relay-identification), and danger mode. This is the
+//      "require the ESP report no active heat owner" half of the rule --
+//      kept as the SECOND, ESP-reported line of defense, not the primary
+//      one, since checks 1-2 alone already answer the question "the Pico
+//      owns that pole" poses without needing to trust the ESP at all; an
+//      ESP that lies or glitches about this flag still has to also fool
+//      the Pico's own relay/current-sense heuristics below.
+//
+// Stale or missing context data is treated as NOT safe for check 3, matching
+// every other context-consuming guard in this codebase (safety_core.c's own
 // context_valid: age >= LINK_TASK_CONTEXT_MAX_AGE_MS, never received this
 // boot, or link_task's own DEGRADED_NO_CONTEXT state, all collapse to the
 // conservative default) -- this function only ever WIDENS a refusal into an
 // acceptance, so any doubt about freshness must fail closed, never open.
-// s_relay_on_continuous and current_task_any_current_present() are kept as
-// additional, independent Pico-local heuristics on top of the ESP's own
-// report (defense in depth: an ESP that lies or glitches about
-// HEAT_REQUESTED/PROFILE_RUNNING still has to also fool the Pico's own
-// relay-mask tracking and its own CT reading) -- none of the three checks
-// is trusted exclusively.
+// s_relay_on_continuous and current_task_any_current_present() remain as
+// additional, independent Pico-local heuristics on top of checks 1-3
+// (defense in depth) -- none of the checks is trusted exclusively.
 //
 // Reads only the handful of scalars this needs under s_context_lock,
 // deliberately not a whole context_snapshot_t copy via link_task_get_
@@ -1530,44 +1562,87 @@ static void link_task_handle_clear_trip(const kilnlink_frame_t *frame)
 // call chain, and check_saftyfw_task_stack_budgets.py already grades
 // link_task against a tight regsp margin (see current_task_any_current_
 // present()'s own header comment for the same reasoning applied there).
+
+// 2026-09-15 Opus re-review N2: set when a SET_CONFIG/COMMIT_CONFIG committed
+// a new tc_type to flash but could not reconfigure the physical MAX31856 to
+// match (heat became enabled in the write-to-reapply window) -- the flash
+// record and the chip are diverged at that point. link_task_fn()'s main loop
+// calls link_task_retry_pending_tc_type_reapply() every poll to keep trying
+// the reapply until it verifies, instead of leaving the divergence stranded
+// silently forever. single-writer: only link_task's own task context ever
+// touches these two (set in the two handlers above, cleared only here).
+static bool s_tc_type_reapply_pending = false;
+static uint8_t s_tc_type_reapply_pending_value = 0;
+
+// Decision core moved to link_task_tc_type_gate.c (pure, host-testable --
+// this function itself pulls in FreeRTOS/pico-sdk headers and cannot be
+// built for the host test executable). This function only reads live
+// state and hands it to the pure decider.
 static bool link_task_heat_is_safe_for_tc_type_change(void)
 {
-    if (s_degraded_no_context) {
-        return false;
-    }
-    if (!s_context_lock || !s_context_published) {
-        return false; // no context ever received this boot -- unknown is not safe
+    link_task_tc_type_gate_input_t in;
+    memset(&in, 0, sizeof(in));
+
+    // Check 1: Pico's own hardware ground truth -- is K4 actually energized
+    // right now.
+    safety_core_get_output_status(&in.relay_energized, NULL);
+
+    // Check 2: did this processor recently accept a REQUEST_ENABLE(true)
+    // that may not have physically closed the relay yet.
+    in.enable_age_ms = safety_core_ms_since_last_enable_true_request(&in.enable_ever_seen);
+
+    // Check 3 inputs: the ESP's own "no active heat owner" report.
+    in.degraded_no_context = s_degraded_no_context;
+    in.context_ever_received = (s_context_lock != NULL) && s_context_published;
+    in.context_max_age_ms = LINK_TASK_CONTEXT_MAX_AGE_MS;
+
+    if (in.context_ever_received) {
+        if (xSemaphoreTake(s_context_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+            in.context_lock_available = true;
+            in.context_valid = s_context_snapshot.valid;
+            in.context_flags = s_context_snapshot.flags;
+            uint32_t ctx_timestamp_ms = s_context_snapshot.timestamp_ms;
+            xSemaphoreGive(s_context_lock);
+
+            // Same wraparound-safe unsigned subtraction as safety_core.c's
+            // own context_valid computation -- both operands come from the
+            // same to_ms_since_boot() clock.
+            uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+            in.context_age_ms = now_ms - ctx_timestamp_ms;
+        }
+        // else: context_lock_available stays false (could not confirm
+        // freshness) -- not safe, per the pure decider's fail-closed rule.
     }
 
-    bool     ctx_valid = false;
-    uint8_t  ctx_flags = 0;
-    uint32_t ctx_timestamp_ms = 0;
-    if (xSemaphoreTake(s_context_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
-        return false; // could not confirm freshness -- not safe
-    }
-    ctx_valid = s_context_snapshot.valid;
-    ctx_flags = s_context_snapshot.flags;
-    ctx_timestamp_ms = s_context_snapshot.timestamp_ms;
-    xSemaphoreGive(s_context_lock);
+    // Additional Pico-local heuristics, defense in depth.
+    in.relay_on_continuous = s_relay_on_continuous;
+    in.any_current_present = current_task_any_current_present();
 
-    if (!ctx_valid) {
-        return false;
-    }
+    return link_task_tc_type_gate_decide(&in, CONTEXT_FLAG_HEAT_REQUESTED,
+                                          CONTEXT_FLAG_PROFILE_RUNNING,
+                                          CONTEXT_FLAG_HEAT_OWNER_ACTIVE);
+}
 
-    // Same wraparound-safe unsigned subtraction as safety_core.c's own
-    // context_valid computation -- both operands come from the same
-    // to_ms_since_boot() clock.
-    uint32_t now_ms = to_ms_since_boot(get_absolute_time());
-    uint32_t age_ms = now_ms - ctx_timestamp_ms;
-    if (age_ms >= LINK_TASK_CONTEXT_MAX_AGE_MS) {
-        return false;
+// 2026-09-15 Opus re-review N2: called every poll from link_task_fn()'s main
+// loop. While s_tc_type_reapply_pending is set, the persisted flash record
+// and the physically configured MAX31856 are diverged -- keep retrying the
+// reapply, loudly, until heat is confirmed safe again and the reconfigure
+// actually goes out, rather than the one-shot skip silently stranding the
+// divergence for the rest of this boot (the review's "keep retrying the
+// reapply until it is verified, and report it" option).
+static void link_task_retry_pending_tc_type_reapply(void)
+{
+    if (!s_tc_type_reapply_pending) {
+        return;
     }
-
-    if (ctx_flags & (CONTEXT_FLAG_HEAT_REQUESTED | CONTEXT_FLAG_PROFILE_RUNNING)) {
-        return false;
+    if (!link_task_heat_is_safe_for_tc_type_change()) {
+        return; // still diverged -- try again next poll
     }
-
-    return !s_relay_on_continuous && !current_task_any_current_present();
+    log_task_log(LOG_LEVEL_WARN, "tc_type_reapply",
+                 "retry: heat now safe, applying previously-skipped tc_type reapply");
+    thermo_task_request_tc_type_reapply();
+    (void)s_tc_type_reapply_pending_value; // carried only for future diagnostics/logging
+    s_tc_type_reapply_pending = false;
 }
 
 static void link_task_handle_set_config(const kilnlink_frame_t *frame)
@@ -1601,7 +1676,14 @@ static void link_task_handle_set_config(const kilnlink_frame_t *frame)
     link_frame_apply_set_config(&committed, msg.tc_type, &rec);
 
     const char *reason = NULL;
-    bool written = config_store_write_ex(&rec, link_task_heat_is_safe_for_tc_type_change(), &reason);
+    // 2026-09-15 Opus re-review N2: bracket the write-plus-reconfigure span
+    // so a REQUEST_ENABLE cannot land between the flash write above and the
+    // MAX31856 reconfigure below and race them -- see safety_core_set_tc_
+    // type_apply_in_progress()'s own doc comment. Cleared on every exit path
+    // below (accepted-and-reapplied, accepted-and-skipped, and refused).
+    safety_core_set_tc_type_apply_in_progress(true);
+    bool written =
+        config_store_write_ex(&rec, link_task_heat_is_safe_for_tc_type_change(), &reason, NULL);
     if (written) {
         log_task_log(LOG_LEVEL_INFO, "set_config", "accepted");
         // Take effect immediately, not after a reboot -- thermo_task.c's own
@@ -1627,13 +1709,27 @@ static void link_task_handle_set_config(const kilnlink_frame_t *frame)
             if (link_task_heat_is_safe_for_tc_type_change()) {
                 thermo_task_request_tc_type_reapply();
             } else {
-                log_task_log(LOG_LEVEL_WARN, "set_config",
-                             "tc_type committed, reapply skipped: heat became enabled");
+                // 2026-09-15 Opus re-review N2: this is exactly the "flash
+                // and chip now disagree" case the review named -- the flash
+                // record already holds the new tc_type but the physical
+                // MAX31856 was never reconfigured to match, because heat
+                // became enabled in the window between the write and here.
+                // Escalated from WARN to ERROR and marked pending so link_
+                // task_retry_pending_tc_type_reapply() (called from the main
+                // loop below) keeps retrying until it verifies, instead of
+                // this being a one-shot skip that silently strands the
+                // divergence forever.
+                log_task_log(LOG_LEVEL_ERROR, "set_config",
+                             "DIVERGED: tc_type committed to flash but chip reapply skipped "
+                             "(heat enabled) -- will retry");
+                s_tc_type_reapply_pending = true;
+                s_tc_type_reapply_pending_value = rec.tc_type;
             }
         }
     } else {
         log_task_log(LOG_LEVEL_WARN, "set_config", reason ? reason : "refused");
     }
+    safety_core_set_tc_type_apply_in_progress(false);
 }
 
 // SAFETY_CMD_SET_CT_CAL (0x19), CommonFW/docs/LINK_PROTOCOL.md section 4 --
@@ -2312,8 +2408,12 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
 
     uint8_t prev_tc_type = config_store_get_tc_type(); // captured BEFORE the write, see tc_type_reapply_policy.h
     const char *reason = NULL;
-    bool written =
-        config_store_write_ex(&to_write, link_task_heat_is_safe_for_tc_type_change(), &reason);
+    config_store_write_decision_t decision = CONFIG_STORE_WRITE_OK;
+    // 2026-09-15 Opus re-review N2: see link_task_handle_set_config()'s
+    // matching comment -- cleared on every exit path below.
+    safety_core_set_tc_type_apply_in_progress(true);
+    bool written = config_store_write_ex(&to_write, link_task_heat_is_safe_for_tc_type_change(), &reason,
+                                          &decision);
     if (written) {
         s_staged_config = to_write; // becomes the new baseline for the next SET_PARAM
         log_task_log(LOG_LEVEL_INFO, "commit_config", "accepted");
@@ -2340,25 +2440,47 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
             if (link_task_heat_is_safe_for_tc_type_change()) {
                 thermo_task_request_tc_type_reapply();
             } else {
-                log_task_log(LOG_LEVEL_WARN, "commit_config",
-                             "tc_type committed, reapply skipped: heat became enabled");
+                // 2026-09-15 Opus re-review N2: see link_task_handle_set_
+                // config()'s matching comment -- same diverged-flash-vs-chip
+                // condition, same retry-until-verified fix.
+                log_task_log(LOG_LEVEL_ERROR, "commit_config",
+                             "DIVERGED: tc_type committed to flash but chip reapply skipped "
+                             "(heat enabled) -- will retry");
+                s_tc_type_reapply_pending = true;
+                s_tc_type_reapply_pending_value = to_write.tc_type;
             }
         }
     } else {
         log_task_log(LOG_LEVEL_WARN, "commit_config", reason ? reason : "refused");
-        // Not field-specific -- config_store_write()'s own refusal is either
-        // "relay is ARMED" (config_store_decide_write()) or a flash failure
-        // (config_store_flash_rc_reason()), never a single staged field's
-        // fault, so this always carries the NO_PARAM_ID sentinel. Match on
-        // the ARMED string specifically (config_store_write_decision_
-        // reason()'s own literal for CONFIG_STORE_WRITE_REFUSED_ARMED) --
-        // anything else here is a storage-layer failure.
-        kilnlink_commit_config_reject_reason_t wire_reason =
-            (reason && strcmp(reason, "refused: relay is ARMED, config writes are refused while ARMED") == 0)
-                ? KILNLINK_COMMIT_CONFIG_REJECT_ARMED
-                : KILNLINK_COMMIT_CONFIG_REJECT_STORAGE;
+        // Not field-specific -- always carries the NO_PARAM_ID sentinel.
+        // 2026-09-15 (Opus re-review N3): map the REAL config_store_write_
+        // decision_t `decision` the write computed internally, not a
+        // strcmp() against one specific reason string -- the old string
+        // match caught only the plain ARMED case and silently collapsed
+        // both HEAT_ON and HEAT_UNKNOWN (and any future new reason) into
+        // the generic STORAGE bucket, hiding the real cause from the page.
+        kilnlink_commit_config_reject_reason_t wire_reason;
+        switch (decision) {
+        case CONFIG_STORE_WRITE_REFUSED_ARMED:
+            wire_reason = KILNLINK_COMMIT_CONFIG_REJECT_ARMED;
+            break;
+        case CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON:
+            wire_reason = KILNLINK_COMMIT_CONFIG_REJECT_ARMED_HEAT_ON;
+            break;
+        case CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_UNKNOWN:
+            wire_reason = KILNLINK_COMMIT_CONFIG_REJECT_ARMED_HEAT_UNKNOWN;
+            break;
+        case CONFIG_STORE_WRITE_FLASH_FAILURE:
+            wire_reason = KILNLINK_COMMIT_CONFIG_REJECT_STORAGE;
+            break;
+        case CONFIG_STORE_WRITE_OK: // unreachable: written was false
+        default:
+            wire_reason = KILNLINK_COMMIT_CONFIG_REJECT_UNKNOWN;
+            break;
+        }
         link_task_send_commit_config_rejected(CONFIG_PARAMS_NO_PARAM_ID, wire_reason);
     }
+    safety_core_set_tc_type_apply_in_progress(false);
 }
 
 // SAFETY_CMD_APPLY_CONFIG_VOLATILE (0x2D), KILN_PROFILES_PLAN.md item 15 --
@@ -2905,6 +3027,7 @@ static void link_task_fn(void *arg)
             last_power_tx = now;
         }
         link_task_poll_trip_event(now);
+        link_task_retry_pending_tc_type_reapply();
 
         if (s_boot_fw_version_repeats_pending > 0 &&
             (now - s_last_boot_fw_version_tx_tick) >= pdMS_TO_TICKS(LINK_BOOT_FW_VERSION_REPEAT_PERIOD_MS)) {

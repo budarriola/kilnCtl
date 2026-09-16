@@ -1050,10 +1050,11 @@ bool config_store_write(const config_store_record_t *rec, const char **out_reaso
         }
         return false;
     }
-    return config_store_write_ex(rec, false, out_reason);
+    return config_store_write_ex(rec, false, out_reason, NULL);
 }
 
-bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, const char **out_reason)
+bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, const char **out_reason,
+                            config_store_write_decision_t *out_decision)
 {
     bool armed = relay_owner_get_state() == RELAY_OWNER_STATE_ARMED;
     // Opus review item 4: compare against what is actually persisted on
@@ -1065,7 +1066,25 @@ bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, con
         config_store_decide_write_ex(armed, tc_type_only_change, heat_safe);
     if (decision != CONFIG_STORE_WRITE_OK) {
         if (out_reason != NULL) {
-            *out_reason = config_store_write_decision_reason(decision);
+            // 2026-09-15 (Opus re-review N4): a MIXED change while ARMED
+            // (tc_type differs AND at least one other field also differs)
+            // used to fall through to the same generic ARMED string as
+            // every other refusal, giving no hint that a tc_type-ONLY
+            // change would have been allowed through. Name the actual
+            // shape of the refusal here instead, ahead of the generic
+            // reason lookup, so the caller/log/wire path sees the real
+            // reason for exactly this decision value.
+            if (decision == CONFIG_STORE_WRITE_REFUSED_ARMED &&
+                s_persisted_record.tc_type != rec->tc_type) {
+                *out_reason = "refused: relay is ARMED and this change also modifies field(s) "
+                              "other than thermocouple type -- only thermocouple type may "
+                              "change while ARMED";
+            } else {
+                *out_reason = config_store_write_decision_reason(decision);
+            }
+        }
+        if (out_decision != NULL) {
+            *out_decision = decision;
         }
         return false;
     }
@@ -1078,6 +1097,9 @@ bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, con
         // already names, not a transient timeout.
         if (out_reason != NULL) {
             *out_reason = config_store_flash_rc_reason(CONFIG_STORE_FLASH_RC_NOT_PERMITTED);
+        }
+        if (out_decision != NULL) {
+            *out_decision = CONFIG_STORE_WRITE_FLASH_FAILURE;
         }
         return false;
     }
@@ -1158,6 +1180,9 @@ bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, con
         if (out_reason != NULL) {
             *out_reason = config_store_flash_rc_reason(rc);
         }
+        if (out_decision != NULL) {
+            *out_decision = CONFIG_STORE_WRITE_FLASH_FAILURE;
+        }
         return false;
     }
 
@@ -1175,6 +1200,9 @@ bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, con
     s_persisted_record = to_write; // opus review item 4: this landed in flash -- update flash-truth
     if (out_reason != NULL) {
         *out_reason = "ok";
+    }
+    if (out_decision != NULL) {
+        *out_decision = CONFIG_STORE_WRITE_OK;
     }
     return true;
 }

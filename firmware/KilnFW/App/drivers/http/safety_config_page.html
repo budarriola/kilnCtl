@@ -288,7 +288,12 @@ document.getElementById('save').addEventListener('click', function () {
   params.push('thermo_count=' + (current.thermo_count || 0));
   params.push('relay_count=' + (current.relay_count || 0));
   params.push('max_simultaneous_relays=' + (current.max_simultaneous_relays || 0));
-  params.push('safety_tc_type=' + (current.safety_tc_type || 0));
+  /* 2026-09-15 (Opus re-review LOW): safety_tc_type is the Pico's own,
+     commissioning-page-owned value -- zones_http_post.c's handler already
+     ignores whatever this field carries (tmp.safety_tc_type =
+     s_zones.cfg.safety_tc_type, unconditionally), so echoing it here was
+     dead weight that could also mislead a reader of this page's source
+     into thinking a POST from here could ever change it. */
   if (current.continue_on_zone_trip) params.push('continue_on_zone_trip=1');
   params.push('pc_link_abort_silence_ms=' + document.getElementById('pcLink').value);
   /* 2026-08-27+1, owner report ("name relays not assigned to a zone"):

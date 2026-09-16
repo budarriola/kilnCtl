@@ -1814,11 +1814,18 @@ function renderZones() {
 }
 
 /* M12: data.safety_tc_type read-only -- assigned on the safety commissioning
-   page, only displayed here. */
-function renderSafetyTcType(code) {
+   page, only displayed here.
+   2026-09-15 (Opus re-review N5): `known` is data.safety_tc_type_known --
+   zones_http_get.c now reports false whenever the Pico's tc_type has never
+   actually been fetched this boot, instead of silently falling back to this
+   ESP's own possibly-stale cached value. Treat "not known" exactly like an
+   unrecognized code: UNSET, never a rendered type. */
+function renderSafetyTcType(code, known) {
   var el = document.getElementById('safetyTcType');
   var t = null;
-  TC_TYPES.forEach(function (x) { if (x.code === code) t = x; });
+  if (known) {
+    TC_TYPES.forEach(function (x) { if (x.code === code) t = x; });
+  }
   el.textContent = t ? (t.name + ' (' + t.range + ') -- ' + t.note) : 'UNSET';
 }
 
@@ -2028,7 +2035,7 @@ function loadCurrent() {
       document.getElementById('relayCount').value = data.relay_count;
       document.getElementById('maxSimultaneous').value = data.max_simultaneous_relays || 0;
       document.getElementById('continueOnZoneTrip').checked = !!data.continue_on_zone_trip;
-      renderSafetyTcType(data.safety_tc_type);
+      renderSafetyTcType(data.safety_tc_type, data.safety_tc_type_known);
       renderZones();
       populateAutotuneZones();
       renderSafetyWiring(data.safety_wiring);

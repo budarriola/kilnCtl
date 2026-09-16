@@ -473,6 +473,32 @@ static QueueHandle_t s_clear_trip_queue = NULL;
 // as link_task.c's own s_context_frames_ok/bad); s_clear_trip_processed/
 // s_clear_trip_last_outcome written only inside safety_core_task() below.
 static uint32_t s_clear_trip_requested = 0;
+
+// 2026-09-15 Opus re-review N1: link_task's tc-type heat-safety gate needs
+// to know "did the Pico recently receive/act on a REQUEST_ENABLE(true)",
+// not just "is GPIO6 high right now" -- relay_owner_command_energize() is
+// a queued command (relay_owner.c drains it on its own tick), so there is
+// a real window, right after this function forwards an accepted enable
+// request, where relay_owner_is_energized() can still read false even
+// though the Pico has committed to energizing. single-writer: only this
+// function (safety_core_request_enable(), always called from link_task's
+// own task context per its header comment) ever writes this.
+static uint32_t s_last_enable_true_request_ms = 0;
+static bool     s_last_enable_true_request_seen = false;
+
+// 2026-09-15 Opus re-review N2: set true by link_task.c for the whole
+// span from "the tc-type heat-safety gate just passed" through "the new
+// tc_type has actually been reconfigured into the MAX31856 (or the
+// reconfigure was correctly skipped/retried)" -- see link_task.c's own
+// comment on this window. safety_core_request_enable() below refuses the
+// ON direction while this is true, same "ON direction only, de-energizing
+// always reachable" shape as every other refusal in that function, so a
+// REQUEST_ENABLE landing mid-apply can never race the flash-write-then-
+// reconfigure sequence: the flash record and the physical chip cannot
+// diverge because heat is never granted during the one window where they
+// could. single-writer: only link_task.c ever calls the setter, always
+// from its own task context (same as s_last_enable_true_request_ms above).
+static bool s_tc_type_apply_in_progress = false;
 static uint32_t s_clear_trip_processed = 0;
 static safety_clear_trip_outcome_t s_clear_trip_last_outcome = SAFETY_CLEAR_TRIP_OUTCOME_NONE;
 
@@ -1669,6 +1695,17 @@ bool safety_core_request_enable(bool enable)
         return false;
     }
 
+    // 2026-09-15 Opus re-review N2: refuse the ON direction while a tc_type
+    // apply (config_store flash write + MAX31856 reconfigure) is in
+    // progress -- see s_tc_type_apply_in_progress's own doc comment. Same
+    // "ON direction only" shape as the update-transfer interlock just
+    // above.
+    if (enable && s_tc_type_apply_in_progress) {
+        log_task_log(LOG_LEVEL_WARN, "request_enable",
+                     "refused: tc_type apply in progress");
+        return false;
+    }
+
     // safety_tc_installed (config param 0x0211) refusal -- the other half
     // of the S5 trade documented in safety_guards.c's grace-exceeded block
     // and in config_store.h's own field comment. When the operator has
@@ -1716,12 +1753,43 @@ bool safety_core_request_enable(bool enable)
         }
     }
 
+    // Record "the Pico just received and is about to act on an enable
+    // request" BEFORE forwarding -- see s_last_enable_true_request_ms's own
+    // doc comment. Recorded on every accepted-past-the-refusals enable=true
+    // call regardless of relay_owner_command_energize()'s own return (even
+    // a dropped-queue command means the ESP believes it holds a grant, and
+    // this timestamp exists precisely to distrust "not energized yet" for a
+    // short window after that).
+    if (enable) {
+        s_last_enable_true_request_ms = to_ms_since_boot(get_absolute_time());
+        s_last_enable_true_request_seen = true;
+    }
+
     // See safety_core.h's doc comment: deliberately a thin forward beyond
     // the check above, no second policy layer duplicating relay_owner's
     // own state machine. relay_owner_command_energize() already refuses
     // while TRIPPED, accepts-but-never-applies during GRACE, and only
     // actually drives GPIO6 high while ARMED.
     return relay_owner_command_energize(enable);
+}
+
+// See safety_core.h's doc comment.
+void safety_core_set_tc_type_apply_in_progress(bool in_progress)
+{
+    s_tc_type_apply_in_progress = in_progress;
+}
+
+// See safety_core.h's doc comment.
+uint32_t safety_core_ms_since_last_enable_true_request(bool *out_ever_seen)
+{
+    if (out_ever_seen) {
+        *out_ever_seen = s_last_enable_true_request_seen;
+    }
+    if (!s_last_enable_true_request_seen) {
+        return UINT32_MAX;
+    }
+    uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    return now_ms - s_last_enable_true_request_ms; // wraparound-safe unsigned subtraction
 }
 
 bool safety_core_start(void)

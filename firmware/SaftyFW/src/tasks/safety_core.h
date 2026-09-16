@@ -235,6 +235,38 @@ bool safety_core_get_trip_event(uint8_t *out_trip_seq, safety_trip_t *out_trip_r
 // relay_owner_is_energized() for that).
 bool safety_core_request_enable(bool enable);
 
+// 2026-09-15 Opus re-review N1: how long ago (ms) did this processor last
+// receive and accept-past-its-own-refusals a REQUEST_ENABLE(true)? Distinct
+// from safety_core_get_output_status()'s relay_energized (GPIO6 actually
+// high right now) -- relay_owner_command_energize() is a queued command, so
+// there is a real window right after an accepted enable request where the
+// relay has not physically closed yet. link_task's tc-type heat-safety gate
+// treats a recent enable (below some caller-chosen "settled" threshold) as
+// NOT safe, on top of (not instead of) the direct relay_energized check --
+// "recent" catches the request-accepted-but-not-yet-physically-closed
+// window; relay_energized catches everything after that, including a
+// GRACE-state grant that never gets revoked.
+//
+// `*out_ever_seen` is false (return value UINT32_MAX) if no enable=true
+// request has ever been accepted-past-refusals this boot -- treat that as
+// "not recent" (the gate cares only about a recent TRUE, never having seen
+// one is the safe case). Safe to call from any task; single-writer static,
+// only ever written inside safety_core_request_enable().
+uint32_t safety_core_ms_since_last_enable_true_request(bool *out_ever_seen);
+
+// 2026-09-15 Opus re-review N2: called only by link_task.c, bracketing the
+// span from "the tc-type heat-safety gate just passed" through "the new
+// tc_type has actually been reconfigured into the MAX31856 (or the
+// reconfigure was correctly skipped/retried)". While true,
+// safety_core_request_enable(true) refuses -- see that function's own doc
+// comment on this check -- so a REQUEST_ENABLE landing mid-apply can never
+// race the flash-write-then-reconfigure sequence and leave the persisted
+// tc_type and the physically configured chip silently diverged. Must
+// always be paired: set true right before the flash write, cleared in
+// every exit path (success, skipped, or a re-check failure) once the
+// reconfigure decision is settled -- never left true across a return.
+void safety_core_set_tc_type_apply_in_progress(bool in_progress);
+
 // SWD/debug-only diagnostics for the 2026-08-27 audit item 1 fix (measured,
 // not compile-time-constant, dt_s -- see safety_core.c's own comment at its
 // tick_dt_compute_s() call site and tick_timing.h's header comment for the

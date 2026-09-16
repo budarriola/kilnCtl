@@ -6,6 +6,7 @@
                                 // byte carries; one shared definition rather
                                 // than a duplicated 0/1 convention
 
+#include <stdlib.h> // abort() -- config_store_only_tc_type_differs()'s reentrancy trip-wire
 #include <string.h>
 
 #include "config_params.h" // config_params_validate_ranges() -- load-time re-check, see config_store_unpack()
@@ -1174,6 +1175,25 @@ bool config_store_only_tc_type_differs(const config_store_record_t *current,
     // do not add one without revisiting this.
     static uint8_t a[CONFIG_STORE_RECORD_LEN];
     static uint8_t b[CONFIG_STORE_RECORD_LEN];
+    // 2026-09-15 (Opus re-review LOW): the comment above documents single-
+    // writer BY CONVENTION only -- nothing previously checked it at runtime.
+    // Assert it instead of trusting the comment: a second overlapping call
+    // (this function re-entered before the first call's memcmp() below has
+    // read `a`/`b`) would corrupt both callers' comparisons silently, since
+    // they share these two static buffers. `s_call_in_progress` is not
+    // itself thread-safe against a true concurrent entry from a second core/
+    // ISR -- it is a straight-line reentrancy trip-wire, adequate here
+    // because the real hazard this guards against is a future caller added
+    // from a different task, not a race that needs a lock to detect.
+    static volatile bool s_call_in_progress = false;
+    if (s_call_in_progress) {
+        // Written as an explicit abort(), not assert() -- this file builds
+        // with -DNDEBUG on the RP2040 target (assert() compiles to nothing
+        // there), and this check must fire in that build too, not only in
+        // host tests.
+        abort();
+    }
+    s_call_in_progress = true;
     config_store_pack(current, a);
     config_store_pack(candidate, b);
 
@@ -1188,7 +1208,9 @@ bool config_store_only_tc_type_differs(const config_store_record_t *current,
     put_u16_le(&a[REC_OFF_FIELDS_SET], fields_set_a);
     put_u16_le(&b[REC_OFF_FIELDS_SET], fields_set_b);
 
-    return memcmp(a, b, REC_OFF_CRC) == 0;
+    bool equal = memcmp(a, b, REC_OFF_CRC) == 0;
+    s_call_in_progress = false;
+    return equal;
 }
 
 uint32_t config_store_record_crc(const config_store_record_t *rec)

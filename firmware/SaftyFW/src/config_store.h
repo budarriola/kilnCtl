@@ -1020,6 +1020,13 @@ typedef enum {
     // (and a log line) never reports a specific safety fact ("heat is on")
     // that was never actually determined.
     CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_UNKNOWN,
+    // 2026-09-15 (Opus re-review N3): not an ARMED-family refusal at all --
+    // the ARMED/heat gate passed, but the actual flash program/erase (or the
+    // hal_flash_safe_execute() lockout handshake) failed. Kept distinct so
+    // an out_decision-switching caller never mistakes "flash write failed"
+    // for one of the ARMED refusals above; the human-readable *out_reason
+    // string still carries the specific hal/flash rc.
+    CONFIG_STORE_WRITE_FLASH_FAILURE,
 } config_store_write_decision_t;
 
 // Pure decision: given whether the relay is currently ARMED (relay_owner's
@@ -1181,7 +1188,15 @@ bool config_store_write(const config_store_record_t *rec, const char **out_reaso
 // the only callers that pass a `heat_safe` computed from live inputs;
 // SET_CT_CAL and every other config_store_write() call site keeps calling
 // the plain wrapper, which can never relax the ARMED refusal.
-bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, const char **out_reason);
+// `out_decision`, if non-NULL, receives the exact config_store_write_decision_t
+// this call computed internally (config_store_decide_write_ex()) -- including
+// CONFIG_STORE_WRITE_OK on success -- so a caller (link_task.c) can switch on
+// the real reason instead of string-matching `*out_reason`. Added 2026-09-15
+// Opus re-review N3: the old string-compare-only contract collapsed both
+// CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON and _HEAT_UNKNOWN into one generic
+// wire reject reason.
+bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, const char **out_reason,
+                            config_store_write_decision_t *out_decision);
 
 // KILN_PROFILES_PLAN.md item 15 -- installs `rec` into the live in-RAM
 // record (config_store_get_full_record()/every guard's seqlock snapshot)

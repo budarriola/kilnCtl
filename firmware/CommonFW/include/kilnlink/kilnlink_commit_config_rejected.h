@@ -54,6 +54,16 @@ typedef enum {
     KILNLINK_COMMIT_CONFIG_REJECT_ARMED = 2,         /* config writes are refused while ARMED */
     KILNLINK_COMMIT_CONFIG_REJECT_STORAGE = 3,       /* validation passed but the flash write itself failed */
     KILNLINK_COMMIT_CONFIG_REJECT_UNKNOWN = 4,       /* fallback; should not occur in practice */
+    /* 2026-09-15 (Opus re-review N3): a tc_type-only change refused while
+     * ARMED, distinct from the plain ARMED reason above -- these two carry a
+     * real, different actionable fact ("heat is confirmed on right now" vs
+     * "the Pico could not confirm heat state"), not just a generic ARMED
+     * refusal, so the page must not collapse them back into one string. See
+     * config_store_write_decision_t's own CONFIG_STORE_WRITE_REFUSED_ARMED_
+     * HEAT_ON/_HEAT_UNKNOWN (SaftyFW/src/config_store.h), which link_task.c
+     * maps directly onto these two wire values. */
+    KILNLINK_COMMIT_CONFIG_REJECT_ARMED_HEAT_ON = 5,
+    KILNLINK_COMMIT_CONFIG_REJECT_ARMED_HEAT_UNKNOWN = 6,
 } kilnlink_commit_config_reject_reason_t;
 
 typedef enum {

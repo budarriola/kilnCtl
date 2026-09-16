@@ -235,11 +235,20 @@ esp_err_t zones_get_handler(httpd_req_t *req)
     /* 2026-09-15 (Opus review item 3): read the Pico's LIVE tc_type back
      * through safety_cfg_store's mirror rather than serving this ESP's own
      * possibly-stale s_zones.cfg.safety_tc_type -- see
-     * zones_get_safety_pico_tc_type()'s doc comment. Falls back to the local
-     * cache only if the Pico has never reported the param yet (never-
-     * fetched, not a real disagreement), so the field is never left blank. */
-    uint8_t live_pico_tc_type = s_zones.cfg.safety_tc_type;
-    (void)zones_get_safety_pico_tc_type(&live_pico_tc_type);
+     * zones_get_safety_pico_tc_type()'s doc comment.
+     *
+     * 2026-09-15 (Opus re-review N5): this used to fall back to the ESP's
+     * own possibly-stale s_zones.cfg.safety_tc_type whenever the Pico's
+     * value had never been fetched yet -- exactly the stale-mirror problem
+     * this getter exists to avoid, just moved one level up. A "never
+     * fetched" tc_type is UNKNOWN, not "whatever this ESP happened to
+     * cache" -- the page must be able to tell the two apart (same
+     * "pico_known" convention safety_ceiling below already uses), so
+     * live_pico_tc_type now starts at 0 (a real, valid tc_type value) ONLY
+     * when live_pico_tc_type_known is also true; a page must not render
+     * safety_tc_type at all when the known flag is false. */
+    uint8_t live_pico_tc_type = 0;
+    bool live_pico_tc_type_known = zones_get_safety_pico_tc_type(&live_pico_tc_type);
 
     /* Owner request 2026-09-10: "if i change the max temp in the web gui it
      * should change it in the pico too" -- surface the RELATIONSHIP, not
@@ -274,7 +283,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
     uint32_t config_generation = zones_config_generation();
     APPEND("{\"generation\":%u,"
            "\"thermo_count\":%u,\"relay_count\":%u,\"max_simultaneous_relays\":%u,"
-           "\"continue_on_zone_trip\":%s,\"safety_tc_type\":%u,"
+           "\"continue_on_zone_trip\":%s,\"safety_tc_type\":%u,\"safety_tc_type_known\":%s,"
            "\"pc_link_abort_silence_ms\":%.0f,"
            /* docs/ON_OFF_ZONE_PLAN.md step 6: the resolved-default numbers
             * zones_config_get_hyst_c()/_min_on_s()/_min_off_s() substitute
@@ -312,6 +321,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
            (unsigned)config_generation,
            s_zones.cfg.thermo_count, s_zones.cfg.relay_count, s_zones.cfg.max_simultaneous_relays,
            s_zones.cfg.continue_on_zone_trip ? "true" : "false", live_pico_tc_type,
+           live_pico_tc_type_known ? "true" : "false",
            (double)s_zones.cfg.pc_link_abort_silence_ms,
            (double)ZONE_HYST_C_DEFAULT, (unsigned)ZONE_MIN_ON_OFF_S_DEFAULT,
            zone_owned_relay_mask(&s_zones.cfg),
