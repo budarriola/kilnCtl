@@ -402,6 +402,94 @@ def verify_kconfig_guard(rel_path, key):
             "from the ELF cannot honestly be attributed to that option being off.")
 
 
+NORMALISED_MACRO_SOURCE = os.path.join("drivers", "hw", "settings.h")
+
+
+def normalised_gate_violations(roots):
+    """Enforce the limit documented in verify_kconfig_guard(): no TASKS root may
+    be compiled out by a NORMALISED macro.
+
+    drivers/hw/settings.h defines a family of object-like macros as literal 1/0
+    derived from CONFIG_KILNCTL_* keys (KILNCTL_SPI_ASYNC_FLUSH and siblings),
+    and source gates on the normalised name, not on the CONFIG_ key. A
+    `kconfig=` row names a literal CONFIG_* symbol and matches it against an
+    `#if`/`#elif` line, so it CANNOT describe such a gate. That was recorded as
+    F5 of docs/audits/stack_budget_kconfig_gating_review_2026-09-15.md, whose
+    remedy was a comment -- which is what verify_kconfig_guard()'s docstring and
+    the TASKS header became. A comment, though, only helps somebody who reads it
+    before moving a root; this function makes the same statement enforceable.
+
+    The failure it prevents is NOT a false pass -- an unexpressible gate makes a
+    root vanish from a build that has the option off, and the row falls through
+    to "missing root = FAIL". It is a confusing, seemingly-unrelated failure in
+    a check about stack sizes, arriving whenever somebody happens to build with
+    that option off. This says the real thing instead, in that file, at that
+    line: the table cannot express this gate, and it needs a real indirection
+    rather than a `kconfig=` key.
+
+    Returns a list of human-readable violations (empty when clean)."""
+    settings_text = _read(NORMALISED_MACRO_SOURCE)
+    normalised = set(re.findall(r'^#[ \t]*define[ \t]+(KILNCTL_\w+)[ \t]+[01][ \t]*$',
+                                settings_text, re.M))
+    if not normalised:
+        # Vacuity floor: if the macro family cannot be found, this guard would
+        # silently approve everything. Say so rather than pass.
+        return [f"no normalised 1/0 KILNCTL_* macros found in {NORMALISED_MACRO_SOURCE} -- "
+                "either the file moved or its macro shape changed, and this guard is "
+                "vacuous as written. Not reporting a clean result on an unexamined tree."]
+    if not roots:
+        return ["normalised_gate_violations() was given no root symbols to look for, "
+                "so it examined nothing. Refusing to report clean."]
+
+    root_pat = re.compile(r'^[A-Za-z_][\w \t\*]*\b(' + "|".join(sorted(roots)) + r')\s*\(')
+    cond_pat = re.compile(r'^[ \t]*#[ \t]*(if|ifdef|ifndef|elif|else|endif)\b(.*)$')
+    trees = [APP_DIR, os.path.join(REPO_ROOT, "firmware", "hwAbstraction", "esp")]
+
+    violations = []
+    for tree in trees:
+        for dirpath, _dirs, files in os.walk(tree):
+            if os.sep + "build" in dirpath:
+                continue
+            for fn in files:
+                if not fn.endswith(".c"):
+                    continue
+                path = os.path.join(dirpath, fn)
+                stack = []
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    for lineno, line in enumerate(fh, 1):
+                        cm = cond_pat.match(line)
+                        if cm:
+                            kw, rest = cm.group(1), cm.group(2).strip()
+                            if kw in ("if", "ifdef", "ifndef"):
+                                stack.append(rest)
+                            elif kw in ("elif", "else"):
+                                if stack:
+                                    stack[-1] = rest or "<else>"
+                            elif kw == "endif":
+                                if stack:
+                                    stack.pop()
+                            continue
+                        rm = root_pat.match(line)
+                        if not (rm and stack):
+                            continue
+                        conds = " && ".join(stack)
+                        named = sorted(n for n in normalised
+                                       if re.search(r'\b' + n + r'\b', conds))
+                        if named:
+                            rel = os.path.relpath(path, REPO_ROOT)
+                            violations.append(
+                                f"{rel}:{lineno}: TASKS root `{rm.group(1)}` is defined inside a "
+                                f"preprocessor conditional gated on the NORMALISED macro(s) "
+                                f"{', '.join(named)} (controlling condition: {conds}). The TASKS "
+                                f"table's `kconfig=` key matches a literal CONFIG_* symbol in an "
+                                f"`#if`/`#elif` and cannot express this gate, so with that option "
+                                f"off the root vanishes and the row fails as a missing root. This "
+                                f"needs a real indirection in the table, not a `kconfig=` key -- "
+                                f"see verify_kconfig_guard() and F5 of "
+                                f"docs/audits/stack_budget_kconfig_gating_review_2026-09-15.md.")
+    return violations
+
+
 # ---------------------------------------------------------------------------
 # TASKS: one row per stack_margin_register() call site with no dedicated
 # checker of its own. `root` is the task's own C entry function (the first
@@ -733,6 +821,18 @@ def main():
     results = []
     errors = []
     excluded = []
+
+    # SOURCE-SIDE STRUCTURAL GUARD, run before any row is measured: no root may
+    # be gated by something this table cannot describe. See
+    # normalised_gate_violations() for why this is enforced rather than merely
+    # commented.
+    _tracked_roots = set()
+    for _t in TASKS:
+        if _t.get("root"):
+            _tracked_roots.add(_t["root"])
+        for _extra in (_t.get("extra_roots") or ()):
+            _tracked_roots.add(_extra[0] if isinstance(_extra, (tuple, list)) else _extra)
+    errors.extend(normalised_gate_violations(_tracked_roots))
     for task in TASKS:
         tname = task["name"]
         # KCONFIG-GATED ROWS. A task whose whole body is #if CONFIG_X'd out is

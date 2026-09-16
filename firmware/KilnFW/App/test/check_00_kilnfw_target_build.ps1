@@ -296,6 +296,9 @@ if (-not (Test-Path -LiteralPath $MainSdkconfig)) {
 # owning tree's check is running right now, the directory is left alone and a
 # later run prunes it. The owner-is-gone condition is permanent, so deferring
 # costs nothing but disk until the next invocation.
+# Build directories that are deliberately SHARED rather than per-tree, and so
+# are never marker-owned and never pruned -- see the long note inside the loop.
+$SharedBuildDirNames = @("checkbuild", "checkbuild_origin_kilnfw", "checkbuild_origin_saftyfw")
 foreach ($stale in (Get-ChildItem -LiteralPath "C:\wt" -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -cmatch '^checkbuild_[0-9a-f]{10}$' })) {
     # -cmatch, not -match (2026-09-16, N5 of
@@ -308,6 +311,30 @@ foreach ($stale in (Get-ChildItem -LiteralPath "C:\wt" -Directory -ErrorAction S
     # case is unreachable today; the case-sensitive match keeps the directory
     # name and the mutex name agreeing on exactly one spelling.
     if ([string]::Equals($stale.FullName, $WorktreePath, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+    # THE SHARED, NON-PER-TREE BUILD DIRECTORIES ARE DELIBERATELY UNRECLAIMABLE
+    # (2026-09-16). C:\wt\checkbuild_origin_kilnfw (check_01_kilnfw_pushed_build.ps1)
+    # and C:\wt\checkbuild_origin_saftyfw (check_01_saftyfw_pushed_build.ps1) carry
+    # no .checkbuild_source marker, and MUST NOT be given one. That is not an
+    # oversight in 827dd887's pruning logic -- it is the only correct state for
+    # them. The marker means "this directory belongs to the one tree named
+    # inside it, and dies with that tree"; those two directories belong to NO
+    # tree. Their content is a pure function of origin/main, they are
+    # deliberately shared by every invoking worktree (which is why they are one
+    # directory instead of ~425 MB per tree), and they are hard-reset to the
+    # fetched ref on every run. A marker naming whichever tree happened to
+    # create one would be a false statement of ownership, and would make a
+    # live, shared directory look reclaimable the moment that unrelated tree was
+    # removed -- deleting it out from under every other session's check_01.
+    # Strictly worse than leaving them permanently resident.
+    #
+    # They are already unreachable here: neither name matches the
+    # ^checkbuild_[0-9a-f]{10}$ pattern above, and neither carries a marker, so
+    # two independent conditions each exclude them (confirmed by fixture in
+    # docs/audits/review_check00_per_tree_build_2026-09-15.md). This list is
+    # belt-and-braces and changes no behaviour today: it states the intent by
+    # name, so that a future widening of the name pattern cannot silently bring
+    # a shared directory into range.
+    if ($SharedBuildDirNames -contains $stale.Name) { continue }
     $staleMarker = Join-Path $stale.FullName ".checkbuild_source"
     if (-not (Test-Path -LiteralPath $staleMarker)) { continue }
     # Read as UTF-8, matching the write site's encoding exactly -- see the N1
@@ -533,10 +560,29 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
     # reason. Adding a new build-output or tooling directory under these three
     # trees means adding it here: /XD with an absolute path covers exactly one
     # directory, by design.
+    # ONE DECLARATION OF WHAT IS MIRRORED, READ BY BOTH THE MIRROR AND ITS
+    # VERIFICATION (2026-09-16, N7 closure). The post-mirror content assertion
+    # below must walk exactly the set of files robocopy was asked to copy. Two
+    # hand-maintained copies of these exclude lists would be CLAUDE.md's "reset
+    # one side of a pair" class: a newly excluded directory dropped from the
+    # mirror but still demanded by the verifier, or -- far worse, because it is
+    # silent -- a tree that is mirrored but no longer verified. Both sides read
+    # this one table.
+    $MirrorSpecs = @(
+        @{ Rel = "firmware\KilnFW"
+           XD  = @("build", "App\test\build", ".venv", "components\lvgl", ".git")
+           XF  = @("sdkconfig") },
+        @{ Rel = "firmware\hwAbstraction"
+           XD  = @("test\build", ".git")
+           XF  = @() },
+        @{ Rel = "firmware\CommonFW"
+           XD  = @("build", "test\build", ".git")
+           XF  = @() }
+    )
     Mirror-Tree (Join-Path $repoRoot "firmware\KilnFW") (Join-Path $WorktreePath "firmware\KilnFW") `
-        @("build", "App\test\build", ".venv", "components\lvgl", ".git") @("sdkconfig")
+        $MirrorSpecs[0].XD $MirrorSpecs[0].XF
     Mirror-Tree (Join-Path $repoRoot "firmware\hwAbstraction") (Join-Path $WorktreePath "firmware\hwAbstraction") `
-        @("test\build", ".git") @()
+        $MirrorSpecs[1].XD $MirrorSpecs[1].XF
     # firmware/CommonFW (kilnlink) -- added 2026-09-14. The worktree's OWN git
     # checkout is pinned to whatever $headCommit existed the FIRST time this
     # persistent worktree was created (git worktree add above only runs once,
@@ -555,7 +601,7 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
     # this worktree's own (stale) checkout unless mirrored the same way the
     # other two trees are.
     Mirror-Tree (Join-Path $repoRoot "firmware\CommonFW") (Join-Path $WorktreePath "firmware\CommonFW") `
-        @("build", "test\build", ".git") @()
+        $MirrorSpecs[2].XD $MirrorSpecs[2].XF
 
     # DID THE MIRROR ACTUALLY DELIVER THIS TREE'S SOURCE? A check that cannot
     # see the source it was invoked to grade must FAIL loudly, never quietly
@@ -690,6 +736,89 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
     } else {
         Write-Host "Mirror content check: git reports no uncommitted changes in the mirrored trees, so the newest-source witness above is the only freshness assertion available."
     }
+    # FULL-TREE CONTENT ASSERTION -- N7's STATED RESIDUAL GAP, CLOSED
+    # (2026-09-16). The two assertions above are both samples. The witness is
+    # one file chosen by mtime; the dirty-set check covers exactly what git
+    # reports as modified or untracked. Neither says anything about a COMMITTED
+    # file whose stale copy in the build worktree happens to match on both size
+    # and mtime -- and robocopy /MIR SKIPS such a file, keeping the old bytes
+    # and exiting 0. N7 recorded that gap and explicitly declined to close it.
+    #
+    # It is reachable, and not only in theory. Measured here 2026-09-16:
+    #   * robocopy /MIR leaves the stale destination bytes in place when source
+    #     and destination share a size and an mtime (exit 0, no diagnostic).
+    #   * There is NO robocopy flag that repairs it: /IS, /IS /IT, /E /IS and
+    #     /FFT were each measured against the same fixture and every one left
+    #     the stale bytes. So "make the mirror always copy" is not available;
+    #     the only instrument is to verify content after the fact.
+    #   * `git checkout` is NOT a way in: it stamps mtime with the checkout
+    #     time, which differs from the destination's older stamp, so the copy
+    #     happens. That is the reassuring half.
+    #   * `Copy-Item` (and robocopy, and archive extraction) DO preserve mtime.
+    #     Restoring a same-length variant of a file from a preserved-timestamp
+    #     copy is therefore a real way to produce this state -- and restoring a
+    #     file by hand from a pristine copy is exactly what this project's own
+    #     negative-test discipline requires after every sabotage. The collision
+    #     needs the same length too, which a flipped comparison operator, a
+    #     changed digit or a same-length identifier rename all satisfy.
+    # A false PASS here is not cosmetic: this check is what stands between a
+    # stale artifact and a board, and it PUBLISHES the ELF it built into the
+    # shared build/ directory that every downstream stack-budget check reads.
+    #
+    # Cost, measured on this machine over the 1063 mirrored files (61.3 MB):
+    # hashing one side with [SHA256]::ComputeHash over a FileStream is 0.82 s
+    # (Get-FileHash, which is what the sample assertions use, is 1.94 s for the
+    # same set -- 2.4x, so the .NET form is used here); both sides together are
+    # ~1.6 s. The mirror step itself is 0.09 s in the steady no-op case and
+    # 0.79 s cold. So this roughly doubles the pre-build phase in absolute
+    # terms, against an idf.py build measured at ~27 s incremental and ~138 s
+    # cold -- 1-6% of the run, to convert a documented silent false PASS into a
+    # loud failure. The sample assertions above are KEPT rather than replaced:
+    # they fail earlier and name the specific thing that went wrong, which is a
+    # better diagnostic than "some file differs".
+    $verifyStart = Get-Date
+    $verifiedFiles = 0
+    $shaAlg = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        foreach ($spec in $MirrorSpecs) {
+            $srcRoot = Join-Path $repoRoot $spec.Rel
+            if (-not (Test-Path -LiteralPath $srcRoot)) { continue }
+            $dstRoot = Join-Path $WorktreePath $spec.Rel
+            # Same exclusions robocopy was given, derived from the same table:
+            # /XD is an absolute directory prefix, /XF a bare filename at any depth.
+            $excludedPrefixes = @()
+            foreach ($x in $spec.XD) { $excludedPrefixes += ((Join-Path $srcRoot $x).ToLowerInvariant() + '\') }
+            foreach ($f in (Get-ChildItem -LiteralPath $srcRoot -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+                $lower = $f.FullName.ToLowerInvariant()
+                $skip = $false
+                foreach ($e in $excludedPrefixes) { if ($lower.StartsWith($e)) { $skip = $true; break } }
+                if ($skip) { continue }
+                if ($spec.XF -contains $f.Name) { continue }
+                $relPath = $f.FullName.Substring($srcRoot.Length).TrimStart('\')
+                $dstFile = Join-Path $dstRoot $relPath
+                if (-not [System.IO.File]::Exists($dstFile)) {
+                    Fail "the mirror step did not deliver $dstFile -- $($spec.Rel)\$relPath exists in the invoking tree but not in the build worktree, so this check would be grading a source tree that is missing a file the invoking tree has."
+                }
+                $fsSrc = [System.IO.File]::OpenRead($f.FullName)
+                try { $hSrc = [System.BitConverter]::ToString($shaAlg.ComputeHash($fsSrc)) } finally { $fsSrc.Dispose() }
+                $fsDst = [System.IO.File]::OpenRead($dstFile)
+                try { $hDst = [System.BitConverter]::ToString($shaAlg.ComputeHash($fsDst)) } finally { $fsDst.Dispose() }
+                if ($hSrc -ne $hDst) {
+                    Fail "after mirroring, $dstFile still differs from the invoking tree's $($spec.Rel)\$relPath. robocopy /MIR skips a file whose source and destination share a size and an mtime even when the contents differ (measured: it keeps the stale bytes and exits 0), and no robocopy flag repairs it -- so the build worktree is holding source that is NOT this tree's, and every artifact built from it would be graded as if it were. Delete $dstFile (or the whole build worktree) and re-run."
+                }
+                $verifiedFiles++
+            }
+        }
+    } finally {
+        $shaAlg.Dispose()
+    }
+    # Vacuity floor, in this file's established style: an assertion that
+    # verified nothing must never be reported as an assertion that passed.
+    if ($verifiedFiles -lt 100) {
+        Fail "the full-tree mirror content assertion only compared $verifiedFiles file(s) under $repoRoot -- the invoking tree's mirrored source trees cannot really be that small (1063 files when this was written), so the enumeration or its exclusions are broken and this assertion is vacuous. Refusing to report on a mirror whose success could not be confirmed."
+    }
+    Write-Host ("Mirror content assertion: all {0} mirrored files are byte-identical in the build worktree ({1:N1}s)." -f $verifiedFiles, ((Get-Date) - $verifyStart).TotalSeconds)
+
     if (-not (Test-Path -LiteralPath $lvglCMake)) {
         Fail "$lvglCMake is missing after the mirror step -- the lvgl component has been deleted out of the build worktree. Downstream this surfaces as a confusing 'Failed to resolve component lvgl' CMake error rather than as the checkout problem it actually is."
     }
