@@ -27,9 +27,12 @@
 # docs/CONFIG_FILESYSTEM.md and the "gitignored config hides mismatch"
 # lesson elsewhere in this repo's history) and is NOT part of what a fresh
 # `git pull` on origin/main hands another session at all -- ESP-IDF cannot
-# build without one, so this check copies the MAIN TREE's own sdkconfig
-# into the worktree below (hash-verified after the copy) rather than
-# fabricating a default one. That means this check does NOT actually prove
+# build without one, so this check copies a real board-tuned sdkconfig into
+# the worktree below (hash-verified after the copy) rather than fabricating
+# a default one: the invoking tree's own if it has one, otherwise the main
+# worktree's (see the seed-resolution block further down -- this paragraph
+# claimed "the MAIN TREE's" while the code in fact read only the invoking
+# tree's and skipped outright when it was absent). That means this check does NOT actually prove
 # "a fresh clone of origin/main builds" -- it proves "origin/main's SOURCE
 # builds against whatever board config happens to be sitting in the machine
 # running this check". A push that changes a Kconfig default, or that
@@ -86,13 +89,27 @@
 # actually invoke the compiler (worktree setup, sdkconfig mismatch,
 # submodule init) is a FAIL, never a silent PASS -- same contract as
 # check_00.
+#
+# A MISSING sdkconfig IS NOT ON THAT LIST, deliberately (2026-09-16). It
+# used to be, in the code but never in this paragraph -- the code exited 3
+# for it while this contract described only the three prerequisites above.
+# Since sdkconfig is gitignored that skip fired in every clean worktree,
+# which is where this project verifies every commit, and a SKIP fails the
+# whole run_all_checks.ps1 run by default. It is now resolved against the
+# main worktree (see the seed-resolution block below) and, if genuinely
+# absent everywhere on the machine, is a FAIL: an absent board config is a
+# provisioning defect somebody must fix, not an absent toolchain to shrug
+# at.
 
 $ErrorActionPreference = "Stop"
 $ErrorActionPreference = "Continue"
 
 . (Join-Path $PSScriptRoot "..\..\..\..\tools\build_lock.ps1")
 
-$repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..\..")
+# -LiteralPath: Resolve-Path glob-expands otherwise, so a tree path containing
+# [ or ] would fail to resolve here. This matters more than cosmetically now
+# that $repoRoot.Path is compared against the main worktree's path below.
+$repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..\..\..")
 $IdfProfile = "C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1"
 
 function Fail([string]$msg) {
@@ -109,10 +126,64 @@ if (-not (Test-Path $IdfProfile)) {
     exit 3
 }
 
+# SDKCONFIG SEED RESOLUTION (2026-09-16).
+# ---------------------------------------
+# Until this revision this block looked ONLY at the INVOKING tree's
+# firmware\KilnFW\sdkconfig and exited 3 (SKIP) when it was absent -- while
+# saying "in the main tree", which is not the path it tested. Two problems,
+# both real:
+#
+#   * sdkconfig is gitignored, so a fresh worktree never has one. A clean
+#     worktree at origin/main is where every commit in this repo is actually
+#     verified, so this check SKIPped in exactly the situation it matters
+#     most -- and run_all_checks.ps1 fails the whole run on a SKIP by
+#     default, so an otherwise-green verification run exited non-zero and
+#     had to be explained away by hand every time.
+#   * The message sent the reader to the main tree to look for a file whose
+#     absence had been detected somewhere else entirely.
+#
+# Fix, the same one check_00_kilnfw_target_build.ps1 already makes for its
+# own identical need: prefer the invoking tree's own sdkconfig, fall back to
+# the MAIN worktree's board-tuned config and SAY SO, and if neither exists
+# FAIL rather than SKIP.
+#
+# WHY THE FALLBACK IS HONEST HERE SPECIFICALLY, not merely precedented.
+# This check's build worktree is reset --hard to the fetched origin/main
+# every run, so the SOURCE it compiles is byte-for-byte the pushed ref no
+# matter which tree invoked the check -- the invoking tree contributes
+# nothing to it. The seed config is the single exception, and the header
+# above already documents at length that this check proves "origin/main's
+# source builds against whatever board config is sitting on the machine
+# running this check", not "a fresh clone builds". Reaching that same
+# machine's same board-tuned file by a second path when the invoking tree
+# is a fresh worktree does not widen that exception by one bit: it is the
+# identical file, and the alternative on offer is not a stricter check but
+# no check at all. The genuine gap -- a Kconfig-default drift a seeded
+# config cannot see -- is unchanged by this, and is still flagged unfixed
+# in the header's ONE DELIBERATE EXCEPTION paragraph.
+#
+# Regenerating a config from Kconfig defaults instead is NOT an option, and
+# this is the reason a pinned-defaults answer was rejected rather than
+# merely not chosen: sdkconfig.defaults pins no CONFIG_IDF_TARGET, so a
+# regenerated config silently targets plain esp32 rather than esp32s3 and
+# dies on esp32s3-only code -- it would convert this check from a skip into
+# a red herring.
+$repoRootFull = ([System.IO.Path]::GetFullPath($repoRoot.Path)).TrimEnd('\')
+$mainWorktreeRaw = (((& git -C $repoRoot worktree list --porcelain) | Select-Object -First 1) -replace '^worktree\s+', '').Trim()
+if (-not $mainWorktreeRaw) {
+    Fail "could not determine the main worktree path ('git worktree list --porcelain' produced nothing for $repoRoot) -- refusing to guess where the board-tuned sdkconfig seed lives."
+}
+$mainWorktreeFull = ([System.IO.Path]::GetFullPath($mainWorktreeRaw.Replace('/', '\'))).TrimEnd('\')
+
 $MainSdkconfig = Join-Path $repoRoot "firmware\KilnFW\sdkconfig"
-if (-not (Test-Path $MainSdkconfig)) {
-    Write-Host "SKIP: no firmware\KilnFW\sdkconfig in the main tree to seed this build with -- same board-tuned-config prerequisite check_00 requires" -ForegroundColor Yellow
-    exit 3
+if (-not (Test-Path -LiteralPath $MainSdkconfig)) {
+    $fallbackSdkconfig = Join-Path $mainWorktreeFull "firmware\KilnFW\sdkconfig"
+    if (Test-Path -LiteralPath $fallbackSdkconfig) {
+        Write-Host "NOTE: $repoRootFull has no firmware\KilnFW\sdkconfig (gitignored; absent in a fresh worktree) -- seeding this build from the main worktree's board-tuned config at $fallbackSdkconfig" -ForegroundColor Yellow
+        $MainSdkconfig = $fallbackSdkconfig
+    } else {
+        Fail "no firmware\KilnFW\sdkconfig in the invoking tree ($repoRootFull) and none in the main worktree ($mainWorktreeFull) either. This is the board-tuned config this check must not regenerate from Kconfig defaults (sdkconfig.defaults pins no CONFIG_IDF_TARGET, so a regenerated config would silently target esp32, not esp32s3). Run the IDE workspace setup, or copy a known-good sdkconfig into the main tree, before this check can say anything truthful about whether origin/main builds."
+    }
 }
 
 # Fetch origin/main. A network-absent machine or a repo with no `origin`
