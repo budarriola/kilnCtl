@@ -90,7 +90,12 @@ void heat_enable_init(SafetyLinkClass *safety_or_null);
 // loudly, which this function does.
 bool heat_enable_acquire(heat_enable_claimant_t who);
 
-// Release-epoch pair, added 2026-09-15 (review of 8813bedd, finding MEDIUM-5).
+// Release-epoch pair, added 2026-09-15 (review of 8813bedd, finding MEDIUM-5),
+// and made to actually work 2026-09-16 -- as first committed it was inert, see
+// heat_enable_release_backstop() above for the sample-then-spend ABA it missed
+// and the stop-generation discriminator that closes it. Read "epoch" below as
+// "stop generation": it counts real stop/pause/abort transitions of `who`,
+// plus any idle-backstop tick that was itself the teardown.
 //
 // THE WINDOW THESE CLOSE. Every caller of acquire in this firmware decides to
 // acquire while holding its OWN module lock (s_exec.lock / s_at.lock), then
@@ -138,6 +143,52 @@ bool heat_enable_acquire_since(heat_enable_claimant_t who, uint32_t epoch);
 // heat_enable_is_held() still flip synchronously, before this call returns,
 // exactly as before; only the deep UART send is deferred.
 void heat_enable_release(heat_enable_claimant_t who);
+
+// The per-tick IDLE BACKSTOP form of the call above, added 2026-09-16 after a
+// review found the release-epoch pair below did not actually close the window
+// it was written for. Identical in every respect EXCEPT that it does not
+// advance the stop generation when the claimant held nothing.
+//
+// WHY THE SPLIT EXISTS. The epoch below is the discriminator
+// heat_enable_acquire_since() uses to refuse a claim that was torn down while
+// the caller was between sampling and spending it. Until now it only advanced
+// on a release that found the claimant's bit SET -- and at EVERY
+// acquire_since() call site in this firmware the bit is CLEAR at the moment
+// the epoch is sampled (profile_executor_run.c's fresh start has not acquired
+// yet; profile_executor_status.c's resume follows a pause that already
+// released; autotune_engine.c's two start paths likewise). So a stop landing
+// inside the sample-then-spend window performed a release that advanced
+// nothing, the stale epoch compared EQUAL, and the acquire RESURRECTED the
+// claim: REQUEST_ENABLE(true) on the wire, and heat_owner_active_decide()
+// (safety_link_frames.c) reporting a heat owner off the same held_mask -- both
+// on behalf of a run that had already stopped.
+//
+// The obvious fix -- advance on every release -- is wrong on its own:
+// profile_executor.c's and autotune_engine.c's task loops call release
+// UNCONDITIONALLY on every tick they spend in a non-running state, as a
+// backstop. Those ticks are not stops, and making them advance the generation
+// would spuriously refuse a legitimate acquire that merely raced an idle tick.
+//
+// So the discriminator is "did a real stop/pause/abort transition happen", and
+// the caller states it by choosing WHICH function to call:
+//
+//   heat_enable_release()          -- a real transition (halt, pause, abort,
+//                                     guard trip, run completion). ALWAYS
+//                                     advances the stop generation, held or
+//                                     not.
+//   heat_enable_release_backstop() -- the unconditional per-tick idle
+//                                     backstop. Advances it only if the claim
+//                                     really was held, i.e. only when that
+//                                     tick was itself the teardown.
+//
+// The DEFAULT spelling is deliberately the safe one. A release site that is
+// never classified keeps the always-advance behaviour, whose worst outcome is
+// an acquire refused -- a run that does not get heat, and says so loudly.
+// Defaulting the other way would silently reopen this hole. There are exactly
+// two backstop call sites in the firmware (profile_executor.c's "state is not
+// RUNNING" branch and autotune_engine.c's "not running" branch) and
+// test_heat_enable.c pins that.
+void heat_enable_release_backstop(heat_enable_claimant_t who);
 
 // Drains one release owed to the wire, if any (no-op otherwise). Called once
 // per loop iteration by safety_poll_task (safety_link_poll.c) -- the same

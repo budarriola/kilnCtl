@@ -3146,8 +3146,8 @@ static void test_autotune_manual_abort_releases_heat_enable(void)
     /* The engine's task loop calls heat_enable_release() on every tick it
      * spends in a non-running state, as a backstop. That must not put a
      * frame on the wire per tick. */
-    heat_enable_release(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
-    heat_enable_release(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
+    heat_enable_release_backstop(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
+    heat_enable_release_backstop(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
     heat_enable_service_pending_release();
     TEST_CHECK(s_req_enable_false_calls == 1, "the per-tick backstop is free after the first release");
 }

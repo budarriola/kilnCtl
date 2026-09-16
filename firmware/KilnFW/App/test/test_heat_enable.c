@@ -365,8 +365,15 @@ static void test_release_defers_the_wire_send_off_the_callers_stack(void)
         TEST_CHECK(false, "could not locate drivers/heat_enable.c to source-scan");
         return;
     }
-    const char *fn = strstr(text, "void heat_enable_release(heat_enable_claimant_t who)");
-    TEST_CHECK(fn != NULL, "sanity: heat_enable_release()'s definition must be findable in the source");
+    /* 2026-09-16: the body moved into he_release_common(), shared by
+     * heat_enable_release() and heat_enable_release_backstop(). Anchored on
+     * the helper so this scan keeps covering the REAL code rather than a
+     * two-line wrapper that trivially contains no send -- the region from here
+     * to heat_enable_service_pending_release() spans the helper AND both
+     * wrappers, so it is strictly more coverage than before, not less. */
+    const char *fn = strstr(text,
+                            "static void he_release_common(heat_enable_claimant_t who, uint32_t bit, bool stop_transition)");
+    TEST_CHECK(fn != NULL, "sanity: he_release_common()'s definition must be findable in the source");
     if (fn != NULL) {
         const char *next_fn = strstr(fn + 1, "\nvoid heat_enable_service_pending_release(void)");
         TEST_CHECK(next_fn != NULL, "sanity: the next function boundary must be findable");
@@ -377,7 +384,7 @@ static void test_release_defers_the_wire_send_off_the_callers_stack(void)
                 memcpy(body, fn, body_len);
                 body[body_len] = '\0';
                 TEST_CHECK(strstr(body, "safety_link_request_enable(") == NULL,
-                           "heat_enable_release()'s own function body must not call "
+                           "the release path's own function bodies must not call "
                            "safety_link_request_enable() -- if this matches, the synchronous send "
                            "came back onto profile_executor_status.c's/profile_executor.c's caller "
                            "stacks, recreating the 2026-09-15 panic");
@@ -658,15 +665,38 @@ static void test_stale_claim_is_not_resurrected(void)
                "an autotune release does NOT invalidate a profile's pending acquire");
     TEST_CHECK(heat_enable_is_held(HEAT_ENABLE_CLAIMANT_PROFILE) == true, "the firing holds its claim");
 
-    /* A release of a claim that was never held is a no-op and must not bump
-     * the epoch -- otherwise the per-tick backstop callers
-     * (profile_executor's "state is not RUNNING" branch) would invalidate
-     * every in-flight acquire. */
+    /* An IDLE BACKSTOP tick that finds nothing held must not advance the stop
+     * generation -- otherwise the per-tick backstop callers (profile_executor's
+     * "state is not RUNNING" branch and autotune_engine.c's "not running"
+     * branch, which call it on EVERY such tick) would invalidate every
+     * in-flight acquire.
+     *
+     * 2026-09-16: this assertion used to be written against plain
+     * heat_enable_release(), and that is what pinned the resurrection hole
+     * open -- see
+     * test_stop_in_the_sample_then_spend_window_is_not_resurrected() below.
+     * The requirement it encodes is RIGHT; it just belongs to the BACKSTOP
+     * form of the call, which is the only caller that actually has it.
+     * Re-pointed, not deleted or weakened: same property, asserted against the
+     * call that needs it. */
     reset_all(true);
     uint32_t e2 = heat_enable_claim_epoch(HEAT_ENABLE_CLAIMANT_PROFILE);
-    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_release_backstop(HEAT_ENABLE_CLAIMANT_PROFILE);
     TEST_CHECK(heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_PROFILE, e2) == true,
-               "a no-op release does not invalidate a legitimate acquire");
+               "an idle-backstop tick with nothing held does not invalidate a legitimate acquire");
+    TEST_CHECK(heat_enable_is_held(HEAT_ENABLE_CLAIMANT_PROFILE) == true,
+               "sanity: that legitimate acquire really did record its claim");
+
+    /* ...and the backstop still counts when the tick IS the teardown: a claim
+     * it actually tore down must not be re-acquirable on a stale generation
+     * either. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    uint32_t e2b = heat_enable_claim_epoch(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_release_backstop(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_service_pending_release();
+    TEST_CHECK(heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_PROFILE, e2b) == false,
+               "a backstop tick that was itself the teardown DOES invalidate a stale acquire");
 
     /* Plain heat_enable_acquire() must remain an explicit opt-out that always
      * proceeds -- callers not carrying an earlier decision are unaffected. */
@@ -676,6 +706,102 @@ static void test_stale_claim_is_not_resurrected(void)
     heat_enable_service_pending_release();
     TEST_CHECK(heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE) == true,
                "plain acquire() still acquires after a release -- it samples a fresh epoch");
+}
+
+static void test_stop_in_the_sample_then_spend_window_is_not_resurrected(void)
+{
+    TEST_SECTION("heat_enable -- 2026-09-16: a stop landing INSIDE the sample-then-spend window "
+                 "must not let the acquire resurrect the claim. The 2026-09-15 epoch pair did not "
+                 "close this: at every acquire_since() call site the claimant's bit is CLEAR when "
+                 "the epoch is sampled, so the stop's release found was_held==false, advanced "
+                 "nothing, and the stale epoch compared EQUAL -- REQUEST_ENABLE(true) on the wire "
+                 "and a heat owner reported to the Pico, for a run that had already stopped");
+
+    /* ---- Case 1: a FRESH START (profile_executor_run.c). The run flips to
+     * RUNNING under s_exec.lock, samples the epoch, drops the lock -- and has
+     * NOT acquired yet, so held_mask is 0 here. An operator Stop then runs the
+     * whole halt path (heat_enable_release() included) in the gap before the
+     * unlocked acquire_since() runs. */
+    reset_all(true);
+    uint32_t start_epoch = heat_enable_claim_epoch(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_is_held(HEAT_ENABLE_CLAIMANT_PROFILE) == false,
+               "sanity: this models the real call sites -- the claimant's bit is CLEAR at the "
+               "moment the epoch is sampled, which is exactly why 'advance only if was_held' was "
+               "inert");
+
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);   /* the operator Stop */
+    heat_enable_service_pending_release();
+
+    TEST_CHECK(heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_PROFILE, start_epoch) == false,
+               "MUST GO RED if a stop inside the sample-then-spend window can be overtaken -- the "
+               "acquire must REFUSE, not re-claim heat for a firing that has already stopped");
+    TEST_CHECK(g_enable_true_calls == 0,
+               "and nothing was put on the wire: no REQUEST_ENABLE(true) may be sent on behalf of "
+               "a run that no longer exists");
+    TEST_CHECK(enable_sends() == 0, "the link was never asked to permit heating");
+    TEST_CHECK(heat_enable_is_held(HEAT_ENABLE_CLAIMANT_PROFILE) == false,
+               "and held_mask stays clear -- heat_owner_active_decide() (safety_link_frames.c) "
+               "reads that same mask, so the Pico is not told a heat owner is active either");
+    TEST_CHECK(heat_enable_is_granted() == false, "nothing reads as granted");
+    TEST_CHECK(heat_enable_retry_pending() == false,
+               "and a refused acquire leaves nothing queued for heat_enable_reconcile() to retry "
+               "-- a resurrection on the watchdog's next tick would be the same bug, delayed");
+
+    /* ---- Case 2: a RESUME (profile_executor_status.c). pause() already
+     * released the claim, so the bit is clear here too; resume() samples the
+     * epoch under s_exec.lock and spends it unlocked, and the operator's Stop
+     * lands in that gap. Structurally the same window, reached the other
+     * way. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);      /* the run was going */
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);            /* pause() */
+    heat_enable_service_pending_release();
+    uint32_t resume_epoch = heat_enable_claim_epoch(HEAT_ENABLE_CLAIMANT_PROFILE);
+    uint32_t sends_before_stop = enable_sends();
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);            /* halt(), in the gap */
+    heat_enable_service_pending_release();
+    TEST_CHECK(heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_PROFILE, resume_epoch) == false,
+               "a stop landing between resume()'s unlock and its acquire must refuse too");
+    TEST_CHECK(enable_sends() == sends_before_stop, "and it sent no re-enable");
+    TEST_CHECK(heat_enable_is_held(HEAT_ENABLE_CLAIMANT_PROFILE) == false, "no claim resurrected");
+
+    /* ---- Case 3: the autotune claimant, whose start paths
+     * (autotune_engine.c) sample and spend the same way. */
+    reset_all(true);
+    uint32_t at_epoch = heat_enable_claim_epoch(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_AUTOTUNE);           /* abort, in the gap */
+    heat_enable_service_pending_release();
+    TEST_CHECK(heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_AUTOTUNE, at_epoch) == false,
+               "the autotune claimant's start path refuses a stop in the same window");
+    TEST_CHECK(g_enable_true_calls == 0, "and asked for no heat");
+
+    /* ---- Structural: the two per-tick idle backstops must be the ONLY
+     * release sites spelled as the backstop form. Every other release site is
+     * a real transition and must keep the always-advance spelling -- if one of
+     * them were quietly converted to the backstop form, this fix would be
+     * inert again for that path, silently. */
+    char *pe = profile_executor_read_source();
+    if (!pe) {
+        TEST_CHECK(false, "could not locate drivers/control/profile_executor.c to source-scan");
+        return;
+    }
+    TEST_CHECK(strstr(pe, "heat_enable_release_backstop(HEAT_ENABLE_CLAIMANT_PROFILE);") != NULL,
+               "profile_executor.c's per-tick 'state is not RUNNING' branch must use the BACKSTOP "
+               "form -- with the plain form every idle tick would advance the stop generation and "
+               "spuriously refuse a legitimate run start that raced one");
+    TEST_CHECK(strstr(pe, "heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);") == NULL,
+               "...and profile_executor.c's tick loop has no plain release left in it");
+    free(pe);
+
+    char *he = heat_enable_read_source();
+    if (!he) {
+        TEST_CHECK(false, "could not locate drivers/control/heat_enable.c to source-scan");
+        return;
+    }
+    TEST_CHECK(strstr(he, "if (stop_transition || was_held) {") != NULL,
+               "MUST GO RED if the stop-generation advance goes back to being gated on was_held "
+               "alone -- that is precisely the inert form this fix replaced");
+    free(he);
 }
 
 static void test_reconcile_runs_last_in_the_watchdog_loop(void)
@@ -805,6 +931,7 @@ void run_test_heat_enable(void)
     test_flush_drives_the_exchange_at_most_once();
     test_reconcile_never_drives_the_blocking_exchange_unconditionally();
     test_stale_claim_is_not_resurrected();
+    test_stop_in_the_sample_then_spend_window_is_not_resurrected();
     test_reconcile_runs_last_in_the_watchdog_loop();
     test_flush_bound_comment_is_correctly_derived();
     test_bad_claimant();
