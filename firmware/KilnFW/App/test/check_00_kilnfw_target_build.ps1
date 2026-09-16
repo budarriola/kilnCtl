@@ -620,6 +620,27 @@ public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFile
         Write-Host "NOTE: idf.py build did not produce $ccPath -- check_compile_esp_backends.ps1 will report its own missing-file error." -ForegroundColor Yellow
     }
 
+    # ALSO PUBLISH THE SDKCONFIG THIS BUILD ACTUALLY USED (2026-09-15).
+    # check_all_task_stack_budgets.py adjudicates its Kconfig-gated task rows
+    # (gpio_probe, backlight_pwm) against the sdkconfig that produced the ELF
+    # it measures, and resolves that config from --elf: a config published IN
+    # the ELF's own directory wins over anything inferred from directory
+    # layout, and there is deliberately no repo-root fallback.
+    #
+    # The ELF published just above was built in $WorktreePath against
+    # $WorktreeSdkconfig -- which is NOT necessarily the invoking tree's own
+    # firmware\KilnFW\sdkconfig, because a fresh worktree has none (gitignored)
+    # and the provisioning step above falls back to the main worktree's
+    # board-tuned config. Publishing the ELF without the config that produced
+    # it therefore leaves that checker either grading against a config that did
+    # not build this ELF, or -- in a fresh worktree, which has no sdkconfig at
+    # all -- unable to adjudicate and failing even though THIS check just
+    # succeeded. Publishing the real one alongside makes the published artifact
+    # self-describing and closes both cases.
+    $sdkTmp = Join-Path $mainBuildDir "sdkconfig.tmp_$PID"
+    Publish-BuildArtifact -SourcePath $WorktreeSdkconfig -TempPath $sdkTmp -FinalPath (Join-Path $mainBuildDir "sdkconfig")
+    Write-Host "Published the sdkconfig this build used to $mainBuildDir"
+
     # check_duplicate_symbols.ps1 walks this project's own component object
     # directories (esp-idf\{App,drivers,kilnlink,hwabstraction_esp}\CMakeFiles\...)
     # under firmware\KilnFW\build\ in the MAIN tree -- not in this check's own

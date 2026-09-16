@@ -131,12 +131,18 @@ an INDETERMINATE task's true depth may be worse than what is printed.
 KCONFIG-GATED TASKS: two rows (gpio_probe, backlight_pwm) name a `kconfig`
 symbol because their task body is #if'd out when that option is off. Such a
 row is adjudicated against the sdkconfig belonging to the ELF being measured
-(--elf's ../sdkconfig, NOT the repo root's -- `sdkconfig` is gitignored and
-the shared main tree's differs from any clean worktree's): option on => the
-row is measured normally and a vanished root still FAILS; option off => the
-root is REQUIRED to be absent and is reported as excluded-by-config, and a
-root that resolves anyway FAILS as an ELF/sdkconfig disagreement. It is not
-a SKIP: the run still measures and grades every other row.
+(resolved from --elf, NOT from the repo root -- `sdkconfig` is gitignored and
+the shared main tree's differs from any clean worktree's; see
+use_sdkconfig_for_elf's RESOLUTION ORDER comment, which has no repo-root
+fallback and refuses archived ELFs outright): option on => the row is
+measured normally and a vanished root still FAILS; option off => the root is
+REQUIRED to be absent AND the task's source-side definition must still be
+present and still gated on that symbol, and the row is then reported as
+excluded-by-config; a root that resolves anyway FAILS as an ELF/sdkconfig
+disagreement. It is not a SKIP: the run still measures and grades every other
+row. `kconfig=` names a literal CONFIG_* symbol tested by a preprocessor
+conditional -- a root gated on a NORMALISED macro instead cannot be expressed
+this way; see verify_kconfig_guard().
 
 EXIT CODES: 0 OK (all ceiling-graded tasks within budget; INDETERMINATE tasks
 are noted, not failed, as long as their own known lower bound is within
@@ -199,38 +205,148 @@ def extract_local_macro(rel_path, define_pattern, usage_pattern):
 
 _SDKCONFIG_CACHE = {}
 
+# A real esp-idf sdkconfig carries on the order of 1500 CONFIG_ keys. Anything
+# at or under this floor is not a config this check is willing to grade a
+# build against -- see _load_sdkconfig()'s "USABLE" definition.
+MIN_PLAUSIBLE_SDKCONFIG_KEYS = 50
+
 # The sdkconfig that produced the ELF being measured. `sdkconfig` is
 # gitignored, so it differs between the shared main working tree (where a
 # bench operator may have toggled a debug option on) and any clean worktree
 # (where idf.py regenerates it from sdkconfig.defaults + Kconfig defaults).
 # Reading the wrong one is how a Kconfig-gated task's presence gets
-# mis-adjudicated -- so resolve it from --elf (build/KilnCtrl.elf ->
-# ../sdkconfig), not from the repo root, whenever the caller points this
-# check at another build.
+# mis-adjudicated.
+#
+# RESOLUTION ORDER, and why there is NO repo-root fallback (2026-09-15).
+# ---------------------------------------------------------------------
+# The original version of this resolution fell back to the repo-root
+# `sdkconfig` whenever --elf had no sibling config, silently and with no
+# warning -- which reinstated exactly the behaviour it was written to remove,
+# and could grade any ELF anywhere against whatever happens to be configured
+# in this tree right now. Resolution is now ordered, explicit, and terminal:
+#
+#   1. --sdkconfig, if the caller supplied one. Authoritative; must exist.
+#   2. `<elf-stem>.sdkconfig` or `sdkconfig` sitting IN the ELF's own
+#      directory -- a config PUBLISHED alongside the artifact it produced.
+#      This is the provenance-carrying case and it is preferred over
+#      anything inferred from directory layout.
+#   3. `<elf-dir>/../sdkconfig` -- the ordinary "ELF is in a build directory
+#      inside an esp-idf project" case. For the default
+#      build/KilnCtrl.elf this resolves to the project's live sdkconfig,
+#      which is correct: that build directory and that config are the same
+#      configuration of the same tree.
+#
+# ARCHIVED ELFs ARE REFUSED, not guessed at. KilnFW/elf_archive/ is a SIBLING
+# of build/, so rule 3 would resolve an archived ELF to the config of
+# whatever is configured NOW -- confidently the wrong file, and precisely the
+# provenance error the ELF archive exists to prevent (see CLAUDE.md's
+# "Symbolize a crash against the ELF that matches the RUNNING image"). Rule 3
+# is therefore not offered for an ELF sitting in an `elf_archive` directory:
+# absent a published sibling config (rule 2) or an explicit --sdkconfig
+# (rule 1), resolution FAILS and every row that needs the config says so.
+#
+# If nothing resolves, SDKCONFIG_PATH is None and _load_sdkconfig() raises
+# with SDKCONFIG_ORIGIN's explanation. That is deliberately a per-row FAIL,
+# not an "assume off".
 SDKCONFIG_PATH = DEFAULT_SDKCONFIG
+SDKCONFIG_ORIGIN = "module default (no ELF resolved yet)"
+
+ELF_ARCHIVE_DIRNAME = "elf_archive"
 
 
-def use_sdkconfig_for_elf(elf):
-    """Point sdkconfig reads at the config belonging to `elf`'s own build."""
-    global SDKCONFIG_PATH
-    cand = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(elf)),
-                                        os.pardir, "sdkconfig"))
-    SDKCONFIG_PATH = cand if os.path.isfile(cand) else DEFAULT_SDKCONFIG
+def _sdkconfig_candidates(elf):
+    """(path, human-readable origin) pairs, most authoritative first."""
+    elf_dir = os.path.dirname(os.path.abspath(elf))
+    stem = os.path.splitext(os.path.basename(elf))[0]
+    cands = [
+        (os.path.join(elf_dir, stem + ".sdkconfig"),
+         f"published beside the ELF as {stem}.sdkconfig"),
+        (os.path.join(elf_dir, "sdkconfig"),
+         "published inside the ELF's own directory"),
+    ]
+    if os.path.basename(elf_dir).lower() != ELF_ARCHIVE_DIRNAME:
+        cands.append((os.path.abspath(os.path.join(elf_dir, os.pardir, "sdkconfig")),
+                      "the ELF's build-directory parent"))
+    return cands
+
+
+def use_sdkconfig_for_elf(elf, explicit=None):
+    """Point sdkconfig reads at the config belonging to `elf`'s own build.
+
+    Returns (path_or_None, origin_description). Never silently falls back to
+    the repo root; see the RESOLUTION ORDER comment above."""
+    global SDKCONFIG_PATH, SDKCONFIG_ORIGIN
     _SDKCONFIG_CACHE.clear()
-    return SDKCONFIG_PATH
+    if explicit:
+        SDKCONFIG_PATH = os.path.abspath(explicit)
+        SDKCONFIG_ORIGIN = "supplied explicitly with --sdkconfig"
+        return SDKCONFIG_PATH, SDKCONFIG_ORIGIN
+    cands = _sdkconfig_candidates(elf)
+    for path, origin in cands:
+        if os.path.isfile(path):
+            SDKCONFIG_PATH = os.path.abspath(path)
+            SDKCONFIG_ORIGIN = origin
+            return SDKCONFIG_PATH, SDKCONFIG_ORIGIN
+    SDKCONFIG_PATH = None
+    tried = "; ".join(f"{p} ({o})" for p, o in cands)
+    if os.path.basename(os.path.dirname(os.path.abspath(elf))).lower() == ELF_ARCHIVE_DIRNAME:
+        SDKCONFIG_ORIGIN = (
+            f"UNRESOLVED: {elf} is an ARCHIVED ELF. The archive is a sibling of build/, so "
+            "the live project sdkconfig is NOT the config that produced this ELF and this "
+            "check refuses to grade an archived artifact against it. Tried: " + tried +
+            ". Supply the config that actually produced this ELF with --sdkconfig.")
+    else:
+        SDKCONFIG_ORIGIN = (
+            "UNRESOLVED: no sdkconfig found for this ELF (build the project first, or pass "
+            "--sdkconfig). Tried: " + tried +
+            ". There is deliberately no repo-root fallback: grading an ELF against a config "
+            "that did not produce it is the failure this resolution exists to prevent.")
+    return SDKCONFIG_PATH, SDKCONFIG_ORIGIN
 
 
 def _load_sdkconfig():
+    """Parse the resolved sdkconfig, or raise.
+
+    USABLE, defined (2026-09-15): the file exists, parses to at least
+    MIN_PLAUSIBLE_SDKCONFIG_KEYS `CONFIG_*=value` assignments, and contains
+    CONFIG_IDF_TARGET (which esp-idf writes into every generated sdkconfig,
+    and which sdkconfig.defaults pins for this project). Anything else --
+    empty, truncated mid-write, or garbage -- RAISES.
+
+    Before this, any file that could be opened was treated as authoritative
+    and a key simply missing from it read as "that option is off", so an
+    empty or half-written sdkconfig silently reported EVERY option disabled
+    and excused every Kconfig-gated row. That was inconsistent inside a
+    single run: the four CONFIG_KILNCTL_UART_*_STACK_SIZE rows read the same
+    file through _sdkconfig_value(), which has always FAILed loudly on a
+    missing key. A truncated sdkconfig is not hypothetical here -- this file
+    is copied between trees by check_00_kilnfw_target_build.ps1, and this
+    repo has had a non-atomic-publish incident already
+    (docs/audits/stack_budget_remeasure_after_elf_publish_bug_2026-09-10.md).
+    """
     if _SDKCONFIG_CACHE:
         return
+    if SDKCONFIG_PATH is None:
+        raise ValueError(SDKCONFIG_ORIGIN)
     if not os.path.isfile(SDKCONFIG_PATH):
         raise ValueError(f"no sdkconfig at {SDKCONFIG_PATH} (build the project first)")
+    parsed = {}
     for line in open(SDKCONFIG_PATH, encoding="utf-8", errors="replace"):
         if line.startswith("#"):
             continue  # "# CONFIG_X is not set" -- absence IS the 'n' value
         if "=" in line:
             k, _, v = line.strip().partition("=")
-            _SDKCONFIG_CACHE[k] = v
+            parsed[k] = v
+    config_keys = sum(1 for k in parsed if k.startswith("CONFIG_"))
+    if config_keys <= MIN_PLAUSIBLE_SDKCONFIG_KEYS or "CONFIG_IDF_TARGET" not in parsed:
+        raise ValueError(
+            f"{SDKCONFIG_PATH} exists but is not a usable sdkconfig: parsed {config_keys} "
+            f"CONFIG_* assignment(s) (need more than {MIN_PLAUSIBLE_SDKCONFIG_KEYS}) and "
+            f"CONFIG_IDF_TARGET is {'present' if 'CONFIG_IDF_TARGET' in parsed else 'ABSENT'}. "
+            "A real esp-idf sdkconfig has ~1500 keys. This is empty, truncated mid-write, or "
+            "not an sdkconfig at all -- refusing to read every option as 'off' from it, which "
+            "would silently excuse every Kconfig-gated row.")
+    _SDKCONFIG_CACHE.update(parsed)
 
 
 def _sdkconfig_value(key):
@@ -261,6 +377,31 @@ def extract_sdkconfig_macro(rel_path, usage_pattern, sdkconfig_key):
     return _sdkconfig_value(sdkconfig_key)
 
 
+def verify_kconfig_guard(rel_path, key):
+    """Confirm `rel_path` still gates something on `key` with a preprocessor
+    conditional. Used only on the EXCLUDED path -- see main()'s "SOURCE-SIDE
+    VERIFICATION" note. Matches `#if`/`#elif` mentioning the literal key, so
+    it holds for both `#if CONFIG_X` (backlight_pwm.c:57) and the negated
+    `#if !CONFIG_X` (gpio_probe.c:7).
+
+    NOTE, and this is the limit of what `kconfig=` can express: the key is
+    matched as a literal CONFIG_* symbol in a preprocessor conditional. A
+    root gated instead by a NORMALISED macro (drivers/hw/settings.h defines
+    e.g. KILNCTL_SPI_ASYNC_FLUSH as 1/0 from CONFIG_KILNCTL_SPI_ASYNC_FLUSH,
+    and the #if names the normalised macro, not the CONFIG_ key) cannot be
+    described by this mechanism. No TASKS root is gated that way today; if
+    one ever is, this table needs a real indirection, not a `kconfig=` key --
+    otherwise the row would fall through to "missing root = FAIL"."""
+    text = _read(rel_path)
+    pat = r'^[ \t]*#[ \t]*(?:if|elif)\b[^\n]*\b' + re.escape(key) + r'\b'
+    if not re.search(pat, text, re.M):
+        raise ValueError(
+            f"no `#if`/`#elif` line in {rel_path} mentions {key}. This row declares that task "
+            f"is compiled out by {key}, but the source no longer gates it on that symbol "
+            "(option renamed, guard removed, or the file restructured), so the root's absence "
+            "from the ELF cannot honestly be attributed to that option being off.")
+
+
 # ---------------------------------------------------------------------------
 # TASKS: one row per stack_margin_register() call site with no dedicated
 # checker of its own. `root` is the task's own C entry function (the first
@@ -281,6 +422,7 @@ TASKS = [
          # turned it on locally for bench work -- see the `kconfig` handling
          # in main().
          kconfig="CONFIG_KILNCTL_ENABLE_GPIO_PROBE",
+         kconfig_src="drivers/bridge/gpio_probe.c",
          stack=lambda: extract_int_literal("drivers/bridge/gpio_probe.c",
              r'xTaskCreatePinnedToCoreWithCaps\(gpio_probe_task,\s*"gpio_probe",\s*(\d+)')),
     dict(name="link_watchdog", root="link_watchdog_task",
@@ -328,6 +470,7 @@ TASKS = [
          # explicitly told by that Kconfig help text to turn it off, and this
          # check must stay correct on such a board too.
          kconfig="CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE",
+         kconfig_src="drivers/hw/backlight_pwm.c",
          stack=lambda: extract_int_literal("drivers/hw/backlight_pwm.c",
              r'xTaskCreate\(backlight_pwm_task,\s*"backlight_pwm",\s*(\d+)')),
     dict(name="i2c_owner_ns2009", root="i2c_owner_task",
@@ -491,6 +634,10 @@ def main():
     # Negative-test hooks: force one task's measured numbers to force a FAIL deterministically
     # without touching production code (used by the human negative test on a copy of the ELF).
     ap.add_argument("--force-ceiling", metavar="TASK=BYTES", action="append", default=[])
+    ap.add_argument("--sdkconfig", default=None,
+                     help="the sdkconfig that produced --elf. Normally inferred from --elf "
+                          "(see use_sdkconfig_for_elf); REQUIRED for an ELF in elf_archive/, "
+                          "whose producing config is not the project's live one.")
     args = ap.parse_args()
 
     forced_ceilings = {}
@@ -498,7 +645,13 @@ def main():
         k, _, v = item.partition("=")
         forced_ceilings[k] = int(v)
 
-    use_sdkconfig_for_elf(args.elf)
+    sdk_path, sdk_origin = use_sdkconfig_for_elf(args.elf, args.sdkconfig)
+    # Say out loud which config this run is grading against. A run must never
+    # be able to quietly grade an ELF against a config that did not produce it.
+    if sdk_path is None:
+        print(f"check_all_task_stack_budgets: sdkconfig: {sdk_origin}")
+    else:
+        print(f"check_all_task_stack_budgets: sdkconfig: {sdk_path} ({sdk_origin})")
 
     if not os.path.isfile(args.elf):
         print("check_all_task_stack_budgets: SKIP: no ELF at " + args.elf)
@@ -557,6 +710,39 @@ def main():
                     lib.resolve_root(parsed, task["root"], args.elf, addr2line,
                                      task.get("expect_path"))
                 except ValueError:
+                    # SOURCE-SIDE VERIFICATION OF AN EXCLUDED ROW (2026-09-15).
+                    # Absence from the ELF alone is one-sided evidence. With
+                    # the option off -- which for gpio_probe is EVERY clean
+                    # worktree and every default build -- a task that had been
+                    # deleted or renamed outright in source produces exactly
+                    # the same absence, and the previous version of this branch
+                    # reported it as "confirmed absent" and exited 0. (Proved
+                    # by deleting gpio_probe_task from gpio_probe.c: the check
+                    # passed.) An `#if` that no longer matches the declared
+                    # symbol was always caught, loudly and in the safe
+                    # direction, by the disagreement FAIL just below -- plain
+                    # deletion was the real hole.
+                    #
+                    # So an excluded row is excused from MEASURING the symbol
+                    # in the ELF, never from knowing the code is still there:
+                    # the row's own stack= extractor must still match its
+                    # xTaskCreate* call site (which pins the task function name
+                    # AND the stack literal), and the file must still gate
+                    # something on the Kconfig symbol this row names. Both are
+                    # pure source reads -- no measurement cost, and insensitive
+                    # to whether the task was compiled in.
+                    try:
+                        task["stack"]()
+                        verify_kconfig_guard(task["kconfig_src"], kcfg)
+                    except (ValueError, OSError) as e:
+                        errors.append(
+                            f"{tname}: {kcfg} is off in {SDKCONFIG_PATH} and root symbol "
+                            f"{task['root']!r} is correctly absent from the ELF -- but the "
+                            f"SOURCE-side definition could not be confirmed: {e} "
+                            "A Kconfig-gated row is excused from being measured in the ELF, "
+                            "never from still existing in source; 'compiled out' and "
+                            "'deleted' must not look the same to this check.")
+                        continue
                     excluded.append((tname, kcfg))
                     continue
                 errors.append(
@@ -624,10 +810,24 @@ def main():
         return 1
 
     if args.dump_ceilings:
+        # Excluded rows appear too, commented, so the dump is a COMPLETE
+        # picture of the table. Previously this returned before the
+        # excluded-row report and a baseline regenerated with an option off
+        # simply omitted that row with no trace -- self-correcting (a later
+        # build with the option on FAILs with "no CEILING_BYTES entry") but a
+        # foot-gun for whoever regenerates the table.
         print("CEILING_BYTES = {")
         for r in results:
             print(f'    "{r["task"]["name"]}": {r["total"]},')
+        for tname, kcfg in excluded:
+            print(f'    # "{tname}": EXCLUDED from this dump -- {kcfg} is off in '
+                  f"{SDKCONFIG_PATH}, so it was not measured. Keep this row's existing "
+                  "CEILING_BYTES value, or re-dump with that option on to capture it.")
         print("}")
+        if excluded:
+            print(f"# {len(excluded)} of {len(results) + len(excluded)} table row(s) are missing "
+                  "above because their Kconfig option is off in this build -- this dump is NOT a "
+                  "complete replacement for CEILING_BYTES.")
         return 0
 
     for tname, kcfg in excluded:
