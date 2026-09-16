@@ -23,16 +23,31 @@
 #       Exit-BuildLock -Lock $lock
 #   }
 
+# THE MUTEX NAME IS PUBLIC, NOT AN INTERNAL DETAIL (2026-09-16, N3 of
+# docs/audits/review_check00_d1_d6_closure_2026-09-16.md).
+# check_00_kilnfw_target_build.ps1's prune pass has to build the name of a
+# lock it does not own, so that it can test whether ANOTHER tree's check run
+# is currently using the build directory it is about to delete. Until now it
+# spelled "Global\kilnCtl_buildlock_" out itself, giving two copies of a
+# naming contract expressed nowhere -- CLAUDE.md's "reset one side of a pair"
+# class, and a one-character drift there was measured to flip a held-lock case
+# straight back to deleting a directory mid-build, silently. Both sides now
+# call this one function, so the contract cannot drift.
+function Get-BuildLockMutexName {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    # "Global\" makes this visible across all sessions/users on the machine,
+    # not just the current one -- two separate agent/session processes must
+    # see the same mutex.
+    return "Global\kilnCtl_buildlock_$Name"
+}
+
 function Enter-BuildLock {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
         [int]$TimeoutSeconds = 900
     )
 
-    # "Global\" makes this visible across all sessions/users on the machine,
-    # not just the current one -- two separate agent/session processes must
-    # see the same mutex.
-    $mutexName = "Global\kilnCtl_buildlock_$Name"
+    $mutexName = Get-BuildLockMutexName -Name $Name
     $mutex = New-Object System.Threading.Mutex($false, $mutexName)
 
     $acquired = $false

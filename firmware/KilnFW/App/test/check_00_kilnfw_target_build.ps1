@@ -255,11 +255,24 @@ if (-not (Test-Path -LiteralPath $MainSdkconfig)) {
 # happens to be named that way would therefore have been read as "gone" and its
 # build directory `git worktree remove --force`d and `Remove-Item -Recurse`d out
 # from under a running build. No bracketed worktree existed when this was found,
-# so it never fired; it is closed here rather than left latent. The literal
-# .NET predicate is used instead of `Test-Path -LiteralPath` so the marker's
-# `-Encoding ascii` `?` substitution for a non-ASCII path can no longer be
-# rescued by `?` being a single-character wildcard: a marker that does not name
-# a path that literally exists now fails the test honestly rather than by luck.
+# so it never fired; it is closed here rather than left latent.
+#
+# THE MARKER MUST BE UTF-8, OR THE LITERAL PREDICATE IS ITSELF A DELETION PATH
+# (2026-09-16, N1 of docs/audits/review_check00_d1_d6_closure_2026-09-16.md).
+# The first version of this fix argued that the literal .NET predicate was
+# better than `Test-Path -LiteralPath` because the marker's then `-Encoding
+# ascii` write substituted `?` for any non-ASCII character, and `Test-Path`
+# only matched such a marker because `?` is a single-character wildcard --
+# "honestly failing rather than matching by luck". That direction is INVERTED
+# and was measured to be so: for a live owner whose path contains a non-ASCII
+# character the path really does exist, the marker is what is lossy, and the
+# wildcard was load-bearing safety. `Test-Path` returned True and kept the
+# directory; `[Directory]::Exists` returns False and PRUNES it -- D1's own
+# failure shape, a live session's build directory deleted, reached through a
+# different trigger. The actual fix is upstream of the predicate: the marker is
+# now written and read as UTF-8 without a BOM (see the write site below), so it
+# round-trips every path NTFS can name. With a faithful marker the literal
+# predicate is both correct and safe, and neither half can be dropped.
 #
 # AND IT MUST NOT RACE THE VICTIM'S OWN BUILD. This loop deliberately runs
 # OUTSIDE the $LockName lock taken further down -- and moving it inside would
@@ -271,17 +284,33 @@ if (-not (Test-Path -LiteralPath $MainSdkconfig)) {
 # later run prunes it. The owner-is-gone condition is permanent, so deferring
 # costs nothing but disk until the next invocation.
 foreach ($stale in (Get-ChildItem -LiteralPath "C:\wt" -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '^checkbuild_[0-9a-f]{10}$' })) {
+        Where-Object { $_.Name -cmatch '^checkbuild_[0-9a-f]{10}$' })) {
+    # -cmatch, not -match (2026-09-16, N5 of
+    # docs/audits/review_check00_d1_d6_closure_2026-09-16.md): PowerShell's
+    # -match is case-insensitive, so it accepts uppercase hex, while Win32
+    # mutex names are case-SENSITIVE -- a mutex named with uppercase hex was
+    # measured to be acquirable independently of its lowercase twin, so a
+    # directory named that way would read as unlocked no matter who was
+    # building in it. This script only ever generates lowercase hex, so the
+    # case is unreachable today; the case-sensitive match keeps the directory
+    # name and the mutex name agreeing on exactly one spelling.
     if ([string]::Equals($stale.FullName, $WorktreePath, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
     $staleMarker = Join-Path $stale.FullName ".checkbuild_source"
     if (-not (Test-Path -LiteralPath $staleMarker)) { continue }
-    $owner = (Get-Content -LiteralPath $staleMarker -Raw -ErrorAction SilentlyContinue)
+    # Read as UTF-8, matching the write site's encoding exactly -- see the N1
+    # note above. Get-Content -Raw with no -Encoding uses the ANSI codepage in
+    # Windows PowerShell 5.1 and would mangle exactly the paths the UTF-8 write
+    # exists to preserve.
+    $owner = $null
+    try { $owner = [System.IO.File]::ReadAllText($staleMarker, [System.Text.Encoding]::UTF8) } catch { $owner = $null }
     if (-not $owner) { continue }
     $owner = $owner.Trim()
     if ([System.IO.Directory]::Exists($owner) -or [System.IO.File]::Exists($owner)) { continue }
 
     $staleTag = $stale.Name.Substring("checkbuild_".Length)
-    $staleMutex = New-Object System.Threading.Mutex($false, "Global\kilnCtl_buildlock_kilnfw_checkbuild_worktree_$staleTag")
+    # The lock name comes from build_lock.ps1's own name builder, never from a
+    # second copy of the "Global\kilnCtl_buildlock_" literal (2026-09-16, N3).
+    $staleMutex = New-Object System.Threading.Mutex($false, (Get-BuildLockMutexName -Name "kilnfw_checkbuild_worktree_$staleTag"))
     $staleHeld = $false
     try {
         try {
@@ -292,6 +321,20 @@ foreach ($stale in (Get-ChildItem -LiteralPath "C:\wt" -Directory -ErrorAction S
         }
         if (-not $staleHeld) {
             Write-Host "Not pruning $($stale.FullName): its owning tree '$owner' is gone, but its build lock is currently HELD -- a run is still using that directory. Leaving it for a later invocation rather than deleting a directory mid-build." -ForegroundColor Yellow
+            continue
+        }
+        # RE-TEST UNDER THE LOCK (2026-09-16, N6 of the same review). The
+        # owner-exists test above ran before the lock was taken, and the owning
+        # tree can be recreated at the same path in between (an agent worktree
+        # removed and re-added, or a `git worktree add` that has started but
+        # not yet reached its own Enter-BuildLock). Re-testing here means the
+        # decision to delete is made with the victim's lock actually in hand,
+        # which -- together with the victim now taking that lock BEFORE it
+        # creates its directory and writes its marker (see the lock site
+        # below) -- leaves no window in which a live tree's directory is
+        # deleted.
+        if ([System.IO.Directory]::Exists($owner) -or [System.IO.File]::Exists($owner)) {
+            Write-Host "Not pruning $($stale.FullName): its owning tree '$owner' reappeared between the first check and acquiring its build lock." -ForegroundColor Yellow
             continue
         }
         Write-Host "Pruning stale build worktree $($stale.FullName) -- its tree '$owner' no longer exists"
@@ -308,13 +351,29 @@ foreach ($stale in (Get-ChildItem -LiteralPath "C:\wt" -Directory -ErrorAction S
     }
 }
 
-if (-not (Test-Path -LiteralPath $WorktreePath)) {
-    Write-Host "Setting up persistent build worktree at $WorktreePath (first run for this tree) ..."
-    & git -C $repoRoot worktree add --detach $WorktreePath $headCommit 2>&1 | Write-Host
-    if ($LASTEXITCODE -ne 0) {
-        Fail "git worktree add failed (exit $LASTEXITCODE)"
+# THE LOCK COVERS DIRECTORY CREATION AND THE MARKER WRITE TOO (2026-09-16, N6
+# of docs/audits/review_check00_d1_d6_closure_2026-09-16.md). It used to be
+# taken only just before the mirror, so this tree created its own build
+# directory and wrote its own ownership marker while holding nothing -- and a
+# concurrent pruner that had already decided "owner gone" (a tree removed and
+# recreated at the same path) could hold that same per-tree lock and delete the
+# directory out from under a run that was still starting up. Taking it here,
+# before the directory exists, means every operation this script performs
+# against $WorktreePath -- create, mark, mirror, build, publish -- happens under
+# the one lock a pruner must acquire before it can touch that directory.
+#
+# The prune loop above deliberately stays OUTSIDE this lock: it is this tree's
+# lock, and every directory the prune can delete belongs to a different tree
+# and is guarded by that tree's own lock, which the prune takes separately.
+$lock = Enter-BuildLock -Name $LockName
+try {
+    if (-not (Test-Path -LiteralPath $WorktreePath)) {
+        Write-Host "Setting up persistent build worktree at $WorktreePath (first run for this tree) ..."
+        & git -C $repoRoot worktree add --detach $WorktreePath $headCommit 2>&1 | Write-Host
+        if ($LASTEXITCODE -ne 0) {
+            Fail "git worktree add failed (exit $LASTEXITCODE)"
+        }
     }
-}
 
 # WRITE THE OWNERSHIP MARKER IMMEDIATELY (2026-09-16, D5 of the same review).
 # Until now the marker was written far below, after the mirror and the sentinel
@@ -323,9 +382,38 @@ if (-not (Test-Path -LiteralPath $WorktreePath)) {
 # prune above skips markerless directories unconditionally (by design: that is
 # what keeps it away from hand-made worktrees). Such a directory was therefore
 # unreclaimable forever. Writing the marker here, the moment the directory is
-# known to exist and before anything that can fail, means every directory this
-# script creates is prunable from its first instant.
-Set-Content -LiteralPath $MarkerFile -Value $repoRootFull -Encoding ascii
+# known to exist, means every directory this script creates is prunable from
+# very close to its first instant.
+#
+# NOT "before anything that can fail" (2026-09-16, N4 of
+# docs/audits/review_check00_d1_d6_closure_2026-09-16.md, which correctly
+# caught that overclaim in the previous wording). The `git worktree add` above
+# and its exit-code Fail sit between the directory appearing and this write.
+# The reachable failures there are benign -- a bad commit-ish exits 128 having
+# created nothing, and the one case that does leave a directory behind
+# (a non-empty destination) is excluded by the Test-Path guard above -- but the
+# window is not empty, and the claim should not say it is.
+#
+# UTF-8, NO BOM, AND A HARD FAILURE IF IT CANNOT BE WRITTEN (2026-09-16, N1 and
+# N4 of docs/audits/review_check00_d1_d6_closure_2026-09-16.md). Two separate
+# defects, one call site:
+#   * -Encoding ascii substituted "?" for every non-ASCII character, so the
+#     marker did not name the tree it claimed to. Once the prune's owner test
+#     became literal (D1) that turned directly into "delete a live owner's
+#     build directory" -- see the long N1 note at the prune loop. UTF-8
+#     round-trips every path NTFS can name; no BOM, so the bytes are the path
+#     and nothing else. The prune reads it back with the same encoding.
+#   * Set-Content raises a NON-TERMINATING error under this script's
+#     $ErrorActionPreference = "Continue", so a failed marker write simply
+#     printed red text and carried on, leaving exactly the unreclaimable
+#     ~425 MB markerless directory D5 set out to eliminate, with no signal in
+#     the check's own verdict. [File]::WriteAllText throws, and the throw is
+#     converted into this script's own loud Fail.
+try {
+    [System.IO.File]::WriteAllText($MarkerFile, $repoRootFull, (New-Object System.Text.UTF8Encoding($false)))
+} catch {
+    Fail "could not write the ownership marker $MarkerFile ($($_.Exception.Message)) -- refusing to continue, because an unmarked build directory is never reclaimed by the prune pass above and would leak ~425 MB permanently."
+}
 
 # CONTENT test, not merely the presence of the .git file: a /MIR with a
 # mis-specified exclude has emptied this directory before while leaving .git
@@ -404,8 +492,9 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
 # The lock NAME is per-tree for the same reason the directory is: runs from
 # different trees now touch disjoint directories, so making them queue behind
 # one global mutex would serialize work that cannot actually collide.
-$lock = Enter-BuildLock -Name $LockName
-try {
+    # (The lock is taken further up now, before the build worktree directory is
+    # created and its ownership marker written -- see N6 at that site. It used
+    # to be taken here.)
     Write-Host "Mirroring current firmware/KilnFW, firmware/hwAbstraction and firmware/CommonFW into $WorktreePath ..."
     # NESTED build\ DIRECTORIES MUST BE NAMED EXPLICITLY (2026-09-16, D4 of
     # docs/audits/review_check00_per_tree_build_2026-09-15.md). Making the /XD
@@ -419,8 +508,20 @@ try {
     # wasted I/O carrying host .obj/.exe artifacts that the target build has no
     # use for. They are listed here so the absolute form covers what the bare
     # name used to, without giving back the ambiguity the bare name had.
+    #
+    # THE LIST WAS STILL INCOMPLETE (2026-09-16, N2 of
+    # docs/audits/review_check00_d1_d6_closure_2026-09-16.md). The version above
+    # named the nested host-test build trees but not firmware\CommonFW\build --
+    # 427 files, 67.9 MB in the main tree, roughly three times what the D4 fix
+    # recovered, mirrored on every run by both the bare-name and absolute-path
+    # versions of this code. firmware\KilnFW\.venv (942 files, 12.7 MB,
+    # containing among other things pip's own .../operations/build) is a Python
+    # virtualenv, not target-build input, and is excluded here for the same
+    # reason. Adding a new build-output or tooling directory under these three
+    # trees means adding it here: /XD with an absolute path covers exactly one
+    # directory, by design.
     Mirror-Tree (Join-Path $repoRoot "firmware\KilnFW") (Join-Path $WorktreePath "firmware\KilnFW") `
-        @("build", "App\test\build", "components\lvgl", ".git") @("sdkconfig")
+        @("build", "App\test\build", ".venv", "components\lvgl", ".git") @("sdkconfig")
     Mirror-Tree (Join-Path $repoRoot "firmware\hwAbstraction") (Join-Path $WorktreePath "firmware\hwAbstraction") `
         @("test\build", ".git") @()
     # firmware/CommonFW (kilnlink) -- added 2026-09-14. The worktree's OWN git
@@ -441,7 +542,7 @@ try {
     # this worktree's own (stale) checkout unless mirrored the same way the
     # other two trees are.
     Mirror-Tree (Join-Path $repoRoot "firmware\CommonFW") (Join-Path $WorktreePath "firmware\CommonFW") `
-        @("test\build", ".git") @()
+        @("build", "test\build", ".git") @()
 
     # DID THE MIRROR ACTUALLY DELIVER THIS TREE'S SOURCE? A check that cannot
     # see the source it was invoked to grade must FAIL loudly, never quietly
@@ -483,13 +584,36 @@ try {
     # not "this tree's source got mirrored", which is what the failure text
     # claims. This closes that gap by additionally pinning the ONE file whose
     # staleness the mirror is actually there to prevent: the most recently
-    # modified mirrored source file in the invoking tree. That is by
-    # construction the edit a no-op mirror would have failed to deliver -- the
-    # uncommitted change this check exists to catch before it is even
-    # committed. An unchanged tree passes trivially (the copy is already
-    # correct, which is the legitimate no-op case the freshness signal below
-    # also accommodates); a tree carrying a fresh edit cannot pass unless that
-    # edit physically arrived in the build worktree.
+    # modified mirrored source file in the invoking tree. An unchanged tree
+    # passes trivially (the copy is already correct, which is the legitimate
+    # no-op case the freshness signal below also accommodates); a tree carrying
+    # a fresh edit cannot pass unless that edit physically arrived in the build
+    # worktree.
+    #
+    # WHAT THE WITNESS ALONE DOES AND DOES NOT PROVE (2026-09-16, N7 of
+    # docs/audits/review_check00_d1_d6_closure_2026-09-16.md). The original
+    # wording here claimed the witness was "by construction the edit a no-op
+    # mirror would have failed to deliver". That is FALSE and was measured to
+    # be: the witness is whatever file has the newest mtime, which is the
+    # edited file only when nothing else in three trees was touched more
+    # recently, and `robocopy /MIR` SKIPS a file whose source and destination
+    # have the same size and the same mtime even when the contents differ
+    # (measured: destination kept its old bytes, robocopy exited 0). A stale
+    # .c can therefore ride in behind an unrelated newer witness. The witness
+    # is still a real strengthening over three rarely-changing CMakeLists.txt
+    # pairs and is load-bearing -- poisoning the mirror fails the check here,
+    # before idf.py runs -- but it is a sample, not a proof.
+    #
+    # So the witness is backed below by a CONTENT check over every file git
+    # reports as modified or untracked in the three mirrored trees. That set is
+    # exactly "the uncommitted change this check exists to catch before it is
+    # even committed", named by content rather than by mtime, so neither an
+    # unrelated newer file nor robocopy's same-size/same-mtime skip can hide
+    # one. The residual gap, stated plainly: a COMMITTED change that a stale
+    # destination copy happens to match in both size and mtime is still not
+    # detected by either assertion. Closing that needs hashing every mirrored
+    # file (thousands, every run) or /FFT-style forced copies; it is not
+    # closed here, and no assertion in this block claims otherwise.
     #
     # The exclusions mirror Mirror-Tree's own: anything under a build\ tree,
     # the lvgl submodule, .git, and sdkconfig (handled separately by the
@@ -520,6 +644,39 @@ try {
         Fail "after mirroring, $witnessDst still differs from the invoking tree's $witnessRel -- that is the most recently modified source file in this tree (mtime $($witness.LastWriteTime)), so the build worktree is grading source older than this tree's newest edit."
     }
     Write-Host "Mirror witness: $witnessRel (newest-modified source, $($witness.LastWriteTime)) is present and byte-identical in the build worktree."
+
+    # CONTENT-NAMED WITNESS SET: every uncommitted change in the mirrored trees
+    # (2026-09-16, N7). Selected by git, not by mtime, so robocopy's
+    # same-size/same-mtime skip cannot hide one behind an unrelated newer file.
+    $dirtyPorcelain = @(& git -C $repoRoot status --porcelain --untracked-files=all -- "firmware/KilnFW" "firmware/hwAbstraction" "firmware/CommonFW" 2>$null)
+    $dirtyChecked = 0
+    foreach ($line in $dirtyPorcelain) {
+        if (-not $line -or $line.Length -lt 4) { continue }
+        $path = $line.Substring(3).Trim()
+        # Renames are reported as "old -> new"; only the destination exists.
+        if ($path -match '\s->\s') { $path = ($path -split '\s->\s')[-1] }
+        $path = $path.Trim('"').Replace('/', '\')
+        if ($path -match '\\build\\' -or $path -match '^firmware\\CommonFW\\build\\' -or
+            $path -match '\\components\\lvgl\\' -or $path -match '\\\.venv\\' -or
+            $path -match '\\sdkconfig$' -or $path -match '\\$') { continue }
+        $dirtySrc = Join-Path $repoRoot $path
+        # A deletion has no source file; /MIR removes the destination copy, and
+        # a destination that is already absent is equally correct.
+        if (-not (Test-Path -LiteralPath $dirtySrc)) { continue }
+        $dirtyDst = Join-Path $WorktreePath $path
+        if (-not (Test-Path -LiteralPath $dirtyDst)) {
+            Fail "the mirror step did not deliver $dirtyDst -- $path is an uncommitted change in this tree (git reports it as '$($line.Substring(0,2))'), i.e. precisely the edit this check exists to grade before it is committed, and it is absent from the build worktree."
+        }
+        if ((Get-FileHash -LiteralPath $dirtySrc -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $dirtyDst -Algorithm SHA256).Hash) {
+            Fail "after mirroring, $dirtyDst still differs from the invoking tree's $path -- that is an uncommitted change in this tree, so the build worktree is grading source that is not this tree's. (robocopy /MIR skips a file whose source and destination share a size and an mtime even when the contents differ; this assertion is what catches that.)"
+        }
+        $dirtyChecked++
+    }
+    if ($dirtyChecked -gt 0) {
+        Write-Host "Mirror content check: all $dirtyChecked uncommitted change(s) in the mirrored trees are present and byte-identical in the build worktree."
+    } else {
+        Write-Host "Mirror content check: git reports no uncommitted changes in the mirrored trees, so the newest-source witness above is the only freshness assertion available."
+    }
     if (-not (Test-Path -LiteralPath $lvglCMake)) {
         Fail "$lvglCMake is missing after the mirror step -- the lvgl component has been deleted out of the build worktree. Downstream this surfaces as a confusing 'Failed to resolve component lvgl' CMake error rather than as the checkout problem it actually is."
     }
