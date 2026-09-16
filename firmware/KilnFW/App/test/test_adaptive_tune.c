@@ -298,6 +298,9 @@ void profile_executor_get_status(profile_exec_status_t *out)
 #define ATCF_MKDIR(p) mkdir((p), 0755)
 #define ATCF_RMDIR(p) rmdir(p)
 #endif
+#include "cfg_fs.h" /* cfg_fs_init()/_deinit()/_is_available()/_exists() -- the ki-baseline
+                       * cfg_fs tests below call these directly. Was relying on an implicit
+                       * declaration (C4013); now an error. */
 
 // ---------------------------------------------------------------------
 // Test helpers

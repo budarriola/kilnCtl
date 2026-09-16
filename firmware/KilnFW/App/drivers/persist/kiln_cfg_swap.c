@@ -13,7 +13,7 @@
 #include "kiln_package.h"
 #include "ota_state.h" /* ota_http_check_interlocks()/OTA_INTERLOCK_OK -- same predicate
                         * kiln_cfg_store_apply() itself is built on, section 4.3 */
-#include "safety_cfg_http.h" /* safety_cfg_http_apply_package_and_confirm()/_set_and_confirm_f32() */
+#include "safety_cfg_write.h" /* safety_cfg_write_apply_package_and_confirm()/_set_and_confirm_f32() */
 #include "safety_cfg_store.h" /* safety_cfg_store_refetch()/_get_by_index()/_param_count()/_cached_crc() */
 #include "safety_ceiling_sync.h" /* safety_ceiling_sync_reconcile_on_link_up()/_is_diverged()/
                                   * SAFETY_PARAM_ID_ABS_MAX_TEMP_C */
@@ -198,7 +198,7 @@ bool kiln_cfg_swap_is_pending(void)
  * still return the expected hash" if fed an echo rather than a fresh
  * fetch). Float fields are compared through config_identity_normalize_f32()
  * -- imported here by value rather than by #include, since this file
- * already has its own float-text round trip via safety_cfg_http's %.9g
+ * already has its own float-text round trip via safety_cfg_write's %.9g
  * encode and does not need config_divergence.h's whole API for a single
  * field compare; duplicating exactly ONE normalization step (not the
  * general identity/hash machinery, which item 7 already owns) avoids a
@@ -282,7 +282,7 @@ static bool push_and_verify_pico(SafetyLinkClass *link, const kiln_pkg_safety_t 
 {
     char push_reason[KILN_CFG_SWAP_REASON_MAX];
     push_reason[0] = '\0';
-    if (!safety_cfg_http_apply_package_and_confirm(link, pkg, volatile_install, push_reason, sizeof(push_reason),
+    if (!safety_cfg_write_apply_package_and_confirm(link, pkg, volatile_install, push_reason, sizeof(push_reason),
                                                     NULL)) {
         /* Precision cap (.181s), not a magic number: GCC's -Werror=format-
          * truncation can prove push_reason's DECLARED size (KILN_CFG_SWAP_
@@ -380,7 +380,7 @@ static bool rollback(SafetyLinkClass *link, const kiln_cfg_swap_pending_t *p, bo
             memcpy(&r_ceiling, &p->rollback_pico.entries[i].value_bits, sizeof(r_ceiling));
             char ceiling_reason[KILN_CFG_SWAP_REASON_MAX];
             ceiling_reason[0] = '\0';
-            if (!safety_cfg_http_set_and_confirm_f32_volatile(link, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, r_ceiling,
+            if (!safety_cfg_write_set_and_confirm_f32_volatile(link, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, r_ceiling,
                                                               ceiling_reason, sizeof(ceiling_reason), NULL)) {
                 ESP_LOGW(TAG, "rollback: could not restore the Pico's pre-swap ceiling directly (%s) -- "
                               "the standing reconcile-on-link-up call below is a second attempt",
@@ -421,7 +421,7 @@ static bool rollback(SafetyLinkClass *link, const kiln_cfg_swap_pending_t *p, bo
  * (volatile_install=false) -- i.e. section 1a.4's case 1, "persist what is
  * now proven live". Ceiling is pushed too (this is the one place a flash
  * write of the ceiling is attempted for a swap; the flash-writing single-
- * field wrapper is safety_cfg_http_set_and_confirm_f32(), unchanged, NOT
+ * field wrapper is safety_cfg_write_set_and_confirm_f32(), unchanged, NOT
  * the volatile variant this module otherwise uses).
  *
  * ALLOWED TO FAIL, always, with only a log line -- an ARMED refusal here
@@ -445,7 +445,7 @@ static void persist_pico_flash_fallback(SafetyLinkClass *link, const kiln_pkg_sa
     if (have_target_ceiling) {
         char ceiling_reason[KILN_CFG_SWAP_REASON_MAX];
         ceiling_reason[0] = '\0';
-        if (!safety_cfg_http_set_and_confirm_f32(link, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, target_ceiling,
+        if (!safety_cfg_write_set_and_confirm_f32(link, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, target_ceiling,
                                                  ceiling_reason, sizeof(ceiling_reason), NULL)) {
             ESP_LOGI(TAG, "step 13 (flash fallback): ceiling flash persist did not land (%s) -- expected "
                           "while ARMED, swap already succeeded via the volatile install, not a failure",
@@ -454,7 +454,7 @@ static void persist_pico_flash_fallback(SafetyLinkClass *link, const kiln_pkg_sa
     }
     char push_reason[KILN_CFG_SWAP_REASON_MAX];
     push_reason[0] = '\0';
-    if (!safety_cfg_http_apply_package_and_confirm(link, target_pico, /*volatile_install=*/false, push_reason,
+    if (!safety_cfg_write_apply_package_and_confirm(link, target_pico, /*volatile_install=*/false, push_reason,
                                                     sizeof(push_reason), NULL)) {
         ESP_LOGI(TAG, "step 13 (flash fallback): config flash persist did not land (%s) -- expected while "
                       "ARMED, swap already succeeded via the volatile install, not a failure",
@@ -525,8 +525,8 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
     /* step 4: ceiling raise-first (lower-last is handled at step 10 via
      * safety_ceiling_sync_reconcile_on_link_up(), see this file's header
      * comment). Item 15: goes through the volatile install
-     * (safety_cfg_http_set_and_confirm_f32_volatile()), NEVER the flash-
-     * writing safety_cfg_http_set_and_confirm_f32() the standing ceiling-
+     * (safety_cfg_write_set_and_confirm_f32_volatile()), NEVER the flash-
+     * writing safety_cfg_write_set_and_confirm_f32() the standing ceiling-
      * reconcile loop still uses -- this raise is part of a swap the owner's
      * rule requires to never disarm the Pico, and the flash path is
      * unconditionally refused while ARMED (the Pico's ordinary running
@@ -547,7 +547,7 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
     if (raise_first) {
         char sub[KILN_CFG_SWAP_REASON_MAX];
         sub[0] = '\0';
-        if (!safety_cfg_http_set_and_confirm_f32_volatile(link, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, target_ceiling, sub,
+        if (!safety_cfg_write_set_and_confirm_f32_volatile(link, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, target_ceiling, sub,
                                                           sizeof(sub), NULL)) {
             clear_pending();
             snprintf(reason_out, reason_cap, "could not raise the Pico's ceiling before the swap: %s", sub);

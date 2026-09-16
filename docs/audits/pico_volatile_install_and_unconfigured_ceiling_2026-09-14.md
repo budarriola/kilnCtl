@@ -199,7 +199,7 @@ working: the primary interlock chain is untouched.
   `config_store_write_volatile()`.
 - `firmware/KilnFW` target build (`check_00_kilnfw_target_build.ps1`): FAILED,
   attributed to concurrent work, NOT this change --
-  `drivers/http/safety_cfg_http.c:1132: 'SAFETY_PARAM_ID_ABS_MAX_TEMP_C'
+  `drivers/safety/safety_cfg_write.c:687: 'SAFETY_PARAM_ID_ABS_MAX_TEMP_C'
   undeclared` and a `kiln_cfg_store.c` `-Werror=format-truncation`, both in
   files this pass never touched (owned by the concurrent kiln-package/
   zones_config_accessors work). Neither symbol nor file appears in this

@@ -154,7 +154,7 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
 // implementation (safety_ceiling_sync.c, linked into this executable as a
 // plain .c file -- see build_host_tests.ps1) calls THIS function to actually
 // stage+commit+confirm the Pico write. The real body
-// (safety_cfg_http.c's safety_cfg_http_set_and_confirm_f32()) lives inside a
+// (safety_cfg_write.c's safety_cfg_write_set_and_confirm_f32()) lives inside a
 // giant ESP-httpd-owning translation unit this executable has no business
 // pulling in (same "fake body, not the real file" reasoning as
 // relay_cycles_set_type() above) -- so this fake always reports success,
@@ -172,7 +172,7 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
 static int s_ceiling_writer_calls = 0;
 static float s_ceiling_writer_last_target_c = 0.0f;
 
-bool safety_cfg_http_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_id, float value,
+bool safety_cfg_write_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_id, float value,
                                           char *reason_out, size_t reason_cap,
                                           safety_ceiling_refusal_class_t *out_class)
 {
@@ -9721,7 +9721,7 @@ static void test_zones_current_sweep_start_atomic_gate_closes_the_race(void)
 // safety_poll_task tick the link is up (safety_link_poll.c), it re-derives
 // the ESP's own ceiling target and re-runs the same guard_raise() the POST
 // handler uses. These three tests exercise it directly, using the same
-// fake safety_cfg_http_set_and_confirm_f32() (now call-counted) every other
+// fake safety_cfg_write_set_and_confirm_f32() (now call-counted) every other
 // ceiling-adjacent test in this file already relies on.
 static void reconcile_test_reset(void)
 {

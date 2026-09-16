@@ -60,10 +60,10 @@ the header already promises.
 
 ### HIGH 2 -- an ARMED refusal wedges the divergence indefinitely
 
-`safety_cfg_http.c:1265` gates the recapture on `if (ok && commit)`, and
+`safety_cfg_http.c:652` gates the recapture on `if (ok && commit)`, and
 `ok` is false whenever the Pico refuses the write. `KILNLINK_COMMIT_CONFIG_REJECT_ARMED`
 ("relay is ARMED -- config writes are refused while ARMED",
-`safety_cfg_http.c:833`) is now a common refusal given the tc_type rules.
+`safety_cfg_write.c:313`) is now a common refusal given the tc_type rules.
 
 No other production path pushes the broadened/standing field set:
 `safety_ceiling_sync_reconcile_on_link_up()` pushes `abs_max_temp_c` only

@@ -147,7 +147,7 @@ $patterns = @(
     "safety_link_request_enable",
     "nvs_save_store",
     "zone_normals_save",
-    # WIDENED 2026-09-09 (opus review defect A): safety_cfg_http.c's
+    # WIDENED 2026-09-09 (opus review defect A): the commissioning write path's
     # apply_pairs() called estop_verification_clear() as a bare statement and
     # then returned true, so a failed clear left a standing "verified"
     # E-stop record while the POST reported success -- the same discard shape

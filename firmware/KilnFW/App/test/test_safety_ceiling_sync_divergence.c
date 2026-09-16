@@ -66,7 +66,7 @@ int g_test_count = 0;
 
 #include "MAX31856.h"
 #include "config_divergence.h"
-#include "safety_cfg_http.h"
+#include "safety_cfg_write.h"
 #include "safety_cfg_store.h"
 #include "safety_ceiling_sync.h"
 
@@ -272,7 +272,7 @@ bool safety_cfg_store_lookup(uint16_t param_id, uint8_t *out_type, const char **
 }
 
 // ---------------------------------------------------------------------
-// Fake: safety_cfg_http_set_and_confirm_f32() -- the Pico-write half of a
+// Fake: safety_cfg_write_set_and_confirm_f32() -- the Pico-write half of a
 // RAISE. This file is not exercising the raise/backoff machinery
 // (test_safety_ceiling_policy.c already owns that, at the pure-logic
 // layer) -- it only needs the reconcile call this test drives to complete
@@ -280,7 +280,7 @@ bool safety_cfg_store_lookup(uint16_t param_id, uint8_t *out_type, const char **
 // mirrors the write into the same fake Pico-ceiling cache above, exactly
 // the way a real confirmed write would update safety_cfg_store's cache.
 // ---------------------------------------------------------------------
-bool safety_cfg_http_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_id, float value, char *reason_out,
+bool safety_cfg_write_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_id, float value, char *reason_out,
                                           size_t reason_cap, safety_ceiling_refusal_class_t *out_class)
 {
     (void)link;
@@ -320,7 +320,7 @@ static void hook_counters_reset(void)
 
 // A non-NULL SafetyLinkClass* is all safety_ceiling_sync_reconcile_on_
 // link_up() needs to treat the link as "up" -- it is never dereferenced by
-// this file's fakes (safety_cfg_http_set_and_confirm_f32() above ignores
+// this file's fakes (safety_cfg_write_set_and_confirm_f32() above ignores
 // its `link` argument, same as test_zones_http.c's identical fake), so an
 // uninitialized-but-non-NULL pointer is sufficient and standard practice
 // in this test suite (test_zones_http.c's `(SafetyLinkClass *)1`).

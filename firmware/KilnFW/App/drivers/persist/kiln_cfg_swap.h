@@ -19,13 +19,13 @@
 //   2. snapshot the CURRENT live state (R) and persist it into the pending-
 //      swap record, marker=STAGED. This is the crash-recovery anchor.
 //   4. if P's ceiling is >= the Pico's CURRENT ceiling: raise it now, before
-//      touching anything else, via safety_cfg_http_set_and_confirm_f32_
+//      touching anything else, via safety_cfg_write_set_and_confirm_f32_
 //      volatile() (item 15, SAFETY_CMD_APPLY_CONFIG_VOLATILE/0x2D -- NEVER
-//      the flash-writing safety_cfg_http_set_and_confirm_f32() the standing
+//      the flash-writing safety_cfg_write_set_and_confirm_f32() the standing
 //      ceiling-reconcile loop still uses; see docs/audits/kiln_swap_
 //      volatile_wiring_2026-09-14.md for why).
 //   5. marker=PICO_OPEN, persist.
-//   6. push every OTHER Pico param, also volatile (safety_cfg_http_apply_
+//   6. push every OTHER Pico param, also volatile (safety_cfg_write_apply_
 //      package_and_confirm(..., volatile_install=true, ...)) -- the Pico
 //      never leaves ARMED for the whole transaction, forward or rollback.
 //   7. read back (that same call's confirm-by-readback) and compare field-

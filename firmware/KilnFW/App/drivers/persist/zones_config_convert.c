@@ -5,6 +5,7 @@
 // in this file has a public entry point of its own.
 #include "zones_config_json_internal.h"
 
+#include <stdio.h> /* snprintf() -- implicit declaration otherwise; C4013/-Werror=implicit-function-declaration */
 #include <string.h>
 
 /* ZONES_CFG_VERSION 20->21 (docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs): every historical

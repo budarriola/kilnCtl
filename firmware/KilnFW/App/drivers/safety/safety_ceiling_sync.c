@@ -13,25 +13,31 @@
 #include "MAX31856.h"
 #include "config_divergence.h"
 #include "hal_time.h" /* hal_time_now_us() -- HAL_INCLUDE_BOUNDARY: this file must not include esp_timer.h directly */
-/* 2026-09-15 review follow-up (item G), PARTIALLY closed. The finding was
- * that a safety/ module including an http/ header is a layering inversion.
- * The part that could honestly be fixed was the recent-ARMED-refusal
- * timestamp: it was a bare file static in safety_cfg_http.c read through
- * this header, and it now lives in safety_cfg_store (which this file
- * already depends on, and which is the natural owner of Pico-config state
- * -- the HTTP handler writes it, this file reads it).
+/* 2026-09-15 review follow-up (item G), NOW FULLY CLOSED (2026-09-16). The
+ * finding was that a safety/ module including an http/ header is a layering
+ * inversion. Two parts:
  *
- * The include itself must STAY: ceiling_writer() below genuinely calls
- * safety_cfg_http_set_and_confirm_f32(), the stage/commit/confirm-by-read-
- * back machinery this file must not reimplement. Removing the include was
- * tried and is a live defect, not a cosmetic one -- with no prototype, C
- * assumes "extern returning int", the float target is passed under default
- * argument promotion, and the Pico ceiling gets written as 0. It was caught
- * by test_zones_http.c'"'"'s reconcile test (target read back 0.0 instead of
- * 1200.0), NOT by the compiler, which only emits a warning. Untangling that
- * dependency properly means moving the write machinery out of http/, which
- * is a larger refactor than this review item. */
-#include "safety_cfg_http.h"
+ *  - The recent-ARMED-refusal timestamp was a bare file static in
+ *    safety_cfg_http.c read through that header; it moved to
+ *    safety_cfg_store (the natural owner of Pico-config state -- the HTTP
+ *    handler writes it, this file reads it) on 2026-09-15.
+ *
+ *  - The remaining reason for the include was pico_ceiling_writer() below,
+ *    which calls the stage/commit/confirm-by-read-back machinery this file
+ *    must not reimplement. That machinery has now MOVED OUT of http/ into
+ *    drivers/safety/safety_cfg_write.c, where it belongs: a set-and-confirm
+ *    primitive over the safety link is safety-layer work, and http/ is now
+ *    one of its callers. The http/ include is gone as a result.
+ *
+ * Why this mattered: an earlier attempt to close this by simply deleting
+ * the #include left the call with no prototype in scope, C assumed "extern
+ * returning int", the float target went through default argument promotion,
+ * and the Pico ceiling was written as 0. Only test_zones_http.c's reconcile
+ * test caught it (target read back 0.0 instead of 1200.0); the compiler
+ * merely warned. That warning is now an ERROR on this component
+ * (-Werror=implicit-function-declaration, App/drivers/CMakeLists.txt), so
+ * the same mistake cannot compile again here or anywhere else in App/. */
+#include "safety_cfg_write.h"
 #include "safety_cfg_store.h"
 #include "zones_config_accessors.h"
 
@@ -205,7 +211,7 @@ bool safety_ceiling_sync_is_standing_diverged(char *reason_out, size_t reason_ca
 /* The writer callback safety_ceiling_policy.c calls. `ctx` is the
  * SafetyLinkClass* to write through (may be NULL -- handled below, callers
  * of THIS file never reach a NULL-link writer call because both entry
- * points short-circuit on `!link` first). Reuses safety_cfg_http.c's
+ * points short-circuit on `!link` first). Reuses safety_cfg_write.c's
  * apply_pairs()/confirm_commit_landed() machinery via its public wrapper --
  * stage, commit, and a live read-back that proves the value landed, never
  * a bare ACK. */
@@ -213,7 +219,7 @@ static bool pico_ceiling_writer(void *ctx, float target_c, char *reason_out, siz
                                  safety_ceiling_refusal_class_t *out_class)
 {
     SafetyLinkClass *link = (SafetyLinkClass *)ctx;
-    return safety_cfg_http_set_and_confirm_f32(link, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, target_c, reason_out,
+    return safety_cfg_write_set_and_confirm_f32(link, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, target_c, reason_out,
                                                 reason_cap, out_class);
 }
 
@@ -549,7 +555,7 @@ static void enforce_ceiling_divergence(float target_c, bool target_known, float 
     } else {
         /* 2026-09-15 review (HIGH 2): a mismatch here often cannot be
          * corrected right now because a commissioning re-push was refused
-         * while the relay is ARMED -- see safety_cfg_http_recent_armed_
+         * while the relay is ARMED -- see safety_cfg_store_recent_armed_
          * refusal()'s doc comment. Naming that explicitly turns "config
          * mismatch, no visible remedy" (the shape most likely to end with
          * this warning ignored or silenced) into "disarm and retry", an

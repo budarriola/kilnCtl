@@ -215,6 +215,11 @@ try {
     $hostTestsRspLines = @(
         "/nologo"
         "/W3"
+        # C4013 "undefined; assuming extern returning int" -- the MSVC spelling
+        # of -Werror=implicit-function-declaration. Promoted to an ERROR
+        # 2026-09-16: a missing prototype on the Pico ceiling write path passed
+        # a float under default argument promotion and wrote the ceiling as 0.
+        "/we4013"
         "/EHsc"
         "/I`"$stubDir`""
         "/I`"$commonInc`""

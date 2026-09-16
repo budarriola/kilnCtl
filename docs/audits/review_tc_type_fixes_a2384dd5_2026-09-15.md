@@ -84,7 +84,7 @@ reconnect. `zones_http_post.c:239` still overwrites any submitted value with its
 ### F1 (MEDIUM): the two new wire reject reasons have no consumer on the ESP
 `KILNLINK_COMMIT_CONFIG_REJECT_ARMED_HEAT_ON (5)` and `_ARMED_HEAT_UNKNOWN (6)` are emitted by
 `link_task.c:2460-2480` but appear nowhere on the ESP side:
-- `commit_reject_reason_words()` (`safety_cfg_http.c:828-837`) has cases only for
+- `commit_reject_reason_words()` (`safety_cfg_write.c:308-317`) has cases only for
   RANGE/CONTRADICTION/ARMED/STORAGE; 5 and 6 fall to `default: "refused (unrecognised reason)"`.
 - `reject_reason_to_refusal_class()` (`:848-856`) likewise defaults to
   `SAFETY_CEILING_REFUSAL_OTHER`.

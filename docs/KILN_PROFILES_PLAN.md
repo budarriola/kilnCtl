@@ -41,8 +41,8 @@ already has:
 | a working dropdown UI with save / clone / rename / delete / apply | `firmware/KilnFW/App/drivers/http/main_page.html`, from ~line 1313 |
 | firing interlock already enforced inside `kiln_cfg_store_apply()` | `kiln_cfg_store.c:767` |
 | whole-system JSON export/import (profiles + zones), two-pass validate-then-commit, heap-not-stack candidate arrays | `http/backup_export.c`, `http/backup_import.c` |
-| Pico param set-and-confirm ("never trust a bare ACK") | `safety_cfg_http_set_and_confirm_f32()`, `http/safety_cfg_http.c:1043` |
-| batched multi-param commit + confirm | `apply_pairs()` / `confirm_commit_landed()`, same file |
+| Pico param set-and-confirm ("never trust a bare ACK") | `safety_cfg_write_set_and_confirm_f32()`, `safety/safety_cfg_write.c:521` |
+| batched multi-param commit + confirm | `safety_cfg_write_apply_pairs()` / `confirm_commit_landed()`, same file |
 | Pico ceiling mirroring policy, apply-lower/guard-raise ordering, link-up reconcile | `safety/safety_ceiling_sync.c` |
 | ESP-side cache of all 68 Pico params, plus the Pico's live `config_crc` arriving in every telemetry frame | `safety/safety_cfg_store.c`, `SAFETY_CFG_PARAM_COUNT 68` |
 

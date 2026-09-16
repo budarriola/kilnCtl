@@ -365,6 +365,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # enforcement calls, also intended for the planned
                        # multi-kiln config-swap feature to build on.
                        "safety/config_divergence.c"
+                       "safety/safety_cfg_write.c"
                        "http/safety_cfg_http.c"
                        # GET /api/saftyfw_stack_margin -- surfaces
                        # safety_link_get_stack_margin() (SaftyFW's nine live
@@ -521,3 +522,25 @@ add_dependencies(${COMPONENT_LIB} drivers_build_info)
 # REQUIRES would not help: that is the dependency that already exists, and in
 # the wrong direction for this.
 idf_component_add_link_dependency(FROM lvgl)
+
+# 2026-09-16: an implicit function declaration is a HARD ERROR in this
+# component, not a warning.
+#
+# Why: drivers/safety/safety_ceiling_sync.c called a write primitive that
+# lived in drivers/http/. An attempt to close that layering inversion by
+# deleting the #include left the call with no prototype in scope; C assumed
+# "extern int f()", the float argument went through default argument
+# promotion, and THE PICO ABS-MAX-TEMP CEILING WAS WRITTEN AS 0. The compiler
+# only warned. A host test was the only thing that caught it.
+#
+# This covers every first-party driver source -- safety/, persist/, http/,
+# control/, net/, owners/, ui/, hw/ -- since they all compile into
+# ${COMPONENT_LIB}. PRIVATE, so it never leaks onto vendored/managed
+# components (lvgl, joltwallet__littlefs) that are not ours to fix.
+# -Werror=implicit-int and -Werror=int-conversion are the two adjacent
+# failure modes of the same missing-declaration class and cost nothing.
+target_compile_options(${COMPONENT_LIB} PRIVATE
+    -Werror=implicit-function-declaration
+    -Werror=implicit-int
+    -Werror=int-conversion
+)

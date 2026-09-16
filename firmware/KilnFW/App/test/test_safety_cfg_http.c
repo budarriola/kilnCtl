@@ -1,6 +1,6 @@
 // Host test for App/drivers/http/safety_cfg_http.c's pure/static helpers --
 // parse_set_param_body() (the id=/value= form tokenizer), parse_value_for_
-// type(), build_commissioning_json() and apply_pairs(). Own SEPARATE
+// type(), build_commissioning_json() and safety_cfg_write_apply_pairs(). Own SEPARATE
 // executable (build_host_tests.ps1's third build+run step), same reason
 // test_zones_http.c is: safety_cfg_http.c's static functions have no other
 // seam, so this file #includes it directly, which means defining its OWN
@@ -39,7 +39,7 @@ const uint8_t safety_commissioning_page_html_gz_start[] = { 0x1f, 0x8b, 0x00 };
 const uint8_t safety_commissioning_page_html_gz_end[] = { 0x00 };
 
 // web_encoding.h -- reached only from the page handler, which these tests do
-// not exercise (they cover the JSON builder, the tokenizer and apply_pairs).
+// not exercise (they cover the JSON builder, the tokenizer and safety_cfg_write_apply_pairs).
 // Same stub bodies test_zones_http.c uses for the identical reason.
 esp_err_t web_send_gzip_not_acceptable(httpd_req_t *req, const char *tag, const char *page_name)
 {
@@ -54,6 +54,7 @@ bool web_client_accepts_gzip(httpd_req_t *req)
     return true;
 }
 
+#include "../drivers/safety/safety_cfg_write.c"
 #include "../drivers/http/safety_cfg_http.c"
 
 // ---------------------------------------------------------------------------
@@ -80,7 +81,7 @@ void web_set_asset_cache_headers(httpd_req_t *r);
 void web_set_asset_cache_headers(httpd_req_t *r) { (void)r; }
 // Captures the last body handed to httpd_resp_send() -- needed only by the
 // rate_guard_auto handler-level tests below (test_build_json_* and the
-// apply_pairs tests all call the static helpers directly and never look at
+// safety_cfg_write_apply_pairs tests all call the static helpers directly and never look at
 // this). Every pre-existing caller of httpd_resp_send() is unaffected: the
 // stub's return value and (void) semantics for callers that ignore the
 // capture are unchanged.
@@ -139,7 +140,7 @@ static uint8_t s_stub_lookup_type = KILNLINK_PARAM_TYPE_U16;
 static const char *s_stub_lookup_name = "stub_field";
 // LOW fix (2026-08-27 audit): call-numbered controls so a test can make
 // safety_cfg_store_lookup() behave differently on confirm_commit_landed()'s
-// OWN (post-refetch) call than it did during apply_pairs()'s earlier staging
+// OWN (post-refetch) call than it did during safety_cfg_write_apply_pairs()'s earlier staging
 // call for the very same pair -- the only way to reach the "believed
 // unreachable" branches confirm_commit_landed() now fails on instead of
 // silently skipping. Both default OFF so every pre-existing test (which
@@ -215,7 +216,7 @@ bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t crc)
 // 2026-09-10 opus review, blocking-call fix: confirm_commit_landed() now
 // calls THIS non-blocking sibling instead when `nonblocking_refetch` is
 // true -- the ceiling-reconcile writer's own call path
-// (safety_cfg_http_set_and_confirm_f32() -> apply_pairs_ex(..., true)),
+// (safety_cfg_write_set_and_confirm_f32() -> apply_pairs_ex(..., true)),
 // which is the only caller in this file's build that ever runs on
 // safety_poll_task. Deliberately a SEPARATE counter/result from the
 // blocking stub above (not shared) so
@@ -534,7 +535,7 @@ esp_err_t safety_link_send_apply_config_volatile(SafetyLinkClass *link, uint16_t
 // executable (test_safety_cfg_http.c #includes safety_cfg_http.c directly),
 // so it cannot link the real estop_verification.c the way main_boot_early.c
 // does on target -- a fake here, same as every safety_link.h/safety_cfg_
-// store.h stub above, is enough to prove apply_pairs() calls the clear on a
+// store.h stub above, is enough to prove safety_cfg_write_apply_pairs() calls the clear on a
 // 0x0212 commit and NOT on any other param.
 // ---------------------------------------------------------------------------
 static int s_stub_estop_verif_clear_calls = 0;
@@ -765,23 +766,23 @@ static void test_parse_rejects_dangling_id(void)
 
 static void test_parse_value_for_type_bounds(void)
 {
-    TEST_SECTION("parse_value_for_type -- accepts in-range, rejects out-of-range/garbage per wire type");
+    TEST_SECTION("safety_cfg_write_parse_value_for_type -- accepts in-range, rejects out-of-range/garbage per wire type");
     kilnlink_param_value_t v;
-    TEST_CHECK(parse_value_for_type("1", KILNLINK_PARAM_TYPE_BOOL, &v) && v.bool_val == 1,
+    TEST_CHECK(safety_cfg_write_parse_value_for_type("1", KILNLINK_PARAM_TYPE_BOOL, &v) && v.bool_val == 1,
                "bool '1' parses");
-    TEST_CHECK(parse_value_for_type("2", KILNLINK_PARAM_TYPE_BOOL, &v) == false,
+    TEST_CHECK(safety_cfg_write_parse_value_for_type("2", KILNLINK_PARAM_TYPE_BOOL, &v) == false,
                "bool '2' is out of range (0/1 only)");
-    TEST_CHECK(parse_value_for_type("255", KILNLINK_PARAM_TYPE_U8, &v) && v.u8_val == 255,
+    TEST_CHECK(safety_cfg_write_parse_value_for_type("255", KILNLINK_PARAM_TYPE_U8, &v) && v.u8_val == 255,
                "u8 accepts its max value");
-    TEST_CHECK(parse_value_for_type("256", KILNLINK_PARAM_TYPE_U8, &v) == false, "u8 rejects 256");
-    TEST_CHECK(parse_value_for_type("65535", KILNLINK_PARAM_TYPE_U16, &v) && v.u16_val == 65535,
+    TEST_CHECK(safety_cfg_write_parse_value_for_type("256", KILNLINK_PARAM_TYPE_U8, &v) == false, "u8 rejects 256");
+    TEST_CHECK(safety_cfg_write_parse_value_for_type("65535", KILNLINK_PARAM_TYPE_U16, &v) && v.u16_val == 65535,
                "u16 accepts its max value");
-    TEST_CHECK(parse_value_for_type("70000", KILNLINK_PARAM_TYPE_U16, &v) == false, "u16 rejects 70000");
-    TEST_CHECK(parse_value_for_type("123.5", KILNLINK_PARAM_TYPE_F32, &v) && v.f32_val > 123.0f,
+    TEST_CHECK(safety_cfg_write_parse_value_for_type("70000", KILNLINK_PARAM_TYPE_U16, &v) == false, "u16 rejects 70000");
+    TEST_CHECK(safety_cfg_write_parse_value_for_type("123.5", KILNLINK_PARAM_TYPE_F32, &v) && v.f32_val > 123.0f,
                "f32 parses a decimal");
-    TEST_CHECK(parse_value_for_type("not_a_number", KILNLINK_PARAM_TYPE_F32, &v) == false,
+    TEST_CHECK(safety_cfg_write_parse_value_for_type("not_a_number", KILNLINK_PARAM_TYPE_F32, &v) == false,
                "garbage text is rejected, not parsed as 0");
-    TEST_CHECK(parse_value_for_type("12abc", KILNLINK_PARAM_TYPE_U16, &v) == false,
+    TEST_CHECK(safety_cfg_write_parse_value_for_type("12abc", KILNLINK_PARAM_TYPE_U16, &v) == false,
                "trailing garbage after a valid-looking prefix is rejected, not truncated");
 }
 
@@ -982,7 +983,7 @@ static void test_stale_flag_reflects_crc_mismatch(void)
 
 static void test_apply_pairs_all_succeed_with_commit(void)
 {
-    TEST_SECTION("apply_pairs -- every pair staged, commit ACKed -- success, empty reason");
+    TEST_SECTION("safety_cfg_write_apply_pairs -- every pair staged, commit ACKed -- success, empty reason");
     reset_all();
     SafetyLinkClass fake_link;
     memset(&fake_link, 0, sizeof(fake_link));
@@ -1004,7 +1005,7 @@ static void test_apply_pairs_all_succeed_with_commit(void)
     s_stub_params[1].set = true;
     s_stub_params[1].value.u16_val = 75;
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 2, true, reason, sizeof(reason), NULL);
+    bool ok = safety_cfg_write_apply_pairs(&fake_link, pairs, 2, true, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == true, "all staged and committed successfully");
     TEST_CHECK(reason[0] == '\0', "no reason text on success");
     TEST_CHECK(s_stub_set_param_calls == 2, "both pairs were staged");
@@ -1019,7 +1020,7 @@ static void test_apply_pairs_all_succeed_with_commit(void)
 // re-sent polarity value is the SAME one that was verified against.
 static void test_apply_pairs_estop_polarity_commit_clears_verification(void)
 {
-    TEST_SECTION("apply_pairs -- a landed commit of param 0x0212 (estop_active_level) clears "
+    TEST_SECTION("safety_cfg_write_apply_pairs -- a landed commit of param 0x0212 (estop_active_level) clears "
                  "estop_verification");
     reset_all();
     SafetyLinkClass fake_link;
@@ -1033,7 +1034,7 @@ static void test_apply_pairs_estop_polarity_commit_clears_verification(void)
     s_stub_params[0].set = true;
     s_stub_params[0].value.u8_val = 1;
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
+    bool ok = safety_cfg_write_apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == true, "commit landed");
     TEST_CHECK(s_stub_estop_verif_clear_calls == 1,
                "a landed commit that includes 0x0212 clears the E-stop verification exactly once");
@@ -1044,7 +1045,7 @@ static void test_apply_pairs_estop_polarity_commit_clears_verification(void)
 // every successful commit.
 static void test_apply_pairs_unrelated_commit_does_not_clear_verification(void)
 {
-    TEST_SECTION("apply_pairs -- a landed commit of an unrelated param does NOT clear "
+    TEST_SECTION("safety_cfg_write_apply_pairs -- a landed commit of an unrelated param does NOT clear "
                  "estop_verification");
     reset_all();
     SafetyLinkClass fake_link;
@@ -1057,7 +1058,7 @@ static void test_apply_pairs_unrelated_commit_does_not_clear_verification(void)
     s_stub_params[0].set = true;
     s_stub_params[0].value.u16_val = 100;
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
+    bool ok = safety_cfg_write_apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == true, "commit landed");
     TEST_CHECK(s_stub_estop_verif_clear_calls == 0,
                "a landed commit of an unrelated param must NOT touch estop_verification");
@@ -1066,7 +1067,7 @@ static void test_apply_pairs_unrelated_commit_does_not_clear_verification(void)
 // ---------------------------------------------------------------------------
 // 2026-08-27 audit fix: "ok cannot fail" -- a commit that the Pico's link
 // layer ACKed and that arrived with no REJECTED frame inside the reply
-// window used to be reported as success unconditionally (apply_pairs()
+// window used to be reported as success unconditionally (safety_cfg_write_apply_pairs()
 // returned true straight off safety_link_send_commit_config()'s return
 // value). That is provably not proof of anything: SET_PARAM/COMMIT_CONFIG are
 // both fire-and-forget UART broadcasts (uart_protocol_send_broadcast()
@@ -1074,12 +1075,12 @@ static void test_apply_pairs_unrelated_commit_does_not_clear_verification(void)
 // ever meant "we didn't SEE a refusal", never "the Pico actually wrote it".
 // confirm_commit_landed() is what turns that into a real proof -- these three
 // tests exercise exactly the three ways a "successful" commit could still be
-// a lie, and prove apply_pairs() now catches every one of them.
+// a lie, and prove safety_cfg_write_apply_pairs() now catches every one of them.
 // ---------------------------------------------------------------------------
 
 static void test_apply_pairs_readback_mismatch_fails_even_when_acked_and_not_rejected(void)
 {
-    TEST_SECTION("apply_pairs -- ACKed, not rejected, but the read-back does NOT match -- must FAIL");
+    TEST_SECTION("safety_cfg_write_apply_pairs -- ACKed, not rejected, but the read-back does NOT match -- must FAIL");
     reset_all();
     SafetyLinkClass fake_link;
     memset(&fake_link, 0, sizeof(fake_link));
@@ -1091,7 +1092,7 @@ static void test_apply_pairs_readback_mismatch_fails_even_when_acked_and_not_rej
     // three times while live_config_crc never moved and the Pico's own
     // histogram showed commit_config_rejected=2.
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
+    bool ok = safety_cfg_write_apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == false, "a commit that ACKed but did not actually land is reported as FAILED");
     TEST_CHECK(reason[0] != '\0', "a non-empty reason is produced");
     TEST_CHECK(strstr(reason, "does not read back") != NULL || strstr(reason, "FAILED") != NULL,
@@ -1103,14 +1104,14 @@ static void test_apply_pairs_readback_mismatch_fails_even_when_acked_and_not_rej
 // type", scope-expanded to tc_offset_c, 0x010A): same class of test as
 // test_apply_pairs_readback_mismatch_fails_even_when_acked_and_not_rejected()
 // above, but naming tc_offset_c specifically -- confirm_commit_landed()/
-// apply_pairs() are generic over param_id, so this does not exercise new
+// safety_cfg_write_apply_pairs() are generic over param_id, so this does not exercise new
 // code, but the task brief asks for the read-back-verification negative test
 // to explicitly cover the new field, not just its siblings. F32 (not the
 // U16 the other tests default to), and a negative, non-integer value so a
 // sign or truncation bug could not accidentally pass.
 static void test_apply_pairs_tc_offset_c_readback_mismatch_fails(void)
 {
-    TEST_SECTION("apply_pairs -- tc_offset_c (0x010A) ACKed, not rejected, but the read-back "
+    TEST_SECTION("safety_cfg_write_apply_pairs -- tc_offset_c (0x010A) ACKed, not rejected, but the read-back "
                  "does NOT match -- must FAIL, not report success");
     reset_all();
     s_stub_lookup_type = KILNLINK_PARAM_TYPE_F32;
@@ -1122,7 +1123,7 @@ static void test_apply_pairs_tc_offset_c_readback_mismatch_fails(void)
     // reports tc_offset_c back as -4.25 after the "commit", the exact shape
     // of a write that ACKed on the wire but did not really land.
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
+    bool ok = safety_cfg_write_apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == false,
                "a tc_offset_c commit that ACKed but did not actually land is reported as FAILED, "
                "never as success -- a wrong safety-TC calibration offset silently believed to be "
@@ -1135,24 +1136,24 @@ static void test_apply_pairs_tc_offset_c_readback_mismatch_fails(void)
 
 // 2026-09-10 opus review, second finding: confirm_commit_landed() used to
 // call the BLOCKING safety_cfg_store_refetch() (portMAX_DELAY) unconditionally
-// -- correct for every httpd-worker caller of apply_pairs(), but a documented
+// -- correct for every httpd-worker caller of safety_cfg_write_apply_pairs(), but a documented
 // rule violation for the ceiling-reconcile writer (safety_ceiling_sync.c),
 // which runs on safety_poll_task and must never block on s_store_lock behind
 // an httpd commissioning POST (safety_cfg_store.c:1488-1510's own "ONLY path
-// safety_poll_task may take" rule). safety_cfg_http_set_and_confirm_f32() is
+// safety_poll_task may take" rule). safety_cfg_write_set_and_confirm_f32() is
 // that writer's entry point, and is now the ONLY caller in this file's build
 // that reaches apply_pairs_ex() with nonblocking_refetch=true.
 //
 // This is the negative-test-shaped proof the blocking-call fix is real: it
 // checks CALL COUNTS on the two separately-tracked stubs, not just a return
 // value both stubs could satisfy identically. Break the fix by hand (e.g.
-// have safety_cfg_http_set_and_confirm_f32() call apply_pairs_ex(...,
+// have safety_cfg_write_set_and_confirm_f32() call apply_pairs_ex(...,
 // /*nonblocking_refetch=*/false) instead) and this test fails: s_stub_
 // refetch_calls becomes 1 and s_stub_refetch_nonblocking_calls becomes 0,
 // the exact inversion of what this asserts.
 static void test_set_and_confirm_f32_uses_nonblocking_refetch(void)
 {
-    TEST_SECTION("safety_cfg_http_set_and_confirm_f32 -- the ceiling-reconcile writer's confirm "
+    TEST_SECTION("safety_cfg_write_set_and_confirm_f32 -- the ceiling-reconcile writer's confirm "
                  "step uses the NON-BLOCKING refetch, never the blocking one safety_poll_task must "
                  "not call");
     reset_all();
@@ -1166,7 +1167,7 @@ static void test_set_and_confirm_f32_uses_nonblocking_refetch(void)
     s_stub_params[0].value.f32_val = 120.0f;
     char reason[160];
     safety_ceiling_refusal_class_t out_class = SAFETY_CEILING_REFUSAL_OTHER;
-    bool ok = safety_cfg_http_set_and_confirm_f32(&fake_link, 0x0104u, 120.0f, reason, sizeof(reason),
+    bool ok = safety_cfg_write_set_and_confirm_f32(&fake_link, 0x0104u, 120.0f, reason, sizeof(reason),
                                                    &out_class);
     TEST_CHECK(ok == true, "staged, committed, and confirmed by read-back");
     TEST_CHECK(s_stub_refetch_nonblocking_calls == 1,
@@ -1179,14 +1180,14 @@ static void test_set_and_confirm_f32_uses_nonblocking_refetch(void)
 
 static void test_apply_pairs_refetch_failure_reports_unconfirmed_not_success(void)
 {
-    TEST_SECTION("apply_pairs -- the live read-back itself fails (link trouble) -- reported UNCONFIRMED");
+    TEST_SECTION("safety_cfg_write_apply_pairs -- the live read-back itself fails (link trouble) -- reported UNCONFIRMED");
     reset_all();
     s_stub_refetch_result = false; // safety_cfg_store_refetch() could not complete
     SafetyLinkClass fake_link;
     memset(&fake_link, 0, sizeof(fake_link));
     safety_cfg_post_pair_t pairs[1] = { { .param_id = 0x0104u, .value_text = "1300" } };
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
+    bool ok = safety_cfg_write_apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == false, "an unconfirmable commit is never reported as success");
     TEST_CHECK(strstr(reason, "UNCONFIRMED") != NULL || strstr(reason, "could not read") != NULL,
                "the reason is honest about not knowing, not a fabricated success or a fabricated field name");
@@ -1194,7 +1195,7 @@ static void test_apply_pairs_refetch_failure_reports_unconfirmed_not_success(voi
 
 static void test_apply_pairs_late_rejection_attaches_pico_reason_to_confirmed_failure(void)
 {
-    TEST_SECTION("apply_pairs -- a REJECTED frame that missed the reply window still surfaces its reason "
+    TEST_SECTION("safety_cfg_write_apply_pairs -- a REJECTED frame that missed the reply window still surfaces its reason "
                  "once the read-back proves the write failed");
     reset_all();
     // s_stub_commit_rejected stays false (this simulates the ~144 ms race:
@@ -1211,7 +1212,7 @@ static void test_apply_pairs_late_rejection_attaches_pico_reason_to_confirmed_fa
     safety_cfg_post_pair_t pairs[1] = { { .param_id = 0x0104u, .value_text = "1300" } };
     char reason[160];
     safety_ceiling_refusal_class_t refusal_class = SAFETY_CEILING_REFUSAL_OTHER;
-    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), &refusal_class);
+    bool ok = safety_cfg_write_apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), &refusal_class);
     TEST_CHECK(ok == false, "still reported as failed -- the read-back is what decides, and it never matched");
     TEST_CHECK(strstr(reason, "ARMED") != NULL,
                "the Pico's OWN late-arriving reason is attached to the failure, not a generic message");
@@ -1225,7 +1226,7 @@ static void test_apply_pairs_late_rejection_attaches_pico_reason_to_confirmed_fa
 
 static void test_apply_pairs_refetch_failure_with_no_stash_classifies_as_other_not_armed(void)
 {
-    TEST_SECTION("apply_pairs -- an unconfirmable commit with NO rejection frame in hand must classify as "
+    TEST_SECTION("safety_cfg_write_apply_pairs -- an unconfirmable commit with NO rejection frame in hand must classify as "
                  "OTHER, never guess ARMED just because ARMED is the most common real-world cause");
     reset_all();
     s_stub_refetch_result = false; // safety_cfg_store_refetch() could not complete
@@ -1236,7 +1237,7 @@ static void test_apply_pairs_refetch_failure_with_no_stash_classifies_as_other_n
     safety_cfg_post_pair_t pairs[1] = { { .param_id = 0x0104u, .value_text = "1300" } };
     char reason[160];
     safety_ceiling_refusal_class_t refusal_class = SAFETY_CEILING_REFUSAL_ARMED; // deliberately wrong seed
-    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), &refusal_class);
+    bool ok = safety_cfg_write_apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), &refusal_class);
     TEST_CHECK(ok == false, "an unconfirmable commit is never reported as success");
     TEST_CHECK(refusal_class == SAFETY_CEILING_REFUSAL_OTHER,
                "with no numeric reject reason available, the classification must be the safe default "
@@ -1315,7 +1316,7 @@ static void test_build_json_still_reports_set_when_peer_reliable(void)
 // ---------------------------------------------------------------------------
 // LOW (2026-08-27 audit fix): confirm_commit_landed()'s two `continue`s, for
 // a pair whose lookup or value-parse fails on ITS OWN (post-refetch) pass --
-// believed unreachable because apply_pairs() already validated both before
+// believed unreachable because safety_cfg_write_apply_pairs() already validated both before
 // ever staging the pair -- used to silently skip verification of that pair
 // and let the OVERALL commit still report success if every OTHER pair
 // checked out. That is the identical failure shape ("ok cannot fail") this
@@ -1325,19 +1326,19 @@ static void test_build_json_still_reports_set_when_peer_reliable(void)
 
 static void test_confirm_commit_landed_lookup_failure_on_its_own_pass_fails_closed(void)
 {
-    TEST_SECTION("apply_pairs -- if confirm_commit_landed()'s OWN lookup fails for a pair (believed "
+    TEST_SECTION("safety_cfg_write_apply_pairs -- if confirm_commit_landed()'s OWN lookup fails for a pair (believed "
                  "unreachable), the commit is reported FAILED, not silently skipped-and-successful");
     reset_all();
     SafetyLinkClass fake_link;
     memset(&fake_link, 0, sizeof(fake_link));
     safety_cfg_post_pair_t pairs[1] = { { .param_id = 513, .value_text = "100" } };
-    // Call #1 is apply_pairs()'s own staging-time lookup (must succeed, or
+    // Call #1 is safety_cfg_write_apply_pairs()'s own staging-time lookup (must succeed, or
     // this never reaches confirm_commit_landed() at all). Call #2 is
     // confirm_commit_landed()'s post-refetch lookup for that SAME pair --
     // fail exactly that one.
     s_stub_lookup_fail_at_call = 2;
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
+    bool ok = safety_cfg_write_apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == false, "a lookup failure inside confirm_commit_landed() fails the whole commit");
     TEST_CHECK(reason[0] != '\0', "a non-empty reason is produced");
     TEST_CHECK(strstr(reason, "UNCONFIRMED") != NULL,
@@ -1346,7 +1347,7 @@ static void test_confirm_commit_landed_lookup_failure_on_its_own_pass_fails_clos
 
 static void test_confirm_commit_landed_parse_failure_on_its_own_pass_fails_closed(void)
 {
-    TEST_SECTION("apply_pairs -- if confirm_commit_landed()'s OWN value-parse fails for a pair (believed "
+    TEST_SECTION("safety_cfg_write_apply_pairs -- if confirm_commit_landed()'s OWN value-parse fails for a pair (believed "
                  "unreachable), the commit is reported FAILED, not silently skipped-and-successful");
     reset_all();
     SafetyLinkClass fake_link;
@@ -1355,12 +1356,12 @@ static void test_confirm_commit_landed_parse_failure_on_its_own_pass_fails_close
     // Call #1 (staging) sees the default type (U16) -- "100" parses fine.
     // Call #2 (confirm_commit_landed()'s own re-lookup for the same pair) is
     // overridden to report BOOL instead -- "100" is not a legal bool literal
-    // (parse_value_for_type() only accepts "0"/"1"), so THAT call's re-parse
+    // (safety_cfg_write_parse_value_for_type() only accepts "0"/"1"), so THAT call's re-parse
     // fails even though the original staging parse never did.
     s_stub_lookup_type_override_call = 2;
     s_stub_lookup_type_override_value = KILNLINK_PARAM_TYPE_BOOL;
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
+    bool ok = safety_cfg_write_apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == false, "a re-parse failure inside confirm_commit_landed() fails the whole commit");
     TEST_CHECK(reason[0] != '\0', "a non-empty reason is produced");
     TEST_CHECK(strstr(reason, "UNCONFIRMED") != NULL,
@@ -1369,14 +1370,14 @@ static void test_confirm_commit_landed_parse_failure_on_its_own_pass_fails_close
 
 static void test_apply_pairs_unknown_id_is_refused_and_named(void)
 {
-    TEST_SECTION("apply_pairs -- an unknown param id is refused and named in the reason");
+    TEST_SECTION("safety_cfg_write_apply_pairs -- an unknown param id is refused and named in the reason");
     reset_all();
     s_stub_lookup_result = false; // simulates an id this build's table does not recognise
     SafetyLinkClass fake_link;
     memset(&fake_link, 0, sizeof(fake_link));
     safety_cfg_post_pair_t pairs[1] = { { .param_id = 0x9999, .value_text = "1" } };
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 1, false, reason, sizeof(reason), NULL);
+    bool ok = safety_cfg_write_apply_pairs(&fake_link, pairs, 1, false, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == false, "an unknown id is refused");
     TEST_CHECK(strstr(reason, "39321") != NULL || strstr(reason, "unknown") != NULL,
                "the reason names the offending id (COMMISSIONING.md sec 2's per-id refusal)");
@@ -1385,14 +1386,14 @@ static void test_apply_pairs_unknown_id_is_refused_and_named(void)
 
 static void test_apply_pairs_refused_commit_surfaces_reason(void)
 {
-    TEST_SECTION("apply_pairs -- a commit the safety processor never ACKs surfaces a reason, not silence");
+    TEST_SECTION("safety_cfg_write_apply_pairs -- a commit the safety processor never ACKs surfaces a reason, not silence");
     reset_all();
     s_stub_commit_result = ESP_ERR_TIMEOUT;
     SafetyLinkClass fake_link;
     memset(&fake_link, 0, sizeof(fake_link));
     safety_cfg_post_pair_t pairs[1] = { { .param_id = 513, .value_text = "100" } };
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
+    bool ok = safety_cfg_write_apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == false, "an un-ACKed commit is reported as a failure");
     TEST_CHECK(reason[0] != '\0', "a non-empty reason is always produced on failure");
     TEST_CHECK(strstr(reason, "commit") != NULL || strstr(reason, "acknowledge") != NULL,
@@ -1402,7 +1403,7 @@ static void test_apply_pairs_refused_commit_surfaces_reason(void)
 
 static void test_apply_pairs_rejected_commit_names_field_and_reason(void)
 {
-    TEST_SECTION("apply_pairs -- a REJECTED commit (0x20) names the offending field and reason, "
+    TEST_SECTION("safety_cfg_write_apply_pairs -- a REJECTED commit (0x20) names the offending field and reason, "
                  "not \"awaiting confirmation\"");
     reset_all();
     s_stub_commit_rejected = true;
@@ -1414,10 +1415,10 @@ static void test_apply_pairs_rejected_commit_names_field_and_reason(void)
     // value_text just has to parse for the stub's default wire type
     // (KILNLINK_PARAM_TYPE_U16) -- the actual rejection this test exercises
     // comes from the stubbed safety_link_send_commit_config() outcome, not
-    // from parse_value_for_type(), so this must be an in-range U16.
+    // from safety_cfg_write_parse_value_for_type(), so this must be an in-range U16.
     safety_cfg_post_pair_t pairs[1] = { { .param_id = 0x0104u, .value_text = "500" } };
     char reason[160];
-    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
+    bool ok = safety_cfg_write_apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == false, "a rejected commit is reported as a failure, not success");
     TEST_CHECK(strstr(reason, "abs_max_temp_c") != NULL,
                "the offending field is named (COMMISSIONING.md sec 3.1: \"name the offending field\")");
@@ -1433,7 +1434,7 @@ static void test_apply_pairs_rejected_commit_names_field_and_reason(void)
     s_stub_commit_reject_param_id = KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID;
     s_stub_commit_reject_reason = KILNLINK_COMMIT_CONFIG_REJECT_ARMED;
     reason[0] = '\0';
-    ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
+    ok = safety_cfg_write_apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == false, "an ARMED rejection is reported as a failure");
     TEST_CHECK(strstr(reason, "ARMED") != NULL, "the ARMED reason is named");
     TEST_CHECK(strstr(reason, "0x0104") == NULL && strstr(reason, "abs_max_temp_c") == NULL,
@@ -1449,7 +1450,7 @@ static void test_apply_pairs_rejected_commit_names_field_and_reason(void)
 // all three now render an actionable, ARMED-family sentence instead.
 static void test_apply_pairs_rejected_commit_new_tc_type_reasons_are_readable(void)
 {
-    TEST_SECTION("apply_pairs -- ARMED_HEAT_ON/ARMED_HEAT_UNKNOWN/ARMED_MIXED render real "
+    TEST_SECTION("safety_cfg_write_apply_pairs -- ARMED_HEAT_ON/ARMED_HEAT_UNKNOWN/ARMED_MIXED render real "
                  "sentences, not \"unrecognised reason\"");
     SafetyLinkClass fake_link;
     memset(&fake_link, 0, sizeof(fake_link));
@@ -1467,7 +1468,7 @@ static void test_apply_pairs_rejected_commit_new_tc_type_reasons_are_readable(vo
         s_stub_commit_reject_param_id = KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID;
         s_stub_commit_reject_reason = reasons[i];
         reason[0] = '\0';
-        bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
+        bool ok = safety_cfg_write_apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
         TEST_CHECK(ok == false, "the rejection is reported as a failure");
         TEST_CHECK(strstr(reason, "ARMED") != NULL,
                    "the sentence names ARMED (matches the page's /ARMED/i test)");
@@ -1749,7 +1750,7 @@ static void test_ct_auto_zero_100mv_refusal_uses_quantized_counts(void)
 // S8 rate-guard auto-calc write path (docs/audits/s8_auto_calc_design_2026-
 // 09-09.md "Part 3") -- rate_guard_gather_and_estimate()/rate_guard_current_
 // value()/rate_guard_auto_compute() directly (same "call the static helper
-// directly" convention this whole file already uses for apply_pairs()/
+// directly" convention this whole file already uses for safety_cfg_write_apply_pairs()/
 // build_commissioning_json()), plus a few handler-level smoke tests via the
 // captured httpd_resp_send() body for the two cases reachable without a
 // real request body (content_len == 0 -- see rate_guard_auto_post_handler's
@@ -2075,7 +2076,7 @@ static void test_build_json_rate_guard_provenance_manual(void)
 static void test_rate_guard_auto_post_handler_dormant_applies_and_tags_auto(void)
 {
     TEST_SECTION("rate_guard_auto_post_handler -- candidate does not loosen the guard, empty body -> "
-                 "writes via apply_pairs, tags the provenance record AUTO only after a verified read-back");
+                 "writes via safety_cfg_write_apply_pairs, tags the provenance record AUTO only after a verified read-back");
     reset_all();
     reset_rate_guard_stubs();
     s_stub_lookup_type = KILNLINK_PARAM_TYPE_F32;
@@ -2087,7 +2088,7 @@ static void test_rate_guard_auto_post_handler_dormant_applies_and_tags_auto(void
     s_stub_zone_fit_temp_c[0] = 20.0f; // -> floored to 15.0
     // s_stub_params (the fake for safety_cfg_store_get_by_index()) is read
     // BOTH by rate_guard_auto_compute()'s own pre-write lookup and by
-    // apply_pairs()'s post-commit read-back (confirm_commit_landed()) --
+    // safety_cfg_write_apply_pairs()'s post-commit read-back (confirm_commit_landed()) --
     // there is only one fake state for both, so seed it with the value the
     // Pico is expected to read back AFTER the commit (15.0), exactly like a
     // real 15.0-committed board would answer at any point once the write

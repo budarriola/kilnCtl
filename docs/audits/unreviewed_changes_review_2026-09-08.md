@@ -69,7 +69,7 @@ unfound.
 
 ### D3 (LOW, `3a20a560`) -- "internal DRAM" is stated but not enforced
 
-`firmware/KilnFW/App/drivers/http/safety_cfg_http.c:1229-1236` argues explicitly
+`firmware/KilnFW/App/drivers/safety/safety_cfg_write.c:707-714` argues explicitly
 that every heap buffer in a handler with any flash-writing path must be internal
 DRAM "rather than depending on 'this particular buffer's lifetime doesn't overlap
 the write' staying true after a future edit" -- and then allocates with
@@ -201,7 +201,7 @@ walked by hand:
 success frees both) and `:1252` (freed on the short-read arm and after apply);
 `profiles_catalog_http.c:387` (every `APPEND` overflow `goto send:`, which is the
 single exit that frees);
-`safety_cfg_http.c:1230/1241/1368` (three narrow braced scopes, freed before the
+`safety_cfg_write.c:708/719` and `safety_cfg_http.c:681` (three narrow braced scopes, freed before the
 scope ends, so none is live across the handler's many later returns);
 `profile_executor_firing_stats.c:324` (freed on both arms) and `:423-424`
 (the partial-failure arm frees both -- `free(NULL)` is well-defined -- and the
@@ -227,7 +227,7 @@ is real but unenforced.
 (`safety_cfg_store.c:1009-1014`) returns false with the cache untouched -- the
 same outcome as any failed page fetch -- and the wrapper still gives the lock back.
 Critically, `ct_auto_zero_post_handler`'s third allocation
-(`safety_cfg_http.c:1367`) sits BEFORE the postcondition check and well before the
+(`safety_cfg_http.c:680`) sits BEFORE the postcondition check and well before the
 `apply_pairs()` commit, so its failure aborts with a 500 having written nothing to
 the Pico.
 

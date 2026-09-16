@@ -190,7 +190,7 @@ ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, c
 typedef struct SafetyLinkClass_s { int dummy; } SafetyLinkClass;
 static SafetyLinkClass s_fake_link;
 
-// -- safety_cfg_http.h --
+// -- safety_cfg_write.h --
 static bool s_pico_push_should_fail = false;
 static char s_pico_push_fail_reason[128] = "push refused";
 static bool g_bump_gen_on_push = false; // H6 test hook: simulate a racing writer during the Pico round trip
@@ -209,7 +209,7 @@ static int s_flash_push_count = 0;
 // are NEVER refused by this flag, mirroring config_store_write_volatile()
 // never calling config_store_decide_write() at all.
 static bool s_pico_armed = false;
-bool safety_cfg_http_apply_package_and_confirm(SafetyLinkClass *link, const kiln_pkg_safety_t *pkg,
+bool safety_cfg_write_apply_package_and_confirm(SafetyLinkClass *link, const kiln_pkg_safety_t *pkg,
                                                 bool volatile_install, char *reason_out, size_t reason_cap,
                                                 void *out_class)
 {
@@ -249,7 +249,7 @@ bool safety_cfg_http_apply_package_and_confirm(SafetyLinkClass *link, const kiln
 static bool s_ceiling_set_should_fail = false;
 static float s_pico_ceiling = 1200.0f;
 static bool s_last_ceiling_set_was_volatile = false;
-bool safety_cfg_http_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_id, float value, char *reason_out,
+bool safety_cfg_write_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_id, float value, char *reason_out,
                                           size_t reason_cap, void *out_class)
 {
     (void)out_class;
@@ -274,7 +274,7 @@ bool safety_cfg_http_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_i
     return true;
 }
 
-bool safety_cfg_http_set_and_confirm_f32_volatile(SafetyLinkClass *link, uint16_t param_id, float value,
+bool safety_cfg_write_set_and_confirm_f32_volatile(SafetyLinkClass *link, uint16_t param_id, float value,
                                                    char *reason_out, size_t reason_cap, void *out_class)
 {
     (void)out_class;
@@ -427,7 +427,7 @@ bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, si
 // App/test/stubs/ uses for ESP-IDF headers, applied here to this
 // codebase's OWN headers instead, since kiln_cfg_swap.c's dependency
 // surface -- kiln_cfg_store.h, kiln_package.h, safety_link.h, safety_cfg_
-// store.h, safety_cfg_http.h, safety_ceiling_sync.h, ota_state.h,
+// store.h, safety_cfg_write.h, safety_ceiling_sync.h, ota_state.h,
 // zones_config_accessors.h -- is too large and too hardware-adjacent to
 // link for real without dragging in httpd/I2C/SPI ownership this file's
 // job is explicitly to test AROUND, not through). kiln_cfg_swap.h ITSELF
@@ -438,7 +438,7 @@ bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, si
 #define KILN_CFG_STORE_H
 #define OTA_STATE_H
 #define SAFETY_CFG_STORE_H
-#define SAFETY_CFG_HTTP_H
+#define SAFETY_CFG_WRITE_H
 #define SAFETY_CEILING_SYNC_H
 
 #include "../drivers/persist/kiln_cfg_swap.c"

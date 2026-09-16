@@ -943,6 +943,9 @@ bool zones_config_set_adaptive_tune_enabled(uint8_t zone_index, bool enabled)
 #define FSCF_TEST_MKDIR(p) mkdir((p), 0755)
 #define FSCF_TEST_RMDIR(p) rmdir(p)
 #endif
+#include "fake_kv.h" /* fake_kv_reset_all()/fake_kv_set_write_safe_here() -- the firing-stats
+                        * tests below call these directly. Was relying on an implicit
+                        * declaration (C4013); now an error. */
 #include "cfg_fs.h" /* real mount/write-atomic/read/delete against a temp dir -- docs/FILESYSTEM_USER_DATA_PLAN.md
                        * section 5 item 7's firing-stats cfg-filesystem bridge tests, appended near the
                        * bottom of this file. */

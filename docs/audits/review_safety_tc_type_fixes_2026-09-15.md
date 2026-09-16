@@ -87,7 +87,7 @@ the write rather than committing a type the part is not running.
 `link_task.c:2355-2359` maps a refusal to `KILNLINK_COMMIT_CONFIG_REJECT_ARMED` only by
 `strcmp` against the plain REFUSED_ARMED sentence. The new HEAT_ON reason (and HEAT_UNKNOWN)
 strings differ, so they map to `KILNLINK_COMMIT_CONFIG_REJECT_STORAGE`. The consequences:
-- `safety_cfg_http.c:834` renders "the safety processor's flash write failed".
+- `safety_cfg_write.c:314` renders "the safety processor's flash write failed".
 - The commissioning page's `/ARMED/i` tests do not match (`safety_commissioning_page.html:2066`,
   `commissioning_shared.js:163`).
 - `reject_reason_to_refusal_class()` classifies the refusal as a storage fault, not ARMED.

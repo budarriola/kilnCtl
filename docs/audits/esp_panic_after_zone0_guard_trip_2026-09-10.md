@@ -150,7 +150,7 @@ header/companion change had not yet landed:
    `safety_cfg_diff_entry_t`/`SAFETY_CFG_STORE_DIFF_MAX`, undeclared in
    `safety_cfg_store.h` at that commit. A subsequent fetch
    (`origin/main` advanced to `9f5fe0d1`, a merge commit) resolved this.
-2. At `origin/main` `9f5fe0d1`: `safety_cfg_http.c:1879` references
+2. At `origin/main` `9f5fe0d1`: `safety_cfg_http.c:1192` references
    `s8_rate_guard_zone_input_t.coupling_provenance_ok`, which does not
    exist in the `s8_rate_guard_zone_input_t` struct
    (`s8_rate_guard_estimate.h`) at this commit. The main tree's own
