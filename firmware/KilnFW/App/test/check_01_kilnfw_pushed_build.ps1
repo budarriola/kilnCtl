@@ -188,6 +188,22 @@ if (-not $originSha) {
 # the SAME directory, serialized -- not two copies of it at ~425 MB each.
 # Serialization is the build lock below, which is why creating this worktree
 # now happens INSIDE that lock (see there).
+#
+# RESIDUAL EXPOSURE, STATED PLAINLY (2026-09-16). Moving creation and
+# submodule init inside the lock closes the race between two runs of THIS
+# script. It does not, and cannot, protect this directory from an actor that
+# never takes the lock -- a hand-run 'rmdir /s /q' of the build tree, an
+# editor indexing it, a cleanup script. One such incident was observed while
+# this fix was being written: a concurrent full-suite run failed here with
+# "ld.exe: reopening esp-idf/esp_hw_support/libesp_hw_support.a: No such
+# file or directory", i.e. a LINK failure that reads exactly like a broken
+# origin/main, caused by an out-of-lock deletion of this directory; the same
+# run's log also showed the tree sitting at another session's deliberate
+# "NEGATIVE TEST ONLY - deliberate compile break" commit. A shared directory
+# plus a lock only everyone honours is the accepted cost of not copying
+# ~425 MB per tree. If you are about to delete or check out this directory
+# by hand, take the same lock first: tools/build_lock.ps1,
+# Enter-BuildLock -Name "kilnfw_checkbuild_origin_worktree".
 $WorktreePath = "C:\wt\checkbuild_origin_kilnfw"
 
 foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", "MSYS", "MSYS2_PATH_TYPE")) {
