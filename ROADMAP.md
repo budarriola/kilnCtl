@@ -880,7 +880,7 @@ open is short:
 | Size | Item | Where |
 |---|---|---|
 | L | **Every fault says what was detected and what to do** — a standing rule, not a closing milestone, so it never fully closes: applies to every fault surface added from here on. All of S6a's own checklist items landed 2026-08-28 | M13 |
-| XL | **Source layering + hardware abstraction** — `drivers/` reorg applied in `9f18ca5` (2026-09-05); HAL Phases 0-4 all done (every interface has a real backend + host fake, every named consumer migrated, include-boundary enforcement is strict, `esp_random.h` classified 2026-09-06). Open: a hardware timing re-check (safety-link reply, display frame time, thermo read latency) — see `docs/HW_ABSTRACTION.md` | M16; `docs/HW_ABSTRACTION.md` |
+| XL | **Source layering + hardware abstraction** — `drivers/` reorg applied in `9f18ca5` (2026-09-05); HAL Phases 0-4 all done (every interface has a real backend + host fake, every named consumer migrated, include-boundary enforcement is strict, `esp_random.h` classified 2026-09-06). **Closed 2026-09-16: the hardware timing re-check.** All three named measurements (safety-link reply, display frame time, thermo read latency) now have hardware numbers — safety-link reply against the pre-existing 345 ms budget (max 340 ms observed, thin margin, see the 2026-09-14 composition correction on what that counter actually measures); display/thermo have no prior figure to compare against and are recorded as fresh baselines against the ESP32-S3's 300 ms interrupt-watchdog ceiling (max 81 ms / 57 ms observed, comfortably under). No measurable cost from the HAL indirection against any of these bars. Full detail: `docs/HW_ABSTRACTION.md` | M16; `docs/HW_ABSTRACTION.md` |
 | L | ~~**An uncommissioned safety processor must refuse heating enable.**~~ Landed `5cd56b6`. Resolved 2026-08-28 by making CTs **optional hardware**: `ct_installed` (param `0x0109`) is a new ASKED commissioning question, and answering *no* drops the CT-map requirement **and** switches S3/S4/S9/S14 off while reporting them off. Verified on the live board: `commissioned: true`, heat permitted | M12 |
 | S | ~~`thermal_guard_cfg_t.progress_band_c` unwired.~~ Done (`992f3954`, review conditions landed `e5375594`): `zone_cfg_t::progress_band_c` (ZONES_CFG_VERSION 21->22), `zones_config_get/set_progress_band_c()`, both build sites (`profile_executor_run.c`, `autotune_engine.c`), zones GET/POST wire (`z%u_progressband`). 0 = 3 °C firmware default, matching `error_band_c`'s sentinel convention. See `docs/audits/consumer_without_producer_2026-09-06.md` | M13 |
 | **L** | **`iter_tune` redesign — see the M-row above (this table, "iter_tune.c wire-vs-delete decision") for current step status; consolidated here 2026-09-14 roadmap truth-up to remove a duplicate that had drifted (this row still said "steps 3-4 and 6-9 remain design-only" after both plan doc and code had moved past it).** Design background kept: owner decision 2026-09-08 to keep and redesign rather than wire `control/iter_tune.c` as-is (`3bf773af` superseded); score measures matched profile segments (ramp lag in seconds, dwell-entry overshoot, steady dwell RMS) against the target profile rather than whole-firing IAE, validated first in simulation by extending `firmware/KilnFW/App/test/sim_plant.c` with the four gaps (PWM window, actuation lag, MAX31856 quantisation, real measured plant/coupling constants) — *not* the deleted `SimFW`/`kilnsim`. 10 ordered steps (0-9), no kiln time before step 8. See `docs/audits/consumer_without_producer_2026-09-06.md` for how the module got here | `docs/ITER_TUNE_REDESIGN_PLAN.md`; `PID_EXPANSION_PLAN.md` |
@@ -2202,7 +2202,7 @@ file maps and the "patterns worth copying" list:
 
 ---
 
-## M16 — Source layering and hardware abstraction · *opened 2026-09-05, HAL work done, one item open (hardware-only)*
+## M16 — Source layering and hardware abstraction · *opened 2026-09-05, closed 2026-09-16*
 
 Two related reorganisations of the firmware trees, documented in full in
 [`docs/HW_ABSTRACTION.md`](docs/HW_ABSTRACTION.md). Both are done:
@@ -2212,14 +2212,19 @@ host fake, every named production consumer is migrated, and
 `check_hal_include_boundary.ps1`'s enforcement is strict, not just a
 ratchet), including `esp_random.h`'s hal_sysinfo classification (2026-09-06,
 the plan's last open header). Durable conventions and the holdout list
-moved to `firmware/hwAbstraction/README.md`. One item remains open, tracked
-in the plan doc's "Still open" section: a hardware timing re-check
-(safety-link reply, display frame time, thermo read latency — host tests
-can't see this; the display/thermo half is already measurable via
-`GET /api/diagnostics/timing`, the safety-link reply half still needs an
-external timer). Everything else named as unmigrated in the plan
-(Wi-Fi/httpd/LVGL, OTA partition writes, the SaftyFW bootloader,
-`firmware/UnitTestFw`) is an owner-decided permanent holdout, not open work.
+moved to `firmware/hwAbstraction/README.md`. The row's one remaining item,
+the hardware timing re-check (safety-link reply, display frame time, thermo
+read latency — host tests can't see this), is now closed too: all three
+have a live-board number as of 2026-09-16, via `GET /api/diagnostics/timing`
+for all three (the safety-link half no longer needed an external timer —
+`link_reply_us` was instrumented and measured on hardware 2026-09-14, with
+a same-day composition correction on what it actually measures; display/
+thermo were measured 2026-09-16 with no prior figure to compare against, so
+they're recorded as baselines). Full numbers and bars: `docs/
+HW_ABSTRACTION.md`'s "Still open" section. Everything else named as
+unmigrated in the plan (Wi-Fi/httpd/LVGL, OTA partition writes, the SaftyFW
+bootloader, `firmware/UnitTestFw`) is an owner-decided permanent holdout,
+not open work.
 
 1. **KilnFW `drivers/` layering** (KilnFW only) — DONE (`9f18ca5`,
    2026-09-05). `App/drivers/` reorganised into

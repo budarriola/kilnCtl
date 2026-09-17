@@ -134,6 +134,74 @@ the goal, tree shape, decisions, changelog, and remaining open items.
   instrumentation are unchanged by this note; retargeting `link_reply_us`
   to a genuinely reply-matched command, or renaming/relabeling it, is left
   as an open decision for whoever owns this counter next.
+
+  **2026-09-16, item fully CLOSES — display frame time and thermo read
+  latency measured on hardware, the last two of the three named
+  measurements.** Board reached via `kilnctrl` MCP only (no flash, no
+  reset, no firing). Health first: `get_heap_status` — `reset_reason=
+  'interrupt watchdog'` (a past boot event, not this one; per
+  `project_reset_reason_names_current_boot`), `uptime_s=11233`, no
+  unacknowledged-crash banner. Read `GET /api/diagnostics/timing` (via
+  `get_heap_status`) twice, 47 s apart, to check stability before trusting
+  a single sample:
+
+  | metric | count | min | mean | last | max |
+  |---|---|---|---|---|---|
+  | `display_flush_us` | 89803→90200 | 12727 | 22281→22282 | 24363/13031 | 80897 |
+  | `thermo_read_us` | 29740→29853 | 2534 | 3080→3079 | 2578/2656 | 57362 |
+  | `link_reply_us` | 5389 (unchanged — no `safety_ping` issued between reads, confirming the 2026-09-14 finding that it does not fire on background polling) | 1012 | 191804 | 3315 | 340104 |
+
+  (all µs, cumulative since this boot's 11233 s uptime). `min`/`mean`
+  unchanged to within 1 µs and `max` identical between the two reads —
+  measurement noise here is dominated by real scheduling/bus-contention
+  jitter already captured in each counter's own min/max spread, not by
+  instrumentation error (`hal_time_now_us()` is µs-resolution and these are
+  firmware-computed aggregates read back over HTTP, not client-side
+  stopwatch timings).
+
+  **Bars checked, none invented.** No repo doc sets an application-level
+  display-frame-time or thermo-read-latency budget (searched
+  `docs/audits/`, `docs/*.md`, `firmware/KilnFW/docs/` — the only frame-
+  time-adjacent hit, `docs/audits/power_cycle_black_screen_2026-09-08.md`,
+  is a "no samples yet" observation, not a budget). Two real, documented
+  ceilings exist and both apply, since either stat blowing past them is
+  exactly the failure class this board has already hit once
+  (`reset_reason='interrupt watchdog'` above): `CONFIG_ESP_INT_WDT_TIMEOUT_MS
+  =300` and `CONFIG_ESP_TASK_WDT_TIMEOUT_S=5` (`firmware/KilnFW/sdkconfig`).
+  `display_flush_us` max (80897 µs ≈ 81 ms) and `thermo_read_us` max
+  (57362 µs ≈ 57 ms) both sit well under the 300 ms interrupt-watchdog
+  ceiling (27% and 19% of it respectively) and far under the 5 s task-
+  watchdog ceiling — this is a watchdog not-to-exceed, not a frame-time
+  design target, so headroom under it says "not currently causing
+  resets," not "imperceptibly fast." Separately, the MAX31856's own
+  ~100 ms automatic-conversion-mode datasheet figure
+  (`MAX31856_CR0_CMODE`'s comment, `firmware/KilnFW/App/drivers/hw/
+  MAX31856.h:92`) is a loose sanity bound for `thermo_read_us`, which
+  reads a value already latched by that background conversion rather than
+  blocking on one — consistent with the measured ~3 ms mean/57 ms max
+  being well under 100 ms. **No prior on-hardware figure exists for either
+  metric to compare against** (the 2026-09-06 note above found no
+  measurement path at all before this endpoint existed) — today's numbers
+  are recorded as the baseline, not a comparison, honestly labeled as such.
+
+  `link_reply_us` reconfirmed unchanged from 2026-09-14 (same board
+  session, no new `safety_ping` traffic) — still subject to that entry's
+  composition correction (phase-wait, not transport latency); the
+  phase-independent health signal remains `safety_get_link_stats()`'s
+  `timeouts` (1, out of thousands of exchanges since boot, not attributable
+  to this session).
+
+  **Verdict: all three named measurements (safety-link reply, display
+  frame time, thermo read latency) now have a hardware number.** Two
+  (safety-link reply, against the 345 ms budget) and (display/thermo,
+  against the interrupt-watchdog ceiling) are real comparisons; display
+  and thermo have no prior-figure comparison and are recorded as fresh
+  baselines instead. The HAL indirection cost nothing measurable against
+  any of these bars: every observed max stays inside its relevant ceiling,
+  and the mechanism-level correction on `link_reply_us` is a composition
+  finding about what the counter measures, not evidence of an added-latency
+  regression from the HAL layer itself. This closes the ROADMAP M16 row's
+  remaining open item.
 - ~~Remaining SaftyFW hardware/ includes~~ — closed 2026-09-06:
   `main.c`, `console_uart.c`, `thermo_task.c` re-reviewed line by line.
   `main.c`'s GPIO6-low latch/direction pair matches `hal_gpio_init_out()`'s
