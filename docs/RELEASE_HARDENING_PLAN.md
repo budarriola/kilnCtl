@@ -589,6 +589,22 @@ release cannot ship without:
   structs), so there is no CRC to check. `ZONES_CFG_VERSION` was not bumped by
   this pass. **Size: S (down from M) — closed to the extent argued reachable;
   v7-v23 consciously declined, not missed.**
+  **Update, 2026-09-17:** the CRC-narrowing above closed one specific gap, but
+  `docs/audits/release_hardening_plan_verify_1_2_5_7_8_2026-09-16.md`
+  separately confirmed the corpus test this bullet's title actually names —
+  "a v1-through-current corpus of real persisted blobs, run each forward to
+  current, assert the result is sane" — was still genuinely missing: every
+  existing migration test proved one hop, or one specific historical starting
+  point, never the full v1..v25 sweep. That gap is now closed by
+  `test_zones_config_migration_corpus_every_historical_version_forward()`
+  (`firmware/KilnFW/App/test/test_zones_http.c`): it constructs one real,
+  minimally-populated `zones_cfg_vN_t` for every historical version 1..25,
+  decodes each through the actual production
+  `zones_config_json_decode_blob()`, and asserts the decode succeeds, the
+  result is stamped with the current version, and the fields common to every
+  historical layout survive unchanged. A `_Static_assert` on
+  `ZONES_CFG_VERSION` trips the day a new version is added without extending
+  this corpus. **Blocker fully closed.**
 - **Import of a deliberately hostile config.** Truncated, wrong CRC, valid CRC
   with out-of-range values, a version number from the future, a file that is
   valid for a *different* kiln. The kiln-profiles plan covers untrusted upload

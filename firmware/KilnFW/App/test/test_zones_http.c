@@ -3496,6 +3496,974 @@ static void test_nvs_load_from_v6_blob_upconverts_fields_correctly(void)
     nvs_test_clear();
 }
 
+// RELEASE_HARDENING_PLAN.md blocker 7's "migration test that runs every
+// historical schema version forward" -- confirmed genuinely missing by
+// docs/audits/release_hardening_plan_verify_1_2_5_7_8_2026-09-16.md: every
+// existing migration test above proves one hop (or, in the v1->v16 chain
+// test's case, one specific historical starting point) in detail, but
+// nothing exercises the FULL v1..v25 corpus of on-disk layouts this
+// firmware must still be able to read. A field unit that has skipped
+// several updates can present any one of them on its next boot, and
+// zones_cfg_expected_len_for_version()/convert_versioned_blob_to_current()
+// dispatch on the stored version byte alone -- a converter case silently
+// missing or misordered for some version N would not be caught by any test
+// that only ever constructs v1, v6, v7, v8... by name.
+//
+// This is written as 25 concrete static functions (not a hidden macro body)
+// so that check_test_has_assertions.ps1's plain-text scan -- and any human
+// reader -- sees the real TEST_CHECK calls directly, not behind macro
+// concatenation. Each constructs one minimally-populated, real (not
+// test-local-copy) zones_cfg_vN_t, decodes it through the actual production
+// zones_config_json_decode_blob() (never a transcribed copy of the migration
+// logic), and asserts three things hold: the decode succeeds
+// (ZONES_DECODE_OK -- i.e. zones_config_json_validate() accepts the migrated
+// result), the result is stamped with the current version, and the handful
+// of fields common to every historical layout (thermo_count/relay_count,
+// zone name, relay_mask, pid_kp, max_temp_c) survive the trip unchanged.
+
+static void corpus_migrate_case_v1(void)
+{
+    zones_cfg_v1_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 1;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v1 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v1 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v1 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v1 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v1 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v1 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v1 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v1 zones[0].max_temp_c survives migration");
+    }
+}
+
+static void corpus_migrate_case_v2(void)
+{
+    zones_cfg_v2_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 2;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v2 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v2 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v2 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v2 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v2 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v2 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v2 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v2 zones[0].max_temp_c survives migration");
+    }
+}
+
+static void corpus_migrate_case_v3(void)
+{
+    zones_cfg_v3_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 3;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v3 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v3 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v3 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v3 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v3 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v3 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v3 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v3 zones[0].max_temp_c survives migration");
+    }
+}
+
+static void corpus_migrate_case_v4(void)
+{
+    zones_cfg_v4_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 4;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v4 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v4 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v4 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v4 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v4 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v4 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v4 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v4 zones[0].max_temp_c survives migration");
+    }
+}
+
+static void corpus_migrate_case_v5(void)
+{
+    zones_cfg_v5_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 5;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v5 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v5 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v5 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v5 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v5 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v5 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v5 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v5 zones[0].max_temp_c survives migration");
+    }
+}
+
+static void corpus_migrate_case_v6(void)
+{
+    zones_cfg_v6_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 6;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v6 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v6 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v6 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v6 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v6 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v6 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v6 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v6 zones[0].max_temp_c survives migration");
+    }
+}
+
+static void corpus_migrate_case_v7(void)
+{
+    zones_cfg_v7_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 7;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v7 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v7 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v7 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v7 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v7 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v7 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v7 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v7 zones[0].max_temp_c survives migration");
+    }
+}
+
+static void corpus_migrate_case_v8(void)
+{
+    zones_cfg_v8_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 8;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v8 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v8 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v8 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v8 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v8 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v8 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v8 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v8 zones[0].max_temp_c survives migration");
+    }
+}
+
+/* v9 introduced timing_profile_count/timing_profiles[] --
+ * zones_config_json_validate() requires timing_profile_count in
+ * [1, MAX31856_CHANNEL_COUNT] (every zone's timing_profile index, even a
+ * fresh zero, must resolve to a real profile), so every version from
+ * here on needs at least one declared. The zero-initialized profile's
+ * own fields (guard windows/margins, all 0.0f) are within-range on their
+ * own, so no further per-field setup is needed. */
+
+static void corpus_migrate_case_v9(void)
+{
+    zones_cfg_v9_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 9;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.timing_profile_count = 1;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v9 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v9 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v9 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v9 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v9 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v9 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v9 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v9 zones[0].max_temp_c survives migration");
+    }
+}
+
+static void corpus_migrate_case_v10(void)
+{
+    zones_cfg_v10_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 10;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.timing_profile_count = 1;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v10 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v10 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v10 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v10 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v10 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v10 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v10 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v10 zones[0].max_temp_c survives migration");
+    }
+}
+
+static void corpus_migrate_case_v11(void)
+{
+    zones_cfg_v11_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 11;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.timing_profile_count = 1;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v11 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v11 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v11 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v11 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v11 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v11 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v11 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v11 zones[0].max_temp_c survives migration");
+    }
+}
+
+static void corpus_migrate_case_v12(void)
+{
+    zones_cfg_v12_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 12;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.timing_profile_count = 1;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v12 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v12 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v12 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v12 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v12 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v12 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v12 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v12 zones[0].max_temp_c survives migration");
+    }
+}
+
+static void corpus_migrate_case_v13(void)
+{
+    zones_cfg_v13_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 13;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.timing_profile_count = 1;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v13 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v13 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v13 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v13 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v13 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v13 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v13 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v13 zones[0].max_temp_c survives migration");
+    }
+}
+
+static void corpus_migrate_case_v14(void)
+{
+    zones_cfg_v14_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 14;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.timing_profile_count = 1;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v14 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v14 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v14 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v14 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v14 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v14 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v14 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v14 zones[0].max_temp_c survives migration");
+    }
+}
+
+static void corpus_migrate_case_v15(void)
+{
+    zones_cfg_v15_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 15;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.timing_profile_count = 1;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v15 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v15 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v15 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v15 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v15 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v15 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v15 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v15 zones[0].max_temp_c survives migration");
+    }
+}
+
+static void corpus_migrate_case_v16(void)
+{
+    zones_cfg_v16_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 16;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.timing_profile_count = 1;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v16 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v16 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v16 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v16 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v16 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v16 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v16 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v16 zones[0].max_temp_c survives migration");
+    }
+}
+
+static void corpus_migrate_case_v17(void)
+{
+    zones_cfg_v17_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 17;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.timing_profile_count = 1;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v17 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v17 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v17 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v17 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v17 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v17 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v17 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v17 zones[0].max_temp_c survives migration");
+    }
+}
+
+static void corpus_migrate_case_v18(void)
+{
+    zones_cfg_v18_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 18;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.timing_profile_count = 1;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v18 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v18 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v18 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v18 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v18 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v18 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v18 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v18 zones[0].max_temp_c survives migration");
+    }
+}
+
+static void corpus_migrate_case_v19(void)
+{
+    zones_cfg_v19_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 19;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.timing_profile_count = 1;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v19 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v19 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v19 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v19 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v19 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v19 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v19 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v19 zones[0].max_temp_c survives migration");
+    }
+}
+
+static void corpus_migrate_case_v20(void)
+{
+    zones_cfg_v20_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 20;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.timing_profile_count = 1;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v20 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v20 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v20 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v20 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v20 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v20 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v20 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v20 zones[0].max_temp_c survives migration");
+    }
+}
+
+static void corpus_migrate_case_v21(void)
+{
+    zones_cfg_v21_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 21;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.timing_profile_count = 1;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v21 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v21 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v21 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v21 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v21 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v21 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v21 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v21 zones[0].max_temp_c survives migration");
+    }
+}
+
+static void corpus_migrate_case_v22(void)
+{
+    zones_cfg_v22_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 22;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.timing_profile_count = 1;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v22 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v22 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v22 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v22 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v22 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v22 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v22 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v22 zones[0].max_temp_c survives migration");
+    }
+}
+
+static void corpus_migrate_case_v23(void)
+{
+    zones_cfg_v23_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 23;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.timing_profile_count = 1;
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v23 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v23 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v23 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v23 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v23 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v23 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v23 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v23 zones[0].max_temp_c survives migration");
+    }
+}
+
+/* v24 is also opus review finding 10's CRC-checked version
+ * (zones_config_migrate.c's decode_zones_blob(), the ZONES_CFG_VERSION-1
+ * and ZONES_CFG_VERSION-2 branches): decode_blob() treats an
+ * all-zero crc32 field on these two specific versions as a mismatch, so
+ * this corpus must stamp a real one -- the exact "everything before
+ * crc32, then 4 zero bytes, esp_crc32_le() twice" computation production
+ * uses, matching make_minimal_valid_v25_blob() elsewhere in this file
+ * rather than a separately-invented routine. */
+static void corpus_migrate_case_v24(void)
+{
+    zones_cfg_v24_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 24;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.timing_profile_count = 1;
+    {
+        static const uint8_t zero4[sizeof(uint32_t)] = {0};
+        uint32_t crc = esp_crc32_le(0, (const uint8_t *)&src, offsetof(zones_cfg_v24_t, crc32));
+        src.crc32 = esp_crc32_le(crc, zero4, sizeof(zero4));
+    }
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v24 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v24 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v24 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v24 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v24 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v24 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v24 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v24 zones[0].max_temp_c survives migration");
+    }
+}
+
+/* v25 is also opus review finding 10's CRC-checked version
+ * (zones_config_migrate.c's decode_zones_blob(), the ZONES_CFG_VERSION-1
+ * and ZONES_CFG_VERSION-2 branches): decode_blob() treats an
+ * all-zero crc32 field on these two specific versions as a mismatch, so
+ * this corpus must stamp a real one -- the exact "everything before
+ * crc32, then 4 zero bytes, esp_crc32_le() twice" computation production
+ * uses, matching make_minimal_valid_v25_blob() elsewhere in this file
+ * rather than a separately-invented routine. */
+static void corpus_migrate_case_v25(void)
+{
+    zones_cfg_v25_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 25;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.timing_profile_count = 1;
+    {
+        static const uint8_t zero4[sizeof(uint32_t)] = {0};
+        uint32_t crc = esp_crc32_le(0, (const uint8_t *)&src, offsetof(zones_cfg_v25_t, crc32));
+        src.crc32 = esp_crc32_le(crc, zero4, sizeof(zero4));
+    }
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v25 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v25 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v25 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v25 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v25 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v25 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v25 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v25 zones[0].max_temp_c survives migration");
+    }
+}
+
+static void test_zones_config_migration_corpus_every_historical_version_forward(void)
+{
+    TEST_SECTION("zones_config_json_decode_blob -- release-hardening corpus: every historical "
+                 "zones_cfg version v1..v25 migrates forward to current cleanly, not just the "
+                 "individually-named versions other tests exercise");
+
+    corpus_migrate_case_v1();
+    corpus_migrate_case_v2();
+    corpus_migrate_case_v3();
+    corpus_migrate_case_v4();
+    corpus_migrate_case_v5();
+    corpus_migrate_case_v6();
+    corpus_migrate_case_v7();
+    corpus_migrate_case_v8();
+    corpus_migrate_case_v9();
+    corpus_migrate_case_v10();
+    corpus_migrate_case_v11();
+    corpus_migrate_case_v12();
+    corpus_migrate_case_v13();
+    corpus_migrate_case_v14();
+    corpus_migrate_case_v15();
+    corpus_migrate_case_v16();
+    corpus_migrate_case_v17();
+    corpus_migrate_case_v18();
+    corpus_migrate_case_v19();
+    corpus_migrate_case_v20();
+    corpus_migrate_case_v21();
+    corpus_migrate_case_v22();
+    corpus_migrate_case_v23();
+    corpus_migrate_case_v24();
+    corpus_migrate_case_v25();
+
+    /* This corpus must actually track ZONES_CFG_VERSION rather than silently
+     * going stale the next time it bumps: fail loudly, at test-run time, the
+     * day a v26 (or later) historical layout exists and this file has not
+     * been extended to cover it. */
+    _Static_assert(ZONES_CFG_VERSION == 26,
+                   "a new zones_cfg version was added -- extend this corpus with a new "
+                   "corpus_migrate_case_vN() for the version that just became historical, then "
+                   "update this assert to the new ZONES_CFG_VERSION");
+}
+
 // End-to-end composition test: the OLDEST supported version (v1) all the way
 // to CURRENT (v15), asserting real field values -- not just defaults --
 // survive every hop. "Composes by inspection" was the audit's own phrase for
@@ -11705,6 +12673,7 @@ void run_test_zones_http(void)
     test_nvs_load_from_v4_blob_upconverts_thermo_mask_correctly();
     test_nvs_load_from_v5_blob_upconverts_zones_1_and_2_correctly();
     test_nvs_load_from_v6_blob_upconverts_fields_correctly();
+    test_zones_config_migration_corpus_every_historical_version_forward();
     test_nvs_load_from_v1_blob_chains_end_to_end_to_v16_preserving_real_values();
     test_nvs_load_from_v7_blob_upconverts_and_defaults_new_fields();
     test_nvs_load_from_v8_blob_with_distinct_zone_values_migrates_losslessly();
