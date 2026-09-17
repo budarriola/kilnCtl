@@ -105,7 +105,19 @@ route_tier_t http_auth_effective_tier(const char *uri, httpd_method_t method);
 //     ALLOW, regardless of role -- including HTTP_AUTH_ROLE_NONE. The
 //     Dashboard must stay viewable with no credential even once auth is on.
 //
-//   web_enabled == true, tier != ROUTE_TIER_OPEN, role == HTTP_AUTH_ROLE_NONE:
+//   web_enabled == true, tier == ROUTE_TIER_SAFETY_REDUCE:
+//     ALLOW, regardless of role -- including HTTP_AUTH_ROLE_NONE. Plan
+//     section 9: a route that can only ever reduce heat/risk (today, POST
+//     /api/profile_exec/stop) must never become harder to reach once auth
+//     is on than it was with auth off -- a locked-out owner watching a kiln
+//     climb is a worse failure mode than the one authentication protects
+//     against. This is decided from route_tier_table.h's own per-route
+//     classification, not a URI string match inside this function or the
+//     pre-handler -- a second, independently maintained match would be
+//     exactly the reset-one-side-of-a-pair shape CLAUDE.md documents.
+//
+//   web_enabled == true, tier != ROUTE_TIER_OPEN, tier != ROUTE_TIER_SAFETY_REDUCE,
+//   role == HTTP_AUTH_ROLE_NONE:
 //     DENY_NO_SESSION. No session, an expired session, and an unresolvable
 //     session all arrive here as the same role value (see the type's own
 //     comment) and are denied identically -- a gated route never leaks

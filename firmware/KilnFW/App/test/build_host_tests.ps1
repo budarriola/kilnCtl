@@ -217,6 +217,17 @@ try {
         # link needs; its psa/crypto.h host stub needs exactly one
         # g_stub_psa_import_key_result definition, added in test_backup_import.c.
         (Join-Path $driversDir "persist/web_auth_store.c"),
+        # kiln_http_register() (http_auth_http.c) rewiring pass: backup_http.c
+        # (#included via test_backup_import.c, joined into $sources per the
+        # comment further down) now calls it instead of
+        # httpd_register_uri_handler() directly. http_auth_enforce.c/
+        # http_auth_policy_iface.c/http_session_iface.c linked in for real,
+        # same "already host-tested elsewhere, needs its real symbols to
+        # link" reasoning as web_auth_store.c immediately above.
+        (Join-Path $driversDir "http/http_auth_http.c"),
+        (Join-Path $driversDir "http/http_auth_enforce.c"),
+        (Join-Path $driversDir "http/http_auth_policy_iface.c"),
+        (Join-Path $driversDir "http/http_session_iface.c"),
         (Join-Path $driversDir "hw/touch_dev.c"),
         (Join-Path $driversDir "control/ramp_ident.c"),
         (Join-Path $driversDir "control/ramp_transient_ident.c"),
@@ -414,7 +425,12 @@ try {
             # direct esp_timer_get_time() call the HAL include-boundary check
             # refuses) -- fake_time.c supplies it here, same convention as
             # every other hal_time_now_us() caller linked into this suite.
-            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`""
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            # kiln_http_register() rewiring: zones_http.c (#included via
+            # test_zones_http.c) now calls it instead of
+            # httpd_register_uri_handler() directly.
+            "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`""
     # fake_kv.c/hal_status.c/hal_esp_common.c added HW_ABSTRACTION.md Phase 3
     # item 3 (nvs.h -> hal_kv.h migration): zones_http.c/zones_config_store.c now
     # call hal_kv_*()/hal_status_to_esp_err() instead of nvs_*() directly, and
@@ -458,7 +474,12 @@ try {
             # (armed-refusal-recency tracking) -- fake_time.c supplies it here,
             # same convention as safety_ceiling_sync.c's own callers elsewhere
             # in this script.
-            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`""
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            # kiln_http_register() rewiring: safety_cfg_http.c (#included
+            # above) now calls it instead of httpd_register_uri_handler()
+            # directly.
+            "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`""
 
     Invoke-HostTestExe -Name "safety_cfg_http" -ExePath $exe3 -BuildCmd $cmd3
 
@@ -608,7 +629,12 @@ try {
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/profiles_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
+            # kiln_http_register() rewiring: profiles_http.c (#included
+            # above) now calls it instead of httpd_register_uri_handler()
+            # directly.
+            "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`""
     # HW_ABSTRACTION.md Phase 3 item 3 (nvs.h -> hal_kv.h migration, batch
     # 4): profiles_http.c (#included directly above) now calls hal_kv_*() and
     # hal_status_to_esp_err() instead of nvs_*() directly, so this executable
@@ -647,10 +673,21 @@ try {
             "`"$(Join-Path $driversDir 'persist/ota_record.c')`" `"$(Join-Path $driversDir 'http/ota_http_util.c')`" " +
             "`"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
             "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+    # WEB_AUTH_PLAN.md section 2b: ota_http.c now calls
+    # http_auth_policy_web_enabled() (http_auth_policy_iface.c) directly, and
+    # already used kiln_http_register() (http_auth_http.c) from the earlier
+    # route-rewiring pass; http_auth_http.c in turn needs
+    # http_auth_enforce.c's pure decision function and
+    # http_session_iface.c's session resolver. All four linked in for REAL,
+    # same rationale as web_auth_store.c above: they are already host-tested
+    # elsewhere (test_http_auth_enforce.c) and this executable needs their
+    # real symbols to link, not a stand-in.
     # hal_time migration (HW_ABSTRACTION.md item 5): ota_http_pico.c, one of
     # the files #included directly into test_ota_http.c above, now calls
     # hal_time_now_us() instead of esp_timer_get_time(); fake_time.c supplies it.
@@ -1021,7 +1058,12 @@ try {
     New-Item -ItemType Directory -Force -Path $pihObjDir | Out-Null
     $cmd21 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$pihObjDir\\`" /Fe:`"$exe21`" `"$(Join-Path $testDir 'test_partition_info_http.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`""
+            "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            # kiln_http_register() rewiring: partition_info_http.c
+            # (#included above) now calls it instead of
+            # httpd_register_uri_handler() directly.
+            "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`""
 
     Invoke-HostTestExe -Name "partition_info_http" -ExePath $exe21 -BuildCmd $cmd21
 
@@ -1212,7 +1254,12 @@ try {
     $cmd29 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$exe29ObjDir\\`" /Fe:`"$exe29`" " +
             "`"$(Join-Path $testDir 'test_profile_export_import.c')`" " +
-            "`"$(Join-Path $driversDir 'persist/backup_json.c')`""
+            "`"$(Join-Path $driversDir 'persist/backup_json.c')`" " +
+            # kiln_http_register() rewiring: profile_export_import's handler
+            # (#included above) now calls it instead of
+            # httpd_register_uri_handler() directly.
+            "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`""
 
     Invoke-HostTestExe -Name "profile_export_import" -ExePath $exe29 -BuildCmd $cmd29
 
@@ -1390,7 +1437,12 @@ try {
     $ssmObjDir = Join-Path $outDir "ssm"
     New-Item -ItemType Directory -Force -Path $ssmObjDir | Out-Null
     $cmd37 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
-            "/Fo:`"$ssmObjDir\\`" /Fe:`"$exe37`" `"$(Join-Path $testDir 'test_safety_stack_margin_http.c')`""
+            "/Fo:`"$ssmObjDir\\`" /Fe:`"$exe37`" `"$(Join-Path $testDir 'test_safety_stack_margin_http.c')`" " +
+            # kiln_http_register() rewiring: safety_stack_margin_http.c
+            # (#included above) now calls it instead of
+            # httpd_register_uri_handler() directly.
+            "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`""
 
     Invoke-HostTestExe -Name "safety_stack_margin_http" -ExePath $exe37 -BuildCmd $cmd37
 

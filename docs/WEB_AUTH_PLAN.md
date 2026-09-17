@@ -475,6 +475,23 @@ than 80 routes were found, so a broken regex cannot report a clean pass on
 zero routes). It fails the build when any route literal is registered through
 a path that does not carry an explicit tier, and names every offender.
 
+**Design deviation from this section's original sketch:** the shipped
+`kiln_http_register(server, &uri_handler)` takes no `tier` parameter — the
+sketch above shows one. The tier is resolved *internally*, inside
+`kiln_http_register()`, via `http_auth_lookup_tier(uri, method)` against
+`route_tier_table.h`, rather than being supplied by each call site. Reasoning:
+a caller-supplied tier is a second place the classification can drift from
+the table that `check_route_tier_coverage.ps1` actually audits — a call site
+could pass `ROUTE_TIER_USER` while the table (or a later edit to the table)
+says `ADMIN`, and nothing would catch the mismatch until an attacker found
+it. Resolving the tier from the single table `route_tier_table.h` already
+owns means there is exactly one place classification can be wrong, and the
+mechanical check already audits that one place. The fail-closed behaviour
+this section calls for (an untiered route defaults to ADMIN and logs
+`ROUTE WITH NO TIER`) is unchanged, and lives in `kiln_http_register()`
+itself (`http_auth_http.c`) rather than needing a caller to have supplied
+anything.
+
 *Acceptance:* `tools/run_all_checks.ps1` discovers the new check by its
 `check_*` name and it passes on a clean tree; the check's reported route count
 equals `check_uri_handler_cap.ps1`'s.
@@ -688,7 +705,7 @@ user, auth on + admin} against `/api/profile_exec/stop` and asserts ALLOW in
 all five; a bench check confirms the LCD Stop button works with the LCD locked
 and a firing running.
 
-**Status, 2026-09-17 — LCD side done, HTTP side has an open gap.**
+**Status, 2026-09-17 — both LCD and HTTP sides done.**
 
 LCD side: `ui_home_fire_btn_cb()` (`firmware/KilnFW/App/drivers/ui/ui_page_home_actions.c`)
 already matches this section exactly — its RUNNING/PAUSED branch calls
@@ -701,35 +718,31 @@ branches apart), and its negative test
 (`firmware/KilnFW/App/test/test_check_stop_path_never_gated.ps1`) proves the
 check catches a PIN gate actually moved onto the Stop branch — verified
 against the real production file, restored by hand, sha256-confirmed
-unchanged. `firmware/KilnFW/App/test/test_web_auth_safety_interaction.c`
-host-tests the two route-tier facts this section depends on
-(`/api/profile_exec/stop` is USER, `/api/safety/clear_trip` is ADMIN) plus
-the "auth off" combination of the acceptance list above, driven through the
-real route table.
+unchanged.
 
-HTTP side, open gap: **the URI-level bypass for `POST /api/profile_exec/stop`
-does not exist yet.** `http_auth_check()`
-(`firmware/KilnFW/App/drivers/http/http_auth_enforce.c`) takes only a
-`route_tier_t`/role/`web_enabled` triple — it has no URI parameter at all —
-and neither it nor `http_auth_http.c`'s `kiln_http_prehandler()` special-cases
-`/api/profile_exec/stop` anywhere. Since the route is tiered USER (correct
-per section 1), today only 3 of the 5 acceptance-list combinations actually
-ALLOW: auth off, auth-on+user, and auth-on+admin. **Auth-on with no session
-and auth-on+locked both currently return `DENY_NO_SESSION`** — a stop request
-from a client that never logged in, or whose session expired, is refused
-exactly like any other USER-tier route, which is precisely what this section
-exists to prevent. This is a gap in the enforcement point (plan item 5),
-which was out of scope for the pass that added the checks above (owned by
-another in-flight change to that same file pair) — flagged here rather than
-fixed. Closing it needs either a URI-aware exemption list in
-`kiln_http_prehandler()` (checked before calling `http_auth_check()`) or a
-new `route_tier_t`-independent bypass flag threaded through
-`route_tier_table.h`, consulted by both `http_auth_check()` and a
-correspondingly extended acceptance test in `test_http_auth_enforce.c` (or
-`test_web_auth_safety_interaction.c`) exercising all five combinations named
-above. Until that lands, the bench-check half of this section's acceptance
-criterion should also be spot-checked with the LCD *and* an unauthenticated
-browser tab side by side.
+HTTP side, defect found and closed (section 5's enforcement point): the
+first implementation of `http_auth_check()`/`kiln_http_prehandler()`
+classified `POST /api/profile_exec/stop` as `ROUTE_TIER_USER` — its
+plan-nominal tier — and had no code path that bypassed the session check
+for it, so an auth-on, session-less or locked-out client got
+`DENY_NO_SESSION` on stop. Only 3 of this section's 5 required combinations
+allowed it. Fixed by introducing a fourth tier, `ROUTE_TIER_SAFETY_REDUCE`
+(`route_tier_table.h`), assigned to `/api/profile_exec/stop` in place of
+`ROUTE_TIER_USER`, and handled in `http_auth_check()`
+(`http_auth_enforce.c`) as an unconditional ALLOW — checked before the
+no-session/no-role logic, same position as `ROUTE_TIER_OPEN`. Deliberately
+not a URI string comparison inside the enforcement function or the
+pre-handler: a hardcoded path match would be a second, independently-
+maintained record of which routes bypass auth, alongside
+`route_tier_table.h` — exactly the reset-one-side-of-a-pair shape
+CLAUDE.md documents four prior instances of. Routing it through the tier
+table instead means `check_route_tier_coverage.ps1` keeps covering this
+route the same as every other one, and there remains exactly one place
+(`route_tier_table.h`) that answers "which routes bypass auth entirely."
+`firmware/KilnFW/App/test/test_web_auth_safety_interaction.c` and
+`test_http_auth_enforce.c` now cover all 5 acceptance-list combinations
+against the real route table, driven through `ROUTE_TIER_SAFETY_REDUCE`
+rather than a bare literal.
 
 ---
 

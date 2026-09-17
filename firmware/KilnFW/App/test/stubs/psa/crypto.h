@@ -178,4 +178,27 @@ static inline psa_status_t psa_hash_abort(psa_hash_operation_t *op)
     return PSA_SUCCESS;
 }
 
+// One-shot hash, added for http_session_iface.c's sha256() (WEB_AUTH_PLAN.md
+// section 4's session-token hashing). Deterministic, order-sensitive fake --
+// same rationale as psa_stub_fake_mac() above: what http_session_iface.c's
+// own host tests actually verify (the same token hashes to the same lookup
+// key, and different tokens hash differently) does not depend on real SHA-256
+// strength, only on that same-input/same-output, different-input/different-
+// output property. Reuses psa_stub_fake_mac() with a fixed, non-secret
+// "key" so this is a distinct mixing from the HMAC path above rather than a
+// second copy of the same function.
+static inline psa_status_t psa_hash_compute(psa_algorithm_t alg, const uint8_t *input,
+                                             size_t input_length, uint8_t *hash, size_t hash_size,
+                                             size_t *hash_length)
+{
+    (void)alg;
+    if (hash_size < 32) {
+        return PSA_ERROR_GENERIC_ERROR;
+    }
+    static const uint8_t kFixedKey[8] = {0x68, 0x61, 0x73, 0x68, 0x6b, 0x65, 0x79, 0x00};
+    psa_stub_fake_mac(kFixedKey, sizeof(kFixedKey), input, input_length, hash);
+    if (hash_length) *hash_length = 32;
+    return PSA_SUCCESS;
+}
+
 #endif // TEST_STUB_PSA_CRYPTO_H

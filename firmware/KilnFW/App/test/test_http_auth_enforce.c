@@ -127,6 +127,31 @@ static void test_insufficient_tier_denied(void) {
                "USER role on a USER-tier route -> ALLOW");
 }
 
+static void test_safety_reduce_always_allowed(void) {
+    TEST_SECTION("http_auth_check -- ROUTE_TIER_SAFETY_REDUCE is allowed regardless of role or lockout");
+
+    // SCENARIO (plan section 9): POST /api/profile_exec/stop can only ever
+    // reduce heat/risk, so it must be reachable with no session at all, and
+    // with a role the resolver would otherwise report for a locked-out or
+    // never-logged-in client (HTTP_AUTH_ROLE_NONE) -- exactly the same value
+    // an expired or unresolvable session collapses to.
+    route_tier_t tier;
+    TEST_CHECK(http_auth_lookup_tier("/api/profile_exec/stop", HTTP_POST, &tier) &&
+                   tier == ROUTE_TIER_SAFETY_REDUCE,
+               "POST /api/profile_exec/stop is ROUTE_TIER_SAFETY_REDUCE in route_tier_table.h, not USER");
+
+    TEST_CHECK(http_auth_check(ROUTE_TIER_SAFETY_REDUCE, HTTP_AUTH_ROLE_NONE, true) == HTTP_AUTH_DECISION_ALLOW,
+               "auth ON + SAFETY_REDUCE + no session (or locked out) -> ALLOW, never DENY_NO_SESSION");
+    TEST_CHECK(http_auth_check(ROUTE_TIER_SAFETY_REDUCE, HTTP_AUTH_ROLE_USER, true) == HTTP_AUTH_DECISION_ALLOW,
+               "auth ON + SAFETY_REDUCE + USER session -> ALLOW");
+    TEST_CHECK(http_auth_check(ROUTE_TIER_SAFETY_REDUCE, HTTP_AUTH_ROLE_ADMIN, true) == HTTP_AUTH_DECISION_ALLOW,
+               "auth ON + SAFETY_REDUCE + ADMIN session -> ALLOW");
+    // And with auth off it is unaffected too -- this tier is not a special
+    // case of the auth-off collapse, it is unconditional.
+    TEST_CHECK(http_auth_check(ROUTE_TIER_SAFETY_REDUCE, HTTP_AUTH_ROLE_NONE, false) == HTTP_AUTH_DECISION_ALLOW,
+               "auth OFF + SAFETY_REDUCE + no session -> ALLOW");
+}
+
 static void test_unresolvable_tier_end_to_end(void) {
     TEST_SECTION("http_auth_check -- an unresolvable tier ends up denied, not silently open");
 
@@ -152,5 +177,6 @@ void run_test_http_auth_enforce(void) {
     test_no_session_denied();
     test_expired_session_denied();
     test_insufficient_tier_denied();
+    test_safety_reduce_always_allowed();
     test_unresolvable_tier_end_to_end();
 }

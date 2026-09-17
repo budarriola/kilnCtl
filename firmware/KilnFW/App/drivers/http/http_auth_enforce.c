@@ -41,6 +41,17 @@ http_auth_decision_t http_auth_check(route_tier_t tier, http_auth_role_t role, b
         return HTTP_AUTH_DECISION_ALLOW;
     }
 
+    // Plan section 9: a route that can only ever reduce heat/risk (today,
+    // POST /api/profile_exec/stop, ROUTE_TIER_SAFETY_REDUCE) must be
+    // reachable regardless of role or session state -- including
+    // HTTP_AUTH_ROLE_NONE and a locked-out client. Authentication must
+    // never be able to make stopping a firing harder than it is with auth
+    // off; checked here, before the no-session denial below, so nothing
+    // past this line can veto it.
+    if (tier == ROUTE_TIER_SAFETY_REDUCE) {
+        return HTTP_AUTH_DECISION_ALLOW;
+    }
+
     // Everything past this point requires SOME session. No session, an
     // expired one, and an unresolvable one all arrive as HTTP_AUTH_ROLE_NONE
     // (see the session-resolver contract in http_session_iface.h) and are
@@ -59,11 +70,13 @@ http_auth_decision_t http_auth_check(route_tier_t tier, http_auth_role_t role, b
             return (role == HTTP_AUTH_ROLE_ADMIN) ? HTTP_AUTH_DECISION_ALLOW
                                                    : HTTP_AUTH_DECISION_DENY_INSUFFICIENT;
         case ROUTE_TIER_OPEN:
-            // Unreachable: handled above. Kept as an explicit case (rather
-            // than falling into `default`) so this switch names every enum
-            // value from route_tier_table.h and a future added tier fails
-            // to compile silently-correct instead of falling through this
-            // switch's default -- see the `default` case immediately below.
+        case ROUTE_TIER_SAFETY_REDUCE:
+            // Both unreachable: handled above. Kept as explicit cases
+            // (rather than falling into `default`) so this switch names
+            // every enum value from route_tier_table.h and a future added
+            // tier fails to compile silently-correct instead of falling
+            // through this switch's default -- see the `default` case
+            // immediately below.
             return HTTP_AUTH_DECISION_ALLOW;
         default:
             // A tier value route_tier_table.h did not define (e.g. a new

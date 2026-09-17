@@ -90,15 +90,17 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
     bool web_enabled = http_auth_policy_web_enabled();
 
     http_auth_role_t role = HTTP_AUTH_ROLE_NONE;
-    // Skip the session lookup entirely for OPEN routes and whenever web
-    // auth is off -- http_auth_check() would ALLOW either way, and this
-    // also means the Dashboard's hot GET /api/status path never pays for a
-    // session-table lookup it cannot need. Not an optimization this
-    // decision structurally depends on: http_auth_check() called with
-    // role == HTTP_AUTH_ROLE_NONE unconditionally still ALLOWs both of
-    // those cases on its own, so a future change here that always resolves
-    // the role first cannot make this less safe, only slower.
-    if (web_enabled && ctx->tier != ROUTE_TIER_OPEN) {
+    // Skip the session lookup entirely for OPEN and SAFETY_REDUCE routes
+    // (e.g. POST /api/profile_exec/stop) and whenever web auth is off --
+    // http_auth_check() would ALLOW all of those regardless of role, and
+    // this also means the Dashboard's hot GET /api/status path (and the
+    // stop button) never pays for a session-table lookup they cannot need.
+    // Not an optimization this decision structurally depends on:
+    // http_auth_check() called with role == HTTP_AUTH_ROLE_NONE
+    // unconditionally still ALLOWs every one of those cases on its own, so
+    // a future change here that always resolves the role first cannot make
+    // this less safe, only slower.
+    if (web_enabled && ctx->tier != ROUTE_TIER_OPEN && ctx->tier != ROUTE_TIER_SAFETY_REDUCE) {
         resolve_role_for_request(req, &role);
     }
 

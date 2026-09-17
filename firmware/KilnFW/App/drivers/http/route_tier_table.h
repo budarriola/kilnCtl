@@ -61,6 +61,19 @@ typedef enum {
     ROUTE_TIER_OPEN = 0,   /* no credential, ever */
     ROUTE_TIER_USER,       /* `user` or `administrator` */
     ROUTE_TIER_ADMIN,      /* `administrator` only */
+    /* Reachable with NO credential and regardless of lockout/session state,
+     * same as OPEN, but distinct from OPEN because it is not "public read"
+     * -- it is "this route only ever REDUCES heat/risk, so authentication
+     * must never be able to make it harder to reach than an unauthenticated
+     * board" (plan section 9). Kept as its own tier, not folded into OPEN,
+     * so route_tier_table.h stays the single legible record of *why* a
+     * route needs no session: OPEN means "safe to reveal/costs nothing",
+     * this means "safe (indeed necessary) to always allow because it can
+     * only make the kiln safer". http_auth_check() and
+     * kiln_http_prehandler() both key off THIS enum value rather than a
+     * URI string match, so there remains exactly one place a route's
+     * always-reachable status is decided. */
+    ROUTE_TIER_SAFETY_REDUCE,
 } route_tier_t;
 
 typedef struct {
@@ -103,14 +116,16 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/wifi", HTTP_GET, ROUTE_TIER_OPEN),
 
     /* ---- USER -- start and stop a firing, and nothing else (plan section
-     * 1, "USER"). NOTE: /api/profile_exec/stop is also listed here at its
-     * plan-assigned tier for table completeness, but per plan section 9 it
-     * bypasses authentication unconditionally at the enforcement point --
-     * that bypass is item 5's job, not this table's. This table only ever
-     * records the tier a route is *nominally* USER/ADMIN under; it does not
-     * encode the safety-bypass exception. */
+     * 1, "USER"). NOTE: /api/profile_exec/stop is classified
+     * ROUTE_TIER_SAFETY_REDUCE, not ROUTE_TIER_USER -- plan section 9
+     * requires it be reachable with no session and regardless of lockout
+     * state (a locked-out owner watching a kiln climb must still be able to
+     * stop it). This is decided HERE, in the one table both the mechanical
+     * coverage check and the enforcement pre-handler consult, rather than
+     * as a URI string match inside the enforcement function -- see
+     * ROUTE_TIER_SAFETY_REDUCE's own doc comment above. */
     ROUTE_TIER("/api/profile_exec/start", HTTP_POST, ROUTE_TIER_USER),
-    ROUTE_TIER("/api/profile_exec/stop", HTTP_POST, ROUTE_TIER_USER),
+    ROUTE_TIER("/api/profile_exec/stop", HTTP_POST, ROUTE_TIER_SAFETY_REDUCE),
     ROUTE_TIER("/api/profile_exec/pause", HTTP_POST, ROUTE_TIER_USER),
     ROUTE_TIER("/api/profile_exec/resume", HTTP_POST, ROUTE_TIER_USER),
     ROUTE_TIER("/api/profile_exec/ack_last_run", HTTP_POST, ROUTE_TIER_USER),
