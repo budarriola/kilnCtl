@@ -276,6 +276,10 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # doc comment for the file map.
                        "net/ota_auth.c"
                        "net/auth_reset_gesture.c"
+                       # docs/WEB_AUTH_PLAN.md section 4/8 -- the pure session-table/
+                       # timeout module, host-tested alongside ota_auth.c (same
+                       # no-ESP-IDF-dependency discipline).
+                       "net/web_auth_session.c"
                        "net/ota_interlock.c"
                        "control/heat_interlock.c"
                        "persist/ota_record.c"

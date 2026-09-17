@@ -57,6 +57,7 @@ try {
         # instance, not by calling into a second parallel lockout of its own.
         (Join-Path $testDir "test_lcd_auth_state.c"),
         (Join-Path $testDir "test_security_http_core.c"),
+        (Join-Path $testDir "test_web_auth.c"),
         (Join-Path $testDir "test_ota_interlock.c"),
         (Join-Path $testDir "test_heat_interlock.c"),
         (Join-Path $testDir "test_heat_enable.c"),
@@ -145,6 +146,7 @@ try {
         (Join-Path $driversDir "net/ota_auth.c"),
         (Join-Path $driversDir "net/auth_reset_gesture.c"),
         (Join-Path $driversDir "ui/lcd_auth_state.c"),
+        (Join-Path $driversDir "net/web_auth_session.c"),
         (Join-Path $driversDir "net/ota_interlock.c"),
         (Join-Path $driversDir "http/security_http_core.c"),
         (Join-Path $driversDir "http/security_backend_placeholder.c"),
