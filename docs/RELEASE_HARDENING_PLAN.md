@@ -261,7 +261,7 @@ check that the release decision will cite:
 the host-test suites, and the ones that matter for release are a subset —
 scope it to the safety, config, stack-budget and build gates first.
 
-**Progress.** Four passes of negative-testing have run so far:
+**Progress.** Five passes of negative-testing have run so far:
 `docs/audits/release_gate_vacuity_audit_2026-09-16.md` (first slice),
 `docs/audits/release_gate_vacuity_audit_2026-09-16b.md` (six mirror-drift
 checks plus the KilnFW stack-budget extraction-fidelity question),
@@ -274,18 +274,42 @@ negative test of the new `-RunSetup` worktree-mint switch below), and
 independence`, `check_uri_handler_cap`, `check_heartbeat_contract`,
 `check_heat_enable_wiring`, `check_c_files_in_cmakelists`,
 `check_no_duplicate_crc`, `check_safety_baud_sync`, and the PC-side half of
-`check_relay_authority_paths` — eight gates). Every gate negative-tested
-across the four passes was found load-bearing; none was vacuous.
+`check_relay_authority_paths` — eight gates), and
+`docs/audits/release_gate_vacuity_audit_2026-09-16e.md` (the firmware-side
+half of `check_relay_authority_paths` plus a materially widened PC-side rule,
+`check_mcp_facade_coverage`, `check_mcp_tool_count_doc`,
+`check_test_has_assertions`, `check_test_c_files_wired`,
+`check_stack_margin_registration`'s create-vs-register sub-check,
+`check_safety_trip_mask_docs`, `check_mykicad_golden_suite_runs` — eight
+gates, plus `check_duplicate_symbols` examined at a fresh-build baseline
+only, FAIL path not yet exercised). Every gate negative-tested across the
+five passes was found load-bearing; none was vacuous, though one stale
+documented negative-test example was found in `check_mcp_facade_coverage.py`
+(`plant_sim_compare`, now independently covered by a later `GROUP_PREFIXES`
+entry — reported, not silently rewritten) and one real, live production bug
+was found and fixed: `actions.py`'s `"IO: All Relays Off"` GUI action
+bypassed `IoClient`'s refusal-aware wrapper via a bare `_send()` call,
+caught by the fifth pass's widened `check_relay_authority_paths.py` rule;
+fixing it surfaced a second issue — routing relay actions through
+`_client_query()` drops the protocol-compatibility gate `_send()` applies —
+fixed by adding `_gated_client_query()` and using it for all three relay
+actions, which also closed a pre-existing, never-tested gap in
+`"IO: Set Relay"`/`"IO: Set Relay Mask"`. The fifth pass also found
+`check_01_kilnfw_pushed_build.ps1` genuinely, currently failing against live
+`origin/main` (a `-Werror=format-truncation` defect in `backup_import.c`
+from concurrent, unrelated backup/config-migration work) — out of scope to
+fix here, but strong unplanned evidence the check is load-bearing.
 `tools/worktree_mint.ps1 -RunSetup` (added in the third pass) lets a minted
 worktree actually run `tools/run_all_checks.ps1` to completion, which the
-first two passes could not do; the fourth pass used it directly. The fourth
-pass also fixed 11 pre-existing `check_doc_hash_citations.ps1` false
-positives in the third pass's own document (git-hash-object blob hashes
-misread as commit citations — rewritten as `` `blob:<hash>` `` rather than
-deleted). The fourth pass's own document lists what is still unexamined —
-the two `check_00_*_target_build.ps1`/`check_01_*_pushed_build.ps1` pairs'
-FAIL paths, the firmware-side half of `check_relay_authority_paths`, the
-UI/layout family, and roughly half a dozen more.
+first two passes could not do; the fourth and fifth passes used it directly.
+The fourth pass also fixed 11 pre-existing `check_doc_hash_citations.ps1`
+false positives in the third pass's own document (git-hash-object blob
+hashes misread as commit citations — rewritten as `` `blob:<hash>` `` rather
+than deleted). The fifth pass's own document lists what is still
+unexamined — the remaining four `check_stack_margin_registration.ps1`
+sub-checks, `check_duplicate_symbols.ps1`'s FAIL path, both
+`check_00_*_target_build.ps1`/`check_01_*_pushed_build.ps1` pairs' FAIL
+paths, the UI/layout family, and a couple more.
 
 **Already covered, name the evidence:** the two `check_01_*_pushed_build.ps1`
 scripts are the strongest single piece of process coverage in the repo. They

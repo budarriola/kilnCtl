@@ -25,7 +25,18 @@ What this scans, under tools/PcTools/src and tools/PcTools/scripts:
     (``set_relay``/``set_relay_mask``/``all_relays_off`` in
     tools/PcTools/src/kilnctrl/io_expander.py -- the file that defines those
     wrappers is itself exempt) -- i.e. the frame-builder call must be wrapped
-    by the refusal-aware method, not handed to a bare ``.send(``.
+    by the refusal-aware method. 2026-09-16e widening: the rule now requires
+    the wrapper method's PRESENCE rather than a bypass sender's ABSENCE, so it
+    catches a bare unwrapped call (no sender at all) and a call routed
+    through any other sender helper, not just a literal ``.send(``. The
+    earlier, narrower version passed clean on both of those shapes -- see
+    docs/audits/release_gate_vacuity_audit_2026-09-16d.md's "attempt 1"
+    near-miss, and this widening's own real catch: actions.py's "IO: All
+    Relays Off" action called ``_send(ctx, UART_TASK_ID_IO,
+    devices.io_all_relays_off())`` directly (a live production bypass, not a
+    synthetic one), fixed in the same commit by routing it through
+    ``IoClient.all_relays_off()`` via ``_client_query()`` like its sibling
+    relay actions.
 
 This is a source-text scan (like the repo's other check_*.py/ps1 guards), not
 an AST-precise call-graph -- see the negative-test file listed below for what
@@ -69,11 +80,23 @@ RAW_BUILDER_RE = re.compile(
 #: self._set_relay_style(), not to a bare send()).
 DEFINITION_FILES = {"devices_io.py", "devices.py", "io_expander.py"}
 
-#: A call site is safe when this line (or one of the next few, for a
-#: multi-line call) is inside one of these wrapper calls rather than a bare
-#: ``.send(``. Matched by simple lexical proximity: the nearest preceding
-#: "def "/".send(" style token on the same logical statement.
-SEND_CALL_RE = re.compile(r"\.send\s*\(")
+#: A call site is safe ONLY when the raw builder's return value is passed
+#: straight into one of the three allowlisted wrapper methods in the same
+#: window -- i.e. `client.set_relay(..., devices.io_set_relay(...))`-shaped
+#: (io_expander.py's own bodies, exempted by filename above). Anything else
+#: is a bypass: not just `link.send(devices.io_set_relay(...))` (the shape
+#: `current_sense_commissioning.py` shipped with) but also a BARE call with
+#: no wrapper at all, and a call routed through any OTHER sender -- e.g.
+#: `_send(ctx, UART_TASK_ID_IO, devices.io_all_relays_off())`, the shape
+#: `actions.py`'s "IO: All Relays Off" action shipped with (found by this
+#: widening and fixed in the same commit: routed through
+#: `IoClient.all_relays_off()` via `_client_query()` instead). The earlier
+#: version of this rule only fired when a literal `.send(` appeared nearby,
+#: which both of those shapes evade -- one by omitting any sender at all,
+#: the other by calling a same-module helper (`_send`) that is not spelled
+#: `.send(`. Requiring the wrapper method's PRESENCE (instead of requiring
+#: the bypass sender's ABSENCE) closes both gaps at once and cannot be
+#: evaded by a differently-named sender helper.
 WRAPPER_METHOD_RE = re.compile(
     r"\b(set_relay_mask|set_relay|all_relays_off)\s*\("
 )
@@ -251,13 +274,16 @@ def check_file(path: Path) -> list[str]:
         # line, e.g. `return self._set_relay_style(IO_CMD_SET_RELAY,
         # devices.io_set_relay(relay, on), timeout)` inside io_expander.py
         # itself -- already exempted above by filename). A caller site is a
-        # bypass when the nearest enclosing call is a bare `.send(`.
+        # bypass whenever the raw builder's value is NOT visibly wrapped by
+        # one of the three refusal-aware methods -- whether it is handed to
+        # `.send(` directly, to some other sender (`_send(...)`,
+        # `link.send`, a bare unused call, etc.), or nothing at all.
         window = "\n".join(lines[max(0, i - 2) : i + 1])
-        if SEND_CALL_RE.search(window) and not WRAPPER_METHOD_RE.search(window):
+        if not WRAPPER_METHOD_RE.search(window):
             violations.append(
-                f"{path}:{i + 1}: raw frame builder passed to .send() directly "
-                f"-- use IoClient.set_relay()/set_relay_mask()/all_relays_off() "
-                f"instead, so a firmware refusal is actually observed: "
+                f"{path}:{i + 1}: raw frame builder not wrapped by "
+                f"IoClient.set_relay()/set_relay_mask()/all_relays_off() -- "
+                f"a firmware refusal reply would not be observed: "
                 f"{line.strip()}"
             )
     return violations

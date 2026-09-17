@@ -159,6 +159,38 @@ def _client_query(
     return describe(value)
 
 
+def _gated_client_query(
+    ctx: ActionContext,
+    client: object,
+    task_name: str,
+    error_type: type,
+    describe: Callable[[object], str],
+    query: Callable[..., object],
+) -> str:
+    """Same as ``_client_query``, but gated on the protocol-version
+    compatibility check ``_send`` applies.
+
+    The IoClient/ThermoClient/etc. wrapper methods talk to ``ctx.link``
+    directly and have no notion of protocol-version compatibility -- they
+    only guard against a FIRMWARE-level refusal (owned-by-profile, safety
+    fault, OTA in progress). A device command reached through one of these
+    wrappers before compatibility is confirmed (or after an incompatible
+    version is observed) is exactly the same hazard ``_send``'s gate exists
+    to prevent -- e.g. relay-authority commands must never reach the wrong
+    firmware/protocol version. Relay actions must use this, not the
+    ungated ``_client_query``, for that reason.
+    """
+    if ctx.info.compatible is not True:
+        reason = (
+            "protocol version mismatch"
+            if ctx.info.compatible is False
+            else "firmware version not yet confirmed (press \"INFO: Get FW Version\" first)"
+        )
+        ctx.session_log.error("refused %s command: %s", task_name, reason)
+        return f"error: refused - {reason}"
+    return _client_query(client, task_name, error_type, describe, query)
+
+
 # ---------------------------------------------------------------------------
 # THERMO -- 3x MAX31856 (task 1)
 # ---------------------------------------------------------------------------
@@ -298,8 +330,8 @@ _register(
     "reporting success, since the firmware answers a rejected relay command but not a "
     "successful one.",
     {"relay": int, "on": bool},
-    lambda ctx, relay, on: _client_query(
-        ctx.io, "IO", IoQueryError, _describe_relay_result,
+    lambda ctx, relay, on: _gated_client_query(
+        ctx, ctx.io, "IO", IoQueryError, _describe_relay_result,
         lambda client: client.set_relay(relay, on),
     ),
 )
@@ -309,8 +341,8 @@ _register(
     "(K3/J8, K1/J3, K2/J4, K5/J11) in both mask (which to change) and value. Same "
     "refusal-aware wait as \"IO: Set Relay\".",
     {"mask": int, "value": int},
-    lambda ctx, mask, value: _client_query(
-        ctx.io, "IO", IoQueryError, _describe_relay_result,
+    lambda ctx, mask, value: _gated_client_query(
+        ctx, ctx.io, "IO", IoQueryError, _describe_relay_result,
         lambda client: client.set_relay_mask(mask, value),
     ),
 )
@@ -319,7 +351,10 @@ _register(
     "De-energize all four relays unconditionally -- the same state the firmware "
     "falls back to on link loss or a safety fault.",
     {},
-    lambda ctx: _send(ctx, UART_TASK_ID_IO, devices.io_all_relays_off()),
+    lambda ctx: _gated_client_query(
+        ctx, ctx.io, "IO", IoQueryError, lambda result: result.describe(),
+        lambda client: client.all_relays_off(),
+    ),
 )
 _register(
     "IO: Set Digital Output",
