@@ -49,6 +49,8 @@ void run_test_readiness_estop_verification(void);
 void run_test_kiln_cfg_store(void);
 void run_test_safety_cfg_store(void);
 void run_test_boot_guard(void);
+void run_test_pico_auto_update_decision(void);
+void run_test_pico_update_attempts(void);
 void run_test_boot_button(void);
 void run_test_backlight_pwm(void);
 void run_test_display_power_policy(void);
@@ -143,6 +145,8 @@ int main(void)
     run_test_kiln_cfg_store();
     run_test_safety_cfg_store();
     run_test_boot_guard();
+    run_test_pico_auto_update_decision();
+    run_test_pico_update_attempts();
     run_test_boot_button();
     run_test_backlight_pwm();
     run_test_display_power_policy();

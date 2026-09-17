@@ -66,6 +66,13 @@ try {
         (Join-Path $testDir "test_kiln_cfg_store.c"),
         (Join-Path $testDir "test_safety_cfg_store.c"),
         (Join-Path $testDir "test_boot_guard.c"),
+        # docs/PICO_AUTO_UPDATE_PLAN.md -- pure decision logic (header-only,
+        # no I/O) and the persisted per-pair attempt-budget counter
+        # (#includes pico_update_attempts.c directly, same convention as
+        # test_boot_guard.c immediately above; no fake-body collision, so it
+        # joins this combined executable rather than needing its own).
+        (Join-Path $testDir "test_pico_auto_update_decision.c"),
+        (Join-Path $testDir "test_pico_update_attempts.c"),
         (Join-Path $testDir "test_boot_button.c"),
         (Join-Path $testDir "test_backlight_pwm.c"),
         (Join-Path $testDir "test_display_power_policy.c"),

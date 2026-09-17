@@ -203,6 +203,19 @@ ALLOWLIST = {
     # Pattern 3 (init-time only): ota_record_save() runs once from
     # app_main's boot-time OTA-verify sequence.
     "ota_record.c",
+    # docs/PICO_AUTO_UPDATE_PLAN.md -- persisted per-pair attempt-budget
+    # counter for the Pico auto-update decision (pico_auto_update.h). Same
+    # mechanics as boot_guard.c (copied deliberately, see this file's own
+    # header), and same allowlist reasoning: as of this pass its write
+    # functions (pico_update_attempts_record_attempt()/_record_failure()/
+    # _clear()) have no call site yet -- the boot-time glue
+    # (pico_auto_update_state.c, docs/PICO_AUTO_UPDATE_PLAN.md step 3) that
+    # will call them is a separate, later commit. When wired, its only
+    # caller is the synchronous boot path in main_control_bringup.c, before
+    # normal task concurrency exists -- Pattern 3 (init-time only), same
+    # shape as boot_guard.c's own entry above. Until then this is dead code
+    # with no PSRAM-stack exposure at all (unreachable).
+    "pico_update_attempts.c",
     # Pattern 2 (local caller_stack_is_external() guard), see this file's
     # own comment mirroring kiln_cfg_store.c's.
     "profile_executor_firing_stats.c",
