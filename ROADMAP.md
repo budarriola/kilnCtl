@@ -1,7 +1,7 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-14, roadmap-upkeep audit
-> (fifteenth sweep) — the second promised plan pass. Folds in results that
+> **Status:** planning · **Last reviewed:** 2026-09-16, roadmap-upkeep audit
+> (sixteenth sweep) — see note below; also folds in the fifteenth sweep that
 > were "work in progress" as of the fourteenth sweep (dimensionless fuzzy
 > bands, the overshoot re-measurement and its review, the firing_score fix
 > sequence) and records an owner decision. No hardware touched, no firmware
@@ -804,6 +804,23 @@
 > two will drift. When a milestone lands, tick it here **and** in the owning
 > plan. When the shape of the work changes, edit this file rather than letting it
 > describe a project that no longer exists.
+> **Sixteenth sweep, 2026-09-16 — roadmap-upkeep pass.** Two milestones were
+> fully done but still presented as live work and were collapsed to one-line
+> CLOSED entries: M12 (every row already ticked by 2026-09-15; cited commits
+> `5cd56b6`/`64d0a8e`/`17ae4d9`/`b5cb83a4`/`c0729e1e`/`ddbd024`/`3149393`
+> verified as ancestors of `origin/main`, full text moved to
+> `docs/COMPLETED_2026-09.md`) and M16 (closed the same day by `61c75767`,
+> already mirrored into `docs/HW_ABSTRACTION.md`, just never collapsed here).
+> A third instance was a pure forwarding address rather than a milestone: the
+> "Future work — KilnFW PC-link command acknowledgement" section had nothing
+> left of its own — the work closed in `firmware/KilnFW/TODO.md` section 11
+> back on 2026-08-24 (`5df2190`/`a458a8f`/`7b4c087`, all verified ancestors of
+> `origin/main`) — so it now collapses to a one-line pointer too. No other
+> milestone's tick state disagreed with its owning plan on this sweep; a
+> sample of M12's cited commits and `commissioning_gate.c`'s
+> `!calibration_missing && config_params_all_required_set()` check were
+> verified against code, not just against plan prose.
+
 
 The system is two firmwares that must agree with each other:
 
@@ -1917,210 +1934,14 @@ day. The write-window constraint this uncovered (config writes refused
 outside the ~60s boot GRACE period) shaped M12's design below. Full
 postmortem: [`docs/COMPLETED_2026-09.md`](docs/COMPLETED_2026-09.md#m12a--the-commissioning-surface-lied-full-postmortem--opened-and-closed-2026-08-28).
 
-## M12 — Commissioning the operator can actually do · *opened 2026-08-28*
+## M12 — Commissioning the operator can actually do · *opened and CLOSED 2026-08-28*
 
-The owner answered six of the standing blocked-on-you questions in one message
-on 2026-08-28. Most of the answers were not values to paste into a config —
-they were *"the operator should be able to enter that"*, which turns a set of
-questions into a milestone.
-
-**The ordering constraint, and it is the important part of this milestone.**
-The last item below makes an uncommissioned safety processor refuse heating
-enable. Today the board grants enable while `commissioned: false`, and that is
-the only reason the bench can heat at all. Land the refusal first and the bench
-is locked out of heating until a full commissioning pass succeeds — including
-`abs_max_temp_c`, which has no value yet. So the refusal goes **last**, after
-the entry surface exists and a real commissioning pass has been completed on
-the board. That is a sequencing decision, not a reason to soften the refusal.
-
-- [x] **Kiln maximum temperature entered on the safety page**, and used to set
-      `abs_max_temp_c` on the safety processor. Already landed — field id 260
-      on `safety_commissioning_page.html`, `noDefault: true` so unset never
-      reads as 0/no-limit (the M12a fix). Checkbox was stale; verified
-      2026-08-28 by re-reading the page rather than re-implementing
-- [x] **Thermocouple maximum inferred from the thermocouple type**, not
-      entered. 2026-08-28: selecting `tc_type` now pre-fills `abs_max_temp_c`
-      from `TC_MAX_C_BY_TYPE`, via `placeholder` rather than `.value` so the
-      pre-fill is visible but never silently saved/committed on the
-      operator's behalf — a real review finding on the first pass fixed
-      before landing. `abs_max_temp_c` stays ASKED and independently
-      editable per the spec (it's the kiln's own ceiling, not purely the
-      sensor's); `checkTcMaxContradiction()`'s existing hard block (gates
-      both Save and guided-flow commit) still prevents committing above the
-      type's table max. One drifted row found between this table and
-      SaftyFW's own `TC_RANGES` (type B: 1798 here vs 1820 there, two
-      different datasheet pages) — noted in code, the lower/more
-      conservative number kept on purpose
-- [x] **Maximum expected kiln power entered on the safety page.** Already
-      landed — `max_expected_power_w` (id 793, param 0x0319) on
-      `safety_commissioning_page.html`. Checkbox was stale; verified
-      2026-08-28
-- [x] **Per-zone current measurement, from the zones page.** Already landed
-      (`zones_page.html`'s "Measure Zone Normal Current" sweep,
-      `zones_http.c`'s `ZONE_SWEEP_*` implementation) — one zone at a time,
-      refuses during a running profile/autotune/link-down/trip-latched,
-      Abort leaves every relay off. Checkbox was stale; verified 2026-08-28.
-      **What it does NOT do**: write SaftyFW's per-CT-channel `ct_channel_map`/
-      `i_normal_a[]` — it stores a per-ZONE result on the ESP side only
-- [x] **`ct_channel_map` derived from the zone-normal-current sweep**, so S14
-      can actually be armed. 2026-08-28. The sweep now samples all three CT
-      channels separately per zone (not summed through `ct_mask`, which is
-      the thing being derived); a channel is only accepted when it clears an
-      absolute floor AND beats the runner-up by 4x, and a zone whose
-      `relay_mask` isn't exactly its own relay bit, or that ties with another
-      zone for the same channel, is refused rather than guessed — both
-      refusal paths are host-tested. The commit is verified LIVE, not
-      trusted from the ACK: the same class of bug `ddbd024` fixed for the
-      commissioning page's own writes was caught by review here too — an
-      ACKed, un-rejected COMMIT_CONFIG is not proof the Pico stored
-      anything, so this reads the value back over the wire before persisting
-      or reporting a channel as derived. A failed/rejected/unconfirmed
-      commit also backs out anything already staged, so an unrelated later
-      commit can't pick up a leftover partial map. `safety_commissioning_page.html`'s
-      three manual-entry fields now show the derived value read-only with an
-      explicit override, falling through to manual entry when the sweep
-      hasn't run or was ambiguous
-- [x] **Runtime CT-to-zone mapping check.** The comparison itself was already
-      shipped (`zones_ct_mapping_mismatch()`/`zones_ct_mapping_warn_mask()`,
-      `zones_http.c`, Task 2) and re-evaluated fresh against LIVE current on
-      every `GET /api/zones` — but `zones_page.html` only ever called that
-      endpoint once, at page load, so an operator who opened the page and
-      walked away never saw a CT moved mid-firing. 2026-08-28: added
-      `pollCtMapping()`, the same `setInterval` pattern this page already
-      uses for `pollCtCurrents`/`pollAutotune`, deliberately touching only
-      `#ctWarnings` rather than reusing the full-page load path (which
-      overwrites every form field from the response — fine once, destructive
-      on an interval while an operator might be mid-edit). Catches a CT
-      moved to the wrong jack, exactly the mistake `CONFIG_REFERENCE.md`
-      says a wrong `k_ct_v_per_a` cannot be distinguished from otherwise.
-      Never a trip — `zones_http.h`'s own doc comment is explicit that this
-      decision belongs to the safety processor, not this file
-- [x] **Delete the twelve stale `display_*` MCP tools.** The owner left the
-      choice open; deleting wins because `display_bridge_task` is confirmed
-      dead code on real hardware, so "restore a minimal firmware handler" means
-      writing a new consumer for tools nobody uses, not repairing a broken one.
-      Shipped 2026-08-28: the removal itself rode in with `9838399` — fifteen
-      tools in the end (`display_read_id`, `display_rgb565`, `display_reset`,
-      `_set_power`, `_set_rotation`, `_set_invert`, `_clear`, `_fill_rect`,
-      `_draw_rect`, `_draw_line`, `_set_text_cursor`, `_set_text_style`,
-      `_print`, `_send_image`, `_test_pattern`) plus their `_display_mutating`
-      helper. Deliberately kept: `devices.display_*` frame builders,
-      `DisplayClient`, `actions.py`'s DISPLAY entries and `gui.py`'s Display
-      panel — all still reached by the generic `press_button`/`list_buttons`
-      path, which is a live front end, not part of this cleanup. This pass
-      corrected the stale registered-tool counts left behind (135 -> 127 in
-      `CLAUDE.md`, `docs/MCP_SERVERS.md`, `mcp_server.py`, `mcpkit/__init__.py`)
-- [x] **An uncommissioned safety processor refuses heating enable** — the
-      owner's answer was an unqualified NO. Shipped 2026-08-28 (`5cd56b6`),
-      last, per the ordering note above. **Commissioned** now means two
-      facts that must agree: the `calibration_missing` verdict `COMMIT_CONFIG`
-      persisted, AND `config_params_all_required_set()` recomputed from
-      `fields_set` (the eight no-safe-default fields — `tc_source`,
-      `borrowed_zone_index`, `tc_placement_mode`, `abs_max_temp_c`,
-      `ct_channel_map`, `max_rate_c_per_min`, `mains_voltage_v`, `tc_type`).
-      Any disagreement, in either direction, refuses — a stored flag the bits
-      do not back up, or a v1→v2-migrated record whose flag is forced true.
-      Plausible values never count: only an explicit `SET_PARAM` +
-      `COMMIT_CONFIG` sets a bit. **The guard lives on the safety processor**,
-      not in the KilnFW UI: `firmware/SaftyFW/src/commissioning_gate.c` (pure,
-      host-tested) consulted by `safety_core_request_enable()` on the ON
-      direction only, beside the update interlock and the `safety_tc_installed`
-      refusal — `SAFETY_CMD_REQUEST_ENABLE(1)` never reaches
-      `relay_owner_command_energize()`, while de-energizing is never gated.
-      This closes the 2026-08-24 bench finding: an uncommissioned board has
-      `abs_max_temp_c == 0`, so S1 can never trip, and S8 ships disabled —
-      heat was being granted with no absolute ceiling in force. **No new fault
-      source or wire field**: the condition already travels as Frame B's
-      `CALIBRATION_MISSING` bit, which KilnFW shows as `commissioned:false` on
-      the commissioning page and as the FAIL of the "Safety processor
-      commissioned" readiness item a firing start is already blocked on; the
-      Pico logs `request_enable: refused: safety processor not commissioned`.
-      Accepted cost, exactly as `SaftyFW/TODO.md` predicted: a never-
-      commissioned bench board cannot close K4 until a real commissioning pass
-      lands
-
-Added 2026-08-28, same conversation — these are about making the commissioning
-surface usable rather than merely correct:
-
-- [x] **The commissioning page is far too complex** (owner's words). Shipped
-      2026-08-28 (`64d0a8e`): the page now asks four questions (kiln maximum
-      temperature, where the safety thermocouple sits, mains voltage,
-      expected power), writing six parameters — the ones nothing else can
-      derive. The full 58-parameter list stays reachable under a closed-by-
-      default `<details>` Advanced view for anyone who needs it, but the
-      guided four-question flow is what a landing operator sees.
-      `firmware/KilnFW/docs/COMMISSIONING_UX.md` tracks the field-by-field
-      DERIVED/ASKED/DEFAULTED classification and is kept in sync with the
-      real page, not left as a stale proposal
-- [x] **Mains voltage becomes a dropdown** — 120, 240, 380, 460 and any other
-      distinct standard worth offering. `CONFIG_REFERENCE.md` §3 says unset
-      means "report --, never assume", so an explicit unset option survives.
-      Already landed — `MAINS_VOLTAGE_OPTIONS` on
-      `safety_commissioning_page.html` (120/208/240/277/380/400/415/460V,
-      `-1` "Other..." fallback, explicit unset). Checkbox was stale; verified
-      2026-08-28
-- [x] **Current-monitor calibration comes from the zones config**, not from the
-      commissioning page — it consumes the per-zone normal-current measurement
-      rather than asking for numbers. 2026-08-28, `17ae4d9`. The 16 read-only
-      current-sense rows already mirrored the zones config; the one that did
-      not have a producer was `k_ct_v_per_a[0..2]`, which asked for a CT
-      datasheet figure nobody had (`COMMISSIONING_UX.md` OQ4) and so stayed at
-      `config_store.c`'s `memset(0)` — not cosmetic, since
-      `current_presence_policy.c` then abandons the configured `i_present_a`
-      for a fixed counts-domain margin. The zone current-sweep now calibrates
-      it: it already energizes one zone at a time with every other relay
-      forced off, so summing each zone's dominant CT channel gives the
-      whole-kiln current at full output, and `max_expected_power_w /
-      mains_voltage_v` (Q4/Q3, both already answered) gives what it should be.
-      Amps are inversely proportional to `k_ct`, so the correction is one
-      scale factor, `k_new[c] = k_old[c] · (measured / expected)`. Refuses
-      outright — with the reason on both pages — on an unresolved or
-      shared-CT zone (the total would be short by that zone's share), an unset
-      Q3/Q4, a `k_old` still at 0 (the link carries amps, not counts, so every
-      reading was `0.0 A`), a total under 2 A, a correction outside 0.2×–5×,
-      or a result outside 0.0005–0.5 V/A. Written over the same
-      `SET_PARAM`/`COMMIT_CONFIG` path a typed value uses, confirmed by a live
-      bit-exact read-back, and backed out of the Pico's staged buffer on every
-      failure arm — the same discipline as `zone_sweep_push_ct_channel_map()`,
-      and it refuses to run at all if that push left the shared staged buffer
-      unrepaired. A clamp-meter override stays behind a checkbox on the
-      commissioning page. `zones_http.c`, 14 new host tests, each guard
-      re-run stubbed out to prove it fails without it
-- [x] **The safety thermocouple and safety relay configuration shown on the
-      zones config, NOT reassignable there.** 2026-08-28. `safetyTcType` on
-      `zones_page.html` was a live editable `<select>` submitted back on
-      Save; now `renderSafetyTcType()` renders it read-only (same pattern as
-      the safety-relay display `renderSafetyWiring()` already used), removed
-      from the Save payload, with a note pointing at the safety
-      commissioning page's Advanced section — the actual assignment
-      surface, and where it stays ASKED. No safety-relay editable field
-      existed to fix; that side was already read-only. No firmware/C change
-      needed: `zones_http.c` already re-echoes the stored value when a
-      field is absent from a POST, the same "older client omits the field"
-      convention every other optional field on this page already relies on
-- [x] **An over-current guard to pair with the under-current guard**, set as a
-      PERCENTAGE of the measured normal current. Specified symmetrically with
-      the existing S3/S4/S11 family, and it must NOT trip on a zone whose
-      normal has never been measured. Already landed — S14
-      (`safety_guards.c:781-798`), `overcurrent_pct`/`overcurrent_time_s`,
-      WARN-only, per-channel `i_normal_valid` gate so an unmeasured channel is
-      skipped rather than tripped. `build_saftyfw_host_tests` passes 1891/1891
-      including its coverage. Checkbox was stale; verified 2026-08-28. **Not
-      the same as arming it**: S14 still can't be armed until `ct_channel_map`
-      has a real producer — see the item above. **Corrected 2026-09-15
-      roadmap claim audit: superseded.** `b5cb83a4` exempted the summed-CT
-      topology from the `ct_channel_map` commissioning requirement, and
-      `c0729e1e` added the `i_normal_a` write path; `/api/readiness` now
-      reports exactly three missing parameters, `i_normal_a[0..2]`, with
-      `ct_channel_map` no longer counted (eleventh sweep, above). The
-      remaining blocker for arming S14/S15 is the uncalibrated CT and
-      `i_normal_a`, not `ct_channel_map`
-
-**Answered and closed, recorded so they are not re-asked:** every relay is to
-be rated for 100% duty cycle and inrush is negligible — the board is designed
-for it, so the SSR-vs-contactor-coil question and the 2 A/125 VA duty-window
-check are both settled and need no further hardware answer. Breaker capacity is
-assumed sufficient for the full kiln load at 100% duty.
+**CLOSED.** All items landed and are hardware/code-verified, including the
+2026-08-28 same-conversation additions and the 2026-09-15 S14/S15 correction
+(`b5cb83a4`, `c0729e1e`). Every row in this milestone was already ticked by
+2026-09-15 — found stale-presented-as-live during the 2026-09-16
+roadmap-upkeep sweep and collapsed here. Full detail:
+[`docs/COMPLETED_2026-09.md`](docs/COMPLETED_2026-09.md#m12--commissioning-the-operator-can-actually-do-full-detail-moved-2026-09-16).
 
 ## M13 — Every fault says what was detected, and what to do · *opened 2026-08-28*
 
@@ -2202,99 +2023,32 @@ file maps and the "patterns worth copying" list:
 
 ---
 
-## M16 — Source layering and hardware abstraction · *opened 2026-09-05, closed 2026-09-16*
+## M16 — Source layering and hardware abstraction · *opened 2026-09-05, CLOSED 2026-09-16*
 
-Two related reorganisations of the firmware trees, documented in full in
-[`docs/HW_ABSTRACTION.md`](docs/HW_ABSTRACTION.md). Both are done:
-the `drivers/` directory move (`9f18ca5`, 2026-09-05) and all five HAL
-phases (0-4 — every interface has a real ESP and/or Pico backend plus a
-host fake, every named production consumer is migrated, and
-`check_hal_include_boundary.ps1`'s enforcement is strict, not just a
-ratchet), including `esp_random.h`'s hal_sysinfo classification (2026-09-06,
-the plan's last open header). Durable conventions and the holdout list
-moved to `firmware/hwAbstraction/README.md`. The row's one remaining item,
-the hardware timing re-check (safety-link reply, display frame time, thermo
-read latency — host tests can't see this), is now closed too: all three
-have a live-board number as of 2026-09-16, via `GET /api/diagnostics/timing`
-for all three (the safety-link half no longer needed an external timer —
-`link_reply_us` was instrumented and measured on hardware 2026-09-14, with
-a same-day composition correction on what it actually measures; display/
-thermo were measured 2026-09-16 with no prior figure to compare against, so
-they're recorded as baselines). Full numbers and bars: `docs/
-HW_ABSTRACTION.md`'s "Still open" section. Everything else named as
-unmigrated in the plan (Wi-Fi/httpd/LVGL, OTA partition writes, the SaftyFW
-bootloader, `firmware/UnitTestFw`) is an owner-decided permanent holdout,
-not open work.
-
-1. **KilnFW `drivers/` layering** (KilnFW only) — DONE (`9f18ca5`,
-   2026-09-05). `App/drivers/` reorganised into
-   `App/drivers/{hw,owners,control,safety,persist,net,http,ui,bridge,sim,
-   common}/`, 359 renames, CMakeLists SRCS rewritten and `check_*.ps1`
-   scripts re-greped for old paths.
-2. **`firmware/hwAbstraction/{interface,esp,pico,host}`** — DONE. Link-time
-   backends for spi/i2c/uart/gpio/adc/kv/flash/scratch/time/wdt/pwm/sysinfo
-   over ESP-IDF and pico-sdk, with host fakes replacing the old stub-header
-   include trick.
-
-`firmware/UnitTestFw` stays untouched throughout (owner decision, do not
-re-propose folding it in).
-
-Gates: `build_kilnfw` + all host-test executables green after every commit (the "23" recorded here was stale by 2026-09-15 — `build_host_tests.ps1` builds well over thirty; read its own summary rather than a number frozen in this file);
-every check script proven able to go red after the move (nine of twelve
-prior splits broke one silently); safety-link reply timing re-measured on
-hardware after Phase 1b. Land-alone diffs — coordinate with any other
-session on the tree, and rebase the `s14-cal-gate` worktree before any
-SaftyFW move touching `safety_core.c`.
+**CLOSED.** Both reorganisations landed: the `drivers/` directory move
+(`9f18ca5`, 2026-09-05) and all five HAL phases, and the one item that stayed
+open past that — the hardware timing re-check for safety-link reply, display
+frame time, and thermo read latency — got its last two live-board numbers on
+2026-09-16 (`link_reply_us` measured 2026-09-14; `display_flush_us`/
+`thermo_read_us` measured 2026-09-16). Everything named as unmigrated in the
+plan (Wi-Fi/httpd/LVGL, OTA partition writes, the SaftyFW bootloader,
+`firmware/UnitTestFw`) is an owner-decided permanent holdout, not open work.
+Full detail, numbers and bars: [`docs/HW_ABSTRACTION.md`](docs/HW_ABSTRACTION.md).
 
 ---
 
 ## Future work — KilnFW PC-link command acknowledgement
 
-**Moved out of this file, 2026-08-24.** Per the upkeep rule at the top, the
-detail now lives in [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md)
-section 11, which owns it. In brief: the core defect is fixed — a truncated
-payload, an out-of-range index and each relay refusal reason (owned / safety /
-updating) now produce a reply the host can tell apart from success and from
-each other, and `pc_tools` surfaces the reason instead of decoding it and
-discarding it, which is what it used to do. The rule worth carrying forward is
-recorded in [`firmware/KilnFW/docs/UART_PROTOCOL.md`](firmware/KilnFW/docs/UART_PROTOCOL.md):
-on this hop an ACK means *queued*, not *done*, so a handler that rejects must
-reply for itself.
-
-**Closed out 2026-08-24 (`7b4c087`).** The three narrower instances this
-paragraph used to leave open are done, and the audit behind them found more
-than the item described: twelve IO subcommands plus DISPLAY's writes and three
-TOUCH commands were fire-and-forget on the host side, so a refusal landed with
-nothing pending and was logged at debug as "ignoring unsolicited response";
-AUTOTUNE `ABORT`/`ACCEPT` and four WIFI writes did wait but discarded the
-reason. On the firmware side `display_bridge_task` had never received any of
-the original treatment at all — 13 guard failures replying zero bytes, plus 2
-in TOUCH.
-
-Two things are worth carrying forward rather than rediscovering:
-
-- **A reasonless rejection is not a safe default.** `{subcmd, 0}` was
-  byte-identical to `THERMO_CMD_READ_FAULTS`'s and `IO_CMD_SX_SCAN`'s honest
-  empty-success reply, so "this firmware has never heard of your command"
-  and "we ran it and found nothing" were the same two bytes — on the exact
-  path an older build takes. Every rejection now carries a reason, enforced by
-  [`tools/check_bridge_reject_reason.ps1`](tools/check_bridge_reject_reason.ps1).
-- **The DISPLAY half is correct but unreachable.** `main.c` never starts
-  `display_bridge_task` (LVGL owns the panel), so every DISPLAY frame is NACKed
-  by the transport as "dst task 4 not registered". It changes no observable
-  behaviour until `KilnFW/TODO.md` §10.1 decides between deleting the stale
-  `display_*` tools and restoring a minimal handler. **That decision is open
-  and is one of the few remaining items that needs a human.**
-
-One gap remains open on purpose: `BLIT_DATA` stays raw fire-and-forget, because
-a per-chunk wait would turn a ~1 minute image transfer into ~20 minutes.
-
-This does NOT apply to the ESP↔Pico safety link, whose no-ACK doctrine is
-deliberate and correct: `LINK_PROTOCOL.md` sections 1–2 forbid obliging the
-Pico to reply, and telemetry already carries `config_crc`, the trip mask and
-`boot_id` every 500 ms, so "poll the next frame" is both available and
-sufficient there. The two files carry similar-looking comments that mean
-different things; keep them distinct.
+**CLOSED**, moved out of this file 2026-08-24, closed in the owning doc
+2026-08-24 (`5df2190`, `a458a8f`, `7b4c087` — all verified ancestors of
+`origin/main`; `check_bridge_reject_reason.ps1` and
+`test_bridge_reject_reply.py` both pass). This section had become a pure
+forwarding address with no open row of its own — collapsed here 2026-09-16
+so it can't be mistaken for live work. Two deliberate, still-visible gaps
+live in the owning doc, not here: `display_bridge_task` awaiting an owner
+decision (delete vs. restore), and `BLIT_DATA` staying fire-and-forget by
+design. Full detail: [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md)
+section 11.
 
 ---
 

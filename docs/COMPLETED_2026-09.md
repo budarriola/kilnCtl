@@ -1428,3 +1428,217 @@ the real ST7796 panel unless noted.
   (`target_c`/`ramp_c_per_hr`/`dwell_min`/`segment_count`) was touched.
   Owner decision needed on the 10 unresolved entries — see ROADMAP.md
   "Blocked on you". Not yet flashed (firing in progress).
+
+## M12 — commissioning the operator can actually do, full detail, moved 2026-09-16
+
+Moved from ROADMAP.md during the roadmap-upkeep sweep, 2026-09-16: every row
+in this milestone was already ticked (all commits verified as ancestors of
+origin/main: `5cd56b6`, `64d0a8e`, `17ae4d9`, `b5cb83a4`, `c0729e1e`, `ddbd024`,
+`3149393`), so it collapses per the upkeep rule rather than continuing to
+present finished work as live. Full original text preserved below.
+
+## M12 — Commissioning the operator can actually do · *opened 2026-08-28*
+
+The owner answered six of the standing blocked-on-you questions in one message
+on 2026-08-28. Most of the answers were not values to paste into a config —
+they were *"the operator should be able to enter that"*, which turns a set of
+questions into a milestone.
+
+**The ordering constraint, and it is the important part of this milestone.**
+The last item below makes an uncommissioned safety processor refuse heating
+enable. Today the board grants enable while `commissioned: false`, and that is
+the only reason the bench can heat at all. Land the refusal first and the bench
+is locked out of heating until a full commissioning pass succeeds — including
+`abs_max_temp_c`, which has no value yet. So the refusal goes **last**, after
+the entry surface exists and a real commissioning pass has been completed on
+the board. That is a sequencing decision, not a reason to soften the refusal.
+
+- [x] **Kiln maximum temperature entered on the safety page**, and used to set
+      `abs_max_temp_c` on the safety processor. Already landed — field id 260
+      on `safety_commissioning_page.html`, `noDefault: true` so unset never
+      reads as 0/no-limit (the M12a fix). Checkbox was stale; verified
+      2026-08-28 by re-reading the page rather than re-implementing
+- [x] **Thermocouple maximum inferred from the thermocouple type**, not
+      entered. 2026-08-28: selecting `tc_type` now pre-fills `abs_max_temp_c`
+      from `TC_MAX_C_BY_TYPE`, via `placeholder` rather than `.value` so the
+      pre-fill is visible but never silently saved/committed on the
+      operator's behalf — a real review finding on the first pass fixed
+      before landing. `abs_max_temp_c` stays ASKED and independently
+      editable per the spec (it's the kiln's own ceiling, not purely the
+      sensor's); `checkTcMaxContradiction()`'s existing hard block (gates
+      both Save and guided-flow commit) still prevents committing above the
+      type's table max. One drifted row found between this table and
+      SaftyFW's own `TC_RANGES` (type B: 1798 here vs 1820 there, two
+      different datasheet pages) — noted in code, the lower/more
+      conservative number kept on purpose
+- [x] **Maximum expected kiln power entered on the safety page.** Already
+      landed — `max_expected_power_w` (id 793, param 0x0319) on
+      `safety_commissioning_page.html`. Checkbox was stale; verified
+      2026-08-28
+- [x] **Per-zone current measurement, from the zones page.** Already landed
+      (`zones_page.html`'s "Measure Zone Normal Current" sweep,
+      `zones_http.c`'s `ZONE_SWEEP_*` implementation) — one zone at a time,
+      refuses during a running profile/autotune/link-down/trip-latched,
+      Abort leaves every relay off. Checkbox was stale; verified 2026-08-28.
+      **What it does NOT do**: write SaftyFW's per-CT-channel `ct_channel_map`/
+      `i_normal_a[]` — it stores a per-ZONE result on the ESP side only
+- [x] **`ct_channel_map` derived from the zone-normal-current sweep**, so S14
+      can actually be armed. 2026-08-28. The sweep now samples all three CT
+      channels separately per zone (not summed through `ct_mask`, which is
+      the thing being derived); a channel is only accepted when it clears an
+      absolute floor AND beats the runner-up by 4x, and a zone whose
+      `relay_mask` isn't exactly its own relay bit, or that ties with another
+      zone for the same channel, is refused rather than guessed — both
+      refusal paths are host-tested. The commit is verified LIVE, not
+      trusted from the ACK: the same class of bug `ddbd024` fixed for the
+      commissioning page's own writes was caught by review here too — an
+      ACKed, un-rejected COMMIT_CONFIG is not proof the Pico stored
+      anything, so this reads the value back over the wire before persisting
+      or reporting a channel as derived. A failed/rejected/unconfirmed
+      commit also backs out anything already staged, so an unrelated later
+      commit can't pick up a leftover partial map. `safety_commissioning_page.html`'s
+      three manual-entry fields now show the derived value read-only with an
+      explicit override, falling through to manual entry when the sweep
+      hasn't run or was ambiguous
+- [x] **Runtime CT-to-zone mapping check.** The comparison itself was already
+      shipped (`zones_ct_mapping_mismatch()`/`zones_ct_mapping_warn_mask()`,
+      `zones_http.c`, Task 2) and re-evaluated fresh against LIVE current on
+      every `GET /api/zones` — but `zones_page.html` only ever called that
+      endpoint once, at page load, so an operator who opened the page and
+      walked away never saw a CT moved mid-firing. 2026-08-28: added
+      `pollCtMapping()`, the same `setInterval` pattern this page already
+      uses for `pollCtCurrents`/`pollAutotune`, deliberately touching only
+      `#ctWarnings` rather than reusing the full-page load path (which
+      overwrites every form field from the response — fine once, destructive
+      on an interval while an operator might be mid-edit). Catches a CT
+      moved to the wrong jack, exactly the mistake `CONFIG_REFERENCE.md`
+      says a wrong `k_ct_v_per_a` cannot be distinguished from otherwise.
+      Never a trip — `zones_http.h`'s own doc comment is explicit that this
+      decision belongs to the safety processor, not this file
+- [x] **Delete the twelve stale `display_*` MCP tools.** The owner left the
+      choice open; deleting wins because `display_bridge_task` is confirmed
+      dead code on real hardware, so "restore a minimal firmware handler" means
+      writing a new consumer for tools nobody uses, not repairing a broken one.
+      Shipped 2026-08-28: the removal itself rode in with `9838399` — fifteen
+      tools in the end (`display_read_id`, `display_rgb565`, `display_reset`,
+      `_set_power`, `_set_rotation`, `_set_invert`, `_clear`, `_fill_rect`,
+      `_draw_rect`, `_draw_line`, `_set_text_cursor`, `_set_text_style`,
+      `_print`, `_send_image`, `_test_pattern`) plus their `_display_mutating`
+      helper. Deliberately kept: `devices.display_*` frame builders,
+      `DisplayClient`, `actions.py`'s DISPLAY entries and `gui.py`'s Display
+      panel — all still reached by the generic `press_button`/`list_buttons`
+      path, which is a live front end, not part of this cleanup. This pass
+      corrected the stale registered-tool counts left behind (135 -> 127 in
+      `CLAUDE.md`, `docs/MCP_SERVERS.md`, `mcp_server.py`, `mcpkit/__init__.py`)
+- [x] **An uncommissioned safety processor refuses heating enable** — the
+      owner's answer was an unqualified NO. Shipped 2026-08-28 (`5cd56b6`),
+      last, per the ordering note above. **Commissioned** now means two
+      facts that must agree: the `calibration_missing` verdict `COMMIT_CONFIG`
+      persisted, AND `config_params_all_required_set()` recomputed from
+      `fields_set` (the eight no-safe-default fields — `tc_source`,
+      `borrowed_zone_index`, `tc_placement_mode`, `abs_max_temp_c`,
+      `ct_channel_map`, `max_rate_c_per_min`, `mains_voltage_v`, `tc_type`).
+      Any disagreement, in either direction, refuses — a stored flag the bits
+      do not back up, or a v1→v2-migrated record whose flag is forced true.
+      Plausible values never count: only an explicit `SET_PARAM` +
+      `COMMIT_CONFIG` sets a bit. **The guard lives on the safety processor**,
+      not in the KilnFW UI: `firmware/SaftyFW/src/commissioning_gate.c` (pure,
+      host-tested) consulted by `safety_core_request_enable()` on the ON
+      direction only, beside the update interlock and the `safety_tc_installed`
+      refusal — `SAFETY_CMD_REQUEST_ENABLE(1)` never reaches
+      `relay_owner_command_energize()`, while de-energizing is never gated.
+      This closes the 2026-08-24 bench finding: an uncommissioned board has
+      `abs_max_temp_c == 0`, so S1 can never trip, and S8 ships disabled —
+      heat was being granted with no absolute ceiling in force. **No new fault
+      source or wire field**: the condition already travels as Frame B's
+      `CALIBRATION_MISSING` bit, which KilnFW shows as `commissioned:false` on
+      the commissioning page and as the FAIL of the "Safety processor
+      commissioned" readiness item a firing start is already blocked on; the
+      Pico logs `request_enable: refused: safety processor not commissioned`.
+      Accepted cost, exactly as `SaftyFW/TODO.md` predicted: a never-
+      commissioned bench board cannot close K4 until a real commissioning pass
+      lands
+
+Added 2026-08-28, same conversation — these are about making the commissioning
+surface usable rather than merely correct:
+
+- [x] **The commissioning page is far too complex** (owner's words). Shipped
+      2026-08-28 (`64d0a8e`): the page now asks four questions (kiln maximum
+      temperature, where the safety thermocouple sits, mains voltage,
+      expected power), writing six parameters — the ones nothing else can
+      derive. The full 58-parameter list stays reachable under a closed-by-
+      default `<details>` Advanced view for anyone who needs it, but the
+      guided four-question flow is what a landing operator sees.
+      `firmware/KilnFW/docs/COMMISSIONING_UX.md` tracks the field-by-field
+      DERIVED/ASKED/DEFAULTED classification and is kept in sync with the
+      real page, not left as a stale proposal
+- [x] **Mains voltage becomes a dropdown** — 120, 240, 380, 460 and any other
+      distinct standard worth offering. `CONFIG_REFERENCE.md` §3 says unset
+      means "report --, never assume", so an explicit unset option survives.
+      Already landed — `MAINS_VOLTAGE_OPTIONS` on
+      `safety_commissioning_page.html` (120/208/240/277/380/400/415/460V,
+      `-1` "Other..." fallback, explicit unset). Checkbox was stale; verified
+      2026-08-28
+- [x] **Current-monitor calibration comes from the zones config**, not from the
+      commissioning page — it consumes the per-zone normal-current measurement
+      rather than asking for numbers. 2026-08-28, `17ae4d9`. The 16 read-only
+      current-sense rows already mirrored the zones config; the one that did
+      not have a producer was `k_ct_v_per_a[0..2]`, which asked for a CT
+      datasheet figure nobody had (`COMMISSIONING_UX.md` OQ4) and so stayed at
+      `config_store.c`'s `memset(0)` — not cosmetic, since
+      `current_presence_policy.c` then abandons the configured `i_present_a`
+      for a fixed counts-domain margin. The zone current-sweep now calibrates
+      it: it already energizes one zone at a time with every other relay
+      forced off, so summing each zone's dominant CT channel gives the
+      whole-kiln current at full output, and `max_expected_power_w /
+      mains_voltage_v` (Q4/Q3, both already answered) gives what it should be.
+      Amps are inversely proportional to `k_ct`, so the correction is one
+      scale factor, `k_new[c] = k_old[c] · (measured / expected)`. Refuses
+      outright — with the reason on both pages — on an unresolved or
+      shared-CT zone (the total would be short by that zone's share), an unset
+      Q3/Q4, a `k_old` still at 0 (the link carries amps, not counts, so every
+      reading was `0.0 A`), a total under 2 A, a correction outside 0.2×–5×,
+      or a result outside 0.0005–0.5 V/A. Written over the same
+      `SET_PARAM`/`COMMIT_CONFIG` path a typed value uses, confirmed by a live
+      bit-exact read-back, and backed out of the Pico's staged buffer on every
+      failure arm — the same discipline as `zone_sweep_push_ct_channel_map()`,
+      and it refuses to run at all if that push left the shared staged buffer
+      unrepaired. A clamp-meter override stays behind a checkbox on the
+      commissioning page. `zones_http.c`, 14 new host tests, each guard
+      re-run stubbed out to prove it fails without it
+- [x] **The safety thermocouple and safety relay configuration shown on the
+      zones config, NOT reassignable there.** 2026-08-28. `safetyTcType` on
+      `zones_page.html` was a live editable `<select>` submitted back on
+      Save; now `renderSafetyTcType()` renders it read-only (same pattern as
+      the safety-relay display `renderSafetyWiring()` already used), removed
+      from the Save payload, with a note pointing at the safety
+      commissioning page's Advanced section — the actual assignment
+      surface, and where it stays ASKED. No safety-relay editable field
+      existed to fix; that side was already read-only. No firmware/C change
+      needed: `zones_http.c` already re-echoes the stored value when a
+      field is absent from a POST, the same "older client omits the field"
+      convention every other optional field on this page already relies on
+- [x] **An over-current guard to pair with the under-current guard**, set as a
+      PERCENTAGE of the measured normal current. Specified symmetrically with
+      the existing S3/S4/S11 family, and it must NOT trip on a zone whose
+      normal has never been measured. Already landed — S14
+      (`safety_guards.c:781-798`), `overcurrent_pct`/`overcurrent_time_s`,
+      WARN-only, per-channel `i_normal_valid` gate so an unmeasured channel is
+      skipped rather than tripped. `build_saftyfw_host_tests` passes 1891/1891
+      including its coverage. Checkbox was stale; verified 2026-08-28. **Not
+      the same as arming it**: S14 still can't be armed until `ct_channel_map`
+      has a real producer — see the item above. **Corrected 2026-09-15
+      roadmap claim audit: superseded.** `b5cb83a4` exempted the summed-CT
+      topology from the `ct_channel_map` commissioning requirement, and
+      `c0729e1e` added the `i_normal_a` write path; `/api/readiness` now
+      reports exactly three missing parameters, `i_normal_a[0..2]`, with
+      `ct_channel_map` no longer counted (eleventh sweep, above). The
+      remaining blocker for arming S14/S15 is the uncalibrated CT and
+      `i_normal_a`, not `ct_channel_map`
+
+**Answered and closed, recorded so they are not re-asked:** every relay is to
+be rated for 100% duty cycle and inrush is negligible — the board is designed
+for it, so the SSR-vs-contactor-coil question and the 2 A/125 VA duty-window
+check are both settled and need no further hardware answer. Breaker capacity is
+assumed sufficient for the full kiln load at 100% duty.
+
