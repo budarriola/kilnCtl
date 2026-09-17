@@ -10,8 +10,8 @@
 #include <string.h>
 
 #include "esp_log.h"
-#include "esp_random.h"
 
+#include "hal_sysinfo.h"
 #include "security_backend.h"
 #include "web_auth_store.h"
 #include "wifi_prov.h"
@@ -75,7 +75,7 @@ static security_err_t web_auth_backend_set_web_password(security_role_t role, co
     }
 
     uint8_t salt[WEB_AUTH_SALT_LEN];
-    esp_fill_random(salt, sizeof(salt));
+    hal_sysinfo_fill_random(salt, sizeof(salt)); // HAL Phase 4: routed through hal_sysinfo, same single entropy boundary as safety_link.c's esp_boot_id and ota_http_esp.c's challenge nonce -- the credential store deliberately never calls esp_fill_random() itself.
 
     // item 10's forced-change flag applies only to a credential set BY the
     // physical reset gesture, never to an ordinary owner-initiated change
@@ -109,7 +109,7 @@ static security_err_t web_auth_backend_set_lcd_pin(security_role_t role, const c
     }
 
     uint8_t salt[WEB_AUTH_SALT_LEN];
-    esp_fill_random(salt, sizeof(salt));
+    hal_sysinfo_fill_random(salt, sizeof(salt)); // HAL Phase 4: routed through hal_sysinfo, same single entropy boundary as safety_link.c's esp_boot_id and ota_http_esp.c's challenge nonce -- the credential store deliberately never calls esp_fill_random() itself.
 
     hal_status_t status = web_auth_store_set_pin(to_store_role(role), pin, salt);
     if (status != HAL_OK) {

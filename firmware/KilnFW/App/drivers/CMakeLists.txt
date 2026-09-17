@@ -302,6 +302,16 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "http/http_auth_http.c"
                        "http/http_session_iface_stub.c"
                        "http/http_auth_policy_iface_stub.c"
+                       # WEB_AUTH_PLAN.md item 6's password/PIN/policy page
+                       # seam: security_http_core.c owns dispatch (also
+                       # host-tested against a hand-built fake vtable),
+                       # security_backend_web_auth.c is the real ESP-facing
+                       # vtable wired to web_auth_store.h, and
+                       # security_backend_placeholder.c is the fail-closed
+                       # default before a real backend is registered.
+                       "http/security_http_core.c"
+                       "http/security_backend_web_auth.c"
+                       "http/security_backend_placeholder.c"
                        "net/ota_pico_relay.c"
                        "net/wifi_prov.c"
                        # wifi_prov.c split 2026-09-04 (ROADMAP.md M15 A3,
