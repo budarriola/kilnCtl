@@ -297,11 +297,9 @@ static void test_set_detects_lying_write(void)
                "the role must still read as not-configured after the lying write was caught");
 }
 
-// --- Item 11: enabling refused without an existing credential -- this
-// module's contribution is the primitive (*_configured()); the actual
-// refusal gate lives at the password-page call site (out of scope here),
-// so this test proves the primitive itself is correct and would let that
-// gate work. --------------------------------------------------------------
+// --- Item 11: enabling refused without an existing credential -- the
+// underlying primitive (*_configured()) is what web_auth_policy_check_
+// transition() below is built on. -----------------------------------------
 static void test_enable_gate_primitive(void)
 {
     TEST_SECTION("password_configured()/pin_configured() as the enable-gate primitive");
@@ -314,6 +312,66 @@ static void test_enable_gate_primitive(void)
                "set the administrator credential");
     TEST_CHECK(web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR) == true,
                "now the enable-gate primitive must see true");
+}
+
+// --- Item 11 acceptance: "enabling web auth with no administrator
+// credential is refused; enabling clears all sessions and disabling does
+// not." web_auth_policy_check_transition() is the one place this decision
+// is made -- see its header comment for why it is not re-derived at the
+// (out-of-scope-here) password-page call site. -----------------------------
+static void test_policy_check_transition(void)
+{
+    TEST_SECTION("web_auth_policy_check_transition: enable gate + edge-triggered session clear");
+
+    web_auth_policy_t off = {.web_enabled = false, .lcd_enabled = false};
+    web_auth_policy_t web_on = {.web_enabled = true, .lcd_enabled = false};
+    web_auth_policy_t lcd_on = {.web_enabled = false, .lcd_enabled = true};
+    bool clear_web, clear_lcd;
+
+    // Refused: turning web on with no administrator password configured.
+    web_auth_policy_transition_t r = web_auth_policy_check_transition(
+        &off, &web_on, /*admin_password_configured=*/false, /*admin_pin_configured=*/false,
+        &clear_web, &clear_lcd);
+    TEST_CHECK(r == WEB_AUTH_POLICY_TRANSITION_REFUSED_NO_WEB_CREDENTIAL,
+               "enabling web auth with no administrator credential must be refused");
+    TEST_CHECK(clear_web == false && clear_lcd == false,
+               "a refused transition must report no session clears at all");
+
+    // Refused: turning lcd on with no administrator PIN configured.
+    r = web_auth_policy_check_transition(&off, &lcd_on, /*admin_password_configured=*/true,
+                                          /*admin_pin_configured=*/false, &clear_web, &clear_lcd);
+    TEST_CHECK(r == WEB_AUTH_POLICY_TRANSITION_REFUSED_NO_LCD_CREDENTIAL,
+               "enabling lcd auth with no administrator PIN must be refused, independent of "
+               "the web credential's state");
+
+    // Allowed: turning web on (off -> on) with the credential present must
+    // clear web sessions but never touch the (untouched) lcd session.
+    r = web_auth_policy_check_transition(&off, &web_on, /*admin_password_configured=*/true,
+                                          /*admin_pin_configured=*/false, &clear_web, &clear_lcd);
+    TEST_CHECK(r == WEB_AUTH_POLICY_TRANSITION_OK, "enabling web with a credential must succeed");
+    TEST_CHECK(clear_web == true && clear_lcd == false,
+               "enabling web (off->on) must clear web sessions and only web sessions");
+
+    // Allowed: re-saving an already-on policy (no edge) must NOT clear
+    // sessions -- a caller changing only a timeout must not silently log
+    // everyone out.
+    r = web_auth_policy_check_transition(&web_on, &web_on, /*admin_password_configured=*/true,
+                                          /*admin_pin_configured=*/false, &clear_web, &clear_lcd);
+    TEST_CHECK(r == WEB_AUTH_POLICY_TRANSITION_OK, "re-saving an already-on policy must succeed");
+    TEST_CHECK(clear_web == false,
+               "re-saving an unchanged already-enabled policy must not clear sessions");
+
+    // Allowed: disabling (on -> off) must never clear sessions ("sessions
+    // become irrelevant but are kept").
+    r = web_auth_policy_check_transition(&web_on, &off, /*admin_password_configured=*/true,
+                                          /*admin_pin_configured=*/false, &clear_web, &clear_lcd);
+    TEST_CHECK(r == WEB_AUTH_POLICY_TRANSITION_OK, "disabling web auth must succeed");
+    TEST_CHECK(clear_web == false, "disabling web auth must NOT clear sessions -- they are kept");
+
+    // NULL guard: never a valid call, but must never report OK or write
+    // through NULL out-params.
+    r = web_auth_policy_check_transition(NULL, &web_on, true, true, NULL, NULL);
+    TEST_CHECK(r != WEB_AUTH_POLICY_TRANSITION_OK, "a NULL current policy must never resolve OK");
 }
 
 int main(void)
@@ -329,6 +387,7 @@ int main(void)
     test_upgrade_path_unreadable_fails_closed();
     test_set_detects_lying_write();
     test_enable_gate_primitive();
+    test_policy_check_transition();
 
     fake_kv_reset_all();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);

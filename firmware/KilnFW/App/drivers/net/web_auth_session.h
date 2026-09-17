@@ -227,6 +227,50 @@ bool web_auth_session_in_prompt_window(uint32_t last_seen_ms, uint32_t timeout_s
 web_auth_session_role_t web_auth_effective_role(const web_auth_table_t *t, bool web_enabled,
                                                  const uint8_t *token_hash, uint32_t timeout_s, uint32_t now_ms);
 
+// --- Admin-credential bootstrap state (plan items 10 & 11) ------------------
+//
+// Three paths can leave an interface "enabled" while its administrator
+// credential is unconfigured -- and they must all resolve to exactly the
+// same caller-visible behaviour, or this is the reset-one-side-of-a-pair bug
+// class CLAUDE.md names (four confirmed silent instances already):
+//   - First boot: unreachable by construction. An absent auth_policy record
+//     collapses to effective_enabled==false via web_auth_policy_effective_
+//     enabled(), so this predicate is never even true here -- there is
+//     nothing to bootstrap because auth is off.
+//   - Field upgrade: same as first boot for the same reason -- an upgraded
+//     board has no auth_policy record either, so effective_enabled==false.
+//   - The item 10 physical credential reset: reachable, and deliberate. It
+//     clears the administrator password/PIN record (configured=false,
+//     must_change=true) but leaves the policy record's enabled flags
+//     untouched -- "does not disable authentication" (plan item 10) -- so a
+//     board can be left with effective auth ON and no administrator
+//     credential to log in with.
+//
+// This is the ONE predicate that names that state, so it is decided once
+// here rather than re-derived at every call site that could reach it (today,
+// only the item 10 reset reaches it -- but a future path must be checked
+// against this same function, not a fresh copy of "enabled && !configured").
+// It answers "is this interface waiting on a fresh administrator credential
+// with no prior login" -- true iff `effective_enabled` (already collapsed
+// via web_auth_policy_effective_enabled(), same convention as
+// web_auth_effective_role() above) is true AND
+// `admin_credential_configured` (web_auth_store_password_configured(
+// WEB_AUTH_ROLE_ADMINISTRATOR) for the web interface, or
+// web_auth_store_pin_configured(WEB_AUTH_ROLE_ADMINISTRATOR) for the LCD --
+// same formula, either interface) is false.
+//
+// This must be neither a lockout nor a silent bypass: ordinary login can
+// never succeed in this state on its own (web_auth_store_verify_password()/
+// _verify_pin() both report false unconditionally against an unconfigured
+// record -- ordinary login stays fail-closed, not a silent bypass), so a
+// caller that sees this predicate true must route to a credential-bootstrap
+// flow that requires no prior session (none can exist) and writes a new
+// administrator credential through the ordinary, strength-checked
+// web_auth_store_set_password()/_set_pin() -- never a shortcut that skips
+// strength validation or invents a session. This predicate only identifies
+// the state; it grants nothing by itself. Pure function, no I/O.
+bool web_auth_admin_bootstrap_needed(bool effective_enabled, bool admin_credential_configured);
+
 // --- Credential verification seam --------------------------------------------
 //
 // Section 2/3's credential storage has landed (web_auth_store.h,

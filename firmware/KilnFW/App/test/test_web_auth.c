@@ -281,6 +281,33 @@ static void test_lcd_session(void)
                " independent of any web session in play");
 }
 
+// --- Items 10 & 11: the admin-credential bootstrap state must resolve
+// identically no matter which of the three paths (first boot, field
+// upgrade, physical reset) could in principle produce it -- see this
+// predicate's header comment for why only the physical reset actually
+// reaches it today. Exercised here purely on the two booleans the real
+// callers (item 10's reset, item 6's login/password page) would derive from
+// web_auth_policy_effective_enabled() and web_auth_store_password_
+// configured()/_pin_configured() -- this test does not itself depend on
+// which module produced them, which IS the point: the predicate cannot be
+// fooled into a different answer by its caller's history. ------------------
+static void test_admin_bootstrap_needed(void)
+{
+    TEST_SECTION("web_auth_admin_bootstrap_needed -- neither a lockout nor a silent bypass");
+
+    TEST_CHECK(web_auth_admin_bootstrap_needed(true, false) == true,
+               "enabled + no administrator credential (the post-physical-reset state, item 10) "
+               "must report bootstrap-needed");
+    TEST_CHECK(web_auth_admin_bootstrap_needed(true, true) == false,
+               "enabled + administrator credential present is the ordinary case -- no bootstrap");
+    TEST_CHECK(web_auth_admin_bootstrap_needed(false, false) == false,
+               "auth OFF must never report bootstrap-needed regardless of credential state -- "
+               "first boot and field upgrade both collapse to effective_enabled==false before "
+               "this predicate is ever consulted, so this also covers those two paths");
+    TEST_CHECK(web_auth_admin_bootstrap_needed(false, true) == false,
+               "auth off with a credential already configured is still not a bootstrap case");
+}
+
 void run_test_web_auth(void)
 {
     test_table_init_and_lookup();
@@ -293,4 +320,5 @@ void run_test_web_auth(void)
     test_touch_extends_and_clears_prompt();
     test_auth_disabled_inert_path();
     test_lcd_session();
+    test_admin_bootstrap_needed();
 }

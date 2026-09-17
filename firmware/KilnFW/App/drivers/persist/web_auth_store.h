@@ -263,6 +263,54 @@ hal_status_t web_auth_store_set_policy(const web_auth_policy_t *policy);
 // loaded via web_auth_store_load_policy().
 bool web_auth_policy_effective_enabled(web_auth_load_status_t status, bool stored_enabled);
 
+// --- Enable-gate / session-clear decision (plan item 11, "the only place
+// the two interact") ---------------------------------------------------------
+//
+// "No credential set" is not an error state -- a board with auth off and no
+// credential is fully functional. But "enabling auth is refused unless a
+// credential for that interface exists" (item 11) is a real invariant this
+// module must protect, because nothing else stands between an operator and
+// locking themselves out: web_auth_store_set_policy() above deliberately does
+// NOT enforce it (any caller can persist any policy value -- see its own doc
+// comment), so the one place this check happens is here, called by whichever
+// slice actually flips a switch (today, the item 6 password page). A second,
+// re-derived copy of this rule anywhere else would be exactly the kind of
+// silent duplicate CLAUDE.md's "reset one side of a pair" note warns about.
+//
+// `requested` is the whole policy record the caller wants to persist next;
+// `admin_password_configured`/`admin_pin_configured` are
+// web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR) /
+// web_auth_store_pin_configured(WEB_AUTH_ROLE_ADMINISTRATOR) -- passed in
+// rather than read here so this stays a pure function like the rest of this
+// header's decision logic (no I/O, host-testable with a fake_kv-free test).
+// The check is on `requested`, not on the current->requested edge: an
+// enabled-but-now-credential-less state is never valid to persist, not just
+// newly-invalid to enter, so a caller cannot "grandfather" a stale enabled
+// flag back in by resaving it unchanged.
+//
+// `out_clear_web_sessions`/`out_clear_lcd_session` are only meaningful when
+// the return value is WEB_AUTH_POLICY_TRANSITION_OK; on any REFUSED result
+// they are set false and the caller MUST NOT call web_auth_store_set_policy()
+// with `requested` at all. When OK, `*out_clear_web_sessions` is true iff
+// this transition turns web_enabled on (false -> true in `current`), never
+// merely because it is already true (a re-save of an unchanged "on" policy,
+// e.g. from changing only a timeout, must not silently log everyone out) --
+// same edge-triggered reasoning for `*out_clear_lcd_session` against
+// lcd_enabled. Disabling never clears (item 11: "sessions become irrelevant
+// but are kept").
+typedef enum {
+    WEB_AUTH_POLICY_TRANSITION_OK = 0,
+    WEB_AUTH_POLICY_TRANSITION_REFUSED_NO_WEB_CREDENTIAL,
+    WEB_AUTH_POLICY_TRANSITION_REFUSED_NO_LCD_CREDENTIAL,
+} web_auth_policy_transition_t;
+
+web_auth_policy_transition_t web_auth_policy_check_transition(const web_auth_policy_t *current,
+                                                                const web_auth_policy_t *requested,
+                                                                bool admin_password_configured,
+                                                                bool admin_pin_configured,
+                                                                bool *out_clear_web_sessions,
+                                                                bool *out_clear_lcd_session);
+
 #ifdef __cplusplus
 }
 #endif

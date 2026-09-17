@@ -537,3 +537,61 @@ bool web_auth_policy_effective_enabled(web_auth_load_status_t status, bool store
             return true; // fail closed -- see header comment
     }
 }
+
+web_auth_policy_transition_t web_auth_policy_check_transition(const web_auth_policy_t *current,
+                                                                const web_auth_policy_t *requested,
+                                                                bool admin_password_configured,
+                                                                bool admin_pin_configured,
+                                                                bool *out_clear_web_sessions,
+                                                                bool *out_clear_lcd_session)
+{
+    bool clear_web = false;
+    bool clear_lcd = false;
+
+    if (out_clear_web_sessions != NULL) {
+        *out_clear_web_sessions = false;
+    }
+    if (out_clear_lcd_session != NULL) {
+        *out_clear_lcd_session = false;
+    }
+
+    if (current == NULL || requested == NULL) {
+        return WEB_AUTH_POLICY_TRANSITION_REFUSED_NO_WEB_CREDENTIAL; // never a valid call; pick
+                                                                       // the stricter refusal so a
+                                                                       // caller that ignores the
+                                                                       // return value still fails
+                                                                       // to persist anything
+    }
+
+    // The invariant is on `requested`, not the edge -- see header comment:
+    // a policy record that reads enabled==true must never be persistable
+    // without that interface's administrator credential already configured,
+    // whether this is a fresh enable or a re-save of an already-enabled
+    // record.
+    if (requested->web_enabled && !admin_password_configured) {
+        return WEB_AUTH_POLICY_TRANSITION_REFUSED_NO_WEB_CREDENTIAL;
+    }
+    if (requested->lcd_enabled && !admin_pin_configured) {
+        return WEB_AUTH_POLICY_TRANSITION_REFUSED_NO_LCD_CREDENTIAL;
+    }
+
+    // Edge-triggered: only an actual off->on flip clears sessions (item 11:
+    // "Enabling auth: every existing session is cleared" / "Disabling auth:
+    // sessions become irrelevant but are kept"). A no-op re-save of an
+    // already-enabled interface (e.g. changing only the other interface's
+    // timeout) must not silently log anyone out.
+    if (requested->web_enabled && !current->web_enabled) {
+        clear_web = true;
+    }
+    if (requested->lcd_enabled && !current->lcd_enabled) {
+        clear_lcd = true;
+    }
+
+    if (out_clear_web_sessions != NULL) {
+        *out_clear_web_sessions = clear_web;
+    }
+    if (out_clear_lcd_session != NULL) {
+        *out_clear_lcd_session = clear_lcd;
+    }
+    return WEB_AUTH_POLICY_TRANSITION_OK;
+}
