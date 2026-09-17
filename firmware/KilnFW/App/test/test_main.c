@@ -96,6 +96,7 @@ void run_test_approach_rate_cap(void);
 void run_test_zone_sweep_relay_off_wiring(void);
 void run_test_safety_ceiling_policy(void);
 void run_test_http_auth_enforce(void);
+void run_test_http_session_iface(void);
 void run_test_web_auth_safety_interaction(void);
 void run_test_web_auth_login(void);
 // run_test_safety_cfg_http() is NOT called here -- test_safety_cfg_http.c is
@@ -196,6 +197,7 @@ int main(void)
     run_test_zone_sweep_relay_off_wiring();
     run_test_safety_ceiling_policy();
     run_test_http_auth_enforce();
+    run_test_http_session_iface();
     run_test_web_auth_safety_interaction();
     run_test_web_auth_login();
 

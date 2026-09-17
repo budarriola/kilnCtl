@@ -383,6 +383,25 @@ details.info > *:not(summary) { display: block; margin: 0.4em 0 0; }
                            min-height: 32px; min-width: 32px; background: transparent;
                            color: #fff; border: 1px solid #fff; border-radius: var(--ui-radius);
                            cursor: pointer; }
+
+/* WEB_AUTH_PLAN.md section 8: the inactivity-lock "stay unlocked" prompt.
+   Deliberately NOT .kc-menu-overlay's full-screen blocking pattern -- this
+   is a convenience nudge, not the enforcement (the server expires the
+   session regardless of whether this is ever seen/clicked), so it is a
+   small fixed corner card that never covers page content. Uses the same
+   card/text tokens as the rest of the UI, --ui-accent-1 ("warn", not
+   "something is wrong" -- an impending lock on an otherwise healthy board
+   is a nudge) -- no new colour introduced. */
+.kc-lock-prompt { position: fixed; right: 1em; bottom: calc(var(--ui-touch, 44px) + 1.2em);
+                   z-index: 950; background: var(--ui-card); color: var(--ui-text-primary);
+                   border: 2px solid var(--ui-accent-1); border-radius: var(--ui-radius);
+                   padding: 0.7em 1em; max-width: 260px; font-size: 0.9em;
+                   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4); display: flex;
+                   flex-direction: column; gap: 0.5em; }
+.kc-lock-prompt[hidden] { display: none; }
+.kc-lock-prompt button { align-self: flex-end; padding: 0.3em 0.8em; background: var(--ui-accent-1);
+                          color: #fff; border: none; border-radius: var(--ui-radius);
+                          cursor: pointer; min-height: 32px; }
 /* Dims (not hides) live-looking values while disconnected -- UI_PLAN.md
    item 4's "dim its values" wording. Every *_page.html now annotates its
    live device-reading elements with .kc-live-value (temperatures, relay/

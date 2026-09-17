@@ -336,6 +336,13 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # authentication surfaces).
                        "net/web_auth_login.c"
                        "http/web_auth_login_http.c"
+                       # WEB_AUTH_PLAN.md section 8, web-GUI half: the
+                       # inactivity lock's status poll (GET /api/auth/session)
+                       # and explicit extend (POST /api/auth/session/extend).
+                       # ESP-only glue over http_session_iface.h's
+                       # http_auth_session_status()/http_auth_session_touch();
+                       # no session table or timeout value of its own.
+                       "http/web_auth_session_status_http.c"
                        "net/ota_pico_relay.c"
                        "net/wifi_prov.c"
                        # wifi_prov.c split 2026-09-04 (ROADMAP.md M15 A3,

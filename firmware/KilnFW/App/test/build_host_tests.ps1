@@ -128,6 +128,7 @@ try {
         # combined executable rather than needing its own, same convention
         # as test_ota_auth.c/ota_auth.c just above it in this file's history.
         (Join-Path $testDir "test_http_auth_enforce.c"),
+        (Join-Path $testDir "test_http_session_iface.c"),
         (Join-Path $testDir "test_web_auth_safety_interaction.c"),
         # docs/WEB_AUTH_PLAN.md section 6 -- the login handler's pure
         # role-selection logic (net/web_auth_login.c below), host-tested the

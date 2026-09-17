@@ -100,6 +100,35 @@ void http_session_hash_token(const char *token, size_t token_len, uint8_t out[32
 // http_auth_enforce.c changes.
 http_auth_role_t http_auth_session_resolve(const char *token, const char *client_ip);
 
+// Section 8's web-GUI inactivity lock: two more entry points against the
+// SAME session table http_session_table() owns -- neither adds a second
+// table, a second cookie-extraction site, or a second timeout value.
+//
+// http_auth_session_status() answers a passive status poll (the new
+// GET /api/auth/session route, classified ROUTE_TIER_OPEN so it never
+// itself counts as activity -- see http_auth_decision_counts_as_activity()).
+// It looks the token up and reports the session's role, its last_seen_ms,
+// and the policy's resolved timeout_s (WEB_AUTH_TIMEOUT_NEVER_S when
+// "never"), WITHOUT touching last_seen_ms -- a client polling this to
+// render its own inactivity countdown must never itself be the reason the
+// countdown never fires. Returns false (role NONE, last_seen 0) for no
+// token, no matching slot, or an expired slot; timeout_s is still filled in
+// on a false return so a caller can compute a prompt window even before any
+// session exists.
+bool http_auth_session_status(const char *token, web_auth_session_role_t *role_out,
+                               uint32_t *last_seen_ms_out, uint32_t *timeout_s_out);
+
+// Extends a session exactly the way ordinary authenticated activity does:
+// looks the token up, and if (and only if) it is STILL VALID against the
+// current timeout, calls web_auth_table_touch() to bump last_seen_ms to now
+// and clear the prompt flag. A token that is absent, matches no slot, or is
+// already expired is left alone -- this function must never "revive" an
+// expired session, which is what makes server-side expiry independent of
+// the browser: a client that ignores the lock prompt and keeps calling this
+// (or any USER/ADMIN route) after the deadline gets nothing, because the
+// validity check runs before the touch, not after.
+void http_auth_session_touch(const char *token);
+
 #ifdef __cplusplus
 }
 #endif

@@ -33,6 +33,7 @@
 #include "backup_http.h"
 #include "security_backend_web_auth.h"
 #include "web_auth_login_http.h"
+#include "web_auth_session_status_http.h"
 #include "settings_http.h"
 #include "cfg_fs_format_http.h"
 #include "factory_reset.h"
@@ -567,6 +568,15 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (web_auth_login_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "web_auth_login_http_start failed: %s -- no /login or "
                       "/api/auth/login route this boot", esp_err_to_name(web_auth_login_err));
+    }
+
+    // WEB_AUTH_PLAN.md section 8, web-GUI half: the inactivity lock's status
+    // poll and explicit "stay unlocked" extend. Non-fatal on failure, same
+    // convention as the rest of this block.
+    esp_err_t web_auth_session_status_err = web_auth_session_status_http_start();
+    if (web_auth_session_status_err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "web_auth_session_status_http_start failed: %s -- no "
+                      "/api/auth/session route this boot", esp_err_to_name(web_auth_session_status_err));
     }
 
     // CommonFW/docs/UPDATE_PROTOCOL.md section 2 + section 1 / TODO.md 9.4:

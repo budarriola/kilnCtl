@@ -101,7 +101,19 @@ static bool extract_named_cookie(const char *raw, const char *name, char *out, s
 // + 46 bytes, all fixed, well under the 256-byte-local ceiling this plan
 // (and CLAUDE.md's httpd-stack history) sets for anything running on the
 // shared 8 KB httpd task stack.
-static void resolve_role_for_request(httpd_req_t *req, http_auth_role_t *out_role) {
+// Exported so a route that needs the raw session token itself (today: the
+// section 8 status-poll/extend routes, web_auth_session_status_http.c) can
+// reuse this SAME cookie-extraction path rather than parsing the Cookie
+// header a second time -- there must stay exactly one cookie-extraction
+// site (http_session_iface.h's own contract). Returns true and leaves `out`
+// non-empty only on a genuine kiln_sid cookie match, false (and out[0]='\0')
+// otherwise -- same contract as extract_named_cookie() above.
+bool http_auth_extract_session_token(httpd_req_t *req, char *out, size_t out_len) {
+    if (out == NULL || out_len == 0) {
+        return false;
+    }
+    out[0] = '\0';
+
     char cookie[128];
     cookie[0] = '\0';
     size_t cookie_hdr_len = httpd_req_get_hdr_value_len(req, "Cookie");
@@ -111,13 +123,27 @@ static void resolve_role_for_request(httpd_req_t *req, http_auth_role_t *out_rol
         }
     }
 
+    return extract_named_cookie(cookie, HTTP_SESSION_COOKIE_NAME, out, out_len);
+}
+
+static void resolve_role_for_request(httpd_req_t *req, http_auth_role_t *out_role, char *out_token,
+                                      size_t out_token_len) {
     char token[128];
-    bool have_token = extract_named_cookie(cookie, HTTP_SESSION_COOKIE_NAME, token, sizeof(token));
+    bool have_token = http_auth_extract_session_token(req, token, sizeof(token));
 
     char ip[46];
     ota_http_get_client_ip(req, ip, sizeof(ip));
 
     *out_role = http_auth_session_resolve(have_token ? token : NULL, ip);
+
+    if (out_token != NULL && out_token_len > 0) {
+        if (have_token) {
+            strncpy(out_token, token, out_token_len - 1);
+            out_token[out_token_len - 1] = '\0';
+        } else {
+            out_token[0] = '\0';
+        }
+    }
 }
 
 // Fix for the OPEN-tier build-identity leak on GET /api/ota/esp/status
@@ -144,7 +170,7 @@ bool http_auth_caller_is_admin(httpd_req_t *req) {
         return true;
     }
     http_auth_role_t role = HTTP_AUTH_ROLE_NONE;
-    resolve_role_for_request(req, &role);
+    resolve_role_for_request(req, &role, NULL, 0);
     return role == HTTP_AUTH_ROLE_ADMIN;
 }
 
@@ -169,6 +195,8 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
     bool bootstrap_needed = http_auth_policy_admin_bootstrap_needed();
 
     http_auth_role_t role = HTTP_AUTH_ROLE_NONE;
+    char token[128];
+    token[0] = '\0';
     // Skip the session lookup entirely for OPEN and SAFETY_REDUCE routes
     // (e.g. POST /api/profile_exec/stop) and whenever web auth is off --
     // http_auth_check() would ALLOW all of those regardless of role, and
@@ -180,10 +208,20 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
     // a future change here that always resolves the role first cannot make
     // this less safe, only slower.
     if (web_enabled && ctx->tier != ROUTE_TIER_OPEN && ctx->tier != ROUTE_TIER_SAFETY_REDUCE) {
-        resolve_role_for_request(req, &role);
+        resolve_role_for_request(req, &role, token, sizeof(token));
     }
 
     http_auth_decision_t decision = http_auth_check(ctx->tier, role, web_enabled, bootstrap_needed);
+    // Section 8: any request actually ALLOWED against a real credential tier
+    // (USER/ADMIN) is "activity" and extends the session -- the ONE place
+    // this touch happens, so a route never has to remember to call it
+    // itself. http_auth_session_touch() re-validates before touching, so
+    // this can never revive an already-expired session (see its own
+    // comment) -- the server, not this call site, is what makes the
+    // expiry real.
+    if (token[0] != '\0' && http_auth_decision_counts_as_activity(ctx->tier, decision)) {
+        http_auth_session_touch(token);
+    }
     switch (decision) {
         case HTTP_AUTH_DECISION_ALLOW:
             // Restore the ORIGINAL user_ctx before calling into the real

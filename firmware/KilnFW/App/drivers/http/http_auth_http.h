@@ -74,6 +74,17 @@ esp_err_t kiln_http_register(httpd_handle_t server, const httpd_uri_t *uri_handl
 // context.
 bool http_auth_caller_is_admin(httpd_req_t *req);
 
+// Extracts the kiln_sid session cookie's value, verbatim, from `req`'s
+// Cookie header -- the SAME cookie-extraction logic kiln_http_prehandler()
+// and http_auth_caller_is_admin() use internally, exposed so a route that
+// needs the raw token itself (section 8's GET /api/auth/session status
+// poll, which reports role/last_seen/timeout without touching the session --
+// see http_session_iface.h's http_auth_session_status()) does not become a
+// second, independently-written cookie parser. Returns true and leaves
+// `out` non-empty only on a genuine match; false and out[0]='\0' otherwise
+// (missing header, missing cookie, or a value too large for `out_len`).
+bool http_auth_extract_session_token(httpd_req_t *req, char *out, size_t out_len);
+
 #ifdef __cplusplus
 }
 #endif

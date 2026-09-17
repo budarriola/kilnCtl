@@ -116,6 +116,15 @@ static const route_tier_entry_t kRouteTierTable[] = {
      * itself, not this classification. */
     ROUTE_TIER("/login", HTTP_GET, ROUTE_TIER_OPEN),
     ROUTE_TIER("/api/auth/login", HTTP_POST, ROUTE_TIER_OPEN),
+    /* WEB_AUTH_PLAN.md section 8: the web-GUI inactivity lock's status poll.
+     * OPEN, not USER -- deliberately excluded from
+     * http_auth_decision_counts_as_activity()'s activity set (see that
+     * function's own comment): a poll that extends the very session it
+     * reports on would defeat the lock. POST .../extend, the explicit
+     * "stay unlocked" action, is the real USER-tier row below, grouped with
+     * the rest of that tier so its activity-touch behaviour is the ordinary
+     * one every other USER route already gets. */
+    ROUTE_TIER("/api/auth/session", HTTP_GET, ROUTE_TIER_OPEN),
     ROUTE_TIER("/app.js", HTTP_GET, ROUTE_TIER_OPEN),
     ROUTE_TIER("/nav.js", HTTP_GET, ROUTE_TIER_OPEN),
     ROUTE_TIER("/theme.css", HTTP_GET, ROUTE_TIER_OPEN),
@@ -143,6 +152,13 @@ static const route_tier_entry_t kRouteTierTable[] = {
      * coverage check and the enforcement pre-handler consult, rather than
      * as a URI string match inside the enforcement function -- see
      * ROUTE_TIER_SAFETY_REDUCE's own doc comment above. */
+    /* WEB_AUTH_PLAN.md section 8: the explicit "stay unlocked" action. USER
+     * tier so the shared pre-handler's own activity-touch (see
+     * http_auth_decision_counts_as_activity()) extends the session on this
+     * route exactly the same way it does for every other ordinary
+     * authenticated request -- no special-case touch code lives in the
+     * handler itself. */
+    ROUTE_TIER("/api/auth/session/extend", HTTP_POST, ROUTE_TIER_USER),
     ROUTE_TIER("/api/profile_exec/start", HTTP_POST, ROUTE_TIER_USER),
     ROUTE_TIER("/api/profile_exec/stop", HTTP_POST, ROUTE_TIER_SAFETY_REDUCE),
     ROUTE_TIER("/api/profile_exec/pause", HTTP_POST, ROUTE_TIER_USER),

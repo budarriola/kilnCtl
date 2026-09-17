@@ -905,6 +905,92 @@
     ro.observe(bar);
   }
 
+  // ---- Session inactivity lock (WEB_AUTH_PLAN.md section 8) --------------
+  //
+  // Convenience only -- the SERVER is what actually expires the session
+  // (http_session_iface.c's http_auth_session_status()/_touch(), which
+  // re-validates on every call so an expired session can never be revived
+  // just because a client keeps calling in). This widget polls the passive
+  // GET /api/auth/session status route (deliberately ROUTE_TIER_OPEN on the
+  // server so the poll itself never counts as activity -- see
+  // http_auth_decision_counts_as_activity()), shows a small non-blocking
+  // "stay unlocked" prompt in the final window the server reports, and
+  // returns to the Dashboard ("/") -- not /login, per the plan's own
+  // wording -- once the server reports the session is actually gone. A
+  // client that ignores this prompt, or has JS disabled entirely, is still
+  // refused by the server on its next USER/ADMIN request regardless.
+  var SESSION_POLL_MS = 5000;
+  var sessionPollTimer = null;
+  var lockPromptEl = null;
+  var lastKnownRole = null; // null until the first successful poll
+
+  function buildLockPrompt() {
+    var el = document.createElement('div');
+    el.className = 'kc-lock-prompt';
+    el.setAttribute('hidden', '');
+    el.setAttribute('role', 'alert');
+    var msg = document.createElement('span');
+    msg.textContent = 'Your session is about to lock from inactivity.';
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = 'Stay unlocked';
+    btn.addEventListener('click', function () {
+      fetch('/api/auth/session/extend', { method: 'POST' })
+        .then(function () {
+          el.setAttribute('hidden', '');
+          pollSession(); // re-poll immediately so the countdown reflects the extension
+        })
+        .catch(function () {
+          // Extend failed (e.g. the session already expired underneath the
+          // click) -- leave the prompt up; the next regular poll reconciles
+          // against the server's real state either way.
+        });
+    });
+    el.appendChild(msg);
+    el.appendChild(btn);
+    document.body.appendChild(el);
+    return el;
+  }
+
+  function pollSession() {
+    if (document.visibilityState === 'hidden') {
+      sessionPollTimer = setTimeout(pollSession, SESSION_POLL_MS);
+      return;
+    }
+    fetch('/api/auth/session')
+      .then(function (r) {
+        if (!r.ok) throw new Error('http ' + r.status);
+        return r.json();
+      })
+      .then(function (st) {
+        var role = st && st.role;
+        // Transition from a real session to "none" -- the server has
+        // actually expired it. Return to the Dashboard, per the plan's
+        // wording ("the interface returns to the Dashboard"), not /login.
+        if (lastKnownRole && lastKnownRole !== 'none' && role === 'none') {
+          if (lockPromptEl) lockPromptEl.setAttribute('hidden', '');
+          if (window.location.pathname !== '/') {
+            window.location.href = '/';
+          }
+        }
+        lastKnownRole = role;
+
+        if (lockPromptEl) {
+          if (st && st.prompt) {
+            lockPromptEl.removeAttribute('hidden');
+          } else {
+            lockPromptEl.setAttribute('hidden', '');
+          }
+        }
+        sessionPollTimer = setTimeout(pollSession, SESSION_POLL_MS);
+      })
+      .catch(function () {
+        // A transient failure here is exactly what the heartbeat's own
+        // connection-lost banner already covers -- just retry on schedule.
+        sessionPollTimer = setTimeout(pollSession, SESSION_POLL_MS);
+      });
+  }
+
   function init() {
     bannerEl = buildBanner();
     recoveryBannerEl = buildRecoveryBanner();
@@ -912,9 +998,11 @@
     stopBarEl = buildStopBar();
     observeStopBarHeight(stopBarEl);
     buildUnitBtn();
+    lockPromptEl = buildLockPrompt();
     pollHeartbeat();
     pollRecoveryMode();
     pollSetupOffer();
+    pollSession();
     recoveryPollTimer = setInterval(pollRecoveryMode, RECOVERY_POLL_MS);
     setupOfferPollTimer = setInterval(pollSetupOffer, SETUP_OFFER_POLL_MS);
     document.addEventListener('visibilitychange', function () {

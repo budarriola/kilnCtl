@@ -351,6 +351,43 @@ static void test_every_table_row_reachable_via_lookup(void) {
     }
 }
 
+static void test_decision_counts_as_activity(void) {
+    TEST_SECTION("http_auth_decision_counts_as_activity -- section 8's activity predicate");
+
+    // Only an ALLOW against a real credential tier counts. Every non-ALLOW
+    // decision is never activity, regardless of tier.
+    TEST_CHECK(!http_auth_decision_counts_as_activity(ROUTE_TIER_USER, HTTP_AUTH_DECISION_DENY_NO_SESSION),
+               "USER tier DENY_NO_SESSION is not activity");
+    TEST_CHECK(!http_auth_decision_counts_as_activity(ROUTE_TIER_ADMIN, HTTP_AUTH_DECISION_DENY_INSUFFICIENT),
+               "ADMIN tier DENY_INSUFFICIENT is not activity");
+    TEST_CHECK(!http_auth_decision_counts_as_activity(ROUTE_TIER_OPEN, HTTP_AUTH_DECISION_DENY_NO_SESSION),
+               "OPEN tier denial (should not happen in practice) is still not activity");
+
+    // ALLOW on USER/ADMIN is the whole point -- ordinary authenticated
+    // requests extend the session.
+    TEST_CHECK(http_auth_decision_counts_as_activity(ROUTE_TIER_USER, HTTP_AUTH_DECISION_ALLOW),
+               "USER tier ALLOW counts as activity");
+    TEST_CHECK(http_auth_decision_counts_as_activity(ROUTE_TIER_ADMIN, HTTP_AUTH_DECISION_ALLOW),
+               "ADMIN tier ALLOW counts as activity");
+
+    // ALLOW on OPEN must NOT count -- this is the keepalive-vs-activity
+    // distinction section 8 states explicitly: "a dashboard polling
+    // /api/status does NOT count, which is the whole point." The new
+    // GET /api/auth/session status poll is classified OPEN for exactly this
+    // reason.
+    TEST_CHECK(!http_auth_decision_counts_as_activity(ROUTE_TIER_OPEN, HTTP_AUTH_DECISION_ALLOW),
+               "OPEN tier ALLOW (e.g. GET /api/auth/session, GET /api/status) is NOT activity");
+
+    // ALLOW on SAFETY_REDUCE and ADMIN_BOOTSTRAP also must not count -- both
+    // can ALLOW with no session at all (HTTP_AUTH_ROLE_NONE), so treating
+    // them as activity would mean "touching" a session that may not exist,
+    // or extending session-less traffic that was never authenticated.
+    TEST_CHECK(!http_auth_decision_counts_as_activity(ROUTE_TIER_SAFETY_REDUCE, HTTP_AUTH_DECISION_ALLOW),
+               "SAFETY_REDUCE tier ALLOW is not activity (allowed even with no session)");
+    TEST_CHECK(!http_auth_decision_counts_as_activity(ROUTE_TIER_ADMIN_BOOTSTRAP, HTTP_AUTH_DECISION_ALLOW),
+               "ADMIN_BOOTSTRAP tier ALLOW is not activity (fires only before a credential exists)");
+}
+
 void run_test_http_auth_enforce(void) {
     test_lookup_tier_real_routes();
     test_effective_tier_fail_closed_default();
@@ -366,4 +403,5 @@ void run_test_http_auth_enforce(void) {
     test_admin_tier_denied_while_bootstrap_needed();
     test_full_matrix_every_tier_role_auth_bootstrap();
     test_every_table_row_reachable_via_lookup();
+    test_decision_counts_as_activity();
 }

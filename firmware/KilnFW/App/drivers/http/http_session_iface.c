@@ -167,3 +167,68 @@ http_auth_role_t http_auth_session_resolve(const char *token, const char *client
                                                              (uint32_t)hal_time_now_ms());
     return to_enforce_role(role);
 }
+
+bool http_auth_session_status(const char *token, web_auth_session_role_t *role_out,
+                               uint32_t *last_seen_ms_out, uint32_t *timeout_s_out) {
+    if (role_out) {
+        *role_out = WEB_AUTH_SESSION_ROLE_NONE;
+    }
+    if (last_seen_ms_out) {
+        *last_seen_ms_out = 0;
+    }
+    uint32_t timeout_s = resolve_timeout_s();
+    if (timeout_s_out) {
+        *timeout_s_out = timeout_s;
+    }
+    if (!token || token[0] == '\0') {
+        return false;
+    }
+
+    uint8_t token_hash[32];
+    sha256((const uint8_t *)token, strlen(token), token_hash);
+
+    web_auth_table_t *t = http_session_table();
+    int idx = web_auth_table_find_by_token(t, token_hash);
+    if (idx < 0) {
+        return false;
+    }
+
+    uint32_t now = (uint32_t)hal_time_now_ms();
+    if (!web_auth_session_is_valid(t->slots[idx].last_seen_ms, timeout_s, now)) {
+        return false;
+    }
+
+    if (role_out) {
+        *role_out = t->slots[idx].role;
+    }
+    if (last_seen_ms_out) {
+        *last_seen_ms_out = t->slots[idx].last_seen_ms;
+    }
+    return true;
+}
+
+void http_auth_session_touch(const char *token) {
+    if (!token || token[0] == '\0') {
+        return;
+    }
+
+    uint8_t token_hash[32];
+    sha256((const uint8_t *)token, strlen(token), token_hash);
+
+    web_auth_table_t *t = http_session_table();
+    int idx = web_auth_table_find_by_token(t, token_hash);
+    if (idx < 0) {
+        return;
+    }
+
+    uint32_t now = (uint32_t)hal_time_now_ms();
+    uint32_t timeout_s = resolve_timeout_s();
+    // Never revive an already-expired session -- this is the server-side
+    // enforcement guarantee: a client ignoring the lock prompt and still
+    // sending requests past the deadline must not be able to extend itself
+    // back to life just by trying.
+    if (!web_auth_session_is_valid(t->slots[idx].last_seen_ms, timeout_s, now)) {
+        return;
+    }
+    web_auth_table_touch(t, (size_t)idx, now);
+}

@@ -110,3 +110,10 @@ http_auth_decision_t http_auth_check(route_tier_t tier, http_auth_role_t role, b
             return HTTP_AUTH_DECISION_DENY_INSUFFICIENT;
     }
 }
+
+bool http_auth_decision_counts_as_activity(route_tier_t tier, http_auth_decision_t decision) {
+    if (decision != HTTP_AUTH_DECISION_ALLOW) {
+        return false;
+    }
+    return tier == ROUTE_TIER_USER || tier == ROUTE_TIER_ADMIN;
+}

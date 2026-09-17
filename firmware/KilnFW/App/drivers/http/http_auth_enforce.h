@@ -165,6 +165,18 @@ route_tier_t http_auth_effective_tier(const char *uri, httpd_method_t method);
 http_auth_decision_t http_auth_check(route_tier_t tier, http_auth_role_t role, bool web_enabled,
                                       bool bootstrap_needed);
 
+// Section 8's "what counts as activity" predicate: true only for a request
+// that was actually ALLOWED against a real credential tier (USER or ADMIN).
+// A passive status poll classified ROUTE_TIER_OPEN (docs/WEB_AUTH_PLAN.md's
+// "GET /api/auth/session" keepalive) must NOT count as activity even though
+// it is ALLOWED -- that route is deliberately kept OPEN so it never reaches
+// this predicate's true branch. ROUTE_TIER_SAFETY_REDUCE and
+// ROUTE_TIER_ADMIN_BOOTSTRAP are excluded too: neither implies an
+// authenticated session worth extending (SAFETY_REDUCE allows even with no
+// session; ADMIN_BOOTSTRAP's ALLOW only ever fires before a credential
+// exists). Any non-ALLOW decision is never activity.
+bool http_auth_decision_counts_as_activity(route_tier_t tier, http_auth_decision_t decision);
+
 #ifdef __cplusplus
 }
 #endif
