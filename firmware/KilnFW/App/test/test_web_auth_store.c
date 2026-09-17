@@ -21,6 +21,17 @@ psa_status_t g_stub_psa_import_key_result = PSA_SUCCESS;
 
 #include "../drivers/persist/web_auth_store.c"
 
+// Direct-#include of the gesture state machine too (same convention as
+// web_auth_store.c above) -- only this executable links both fake_kv.h and
+// psa/crypto.h's host stub, so it is the one place the WIRED path (item
+// 10's confirm step actually calling web_auth_store_clear_for_physical_
+// reset()) can be exercised end-to-end. auth_reset_gesture.c itself has no
+// I/O dependency and is otherwise tested standalone in
+// test_auth_reset_gesture.c (the combined host-test executable); this file
+// only adds the negative case that needs a real, wired, non-null seam:
+// "a gesture that aborts partway must leave the stored credentials intact".
+#include "../drivers/net/auth_reset_gesture.c"
+
 static void reset_all(void)
 {
     fake_kv_reset_all();
@@ -374,6 +385,230 @@ static void test_policy_check_transition(void)
     TEST_CHECK(r != WEB_AUTH_POLICY_TRANSITION_OK, "a NULL current policy must never resolve OK");
 }
 
+// --- Item 10: the physical reset's real entry point -----------------------
+// web_auth_store_clear_for_physical_reset() -- the header had no clear entry
+// point for either the administrator credential or the policy record before
+// this task; both were added here (see web_auth_store.h's doc comment on
+// the function) rather than reached around from auth_reset_gesture.c, which
+// must never open the kiln_auth namespace itself
+// (check_kiln_auth_config_isolation.ps1's allowlist names only
+// web_auth_store.c/.h).
+static void test_clear_for_physical_reset(void)
+{
+    TEST_SECTION("web_auth_store_clear_for_physical_reset -- administrator cleared, "
+                 "user/PINs untouched, policy back to ABSENT");
+    reset_all();
+
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_USER, "operator", "UserPassword1",
+                                            SALT_A, false) == HAL_OK,
+               "set up: user password configured");
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "AdminPass123",
+                                            SALT_B, false) == HAL_OK,
+               "set up: administrator password configured");
+    TEST_CHECK(web_auth_store_set_pin(WEB_AUTH_ROLE_USER, "1234", SALT_A) == HAL_OK,
+               "set up: user PIN configured");
+    TEST_CHECK(web_auth_store_set_pin(WEB_AUTH_ROLE_ADMINISTRATOR, "5678", SALT_B) == HAL_OK,
+               "set up: administrator PIN configured");
+    web_auth_policy_t pol = {.web_enabled = true, .lcd_enabled = true,
+                              .web_timeout_s = 300, .lcd_timeout_s = 60};
+    TEST_CHECK(web_auth_store_set_policy(&pol) == HAL_OK, "set up: policy enabled and persisted");
+
+    TEST_CHECK(web_auth_store_clear_for_physical_reset() == true,
+               "the physical reset entry point reports success");
+
+    web_auth_password_record_t admin_rec;
+    TEST_CHECK(web_auth_store_load_password(WEB_AUTH_ROLE_ADMINISTRATOR, &admin_rec) ==
+                   WEB_AUTH_LOAD_OK,
+               "administrator record still loads OK (well-formed, just cleared)");
+    TEST_CHECK(admin_rec.configured == false,
+               "administrator no longer has a password configured after reset");
+    TEST_CHECK(admin_rec.must_change == true,
+               "administrator record's must_change is set true by the reset");
+    TEST_CHECK(web_auth_store_verify_password(WEB_AUTH_ROLE_ADMINISTRATOR, "AdminPass123") ==
+                   false,
+               "the old administrator password no longer verifies");
+
+    TEST_CHECK(web_auth_store_verify_password(WEB_AUTH_ROLE_USER, "UserPassword1") == true,
+               "the user's password is untouched by an administrator-only reset");
+
+    TEST_CHECK(web_auth_store_verify_pin(WEB_AUTH_ROLE_USER, "1234") == true,
+               "the user's LCD PIN is untouched by the credential reset");
+    TEST_CHECK(web_auth_store_verify_pin(WEB_AUTH_ROLE_ADMINISTRATOR, "5678") == true,
+               "the administrator's LCD PIN is untouched by the credential reset -- "
+               "item 10 clears the web password and the policy, never a PIN");
+
+    web_auth_policy_t loaded_pol;
+    TEST_CHECK(web_auth_store_load_policy(&loaded_pol) == WEB_AUTH_LOAD_ABSENT,
+               "policy reads back as genuinely ABSENT after the reset, not merely "
+               "overwritten with false/false");
+    TEST_CHECK(web_auth_policy_effective_enabled(WEB_AUTH_LOAD_ABSENT, loaded_pol.web_enabled) ==
+                   false,
+               "ABSENT collapses to auth-off -- the owner can reach the board again");
+}
+
+static void test_clear_for_physical_reset_on_empty_store(void)
+{
+    TEST_SECTION("web_auth_store_clear_for_physical_reset -- safe against a never-written store");
+    reset_all();
+
+    TEST_CHECK(web_auth_store_clear_for_physical_reset() == true,
+               "clearing an already-empty store still reports success");
+    web_auth_policy_t loaded_pol;
+    TEST_CHECK(web_auth_store_load_policy(&loaded_pol) == WEB_AUTH_LOAD_ABSENT,
+               "policy is (still) ABSENT");
+    TEST_CHECK(web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR) == false,
+               "administrator still reads as not configured");
+}
+
+// --- The WIRED gesture path: a real, non-null clear_credentials_fn --------
+// Coordinator instruction: keep AUTH_RESET_CONFIRM_NOT_WIRED covered
+// (test_auth_reset_gesture.c, unchanged) AND extend the negative cases to
+// this wired path -- an aborted gesture must leave the stored credentials
+// intact, not partially cleared.
+
+static void seed_credentials_for_gesture_test(void)
+{
+    reset_all();
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_USER, "operator", "UserPassword1",
+                                            SALT_A, false) == HAL_OK,
+               "seed: user password configured");
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "AdminPass123",
+                                            SALT_B, false) == HAL_OK,
+               "seed: administrator password configured");
+    web_auth_policy_t pol = {.web_enabled = true, .lcd_enabled = false,
+                              .web_timeout_s = 300, .lcd_timeout_s = -1};
+    TEST_CHECK(web_auth_store_set_policy(&pol) == HAL_OK, "seed: policy persisted");
+}
+
+static void assert_credentials_untouched(const char *why)
+{
+    TEST_CHECK(web_auth_store_verify_password(WEB_AUTH_ROLE_ADMINISTRATOR, "AdminPass123") == true,
+               why);
+    TEST_CHECK(web_auth_store_verify_password(WEB_AUTH_ROLE_USER, "UserPassword1") == true, why);
+    web_auth_policy_t loaded_pol;
+    TEST_CHECK(web_auth_store_load_policy(&loaded_pol) == WEB_AUTH_LOAD_OK, why);
+    TEST_CHECK(loaded_pol.web_enabled == true, why);
+}
+
+static void test_wired_gesture_full_confirm_clears_administrator_only(void)
+{
+    TEST_SECTION("wired gesture -- a full, confirmed gesture clears the administrator "
+                 "and the policy through the real store, user untouched");
+    seed_credentials_for_gesture_test();
+
+    auth_reset_gesture_state_t s;
+    auth_reset_gesture_reset(&s);
+    s.clear_credentials_fn = web_auth_store_clear_for_physical_reset;
+
+    auth_reset_gesture_on_corner_tap(&s, AUTH_RESET_CORNER_TOP_LEFT, 1000, true, false, false);
+    auth_reset_gesture_on_corner_tap(&s, AUTH_RESET_CORNER_TOP_RIGHT, 1100, true, false, false);
+    auth_reset_gesture_on_corner_tap(&s, AUTH_RESET_CORNER_BOTTOM_LEFT, 1200, true, false, false);
+    auth_reset_gesture_tap_result_t r4 = auth_reset_gesture_on_corner_tap(
+        &s, AUTH_RESET_CORNER_BOTTOM_RIGHT, 1300, true, false, false);
+    TEST_CHECK(r4 == AUTH_RESET_TAP_ARMED, "full correct sequence arms");
+
+    auth_reset_gesture_confirm_result_t cr = auth_reset_gesture_confirm(&s, 1400);
+    TEST_CHECK(cr == AUTH_RESET_CONFIRM_OK, "confirm through the real wired store -- OK");
+
+    TEST_CHECK(web_auth_store_verify_password(WEB_AUTH_ROLE_ADMINISTRATOR, "AdminPass123") ==
+                   false,
+               "administrator's old password no longer verifies after a real confirmed reset");
+    TEST_CHECK(web_auth_store_verify_password(WEB_AUTH_ROLE_USER, "UserPassword1") == true,
+               "user's password survives a real confirmed reset");
+    web_auth_policy_t loaded_pol;
+    TEST_CHECK(web_auth_store_load_policy(&loaded_pol) == WEB_AUTH_LOAD_ABSENT,
+               "policy reads back ABSENT after a real confirmed reset");
+}
+
+static void test_wired_gesture_out_of_order_leaves_store_intact(void)
+{
+    TEST_SECTION("wired gesture -- an out-of-order tap aborts and never touches the real store");
+    seed_credentials_for_gesture_test();
+
+    auth_reset_gesture_state_t s;
+    auth_reset_gesture_reset(&s);
+    s.clear_credentials_fn = web_auth_store_clear_for_physical_reset;
+
+    auth_reset_gesture_on_corner_tap(&s, AUTH_RESET_CORNER_TOP_LEFT, 1000, true, false, false);
+    auth_reset_gesture_tap_result_t r2 = auth_reset_gesture_on_corner_tap(
+        &s, AUTH_RESET_CORNER_BOTTOM_RIGHT, 1100, true, false, false);
+    TEST_CHECK(r2 == AUTH_RESET_TAP_ABANDONED, "out-of-order tap abandons the sequence");
+    TEST_CHECK(auth_reset_gesture_confirm(&s, 1200) == AUTH_RESET_CONFIRM_NOT_ARMED,
+               "confirm after an abandoned sequence -- NOT_ARMED, the real seam is never called");
+
+    assert_credentials_untouched(
+        "an out-of-order tap must leave every real, wired credential and the policy intact");
+}
+
+static void test_wired_gesture_missing_corner_leaves_store_intact(void)
+{
+    TEST_SECTION("wired gesture -- a missing corner (only 3 of 4) never touches the real store");
+    seed_credentials_for_gesture_test();
+
+    auth_reset_gesture_state_t s;
+    auth_reset_gesture_reset(&s);
+    s.clear_credentials_fn = web_auth_store_clear_for_physical_reset;
+
+    auth_reset_gesture_on_corner_tap(&s, AUTH_RESET_CORNER_TOP_LEFT, 1000, true, false, false);
+    auth_reset_gesture_on_corner_tap(&s, AUTH_RESET_CORNER_TOP_RIGHT, 1100, true, false, false);
+    auth_reset_gesture_on_corner_tap(&s, AUTH_RESET_CORNER_BOTTOM_LEFT, 1200, true, false, false);
+    /* Never tap BOTTOM_RIGHT. */
+    TEST_CHECK(!s.armed, "three of four taps -- never armed");
+    TEST_CHECK(auth_reset_gesture_confirm(&s, 1300) == AUTH_RESET_CONFIRM_NOT_ARMED,
+               "confirm with a missing corner -- NOT_ARMED");
+
+    assert_credentials_untouched(
+        "a missing corner must leave every real, wired credential and the policy intact");
+}
+
+static void test_wired_gesture_estop_released_mid_sequence_leaves_store_intact(void)
+{
+    TEST_SECTION("wired gesture -- E-stop released mid-sequence never touches the real store");
+    seed_credentials_for_gesture_test();
+
+    auth_reset_gesture_state_t s;
+    auth_reset_gesture_reset(&s);
+    s.clear_credentials_fn = web_auth_store_clear_for_physical_reset;
+
+    auth_reset_gesture_on_corner_tap(&s, AUTH_RESET_CORNER_TOP_LEFT, 1000, true, false, false);
+    auth_reset_gesture_on_corner_tap(&s, AUTH_RESET_CORNER_TOP_RIGHT, 1100, true, false, false);
+    /* E-stop released before the third tap. */
+    auth_reset_gesture_tap_result_t r = auth_reset_gesture_on_corner_tap(
+        &s, AUTH_RESET_CORNER_BOTTOM_LEFT, 1200, false, false, false);
+    TEST_CHECK(r == AUTH_RESET_TAP_IGNORED_PRECONDITIONS,
+               "tap while E-stop released -- ignored, sequence abandoned");
+    TEST_CHECK(auth_reset_gesture_confirm(&s, 1300) == AUTH_RESET_CONFIRM_NOT_ARMED,
+               "confirm after E-stop was released mid-sequence -- NOT_ARMED");
+
+    assert_credentials_untouched(
+        "E-stop released mid-sequence must leave every real, wired credential and the "
+        "policy intact");
+}
+
+static void test_wired_gesture_confirm_window_expired_leaves_store_intact(void)
+{
+    TEST_SECTION("wired gesture -- an expired confirm never touches the real store");
+    seed_credentials_for_gesture_test();
+
+    auth_reset_gesture_state_t s;
+    auth_reset_gesture_reset(&s);
+    s.clear_credentials_fn = web_auth_store_clear_for_physical_reset;
+
+    auth_reset_gesture_on_corner_tap(&s, AUTH_RESET_CORNER_TOP_LEFT, 1000, true, false, false);
+    auth_reset_gesture_on_corner_tap(&s, AUTH_RESET_CORNER_TOP_RIGHT, 1100, true, false, false);
+    auth_reset_gesture_on_corner_tap(&s, AUTH_RESET_CORNER_BOTTOM_LEFT, 1200, true, false, false);
+    auth_reset_gesture_tap_result_t r4 = auth_reset_gesture_on_corner_tap(
+        &s, AUTH_RESET_CORNER_BOTTOM_RIGHT, 1300, true, false, false);
+    TEST_CHECK(r4 == AUTH_RESET_TAP_ARMED, "full sequence arms");
+
+    uint32_t too_late = 1300 + AUTH_RESET_GESTURE_CONFIRM_WINDOW_MS + 1;
+    TEST_CHECK(auth_reset_gesture_confirm(&s, too_late) == AUTH_RESET_CONFIRM_EXPIRED,
+               "confirm past the 30 s window -- EXPIRED, the real seam is never called");
+
+    assert_credentials_untouched(
+        "an expired confirm must leave every real, wired credential and the policy intact");
+}
+
 int main(void)
 {
     test_crc32_vector();
@@ -388,6 +623,13 @@ int main(void)
     test_set_detects_lying_write();
     test_enable_gate_primitive();
     test_policy_check_transition();
+    test_clear_for_physical_reset();
+    test_clear_for_physical_reset_on_empty_store();
+    test_wired_gesture_full_confirm_clears_administrator_only();
+    test_wired_gesture_out_of_order_leaves_store_intact();
+    test_wired_gesture_missing_corner_leaves_store_intact();
+    test_wired_gesture_estop_released_mid_sequence_leaves_store_intact();
+    test_wired_gesture_confirm_window_expired_leaves_store_intact();
 
     fake_kv_reset_all();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);

@@ -1,4 +1,11 @@
 // auth_reset_gesture.c -- see auth_reset_gesture.h for the design rationale.
+//
+// Deliberately has NO dependency on web_auth_store.h or any other I/O
+// module (see the header's "pure, host-testable" framing) -- the singleton
+// that wires clear_credentials_fn to the real credential store lives in
+// auth_reset_gesture_wiring.c instead, its own translation unit, so this
+// file stays linkable into every host-test executable (including the
+// combined one) without pulling in psa/crypto.h's host stub.
 #include "auth_reset_gesture.h"
 
 #include <stddef.h>
@@ -130,3 +137,6 @@ bool auth_reset_gesture_is_armed_and_live(const auth_reset_gesture_state_t *s, u
     }
     return (uint32_t)(now_ms - s->armed_at_ms) <= AUTH_RESET_GESTURE_CONFIRM_WINDOW_MS;
 }
+
+/* auth_reset_gesture_singleton() is defined in auth_reset_gesture_wiring.c,
+ * not here -- see this file's header comment. */

@@ -222,6 +222,28 @@ if (Test-Path $routeTierNegativeTest) {
     Write-Host "         without it because -AllowFewerChecks was passed." -ForegroundColor Yellow
 }
 
+# test_check_stop_path_never_gated.ps1 is a negative test, not a guard -- it
+# proves check_stop_path_never_gated.ps1's scan (docs/WEB_AUTH_PLAN.md
+# section 9, the LCD Stop-is-never-gated property) can actually detect a PIN
+# gate moved onto the Stop branch. Named test_*, not check_*, so the glob
+# above does not pick it up; wired explicitly here, same pattern as the two
+# negative tests just above.
+$stopPathNegativeTest = Join-Path $repoRoot "firmware\KilnFW\App\test\test_check_stop_path_never_gated.ps1"
+if (Test-Path $stopPathNegativeTest) {
+    $checks += Get-Item $stopPathNegativeTest
+    $checks = $checks | Sort-Object FullName
+} elseif (-not $AllowFewerChecks) {
+    Write-Host ""
+    Write-Host "FAILED: expected negative test $stopPathNegativeTest not found --" -ForegroundColor Red
+    Write-Host "        has it moved? A missing negative test must not read as a clean run." -ForegroundColor Red
+    Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+    exit 2
+} else {
+    Write-Host ""
+    Write-Host "WARNING: expected negative test $stopPathNegativeTest not found -- proceeding" -ForegroundColor Yellow
+    Write-Host "         without it because -AllowFewerChecks was passed." -ForegroundColor Yellow
+}
+
 # firmware/hwAbstraction/test/{compile_esp_backends,compile_pico_backends,
 # test_host_fakes}.ps1 are named compile_*/test_* rather than check_*, so
 # the glob above does not pick them up on its own -- added explicitly here,
