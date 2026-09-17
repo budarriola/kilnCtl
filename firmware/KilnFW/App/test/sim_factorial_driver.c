@@ -553,9 +553,30 @@ static bool run_cell_firing(const sim_plant_cfg_t *plant_cfg_in, float model_k_d
     int ramp2_ticks = (int)((t2 - t1) / rate_c_per_s / DT_S);
     if (ramp1_ticks < 1) ramp1_ticks = 1;
     if (ramp2_ticks < 1) ramp2_ticks = 1;
-    int dwell_ticks = (int)(6.0f * model_tau_s / DT_S);
-    if (dwell_ticks < 1200) dwell_ticks = 1200;
-    if (dwell_ticks > 20000) dwell_ticks = 20000;
+    // Section 8 dwell-length fix (docs/audits/adaptive_fuzzy_section8_campaign_2026-09-16.md):
+    // the three single-firing arms (ad == NULL) keep their original 6*tau
+    // dwell unchanged -- their byte-identity with prior recorded runs must
+    // not move. The two adaptive-chain arms (A_PID_AT / A_FUZZY_AT, ad !=
+    // NULL) share ONE dwell formula between them (so gate 2's firing-1
+    // bit-identity between A_PID_AT and A_FUZZY_AT is unaffected -- both
+    // read this same branch), lengthened to comfortably clear
+    // adaptive_tune's own harvest gate: ADAPTIVE_TUNE_SETTLE_MIN_S (180s)
+    // of settled dwell AFTER the slope has already dropped below
+    // ADAPTIVE_TUNE_SETTLE_SLOPE_FLOOR_C_PER_S, which itself can eat
+    // several tau of a dwell before it is even reached. A first pass at
+    // 16*tau (measured: activity rose from 5.4% to 27.7%, still under the
+    // 30% bar) showed the fix works but needed more margin, so this uses
+    // 28*tau, well past the harvest gate rather than marginally past it.
+    int dwell_ticks;
+    if (ad) {
+        dwell_ticks = (int)(28.0f * model_tau_s / DT_S);
+        if (dwell_ticks < 7000) dwell_ticks = 7000;
+        if (dwell_ticks > 90000) dwell_ticks = 90000;
+    } else {
+        dwell_ticks = (int)(6.0f * model_tau_s / DT_S);
+        if (dwell_ticks < 1200) dwell_ticks = 1200;
+        if (dwell_ticks > 20000) dwell_ticks = 20000;
+    }
 
     double kp_mult_sum = 0.0, ki_mult_sum = 0.0, kd_mult_sum = 0.0;
     long ramp_tick_count = 0;
