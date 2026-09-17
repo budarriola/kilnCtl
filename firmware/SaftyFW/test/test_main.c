@@ -9,6 +9,7 @@ int g_test_failures = 0;
 int g_test_count = 0;
 
 void run_test_safety_guards(void);
+void run_test_safety_guards_realistic_trace(void);
 void run_test_link_frame(void);
 void run_test_link_frame_wire(void);
 void run_test_bootloader_metadata(void);
@@ -63,6 +64,7 @@ void run_test_estop_deenergizes_relay(void);
 int main(void)
 {
     run_test_safety_guards();
+    run_test_safety_guards_realistic_trace();
     run_test_guard_nuisance();
     run_test_debounce_policy();
     run_test_debounce_nuisance();

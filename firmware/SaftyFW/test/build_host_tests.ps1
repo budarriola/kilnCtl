@@ -79,6 +79,7 @@ try {
         (Join-Path $testDir "test_boot_checkin_coverage.c"),
         (Join-Path $testDir "test_watchdog_budget_coverage.c"),
         (Join-Path $testDir "test_watchdog_gate.c"),
+        (Join-Path $testDir "test_safety_guards_realistic_trace.c"),
         (Join-Path $srcDir "safety_guards.c"),
         (Join-Path $srcDir "config_store.c"),
         (Join-Path $testDir "fake_log_task.c"),

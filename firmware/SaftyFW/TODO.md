@@ -310,10 +310,24 @@ S8 (implausible rate of rise) remains unimplemented **by design** —
 `SAFETY_MODEL.md` §4 says it ships disabled until a real full-power ramp is
 logged (Phase 9); there is no defensible threshold to build yet.
 
-- [ ] Reuse `firmware/KilnFW/App/test/sim_plant.c` for realistic thermal traces
-      in the guard tests (current tests use synthetic step/ramp sequences,
-      which were enough to prove each guard's boundary, but a closed-loop
-      trace is still useful for S2/S8 tuning later).
+- [x] **Closed-loop, realistic-trace tests for S1/S8** — 2026-09-17,
+      `test/test_safety_guards_realistic_trace.c`. Literally reusing
+      `firmware/KilnFW/App/test/sim_plant.c` was rejected: its header pulls in
+      `zones_config_json.h`, a 3500+ line KilnFW-only persistence header, and
+      wiring that into SaftyFW's host-test build would be exactly the kind of
+      cross-firmware coupling `safety_guards.h`'s own independence doctrine
+      argues against, just to get a test fixture. Instead this file implements
+      an equivalent first-order-lag-plus-dead-time heating model (thermal
+      mass, loss proportional to delta-T, a fixed transport delay)
+      independently, scoped to only what S1/S8 need, and drives the real,
+      unmodified `safety_guards_tick()` with it — four new cases: S1 stays
+      quiet under closed-loop bang-bang control and trips on a stuck-relay
+      runaway trace; S8 stays quiet under a legitimate closed-loop ramp and
+      trips against a faster/lighter-mass plant. Wired into `test_main.c` and
+      `build_host_tests.ps1`. Negative-tested (sabotaged S1's trip condition
+      in `safety_guards.c`, confirmed the new tests fail red, hand-restored,
+      confirmed `git diff` empty, forced a full clean rebuild, confirmed
+      green).
 
 ## Phase 5 — Relay authority
 
