@@ -53,8 +53,13 @@
 >   WI-8 DONE (per-item status in
 >   `docs/audits/scenario_simulation_implementation_2026-09-14.md`), WI-9
 >   DROPPED (its premise, the fuzzy/Ki mutual-exclusion guard, was deleted by
->   `88bb4333`, not merely disabled), WI-10 not started. Read that plan and
->   its implementation audit directly rather than this line; the
+>   `88bb4333`, not merely disabled). **Updated 2026-09-16: WI-10 is now DONE
+>   and the plan is CLOSED** — a `strength_pct` cross-firing adapter design
+>   plus its simulation arm (`sim_strength_pct_adapt.c`) found every scoped
+>   scenario's 9-firing chain stayed `FIRING_COMPARE_INSUFFICIENT` (too few
+>   matched-segment pairs per firing to clear the comparator's Bar 1 floor)
+>   — a recorded, non-fatal finding per the plan's own acceptance criterion,
+>   not a defect. Read that plan directly rather than this line; the
 >   "no outcome exists" framing here was stale.
 >   Owner principle, now decided: fuzzy constants, like PID gains, are
 >   **derived per kiln, not shipped** — bench values may be anything

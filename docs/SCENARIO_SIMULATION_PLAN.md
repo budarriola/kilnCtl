@@ -1,13 +1,17 @@
 # Scenario simulation plan: controller behaviour under plant/model mismatch
 
-Date: 2026-09-14. Status: IN PROGRESS -- WI-1 through WI-8 are DONE (see
-docs/audits/scenario_simulation_implementation_2026-09-14.md for status per
-work item); this document is the specification those passes implemented
-against and an opus agent reviews each result against. WI-9 is DROPPED (its
-premise -- a fuzzy/Ki mutual-exclusion guard to remove -- no longer exists:
-88bb4333 deleted the Ki write path entirely, not merely the guard). WI-10 is
-not started. No board was flashed and no heating run was performed for any
-of this.
+Date: 2026-09-14, updated 2026-09-16. Status: CLOSED -- WI-1 through WI-8 are
+DONE (see docs/audits/scenario_simulation_implementation_2026-09-14.md for
+status per work item); this document is the specification those passes
+implemented against and an opus agent reviews each result against. WI-9 is
+DROPPED (its premise -- a fuzzy/Ki mutual-exclusion guard to remove -- no
+longer exists: 88bb4333 deleted the Ki write path entirely, not merely the
+guard). WI-10 is DONE 2026-09-16: design doc plus simulation arm delivered
+(see WI-10 entry below); every scoped scenario's 9-firing chain stayed
+INSUFFICIENT (too few matched segment pairs per firing to clear
+`firing_compare`'s Bar 1 floor) -- a recorded, non-fatal finding per its own
+acceptance criterion, not a defect. No board was flashed and no heating run
+was performed for any of this.
 
 ---
 
@@ -1059,6 +1063,26 @@ reusing the argument `1142c73b` refuted, and names what it would do about
 selection bias from excluded non-settling runs. **No firmware change. No
 hardware.** If the simulation shows the adapter wandering or failing to
 converge, that is a complete and valuable result — record it and stop.
+
+**DONE 2026-09-16.** Design doc:
+`docs/audits/strength_pct_adapter_design_2026-09-16.md`. Simulation arm:
+`firmware/KilnFW/App/test/sim_strength_pct_adapt.c` (built as
+`kilnctl_sim_strength_pct_adapt.exe`, wired into `build_host_tests.ps1`).
+Result across all four scoped scenarios (S2, S5, S7, S12): every 9-firing
+chain stayed `FIRING_COMPARE_INSUFFICIENT` for all 8 trial firings -- none
+ever reached `FIRING_COMPARE_ACCEPT` or `FIRING_COMPARE_REJECT_DEGRADED`.
+Cause, read from `firing_compare.c`: a 4-segment firing yields too few
+matched-segment pairs per sub-score to clear `FIRING_COMPARE_BAR1_MIN_N`,
+so Bar 1 never clears regardless of scenario. This is the acceptance
+criterion's anticipated outcome -- "the adapter wandering or failing to
+converge... is a complete and valuable result" -- recorded here, not a
+harness defect (the harness's own defect path was negative-tested
+separately: a deliberately corrupted scenario id produced a real `FAIL`
+exit, then the source was restored and a full rebuild reconfirmed `PASS`).
+A real adapter would need either longer firings (more segments -> more
+matched pairs per class) or a lower `FIRING_COMPARE_BAR1_MIN_N` floor for
+this specific comparison to ever leave `INSUFFICIENT`; this plan does not
+propose either change, per its own "design only" scope.
 
 ---
 

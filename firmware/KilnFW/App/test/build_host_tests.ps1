@@ -1671,6 +1671,32 @@ try {
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
     Invoke-HostTestExe -Name "sim_scenarios_adaptive" -ExePath $exeScenariosAdaptive -BuildCmd $cmdScenariosAdaptive
 
+    # ---- sim_strength_pct_adapt.exe: docs/SCENARIO_SIMULATION_PLAN.md WI-10
+    # (docs/audits/strength_pct_adapter_design_2026-09-16.md is the design;
+    # this executable is its simulation arm). A cross-firing scalar
+    # hill-climb over strength_pct for S2/S5/S7/S12, adjudicated ONLY by the
+    # real, unmodified firing_compare() comparing consecutive already-
+    # finished firings' own firing_score_set_t -- never a within-run
+    # inference (see the design doc sec 3). Own executable, lighter link
+    # surface than sim_scenarios_adaptive.exe (no adaptive_tune.c, no
+    # zones_config fake, no FreeRTOS mutex): only pid/pid_fuzzy/pid_autotune/
+    # firing_score/firing_compare/sim_plant, same four-plus-two-file posture
+    # as sim_scenarios.exe plus the comparator. Gates the build on internal
+    # self-consistency only (a named scenario missing from the table, a NaN
+    # this design's own refusal handling does not explain, or the
+    # strength_pct=0 bit-exact contract breaking) -- a chain that never
+    # accepts a step, oscillates, or wanders is a printed, non-fatal finding,
+    # per WI-10's own acceptance line and the design doc sec 5.
+    $exeStrengthAdapt = Join-Path $outDir "kilnctl_sim_strength_pct_adapt.exe"
+    $cmdStrengthAdapt = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$outDir\\`" /Fe:`"$exeStrengthAdapt`" `"$(Join-Path $testDir 'sim_strength_pct_adapt.c')`" " +
+            "`"$(Join-Path $testDir 'sim_scenario_table.c')`" `"$(Join-Path $testDir 'sim_plant.c')`" " +
+            "`"$(Join-Path $testDir 'sim_high_temp.c')`" `"$(Join-Path $testDir 'sim_mistune.c')`" " +
+            "`"$(Join-Path $driversDir 'control/pid.c')`" `"$(Join-Path $driversDir 'control/pid_fuzzy.c')`" " +
+            "`"$(Join-Path $driversDir 'control/pid_autotune.c')`" `"$(Join-Path $driversDir 'control/firing_score.c')`" " +
+            "`"$(Join-Path $driversDir 'control/firing_compare.c')`""
+    Invoke-HostTestExe -Name "sim_strength_pct_adapt" -ExePath $exeStrengthAdapt -BuildCmd $cmdStrengthAdapt
+
     # ---- sim_fuzzy_overshoot.exe: docs/audits/fuzzy_overshoot_measurement_
     # 2026-09-13.md -- the owner correction that sim_fuzzy_closedloop.c's
     # tracking scenario (IAE/MAE averaged over a whole run) is the wrong
@@ -1825,7 +1851,11 @@ try {
     # Invoke-HostTestExe call -- counted by grep against the actual file at
     # edit time (47), not by incrementing the stale prior value by one, since
     # this counter had already drifted before (see the 42->45 note above).
-    $totalExpected = 47
+    # 47 -> 48: this pass added sim_strength_pct_adapt.c as its own 48th
+    # Invoke-HostTestExe call -- docs/SCENARIO_SIMULATION_PLAN.md WI-10's
+    # strength_pct cross-firing adapter simulation arm (design doc
+    # docs/audits/strength_pct_adapter_design_2026-09-16.md).
+    $totalExpected = 48
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the
