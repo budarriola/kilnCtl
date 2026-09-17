@@ -544,6 +544,24 @@ void dashboard_get_status(dashboard_status_t *out)
     out->time_tz[sizeof(out->time_tz) - 1] = '\0';
 }
 
+bool dashboard_http_estop_asserted(void)
+{
+    /* Same s_dash.safety cache and safety_link_get_status() call as
+     * dashboard_get_status() above (see its SAFETY_FLAG_RELAY/ENABLED
+     * reads) -- fail-safe false (not asserted) on a null/unknown/erroring
+     * link, per this function's own header doc comment: a reset-clearing
+     * gesture gated on this must only arm when E-stop is POSITIVELY
+     * confirmed asserted. */
+    if (!s_dash.safety) {
+        return false;
+    }
+    safety_link_status_t sl;
+    if (safety_link_get_status(s_dash.safety, &sl) != ESP_OK) {
+        return false;
+    }
+    return (sl.flags & SAFETY_FLAG_ESTOP) != 0u;
+}
+
 
 /* See dashboard_http.h -- mirrors status_get_handler()'s io_ready/
  * thermo_ready/safety_ready computation exactly (same order, same

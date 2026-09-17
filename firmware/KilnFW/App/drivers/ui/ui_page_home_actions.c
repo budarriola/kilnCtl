@@ -7,6 +7,7 @@
  * page's overall design history. */
 #include "ui_page_home_internal.h"
 #include "ui_lcd_lock.h"
+#include "hal_time.h" /* hal_time_now_us() -- auth_reset_gesture's now_ms argument */
 
 static bool ui_home_resolve_start_profile_id(uint8_t *out_id)
 {
@@ -306,3 +307,107 @@ lv_obj_t *ui_home_build_button(lv_obj_t *parent, const char *text, lv_color_t bg
  * step (t1<=t0, an unknown-duration ramp segment -- see
  * profile_feasibility.h's HONESTY RULE) holds the step's arrival value
  * rather than dividing by zero. Returns NAN if pts is empty. */
+
+/* docs/WEB_AUTH_PLAN.md item 10 -- confirm-step callback for the physical
+ * credential-reset gesture. Called AFTER ui_confirm_show()'s dialog is
+ * already closed (see ui_confirm.h's doc comment), so it is safe to log and
+ * mutate the singleton gesture state directly here. */
+static void ui_home_auth_reset_confirm_yes_cb(void *user_data)
+{
+    (void)user_data;
+    auth_reset_gesture_state_t *gesture = auth_reset_gesture_singleton();
+    uint32_t now_ms = (uint32_t)(hal_time_now_us() / 1000);
+    auth_reset_gesture_confirm_result_t result = auth_reset_gesture_confirm(gesture, now_ms);
+    switch (result) {
+        case AUTH_RESET_CONFIRM_OK:
+            ESP_LOGE(UI_HOME_TAG,
+                     "**********************************************************************");
+            ESP_LOGE(UI_HOME_TAG,
+                     "* PHYSICAL AUTH RESET CONFIRMED -- administrator credential cleared.   *");
+            ESP_LOGE(UI_HOME_TAG,
+                     "* Web auth stays ENABLED; no administrator password is now configured. *");
+            ESP_LOGE(UI_HOME_TAG,
+                     "* Login must now force a set-a-new-password flow (WEB_AUTH_PLAN.md      *");
+            ESP_LOGE(UI_HOME_TAG,
+                     "* section 11, owned separately) -- this is NOT a lockout or a bypass.   *");
+            ESP_LOGE(UI_HOME_TAG,
+                     "**********************************************************************");
+            break;
+        case AUTH_RESET_CONFIRM_NOT_ARMED:
+            ESP_LOGE(UI_HOME_TAG, "Auth reset confirm pressed but gesture was not armed -- ignored.");
+            break;
+        case AUTH_RESET_CONFIRM_EXPIRED:
+            ESP_LOGE(UI_HOME_TAG,
+                     "Auth reset confirm window (30 s) expired before confirm was pressed -- "
+                     "no credential change. Re-arm by repeating all four corner taps.");
+            break;
+        case AUTH_RESET_CONFIRM_NOT_WIRED:
+            ESP_LOGE(UI_HOME_TAG,
+                     "Auth reset armed and confirmed but clear_credentials_fn is NULL -- the "
+                     "credential store was never wired to the gesture. No change made.");
+            break;
+        case AUTH_RESET_CONFIRM_CLEAR_FAILED:
+            ESP_LOGE(UI_HOME_TAG,
+                     "Auth reset armed and confirmed but the credential-store clear FAILED its "
+                     "own read-back verification -- no credential change confirmed. Retry by "
+                     "re-arming the gesture.");
+            break;
+    }
+}
+
+/* One shared handler for all four corner hit zones (see
+ * ui_page_home_internal.h's doc comment on this prototype). Reads the three
+ * live preconditions fresh on every tap, per auth_reset_gesture.h's own
+ * contract, then feeds the tap into the board-wide singleton gesture state.
+ * The ARMED transition is the only one that needs action here beyond
+ * logging: it pops the confirm dialog immediately (plan item 10 step 4).
+ * The persistent "AUTH RESET ARMED" banner and the cancel/expiry logging
+ * live on the existing 1 Hz refresh tick instead (ui_page_home_refresh.c)
+ * -- see that file for why (ui_confirm.h's Cancel button has no callback
+ * hook to log from directly, so natural 30 s expiry, observed on the next
+ * tick after it happens, is the mechanism actually used for "cancel"). */
+void ui_home_auth_reset_corner_tap_cb(lv_event_t *e)
+{
+    auth_reset_gesture_corner_t corner =
+        (auth_reset_gesture_corner_t)(intptr_t)lv_event_get_user_data(e);
+
+    bool estop_asserted = dashboard_http_estop_asserted();
+    profile_exec_status_t st;
+    profile_executor_get_status(&st);
+    bool firing_active = (st.state == PROFILE_EXEC_RUNNING || st.state == PROFILE_EXEC_PAUSED);
+    bool heat_enabled = heat_enable_is_granted();
+    uint32_t now_ms = (uint32_t)(hal_time_now_us() / 1000);
+
+    auth_reset_gesture_state_t *gesture = auth_reset_gesture_singleton();
+    auth_reset_gesture_tap_result_t result = auth_reset_gesture_on_corner_tap(
+        gesture, corner, now_ms, estop_asserted, firing_active, heat_enabled);
+
+    if (result == AUTH_RESET_TAP_ARMED) {
+        ESP_LOGE(UI_HOME_TAG,
+                 "**********************************************************************");
+        ESP_LOGE(UI_HOME_TAG,
+                 "* PHYSICAL AUTH RESET ARMED -- E-stop asserted, no firing active.       *");
+        ESP_LOGE(UI_HOME_TAG,
+                 "* Confirm within 30 s to clear the administrator credential. Auth stays *");
+        ESP_LOGE(UI_HOME_TAG,
+                 "* ENABLED either way -- see WEB_AUTH_PLAN.md section 10.                *");
+        ESP_LOGE(UI_HOME_TAG,
+                 "**********************************************************************");
+
+        ui_confirm_params_t params = {
+            .title = "Confirm Credential Reset",
+            .body = "Clear the administrator password? Web auth stays ENABLED and no other "
+                    "config changes. You will need to set a new administrator password on "
+                    "next login.",
+            .confirm_label = "Clear Credential",
+            .confirm_color = UI_THEME_ACCENT_5, /* stop-red -- destructive-ish action */
+            .on_confirm = ui_home_auth_reset_confirm_yes_cb,
+            .user_data = NULL,
+        };
+        ui_confirm_show(&params);
+    }
+    /* IGNORED_PRECONDITIONS/IGNORED_ALREADY_ARMED/ABANDONED/PROGRESS all need
+     * no action here -- they are silent-by-design per auth_reset_gesture.h's
+     * own doc comment (a panel used for its safety function must not be
+     * distracted by a stray tap outside the precondition window). */
+}

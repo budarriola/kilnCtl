@@ -15,6 +15,7 @@
 #include "zones_config_accessors.h" /* zones_config_get_load_fault() -- CLAUDE.md's
                                        * ota_rollback_esp() hazard, closed 2026-09-16 */
 #include "kiln_cfg_swap.h" /* kiln_cfg_swap_get_boot_fault() -- M13 fix */
+#include "hal_time.h" /* hal_time_now_us() -- auth_reset_gesture's now_ms argument */
 
 /* 2026-09-15 review follow-up (review_divergence_wiring_60d6552f_2026-09-15.md,
  * items A/B/C and HIGH 1): the deferred Pico-half recapture poll and its
@@ -28,6 +29,16 @@
  * loop (safety_link_poll.c), which is display-independent and already owns
  * the divergence evaluation. This file keeps only the on-screen "Config
  * mismatch (Pico)" notice, which IS legitimately display-dependent. */
+
+/* docs/WEB_AUTH_PLAN.md item 10 -- tracks the gesture's armed-and-live state
+ * across ticks so a transition from true to false (whether by successful
+ * confirm, which logs itself in ui_home_auth_reset_confirm_yes_cb(), or by
+ * the 30 s window elapsing with no confirm at all) can be told apart and
+ * logged as an expiry/cancel exactly once. ui_confirm.h's Cancel button has
+ * no callback hook (see its own doc comment) so a dialog-Cancel tap cannot
+ * log directly -- this 1 Hz observation of natural expiry is the mechanism
+ * actually used for the "cancel" ESP_LOGE, not a true button-press hook. */
+static bool s_ui_home_auth_reset_was_armed_live = false;
 
 void ui_home_refresh_cb(lv_timer_t *timer)
 {
@@ -144,6 +155,30 @@ void ui_home_refresh_cb(lv_timer_t *timer)
         }
     }
 
+    /* docs/WEB_AUTH_PLAN.md item 10 -- cancel/expiry logging for the
+     * physical credential-reset gesture. See s_ui_home_auth_reset_was_armed_live's
+     * own doc comment for why this 1 Hz observation, rather than a true
+     * button-press hook, is the mechanism used for "cancel". A transition
+     * from armed-and-live to not-live with the gesture STILL reporting
+     * armed==true (auth_reset_gesture_cancel() below actually clears it) can
+     * only mean the 30 s confirm window elapsed with no confirm pressed --
+     * a successful confirm already transitions the state to idle itself
+     * (auth_reset_gesture_confirm()'s own contract), so this branch never
+     * double-logs a real confirm. */
+    {
+        uint32_t now_ms = (uint32_t)(hal_time_now_us() / 1000);
+        auth_reset_gesture_state_t *gesture = auth_reset_gesture_singleton();
+        bool armed_live = auth_reset_gesture_is_armed_and_live(gesture, now_ms);
+        if (s_ui_home_auth_reset_was_armed_live && !armed_live && gesture->armed) {
+            ESP_LOGE(UI_HOME_TAG,
+                     "Auth reset gesture's 30 s confirm window elapsed with no confirm -- "
+                     "cancelled/expired, no credential change. Re-arm by repeating all four "
+                     "corner taps.");
+            auth_reset_gesture_cancel(gesture);
+        }
+        s_ui_home_auth_reset_was_armed_live = armed_live;
+    }
+
     /* Safety-trip strip. Same gate the removed state-card banner used, kept
      * verbatim on purpose: diag_age_ms < SAFETY_LINK_STALE_MS, because a
      * STALE diag_state == TRIPPED is a silent link, not a live trip, and
@@ -177,6 +212,18 @@ void ui_home_refresh_cb(lv_timer_t *timer)
             snprintf(trip_buf, sizeof(trip_buf), "SAFETY TRIP -- %s",
                      safety_trip_words_short(ds.diag_trip_reason));
             lv_label_set_text(s_ui_home_trip_strip, trip_buf);
+            lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
+        } else if (auth_reset_gesture_is_armed_and_live(auth_reset_gesture_singleton(),
+                                                          (uint32_t)(hal_time_now_us() / 1000))) {
+            /* docs/WEB_AUTH_PLAN.md item 10 step 4's "AUTH RESET ARMED --
+             * confirm within 30 s" banner. Ranked below the OTA-bypass and
+             * live-safety-trip banners above (same "reads first if somehow
+             * both are live" ordering this strip already uses elsewhere),
+             * above the config-quarantine branches below: this is a live,
+             * time-boxed operator action in progress and deserves more
+             * visibility than an informational config warning. Reused
+             * verbatim -- same widget, same styling, no new LCD color. */
+            lv_label_set_text(s_ui_home_trip_strip, "AUTH RESET ARMED -- confirm within 30 s");
             lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
         } else {
             /* Config-load-fault quarantine: the board could not decode its

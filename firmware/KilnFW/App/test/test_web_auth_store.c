@@ -387,16 +387,19 @@ static void test_policy_check_transition(void)
 
 // --- Item 10: the physical reset's real entry point -----------------------
 // web_auth_store_clear_for_physical_reset() -- the header had no clear entry
-// point for either the administrator credential or the policy record before
-// this task; both were added here (see web_auth_store.h's doc comment on
-// the function) rather than reached around from auth_reset_gesture.c, which
-// must never open the kiln_auth namespace itself
-// (check_kiln_auth_config_isolation.ps1's allowlist names only
-// web_auth_store.c/.h).
+// point for the administrator credential before this task; it was added
+// here (see web_auth_store.h's doc comment on the function) rather than
+// reached around from auth_reset_gesture.c, which must never open the
+// kiln_auth namespace itself (check_kiln_auth_config_isolation.ps1's
+// allowlist names only web_auth_store.c/.h). Forward fix: this function
+// used to also erase the policy record back to ABSENT, which plan section
+// 10 forbids ("does not disable authentication ... does not clear any
+// config") -- it now leaves the policy completely untouched, so the tests
+// below assert the policy survives byte-for-byte rather than going ABSENT.
 static void test_clear_for_physical_reset(void)
 {
     TEST_SECTION("web_auth_store_clear_for_physical_reset -- administrator cleared, "
-                 "user/PINs untouched, policy back to ABSENT");
+                 "user/PINs/policy untouched");
     reset_all();
 
     TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_USER, "operator", "UserPassword1",
@@ -435,15 +438,20 @@ static void test_clear_for_physical_reset(void)
                "the user's LCD PIN is untouched by the credential reset");
     TEST_CHECK(web_auth_store_verify_pin(WEB_AUTH_ROLE_ADMINISTRATOR, "5678") == true,
                "the administrator's LCD PIN is untouched by the credential reset -- "
-               "item 10 clears the web password and the policy, never a PIN");
+               "item 10 clears only the administrator's web password, never a PIN or "
+               "the policy");
 
     web_auth_policy_t loaded_pol;
-    TEST_CHECK(web_auth_store_load_policy(&loaded_pol) == WEB_AUTH_LOAD_ABSENT,
-               "policy reads back as genuinely ABSENT after the reset, not merely "
-               "overwritten with false/false");
-    TEST_CHECK(web_auth_policy_effective_enabled(WEB_AUTH_LOAD_ABSENT, loaded_pol.web_enabled) ==
-                   false,
-               "ABSENT collapses to auth-off -- the owner can reach the board again");
+    TEST_CHECK(web_auth_store_load_policy(&loaded_pol) == WEB_AUTH_LOAD_OK,
+               "policy record is left exactly as the owner set it -- plan section 10 "
+               "forbids clearing any config, including policy");
+    TEST_CHECK(loaded_pol.web_enabled == true && loaded_pol.lcd_enabled == true,
+               "policy fields are byte-for-byte what was seeded before the reset");
+    TEST_CHECK(web_auth_policy_effective_enabled(WEB_AUTH_LOAD_OK, loaded_pol.web_enabled) ==
+                   true,
+               "auth stays enabled after the reset -- this is the new reachable state "
+               "(enabled, no administrator credential configured) that section 11's "
+               "login-path work must treat as a forced set-a-new-password flow");
 }
 
 static void test_clear_for_physical_reset_on_empty_store(void)
@@ -455,7 +463,7 @@ static void test_clear_for_physical_reset_on_empty_store(void)
                "clearing an already-empty store still reports success");
     web_auth_policy_t loaded_pol;
     TEST_CHECK(web_auth_store_load_policy(&loaded_pol) == WEB_AUTH_LOAD_ABSENT,
-               "policy is (still) ABSENT");
+               "policy is (still) ABSENT -- untouched, and it was never written");
     TEST_CHECK(web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR) == false,
                "administrator still reads as not configured");
 }
@@ -493,7 +501,7 @@ static void assert_credentials_untouched(const char *why)
 static void test_wired_gesture_full_confirm_clears_administrator_only(void)
 {
     TEST_SECTION("wired gesture -- a full, confirmed gesture clears the administrator "
-                 "and the policy through the real store, user untouched");
+                 "through the real store, user and policy untouched");
     seed_credentials_for_gesture_test();
 
     auth_reset_gesture_state_t s;
@@ -516,8 +524,11 @@ static void test_wired_gesture_full_confirm_clears_administrator_only(void)
     TEST_CHECK(web_auth_store_verify_password(WEB_AUTH_ROLE_USER, "UserPassword1") == true,
                "user's password survives a real confirmed reset");
     web_auth_policy_t loaded_pol;
-    TEST_CHECK(web_auth_store_load_policy(&loaded_pol) == WEB_AUTH_LOAD_ABSENT,
-               "policy reads back ABSENT after a real confirmed reset");
+    TEST_CHECK(web_auth_store_load_policy(&loaded_pol) == WEB_AUTH_LOAD_OK,
+               "policy still reads back OK (not erased) after a real confirmed reset");
+    TEST_CHECK(loaded_pol.web_enabled == true,
+               "policy is left exactly as seeded -- auth stays enabled, satisfying plan "
+               "section 10's 'does not disable authentication' requirement");
 }
 
 static void test_wired_gesture_out_of_order_leaves_store_intact(void)
