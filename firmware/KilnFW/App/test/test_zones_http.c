@@ -7395,6 +7395,105 @@ static void test_decode_zones_blob_refuses_a_v25_blob_with_a_corrupted_crc(void)
     TEST_CHECK(out.thermo_count == 0, "a refused blob leaves *out zeroed, never a half-migrated struct");
 }
 
+// Release-hardening pass, 2026-09-16 (docs/audits/release_hardening_plan_
+// verify_1_2_5_7_8_2026-09-16.md, blocker 7): the 25->26 bump moved v25 onto
+// the opus-finding-10 CRC gate and, in the SAME motion, silently dropped v24
+// off it (v24 used to be ZONES_CFG_VERSION-1 before this pass, now it is
+// ZONES_CFG_VERSION-2 and was, until zones_config_migrate.c's matching fix,
+// unchecked again). This is the exact "immediately widens" pattern the
+// opus-10 comment names -- closed here for v24 specifically, mirroring the
+// v25 tests above byte-for-byte, since v24 is judged reachable (a board can
+// plausibly go without a reboot across a short, two-schema-bump gap) while
+// v7..v23 are not (see zones_config_migrate.c's own comment for the full
+// reachability argument this repo settled on).
+static void make_minimal_valid_v24_blob(zones_cfg_v24_t *src)
+{
+    memset(src, 0, sizeof(*src));
+    src->version = 24;
+    src->thermo_count = 2;
+    src->relay_count = 2;
+    src->safety_tc_type = 3;
+    src->pc_link_abort_silence_ms = 45000.0f;
+    src->timing_profile_count = 1;
+    snprintf(src->timing_profiles[0].name, sizeof(src->timing_profiles[0].name), "Default");
+    src->zones[0].relay_mask = 0x01;
+    src->zones[0].thermo_mask = 0x01;
+    src->zones[0].max_temp_c = 1300.0f;
+    src->zones[0].model_fit_temp_c = ZONE_MODEL_FIT_TEMP_UNKNOWN;
+    src->zones[0].model_fit_ambient_c = ZONE_MODEL_FIT_TEMP_UNKNOWN;
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        src->zones[0].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+    }
+    src->zones[1].relay_mask = 0x02;
+    src->zones[1].thermo_mask = 0x02;
+    src->zones[1].max_temp_c = 1250.0f;
+    src->zones[1].model_fit_temp_c = ZONE_MODEL_FIT_TEMP_UNKNOWN;
+    src->zones[1].model_fit_ambient_c = ZONE_MODEL_FIT_TEMP_UNKNOWN;
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        src->zones[1].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+    }
+    // Same "everything before crc32, then 4 zero bytes" computation
+    // zones_config_migrate.c's decode_zones_blob() itself uses to verify a
+    // v24 blob -- mirrors make_minimal_valid_v25_blob() above exactly, one
+    // struct type earlier.
+    {
+        static const uint8_t zero4[sizeof(uint32_t)] = {0};
+        uint32_t crc = esp_crc32_le(0, (const uint8_t *)src, offsetof(zones_cfg_v24_t, crc32));
+        src->crc32 = esp_crc32_le(crc, zero4, sizeof(zero4));
+    }
+}
+
+static void test_decode_zones_blob_accepts_a_v24_blob_with_a_correct_crc(void)
+{
+    TEST_SECTION("decode_zones_blob -- a v24 blob with a CORRECT crc32 still migrates to v26 "
+                 "(the v24 CRC gate must not refuse good blobs)");
+
+    zones_cfg_v24_t src;
+    make_minimal_valid_v24_blob(&src);
+
+    zones_cfg_t out;
+    const char *reason = "unset";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    TEST_CHECK(r == ZONES_DECODE_OK, "a well-formed, correctly-CRC'd v24 blob migrates cleanly");
+    TEST_CHECK(out.version == ZONES_CFG_VERSION, "migrated config is stamped the current (v26) version");
+    TEST_CHECK(out.thermo_count == 2, "sibling field survives the two-version hop unchanged");
+    TEST_CHECK(out.zones[0].coil_power_w == 0.0f,
+               "a migrated zone's v25-added coil_power_w reads its 'equal share' sentinel, "
+               "not garbage from beyond the v24 blob's own tail");
+    TEST_CHECK(out.zones[0].autotune_baseline_k_dc == 0.0f,
+               "a migrated zone's v26-added autotune_baseline_k_dc reads its 'not recorded yet' "
+               "sentinel, not garbage from beyond the v24 blob's own tail");
+}
+
+static void test_decode_zones_blob_refuses_a_v24_blob_with_a_corrupted_crc(void)
+{
+    TEST_SECTION("decode_zones_blob -- NEGATIVE TEST: a v24 blob with a flipped bit and its OLD "
+                 "(now-mismatched) crc32 is refused, not silently migrated two versions forward. "
+                 "Regression this catches: before this pass's zones_config_migrate.c fix, decode_"
+                 "zones_blob() only CRC-checked ZONES_CFG_VERSION-1 (v25) -- a v24 blob took only "
+                 "the length check, so this exact corruption would have migrated silently and this "
+                 "test would have observed ZONES_DECODE_OK.");
+
+    zones_cfg_v24_t src;
+    make_minimal_valid_v24_blob(&src);
+    // Flip one bit of a real, in-range value (a PID gain), same worked
+    // example opus review finding 10 and the v25 negative test above use.
+    src.zones[0].pid_kp = 12.5f;
+    {
+        static const uint8_t zero4[sizeof(uint32_t)] = {0};
+        uint32_t crc = esp_crc32_le(0, (const uint8_t *)&src, offsetof(zones_cfg_v24_t, crc32));
+        src.crc32 = esp_crc32_le(crc, zero4, sizeof(zero4));
+    }
+    uint8_t *raw = (uint8_t *)&src;
+    raw[offsetof(zones_cfg_v24_t, zones[0].pid_kp)] ^= 0x01; // corrupt AFTER computing the CRC
+
+    zones_cfg_t out;
+    const char *reason = "unset";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    TEST_CHECK(r == ZONES_DECODE_CORRUPT, "a v24 blob whose bytes no longer match its own crc32 is refused");
+    TEST_CHECK(out.thermo_count == 0, "a refused blob leaves *out zeroed, never a half-migrated struct");
+}
+
 // docs/ON_OFF_ZONE_PLAN.md sec 1/sec 2 predicates.
 static void test_zone_is_on_off_and_zone_needs_ceiling(void)
 {
@@ -11542,6 +11641,8 @@ void run_test_zones_http(void)
     test_nvs_load_from_v23_blob_defaults_model_fit_context_to_unknown();
     test_decode_zones_blob_accepts_a_v25_blob_with_a_correct_crc();
     test_decode_zones_blob_refuses_a_v25_blob_with_a_corrupted_crc();
+    test_decode_zones_blob_accepts_a_v24_blob_with_a_correct_crc();
+    test_decode_zones_blob_refuses_a_v24_blob_with_a_corrupted_crc();
     test_zone_is_on_off_and_zone_needs_ceiling();
     test_NEGATIVE_wrong_zone_band_read_is_caught();
     test_NEGATIVE_migration_default_of_zero_instead_of_20_is_caught();
