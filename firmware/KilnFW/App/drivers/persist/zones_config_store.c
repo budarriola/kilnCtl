@@ -48,6 +48,36 @@ NVS_KEY_LEN_CHECK(NVS_KEY_ZONES_REV);
 
 static uint32_t s_zones_cfg_rev = 0;
 
+/* CLAUDE.md's ota_rollback_esp() hazard, closed 2026-09-16 -- see
+ * zones_cfg_load_fault_t's own doc comment (zones_config_accessors.h) for
+ * the full rule. Latched below, in nvs_load_from_decode(), the one place a
+ * real on-flash blob's decode outcome is known; read back only through
+ * zones_config_get_load_fault(). Scoped to KILN_NVS_PARTITION only (the
+ * authoritative store nvs_load() reads) -- migrate_from_default_partition()'s
+ * probe of the pre-split legacy partition below must not latch this: that
+ * path already has its own found/valid handling and a failure there is a
+ * separate, older concern, not "this boot is running on defaults instead of
+ * its own tuned config." */
+static zones_cfg_load_fault_t s_zones_cfg_load_fault = {0};
+
+bool zones_config_get_load_fault(zones_cfg_load_fault_t *out)
+{
+    if (out) {
+        *out = s_zones_cfg_load_fault;
+    }
+    return s_zones_cfg_load_fault.occurred;
+}
+
+static void zones_cfg_load_fault_latch(zones_cfg_load_fault_kind_t kind, uint8_t on_disk_version,
+                                        const char *reason)
+{
+    s_zones_cfg_load_fault.occurred = true;
+    s_zones_cfg_load_fault.kind = kind;
+    s_zones_cfg_load_fault.on_disk_version = on_disk_version;
+    s_zones_cfg_load_fault.fw_version = ZONES_CFG_VERSION;
+    snprintf(s_zones_cfg_load_fault.reason, sizeof(s_zones_cfg_load_fault.reason), "%s", reason ? reason : "");
+}
+
 static uint32_t zones_cfg_rev_load(void)
 {
     hal_kv_handle_t h;
@@ -94,7 +124,10 @@ esp_err_t nvs_partition_init(const char *partition)
  * but not valid; a migrated older blob is both; genuine corruption is
  * neither. */
 static esp_err_t nvs_load_from_decode(const char *partition, zones_cfg_t *out_cfg, bool *out_found,
-                                       bool *out_valid);
+                                       bool *out_valid, bool *out_migrated, uint8_t *out_on_disk_version);
+static esp_err_t nvs_load_from_with_migration_info(const char *partition, zones_cfg_t *out_cfg, bool *out_found,
+                                                     bool *out_valid, bool *out_migrated,
+                                                     uint8_t *out_on_disk_version);
 
 /* Thin wrapper around the real load below, added 2026-09-09 (opus review
  * defect D). Every path through nvs_load_from_decode() that does NOT end in
@@ -110,27 +143,70 @@ static esp_err_t nvs_load_from_decode(const char *partition, zones_cfg_t *out_cf
  * around every return path rather than at each of them, so a future early
  * return cannot forget it. Nothing else about the defaults changes, and
  * neither the struct layout nor ZONES_CFG_VERSION moves. */
+/* Signature deliberately unchanged (4 params) -- test_zones_http.c reaches
+ * this `static` function directly by including this translation unit,
+ * roughly 50 call sites, so this is not free to grow a parameter list. The
+ * migration-write-back fix below needs the out_migrated/out_on_disk_version
+ * outputs too, but only nvs_load() needs them -- it calls
+ * nvs_load_from_with_migration_info() (right below) instead of this one. */
 static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool *out_found, bool *out_valid)
 {
+    bool migrated_unused = false;
+    uint8_t on_disk_version_unused = 0;
+    return nvs_load_from_with_migration_info(partition, out_cfg, out_found, out_valid, &migrated_unused,
+                                              &on_disk_version_unused);
+}
+
+/* Same as nvs_load_from() above, plus the migration-write-back fix's two
+ * extra outputs. Free to take whatever shape is convenient since its only
+ * caller is nvs_load() itself, below. */
+static esp_err_t nvs_load_from_with_migration_info(const char *partition, zones_cfg_t *out_cfg, bool *out_found,
+                                                     bool *out_valid, bool *out_migrated,
+                                                     uint8_t *out_on_disk_version)
+{
     bool valid = false;
-    esp_err_t err = nvs_load_from_decode(partition, out_cfg, out_found, &valid);
+    bool migrated = false;
+    uint8_t on_disk_version = 0;
+    esp_err_t err = nvs_load_from_decode(partition, out_cfg, out_found, &valid, &migrated, &on_disk_version);
     if (!valid) {
         zones_config_json_apply_model_fit_defaults(out_cfg);
     }
     if (out_valid) {
         *out_valid = valid;
     }
+    if (out_migrated) {
+        *out_migrated = migrated;
+    }
+    if (out_on_disk_version) {
+        *out_on_disk_version = on_disk_version;
+    }
     return err;
 }
 
+/* out_migrated reports whether the blob just decoded was written to flash by
+ * an OLDER version than ZONES_CFG_VERSION and had to go through
+ * convert_versioned_blob_to_current() to be usable -- true only alongside a
+ * ZONES_DECODE_OK outcome, since a NEWER or CORRUPT outcome never adopts
+ * anything. This is what the "persist the migration back to flash" fix below
+ * (2026-09-16, single-migration-step hazard) keys off: without it, a config
+ * migrated in RAM this boot is never written back, so a firmware that only
+ * carries the single step from its immediate predecessor loses the config
+ * entirely if two schema-bumping firmwares are installed in a row without an
+ * intervening boot on the first one (see nvs_load()'s call site). */
 static esp_err_t nvs_load_from_decode(const char *partition, zones_cfg_t *out_cfg, bool *out_found,
-                                       bool *out_valid)
+                                       bool *out_valid, bool *out_migrated, uint8_t *out_on_disk_version)
 {
     if (out_found) {
         *out_found = false;
     }
     if (out_valid) {
         *out_valid = false;
+    }
+    if (out_migrated) {
+        *out_migrated = false;
+    }
+    if (out_on_disk_version) {
+        *out_on_disk_version = 0;
     }
     memset(out_cfg, 0, sizeof(*out_cfg));
 
@@ -181,6 +257,12 @@ static esp_err_t nvs_load_from_decode(const char *partition, zones_cfg_t *out_cf
         if (out_valid) {
             *out_valid = true;
         }
+        if (out_on_disk_version) {
+            *out_on_disk_version = raw[0];
+        }
+        if (out_migrated && raw[0] != ZONES_CFG_VERSION) {
+            *out_migrated = true;
+        }
         ESP_LOGI(ZONES_HTTP_TAG, "zones_cfg from '%s' loaded (on-disk version %u) as v%u", partition,
                  (unsigned)raw[0], (unsigned)ZONES_CFG_VERSION);
         return ESP_OK;
@@ -193,6 +275,9 @@ static esp_err_t nvs_load_from_decode(const char *partition, zones_cfg_t *out_cf
         ESP_LOGW(ZONES_HTTP_TAG, "zones_cfg from '%s' is version %u, newer than this firmware's %u -- "
                       "refusing to load, flash data left untouched",
                  partition, (unsigned)raw[0], (unsigned)ZONES_CFG_VERSION);
+        if (strcmp(partition, KILN_NVS_PARTITION) == 0) {
+            zones_cfg_load_fault_latch(ZONES_CFG_LOAD_FAULT_NEWER, raw[0], reason);
+        }
         if (out_found) {
             *out_found = true;
         }
@@ -204,10 +289,18 @@ static esp_err_t nvs_load_from_decode(const char *partition, zones_cfg_t *out_cf
          * zones_config_json_validate()) -- loud enough that an operator can see it,
          * naming the on-disk version and the specific rejection reason.
          * Nothing worth protecting was found here, so a caller (the
-         * legacy-partition migration) is free to look elsewhere. */
+         * legacy-partition migration) is free to look elsewhere. This bucket
+         * also covers a version this firmware's migration chain does not
+         * reach back far enough to consume (docs/CONFIG_MIGRATION_CHAIN_PLAN.md's
+         * one-step-at-a-time policy) -- there is no separate decode outcome
+         * for that case today, so it is reported as UNREADABLE, same as any
+         * other undecodable blob. */
         ESP_LOGW(ZONES_HTTP_TAG, "zones_cfg blob from '%s' (on-disk version %u, %u bytes) REJECTED: %s -- "
                       "falling back to defaults, NOT adopting this config",
                  partition, (unsigned)raw[0], (unsigned)len, reason);
+        if (strcmp(partition, KILN_NVS_PARTITION) == 0) {
+            zones_cfg_load_fault_latch(ZONES_CFG_LOAD_FAULT_UNREADABLE, raw[0], reason);
+        }
         return ESP_OK;
     }
 }
@@ -269,6 +362,58 @@ void migrate_from_default_partition(void)
     }
 }
 
+/* Persists a just-migrated blob (already in s_zones.cfg, current layout)
+ * back to KILN_NVS_PARTITION and reads it back to confirm the write actually
+ * landed, rather than trusting nvs_save()'s return code alone -- same shape
+ * as boot_guard_mark_healthy()'s read-back-confirmed fix (CLAUDE.md's "boot
+ * order beats bounded waits" / write-lies section): an NVS write there once
+ * reported HAL_OK while the persisted value never actually changed, and
+ * bricked the board into a recovery loop three times before a read-back
+ * check closed it. One bounded retry, same as that fix. Called only from
+ * nvs_load()'s boot-time load path (never from the flash worker, never from
+ * a PSRAM-stacked task -- see this function's caller), so a direct,
+ * synchronous nvs_save() here is safe; nvs_save()'s own comment documents
+ * why IT must never be called inline from arbitrary httpd/executor callers,
+ * which does not apply to this one-time boot-load call site. */
+static bool zones_config_persist_migrated_blob_verified(uint8_t on_disk_version_before_migration)
+{
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        esp_err_t save_err = nvs_save(); /* stamps version=ZONES_CFG_VERSION, a real crc32, and writes it */
+        if (save_err != ESP_OK) {
+            ESP_LOGW(ZONES_HTTP_TAG, "migrated zones_cfg (was on-disk v%u) write-back attempt %d failed: %s",
+                     (unsigned)on_disk_version_before_migration, attempt, esp_err_to_name(save_err));
+            continue;
+        }
+        uint8_t raw[sizeof(zones_cfg_t)];
+        memset(raw, 0, sizeof(raw));
+        size_t len = sizeof(raw);
+        hal_kv_handle_t h;
+        hal_status_t oerr = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+        if (oerr != HAL_OK) {
+            ESP_LOGW(ZONES_HTTP_TAG, "migrated zones_cfg write-back attempt %d: read-back open failed", attempt);
+            continue;
+        }
+        hal_status_t gerr = hal_kv_get_blob(&h, NVS_KEY_ZONES, raw, &len);
+        hal_kv_close(&h);
+        if (gerr == HAL_OK && len == sizeof(s_zones.cfg) && memcmp(raw, &s_zones.cfg, sizeof(s_zones.cfg)) == 0) {
+            ESP_LOGI(ZONES_HTTP_TAG, "migrated zones_cfg (was on-disk v%u) persisted to '%s' and verified by "
+                          "read-back as v%u, crc32 0x%08x",
+                     (unsigned)on_disk_version_before_migration, KILN_NVS_PARTITION,
+                     (unsigned)ZONES_CFG_VERSION, (unsigned)s_zones.cfg.crc32);
+            return true;
+        }
+        ESP_LOGW(ZONES_HTTP_TAG, "migrated zones_cfg write-back attempt %d: read-back did not match what was "
+                      "just written -- retrying",
+                 attempt);
+    }
+    ESP_LOGE(ZONES_HTTP_TAG, "migrated zones_cfg (was on-disk v%u) could NOT be verified as persisted to '%s' "
+                  "after retry -- this boot runs on the migrated in-RAM copy, but flash still holds the old "
+                  "bytes; a second firmware install one step further (the one-step migration policy) will "
+                  "be unable to read them and will treat this config as too old to consume",
+             (unsigned)on_disk_version_before_migration, KILN_NVS_PARTITION);
+    return false;
+}
+
 /* out_found/out_valid are nvs_load_from()'s own outputs, passed straight
  * through -- see FIX 1's history here: zones_http_start() used to reconstruct
  * "was anything found in kiln_nvs" from s_zones.cfg.version != 0 after this
@@ -279,7 +424,10 @@ void migrate_from_default_partition(void)
  * get the real found/valid flags instead of guessing from the zeroed struct. */
 esp_err_t nvs_load(bool *out_found, bool *out_valid)
 {
-    esp_err_t err = nvs_load_from(KILN_NVS_PARTITION, &s_zones.cfg, out_found, out_valid);
+    bool migrated_from_nvs = false;
+    uint8_t on_disk_version_before = 0;
+    esp_err_t err = nvs_load_from_with_migration_info(KILN_NVS_PARTITION, &s_zones.cfg, out_found, out_valid,
+                                                        &migrated_from_nvs, &on_disk_version_before);
 
     /* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 5: read-through
      * against the `cfg` file on top of whatever nvs_load_from() just
@@ -299,6 +447,16 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
                                                     &used_file);
     s_zones_cfg_rev = resolved_rev;
     if (used_file) {
+        /* The `cfg` LittleFS file won the tie-break, so whatever was just
+         * decoded/migrated from NVS above is discarded in favor of it --
+         * persisting the NVS-side migration here would be writing back data
+         * this boot isn't even using. The `cfg` side's own version currency
+         * is zones_config_cfg_fs_resolve()'s concern, not this fix's: on
+         * every board today there is no `cfg` partition mounted at boot
+         * (CLAUDE.md's "cfg partition ... not yet mounted at boot, so this
+         * is inert today"), so used_file is unreachable in practice and this
+         * gap is deliberately left for whoever wires that partition up. */
+        migrated_from_nvs = false;
         s_zones.cfg = resolved;
         if (out_found) {
             *out_found = true;
@@ -321,6 +479,26 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
          * an unusable config load leaves the existing types alone rather
          * than resetting them to the zeroed struct's default. */
         zones_config_push_all_relay_types();
+    }
+
+    /* Single-migration-step hazard fix (2026-09-16, coordinator finding):
+     * migration above happens only in RAM (s_zones.cfg) -- nothing on the
+     * ordinary load path wrote it back to flash before this fix. Under the
+     * one-step-per-firmware migration policy (docs/CONFIG_MIGRATION_CHAIN_
+     * PLAN.md), an operator who installs vN+1, boots it, then installs vN+2
+     * would find vN+2 unable to consume the still-on-flash vN bytes, even
+     * though every step they took was correct -- a failure that punishes
+     * doing the right thing. Persist it now, once, verified by read-back
+     * (never trust nvs_save()'s return code alone -- see
+     * zones_config_persist_migrated_blob_verified()'s comment). Gated on
+     * `err == ESP_OK && trustworthy` so this never fires for a refused/
+     * corrupt/zeroed load. A failed persist does not fail this boot's load
+     * (the migrated in-RAM copy is still usable this boot, same as
+     * migrate_from_default_partition()'s own error handling below) -- it is
+     * logged loudly and will simply retry on the next boot that reaches
+     * this migration branch again. */
+    if (err == ESP_OK && trustworthy && migrated_from_nvs) {
+        (void)zones_config_persist_migrated_blob_verified(on_disk_version_before);
     }
     return err;
 }

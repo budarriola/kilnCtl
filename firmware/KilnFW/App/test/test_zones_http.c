@@ -1948,6 +1948,68 @@ static void test_zones_http_start_refused_newer_blob_not_overwritten(void)
     nvs_test_clear();
 }
 
+// Single-migration-step hazard (2026-09-16 coordinator finding, closed same
+// day): an operator who installs vN+1, boots it (migrating vN bytes to RAM
+// only), then installs vN+2 loses the config even though every step was
+// correct -- vN+2 can only consume vN+1, and nothing ever wrote the migrated
+// bytes back. zones_http_start()'s ordinary boot path (nvs_load()) must now
+// persist a migrated blob and verify it by read-back before treating the
+// boot as trustworthy, mirroring boot_guard_mark_healthy()'s
+// never-trust-a-bare-write-return-code precedent. This stages a real OLDER
+// (v1) blob -- not the never-reached newer-blob case above -- and checks
+// what's actually on flash afterward, not just what's in RAM.
+static void test_zones_http_start_persists_migrated_blob_with_real_crc(void)
+{
+    TEST_SECTION("zones_http_start -- single-step migration hazard: a migrated OLDER blob is "
+                 "written back to flash with a correct crc32, not left as the stale on-disk bytes");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v1_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 1;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    stage_zones_blob(&src, sizeof(src));
+
+    s_zones_config_valid = false;
+    (void)zones_http_start(); // ESP_ERR_INVALID_STATE from the stub HTTP server is expected/ignored --
+                              // the NVS load/migrate/persist logic under test already ran by then.
+
+    hal_kv_handle_t readback_h;
+    hal_status_t readback_err = hal_kv_open(&readback_h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    uint8_t readback[sizeof(zones_cfg_t)];
+    size_t readback_len = sizeof(readback);
+    if (readback_err == HAL_OK) {
+        readback_err = hal_kv_get_blob(&readback_h, NVS_KEY_ZONES, readback, &readback_len);
+        hal_kv_close(&readback_h);
+    }
+    TEST_CHECK(readback_err == HAL_OK, "the migrated blob must actually be readable back from flash");
+    TEST_CHECK(readback_len == sizeof(zones_cfg_t),
+              "the persisted blob must be full current-version size, not the old v1 size still sitting there");
+    TEST_CHECK(readback[0] == ZONES_CFG_VERSION,
+              "THE HAZARD: flash must hold the migrated version, not the stale v1 byte a second-step-only "
+              "migration policy would then be unable to consume");
+
+    zones_cfg_t on_disk;
+    memcpy(&on_disk, readback, sizeof(on_disk));
+    uint32_t stamped_crc = on_disk.crc32;
+    on_disk.crc32 = 0;
+    uint32_t recomputed = zones_config_json_compute_crc(&on_disk);
+    TEST_CHECK(stamped_crc != 0, "the persisted blob's crc32 must not be left at 0 (zones_config_migrate.c's "
+                                 "documented as-yet-unsaved sentinel) -- it has now actually been saved");
+    TEST_CHECK(stamped_crc == recomputed,
+              "the persisted crc32 must be the REAL crc of what was written, not a stale/mismatched value");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 // ---------------------------------------------------------------------------
 // "Saved securely like the others" -- the real defect this pass fixes.
 // nvs_load_from()'s old load path (for a stored version OLDER than current)
@@ -11560,6 +11622,7 @@ void run_test_zones_http(void)
     test_import_blob_pass1_accepts_acyclic_settings_source();
     test_nvs_load_from_newer_than_firmware_is_found_but_not_valid();
     test_zones_http_start_refused_newer_blob_not_overwritten();
+    test_zones_http_start_persists_migrated_blob_with_real_crc();
 
     test_nvs_load_from_old_version_wrong_length_is_rejected();
     test_nvs_load_from_bad_crc_is_rejected();
