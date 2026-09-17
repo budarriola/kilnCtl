@@ -261,22 +261,31 @@ check that the release decision will cite:
 the host-test suites, and the ones that matter for release are a subset —
 scope it to the safety, config, stack-budget and build gates first.
 
-**Progress.** Three passes of negative-testing have run so far:
+**Progress.** Four passes of negative-testing have run so far:
 `docs/audits/release_gate_vacuity_audit_2026-09-16.md` (first slice),
 `docs/audits/release_gate_vacuity_audit_2026-09-16b.md` (six mirror-drift
-checks plus the KilnFW stack-budget extraction-fidelity question), and
+checks plus the KilnFW stack-budget extraction-fidelity question),
 `docs/audits/release_gate_vacuity_audit_2026-09-16c.md` (KilnFW's
 `check_httpd_task_stack_budget`/`check_system_uart_bridge_stack_budget`/
 `check_uart_log_bridge_stack_budget`, SaftyFW's ARM stack-budget checker and
 its isolation/guard-producer family — nine gates total, plus a behavioral
-negative test of the new `-RunSetup` worktree-mint switch below). Every gate
-negative-tested across the three passes was found load-bearing; none was
-vacuous. `tools/worktree_mint.ps1 -RunSetup` (added in the third pass) lets a
-minted worktree actually run `tools/run_all_checks.ps1` to completion, which
-the first two passes could not do. The third pass's own document lists what
-is still unexamined — the two `check_00_*_target_build.ps1`/
-`check_01_*_pushed_build.ps1` pairs, `check_uart_version_independence`, the
-UI/layout family, and roughly a dozen more.
+negative test of the new `-RunSetup` worktree-mint switch below), and
+`docs/audits/release_gate_vacuity_audit_2026-09-16d.md` (`check_uart_version_
+independence`, `check_uri_handler_cap`, `check_heartbeat_contract`,
+`check_heat_enable_wiring`, `check_c_files_in_cmakelists`,
+`check_no_duplicate_crc`, `check_safety_baud_sync`, and the PC-side half of
+`check_relay_authority_paths` — eight gates). Every gate negative-tested
+across the four passes was found load-bearing; none was vacuous.
+`tools/worktree_mint.ps1 -RunSetup` (added in the third pass) lets a minted
+worktree actually run `tools/run_all_checks.ps1` to completion, which the
+first two passes could not do; the fourth pass used it directly. The fourth
+pass also fixed 11 pre-existing `check_doc_hash_citations.ps1` false
+positives in the third pass's own document (git-hash-object blob hashes
+misread as commit citations — rewritten as `` `blob:<hash>` `` rather than
+deleted). The fourth pass's own document lists what is still unexamined —
+the two `check_00_*_target_build.ps1`/`check_01_*_pushed_build.ps1` pairs'
+FAIL paths, the firmware-side half of `check_relay_authority_paths`, the
+UI/layout family, and roughly half a dozen more.
 
 **Already covered, name the evidence:** the two `check_01_*_pushed_build.ps1`
 scripts are the strongest single piece of process coverage in the repo. They

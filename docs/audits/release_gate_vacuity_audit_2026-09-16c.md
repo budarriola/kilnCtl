@@ -89,7 +89,7 @@ profiles_cfg_fs_load_raw -> profile_decode_blob`.
 **5328 B — exactly +1024 B** — real exit 1 (`FAIL -- cfgfs_status_get_handler
 reaches 5328 B, exceeding the 4832 B ceiling`). Restored by hand; `git diff
 --quiet` empty; `git hash-object` matched HEAD's blob
-(`611770238464619821ba07c7542c24ab7fa20bf9`). `idf.py fullclean && idf.py
+(`blob:611770238464619821ba07c7542c24ab7fa20bf9`). `idf.py fullclean && idf.py
 build`, re-measured: 4304 B again, exit 0, byte-identical.
 
 **Verdict: load-bearing.**
@@ -103,7 +103,7 @@ get_vfs_for_path` (ceiling 1936 B).
 (`firmware/KilnFW/App/drivers/persist/cfg_fs.c`), rebuilt. Measured **2448 B
 — exactly +512 B** — real exit 1 (`FAIL -- 2448 B exceeds the 1936 B
 ceiling`). Restored by hand; `git diff --quiet` empty; `git hash-object`
-matched HEAD (`2580be42202548557dcc71803639cb3d6fc3301f`). Full
+matched HEAD (`blob:2580be42202548557dcc71803639cb3d6fc3301f`). Full
 `idf.py fullclean && idf.py build`, re-measured: 1936 B again, exit 0,
 byte-identical.
 
@@ -118,7 +118,7 @@ byte-identical.
 (`firmware/hwAbstraction/esp/uart/uart_protocol.c`), rebuilt. Measured
 **1456 B — exactly +256 B** — real exit 1 (`FAIL -- 1456 B exceeds the 1200 B
 ceiling`). Restored by hand; `git diff --quiet` empty; `git hash-object`
-matched HEAD (`df7ddfcdaf93da93657e00cf2c1f254de71feeed`). Full
+matched HEAD (`blob:df7ddfcdaf93da93657e00cf2c1f254de71feeed`). Full
 `idf.py fullclean && idf.py build`, re-measured: 1200 B again, exit 0,
 byte-identical. (This build also re-confirmed gates 1 and 2 unchanged.)
 
@@ -145,7 +145,7 @@ the script's own header) and 3 fully measured: `log_task` 472 B (ceiling
 Measured `log_task` at **600 B — exactly +128 B**, real exit 1
 (`[FAIL(ceiling)]`, 600 B > 472 B ceiling). Restored by hand; `git diff
 --quiet` empty; `git hash-object` matched HEAD
-(`27b0a329c1bd9d803108efaae5cc3fd056434522`). Deleted `build/` entirely,
+(`blob:27b0a329c1bd9d803108efaae5cc3fd056434522`). Deleted `build/` entirely,
 reconfigured from scratch (`cmake -G Ninja -B build .`) and rebuilt
 (`ninja -C build`), re-measured: `log_task` 472 B again, exit 0,
 byte-identical to baseline.
@@ -167,7 +167,7 @@ C:\...\safety_core.c:24: safety_core includes a link/uart header -- #include "li
 1 isolation violation(s) found
 ```
 Restored by hand; `git diff --quiet` empty; `git hash-object` matched HEAD
-(`f465336a48b9690547479ccef0e800a336ef32db`).
+(`blob:f465336a48b9690547479ccef0e800a336ef32db`).
 
 **Negative test (b):** added `int zz_audit_touch_gpio6(void) { return GPIO6;
 }` to `firmware/SaftyFW/src/tasks/link_task.c`. Real failure:
@@ -176,7 +176,7 @@ C:\...\link_task.c:50: link_task references GPIO6/the relay -- int zz_audit_touc
 1 isolation violation(s) found
 ```
 Restored by hand; `git diff --quiet` empty; `git hash-object` matched HEAD
-(`817845a51ce20a97ec5db31ce8766e1e82cdee4e`). Re-ran clean: `Isolation check
+(`blob:817845a51ce20a97ec5db31ce8766e1e82cdee4e`). Re-ran clean: `Isolation check
 passed`.
 
 This is a pure text/grep check with no ELF dependency, so no rebuild step
@@ -197,7 +197,7 @@ C:\...\safety_core.c:25: CRC implementation outside CommonFW -- int zz_audit_crc
 1 CRC/byte-stuffing implementation(s) found outside firmware/CommonFW
 ```
 Restored by hand; `git diff --quiet` empty; `git hash-object` matched HEAD
-(`f465336a48b9690547479ccef0e800a336ef32db`). Re-ran clean.
+(`blob:f465336a48b9690547479ccef0e800a336ef32db`). Re-ran clean.
 
 **Verdict: load-bearing.**
 
@@ -216,7 +216,7 @@ safety_guard_input_t.tc_valid is never assigned in safety_core_build_input()
 1 guard input field(s) have no producer
 ```
 Restored by hand; `git diff --quiet` empty; `git hash-object` matched HEAD
-(`f465336a48b9690547479ccef0e800a336ef32db`). Re-ran clean: all 27 fields
+(`blob:f465336a48b9690547479ccef0e800a336ef32db`). Re-ran clean: all 27 fields
 assigned.
 
 **Verdict: load-bearing.**
@@ -236,8 +236,8 @@ zz_audit_current_sense_set_dummy(): 2 hit(s) in src/ (declaration + definition o
 ```
 Restored both files by hand; `git diff --quiet` empty on both; `git
 hash-object` matched HEAD for both (`current_sense.c`:
-`87f8cb184a28cfb8d467353d4f7c6230c4a2d0ce`, `current_sense.h`:
-`467963cc56d96ca7be2d9c4ff9e103615aa108d2`). Re-ran clean: all 6 setters have
+`blob:87f8cb184a28cfb8d467353d4f7c6230c4a2d0ce`, `current_sense.h`:
+`blob:467963cc56d96ca7be2d9c4ff9e103615aa108d2`). Re-ran clean: all 6 setters have
 call sites.
 
 **Verdict: load-bearing.**
@@ -258,7 +258,7 @@ thermo_snapshot_t.cj_valid is never assigned by any production file in src/
 1 thermo_snapshot_t field(s) have no production producer
 ```
 Restored by hand (all three sites); `git diff --quiet` empty; `git
-hash-object` matched HEAD (`4ad58571b13f380610ce37fc3d3ab940d0e311db`).
+hash-object` matched HEAD (`blob:4ad58571b13f380610ce37fc3d3ab940d0e311db`).
 Re-ran clean: all 7 fields covered.
 
 **Verdict: load-bearing.**
