@@ -104,7 +104,7 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
         "http/zones_page.html"
         "http/setup_wizard_page.html"
         "http/commissioning_shared.js"
-        "http/login_page.html")
+        "http/login_page.html" "net/security_page.html")
     set(KILNCTL_GZIP_ASSET_FILES "")
     foreach(asset ${KILNCTL_GZIP_ASSETS})
         get_filename_component(kilnctl_gz_basename "${asset}" NAME)
@@ -323,6 +323,13 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "http/security_http_core.c"
                        "http/security_backend_web_auth.c"
                        "http/security_backend_placeholder.c"
+                       # ESP glue for the above: route registration, request
+                       # body parsing, and JSON response sending for
+                       # GET /settings/security, GET /api/auth/config and
+                       # POST /api/auth/security. Not host-tested (ESP-only,
+                       # same split as web_auth_login_http.c) -- the pure
+                       # logic it calls into is host-tested above.
+                       "http/security_http.c"
                        # WEB_AUTH_PLAN.md section 6 -- the browser-side login:
                        # GET /login and POST /api/auth/login. web_auth_login.c
                        # is the pure role-selection logic (also linked into

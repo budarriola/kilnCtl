@@ -32,6 +32,7 @@
 #include "dualwrite_window_http.h"
 #include "backup_http.h"
 #include "security_backend_web_auth.h"
+#include "security_http.h"
 #include "web_auth_login_http.h"
 #include "web_auth_session_status_http.h"
 #include "settings_http.h"
@@ -557,6 +558,20 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (security_backend_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "security_backend_web_auth_start failed: %s -- no "
                       "/api/auth/bootstrap_password route this boot", esp_err_to_name(security_backend_err));
+    }
+
+    // WEB_AUTH_PLAN.md section 6: the admin password/settings page --
+    // GET /settings/security, GET /api/auth/config, POST /api/auth/security.
+    // Registered after security_backend_web_auth_start() so the real vtable
+    // is already installed by the time this page's first request can
+    // arrive. Non-fatal on failure, same convention as the rest of this
+    // block: a board that fails this registration still boots, just
+    // without a way to change credentials/policy via the web UI until the
+    // next successful boot.
+    esp_err_t security_http_err = security_http_start();
+    if (security_http_err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "security_http_start failed: %s -- no /settings/security "
+                      "page this boot", esp_err_to_name(security_http_err));
     }
 
     // WEB_AUTH_PLAN.md section 6: the browser-side login -- GET /login and

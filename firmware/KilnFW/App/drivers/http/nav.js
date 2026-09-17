@@ -111,6 +111,8 @@
     // landed on the same document. They now point at genuinely different
     // routes.
     { href: '/settings/display', label: 'Display (theme & units)' },
+    // WEB_AUTH_PLAN.md section 6: the admin password/settings page.
+    { href: '/settings/security', label: 'Security (passwords & PINs)' },
     { href: '/settings#danger', label: 'Reset' },
   ];
 

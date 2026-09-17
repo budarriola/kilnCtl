@@ -39,6 +39,16 @@ static void test_lookup_tier_real_routes(void) {
     TEST_CHECK(http_auth_lookup_tier("/api/zones", HTTP_POST, &tier) && tier == ROUTE_TIER_ADMIN,
                "POST /api/zones is also ADMIN (both methods happen to agree here, but looked up "
                "independently)");
+
+    // WEB_AUTH_PLAN.md section 6: the admin password/settings page
+    // (security_http.c) and its two API routes -- all three ADMIN, same as
+    // every other /settings page shell and /api/settings writer.
+    TEST_CHECK(http_auth_lookup_tier("/settings/security", HTTP_GET, &tier) && tier == ROUTE_TIER_ADMIN,
+               "GET /settings/security is ADMIN in route_tier_table.h");
+    TEST_CHECK(http_auth_lookup_tier("/api/auth/config", HTTP_GET, &tier) && tier == ROUTE_TIER_ADMIN,
+               "GET /api/auth/config is ADMIN in route_tier_table.h");
+    TEST_CHECK(http_auth_lookup_tier("/api/auth/security", HTTP_POST, &tier) && tier == ROUTE_TIER_ADMIN,
+               "POST /api/auth/security is ADMIN in route_tier_table.h");
 }
 
 static void test_effective_tier_fail_closed_default(void) {

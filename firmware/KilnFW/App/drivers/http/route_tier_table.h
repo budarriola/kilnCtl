@@ -329,6 +329,14 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/settings/display", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/settings/zones", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/settings/safety", HTTP_GET, ROUTE_TIER_ADMIN),
+    /* WEB_AUTH_PLAN.md section 6: the admin password/settings page
+     * (security_http.c) and the two API routes it calls -- GET returns only
+     * boolean/timeout status (never a hash/salt/PIN value), POST is the one
+     * dispatch route every Save button on that page submits to. ADMIN, same
+     * as every other /settings page shell and /api/settings writer. */
+    ROUTE_TIER("/settings/security", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/auth/config", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/auth/security", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/safety", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/safety/commissioning", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/profiles", HTTP_GET, ROUTE_TIER_ADMIN),

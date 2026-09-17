@@ -1,12 +1,15 @@
 # Web + LCD authentication plan
 
 > **Status:** in progress · **Opened:** 2026-09-16. The backend, LCD half,
-> physical credential-reset gesture, the web login surface (section 6), and
-> the web-GUI half of the inactivity lock (section 8) have all landed and
-> are host-tested. What remains is section 9's fuller safety interaction
-> sweep and any outstanding items in sections 10-13 — see each section's own
-> status line. No board was flashed and no heating run was performed for
-> this refresh; no `.kicad_*` file was touched.
+> physical credential-reset gesture, the web login surface and the admin
+> password/settings page (both section 6), and the web-GUI half of the
+> inactivity lock (section 8) have all landed and are host-tested. Section 9
+> is also fully closed, per its own 2026-09-17 status note below — the
+> "still pending" wording that used to sit here was stale against that note.
+> What remains is any outstanding items in sections 10-13 — see each
+> section's own status line (section 10 is bench-only work, out of scope for
+> a host-only pass). No board was flashed and no heating run was performed
+> for this refresh; no `.kicad_*` file was touched.
 
 Username/password authentication and roles for the web GUI, two numeric PINs
 for the LCD, an inactivity lock on both, and a physical-presence credential
@@ -57,6 +60,16 @@ reset.
 - **Section 6, the login page and route:** `GET /login` and
   `POST /api/auth/login` (`web_auth_login_http.c`) exchange a password for a
   session cookie for either role.
+- **Section 6, the admin password/settings page:** `GET /settings/security`,
+  `GET /api/auth/config`, and `POST /api/auth/security` (`security_http.c`)
+  are now registered (ADMIN tier, `route_tier_table.h`) and dispatch through
+  the already-host-tested `security_http_core.c`/`security_backend_web_auth.c`
+  pair. `net/security_page.html` (the page itself, written earlier) named
+  route registration, this HTTP glue, the `CMakeLists.txt` wiring, and the
+  nav.js entry as its own remaining DEFERRED items; all four now landed.
+  `test_http_auth_enforce.c` asserts all three routes resolve to
+  `ROUTE_TIER_ADMIN` against the real table, negative-tested the same way as
+  the rest of this list.
 - **Section 8, the web-GUI half of the inactivity lock:**
   `GET /api/auth/session` (OPEN tier, a passive status poll that never
   extends a session) and `POST /api/auth/session/extend` (USER tier, the
@@ -81,10 +94,11 @@ reset.
 
 **Still pending:**
 
-- **Section 9**'s fuller safety-interaction sweep beyond the stop-path case
-  already covered by `test_web_auth_safety_interaction.c` — see that
-  section for the remaining scenarios.
-- Sections 10-13's own status lines name any work still open under each.
+- Section 9 is fully closed (see its own "Status, 2026-09-17" note below) —
+  the bullet that used to be here claiming a further sweep was stale against
+  that note and has been removed.
+- Sections 10-13's own status lines name any work still open under each
+  (section 10 is bench-only, out of scope for a host-only pass).
 
 ### Two facts that shape the design
 
@@ -649,6 +663,28 @@ drops the LCD session. Changing the lock timeout does not invalidate anything
 *Acceptance:* a host test asserts that a password change clears exactly the
 slots holding that role and leaves other-role slots intact; a `user`-role
 session receives 403 from every method on the security endpoints.
+
+**Status, 2026-09-17 — landed.** `security_http.c` registers all three
+routes (`GET /settings/security`, `GET /api/auth/config`,
+`POST /api/auth/security`) via `kiln_http_register()`, wired into
+`main_network_http.c`'s bringup right after `security_backend_web_auth_start()`
+installs the real vtable. It is pure glue: request parsing and response
+sending only, dispatching every decision into `security_http_core.c`'s
+already-host-tested `security_http_dispatch()`. The page itself
+(`net/security_page.html`) was already written and defined its own wire
+contract (`GET /api/auth/config`'s JSON shape, `POST /api/auth/security`'s
+`cmd=set_web_password|set_lcd_pin|set_policy` form contract) before this
+glue existed; this landing matches that contract field-for-field rather than
+re-deriving it. `CMakeLists.txt` gained the page in `KILNCTL_GZIP_ASSETS`
+and `security_http.c` in the target's `SRCS`; `nav.js` gained a
+`/settings/security` entry. The 403-for-`user`-role half of this section's
+acceptance criterion is exercised by `security_http_core.c`'s existing host
+tests (`security_http_dispatch()` unconditionally refuses a non-ADMIN caller
+first); the password-change-clears-the-right-slots half is
+`security_backend_web_auth.c`'s existing coverage. What is new here is only
+the routing (all three ADMIN in `route_tier_table.h`, asserted against the
+real table in `test_http_auth_enforce.c`) and the ESP-side parsing/response
+glue — neither of which existed on `main` before this pass.
 
 ---
 
