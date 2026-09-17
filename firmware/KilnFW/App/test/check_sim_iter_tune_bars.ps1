@@ -1,5 +1,9 @@
 # check_sim_iter_tune_bars.ps1 -- enforces sim_iter_tune.exe's A1/A2/A5/A6
-# statistical acceptance bars (ITER_TUNE_REDESIGN_PLAN.md sec 6/7).
+# and A8-A2-half statistical acceptance bars (ITER_TUNE_REDESIGN_PLAN.md sec
+# 6/7). A8's A1-half (cross-profile false-accept rate) is measured and
+# printed every run but deliberately NOT enforced here -- see the "A8
+# (profile independence)" note near this script's PASS message and
+# sim_iter_tune.c's own A8 comment for why.
 #
 # Until 2026-09-10 (docs/audits/firing_score_entry_ema_review_2026-09-10.md)
 # sim_iter_tune.c's main() printed PASS/FAIL per bar but always
@@ -8,7 +12,7 @@
 # it, and every bar could silently fail forever. That is exactly how the A1
 # false-accept rate went from 0.00% to 3.64% after d63a5591's coupling-model
 # change and was only caught by a manual re-run. sim_iter_tune.c's main()
-# now returns 1 if any of A1/A2/A5/A6 fails; this script builds it, runs it
+# now returns 1 if any of A1/A2/A5/A6/A8-A2-half fails; this script builds it, runs it
 # at the n=220 sample size the audit's numbers are quoted at (660 A1/A2
 # comparisons), and fails on a non-zero exit -- naming which bar(s) failed
 # from the captured stdout so a red run does not require re-reading the
@@ -216,7 +220,7 @@ echo BUILD_EXIT=%ERRORLEVEL%
         exit 1
     }
 
-    Write-Host "PASS: sim_iter_tune.exe (n=220) -- A2/A5/A6 clear; A1 clear against its pinned rate"
+    Write-Host "PASS: sim_iter_tune.exe (n=220) -- A2/A5/A6 clear; A8 A2-half clear; A1 clear against its pinned rate"
     Write-Host "      (24/660, ~3.64%). The 2.0% design target is an ASPIRATION, not currently"
     Write-Host "      reachable on this plant: root cause (2026-09-14 audit) is an honest interaction"
     Write-Host "      of sim_plant.c's raw-relay-driven coupling (d63a5591), ENTRY_PEAK_C's raw"
@@ -225,11 +229,14 @@ echo BUILD_EXIT=%ERRORLEVEL%
     Write-Host "      Noise floor at n=660 is ~4.8 counts (sd); a move under ~10 counts is not an"
     Write-Host "      improvement. See sim_iter_tune.c's EXIT CONDITION comment above"
     Write-Host "      A1_PINNED_MAX_ACCEPTS and docs/audits/a1_false_accept_root_cause_2026-09-14.md."
-    Write-Host "      A8 (profile independence, A1-half) is measured every run and printed above but"
-    Write-Host "      NOT gated into this exit code -- it genuinely FAILS (45/660, 6.82%, against a"
-    Write-Host "      38.4-count 3-sd-widened ceiling around A1's own pinned rate). See sim_iter_tune.c's"
-    Write-Host "      A8 comment and ITER_TUNE_REDESIGN_PLAN.md sec 8 step 6 for why this is reported,"
-    Write-Host "      not gated or worked around."
+    Write-Host "      A8 (profile independence) has TWO halves. The A1-half is measured every run and"
+    Write-Host "      printed above but NOT gated into this exit code -- it genuinely FAILS (45/660,"
+    Write-Host "      6.82%, against a 38.4-count 3-sd-widened ceiling around A1's own pinned rate). See"
+    Write-Host "      sim_iter_tune.c's A8 comment and ITER_TUNE_REDESIGN_PLAN.md sec 8 step 6 for why"
+    Write-Host "      this is reported, not gated or worked around. The A2-half (never-worse, gain sets"
+    Write-Host "      found tuning on one profile evaluated on a different one) IS gated into this exit"
+    Write-Host "      code -- it measures a genuine, reproduced PASS (0/660 worse, well inside the <= 1%"
+    Write-Host "      bar) with no tension against a permanently-red build, unlike the A1-half."
     exit 0
 } finally {
     Exit-BuildLock -Lock $lock

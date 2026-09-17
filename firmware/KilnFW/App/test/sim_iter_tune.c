@@ -404,7 +404,28 @@ typedef struct {
     int firings;
 } run_report_t;
 
+// eval_profile/eval_nseg: the profile the FINAL initial-vs-final cost
+// comparison (rep->initial_cost/rep->final_cost -- A2's own "never worse"
+// metric) is measured on. The search itself is untouched by this parameter:
+// every accept/reject decision inside the tuning loop below still runs on
+// whatever `profile`/`nseg` the caller passes in as the SEARCH profile (see
+// the two run_firing_on() calls inside the loop below), exactly as before
+// this parameter existed. A8 (plan sec 7): "A1 and A2 re-measured with
+// trial and baseline firings on different profiles". For A1 (Part 4,
+// already built) that means the null-experiment's two compared firings run
+// on different profiles. A2's own two compared firings ARE this function's
+// final ev0 (initial gains)/ev1 (final gains) evaluation -- so the faithful
+// cross-profile re-measurement of A2 is: let the search run to completion
+// exactly as production would (accept/reject decided on ONE real profile),
+// then score whether the gain set it landed on is still not worse than
+// where it started, evaluated on a DIFFERENT profile than the one that was
+// tuned on -- i.e. "a tuning accepted while firing profile A must not make
+// things worse the next time the kiln fires profile B." Passing the same
+// profile for both `profile` (search) and `eval_profile` (scoring)
+// reproduces the original, single-profile A2 exactly, byte-for-byte -- see
+// Part 1/Part 3's call sites, unchanged in that respect.
 static void tune_run(const start_set_t *ss, const plant_variant_t *plant, int max_firings, bool verbose,
+                     const seg_def_t *profile, int nseg, const seg_def_t *eval_profile, int eval_nseg,
                      run_report_t *rep)
 {
     memset(rep, 0, sizeof(*rep));
@@ -423,7 +444,7 @@ static void tune_run(const start_set_t *ss, const plant_variant_t *plant, int ma
     // Seed firing: everything runs on the starting gains, and its score set
     // becomes each zone's baseline set.
     firing_result_t base;
-    run_firing(gains, plant, &base);
+    run_firing_on(gains, plant, profile, nseg, &base);
     firing_score_set_t baseline_set[NZ];
     for (int i = 0; i < NZ; i++) baseline_set[i] = base.set[i];
     rep->firings = 1;
@@ -460,7 +481,7 @@ static void tune_run(const start_set_t *ss, const plant_variant_t *plant, int ma
         }
 
         firing_result_t trial;
-        run_firing(trial_gains, plant, &trial);
+        run_firing_on(trial_gains, plant, profile, nseg, &trial);
         rep->firings++;
 
         firing_compare_result_t cmp;
@@ -496,10 +517,12 @@ static void tune_run(const start_set_t *ss, const plant_variant_t *plant, int ma
 
     // Evaluation: initial vs final gains on the SAME plant with the SAME
     // noise seed and the SAME start temperature, so the difference is the
-    // gains and nothing else.
+    // gains and nothing else. Scored on eval_profile/eval_nseg, which is
+    // g_profile/NSEG (the same profile the search above ran on) for every
+    // caller except Part 5's A8 A2-half.
     firing_result_t ev0, ev1;
-    run_firing(rep->initial, plant, &ev0);
-    run_firing(rep->final_gains, plant, &ev1);
+    run_firing_on(rep->initial, plant, eval_profile, eval_nseg, &ev0);
+    run_firing_on(rep->final_gains, plant, eval_profile, eval_nseg, &ev1);
     for (int i = 0; i < NZ; i++) {
         rep->initial_cost[i] = ev0.mean_abs_err_c[i];
         rep->final_cost[i] = ev1.mean_abs_err_c[i];
@@ -855,7 +878,7 @@ int main(int argc, char **argv)
     for (int s = 0; s < NSTART; s++) {
         run_report_t rep;
         plant_variant_t v = nominal_variant(0x1234567u);
-        tune_run(&g_starts[s], &v, 40, true, &rep);
+        tune_run(&g_starts[s], &v, 40, true, g_profile, NSEG, g_profile, NSEG, &rep);
         report_run(&g_starts[s], &rep);
         for (int i = 0; i < NZ; i++) {
             float d = rep.final_cost[i] - rep.initial_cost[i];
@@ -1079,7 +1102,7 @@ int main(int argc, char **argv)
         plant_variant_t v = mismatched_variant(0x5000u + (uint32_t)n * 2654435761u);
         const start_set_t *ss = &g_starts[n % NSTART];
         run_report_t rep;
-        tune_run(ss, &v, 40, false, &rep);
+        tune_run(ss, &v, 40, false, g_profile, NSEG, g_profile, NSEG, &rep);
         if (rep.cage_violation) cage++;
         for (int i = 0; i < NZ; i++) {
             float d = rep.final_cost[i] - rep.initial_cost[i];
@@ -1171,6 +1194,61 @@ int main(int argc, char **argv)
     printf("  A8 bar: cross-profile false-accept rate unchanged within A1's own pinned ceiling "
            "+/- 3 sampling sd (<= %.1f of %d) -> %s\n", a8_ceiling, p4_total, a8_pass ? "PASS" : "FAIL");
 
+    // ---- Part 5: A8 profile independence (A2 half) ----
+    // Plan sec 7, A8: "A1 and A2 re-measured with trial and baseline
+    // firings on different profiles ... unchanged within their own bars."
+    // A2's own bar (sec 7: "final tracking cost vs. starting cost ...
+    // fraction of runs ending worse by more than one Bar-1 floor <= 1%")
+    // is itself defined entirely by ONE pair of compared firings per
+    // zone-run: tune_run()'s own ev0 (initial gains)/ev1 (final gains)
+    // evaluation. So the faithful cross-profile re-measurement of A2 is:
+    // run the search to termination exactly as Part 3 does -- accept/reject
+    // decided on g_profile, the one real profile being fired while tuning
+    // -- and then, instead of scoring "did the found gains get worse on the
+    // SAME profile", score "did the found gains get worse on a DIFFERENT
+    // profile the kiln might be fired on next" by evaluating both ev0 and
+    // ev1 on g_profile_b via tune_run()'s eval_profile/eval_nseg params
+    // (added above; the search itself is unchanged -- it never sees
+    // g_profile_b). This is the literal reading of "a tuning accepted on
+    // one profile must not degrade performance when the kiln is
+    // subsequently run on a different profile": the search runs once, on
+    // the profile it actually tuned against, and the transfer question is
+    // asked only at the evaluation step, which is exactly where A2's own
+    // metric already lives.
+    //
+    // "Unchanged within its own bar" for A2 needs no statistical widening
+    // the way A1's did: A2's bar is not a pre-existing nonzero measured
+    // rate with known sampling noise (A1's problem, see the a8_ceiling
+    // derivation above) -- it is a flat <= 1% threshold on its own terms,
+    // so the SAME 1% bar A2 already uses is the direct, faithful
+    // "unchanged" comparison. Same mismatched-ensemble construction as
+    // Part 3 (K+/-30%, tau+/-40%, L+/-50%, coupling+/-50%, start +/-15C),
+    // different seed base so this draws its own slice of the urand()/LCG
+    // stream rather than reusing Part 3's exact sequence.
+    printf("\n#### PART 5: A8 profile independence (A2 half) -- search on g_profile, "
+           "never-worse evaluated on g_profile_b ####\n");
+    int p5_worse = 0, p5_better = 0, p5_same = 0, p5_zruns = 0;
+    for (int n = 0; n < mc_runs; n++) {
+        plant_variant_t v = mismatched_variant(0x7000u + (uint32_t)n * 2654435761u);
+        const start_set_t *ss = &g_starts[n % NSTART];
+        run_report_t rep;
+        tune_run(ss, &v, 40, false, g_profile, NSEG, g_profile_b, NSEG_B, &rep);
+        for (int i = 0; i < NZ; i++) {
+            float d = rep.final_cost[i] - rep.initial_cost[i];
+            if (!isfinite(d)) continue;
+            p5_zruns++;
+            if (d > 0.5f) p5_worse++;
+            else if (d < -0.5f) p5_better++;
+            else p5_same++;
+        }
+    }
+    printf("  %d zone-runs over %d mismatched plants, evaluated on g_profile_b: better %d, "
+           "unchanged(<0.5C) %d, WORSE %d (%.2f%%)\n",
+           p5_zruns, mc_runs, p5_better, p5_same, p5_worse, 100.0 * p5_worse / (p5_zruns ? p5_zruns : 1));
+    bool a8a2_pass = (100.0 * p5_worse / (p5_zruns ? p5_zruns : 1)) <= 1.0;
+    printf("  A8 A2-half bar: cross-profile worse-by-more-than-one-floor <= 1%% -> %s\n",
+           a8a2_pass ? "PASS" : "FAIL");
+
     // ---- Enforcement ----
     // Until 2026-09-10 this harness's bars were printf-only: main() always
     // `return 0`, so build_host_tests.ps1 (which links this as a
@@ -1207,9 +1285,19 @@ int main(int argc, char **argv)
     // understood, previously-defended tradeoff the way A1's pin is. The
     // finding stands as reported, blocking for the PLAN (not the build) --
     // see ITER_TUNE_REDESIGN_PLAN.md sec 8, step 6.
+    // A8's A2-half (Part 5) is DIFFERENT from the A1-half above: it is a
+    // genuine, reproduced PASS (0/660 cross-profile worse, well inside the
+    // <= 1% bar -- see PART 5's own printf), not a newly-discovered
+    // regression. A2's bar carries none of A1's "already a known nonzero
+    // rate, pinned rather than met" baggage, so there is no tension in
+    // enforcing it the same way A2/A5/A6 already are: doing so cannot force
+    // a permanently red build (it measures clean with margin) and closes
+    // the one criterion the 2026-09-16 status block named as the remaining
+    // open gap in plan sec 8 step 6. Gated into all_pass below.
     (void)a8_pass;
-    bool all_pass = a1_pass && a2_pass && a5_pass && a6_pass && a_step4_gate;
-    printf("\n#### OVERALL: %s (A8 measured above, NOT gated into this verdict -- see A8 comment) ####\n",
+    bool all_pass = a1_pass && a2_pass && a5_pass && a6_pass && a_step4_gate && a8a2_pass;
+    printf("\n#### OVERALL: %s (A8 A1-half measured above, NOT gated into this verdict -- see A8 comment; "
+           "A8 A2-half IS gated, see A8 A2-half comment) ####\n",
            all_pass ? "PASS (A2/A5/A6 clear; A1 clear ONLY against its pinned known-failure "
                       "ceiling, NOT the 2.0% design target -- see A1 NOTE above)"
                     : "FAIL");

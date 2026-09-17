@@ -39,12 +39,38 @@
 >   got below) so a genuine, freshly-discovered doubling of the false-accept
 >   rate is not quietly pinned the way A1's already-litigated number was --
 >   pinning THIS number would be exactly the "workaround" sec 8 forbids.
->   **Steps 7, 8, 9 are NOT started** and should not be, until A8 is either
->   resolved (the plan's algorithm/scoring changed to close the gap) or the
->   owner accepts the gap and revises sec 7's bar deliberately, the same way
->   A1's was revised, with the tradeoff named. "A design that passes A1-A6
->   but fails A7 or A8 has not been redesigned, only re-tuned" (sec 7's own
->   words) -- that is exactly the state found here.
+>
+> **Status update, 2026-09-16 (later pass): A8's A2-half (never-worse
+> re-measured across profiles) is now built and gated.** `tune_run()` was
+> extended to take a separate search profile and eval profile per call
+> (`sim_iter_tune.c`, new params on `tune_run`); Part 1 and Part 3 pass
+> `g_profile`/`g_profile` for both, unchanged from before. New **Part 5**
+> reuses Part 3's mismatched-plant ensemble (220 plants, 660 zone-runs) but
+> searches on `g_profile` and evaluates the final accept/reject cost on
+> `g_profile_b`, the same never-worse floor (>0.5 C) as A2 itself. Measured
+> result: **0 worse of 660 (0.00%), 2 better, 658 unchanged** -- a clean,
+> reproducible PASS well inside the <=1% bar, unlike the A1-half's genuine
+> 6.82% miss above. This bar (`"A8 A2-half bar: ..."`, `check_sim_iter_tune_bars.ps1`)
+> IS now gated into the script's exit code, since a genuine pass carries no
+> risk of pinning a workaround. Negative-tested: sabotaging the comparison
+> (`<=` to `>=`) reproducibly FAILs (exit 1); hand-restored and confirmed via
+> md5/git-hash-object against a pristine backup (not `git show`, CRLF); a
+> full clean rebuild afterward reproduces PASS/exit 0. (A side finding from
+> the sabotage run: the original label `"A8 bar (A2 half): ..."` did not
+> match the script's `"bar:.*-> FAIL"` summary regex, so a failing A2-half
+> would print FAIL and exit 1 but never appear in the human-readable failing-
+> bar list; renamed to `"A8 A2-half bar: ..."` to match the convention used
+> by every other bar and fix the summary.)
+>
+> **The A1-half of A8 is unchanged and still an open, genuine, non-blocking
+> FAIL** (45/660, 6.82%, vs a 38.4-count ceiling) -- this pass did not touch
+> it and makes no claim about it. **Steps 7, 8, 9 are STILL NOT started**
+> and should not be until A8's A1-half is either resolved (the plan's
+> algorithm/scoring changed to close the gap) or the owner accepts the gap
+> and revises sec 7's bar deliberately, the same way A1's was revised, with
+> the tradeoff named. "A design that passes A1-A6 but fails A7 or A8 has not
+> been redesigned, only re-tuned" (sec 7's own words) -- A8's A1-half keeps
+> that exactly true; only the A2-half of A8 is now closed.
 >
 > **Status update, 2026-09-10 (later pass):** steps 1, 2, 3, 4, 5 and the
 > write-surface part of 7 are now IMPLEMENTED. The status paragraph that used
