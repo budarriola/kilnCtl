@@ -100,6 +100,7 @@ static esp_err_t security_config_get_handler(httpd_req_t *req)
 //   cmd=set_web_password&role=admin|user&username=...&password=...
 //   cmd=set_lcd_pin&role=admin|user&pin=...
 //   cmd=set_policy&web_enabled=0|1&lcd_enabled=0|1&web_timeout_min=N&lcd_timeout_min=N
+//   cmd=clear_credentials (item 12b -- no other fields)
 // Bounded-body-then-parse-then-dispatch, same shape as settings_http.c's
 // POST handlers. This route is ROUTE_TIER_ADMIN so kiln_http_register()'s
 // pre-handler has already refused a non-admin caller before this body runs;
@@ -225,6 +226,10 @@ static esp_err_t security_post_handler(httpd_req_t *req)
         sreq.policy.lcd_enabled = lcd_en;
         sreq.policy.web_timeout_min = web_timeout;
         sreq.policy.lcd_timeout_min = lcd_timeout;
+    } else if (strcmp(cmd_val, "clear_credentials") == 0) {
+        // Item 12b's "Clear login credentials" action. No fields beyond
+        // cmd itself.
+        sreq.cmd = SECURITY_CMD_CLEAR_CREDENTIALS;
     } else {
         sreq.cmd = SECURITY_CMD_UNKNOWN;
     }

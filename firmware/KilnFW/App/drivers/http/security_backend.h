@@ -100,6 +100,17 @@ typedef struct {
     // every session for that role, including the caller's" (item 6). Must
     // be a no-op, not a crash, until the session layer lands.
     void (*invalidate_sessions_for_role)(security_role_t role);
+
+    // Item 12b's "Clear login credentials" ADMIN action: resets BOTH roles'
+    // web passwords and BOTH roles' LCD PINs to unconfigured (administrator
+    // gets must_change=true, same post-reset state the physical gesture
+    // produces), and leaves the auth-enabled policy untouched. Distinct
+    // from the physical four-corner reset gesture (item 10, unauthenticated,
+    // E-stop-gated) and from `POST /api/factory_reset` (item 12b: no scope
+    // of that route may ever touch this namespace). Returns
+    // SECURITY_ERR_STORAGE if the underlying store could not confirm the
+    // clear by read-back.
+    security_err_t (*clear_all_credentials)(void);
 } security_backend_vtable_t;
 
 // Test/production injection point. Passing NULL restores the default

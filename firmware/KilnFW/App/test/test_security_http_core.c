@@ -34,6 +34,11 @@ static struct {
 
     int invalidate_calls;
     security_role_t last_invalidated_role;
+    security_role_t invalidated_roles_seen[4]; // order the seam was called in, this test cycle
+    int invalidated_roles_seen_count;
+
+    int clear_all_credentials_calls;
+    security_err_t clear_all_credentials_result;
 } fake;
 
 static void fake_reset(void)
@@ -42,6 +47,7 @@ static void fake_reset(void)
     fake.set_web_password_result = SECURITY_OK;
     fake.set_lcd_pin_result = SECURITY_OK;
     fake.set_policy_result = SECURITY_OK;
+    fake.clear_all_credentials_result = SECURITY_OK;
 }
 
 static security_err_t fake_set_web_password(security_role_t role, const char *username, const char *password)
@@ -81,6 +87,15 @@ static void fake_invalidate_sessions_for_role(security_role_t role)
 {
     fake.invalidate_calls++;
     fake.last_invalidated_role = role;
+    if (fake.invalidated_roles_seen_count < 4) {
+        fake.invalidated_roles_seen[fake.invalidated_roles_seen_count++] = role;
+    }
+}
+
+static security_err_t fake_clear_all_credentials(void)
+{
+    fake.clear_all_credentials_calls++;
+    return fake.clear_all_credentials_result;
 }
 
 static const security_backend_vtable_t fake_vtable = {
@@ -89,6 +104,7 @@ static const security_backend_vtable_t fake_vtable = {
     .set_policy = fake_set_policy,
     .get_config = fake_get_config,
     .invalidate_sessions_for_role = fake_invalidate_sessions_for_role,
+    .clear_all_credentials = fake_clear_all_credentials,
 };
 
 static security_request_t blank_request(security_cmd_t cmd)
@@ -153,6 +169,16 @@ static void test_admin_only_gate(void)
     security_http_dispatch(&fake_vtable, SECURITY_ROLE_USER, &policy_req, &result);
     TEST_CHECK(result.http_status == 403, "a user-role caller gets 403 on SET_POLICY too");
     TEST_CHECK(fake.set_policy_calls == 0, "policy backend never touched for a refused caller");
+
+    // Item 12b: the new clear-credentials action gets the same ADMIN-only
+    // gate as every other command on this page -- a `user` session must not
+    // be able to wipe everyone's credentials.
+    fake_reset();
+    security_request_t clear_req = blank_request(SECURITY_CMD_CLEAR_CREDENTIALS);
+    security_http_dispatch(&fake_vtable, SECURITY_ROLE_USER, &clear_req, &result);
+    TEST_CHECK(result.http_status == 403, "a user-role caller gets 403 on CLEAR_CREDENTIALS");
+    TEST_CHECK(fake.clear_all_credentials_calls == 0, "the store is never touched for a refused caller");
+    TEST_CHECK(fake.invalidate_calls == 0, "no session invalidation on a refused clear either");
 }
 
 static void test_set_admin_password_success_invalidates_admin_only(void)
@@ -331,6 +357,42 @@ static void test_unknown_command_refused(void)
                "no backend entry point is called for an unrecognized command");
 }
 
+static void test_clear_credentials_success_invalidates_both_roles(void)
+{
+    TEST_SECTION("CLEAR_CREDENTIALS success -- clears the store, invalidates ADMIN and USER");
+
+    fake_reset();
+    security_request_t req = blank_request(SECURITY_CMD_CLEAR_CREDENTIALS);
+    security_result_t result;
+    security_http_dispatch(&fake_vtable, SECURITY_ROLE_ADMIN, &req, &result);
+
+    TEST_CHECK(result.http_status == 200, "an admin caller clearing credentials succeeds");
+    TEST_CHECK(fake.clear_all_credentials_calls == 1, "the store's clear-all entry point is called exactly once");
+    TEST_CHECK(fake.invalidate_calls == 2, "both roles' sessions are invalidated, not just the caller's");
+    TEST_CHECK(fake.invalidated_roles_seen_count == 2 &&
+                   fake.invalidated_roles_seen[0] == SECURITY_ROLE_ADMIN &&
+                   fake.invalidated_roles_seen[1] == SECURITY_ROLE_USER,
+               "ADMIN is invalidated before USER, and both roles are covered");
+    TEST_CHECK(result.invalidated_sessions, "result reports the invalidation so the caller's own session drops too");
+}
+
+static void test_clear_credentials_storage_failure_maps_to_500(void)
+{
+    TEST_SECTION("CLEAR_CREDENTIALS -- a failed read-back verification maps to 500, skips invalidation");
+
+    fake_reset();
+    fake.clear_all_credentials_result = SECURITY_ERR_STORAGE;
+    security_request_t req = blank_request(SECURITY_CMD_CLEAR_CREDENTIALS);
+    security_result_t result;
+    security_http_dispatch(&fake_vtable, SECURITY_ROLE_ADMIN, &req, &result);
+
+    TEST_CHECK(result.http_status == 500, "a storage failure maps to 500, not a false 200");
+    TEST_CHECK(fake.clear_all_credentials_calls == 1, "the store was asked");
+    TEST_CHECK(fake.invalidate_calls == 0,
+               "sessions are never invalidated when the underlying clear could not be confirmed");
+    TEST_CHECK(!result.invalidated_sessions, "result does not claim an invalidation that didn't happen");
+}
+
 void run_test_security_http_core(void)
 {
     test_pin_validation();
@@ -344,4 +406,6 @@ void run_test_security_http_core(void)
     test_policy_dispatch_never_invalidates();
     test_not_implemented_maps_to_501();
     test_unknown_command_refused();
+    test_clear_credentials_success_invalidates_both_roles();
+    test_clear_credentials_storage_failure_maps_to_500();
 }

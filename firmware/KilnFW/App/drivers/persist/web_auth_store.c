@@ -704,3 +704,81 @@ bool web_auth_store_clear_for_physical_reset(void)
     }
     return true;
 }
+
+// WEB_AUTH_PLAN.md item 12b's "Clear login credentials" ADMIN-route action
+// -- see this function's header-comment for the full rationale (distinct
+// from both the physical reset gesture above and from factory_reset.c,
+// which must never touch this namespace). Clears both roles in both blobs;
+// deliberately leaves auth_policy untouched, same reasoning as
+// web_auth_store_clear_for_physical_reset() above.
+bool web_auth_store_clear_all_credentials(void)
+{
+    web_auth_web_blob_t blob;
+    memset(&blob, 0, sizeof(blob));
+    hal_status_t existing = load_blob(WEB_AUTH_KEY_WEB, &blob, sizeof(blob));
+    if (existing != HAL_OK || blob.version != WEB_AUTH_STORE_VERSION ||
+        web_blob_crc(&blob) != blob.crc32) {
+        memset(&blob, 0, sizeof(blob));
+    }
+
+    web_auth_password_record_t *admin = &blob.roles[WEB_AUTH_ROLE_ADMINISTRATOR];
+    memset(admin, 0, sizeof(*admin));
+    admin->must_change = true; // same forced-set-a-new-password state as the
+                                // physical reset (item 10)
+    admin->configured = false;
+
+    web_auth_password_record_t *user = &blob.roles[WEB_AUTH_ROLE_USER];
+    memset(user, 0, sizeof(*user));
+    user->configured = false; // the `user` record has no must_change flow
+
+    blob.version = WEB_AUTH_STORE_VERSION;
+    blob.crc32 = web_blob_crc(&blob);
+
+    hal_status_t err = set_blob_verified(WEB_AUTH_KEY_WEB, &blob, sizeof(blob));
+    if (err != HAL_OK) {
+        return false;
+    }
+
+    web_auth_web_blob_t check;
+    memset(&check, 0, sizeof(check));
+    if (load_blob(WEB_AUTH_KEY_WEB, &check, sizeof(check)) != HAL_OK) {
+        return false;
+    }
+    if (check.roles[WEB_AUTH_ROLE_ADMINISTRATOR].configured != false ||
+        check.roles[WEB_AUTH_ROLE_ADMINISTRATOR].must_change != true ||
+        check.roles[WEB_AUTH_ROLE_USER].configured != false) {
+        return false;
+    }
+
+    web_auth_lcd_blob_t lcd_blob;
+    memset(&lcd_blob, 0, sizeof(lcd_blob));
+    hal_status_t lcd_existing = load_blob(WEB_AUTH_KEY_LCD, &lcd_blob, sizeof(lcd_blob));
+    if (lcd_existing != HAL_OK || lcd_blob.version != WEB_AUTH_STORE_VERSION ||
+        lcd_blob_crc(&lcd_blob) != lcd_blob.crc32) {
+        memset(&lcd_blob, 0, sizeof(lcd_blob));
+    }
+
+    memset(&lcd_blob.roles[WEB_AUTH_ROLE_ADMINISTRATOR], 0, sizeof(lcd_blob.roles[WEB_AUTH_ROLE_ADMINISTRATOR]));
+    lcd_blob.roles[WEB_AUTH_ROLE_ADMINISTRATOR].configured = false;
+    memset(&lcd_blob.roles[WEB_AUTH_ROLE_USER], 0, sizeof(lcd_blob.roles[WEB_AUTH_ROLE_USER]));
+    lcd_blob.roles[WEB_AUTH_ROLE_USER].configured = false;
+
+    lcd_blob.version = WEB_AUTH_STORE_VERSION;
+    lcd_blob.crc32 = lcd_blob_crc(&lcd_blob);
+
+    hal_status_t lcd_err = set_blob_verified(WEB_AUTH_KEY_LCD, &lcd_blob, sizeof(lcd_blob));
+    if (lcd_err != HAL_OK) {
+        return false;
+    }
+
+    web_auth_lcd_blob_t lcd_check;
+    memset(&lcd_check, 0, sizeof(lcd_check));
+    if (load_blob(WEB_AUTH_KEY_LCD, &lcd_check, sizeof(lcd_check)) != HAL_OK) {
+        return false;
+    }
+    if (lcd_check.roles[WEB_AUTH_ROLE_ADMINISTRATOR].configured != false ||
+        lcd_check.roles[WEB_AUTH_ROLE_USER].configured != false) {
+        return false;
+    }
+    return true;
+}

@@ -485,6 +485,84 @@ static void test_clear_for_physical_reset_on_empty_store(void)
                "clear is exercised even when it was never written)");
 }
 
+// web_auth_store_clear_all_credentials() -- item 12b's "Clear login
+// credentials" ADMIN route, distinct from both the physical reset gesture
+// above (administrator-only) and a factory reset (never touches
+// credentials at all): this clears BOTH roles' web passwords AND both
+// roles' LCD PINs, and leaves the policy record completely untouched.
+static void test_clear_all_credentials(void)
+{
+    TEST_SECTION("web_auth_store_clear_all_credentials -- both roles' passwords AND PINs "
+                 "cleared, policy untouched");
+    reset_all();
+
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_USER, "operator", "UserPassword1",
+                                            SALT_A, false) == HAL_OK,
+               "set up: user password configured");
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "AdminPass123",
+                                            SALT_B, false) == HAL_OK,
+               "set up: administrator password configured");
+    TEST_CHECK(web_auth_store_set_pin(WEB_AUTH_ROLE_USER, "1234", SALT_A) == HAL_OK,
+               "set up: user PIN configured");
+    TEST_CHECK(web_auth_store_set_pin(WEB_AUTH_ROLE_ADMINISTRATOR, "5678", SALT_B) == HAL_OK,
+               "set up: administrator PIN configured");
+    web_auth_policy_t pol = {.web_enabled = true, .lcd_enabled = true,
+                              .web_timeout_s = 300, .lcd_timeout_s = 60};
+    TEST_CHECK(web_auth_store_set_policy(&pol) == HAL_OK, "set up: policy enabled and persisted");
+
+    TEST_CHECK(web_auth_store_clear_all_credentials() == true,
+               "clear_all_credentials reports success (every write confirmed by read-back)");
+
+    TEST_CHECK(web_auth_store_verify_password(WEB_AUTH_ROLE_ADMINISTRATOR, "AdminPass123") == false,
+               "the old administrator password no longer verifies");
+    TEST_CHECK(web_auth_store_verify_password(WEB_AUTH_ROLE_USER, "UserPassword1") == false,
+               "the old user password no longer verifies -- unlike the physical reset, the "
+               "user record IS cleared by this action");
+    TEST_CHECK(web_auth_store_verify_pin(WEB_AUTH_ROLE_ADMINISTRATOR, "5678") == false,
+               "the old administrator LCD PIN no longer verifies");
+    TEST_CHECK(web_auth_store_verify_pin(WEB_AUTH_ROLE_USER, "1234") == false,
+               "the old user LCD PIN no longer verifies");
+
+    web_auth_password_record_t admin_rec;
+    TEST_CHECK(web_auth_store_load_password(WEB_AUTH_ROLE_ADMINISTRATOR, &admin_rec) ==
+                   WEB_AUTH_LOAD_OK,
+               "administrator record still loads OK (well-formed, just cleared)");
+    TEST_CHECK(admin_rec.configured == false, "administrator no longer configured");
+    TEST_CHECK(admin_rec.must_change == true,
+               "administrator record's must_change is set true, same as the physical reset");
+
+    web_auth_password_record_t user_rec;
+    TEST_CHECK(web_auth_store_load_password(WEB_AUTH_ROLE_USER, &user_rec) == WEB_AUTH_LOAD_OK,
+               "user record still loads OK (well-formed, just cleared)");
+    TEST_CHECK(user_rec.configured == false, "user no longer configured");
+
+    web_auth_policy_t loaded_pol;
+    TEST_CHECK(web_auth_store_load_policy(&loaded_pol) == WEB_AUTH_LOAD_OK,
+               "policy record is left exactly as the owner set it -- this action clears "
+               "credentials only, never any config");
+    TEST_CHECK(loaded_pol.web_enabled == true && loaded_pol.lcd_enabled == true &&
+                   loaded_pol.web_timeout_s == 300 && loaded_pol.lcd_timeout_s == 60,
+               "policy fields are byte-for-byte what was seeded before the clear");
+}
+
+static void test_clear_all_credentials_on_empty_store(void)
+{
+    TEST_SECTION("web_auth_store_clear_all_credentials -- safe against a never-written store");
+    reset_all();
+
+    TEST_CHECK(web_auth_store_clear_all_credentials() == true,
+               "clearing an already-empty store still reports success");
+    web_auth_policy_t loaded_pol;
+    TEST_CHECK(web_auth_store_load_policy(&loaded_pol) == WEB_AUTH_LOAD_ABSENT,
+               "policy is (still) ABSENT -- untouched, and it was never written");
+    TEST_CHECK(web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR) == false &&
+                   web_auth_store_password_configured(WEB_AUTH_ROLE_USER) == false,
+               "both roles still read as not configured");
+    TEST_CHECK(web_auth_store_pin_configured(WEB_AUTH_ROLE_ADMINISTRATOR) == false &&
+                   web_auth_store_pin_configured(WEB_AUTH_ROLE_USER) == false,
+               "both roles' LCD PINs still read as not configured");
+}
+
 // --- The WIRED gesture path: a real, non-null clear_credentials_fn --------
 // Coordinator instruction: keep AUTH_RESET_CONFIRM_NOT_WIRED covered
 // (test_auth_reset_gesture.c, unchanged) AND extend the negative cases to
@@ -653,6 +731,8 @@ int main(void)
     test_policy_check_transition();
     test_clear_for_physical_reset();
     test_clear_for_physical_reset_on_empty_store();
+    test_clear_all_credentials();
+    test_clear_all_credentials_on_empty_store();
     test_wired_gesture_full_confirm_clears_administrator_only();
     test_wired_gesture_out_of_order_leaves_store_intact();
     test_wired_gesture_missing_corner_leaves_store_intact();

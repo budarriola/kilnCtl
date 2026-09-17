@@ -353,6 +353,38 @@ web_auth_policy_transition_t web_auth_policy_check_transition(const web_auth_pol
 // with no adapter -- see auth_reset_gesture.h.
 bool web_auth_store_clear_for_physical_reset(void);
 
+// WEB_AUTH_PLAN.md item 12b, "the counter-expectation, acknowledged rather
+// than dismissed": an already-authenticated administrator's explicit
+// "Clear login credentials" action (POST /api/auth/security,
+// cmd=clear_credentials -- security_http_core.c), reachable from
+// /settings/security, distinct from BOTH the physical four-corner reset
+// gesture (item 10, E-stop-gated, recovers a forgotten credential with
+// nobody able to log in) and from `POST /api/factory_reset` (which item
+// 12b states explicitly must NOT touch this namespace, in any of its four
+// scopes). This route is not a weakening: it requires a session that
+// already holds full administrator access, which could change every
+// password individually anyway -- this is a convenience for the "I
+// expected factory reset to also clear login" expectation, answered
+// through a legitimate route instead of by widening factory_reset's own
+// blast radius.
+//
+// Clears BOTH roles, web password and LCD PIN alike: the administrator
+// web record (configured=false, must_change=true -- same as the physical
+// reset, so a subsequent login is forced through the set-a-new-password
+// flow / POST /api/auth/bootstrap_password if web auth is enabled), the
+// `user` web record (configured=false, no must_change field to set), and
+// both LCD PIN records (configured=false). Deliberately does NOT touch
+// `auth_policy` -- exactly like web_auth_store_clear_for_physical_reset(),
+// enabling/disabling auth is a separate decision this function has no
+// opinion on, and silently flipping it back to auth-off would be a bigger
+// change than "clear the credentials" implies.
+//
+// Same read-back-verified write discipline as every other setter in this
+// file. Returns true only once every one of the four records (web
+// admin/user, LCD admin/user) is confirmed cleared by read-back; on false
+// the caller must treat the clear as not having (fully) happened.
+bool web_auth_store_clear_all_credentials(void);
+
 #ifdef __cplusplus
 }
 #endif

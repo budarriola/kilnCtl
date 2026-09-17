@@ -1278,6 +1278,49 @@ credential records intact.
 confirm the rollback assertion goes RED, restore by hand, confirm GREEN, and
 force a full rebuild.
 
+**Status, 2026-09-17 — landed (the "Clear login credentials" ADMIN route).**
+The rest of this section (exclusion from export/import/backup/slot-apply/
+factory-reset, and the fail-closed OTA-rollback handling) was already landed;
+the one remaining unmet acceptance item was the explicitly labelled ADMIN
+route this section calls for, plus the danger-zone disclosure line, and both
+now ship:
+
+- `web_auth_store.h`/`.c` — `web_auth_store_clear_all_credentials()`: clears
+  both roles' web passwords AND both roles' LCD PINs (both `web_auth`/`lcd_auth`
+  blobs), read-back verified the same way as
+  `web_auth_store_clear_for_physical_reset()`, and deliberately leaves
+  `auth_policy` untouched. This is a *different* mechanism from that
+  physical-reset function (administrator-only, gesture-gated) — this one is
+  both roles, reached only through an authenticated ADMIN session.
+- `security_backend.h`/`security_backend_web_auth.c`/`security_backend_placeholder.c`
+  — a `clear_all_credentials` vtable entry, mapping a failed read-back to
+  `SECURITY_ERR_STORAGE` (500), never a false success.
+- `security_http_core.h`/`.c` — new `SECURITY_CMD_CLEAR_CREDENTIALS`, gated by
+  the same ADMIN-only check every other command on this page already has, and
+  on success invalidating both `SECURITY_ROLE_ADMIN` and `SECURITY_ROLE_USER`
+  sessions (every session for both roles must drop, not only the caller's).
+- `security_http.c` — reuses the existing `POST /api/auth/security` route
+  (already `ROUTE_TIER_ADMIN`) with `cmd=clear_credentials`; no new route, no
+  route-tier-table change.
+- `net/security_page.html` — a labelled "Clear login credentials" button,
+  separate from the policy/password controls above it, posting `cmd=clear_credentials`.
+- `http/settings_page.html` — the danger-zone copy now states in one line that
+  login credentials are not included in any of the four reset scopes and names
+  both ways to clear them (this route, and the physical gesture).
+
+*Negative test performed:* sabotaged
+`web_auth_store_clear_all_credentials()` to skip clearing the `user` password
+record (a "reset one side of a pair" shape), confirming RED —
+`kilnctl_host_tests_web_auth_store.exe` dropped from 149/149 to 144/149, with
+5 named `FAIL` lines pointing at `test_web_auth_store.c:514/520/522/524/537`.
+Restored by hand with Edit; `git diff` on `web_auth_store.c` showed only this
+session's real additions, and `git hash-object` matched the pre-sabotage hash,
+blob:firmware/KilnFW/App/drivers/persist/web_auth_store.c`0bd7cf9fa0ef5f41089eb96803f899f6cc0e9b46`,
+exactly. A forced full rebuild (the
+`App/test/build` directory deleted first) then reported "all 50 host test
+executables built and passed", with `kilnctl_host_tests_web_auth_store.exe`
+at 149/149 and the combined `kilnctl_host_tests.exe` at 8789/8789.
+
 ---
 
 ## 13. Owner decisions — settled

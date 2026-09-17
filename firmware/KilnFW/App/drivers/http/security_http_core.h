@@ -21,6 +21,10 @@ typedef enum {
     SECURITY_CMD_SET_USER_PASSWORD,
     SECURITY_CMD_SET_LCD_PIN,
     SECURITY_CMD_SET_POLICY,
+    // Item 12b's "Clear login credentials" action: resets both roles' web
+    // passwords and both roles' LCD PINs to unconfigured. No request fields
+    // beyond `cmd` are read for this command.
+    SECURITY_CMD_CLEAR_CREDENTIALS,
     SECURITY_CMD_UNKNOWN,
 } security_cmd_t;
 

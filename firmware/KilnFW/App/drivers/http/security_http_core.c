@@ -188,6 +188,30 @@ void security_http_dispatch(const security_backend_vtable_t *vt, security_role_t
         set_result(out, 200, "policy updated");
         return;
     }
+    case SECURITY_CMD_CLEAR_CREDENTIALS: {
+        // Item 12b's "Clear login credentials" action -- see
+        // security_backend.h's clear_all_credentials() comment for the full
+        // rationale. No request fields to validate; this command takes none.
+        security_err_t err = vt->clear_all_credentials();
+        if (err != SECURITY_OK) {
+            set_result_from_err(out, err);
+            return;
+        }
+        // Both roles' web passwords and both roles' LCD PINs were just
+        // cleared -- every session for both roles must go, not only the
+        // caller's own, same "changing a password invalidates every
+        // session for that role" reasoning item 6 already applies per-role.
+        // invalidate_sessions_for_role() also unconditionally force-locks
+        // the single LCD session (security_backend_web_auth.c), so calling
+        // it for USER after ADMIN is what actually reaches the `user`
+        // web-session slots; the LCD side is covered by the first call.
+        vt->invalidate_sessions_for_role(SECURITY_ROLE_ADMIN);
+        vt->invalidate_sessions_for_role(SECURITY_ROLE_USER);
+        set_result(out, 200, "login credentials cleared");
+        out->invalidated_sessions = true;
+        out->invalidated_role = SECURITY_ROLE_ADMIN;
+        return;
+    }
     case SECURITY_CMD_UNKNOWN:
     default:
         set_result(out, 400, "unknown action");

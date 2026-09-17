@@ -175,6 +175,15 @@ password below for at least the administrator account before turning authenticat
     regardless of these settings.</p>
 </div>
 
+<div class="kc-sec-block kc-sec-danger">
+  <h2>Clear login credentials</h2>
+  <p class="hint">Resets the administrator and user web passwords and both LCD PINs to
+    unconfigured. This is separate from a factory reset -- a factory reset does not touch
+    login credentials at all. Use this only when every password/PIN is lost.</p>
+  <button type="button" id="kcSecClearCreds">Clear login credentials</button>
+  <span id="kcSecClearCredsStatus" class="kc-sec-status"></span>
+</div>
+
 <script>
 (function () {
   // ---------------------------------------------------------------------
@@ -199,6 +208,10 @@ password below for at least the administrator account before turning authenticat
   //     cmd=set_web_password&role=admin|user&username=...&password=...
   //     cmd=set_lcd_pin&role=admin|user&pin=...
   //     cmd=set_policy&web_enabled=0|1&lcd_enabled=0|1&web_timeout_min=N&lcd_timeout_min=N
+  //     cmd=clear_credentials (item 12b -- no other fields; clears both roles'
+  //       web passwords and both LCD PINs; distinct from a factory reset,
+  //       which never touches credentials, and from the physical four-corner
+  //       E-stop-gated reset gesture, which is the other way to clear them)
   //   -> { ok: true } or { ok: false, error: "..." }. The password/PIN value
   //   travels only in the POST body, never the URL, and the response never
   //   echoes it back.
@@ -432,6 +445,26 @@ password below for at least the administrator account before turning authenticat
         loadCurrent();
       })
       .catch(function (e) { setStatus(policyStatus, 'Save failed: ' + e.message, true); });
+  });
+
+  var clearCredsBtn = document.getElementById('kcSecClearCreds');
+  var clearCredsStatus = document.getElementById('kcSecClearCredsStatus');
+  clearCredsBtn.addEventListener('click', function () {
+    if (!confirm('Clear the administrator password, user password, and both LCD PINs? ' +
+                 'This cannot be undone from this page.')) {
+      return;
+    }
+    setStatus(clearCredsStatus, 'Clearing...', false);
+    fetch('/api/auth/security', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'cmd=clear_credentials',
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.ok) throw new Error(d.error || 'clear failed');
+        setStatus(clearCredsStatus, 'Cleared. You will be signed out.', false);
+        loadCurrent();
+      })
+      .catch(function (e) { setStatus(clearCredsStatus, 'Clear failed: ' + e.message, true); });
   });
 })();
 </script>

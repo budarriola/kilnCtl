@@ -76,12 +76,20 @@ static void placeholder_invalidate_sessions_for_role(security_role_t role)
                            (int)role);
 }
 
+static security_err_t placeholder_clear_all_credentials(void)
+{
+    SECURITY_BACKEND_LOGW("clear_all_credentials() refused -- credential storage (WEB_AUTH_PLAN.md item 2) "
+                           "is not wired in yet; nothing to clear");
+    return SECURITY_ERR_NOT_IMPLEMENTED;
+}
+
 static const security_backend_vtable_t s_placeholder_vtable = {
     .set_web_password = placeholder_set_web_password,
     .set_lcd_pin = placeholder_set_lcd_pin,
     .set_policy = placeholder_set_policy,
     .get_config = placeholder_get_config,
     .invalidate_sessions_for_role = placeholder_invalidate_sessions_for_role,
+    .clear_all_credentials = placeholder_clear_all_credentials,
 };
 
 static const security_backend_vtable_t *s_active_vtable = &s_placeholder_vtable;

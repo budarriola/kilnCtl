@@ -276,12 +276,34 @@ static void web_auth_backend_invalidate_sessions_for_role(security_role_t role)
              (int)role);
 }
 
+static security_err_t web_auth_backend_clear_all_credentials(void)
+{
+    // Item 12b's "Clear login credentials" ADMIN action. Thin wrapper: all
+    // the actual clearing (both roles, both blobs, read-back verified) is
+    // web_auth_store_clear_all_credentials()'s job; this file only maps its
+    // bool result onto this seam's security_err_t and logs the event at the
+    // same loud level the physical-reset gesture and boot_guard's own
+    // "never trust a write's return code alone" lesson use elsewhere in
+    // this tree -- a rare, security-relevant event that must be findable
+    // afterwards.
+    bool ok = web_auth_store_clear_all_credentials();
+    if (!ok) {
+        ESP_LOGE(TAG, "clear_all_credentials() FAILED -- one or more records could not be confirmed cleared "
+                      "by read-back; credentials may be left in a partially-cleared state");
+        return SECURITY_ERR_STORAGE;
+    }
+    ESP_LOGW(TAG, "clear_all_credentials(): administrator and user web passwords and LCD PINs cleared "
+                  "via the authenticated /settings/security route (WEB_AUTH_PLAN.md item 12b)");
+    return SECURITY_OK;
+}
+
 static const security_backend_vtable_t s_web_auth_vtable = {
     .set_web_password = web_auth_backend_set_web_password,
     .set_lcd_pin = web_auth_backend_set_lcd_pin,
     .set_policy = web_auth_backend_set_policy,
     .get_config = web_auth_backend_get_config,
     .invalidate_sessions_for_role = web_auth_backend_invalidate_sessions_for_role,
+    .clear_all_credentials = web_auth_backend_clear_all_credentials,
 };
 
 void security_backend_web_auth_install(void)
