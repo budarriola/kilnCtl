@@ -19,9 +19,13 @@
 // should progress, abandon, arm, or (on confirm) fire the clear -- and it
 // fires the clear through one function-pointer seam
 // (auth_reset_gesture_state_t.clear_credentials_fn) so wiring in the real
-// credential-store reset function, once its header lands, is a one-line
-// change at the call site that constructs the state (set the field to
-// e.g. web_auth_store_reset_administrator instead of a stub/NULL).
+// credential-store reset function is a one-line assignment at the call site
+// that constructs the state:
+// s.clear_credentials_fn = web_auth_store_clear_for_physical_reset;
+// (firmware/KilnFW/App/drivers/persist/web_auth_store.h) -- that header now
+// exists and its function's signature already matches
+// auth_reset_gesture_clear_fn exactly (bool (*)(void)), so no adapter is
+// needed. See auth_reset_gesture_wiring.c for the real wiring.
 //
 // Host-testable, no ESP-IDF dependency -- same discipline as ota_auth.h
 // (see App/test/build_host_tests.ps1).
@@ -172,6 +176,22 @@ void auth_reset_gesture_cancel(auth_reset_gesture_state_t *s);
 // showing the armed banner without mutating state -- unlike
 // auth_reset_gesture_confirm(), calling this never transitions `s`.
 bool auth_reset_gesture_is_armed_and_live(const auth_reset_gesture_state_t *s, uint32_t now_ms);
+
+// --- Board-wide singleton, wired to the real credential store --------------
+//
+// Exactly one physical panel exists, so exactly one gesture state is needed
+// board-wide. This lives here (not in an LCD-owned file) so the seam wiring
+// is a one-time, reviewed step in the module that owns
+// auth_reset_gesture_state_t, per the standing instruction to keep
+// corner-tap detection in its own module rather than editing the LCD
+// PIN/keypad module that will call into it. First call lazily constructs
+// the instance with clear_credentials_fn already wired to
+// web_auth_store_clear_for_physical_reset() (firmware/KilnFW/App/drivers/
+// persist/web_auth_store.h); every call thereafter returns the same
+// pointer. Not thread-safe by itself -- callers must only touch it from the
+// single UI/LVGL task that owns touch input, same assumption every other
+// LVGL-adjacent module in this tree already makes.
+auth_reset_gesture_state_t *auth_reset_gesture_singleton(void);
 
 #ifdef __cplusplus
 }

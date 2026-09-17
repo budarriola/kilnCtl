@@ -263,6 +263,42 @@ hal_status_t web_auth_store_set_policy(const web_auth_policy_t *policy);
 // loaded via web_auth_store_load_policy().
 bool web_auth_policy_effective_enabled(web_auth_load_status_t status, bool stored_enabled);
 
+// --- Physical credential reset (plan item 10) -------------------------------
+
+// The one entry point item 10's confirmed gesture (E-stop asserted, all four
+// LCD corners tapped in order, then an explicit timed confirm) calls once
+// the confirm step fires. Does exactly three things, and nothing else:
+//
+//  1. Clears the ADMINISTRATOR's web password record only -- the USER
+//     record within the same shared blob is left byte-for-byte untouched.
+//     "Cleared" means configured=false, must_change=true, hash/salt zeroed:
+//     no default password value is invented or stored (this module holds no
+//     entropy source per its randomness note, and a fixed literal password
+//     baked into source is exactly the class of secret this codebase's
+//     "never write a real credential into the repo" rule exists to forbid).
+//     Combined with step 2 this is safe: with policy ABSENT, web auth is
+//     OFF, so no administrator login is required to reach the board at all.
+//  2. Erases the policy record (WEB_AUTH_KEY_POLICY) back to genuinely
+//     ABSENT -- not merely overwritten with false/false -- so a subsequent
+//     web_auth_store_load_policy() reports WEB_AUTH_LOAD_ABSENT, which
+//     web_auth_policy_effective_enabled() collapses to auth-off. This is
+//     the intended post-reset state: the owner can reach the board again.
+//  3. Leaves the LCD PIN record (WEB_AUTH_KEY_LCD, both roles) and every
+//     config namespace/partition completely untouched.
+//
+// Same read-back-verified write/erase discipline as every other setter in
+// this file. Returns true only if both the credential write and the policy
+// erase are confirmed by read-back; on false the caller must treat the
+// reset as not having happened (this function does not promise a partial
+// reset is safe to leave partially applied, but it also performs the two
+// steps independently -- a caller that gets false should retry the whole
+// gesture rather than assume either half landed).
+//
+// Signature is exactly auth_reset_gesture_clear_fn (bool (*)(void)) so it
+// can be assigned directly to auth_reset_gesture_state_t.clear_credentials_fn
+// with no adapter -- see auth_reset_gesture.h.
+bool web_auth_store_clear_for_physical_reset(void);
+
 #ifdef __cplusplus
 }
 #endif

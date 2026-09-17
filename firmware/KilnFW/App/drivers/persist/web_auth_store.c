@@ -537,3 +537,67 @@ bool web_auth_policy_effective_enabled(web_auth_load_status_t status, bool store
             return true; // fail closed -- see header comment
     }
 }
+
+// --- Physical credential reset (item 10) -------------------------------------
+
+bool web_auth_store_clear_for_physical_reset(void)
+{
+    // Step 1: clear ONLY the administrator's password record, in place
+    // within the shared web_auth blob -- the user record is copied through
+    // untouched. Same "load existing, discard on absent/wrong-version/
+    // corrupt" convention as web_auth_store_set_password(), except here a
+    // discard still produces a valid, empty blob rather than an error: a
+    // physical reset must succeed even against a store that was never
+    // written or was already corrupt.
+    web_auth_web_blob_t blob;
+    memset(&blob, 0, sizeof(blob));
+    hal_status_t existing = load_blob(WEB_AUTH_KEY_WEB, &blob, sizeof(blob));
+    if (existing != HAL_OK || blob.version != WEB_AUTH_STORE_VERSION ||
+        web_blob_crc(&blob) != blob.crc32) {
+        memset(&blob, 0, sizeof(blob));
+    }
+
+    web_auth_password_record_t *admin = &blob.roles[WEB_AUTH_ROLE_ADMINISTRATOR];
+    memset(admin, 0, sizeof(*admin));
+    admin->must_change = true;  // item 10: a physical reset sets this true
+    admin->configured = false;  // no password value invented/stored -- see
+                                 // header comment; safe because step 2 below
+                                 // takes policy back to ABSENT (auth off).
+
+    blob.version = WEB_AUTH_STORE_VERSION;
+    blob.crc32 = web_blob_crc(&blob);
+
+    hal_status_t err = set_blob_verified(WEB_AUTH_KEY_WEB, &blob, sizeof(blob));
+    if (err != HAL_OK) {
+        return false;
+    }
+
+    // Step 2: erase the policy key back to genuinely ABSENT (not merely
+    // overwritten with false/false) so web_auth_store_load_policy() reports
+    // WEB_AUTH_LOAD_ABSENT afterward, which web_auth_policy_effective_enabled()
+    // collapses to auth-off -- the intended post-reset state.
+    hal_kv_handle_t h;
+    hal_status_t open_err = hal_kv_open(&h, WEB_AUTH_NAMESPACE, HAL_KV_MODE_READ_WRITE, NULL);
+    if (open_err != HAL_OK) {
+        return false;
+    }
+    hal_status_t erase_err = hal_kv_erase_key(&h, WEB_AUTH_KEY_POLICY);
+    if (erase_err == HAL_OK) {
+        erase_err = hal_kv_commit(&h);
+    }
+    hal_kv_close(&h);
+    // HAL_NOT_FOUND means the policy key was already absent -- that is the
+    // goal state already reached, not a failure (same "already gone, not an
+    // error" convention hal_kv_esp.c documents for nvs_erase_key()).
+    if (erase_err != HAL_OK && erase_err != HAL_NOT_FOUND) {
+        return false;
+    }
+
+    // Read-back verify absence -- never trust the erase/commit return code
+    // alone, same discipline as every write in this file.
+    web_auth_policy_t check;
+    if (web_auth_store_load_policy(&check) != WEB_AUTH_LOAD_ABSENT) {
+        return false;
+    }
+    return true;
+}

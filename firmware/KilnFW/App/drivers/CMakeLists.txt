@@ -280,6 +280,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # timeout module, host-tested alongside ota_auth.c (same
                        # no-ESP-IDF-dependency discipline).
                        "net/web_auth_session.c"
+                       "net/auth_reset_gesture_wiring.c"
                        "net/ota_interlock.c"
                        "control/heat_interlock.c"
                        "persist/ota_record.c"
