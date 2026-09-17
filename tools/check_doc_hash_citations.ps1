@@ -37,6 +37,30 @@
   repo's. Those hashes will never resolve against the parent repo no matter
   how correct they are.
 
+  BLOB HASHES (added 2026-09-16): standing practice in this repo, after a
+  negative test sabotages a tracked file and restores it by hand, is to run
+  `git hash-object` on the restored file and compare it against
+  `git rev-parse HEAD:<path>` to prove the restoration is byte-exact (see
+  CLAUDE.md's negative-test guidance). That comparison produces a BLOB hash,
+  not a commit hash -- `cat-file -e <hash>^{commit}` can never resolve it no
+  matter how correct it is, because a blob is not a commit. Citing one this
+  way is real, load-bearing evidence and should not be deleted or vaguely
+  elided to dodge this check (that happened once, in
+  docs/audits/release_gate_vacuity_audit_2026-09-16g.md, which is what
+  prompted this fix -- the doc tried to avoid tripping this check by
+  "eliding" the hash down to an 8-char prefix, but kept it backtick-quoted,
+  so it still matched and still failed, as a commit, which it never was).
+  Tag it explicitly with `blob:<path>` immediately before the backtick, no
+  whitespace (matching the `sub:` convention), e.g.
+  `blob:firmware/hwAbstraction/common/hal_status.c`\`cf1dbafb\``. This is
+  graded MORE strictly than plain existence: the script recomputes
+  `git rev-parse HEAD:<path>` itself and checks the cited hash is a prefix
+  of it, so the citation is confirmed to match what HEAD actually has at
+  that exact path -- not merely that some blob with that id exists
+  somewhere in the object database (a coincidental collision at an unrelated
+  path would still fail). A missing path, or a cited prefix that does not
+  match HEAD's actual blob there, is a hard FAIL naming both.
+
   Parent-repo resolution is the default and requires no annotation -- this
   covers the overwhelming majority of the ~1,100 citations in this repo
   unchanged. A citation that refers to a SUBMODULE commit must say so
@@ -218,13 +242,14 @@ $KnownNonHashFalsePositives = @(
     @{ File = 'docs/audits/adaptive_fuzzy_evaluation_progress_2026-09-14.md'; Hash = 'e6f38410942ac28eb260864604168932' }  # md5 of a build artifact (factorial_of1.tsv, before/after poison comparison), not a git commit
 )
 
-$hashPattern = '(\b(?i:fabricated)\s+)?(?:\b(?i:sub):([A-Za-z0-9_.\-]+))?`([0-9a-f]{7,40})`'
+$hashPattern = '(\b(?i:fabricated)\s+)?(?:\b(?i:sub):([A-Za-z0-9_.\-]+)|\b(?i:blob):([A-Za-z0-9_./\-]+))?`([0-9a-f]{7,40})`'
 $failures = @()
 $totalCitations = 0
 $excludedFabricated = 0
 $uniqueChecked = @{}
 $resolvedInParent = 0
 $resolvedInSubmodule = @{}
+$resolvedInBlob = 0
 
 # Citations that name a declared-but-not-checked-out submodule. Reported, but
 # never counted as failures -- see header, "UNINITIALIZED SUBMODULES ARE
@@ -266,7 +291,8 @@ foreach ($file in $files) {
         foreach ($m in $matches_) {
             $isFabricatedMarker = $m.Groups[1].Success
             $subName = $m.Groups[2].Value
-            $hash = $m.Groups[3].Value
+            $blobPath = $m.Groups[3].Value
+            $hash = $m.Groups[4].Value
             if ($isFabricatedMarker) {
                 # Marked as an illustrative/not-a-citation token -- see header.
                 $excludedFabricated++
@@ -337,7 +363,51 @@ foreach ($file in $files) {
                 continue
             }
 
-            # No sub: tag -- parent-repo resolution only (the default case,
+            if ($blobPath) {
+                # Explicitly declared as a BLOB citation -- see header,
+                # "BLOB HASHES". Standing practice in this repo is
+                # hand-restore-and-verify: a file is edited back to its
+                # pre-sabotage content by hand, then `git hash-object` is run
+                # on it and compared against `git rev-parse HEAD:<path>` to
+                # prove the restoration is byte-exact. That produced hash is
+                # a real, meaningful thing to cite -- it is just a BLOB hash,
+                # not a commit hash, and `cat-file -e <hash>^{commit}` can
+                # never resolve it no matter how correct it is (a blob is not
+                # a commit). A `blob:<path>` tag immediately before the
+                # backtick (no whitespace, matching the sub: convention)
+                # marks this and is graded by recomputing the blob id HEAD
+                # actually has at <path> and checking the cited hash is a
+                # prefix of it -- this is a STRICTER check than mere
+                # existence: it confirms the citation matches the ACTUAL
+                # committed content at that path, not just that some blob
+                # with that id exists somewhere in the object database.
+                & git cat-file -e "HEAD:$blobPath" 2>$null 1>$null
+                if ($LASTEXITCODE -ne 0) {
+                    $failures += [PSCustomObject]@{
+                        File = $file
+                        Line = $lineNum
+                        Hash = $hash
+                        Text = $line.Trim()
+                        Reason = "declared blob:$blobPath but that path does not exist at HEAD"
+                    }
+                    continue
+                }
+                $actualBlob = (& git rev-parse "HEAD:$blobPath" 2>$null).Trim()
+                if ($actualBlob -and $actualBlob.StartsWith($hash, [System.StringComparison]::Ordinal)) {
+                    $resolvedInBlob++
+                    continue
+                }
+                $failures += [PSCustomObject]@{
+                    File = $file
+                    Line = $lineNum
+                    Hash = $hash
+                    Text = $line.Trim()
+                    Reason = "declared blob:$blobPath but HEAD's blob there is $actualBlob, which does not start with the cited hash"
+                }
+                continue
+            }
+
+            # No sub: or blob: tag -- parent-repo resolution only (the default case,
             # covering the overwhelming majority of citations). No implicit
             # submodule fallback: see header, "SUBMODULE HASHES".
             & git cat-file -e "$hash^{commit}" 2>$null 1>$null
@@ -360,7 +430,7 @@ $subSummary = if ($resolvedInSubmodule.Count -gt 0) {
     'none'
 }
 Write-Host "check_doc_hash_citations: $totalCitations citations, $($uniqueChecked.Count) unique hashes checked, $excludedFabricated excluded (marked fabricated)."
-Write-Host "  resolved: $resolvedInParent in parent repo; via sub: tag: $subSummary."
+Write-Host "  resolved: $resolvedInParent in parent repo; via sub: tag: $subSummary; via blob: tag: $resolvedInBlob."
 
 if ($skippedUninitialized.Count -gt 0) {
     # These citations were NEVER CHECKED. Reporting PASS/exit 0 over them is

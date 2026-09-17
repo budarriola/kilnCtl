@@ -74,11 +74,13 @@ a byte mismatch (916 vs. 915 bytes — an extra trailing newline from the
 hand-edit) caught by the hash check, not the visual diff; fixed by exact
 byte reconstruction. Verified both files:
 - `firmware/hwAbstraction/common/hal_status.c`: `git diff --quiet` empty;
-  `git hash-object` (first 8 chars `cf1dbafb`, elided the rest to avoid a
-  bare hex citation) matched `git rev-parse HEAD:<path>` exactly.
+  `git hash-object` (first 8 chars
+  blob:firmware/hwAbstraction/common/hal_status.c`cf1dbafb`) matched
+  `git rev-parse HEAD:<path>` exactly.
 - `firmware/hwAbstraction/esp/common/hal_esp_common.c`: `git diff --quiet`
-  empty; `git hash-object` (first 8 chars `7f544609`, elided the rest to
-  avoid a bare hex citation) matched HEAD's blob exactly.
+  empty; `git hash-object` (first 8 chars
+  blob:firmware/hwAbstraction/esp/common/hal_esp_common.c`7f544609`) matched
+  HEAD's blob exactly.
 
 Forced a full rebuild (`check_00_kilnfw_target_build.ps1` re-run from clean)
 before the confirming PASS — per this repo's own standing rule that a
@@ -129,8 +131,8 @@ statement inside `json_escape()` in
 `firmware/KilnFW/App/drivers/http/dashboard_json.c`. Result: FAILED, naming
 the file:line and the exact unauthorized call. Restored via exact
 string-replace; `git diff --quiet` empty; `git hash-object` (first 8 chars
-`cc9dfc29`, elided the rest to avoid a bare hex citation) matched HEAD.
-Re-run: PASS.
+blob:firmware/KilnFW/App/drivers/http/dashboard_json.c`cc9dfc29`) matched
+HEAD. Re-run: PASS.
 
 **Verdict: load-bearing.**
 
@@ -145,8 +147,10 @@ permanently block another claimant.
 and `profile_executor_status.c` (lines 59, 153). Result: FAILED —
 "profile_executor ... no heat_enable_release() call...". Restored via sed
 removing the prefix; `git diff --quiet` empty on both files;
-`git hash-object` (first 8 chars `489bc22c` and `552f8a05` respectively,
-elided the rest to avoid bare hex citations) matched HEAD on both. Re-run:
+`git hash-object` (first 8 chars
+blob:firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c`489bc22c`
+and blob:firmware/KilnFW/App/drivers/control/profile_executor_status.c`552f8a05`
+respectively) matched HEAD on both. Re-run:
 PASS — "1 enable / 2 release wire call(s)...".
 
 **Verdict: load-bearing.**
@@ -160,8 +164,9 @@ bench three times before as a silent 404.
 **Negative test:** changed `config.max_uri_handlers = 140;` to `= 1;` (line
 1040). Result: FAILED — "max_uri_handlers (1) is below the real worst-case
 route count (137)...". Restored to `140`; `git diff --quiet` empty;
-`git hash-object` (first 8 chars `62143299`, elided the rest to avoid a bare
-hex citation) matched HEAD. Re-run: PASS, with an informational note (not a
+`git hash-object` (first 8 chars
+blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`62143299`)
+matched HEAD. Re-run: PASS, with an informational note (not a
 defect) that headroom is thin — 3 spare slots for 137 routes against a cap
 of 140.
 
@@ -193,8 +198,8 @@ deliberately independent protocol versions.
 FAILED — "UART_PROTOCOL_VERSION must never be re-derived from
 KILNLINK_PROTOCOL_VERSION (or any other KILNLINK_* symbol)...". Restored to
 `((uint16_t)12)`; `git diff --quiet` empty; `git hash-object` (first 8
-chars `b2f1e683`, elided the rest to avoid a bare hex citation) matched
-HEAD. Re-run: PASS.
+chars blob:firmware/KilnFW/App/drivers/common/uart_task_ids.h`b2f1e683`)
+matched HEAD. Re-run: PASS.
 
 **Verdict: load-bearing.**
 
@@ -214,9 +219,9 @@ firmware timeout, (3) `_HEARTBEAT_TASK_ID` colliding with a real
 name="link-hub-heartbeat").start()`). Result: FAILED — "The heartbeat thread
 start() call is commented out in link_hub.py -- producer exists in source
 but never runs." Restored by removing the `#`; `git diff --quiet` empty;
-`git hash-object` (first 8 chars `15bc306a`, elided the rest to avoid a bare
-hex citation) matched HEAD. Re-run: PASS — "producer runs, margin holds,
-task id is isolated."
+`git hash-object` (first 8 chars
+blob:tools/PcTools/src/kilnctrl/link_hub.py`15bc306a`) matched HEAD.
+Re-run: PASS — "producer runs, margin holds, task id is isolated."
 
 **Verdict: load-bearing.**
 
