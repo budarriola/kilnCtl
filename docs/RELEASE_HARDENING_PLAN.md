@@ -476,10 +476,29 @@ release cannot ship without:
 
 ---
 
-## 8. BLOCKER — what must be verified on the installed kiln, and the
+## 8. ~~BLOCKER~~ DONE — what must be verified on the installed kiln, and the
 ## first-boot checklist
 
-**The gap.** There is no document that says, in order, what an operator does
+**Closed.** `docs/FIRST_FIRING_CHECKLIST.md` now exists: an ordered,
+owner-followable sequence covering pre-power wiring/continuity, E-stop
+function (both poles, including the durable `estop_verification` attestation
+for pole 1, which no software check can see), safety-link-up and trip
+clearing, per-zone thermocouple identity and type on both processors
+(including the zone-2-is-bottom/zone-0-is-top swap check and the
+`s_tc_type_verified` distinction from a bad reading), Pico/ESP
+`abs_max_temp_c` equality, a low-temperature dry run proving the contactor
+before any real load, CT calibration (with the import-forces-uncalibrated
+caveat), and an explicit per-guard accounting of what the bench already
+proved versus what still needs the installed kiln or a supervised firing.
+It ends by handing off to the low-temperature/full-temperature/unattended
+firing sequence below rather than claiming to close that sequence itself.
+The remaining bullets below (S8's real threshold, autotune/coupling matrix,
+thermal overshoot/cool-down, relay wiring under full load) still require an
+actual firing on the installed kiln to measure — the checklist gets the
+kiln to the point those are safely attemptable, it does not substitute for
+running them.
+
+**The gap (as originally written).** There is no document that says, in order, what an operator does
 between "the controller is bolted to a kiln that has never run under it" and
 "it is safe to leave this firing unattended". `docs/SETUP_WIZARD.md` covers
 configuration thoroughly and is the right backbone, but configuration is not
