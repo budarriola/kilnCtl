@@ -5,15 +5,18 @@ migration of the nearest configuration forward allowing a one way one step at
 a time config update path".
 
 **Policy in one sentence.** From the next schema bump onward, a firmware
-release that bumps a persisted config version ships exactly one new migration
-step — the one carrying N-1 to N — and a blob older than N-1 is brought current
-by applying steps in sequence, never by a converter that knows every historical
-shape at once.
+release that bumps a persisted config version ships exactly one migration step
+— the one carrying N-1 to N — and that is the *only* step it carries: a blob
+older than N-1 is not readable by that firmware at all.
+
+All four decisions this plan originally left open are settled (§6). Two were
+settled against this plan's recommendation and are written here as decisions,
+not re-argued.
 
 This document is pending work only. It does not restate the existing converter
 except where a decision depends on it.
 
-## 0. Scope, and the two readings of "one step at a time"
+## 0. Scope and policy
 
 ### 0.1 Which stores this governs
 
@@ -23,7 +26,7 @@ byte a future release can bump):
 | Store | Version symbol | Today |
 |---|---|---|
 | ESP zones config | `ZONES_CFG_VERSION` (`firmware/KilnFW/App/drivers/persist/zones_config_json.h`) | 26; monolithic converter v1..v25 |
-| ESP saved kiln-config slots | `KILN_CFG_STORE_VERSION` (`firmware/KilnFW/App/drivers/persist/kiln_cfg_store_internal.h`) | 3; **already a real step chain** — see §1.1 |
+| ESP saved kiln-config slots | `KILN_CFG_STORE_VERSION` (`firmware/KilnFW/App/drivers/persist/kiln_cfg_store_internal.h`) | 3; a real two-step chain — see §1.1 |
 | ESP fire profiles | `PROFILE_VERSION` (`firmware/KilnFW/App/drivers/http/profiles_http.c`) | 4; monolithic per-version branches |
 | RP2040 safety config | `CONFIG_STORE_FORMAT_VERSION` (`firmware/SaftyFW/src/config_store.h`) | 2; one v1->v2 branch, which IS a single step |
 
@@ -35,170 +38,242 @@ Not governed, and why:
   no user tuning a migration would preserve; a lost one is re-provisioned, not
   migrated.
 - **The `cfg` LittleFS partition itself.** The dual-write bridges
-  (`zones_config_cfg_fs.h`, `profiles_cfg_fs.h`) deliberately store *the same
-  versioned blob* and call `zones_config_json_decode_blob()` unchanged, with no
-  separate migration path of their own. The file is a second copy of the blob,
-  not a second schema — so this policy lands entirely in the decode path and
-  the `cfg` bridges inherit it for free. Nothing in this plan touches
-  `cfg_fs*.c`.
+  (`zones_config_cfg_fs.h`, `profiles_cfg_fs.h`) store *the same versioned
+  blob* and call `zones_config_json_decode_blob()` unchanged, with no separate
+  migration path of their own. The policy therefore lands in the decode path
+  and the bridges inherit it — but see §1.5, because under D1 the *second copy*
+  becomes a hazard rather than a free win.
 - **`KILN_PKG_SCHEMA_VERSION`** (`kiln_package.h`) — a hash-identity schema for
   comparing an ESP/Pico package pair, not a stored layout that migrates.
 
-### 0.2 The ambiguity, stated rather than assumed
+### 0.2 D1, settled: a firmware carries exactly one step
 
-The requirement is readable two ways:
+**Owner decision, 2026-09-16, overriding this plan's earlier recommendation.**
+A firmware carries the single step from the immediately preceding version to
+its own — not the accumulated historical chain. Read with the original wording
+("one way one step at a time config update path"), the intended upgrade path is
+sequential, one firmware release at a time; a board that skips a release is not
+expected to migrate directly.
 
-- **(A) Whole chain retained.** Each firmware carries every step from the
-  oldest supported version up to its own, and applies as many as needed. "One
-  step at a time" describes how the code is *written and tested*, not how much
-  history a build understands.
-- **(B) Only the newest step retained.** A firmware carries only N-1 -> N;
-  anything older is unreadable and falls back to firmware defaults.
+Consequences, stated sharply because they are sharp:
 
-**This plan assumes (A).** Two pieces of evidence, not just preference. First,
-(B) makes an upgrade destructive for any board that skips a release: the blob
-decodes as corrupt and the board runs on firmware-default PID gains — the exact
-hazard `CLAUDE.md` records for the rollback case, converted from a rare
-rollback event into a routine upgrade event. Second, the codebase already
-implements (A) at `kiln_cfg_store.c`: `migrate_store_v1_to_v2()` then
-`migrate_store_v2_to_v3()` are chained for a v1 blob, and the comment at the
-first of them says so explicitly — "the old `migrate_store_v1_to_current()` now
-that 'current' is v3, one step". Nothing in the tree implements (B).
+- A board more than one config version behind **cannot read its own config**.
+  Not "reads it degraded" — the decode fails and the board would otherwise fall
+  back to firmware defaults, losing PID gains, the coupling matrix, model fits
+  and commissioned limits.
+- That silent-default outcome is the *same hazard class* D3 exists to catch,
+  arriving from the opposite direction. §1.4 therefore extends the quarantine to
+  cover it: **too old to consume is quarantined exactly like too new to
+  understand.** A board must never quietly run on defaults because of a version
+  gap in either direction.
+- The live chain is permanently length one, so §1.2's multi-step driver
+  collapses to a single conditional. The step *form* still earns its keep
+  (frozen input type, its own CRC gate, its own captured-blob test); the
+  table-walking machinery does not, and must not be built speculatively.
 
-**If the owner meant (B), the cost is:** every step's code and test can be
-deleted one release after it lands (a small, ongoing maintenance saving and
-some flash), and in exchange any board more than one release behind loses all
-zone tuning — PID gains, coupling matrix, model fits, commissioned limits — on
-upgrade, silently, with only a log line. On the Pico half it would additionally
-force a CT recalibration on every second bump, which §2 shows is the thing the
-owner has just asked to avoid. Recorded as an open decision in §6 (D1) because
-it is a policy call, but the recommendation is (A).
+### 0.3 Upgrading a board that sat unused across several releases
 
-### 0.3 One-way
+This is now a documented operator procedure, not an edge case. It must appear
+in the release notes for any release that bumps a config version.
 
-No downgrade step is written, ever. This is consistent with
+**The procedure:** install each intervening release in version order, letting
+the board **boot and persist** between each (§1.6 — persisting is not
+automatic today, and that is a defect this plan must close before D1 is safe).
+Each boot consumes exactly one step. There is no supported way to jump.
+
+**If an intervening release is unavailable or skipped**, the config cannot be
+recovered by any firmware, and the operator's recourse is a pre-upgrade backup:
+`kiln_cfg_store`'s saved slots and the `/api/backup` export are the only paths
+that carry settings across a gap, and a backup blob is itself versioned and
+subject to the same one-step rule. **Take a backup before upgrading, and
+restore it by re-entering values, not by importing an unreadably-old blob.**
+
+**Does the single-slot OTA design actually permit stepping?** Checked against
+`docs/OTA_SINGLE_SLOT_PLAN.md` and the build config rather than assumed.
+**Yes, mechanically — with three frictions worth knowing, none prohibitive:**
+
+1. **No anti-rollback bars an older or intermediate image.**
+   `firmware/KilnFW/sdkconfig.defaults` sets `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`
+   and `CONFIG_APP_ROLLBACK_ENABLE` — the confirm-or-revert mechanism — but
+   **not** `CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK`, the monotonic secure-version
+   refusal. Those are different features. Nothing in the bootloader refuses an
+   image whose version is lower than the running one, so a sequence of
+   intermediate images can be pushed in order. **If anti-rollback is ever
+   enabled, stepping breaks and D1 becomes unimplementable as written** — that
+   is a standing constraint this plan places on any future secure-boot work.
+2. **A failed intermediate lands in recovery, not in the previous app.** With
+   one application slot, an image that fails to confirm falls back to the
+   recovery image. That is recoverable over Wi-Fi by pushing the next image, but
+   it means each intermediate hop is a real (if small) risk, taken N times
+   instead of once.
+3. **Passing through recovery is migration-neutral.** The recovery image does
+   not mount `cfg` and never reads or repairs config. It cannot consume a step
+   and cannot corrupt one.
+
+**Assessment: not a collision between the two owner decisions.** Single-slot
+OTA permits the sequential path D1 requires. The genuine blocker is §1.6's
+write-back defect, which is internal to the config store and fixable.
+
+### 0.4 One-way
+
+No downgrade step is written, ever. Consistent with
 `docs/OTA_SINGLE_SLOT_PLAN.md`, where the rollback target is a recovery image
-that does not fire the kiln, not an older application. Today a newer-than-known
-blob is already refused rather than guessed at:
-`zones_config_json_decode_blob()` returns `ZONES_DECODE_NEWER`, and
-`zones_config_store.c`'s loader leaves flash untouched, sets `*out_found = true`
-so the legacy-partition migration cannot overwrite it, and runs that boot on
-defaults. **That behaviour is correct and this plan keeps it** — but it is also
-the unannounced-defaults hazard `CLAUDE.md` describes, so §1.4 adds the missing
-annunciation rather than changing the refusal.
+that does not fire the kiln, not an older application.
 
 ## 1. What a step is
 
 ### 1.1 Signature and location
 
-The precedent to copy is `kiln_cfg_store.c`'s pair, whose shape is already
-right: a file-local function taking a `const` pointer to the frozen source
-struct and a pointer to the next version's struct, total, with no return value
-because a shape-to-shape copy cannot fail once the length gate has passed.
+The precedent to copy is `kiln_cfg_store.c`'s pair: a file-local function
+taking a `const` pointer to the frozen source struct and a pointer to the next
+version's struct, with no return value, because a shape-to-shape copy cannot
+fail once the length gate has passed. (That store carries two chained steps
+today; under D1 it stops accumulating and keeps only its newest — see §4.)
 
-Generalised for the zones store, each step lands in
+Each step lands in
 `firmware/KilnFW/App/drivers/persist/zones_config_migrate.c` as:
 
 ```c
-/* vN-1 -> vN. Frozen input type, next-version output type. */
-static void zones_cfg_step_v27_to_v28(const zones_cfg_v27_t *src, zones_cfg_v28_t *dst);
+/* vN-1 -> vN. Frozen input type, current output type. */
+static void zones_cfg_step_v26_to_v27(const zones_cfg_v26_t *src, zones_cfg_t *dst);
 ```
 
-with a table the driver walks:
-
-```c
-typedef void (*zones_cfg_step_fn)(const void *src, void *dst);
-struct zones_cfg_step { uint8_t from; size_t src_size, dst_size; zones_cfg_step_fn fn; };
-```
-
-Three properties each step must hold, all of which the existing per-version
-cases already demonstrate and which the step form makes enforceable:
+Because the chain is length one, the destination *is* the current struct and no
+dispatch table is needed — one `if (version == ZONES_CFG_VERSION - 1)` branch
+calls it. Three properties each step must hold:
 
 1. **Its input type is frozen.** `zones_config_json.h` already freezes each
    historical struct with `_Static_assert` on `sizeof` and on the offset of
-   every field a converter reads (`zone_cfg_v24_t` and `zone_cfg_v25_t` carry
-   exactly this today). A step's input type gets the same treatment the moment
-   it is created, and is never edited again.
-2. **It never reads the current struct.** The bug that a step form exists to
-   prevent is the one `zones_cfg_expected_len_for_version()`'s comment records:
+   every field a converter reads (`zone_cfg_v24_t`, `zone_cfg_v25_t` today). A
+   step's input type gets the same treatment when created, and is never edited.
+2. **It never reads the current struct as its source.** The bug the step form
+   prevents is the one `zones_cfg_expected_len_for_version()`'s comment records:
    returning the *current* struct's size for an old version, which rejected
    every profile on the owner's board and was caught only by a hardware flash.
-   A step whose output type is `zones_cfg_v28_t` rather than `zones_cfg_t`
-   cannot drift when v29 lands.
-3. **It does not carry the source CRC forward.** Each existing case says this
-   in prose; in the step form it is structural, because the destination type's
-   `crc32` is not written by the step at all.
+3. **It does not carry the source CRC forward.** Structural, because the
+   destination's `crc32` is not written by the step at all.
 
-### 1.2 Chain selection and application
+### 1.2 Selection and application
 
 `zones_config_json_decode_blob()` keeps its current front matter unchanged —
 version byte read, newer-than-known refusal, `zones_cfg_expected_len_for_version()`
-length gate, current-version CRC path. The `else` branch gains a driver:
+length gate, current-version CRC path. The `else` branch becomes:
 
-1. Verify the blob's CRC **against its own claimed version's layout** (§1.3).
-2. Walk the step table from the blob's version to `ZONES_CFG_VERSION`, each
-   step's output buffer becoming the next's input.
-3. If no contiguous run of steps reaches the current version, fall through to
-   `convert_versioned_blob_to_current()` (§4) and, if that also declines,
-   return `ZONES_DECODE_CORRUPT` exactly as today.
-4. Stamp `out->version = ZONES_CFG_VERSION`, leave `out->crc32` zero as today,
-   then run the existing post-chain fixups (`zones_config_json_apply_model_fit_defaults()`,
-   `raise_heater_timing_to_floors()`) and `zones_config_json_validate()`
-   unchanged. These are deliberately *not* steps: they apply on every load
+1. If `version == ZONES_CFG_VERSION - 1`: verify the blob's CRC against its own
+   claimed version's layout (§1.3), run the one step, then the existing
+   post-migration fixups (`zones_config_json_apply_model_fit_defaults()`,
+   `raise_heater_timing_to_floors()`) and `zones_config_json_validate()`,
+   unchanged. These are deliberately not steps: they apply on every load
    whatever version the blob claimed, which is the property
-   `raise_heater_timing_to_floors()`'s comment says it needs to also catch a
-   restored old backup.
+   `raise_heater_timing_to_floors()`'s comment says it needs.
+2. Else if the version is within the pre-v26 tail's range: the existing
+   `convert_versioned_blob_to_current()`, unchanged (§4).
+3. Else: **too old to consume** — a distinct outcome from corruption, carrying
+   its own reason string and triggering §1.4's quarantine. It must not be
+   reported as `ZONES_DECODE_CORRUPT`, because the operator's remedy is
+   completely different (step through releases or restore a backup, versus
+   discard a damaged blob).
 
-**Buffer cost is the one real implementation constraint.** Two `zones_cfg_t`-
-sized buffers ping-ponged is roughly 1.8 KB of stack, and
-`zones_config_json_compute_crc()`'s comment records a real 2026-09-09 panic
-caused by a single ~900 B copy of this struct on `profile_executor`'s 4096 B
-stack. Decode runs at boot and from the httpd worker, not from
-`profile_executor`, but the step driver must still use two file-static buffers
-under the store's existing lock, never stack locals. This is a blocking design
-constraint on the implementation, not an optimisation.
+Since the chain is length one there is no ping-pong buffering, and the ~1.8 KB
+of stack two `zones_cfg_t` buffers would have cost does not arise. The single
+step still writes into a file-static destination under the store's existing
+lock rather than a stack local: `zones_config_json_compute_crc()`'s comment
+records a real 2026-09-09 panic from a single ~900 B copy of this struct on
+`profile_executor`'s 4096 B stack.
 
-### 1.3 What "verify the CRC of an old blob" means under a chain
+### 1.3 What "verify the CRC of an old blob" means
 
-Today's two old-version CRC gates (v25 as N-1, v24 as N-2, added by
-`49772fa5`) are hand-written copies of the same six lines, each with a
-`_Static_assert` that `crc32` is the last field of that version's struct. Under
-the chain they stop being special cases and become **a property of the step
-table**: each entry already knows its source size, so one generic
+Unchanged by D1 and still the rule: **the CRC is verified once, against the
+blob's own layout, before the step runs — never after.** The post-step struct
+is in RAM and never crossed a flash boundary, so re-CRCing would check the
+step's own arithmetic rather than storage integrity, against a synthetic value
+no writer ever produced.
 
-```c
-crc_ok = crc32_over(blob, src_size - 4) == read_u32(blob + src_size - 4);
-```
+Today's N-1 gate (v25, and v24 as N-2, added by `49772fa5`) is exactly the
+right shape and becomes the permanent pattern: each new step brings its own
+six-line gate plus a `_Static_assert` that `crc32` is the last field of its
+input struct.
 
-covers every version that has a step, with the same `_Static_assert` per
-frozen type. That is the honest answer to "what does verifying an old blob's
-CRC mean": **the CRC is verified once, against the blob's own layout, before
-the first step runs — never again between steps**, because the intermediate
-buffers are in RAM and never crossed a flash boundary. Re-CRCing between steps
-would check the step's own arithmetic, not storage integrity, and would need a
-synthetic CRC per intermediate version that no writer ever produced.
+The N-2 gate is a casualty of D1 worth naming: once only N-1 is consumable, a
+v(N-2) blob is refused before any CRC question arises, so that gate becomes
+dead code at the next bump and should be deleted with the step that obsoletes
+it, not left to rot. No retroactive coverage is created for v1..v23 (v1..v6
+predate `crc32` entirely); claiming otherwise in a log line or test name would
+be a vacuous gate.
 
-Consequence worth naming: the chain does **not** retroactively give v1..v23
-CRC coverage, and must not pretend to. v1..v6 predate the `crc32` field
-entirely; v7..v23 have a real CRC that the tail converter (§4) still discards,
-exactly as today. The step-table gate covers each version from the first one
-that gets a step onward — which under §4's decision means v26 onward. Anything
-implying broader coverage in a log line or a test name is a vacuous gate.
+### 1.4 Quarantine, in both directions
 
-### 1.4 Newer-than-known: keep the refusal, add the annunciation
+Extends D3's newer-than-known quarantine to cover D1's older-than-consumable
+case. **A separate agent is implementing the quarantine mechanism; this section
+is the contract it must satisfy, not a second implementation.**
 
-Unchanged: refuse, leave flash untouched, run on defaults for that boot. What
-is missing is that the operator is told only by a `ESP_LOGW` nobody reads
-during a rollback — `CLAUDE.md` records a firing started on firmware-default
-PID gains after exactly this. Pending work, small and independent of the rest
-of this plan:
+| Blob state | Today | Required |
+|---|---|---|
+| Newer than firmware knows | refused, `ESP_LOGW`, runs on defaults | quarantine: refuse firing, state the reason |
+| Older than the one step can consume | would decode-fail and fall back to defaults | **same quarantine, distinct reason string** |
 
-- A sticky flag, set on `ZONES_DECODE_NEWER`, surfaced on `/api/zones/config`
-  and in `capability_preflight`, that **refuses to start a firing** until the
-  operator either flashes firmware that understands the blob or explicitly
-  discards it. `kiln_cfg_store.c`'s `set_quarantine()` is the working
-  precedent — same posture (flash untouched, writes refused until the operator
-  acts), applied to the zones store, which currently has no equivalent.
+Both set a sticky flag surfaced on `/api/zones/config` and honoured by
+`capability_preflight`, which **refuses to start a firing** until the operator
+acts. Flash is left untouched in both cases: the bytes are the operator's only
+copy and a board that cannot read them must not overwrite them.
+`kiln_cfg_store.c`'s `set_quarantine()` is the working precedent — same posture,
+and its message names the version it found and the version it expected, which
+is exactly what an operator needs to know which intermediate release to install.
+
+The two reasons must remain distinguishable in the operator-facing text. "Too
+new: install newer firmware or discard" and "too old: step through the
+intervening releases, or restore a backup" are different instructions, and
+collapsing them into one "config unreadable" message would destroy the only
+actionable information the board has.
+
+### 1.5 The `cfg`/NVS second copy
+
+Under D1 the dual-write bridge needs explicit handling rather than inheriting
+the policy for free. `nvs_load()` calls `zones_config_cfg_fs_resolve()`, which
+picks a winner between the NVS blob and the `cfg` file by revision and may
+write a resync copy to the loser. Both copies are independently versioned.
+
+The hazard: if one copy is migrated and rewritten while the other keeps its
+old-version bytes, a later release sees a blob two versions behind on whichever
+side lost, and D1 makes that unreadable. **Requirement: a migration write-back
+(§1.6) must update both copies, or deliberately invalidate the stale one.**
+This is inert on boards with no `cfg` partition, which is all of them today,
+and must be settled before `cfg` goes live rather than after.
+
+### 1.6 Migration must persist — the blocking defect
+
+**Found by inspection during this revision, and it blocks D1.**
+
+A migrated blob is **never written back on the ordinary load path**.
+`nvs_load()` decodes into `s_zones.cfg` and returns; flash still holds the
+old-version bytes. The only save-back on any migrated path is inside
+`migrate_from_default_partition()`, a one-time legacy-partition move that calls
+`nvs_save()` — not the general case. Under the previous whole-chain reading
+this was harmless, because a later firmware could still read the old blob
+whenever it eventually got rewritten.
+
+**Under D1 it defeats the entire upgrade path.** An operator who does exactly
+the right thing — install vN+1, boot it, install vN+2 — still arrives with vN
+bytes on flash, because nothing during the vN+1 boot necessarily wrote the
+migrated config back. vN+2 can only consume vN+1. The config is lost despite
+correct operator behaviour, which is the worst possible failure shape: it
+punishes compliance.
+
+Required work, and it is a prerequisite for the first step, not a follow-up:
+
+1. `zones_config_json_decode_blob()` reports whether it migrated (a new out-flag
+   or a distinct `ZONES_DECODE_OK_MIGRATED` result). `out_valid` cannot serve —
+   it is true for both current and migrated blobs.
+2. `nvs_load()` persists immediately on that signal, through the existing flash
+   worker, before the boot proceeds to anything that can fire.
+3. The write-back is **read-back verified**. `CLAUDE.md`'s standing rule from the
+   boot-guard episode applies directly: an NVS write reporting success proves
+   nothing about flash. A migration whose write-back is unverified is a
+   migration that may silently need doing again next boot — and under D1 the
+   next boot may be the one that can no longer do it.
+4. If the write-back cannot be verified, **quarantine rather than proceed**
+   (§1.4). Running a firing on a config that could not be persisted forward is
+   precisely the situation the operator must be told about.
 
 ## 2. The Pico half, and the CT normals
 
@@ -207,166 +282,220 @@ owns it) records that the Pico's config store lives outside both application
 slots, so an automatic update preserves `abs_max_temp_c`, the arming state and
 the CT normals `i_normal_a` by construction, with one residual: a
 `CONFIG_STORE_FORMAT_VERSION` bump, deliberately excluded from automatic
-update. The just-settled decision is that such a bump must carry the CT normals
+update. The settled decision is that such a bump must carry the CT normals
 (`i_normal_a`, param ids `0x031A`/`0x031B`/`0x031C`, i.e. 794-796 decimal,
 `firmware/SaftyFW/src/config_params.c`) forward automatically rather than
 forcing recalibration.
 
-**Is a step chain the mechanism that makes that implementable? Yes, and the
-Pico is already 90% of the way there.** `config_store_unpack()`'s v1 branch is
-already a correctly-shaped single step: it checks the v1 CRC against *v1's own
-shorter range* (`REC_V1_OFF_CRC`), starts from `config_store_default()`, then
-overlays exactly the fields v1 held. Formalising it as a table entry and
-requiring each future bump to add one is a small change.
+**Does the step form make that implementable? Yes, and the Pico is already
+most of the way there.** `config_store_unpack()`'s v1 branch is a correctly-
+shaped single step: it checks the v1 CRC against *v1's own shorter range*
+(`REC_V1_OFF_CRC`), starts from `config_store_default()`, then overlays exactly
+the fields v1 held.
 
 The thing that actually blocks carrying `i_normal_a` forward is **not** the
 migration shape — it is `calibration_missing`, which the v1 step forces `true`
-unconditionally with a documented rationale: a migrated record "was never
-commissioned against the fields this pass added". That rationale is right for
-v1, where the added fields were commissioning fields. It is wrong as a blanket
-rule, and under the owner's decision it must become per-step:
+unconditionally, with a documented rationale: a migrated record "was never
+commissioned against the fields this pass added". That is right for v1, whose
+additions were commissioning fields. It is wrong as a blanket rule, and must
+become per-step:
 
 - Each step declares which `fields_set` bits it carries forward and whether its
-  own additions require recommissioning. A bump that adds no commissioning-
-  relevant field carries `calibration_missing` through unchanged and preserves
+  own additions require recommissioning. A bump adding no commissioning-relevant
+  field carries `calibration_missing` through unchanged and preserves
   `i_normal_a` plus its three `CONFIG_STORE_SET_I_NORMAL_A_*` bits.
-- A bump that *does* add a commissioning-relevant field sets
-  `calibration_missing` — but that is then a deliberate, per-step,
-  reviewable statement, not an artefact of the migration path.
+- A bump that does add one sets `calibration_missing` — a deliberate,
+  reviewable, per-step statement rather than an artefact of the migration path.
 - `config_params_validate_ranges()` continues to run on the migrated record, as
-  both existing branches do. A carried-forward `i_normal_a` that fails
-  `RANGE_F32_NONNEG` still invalidates the slot, which is the correct outcome.
+  both existing branches do. A carried-forward `i_normal_a` failing
+  `RANGE_F32_NONNEG` still invalidates the slot, which is correct.
 
-That per-step `calibration_missing` policy is the whole mechanism. Without it,
-carrying the normals forward is impossible however the migration is shaped;
-with it, the chain form makes the declaration a required field of each new
-step rather than something to remember.
+D1 applies here too, and the Pico is where it bites hardest: a safety processor
+two format versions behind loses its commissioned ceiling and CT normals. The
+Pico's own store already refuses an unknown version and falls back to
+`config_store_default()` **with `calibration_missing` forced true**, which is
+the correct posture — the guards then know they are uncommissioned rather than
+trusting defaults. That is the behaviour §1.4 is asking the ESP side to match.
 
-## 3. Testing, with a deliberate asymmetry
+## 3. Testing
 
 **Two halves, two standards. A later reader must not mistake the first for the
 second.**
 
 **The pre-v26 tail keeps whatever coverage it has, and this work owes it
-nothing more.** `test_zones_http.c` today exercises v6..v23 forward-conversion
-by constructing a frozen historical struct in C, field by field, and staging it
-(`stage_zones_blob()`), with each such test setting `src.crc32 = 0` and a
-comment recording that the old-version path does not check it. That is real
-coverage of the conversion arithmetic and it stays. It is not the standard for
-new work, and no new test should be modelled on it.
+nothing more.** `test_zones_http.c` exercises v6..v23 forward-conversion by
+constructing a frozen historical struct in C and staging it
+(`stage_zones_blob()`), each such test setting `src.crc32 = 0` with a comment
+recording that the old-version path does not check it. That is real coverage of
+the conversion arithmetic and it stays. It is **not** the standard for new work
+and no new test should be modelled on it.
 
 **Every new step owes, from the day it lands:**
 
-1. **A real blob at its input version, byte-exact, with a real CRC.** Not a
-   C struct assembled in the test — a captured byte array. The reason is the
-   `expected_len_for_version()` failure already in this tree's history: a test
-   that builds its input from a struct definition shares the very assumption
-   the migration can get wrong, and passes when the on-flash reality differs.
-2. **Where the blobs live.** A new `firmware/KilnFW/App/test/cfg_blobs/`
-   directory, one `zones_v<N>.bin` per version, each with a sidecar `.md`
-   naming its provenance. Both sources are legitimate and both are needed:
-   - **Captured**, preferred: dump the bench board's `kiln_nvs` blob (or the
-     `cfg` partition file, which holds the same bytes) *before* flashing the
-     firmware that bumps the version. This is a step in the release procedure,
-     not an afterthought — once the bump is flashed the pre-bump blob is gone.
-   - **Synthesized**, fallback: produced by a host program from the frozen
-     struct plus a real computed CRC, for a version whose capture window was
-     missed. A synthesized blob is marked as such in its sidecar and does not
-     count as satisfying (1) on its own if a capture was possible.
-3. **Chain-level tests, not just step-level.** At least one test that decodes
-   the oldest blob with a step and asserts it reaches the current version
-   through every intervening step, and one that asserts a corrupted byte
-   anywhere in an old blob is rejected by §1.3's gate rather than migrated.
-4. **A negative test per step**, per this repo's standing rule: break the
-   step's field mapping, confirm the test fails, restore by hand, and force a
-   full rebuild before re-measuring — `CLAUDE.md` records a poisoned `.exe`
-   surviving an otherwise-correct revert and reaching a committed verdict.
+1. **A real blob at its input version, byte-exact, with a real CRC** — a
+   captured byte array, not a C struct assembled in the test. A test that builds
+   its input from the struct definition shares the very assumption the migration
+   can get wrong, and passes when on-flash reality differs. This is the
+   `expected_len_for_version()` failure already in this tree's history.
+2. **Fixtures live in `firmware/KilnFW/App/test/cfg_blobs/`**, one
+   `zones_v<N>.bin` per version with a sidecar `.md` naming its provenance
+   (which board, which firmware build, captured or synthesized).
+3. **A round-trip test through the write-back path** (§1.6): decode the old
+   blob, persist, re-read, and assert the stored version advanced. Without this
+   the §1.6 defect can regress silently, and under D1 a silent regression costs
+   the config.
+4. **A negative test per step**: break the step's field mapping, confirm the
+   test fails, restore by hand, and **force a full rebuild** before re-measuring
+   — `CLAUDE.md` records a poisoned `.exe` surviving an otherwise-correct revert
+   and reaching a committed verdict.
 
-Same standard applies to each new `CONFIG_STORE_FORMAT_VERSION` step on the
-Pico, whose host tests already live in `firmware/SaftyFW/test/test_config_store.c`.
+Same standard for each new `CONFIG_STORE_FORMAT_VERSION` step on the Pico,
+whose host tests live in `firmware/SaftyFW/test/test_config_store.c`.
 
-## 4. The existing monolithic converter — settled, not a recommendation
+### 3.1 D4, settled: the capture is a mandatory release step
+
+**Owner decision, as recommended.** Capturing a real config blob before each
+version bump is a required part of the release procedure, not best-effort.
+
+- **When:** before flashing the firmware that bumps the version. The window
+  closes permanently at that moment — once the bumped build has run and
+  persisted (§1.6), the pre-bump bytes are gone from the only board that had
+  them.
+- **What:** the raw `kiln_nvs` zones blob (and, once `cfg` is live, the
+  corresponding file), plus the Pico's config record for a
+  `CONFIG_STORE_FORMAT_VERSION` bump.
+- **Where:** committed to `firmware/KilnFW/App/test/cfg_blobs/` with its
+  sidecar, in the same commit as the step that consumes it.
+- **How a test consumes one:** the step's test reads the `.bin` verbatim,
+  hands those exact bytes to `zones_config_json_decode_blob()`, and asserts both
+  the decoded field values and that the CRC gate accepted the real stored CRC.
+  A test that recomputes the CRC over the fixture instead of using the stored
+  one has disarmed the gate it exists to prove.
+- **Synthesized fallback:** permitted only where a capture window was genuinely
+  missed, marked as such in the sidecar, and never counted as satisfying (1)
+  when a capture was possible. §5's check cannot tell the two apart, so this one
+  rests on review.
+
+## 4. The existing monolithic converter, and D2's expiry
+
+### 4.1 Settled: forward-only, not retroactive
 
 **Owner decision, 2026-09-16:** "Start that from here on out no I need to do it
-historically". The policy is forward-only. `convert_versioned_blob_to_current()`
-is **not** decomposed retroactively; it stays exactly as it is, as the pre-v26
-tail, and the chain of single-version steps begins at the next bump above 26.
-A blob older than the tail's coverage is handled by the existing converter
-exactly as today.
+historically". `convert_versioned_blob_to_current()` is **not** decomposed
+retroactively; it stays as the pre-v26 tail, and single-version steps begin at
+the next bump above 26.
 
-The part that can actually go wrong is the handoff, so it is pinned here
-rather than left to the implementation:
+The handoff is the part that can go wrong, so it is pinned rather than left to
+implementation:
 
 | Blob version | Owner of that blob | Notes |
 |---|---|---|
-| > `ZONES_CFG_VERSION` | neither — refused | `ZONES_DECODE_NEWER`, unchanged (§1.4) |
+| > `ZONES_CFG_VERSION` | neither — refused | quarantined, §1.4 |
 | == `ZONES_CFG_VERSION` | the current-version branch | full CRC check, unchanged |
-| 26 .. `ZONES_CFG_VERSION - 1` | **the step chain** | v26 is the first version with a step, added by the bump to v27 |
-| 1 .. 25 | **the tail converter**, unchanged | direct-to-current, exactly as today |
+| == `ZONES_CFG_VERSION - 1` | **the one step** | its own CRC gate, §1.3 |
+| 1 .. 25, while the tail survives | **the tail converter**, unchanged | direct-to-current, exactly as today |
+| everything else | nobody — **too old to consume** | quarantined, §1.4, distinct reason |
 
-Read the middle row carefully: v26 is the chain's *input floor*, not its first
-output. The step table is empty until `ZONES_CFG_VERSION` becomes 27, at which
-point exactly one entry exists, `from = 26`. Every version is claimed by exactly
-one owner and none by both, enforced mechanically by §5's check: the step
-table's lowest `from` must equal 26 and its entries must be contiguous up to
-`ZONES_CFG_VERSION - 1`, while the tail converter's `switch` must cover 1..25
-and no more. A gap or an overlap fails the build rather than producing a blob
-that silently falls through to `ZONES_DECODE_CORRUPT`.
+At `ZONES_CFG_VERSION` 27 the step's input is v26 and the tail still covers
+1..25, leaving **no gap**. At 28 the step's input is v27 and v26 belongs to
+nobody — the first version to fall into "too old to consume". Every version is
+claimed by exactly one owner or explicitly by none, enforced by §5's check
+rather than by reading.
 
-One consequence of the tail staying: its known CRC coverage gap stays too.
-v24/v25 keep their hand-written gates from `49772fa5`; v7..v23 remain
-unchecked; v1..v6 have no CRC to check. §1.3's generic gate applies to the
-chain only. Documenting that boundary honestly is part of this work; closing it
-is not.
+### 4.2 D2, settled: steps expire past a fixed age
+
+**Owner decision, overriding this plan's earlier "no expiry" recommendation.**
+
+Under D1 the live chain is already length one, so expiry does not shorten a
+chain — **it governs the pre-v26 tail**, which is the only accumulated history
+in the tree. Concretely, "drop past a fixed age" means: the tail converter's
+oldest cases are deleted once they pass the floor, and the versions they covered
+join "too old to consume".
+
+Proposed concrete policy, for confirmation at implementation time:
+
+- **Measured in config versions, not releases or dates.** Versions are what the
+  code and the blobs actually carry; release count is not recorded on flash, and
+  a date is not knowable from a blob. A floor expressed in versions is checkable
+  by §5's check; one expressed in dates is not.
+- **Floor: `ZONES_CFG_VERSION - 8`**, a named constant beside the version
+  itself, with a comment stating that lowering it is a data-loss decision. Eight
+  is chosen as roughly a season of this project's bump rate — long enough that
+  the bench board's own blob is never orphaned between sessions, short enough
+  that the tail actually shrinks. It is a starting value, not a derived one.
+- **A board below the floor quarantines** (§1.4) — refuses firing, states the
+  version it found, leaves flash untouched. It does **not** silently reset.
+- **Deletions happen at bump time**, in the same commit as the new step, so the
+  tail shrinks by exactly the versions that crossed the floor and the change is
+  reviewable alongside the thing that caused it.
+
+**Named plainly: dropping the tail is what strands an old board permanently.**
+Today a v7 blob still migrates. Once the floor passes 7, that same board's
+config is unreadable by every future firmware, forever, with no recovery path
+but re-entering values by hand. That is the accepted cost of the decision, and
+the reason §1.4's quarantine must name the version it found — for a stranded
+board, that message is the only remaining evidence of what the config was.
 
 ## 5. Mechanical enforcement
 
-Yes — a config version bump should fail the build if it does not bring its step
-and its test. This repo's own history is the argument: `check_no_orphaned_checks.ps1`
-exists because "someone remembers" failed at least three times, and a check
-that is never negative-tested ships as a vacuous pass.
+A config version bump must fail the build if it does not bring its step and its
+test. `check_no_orphaned_checks.ps1` exists because "someone remembers" failed
+at least three times.
 
-Proposed `tools/check_config_migration_steps.ps1`, run by
-`run_all_checks.ps1`'s existing `check_*.ps1` glob (so it needs no
-registration), asserting, for each governed store in §0.1:
+Proposed `tools/check_config_migration_steps.ps1`, picked up automatically by
+`run_all_checks.ps1`'s `check_*.ps1` glob, asserting for each governed store:
 
-1. A step exists whose `from` equals `CURRENT_VERSION - 1`, unless the current
-   version is at or below that store's tail boundary (26 for zones).
-2. The step table is contiguous from the store's chain floor to
-   `CURRENT_VERSION - 1`, with no duplicate `from` and no overlap with the tail
-   converter's covered range (§4's table, enforced literally).
-3. Every step's input type has its `sizeof` and `crc32`-is-last `_Static_assert`.
-4. A fixture `cfg_blobs/zones_v<from>.bin` exists for every step, with a sidecar.
-5. That fixture's filename appears in a test source, so a blob cannot sit in the
-   directory unread — the same failure `check_no_orphaned_checks.ps1` guards.
+1. A step exists whose input is `CURRENT_VERSION - 1`, unless the current
+   version is still within the tail's range (26 for zones).
+2. **Exactly one** step exists — under D1 a second is a defect, not a bonus.
+   This is the check that keeps D1 from silently decaying back into an
+   accumulated chain.
+3. No gap and no overlap between the step, the tail's covered range, and the
+   expiry floor (§4.1's table, enforced literally).
+4. Every step's input type carries its `sizeof` and `crc32`-is-last
+   `_Static_assert`.
+5. A fixture `cfg_blobs/zones_v<input>.bin` plus sidecar exists for the step,
+   and its filename appears in a test source — so a blob cannot sit unread, the
+   failure `check_no_orphaned_checks.ps1` guards.
+6. The expiry floor constant exists and the tail's oldest case matches it.
 
-The check must itself be negative-tested before it lands: bump the version in a
-scratch tree without adding a step and confirm a red run, per this repo's rule
-that eight checks shipped as vacuous passes without that step.
+The check must itself be negative-tested before landing: bump the version in a
+scratch tree without adding a step, and confirm a red run. Eight checks in this
+repo shipped as vacuous passes without that discipline.
 
-## 6. Owner decisions left open
+## 6. Decisions — all settled
 
-**D1 — Whole chain or newest step only (§0.2).** *Recommendation: whole chain
-(reading A).* It is the only reading under which a board that skips a release
-keeps its tuning, and it is what `kiln_cfg_store.c` already does. Reading B
-would make every skipped release silently reset zone tuning to firmware
-defaults and, on the Pico, force a CT recalibration the owner has just asked to
-avoid.
+**D1 — one step only, not the whole chain.** Settled 2026-09-16, against this
+plan's recommendation. Sequential upgrade is the intended path; a skipped
+release is not expected to migrate. §0.2, §0.3, and the §1.6 write-back defect
+are the consequences.
 
-**D2 — How far back the chain is supported once it is long.** *Recommendation:
-no expiry for now; revisit at ten steps.* Each step is small and flash is not
-the constraint (`docs/OTA_SINGLE_SLOT_PLAN.md` gives the application 8 MiB).
-Set a policy when there is evidence of a cost, not before.
+**D2 — steps expire past a fixed age.** Settled, against this plan's
+recommendation. Governs the pre-v26 tail; concrete policy proposed in §4.2,
+including that dropping the tail strands an old board permanently.
 
-**D3 — Does a firing-blocking quarantine on a newer-than-known blob (§1.4) go
-in now or with the OTA single-slot work?** *Recommendation: now, and
-independently.* It is the live hazard `CLAUDE.md` already records against the
-current `ota_rollback_esp()` path, it does not depend on any step existing, and
-it is a few hours' work.
+**D3 — quarantine firing, land now.** Settled as recommended, and extended by
+§1.4 to cover the older-than-consumable direction as well as newer-than-known.
+Implemented by a separate agent; §1.4 is the contract, not a second
+implementation.
 
-**D4 — Is a pre-bump blob capture (§3.2) a mandatory release step?**
-*Recommendation: yes, mandatory, as part of the bump itself.* The capture
-window closes the moment the bumped firmware is flashed, and a synthesized
-fallback shares the assumption the test is meant to check.
+**D4 — pre-bump blob capture is mandatory.** Settled as recommended. §3.1.
 
-Item 4 (the tail converter) is settled, not open — see §4.
+The tail-converter question (originally item 4) was settled earlier the same
+day and is recorded in §4.1.
+
+### 6.1 Residual risks carried by these decisions
+
+Not open questions — accepted consequences, recorded so they are not
+rediscovered as surprises:
+
+1. **§1.6 is a prerequisite, not a follow-up.** D1 is unsafe until a migrated
+   config is persisted and read-back verified on the ordinary load path. The
+   first step must not land before it.
+2. **Enabling anti-rollback would break the upgrade path** (§0.3). Any future
+   secure-boot work must account for this or D1 becomes unimplementable.
+3. **Each intermediate hop carries single-slot OTA's failure mode** — a failed
+   image lands in recovery, N times instead of once. Recoverable over Wi-Fi, but
+   the exposure scales with how far behind the board is.
+4. **`cfg`/NVS divergence** (§1.5) must be settled before the `cfg` partition
+   goes live, not after.
