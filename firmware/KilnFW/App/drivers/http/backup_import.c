@@ -1465,9 +1465,22 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
             safety_ceiling_refusal_class_t out_class = SAFETY_CEILING_REFUSAL_NONE;
             if (!safety_cfg_write_apply_pairs(s_hw_safety, pairs, n_pairs, true /* commit */, reason,
                                               sizeof(reason), &out_class)) {
+                /* err_msg's real caller buffer is 160 B (backup_http.c's
+                 * POST handler); this fixed 84-byte prefix leaves only 75
+                 * bytes free before the terminator, not 80 -- %.80s could
+                 * write up to 80 into that 75-byte remainder
+                 * (-Werror=format-truncation caught it outright: KilnFW
+                 * target build broke on origin/main at 407ac1ba). Trimmed
+                 * to %.75s, the actual free space, rather than widening any
+                 * buffer: a longer `reason` string here (e.g. a verbose
+                 * commit_reject_reason_words() sentence) is truncated, same
+                 * as every other %.NNs precision cap already used in this
+                 * file (%.48s above), not silently overflowed -- a
+                 * truncated error MESSAGE is safe; it never reaches
+                 * anything committed to config. */
                 snprintf(err_msg, err_cap,
                         "backup carries a safety processor i_normal_a baseline; restore refused/unconfirmed: "
-                        "%.80s",
+                        "%.75s",
                         reason);
                 return false;
             }
