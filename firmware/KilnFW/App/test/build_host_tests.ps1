@@ -56,6 +56,7 @@ try {
         # turn reuses ota_auth.c's lockout primitive by embedding a fresh
         # instance, not by calling into a second parallel lockout of its own.
         (Join-Path $testDir "test_lcd_auth_state.c"),
+        (Join-Path $testDir "test_security_http_core.c"),
         (Join-Path $testDir "test_ota_interlock.c"),
         (Join-Path $testDir "test_heat_interlock.c"),
         (Join-Path $testDir "test_heat_enable.c"),
@@ -137,6 +138,8 @@ try {
         (Join-Path $driversDir "net/auth_reset_gesture.c"),
         (Join-Path $driversDir "ui/lcd_auth_state.c"),
         (Join-Path $driversDir "net/ota_interlock.c"),
+        (Join-Path $driversDir "http/security_http_core.c"),
+        (Join-Path $driversDir "http/security_backend_placeholder.c"),
         (Join-Path $driversDir "persist/ota_record.c"),
         (Join-Path $driversDir "control/heat_interlock.c"),
         (Join-Path $driversDir "control/heat_enable.c"),
