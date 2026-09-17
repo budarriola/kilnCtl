@@ -767,32 +767,25 @@ CEILING_BYTES = {
     # hazard documented in CLAUDE.md. screen_idle.c itself is BYTE-IDENTICAL
     # since the 3008 baseline (verified: `git diff <3008-baseline>..HEAD --
     # .../ui/screen_idle.c` is empty) -- the growth is entirely in callees on
-    # this task's own reachable path, confirmed by standalone -fstack-usage
-    # recompiles of the two affected translation units against this exact
-    # source tree (no full link available -- see below):
-    #   +96 B in screen_idle_refresh_inputs's own frame (0x8b0 vs 0x850
-    #   words->2224 vs 2128 B): its local `dashboard_status_t status;` grew
-    #   because dashboard_http.h added 5 new fields (2 bool, 2 uint8_t, a
-    #   char[96] reason string) to surface the quarantine fault -- no line in
-    #   screen_idle.c changed, only the struct it embeds on its own stack.
-    #   +48 B in dashboard_get_status's own frame (0x1a0 vs 0x1d0 words->416
-    #   vs 464 B): a new local `zones_cfg_load_fault_t load_fault;` plus the
+    # this task's own reachable path:
+    #   +96 B in screen_idle_refresh_inputs's own frame (2224 vs 2128 B):
+    #   its local `dashboard_status_t status;` grew because dashboard_http.h
+    #   added 5 new fields (2 bool, 2 uint8_t, a char[96] reason string) to
+    #   surface the quarantine fault -- no line in screen_idle.c changed,
+    #   only the struct it embeds on its own stack.
+    #   +48 B in dashboard_get_status's own frame (416 vs 464 B): a new
+    #   local `zones_cfg_load_fault_t load_fault;` plus the
     #   `zones_config_get_load_fault()` call and an `snprintf()` into
     #   out->zones_config_load_fault_reason.
-    # Honest free at 3152 is 2992 B of 6144 B (48.7%) -- headroom actually
-    # improves over the 46.2% at the 3008 baseline because the task's own
-    # declared stack was not the thing measured there; this is legitimate,
-    # understood growth closing a real safety hazard, not a regression to
-    # paper over, and not one to design around by removing the surfaced
-    # fault. A full linked KilnCtrl.elf could not be built as of this
-    # measurement (2026-09-16) -- origin/main's backup_import.c:1284 fails
-    # -Werror=format-truncation, a pre-existing defect out of scope here --
-    # so this was measured via targeted `xtensa-esp32s3-elf-gcc -fstack-usage
-    # -c` recompiles of dashboard_http.c and screen_idle.c using the exact
-    # flags from build/compile_commands.json, cross-checked against a
-    # flash-verified archived ELF at commit d459d124 (an ancestor of this
-    # baseline) which independently reproduced the prior 3008 B total with
-    # the same per-function breakdown.
+    # Verified 2026-09-16 against a real linked KilnCtrl.elf (`idf.py build`,
+    # clean worktree at this commit's parent, backup_import.c:1284's
+    # -Werror=format-truncation break already fixed by 7ad48c62 by then) via
+    # this checker script itself: total 3152 B exactly, honest free 2692 B
+    # of 6144 B (43.8%) after UNMODELED_OVERHEAD_BYTES. That is down from the
+    # 3008-baseline's headroom, as expected for a straightforward size
+    # increase -- this is legitimate, understood growth closing a real
+    # safety hazard, not a regression to paper over, and not one to design
+    # around by removing the surfaced fault.
     "screen_idle": 3152,
     "uart_owner_evt_task": 176,
     "uart_proto_rx": 3584,
