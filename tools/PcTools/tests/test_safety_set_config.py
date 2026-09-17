@@ -64,46 +64,130 @@ class SafetyTcTypeNameTableTests(unittest.TestCase):
         self.assertEqual(len(values), len(set(values)), "no two names share a wire value")
 
 
+def _idle_profile():
+    return unittest.mock.MagicMock(state=0, state_name="idle", profile_id=0, name="")
+
+
+def _idle_autotune():
+    return unittest.mock.MagicMock(state=0, state_name="idle", zone=0)
+
+
 class SafetySetTcTypeToolTests(unittest.TestCase):
-    # 2026-08-24: safety_set_tc_type() now goes through
-    # SafetyClient.set_config() (waits a short window for the optional
-    # ESP-side refusal reply -- ROADMAP.md "KilnFW PC-link command
-    # acknowledgement") instead of the raw fire-and-forget mcp_server._send.
-    # These patch SafetyClient.set_config directly rather than _send.
-    def test_known_name_sends_expected_bytes(self):
+    # 2026-09-17: safety_set_tc_type() no longer sends the raw fire-and-forget
+    # SAFETY_CMD_SET_CONFIG wire command (that reply carries no proof the
+    # write landed -- see devices.safety_set_config()'s docstring). It now
+    # writes the identical config_store `tc_type` field over
+    # GET/POST /api/safety/commissioning, the same generically-verifying
+    # path safety_set_rate_guard()/safety_set_commissioning_fields() use, so
+    # these tests mock safety_cfg_http_client.apply_safety_fields directly
+    # (test_safety_rate_guard.py's own convention) instead of
+    # SafetyClient.set_config.
+    def setUp(self):
+        self._patches = [
+            unittest.mock.patch.object(mcp_server._profiles, "get_exec_status", return_value=_idle_profile()),
+            unittest.mock.patch.object(mcp_server._autotune, "get_status", return_value=_idle_autotune()),
+        ]
+        for p in self._patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_known_name_writes_expected_field(self):
+        from kilnctrl import safety_cfg_http_client as sc
+
         with unittest.mock.patch.object(
-            mcp_server._safety, "set_config", return_value=devices.OkReason(ok=True)
-        ) as mock_set_config:
+            sc, "apply_safety_fields",
+            return_value=sc.SafetyApplyResult(ok=True, confirmed=["tc_type"], commissioned_after=True),
+        ) as mock_apply:
             result = mcp_server.safety_set_tc_type("K")
         self.assertTrue(result.startswith("ok"))
-        mock_set_config.assert_called_once_with(0x03)
+        self.assertIn("tc_type=3", result)
+        (host, fields), kwargs = mock_apply.call_args
+        self.assertEqual(fields, {"tc_type": 0x03})
+        self.assertTrue(kwargs.get("verify", True))
 
     def test_lowercase_name_accepted(self):
-        with unittest.mock.patch.object(
-            mcp_server._safety, "set_config", return_value=devices.OkReason(ok=True)
-        ) as mock_set_config:
-            mcp_server.safety_set_tc_type("k")
-        mock_set_config.assert_called_once_with(0x03)
+        from kilnctrl import safety_cfg_http_client as sc
 
-    def test_unknown_name_never_reaches_set_config(self):
-        with unittest.mock.patch.object(mcp_server._safety, "set_config") as mock_set_config:
+        with unittest.mock.patch.object(
+            sc, "apply_safety_fields",
+            return_value=sc.SafetyApplyResult(ok=True, confirmed=["tc_type"]),
+        ) as mock_apply:
+            mcp_server.safety_set_tc_type("k")
+        (host, fields), _kwargs = mock_apply.call_args
+        self.assertEqual(fields, {"tc_type": 0x03})
+
+    def test_unknown_name_never_reaches_the_wire(self):
+        from kilnctrl import safety_cfg_http_client as sc
+
+        with unittest.mock.patch.object(sc, "apply_safety_fields") as mock_apply:
             result = mcp_server.safety_set_tc_type("not-a-type")
-        mock_set_config.assert_not_called()
+        mock_apply.assert_not_called()
         self.assertTrue(result.startswith("error:"))
 
-    def test_refusal_reason_reaches_the_caller(self):
-        # The regression this pass fixes: a truncated/out-of-range refusal
-        # used to be silently dropped in SafetyClient's own consumer thread
-        # (mcp_server called the fire-and-forget _send, which never waited
-        # for the reply). Now it must show up in the returned string.
+    def test_readback_mismatch_reported_as_failure_not_success(self):
+        # The regression this pass fixes: the old wire path had no reply to
+        # even be wrong about -- "outcome shows up on the Pico's log, not
+        # here" was the tool's own prior docstring. Now a write that does
+        # not actually land must be reported as a failure, not "ok".
+        from kilnctrl import safety_cfg_http_client as sc
+
         with unittest.mock.patch.object(
-            mcp_server._safety,
-            "set_config",
-            return_value=devices.OkReason(ok=False, reason="out of range"),
+            sc, "apply_safety_fields",
+            return_value=sc.SafetyApplyResult(
+                ok=False, post_reason="",
+                mismatches=["tc_type: expected 3, board reports 0"],
+            ),
+        ):
+            result = mcp_server.safety_set_tc_type("K")
+        self.assertTrue(result.startswith("failed"))
+        self.assertIn("tc_type", result)
+
+    def test_armed_rejection_names_the_grace_window_fix(self):
+        from kilnctrl import safety_cfg_http_client as sc
+
+        with unittest.mock.patch.object(
+            sc, "apply_safety_fields",
+            return_value=sc.SafetyApplyResult(
+                ok=False,
+                post_reason="commit rejected: tc_type (id 261) -- relay is ARMED -- "
+                            "config writes are refused while ARMED -- values were staged but NOT written",
+            ),
         ):
             result = mcp_server.safety_set_tc_type("K")
         self.assertTrue(result.startswith("refused"))
-        self.assertIn("out of range", result)
+        self.assertIn('debug_reset(peer="pico")', result)
+        self.assertIn("60 seconds", result)
+
+    def test_http_error_surfaces_as_error_string_not_exception(self):
+        from kilnctrl import safety_cfg_http_client as sc
+
+        with unittest.mock.patch.object(
+            sc, "apply_safety_fields", side_effect=sc.SafetyCfgHttpError("unreachable")
+        ):
+            result = mcp_server.safety_set_tc_type("K")
+        self.assertTrue(result.startswith("error"))
+
+    def test_refused_while_profile_running(self):
+        from kilnctrl import safety_cfg_http_client as sc
+
+        running = unittest.mock.MagicMock(state=1, state_name="running", profile_id=3, name="Cone 6")
+        with unittest.mock.patch.object(mcp_server._profiles, "get_exec_status", return_value=running), \
+             unittest.mock.patch.object(sc, "apply_safety_fields") as mock_apply:
+            result = mcp_server.safety_set_tc_type("K")
+        self.assertTrue(result.startswith("refused"))
+        self.assertIn("running", result)
+        mock_apply.assert_not_called()
+
+    def test_refused_while_autotune_running(self):
+        from kilnctrl import safety_cfg_http_client as sc
+
+        at = unittest.mock.MagicMock(state=3, state_name="relay_approach", zone=1)
+        with unittest.mock.patch.object(mcp_server._autotune, "get_status", return_value=at), \
+             unittest.mock.patch.object(sc, "apply_safety_fields") as mock_apply:
+            result = mcp_server.safety_set_tc_type("K")
+        self.assertTrue(result.startswith("refused"))
+        self.assertIn("autotune", result)
+        mock_apply.assert_not_called()
 
 
 if __name__ == "__main__":

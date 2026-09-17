@@ -219,10 +219,17 @@ def safety_set_config(tc_type: int) -> bytes:
     Pico side (logged there, not returned here) if the relay is currently
     ARMED, or if `tc_type` isn't a value SaftyFW recognises.
 
-    `tc_type` is the raw MAX31856 CR1 TC[3:0] wire value (0-0x0F); callers
-    that have a human-readable name ("K", "J", ...) should go through
-    SAFETY_TC_TYPE_NAMES / mcp_server.safety_set_tc_type() instead of calling
-    this directly with a guessed number.
+    LOW-LEVEL ENCODER ONLY as of 2026-09-17: ``mcp_server.safety_set_tc_type()``
+    no longer calls this -- it writes the identical underlying
+    ``config_store_record_t.tc_type`` field over GET/POST
+    /api/safety/commissioning instead (config_params.c id 0x0105), which
+    independently re-reads and confirms the write rather than trusting a
+    wire command with no reply. This raw wire encoder is kept for
+    ``SafetyClient.set_config()``/anything that needs the bare nibble sent
+    directly, but a caller wanting tc_type commissioned with feedback should
+    use ``safety_set_tc_type()``, not this.
+
+    `tc_type` is the raw MAX31856 CR1 TC[3:0] wire value (0-0x0F).
     """
     return struct.pack(
         "<BB", SAFETY_CMD_SET_CONFIG, _check_range(tc_type, 0, 0x0F, "tc_type")

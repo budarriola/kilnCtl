@@ -21,6 +21,8 @@
 #ifndef KILNCTL_HTTP_AUTH_HTTP_H
 #define KILNCTL_HTTP_AUTH_HTTP_H
 
+#include <stdbool.h>
+
 #include "esp_http_server.h"
 
 #ifdef __cplusplus
@@ -48,6 +50,29 @@ extern "C" {
 // failure, since that would silently reintroduce the exact per-route
 // allowlist gap this design exists to avoid.
 esp_err_t kiln_http_register(httpd_handle_t server, const httpd_uri_t *uri_handler);
+
+// For a route classified ROUTE_TIER_OPEN, kiln_http_prehandler() above never
+// resolves a caller role (see its own comment: http_auth_check() would
+// ALLOW regardless, so it isn't worth the session-table lookup on the
+// dashboard's hot poll paths). That means an OPEN handler that wants to
+// serve a DIFFERENT body to an authenticated administrator than to an
+// anonymous caller -- e.g. GET /api/ota/esp/status keeping the route itself
+// reachable pre-auth for OTA clients while still hiding exact build/commit
+// identity from an unauthenticated network onlooker -- cannot lean on the
+// pre-handler's decision and must ask this instead.
+//
+// Returns true iff: web auth is currently off (docs/WEB_AUTH_PLAN.md section
+// 11 -- a board with auth off is exactly as open as the board is today, so
+// every caller is treated the same as an authenticated admin would be), OR
+// the request carries a session cookie that resolves to HTTP_AUTH_ROLE_ADMIN.
+// A USER-role session, an expired/absent session, and auth-on-but-no-cookie
+// all return false, identically -- same no-distinguishing-why discipline as
+// http_auth_check()'s own DENY_NO_SESSION collapse.
+//
+// Safe to call from any OPEN-tier (or unwrapped) handler; this does its own
+// cookie extraction and does not depend on kiln_http_register()'s wrapper
+// context.
+bool http_auth_caller_is_admin(httpd_req_t *req);
 
 #ifdef __cplusplus
 }

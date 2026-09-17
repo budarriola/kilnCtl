@@ -309,33 +309,93 @@ def safety_clear_trip() -> str:
 
 
 @_srv._tool()
-def safety_set_tc_type(tc_type_name: str) -> str:
-    """Commission the safety processor's thermocouple type (config_store.h).
+def safety_set_tc_type(tc_type_name: str, host: Optional[str] = None) -> str:
+    """Commission the safety processor's thermocouple type (config_store.h's
+    ``tc_type`` field, config_params.c id ``0x0105``).
 
     `tc_type_name` is one of "B", "E", "J", "K", "N", "R", "S", "T"
     (case-insensitive), mirroring firmware/SaftyFW/src/max31856.h's
-    MAX31856_TC_TYPE_* ordering. Fire-and-forget, like clear_trip -- there is
-    no reply on the wire; the outcome (accepted, or refused because the relay
-    is ARMED / the value wasn't recognised) shows up on the Pico's _srv.log, and
-    eventually in config_version advancing on the next GET_DIAG/GET_STATUS
-    poll, not here.
+    MAX31856_TC_TYPE_* ordering.
 
-    This tool only sends the wire command -- it does not build any GUI/LCD
-    commissioning flow (out of scope, same as clear_trip's own LCD surface
-    was deferred for the same budget/scope reason).
+    Until 2026-09-17 this sent only the raw wire command (SAFETY_CMD_SET_CONFIG
+    0x16, still available as ``devices.safety_set_config()``/
+    ``SafetyClient.set_config()`` for anything that needs the bare nibble),
+    which is fire-and-forget on the Pico's own say-so: no reply names success
+    or failure, so a caller had no way to tell "commissioned" from "silently
+    refused because the relay was ARMED" without a separate poll days later.
+    That is exactly the failure class this project has been bitten by
+    repeatedly (`flash_firmware()` once reported success while the board kept
+    running the old image; a boot_guard NVS write once returned OK while the
+    value never persisted) -- CLAUDE.md now names it explicitly.
+
+    `tc_type` is ALSO one of GET/POST /api/safety/commissioning's known
+    parameters (config_params.c id 0x0105, same underlying
+    ``config_store_record_t.tc_type`` field the wire command writes,
+    `CHECK_U8_MAX(7u)`-bounded exactly like SAFETY_TC_TYPE_NAMES's 0-7
+    range), which already has a tested, independently-verifying write path
+    (`safety_cfg_http_client.apply_safety_fields`, the same one
+    `safety_set_rate_guard()`/`safety_set_commissioning_fields()` use). This
+    tool now goes through THAT path instead of the raw wire command: it
+    stages `tc_type` via SET_PARAM, commits, and -- with `verify=True` --
+    independently re-reads the commissioning page afterward and confirms
+    `tc_type` now reads back SET and equal to what was requested, rather than
+    trusting the POST's own ``{"ok":true}``. A field that reads back UNSET or
+    with a different value after the commit is reported as a failure here,
+    not a pass.
+
+    REFUSES if a profile is firing or an autotune run is in progress (same
+    check safety_set_rate_guard()/safety_set_commissioning_fields() make,
+    via profiles_get_exec_status()/autotune_get_status(), BEFORE anything is
+    sent over the wire) -- config_store.c does allow a tc_type-ONLY change
+    while ARMED as long as heat is currently off (`config_store_decide_write_ex`'s
+    `tc_type_only_change` relaxation), but a live run is still not a safe
+    time to change what sensor type the safety processor is decoding.
+
+    If the write is refused because the board is not in the post-reset GRACE
+    window and the tc_type-only relaxation above does not apply (heat is
+    on), the error names that explicitly and says to call
+    ``debug_reset(peer="pico")`` then retry within 60 seconds, same as the
+    other commissioning-field tools.
+
+    Host is auto-resolved the same way safety_get_commissioning()/
+    safety_set_rate_guard() do; pass `host` explicitly for kilnctl.local or
+    a board reachable only from a different network than this link's serial
+    port.
     """
     name = tc_type_name.strip().upper()
     if name not in devices.SAFETY_TC_TYPE_NAMES:
         known = ", ".join(sorted(devices.SAFETY_TC_TYPE_NAMES))
         return f"error: unknown tc_type_name {tc_type_name!r} -- expected one of {known}"
+    value = devices.SAFETY_TC_TYPE_NAMES[name]
+
+    busy = _profile_or_autotune_running()
+    if busy is not None:
+        return f"refused: {busy} -- writing a new tc_type mid-run is not safe; stop it first"
+
+    from .mcp_server_ota import _ota_resolve_host
+
+    resolved = _ota_resolve_host(host)
     try:
-        result = _srv._safety.set_config(devices.SAFETY_TC_TYPE_NAMES[name])
-    except SafetyQueryError as exc:
+        result = safety_cfg_http_client.apply_safety_fields(resolved, {"tc_type": value}, verify=True)
+    except safety_cfg_http_client.SafetyCfgUnknownParamError as exc:
         return f"error: {exc}"
-    if result.ok:
-        return f"ok - requested tc_type {name}"
-    detail = f": {result.reason}" if result.reason else ""
-    return f"refused - could not set tc_type{detail}"
+    except safety_cfg_http_client.SafetyCfgHttpError as exc:
+        return f"error writing tc_type over HTTP (host={resolved}): {exc}"
+
+    if not result.ok:
+        reason = result.post_reason or "; ".join(result.mismatches) or "unknown failure"
+        if "ARMED" in reason:
+            return (
+                "refused: the safety processor rejected the write because the relay is ARMED "
+                "-- config writes only land during the 60s post-reset GRACE window (or, for "
+                "tc_type specifically, while heat is off). Call debug_reset(peer=\"pico\") and "
+                "then call safety_set_tc_type(...) again within 60 seconds. "
+                f"(board said: {reason})"
+            )
+        return f"failed: {reason}"
+
+    return (f"ok - tc_type {name} written and confirmed by read-back: "
+            f"tc_type={value} | board reports commissioned: {result.commissioned_after}")
 
 
 @_srv._tool()
@@ -981,10 +1041,13 @@ def ota_rollback_pico() -> str:
 
     This travels over the already-authenticated safety UART bridge (PC -> ESP
     -> Pico, SAFETY_CMD_ROLLBACK = 0x17), the same authentication boundary as
-    safety_set_tc_type()/safety_ping() -- NOT the HTTP OTA challenge/password
+    safety_ping()/safety_clear_trip() -- NOT the HTTP OTA challenge/password
     path ota_rollback_esp() uses, since there is no separate HTTP surface on
-    the Pico side at all; every Pico command already goes through the ESP's
-    UART bridge.
+    the Pico side at all for a bootloader-slot rollback; every other Pico
+    command goes through the ESP's UART bridge too, though
+    safety_set_tc_type() specifically now writes over
+    GET/POST /api/safety/commissioning instead (2026-09-17, verified
+    read-back rather than fire-and-forget -- see that tool's own docstring).
 
     Refused entirely on SaftyFW's own say-so (fire-and-forget: this call
     cannot see the refusal, only that nothing changes):

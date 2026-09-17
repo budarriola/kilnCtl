@@ -74,6 +74,34 @@ static void resolve_role_for_request(httpd_req_t *req, http_auth_role_t *out_rol
     *out_role = http_auth_session_resolve(cookie[0] != '\0' ? cookie : NULL, ip);
 }
 
+// Fix for the OPEN-tier build-identity leak on GET /api/ota/esp/status
+// (WEB_AUTH_PLAN.md section 2b): an OPEN-tier handler's shared pre-handler
+// (kiln_http_prehandler() below) never resolves
+// a role at all for OPEN routes -- see its own comment -- so a handler that
+// needs to vary ITS OWN response body by caller role (e.g.
+// ota_esp_status_get_handler() trimming exact commit/dirty/build-date
+// identity to admins only, while the route itself must stay reachable with
+// no session per WEB_AUTH_PLAN.md section 2b) cannot reuse that decision and
+// has to resolve one for itself. This is that one shared answer, reusing
+// resolve_role_for_request()'s exact cookie-extraction logic above rather
+// than a second copy in the caller -- another instance of the
+// reset-one-side-of-a-pair class CLAUDE.md warns about if this drifted from
+// the pre-handler's own resolution.
+//
+// Folds in section 11's "a board with auth off is exactly as open as the
+// board is today" rule directly: with web auth off there is no session
+// concept to fail a caller against, so this returns true unconditionally,
+// matching http_auth_check()'s own ALLOW-everything behaviour for that case
+// rather than requiring every caller to re-derive it.
+bool http_auth_caller_is_admin(httpd_req_t *req) {
+    if (!http_auth_policy_web_enabled()) {
+        return true;
+    }
+    http_auth_role_t role = HTTP_AUTH_ROLE_NONE;
+    resolve_role_for_request(req, &role);
+    return role == HTTP_AUTH_ROLE_ADMIN;
+}
+
 static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
     kiln_http_route_ctx_t *ctx = (kiln_http_route_ctx_t *)req->user_ctx;
     // Defensive: a NULL ctx can only happen if this function were ever

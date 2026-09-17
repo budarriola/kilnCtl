@@ -169,6 +169,28 @@ static inline BaseType_t ota_http_test_xSemaphoreTake(SemaphoreHandle_t sem, Tic
 #include "fake_kv.h" // fake_kv_reset_all() -- the credential-survival tests below need a clean
                      // hal_kv state per scope, same convention as test_web_auth_store.c's reset_all()
 
+// GET /api/ota/esp/status build-identity redaction tests (below, near
+// test_boot_guard_status_reports_count_and_recovery_mode()) need the real
+// session/auth seam: http_auth_caller_is_admin() (http_auth_http.c, linked
+// as a real object per build_host_tests.ps1's cmd8), the real session table
+// (http_session_iface.c's http_session_table(), the same instance
+// http_auth_caller_is_admin()'s own cookie resolution reads through
+// http_auth_session_resolve()), web_auth_table_create_session() to mint a
+// real session by hash (net/web_auth_session.h), and
+// web_auth_store_set_policy() to flip web_enabled on/off (section 11's
+// "auth off == today" case). All four are already linked into this exact
+// test executable -- no build-script change needed.
+#include "http_auth_http.h"
+#include "web_auth_session.h"
+#include "http_session_iface.h"
+
+// http_session_table() has external linkage (http_session_iface.c) but is
+// deliberately NOT declared in http_session_iface.h -- that header's own
+// comment reserves it for section 6's login handler, forward-declared at
+// its own call site rather than exposed as general public API. Same
+// forward-declare-at-point-of-use precedent this file needs here.
+web_auth_table_t *http_session_table(void);
+
 // ---- ota_http.c's embedded-page symbols -----------------------------------
 const uint8_t ota_page_html_gz_start[1] = { 0 };
 const uint8_t ota_page_html_gz_end[1] = { 0 };
@@ -1731,6 +1753,138 @@ static void test_boot_guard_reset_authenticated_reports_failure_honestly(void)
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/ota/esp/status -- OPEN tier (route_tier_table.h), reachable with
+// no session so pre-auth OTA clients keep working, but commit/dirty/
+// build_date must be redacted to JSON null for a non-admin caller (the fix
+// for the build-identity leak this route's OPEN test does not cover; see
+// ota_esp_status_get_handler()'s own comment). recovery_mode/version/
+// active_slot/etc. stay unredacted for every caller.
+// ---------------------------------------------------------------------------
+
+// Mints a real ADMIN or USER session in the real session table
+// (http_session_table()) and returns the raw bearer token to hand to
+// stub_header_set("Cookie", ...) -- exactly the path a real login would
+// produce (web_auth_table_create_session() keyed by SHA-256 of the token,
+// same hash http_auth_session_resolve() recomputes from the cookie it is
+// given), so this exercises the real seam rather than a transcribed copy of
+// it.
+static const char *ota_status_test_make_session(web_auth_session_role_t role, const char *token) {
+    uint8_t hash[32];
+    size_t hash_len = 0;
+    psa_hash_compute(PSA_ALG_SHA_256, (const uint8_t *)token, strlen(token), hash, sizeof(hash), &hash_len);
+    web_auth_table_create_session(http_session_table(), hash, "10.0.0.9", role, (uint32_t)0);
+    return token;
+}
+
+static void test_ota_esp_status_web_auth_off_gets_full_payload(void)
+{
+    TEST_SECTION("ota_esp_status_get_handler -- web auth OFF: every caller treated as admin "
+                 "(WEB_AUTH_PLAN.md section 11), commit/dirty/build_date present");
+    web_auth_policy_t policy = { .web_enabled = false, .lcd_enabled = false,
+                                  .web_timeout_s = -1, .lcd_timeout_s = -1 };
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init default nvs partition");
+    TEST_CHECK(web_auth_store_set_policy(&policy) == HAL_OK, "setup: policy persisted");
+    stub_headers_reset();
+    s_last_resp_body[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = ota_esp_status_get_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "handler always returns ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, "\"commit\":\"stub\"") != NULL,
+              "auth off -- real commit value present");
+    TEST_CHECK(strstr(s_last_resp_body, "\"dirty\":false") != NULL,
+              "auth off -- real dirty value present");
+    TEST_CHECK(strstr(s_last_resp_body, "\"build_date\":\"1970-01-01 00:00:00\"") != NULL,
+              "auth off -- real build_date value present");
+}
+
+static void test_ota_esp_status_unauthenticated_redacts_build_identity(void)
+{
+    TEST_SECTION("ota_esp_status_get_handler -- web auth ON, no cookie: commit/dirty/build_date "
+                 "redacted to null, recovery_mode still present");
+    web_auth_policy_t policy = { .web_enabled = true, .lcd_enabled = false,
+                                  .web_timeout_s = -1, .lcd_timeout_s = -1 };
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init default nvs partition");
+    TEST_CHECK(web_auth_store_set_policy(&policy) == HAL_OK, "setup: policy persisted");
+    stub_headers_reset();
+    s_last_resp_body[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = ota_esp_status_get_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "handler always returns ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, "\"commit\":null") != NULL,
+              "no session -- commit redacted to null");
+    TEST_CHECK(strstr(s_last_resp_body, "\"dirty\":null") != NULL,
+              "no session -- dirty redacted to null");
+    TEST_CHECK(strstr(s_last_resp_body, "\"build_date\":null") != NULL,
+              "no session -- build_date redacted to null");
+    TEST_CHECK(strstr(s_last_resp_body, "\"recovery_mode\":false") != NULL,
+              "recovery_mode is NOT redacted -- app.js's OPEN-tier dashboard banner needs it "
+              "pre-auth (2026-09-08 incident fix)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"version\":") != NULL, "version is NOT redacted");
+}
+
+static void test_ota_esp_status_user_session_redacts_build_identity(void)
+{
+    TEST_SECTION("ota_esp_status_get_handler -- web auth ON, USER-role session: still redacted, "
+                 "identical to no session");
+    web_auth_policy_t policy = { .web_enabled = true, .lcd_enabled = false,
+                                  .web_timeout_s = -1, .lcd_timeout_s = -1 };
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init default nvs partition");
+    TEST_CHECK(web_auth_store_set_policy(&policy) == HAL_OK, "setup: policy persisted");
+    const char *token = ota_status_test_make_session(WEB_AUTH_SESSION_ROLE_USER, "user-token-1");
+    stub_headers_reset();
+    char cookie[64];
+    snprintf(cookie, sizeof(cookie), "%s", token);
+    stub_header_set("Cookie", cookie);
+    s_last_resp_body[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = ota_esp_status_get_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "handler always returns ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, "\"commit\":null") != NULL,
+              "USER role -- commit still redacted, not just NONE");
+    TEST_CHECK(strstr(s_last_resp_body, "\"dirty\":null") != NULL,
+              "USER role -- dirty still redacted");
+    TEST_CHECK(strstr(s_last_resp_body, "\"build_date\":null") != NULL,
+              "USER role -- build_date still redacted");
+}
+
+static void test_ota_esp_status_admin_session_gets_full_payload(void)
+{
+    TEST_SECTION("ota_esp_status_get_handler -- web auth ON, ADMIN-role session: real "
+                 "commit/dirty/build_date values");
+    web_auth_policy_t policy = { .web_enabled = true, .lcd_enabled = false,
+                                  .web_timeout_s = -1, .lcd_timeout_s = -1 };
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init default nvs partition");
+    TEST_CHECK(web_auth_store_set_policy(&policy) == HAL_OK, "setup: policy persisted");
+    const char *token = ota_status_test_make_session(WEB_AUTH_SESSION_ROLE_ADMIN, "admin-token-1");
+    stub_headers_reset();
+    char cookie[64];
+    snprintf(cookie, sizeof(cookie), "%s", token);
+    stub_header_set("Cookie", cookie);
+    s_last_resp_body[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = ota_esp_status_get_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "handler always returns ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, "\"commit\":\"stub\"") != NULL,
+              "ADMIN role -- real commit value present");
+    TEST_CHECK(strstr(s_last_resp_body, "\"dirty\":false") != NULL,
+              "ADMIN role -- real dirty value present");
+    TEST_CHECK(strstr(s_last_resp_body, "\"build_date\":\"1970-01-01 00:00:00\"") != NULL,
+              "ADMIN role -- real build_date value present");
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/boot_guard -- unauthenticated diagnostics, same exposure level as
 // GET /api/status. Reports whatever boot_guard reports, honestly, with no
 // auth gate to bypass first.
@@ -1786,6 +1940,21 @@ void run_test_ota_http(void)
     test_boot_guard_reset_authenticated_reports_success();
     test_boot_guard_reset_authenticated_reports_failure_honestly();
     test_boot_guard_status_reports_count_and_recovery_mode();
+
+    test_ota_esp_status_web_auth_off_gets_full_payload();
+    test_ota_esp_status_unauthenticated_redacts_build_identity();
+    test_ota_esp_status_user_session_redacts_build_identity();
+    test_ota_esp_status_admin_session_gets_full_payload();
+    {
+        // Leave web auth off for every test after this one -- matches the
+        // state every other pre-existing test in this file assumed
+        // (unauthenticated handler calls throughout) before these four ran.
+        web_auth_policy_t policy = { .web_enabled = false, .lcd_enabled = false,
+                                      .web_timeout_s = -1, .lcd_timeout_s = -1 };
+        TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init default nvs partition");
+    TEST_CHECK(web_auth_store_set_policy(&policy) == HAL_OK, "setup: policy persisted");
+        stub_headers_reset();
+    }
 
     test_pico_rollback_post_returns_pending_without_blocking();
     test_pico_rollback_status_reports_idle_before_any_request();

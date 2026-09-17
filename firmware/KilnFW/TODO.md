@@ -1447,6 +1447,19 @@ redraw on the wake edge.
 - [x] **The twelve stale `display_*` MCP tools were deleted** (ROADMAP.md:1140,
       1071-1083). This entry was stale — see `DISPLAY_ST7796_PLAN.md` §0 and
       §14.
+- [x] **`uart_bridge.c`'s `display_bridge_task`/`uart_bridge_start_display_task()`
+      were deleted 2026-08-27 (`ddbd0248`)** — confirmed dead code first
+      (`main.c` never called `uart_bridge_start_display_task()`; LVGL owns the
+      panel outright), then removed along with its `xTaskCreatePinnedToCore()`
+      call site, header declaration, and its stack-margin registration entry.
+      `DISPLAY_CMD_*`/`UART_TASK_ID_DISPLAY` stay defined in `uart_task_ids.h`
+      as wire-protocol constants only — kilnctrl's `gui.py`/`actions.py`
+      Display panel still speaks them, even though nothing on the firmware
+      side answers any more. A later pass (2026-09-17, re-verified against
+      `origin/main`) confirmed no trace of the task, its constants, or a
+      registration entry remains anywhere in `firmware/`; `ARCHITECTURE.md`,
+      `ARCHITECTURE_DECISIONS.md`, and `UART_PROTOCOL.md` already recorded the
+      same removal and needed no further edit.
 - [ ] Decide the color/asset story once the visual style (10.2) is picked —
       LVGL widgets are themeable, so this is a theme/style pass on stock
       widgets, not custom-drawn ones.
