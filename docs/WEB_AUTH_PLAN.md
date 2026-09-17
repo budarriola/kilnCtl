@@ -4,8 +4,9 @@
 > board was flashed, no heating run was performed, and no `.kicad_*` file was
 > touched while writing it.
 
-Username/password authentication and roles for the web GUI, a numeric PIN for
-the LCD, an inactivity lock on both, and a physical-presence credential reset.
+Username/password authentication and roles for the web GUI, two numeric PINs
+for the LCD, an inactivity lock on both, and a physical-presence credential
+reset.
 
 ---
 
@@ -41,16 +42,17 @@ What does **not** exist, and is the whole of the work below:
   password, returned in plain text by `wifi_prov_get_ap_password()` and
   deliberately published by `/status`. It cannot satisfy "hashed, salted,
   never recoverable" and is not reused as the web credential.
-- A password-setting page, an LCD PIN, an inactivity lock, a fail-closed
+- A password-setting page, the two LCD PINs, an inactivity lock, a fail-closed
   enforcement point, and a physical reset gesture.
 
 ### Two facts that shape the design
 
-1. **`GET /api/ota/challenge` and the `X-Ota-Mac` scheme stay exactly as they
-   are.** The OTA family keeps its own per-request HMAC challenge regardless of
-   whether a session is present. This layer sits alongside it and never
-   replaces it — so an OTA push still needs the AP-password-derived MAC even
-   from an authenticated administrator session.
+1. **The OTA challenge *mechanism* is kept; the separate OTA *credential* is
+   retired.** `GET /api/ota/challenge`, the `X-Ota-Mac` header and the whole
+   nonce/lockout/constant-time machinery stay. What goes is the second secret:
+   the nine currently-authenticated routes become ordinary ADMIN routes
+   verified against the single administrator credential, so an operator never
+   sets or remembers an OTA password of their own. See item 2b.
 2. **Auth defaults to OFF for both interfaces** (owner decision). The tier
    model must behave correctly in that configuration, not treat it as an error.
    See item 11.
@@ -144,9 +146,10 @@ and the reads `GET /api/zones`, `/api/zones/ct_channel_map`,
 the diagnostics shell learns the board's full feature surface, and it is
 cheaper to gate the shell than to audit every widget inside it.
 
-`GET /api/ota/challenge` stays OPEN — it issues a nonce that is worthless
-without the AP password, and gating it would break the OTA flow it exists to
-serve.
+`GET /api/ota/challenge` stays OPEN — it issues a nonce and (per item 2b) the
+administrator record's salt and iteration count, none of which is usable
+without the administrator password itself. Gating it would break the flow it
+exists to serve. The nine routes it serves are ADMIN like any other.
 
 ### Ambiguous routes, with a recommendation
 
@@ -192,20 +195,57 @@ unrecoverable cannot be the one `GET /status` prints in plain text.
   runs **on the httpd task**, so it must use no large stack locals (see
   item 3's stack budget) — PBKDF2's working set is two 32-byte blocks.
 
-**Record layout.** One versioned blob per credential in NVS namespace
-`kiln_cfg` on `KILN_NVS_PARTITION`, the existing namespace, so no new
-partition and no new namespace:
+**Where the record lives — corrected, and this is load-bearing.** An earlier
+draft of this plan put the credentials in namespace `kiln_cfg` on
+`KILN_NVS_PARTITION`. **That is wrong**, and reading `factory_reset.c` is what
+found it: every reset scope erases whole **partitions** via
+`hal_kv_erase_partition()`, and both `kKilnOnly` and `kAll` name `kiln_nvs`.
+Credentials placed there would be destroyed by the "kiln" button, which is
+advertised as erasing only the kiln configuration.
+
+**Credentials live in their own NVS namespace `kiln_auth` on the default `nvs`
+partition** (`NVS_DEFAULT_PART_NAME`, 24 KB at 0x9000). Reasons, in order of
+weight:
+
+- **No reset scope can reach it.** The scope table names exactly three
+  partitions — `wifi_nvs`, `kiln_nvs`, `profiles_nvs` — and `nvs` is not one of
+  them. The blanket `nvs_flash_erase()` that would have reached it was retired
+  in 2026-08-12 (TODO.md 8.1) and no call to it remains under `App/`. This
+  gives credentials the same "no scope's erase can reach another scope's data"
+  property that `factory_reset.c`'s own header comment claims for the rest.
+- **It exists on every already-flashed board**, so a field upgrade delivered as
+  an OTA — which cannot rewrite the partition table — can still enable
+  authentication afterwards. A dedicated new `auth_nvs` partition was considered
+  and **rejected for exactly that reason**: there is free flash after `cfg` for
+  one, but a board that only ever receives OTAs would never get the partition
+  and so could never enable auth.
+- It is no longer a config store. Zones, rules and profiles moved out to the
+  three dedicated partitions; `nvs` is kept in place only so a rollback to
+  pre-split firmware still finds its old data. One added namespace beside that
+  is additive and collides with nothing.
+
+Namespace `kiln_auth` is 9 characters. One versioned blob per credential
+inside it:
 
 - key `web_auth` — `{ version, flags, per-role records }` where each record is
   `{ username[33], salt[16], hash[32], iterations, must_change }`.
   Two records: one `administrator`, one `user`.
-- key `lcd_auth` — `{ version, salt[16], hash[32], iterations, digits }` for
-  the LCD PIN. Separate key so a PIN change does not rewrite the web blob.
-- key `auth_policy` — `{ version, web_enabled, lcd_enabled, lock_timeout_s }`.
+- key `lcd_auth` — `{ version, per-role records }`, each record
+  `{ salt[16], hash[32], iterations, digits }`. **Two records: a `user` PIN and
+  an `administrator` PIN** (owner decision, item 7). Separate key from
+  `web_auth` so a PIN change does not rewrite the web blob.
+- key `auth_policy` — `{ version, web_enabled, lcd_enabled, web_timeout_s,
+  lcd_timeout_s }`. Two independent timeouts (owner decision, item 8).
 
-Three keys, 8, 8 and 11 characters — all inside NVS's 15-character limit, each
-declared with `NVS_KEY_LEN_CHECK()` so the limit is a compile-time failure, and
-each also caught by `tools/check_nvs_key_length.ps1`'s independent backstop.
+**Key lengths, checked rather than assumed.** Four names, all inside NVS's
+15-character cap: namespace `kiln_auth` (9), keys `web_auth` (8), `lcd_auth`
+(8), `auth_policy` (11). Checked explicitly because an over-length key in this
+project once silently never persisted at all. Each name is declared with
+`NVS_KEY_LEN_CHECK()` so an over-length name is a compile-time failure, and each
+is also caught by `tools/check_nvs_key_length.ps1`'s independent backstop. Any
+later rename must keep both properties: a too-long key does not fail at
+runtime, it quietly stores nothing — which for a credential record reads as
+"no credentials set", the one outcome item 12b forbids.
 
 **New schema version: `WEB_AUTH_STORE_VERSION 1u`**, its own constant in the
 new module's header, following `SAFETY_CFG_STORE_VERSION` and
@@ -220,11 +260,12 @@ unformatted and unmounted on the bench board, so a dual-write is inert today,
 and a credential is exactly what must stay readable while diagnosing a
 filesystem problem. Revisit only after the dual-write window closes.
 
-**The PIN is hashed identically to a password.** A 4–8 digit PIN has at most
+**Both PINs are hashed identically to a password.** A 4–8 digit PIN has at most
 10^8 candidates, so its hash is brute-forceable offline in any case; hashing it
 costs nothing and stops a casual NVS dump from reading it directly. The real
 protection is that PIN entry is physically local and rate-limited by the
-existing lockout.
+existing lockout — which matters more now that one of the two PINs grants full
+administrator access at the panel (item 7).
 
 *Acceptance:* a host test sets a password, reads back the stored blob, and
 asserts the plaintext appears nowhere in it; two identical passwords set on
@@ -237,13 +278,96 @@ confirm GREEN.
 
 ---
 
+## 2b. OTA and the other eight authenticated routes use the administrator credential
+
+Owner requirement: **OTA must not require a password of its own.** The nine
+routes that authenticate today — `POST /api/ota/esp`, `/api/ota/esp/rollback`,
+`/api/ota/esp/recovery_exit`, `/api/ota/esp/boot_guard_reset`,
+`/api/ota/pico`, `/api/ota/pico/rollback`, `/api/factory_reset`,
+`/api/cfgfs/format_confirm` and `/api/sw_reset` — become ordinary ADMIN routes.
+
+**Kept versus retired, stated separately because the objection is only to one
+of them:**
+
+- **Kept:** `ota_auth.c` in full — nonce issue/check, single use, 30 s expiry,
+  constant-time comparison, and the eight per-context escalating lockouts. Also
+  kept: the `X-Ota-Mac` header shape, `ota_http_authenticate_request()`, the
+  auth-before-state-check ordering, and the `boot_button_ota_bypass_active()`
+  physical-presence bypass. None of that is the problem, and all of it is
+  already host-tested.
+- **Retired:** the *credential* — the `HMAC-SHA256(ap_password,
+  "kilnctl-ota-v1")` key derivation. That is what makes OTA a second secret.
+
+**What the credential is verified against.** One record: the administrator
+entry in `web_auth` (item 2). Both paths check that same stored record, and
+neither keeps a store of its own:
+
+- **A web session.** An authenticated administrator session satisfies these
+  routes with no MAC at all, which is what makes the browser OTA page work
+  without a second prompt.
+- **The challenge–response, for scripted and command-line clients.**
+  `GET /api/ota/challenge` returns the nonce plus the administrator record's
+  salt and iteration count. The client computes
+  `PBKDF2-HMAC-SHA256(password, salt, iterations)` locally — the same value the
+  board has stored — and the MAC key becomes
+  `HMAC-SHA256(stored_hash, "<context string>")`, preserving the existing
+  "the secret is the key, the context string is the message" structure that
+  currently keeps the literal password out of the comparison path. The password
+  itself never crosses the wire.
+
+Publishing the salt is deliberate and standard (SCRAM does the same); a salt
+without the hash is not a credential, and the challenge endpoint is covered by
+the existing per-context lockout. One consequence stated honestly: the stored
+hash is OTA-equivalent to the password for anyone who can already read NVS off
+the flash. That is **not** a regression — today's OTA secret is the AP
+password, stored in plaintext and deliberately published by `GET /status` — but
+it is another reason the hash must never appear in an export (item 12b).
+
+**Migration for a board that has an OTA password today.** There is no separate
+OTA password to migrate: today's OTA credential *is* the AP password. A board
+taking this firmware keeps working unchanged, because auth ships OFF and the
+auth-off rule below preserves exactly today's behaviour. **At no point is there
+an OTA route that no credential can open.** The AP-password path for these nine
+routes is retired only at the moment an administrator enables web auth, which
+is also the moment an administrator credential is guaranteed to exist (item 11
+refuses to enable auth without one).
+
+**Auth disabled: what gates OTA, and is it a loosening?** This is the one place
+where "auth off collapses every tier to full access" must **not** apply, and it
+is a deliberate, named exception. If auth-off left these nine routes ungated, a
+field-upgraded board would go from OTA-requiring-the-AP-password to
+OTA-open-to-the-network — **that would be a real loosening of the only routes
+that are authenticated today.** Recommendation, and this plan's position:
+**with web auth disabled, the nine routes fall back to today's AP-password
+challenge, unchanged.** Auth-off therefore means "no web login required", never
+"anyone may reflash the kiln". With web auth enabled, the administrator
+credential governs and the AP-password path is refused.
+
+*Acceptance:* a host test asserts that with auth enabled a correct
+administrator-derived MAC is accepted on each of the nine contexts and an
+AP-password-derived MAC is refused; that with auth disabled the reverse holds;
+that an administrator session alone satisfies all nine; and that a `user`
+session satisfies none. A bench check performs a real OTA with no OTA-specific
+password configured anywhere.
+*Negative test:* point the MAC key derivation back at
+`wifi_prov_get_ap_password()` while auth is enabled, confirm the
+"AP-password MAC is refused" assertion goes RED, restore by hand, confirm
+GREEN, and force a full rebuild.
+
+The LCD PINs remain separate secrets from the web password — that is the
+owner's explicit design (item 7) and is untouched by this item.
+
+---
+
 ## 3. Password and PIN strength rules
 
-**LCD PIN: 4 to 8 digits**, enforced in two places — the keypad refuses to
-submit outside the range, and the web setter rejects out-of-range before
+**Both LCD PINs: 4 to 8 digits**, enforced in two places — the keypad refuses
+to submit outside the range, and the web setter rejects out-of-range before
 hashing. The setter's check is the authoritative one; the keypad's is a
 convenience. Both must exist, because a PIN set out of range from a script
-would otherwise be unenterable at the panel and lock the LCD permanently.
+would otherwise be unenterable at the panel and lock the LCD permanently. The
+two PINs must also differ from each other, or the administrator PIN is
+reachable by anyone holding the user PIN.
 
 **Web password: minimum 10 characters, at least one character that is not a
 lowercase letter, and a rejection list of the obvious (`password`, `kiln`,
@@ -359,9 +483,12 @@ open it and cannot change their own password; the owner described one person
 who sets the passwords.
 
 It sets, in one place: the administrator username and password, the `user`
-password, the LCD PIN, the lock timeout, and the two auth-enabled switches.
-**The LCD PIN is set here and only here** — the LCD never sets its own PIN,
-so a stolen panel session cannot change the credential that protects it.
+password, **both LCD PINs**, **both lock timeouts** (web and LCD, independently
+settable), and the two auth-enabled switches.
+**The LCD PINs are set here and only here** — the LCD never sets its own PIN,
+so a stolen panel session cannot change the credential that protects it. That
+holds even for the LCD administrator PIN: full access at the panel still does
+not include changing what the panel's own credential is.
 
 **Changing a password invalidates every session for that role, including the
 caller's.** The caller is redirected to a fresh login. Reasoning: the usual
@@ -403,14 +530,38 @@ cancels), or the lock timeout expiring. Cancelling returns to the Dashboard.
 at 8. A wrong PIN feeds the existing `ota_auth` lockout under a new context so
 repeated wrong guesses at the panel escalate the same way a wrong OTA MAC does.
 
-**Does the PIN carry a role? No — one tier.** Recommendation: the LCD PIN
-grants the **USER** tier only. Reasoning: the owner described two roles for the
-web GUI specifically, the LCD has no text entry for a username, and no
-administrator action in the route table has an LCD equivalent worth the risk —
-zones config, calibration, OTA and the danger zone are all web-only surfaces.
-A single-tier PIN also means the PIN can never be the credential that
-authorises a factory reset. **This is a recommendation, not a settled
-decision — see item 13.**
+**Two PINs, two tiers — settled by the owner.** A `user` PIN grants the USER
+tier and an `administrator` PIN grants ADMIN at the panel. Which PIN was
+entered decides the tier; there is no username to type, so the PIN itself is
+the role selector. Entry is identical for both.
+
+**Accepted tradeoff, recorded rather than dropped.** This was decided against
+the recommendation in this plan's first draft, and the cost is real: **a 4–8
+digit secret now guards full configuration access at the panel**, while the web
+administrator credential requires 10 characters with a non-lowercase (item 3).
+A 4-digit PIN is 10^4 candidates — materially weaker, and it reaches zones
+config, calibration and the danger zone through the panel. The owner accepts
+this; the plan records it as an accepted tradeoff, not a solved problem.
+
+What makes it tolerable is rate limiting, so the PIN path must be wired to it
+properly rather than incidentally:
+
+- Every wrong PIN feeds the existing `ota_auth` lockout under **its own new
+  context**, separate from the web login's and from each OTA context's, so
+  panel guessing cannot lock out the web interface and vice versa.
+- The existing escalating backoff applies unchanged: 3 failures arms it, then
+  60 s doubling to a 900 s ceiling. At that ceiling an exhaustive 4-digit
+  search is on the order of years of continuous presence at the panel, which
+  is the property that makes a short secret acceptable *here* and would not
+  make it acceptable on a network-reachable route.
+- The lockout is keyed to the panel as a whole, not per PIN, so an attacker
+  cannot halve the work by alternating between the two PINs.
+- A locked-out panel still shows the Dashboard and still stops a firing
+  (item 9). Lockout must never be reachable as a denial of a stop.
+
+Because the administrator PIN can authorise a factory reset from the panel, it
+is worth noting explicitly that the *credential reset* gesture (item 10) does
+**not** accept it — that gesture requires physical E-stop assertion, not a PIN.
 
 *Acceptance:* `UI_TEST_CMD_LIST_TAP_TARGETS` reports all 12 keypad keys plus
 `OK` and `Cancel` as named, non-hidden tap targets; a scripted
@@ -423,13 +574,20 @@ outside the theme set.
 
 ## 8. The inactivity lock and the 10-second prompt
 
-**One shared timeout value, not two.** Recommendation, and the reason: the
-owner asked for it "configurable in the same password section", one field is
-one thing to explain and one thing to get wrong, and there is no argued reason
-the two surfaces should differ. Range 1–60 minutes plus `never`, stored in
-`auth_policy`. `never` is meaningful and must work: an operator who wants the
-panel permanently unlocked while standing at the kiln should not have to
-disable auth to get it.
+**Two independent timeout values — settled by the owner**, one for the web GUI
+and one for the LCD, both on the password page, both stored in `auth_policy` as
+`web_timeout_s` and `lcd_timeout_s`. This was decided against the first
+draft's recommendation of a single shared value; the practical argument for two
+is that the panel is physically at the kiln and the browser may be anywhere, so
+the sensible values genuinely differ. Range 1–60 minutes plus `never` for each.
+`never` is meaningful and must work: an operator who wants the panel
+permanently unlocked while standing at the kiln should not have to disable auth
+to get it.
+
+**The 10-second stay-unlocked prompt applies to each interface separately**,
+against that interface's own timeout. The two never interact: web activity does
+not extend the LCD session, and a tap on the panel does not extend a browser
+session.
 
 **What counts as activity.** Web: any authenticated request that is not the
 keepalive itself — so a dashboard polling `/api/status` from an idle browser
@@ -520,35 +678,47 @@ and a firing running.
 
 ## 10. The physical credential reset
 
-**The owner's sketch cannot be implemented literally**, for a reason found in
-the code: the LCD has no Stop button independent of the merged Start/Stop
-widget, and that widget reads "Stop" **only while a firing is RUNNING or
-PAUSED**. A gesture ending in "press stop, press stop" would therefore require
-a firing to be in progress — the exact condition under which the gesture must
-be impossible.
+**The owner's later wording — "Estop then tap 1 corners of the lcd" — is the
+gesture, and the earlier "press stop twice" sketch is dropped.** Dropping it
+was forced by the code: the LCD has no Stop button independent of the merged
+Start/Stop widget, and that widget reads "Stop" **only while a firing is
+RUNNING or PAUSED** — the exact condition under which the gesture must be
+impossible.
 
-**Recommended gesture instead:**
+> **Assumption needing confirmation:** "tap 1 corners" is read here as **tap
+> each of the four corners once, in order (top-left, top-right, bottom-right,
+> bottom-left)**. If the owner meant one specific corner, or any corner once,
+> only step 3 changes — the preconditions, the confirm dialog and the outcome
+> below all stand either way.
+
+**The gesture:**
 
 1. E-stop asserted (`safety_link_status_t.flags & SAFETY_FLAG_ESTOP`), and
 2. no firing in progress, and `heat_enable_is_granted()` false, then
-3. three taps on the Dashboard graph within 3 seconds, which arms the reset and
-   shows a plain-text banner in the existing `s_ui_home_trip_strip` — "AUTH
-   RESET ARMED — confirm within 30 s", then
+3. each of the four LCD corners tapped once, in order, within 10 seconds —
+   an out-of-order or missed corner resets the sequence — which arms the reset
+   and shows a plain-text banner in the existing `s_ui_home_trip_strip` —
+   "AUTH RESET ARMED — confirm within 30 s", then
 4. a `ui_confirm` dialog whose confirm button must be pressed. One deliberate
    confirmation, not a second ambiguous tap.
 
 Why this shape: the E-stop precondition makes it unreachable remotely by
 construction (E-stop is a physical contact read by the Pico, not a writable
-field), the three-tap-then-confirm sequence is not hittable by accident, and
-the heat and firing gates satisfy "impossible during a firing or while heat is
-enabled" without depending on a widget's caption.
+field), an ordered four-corner sequence is not hittable by accident, and the
+heat and firing gates satisfy "impossible during a firing or while heat is
+enabled" without depending on a widget's caption. The E-stop and no-heat
+preconditions and the explicit confirm dialog are this plan's safety envelope
+around the gesture; the corner taps replace only the tap-and-press part.
 
-**New work this needs:** the home chart is not a tap target today — it has no
-`LV_OBJ_FLAG_CLICKABLE` and no `LV_EVENT_CLICKED` handler, only a draw
-callback. Make it clickable and give it a name so `kiln_ui_click_by_name()`
-can reach it; a nameless chart cannot be clicked by name. Also add a small
-accessor for the E-stop bit — the bit is already populated and cached on the
-ESP but **has no consumer anywhere**, so this is a read, not new plumbing.
+**New work this needs, and what it no longer needs.** Corner taps are cheaper
+than the graph tap this plan first proposed: **no `LV_OBJ_FLAG_CLICKABLE` on
+the chart and no chart click handler are required**, and the chart stays a
+draw-only widget. What is needed is four small transparent hit zones (about
+40x40 px) at the corners of the Dashboard, non-visual, adding no colour, plus a
+small accessor for the E-stop bit — the bit is already populated and cached on
+the ESP but **has no consumer anywhere**, so that is a read, not new plumbing.
+One bench item: confirm no existing Dashboard control already occupies those
+four 40x40 regions, and shrink the zones rather than steal a tap if one does.
 
 **What the reset actually does:** restores a default administrator credential
 with `must_change = true`, so the next login is forced to set a new password
@@ -563,10 +733,12 @@ branch. One line each; this is a rare event and must be findable afterwards.
 
 *Acceptance:* a host test on the pure gate predicate asserts the gesture is
 refused with E-stop clear, refused with a firing running, refused with heat
-enabled, and armed only with all three conditions met, and that arming expires
-after 30 s. On the bench, a `TOUCH_CMD_INJECT` / `kiln_ui_click_by_name()`
-sequence performs the gesture with no human present and `capture_lcd.ps1`
-confirms the armed banner is on screen.
+enabled, and armed only with all three conditions met; that an out-of-order
+corner sequence does not arm; and that arming expires after 30 s. On the bench,
+a `TOUCH_CMD_INJECT` sequence at the four corner **coordinates** performs the
+gesture with no human present — coordinate injection needs no widget name, so
+this is testable headlessly without naming the hit zones — and
+`capture_lcd.ps1` confirms the armed banner is on screen.
 *Negative test:* invert the E-stop condition in the production predicate,
 confirm the "refused with E-stop clear" assertion goes RED, restore by hand.
 
@@ -584,6 +756,13 @@ returns ALLOW immediately, before any session lookup. The same for
 `lcd_enabled` and the keypad. Consequence, stated plainly: **a board with auth
 off is exactly as open as the board is today.** That is the point of the
 default, and it is why the setup wizard must ask.
+
+**One named exception: the nine OTA-family routes are never ungated.** With web
+auth off they fall back to today's AP-password challenge rather than becoming
+open, because anything else would loosen the only routes that are authenticated
+today. Full reasoning in item 2b. "Exactly as open as today" therefore means
+precisely that — today's board already requires a credential for OTA, factory
+reset, `sw_reset` and the `cfgfs` format, and so does this one.
 
 **"No credential set" is not an error state.** It is the shipped default. A
 board with auth off and no credential is fully functional. Enabling auth is
@@ -689,6 +868,51 @@ sections and contains **no generic NVS enumeration** (zero `nvs_entry_*` calls),
 so a credential record cannot be swept into an export by accident. It is not in
 the file because nothing writes it there, not because a filter removes it.
 
+### One property, not several rules: the record lives outside config storage
+
+Owner requirement: **credentials are board-scoped, not config-scoped.** Every
+config slot shares one set of credentials; there is no per-slot password. The
+plan states that as a single structural property rather than as a list of rules
+that could drift apart:
+
+> The credential record lives in its own namespace on its own partition
+> (item 2), and **no config operation reads or writes it.**
+
+"Does not travel in a backup" and "survives a slot switch" are then the same
+fact, not two rules. Every operation that touches configuration, and what it
+does to the credential record:
+
+| Operation | Route / entry point | Effect on credentials |
+| --- | --- | --- |
+| Save current config to a slot | `POST /api/kiln_configs/save` | none — writes `kiln_cfg` only |
+| Clone a slot | `POST /api/kiln_configs/clone` | none |
+| **Apply / switch slot** | `POST /api/kiln_configs/apply` | **none — this is the slot switch, and the one credential set stays in force across it** |
+| Rename a slot | `POST /api/kiln_configs/rename` | none |
+| Delete a slot | `POST /api/kiln_configs/delete` | none |
+| Export one slot's package | `GET /api/kiln_configs/export` | not in the file |
+| Import a package, including a foreign one | `POST /api/kiln_configs/import` | none — never opened, so a foreign package cannot install another kiln's passwords |
+| Whole-board backup export | `GET /api/backup/export` | not in the file (`backup_export.c` has no generic NVS enumeration) |
+| Whole-board restore | `POST /api/backup/import` | none |
+| Autosave from live | `kiln_cfg_store_autosave_from_live()` | none |
+| Quarantine, and quarantine clear | `kiln_cfg_store_quarantine_clear()` | none |
+| Zones config, prefs, profiles writes | `kiln_nvs` / `profiles_nvs` writers | none — different partitions |
+| `cfg` LittleFS dual-write, and its format | `cfg_fs_*` | none — credentials are NVS-only (item 2) |
+| Factory reset, any of the four scopes | `POST /api/factory_reset` | none — see case 5, answered explicitly |
+
+The precedent for a field that deliberately does not travel is `3efdac65`'s
+board-identity check, which forces `calibrated = false` and clears
+`i_normal_a[]` when a package's `source_board` does not match the running board.
+Credentials go one step further: there is no field to neutralise on import,
+because there is no credential field in the package at all.
+
+*Acceptance:* one host test walks that table — for each operation it sets
+credentials, performs the operation, and asserts all three records are
+byte-identical afterwards. The slot-apply row must be a real switch between two
+populated slots, not a no-op apply of the already-active slot.
+*Negative test:* add a credential section to the export writer, confirm the
+"export contains none of the set password's bytes" assertion goes RED, restore
+by hand, confirm GREEN, and force a full rebuild.
+
 ### Case-by-case outcomes
 
 1. **OTA upgrade to newer firmware.** Credentials survive untouched. An OTA
@@ -707,6 +931,20 @@ the file because nothing writes it there, not because a filter removes it.
    behaviour it already has. This is the same shape as the documented
    `zones_cfg` rollback hazard, with the opposite default: zones falls back to
    firmware defaults, credentials must not.
+
+   **Ordering hazard, created by item 2b and resolved here.** Folding OTA into
+   administrator auth means an OTA route is now gated by the very record an OTA
+   must preserve. If an unreadable credential record refused the OTA routes the
+   way it refuses a web login, a rollback past a credential-schema bump would
+   remove the means of repair: the operator could no longer OTA forward to the
+   firmware that understands the record, leaving only the physical gesture or
+   JTAG. So the two rules differ deliberately — **a web login is refused when
+   the record is unreadable; the nine OTA-family routes instead fall back to
+   the AP-password challenge** (item 2b's auth-off path), which needs no
+   credential record at all. Refusing a web login costs nothing that is not
+   recoverable; refusing OTA removes the repair path. The
+   `boot_button_ota_bypass_active()` physical-presence window remains beneath
+   both as the last resort.
 3. **Config backup / export.** Credentials are **not** in the file. State it on
    the backup page in one line — "Backup does not include usernames,
    passwords or the LCD PIN. Those stay on this board." — so an operator
@@ -715,13 +953,31 @@ the file because nothing writes it there, not because a filter removes it.
 4. **Config restore, swap, or a package from a different board.** Credentials
    are untouched by the restore, in all three cases, including a foreign
    package. The import path never opens the credential keys.
-5. **Factory reset and config erase.** Credentials are **out of scope for
-   every existing reset scope** — "wifi", "kiln", "profiles" and "all". The
-   deliberate credential-recovery path is the physical gesture, which already
-   covers the real need and leaves a log entry; an accidental "all" should not
-   also silently clear who may log in. Note the asymmetry deliberately: "all"
-   formats the `cfg` partition and restores builtin profiles but leaves the
-   three credential keys standing.
+5. **Factory reset and config erase — answered explicitly, because the owner
+   expectation cuts both ways.** A factory reset **does not clear
+   credentials**, in any of the four scopes. None of them can: each erases only
+   the partitions its own table row names (`wifi_nvs`, `kiln_nvs`,
+   `profiles_nvs`), and the credentials are on `nvs` (item 2). With that
+   placement this is a structural outcome, not a filter someone has to remember
+   to maintain. "all" still formats the `cfg` partition and restores builtin
+   profiles; the three credential keys stand.
+
+   **Why not clear them.** Making "all" clear credentials would create a
+   *second* credential-reset path alongside the corner-tap gesture — and a
+   worse one, because `POST /api/factory_reset` is remote where the gesture is
+   deliberately not. Every precaution in item 10 (E-stop asserted, no firing,
+   heat not enabled, explicit confirm) would have to be replicated on it, or the
+   protection would simply have a second door.
+
+   **The counter-expectation, acknowledged rather than dismissed.** An owner may
+   reasonably read "factory reset, scope: all" as clearing everything. Two
+   things answer that instead of leaving it implicit: the danger-zone copy for
+   "all" must state in one line that login credentials are **not** included and
+   name the two ways to clear them; and a separate, explicitly labelled "Clear
+   login credentials" action sits beside it as its own ADMIN route. That route
+   is not a weakening — it requires an already-authenticated administrator, who
+   can change the passwords anyway — and it is not a substitute for the gesture,
+   which exists for the case where nobody can log in at all.
 
 **Schema versions:** the credential records carry their own
 `WEB_AUTH_STORE_VERSION`, separate from every config version precisely so that
@@ -742,11 +998,22 @@ force a full rebuild.
 
 ---
 
-## 13. Owner decisions still needed
+## 13. Owner decisions — settled, and the one assumption left
 
-1. **Does the LCD PIN grant `user` only, or may an administrator use the
-   panel?** Recommendation: `user` only (item 7). Needs a yes.
-2. **Is one shared lock timeout acceptable, or are separate web and LCD values
-   wanted?** Recommendation: one shared value (item 8).
-3. **Is the revised reset gesture acceptable?** The owner's
-   "stop, stop" ending cannot be built as described (item 10).
+Settled 2026-09-16. Two went against this plan's first-draft recommendation;
+the plan follows the owner's decision and records the cost rather than
+re-arguing it.
+
+1. **LCD gets two PINs, not one tier** — a `user` PIN and an `administrator`
+   PIN, both 4–8 digits. Decided against the draft's recommendation. The
+   accepted tradeoff and the rate-limiting that makes it tolerable are recorded
+   in item 7.
+2. **Separate lock timeouts for web and LCD**, independently settable, each
+   with its own 10-second prompt. Decided against the draft's recommendation
+   (item 8).
+3. **OTA uses the administrator credential**, with no OTA password of its own
+   (item 2b).
+
+**Still an assumption, not a decision:** that "tap 1 corners of the lcd" means
+**each of the four corners once, in order**. Item 10 is written that way and
+flags it inline; only that one step changes if the owner meant something else.
