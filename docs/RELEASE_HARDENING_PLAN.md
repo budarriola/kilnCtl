@@ -87,11 +87,25 @@ next:
    overwritten. The existing 748032-byte on-board dump is still permanently
    unsymbolizable — its matching ELF (build `Sep 14 2026 23:55:17Z`) was lost
    before the ELF-archive durability fix (`a347e726`) landed, and nothing
-   recovers lost ELFs after the fact. **Residual gap, confirmed still open:**
-   `find_crash_elf()` (`mcp_server_flash.py:970`) resolves against the
-   board's *currently running* `fw_build`, not the stored dump's origin
-   build — a dump fetched before a reflash will be matched to the wrong ELF
-   unless the caller passes the dump's own `fw_build` by hand. Full detail:
+   recovers lost ELFs after the fact. **Residual gap, closed 2026-09-16:**
+   `find_crash_elf()` (`mcp_server_flash.py:970`) still resolves against the
+   board's *currently running* `fw_build`, still wrong for a stored dump's
+   origin build — but callers no longer have to trust it. `read_esp_coredump()`
+   now falls through to `coredump_fetch.find_matching_archived_elf()` on a
+   mismatch instead of stopping at the first candidate, and a new tool,
+   `find_crash_elf_for_coredump(coredump_path)`, verifies directly against
+   the coredump's own embedded SHA256 across every archived ELF
+   (`elf_archive.list_all_kiln_elf_paths()`) rather than any externally
+   reported build identity. Two distinct, loud outcomes: an environment
+   problem (wrong interpreter, no `esp_coredump`) aborts immediately naming
+   it; every archived ELF failing the SHA256 check is reported as
+   PERMANENTLY UNSYMBOLIZABLE — a legitimate outcome, not a mismatch or a
+   tooling failure. The 748032-byte on-board dump above remains exactly that
+   legitimate outcome: its ELF is gone, so nothing will ever match it.
+   Negative tests: `tools/PcTools/tests/test_coredump_fetch.py`'s
+   `FindMatchingArchivedElfTests` (reproduces the wrong-ELF selection via the
+   unchanged `elf_archive.find_kiln_elf_for_build()` lookup, then proves the
+   content-based search corrects it). Full detail:
    `docs/audits/release_hardening_plan_verify_1_2_5_7_8_2026-09-16.md`.
 2. **A stack-margin measurement taken during a firing, not at idle.** The idle
    baseline is a floor, not a worst case — that is already recorded as a

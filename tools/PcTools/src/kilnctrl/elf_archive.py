@@ -1612,6 +1612,46 @@ def archive_safty_elf(elf_path: str, safty_fw_root: str, source: str) -> Archive
                             "build_time": build_time, "source": source})
 
 
+def list_all_kiln_elf_paths() -> list[str]:
+    """Every distinct KilnCtrl-*.elf file this archive currently knows about
+    (via the manifest or the superseded registry, deduped by elf_key) that
+    still exists on disk, sorted for deterministic ordering.
+
+    Added for content-based coredump/ELF matching
+    (`coredump_fetch.find_matching_archived_elf`): a stored coredump can
+    outlive the boot/flash that produced it, so the board's CURRENTLY
+    reported `fw_build` is not a trustworthy key for finding the ELF that
+    actually produced a given coredump -- `find_kiln_elf_for_build` alone is
+    the wrong tool for that case. This function instead hands back every
+    candidate ELF so the caller can verify each one directly against the
+    coredump's own embedded SHA256 (which esp_coredump itself checks) rather
+    than trusting any externally-recorded identity."""
+    archive_dir = kiln_archive_dir()
+    try:
+        migrate_legacy_archive(archive_dir, "KilnCtrl", lock_timeout_s=3.0)
+    except Exception as exc:  # noqa: BLE001 -- listing candidates must never raise on this
+        print(f"elf_archive: WARNING -- candidate-listing legacy migration failed for "
+              f"{archive_dir}: {exc}; continuing with the existing manifest.")
+    manifest = _load_manifest(archive_dir)
+    superseded = _load_superseded(archive_dir)
+    keys: set = set()
+    for entry in manifest.values():
+        if isinstance(entry, dict) and entry.get("elf_key"):
+            keys.add(entry["elf_key"])
+    for entries in superseded.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("elf_key"):
+                keys.add(entry["elf_key"])
+    paths = []
+    for key in sorted(keys):
+        path = os.path.join(archive_dir, f"KilnCtrl-{key}.elf")
+        if os.path.isfile(path):
+            paths.append(path)
+    return paths
+
+
 def find_kiln_elf_for_build(fw_build: str) -> tuple[Optional[str], str]:
     """Returns (path, message). path is None on no match -- message always
     explains what was searched and, on a miss, how many entries exist so a

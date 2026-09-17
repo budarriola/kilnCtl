@@ -988,7 +988,18 @@ def find_crash_elf(host: Optional[str] = None, fw_build: Optional[str] = None) -
 
     Fails LOUD with no match rather than falling back to KilnCtrl-latest.elf
     or the newest-by-mtime file -- either would silently reproduce the exact
-    failure mode (confident wrong line numbers) this tool exists to prevent."""
+    failure mode (confident wrong line numbers) this tool exists to prevent.
+
+    CAVEAT (2026-09-16): this keys the lookup off the board's CURRENTLY
+    RUNNING `fw_build` -- correct for symbolizing a panic that just
+    happened, on a board that has not been reflashed since. It is WRONG for
+    a coredump that has been sitting in the coredump partition (or in the
+    durable coredump archive) since an earlier boot: the board can be
+    running a different build by the time you call this, and this function
+    has no way to know that from `fw_build` alone. For a STORED coredump,
+    use `find_crash_elf_for_coredump()` instead, which verifies against the
+    coredump's own embedded SHA256 rather than trusting any externally
+    reported build identity."""
     if fw_build is None:
         from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
         resolved = _ota_resolve_host(host)
@@ -1003,6 +1014,54 @@ def find_crash_elf(host: Optional[str] = None, fw_build: Optional[str] = None) -
     if path is None:
         return f"error: {message}"
     return message
+
+
+@_srv._tool()
+def find_crash_elf_for_coredump(coredump_path: str) -> str:
+    """Finds the ELF that actually produced a STORED coredump file (one
+    already fetched via `read_esp_coredump()`, or a durable archive copy
+    under `firmware/KilnFW/coredump_archive/`), by verifying against the
+    coredump's own embedded app SHA256 -- never by trusting any externally
+    reported build identity.
+
+    Use this instead of `find_crash_elf()` whenever the coredump was NOT
+    just now pulled from a board you know hasn't been reflashed since: a
+    coredump persists in the coredump partition (or in the durable archive)
+    across later flashes/OTAs/reboots, so the board's CURRENTLY running
+    `fw_build` -- and even a coredump archive sidecar's recorded
+    `fw_build_reported` (explicitly documented in coredump_fetch.py as "what
+    was running when we fetched it", not "what panicked") -- can both name
+    the wrong build. Confirmed live: one bench-board coredump's own embedded
+    SHA256 began `0965ca575...` while the board's then-current app's began
+    `1204ef146...`.
+
+    Tries every ELF `elf_archive` currently has archived for KilnFW against
+    esp_coredump's own SHA256 check (the strongest available identifier of
+    a dump's true origin) and returns the first exact match, symbolized.
+
+    Fails LOUD and DISTINCTLY on two different outcomes, never conflated:
+      - an ENVIRONMENT problem (wrong Python interpreter, IDF_PATH unset,
+        espcoredump.py missing) aborts immediately, naming the problem --
+        this says nothing about whether any archived ELF matches;
+      - every archived ELF was tried and NONE matched is reported as
+        PERMANENTLY UNSYMBOLIZABLE: a legitimate outcome (the build that
+        produced this dump was never archived, or its ELF was since
+        pruned), not a tooling failure and not a "guess the closest one"
+        situation -- do not retry with a substitute ELF chosen by hand."""
+    if not os.path.isfile(coredump_path):
+        return f"error: coredump file does not exist: {coredump_path!r}"
+    candidates = elf_archive.list_all_kiln_elf_paths()
+    if not candidates:
+        return (
+            "error: the KilnFW ELF archive currently has zero candidate ELFs "
+            f"(checked {elf_archive.kiln_archive_dir()}) -- nothing to search, "
+            "not a verdict about this coredump"
+        )
+    try:
+        elf_path, symbolized = coredump_fetch.find_matching_archived_elf(coredump_path, candidates)
+    except coredump_fetch.CoredumpSymbolizeError as exc:
+        return f"error: {exc}"
+    return f"elf={elf_path}\n{symbolized}"
 
 
 @_srv._tool()
@@ -1074,21 +1133,45 @@ def read_esp_coredump(host: Optional[str] = None, out_path: Optional[str] = None
     if not symbolize:
         return result
 
-    fw_build = None
-    if elf_path is None:
+    if elf_path is not None:
         try:
-            info = capability_preflight.get_board_info(resolved)
-        except Exception as exc:  # noqa: BLE001 - report as a normal tool error, not a crash
-            return f"{result}\nerror: could not query board at {resolved} for fw_build to find a matching ELF: {exc}"
+            symbolized = coredump_fetch.symbolize_coredump(out_path, elf_path, fw_build="<given explicitly>")
+        except coredump_fetch.CoredumpSymbolizeError as exc:
+            return f"{result}\nerror: {exc}"
+        return f"{result}\nelf={elf_path}\n{symbolized}"
+
+    # No elf_path given: this coredump was JUST fetched over HTTP, so the
+    # board's currently-reported fw_build is the most likely origin build --
+    # try it first as a fast path. But it is NOT guaranteed correct (the
+    # board could have been reflashed between the panic that produced this
+    # coredump and this fetch, without the coredump partition being
+    # cleared), so a mismatch here falls through to a full content-based
+    # search across every archived ELF rather than being reported as a
+    # hard failure. This is the 2026-09-16 fix for the gap find_crash_elf()
+    # names in its own docstring: never trust an externally-reported build
+    # identity as the final word on what produced a given coredump -- verify
+    # against the coredump's own embedded SHA256 instead.
+    fw_build = None
+    fast_path_elf = None
+    try:
+        info = capability_preflight.get_board_info(resolved)
         fw_build = info.fw_build
-        if not fw_build:
-            return f"{result}\nerror: board at {resolved} did not report fw_build in /api/status -- pass elf_path explicitly"
-        elf_path, message = elf_archive.find_kiln_elf_for_build(fw_build)
-        if elf_path is None:
-            return f"{result}\nerror: {message}"
+    except Exception:  # noqa: BLE001 - fast path is best-effort; fall through to full search either way
+        pass
+    if fw_build:
+        fast_path_elf, _msg = elf_archive.find_kiln_elf_for_build(fw_build)
+
+    candidates = elf_archive.list_all_kiln_elf_paths()
+    if fast_path_elf is not None:
+        # Try the likely candidate first (fast, and the common case), but
+        # keep it in the full candidate list too so find_matching_archived_elf
+        # still finds it if ordering here ever changes.
+        ordered = [fast_path_elf] + [p for p in candidates if p != fast_path_elf]
+    else:
+        ordered = candidates
 
     try:
-        symbolized = coredump_fetch.symbolize_coredump(out_path, elf_path, fw_build=fw_build or "<given explicitly>")
+        elf_path, symbolized = coredump_fetch.find_matching_archived_elf(out_path, ordered)
     except coredump_fetch.CoredumpSymbolizeError as exc:
         return f"{result}\nerror: {exc}"
     return f"{result}\nelf={elf_path}\n{symbolized}"

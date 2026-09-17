@@ -309,6 +309,102 @@ def symbolize_coredump(coredump_path: str, elf_path: str, *, fw_build: str = "<u
     return proc.stdout
 
 
+# Substrings that mark a symbolize failure as an ENVIRONMENT problem (wrong
+# interpreter, no IDF_PATH, missing espcoredump.py) rather than a verdict
+# about whether a given ELF matches the coredump. find_matching_archived_elf
+# below must not swallow these into "this candidate didn't match" -- an
+# environment failure says nothing about any candidate and must abort the
+# whole search loudly, not be silently absorbed into a false "none of the
+# N archived ELFs match" verdict (exactly this repo's recurring failure
+# mode: an environment/lookup problem reported as a substantive verdict
+# about the data -- see docs/audits/esp_coredump_extraction_2026-09-14.md
+# and the 2026-09-16 wrong-interpreter finding above).
+_ENVIRONMENT_FAILURE_MARKERS = (
+    "ModuleNotFoundError",
+    "IDF_PATH is not set",
+    "espcoredump.py not found",
+    "failed to run espcoredump",
+)
+
+
+def find_matching_archived_elf(coredump_path: str, candidate_elves: list[str], *,
+                                espcoredump_python: Optional[str] = None,
+                                idf_path: Optional[str] = None,
+                                subcommand: str = "info_corefile") -> tuple[str, str]:
+    """Finds the ELF that actually produced `coredump_path`, by trying each
+    of `candidate_elves` against espcoredump/esp_coredump's own embedded
+    SHA256 check (`symbolize_coredump` above) until one succeeds -- rather
+    than trusting any externally-reported build identity (a board's
+    CURRENTLY RUNNING `fw_build`, a coredump-archive provenance sidecar's
+    `fw_build_reported`, or anything else recorded outside the coredump
+    itself).
+
+    Why this exists: a coredump persisted on the board outlives the boot
+    that wrote it -- a later flash, OTA, or reboot can leave the board
+    running a DIFFERENT build by the time the coredump is fetched or
+    re-symbolized. `find_crash_elf()`/`read_esp_coredump()`'s original
+    behaviour of keying the ELF lookup off the board's *current* `fw_build`
+    is confidently wrong in exactly that case: it returns a plausible ELF
+    that symbolizes cleanly-looking output for the wrong build, reproducing
+    the "confident wrong line numbers" failure this whole module exists to
+    prevent. Confirmed against a real stored coredump on the bench board:
+    the dump's own embedded app SHA256 began `0965ca575...` while the
+    board's then-currently-running app's began `1204ef146...` -- two
+    different builds. The embedded SHA256 esp_coredump checks is the
+    strongest available identifier of a dump's true origin build, so this
+    function verifies against it directly instead of trusting any
+    externally-recorded metadata.
+
+    Returns (elf_path, stdout) for the first candidate that satisfies
+    esp_coredump's own SHA256 check. Raises `CoredumpSymbolizeError`:
+      - immediately, naming the underlying problem, if any candidate
+        attempt fails for an ENVIRONMENT reason (wrong interpreter,
+        IDF_PATH unset, espcoredump.py missing) -- never conflated with a
+        "no match" verdict, since an environment failure says nothing about
+        whether any candidate's content actually matches;
+      - after exhausting every candidate, if all of them fail on content
+        (an actual SHA256 mismatch each time) -- worded as a PERMANENTLY
+        UNSYMBOLIZABLE dump (the build that produced it was never archived,
+        or its ELF has since been pruned), a legitimate, distinctly-labeled
+        outcome, not an error that reads like an environment problem or a
+        single wrong guess."""
+    if not candidate_elves:
+        raise CoredumpSymbolizeError(
+            "no archived ELF candidates were given to search -- nothing to try. "
+            "This means the ELF archive is empty, not that this coredump is unsymbolizable."
+        )
+    tried: list[tuple[str, str]] = []
+    for elf_path in candidate_elves:
+        try:
+            out = symbolize_coredump(
+                coredump_path, elf_path,
+                fw_build=f"<candidate {os.path.basename(elf_path)}, content-based search>",
+                espcoredump_python=espcoredump_python, idf_path=idf_path, subcommand=subcommand,
+            )
+        except CoredumpSymbolizeError as exc:
+            msg = str(exc)
+            if any(marker in msg for marker in _ENVIRONMENT_FAILURE_MARKERS):
+                # Do not keep trying other candidates against a broken
+                # toolchain -- every subsequent attempt would fail the same
+                # way for the same non-content reason, and reporting that as
+                # "N/N candidates didn't match" would be exactly the
+                # environment-failure-reported-as-a-data-verdict bug this
+                # function exists to avoid.
+                raise
+            tried.append((elf_path, msg.splitlines()[-1] if msg else "<empty>"))
+            continue
+        return elf_path, out
+    detail = "\n".join(f"  - {p}: {m}" for p, m in tried)
+    raise CoredumpSymbolizeError(
+        f"cannot symbolize: PERMANENTLY UNSYMBOLIZABLE -- none of the {len(candidate_elves)} archived "
+        "ELF(s) checked match this coredump's own embedded build identity (each failed esp_coredump's "
+        "SHA256 check). This means the build that actually produced this coredump was never archived, "
+        "or its ELF has since been pruned -- a legitimate outcome, not a tooling bug. Do NOT retry with "
+        "a guessed substitute ELF; that reproduces the exact confident-wrong-line-numbers failure this "
+        "module exists to prevent.\n" + detail
+    )
+
+
 # ---------------------------------------------------------------------------
 # Durable, provenance-carrying archive of every raw coredump ever fetched.
 #

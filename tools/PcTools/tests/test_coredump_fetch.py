@@ -193,5 +193,143 @@ class SymbolizeMismatchTests(unittest.TestCase):
             run_mock.assert_not_called()
 
 
+class FindMatchingArchivedElfTests(unittest.TestCase):
+    """Negative tests for the 2026-09-16 gap: `find_crash_elf()`/
+    `read_esp_coredump()`'s old behaviour trusted the board's CURRENTLY
+    RUNNING `fw_build` as the identity of whatever produced a given
+    coredump. That is wrong for a coredump that outlived a later flash --
+    the board's current fw_build names a DIFFERENT build than the one that
+    actually wrote the dump. `find_matching_archived_elf()` fixes this by
+    verifying against espcoredump's own SHA256 check instead of trusting any
+    externally-reported identity.
+
+    Each test proves this against the OLD code path too: `elf_archive.
+    find_kiln_elf_for_build()` (unchanged, still the function
+    `find_crash_elf()` calls) is exercised directly to show it confidently
+    returns an ELF that does NOT match the coredump -- not merely that a
+    new API is missing."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.coredump_path = os.path.join(self.tmpdir, "dump.bin")
+        with open(self.coredump_path, "wb") as f:
+            f.write(b"\x00" * 64)
+        self.elf_running = os.path.join(self.tmpdir, "KilnCtrl-running.elf")  # what fw_build names
+        self.elf_origin = os.path.join(self.tmpdir, "KilnCtrl-origin.elf")    # what actually produced the dump
+        for p in (self.elf_running, self.elf_origin):
+            with open(p, "wb") as f:
+                f.write(b"\x7fELF fake")
+        self.idf_dir = os.path.join(self.tmpdir, "idf")
+        os.makedirs(os.path.join(self.idf_dir, "components", "espcoredump"), exist_ok=True)
+        with open(os.path.join(self.idf_dir, "components", "espcoredump", "espcoredump.py"), "w") as f:
+            f.write("# stub, never actually executed -- subprocess.run is mocked below\n")
+
+    def _mock_subprocess_for(self, matching_elf_path: str):
+        """A fake `subprocess.run` standing in for espcoredump: succeeds only
+        when called against `matching_elf_path`, mismatches (like a real
+        SHA256 refusal) against anything else."""
+        def _run(cmd, **kwargs):
+            elf_arg = cmd[-1]
+            if elf_arg == matching_elf_path:
+                return unittest.mock.Mock(returncode=0, stdout="Crashed task: profile_executor\n", stderr="")
+            return unittest.mock.Mock(
+                returncode=1, stdout="",
+                stderr="Error: SHA256 of ELF file does not match the one stored in the core dump!",
+            )
+        return _run
+
+    def test_old_lookup_by_running_fw_build_returns_an_elf_that_does_not_match(self):
+        """Reproduces the real incident named in the task: the board's
+        currently-running fw_build names `elf_running`, but the coredump was
+        actually produced by `elf_origin` (a build that ran earlier and has
+        since been superseded by a flash). The OLD code path -- calling
+        `find_kiln_elf_for_build(fw_build)` and trusting its result outright
+        -- hands back `elf_running`, which fails espcoredump's own SHA256
+        check against this coredump. This is the "confidently wrong ELF"
+        failure mode itself, demonstrated with the actual unchanged lookup
+        function the old `find_crash_elf()`/`read_esp_coredump()` code used."""
+        import kilnctrl.elf_archive as elf_archive
+        orig_dir_fn = elf_archive.kiln_archive_dir
+        archive_dir = os.path.join(self.tmpdir, "elf_archive")
+        elf_archive.kiln_archive_dir = lambda: archive_dir
+        try:
+            elf_archive.archive_kiln_elf(self.elf_running, "Sep 12 2026 10:00:00", "aaaa1111", "test")
+            path, _msg = elf_archive.find_kiln_elf_for_build("Sep 12 2026 10:00:00")
+            self.assertIsNotNone(path, "the old lookup must still find AN entry -- it exists")
+
+            # Confirm this OLD result is actually wrong for this coredump:
+            # espcoredump itself would refuse it with a SHA256 mismatch.
+            with unittest.mock.patch("subprocess.run", side_effect=self._mock_subprocess_for(self.elf_origin)):
+                with self.assertRaises(coredump_fetch.CoredumpSymbolizeError) as ctx:
+                    coredump_fetch.symbolize_coredump(
+                        self.coredump_path, path, fw_build="Sep 12 2026 10:00:00", idf_path=self.idf_dir,
+                    )
+            self.assertIn("SHA256", str(ctx.exception))
+        finally:
+            elf_archive.kiln_archive_dir = orig_dir_fn
+
+    def test_content_based_search_finds_the_true_origin_after_a_mismatch(self):
+        """The fix: given both candidates (the wrongly-favored `elf_running`
+        first, matching what a naive fw_build-keyed lookup would try, and
+        the true `elf_origin` second), `find_matching_archived_elf` must
+        skip the mismatching one and return the one that actually matches --
+        never stopping at the first candidate's failure and never silently
+        keeping the wrong guess."""
+        with unittest.mock.patch("subprocess.run", side_effect=self._mock_subprocess_for(self.elf_origin)):
+            elf_path, out = coredump_fetch.find_matching_archived_elf(
+                self.coredump_path, [self.elf_running, self.elf_origin], idf_path=self.idf_dir,
+            )
+        self.assertEqual(elf_path, self.elf_origin)
+        self.assertIn("profile_executor", out)
+
+    def test_no_candidate_matches_reports_permanently_unsymbolizable(self):
+        """When the true origin build was never archived at all (a
+        legitimate, permanent outcome -- explicitly called out by the task:
+        one such dump exists on the bench board right now), every candidate
+        fails the SHA256 check. This must be reported as a distinctly
+        labeled, non-recoverable result -- not a plain error indistinguishable
+        from a tooling/environment problem, and never a silent fallback to
+        any of the candidates tried."""
+        def _always_mismatch(cmd, **kwargs):
+            return unittest.mock.Mock(
+                returncode=1, stdout="",
+                stderr="Error: SHA256 of ELF file does not match the one stored in the core dump!",
+            )
+        with unittest.mock.patch("subprocess.run", side_effect=_always_mismatch):
+            with self.assertRaises(coredump_fetch.CoredumpSymbolizeError) as ctx:
+                coredump_fetch.find_matching_archived_elf(
+                    self.coredump_path, [self.elf_running, self.elf_origin], idf_path=self.idf_dir,
+                )
+        msg = str(ctx.exception)
+        self.assertIn("PERMANENTLY UNSYMBOLIZABLE", msg)
+        self.assertIn(self.elf_running, msg)
+        self.assertIn(self.elf_origin, msg)
+
+    def test_environment_failure_aborts_search_instead_of_reporting_no_match(self):
+        """A broken toolchain (wrong interpreter, no esp_coredump installed)
+        must never be reported as "none of the archived ELFs match" -- that
+        conflates an environment problem with a verdict about the data,
+        exactly this repo's recurring failure mode (2026-09-16 finding in
+        coredump_fetch.py: a ModuleNotFoundError and a genuine SHA256
+        mismatch produced visually similar "exit 1" results). The search
+        must abort on the FIRST candidate's environment failure rather than
+        burning through every candidate and then reporting a misleading
+        "no match" verdict."""
+        module_not_found = unittest.mock.Mock(
+            returncode=1, stdout="",
+            stderr="Traceback (most recent call last):\nModuleNotFoundError: No module named 'esp_coredump'",
+        )
+        with unittest.mock.patch("subprocess.run", return_value=module_not_found) as run_mock:
+            with self.assertRaises(coredump_fetch.CoredumpSymbolizeError) as ctx:
+                coredump_fetch.find_matching_archived_elf(
+                    self.coredump_path, [self.elf_running, self.elf_origin], idf_path=self.idf_dir,
+                )
+            # Aborted after the first candidate -- did not burn through both.
+            run_mock.assert_called_once()
+        msg = str(ctx.exception)
+        self.assertIn("ModuleNotFoundError", msg)
+        self.assertNotIn("PERMANENTLY UNSYMBOLIZABLE", msg)
+
+
 if __name__ == "__main__":
     unittest.main()

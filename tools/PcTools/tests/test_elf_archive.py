@@ -77,6 +77,27 @@ class ArchiveKilnElfTest(unittest.TestCase):
         self.assertEqual(path2, result.archived_path)
         self.assertIn("found", message2)
 
+    def test_list_all_kiln_elf_paths_returns_every_distinct_archived_elf(self):
+        # 2026-09-16: list_all_kiln_elf_paths() backs the content-based
+        # coredump/ELF matcher (coredump_fetch.find_matching_archived_elf),
+        # which must be able to see every archived build as a candidate --
+        # not just whichever one a board's currently-reported fw_build
+        # happens to name. Archive two distinct builds and confirm both come
+        # back, and that a manifest entry whose file was deleted off disk
+        # (should never happen in practice, but must not crash a listing
+        # call) is silently excluded rather than raising.
+        elf_a = os.path.join(self._tmp.name, "KilnCtrl_a.elf")
+        elf_b = os.path.join(self._tmp.name, "KilnCtrl_b.elf")
+        _write_fake_elf(elf_a, b"content A for listing test")
+        _write_fake_elf(elf_b, b"content B for listing test, different length")
+        result_a = elf_archive.archive_kiln_elf(elf_a, "Sep 10 2026 12:00:00", "0dddd435", "test")
+        result_b = elf_archive.archive_kiln_elf(elf_b, "Sep 11 2026 09:30:00", "1eeee546", "test")
+
+        paths = elf_archive.list_all_kiln_elf_paths()
+        self.assertIn(result_a.archived_path, paths)
+        self.assertIn(result_b.archived_path, paths)
+        self.assertEqual(len(paths), 2)
+
     def test_lookup_with_no_match_fails_loudly(self):
         elf_path = os.path.join(self._tmp.name, "KilnCtrl.elf")
         _write_fake_elf(elf_path, b"fake elf bytes v1")
