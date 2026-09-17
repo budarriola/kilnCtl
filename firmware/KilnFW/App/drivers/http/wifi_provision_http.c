@@ -1037,8 +1037,17 @@ esp_err_t wifi_provision_http_start(void)
      * caught it exactly as designed. Set to 140: 131 plus 9 spare slots,
      * same headroom convention as every bump above. RAM cost: 10 extra
      * pointer slots * 4 bytes = 40 bytes, noise against the documented
-     * ~11.9 kB DRAM failure floor. */
-    config.max_uri_handlers = 140;
+     * ~11.9 kB DRAM failure floor.
+     *
+     * Bumped 140 -> 151, 2026-09-17: WEB_AUTH_PLAN.md section 8's two new
+     * routes (GET /api/auth/session, POST /api/auth/session/extend --
+     * web_auth_session_status_http.c) took the real count from 140 to 142
+     * -- two over this cap. check_uri_handler_cap.ps1 caught it exactly as
+     * designed. Set to 151: 142 plus 9 spare slots, same headroom
+     * convention as every bump above. RAM cost: 11 extra pointer slots * 4
+     * bytes = 44 bytes, noise against the documented ~11.9 kB DRAM failure
+     * floor. */
+    config.max_uri_handlers = 151;
     /* Default (4096) is tight for the largest POST handlers on this server:
      * zones_post_handler (zones_http.c) alone stacks a 2561-byte body
      * buffer plus a ~170-byte zones_cfg_t scratch copy on top of whatever
