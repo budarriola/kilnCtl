@@ -302,6 +302,19 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "http/http_auth_http.c"
                        "http/http_session_iface_stub.c"
                        "http/http_auth_policy_iface_stub.c"
+                       # WEB_AUTH_PLAN.md items 2/3/6/11 -- the security page's
+                       # dispatch core (security_http_core.c, host-tested
+                       # against a hand-built fake vtable) and its two real
+                       # vtable implementations: security_backend_web_auth.c
+                       # (wired to web_auth_store.h) and security_backend_
+                       # placeholder.c (used before the real backend existed /
+                       # for any role this backend doesn't cover). Previously
+                       # host-test-only via build_host_tests.ps1's own SRCS
+                       # list -- never linked into the real target, so this
+                       # page compiled and ran nowhere on a real board.
+                       "http/security_http_core.c"
+                       "http/security_backend_web_auth.c"
+                       "http/security_backend_placeholder.c"
                        "net/ota_pico_relay.c"
                        "net/wifi_prov.c"
                        # wifi_prov.c split 2026-09-04 (ROADMAP.md M15 A3,

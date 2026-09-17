@@ -12,6 +12,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_http_server.h"
+#include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 
 #include "profiles_http.h"
 #include "backup_json.h" // shared hand-rolled JSON reader (see that header's own
@@ -438,12 +439,12 @@ esp_err_t profiles_export_http_start(void)
     static const httpd_uri_t import_uri = {
         .uri = "/api/profile/import", .method = HTTP_POST, .handler = import_post_handler,
     };
-    esp_err_t err = httpd_register_uri_handler(server, &export_uri);
+    esp_err_t err = kiln_http_register(server, &export_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(GET /api/profile/export) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &import_uri);
+    err = kiln_http_register(server, &import_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/profile/import) failed: %s", esp_err_to_name(err));
         return err;

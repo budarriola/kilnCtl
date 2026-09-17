@@ -1,4 +1,5 @@
 #include "zones_http.h"
+#include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 #include "zones_http_internal.h"
 #include "zones_config_json.h" /* the HTTP-free core -- zone_cfg_t/zones_cfg_t/
                                 * zone_timing_profile_t, the versioned-blob decode/
@@ -792,57 +793,57 @@ esp_err_t zones_http_start(void)
     static const httpd_uri_t tuning_rec_uri = {
         .uri = "/api/tuning_recommendations", .method = HTTP_GET, .handler = tuning_rec_get_handler,
     };
-    err = httpd_register_uri_handler(server, &page_uri);
+    err = kiln_http_register(server, &page_uri);
     if (err != ESP_OK) {
         ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(/settings/zones) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &safety_page_uri);
+    err = kiln_http_register(server, &safety_page_uri);
     if (err != ESP_OK) {
         ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(/settings/safety) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &get_uri);
+    err = kiln_http_register(server, &get_uri);
     if (err != ESP_OK) {
         ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(GET /api/zones) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &get_diag_uri);
+    err = kiln_http_register(server, &get_diag_uri);
     if (err != ESP_OK) {
         ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(GET /api/zones_diag) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &post_uri);
+    err = kiln_http_register(server, &post_uri);
     if (err != ESP_OK) {
         ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(POST /api/zones) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &pid_post_uri);
+    err = kiln_http_register(server, &pid_post_uri);
     if (err != ESP_OK) {
         ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(POST /api/zones/pid) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &sweep_start_uri);
+    err = kiln_http_register(server, &sweep_start_uri);
     if (err != ESP_OK) {
         ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(POST current_sweep/start) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &sweep_abort_uri);
+    err = kiln_http_register(server, &sweep_abort_uri);
     if (err != ESP_OK) {
         ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(POST current_sweep/abort) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &sweep_status_uri);
+    err = kiln_http_register(server, &sweep_status_uri);
     if (err != ESP_OK) {
         ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(GET current_sweep/status) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &ct_map_uri);
+    err = kiln_http_register(server, &ct_map_uri);
     if (err != ESP_OK) {
         ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(GET ct_channel_map) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &tuning_rec_uri);
+    err = kiln_http_register(server, &tuning_rec_uri);
     if (err != ESP_OK) {
         ESP_LOGE(ZONES_HTTP_TAG, "httpd_register_uri_handler(GET tuning_recommendations) failed: %s", esp_err_to_name(err));
         return err;

@@ -1,4 +1,5 @@
 #include "cfg_fs_format_http.h"
+#include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 
 #include <stdio.h>
 #include <string.h>
@@ -70,7 +71,7 @@ esp_err_t cfg_fs_format_http_start(void)
     static const httpd_uri_t pending_uri = {
         .uri = "/api/cfgfs/format_pending", .method = HTTP_GET, .handler = format_pending_get_handler,
     };
-    esp_err_t err = httpd_register_uri_handler(server, &pending_uri);
+    esp_err_t err = kiln_http_register(server, &pending_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(GET /api/cfgfs/format_pending) failed: %s",
                  esp_err_to_name(err));
@@ -80,7 +81,7 @@ esp_err_t cfg_fs_format_http_start(void)
     static const httpd_uri_t confirm_uri = {
         .uri = "/api/cfgfs/format_confirm", .method = HTTP_POST, .handler = format_confirm_post_handler,
     };
-    err = httpd_register_uri_handler(server, &confirm_uri);
+    err = kiln_http_register(server, &confirm_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/cfgfs/format_confirm) failed: %s",
                  esp_err_to_name(err));

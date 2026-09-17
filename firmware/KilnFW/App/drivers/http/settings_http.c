@@ -1,4 +1,5 @@
 #include "settings_http.h"
+#include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -282,28 +283,28 @@ esp_err_t settings_http_start(void)
         .uri = "/api/settings/display_power", .method = HTTP_POST, .handler = settings_display_power_post_handler,
     };
 
-    esp_err_t err = httpd_register_uri_handler(server, &settings_uri);
+    esp_err_t err = kiln_http_register(server, &settings_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/settings) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &display_uri);
+    err = kiln_http_register(server, &display_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/settings/display) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &tz_uri);
+    err = kiln_http_register(server, &tz_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/settings/tz) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &display_power_get_uri);
+    err = kiln_http_register(server, &display_power_get_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(GET /api/settings/display_power) failed: %s",
                  esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &display_power_post_uri);
+    err = kiln_http_register(server, &display_power_post_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/settings/display_power) failed: %s",
                  esp_err_to_name(err));

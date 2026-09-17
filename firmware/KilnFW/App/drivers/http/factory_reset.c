@@ -1,4 +1,5 @@
 #include "factory_reset.h"
+#include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 
 #include <string.h>
 
@@ -396,7 +397,7 @@ esp_err_t factory_reset_http_start(void)
     static const httpd_uri_t post_uri = {
         .uri = "/api/factory_reset", .method = HTTP_POST, .handler = reset_post_handler,
     };
-    esp_err_t err = httpd_register_uri_handler(server, &post_uri);
+    esp_err_t err = kiln_http_register(server, &post_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/factory_reset) failed: %s", esp_err_to_name(err));
         return err;

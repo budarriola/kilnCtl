@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "esp_http_server.h"
+#include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 #include "esp_log.h"
 
 #include "http_form.h"
@@ -201,7 +202,7 @@ esp_err_t setup_progress_http_start(void)
     static const httpd_uri_t get_uri = {
         .uri = "/api/setup/progress", .method = HTTP_GET, .handler = api_setup_progress_get_handler,
     };
-    esp_err_t err = httpd_register_uri_handler(server, &get_uri);
+    esp_err_t err = kiln_http_register(server, &get_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(GET /api/setup/progress) failed: %s", esp_err_to_name(err));
         return err;
@@ -210,7 +211,7 @@ esp_err_t setup_progress_http_start(void)
     static const httpd_uri_t post_uri = {
         .uri = "/api/setup/progress", .method = HTTP_POST, .handler = api_setup_progress_post_handler,
     };
-    err = httpd_register_uri_handler(server, &post_uri);
+    err = kiln_http_register(server, &post_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/setup/progress) failed: %s", esp_err_to_name(err));
         return err;

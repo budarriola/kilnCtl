@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "esp_http_server.h"
+#include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 #include "esp_log.h"
 
 #include "board_temps.h"
@@ -72,7 +73,7 @@ esp_err_t board_temps_http_start(MAX31856BusClass *thermo_bus_or_null)
     static const httpd_uri_t api_uri = {
         .uri = "/api/board_temps", .method = HTTP_GET, .handler = api_board_temps_get_handler,
     };
-    esp_err_t err = httpd_register_uri_handler(server, &api_uri);
+    esp_err_t err = kiln_http_register(server, &api_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/board_temps) failed: %s", esp_err_to_name(err));
         return err;

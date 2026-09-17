@@ -10,8 +10,10 @@
 #include <string.h>
 
 #include "esp_log.h"
-#include "esp_random.h"
 
+#include "hal_sysinfo.h" // hal_sysinfo_fill_random() -- HAL boundary: no raw
+                          // esp_random.h in this file, see check_hal_include_
+                          // boundary.ps1's EspRandomAllowlist comment.
 #include "security_backend.h"
 #include "web_auth_store.h"
 #include "wifi_prov.h"
@@ -75,7 +77,7 @@ static security_err_t web_auth_backend_set_web_password(security_role_t role, co
     }
 
     uint8_t salt[WEB_AUTH_SALT_LEN];
-    esp_fill_random(salt, sizeof(salt));
+    hal_sysinfo_fill_random(salt, sizeof(salt));
 
     // item 10's forced-change flag applies only to a credential set BY the
     // physical reset gesture, never to an ordinary owner-initiated change
@@ -109,7 +111,7 @@ static security_err_t web_auth_backend_set_lcd_pin(security_role_t role, const c
     }
 
     uint8_t salt[WEB_AUTH_SALT_LEN];
-    esp_fill_random(salt, sizeof(salt));
+    hal_sysinfo_fill_random(salt, sizeof(salt));
 
     hal_status_t status = web_auth_store_set_pin(to_store_role(role), pin, salt);
     if (status != HAL_OK) {

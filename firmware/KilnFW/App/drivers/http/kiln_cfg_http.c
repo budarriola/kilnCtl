@@ -1,4 +1,5 @@
 #include "kiln_cfg_http.h"
+#include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -541,7 +542,7 @@ esp_err_t kiln_cfg_http_start(void)
     const httpd_uri_t *uris[] = { &list_uri,   &save_uri,  &clone_uri,  &apply_uri,
                                  &delete_uri, &rename_uri, &export_uri, &import_uri };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
-        esp_err_t err = httpd_register_uri_handler(server, uris[i]);
+        esp_err_t err = kiln_http_register(server, uris[i]);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "httpd_register_uri_handler(%s) failed: %s", uris[i]->uri, esp_err_to_name(err));
             return err;

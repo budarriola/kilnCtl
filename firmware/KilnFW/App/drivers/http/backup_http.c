@@ -49,6 +49,7 @@
 // for the full split map (backup_json.c, backup_export.c, backup_import.c).
 
 #include "backup_http.h"
+#include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 #include "backup_http_internal.h"
 
 #include "esp_log.h"
@@ -75,17 +76,17 @@ esp_err_t backup_http_start(void)
         .uri = "/api/backup/import", .method = HTTP_POST, .handler = backup_import_post_handler,
     };
 
-    esp_err_t err = httpd_register_uri_handler(server, &page_uri);
+    esp_err_t err = kiln_http_register(server, &page_uri);
     if (err != ESP_OK) {
         ESP_LOGE(BACKUP_TAG, "httpd_register_uri_handler(/settings/backup) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &export_uri);
+    err = kiln_http_register(server, &export_uri);
     if (err != ESP_OK) {
         ESP_LOGE(BACKUP_TAG, "httpd_register_uri_handler(/api/backup/export) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &import_uri);
+    err = kiln_http_register(server, &import_uri);
     if (err != ESP_OK) {
         ESP_LOGE(BACKUP_TAG, "httpd_register_uri_handler(/api/backup/import) failed: %s", esp_err_to_name(err));
         return err;

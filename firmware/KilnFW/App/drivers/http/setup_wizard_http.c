@@ -1,4 +1,5 @@
 #include "setup_wizard_http.h"
+#include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 
 #include "esp_log.h"
 
@@ -41,7 +42,7 @@ esp_err_t setup_wizard_http_start(void)
     static const httpd_uri_t page_uri = {
         .uri = "/setup", .method = HTTP_GET, .handler = page_get_handler,
     };
-    esp_err_t err = httpd_register_uri_handler(server, &page_uri);
+    esp_err_t err = kiln_http_register(server, &page_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/setup) failed: %s", esp_err_to_name(err));
         return err;

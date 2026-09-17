@@ -1,4 +1,5 @@
 #include "dashboard_http_internal.h"
+#include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 
 #include <math.h>
 #include <stdio.h>
@@ -794,101 +795,101 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
     static const httpd_uri_t unit_pref_uri = {
         .uri = "/api/unit_pref", .method = HTTP_POST, .handler = unit_pref_post_handler,
     };
-    esp_err_t err = httpd_register_uri_handler(server, &status_uri);
+    esp_err_t err = kiln_http_register(server, &status_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/status) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &exec_status_uri);
+    err = kiln_http_register(server, &exec_status_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/profile_exec) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &profile_plan_uri);
+    err = kiln_http_register(server, &profile_plan_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/profile_plan) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &exec_start_uri);
+    err = kiln_http_register(server, &exec_start_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/profile_exec/start) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &exec_stop_uri);
+    err = kiln_http_register(server, &exec_stop_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/profile_exec/stop) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &exec_pause_uri);
+    err = kiln_http_register(server, &exec_pause_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/profile_exec/pause) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &exec_resume_uri);
+    err = kiln_http_register(server, &exec_resume_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/profile_exec/resume) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &exec_ack_last_run_uri);
+    err = kiln_http_register(server, &exec_ack_last_run_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/profile_exec/ack_last_run) failed: %s",
                  esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &safety_clear_trip_uri);
+    err = kiln_http_register(server, &safety_clear_trip_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/safety/clear_trip) failed: %s", esp_err_to_name(err));
     }
-    err = httpd_register_uri_handler(server, &safety_log_level_uri);
+    err = kiln_http_register(server, &safety_log_level_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/safety/log_level) failed: %s", esp_err_to_name(err));
     }
-    err = httpd_register_uri_handler(server, &control_status_uri);
+    err = kiln_http_register(server, &control_status_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/control) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &firing_history_uri);
+    err = kiln_http_register(server, &firing_history_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/firing_history) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &history_csv_uri);
+    err = kiln_http_register(server, &history_csv_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/history.csv) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &autotune_status_uri);
+    err = kiln_http_register(server, &autotune_status_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/autotune) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &autotune_matrix_uri);
+    err = kiln_http_register(server, &autotune_matrix_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/autotune/matrix) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &autotune_start_uri);
+    err = kiln_http_register(server, &autotune_start_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/autotune/start) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &autotune_abort_uri);
+    err = kiln_http_register(server, &autotune_abort_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/autotune/abort) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &autotune_accept_uri);
+    err = kiln_http_register(server, &autotune_accept_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/autotune/accept) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &autotune_trace_uri);
+    err = kiln_http_register(server, &autotune_trace_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/autotune/trace.csv) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &unit_pref_uri);
+    err = kiln_http_register(server, &unit_pref_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/unit_pref) failed: %s", esp_err_to_name(err));
         return err;

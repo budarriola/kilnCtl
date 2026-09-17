@@ -4,6 +4,7 @@
 #include <stdio.h>
 
 #include "esp_http_server.h"
+#include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 #include "esp_log.h"
 #include "esp_partition.h"
 
@@ -136,7 +137,7 @@ esp_err_t partition_info_http_start(void)
     static const httpd_uri_t api_uri = {
         .uri = "/api/partitions", .method = HTTP_GET, .handler = api_partitions_get_handler,
     };
-    esp_err_t err = httpd_register_uri_handler(server, &api_uri);
+    esp_err_t err = kiln_http_register(server, &api_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/partitions) failed: %s", esp_err_to_name(err));
         return err;

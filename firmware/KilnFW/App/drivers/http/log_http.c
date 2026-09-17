@@ -6,6 +6,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_http_server.h"
+#include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 
 #include "log_store.h"
 #include "wifi_provision_http.h"
@@ -84,12 +85,12 @@ esp_err_t log_http_start(void)
     static const httpd_uri_t autotune_uri = {
         .uri = "/api/logs/autotune", .method = HTTP_GET, .handler = autotune_get_handler,
     };
-    esp_err_t err = httpd_register_uri_handler(server, &firing_uri);
+    esp_err_t err = kiln_http_register(server, &firing_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/logs/firing) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &autotune_uri);
+    err = kiln_http_register(server, &autotune_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/logs/autotune) failed: %s", esp_err_to_name(err));
         return err;

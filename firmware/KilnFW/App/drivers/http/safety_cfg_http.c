@@ -1,4 +1,5 @@
 #include "safety_cfg_http.h"
+#include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 
 #include <math.h>
 #include <stdint.h>
@@ -1895,7 +1896,7 @@ esp_err_t safety_cfg_http_start(SafetyLinkClass *link_or_null, kiln_io_t *io_or_
                                    &relay_type_uri, &ct_cal_uri,       &ct_auto_zero_uri,
                                    &rate_guard_auto_get_uri, &rate_guard_auto_post_uri };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
-        esp_err_t err = httpd_register_uri_handler(server, uris[i]);
+        esp_err_t err = kiln_http_register(server, uris[i]);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "httpd_register_uri_handler(%s) failed: %s", uris[i]->uri, esp_err_to_name(err));
             return err;

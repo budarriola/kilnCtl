@@ -7,6 +7,7 @@
 
 #include "esp_log.h"
 #include "esp_http_server.h"
+#include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -1150,7 +1151,7 @@ esp_err_t wifi_provision_http_start(void)
      * instead of just going quiet. */
 #define REGISTER_OR_LOG(uri_ptr)                                                                \
     do {                                                                                        \
-        esp_err_t reg_err = httpd_register_uri_handler(s_server, (uri_ptr));                    \
+        esp_err_t reg_err = kiln_http_register(s_server, (uri_ptr));                    \
         if (reg_err != ESP_OK) {                                                                \
             ESP_LOGE(TAG, "httpd_register_uri_handler(%s) failed: %s", (uri_ptr)->uri,          \
                      esp_err_to_name(reg_err));                                                 \

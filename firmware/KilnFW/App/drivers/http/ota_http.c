@@ -1,4 +1,5 @@
 #include "ota_http.h"
+#include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 #include "ota_http_internal.h"
 #include "ota_http_util.h"
 
@@ -957,7 +958,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     static const httpd_uri_t ota_page_uri = {
         .uri = "/ota", .method = HTTP_GET, .handler = ota_page_get_handler
     };
-    esp_err_t err = httpd_register_uri_handler(server, &ota_page_uri);
+    esp_err_t err = kiln_http_register(server, &ota_page_uri);
     if (err != ESP_OK) {
         ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/ota) failed: %s", esp_err_to_name(err));
         return err;
@@ -966,7 +967,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     static const httpd_uri_t challenge_uri = {
         .uri = "/api/ota/challenge", .method = HTTP_GET, .handler = ota_challenge_get_handler
     };
-    err = httpd_register_uri_handler(server, &challenge_uri);
+    err = kiln_http_register(server, &challenge_uri);
     if (err != ESP_OK) {
         ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/challenge) failed: %s",
                  esp_err_to_name(err));
@@ -978,7 +979,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     static const httpd_uri_t esp_update_uri = {
         .uri = "/api/ota/esp", .method = HTTP_POST, .handler = ota_esp_post_handler
     };
-    err = httpd_register_uri_handler(server, &esp_update_uri);
+    err = kiln_http_register(server, &esp_update_uri);
     if (err != ESP_OK) {
         ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/esp) failed: %s", esp_err_to_name(err));
         return err;
@@ -990,7 +991,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     static const httpd_uri_t pico_update_uri = {
         .uri = "/api/ota/pico", .method = HTTP_POST, .handler = ota_pico_post_handler
     };
-    err = httpd_register_uri_handler(server, &pico_update_uri);
+    err = kiln_http_register(server, &pico_update_uri);
     if (err != ESP_OK) {
         ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/pico) failed: %s", esp_err_to_name(err));
         return err;
@@ -999,7 +1000,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     static const httpd_uri_t pico_status_uri = {
         .uri = "/api/ota/pico/status", .method = HTTP_GET, .handler = ota_pico_status_get_handler
     };
-    err = httpd_register_uri_handler(server, &pico_status_uri);
+    err = kiln_http_register(server, &pico_status_uri);
     if (err != ESP_OK) {
         ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/pico/status) failed: %s", esp_err_to_name(err));
         return err;
@@ -1011,7 +1012,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     static const httpd_uri_t interlock_uri = {
         .uri = "/api/ota/interlock", .method = HTTP_GET, .handler = ota_interlock_get_handler
     };
-    err = httpd_register_uri_handler(server, &interlock_uri);
+    err = kiln_http_register(server, &interlock_uri);
     if (err != ESP_OK) {
         ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/interlock) failed: %s", esp_err_to_name(err));
         return err;
@@ -1023,7 +1024,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     static const httpd_uri_t esp_status_uri = {
         .uri = "/api/ota/esp/status", .method = HTTP_GET, .handler = ota_esp_status_get_handler
     };
-    err = httpd_register_uri_handler(server, &esp_status_uri);
+    err = kiln_http_register(server, &esp_status_uri);
     if (err != ESP_OK) {
         ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/esp/status) failed: %s", esp_err_to_name(err));
         return err;
@@ -1035,7 +1036,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     static const httpd_uri_t esp_rollback_uri = {
         .uri = "/api/ota/esp/rollback", .method = HTTP_POST, .handler = ota_esp_rollback_post_handler
     };
-    err = httpd_register_uri_handler(server, &esp_rollback_uri);
+    err = kiln_http_register(server, &esp_rollback_uri);
     if (err != ESP_OK) {
         ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/esp/rollback) failed: %s", esp_err_to_name(err));
         return err;
@@ -1048,7 +1049,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     static const httpd_uri_t pico_rollback_uri = {
         .uri = "/api/ota/pico/rollback", .method = HTTP_POST, .handler = ota_pico_rollback_post_handler
     };
-    err = httpd_register_uri_handler(server, &pico_rollback_uri);
+    err = kiln_http_register(server, &pico_rollback_uri);
     if (err != ESP_OK) {
         ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/pico/rollback) failed: %s", esp_err_to_name(err));
         return err;
@@ -1060,7 +1061,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
         .uri = "/api/ota/pico/rollback/status", .method = HTTP_GET,
         .handler = ota_pico_rollback_status_get_handler
     };
-    err = httpd_register_uri_handler(server, &pico_rollback_status_uri);
+    err = kiln_http_register(server, &pico_rollback_status_uri);
     if (err != ESP_OK) {
         ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/pico/rollback/status) failed: %s",
                  esp_err_to_name(err));
@@ -1074,7 +1075,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     static const httpd_uri_t recovery_exit_uri = {
         .uri = "/api/ota/esp/recovery_exit", .method = HTTP_POST, .handler = ota_recovery_exit_post_handler
     };
-    err = httpd_register_uri_handler(server, &recovery_exit_uri);
+    err = kiln_http_register(server, &recovery_exit_uri);
     if (err != ESP_OK) {
         ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/esp/recovery_exit) failed: %s", esp_err_to_name(err));
         return err;
@@ -1089,7 +1090,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     static const httpd_uri_t boot_guard_reset_uri = {
         .uri = "/api/ota/esp/boot_guard_reset", .method = HTTP_POST, .handler = ota_boot_guard_reset_post_handler
     };
-    err = httpd_register_uri_handler(server, &boot_guard_reset_uri);
+    err = kiln_http_register(server, &boot_guard_reset_uri);
     if (err != ESP_OK) {
         ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/esp/boot_guard_reset) failed: %s", esp_err_to_name(err));
         return err;
@@ -1101,7 +1102,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     static const httpd_uri_t boot_guard_status_uri = {
         .uri = "/api/boot_guard", .method = HTTP_GET, .handler = ota_boot_guard_status_get_handler
     };
-    err = httpd_register_uri_handler(server, &boot_guard_status_uri);
+    err = kiln_http_register(server, &boot_guard_status_uri);
     if (err != ESP_OK) {
         ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/boot_guard) failed: %s", esp_err_to_name(err));
         return err;

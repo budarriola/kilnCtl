@@ -22,6 +22,7 @@
 #include <stdio.h>
 
 #include "esp_http_server.h"
+#include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 #include "esp_log.h"
 
 #include "kilnlink/kilnlink_stack_margin.h"
@@ -180,7 +181,7 @@ esp_err_t safety_stack_margin_http_start(SafetyLinkClass *link_or_null)
     static const httpd_uri_t api_uri = {
         .uri = "/api/saftyfw_stack_margin", .method = HTTP_GET, .handler = api_stack_margin_get_handler,
     };
-    esp_err_t err = httpd_register_uri_handler(server, &api_uri);
+    esp_err_t err = kiln_http_register(server, &api_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/saftyfw_stack_margin) failed: %s",
                  esp_err_to_name(err));

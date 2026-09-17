@@ -1,4 +1,5 @@
 #include "diagnostics_http.h"
+#include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 
 #include <math.h>
 #include <stdint.h>
@@ -1644,127 +1645,127 @@ esp_err_t diagnostics_http_start(SafetyLinkClass *safety)
         .uri = "/api/estop/verify", .method = HTTP_POST, .handler = estop_verify_post_handler,
     };
 
-    esp_err_t err = httpd_register_uri_handler(server, &diagnostics_uri);
+    esp_err_t err = kiln_http_register(server, &diagnostics_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/diagnostics) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &safety_uri);
+    err = kiln_http_register(server, &safety_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/safety) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &thermo_faults_api_uri);
+    err = kiln_http_register(server, &thermo_faults_api_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/thermo/faults) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &crash_report_api_uri);
+    err = kiln_http_register(server, &crash_report_api_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/crash_report) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &coredump_info_api_uri);
+    err = kiln_http_register(server, &coredump_info_api_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/coredump/info) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &coredump_chunk_api_uri);
+    err = kiln_http_register(server, &coredump_chunk_api_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/coredump/chunk) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &cfgfs_status_api_uri);
+    err = kiln_http_register(server, &cfgfs_status_api_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/cfgfs) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &cfgfs_file_get_uri);
+    err = kiln_http_register(server, &cfgfs_file_get_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(GET /api/cfgfs/file) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &cfgfs_file_post_uri);
+    err = kiln_http_register(server, &cfgfs_file_post_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/cfgfs/file) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &lwip_stats_get_uri);
+    err = kiln_http_register(server, &lwip_stats_get_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/debug/lwip_stats) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &diagnostics_timing_get_uri);
+    err = kiln_http_register(server, &diagnostics_timing_get_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/diagnostics/timing) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &crash_report_ack_uri);
+    err = kiln_http_register(server, &crash_report_ack_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/crash_report/ack) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &crash_report_clear_uri);
+    err = kiln_http_register(server, &crash_report_clear_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/crash_report/clear) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &watchdog_cfg_get_uri);
+    err = kiln_http_register(server, &watchdog_cfg_get_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(GET /api/watchdog_cfg) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &watchdog_cfg_post_uri);
+    err = kiln_http_register(server, &watchdog_cfg_post_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/watchdog_cfg) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &ramp_assist_get_uri);
+    err = kiln_http_register(server, &ramp_assist_get_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(GET /api/ramp_assist) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &ramp_assist_post_uri);
+    err = kiln_http_register(server, &ramp_assist_post_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/ramp_assist) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &relay_cycles_reset_uri);
+    err = kiln_http_register(server, &relay_cycles_reset_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/relay_cycles/reset) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &relay_cycles_restore_uri);
+    err = kiln_http_register(server, &relay_cycles_restore_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/relay_cycles/restore) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &danger_get_uri);
+    err = kiln_http_register(server, &danger_get_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(GET /api/diagnostics/danger) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &danger_start_uri);
+    err = kiln_http_register(server, &danger_start_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/diagnostics/danger/start) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &danger_stop_uri);
+    err = kiln_http_register(server, &danger_stop_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/diagnostics/danger/stop) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &danger_relay_uri);
+    err = kiln_http_register(server, &danger_relay_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/diagnostics/danger/relay) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &danger_enable_uri);
+    err = kiln_http_register(server, &danger_enable_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/diagnostics/danger/enable) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &estop_verify_uri);
+    err = kiln_http_register(server, &estop_verify_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/estop/verify) failed: %s", esp_err_to_name(err));
         return err;

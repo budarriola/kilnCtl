@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "esp_http_server.h"
+#include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 #include "esp_log.h"
 #include "hal_time.h"
 #include "freertos/FreeRTOS.h"
@@ -341,12 +342,12 @@ esp_err_t sim_backend_register_http(void)
     static const httpd_uri_t post_uri = {
         .uri = "/api/sim", .method = HTTP_POST, .handler = sim_post_handler, .user_ctx = NULL};
 
-    esp_err_t err = httpd_register_uri_handler(server, &get_uri);
+    esp_err_t err = kiln_http_register(server, &get_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(GET /api/sim) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &post_uri);
+    err = kiln_http_register(server, &post_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/sim) failed: %s", esp_err_to_name(err));
     }

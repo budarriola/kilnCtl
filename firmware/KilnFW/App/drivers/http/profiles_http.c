@@ -1,4 +1,5 @@
 #include "profiles_http.h"
+#include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 
 #include <math.h>
 #include <stdio.h>
@@ -1400,44 +1401,44 @@ esp_err_t profiles_http_start(void)
     static const httpd_uri_t builtin_restore_uri = {
         .uri = "/api/profile/builtin/restore", .method = HTTP_POST, .handler = builtin_restore_post_handler,
     };
-    err = httpd_register_uri_handler(server, &page_uri);
+    err = kiln_http_register(server, &page_uri);
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "httpd_register_uri_handler(/profiles) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &list_uri);
+    err = kiln_http_register(server, &list_uri);
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "httpd_register_uri_handler(GET /api/profiles) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &detail_uri);
+    err = kiln_http_register(server, &detail_uri);
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "httpd_register_uri_handler(GET /api/profile) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &post_uri);
+    err = kiln_http_register(server, &post_uri);
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "httpd_register_uri_handler(POST /api/profile) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &delete_uri);
+    err = kiln_http_register(server, &delete_uri);
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "httpd_register_uri_handler(POST /api/profile/delete) failed: %s", esp_err_to_name(err));
         return err;
     }
 
-    err = httpd_register_uri_handler(server, &builtin_list_uri);
+    err = kiln_http_register(server, &builtin_list_uri);
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "httpd_register_uri_handler(GET /api/profiles/builtin) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &builtin_hide_uri);
+    err = kiln_http_register(server, &builtin_hide_uri);
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "httpd_register_uri_handler(POST /api/profile/builtin/hide) failed: %s",
                  esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &builtin_restore_uri);
+    err = kiln_http_register(server, &builtin_restore_uri);
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "httpd_register_uri_handler(POST /api/profile/builtin/restore) failed: %s",
                  esp_err_to_name(err));

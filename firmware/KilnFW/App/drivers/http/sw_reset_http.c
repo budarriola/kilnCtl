@@ -1,4 +1,5 @@
 #include "sw_reset_http.h"
+#include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -445,7 +446,7 @@ esp_err_t sw_reset_http_start(SafetyLinkClass *safety_or_null)
     static const httpd_uri_t post_uri = {
         .uri = "/api/sw_reset", .method = HTTP_POST, .handler = sw_reset_post_handler,
     };
-    esp_err_t err = httpd_register_uri_handler(server, &post_uri);
+    esp_err_t err = kiln_http_register(server, &post_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/sw_reset) failed: %s", esp_err_to_name(err));
         return err;
