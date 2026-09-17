@@ -86,8 +86,30 @@ static void test_stop_route_all_five_combinations_allow(void) {
                "5/5: auth on + admin session -> ALLOW");
 }
 
+// Plan section 12, point 2: the safety-reduce guarantee must hold across
+// bootstrap_needed too, not only across role/session -- a physical
+// credential reset (item 10) must never leave a firing unstoppable while the
+// board waits for a fresh administrator credential.
+static void test_stop_route_allowed_during_bootstrap_needed(void) {
+    TEST_SECTION("http_auth_check -- POST /api/profile_exec/stop stays ALLOW while "
+                 "bootstrap_needed, for every role including a locked-out client");
+
+    route_tier_t tier;
+    TEST_CHECK(http_auth_lookup_tier("/api/profile_exec/stop", HTTP_POST, &tier),
+               "POST /api/profile_exec/stop must have a row in route_tier_table.h");
+
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, true, true) == HTTP_AUTH_DECISION_ALLOW,
+               "auth on + no session (locked out) + bootstrap_needed -> ALLOW");
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_USER, true, true) == HTTP_AUTH_DECISION_ALLOW,
+               "auth on + user session + bootstrap_needed -> ALLOW");
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_ADMIN, true, true) == HTTP_AUTH_DECISION_ALLOW,
+               "auth on + admin session + bootstrap_needed -> ALLOW (bootstrap_needed only ever "
+               "tightens ADMIN-tier routes, never SAFETY_REDUCE)");
+}
+
 void run_test_web_auth_safety_interaction(void) {
     test_stop_route_tier_is_safety_reduce();
     test_clear_trip_is_admin();
     test_stop_route_all_five_combinations_allow();
+    test_stop_route_allowed_during_bootstrap_needed();
 }

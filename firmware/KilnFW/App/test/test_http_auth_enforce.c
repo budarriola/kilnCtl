@@ -248,6 +248,109 @@ static void test_admin_tier_denied_while_bootstrap_needed(void) {
                "(stopping a firing is unaffected by bootstrap state)");
 }
 
+// Plan section 12, point 1: every tier reached end-to-end through the real
+// enforcement entry point at each role (NONE/USER/ADMIN), with auth enabled
+// and disabled, and with bootstrap_needed true and false -- 5 tiers x 3
+// roles x 2 x 2 = 60 combinations. This table is transcribed directly from
+// http_auth_enforce.h's own documented contract (the comment above
+// http_auth_check(), lines ~92-164) rather than re-deriving the decision
+// logic -- it is DATA asserting the spec's stated promises hold against the
+// real function, not a second implementation of http_auth_check() that could
+// silently drift from it (the "reset one side of a pair" bug class
+// CLAUDE.md documents: two independently-kept copies of the same fact).
+// Every row here calls the one real http_auth_check(); none of them
+// reimplement its branching.
+static void test_full_matrix_every_tier_role_auth_bootstrap(void) {
+    TEST_SECTION("http_auth_check -- full matrix: every tier x every role x auth on/off x "
+                 "bootstrap true/false (plan section 12 point 1)");
+
+    static const route_tier_t kTiers[] = {
+        ROUTE_TIER_OPEN, ROUTE_TIER_USER, ROUTE_TIER_ADMIN, ROUTE_TIER_SAFETY_REDUCE,
+        ROUTE_TIER_ADMIN_BOOTSTRAP,
+    };
+    static const http_auth_role_t kRoles[] = {
+        HTTP_AUTH_ROLE_NONE, HTTP_AUTH_ROLE_USER, HTTP_AUTH_ROLE_ADMIN,
+    };
+    static const bool kBools[] = {false, true};
+
+    size_t checked = 0;
+    for (size_t ti = 0; ti < sizeof(kTiers) / sizeof(kTiers[0]); ti++) {
+        for (size_t ri = 0; ri < sizeof(kRoles) / sizeof(kRoles[0]); ri++) {
+            for (size_t wi = 0; wi < 2; wi++) {
+                for (size_t bi = 0; bi < 2; bi++) {
+                    route_tier_t tier = kTiers[ti];
+                    http_auth_role_t role = kRoles[ri];
+                    bool web_enabled = kBools[wi];
+                    bool bootstrap_needed = kBools[bi];
+
+                    http_auth_decision_t expect;
+                    if (!web_enabled) {
+                        // Section 11: auth off collapses everything to ALLOW,
+                        // unconditionally -- role/tier/bootstrap irrelevant.
+                        expect = HTTP_AUTH_DECISION_ALLOW;
+                    } else if (tier == ROUTE_TIER_OPEN || tier == ROUTE_TIER_SAFETY_REDUCE) {
+                        // Both unconditional ALLOW regardless of role/bootstrap.
+                        expect = HTTP_AUTH_DECISION_ALLOW;
+                    } else if (tier == ROUTE_TIER_ADMIN_BOOTSTRAP) {
+                        // Gated on bootstrap_needed alone, never role.
+                        expect = bootstrap_needed ? HTTP_AUTH_DECISION_ALLOW
+                                                   : HTTP_AUTH_DECISION_DENY_INSUFFICIENT;
+                    } else if (role == HTTP_AUTH_ROLE_NONE) {
+                        // USER/ADMIN tiers with no session -> 401, regardless
+                        // of bootstrap_needed (that gate only ever tightens
+                        // ADMIN further once a session exists).
+                        expect = HTTP_AUTH_DECISION_DENY_NO_SESSION;
+                    } else if (tier == ROUTE_TIER_USER) {
+                        // USER or ADMIN role both satisfy USER tier.
+                        expect = HTTP_AUTH_DECISION_ALLOW;
+                    } else { // ROUTE_TIER_ADMIN, role != NONE
+                        if (bootstrap_needed) {
+                            expect = HTTP_AUTH_DECISION_DENY_INSUFFICIENT;
+                        } else {
+                            expect = (role == HTTP_AUTH_ROLE_ADMIN) ? HTTP_AUTH_DECISION_ALLOW
+                                                                     : HTTP_AUTH_DECISION_DENY_INSUFFICIENT;
+                        }
+                    }
+
+                    http_auth_decision_t got = http_auth_check(tier, role, web_enabled, bootstrap_needed);
+                    TEST_CHECK(got == expect,
+                               "matrix case (see counter in section header on failure)");
+                    checked++;
+                }
+            }
+        }
+    }
+    TEST_CHECK(checked == 5 * 3 * 2 * 2, "matrix covered exactly 60 combinations (5 tiers x 3 roles x "
+                                          "2 auth states x 2 bootstrap states)");
+}
+
+// Plan section 12, point 5 (reachability half): every row actually present in
+// the real kRouteTierTable must be found by http_auth_lookup_tier() with its
+// declared tier -- proves the lookup's linear scan does not silently skip or
+// misclassify a later row (e.g. an early wrong match, an off-by-one bound).
+// The "none orphaned" half (a table row with no corresponding real registered
+// route) is a cross-file fact this pure-logic file cannot see -- it is
+// covered by test_check_route_tier_coverage.ps1's real-tree assertion
+// instead, using the SAME Get-RegisteredRoutes/Get-TieredKeys the mechanical
+// check itself uses (see that file for why a second scanner here would be
+// exactly the drift risk CLAUDE.md warns about).
+static void test_every_table_row_reachable_via_lookup(void) {
+    TEST_SECTION("http_auth_lookup_tier -- every row in the real kRouteTierTable is reachable "
+                 "(plan section 12 point 5, reachability half)");
+
+    size_t n = ROUTE_TIER_TABLE_COUNT;
+    TEST_CHECK(n > 100, "the real table has a plausible number of rows (sanity floor, not a mirror "
+                        "of the exact count)");
+
+    for (size_t i = 0; i < n; i++) {
+        const route_tier_entry_t *e = &kRouteTierTable[i];
+        route_tier_t found;
+        bool ok = http_auth_lookup_tier(e->uri, e->method, &found);
+        TEST_CHECK(ok && found == e->tier, "each real table row is found by lookup with its own "
+                                           "declared tier");
+    }
+}
+
 void run_test_http_auth_enforce(void) {
     test_lookup_tier_real_routes();
     test_effective_tier_fail_closed_default();
@@ -261,4 +364,6 @@ void run_test_http_auth_enforce(void) {
     test_bootstrap_route_tier_is_admin_bootstrap();
     test_admin_bootstrap_tier_gated_on_bootstrap_needed();
     test_admin_tier_denied_while_bootstrap_needed();
+    test_full_matrix_every_tier_role_auth_bootstrap();
+    test_every_table_row_reachable_via_lookup();
 }

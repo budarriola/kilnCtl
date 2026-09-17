@@ -132,6 +132,38 @@ if (-not $realTableFile) {
     }
 }
 
+# --- Assertion 5 (plan section 12, point 5, "none orphaned" half): every
+# row in the REAL route_tier_table.h corresponds to a route actually
+# registered somewhere in the real drivers tree. This is the reverse
+# direction from assertion 4 (which proves every registered route has a
+# table row) -- a table row with no matching real route is a stale entry
+# that route_tier_table.h's own header comment says "should still be deleted
+# when noticed" but which nothing mechanically catches today. Reuses the
+# SAME Get-RegisteredRoutes/Get-TieredKeys the production check itself uses
+# (dot-sourced above), not a second parser. ---
+if ($realTableFile) {
+    $realRegisteredKeys = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($f in (Get-ChildItem -Path $realDriversDir -Filter "*.c" -File -Recurse)) {
+        foreach ($r in (Get-RegisteredRoutes -Path $f.FullName)) {
+            if ($null -ne $r.Method) {
+                [void]$realRegisteredKeys.Add("$($r.Method) $($r.Uri)")
+            }
+        }
+    }
+    $realTieredKeys = Get-TieredKeys -Path $realTableFile
+    $orphaned = @()
+    foreach ($key in $realTieredKeys.Keys) {
+        if (-not $realRegisteredKeys.Contains($key)) {
+            $orphaned += $key
+        }
+    }
+    if ($orphaned.Count -gt 0) {
+        $failures += "Assertion 5 FAILED: $($orphaned.Count) row(s) in $realTableFile have no matching registered route (orphaned): $($orphaned -join ', ')"
+    } else {
+        Write-Host "Assertion 5 OK: every row in the real route_tier_table.h ($($realTieredKeys.Count) rows) corresponds to an actually-registered route -- none orphaned."
+    }
+}
+
 } finally {
     Remove-Item -Path $scratchDir -Recurse -Force -ErrorAction SilentlyContinue
 }
@@ -142,5 +174,5 @@ if ($failures.Count -gt 0) {
     throw "$($failures.Count) assertion(s) failed."
 }
 
-Write-Host "test_check_route_tier_coverage: all assertions passed (fully-tiered synthetic tree=0 missing, injected untiered route detected and named, blindness floor has teeth, real production tree fully covered)." -ForegroundColor Green
+Write-Host "test_check_route_tier_coverage: all assertions passed (fully-tiered synthetic tree=0 missing, injected untiered route detected and named, blindness floor has teeth, real production tree fully covered in both directions -- none missing, none orphaned)." -ForegroundColor Green
 exit 0
