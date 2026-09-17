@@ -414,6 +414,19 @@ void dashboard_get_status(dashboard_status_t *out)
     snprintf(out->zones_config_load_fault_reason, sizeof(out->zones_config_load_fault_reason), "%s",
              load_fault.reason);
 
+    /* M13 fix (2026-09-16): the single-migration-step write-back's own
+     * verified-persist failure -- distinct from zones_config_load_fault
+     * above (that one means THIS boot could not decode a stored config at
+     * all; this one means THIS boot decoded and is running fine, but the
+     * migrated blob could not be confirmed written back to flash, so a
+     * LATER boot may hit the load fault instead). See
+     * zones_cfg_migration_persist_fault_t's own doc comment
+     * (zones_config_accessors.h). */
+    zones_cfg_migration_persist_fault_t migration_persist_fault;
+    out->zones_config_migration_persist_fault = zones_config_get_migration_persist_fault(&migration_persist_fault);
+    out->zones_config_migration_persist_fault_on_disk_version = migration_persist_fault.on_disk_version;
+    out->zones_config_migration_persist_fault_fw_version = migration_persist_fault.fw_version;
+
     /* UI_PLAN.md section 5's missing field set (see dashboard_http.h's
      * struct comment above these fields for the full rationale). Every read
      * here is cheap and side-effect-free -- esp_app_get_description() reads

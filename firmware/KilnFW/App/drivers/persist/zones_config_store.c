@@ -78,6 +78,20 @@ static void zones_cfg_load_fault_latch(zones_cfg_load_fault_kind_t kind, uint8_t
     snprintf(s_zones_cfg_load_fault.reason, sizeof(s_zones_cfg_load_fault.reason), "%s", reason ? reason : "");
 }
 
+/* M13 fix (2026-09-16): see zones_cfg_migration_persist_fault_t's doc
+ * comment in zones_config_accessors.h. Latched only from
+ * zones_config_persist_migrated_blob_verified()'s give-up path below --
+ * never cleared mid-boot, same convention as s_zones_cfg_load_fault above. */
+static zones_cfg_migration_persist_fault_t s_zones_cfg_migration_persist_fault = {0};
+
+bool zones_config_get_migration_persist_fault(zones_cfg_migration_persist_fault_t *out)
+{
+    if (out) {
+        *out = s_zones_cfg_migration_persist_fault;
+    }
+    return s_zones_cfg_migration_persist_fault.occurred;
+}
+
 static uint32_t zones_cfg_rev_load(void)
 {
     hal_kv_handle_t h;
@@ -411,6 +425,13 @@ static bool zones_config_persist_migrated_blob_verified(uint8_t on_disk_version_
                   "bytes; a second firmware install one step further (the one-step migration policy) will "
                   "be unable to read them and will treat this config as too old to consume",
              (unsigned)on_disk_version_before_migration, KILN_NVS_PARTITION);
+    /* M13 fix (2026-09-16): this used to be an ESP_LOGE only, invisible to
+     * the operator -- see zones_cfg_migration_persist_fault_t's doc comment
+     * (zones_config_accessors.h). Latch it so dashboard_http.c/LCD can name
+     * it, same pattern as s_zones_cfg_load_fault above. */
+    s_zones_cfg_migration_persist_fault.occurred = true;
+    s_zones_cfg_migration_persist_fault.on_disk_version = on_disk_version_before_migration;
+    s_zones_cfg_migration_persist_fault.fw_version = ZONES_CFG_VERSION;
     return false;
 }
 

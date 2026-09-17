@@ -204,7 +204,25 @@ void ui_home_refresh_cb(lv_timer_t *timer)
                 lv_label_set_text(s_ui_home_trip_strip, fault_buf);
                 lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
             } else {
-                lv_obj_add_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
+                /* M13 fix (2026-09-16): lowest priority of the four branches
+                 * here on purpose -- this boot's config IS valid and running;
+                 * it is only a warning that a migrated blob's write-back to
+                 * flash could not be confirmed, so a LATER boot might hit the
+                 * quarantine branch above instead. Same strip, same 96-char/
+                 * no-scroll constraint, no new colors -- see
+                 * main_page.html's renderZonesConfigMigrationPersistFault()
+                 * for the same condition on the web side. */
+                zones_cfg_migration_persist_fault_t mfault;
+                if (zones_config_get_migration_persist_fault(&mfault)) {
+                    char mfault_buf[96];
+                    snprintf(mfault_buf, sizeof(mfault_buf),
+                             "CONFIG MIGRATION v%u->v%u NOT CONFIRMED SAVED -- re-save zones",
+                             (unsigned)mfault.on_disk_version, (unsigned)mfault.fw_version);
+                    lv_label_set_text(s_ui_home_trip_strip, mfault_buf);
+                    lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
+                } else {
+                    lv_obj_add_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
+                }
             }
         }
     }

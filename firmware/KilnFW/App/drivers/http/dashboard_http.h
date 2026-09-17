@@ -159,6 +159,18 @@ typedef struct {
     uint8_t  zones_config_load_fault_fw_version;
     char     zones_config_load_fault_reason[96];
 
+    /* M13 fix (2026-09-16): see zones_cfg_migration_persist_fault_t's own
+     * doc comment (zones_config_accessors.h). Orthogonal to
+     * zones_config_load_fault above -- this boot's config IS valid and
+     * running; the warning is that a migrated blob could not be confirmed
+     * written back to flash, so a future boot may hit the load fault
+     * instead. No reason string needed: the only cause is "write or
+     * read-back failed after retry," already covered by the two versions
+     * named here. */
+    bool     zones_config_migration_persist_fault;
+    uint8_t  zones_config_migration_persist_fault_on_disk_version;
+    uint8_t  zones_config_migration_persist_fault_fw_version;
+
     /* ROADMAP.md M6 "GUI shows safety temperature, enclosure temperature and
      * power" -- read straight from safety_link_get_status()'s cache
      * (safety_link.h's safety_link_status_t), not re-parsed from a frame

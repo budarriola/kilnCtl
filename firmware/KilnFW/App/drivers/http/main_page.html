@@ -372,6 +372,7 @@
 <div id="spiWedgedBanner"></div>
 <div id="bootButtonBypassBanner"></div>
 <div id="zonesConfigLoadFaultBanner"></div>
+<div id="zonesConfigMigrationPersistFaultBanner"></div>
 <div id="safetyTripBanner"></div>
 <div id="lastRunBanner"></div>
 
@@ -2098,6 +2099,35 @@ function renderZonesConfigLoadFault(data) {
     '<div class="row"><span>The board is running on blank/default settings this boot, not your tuned ' +
     'configuration, and will not start a firing until this is resolved.</span></div>' +
     '<div class="row"><span>To clear</span><span>' + window.kcEscapeHtml(remedy) + '</span></div>' +
+    '</div>';
+}
+
+// M13 fix (2026-09-16): the single-migration-step write-back
+// (zones_config_persist_migrated_blob_verified(), zones_config_store.c)
+// could not confirm a just-migrated zones config was actually written back
+// to flash. Distinct from renderZonesConfigLoadFault() above -- THIS boot's
+// config is valid and running fine right now; the risk is only that the
+// NEXT firmware install (one step further, per the one-step migration
+// policy) will find flash still holding the older, pre-migration bytes and
+// refuse them the same way renderZonesConfigLoadFault() describes. Not a
+// firing-blocking condition, so it gets the quieter "interrupted" (red
+// left-border) treatment rather than the solid safety-trip fill.
+function renderZonesConfigMigrationPersistFault(data) {
+  var el = document.getElementById('zonesConfigMigrationPersistFaultBanner');
+  if (!el) return;
+  if (!data.zones_config_migration_persist_fault) { el.innerHTML = ''; return; }
+  var onDisk = data.zones_config_migration_persist_fault_on_disk_version;
+  var fwVer = data.zones_config_migration_persist_fault_fw_version;
+  el.innerHTML = '<div class="banner interrupted">' +
+    '<h3>ZONE CONFIG MIGRATION NOT CONFIRMED SAVED</h3>' +
+    '<div class="row"><span>This boot migrated the stored zone config from version ' + onDisk +
+    ' to version ' + fwVer + ' and is running on it now, but could not confirm the migrated copy was ' +
+    'written back to flash.</span></div>' +
+    '<div class="row"><span>Nothing is wrong right now, but the NEXT firmware update may not be able to ' +
+    'read the config still on flash and could fall back to default gains with no separate ' +
+    'warning.</span></div>' +
+    '<div class="row"><span>To clear</span><span>Re-save the zones config from /settings/zones (or reboot ' +
+    'this firmware once more) so the write-back is retried.</span></div>' +
     '</div>';
 }
 
@@ -4034,6 +4064,7 @@ function poll() {
       renderSpiWedged(data);
       renderBootButtonBypass(data);
       renderZonesConfigLoadFault(data);
+      renderZonesConfigMigrationPersistFault(data);
       renderSafetyTrip(data);
       // Client-side multi-zone autotune trace sampling (see
       // sampleAutotuneZoneTemps's own header comment) -- a no-op whenever no

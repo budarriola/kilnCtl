@@ -2010,6 +2010,67 @@ static void test_zones_http_start_persists_migrated_blob_with_real_crc(void)
     nvs_test_clear();
 }
 
+// M13 fix (2026-09-16, ROADMAP.md's standing "every fault says what was
+// detected and what to do" rule): zones_config_persist_migrated_blob_verified()
+// used to report its give-up-after-retry outcome via ESP_LOGE only, invisible
+// to any operator-facing surface. zones_config_get_migration_persist_fault()
+// now latches it. Proven both ways: a lying write (fake_kv_script_silent_set_
+// noops(), the exact "reported HAL_OK, nothing actually changed" shape from
+// docs/audits/boot_guard_recovery_loop_2026-09-08.md that motivated the
+// read-back-verified pattern this function copies) must latch the fault; an
+// ordinary successful migration (the test above) must NOT.
+static void test_zones_http_migration_persist_fault_latches_on_lying_write(void)
+{
+    TEST_SECTION("zones_config_get_migration_persist_fault -- latches when the migrated blob's "
+                 "write-back cannot be verified (a write that lies about succeeding), stays clear "
+                 "on an ordinary successful migration");
+
+    // Baseline: nothing latched before any load has run.
+    zones_cfg_migration_persist_fault_t fault;
+    memset(&fault, 0xAA, sizeof(fault)); // poison, so a no-op get_* can't accidentally read as zeroed/false
+    TEST_CHECK(!zones_config_get_migration_persist_fault(&fault),
+              "no migration attempted yet this test binary run -- must report false");
+
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v1_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 1;
+    src.thermo_count = 1;
+    src.relay_count = 1;
+    src.max_simultaneous_relays = 1;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 2.0f;
+    src.zones[0].max_temp_c = 1000.0f;
+    stage_zones_blob(&src, sizeof(src));
+
+    // Arm BOTH write-back attempts (zones_config_persist_migrated_blob_verified()'s
+    // bounded retry loop tries up to 2 times) to lie -- report HAL_OK while
+    // leaving the key's persisted value untouched, so the read-back inside
+    // that function can never match and it must exhaust its retry and give up.
+    // 4, not 2: nvs_save() makes TWO set-shaped calls per attempt
+    // (hal_kv_set_blob(NVS_KEY_ZONES) then hal_kv_set_u32(NVS_KEY_ZONES_REV)) --
+    // arming only 2 lies covers just attempt 0's pair, leaving attempt 1 to
+    // write for real and defeat this test (found by running it: it failed
+    // with the fault never latching, because attempt 1 silently succeeded).
+    fake_kv_script_silent_set_noops(4);
+
+    s_zones_config_valid = false;
+    (void)zones_http_start();
+
+    TEST_CHECK(zones_config_get_migration_persist_fault(&fault),
+              "a write-back that lies on both attempts must latch the migration-persist fault -- "
+              "this used to be an ESP_LOGE only, invisible to the operator");
+    TEST_CHECK(fault.on_disk_version == 1, "the latched fault must name the pre-migration on-disk version");
+    TEST_CHECK(fault.fw_version == ZONES_CFG_VERSION,
+              "the latched fault must name the firmware version the migration was TO, not a stale value");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 // ---------------------------------------------------------------------------
 // "Saved securely like the others" -- the real defect this pass fixes.
 // nvs_load_from()'s old load path (for a stored version OLDER than current)
@@ -11623,6 +11684,7 @@ void run_test_zones_http(void)
     test_nvs_load_from_newer_than_firmware_is_found_but_not_valid();
     test_zones_http_start_refused_newer_blob_not_overwritten();
     test_zones_http_start_persists_migrated_blob_with_real_crc();
+    test_zones_http_migration_persist_fault_latches_on_lying_write();
 
     test_nvs_load_from_old_version_wrong_length_is_rejected();
     test_nvs_load_from_bad_crc_is_rejected();

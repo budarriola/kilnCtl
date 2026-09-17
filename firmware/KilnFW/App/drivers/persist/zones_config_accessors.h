@@ -522,6 +522,32 @@ typedef struct {
  * safe from any task including the LVGL/httpd stacks. */
 bool zones_config_get_load_fault(zones_cfg_load_fault_t *out);
 
+/* M13 ("every fault says what was detected and what to do", ROADMAP.md,
+ * standing rule): the single-migration-step hazard fix (2026-09-16,
+ * zones_config_persist_migrated_blob_verified() in zones_config_store.c)
+ * writes-back-and-verifies a just-migrated blob so a later, one-step-only
+ * firmware can still consume it. When that write-back itself cannot be
+ * confirmed (write failed, or a read-back mismatch after the bounded
+ * retry), this boot keeps running fine on the in-RAM migrated copy, but
+ * flash still holds the OLDER bytes -- the very next firmware install one
+ * step further will find them unreadable and fall back to defaults with no
+ * separate warning, same hazard shape as zones_cfg_load_fault_t above. That
+ * used to be logged only via ESP_LOGE, invisible to the operator. Latched
+ * once, for the boot, the first (and only) time
+ * zones_config_persist_migrated_blob_verified() gives up; never cleared
+ * mid-boot. A board that never attempted a migration this boot, or whose
+ * write-back verified fine, leaves this false. */
+typedef struct {
+    bool occurred;
+    uint8_t on_disk_version;  /* the pre-migration on-disk version byte */
+    uint8_t fw_version;       /* ZONES_CFG_VERSION at the moment this was captured */
+} zones_cfg_migration_persist_fault_t;
+
+/* Returns the latched migration write-back fault (see the type's own
+ * comment above). *out (if given) is zeroed with occurred==false when
+ * nothing was latched this boot. Cheap RAM read. */
+bool zones_config_get_migration_persist_fault(zones_cfg_migration_persist_fault_t *out);
+
 /* Below: read-only accessors for profile_executor.c (TODO.md section 6).
  * Same rule as zones_config_get_max_ramp -- false means "cannot answer,"
  * not "answer is zero." */
