@@ -105,6 +105,103 @@ def _unit_test_fixture_fw_root() -> str:
 MAIN_BOARD_JTAG_SERIAL = serial_link.MAIN_BOARD_JTAG_SERIAL
 FIXTURE_JTAG_SERIAL = serial_link.FIXTURE_JTAG_SERIAL
 
+# ---------------------------------------------------------------------------
+# App-image flash offset vs. the board's OWN live partition table.
+#
+# flash_firmware() writes the app image to a hardcoded offset (see the
+# `program_esp build/KilnCtrl.bin ... verify` line below) rather than
+# deriving it from partitions.csv or from the board. That is deliberate --
+# see docs/OTA_SINGLE_SLOT_PLAN.md step 3/4: the 2026-09-16
+# single-application-slot partitions.csv landed (`app`/ota_0 @0x210000,
+# `recovery`/factory @0xA10000) WITHOUT retargeting this tool, because the
+# bench board still carries the OLD table (`ota_0`/`ota_1`/`factory`,
+# factory @0x810000) and retargeting the write offset before the board
+# itself is migrated would silently write the app image into the middle of
+# whatever the new table's `app` (ota_0) region now covers -- exactly the
+# "partial reflash after the wrong region" incident class this tool's own
+# docstring warns about.
+#
+# Nothing enforced that the two stay in agreement, though: a board actually
+# migrated to the new table (or a future edit that updates this constant
+# early) would go undetected right up until a flash landed in the wrong
+# place. APP_FLASH_OFFSET is the single source of truth for what this tool
+# is ABOUT to write, and _check_app_flash_offset_matches_chip() below reads
+# the board's own live table (over GET /api/partitions -- no JTAG, no
+# reset) and refuses before ever calling OpenOCD if the two disagree.
+APP_FLASH_OFFSET = 0x810000
+_PARTITION_TYPE_APP = 0x00
+_PARTITION_SUBTYPE_FACTORY = 0x00
+
+
+def _chip_factory_app_partition(
+    host: str, get_partitions_fn=None
+) -> "tuple[Optional[partition_table.PartitionEntry], list[partition_table.PartitionEntry]]":
+    """Reads `host`'s live partition table (GET /api/partitions, no JTAG, no
+    reset) and returns (the app/factory-subtype entry if present else None,
+    the full entry list). `get_partitions_fn` is the same injectable seam
+    `partition_table.read_chip_partition_table_from_http` already exposes,
+    threaded through here so tests can drive this against fake board data
+    without a real socket or board -- see test_mcp_server_flash_partition_guard.py."""
+    entries = partition_table.read_chip_partition_table_from_http(host, get_partitions_fn=get_partitions_fn)
+    factory = next(
+        (e for e in entries if e.type == _PARTITION_TYPE_APP and e.subtype == _PARTITION_SUBTYPE_FACTORY),
+        None,
+    )
+    return factory, entries
+
+
+def _check_app_flash_offset_matches_chip(host: Optional[str], get_partitions_fn=None) -> Optional[str]:
+    """Refuse-rather-than-guess guard for the app-image write offset.
+
+    Returns None when it is safe to proceed: either the board's live
+    partition table confirms APP_FLASH_OFFSET is exactly where its
+    app/factory-subtype partition sits, or the board could not be reached
+    at all (bring-up / verify=False case -- there is nothing to disagree
+    with, so this is not a mismatch; _preflash_board_address()'s own
+    "never observed up" vs. "observed up, now silent" distinction covers
+    the meaningfully different bring-up case elsewhere).
+
+    Returns a fully-formed `error: ...` string -- naming both the offset
+    this tool is about to write and what the board itself reports, and
+    saying which side is stale -- when the board IS reachable and its
+    table disagrees. Never auto-corrects or proceeds on a mismatch; the
+    caller (flash_firmware()) must refuse unless the caller passed an
+    explicit override."""
+    if not host:
+        return None
+    try:
+        factory, entries = _chip_factory_app_partition(host, get_partitions_fn=get_partitions_fn)
+    except (partition_http_client.PartitionHttpError, ValueError, KeyError) as exc:
+        _srv._session_log.warning(
+            "flash_firmware: could not read chip partition table for the partition-offset guard "
+            "(host=%s): %s -- proceeding without this confirmation", host, exc,
+        )
+        return None
+    if factory is None:
+        chip_summary = ", ".join(e.field_str() for e in entries) or "(no partitions reported)"
+        return (
+            f"error: refusing to flash -- board at {host} reports a live partition table with NO "
+            f"app/factory-subtype partition at all, so the app image write offset "
+            f"(0x{APP_FLASH_OFFSET:x}, hardcoded in flash_firmware()) cannot be confirmed safe. "
+            f"Board's live table: {chip_summary}. The BOARD's table is the side that looks stale/"
+            "unexpected here -- confirm with debug_check_partition_table() before proceeding. "
+            "Pass allow_partition_offset_mismatch=True only after reviewing this by hand."
+        )
+    if factory.offset != APP_FLASH_OFFSET:
+        return (
+            f"error: refusing to flash -- flash_firmware() is about to write the app image at "
+            f"0x{APP_FLASH_OFFSET:x}, but the board at {host} reports its own '{factory.name}' "
+            f"(app/factory-subtype) partition at 0x{factory.offset:x} instead. One side is stale: "
+            f"either this tool's hardcoded APP_FLASH_OFFSET (mcp_server_flash.py) was retargeted "
+            f"ahead of a board that has not actually been migrated yet, or this board's own table "
+            f"was migrated (see docs/OTA_SINGLE_SLOT_PLAN.md) without this tool being retargeted to "
+            "match. Refusing rather than guessing which side is right -- confirm which side is "
+            "actually stale with debug_check_partition_table(), fix that side, and only then pass "
+            "allow_partition_offset_mismatch=True if you have concluded the write is intentional "
+            "anyway (e.g. mid-migration with a plan in hand)."
+        )
+    return None
+
 
 def _enumerated_jtag_serials() -> "list[str]":
     """Thin wrapper -- see serial_link.enumerated_303a_1001_serials() for the
@@ -449,6 +546,7 @@ def flash_firmware(
     allow_sensitive_dirty: bool = False,
     kiln_fw_root: Optional[str] = None,
     ap_password: Optional[str] = None,
+    allow_partition_offset_mismatch: bool = False,
 ) -> str:
     """Flashes KilnFW/build/{bootloader,partition_table,KilnCtrl}.bin to the
     board over JTAG via OpenOCD -- the ONLY sanctioned way to flash this
@@ -598,7 +696,23 @@ def flash_firmware(
     WARNING appended to the result, never raised -- the flash itself already
     succeeded and landed by this point, and a caller who omits `ap_password`
     (the default) gets the same behavior as before this parameter existed:
-    no attempt, no warning."""
+    no attempt, no warning.
+
+    `allow_partition_offset_mismatch`: before touching OpenOCD, if the board
+    is reachable right now, this tool reads the board's OWN live partition
+    table (GET /api/partitions -- no JTAG, no reset) and refuses if its
+    app/factory-subtype partition's offset disagrees with the offset this
+    tool is hardcoded to write the app image to (APP_FLASH_OFFSET, module
+    level in mcp_server_flash.py). See docs/OTA_SINGLE_SLOT_PLAN.md: the
+    2026-09-16 single-application-slot partitions.csv landed without
+    retargeting this tool's write offset, on purpose, because the bench
+    board still carries the OLD table -- this guard is what makes that gap
+    safe rather than merely documented. Never auto-corrects the address; a
+    mismatch is refused, naming both offsets and which side looks stale,
+    unless this is passed True after reviewing the mismatch by hand (e.g.
+    debug_check_partition_table()). A board that cannot be reached at all
+    is not a mismatch (nothing to compare against) and this check is a
+    no-op in that case, same as verify=False's own bring-up allowance."""
     openocd_exe = _find_openocd_exe()
     if not openocd_exe:
         return "error: openocd.exe not found under ~/.espressif/tools/openocd-esp32/ or C:\\Espressif\\ -- is it installed?"
@@ -698,9 +812,34 @@ def flash_firmware(
     # address is both the best candidate for post-flash verification and the
     # evidence that makes a post-flash silence a hard failure rather than a
     # bring-up warning (see _preflash_board_address / _verify_flash_landed).
-    pre_flash_host = _preflash_board_address(host) if verify else None
+    # Probed unconditionally (not just when verify=True) because the
+    # partition-offset guard just below needs it too: refusing an unsafe
+    # write is not something verify=False should be able to skip just
+    # because post-flash confirmation was also turned off for this call.
+    partition_guard_host = _preflash_board_address(host)
+    pre_flash_host = partition_guard_host if verify else None
     if verify:
         _srv._session_log.info("flash_firmware: pre-flash board HTTP address: %s", pre_flash_host or "(not answering)")
+
+    # Refuse-rather-than-guess: if the board is reachable right now, its own
+    # live partition table must agree with the offset this tool is about to
+    # write the app image to (APP_FLASH_OFFSET). A board that cannot be
+    # reached at all (bring-up, or verify=False for a board whose HTTP stack
+    # genuinely isn't up yet) has nothing to disagree with, so this check is
+    # a no-op in that case -- see _check_app_flash_offset_matches_chip()'s
+    # own docstring. This never auto-corrects the write address; it only
+    # ever refuses or proceeds unchanged.
+    if not allow_partition_offset_mismatch:
+        partition_mismatch = _check_app_flash_offset_matches_chip(partition_guard_host)
+        if partition_mismatch:
+            _srv._session_log.warning("flash_firmware: %s", partition_mismatch)
+            flash_provenance.write_provenance_json(
+                tree_state, provenance_path,
+                outcome=flash_provenance.OUTCOME_REFUSED_PARTITION_MISMATCH,
+                detail=partition_mismatch,
+                kiln_fw_root_override=kiln_fw_root,
+            )
+            return partition_mismatch
 
     kill_openocd_sessions()  # a stale session holding the JTAG interface looks identical to a flash failure
 
@@ -708,7 +847,7 @@ def flash_firmware(
         f"adapter serial {MAIN_BOARD_JTAG_SERIAL}; "
         "program_esp build/bootloader/bootloader.bin 0x0 verify; "
         "program_esp build/partition_table/partition-table.bin 0x8000 verify; "
-        "program_esp build/KilnCtrl.bin 0x810000 verify reset exit"
+        f"program_esp build/KilnCtrl.bin 0x{APP_FLASH_OFFSET:x} verify reset exit"
     )
     stale_prefix = f"WARNING: flashed a stale binary anyway ({stale.reason})\n" if (stale.stale and allow_stale) else ""
 
