@@ -1,7 +1,11 @@
 """test_cfg_convert.py -- tests for kilnctrl.cfg_convert, the host-side
 kiln backup-package version converter (see that module's docstring for the
-"why"). Fixtures under tests/fixtures/cfg_convert/ are SYNTHESIZED (see that
-directory's README.md) -- no real board capture exists in the tree today.
+"why"). Most fixtures under tests/fixtures/cfg_convert/ are SYNTHESIZED (see
+that directory's README.md); v4_bench1_2026-09-16.json is a real
+`GET /api/backup/export` capture from the bench board (protocol_version 12,
+firmware commit d459d124), confirmed by hand to carry no calibration keys
+(bench has no CT fitted) and no credential-shaped keys before it was ever
+committed.
 
 Must be run through the pytest runner, per CLAUDE.md's standing note that
 plain unittest spuriously fails four PcTools tests.
@@ -188,6 +192,48 @@ def test_cli_to_board_end_to_end(tmp_path, monkeypatch, capsys):
     out_doc = json.loads(out_path.read_text(encoding="utf-8"))
     assert out_doc["version"] == 1
     assert "name" not in out_doc["zones"][0]
+
+
+def test_real_capture_loads_and_has_no_calibration_or_credential_keys():
+    """The real bench capture is exactly the kind of document
+    _check_forbidden already guards against carrying credentials in --
+    confirm here too, and confirm the bench's uncalibrated CT channels show
+    up as the calibration keys being simply ABSENT, not zeroed or
+    defaulted, matching this module's own never-fabricate contract."""
+    doc = _load("v4_bench1_2026-09-16.json")
+    assert doc["kind"] == "kilnctl_backup"
+    assert doc["version"] == 4
+    for zone in doc["zones"]:
+        for key in cfg_convert.CALIBRATION_KEYS:
+            assert key not in zone, f"real capture unexpectedly carries calibration key {key}"
+        for key in zone:
+            assert not cfg_convert.FORBIDDEN_KEY_RE.match(key)
+
+
+def test_real_capture_downgrade_to_v3_collapses_multi_neighbor_coupling():
+    """Unlike the synthesized v4 fixture (each zone has at most two nonzero
+    coupling cells), the real bench capture's zones each have TWO nonzero
+    neighbor coefficients (a genuine 3-zone coupling matrix) -- exercising
+    the same v4->v3 collapse-to-strongest-neighbor path against real
+    hardware-measured coupling data rather than hand-picked numbers."""
+    doc = _load("v4_bench1_2026-09-16.json")
+    out, report = cfg_convert.convert(doc, 3)
+    z0 = out["zones"][0]
+    # Real zone 0 row: coupling_c0=0.0, coupling_c1=25.4167, coupling_c2=24.5203
+    # -- channel 1 has the larger magnitude and must be the one kept.
+    assert z0["coupling_neighbor_zone"] == 1
+    assert z0["coupling_coeff"] == pytest.approx(25.4167)
+    assert "coupling_c1" not in z0 and "coupling_c2" not in z0
+    dropped = [o for o in report.outcomes if o.outcome == "dropped" and o.field == "coupling_c2"]
+    assert dropped, "the smaller-magnitude real neighbor coefficient must be reported as dropped"
+    assert report.lossy
+
+
+def test_real_capture_round_trips_at_same_version():
+    doc = _load("v4_bench1_2026-09-16.json")
+    out, report = cfg_convert.convert(doc, 4)
+    assert out == doc
+    assert not report.lossy
 
 
 def test_cli_rejects_forbidden_document(tmp_path):
