@@ -284,6 +284,19 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "http/ota_http_pico.c"
                        "http/ota_http_recovery.c"
                        "http/ota_http_util.c"
+                       # WEB_AUTH_PLAN.md section 5 -- fail-closed HTTP
+                       # enforcement point. http_auth_enforce.c is pure
+                       # logic (host-tested, test_http_auth_enforce.c);
+                       # http_auth_http.c is the ESP-IDF httpd glue
+                       # (untested by host tests by design, same split as
+                       # ota_auth.c/ota_http.c above). The two _iface_stub.c
+                       # files are fail-closed placeholders for the session
+                       # (section 4) and policy-enabled (section 2/11) seams
+                       # -- see http_session_iface.h / http_auth_policy_iface.h.
+                       "http/http_auth_enforce.c"
+                       "http/http_auth_http.c"
+                       "http/http_session_iface_stub.c"
+                       "http/http_auth_policy_iface_stub.c"
                        "net/ota_pico_relay.c"
                        "net/wifi_prov.c"
                        # wifi_prov.c split 2026-09-04 (ROADMAP.md M15 A3,

@@ -119,6 +119,14 @@ try {
         (Join-Path $testDir "test_zone_sweep_relay_off_wiring.c"),
         (Join-Path $testDir "test_approach_rate_cap.c"),
         (Join-Path $testDir "test_safety_ceiling_policy.c"),
+        # docs/WEB_AUTH_PLAN.md section 5 -- the fail-closed enforcement
+        # decision. Pure logic, no ESP-IDF dependency beyond the
+        # httpd_method_t/httpd_uri_t types route_tier_table.h names (this
+        # executable already builds against App/test/stubs/esp_http_server.h
+        # for zones_http.c/backup_http.c/ota_http.c above), so it joins this
+        # combined executable rather than needing its own, same convention
+        # as test_ota_auth.c/ota_auth.c just above it in this file's history.
+        (Join-Path $testDir "test_http_auth_enforce.c"),
         (Join-Path $testDir "test_sim_high_temp.c"),
         (Join-Path $testDir "test_sim_mistune.c"),
         (Join-Path $testDir "test_sim_factorial_design.c"),
@@ -140,6 +148,7 @@ try {
         (Join-Path $driversDir "net/ota_interlock.c"),
         (Join-Path $driversDir "http/security_http_core.c"),
         (Join-Path $driversDir "http/security_backend_placeholder.c"),
+        (Join-Path $driversDir "http/http_auth_enforce.c"),
         (Join-Path $driversDir "persist/ota_record.c"),
         (Join-Path $driversDir "control/heat_interlock.c"),
         (Join-Path $driversDir "control/heat_enable.c"),

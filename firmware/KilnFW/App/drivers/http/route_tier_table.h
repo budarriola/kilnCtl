@@ -19,7 +19,7 @@
  *     silently drift apart.
  *
  * KEEP THIS FILE IN SYNC WITH THE REAL ROUTE TABLE. Adding a new
- * httpd_uri_t anywhere under firmware/KilnFW/App/drivers/*.c requires an
+ * httpd_uri_t anywhere under firmware/KilnFW/App/drivers (any .c file) requires an
  * ROUTE_TIER() row here in the SAME change -- the mechanical check exists
  * specifically so a route added without one is caught at check time rather
  * than shipping open by default. A route present here that no longer exists
