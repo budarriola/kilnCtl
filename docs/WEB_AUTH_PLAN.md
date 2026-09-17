@@ -1,12 +1,12 @@
 # Web + LCD authentication plan
 
-> **Status:** in progress · **Opened:** 2026-09-16. Most of the backend —
-> route tiers, credential storage, session primitives, enforcement, the LCD
-> PIN/keypad/lock, and the physical credential-reset gesture — has landed and
-> is host-tested. What remains is the web GUI's own login surface (section
-> 6) and its half of the inactivity prompt (section 8). No board was flashed
-> and no heating run was performed for this refresh; no `.kicad_*` file was
-> touched.
+> **Status:** in progress · **Opened:** 2026-09-16. The backend, LCD half,
+> physical credential-reset gesture, the web login surface (section 6), and
+> the web-GUI half of the inactivity lock (section 8) have all landed and
+> are host-tested. What remains is section 9's fuller safety interaction
+> sweep and any outstanding items in sections 10-13 — see each section's own
+> status line. No board was flashed and no heating run was performed for
+> this refresh; no `.kicad_*` file was touched.
 
 Username/password authentication and roles for the web GUI, two numeric PINs
 for the LCD, an inactivity lock on both, and a physical-presence credential
@@ -54,22 +54,37 @@ reset.
   negative-tested by sabotaging the production source, confirming a
   behavioural RED, hand-restoring, and forcing a full rebuild from a deleted
   build directory before reconfirming GREEN.
+- **Section 6, the login page and route:** `GET /login` and
+  `POST /api/auth/login` (`web_auth_login_http.c`) exchange a password for a
+  session cookie for either role.
+- **Section 8, the web-GUI half of the inactivity lock:**
+  `GET /api/auth/session` (OPEN tier, a passive status poll that never
+  extends a session) and `POST /api/auth/session/extend` (USER tier, the
+  explicit "stay unlocked" action) are implemented in
+  `web_auth_session_status_http.c`. Any ALLOWed request against USER/ADMIN
+  counts as activity and extends the session automatically
+  (`http_auth_decision_counts_as_activity()`,
+  `kiln_http_prehandler()` in `http_auth_http.c`) — no route has to touch
+  the session itself, and the status poll is excluded from that set by
+  tier alone rather than a special-cased branch. Server-side enforcement is
+  independent of the browser: `http_auth_session_touch()`
+  (`http_session_iface.c`) re-validates the session with
+  `web_auth_session_is_valid()` before ever calling `web_auth_table_touch()`,
+  so an already-expired session can never be revived just because a client
+  keeps calling in. `app.js` polls the status route every 5 s and shows a
+  small, non-blocking `.kc-lock-prompt` corner widget (`theme.css`) — not a
+  full-screen overlay — in the server-reported prompt window, and returns
+  to the Dashboard (`/`, not `/login`) once the server reports the session
+  gone, per this section's own wording below. `test_http_session_iface.c`
+  covers the status/touch contract, negative-tested the same way as the
+  rest of this list.
 
-**Still pending — the whole of the remaining work:**
+**Still pending:**
 
-- **Section 6, the login page and route.** No `/api/auth/login` route exists
-  anywhere in the tree (only the one-time `/api/auth/bootstrap_password` is
-  registered), and no HTML page references it — confirmed by
-  `http_session_iface.c`'s own header comment: "section 6 (the login/password
-  page, and the login) has not landed yet". Without it, a browser has no way
-  to exchange the administrator or user password for a session cookie once a
-  password has been set.
-- **Section 8's web-GUI half of the inactivity lock and its 10 s prompt.**
-  `ui_lcd_lock.h` explicitly scopes itself to "the LCD half only — the web
-  GUI's own timeout/prompt belongs to whichever module owns `app.js`'s
-  session handling, not here", and no such module exists yet. Blocked on
-  section 6 landing first (there is no web session to time out until login
-  exists).
+- **Section 9**'s fuller safety-interaction sweep beyond the stop-path case
+  already covered by `test_web_auth_safety_interaction.c` — see that
+  section for the remaining scenarios.
+- Sections 10-13's own status lines name any work still open under each.
 
 ### Two facts that shape the design
 
@@ -723,11 +738,15 @@ against that interface's own timeout. The two never interact: web activity does
 not extend the LCD session, and a tap on the panel does not extend a browser
 session.
 
-**What counts as activity.** Web: any authenticated request that is not the
-keepalive itself — so a dashboard polling `/api/status` from an idle browser
-tab does **not** keep an admin session alive, which is the whole point. LCD:
-any touch event delivered to LVGL, including a touch that only scrolls or is
-swallowed by a backdrop.
+**What counts as activity.** Web: any request actually ALLOWed against
+`ROUTE_TIER_USER`/`ROUTE_TIER_ADMIN`
+(`http_auth_decision_counts_as_activity()`) — so a dashboard polling
+`/api/status` from an idle browser tab, or the lock prompt's own
+`GET /api/auth/session` status poll (kept `ROUTE_TIER_OPEN` for exactly
+this reason), does **not** keep an admin session alive, which is the whole
+point; only the explicit `POST /api/auth/session/extend` (or any other
+ordinary USER/ADMIN action) does. LCD: any touch event delivered to LVGL,
+including a touch that only scrolls or is swallowed by a backdrop.
 
 **What locking does.** The session drops to the unauthenticated tier and the
 interface returns to the Dashboard. The display does not blank — backlight
@@ -737,17 +756,23 @@ never interrupted by a lock**; the executor does not read auth state at all.
 
 **The 10-second prompt.** At `timeout - 10 s`, both interfaces show a "Stay
 unlocked" prompt. On the LCD it is a `ui_confirm` dialog with a 10-second
-countdown in its body; on the web it is a modal in `app.js`. Accepting
-refreshes `last_seen_ms`. Ignoring it locks at expiry and the prompt closes
-itself.
+countdown in its body; on the web it is a small non-blocking corner widget
+in `app.js` (`.kc-lock-prompt`), deliberately not a modal — see below.
+Accepting posts `POST /api/auth/session/extend`, which the shared
+activity-touch mechanism extends by the full timeout the same as any other
+USER-tier request. Ignoring it locks at expiry (enforced server-side
+regardless of whether the prompt was ever shown or clicked) and the widget
+hides itself once the next poll reports the session gone.
 
-**The prompt must never block a safety action.** It is a normal
+**The prompt must never block a safety action.** The LCD prompt is a normal
 `lv_layer_top()` modal, so the Stop control is behind it for those 10 seconds
 — that is unacceptable, so the LCD prompt is shown **only when a gated action
 is possible in the first place**, and it is dismissed instantly by any touch
-outside it, not only by its own buttons. On the web the modal is
-non-blocking: the dashboard behind it stays interactive. State plainly: no
-code path in this feature may take a lock that a stop or trip path also takes.
+outside it, not only by its own buttons. On the web the widget is a small
+fixed-position corner element, not a full-screen overlay: the dashboard
+behind it, including Stop, stays fully interactive the whole time. State
+plainly: no code path in this feature may take a lock that a stop or trip
+path also takes.
 
 **Should locking be suspended during a firing? No — but the Dashboard stays
 live, which is what the operator actually wants.** Recommendation and
@@ -762,12 +787,18 @@ runs during a firing exactly as it does otherwise.
 item 4's 700 bytes. The sweep is a comparison per slot on an existing periodic
 tick — no new task, no new timer, no stack growth.
 
-*Acceptance:* a host test with an injectable clock asserts a session is valid
-at `timeout - 1 ms`, invalid at `timeout + 1 ms`, that the prompt window opens
-at `timeout - 10 s`, that accepting extends by the full timeout, and that a
-keepalive request alone does not extend it.
-*Negative test:* make the activity check treat the keepalive as activity,
-confirm the "keepalive does not extend" assertion goes RED, restore by hand.
+*Acceptance, landed.* The boundary math (`timeout - 1 ms`/`timeout + 1 ms`,
+the prompt window opening at `timeout - 10 s`, and touch extending by the
+full timeout) is covered by `test_web_auth.c` against
+`web_auth_session.c`/`web_auth_session_in_prompt_window()`. The HTTP-layer
+wiring — that any ALLOWed USER/ADMIN request counts as activity, that the
+status poll alone never does (it is `ROUTE_TIER_OPEN`, not a special-cased
+branch), and that touching an already-expired session can never revive it —
+is covered by `test_http_session_iface.c` and
+`test_http_auth_enforce.c`'s `test_decision_counts_as_activity()`. Each
+assertion was negative-tested: the guarded production line was broken,
+confirmed RED, restored by hand with a matching `git hash-object`, and
+reconfirmed GREEN after a forced full rebuild.
 
 ---
 
