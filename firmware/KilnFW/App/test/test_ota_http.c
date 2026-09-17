@@ -153,6 +153,22 @@ static inline BaseType_t ota_http_test_xSemaphoreTake(SemaphoreHandle_t sem, Tic
 #undef xSemaphoreTake
 #undef asm
 
+// web_auth_store.h -- docs/WEB_AUTH_PLAN.md item 12b's factory-reset half:
+// a credential must survive every one of factory_reset.c's four scopes
+// (wifi/kiln/profiles/all), none of which may erase the default `nvs`
+// partition kiln_auth lives on (see factory_reset.c's kScopes[] table just
+// #included above -- WIFI_NVS_PARTITION/KILN_NVS_PARTITION/
+// PROFILES_NVS_PARTITION are "wifi_nvs"/"kiln_nvs"/"profiles_nvs", never
+// the default partition). Linked as a REAL, separately-compiled object
+// (build_host_tests.ps1's cmd8), not #include'd -- it has a public header
+// and no static internals this file needs to reach, unlike ota_http.c/
+// factory_reset.c above. g_stub_psa_import_key_result (just above) is the
+// one extern web_auth_store.c's psa/crypto.h stub needs; already defined
+// here for ota_http.c's own HMAC use.
+#include "web_auth_store.h"
+#include "fake_kv.h" // fake_kv_reset_all() -- the credential-survival tests below need a clean
+                     // hal_kv state per scope, same convention as test_web_auth_store.c's reset_all()
+
 // ---- ota_http.c's embedded-page symbols -----------------------------------
 const uint8_t ota_page_html_gz_start[1] = { 0 };
 const uint8_t ota_page_html_gz_end[1] = { 0 };
@@ -1350,6 +1366,101 @@ static void test_sw_reset_does_not_touch_nvs(void)
     hal_kv_close(&h);
 }
 
+// ---------------------------------------------------------------------------
+// docs/WEB_AUTH_PLAN.md item 12b, factory-reset half: a credential set
+// through web_auth_store_set_password()/_set_pin() must survive EVERY one
+// of factory_reset.c's four scopes. Calls the real, non-static
+// factory_reset_execute() directly (not through reset_post_handler()'s
+// auth/interlock gate, which this file's other tests already cover and
+// which is orthogonal to this property) so the real hal_kv_erase_partition()
+// calls on wifi_nvs/kiln_nvs/profiles_nvs actually run against the real
+// fake_kv backend. A synthetic credential is used throughout -- never a
+// real password.
+// ---------------------------------------------------------------------------
+static const uint8_t WEBAUTH12B_SALT[WEB_AUTH_SALT_LEN] = {
+    0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8,
+    0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF, 0xB0};
+#define WEBAUTH12B_SYNTHETIC_PASSWORD "Synthetic-Test-Secret-9"
+#define WEBAUTH12B_SYNTHETIC_PIN "482913"
+
+static void seed_webauth12b_credential(void)
+{
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK,
+              "setup: init the default nvs partition (kiln_auth's home)");
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "synthtestuser",
+                                            WEBAUTH12B_SYNTHETIC_PASSWORD, WEBAUTH12B_SALT,
+                                            false) == HAL_OK,
+              "setup: seed a synthetic administrator password");
+    TEST_CHECK(web_auth_store_set_pin(WEB_AUTH_ROLE_USER, WEBAUTH12B_SYNTHETIC_PIN,
+                                       WEBAUTH12B_SALT) == HAL_OK,
+              "setup: seed a synthetic user LCD PIN");
+    TEST_CHECK(web_auth_store_verify_password(WEB_AUTH_ROLE_ADMINISTRATOR,
+                                               WEBAUTH12B_SYNTHETIC_PASSWORD),
+              "setup sanity: the seeded password verifies before any reset scope runs");
+    TEST_CHECK(web_auth_store_verify_pin(WEB_AUTH_ROLE_USER, WEBAUTH12B_SYNTHETIC_PIN),
+              "setup sanity: the seeded PIN verifies before any reset scope runs");
+}
+
+static void assert_webauth12b_credential_survived(const char *scope_name)
+{
+    TEST_CHECK(web_auth_store_verify_password(WEB_AUTH_ROLE_ADMINISTRATOR,
+                                               WEBAUTH12B_SYNTHETIC_PASSWORD),
+              scope_name);
+    TEST_CHECK(web_auth_store_verify_pin(WEB_AUTH_ROLE_USER, WEBAUTH12B_SYNTHETIC_PIN),
+              scope_name);
+}
+
+static void test_credential_survives_factory_reset_wifi_scope(void)
+{
+    TEST_SECTION("factory_reset_execute(FACTORY_RESET_SCOPE_WIFI) -- a kiln_auth credential must survive");
+    fake_kv_reset_all();
+    TEST_CHECK(hal_kv_init_partition("wifi_nvs") == HAL_OK, "setup: init wifi_nvs");
+    seed_webauth12b_credential();
+    TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_WIFI) == ESP_OK,
+              "factory_reset_execute(WIFI) must succeed");
+    assert_webauth12b_credential_survived(
+        "the administrator password must still verify after a WIFI-scope factory reset");
+}
+
+static void test_credential_survives_factory_reset_kiln_scope(void)
+{
+    TEST_SECTION("factory_reset_execute(FACTORY_RESET_SCOPE_KILN) -- a kiln_auth credential must survive");
+    fake_kv_reset_all();
+    TEST_CHECK(hal_kv_init_partition("kiln_nvs") == HAL_OK, "setup: init kiln_nvs");
+    seed_webauth12b_credential();
+    TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_KILN) == ESP_OK,
+              "factory_reset_execute(KILN) must succeed");
+    assert_webauth12b_credential_survived(
+        "the administrator password must still verify after a KILN-scope factory reset");
+}
+
+static void test_credential_survives_factory_reset_profiles_scope(void)
+{
+    TEST_SECTION("factory_reset_execute(FACTORY_RESET_SCOPE_PROFILES) -- a kiln_auth credential must survive");
+    fake_kv_reset_all();
+    TEST_CHECK(hal_kv_init_partition("profiles_nvs") == HAL_OK, "setup: init profiles_nvs");
+    seed_webauth12b_credential();
+    TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_PROFILES) == ESP_OK,
+              "factory_reset_execute(PROFILES) must succeed");
+    assert_webauth12b_credential_survived(
+        "the administrator password must still verify after a PROFILES-scope factory reset");
+}
+
+static void test_credential_survives_factory_reset_all_scope(void)
+{
+    TEST_SECTION("factory_reset_execute(FACTORY_RESET_SCOPE_ALL) -- a kiln_auth credential must survive "
+                 "even the full factory-default wipe");
+    fake_kv_reset_all();
+    TEST_CHECK(hal_kv_init_partition("wifi_nvs") == HAL_OK, "setup: init wifi_nvs");
+    TEST_CHECK(hal_kv_init_partition("kiln_nvs") == HAL_OK, "setup: init kiln_nvs");
+    TEST_CHECK(hal_kv_init_partition("profiles_nvs") == HAL_OK, "setup: init profiles_nvs");
+    seed_webauth12b_credential();
+    TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_ALL) == ESP_OK,
+              "factory_reset_execute(ALL) must succeed");
+    assert_webauth12b_credential_survived(
+        "the administrator password must still verify after an ALL-scope (factory-default) reset");
+}
+
 // --- ESP-side sequencing for the Pico half (SAFETY_CMD_REBOOT, 0x29) -------
 //
 // sw_reset_post_handler() commands the Pico on the REQUEST task and reports
@@ -1696,6 +1807,10 @@ void run_test_ota_http(void)
     test_sw_reset_does_not_touch_nvs();
     test_sw_reset_pico_outcome_mapping();
     test_sw_reset_pico_sentences_are_honest();
+    test_credential_survives_factory_reset_wifi_scope();
+    test_credential_survives_factory_reset_kiln_scope();
+    test_credential_survives_factory_reset_profiles_scope();
+    test_credential_survives_factory_reset_all_scope();
 }
 
 int main(void)

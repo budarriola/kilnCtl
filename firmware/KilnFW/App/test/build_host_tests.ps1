@@ -206,6 +206,16 @@ try {
         # kiln_package.c immediately above; test/stubs/esp_mac.h supplies the
         # host-side esp_efuse_mac_get_default() it calls.
         (Join-Path $driversDir "persist/kiln_board_identity.c"),
+        # docs/WEB_AUTH_PLAN.md item 12b: linked in for REAL (public header,
+        # no static internals test_backup_import.c/test_kiln_cfg_store.c need
+        # to reach) so this executable can seed a real credential and prove
+        # it survives a whole-board export and a per-slot config-package
+        # export/import (kiln_cfg_store_export_package_json(), #included
+        # above via test_kiln_cfg_store.c's #include of kiln_cfg_store.c).
+        # fake_kv.c/hal_status.c/hal_esp_common.c above already cover its
+        # link needs; its psa/crypto.h host stub needs exactly one
+        # g_stub_psa_import_key_result definition, added in test_backup_import.c.
+        (Join-Path $driversDir "persist/web_auth_store.c"),
         (Join-Path $driversDir "hw/touch_dev.c"),
         (Join-Path $driversDir "control/ramp_ident.c"),
         (Join-Path $driversDir "control/ramp_transient_ident.c"),
@@ -467,7 +477,15 @@ try {
     $exe33 = Join-Path $outDir "kilnctl_host_tests_kiln_cfg_swap.exe"
     $cmd33 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
              "/Fo:`"$outDir\\`" /Fe:`"$exe33`" `"$(Join-Path $testDir 'test_kiln_cfg_swap.c')`" " +
-             "`"$(Join-Path $hwAbsDir 'host\fake_kv.c')`""
+             "`"$(Join-Path $hwAbsDir 'host\fake_kv.c')`" " +
+             "`"$(Join-Path $driversDir 'persist\web_auth_store.c')`" " +
+             "`"$(Join-Path $hwAbsDir 'common\hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp\common\hal_esp_common.c')`""
+    # web_auth_store.c added for docs/WEB_AUTH_PLAN.md item 12b: linked in for
+    # REAL (public header, no static internals this file needs) so this
+    # executable can prove a real credential survives a slot swap
+    # (kiln_cfg_swap_apply()) regardless of the swap's own outcome. Needs
+    # hal_status.c/hal_esp_common.c too (not otherwise linked here) for
+    # web_auth_store.c's HAL_OK/hal_status plumbing.
 
     Invoke-HostTestExe -Name "kiln_cfg_swap" -ExePath $exe33 -BuildCmd $cmd33
 
@@ -627,6 +645,7 @@ try {
             "`"$(Join-Path $driversDir 'net/ota_auth.c')`" `"$(Join-Path $driversDir 'net/ota_interlock.c')`" " +
             "`"$(Join-Path $driversDir 'persist/ota_record.c')`" `"$(Join-Path $driversDir 'http/ota_http_util.c')`" " +
             "`"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
@@ -644,6 +663,13 @@ try {
     # flash-safety review follow-up: ota_record.c now also calls
     # hal_status_to_esp_err() to preserve its ESP_FAIL/mapped-error return
     # contract instead of collapsing every failure to plain ESP_FAIL.
+    # web_auth_store.c added for docs/WEB_AUTH_PLAN.md item 12b: linked in for
+    # REAL (not #included -- it has a public header and no static internals
+    # this file needs to reach) so test_ota_http.c can prove a real credential
+    # survives factory_reset_execute() across all four scopes. Its
+    # psa/crypto.h host stub needs exactly one g_stub_psa_import_key_result
+    # definition per executable; ota_http.c's own HMAC use already supplies
+    # one in this executable (test_ota_http.c), so no new definition is added.
 
     Invoke-HostTestExe -Name "ota_http" -ExePath $exe8 -BuildCmd $cmd8
 

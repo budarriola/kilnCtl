@@ -88,6 +88,22 @@ void test_stub_zones_set_max_ramp(uint8_t zone_index, bool answers, float c_per_
 // own comment for why that gap existed before today.
 #include "../drivers/persist/zone_settings_source_chain.h"
 
+// docs/WEB_AUTH_PLAN.md item 12b -- web_auth_store.c (linked for real, see
+// build_host_tests.ps1's comment on this executable's $sources entry) so
+// test_export_never_contains_credential_markers() below can seed a REAL
+// credential and check its actual hash/salt bytes, not merely the absence
+// of the kiln_auth/web_auth/lcd_auth/auth_policy identifier strings. fake_kv.h
+// gives fake_kv_reset_all()/hal_kv_init_partition() -- this executable
+// already links the real fake_kv.c backend for boot_guard.c/kiln_cfg_store.c/
+// etc. above. Its psa/crypto.h host stub needs exactly one
+// g_stub_psa_import_key_result definition per executable; none of this
+// executable's other files define it (ota_http.c/test_web_auth_store.c each
+// live in their own separate executables), so it is defined here.
+#include "web_auth_store.h"
+#include "fake_kv.h"
+#include "psa/crypto.h"
+psa_status_t g_stub_psa_import_key_result = PSA_SUCCESS;
+
 // ---- Embedded-page symbols backup_page_get_handler() references ----------
 // Never actually sent by these tests (that handler is never called), but
 // must exist for the linker.
@@ -2838,34 +2854,74 @@ static void test_safety_i_normal_a_absent_key_never_calls_write(void)
 // host test asserting "an export's JSON contains none of the three
 // credential key names and none of a set password's bytes".
 //
-// Item 2's credential-storage module (web_auth_store.c / the setters that
-// would actually hash and persist a password) does not exist in this tree
-// yet -- that is a different slice of the same plan. So this test cannot yet
-// do the full acceptance test ("set a password, export, assert the hash's
-// bytes are absent"); there is no setter to call. What IS testable today,
-// against real production code rather than a mirror, is the structural half
-// of the same property: backup_export_get_handler() -- the real handler,
-// pulled in via the #include of backup_export.c above -- never emits any of
-// the three credential record key names (web_auth/lcd_auth/auth_policy), the
-// kiln_auth namespace name itself, or the literal word "password", no matter
-// what zone/profile state it is fed. This is not vacuous: backup_export.c's
+// Item 2's credential-storage module (web_auth_store.c) landed at c3008eb8,
+// so this test now does the full acceptance shape docs/WEB_AUTH_PLAN.md item
+// 12b asks for: seed a REAL, synthetic credential through
+// web_auth_store_set_password()/_set_pin(), export a backup, and assert the
+// ACTUAL stored hash+salt bytes (hex-encoded, the only form they could appear
+// in a JSON export) are absent from the export body -- not merely that the
+// kiln_auth/web_auth/lcd_auth/auth_policy identifier strings are absent. Both
+// checks are kept: the identifier-string check still catches a future config
+// path that references the namespace/keys by name without emitting bytes
+// (e.g. a stray debug log line), and the byte check catches the shape this
+// test was previously blocked on -- a hypothetical export path that reads the
+// raw NVS blob without knowing/using its key name. backup_export.c's
 // hand-written, no-generic-NVS-enumeration section list (verified by
 // inspection -- zero nvs_entry_* calls in that file) is exactly the reason
-// exclusion holds, and this test exercises that real writer's real output
-// rather than asserting the absence of a feature that hasn't been built.
-// When item 2 lands, add a companion test here (or a new test_web_auth.c per
-// section 12) that seeds a real credential, exports, and asserts the actual
-// stored hash bytes are absent -- this test's forbidden-substring list should
-// be reused there rather than duplicated.
+// exclusion holds; this test exercises that real writer's real output against
+// a real, hashed-and-salted credential.
 // ---------------------------------------------------------------------------
+static const uint8_t BACKUP12B_SALT[WEB_AUTH_SALT_LEN] = {
+    0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8,
+    0xE9, 0xEA, 0xEB, 0xEC, 0xED, 0xEE, 0xEF, 0xF0};
+#define BACKUP12B_SYNTHETIC_PASSWORD "Synthetic-Backup-Secret-3"
+#define BACKUP12B_SYNTHETIC_PIN "751046"
+
+static void hex_encode(const uint8_t *bytes, size_t len, char *out, size_t out_cap)
+{
+    static const char hexdigits[] = "0123456789abcdef";
+    TEST_CHECK(out_cap >= (len * 2u + 1u), "hex_encode: output buffer large enough");
+    for (size_t i = 0; i < len; i++) {
+        out[i * 2] = hexdigits[(bytes[i] >> 4) & 0x0F];
+        out[i * 2 + 1] = hexdigits[bytes[i] & 0x0F];
+    }
+    out[len * 2] = '\0';
+}
+
 static void test_export_never_contains_credential_markers(void)
 {
     TEST_SECTION("backup_export_get_handler -- WEB_AUTH_PLAN.md item 12b: the emitted backup JSON "
                  "never contains the kiln_auth NVS namespace name, any of the three credential record "
-                 "key names (web_auth/lcd_auth/auth_policy), or the literal word 'password' -- "
-                 "credentials live outside config storage entirely and no config operation reads or "
-                 "writes them");
+                 "key names (web_auth/lcd_auth/auth_policy), the literal word 'password', or the actual "
+                 "stored hash/salt bytes of a real seeded credential -- credentials live outside config "
+                 "storage entirely and no config operation reads or writes them");
     reset_stub_state();
+    fake_kv_reset_all();
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init the default nvs partition (kiln_auth's home)");
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "backuptestuser",
+                                            BACKUP12B_SYNTHETIC_PASSWORD, BACKUP12B_SALT, false) == HAL_OK,
+              "setup: seed a synthetic administrator password");
+    TEST_CHECK(web_auth_store_set_pin(WEB_AUTH_ROLE_USER, BACKUP12B_SYNTHETIC_PIN, BACKUP12B_SALT) == HAL_OK,
+              "setup: seed a synthetic user LCD PIN");
+
+    // Pull the actual stored blobs back out via the real loader (not a
+    // separately-derived hash) so this test compares against exactly what a
+    // leaking export path would actually be leaking.
+    web_auth_password_record_t web_blob;
+    TEST_CHECK(web_auth_store_load_password(WEB_AUTH_ROLE_ADMINISTRATOR, &web_blob) == WEB_AUTH_LOAD_OK,
+              "setup: real stored password blob loads back");
+    web_auth_pin_record_t lcd_blob;
+    TEST_CHECK(web_auth_store_load_pin(WEB_AUTH_ROLE_USER, &lcd_blob) == WEB_AUTH_LOAD_OK,
+              "setup: real stored PIN blob loads back");
+
+    char web_hash_hex[WEB_AUTH_HASH_LEN * 2 + 1];
+    char web_salt_hex[WEB_AUTH_SALT_LEN * 2 + 1];
+    char lcd_hash_hex[WEB_AUTH_HASH_LEN * 2 + 1];
+    char lcd_salt_hex[WEB_AUTH_SALT_LEN * 2 + 1];
+    hex_encode(web_blob.hash, WEB_AUTH_HASH_LEN, web_hash_hex, sizeof(web_hash_hex));
+    hex_encode(web_blob.salt, WEB_AUTH_SALT_LEN, web_salt_hex, sizeof(web_salt_hex));
+    hex_encode(lcd_blob.hash, WEB_AUTH_HASH_LEN, lcd_hash_hex, sizeof(lcd_hash_hex));
+    hex_encode(lcd_blob.salt, WEB_AUTH_SALT_LEN, lcd_salt_hex, sizeof(lcd_salt_hex));
 
     profile_t p;
     memset(&p, 0, sizeof(p));
@@ -2888,6 +2944,14 @@ static void test_export_never_contains_credential_markers(void)
         TEST_CHECK(strstr(s_export_body, "lcd_auth") == NULL, "export never names the lcd_auth key");
         TEST_CHECK(strstr(s_export_body, "auth_policy") == NULL, "export never names the auth_policy key");
         TEST_CHECK(strstr(s_export_body, "password") == NULL, "export never contains the literal word 'password'");
+        TEST_CHECK(strstr(s_export_body, web_hash_hex) == NULL,
+                  "export never contains the real stored administrator password hash's bytes");
+        TEST_CHECK(strstr(s_export_body, web_salt_hex) == NULL,
+                  "export never contains the real stored administrator password salt's bytes");
+        TEST_CHECK(strstr(s_export_body, lcd_hash_hex) == NULL,
+                  "export never contains the real stored user PIN hash's bytes");
+        TEST_CHECK(strstr(s_export_body, lcd_salt_hex) == NULL,
+                  "export never contains the real stored user PIN salt's bytes");
     }
 }
 

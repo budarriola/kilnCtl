@@ -27,6 +27,17 @@
 #include "esp_err.h"
 #include "fake_kv.h"
 
+// docs/WEB_AUTH_PLAN.md item 12b -- kiln_cfg_swap.c is entirely faked above
+// (this file's own convention), but hal_kv is NOT faked: it links the real
+// fake_kv.h/.c backend. That real backend also backs web_auth_store.c's
+// kiln_auth namespace, so this same executable can seed a real credential
+// and prove kiln_cfg_swap_apply() (a slot swap -- item 12b's remaining
+// untested case) leaves it untouched, regardless of the swap's own
+// success/refusal outcome, which is orthogonal to this property.
+#include "web_auth_store.h"
+#include "psa/crypto.h"
+psa_status_t g_stub_psa_import_key_result = PSA_SUCCESS;
+
 int g_test_failures = 0;
 int g_test_count = 0;
 
@@ -941,6 +952,46 @@ static void test_negative_generation_check_is_load_bearing(void)
     TEST_CHECK(1, "see docs/audits/kiln_swap_transaction_2026-09-14.md for the negative-test transcript");
 }
 
+// ---------------------------------------------------------------------------
+// docs/WEB_AUTH_PLAN.md item 12b: a credential set through
+// web_auth_store_set_password()/_set_pin() must survive a slot swap
+// (kiln_cfg_swap_apply()), regardless of whether the swap itself succeeds or
+// is refused -- that outcome is orthogonal to this property. A synthetic
+// credential is used, never a real password.
+// ---------------------------------------------------------------------------
+static const uint8_t SWAP12B_SALT[WEB_AUTH_SALT_LEN] = {
+    0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8,
+    0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0xCF, 0xD0};
+#define SWAP12B_SYNTHETIC_PASSWORD "Synthetic-Swap-Secret-7"
+#define SWAP12B_SYNTHETIC_PIN "319642"
+
+static void test_credential_survives_a_slot_swap(void)
+{
+    TEST_SECTION("kiln_cfg_swap_apply() -- WEB_AUTH_PLAN.md item 12b: a kiln_auth credential "
+                 "must survive a slot swap regardless of the swap's own outcome");
+    reset_state();
+    // reset_state() already does fake_kv_reset_all()/hal_kv_init_partition(KILN_NVS_PARTITION_SWAP);
+    // kiln_auth lives on the DEFAULT nvs partition, a separate init.
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init the default nvs partition (kiln_auth's home)");
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "swaptestuser",
+                                            SWAP12B_SYNTHETIC_PASSWORD, SWAP12B_SALT, false) == HAL_OK,
+              "setup: seed a synthetic administrator password");
+    TEST_CHECK(web_auth_store_set_pin(WEB_AUTH_ROLE_USER, SWAP12B_SYNTHETIC_PIN, SWAP12B_SALT) == HAL_OK,
+              "setup: seed a synthetic user LCD PIN");
+
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    bool diverged = false;
+    // Outcome (success or refusal) is deliberately not asserted here -- other
+    // tests in this file already cover kiln_cfg_swap_apply()'s own behavior.
+    // What is under test is that the credential is untouched either way.
+    (void)kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+
+    TEST_CHECK(web_auth_store_verify_password(WEB_AUTH_ROLE_ADMINISTRATOR, SWAP12B_SYNTHETIC_PASSWORD),
+              "the administrator password must still verify after a slot swap");
+    TEST_CHECK(web_auth_store_verify_pin(WEB_AUTH_ROLE_USER, SWAP12B_SYNTHETIC_PIN),
+              "the user PIN must still verify after a slot swap");
+}
+
 int main(void)
 {
     test_clean_swap_applies_both_halves();
@@ -961,6 +1012,7 @@ int main(void)
     test_boot_recovery_corrupt_marker_stays_alarmed();
     test_boot_recovery_fault_latches_first_only();
     test_negative_generation_check_is_load_bearing();
+    test_credential_survives_a_slot_swap();
 
     if (g_test_failures == 0) {
         printf("ALL TESTS PASSED\n");

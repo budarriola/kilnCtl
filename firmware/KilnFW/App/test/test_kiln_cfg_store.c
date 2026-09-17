@@ -58,6 +58,14 @@
 
 #include "cfg_fs.h"
 
+// docs/WEB_AUTH_PLAN.md item 12b -- web_auth_store.c (linked for real, see
+// build_host_tests.ps1's comment on this executable's $sources entry) so the
+// config-package export/import test below can seed a real credential and
+// prove it survives kiln_cfg_store_export_package_json()/_import_package_json()
+// untouched. g_stub_psa_import_key_result is already defined once for this
+// whole executable in test_backup_import.c.
+#include "web_auth_store.h"
+
 // Test-only malloc seam for nvs_load_store()'s v1-migration-buffer
 // allocation (kiln_cfg_store.c:234ish, `malloc(sizeof(*v1))`) -- proves the
 // "malloc failure leaves defaults standing" branch without needing a real
@@ -1863,6 +1871,71 @@ static void test_export_import_new_slot_round_trip(void)
     free(json);
 }
 
+// ---------------------------------------------------------------------------
+// docs/WEB_AUTH_PLAN.md item 12b: "the config package" (per-slot
+// export/import via kiln_cfg_store_export_package_json()/
+// _import_package_json(), distinct from the whole-board backup covered in
+// test_backup_import.c) must never contain, and must never disturb, a
+// kiln_auth credential. A synthetic credential is used, never a real one.
+// ---------------------------------------------------------------------------
+static const uint8_t PKG12B_SALT[WEB_AUTH_SALT_LEN] = {
+    0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+    0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20};
+#define PKG12B_SYNTHETIC_PASSWORD "Synthetic-Package-Secret-4"
+#define PKG12B_SYNTHETIC_PIN "608274"
+
+static void test_export_package_json_never_contains_or_disturbs_credential(void)
+{
+    TEST_SECTION("kiln_cfg_store_export_package_json/_import_package_json -- WEB_AUTH_PLAN.md item 12b: "
+                 "a kiln_auth credential is absent from the exported package JSON and untouched by import");
+    reset_state();
+    fake_kv_reset_all();
+    TEST_CHECK(hal_kv_init_partition(KILN_NVS_PARTITION) == HAL_OK, "setup: re-init kiln_nvs after fake_kv_reset_all");
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init the default nvs partition (kiln_auth's home)");
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "pkgtestuser",
+                                            PKG12B_SYNTHETIC_PASSWORD, PKG12B_SALT, false) == HAL_OK,
+              "setup: seed a synthetic administrator password");
+    TEST_CHECK(web_auth_store_set_pin(WEB_AUTH_ROLE_USER, PKG12B_SYNTHETIC_PIN, PKG12B_SALT) == HAL_OK,
+              "setup: seed a synthetic user LCD PIN");
+
+    int32_t id1 = -1;
+    char reason[160] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Cred-Package-Test", -1, &id1, reason, sizeof(reason)), "save succeeds");
+
+    char *json = (char *)malloc(KILN_CFG_EXPORT_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    TEST_CHECK(kiln_cfg_store_export_package_json(id1, json, KILN_CFG_EXPORT_JSON_MAX_LEN, &len, reason,
+                                                  sizeof(reason)),
+               "export succeeds");
+    TEST_CHECK(strstr(json, "kiln_auth") == NULL, "package JSON never names the kiln_auth namespace");
+    TEST_CHECK(strstr(json, "web_auth") == NULL, "package JSON never names the web_auth key");
+    TEST_CHECK(strstr(json, "lcd_auth") == NULL, "package JSON never names the lcd_auth key");
+    TEST_CHECK(strstr(json, "auth_policy") == NULL, "package JSON never names the auth_policy key");
+    TEST_CHECK(strstr(json, "password") == NULL, "package JSON never contains the literal word 'password'");
+    TEST_CHECK(strstr(json, PKG12B_SYNTHETIC_PASSWORD) == NULL,
+              "package JSON never contains the plaintext synthetic password");
+
+    // Import it back (into a new slot, same convention as
+    // test_export_import_new_slot_round_trip() above) and confirm the
+    // credential is still exactly as seeded -- import must not disturb it.
+    char *name_field = strstr(json, "\"name\":\"Cred-Package-Test\"");
+    TEST_CHECK(name_field != NULL, "found the name field to rename before import");
+    if (name_field) {
+        name_field[strlen("\"name\":\"Cred-Package-Tes")] = '5'; // same length, avoids the self-name collision
+    }
+    int32_t id2 = -1;
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_import_package_json(json, &id2, reason, sizeof(reason)), "import succeeds");
+
+    TEST_CHECK(web_auth_store_verify_password(WEB_AUTH_ROLE_ADMINISTRATOR, PKG12B_SYNTHETIC_PASSWORD),
+              "the administrator password must still verify after export+import of a config package");
+    TEST_CHECK(web_auth_store_verify_pin(WEB_AUTH_ROLE_USER, PKG12B_SYNTHETIC_PIN),
+              "the user PIN must still verify after export+import of a config package");
+
+    free(json);
+}
+
 static void test_import_refuses_malformed(void)
 {
     TEST_SECTION("kiln_cfg_store_import_package_json -- refuses a malformed file, writes nothing");
@@ -3205,6 +3278,7 @@ void run_test_kiln_cfg_store(void)
     test_cfg_fs_interrupted_write_leaves_old_or_new();
 
     test_export_import_new_slot_round_trip();
+    test_export_package_json_never_contains_or_disturbs_credential();
     test_import_refuses_malformed();
     test_import_refuses_newer_pkg_schema_nothing_written();
     test_import_refuses_hash_mismatch_nothing_written();
