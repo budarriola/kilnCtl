@@ -355,6 +355,25 @@ and **re-read the config CRC from telemetry to prove it** — a test threshold
 left in place is the most plausible way this system ends up quietly
 unprotected.
 
+### §3.4 executed rows (2026-09-16)
+
+Full reproducible commands, mask arithmetic, and readbacks for every row
+below are in `docs/audits/guard_bench_provocations_2026-09-16.md` — this
+table is the completion record the "Completion checklist" section asks for,
+not a replacement for that evidence. No board was flashed; `abs_max_temp_c`
+was the only field touched that has a Pico/ESP equality invariant, and it
+was read back as `80` (its pre-test and only ever ESP-matching value) both
+before and after.
+
+| Guard | Result | trip_reason / trip_mask observed | Cleared/restored |
+|---|---|---|---|
+| S1 | **Executed, matched.** Lowered `abs_max_temp_c` to 25 (live reading ~29.2C) via `safety_set_commissioning_fields` (required a `debug_reset(peer="pico")` first to open the post-reset write grace window). | `trip_reason 1 [SAFETY_TRIP_OVERTEMP]`, `trip_mask 0x0001` (= `1<<(1-1)`) | Yes — `abs_max_temp_c` restored to 80, `safety_clear_trip()`, config CRC back to pre-test 27984 |
+| S6a | **Executed, matched.** `safety_set_fault_out(assert_fault=true)` — a published tool driving the ESP's real GPIO6->opto->Pico fault line, no wire-shorting needed. **Reclassifies this guard's hardware path from Bucket C to Bucket A** in `docs/SAFETY_ARGUMENT_WITHOUT_BENCH.md`'s taxonomy (that document is not edited by this pass; its host-fixture-gap finding for the deleted `virtual_dut` harness remains separately valid). | `trip_reason 6 [SAFETY_TRIP_MAIN_FAULT]`, `trip_mask 0x0020` (= `1<<(6-1)`) | Yes — `safety_set_fault_out(assert_fault=false)`, `safety_clear_trip()` |
+| S13 | **Executed, matched.** Armed `tc_source=BORROWED_ZONE(1)`, `borrowed_zone_index=0`, then stalled zone 0's ESP-side thermocouple via `thermo_config_channel(..., auto_convert=false)` (the same "stopped converting" technique as §3.2, applied on the borrowed zone's own channel) and waited 65s (> `borrowed_stale_trip_s` default 60s). | `trip_reason 14 [SAFETY_TRIP_BORROWED_STALE]`, `trip_mask 0x2000` (= `1<<(14-1)`); `warn_mask` also `0x2000`, consistent with S13's graduated WARN-then-TRIP design | Yes — `auto_convert` re-enabled, `tc_source`/`borrowed_zone_index` restored to 0/0, `safety_clear_trip()` |
+| S6b | **Attempted, not verified — missing tooling.** `debug_halt(peer="esp")` then a 125s wait then `debug_resume` failed with `"[esp32s3.cpu0] not halted"`: the halt did not survive across the separate OpenOCD sessions each MCP call opens, so the ESP never actually stopped servicing the link for anywhere near the 120s hard threshold. `safety_get_diag()` confirmed no trip occurred. Needs either a long-lived halt-for-duration tool or a dedicated safety-link-kill lever; not reported as a pass or a guard defect. | n/a — stimulus never actually applied | n/a — no lasting state change; board read back as `armed` |
+| S5 (fault-injection) | **Attempted, not verified — missing tooling.** Neither of the two cases named in `SAFETY_ARGUMENT_WITHOUT_BENCH.md` (a `tc_type` CR1 mismatch, a forced out-of-band reading) could be executed: the `thermo_read_reg`/`thermo_write_reg` register-level tools reach only the ESP's three main-board channels, not the Pico's own safety-processor MAX31856, and `safety_set_tc_type()` only commissions a type through the normal `SET_PARAM` path rather than injecting a raw fault condition. No MCP tool currently exposes register-level access to the safety thermocouple. | n/a — stimulus never applied | n/a — no field was written |
+| S2, S7, S9, S11, KilnFW thermal_guard 1/2/3/4/5/7/9 | **Not attempted this session.** S7/S9/S11 need a hand physically at the E-stop, at a live-mains bypass jumper, and at a thermal clamp on the safety TC's junction respectively; S2 and the thermal_guard rows need a supervised multi-minute firing. Not a tooling gap (`profiles_*`/`thermo_*`/`io_*` all exist) — out of this session's scope. Recommend scheduling as follow-on bench time with a person present. | n/a | n/a |
+
 ---
 
 ## 4. Recording results
