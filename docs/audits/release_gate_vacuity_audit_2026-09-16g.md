@@ -165,7 +165,7 @@ bench three times before as a silent 404.
 1040). Result: FAILED — "max_uri_handlers (1) is below the real worst-case
 route count (137)...". Restored to `140`; `git diff --quiet` empty;
 `git hash-object` (first 8 chars
-blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`62143299`)
+blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`1f05497a`)
 matched HEAD. Re-run: PASS, with an informational note (not a
 defect) that headroom is thin — 3 spare slots for 137 routes against a cap
 of 140.
