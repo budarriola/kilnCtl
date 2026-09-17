@@ -935,6 +935,7 @@ open is short:
 | [`docs/REPO_LAYOUT.md`](docs/REPO_LAYOUT.md) | The hardware/software reorganisation and its blockers |
 | [`docs/SETUP.md`](docs/SETUP.md) | Fresh-clone setup: what is machine-specific, and how `tools/setup.ps1` handles it |
 | [`docs/RELEASE_HARDENING_PLAN.md`](docs/RELEASE_HARDENING_PLAN.md) | What has to be true before this controls a real kiln unattended: coredump readback for the open `profile_executor` panic, a release-gate audit against this repo's own vacuous-pass history, long-duration soak with a machine-checked verdict, guard provocation on hardware split into what the 4 W bench can and cannot ever close, failure injection, OTA/recovery mechanics, and the first-firing checklist. Risk-ordered, blockers marked. **Starts once `docs/KILN_PROFILES_PLAN.md` is finished** |
+| [`docs/WEB_AUTH_PLAN.md`](docs/WEB_AUTH_PLAN.md) | Username/password and roles for the web GUI plus a numeric PIN for the LCD: an always-open Dashboard tier, `user` (start/stop only) and `administrator` (everything else), the full three-tier classification of all 140 HTTP routes, hashed and salted credentials in NVS, a fail-closed enforcement point with a mechanical route-tier check, an inactivity lock with a ten-second stay-unlocked prompt on both interfaces, and an E-stop-gated physical credential reset. Authentication ships defaulted OFF on both interfaces, so a field-upgraded board is unchanged. **Follows `docs/RELEASE_HARDENING_PLAN.md`** |
 
 ---
 
