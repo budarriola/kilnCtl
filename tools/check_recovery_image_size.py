@@ -17,16 +17,31 @@ one image whose entire value is having almost no surface to fail on --
 nothing upstream currently gates its size at all. This script is that gate.
 
 WHAT EXISTS TODAY VS WHAT IS STILL PLANNED (checked at run time, not
-assumed): as of 2026-09-16 neither half of the plan has landed --
-`firmware/KilnFW/partitions.csv` has no `recovery` row yet (still the
-dual-OTA-slot table), and there is no separate recovery-image IDF project
-in the tree yet (`docs/OTA_SINGLE_SLOT_PLAN.md` section 8 lists both as
-future steps: step 3 for the table, step 1 for the image). So today this
-gate legitimately SKIPs -- there is nothing yet to bound. It is written now,
-ahead of both landing, precisely so that the day either one lands the gate
-is already live and enforcing, rather than being a follow-up someone has to
+assumed): as of 2026-09-16 neither half of the plan had landed --
+`firmware/KilnFW/partitions.csv` had no `recovery` row yet (still the
+dual-OTA-slot table), and there was no separate recovery-image IDF project
+in the tree (`docs/OTA_SINGLE_SLOT_PLAN.md` section 8 listed both as future
+steps: step 3 for the table, step 1 for the image). This script legitimately
+SKIP'd in that state -- there was nothing yet to bound -- and was written
+ahead of both landing precisely so the day either one landed the gate was
+already live and enforcing, rather than being a follow-up someone had to
 remember. See run_all_checks.ps1's SKIP contract: a skip must name its
 reason and is NOT the same as a silent pass.
+
+Both halves have since landed (partition row: `e88bd9ee`'s plan and its
+2026-09-16 step-3 commit; `firmware/KilnFW_recovery/` itself: `5e07eeca`).
+That closed one SKIP reason but exposed a second: nothing in provisioning
+or the check suite ever actually BUILT `recovery.bin`, so a fresh clone
+still had no artifact to measure and this script still SKIP'd, on every
+machine, permanently -- a gap found and fixed 2026-09-17.
+`firmware/KilnFW/App/test/check_00_kilnfw_recovery_target_build.ps1` now
+builds `firmware/KilnFW_recovery` and publishes `recovery.bin` on any
+machine with the ESP-IDF toolchain, so this script now normally PASSes with
+a real measured figure. It still legitimately SKIPs (both reasons below
+remain live code paths, not dead ones) on a machine that genuinely lacks
+the ESP-IDF toolchain -- the same category of prerequisite-missing SKIP
+`check_00_kilnfw_target_build.ps1` already uses for the main application
+build, not a new or wider exemption.
 
 WHERE THE BOUND COMES FROM. The byte bound is read directly out of
 `--partitions-csv` (default `firmware/KilnFW/partitions.csv`) for the row

@@ -101,10 +101,11 @@ param(
     # Exclude checks whose repo-relative path matches this regex (-match).
     [string]$Skip,
 
-    # Skip ONLY the two full target builds (check_00_kilnfw_target_build.ps1,
-    # check_00_saftyfw_target_build.ps1) -- for a caller that just ran
-    # build_kilnfw/build_saftyfw (or equivalent) itself and wants the rest of
-    # the suite without paying to redo the target build. Every other check,
+    # Skip ONLY the full target builds (check_00_kilnfw_target_build.ps1,
+    # check_00_saftyfw_target_build.ps1, check_00_kilnfw_recovery_target_
+    # build.ps1) -- for a caller that just ran build_kilnfw/build_saftyfw (or
+    # equivalent) itself and wants the rest of the suite without paying to
+    # redo the target build. Every other check,
     # including the two checks that read the target ELFs, still runs. This is
     # NOT a general "skip slow checks" switch -- everything else in the
     # default run still runs, because weakening any of it is exactly the
@@ -379,7 +380,8 @@ if ($Skip) {
 if ($Fast) {
     $checks = $checks | Where-Object {
         $_.FullName -notmatch 'check_00_kilnfw_target_build\.ps1$' -and
-        $_.FullName -notmatch 'check_00_saftyfw_target_build\.ps1$'
+        $_.FullName -notmatch 'check_00_saftyfw_target_build\.ps1$' -and
+        $_.FullName -notmatch 'check_00_kilnfw_recovery_target_build\.ps1$'
     }
 }
 
@@ -545,13 +547,22 @@ function Invoke-ChecksParallel {
 # correctly within phase 2 via that same named mutex -- they just queue
 # instead of racing, exactly as build_lock.ps1's own header describes for
 # two concurrent manual runs.
+#
+# check_00_kilnfw_recovery_target_build.ps1 (2026-09-17) joins this same
+# phase for the same reason: it publishes firmware/KilnFW_recovery/build/
+# recovery.bin, and tools/check_recovery_image_size.ps1 (phase 2) only SKIPs
+# on a MISSING recovery.bin, not a stale or in-progress one -- if it ran
+# concurrently with this build it could read a partially-written file or
+# silently fall back to its old "not built yet" SKIP depending on scheduling.
 $buildChecks = $checks | Where-Object {
     $_.FullName -match 'check_00_kilnfw_target_build\.ps1$' -or
-    $_.FullName -match 'check_00_saftyfw_target_build\.ps1$'
+    $_.FullName -match 'check_00_saftyfw_target_build\.ps1$' -or
+    $_.FullName -match 'check_00_kilnfw_recovery_target_build\.ps1$'
 }
 $restChecks = $checks | Where-Object {
     $_.FullName -notmatch 'check_00_kilnfw_target_build\.ps1$' -and
-    $_.FullName -notmatch 'check_00_saftyfw_target_build\.ps1$'
+    $_.FullName -notmatch 'check_00_saftyfw_target_build\.ps1$' -and
+    $_.FullName -notmatch 'check_00_kilnfw_recovery_target_build\.ps1$'
 }
 
 $results = @()
