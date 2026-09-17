@@ -70,12 +70,32 @@ would otherwise ride along or trip the sensitive-dirty guard below; the
 git-provenance record and verification then reflect that worktree, not the
 main tree, and `flash_provenance.json` records which path was used.
 
-`flash_firmware()` writes the **`factory`** partition only — it does not touch
-`otadata`. If an OTA has ever pointed the boot target at `ota_0`/`ota_1`, the
-bootloader keeps booting that image and every later `flash_firmware()` reports
-success while the board keeps running the OLD code (a change you added — a log
-line, say — looks like it "vanished"). Fix: `ota_rollback_esp()` to restore the
-factory boot target.
+`flash_firmware()` (2026-09-17 fix) resolves its write target dynamically
+from `<kiln_fw_root>/partitions.csv` — the partition named `app` (the ota_0
+slot introduced by the single-slot OTA redesign, `docs/OTA_SINGLE_SLOT_PLAN.md`)
+— rather than a hardcoded offset. That hardcoded offset used to point at the
+old table's `factory` partition; after the table redesign it silently
+pointed into the new, much smaller `recovery` partition instead and
+overflowed it by roughly 360 KB into `coredump` (the board kept booting its
+old app image, and post-flash verification correctly failed loud). A hard
+pre-flight size check now also refuses, naming both byte counts, if
+`KilnCtrl.bin` is larger than the target partition.
+
+It still does not touch `otadata`, and this is a known, deliberate gap, not
+a fixed one: on this table, a blank/erased `otadata` makes the bootloader
+boot the factory-subtype partition (`recovery`), not the `app` partition
+just written. Writing a correct `otadata` blob by hand could not be
+verified against real hardware as part of this fix, and a wrong one risks a
+worse, silently-bricked boot than refusing loudly — so `flash_firmware()`'s
+own post-flash verification instead fails loud, naming the running
+partition, if the board isn't found running `app` afterward. Note that
+`ota_rollback_esp()` does **not** fix this scenario: it reverts a board
+that is ALREADY booting one OTA image back to a PREVIOUS one over its own
+HTTP API, and has no path to set an unset/blank `otadata` after a bare JTAG
+flash. A board whose `otadata` already points at `app` (e.g. from a
+previously successful OTA) is unaffected; a from-scratch or never-OTA'd
+board may need `otadata` resolved by hand before a flash from this tool
+will boot.
 
 Resetting both processors close together (a dual reflash) correctly trips
 S6a (mainFault) while the ESP's safety-link handshake is still coming up —

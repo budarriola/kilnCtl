@@ -2,15 +2,17 @@
 """Unit tests for flash_firmware()'s post-flash verification
 (mcp_server_flash.py: _verify_flash_landed() and the verify= wiring).
 
-History: flash_firmware() writes only the ESP32's `factory` partition and
-never touches `otadata`. If an OTA ever pointed the boot target at
-ota_0/ota_1, the bootloader keeps booting that OLD image forever -- every
-later flash_firmware() reports "flashed and verified OK" (OpenOCD's own
-byte-compare during the write) while the board silently keeps running old
-code. This is the recurring "my change vanished" debugging-session drain
-CLAUDE.md documents. _verify_flash_landed() closes that gap by independently
-asking the RUNNING firmware (over HTTP) what partition it's booting and what
-build it reports, and comparing both against what was just flashed.
+History: flash_firmware() resolves its write target dynamically from
+partitions.csv (the `app`/ota_0 slot as of the 2026-09-16 single-slot OTA
+redesign, docs/OTA_SINGLE_SLOT_PLAN.md) and never touches `otadata`. If an
+OTA ever pointed the boot target somewhere else, the bootloader keeps
+booting that OLD image forever -- every later flash_firmware() reports
+"flashed and verified OK" (OpenOCD's own byte-compare during the write)
+while the board silently keeps running old code. This is the recurring "my
+change vanished" debugging-session drain CLAUDE.md documents.
+_verify_flash_landed() closes that gap by independently asking the RUNNING
+firmware (over HTTP) what partition it's booting and what build it reports,
+and comparing both against what was just flashed.
 
 All against MOCKED partition_http_client.get_partitions,
 capability_preflight.get_board_info, and a synthetic on-disk .bin (built the
@@ -63,10 +65,10 @@ class VerifyFlashLandedTest(unittest.TestCase):
         self.bin_path = _write_bin(time_s="20:13:41", date_s="Sep  3 2026")
         self.addCleanup(os.unlink, self.bin_path)
 
-    def test_running_factory_and_matching_build_succeeds_silently(self):
+    def test_running_app_and_matching_build_succeeds_silently(self):
         with unittest.mock.patch.object(
             partition_http_client, "get_partitions",
-            return_value={"running": "factory", "partitions": []},
+            return_value={"running": "app", "partitions": []},
         ), unittest.mock.patch.object(
             capability_preflight, "get_board_info",
             return_value=capability_preflight.BoardInfo(reachable=True, fw_build="Sep  3 2026 20:13:41"),
@@ -76,7 +78,7 @@ class VerifyFlashLandedTest(unittest.TestCase):
 
     def test_running_ota_0_fails_loud_and_names_it(self):
         """The core bug this whole change exists to catch: bootloader still
-        booting a stale OTA slot after a `factory`-only flash."""
+        booting a stale/blank-otadata boot target after an `app`-only flash."""
         with unittest.mock.patch.object(
             partition_http_client, "get_partitions",
             return_value={"running": "ota_0", "partitions": []},
@@ -85,12 +87,18 @@ class VerifyFlashLandedTest(unittest.TestCase):
                 mf._verify_flash_landed("192.168.1.50", self.bin_path)
         msg = str(ctx.exception)
         self.assertIn("ota_0", msg)
+        # ota_rollback_esp() is named, but explicitly as NOT a fix for this
+        # scenario (it reverts an already-booting board over HTTP; it has no
+        # path to set an unset/blank otadata after a bare JTAG flash) -- see
+        # the KNOWN GAP explanation in _verify_flash_landed()'s message.
         self.assertIn("ota_rollback_esp", msg)
+        self.assertIn("does NOT fix this", msg)
+        self.assertIn("KNOWN GAP", msg)
 
     def test_build_timestamp_mismatch_fails_loud_with_both_values(self):
         with unittest.mock.patch.object(
             partition_http_client, "get_partitions",
-            return_value={"running": "factory", "partitions": []},
+            return_value={"running": "app", "partitions": []},
         ), unittest.mock.patch.object(
             capability_preflight, "get_board_info",
             return_value=capability_preflight.BoardInfo(reachable=True, fw_build="Sep  1 2026 08:00:00"),
@@ -116,14 +124,14 @@ class VerifyFlashLandedTest(unittest.TestCase):
     def test_status_unreachable_after_partition_ok_warns_not_raises(self):
         with unittest.mock.patch.object(
             partition_http_client, "get_partitions",
-            return_value={"running": "factory", "partitions": []},
+            return_value={"running": "app", "partitions": []},
         ), unittest.mock.patch.object(
             capability_preflight, "get_board_info",
             return_value=capability_preflight.BoardInfo(reachable=False, error="timed out"),
         ):
             result = mf._verify_flash_landed("192.168.1.50", self.bin_path)
         self.assertIn("WARNING", result)
-        self.assertIn("factory", result)
+        self.assertIn("app", result)
 
     def test_unparseable_bin_warns_does_not_raise(self):
         bad_bin = tempfile.NamedTemporaryFile(suffix=".bin", delete=False)
@@ -189,6 +197,15 @@ class FlashFirmwareVerifyWiringTest(unittest.TestCase):
         self._isfile_patch.start()
         self.addCleanup(self._isfile_patch.stop)
 
+        # These tests never actually create build/KilnCtrl.bin on disk
+        # (_isfile_patch above fakes its presence), so os.path.getsize()
+        # against it would raise FileNotFoundError -- fake a size comfortably
+        # under the real `app` partition's 0x800000 B so the new pre-flight
+        # size check (added alongside the dynamic-offset fix) is a no-op here.
+        self._getsize_patch = unittest.mock.patch.object(mf.os.path, "getsize", return_value=1024)
+        self._getsize_patch.start()
+        self.addCleanup(self._getsize_patch.stop)
+
         # flash_firmware() now probes the board's HTTP address BEFORE
         # flashing (see _preflash_board_address). These tests are about the
         # verify= wiring, not that probe -- and an unpatched probe would try
@@ -253,7 +270,7 @@ class DefaultHostResolutionTest(unittest.TestCase):
 
         def fake_get_partitions(host, timeout=None):
             seen.append(host)
-            return {"running": "factory", "partitions": []}
+            return {"running": "app", "partitions": []}
 
         with unittest.mock.patch.object(
             mcp_server_ota, "_ota_resolve_host", return_value="192.168.1.77"
@@ -303,7 +320,7 @@ class WrongAddressRegressionTest(unittest.TestCase):
             seen.append(host)
             if host != "192.168.1.156":
                 raise partition_http_client.PartitionHttpError("unreachable: timed out")
-            return {"running": "factory", "partitions": []}
+            return {"running": "app", "partitions": []}
 
         with self._patch_resolve("192.168.4.1"), unittest.mock.patch.object(
             partition_http_client, "get_partitions", side_effect=fake_get_partitions
@@ -318,12 +335,12 @@ class WrongAddressRegressionTest(unittest.TestCase):
         self.assertEqual(board_mock.call_args[0][0], "192.168.1.156")
 
     def test_old_build_on_lan_address_fails_loud(self):
-        """(b) Board reachable, running 'factory', but reporting an OLD
+        """(b) Board reachable, running 'app', but reporting an OLD
         build -- the failure the whole feature exists for. Must RAISE and
         name both timestamps."""
         with self._patch_resolve("192.168.4.1"), unittest.mock.patch.object(
             partition_http_client, "get_partitions",
-            return_value={"running": "factory", "partitions": []},
+            return_value={"running": "app", "partitions": []},
         ), unittest.mock.patch.object(
             capability_preflight, "get_board_info",
             return_value=capability_preflight.BoardInfo(reachable=True, fw_build="Aug 12 2026 08:01:02"),
@@ -378,7 +395,7 @@ class WrongAddressRegressionTest(unittest.TestCase):
         def fake_get_partitions(host, timeout=None):
             if host != "192.168.1.156":
                 raise partition_http_client.PartitionHttpError("unreachable: timed out")
-            return {"running": "factory", "partitions": []}
+            return {"running": "app", "partitions": []}
 
         with self._patch_resolve("192.168.1.156"), unittest.mock.patch.object(
             partition_http_client, "get_partitions", side_effect=fake_get_partitions
@@ -577,6 +594,17 @@ class KilnFwRootOverrideTest(unittest.TestCase):
             f.write(b"\x00")
         with open(os.path.join(self.build_dir, "KilnCtrl.bin"), "wb") as f:
             f.write(b"\x00")
+        # _resolve_app_flash_target() reads partitions.csv from the tree
+        # being flashed -- the override tree's own copy, matching the real
+        # single-slot table, not the main tree's.
+        with open(os.path.join(self.override_kiln_fw_root, "partitions.csv"), "w", encoding="utf-8") as f:
+            f.write(
+                "# Name,   Type, SubType, Offset,  Size\n"
+                "otadata,  data, ota,     0x200000, 0x2000,\n"
+                "app,      app,  ota_0,   0x210000, 0x800000,\n"
+                "recovery, app,  factory, 0xA10000, 0x1E0000,\n"
+                "coredump, data, coredump,0xBF0000, 0x100000,\n"
+            )
         self.addCleanup(shutil.rmtree, self.tmp_root, ignore_errors=True)
 
         self._openocd_patch = unittest.mock.patch.object(mf, "_find_openocd_exe", return_value="fake-openocd.exe")
@@ -661,6 +689,29 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         self.assertIsNotNone(prov)
         self.assertEqual(prov["kiln_fw_root_override"], self.override_kiln_fw_root)
         self.assertEqual(prov["outcome"], mf.flash_provenance.OUTCOME_FLASHED_OK)
+
+    def test_write_offset_comes_from_partitions_csv_not_hardcoded(self):
+        """THE Defect 1 regression: the TCL program_esp offset for
+        KilnCtrl.bin must be the `app` partition's offset as resolved from
+        THIS tree's own partitions.csv (0x210000 in the fixture above), not
+        any hardcoded constant. Sabotaging the resolution (see the negative
+        test in the report) turns this red."""
+        mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
+        tcl = self.run_mock.call_args.args[2]
+        self.assertIn("build/KilnCtrl.bin 0x210000 verify", tcl)
+
+    def test_oversized_binary_is_refused_before_openocd(self):
+        """THE new hard pre-flight size check: a KilnCtrl.bin larger than
+        the target partition (0x800000 B per the fixture partitions.csv)
+        must be refused, naming both sizes, before OpenOCD is ever touched."""
+        oversized = 0x800000 + 1
+        with open(os.path.join(self.build_dir, "KilnCtrl.bin"), "wb") as f:
+            f.truncate(oversized)
+        result = mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
+        self.assertTrue(result.startswith("error:"))
+        self.assertIn(str(oversized), result)
+        self.assertIn(str(0x800000), result)
+        self.run_mock.assert_not_called()
 
     def test_no_override_omits_it_from_provenance_json(self):
         # Default path (no override) must still write None -- proves the
