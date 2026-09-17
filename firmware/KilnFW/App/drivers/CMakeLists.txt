@@ -103,7 +103,8 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
         "http/safety_config_page.html"
         "http/zones_page.html"
         "http/setup_wizard_page.html"
-        "http/commissioning_shared.js")
+        "http/commissioning_shared.js"
+        "http/login_page.html")
     set(KILNCTL_GZIP_ASSET_FILES "")
     foreach(asset ${KILNCTL_GZIP_ASSETS})
         get_filename_component(kilnctl_gz_basename "${asset}" NAME)
@@ -322,6 +323,19 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "http/security_http_core.c"
                        "http/security_backend_web_auth.c"
                        "http/security_backend_placeholder.c"
+                       # WEB_AUTH_PLAN.md section 6 -- the browser-side login:
+                       # GET /login and POST /api/auth/login. web_auth_login.c
+                       # is the pure role-selection logic (also linked into
+                       # the host test build, App/test/build_host_tests.ps1);
+                       # web_auth_login_http.c is the ESP-only glue that
+                       # calls it, mints/hashes the session token via
+                       # http_session_iface.h's exposed helpers against the
+                       # SAME table http_auth_session_resolve() reads, and
+                       # owns its own separate ota_auth_lockout_state_t
+                       # instance (section 7: no lockout is shared across
+                       # authentication surfaces).
+                       "net/web_auth_login.c"
+                       "http/web_auth_login_http.c"
                        "net/ota_pico_relay.c"
                        "net/wifi_prov.c"
                        # wifi_prov.c split 2026-09-04 (ROADMAP.md M15 A3,

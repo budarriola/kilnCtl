@@ -58,6 +58,13 @@ static void sha256(const uint8_t *msg, size_t msg_len, uint8_t out[32]) {
     }
 }
 
+// Exposed wrapper over the same sha256() above -- see http_session_iface.h's
+// declaration comment: section 6's login handler must hash the token it
+// mints with this SAME function, not a second independent implementation.
+void http_session_hash_token(const char *token, size_t token_len, uint8_t out[32]) {
+    sha256((const uint8_t *)token, token_len, out);
+}
+
 // timeout_s: web_auth_policy_t.web_timeout_s is -1 for "never" (item 8);
 // web_auth_session.h's WEB_AUTH_TIMEOUT_NEVER_S is 0u for the same concept
 // -- two different sentinel encodings for one idea, mapped explicitly here

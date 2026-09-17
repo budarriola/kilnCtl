@@ -44,20 +44,63 @@ typedef struct {
 static kiln_http_route_ctx_t s_routes[KILN_HTTP_MAX_ROUTES];
 static size_t s_route_count = 0;
 
+// Finds the named cookie's value inside a raw "Cookie:" header value (e.g.
+// "a=1; kiln_sid=abcdef; b=2") and copies it, NUL-terminated, into `out`.
+// Returns true and leaves a non-empty `out` only on a genuine match --
+// `out[0]='\0'`/false otherwise (missing header, name not present, or a
+// value that would not fit `out_len`). A raw header carrying more than one
+// cookie (a real browser sends all cookies for the path in one header,
+// separated by "; ") must not be hashed whole -- see resolve_role_for_request()
+// below and WEB_AUTH_PLAN.md section 2b's 2026-09-17 review note.
+static bool extract_named_cookie(const char *raw, const char *name, char *out, size_t out_len) {
+    out[0] = '\0';
+    if (!raw || !name || out_len == 0) {
+        return false;
+    }
+    size_t name_len = strlen(name);
+    const char *p = raw;
+    while (*p != '\0') {
+        while (*p == ' ' || *p == '\t') {
+            p++;
+        }
+        if (strncmp(p, name, name_len) == 0 && p[name_len] == '=') {
+            const char *val = p + name_len + 1;
+            const char *end = strchr(val, ';');
+            size_t val_len = end ? (size_t)(end - val) : strlen(val);
+            if (val_len == 0 || val_len >= out_len) {
+                return false;
+            }
+            memcpy(out, val, val_len);
+            out[val_len] = '\0';
+            return true;
+        }
+        const char *sep = strchr(p, ';');
+        if (!sep) {
+            break;
+        }
+        p = sep + 1;
+    }
+    return false;
+}
+
 // Extracts a session token for http_auth_session_resolve() from the
-// request's Cookie header. Deliberately passes the raw header value through
-// unparsed -- section 4 (in flight when this was written) owns the actual
-// cookie name/format; this pre-handler does not know or need to know it, it
-// only needs to hand the resolver *something* to look up. A missing or
-// oversized header both resolve to an empty token, which
+// request's Cookie header, parsing out only the named session cookie
+// (HTTP_SESSION_COOKIE_NAME, http_session_iface.h) rather than hashing the
+// whole raw header. A browser's Cookie header can legally carry more than
+// one cookie for a path in any order ("a=1; kiln_sid=X; b=2") -- hashing the
+// header verbatim would make the resolved session depend on which OTHER
+// cookies happen to be present, which is inert only until something other
+// than this login route ever sets a second cookie on the same path
+// (WEB_AUTH_PLAN.md section 2b review, 2026-09-17). A missing header, a
+// missing name, or an oversized value all resolve to an empty token, which
 // http_auth_session_resolve()'s contract already requires mapping to
-// HTTP_AUTH_ROLE_NONE -- so a header this function can't safely copy fails
+// HTTP_AUTH_ROLE_NONE -- so a header this function can't safely parse fails
 // closed, it does not get silently truncated and possibly still matched.
 //
-// Buffer sizes here are the whole of this function's stack budget: 128 + 46
-// bytes, both fixed, well under the 256-byte-local ceiling this plan (and
-// CLAUDE.md's httpd-stack history) sets for anything running on the shared
-// 8 KB httpd task stack.
+// Buffer sizes here are the whole of this function's stack budget: 128 + 128
+// + 46 bytes, all fixed, well under the 256-byte-local ceiling this plan
+// (and CLAUDE.md's httpd-stack history) sets for anything running on the
+// shared 8 KB httpd task stack.
 static void resolve_role_for_request(httpd_req_t *req, http_auth_role_t *out_role) {
     char cookie[128];
     cookie[0] = '\0';
@@ -68,10 +111,13 @@ static void resolve_role_for_request(httpd_req_t *req, http_auth_role_t *out_rol
         }
     }
 
+    char token[128];
+    bool have_token = extract_named_cookie(cookie, HTTP_SESSION_COOKIE_NAME, token, sizeof(token));
+
     char ip[46];
     ota_http_get_client_ip(req, ip, sizeof(ip));
 
-    *out_role = http_auth_session_resolve(cookie[0] != '\0' ? cookie : NULL, ip);
+    *out_role = http_auth_session_resolve(have_token ? token : NULL, ip);
 }
 
 // Fix for the OPEN-tier build-identity leak on GET /api/ota/esp/status
