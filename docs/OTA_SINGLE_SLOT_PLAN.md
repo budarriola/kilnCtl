@@ -1,0 +1,161 @@
+# Single application slot plus a recovery image
+
+> **Status:** plan · **Opened:** 2026-09-16. Nothing here is implemented. No board was flashed, the partition table was not modified, and no `.kicad_*` file was touched.
+
+## 0. The tradeoff, stated first — it is the design intent
+
+Today a failed OTA falls back to a second *full* application image that can complete a firing. After this change it falls back to an image that can do exactly one thing: receive a new application image and write it. The kiln will not run until someone pushes a good image.
+
+That is the wanted behaviour, not a cost being accepted. A recovery image that cannot fire is small, has almost no surface on which to fail, and "the kiln will not run until you fix the firmware" is the correct outcome after a bad update. Nothing below adds complexity to preserve firing capability in recovery, and no second full application image is kept anywhere.
+
+Consequence recorded once, so it is not re-litigated per section: in section 5's matrix, "board is in recovery, non-functional until reflashed, reachable over Wi-Fi, no physical access needed" is a **pass**.
+
+## 1. Partition layout
+
+Current app region, from `firmware/KilnFW/partitions.csv`: `otadata` 0x200000/0x2000, `ota_0` 0x210000/0x300000, `ota_1` 0x510000/0x300000, `factory` 0x810000/0x300000, then a free gap 0xB10000..0xBF0000 (917,504 B, `pico_img`'s old slot), then `coredump` at 0xBF0000.
+
+Everything from `coredump` down is off limits: `coredump` holds a live 748,032-byte dump, `logs` self-reformats on a size change, `cfg` is LittleFS mounted `format_if_mount_failed=false`, and `nvs`/`wifi_nvs`/`kiln_nvs`/`profiles_nvs` hold live zone config, rules, profiles and Wi-Fi credentials. `pico_img` at 0x10000 and the first three stock entries do not move either.
+
+That leaves one contiguous app region, 0x210000..0xBF0000 = 0x9E0000 (10,354,688 B), bounded below by `otadata` and above by `coredump`. Proposed:
+
+```
+otadata,      data, ota,       0x200000, 0x2000,
+app,          app,  ota_0,     0x210000, 0x800000,
+recovery,     app,  factory,   0xA10000, 0x1E0000,
+```
+
+`ota_1` is deleted. `app` is 8 MiB; `recovery` is 1,966,080 B and ends exactly at 0xBF0000, so the 917,504-byte gap is consumed rather than left stranded. Both offsets are 64 KiB-aligned as `gen_esp32part.py` requires. **No data partition moves or changes size**, so the coredump, the config, the profiles and the Wi-Fi credentials all survive by construction — which is what makes the migration in section 2 tractable.
+
+`otadata` must still be erased and rewritten from `ota_data_initial.bin`, because app partition offsets and sizes changed; that is 8 KiB of boot-target state and nothing else.
+
+**What the freed slot buys.** The current application image is 2,291,040 bytes (`firmware/KilnFW/build/KilnCtrl.bin`, today) against a 3,145,728-byte slot — 27% headroom, and the image has grown from ~1.2 MB in August. An 8 MiB slot removes image size as a design constraint for the foreseeable life of the project. That is the return on giving up A/B.
+
+**How big recovery needs to be.** Bounded from contents (section 3), not guessed: second-stage bootloader-class startup, Wi-Fi station plus SoftAP, `esp_wifi` and lwIP, `esp_http_server` with six routes, `esp_ota_ops`, PSA HMAC-SHA256, NVS, and — per the owner's decision in section 9.2, against this plan's own recommendation — one line of text on the LCD, whose display-stack footprint (minimal draw path versus full LVGL) is not yet known. No touch driver, no MAX31856, no control loop, no profile executor, no safety link. The application image carries all of the excluded subsystems and is 2.29 MB; the included set apart from the display line is essentially the IDF `advanced_https_ota` surface plus SoftAP, which lands in the 0.9–1.2 MB range — **that range assumes no display stack at all, and is stated here as the pre-display-decision baseline; step 1 of section 8 must re-measure it with whatever the one-line path actually costs.** 1,966,080 B leaves at least 40% margin against the baseline; whether it still holds once the display line is included is exactly what step 1 answers. **This is a bound, not a measurement** — step 1 of section 8 measures it before the table is ever written, and an image over 1.5 MB means either the inclusion list in section 3 is wrong or the display path chosen for the one line is too heavy, not that the partition is too small by itself.
+
+**The 1.81 MiB above `cfg`** (0xE30000..0x1000000) and the 618,496-byte gap at 0xF0000 stay unmapped. Claiming them now would mean touching the table again later for a use that does not exist yet, and every table write costs a bench visit — a coordinator decision (section 9.3), open to reversal, since the owner was not asked.
+
+**One unverified mechanism, must be measured before the table lands.** ESP-IDF's `check_sizes.py` has historically taken `min()` over all `app` partitions to derive the build's size limit — that is the documented reason all three current slots are 3072K. With a 1,920K `recovery` and an 8,192K `app` in one table, that rule would cap the application build at 1,920K and fail it. Step 2 of section 8 establishes what this IDF version actually does. If the `min()` behaviour holds, the fallback is to build the recovery image from its own project with its own `partitions.csv` describing only its own slot, while the flashed table remains the one above — the on-flash table and a build-time size check are independent artifacts. Do not assume either way.
+
+## 2. Migration of the board in hand
+
+Because no data partition moves, the migration is: write bootloader, partition table, fresh `otadata`, recovery image and application image over JTAG in one `flash_firmware()`-class operation. Everything in NVS, `cfg`, `logs`, `coredump` and `pico_img` is untouched by address.
+
+**Untouched by address is not untouched by risk.** A partition table write is the one operation that can make every other partition unreachable, and the backup situation is worse than it looks:
+
+- `GET /api/backup/export` covers 47 of 65 per-zone fields. The plant model and coupling matrix — the expensive data — are in it. **Missing:** `normal_current_a` and `normal_current_measured` (CT calibration), the entire `tuning_*` provenance family, `coil_power_w`, `relay_type`, `timing_profile`, `hyst_c`, `min_on_s`, `min_off_s`. This is a pre-existing defect in the backup feature, unrelated to this work; it is recorded here because it means **the backup feature alone does not make this migration safe today**. It is not fixed by this plan — a separate pass is already underway against `backup_export.c`/`backup_import.c` toward a complete export/restore round trip, so this gap is not treated here as permanent, only as not yet closed. This plan's migration relies on the raw dumps below rather than on that export being complete.
+- **Wi-Fi credentials are unexportable by design.** No backup carries them. This layout does not touch `wifi_nvs`, and it must stay that way — `wifi_nvs` is a separate partition precisely because NVS corruption recovery is partition-wide. A board that comes up without Wi-Fi is unreachable by every tool we have. **The home Wi-Fi password is the one item on this list with no software answer at all.** `wifi_get_networks()` has no password field by design, and the only password reachable over the API is the board's own AP-mode provisioning password — not the joined network's station credential. Reading the station credential back would require an SWD touch on the ESP32-S3 plus raw ESP-IDF NVS binary parsing; that was considered and rejected as disproportionate to a value the owner already has. **Standing owner action, not a tooling gap:** record the home Wi-Fi password from the owner's own source before the partition table is written. (Not recorded in this document — it belongs with the owner, not in the repo.)
+- **The Pico's CT normals (`i_normal_a`) are not a blocker.** They live in the Pico's own config store as params `0x031A`-`0x031C` (decimal 794-796, `firmware/SaftyFW/src/config_params.c`) — they were never missing, only absent from `GET /api/safety/commissioning`'s reporting. On this bench board they are **unset**: `ct_cal` reports `has_value:false` on all three channels, and S14/S15 render as `DORMANT (i_normal_a not measured)`, confirmed twice today at the same config CRC. There is no calibration value on this board for the migration to lose, so this item does not block it. **On a board where these values have actually been measured and set, they must be captured (read via the Pico link and recorded outside the repo, the same way the other raw dumps below are) before that board's migration** — the risk is real there, just not here.
+
+The pre-migration capture already exists outside the repo at `C:\Users\budar\OneDrive\Desktop\kiln_backups\`, timestamped `20260916_1803`: full backup export plus raw `zones`, `zones_diag`, `safety_commissioning`, `cfgfs`, `partitions` and `status` dumps. The raw dumps cover the 18 fields the export misses. Nothing about that capture belongs in the repo.
+
+**Can the board get there without physical access? No.** A partition table can only be written over a cable — that is the same constraint `UPDATE_PROTOCOL.md` §3 records as "you cannot OTA your way into being OTA-capable". Stated plainly so it is not discovered at the bench: this migration is a one-time, per-board, cable-attached operation. On the bench the cable is already attached and `flash_firmware()` is the path. For any board in the field, it means opening the enclosure.
+
+## 3. What the recovery image contains, and deliberately does not
+
+The bar: **anything beyond receive-an-image-and-write-it must justify itself against being one more thing that can fail in the one image that must never fail.** Three things clear it.
+
+**In:**
+
+1. **Wi-Fi station plus SoftAP fallback.** The only channel to the board that does not require a cable. Without it the recovery image is indistinguishable from a brick. It reads credentials from `wifi_nvs` and writes nothing there.
+2. **An HTTP server with six routes:** `GET /api/ota/challenge`, `POST /api/ota/esp`, `GET /api/partitions`, `GET /api/boot_guard`, `POST /api/ota/esp/boot_guard_reset`, `POST /api/sw_reset`. `/api/partitions` is in because `flash_firmware()`'s verification polls it (section 7) and a recovery image that cannot be verified is a recovery image nobody trusts.
+3. **Authentication of the flash, on the AP-password challenge, unchanged from today's mechanism — owner-decided, section 9.1.** The `GET /api/ota/challenge` nonce and the `X-Ota-Mac` derived-key HMAC over the AP password, with the existing per-context lockout. `docs/WEB_AUTH_PLAN.md` item 2b/13.3 (settled 2026-09-16, after this section's first draft) actually retires that credential in favor of the single administrator credential **once web auth is enabled** — but item 12b keeps exactly this AP-password fallback for the same nine OTA-family routes whenever no usable credential record is available (auth disabled, which ships as the default, or the credential record itself is unreadable), specifically so OTA remains the repair path when the newer, richer credential state is the thing in question. The recovery image is the same kind of case in a stronger form: it must work with no session layer, no PBKDF2, and no `web_auth` NVS blob at all, so it belongs on that same fallback path unconditionally rather than depending on `web_auth` state it cannot evaluate on its own. The AP password lives in `wifi_nvs`, which recovery already reads.
+4. **One static line of text on the LCD, saying the board is in recovery and needs firmware pushed — owner-decided, section 9.2, against this plan's own recommendation of a dark panel.** Exact wording is left to implementation. This is not free: it pulls the ILI9488 driver and a text-rendering path into the one image whose entire value proposition is having almost nothing that can fail, and the display stack is the same area behind all three historical in-app-recovery-mode brickings (section 4). **Open design question this creates, to be settled by measurement, not assumption:** whether one line can be put on the panel through a minimal draw path with no LVGL, or whether LVGL has to come along for it — the two have very different footprints, and step 1 of section 8 must measure whichever path is chosen, because it moves the recovery-image size bound in section 1 (currently 0.9-1.2 MB, sized against a no-display image).
+
+**Out:**
+
+- **Touch, and the rest of the display stack beyond the one line above.** No touch driver, no UI pages, no LVGL widget tree beyond whatever the minimal text path in "In" item 4 needs. The panel otherwise would hold whatever the dying application last drew; the one line replaces that with an explicit message instead.
+- **Reading or repairing config.** Recovery does not mount `cfg` — which is already how recovery behaves today per `docs/CONFIG_FILESYSTEM.md` — does not read zones, profiles or rules, and never repairs anything. It reads NVS for exactly two things: Wi-Fi credentials, and the boot-guard record. It writes exactly two things: `otadata`, and the boot-guard record. A recovery image that edits config is a recovery image that can corrupt the thing the operator is trying to preserve.
+- **The safety link and the Pico image.** No `safety_link`, no `pico_img` staging, no relay protocol. See section 6 and section 9.4 (owner-decided: no).
+- **The control loop, profile executor, autotune, thermocouples, relays.** Not needed to write a flash partition.
+
+## 4. How the bootloader chooses
+
+**Stock `otadata`, no new state.** The second-stage bootloader picks the app from `otadata`, two sectors each with its own sequence number and CRC. A power cut mid-write to one sector leaves that sector's CRC invalid and the other sector wins — power-cut safety here is a property of the format, not something this plan adds.
+
+With one OTA slot and `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, the fallback path is also stock: a freshly written image boots `PENDING_VERIFY`, and if it reboots without calling `esp_ota_mark_app_valid_cancel_rollback()` the bootloader marks it `ABORTED`. With no other valid OTA slot, the next boot falls to `factory` — the recovery image. That is precisely the desired behaviour and it requires no new mechanism.
+
+**What stock does not cover** is an image that confirmed itself days ago and only later starts panic-looping. That is what `boot_guard`'s counter buys, and it is why the counter stays. Its **action changes**: today crossing `RECOVERY_MODE_BOOT_THRESHOLD` (3, `firmware/KilnFW/App/drivers/persist/boot_guard.h:68`) brings the *same* image up degraded. From here, crossing it sets the boot partition to `recovery` and reboots.
+
+**The in-app RECOVERY MODE is deleted.** Not kept, not left dormant. Recommendation, with the reasoning, because this is the most dangerous area in the design — the board has been bricked into a permanent recovery loop three times from it:
+
+- Its purpose was "a degraded application that can still take an OTA". A separate recovery image does that job properly, in a binary that has no LVGL home screen and no `safety_poll_task` to assert on an unstarted module's mutex — the two mechanisms behind the historical panic loops.
+- Keeping both means two different meanings of "recovery" — a mode and an image — differing in what they can do, which is actively confusing at exactly the moment nobody has the patience for it.
+- Deleting it removes `RECOVERY_MODE_ENABLED` (`boot_guard.h:113`), the `is_factory_partition` arm of `boot_confirm_decide()` (`boot_guard.h:314`), the recovery gating in `main_boot_early.c:415`, and the recovery skip inside `cfg_fs_mount_device()`. Every one of those is a conditional that has to be correct in the degraded path and never gets exercised. Owner-decided, section 9.4: delete it outright.
+
+**What is kept, and why:**
+
+- `boot_guard_reset_counter()` (`boot_guard.h:212`) and `POST /api/ota/esp/boot_guard_reset` — the deliberate tool-declared clear that stops ordinary bench flashes from walking a healthy board toward recovery. Served by **both** images.
+- The RTC stuck-counter escape, `boot_guard_counter_is_stuck()` (`firmware/KilnFW/App/drivers/persist/boot_guard.c:146`). The 2026-09-08 loop happened because `boot_guard_mark_healthy()`'s NVS write reported success while the count never reached zero; that hazard is not removed by having a recovery image, so neither is the escape. The rule from that audit still governs anything written here: an in-boot read-back of an NVS write proves nothing about flash.
+- `boot_button_start()` in every boot path (`main_boot_early.c:505`) — the lost-AP-password long-press hatch, which is the only credential escape the recovery image has.
+- `POST /api/ota/esp/recovery_exit` is kept but narrows to one meaning: clear the counter so the next boot takes the application slot. Its current recovery-mode gate at `firmware/KilnFW/App/drivers/http/ota_http_recovery.c:150` goes away with in-app recovery mode.
+
+**Deliberate entry into recovery** needs a route, since `ota_rollback_esp()`'s "boot the other app" no longer exists: an authenticated `POST /api/ota/esp/recovery_boot` that sets the boot partition to `factory` and reboots, keeping the distinct `esp-rollback` HMAC context so a captured MAC cannot be replayed against a plain OTA.
+
+## 5. Failure matrix
+
+| Failure | What happens | Recoverable without physical access |
+|---|---|---|
+| Power cut mid-OTA | Partial write in `app`; `otadata` still points at the old confirmed image, or at recovery if the old image was already replaced. Bootloader validates the image checksum and refuses a truncated one, falling to recovery. | **Pass.** Reachable, reflash over Wi-Fi. |
+| Corrupt image that passes CRC | Boots, fails to confirm, `ABORTED`, next boot is recovery. | **Pass.** |
+| Boots but panics immediately | Same: never reaches `esp_ota_mark_app_valid_cancel_rollback()`, `ABORTED`, recovery. If it panics after having confirmed, the `boot_guard` counter reaches 3 and sets the boot target to recovery. | **Pass.** |
+| Boots, runs, breaks the network | Not caught by rollback (the image confirms itself) and not caught by the counter (it does not reboot). The board is up, the kiln is inoperable from the web, and it is unreachable. **This is the one row the architecture does not improve** — it is equally true today. Mitigation is that the boot-confirm criteria already include the web server being up; strengthening them further is out of scope here. | **No.** Physical: the boot-button long-press hatch brings up SoftAP, then reflash over Wi-Fi — an enclosure visit but not a cable. |
+| **Recovery image itself fails to boot** | Nothing in software runs. No route, no counter, no `otadata` state helps: the fallback has no fallback. | **No, and there is no software answer.** Physical escape: ESP32-S3 USB serial download mode — GPIO0 held low across reset — and `esptool` writing bootloader, table and both images. Note two things about that path on this board: OpenOCD cannot read this board's flash (2026-09-08 audit), and **`esptool` has never been used on this board at all** — the sanctioned path is `flash_firmware()` over JTAG. A last-resort path that has never been exercised is a hope, not a plan. Section 8 step 6 exercises it once at the bench. |
+
+The mitigation for the last row is not a mechanism, it is discipline: the recovery image changes rarely, and every change to it is flashed and booted at the bench before it is shipped in any release.
+
+## 6. The Pico and the safety link
+
+`pico_img` at 0x10000 does not move, so the Pico's staged image is unaffected by the layout.
+
+**The recovery image carries no Pico firmware and no safety link.** While the ESP runs recovery, no Pico update is possible. That is correct: an operator whose ESP is in recovery has one job, which is to push a good ESP image.
+
+**The Pico stays armed, and this is a property of the hardware split, not of anything in this plan.** The Pico's guards, its K4 drive and its trip logic run on the RP2040 independent of the ESP. With the ESP in recovery there is no safety-link traffic, so the Pico sees the link dead, S6b trips, and K4 is de-energized. The kiln cannot heat. There is no path in the recovery image that can grant heat, because the recovery image contains no code that can talk to the Pico at all — the invariant is enforced by absence.
+
+**`abs_max_temp_c` equality is preserved by not touching it.** The Pico's ceiling lives in its own `config_store`; the ESP's lives in `kiln_nvs`. The recovery image reads neither and writes neither, and the migration does not move either partition. Both values are exactly what they were before. The standing ordering rule — raise the Pico first, then the ESP, and the Pico's ceiling is never tighter than the ESP's — is unaffected and unchanged by any of this.
+
+One expected artifact to record so it is not mistaken for a defect: the migration resets both processors close together, which trips S6a `mainFault` (`trip_mask` 0x0020) during the safety-link handshake window. Confirm link-up and that only `SAFETY_TRIP_MAIN_FAULT` is set, then clear.
+
+## 7. Tooling
+
+"Flash the factory slot" currently means "install the application". It now means "install the recovery image". Every tool that encodes the old meaning:
+
+| Tool | What it does today | What it must become |
+|---|---|---|
+| `flash_firmware()` (`mcp_server_flash.py`) | Writes bootloader@0x0, table@0x8000, app@0x810000. Never touches `otadata`. | Writes bootloader, table, recovery@0xA10000, app@0x210000, **and `ota_data_initial.bin`@0x200000** — the last is newly mandatory, because a stale `otadata` after a table change points at an offset that no longer means what it did. Needs a mode for app-only reflash (the common case) versus full. |
+| `_verify_flash_landed()` | Requires `GET /api/partitions` RUNNING == `"factory"`; on mismatch advises `ota_rollback_esp()` "to restore the factory boot target". | Must require RUNNING == the application slot. The advice inverts completely: RUNNING == recovery now means the board fell back, and the instruction is "push an application image", never "roll back". |
+| `ota_rollback_esp()` | Rolls to the other app slot after `esp_ota_check_rollback_is_possible()`. | Becomes `ota_recovery_boot_esp()` — deliberate boot into recovery. Keep the `esp-rollback` HMAC context and the §1 interlocks. The `esp_ota_check_rollback_is_possible()` precondition no longer applies; the check becomes "is the recovery partition valid". |
+| `ota_recovery_exit_esp()` | Clears the counter, reboots out of in-app recovery mode. | Same call, narrowed meaning: clear the counter so the next boot takes the application slot. |
+| `debug_program(peer="esp")` | Refuses. | Still refuses, unchanged. |
+| `debug_check_partition_table()` | Compares against the expected three-app-slot table. | Expected table constant updated; this is the cheapest independent verification that step 4 landed. |
+| `elf_archive.py` / `find_crash_elf()` | One ELF per flash, keyed on the `esp_app_desc` build timestamp; archive retention is provenance-based on "was actually flashed". | **Two images ship per release.** The recovery image has its own `esp_app_desc` and can itself panic, so a crash must be symbolizable against whichever image produced it. Archive both, keyed independently, and teach the lookup to search both. |
+| `flash_provenance.json` / `stale_check.py` | Records one build's git state and hash. | Records both images. |
+
+Doc updates that are part of the work, not follow-ups: `firmware/KilnFW/partitions.csv`'s header block (it is the governing authority and states the current constraints explicitly), `UPDATE_PROTOCOL.md` §3 and §5, `CLAUDE.md`'s `flash_firmware()`/`ota_rollback_esp()` paragraphs.
+
+## 8. Order of work
+
+Each step is independently verifiable, and the board is bootable at every boundary. Only steps 0, 4, 5 and 6 need a human at the bench.
+
+0. **(bench, human) Close the migration blockers.** The capture at `kiln_backups\20260916_1803` exists. The Pico's `i_normal_a` location is established (`firmware/SaftyFW/src/config_params.c`, params 794-796) and is unset on this board, so it is not a blocker here. Remaining: the home Wi-Fi password has no software recovery path and must be recorded by the owner from their own source before step 4. *Nothing proceeds to step 4 until that password is in hand.* Verify: the password is recorded outside the repo.
+1. **Build the recovery image as a second IDF project. Measure it, including the display path for the owner-decided one-line message (section 9.2).** No board touched. This step must settle the open display-stack question from section 3 item 4/section 1 (minimal draw path versus full LVGL) as part of producing the number, not after. Verify: image under 1.5 MB with the section 3 inclusion list including the display line, and it links.
+2. **Establish `check_sizes.py`'s behaviour with unequal app partitions.** Measured against this IDF version, not assumed. Verify: an 8,192K app builds against a table containing a 1,920K app partition, or the separate-project fallback is adopted.
+3. **Land the new `partitions.csv` and the tooling changes, flash nothing.** Update `debug_check_partition_table()`'s expected table, `flash_firmware()`'s image list, the verification's expected RUNNING partition, and the ELF archive's two-image support. Verify: host tests and checkers pass; the board is still running the old table and old image, untouched.
+4. **(bench, human) The migration flash.** Bootloader, table, `otadata`, recovery, app, in one operation. This is the only window in which the board is not bootable. Verify, in order: `GET /api/partitions` shows the new table; RUNNING is the application slot; the 748,032-byte coredump is still readable; `GET /api/zones/config` is byte-identical to the capture; Wi-Fi reassociates without re-provisioning; the Pico link comes up and `abs_max_temp_c` on both sides matches the capture.
+5. **(bench, human) Exercise recovery deliberately.** `ota_recovery_boot_esp()`, then confirm the recovery image serves a challenge, accepts an authenticated OTA of the application image, and that throughout it the Pico has tripped link-dead with K4 open. Verify: the board returns to the application slot by OTA alone, no cable.
+6. **(bench, human) Exercise the last-resort path once.** USB serial download mode plus `esptool`, writing all five artifacts. This is the only escape from a bad recovery image and it has never been run on this board. Verify: the board boots from a state where `otadata` and both app partitions were erased first.
+7. **Delete in-app RECOVERY MODE** and retarget the `boot_guard` counter's action to "boot recovery". Verify: three unconfirmed boots land in the recovery image, and `boot_guard_reset_counter()` from either image clears it.
+8. **Documentation cutover** — `partitions.csv` header, `UPDATE_PROTOCOL.md`, `CLAUDE.md`.
+
+## 9. Decisions
+
+Items 1, 2, 4 and 6 were put to the owner and are settled as of 2026-09-16.
+Items 3 and 5 were not put to the owner; they stand as this plan's own
+recommendation, held by the coordinator, and remain open to reversal if the
+owner weighs in on them later.
+
+1. **Recovery image authentication: AP-password HMAC, unchanged mechanism — owner-decided.** As this plan recommended. `WEB_AUTH_PLAN.md` item 2b/13.3 (settled 2026-09-16) moves the *other* eight OTA-family routes onto the administrator credential once web auth is enabled, but item 12b keeps this exact AP-password challenge as their fallback whenever no credential record is usable — recovery is that case unconditionally, since it carries no `web_auth`/PBKDF2/session state to evaluate in the first place. The administrator credential was rejected for recovery specifically because it would pull PSA PBKDF2 and the `kiln_cfg` credential records into the one image that must never fail, and a forgotten administrator password would lock the operator out of recovery — where the AP password is recoverable via the boot-button hatch.
+2. **Recovery image LCD: one static line of text saying the board is in recovery and needs firmware pushed — owner-decided, against this plan's recommendation of a dark panel.** Exact wording is left to implementation. Cost, stated plainly rather than softened: this pulls the ILI9488 driver and a text-rendering path into the image whose entire value proposition is having almost nothing that can fail, and the display stack is the same area behind all three historical in-app-recovery-mode brickings (section 4). It is accepted as a tradeoff, not re-argued here. **Open design question this creates:** whether the one line can go up through a minimal draw path with no LVGL, or whether LVGL comes along for it — the two footprints differ substantially, and section 8 step 1 must measure whichever is chosen, since it moves the recovery-image size bound in section 1.
+3. **The 1.81 MiB above `cfg` and the 618 KiB gap at 0xF0000 stay unmapped — coordinator decision, open to reversal.** Not put to the owner. This plan's own recommendation: leave them. Claiming space for a use that does not exist means another table write, and every table write is a bench visit.
+4. **In-app RECOVERY MODE is deleted outright — owner-decided.** As this plan recommended. It is the source of three brickings, its job is now done properly by a separate image, and keeping both leaves two things called "recovery" that differ in capability.
+5. **Migration is accepted as cable-attached, one-time, per board — coordinator decision, open to reversal.** Not put to the owner. This plan's own recommendation: accept it. A partition table cannot be written any other way; the alternative is not shipping the change.
+6. **The recovery image does not carry the Pico firmware — owner-decided.** As this plan recommended. It is roughly 95 KB plus the whole relay protocol and the safety link, to serve a case — needing a Pico update while the ESP is in recovery — that should be handled by fixing the ESP first.
