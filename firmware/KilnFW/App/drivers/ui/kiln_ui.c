@@ -28,6 +28,8 @@
 #include "ui_page_touch_test.h"
 #include "touch_cal_store.h"
 #include "lvgl_port.h"
+#include "ui_lcd_lock.h"
+#include "lcd_credential_bridge.h"
 
 /* lv_buttonmatrix_t's real fields (button_areas, btn_cnt) are declared in
  * this private header, not lv_buttonmatrix.h -- the public header only
@@ -286,6 +288,15 @@ esp_err_t kiln_ui_init(void)
         ESP_LOGI(TAG, "no touch calibration on file -- starting calibration instead of home");
         return kiln_ui_show("touch_cal");
     }
+
+    /* docs/WEB_AUTH_PLAN.md section 7/8 (LCD half): one-time setup for the
+     * PIN keypad's inactivity lock (tick timer, touch-activity hook), then
+     * wire both its seams to the real credential store (persist/
+     * web_auth_store.h). Must run after lvgl_port's indev is up (used by
+     * ui_lcd_lock_init()) and before any page can be shown, so a gated
+     * Start button never fires before the lock exists. */
+    ui_lcd_lock_init();
+    lcd_credential_bridge_init();
 
     return kiln_ui_show("home");
 }
