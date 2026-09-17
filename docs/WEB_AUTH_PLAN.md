@@ -699,11 +699,9 @@ Start/Stop widget, and that widget reads "Stop" **only while a firing is
 RUNNING or PAUSED** — the exact condition under which the gesture must be
 impossible.
 
-> **Assumption needing confirmation:** "tap 1 corners" is read here as **tap
-> each of the four corners once, in order (top-left, top-right, bottom-right,
-> bottom-left)**. If the owner meant one specific corner, or any corner once,
-> only step 3 changes — the preconditions, the confirm dialog and the outcome
-> below all stand either way.
+**Owner-confirmed 2026-09-16 (closes item 13's open assumption):** "tap 1
+corners" means tap each of the four corners once, in order — **top-left,
+top-right, bottom-left, bottom-right**.
 
 **The gesture:**
 
@@ -1012,7 +1010,7 @@ force a full rebuild.
 
 ---
 
-## 13. Owner decisions — settled, and the one assumption left
+## 13. Owner decisions — settled
 
 Settled 2026-09-16. Two went against this plan's first-draft recommendation;
 the plan follows the owner's decision and records the cost rather than
@@ -1027,7 +1025,6 @@ re-arguing it.
    (item 8).
 3. **OTA uses the administrator credential**, with no OTA password of its own
    (item 2b).
-
-**Still an assumption, not a decision:** that "tap 1 corners of the lcd" means
-**each of the four corners once, in order**. Item 10 is written that way and
-flags it inline; only that one step changes if the owner meant something else.
+4. **The physical credential-reset gesture (item 10) is confirmed**: "E-stop
+   asserted, then tap each of the four LCD corners once — top-left, top-right,
+   bottom-left, bottom-right, in that order." No longer an assumption.
