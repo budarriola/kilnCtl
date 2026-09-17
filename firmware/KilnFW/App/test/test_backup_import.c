@@ -2828,6 +2828,69 @@ static void test_safety_i_normal_a_absent_key_never_calls_write(void)
               "safety_cfg_write_apply_pairs() was never called -- no UART traffic to the Pico at all");
 }
 
+// ---------------------------------------------------------------------------
+// docs/WEB_AUTH_PLAN.md item 12b ("Credentials versus the config package, OTA
+// and factory reset"): credentials live in their own NVS namespace
+// (`kiln_auth`, on the default `nvs` partition -- item 2) and no config
+// operation reads or writes it. Exclusion from a backup/config export is one
+// of the concrete case-by-case outcomes item 12b lists ("Config backup /
+// export ... not in the file"), and its own acceptance criterion asks for a
+// host test asserting "an export's JSON contains none of the three
+// credential key names and none of a set password's bytes".
+//
+// Item 2's credential-storage module (web_auth_store.c / the setters that
+// would actually hash and persist a password) does not exist in this tree
+// yet -- that is a different slice of the same plan. So this test cannot yet
+// do the full acceptance test ("set a password, export, assert the hash's
+// bytes are absent"); there is no setter to call. What IS testable today,
+// against real production code rather than a mirror, is the structural half
+// of the same property: backup_export_get_handler() -- the real handler,
+// pulled in via the #include of backup_export.c above -- never emits any of
+// the three credential record key names (web_auth/lcd_auth/auth_policy), the
+// kiln_auth namespace name itself, or the literal word "password", no matter
+// what zone/profile state it is fed. This is not vacuous: backup_export.c's
+// hand-written, no-generic-NVS-enumeration section list (verified by
+// inspection -- zero nvs_entry_* calls in that file) is exactly the reason
+// exclusion holds, and this test exercises that real writer's real output
+// rather than asserting the absence of a feature that hasn't been built.
+// When item 2 lands, add a companion test here (or a new test_web_auth.c per
+// section 12) that seeds a real credential, exports, and asserts the actual
+// stored hash bytes are absent -- this test's forbidden-substring list should
+// be reused there rather than duplicated.
+// ---------------------------------------------------------------------------
+static void test_export_never_contains_credential_markers(void)
+{
+    TEST_SECTION("backup_export_get_handler -- WEB_AUTH_PLAN.md item 12b: the emitted backup JSON "
+                 "never contains the kiln_auth NVS namespace name, any of the three credential record "
+                 "key names (web_auth/lcd_auth/auth_policy), or the literal word 'password' -- "
+                 "credentials live outside config storage entirely and no config operation reads or "
+                 "writes them");
+    reset_stub_state();
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    strncpy(p.name, "Cone6", PROFILE_NAME_MAX_LEN);
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0].target_c = 1000.0f;
+    p.segments[0].ramp_c_per_hr = 100.0f;
+    p.segments[0].dwell_min = 5;
+    test_stub_profiles_set(0, &p);
+    TEST_CHECK(zones_config_set_pid(0, 1.0f, 0.1f, 0.0f), "seed zone 0 pid");
+    TEST_CHECK(zones_config_set_name(0, "Top"), "seed zone 0 name");
+
+    esp_err_t err = run_export();
+    TEST_CHECK(err == ESP_OK, "export must succeed");
+    TEST_CHECK(s_export_body != NULL, "export produced a body");
+    if (s_export_body != NULL) {
+        TEST_CHECK(strstr(s_export_body, "kiln_auth") == NULL, "export never names the kiln_auth namespace");
+        TEST_CHECK(strstr(s_export_body, "web_auth") == NULL, "export never names the web_auth key");
+        TEST_CHECK(strstr(s_export_body, "lcd_auth") == NULL, "export never names the lcd_auth key");
+        TEST_CHECK(strstr(s_export_body, "auth_policy") == NULL, "export never names the auth_policy key");
+        TEST_CHECK(strstr(s_export_body, "password") == NULL, "export never contains the literal word 'password'");
+    }
+}
+
 void run_test_backup_import(void)
 {
     test_malformed_body_writes_nothing();
@@ -2870,4 +2933,6 @@ void run_test_backup_import(void)
     test_safety_i_normal_a_round_trips_through_export_import();
     test_safety_i_normal_a_write_failure_aborts_whole_import();
     test_safety_i_normal_a_absent_key_never_calls_write();
+
+    test_export_never_contains_credential_markers();
 }
