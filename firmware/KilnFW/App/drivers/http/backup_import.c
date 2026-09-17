@@ -238,10 +238,45 @@ typedef struct {
      * locked()'s commit section below). */
     bool has_safety_i_normal_a;
     float safety_i_normal_a;
+    /* 2026-09-16 backup-round-trip-gap closure, group 1/2: failsafe_state/
+     * hyst_c/min_on_s/min_off_s -- new setters added this pass. Ordinary
+     * independently-optional fields, same shape as ease_off_window_mult
+     * etc. above. min_on_s/min_off_s are the SECONDS fields
+     * (zone_cfg_t::min_on_s/min_off_s), distinct from heater_cfg's
+     * milliseconds window/min_on_ms/min_off_ms bundle. */
+    bool has_failsafe_state;
+    bool failsafe_state;
+    bool has_hyst_c;
+    float hyst_c;
+    bool has_min_on_s;
+    uint16_t min_on_s;
+    bool has_min_off_s;
+    uint16_t min_off_s;
+    /* Group 3: timing_profile is this zone's index into the top-level
+     * timing_profiles[] bundle (parsed separately, see
+     * s_timing_profile_candidates below) -- committed only after that
+     * bundle is committed, so the index it names already exists. */
+    bool has_timing_profile;
+    uint8_t timing_profile;
 } zone_candidate_t;
 
+/* Group 3: the named timing_profiles[] bundle itself. A small fixed array,
+ * same MAX31856_CHANNEL_COUNT bound as zones_cfg_t::timing_profiles[] --
+ * parsed in pass 1, committed in pass 2 via
+ * zones_config_set_timing_profile_raw(), same two-pass shape as every other
+ * candidate array in this file. Kept as a plain local array (not inside
+ * zone_candidate_t) since it is not per-zone -- one bundle shared by every
+ * zone's timing_profile index. */
+typedef struct {
+    bool present;
+    char name[TIMING_PROFILE_NAME_MAX_LEN + 1];
+    float progress_duty_min, progress_window_s, drift_hysteresis_c, frozen_eps_c, cross_zone_period_s,
+        bangbang_hysteresis_c, cooling_limited_margin_c, cooling_limited_hold_s, ramp_lock_band_c;
+} timing_profile_candidate_t;
+
 static bool backup_import_apply_locked(const char *body, char *err_msg, size_t err_cap,
-                                        profile_candidate_t *candidates, zone_candidate_t *zone_candidates)
+                                        profile_candidate_t *candidates, zone_candidate_t *zone_candidates,
+                                        timing_profile_candidate_t *timing_profile_candidates)
 {
     double dver;
     char kind[24];
@@ -1099,7 +1134,157 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
             zc->safety_i_normal_a = (float)dsafety_inormal;
         }
 
+        /* 2026-09-16 backup-round-trip-gap closure, group 1/2: same
+         * "bound checked here in pass 1, setter re-checks at commit"
+         * pattern as normal_current_a above, using the exact bounds
+         * zones_config_set_hyst_c()/set_min_on_s()/set_min_off_s()
+         * themselves enforce (ZONE_HYST_C_MIN/MAX, ZONE_MIN_ON_OFF_S_MIN/
+         * MAX) -- 0 is accepted here too, meaning "use firmware default",
+         * same as those setters. */
+        double dfailsafe;
+        if (!backup_json_field_opt_num(ze, "failsafe_state", 0, 1, &dfailsafe, &zc->has_failsafe_state,
+                               "failsafe_state", err_msg, err_cap, (unsigned)zone_candidate_count)) {
+            return false;
+        }
+        if (zc->has_failsafe_state) {
+            zc->failsafe_state = dfailsafe != 0.0;
+        }
+        double dhyst;
+        if (!backup_json_field_opt_num(ze, "hyst_c", 0, (double)ZONE_HYST_C_MAX, &dhyst, &zc->has_hyst_c,
+                               "hyst_c", err_msg, err_cap, (unsigned)zone_candidate_count)) {
+            return false;
+        }
+        if (zc->has_hyst_c) {
+            zc->hyst_c = (float)dhyst;
+        }
+        double dminon, dminoff;
+        if (!backup_json_field_opt_num(ze, "min_on_s", 0, (double)ZONE_MIN_ON_OFF_S_MAX, &dminon,
+                               &zc->has_min_on_s, "min_on_s", err_msg, err_cap, (unsigned)zone_candidate_count)) {
+            return false;
+        }
+        if (zc->has_min_on_s) {
+            zc->min_on_s = (uint16_t)dminon;
+        }
+        if (!backup_json_field_opt_num(ze, "min_off_s", 0, (double)ZONE_MIN_ON_OFF_S_MAX, &dminoff,
+                               &zc->has_min_off_s, "min_off_s", err_msg, err_cap,
+                               (unsigned)zone_candidate_count)) {
+            return false;
+        }
+        if (zc->has_min_off_s) {
+            zc->min_off_s = (uint16_t)dminoff;
+        }
+        /* Group 3: timing_profile index. Range-checked against
+         * MAX31856_CHANNEL_COUNT here (the array's own physical bound);
+         * the tighter "< the timing_profiles[] bundle actually being
+         * imported" check happens after that bundle is parsed below,
+         * since this entry may be seen before the bundle is. */
+        double dtprofile;
+        if (!backup_json_field_opt_num(ze, "timing_profile", 0, (double)(MAX31856_CHANNEL_COUNT - 1), &dtprofile,
+                               &zc->has_timing_profile, "timing_profile", err_msg, err_cap,
+                               (unsigned)zone_candidate_count)) {
+            return false;
+        }
+        if (zc->has_timing_profile) {
+            zc->timing_profile = (uint8_t)dtprofile;
+        }
+
         zone_candidate_count++;
+    }
+
+    /* ---- Pass 1c: timing_profiles[] bundle (group 3) ----
+     * A hand-edited or older backup may omit this array entirely -- every
+     * zone's has_timing_profile stays independently optional either way,
+     * and an absent bundle simply means no zone's timing_profile index can
+     * be validated against it below (each such index is then rejected,
+     * same as any other out-of-range value, rather than silently ignored). */
+    size_t timing_profile_candidate_count = 0;
+    {
+        const char *tp_arr = backup_json_obj_find(body, "timing_profiles");
+        for (const char *tpe = backup_json_arr_first(tp_arr); tpe; tpe = backup_json_arr_next(tpe)) {
+            if (timing_profile_candidate_count >= MAX31856_CHANNEL_COUNT) {
+                snprintf(err_msg, err_cap, "backup has more than %u timing profiles",
+                        (unsigned)MAX31856_CHANNEL_COUNT);
+                return false;
+            }
+            timing_profile_candidate_t *tp = &timing_profile_candidates[timing_profile_candidate_count];
+            memset(tp, 0, sizeof(*tp));
+            if (!backup_json_field_str(tpe, "name", tp->name, sizeof(tp->name))) {
+                snprintf(err_msg, err_cap, "timing profile entry %u: missing/invalid \"name\"",
+                        (unsigned)timing_profile_candidate_count);
+                return false;
+            }
+            if (strlen(tp->name) >= sizeof(tp->name)) {
+                snprintf(err_msg, err_cap, "timing profile entry %u: name too long",
+                        (unsigned)timing_profile_candidate_count);
+                return false;
+            }
+            double dduty, dwindow, ddrift, deps, dcross, dbang, dcoolmargin, dcoolhold, dramplock;
+            if (!backup_json_field_num(tpe, "progress_duty_min", &dduty) ||
+                !backup_json_field_num(tpe, "progress_window_s", &dwindow) ||
+                !backup_json_field_num(tpe, "drift_hysteresis_c", &ddrift) ||
+                !backup_json_field_num(tpe, "frozen_eps_c", &deps) ||
+                !backup_json_field_num(tpe, "cross_zone_period_s", &dcross) ||
+                !backup_json_field_num(tpe, "bangbang_hysteresis_c", &dbang) ||
+                !backup_json_field_num(tpe, "cooling_limited_margin_c", &dcoolmargin) ||
+                !backup_json_field_num(tpe, "cooling_limited_hold_s", &dcoolhold) ||
+                !backup_json_field_num(tpe, "ramp_lock_band_c", &dramplock)) {
+                snprintf(err_msg, err_cap, "timing profile entry %u: missing one or more required fields",
+                        (unsigned)timing_profile_candidate_count);
+                return false;
+            }
+            /* Same bounds zones_config_set_timing_profile_raw() itself
+             * enforces -- checked here too so pass 1 fails before any
+             * earlier candidate (profile or zone) is committed. */
+            if (!isfinite(dduty) || dduty < 0.0 || dduty > (double)ZONE_GUARD_DUTY_MAX ||
+                !isfinite(dwindow) || dwindow < 0.0 || dwindow > (double)ZONE_GUARD_TIME_S_MAX ||
+                !isfinite(ddrift) || ddrift < 0.0 || ddrift > (double)ZONE_GUARD_MARGIN_C_MAX ||
+                !isfinite(deps) || deps < 0.0 || deps > (double)ZONE_GUARD_EPS_C_MAX ||
+                !isfinite(dcross) || dcross < 0.0 || dcross > (double)ZONE_GUARD_TIME_S_MAX ||
+                !isfinite(dbang) || dbang < 0.0 || dbang > (double)ZONE_GUARD_MARGIN_C_MAX ||
+                !isfinite(dcoolmargin) || dcoolmargin < 0.0 || dcoolmargin > (double)ZONE_GUARD_MARGIN_C_MAX ||
+                !isfinite(dcoolhold) || dcoolhold < 0.0 || dcoolhold > (double)ZONE_GUARD_TIME_S_MAX ||
+                !isfinite(dramplock) || dramplock < 0.0 || dramplock > (double)ZONE_GUARD_MARGIN_C_MAX) {
+                snprintf(err_msg, err_cap, "timing profile entry %u: a field is out of range",
+                        (unsigned)timing_profile_candidate_count);
+                return false;
+            }
+            tp->present = true;
+            tp->progress_duty_min = (float)dduty;
+            tp->progress_window_s = (float)dwindow;
+            tp->drift_hysteresis_c = (float)ddrift;
+            tp->frozen_eps_c = (float)deps;
+            tp->cross_zone_period_s = (float)dcross;
+            tp->bangbang_hysteresis_c = (float)dbang;
+            tp->cooling_limited_margin_c = (float)dcoolmargin;
+            tp->cooling_limited_hold_s = (float)dcoolhold;
+            tp->ramp_lock_band_c = (float)dramplock;
+            timing_profile_candidate_count++;
+        }
+    }
+    /* Cross-check every zone's timing_profile index (if present) against
+     * the bundle actually being imported, before pass 2 commits anything --
+     * same "fail before any earlier candidate is committed" reasoning as
+     * the settings_source cross-entry check below.
+     *
+     * Export always emits "timing_profile" for a zone (answerable whenever
+     * any timing profile exists at all, same convention as pid_kp), but a
+     * board with no *custom* profiles configured beyond the implicit slot 0
+     * exports an empty "timing_profiles":[] bundle. That combination --
+     * has_timing_profile true, timing_profile 0, timing_profile_candidate_count
+     * 0 -- must NOT reject the whole import: 0 is the always-valid implicit
+     * default slot, not a dangling reference. Only reject when the backup
+     * DOES carry a bundle and the index overflows it; when the bundle is
+     * empty, skip validating (and, at commit time below, skip restoring)
+     * every zone's timing_profile index and leave the target's own value
+     * untouched. */
+    for (size_t zi2 = 0; timing_profile_candidate_count > 0 && zi2 < zone_candidate_count; zi2++) {
+        zone_candidate_t *zc2 = &zone_candidates[zi2];
+        if (zc2->has_timing_profile && zc2->timing_profile >= timing_profile_candidate_count) {
+            snprintf(err_msg, err_cap,
+                    "zone entry %u: timing_profile %u is not one of the %u timing_profiles[] in this backup",
+                    (unsigned)zi2, (unsigned)zc2->timing_profile, (unsigned)timing_profile_candidate_count);
+            return false;
+        }
     }
 
     /* Cross-entry pass 1 for settings_source: each candidate's own
@@ -1286,6 +1471,29 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
                         reason);
                 return false;
             }
+        }
+    }
+
+    /* Group 3: commit the timing_profiles[] bundle BEFORE any zone's
+     * timing_profile index, in slot order 0..count-1 -- each call's index
+     * equals the bundle's CURRENT count on the target board at that point
+     * only when it also equals timing_profile_candidate_count's own running
+     * position, since zones_config_set_timing_profile_raw() both
+     * overwrites an existing slot < the target's current count and grows
+     * the count by exactly one when index == current count. Sequential
+     * ascending order guarantees every index this loop uses is always
+     * either "overwrite an existing slot" or "grow by exactly one", never
+     * a gap -- matching the pass-1 cross-check above, which already
+     * confirmed every zone's timing_profile index is < timing_profile_candidate_count. */
+    for (size_t i = 0; i < timing_profile_candidate_count; i++) {
+        timing_profile_candidate_t *tp = &timing_profile_candidates[i];
+        if (!zones_config_set_timing_profile_raw((uint8_t)i, tp->name, tp->progress_duty_min,
+                                                 tp->progress_window_s, tp->drift_hysteresis_c, tp->frozen_eps_c,
+                                                 tp->cross_zone_period_s, tp->bangbang_hysteresis_c,
+                                                 tp->cooling_limited_margin_c, tp->cooling_limited_hold_s,
+                                                 tp->ramp_lock_band_c)) {
+            snprintf(err_msg, err_cap, "timing profile entry %u rejected at commit", (unsigned)i);
+            return false;
         }
     }
 
@@ -1549,6 +1757,44 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
                     (unsigned)i, zc->index);
             return false;
         }
+        /* 2026-09-16 backup-round-trip-gap closure, group 1/2/3. The
+         * timing_profiles[] bundle itself is already committed above, so
+         * zc->timing_profile (if present) already names a valid slot --
+         * except when the backup carried no bundle at all
+         * (timing_profile_candidate_count == 0), in which case the earlier
+         * cross-check deliberately skipped validating it (see comment
+         * there); restoring it here too would call the setter with an
+         * index that only accidentally matches the *target's* live
+         * profile_count, so skip restoring this field in that case and
+         * leave the target's own timing_profile index untouched. */
+        if (zc->has_failsafe_state && !zones_config_set_failsafe_state(zc->index, zc->failsafe_state)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting failsafe_state",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_hyst_c && !zones_config_set_hyst_c(zc->index, zc->hyst_c)) {
+            snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting hyst_c",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_min_on_s && !zones_config_set_min_on_s(zc->index, zc->min_on_s)) {
+            snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting min_on_s",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_min_off_s && !zones_config_set_min_off_s(zc->index, zc->min_off_s)) {
+            snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting min_off_s",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_timing_profile && timing_profile_candidate_count > 0 &&
+            !zones_config_set_timing_profile_index(zc->index, zc->timing_profile)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting timing_profile",
+                    (unsigned)i, zc->index);
+            return false;
+        }
         /* No has_* guard -- zc->settings_source is ALWAYS a real value (either
          * the imported one, or the ZONE_SETTINGS_SOURCE_CUSTOM default seeded
          * in pass 1), and always committed, matching the "older backup must
@@ -1660,8 +1906,23 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
         return false;
     }
 
-    bool ok = backup_import_apply_locked(body, err_msg, err_cap, candidates, zone_candidates);
+    timing_profile_candidate_t *timing_profile_candidates =
+        heap_caps_malloc(sizeof(timing_profile_candidate_t) * MAX31856_CHANNEL_COUNT,
+                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!timing_profile_candidates) {
+        timing_profile_candidates = malloc(sizeof(timing_profile_candidate_t) * MAX31856_CHANNEL_COUNT);
+    }
+    if (!timing_profile_candidates) {
+        free(zone_candidates);
+        free(candidates);
+        snprintf(err_msg, err_cap, "out of memory (timing profile candidates)");
+        return false;
+    }
 
+    bool ok = backup_import_apply_locked(body, err_msg, err_cap, candidates, zone_candidates,
+                                         timing_profile_candidates);
+
+    free(timing_profile_candidates);
     free(zone_candidates);
     free(candidates);
     return ok;

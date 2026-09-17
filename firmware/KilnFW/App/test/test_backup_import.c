@@ -360,7 +360,40 @@ typedef struct {
     bool set_normal_current_called;
     bool normal_current_measured;
     float normal_current_a;
+    /* 2026-09-16 backup-round-trip-gap closure, group 1/2/3: same
+     * flag/value-per-field convention as every field above. */
+    bool set_failsafe_state_called;
+    bool failsafe_state;
+    bool set_hyst_c_called;
+    float hyst_c;
+    bool set_min_on_s_called;
+    uint16_t min_on_s;
+    bool set_min_off_s_called;
+    uint16_t min_off_s;
+    bool set_timing_profile_index_called;
+    uint8_t timing_profile_index;
 } zone_write_t;
+
+/* Group 3: the named timing_profiles[] bundle -- not per-zone, so kept
+ * outside zone_write_t, mirroring the real zones_cfg_t::timing_profiles[]/
+ * timing_profile_count split. */
+typedef struct {
+    char name[64];
+    float progress_duty_min, progress_window_s, drift_hysteresis_c, frozen_eps_c, cross_zone_period_s,
+        bangbang_hysteresis_c, cooling_limited_margin_c, cooling_limited_hold_s, ramp_lock_band_c;
+} timing_profile_write_t;
+static timing_profile_write_t s_timing_profiles[STUB_ZONE_COUNT];
+static uint8_t s_timing_profile_count;
+static uint8_t s_set_timing_profile_raw_calls;
+
+/* Group 4: CT map / k_ct_v_per_a -- EXPORT-ONLY (see backup_export.c's own
+ * comment on why import never restores these); this stub only needs to
+ * feed the two derived-value getters backup_export.c calls, no setter
+ * observability is needed since backup_import_apply() never calls one. */
+static uint8_t s_ct_map_derived_mask;
+static uint8_t s_ct_map_zone[MAX31856_CHANNEL_COUNT];
+static uint8_t s_k_ct_derived_mask;
+static float s_k_ct_v_per_a[MAX31856_CHANNEL_COUNT];
 
 static zone_write_t s_writes[STUB_ZONE_COUNT];
 static uint8_t s_relay_count = 4;
@@ -439,6 +472,13 @@ static void reset_stub_state(void)
     memset(&g_last_saved_profile, 0, sizeof(g_last_saved_profile));
     memset(s_profile_present, 0, sizeof(s_profile_present));
     memset(s_profile_slots, 0, sizeof(s_profile_slots));
+    memset(s_timing_profiles, 0, sizeof(s_timing_profiles));
+    s_timing_profile_count = 0;
+    s_set_timing_profile_raw_calls = 0;
+    s_ct_map_derived_mask = 0;
+    memset(s_ct_map_zone, 0, sizeof(s_ct_map_zone));
+    s_k_ct_derived_mask = 0;
+    memset(s_k_ct_v_per_a, 0, sizeof(s_k_ct_v_per_a));
     test_stub_zones_set_thermo_count(3);
     for (uint8_t i = 0; i < STUB_ZONE_COUNT; i++) {
         test_stub_zones_set_max_ramp(i, true, 1000.0f);
@@ -908,6 +948,84 @@ bool zones_config_get_normal_current(uint8_t zone_index, float *out_amps, bool *
     if (out_measured) *out_measured = s_writes[zone_index].normal_current_measured;
     return true;
 }
+/* 2026-09-16 backup-round-trip-gap closure, group 1/2/3 -- same
+ * "always answerable once zi passed pid_kp" convention as ease_off_window_mult
+ * etc. above. */
+bool zones_config_get_failsafe_state(uint8_t zone_index, bool *out_on)
+{
+    if (!out_on || zone_index >= STUB_ZONE_COUNT) return false;
+    *out_on = s_writes[zone_index].failsafe_state;
+    return true;
+}
+bool zones_config_get_hyst_c(uint8_t zone_index, float *out_hyst_c)
+{
+    if (!out_hyst_c || zone_index >= STUB_ZONE_COUNT) return false;
+    *out_hyst_c = s_writes[zone_index].hyst_c;
+    return true;
+}
+bool zones_config_get_min_on_s(uint8_t zone_index, uint16_t *out_s)
+{
+    if (!out_s || zone_index >= STUB_ZONE_COUNT) return false;
+    *out_s = s_writes[zone_index].min_on_s;
+    return true;
+}
+bool zones_config_get_min_off_s(uint8_t zone_index, uint16_t *out_s)
+{
+    if (!out_s || zone_index >= STUB_ZONE_COUNT) return false;
+    *out_s = s_writes[zone_index].min_off_s;
+    return true;
+}
+bool zones_config_get_timing_profile_index(uint8_t zone_index, uint8_t *out_index)
+{
+    if (!out_index || zone_index >= STUB_ZONE_COUNT) return false;
+    *out_index = s_writes[zone_index].timing_profile_index;
+    return true;
+}
+uint8_t zones_config_get_timing_profile_count(void)
+{
+    return s_timing_profile_count;
+}
+bool zones_config_get_timing_profile_raw(uint8_t profile_index, char *out_name, size_t name_cap,
+                                         float *out_progress_duty_min, float *out_progress_window_s,
+                                         float *out_drift_hysteresis_c, float *out_frozen_eps_c,
+                                         float *out_cross_zone_period_s, float *out_bangbang_hysteresis_c,
+                                         float *out_cooling_limited_margin_c,
+                                         float *out_cooling_limited_hold_s, float *out_ramp_lock_band_c)
+{
+    if (!out_name || name_cap == 0 || !out_progress_duty_min || !out_progress_window_s ||
+        !out_drift_hysteresis_c || !out_frozen_eps_c || !out_cross_zone_period_s ||
+        !out_bangbang_hysteresis_c || !out_cooling_limited_margin_c || !out_cooling_limited_hold_s ||
+        !out_ramp_lock_band_c || profile_index >= s_timing_profile_count) {
+        return false;
+    }
+    const timing_profile_write_t *tp = &s_timing_profiles[profile_index];
+    strncpy(out_name, tp->name, name_cap - 1);
+    out_name[name_cap - 1] = '\0';
+    *out_progress_duty_min = tp->progress_duty_min;
+    *out_progress_window_s = tp->progress_window_s;
+    *out_drift_hysteresis_c = tp->drift_hysteresis_c;
+    *out_frozen_eps_c = tp->frozen_eps_c;
+    *out_cross_zone_period_s = tp->cross_zone_period_s;
+    *out_bangbang_hysteresis_c = tp->bangbang_hysteresis_c;
+    *out_cooling_limited_margin_c = tp->cooling_limited_margin_c;
+    *out_cooling_limited_hold_s = tp->cooling_limited_hold_s;
+    *out_ramp_lock_band_c = tp->ramp_lock_band_c;
+    return true;
+}
+void zones_ct_channel_map_derived(uint8_t *out_derived_mask, uint8_t *out_zone_for_ch)
+{
+    /* Real implementation (zones_config_store.c) only ever writes
+     * ZONE_CT_CHANNEL_COUNT (3) bytes into the caller's buffer -- matched
+     * exactly here since backup_export.c's caller passes a buffer sized to
+     * that constant, not MAX31856_CHANNEL_COUNT. */
+    if (out_derived_mask) *out_derived_mask = s_ct_map_derived_mask;
+    if (out_zone_for_ch) memcpy(out_zone_for_ch, s_ct_map_zone, ZONE_CT_CHANNEL_COUNT);
+}
+void zones_ct_k_v_per_a_derived(uint8_t *out_derived_mask, float *out_k_v_per_a)
+{
+    if (out_derived_mask) *out_derived_mask = s_k_ct_derived_mask;
+    if (out_k_v_per_a) memcpy(out_k_v_per_a, s_k_ct_v_per_a, ZONE_CT_CHANNEL_COUNT * sizeof(float));
+}
 
 // ---- zones_http.h setters -- every one records the call and bumps the
 // shared write counter, matching the real setters' "false means rejected,
@@ -1160,6 +1278,73 @@ bool zones_config_set_tuning_quality(uint8_t zone_index, const zone_tuning_quali
      * tuning quality before calling run_export() needs the GETTER to answer
      * with it too, not just this observability copy. */
     test_stub_zones_set_full_tuning_quality(zone_index, q);
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_failsafe_state(uint8_t zone_index, bool on_state)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_failsafe_state_called = true;
+    s_writes[zone_index].failsafe_state = on_state;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_hyst_c(uint8_t zone_index, float hyst_c)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_hyst_c_called = true;
+    s_writes[zone_index].hyst_c = hyst_c;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_min_on_s(uint8_t zone_index, uint16_t min_on_s)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_min_on_s_called = true;
+    s_writes[zone_index].min_on_s = min_on_s;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_min_off_s(uint8_t zone_index, uint16_t min_off_s)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_min_off_s_called = true;
+    s_writes[zone_index].min_off_s = min_off_s;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_timing_profile_index(uint8_t zone_index, uint8_t index)
+{
+    if (zone_index >= STUB_ZONE_COUNT || index >= s_timing_profile_count) return false;
+    s_writes[zone_index].set_timing_profile_index_called = true;
+    s_writes[zone_index].timing_profile_index = index;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_timing_profile_raw(uint8_t profile_index, const char *name,
+                                         float progress_duty_min, float progress_window_s,
+                                         float drift_hysteresis_c, float frozen_eps_c,
+                                         float cross_zone_period_s, float bangbang_hysteresis_c,
+                                         float cooling_limited_margin_c, float cooling_limited_hold_s,
+                                         float ramp_lock_band_c)
+{
+    if (!name || profile_index > s_timing_profile_count || profile_index >= STUB_ZONE_COUNT) return false;
+    timing_profile_write_t *tp = &s_timing_profiles[profile_index];
+    strncpy(tp->name, name, sizeof(tp->name) - 1);
+    tp->name[sizeof(tp->name) - 1] = '\0';
+    tp->progress_duty_min = progress_duty_min;
+    tp->progress_window_s = progress_window_s;
+    tp->drift_hysteresis_c = drift_hysteresis_c;
+    tp->frozen_eps_c = frozen_eps_c;
+    tp->cross_zone_period_s = cross_zone_period_s;
+    tp->bangbang_hysteresis_c = bangbang_hysteresis_c;
+    tp->cooling_limited_margin_c = cooling_limited_margin_c;
+    tp->cooling_limited_hold_s = cooling_limited_hold_s;
+    tp->ramp_lock_band_c = ramp_lock_band_c;
+    if (profile_index == s_timing_profile_count) {
+        s_timing_profile_count = (uint8_t)(profile_index + 1);
+    }
+    s_set_timing_profile_raw_calls++;
     g_total_write_calls++;
     return true;
 }
@@ -2209,6 +2394,10 @@ static void test_export_round_trips_through_import_to_identical_config(void)
     zones_config_set_coupling_cell(1, 2, 3.25f, 0.0f, 0.0f);
     zones_config_set_settings_source(1, SRC_GROUP_LIMITS, 2);
     zones_config_set_coupling_diag_k_dc(1, 33.5f);
+    zones_config_set_failsafe_state(1, true);
+    zones_config_set_hyst_c(1, 4.5f);
+    zones_config_set_min_on_s(1, 30);
+    zones_config_set_min_off_s(1, 45);
 
     esp_err_t err = run_export();
     TEST_CHECK(err == ESP_OK, "export must succeed");
@@ -2221,6 +2410,10 @@ static void test_export_round_trips_through_import_to_identical_config(void)
     reset_stub_state();
     zones_config_set_pid(1, 1.0f, 1.0f, 1.0f);
     zones_config_set_settings_source(1, SRC_GROUP_LIMITS, 0);
+    zones_config_set_failsafe_state(1, false);
+    zones_config_set_hyst_c(1, 1.0f);
+    zones_config_set_min_on_s(1, 1);
+    zones_config_set_min_off_s(1, 1);
     g_total_write_calls = 0;
 
     char import_err[256];
@@ -2248,6 +2441,11 @@ static void test_export_round_trips_through_import_to_identical_config(void)
                     "coupling_diag_k_dc round-trips through export->import");
     TEST_CHECK(s_writes[1].settings_source[SRC_GROUP_LIMITS] == 2, "settings_source round-trips (NOT the 0 left over from the "
               "pre-import poison state above, proving import actually ran, not a no-op that left it alone)");
+    TEST_CHECK(s_writes[1].set_failsafe_state_called && s_writes[1].failsafe_state == true,
+              "failsafe_state round-trips (NOT the false left over from the pre-import poison state)");
+    TEST_CHECK_NEAR(s_writes[1].hyst_c, 4.5, 1e-6, "hyst_c round-trips (NOT the 1.0 poison value)");
+    TEST_CHECK(s_writes[1].min_on_s == 30, "min_on_s round-trips (NOT the 1 poison value)");
+    TEST_CHECK(s_writes[1].min_off_s == 45, "min_off_s round-trips (NOT the 1 poison value)");
 
     TEST_CHECK(g_profile_save_calls == 1, "the one exported profile was re-committed");
     TEST_CHECK(strcmp(g_last_saved_profile.name, "Cone6") == 0, "profile name round-trips");
@@ -2256,6 +2454,58 @@ static void test_export_round_trips_through_import_to_identical_config(void)
     TEST_CHECK_NEAR(g_last_saved_profile.segments[0].target_c, 1200.0, 1e-6, "profile segment target_c round-trips");
     TEST_CHECK_NEAR(g_last_saved_profile.segments[0].ramp_c_per_hr, 100.0, 1e-6, "profile segment ramp_c_per_hr round-trips");
     TEST_CHECK(g_last_saved_profile.segments[0].dwell_min == 10, "profile segment dwell_min round-trips");
+}
+
+// A NON-empty timing_profiles[] bundle: this is the case the empty-bundle
+// fix above deliberately does NOT exercise, so it needs its own test proving
+// the bundle itself round-trips and a zone's timing_profile index that
+// legitimately points into it is both validated and restored.
+static void test_timing_profiles_bundle_round_trips_nonempty(void)
+{
+    TEST_SECTION("backup_import_apply -- non-empty timing_profiles[] bundle round-trips, "
+                 "and a zone's timing_profile index pointing into it is restored");
+    reset_stub_state();
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
+        "\"timing_profiles\":["
+        "{\"name\":\"Slow\",\"progress_duty_min\":0.1,\"progress_window_s\":60,"
+        "\"drift_hysteresis_c\":1.5,\"frozen_eps_c\":0.2,\"cross_zone_period_s\":30,"
+        "\"bangbang_hysteresis_c\":2.0,\"cooling_limited_margin_c\":5.0,"
+        "\"cooling_limited_hold_s\":120,\"ramp_lock_band_c\":25},"
+        "{\"name\":\"Fast\",\"progress_duty_min\":0.5,\"progress_window_s\":10,"
+        "\"drift_hysteresis_c\":0.5,\"frozen_eps_c\":0.1,\"cross_zone_period_s\":5,"
+        "\"bangbang_hysteresis_c\":1.0,\"cooling_limited_margin_c\":2.0,"
+        "\"cooling_limited_hold_s\":30,\"ramp_lock_band_c\":25}],"
+        "\"zones\":["
+        "{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"timing_profile\":1}]}";
+    char err[256];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+    TEST_CHECK(ok, "importing a real, non-empty timing_profiles[] bundle with a zone index inside it must succeed");
+    TEST_CHECK(s_timing_profile_count == 2, "both timing_profiles[] entries were committed");
+    TEST_CHECK(strcmp(s_timing_profiles[0].name, "Slow") == 0, "profile 0 name round-trips");
+    TEST_CHECK(strcmp(s_timing_profiles[1].name, "Fast") == 0, "profile 1 name round-trips");
+    TEST_CHECK_NEAR(s_timing_profiles[1].progress_duty_min, 0.5, 1e-6, "profile 1 progress_duty_min round-trips");
+    TEST_CHECK(s_writes[0].set_timing_profile_index_called && s_writes[0].timing_profile_index == 1,
+              "zone 0's timing_profile index (1) is restored once the bundle it points into is committed");
+
+    // Negative half of the same scenario: an index that overflows the
+    // bundle actually present in the SAME backup must reject the whole
+    // import, not silently clamp or skip.
+    reset_stub_state();
+    const char *bad_body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
+        "\"timing_profiles\":["
+        "{\"name\":\"Slow\",\"progress_duty_min\":0.1,\"progress_window_s\":60,"
+        "\"drift_hysteresis_c\":1.5,\"frozen_eps_c\":0.2,\"cross_zone_period_s\":30,"
+        "\"bangbang_hysteresis_c\":2.0,\"cooling_limited_margin_c\":5.0,"
+        "\"cooling_limited_hold_s\":120,\"ramp_lock_band_c\":25}],"
+        "\"zones\":["
+        "{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"timing_profile\":1}]}";
+    char err2[256];
+    bool ok2 = backup_import_apply(bad_body, err2, sizeof(err2));
+    TEST_CHECK(!ok2, "a timing_profile index (1) that overflows a NON-empty 1-entry bundle must be refused");
+    TEST_CHECK(!s_writes[0].set_timing_profile_index_called, "the refused import must not have written anything");
 }
 
 // ---------------------------------------------------------------------------
@@ -2610,6 +2860,7 @@ void run_test_backup_import(void)
     test_export_emits_live_pico_tc_type_not_stale_esp_cache();
     test_export_round_trips_through_import_to_identical_config();
     test_ct_normals_and_new_fields_round_trip_through_export_import();
+    test_timing_profiles_bundle_round_trips_nonempty();
 
     test_v4_coupling_tau_dead_time_round_trip_asymmetric_per_pair();
     test_v4_coupling_tau_dead_time_omitted_entirely_preserves_measured_values();

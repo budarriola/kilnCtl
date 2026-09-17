@@ -427,6 +427,30 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
                                 (double)progress_band_c, (unsigned)zone_type);
             backup_stream_printf(&s, "\"model_fit_temp_c\":%.2f,\"model_fit_ambient_c\":%.2f,",
                                 (double)model_fit_temp_c, (double)model_fit_ambient_c);
+            /* 2026-09-16 backup-round-trip-gap closure, group 1/2/3: these
+             * four also have public getter+setter pairs added this pass
+             * (zones_config_accessors.h) but previously round-tripped
+             * nowhere. failsafe_state/hyst_c/min_on_s/min_off_s are always
+             * answerable once zi passed the pid_kp check, same as every
+             * other field in this unconditional block. NOTE: min_on_s/
+             * min_off_s are the on/off-zone plan's SECONDS fields
+             * (zone_cfg_t::min_on_s/min_off_s) -- a completely different
+             * pair from heater_min_on_ms/heater_min_off_ms (milliseconds,
+             * zones_config_get_heater_cfg()) already emitted above, so
+             * they get distinct key names to avoid any collision. */
+            bool failsafe_state = false;
+            zones_config_get_failsafe_state(zi, &failsafe_state);
+            float hyst_c = 0.0f;
+            zones_config_get_hyst_c(zi, &hyst_c);
+            uint16_t min_on_s = 0, min_off_s = 0;
+            zones_config_get_min_on_s(zi, &min_on_s);
+            zones_config_get_min_off_s(zi, &min_off_s);
+            uint8_t timing_profile_index = 0;
+            zones_config_get_timing_profile_index(zi, &timing_profile_index);
+            backup_stream_printf(&s, "\"failsafe_state\":%u,\"hyst_c\":%.3f,",
+                                failsafe_state ? 1u : 0u, (double)hyst_c);
+            backup_stream_printf(&s, "\"min_on_s\":%u,\"min_off_s\":%u,\"timing_profile\":%u,",
+                                (unsigned)min_on_s, (unsigned)min_off_s, (unsigned)timing_profile_index);
             /* adaptive_tune_enabled is the last UNCONDITIONAL key of this
              * object -- no trailing comma here. The two blocks that follow
              * (tuning_*, normal_current_a) are each conditionally emitted,
@@ -514,6 +538,102 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
         backup_stream_printf(&s, "}");
     }
     backup_stream_printf(&s, "]");
+
+    /* 2026-09-16 backup-round-trip-gap closure, group 3: the named
+     * timing_profiles[] bundle itself (as opposed to each zone's
+     * "timing_profile" index into it, emitted above). One top-level array,
+     * indexed 0..timing_profile_count-1 -- zones_config_get_timing_profile_raw()
+     * is the scalar-out-param accessor added this pass (zone_timing_profile_t
+     * cannot be named in zones_config_accessors.h -- circular include with
+     * zones_config_json.h -- so this mirrors zones_config_get_guard_thresholds()'s
+     * existing scalar-out-param shape rather than exposing the struct).
+     * tuning_seq is DELIBERATELY NOT exported here or anywhere: no accessor
+     * anywhere in the firmware exposes it (confirmed by grep before this
+     * pass), so there is nothing to read it back from; adding one purely for
+     * this backup would be new surface with no other caller, on a value
+     * whose only use is de-duplicating already-applied autotune runs. */
+    {
+        uint8_t tp_count = zones_config_get_timing_profile_count();
+        backup_stream_printf(&s, ",\"timing_profiles\":[");
+        for (uint8_t p = 0; p < tp_count; p++) {
+            char tp_name[TIMING_PROFILE_NAME_MAX_LEN + 1];
+            float duty_min, window_s, drift_c, frozen_eps_c, cross_zone_s, bangbang_c, cool_margin_c,
+                cool_hold_s, ramp_lock_c;
+            if (!zones_config_get_timing_profile_raw(p, tp_name, sizeof(tp_name), &duty_min, &window_s,
+                                                     &drift_c, &frozen_eps_c, &cross_zone_s, &bangbang_c,
+                                                     &cool_margin_c, &cool_hold_s, &ramp_lock_c)) {
+                continue;
+            }
+            char tp_name_escaped[TIMING_PROFILE_NAME_MAX_LEN * 2 + 1];
+            json_escape(tp_name, tp_name_escaped, sizeof(tp_name_escaped));
+            backup_stream_printf(&s, "%s{\"name\":\"%s\",\"progress_duty_min\":%.4f,\"progress_window_s\":%.1f,",
+                                p == 0 ? "" : ",", tp_name_escaped, (double)duty_min, (double)window_s);
+            backup_stream_printf(&s, "\"drift_hysteresis_c\":%.2f,\"frozen_eps_c\":%.3f,"
+                                "\"cross_zone_period_s\":%.1f,",
+                                (double)drift_c, (double)frozen_eps_c, (double)cross_zone_s);
+            backup_stream_printf(&s, "\"bangbang_hysteresis_c\":%.2f,\"cooling_limited_margin_c\":%.2f,"
+                                "\"cooling_limited_hold_s\":%.1f,\"ramp_lock_band_c\":%.2f}",
+                                (double)bangbang_c, (double)cool_margin_c, (double)cool_hold_s,
+                                (double)ramp_lock_c);
+        }
+        backup_stream_printf(&s, "]");
+    }
+
+    /* 2026-09-16 backup-round-trip-gap closure, group 4: ct_map_zone[]/
+     * k_ct_v_per_a[] -- EXPORT-ONLY, deliberately not restored on import.
+     * Public getters already existed before this pass
+     * (zones_ct_channel_map_derived()/zones_ct_k_v_per_a_derived(), both in
+     * zones_config_accessors.h) -- the "no getter" premise for this group
+     * was false. What is genuinely missing is a SAFE way to restore them:
+     * each is a mapping from a physical CT clamp channel to a zone, or that
+     * channel's derived volts-per-amp scale, both derived by the
+     * current-sweep commissioning flow against THIS board's actual CT
+     * wiring. Restoring a backup taken on one board's wiring onto a
+     * different board (or the same board after a CT clamp was moved to a
+     * different channel) would silently mislabel which physical channel
+     * feeds which zone -- the commissioning page would show it as
+     * "derived"/trustworthy when it no longer matches the wiring in front
+     * of the operator. kiln_cfg_store.c's foreign-package pattern
+     * (source_board_id set on export, force-cleared on import when absent
+     * or mismatched) is the precedent for gating this kind of restore, but
+     * the JSON backup format has no board-identity field to reuse that
+     * pattern with, and adding one is a larger change than this pass's
+     * scope. The safe middle ground taken here: export it as read-only,
+     * informational context (useful for a human diffing two backups, or
+     * confirming what a board's wiring WAS at export time), and
+     * backup_import_apply() never calls zone_ct_map_set()/zone_k_ct_set()
+     * at all -- an operator who needs to restore CT wiring re-runs the
+     * current-sweep commissioning flow on the actual hardware instead. */
+    {
+        uint8_t ct_map_mask = 0, k_ct_mask = 0;
+        uint8_t ct_map_zone[ZONE_CT_CHANNEL_COUNT];
+        float k_ct_v_per_a[ZONE_CT_CHANNEL_COUNT];
+        memset(ct_map_zone, 0, sizeof(ct_map_zone));
+        memset(k_ct_v_per_a, 0, sizeof(k_ct_v_per_a));
+        zones_ct_channel_map_derived(&ct_map_mask, ct_map_zone);
+        zones_ct_k_v_per_a_derived(&k_ct_mask, k_ct_v_per_a);
+        backup_stream_printf(&s, ",\"ct_map_informational_only\":[");
+        bool first_ct = true;
+        for (uint8_t ch = 0; ch < ZONE_CT_CHANNEL_COUNT; ch++) {
+            if (!(ct_map_mask & (1u << ch))) {
+                continue;
+            }
+            backup_stream_printf(&s, "%s{\"ct_channel\":%u,\"zone\":%u}", first_ct ? "" : ",", ch,
+                                ct_map_zone[ch]);
+            first_ct = false;
+        }
+        backup_stream_printf(&s, "],\"k_ct_v_per_a_informational_only\":[");
+        bool first_k = true;
+        for (uint8_t ch = 0; ch < ZONE_CT_CHANNEL_COUNT; ch++) {
+            if (!(k_ct_mask & (1u << ch))) {
+                continue;
+            }
+            backup_stream_printf(&s, "%s{\"ct_channel\":%u,\"k_v_per_a\":%.5f}", first_k ? "" : ",", ch,
+                                (double)k_ct_v_per_a[ch]);
+            first_k = false;
+        }
+        backup_stream_printf(&s, "]");
+    }
 
     /* 2026-09-15 (Opus adversarial re-review, F6): this used to read
      * zones_config_get_safety_tc_type() -- the ESP's own cached copy, which

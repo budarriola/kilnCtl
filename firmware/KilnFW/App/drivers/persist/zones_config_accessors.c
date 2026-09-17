@@ -920,6 +920,19 @@ bool zones_config_get_failsafe_state(uint8_t zone_index, bool *out_on)
     return true;
 }
 
+/* Writer for the getter above -- 2026-09-16 backup-round-trip-gap closure,
+ * group 1. Same [0,1] bound validate_zones_cfg() enforces on this field
+ * (z->failsafe_state > 1). */
+bool zones_config_set_failsafe_state(uint8_t zone_index, bool on_state)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].failsafe_state = on_state ? 1u : 0u;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
 bool zones_config_get_hyst_c(uint8_t zone_index, float *out_hyst_c)
 {
     if (!out_hyst_c) {
@@ -932,6 +945,21 @@ bool zones_config_get_hyst_c(uint8_t zone_index, float *out_hyst_c)
     float stored = s_zones.cfg.zones[zone_index].hyst_c;
     *out_hyst_c = (stored > 0.0f) ? stored : 2.0f;
     return true;
+}
+
+/* Writer for the getter above -- 2026-09-16 backup-round-trip-gap closure,
+ * group 2. 0 is accepted (explicit "reset to firmware default"); a non-zero
+ * value must fall in [ZONE_HYST_C_MIN, ZONE_HYST_C_MAX] -- same
+ * "(0, MIN)-sliver refused" shape validate_zones_cfg() enforces. */
+bool zones_config_set_hyst_c(uint8_t zone_index, float hyst_c)
+{
+    if (zone_index >= s_zones.cfg.thermo_count || !isfinite(hyst_c) || hyst_c < 0.0f ||
+        hyst_c > ZONE_HYST_C_MAX || (hyst_c != 0.0f && hyst_c < ZONE_HYST_C_MIN)) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].hyst_c = hyst_c;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
 }
 
 bool zones_config_get_min_on_s(uint8_t zone_index, uint16_t *out_s)
@@ -948,6 +976,20 @@ bool zones_config_get_min_on_s(uint8_t zone_index, uint16_t *out_s)
     return true;
 }
 
+/* Writer for the getter above -- 2026-09-16 backup-round-trip-gap closure,
+ * group 2. Same "0 = reset to default, (0, MIN)-sliver refused" shape as
+ * zones_config_set_hyst_c(), bounded against ZONE_MIN_ON_OFF_S_MIN/MAX. */
+bool zones_config_set_min_on_s(uint8_t zone_index, uint16_t min_on_s)
+{
+    if (zone_index >= s_zones.cfg.thermo_count || min_on_s > ZONE_MIN_ON_OFF_S_MAX ||
+        (min_on_s != 0u && min_on_s < ZONE_MIN_ON_OFF_S_MIN)) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].min_on_s = min_on_s;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
 bool zones_config_get_min_off_s(uint8_t zone_index, uint16_t *out_s)
 {
     if (!out_s) {
@@ -960,6 +1002,18 @@ bool zones_config_get_min_off_s(uint8_t zone_index, uint16_t *out_s)
     uint16_t stored = s_zones.cfg.zones[zone_index].min_off_s;
     *out_s = (stored > 0u) ? stored : 30u;
     return true;
+}
+
+/* Writer for the getter above -- same shape as zones_config_set_min_on_s(). */
+bool zones_config_set_min_off_s(uint8_t zone_index, uint16_t min_off_s)
+{
+    if (zone_index >= s_zones.cfg.thermo_count || min_off_s > ZONE_MIN_ON_OFF_S_MAX ||
+        (min_off_s != 0u && min_off_s < ZONE_MIN_ON_OFF_S_MIN)) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].min_off_s = min_off_s;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
 }
 
 bool zones_config_get_temp_limits(uint8_t zone_index, float *out_max_temp_c, float *out_min_temp_c)
@@ -1143,6 +1197,124 @@ bool zones_config_get_pc_link_abort_silence_ms(float *out_ms)
     }
     *out_ms = s_zones.cfg.pc_link_abort_silence_ms;
     return true;
+}
+
+/* ---- Timing-profile bundle accessors -- 2026-09-16 backup-round-trip-gap
+ * closure, group 3. See zones_config_accessors.h's header comment on this
+ * block for why these exist and why the bundle is spelled as scalar
+ * out-params rather than a zone_timing_profile_t*. */
+
+bool zones_config_get_timing_profile_index(uint8_t zone_index, uint8_t *out_index)
+{
+    if (!out_index || zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    *out_index = s_zones.cfg.zones[zone_index].timing_profile;
+    return true;
+}
+
+bool zones_config_set_timing_profile_index(uint8_t zone_index, uint8_t index)
+{
+    if (zone_index >= s_zones.cfg.thermo_count || index >= s_zones.cfg.timing_profile_count) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].timing_profile = index;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
+uint8_t zones_config_get_timing_profile_count(void)
+{
+    return s_zones.cfg.timing_profile_count;
+}
+
+bool zones_config_get_timing_profile_raw(uint8_t profile_index, char *out_name, size_t name_cap,
+                                         float *out_progress_duty_min, float *out_progress_window_s,
+                                         float *out_drift_hysteresis_c, float *out_frozen_eps_c,
+                                         float *out_cross_zone_period_s, float *out_bangbang_hysteresis_c,
+                                         float *out_cooling_limited_margin_c,
+                                         float *out_cooling_limited_hold_s, float *out_ramp_lock_band_c)
+{
+    if (!out_name || name_cap == 0 || !out_progress_duty_min || !out_progress_window_s ||
+        !out_drift_hysteresis_c || !out_frozen_eps_c || !out_cross_zone_period_s ||
+        !out_bangbang_hysteresis_c || !out_cooling_limited_margin_c || !out_cooling_limited_hold_s ||
+        !out_ramp_lock_band_c || profile_index >= s_zones.cfg.timing_profile_count) {
+        return false;
+    }
+    const zone_timing_profile_t *tp = &s_zones.cfg.timing_profiles[profile_index];
+    strncpy(out_name, tp->name, name_cap - 1);
+    out_name[name_cap - 1] = '\0';
+    *out_progress_duty_min = tp->guard_progress_duty_min;
+    *out_progress_window_s = tp->guard_progress_window_s;
+    *out_drift_hysteresis_c = tp->guard_drift_hysteresis_c;
+    *out_frozen_eps_c = tp->guard_frozen_eps_c;
+    *out_cross_zone_period_s = tp->guard_cross_zone_period_s;
+    *out_bangbang_hysteresis_c = tp->bangbang_hysteresis_c;
+    *out_cooling_limited_margin_c = tp->cooling_limited_margin_c;
+    *out_cooling_limited_hold_s = tp->cooling_limited_hold_s;
+    *out_ramp_lock_band_c = tp->ramp_lock_band_c;
+    return true;
+}
+
+bool zones_config_set_timing_profile_raw(uint8_t profile_index, const char *name,
+                                         float progress_duty_min, float progress_window_s,
+                                         float drift_hysteresis_c, float frozen_eps_c,
+                                         float cross_zone_period_s, float bangbang_hysteresis_c,
+                                         float cooling_limited_margin_c, float cooling_limited_hold_s,
+                                         float ramp_lock_band_c)
+{
+    if (!name || profile_index > s_zones.cfg.timing_profile_count ||
+        profile_index >= MAX31856_CHANNEL_COUNT || strlen(name) > TIMING_PROFILE_NAME_MAX_LEN) {
+        return false;
+    }
+    if (!isfinite(progress_duty_min) || progress_duty_min < 0.0f || progress_duty_min > ZONE_GUARD_DUTY_MAX) {
+        return false;
+    }
+    if (!isfinite(progress_window_s) || progress_window_s < 0.0f || progress_window_s > ZONE_GUARD_TIME_S_MAX) {
+        return false;
+    }
+    if (!isfinite(drift_hysteresis_c) || drift_hysteresis_c < 0.0f || drift_hysteresis_c > ZONE_GUARD_MARGIN_C_MAX) {
+        return false;
+    }
+    if (!isfinite(frozen_eps_c) || frozen_eps_c < 0.0f || frozen_eps_c > ZONE_GUARD_EPS_C_MAX) {
+        return false;
+    }
+    if (!isfinite(cross_zone_period_s) || cross_zone_period_s < 0.0f ||
+        cross_zone_period_s > ZONE_GUARD_TIME_S_MAX) {
+        return false;
+    }
+    if (!isfinite(bangbang_hysteresis_c) || bangbang_hysteresis_c < 0.0f ||
+        bangbang_hysteresis_c > ZONE_GUARD_MARGIN_C_MAX) {
+        return false;
+    }
+    if (!isfinite(cooling_limited_margin_c) || cooling_limited_margin_c < 0.0f ||
+        cooling_limited_margin_c > ZONE_GUARD_MARGIN_C_MAX) {
+        return false;
+    }
+    if (!isfinite(cooling_limited_hold_s) || cooling_limited_hold_s < 0.0f ||
+        cooling_limited_hold_s > ZONE_GUARD_TIME_S_MAX) {
+        return false;
+    }
+    if (!isfinite(ramp_lock_band_c) || ramp_lock_band_c < 0.0f || ramp_lock_band_c > ZONE_GUARD_MARGIN_C_MAX) {
+        return false;
+    }
+    zone_timing_profile_t *tp = &s_zones.cfg.timing_profiles[profile_index];
+    strncpy(tp->name, name, TIMING_PROFILE_NAME_MAX_LEN);
+    tp->name[TIMING_PROFILE_NAME_MAX_LEN] = '\0';
+    tp->guard_progress_duty_min = progress_duty_min;
+    tp->guard_progress_window_s = progress_window_s;
+    tp->guard_drift_hysteresis_c = drift_hysteresis_c;
+    tp->guard_frozen_eps_c = frozen_eps_c;
+    tp->guard_cross_zone_period_s = cross_zone_period_s;
+    tp->bangbang_hysteresis_c = bangbang_hysteresis_c;
+    tp->cooling_limited_margin_c = cooling_limited_margin_c;
+    tp->cooling_limited_hold_s = cooling_limited_hold_s;
+    tp->ramp_lock_band_c = ramp_lock_band_c;
+    if (profile_index == s_zones.cfg.timing_profile_count) {
+        s_zones.cfg.timing_profile_count = (uint8_t)(profile_index + 1);
+    }
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
 }
 
 /* ZONES_CFG_VERSION 16->17: PER-ZONE as of this pass (was a single global

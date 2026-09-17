@@ -1110,6 +1110,18 @@ bool zone_needs_ceiling(uint8_t zone_index);
  * still land on the safe default. */
 bool zones_config_get_failsafe_state(uint8_t zone_index, bool *out_on);
 
+/* Writer for the getter above -- 2026-09-16 backup-round-trip-gap closure
+ * (group 1 of the deferred field list: this getter existed with no setter
+ * anywhere, so an import had nothing to commit a restored value through).
+ * Same "refused, never clamped" discipline as every other setter in this
+ * file: on_state is boolean-ish (0/1 only, matching zones_config_json.c's
+ * validate_zones_cfg() `z->failsafe_state > 1` check), zone_index must be
+ * < the currently configured thermo_count. This is the operator/import
+ * writer of the same field on_off_trigger_report.c reads through the
+ * getter above -- it does not itself re-evaluate or push anything to the
+ * Pico; see on_off_trigger_decide.h for who consumes the new value. */
+bool zones_config_set_failsafe_state(uint8_t zone_index, bool on_state);
+
 /* docs/ON_OFF_ZONE_PLAN.md sec 3's temperature hysteresis: stored value 0
  * means "not configured" and the caller substitutes the plan's 2.0 C
  * default -- same "0 substituted with a firmware default" convention
@@ -1122,6 +1134,14 @@ bool zones_config_get_failsafe_state(uint8_t zone_index, bool *out_on);
  * the one that CANNOT chatter, not the one that reads as "unset". */
 bool zones_config_get_hyst_c(uint8_t zone_index, float *out_hyst_c);
 
+/* Writer for the getter above -- 2026-09-16 backup-round-trip-gap closure
+ * (group 2: persisted and readable, but no setter, so a restore could not
+ * write it back). 0 is accepted as an explicit "reset to the firmware
+ * default", matching validate_zones_cfg()'s own "(0, MIN)-sliver" shape:
+ * refused only for a non-zero value outside [ZONE_HYST_C_MIN,
+ * ZONE_HYST_C_MAX] or a non-finite one. Never clamped. */
+bool zones_config_set_hyst_c(uint8_t zone_index, float hyst_c);
+
 /* docs/ON_OFF_ZONE_PLAN.md sec 3's minimum on/off dwell: stored 0 means
  * "not configured", substituted with the plan's 30 s default. Out-of-range
  * zone_index: returns false, *out_s left at the 30 s default -- same
@@ -1129,6 +1149,13 @@ bool zones_config_get_hyst_c(uint8_t zone_index, float *out_hyst_c);
  * one that bounds relay chatter, not zero). */
 bool zones_config_get_min_on_s(uint8_t zone_index, uint16_t *out_s);
 bool zones_config_get_min_off_s(uint8_t zone_index, uint16_t *out_s);
+
+/* Writers for the two getters above -- same "0 = reset to firmware
+ * default" / "(0, MIN)-sliver refused" shape as zones_config_set_hyst_c(),
+ * bounded against ZONE_MIN_ON_OFF_S_MIN/MAX. 2026-09-16 backup-round-trip-
+ * gap closure, group 2. */
+bool zones_config_set_min_on_s(uint8_t zone_index, uint16_t min_on_s);
+bool zones_config_set_min_off_s(uint8_t zone_index, uint16_t min_off_s);
 
 /* Guard 5's absolute limits (TODO.md 6A.3). max_temp_c == 0 still means
  * "not set" here, at the storage/getter layer this function lives at --
@@ -1254,6 +1281,66 @@ bool zones_config_get_executor_thresholds(uint8_t zone_index, float *out_bangban
                                           float *out_cooling_limited_hold_s,
                                           float *out_ramp_lock_band_c);
 bool zones_config_get_pc_link_abort_silence_ms(float *out_ms);
+
+/* ---- Timing-profile bundle accessors (2026-09-16 backup-round-trip-gap
+ * closure, group 3): zones_config_get_guard_extra()/get_executor_thresholds()
+ * above only ever hand back the RESOLVED nine values for a given zone --
+ * there was no accessor anywhere that could read or write zone_cfg_t::
+ * timing_profile (which profile a zone POINTS AT) or a
+ * zone_timing_profile_t bundle itself (its name and nine numbers), so an
+ * import had no surface to restore either through. zone_timing_profile_t
+ * cannot be named in this header (it is declared in zones_config_json.h,
+ * which #includes THIS header, not the other way around -- a forward
+ * declaration would still leave callers unable to touch its fields without
+ * that header), so this pair follows zones_config_get_guard_thresholds()'s
+ * own precedent of spelling the struct out as plain scalar out-params
+ * instead of adding a circular include. */
+
+/* Which zones_cfg_t::timing_profiles[] slot this zone currently uses.
+ * Same "false = cannot answer" convention as every getter above. */
+bool zones_config_get_timing_profile_index(uint8_t zone_index, uint8_t *out_index);
+
+/* Writer for the getter above -- bounded against the CURRENT
+ * timing_profile_count (same rule validate_zones_cfg() enforces on a
+ * submitted zone_cfg_t::timing_profile: it must reference a profile slot
+ * that actually exists). Refused, never clamped. */
+bool zones_config_set_timing_profile_index(uint8_t zone_index, uint8_t index);
+
+/* How many of zones_cfg_t::timing_profiles[]'s MAX31856_CHANNEL_COUNT slots
+ * are currently meaningful. Never 0 on a config zones_config_is_valid()
+ * reports true for. */
+uint8_t zones_config_get_timing_profile_count(void);
+
+/* Read one named timing-profile bundle by its slot index (0-based, must be
+ * < zones_config_get_timing_profile_count()) -- NOT resolved through any
+ * zone, unlike zones_config_get_guard_extra() above. out_name must have at
+ * least TIMING_PROFILE_NAME_MAX_LEN+1 bytes; returns false (leaving every
+ * output untouched) for an out-of-range profile_index or a null out_name. */
+bool zones_config_get_timing_profile_raw(uint8_t profile_index, char *out_name, size_t name_cap,
+                                         float *out_progress_duty_min, float *out_progress_window_s,
+                                         float *out_drift_hysteresis_c, float *out_frozen_eps_c,
+                                         float *out_cross_zone_period_s, float *out_bangbang_hysteresis_c,
+                                         float *out_cooling_limited_margin_c,
+                                         float *out_cooling_limited_hold_s, float *out_ramp_lock_band_c);
+
+/* Writer for the getter above. profile_index must be <= the CURRENT
+ * timing_profile_count -- writing exactly at the current count grows it by
+ * one (matching zones_http_post.c's own "profiles submitted 0..N-1
+ * contiguously, count becomes N" convention); writing past that leaves an
+ * unreachable gap slot no zone_cfg_t::timing_profile could ever validate
+ * against, so it is refused rather than silently accepted. Every numeric
+ * field is bounded exactly as validate_zones_cfg()'s timing-profile loop
+ * enforces (ZONE_GUARD_DUTY_MAX/ZONE_GUARD_TIME_S_MAX/
+ * ZONE_GUARD_MARGIN_C_MAX/ZONE_GUARD_EPS_C_MAX); name longer than
+ * TIMING_PROFILE_NAME_MAX_LEN is refused, same convention as
+ * zones_config_set_name(). Refused (nothing written) for any numeric field
+ * out of range, a null/oversized name, or profile_index out of bounds. */
+bool zones_config_set_timing_profile_raw(uint8_t profile_index, const char *name,
+                                         float progress_duty_min, float progress_window_s,
+                                         float drift_hysteresis_c, float frozen_eps_c,
+                                         float cross_zone_period_s, float bangbang_hysteresis_c,
+                                         float cooling_limited_margin_c, float cooling_limited_hold_s,
+                                         float ramp_lock_band_c);
 
 /* Runtime accessor pair for zone_cfg_t::progress_band_c (ZONES_CFG_VERSION
  * 21->22, docs/audits/consumer_without_producer_2026-09-06.md finding 1) --
