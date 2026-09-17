@@ -61,8 +61,8 @@ silent PASS or a SKIP).
 **Restore:** removed the inserted line by hand (never `git checkout --`).
 `git diff --stat firmware/SaftyFW/src/tasks/link_frame.c` — empty.
 `git hash-object firmware/SaftyFW/src/tasks/link_frame.c` —
-`c7aefbdf2c4a9349ae338f746d3d29f21605cddb`, matching the pre-sabotage hash
-taken before the edit.
+blob:firmware/SaftyFW/src/tasks/link_frame.c`c7aefbdf2c4a9349ae338f746d3d29f21605cddb`,
+matching the pre-sabotage hash taken before the edit.
 
 **Forced full rebuild:** deleted `firmware/SaftyFW/build` entirely (not a
 reconfigure-in-place) and re-ran the check from scratch. **PASS**, exit 0,
