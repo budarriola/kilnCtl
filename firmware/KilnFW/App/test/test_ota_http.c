@@ -1839,7 +1839,7 @@ static void test_ota_esp_status_user_session_redacts_build_identity(void)
     const char *token = ota_status_test_make_session(WEB_AUTH_SESSION_ROLE_USER, "user-token-1");
     stub_headers_reset();
     char cookie[64];
-    snprintf(cookie, sizeof(cookie), "%s", token);
+    snprintf(cookie, sizeof(cookie), HTTP_SESSION_COOKIE_NAME "=%s", token);
     stub_header_set("Cookie", cookie);
     s_last_resp_body[0] = '\0';
 
@@ -1867,7 +1867,7 @@ static void test_ota_esp_status_admin_session_gets_full_payload(void)
     const char *token = ota_status_test_make_session(WEB_AUTH_SESSION_ROLE_ADMIN, "admin-token-1");
     stub_headers_reset();
     char cookie[64];
-    snprintf(cookie, sizeof(cookie), "%s", token);
+    snprintf(cookie, sizeof(cookie), HTTP_SESSION_COOKIE_NAME "=%s", token);
     stub_header_set("Cookie", cookie);
     s_last_resp_body[0] = '\0';
 
@@ -1882,6 +1882,66 @@ static void test_ota_esp_status_admin_session_gets_full_payload(void)
               "ADMIN role -- real dirty value present");
     TEST_CHECK(strstr(s_last_resp_body, "\"build_date\":\"1970-01-01 00:00:00\"") != NULL,
               "ADMIN role -- real build_date value present");
+}
+
+// 2026-09-17 review of the section 6 login route (WEB_AUTH_PLAN.md section
+// 2b): resolve_role_for_request() (http_auth_http.c) used to SHA-256 the
+// WHOLE raw Cookie header instead of parsing the named session cookie
+// (HTTP_SESSION_COOKIE_NAME), so a second cookie on the same path -- legal
+// per RFC 6265, and exactly what a real browser sends once anything else
+// ever sets one -- silently changed the resolved session. These two tests
+// exercise the real fix (extract_named_cookie() inside http_auth_http.c,
+// exercised only indirectly here since it is file-static) via the same
+// public handler the tests above use, with decoy cookies before and after
+// the real one.
+static void test_ota_esp_status_admin_session_survives_decoy_cookies(void)
+{
+    TEST_SECTION("ota_esp_status_get_handler -- a Cookie header carrying OTHER cookies around "
+                 "kiln_sid must still resolve the real session (the header-hashing bug this "
+                 "fixes would have made this depend on which decoys are present)");
+    web_auth_policy_t policy = { .web_enabled = true, .lcd_enabled = false,
+                                  .web_timeout_s = -1, .lcd_timeout_s = -1 };
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init default nvs partition");
+    TEST_CHECK(web_auth_store_set_policy(&policy) == HAL_OK, "setup: policy persisted");
+    const char *token = ota_status_test_make_session(WEB_AUTH_SESSION_ROLE_ADMIN, "admin-token-2");
+    stub_headers_reset();
+    char cookie[96];
+    snprintf(cookie, sizeof(cookie), "a=1; " HTTP_SESSION_COOKIE_NAME "=%s; theme=dark", token);
+    stub_header_set("Cookie", cookie);
+    s_last_resp_body[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = ota_esp_status_get_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "handler always returns ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, "\"commit\":\"stub\"") != NULL,
+              "decoy cookies before/after kiln_sid do not prevent ADMIN resolution");
+}
+
+static void test_ota_esp_status_unnamed_cookie_value_is_not_a_session(void)
+{
+    TEST_SECTION("ota_esp_status_get_handler -- a Cookie header with NO kiln_sid= name (the "
+                 "pre-fix format, a bare token) must resolve to no session, not accidentally "
+                 "match by matching the whole header's hash");
+    web_auth_policy_t policy = { .web_enabled = true, .lcd_enabled = false,
+                                  .web_timeout_s = -1, .lcd_timeout_s = -1 };
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init default nvs partition");
+    TEST_CHECK(web_auth_store_set_policy(&policy) == HAL_OK, "setup: policy persisted");
+    const char *token = ota_status_test_make_session(WEB_AUTH_SESSION_ROLE_ADMIN, "admin-token-3");
+    stub_headers_reset();
+    char cookie[64];
+    snprintf(cookie, sizeof(cookie), "%s", token); // bare token, no "kiln_sid=" name
+    stub_header_set("Cookie", cookie);
+    s_last_resp_body[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = ota_esp_status_get_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "handler always returns ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, "\"commit\":null") != NULL,
+              "no named kiln_sid cookie -- redacted exactly like no session at all");
 }
 
 // ---------------------------------------------------------------------------
@@ -1945,6 +2005,8 @@ void run_test_ota_http(void)
     test_ota_esp_status_unauthenticated_redacts_build_identity();
     test_ota_esp_status_user_session_redacts_build_identity();
     test_ota_esp_status_admin_session_gets_full_payload();
+    test_ota_esp_status_admin_session_survives_decoy_cookies();
+    test_ota_esp_status_unnamed_cookie_value_is_not_a_session();
     {
         // Leave web auth off for every test after this one -- matches the
         // state every other pre-existing test in this file assumed

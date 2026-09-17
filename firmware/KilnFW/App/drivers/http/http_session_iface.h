@@ -16,11 +16,40 @@
 #ifndef KILNCTL_HTTP_SESSION_IFACE_H
 #define KILNCTL_HTTP_SESSION_IFACE_H
 
+#include <stdint.h>
+#include <stddef.h>
+
 #include "http_auth_enforce.h" // http_auth_role_t
+#include "web_auth_session.h" // web_auth_table_t
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// The ONE cookie name this seam's session mechanism uses, shared verbatim
+// between the login handler that sets it (web_auth_login_http.c's
+// Set-Cookie) and http_auth_http.c's resolve_role_for_request(), which
+// parses it back out of the request's Cookie header. Defined here rather
+// than in either of those two files so the name can never drift between
+// writer and reader -- the same reset-one-side-of-a-pair hazard
+// http_session_table()/http_session_hash_token() above already guard
+// against.
+#define HTTP_SESSION_COOKIE_NAME "kiln_sid"
+
+// Returns the ONE session table this seam's .c file owns (a single static
+// web_auth_table_t, lazily initialised). Section 6's login handler MUST
+// call web_auth_table_create_session() against THIS table, not a second
+// static instance of its own -- see http_session_iface.c's header comment
+// for why (the reset-one-side-of-a-pair shape CLAUDE.md warns about).
+web_auth_table_t *http_session_table(void);
+
+// Plain SHA-256 of a bearer token, exactly the hash http_auth_session_resolve()
+// uses to look a token up. Section 6's login handler MUST hash the token it
+// mints with THIS function before calling web_auth_table_create_session(),
+// not a second, independently-written hash -- otherwise a login-minted
+// token would never resolve here (same reset-one-side-of-a-pair hazard as
+// http_session_table() above).
+void http_session_hash_token(const char *token, size_t token_len, uint8_t out[32]);
 
 // Resolves the caller's role from whatever the real session mechanism uses
 // to identify a session -- a bearer token pulled from a cookie header, in

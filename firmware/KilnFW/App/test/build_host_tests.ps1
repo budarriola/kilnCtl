@@ -129,6 +129,12 @@ try {
         # as test_ota_auth.c/ota_auth.c just above it in this file's history.
         (Join-Path $testDir "test_http_auth_enforce.c"),
         (Join-Path $testDir "test_web_auth_safety_interaction.c"),
+        # docs/WEB_AUTH_PLAN.md section 6 -- the login handler's pure
+        # role-selection logic (net/web_auth_login.c below), host-tested the
+        # same way test_http_auth_enforce.c/http_auth_enforce.c are: no
+        # ESP-IDF dependency, joins this combined executable rather than
+        # needing its own.
+        (Join-Path $testDir "test_web_auth_login.c"),
         (Join-Path $testDir "test_sim_high_temp.c"),
         (Join-Path $testDir "test_sim_mistune.c"),
         (Join-Path $testDir "test_sim_factorial_design.c"),
@@ -148,6 +154,7 @@ try {
         (Join-Path $driversDir "net/auth_reset_gesture.c"),
         (Join-Path $driversDir "ui/lcd_auth_state.c"),
         (Join-Path $driversDir "net/web_auth_session.c"),
+        (Join-Path $driversDir "net/web_auth_login.c"),
         (Join-Path $driversDir "net/ota_interlock.c"),
         (Join-Path $driversDir "http/security_http_core.c"),
         (Join-Path $driversDir "http/security_backend_placeholder.c"),

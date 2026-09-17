@@ -108,6 +108,14 @@ static const route_tier_entry_t kRouteTierTable[] = {
      * anyone can log in, plus the reads app.js actually issues to render
      * it. */
     ROUTE_TIER("/", HTTP_GET, ROUTE_TIER_OPEN),
+    /* WEB_AUTH_PLAN.md section 6: the login page and the credential-check
+     * route it submits to. Both OPEN for the same reason
+     * GET /api/ota/challenge is OPEN -- a caller with no session yet must
+     * still be able to reach the login form and submit credentials; the
+     * real gate is web_auth_store_verify_password() inside the handler
+     * itself, not this classification. */
+    ROUTE_TIER("/login", HTTP_GET, ROUTE_TIER_OPEN),
+    ROUTE_TIER("/api/auth/login", HTTP_POST, ROUTE_TIER_OPEN),
     ROUTE_TIER("/app.js", HTTP_GET, ROUTE_TIER_OPEN),
     ROUTE_TIER("/nav.js", HTTP_GET, ROUTE_TIER_OPEN),
     ROUTE_TIER("/theme.css", HTTP_GET, ROUTE_TIER_OPEN),

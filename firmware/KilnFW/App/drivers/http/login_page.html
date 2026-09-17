@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kiln Login</title>
+<link rel="stylesheet" href="/theme.css">
+<style>
+  body { display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+  form { display: flex; flex-direction: column; gap: 0.75rem; width: 18rem; padding: 1.5rem; }
+  label { font-size: 0.9rem; }
+  input { padding: 0.5rem; font-size: 1rem; }
+  button { padding: 0.6rem; font-size: 1rem; cursor: pointer; }
+  #error { color: #c0392b; min-height: 1.2rem; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<form id="login-form" autocomplete="on">
+  <h2>Kiln Login</h2>
+  <label for="username">Username</label>
+  <input id="username" name="username" type="text" autocomplete="username" required>
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="current-password" required>
+  <div id="error"></div>
+  <button type="submit">Log in</button>
+</form>
+<script>
+document.getElementById('login-form').addEventListener('submit', function (evt) {
+  evt.preventDefault();
+  var errorEl = document.getElementById('error');
+  errorEl.textContent = '';
+  var body = 'username=' + encodeURIComponent(document.getElementById('username').value) +
+             '&password=' + encodeURIComponent(document.getElementById('password').value);
+  fetch('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body
+  }).then(function (resp) {
+    if (resp.ok) {
+      window.location.href = '/';
+      return;
+    }
+    return resp.text().then(function (text) {
+      errorEl.textContent = (resp.status === 429) ? 'Too many attempts -- try again later.' : (text || 'Login failed.');
+    });
+  }).catch(function () {
+    errorEl.textContent = 'Network error.';
+  });
+});
+</script>
+</body>
+</html>

@@ -32,6 +32,7 @@
 #include "dualwrite_window_http.h"
 #include "backup_http.h"
 #include "security_backend_web_auth.h"
+#include "web_auth_login_http.h"
 #include "settings_http.h"
 #include "cfg_fs_format_http.h"
 #include "factory_reset.h"
@@ -555,6 +556,17 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (security_backend_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "security_backend_web_auth_start failed: %s -- no "
                       "/api/auth/bootstrap_password route this boot", esp_err_to_name(security_backend_err));
+    }
+
+    // WEB_AUTH_PLAN.md section 6: the browser-side login -- GET /login and
+    // POST /api/auth/login. Non-fatal on failure, same convention as every
+    // other *_http_start() call in this block: a board that fails this
+    // registration still boots, just with no way for a browser to
+    // authenticate until the next successful boot.
+    esp_err_t web_auth_login_err = web_auth_login_http_start();
+    if (web_auth_login_err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "web_auth_login_http_start failed: %s -- no /login or "
+                      "/api/auth/login route this boot", esp_err_to_name(web_auth_login_err));
     }
 
     // CommonFW/docs/UPDATE_PROTOCOL.md section 2 + section 1 / TODO.md 9.4:
