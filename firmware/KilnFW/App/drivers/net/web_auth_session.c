@@ -8,7 +8,7 @@ void web_auth_table_init(web_auth_table_t *t)
     memset(t, 0, sizeof(*t));
 }
 
-bool web_auth_constant_time_equal(const uint8_t *a, const uint8_t *b, size_t len)
+bool web_auth_session_constant_time_equal(const uint8_t *a, const uint8_t *b, size_t len)
 {
     // Same discipline as ota_auth_constant_time_equal(): always inspect
     // every byte, never early-exit on the first mismatch.
@@ -75,7 +75,7 @@ int web_auth_table_find_by_token(const web_auth_table_t *t, const uint8_t token_
         if (!slot->in_use) {
             continue;
         }
-        if (web_auth_constant_time_equal(slot->token_hash, token_hash, WEB_AUTH_TOKEN_HASH_LEN)) {
+        if (web_auth_session_constant_time_equal(slot->token_hash, token_hash, WEB_AUTH_TOKEN_HASH_LEN)) {
             return (int)i;
         }
     }

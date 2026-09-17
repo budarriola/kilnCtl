@@ -71,7 +71,7 @@ typedef struct {
     bool     in_use;
     uint8_t  token_hash[WEB_AUTH_TOKEN_HASH_LEN]; // never the raw token -- compared
                                                     // constant-time, see
-                                                    // web_auth_constant_time_equal()
+                                                    // web_auth_session_constant_time_equal()
     char     client_ip[WEB_AUTH_CLIENT_IP_LEN];
     web_auth_session_role_t role;
     uint32_t issued_ms;
@@ -93,8 +93,12 @@ void web_auth_table_init(web_auth_table_t *t);
 // Constant-time comparison, same discipline and same reasoning as
 // ota_auth_constant_time_equal() (see ota_auth.h): a token hash comparison
 // is exactly the kind of network-facing secret compare that must not leak
-// timing information proportional to the first mismatched byte.
-bool web_auth_constant_time_equal(const uint8_t *a, const uint8_t *b, size_t len);
+// timing information proportional to the first mismatched byte. Named
+// web_auth_session_* (not the shorter web_auth_constant_time_equal) because
+// web_auth_store.c/.h already defines its own externally-linked
+// web_auth_constant_time_equal() for its hash compares -- check_duplicate_
+// symbols.ps1 caught the collision.
+bool web_auth_session_constant_time_equal(const uint8_t *a, const uint8_t *b, size_t len);
 
 // Creates a new session: finds a free slot, or if the table is full, evicts
 // the slot with the smallest last_seen_ms (least recently seen) -- "a stale
