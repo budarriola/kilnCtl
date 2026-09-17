@@ -1797,6 +1797,79 @@ static void test_profile_name_at_limit_accepted(void)
     TEST_CHECK(strcmp(g_last_saved_profile.name, "ExactlyFifteenC") == 0, "the full, untruncated name was written");
 }
 
+// RELEASE_HARDENING_PLAN.md item 7, "import of a deliberately hostile
+// config": the individual rejection tests above (malformed body, wrong
+// kind, too-new version, out-of-range model, overlong zone/profile name)
+// each prove ONE shape is refused, but the actual release gate --
+// "no such input can produce a bootable state that will command heat" --
+// was never stated as its own assertion; it had to be inferred by reading
+// all of them together (see docs/audits/
+// release_hardening_plan_verify_1_2_5_7_8_2026-09-16.md, blocker 7). This
+// test states that property directly, in one place, over every hostile
+// shape this file already knows how to construct: for each, backup_import_
+// apply() must both refuse (ok == false) AND leave the zero-write invariant
+// intact -- g_total_write_calls and g_profile_save_calls (the two sinks
+// that could otherwise persist a value a later boot would read back and
+// command heat from) both stay at zero. A body that got this wrong
+// (accepted, or partially committed before failing) would slip
+// past the per-shape tests above only if a future edit added a new hostile
+// shape without a matching rejection test for it -- this test is a single
+// choke point that would still catch a REGRESSION in any of the shapes
+// already listed here, which is exactly the gap the audit named.
+static void test_no_hostile_backup_input_produces_a_bootable_heat_commanding_state(void)
+{
+    TEST_SECTION("backup_import_apply -- release gate: no hostile input shape writes anything at all");
+
+    static const char *const kHostileBodies[] = {
+        // truncated / malformed JSON
+        "{",
+        // wrong "kind"
+        "{\"kind\":\"something_else\",\"version\":2,\"profiles\":[],\"zones\":[]}",
+        // version newer than this firmware's BACKUP_FORMAT_VERSION (4)
+        "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],\"zones\":[]}",
+        // a version number "from the future", far past anything ever issued
+        "{\"kind\":\"kilnctl_backup\",\"version\":9999,\"profiles\":[],\"zones\":[]}",
+        // valid JSON, in-range "kind"/"version", but a value outside the
+        // validated model range for one zone
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],"
+        "\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
+        "\"model_k_dc\":999999,\"model_tau_s\":100,\"model_dead_time_s\":30}]}",
+        // an overlong zone name, otherwise well-formed
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],"
+        "\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
+        "\"name\":\"ThisNameIsWayTooLongForOneZone\"}]}",
+        // an overlong profile name, otherwise well-formed
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,"
+        "\"profiles\":[{\"id\":0,\"name\":\"ThisNameIsWayTooLongForOneProfile\",\"zone_mask\":1,"
+        "\"segments\":[{\"target_c\":100,\"ramp_c_per_hr\":50,\"dwell_min\":30}]}],"
+        "\"zones\":[]}",
+        // a self-referencing settings_source -- structurally valid JSON,
+        // individually in-range values, only wrong as a whole
+        "{\"kind\":\"kilnctl_backup\",\"version\":3,\"profiles\":[],"
+        "\"zones\":[{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
+        "\"settings_source\":1}]}",
+    };
+
+    for (size_t i = 0; i < sizeof(kHostileBodies) / sizeof(kHostileBodies[0]); i++) {
+        reset_stub_state();
+        char err[160];
+        bool ok = backup_import_apply(kHostileBodies[i], err, sizeof(err));
+
+        char msg[256];
+        snprintf(msg, sizeof(msg), "hostile body #%zu must be refused, not accepted", i);
+        TEST_CHECK(!ok, msg);
+
+        snprintf(msg, sizeof(msg),
+                 "hostile body #%zu: no zone setter may have run -- a partial commit before "
+                 "the refusal is exactly the shape that could leave a bootable-and-heat-"
+                 "commanding config behind", i);
+        TEST_CHECK(g_total_write_calls == 0, msg);
+
+        snprintf(msg, sizeof(msg), "hostile body #%zu: no profile may have been saved", i);
+        TEST_CHECK(g_profile_save_calls == 0, msg);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Version 3 (2026-08-30): PID_EXPANSION_PLAN.md Phase 2/4's four new fields
 // -- fuzzy_strength_pct, coupling_coeff, coupling_neighbor_zone,
@@ -2967,6 +3040,7 @@ void run_test_backup_import(void)
     test_v2_body_with_stale_sentinel_still_imports();
     test_overlong_profile_name_rejected();
     test_profile_name_at_limit_accepted();
+    test_no_hostile_backup_input_produces_a_bootable_heat_commanding_state();
 
     test_v4_new_fields_round_trip_distinct_values();
     test_coupling_diag_k_dc_round_trips_distinct_value();
