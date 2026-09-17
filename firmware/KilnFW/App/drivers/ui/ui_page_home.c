@@ -487,6 +487,72 @@ lv_obj_t *ui_page_home_build(void)
      * of silently becoming scrollable. */
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
+    /* docs/WEB_AUTH_PLAN.md item 10 -- the four transparent corner hit zones
+     * for the physical credential-reset gesture. Built here, as the FIRST
+     * children of `scr`, deliberately BEFORE the topbar/content/action_row
+     * below: LVGL resolves an overlapping tap to the LAST-added (topmost)
+     * child, so any real control built after this point -- the topbar's
+     * gear icon, the Pause/Start buttons' extended touch halo -- always wins
+     * an overlapping tap regardless of geometric overlap. This is the
+     * primary safety mechanism; the explicit size shrinks below are
+     * defense-in-depth on top of it, not a substitute for it.
+     *
+     * Bench check performed at code-review level (no live hardware access in
+     * this pass -- see the commit message): grepping ui_topbar.c found the
+     * home page's gear-icon box is a 36x36 FLOATING object flush at
+     * LV_ALIGN_TOP_RIGHT (icon width UI_TOPBAR_ICON_W_PX plus
+     * UI_THEME_STATUS_BAR_HEIGHT_PX/PADDING_PX math for one icon), directly
+     * under a naive 40x40 top-right zone. Reading this file's own action_row
+     * comment (immediately above where it is built, below) found the
+     * Pause/Start buttons carry a documented ~24px touch-area halo beyond
+     * their 36px drawn height, reaching both bottom corners. Top-left has no
+     * competing control. Per the "shrink a zone rather than steal a tap"
+     * instruction: top-left stays a full 40x40; top-right, bottom-left and
+     * bottom-right are shrunk to 24x24, each commented with exactly which
+     * real control it avoids stealing from -- on top of the z-order
+     * precedence above, which is what actually guarantees the real controls
+     * win. All four are fully transparent (bg_opa TRANSP, no border) --
+     * this deliberately adds no new visible element and no new LCD color. */
+    {
+        const int32_t full_zone_px = 40;
+        const int32_t shrunk_zone_px = 24; /* smaller on purpose -- see comment above */
+
+        struct {
+            auth_reset_gesture_corner_t corner;
+            lv_align_t align;
+            int32_t size_px;
+        } zones[AUTH_RESET_CORNER_COUNT] = {
+            { AUTH_RESET_CORNER_TOP_LEFT,     LV_ALIGN_TOP_LEFT,     full_zone_px },
+            /* Shrunk: avoids stealing from ui_topbar.c's 36x36 gear-icon
+             * FLOATING box, flush at LV_ALIGN_TOP_RIGHT (0,0). */
+            { AUTH_RESET_CORNER_TOP_RIGHT,    LV_ALIGN_TOP_RIGHT,    shrunk_zone_px },
+            /* Shrunk: avoids stealing from the Pause button's ~24px touch
+             * halo below action_row's bottom-left corner. */
+            { AUTH_RESET_CORNER_BOTTOM_LEFT,  LV_ALIGN_BOTTOM_LEFT,  shrunk_zone_px },
+            /* Shrunk: avoids stealing from the Start/Stop button's ~24px
+             * touch halo below action_row's bottom-right corner. */
+            { AUTH_RESET_CORNER_BOTTOM_RIGHT, LV_ALIGN_BOTTOM_RIGHT, shrunk_zone_px },
+        };
+
+        for (size_t i = 0; i < AUTH_RESET_CORNER_COUNT; i++) {
+            lv_obj_t *zone = lv_obj_create(scr);
+            lv_obj_set_size(zone, zones[i].size_px, zones[i].size_px);
+            lv_obj_set_style_bg_opa(zone, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_border_width(zone, 0, 0);
+            lv_obj_set_style_pad_all(zone, 0, 0);
+            lv_obj_remove_flag(zone, LV_OBJ_FLAG_SCROLLABLE);
+            /* FLOATING first, before alignment -- same ordering ui_topbar.c
+             * uses for its icon box, and for the same reason (excludes it
+             * from `scr`'s flex-column layout so it can be positioned
+             * freely against the screen edge instead of stacking as a flow
+             * child). */
+            lv_obj_add_flag(zone, LV_OBJ_FLAG_FLOATING);
+            lv_obj_align(zone, zones[i].align, 0, 0);
+            lv_obj_add_event_cb(zone, ui_home_auth_reset_corner_tap_cb, LV_EVENT_CLICKED,
+                                 (void *)(intptr_t)zones[i].corner);
+        }
+    }
+
     /* Top bar -- ui_topbar.c/.h owns both LVGL traps (hit-test-does-not-
      * escape-the-parent, and the flex trap on a FLOATING icon proxy); see
      * that header for the mechanism. No title here: this page shows the

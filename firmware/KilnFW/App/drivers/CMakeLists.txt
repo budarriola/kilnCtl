@@ -314,7 +314,11 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # for any role this backend doesn't cover). Previously
                        # host-test-only via build_host_tests.ps1's own SRCS
                        # list -- never linked into the real target, so this
-                       # page compiled and ran nowhere on a real board.
+                       # page compiled and ran nowhere on a real board. The
+                       # *_stub.c seam placeholders are deleted now that both
+                       # real modules (session table, policy/credential
+                       # storage) exist -- see http_session_iface.h /
+                       # http_auth_policy_iface.h.
                        "http/security_http_core.c"
                        "http/security_backend_web_auth.c"
                        "http/security_backend_placeholder.c"

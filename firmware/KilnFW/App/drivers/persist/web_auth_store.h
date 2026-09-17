@@ -263,11 +263,59 @@ hal_status_t web_auth_store_set_policy(const web_auth_policy_t *policy);
 // loaded via web_auth_store_load_policy().
 bool web_auth_policy_effective_enabled(web_auth_load_status_t status, bool stored_enabled);
 
+// --- Enable-gate / session-clear decision (plan item 11, "the only place
+// the two interact") ---------------------------------------------------------
+//
+// "No credential set" is not an error state -- a board with auth off and no
+// credential is fully functional. But "enabling auth is refused unless a
+// credential for that interface exists" (item 11) is a real invariant this
+// module must protect, because nothing else stands between an operator and
+// locking themselves out: web_auth_store_set_policy() above deliberately does
+// NOT enforce it (any caller can persist any policy value -- see its own doc
+// comment), so the one place this check happens is here, called by whichever
+// slice actually flips a switch (today, the item 6 password page). A second,
+// re-derived copy of this rule anywhere else would be exactly the kind of
+// silent duplicate CLAUDE.md's "reset one side of a pair" note warns about.
+//
+// `requested` is the whole policy record the caller wants to persist next;
+// `admin_password_configured`/`admin_pin_configured` are
+// web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR) /
+// web_auth_store_pin_configured(WEB_AUTH_ROLE_ADMINISTRATOR) -- passed in
+// rather than read here so this stays a pure function like the rest of this
+// header's decision logic (no I/O, host-testable with a fake_kv-free test).
+// The check is on `requested`, not on the current->requested edge: an
+// enabled-but-now-credential-less state is never valid to persist, not just
+// newly-invalid to enter, so a caller cannot "grandfather" a stale enabled
+// flag back in by resaving it unchanged.
+//
+// `out_clear_web_sessions`/`out_clear_lcd_session` are only meaningful when
+// the return value is WEB_AUTH_POLICY_TRANSITION_OK; on any REFUSED result
+// they are set false and the caller MUST NOT call web_auth_store_set_policy()
+// with `requested` at all. When OK, `*out_clear_web_sessions` is true iff
+// this transition turns web_enabled on (false -> true in `current`), never
+// merely because it is already true (a re-save of an unchanged "on" policy,
+// e.g. from changing only a timeout, must not silently log everyone out) --
+// same edge-triggered reasoning for `*out_clear_lcd_session` against
+// lcd_enabled. Disabling never clears (item 11: "sessions become irrelevant
+// but are kept").
+typedef enum {
+    WEB_AUTH_POLICY_TRANSITION_OK = 0,
+    WEB_AUTH_POLICY_TRANSITION_REFUSED_NO_WEB_CREDENTIAL,
+    WEB_AUTH_POLICY_TRANSITION_REFUSED_NO_LCD_CREDENTIAL,
+} web_auth_policy_transition_t;
+
+web_auth_policy_transition_t web_auth_policy_check_transition(const web_auth_policy_t *current,
+                                                                const web_auth_policy_t *requested,
+                                                                bool admin_password_configured,
+                                                                bool admin_pin_configured,
+                                                                bool *out_clear_web_sessions,
+                                                                bool *out_clear_lcd_session);
+
 // --- Physical credential reset (plan item 10) -------------------------------
 
 // The one entry point item 10's confirmed gesture (E-stop asserted, all four
 // LCD corners tapped in order, then an explicit timed confirm) calls once
-// the confirm step fires. Does exactly three things, and nothing else:
+// the confirm step fires. Does exactly two things, and nothing else:
 //
 //  1. Clears the ADMINISTRATOR's web password record only -- the USER
 //     record within the same shared blob is left byte-for-byte untouched.
@@ -276,23 +324,29 @@ bool web_auth_policy_effective_enabled(web_auth_load_status_t status, bool store
 //     entropy source per its randomness note, and a fixed literal password
 //     baked into source is exactly the class of secret this codebase's
 //     "never write a real credential into the repo" rule exists to forbid).
-//     Combined with step 2 this is safe: with policy ABSENT, web auth is
-//     OFF, so no administrator login is required to reach the board at all.
-//  2. Erases the policy record (WEB_AUTH_KEY_POLICY) back to genuinely
-//     ABSENT -- not merely overwritten with false/false -- so a subsequent
-//     web_auth_store_load_policy() reports WEB_AUTH_LOAD_ABSENT, which
-//     web_auth_policy_effective_enabled() collapses to auth-off. This is
-//     the intended post-reset state: the owner can reach the board again.
-//  3. Leaves the LCD PIN record (WEB_AUTH_KEY_LCD, both roles) and every
-//     config namespace/partition completely untouched.
+//  2. Leaves the policy record (WEB_AUTH_KEY_POLICY), the LCD PIN record
+//     (WEB_AUTH_KEY_LCD, both roles) and every config namespace/partition
+//     completely untouched. Plan section 10 is explicit that this reset
+//     "does not disable authentication ... and does not clear any config":
+//     the failure being recovered from is a forgotten password, and
+//     silently taking policy back to WEB_AUTH_LOAD_ABSENT (auth-off, via
+//     web_auth_policy_effective_enabled()'s ABSENT collapse) would be a
+//     bigger hole than the one being closed. An earlier version of this
+//     function did exactly that and was corrected.
 //
-// Same read-back-verified write/erase discipline as every other setter in
-// this file. Returns true only if both the credential write and the policy
-// erase are confirmed by read-back; on false the caller must treat the
-// reset as not having happened (this function does not promise a partial
-// reset is safe to leave partially applied, but it also performs the two
-// steps independently -- a caller that gets false should retry the whole
-// gesture rather than assume either half landed).
+// Net effect: if web auth was enabled before the reset, it stays enabled,
+// with the administrator credential now unconfigured. That is a new
+// reachable state -- auth enabled, no administrator credential configured,
+// must_change=true -- and it is section 11's login-path work (auth
+// disabled/first-boot/field-upgrade handling, owned separately) that must
+// treat it as a forced set-a-new-password flow, not as a lockout or a
+// silent bypass. This function only creates the state; it does not handle
+// it.
+//
+// Same read-back-verified write discipline as every other setter in this
+// file. Returns true only once the administrator-record write is confirmed
+// by read-back; on false the caller must treat the reset as not having
+// happened.
 //
 // Signature is exactly auth_reset_gesture_clear_fn (bool (*)(void)) so it
 // can be assigned directly to auth_reset_gesture_state_t.clear_credentials_fn

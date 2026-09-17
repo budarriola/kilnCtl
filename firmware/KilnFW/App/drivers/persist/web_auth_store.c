@@ -538,17 +538,90 @@ bool web_auth_policy_effective_enabled(web_auth_load_status_t status, bool store
     }
 }
 
+web_auth_policy_transition_t web_auth_policy_check_transition(const web_auth_policy_t *current,
+                                                                const web_auth_policy_t *requested,
+                                                                bool admin_password_configured,
+                                                                bool admin_pin_configured,
+                                                                bool *out_clear_web_sessions,
+                                                                bool *out_clear_lcd_session)
+{
+    bool clear_web = false;
+    bool clear_lcd = false;
+
+    if (out_clear_web_sessions != NULL) {
+        *out_clear_web_sessions = false;
+    }
+    if (out_clear_lcd_session != NULL) {
+        *out_clear_lcd_session = false;
+    }
+
+    if (current == NULL || requested == NULL) {
+        return WEB_AUTH_POLICY_TRANSITION_REFUSED_NO_WEB_CREDENTIAL; // never a valid call; pick
+                                                                       // the stricter refusal so a
+                                                                       // caller that ignores the
+                                                                       // return value still fails
+                                                                       // to persist anything
+    }
+
+    // The invariant is on `requested`, not the edge -- see header comment:
+    // a policy record that reads enabled==true must never be persistable
+    // without that interface's administrator credential already configured,
+    // whether this is a fresh enable or a re-save of an already-enabled
+    // record.
+    if (requested->web_enabled && !admin_password_configured) {
+        return WEB_AUTH_POLICY_TRANSITION_REFUSED_NO_WEB_CREDENTIAL;
+    }
+    if (requested->lcd_enabled && !admin_pin_configured) {
+        return WEB_AUTH_POLICY_TRANSITION_REFUSED_NO_LCD_CREDENTIAL;
+    }
+
+    // Edge-triggered: only an actual off->on flip clears sessions (item 11:
+    // "Enabling auth: every existing session is cleared" / "Disabling auth:
+    // sessions become irrelevant but are kept"). A no-op re-save of an
+    // already-enabled interface (e.g. changing only the other interface's
+    // timeout) must not silently log anyone out.
+    if (requested->web_enabled && !current->web_enabled) {
+        clear_web = true;
+    }
+    if (requested->lcd_enabled && !current->lcd_enabled) {
+        clear_lcd = true;
+    }
+
+    if (out_clear_web_sessions != NULL) {
+        *out_clear_web_sessions = clear_web;
+    }
+    if (out_clear_lcd_session != NULL) {
+        *out_clear_lcd_session = clear_lcd;
+    }
+    return WEB_AUTH_POLICY_TRANSITION_OK;
+}
+
 // --- Physical credential reset (item 10) -------------------------------------
 
 bool web_auth_store_clear_for_physical_reset(void)
 {
-    // Step 1: clear ONLY the administrator's password record, in place
-    // within the shared web_auth blob -- the user record is copied through
-    // untouched. Same "load existing, discard on absent/wrong-version/
-    // corrupt" convention as web_auth_store_set_password(), except here a
-    // discard still produces a valid, empty blob rather than an error: a
-    // physical reset must succeed even against a store that was never
-    // written or was already corrupt.
+    // Clear ONLY the administrator's password record, in place within the
+    // shared web_auth blob -- the user record is copied through untouched.
+    // Same "load existing, discard on absent/wrong-version/corrupt"
+    // convention as web_auth_store_set_password(), except here a discard
+    // still produces a valid, empty blob rather than an error: a physical
+    // reset must succeed even against a store that was never written or
+    // was already corrupt.
+    //
+    // Deliberately does NOT touch the policy record. Plan section 10 is
+    // explicit: this reset "does not disable authentication ... and does
+    // not clear any config" -- the failure being recovered from is a
+    // forgotten password, and silently unlocking the whole board (which an
+    // earlier version of this function did, by erasing the policy key back
+    // to WEB_AUTH_LOAD_ABSENT so web_auth_policy_effective_enabled()
+    // collapsed to auth-off) is a bigger hole than the one being closed.
+    // The policy is left exactly as the owner had it: if web auth was
+    // enabled, it stays enabled, now with configured=false/must_change=true
+    // on the administrator record. Section 11's login path owns treating
+    // "enabled, no administrator credential configured" as a forced
+    // set-a-new-password flow rather than a lockout or a silent bypass --
+    // that state is reachable starting with this function, but implementing
+    // that flow is not this function's job.
     web_auth_web_blob_t blob;
     memset(&blob, 0, sizeof(blob));
     hal_status_t existing = load_blob(WEB_AUTH_KEY_WEB, &blob, sizeof(blob));
@@ -561,8 +634,7 @@ bool web_auth_store_clear_for_physical_reset(void)
     memset(admin, 0, sizeof(*admin));
     admin->must_change = true;  // item 10: a physical reset sets this true
     admin->configured = false;  // no password value invented/stored -- see
-                                 // header comment; safe because step 2 below
-                                 // takes policy back to ABSENT (auth off).
+                                 // header comment.
 
     blob.version = WEB_AUTH_STORE_VERSION;
     blob.crc32 = web_blob_crc(&blob);
@@ -572,31 +644,17 @@ bool web_auth_store_clear_for_physical_reset(void)
         return false;
     }
 
-    // Step 2: erase the policy key back to genuinely ABSENT (not merely
-    // overwritten with false/false) so web_auth_store_load_policy() reports
-    // WEB_AUTH_LOAD_ABSENT afterward, which web_auth_policy_effective_enabled()
-    // collapses to auth-off -- the intended post-reset state.
-    hal_kv_handle_t h;
-    hal_status_t open_err = hal_kv_open(&h, WEB_AUTH_NAMESPACE, HAL_KV_MODE_READ_WRITE, NULL);
-    if (open_err != HAL_OK) {
+    // Read-back verify the administrator record landed as intended -- never
+    // trust the write return code alone, same discipline as every other
+    // setter in this file.
+    web_auth_web_blob_t check;
+    memset(&check, 0, sizeof(check));
+    if (load_blob(WEB_AUTH_KEY_WEB, &check, sizeof(check)) != HAL_OK) {
         return false;
     }
-    hal_status_t erase_err = hal_kv_erase_key(&h, WEB_AUTH_KEY_POLICY);
-    if (erase_err == HAL_OK) {
-        erase_err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-    // HAL_NOT_FOUND means the policy key was already absent -- that is the
-    // goal state already reached, not a failure (same "already gone, not an
-    // error" convention hal_kv_esp.c documents for nvs_erase_key()).
-    if (erase_err != HAL_OK && erase_err != HAL_NOT_FOUND) {
-        return false;
-    }
-
-    // Read-back verify absence -- never trust the erase/commit return code
-    // alone, same discipline as every write in this file.
-    web_auth_policy_t check;
-    if (web_auth_store_load_policy(&check) != WEB_AUTH_LOAD_ABSENT) {
+    const web_auth_password_record_t *check_admin =
+        &check.roles[WEB_AUTH_ROLE_ADMINISTRATOR];
+    if (check_admin->configured != false || check_admin->must_change != true) {
         return false;
     }
     return true;

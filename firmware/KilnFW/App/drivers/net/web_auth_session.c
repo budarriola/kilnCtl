@@ -198,3 +198,8 @@ web_auth_session_role_t web_auth_effective_role(const web_auth_table_t *t, bool 
     }
     return slot->role;
 }
+
+bool web_auth_admin_bootstrap_needed(bool effective_enabled, bool admin_credential_configured)
+{
+    return effective_enabled && !admin_credential_configured;
+}

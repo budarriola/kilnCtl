@@ -514,6 +514,18 @@ typedef struct {
 
 void dashboard_get_status(dashboard_status_t *out);
 
+/* WEB_AUTH_PLAN.md item 10's physical credential-reset gesture needs a
+ * read of the E-stop bit -- SAFETY_FLAG_ESTOP is already carried on every
+ * status poll (safety_link_status_t.flags, see safety_link.h) but had no
+ * consumer anywhere in the codebase before this. This is a read, not new
+ * plumbing: same s_dash.safety cache dashboard_get_status() already reads,
+ * same null/error-tolerant discipline as dashboard_safety_ready() above.
+ * Fail-safe false (never asserted) if the link is unknown/down/erroring --
+ * a gesture gated on this can only arm when E-stop is POSITIVELY confirmed
+ * asserted, so "we don't know" must read as "not asserted", not "asserted".
+ */
+bool dashboard_http_estop_asserted(void);
+
 /* TODO.md 10.1a shared-backend seam: the same total_planned_s/elapsed_s/
  * remaining_s/remaining_is_estimate math GET /api/profile_exec serializes,
  * pulled out so ui_page_home.c's LCD progress bar reads identical numbers to

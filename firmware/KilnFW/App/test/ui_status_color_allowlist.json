@@ -24,6 +24,9 @@
     { "selector": ".row .value.near", "note": "2026-09 audit fix: render() now appends ' -- WARN'/' -- NEAR LIMIT' etc. to the value text for this class (see safety_page.html), a non-colour cue this CSS-only scan can't see." },
     { "selector": ".card.ineffective", "note": "always paired with the bold '!! TRIP_INEFFECTIVE !!' row text and a separate breaker-warning banner -- not colour alone." }
   ],
+  "security_page.html": [
+    { "selector": ".kc-sec-status.ok", "note": "same meaning and same token as safety_page.html's '.row .value.ok' above -- an OK/success confirmation, not a distinct status. setStatus() (security_page.html) always sets el.textContent to the outcome sentence ('Saved.', 'Saved. You will be signed out.', etc.) in the same call that sets this class; the .err sibling class (color: var(--fault-color), not a tracked token) covers the failure case with its own differing text ('Passwords do not match.', 'Save failed: ...', etc.). Both cues are DOM/JS-injected and not visible to this CSS-shape scan." }
+  ],
   "zones_page.html": [
     { "selector": "table.coupling td.rga-ok", "note": "commit c8c3b64 (2026-08-31) made classifyRga()'s call site inject a glyph suffix (✓/!/✗) into the cell text alongside the colour, resolving the prior colour-only proposal -- but the CSS rule itself (color: var(--ok) only) is unchanged, so this CSS-shape scan still flags it and still can't see the glyph, which is injected by JS (see zones_page.html's classifyRga()/glyph map) rather than present in static markup. Kept allowlisted because the check will always flag this selector shape regardless of the glyph; the note now records the real (non-colour) cue instead of the stale 'not yet fixed' text." },
     { "selector": "table.coupling td.rga-warn", "note": "see rga-ok above." },

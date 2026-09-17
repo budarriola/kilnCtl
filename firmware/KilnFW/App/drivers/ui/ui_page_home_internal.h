@@ -35,6 +35,7 @@
 #include "ui_page_home.h"
 
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 #include <math.h>
 
@@ -53,6 +54,12 @@
 #include "profile_feasibility.h"
 #include "profiles_http.h"
 #include "ramp_assist_cfg.h"
+#include "auth_reset_gesture.h" /* docs/WEB_AUTH_PLAN.md item 10 -- the four-corner
+                                   * physical credential-reset gesture; this page owns
+                                   * the corner hit zones and confirm dialog per that
+                                   * item's "LCD-owning agent" split. */
+#include "heat_enable.h" /* heat_enable_is_granted() -- one of the gesture's three
+                            * live preconditions. */
 #include "ui_page_home_graph.h"
 #include "run_state.h"
 #include "ui_theme.h"
@@ -124,6 +131,15 @@ lv_obj_t *ui_home_build_button(lv_obj_t *parent, const char *text, lv_color_t bg
                                 int32_t height, lv_obj_t **out_label);
 void ui_home_fire_btn_cb(lv_event_t *e);
 void ui_home_pause_resume_btn_cb(lv_event_t *e);
+
+/* WEB_AUTH_PLAN.md item 10 -- one shared corner-tap handler for all four
+ * hit zones, discriminated by the corner baked into the event's user_data
+ * at lv_obj_add_event_cb() time (auth_reset_gesture_corner_t cast through
+ * (void*)(intptr_t)). See ui_page_home.c's build() for where the four
+ * zones are created and ui_page_home_refresh.c for the armed-banner /
+ * cancel-or-expiry logging that reads auth_reset_gesture_singleton() on
+ * the existing 1 Hz tick. */
+void ui_home_auth_reset_corner_tap_cb(lv_event_t *e);
 
 /* ---- chart.c: planned-curve lookup, draw-event hooks, tick/legend layout,
  * used from ui_page_home_build() and ui_page_home_refresh.c ------------- */
