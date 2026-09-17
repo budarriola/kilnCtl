@@ -144,10 +144,13 @@ class ParseCsvTests(unittest.TestCase):
         csv_path = os.path.join(repo_root, "firmware", "KilnFW", "partitions.csv")
         entries = pt.parse_partitions_csv(csv_path)
         names = {e.name for e in entries}
-        # A handful of partitions this doc/task cares about, per the file's
-        # own 2026-09-02 header block.
+        # A handful of partitions this doc/task cares about. 'ota_0'/'ota_1'/
+        # 'factory' were replaced by 'app'/'recovery' 2026-09-16 (single
+        # application slot + recovery image, docs/OTA_SINGLE_SLOT_PLAN.md
+        # section 1 / section 8 step 3) -- see partitions.csv's own header
+        # block for that revision.
         for expected in ("pico_img", "wifi_nvs", "kiln_nvs", "profiles_nvs",
-                         "otadata", "ota_0", "ota_1", "factory", "coredump", "logs"):
+                         "otadata", "app", "recovery", "coredump", "logs"):
             self.assertIn(expected, names)
 
 

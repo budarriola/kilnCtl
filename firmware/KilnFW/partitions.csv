@@ -274,9 +274,8 @@ wifi_nvs,     data, nvs,     0x187000, 0x6000,
 kiln_nvs,     data, nvs,     0x18D000, 0x10000,
 profiles_nvs, data, nvs,     0x19D000, 0x60000,
 otadata,      data, ota,       0x200000, 0x2000,
-ota_0,        app,  ota_0,     0x210000, 0x300000,
-ota_1,        app,  ota_1,     0x510000, 0x300000,
-factory,      app,  factory,   0x810000, 0x300000,
+app,          app,  ota_0,     0x210000, 0x800000,
+recovery,     app,  factory,   0xA10000, 0x1E0000,
 coredump,     data, coredump,  0xBF0000, 0x100000,
 logs,         data, spiffs,    0xCF0000, 0xC0000,
 cfg,          data, littlefs,  0xDB0000, 0x80000,
@@ -560,3 +559,82 @@ cfg,          data, littlefs,  0xDB0000, 0x80000,
 # about it. `ota_rollback_esp()` restores the factory boot target. See
 # docs/FILESYSTEM_PLAN.md "Applying the table change" for the ordered
 # procedure and the mandatory pre-change backup.
+#
+# --- single application slot + recovery image, added 2026-09-16
+#     (docs/OTA_SINGLE_SLOT_PLAN.md, section 1 and section 8 step 3) --------
+#
+# THIS IS NOT AN APPEND-ONLY REVISION. `ota_0`, `ota_1` and `factory` are
+# REMOVED and replaced by two new rows, `app` and `recovery`. This is the
+# tradeoff stated in the plan's section 0: giving up A/B OTA (two full
+# application images) for one large application slot plus one small,
+# content-restricted recovery image that can do nothing but receive and
+# write a new application image.
+#
+# NO DATA PARTITION MOVES OR CHANGES SIZE. `nvs`, `phy_init`, `pico_img`,
+# `wifi_nvs`, `kiln_nvs`, `profiles_nvs`, `otadata`, `coredump`, `logs` and
+# `cfg` all keep their offsets and sizes exactly as above -- zone config,
+# rules, profiles, Wi-Fi credentials, the coredump and the LittleFS `cfg`
+# volume all survive this table write by construction. Only the three
+# `app`-type rows between `otadata` and `coredump` change.
+#
+# Old app region (removed): `ota_0` 0x210000/0x300000, `ota_1`
+# 0x510000/0x300000, `factory` 0x810000/0x300000, then the 917,504-byte
+# free gap 0xB10000..0xBF0000 left over from `pico_img`'s 2026-09-02
+# relocation.
+#
+# New app region:
+#   app,          app,  ota_0,     0x210000, 0x800000,
+#   recovery,     app,  factory,   0xA10000, 0x1E0000,
+#
+# Fit arithmetic (bounded below by `otadata`, above by `coredump`, exactly
+# as the plan computes it):
+#   app:      0x210000 + 0x800000 = 0xA10000
+#   recovery: 0xA10000 + 0x1E0000 = 0xBF0000  <- exactly `coredump`'s
+#             unchanged offset, so the old 917,504 B gap is fully consumed
+#             rather than left stranded, and nothing below `coredump` moves.
+#   0x1E0000 = 1,966,080 B; 0x800000 = 8,388,608 B (8 MiB). Both offsets
+#   (0x210000, 0xA10000) are 64 KiB-aligned, as `gen_esp32part.py` requires
+#   for `app`-type partitions.
+#
+# `app` keeps subtype `ota_0` (0x10) and `recovery` keeps subtype `factory`
+# (0x00) so that: (a) `esp_ota_ops`'s rollback/PENDING_VERIFY machinery,
+# which is keyed to the `ota_0`/`ota_1`/... subtype family, continues to
+# work unmodified against a single OTA-capable slot; and (b) the bootloader's
+# stock "otadata invalid or absent -> boot `factory`" fallback, which is
+# keyed to the `factory` subtype specifically, continues to select
+# `recovery` with no bootloader change. Renaming the CSV labels (`app`,
+# `recovery`) is purely a labeling change for readability; the numeric
+# type/subtype encoding gen_esp32part.py emits is unchanged from what
+# `ota_0`/`factory` already produced.
+#
+# `otadata` MUST be erased and rewritten from `ota_data_initial.bin` when
+# this table is actually flashed to a board, because the `app`-type offsets
+# and sizes changed (same rule the 2026-08-21 `factory` move above already
+# states) -- NOT done as part of this revision, which is source-and-build
+# only per the plan's section 8 step 3 scope. See docs/OTA_SINGLE_SLOT_PLAN.md
+# section 2 for the full migration procedure and its pre-flight backup
+# requirements; nothing in that migration has been performed against the
+# bench board by this commit.
+#
+# check_sizes.py's min()-over-all-app-partitions gate is measurably NOT a
+# blocker for the size mismatch between `app` (8 MiB) and `recovery`
+# (1,966,080 B) -- see docs/OTA_SINGLE_SLOT_PLAN.md section 1 for the
+# empirical confirmation against the IDF version installed here
+# (`C:\esp\v6.0.2\esp-idf`): a binary that fits `app` but overflows
+# `recovery` prints a non-fatal `Warning:` and the build still exits 0.
+# `tools/check_recovery_image_size.py` (added 2026-09-16, ahead of this row
+# existing) is the hard gate that gap needs; it reads its bound from this
+# file's `recovery` row via `kilnctrl.partition_table.parse_partitions_csv`,
+# so it moves from SKIP ("no recovery row") to a second SKIP ("row exists,
+# but no recovery.bin has been built yet") the moment this row lands --
+# still not enforcing, because section 8 step 1 (the separate recovery-image
+# IDF project) has not landed. It will start enforcing for real once that
+# image exists at its default path or a caller passes --recovery-bin.
+#
+# `ota_1` and the recovery-mode plumbing it supported (A/B rollback between
+# two full application images) are gone. The plan's section 4 covers how the
+# bootloader now chooses between `app` and `recovery` using stock `otadata`
+# semantics plus the existing `boot_guard` counter, unchanged by this table
+# edit alone -- that wiring (retargeting `boot_guard`'s action, deleting
+# in-app RECOVERY MODE) is separate follow-on work (plan section 8 steps 4
+# and 7), not part of this table-only pass.

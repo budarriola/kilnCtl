@@ -292,9 +292,13 @@ if (-not $PSBoundParameters.ContainsKey('CsvPath')) {
         @('kiln_nvs',    0x18D000,   0x10000),
         @('profiles_nvs',0x19D000,   0x60000),
         @('otadata',     0x200000,   0x2000),
-        @('ota_0',       0x210000,   0x300000),
-        @('ota_1',       0x510000,   0x300000),
-        @('factory',     0x810000,   0x300000),
+        # single application slot + recovery image, 2026-09-16
+        # (docs/OTA_SINGLE_SLOT_PLAN.md section 1 / section 8 step 3):
+        # 'ota_0'/'ota_1'/'factory' replaced by 'app'/'recovery'. See
+        # partitions.csv's own "single application slot + recovery image"
+        # header block for the fit arithmetic.
+        @('app',         0x210000,   0x800000),
+        @('recovery',    0xA10000,   0x1E0000),
         @('coredump',    0xBF0000,   0x100000),
         @('logs',        0xCF0000,   0xC0000),
         # cfg: added 2026-09-07, append-only into the free tail, sized from the
