@@ -398,8 +398,8 @@ static void test_policy_check_transition(void)
 // below assert the policy survives byte-for-byte rather than going ABSENT.
 static void test_clear_for_physical_reset(void)
 {
-    TEST_SECTION("web_auth_store_clear_for_physical_reset -- administrator cleared, "
-                 "user/PINs/policy untouched");
+    TEST_SECTION("web_auth_store_clear_for_physical_reset -- administrator password AND "
+                 "administrator LCD PIN cleared, user credentials/policy untouched");
     reset_all();
 
     TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_USER, "operator", "UserPassword1",
@@ -436,10 +436,24 @@ static void test_clear_for_physical_reset(void)
 
     TEST_CHECK(web_auth_store_verify_pin(WEB_AUTH_ROLE_USER, "1234") == true,
                "the user's LCD PIN is untouched by the credential reset");
-    TEST_CHECK(web_auth_store_verify_pin(WEB_AUTH_ROLE_ADMINISTRATOR, "5678") == true,
-               "the administrator's LCD PIN is untouched by the credential reset -- "
-               "item 10 clears only the administrator's web password, never a PIN or "
-               "the policy");
+
+    // Item 4a fix (2026-09-17 adversarial review, 1179e2d3): this used to
+    // assert the OPPOSITE -- that the administrator's LCD PIN survived a
+    // physical reset untouched. That was the bug: the documented physical
+    // four-corner reset gesture exists to recover a forgotten credential,
+    // and a forgotten LCD PIN is exactly the situation it must be able to
+    // recover from. The administrator's LCD PIN record is now cleared
+    // alongside the web password.
+    TEST_CHECK(web_auth_store_verify_pin(WEB_AUTH_ROLE_ADMINISTRATOR, "5678") == false,
+               "the administrator's LCD PIN no longer verifies after the physical reset -- "
+               "a forgotten LCD PIN is exactly the failure this gesture must recover from");
+    TEST_CHECK(web_auth_store_pin_configured(WEB_AUTH_ROLE_ADMINISTRATOR) == false,
+               "administrator LCD PIN reads as not-configured after the reset");
+    web_auth_pin_record_t admin_pin_rec;
+    TEST_CHECK(web_auth_store_load_pin(WEB_AUTH_ROLE_ADMINISTRATOR, &admin_pin_rec) ==
+                   WEB_AUTH_LOAD_OK,
+               "administrator LCD PIN record still loads OK (well-formed, just cleared) -- "
+               "the LCD blob as a whole is not corrupted by the reset");
 
     web_auth_policy_t loaded_pol;
     TEST_CHECK(web_auth_store_load_policy(&loaded_pol) == WEB_AUTH_LOAD_OK,
@@ -466,6 +480,9 @@ static void test_clear_for_physical_reset_on_empty_store(void)
                "policy is (still) ABSENT -- untouched, and it was never written");
     TEST_CHECK(web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR) == false,
                "administrator still reads as not configured");
+    TEST_CHECK(web_auth_store_pin_configured(WEB_AUTH_ROLE_ADMINISTRATOR) == false,
+               "administrator LCD PIN still reads as not configured (item 4a: the LCD blob "
+               "clear is exercised even when it was never written)");
 }
 
 // --- The WIRED gesture path: a real, non-null clear_credentials_fn --------

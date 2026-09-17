@@ -902,10 +902,18 @@ four 40x40 regions, and shrink the zones rather than steal a tap if one does.
 
 **What the reset actually does:** restores a default administrator credential
 with `must_change = true`, so the next login is forced to set a new password
-before anything else. It does **not** disable authentication, does not touch
-the `user` password or the LCD PIN, and does not clear any config. Reasoning:
-the failure being recovered from is a forgotten password, and silently
-unlocking the whole board is a bigger hole than the one being closed.
+before anything else, and clears the administrator's LCD PIN record so it
+reads as not-configured. It does **not** disable authentication, does not
+touch the `user` password or the `user` LCD PIN, and does not clear any
+config. Reasoning: the failure being recovered from is a forgotten
+credential, and a forgotten LCD PIN is exactly that failure — the gesture
+must be able to recover from it the same way it recovers a forgotten web
+password — while silently unlocking the whole board is still a bigger hole
+than the one being closed, which is why the `user` role's credentials are
+untouched. (2026-09-17 adversarial review, commit `1179e2d3`: the original
+implementation cleared only the administrator web password, leaving a lost
+administrator LCD PIN unrecoverable by this gesture — fixed in
+`web_auth_store_clear_for_physical_reset()`.)
 
 **Logging:** `ESP_LOGE` at arm, at confirm and at cancel, naming E-stop state
 and firing state, in the same loud style as the `boot_button_ota_bypass_active()`
@@ -984,6 +992,28 @@ web auth with no administrator credential is refused; that enabling clears all
 sessions and disabling does not.
 *Negative test:* make the absent-record default read as `enabled`, confirm the
 field-upgrade assertion goes RED, restore by hand.
+
+**2026-09-17 adversarial review, commit `1179e2d3` — two defects in this
+section's own wiring, both fixed:**
+
+1. "Enabling web auth with no administrator credential is refused" was true
+   at the store layer (`web_auth_policy_check_transition()` correctly checks
+   for the ADMINISTRATOR password specifically) but the HTTP-facing backend,
+   `web_auth_backend_set_policy()`, re-derived its own looser rule — refusing
+   only when NEITHER the admin nor the user password was set. Enabling with
+   only a user password configured therefore passed the backend's check,
+   left `admin_bootstrap_needed` true, and denied every ADMIN route,
+   including the undo route itself. Fixed by making the backend call the
+   store's own `web_auth_policy_check_transition()` rather than
+   re-implementing the rule — there is now exactly one place that decides
+   transition legality.
+2. "Enabling clears all sessions" had no consumer: `web_auth_policy_check_
+   transition()`'s `out_clear_web_sessions`/`out_clear_lcd_session` outputs
+   were computed and asserted only in `test_web_auth_store.c`, and the
+   backend's `invalidate_sessions_for_role()` was an explicit no-op. Fixed
+   by wiring both outputs to the real session state in
+   `web_auth_backend_set_policy()` (`web_auth_table_destroy_all()` against
+   `http_session_table()`, and `ui_lcd_lock_force_lock()` for the LCD side).
 
 ---
 

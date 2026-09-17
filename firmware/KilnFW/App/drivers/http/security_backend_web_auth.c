@@ -17,8 +17,12 @@
 #include "http_auth_http.h"       // kiln_http_register()
 #include "http_auth_policy_iface.h" // http_auth_policy_web_enabled()
 #include "http_form.h"             // http_form_find_field()
+#include "http_session_iface.h"    // http_session_table() -- item 2: the real
+                                    // web session table this backend must
+                                    // actually clear on an off->on transition
 #include "security_backend.h"
 #include "security_http_core.h" // SECURITY_HTTP_USERNAME_MAX/PASSWORD_MAX
+#include "ui_lcd_lock.h"        // ui_lcd_lock_force_lock() -- item 2, LCD half
 #include "web_auth_session.h"   // web_auth_admin_bootstrap_needed()
 #include "web_auth_store.h"
 #include "wifi_prov.h"
@@ -133,33 +137,73 @@ static security_err_t web_auth_backend_set_policy(const security_policy_t *polic
         return SECURITY_ERR_INVALID_INPUT;
     }
 
-    // Item 11: refusing to enable auth without a credential is this page's
-    // job (the store's setter just persists what it is given) -- enforce it
-    // here, at the one place both roles' configured-state is checked
-    // together, rather than duplicating this gate in security_http_core.c
-    // where neither role's storage state is otherwise visible.
-    if (policy->web_enabled &&
-        !web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR) &&
-        !web_auth_store_password_configured(WEB_AUTH_ROLE_USER)) {
-        return SECURITY_ERR_INVALID_INPUT;
-    }
-    if (policy->lcd_enabled &&
-        !web_auth_store_pin_configured(WEB_AUTH_ROLE_ADMINISTRATOR) &&
-        !web_auth_store_pin_configured(WEB_AUTH_ROLE_USER)) {
-        return SECURITY_ERR_INVALID_INPUT;
+    // Item 1 fix (2026-09-17 adversarial review, 1179e2d3): this used to
+    // re-derive its own, looser version of the enable gate right here --
+    // refusing web_enabled only when NEITHER an admin NOR a user password
+    // was set. web_auth_policy_check_transition() (web_auth_store.h/.c)
+    // correctly requires the ADMINISTRATOR credential specifically, and
+    // until this fix it was called from nowhere but its own host test.
+    // Failure sequence the old code allowed: configure only a USER web
+    // password, enable web auth -> the old gate above was satisfied (a
+    // password IS configured, just not the administrator's) ->
+    // web_auth_admin_bootstrap_needed() reads true -> http_auth_check()
+    // denies every ADMIN-tier route to every caller, including
+    // POST /api/security/policy itself, the one route that could undo the
+    // mistake. There must be exactly one place that decides whether a
+    // policy transition is legal -- this now calls that one place instead
+    // of maintaining a second, weaker copy of its rule.
+    web_auth_policy_t current;
+    web_auth_load_status_t current_status = web_auth_store_load_policy(&current);
+    if (current_status != WEB_AUTH_LOAD_OK) {
+        // ABSENT or UNREADABLE: no persisted transition to compare against.
+        // Treat the current state as fully off so an off->on request is
+        // still correctly seen as an edge (and therefore clears sessions
+        // below), matching web_auth_policy_effective_enabled()'s own
+        // ABSENT-reads-as-off convention rather than inventing a third
+        // interpretation here.
+        current.web_enabled = false;
+        current.lcd_enabled = false;
+        current.web_timeout_s = -1;
+        current.lcd_timeout_s = -1;
     }
 
-    web_auth_policy_t store_policy = {
+    web_auth_policy_t requested = {
         .web_enabled = policy->web_enabled,
         .lcd_enabled = policy->lcd_enabled,
         .web_timeout_s = minutes_to_seconds(policy->web_timeout_min),
         .lcd_timeout_s = minutes_to_seconds(policy->lcd_timeout_min),
     };
 
-    hal_status_t status = web_auth_store_set_policy(&store_policy);
+    bool admin_password_configured = web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR);
+    bool admin_pin_configured = web_auth_store_pin_configured(WEB_AUTH_ROLE_ADMINISTRATOR);
+    bool clear_web_sessions = false;
+    bool clear_lcd_session = false;
+
+    web_auth_policy_transition_t transition = web_auth_policy_check_transition(
+        &current, &requested, admin_password_configured, admin_pin_configured,
+        &clear_web_sessions, &clear_lcd_session);
+    if (transition != WEB_AUTH_POLICY_TRANSITION_OK) {
+        return SECURITY_ERR_INVALID_INPUT;
+    }
+
+    hal_status_t status = web_auth_store_set_policy(&requested);
     if (status != HAL_OK) {
         ESP_LOGE(TAG, "web_auth_store_set_policy failed, status=%d", (int)status);
         return SECURITY_ERR_STORAGE;
+    }
+
+    // Item 2 fix: the transition's out_clear_web_sessions/out_clear_lcd_session
+    // outputs previously had no consumer anywhere outside test_web_auth_store.c
+    // -- plan section 11's "enabling auth clears every session" was computed
+    // correctly and then discarded. Wire them to the real session mechanisms:
+    // http_session_table() (http_session_iface.h, the same table
+    // http_auth_session_resolve() looks sessions up in) for the web half, and
+    // ui_lcd_lock_force_lock() for the LCD half.
+    if (clear_web_sessions) {
+        web_auth_table_destroy_all(http_session_table());
+    }
+    if (clear_lcd_session) {
+        ui_lcd_lock_force_lock();
     }
     return SECURITY_OK;
 }
@@ -204,14 +248,31 @@ static bool web_auth_backend_get_config(security_config_t *out)
 
 static void web_auth_backend_invalidate_sessions_for_role(security_role_t role)
 {
-    // WEB_AUTH_PLAN.md item 4/5's session table (web_auth_session.h) has not
-    // landed on main yet -- this stays a documented no-op, exactly like the
-    // placeholder it replaces, until that module exists. Replacing this one
-    // function body (e.g. web_auth_session_invalidate_role(to_store_role(role)))
-    // is then the entire remaining integration step, no other file in this
-    // adapter changes.
-    ESP_LOGW(TAG, "invalidate_sessions_for_role(role=%d) is a no-op -- the session table "
-                  "(WEB_AUTH_PLAN.md item 4/5) has not landed yet",
+    // Item 2 fix: WEB_AUTH_PLAN.md item 4/5's session table
+    // (net/web_auth_session.h) and its http_session_table() owner
+    // (http_session_iface.h) have both since landed -- this no longer stays
+    // a documented placeholder. security_http_core.c calls this vtable slot
+    // from THREE call sites sharing one security_role_t parameter: an admin
+    // web password change, a user web password change, and an LCD PIN
+    // change (section 6: "changing a password invalidates every session for
+    // that role" / "changing the LCD PIN drops the LCD session") -- the role
+    // value alone does not say which credential changed, and the LCD has
+    // exactly one session, not a slot per role (item 4), so it cannot be
+    // selectively targeted by role the way the web table can. Rather than
+    // widen this vtable slot's signature to carry that distinction (a larger
+    // change than this review's four items call for), tear down BOTH: the
+    // matching role's web sessions, and the single LCD session outright.
+    // This is a safe superset for the two web-password call sites (an admin
+    // password change forcing a re-tap of an already-open LCD session is not
+    // a correctness problem, only slightly more conservative than strictly
+    // necessary) and is exactly correct for the LCD-PIN call site, which
+    // otherwise had no consumer for its own invalidation at all.
+    web_auth_session_role_t session_role = (role == SECURITY_ROLE_ADMIN) ? WEB_AUTH_SESSION_ROLE_ADMIN
+                                                                          : WEB_AUTH_SESSION_ROLE_USER;
+    web_auth_table_destroy_role(http_session_table(), session_role);
+    ui_lcd_lock_force_lock();
+    ESP_LOGI(TAG, "invalidate_sessions_for_role(role=%d): web sessions for that role and the LCD "
+                  "session torn down",
              (int)role);
 }
 

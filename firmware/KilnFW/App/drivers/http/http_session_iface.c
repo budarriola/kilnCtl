@@ -71,23 +71,47 @@ void http_session_hash_token(const char *token, size_t token_len, uint8_t out[32
 // rather than passed through, so a future divergence between either
 // module's sentinel choice is a compile-visible one-line fix at this one
 // boundary, not a silent reinterpretation.
-static uint32_t resolve_timeout_s(void) {
+// Item 3 fix (2026-09-17 adversarial review, 1179e2d3): an UNREADABLE policy
+// record must fail closed on BOTH halves it governs -- the enable flag (that
+// half was already correct: web_auth_policy_effective_enabled() collapses
+// UNREADABLE to true, forcing auth on) AND expiry. Before this fix,
+// resolve_timeout_s() returned WEB_AUTH_TIMEOUT_NEVER_S (0) for any non-OK
+// status, and web_auth_session_is_valid() treats 0 as "never expires" -- so
+// a policy record that went corrupt (e.g. a flash bit-flip, or a
+// wrong-version blob) turned every existing session immortal, at the exact
+// moment the enable-flag half of the same code was declaring the interface
+// MORE locked down, not less. Both halves of one corrupt-record case must
+// land on the safe side: this resolver now reports UNREADABLE explicitly so
+// the caller can deny outright rather than substitute "never expires".
+typedef struct {
+    uint32_t timeout_s;
+    bool     unreadable;
+} resolved_timeout_t;
+
+static resolved_timeout_t resolve_timeout_s(void) {
     web_auth_policy_t policy;
     web_auth_load_status_t status = web_auth_store_load_policy(&policy);
+    if (status == WEB_AUTH_LOAD_UNREADABLE) {
+        // A record that exists but fails its version/CRC check -- distinct
+        // from ABSENT (never written), which is not a corruption and is
+        // never reached here in practice anyway (ABSENT collapses
+        // web_enabled to false, so http_auth_check() never calls this
+        // resolver at all in that case). Fail closed: treat every session
+        // as already expired rather than picking a substitute duration.
+        resolved_timeout_t r = { .timeout_s = WEB_AUTH_TIMEOUT_NEVER_S, .unreadable = true };
+        return r;
+    }
     if (status != WEB_AUTH_LOAD_OK) {
-        // No readable policy record: web_timeout_s has no persisted meaning
-        // yet. Falling back to WEB_AUTH_TIMEOUT_NEVER_S here is safe, not a
-        // fail-open hole -- http_auth_check() only ever reaches this
-        // resolver when http_auth_policy_web_enabled() (the OTHER, separate
-        // seam) has already said auth is on, and a missing/unreadable
-        // POLICY record's own fail-closed behaviour is that seam's job
-        // (see http_auth_policy_iface.c), not this one's to re-derive.
-        return WEB_AUTH_TIMEOUT_NEVER_S;
+        // ABSENT: web_timeout_s has no persisted meaning yet. Falling back
+        // to WEB_AUTH_TIMEOUT_NEVER_S here is safe, not a fail-open hole --
+        // see the UNREADABLE branch above for why this path is not expected
+        // to be reached while auth is actually enabled.
+        resolved_timeout_t r = { .timeout_s = WEB_AUTH_TIMEOUT_NEVER_S, .unreadable = false };
+        return r;
     }
-    if (policy.web_timeout_s < 0) {
-        return WEB_AUTH_TIMEOUT_NEVER_S;
-    }
-    return (uint32_t)policy.web_timeout_s;
+    resolved_timeout_t r = { .unreadable = false };
+    r.timeout_s = (policy.web_timeout_s < 0) ? WEB_AUTH_TIMEOUT_NEVER_S : (uint32_t)policy.web_timeout_s;
+    return r;
 }
 
 // web_auth_session_role_t (this seam's session module) and http_auth_role_t
@@ -121,6 +145,17 @@ http_auth_role_t http_auth_session_resolve(const char *token, const char *client
     uint8_t token_hash[32];
     sha256((const uint8_t *)token, strlen(token), token_hash);
 
+    resolved_timeout_t timeout = resolve_timeout_s();
+    if (timeout.unreadable) {
+        // Item 3 fix: an unreadable policy record denies outright rather
+        // than resolving a (possibly still-live) session against a
+        // substitute "never expires" timeout -- see resolve_timeout_s()'s
+        // comment. This deliberately never even reaches the table lookup:
+        // there is no safe timeout value to hand web_auth_effective_role()
+        // here, so this seam does not try to invent one.
+        return HTTP_AUTH_ROLE_NONE;
+    }
+
     // web_enabled is passed as true here, deliberately not the real policy
     // flag: http_auth_check() (http_auth_enforce.c) already consults the
     // separate http_auth_policy_web_enabled() seam and only calls this
@@ -128,7 +163,7 @@ http_auth_role_t http_auth_session_resolve(const char *token, const char *client
     // seam's own header comment for why passing the real flag again here
     // would be redundant, not more correct.
     web_auth_session_role_t role = web_auth_effective_role(http_session_table(), /*web_enabled=*/true,
-                                                             token_hash, resolve_timeout_s(),
+                                                             token_hash, timeout.timeout_s,
                                                              (uint32_t)hal_time_now_ms());
     return to_enforce_role(role);
 }

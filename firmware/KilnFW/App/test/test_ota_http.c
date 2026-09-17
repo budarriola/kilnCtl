@@ -1884,6 +1884,68 @@ static void test_ota_esp_status_admin_session_gets_full_payload(void)
               "ADMIN role -- real build_date value present");
 }
 
+// Item 3 fix (2026-09-17 adversarial review, 1179e2d3): resolve_timeout_s()
+// (http_session_iface.c) used to return WEB_AUTH_TIMEOUT_NEVER_S (0) whenever
+// the policy record failed to load, and web_auth_session_is_valid() treats 0
+// as "never expires" -- so a policy record that goes UNREADABLE (a bad CRC
+// from flash corruption, say) failed CLOSED on the enable flag but OPEN on
+// expiry: an admin session minted while the policy was healthy would stay
+// valid forever once the record turned unreadable, instead of being treated
+// as expired/denied like every other failure of that record. This test
+// mints a real ADMIN session while the policy is healthy, then corrupts the
+// LAST byte of the persisted policy blob (falls inside its trailing crc32
+// field -- confirmed by reading web_auth_store.c's web_auth_policy_blob_t
+// layout: {version, web_enabled, lcd_enabled, reserved[2], web_timeout_s,
+// web_timeout_s, crc32}) via the public hal_kv_get_blob/hal_kv_set_blob API
+// only -- this file links web_auth_store.c as a compiled object, not
+// #include, so it has no access to that struct's definition or to
+// load_blob()/set_blob_verified(), unlike test_web_auth_store.c's own
+// unreadable-record test. A previously-valid ADMIN session must then be
+// denied full payload, exactly as if it had expired.
+static void test_ota_esp_status_admin_session_denied_when_policy_unreadable(void)
+{
+    TEST_SECTION("ota_esp_status_get_handler -- policy record UNREADABLE: a previously-valid ADMIN "
+                 "session is denied (fail closed on expiry, item 3), not treated as never-expiring");
+    web_auth_policy_t policy = { .web_enabled = true, .lcd_enabled = false,
+                                  .web_timeout_s = -1, .lcd_timeout_s = -1 };
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init default nvs partition");
+    TEST_CHECK(web_auth_store_set_policy(&policy) == HAL_OK, "setup: policy persisted while healthy");
+    const char *token = ota_status_test_make_session(WEB_AUTH_SESSION_ROLE_ADMIN, "admin-token-unreadable");
+
+    // Corrupt the persisted policy blob's CRC via the public hal_kv API only.
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, "kiln_auth", HAL_KV_MODE_READ_WRITE, NULL) == HAL_OK,
+              "setup: open kiln_auth namespace for corruption");
+    uint8_t blob[64];
+    size_t blob_len = sizeof(blob);
+    TEST_CHECK(hal_kv_get_blob(&h, "auth_policy", blob, &blob_len) == HAL_OK,
+              "setup: read back the persisted policy blob");
+    TEST_CHECK(blob_len > 0 && blob_len <= sizeof(blob), "setup: policy blob length sane");
+    blob[blob_len - 1] ^= 0xFFu; // flip the last byte -- inside the trailing crc32 field
+    TEST_CHECK(hal_kv_set_blob(&h, "auth_policy", blob, blob_len) == HAL_OK,
+              "setup: write back the corrupted policy blob");
+    TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "setup: commit the corruption");
+    hal_kv_close(&h);
+
+    stub_headers_reset();
+    char cookie[64];
+    snprintf(cookie, sizeof(cookie), HTTP_SESSION_COOKIE_NAME "=%s", token);
+    stub_header_set("Cookie", cookie);
+    s_last_resp_body[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = ota_esp_status_get_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "handler always returns ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, "\"commit\":null") != NULL,
+              "policy unreadable -- previously-valid ADMIN session now denied, commit redacted");
+    TEST_CHECK(strstr(s_last_resp_body, "\"dirty\":null") != NULL,
+              "policy unreadable -- dirty still redacted");
+    TEST_CHECK(strstr(s_last_resp_body, "\"build_date\":null") != NULL,
+              "policy unreadable -- build_date still redacted");
+}
+
 // 2026-09-17 review of the section 6 login route (WEB_AUTH_PLAN.md section
 // 2b): resolve_role_for_request() (http_auth_http.c) used to SHA-256 the
 // WHOLE raw Cookie header instead of parsing the named session cookie
@@ -2005,6 +2067,7 @@ void run_test_ota_http(void)
     test_ota_esp_status_unauthenticated_redacts_build_identity();
     test_ota_esp_status_user_session_redacts_build_identity();
     test_ota_esp_status_admin_session_gets_full_payload();
+    test_ota_esp_status_admin_session_denied_when_policy_unreadable();
     test_ota_esp_status_admin_session_survives_decoy_cookies();
     test_ota_esp_status_unnamed_cookie_value_is_not_a_session();
     {

@@ -115,7 +115,29 @@ static void tick_timer_cb(lv_timer_t *t)
     (void)t;
     ui_lcd_lock_policy_t policy = current_policy();
     if (!policy.enabled) {
-        return; // section 11: auth off, nothing to tick
+        // Item 4b fix (2026-09-17 adversarial review, 1179e2d3): this used
+        // to just return here, leaving s_lock.granted_role untouched.
+        // Failure sequence: unlock with a PIN (granted_role = ADMIN) ->
+        // disable auth (policy.enabled false, this branch taken every tick
+        // from here on) -> re-enable auth. At re-enable, s_lock.granted_role
+        // was NEVER cleared, so lcd_lock_is_locked() reads false and the
+        // panel is immediately usable at ADMIN tier again with no fresh PIN
+        // demanded -- the reset-one-side-of-a-pair class (CLAUDE.md): the
+        // policy's enabled bit was reset without revisiting the session
+        // state derived from it. Force-locking every tick while disabled
+        // means that by the time enabled flips back true, the session has
+        // already been torn down, so re-enabling always finds the panel
+        // locked, matching section 11's "enabling auth clears every
+        // session" for the LCD side without needing a separate push from
+        // the policy-write call site.
+        if (!lcd_lock_is_locked(&s_lock)) {
+            lcd_lock_force_lock(&s_lock);
+            close_prompt();
+            if (ui_lcd_keypad_is_open()) {
+                ui_lcd_keypad_force_close();
+            }
+        }
+        return; // section 11: auth off, nothing further to tick
     }
     if (s_lock.timeout_s != policy.timeout_s) {
         s_lock.timeout_s = policy.timeout_s; // pick up a live policy change without a reboot
@@ -188,6 +210,19 @@ bool ui_lcd_lock_has_role(lcd_pin_role_t role)
 void ui_lcd_lock_note_activity(void)
 {
     lcd_lock_note_activity(&s_lock, (uint32_t)lv_tick_get());
+}
+
+void ui_lcd_lock_force_lock(void)
+{
+    if (lcd_lock_is_locked(&s_lock)) {
+        return;
+    }
+    lcd_lock_force_lock(&s_lock);
+    close_prompt();
+    if (ui_lcd_keypad_is_open()) {
+        ui_lcd_keypad_force_close();
+    }
+    ESP_LOGI(TAG, "LCD session force-locked (policy transition)");
 }
 
 typedef struct {

@@ -600,13 +600,21 @@ web_auth_policy_transition_t web_auth_policy_check_transition(const web_auth_pol
 
 bool web_auth_store_clear_for_physical_reset(void)
 {
-    // Clear ONLY the administrator's password record, in place within the
-    // shared web_auth blob -- the user record is copied through untouched.
-    // Same "load existing, discard on absent/wrong-version/corrupt"
-    // convention as web_auth_store_set_password(), except here a discard
-    // still produces a valid, empty blob rather than an error: a physical
-    // reset must succeed even against a store that was never written or
-    // was already corrupt.
+    // Item 4a fix (2026-09-17 adversarial review, 1179e2d3): this used to
+    // clear only the web administrator PASSWORD record (WEB_AUTH_KEY_WEB),
+    // leaving the LCD administrator PIN record (WEB_AUTH_KEY_LCD, a
+    // separate blob) untouched. Failure sequence: operator forgets the LCD
+    // admin PIN -> performs the documented physical four-corner reset
+    // gesture, which exists exactly to recover from a forgotten credential
+    // -> the web password clears, but the LCD PIN record is never revisited,
+    // so the panel is still locked with the same forgotten PIN and the
+    // gesture has not actually recovered anything for the LCD side. Both
+    // records are cleared below, in place, one right after the other --
+    // same "load existing, discard on absent/wrong-version/corrupt"
+    // convention as web_auth_store_set_password()/web_auth_store_set_pin(),
+    // except here a discard still produces a valid, empty blob rather than
+    // an error: a physical reset must succeed even against a store that was
+    // never written or was already corrupt.
     //
     // Deliberately does NOT touch the policy record. Plan section 10 is
     // explicit: this reset "does not disable authentication ... and does
@@ -655,6 +663,43 @@ bool web_auth_store_clear_for_physical_reset(void)
     const web_auth_password_record_t *check_admin =
         &check.roles[WEB_AUTH_ROLE_ADMINISTRATOR];
     if (check_admin->configured != false || check_admin->must_change != true) {
+        return false;
+    }
+
+    // Same treatment for the LCD administrator PIN, in the separate
+    // WEB_AUTH_KEY_LCD blob -- the user PIN record is copied through
+    // untouched, exactly like the web blob's user password above.
+    // web_auth_pin_record_t has no must_change field (the LCD keypad has no
+    // forced-change flow -- section 7 never asks for a PIN twice), so
+    // configured=false is the entire clear.
+    web_auth_lcd_blob_t lcd_blob;
+    memset(&lcd_blob, 0, sizeof(lcd_blob));
+    hal_status_t lcd_existing = load_blob(WEB_AUTH_KEY_LCD, &lcd_blob, sizeof(lcd_blob));
+    if (lcd_existing != HAL_OK || lcd_blob.version != WEB_AUTH_STORE_VERSION ||
+        lcd_blob_crc(&lcd_blob) != lcd_blob.crc32) {
+        memset(&lcd_blob, 0, sizeof(lcd_blob));
+    }
+
+    web_auth_pin_record_t *lcd_admin = &lcd_blob.roles[WEB_AUTH_ROLE_ADMINISTRATOR];
+    memset(lcd_admin, 0, sizeof(*lcd_admin));
+    lcd_admin->configured = false;
+
+    lcd_blob.version = WEB_AUTH_STORE_VERSION;
+    lcd_blob.crc32 = lcd_blob_crc(&lcd_blob);
+
+    hal_status_t lcd_err = set_blob_verified(WEB_AUTH_KEY_LCD, &lcd_blob, sizeof(lcd_blob));
+    if (lcd_err != HAL_OK) {
+        return false;
+    }
+
+    // Read-back verify the LCD administrator record landed as intended --
+    // same discipline as the web blob above.
+    web_auth_lcd_blob_t lcd_check;
+    memset(&lcd_check, 0, sizeof(lcd_check));
+    if (load_blob(WEB_AUTH_KEY_LCD, &lcd_check, sizeof(lcd_check)) != HAL_OK) {
+        return false;
+    }
+    if (lcd_check.roles[WEB_AUTH_ROLE_ADMINISTRATOR].configured != false) {
         return false;
     }
     return true;

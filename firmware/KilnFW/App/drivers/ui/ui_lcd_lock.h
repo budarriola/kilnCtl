@@ -47,6 +47,15 @@ void ui_lcd_lock_init(void);
 // applies identically on the LCD.
 bool ui_lcd_lock_has_role(lcd_pin_role_t role);
 
+// Explicit teardown of the current LCD session, if any -- e.g. a policy
+// write that just flipped lcd_enabled off->on (WEB_AUTH_PLAN.md section 11:
+// "enabling auth clears every session"), called from
+// security_backend_web_auth.c's set_policy path. A no-op if already locked.
+// Equivalent in effect to letting the inactivity tick expire the session,
+// exposed directly so a caller never has to fake a clock jump to get the
+// same result.
+void ui_lcd_lock_force_lock(void);
+
 // Any touch delivered to LVGL counts as activity (section 8: "including a
 // touch that only scrolls or is swallowed by a backdrop"). Wired once from
 // lvgl_port.c's input read callback.
