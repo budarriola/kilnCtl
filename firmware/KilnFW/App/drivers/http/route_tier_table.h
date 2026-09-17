@@ -74,6 +74,17 @@ typedef enum {
      * URI string match, so there remains exactly one place a route's
      * always-reachable status is decided. */
     ROUTE_TIER_SAFETY_REDUCE,
+    /* Exactly one route belongs to this tier: POST /api/auth/bootstrap_password
+     * (WEB_AUTH_PLAN.md items 10/11's administrator-bootstrap state,
+     * web_auth_admin_bootstrap_needed() in net/web_auth_session.h). Distinct
+     * from ROUTE_TIER_ADMIN on purpose: this route must be reachable with NO
+     * session at all (none can exist pre-bootstrap) but ONLY while bootstrap
+     * is needed -- the inverse gating shape of every other tier here, which
+     * all gate on role, never on this kind of one-shot system state. Kept as
+     * its own tier rather than folded into ROUTE_TIER_ADMIN or ROUTE_TIER_OPEN
+     * so http_auth_check() (the one place that interprets it) has a single
+     * named case to key off, not a URI string match. */
+    ROUTE_TIER_ADMIN_BOOTSTRAP,
 } route_tier_t;
 
 typedef struct {
@@ -134,6 +145,11 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/api/profiles/builtin", HTTP_GET, ROUTE_TIER_USER),
     ROUTE_TIER("/api/profile/export", HTTP_GET, ROUTE_TIER_USER),
     ROUTE_TIER("/api/kiln_configs", HTTP_GET, ROUTE_TIER_USER),
+
+    /* ---- ADMIN_BOOTSTRAP -- the one-route exception (plan items 10/11):
+     * reachable with no session, gated instead on
+     * web_auth_admin_bootstrap_needed() at the enforcement point. ---- */
+    ROUTE_TIER("/api/auth/bootstrap_password", HTTP_POST, ROUTE_TIER_ADMIN_BOOTSTRAP),
 
     /* ---- ADMIN -- everything else (plan section 1, "ADMIN"). ---- */
 

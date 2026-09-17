@@ -42,6 +42,16 @@ extern "C" {
 // has not yet been wired for.
 bool http_auth_policy_web_enabled(void);
 
+// True iff the administrator-credential bootstrap state (plan items 10/11,
+// web_auth_admin_bootstrap_needed() in net/web_auth_session.h) currently
+// holds for the web interface. Calls that one predicate directly, fed by
+// http_auth_policy_web_enabled() (for effective_enabled) and
+// web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR) (for
+// admin_credential_configured) -- never re-derives "enabled &&
+// !configured" inline, same discipline as http_auth_policy_web_enabled()
+// itself toward web_auth_policy_effective_enabled().
+bool http_auth_policy_admin_bootstrap_needed(void);
+
 #ifdef __cplusplus
 }
 #endif

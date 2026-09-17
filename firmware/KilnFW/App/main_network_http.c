@@ -31,6 +31,7 @@
 #include "partition_info_http.h"
 #include "dualwrite_window_http.h"
 #include "backup_http.h"
+#include "security_backend_web_auth.h"
 #include "settings_http.h"
 #include "cfg_fs_format_http.h"
 #include "factory_reset.h"
@@ -541,6 +542,19 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (settings_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "settings_http_start failed: %s -- no /settings or "
                       "/settings/display page this boot", esp_err_to_name(settings_err));
+    }
+
+    // WEB_AUTH_PLAN.md items 10/11: installs the real security_backend_
+    // vtable and registers POST /api/auth/bootstrap_password -- the sole
+    // consumer of web_auth_admin_bootstrap_needed() (net/web_auth_session.h).
+    // Non-fatal on failure, same convention as every other *_http_start()
+    // call in this block: a board that fails this registration still boots
+    // with the Dashboard viewable, just without a way to bootstrap an
+    // administrator credential until the next successful boot.
+    esp_err_t security_backend_err = security_backend_web_auth_start();
+    if (security_backend_err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "security_backend_web_auth_start failed: %s -- no "
+                      "/api/auth/bootstrap_password route this boot", esp_err_to_name(security_backend_err));
     }
 
     // CommonFW/docs/UPDATE_PROTOCOL.md section 2 + section 1 / TODO.md 9.4:

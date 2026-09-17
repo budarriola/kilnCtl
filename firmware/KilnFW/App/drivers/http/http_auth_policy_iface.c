@@ -14,10 +14,21 @@
 #include "http_auth_policy_iface.h"
 
 #include "web_auth_store.h"
+#include "web_auth_session.h" // web_auth_admin_bootstrap_needed() -- the one
+                                // predicate for this state, never re-derived
+                                // here (same include-path convention as
+                                // http_session_iface.c's own use of this
+                                // header)
 
 bool http_auth_policy_web_enabled(void) {
     web_auth_policy_t policy;
     web_auth_load_status_t status = web_auth_store_load_policy(&policy);
     bool stored_enabled = (status == WEB_AUTH_LOAD_OK) ? policy.web_enabled : false;
     return web_auth_policy_effective_enabled(status, stored_enabled);
+}
+
+bool http_auth_policy_admin_bootstrap_needed(void) {
+    bool effective_enabled = http_auth_policy_web_enabled();
+    bool admin_configured = web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR);
+    return web_auth_admin_bootstrap_needed(effective_enabled, admin_configured);
 }

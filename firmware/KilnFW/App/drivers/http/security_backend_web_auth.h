@@ -18,6 +18,8 @@
 #ifndef SECURITY_BACKEND_WEB_AUTH_H
 #define SECURITY_BACKEND_WEB_AUTH_H
 
+#include "esp_err.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -27,6 +29,23 @@ extern "C" {
 // more than once (idempotent); not thread-safe, same contract as
 // security_backend_set_vtable() itself.
 void security_backend_web_auth_install(void);
+
+// Installs the real backend (calls security_backend_web_auth_install()) and
+// registers POST /api/auth/bootstrap_password -- the plan items 10/11
+// administrator-credential-bootstrap route, the one consumer of
+// web_auth_admin_bootstrap_needed() (net/web_auth_session.h). Gated at the
+// enforcement layer by ROUTE_TIER_ADMIN_BOOTSTRAP
+// (route_tier_table.h)/http_auth_check(), not by any check in this file's
+// handler alone -- see security_backend_web_auth.c's handler comment for
+// why it re-checks the same predicate anyway (defence in depth, not the
+// real gate). Resolves the HTTP server handle itself via
+// wifi_provision_http_get_server(), same "no server param, no
+// esp_http_server.h dependency in this header" convention as
+// settings_http_start(); follows the same start()-function/
+// kiln_http_register() pattern. Non-fatal ESP_LOGW on failure is the
+// caller's job, same convention as every other *_http_start() this
+// codebase's boot sequence calls.
+esp_err_t security_backend_web_auth_start(void);
 
 #ifdef __cplusplus
 }

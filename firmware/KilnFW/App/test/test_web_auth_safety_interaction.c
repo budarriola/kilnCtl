@@ -68,21 +68,21 @@ static void test_stop_route_all_five_combinations_allow(void) {
                "POST /api/profile_exec/stop must have a row in route_tier_table.h at all before "
                "the rest of this test means anything");
 
-    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, false) == HTTP_AUTH_DECISION_ALLOW,
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, false, false) == HTTP_AUTH_DECISION_ALLOW,
                "1/5: auth off -> ALLOW");
-    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, true) == HTTP_AUTH_DECISION_ALLOW,
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, true, false) == HTTP_AUTH_DECISION_ALLOW,
                "2/5: auth on + no session -> ALLOW (was DENY_NO_SESSION before this fix)");
     // "locked" carries no distinct role value of its own -- a locked-out
     // client is, from the enforcement point's perspective, a client with no
     // resolvable session, i.e. HTTP_AUTH_ROLE_NONE. Asserted again here
     // under its own name so a future reviewer sees section 9's "locked"
     // combination named explicitly, not merely inferred from "no session".
-    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, true) == HTTP_AUTH_DECISION_ALLOW,
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, true, false) == HTTP_AUTH_DECISION_ALLOW,
                "3/5: auth on + locked (no resolvable session) -> ALLOW (was DENY_NO_SESSION before "
                "this fix)");
-    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_USER, true) == HTTP_AUTH_DECISION_ALLOW,
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_USER, true, false) == HTTP_AUTH_DECISION_ALLOW,
                "4/5: auth on + user session -> ALLOW");
-    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_ADMIN, true) == HTTP_AUTH_DECISION_ALLOW,
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_ADMIN, true, false) == HTTP_AUTH_DECISION_ALLOW,
                "5/5: auth on + admin session -> ALLOW");
 }
 

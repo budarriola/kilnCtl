@@ -143,7 +143,27 @@ route_tier_t http_auth_effective_tier(const char *uri, httpd_method_t method);
 // stays at least as strict as either check alone) but it does mean OTA
 // currently requires BOTH an admin session AND a MAC until section 2b lands
 // -- tracked there, not fixed here.
-http_auth_decision_t http_auth_check(route_tier_t tier, http_auth_role_t role, bool web_enabled);
+//
+// `bootstrap_needed` is the caller's already-resolved
+// web_auth_admin_bootstrap_needed() result (net/web_auth_session.h) -- never
+// re-derived here from raw policy/credential state, same discipline as
+// `web_enabled` itself. It changes two things:
+//
+//   tier == ROUTE_TIER_ADMIN_BOOTSTRAP:
+//     ALLOW iff bootstrap_needed, else DENY_INSUFFICIENT -- unconditional on
+//     role (there can be no session yet in the true case, and once bootstrap
+//     is no longer needed this one-shot route must close even for an
+//     administrator, who has /settings/security instead).
+//
+//   tier == ROUTE_TIER_ADMIN, bootstrap_needed == true:
+//     DENY_INSUFFICIENT, even when role == HTTP_AUTH_ROLE_ADMIN. A physical
+//     credential reset (plan item 10) clears the administrator credential
+//     record but does NOT invalidate existing sessions -- without this check
+//     a stale pre-reset admin session would still satisfy every ADMIN route
+//     while the board is waiting for a fresh credential, defeating the
+//     bootstrap gate entirely.
+http_auth_decision_t http_auth_check(route_tier_t tier, http_auth_role_t role, bool web_enabled,
+                                      bool bootstrap_needed);
 
 #ifdef __cplusplus
 }

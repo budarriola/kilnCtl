@@ -88,6 +88,11 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
     }
 
     bool web_enabled = http_auth_policy_web_enabled();
+    // Fed straight to http_auth_check() -- never re-derived there or
+    // anywhere else, per web_auth_admin_bootstrap_needed()'s own header
+    // comment (net/web_auth_session.h) naming this the one predicate for
+    // this state.
+    bool bootstrap_needed = http_auth_policy_admin_bootstrap_needed();
 
     http_auth_role_t role = HTTP_AUTH_ROLE_NONE;
     // Skip the session lookup entirely for OPEN and SAFETY_REDUCE routes
@@ -104,7 +109,7 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
         resolve_role_for_request(req, &role);
     }
 
-    http_auth_decision_t decision = http_auth_check(ctx->tier, role, web_enabled);
+    http_auth_decision_t decision = http_auth_check(ctx->tier, role, web_enabled, bootstrap_needed);
     switch (decision) {
         case HTTP_AUTH_DECISION_ALLOW:
             // Restore the ORIGINAL user_ctx before calling into the real

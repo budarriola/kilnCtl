@@ -14,9 +14,15 @@
 #include "hal_sysinfo.h" // hal_sysinfo_fill_random() -- HAL boundary: no raw
                           // esp_random.h in this file, see check_hal_include_
                           // boundary.ps1's EspRandomAllowlist comment.
+#include "http_auth_http.h"       // kiln_http_register()
+#include "http_auth_policy_iface.h" // http_auth_policy_web_enabled()
+#include "http_form.h"             // http_form_find_field()
 #include "security_backend.h"
+#include "security_http_core.h" // SECURITY_HTTP_USERNAME_MAX/PASSWORD_MAX
+#include "web_auth_session.h"   // web_auth_admin_bootstrap_needed()
 #include "web_auth_store.h"
 #include "wifi_prov.h"
+#include "wifi_provision_http.h" // wifi_provision_http_get_server()
 
 static const char *TAG = "security_backend_web_auth";
 
@@ -220,4 +226,107 @@ static const security_backend_vtable_t s_web_auth_vtable = {
 void security_backend_web_auth_install(void)
 {
     security_backend_set_vtable(&s_web_auth_vtable);
+}
+
+// POST /api/auth/bootstrap_password -- the one consumer of
+// web_auth_admin_bootstrap_needed() (net/web_auth_session.h). The REAL gate
+// is the enforcement pre-handler: this route is classified
+// ROUTE_TIER_ADMIN_BOOTSTRAP (route_tier_table.h), and http_auth_check()
+// (http_auth_enforce.c) denies it outright once bootstrap_needed is false --
+// never a hardcoded URI match, that decision already lives in the one place
+// it belongs. The re-check below is defence in depth only (a second,
+// independent gate against the same real predicate, not a re-derivation of
+// it -- both calls resolve through web_auth_admin_bootstrap_needed()
+// itself), in case this handler is ever reached by a path that bypasses
+// kiln_http_register()'s wrapper.
+//
+// Body is form-urlencoded (this codebase's convention, see http_form.h),
+// capped well under this task's stack-local budget. Reuses
+// web_auth_backend_set_web_password() directly -- the same strength check,
+// username validation, random salt and must_change=false write an ordinary
+// owner-initiated password change gets, since a bootstrap-set password is
+// not a "forced default", it is the operator's own first real credential
+// and must satisfy exactly the same strength rule as any other. Never
+// invents or writes a placeholder/default password anywhere.
+#define AUTH_BOOTSTRAP_BODY_MAX 512
+
+static esp_err_t auth_bootstrap_password_post_handler(httpd_req_t *req)
+{
+    // Defence in depth (see comment above) -- re-resolves through the same
+    // predicate the enforcement pre-handler already gated on, never a
+    // separate/looser check.
+    bool effective_enabled = http_auth_policy_web_enabled();
+    bool admin_configured = web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR);
+    if (!web_auth_admin_bootstrap_needed(effective_enabled, admin_configured)) {
+        // No HTTPD_409_CONFLICT in esp_http_server.h's httpd_err_code_t --
+        // set the status line directly, same convention
+        // kiln_http_prehandler()'s own 500 branch (http_auth_http.c) uses.
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_send(req, "administrator credential already configured", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
+    if (req->content_len <= 0 || req->content_len >= AUTH_BOOTSTRAP_BODY_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
+        return ESP_OK;
+    }
+
+    char body[AUTH_BOOTSTRAP_BODY_MAX];
+    int received = httpd_req_recv(req, body, req->content_len);
+    if (received <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "failed to read body");
+        return ESP_OK;
+    }
+    body[received] = '\0';
+
+    char username[SECURITY_HTTP_USERNAME_MAX + 1];
+    char password[SECURITY_HTTP_PASSWORD_MAX + 1];
+    int username_len = http_form_find_field(body, "username", username, sizeof(username));
+    int password_len = http_form_find_field(body, "password", password, sizeof(password));
+    if (username_len < 0 || password_len < 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "username and password are required");
+        return ESP_OK;
+    }
+
+    security_err_t result = web_auth_backend_set_web_password(SECURITY_ROLE_ADMIN, username, password);
+    switch (result) {
+        case SECURITY_OK:
+            httpd_resp_set_type(req, "application/json");
+            return httpd_resp_sendstr(req, "{\"ok\":true}");
+        case SECURITY_ERR_WEAK:
+        case SECURITY_ERR_INVALID_INPUT:
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "password rejected");
+            return ESP_OK;
+        default:
+            ESP_LOGE(TAG, "bootstrap_password: set_web_password failed, err=%d", (int)result);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "failed to set password");
+            return ESP_OK;
+    }
+}
+
+esp_err_t security_backend_web_auth_start(void)
+{
+    security_backend_web_auth_install();
+
+    httpd_handle_t server = wifi_provision_http_get_server();
+    if (!server) {
+        ESP_LOGE(TAG, "no HTTP server -- wifi_provision_http_start() must run first");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    static const httpd_uri_t bootstrap_uri = {
+        .uri = "/api/auth/bootstrap_password",
+        .method = HTTP_POST,
+        .handler = auth_bootstrap_password_post_handler,
+    };
+
+    esp_err_t err = kiln_http_register(server, &bootstrap_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/auth/bootstrap_password) failed: %s",
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    ESP_LOGI(TAG, "web auth backend installed, bootstrap route up");
+    return ESP_OK;
 }

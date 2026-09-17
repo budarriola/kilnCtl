@@ -27,7 +27,8 @@ route_tier_t http_auth_effective_tier(const char *uri, httpd_method_t method) {
     return tier;
 }
 
-http_auth_decision_t http_auth_check(route_tier_t tier, http_auth_role_t role, bool web_enabled) {
+http_auth_decision_t http_auth_check(route_tier_t tier, http_auth_role_t role, bool web_enabled,
+                                      bool bootstrap_needed) {
     // Section 11: auth off collapses every tier to full access, checked
     // first and unconditionally so nothing below this line can veto it.
     if (!web_enabled) {
@@ -39,6 +40,16 @@ http_auth_decision_t http_auth_check(route_tier_t tier, http_auth_role_t role, b
     // HTTP_AUTH_ROLE_NONE.
     if (tier == ROUTE_TIER_OPEN) {
         return HTTP_AUTH_DECISION_ALLOW;
+    }
+
+    // Plan items 10/11's administrator-bootstrap route: reachable with no
+    // session at all, but ONLY while bootstrap_needed -- unconditional on
+    // role in both directions (see http_auth_check()'s own doc comment for
+    // why this must also close for role == ADMIN once bootstrap is no
+    // longer needed). Checked before the no-session denial below, since the
+    // true case has no session to deny.
+    if (tier == ROUTE_TIER_ADMIN_BOOTSTRAP) {
+        return bootstrap_needed ? HTTP_AUTH_DECISION_ALLOW : HTTP_AUTH_DECISION_DENY_INSUFFICIENT;
     }
 
     // Plan section 9: a route that can only ever reduce heat/risk (today,
@@ -67,6 +78,14 @@ http_auth_decision_t http_auth_check(route_tier_t tier, http_auth_role_t role, b
             // both satisfy USER.
             return HTTP_AUTH_DECISION_ALLOW;
         case ROUTE_TIER_ADMIN:
+            // bootstrap_needed closes even an admin-role stale session --
+            // see http_auth_check()'s own doc comment: a physical
+            // credential reset (item 10) clears the credential record but
+            // does not invalidate existing sessions, so role == ADMIN alone
+            // is not sufficient while bootstrap is outstanding.
+            if (bootstrap_needed) {
+                return HTTP_AUTH_DECISION_DENY_INSUFFICIENT;
+            }
             return (role == HTTP_AUTH_ROLE_ADMIN) ? HTTP_AUTH_DECISION_ALLOW
                                                    : HTTP_AUTH_DECISION_DENY_INSUFFICIENT;
         case ROUTE_TIER_OPEN:
@@ -78,6 +97,11 @@ http_auth_decision_t http_auth_check(route_tier_t tier, http_auth_role_t role, b
             // through this switch's default -- see the `default` case
             // immediately below.
             return HTTP_AUTH_DECISION_ALLOW;
+        case ROUTE_TIER_ADMIN_BOOTSTRAP:
+            // Unreachable: handled above, before the no-session check. Kept
+            // explicit for the same exhaustiveness reason as the two cases
+            // above.
+            return HTTP_AUTH_DECISION_DENY_INSUFFICIENT;
         default:
             // A tier value route_tier_table.h did not define (e.g. a new
             // enumerator added there with no case added here). Fail closed:
