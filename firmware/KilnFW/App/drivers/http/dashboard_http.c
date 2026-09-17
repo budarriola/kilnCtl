@@ -400,6 +400,20 @@ void dashboard_get_status(dashboard_status_t *out)
      * load" explicitly instead of a kiln that just silently won't fire. */
     out->zones_config_valid = zones_config_is_valid();
 
+    /* CLAUDE.md's ota_rollback_esp() hazard, closed 2026-09-16: name WHY,
+     * when zones_config_valid is false because a real prior config existed
+     * and failed to decode -- distinct from "never configured" -- so the web
+     * UI can say so before an operator loads a kiln. See
+     * zones_cfg_load_fault_t's own doc comment (zones_config_accessors.h). */
+    zones_cfg_load_fault_t load_fault;
+    out->zones_config_load_fault = zones_config_get_load_fault(&load_fault);
+    out->zones_config_load_fault_newer = out->zones_config_load_fault &&
+                                          load_fault.kind == ZONES_CFG_LOAD_FAULT_NEWER;
+    out->zones_config_load_fault_on_disk_version = load_fault.on_disk_version;
+    out->zones_config_load_fault_fw_version = load_fault.fw_version;
+    snprintf(out->zones_config_load_fault_reason, sizeof(out->zones_config_load_fault_reason), "%s",
+             load_fault.reason);
+
     /* UI_PLAN.md section 5's missing field set (see dashboard_http.h's
      * struct comment above these fields for the full rationale). Every read
      * here is cheap and side-effect-free -- esp_app_get_description() reads

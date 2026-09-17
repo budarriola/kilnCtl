@@ -371,6 +371,7 @@
      nothing-to-report pattern as the other banners here. -->
 <div id="spiWedgedBanner"></div>
 <div id="bootButtonBypassBanner"></div>
+<div id="zonesConfigLoadFaultBanner"></div>
 <div id="safetyTripBanner"></div>
 <div id="lastRunBanner"></div>
 
@@ -2055,6 +2056,48 @@ function renderBootButtonBypass(data) {
     '<div class="row"><span>Any device on this network can flash firmware right now, no password.</span></div>' +
     '<div class="row"><span>Closes automatically in</span><span class="kc-live-value">' +
       mm + ':' + (ss < 10 ? '0' : '') + ss + '</span></div>' +
+    '</div>';
+}
+
+// CLAUDE.md's ota_rollback_esp() hazard, closed 2026-09-16: firing is refused
+// (profile_executor_run.c) while a real, previously-tuned zones config
+// exists on flash but this firmware could not decode it -- either an OTA
+// rollback past a schema bump (on-disk version NEWER than this firmware
+// knows) or a blob older than this firmware's migration chain can bring
+// forward. zones_config_load_fault is only ever true in that specific case,
+// never for the unrelated "board has simply never been configured" state
+// (which also reads zones_config_valid==false but leaves this flag false and
+// gets the ordinary "/settings/zones" message the Start button already
+// shows). Same solid "safety-trip" banner styling as renderSpiWedged() above
+// it -- this blocks firing exactly like a live trip does, so it earns the
+// same visual weight, not a quieter informational one. No "fire anyway"
+// button: this state means the board does not trust its own tuning data
+// (PID gains, guard bands, thermocouple mapping), and offering a bypass here
+// would recreate the exact silent-defaults hazard this banner exists to
+// close -- see profile_executor_run.c's identical no-override reasoning.
+function renderZonesConfigLoadFault(data) {
+  var el = document.getElementById('zonesConfigLoadFaultBanner');
+  if (!el) return;
+  if (!data.zones_config_load_fault) { el.innerHTML = ''; return; }
+  var onDisk = data.zones_config_load_fault_on_disk_version;
+  var fwVer = data.zones_config_load_fault_fw_version;
+  var reason = data.zones_config_load_fault_reason || '';
+  var detail, remedy;
+  if (data.zones_config_load_fault_newer) {
+    detail = 'Stored zone config is version ' + onDisk + '; this firmware only understands up to version ' +
+      fwVer + ' -- likely an OTA rollback past a config schema bump (see ota_rollback_esp() in CLAUDE.md).';
+    remedy = 'Reflash the matching (or newer) firmware to restore the tuned config.';
+  } else {
+    detail = 'Stored zone config is version ' + onDisk + ' and this firmware (version ' + fwVer +
+      ') cannot migrate it forward: ' + window.kcEscapeHtml(reason) + '.';
+    remedy = 'Reflash the firmware version that saved this config, or reconfigure zones from scratch.';
+  }
+  el.innerHTML = '<div class="banner safety-trip">' +
+    '<h3>ZONE CONFIG NOT UNDERSTOOD -- FIRING REFUSED</h3>' +
+    '<div class="row"><span>' + window.kcEscapeHtml(detail) + '</span></div>' +
+    '<div class="row"><span>The board is running on blank/default settings this boot, not your tuned ' +
+    'configuration, and will not start a firing until this is resolved.</span></div>' +
+    '<div class="row"><span>To clear</span><span>' + window.kcEscapeHtml(remedy) + '</span></div>' +
     '</div>';
 }
 
@@ -3990,6 +4033,7 @@ function poll() {
       renderRelayLife(data);
       renderSpiWedged(data);
       renderBootButtonBypass(data);
+      renderZonesConfigLoadFault(data);
       renderSafetyTrip(data);
       // Client-side multi-zone autotune trace sampling (see
       // sampleAutotuneZoneTemps's own header comment) -- a no-op whenever no

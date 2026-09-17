@@ -12,6 +12,8 @@
 #include "safety_ceiling_sync.h" /* 2026-09-15 review (review_divergence_rework_c1d2c526_2026-09-15.md,
                                    * HIGH 2): safety_ceiling_sync_is_standing_diverged() surfaced on the LCD. */
 #include "config_divergence.h" /* CONFIG_DIVERGENCE_REASON_MAX */
+#include "zones_config_accessors.h" /* zones_config_get_load_fault() -- CLAUDE.md's
+                                       * ota_rollback_esp() hazard, closed 2026-09-16 */
 
 /* 2026-09-15 review follow-up (review_divergence_wiring_60d6552f_2026-09-15.md,
  * items A/B/C and HIGH 1): the deferred Pico-half recapture poll and its
@@ -176,7 +178,34 @@ void ui_home_refresh_cb(lv_timer_t *timer)
             lv_label_set_text(s_ui_home_trip_strip, trip_buf);
             lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
         } else {
-            lv_obj_add_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
+            /* Config-load-fault quarantine: the board could not decode its
+             * stored zones config (either NEWER than this firmware knows,
+             * e.g. after an OTA rollback past a schema bump, or older than
+             * its migration chain can consume) and is running/would run on
+             * firmware-default PID gains -- profile_executor_run.c refuses
+             * to start a firing in this state. Below OTA bypass (a live
+             * network exposure) and a live safety trip on purpose, same
+             * ordering as main_page.html's renderZonesConfigLoadFault().
+             * Short by necessity: 96-char strip, 480x320, no scrolling. No
+             * "fire anyway" affordance here either -- see
+             * profile_executor_run.c's comment for why. */
+            zones_cfg_load_fault_t fault;
+            if (zones_config_get_load_fault(&fault)) {
+                char fault_buf[96];
+                if (fault.kind == ZONES_CFG_LOAD_FAULT_NEWER) {
+                    snprintf(fault_buf, sizeof(fault_buf),
+                             "CONFIG QUARANTINED -- v%u newer than fw v%u, reflash",
+                             (unsigned)fault.on_disk_version, (unsigned)fault.fw_version);
+                } else {
+                    snprintf(fault_buf, sizeof(fault_buf),
+                             "CONFIG QUARANTINED -- v%u unreadable, reflash matching fw",
+                             (unsigned)fault.on_disk_version);
+                }
+                lv_label_set_text(s_ui_home_trip_strip, fault_buf);
+                lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
+            }
         }
     }
 

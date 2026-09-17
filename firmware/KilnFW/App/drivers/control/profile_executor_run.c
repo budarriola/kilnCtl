@@ -139,7 +139,37 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * check, which cannot tell "genuinely no zones configured" from "zone
      * config failed to load" -- both read as the same zeroed struct. */
     if (!zones_config_is_valid()) {
-        if (err_msg) {
+        /* CLAUDE.md's ota_rollback_esp() hazard, closed 2026-09-16: name what
+         * actually happened -- a real, previously-tuned config this firmware
+         * refused to decode (rollback past a schema bump, or a blob one
+         * migration step short of what this build understands), not the
+         * unrelated "nobody has configured this board yet" case the generic
+         * message below still covers. zones_config_get_load_fault() answers
+         * false (and leaves *fault unlatched) on a genuinely fresh board, so
+         * that message is unchanged for that case. No override path exists
+         * here on purpose -- see zones_config_get_load_fault()'s own doc
+         * comment: this state means the board does not trust its own
+         * tuning data, and firing on unknown gains/limits is exactly the
+         * hazard this gate exists to close. */
+        zones_cfg_load_fault_t fault;
+        if (zones_config_get_load_fault(&fault)) {
+            if (err_msg) {
+                if (fault.kind == ZONES_CFG_LOAD_FAULT_NEWER) {
+                    snprintf(err_msg, err_cap,
+                             "stored zone config is version %u; this firmware only understands up to version %u "
+                             "-- likely an OTA rollback past a config schema bump. Firing refused: reflash the "
+                             "matching (or newer) firmware to restore the tuned config (see ota_rollback_esp() "
+                             "in CLAUDE.md)",
+                             (unsigned)fault.on_disk_version, (unsigned)fault.fw_version);
+                } else {
+                    snprintf(err_msg, err_cap,
+                             "stored zone config is version %u and this firmware (version %u) cannot migrate it "
+                             "forward: %s. Firing refused: reflash the firmware version that saved this config, "
+                             "or reconfigure zones from scratch",
+                             (unsigned)fault.on_disk_version, (unsigned)fault.fw_version, fault.reason);
+                }
+            }
+        } else if (err_msg) {
             snprintf(err_msg, err_cap,
                      "zone config failed to load or has not been saved -- this kiln cannot be started "
                      "until zone config loads cleanly (see /settings/zones)");

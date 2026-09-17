@@ -147,6 +147,18 @@ typedef struct {
     bool     safety_ready;
     bool     zones_config_valid;
 
+    /* CLAUDE.md's ota_rollback_esp() hazard, closed 2026-09-16 -- see
+     * zones_cfg_load_fault_t's own doc comment (zones_config_accessors.h).
+     * zones_config_load_fault is only meaningful when zones_config_valid is
+     * false; it distinguishes "a real prior config existed and this
+     * firmware refused it" from the unrelated "never configured" case,
+     * which also reads zones_config_valid==false but leaves this false. */
+    bool     zones_config_load_fault;
+    bool     zones_config_load_fault_newer; /* true: on-disk newer than this fw; false: this fw cannot read/migrate it */
+    uint8_t  zones_config_load_fault_on_disk_version;
+    uint8_t  zones_config_load_fault_fw_version;
+    char     zones_config_load_fault_reason[96];
+
     /* ROADMAP.md M6 "GUI shows safety temperature, enclosure temperature and
      * power" -- read straight from safety_link_get_status()'s cache
      * (safety_link.h's safety_link_status_t), not re-parsed from a frame

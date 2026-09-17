@@ -451,6 +451,24 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
 
     APPEND(",\"safety_ready\":%s", ds->safety_ready ? "true" : "false");
     APPEND(",\"zones_config_valid\":%s", ds->zones_config_valid ? "true" : "false");
+    /* CLAUDE.md's ota_rollback_esp() hazard, closed 2026-09-16: only
+     * meaningful when zones_config_valid is false -- distinguishes "a real
+     * prior config existed and this firmware refused it" (fires this) from
+     * plain "never configured" (does not). See dashboard_http.h's own field
+     * comments. Reason string is firmware-static today, never untrusted
+     * network input, but json_escape()'d anyway per this file's own
+     * fw_version precedent just below -- cheap insurance against a stray
+     * quote ever reaching this buffer. */
+    APPEND(",\"zones_config_load_fault\":%s", ds->zones_config_load_fault ? "true" : "false");
+    if (ds->zones_config_load_fault) {
+        char reason_esc[sizeof(ds->zones_config_load_fault_reason) * 2 + 1];
+        json_escape(ds->zones_config_load_fault_reason, reason_esc, sizeof(reason_esc));
+        APPEND(",\"zones_config_load_fault_newer\":%s", ds->zones_config_load_fault_newer ? "true" : "false");
+        APPEND(",\"zones_config_load_fault_on_disk_version\":%u",
+               (unsigned)ds->zones_config_load_fault_on_disk_version);
+        APPEND(",\"zones_config_load_fault_fw_version\":%u", (unsigned)ds->zones_config_load_fault_fw_version);
+        APPEND(",\"zones_config_load_fault_reason\":\"%s\"", reason_esc);
+    }
 
     /* ROADMAP.md M6 -- null (not 0), same convention board_temps.c's
      * GET /api/board_temps already established (TODO.md 10.7): a JSON null

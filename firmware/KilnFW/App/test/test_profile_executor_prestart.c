@@ -482,6 +482,22 @@ bool zones_config_get_continue_on_zone_trip(void)
     return g_continue_on_zone_trip;
 }
 
+/* Fake for the config-load-fault quarantine gate (profile_executor_run.c
+ * calls this to refuse a firing start when the stored zones config was
+ * unreadable/newer-than-known). This prestart harness never exercises a
+ * faulted boot, so "no fault" (false) is the correct default -- same
+ * convention as the other zones_config_get_*() fakes in this file. */
+static bool s_test_load_fault_present = false;
+static zones_cfg_load_fault_t s_test_load_fault_value;
+bool zones_config_get_load_fault(zones_cfg_load_fault_t *out)
+{
+    if (!s_test_load_fault_present) {
+        return false;
+    }
+    if (out) { *out = s_test_load_fault_value; }
+    return true;
+}
+
 /* Per-zone control mode, settable by test_profile_zones_have_ceiling_* below
  * (audit 2026-08-27, revised after the owner's live board reply) -- defaults
  * to all-OFF (zero-initialized, ZONE_CONTROL_MODE_OFF == 0), which matches
@@ -2043,6 +2059,87 @@ static void test_run_decodes_fault_sources_instead_of_hex(void)
     s_test_zones_config_valid = false;
     s_test_relay_authority_blocked = false;
     s_test_relay_authority_blocked_sources = 0;
+}
+
+// CLAUDE.md's ota_rollback_esp() hazard, closed 2026-09-16: a config the
+// firmware could not decode (OTA rollback past a schema bump, or a blob one
+// migration step short of what this build understands) must refuse to start
+// a firing with a message naming WHICH of the two happened, not the generic
+// "zone config failed to load" message that also covers a genuinely
+// unconfigured board. This proves the two fault kinds produce distinct,
+// version-naming messages, and that a fresh/unconfigured board (fault
+// unlatched) still gets the old generic message unchanged.
+static void set_load_fault_newer(uint8_t on_disk, uint8_t fw)
+{
+    s_test_load_fault_present = true;
+    memset(&s_test_load_fault_value, 0, sizeof(s_test_load_fault_value));
+    s_test_load_fault_value.kind = ZONES_CFG_LOAD_FAULT_NEWER;
+    s_test_load_fault_value.on_disk_version = on_disk;
+    s_test_load_fault_value.fw_version = fw;
+}
+static void set_load_fault_unreadable(uint8_t on_disk, uint8_t fw, const char *reason)
+{
+    s_test_load_fault_present = true;
+    memset(&s_test_load_fault_value, 0, sizeof(s_test_load_fault_value));
+    s_test_load_fault_value.kind = ZONES_CFG_LOAD_FAULT_UNREADABLE;
+    s_test_load_fault_value.on_disk_version = on_disk;
+    s_test_load_fault_value.fw_version = fw;
+    snprintf(s_test_load_fault_value.reason, sizeof(s_test_load_fault_value.reason), "%s", reason);
+}
+
+static void test_run_refuses_with_named_reason_on_config_quarantine(void)
+{
+    TEST_SECTION("profile_executor_run() quarantine gate: NEWER vs UNREADABLE get distinct, version-naming refusals");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_IDLE;
+
+    memset(&s_test_profiles_http_get_out, 0, sizeof(s_test_profiles_http_get_out));
+    s_test_profiles_http_get_out.zone_mask = 0x01;
+    s_test_profiles_http_get_out.segment_count = 1;
+    s_test_profiles_http_get_ok = true;
+    s_test_zones_config_valid = false; /* the quarantine gate only engages when the config is NOT trusted */
+
+    // Case 1: version NEWER than this firmware understands (rollback past a schema bump).
+    set_load_fault_newer(30, 26);
+    char err[256];
+    err[0] = '\0';
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(!ok, "a quarantined (newer) config must refuse the firing");
+    TEST_CHECK(strstr(err, "30") != NULL && strstr(err, "26") != NULL,
+               "the refusal must name both the on-disk version and the firmware's understood version");
+    TEST_CHECK(strstr(err, "reflash") != NULL, "the refusal must state the way out: reflash matching firmware");
+    TEST_CHECK(strstr(err, "cannot migrate it forward") == NULL,
+               "a NEWER fault must not be worded as the UNREADABLE case");
+
+    // Case 2: version OLDER than this firmware's one-step migration can consume.
+    set_load_fault_unreadable(10, 26, "no migration path from v10");
+    err[0] = '\0';
+    ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(!ok, "a quarantined (unreadable) config must refuse the firing");
+    TEST_CHECK(strstr(err, "10") != NULL, "the refusal must name the on-disk version it could not migrate");
+    TEST_CHECK(strstr(err, "cannot migrate it forward") != NULL,
+               "the unreadable case must be worded distinctly from the newer case");
+    TEST_CHECK(strstr(err, "no migration path from v10") != NULL,
+               "the refusal must surface the specific migration failure reason");
+
+    // Control: a genuinely fresh/unconfigured board (fault unlatched) still gets
+    // the old, generic message -- the fix must not misfire on an unrelated cause.
+    s_test_load_fault_present = false;
+    memset(&s_test_load_fault_value, 0, sizeof(s_test_load_fault_value));
+    err[0] = '\0';
+    ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(!ok, "a genuinely never-configured board must still refuse the firing");
+    TEST_CHECK(strstr(err, "zone config failed to load or has not been saved") != NULL,
+               "with no latched fault, the generic message must be unchanged");
+    TEST_CHECK(strstr(err, "reflash") == NULL,
+               "the generic no-fault message must not claim a reflash is needed -- that would mislead an operator "
+               "whose board was simply never configured");
+
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+    s_test_load_fault_present = false;
+    memset(&s_test_load_fault_value, 0, sizeof(s_test_load_fault_value));
 }
 
 // The shared heat claim's atomic gate (relay_authority.h) -- proves the LATE
@@ -8409,6 +8506,7 @@ void run_test_profile_executor_prestart(void)
     test_io_segs_force_all_off_sweeps_general_io_too();
     test_run_refuses_while_zone_sweep_is_active();
     test_run_decodes_fault_sources_instead_of_hex();
+    test_run_refuses_with_named_reason_on_config_quarantine();
     test_run_refuses_at_atomic_heat_claim_gate();
     test_guard_trip_releases_heat_enable();
     test_halt_releases_heat_enable();

@@ -487,6 +487,41 @@ bool zones_config_set_safety_tc_type(uint8_t tc_type);
  * pc_tools GUI's Zones panel can say so instead of silently doing nothing. */
 bool zones_config_is_valid(void);
 
+/* CLAUDE.md's ota_rollback_esp() hazard, closed 2026-09-16: naming WHY the
+ * config failed to load, distinct from "never configured" (a legitimate
+ * first-boot state also covered by zones_config_is_valid()==false above).
+ * Latched once, for the boot, the first time nvs_load() actually finds a
+ * real prior blob in KILN_NVS_PARTITION that this firmware could not turn
+ * into a trustworthy zones_cfg_t -- either because the blob's own version is
+ * NEWER than ZONES_CFG_VERSION (a rollback past a schema bump, or newer
+ * firmware than this build), or because it is OLDER than this firmware can
+ * migrate forward (docs/CONFIG_MIGRATION_CHAIN_PLAN.md's one-step-at-a-time
+ * policy: a future build carrying only the N-1->N step cannot consume a
+ * blob more than one step behind). Never cleared by a later in-RAM event --
+ * like recovery_mode, this is fixed for the boot; only a fresh boot (after a
+ * reflash or a fresh save that lands a new, valid blob) re-evaluates it. A
+ * board with NOTHING ever saved (fresh out of the box) leaves this false: no
+ * prior data existed to fail decoding, so there is nothing to warn about. */
+typedef enum {
+    ZONES_CFG_LOAD_FAULT_NONE = 0,    /* no fault latched this boot */
+    ZONES_CFG_LOAD_FAULT_NEWER,       /* on-disk version > ZONES_CFG_VERSION */
+    ZONES_CFG_LOAD_FAULT_UNREADABLE,  /* on-disk version this fw cannot decode/migrate (too old, corrupt, bad CRC/length) */
+} zones_cfg_load_fault_kind_t;
+
+typedef struct {
+    bool occurred;
+    zones_cfg_load_fault_kind_t kind;
+    uint8_t on_disk_version;   /* the blob's own claimed version byte */
+    uint8_t fw_version;        /* ZONES_CFG_VERSION at the moment this was captured */
+    char reason[96];           /* zones_config_json_decode_blob()'s own *err_reason, copied */
+} zones_cfg_load_fault_t;
+
+/* Returns the latched fault (see the type's own comment above). Always
+ * answerable -- when nothing was ever latched this boot, *out (if given) is
+ * zeroed with occurred==false and the return value is false. Cheap RAM read,
+ * safe from any task including the LVGL/httpd stacks. */
+bool zones_config_get_load_fault(zones_cfg_load_fault_t *out);
+
 /* Below: read-only accessors for profile_executor.c (TODO.md section 6).
  * Same rule as zones_config_get_max_ramp -- false means "cannot answer,"
  * not "answer is zero." */
