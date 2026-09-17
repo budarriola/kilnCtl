@@ -128,6 +128,7 @@ try {
         # combined executable rather than needing its own, same convention
         # as test_ota_auth.c/ota_auth.c just above it in this file's history.
         (Join-Path $testDir "test_http_auth_enforce.c"),
+        (Join-Path $testDir "test_web_auth_safety_interaction.c"),
         (Join-Path $testDir "test_sim_high_temp.c"),
         (Join-Path $testDir "test_sim_mistune.c"),
         (Join-Path $testDir "test_sim_factorial_design.c"),

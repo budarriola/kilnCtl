@@ -688,6 +688,49 @@ user, auth on + admin} against `/api/profile_exec/stop` and asserts ALLOW in
 all five; a bench check confirms the LCD Stop button works with the LCD locked
 and a firing running.
 
+**Status, 2026-09-17 — LCD side done, HTTP side has an open gap.**
+
+LCD side: `ui_home_fire_btn_cb()` (`firmware/KilnFW/App/drivers/ui/ui_page_home_actions.c`)
+already matches this section exactly — its RUNNING/PAUSED branch calls
+`ui_home_show_stop_confirm()` directly with no PIN gate, and only its Start
+branch goes through `ui_lcd_lock_run_gated()`. This is now enforced
+mechanically: `tools/check_stop_path_never_gated.ps1` fails the build if a
+future change adds a gate call to the Stop branch (or removes the Stop call
+entirely, or strips the Start gate so the check can no longer tell the two
+branches apart), and its negative test
+(`firmware/KilnFW/App/test/test_check_stop_path_never_gated.ps1`) proves the
+check catches a PIN gate actually moved onto the Stop branch — verified
+against the real production file, restored by hand, sha256-confirmed
+unchanged. `firmware/KilnFW/App/test/test_web_auth_safety_interaction.c`
+host-tests the two route-tier facts this section depends on
+(`/api/profile_exec/stop` is USER, `/api/safety/clear_trip` is ADMIN) plus
+the "auth off" combination of the acceptance list above, driven through the
+real route table.
+
+HTTP side, open gap: **the URI-level bypass for `POST /api/profile_exec/stop`
+does not exist yet.** `http_auth_check()`
+(`firmware/KilnFW/App/drivers/http/http_auth_enforce.c`) takes only a
+`route_tier_t`/role/`web_enabled` triple — it has no URI parameter at all —
+and neither it nor `http_auth_http.c`'s `kiln_http_prehandler()` special-cases
+`/api/profile_exec/stop` anywhere. Since the route is tiered USER (correct
+per section 1), today only 3 of the 5 acceptance-list combinations actually
+ALLOW: auth off, auth-on+user, and auth-on+admin. **Auth-on with no session
+and auth-on+locked both currently return `DENY_NO_SESSION`** — a stop request
+from a client that never logged in, or whose session expired, is refused
+exactly like any other USER-tier route, which is precisely what this section
+exists to prevent. This is a gap in the enforcement point (plan item 5),
+which was out of scope for the pass that added the checks above (owned by
+another in-flight change to that same file pair) — flagged here rather than
+fixed. Closing it needs either a URI-aware exemption list in
+`kiln_http_prehandler()` (checked before calling `http_auth_check()`) or a
+new `route_tier_t`-independent bypass flag threaded through
+`route_tier_table.h`, consulted by both `http_auth_check()` and a
+correspondingly extended acceptance test in `test_http_auth_enforce.c` (or
+`test_web_auth_safety_interaction.c`) exercising all five combinations named
+above. Until that lands, the bench-check half of this section's acceptance
+criterion should also be spot-checked with the LCD *and* an unauthenticated
+browser tab side by side.
+
 ---
 
 ## 10. The physical credential reset
