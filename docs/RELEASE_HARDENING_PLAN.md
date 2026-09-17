@@ -73,15 +73,26 @@ task is not a risk trade — it is an unbounded one.
 **How to know it is closed.** In order, and none of these substitutes for the
 next:
 
-1. **Coredump readback has to work first.** The 2026-09-15 pass failed for
-   structural reasons: no tooling in this repo reads the stored coredump
-   partition, and the PC-side link spoke a different protocol version than the
-   board. Until a raw coredump can be pulled and symbolized against the
-   archived ELF that matches the running build (`find_crash_elf()` already
-   does the matching half), every future occurrence produces the same
-   zero-information report. This is the single highest-value piece of work in
-   the plan, because it converts all subsequent occurrences from mysteries
-   into diagnoses. **Size: M.**
+1. ~~Coredump readback has to work first~~ — **done, `4af518ca`.** The prior
+   failure was two real bugs: wrong `espcoredump` CLI args (positional path
+   instead of `--core`/`--core-format`, no `--chip`) and the wrong
+   interpreter (defaulted to the MCP server's own venv, which lacks
+   `esp_coredump`), whose `ModuleNotFoundError` was misreported as "very
+   likely an ELF/coredump mismatch" — an environment failure dressed as a
+   substantive verdict. Fixed and confirmed live: `espcoredump` now runs far
+   enough to report its own genuine verdict. Host-tested:
+   `tools/PcTools/tests/test_coredump_symbolize_and_archive.py`. Also adds a
+   durable, content-addressed coredump archive
+   (`firmware/KilnFW/coredump_archive/`) so a fetched dump is never
+   overwritten. The existing 748032-byte on-board dump is still permanently
+   unsymbolizable — its matching ELF (build `Sep 14 2026 23:55:17Z`) was lost
+   before the ELF-archive durability fix (`a347e726`) landed, and nothing
+   recovers lost ELFs after the fact. **Residual gap, confirmed still open:**
+   `find_crash_elf()` (`mcp_server_flash.py:970`) resolves against the
+   board's *currently running* `fw_build`, not the stored dump's origin
+   build — a dump fetched before a reflash will be matched to the wrong ELF
+   unless the caller passes the dump's own `fw_build` by hand. Full detail:
+   `docs/audits/release_hardening_plan_verify_1_2_5_7_8_2026-09-16.md`.
 2. **A stack-margin measurement taken during a firing, not at idle.** The idle
    baseline is a floor, not a worst case — that is already recorded as a
    standing caveat in `tools/PcTools/scripts/stability_soak.py`'s own
@@ -140,16 +151,29 @@ unattended firing. The board being demonstrably healthy at minute ten is not
 evidence about hour eight; this is the same "a snapshot is not a trend" error
 the idle-stack-baseline caveat already names.
 
-**How to know it is closed.** Extend `stability_soak.py` with an explicit
-verdict rather than only a CSV: a declared bound per metric, a
-monotonic-degradation test on heap min-free and stack high-water (a
-statistically significant downward slope is a failure even if no bound is
-breached), and a non-zero exit on violation. Then run it across a full
-intended-duration firing. **The exit code is the point** — this repo has
-already been burned by a harness that printed a PASS-shaped verdict and
-exited 0 on a regression, so the verdict must be machine-checked and the
-harness must be negative-tested by feeding it a synthetic degrading series and
-confirming it goes red. **Size: M for the harness, L including the runs.**
+**How to know it is closed.** ~~Extend `stability_soak.py` with an explicit
+verdict rather than only a CSV~~ — **partly done already.** `main()` already
+returns a real PASS/FAIL verdict with a non-zero exit (1 on any accumulated
+problem, 2 on a precondition failure), and already flags a heap-floor breach,
+a DOWN trend on heap-free or stack-min-headroom%, and a positive delta on
+`crc_errors`/`timeouts`/`broadcast_dropped` (landed across `95ca7e6e`,
+`e84a2db5`, `3780030f`). Three things are still genuinely open:
+
+1. **The trend test is not a slope test.** `_trend_direction()` compares only
+   the first and last sample against a 5% threshold — noisy middle samples
+   are invisible to it. Needs a real monotonic-degradation/slope test on
+   heap min-free and stack high-water, per the original ask.
+2. **The harness itself has never been negative-tested.** No test file
+   references `stability_soak.py` or `_trend_direction()`. Feed it a
+   synthetic degrading series and confirm it goes RED before trusting it —
+   this repo has been burned by exactly this omission eight times before.
+3. **No run of the intended release duration exists**, with or without a
+   firing active — no `stability_soak_*.csv` artifact or audit record exists
+   anywhere in the tree.
+
+**Size: S for the slope test + negative test (the verdict scaffolding is
+already there), L for the runs.** Full verification detail:
+`docs/audits/release_hardening_plan_verify_1_2_5_7_8_2026-09-16.md`.
 
 **Already partly covered, and worth saying:** the metric *selection* problem
 is solved. `stability_soak.py` already samples the right things, already
@@ -291,12 +315,23 @@ several cases host-tested. Almost none has been made to happen on real
 hardware. Specifically:
 
 - **Power loss mid-write.** The RP2040 `config_store` A/B sector scheme is
-  implemented and flashed, and its in-RAM cache race is fixed. But its
-  `next_write_slot` torn-slot reprogramming defect is flagged and untouched,
-  and `docs/CONFIG_FILESYSTEM.md` records it as a real, open atomicity defect.
-  A kiln loses power mid-firing for ordinary reasons — a breaker, a storm, an
-  operator. **Fix the defect, then prove it by cutting power during a write,
-  repeatedly, and confirming the config reads back intact every time.**
+  implemented and flashed, and its in-RAM cache race is fixed. ~~Its
+  `next_write_slot` torn-slot reprogramming defect is flagged and untouched~~
+  — **the defect is fixed, 2026-09-14** (`config_store_next_write_slot()` now
+  verifies the target slot is actually erased before programming, and
+  read-back-verifies after every program; full detail
+  `docs/audits/rp2040_config_store_write_atomicity_2026-09-14.md`), host-tested
+  (`test_config_store_flash.c`, torn-slot-reuse cases) and **partially
+  bench-verified** (`88bb4333`, 2026-09-14: a real field round-tripped
+  correctly across two live Pico reboots, all safety-relevant config read
+  back unchanged). What remains genuinely open, by deliberate safety choice
+  rather than oversight: that bench pass explicitly did not tear a real flash
+  program mid-write (judged unsafe/irreversible on the only bench Pico), so
+  the mismatch-detected and slot-skip-and-switch branches are proven only by
+  the host-test power-cut-injection harness, never on real hardware. **The
+  plan's original ask — cut power during a write, repeatedly, on real
+  hardware, confirming intact read-back every time — is still open.** Verify
+  detail: `docs/audits/release_hardening_plan_verify_1_2_5_7_8_2026-09-16.md`.
 - **A Pico reboot mid-firing.** The reset-one-side bug class has already
   produced four confirmed silent instances in this codebase, one of them
   exactly this scenario (`trip_seq` restarting on the Pico while the ESP's
@@ -427,7 +462,17 @@ release cannot ship without:
   with out-of-range values, a version number from the future, a file that is
   valid for a *different* kiln. The kiln-profiles plan covers untrusted upload
   for its own surface; the release gate is that no such input can produce a
-  bootable state that will command heat. **Size: M. Blocker.**
+  bootable state that will command heat. **Substantially more coverage
+  already exists than this bullet implied**: `test_backup_import.c` already
+  rejects a malformed/truncated body, wrong `kind`, a too-new version,
+  out-of-range model values and overlong names; separately, at the NVS-blob
+  level, bad-CRC and refused-newer-than-firmware blobs are covered and
+  preserved un-overwritten (`test_nvs_load_from_bad_crc_is_rejected`,
+  `test_zones_http_start_refused_newer_blob_not_overwritten`, among others).
+  What is still missing is a single test stating the release-gate property
+  directly rather than inferring it from several unit tests. **Size: S
+  (down from M).** Verify detail:
+  `docs/audits/release_hardening_plan_verify_1_2_5_7_8_2026-09-16.md`.
 
 ---
 
