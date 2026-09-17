@@ -171,22 +171,35 @@ returns a real PASS/FAIL verdict with a non-zero exit (1 on any accumulated
 problem, 2 on a precondition failure), and already flags a heap-floor breach,
 a DOWN trend on heap-free or stack-min-headroom%, and a positive delta on
 `crc_errors`/`timeouts`/`broadcast_dropped` (landed across `95ca7e6e`,
-`e84a2db5`, `3780030f`). Three things are still genuinely open:
+`e84a2db5`, `3780030f`). Of the three items named next, two are now done
+(slope test, negative test); one remains open (the actual release-duration
+run):
 
-1. **The trend test is not a slope test.** `_trend_direction()` compares only
-   the first and last sample against a 5% threshold — noisy middle samples
-   are invisible to it. Needs a real monotonic-degradation/slope test on
-   heap min-free and stack high-water, per the original ask.
-2. **The harness itself has never been negative-tested.** No test file
-   references `stability_soak.py` or `_trend_direction()`. Feed it a
-   synthetic degrading series and confirm it goes RED before trusting it —
-   this repo has been burned by exactly this omission eight times before.
+1. ~~**The trend test is not a slope test.**~~ **DONE.** `_trend_direction()`
+   no longer compares only the first and last sample. It now fits a real
+   ordinary-least-squares line over every sample against `t_s`, expresses
+   the result as a slope in units per hour, and classifies DOWN/UP only once
+   the fitted slope's magnitude exceeds a per-metric floor
+   (`HEAP_TREND_FLOOR_BYTES_PER_HOUR`, `STACK_PCT_TREND_FLOOR_PP_PER_HOUR`) —
+   immune to the failure mode named here, where a monotone drift that
+   happens to return near its starting value was invisible to a two-point
+   comparison. Verdict semantics (DOWN still fails the run, non-zero exit)
+   are unchanged.
+2. ~~**The harness itself has never been negative-tested.**~~ **DONE.**
+   `tools/PcTools/tests/test_stability_soak_trend.py` feeds the OLD
+   first-vs-last `_trend_direction()` (loaded verbatim from the pre-fix
+   commit via `git show`, not a hand-transcribed stand-in) a series that
+   drifts strongly up or down but returns near its starting value at the
+   last sample, and confirms the old code reports "flat" on that series
+   while the new least-squares classifier correctly reports UP/DOWN with the
+   real slope. Also covers noise-only series (must stay flat) and a
+   realistic noisy monotone decline (must be flagged DOWN).
 3. **No run of the intended release duration exists**, with or without a
    firing active — no `stability_soak_*.csv` artifact or audit record exists
-   anywhere in the tree.
+   anywhere in the tree. **Still open — not attempted as part of this pass.**
 
-**Size: S for the slope test + negative test (the verdict scaffolding is
-already there), L for the runs.** Full verification detail:
+**Size: L for the remaining run.** The slope test and negative test (item
+1/2 above) are closed. Full verification detail:
 `docs/audits/release_hardening_plan_verify_1_2_5_7_8_2026-09-16.md`.
 
 **Already partly covered, and worth saying:** the metric *selection* problem

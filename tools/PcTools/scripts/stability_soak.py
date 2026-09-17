@@ -106,6 +106,16 @@ HEAP_INTERNAL_FLOOR_BYTES = 36_000
 # does not cry wolf on noise).
 TREND_MIN_SAMPLES = 5
 
+# Trend thresholds, expressed as a least-squares slope in units per HOUR --
+# not a first-vs-last endpoint comparison (that shape is blind to a monotone
+# drift that happens to return near its starting value between two noisy
+# endpoint samples, and is dominated by noise in those two samples). A run's
+# fitted slope must exceed one of these magnitudes to be called DOWN/UP; a
+# smaller slope is flat/noise. Conservative starting points, same rationale
+# as TREND_MIN_SAMPLES above -- tune against real run history once it exists.
+HEAP_TREND_FLOOR_BYTES_PER_HOUR = 2_000.0
+STACK_PCT_TREND_FLOOR_PP_PER_HOUR = 2.0
+
 CSV_FIELDS = [
     "t_s", "wall_time",
     "esp_reset_reason", "esp_uptime_s", "unacknowledged_crash",
@@ -276,18 +286,43 @@ def sample_once(host: str, baseline: Baseline, t0: float) -> Sample:
     return Sample(row=row, problems=problems)
 
 
-def _trend_direction(values: "list[float]") -> str:
-    """Very small trend classifier: last value vs. first, over samples with
-    no missing data. Only meaningful with TREND_MIN_SAMPLES or more points --
-    callers must check length themselves before trusting the label."""
+def _linreg_slope_per_sec(t_values: "list[float]", values: "list[float]") -> float:
+    """Ordinary least-squares slope of `values` against `t_values` (seconds),
+    units per second. Returns 0.0 if there are fewer than 2 distinct t's."""
+    n = len(t_values)
+    if n < 2:
+        return 0.0
+    mean_t = sum(t_values) / n
+    mean_y = sum(values) / n
+    num = sum((t - mean_t) * (y - mean_y) for t, y in zip(t_values, values))
+    den = sum((t - mean_t) ** 2 for t in t_values)
+    if den == 0.0:
+        return 0.0
+    return num / den
+
+
+def _trend_direction(t_values: "list[float]", values: "list[float]", floor_per_hour: float) -> "tuple[str, float]":
+    """Real least-squares slope test over ALL samples (not a first-vs-last
+    endpoint comparison -- that shape is blind to a monotone drift that
+    happens to return near its starting value, and is dominated by noise in
+    just the two endpoint samples). Fits a line to (t_values, values) and
+    expresses the slope in units per hour; classifies DOWN/UP only once the
+    magnitude of that fitted slope exceeds `floor_per_hour`, so a handful of
+    noisy samples cannot flip the verdict the way two noisy endpoints could.
+
+    Returns (label, slope_per_hour). label is "insufficient samples" below
+    TREND_MIN_SAMPLES points; otherwise one of "DOWN", "UP", "flat".
+    Callers must check the length themselves before trusting the label, same
+    as before.
+    """
     if len(values) < TREND_MIN_SAMPLES:
-        return "insufficient samples"
-    first, last = values[0], values[-1]
-    if last < first * 0.95:
-        return "DOWN"
-    if last > first * 1.05:
-        return "UP"
-    return "flat"
+        return "insufficient samples", 0.0
+    slope_per_hour = _linreg_slope_per_sec(t_values, values) * 3600.0
+    if slope_per_hour <= -abs(floor_per_hour):
+        return "DOWN", slope_per_hour
+    if slope_per_hour >= abs(floor_per_hour):
+        return "UP", slope_per_hour
+    return "flat", slope_per_hour
 
 
 def main() -> int:
@@ -378,8 +413,21 @@ def main() -> int:
             out.append(float(v))
         return out
 
-    heap_trend = _trend_direction(col("heap_internal_free"))
-    stack_pct_trend = _trend_direction(col("stack_min_headroom_pct"))
+    def col_with_t(name: str) -> "tuple[list[float], list[float]]":
+        ts: list[float] = []
+        vals: list[float] = []
+        for r in rows:
+            v = r.get(name)
+            if v in (None, ""):
+                continue
+            ts.append(float(r["t_s"]))
+            vals.append(float(v))
+        return ts, vals
+
+    heap_t, heap_vals = col_with_t("heap_internal_free")
+    heap_trend, heap_slope_per_hour = _trend_direction(heap_t, heap_vals, HEAP_TREND_FLOOR_BYTES_PER_HOUR)
+    stack_t, stack_vals = col_with_t("stack_min_headroom_pct")
+    stack_pct_trend, stack_slope_per_hour = _trend_direction(stack_t, stack_vals, STACK_PCT_TREND_FLOOR_PP_PER_HOUR)
     crc_vals = col("crc_errors")
     timeout_vals = col("timeouts")
     bd_vals = col("broadcast_dropped")
@@ -395,9 +443,10 @@ def main() -> int:
     print("=" * 70)
     print(f"SOAK SUMMARY -- mode={mode}, samples={len(rows)}, "
           f"duration={round(time.monotonic() - t0, 1)}s, csv={out_path}")
-    print(f"  heap_internal.free trend: {heap_trend}"
+    print(f"  heap_internal.free trend: {heap_trend} (slope {heap_slope_per_hour:+.1f} B/hour)"
           + (" *** FLOOR BREACH ABOVE ***" if any(v < HEAP_INTERNAL_FLOOR_BYTES for v in col("heap_internal_free")) else ""))
-    print(f"  stack min headroom% trend: {stack_pct_trend} (idle-only run cannot prove firing-time headroom -- see docstring)")
+    print(f"  stack min headroom% trend: {stack_pct_trend} (slope {stack_slope_per_hour:+.2f} pp/hour) "
+          "(idle-only run cannot prove firing-time headroom -- see docstring)")
 
     # --- predicted-vs-actual cross-check (docs/audits/2026-09-08-httpd-stack-gap.md) ---
     # The static check's own "honest" headroom estimate is a constant-overhead
