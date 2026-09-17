@@ -187,6 +187,13 @@ clipping any UI content.
 
 Full rationale, token measurements, and how to add a tool: **docs/MCP_SERVERS.md**.
 
+Three git-workflow guards live under `tools/`: `worktree_mint.ps1` (mint/remove
+a short, uniquely-named worktree at `origin/main` under `C:\wt\`),
+`push_verify.ps1` (verify a commit actually landed on `origin/main`, direction-
+and `$?`-safe), and `commit_guard.ps1` (refuse a commit whose working copy
+differs from `origin/main` until every difference is confirmed as your own).
+Full detail: **docs/MCP_SERVERS.md**'s "Git workflow guards" section.
+
 ## Project Structure
 
 The tree is split into hardware and software halves. See `docs/REPO_LAYOUT.md`

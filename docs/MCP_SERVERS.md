@@ -361,6 +361,74 @@ would ride along or trip the sensitive-dirty guard above). A fresh
    set-target esp32s3` explicitly before `build` -- do not rely on a stale
    `sdkconfig` or the tool's own default.
 
+## Git workflow guards (`tools/worktree_mint.ps1`, `tools/push_verify.ps1`, `tools/commit_guard.ps1`)
+
+Three small PowerShell tools under `tools/` close three recurring, expensive
+failure modes seen repeatedly in this project's development workflow (each
+with real damage on record -- see each script's own header for the incidents
+it exists to prevent). None of them assert anything standing about the
+repository's current state, so none is wired into `run_all_checks.ps1` --
+they are invoked by hand at the workflow moment they apply.
+
+**`tools/worktree_mint.ps1`** -- mint or remove a short-lived worktree at
+`origin/main` under `C:\wt\`. `C:\wt\` is a flat namespace shared by every
+concurrent session on this machine, and two constraints have bitten
+repeatedly: the path must be SHORT (a nested `.claude/worktrees/...` path
+overflows the MSVC command line building SaftyFW host tests) and the name
+must be UNIQUE (generic names collide between live sessions).
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\worktree_mint.ps1 -Label myfeature
+    # fetches origin, creates C:\wt\myfeature_<random> at origin/main,
+    # refuses rather than reusing an existing directory, prints
+    # "WORKTREE: <path>"
+
+powershell -ExecutionPolicy Bypass -File tools\worktree_mint.ps1 -Remove -Path C:\wt\myfeature_ab12cd
+    # removes cleanly; refuses if the worktree has uncommitted changes
+    # (tracked or untracked) unless -Force is also passed
+```
+
+**`tools/push_verify.ps1`** -- verify a commit actually landed on
+`origin/main`, in one unambiguous verdict line. This project has produced
+four false "landed" reports from two specific causes: (1) running the
+ancestry check backwards -- `git merge-base --is-ancestor origin/main HEAD`
+asks "is origin/main an ancestor of my branch", which succeeds even for a
+commit stranded on an unpushed local branch, not `git merge-base
+--is-ancestor <mine> origin/main`, the question that actually matters; and
+(2) trusting `$?` after a native `git push` in PowerShell 5.1, which is set
+to `$false` on any command that wrote to stderr -- and `git push`'s own
+progress banner does that on a successful push. This script uses the correct
+argument order and reads only `$LASTEXITCODE`, never `$?`, never push output.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\push_verify.ps1 -Commit <hash> [-Branch origin/main]
+    # prints "VERDICT: LANDED -- ..." or "VERDICT: NOT LANDED -- ...",
+    # and on NOT LANDED also names the local branch(es) the commit IS
+    # reachable from, if any (the actual common root cause)
+```
+
+**`tools/commit_guard.ps1`** -- guard a commit against the stale-working-copy
+trap before it happens. `git commit -o <path>` (and `--amend` without a
+pathspec) commits the WORKING COPY of a path whole, not your edit
+specifically; in a tree several sessions edit concurrently, a stale working
+copy silently reverts everyone else's changes to that file. This has
+happened twice for real here: a stale doc commit reverted 113 lines of
+another session's work, and a bare `--amend` pushed a 1067-line revert of
+live work. The script compares `git hash-object <path>` against
+`git rev-parse origin/main:<path>` for each path about to be committed, shows
+the diff, reports insertion/deletion counts, and refuses by default until
+the caller passes `-Confirm`. An optional `-ExpectedMaxLines` per path flags
+any path whose actual insertion+deletion count exceeds what the caller
+declared -- that count was the available tell in the real 113-line incident
+and was read past unlooked-at.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\commit_guard.ps1 -Path CLAUDE.md -ExpectedMaxLines 40
+    # refuses (exit 1) unless -Confirm is also passed, or the path is
+    # unchanged/new vs origin/main; also refuses if actual changed lines
+    # exceed the declared budget, regardless of -Confirm
+```
+
 ## Adding a tool
 
 For `kilnctrl`, write it in the server module with the existing

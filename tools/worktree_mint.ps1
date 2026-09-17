@@ -1,0 +1,172 @@
+# worktree_mint.ps1 -- mint or remove a short-lived, collision-proof git
+# worktree at origin/main under C:\wt\.
+#
+# WHY THIS EXISTS. The shared main tree at C:\Users\...\kilnCtl normally
+# carries somewhere around a hundred dirty tracked paths belonging to other
+# concurrent sessions (see CLAUDE.md's "concurrent sessions" notes), so
+# nearly all real work has to happen in a separate worktree checked out at
+# origin/main. Two constraints have bitten repeatedly enough to be written
+# down as project memory:
+#
+#   - SHORT PATH. SaftyFW host-test builds overflow the MSVC command line
+#     from the default `.claude/worktrees/...` path (nested several levels
+#     under a long project directory). The standing convention is a short
+#     path directly under `C:\wt\`.
+#   - UNIQUE NAME. `C:\wt\` is a flat namespace shared by every concurrent
+#     session on this machine (as of 2026-09-16 it holds several hundred
+#     entries from past sessions -- see its directory listing). A generic
+#     name like `C:\wt\build` or `C:\wt\work` collides with another live
+#     session's worktree. This script appends a random suffix to whatever
+#     label the caller supplies so a collision is astronomically unlikely,
+#     and it refuses outright if the resulting path already exists rather
+#     than silently reusing (and corrupting) someone else's worktree.
+#
+# USAGE
+#   powershell -ExecutionPolicy Bypass -File tools\worktree_mint.ps1 -Label myfeature
+#       Fetches origin, creates C:\wt\myfeature_<6-char-random> checked out
+#       at origin/main (detached), and prints the path on its own line
+#       prefixed "WORKTREE: " so a caller can grep it out reliably.
+#
+#   powershell -ExecutionPolicy Bypass -File tools\worktree_mint.ps1 -Remove -Path C:\wt\myfeature_ab12cd
+#       Removes a worktree cleanly (git worktree remove), but refuses if it
+#       has uncommitted changes (tracked modifications, staged changes, or
+#       untracked files) -- exactly the situation where a careless remove
+#       would silently discard real work.  Pass -Force together with
+#       -Remove only when you have already confirmed (by hand) that the
+#       dirty state is disposable; the script never assumes that on its own.
+#
+# EXIT CODES follow this repo's check_*.ps1 convention where applicable:
+#   0 -- success (mint: worktree created; remove: worktree removed)
+#   1 -- failure (bad args, git error, refused due to dirty state or an
+#        already-existing target path)
+#
+# This is a workflow helper, not a repo-health guard, so it is not wired
+# into run_all_checks.ps1 -- there is nothing here for that runner to
+# assert about the repository itself.
+
+[CmdletBinding()]
+param(
+    [string]$Label,
+    [switch]$Remove,
+    [string]$Path,
+    [switch]$Force,
+    [string]$WtRoot = "C:\wt"
+)
+
+# NOTE: deliberately "Continue", not "Stop". PowerShell 5.1 treats a native
+# command's stderr output as a terminating NativeCommandError under
+# $ErrorActionPreference="Stop" even when the command's exit code is 0 --
+# `git fetch`'s ordinary progress banner goes to stderr, so "Stop" here
+# would abort this script on a successful fetch. Every git call below is
+# checked via $LASTEXITCODE explicitly instead, which is the only reliable
+# success signal for a native command in PowerShell 5.1 (see docs/MCP_SERVERS.md
+# on the same trap in flash_firmware()'s callers, and tools/push_verify.ps1).
+$ErrorActionPreference = "Continue"
+
+function Get-RepoRoot {
+    $top = git rev-parse --show-toplevel 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $top) {
+        throw "Not inside a git repository (git rev-parse --show-toplevel failed)."
+    }
+    # git prints forward slashes even on Windows; normalize.
+    return ($top -replace '/', '\')
+}
+
+function New-RandomSuffix {
+    # 6 lowercase-alnum chars -- enough entropy that two concurrent sessions
+    # picking the same human label will not also pick the same suffix.
+    $chars = "abcdefghijklmnopqrstuvwxyz0123456789".ToCharArray()
+    -join (1..6 | ForEach-Object { $chars | Get-Random })
+}
+
+if ($Remove) {
+    if (-not $Path) {
+        Write-Host "ERROR: -Remove requires -Path <worktree directory>." -ForegroundColor Red
+        exit 1
+    }
+    $repoRoot = Get-RepoRoot
+    $full = [System.IO.Path]::GetFullPath($Path)
+    if (-not (Test-Path $full)) {
+        Write-Host "ERROR: '$full' does not exist -- nothing to remove." -ForegroundColor Red
+        exit 1
+    }
+
+    # Refuse on uncommitted changes: tracked modifications/staged changes
+    # (git status --porcelain) OR untracked files, unless -Force.
+    $porcelain = git -C $full status --porcelain --untracked-files=all 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: '$full' does not look like a git worktree (git status failed)." -ForegroundColor Red
+        exit 1
+    }
+    if ($porcelain -and -not $Force) {
+        Write-Host "REFUSED: worktree '$full' has uncommitted changes:" -ForegroundColor Red
+        Write-Host $porcelain
+        Write-Host "Commit, discard by hand, or pass -Force only after you have reviewed the above." -ForegroundColor Red
+        exit 1
+    }
+    if ($porcelain -and $Force) {
+        Write-Host "WARNING: removing '$full' with uncommitted changes present (-Force):" -ForegroundColor Yellow
+        Write-Host $porcelain
+    }
+
+    git -C $repoRoot worktree remove $full --force *>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: git worktree remove failed for '$full'." -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "REMOVED: $full" -ForegroundColor Green
+    exit 0
+}
+
+# --- mint path ---
+if (-not $Label) {
+    Write-Host "ERROR: -Label <short-name> is required to mint a worktree (e.g. -Label pushcheck)." -ForegroundColor Red
+    exit 1
+}
+if ($Label -notmatch '^[A-Za-z0-9_-]+$') {
+    Write-Host "ERROR: -Label must be alphanumeric/underscore/hyphen only (got '$Label')." -ForegroundColor Red
+    exit 1
+}
+
+$repoRoot = Get-RepoRoot
+
+if (-not (Test-Path $WtRoot)) {
+    New-Item -ItemType Directory -Path $WtRoot -Force | Out-Null
+}
+
+git fetch origin main *>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "ERROR: git fetch origin main failed." -ForegroundColor Red
+    exit 1
+}
+
+# Try a handful of times in the (very unlikely) event of a suffix collision
+# against another concurrent mint.
+$target = $null
+for ($i = 0; $i -lt 20; $i++) {
+    $candidate = Join-Path $WtRoot ("{0}_{1}" -f $Label, (New-RandomSuffix))
+    if (-not (Test-Path $candidate)) {
+        $target = $candidate
+        break
+    }
+}
+if (-not $target) {
+    Write-Host "ERROR: could not find a free worktree path under $WtRoot after 20 attempts." -ForegroundColor Red
+    exit 1
+}
+
+# Belt-and-suspenders: refuse rather than reuse if somehow the path appeared
+# between the check above and here (race with another mint).
+if (Test-Path $target) {
+    Write-Host "ERROR: '$target' already exists -- refusing to reuse an existing directory." -ForegroundColor Red
+    exit 1
+}
+
+git -C $repoRoot worktree add --detach $target origin/main *>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "ERROR: git worktree add failed for '$target'." -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "WORKTREE: $target" -ForegroundColor Green
+exit 0
