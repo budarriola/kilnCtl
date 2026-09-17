@@ -240,9 +240,15 @@ side lost, and D1 makes that unreadable. **Requirement: a migration write-back
 This is inert on boards with no `cfg` partition, which is all of them today,
 and must be settled before `cfg` goes live rather than after.
 
-### 1.6 Migration must persist — the blocking defect
+### 1.6 Migration must persist — the blocking defect (CLOSED 2026-09-17)
 
-**Found by inspection during this revision, and it blocks D1.**
+**Found by inspection during this revision, and it blocked D1. Now fixed and
+landed: `d3f74d67` persists a migrated blob immediately on the ordinary
+`nvs_load()` path, read-back verified, and `6985c89b` surfaces a write-back
+verify failure to the operator (`zones_cfg_migration_persist_fault_t`, wired
+through `dashboard_http.c` -> `/api/status` -> the LCD trip strip) rather than
+silently retrying forever. All four numbered requirements below are
+implemented; kept here as the record of what was required and why.**
 
 A migrated blob is **never written back on the ordinary load path**.
 `nvs_load()` decodes into `s_zones.cfg` and returns; flash still holds the
