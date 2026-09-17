@@ -43,6 +43,18 @@ reset.
   exclusively through `web_auth_admin_bootstrap_needed()`, and a stale ADMIN
   session is denied on ordinary ADMIN routes while bootstrap is outstanding.
 
+- **The section 12 host-test matrix**: `test_http_auth_enforce.c` drives all
+  60 tier/role/enabled/bootstrap combinations against the contract stated in
+  `http_auth_enforce.h`, and asserts every row of `route_tier_table.h` is
+  found by `http_auth_lookup_tier()` with its declared tier.
+  `test_web_auth_safety_interaction.c` covers the stop path while bootstrap is
+  outstanding, and `test_check_route_tier_coverage.ps1`'s fifth assertion
+  proves no tier-table row is orphaned. All of these call the production
+  functions rather than a transcribed copy of the logic, and each was
+  negative-tested by sabotaging the production source, confirming a
+  behavioural RED, hand-restoring, and forcing a full rebuild from a deleted
+  build directory before reconfirming GREEN.
+
 **Still pending — the whole of the remaining work:**
 
 - **Section 6, the login page and route.** No `/api/auth/login` route exists
@@ -915,6 +927,11 @@ field-upgrade assertion goes RED, restore by hand.
 ---
 
 ## 12. Testing
+
+**Landed.** The host-test matrix this section calls for is in place; see the
+section 12 bullet in section 0 for what it covers and how it was
+negative-tested. What remains below is the bench work, which no host test can
+stand in for.
 
 **Host tests** (`firmware/KilnFW/App/test/test_web_auth.c`, added to
 `build_host_tests.ps1`'s `$sources` with `$totalExpected` bumped from 47 to 48
