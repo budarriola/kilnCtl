@@ -1134,3 +1134,16 @@ bool lvgl_port_indev_exists(void)
 {
     return s_port.lv_indev != NULL;
 }
+
+/* Exposes the touch indev so a caller can attach its own lv_indev_add_event_cb()
+ * -- added for ui_lcd_lock.c's inactivity-lock activity hook
+ * (docs/WEB_AUTH_PLAN.md section 8: "any touch event delivered to LVGL,
+ * including a touch that only scrolls or is swallowed by a backdrop" --
+ * an indev-level LV_EVENT_PRESSED callback sees every press regardless of
+ * which widget, if any, ends up handling it, unlike a callback attached to
+ * one specific widget). Returns NULL before lvgl_port_start() has created
+ * the indev, same as lvgl_port_indev_exists() reports false in that window. */
+lv_indev_t *lvgl_port_get_indev(void)
+{
+    return s_port.lv_indev;
+}

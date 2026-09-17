@@ -50,6 +50,12 @@ try {
         (Join-Path $testDir "test_sim_plant_three_node.c"),
         (Join-Path $testDir "test_ota_auth.c"),
         (Join-Path $testDir "test_auth_reset_gesture.c"),
+        # docs/WEB_AUTH_PLAN.md section 7/8 (LCD half only) -- the LCD's
+        # own two-PIN keypad and inactivity lock. #includes lcd_auth_state.c
+        # directly (same convention as test_boot_guard.c above), which in
+        # turn reuses ota_auth.c's lockout primitive by embedding a fresh
+        # instance, not by calling into a second parallel lockout of its own.
+        (Join-Path $testDir "test_lcd_auth_state.c"),
         (Join-Path $testDir "test_ota_interlock.c"),
         (Join-Path $testDir "test_heat_interlock.c"),
         (Join-Path $testDir "test_heat_enable.c"),
@@ -129,6 +135,7 @@ try {
         (Join-Path $driversDir "control/pid_fuzzy_confidence.c"),
         (Join-Path $driversDir "net/ota_auth.c"),
         (Join-Path $driversDir "net/auth_reset_gesture.c"),
+        (Join-Path $driversDir "ui/lcd_auth_state.c"),
         (Join-Path $driversDir "net/ota_interlock.c"),
         (Join-Path $driversDir "persist/ota_record.c"),
         (Join-Path $driversDir "control/heat_interlock.c"),

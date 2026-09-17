@@ -35,6 +35,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "lvgl.h" /* lv_indev_t, for lvgl_port_get_indev() */
 
 #include "panel_spi.h"
 #include "screen_idle.h"
@@ -187,6 +188,10 @@ void lvgl_port_get_touch_diag(bool *input_enabled, uint32_t *touch_read_cb_count
  * of the permanent counter set the task asked for; kept only long enough to
  * settle whether lv_indev_create() itself failed. */
 bool lvgl_port_indev_exists(void);
+
+/* Exposes the touch indev for ui_lcd_lock.c's inactivity-lock activity hook
+ * -- see lvgl_port.c's definition comment. NULL before lvgl_port_start(). */
+lv_indev_t *lvgl_port_get_indev(void);
 
 /* ONE-OFF root-cause probe -- see lvgl_port.c's definition comment. */
 void lvgl_port_get_timer_handler_calls(uint32_t *calls);

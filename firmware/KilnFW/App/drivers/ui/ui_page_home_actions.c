@@ -6,6 +6,7 @@
  * reaches across the split, and ui_page_home.c's own header comment for the
  * page's overall design history. */
 #include "ui_page_home_internal.h"
+#include "ui_lcd_lock.h"
 
 static bool ui_home_resolve_start_profile_id(uint8_t *out_id)
 {
@@ -197,15 +198,25 @@ static void ui_home_show_stop_confirm(void)
  * each assuming a fixed action, so a state change between ui_home_refresh_cb() ticks
  * and the actual tap can never fire the stale action -- the same reasoning
  * now also decides which of the two confirmation dialogs to show. */
+static void ui_home_show_start_confirm_gated_cb(void *user_data)
+{
+    (void)user_data;
+    ui_home_show_start_confirm();
+}
+
 void ui_home_fire_btn_cb(lv_event_t *e)
 {
     (void)e;
     profile_exec_status_t st;
     profile_executor_get_status(&st);
     if (st.state == PROFILE_EXEC_RUNNING || st.state == PROFILE_EXEC_PAUSED) {
+        /* Stop is never gated -- docs/WEB_AUTH_PLAN.md section 9: a PIN
+         * surface must never be able to prevent a running firing from being
+         * stopped. Only the Start half below goes through the lock. */
         ui_home_show_stop_confirm();
     } else {
-        ui_home_show_start_confirm();
+        ui_lcd_lock_run_gated("Enter PIN to start firing", LCD_PIN_ROLE_USER,
+                               ui_home_show_start_confirm_gated_cb, NULL);
     }
 }
 

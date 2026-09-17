@@ -22,6 +22,7 @@ void run_test_sim_mistune(void);
 void run_test_sim_factorial_design(void);
 void run_test_ota_auth(void);
 void run_test_auth_reset_gesture(void);
+void run_test_lcd_auth_state(void);
 void run_test_ota_interlock(void);
 void run_test_heat_interlock(void);
 void run_test_heat_enable(void);
@@ -119,6 +120,7 @@ int main(void)
     run_test_sim_factorial_design();
     run_test_ota_auth();
     run_test_auth_reset_gesture();
+    run_test_lcd_auth_state();
     run_test_ota_interlock();
     run_test_heat_interlock();
     run_test_heat_enable();
