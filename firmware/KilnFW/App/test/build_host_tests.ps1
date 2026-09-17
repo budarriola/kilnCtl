@@ -1462,6 +1462,27 @@ try {
 
     Invoke-HostTestExe -Name "heat_owner_active_decide" -ExePath $exe42 -BuildCmd $cmd42
 
+    # ---- test_web_auth_store.c: its own 43rd, separate executable ----------
+    # docs/WEB_AUTH_PLAN.md sections 2/3/11 -- the credential storage
+    # foundation. Own executable (not joined into the combined $sources
+    # executable) because it needs psa/crypto.h's host stub for real
+    # PBKDF2-style hashing, and no file in the combined executable pulls
+    # that stub in today (only ota_http.c does, and that file is deliberately
+    # NOT linked there) -- isolating it avoids any static/global collision
+    # with the ~30+ files the combined executable already shares one
+    # namespace across. Same fake_kv.c/hal_status.c/hal_esp_common.c minimal
+    # link set as exe41 (crash_report) above, since this module round-trips
+    # through the same hal_kv.h fake.
+    $exe43 = Join-Path $outDir "kilnctl_host_tests_web_auth_store.exe"
+    $waObjDir = Join-Path $outDir "wa"
+    New-Item -ItemType Directory -Force -Path $waObjDir | Out-Null
+    $cmd43 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$waObjDir\\`" /Fe:`"$exe43`" `"$(Join-Path $testDir 'test_web_auth_store.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "web_auth_store" -ExePath $exe43 -BuildCmd $cmd43
+
     # ---- sim_iter_tune.exe / sim_wide_temp_sweep.exe: data-generating
     # harnesses (ITER_TUNE_REDESIGN_PLAN.md sec 6/7), not TEST_CHECK
     # pass/fail suites -- their stdout is the evidence for the audit docs
@@ -1871,7 +1892,7 @@ try {
     # Invoke-HostTestExe call -- docs/SCENARIO_SIMULATION_PLAN.md WI-10's
     # strength_pct cross-firing adapter simulation arm (design doc
     # docs/audits/strength_pct_adapter_design_2026-09-16.md).
-    $totalExpected = 48
+    $totalExpected = 49
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the

@@ -190,6 +190,14 @@ $allowlistPaths = @(
     # module's host tests build standalone, off-target, without pulling in
     # boot_guard.c) -- nothing to do with the link's CRC16-CCITT-FALSE.
     (Join-Path $firmwareRoot "KilnFW\App\drivers\persist\pico_update_attempts.c"),
+    # docs/WEB_AUTH_PLAN.md item 2 (credential storage): web_auth_store.c's
+    # crc32_compute() is the SAME class as boot_guard.c's/pico_update_
+    # attempts.c's entries above -- a standalone table-less CRC32 (IEEE
+    # 802.3/zlib polynomial) over this module's OWN kiln_auth NVS blobs
+    # (web/lcd/policy records), deliberately copied rather than shared so
+    # this module's host tests build standalone off-target -- nothing to do
+    # with the link's CRC16-CCITT-FALSE.
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\persist\web_auth_store.c"),
     (Join-Path $firmwareRoot "KilnFW\App\drivers\safety\watchdog_cfg.c"),
     (Join-Path $firmwareRoot "KilnFW\App\drivers\safety\crash_report.c"),
     (Join-Path $firmwareRoot "KilnFW\App\drivers\http\profiles_http.c"),

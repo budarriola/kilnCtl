@@ -284,6 +284,16 @@ ALLOWLIST = {
     # Pattern 3 (init-time only): unit preference save runs from the
     # settings HTTP handler's internal-SRAM-stack httpd task.
     "unit_pref.c",
+    # Pattern 3 (internal-SRAM-stack caller, reached live, not init-time) --
+    # same shape as estop_verification.c's/display_power_cfg.c's own
+    # entries. web_auth_store_set_password()/_set_pin()/_set_policy() (via
+    # set_blob_verified()) are called only from the password/PIN-entry
+    # httpd handlers (owned by the web-auth password-page and LCD-keypad
+    # slices) and from the physical-credential-reset handler -- all
+    # internal-SRAM-stack httpd/LVGL tasks, never PSRAM, never the flash
+    # worker, so neither the caller_stack_is_external() guard nor worker
+    # dispatch applies here.
+    "web_auth_store.c",
     # Pattern 3 (init-time only): watchdog config save runs once from
     # app_main's own task before the scheduler starts.
     "watchdog_cfg.c",

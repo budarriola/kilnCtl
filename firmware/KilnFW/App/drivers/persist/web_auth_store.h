@@ -1,0 +1,270 @@
+// web_auth_store.h -- credential storage foundation for docs/WEB_AUTH_PLAN.md
+// sections 2 (credential storage), 3 (strength rules) and 11 (auth
+// disabled/first boot/field upgrade).
+//
+// SCOPE: this module owns exactly the credential RECORD -- hashed/salted
+// web passwords and LCD PINs for the `user` and `administrator` roles, the
+// auth-enabled policy flags, strength validation, and the verify/set entry
+// points other slices call. It does NOT implement: sessions (plan item 4),
+// the HTTP enforcement pre-handler and route tier table (item 5), the
+// password page (item 6), LCD PIN entry/the keypad (item 7), the inactivity
+// lock (item 8), or the physical credential-reset gesture (item 10). Those
+// are other slices; this header is what they call into.
+//
+// WHERE THE RECORD LIVES -- load-bearing, see the plan's item 2. Credentials
+// live in NVS namespace `kiln_auth` on the DEFAULT `nvs` partition
+// (NVS_DEFAULT_PART_NAME, pass partition=NULL to hal_kv_open), deliberately
+// OUTSIDE every config partition (`wifi_nvs`, `kiln_nvs`, `profiles_nvs`).
+// No factory-reset scope names `nvs`, and no config operation (kiln config
+// slot save/apply/clone/delete/rename, package import/export, whole-board
+// backup/restore, zones/prefs/profiles writes, cfg LittleFS dual-write) may
+// read or write these keys -- that is the "one property, not several rules"
+// item 12b describes. Do not add a credential read/write anywhere outside
+// this file and web_auth_store.c.
+//
+// PURE VS I/O SPLIT (App/test/build_host_tests.ps1 discipline, same as
+// ota_auth.h/.c): the strength-check and policy-collapse functions below
+// take no hal_kv dependency and are pure. The record load/verify/set
+// functions do real NVS I/O via hal_kv.h and are exercised in host tests
+// through fake_kv.h's RAM-backed fake, same convention as boot_guard.c/
+// crash_report.c.
+//
+// HASHING: PBKDF2-style iterated HMAC-SHA256 (WEB_AUTH_ITERATIONS rounds),
+// 16-byte random salt, 32-byte output -- see web_auth_store.c's
+// web_auth_hash_compute() doc comment for the exact construction and why it
+// is the plan's documented fallback rather than a PSA PBKDF2 algorithm ID.
+// Runs on the caller's stack; callers must not run it while holding a
+// safety/relay-owner lock and must not call it from a PSRAM-backed stack
+// (this module makes no attempt to detect that -- callers already know which
+// task they run on, per hal_kv.h's own write-context contract).
+//
+// SALT/RANDOMNESS: this module does NOT generate randomness itself (no
+// esp_fill_random() call anywhere in this file), the same design choice
+// ota_auth_nonce_issue() already made for the identical reason: a pure,
+// host-testable module cannot own an entropy source, and every caller
+// already has one. web_auth_store_set_password()/_set_pin() take the salt as
+// a caller-supplied `const uint8_t[16]` -- callers fill it via
+// esp_fill_random() (ESP-IDF) immediately before calling.
+#ifndef KILNCTL_WEB_AUTH_STORE_H
+#define KILNCTL_WEB_AUTH_STORE_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "hal_status.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// --- Sizing --------------------------------------------------------------
+
+#define WEB_AUTH_SALT_LEN        16u
+#define WEB_AUTH_HASH_LEN        32u
+#define WEB_AUTH_USERNAME_MAX_LEN 32u /* +1 for NUL in the record */
+#define WEB_AUTH_ITERATIONS      20000u /* plan item 2: "20,000 iterations" */
+
+#define WEB_AUTH_STORE_VERSION 1u /* own schema version -- see header comment;
+                                    * ZONES_CFG_VERSION (26) is untouched by
+                                    * this module and must stay untouched. */
+
+// --- Roles -----------------------------------------------------------------
+
+typedef enum {
+    WEB_AUTH_ROLE_USER = 0,
+    WEB_AUTH_ROLE_ADMINISTRATOR = 1,
+    WEB_AUTH_ROLE_COUNT = 2,
+} web_auth_role_t;
+
+// --- Strength rules (plan item 3) ------------------------------------------
+
+typedef enum {
+    WEB_AUTH_PW_OK = 0,
+    WEB_AUTH_PW_TOO_SHORT,        // < 10 characters
+    WEB_AUTH_PW_TOO_LONG,         // > 64 characters
+    WEB_AUTH_PW_ALL_LOWERCASE,    // no character outside a-z
+    WEB_AUTH_PW_REJECTED_COMMON,  // on the rejection list (see below)
+} web_auth_pw_check_t;
+
+// Minimum 10 characters, at most 64, at least one character that is not a
+// lowercase letter, and not on the rejection list: the literal strings
+// "password" and "kiln" (case-insensitive), the username being set, the AP
+// SSID, and the AP password. `username`/`ap_ssid`/`ap_password` may each be
+// NULL or empty (nothing to compare against); comparisons are
+// case-insensitive for the fixed words, case-SENSITIVE for username/SSID/AP
+// password (those are exact secrets, not English words). No maximum below
+// 64, no forced rotation, no composition beyond this -- plan item 3's
+// reasoning against a character-class matrix. Pure function, no I/O.
+web_auth_pw_check_t web_auth_password_check(const char *password, const char *username,
+                                             const char *ap_ssid, const char *ap_password);
+
+typedef enum {
+    WEB_AUTH_PIN_OK = 0,
+    WEB_AUTH_PIN_TOO_SHORT,   // < 4 digits
+    WEB_AUTH_PIN_TOO_LONG,    // > 8 digits
+    WEB_AUTH_PIN_NOT_DIGITS,  // contains a non-digit character
+    WEB_AUTH_PIN_SAME_AS_OTHER, // equals the other role's PIN (plan item 3:
+                                  // "the two PINs must also differ from
+                                  // each other")
+} web_auth_pin_check_t;
+
+// `pin` is the candidate PIN as a NUL-terminated decimal digit string (4-8
+// digits). `other_pin_or_null` is the OTHER role's current PIN in the same
+// form, or NULL/empty if the other role has no PIN set yet (nothing to
+// collide with). Pure function, no I/O.
+web_auth_pin_check_t web_auth_pin_check(const char *pin, const char *other_pin_or_null);
+
+// --- Hashing (item 2) -------------------------------------------------------
+
+// Iterated-HMAC-SHA256 KDF: out = H_n(secret, salt) where H_1 = HMAC(secret,
+// salt) and H_i = HMAC(secret, H_{i-1}) for i > 1, `iterations` = n. This is
+// the plan's explicitly-sanctioned fallback ("an iterated HMAC-SHA256 loop
+// over the already-proven psa_mac_compute() path") rather than a PSA PBKDF2
+// algorithm object, chosen because only psa/crypto.h (not a raw mbedtls
+// header) is included anywhere in this tree today -- see ota_http.c's
+// hmac_sha256() for the same PSA import/compute/destroy shape this reuses.
+// `secret`/`secret_len` is the password or PIN's raw bytes -- never logged,
+// never stored, discarded by the caller immediately after this call.
+// `iterations` must be >= 1; the record stores it, not a compile-time
+// constant, so a future round-count bump costs nothing on records that
+// already exist. `out` receives exactly WEB_AUTH_HASH_LEN bytes.
+void web_auth_hash_compute(const uint8_t *secret, size_t secret_len,
+                            const uint8_t salt[WEB_AUTH_SALT_LEN], uint32_t iterations,
+                            uint8_t out[WEB_AUTH_HASH_LEN]);
+
+// Constant-time comparison of two WEB_AUTH_HASH_LEN buffers -- same
+// reasoning as ota_auth_constant_time_equal(): a network- or panel-facing
+// comparison of a secret-derived value must not leak timing information
+// proportional to the first mismatched byte.
+bool web_auth_constant_time_equal(const uint8_t *a, const uint8_t *b, size_t len);
+
+// --- Records -----------------------------------------------------------------
+
+typedef struct {
+    char     username[WEB_AUTH_USERNAME_MAX_LEN + 1];
+    uint8_t  salt[WEB_AUTH_SALT_LEN];
+    uint8_t  hash[WEB_AUTH_HASH_LEN];
+    uint32_t iterations;
+    bool     must_change; // item 10: a physical reset sets this true
+    bool     configured;  // false = this role has no password set yet
+} web_auth_password_record_t;
+
+typedef struct {
+    uint8_t  salt[WEB_AUTH_SALT_LEN];
+    uint8_t  hash[WEB_AUTH_HASH_LEN];
+    uint32_t iterations;
+    uint8_t  digits;      // number of decimal digits this PIN has (4-8)
+    bool     configured;
+} web_auth_pin_record_t;
+
+typedef struct {
+    bool    web_enabled;
+    bool    lcd_enabled;
+    int32_t web_timeout_s; // -1 == "never" (plan item 8)
+    int32_t lcd_timeout_s; // -1 == "never"
+} web_auth_policy_t;
+
+// Result of loading a versioned record from NVS. Distinguishes "never
+// written" (ABSENT -- the shipped default / an un-upgraded board, item 11)
+// from "written, but this build cannot trust it" (UNREADABLE -- wrong size,
+// bad CRC, or a version newer than this build knows, item 12b's OTA-rollback
+// case). The two must NEVER collapse to the same caller-visible behaviour
+// for a credential or policy record: ABSENT means "auth off, fully
+// functional", UNREADABLE must fail closed. See
+// web_auth_policy_effective_enabled() below, which is the one function that
+// turns this distinction into a yes/no answer for the auth-off collapse.
+typedef enum {
+    WEB_AUTH_LOAD_OK = 0,
+    WEB_AUTH_LOAD_ABSENT,
+    WEB_AUTH_LOAD_UNREADABLE,
+} web_auth_load_status_t;
+
+// --- Load / verify / set: web passwords -------------------------------------
+
+// Loads role's password record. WEB_AUTH_LOAD_ABSENT (never written) leaves
+// *out zeroed with configured=false; WEB_AUTH_LOAD_UNREADABLE leaves *out
+// zeroed too -- a caller must check the return status, not *out->configured,
+// to tell "no credential" from "unreadable, do not trust this".
+web_auth_load_status_t web_auth_store_load_password(web_auth_role_t role,
+                                                      web_auth_password_record_t *out);
+
+// True iff `password` matches role's stored record. Always false if the
+// record is ABSENT or UNREADABLE, or if `password`/`role` is invalid -- a
+// caller never needs to check web_auth_store_load_password() first just to
+// decide whether to call this. Runs the KDF (WEB_AUTH_ITERATIONS rounds) on
+// the caller's own stack -- see this header's hashing note above for the
+// stack-context caveat.
+bool web_auth_store_verify_password(web_auth_role_t role, const char *password);
+
+// True iff role has a password configured (LOAD_OK and configured==true).
+// Used by item 11's "enabling auth is refused unless a credential exists"
+// gate and by nothing else -- it is not itself an auth check.
+bool web_auth_store_password_configured(web_auth_role_t role);
+
+// Sets role's password. Caller supplies `salt` (WEB_AUTH_SALT_LEN
+// caller-generated random bytes -- see this header's randomness note) and
+// `username` (NUL-terminated, truncated to WEB_AUTH_USERNAME_MAX_LEN if
+// longer -- callers should validate length themselves via
+// web_auth_password_check() first). Does NOT itself validate password
+// strength -- that is the caller's job via web_auth_password_check(), kept
+// separate so a caller can show a strength error before ever reaching a
+// storage call. Hashes, writes the whole `web_auth` blob (both roles -- see
+// web_auth_store.c for why it is one blob, not one key per role), and
+// verifies the write by reading it back before returning HAL_OK -- never
+// trust a bare NVS write return code (see boot_guard_mark_healthy()'s
+// history). Returns HAL_IO if the read-back does not match what was
+// written. Must be called from a context where hal_kv_write_safe_here() is
+// true (this function does not check that itself, matching every other
+// persist module's convention).
+hal_status_t web_auth_store_set_password(web_auth_role_t role, const char *username,
+                                          const char *password,
+                                          const uint8_t salt[WEB_AUTH_SALT_LEN],
+                                          bool must_change);
+
+// --- Load / verify / set: LCD PINs -------------------------------------------
+
+web_auth_load_status_t web_auth_store_load_pin(web_auth_role_t role, web_auth_pin_record_t *out);
+
+// `pin` is the entered PIN as a NUL-terminated decimal digit string.
+bool web_auth_store_verify_pin(web_auth_role_t role, const char *pin);
+
+bool web_auth_store_pin_configured(web_auth_role_t role);
+
+// Same read-back-verified write discipline as web_auth_store_set_password().
+// Does not itself enforce web_auth_pin_check() -- caller's job, same split.
+hal_status_t web_auth_store_set_pin(web_auth_role_t role, const char *pin,
+                                     const uint8_t salt[WEB_AUTH_SALT_LEN]);
+
+// --- Load / verify / set: policy ---------------------------------------------
+
+web_auth_load_status_t web_auth_store_load_policy(web_auth_policy_t *out);
+
+// Same read-back-verified write discipline. Does not itself refuse enabling
+// auth without a credential -- that check belongs at the call site (the
+// password page, item 6), using web_auth_store_password_configured()/
+// web_auth_store_pin_configured() above; this setter just persists whatever
+// it is given.
+hal_status_t web_auth_store_set_policy(const web_auth_policy_t *policy);
+
+// --- Auth-off / first-boot / field-upgrade collapse (plan item 11) ---------
+
+// Turns a load status + a possibly-stale stored flag into the one answer
+// every enforcement point needs: "is this interface's auth actually in
+// force right now". ABSENT -> false (shipped default, field-upgrade
+// no-regression). OK -> `stored_enabled` verbatim. UNREADABLE -> true
+// (fail closed -- item 12b's OTA-rollback-past-a-schema-bump case: a record
+// this build cannot parse must never be read as "no credentials set", so it
+// is treated as enabled, and since the credential record underneath it is
+// then also UNREADABLE, web_auth_store_verify_password()/_verify_pin() both
+// report false unconditionally -- the net effect is "login refused, use the
+// physical reset gesture (item 10)", exactly what the plan specifies).
+// Pure function, no I/O -- callers pass in the status/flag they already
+// loaded via web_auth_store_load_policy().
+bool web_auth_policy_effective_enabled(web_auth_load_status_t status, bool stored_enabled);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // KILNCTL_WEB_AUTH_STORE_H

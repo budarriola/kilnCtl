@@ -75,7 +75,14 @@ $forbiddenIdentifiers = @("kiln_auth", "web_auth", "lcd_auth", "auth_policy")
 # header comment). When it does, its file(s) belong here, added
 # deliberately and reviewed, never as a default outcome of this check
 # failing to find them.
-$Allowlist = @()
+#
+# web_auth_store.c/.h: this IS item 2's credential-storage module (docs/
+# WEB_AUTH_PLAN.md secs 2/3/11) -- kiln_auth is its own dedicated NVS
+# namespace, deliberately distinct from kiln_nvs/wifi_nvs/profiles_nvs (the
+# only three factory-reset ever erases), and web_auth/lcd_auth/auth_policy
+# are its three blob keys. No config/backup/restore/factory-reset path may
+# reference them; this file is the one place that legitimately does.
+$Allowlist = @("web_auth_store.c", "web_auth_store.h")
 
 # Same comment-stripping helper as check_uri_handler_cap.ps1 /
 # check_bridge_reject_reason.ps1 / check_uart_version_independence.ps1
