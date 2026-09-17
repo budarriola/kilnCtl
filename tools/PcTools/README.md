@@ -264,6 +264,90 @@ passes `use_ct_map_backup=True` (a host-test scenario, or a deliberate
 exercise of `commissioning_gate.c`'s accept path). The real map comes from the
 zone current-sweep on the zones page once CTs exist.
 
+## Config package conversion (`cfg_convert`)
+
+`src/kilnctrl/cfg_convert.py` converts a kiln backup package -- the JSON
+document `GET /api/backup/export` produces and `POST /api/backup/import`
+accepts (`firmware/KilnFW/App/drivers/http/backup_export.c`/
+`backup_import.c`) -- from any `BACKUP_FORMAT_VERSION` to any other, in
+either direction, best effort. This is entirely a PC-side tool: the board
+itself keeps its firmware migration limited to exactly one step, the version
+it was built against minus one (`docs/CONFIG_MIGRATION_CHAIN_PLAN.md`), so a
+board more than one release behind cannot read its own on-flash config and
+would fall back to firmware defaults on its own. `cfg_convert` closes that
+gap off-board: it produces a package already expressed in the shape the
+target board's own firmware understands, so a restore never hands a board a
+package it cannot read.
+
+```powershell
+# Convert a downloaded backup to an older package format (version 2):
+python -m kilnctrl.cfg_convert C:\backups\kiln_2026-09-10.json --to-version 2 -o converted.json
+
+# Convert to whatever format the board at this address currently understands,
+# read live over HTTP from its own GET /api/backup/export -- no need to know
+# the number:
+python -m kilnctrl.cfg_convert C:\backups\kiln_2026-09-10.json --to-board 192.168.1.42 -o converted.json
+```
+
+Installed as the `kilnctrl-cfg-convert` console script too, once the venv is
+active (`kilnctrl-cfg-convert <input> --to-version 2 -o converted.json`).
+
+**Forward conversion** (older document to a newer version) follows the same
+additive-field semantics the firmware's own backup exporter/importer already
+use: most fields introduced by a later firmware are optional, presence-gated
+keys that a document simply may or may not carry, so "converting forward"
+mostly means leaving them unset rather than inventing a value for them. The
+one genuinely structural change in the format's history is how zone-to-zone
+thermal coupling is expressed -- a single `coupling_coeff`/
+`coupling_neighbor_zone` pair (versions 1-3) versus a full `coupling_c<N>`
+row, one key per neighbor channel (version 4 onward) -- and `cfg_convert`
+expands or collapses that representation explicitly.
+
+**Backward conversion is best effort by definition:** a field the target
+version's document shape cannot express is dropped, and a coupling row with
+more than one real neighbor collapses to whichever single coefficient has
+the larger magnitude, discarding the rest. Every conversion prints (and can
+write to a `--report` JSON file) a line for every field that did not survive
+intact, naming it as `dropped`, `derived`, or `kept` with a short reason --
+for example, collapsing a full coupling row into the single-neighbor v3
+format reports the discarded neighbor(s) by name, and expanding a
+single-neighbor v3 pair into a v4 row reports which channels are *derived*
+zeros rather than real measurements. Running the same document A -> B -> A
+does not silently "round-trip" -- the report on the second hop shows plainly
+that the fields dropped on the way to B were not restored, because they no
+longer exist anywhere to restore from.
+
+**`cfg_convert` never fabricates a calibration value.** If the target
+version has a calibration field (`normal_current_a` on the ESP zone side;
+the Pico/SaftyFW-side analogue is `i_normal_a`, not carried in today's ESP
+backup document but guarded the same way) that the source document does not
+have, the output simply does not have it either -- it is never defaulted,
+derived, or copied from another zone. An uncalibrated CT channel correctly
+leaves its guard dormant; a fabricated reading would arm that guard on a
+lie, which is worse.
+
+**`cfg_convert` never reads or emits a credential.** It refuses outright
+(exits non-zero, writes nothing) if the input document contains a
+`kiln_auth` key or any Wi-Fi-credential-shaped key (SSID, password, PSK) at
+any depth -- the real export format never contains these, so their presence
+means the document should not be trusted, not that they should be quietly
+carried through or stripped.
+
+Because this module duplicates firmware's own idea of what a backup document
+contains, `firmware/KilnFW/App/test/cfg_convert_field_mirror_drift_check.py`
+(wired into `tools/run_all_checks.ps1` via
+`check_cfg_convert_field_mirror_drift.ps1`, same as the project's other
+`*_mirror_drift_check.py` scripts) extracts the live field vocabulary and
+`BACKUP_FORMAT_VERSION`/`BACKUP_FORMAT_VERSION_MIN` constants straight out of
+`backup_export.c`/`backup_import.c`/`backup_http_internal.h` and fails the
+build the moment `cfg_convert.py`'s own copy disagrees.
+
+Tests: `tools/PcTools/tests/test_cfg_convert.py`, run through pytest. Its
+fixtures under `tests/fixtures/cfg_convert/` are **synthesized**, not
+captured from a real board -- see that directory's own `README.md` for where
+a real capture should live once one exists (the owner's release-step
+requirement is to capture one before every version bump).
+
 ## Gate fields -- config values that make a feature REACHABLE, not just configured
 
 `src/kilnctrl/gate_fields.py` is the checked-in inventory of **gate fields**:

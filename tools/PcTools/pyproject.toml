@@ -50,6 +50,7 @@ kilnctrl-telemetry = "kilnctrl.telemetry_capture:main"
 kilnctrl-log-analysis = "kilnctrl.log_analysis:main"
 kilnctrl-plant-sim = "kilnctrl.plant_sim:main"
 kilnctrl-coupled-ident = "kilnctrl.coupled_ident:main"
+kilnctrl-cfg-convert = "kilnctrl.cfg_convert:main"
 
 [build-system]
 requires = ["hatchling"]

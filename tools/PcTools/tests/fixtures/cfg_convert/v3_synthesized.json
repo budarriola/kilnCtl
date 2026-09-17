@@ -1,0 +1,35 @@
+{
+  "kind": "kilnctl_backup",
+  "version": 3,
+  "profiles": [
+    {"id": 0, "name": "Bisque", "zone_mask": 3, "segments": [
+      {"target_c": 999.0, "ramp_c_per_hr": 150.0, "dwell_min": 20}
+    ]}
+  ],
+  "zones": [
+    {"index": 0, "pid_kp": 12.5, "pid_ki": 0.02, "pid_kd": 3.1,
+     "model_k_dc": 0.85, "model_tau_s": 900.0, "model_dead_time_s": 12.0, "tc_type": 3,
+     "name": "Top", "relay_mask": 1, "thermo_mask": 1, "ct_mask": 1,
+     "cal_offset_c": 0.5, "max_ramp_c_per_hr": 300.0, "sanity_rate_c_per_min": 5.0,
+     "control_mode": 1, "max_temp_c": 1300.0, "min_temp_c": 0.0,
+     "heater_window_ms": 2000.0, "heater_min_on_ms": 100.0, "heater_min_off_ms": 100.0,
+     "guard_wrong_dir_window_s": 60.0, "guard_wrong_dir_rate_c_per_min": 0.5,
+     "guard_off_settle_s": 30.0, "guard_runaway_rate_c_per_min": 20.0,
+     "guard_runaway_margin_c": 15.0, "guard_drift_period_s": 300.0,
+     "guard_sensor_fault_debounce_ticks": 5.0, "guard_frozen_window_s": 120.0,
+     "cross_zone_max_delta_c": 50.0, "settings_source": 1,
+     "fuzzy_strength_pct": 25.0, "coupling_coeff": 0.12, "coupling_neighbor_zone": 1},
+    {"index": 1, "pid_kp": 11.0, "pid_ki": 0.018, "pid_kd": 2.9,
+     "name": "Bottom", "relay_mask": 2, "thermo_mask": 2, "ct_mask": 2,
+     "cal_offset_c": -0.3, "max_ramp_c_per_hr": 300.0, "sanity_rate_c_per_min": 5.0,
+     "control_mode": 1, "max_temp_c": 1300.0, "min_temp_c": 0.0,
+     "heater_window_ms": 2000.0, "heater_min_on_ms": 100.0, "heater_min_off_ms": 100.0,
+     "guard_wrong_dir_window_s": 60.0, "guard_wrong_dir_rate_c_per_min": 0.5,
+     "guard_off_settle_s": 30.0, "guard_runaway_rate_c_per_min": 20.0,
+     "guard_runaway_margin_c": 15.0, "guard_drift_period_s": 300.0,
+     "guard_sensor_fault_debounce_ticks": 5.0, "guard_frozen_window_s": 120.0,
+     "cross_zone_max_delta_c": 50.0, "settings_source": 1,
+     "fuzzy_strength_pct": 20.0}
+  ],
+  "safety_tc_type": 3
+}
