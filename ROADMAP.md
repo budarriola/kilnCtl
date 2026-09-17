@@ -1970,6 +1970,37 @@ TIME not read live), real numbers on every `safety_trip_t` cause line,
 KilnFW-side fault coverage, and an explicit non-clearable notice for S9.**
 Full postmortem: [`docs/COMPLETED_2026-09.md`](docs/COMPLETED_2026-09.md#m13m14--fault-reporting-and-verification-findings-full-detail-moved-2026-09-04).
 
+**Second sweep, 2026-09-16** (following `6985c89b`'s zones-config
+migration-persist fix, which explicitly did not review the rest): widened the
+hunt for give-up paths whose only output is `ESP_LOGE` with no web/LCD/API
+surface. Found and fixed two gaps, both in `kiln_cfg_swap.c`'s
+`kiln_cfg_swap_boot_recover()` (the two-processor config-swap boot-recovery
+state machine) — its seven failing branches (unreadable/CRC-bad pending
+record, no safety link for PICO_OPEN/PICO_DONE, rollback-failed,
+ESP_DONE re-read-failed with fallback-rollback-failed, ESP_DONE
+esp/pico-mismatch, unrecognised marker) only ever logged and left heaters
+alarmed with no operator-visible cause or remedy. Added
+`kiln_cfg_swap_boot_fault_t`/`kiln_cfg_swap_get_boot_fault()` (same
+first-one-latched-wins convention as `zones_cfg_load_fault_t`), wired through
+`dashboard_http.c` -> `dashboard_status_http.c`'s `/api/status` JSON ->
+`main_page.html`'s new banner -> `ui_page_home_refresh.c`'s LCD trip strip.
+Also found, while wiring this, that `6985c89b`'s own
+`zones_config_migration_persist_fault` fields were populated in
+`dashboard_http.c` and consumed by `main_page.html`'s JS but were **never
+serialized** into the `/api/status` JSON in `dashboard_status_http.c` — that
+banner was dead code since it landed; fixed in the same pass. Host tests:
+two new cases in `test_kiln_cfg_swap.c` (fault latches with an actionable
+reason; first-one-wins across two different failures), both negative-tested
+by hand against the production latch guard. Other candidate surfaces
+reviewed and judged already adequate or out of scope this pass:
+`estop_verification_clear()`/`safety_cfg_write.c` (already returns an
+actionable reason to the HTTP caller), `ota_pico_relay.c`'s retransmission
+give-up (already surfaced via OTA status), `safety_cfg_store_flush_if_dirty()`
+(self-heals on next refetch), and `thermo_task.c`'s SWD-only
+`s_reconfig_gave_up` counter (not conclusively checked against the generic
+TC-invalid path this pass — left open for a future sweep). This remains a
+standing rule, not a milestone that closes.
+
 **The clearing semantics, recorded here because they were only discoverable by
 reading `safety_guards.c`:** an S6a trip LATCHES. It does not clear on its own,
 a new firing does not clear it, and an ESP reboot does not. Only an explicit

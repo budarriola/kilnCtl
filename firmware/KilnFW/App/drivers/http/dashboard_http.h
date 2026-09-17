@@ -171,6 +171,16 @@ typedef struct {
     uint8_t  zones_config_migration_persist_fault_on_disk_version;
     uint8_t  zones_config_migration_persist_fault_fw_version;
 
+    /* M13 fix: see kiln_cfg_swap_boot_fault_t's own doc comment
+     * (kiln_cfg_swap.h). Set only while an interrupted two-processor kiln-
+     * config swap could not be recovered at boot -- heaters are alarmed/
+     * disabled the whole time this is true. `reason` already names both
+     * what was detected and what to do (apply a kiln config again, or check
+     * the safety link), copied verbatim from the latch. */
+    bool     kiln_cfg_swap_boot_fault;
+    int32_t  kiln_cfg_swap_boot_fault_target_id;
+    char     kiln_cfg_swap_boot_fault_reason[200];
+
     /* ROADMAP.md M6 "GUI shows safety temperature, enclosure temperature and
      * power" -- read straight from safety_link_get_status()'s cache
      * (safety_link.h's safety_link_status_t), not re-parsed from a frame

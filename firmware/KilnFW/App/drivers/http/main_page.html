@@ -373,6 +373,7 @@
 <div id="bootButtonBypassBanner"></div>
 <div id="zonesConfigLoadFaultBanner"></div>
 <div id="zonesConfigMigrationPersistFaultBanner"></div>
+<div id="kilnCfgSwapBootFaultBanner"></div>
 <div id="safetyTripBanner"></div>
 <div id="lastRunBanner"></div>
 
@@ -2128,6 +2129,25 @@ function renderZonesConfigMigrationPersistFault(data) {
     'warning.</span></div>' +
     '<div class="row"><span>To clear</span><span>Re-save the zones config from /settings/zones (or reboot ' +
     'this firmware once more) so the write-back is retried.</span></div>' +
+    '</div>';
+}
+
+// M13 fix: kiln_cfg_swap_boot_recover() (kiln_cfg_swap.c) could not recover
+// an interrupted two-processor kiln-config swap at boot. Heaters are
+// alarmed/disabled the whole time this is true (the divergence/ceiling
+// hooks this module reuses already gate them) -- this banner's only job is
+// to say WHY and what to do, since previously that only reached an ESP_LOGE
+// line. "interrupted" (red left-border) treatment, same as the migration
+// banner above, not the solid safety-trip fill: this is a config-sync
+// condition with a known remedy, not an active thermal trip.
+function renderKilnCfgSwapBootFault(data) {
+  var el = document.getElementById('kilnCfgSwapBootFaultBanner');
+  if (!el) return;
+  if (!data.kiln_cfg_swap_boot_fault) { el.innerHTML = ''; return; }
+  var reason = data.kiln_cfg_swap_boot_fault_reason || '';
+  el.innerHTML = '<div class="banner interrupted">' +
+    '<h3>KILN CONFIG SWAP INTERRUPTED -- NOT RECOVERED</h3>' +
+    '<div class="row"><span>' + window.kcEscapeHtml(reason) + '</span></div>' +
     '</div>';
 }
 
@@ -4065,6 +4085,7 @@ function poll() {
       renderBootButtonBypass(data);
       renderZonesConfigLoadFault(data);
       renderZonesConfigMigrationPersistFault(data);
+      renderKilnCfgSwapBootFault(data);
       renderSafetyTrip(data);
       // Client-side multi-zone autotune trace sampling (see
       // sampleAutotuneZoneTemps's own header comment) -- a no-op whenever no

@@ -470,6 +470,35 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
         APPEND(",\"zones_config_load_fault_reason\":\"%s\"", reason_esc);
     }
 
+    /* M13 fix -- bug found during the 2026-09-16 wider sweep: this JSON
+     * endpoint never emitted zones_config_migration_persist_fault at all --
+     * dashboard_http.c populated the struct field and main_page.html's
+     * banner already read data.zones_config_migration_persist_fault, but
+     * nothing between them ever put it on the wire, so that banner was dead
+     * code from the moment it shipped (always reads undefined -> falsy ->
+     * banner never renders). See dashboard_http.h's own field comments. */
+    APPEND(",\"zones_config_migration_persist_fault\":%s",
+           ds->zones_config_migration_persist_fault ? "true" : "false");
+    if (ds->zones_config_migration_persist_fault) {
+        APPEND(",\"zones_config_migration_persist_fault_on_disk_version\":%u",
+               (unsigned)ds->zones_config_migration_persist_fault_on_disk_version);
+        APPEND(",\"zones_config_migration_persist_fault_fw_version\":%u",
+               (unsigned)ds->zones_config_migration_persist_fault_fw_version);
+    }
+
+    /* M13 fix: kiln_cfg_swap_boot_fault -- see kiln_cfg_swap_boot_fault_t's
+     * own doc comment (kiln_cfg_swap.h) and dashboard_http.h's field
+     * comment. `reason` is firmware-composed (never untrusted network
+     * input) but json_escape()'d anyway, same insurance as the load-fault
+     * reason above. */
+    APPEND(",\"kiln_cfg_swap_boot_fault\":%s", ds->kiln_cfg_swap_boot_fault ? "true" : "false");
+    if (ds->kiln_cfg_swap_boot_fault) {
+        char swap_reason_esc[sizeof(ds->kiln_cfg_swap_boot_fault_reason) * 2 + 1];
+        json_escape(ds->kiln_cfg_swap_boot_fault_reason, swap_reason_esc, sizeof(swap_reason_esc));
+        APPEND(",\"kiln_cfg_swap_boot_fault_target_id\":%ld", (long)ds->kiln_cfg_swap_boot_fault_target_id);
+        APPEND(",\"kiln_cfg_swap_boot_fault_reason\":\"%s\"", swap_reason_esc);
+    }
+
     /* ROADMAP.md M6 -- null (not 0), same convention board_temps.c's
      * GET /api/board_temps already established (TODO.md 10.7): a JSON null
      * cannot be mistaken for a real 0 C reading or a real 0 W power figure

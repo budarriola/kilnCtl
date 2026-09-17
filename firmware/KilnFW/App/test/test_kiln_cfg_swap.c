@@ -735,6 +735,7 @@ static void test_boot_recovery_corrupt_marker_stays_alarmed(void)
 {
     TEST_SECTION("H10: a corrupt pending record is NEVER treated as NONE -- stays alarmed, never re-armed");
     reset_state();
+    memset(&s_boot_fault, 0, sizeof(s_boot_fault));
     kiln_cfg_swap_pending_t p;
     memset(&p, 0, sizeof(p));
     p.marker = KILN_CFG_SWAP_MARKER_PICO_OPEN;
@@ -754,6 +755,56 @@ static void test_boot_recovery_corrupt_marker_stays_alarmed(void)
     bool loaded = load_pending_ex(&raw, &existed_but_unreadable);
     TEST_CHECK(!loaded && existed_but_unreadable,
                "the record is STILL unreadable after boot_recover() -- it was never cleared/overwritten");
+    // M13: an operator-facing latch must exist for this give-up path -- an
+    // ESP_LOGE with no web/LCD surface is not actionable to anyone away
+    // from a serial console.
+    kiln_cfg_swap_boot_fault_t fault;
+    TEST_CHECK(kiln_cfg_swap_get_boot_fault(&fault), "boot fault latched for an unreadable pending record");
+    TEST_CHECK(fault.kind == KILN_CFG_SWAP_BOOT_FAULT_UNREADABLE, "fault kind names the unreadable-record case");
+    TEST_CHECK(strlen(fault.reason) > 0, "fault reason is non-empty -- names what to do about it");
+    TEST_CHECK(strstr(fault.reason, "apply a kiln config again") != NULL,
+               "reason tells the operator the concrete recovery action, not just what failed");
+}
+
+static void test_boot_recovery_fault_latches_first_only(void)
+{
+    TEST_SECTION("M13: boot-recovery fault latch is first-one-wins, same convention as zones_cfg_load_fault_t");
+    reset_state();
+    memset(&s_boot_fault, 0, sizeof(s_boot_fault));
+    TEST_CHECK(!kiln_cfg_swap_get_boot_fault(NULL), "no fault latched before any boot recovery runs");
+
+    // First failure: an unreadable pending record.
+    kiln_cfg_swap_pending_t p;
+    memset(&p, 0, sizeof(p));
+    p.marker = KILN_CFG_SWAP_MARKER_PICO_OPEN;
+    p.target_id = 7;
+    p.crc32 = pending_crc(&p);
+    TEST_CHECK(save_pending(&p), "record persists");
+    TEST_CHECK(fake_kv_script_corrupt_key(KILN_NVS_PARTITION_SWAP, NVS_NAMESPACE_SWAP, NVS_KEY_SWAP_PENDING),
+               "first failure staged: unreadable record");
+    kiln_cfg_swap_boot_recover();
+    kiln_cfg_swap_boot_fault_t first;
+    TEST_CHECK(kiln_cfg_swap_get_boot_fault(&first), "first fault latched");
+    TEST_CHECK(first.kind == KILN_CFG_SWAP_BOOT_FAULT_UNREADABLE, "first fault is the unreadable-record kind");
+
+    // Second, DIFFERENT failure: a PICO_OPEN/DONE record with no link
+    // attached (kiln_cfg_swap_set_link(NULL)), which recovery cannot act
+    // on either -- but the FIRST latch must survive, never be overwritten.
+    kiln_cfg_swap_set_link(NULL);
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION_SWAP);
+    memset(&p, 0, sizeof(p));
+    p.marker = KILN_CFG_SWAP_MARKER_PICO_DONE;
+    p.target_id = 9;
+    p.crc32 = pending_crc(&p);
+    TEST_CHECK(save_pending(&p), "second, different failure staged: PICO_DONE with no link");
+    kiln_cfg_swap_boot_recover();
+    kiln_cfg_swap_boot_fault_t second;
+    TEST_CHECK(kiln_cfg_swap_get_boot_fault(&second), "fault still latched after the second boot_recover() call");
+    TEST_CHECK(second.kind == KILN_CFG_SWAP_BOOT_FAULT_UNREADABLE,
+               "the FIRST fault (UNREADABLE) is still what is reported -- the second, different failure "
+               "(NO_LINK) never overwrote it, matching zones_cfg_load_fault_t's 'first one latched wins'");
+    TEST_CHECK(strcmp(second.reason, first.reason) == 0, "reason text unchanged by the second failure");
 }
 
 static void test_swap_completes_with_pico_armed_never_disarmed(void)
@@ -908,6 +959,7 @@ int main(void)
     test_boot_recovery_staged_discards();
     test_boot_recovery_pico_done_reapplies_rollback();
     test_boot_recovery_corrupt_marker_stays_alarmed();
+    test_boot_recovery_fault_latches_first_only();
     test_negative_generation_check_is_load_bearing();
 
     if (g_test_failures == 0) {

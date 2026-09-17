@@ -35,6 +35,7 @@
 #include "sim_backend.h"
 #include "uart_task_ids.h"
 #include "kilnlink/kilnlink_version.h" /* KILNLINK_PROTOCOL_VERSION -- self_protocol_version below is this firmware's ESP<->Pico link version, not the PC<->ESP UART_PROTOCOL_VERSION */
+#include "kiln_cfg_swap.h"
 #include "ramp_assist_cfg.h"
 #include "unit_pref.h"
 #include "watchdog_cfg.h"
@@ -426,6 +427,18 @@ void dashboard_get_status(dashboard_status_t *out)
     out->zones_config_migration_persist_fault = zones_config_get_migration_persist_fault(&migration_persist_fault);
     out->zones_config_migration_persist_fault_on_disk_version = migration_persist_fault.on_disk_version;
     out->zones_config_migration_persist_fault_fw_version = migration_persist_fault.fw_version;
+
+    /* M13 fix: kiln_cfg_swap_boot_recover()'s "could not recover an
+     * interrupted two-processor config swap" outcomes used to be
+     * ESP_LOGE-only, even though the board is left alarmed/disabled the
+     * whole time (kiln_cfg_swap_is_pending() was already true, wired only
+     * to gate autosave, never to tell an operator anything). See
+     * kiln_cfg_swap_boot_fault_t's own doc comment (kiln_cfg_swap.h). */
+    kiln_cfg_swap_boot_fault_t swap_boot_fault;
+    out->kiln_cfg_swap_boot_fault = kiln_cfg_swap_get_boot_fault(&swap_boot_fault);
+    out->kiln_cfg_swap_boot_fault_target_id = swap_boot_fault.target_id;
+    snprintf(out->kiln_cfg_swap_boot_fault_reason, sizeof(out->kiln_cfg_swap_boot_fault_reason), "%s",
+             swap_boot_fault.reason);
 
     /* UI_PLAN.md section 5's missing field set (see dashboard_http.h's
      * struct comment above these fields for the full rationale). Every read

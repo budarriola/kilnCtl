@@ -14,6 +14,7 @@
 #include "config_divergence.h" /* CONFIG_DIVERGENCE_REASON_MAX */
 #include "zones_config_accessors.h" /* zones_config_get_load_fault() -- CLAUDE.md's
                                        * ota_rollback_esp() hazard, closed 2026-09-16 */
+#include "kiln_cfg_swap.h" /* kiln_cfg_swap_get_boot_fault() -- M13 fix */
 
 /* 2026-09-15 review follow-up (review_divergence_wiring_60d6552f_2026-09-15.md,
  * items A/B/C and HIGH 1): the deferred Pico-half recapture poll and its
@@ -203,8 +204,22 @@ void ui_home_refresh_cb(lv_timer_t *timer)
                 }
                 lv_label_set_text(s_ui_home_trip_strip, fault_buf);
                 lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
+            } else if (kiln_cfg_swap_get_boot_fault(NULL)) {
+                /* M13 fix: an interrupted two-processor kiln-config swap
+                 * could not be recovered at boot -- heaters are alarmed/
+                 * disabled the whole time this is true (kiln_cfg_swap.c's
+                 * own hooks into the divergence/ceiling gates it reuses).
+                 * Ranked above the migration-persist warning below (that one
+                 * is informational only; this one means heat is actively
+                 * refused right now), below a live safety trip and the OTA
+                 * bypass banner. Same 96-char/no-scroll strip; the full
+                 * reason (names the remedy) is on the web dashboard only --
+                 * this literal is the short form that fits here. */
+                lv_label_set_text(s_ui_home_trip_strip,
+                                   "CONFIG SWAP INTERRUPTED -- see dashboard, re-apply config");
+                lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
             } else {
-                /* M13 fix (2026-09-16): lowest priority of the four branches
+                /* M13 fix (2026-09-16): lowest priority of the branches
                  * here on purpose -- this boot's config IS valid and running;
                  * it is only a warning that a migrated blob's write-back to
                  * flash could not be confirmed, so a LATER boot might hit the

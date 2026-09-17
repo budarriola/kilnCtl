@@ -216,6 +216,52 @@ kiln_cfg_swap_marker_t kiln_cfg_swap_get_marker(int32_t *out_target_id, int32_t 
  * pattern in main_control_bringup.c. */
 bool kiln_cfg_swap_is_pending(void);
 
+/* M13 ("every fault says what was detected and what to do", ROADMAP.md
+ * standing rule): kiln_cfg_swap_boot_recover() (section 4.4's five-case
+ * table) used to report every one of its "could not recover, staying
+ * alarmed" outcomes via ESP_LOGE only -- kiln_cfg_swap_is_pending() exists
+ * and is TRUE for the whole time the board sits in this state (that is
+ * literally what "leave the pending record" means, in every failing branch
+ * below), but its only caller (main_control_bringup.c) uses it purely to
+ * gate autosave, never to tell an operator anything. A board could sit with
+ * heaters alarmed/disabled from an interrupted two-processor config swap
+ * indefinitely with nothing on the dashboard or LCD naming why, or what to
+ * do about it -- discoverable only by an ESP_LOGE line in a serial log an
+ * operator is not watching.
+ *
+ * Latched once, the first time kiln_cfg_swap_boot_recover() reaches a
+ * branch that leaves the pending record in place (i.e. does NOT reach
+ * clear_pending()) -- covers: an unreadable/corrupt pending record (H10),
+ * no safety-link available to recover a PICO_OPEN/PICO_DONE interruption,
+ * that recovery's own rollback attempt failing, an ESP_DONE row whose
+ * post-boot re-verification could not confirm both sides match (including
+ * its own fallback-rollback failing), and an unrecognised marker byte.
+ * Never latched by the STAGED case (a clean, harmless discard: nothing was
+ * ever written to either processor) or by a recovery that succeeds. Not
+ * cleared mid-boot, same "fixed for the boot" discipline as zones_cfg_load_
+ * fault_t (zones_config_accessors.h) -- a fresh boot that recovers cleanly,
+ * or that finds no pending record at all, re-evaluates to false. */
+typedef enum {
+    KILN_CFG_SWAP_BOOT_FAULT_NONE = 0,
+    KILN_CFG_SWAP_BOOT_FAULT_UNREADABLE,           /* record present but unreadable or failed its CRC (H10) */
+    KILN_CFG_SWAP_BOOT_FAULT_NO_LINK,              /* PICO_OPEN/PICO_DONE recovery needs a safety link that is not up */
+    KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_FAILED,      /* the rollback-to-R attempt itself failed */
+    KILN_CFG_SWAP_BOOT_FAULT_ESP_DONE_UNCONFIRMED, /* ESP_DONE row: could not re-confirm both sides match */
+    KILN_CFG_SWAP_BOOT_FAULT_UNRECOGNISED_MARKER,  /* pending record's marker byte is not a known value */
+} kiln_cfg_swap_boot_fault_kind_t;
+
+typedef struct {
+    bool occurred;
+    kiln_cfg_swap_boot_fault_kind_t kind;
+    int32_t target_id; /* the pending record's own target_id at the moment this latched */
+    char reason[KILN_CFG_SWAP_REASON_MAX]; /* human-readable detail + what to do, copied verbatim */
+} kiln_cfg_swap_boot_fault_t;
+
+/* Returns the latched boot-recovery fault (see the type's own comment
+ * above). *out (if given) is zeroed with occurred==false when nothing was
+ * latched this boot. Cheap RAM read, safe from any task. */
+bool kiln_cfg_swap_get_boot_fault(kiln_cfg_swap_boot_fault_t *out);
+
 #ifdef __cplusplus
 }
 #endif

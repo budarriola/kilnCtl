@@ -23,6 +23,30 @@ static const char *TAG = "kiln_cfg_swap";
 
 static SafetyLinkClass *s_link = NULL;
 
+/* M13 fix -- see kiln_cfg_swap_boot_fault_t's own doc comment
+ * (kiln_cfg_swap.h) for scope and rationale. Latched once per boot, never
+ * cleared mid-boot; only kiln_cfg_swap_boot_recover() writes it. */
+static kiln_cfg_swap_boot_fault_t s_boot_fault = {0};
+
+static void latch_boot_fault(kiln_cfg_swap_boot_fault_kind_t kind, int32_t target_id, const char *reason)
+{
+    if (s_boot_fault.occurred) {
+        return; /* first one latched wins, same convention as zones_cfg_load_fault_t */
+    }
+    s_boot_fault.occurred = true;
+    s_boot_fault.kind = kind;
+    s_boot_fault.target_id = target_id;
+    snprintf(s_boot_fault.reason, sizeof(s_boot_fault.reason), "%s", reason ? reason : "");
+}
+
+bool kiln_cfg_swap_get_boot_fault(kiln_cfg_swap_boot_fault_t *out)
+{
+    if (out) {
+        *out = s_boot_fault;
+    }
+    return s_boot_fault.occurred;
+}
+
 void kiln_cfg_swap_set_link(SafetyLinkClass *link_or_null)
 {
     s_link = link_or_null;
@@ -732,6 +756,9 @@ void kiln_cfg_swap_boot_recover(void)
         ESP_LOGE(TAG, "pending swap record exists but could not be read back at boot (HAL_IO/wrong size) -- "
                       "treating exactly like a failed CRC check: an unrecoverable interrupted swap, staying "
                       "alarmed until an operator applies a kiln config again");
+        latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_UNREADABLE, KILN_CFG_NO_ACTIVE_ID,
+                         "an interrupted kiln-config swap record could not be read back at boot -- heaters "
+                         "stay alarmed/disabled; apply a kiln config again to clear this");
         return;
     }
     if (pending_crc(&p) != p.crc32) {
@@ -752,6 +779,9 @@ void kiln_cfg_swap_boot_recover(void)
         ESP_LOGE(TAG, "pending swap record failed its own integrity check at boot -- treating as an "
                       "unrecoverable interrupted swap; heaters stay gated by the standing divergence "
                       "check until an operator applies a kiln config again");
+        latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_UNREADABLE, KILN_CFG_NO_ACTIVE_ID,
+                         "an interrupted kiln-config swap record failed its integrity check at boot -- "
+                         "heaters stay alarmed/disabled; apply a kiln config again to clear this");
         return;
     }
     SafetyLinkClass *link = s_link;
@@ -779,6 +809,10 @@ void kiln_cfg_swap_boot_recover(void)
                  (int)p.marker);
         if (!link) {
             ESP_LOGE(TAG, "boot: no safety link available to recover -- staying alarmed until one is up");
+            latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_NO_LINK, p.target_id,
+                             "an interrupted kiln-config swap cannot be recovered without the safety "
+                             "processor link -- heaters stay alarmed/disabled; check the safety-link "
+                             "connection, or reboot once it is up");
             return;
         }
         if (rollback(link, &p, /*esp_was_committed=*/(p.marker == KILN_CFG_SWAP_MARKER_PICO_DONE), reason,
@@ -787,6 +821,11 @@ void kiln_cfg_swap_boot_recover(void)
             ESP_LOGW(TAG, "boot: interrupted swap recovered -- both sides confirmed back on the pre-swap config");
         } else {
             ESP_LOGE(TAG, "boot: interrupted-swap recovery failed: %s -- staying alarmed, will retry", reason);
+            char op_reason[KILN_CFG_SWAP_REASON_MAX + 128];
+            snprintf(op_reason, sizeof(op_reason),
+                     "an interrupted kiln-config swap could not be rolled back at boot (%.60s) -- heaters "
+                     "stay alarmed/disabled; apply a kiln config again to clear this", reason);
+            latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_FAILED, p.target_id, op_reason);
         }
         return;
     case KILN_CFG_SWAP_MARKER_ESP_DONE: {
@@ -807,6 +846,12 @@ void kiln_cfg_swap_boot_recover(void)
                 clear_pending();
             } else {
                 ESP_LOGE(TAG, "boot: ESP_DONE fallback rollback also failed: %s -- staying alarmed", sub);
+                char op_reason[KILN_CFG_SWAP_REASON_MAX + 128];
+                snprintf(op_reason, sizeof(op_reason),
+                         "an interrupted kiln-config swap's target slot could not be re-read at boot, and "
+                         "the fallback rollback also failed (%.40s) -- heaters stay alarmed/disabled; apply a "
+                         "kiln config again to clear this", sub);
+                latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_ESP_DONE_UNCONFIRMED, p.target_id, op_reason);
             }
             return;
         }
@@ -843,12 +888,21 @@ void kiln_cfg_swap_boot_recover(void)
             ESP_LOGE(TAG, "boot: ESP_DONE could not confirm both sides on the new config (esp_matches=%d "
                           "pico_matches=%d) -- staying alarmed, will retry",
                      (int)esp_matches, (int)pico_matches);
+            char op_reason[KILN_CFG_SWAP_REASON_MAX];
+            snprintf(op_reason, sizeof(op_reason),
+                     "an interrupted kiln-config swap could not be confirmed on both processors at boot "
+                     "(esp=%s, pico=%s) -- heaters stay alarmed/disabled; apply a kiln config again to "
+                     "clear this", esp_matches ? "ok" : "mismatch", pico_matches ? "ok" : "mismatch");
+            latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_ESP_DONE_UNCONFIRMED, p.target_id, op_reason);
         }
         return;
     }
     default:
         ESP_LOGE(TAG, "boot: pending swap record has an unrecognised marker %u -- treating as unrecoverable",
                  (unsigned)p.marker);
+        latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_UNRECOGNISED_MARKER, p.target_id,
+                         "an interrupted kiln-config swap record has an unrecognised marker -- heaters "
+                         "stay alarmed/disabled; apply a kiln config again to clear this");
         return;
     }
 }
