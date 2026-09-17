@@ -68,6 +68,7 @@
 #include "config_params.h" // param_id <-> config_store_record_t field mapping, see SET_PARAM/GET_PARAM/COMMIT_CONFIG/GET_CONFIG_PAGE handlers below
 #include "config_store.h" // SAFETY_CMD_SET_CONFIG, see link_task_handle_set_config()
 #include "link_diag_flags.h" // pure Frame B `flags` assembly, see link_task_send_diag()
+#include "clear_trip_diag.h" // clear_trip_diag_get_cached() -- Frame B flags bit3, see link_task_send_diag()
 #include "current_task.h"
 #include "discrete_task.h"
 #include "log_task.h" // CLEAR_TRIP/SET_CONFIG outcome logging, see link_task_handle_clear_trip()/_set_config()
@@ -1062,15 +1063,25 @@ static void link_task_send_diag(void)
     // format already had this bit, so this is a wiring fix, not a protocol
     // change). bit2 estop_unwired_suspect stays 0 -- no detection heuristic
     // is specified in SAFETY_MODEL.md/HARDWARE.md or built anywhere in this
-    // codebase yet. Assembly itself lives in link_diag_flags.c, pure and
-    // host-tested (test/test_link_diag_flags.c), since this file cannot be.
+    // codebase yet. bit3 clear_trip_diag_present: WIRED 2026-09-16, same
+    // shape as bit1 -- clear_trip_diag_get_cached() (main.c step 3b already
+    // reads and caches it at boot, before the register is cleared) reports
+    // whether LAST boot left behind a valid CLEAR_TRIP checkpoint; true here
+    // means the previous boot reset mid-way through a CLEAR_TRIP drain. This
+    // read is safe from link_task's own context: s_clear_trip_diag_cached is
+    // written once, before the scheduler starts (see that variable's own
+    // declaration), so no torn-read/lifetime hazard the way a mid-boot write
+    // from another task would have. Assembly itself lives in
+    // link_diag_flags.c, pure and host-tested (test/test_link_diag_flags.c),
+    // since this file cannot be.
     //
     // Note what parsing PUSH_CONTEXT does NOT yet mean: there is still no
     // context-consuming correlation guard (S2/S3/S4/S6/S10) to disable on
     // sim_context_seen or reset on a boot_id change -- this frame reports
     // that the fact is known, not that anything downstream acts on it yet.
     uint8_t diag_flags =
-        link_diag_flags_compute(config_store_is_calibration_missing(), s_context_sim_seen);
+        link_diag_flags_compute(config_store_is_calibration_missing(), s_context_sim_seen,
+                                 clear_trip_diag_get_cached().magic_ok);
     //
     // Built via the shared kilnlink_diag_encode() codec (CommonFW/src/
     // kilnlink_diag.c, host-tested test_diag.c) rather than this file's own

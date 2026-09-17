@@ -45,6 +45,7 @@ void run_test_safety_core_s8_wiring(void);
 void run_test_safety_core_polarity_wiring(void);
 void run_test_safety_core_ct_calibration_gate(void);
 void run_test_safety_core_unconfigured_armed_backstop(void);
+void run_test_safety_core_trip_logging(void);
 void run_test_update_task_relay_wiring(void);
 void run_test_reboot_in_place_wiring(void);
 void run_test_tc_type_reapply_policy(void);
@@ -101,6 +102,7 @@ int main(void)
     run_test_safety_core_polarity_wiring();
     run_test_safety_core_ct_calibration_gate();
     run_test_safety_core_unconfigured_armed_backstop();
+    run_test_safety_core_trip_logging();
     run_test_estop_deenergizes_relay();
     run_test_update_task_relay_wiring();
     run_test_reboot_in_place_wiring();

@@ -1340,11 +1340,23 @@ static void safety_core_task(void *arg)
                                                                             &s_guard_cfg);
             s_trip_seq++; // wraps uint8_t -- see the variable's own doc comment
 
-            // TODO (Phase 8): step 4 of SAFETY_MODEL.md section 6's 4-step
-            // trip order (logging the trip itself) is still not implemented
-            // here -- log_task now exists (see the CLEAR_TRIP drain right
-            // below, which does use it), but wiring the ORIGINAL trip event
-            // to it is separate, later work, not this pass's.
+            // Step 4 of SAFETY_MODEL.md section 6's 4-step trip order:
+            // log the trip itself. The log_task call below is a 0-tick
+            // xQueueSend (see log_task.h's own doc comment) -- exactly the
+            // same non-blocking property the CLEAR_TRIP drain below relies
+            // on -- so this cannot extend this tick or block behind a full
+            // log queue; a full queue just drops the entry (log_task's own
+            // dropped-count tracks that) rather than stalling
+            // safety_core_task. Deliberately placed AFTER the trip is
+            // fully latched above (K4 already commanded via
+            // s_trip_command_owed, state and Frame D snapshot already
+            // written) so this audit-trail write can never precede or gate
+            // the actual trip action.
+            char trip_msg[64];
+            snprintf(trip_msg, sizeof(trip_msg), "reason=%u tc_c=%.1f uptime_ms=%lu",
+                     (unsigned)s_trip_reason, (double)s_trip_tc_c,
+                     (unsigned long)s_trip_uptime_ms);
+            log_task_log(LOG_LEVEL_ERROR, "trip", trip_msg);
         }
 
         // Retry a still-owed trip command every tick, independent of

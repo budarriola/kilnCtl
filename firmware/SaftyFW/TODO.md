@@ -497,6 +497,35 @@ RP2040/CT hardware attached to any build machine, and the link is bench-dead.
       now `src/link_diag_flags.c` (pure, host-tested,
       `test/test_link_diag_flags.c`, since `link_task.c` itself cannot be) —
       no `KILNLINK_PROTOCOL_VERSION` bump.
+- [x] **The ORIGINAL trip event is now logged, not just its later clear.**
+      2026-09-16. `SAFETY_MODEL.md` §6's 4-step trip order's step 4 (log the
+      trip) was still a `TODO` in `safety_core_task()`'s `newly_tripped`
+      block — `log_task` existed and the CLEAR_TRIP drain already used it,
+      but nothing wired the trip decision itself to it, so the audit trail
+      recorded why a trip was CLEARED but never why it happened in the first
+      place. Fixed: a `LOG_LEVEL_ERROR` `log_task_log()` call (tag `"trip"`,
+      reason/tc_c/uptime_ms), placed AFTER the K4-command latch and the
+      Frame D snapshot so the audit-trail write can never precede or gate
+      the trip action, and non-blocking (0-tick `xQueueSend`, same as
+      CLEAR_TRIP) so it cannot extend the safety_core tick. `safety_core.c`
+      cannot be host-compiled (FreeRTOS/pico-sdk), so this is covered by a
+      source-text-scan test, same precedent as the S8-wiring and
+      stack-budget tests: `test/test_safety_core_trip_logging.c`.
+- [x] **`clear_trip_diag` (the CLEAR_TRIP-crash reset-surviving checkpoint)
+      surfaced in the DIAG frame.** 2026-09-16. `main.c` step 3b captured
+      `clear_trip_diag_get_cached()` at boot but explicitly left it
+      SWD-only ("not yet surfaced" — see that step's old comment). Wired the
+      same way `calibration_missing` was: a spare bit already reserved in
+      Frame B's `flags` byte, `KILNLINK_DIAG_FLAG_CLEAR_TRIP_DIAG_PRESENT`
+      (bit3, `kilnlink_diag.h`), now set from
+      `clear_trip_diag_get_cached().magic_ok` in `link_task_send_diag()` via
+      `link_diag_flags_compute()` (`src/link_diag_flags.c`) — a boolean
+      summary ("did last boot leave behind an unread CLEAR_TRIP checkpoint",
+      i.e. reboot mid-drain) rather than the full stage/reason/outcome
+      detail, which stays SWD-only (no room in one flags bit for that, and
+      no consumer has asked for finer granularity over the link). Purely
+      additive — no `KILNLINK_PROTOCOL_VERSION` bump. Host-tested:
+      `test/test_link_diag_flags.c`'s two new cases.
 
 ## Phase 8b — ESP web GUI surface (`KilnFW` work)
 

@@ -357,13 +357,18 @@ int main(void)
     // for the scratch-register budget and why this needed its own module
     // (watchdog_hw->scratch[7] is the one free register; boot_reason.c's
     // own [0]/[1] pair was never available to reuse).
+    // clear_trip_diag_read() also caches the result (clear_trip_diag_
+    // get_cached()) for link_task.c to read later, at its own leisure --
+    // 2026-09-16: link_task_send_diag() now surfaces clear_trip_diag.
+    // magic_ok as Frame B (SAFETY_CMD_DIAG)'s flags bit3
+    // (KILNLINK_DIAG_FLAG_CLEAR_TRIP_DIAG_PRESENT, link_diag_flags.c),
+    // closing the "not yet surfaced" gap this comment used to name. The
+    // local variable below is otherwise unused in this function -- reading
+    // it here (rather than only via the cache) is what forces clear_trip_
+    // diag_clear() a few lines down to run only AFTER the read, same
+    // ordering boot_reason_read()/_clear_trip() already establish just
+    // above.
     clear_trip_diag_t clear_trip_diag = clear_trip_diag_read();
-
-    // TODO: surface clear_trip_diag in the DIAG frame (link_task.c,
-    // SAFETY_CMD_DIAG) now that DIAG reliably reaches the ESP again
-    // (2026-08-23's TIMER_DBGPAUSE fix) -- not done this pass; read and
-    // preserved here, same "not yet surfaced" state boot_reason was left in
-    // above, SWD-readable via clear_trip_diag_get_cached() in the meantime.
     (void)clear_trip_diag;
 
     clear_trip_diag_clear();

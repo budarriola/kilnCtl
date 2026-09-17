@@ -47,7 +47,32 @@ extern "C" {
 //   specified in SAFETY_MODEL.md/HARDWARE.md or built anywhere in this
 //   codebase yet (TODO.md does not list it as open either); always 0, same
 //   as link_task_send_diag() already documented before this change.
-uint8_t link_diag_flags_compute(bool calibration_missing, bool sim_context_seen);
+//   bit3 CLEAR_TRIP_DIAG_PRESENT <- clear_trip_diag_present (link_task.c's
+//                                                          caller sources
+//                                                          this from
+//                                                          clear_trip_diag_
+//                                                          get_cached().magic_ok
+//                                                          -- see
+//                                                          kilnlink_diag.h's
+//                                                          bit3 comment for
+//                                                          what "present"
+//                                                          means. TODO.md
+//                                                          Phase 8, "surface
+//                                                          clear_trip_diag
+//                                                          in the DIAG
+//                                                          frame" -- this is
+//                                                          the wiring fix,
+//                                                          same shape as
+//                                                          calibration_missing's
+//                                                          own fix above:
+//                                                          the wire format
+//                                                          already reserved
+//                                                          this bit as
+//                                                          unused/spare, so
+//                                                          no protocol
+//                                                          version bump.
+uint8_t link_diag_flags_compute(bool calibration_missing, bool sim_context_seen,
+                                 bool clear_trip_diag_present);
 
 #ifdef __cplusplus
 }

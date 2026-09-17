@@ -57,6 +57,19 @@ typedef enum {
     KILNLINK_DIAG_FLAG_SIM_CONTEXT_SEEN      = 0x01u,
     KILNLINK_DIAG_FLAG_CALIBRATION_MISSING   = 0x02u,
     KILNLINK_DIAG_FLAG_ESTOP_UNWIRED_SUSPECT = 0x04u,
+    /* bit3, added 2026-09-16: surfaces clear_trip_diag.h's reset-surviving
+     * CLEAR_TRIP checkpoint (watchdog_hw->scratch[7]) -- set iff LAST boot
+     * left behind a checkpoint with a valid magic tag, i.e. this boot's
+     * clear_trip_diag_read() (main.c step 3b, before the register is
+     * cleared) found the PREVIOUS boot mid-way through a CLEAR_TRIP drain
+     * when it reset. That is a strong signal of the exact reboot this
+     * module was built to catch (see clear_trip_diag.h's own header
+     * comment) -- one bit, not the checkpoint's stage/reason/outcome
+     * detail, which stays SWD-only via clear_trip_diag_get_cached() (no
+     * room in this byte, and no consumer has asked for finer granularity
+     * over the link yet). TODO.md Phase 8: previously captured but never
+     * surfaced past a debugger; this is the fix. */
+    KILNLINK_DIAG_FLAG_CLEAR_TRIP_DIAG_PRESENT = 0x08u,
 } kilnlink_diag_flag_t;
 
 /* state byte (offset 24) -- LINK_PROTOCOL.md sec 6, Frame B: 0 init,

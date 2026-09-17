@@ -356,7 +356,14 @@ CEILING_BYTES = {
     # unconfigured-ARMED backstop, moving the measured total 2160 -> 2168 B.
     # Re-pinned to the new measured value, same "pinned at measured, not a
     # padded guess" convention this table's own header comment describes.
-    "safety_core": 2168,
+    #
+    # 2026-09-16, Gap 1 telemetry fix (TODO.md Phase 8): the newly_tripped
+    # block now also logs the original trip event via log_task_log() (see
+    # safety_core.c's own comment at that call site), adding a `char
+    # trip_msg[64]` local and its snprintf() call -- moving the measured
+    # total 2168 -> 2176 B. Re-pinned to the new measured value, same
+    # convention.
+    "safety_core": 2176,
     # Live tc_type reapply (thermo_task_request_tc_type_reapply(), 2026-09-15):
     # thermo_task_fn()'s loop gained two locals (verified_before_retry,
     # forced_reconfigure) around the reconfig-retry gate, moving the measured
