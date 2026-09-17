@@ -50,7 +50,10 @@
 #include "safety_ceiling_sync.h" /* 2026-09-10: a restored backup can raise max_temp_c same as a POST -- see
                                   * the guard immediately before the zone-tuning commit loop below. */
 #include "zones_config_accessors.h"
-#include "zones_http_internal.h" /* s_hw_safety */
+#include "zones_config_json.h" /* relay_type/ease_off_window_mult/approach_rate_cap/
+                                 * error_band_c/rate_band_c_per_s setters --
+                                 * 2026-09-16 backup-round-trip-gap closure */
+#include "zones_http_internal.h" /* s_hw_safety, zone_normals_set() */
 
 /* ---- backup_import_apply()'s two big candidate arrays: heap, not stack ----
  *
@@ -179,6 +182,49 @@ typedef struct {
      * "settings_source" scalar has every group set to that one value
      * instead, preserving the old fan-out behavior for old backups. */
     uint8_t settings_source[SRC_GROUP_COUNT];
+    /* 2026-09-16 backup-round-trip-gap closure: every field below has a
+     * public getter+setter pair (verified directly against
+     * zones_config_accessors.h/zones_config_json.h) and was exported but
+     * never restorable -- same "worse than never offered" class the
+     * version-2 fields above already closed once. Ordinary independently-
+     * optional fields, no bundling (each backing setter takes exactly one
+     * of these). */
+    bool has_ease_off_window_mult;
+    float ease_off_window_mult;
+    bool has_approach_rate_cap;
+    float approach_rate_cap_c_per_hr;
+    bool has_error_band_c;
+    float error_band_c;
+    bool has_rate_band_c_per_s;
+    float rate_band_c_per_s;
+    bool has_relay_type;
+    uint8_t relay_type;
+    bool has_progress_band_c;
+    float progress_band_c;
+    bool has_zone_type;
+    uint8_t zone_type;
+    /* model_fit_temp_c/model_fit_ambient_c are a bundled pair, same as
+     * temp_limits/heater_cfg above -- zones_config_set_model_fit_context()
+     * takes both together. */
+    bool has_model_fit_context;
+    float model_fit_temp_c, model_fit_ambient_c;
+    bool has_coil_power_w;
+    float coil_power_w;
+    bool has_autotune_baseline_k_dc;
+    float autotune_baseline_k_dc;
+    bool has_adaptive_tune_enabled;
+    bool adaptive_tune_enabled;
+    /* tuning_* provenance family -- bundled as a whole (mirrors
+     * zone_tuning_quality_t/zones_config_set_tuning_quality()'s own
+     * all-fields-at-once contract). tuning_seq is deliberately NOT here --
+     * no accessor anywhere exposes it, so it cannot be restored; see the
+     * backup round-trip report. */
+    bool has_tuning_quality;
+    zone_tuning_quality_t tuning_quality;
+    /* CT normals -- the owner's own named example. Not bundled with
+     * anything; zone_normals_set() takes just the one amps value. */
+    bool has_normal_current_a;
+    float normal_current_a;
 } zone_candidate_t;
 
 static bool backup_import_apply_locked(const char *body, char *err_msg, size_t err_cap,
@@ -852,6 +898,178 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
             }
         }
 
+        /* 2026-09-16 backup-round-trip-gap closure -- ordinary independently-
+         * optional numeric fields, same shape as fuzzy_strength_pct/
+         * coupling_diag_k_dc above (each has its own setter taking exactly
+         * this one value). Bounds mirror each field's own zones_config_
+         * set_*() range check in zones_config_json.h -- pass 1 rejects an
+         * out-of-range value here, before any earlier candidate in this
+         * same import is committed, same reasoning as every other bounded
+         * field in this function. */
+        double dease;
+        if (!backup_json_field_opt_num(ze, "ease_off_window_mult", 0, (double)ZONE_EASE_OFF_WINDOW_MULT_MAX, &dease,
+                               &zc->has_ease_off_window_mult, "ease_off_window_mult", err_msg, err_cap,
+                               (unsigned)zone_candidate_count)) {
+            return false;
+        }
+        if (zc->has_ease_off_window_mult) {
+            zc->ease_off_window_mult = (float)dease;
+        }
+        double dapproach;
+        if (!backup_json_field_opt_num(ze, "approach_rate_cap_c_per_hr", 0,
+                               (double)ZONE_APPROACH_RATE_CAP_C_PER_HR_MAX, &dapproach,
+                               &zc->has_approach_rate_cap, "approach_rate_cap_c_per_hr", err_msg, err_cap,
+                               (unsigned)zone_candidate_count)) {
+            return false;
+        }
+        if (zc->has_approach_rate_cap) {
+            zc->approach_rate_cap_c_per_hr = (float)dapproach;
+        }
+        double derrband;
+        if (!backup_json_field_opt_num(ze, "error_band_c", 0, (double)ZONE_ERROR_BAND_C_MAX, &derrband,
+                               &zc->has_error_band_c, "error_band_c", err_msg, err_cap,
+                               (unsigned)zone_candidate_count)) {
+            return false;
+        }
+        if (zc->has_error_band_c) {
+            zc->error_band_c = (float)derrband;
+        }
+        double drateband;
+        if (!backup_json_field_opt_num(ze, "rate_band_c_per_s", 0, (double)ZONE_RATE_BAND_C_PER_S_MAX, &drateband,
+                               &zc->has_rate_band_c_per_s, "rate_band_c_per_s", err_msg, err_cap,
+                               (unsigned)zone_candidate_count)) {
+            return false;
+        }
+        if (zc->has_rate_band_c_per_s) {
+            zc->rate_band_c_per_s = (float)drateband;
+        }
+        double drelaytype;
+        if (!backup_json_field_opt_num(ze, "relay_type", 0, (double)ZONE_RELAY_TYPE_MAX, &drelaytype,
+                               &zc->has_relay_type, "relay_type", err_msg, err_cap,
+                               (unsigned)zone_candidate_count)) {
+            return false;
+        }
+        if (zc->has_relay_type) {
+            zc->relay_type = (uint8_t)drelaytype;
+        }
+        double dprogband;
+        if (!backup_json_field_opt_num(ze, "progress_band_c", 0, (double)ZONE_PROGRESS_BAND_C_MAX, &dprogband,
+                               &zc->has_progress_band_c, "progress_band_c", err_msg, err_cap,
+                               (unsigned)zone_candidate_count)) {
+            return false;
+        }
+        if (zc->has_progress_band_c) {
+            zc->progress_band_c = (float)dprogband;
+        }
+        double dzonetype;
+        if (!backup_json_field_opt_num(ze, "zone_type", 0, (double)ZONE_TYPE_ON_OFF, &dzonetype,
+                               &zc->has_zone_type, "zone_type", err_msg, err_cap,
+                               (unsigned)zone_candidate_count)) {
+            return false;
+        }
+        if (zc->has_zone_type) {
+            zc->zone_type = (uint8_t)dzonetype;
+        }
+        /* model_fit_temp_c/model_fit_ambient_c -- bundled pair, same as
+         * temp_limits/heater_cfg above. ZONE_MODEL_FIT_TEMP_UNKNOWN
+         * (-273.15) is a real, legitimate value here (it IS the sentinel
+         * the setter accepts to mean "unknown"), so the bound is widened to
+         * include it rather than rejecting it as out-of-range. */
+        double dfittemp, dfitambient;
+        bool has_fittemp = backup_json_field_num(ze, "model_fit_temp_c", &dfittemp);
+        bool has_fitambient = backup_json_field_num(ze, "model_fit_ambient_c", &dfitambient);
+        if (has_fittemp || has_fitambient) {
+            if (!(has_fittemp && has_fitambient)) {
+                snprintf(err_msg, err_cap,
+                        "zone tuning entry %u: model_fit_temp_c/model_fit_ambient_c must both be present together",
+                        (unsigned)zone_candidate_count);
+                return false;
+            }
+            zc->has_model_fit_context = true;
+            zc->model_fit_temp_c = (float)dfittemp;
+            zc->model_fit_ambient_c = (float)dfitambient;
+        }
+        double dcoilpower;
+        if (!backup_json_field_opt_num(ze, "coil_power_w", 0, (double)ZONE_COIL_POWER_W_MAX, &dcoilpower,
+                               &zc->has_coil_power_w, "coil_power_w", err_msg, err_cap,
+                               (unsigned)zone_candidate_count)) {
+            return false;
+        }
+        if (zc->has_coil_power_w) {
+            zc->coil_power_w = (float)dcoilpower;
+        }
+        double dautobase;
+        if (!backup_json_field_opt_num(ze, "autotune_baseline_k_dc", 0, (double)ZONE_MODEL_K_MAX, &dautobase,
+                               &zc->has_autotune_baseline_k_dc, "autotune_baseline_k_dc", err_msg, err_cap,
+                               (unsigned)zone_candidate_count)) {
+            return false;
+        }
+        if (zc->has_autotune_baseline_k_dc) {
+            zc->autotune_baseline_k_dc = (float)dautobase;
+        }
+        /* Booleans as 0/1 -- see backup_export.c's matching comment. */
+        double dadaptive;
+        if (!backup_json_field_opt_num(ze, "adaptive_tune_enabled", 0, 1, &dadaptive,
+                               &zc->has_adaptive_tune_enabled, "adaptive_tune_enabled", err_msg, err_cap,
+                               (unsigned)zone_candidate_count)) {
+            return false;
+        }
+        if (zc->has_adaptive_tune_enabled) {
+            zc->adaptive_tune_enabled = dadaptive != 0.0;
+        }
+        /* tuning_* provenance family -- bundled as a whole, all-or-nothing,
+         * gated on tuning_valid being present and 1 (the export only ever
+         * emits this whole block when the underlying run was valid; an
+         * absent tuning_valid key means an older backup, or a zone that had
+         * never been tuned when the backup was taken -- either way, leave
+         * the target board's own tuning record untouched rather than
+         * clobbering it with zeros). tuning_seq is NOT restorable (see
+         * zone_candidate_t's own comment); the struct's remaining 9 fields
+         * are. */
+        double dtvalid;
+        bool has_tvalid = backup_json_field_num(ze, "tuning_valid", &dtvalid);
+        if (has_tvalid && dtvalid != 0.0) {
+            double dtmethod, dtrule, dtsettled, dtextrap, dttau, dtbaseline, dtstepamb, dtrawrise, dtriseinf;
+            if (!backup_json_field_num(ze, "tuning_method", &dtmethod) ||
+                !backup_json_field_num(ze, "tuning_rule", &dtrule) ||
+                !backup_json_field_num(ze, "tuning_settled", &dtsettled) ||
+                !backup_json_field_num(ze, "tuning_extrapolation_converged", &dtextrap) ||
+                !backup_json_field_num(ze, "tuning_tau_consistent", &dttau) ||
+                !backup_json_field_num(ze, "tuning_baseline_c", &dtbaseline) ||
+                !backup_json_field_num(ze, "tuning_step_ambient_c", &dtstepamb) ||
+                !backup_json_field_num(ze, "tuning_raw_rise_c", &dtrawrise) ||
+                !backup_json_field_num(ze, "tuning_rise_inf_c", &dtriseinf)) {
+                snprintf(err_msg, err_cap,
+                        "zone tuning entry %u: tuning_valid present but one or more tuning_* fields missing",
+                        (unsigned)zone_candidate_count);
+                return false;
+            }
+            zc->has_tuning_quality = true;
+            zc->tuning_quality.valid = true;
+            zc->tuning_quality.method = (uint8_t)dtmethod;
+            zc->tuning_quality.rule = (uint8_t)dtrule;
+            zc->tuning_quality.settled = dtsettled != 0.0;
+            zc->tuning_quality.extrapolation_converged = dtextrap != 0.0;
+            zc->tuning_quality.tau_consistent = dttau != 0.0;
+            zc->tuning_quality.baseline_c = (float)dtbaseline;
+            zc->tuning_quality.step_ambient_c = (float)dtstepamb;
+            zc->tuning_quality.raw_rise_c = (float)dtrawrise;
+            zc->tuning_quality.rise_inf_c = (float)dtriseinf;
+        }
+        /* CT normals -- the owner's own named example. zone_normals_set()
+         * rejects negative/non-finite ahead of commit anyway, but the same
+         * bound is checked here in pass 1 for the usual "fail before any
+         * earlier candidate is committed" reason. */
+        double dnormal;
+        if (!backup_json_field_opt_num(ze, "normal_current_a", 0, 1000.0, &dnormal,
+                               &zc->has_normal_current_a, "normal_current_a", err_msg, err_cap,
+                               (unsigned)zone_candidate_count)) {
+            return false;
+        }
+        if (zc->has_normal_current_a) {
+            zc->normal_current_a = (float)dnormal;
+        }
+
         zone_candidate_count++;
     }
 
@@ -1139,6 +1357,104 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
             !zones_config_set_coupling_diag_k_dc(zc->index, zc->coupling_diag_k_dc)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting coupling_diag_k_dc",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        /* 2026-09-16 backup-round-trip-gap closure -- "omit preserves the
+         * current value" throughout, same as fuzzy_strength_pct/
+         * coupling_diag_k_dc above: every one of these was independently
+         * optional in pass 1, so an absent key here means an older backup
+         * (or a hand-edited one), not "reset to zero". */
+        if (zc->has_ease_off_window_mult &&
+            !zones_config_set_ease_off_window_mult(zc->index, zc->ease_off_window_mult)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting ease_off_window_mult",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_approach_rate_cap &&
+            !zones_config_set_approach_rate_cap_c_per_hr(zc->index, zc->approach_rate_cap_c_per_hr)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting approach_rate_cap_c_per_hr",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_error_band_c && !zones_config_set_error_band_c(zc->index, zc->error_band_c)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting error_band_c",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_rate_band_c_per_s && !zones_config_set_rate_band_c_per_s(zc->index, zc->rate_band_c_per_s)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting rate_band_c_per_s",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        /* zones_config_set_relay_type() pushes the new type out to
+         * relay_cycles_set_type() for this zone's relays internally
+         * (confirmed by direct read of zones_config_accessors.c) -- no
+         * separate zones_config_push_relay_type() call needed here. */
+        if (zc->has_relay_type && !zones_config_set_relay_type(zc->index, zc->relay_type)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting relay_type",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_progress_band_c && !zones_config_set_progress_band_c(zc->index, zc->progress_band_c)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting progress_band_c",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_zone_type && !zones_config_set_zone_type(zc->index, (zone_type_t)zc->zone_type)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting zone_type",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_model_fit_context &&
+            !zones_config_set_model_fit_context(zc->index, zc->model_fit_temp_c, zc->model_fit_ambient_c)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting model fit context",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_coil_power_w && !zones_config_set_coil_power_w(zc->index, zc->coil_power_w)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting coil_power_w",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_autotune_baseline_k_dc &&
+            !zones_config_set_autotune_baseline_k_dc(zc->index, zc->autotune_baseline_k_dc)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting autotune_baseline_k_dc",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_adaptive_tune_enabled &&
+            !zones_config_set_adaptive_tune_enabled(zc->index, zc->adaptive_tune_enabled)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting adaptive_tune_enabled",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_tuning_quality && !zones_config_set_tuning_quality(zc->index, &zc->tuning_quality)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting tuning quality",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        /* CT normals -- the owner's own named example, and a SEPARATE NVS
+         * store from zone_cfg_t (zone_normals_cfg_t) -- see
+         * backup_export.c's matching comment. zone_normals_set() persists
+         * immediately on success (its own save, not zones_config_save_now()
+         * below), same as it does for the live current-sweep task's own
+         * calls into it. */
+        if (zc->has_normal_current_a && !zone_normals_set(zc->index, zc->normal_current_a)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting normal_current_a",
                     (unsigned)i, zc->index);
             return false;
         }

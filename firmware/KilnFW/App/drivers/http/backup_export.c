@@ -33,6 +33,12 @@
 #include "web_encoding.h"
 #include "wifi_provision_http.h"
 #include "zones_config_accessors.h"
+#include "zones_config_json.h" /* relay_type/ease_off_window_mult/approach_rate_cap/
+                                 * error_band_c/rate_band_c_per_s getters+setters --
+                                 * 2026-09-16 backup-round-trip-gap closure, see
+                                 * docs/audits for the field-by-field enumeration */
+#include "zones_http_internal.h" /* zone_normals_set()/zones_config_get_normal_current()
+                                   * -- CT normals, the owner's own named example */
 
 /* Embedded via EMBED_TXTFILES, pre-gzipped at configure time by
  * App/drivers/CMakeLists.txt -- same convention as every other *_page.html
@@ -380,9 +386,104 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
             backup_stream_printf(&s, "\"coupling_diag_k_dc\":%.4f,", (double)coupling_diag_k_dc);
             backup_stream_printf(&s, "\"settings_source\":%u,", (unsigned)settings_source);
             for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
-                backup_stream_printf(&s, "\"settings_source_g%u\":%u%s", (unsigned)g,
-                                    (unsigned)settings_source_group[g],
-                                    (g + 1 < SRC_GROUP_COUNT) ? "," : "");
+                backup_stream_printf(&s, "\"settings_source_g%u\":%u,", (unsigned)g,
+                                    (unsigned)settings_source_group[g]);
+            }
+            /* 2026-09-16 backup-round-trip-gap closure: every one of these
+             * has a PUBLIC getter+setter pair already (confirmed by direct
+             * read of zones_config_accessors.h/zones_config_json.h), so each
+             * was a field that read back nowhere and could be restored
+             * nowhere -- exactly the "worse than never offered" case
+             * backup_http.h's own header comment calls out. All are
+             * "always answerable once zi passed the pid_kp check", same as
+             * every version-2/3/4 field above -- no has_X skip needed here,
+             * only on the import side where an OLDER package simply won't
+             * carry the key. */
+            float ease_off_window_mult = 0.0f;
+            zones_config_get_ease_off_window_mult(zi, &ease_off_window_mult);
+            float approach_rate_cap_c_per_hr = 0.0f;
+            zones_config_get_approach_rate_cap_c_per_hr(zi, &approach_rate_cap_c_per_hr);
+            float error_band_c = 0.0f, rate_band_c_per_s = 0.0f;
+            zones_config_get_error_band_c(zi, &error_band_c);
+            zones_config_get_rate_band_c_per_s(zi, &rate_band_c_per_s);
+            uint8_t relay_type = 0;
+            zones_config_get_relay_type(zi, &relay_type);
+            float progress_band_c = 0.0f;
+            zones_config_get_progress_band_c(zi, &progress_band_c);
+            zone_type_t zone_type = ZONE_TYPE_HEATER;
+            zones_config_get_zone_type(zi, &zone_type);
+            float model_fit_temp_c = 0.0f, model_fit_ambient_c = 0.0f;
+            zones_config_get_model_fit_context(zi, &model_fit_temp_c, &model_fit_ambient_c);
+            float coil_power_w = 0.0f;
+            zones_config_get_coil_power_w(zi, &coil_power_w);
+            float autotune_baseline_k_dc = 0.0f;
+            zones_config_get_autotune_baseline_k_dc(zi, &autotune_baseline_k_dc);
+            bool adaptive_tune_enabled = zones_config_get_adaptive_tune_enabled(zi);
+            backup_stream_printf(&s, "\"ease_off_window_mult\":%.3f,\"approach_rate_cap_c_per_hr\":%.2f,",
+                                (double)ease_off_window_mult, (double)approach_rate_cap_c_per_hr);
+            backup_stream_printf(&s, "\"error_band_c\":%.3f,\"rate_band_c_per_s\":%.5f,\"relay_type\":%u,",
+                                (double)error_band_c, (double)rate_band_c_per_s, (unsigned)relay_type);
+            backup_stream_printf(&s, "\"progress_band_c\":%.2f,\"zone_type\":%u,",
+                                (double)progress_band_c, (unsigned)zone_type);
+            backup_stream_printf(&s, "\"model_fit_temp_c\":%.2f,\"model_fit_ambient_c\":%.2f,",
+                                (double)model_fit_temp_c, (double)model_fit_ambient_c);
+            /* adaptive_tune_enabled is the last UNCONDITIONAL key of this
+             * object -- no trailing comma here. The two blocks that follow
+             * (tuning_*, normal_current_a) are each conditionally emitted,
+             * so they each carry their own LEADING comma instead, keeping
+             * the object valid JSON whether zero, one, or both fire. */
+            /* Booleans emitted as 0/1, not JSON true/false: backup_json.h's
+             * reader (backup_json_field_num/_opt_num) has no boolean
+             * primitive, and adding one purely for these few fields is not
+             * worth a new parser code path on this board's fixed 8KB httpd
+             * stack budget -- 0/1 round-trips through the existing numeric
+             * reader exactly. */
+            backup_stream_printf(&s, "\"coil_power_w\":%.2f,\"autotune_baseline_k_dc\":%.4f,"
+                                "\"adaptive_tune_enabled\":%u",
+                                (double)coil_power_w, (double)autotune_baseline_k_dc,
+                                adaptive_tune_enabled ? 1u : 0u);
+            /* tuning_* provenance family (zone_tuning_quality_t) -- emitted
+             * only when the underlying tuning has actually run (valid==true),
+             * same "skip the key rather than emit a bogus zero" convention
+             * as have_model above: this struct's own float fields (baseline_c
+             * etc.) are meaningless before a run has ever completed, and
+             * import must not overwrite a REAL tuning record on the target
+             * board with a "never tuned" backup that never measured one.
+             * tuning_seq itself is deliberately not part of this struct
+             * (no accessor exposes it anywhere in the firmware) and so
+             * cannot be carried here -- see the backup round-trip report. */
+            zone_tuning_quality_t tq;
+            memset(&tq, 0, sizeof(tq));
+            bool have_tuning = zones_config_get_tuning_quality(zi, &tq) && tq.valid;
+            if (have_tuning) {
+                backup_stream_printf(&s, ",\"tuning_valid\":1,\"tuning_method\":%u,\"tuning_rule\":%u,",
+                                    (unsigned)tq.method, (unsigned)tq.rule);
+                backup_stream_printf(&s, "\"tuning_settled\":%u,\"tuning_extrapolation_converged\":%u,"
+                                    "\"tuning_tau_consistent\":%u,",
+                                    tq.settled ? 1u : 0u,
+                                    tq.extrapolation_converged ? 1u : 0u,
+                                    tq.tau_consistent ? 1u : 0u);
+                backup_stream_printf(&s, "\"tuning_baseline_c\":%.3f,\"tuning_step_ambient_c\":%.3f,",
+                                    (double)tq.baseline_c, (double)tq.step_ambient_c);
+                backup_stream_printf(&s, "\"tuning_raw_rise_c\":%.3f,\"tuning_rise_inf_c\":%.3f",
+                                    (double)tq.raw_rise_c, (double)tq.rise_inf_c);
+            }
+            /* CT normals -- the owner's own literal example ("ct normals
+             * ... backup"). This is a SEPARATE NVS store (zone_normals_cfg_t,
+             * its own version/CRC, NVS key zone_norm_cfg) from zone_cfg_t,
+             * indexed the same way (zi = MAX31856 channel = zone index), so
+             * it is folded into this same zone object rather than a new
+             * top-level array -- one JSON entry per zone either way, and
+             * this avoids a second index space to keep in sync. Emitted only
+             * when actually measured (has_normal_current), same "skip
+             * unmeasured rather than emit a false 0.0" convention as
+             * model_k_dc/tuning above -- an unmeasured CT normal is not the
+             * same fact as "measured at 0 A". */
+            float normal_current_a = 0.0f;
+            bool normal_current_measured = false;
+            if (zones_config_get_normal_current(zi, &normal_current_a, &normal_current_measured) &&
+                normal_current_measured) {
+                backup_stream_printf(&s, ",\"normal_current_a\":%.4f", (double)normal_current_a);
             }
         }
         /* settings_source_g%u above is now the last key of this object (it

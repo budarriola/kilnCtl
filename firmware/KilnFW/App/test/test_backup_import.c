@@ -328,6 +328,38 @@ typedef struct {
      * flag observable" convention as set_fuzzy_strength_called above. */
     bool set_coupling_diag_k_dc_called;
     float coupling_diag_k_dc;
+    /* 2026-09-16 backup-round-trip-gap closure (owner: "shouldn't ct normals
+     * be part of a config backup?") -- one flag/value per newly-closed
+     * field, same convention as every field above. normal_current_a is the
+     * owner's own named example (CT calibration); the rest close every
+     * other confirmed-closeable gap found in the same audit. */
+    bool set_ease_off_window_mult_called;
+    float ease_off_window_mult;
+    bool set_approach_rate_cap_called;
+    float approach_rate_cap_c_per_hr;
+    bool set_error_band_c_called;
+    float error_band_c;
+    bool set_rate_band_c_per_s_called;
+    float rate_band_c_per_s;
+    bool set_relay_type_called;
+    uint8_t relay_type;
+    bool set_progress_band_c_called;
+    float progress_band_c;
+    bool set_zone_type_called;
+    uint8_t zone_type;
+    bool set_model_fit_context_called;
+    float model_fit_temp_c, model_fit_ambient_c;
+    bool set_coil_power_w_called;
+    float coil_power_w;
+    bool set_autotune_baseline_k_dc_called;
+    float autotune_baseline_k_dc;
+    bool set_adaptive_tune_enabled_called;
+    bool adaptive_tune_enabled;
+    bool set_tuning_quality_called;
+    zone_tuning_quality_t tuning_quality;
+    bool set_normal_current_called;
+    bool normal_current_measured;
+    float normal_current_a;
 } zone_write_t;
 
 static zone_write_t s_writes[STUB_ZONE_COUNT];
@@ -703,6 +735,96 @@ bool zones_get_safety_pico_tc_type(uint8_t *out_tc_type)
     return true;
 }
 
+/* 2026-09-16 backup-round-trip-gap closure -- getters for every field
+ * backup_export.c now reads unconditionally (once zi has answered
+ * pid_kp) return true whenever zone_index is in bounds, same as the
+ * plain scalar getters above; the two CONDITIONAL export fields
+ * (tuning_quality, normal_current_a) answer false/not-measured by
+ * default so a test that doesn't seed them sees those keys omitted,
+ * matching the real getters' own "0 means not yet answerable" gate. */
+bool zones_config_get_ease_off_window_mult(uint8_t zone_index, float *out_mult)
+{
+    if (!out_mult || zone_index >= STUB_ZONE_COUNT) return false;
+    *out_mult = s_writes[zone_index].ease_off_window_mult;
+    return true;
+}
+bool zones_config_get_approach_rate_cap_c_per_hr(uint8_t zone_index, float *out_cap_c_per_hr)
+{
+    if (!out_cap_c_per_hr || zone_index >= STUB_ZONE_COUNT) return false;
+    *out_cap_c_per_hr = s_writes[zone_index].approach_rate_cap_c_per_hr;
+    return true;
+}
+bool zones_config_get_error_band_c(uint8_t zone_index, float *out_band_c)
+{
+    if (!out_band_c || zone_index >= STUB_ZONE_COUNT) return false;
+    *out_band_c = s_writes[zone_index].error_band_c;
+    return true;
+}
+bool zones_config_get_rate_band_c_per_s(uint8_t zone_index, float *out_band_c_per_s)
+{
+    if (!out_band_c_per_s || zone_index >= STUB_ZONE_COUNT) return false;
+    *out_band_c_per_s = s_writes[zone_index].rate_band_c_per_s;
+    return true;
+}
+bool zones_config_get_relay_type(uint8_t zone_index, uint8_t *out_relay_type)
+{
+    if (!out_relay_type || zone_index >= STUB_ZONE_COUNT) return false;
+    *out_relay_type = s_writes[zone_index].relay_type;
+    return true;
+}
+bool zones_config_get_progress_band_c(uint8_t zone_index, float *out_band_c)
+{
+    if (!out_band_c || zone_index >= STUB_ZONE_COUNT) return false;
+    *out_band_c = s_writes[zone_index].progress_band_c;
+    return true;
+}
+bool zones_config_get_zone_type(uint8_t zone_index, zone_type_t *out_type)
+{
+    if (!out_type || zone_index >= STUB_ZONE_COUNT) return false;
+    *out_type = (zone_type_t)s_writes[zone_index].zone_type;
+    return true;
+}
+bool zones_config_get_model_fit_context(uint8_t zone_index, float *out_fit_temp_c, float *out_fit_ambient_c)
+{
+    if (!out_fit_temp_c || !out_fit_ambient_c || zone_index >= STUB_ZONE_COUNT) return false;
+    *out_fit_temp_c = s_writes[zone_index].model_fit_temp_c;
+    *out_fit_ambient_c = s_writes[zone_index].model_fit_ambient_c;
+    return true;
+}
+bool zones_config_get_coil_power_w(uint8_t zone_index, float *out_power_w)
+{
+    if (!out_power_w || zone_index >= STUB_ZONE_COUNT) return false;
+    *out_power_w = s_writes[zone_index].coil_power_w;
+    return true;
+}
+bool zones_config_get_autotune_baseline_k_dc(uint8_t zone_index, float *out_k_dc)
+{
+    if (!out_k_dc || zone_index >= STUB_ZONE_COUNT) return false;
+    *out_k_dc = s_writes[zone_index].autotune_baseline_k_dc;
+    return true;
+}
+bool zones_config_get_adaptive_tune_enabled(uint8_t zone_index)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    return s_writes[zone_index].adaptive_tune_enabled;
+}
+/* zones_config_get_tuning_quality()'s ONE definition in this host-test
+ * binary lives in test_profile_feasibility.c (profile_feasibility.c's own
+ * real production dependency) -- see that file's stub_zone_t comment. This
+ * file reaches it through test_stub_zones_set_full_tuning_quality() instead
+ * of redefining the symbol (multiple-definition link error), same
+ * cross-file-hook convention as zones_config_get_thermo_count()/
+ * zones_config_get_max_ramp() in the other direction. */
+void test_stub_zones_set_full_tuning_quality(uint8_t zi, const zone_tuning_quality_t *tq);
+
+bool zones_config_get_normal_current(uint8_t zone_index, float *out_amps, bool *out_measured)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    if (out_amps) *out_amps = s_writes[zone_index].normal_current_a;
+    if (out_measured) *out_measured = s_writes[zone_index].normal_current_measured;
+    return true;
+}
+
 // ---- zones_http.h setters -- every one records the call and bumps the
 // shared write counter, matching the real setters' "false means rejected,
 // nothing written" shape (always true here since backup_import_apply()'s
@@ -851,6 +973,123 @@ bool zones_config_set_coupling_diag_k_dc(uint8_t zone_index, float k_dc)
     if (zone_index >= STUB_ZONE_COUNT) return false;
     s_writes[zone_index].set_coupling_diag_k_dc_called = true;
     s_writes[zone_index].coupling_diag_k_dc = k_dc;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_ease_off_window_mult(uint8_t zone_index, float mult)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_ease_off_window_mult_called = true;
+    s_writes[zone_index].ease_off_window_mult = mult;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_approach_rate_cap_c_per_hr(uint8_t zone_index, float cap_c_per_hr)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_approach_rate_cap_called = true;
+    s_writes[zone_index].approach_rate_cap_c_per_hr = cap_c_per_hr;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_error_band_c(uint8_t zone_index, float band_c)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_error_band_c_called = true;
+    s_writes[zone_index].error_band_c = band_c;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_rate_band_c_per_s(uint8_t zone_index, float band_c_per_s)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_rate_band_c_per_s_called = true;
+    s_writes[zone_index].rate_band_c_per_s = band_c_per_s;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_relay_type(uint8_t zone_index, uint8_t relay_type)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_relay_type_called = true;
+    s_writes[zone_index].relay_type = relay_type;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_progress_band_c(uint8_t zone_index, float band_c)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_progress_band_c_called = true;
+    s_writes[zone_index].progress_band_c = band_c;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_zone_type(uint8_t zone_index, zone_type_t type)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_zone_type_called = true;
+    s_writes[zone_index].zone_type = (uint8_t)type;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_model_fit_context(uint8_t zone_index, float fit_temp_c, float fit_ambient_c)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_model_fit_context_called = true;
+    s_writes[zone_index].model_fit_temp_c = fit_temp_c;
+    s_writes[zone_index].model_fit_ambient_c = fit_ambient_c;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_coil_power_w(uint8_t zone_index, float power_w)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_coil_power_w_called = true;
+    s_writes[zone_index].coil_power_w = power_w;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_autotune_baseline_k_dc(uint8_t zone_index, float k_dc)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_autotune_baseline_k_dc_called = true;
+    s_writes[zone_index].autotune_baseline_k_dc = k_dc;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_adaptive_tune_enabled(uint8_t zone_index, bool enabled)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_adaptive_tune_enabled_called = true;
+    s_writes[zone_index].adaptive_tune_enabled = enabled;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_tuning_quality(uint8_t zone_index, const zone_tuning_quality_t *q)
+{
+    if (!q || zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_tuning_quality_called = true;
+    s_writes[zone_index].tuning_quality = *q;
+    /* Also feed test_profile_feasibility.c's storage -- that file owns the
+     * one zones_config_get_tuning_quality() definition in this binary (see
+     * this file's forward-declared hook above), so a test seeding a zone's
+     * tuning quality before calling run_export() needs the GETTER to answer
+     * with it too, not just this observability copy. */
+    test_stub_zones_set_full_tuning_quality(zone_index, q);
+    g_total_write_calls++;
+    return true;
+}
+/* zone_normals_set() -- the owner's own named example (CT calibration),
+ * a separate NVS store (zone_normals_cfg_t) from zone_cfg_t on real
+ * firmware, but modeled here in the same s_writes[] table since this
+ * stub file's only job is observing what backup_import_apply() commits,
+ * not replicating the real store split. */
+bool zone_normals_set(uint8_t zone_index, float amps)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_normal_current_called = true;
+    s_writes[zone_index].normal_current_a = amps;
+    s_writes[zone_index].normal_current_measured = true;
     g_total_write_calls++;
     return true;
 }
@@ -2043,6 +2282,100 @@ static void test_v4_coupling_tau_dead_time_partial_per_cell_presence(void)
               "preserve by never being committed again");
 }
 
+// ---------------------------------------------------------------------------
+// 2026-09-16 backup-round-trip-gap closure. Owner's own words: "shouldn't ct
+// normals be part of a config backup? I dont want to have to recalibrate my
+// kiln after a restore." Before this pass, backup_export.c never read
+// zones_config_get_normal_current() (or relay_type/coil_power_w/
+// adaptive_tune_enabled/tuning_quality/etc.) at all -- a restore silently
+// dropped the CT calibration and every other field below, landing back on
+// firmware defaults. Proves the CLOSED fields round-trip end to end, the
+// same "export -> feed into import against a poisoned starting state ->
+// assert" shape as test_export_round_trips_through_import_to_identical_
+// config() above, but isolated to the fields this pass added so a parent
+// (pre-fix) build fails this test with an honest value mismatch rather than
+// a crash: on parent code, zones_config_get_normal_current()/
+// zones_config_get_relay_type()/etc. are never called by export, so none of
+// these keys appear in the exported JSON, so import's has_* flags never
+// fire, so every assertion below (checking the POISONED value was
+// overwritten) fails on a real, wrong number -- not a build or link error.
+// ---------------------------------------------------------------------------
+static void test_ct_normals_and_new_fields_round_trip_through_export_import(void)
+{
+    TEST_SECTION("backup_export_get_handler -> backup_import_apply -- CT normal_current_a "
+                 "(the owner's own named example) and the other 2026-09-16 closed fields "
+                 "(relay_type, coil_power_w, adaptive_tune_enabled, tuning_quality) all "
+                 "round-trip through a real export/import cycle");
+    reset_stub_state();
+
+    zones_config_set_pid(1, 1.0f, 0.0f, 0.0f); /* zone 1 must answer pid_kp for export to visit it at all */
+    TEST_CHECK(zone_normals_set(1, 12.345f), "seed zone 1's measured CT normal current");
+    TEST_CHECK(zones_config_set_relay_type(1, 2), "seed zone 1 relay_type (2 = mercury)");
+    TEST_CHECK(zones_config_set_coil_power_w(1, 2750.5f), "seed zone 1 coil_power_w");
+    TEST_CHECK(zones_config_set_adaptive_tune_enabled(1, true), "seed zone 1 adaptive_tune_enabled");
+
+    zone_tuning_quality_t tq;
+    memset(&tq, 0, sizeof(tq));
+    tq.valid = true;
+    tq.method = 1;
+    tq.rule = 2;
+    tq.settled = true;
+    tq.extrapolation_converged = false;
+    tq.tau_consistent = true;
+    tq.baseline_c = 24.5f;
+    tq.step_ambient_c = 23.1f;
+    tq.raw_rise_c = 88.0f;
+    tq.rise_inf_c = 95.5f;
+    TEST_CHECK(zones_config_set_tuning_quality(1, &tq), "seed zone 1 tuning_quality");
+
+    esp_err_t err = run_export();
+    TEST_CHECK(err == ESP_OK, "export must succeed");
+    TEST_CHECK(s_export_body != NULL && s_export_len > 0, "export must have produced a body");
+    TEST_CHECK(strstr(s_export_body, "\"normal_current_a\":12.3450") != NULL,
+              "the measured CT normal current is actually emitted by export");
+    TEST_CHECK(strstr(s_export_body, "\"relay_type\":2") != NULL, "relay_type is emitted");
+    TEST_CHECK(strstr(s_export_body, "\"coil_power_w\":2750.50") != NULL, "coil_power_w is emitted");
+    TEST_CHECK(strstr(s_export_body, "\"adaptive_tune_enabled\":1") != NULL, "adaptive_tune_enabled is emitted");
+    TEST_CHECK(strstr(s_export_body, "\"tuning_valid\":1") != NULL, "tuning_quality block is emitted");
+
+    /* Reset to a DIFFERENT (poisoned) state, distinct from every seeded value
+     * above, so a re-import that silently no-ops (the parent-code failure
+     * mode) leaves these fields readably WRONG rather than coincidentally
+     * matching. */
+    reset_stub_state();
+    zones_config_set_pid(1, 1.0f, 0.0f, 0.0f);
+    zones_config_set_relay_type(1, 0);
+    zones_config_set_coil_power_w(1, 0.0f);
+    /* normal_current_a/adaptive_tune_enabled/tuning_quality: reset_stub_state()
+     * already left these at "not measured"/false/"not called" -- the poison
+     * for these three IS the untouched default, since that is exactly the
+     * firmware-default state the owner's complaint says a restore must not
+     * silently fall back to. */
+    g_total_write_calls = 0;
+
+    char import_err[256];
+    bool ok = backup_import_apply(s_export_body, import_err, sizeof(import_err));
+    TEST_CHECK(ok, "re-importing exactly what was just exported must succeed");
+
+    TEST_CHECK(s_writes[1].set_normal_current_called,
+              "CT normal current was actually restored by import (owner's own named example)");
+    TEST_CHECK_NEAR(s_writes[1].normal_current_a, 12.345, 1e-3,
+                    "the restored CT normal current matches the pre-backup measured value exactly -- "
+                    "no recalibration required after a restore");
+    TEST_CHECK(s_writes[1].set_relay_type_called && s_writes[1].relay_type == 2,
+              "relay_type was restored, not left at the poisoned 0 (SSR)");
+    TEST_CHECK(s_writes[1].set_coil_power_w_called, "coil_power_w setter ran");
+    TEST_CHECK_NEAR(s_writes[1].coil_power_w, 2750.5, 1e-2, "coil_power_w restored exactly");
+    TEST_CHECK(s_writes[1].set_adaptive_tune_enabled_called && s_writes[1].adaptive_tune_enabled,
+              "adaptive_tune_enabled was restored true, not left at the poisoned/default false");
+    TEST_CHECK(s_writes[1].set_tuning_quality_called && s_writes[1].tuning_quality.valid,
+              "tuning_quality was restored, not left unset");
+    TEST_CHECK_NEAR(s_writes[1].tuning_quality.baseline_c, 24.5, 1e-3, "tuning_quality.baseline_c restored exactly");
+    TEST_CHECK_NEAR(s_writes[1].tuning_quality.rise_inf_c, 95.5, 1e-3, "tuning_quality.rise_inf_c restored exactly");
+    TEST_CHECK(s_writes[1].tuning_quality.method == 1 && s_writes[1].tuning_quality.rule == 2,
+              "tuning_quality.method/rule restored exactly");
+}
+
 void run_test_backup_import(void)
 {
     test_malformed_body_writes_nothing();
@@ -2074,6 +2407,7 @@ void run_test_backup_import(void)
     test_export_emits_expected_keys_and_values_for_a_known_config();
     test_export_emits_live_pico_tc_type_not_stale_esp_cache();
     test_export_round_trips_through_import_to_identical_config();
+    test_ct_normals_and_new_fields_round_trip_through_export_import();
 
     test_v4_coupling_tau_dead_time_round_trip_asymmetric_per_pair();
     test_v4_coupling_tau_dead_time_omitted_entirely_preserves_measured_values();

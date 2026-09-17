@@ -77,6 +77,21 @@ ALLOWED_FILES = {
     # arithmetic with the field. Reviewed: no new producer/consumer, no
     # sentinel hazard.
     "firmware/KilnFW/App/test/test_zones_http.c",
+    # 2026-09-16 (backup round-trip gap closure, owner request "back up my
+    # CT normals / restore the same runnable config"): backup_export.c reads
+    # coil_power_w via zones_config_get_coil_power_w() and emits it VERBATIM,
+    # 0.0f included -- it round-trips the stored value (and its sentinel
+    # meaning) exactly, never re-deriving or defaulting it. backup_import.c
+    # writes it back only when the imported JSON actually carries the key
+    # (has_coil_power_w), so an older backup that omits the field leaves the
+    # live value (sentinel or real) untouched, matching every other optional
+    # field's "omit preserves current" convention in this file. Neither file
+    # does arithmetic with the value or treats 0.0f as a real zero-watt coil
+    # -- reviewed, no new sentinel hazard. test_backup_import.c only feeds a
+    # distinctive nonzero value (2750.5) through the same round trip.
+    "firmware/KilnFW/App/drivers/http/backup_export.c",
+    "firmware/KilnFW/App/drivers/http/backup_import.c",
+    "firmware/KilnFW/App/test/test_backup_import.c",
 }
 
 # The one file that actually consumes the value (does arithmetic with it,

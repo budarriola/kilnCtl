@@ -42,6 +42,21 @@ typedef struct {
     float ambient_c;             /* zone_tuning_quality_t::baseline_c -- the production ambient
                                    * source since the 7e632e8 review fix; see
                                    * get_persisted_ambient_c() */
+    /* 2026-09-16 backup-round-trip-gap closure: backup_export.c/backup_
+     * import.c (test_backup_import.c) now also drive zones_config_get_
+     * tuning_quality() -- the ONE definition of that symbol in this host-test
+     * binary lives here, so rather than redefine it (multiple-definition
+     * link error) test_backup_import.c reaches it through
+     * test_stub_zones_set_full_tuning_quality() below, which fills in the
+     * rest of zone_tuning_quality_t that profile_feasibility.c itself never
+     * reads. */
+    uint8_t ambient_rule;
+    bool ambient_settled;
+    bool ambient_extrapolation_converged;
+    bool ambient_tau_consistent;
+    float ambient_step_ambient_c;
+    float ambient_raw_rise_c;
+    float ambient_rise_inf_c;
 } stub_zone_t;
 
 static stub_zone_t s_zones[STUB_MAX_ZONES];
@@ -84,6 +99,27 @@ static void stub_zone_ambient_method(uint8_t zi, bool answers, bool valid, uint8
 static void stub_zone_ambient(uint8_t zi, bool answers, bool valid, float baseline_c)
 {
     stub_zone_ambient_method(zi, answers, valid, 0u /* AUTOTUNE_METHOD_STEP */, baseline_c);
+}
+
+/* Cross-file hook for test_backup_import.c -- see stub_zone_t's own comment
+ * above. Fills every field of zone_tuning_quality_t, not just the three
+ * (valid/method/baseline_c) profile_feasibility.c itself reads. */
+void test_stub_zones_set_full_tuning_quality(uint8_t zi, const zone_tuning_quality_t *tq)
+{
+    if (zi >= STUB_MAX_ZONES || !tq) {
+        return;
+    }
+    s_zones[zi].ambient_getter_answers = true;
+    s_zones[zi].ambient_valid = tq->valid;
+    s_zones[zi].ambient_method = tq->method;
+    s_zones[zi].ambient_c = tq->baseline_c;
+    s_zones[zi].ambient_rule = tq->rule;
+    s_zones[zi].ambient_settled = tq->settled;
+    s_zones[zi].ambient_extrapolation_converged = tq->extrapolation_converged;
+    s_zones[zi].ambient_tau_consistent = tq->tau_consistent;
+    s_zones[zi].ambient_step_ambient_c = tq->step_ambient_c;
+    s_zones[zi].ambient_raw_rise_c = tq->raw_rise_c;
+    s_zones[zi].ambient_rise_inf_c = tq->rise_inf_c;
 }
 
 /* A zone with the hand-checkable model above and a ceiling high enough that
@@ -194,6 +230,13 @@ bool zones_config_get_tuning_quality(uint8_t zone_index, zone_tuning_quality_t *
     out->valid = s_zones[zone_index].ambient_valid;
     out->method = s_zones[zone_index].ambient_method;
     out->baseline_c = s_zones[zone_index].ambient_c;
+    out->rule = s_zones[zone_index].ambient_rule;
+    out->settled = s_zones[zone_index].ambient_settled;
+    out->extrapolation_converged = s_zones[zone_index].ambient_extrapolation_converged;
+    out->tau_consistent = s_zones[zone_index].ambient_tau_consistent;
+    out->step_ambient_c = s_zones[zone_index].ambient_step_ambient_c;
+    out->raw_rise_c = s_zones[zone_index].ambient_raw_rise_c;
+    out->rise_inf_c = s_zones[zone_index].ambient_rise_inf_c;
     return true;
 }
 
