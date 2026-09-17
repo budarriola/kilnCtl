@@ -26,6 +26,12 @@ typedef struct httpd_req {
     long long content_len; /* matches real esp_http_server's httpd_req_t::content_len (size_t) closely
                              * enough for req->content_len comparisons/casts in backup_http.c -- signed
                              * so a test can also express "no body" as <= 0 the same way real code checks. */
+    // Matches real esp_http_server's httpd_req_t::user_ctx -- added for
+    // kiln_http_register()'s pre-handler (http_auth_http.c), which reads and
+    // overwrites this field to smuggle its own wrapper context through
+    // httpd_register_uri_handler() and restore the real handler's original
+    // user_ctx before dispatching to it.
+    void *user_ctx;
 } httpd_req_t;
 
 typedef enum {

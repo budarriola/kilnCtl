@@ -228,6 +228,12 @@ try {
         (Join-Path $driversDir "http/http_auth_enforce.c"),
         (Join-Path $driversDir "http/http_auth_policy_iface.c"),
         (Join-Path $driversDir "http/http_session_iface.c"),
+        # http_auth_http.c's resolve_role_for_request() calls
+        # httpd_req_get_hdr_value_len/_str and ota_http_get_client_ip, real
+        # esp_http_server.h symbols this executable has no other source for
+        # (only test_ota_http.c's own #include of ota_http.c supplies them,
+        # and that's a separate executable) -- link-only fakes, see the file.
+        (Join-Path $testDir "stubs/http_auth_link_stub.c"),
         (Join-Path $driversDir "hw/touch_dev.c"),
         (Join-Path $driversDir "control/ramp_ident.c"),
         (Join-Path $driversDir "control/ramp_transient_ident.c"),
@@ -430,7 +436,14 @@ try {
             # test_zones_http.c) now calls it instead of
             # httpd_register_uri_handler() directly.
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
-            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`""
+            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            # http_auth_policy_iface.c/http_session_iface.c call into
+            # web_auth_store.c (policy load) and web_auth_session.c (real
+            # session table/role resolution) -- linked in for REAL, same
+            # "already host-tested elsewhere, needs its real symbols to link"
+            # reasoning used everywhere else these four files travel together.
+            "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
+            "`"$(Join-Path $testDir 'stubs/http_auth_link_stub.c')`""
     # fake_kv.c/hal_status.c/hal_esp_common.c added HW_ABSTRACTION.md Phase 3
     # item 3 (nvs.h -> hal_kv.h migration): zones_http.c/zones_config_store.c now
     # call hal_kv_*()/hal_status_to_esp_err() instead of nvs_*() directly, and
@@ -479,7 +492,18 @@ try {
             # above) now calls it instead of httpd_register_uri_handler()
             # directly.
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
-            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`""
+            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            # http_auth_policy_iface.c/http_session_iface.c call into
+            # web_auth_store.c (policy load) and web_auth_session.c (real
+            # session table/role resolution) -- linked in for REAL, same
+            # "already host-tested elsewhere, needs its real symbols to link"
+            # reasoning used everywhere else these four files travel together.
+            "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
+            # web_auth_store.c needs the host hal_kv backend (fake_kv.c) --
+            # not otherwise linked into this executable (its own
+            # safety_cfg_store fake is separate and does not touch hal_kv).
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
+            "`"$(Join-Path $testDir 'stubs/http_auth_link_stub.c')`""
 
     Invoke-HostTestExe -Name "safety_cfg_http" -ExePath $exe3 -BuildCmd $cmd3
 
@@ -634,7 +658,17 @@ try {
             # above) now calls it instead of httpd_register_uri_handler()
             # directly.
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
-            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`""
+            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            # http_auth_policy_iface.c/http_session_iface.c call into
+            # web_auth_store.c (policy load) and web_auth_session.c (real
+            # session table/role resolution) -- linked in for REAL, same
+            # "already host-tested elsewhere, needs its real symbols to link"
+            # reasoning used everywhere else these four files travel together.
+            "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
+            # http_session_iface.c needs hal_time_now_ms() -- not otherwise
+            # linked into this executable.
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $testDir 'stubs/http_auth_link_stub.c')`""
     # HW_ABSTRACTION.md Phase 3 item 3 (nvs.h -> hal_kv.h migration, batch
     # 4): profiles_http.c (#included directly above) now calls hal_kv_*() and
     # hal_status_to_esp_err() instead of nvs_*() directly, so this executable
@@ -672,7 +706,7 @@ try {
             "`"$(Join-Path $driversDir 'net/ota_auth.c')`" `"$(Join-Path $driversDir 'net/ota_interlock.c')`" " +
             "`"$(Join-Path $driversDir 'persist/ota_record.c')`" `"$(Join-Path $driversDir 'http/ota_http_util.c')`" " +
             "`"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
-            "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
@@ -1063,7 +1097,18 @@ try {
             # (#included above) now calls it instead of
             # httpd_register_uri_handler() directly.
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
-            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`""
+            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            # http_auth_policy_iface.c/http_session_iface.c call into
+            # web_auth_store.c (policy load) and web_auth_session.c (real
+            # session table/role resolution) -- linked in for REAL, same
+            # "already host-tested elsewhere, needs its real symbols to link"
+            # reasoning used everywhere else these four files travel together.
+            "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
+            # web_auth_store.c needs the host hal_kv backend (fake_kv.c);
+            # http_session_iface.c needs hal_time_now_ms() (fake_time.c) --
+            # neither otherwise linked into this executable.
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $testDir 'stubs/http_auth_link_stub.c')`""
 
     Invoke-HostTestExe -Name "partition_info_http" -ExePath $exe21 -BuildCmd $cmd21
 
@@ -1259,7 +1304,18 @@ try {
             # (#included above) now calls it instead of
             # httpd_register_uri_handler() directly.
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
-            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`""
+            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            # http_auth_policy_iface.c/http_session_iface.c call into
+            # web_auth_store.c (policy load) and web_auth_session.c (real
+            # session table/role resolution) -- linked in for REAL, same
+            # "already host-tested elsewhere, needs its real symbols to link"
+            # reasoning used everywhere else these four files travel together.
+            "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
+            # web_auth_store.c needs the host hal_kv backend (fake_kv.c);
+            # http_session_iface.c needs hal_time_now_ms() (fake_time.c) --
+            # neither otherwise linked into this executable.
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $testDir 'stubs/http_auth_link_stub.c')`""
 
     Invoke-HostTestExe -Name "profile_export_import" -ExePath $exe29 -BuildCmd $cmd29
 
@@ -1442,7 +1498,18 @@ try {
             # (#included above) now calls it instead of
             # httpd_register_uri_handler() directly.
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
-            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`""
+            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            # http_auth_policy_iface.c/http_session_iface.c call into
+            # web_auth_store.c (policy load) and web_auth_session.c (real
+            # session table/role resolution) -- linked in for REAL, same
+            # "already host-tested elsewhere, needs its real symbols to link"
+            # reasoning used everywhere else these four files travel together.
+            "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
+            # web_auth_store.c needs the host hal_kv backend (fake_kv.c);
+            # http_session_iface.c needs hal_time_now_ms() (fake_time.c) --
+            # neither otherwise linked into this executable.
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $testDir 'stubs/http_auth_link_stub.c')`""
 
     Invoke-HostTestExe -Name "safety_stack_margin_http" -ExePath $exe37 -BuildCmd $cmd37
 

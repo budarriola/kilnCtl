@@ -49,6 +49,14 @@ int g_test_count = 0;
 #include "esp_err.h"
 #include "esp_http_server.h"
 #include "fake_kv.h"
+#include "psa/crypto.h"
+
+// psa/crypto.h's host stub declares this `extern` (only ONE definition per
+// executable, test_ota_http.c/test_web_auth_store.c already have their own)
+// -- this executable now links web_auth_store.c (docs/WEB_AUTH_PLAN.md
+// section 5/9 route rewiring pulling in http_auth_policy_iface.c) so it
+// needs its own copy.
+psa_status_t g_stub_psa_import_key_result = PSA_SUCCESS;
 
 // RELAY_LIFE_BUDGET.md: zones_config_store.c now calls
 // relay_cycles_set_type() (relay_cycles.h) on load and on every successful

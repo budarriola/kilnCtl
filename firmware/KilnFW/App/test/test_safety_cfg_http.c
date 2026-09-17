@@ -22,6 +22,13 @@ int g_test_count = 0;
 
 #include "esp_err.h"
 #include "esp_http_server.h"
+#include "psa/crypto.h"
+
+// psa/crypto.h's host stub declares this `extern` (only ONE definition per
+// executable) -- this executable now links web_auth_store.c
+// (docs/WEB_AUTH_PLAN.md section 5/9 route rewiring pulling in
+// http_auth_policy_iface.c) so it needs its own copy.
+psa_status_t g_stub_psa_import_key_result = PSA_SUCCESS;
 
 #include "kilnlink/kilnlink_commit_config_rejected.h"
 

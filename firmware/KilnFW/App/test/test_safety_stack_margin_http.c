@@ -27,6 +27,13 @@ int g_test_count = 0;
 
 #include "esp_err.h"
 #include "esp_http_server.h"
+#include "psa/crypto.h"
+
+// psa/crypto.h's host stub declares this `extern` (only ONE definition per
+// executable) -- this executable now links web_auth_store.c
+// (docs/WEB_AUTH_PLAN.md section 5/9 route rewiring pulling in
+// http_auth_policy_iface.c) so it needs its own copy.
+psa_status_t g_stub_psa_import_key_result = PSA_SUCCESS;
 
 #include "../drivers/http/safety_stack_margin_http.c"
 
@@ -51,6 +58,11 @@ esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
     (void)buf_len;
     return ESP_OK;
 }
+// kiln_http_register()'s pre-handler (http_auth_http.c, now linked into
+// this executable) calls httpd_resp_set_status() on a DENY -- never actually
+// reached by these tests, but must resolve at link time, same convention
+// as the rest of this stub block.
+esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status) { (void)r; (void)status; return ESP_OK; }
 esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char *msg)
 {
     (void)r; (void)error; (void)msg; return ESP_OK;

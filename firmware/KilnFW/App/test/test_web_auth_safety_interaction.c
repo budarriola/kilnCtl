@@ -1,67 +1,43 @@
-// Host tests for docs/WEB_AUTH_PLAN.md section 9 ("Safety interaction") --
-// the part of that section decidable purely from route_tier_table.h and
-// http_auth_check() (App/drivers/http/http_auth_enforce.c), with no
-// dependency on the enforcement wiring's still-in-flight URI-level bypass
-// (see the large comment block below before assuming more is covered here
-// than actually is).
+// Host tests for docs/WEB_AUTH_PLAN.md section 9 ("Safety interaction").
 //
-// SCOPE AND A KNOWN GAP, READ THIS FIRST:
-//
-// Section 9's own acceptance criterion is: "a host test drives the
-// enforcement function with every combination of {auth off, auth on + no
-// session, auth on + locked, auth on + user, auth on + admin} against
+// Section 9's acceptance criterion: "a host test drives the enforcement
+// function with every combination of {auth off, auth on + no session, auth
+// on + locked, auth on + user, auth on + admin} against
 // /api/profile_exec/stop and asserts ALLOW in all five."
 //
-// As of this writing, http_auth_check() (the only "enforcement function"
-// that exists) takes a route_tier_t, a role, and a web_enabled flag -- it
-// has NO uri parameter at all, so it structurally cannot special-case
-// /api/profile_exec/stop. Neither it nor http_auth_http.c's
-// kiln_http_prehandler() contains any reference to
-// "/api/profile_exec/stop" anywhere. route_tier_table.h classifies that
-// route ROUTE_TIER_USER (nominally correct per plan section 1), which means
-// today, with web auth on:
-//   - auth off                        -> ALLOW  (covered below, test 3)
-//   - auth on + admin session         -> ALLOW  (USER tier, ADMIN role satisfies it)
-//   - auth on + user session          -> ALLOW  (USER tier, USER role satisfies it)
-//   - auth on + no session            -> DENY_NO_SESSION  <-- violates section 9
-//   - auth on + locked (no session)   -> DENY_NO_SESSION  <-- violates section 9
+// UPDATE 2026-09-17: the gap this file originally documented (only 3 of 5
+// combinations allowed, because http_auth_check() had no URI awareness and
+// route_tier_table.h tiered the stop route ROUTE_TIER_USER) is now closed.
+// The fix is table-driven, not a URI string match: route_tier_table.h gains
+// ROUTE_TIER_SAFETY_REDUCE, assigned to POST /api/profile_exec/stop in place
+// of ROUTE_TIER_USER, and http_auth_check() (http_auth_enforce.c) treats
+// that tier as an unconditional ALLOW -- checked in the same position as
+// ROUTE_TIER_OPEN, before role/session are even inspected. See
+// route_tier_table.h's and http_auth_enforce.h's own comments on
+// ROUTE_TIER_SAFETY_REDUCE for why this stays a single source of truth
+// (check_route_tier_coverage.ps1's regex is generic over any ROUTE_TIER_*
+// value, so this needed no change there).
 //
-// Only 3 of the 5 required combinations currently ALLOW. The missing piece
-// is a URI-aware safety bypass in the enforcement point itself (plan item
-// 5), which this task's scope explicitly excludes (owned by the in-flight
-// route-rewiring work) -- fixing http_auth_enforce.c/http_auth_http.c is
-// NOT done here. This file tests only what current code can honestly
-// support without asserting the two wrong outcomes as if they were correct;
-// see docs/WEB_AUTH_PLAN.md section 9 for the note pointing at this gap.
-//
-// What IS tested here, all dependency-free and true today:
-//   1. /api/profile_exec/stop's nominal tier is USER, matching plan section
-//      1/9's own description ("Nominally USER") -- a regression pin so a
-//      future accidental re-tier to ADMIN (which would only make the gap
-//      above worse) is caught immediately.
-//   2. /api/safety/clear_trip is ADMIN, matching plan section 9's explicit
-//      "deliberately, ADMIN" -- clearing a trip is not itself a safety
-//      action, it re-enables heat after one, so it correctly needs the
-//      higher tier (this is the ONE deliberate exception to "everything
-//      that reduces heat must stay reachable": clearing a trip does not
-//      reduce heat, it is a precondition for re-arming).
-//   3. The "auth off" combination of section 9's list, driven through the
-//      REAL looked-up tier for /api/profile_exec/stop (not a bare
-//      ROUTE_TIER_USER literal), proving that one of the five required
-//      combinations already holds end-to-end against the real route table.
+// All 5 of section 9's required combinations are exercised below, driven
+// through the REAL looked-up tier for /api/profile_exec/stop (never a bare
+// literal), so a future accidental re-tier of the route is caught here
+// rather than only in test_http_auth_enforce.c's own
+// test_safety_reduce_always_allowed().
 #include "test_common.h"
 
 #include "../drivers/http/http_auth_enforce.h"
 
-static void test_stop_route_tier_is_user(void) {
-    TEST_SECTION("route_tier_table.h -- POST /api/profile_exec/stop is USER (plan section 9's own "
-                 "description: 'Nominally USER, but a stop is never refused for lack of a session')");
+static void test_stop_route_tier_is_safety_reduce(void) {
+    TEST_SECTION("route_tier_table.h -- POST /api/profile_exec/stop is ROUTE_TIER_SAFETY_REDUCE, "
+                 "not USER (plan section 9: a stop is never refused for lack of a session, "
+                 "including a locked-out or session-less client)");
 
     route_tier_t tier;
-    TEST_CHECK(http_auth_lookup_tier("/api/profile_exec/stop", HTTP_POST, &tier) && tier == ROUTE_TIER_USER,
-               "POST /api/profile_exec/stop is USER in route_tier_table.h -- a re-tier to ADMIN would "
-               "only widen the gap documented at the top of this file (an admin-only nominal tier "
-               "still has no URI-level bypass either), so this must never silently drift.");
+    TEST_CHECK(http_auth_lookup_tier("/api/profile_exec/stop", HTTP_POST, &tier) &&
+                   tier == ROUTE_TIER_SAFETY_REDUCE,
+               "POST /api/profile_exec/stop is ROUTE_TIER_SAFETY_REDUCE in route_tier_table.h -- a "
+               "re-tier back to USER (or to ADMIN) would silently reopen the DENY_NO_SESSION gap "
+               "this section exists to close, so this must never drift.");
 }
 
 static void test_clear_trip_is_admin(void) {
@@ -77,22 +53,41 @@ static void test_clear_trip_is_admin(void) {
                "a violation of section 9's guarantee.");
 }
 
-static void test_stop_route_auth_off_allows(void) {
-    TEST_SECTION("http_auth_check -- section 9's 'auth off' combination against the REAL looked-up "
-                 "tier for POST /api/profile_exec/stop (1 of the 5 required combinations; see this "
-                 "file's header comment for the other 4, which do not hold today)");
+// Drives http_auth_check() with the REAL looked-up tier for the stop route
+// (never ROUTE_TIER_SAFETY_REDUCE as a bare literal) through all 5 of
+// section 9's required combinations. "locked" and "no session" both resolve
+// to HTTP_AUTH_ROLE_NONE at the enforcement point -- see http_auth_role_t's
+// own doc comment in http_auth_enforce.h for why a locked-out session and an
+// absent one are deliberately indistinguishable here.
+static void test_stop_route_all_five_combinations_allow(void) {
+    TEST_SECTION("http_auth_check -- POST /api/profile_exec/stop's real looked-up tier ALLOWs all "
+                 "5 of section 9's required combinations");
 
     route_tier_t tier;
     TEST_CHECK(http_auth_lookup_tier("/api/profile_exec/stop", HTTP_POST, &tier),
                "POST /api/profile_exec/stop must have a row in route_tier_table.h at all before "
                "the rest of this test means anything");
+
     TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, false) == HTTP_AUTH_DECISION_ALLOW,
-               "auth off + /api/profile_exec/stop's real tier + no session -> ALLOW (section 9's "
-               "first required combination)");
+               "1/5: auth off -> ALLOW");
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, true) == HTTP_AUTH_DECISION_ALLOW,
+               "2/5: auth on + no session -> ALLOW (was DENY_NO_SESSION before this fix)");
+    // "locked" carries no distinct role value of its own -- a locked-out
+    // client is, from the enforcement point's perspective, a client with no
+    // resolvable session, i.e. HTTP_AUTH_ROLE_NONE. Asserted again here
+    // under its own name so a future reviewer sees section 9's "locked"
+    // combination named explicitly, not merely inferred from "no session".
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, true) == HTTP_AUTH_DECISION_ALLOW,
+               "3/5: auth on + locked (no resolvable session) -> ALLOW (was DENY_NO_SESSION before "
+               "this fix)");
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_USER, true) == HTTP_AUTH_DECISION_ALLOW,
+               "4/5: auth on + user session -> ALLOW");
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_ADMIN, true) == HTTP_AUTH_DECISION_ALLOW,
+               "5/5: auth on + admin session -> ALLOW");
 }
 
 void run_test_web_auth_safety_interaction(void) {
-    test_stop_route_tier_is_user();
+    test_stop_route_tier_is_safety_reduce();
     test_clear_trip_is_admin();
-    test_stop_route_auth_off_allows();
+    test_stop_route_all_five_combinations_allow();
 }
