@@ -1,8 +1,12 @@
 # Web + LCD authentication plan
 
-> **Status:** plan · **Opened:** 2026-09-16. Nothing here is implemented. No
-> board was flashed, no heating run was performed, and no `.kicad_*` file was
-> touched while writing it.
+> **Status:** in progress · **Opened:** 2026-09-16. Most of the backend —
+> route tiers, credential storage, session primitives, enforcement, the LCD
+> PIN/keypad/lock, and the physical credential-reset gesture — has landed and
+> is host-tested. What remains is the web GUI's own login surface (section
+> 6) and its half of the inactivity prompt (section 8). No board was flashed
+> and no heating run was performed for this refresh; no `.kicad_*` file was
+> touched.
 
 Username/password authentication and roles for the web GUI, two numeric PINs
 for the LCD, an inactivity lock on both, and a physical-presence credential
@@ -10,40 +14,52 @@ reset.
 
 ---
 
-## 0. Read this first: what already exists, and what does not
+## 0. Read this first: what is done, and what is still pending
 
-| Already exists | Where |
-|---|---|
-| A complete, host-tested challenge–response auth state machine: nonce issue/check/invalidate, single-use, 30 s expiry, constant-time compare, per-context escalating lockout | `firmware/KilnFW/App/drivers/net/ota_auth.h`, `ota_auth.c`, `firmware/KilnFW/App/test/test_ota_auth.c` |
-| A request-level wrapper that parses the `X-Ota-Mac` header, hex-decodes it, verifies, and sends the 400/403 itself | `ota_http_authenticate_request()`, `firmware/KilnFW/App/drivers/http/ota_http.c` |
-| PSA crypto initialised at HTTP start, HMAC-SHA256 available and linked | `ota_http_start()`, `psa/crypto.h` includes in the `ota_http_*` family |
-| A physical-presence auth bypass with precedent for logging it loudly | `boot_button_ota_bypass_active()` branch in `ota_http_verify_request()` |
-| A designed session layer — random 32-byte tokens, a fixed 8-slot RAM table, token hashes compared constant-time, LRU eviction, sliding idle plus hard cap, `HttpOnly; SameSite=Strict` cookie, IP binding, RAM-only across reboot | `firmware/KilnFW/docs/UI_PLAN.md`, section "Open, explicitly deferred by the owner: auth / session layer" |
-| A shared LCD modal built on `lv_msgbox` parented to `lv_layer_top()`, so it consumes none of a page's no-scroll content budget | `firmware/KilnFW/App/drivers/ui/ui_confirm.h` |
-| Headless LCD tap injection and tap-target discovery, already wired to the UART bridge | `kiln_ui_click_by_name()`, `UI_TEST_CMD_LIST_TAP_TARGETS`, `UI_TEST_CMD_CLICK_BY_NAME`, `TOUCH_CMD_INJECT` |
-| Live E-stop state, already arriving from the Pico every frame | `safety_link_status_t.flags & SAFETY_FLAG_ESTOP`, packed by `link_frame_pack_status()` |
-| A persisted, versioned-blob NVS pattern with a compile-time 15-char key guard | `firmware/KilnFW/App/drivers/persist/nvs_key_check.h`, `kiln_cfg_store.c` |
+**Done and host-tested** (see the commits landing each item for detail —
+`git log --oneline -- docs/WEB_AUTH_PLAN.md` and the files named below):
 
-**The session design in `UI_PLAN.md` is not re-planned here.** Items below
-reference it and change it only where the owner's new requirements force a
-change — and it carries a "Do not implement" marker that this plan supersedes.
+- **Route tiers** (item 1): `firmware/KilnFW/App/drivers/http/route_tier_table.h`
+  classifies every registered route as OPEN/USER/ADMIN/ADMIN_BOOTSTRAP, and
+  `http_auth_enforce.c`/`http_auth_http.c` gate every real request through it
+  via `kiln_http_register()` — a route not converted to that macro cannot
+  reach production per `check_route_tier_coverage.ps1`.
+- **Credential storage** (items 2, 2b, 3): `web_auth_store.c`/`.h` (namespace
+  `kiln_auth` on the default `nvs` partition, PBKDF2-HMAC-SHA256, per-role
+  records) and `security_backend_web_auth.c` (the setter, wired into
+  `main_network_http.c`'s bringup and into `CMakeLists.txt` for the real
+  target, not just host tests). The nine previously OTA-authenticated routes
+  are ordinary ADMIN rows in the tier table; the AP-password fallback for
+  those nine while auth is disabled is implemented in `ota_http.c`.
+- **Session primitives** (item 4): `web_auth_session.c`/`.h`,
+  `http_session_iface.c`/`.h`.
+- **LCD PIN entry, keypad, and the LCD half of the inactivity lock**
+  (items 7, 8's LCD half): `lcd_auth_state.c`, `ui_lcd_keypad.c`,
+  `ui_lcd_lock.c`, `lcd_credential_bridge.c`.
+- **The physical credential reset** (item 10): `auth_reset_gesture.c`/`.h`,
+  `auth_reset_gesture_wiring.c`.
+- **Admin-bootstrap wiring** (items 10/11): `ROUTE_TIER_ADMIN_BOOTSTRAP` gates
+  `POST /api/auth/bootstrap_password` (`security_backend_web_auth.c`)
+  exclusively through `web_auth_admin_bootstrap_needed()`, and a stale ADMIN
+  session is denied on ordinary ADMIN routes while bootstrap is outstanding.
 
-What does **not** exist, and is the whole of the work below:
+**Still pending — the whole of the remaining work:**
 
-- Roles. Nothing in the tree distinguishes a `user` from an `administrator`.
-- Any authentication on any non-OTA route. Exactly five routes authenticate
-  today: `POST /api/ota/esp`, `/api/ota/esp/rollback`,
-  `/api/ota/esp/recovery_exit`, `/api/ota/esp/boot_guard_reset`,
-  `/api/ota/pico`, `/api/ota/pico/rollback`, `/api/factory_reset`,
-  `/api/cfgfs/format_confirm` and `/api/sw_reset`. Every other mutating route
-  — including `POST /api/zones`, `/api/profile_exec/start`,
-  `/api/safety/clear_trip` and `/api/diagnostics/danger/relay` — is open.
-- A stored web credential. The only password in the firmware today is the AP
-  password, returned in plain text by `wifi_prov_get_ap_password()` and
-  deliberately published by `/status`. It cannot satisfy "hashed, salted,
-  never recoverable" and is not reused as the web credential.
-- A password-setting page, the two LCD PINs, an inactivity lock, a fail-closed
-  enforcement point, and a physical reset gesture.
+- **Section 6, the login page and route.** No `/api/auth/login` route exists
+  anywhere in the tree (only the one-time `/api/auth/bootstrap_password` is
+  registered), and no HTML page references it — confirmed by
+  `http_session_iface.c`'s own header comment: "section 6 (the login/password
+  page, and the login) has not landed yet". Without it, a browser has no way
+  to exchange the administrator or user password for a session cookie once a
+  password has been set.
+- **Section 8's web-GUI half of the inactivity lock and its 10 s prompt.**
+  `ui_lcd_lock.h` explicitly scopes itself to "the LCD half only — the web
+  GUI's own timeout/prompt belongs to whichever module owns `app.js`'s
+  session handling, not here", and no such module exists yet. Blocked on
+  section 6 landing first (there is no web session to time out until login
+  exists).
+
+### Two facts that shape the design
 
 ### Two facts that shape the design
 
@@ -164,6 +180,22 @@ cheaper to gate the shell than to audit every widget inside it.
 administrator record's salt and iteration count, none of which is usable
 without the administrator password itself. Gating it would break the flow it
 exists to serve. The nine routes it serves are ADMIN like any other.
+
+**`GET /api/ota/esp/status` (OPEN) — flagged, not fixed, by this refresh.**
+Its handler (`ota_esp_status_get_handler()`, `ota_http_esp.c`) returns more
+than a progress percentage: `commit` (the exact firmware git commit hash),
+`dirty` (whether that build had local modifications), `build_date`,
+`active_slot`/`inactive_slot` with `inactive_version`, `recovery_mode`
+(whether the board is boot-looping into recovery), and, once one update has
+happened, the last update's `image_sha256_hex`. A dashboard progress read is
+defensible as OPEN; an exact commit-and-dirty-flag fingerprint and the
+recovery-mode boot state are not the same class of information as "what an
+onlooker at the kiln can already see" (section 1's OPEN test) — the fingerprint
+lets a remote, unauthenticated attacker target a known defect in that exact
+build, and `recovery_mode` signals a window where the board's own safety
+gating (boot_guard) is in a degraded state. This is pre-existing behavior, not
+introduced by this plan, and is out of this plan's scope to fix — recorded
+here so it is not mistaken for something this refresh already checked.
 
 ### Ambiguous routes, with a recommendation
 
@@ -299,6 +331,13 @@ routes that authenticate today — `POST /api/ota/esp`, `/api/ota/esp/rollback`,
 `/api/ota/esp/recovery_exit`, `/api/ota/esp/boot_guard_reset`,
 `/api/ota/pico`, `/api/ota/pico/rollback`, `/api/factory_reset`,
 `/api/cfgfs/format_confirm` and `/api/sw_reset` — become ordinary ADMIN routes.
+These nine are a *subset*, not the whole OTA/reset/filesystem route family:
+that family (section 1's "OTA, reset, filesystem" list) has 32 entries in
+`route_tier_table.h` today — 30 ADMIN, and 2 deliberately OPEN
+(`GET /api/ota/challenge`, `GET /api/ota/esp/status`; see below). "Nine"
+throughout this item refers only to the routes that carried their own
+OTA-password authentication before this plan, matching the code comment at
+`route_tier_table.h`'s "OTA, reset, filesystem" block.
 
 **Kept versus retired, stated separately because the objection is only to one
 of them:**
