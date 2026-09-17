@@ -26,7 +26,7 @@ enclosed in backticks as a cited commit hash and demands it resolve via
 
 All 11 cited tokens are `git hash-object` **blob** hashes recorded during
 that pass's byte-identical-restore verification (e.g. "`git hash-object`
-matched HEAD (`` `f465336a48b9690547479ccef0e800a336ef32db` ``)") — legitimate
+matched HEAD (`` `blob:f465336a48b9690547479ccef0e800a336ef32db` ``)") — legitimate
 evidence, but a blob hash, not a commit hash, so it correctly never resolves
 via `^{commit}`. The fix is not to delete or weaken the evidence; it is to
 stop the token from parsing as a commit citation. Each of the 11 was
@@ -36,15 +36,15 @@ text is no longer pure hex), while the hash itself is untouched and the
 prose reads the same. All 9 distinct hashes affected (2 repeated across
 multiple gates in that document):
 
-`611770238464619821ba07c7542c24ab7fa20bf9`,
-`2580be42202548557dcc71803639cb3d6fc3301f`,
-`df7ddfcdaf93da93657e00cf2c1f254de71feeed`,
-`27b0a329c1bd9d803108efaae5cc3fd056434522`,
-`f465336a48b9690547479ccef0e800a336ef32db` (×4 in that doc),
-`817845a51ce20a97ec5db31ce8766e1e82cdee4e`,
-`87f8cb184a28cfb8d467353d4f7c6230c4a2d0ce`,
-`467963cc56d96ca7be2d9c4ff9e103615aa108d2`,
-`4ad58571b13f380610ce37fc3d3ab940d0e311db`.
+`blob:611770238464619821ba07c7542c24ab7fa20bf9`,
+`blob:2580be42202548557dcc71803639cb3d6fc3301f`,
+`blob:df7ddfcdaf93da93657e00cf2c1f254de71feeed`,
+`blob:27b0a329c1bd9d803108efaae5cc3fd056434522`,
+`blob:f465336a48b9690547479ccef0e800a336ef32db` (×4 in that doc),
+`blob:817845a51ce20a97ec5db31ce8766e1e82cdee4e`,
+`blob:87f8cb184a28cfb8d467353d4f7c6230c4a2d0ce`,
+`blob:467963cc56d96ca7be2d9c4ff9e103615aa108d2`,
+`blob:4ad58571b13f380610ce37fc3d3ab940d0e311db`.
 
 **Before:** `check_doc_hash_citations: FAIL — 11 cited hash(es) do not
 resolve to a commit`, exit 1.
