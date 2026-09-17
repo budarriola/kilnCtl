@@ -176,9 +176,15 @@ bool http_auth_session_status(const char *token, web_auth_session_role_t *role_o
     if (last_seen_ms_out) {
         *last_seen_ms_out = 0;
     }
-    uint32_t timeout_s = resolve_timeout_s();
+    resolved_timeout_t timeout = resolve_timeout_s();
     if (timeout_s_out) {
-        *timeout_s_out = timeout_s;
+        *timeout_s_out = timeout.timeout_s;
+    }
+    // Item 3's fail-closed rule applies here too: an unreadable policy
+    // record must not be treated as "never expires" -- report no valid
+    // session rather than resolve against a substitute timeout.
+    if (timeout.unreadable) {
+        return false;
     }
     if (!token || token[0] == '\0') {
         return false;
@@ -194,7 +200,7 @@ bool http_auth_session_status(const char *token, web_auth_session_role_t *role_o
     }
 
     uint32_t now = (uint32_t)hal_time_now_ms();
-    if (!web_auth_session_is_valid(t->slots[idx].last_seen_ms, timeout_s, now)) {
+    if (!web_auth_session_is_valid(t->slots[idx].last_seen_ms, timeout.timeout_s, now)) {
         return false;
     }
 
@@ -222,12 +228,18 @@ void http_auth_session_touch(const char *token) {
     }
 
     uint32_t now = (uint32_t)hal_time_now_ms();
-    uint32_t timeout_s = resolve_timeout_s();
+    resolved_timeout_t timeout = resolve_timeout_s();
+    // Item 3's fail-closed rule: an unreadable policy record must not
+    // resolve against a substitute "never expires" timeout, so treat it as
+    // not touchable rather than guessing.
+    if (timeout.unreadable) {
+        return;
+    }
     // Never revive an already-expired session -- this is the server-side
     // enforcement guarantee: a client ignoring the lock prompt and still
     // sending requests past the deadline must not be able to extend itself
     // back to life just by trying.
-    if (!web_auth_session_is_valid(t->slots[idx].last_seen_ms, timeout_s, now)) {
+    if (!web_auth_session_is_valid(t->slots[idx].last_seen_ms, timeout.timeout_s, now)) {
         return;
     }
     web_auth_table_touch(t, (size_t)idx, now);

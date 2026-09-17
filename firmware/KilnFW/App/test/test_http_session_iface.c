@@ -147,6 +147,60 @@ static void test_touch_never_revives_expired_session(void)
                                "(status reports 0 because the session no longer validates)");
 }
 
+// Item 3 fix (2026-09-17 adversarial review, 1179e2d3, landed concurrently
+// with this file on origin/main): resolve_timeout_s() now fails closed on
+// an UNREADABLE policy record instead of substituting WEB_AUTH_TIMEOUT_NEVER_S
+// (which web_auth_session_is_valid() reads as "never expires"). Both of this
+// file's own functions must inherit that fail-closed behaviour rather than
+// re-introducing the same immortal-session hole through a different call
+// site -- corrupt the persisted policy blob's CRC via the public hal_kv API
+// only (same technique as test_ota_http.c's own UNREADABLE test) and confirm
+// a previously-valid session is denied by status() and left untouched by
+// touch(), exactly as if it had expired.
+static void test_unreadable_policy_fails_closed(void)
+{
+    TEST_SECTION("http_auth_session_status/_touch -- UNREADABLE policy record fails closed, "
+                 "never substitutes 'never expires' for a session that predates the corruption");
+
+    reset_all();
+    set_policy_timeout(60);
+    make_session("tok-unreadable", WEB_AUTH_SESSION_ROLE_ADMIN, 0);
+    fake_time_advance_ms(1000); // still well within the healthy 60s window
+
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, "kiln_auth", HAL_KV_MODE_READ_WRITE, NULL) == HAL_OK,
+               "setup: open kiln_auth namespace for corruption");
+    uint8_t blob[64];
+    size_t blob_len = sizeof(blob);
+    TEST_CHECK(hal_kv_get_blob(&h, "auth_policy", blob, &blob_len) == HAL_OK,
+               "setup: read back the persisted policy blob");
+    TEST_CHECK(blob_len > 0 && blob_len <= sizeof(blob), "setup: policy blob length sane");
+    blob[blob_len - 1] ^= 0xFFu; // flip the last byte -- inside the trailing crc32 field
+    TEST_CHECK(hal_kv_set_blob(&h, "auth_policy", blob, blob_len) == HAL_OK,
+               "setup: write back the corrupted policy blob");
+    TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "setup: commit the corruption");
+    hal_kv_close(&h);
+
+    web_auth_session_role_t role = WEB_AUTH_SESSION_ROLE_ADMIN; // poison
+    uint32_t last_seen = 999;
+    uint32_t timeout_s = 999;
+    TEST_CHECK(!http_auth_session_status("tok-unreadable", &role, &last_seen, &timeout_s),
+               "an UNREADABLE policy denies a still-fresh session outright -- fail closed, "
+               "not 'never expires'");
+    TEST_CHECK(role == WEB_AUTH_SESSION_ROLE_NONE, "role collapses to NONE under UNREADABLE");
+
+    http_auth_session_touch("tok-unreadable");
+    // The touch above must have been a no-op: prove the underlying slot's
+    // last_seen_ms was never moved by reading it back after the policy is
+    // repaired.
+    set_policy_timeout(60);
+    TEST_CHECK(http_auth_session_status("tok-unreadable", &role, &last_seen, &timeout_s),
+               "sanity: repairing the policy makes the session resolvable again");
+    TEST_CHECK(last_seen == 0, "touch() during UNREADABLE never moved last_seen_ms -- "
+                               "it is still the original issue time (0), not bumped by the "
+                               "no-op touch attempted while the policy was corrupt");
+}
+
 static void test_touch_unknown_token_and_never_timeout(void)
 {
     TEST_SECTION("http_auth_session_touch -- no-op on unknown/absent token; WEB_AUTH_TIMEOUT_NEVER_S "
@@ -180,5 +234,6 @@ void run_test_http_session_iface(void) {
     test_status_unknown_and_no_token();
     test_touch_extends_valid_session();
     test_touch_never_revives_expired_session();
+    test_unreadable_policy_fails_closed();
     test_touch_unknown_token_and_never_timeout();
 }
