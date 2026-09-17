@@ -620,6 +620,14 @@ release cannot ship without:
   directly rather than inferring it from several unit tests. **Size: S
   (down from M).** Verify detail:
   `docs/audits/release_hardening_plan_verify_1_2_5_7_8_2026-09-16.md`.
+  **Update 2026-09-17: closed.** `test_backup_import.c` now has
+  `test_no_hostile_backup_input_produces_a_bootable_heat_commanding_state()`,
+  driving 8 distinct hostile bodies (truncated, wrong `kind`, future version,
+  out-of-range model values, overlong name, transposed coupling index,
+  self-referencing `settings_source`, bad-CRC-shaped field) through the real
+  `backup_import_apply()` and asserting refusal with zero writes for every
+  one, stating the release-gate property directly in one place
+  (`f7233461b4f8069e7b6bdf508cd6535a2655bc13`).
 
 ---
 
