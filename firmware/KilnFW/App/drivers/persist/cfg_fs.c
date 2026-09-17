@@ -301,6 +301,52 @@ static bool flatten_for_tmp(const char *rel_path, char *out, size_t cap)
     return true;
 }
 
+/* Strict read-back for cfg_fs_write_atomic()'s verification, same
+ * discipline as boot_guard.c's verify_persisted_count() (see that
+ * function's comment and docs/audits/boot_guard_recovery_loop_2026-09-08.md):
+ * a successful rename()/MoveFileExA() return is NOT itself proof the bytes
+ * landed -- that class of bug ("write reports success, storage disagrees")
+ * has shipped twice already in this codebase (boot_guard's NVS clear, and
+ * the underlying write-lies pattern documented for flash generally), and
+ * cfg_fs is a second flash-backed write path with no coverage of its own.
+ * Any failure to reopen/read/short-read/mismatch returns false -- there is
+ * no "missing collapses to expected" shortcut here, unlike a normal read
+ * path's defaults, because a verification step must tell "confirmed
+ * correct" apart from "could not confirm" rather than conflating them. */
+static bool verify_write_readback(const char *final_path, const void *data, size_t len)
+{
+    FILE *f = fopen(final_path, "rb");
+    if (!f) {
+        return false;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return false;
+    }
+    long sz = ftell(f);
+    if (sz < 0 || (size_t)sz != len) {
+        fclose(f);
+        return false;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return false;
+    }
+    bool ok = true;
+    if (len > 0) {
+        void *readback = malloc(len);
+        if (!readback) {
+            fclose(f);
+            return false;
+        }
+        size_t got = fread(readback, 1, len, f);
+        ok = (got == len) && (memcmp(readback, data, len) == 0);
+        free(readback);
+    }
+    fclose(f);
+    return ok;
+}
+
 esp_err_t cfg_fs_write_atomic(const char *rel_path, const void *data, size_t len)
 {
     if (!rel_path || (!data && len > 0)) {
@@ -364,6 +410,18 @@ esp_err_t cfg_fs_write_atomic(const char *rel_path, const void *data, size_t len
 
     if (cfg_fs_atomic_rename(tmp_path, final_path) != 0) {
         remove(tmp_path);
+        return ESP_FAIL;
+    }
+
+    /* Read back what is now at final_path and compare against what was
+     * asked to be written. The rename already happened -- unlike the
+     * pre-rename failure branches above, there is no "leave the old file
+     * untouched" option left at this point (the old file, if any, is
+     * already gone) -- but a write that reports ESP_OK while the bytes on
+     * disk disagree with the caller's buffer must never be handed back as
+     * success. See verify_write_readback()'s comment for why this mirrors
+     * boot_guard_mark_healthy()'s verified-clear discipline. */
+    if (!verify_write_readback(final_path, data, len)) {
         return ESP_FAIL;
     }
     return ESP_OK;

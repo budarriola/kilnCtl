@@ -121,11 +121,23 @@ esp_err_t cfg_fs_exists(const char *rel_path, bool *out_exists);
 esp_err_t cfg_fs_read(const char *rel_path, void *buf, size_t cap, size_t *out_len);
 
 /* Atomic write: `<base>/.tmp/<flattened rel_path>` written+fsynced, then
- * renamed onto `<base>/<rel_path>`. On any failure the temp file is removed
- * and the ORIGINAL file at `rel_path` (if any) is left completely
- * untouched -- this is the guarantee this whole module exists to provide.
- * Creates the immediate parent directory of `rel_path` (and `.tmp/`) if
- * missing; does not create more than one level. */
+ * renamed onto `<base>/<rel_path>`. On any failure before the rename, the
+ * temp file is removed and the ORIGINAL file at `rel_path` (if any) is left
+ * completely untouched -- this is the guarantee this whole module exists to
+ * provide. Creates the immediate parent directory of `rel_path` (and
+ * `.tmp/`) if missing; does not create more than one level.
+ *
+ * After the rename, this function reopens `rel_path` and compares what is
+ * actually on disk against `data`/`len` before returning ESP_OK -- same
+ * verify-by-read-back discipline as boot_guard_mark_healthy()'s NVS clear
+ * (docs/audits/boot_guard_recovery_loop_2026-09-08.md: a HAL_OK/success
+ * return from a flash write was observed NOT to guarantee the bytes
+ * actually changed). A mismatch or unreadable read-back returns ESP_FAIL
+ * even though the rename itself reported success -- every caller of this
+ * function (zones/profiles/prefs/firing-stats/kiln-cfg-store `cfg_fs`
+ * dual-write paths) already treats a non-ESP_OK return as "did not
+ * persist" and falls back / logs a warning, so this needed no caller-side
+ * changes to take effect. */
 esp_err_t cfg_fs_write_atomic(const char *rel_path, const void *data, size_t len);
 
 esp_err_t cfg_fs_delete(const char *rel_path);
