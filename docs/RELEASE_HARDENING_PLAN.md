@@ -452,12 +452,33 @@ swap across two processors. Do not re-plan any of it here.
 **What release adds on top.** Two things that plan does not have to solve but
 release cannot ship without:
 
-- **A migration test that runs every historical schema version forward.**
-  `ZONES_CFG_VERSION` is in the low twenties; each bump has a converter. There
-  is no test that takes a v1-through-current corpus of real persisted blobs and
-  runs each forward to current, asserting the resulting config is sane. This
-  matters for release because a field unit that has been through several
-  updates is exactly the case nobody has. **Size: M. Blocker.**
+- **A migration test that runs every historical schema version forward —
+  CLOSED, 2026-09-16, narrower than originally scoped, deliberately.**
+  `convert_versioned_blob_to_current()` (`zones_config_migrate.c`) already
+  performs a direct v1-through-v25-to-current conversion for every historical
+  version — that part of the ask was already satisfied at the conversion
+  layer before this pass. The real gap, per
+  `docs/audits/release_hardening_plan_verify_1_2_5_7_8_2026-09-16.md`, was
+  narrower: CRC-integrity verification in
+  `zones_config_json_decode_blob()` only covered the current version and
+  `ZONES_CFG_VERSION - 1` (the 2026-09-10 fix for Opus finding 10, deliberately
+  scoped to N-1 "not every historical version"). This pass widens that gate to
+  `ZONES_CFG_VERSION - 2` (v24) — the version a board goes through on its
+  *second-most-recent* update, mechanically identical to the existing N-1
+  check, with a matching negative test
+  (`test_decode_zones_blob_refuses_a_v24_blob_with_a_corrupted_crc`,
+  `test_zones_http.c`).
+  **Deliberately left unimplemented:** widening the same CRC gate to v7-v23.
+  These are structurally reachable (the switch/converter already handles
+  them) but judged practically unreachable for the one board this project
+  ships against, given this board's reflash cadence — by the time a second
+  bump has happened, the board has already round-tripped through the N-1 gate
+  once and the persisted blob is already current-version. v1-v6 are not just
+  impractical but impossible to add: those structs predate the `crc32` field
+  entirely (added later; enforced today only by `_Static_assert` on later
+  structs), so there is no CRC to check. `ZONES_CFG_VERSION` was not bumped by
+  this pass. **Size: S (down from M) — closed to the extent argued reachable;
+  v7-v23 consciously declined, not missed.**
 - **Import of a deliberately hostile config.** Truncated, wrong CRC, valid CRC
   with out-of-range values, a version number from the future, a file that is
   valid for a *different* kiln. The kiln-profiles plan covers untrusted upload

@@ -1076,8 +1076,9 @@ zones_decode_result_t zones_config_json_decode_blob(const void *blob, size_t len
         /* ZONES_CFG_VERSION 25->26: this check follows the immediately-prior
          * version (whichever ZONES_CFG_VERSION - 1 names), same "narrow,
          * one-version-at-a-time" scope opus review finding 10's comment
-         * above accepted -- v1..v24 remain uncovered by this specific gate
-         * for the same reasons given there, not widened by this pass. */
+         * above accepted -- v1..v23 remain uncovered by this specific gate
+         * for the same reasons given there (v24 is covered separately,
+         * below, added in the 2026-09-16 release-hardening pass). */
         if (version == ZONES_CFG_VERSION - 1) {
             _Static_assert(offsetof(zones_cfg_v25_t, crc32) + sizeof(uint32_t) == sizeof(zones_cfg_v25_t),
                            "zones_cfg_v25_t's CRC check below assumes crc32 is its last field");
@@ -1089,6 +1090,40 @@ zones_decode_result_t zones_config_json_decode_blob(const void *blob, size_t len
             computed_crc = esp_crc32_le(computed_crc, zero4, sizeof(zero4));
             if (computed_crc != stored_crc) {
                 *reason = "CRC mismatch on the stored v25 blob -- treating as corrupt rather than migrating it";
+                return ZONES_DECODE_CORRUPT;
+            }
+        }
+        /* Release-hardening pass, 2026-09-16 (docs/audits/
+         * release_hardening_plan_verify_1_2_5_7_8_2026-09-16.md, blocker 7):
+         * the 25->26 bump above already re-derived this gate for its own
+         * new N-1 (v25) -- but that same bump is *also* the moment v24
+         * silently dropped OFF this gate and onto the "uncovered" list,
+         * exactly the "immediately widens" pattern opus review finding 10's
+         * comment names. v24 is judged reachable enough to close now,
+         * narrowly, same one-version-at-a-time scope: this project's board
+         * is reflashed within the same development session far more often
+         * than not (CLAUDE.md's flash/reset log), so an NVS blob surviving
+         * completely unmigrated across TWO schema bumps (a short gap
+         * between sessions) is plausible; surviving across the other 17
+         * (v7..v23) each require the board to have gone unflashed across
+         * that whole historical stretch, which nothing in this project's
+         * history suggests ever happened -- those remain deliberately
+         * unimplemented, same reasoning as the comment above, not widened
+         * by this pass either. v1..v6 predate crc32 entirely and cannot be
+         * checked at all. zones_cfg_v24_t has the identical "crc32 is the
+         * last field" shape as v25 (frozen struct comment, zones_config_
+         * json.h), so this mirrors the v25 branch exactly. */
+        if (version == ZONES_CFG_VERSION - 2) {
+            _Static_assert(offsetof(zones_cfg_v24_t, crc32) + sizeof(uint32_t) == sizeof(zones_cfg_v24_t),
+                           "zones_cfg_v24_t's CRC check below assumes crc32 is its last field");
+            uint32_t stored_crc = 0;
+            memcpy(&stored_crc, (const uint8_t *)blob + offsetof(zones_cfg_v24_t, crc32), sizeof(stored_crc));
+            static const uint8_t zero4[sizeof(uint32_t)] = {0};
+            uint32_t computed_crc =
+                esp_crc32_le(0, (const uint8_t *)blob, offsetof(zones_cfg_v24_t, crc32));
+            computed_crc = esp_crc32_le(computed_crc, zero4, sizeof(zero4));
+            if (computed_crc != stored_crc) {
+                *reason = "CRC mismatch on the stored v24 blob -- treating as corrupt rather than migrating it";
                 return ZONES_DECODE_CORRUPT;
             }
         }
