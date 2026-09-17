@@ -1,0 +1,22 @@
+idf_component_register(
+    SRCS
+        "recovery_main.c"
+        "recovery_wifi.c"
+        "recovery_http.c"
+        "recovery_lcd.c"
+        "ota_auth.c"
+    INCLUDE_DIRS "."
+    REQUIRES
+        esp_wifi
+        esp_netif
+        esp_event
+        nvs_flash
+        esp_http_server
+        app_update
+        mbedtls
+        driver
+        esp_driver_gpio
+        esp_driver_i2c
+        esp_driver_spi
+        esp_timer
+)
