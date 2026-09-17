@@ -786,7 +786,29 @@ CEILING_BYTES = {
     # increase -- this is legitimate, understood growth closing a real
     # safety hazard, not a regression to paper over, and not one to design
     # around by removing the surfaced fault.
-    "screen_idle": 3152,
+    # 3504 = 3152 (prior baseline, above) + 352, from 6985c89b/da90fbd9
+    # ("M13 second sweep: surface kiln_cfg_swap boot-recovery give-ups")
+    # closing the silent-migration-loss hazard where an interrupted
+    # two-processor kiln-config swap could leave the board alarmed with no
+    # operator-visible reason. screen_idle.c itself is unchanged by that
+    # commit pair -- the growth is again entirely in dashboard_http.h's
+    # dashboard_status_t, which screen_idle_refresh_inputs holds as a plain
+    # (non-pointer) local on its own stack:
+    #   dashboard_status_t gained zones_config_migration_persist_fault
+    #   (bool) + two uint8_t version fields, plus kiln_cfg_swap_boot_fault
+    #   (bool) + int32_t target_id + a 200-byte char[] reason string copied
+    #   verbatim from the latch -- no line in screen_idle.c changed, only
+    #   the struct it embeds.
+    # Verified 2026-09-16 against a real linked KilnCtrl.elf, freshly built
+    # (`idf.py build`) in a clean worktree minted at origin/main == da90fbd9,
+    # via this checker script itself: total 3504 B (a LOWER BOUND -- this
+    # task remains INDETERMINATE, an unresolved indirect call outside
+    # extra_roots' coverage), honest free 2340 B of 6144 B (38.1%) after
+    # UNMODELED_OVERHEAD_BYTES. Legitimate, understood growth closing a real
+    # safety-visibility hazard (the same one CLAUDE.md's boot_guard section
+    # already documents as fixed), not a regression to paper over, and not
+    # one to design around by shrinking the surfaced fault's own message.
+    "screen_idle": 3504,
     "uart_owner_evt_task": 176,
     "uart_proto_rx": 3584,
 }

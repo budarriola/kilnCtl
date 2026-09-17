@@ -282,6 +282,14 @@ extern "C" {
 #define SAFETY_LINK_DIAG_FLAG_SIM_CONTEXT_SEEN      0x01u
 #define SAFETY_LINK_DIAG_FLAG_CALIBRATION_MISSING   0x02u
 #define SAFETY_LINK_DIAG_FLAG_ESTOP_UNWIRED_SUSPECT 0x04u
+/* bit3 (CLEAR_TRIP_DIAG_PRESENT) is on the wire (kilnlink_diag.h) but has no
+ * consumer here yet -- not this pass's scope, left as found.
+ * bit4, mirrored 2026-09-16: thermo_task.c's MAX31856 tc_type reconfigure
+ * retry has exhausted its bound with the type still unverified. See
+ * kilnlink_diag.h's own bit4 comment for what this does and does not mean --
+ * a configuration/verification failure, not necessarily a bad temperature
+ * reading (CLAUDE.md's "safety TC invalid is one CR1 byte" note). */
+#define SAFETY_LINK_DIAG_FLAG_TC_RECONFIG_GAVE_UP   0x10u
 
 /* DIAG boot_reason byte (offset 10), kilnlink_diag.h's
  * kilnlink_diag_boot_flag_t mirrored here, same reasoning as above. */

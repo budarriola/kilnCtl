@@ -71,8 +71,28 @@ extern "C" {
 //                                                          unused/spare, so
 //                                                          no protocol
 //                                                          version bump.
+//   bit4 TC_RECONFIG_GAVE_UP <- tc_reconfig_gave_up      (link_task.c's
+//                                                          caller sources
+//                                                          this from
+//                                                          thermo_task_
+//                                                          reconfig_gave_up()
+//                                                          -- see
+//                                                          kilnlink_diag.h's
+//                                                          bit4 comment for
+//                                                          what it means and,
+//                                                          importantly, what
+//                                                          it does NOT mean
+//                                                          ("gave up on
+//                                                          verifying the
+//                                                          configured type",
+//                                                          not "bad reading").
+//                                                          Same "wire format
+//                                                          already reserved
+//                                                          this bit" shape as
+//                                                          bit3, no protocol
+//                                                          version bump.
 uint8_t link_diag_flags_compute(bool calibration_missing, bool sim_context_seen,
-                                 bool clear_trip_diag_present);
+                                 bool clear_trip_diag_present, bool tc_reconfig_gave_up);
 
 #ifdef __cplusplus
 }

@@ -333,6 +333,8 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
             APPEND(",\"diag_context_frames_ok\":%lu", (unsigned long)ds->diag_context_frames_ok);
             APPEND(",\"diag_context_frames_bad\":%lu", (unsigned long)ds->diag_context_frames_bad);
             APPEND(",\"diag_tx_frames_dropped\":%lu", (unsigned long)ds->diag_tx_frames_dropped);
+            APPEND(",\"safety_tc_reconfig_gave_up\":%s",
+                   ds->safety_tc_reconfig_gave_up ? "true" : "false");
         }
         APPEND("}");
         free(ds);
@@ -498,6 +500,15 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
         APPEND(",\"kiln_cfg_swap_boot_fault_target_id\":%ld", (long)ds->kiln_cfg_swap_boot_fault_target_id);
         APPEND(",\"kiln_cfg_swap_boot_fault_reason\":\"%s\"", swap_reason_esc);
     }
+
+    /* 2026-09-16: surfaces thermo_task.c's (SaftyFW) MAX31856 tc_type
+     * reconfigure-retry give-up on the main status endpoint, not only the
+     * diag-detail one above -- this is the field an operator-facing banner
+     * (main_page.html) or the LCD diagnostics page would actually poll. See
+     * dashboard_http.h's field comment before wording any UI text around
+     * this: it means "configuration/verification failed", not "bad
+     * reading". */
+    APPEND(",\"safety_tc_reconfig_gave_up\":%s", ds->safety_tc_reconfig_gave_up ? "true" : "false");
 
     /* ROADMAP.md M6 -- null (not 0), same convention board_temps.c's
      * GET /api/board_temps already established (TODO.md 10.7): a JSON null

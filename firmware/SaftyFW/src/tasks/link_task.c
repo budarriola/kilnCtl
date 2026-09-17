@@ -1079,9 +1079,14 @@ static void link_task_send_diag(void)
     // context-consuming correlation guard (S2/S3/S4/S6/S10) to disable on
     // sim_context_seen or reset on a boot_id change -- this frame reports
     // that the fact is known, not that anything downstream acts on it yet.
+    // bit4 tc_reconfig_gave_up: WIRED 2026-09-16, same shape as bit3 just
+    // above -- thermo_task_reconfig_gave_up() reads thermo_task.c's
+    // s_reconfig_gave_up (a plain volatile bool, safe to read from this
+    // task's own context the same way thermo_task_injection_active() is).
     uint8_t diag_flags =
         link_diag_flags_compute(config_store_is_calibration_missing(), s_context_sim_seen,
-                                 clear_trip_diag_get_cached().magic_ok);
+                                 clear_trip_diag_get_cached().magic_ok,
+                                 thermo_task_reconfig_gave_up());
     //
     // Built via the shared kilnlink_diag_encode() codec (CommonFW/src/
     // kilnlink_diag.c, host-tested test_diag.c) rather than this file's own

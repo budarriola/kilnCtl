@@ -70,6 +70,21 @@ typedef enum {
      * over the link yet). TODO.md Phase 8: previously captured but never
      * surfaced past a debugger; this is the fix. */
     KILNLINK_DIAG_FLAG_CLEAR_TRIP_DIAG_PRESENT = 0x08u,
+    /* bit4, added 2026-09-16: thermo_task.c's periodic MAX31856 tc_type
+     * reconfigure retry (max31856_reconfig_retry.h) has exhausted
+     * MAX31856_RECONFIG_RETRY_MAX_ATTEMPTS with the type still unverified.
+     * Before this bit, that fact was visible only to a debugger attached to
+     * thermo_task.c's s_reconfig_gave_up -- the WARN log line at the same
+     * transition (log_task_log()) travels over the isolated link as an
+     * ordinary LOG-task frame, which nothing on the ESP side decodes. This
+     * is visibility only: S5 already treats the resulting sensor-invalid
+     * snapshot (max31856_tc_type_verified() == false) as a trip condition
+     * on its own, unaffected by this bit either way. A consumer of this bit
+     * MUST NOT describe it as "bad reading" -- the underlying cause named
+     * here is a configuration/verification failure (a CR1 readback
+     * mismatch), not necessarily an out-of-range or noisy temperature; see
+     * CLAUDE.md's "safety TC invalid is one CR1 byte" note. */
+    KILNLINK_DIAG_FLAG_TC_RECONFIG_GAVE_UP = 0x10u,
 } kilnlink_diag_flag_t;
 
 /* state byte (offset 24) -- LINK_PROTOCOL.md sec 6, Frame B: 0 init,

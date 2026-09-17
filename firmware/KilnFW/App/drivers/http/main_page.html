@@ -374,6 +374,7 @@
 <div id="zonesConfigLoadFaultBanner"></div>
 <div id="zonesConfigMigrationPersistFaultBanner"></div>
 <div id="kilnCfgSwapBootFaultBanner"></div>
+<div id="safetyTcReconfigGaveUpBanner"></div>
 <div id="safetyTripBanner"></div>
 <div id="lastRunBanner"></div>
 
@@ -2148,6 +2149,37 @@ function renderKilnCfgSwapBootFault(data) {
   el.innerHTML = '<div class="banner interrupted">' +
     '<h3>KILN CONFIG SWAP INTERRUPTED -- NOT RECOVERED</h3>' +
     '<div class="row"><span>' + window.kcEscapeHtml(reason) + '</span></div>' +
+    '</div>';
+}
+
+// 2026-09-16: the safety processor's (SaftyFW) MAX31856 tc_type reconfigure
+// retry (thermo_task.c) has exhausted its bound with the type still
+// unverified. Before this bit reached the wire (SAFETY_LINK_DIAG_FLAG_TC_
+// RECONFIG_GAVE_UP, safety_link.h), the only trace was thermo_task.c's own
+// s_reconfig_gave_up (SWD-only) and a WARN log line that travels over the
+// isolated Pico<->ESP link as an ordinary LOG-task frame nothing on this
+// side decodes -- an operator watching only this page had no way to learn
+// that the safety thermocouple's already-reported invalid reading (S5) will
+// NOT self-heal without intervention. Deliberately does NOT say "bad
+// reading" or "sensor fault" -- the underlying cause is a config/
+// verification failure (CLAUDE.md's "safety TC invalid is one CR1 byte"
+// note: often a single CR1 readback mismatch, not a real temperature
+// problem). "interrupted" (red left-border) treatment, same as the two
+// banners just above: a known, named condition with a remedy, not the
+// solid safety-trip fill (S5 itself already gets that treatment via
+// safetyTripBanner when it is the live trip cause).
+function renderSafetyTcReconfigGaveUp(data) {
+  var el = document.getElementById('safetyTcReconfigGaveUpBanner');
+  if (!el) return;
+  if (!data.safety_tc_reconfig_gave_up) { el.innerHTML = ''; return; }
+  el.innerHTML = '<div class="banner interrupted">' +
+    '<h3>SAFETY THERMOCOUPLE CONFIG NOT VERIFIED</h3>' +
+    '<div class="row"><span>The safety processor could not confirm the safety thermocouple\'s ' +
+    'configured type after repeated retries and has stopped retrying automatically. This is a ' +
+    'configuration/verification failure, not necessarily a bad reading.</span></div>' +
+    '<div class="row"><span>To clear</span><span>Power-cycle the safety processor, or check the ' +
+    'safety thermocouple\'s wiring/connector, then confirm via the safety status panel that the ' +
+    'reading is valid again.</span></div>' +
     '</div>';
 }
 
@@ -4086,6 +4118,7 @@ function poll() {
       renderZonesConfigLoadFault(data);
       renderZonesConfigMigrationPersistFault(data);
       renderKilnCfgSwapBootFault(data);
+      renderSafetyTcReconfigGaveUp(data);
       renderSafetyTrip(data);
       // Client-side multi-zone autotune trace sampling (see
       // sampleAutotuneZoneTemps's own header comment) -- a no-op whenever no

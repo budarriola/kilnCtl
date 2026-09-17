@@ -319,6 +319,16 @@ void dashboard_get_status(dashboard_status_t *out)
             out->diag_context_frames_ok = sl.diag_context_frames_ok;
             out->diag_context_frames_bad = sl.diag_context_frames_bad;
             out->diag_tx_frames_dropped = sl.diag_tx_frames_dropped;
+            /* 2026-09-16: surfaces thermo_task.c's MAX31856 tc_type
+             * reconfigure-retry give-up (SAFETY_LINK_DIAG_FLAG_TC_RECONFIG_
+             * GAVE_UP, safety_link.h) past SWD. See that flag's own doc
+             * comment for what it does and does NOT mean -- a config/
+             * verification failure (one CR1 byte), not necessarily a bad
+             * temperature reading; the generic S5 sensor-invalid trip
+             * (already surfaced via diag_trip_reason above when it is the
+             * live cause) is unaffected either way. */
+            out->safety_tc_reconfig_gave_up =
+                (sl.diag_flags & SAFETY_LINK_DIAG_FLAG_TC_RECONFIG_GAVE_UP) != 0u;
 
             out->trip_event_ever_received = sl.trip_event_ever_received;
             out->trip_reason = sl.trip_reason;

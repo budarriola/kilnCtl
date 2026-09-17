@@ -112,6 +112,25 @@ bool thermo_task_injection_active(void);
 // S5 already treats as a trip condition like any other dead/unplugged part.
 void thermo_task_request_tc_type_reapply(void);
 
+// --- Reconfig-retry give-up, surfaced past SWD (2026-09-16) ---------------
+// Mirrors s_reconfig_gave_up (thermo_task.c): true once
+// max31856_reconfig_retry_note_result() has exhausted
+// MAX31856_RECONFIG_RETRY_MAX_ATTEMPTS with the tc_type still unverified.
+// Before this accessor existed, that fact was visible only to a debugger
+// attached to this task's static (log_task_log()'s one WARN line at the
+// same transition goes out over the isolated link as an ordinary LOG frame,
+// which nothing on the ESP side currently decodes -- see
+// docs/audits/thermo_reconfig_giveup_visibility_2026-09-16.md) -- an
+// operator watching only the web page or the LCD had no way to learn the
+// difference between "still probing, will recover on its own" and "given
+// up; this sensor will not self-heal without intervention" for a thermo-
+// couple already reporting invalid via the generic S5 sensor-invalid path.
+// Read live by link_task.c's DIAG-frame builder (kilnlink_diag_flag_t's
+// KILNLINK_DIAG_FLAG_TC_RECONFIG_GAVE_UP bit), same shape as
+// thermo_task_injection_active() above. Does NOT change what S5 does --
+// this is visibility only, never a new trip condition.
+bool thermo_task_reconfig_gave_up(void);
+
 #ifdef __cplusplus
 }
 #endif

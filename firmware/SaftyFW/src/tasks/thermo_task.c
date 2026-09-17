@@ -365,6 +365,15 @@ bool thermo_task_injection_active(void)
     return s_inject_active;
 }
 
+bool thermo_task_reconfig_gave_up(void)
+{
+    // s_reconfig_gave_up is `volatile bool`, written only from this task's
+    // own loop (see its declaration above) -- a plain read is the same
+    // discipline thermo_task_injection_active() just above uses for
+    // s_inject_active, no lock needed for a single-word flag.
+    return s_reconfig_gave_up;
+}
+
 static void thermo_task_fn(void *arg)
 {
     (void)arg;

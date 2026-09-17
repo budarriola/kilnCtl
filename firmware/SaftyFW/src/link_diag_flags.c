@@ -4,7 +4,7 @@
 #include "kilnlink/kilnlink_diag.h" // KILNLINK_DIAG_FLAG_* -- pure wire-format header
 
 uint8_t link_diag_flags_compute(bool calibration_missing, bool sim_context_seen,
-                                 bool clear_trip_diag_present)
+                                 bool clear_trip_diag_present, bool tc_reconfig_gave_up)
 {
     uint8_t flags = 0;
     if (sim_context_seen) {
@@ -17,6 +17,9 @@ uint8_t link_diag_flags_compute(bool calibration_missing, bool sim_context_seen,
     // header comment.
     if (clear_trip_diag_present) {
         flags |= (uint8_t)KILNLINK_DIAG_FLAG_CLEAR_TRIP_DIAG_PRESENT;
+    }
+    if (tc_reconfig_gave_up) {
+        flags |= (uint8_t)KILNLINK_DIAG_FLAG_TC_RECONFIG_GAVE_UP;
     }
     return flags;
 }
