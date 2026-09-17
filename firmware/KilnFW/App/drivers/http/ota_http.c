@@ -1,5 +1,6 @@
 #include "ota_http.h"
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
+#include "http_auth_policy_iface.h" // http_auth_policy_web_enabled() -- section 2b's OTA-secret retirement
 #include "ota_http_internal.h"
 #include "ota_http_util.h"
 
@@ -373,6 +374,34 @@ ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const u
         ESP_LOGE(OTA_HTTP_TAG, "OTA verify(%s) from %s: AUTHENTICATION BYPASSED by the BOOT-button recovery "
                       "window -- a long-press on GPIO0 opened this, %lu ms remain",
                  ctx_str, ip, (unsigned long)boot_button_bypass_remaining_ms());
+        return OTA_HTTP_VERIFY_OK;
+    }
+
+    // WEB_AUTH_PLAN.md item 2b: these nine routes (this function's six
+    // contexts, plus factory_reset.c/cfg_fs_format_http.c/sw_reset_http.c's
+    // OTA_HTTP_CONTEXT_FACTORY_RESET/OTA_HTTP_CONTEXT_SW_RESET calls) are
+    // ordinary ADMIN routes in route_tier_table.h. Once web auth is turned
+    // on, kiln_http_register()'s enforcement pre-handler has ALREADY
+    // required a valid ADMIN session before this function is ever reached,
+    // so the AP-password challenge/HMAC below would just be a second,
+    // independent credential guarding the same action -- retiring it here
+    // (nonce/lockout state is left completely untouched, see the branch
+    // below) is what "one administrator credential" means in practice.
+    //
+    // Field-upgrade path, deliberately NOT short-circuited by this check:
+    // http_auth_policy_web_enabled() reads false for a board that has never
+    // configured a web admin/user password (WEB_AUTH_LOAD_ABSENT --
+    // web_auth_policy_effective_enabled()'s own doc comment), which is
+    // every board shipped before this feature and every board that
+    // upgrades without ever visiting the new security page. Those boards
+    // fall straight through to the exact nonce+HMAC(ap_password) check this
+    // function already ran before this change -- unchanged behaviour, so
+    // upgrading this firmware alone can never lock an owner out of OTA,
+    // factory-reset, or sw-reset on their own board.
+    if (http_auth_policy_web_enabled()) {
+        ESP_LOGI(OTA_HTTP_TAG, "OTA verify(%s) from %s: web auth is enabled, this route's ADMIN session "
+                      "check already ran before this handler -- AP-password challenge retired for this "
+                      "request", ctx_str, ip);
         return OTA_HTTP_VERIFY_OK;
     }
 

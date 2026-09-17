@@ -294,14 +294,17 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # logic (host-tested, test_http_auth_enforce.c);
                        # http_auth_http.c is the ESP-IDF httpd glue
                        # (untested by host tests by design, same split as
-                       # ota_auth.c/ota_http.c above). The two _iface_stub.c
-                       # files are fail-closed placeholders for the session
-                       # (section 4) and policy-enabled (section 2/11) seams
-                       # -- see http_session_iface.h / http_auth_policy_iface.h.
+                       # ota_auth.c/ota_http.c above). http_session_iface.c
+                       # and http_auth_policy_iface.c are the two real seam
+                       # implementations (session module landed bc481c5a,
+                       # policy/credential storage landed c3008eb8) -- see
+                       # http_session_iface.h / http_auth_policy_iface.h.
+                       # Their fail-closed *_iface_stub.c placeholders are
+                       # deleted now that both real modules exist.
                        "http/http_auth_enforce.c"
                        "http/http_auth_http.c"
-                       "http/http_session_iface_stub.c"
-                       "http/http_auth_policy_iface_stub.c"
+                       "http/http_session_iface.c"
+                       "http/http_auth_policy_iface.c"
                        # WEB_AUTH_PLAN.md items 2/3/6/11 -- the security page's
                        # dispatch core (security_http_core.c, host-tested
                        # against a hand-built fake vtable) and its two real
