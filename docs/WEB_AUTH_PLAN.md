@@ -422,6 +422,58 @@ GREEN, and force a full rebuild.
 The LCD PINs remain separate secrets from the web password — that is the
 owner's explicit design (item 7) and is untouched by this item.
 
+**`GET /api/ota/esp/status` stays OPEN, but its unauthenticated payload was
+trimmed (2026-09-17).** This route is one of the two deliberately-OPEN
+entries named above, kept OPEN so a scripted OTA client can poll it before
+authenticating. An audit found the OPEN tier's own test — "what an onlooker
+standing at the kiln can already see" — did not actually cover three of its
+fields: `commit` (the exact firmware git commit), `dirty` (whether that build
+had uncommitted changes) and `build_date`. Publishing the exact commit lets a
+remote, unauthenticated caller narrow its search for a specific known defect
+in that exact build, and none of the three is otherwise observable by
+standing at the board. The fix is **not** a retier (OTA clients still need
+this route pre-auth) and **not** removing the fields from the schema (the
+authenticated `/ota` admin page's `renderEspInfo()` still reads them, and
+retiring the keys would be a breaking schema change for that page). Instead,
+`ota_esp_status_get_handler()` now resolves the caller's role itself — via a
+new `http_auth_caller_is_admin()` helper (`http_auth_http.c`/`.h`), since
+`kiln_http_prehandler()` never resolves a role for an OPEN-tier route at all
+(item 5's own performance carve-out) — and reports `commit`/`dirty`/
+`build_date` as their real values only to a caller already holding an
+authenticated administrator session (or when web auth is off entirely, per
+item 11's "auth off is exactly as open as the board is today" collapse);
+every other caller gets JSON `null` for those three keys, keeping the
+response shape stable rather than dropping keys.
+
+`recovery_mode` was deliberately left unauthenticated rather than folded into
+the same redaction, decided on its own merits: the dashboard's OPEN-tier
+`app.js` already polls this exact route to drive a recovery-mode banner on
+the main page, a fix shipped for the 2026-09-08 incident where recovery mode
+was effectively invisible to whoever was standing at the kiln. That is
+precisely the OPEN tier's own test — a board already visibly unhealthy (LCD,
+relays, general behaviour) is not narrowed by also reporting one boolean
+about *why* — unlike the commit hash, which narrows an attacker's search
+rather than describing something already visible. `version`, `active_slot`,
+`inactive_slot`, `inactive_version`, `phase`, `percent` and `last_update`
+were left unchanged for the same reason: none of them names a specific known
+defect the way an exact commit hash does.
+
+*Acceptance:* host tests in `test_ota_http.c` cover all four
+web-auth/role combinations against the real
+`ota_esp_status_get_handler()`/`http_auth_caller_is_admin()` production
+functions: auth off (full payload, matching item 11); auth on with no
+session (redacted); auth on with a `user`-role session (still redacted,
+identical to no session); and auth on with an `admin`-role session (full
+payload). `recovery_mode` and `version` are asserted present and unredacted
+in the no-session case.
+*Negative test:* forced `ota_esp_status_get_handler()`'s admin check to
+`true` unconditionally, rebuilt, confirmed the three redaction assertions
+(no-session and user-session cases, six checks total) went RED while the
+other 176 of this executable's 182 checks stayed GREEN, restored the source
+by hand, confirmed an empty `git diff` and a matching `git hash-object`,
+deleted the test build directory, forced a full rebuild, and reconfirmed
+182/182 GREEN.
+
 ---
 
 ## 3. Password and PIN strength rules

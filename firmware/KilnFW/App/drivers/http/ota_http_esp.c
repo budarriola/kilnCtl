@@ -13,6 +13,8 @@
 #include "esp_app_desc.h" /* esp_app_desc_t -- esp_ota_get_partition_description() (inactive slot) still uses this directly, out of hal_sysinfo's scope */
 #include "esp_app_format.h" /* esp_image_header_t, ESP_IMAGE_HEADER_MAGIC -- section 3's pre-esp_ota_begin() check */
 #include "hal_sysinfo.h" /* hal_sysinfo_get_build_info()/_get_running_partition() -- the RUNNING image's own version/label, see call sites below */
+#include "http_auth_http.h" /* http_auth_caller_is_admin() -- ota_esp_status_get_handler() below trims
+                              * exact commit/dirty/build-date identity to admins only; see call site */
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
@@ -521,20 +523,56 @@ esp_err_t ota_esp_status_get_handler(httpd_req_t *req)
     // counter for the NEXT boot (see boot_guard.h's doc comment).
     bool recovery_mode = boot_guard_is_recovery_mode();
 
+    // route_tier_table.h keeps this route ROUTE_TIER_OPEN deliberately (OTA
+    // clients call it pre-authentication) -- but the OPEN tier's own test
+    // (WEB_AUTH_PLAN.md section 2b: "what an onlooker standing at the kiln
+    // can already see") does not cover exact firmware build identity: the
+    // commit hash and dirty-build flag narrow an attacker's search for a
+    // specific known defect, and the build date/time adds nothing an
+    // onlooker could not otherwise infer less precisely. Rather than
+    // retiering the route (which would break pre-auth OTA callers) or
+    // dropping these fields from the schema (which would break the
+    // authenticated /ota admin page's renderEspInfo(), which reads them),
+    // redact just the VALUES to JSON null for a non-admin caller and keep
+    // the real values for an authenticated admin -- kiln_http_prehandler()
+    // never resolves a role for OPEN routes (see its own comment), so this
+    // handler resolves one for itself via http_auth_caller_is_admin().
+    //
+    // recovery_mode is deliberately NOT redacted: app.js's pollRecoveryMode()
+    // reads it on the OPEN-tier main dashboard to show a recovery-mode
+    // banner, a shipped fix for the 2026-09-08 incident where recovery mode
+    // was effectively invisible to whoever was standing at the board -- an
+    // onlooker at the kiln can already see the board is unhealthy (LCD/relay
+    // behaviour), so this is exactly the OPEN test's own "already visible"
+    // case, not a narrowing fact like the commit hash is.
+    bool is_admin = http_auth_caller_is_admin(req);
+    char commit_json[64];
+    char build_date_json[80];
+    const char *dirty_json;
+    if (is_admin) {
+        snprintf(commit_json, sizeof(commit_json), "\"%s\"", FW_GIT_COMMIT);
+        snprintf(build_date_json, sizeof(build_date_json), "\"%s\"", FW_BUILD_DATE " " FW_BUILD_TIME);
+        dirty_json = FW_GIT_DIRTY ? "true" : "false";
+    } else {
+        strcpy(commit_json, "null");
+        strcpy(build_date_json, "null");
+        dirty_json = "null";
+    }
+
     char body[768];
     int n;
     if (have_record) {
         n = snprintf(body, sizeof(body),
                       "{\"phase\":\"%s\",\"percent\":%u,"
-                      "\"version\":\"%s\",\"commit\":\"%s\",\"dirty\":%s,\"build_date\":\"%s\","
+                      "\"version\":\"%s\",\"commit\":%s,\"dirty\":%s,\"build_date\":%s,"
                       "\"active_slot\":\"%s\",\"inactive_slot\":\"%s\",\"inactive_version\":\"%s\","
                       "\"recovery_mode\":%s,"
                       "\"last_update\":"
                       "{\"processor\":\"%s\",\"version_before\":\"%s\",\"version_after\":\"%s\","
                       "\"success\":%s,\"reason\":\"%s\",\"uptime_s\":%u,\"image_sha256\":\"%s\"}}",
                       ota_http_esp_phase_str(phase), (unsigned)percent,
-                      running_version, FW_GIT_COMMIT, FW_GIT_DIRTY ? "true" : "false",
-                      FW_BUILD_DATE " " FW_BUILD_TIME, active_slot, inactive_slot, inactive_version,
+                      running_version, commit_json, dirty_json,
+                      build_date_json, active_slot, inactive_slot, inactive_version,
                       recovery_mode ? "true" : "false",
                       rec.processor, rec.version_before,
                       rec.version_after, rec.success ? "true" : "false", rec.reason,
@@ -542,13 +580,13 @@ esp_err_t ota_esp_status_get_handler(httpd_req_t *req)
     } else {
         n = snprintf(body, sizeof(body),
                       "{\"phase\":\"%s\",\"percent\":%u,"
-                      "\"version\":\"%s\",\"commit\":\"%s\",\"dirty\":%s,\"build_date\":\"%s\","
+                      "\"version\":\"%s\",\"commit\":%s,\"dirty\":%s,\"build_date\":%s,"
                       "\"active_slot\":\"%s\",\"inactive_slot\":\"%s\",\"inactive_version\":\"%s\","
                       "\"recovery_mode\":%s,"
                       "\"last_update\":null}",
                       ota_http_esp_phase_str(phase), (unsigned)percent,
-                      running_version, FW_GIT_COMMIT, FW_GIT_DIRTY ? "true" : "false",
-                      FW_BUILD_DATE " " FW_BUILD_TIME, active_slot, inactive_slot, inactive_version,
+                      running_version, commit_json, dirty_json,
+                      build_date_json, active_slot, inactive_slot, inactive_version,
                       recovery_mode ? "true" : "false");
     }
     httpd_resp_set_type(req, "application/json");
