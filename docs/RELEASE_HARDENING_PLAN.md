@@ -485,8 +485,9 @@ hazards in it:
    automatic post-flash verification now catches this loudly, which is a real
    mitigation — but the hazard itself is structural and an operator doing a
    field update needs to not be able to hit it.
-2. **Rolling back past a `zones_cfg` schema bump silently runs on
-   firmware-default PID gains.** The older firmware refuses the
+2. ~~**Rolling back past a `zones_cfg` schema bump silently runs on
+   firmware-default PID gains.**~~ — **CLOSED, `bfa60679`, 2026-09-16** (see
+   the matching bullet below). The older firmware refuses the
    newer-than-it-knows blob, flash is untouched so reflashing restores
    everything, and there is *no separate warning* — a firing started between
    the rollback and the reflash runs on defaults. On a 4 W fixture that is a
@@ -527,11 +528,25 @@ over to it with a JTAG probe.
   (`ap_password` must be passed) rather than the flash-tool's default, so an
   ordinary `flash_firmware()` call with no `ap_password` still gets none of
   this protection.
-- Make the schema-downgrade hazard impossible to hit silently: on boot, if the
-  persisted config version is newer than this firmware understands, refuse to
-  start a firing and say so on every surface, rather than running on defaults.
-  **Size: M.** This is a blocker; the current behaviour is a silent wrong
-  answer with heat attached.
+- ~~Make the schema-downgrade hazard impossible to hit silently: on boot, if
+  the persisted config version is newer than this firmware understands,
+  refuse to start a firing and say so on every surface, rather than running
+  on defaults.~~ — **CLOSED, `bfa60679`, 2026-09-16 ("Refuse to start a
+  firing on a quarantined zones config, surface it everywhere").** A new
+  `zones_cfg_load_fault_t` (`zones_config_accessors.h`) is latched in
+  `zones_config_store.c` whenever the on-disk blob is newer than
+  `ZONES_CFG_VERSION` or older than the single-step migration chain can
+  carry forward, and `profile_executor_run()` now refuses to start with a
+  fault-kind-specific, version-naming message instead of silently adopting
+  firmware-default gains — no override. Surfaced on every operator-facing
+  path: the web dashboard status payload and `main_page.html` banner, and
+  the LCD home page's trip-strip widget (`ui_page_home_refresh.c`), matching
+  CLAUDE.md's no-scrolling/existing-layout constraint. Negative-tested in
+  `test_profile_executor_prestart.c`
+  (`test_run_refuses_with_named_reason_on_config_quarantine`): 5 genuine
+  `TEST_CHECK` failures against the sabotaged gate, 0 at the fix, via a full
+  rebuild of all 47 host-test executables in both states (per that commit's
+  message).
 - Complete a real Pico update over the wire, end to end, including whatever
   bootloader/metadata gap `firmware/SaftyFW/docs/BOOTLOADER.md` and the update
   protocol's completion checklist imply for a finished one. **Size: L.**
