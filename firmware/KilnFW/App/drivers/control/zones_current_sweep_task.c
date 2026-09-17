@@ -1880,3 +1880,37 @@ bool zones_get_safety_pico_tc_type(uint8_t *out_tc_type)
     return false;
 }
 
+/* 2026-09-16 config-backup round-trip gap closure: the Pico's own S14/S15
+ * arming baseline, i_normal_a[zi] (ZONE_INORMAL_PARAM_ID(zi), 0x031A-0x031C),
+ * was never readable outside this file -- backup_export.c needs it to close
+ * the last owner-named gap in the backup round trip (the ESP-side
+ * zones_config_get_normal_current() CT normal was fixed in 163b5842; this is
+ * the SEPARATE, Pico-owned baseline those two guards actually key off, per
+ * this file's own "Feature: nameplate current -> S14/S15 arming" comment
+ * above). Same live-scan-of-safety_cfg_store's-cache shape as
+ * zones_get_safety_pico_tc_type() just above, same "never fetched" ->
+ * false contract -- an unset baseline (fresh board, or a channel never
+ * swept) must never be reported as a false 0.0 A. `zi` out of range is
+ * refused the same way an out-of-range channel is refused everywhere else
+ * in this file. */
+bool zones_get_safety_pico_i_normal_a(uint8_t zi, float *out_a)
+{
+    if (!out_a || zi >= MAX31856_CHANNEL_COUNT) {
+        return false;
+    }
+    *out_a = 0.0f;
+    uint16_t want_id = ZONE_INORMAL_PARAM_ID(zi);
+    size_t count = safety_cfg_store_param_count();
+    for (size_t idx = 0; idx < count; idx++) {
+        safety_cfg_param_t row;
+        if (safety_cfg_store_get_by_index(idx, &row) && row.param_id == want_id) {
+            if (!row.set || row.type != KILNLINK_PARAM_TYPE_F32) {
+                return false;
+            }
+            *out_a = row.value.f32_val;
+            return true;
+        }
+    }
+    return false;
+}
+

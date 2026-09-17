@@ -1730,6 +1730,14 @@ void zones_get_safety_wiring(zone_safety_wiring_t *out);
  * (out_tc_type left at 0) if the Pico has never reported the param yet. */
 bool zones_get_safety_pico_tc_type(uint8_t *out_tc_type);
 
+/* Live read-back of the Pico's own S14/S15 arming baseline for channel `zi`,
+ * via safety_cfg_store's mirror (param_id 0x031A + zi, "i_normal_a[zi]") --
+ * 2026-09-16 config-backup round-trip gap closure. Returns false (out_a left
+ * at 0.0f) for zi >= MAX31856_CHANNEL_COUNT or a channel the Pico has never
+ * reported a value for (fresh board, or never swept) -- never fabricates a
+ * false 0.0 A baseline. See zones_current_sweep_task.c's definition. */
+bool zones_get_safety_pico_i_normal_a(uint8_t zi, float *out_a);
+
 #ifdef __cplusplus
 }
 #endif

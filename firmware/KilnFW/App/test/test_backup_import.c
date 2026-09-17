@@ -372,6 +372,25 @@ static uint8_t s_safety_tc_type;
 // placement that put the declaration AFTER reset_stub_state()'s use of it.
 static uint8_t s_pico_tc_type;
 static bool s_pico_tc_type_known = true;
+/* 2026-09-16 config-backup round-trip gap closure: the Pico's OWN
+ * i_normal_a[zi] (0x031A-0x031C), read via zones_get_safety_pico_i_normal_a()
+ * -- same "known/value" shape as s_pico_tc_type/_known above. Defaults to
+ * NOT known on every zone, matching the real bench (ct_cal reports
+ * has_value:false on all 3 channels today) and this codebase's "skip
+ * unmeasured rather than emit a false 0.0" export convention -- a test must
+ * explicitly seed a zone's value via s_pico_i_normal_a_known[]/[]_a[] to see
+ * the export key appear. */
+static bool s_pico_i_normal_a_known[STUB_ZONE_COUNT];
+static float s_pico_i_normal_a[STUB_ZONE_COUNT];
+
+/* Forward declarations: definitions live further down (next to the
+ * safety_cfg_write_apply_pairs() stub they belong to), but reset_stub_state()
+ * above that point needs to clear them each test. */
+extern bool g_stub_safety_cfg_write_result;
+extern char g_stub_safety_cfg_write_reason[128];
+extern int g_stub_safety_cfg_write_n_pairs;
+extern bool g_stub_safety_cfg_write_commit_arg;
+extern safety_cfg_post_pair_t g_stub_safety_cfg_write_pairs[8];
 static int g_total_write_calls;
 static int g_profile_save_calls;
 static uint8_t g_last_saved_profile_id;
@@ -407,6 +426,13 @@ static void reset_stub_state(void)
     s_safety_tc_type = 0;
     s_pico_tc_type = 0;
     s_pico_tc_type_known = true;
+    memset(s_pico_i_normal_a_known, 0, sizeof(s_pico_i_normal_a_known));
+    memset(s_pico_i_normal_a, 0, sizeof(s_pico_i_normal_a));
+    g_stub_safety_cfg_write_result = true;
+    g_stub_safety_cfg_write_reason[0] = '\0';
+    g_stub_safety_cfg_write_n_pairs = -1;
+    g_stub_safety_cfg_write_commit_arg = false;
+    memset(g_stub_safety_cfg_write_pairs, 0, sizeof(g_stub_safety_cfg_write_pairs));
     g_total_write_calls = 0;
     g_profile_save_calls = 0;
     g_last_saved_profile_id = 0;
@@ -554,6 +580,48 @@ bool safety_ceiling_sync_guard_raise(SafetyLinkClass *link, const float *new_max
         *out_refusal_class = SAFETY_CEILING_REFUSAL_NONE;
     }
     return true;
+}
+
+/* 2026-09-16 config-backup round-trip gap closure: backup_import.c
+ * (#included above) now calls safety_cfg_write_apply_pairs() to push the
+ * backup's safety_i_normal_a values back onto the Pico through the EXISTING
+ * stage/COMMIT_CONFIG/forced-read-back-confirm machinery. That real function
+ * lives in safety_cfg_write.c, which is NOT linked into this executable
+ * (same "own fake bodies, real module linked elsewhere" convention as
+ * safety_ceiling_sync_guard_raise() just above) -- test_safety_cfg_http.c is
+ * the executable that exercises the real implementation's staging/commit/
+ * confirm logic. This file's job is only backup_import_apply()'s own
+ * validate-then-commit control flow: did it build the right pairs, did it
+ * abort the WHOLE import loudly on a refused/unconfirmed write, did it skip
+ * the call entirely when the backup carries no safety_i_normal_a key.
+ * Controllable via g_stub_safety_cfg_write_result; captures every pair
+ * passed in g_stub_safety_cfg_write_pairs/_n_pairs so a test can assert the
+ * exact param_id/value_text backup_import.c built. */
+bool g_stub_safety_cfg_write_result = true;
+char g_stub_safety_cfg_write_reason[128] = "";
+safety_cfg_post_pair_t g_stub_safety_cfg_write_pairs[8];
+int g_stub_safety_cfg_write_n_pairs = -1; /* -1 == "never called" */
+bool g_stub_safety_cfg_write_commit_arg = false;
+
+bool safety_cfg_write_apply_pairs(SafetyLinkClass *link, const safety_cfg_post_pair_t *pairs, int n_pairs,
+                                   bool commit, char *reason_out, size_t reason_cap,
+                                   safety_ceiling_refusal_class_t *out_class)
+{
+    (void)link;
+    g_stub_safety_cfg_write_n_pairs = n_pairs;
+    g_stub_safety_cfg_write_commit_arg = commit;
+    int n_copy = (n_pairs < 8) ? n_pairs : 8;
+    for (int i = 0; i < n_copy; i++) {
+        g_stub_safety_cfg_write_pairs[i] = pairs[i];
+    }
+    if (reason_out && reason_cap > 0) {
+        strncpy(reason_out, g_stub_safety_cfg_write_reason, reason_cap - 1);
+        reason_out[reason_cap - 1] = '\0';
+    }
+    if (out_class) {
+        *out_class = g_stub_safety_cfg_write_result ? SAFETY_CEILING_REFUSAL_NONE : SAFETY_CEILING_REFUSAL_OTHER;
+    }
+    return g_stub_safety_cfg_write_result;
 }
 
 /* v8 overrides. Settable so a test can prove a configured value actually
@@ -732,6 +800,22 @@ bool zones_get_safety_pico_tc_type(uint8_t *out_tc_type)
         return false;
     }
     *out_tc_type = s_pico_tc_type;
+    return true;
+}
+
+/* 2026-09-16 config-backup round-trip gap closure: own stub, real accessor
+ * links into a different executable -- see s_pico_i_normal_a_known's own
+ * comment above. */
+bool zones_get_safety_pico_i_normal_a(uint8_t zi, float *out_a)
+{
+    if (!out_a || zi >= STUB_ZONE_COUNT) {
+        return false;
+    }
+    if (!s_pico_i_normal_a_known[zi]) {
+        *out_a = 0.0f;
+        return false;
+    }
+    *out_a = s_pico_i_normal_a[zi];
     return true;
 }
 
@@ -2376,6 +2460,124 @@ static void test_ct_normals_and_new_fields_round_trip_through_export_import(void
               "tuning_quality.method/rule restored exactly");
 }
 
+// ---------------------------------------------------------------------------
+// 2026-09-16, closing the LAST owner-relevant backup gap: the Pico's OWN
+// i_normal_a[0..2] (0x031A-0x031C, S14/S15's arming baseline) was never
+// covered by test_ct_normals_and_new_fields_round_trip_through_export_import()
+// above -- that test closed the ESP-side normal_current_a, not the safety
+// processor's separate copy. Four tests below, same "prove the CLOSED gap,
+// a parent build fails on an honest value/behavior mismatch" shape:
+//   1) export omits the key entirely when the Pico value is unset (the real
+//      bench's actual state today -- ct_cal reports has_value:false on all 3
+//      channels), matching the "skip unmeasured, never emit a false 0.0"
+//      convention normal_current_a/model_k_dc already follow.
+//   2) a set value round-trips end to end THROUGH THE REAL WRITE PATH: export
+//      emits it, import builds the correct (param_id, value_text) pair and
+//      calls safety_cfg_write_apply_pairs() -- the same stage/COMMIT_CONFIG/
+//      forced-read-back-confirm machinery every other Pico config write uses.
+//   3) a refused/unconfirmed write (stub reports false, as the real function
+//      does on an ARMED refusal or a read-back mismatch) aborts the WHOLE
+//      import loudly -- backup_import_apply() returns false, the reason
+//      reaches the caller, and NO zone tuning from the same body is
+//      committed either, since the safety write happens before the per-zone
+//      commit loop.
+//   4) a backup with no safety_i_normal_a key at all (old backup, or a
+//      source board where this channel was never measured) causes ZERO
+//      UART traffic -- safety_cfg_write_apply_pairs() must not even be
+//      called -- so the target board's own existing arming baseline is left
+//      untouched ("never de-arm on omission").
+// ---------------------------------------------------------------------------
+static void test_safety_i_normal_a_export_omitted_when_unset(void)
+{
+    TEST_SECTION("backup_export_get_handler -- safety_i_normal_a is OMITTED when the Pico's "
+                 "i_normal_a is unset (the real bench's actual state today)");
+    reset_stub_state();
+    zones_config_set_pid(0, 1.0f, 0.0f, 0.0f);
+    /* s_pico_i_normal_a_known[0] stays false from reset_stub_state() -- unset. */
+
+    esp_err_t err = run_export();
+    TEST_CHECK(err == ESP_OK, "export must succeed");
+    TEST_CHECK(s_export_body != NULL && strstr(s_export_body, "safety_i_normal_a") == NULL,
+              "the key is never emitted for an unmeasured channel");
+}
+
+static void test_safety_i_normal_a_round_trips_through_export_import(void)
+{
+    TEST_SECTION("backup_export_get_handler -> backup_import_apply -- the Pico's OWN "
+                 "i_normal_a[zi] (S14/S15's arming baseline, 0x031A-0x031C) round-trips through "
+                 "a real export/import cycle, via the real safety_cfg_write_apply_pairs() staging");
+    reset_stub_state();
+    zones_config_set_pid(1, 1.0f, 0.0f, 0.0f); /* zone 1 must answer pid_kp for export to visit it */
+    s_pico_i_normal_a_known[1] = true;
+    s_pico_i_normal_a[1] = 7.6543f;
+
+    esp_err_t err = run_export();
+    TEST_CHECK(err == ESP_OK, "export must succeed");
+    TEST_CHECK(strstr(s_export_body, "\"safety_i_normal_a\":7.6543") != NULL,
+              "the Pico's measured i_normal_a is actually emitted by export");
+
+    reset_stub_state();
+    zones_config_set_pid(1, 1.0f, 0.0f, 0.0f);
+    g_total_write_calls = 0;
+
+    char import_err[256];
+    bool ok = backup_import_apply(s_export_body, import_err, sizeof(import_err));
+    TEST_CHECK(ok, "re-importing exactly what was just exported must succeed");
+    TEST_CHECK(g_stub_safety_cfg_write_n_pairs == 1,
+              "safety_cfg_write_apply_pairs() was called with exactly one pair");
+    if (g_stub_safety_cfg_write_n_pairs == 1) {
+        TEST_CHECK(g_stub_safety_cfg_write_pairs[0].param_id == (uint16_t)0x031Bu,
+                  "the pair targets i_normal_a[1] (0x031A + zone index 1 = 0x031B), never abs_max_temp_c");
+        float parsed = strtof(g_stub_safety_cfg_write_pairs[0].value_text, NULL);
+        TEST_CHECK_NEAR(parsed, 7.6543, 1e-3, "the pair's value_text encodes the exact restored value");
+    }
+    TEST_CHECK(g_stub_safety_cfg_write_commit_arg, "the write commits (persists to flash), not a volatile-only install");
+}
+
+static void test_safety_i_normal_a_write_failure_aborts_whole_import(void)
+{
+    TEST_SECTION("backup_import_apply -- safety_cfg_write_apply_pairs() refusing/failing to confirm "
+                 "the i_normal_a write aborts the WHOLE import loudly -- no partial apply, and the "
+                 "same body's ordinary zone tuning is NOT committed either");
+    reset_stub_state();
+    zones_config_set_pid(1, 1.0f, 0.0f, 0.0f);
+    g_total_write_calls = 0;
+    g_stub_safety_cfg_write_result = false;
+    strncpy(g_stub_safety_cfg_write_reason, "refused: relay ARMED", sizeof(g_stub_safety_cfg_write_reason) - 1);
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
+        "\"zones\":[{\"index\":1,\"pid_kp\":9.0,\"pid_ki\":0,\"pid_kd\":0,\"safety_i_normal_a\":3.0}]}";
+    char err[256];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(!ok, "the import must fail loudly, not complete quietly, when the Pico write is unconfirmed");
+    TEST_CHECK(strstr(err, "relay ARMED") != NULL || strstr(err, "refused") != NULL || strstr(err, "unconfirmed") != NULL,
+              "the refusal reason reaches the caller, not a generic message");
+    TEST_CHECK(g_total_write_calls == 0,
+              "NOTHING was committed -- the same body's zone 1 pid_kp=9.0 must not have landed either, "
+              "since the safety write happens before the per-zone commit loop");
+}
+
+static void test_safety_i_normal_a_absent_key_never_calls_write(void)
+{
+    TEST_SECTION("backup_import_apply -- a backup with NO safety_i_normal_a key at all makes ZERO calls "
+                 "to safety_cfg_write_apply_pairs() -- never de-arm on omission");
+    reset_stub_state();
+    zones_config_set_pid(0, 1.0f, 0.0f, 0.0f);
+    g_total_write_calls = 0;
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
+        "\"zones\":[{\"index\":0,\"pid_kp\":2.0,\"pid_ki\":0,\"pid_kd\":0}]}";
+    char err[160];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(ok, "an ordinary backup with no safety_i_normal_a key still imports");
+    TEST_CHECK(g_stub_safety_cfg_write_n_pairs == -1,
+              "safety_cfg_write_apply_pairs() was never called -- no UART traffic to the Pico at all");
+}
+
 void run_test_backup_import(void)
 {
     test_malformed_body_writes_nothing();
@@ -2412,4 +2614,9 @@ void run_test_backup_import(void)
     test_v4_coupling_tau_dead_time_round_trip_asymmetric_per_pair();
     test_v4_coupling_tau_dead_time_omitted_entirely_preserves_measured_values();
     test_v4_coupling_tau_dead_time_partial_per_cell_presence();
+
+    test_safety_i_normal_a_export_omitted_when_unset();
+    test_safety_i_normal_a_round_trips_through_export_import();
+    test_safety_i_normal_a_write_failure_aborts_whole_import();
+    test_safety_i_normal_a_absent_key_never_calls_write();
 }

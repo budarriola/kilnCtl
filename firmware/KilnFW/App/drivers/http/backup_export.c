@@ -485,6 +485,22 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
                 normal_current_measured) {
                 backup_stream_printf(&s, ",\"normal_current_a\":%.4f", (double)normal_current_a);
             }
+            /* 2026-09-16 config-backup round-trip gap closure: the Pico's OWN
+             * i_normal_a[zi] (0x031A-0x031C) -- the actual S14/S15 arming
+             * baseline those two guards read on the safety processor. This is
+             * a SEPARATE store from normal_current_a just above (that is the
+             * ESP-side zones_config_get_normal_current() record fixed in
+             * 163b5842); losing this one forces a full CT-normal recalibration
+             * (a real current sweep) after every restore even though the ESP
+             * half round-trips fine. Emitted only when the Pico has actually
+             * reported a value for this channel (zones_get_safety_pico_i_
+             * normal_a() returns false for "never fetched/measured") -- same
+             * "skip unmeasured rather than emit a false 0.0" convention as
+             * normal_current_a and model_k_dc above. */
+            float safety_i_normal_a = 0.0f;
+            if (zones_get_safety_pico_i_normal_a(zi, &safety_i_normal_a)) {
+                backup_stream_printf(&s, ",\"safety_i_normal_a\":%.4f", (double)safety_i_normal_a);
+            }
         }
         /* settings_source_g%u above is now the last key of this object (it
          * was settings_source before the per-group keys were added) and is

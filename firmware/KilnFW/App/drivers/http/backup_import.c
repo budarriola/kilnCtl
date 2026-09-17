@@ -49,6 +49,10 @@
 #include "profiles_http.h"
 #include "safety_ceiling_sync.h" /* 2026-09-10: a restored backup can raise max_temp_c same as a POST -- see
                                   * the guard immediately before the zone-tuning commit loop below. */
+#include "safety_cfg_write.h" /* 2026-09-16: safety_cfg_write_apply_pairs() -- the same stage/COMMIT_CONFIG/
+                                * forced-read-back-confirm path safety_cfg_http.c's own POST handler uses,
+                                * reused here so the Pico's i_normal_a[0..2] restore is never trusted on a
+                                * bare ACK -- see the push immediately after the ceiling guard below. */
 #include "zones_config_accessors.h"
 #include "zones_config_json.h" /* relay_type/ease_off_window_mult/approach_rate_cap/
                                  * error_band_c/rate_band_c_per_s setters --
@@ -225,6 +229,15 @@ typedef struct {
      * anything; zone_normals_set() takes just the one amps value. */
     bool has_normal_current_a;
     float normal_current_a;
+    /* The Pico's OWN i_normal_a[index] (0x031A + index) -- the S14/S15
+     * arming baseline, a SEPARATE store from normal_current_a above (see
+     * backup_export.c's matching comment). Not committed via zones_config_
+     * set_*() like every other field in this struct -- it is pushed to the
+     * safety processor itself, over the safety link, in its own guarded
+     * block right after the ceiling-raise guard (see backup_import_apply_
+     * locked()'s commit section below). */
+    bool has_safety_i_normal_a;
+    float safety_i_normal_a;
 } zone_candidate_t;
 
 static bool backup_import_apply_locked(const char *body, char *err_msg, size_t err_cap,
@@ -1069,6 +1082,22 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
         if (zc->has_normal_current_a) {
             zc->normal_current_a = (float)dnormal;
         }
+        /* The Pico's own i_normal_a[index] -- same range as normal_current_a
+         * above (SaftyFW's config_params.c only enforces CHECK_F32_NONNEG on
+         * this field; 1000 A is already a generous upper sanity bound, same
+         * one this file already uses for the ESP-side twin). Range-checked
+         * here in pass 1 for the same "fail before anything commits" reason;
+         * the actual write only happens after every other pass-1 check in
+         * this whole import has already passed. */
+        double dsafety_inormal;
+        if (!backup_json_field_opt_num(ze, "safety_i_normal_a", 0, 1000.0, &dsafety_inormal,
+                               &zc->has_safety_i_normal_a, "safety_i_normal_a", err_msg, err_cap,
+                               (unsigned)zone_candidate_count)) {
+            return false;
+        }
+        if (zc->has_safety_i_normal_a) {
+            zc->safety_i_normal_a = (float)dsafety_inormal;
+        }
 
         zone_candidate_count++;
     }
@@ -1195,6 +1224,68 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
                     "backup would raise a zone ceiling; safety processor ceiling refused/unconfirmed: %.48s",
                     ceiling_reason);
             return false;
+        }
+    }
+
+    /* 2026-09-16 config-backup round-trip gap closure: the Pico's own
+     * i_normal_a[0..2] (S14/S15 arming baseline) -- see backup_export.c's
+     * matching comment and zone_candidate_t::safety_i_normal_a's own comment
+     * for why this is a separate store from normal_current_a/zone_normals_set()
+     * below. Pushed here, BEFORE the zone-tuning commit loop (which never
+     * depends on this and never gates it), via the SAME stage/COMMIT_CONFIG/
+     * forced-read-back-confirm path safety_cfg_http.c's own commissioning POST
+     * handler uses (safety_cfg_write_apply_pairs()) -- "never trust a bare
+     * ACK" applies here exactly as it does to every other Pico config write in
+     * this codebase. Nothing is attempted (n_pairs stays 0, no UART traffic at
+     * all) unless the backup actually carries at least one safety_i_normal_a
+     * key -- an older backup, or one taken from a board where this channel was
+     * never swept, simply preserves whatever the target Pico already has,
+     * same "omit preserves current" convention every other optional field in
+     * this file follows, and the one that keeps this restore from ever DE-
+     * ARMING a channel the backup itself says nothing about.
+     *
+     * abs_max_temp_c (SAFETY_PARAM_ID_ABS_MAX_TEMP_C, staged/committed by the
+     * ceiling guard immediately above) is never one of these pairs -- this
+     * block only ever builds param ids 0x031A + index, never the ceiling id,
+     * so the two writes can never collide or be reordered against each
+     * other's own guard.
+     *
+     * A failure here (rejected commit, ARMED refusal, a read-back that does
+     * not confirm) aborts the WHOLE import loudly, before any zone-tuning
+     * field below is committed -- silently completing an import that could
+     * not confirm the Pico actually holds the restored baseline would be
+     * exactly the "logging unchecked success" defect class this codebase has
+     * been bitten by repeatedly, applied to a safety-arming value instead of
+     * a log line. */
+    {
+        safety_cfg_post_pair_t pairs[MAX31856_CHANNEL_COUNT];
+        int n_pairs = 0;
+        for (size_t i = 0; i < zone_candidate_count; i++) {
+            zone_candidate_t *zc = &zone_candidates[i];
+            if (!zc->has_safety_i_normal_a || zc->index >= MAX31856_CHANNEL_COUNT) {
+                continue;
+            }
+            safety_cfg_post_pair_t *pair = &pairs[n_pairs++];
+            pair->param_id = (uint16_t)(0x031Au + zc->index); /* i_normal_a[index] */
+            int wn = snprintf(pair->value_text, sizeof(pair->value_text), "%.6f", (double)zc->safety_i_normal_a);
+            if (wn < 0 || (size_t)wn >= sizeof(pair->value_text)) {
+                snprintf(err_msg, err_cap,
+                        "zone tuning entry %u (channel %u): safety_i_normal_a value could not be encoded",
+                        (unsigned)i, (unsigned)zc->index);
+                return false;
+            }
+        }
+        if (n_pairs > 0) {
+            char reason[128];
+            safety_ceiling_refusal_class_t out_class = SAFETY_CEILING_REFUSAL_NONE;
+            if (!safety_cfg_write_apply_pairs(s_hw_safety, pairs, n_pairs, true /* commit */, reason,
+                                              sizeof(reason), &out_class)) {
+                snprintf(err_msg, err_cap,
+                        "backup carries a safety processor i_normal_a baseline; restore refused/unconfirmed: "
+                        "%.80s",
+                        reason);
+                return false;
+            }
         }
     }
 
