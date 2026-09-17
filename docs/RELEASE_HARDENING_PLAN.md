@@ -330,6 +330,20 @@ checks, and both `check_00_*_target_build.ps1`/`check_01_*_pushed_build.ps1`
 pairs' FAIL paths (still only exercised at a clean baseline, never
 deliberately sabotaged).
 
+A seventh pass, `docs/audits/release_gate_vacuity_audit_2026-09-16g.md`,
+fixed the `check_duplicate_symbols.ps1` `hwabstraction_esp` source-root gap
+the sixth pass had found but deliberately left unfixed (`hal_status.c.obj`
+was silently classified as stale and dropped from every scan; now correctly
+attributed, 264 to 265 objects scanned), verified by planting a genuine
+duplicate symbol spanning exactly `hal_status.c` and `hal_esp_common.c` and
+confirming the fix is what makes it visible at all. It also negative-tested
+eight more gates -- `check_c_files_in_cmakelists`, `check_no_duplicate_crc`,
+`check_relay_authority_paths`, `check_heat_enable_wiring`,
+`check_uri_handler_cap`, `check_test_c_files_wired`,
+`check_uart_version_independence`, and `check_heartbeat_contract` (the
+cross-language PC/firmware heartbeat producer-consumer pair) -- all found
+load-bearing.
+
 **Already covered, name the evidence:** the two `check_01_*_pushed_build.ps1`
 scripts are the strongest single piece of process coverage in the repo. They
 build `origin/main`'s actual content in a clean worktree rather than the local

@@ -140,7 +140,7 @@ $componentSourceRoots = @{
     "esp-idf\App\CMakeFiles\__idf_App.dir"          = "firmware\KilnFW\App"
     "esp-idf\drivers\CMakeFiles\__idf_drivers.dir"   = "firmware\KilnFW\App\drivers"
     "esp-idf\kilnlink\CMakeFiles\__idf_kilnlink.dir" = "firmware\CommonFW"
-    "esp-idf\hwabstraction_esp\CMakeFiles\__idf_hwabstraction_esp.dir" = "firmware\hwAbstraction\esp"
+    "esp-idf\hwabstraction_esp\CMakeFiles\__idf_hwabstraction_esp.dir" = @("firmware\hwAbstraction\esp", "firmware\hwAbstraction\common")
 }
 
 # Matched by BASENAME against everything real under the component's source
@@ -154,8 +154,10 @@ $componentSourceRoots = @{
 # loop only needs to tell "some real .c by this name still exists in this
 # component's source tree" from "nothing does any more, this is leftover
 # build output" -- not to prove it is the same file byte-for-byte.
+$allSourceRoots = @()
+foreach ($v in $componentSourceRoots.Values) { foreach ($r in @($v)) { $allSourceRoots += $r } }
 $sourceBasenamesByRoot = @{}
-foreach ($sourceRoot in ($componentSourceRoots.Values | Select-Object -Unique)) {
+foreach ($sourceRoot in ($allSourceRoots | Select-Object -Unique)) {
     $sourceFull = Join-Path $repoRoot $sourceRoot
     $names = @{}
     if (Test-Path $sourceFull) {
@@ -172,12 +174,23 @@ foreach ($c in $componentDirs) {
     $full = Join-Path $buildDir $c
     if (Test-Path $full) {
         $candidates = @(Get-ChildItem -Path $full -Recurse -File -Filter "*.c.obj" -ErrorAction SilentlyContinue)
-        $sourceRoot = $componentSourceRoots[$c]
-        $knownNames = $sourceBasenamesByRoot[$sourceRoot]
+        $sourceRoots = @($componentSourceRoots[$c])
         foreach ($obj in $candidates) {
             $expectedBaseName = $obj.Name -replace '\.obj$', ''
-            if ($sourceRoot -and $knownNames -and -not $knownNames.ContainsKey($expectedBaseName)) {
-                $staleObjFiles += [pscustomobject]@{ Obj = $obj; ExpectedBaseName = $expectedBaseName; SourceRoot = $sourceRoot }
+            $foundInAnyRoot = $false
+            $haveAnyKnownNames = $false
+            foreach ($sourceRoot in $sourceRoots) {
+                $knownNames = $sourceBasenamesByRoot[$sourceRoot]
+                if ($knownNames) {
+                    $haveAnyKnownNames = $true
+                    if ($knownNames.ContainsKey($expectedBaseName)) {
+                        $foundInAnyRoot = $true
+                        break
+                    }
+                }
+            }
+            if ($haveAnyKnownNames -and -not $foundInAnyRoot) {
+                $staleObjFiles += [pscustomobject]@{ Obj = $obj; ExpectedBaseName = $expectedBaseName; SourceRoot = ($sourceRoots -join ", ") }
             } else {
                 $objFiles += $obj
             }
