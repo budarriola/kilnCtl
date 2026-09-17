@@ -313,14 +313,30 @@ static float q1(float c) { return roundf(c * 10.0f) / 10.0f; }
 // A6 tune mismatch triples (m_k, m_tau, m_L), SCENARIO_SIMULATION_PLAN.md
 // sec 2.4 -- link the SIMC formula via pid_autotune_tune_from_fopdt(),
 // never reimplement it; these are just the model-vs-plant multipliers.
+//
+// 2026-09-16 section-8 rebuild
+// (docs/audits/adaptive_fuzzy_section8_cell_mix_rebuild_2026-09-16.md): HOT's
+// original (0.5, 2.0, 0.5) triple is a ~2x gain error that, measured at
+// commit 3c3c6886, left 105/118 mismatched cells stuck at ring_count=0 --
+// the dwell residual it produces oscillates (150-250 zero crossings per
+// firing) and never damps below adaptive_tune's ADAPTIVE_TUNE_SETTLE_SLOPE_FLOOR_C_PER_S
+// (0.003 C/s) inside the dwell, so no observation is ever harvested
+// regardless of dwell length. HOT is softened here to a mismatch that still
+// clears ADAPTIVE_TUNE_MIN_MATERIAL_MOVE_FRAC (0.5%) by roughly 100x but
+// settles well inside the 28*tau adaptive-arm dwell. MILD_HOT is new: it is
+// what stage 1's factorial now varies A6 over instead of MATCHED (which
+// carried zero gain error and so could never activate adaptive_tune at
+// all), sized smaller again than the softened HOT so a majority of the
+// rebuilt cell mix settles even faster/more reliably.
 typedef struct { float m_k, m_tau, m_l; } tune_mismatch_t;
 static tune_mismatch_t tune_mismatch_for(sim_fac_a6_tune_t a6)
 {
     switch (a6) {
         case SIM_FAC_A6_MATCHED:       return (tune_mismatch_t){1.0f, 1.0f, 1.0f};
-        case SIM_FAC_A6_HOT:           return (tune_mismatch_t){0.5f, 2.0f, 0.5f};
+        case SIM_FAC_A6_HOT:           return (tune_mismatch_t){0.75f, 1.35f, 0.75f};
         case SIM_FAC_A6_COLD:          return (tune_mismatch_t){2.0f, 0.5f, 2.0f};
         case SIM_FAC_A6_SLOW_INTEGRAL: return (tune_mismatch_t){1.0f, 3.0f, 1.0f};
+        case SIM_FAC_A6_MILD_HOT:      return (tune_mismatch_t){0.85f, 1.2f, 0.85f};
         default:                       return (tune_mismatch_t){1.0f, 1.0f, 1.0f};
     }
 }
@@ -820,7 +836,8 @@ static void print_cell_row(const sim_factorial_cell_t *cell, const char *arm_lab
            (double)cell->a3_sensor_bias_p, (double)cell->a4_loss_scale_span_r_s,
            (double)cell->a5_ramp_rate_c_per_hr,
            cell->a6_tune == SIM_FAC_A6_MATCHED ? "MATCHED" : cell->a6_tune == SIM_FAC_A6_HOT ? "HOT" :
-               cell->a6_tune == SIM_FAC_A6_COLD ? "COLD" : "SLOW_INTEGRAL",
+               cell->a6_tune == SIM_FAC_A6_COLD ? "COLD" :
+               cell->a6_tune == SIM_FAC_A6_MILD_HOT ? "MILD_HOT" : "SLOW_INTEGRAL",
            (double)cell->a7_phi, (double)cell->a8_bi, arm_label,
            fmt_val(buf1, sizeof(buf1), r->have_lag, r->lag_s),
            fmt_val(buf2, sizeof(buf2), r->have_lag_signed, r->lag_signed_s),
@@ -851,8 +868,15 @@ static void print_cell_row(const sim_factorial_cell_t *cell, const char *arm_lab
 #define MATERIALITY_FLOOR_C          0.5f   /* per OBJECTIVE, not aggregate (plan sec 8) */
 
 /* Gate 3, the limit-cycle regression fixture: the seven cells the fixed-gain
- * run showed a converged, bounded limit cycle in. All seven are A6 = MATCHED
- * -- that is precisely why cap_L keys on L/tau and not on model agreement. */
+ * run showed a converged, bounded limit cycle in. All seven were A6 =
+ * MATCHED at the time this fixture was registered -- that is precisely why
+ * cap_L keys on L/tau and not on model agreement. The 2026-09-16 cell-mix
+ * rebuild (docs/audits/adaptive_fuzzy_section8_cell_mix_rebuild_2026-09-16.md)
+ * moved stage 1's A6 level 0 from MATCHED to MILD_HOT, so these same
+ * cell IDs now carry a small material gain error instead of none -- the
+ * fixture is pinned by cell ID, not by A6 category, so this is unchanged
+ * mechanically; it is called out here so a reader is not confused by the
+ * stale premise. */
 static const char *const GATE3_PINNED_CELLS[] = {
     "ST1-049", "ST1-057", "ST1-113", "ST1-121", "ST1-177", "ST1-241", "ST1-249",
 };

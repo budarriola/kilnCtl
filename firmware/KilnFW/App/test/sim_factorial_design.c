@@ -59,7 +59,11 @@ size_t sim_factorial_generate(sim_factorial_cell_t *out, size_t out_capacity)
     static const float A3[2] = {SIM_FAC_A3_LOAD_CENTRIC, SIM_FAC_A3_NEAR_ELEMENT};
     static const float A4[2] = {SIM_FAC_A4_BENCH_SPAN, SIM_FAC_A4_KILN_SPAN};
     static const float A5[2] = {SIM_FAC_A5_SLOW, SIM_FAC_A5_FAST};
-    static const sim_fac_a6_tune_t A6[2] = {SIM_FAC_A6_MATCHED, SIM_FAC_A6_HOT};
+    // 2026-09-16 rebuild: MATCHED (no gain error, cannot ever activate
+    // adaptive_tune) replaced by MILD_HOT, a real-but-settleable mismatch --
+    // see the header's comment on sim_fac_a6_tune_t and
+    // docs/audits/adaptive_fuzzy_section8_cell_mix_rebuild_2026-09-16.md.
+    static const sim_fac_a6_tune_t A6[2] = {SIM_FAC_A6_MILD_HOT, SIM_FAC_A6_HOT};
     static const float A7[2] = {SIM_FAC_A7_LOAD_LEAKS, SIM_FAC_A7_ELEMENT_LEAKS};
     static const float A8[2] = {SIM_FAC_A8_ISOTHERMAL, SIM_FAC_A8_GRADIENT};
 

@@ -47,14 +47,28 @@ typedef enum {
 
 // Factor A6: PID tune mismatch. Categorical, 2 informative degrees of
 // freedom per §1.6 (loop-gain error, integral-time error) even though it is
-// carried here as 4 named categories -- MATCHED/HOT are the stage-1
-// screening pair; COLD/SLOW_INTEGRAL are stage-2-only diagnostic cells
-// (§1.6, §4.3's "Tune block").
+// carried here as 5 named categories.
+//
+// 2026-09-16 section-8 rebuild (docs/audits/adaptive_fuzzy_section8_cell_mix_rebuild_2026-09-16.md):
+// stage 1's screening pair used to be {MATCHED, HOT}, which put NO gain
+// error at all into 54.6% of the 260-cell campaign (every MATCHED cell) and
+// an error so large in most of the rest (HOT's 2x/0.5x) that the dwell
+// residual never settled below adaptive_tune's slope floor. MATCHED is kept
+// (used as the reference level for the curvature/high-Bi blocks, which
+// intentionally hold tune fixed while varying other factors) but is no
+// longer one of stage 1's two varied levels. MILD_HOT replaces it there: a
+// real, material gain error (comfortably above
+// ADAPTIVE_TUNE_MIN_MATERIAL_MOVE_FRAC = 0.5%) sized to actually settle
+// inside the 28*tau adaptive-arm dwell. HOT itself was also softened for the
+// same reason -- see tune_mismatch_for() in sim_factorial_driver.c, which is
+// the actual source of truth for the multipliers; COLD/SLOW_INTEGRAL remain
+// stage-2-only diagnostic cells (§1.6, §4.3's "Tune block").
 typedef enum {
     SIM_FAC_A6_MATCHED = 0,
     SIM_FAC_A6_HOT,
     SIM_FAC_A6_COLD,
     SIM_FAC_A6_SLOW_INTEGRAL,
+    SIM_FAC_A6_MILD_HOT,
     SIM_FAC_A6_COUNT,
 } sim_fac_a6_tune_t;
 
