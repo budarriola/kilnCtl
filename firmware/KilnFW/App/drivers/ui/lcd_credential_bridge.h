@@ -7,12 +7,20 @@
 // into persist/, so a future audit of "what touches web_auth_store.h" finds
 // exactly one small file, not scattered #includes across the UI glue.
 //
-// Not host-tested itself (thin glue over two already-tested modules, same
-// convention as ui_lcd_keypad.c/ui_lcd_lock.c) -- what IS tested is that
-// lcd_auth_state.c's submit logic and web_auth_store.c's verify logic each
-// do the right thing in isolation; this file just connects them.
+// This file DOES carry its own logic worth testing directly, even though it
+// is thin: the try-administrator-then-user role ordering in
+// lcd_credential_verify_pin(), and the ABSENT/OK/UNREADABLE -> effective
+// "enabled" collapse in lcd_credential_load_policy(). web_auth_store.c's own
+// host tests cover web_auth_store_verify_pin()/web_auth_policy_effective_
+// enabled() in isolation, but not how this file combines them -- see
+// App/test/test_lcd_credential_bridge.c.
 #ifndef KILNCTL_LCD_CREDENTIAL_BRIDGE_H
 #define KILNCTL_LCD_CREDENTIAL_BRIDGE_H
+
+#include <stdint.h>
+
+#include "lcd_auth_state.h"
+#include "ui_lcd_lock.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -23,6 +31,16 @@ extern "C" {
 // verify seam and lcd_credential_load_policy() as the lock's policy seam,
 // replacing the fail-closed/auth-off stubs those modules default to.
 void lcd_credential_bridge_init(void);
+
+// --- Exposed for host testing (App/test/test_lcd_credential_bridge.c) -----
+// Production code never calls these directly -- it goes through the seams
+// via lcd_credential_bridge_init() above. Not static so the two decisions
+// this file makes on its own (role ordering, effective-enabled collapse)
+// can be exercised against a fake_kv-backed web_auth_store, the same
+// "exposed for host tests" convention as adaptive_tune.h and
+// safety_stack_margin_http.h use for their own pure helpers.
+lcd_pin_role_t lcd_credential_verify_pin(const char *digits, uint8_t len);
+ui_lcd_lock_policy_t lcd_credential_load_policy(void);
 
 #ifdef __cplusplus
 }

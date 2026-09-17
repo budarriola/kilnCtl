@@ -1495,6 +1495,27 @@ try {
 
     Invoke-HostTestExe -Name "web_auth_store" -ExePath $exe43 -BuildCmd $cmd43
 
+    # ---- test_lcd_credential_bridge.c: its own 44th, separate executable --
+    # lcd_credential_bridge.c wires the LCD keypad/lock seams to
+    # web_auth_store.c and carries two decisions of its own worth testing in
+    # combination (role ordering, effective-enabled collapse) -- see that
+    # file's header comment. Same isolation rationale and link set as exe43
+    # immediately above: needs psa/crypto.h's host stub for real PBKDF2-style
+    # hashing via web_auth_store.c, and the same fake_kv.c/hal_status.c/
+    # hal_esp_common.c minimal set. Does NOT link lcd_auth_state.c or
+    # ui_lcd_lock.c -- the latter is LVGL-dependent and not host-testable, so
+    # the test file supplies its own trivial stub definitions of both
+    # modules' setter functions instead.
+    $exe44 = Join-Path $outDir "kilnctl_host_tests_lcd_credential_bridge.exe"
+    $lcbObjDir = Join-Path $outDir "lcb"
+    New-Item -ItemType Directory -Force -Path $lcbObjDir | Out-Null
+    $cmd44 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$lcbObjDir\\`" /Fe:`"$exe44`" `"$(Join-Path $testDir 'test_lcd_credential_bridge.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "lcd_credential_bridge" -ExePath $exe44 -BuildCmd $cmd44
+
     # ---- sim_iter_tune.exe / sim_wide_temp_sweep.exe: data-generating
     # harnesses (ITER_TUNE_REDESIGN_PLAN.md sec 6/7), not TEST_CHECK
     # pass/fail suites -- their stdout is the evidence for the audit docs
@@ -1904,7 +1925,11 @@ try {
     # Invoke-HostTestExe call -- docs/SCENARIO_SIMULATION_PLAN.md WI-10's
     # strength_pct cross-firing adapter simulation arm (design doc
     # docs/audits/strength_pct_adapter_design_2026-09-16.md).
-    $totalExpected = 49
+    # 49 -> 50: test_lcd_credential_bridge.c added as its own 50th
+    # Invoke-HostTestExe call -- lcd_credential_bridge.c's role-ordering and
+    # effective-enabled-collapse logic, previously untested (see that file's
+    # header comment and App/test/test_lcd_credential_bridge.c).
+    $totalExpected = 50
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the

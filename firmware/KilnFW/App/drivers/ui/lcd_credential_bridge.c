@@ -10,7 +10,7 @@
 // PIN and report whichever one matched. web_auth_pin_check()'s
 // SAME_AS_OTHER rule guarantees the two PINs never collide, so at most one
 // of these two calls can ever succeed for a given `digits`.
-static lcd_pin_role_t lcd_credential_verify_pin(const char *digits, uint8_t len)
+lcd_pin_role_t lcd_credential_verify_pin(const char *digits, uint8_t len)
 {
     (void)len; // digits is NUL-terminated (lcd_pin_entry_t's invariant);
                // web_auth_store_verify_pin() takes a NUL-terminated string.
@@ -33,7 +33,7 @@ static lcd_pin_role_t lcd_credential_verify_pin(const char *digits, uint8_t len)
 // underlying PIN records are then also UNREADABLE in that same case,
 // lcd_credential_verify_pin() above denies every PIN unconditionally -- the
 // panel locks and stays locked until the physical reset gesture (item 10).
-static ui_lcd_lock_policy_t lcd_credential_load_policy(void)
+ui_lcd_lock_policy_t lcd_credential_load_policy(void)
 {
     web_auth_policy_t stored;
     web_auth_load_status_t status = web_auth_store_load_policy(&stored);
