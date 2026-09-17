@@ -32,6 +32,18 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// web_auth_store.h (landed c3008eb8) owns credential-role identity
+// (web_auth_role_t: WEB_AUTH_ROLE_USER/_ADMINISTRATOR) for its
+// PBKDF2-backed password/PIN records. This module's role concept is a
+// distinct, session-tier notion that also needs a NONE (no session) value
+// the credential-role enum has no room for -- so it gets its own type,
+// web_auth_session_role_t, rather than colliding on the name
+// `web_auth_role_t` (and its `WEB_AUTH_ROLE_USER` enumerator) when both
+// headers are included together, as the real login/enforcement code will
+// need to. Included here (a pure header, no I/O) purely for the credential
+// verification seam's function-pointer types below.
+#include "../persist/web_auth_store.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -39,10 +51,10 @@ extern "C" {
 // --- Roles -----------------------------------------------------------------
 
 typedef enum {
-    WEB_AUTH_ROLE_NONE = 0, // no session / unauthenticated
-    WEB_AUTH_ROLE_USER,
-    WEB_AUTH_ROLE_ADMIN,
-} web_auth_role_t;
+    WEB_AUTH_SESSION_ROLE_NONE = 0, // no session / unauthenticated
+    WEB_AUTH_SESSION_ROLE_USER,
+    WEB_AUTH_SESSION_ROLE_ADMIN,
+} web_auth_session_role_t;
 
 // --- Session slots (WEB_AUTH_PLAN.md section 4) -----------------------------
 //
@@ -61,7 +73,7 @@ typedef struct {
                                                     // constant-time, see
                                                     // web_auth_constant_time_equal()
     char     client_ip[WEB_AUTH_CLIENT_IP_LEN];
-    web_auth_role_t role;
+    web_auth_session_role_t role;
     uint32_t issued_ms;
     uint32_t last_seen_ms;
     bool     prompted; // true once the 10 s stay-unlocked prompt has been surfaced
@@ -96,7 +108,7 @@ bool web_auth_constant_time_equal(const uint8_t *a, const uint8_t *b, size_t len
 // module performs no dedup); the caller is responsible for minting a fresh
 // random token per login, same as UI_PLAN.md's original design.
 size_t web_auth_table_create_session(web_auth_table_t *t, const uint8_t token_hash[WEB_AUTH_TOKEN_HASH_LEN],
-                                      const char *client_ip, web_auth_role_t role, uint32_t now_ms);
+                                      const char *client_ip, web_auth_session_role_t role, uint32_t now_ms);
 
 // Looks up a session by token hash (compared constant-time against every
 // in-use slot -- there is no faster indexed lookup here, and 8 slots makes
@@ -120,7 +132,7 @@ void web_auth_table_destroy_session(web_auth_table_t *t, size_t idx);
 // Explicit teardown of every slot holding `role` (WEB_AUTH_PLAN.md section 6:
 // "changing a password invalidates every session for that role"). Slots of
 // any other role are left untouched.
-void web_auth_table_destroy_role(web_auth_table_t *t, web_auth_role_t role);
+void web_auth_table_destroy_role(web_auth_table_t *t, web_auth_session_role_t role);
 
 // Explicit teardown of every slot, regardless of role (WEB_AUTH_PLAN.md
 // section 11: "Enabling auth: every existing session is cleared").
@@ -133,14 +145,14 @@ void web_auth_table_destroy_all(web_auth_table_t *t);
 // needed since there is only ever one.
 typedef struct {
     bool     active;
-    web_auth_role_t role; // which PIN was entered decides the tier -- section 7
+    web_auth_session_role_t role; // which PIN was entered decides the tier -- section 7
     uint32_t issued_ms;
     uint32_t last_seen_ms;
     bool     prompted;
 } web_auth_lcd_session_t;
 
 void web_auth_lcd_session_init(web_auth_lcd_session_t *s);
-void web_auth_lcd_session_create(web_auth_lcd_session_t *s, web_auth_role_t role, uint32_t now_ms);
+void web_auth_lcd_session_create(web_auth_lcd_session_t *s, web_auth_session_role_t role, uint32_t now_ms);
 void web_auth_lcd_session_touch(web_auth_lcd_session_t *s, uint32_t now_ms);
 void web_auth_lcd_session_destroy(web_auth_lcd_session_t *s);
 
@@ -189,35 +201,43 @@ bool web_auth_session_in_prompt_window(uint32_t last_seen_ms, uint32_t timeout_s
 // "auth off" branch lives in one place, tested once, rather than being
 // re-derived at every call site.
 //
-// Returns WEB_AUTH_ROLE_ADMIN immediately, with none of the other
+// Returns WEB_AUTH_SESSION_ROLE_ADMIN immediately, with none of the other
 // parameters inspected, when `web_enabled` is false -- collapsing every
 // tier to full access, as section 11 requires. When `web_enabled` is true,
 // looks the token up in `t` (NULL token_hash means "no session presented",
 // e.g. a request with no cookie) and returns its role if the session is
 // both found and still valid under `timeout_s` at `now_ms`; returns
-// WEB_AUTH_ROLE_NONE otherwise (unknown token, or a token that IS in the
-// table but has expired -- section 8's lock: "The session drops to the
+// WEB_AUTH_SESSION_ROLE_NONE otherwise (unknown token, or a token that IS in
+// the table but has expired -- section 8's lock: "The session drops to the
 // unauthenticated tier").
-web_auth_role_t web_auth_effective_role(const web_auth_table_t *t, bool web_enabled,
-                                         const uint8_t *token_hash, uint32_t timeout_s, uint32_t now_ms);
+//
+// `web_enabled` is a plain, caller-resolved boolean -- this function has
+// never read any stored policy flag itself. The section 5 enforcement point
+// (the caller) is expected to derive it via
+// web_auth_policy_effective_enabled(status, stored_enabled) (from the now-
+// landed web_auth_store.h) before calling here, so the UNREADABLE-record
+// fail-closed behaviour lives in that one collapse function rather than
+// being re-derived at this call site -- this signature does not need to
+// change to support that; it already only ever takes an already-resolved
+// bool.
+web_auth_session_role_t web_auth_effective_role(const web_auth_table_t *t, bool web_enabled,
+                                                 const uint8_t *token_hash, uint32_t timeout_s, uint32_t now_ms);
 
 // --- Credential verification seam --------------------------------------------
 //
-// Section 2/3 (credential storage, PBKDF2, strength rules) belongs to a
-// different pass. Until that header exists, this module -- and the login
-// handler that will call into it -- code against this function-pointer
-// contract instead of a concrete header, so adopting the real
-// `kiln_auth`-backed verifier is a one-line change: swap the function
-// pointer this callback type is bound to, nothing here has to change.
-//
-// A real implementation takes a username/password pair and the role it
-// claims to be, and returns true iff that credential is currently valid for
-// that role (constant-time compare against the stored hash, its own
-// business, not this module's). This module places no requirement on how
-// `username`/`password` are represented beyond NUL-terminated C strings, so
-// it imposes no assumption about the eventual PBKDF2/storage shape.
-typedef bool (*web_auth_credential_verify_fn)(const char *username, const char *password,
-                                               web_auth_role_t claimed_role, void *ctx);
+// Section 2/3's credential storage has landed (web_auth_store.h,
+// c3008eb8): web_auth_store_verify_password(role, password) and
+// web_auth_store_verify_pin(role, pin). These two typedefs are shaped to
+// match those functions' signatures exactly, so wiring the real verifiers
+// in is a direct assignment at the call site --
+//     web_auth_verify_password_fn verify_pw = web_auth_store_verify_password;
+//     web_auth_verify_pin_fn      verify_pin = web_auth_store_verify_pin;
+// -- not an adapter/shim. `role` here is web_auth_store.h's credential-role
+// type (WEB_AUTH_ROLE_USER / WEB_AUTH_ROLE_ADMINISTRATOR), distinct from
+// this file's own web_auth_session_role_t (see the top-of-file comment on
+// that collision).
+typedef bool (*web_auth_verify_password_fn)(web_auth_role_t role, const char *password);
+typedef bool (*web_auth_verify_pin_fn)(web_auth_role_t role, const char *pin);
 
 #ifdef __cplusplus
 }

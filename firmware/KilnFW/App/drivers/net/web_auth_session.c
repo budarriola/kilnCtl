@@ -1,4 +1,4 @@
-// web_auth_session.c -- see web_auth_session.h for scope/ownership.
+﻿// web_auth_session.c -- see web_auth_session.h for scope/ownership.
 #include "web_auth_session.h"
 
 #include <string.h>
@@ -33,7 +33,7 @@ static size_t find_lru_slot(const web_auth_table_t *t)
 }
 
 size_t web_auth_table_create_session(web_auth_table_t *t, const uint8_t token_hash[WEB_AUTH_TOKEN_HASH_LEN],
-                                      const char *client_ip, web_auth_role_t role, uint32_t now_ms)
+                                      const char *client_ip, web_auth_session_role_t role, uint32_t now_ms)
 {
     size_t idx = WEB_AUTH_WEB_SLOT_COUNT; // sentinel, replaced below
     for (size_t i = 0; i < WEB_AUTH_WEB_SLOT_COUNT; i++) {
@@ -99,7 +99,7 @@ void web_auth_table_destroy_session(web_auth_table_t *t, size_t idx)
     memset(&t->slots[idx], 0, sizeof(t->slots[idx]));
 }
 
-void web_auth_table_destroy_role(web_auth_table_t *t, web_auth_role_t role)
+void web_auth_table_destroy_role(web_auth_table_t *t, web_auth_session_role_t role)
 {
     for (size_t i = 0; i < WEB_AUTH_WEB_SLOT_COUNT; i++) {
         if (t->slots[i].in_use && t->slots[i].role == role) {
@@ -118,7 +118,7 @@ void web_auth_lcd_session_init(web_auth_lcd_session_t *s)
     memset(s, 0, sizeof(*s));
 }
 
-void web_auth_lcd_session_create(web_auth_lcd_session_t *s, web_auth_role_t role, uint32_t now_ms)
+void web_auth_lcd_session_create(web_auth_lcd_session_t *s, web_auth_session_role_t role, uint32_t now_ms)
 {
     memset(s, 0, sizeof(*s));
     s->active = true;
@@ -174,7 +174,7 @@ bool web_auth_session_in_prompt_window(uint32_t last_seen_ms, uint32_t timeout_s
     return elapsed_ms >= (timeout_ms - WEB_AUTH_PROMPT_WINDOW_MS);
 }
 
-web_auth_role_t web_auth_effective_role(const web_auth_table_t *t, bool web_enabled,
+web_auth_session_role_t web_auth_effective_role(const web_auth_table_t *t, bool web_enabled,
                                          const uint8_t *token_hash, uint32_t timeout_s, uint32_t now_ms)
 {
     if (!web_enabled) {
@@ -183,18 +183,18 @@ web_auth_role_t web_auth_effective_role(const web_auth_table_t *t, bool web_enab
         // before any session lookup." Returning ADMIN here (the most
         // permissive role) unconditionally, with no table access at all,
         // IS that short-circuit -- no added latency, no new failure mode.
-        return WEB_AUTH_ROLE_ADMIN;
+        return WEB_AUTH_SESSION_ROLE_ADMIN;
     }
     if (!token_hash) {
-        return WEB_AUTH_ROLE_NONE;
+        return WEB_AUTH_SESSION_ROLE_NONE;
     }
     int idx = web_auth_table_find_by_token(t, token_hash);
     if (idx < 0) {
-        return WEB_AUTH_ROLE_NONE;
+        return WEB_AUTH_SESSION_ROLE_NONE;
     }
     const web_auth_slot_t *slot = &t->slots[(size_t)idx];
     if (!web_auth_session_is_valid(slot->last_seen_ms, timeout_s, now_ms)) {
-        return WEB_AUTH_ROLE_NONE;
+        return WEB_AUTH_SESSION_ROLE_NONE;
     }
     return slot->role;
 }

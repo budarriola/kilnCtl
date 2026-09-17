@@ -1,4 +1,4 @@
-// Host tests for App/drivers/net/web_auth_session.c --
+﻿// Host tests for App/drivers/net/web_auth_session.c --
 // docs/WEB_AUTH_PLAN.md section 4 (session mechanism) and the web half of
 // section 8 (inactivity lock + 10 s stay-unlocked prompt). No ESP-IDF
 // dependency.
@@ -26,11 +26,11 @@ static void test_table_init_and_lookup(void)
     make_hash(h1, 1);
     TEST_CHECK(web_auth_table_find_by_token(&t, h1) == -1, "empty table finds nothing");
 
-    size_t idx = web_auth_table_create_session(&t, h1, "10.0.0.5", WEB_AUTH_ROLE_ADMIN, 1000);
+    size_t idx = web_auth_table_create_session(&t, h1, "10.0.0.5", WEB_AUTH_SESSION_ROLE_ADMIN, 1000);
     TEST_CHECK(idx < WEB_AUTH_WEB_SLOT_COUNT, "create_session returns a real slot index");
     TEST_CHECK(web_auth_table_find_by_token(&t, h1) == (int)idx, "lookup finds the session just created");
     TEST_CHECK(strcmp(t.slots[idx].client_ip, "10.0.0.5") == 0, "client_ip stored");
-    TEST_CHECK(t.slots[idx].role == WEB_AUTH_ROLE_ADMIN, "role stored");
+    TEST_CHECK(t.slots[idx].role == WEB_AUTH_SESSION_ROLE_ADMIN, "role stored");
 
     uint8_t h2[WEB_AUTH_TOKEN_HASH_LEN];
     make_hash(h2, 200);
@@ -49,15 +49,15 @@ static void test_unknown_token_effective_role(void)
 
     uint8_t issued[WEB_AUTH_TOKEN_HASH_LEN];
     make_hash(issued, 5);
-    web_auth_table_create_session(&t, issued, "1.2.3.4", WEB_AUTH_ROLE_USER, 0);
+    web_auth_table_create_session(&t, issued, "1.2.3.4", WEB_AUTH_SESSION_ROLE_USER, 0);
 
     uint8_t unknown[WEB_AUTH_TOKEN_HASH_LEN];
     make_hash(unknown, 99);
-    TEST_CHECK(web_auth_effective_role(&t, true, unknown, 300, 100) == WEB_AUTH_ROLE_NONE,
+    TEST_CHECK(web_auth_effective_role(&t, true, unknown, 300, 100) == WEB_AUTH_SESSION_ROLE_NONE,
                "a token that was never issued resolves to NONE, not the role of some other slot");
-    TEST_CHECK(web_auth_effective_role(&t, true, issued, 300, 100) == WEB_AUTH_ROLE_USER,
+    TEST_CHECK(web_auth_effective_role(&t, true, issued, 300, 100) == WEB_AUTH_SESSION_ROLE_USER,
                "sanity: the actually-issued token still resolves correctly");
-    TEST_CHECK(web_auth_effective_role(&t, true, NULL, 300, 100) == WEB_AUTH_ROLE_NONE,
+    TEST_CHECK(web_auth_effective_role(&t, true, NULL, 300, 100) == WEB_AUTH_SESSION_ROLE_NONE,
                "no token presented at all (NULL) is NONE, not a crash");
 }
 
@@ -73,14 +73,14 @@ static void test_lru_eviction(void)
         make_hash(hashes[i], (uint8_t)(10 + i));
         // Ascending last_seen_ms so slot 0 is always the least-recently-seen
         // going into the 9th create.
-        web_auth_table_create_session(&t, hashes[i], "0.0.0.0", WEB_AUTH_ROLE_USER, (uint32_t)(1000 + i));
+        web_auth_table_create_session(&t, hashes[i], "0.0.0.0", WEB_AUTH_SESSION_ROLE_USER, (uint32_t)(1000 + i));
     }
     for (int i = 0; i < (int)WEB_AUTH_WEB_SLOT_COUNT; i++) {
         TEST_CHECK(web_auth_table_find_by_token(&t, hashes[i]) != -1, "all 8 initial sessions are present");
     }
 
     make_hash(hashes[WEB_AUTH_WEB_SLOT_COUNT], 250);
-    web_auth_table_create_session(&t, hashes[WEB_AUTH_WEB_SLOT_COUNT], "0.0.0.0", WEB_AUTH_ROLE_ADMIN, 5000);
+    web_auth_table_create_session(&t, hashes[WEB_AUTH_WEB_SLOT_COUNT], "0.0.0.0", WEB_AUTH_SESSION_ROLE_ADMIN, 5000);
 
     TEST_CHECK(web_auth_table_find_by_token(&t, hashes[0]) == -1,
                "the 9th session evicts the least-recently-seen (slot 0's token)");
@@ -102,7 +102,7 @@ static void test_touch_updates_lru_order(void)
     uint8_t hashes[WEB_AUTH_WEB_SLOT_COUNT][WEB_AUTH_TOKEN_HASH_LEN];
     for (int i = 0; i < (int)WEB_AUTH_WEB_SLOT_COUNT; i++) {
         make_hash(hashes[i], (uint8_t)(30 + i));
-        web_auth_table_create_session(&t, hashes[i], "0.0.0.0", WEB_AUTH_ROLE_USER, (uint32_t)(1000 + i));
+        web_auth_table_create_session(&t, hashes[i], "0.0.0.0", WEB_AUTH_SESSION_ROLE_USER, (uint32_t)(1000 + i));
     }
     // Touch slot 0 (originally the oldest) so it is now the most recent.
     int idx0 = web_auth_table_find_by_token(&t, hashes[0]);
@@ -110,7 +110,7 @@ static void test_touch_updates_lru_order(void)
 
     uint8_t newcomer[WEB_AUTH_TOKEN_HASH_LEN];
     make_hash(newcomer, 250);
-    web_auth_table_create_session(&t, newcomer, "0.0.0.0", WEB_AUTH_ROLE_ADMIN, 10000);
+    web_auth_table_create_session(&t, newcomer, "0.0.0.0", WEB_AUTH_SESSION_ROLE_ADMIN, 10000);
 
     TEST_CHECK(web_auth_table_find_by_token(&t, hashes[0]) != -1,
                "a touched slot is no longer the LRU victim");
@@ -129,8 +129,8 @@ static void test_destroy_session_and_role(void)
     uint8_t admin_h[WEB_AUTH_TOKEN_HASH_LEN];
     make_hash(user_h, 40);
     make_hash(admin_h, 60);
-    size_t user_idx = web_auth_table_create_session(&t, user_h, "0.0.0.0", WEB_AUTH_ROLE_USER, 1000);
-    web_auth_table_create_session(&t, admin_h, "0.0.0.0", WEB_AUTH_ROLE_ADMIN, 1000);
+    size_t user_idx = web_auth_table_create_session(&t, user_h, "0.0.0.0", WEB_AUTH_SESSION_ROLE_USER, 1000);
+    web_auth_table_create_session(&t, admin_h, "0.0.0.0", WEB_AUTH_SESSION_ROLE_ADMIN, 1000);
 
     web_auth_table_destroy_session(&t, user_idx);
     TEST_CHECK(web_auth_table_find_by_token(&t, user_h) == -1, "logout removes exactly that session");
@@ -142,10 +142,10 @@ static void test_destroy_session_and_role(void)
     make_hash(admin1, 1);
     make_hash(admin2, 2);
     make_hash(user1, 3);
-    web_auth_table_create_session(&t, admin1, "0.0.0.0", WEB_AUTH_ROLE_ADMIN, 1000);
-    web_auth_table_create_session(&t, admin2, "0.0.0.0", WEB_AUTH_ROLE_ADMIN, 1000);
-    web_auth_table_create_session(&t, user1, "0.0.0.0", WEB_AUTH_ROLE_USER, 1000);
-    web_auth_table_destroy_role(&t, WEB_AUTH_ROLE_ADMIN);
+    web_auth_table_create_session(&t, admin1, "0.0.0.0", WEB_AUTH_SESSION_ROLE_ADMIN, 1000);
+    web_auth_table_create_session(&t, admin2, "0.0.0.0", WEB_AUTH_SESSION_ROLE_ADMIN, 1000);
+    web_auth_table_create_session(&t, user1, "0.0.0.0", WEB_AUTH_SESSION_ROLE_USER, 1000);
+    web_auth_table_destroy_role(&t, WEB_AUTH_SESSION_ROLE_ADMIN);
     TEST_CHECK(web_auth_table_find_by_token(&t, admin1) == -1, "role-wide destroy clears the first admin slot");
     TEST_CHECK(web_auth_table_find_by_token(&t, admin2) == -1, "role-wide destroy clears the second admin slot");
     TEST_CHECK(web_auth_table_find_by_token(&t, user1) != -1, "a user-role slot is untouched by an admin-role destroy");
@@ -203,7 +203,7 @@ static void test_touch_extends_and_clears_prompt(void)
     web_auth_table_init(&t);
     uint8_t h[WEB_AUTH_TOKEN_HASH_LEN];
     make_hash(h, 7);
-    size_t idx = web_auth_table_create_session(&t, h, "0.0.0.0", WEB_AUTH_ROLE_USER, 0);
+    size_t idx = web_auth_table_create_session(&t, h, "0.0.0.0", WEB_AUTH_SESSION_ROLE_USER, 0);
     t.slots[idx].prompted = true; // simulate the prompt having been shown
 
     web_auth_table_touch(&t, idx, 5000);
@@ -230,9 +230,9 @@ static void test_auth_disabled_inert_path(void)
 
     uint8_t random_token[WEB_AUTH_TOKEN_HASH_LEN];
     make_hash(random_token, 123);
-    TEST_CHECK(web_auth_effective_role(&t, false, random_token, 60, 1000) == WEB_AUTH_ROLE_ADMIN,
+    TEST_CHECK(web_auth_effective_role(&t, false, random_token, 60, 1000) == WEB_AUTH_SESSION_ROLE_ADMIN,
                "auth disabled + no session anywhere still resolves to ADMIN (full access)");
-    TEST_CHECK(web_auth_effective_role(&t, false, NULL, 60, 1000) == WEB_AUTH_ROLE_ADMIN,
+    TEST_CHECK(web_auth_effective_role(&t, false, NULL, 60, 1000) == WEB_AUTH_SESSION_ROLE_ADMIN,
                "auth disabled + no token presented at all still resolves to ADMIN");
 
     // Even an expired/garbage table must not leak through and produce NONE:
@@ -240,13 +240,13 @@ static void test_auth_disabled_inert_path(void)
     // consulted while auth is off.
     uint8_t issued[WEB_AUTH_TOKEN_HASH_LEN];
     make_hash(issued, 1);
-    web_auth_table_create_session(&t, issued, "0.0.0.0", WEB_AUTH_ROLE_USER, 0);
-    TEST_CHECK(web_auth_effective_role(&t, false, issued, 60, 999999999u) == WEB_AUTH_ROLE_ADMIN,
+    web_auth_table_create_session(&t, issued, "0.0.0.0", WEB_AUTH_SESSION_ROLE_USER, 0);
+    TEST_CHECK(web_auth_effective_role(&t, false, issued, 60, 999999999u) == WEB_AUTH_SESSION_ROLE_ADMIN,
                "auth disabled ignores real (even long-expired) session state and still grants ADMIN");
 
     // And the reverse: with auth ENABLED, an unknown/garbage token on a
     // non-empty table must not accidentally resolve to ADMIN.
-    TEST_CHECK(web_auth_effective_role(&t, true, random_token, 60, 1000) == WEB_AUTH_ROLE_NONE,
+    TEST_CHECK(web_auth_effective_role(&t, true, random_token, 60, 1000) == WEB_AUTH_SESSION_ROLE_NONE,
                "auth enabled + unrelated token is NONE -- the disabled-path shortcut does not leak"
                " into the enabled path");
 }
@@ -259,8 +259,8 @@ static void test_lcd_session(void)
     web_auth_lcd_session_init(&s);
     TEST_CHECK(!s.active, "freshly initialized LCD session is inactive");
 
-    web_auth_lcd_session_create(&s, WEB_AUTH_ROLE_ADMIN, 1000);
-    TEST_CHECK(s.active && s.role == WEB_AUTH_ROLE_ADMIN, "create activates with the given role");
+    web_auth_lcd_session_create(&s, WEB_AUTH_SESSION_ROLE_ADMIN, 1000);
+    TEST_CHECK(s.active && s.role == WEB_AUTH_SESSION_ROLE_ADMIN, "create activates with the given role");
     TEST_CHECK(web_auth_session_is_valid(s.last_seen_ms, 60, 1000 + 60000u), "valid at its own boundary");
     TEST_CHECK(!web_auth_session_is_valid(s.last_seen_ms, 60, 1000 + 60000u + 1u), "expires past its own timeout");
 
@@ -275,7 +275,7 @@ static void test_lcd_session(void)
     // timeout constant, per the owner's "two independent timeouts" decision
     // (section 8) -- the web and LCD callers simply pass their own
     // policy-stored value in.
-    web_auth_lcd_session_create(&s, WEB_AUTH_ROLE_USER, 0);
+    web_auth_lcd_session_create(&s, WEB_AUTH_SESSION_ROLE_USER, 0);
     TEST_CHECK(web_auth_session_is_valid(s.last_seen_ms, 5 /* 5 s LCD timeout */, 4999),
                "an LCD session honors whatever (possibly much shorter) timeout its caller passes,"
                " independent of any web session in play");
