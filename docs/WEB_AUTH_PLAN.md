@@ -728,6 +728,15 @@ enabled, disabled, locked, or mid-prompt:**
   for lack of a session. A stop makes the kiln safer; there is no threat model
   in which blocking it is the safe choice, and `app.js` already calls it from
   the unauthenticated dashboard.
+- `POST /api/zones/current_sweep/abort`, `POST /api/autotune/abort`, and
+  `POST /api/diagnostics/danger/stop`. Nominally ADMIN, but each one aborts an
+  operation that is actively driving relays — the current-sweep task, a
+  running autotune (via `force_relays_off()`), and the danger-mode relay
+  window (via `kiln_io_owner_command_all_relays_off()` plus releasing
+  heat-enable), respectively. The same reasoning as the stop route above
+  applies without modification: an expired or session-less client must be
+  able to end any of these, since `/api/profile_exec/stop` does not own them
+  and cannot substitute for aborting them.
 - The LCD Stop control. `ui_home_fire_btn_cb()` must never route through the
   keypad. On the LCD the Start/Stop control is one merged widget that reads
   "Stop" only while RUNNING or PAUSED — so the gate is: **that widget demands

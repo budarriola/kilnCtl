@@ -107,9 +107,75 @@ static void test_stop_route_allowed_during_bootstrap_needed(void) {
                "tightens ADMIN-tier routes, never SAFETY_REDUCE)");
 }
 
+// UPDATE 2026-09-17: adversarial review (route_tier_table.h at origin/main
+// 1179e2d3) found three more routes that abort operations actively driving
+// heat but were left at ROUTE_TIER_ADMIN -- an expired session could not
+// reach them, so /api/profile_exec/stop's always-reachable stop did not
+// actually cover an in-progress current sweep, autotune, or danger-mode
+// relay window. All three are now ROUTE_TIER_SAFETY_REDUCE in
+// route_tier_table.h; the checks below are the generic, table-driven form of
+// test_stop_route_all_five_combinations_allow() /
+// test_stop_route_allowed_during_bootstrap_needed() above, parameterized by
+// route so a future accidental re-tier of any of the four SAFETY_REDUCE
+// routes is caught here.
+static void check_route_is_safety_reduce_and_always_allowed(const char *uri, httpd_method_t method,
+                                                              const char *label) {
+    route_tier_t tier;
+    char msg[256];
+
+    TEST_CHECK(http_auth_lookup_tier(uri, method, &tier), label);
+    snprintf(msg, sizeof(msg), "%s: tier is ROUTE_TIER_SAFETY_REDUCE, not ADMIN", label);
+    TEST_CHECK(tier == ROUTE_TIER_SAFETY_REDUCE, msg);
+
+    snprintf(msg, sizeof(msg), "%s: auth off -> ALLOW", label);
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, false, false) == HTTP_AUTH_DECISION_ALLOW, msg);
+
+    snprintf(msg, sizeof(msg), "%s: auth on + no session (role NONE) -> ALLOW", label);
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, true, false) == HTTP_AUTH_DECISION_ALLOW, msg);
+
+    snprintf(msg, sizeof(msg), "%s: auth on + user session -> ALLOW", label);
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_USER, true, false) == HTTP_AUTH_DECISION_ALLOW, msg);
+
+    snprintf(msg, sizeof(msg), "%s: auth on + admin session -> ALLOW", label);
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_ADMIN, true, false) == HTTP_AUTH_DECISION_ALLOW, msg);
+
+    snprintf(msg, sizeof(msg), "%s: auth on + no session + bootstrap_needed -> ALLOW", label);
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, true, true) == HTTP_AUTH_DECISION_ALLOW, msg);
+
+    snprintf(msg, sizeof(msg), "%s: auth on + user session + bootstrap_needed -> ALLOW", label);
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_USER, true, true) == HTTP_AUTH_DECISION_ALLOW, msg);
+
+    snprintf(msg, sizeof(msg), "%s: auth on + admin session + bootstrap_needed -> ALLOW", label);
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_ADMIN, true, true) == HTTP_AUTH_DECISION_ALLOW, msg);
+}
+
+static void test_sweep_abort_is_safety_reduce_and_always_allowed(void) {
+    TEST_SECTION("route_tier_table.h -- POST /api/zones/current_sweep/abort is ROUTE_TIER_SAFETY_REDUCE "
+                 "(it aborts the current-sweep task, which drives relays)");
+    check_route_is_safety_reduce_and_always_allowed("/api/zones/current_sweep/abort", HTTP_POST,
+                                                     "POST /api/zones/current_sweep/abort");
+}
+
+static void test_autotune_abort_is_safety_reduce_and_always_allowed(void) {
+    TEST_SECTION("route_tier_table.h -- POST /api/autotune/abort is ROUTE_TIER_SAFETY_REDUCE "
+                 "(it aborts a running autotune via force_relays_off())");
+    check_route_is_safety_reduce_and_always_allowed("/api/autotune/abort", HTTP_POST,
+                                                     "POST /api/autotune/abort");
+}
+
+static void test_danger_stop_is_safety_reduce_and_always_allowed(void) {
+    TEST_SECTION("route_tier_table.h -- POST /api/diagnostics/danger/stop is ROUTE_TIER_SAFETY_REDUCE "
+                 "(it drops relays and releases heat-enable via danger_mode_stop())");
+    check_route_is_safety_reduce_and_always_allowed("/api/diagnostics/danger/stop", HTTP_POST,
+                                                     "POST /api/diagnostics/danger/stop");
+}
+
 void run_test_web_auth_safety_interaction(void) {
     test_stop_route_tier_is_safety_reduce();
     test_clear_trip_is_admin();
     test_stop_route_all_five_combinations_allow();
     test_stop_route_allowed_during_bootstrap_needed();
+    test_sweep_abort_is_safety_reduce_and_always_allowed();
+    test_autotune_abort_is_safety_reduce_and_always_allowed();
+    test_danger_stop_is_safety_reduce_and_always_allowed();
 }

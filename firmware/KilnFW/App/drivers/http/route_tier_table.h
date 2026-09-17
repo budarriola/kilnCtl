@@ -158,7 +158,12 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/api/zones", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/zones/pid", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/zones/current_sweep/start", HTTP_POST, ROUTE_TIER_ADMIN),
-    ROUTE_TIER("/api/zones/current_sweep/abort", HTTP_POST, ROUTE_TIER_ADMIN),
+    /* SAFETY_REDUCE, not ADMIN: aborts the current-sweep task
+     * (zones_current_sweep_abort(), zones_current_sweep_task.c), which drives
+     * relays to measure per-zone current -- an expired session must not be
+     * able to keep that running. Same principle as /api/profile_exec/stop
+     * above. */
+    ROUTE_TIER("/api/zones/current_sweep/abort", HTTP_POST, ROUTE_TIER_SAFETY_REDUCE),
     ROUTE_TIER("/api/zones/current_sweep/status", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/settings/tz", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/settings/display_power", HTTP_POST, ROUTE_TIER_ADMIN),
@@ -209,7 +214,11 @@ static const route_tier_entry_t kRouteTierTable[] = {
     /* Tuning */
     ROUTE_TIER("/api/autotune/start", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/autotune/accept", HTTP_POST, ROUTE_TIER_ADMIN),
-    ROUTE_TIER("/api/autotune/abort", HTTP_POST, ROUTE_TIER_ADMIN),
+    /* SAFETY_REDUCE, not ADMIN: aborts a running autotune
+     * (autotune_engine_abort() -> abort_locked() -> force_relays_off(),
+     * autotune_engine_guard.c), which drives relays for the relay-step test.
+     * Same principle as /api/profile_exec/stop above. */
+    ROUTE_TIER("/api/autotune/abort", HTTP_POST, ROUTE_TIER_SAFETY_REDUCE),
     ROUTE_TIER("/api/adaptive_tune/enable", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/adaptive_tune/revert", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/autotune", HTTP_GET, ROUTE_TIER_ADMIN),
@@ -224,7 +233,12 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/api/diagnostics/danger/enable", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/diagnostics/danger/relay", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/diagnostics/danger/start", HTTP_POST, ROUTE_TIER_ADMIN),
-    ROUTE_TIER("/api/diagnostics/danger/stop", HTTP_POST, ROUTE_TIER_ADMIN),
+    /* SAFETY_REDUCE, not ADMIN: exits the danger-mode relay window
+     * (danger_mode_stop() -> kiln_io_owner_command_all_relays_off() plus
+     * releasing heat-enable, danger_mode.c), which is a window explicitly
+     * armed to drive relays outside the normal safety-gated path. Same
+     * principle as /api/profile_exec/stop above. */
+    ROUTE_TIER("/api/diagnostics/danger/stop", HTTP_POST, ROUTE_TIER_SAFETY_REDUCE),
     ROUTE_TIER("/api/diagnostics/danger", HTTP_GET, ROUTE_TIER_ADMIN),
 
     /* OTA, reset, filesystem -- includes the nine routes that authenticate
