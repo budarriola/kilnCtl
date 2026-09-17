@@ -995,16 +995,25 @@ def read_esp_coredump(host: Optional[str] = None, out_path: Optional[str] = None
     that this tool exists to make unnecessary.
 
     Fetches into `out_path` (default: a coredump_<host>.bin file under the
-    OS temp dir) and, if `symbolize` (default True), also finds the matching
-    archived ELF via `find_crash_elf()` and runs espcoredump against both.
-    Fails LOUD -- never a plausible-looking wrong backtrace -- on: no
-    coredump present, a truncated transfer, no archived ELF found for the
-    board's reported fw_build, or an ELF that does not match the coredump
-    (espcoredump's own SHA256 check, propagated verbatim). Pass `elf_path`
-    to symbolize against a specific ELF instead of looking one up.
+    OS temp dir, overwritten on repeated calls -- a scratch working copy,
+    NOT the durable record) and, if `symbolize` (default True), also finds
+    the matching archived ELF via `find_crash_elf()` and runs espcoredump
+    against both. Fails LOUD -- never a plausible-looking wrong backtrace --
+    on: no coredump present, a truncated transfer, no archived ELF found for
+    the board's reported fw_build, or an ELF that does not match the
+    coredump (espcoredump's own SHA256 check, propagated verbatim). Pass
+    `elf_path` to symbolize against a specific ELF instead of looking one up.
     Pass `symbolize=False` to only fetch the raw file (e.g. no ESP-IDF
     toolchain available on this machine) -- still gets you the coredump off
-    the board and onto disk, uninspected."""
+    the board and onto disk, uninspected.
+
+    Every successful fetch is ALSO copied into a durable, content-addressed
+    archive (`coredump_fetch.coredump_archive_dir()`, a sibling of build/ so
+    `idf.py fullclean` cannot wipe it -- same rationale as
+    `elf_archive.kiln_archive_dir()`'s 2026-09-15 move) with a provenance
+    sidecar naming the host, the board's fw_build AT FETCH TIME, and when it
+    was fetched. This tool never clears or deletes anything, here or on the
+    board -- `/api/coredump/info`'s presence flag is untouched by a read."""
     from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
     resolved = _ota_resolve_host(host)
 
@@ -1019,6 +1028,26 @@ def read_esp_coredump(host: Optional[str] = None, out_path: Optional[str] = None
         return f"error: {exc}"
 
     result = f"fetched coredump: {n} bytes from {resolved} -> {out_path}"
+
+    # Best-effort fw_build read for the provenance record -- reused below
+    # for ELF lookup when symbolizing, but fetched here unconditionally so
+    # the archive record is written even when symbolize=False.
+    fw_build_for_provenance = None
+    try:
+        fw_build_for_provenance = capability_preflight.get_board_info(resolved).fw_build
+    except Exception:  # noqa: BLE001 - provenance is best-effort, never blocks the archive copy
+        pass
+
+    try:
+        archived = coredump_fetch.archive_coredump(
+            out_path, host=resolved, fw_build_reported=fw_build_for_provenance
+        )
+        result += f"\narchived: {archived.path} (sha256={archived.sha256[:12]}, provenance={archived.provenance_path})"
+    except coredump_fetch.CoredumpFetchError as exc:
+        # Loud, but does not discard an already-successful fetch -- the raw
+        # file at out_path is still valid and reported above.
+        result += f"\nwarning: could not write durable archive copy: {exc}"
+
     if not symbolize:
         return result
 

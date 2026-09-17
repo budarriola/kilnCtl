@@ -36,11 +36,14 @@ subprocess mismatch case).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -59,6 +62,12 @@ COREDUMP_HTTP_CHUNK_BYTES = 4096
 # BLANK_COREDUMP_SIZE from esp-idf/components/espcoredump/src/core_dump_flash.c --
 # what `data_len` reads back as when no coredump has ever been written.
 COREDUMP_BLANK_LEN = 0xFFFFFFFF
+
+# This board is an ESP32-S3 (see CLAUDE.md/hardware docs) -- espcoredump.py
+# needs --chip to pick the right register layout for a raw (non-ELF) core
+# file; there is exactly one target in this repo so this is not made
+# configurable per call.
+ESP_IDF_CHIP_TARGET = "esp32s3"
 
 
 class CoredumpFetchError(RuntimeError):
@@ -179,6 +188,40 @@ def fetch_coredump_over_http(host: str, out_path: str, *, chunk_size: Optional[i
     return written
 
 
+def _resolve_espcoredump_python(espcoredump_python: Optional[str]) -> str:
+    """Picks the interpreter to run espcoredump.py with.
+
+    2026-09-16 finding: the MCP server's own venv (`sys.executable`, this
+    module's previous unconditional default) does not have `esp_coredump`
+    installed -- only the ESP-IDF-provisioned environment
+    (`IDF_PYTHON_ENV_PATH`, set by `export.ps1`/`export.sh`) does. Running
+    against the wrong interpreter fails with a bare `ModuleNotFoundError`
+    that a naive non-zero-exit check then mislabels as "likely an ELF/
+    coredump mismatch" -- confirmed live against the board's real stored
+    coredump, where the wrong-interpreter failure and a genuine SHA256
+    mismatch produced visually similar "exit 1, look at stderr" results
+    until stderr was actually read. `_run_espcoredump` below inspects
+    stderr for this specific signature and raises a distinct, correctly
+    diagnosed error instead of conflating the two.
+
+    Preference order: an explicit `espcoredump_python` argument, then
+    `IDF_PYTHON_ENV_PATH`'s interpreter (Windows: Scripts/python.exe, POSIX:
+    bin/python) if that env var is set and the file exists, else
+    `sys.executable` as a last resort (better than refusing outright when
+    IDF_PYTHON_ENV_PATH is unset, since some environments do install
+    esp_coredump into the ambient interpreter)."""
+    if espcoredump_python:
+        return espcoredump_python
+    env_root = os.environ.get("IDF_PYTHON_ENV_PATH")
+    if env_root:
+        candidate = os.path.join(env_root, "Scripts", "python.exe")
+        if not os.path.isfile(candidate):
+            candidate = os.path.join(env_root, "bin", "python")
+        if os.path.isfile(candidate):
+            return candidate
+    return sys.executable
+
+
 def symbolize_coredump(coredump_path: str, elf_path: str, *, fw_build: str = "<unspecified>",
                         espcoredump_python: Optional[str] = None,
                         idf_path: Optional[str] = None,
@@ -218,8 +261,24 @@ def symbolize_coredump(coredump_path: str, elf_path: str, *, fw_build: str = "<u
     if not os.path.isfile(script):
         raise CoredumpSymbolizeError(f"espcoredump.py not found at expected path: {script!r}")
 
-    python = espcoredump_python or sys.executable
-    cmd = [python, script, subcommand, "-t", "raw", coredump_path, elf_path]
+    python = _resolve_espcoredump_python(espcoredump_python)
+    # NOTE (2026-09-16 fix): `info_corefile`/`dbg_corefile` take the coredump
+    # file via the `--core`/`-c` + `--core-format`/`-t` FLAGS, not a bare
+    # positional -- the subcommand's only positional argument is `prog` (the
+    # ELF). The previous `[subcommand, "-t", "raw", coredump_path, elf_path]`
+    # form silently consumed coredump_path as `prog` and left elf_path as an
+    # unrecognized trailing argument, which argparse rejects before
+    # espcoredump ever inspects either file -- so no real ELF/coredump
+    # comparison was ever attempted by this code path. `--chip` is also
+    # required (not auto-detected for a raw dump) -- this repo has exactly
+    # one target, ESP_IDF_CHIP_TARGET. Confirmed against the real board
+    # coredump 2026-09-16: with this corrected invocation espcoredump gets
+    # far enough to report a genuine `coredump SHA256(...) != app SHA256(...)`
+    # verdict instead of an argparse usage error.
+    cmd = [
+        python, script, "--chip", ESP_IDF_CHIP_TARGET, subcommand,
+        "--core", coredump_path, "--core-format", "raw", elf_path,
+    ]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -228,6 +287,19 @@ def symbolize_coredump(coredump_path: str, elf_path: str, *, fw_build: str = "<u
         ) from exc
 
     if proc.returncode != 0:
+        # Do not conflate "the tool couldn't even run" with "the tool ran and
+        # found a mismatch" -- confirmed live that both look like "exit 1"
+        # without reading stderr. A missing esp_coredump module says nothing
+        # about whether the ELF actually matches the coredump.
+        if "ModuleNotFoundError" in proc.stderr and "esp_coredump" in proc.stderr:
+            raise CoredumpSymbolizeError(
+                f"espcoredump could not run: the interpreter {python!r} does not have the "
+                "'esp_coredump' package installed (ModuleNotFoundError), so NO ELF/coredump "
+                "comparison was attempted -- this is an environment problem, not a mismatch "
+                "verdict. Pass espcoredump_python= pointing at the ESP-IDF-provisioned "
+                "interpreter (IDF_PYTHON_ENV_PATH), or `pip install esp-coredump` into it.\n"
+                f"--- stderr ---\n{proc.stderr}"
+            )
         raise CoredumpSymbolizeError(
             f"espcoredump refused/failed against elf={elf_path!r} fw_build={fw_build!r} "
             f"(exit {proc.returncode}). This is very likely an ELF/coredump mismatch -- do NOT retry "
@@ -235,3 +307,130 @@ def symbolize_coredump(coredump_path: str, elf_path: str, *, fw_build: str = "<u
             f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
         )
     return proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# Durable, provenance-carrying archive of every raw coredump ever fetched.
+#
+# Why this exists (2026-09-16, RELEASE_HARDENING_PLAN.md blocker 1 item 1):
+# `read_esp_coredump()` used to fetch into a single fixed path
+# (`coredump_<host>.bin` under the OS temp dir), overwritten on every call
+# with no record of which board/build/moment it came from. That is fine for
+# an interactive "look at it right now" session but loses the evidence the
+# instant a second fetch happens, and is exactly the kind of silent
+# overwrite this repo's "reset one side of a pair" and "unregistered
+# producer" bug classes (see elf_archive.py, CLAUDE.md) warn about: a fetch
+# is a one-shot opportunity to capture what is on the board (a later flash
+# or an operator running `/api/crash_report/clear` -- never done by this
+# module -- can make the same board unreadable), so losing the copy by
+# overwriting it is a real cost, not a convenience trade.
+#
+# `archive_coredump()` below copies the already-fetched raw dump into a
+# permanent, uniquely-named location and writes a sidecar JSON naming the
+# board (host), the fw_build it reported AT FETCH TIME (which, per the
+# 2026-09-16 finding above, is NOT guaranteed to be the build that actually
+# produced the dump -- a stored coredump outlives the boot/flash that wrote
+# it, so this field records "what was running when we fetched it", not "what
+# panicked"; a caller with a fw_build read from the crash_report at panic
+# time should pass THAT as fw_build_reported instead), when it was fetched,
+# and the dump's own sha256 (so two fetches of the same still-unacknowledged
+# dump are cheap to recognize as identical rather than being mistaken for
+# two different incidents). Nothing in this module ever deletes or
+# overwrites an existing archived entry -- there is no prune/cap here at
+# all, unlike elf_archive.py, because coredumps are rare (one board panic at
+# a time, at most) rather than one-per-build.
+# ---------------------------------------------------------------------------
+
+
+def _repo_root() -> str:
+    """tools/PcTools/src/kilnctrl/ -> repo root is four levels up. Kept as a
+    private copy (not imported from elf_archive.py) so this module stays
+    usable/testable without importing elf_archive at all."""
+    return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+
+
+def coredump_archive_dir() -> str:
+    """Canonical durable coredump archive -- a sibling of build/ and of
+    elf_archive/, never inside build/, for the same reason elf_archive.py's
+    kiln_archive_dir() moved out of build/ on 2026-09-15: anything inside
+    build/ can be silently wiped by `idf.py fullclean` or an equivalent
+    fresh-configure, which is exactly what destroyed the ELF this module's
+    own 2026-09-16 investigation needed (see docs/RELEASE_HARDENING_PLAN.md
+    blocker 1 and the audit trail it cites)."""
+    return os.path.join(_repo_root(), "firmware", "KilnFW", "coredump_archive")
+
+
+@dataclass
+class ArchivedCoredump:
+    path: str
+    provenance_path: str
+    sha256: str
+    byte_len: int
+
+
+def _sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def archive_coredump(fetched_path: str, *, host: str, fw_build_reported: Optional[str],
+                      archive_dir: Optional[str] = None) -> ArchivedCoredump:
+    """Copies `fetched_path` (a coredump already pulled by
+    `fetch_coredump_over_http()`) into the durable archive
+    (`coredump_archive_dir()` by default) under a name keyed by the dump's
+    own content hash, and writes a `<name>.json` provenance sidecar
+    recording `host`, `fw_build_reported` (the board's `/api/status` fw_build
+    AT FETCH TIME -- see the module-level note above on why that is not
+    necessarily the build that produced the panic), `fetched_at` (UTC,
+    `%Y-%m-%dT%H:%M:%SZ`), `sha256`, and `byte_len`.
+
+    Never overwrites an existing archived file: if the content hash already
+    has an entry (the same still-unacknowledged dump fetched twice), this
+    returns the EXISTING entry unchanged rather than writing a duplicate --
+    idempotent, and it never deletes anything either way. Raises
+    `CoredumpFetchError` (not silently returning a half-written pair) if the
+    source file is missing or the destination directory cannot be created."""
+    if not os.path.isfile(fetched_path):
+        raise CoredumpFetchError(f"cannot archive: fetched coredump does not exist: {fetched_path!r}")
+    dest_dir = archive_dir or coredump_archive_dir()
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except OSError as exc:
+        raise CoredumpFetchError(f"cannot create coredump archive dir {dest_dir!r}: {exc}") from exc
+
+    digest = _sha256_file(fetched_path)
+    short = digest[:12]
+    dest_path = os.path.join(dest_dir, f"coredump-{short}.bin")
+    prov_path = os.path.join(dest_dir, f"coredump-{short}.json")
+
+    if os.path.isfile(dest_path) and os.path.isfile(prov_path):
+        # Same content already archived -- do not overwrite the earlier
+        # provenance record (it may name an earlier, still-accurate fetch
+        # time) and do not write a second copy of identical bytes.
+        with open(prov_path, "r", encoding="utf-8") as f:
+            prior = json.load(f)
+        return ArchivedCoredump(path=dest_path, provenance_path=prov_path,
+                                 sha256=digest, byte_len=int(prior.get("byte_len", os.path.getsize(dest_path))))
+
+    byte_len = os.path.getsize(fetched_path)
+    provenance = {
+        "host": host,
+        "fw_build_reported": fw_build_reported,
+        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "sha256": digest,
+        "byte_len": byte_len,
+        "source_path": os.path.abspath(fetched_path),
+    }
+    # Copy first, then write the sidecar, so a crash between the two never
+    # leaves a provenance record with no backing file -- a dangling .bin
+    # with no .json is recoverable (re-hash it); a .json with no .bin is not.
+    tmp_dest = dest_path + ".part"
+    shutil.copyfile(fetched_path, tmp_dest)
+    os.replace(tmp_dest, dest_path)
+    with open(prov_path, "w", encoding="utf-8") as f:
+        json.dump(provenance, f, indent=2)
+    logger.info("archived coredump: %s (%d bytes, sha256=%s) -> %s", host, byte_len, short, dest_path)
+    return ArchivedCoredump(path=dest_path, provenance_path=prov_path, sha256=digest, byte_len=byte_len)
