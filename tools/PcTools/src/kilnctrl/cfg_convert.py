@@ -148,6 +148,24 @@ KNOWN_ADDITIVE_ZONE_KEYS = frozenset({
     "tuning_method", "tuning_rule", "tuning_settled", "tuning_extrapolation_converged",
     "tuning_tau_consistent", "tuning_baseline_c", "tuning_step_ambient_c", "tuning_raw_rise_c",
     "tuning_rise_inf_c", "normal_current_a", "safety_i_normal_a",
+    # 2026-09-16 backup-round-trip-gap closure, group 1/2: ordinary
+    # per-zone scalars, same shape as ease_off_window_mult etc. above.
+    "failsafe_state", "hyst_c", "min_on_s", "min_off_s",
+    # Group 3: a zone's index into the top-level timing_profiles[] bundle,
+    # and the bundle's own per-entry field vocabulary (the mirror-drift
+    # check's extraction regex does not distinguish a per-zone key from a
+    # key inside a different top-level array in the same file, so the
+    # bundle's field names have to be listed here too even though they are
+    # not literally zone keys).
+    "timing_profile", "timing_profiles", "progress_duty_min", "progress_window_s",
+    "drift_hysteresis_c", "frozen_eps_c", "cross_zone_period_s", "bangbang_hysteresis_c",
+    "cooling_limited_margin_c", "cooling_limited_hold_s", "ramp_lock_band_c",
+    # Group 4 (export-only, deliberately never restored -- see
+    # backup_export.c's own comment on the CT-channel-to-different-board
+    # wiring hazard): the informational CT map/gain arrays and their
+    # per-entry field names.
+    "ct_map_informational_only", "k_ct_v_per_a_informational_only", "zone", "ct_channel",
+    "k_v_per_a",
 })
 
 # Calibration fields this module will NEVER fabricate, default, or derive.
