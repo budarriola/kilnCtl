@@ -301,15 +301,34 @@ from concurrent, unrelated backup/config-migration work) — out of scope to
 fix here, but strong unplanned evidence the check is load-bearing.
 `tools/worktree_mint.ps1 -RunSetup` (added in the third pass) lets a minted
 worktree actually run `tools/run_all_checks.ps1` to completion, which the
-first two passes could not do; the fourth and fifth passes used it directly.
-The fourth pass also fixed 11 pre-existing `check_doc_hash_citations.ps1`
-false positives in the third pass's own document (git-hash-object blob
-hashes misread as commit citations — rewritten as `` `blob:<hash>` `` rather
-than deleted). The fifth pass's own document lists what is still
-unexamined — the remaining four `check_stack_margin_registration.ps1`
-sub-checks, `check_duplicate_symbols.ps1`'s FAIL path, both
-`check_00_*_target_build.ps1`/`check_01_*_pushed_build.ps1` pairs' FAIL
-paths, the UI/layout family, and a couple more.
+first two passes could not do; the fourth, fifth and sixth passes used it
+directly. The fourth pass also fixed 11 pre-existing `check_doc_hash_
+citations.ps1` false positives in the third pass's own document
+(git-hash-object blob hashes misread as commit citations — rewritten as
+`` `blob:<hash>` `` rather than deleted).
+
+A sixth pass, `docs/audits/release_gate_vacuity_audit_2026-09-16f.md`, closed
+the fifth pass's remaining four `check_stack_margin_registration.ps1`
+sub-checks (required-name-missing, duplicate-name, cap-vs-count, hwAbstraction
+accessor/boundary), exercised `check_duplicate_symbols.ps1`'s FAIL path for
+the first time (requiring a real ESP-IDF build; merged an upstream fix for
+the `backup_import.c` `-Werror=format-truncation` defect the fifth pass had
+found to get a clean baseline), and negative-tested two of the seven
+UI/layout checks (`check_ui_budget_asserts`, `check_ui_status_color`) — eight
+gates total, all load-bearing. It also replaced `check_mcp_facade_coverage
+.py`'s stale documented negative-test example (`plant_sim_compare`, flagged
+but not fixed by the fifth pass) with a fresh one (`ramp_assist_set_enabled`)
+and verified it actually fails today, and found — but deliberately left
+unfixed, as a scoped follow-up — a real, currently-live vacuity gap in
+`check_duplicate_symbols.ps1` itself: its `$componentSourceRoots` mapping for
+the `hwabstraction_esp` component omits `firmware/hwAbstraction/common`, even
+though that component's own `CMakeLists.txt` compiles `hal_status.c` from
+there, so `hal_status.c.obj` is silently misclassified as stale build output
+and excluded from duplicate-symbol scanning on every run. The sixth pass's
+own document lists what remains unexamined — five of the seven UI/layout
+checks, and both `check_00_*_target_build.ps1`/`check_01_*_pushed_build.ps1`
+pairs' FAIL paths (still only exercised at a clean baseline, never
+deliberately sabotaged).
 
 **Already covered, name the evidence:** the two `check_01_*_pushed_build.ps1`
 scripts are the strongest single piece of process coverage in the repo. They

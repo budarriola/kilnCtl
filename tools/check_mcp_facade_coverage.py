@@ -40,10 +40,17 @@ WHAT THIS CATCHES, PER SERVER.
 WHAT THIS DOES NOT CATCH. It says nothing about *keyword quality* -- a tool
 with a technically-present-but-useless KEYWORDS tuple still passes. It also
 does not run kiln_find/kicad_find itself or score real queries; it only
-checks that a deliberate taxonomy entry point exists. Negative-tested by
-temporarily deleting the `plant_sim_compare` KEYWORDS entry (which also has
-no GROUP_PREFIXES/GROUP_OVERRIDES coverage) and confirming this script fails,
-then restoring it.
+checks that a deliberate taxonomy entry point exists. Negative-tested (2026-09-16f) by temporarily deleting the
+`ramp_assist_set_enabled` KEYWORDS entry (which also has no
+GROUP_PREFIXES/GROUP_OVERRIDES coverage) and confirming this script fails,
+then restoring it. (The previous worked example, `plant_sim_compare`, went
+stale once that tool picked up independent `GROUP_PREFIXES` coverage --
+deleting only its KEYWORDS entry no longer makes it uncovered, so it no
+longer demonstrates a failure. Pick a fresh keyword-only tool if this one
+also gains prefix coverage later -- see the coverage query in this file's
+own `_check_kilnctrl`/`_check_kicad` for how to find one: any name in
+KEYWORDS but not in GROUP_OVERRIDES and not matching any GROUP_PREFIXES
+prefix.)
 """
 
 from __future__ import annotations
