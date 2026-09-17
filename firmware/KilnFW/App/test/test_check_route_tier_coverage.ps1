@@ -1,0 +1,146 @@
+# test_check_route_tier_coverage.ps1 -- negative test for
+# tools/check_route_tier_coverage.ps1 (docs/WEB_AUTH_PLAN.md section 1).
+#
+# Proves Invoke-RouteTierCoverageScan (the PRODUCTION function, the same one
+# check_route_tier_coverage.ps1's main body calls) can actually detect a
+# route registered with no tier -- fail-closed: unclassified must fail the
+# check, never quietly pass as OPEN. Same dot-source pattern as
+# test_check_hal_include_boundary.ps1: dot-source the check (which, per its
+# own guard, only defines functions when dot-sourced) and call its exported
+# function directly against synthetic scratch files.
+#
+#   1. A synthetic drivers tree with one route file (all tiered) and a
+#      matching table -> zero missing.
+#   2. The same drivers tree with ONE MORE route added, with no matching
+#      ROUTE_TIER row -> exactly one missing, naming that route.
+#   3. Delete the blindness floor's precondition (too few routes / too few
+#      table rows) -> the scan itself still throws rather than passing
+#      vacuously.
+#   4. The REAL production route table and REAL production drivers tree,
+#      dot-sourced and scanned directly (not a copy) -> zero missing, proving
+#      today's real check is not vacuous on the actual tree.
+#
+# This does not touch the real repo tree; steps 1-3 are entirely synthetic
+# scratch files, and step 4 only READS the real tree (Invoke-RouteTierCoverageScan
+# never writes).
+#
+# Usage: powershell -ExecutionPolicy Bypass -File App\test\test_check_route_tier_coverage.ps1
+
+$ErrorActionPreference = "Stop"
+
+$testDir = $PSScriptRoot
+$repoRoot = (Resolve-Path (Join-Path $testDir "..\..\..\..")).Path
+$checkScript = Join-Path $repoRoot "tools\check_route_tier_coverage.ps1"
+
+if (-not (Test-Path $checkScript)) {
+    throw "test_check_route_tier_coverage: expected $checkScript not found -- has it moved?"
+}
+
+# Dot-source: per check_route_tier_coverage.ps1's own guard, this defines
+# Invoke-RouteTierCoverageScan/Get-RegisteredRoutes/Get-TieredKeys and runs
+# nothing else (no $DriversDir/$TableFile were bound, and $MyInvocation
+# .InvocationName is '.' during dot-sourcing).
+. $checkScript
+
+$scratchDir = Join-Path $env:TEMP "route_tier_test_$PID"
+if (-not (Test-Path $scratchDir)) {
+    New-Item -ItemType Directory -Force -Path $scratchDir | Out-Null
+}
+
+$failures = @()
+
+try {
+
+# --- Assertion 1: a small synthetic tree, fully tiered -> 0 missing. ---
+$synthDriversDir = Join-Path $scratchDir "drivers_ok"
+New-Item -ItemType Directory -Force -Path $synthDriversDir | Out-Null
+# Need >=5 .c files for the "only N .c files found" precondition and enough
+# routes for the blindness floor -- pad with filler files carrying no routes
+# at all (they must not count toward the route total).
+1..4 | ForEach-Object {
+    Set-Content -Path (Join-Path $synthDriversDir "filler_$_.c") -Value "/* no routes here */`nint filler_$_(void) { return $_; }`n" -Encoding utf8
+}
+$routeFileContent = @'
+static const httpd_uri_t r1 = { .uri = "/a", .method = HTTP_GET, .handler = h1 };
+static const httpd_uri_t r2 = { .uri = "/b", .method = HTTP_POST, .handler = h2 };
+'@
+Set-Content -Path (Join-Path $synthDriversDir "routes.c") -Value $routeFileContent -Encoding utf8
+
+$tableOkContent = @'
+#define ROUTE_TIER(uri, method, tier) { (uri), (method), (tier) }
+static const route_tier_entry_t kRouteTierTable[] = {
+    ROUTE_TIER("/a", HTTP_GET, ROUTE_TIER_OPEN),
+    ROUTE_TIER("/b", HTTP_POST, ROUTE_TIER_ADMIN),
+};
+'@
+$tableOkFile = Join-Path $scratchDir "table_ok.h"
+Set-Content -Path $tableOkFile -Value $tableOkContent -Encoding utf8
+
+$resultOk = Invoke-RouteTierCoverageScan -DriversDir $synthDriversDir -TableFile $tableOkFile -BlindnessFloor 2
+if ($resultOk.Missing.Count -ne 0) {
+    $missingDesc = ($resultOk.Missing | ForEach-Object { "$($_.Method) $($_.Uri)" }) -join ", "
+    $failures += "Assertion 1 FAILED: fully-tiered synthetic tree scored $($resultOk.Missing.Count) missing route(s), expected 0: $missingDesc"
+} else {
+    Write-Host "Assertion 1 OK: fully-tiered synthetic tree scored 0 missing routes ($($resultOk.TotalRoutes) routes, $($resultOk.TotalTiered) tiered)."
+}
+
+# --- Assertion 2: add ONE untiered route -> exactly 1 missing, naming it. ---
+$synthDriversDirBad = Join-Path $scratchDir "drivers_bad"
+Copy-Item -Path $synthDriversDir -Destination $synthDriversDirBad -Recurse -Force
+$badRouteContent = $routeFileContent + "`nstatic const httpd_uri_t r3 = { .uri = `"/c/new_admin_only_route`", .method = HTTP_POST, .handler = h3 };`n"
+Set-Content -Path (Join-Path $synthDriversDirBad "routes.c") -Value $badRouteContent -Encoding utf8
+
+$resultBad = Invoke-RouteTierCoverageScan -DriversDir $synthDriversDirBad -TableFile $tableOkFile -BlindnessFloor 2
+if ($resultBad.Missing.Count -ne 1) {
+    $failures += "Assertion 2 FAILED: expected exactly 1 missing route after adding an untiered one, got $($resultBad.Missing.Count)."
+} elseif ($resultBad.Missing[0].Uri -ne "/c/new_admin_only_route" -or $resultBad.Missing[0].Method -ne "HTTP_POST") {
+    $failures += "Assertion 2 FAILED: the single missing route did not name the injected route: $($resultBad.Missing[0].Method) $($resultBad.Missing[0].Uri)"
+} else {
+    Write-Host "Assertion 2 OK: untiered route detected and named -- $($resultBad.Missing[0].Method) $($resultBad.Missing[0].Uri)"
+}
+
+# --- Assertion 3: blindness floor still trips on an implausibly small tree,
+# proving the guard itself has teeth (this is the same class of gap the
+# HAL boundary test's assertion 3/3b covers for its own ratchet function). ---
+$floorTripped = $false
+try {
+    Invoke-RouteTierCoverageScan -DriversDir $synthDriversDir -TableFile $tableOkFile -BlindnessFloor 999
+} catch {
+    $floorTripped = $true
+}
+if (-not $floorTripped) {
+    $failures += "Assertion 3 FAILED: BlindnessFloor=999 against a 2-route synthetic tree should have thrown, but did not."
+} else {
+    Write-Host "Assertion 3 OK: blindness floor throws when the counted route total falls below it."
+}
+
+# --- Assertion 4: run the SAME production function against the REAL
+# production drivers tree and REAL route_tier_table.h (read-only -- this
+# does not modify either). Proves today's real table is not vacuously
+# passing because the scan function never actually reaches real code. ---
+$realDriversDir = (Resolve-Path (Join-Path $repoRoot "firmware\KilnFW\App\drivers")).Path
+$realTableFile = (Get-ChildItem -Path $realDriversDir -Filter "route_tier_table.h" -File -Recurse | Select-Object -First 1).FullName
+if (-not $realTableFile) {
+    $failures += "Assertion 4 FAILED: route_tier_table.h not found under $realDriversDir."
+} else {
+    $realResult = Invoke-RouteTierCoverageScan -DriversDir $realDriversDir -TableFile $realTableFile
+    if ($realResult.Missing.Count -ne 0) {
+        $realMissingDesc = ($realResult.Missing | ForEach-Object { "$($_.Method) $($_.Uri) ($($_.File))" }) -join ", "
+        $failures += "Assertion 4 FAILED: real production tree has $($realResult.Missing.Count) route(s) with no tier: $realMissingDesc"
+    } else {
+        Write-Host "Assertion 4 OK: real production tree ($($realResult.TotalRoutes) routes) fully covered by $realTableFile ($($realResult.TotalTiered) tiered rows)."
+    }
+}
+
+} finally {
+    Remove-Item -Path $scratchDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+if ($failures.Count -gt 0) {
+    Write-Host "TEST_CHECK_ROUTE_TIER_COVERAGE FAILED:" -ForegroundColor Red
+    foreach ($f in $failures) { Write-Host "  $f" -ForegroundColor Red }
+    throw "$($failures.Count) assertion(s) failed."
+}
+
+Write-Host "test_check_route_tier_coverage: all assertions passed (fully-tiered synthetic tree=0 missing, injected untiered route detected and named, blindness floor has teeth, real production tree fully covered)." -ForegroundColor Green
+exit 0
