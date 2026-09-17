@@ -350,9 +350,16 @@ hazards in it:
    Both 2026-09-08 findings are fixed — `boot_guard_mark_healthy()` now
    verifies its own NVS write rather than trusting a return code, and
    `boot_guard_reset_counter()` exists for a tool that knows it just
-   deliberately flashed. But that second function **is not yet wired into
-   `flash_firmware()`'s verify step**, which means ordinary development
-   flashing can still walk a healthy board toward recovery mode.
+   deliberately flashed. That second function is now wired into
+   `flash_firmware()`'s verify step (`b09294fb`, 2026-09-09): an opt-in
+   `ap_password` parameter makes `flash_firmware()` call the new
+   `POST /api/ota/esp/boot_guard_reset` route ONLY after post-flash
+   verification confirms full, unambiguous success, and reports the
+   counter's before/after values and whether the clear actually verified —
+   see CLAUDE.md's `boot_guard_reset_counter()` paragraph for the full
+   wiring. A caller who omits `ap_password` gets the pre-existing behavior
+   unchanged, so this is closed for a caller that opts in, not yet closed
+   as a default every flash gets automatically.
 
 The Pico half of field updates has additionally never completed a transfer:
 the 2026-09-06 attempt was refused by a genuine Pico-side interlock before any
@@ -365,10 +372,16 @@ over to it with a JTAG probe.
 
 **How to know it is closed.**
 
-- Wire `boot_guard_reset_counter()` into `flash_firmware()`'s verify step and
-  negative-test it — deliberately, because a prior negative test proved that
-  wiring it into `boot_guard_init()` instead defeats the counter entirely and
-  masks a genuinely failing board. **Size: S.**
+- ~~Wire `boot_guard_reset_counter()` into `flash_firmware()`'s verify step and
+  negative-test it~~ — **done, `b09294fb`** (see item 3 above and CLAUDE.md).
+  Host-tested (`tools/PcTools/tests/test_flash_firmware_verify.py`'s
+  `BootGuardResetWiringTest`, and `test_boot_guard.c`/`test_ota_http.c` on the
+  firmware side) covering the central negative case (a hard verification
+  failure must never clear the counter) and the lying-write/unreachable-
+  endpoint paths. Residual, not yet closed: the call is opt-in
+  (`ap_password` must be passed) rather than the flash-tool's default, so an
+  ordinary `flash_firmware()` call with no `ap_password` still gets none of
+  this protection.
 - Make the schema-downgrade hazard impossible to hit silently: on boot, if the
   persisted config version is newer than this firmware understands, refuse to
   start a firing and say so on every surface, rather than running on defaults.

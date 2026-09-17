@@ -443,8 +443,17 @@ recovery mode this way. Fix: `boot_guard_reset_counter()` (`boot_guard.c`/`.h`),
 externally-triggered clear that bypasses that flaky snapshot entirely, sharing its actual
 verified-clear-with-retry logic with `boot_guard_mark_healthy()` via one common helper so the
 `0b5d9dad` write-lies fix covers both paths. It is meant to be called by a TOOL that knows it
-just performed a deliberate flash (`flash_firmware()`'s verify step, once implemented — not yet
-wired up as of this note), never from inside an unconditional firmware boot path: a negative
+just performed a deliberate flash (`flash_firmware()`'s verify step — wired up in `b09294fb`,
+2026-09-09: a new authenticated `POST /api/ota/esp/boot_guard_reset` route
+(`ota_http_recovery.c`), plus an opt-in `ap_password` parameter on `flash_firmware()`
+(`tools/PcTools/src/kilnctrl/mcp_server_flash.py`) that calls it ONLY after post-flash
+verification confirms full, unambiguous success — never on a raise, a WARNING, or
+`verify=False`; a caller who omits `ap_password` gets the pre-existing behavior unchanged.
+`flash_firmware()`'s result reports the counter's before value, the clear result, and the
+verified-or-not after value, never a silent clear. A `GET /api/boot_guard` diagnostics route
+also landed in the same commit, exposing `{"boot_count","recovery_mode"}` unauthenticated so
+this class of fix no longer needs a JTAG read of `s_bg` to verify), never from inside an
+unconditional firmware boot path: a negative
 test proved that wiring it into every `boot_guard_init()` call instead defeats the counter
 entirely, masking a genuinely failing board. Firmware cannot itself distinguish "a developer
 just flashed this" from "this board is quietly reset-looping" — only the tool knows which one

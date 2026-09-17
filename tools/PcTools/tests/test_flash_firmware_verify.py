@@ -430,21 +430,51 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
         self.preflash_mock.return_value = "192.168.1.156"
         with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
              unittest.mock.patch.object(
+                 mf.ota_http, "get_boot_guard_status",
+                 return_value={"boot_count": 2, "recovery_mode": False}) as status_mock, \
+             unittest.mock.patch.object(
+                 mf.ota_http, "boot_guard_reset_esp",
+                 return_value={"ok": True, "boot_count": 0}) as reset_mock:
+            result = mf.flash_firmware(verify=True, ap_password="hunter2")
+        status_mock.assert_called_once_with("192.168.1.156")
+        reset_mock.assert_called_once_with("192.168.1.156", "hunter2")
+        self.assertNotIn("error:", result)
+        self.assertIn("boot_guard_reset", result)
+        self.assertIn("cleared and verified", result)
+        # Item 4 of the plan: report the count BEFORE the clear (from the
+        # GET probe above) alongside the verified after-value, not just the
+        # after-value alone -- a silent clear with no before/after context
+        # is not acceptable per RELEASE_HARDENING_PLAN.md blocker 6.
+        self.assertIn("before=2", result)
+        self.assertIn("after=0", result)
+
+    def test_before_count_unknown_when_get_status_fails(self):
+        """The pre-reset GET /api/boot_guard probe is best-effort only -- its
+        failure must never block or fail the reset call itself, and must be
+        reported as "unknown" rather than silently omitted or raised."""
+        self.preflash_mock.return_value = "192.168.1.156"
+        with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
+             unittest.mock.patch.object(
+                 mf.ota_http, "get_boot_guard_status",
+                 side_effect=mf.ota_http.OtaHttpError("unreachable")), \
+             unittest.mock.patch.object(
                  mf.ota_http, "boot_guard_reset_esp",
                  return_value={"ok": True, "boot_count": 0}) as reset_mock:
             result = mf.flash_firmware(verify=True, ap_password="hunter2")
         reset_mock.assert_called_once_with("192.168.1.156", "hunter2")
         self.assertNotIn("error:", result)
-        self.assertIn("boot_guard_reset", result)
-        self.assertIn("cleared and verified", result)
+        self.assertIn("before=unknown", result)
+        self.assertIn("after=0", result)
 
     def test_not_called_without_ap_password(self):
         """The default (ap_password=None) must reproduce pre-existing
         behavior exactly -- this is an additive, opt-in parameter."""
         self.preflash_mock.return_value = "192.168.1.156"
         with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
+             unittest.mock.patch.object(mf.ota_http, "get_boot_guard_status") as status_mock, \
              unittest.mock.patch.object(mf.ota_http, "boot_guard_reset_esp") as reset_mock:
             result = mf.flash_firmware(verify=True)
+        status_mock.assert_not_called()
         reset_mock.assert_not_called()
         self.assertNotIn("boot_guard_reset", result)
 
@@ -458,8 +488,10 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
         self.preflash_mock.return_value = "192.168.1.156"
         with unittest.mock.patch.object(mf, "_verify_flash_landed",
                                          return_value="WARNING: board unreachable"), \
+             unittest.mock.patch.object(mf.ota_http, "get_boot_guard_status") as status_mock, \
              unittest.mock.patch.object(mf.ota_http, "boot_guard_reset_esp") as reset_mock:
             mf.flash_firmware(verify=True, ap_password="hunter2")
+        status_mock.assert_not_called()
         reset_mock.assert_not_called()
 
     def test_not_called_on_verification_failure(self):
@@ -494,6 +526,9 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
         self.preflash_mock.return_value = "192.168.1.156"
         with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
              unittest.mock.patch.object(
+                 mf.ota_http, "get_boot_guard_status",
+                 return_value={"boot_count": 2, "recovery_mode": False}), \
+             unittest.mock.patch.object(
                  mf.ota_http, "boot_guard_reset_esp",
                  return_value={"ok": False, "boot_count": 2}):
             result = mf.flash_firmware(verify=True, ap_password="hunter2")
@@ -507,6 +542,9 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
         WARNING, not a tool failure -- the flash already landed."""
         self.preflash_mock.return_value = "192.168.1.156"
         with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
+             unittest.mock.patch.object(
+                 mf.ota_http, "get_boot_guard_status",
+                 return_value={"boot_count": 2, "recovery_mode": False}), \
              unittest.mock.patch.object(
                  mf.ota_http, "boot_guard_reset_esp",
                  side_effect=mf.ota_http.OtaHttpError("unreachable")):

@@ -363,7 +363,15 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
     is a real but non-fatal degradation (docs/audits/
     boot_guard_post_flash_recovery_footgun_2026-09-08.md's residual is that
     ordinary reflashing WITHOUT this call can still, eventually, walk a
-    board into recovery mode; this is exactly the "eventually" case)."""
+    board into recovery mode; this is exactly the "eventually" case).
+
+    Reports the counter's before value (a best-effort GET /api/boot_guard
+    probe taken just before the reset call, purely informational -- its
+    failure never blocks or fails the reset itself, and is reported as
+    "unknown" rather than silently dropped) alongside the reset call's own
+    verified-or-not after value -- RELEASE_HARDENING_PLAN.md blocker 6 calls
+    for both, since a silent clear is not acceptable and a failed clear must
+    be visible with enough context to judge it."""
     if not ap_password:
         return ""
     resolved = _preflash_board_address(host) or pre_flash_host
@@ -371,17 +379,32 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
         return ("WARNING: boot_guard_reset skipped -- could not resolve a board address to call "
                 "POST /api/ota/esp/boot_guard_reset at, even though post-flash verification just "
                 "succeeded against one; the recovery-mode counter was NOT cleared by this flash.")
+    # Best-effort "before" read via the unauthenticated GET /api/boot_guard
+    # diagnostics route, purely for the reported message -- never gates or
+    # fails the reset call below. A board that answers this GET but then
+    # fails the POST (a transient network blip between the two calls) still
+    # gets a useful before/after report instead of losing the before value
+    # entirely.
+    before_count: Optional[int] = None
+    try:
+        before_count = ota_http.get_boot_guard_status(resolved).get("boot_count")
+    except ota_http.OtaHttpError as exc:
+        _srv._session_log.warning("flash_firmware: pre-reset GET /api/boot_guard failed (informational "
+                                   "only, does not block the reset call): %s", exc)
+    before_str = "unknown" if before_count is None else str(before_count)
     try:
         body = ota_http.boot_guard_reset_esp(resolved, ap_password)
     except ota_http.OtaHttpError as exc:
         _srv._session_log.warning("flash_firmware: boot_guard_reset call failed: %s", exc)
         return (f"WARNING: boot_guard_reset call failed ({exc}) -- the flash itself landed fine, "
-                "but the recovery-mode counter was NOT cleared by this flash.")
+                f"but the recovery-mode counter was NOT cleared by this flash (boot_count before "
+                f"this attempt: {before_str}).")
     if body.get("ok"):
         return (f"boot_guard_reset: recovery-mode counter cleared and verified "
-                f"(boot_count now {body.get('boot_count')})")
+                f"(boot_count before={before_str}, after={body.get('boot_count')})")
     return (f"WARNING: boot_guard_reset did not verify (board reported {body!r}) -- the flash "
-            "itself landed fine, but the recovery-mode counter was NOT confirmed cleared; a run of "
+            "itself landed fine, but the recovery-mode counter was NOT confirmed cleared "
+            f"(boot_count before={before_str}, reported after={body.get('boot_count')}); a run of "
             "ordinary reflashes could still eventually walk this board into recovery mode.")
 
 
