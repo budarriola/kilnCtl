@@ -120,6 +120,28 @@ static const seg_def_t g_profile[] = {
 };
 #define NSEG ((int)(sizeof(g_profile) / sizeof(g_profile[0])))
 
+// A8 (plan sec 7): "profile independence" -- A1 and A2 re-measured with
+// trial and baseline firings on DIFFERENT profiles sharing >= 5 segment
+// classes. g_profile_b keeps every one of g_profile's six (rate_bucket,
+// temp_bucket) classes -- same rates and same segment mean-targets, so all
+// six classes still match at the harness's 5 C / 25 C-per-hr bucket widths
+// -- but is a genuinely different profile: each dwell's duration differs
+// (600/1200/600 s here vs 900/900/1200 s in g_profile), so its total tick
+// count, its per-segment scored-tick counts and its firing_score_seg_t
+// state at any given wall-clock tick all differ from g_profile's. This is
+// deliberate: A8 exists to catch a comparator that is secretly sensitive to
+// firing LENGTH or SHAPE rather than only to the matched segment classes it
+// claims to score.
+static const seg_def_t g_profile_b[] = {
+    { 30.0f, 20.0f, 26.0f, 0.0f },
+    {  0.0f, 26.0f, 26.0f, 600.0f },
+    { 60.0f, 26.0f, 31.0f, 0.0f },
+    {  0.0f, 31.0f, 31.0f, 1200.0f },
+    { 90.0f, 31.0f, 36.0f, 0.0f },
+    {  0.0f, 36.0f, 36.0f, 600.0f },
+};
+#define NSEG_B ((int)(sizeof(g_profile_b) / sizeof(g_profile_b[0])))
+
 // ------------------------------------------------------- plant construction
 
 typedef struct {
@@ -188,7 +210,8 @@ typedef struct {
     float max_abs_err_c[NZ];
 } firing_result_t;
 
-static void run_firing(const iter_tune_gains_t gains[NZ], const plant_variant_t *v, firing_result_t *out)
+static void run_firing_on(const iter_tune_gains_t gains[NZ], const plant_variant_t *v,
+                          const seg_def_t *profile, int nseg, firing_result_t *out)
 {
     sim_kiln_cfg_t cfg;
     build_cfg(&cfg, v);
@@ -242,8 +265,8 @@ static void run_firing(const iter_tune_gains_t gains[NZ], const plant_variant_t 
     float dt_s = 1.0f;
     zone_coupling_neighbor_t nb[NZ];
 
-    for (int s = 0; s < NSEG; s++) {
-        const seg_def_t *sd = &g_profile[s];
+    for (int s = 0; s < nseg; s++) {
+        const seg_def_t *sd = &profile[s];
         bool is_dwell = (sd->rate_c_per_hr <= 0.0f);
         float rate_c_per_s = sd->rate_c_per_hr / 3600.0f;
         long ticks = is_dwell ? (long)sd->dwell_s : (long)((sd->to_c - sd->from_c) / rate_c_per_s);
@@ -317,6 +340,11 @@ static void run_firing(const iter_tune_gains_t gains[NZ], const plant_variant_t 
                                      ? (float)(abs_err_sum[i] / (double)out->scored_ticks[i])
                                      : NAN;
     }
+}
+
+static void run_firing(const iter_tune_gains_t gains[NZ], const plant_variant_t *v, firing_result_t *out)
+{
+    run_firing_on(gains, v, g_profile, NSEG, out);
 }
 
 // --------------------------------------------------------------- ensembles
@@ -1075,6 +1103,74 @@ int main(int argc, char **argv)
     printf("  A5 bar: termination within budget >= 95%% -> %s\n", a5_pass ? "PASS" : "FAIL");
     printf("  A6 bar: 0 cage violations -> %s\n", a6_pass ? "PASS" : "FAIL");
 
+    // ---- Part 4: A8 profile independence (A1 half only -- see note below) ----
+    // Plan sec 7, A8: "A1 and A2 re-measured with trial and baseline firings
+    // on different profiles sharing >= 5 segment classes -- unchanged within
+    // their own bars." This implements the A1 half: the same null-experiment
+    // procedure as Part 2 (identical gains, only noise/start-temp differ),
+    // except side A runs g_profile and side B runs g_profile_b -- two
+    // profiles sharing all 6 segment classes (see g_profile_b's own comment)
+    // but differing in per-segment duration, tick count and total length.
+    // If the comparator or firing_score.c were secretly sensitive to firing
+    // shape/length rather than only to matched segment classes, this would
+    // move the false-accept rate; if it is a fair test of the mechanism
+    // alone, the rate should land within the same pinned ceiling as Part 2's
+    // same-profile A1 measurement.
+    //
+    // NOT YET DONE: the A2 (never-worse) half of A8 -- re-running Part 3's
+    // mismatched-ensemble accept/reject loop with tune_run()'s internal
+    // baseline-vs-trial comparisons crossing g_profile/g_profile_b -- needs
+    // tune_run() itself to accept a profile per firing, which this pass does
+    // not touch. Left open; see this file's own header note and the plan's
+    // sec 8 step 6 status for the remaining gap.
+    printf("\n#### PART 4: A8 profile independence (A1 half) -- baseline on g_profile, "
+           "trial on g_profile_b ####\n");
+    int p4_accepts = 0, p4_rejects = 0, p4_insufficient = 0, p4_nopairs = 0;
+    for (int n = 0; n < mc_runs; n++) {
+        plant_variant_t a = nominal_variant(0x2000u + (uint32_t)n * 7919u);
+        plant_variant_t b = a;
+        b.noise_seed = 0xa000u + (uint32_t)n * 104729u;
+        b.start_offset_c = urand(-15.0f, 15.0f);
+        a.start_offset_c = urand(-15.0f, 15.0f);
+        iter_tune_gains_t g[NZ];
+        for (int i = 0; i < NZ; i++) { g[i].kp = g_kp_bench[i]; g[i].ki = g_ki_bench[i]; g[i].kd = g_kd_bench[i]; }
+        firing_result_t ra, rb;
+        run_firing_on(g, &a, g_profile, NSEG, &ra);
+        run_firing_on(g, &b, g_profile_b, NSEG_B, &rb);
+        for (int i = 0; i < NZ; i++) {
+            firing_compare_result_t cmp;
+            switch (firing_compare(&ra.set[i], &rb.set[i], NULL, &cmp)) {
+                case FIRING_COMPARE_ACCEPT: p4_accepts++; break;
+                case FIRING_COMPARE_REJECT_DEGRADED: p4_rejects++; break;
+                case FIRING_COMPARE_INSUFFICIENT: p4_insufficient++; break;
+                default: p4_nopairs++; break;
+            }
+        }
+    }
+    int p4_total = p4_accepts + p4_rejects + p4_insufficient + p4_nopairs;
+    printf("  %d cross-profile null comparisons: ACCEPT %d (%.2f%%)  REJECT %d  INSUFFICIENT %d  NO_PAIRS %d\n",
+           p4_total, p4_accepts, 100.0 * p4_accepts / (p4_total ? p4_total : 1), p4_rejects, p4_insufficient,
+           p4_nopairs);
+    // "unchanged within its own bar": Part 2 and Part 4 draw from the SAME
+    // urand()/LCG stream but at different offsets (Part 4 runs after Parts
+    // 1-3 have already advanced it), so a same-profile re-run of this exact
+    // procedure does NOT reproduce 24/660 exactly -- confirmed by a sanity
+    // run with g_profile_b temporarily set identical to g_profile, which
+    // measured 30/660 (4.55%), not 24/660. A bare re-use of A1's bit-exact
+    // pin (24/660) would therefore misclassify ordinary sampling noise as an
+    // A8 failure. Widen by 3 sampling standard deviations
+    // (sd = sqrt(n*p*(1-p)), the same binomial-noise formula A1's own
+    // comment above derives and uses) around A1's pinned rate before
+    // comparing -- "unchanged within its own bar" means unchanged relative
+    // to that bar's own sampling noise, not bit-for-bit identical under a
+    // different RNG draw.
+    double a1_p = (double)A1_PINNED_MAX_ACCEPTS / (double)A1_PINNED_TOTAL;
+    double a8_sd = sqrt((double)p4_total * a1_p * (1.0 - a1_p));
+    double a8_ceiling = a1_p * (double)p4_total + 3.0 * a8_sd;
+    bool a8_pass = (double)p4_accepts <= a8_ceiling;
+    printf("  A8 bar: cross-profile false-accept rate unchanged within A1's own pinned ceiling "
+           "+/- 3 sampling sd (<= %.1f of %d) -> %s\n", a8_ceiling, p4_total, a8_pass ? "PASS" : "FAIL");
+
     // ---- Enforcement ----
     // Until 2026-09-10 this harness's bars were printf-only: main() always
     // `return 0`, so build_host_tests.ps1 (which links this as a
@@ -1096,10 +1192,26 @@ int main(int argc, char **argv)
     // 2x apart, so folding it in here does not change behaviour for callers
     // that never pass argv[3] (every existing caller, until
     // check_iter_tune_noise_floor.ps1).
+    // A8 is measured and printed above but deliberately kept OUT of
+    // all_pass, the same "informational, non-blocking" treatment this
+    // plan's own sec 6.5 credibility gate got while its own bars were open
+    // (ITER_TUNE_REDESIGN_PLAN.md's 2026-09-10 status block). A8 genuinely
+    // FAILS on this plant (45/660, 6.82%, against a 38.4-count ceiling) --
+    // per plan sec 8 step 6 ("all eight criteria met... any miss ends the
+    // plan at this line with a report, not a workaround"), folding it into
+    // all_pass would force a choice between a permanently red build_host_
+    // tests suite or quietly loosening/pinning A8's bar the way A1's was --
+    // and pinning THIS number would be exactly the "workaround" the plan
+    // forbids, since it is a genuine, newly-discovered doubling of the
+    // false-accept rate under a different profile shape, not an already-
+    // understood, previously-defended tradeoff the way A1's pin is. The
+    // finding stands as reported, blocking for the PLAN (not the build) --
+    // see ITER_TUNE_REDESIGN_PLAN.md sec 8, step 6.
+    (void)a8_pass;
     bool all_pass = a1_pass && a2_pass && a5_pass && a6_pass && a_step4_gate;
-    printf("\n#### OVERALL: %s ####\n",
-           all_pass ? "PASS (A2/A5/A6 clear; A1 clear ONLY against its pinned known-failure ceiling, "
-                      "NOT the 2.0% design target -- see A1 NOTE above)"
+    printf("\n#### OVERALL: %s (A8 measured above, NOT gated into this verdict -- see A8 comment) ####\n",
+           all_pass ? "PASS (A2/A5/A6 clear; A1 clear ONLY against its pinned known-failure "
+                      "ceiling, NOT the 2.0% design target -- see A1 NOTE above)"
                     : "FAIL");
     return all_pass ? 0 : 1;
 }

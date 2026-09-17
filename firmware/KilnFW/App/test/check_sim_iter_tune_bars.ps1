@@ -225,6 +225,11 @@ echo BUILD_EXIT=%ERRORLEVEL%
     Write-Host "      Noise floor at n=660 is ~4.8 counts (sd); a move under ~10 counts is not an"
     Write-Host "      improvement. See sim_iter_tune.c's EXIT CONDITION comment above"
     Write-Host "      A1_PINNED_MAX_ACCEPTS and docs/audits/a1_false_accept_root_cause_2026-09-14.md."
+    Write-Host "      A8 (profile independence, A1-half) is measured every run and printed above but"
+    Write-Host "      NOT gated into this exit code -- it genuinely FAILS (45/660, 6.82%, against a"
+    Write-Host "      38.4-count 3-sd-widened ceiling around A1's own pinned rate). See sim_iter_tune.c's"
+    Write-Host "      A8 comment and ITER_TUNE_REDESIGN_PLAN.md sec 8 step 6 for why this is reported,"
+    Write-Host "      not gated or worked around."
     exit 0
 } finally {
     Exit-BuildLock -Lock $lock

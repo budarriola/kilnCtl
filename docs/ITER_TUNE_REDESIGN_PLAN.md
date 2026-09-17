@@ -1,5 +1,51 @@
 # `iter_tune` redesign — tracking-quality-driven iterative tuning
 
+> **Status update, 2026-09-16: step 6 (Monte-Carlo acceptance, sec 7 A1-A8)
+> built and run; the plan STOPS HERE per its own sec 8 rule ("any miss ends
+> the plan at this line with a report, not a workaround").** Verified against
+> code, not this doc's own prior headers (steps 4/5 below were previously
+> claimed at different states than the code actually showed):
+>
+> - **Step 4** (null-experiment noise-floor artifact) is CLOSED, `602a07a8`.
+> - **Step 5** (`iter_tune.c` rewrite against the new comparator) is CLOSED,
+>   `8f80a4de` plus two defect-fix passes `249ce287`/`ce55440d`.
+> - **Step 6** (Monte-Carlo run of sec 7's A1-A8): A2, A5, A6 PASS (0% worse,
+>   100% terminate within budget, 0 cage violations, `check_sim_iter_tune_bars.ps1`).
+>   A1 PASSES only against a deliberately pinned known-failure ceiling
+>   (24/660, 3.64%, `e3458846`/`docs/audits/a1_false_accept_root_cause_2026-09-14.md`)
+>   -- an honest, previously-investigated and individually-defended property
+>   of this plant/scoring design, not the sec 7 2.0% design target. A3/A4
+>   were checked and found **structurally unreachable** on this plant model:
+>   `sim_iter_tune.c`'s own Part 0 oracle grid shows the whole reachable
+>   tracking-error spread from moving kp/ki is smaller than the owner's
+>   0.5 C floor at every start point tried, so "refuses every trial" is
+>   correct behaviour here, not an algorithm gap -- this is a fact about the
+>   model, already noted in the harness's own comments, not new this pass.
+>   **A8 (profile independence) was newly built this pass (`sim_iter_tune.c`
+>   Part 4, `g_profile_b`) and genuinely FAILS**: re-running the A1
+>   null-experiment procedure with baseline and trial firings on two
+>   different profiles that still share all 6 segment classes (differing
+>   only in per-segment dwell duration) measures 45/660 (6.82%) false
+>   accepts, against a 38.4-count ceiling three sampling standard deviations
+>   wide around A1's own pinned rate -- roughly double, and confirmed not to
+>   be sampling noise (a sanity run with the two profiles made identical
+>   reproduces 30/660, inside the same ceiling). **Only the A1-half of A8 was
+>   built; the A2-half (never-worse re-measured across profiles) is NOT yet
+>   built** -- it needs `tune_run()` itself to take a profile per firing,
+>   which this pass does not touch. Per the plan's own rule this is where
+>   the plan stops and reports, not where it is worked around: A8's bar is
+>   deliberately kept OUT of `check_sim_iter_tune_bars.ps1`'s exit code (the
+>   same informational, non-blocking treatment the sec 6.5 credibility gate
+>   got below) so a genuine, freshly-discovered doubling of the false-accept
+>   rate is not quietly pinned the way A1's already-litigated number was --
+>   pinning THIS number would be exactly the "workaround" sec 8 forbids.
+>   **Steps 7, 8, 9 are NOT started** and should not be, until A8 is either
+>   resolved (the plan's algorithm/scoring changed to close the gap) or the
+>   owner accepts the gap and revises sec 7's bar deliberately, the same way
+>   A1's was revised, with the tradeoff named. "A design that passes A1-A6
+>   but fails A7 or A8 has not been redesigned, only re-tuned" (sec 7's own
+>   words) -- that is exactly the state found here.
+>
 > **Status update, 2026-09-10 (later pass):** steps 1, 2, 3, 4, 5 and the
 > write-surface part of 7 are now IMPLEMENTED. The status paragraph that used
 > to stand here (dated 2026-09-09) said steps 3-4 and the sec 6.5 credibility
