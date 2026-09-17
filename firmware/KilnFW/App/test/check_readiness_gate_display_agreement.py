@@ -59,6 +59,11 @@ PAIRS = {
     # divergence is a fault, not advisory, promoted into the gate the same
     # way estop_verified was on 2026-09-09.
     "safety_ceiling_match": "readiness_ceiling_match_status",
+    # docs/PICO_AUTO_UPDATE_PLAN.md owner decision: "on an unrecoverable
+    # version mismatch the ESP refuses to fire until matched" -- a real
+    # structural block, promoted into the gate the same way
+    # safety_ceiling_match was on 2026-09-14.
+    "pico_update": "readiness_pico_update_status",
 }
 
 REPO_TEST_DIR = Path(__file__).resolve().parent

@@ -45,7 +45,7 @@
 // checklist item is a whole-board summary and would refuse firings the
 // guard-5 check correctly allows. Adding an item to readiness_http.c does
 // NOT add it here -- that is intentional, and the agreement check above only
-// binds the five keys named in READINESS_GATE_KEY_* below.
+// binds the six keys named in READINESS_GATE_KEY_* below.
 //
 // LAYERING: this header is PURE (facts in, decision out) so it can be
 // host-tested and so profile_executor_run.c can call it without dragging in
@@ -86,6 +86,13 @@ typedef enum {
      * safety link is actually up (the other four conditions are either
      * link-independent or already surface a down link first). */
     READINESS_GATE_BLOCK_CEILING_MISMATCH,
+    /* docs/PICO_AUTO_UPDATE_PLAN.md owner decision: "on an unrecoverable
+     * version mismatch the ESP refuses to fire until matched" -- a real
+     * structural block, not a warning surface. Ordered last: like
+     * CEILING_MISMATCH this needs the safety link up to even know the
+     * Pico's version, so the four link-independent/link-surfacing
+     * conditions above take priority. */
+    READINESS_GATE_BLOCK_PICO_UPDATE,
 } readiness_gate_block_t;
 
 /* The `key` strings /api/readiness uses for these same items. The
@@ -97,6 +104,7 @@ typedef enum {
 #define READINESS_GATE_KEY_CRASH_REPORT  "crash_report"
 #define READINESS_GATE_KEY_ESTOP         "estop_verified"
 #define READINESS_GATE_KEY_CEILING_MATCH "safety_ceiling_match"
+#define READINESS_GATE_KEY_PICO_UPDATE   "pico_update"
 
 /* The /api/readiness item key a refusal corresponds to, or NULL for
  * READINESS_GATE_OK. Exists so a refusal can hand the operator's browser the
@@ -104,7 +112,7 @@ typedef enum {
  * and letting them find it: main_page.html's start handler puts this in the
  * response as "readiness_item". Returning the SAME constants the page renders
  * is the point -- check_readiness_gate_display_agreement.ps1 holds both ends
- * of that to the same five keys. */
+ * of that to the same six keys. */
 static inline const char *readiness_gate_item_key(readiness_gate_block_t which)
 {
     switch (which) {
@@ -113,13 +121,14 @@ static inline const char *readiness_gate_item_key(readiness_gate_block_t which)
     case READINESS_GATE_BLOCK_CRASH_REPORT:  return READINESS_GATE_KEY_CRASH_REPORT;
     case READINESS_GATE_BLOCK_ESTOP_VERIFIED: return READINESS_GATE_KEY_ESTOP;
     case READINESS_GATE_BLOCK_CEILING_MISMATCH: return READINESS_GATE_KEY_CEILING_MATCH;
+    case READINESS_GATE_BLOCK_PICO_UPDATE: return READINESS_GATE_KEY_PICO_UPDATE;
     case READINESS_GATE_OK:
     default:
         return NULL;
     }
 }
 
-/* Every board fact the five blocking items need, and nothing else. Passed by
+/* Every board fact the six blocking items need, and nothing else. Passed by
  * value rather than read from globals inside the decision so the decision
  * itself is pure and the full cross product is testable. Field meanings are
  * exactly the arguments of the readiness_*_status() predicates they feed --
@@ -132,9 +141,12 @@ typedef struct {
     bool     crash_acknowledged; /* that record's acknowledged flag */
     bool     estop_verified;     /* estop_verification_is_verified() */
     bool     ceiling_diverged;  /* safety_ceiling_sync_is_diverged() -- the SAME verdict the enforcement acts on */
+    bool     pico_update_blocked; /* pico_auto_update_state_is_blocking() -- true only for an
+                                    * unrecoverable version mismatch (docs/PICO_AUTO_UPDATE_PLAN.md's
+                                    * ABANDONED_* causes), the SAME verdict the boot-time glue computes */
 } readiness_gate_facts_t;
 
-/* Reads the seven facts above off the live board. Target-only
+/* Reads the eight facts above off the live board. Target-only
  * (readiness_gate.c); host tests define their own body. Safe to call before
  * any of the modules it reads have been started -- each underlying accessor
  * documents its own not-yet-started answer, and every one of them fails in
@@ -142,7 +154,7 @@ typedef struct {
 void readiness_gate_collect(readiness_gate_facts_t *out);
 
 /* The decision. Returns the FIRST blocking item (there is no value in
- * listing all five: the operator has to clear them one at a time anyway, and
+ * listing all six: the operator has to clear them one at a time anyway, and
  * a truncating LCD dialog cannot show more than one), or READINESS_GATE_OK.
  *
  * When something blocks and msg/cap are non-NULL, writes an operator-facing
@@ -193,6 +205,10 @@ static inline readiness_gate_block_t readiness_gate_evaluate(const readiness_gat
         which = READINESS_GATE_BLOCK_CEILING_MISMATCH;
         text = "refused -- the safety processor's ceiling does not match the ESP's zone config. Check "
                "the Safety page (a raise may need the safety processor to be de-energized first).";
+    } else if (readiness_pico_update_status(f->pico_update_blocked) == READY_NOT_DONE) {
+        which = READINESS_GATE_BLOCK_PICO_UPDATE;
+        text = "refused -- the safety processor's firmware VERSION does not match and could not be "
+               "auto-updated. Check the Firmware update page.";
     }
 
     if (which != READINESS_GATE_OK && msg != NULL && cap > 0 && text != NULL) {

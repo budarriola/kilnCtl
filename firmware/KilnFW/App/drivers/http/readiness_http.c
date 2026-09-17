@@ -14,6 +14,7 @@
 #include "dashboard_http.h"
 #include "estop_verification.h"
 #include "nvs_report.h"
+#include "pico_auto_update_state.h"
 #include "profiles_builtin.h"
 #include "profiles_http.h"
 #include "config_divergence.h"
@@ -699,6 +700,32 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         size_t before_o = o;
         o = append_item(json, item_cap, o, first, "safety_ceiling_match", "Safety ceiling matches the ESP's", st,
                         detail, "/safety/commissioning", &dropped);
+        if (o != before_o) {
+            first = false;
+        }
+    }
+
+    /* 10a3. Pico auto-update. docs/PICO_AUTO_UPDATE_PLAN.md owner decision:
+     * "on an unrecoverable version mismatch the ESP refuses to fire until
+     * matched" -- same shape as safety_ceiling_match immediately above (a
+     * live verdict computed once elsewhere, displayed and blocked on here
+     * without recomputing it). pico_auto_update_state_is_blocking() reads
+     * true only once the boot-time auto-update path has exhausted its
+     * attempt budget on an unrecoverable mismatch (docs/PICO_AUTO_UPDATE_
+     * PLAN.md's ABANDONED_* causes); an in-progress retry is not blocking. */
+    {
+        bool blocked = pico_auto_update_state_is_blocking();
+        readiness_status_t st = readiness_pico_update_status(blocked);
+        char detail[READINESS_DETAIL_MAX];
+        if (!blocked) {
+            snprintf(detail, sizeof(detail), "%s", "the safety processor's firmware version matches");
+        } else {
+            snprintf(detail, sizeof(detail), "%s",
+                     "safety processor firmware VERSION MISMATCH could not be auto-updated");
+        }
+        size_t before_o = o;
+        o = append_item(json, item_cap, o, first, "pico_update", "Safety processor firmware version", st,
+                        detail, "/ota", &dropped);
         if (o != before_o) {
             first = false;
         }

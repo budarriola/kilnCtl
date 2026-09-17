@@ -1,6 +1,6 @@
 /* readiness_gate_collect() -- the one part of the firing interlock that
  * touches the live board. Everything that DECIDES anything lives in
- * readiness_gate.h as pure code; this file is deliberately nothing but six
+ * readiness_gate.h as pure code; this file is deliberately nothing but seven
  * reads and a struct fill, so there is no logic here for a host test to be
  * unable to reach.
  *
@@ -28,7 +28,10 @@
  *   - estop_verification_is_verified(): false unless a record loaded
  *     cleanly, i.e. a failed load reads exactly like "never verified" --
  *     that module's own documented fail-safe direction, and the reason this
- *     item can never be accidentally satisfied by a storage fault. */
+ *     item can never be accidentally satisfied by a storage fault.
+ *   - pico_auto_update_state_is_blocking(): false (never blocks) until
+ *     docs/PICO_AUTO_UPDATE_PLAN.md's boot-time glue is wired -- see that
+ *     module's own doc comment. */
 
 #include "readiness_gate.h"
 
@@ -38,6 +41,7 @@
 #include "crash_report.h"
 #include "dashboard_http.h"
 #include "estop_verification.h"
+#include "pico_auto_update_state.h"
 #include "safety_ceiling_sync.h"
 
 void readiness_gate_collect(readiness_gate_facts_t *out)
@@ -66,4 +70,11 @@ void readiness_gate_collect(readiness_gate_facts_t *out)
      * acting on -- never recomputed here from raw values a second way (see
      * readiness_ceiling_match_status()'s own doc comment on why). */
     out->ceiling_diverged = safety_ceiling_sync_is_diverged(NULL, 0);
+
+    /* The SAME live verdict readiness_pico_update_status() displays --
+     * see that predicate's own doc comment. pico_auto_update_state_
+     * is_blocking() reads false (never blocks) until docs/PICO_AUTO_
+     * UPDATE_PLAN.md's boot-time glue lands in a later commit; this call
+     * is stable, standalone and safe to add now. */
+    out->pico_update_blocked = pico_auto_update_state_is_blocking();
 }

@@ -246,6 +246,23 @@ static inline readiness_status_t readiness_ceiling_match_status(bool link_up, bo
     return link_up ? READY_NOT_DONE : READY_CANNOT_YET;
 }
 
+/* docs/PICO_AUTO_UPDATE_PLAN.md owner decision: "on an unrecoverable version
+ * mismatch the ESP refuses to fire until matched" -- this is the display
+ * half of a real structural block (readiness_gate.h's
+ * READINESS_GATE_BLOCK_PICO_UPDATE), the same "promoted from advisory to
+ * blocking" shape as readiness_ceiling_match_status() above.
+ *
+ * `blocked` is pico_auto_update_state_is_blocking()'s own live verdict --
+ * deliberately not recomputed here (same "one shared predicate, not two
+ * that can drift" reasoning as the ceiling-match item immediately above).
+ * It reads true only for one of pico_auto_update.h's unrecoverable
+ * ABANDONED_* outcomes after the attempt budget is exhausted; a retryable
+ * mismatch that auto-update is still working through is NOT blocking. */
+static inline readiness_status_t readiness_pico_update_status(bool blocked)
+{
+    return blocked ? READY_NOT_DONE : READY_OK;
+}
+
 /* Pure decision for the "Safety processor trip status" item (2026-09-08 live
  * dry run, docs/audits/setup_wizard_live_dryrun_2026-09-08.md): the old
  * "Hardware present and answering" item (dashboard_http_get_hw_ready()) only

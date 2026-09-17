@@ -20,7 +20,7 @@
 //     comment): the gate blocks item X if and only if item X's DISPLAYED
 //     status -- the one readiness_http.c renders into /api/readiness -- is
 //     READY_NOT_DONE. test_gate_and_display_agree_over_the_cross_product()
-//     walks all 64 fact combinations and checks both directions, plus that
+//     walks all 256 fact combinations and checks both directions, plus that
 //     the item NAMED is the first NOT_DONE one in gate order. This is the
 //     honest form of "a check that fails if the gate and the display can
 //     disagree" for the DECISION side; check_readiness_gate_display_agreement.ps1
@@ -88,6 +88,10 @@ static void set_fully_ready(void)
     /* 2026-09-14: the ceiling-match item, promoted into this gate the same
      * way estop_verified was. Not diverged -- the two sides agree. */
     s_fake_facts.ceiling_diverged = false;
+    /* docs/PICO_AUTO_UPDATE_PLAN.md's new item: not blocked, i.e. the
+     * Pico's firmware version matches (or the boot-time glue has not
+     * flagged an unrecoverable mismatch). */
+    s_fake_facts.pico_update_blocked = false;
 }
 
 /* ---- 2. the allowed case ------------------------------------------------- */
@@ -183,6 +187,21 @@ static void test_ceiling_divergence_alone_refuses(void)
                             "ceiling");
 }
 
+static void test_pico_update_blocked_alone_refuses(void)
+{
+    /* docs/PICO_AUTO_UPDATE_PLAN.md owner decision, verbatim: "on an
+     * unrecoverable version mismatch the ESP refuses to fire until
+     * matched" -- an actual block, not a warning surface. This gate's item
+     * is the enforcement half of that; pico_auto_update_state_is_blocking()
+     * (currently a stub returning false until the boot-time glue lands) is
+     * the same live verdict readiness_http.c's "pico_update" item shows. */
+    TEST_SECTION("an unrecoverable Pico version mismatch alone refuses a start (the NEW enforcement)");
+    set_fully_ready();
+    s_fake_facts.pico_update_blocked = true;
+    check_one_blocking_item("a blocked Pico auto-update refuses the start", READINESS_GATE_BLOCK_PICO_UPDATE,
+                            "VERSION");
+}
+
 /* ---- the cases that must NOT block --------------------------------------- */
 
 static void test_acknowledged_crash_does_not_block(void)
@@ -264,16 +283,19 @@ static readiness_gate_block_t first_not_done_item(const readiness_gate_facts_t *
     if (readiness_ceiling_match_status(f->safety_link_up, f->ceiling_diverged) == READY_NOT_DONE) {
         return READINESS_GATE_BLOCK_CEILING_MISMATCH;
     }
+    if (readiness_pico_update_status(f->pico_update_blocked) == READY_NOT_DONE) {
+        return READINESS_GATE_BLOCK_PICO_UPDATE;
+    }
     return READINESS_GATE_OK;
 }
 
 static void test_gate_and_display_agree_over_the_cross_product(void)
 {
-    TEST_SECTION("gate blocks item X <=> item X's DISPLAYED status is NOT_DONE (all 128 combinations)");
+    TEST_SECTION("gate blocks item X <=> item X's DISPLAYED status is NOT_DONE (all 256 combinations)");
     int mismatches = 0;
     int blocked = 0;
     int allowed = 0;
-    for (unsigned bits = 0; bits < 128u; bits++) {
+    for (unsigned bits = 0; bits < 256u; bits++) {
         readiness_gate_facts_t f;
         memset(&f, 0, sizeof(f));
         f.recovery_mode = (bits & 1u) != 0u;
@@ -283,6 +305,7 @@ static void test_gate_and_display_agree_over_the_cross_product(void)
         f.crash_acknowledged = (bits & 16u) != 0u;
         f.estop_verified = (bits & 32u) != 0u;
         f.ceiling_diverged = (bits & 64u) != 0u;
+        f.pico_update_blocked = (bits & 128u) != 0u;
 
         readiness_gate_block_t expect = first_not_done_item(&f);
         readiness_gate_block_t got = readiness_gate_evaluate(&f, NULL, 0);
@@ -313,6 +336,7 @@ static void test_gate_keys_match_the_api_item_keys(void)
     TEST_CHECK(strcmp(READINESS_GATE_KEY_CRASH_REPORT, "crash_report") == 0, "crash_report key");
     TEST_CHECK(strcmp(READINESS_GATE_KEY_ESTOP, "estop_verified") == 0, "estop_verified key");
     TEST_CHECK(strcmp(READINESS_GATE_KEY_CEILING_MATCH, "safety_ceiling_match") == 0, "safety_ceiling_match key");
+    TEST_CHECK(strcmp(READINESS_GATE_KEY_PICO_UPDATE, "pico_update") == 0, "pico_update key");
 }
 
 /* dashboard_exec_http.c embeds these messages verbatim into a JSON body,
@@ -333,6 +357,7 @@ static void test_messages_are_json_safe(void)
         READINESS_GATE_BLOCK_CRASH_REPORT,
         READINESS_GATE_BLOCK_ESTOP_VERIFIED,
         READINESS_GATE_BLOCK_CEILING_MISMATCH,
+        READINESS_GATE_BLOCK_PICO_UPDATE,
     };
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
         set_fully_ready();
@@ -341,6 +366,7 @@ static void test_messages_are_json_safe(void)
         case READINESS_GATE_BLOCK_SAFETY_TRIP: s_fake_facts.safety_trip_mask = 0x0040u; break;
         case READINESS_GATE_BLOCK_CRASH_REPORT: s_fake_facts.crash_have_record = true; break;
         case READINESS_GATE_BLOCK_CEILING_MISMATCH: s_fake_facts.ceiling_diverged = true; break;
+        case READINESS_GATE_BLOCK_PICO_UPDATE: s_fake_facts.pico_update_blocked = true; break;
         default: s_fake_facts.estop_verified = false; break;
         }
         char msg[192];
@@ -367,6 +393,7 @@ int main(void)
     test_crash_report_alone_refuses();
     test_estop_unverified_alone_refuses();
     test_ceiling_divergence_alone_refuses();
+    test_pico_update_blocked_alone_refuses();
     test_acknowledged_crash_does_not_block();
     test_link_down_is_not_this_gates_refusal();
     test_null_facts_are_not_a_green_light();
