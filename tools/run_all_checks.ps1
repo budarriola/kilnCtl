@@ -223,6 +223,28 @@ if (Test-Path $routeTierNegativeTest) {
     Write-Host "         without it because -AllowFewerChecks was passed." -ForegroundColor Yellow
 }
 
+# test_check_config_migration_steps.ps1 is a negative test, not a guard -- it
+# proves check_config_migration_steps.ps1's scan (docs/CONFIG_MIGRATION_CHAIN_PLAN.md
+# section 5) can actually detect a version bump with no matching step, plus
+# every other rule shape it claims to enforce. Named test_*, not check_*, so
+# the glob above does not pick it up; wired explicitly here, same pattern as
+# the negative tests above.
+$configMigrationStepsNegativeTest = Join-Path $repoRoot "firmware\KilnFW\App\test\test_check_config_migration_steps.ps1"
+if (Test-Path $configMigrationStepsNegativeTest) {
+    $checks += Get-Item $configMigrationStepsNegativeTest
+    $checks = $checks | Sort-Object FullName
+} elseif (-not $AllowFewerChecks) {
+    Write-Host ""
+    Write-Host "FAILED: expected negative test $configMigrationStepsNegativeTest not found --" -ForegroundColor Red
+    Write-Host "        has it moved? A missing negative test must not read as a clean run." -ForegroundColor Red
+    Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+    exit 2
+} else {
+    Write-Host ""
+    Write-Host "WARNING: expected negative test $configMigrationStepsNegativeTest not found -- proceeding" -ForegroundColor Yellow
+    Write-Host "         without it because -AllowFewerChecks was passed." -ForegroundColor Yellow
+}
+
 # test_check_stop_path_never_gated.ps1 is a negative test, not a guard -- it
 # proves check_stop_path_never_gated.ps1's scan (docs/WEB_AUTH_PLAN.md
 # section 9, the LCD Stop-is-never-gated property) can actually detect a PIN

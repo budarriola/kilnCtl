@@ -448,8 +448,11 @@ A config version bump must fail the build if it does not bring its step and its
 test. `check_no_orphaned_checks.ps1` exists because "someone remembers" failed
 at least three times.
 
-Proposed `tools/check_config_migration_steps.ps1`, picked up automatically by
-`run_all_checks.ps1`'s `check_*.ps1` glob, asserting for each governed store:
+Landed (this pass): `tools/check_config_migration_steps.ps1`, picked up
+automatically by `run_all_checks.ps1`'s `check_*.ps1` glob, asserting for the
+ESP zones config store (the sole governed store with an empty, D1-shaped step
+table today — see §0.1's other three stores for why they are not yet covered
+by this script):
 
 1. A step exists whose input is `CURRENT_VERSION - 1`, unless the current
    version is still within the tail's range (26 for zones).
@@ -465,9 +468,21 @@ Proposed `tools/check_config_migration_steps.ps1`, picked up automatically by
    failure `check_no_orphaned_checks.ps1` guards.
 6. The expiry floor constant exists and the tail's oldest case matches it.
 
-The check must itself be negative-tested before landing: bump the version in a
-scratch tree without adding a step, and confirm a red run. Eight checks in this
-repo shipped as vacuous passes without that discipline.
+Negative-tested per that requirement:
+`firmware/KilnFW/App/test/test_check_config_migration_steps.ps1` bumps the
+version in synthetic scratch text (never the real tree) without adding a
+step, and separately with a step missing each individual required property
+(frozen-input assert, crc32-last-field, fixture presence/reference, expiry
+floor), confirming a red run named to the specific broken rule each time,
+plus a green run against a synthetic fully-correct step and against today's
+real (pre-bump) tree. Wired into `run_all_checks.ps1` alongside the other
+`test_check_*.ps1` negative tests. Eight checks in this repo previously
+shipped as vacuous passes without that discipline.
+
+Extending enforcement to the other three governed stores (kiln-config slots,
+fire profiles, RP2040 safety config) is follow-up work, not assumed done
+here — kiln-config slots in particular carries two pre-D1 accumulated steps
+today that a naive "exactly one step" rule would immediately flag.
 
 ## 6. Decisions — all settled
 
