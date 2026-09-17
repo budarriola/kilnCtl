@@ -544,6 +544,7 @@ given).
 | S12 cold-junction WARN | argued + host-tested (ungated) | reads real snapshot, unconditional |
 | S13 borrowed-zone staleness | host-tested | reachable in source (`context_borrowed_sample_counter_advancing()`); commissioning-gated off by default |
 | S14 per-channel overcurrent WARN | host-tested | new guard 2026-08-28, `test_ct_disabled_guards()` pair-tested |
+| S15 shared-CT commanded-sum-vs-measured deficit WARN | host-tested | new guard 2026-09-06, `test_s14_s15_summed_topology()` in `firmware/SaftyFW/test/test_safety_guards.c`; inert unless `ct_topology = summed`, which this board has not commissioned (`GUARD_TEST_MATRIX.md` §3.3/§3.4) |
 | Relay-authority gate (KilnFW, all three callers) | argued + host-tested per caller | `relay_authority.{c,h}`; UART bridge, diagnostics HTTP, profile executor all confirmed routed through it |
 | KilnFW thermal_guard guards 1,2,4,5,7 | **host-tested, not hardware-verified** | `App/test/test_thermal_guard.c` exercises the real `thermal_guard_tick()` (not a stub) for each of these, including override/arming/regression cases (e.g. `"guard 1 trips when commanded heat produces far less than sanity_rate_c_per_min"`, `"guard 4 eventually trips a zone that starts hot and never settles"`); no bench provocation of any of these five is on record (`SAFETY_MODEL.md` summary table, corrected 2026-09-04 — a previous pass of this row read "not yet live-tested" as "not tested at all" and understated the coverage; see `SAFETY_MODEL.md`'s own disagreement note) |
 | KilnFW thermal_guard guard 6 (sensor validity) | hardware-verified | live-verified end to end, no TC attached, trip fired after exactly 3 bad reads, board relay stayed off (`SAFETY_MODEL.md`); also host-tested against the real function (`App/test/test_thermal_guard.c`) |
@@ -557,12 +558,16 @@ given).
 | E-stop polarity fix itself | hardware-relevant, negative-tested at unit level | fixed 2026-08-24; "nothing in the host suite or this fixture could have caught it" before the pure-policy extraction — worth noting the *original* bug shipped invisibly for a time |
 | `virtual_dut`/SimFW cross-check evidence generally | **withdrawn** | tool deleted 2026-08-28; every "Yes" reachability verdict that cited it now rests on source-reading alone (method 1), re-confirmed independently in §6c |
 
-**Rollup (guard-level rows above, S1–S14 plus the two KilnFW-side items called
-out separately):** roughly 20 discrete claims tracked here — **20
-host-tested** (S1–S14's logic rows plus KilnFW guards 1,2,3,4,5,6,7, and
+**Rollup (guard-level rows above, S1–S15 plus the two KilnFW-side items called
+out separately):** roughly 21 discrete claims tracked here — **21
+host-tested** (S1–S15's logic rows plus KilnFW guards 1,2,3,4,5,6,7, and
 guard 9's trip/priority path **and** its fault-clear path, corrected
 2026-09-04 — see the guard 9 row above), **3 hardware-verified** (S5's
-fit/masking finding, KilnFW guard 6, E-stop polarity fix), and the remaining
+hardware fit, S5's masking-before-fit finding, and KilnFW guard 6 — the
+three rows in the table above actually labeled "hardware-verified"; the
+E-stop polarity fix is deliberately excluded here, since its own row is
+labeled "hardware-relevant, negative-tested at unit level," not
+"hardware-verified"), and the remaining
 **~8 explicitly marked "not done"** for hardware. What remains **argued
 only** is narrower than a previous pass of this table claimed, and now
 narrower still: S7's pole-2 press test is bench-verified (not argued), and
