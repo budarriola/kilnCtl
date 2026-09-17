@@ -64,8 +64,12 @@ What does **not** exist, and is the whole of the work below:
 Tier names: **OPEN** (no credential, ever), **USER** (`user` or
 `administrator`), **ADMIN** (`administrator` only).
 
-The 140 registered routes are classified below. The rule that decides the
-ambiguous cases: **a route is OPEN only if its response cannot be used to
+The 137 registered routes are classified below (comment-stripped count, the
+same one `check_uri_handler_cap.ps1` and `check_route_tier_coverage.ps1`
+report — an earlier draft said 140, which counted three `.uri = "..."` text
+matches inside `wifi_provision_http.c`'s own historical audit-comment block
+as if they were real registrations). The rule that decides the ambiguous
+cases: **a route is OPEN only if its response cannot be used to
 change the kiln's behaviour and reveals nothing an onlooker at the kiln cannot
 already see.** Anything that writes is at least USER.
 
@@ -77,8 +81,11 @@ needed to load it:
 
 `GET /`, `/app.js`, `/nav.js`, `/theme.css`, `/commissioning_shared.js`,
 `GET /api/status`, `GET /api/profile_exec`, `GET /api/readiness`,
-`GET /api/unit_pref`, `GET /api/ota/esp/status`, `GET /api/history.csv`,
+`GET /api/ota/esp/status`, `GET /api/history.csv`,
 `GET /api/profile_plan`, `GET /api/board_temps`, `GET /api/firing_history`.
+(An earlier draft also listed `GET /api/unit_pref` here — no such route
+exists. Only `POST /api/unit_pref` is registered, and it belongs in ADMIN
+below; the value the dashboard needs is already in `GET /api/status`'s JSON.)
 
 Also OPEN, read-only and needed before anyone can log in at all:
 `GET /status`, `GET /scan`, `GET /networks`, `GET /wifi`.
@@ -136,6 +143,13 @@ and the reads `GET /api/zones`, `/api/zones/ct_channel_map`,
 `/api/backup/export`, `/api/crash_report`, `/api/boot_guard`,
 `/api/coredump/info`, `/api/coredump/chunk`, `/api/debug/lwip_stats`,
 `/api/diagnostics/timing`, `/api/saftyfw_stack_margin`.
+Also `POST /api/dualwrite_window/restore_verified` (mutates the same
+persisted dual-write/migration state its GET sibling above reads — an
+earlier draft omitted it from every table here).
+
+(`POST /api/kiln_configs/quarantine_clear`, referenced in
+`kiln_cfg_store.c`'s comments, is not yet an actually-registered route and
+needs no tier entry until it is; it is not part of the 137.)
 
 *Network writes:* `POST /provision`, `/forget`, `/ip_config`.
 
@@ -158,7 +172,7 @@ exists to serve. The nine routes it serves are ADMIN like any other.
 | `GET /api/history.csv`, `/api/firing_history` | Full thermal history is more than a glance at the panel | **OPEN.** The owner's requirement is that a run can be monitored; a run's temperature curve is the monitoring. |
 | `GET /api/zones` | Read-only, but exposes PID gains and per-zone calibration | **ADMIN.** It is a config dump, not telemetry. Its temperatures are already in `/api/status`. |
 | `GET /api/readiness` | Enumerates every unfinished commissioning step | **OPEN.** The dashboard renders a readiness banner from it, and it reports nothing secret. |
-| `GET /api/unit_pref` | Needed to render the dashboard | **OPEN for GET, ADMIN for POST.** |
+| `POST /api/unit_pref` | Only a POST route exists (no GET) — the earlier draft's "OPEN for GET" half was fictional | **ADMIN.** The GET variant does not exist; the value the dashboard needs is already in `GET /api/status`'s JSON, which is OPEN. |
 | `GET /api/board_temps` | Telemetry, but board-internal | **OPEN.** Same class as `/api/status`. |
 | `GET /api/coredump/*`, `/api/crash_report` | Diagnostics, no write | **ADMIN.** A coredump contains RAM contents, including the session table. |
 | `GET /status` (the Wi-Fi status page) | Publishes the AP password in plain text | **OPEN, unchanged.** It is the board's own AP identity and is already deliberately public. Because it is public, the web credential must not be derived from it — see item 2. |
