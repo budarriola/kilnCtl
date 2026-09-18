@@ -4,6 +4,7 @@
 #include "ota_http_util.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #include "kilnlink/kilnlink_rollback_result.h"
 
@@ -124,4 +125,14 @@ int ota_http_pico_rollback_format_body(safety_link_rollback_outcome_t outcome, u
                              "\"detail\":\"accepted -- the safety processor rebooted into a different "
                              "firmware image (boot_id and build identity both changed)\"}");
     }
+}
+
+bool ota_http_client_ip_finalize(char *out, size_t out_len, const char *formatted_addr)
+{
+    if (formatted_addr != NULL) {
+        snprintf(out, out_len, "%s", formatted_addr);
+        return true;
+    }
+    snprintf(out, out_len, "unknown");
+    return false;
 }

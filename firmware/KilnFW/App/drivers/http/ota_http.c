@@ -241,27 +241,70 @@ static uint32_t now_ms(void)
 // underlying socket is IPv4-mapped-into-IPv6 by lwip regardless of which
 // family the client actually connected over, so this handles both without
 // the caller needing to know which.
+//
+// 2026-09-17 adversarial review of the Finding-1 fix (WEB_AUTH_CLIENT_IP_LEN
+// 16 -> 46) found two PRE-EXISTING weaknesses here, unrelated to that fix's
+// own buffer-size bug but with a larger blast radius now that the same
+// buffer feeds two more comparison sites (http_auth_session_status()/
+// _touch(), http_auth_http.c):
+//
+//   1. inet_ntop()'s return value went unchecked. lwip's inet_ntop(), like
+//      BSD's, does not touch its output buffer on failure -- so a failure
+//      here used to leave `out` holding whatever was already on the
+//      caller's stack (every real caller declares a plain `char ip[46];`
+//      local, never zero-initialized), and that undefined content then fed
+//      a security strcmp() against a stored session IP. Fixed: the actual
+//      inet_ntop() call/return-check now happens here, and the decision of
+//      what to leave in `out` on any failure is delegated to
+//      ota_http_client_ip_finalize() (ota_http_util.h/.c), which always
+//      leaves `out` NUL-terminated -- host-tested there without needing a
+//      real socket (see test_ota_http.c's ota_http_client_ip_finalize
+//      cases).
+//   2. Every distinct failure path (this function's own two, plus a bad
+//      inet_ntop()) collapses onto the shared literal "unknown" -- two
+//      different clients that both hit any of these paths present the
+//      IDENTICAL client_ip string, so one could resolve a session minted
+//      for the other. This is real but deliberately left UNCHANGED here,
+//      for two reasons: `web_auth_session.h` already documents "unknown" as
+//      a deliberate, load-bearing pre-existing property (its
+//      WEB_AUTH_CLIENT_IP_LEN comment), and the only call site where the
+//      collision is actually exploitable -- web_auth_login_http.c's
+//      login_post_handler(), the sole place a session is MINTED rather than
+//      merely compared against -- was out of scope for this pass (another
+//      session was concurrently editing that file). Every OTHER caller of
+//      this function (http_auth_http.c, ota_http_esp.c/_pico.c/_recovery.c,
+//      web_auth_session_status_http.c) only ever COMPARES `out` against an
+//      already-existing session's stored client_ip, so leaving "unknown" as
+//      the shared miss/undetermined value there is unchanged and still
+//      correct. RECOMMENDED FOLLOW-UP, not done here: have
+//      login_post_handler() refuse to mint a session (fail closed) when
+//      ota_http_get_client_ip() returns "unknown", rather than binding a
+//      real, credential-verified session to a sentinel other undetermined
+//      clients also share.
 void ota_http_get_client_ip(httpd_req_t *req, char *out, size_t out_len)
 {
     int sockfd = httpd_req_to_sockfd(req);
     if (sockfd < 0) {
-        snprintf(out, out_len, "unknown");
+        ota_http_client_ip_finalize(out, out_len, NULL);
         return;
     }
 
     struct sockaddr_in6 addr;
     socklen_t addr_size = sizeof(addr);
     if (getpeername(sockfd, (struct sockaddr *)&addr, &addr_size) != 0) {
-        snprintf(out, out_len, "unknown");
+        ota_http_client_ip_finalize(out, out_len, NULL);
         return;
     }
 
+    char formatted[46]; // INET6_ADDRSTRLEN -- same size as every caller's own buffer
+    const char *result;
     if (addr.sin6_family == AF_INET) {
         struct sockaddr_in *addr4 = (struct sockaddr_in *)&addr;
-        inet_ntop(AF_INET, &addr4->sin_addr, out, out_len);
+        result = inet_ntop(AF_INET, &addr4->sin_addr, formatted, sizeof(formatted));
     } else {
-        inet_ntop(AF_INET6, &addr.sin6_addr, out, out_len);
+        result = inet_ntop(AF_INET6, &addr.sin6_addr, formatted, sizeof(formatted));
     }
+    ota_http_client_ip_finalize(out, out_len, result);
 }
 
 // TODO.md 10.6a: content negotiation lives in web_encoding.h's shared

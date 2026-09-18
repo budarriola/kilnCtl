@@ -52,6 +52,37 @@ const char *ota_http_pico_rollback_reason_str(uint8_t reason_code);
 int ota_http_pico_rollback_format_body(safety_link_rollback_outcome_t outcome, uint8_t reason_code,
                                         char *body, size_t cap);
 
+/* Pure core of ota_http_get_client_ip() (ota_http.c), pulled out so its
+ * failure-path handling can be host-tested without dragging in lwip's
+ * sockets -- ota_http.c does the real httpd_req_to_sockfd()/getpeername()/
+ * inet_ntop() calls and hands this function only the outcome.
+ *
+ * `formatted_addr` is the already-formatted address string on success, or
+ * NULL for ANY failure (httpd_req_to_sockfd() < 0, getpeername() != 0, or
+ * inet_ntop() returning NULL). On every call this leaves `out` NUL-
+ * terminated and holding either a copy of `formatted_addr` or the literal
+ * "unknown" -- never untouched/uninitialized memory, which is what the
+ * 2026-09-17 review found: the caller's `inet_ntop(...)` return value used
+ * to go unchecked, so a lwip inet_ntop() failure (it does not write to its
+ * output buffer on failure, same as BSD's) left the caller's stack buffer
+ * holding whatever was already there, then compared via strcmp() against a
+ * stored session IP -- a read of uninitialized memory feeding a security
+ * comparison.
+ *
+ * Returns true if a real address was written, false if the shared
+ * "unknown" sentinel was -- see ota_http_get_client_ip()'s own header
+ * comment and web_auth_session.h's WEB_AUTH_CLIENT_IP_LEN comment for why
+ * "unknown" is intentionally non-unique (every client that fails to
+ * resolve an address collides on it). A caller that MINTS a new session
+ * off this buffer (web_auth_login_http.c's login_post_handler(), the only
+ * such call site) SHOULD treat a false return as "refuse", not "proceed",
+ * to avoid binding a real session to a sentinel other undetermined clients
+ * also share -- not yet wired up there as of this comment, see
+ * ota_http_get_client_ip()'s own header comment for why. A caller that only
+ * COMPARES against an already-existing session's stored client_ip is
+ * unaffected either way. */
+bool ota_http_client_ip_finalize(char *out, size_t out_len, const char *formatted_addr);
+
 #ifdef __cplusplus
 }
 #endif

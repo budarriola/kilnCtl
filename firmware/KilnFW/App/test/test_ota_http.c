@@ -2116,6 +2116,53 @@ static void test_extract_session_token_large_cookie_header(void)
                "the real kiln_sid value at the end of the long header is extracted correctly");
 }
 
+// 2026-09-17 adversarial review of the Finding-1 fix (client_ip buffer
+// size): ota_http_get_client_ip() used to pass inet_ntop()'s output buffer
+// straight through without checking its return value. lwip's inet_ntop(),
+// like BSD's, does not write to its output on failure, so that failure path
+// left the caller's buffer holding whatever was already on the stack --
+// undefined content then fed into a strcmp() security comparison. The fix
+// pulls the "what goes in `out` on success vs. every failure" decision into
+// ota_http_client_ip_finalize() (ota_http_util.h/.c), a pure function this
+// test exercises directly without needing a real socket.
+static void test_client_ip_finalize_writes_real_address_on_success(void)
+{
+    TEST_SECTION("ota_http_client_ip_finalize -- a resolved address is copied verbatim and reports true");
+    char out[46];
+    memset(out, 0x5A, sizeof(out)); // poison pattern -- would survive untouched if the function did nothing
+    bool known = ota_http_client_ip_finalize(out, sizeof(out), "192.0.2.7");
+    TEST_CHECK(known, "a real formatted address reports true (a real client IP)");
+    TEST_CHECK(strcmp(out, "192.0.2.7") == 0, "the real address is copied into out verbatim");
+}
+
+static void test_client_ip_finalize_defined_on_null_formatted_addr(void)
+{
+    // This is the exact case the review flagged: formatted_addr == NULL
+    // models httpd_req_to_sockfd() < 0, getpeername() != 0, OR inet_ntop()
+    // returning NULL -- every failure path collapses to this one call.
+    TEST_SECTION("ota_http_client_ip_finalize -- NULL formatted_addr (any failure path) leaves out defined, not "
+                 "untouched/uninitialized, and reports false");
+    char out[46];
+    memset(out, 0x5A, sizeof(out)); // poison pattern
+    bool known = ota_http_client_ip_finalize(out, sizeof(out), NULL);
+    TEST_CHECK(!known, "an undetermined address reports false");
+    TEST_CHECK(strcmp(out, "unknown") == 0, "out holds the defined sentinel \"unknown\", not leftover poison bytes");
+    TEST_CHECK(out[0] != (char)0x5A, "the poison byte at out[0] was actually overwritten");
+}
+
+static void test_client_ip_finalize_terminates_with_undersized_buffer(void)
+{
+    // snprintf() truncates rather than overflows even when out_len is too
+    // small for "unknown" (7 chars + NUL) -- confirms this function never
+    // hands back a non-NUL-terminated buffer regardless of caller sizing.
+    TEST_SECTION("ota_http_client_ip_finalize -- undersized out_len still NUL-terminates, never overflows");
+    char out[4];
+    memset(out, 0x5A, sizeof(out));
+    bool known = ota_http_client_ip_finalize(out, sizeof(out), NULL);
+    TEST_CHECK(!known, "still reports false (undetermined) even when the sentinel had to be truncated");
+    TEST_CHECK(out[sizeof(out) - 1] == '\0', "out is NUL-terminated within the caller's buffer size");
+}
+
 // ---------------------------------------------------------------------------
 
 void run_test_ota_http(void)
@@ -2192,6 +2239,10 @@ void run_test_ota_http(void)
     test_credential_survives_factory_reset_all_scope();
     test_extract_session_token_skips_malformed_occurrence();
     test_extract_session_token_large_cookie_header();
+
+    test_client_ip_finalize_writes_real_address_on_success();
+    test_client_ip_finalize_defined_on_null_formatted_addr();
+    test_client_ip_finalize_terminates_with_undersized_buffer();
 }
 
 int main(void)
