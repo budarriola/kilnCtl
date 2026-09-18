@@ -47,15 +47,20 @@ recovery mode.
 
 **As of 2026-09-07 `cfg_fs_mount_device()` (`main_boot_early.c`) now runs at
 boot and auto-formats any partition with no valid LittleFS filesystem in
-it** — see "Auto-format and the ask-first path" below. The bench board's
-`cfg` partition reads 86.6% non-erased (residual bytes left over from
-before the `cfg` partition existed in `partitions.csv`, not a filesystem —
-the density-based gate this section originally shipped with wrongly
-treated that as evidence of content and refused to format it), so its NEXT
-boot after this fix lands will auto-format and mount cleanly, making the
-dual-write bridges live for the first time. A board whose `cfg` partition
-instead contains real (if
-mount-failed) data is NOT touched automatically — see below.
+it** — see "Auto-format and the ask-first path" below. This is source and
+host-test evidence only, not a hardware observation: as of 2026-09-17 this
+code has never run on the bench board, which is still on commit `3b0c82e`
+(built 2026-09-05, 1057 commits behind), so nothing below in this paragraph
+has been seen actually happen. The bench board's `cfg` partition reads
+86.6% non-erased (residual bytes left over from before the `cfg` partition
+existed in `partitions.csv`, not a filesystem — the density-based gate this
+section originally shipped with wrongly treated that as evidence of content
+and refused to format it), so once this code is next flashed to the bench
+board, its NEXT boot is expected — per the source, unconfirmed on hardware
+— to auto-format and mount, making the dual-write bridges live for the
+first time. A board whose `cfg` partition instead contains real (if
+mount-failed) data is NOT touched automatically — see below. See "Open
+items (2026-09-07)" below for the full not-yet-reflashed note.
 
 ## Auto-format and the ask-first path
 

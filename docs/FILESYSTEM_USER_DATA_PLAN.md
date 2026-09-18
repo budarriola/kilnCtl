@@ -12,12 +12,18 @@ opaque `_Static_assert`-pinned C structs in KV blobs.
 Design is complete here. **STALE as of 2026-09-14 (roadmap truth-up): "nothing
 below is implemented" is no longer true.** Zones config, profiles, and
 preferences now dual-write to the `cfg` partition designed below (NVS stays
-authoritative and unconditional) — this is live and proven, not merely
-designed. `docs/CONFIG_FILESYSTEM.md` is the current, authoritative status
-doc for what has actually shipped and what remains open; treat this document
-as the design record it was written as, and `CONFIG_FILESYSTEM.md` as
-superseding it on implementation status (repo convention: newest doc wins on
-conflict).
+authoritative and unconditional) — this is implemented in source and
+host-tested, not merely designed. **Update, 2026-09-17: "live and proven"
+overstated the evidence.** The mount/dual-write code exists and passes host
+tests, but as of 2026-09-17 it has never run on the bench board — that board
+is still on commit `3b0c82e` (built 2026-09-05, 1057 commits behind HEAD),
+and `GET /api/cfgfs` on it answers "no such endpoint". Nothing here has been
+observed on hardware yet. `docs/CONFIG_FILESYSTEM.md` is the current,
+authoritative status doc for what has actually shipped and what remains
+open (including the not-yet-reflashed caveat in its "Open items" section);
+treat this document as the design record it was written as, and
+`CONFIG_FILESYSTEM.md` as superseding it on implementation status (repo
+convention: newest doc wins on conflict).
 
 ---
 
