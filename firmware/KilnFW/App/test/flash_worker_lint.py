@@ -215,6 +215,16 @@ ALLOWLIST = {
     # normal task concurrency exists -- Pattern 3 (init-time only), same
     # shape as boot_guard.c's own entry above. Until then this is dead code
     # with no PSRAM-stack exposure at all (unreachable).
+    # PICO_AUTO_UPDATE_PLAN.md G1 (2026-09-18). Pattern 3 (internal-SRAM-
+    # stack caller, reached live, not init-time) -- same shape as
+    # estop_verification.c's entry above. pico_image_manifest_store() has
+    # exactly one caller, ota_http_pico.c's ota_pico_do_stage(), which runs
+    # on the httpd task (internal SRAM, never PSRAM, never the flash worker),
+    # so it neither dispatches through uart_bridge_ext_run_on_flash_worker()
+    # nor can be re-entered from it. pico_image_manifest_load() (the boot
+    # task's only use) writes nothing. _clear() has no caller yet. The record
+    # is 16 bytes written once per staged image, not a hot write path.
+    "pico_image_manifest.c",
     "pico_update_attempts.c",
     # Pattern 2 (local caller_stack_is_external() guard), see this file's
     # own comment mirroring kiln_cfg_store.c's.

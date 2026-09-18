@@ -5,6 +5,7 @@
 
 #include "esp_log.h"
 #include "hal_kv.h"
+#include "ota_image_crc.h" /* the one CRC-32 in KilnFW -- see record_checksum() below */
 #include "nvs_key_check.h"
 
 static const char *TAG = "pico_img_manifest";
@@ -36,29 +37,16 @@ typedef struct {
 
 typedef char pim_record_size_check[(sizeof(pico_image_manifest_record_t) == 16) ? 1 : -1];
 
-/* Table-less CRC32 (IEEE 802.3/zlib polynomial) -- same routine as
- * boot_guard.c's and pico_update_attempts.c's, copied rather than shared for
- * the same reason they are: each of these persist modules builds standalone
- * in the host tests. This is the record's own integrity check and is
- * unrelated to the IMAGE's CRC (ota_image_crc.h), which is merely a payload
- * field here. */
-static uint32_t crc32_compute(const void *data, size_t len)
+/* The record's own integrity check over its own 12 preceding bytes.
+ * Deliberately NOT a second CRC-32 implementation: it delegates to
+ * ota_image_crc.c, the one linkable, known-answer-tested CRC-32 in KilnFW
+ * (check_link_impl_isolation.ps1 exists to stop a file like this one growing
+ * a private copy that can silently drift). This is unrelated to the IMAGE's
+ * CRC, which is merely a payload field carried in the record -- although it
+ * is now, by construction, the same arithmetic. */
+static uint32_t record_checksum(const pico_image_manifest_record_t *rec)
 {
-    const uint8_t *p = (const uint8_t *)data;
-    uint32_t crc = 0xFFFFFFFFu;
-    for (size_t i = 0; i < len; i++) {
-        crc ^= p[i];
-        for (int b = 0; b < 8; b++) {
-            uint32_t mask = -(crc & 1u);
-            crc = (crc >> 1) ^ (0xEDB88320u & mask);
-        }
-    }
-    return ~crc;
-}
-
-static uint32_t record_crc(const pico_image_manifest_record_t *rec)
-{
-    return crc32_compute(rec, offsetof(pico_image_manifest_record_t, crc32));
+    return ota_image_crc32((const uint8_t *)rec, offsetof(pico_image_manifest_record_t, crc32));
 }
 
 static bool record_is_valid(const pico_image_manifest_record_t *rec)
@@ -66,7 +54,7 @@ static bool record_is_valid(const pico_image_manifest_record_t *rec)
     if (rec->version != PIM_RECORD_VERSION) {
         return false;
     }
-    if (rec->crc32 != record_crc(rec)) {
+    if (rec->crc32 != record_checksum(rec)) {
         return false;
     }
     /* A zero-length image is not a describable image. Catching it here keeps
@@ -81,7 +69,7 @@ static hal_status_t persist_record(uint32_t image_length, uint32_t image_crc32)
     rec.version = PIM_RECORD_VERSION;
     rec.image_length = image_length;
     rec.image_crc32 = image_crc32;
-    rec.crc32 = record_crc(&rec);
+    rec.crc32 = record_checksum(&rec);
 
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
