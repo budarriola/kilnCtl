@@ -35,6 +35,8 @@
     { "selector": "table.coupling td.rga-bad", "note": "see rga-ok above." },
     { "selector": "p.verdict-ok", "note": "full explanatory sentence, e.g. 'Every diagonal element is within...'; colour only reinforces text." },
     { "selector": "p.verdict-warn, div.verdict-warn", "note": "full explanatory sentence; colour only reinforces text." },
-    { "selector": "p.verdict-bad", "note": "full explanatory sentence; colour only reinforces text." }
+    { "selector": "p.verdict-bad", "note": "full explanatory sentence; colour only reinforces text." },
+    { "selector": ".kg-badge.kg-bad", "note": "2026-09-18, kiln zone graphic (docs/ZONE_GRAPHIC_PLAN.md). Genuinely not colour-only: kgBadge() (zones_page.html) picks a SHAPE-distinct glyph in the same call that picks this class -- an octagon (#kgIconError) for bad, a triangle (#kgIconWarn) for warn, a dashed hollow circle carrying '?' (#kgIconUnknown) for unknown -- and emits an SVG <title> holding the full state sentence, plus data-kgtitle/data-kgbody that the delegated click/keydown handler renders into #kilnGraphicPopup. Glyph and title are JS-injected into an inline <svg>, exactly what this CSS-shape scan cannot see; the CSS rule only recolours an already shape-distinct badge." },
+    { "selector": ".kg-badge.kg-warn", "note": "see .kg-badge.kg-bad above -- same kgBadge() call site, triangle glyph (#kgIconWarn) instead of the octagon." }
   ]
 }

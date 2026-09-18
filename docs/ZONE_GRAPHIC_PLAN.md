@@ -1,8 +1,16 @@
 # Zone graphic — a configuration-verification instrument on the web zones page
 
 > **Status:** **stage 1 landed 2026-09-18** — the relay device type, its
-> storage and its migration, the data layer only. Stages 2 to 5 planned,
-> nothing built. **Opened:** 2026-09-18.
+> storage and its migration, the data layer only. **Stages 3, 4 and 5 landed
+> 2026-09-18** — the artwork, the unknown/fail-closed rules, and the badges
+> with click popups — covered by `tools/check_zone_graphic_render.ps1`.
+> **Stage 2 is still open:** `"relay_types"` is not yet on the wire, so the
+> page renders the unknown glyph for every extra relay's device type, and
+> `kgDeviceType()` is the marked seam that begins returning stage 1's real
+> types with no other edit. The graphic is not verified on hardware: another
+> task owned flashing, so the bench board runs firmware without this page; the
+> render function is verified against real captured `/api/zones` and
+> `/api/status` JSON instead. **Opened:** 2026-09-18.
 >
 > **Visual target:** [`docs/images/zone_graphic_reference_stacked_rings.jpg`](images/zone_graphic_reference_stacked_rings.jpg),
 > owner-supplied. The artwork stages build against that image rather than
@@ -287,11 +295,28 @@ from it. Vector-drawn only — **no raster images, no data: URIs, no external
 resources of any kind**: the board serves one flash-resident page and cannot
 reach a CDN.
 
-**Payload.** The page is 209,656 bytes raw and 66,986 gzipped today. Artwork
-plus icons plus the render function is budgeted at **no more than 12 KB raw and
-4 KB gzipped**, which is a real constraint to measure at the end of each stage,
-not an estimate to quote afterwards. The gzipped delta is what matters, since
-that is what is stored in flash and pushed through the socket. The icon set is
+**Payload — measured, and over budget.** The page was 209,656 bytes raw and
+66,986 gzipped before this work. It is now **238,929 raw and 76,466 gzipped:
++29,273 raw and +9,480 gzipped**, measured with gzip -9, the same compressor
+and level the CMake configure step uses. The budget this section set was **no
+more than 12 KB raw and 4 KB gzipped**, so the delivered graphic is roughly
+2.4x over on the number that matters.
+
+That budget was written before the feature had a shape, and it did not survive
+three of the owner's own requirements. The click-popups are the largest single
+cost: the owner asked for icons that "pop up information when clicked", so each
+badge carries the explanatory prose it shows, and that prose is the feature
+rather than decoration. Section 6 is the second: a third rendering everywhere a
+two-state rendering would have done costs roughly half again in both branches
+and strings. The third is the icon set, twelve symbols rather than the nine
+planned, because the six device-type glyphs must exist for the seam to close
+without re-touching the artwork. A comment-trimming pass recovered about 1 KB
+gzipped; the rest is not reducible without deleting one of those three.
+Recorded here as a measured overrun rather than quietly restated — putting a
+number in this section was worth it precisely because it found this.
+
+The gzipped delta is what matters, since that is what is stored in flash and
+pushed through the socket. The icon set is
 drawn to share a single 24x24 viewBox and a single stroke width so the whole
 set compresses against itself.
 

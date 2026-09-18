@@ -207,6 +207,42 @@
      (same fix and same reasoning as profiles_page.html's catalogue-row
      overlap bug -- see that file's `.ci:not([open])` rule). */
   details.advguards:not([open]) > *:not(summary) { display: none; }
+
+  /* Kiln graphic. Colour is never the sole carrier of meaning: each state has
+     its own glyph (warning triangle / error octagon / dashed hollow "?") and
+     every "none" is struck through as well as dimmed. Colours come from the
+     existing theme tokens, so dark/light needs no second palette. */
+  #kilnGraphic { margin: 0 0 14px; }
+  #kilnGraphic .kg-svg { width: 100%; max-width: 470px; height: auto; display: block; }
+  .kg-shell .kg-body { fill: var(--card-bg); stroke: var(--border); stroke-width: 2; }
+  .kg-shell .kg-lid { fill: var(--card-bg); stroke: var(--border); stroke-width: 2; }
+  .kg-shell .kg-lid-top { fill: var(--bg); stroke: var(--border); stroke-width: 2; }
+  .kg-shell .kg-leg { fill: var(--muted); opacity: .55; }
+  .kg-glow { fill: #e8600f; }
+  .kg-port-glow { fill: #e8600f; opacity: .55; }
+  .kg-port { fill: #ffb163; stroke: var(--border); stroke-width: 1.5; }
+  .kg-zonelabel { font: 600 13px system-ui, sans-serif; fill: var(--fg); }
+  .kg-annot text { font: 12px system-ui, sans-serif; fill: var(--fg); }
+  .kg-annot use { color: var(--fg); }
+  .kg-annot.kg-none text, .kg-annot.kg-none use { opacity: .55; }
+  .kg-annot.kg-unknown text, .kg-annot.kg-unknown use { color: var(--warn); fill: var(--warn); }
+  .kg-strike { stroke: var(--muted); stroke-width: 2; }
+  .kg-bracket { fill: none; stroke: var(--fg); stroke-width: 2; opacity: .7; }
+  .kg-badge { cursor: pointer; }
+  .kg-badge.kg-bad { color: var(--bad); }
+  .kg-badge.kg-warn { color: var(--warn); }
+  .kg-badge.kg-unknown { color: var(--muted); }
+  .kg-badge:focus { outline: 2px solid var(--ui-accent, var(--fg)); }
+  .kg-failclosed { border: 2px solid var(--bad); border-radius: 6px; padding: 10px 12px;
+                   background: var(--card-bg); color: var(--fg); margin: 0 0 14px; }
+  .kg-trip { border: 2px solid var(--bad); border-radius: 6px; padding: 10px 12px;
+             background: var(--bad); color: #fff; margin: 0 0 8px; font-weight: 600; }
+  #kilnGraphicPopup { display: none; border: 1px solid var(--border); border-radius: 6px;
+                      background: var(--card-bg); color: var(--fg); padding: 10px 12px;
+                      max-width: 560px; margin: 0 0 14px; position: relative; }
+  #kilnGraphicPopup p { margin: 6px 0 0; }
+  .kg-popup-close { position: absolute; top: 4px; right: 6px; background: none;
+                    border: none; color: var(--fg); font-size: 20px; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -233,6 +269,32 @@ overshoot from reacting too fast. The max ramp rate below is what the Fire
 Profiles page checks a segment's ramp rate against before letting it save.
 Don't know good Kp/Ki/Kd numbers for this kiln? Use Autotune below instead
 of guessing.</p>
+
+<!-- Kiln graphic: THIS kiln as currently configured, drawn from /api/zones
+     (+ /api/status for live health) so the settings below can be confirmed at
+     a glance. One glowing ring per zone, z0 at the top. Deliberately no
+     branding: a generic stacked-ring electric kiln, not any maker's product.
+     Rationale: docs/ZONE_GRAPHIC_PLAN.md. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<symbol id="kgIconHeater" viewBox="0 0 20 20"><path d="M3 4v12M7 4v12M11 4v12M15 4v12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M1 10h18" stroke="currentColor" stroke-width="1.5" opacity=".5"/></symbol>
+<symbol id="kgIconThermo" viewBox="0 0 20 20"><path d="M8 2h4v9a4 4 0 1 1-4 0z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="10" cy="14" r="2" fill="currentColor"/></symbol>
+<symbol id="kgIconCt" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="10" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="1.5"/></symbol>
+<!-- Unknown: hollow and DASHED, so it reads as neither healthy nor an error. -->
+<symbol id="kgIconUnknown" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="3 2.5"/><text x="10" y="14.5" text-anchor="middle" font="bold 12px system-ui, sans-serif" fill="currentColor">?</text></symbol>
+<symbol id="kgIconWarn" viewBox="0 0 20 20"><path d="M10 2l8.5 15h-17z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M10 7v5" stroke="currentColor" stroke-width="2"/><circle cx="10" cy="14.6" r="1.1" fill="currentColor"/></symbol>
+<symbol id="kgIconError" viewBox="0 0 20 20"><path d="M6.5 1.5h7L18.5 6.5v7L13.5 18.5h-7L1.5 13.5v-7z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M7 7l6 6M13 7l-6 6" stroke="currentColor" stroke-width="2"/></symbol>
+<!-- Extra-relay device-type glyphs, selected by name from kgDeviceType().
+     Until the concurrent device-type storage change lands, nothing selects
+     them and every extra relay draws kgIconUnknown. -->
+<symbol id="kgIcon_damper" viewBox="0 0 20 20"><rect x="2" y="3" width="16" height="14" fill="none" stroke="currentColor" stroke-width="2"/><path d="M4 7h12M4 11h12M4 15h12" stroke="currentColor" stroke-width="1.5"/></symbol>
+<symbol id="kgIcon_fan" viewBox="0 0 20 20"><circle cx="10" cy="10" r="2" fill="currentColor"/><path d="M10 8V2M10 12v6M8 10H2M12 10h6" stroke="currentColor" stroke-width="2"/></symbol>
+<symbol id="kgIcon_outlet" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="2"/><rect x="7" y="6" width="2" height="5" fill="currentColor"/><rect x="11" y="6" width="2" height="5" fill="currentColor"/></symbol>
+<symbol id="kgIcon_valve" viewBox="0 0 20 20"><path d="M2 10h16" stroke="currentColor" stroke-width="2"/><path d="M6 6l8 8M14 6l-8 8" stroke="currentColor" stroke-width="2"/></symbol>
+<symbol id="kgIcon_light" viewBox="0 0 20 20"><path d="M10 2a5 5 0 0 1 3 9v3H7v-3a5 5 0 0 1 3-9z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8 17h4" stroke="currentColor" stroke-width="2"/></symbol>
+<symbol id="kgIcon_other" viewBox="0 0 20 20"><rect x="3" y="3" width="14" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="10" cy="10" r="2" fill="currentColor"/></symbol>
+</defs></svg>
+<div id="kilnGraphic"></div>
+<div id="kilnGraphicPopup" role="status"></div>
 
 <label for="thermoCount">Thermocouples in use (0-3)</label>
 <input type="number" id="thermoCount" min="0" max="3" value="0">
@@ -698,6 +760,423 @@ var RELAY_NAMES = ['Relay0', 'Relay1', 'Relay2', 'Relay3'];
 // /api/zones (there is no "ct_count" the way there's a thermo_count/
 // relay_count, per that constant's own comment).
 var ZONE_CT_CHANNEL_COUNT = 3;
+
+/* Kiln graphic: one glowing ring per configured zone, z0 TOP to z2 BOTTOM,
+   annotated with that zone's heaters, thermocouple channels and CT.
+   A verification instrument, not decoration -- docs/ZONE_GRAPHIC_PLAN.md
+   section 6 is the controlling requirement and the reason for the shape of
+   this code: (1) three renderings per annotation, configured / none /
+   not-reported, never two; (2) a missing field is unknown, NEVER a default
+   (notably NOT renderZones()'s form default thermo_mask = 1 << i); (3) the
+   whole graphic fails closed, emitting no <svg> at all. All three are
+   asserted by tools/check_zone_graphic_render.ps1.
+   Everything between the sentinels below is a PURE JSON -> HTML-string
+   function (no DOM, no fetch, no clock); that check extracts it by those
+   exact sentinels and runs it under node. */
+/* KILN_GRAPHIC_PURE_BEGIN */
+var KG_MAX_ZONES = 3;          /* MAX31856_CHANNEL_COUNT -- the hard ceiling */
+var KG_RELAY_COUNT = 4;        /* relay bits this board can have */
+/* Taken from main_page.html's renderSafetyTrip() rather than re-decided, so
+   the two surfaces cannot disagree about whether a trip is LIVE. diag_state is
+   the live latch; trip_reason describes the last TRIP_EVENT ever received,
+   routinely tens of minutes old on a bench board (a dual reflash trips S6a by
+   design -- observed here at age ~39 min while diag_state was 2). Keying the
+   banner off the event would paint a permanent false TRIPPED on a healthy kiln. */
+var KG_DIAG_STATE_TRIPPED = 4; /* main_page.html SAFETY_LINK_DIAG_STATE_TRIPPED */
+var KG_DIAG_STALE_MS = 1500;   /* main_page.html SAFETY_LINK_STALE_MS */
+
+function kgEsc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+/* Absent/null is UNKNOWN; present-and-0 is a deliberate "none". Never collapse. */
+function kgKnown(obj, key) {
+  return !!obj && Object.prototype.hasOwnProperty.call(obj, key) &&
+    obj[key] !== null && obj[key] !== undefined;
+}
+function kgBits(mask) {
+  var out = [];
+  for (var b = 0; b < 8; b++) { if (mask & (1 << b)) out.push(b); }
+  return out;
+}
+/* One annotation's three-state value. No fourth "assume" state exists. */
+function kgMask(zone, key) {
+  if (!kgKnown(zone, key) || typeof zone[key] !== 'number') {
+    return { state: 'unknown', bits: [], text: '?' };
+  }
+  var bits = kgBits(zone[key]);
+  if (bits.length === 0) return { state: 'none', bits: [], text: 'none' };
+  return { state: 'set', bits: bits, text: bits.join(', ') };
+}
+
+/* Extra relays are DERIVED, not declared: any relay bit no zone's relay_mask
+   claims (server-side zone_owned_relay_mask(), client-side the same rule
+   clientOwnedRelayMask() applies to checkbox state). No extra-relay struct
+   exists and none is invented. Returns null, not [], when ownership cannot be
+   derived, so "none" and "unknown" stay distinguishable. */
+function kgExtraRelays(z) {
+  if (!z || !Array.isArray(z.zones)) return null;
+  var owned = 0, i, sawMask = false;
+  for (i = 0; i < z.zones.length; i++) {
+    if (kgKnown(z.zones[i], 'relay_mask') && typeof z.zones[i].relay_mask === 'number') {
+      owned |= z.zones[i].relay_mask;
+      sawMask = true;
+    }
+  }
+  if (!sawMask && z.zones.length > 0) return null;
+  var count = kgKnown(z, 'relay_count') ? z.relay_count : KG_RELAY_COUNT;
+  var out = [];
+  for (i = 0; i < count && i < KG_RELAY_COUNT; i++) {
+    if (!(owned & (1 << i))) out.push(i);
+  }
+  return out;
+}
+
+/* THE RELAY DEVICE-TYPE SEAM. The per-relay device type (unset = 0) belongs to
+   a CONCURRENT change: a types[] array on relay_names_cfg, version 1 -> 2,
+   surfaced as "relay_types" on GET /api/zones. That storage work is
+   deliberately not implemented or duplicated here. Verified absent on the live
+   board, so today every relay takes the 'unknown' path and draws the dashed
+   hollow glyph -- the honest state. When the array lands, real types render
+   with no other change to the artwork. */
+var KG_DEVICE_TYPES = ['unset', 'damper', 'outlet', 'valve', 'fan', 'light', 'other'];
+function kgDeviceType(z, relayIndex) {
+  if (!z || !Array.isArray(z.relay_types)) return 'unknown';
+  var t = z.relay_types[relayIndex];
+  if (typeof t !== 'number' || t <= 0 || t >= KG_DEVICE_TYPES.length) return 'unknown';
+  return KG_DEVICE_TYPES[t];
+}
+
+/* Per-channel health read as-is off GET /api/status; nothing is added to that
+   response and no buffer grows. Absent status is UNKNOWN, never healthy. */
+function kgChannelHealth(st, ch) {
+  if (!st || !Array.isArray(st.channels)) {
+    return { state: 'unknown', why: 'no /api/status data yet, so channel ' + ch + ' health is unknown' };
+  }
+  var r = null, i;
+  for (i = 0; i < st.channels.length; i++) {
+    if (st.channels[i] && st.channels[i].channel === ch) r = st.channels[i];
+  }
+  if (!r) return { state: 'unknown', why: 'channel ' + ch + ' is not reported by /api/status' };
+  if (r.spi_failed) return { state: 'bad', why: 'the SPI read for channel ' + ch + ' failed' };
+  if (r.fault_status) {
+    return { state: 'bad', why: 'MAX31856 fault_status 0x' + r.fault_status.toString(16) + ' on channel ' + ch };
+  }
+  if (!r.valid) return { state: 'bad', why: 'channel ' + ch + ' has no valid reading' };
+  if (r.stale) return { state: 'warn', why: 'channel ' + ch + ' reading is stale (age ' + r.age_ms + ' ms)' };
+  return { state: 'ok', why: 'channel ' + ch + ' reads ' + r.temp_c + ' C' };
+}
+
+/* A clickable badge. Popup text travels in a data attribute so this stays
+   pure; the delegated handler outside the sentinels only displays it. */
+function kgBadge(x, y, kind, title, body) {
+  var glyph = kind === 'bad' ? '#kgIconError' : (kind === 'warn' ? '#kgIconWarn' : '#kgIconUnknown');
+  var cls = kind === 'bad' ? 'kg-bad' : (kind === 'warn' ? 'kg-warn' : 'kg-unknown');
+  return '<g class="kg-badge ' + cls + '" tabindex="0" role="button" transform="translate(' + x + ',' + y + ')"' +
+    ' data-kgtitle="' + kgEsc(title) + '" data-kgbody="' + kgEsc(body) + '">' +
+    '<title>' + kgEsc(title) + '</title>' +
+    '<use href="' + glyph + '" width="20" height="20"/></g>';
+}
+
+function kgAnnotation(x, y, icon, label, value, state) {
+  var cls = state === 'unknown' ? 'kg-unknown' : (state === 'none' ? 'kg-none' : 'kg-set');
+  var glyph = state === 'unknown' ? '#kgIconUnknown' : icon;
+  var shown = state === 'unknown' ? 'not reported' : value;
+  return '<g class="kg-annot ' + cls + '" transform="translate(' + x + ',' + y + ')">' +
+    '<use href="' + glyph + '" width="20" height="20"/>' +
+    '<text x="26" y="15">' + kgEsc(label) + ' ' + kgEsc(shown) + '</text>' +
+    (state === 'none' ? '<line class="kg-strike" x1="0" y1="10" x2="20" y2="10"/>' : '') +
+    '</g>';
+}
+
+/* The fail-closed panel: no <svg> at all. The check asserts exactly that -- a
+   part-drawn kiln with healthy-looking rings on a board that failed to load
+   its config is the outcome this feature exists to prevent. */
+function kgPanel(reason) {
+  return '<div class="kg-failclosed"><b>Kiln graphic not shown.</b> ' +
+    'The configuration could not be read, so drawing it would risk showing a kiln ' +
+    'that does not match this machine. Reason: ' + kgEsc(reason) + '</div>';
+}
+
+/* Pure: (parsed /api/zones, parsed /api/status or null) -> HTML string. */
+function renderKilnGraphicHtml(z, st) {
+  /* ---- Rule 3: fail closed, in priority order ---- */
+  if (!z || typeof z !== 'object') return kgPanel('there is no /api/zones response to draw from.');
+  if (!kgKnown(z, 'thermo_count') || typeof z.thermo_count !== 'number') {
+    return kgPanel('the response carried no thermo_count, so the number of zones is unknown.');
+  }
+  if (!Array.isArray(z.zones)) return kgPanel('the response carried no zones array.');
+  if (st && st.zones_config_valid === false) {
+    return kgPanel('the board reports that its stored zone configuration is NOT valid' +
+      (st.zones_config_load_fault_reason ? ' (' + st.zones_config_load_fault_reason + ')' : '') + '.');
+  }
+  if (st && st.zones_config_load_fault) {
+    return kgPanel('the board reports a zone-config load fault' +
+      (st.zones_config_load_fault_reason ? ': ' + st.zones_config_load_fault_reason : '') + '.');
+  }
+  var n = z.thermo_count;
+  if (n < 1 || n > KG_MAX_ZONES) {
+    return kgPanel(n === 0
+      ? 'no thermocouples are configured yet, so there are no zones to draw.'
+      : 'thermo_count is ' + n + ', outside the 1-' + KG_MAX_ZONES + ' this board supports.');
+  }
+
+  /* Rings are a fixed height and the viewBox GROWS with the zone count, so
+     "exactly thermo_count rings" is structural, not three hand-drawn variants
+     trusted to honour it. */
+  var RING_H = 96, TOP = 62, STAND = 74, CX = 212, RX = 122, RY = 28;
+  var W = 470, H = TOP + n * RING_H + STAND;
+  var s = '', i, k, zi, y;
+
+  s += '<svg class="kg-svg" viewBox="0 0 ' + W + ' ' + H + '" role="img" ' +
+    'aria-label="Kiln drawn with ' + n + ' zone ring section' + (n === 1 ? '' : 's') + '">';
+
+  /* Shell: a flat lid slab, no controller box, no brand plate, no logo. */
+  s += '<g class="kg-shell">';
+  s += '<path class="kg-lid" d="M' + (CX - RX) + ',' + (TOP - 26) + ' v14 a' + RX + ',' + RY +
+    ' 0 0 0 ' + (2 * RX) + ',0 v-14 z"/>';
+  s += '<ellipse class="kg-lid-top" cx="' + CX + '" cy="' + (TOP - 26) + '" rx="' + RX + '" ry="' + RY + '"/>';
+
+  for (i = 0; i < n; i++) {
+    y = TOP + i * RING_H;
+    /* The glowing seam is drawn FIRST and the body over it, so only its top
+       arc shows -- the glowing ring of the reference photograph. */
+    s += '<ellipse class="kg-glow" cx="' + CX + '" cy="' + y + '" rx="' + (RX - 6) + '" ry="' + (RY - 4) + '"/>';
+    s += '<path class="kg-body" d="M' + (CX - RX) + ',' + y + ' v' + RING_H +
+      ' a' + RX + ',' + RY + ' 0 0 0 ' + (2 * RX) + ',0 v-' + RING_H + ' z"/>';
+    s += '<circle class="kg-port-glow" cx="' + CX + '" cy="' + Math.round(y + RING_H * 0.62) + '" r="13"/>';
+    s += '<circle class="kg-port" cx="' + CX + '" cy="' + Math.round(y + RING_H * 0.62) + '" r="7"/>';
+  }
+  var base = TOP + n * RING_H;
+  s += '<path class="kg-leg" d="M' + (CX - RX + 14) + ',' + (base + 6) + ' l-8,' + (STAND - 16) + ' h16 l4,-' + (STAND - 16) + ' z"/>';
+  s += '<path class="kg-leg" d="M' + (CX + RX - 14) + ',' + (base + 6) + ' l8,' + (STAND - 16) + ' h-16 l-4,-' + (STAND - 16) + ' z"/>';
+  s += '</g>';
+
+  /* ---- Per-ring annotations, right-hand column ---- */
+  for (i = 0; i < n; i++) {
+    y = TOP + i * RING_H;
+    zi = null;
+    for (k = 0; k < z.zones.length; k++) { if (z.zones[k] && z.zones[k].index === i) zi = z.zones[k]; }
+    /* A zone the response never described is UNKNOWN throughout -- emphatically
+       NOT filled in from renderZones()'s form default. */
+    var name = (zi && kgKnown(zi, 'name') && zi.name) ? zi.name : ('Zone ' + i);
+    var heat = zi ? kgMask(zi, 'relay_mask') : { state: 'unknown', bits: [], text: '?' };
+    var tc = zi ? kgMask(zi, 'thermo_mask') : { state: 'unknown', bits: [], text: '?' };
+
+    s += '<text class="kg-zonelabel" x="345" y="' + (y + 16) + '">' +
+      kgEsc('z' + i + ' ' + name) + (zi ? '' : ' (not reported)') + '</text>';
+    /* Numbers, not just icons: a zone reading two channels shows BOTH. */
+    s += kgAnnotation(345, y + 24, '#kgIconHeater', 'heaters',
+      heat.state === 'set' ? (heat.bits.length + ' (R' + heat.bits.join(', R') + ')') : heat.text, heat.state);
+    s += kgAnnotation(345, y + 48, '#kgIconThermo', 'TC ch', tc.text, tc.state);
+
+    /* Badges, each drawn at the scope its source actually has. */
+    var bx = 345, by = y + 70, ci;
+    if (tc.state === 'unknown') {
+      s += kgBadge(bx, by, 'unknown', 'Thermocouple assignment unknown',
+        'The board did not report a thermo_mask for zone ' + i + '. That is NOT "no channel ' +
+        'assigned": this page cannot tell which channel drives the zone, so it assumes nothing.');
+      bx += 26;
+    } else if (tc.state === 'none') {
+      s += kgBadge(bx, by, 'warn', 'No thermocouple channel assigned',
+        'Zone ' + i + ' has an empty thermo_mask: no channel feeds it, so it has no control ' +
+        'temperature. A stored configuration value, not a sensor fault.');
+      bx += 26;
+    } else {
+      for (ci = 0; ci < tc.bits.length; ci++) {
+        var hh = kgChannelHealth(st, tc.bits[ci]);
+        if (hh.state === 'ok') continue;
+        s += kgBadge(bx, by, hh.state, 'Thermocouple channel ' + tc.bits[ci] +
+          (hh.state === 'unknown' ? ' state unknown' : ' fault'),
+          hh.why + '. Source: /api/status channels[]. Scope: this CHANNEL, so the same badge is ' +
+          'drawn on every zone whose thermo_mask selects it.');
+        bx += 26;
+      }
+    }
+    if (heat.state === 'none') {
+      s += kgBadge(bx, by, 'warn', 'No relay assigned',
+        'Zone ' + i + ' has an empty relay_mask, so nothing heats it. Stored configuration, not a fault.');
+      bx += 26;
+    } else if (heat.state === 'unknown') {
+      s += kgBadge(bx, by, 'unknown', 'Heater relays unknown',
+        'The response did not report a relay_mask for zone ' + i + ', so nothing is assumed about it.');
+      bx += 26;
+    }
+    /* The heater-load badge ships DORMANT and labelled "not measured": it has
+       no genuine data source today (ct_warn_mask is silent on any zone whose
+       normal was never measured, and cannot assert at all on this ~4 W bench
+       fixture). Not drawn as healthy, not deferred -- it lights up for free
+       once a real kiln measures normals. */
+    var measured = (zi && kgKnown(zi, 'normal_current_measured')) ? !!zi.normal_current_measured : null;
+    if (measured === true && typeof z.ct_warn_mask === 'number' && (z.ct_warn_mask & (1 << i))) {
+      s += kgBadge(bx, by, 'warn', 'Heater load disagrees with the measured normal',
+        'Zone ' + i + ' is commanded on and its live current disagrees with its measured normal of ' +
+        (kgKnown(zi, 'normal_current_a') ? zi.normal_current_a + ' A' : 'an unreported value') + '. ' +
+        'A warning, never a trip: the CT may simply be on the wrong jack.');
+    } else if (measured === false) {
+      s += kgBadge(bx, by, 'unknown', 'Heater load check is DORMANT -- not measured',
+        'This zone’s normal current was never measured, so the heater-load check is DORMANT: it ' +
+        'is not passing, it cannot run. Measure it with the current sweep below. On this ~4 W bench ' +
+        'fixture every zone sits under the sweep’s noise floor, so it stays dormant here and only ' +
+        'becomes live on a kiln-scale load.');
+    } else if (measured === null) {
+      s += kgBadge(bx, by, 'unknown', 'Heater load state not reported',
+        'The response did not say whether this zone’s normal current was ever measured.');
+    }
+  }
+
+  /* CT: ONE bracket down the LEFT spanning exactly the rings that use a
+     channel, number at the elbow. Deliberately NOT a per-ring badge -- zones
+     sharing a channel are SUMMED on it, and sharing is the normal case, so
+     three identical icons would imply three sensors that do not exist. */
+  var byChannel = {}, unknownCt = [], noneCt = [], b2, chKey;
+  for (i = 0; i < n; i++) {
+    zi = null;
+    for (k = 0; k < z.zones.length; k++) { if (z.zones[k] && z.zones[k].index === i) zi = z.zones[k]; }
+    var cm = zi ? kgMask(zi, 'ct_mask') : { state: 'unknown', bits: [] };
+    if (cm.state === 'unknown') { unknownCt.push(i); continue; }
+    if (cm.state === 'none') { noneCt.push(i); continue; }
+    for (b2 = 0; b2 < cm.bits.length; b2++) {
+      if (!byChannel[cm.bits[b2]]) byChannel[cm.bits[b2]] = [];
+      byChannel[cm.bits[b2]].push(i);
+    }
+  }
+  var lane = 0;
+  for (chKey in byChannel) {
+    if (!Object.prototype.hasOwnProperty.call(byChannel, chKey)) continue;
+    var rings = byChannel[chKey];
+    var y0 = TOP + Math.min.apply(null, rings) * RING_H + 10;
+    var y1 = TOP + Math.max.apply(null, rings) * RING_H + RING_H - 10;
+    var lx = 66 - lane * 30;
+    s += '<path class="kg-bracket" d="M' + (lx + 12) + ',' + y0 + ' h-12 v' + (y1 - y0) + ' h12"/>';
+    s += '<g class="kg-annot kg-set" transform="translate(' + (lx - 44) + ',' + Math.round((y0 + y1) / 2 - 22) + ')">' +
+      '<use href="#kgIconCt" width="20" height="20"/><text x="0" y="34">CT' + kgEsc(chKey) + '</text>' +
+      '<text x="0" y="48">z' + kgEsc(rings.join(',z')) + '</text></g>';
+    lane++;
+  }
+  if (noneCt.length) {
+    s += '<g class="kg-annot kg-none" transform="translate(8,' + (TOP + 6) + ')">' +
+      '<use href="#kgIconCt" width="20" height="20"/><line class="kg-strike" x1="0" y1="10" x2="20" y2="10"/>' +
+      '<text x="0" y="34">no CT</text><text x="0" y="48">z' + kgEsc(noneCt.join(',z')) + '</text></g>';
+  }
+  if (unknownCt.length) {
+    s += '<g class="kg-annot kg-unknown" transform="translate(8,' + (TOP + 76) + ')">' +
+      '<use href="#kgIconUnknown" width="20" height="20"/>' +
+      '<text x="0" y="34">CT not</text><text x="0" y="48">reported</text></g>';
+  }
+
+  /* ---- Extra relays: derived, drawn beneath the stand ---- */
+  var extras = kgExtraRelays(z);
+  var ey = base + STAND - 22;
+  if (extras === null) {
+    s += '<g class="kg-annot kg-unknown" transform="translate(8,' + ey + ')">' +
+      '<use href="#kgIconUnknown" width="20" height="20"/>' +
+      '<text x="26" y="15">extra relays not reported</text></g>';
+  } else if (extras.length === 0) {
+    s += '<g class="kg-annot kg-none" transform="translate(8,' + ey + ')">' +
+      '<text x="0" y="15">no extra relays</text></g>';
+  } else {
+    for (i = 0; i < extras.length; i++) {
+      var dt = kgDeviceType(z, extras[i]);
+      var nm = (Array.isArray(z.relay_names) && z.relay_names[extras[i]]) ? z.relay_names[extras[i]] : '';
+      var icon = dt === 'unknown' ? '#kgIconUnknown' : ('#kgIcon_' + dt);
+      var ex = 8 + i * 118;
+      s += '<g class="kg-annot ' + (dt === 'unknown' ? 'kg-unknown' : 'kg-set') +
+        '" transform="translate(' + ex + ',' + ey + ')">' +
+        '<use href="' + icon + '" width="20" height="20"/>' +
+        '<text x="26" y="15">R' + extras[i] + ' ' + kgEsc(nm || (dt === 'unknown' ? 'type ?' : dt)) + '</text></g>';
+      if (dt === 'unknown') {
+        s += kgBadge(ex + 90, ey, 'unknown', 'Relay R' + extras[i] + ' device type not known',
+          'No zone claims this relay, so it is an EXTRA relay -- but nothing says what device it ' +
+          'drives. The per-relay device type is a separate storage change still in flight; until it ' +
+          'lands this page cannot know, and shows the unknown glyph rather than guessing.');
+      }
+    }
+  }
+
+  /* The safety processor's OWN thermocouple belongs to the machine, not to any
+     ring, so it is annotated at the stand. */
+  var sw = z.safety_wiring;
+  var sy = base + 4;
+  if (!sw || !kgKnown(sw, 'link_up')) {
+    s += kgBadge(CX - 10, sy, 'unknown', 'Safety processor wiring not reported',
+      'The response carried no safety wiring data, so the safety thermocouple state is unknown.');
+  } else if (!sw.link_up) {
+    s += kgBadge(CX - 10, sy, 'bad', 'Safety link DOWN',
+      'No safety-processor data is current. Scope: GLOBAL -- every safety-sourced annotation here ' +
+      'is simultaneously unknown, not healthy.');
+  } else if (sw.tc_fault) {
+    s += kgBadge(CX - 10, sy, 'bad', 'Safety thermocouple fault',
+      'Fault code ' + sw.tc_fault + '. Scope: the safety processor’s own sensor -- global, and ' +
+      'not attributable to any one zone.');
+  } else if (!sw.tc_temp_valid) {
+    s += kgBadge(CX - 10, sy, 'warn', 'Safety thermocouple reading not valid',
+      'The safety processor’s own sensor has no trustworthy reading right now.');
+  }
+
+  s += '</svg>';
+
+  /* ONE banner across the whole graphic, never per-ring badges: a trip is a
+     single state machine with one trip_reason, so drawing it against one ring
+     would invent a per-zone attribution the firmware does not have. */
+  var banner = '';
+  var tripped = !!st && !!st.diag_ever_received && st.diag_state === KG_DIAG_STATE_TRIPPED &&
+    typeof st.diag_age_ms === 'number' && st.diag_age_ms < KG_DIAG_STALE_MS;
+  if (tripped) {
+    var reason = st.diag_trip_reason;
+    var cause = (st.trip_event_ever_received && st.trip_reason === reason && st.trip_reason_cause)
+      ? st.trip_reason_cause
+      : (st.diag_trip_reason_cause || 'Cause detail is not available from this firmware build.');
+    banner = '<div class="kg-trip">SAFETY PROCESSOR TRIPPED &mdash; ' +
+      kgEsc(st.diag_trip_reason_words || ('reason ' + reason)) + '<br>' + kgEsc(cause) +
+      (st.diag_trip_reason_remedy ? '<br>' + kgEsc(st.diag_trip_reason_remedy) : '') +
+      '<br>Heating is inhibited for the whole kiln, not for one zone.</div>';
+  }
+  return banner + s;
+}
+/* KILN_GRAPHIC_PURE_END */
+
+/* ---- DOM half, deliberately OUTSIDE the sentinels ---- */
+var kgLastStatus = null;
+function drawKilnGraphic() {
+  var el = document.getElementById('kilnGraphic');
+  if (!el) return;
+  try {
+    el.innerHTML = renderKilnGraphicHtml(current, kgLastStatus);
+  } catch (err) {
+    if (window.console) console.error('kiln graphic render failed', err);
+    el.innerHTML = kgPanel('this page failed to draw it (' +
+      (err && err.message ? err.message : String(err)) +
+      '). Your stored configuration has NOT been changed.');
+  }
+}
+function clearKilnGraphic() {
+  var el = document.getElementById('kilnGraphic');
+  if (el) el.innerHTML = kgPanel('the configuration is being read from the board…');
+}
+(function () {
+  function showPopup(g) {
+    var pop = document.getElementById('kilnGraphicPopup');
+    if (!pop || !g) return;
+    pop.innerHTML = '<button type="button" class="kg-popup-close" aria-label="Close">&times;</button>' +
+      '<b>' + window.kcEscapeHtml(g.getAttribute('data-kgtitle') || '') + '</b><p>' +
+      window.kcEscapeHtml(g.getAttribute('data-kgbody') || '') + '</p>';
+    pop.style.display = 'block';
+  }
+  document.addEventListener('click', function (e) {
+    if (e.target && e.target.classList && e.target.classList.contains('kg-popup-close')) {
+      document.getElementById('kilnGraphicPopup').style.display = 'none';
+      return;
+    }
+    var g = (e.target && e.target.closest) ? e.target.closest('.kg-badge') : null;
+    if (g) showPopup(g);
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    var g = (e.target && e.target.closest) ? e.target.closest('.kg-badge') : null;
+    if (g) { e.preventDefault(); showPopup(g); }
+  });
+})();
 var current = { thermo_count: 0, relay_count: 0, zones: [] };
 
 /* MAX31856 CR1.TC[3:0] 0-7, matching uart_task_ids.h's THERMO_TC_* and
@@ -2025,6 +2504,9 @@ function loadCurrent() {
      when the second is true invites exactly the wrong response (re-entering
      or overwriting a config that was never actually damaged). Each now
      reports what really happened and logs the underlying error. */
+  /* Cleared to the fail-closed panel BEFORE the request goes out, so a refetch
+     that never returns leaves no stale snapshot claiming to be current. */
+  clearKilnGraphic();
   fetch('/api/zones').then(function (r) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
@@ -2042,6 +2524,7 @@ function loadCurrent() {
       renderSafetyCeiling(data.safety_ceiling);
       renderCtWarnings(data.ct_warn_mask, data.zones);
       renderTuningQuality(data.zones);
+      drawKilnGraphic();
     } catch (err) {
       if (window.console) console.error('zones page render failed', err);
       document.getElementById('zones').innerHTML =
@@ -2821,6 +3304,10 @@ document.getElementById('tuningRecGoBtn').addEventListener('click', renderTuning
 // above, so a slow/failed fetch here never blocks the zone form itself.
 function pollCtCurrents() {
   fetch('/api/status').then(function (r) { return r.json(); }).then(function (st) {
+    /* The kiln graphic's live half rides on this EXISTING 3 s poll rather
+       than adding a fetch of its own: no new request rate, no new buffers. */
+    kgLastStatus = st;
+    drawKilnGraphic();
     var amps = st.ct_current_a || [];
     document.querySelectorAll('.ctlive').forEach(function (span) {
       var ch = parseInt(span.dataset.ch, 10);

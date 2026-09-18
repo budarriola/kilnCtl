@@ -2252,7 +2252,7 @@ Full detail, numbers and bars: [`docs/HW_ABSTRACTION.md`](docs/HW_ABSTRACTION.md
 
 ---
 
-## M17 — The zone graphic: configuration you can look at · *opened 2026-09-18*
+## M17 — The zone graphic: configuration you can look at · *opened 2026-09-18; stages 1 and 3–5 landed*
 
 An owner request, and a specific kind of instrument rather than decoration. At
 the top of the **web** zones page sits a cartoon of a stacked kiln — octagonal
@@ -2331,6 +2331,51 @@ rather than being deferred.
 
 Full detail, five-stage landing sequence and test strategy:
 [`docs/ZONE_GRAPHIC_PLAN.md`](docs/ZONE_GRAPHIC_PLAN.md).
+
+**Stages 3–5 CLOSED 2026-09-18 — the graphic itself now exists.** A cartoon
+kiln sits at the top of the web zones page, drawing one glowing ring section
+per configured zone from `thermo_count` — z0 top, z2 bottom — annotated with
+each zone's heater relays, thermocouple channels and CT, plus icons for any
+extra relay (derived as any relay bit no zone's `relay_mask` claims, never a
+declared list). Every annotation has three renderings, not two: configured,
+deliberately none, and not reported. Badges carry click-popups saying what they
+mean and at what scope. A safety trip draws ONE banner for the whole kiln,
+keyed to the live latched `diag_state` rather than the last trip event — the
+bench board reports a ~39-minute-old `trip_reason` alongside a healthy live
+state, which an event-keyed banner would have painted as a permanent false
+trip.
+
+**Stage 2 is still outstanding**, and the graphic is built to survive its
+absence: `"relay_types"` is not yet on the wire, so every extra relay's device
+type renders as the unknown glyph, and `kgDeviceType()` is the marked seam that
+starts returning stage 1's real types with no other edit.
+
+The controlling requirement is the plan's section 6: a graphic that renders
+plausibly while the configuration is unknown is worse than no graphic. So the
+render function is a pure JSON → HTML-string function with DOM insertion kept
+separate, and `tools/check_zone_graphic_render.ps1` drives it under node
+against fixture JSON — asserting that ring count follows configuration, that
+zone order is top-down, that a missing field renders as unknown rather than
+taking the page's own form default (`thermo_mask = 1 << i`), and that an
+invalid config emits **no `<svg>` at all**. Both of those last two were
+negative-tested by sabotage, hand restore and a re-run.
+
+Colour never carries a badge's meaning alone: each badge gets a shape-distinct
+glyph (octagon for a fault, triangle for a warning, dashed hollow circle for
+unknown) plus an SVG `<title>` and the click-popup text. The two new badge
+rules are therefore recorded in
+`firmware/KilnFW/App/test/ui_status_color_allowlist.json` with that call-site
+cue written out, which is what `check_ui_status_color.ps1` asks for — it can
+see the CSS shape but not the JS-injected glyph.
+
+Cost: +29,273 bytes raw, **+9,480 gzipped** on the embedded page — over the
+plan's own 12 KB / 4 KB budget, recorded as a measured overrun in
+[`docs/ZONE_GRAPHIC_PLAN.md`](docs/ZONE_GRAPHIC_PLAN.md) §5 rather than
+restated. No httpd stack buffer and no zones JSON buffer grew; the live half
+rides the page's existing 3 s `/api/status` poll instead of adding a fetch.
+Not hardware-verified: another task owned flashing, so the board runs firmware
+without this page — what is verified is the render function against real
+captured board JSON.
 
 ---
 
