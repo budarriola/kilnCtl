@@ -21,7 +21,18 @@ NVS_KEY_LEN_CHECK(NVS_PARTITION);
 NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
 NVS_KEY_LEN_CHECK(NVS_KEY_PROGRESS);
 
-#define SETUP_WIZARD_PROGRESS_VERSION 2u
+#define SETUP_WIZARD_PROGRESS_VERSION 3u
+
+/* Historical on-disk step count for the v1 and v2 blob layouts below --
+ * FROZEN at 13, deliberately never tied to the live SETUP_WIZARD_STEP_COUNT
+ * (which grew to 14 on 2026-09-18 alongside the wizard page's 14th step).
+ * If this were instead `SETUP_WIZARD_STEP_COUNT`, a future bump of that
+ * constant would silently reinterpret an old board's actual on-disk v1/v2
+ * blob size, breaking version detection for boards that never got this far
+ * -- the same "reset one side of a pair" class this codebase already has
+ * four confirmed instances of (see setup_wizard_progress.h's header
+ * comment / MEMORY.md project_reset_one_side_bug_class). */
+#define SETUP_WIZARD_LEGACY_V1V2_STEP_COUNT 13u
 
 /* ---- version 1 (historical): {state, ts} per step, no note ---- */
 typedef struct {
@@ -33,18 +44,21 @@ typedef struct {
 typedef struct {
     uint8_t version;
     uint8_t reserved[3];
-    setup_wizard_step_v1_t steps[SETUP_WIZARD_STEP_COUNT];
+    setup_wizard_step_v1_t steps[SETUP_WIZARD_LEGACY_V1V2_STEP_COUNT];
 } setup_wizard_progress_v1_t;
 
 _Static_assert(sizeof(setup_wizard_step_v1_t) == 8, "setup_wizard_step_v1_t layout changed");
-_Static_assert(sizeof(setup_wizard_progress_v1_t) == 4 + SETUP_WIZARD_STEP_COUNT * 8,
+_Static_assert(sizeof(setup_wizard_progress_v1_t) == 4 + SETUP_WIZARD_LEGACY_V1V2_STEP_COUNT * 8,
                "setup_wizard_progress_v1_t layout changed");
 
-/* ---- version 2 (current): v1's per-step record + a tail-appended note ----
- * "Tail-append" means the NEW field is appended at the end of the PER-STEP
- * record (mirroring zones_config_migrate.c's own rule for its per-zone
- * structs), not merely at the end of the outer blob -- a per-step append
- * would not be a valid single memcpy if it were done any other way. */
+/* Per-step record shape, used by BOTH the historical 13-step v2 blob and the
+ * current 14-step v3 blob below -- only the step COUNT changed between v2
+ * and v3, not this record's own layout, so one typedef serves both blob
+ * structs (each with its own array length). "Tail-append" (v1 -> v2) means
+ * the NEW field is appended at the end of the PER-STEP record (mirroring
+ * zones_config_migrate.c's own rule for its per-zone structs), not merely
+ * at the end of the outer blob -- a per-step append would not be a valid
+ * single memcpy if it were done any other way. */
 typedef struct {
     uint8_t state;
     uint8_t reserved[3];
@@ -52,14 +66,35 @@ typedef struct {
     char note[SETUP_WIZARD_NOTE_MAX];
 } setup_wizard_step_record_t;
 
+_Static_assert(sizeof(setup_wizard_step_record_t) == 8 + SETUP_WIZARD_NOTE_MAX,
+               "setup_wizard_step_record_t layout changed -- bump SETUP_WIZARD_PROGRESS_VERSION");
+
+/* ---- version 2 (historical): 13-step blob of setup_wizard_step_record_t --
+ * kept around ONLY so a board that persisted a v2 blob before the 2026-09-18
+ * step-count fix can still be migrated forward without its progress being
+ * silently discarded. Frozen at SETUP_WIZARD_LEGACY_V1V2_STEP_COUNT for the
+ * same reason as setup_wizard_progress_v1_t above. */
+typedef struct {
+    uint8_t version;
+    uint8_t reserved[3];
+    setup_wizard_step_record_t steps[SETUP_WIZARD_LEGACY_V1V2_STEP_COUNT];
+} setup_wizard_progress_v2_legacy_t;
+
+_Static_assert(sizeof(setup_wizard_progress_v2_legacy_t) ==
+                   4 + SETUP_WIZARD_LEGACY_V1V2_STEP_COUNT * (8 + SETUP_WIZARD_NOTE_MAX),
+               "setup_wizard_progress_v2_legacy_t layout changed");
+
+/* ---- version 3 (current): same per-step record, SETUP_WIZARD_STEP_COUNT
+ * (14) steps -- the 2026-09-18 fix appended step 13 (web-auth's
+ * "Authentication (optional)") at the true tail of the steps array, so an
+ * old v2 blob's first 13 records migrate across unchanged and step 13
+ * defaults to PENDING (see adopt_v2_legacy_migrate() below). */
 typedef struct {
     uint8_t version;
     uint8_t reserved[3];
     setup_wizard_step_record_t steps[SETUP_WIZARD_STEP_COUNT];
 } setup_wizard_progress_blob_t;
 
-_Static_assert(sizeof(setup_wizard_step_record_t) == 8 + SETUP_WIZARD_NOTE_MAX,
-               "setup_wizard_step_record_t layout changed -- bump SETUP_WIZARD_PROGRESS_VERSION");
 _Static_assert(sizeof(setup_wizard_progress_blob_t) == 4 + SETUP_WIZARD_STEP_COUNT * (8 + SETUP_WIZARD_NOTE_MAX),
                "setup_wizard_progress_blob_t layout changed -- bump SETUP_WIZARD_PROGRESS_VERSION");
 
@@ -78,8 +113,8 @@ static void apply_defaults(void)
     }
 }
 
-/* Fills s_steps from a validated version-2 blob. */
-static void adopt_v2(const setup_wizard_progress_blob_t *blob)
+/* Fills s_steps from a validated current-version (v3, 14-step) blob. */
+static void adopt_v3(const setup_wizard_progress_blob_t *blob)
 {
     for (uint8_t i = 0; i < SETUP_WIZARD_STEP_COUNT; i++) {
         s_steps[i].state = (setup_wizard_step_state_t)blob->steps[i].state;
@@ -89,17 +124,39 @@ static void adopt_v2(const setup_wizard_progress_blob_t *blob)
     }
 }
 
-/* Migrates a validated version-1 blob forward: state/ts carry over exactly,
+/* Migrates a validated version-1 blob forward: state/ts carry over exactly
+ * for the SETUP_WIZARD_LEGACY_V1V2_STEP_COUNT (13) steps v1 actually had,
  * note defaults to empty (nothing in v1 could have set it -- the field did
- * not exist yet). */
+ * not exist yet), and the new 14th step (index 13, added 2026-09-18) is left
+ * at its already-applied PENDING default -- v1 predates that step entirely,
+ * so there is nothing to migrate for it. */
 static void adopt_v1_migrate(const setup_wizard_progress_v1_t *blob)
 {
-    for (uint8_t i = 0; i < SETUP_WIZARD_STEP_COUNT; i++) {
+    for (uint8_t i = 0; i < SETUP_WIZARD_LEGACY_V1V2_STEP_COUNT; i++) {
         s_steps[i].state = (setup_wizard_step_state_t)blob->steps[i].state;
         s_steps[i].ts = blob->steps[i].ts;
         s_steps[i].note[0] = '\0';
     }
-    ESP_LOGI(TAG, "migrated setup wizard progress v1 -> v%u (per-step note defaults empty)",
+    ESP_LOGI(TAG, "migrated setup wizard progress v1 -> v%u (per-step note defaults empty, step 13 defaults pending)",
+             SETUP_WIZARD_PROGRESS_VERSION);
+}
+
+/* Migrates a validated legacy version-2 (13-step) blob forward: all 13
+ * stored records (state/ts/note) carry over exactly, and the new 14th step
+ * (index 13, "Authentication (optional)", added 2026-09-18 alongside the
+ * SETUP_WIZARD_STEP_COUNT 13->14 fix) is left at its already-applied
+ * PENDING default -- an old board's real progress on steps 0..12 must
+ * survive this migration untouched; there is nothing recorded for step 13
+ * to migrate. */
+static void adopt_v2_legacy_migrate(const setup_wizard_progress_v2_legacy_t *blob)
+{
+    for (uint8_t i = 0; i < SETUP_WIZARD_LEGACY_V1V2_STEP_COUNT; i++) {
+        s_steps[i].state = (setup_wizard_step_state_t)blob->steps[i].state;
+        s_steps[i].ts = blob->steps[i].ts;
+        memcpy(s_steps[i].note, blob->steps[i].note, SETUP_WIZARD_NOTE_MAX);
+        s_steps[i].note[SETUP_WIZARD_NOTE_MAX - 1] = '\0';
+    }
+    ESP_LOGI(TAG, "migrated setup wizard progress v2 (13 steps) -> v%u (14 steps, step 13 defaults pending)",
              SETUP_WIZARD_PROGRESS_VERSION);
 }
 
@@ -153,21 +210,38 @@ esp_err_t setup_wizard_progress_start(void)
     }
 
     if (len == sizeof(setup_wizard_progress_blob_t)) {
-        const setup_wizard_progress_blob_t *v2 = &raw;
-        if (v2->version == SETUP_WIZARD_PROGRESS_VERSION &&
-            steps_valid(v2->steps, sizeof(v2->steps[0]), SETUP_WIZARD_STEP_COUNT)) {
-            adopt_v2(v2);
-            ESP_LOGI(TAG, "setup wizard progress loaded (v%u)", (unsigned)v2->version);
+        const setup_wizard_progress_blob_t *v3 = &raw;
+        if (v3->version == SETUP_WIZARD_PROGRESS_VERSION &&
+            steps_valid(v3->steps, sizeof(v3->steps[0]), SETUP_WIZARD_STEP_COUNT)) {
+            adopt_v3(v3);
+            ESP_LOGI(TAG, "setup wizard progress loaded (v%u)", (unsigned)v3->version);
             return ESP_OK;
         }
         ESP_LOGW(TAG, "stored setup wizard progress blob is v%u-sized but version/fields do not check out -- defaulting",
-                 (unsigned)v2->version);
+                 (unsigned)v3->version);
+        return ESP_OK;
+    }
+
+    /* Legacy v2 blob (13 steps, pre-2026-09-18) -- happens to be a different
+     * size than the current v3 blob only because SETUP_WIZARD_STEP_COUNT
+     * grew; the record layout itself did not change. Must be checked before
+     * the "unrecognized size" fallback so an existing board's real progress
+     * on steps 0..12 survives this firmware update instead of being
+     * silently defaulted away. */
+    if (len == sizeof(setup_wizard_progress_v2_legacy_t)) {
+        const setup_wizard_progress_v2_legacy_t *v2 = (const setup_wizard_progress_v2_legacy_t *)&raw;
+        if (v2->version == 2u &&
+            steps_valid(v2->steps, sizeof(v2->steps[0]), SETUP_WIZARD_LEGACY_V1V2_STEP_COUNT)) {
+            adopt_v2_legacy_migrate(v2);
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "stored setup wizard progress blob is v2-legacy-sized but version/fields do not check out -- defaulting");
         return ESP_OK;
     }
 
     if (len == sizeof(setup_wizard_progress_v1_t)) {
         const setup_wizard_progress_v1_t *v1 = (const setup_wizard_progress_v1_t *)&raw;
-        if (v1->version == 1u && steps_valid(v1->steps, sizeof(v1->steps[0]), SETUP_WIZARD_STEP_COUNT)) {
+        if (v1->version == 1u && steps_valid(v1->steps, sizeof(v1->steps[0]), SETUP_WIZARD_LEGACY_V1V2_STEP_COUNT)) {
             adopt_v1_migrate(v1);
             return ESP_OK;
         }
@@ -175,8 +249,9 @@ esp_err_t setup_wizard_progress_start(void)
         return ESP_OK;
     }
 
-    ESP_LOGW(TAG, "stored setup wizard progress blob is size %u (recognize v1=%u, v%u=%u) -- defaulting",
-             (unsigned)len, (unsigned)sizeof(setup_wizard_progress_v1_t), (unsigned)SETUP_WIZARD_PROGRESS_VERSION,
+    ESP_LOGW(TAG, "stored setup wizard progress blob is size %u (recognize v1=%u, v2-legacy=%u, v%u=%u) -- defaulting",
+             (unsigned)len, (unsigned)sizeof(setup_wizard_progress_v1_t),
+             (unsigned)sizeof(setup_wizard_progress_v2_legacy_t), (unsigned)SETUP_WIZARD_PROGRESS_VERSION,
              (unsigned)sizeof(setup_wizard_progress_blob_t));
     return ESP_OK;
 }

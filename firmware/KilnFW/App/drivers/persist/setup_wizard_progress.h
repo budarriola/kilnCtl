@@ -47,8 +47,15 @@
 extern "C" {
 #endif
 
-// One row per docs/SETUP_WIZARD.md section 3's table (steps 0..12).
-#define SETUP_WIZARD_STEP_COUNT 13
+// One row per docs/SETUP_WIZARD.md section 3's table (steps 0..13). Kept in
+// lockstep with setup_wizard_page.html's WIZARD_STEPS array -- the two used
+// to drift silently (WIZARD_STEPS grew a 14th entry, step 13 "Authentication
+// (optional)", for the web-auth work while this constant stayed at 13, so
+// GET /api/setup/progress never surfaced step 13 and POST rejected it with
+// "step out of range"; found 2026-09-18 against the live bench board).
+// setup_wizard_step_count_mirror_drift_check.py pins these two counts
+// against each other so this cannot happen again silently.
+#define SETUP_WIZARD_STEP_COUNT 14
 
 typedef enum {
     SETUP_WIZ_STEP_PENDING = 0,

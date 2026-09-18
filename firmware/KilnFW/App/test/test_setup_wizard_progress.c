@@ -124,6 +124,56 @@ static void test_migration_from_v1(void)
 }
 
 // ---------------------------------------------------------------------
+// Migration from the legacy 13-step (v2) blob, pre-2026-09-18 fix
+// ---------------------------------------------------------------------
+
+// 2026-09-18: SETUP_WIZARD_STEP_COUNT grew 13 -> 14 alongside the wizard
+// page's new step 13 ("Authentication (optional)"). Proves an existing
+// board's real, already-persisted progress (steps 0..12, v2 format) is
+// carried forward untouched into the new 14-step layout, and that the new
+// step 13 defaults to PENDING rather than the whole record being discarded
+// as "unrecognized size" -- this task's own compat requirement.
+static void test_migration_from_v2_legacy(void)
+{
+    reset();
+    setup_wizard_progress_start(); /* opens the namespace once, establishes defaults */
+
+    setup_wizard_progress_v2_legacy_t v2;
+    memset(&v2, 0, sizeof(v2));
+    v2.version = 2;
+    v2.steps[8].state = (uint8_t)SETUP_WIZ_STEP_DONE;
+    v2.steps[8].ts = 55555;
+    v2.steps[9].state = (uint8_t)SETUP_WIZ_STEP_SKIPPED;
+    v2.steps[9].ts = 66666;
+    strncpy(v2.steps[9].note, "no CT installed yet", sizeof(v2.steps[9].note) - 1);
+
+    hal_kv_handle_t h;
+    hal_status_t open_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, NVS_PARTITION);
+    TEST_CHECK(open_err == HAL_OK, "test setup: hal_kv_open for the v2-legacy stash succeeds");
+    hal_status_t set_err = hal_kv_set_blob(&h, NVS_KEY_PROGRESS, &v2, sizeof(v2));
+    TEST_CHECK(set_err == HAL_OK, "test setup: stashing the v2-legacy-shaped (13-step) blob succeeds");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+
+    apply_defaults();
+    esp_err_t err = setup_wizard_progress_start();
+    TEST_CHECK(err == ESP_OK, "start() against a v2-legacy (13-step) blob still returns ESP_OK");
+
+    setup_wizard_step_t s8, s9, s13;
+    setup_wizard_progress_get_step(8, &s8);
+    setup_wizard_progress_get_step(9, &s9);
+    setup_wizard_progress_get_step(13, &s13);
+    TEST_CHECK(s8.state == SETUP_WIZ_STEP_DONE && s8.ts == 55555,
+               "v2-legacy migration: step 8's state+ts carry forward exactly");
+    TEST_CHECK(s9.state == SETUP_WIZ_STEP_SKIPPED && s9.ts == 66666,
+               "v2-legacy migration: step 9's state+ts carry forward exactly");
+    TEST_CHECK(strcmp(s9.note, "no CT installed yet") == 0, "v2-legacy migration: step 9's note carries forward");
+    TEST_CHECK(s13.state == SETUP_WIZ_STEP_PENDING,
+               "v2-legacy migration: the new step 13 (did not exist in the 13-step record) defaults to PENDING, "
+               "not rejected and not made up from step 12's data");
+}
+
+// ---------------------------------------------------------------------
 // Unknown-step rejection
 // ---------------------------------------------------------------------
 
@@ -277,6 +327,7 @@ void run_test_setup_wizard_progress(void)
     test_round_trip();
     test_get_all_matches_get_step();
     test_migration_from_v1();
+    test_migration_from_v2_legacy();
     test_set_step_rejects_out_of_range_index();
     test_set_step_rejects_invalid_state();
     test_partition_init_failure_degrades_to_defaults();

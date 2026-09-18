@@ -38,11 +38,18 @@ static void json_escape(const char *src, char *out, size_t out_cap)
     out[o] = '\0';
 }
 
-/* json_cap sizing: 13 steps x ~80 bytes/row worst case (note escaped to up
- * to 2x its 31-byte max, plus the string index key) + the wrapper --
- * comfortably under 1300 with margin; 2048 leaves headroom for
- * SETUP_WIZARD_STEP_COUNT growing later without this needing to be
- * revisited.
+/* json_cap sizing (recomputed 2026-09-18 when SETUP_WIZARD_STEP_COUNT grew
+ * 13 -> 14): each row's worst case is `,"13":{"state":"skipped","ts":
+ * 4294967295,"note":"<62-char escaped note>"}` = 113 bytes (index up to 2
+ * digits, longest state name "skipped", ts at UINT32_MAX, note escaped to
+ * its full 2*(SETUP_WIZARD_NOTE_MAX-1)=62-byte worst case), so 14 such rows
+ * plus the 22-byte `{"version":1,"steps":{` prefix and 2-byte `}}` suffix,
+ * minus one byte since the first row has no leading comma, comes to 1605
+ * bytes -- comfortably under SETUP_PROGRESS_JSON_CAP=2048 with 443 bytes of
+ * margin. 2048 must NOT be grown to make a future step count fit; if a
+ * future SETUP_WIZARD_STEP_COUNT no longer fits with margin, that is a sign
+ * the wizard has grown too large for this endpoint's shape, not a reason to
+ * enlarge this buffer.
  *
  * Shape: {"version":N,"steps":{"0":{"state":...,"ts":...,"note":...},...}}
  * -- steps keyed by string index (object, not array) to match the
@@ -93,8 +100,11 @@ static esp_err_t api_setup_progress_get_handler(httpd_req_t *req)
                      "%s\"%u\":{\"state\":\"%s\",\"ts\":%u,\"note\":\"%s\"}", i == 0 ? "" : ",", (unsigned)i,
                      setup_wizard_step_state_name(s->steps[i].state), (unsigned)s->steps[i].ts, note_esc);
         if (n < 0 || (size_t)n >= sizeof(s->json) - o) {
-            /* Unreachable at SETUP_WIZARD_STEP_COUNT=13 against a 2048-byte
-             * buffer, but never ship a truncated JSON document silently --
+            /* Still unreachable at SETUP_WIZARD_STEP_COUNT=14 against a
+             * 2048-byte buffer (recomputed worst case 1605 bytes, see the
+             * SETUP_PROGRESS_JSON_CAP comment above) -- re-verified, not
+             * merely re-asserted, when the count grew from 13 to 14 on
+             * 2026-09-18. Never ship a truncated JSON document silently --
              * same discipline as readiness_http.c's own overflow guard. */
             ESP_LOGE(TAG, "setup progress JSON did not fit SETUP_PROGRESS_JSON_CAP=%d", SETUP_PROGRESS_JSON_CAP);
             free(s);
@@ -118,7 +128,7 @@ static esp_err_t api_setup_progress_get_handler(httpd_req_t *req)
     return send_err;
 }
 
-/* POST /api/setup/progress -- form body "step=<0-12>&state=pending|done|skipped[&note=...]",
+/* POST /api/setup/progress -- form body "step=<0-13>&state=pending|done|skipped[&note=...]",
  * same bounded-body-then-validate-then-commit shape as every other settings
  * POST in this codebase (settings_http.c's settings_tz_post_handler). One
  * step per call, matching docs/SETUP_WIZARD.md section 5 point 6:
