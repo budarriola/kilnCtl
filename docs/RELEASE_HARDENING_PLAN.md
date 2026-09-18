@@ -437,6 +437,46 @@ safety case saying openly that it ships unproven, or accept the risk with the
 owner's explicit sign-off. Picking silently is the failure mode. **Size: S to
 decide, XL if the answer is "build the jig".**
 
+**Status, 2026-09-17 (host-only pass; no board touched, no flash/reset).**
+Re-derived `SAFETY_CASE.md` section 4's per-guard classification directly
+against `firmware/SaftyFW/src/` rather than trusting the doc: 21 tracked
+guard-level claims, **21 host-tested, 3 hardware-verified, 0 in the (b)
+"provable by host test but not yet done" bucket** — every guard's pure trip
+logic already has a real-function host test (spot-checked S1/S3/S6a/S9/S12/S13
+against current line numbers; also confirmed S14/S15 have dedicated host
+tests in `test_safety_guards.c`). No new host test was added this pass
+because none of the remaining gaps are closeable that way: what's left is
+exclusively hardware-verification (buckets A/B/C above), which this pass's
+hard safety constraints forbid touching (no `flash_firmware`/`debug_reset`/
+`ota_rollback_esp`). **Found and fixed in `SAFETY_CASE.md` while verifying**:
+three stale source-line citations that no longer pointed at the claimed
+check (S3 reachability `current_task.c:197`->`:243`; S6a trip condition
+`safety_core.c:1073`->`safety_guards.c:459-462`, the prior line was a
+different backstop entirely; S9 reachability `safety_core.c:1109`->`:1278`,
+same mix-up with the unconfigured-armed backstop). None of the three changed
+the classification, only the citation.
+
+Owner/hardware boundary, restated concretely from buckets A/B/C so it can be
+acted on without re-deriving anything:
+- **Bucket A (do on this bench, no new equipment):** S1 ceiling, S2
+  overshoot-sustained, S5 fault-injection (out-of-band reading, `tc_type`
+  mismatch), S6b both link-dead tiers, S7 press-to-open, S11 frozen-sensor
+  (once its gate is reachable), KilnFW per-zone guards. Each needs: provoke
+  it, observe the trip, confirm relay state after, record in
+  `GUARD_TEST_MATRIX.md` section 3.4.
+- **Bucket B (owner must finish CT commissioning first):** S3, S4, S9, S14,
+  S15 — blocked on `CT_COMMISSIONING_PLAN.md` steps 0 and 6, both owner
+  actions, before any bench provocation of these five means anything.
+- **Bucket C (cannot close on this fixture, ever — owner must choose a
+  posture, not schedule work):** S9's welded-contactor escalation (needs an
+  AC-injection jig that does not exist), S8's real rate threshold (needs a
+  full-power ramp a 4 W fixture cannot produce), E-stop pole 1 (permanently
+  unwired here by owner decision), and thermal-behaviour magnitudes generally
+  (measured against a plant with no stored energy). For each, the owner picks
+  one of: build the jig, ship with the safety case saying openly it's
+  unproven until commissioned on the installed kiln, or sign off on the risk
+  explicitly. This pass does not pick for them.
+
 ---
 
 ## 5. BLOCKER — failure injection and recovery, exercised rather than argued

@@ -521,13 +521,13 @@ given).
 | S2 overshoot-sustained | host-tested | `test_safety_guards.c` (119s/121s boundary, 2026-08-19) |
 | S2 reachability + `virtual_dut` cross-check | argued + tooling (removed) | `virtual_dut` evidence existed but the tool was deleted 2026-08-28; source-reachability re-confirmed §6c |
 | S3 load-stuck-on | host-tested | §2 provocation table |
-| S3 reachability | argued | `current_sense_set_cal()` confirmed called, `current_task.c:197` |
+| S3 reachability | argued | `current_sense_set_cal()` confirmed called, `current_task.c:243` (line drifted from a prior `:197` citation, re-confirmed 2026-09-17) |
 | S3 hardware trip | **not done** | §3.4 rows unexecuted — "no hardware was touched to write this" |
 | S4 load-inactive WARN | host-tested | §2 provocation table |
 | S5 sensor validity (incl. per-tc_type band, CR1 readback) | host-tested | `test_max31856_tc_range_policy.c`, `test_max31856_decode.c` |
 | S5 hardware fit (safety TC physically present) | **hardware-verified** | 2026-08-24, live link read "30.20 C (CJ 28.08 C)", `GUARD_TEST_MATRIX.md` §6a |
 | S5 masking-before-fit finding | hardware-verified | same bench session; explains why no other guard had ever transitioned on this board before that date |
-| S6a main-fault trip | argued | reachable in source (`safety_core.c:1073`) since the wiring commits; **cannot be provoked by any current host fixture** — needs bench hardware, permanently (no I2C-expander/opto emulation exists or is planned) |
+| S6a main-fault trip | argued | reachable in source (`safety_guards.c:459-462`, the S6a check itself — line drifted from a prior `safety_core.c:1073` citation, which is a different backstop entirely; re-confirmed 2026-09-17) since the wiring commits; **cannot be provoked by any current host fixture** — needs bench hardware, permanently (no I2C-expander/opto emulation exists or is planned) |
 | S6b link-dead (both tiers) | host-tested | §2 provocation table (10s soft, 120s hard) |
 | S6b hardware | **not done** | §3.4 row unexecuted |
 | S7 E-stop trip logic | host-tested, negative-tested | `test_discrete_pin_policy.c`; polarity-inversion bug reintroduced and confirmed to fail 4+2 assertions, then restored (2026-08-24); relay-deenergize end-to-end pinned by `firmware/SaftyFW/test/test_estop_deenergizes_relay.c` |
@@ -536,7 +536,7 @@ given).
 | S8 rate-of-rise (pure logic + config wiring) | host-tested | `test_s8()`, `test_safety_core_s8_wiring.c`, 2026-09-03 |
 | S8 hardware / real threshold | **not done, and cannot be until a ramp is measured** | ROADMAP.md M3 |
 | S9 trip-ineffective escalation logic | host-tested | §2 provocation table |
-| S9 reachability | argued | `safety_core.c:1109`, `relay_owner_is_energized()` wiring |
+| S9 reachability | argued | `safety_core.c:1278` (`.relay_deenergized = !relay_owner_is_energized()` input wiring; line drifted from a prior `:1109` citation, which is the unconfigured-armed backstop, not S9 — re-confirmed 2026-09-17) |
 | S9 hardware (real welded contactor) | **not done — no jig exists** | ROADMAP.md M4, explicit |
 | S10 chamber-disagreement WARN | host-tested | §2 provocation table |
 | S11 frozen-sensor trip | host-tested | §2 provocation table |
