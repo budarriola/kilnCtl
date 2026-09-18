@@ -365,6 +365,85 @@ zero-production-caller sweep called for by this item's own acceptance
 criteria have not been re-run as a fresh scripted pass in this session --
 the seven prior passes' findings stand but were not re-verified here.
 
+**Status, 2026-09-17 (ninth pass).** Closed `check_ui_responsive_sweep.ps1`
+and both `check_00_*_target_build.ps1` FAIL paths.
+
+Root cause of the three 2026-09-17 misfires (twice SKIP, once a hard FAIL on
+`Page.loadEventFired`, all passing clean on an immediate standalone rerun):
+`ui_responsive_sweep.mjs`'s `isTransientHarnessError()` classifier -- which
+decides whether a CDP/network exception during the sweep is a retriable
+harness hiccup or a genuine layout-regression FAIL -- did not match the exact
+string `CdpSession.waitForEvent()`'s own timeout produces (`` `timed out
+waiting for ${method}` ``), even though the sibling `CdpSession.send()`
+per-call timeout was already covered by an existing regex. A contention-
+caused slow page load under `run_all_checks.ps1`'s default 8-way parallel
+phase therefore fell through to the "real exception" branch and was reported
+as a hard, unretried FAIL instead of being retried. Corroborated live:
+`tasklist` showed a dozen-plus concurrent `chrome.exe` processes on the
+shared machine at the time, matching the file's own prior-incident comments;
+a standalone rerun of the check with that same ambient load passed clean
+(129/129) in ~71s, matching the reported "always passes standalone" pattern.
+
+Fix: added the missing regex clause to `isTransientHarnessError()`, exported
+it (it was previously unexported and therefore untestable in isolation), and
+added `firmware/KilnFW/App/test/ui_responsive_sweep_classify.test.mjs` -- a
+pure unit-level negative test asserting 13 classifications (the two
+2026-09-17-gap cases, six pre-existing transient classifications that must
+not regress, and five messages, including a 2026-09-09 regression guard,
+that must stay hard FAILs). Also fixed a side issue found while making the
+function testable: the module's `main()` was called unconditionally at
+import time, so importing it for a unit test launched a full live Chrome
+sweep as a side effect; guarded behind an entry-point check
+(`if (path.resolve(process.argv[1] || '') === __filename)`).
+
+Sabotage-and-restore proof (in a minted worktree, `git hash-object` matching
+the pre-sabotage blob both before and after): removing the new regex line
+reproduced RED (2 of 13 assertions failed, exactly the two gap cases);
+restoring by hand and re-running confirmed GREEN again with a hash match.
+No production build artifact involved (pure `.mjs`/string-classifier logic),
+so no rebuild step was required for this fix.
+
+Determinism under parallel execution: fixing the classifier alone does not
+eliminate contention entirely (the sweep's own internal wall-clock timeouts
+can still stretch under load even when every result is classified
+correctly), so `check_ui_responsive_sweep.ps1` was also moved into a new,
+third execution phase in `tools/run_all_checks.ps1` (`-MaxParallel 1`),
+run after the existing build-check and throttled-parallel phases, so it
+never shares a scheduling slot with up to 7 concurrently-running sibling
+checks. Two consecutive full foreground `run_all_checks.ps1` runs after this
+change both returned a clean verdict with the sweep check passing in its own
+phase both times -- see the verbatim verdict line below.
+
+Added `firmware/KilnFW/App/test/test_check_ui_responsive_sweep.ps1`, a thin
+wrapper running the new `.mjs` unit test, wired in by name in
+`tools/run_all_checks.ps1` following the existing `test_check_*.ps1`
+convention (same block shape as the hal-boundary/stop-path negative tests).
+Negative-tested the wrapper itself the same way: sabotage reproduced RED
+(wrapper throws with the node exit code), hand-restore + hash match restored
+GREEN.
+
+Both `check_00_*_target_build.ps1` FAIL paths, never previously exercised,
+were negative-tested in a separate minted worktree: appending `#error
+SABOTAGE_NEGATIVE_TEST_<NAME>_BUILD` to `firmware/KilnFW/App/main.c` (resp.
+`firmware/SaftyFW/src/boot_reason.c`) reproduced a genuine compiler error and
+a FAILED verdict naming that exact line for each; restored by hand, confirmed
+an empty `git diff` and a matching `git hash-object` against the
+pre-sabotage blob for each, then deleted the build directory and forced a
+full rebuild before re-measuring -- both came back PASS. Both checks are
+proven able to fail on a genuinely broken build.
+
+Suite total: this pass adds one new file wired by name
+(`test_check_ui_responsive_sweep.ps1`; `check_ui_responsive_sweep.ps1`
+itself already existed and was already glob-discovered, so it does not add
+a second count). Verbatim verdict from a full foreground
+`tools/run_all_checks.ps1` run after all changes: `109 passed, 0 skipped, 0
+failed.` -- sums correctly (109 = 109 + 0 + 0), no `-AllowSkips` needed,
+`check_recovery_image_size.ps1` passed (did not need to SKIP this run).
+
+Not reached this pass: the Python-side zero-production-caller sweep for
+`tools/PcTools/tests` (explicitly out of scope of the eighth pass's C-only
+sweep) remains unstarted.
+
 **Already covered, name the evidence:** the two `check_01_*_pushed_build.ps1`
 scripts are the strongest single piece of process coverage in the repo. They
 build `origin/main`'s actual content in a clean worktree rather than the local
