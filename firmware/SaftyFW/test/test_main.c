@@ -46,6 +46,7 @@ void run_test_safety_core_s8_wiring(void);
 void run_test_safety_core_polarity_wiring(void);
 void run_test_safety_core_ct_calibration_gate(void);
 void run_test_config_store_ct_channel_fitted(void);
+void run_test_config_store_zone_ct_channel(void);
 void run_test_ct_summed_topology_call_sites(void);
 void run_test_safety_core_unconfigured_armed_backstop(void);
 void run_test_safety_core_trip_logging(void);
@@ -107,6 +108,7 @@ int main(void)
     run_test_safety_core_polarity_wiring();
     run_test_safety_core_ct_calibration_gate();
     run_test_config_store_ct_channel_fitted();
+    run_test_config_store_zone_ct_channel();
     run_test_ct_summed_topology_call_sites();
     run_test_safety_core_unconfigured_armed_backstop();
     run_test_safety_core_trip_logging();

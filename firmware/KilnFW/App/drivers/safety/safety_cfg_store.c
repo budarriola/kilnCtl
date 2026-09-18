@@ -151,8 +151,12 @@ static safety_rate_guard_meta_blob_t s_rate_guard_meta;
  * version gets bumped" rule for every table growth.
  *
  * 3 -> 4 (2026-09-08, owner request): tc_offset_c (0x010A) appended at the
- * END of the table, same no-remap-hazard shape as the 2 -> 3 bump. */
-#define SAFETY_CFG_STORE_VERSION 5u
+ * END of the table, same no-remap-hazard shape as the 2 -> 3 bump.
+ *
+ * 5 -> 6 (2026-09-18, docs/CT_CHANNEL_MASK_PLAN.md step 2): zone_ct_channel
+ * [0..2] (0x0320-0x0322) appended at the END of the table, same tail-append
+ * discipline as every bump above. */
+#define SAFETY_CFG_STORE_VERSION 6u
 
 /* CONFIG_REFERENCE.md secs 1-5 / COMMISSIONING.md sec 2.1's param_id table,
  * in that document's own order -- table POSITION is what
@@ -279,6 +283,19 @@ static const safety_cfg_table_row_t SAFETY_CFG_PARAM_TABLE[] = {
      * installation, which cannot see a broken line. The Pico is the
      * authority on the value; this table only names it. */
     { 0x0212, KILNLINK_PARAM_TYPE_U8, "estop_active_level" },
+    /* 0x0320-0x0322 zone_ct_channel[0..2] -- docs/CT_CHANNEL_MASK_PLAN.md
+     * step 2. Which physical CT channel (0-2) each zone's current is read
+     * on, superseding the kiln-wide ct_topology enum (0x031F, which new
+     * firmware keeps writing as a derived label so an older board still
+     * reads something meaningful). Appended at the very END of the table,
+     * never next to 0x031F, for the reason this table's header comment
+     * gives: any insertion but a tail-append shifts every later row and
+     * silently remaps each already-persisted value onto the wrong field.
+     * 5 -> 6 bump. The Pico is the authority on the values; this table only
+     * names them so the generic commissioning endpoint can write them. */
+    { 0x0320, KILNLINK_PARAM_TYPE_U8, "zone_ct_channel[0]" },
+    { 0x0321, KILNLINK_PARAM_TYPE_U8, "zone_ct_channel[1]" },
+    { 0x0322, KILNLINK_PARAM_TYPE_U8, "zone_ct_channel[2]" },
 };
 
 // SAFETY_CFG_PARAM_COUNT (safety_cfg_store.h) is a hand-maintained literal,

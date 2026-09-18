@@ -12,58 +12,68 @@
 #include "config_params.h" // config_params_validate_ranges() -- load-time re-check, see config_store_unpack()
 #include "crc32.h" // bootloader/ -- same CRC-32 used for metadata records
 
-// --- v2 byte layout (little-endian, same convention as bootloader/metadata.c)
+// --- v3 byte layout (little-endian, same convention as bootloader/metadata.c)
+//
+// v3 (CT_CHANNEL_MASK_PLAN.md step 2) changed the record in two ways: it
+// widened fields_set from 2 to 4 bytes IN PLACE at offset 12, which pushed
+// every field from tc_source onward up by exactly 2, and it carved
+// zone_ct_channel[3] out of the front of the reserved tail. Every v2 offset
+// is preserved verbatim in the frozen REC_V2_OFF_* table below, which is
+// what the v2-to-v3 migration reads. The CRC region is [0, 504) at BOTH
+// versions -- same bytes, different meanings -- which is exactly why
+// format_version, not the CRC and not the record length, is what
+// discriminates them.
 //
 // Offset  Size  Field
 //      0     4  magic
 //      4     2  format_version
 //      6     2  reserved0 (0)
 //      8     4  seq
-//     12     2  fields_set (bitmask, CONFIG_STORE_SET_*)
-//     14     1  tc_source
-//     15     1  borrowed_zone_index
-//     16     1  tc_placement_mode
-//     17     4  abs_max_temp_c (f32 LE)
-//     21     1  tc_type
-//     22     3  ct_channel_map[3]
-//     25     1  calibration_missing (0/1)
-//     26     4  firing_margin_c
-//     30     4  overshoot_margin_c
-//     34     4  overshoot_time_s (u32 LE)
-//     38     4  max_rate_c_per_min
-//     42     4  rate_window_s
-//     46     4  blind_grace_s
-//     50     4  frozen_window_s
-//     54     4  tc_disagreement_c
-//     58     4  tc_disagreement_time_s
-//     62     4  tc_expected_offset_c
-//     66     4  cj_warn_c
-//     70     4  cj_max_c
-//     74     4  cj_time_s
-//     78     4  borrowed_stale_s
-//     82     4  borrowed_stale_trip_s
-//     86     1  borrowed_type_expected
-//     87     4  i_present_a
-//     91     6  zero_counts[3] (u16 LE x3)
-//     97     4  correlation_window_s
-//    101     4  stuck_on_time_s
-//    105     4  trip_verify_s
-//    109    12  k_ct_v_per_a[3] (f32 LE x3)
-//    121    12  gain[3] (f32 LE x3)
-//    133     4  mains_voltage_v
-//    137     4  power_window_s
-//    141     4  context_max_age_s
-//    145     4  link_timeout_s
-//    149     4  link_dead_hard_s
-//    153     4  mainfault_debounce_ms
-//    157     4  telemetry_period_ms
-//    161     4  startup_grace_s
-//    165     4  estop_debounce_ms
-//    169     4  watchdog_timeout_ms
-//    173     4  config_check_period_s
-//    177    27  ct_cal: 3 channels x 9 B each (calibrated u8 + gain f32 LE +
+//     12     4  fields_set (bitmask, CONFIG_STORE_SET_*) -- u32 since v3
+//     16     1  tc_source
+//     17     1  borrowed_zone_index
+//     18     1  tc_placement_mode
+//     19     4  abs_max_temp_c (f32 LE)
+//     23     1  tc_type
+//     24     3  ct_channel_map[3]
+//     27     1  calibration_missing (0/1)
+//     28     4  firing_margin_c
+//     32     4  overshoot_margin_c
+//     36     4  overshoot_time_s (u32 LE)
+//     40     4  max_rate_c_per_min
+//     44     4  rate_window_s
+//     48     4  blind_grace_s
+//     52     4  frozen_window_s
+//     56     4  tc_disagreement_c
+//     60     4  tc_disagreement_time_s
+//     64     4  tc_expected_offset_c
+//     68     4  cj_warn_c
+//     72     4  cj_max_c
+//     76     4  cj_time_s
+//     80     4  borrowed_stale_s
+//     84     4  borrowed_stale_trip_s
+//     88     1  borrowed_type_expected
+//     89     4  i_present_a
+//     93     6  zero_counts[3] (u16 LE x3)
+//     99     4  correlation_window_s
+//    103     4  stuck_on_time_s
+//    107     4  trip_verify_s
+//    111    12  k_ct_v_per_a[3] (f32 LE x3)
+//    123    12  gain[3] (f32 LE x3)
+//    135     4  mains_voltage_v
+//    139     4  power_window_s
+//    143     4  context_max_age_s
+//    147     4  link_timeout_s
+//    151     4  link_dead_hard_s
+//    155     4  mainfault_debounce_ms
+//    159     4  telemetry_period_ms
+//    163     4  startup_grace_s
+//    167     4  estop_debounce_ms
+//    171     4  watchdog_timeout_ms
+//    175     4  config_check_period_s
+//    179    27  ct_cal: 3 channels x 9 B each (calibrated u8 + gain f32 LE +
 //               offset f32 LE) -- unchanged shape/offset-within-block from v1
-//    204     1  safety_tc_installed_marker (u8) -- carved out of the former
+//    206     1  safety_tc_installed_marker (u8) -- carved out of the former
 //               300 B reserved block's first byte; see REC_OFF_SAFETY_TC_
 //               INSTALLED below. NOT a 0/1 bool on the wire: a record from
 //               before this field existed holds 0x00 here (confirmed on
@@ -78,17 +88,17 @@
 //               erased flash, this build's own 0x01 "installed" marker,
 //               or any garbage byte) decodes as installed, the safe
 //               default. See unpack_v2_fields()'s comment at this offset.
-//    205     4  max_expected_power_w (f32 LE); gated by
+//    207     4  max_expected_power_w (f32 LE); gated by
 //               CONFIG_STORE_SET_MAX_EXPECTED_POWER_W, carved out of the
 //               front of the former 299 B reserved block, same convention as
 //               REC_OFF_SAFETY_TC_INSTALLED above
-//    209     4  i_normal_a[3][0] -- S14 (COMMISSIONING_UX.md sec 3.3), carved
+//    211     4  i_normal_a[3][0] -- S14 (COMMISSIONING_UX.md sec 3.3), carved
 //               out of the former 295 B reserved block, same convention as
 //               REC_OFF_MAX_EXPECTED_POWER_W above
-//    213     8  i_normal_a[3][1..2] (f32 LE x2)
-//    221     2  overcurrent_pct (u16 LE)
-//    223     4  overcurrent_time_s (u32 LE)
-//    227     1  ct_installed_marker (u8) -- same positive-assertion marker
+//    215     8  i_normal_a[3][1..2] (f32 LE x2)
+//    223     2  overcurrent_pct (u16 LE)
+//    225     4  overcurrent_time_s (u32 LE)
+//    229     1  ct_installed_marker (u8) -- same positive-assertion marker
 //               convention as safety_tc_installed_marker at 204: only the
 //               explicit CT_INSTALLED_MARKER_NOT_INSTALLED (0xA5) byte
 //               decodes as "no CTs fitted"; 0x00 (a legacy record's zeroed
@@ -99,24 +109,31 @@
 //               even reach the value -- the marker convention is belt and
 //               braces, deliberately, because the consequence of a
 //               mis-decode here is three disarmed guards.
-//    228     1  ct_topology (u8, 0=per_zone/1=summed) -- CT_COMMISSIONING_
+//    230     1  ct_topology (u8, 0=per_zone/1=summed) -- CT_COMMISSIONING_
 //               PLAN.md step 3, param 0x031F. Plain 0/1 byte; any other
 //               value (legacy 0x00, erased-flash 0xFF) decodes as per_zone.
-//    229     1  i_present_a_manual (u8, 0/1) -- true iff i_present_a (offset
+//    231     1  i_present_a_manual (u8, 0/1) -- true iff i_present_a (offset
 //               87) was set directly via SET_PARAM rather than auto-derived
 //               from i_normal_a. Same "only 1 means true" decode as above.
-//    230     4  tc_offset_c (f32 LE) -- safety board's own TC calibration
+//    232     4  tc_offset_c (f32 LE) -- safety board's own TC calibration
 //               correction, owner request 2026-09-08; see config_store.h's
 //               struct comment
-//    234     1  estop_active_level (u8, 0=active-high/1=active-low) -- param
+//    236     1  estop_active_level (u8, 0=active-high/1=active-low) -- param
 //               0x0212, owner decision 2026-09-08. Plain 0/1 byte, same
-//               convention as ct_topology at 228: only the value 1 selects
+//               convention as ct_topology at 230: only the value 1 selects
 //               ACTIVE_LOW, so a legacy record's 0x00 and erased flash's
 //               0xFF both decode to ACTIVE_HIGH -- which is both the bench's
 //               real wiring and the fail-safe polarity. An unreadable
 //               configuration must never select the polarity that cannot
 //               detect a broken E-stop line.
-//    235   269  reserved, 0xFF-filled (headroom for a future field)
+//    237     3  zone_ct_channel[3] (u8 x3) -- which CT channel each zone is
+//               read on, params 0x0320-0x0322, CT_CHANNEL_MASK_PLAN.md
+//               step 2. Gated by CONFIG_STORE_SET_ZONE_CT_CHANNEL; when
+//               that bit is clear the map is derived from ct_topology at
+//               230 instead (config_store_effective_zone_ct_channel()).
+//               Carved out of the front of the former 267 B reserved
+//               block, same convention as every field above.
+//    240   264  reserved, 0xFF-filled (headroom for a future field)
 //    504     4  record_crc32, over bytes [0, 504)
 //    508     4  reserved, 0xFF-filled (pad to CONFIG_STORE_RECORD_LEN)
 //    512  total = CONFIG_STORE_RECORD_LEN
@@ -124,61 +141,61 @@
 #define REC_OFF_FORMAT_VERSION         4u
 #define REC_OFF_SEQ                    8u
 #define REC_OFF_FIELDS_SET             12u
-#define REC_OFF_TC_SOURCE              14u
-#define REC_OFF_BORROWED_ZONE_INDEX    15u
-#define REC_OFF_TC_PLACEMENT_MODE      16u
-#define REC_OFF_ABS_MAX_TEMP_C         17u
-#define REC_OFF_TC_TYPE                21u
-#define REC_OFF_CT_CHANNEL_MAP         22u
+#define REC_OFF_TC_SOURCE              16u
+#define REC_OFF_BORROWED_ZONE_INDEX    17u
+#define REC_OFF_TC_PLACEMENT_MODE      18u
+#define REC_OFF_ABS_MAX_TEMP_C         19u
+#define REC_OFF_TC_TYPE                23u
+#define REC_OFF_CT_CHANNEL_MAP         24u
 #define REC_CT_CHANNEL_MAP_LEN         3u
-#define REC_OFF_CALIBRATION_MISSING    25u
-#define REC_OFF_FIRING_MARGIN_C        26u
-#define REC_OFF_OVERSHOOT_MARGIN_C     30u
-#define REC_OFF_OVERSHOOT_TIME_S       34u
-#define REC_OFF_MAX_RATE_C_PER_MIN     38u
-#define REC_OFF_RATE_WINDOW_S          42u
-#define REC_OFF_BLIND_GRACE_S          46u
-#define REC_OFF_FROZEN_WINDOW_S        50u
-#define REC_OFF_TC_DISAGREEMENT_C      54u
-#define REC_OFF_TC_DISAGREEMENT_TIME_S 58u
-#define REC_OFF_TC_EXPECTED_OFFSET_C   62u
-#define REC_OFF_CJ_WARN_C              66u
-#define REC_OFF_CJ_MAX_C               70u
-#define REC_OFF_CJ_TIME_S              74u
-#define REC_OFF_BORROWED_STALE_S       78u
-#define REC_OFF_BORROWED_STALE_TRIP_S  82u
-#define REC_OFF_BORROWED_TYPE_EXPECTED 86u
-#define REC_OFF_I_PRESENT_A            87u
-#define REC_OFF_ZERO_COUNTS            91u
-#define REC_OFF_CORRELATION_WINDOW_S   97u
-#define REC_OFF_STUCK_ON_TIME_S        101u
-#define REC_OFF_TRIP_VERIFY_S          105u
-#define REC_OFF_K_CT_V_PER_A           109u
-#define REC_OFF_GAIN                   121u
-#define REC_OFF_MAINS_VOLTAGE_V        133u
-#define REC_OFF_POWER_WINDOW_S         137u
-#define REC_OFF_CONTEXT_MAX_AGE_S      141u
-#define REC_OFF_LINK_TIMEOUT_S         145u
-#define REC_OFF_LINK_DEAD_HARD_S       149u
-#define REC_OFF_MAINFAULT_DEBOUNCE_MS  153u
-#define REC_OFF_TELEMETRY_PERIOD_MS    157u
-#define REC_OFF_STARTUP_GRACE_S        161u
-#define REC_OFF_ESTOP_DEBOUNCE_MS      165u
-#define REC_OFF_WATCHDOG_TIMEOUT_MS    169u
-#define REC_OFF_CONFIG_CHECK_PERIOD_S  173u
-#define REC_OFF_CT_CAL                 177u
+#define REC_OFF_CALIBRATION_MISSING    27u
+#define REC_OFF_FIRING_MARGIN_C        28u
+#define REC_OFF_OVERSHOOT_MARGIN_C     32u
+#define REC_OFF_OVERSHOOT_TIME_S       36u
+#define REC_OFF_MAX_RATE_C_PER_MIN     40u
+#define REC_OFF_RATE_WINDOW_S          44u
+#define REC_OFF_BLIND_GRACE_S          48u
+#define REC_OFF_FROZEN_WINDOW_S        52u
+#define REC_OFF_TC_DISAGREEMENT_C      56u
+#define REC_OFF_TC_DISAGREEMENT_TIME_S 60u
+#define REC_OFF_TC_EXPECTED_OFFSET_C   64u
+#define REC_OFF_CJ_WARN_C              68u
+#define REC_OFF_CJ_MAX_C               72u
+#define REC_OFF_CJ_TIME_S              76u
+#define REC_OFF_BORROWED_STALE_S       80u
+#define REC_OFF_BORROWED_STALE_TRIP_S  84u
+#define REC_OFF_BORROWED_TYPE_EXPECTED 88u
+#define REC_OFF_I_PRESENT_A            89u
+#define REC_OFF_ZERO_COUNTS            93u
+#define REC_OFF_CORRELATION_WINDOW_S   99u
+#define REC_OFF_STUCK_ON_TIME_S        103u
+#define REC_OFF_TRIP_VERIFY_S          107u
+#define REC_OFF_K_CT_V_PER_A           111u
+#define REC_OFF_GAIN                   123u
+#define REC_OFF_MAINS_VOLTAGE_V        135u
+#define REC_OFF_POWER_WINDOW_S         139u
+#define REC_OFF_CONTEXT_MAX_AGE_S      143u
+#define REC_OFF_LINK_TIMEOUT_S         147u
+#define REC_OFF_LINK_DEAD_HARD_S       151u
+#define REC_OFF_MAINFAULT_DEBOUNCE_MS  155u
+#define REC_OFF_TELEMETRY_PERIOD_MS    159u
+#define REC_OFF_STARTUP_GRACE_S        163u
+#define REC_OFF_ESTOP_DEBOUNCE_MS      167u
+#define REC_OFF_WATCHDOG_TIMEOUT_MS    171u
+#define REC_OFF_CONFIG_CHECK_PERIOD_S  175u
+#define REC_OFF_CT_CAL                 179u
 #define REC_CT_CAL_CHANNEL_LEN         9u /* calibrated u8(1) + gain f32(4) + offset f32(4) */
 #define REC_OFF_SAFETY_TC_INSTALLED \
-    (REC_OFF_CT_CAL + CONFIG_STORE_CT_CAL_NUM_CHANNELS * REC_CT_CAL_CHANNEL_LEN) /* 204 */
-#define REC_OFF_MAX_EXPECTED_POWER_W   (REC_OFF_SAFETY_TC_INSTALLED + 1u) /* 205 */
+    (REC_OFF_CT_CAL + CONFIG_STORE_CT_CAL_NUM_CHANNELS * REC_CT_CAL_CHANNEL_LEN) /* 206 */
+#define REC_OFF_MAX_EXPECTED_POWER_W   (REC_OFF_SAFETY_TC_INSTALLED + 1u) /* 207 */
 // S14 (COMMISSIONING_UX.md section 3.3), carved out of the reserved tail --
 // OQ2 resolved: 16 B fit comfortably inside the 295 B reserved block with no
 // format_version bump, so every already-committed v2 record keeps loading
 // exactly as it did (calibration_missing untouched by this addition).
-#define REC_OFF_I_NORMAL_A             (REC_OFF_MAX_EXPECTED_POWER_W + 4u) /* 209 */
-#define REC_OFF_OVERCURRENT_PCT        (REC_OFF_I_NORMAL_A + 3u * 4u)      /* 221 */
-#define REC_OFF_OVERCURRENT_TIME_S     (REC_OFF_OVERCURRENT_PCT + 2u)      /* 223 */
-#define REC_OFF_CT_INSTALLED           (REC_OFF_OVERCURRENT_TIME_S + 4u)  /* 227 */
+#define REC_OFF_I_NORMAL_A             (REC_OFF_MAX_EXPECTED_POWER_W + 4u) /* 211 */
+#define REC_OFF_OVERCURRENT_PCT        (REC_OFF_I_NORMAL_A + 3u * 4u)      /* 223 */
+#define REC_OFF_OVERCURRENT_TIME_S     (REC_OFF_OVERCURRENT_PCT + 2u)      /* 225 */
+#define REC_OFF_CT_INSTALLED           (REC_OFF_OVERCURRENT_TIME_S + 4u)  /* 229 */
 // ct_topology/i_present_a_manual (CT_COMMISSIONING_PLAN.md step 3), carved
 // out of the front of the reserved tail same as every field above -- plain
 // 0/1 bytes, not the 0xA5-marker convention: this build only ever writes 0
@@ -187,8 +204,8 @@
 // any other byte, including an old record's never-written 0xFF or a legacy
 // record's zeroed 0x00, already falls through to the safe default (per_zone
 // / auto-derive) without needing a distinct improbable sentinel.
-#define REC_OFF_CT_TOPOLOGY            (REC_OFF_CT_INSTALLED + 1u)        /* 228 */
-#define REC_OFF_I_PRESENT_A_MANUAL     (REC_OFF_CT_TOPOLOGY + 1u)         /* 229 */
+#define REC_OFF_CT_TOPOLOGY            (REC_OFF_CT_INSTALLED + 1u)        /* 230 */
+#define REC_OFF_I_PRESENT_A_MANUAL     (REC_OFF_CT_TOPOLOGY + 1u)         /* 231 */
 // tc_offset_c (owner request "I should be able to set the safety
 // thermocouple type" pass, 2026-09-08): a calibration correction ADDED to
 // the safety board's own MAX31856 hot-junction reading before any guard
@@ -206,7 +223,7 @@
 // whatever stale bytes are already there, the same "explicit zero, not
 // trust-the-bytes" discipline overcurrent_pct/_time_s use for their own
 // carved-from-reserved fields.
-#define REC_OFF_TC_OFFSET_C            (REC_OFF_I_PRESENT_A_MANUAL + 1u)  /* 230 */
+#define REC_OFF_TC_OFFSET_C            (REC_OFF_I_PRESENT_A_MANUAL + 1u)  /* 232 */
 // estop_active_level (owner decision 2026-09-08, "Estop polarity should be
 // configureable but the state it is in now on my test setup should be
 // considered the default and the prefered safe to fire state"). Carved out
@@ -218,9 +235,19 @@
 // where an unreadable/legacy configuration lands on the FAIL-SAFE polarity
 // (the one where a cut E-stop line reads as STOP), never on the one that
 // cannot see a broken wire at all.
-#define REC_OFF_ESTOP_ACTIVE_LEVEL     (REC_OFF_TC_OFFSET_C + 4u)         /* 234 */
-#define REC_OFF_RESERVED               (REC_OFF_ESTOP_ACTIVE_LEVEL + 1u)  /* 235 */
-#define REC_RESERVED_LEN               269u
+#define REC_OFF_ESTOP_ACTIVE_LEVEL     (REC_OFF_TC_OFFSET_C + 4u)         /* 236 */
+// zone_ct_channel (CT_CHANNEL_MASK_PLAN.md step 2), carved out of the front
+// of the reserved tail like every field above. Raw 0-2 bytes, NOT a marker
+// convention: the field is meaningless unless CONFIG_STORE_SET_ZONE_CT_
+// CHANNEL is set, and that bit cannot be set on any record written before
+// v3 existed, so there is no legacy byte pattern to defend against here.
+// unpack additionally refuses the whole array (clearing the bit) if any byte
+// is out of range, so a CRC-valid but garbled record falls back to the
+// ct_topology-derived map rather than to a channel id nothing is wired to.
+#define REC_OFF_ZONE_CT_CHANNEL        (REC_OFF_ESTOP_ACTIVE_LEVEL + 1u)  /* 237 */
+#define REC_ZONE_CT_CHANNEL_LEN        3u
+#define REC_OFF_RESERVED               (REC_OFF_ZONE_CT_CHANNEL + REC_ZONE_CT_CHANNEL_LEN) /* 240 */
+#define REC_RESERVED_LEN               264u
 
 // The one byte at REC_OFF_SAFETY_TC_INSTALLED is NOT a 0/1 bool -- see this
 // file's own layout-table comment above for the hardware-confirmed reason:
@@ -243,6 +270,36 @@
 #define CT_INSTALLED_MARKER_INSTALLED            0x01u
 #define CT_INSTALLED_MARKER_NOT_INSTALLED        0xA5u
 #define REC_OFF_CRC                    504u
+
+// --- v2 (legacy) byte layout -- kept ONLY for the v2-to-v3 migration in
+// config_store_unpack_ex(). Frozen: real flash written by the shipped v2
+// firmware exists in this shape, and this table's job is to keep reading it
+// correctly forever, never to track whatever v3 (REC_OFF_* above) becomes.
+// The full v2 field list is the REC_OFF_* table above with every offset from
+// REC_V2_OFF_TC_SOURCE through estop_active_level two bytes lower; only the
+// constants the migration actually needs are frozen as symbols, because
+// those are what make the field block a single contiguous run (see the v2
+// branch of config_store_unpack_ex()) and freezing offsets nothing reads
+// would be freezing a claim nothing checks.
+#define REC_V2_OFF_FIELDS_SET          12u
+#define REC_V2_FIELDS_SET_LEN          2u  /* u16 at v2, u32 at v3 */
+#define REC_V2_OFF_TC_SOURCE           14u
+#define REC_V2_OFF_RESERVED            235u
+#define REC_V2_RESERVED_LEN            269u
+#define REC_V2_OFF_CRC                 504u
+
+// The v2 field block [REC_V2_OFF_TC_SOURCE, REC_V2_OFF_RESERVED) maps
+// byte-for-byte onto v3's [REC_OFF_TC_SOURCE, REC_OFF_ZONE_CT_CHANNEL): the
+// only v3 change below offset 235 was fields_set growing by 2 bytes, so the
+// whole run shifted by exactly that much and nothing inside it was reordered
+// or resized. This assert is what keeps that true -- a future field inserted
+// into the middle of the v3 table would break it at compile time rather than
+// silently making the migration copy the wrong bytes.
+typedef char config_store_v2_block_shift_check
+    [((REC_V2_OFF_RESERVED - REC_V2_OFF_TC_SOURCE) ==
+      (REC_OFF_ZONE_CT_CHANNEL - REC_OFF_TC_SOURCE) &&
+      (REC_OFF_TC_SOURCE - REC_V2_OFF_TC_SOURCE) == 2u &&
+      REC_V2_OFF_CRC == REC_OFF_CRC) ? 1 : -1];
 
 // --- v1 (legacy) byte layout -- kept ONLY for config_store_unpack()'s
 // migration path. This is the exact layout the original 256 B record used;
@@ -365,7 +422,7 @@ void config_store_pack(const config_store_record_t *rec,
     put_u16_le(&out[REC_OFF_FORMAT_VERSION], rec->format_version);
     put_u16_le(&out[6], 0); // reserved0
     put_u32_le(&out[REC_OFF_SEQ], rec->seq);
-    put_u16_le(&out[REC_OFF_FIELDS_SET], rec->fields_set);
+    put_u32_le(&out[REC_OFF_FIELDS_SET], rec->fields_set);
 
     out[REC_OFF_TC_SOURCE] = rec->tc_source;
     out[REC_OFF_BORROWED_ZONE_INDEX] = rec->borrowed_zone_index;
@@ -447,6 +504,8 @@ void config_store_pack(const config_store_record_t *rec,
     put_u16_le(&out[REC_OFF_OVERCURRENT_PCT], rec->overcurrent_pct);
     put_u32_le(&out[REC_OFF_OVERCURRENT_TIME_S], rec->overcurrent_time_s);
 
+    memcpy(&out[REC_OFF_ZONE_CT_CHANNEL], rec->zone_ct_channel, REC_ZONE_CT_CHANNEL_LEN);
+
     memcpy(&out[REC_OFF_RESERVED], rec->reserved, sizeof(rec->reserved));
     // bytes [REC_OFF_RESERVED + REC_RESERVED_LEN, REC_OFF_CRC) already 0xFF
     // from the initial memset -- further headroom.
@@ -463,7 +522,7 @@ static void unpack_v2_fields(const uint8_t *in, config_store_record_t *out)
 {
     out->format_version = get_u16_le(&in[REC_OFF_FORMAT_VERSION]);
     out->seq = get_u32_le(&in[REC_OFF_SEQ]);
-    out->fields_set = get_u16_le(&in[REC_OFF_FIELDS_SET]);
+    out->fields_set = get_u32_le(&in[REC_OFF_FIELDS_SET]);
 
     out->tc_source = in[REC_OFF_TC_SOURCE];
     out->borrowed_zone_index = in[REC_OFF_BORROWED_ZONE_INDEX];
@@ -636,6 +695,33 @@ static void unpack_v2_fields(const uint8_t *in, config_store_record_t *out)
     uint32_t oc_time_raw = get_u32_le(&in[REC_OFF_OVERCURRENT_TIME_S]);
     out->overcurrent_time_s = (oc_time_raw == 0xFFFFFFFFu) ? 0u : oc_time_raw;
 
+    // zone_ct_channel (CT_CHANNEL_MASK_PLAN.md step 2). Gated by
+    // CONFIG_STORE_SET_ZONE_CT_CHANNEL, which no pre-v3 record can have set,
+    // so the raw bytes are only ever trusted on a record this build's own
+    // commissioning flow wrote. The extra range check below is belt and
+    // braces against a CRC-valid but garbled record: rather than hand a
+    // guard a channel id nothing is wired to, clear the bit, which makes
+    // config_store_effective_zone_ct_channel() fall back to the
+    // ct_topology-derived map -- the same "an unreadable configuration lands
+    // on the conservative behaviour" direction every other decode in this
+    // function takes.
+    memcpy(out->zone_ct_channel, &in[REC_OFF_ZONE_CT_CHANNEL], REC_ZONE_CT_CHANNEL_LEN);
+    for (unsigned z = 0; z < REC_ZONE_CT_CHANNEL_LEN; z++) {
+        if (out->zone_ct_channel[z] > 2u) {
+            out->fields_set &= ~(uint32_t)(CONFIG_STORE_SET_ZONE_CT_CHANNEL |
+                                            CONFIG_STORE_SET_ZONE_CT_CHANNEL_0 |
+                                            CONFIG_STORE_SET_ZONE_CT_CHANNEL_1 |
+                                            CONFIG_STORE_SET_ZONE_CT_CHANNEL_2);
+            // Replace the bytes as well, not just the bits: config_params_
+            // validate_ranges() runs on every loaded record and refuses an
+            // out-of-range zone_ct_channel byte outright, so leaving the
+            // garbage in place would turn a field this build is perfectly
+            // able to fall back on into a whole-record rejection.
+            config_store_derive_zone_ct_channel(out->ct_topology, out->zone_ct_channel);
+            break;
+        }
+    }
+
     memcpy(out->reserved, &in[REC_OFF_RESERVED], sizeof(out->reserved));
 }
 
@@ -711,6 +797,72 @@ bool config_store_unpack_ex(const uint8_t in[CONFIG_STORE_RECORD_LEN],
         // config_store.h's "Load-time rejection diagnostics" block for why
         // this distinction (case 2: structurally-valid-but-refused) must
         // never be silent.
+        const char *field = NULL;
+        const char *rule = NULL;
+        if (!config_params_validate_ranges(&scratch, &field, &rule, NULL)) {
+            if (out_reject != NULL) {
+                out_reject->rejected = true;
+                out_reject->field = field;
+                out_reject->rule = rule;
+                out_reject->seq = scratch.seq;
+            }
+            return false;
+        }
+        *out = scratch;
+        return true;
+    }
+
+    if (version == CONFIG_STORE_FORMAT_VERSION_V2) {
+        // Legacy v2 layout (CT_CHANNEL_MASK_PLAN.md step 2). Its CRC covers
+        // [0, REC_V2_OFF_CRC) -- numerically the same region v3 uses, over
+        // different contents, which is why format_version and not the CRC is
+        // what got us into this branch.
+        uint32_t stored_crc = get_u32_le(&in[REC_V2_OFF_CRC]);
+        uint32_t computed_crc = bootloader_crc32(in, REC_V2_OFF_CRC);
+        if (stored_crc != computed_crc) {
+            return false; // corrupted, or a torn write caught mid-program
+        }
+
+        // Rewrite the v2 bytes into v3 shape, then decode them with the ONE
+        // v3 decoder, rather than duplicating ~60 lines of field decoding
+        // that would then be free to drift away from unpack_v2_fields(). The
+        // rewrite itself is driven entirely by the frozen REC_V2_OFF_*
+        // constants above and is compile-time-checked by
+        // config_store_v2_block_shift_check.
+        uint8_t v3[CONFIG_STORE_RECORD_LEN];
+        memset(v3, 0xFF, sizeof(v3));
+        memcpy(v3, in, REC_V2_OFF_FIELDS_SET); // magic, format_version, reserved0, seq
+        // Zero-extend the old 16-bit fields_set into the new 32-bit field:
+        // bits 0-15 keep their exact meanings and positions, so no remapping
+        // is needed -- and bit 16 (ZONE_CT_CHANNEL) lands CLEAR, which is
+        // precisely the "this record predates the field, derive it from
+        // ct_topology" state the decode below depends on.
+        put_u32_le(&v3[REC_OFF_FIELDS_SET],
+                   (uint32_t)get_u16_le(&in[REC_V2_OFF_FIELDS_SET]));
+        memcpy(&v3[REC_OFF_TC_SOURCE], &in[REC_V2_OFF_TC_SOURCE],
+               REC_V2_OFF_RESERVED - REC_V2_OFF_TC_SOURCE);
+        memcpy(&v3[REC_OFF_RESERVED], &in[REC_V2_OFF_RESERVED], REC_RESERVED_LEN);
+
+        config_store_record_t scratch;
+        unpack_v2_fields(v3, &scratch);
+        // zone_ct_channel: derived from the migrated ct_topology byte, per
+        // CT_CHANNEL_MASK_PLAN.md's old-record rule. The bytes at the new
+        // offset are meaningless on a v2 record (they were reserved fill)
+        // and the gating bit stays clear, so every reader that goes through
+        // config_store_effective_zone_ct_channel() would derive the same map
+        // anyway -- filling the array here as well just means a debugger or
+        // a log dump of this record shows the map that is actually in force.
+        config_store_derive_zone_ct_channel(scratch.ct_topology, scratch.zone_ct_channel);
+        scratch.format_version = CONFIG_STORE_FORMAT_VERSION;
+        // Deliberately NOT forcing calibration_missing = true, unlike the v1
+        // branch below. v1 predated the entire commissioning surface, so a
+        // migrated v1 record genuinely had never been commissioned against
+        // it. A v2 record was commissioned against every field v3 has except
+        // zone_ct_channel, and that one field has a correct, fully-specified
+        // derivation from ct_topology -- nothing about it is unknown.
+        // Forcing recommissioning here would be a false claim that the
+        // operator's existing answers are missing, and would disarm guards
+        // on a board that is, in fact, configured.
         const char *field = NULL;
         const char *rule = NULL;
         if (!config_params_validate_ranges(&scratch, &field, &rule, NULL)) {
@@ -919,6 +1071,18 @@ void config_store_default(config_store_record_t *out)
     // NOT written here explicitly, unlike i_present_a etc. above, so a
     // fresh record and a migrated-forward legacy record produce the exact
     // same in-RAM 0 for these two fields.
+
+    // zone_ct_channel: the identity map, the per-zone default that
+    // reproduces every existing behaviour -- and deliberately NOT the
+    // memset(0) {0,0,0} the rest of this function leans on, which would
+    // claim all three zones share channel 0. The gating bit stays clear
+    // either way, so this value is what a debugger shows and what
+    // config_store_effective_zone_ct_channel() would derive anyway from the
+    // PER_ZONE default below; writing it explicitly keeps those two agreeing
+    // without either side having to know the other's rule.
+    out->zone_ct_channel[0] = 0u;
+    out->zone_ct_channel[1] = 1u;
+    out->zone_ct_channel[2] = 2u;
 
     // ct_topology: left at memset(0) above == CONFIG_STORE_CT_TOPOLOGY_
     // PER_ZONE (0) -- the safe default that reproduces every existing
@@ -1230,10 +1394,10 @@ bool config_store_only_tc_type_differs(const config_store_record_t *current,
     put_u32_le(&b[REC_OFF_SEQ], 0);
     a[REC_OFF_TC_TYPE] = 0;
     b[REC_OFF_TC_TYPE] = 0;
-    uint16_t fields_set_a = get_u16_le(&a[REC_OFF_FIELDS_SET]) | CONFIG_STORE_SET_TC_TYPE;
-    uint16_t fields_set_b = get_u16_le(&b[REC_OFF_FIELDS_SET]) | CONFIG_STORE_SET_TC_TYPE;
-    put_u16_le(&a[REC_OFF_FIELDS_SET], fields_set_a);
-    put_u16_le(&b[REC_OFF_FIELDS_SET], fields_set_b);
+    uint32_t fields_set_a = get_u32_le(&a[REC_OFF_FIELDS_SET]) | CONFIG_STORE_SET_TC_TYPE;
+    uint32_t fields_set_b = get_u32_le(&b[REC_OFF_FIELDS_SET]) | CONFIG_STORE_SET_TC_TYPE;
+    put_u32_le(&a[REC_OFF_FIELDS_SET], fields_set_a);
+    put_u32_le(&b[REC_OFF_FIELDS_SET], fields_set_b);
 
     bool equal = memcmp(a, b, REC_OFF_CRC) == 0;
     s_call_in_progress = false;

@@ -2454,6 +2454,7 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
     config_store_record_t to_write = s_staged_config;
     config_params_finalize_ct_channel_map(&to_write);
     config_params_finalize_i_present_a(&to_write); // CT_COMMISSIONING_PLAN.md step 3
+    config_params_finalize_zone_ct_channel(&to_write); // CT_CHANNEL_MASK_PLAN.md step 2
     to_write.calibration_missing = !config_params_all_required_set(&to_write);
 
     uint8_t prev_tc_type = config_store_get_tc_type(); // captured BEFORE the write, see tc_type_reapply_policy.h
@@ -2586,6 +2587,7 @@ static void link_task_handle_apply_config_volatile(const kilnlink_frame_t *frame
     config_store_record_t to_write = s_staged_config;
     config_params_finalize_ct_channel_map(&to_write);
     config_params_finalize_i_present_a(&to_write);
+    config_params_finalize_zone_ct_channel(&to_write); // CT_CHANNEL_MASK_PLAN.md step 2
     to_write.calibration_missing = !config_params_all_required_set(&to_write);
 
     // config_store_write_volatile() can still fail for exactly one reason

@@ -85,12 +85,12 @@ static void test_pack_unpack_roundtrip(void)
     // record written by firmware from BEFORE safety_tc_installed existed
     // actually holds at this offset is 0x00: old config_store_pack() did
     //     memcpy(&out[REC_OFF_RESERVED], rec->reserved, sizeof(rec->reserved))
-    // with the OLD REC_OFF_RESERVED == 204 (this field's offset today) and
+    // with the OLD REC_OFF_RESERVED == 204 (this field's offset today is 206, after the v3 +2 shift) and
     // rec->reserved a 300-byte array that config_store_default() left at
-    // memset(0) -- so out[204] = rec.reserved[0] = 0x00, not 0xFF. This is
+    // memset(0) -- so out[206] = rec.reserved[0] = 0x00, not 0xFF. This is
     // simulated by hand below, calling this file's OWN pack() with the
     // record's reserved[0] forced to 0 and then hand-writing 0x00 at
-    // offset 204 to stand in for "old firmware, which had no
+    // offset 206 to stand in for "old firmware, which had no
     // safety_tc_installed field at all, wrote whatever its own reserved[0]
     // happened to be" -- CRC recomputed over it, matching how a real old
     // record's CRC legitimately covers that 0x00 byte.
@@ -100,7 +100,7 @@ static void test_pack_unpack_roundtrip(void)
     // INSTALLED, 0xA5): 0x00 is emphatically NOT that sentinel.
     rec.safety_tc_installed = 1u; // irrelevant to what gets written below -- overwritten by hand
     config_store_pack(&rec, record);
-    record[204] = 0x00u; // REC_OFF_SAFETY_TC_INSTALLED -- the real legacy byte value
+    record[206] = 0x00u; // REC_OFF_SAFETY_TC_INSTALLED -- the real legacy byte value
     {
         uint32_t crc = bootloader_crc32(record, 504u);
         record[504] = (uint8_t)(crc & 0xFFu);
@@ -122,7 +122,7 @@ static void test_pack_unpack_roundtrip(void)
     // fill byte from some other offset/path) must not accidentally trip
     // the not-installed sentinel either.
     config_store_pack(&rec, record);
-    record[204] = 0xFFu;
+    record[206] = 0xFFu;
     {
         uint32_t crc = bootloader_crc32(record, 504u);
         record[504] = (uint8_t)(crc & 0xFFu);
@@ -140,7 +140,7 @@ static void test_pack_unpack_roundtrip(void)
     // proves the encoder emits the sentinel this decode check depends on.
     rec.safety_tc_installed = 0u;
     config_store_pack(&rec, record);
-    TEST_CHECK(record[204] == 0xA5u,
+    TEST_CHECK(record[206] == 0xA5u,
                "config_store_pack() encodes declared-not-installed as the explicit "
                "0xA5 sentinel, not as a bare 0x00");
     ok = config_store_unpack(record, &back);
@@ -1177,10 +1177,10 @@ static void test_unset_fields_distinguishable_from_zero(void)
 
     // Prove config_store_field_is_set() itself can fail: flip a bit off and
     // confirm the helper reports not-set; flip it back on and confirm set.
-    uint16_t fields_set = back.fields_set;
+    uint32_t fields_set = back.fields_set; // u32 since v3 -- config_store_field_is_set() reads four bytes through this pointer
     TEST_CHECK(config_store_field_is_set(&fields_set, CONFIG_STORE_SET_MAX_RATE_C_PER_MIN),
                "config_store_field_is_set(): true when the bit is present");
-    fields_set = (uint16_t)(fields_set & ~(uint16_t)CONFIG_STORE_SET_MAX_RATE_C_PER_MIN);
+    fields_set = (uint32_t)(fields_set & ~(uint32_t)CONFIG_STORE_SET_MAX_RATE_C_PER_MIN);
     TEST_CHECK(!config_store_field_is_set(&fields_set, CONFIG_STORE_SET_MAX_RATE_C_PER_MIN),
                "config_store_field_is_set(): false once the bit is cleared -- proves the "
                "check can actually fail, not just always return true");
@@ -2027,12 +2027,12 @@ static void test_ct_topology_legacy_decode(void)
     config_store_record_t back;
 
     // A legacy record (built before these two fields existed) holds 0x00 at
-    // offsets 228/229, same hardware-confirmed reasoning as safety_tc_
+    // offsets 230/231, same hardware-confirmed reasoning as safety_tc_
     // installed's own legacy test above (old config_store_pack() memcpy'd a
     // memset(0) rec->reserved). Must decode as per_zone (0) / manual==false.
     config_store_pack(&rec, record);
-    record[228] = 0x00u; // REC_OFF_CT_TOPOLOGY
-    record[229] = 0x00u; // REC_OFF_I_PRESENT_A_MANUAL
+    record[230] = 0x00u; // REC_OFF_CT_TOPOLOGY
+    record[231] = 0x00u; // REC_OFF_I_PRESENT_A_MANUAL
     {
         uint32_t crc = bootloader_crc32(record, 504u);
         record[504] = (uint8_t)(crc & 0xFFu);
@@ -2050,8 +2050,8 @@ static void test_ct_topology_legacy_decode(void)
     // the safe default -- same "only the exact marker means non-default"
     // rule as the ct_installed/safety_tc_installed sentinels.
     config_store_pack(&rec, record);
-    record[228] = 0xFFu;
-    record[229] = 0xFFu;
+    record[230] = 0xFFu;
+    record[231] = 0xFFu;
     {
         uint32_t crc = bootloader_crc32(record, 504u);
         record[504] = (uint8_t)(crc & 0xFFu);
@@ -2069,8 +2069,8 @@ static void test_ct_topology_legacy_decode(void)
     rec.ct_topology = CONFIG_STORE_CT_TOPOLOGY_SUMMED;
     rec.i_present_a_manual = true;
     config_store_pack(&rec, record);
-    TEST_CHECK(record[228] == 1u, "config_store_pack() encodes summed topology as byte value 1");
-    TEST_CHECK(record[229] == 1u, "config_store_pack() encodes i_present_a_manual==true as byte value 1");
+    TEST_CHECK(record[230] == 1u, "config_store_pack() encodes summed topology as byte value 1");
+    TEST_CHECK(record[231] == 1u, "config_store_pack() encodes i_present_a_manual==true as byte value 1");
     TEST_CHECK(config_store_unpack(record, &back), "record with both new fields set unpacks");
     TEST_CHECK(back.ct_topology == CONFIG_STORE_CT_TOPOLOGY_SUMMED, "summed topology round-trips");
     TEST_CHECK(back.i_present_a_manual, "i_present_a_manual==true round-trips");
@@ -2299,7 +2299,7 @@ static void test_config_params_all_required_set(void)
 // part of the on-flash FORMAT, so a test that would silently follow the .c
 // file if someone moved the byte would prove nothing about compatibility with
 // records already written to real boards.
-#define CT_INSTALLED_TEST_OFFSET 227u
+#define CT_INSTALLED_TEST_OFFSET 229u
 
 // Recomputes the trailing CRC after a test has poked a raw byte -- otherwise
 // unpack rejects the record for the wrong reason and the check below passes

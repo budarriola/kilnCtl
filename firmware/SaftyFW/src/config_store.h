@@ -154,7 +154,7 @@ extern "C" {
 // format_version -- it identifies "this is a config_store record of some
 // version", and format_version is what says which one.
 #define CONFIG_STORE_MAGIC 0x4B4C4331u
-#define CONFIG_STORE_FORMAT_VERSION 2u
+#define CONFIG_STORE_FORMAT_VERSION 3u
 
 // The one prior format version this module knows how to migrate FORWARD
 // from. Not "the previous version" in a generic sense -- if a v3 ever
@@ -163,6 +163,17 @@ extern "C" {
 // CONFIG_STORE_FORMAT_VERSION again also grows this migration chain, it does
 // not just redefine this macro.
 #define CONFIG_STORE_FORMAT_VERSION_V1 1u
+
+// The second prior format version, added by the zone_ct_channel pass
+// (docs/CT_CHANNEL_MASK_PLAN.md step 2). v2 is the layout in which
+// fields_set was a uint16_t at offset 12 and every field from tc_source
+// onward sat 2 bytes earlier than it does in v3; its CRC covered bytes
+// [0, REC_V2_OFF_CRC) == [0, 504) -- the same region v3 uses, over
+// different contents, which is exactly why the format_version field (not
+// the CRC, and not the record length) is what discriminates them. Both
+// prior versions are migrated FORWARD, never written: config_store_pack()
+// only ever emits CONFIG_STORE_FORMAT_VERSION.
+#define CONFIG_STORE_FORMAT_VERSION_V2 2u
 
 // Safe, documented default -- matches max31856.h's own doc comment on
 // MAX31856_TC_TYPE_PLACEHOLDER: Type K is the "does not crash, does not
@@ -370,11 +381,43 @@ extern "C" {
 // worse. So the question must be ANSWERED, not defaulted, and the bit is what
 // records that an answer was given.
 //
-// THIS IS THE LAST FREE BIT of the uint16_t fields_set. A future field needs
-// fields_set widened to uint32_t, which is a record-layout change
-// (REC_OFF_FIELDS_SET is 2 bytes) and therefore a format_version bump --
-// not a drop-in the way bits 11-15 were.
+// THIS WAS THE LAST FREE BIT of the old uint16_t fields_set. That widening
+// has now happened: fields_set is a uint32_t as of CONFIG_STORE_FORMAT_
+// VERSION 3 (docs/CT_CHANNEL_MASK_PLAN.md step 2), which is exactly the
+// record-layout change plus format_version bump this comment predicted.
+// Bits 20-31 are free again, and a new bit in that upper half is a drop-in
+// (the record already carries all four bytes), not another version bump.
 #define CONFIG_STORE_SET_CT_INSTALLED         (1u << 15)
+
+// zone_ct_channel[0..2] -- docs/CT_CHANNEL_MASK_PLAN.md. ONE group bit for
+// all three zones, not three per-zone bits: unlike i_normal_a (where a
+// half-measured set is a strictly correct partial result), a half-answered
+// zone-to-channel map is an unsafe subset in exactly the way a
+// half-populated ct_channel_map is -- a zone whose channel nobody confirmed
+// would silently keep the compiled identity default while its siblings
+// moved, which is a different, wrong kiln topology rather than a smaller
+// one. So this bit is DERIVED at COMMIT_CONFIG once all three per-zone
+// SET_PARAM writes have arrived, the same shape as
+// CONFIG_STORE_SET_CT_CHANNEL_MAP (config_params_finalize_zone_ct_channel()).
+//
+// When the bit is CLEAR the stored bytes are not trusted at all: the record
+// is read as "this board has never been commissioned per zone", and the
+// effective map is DERIVED from the legacy ct_topology byte
+// (config_store_effective_zone_ct_channel() below), so an already-
+// commissioned PER_ZONE or SUMMED board's guard behaviour is unchanged by a
+// firmware upgrade that merely adds this field.
+#define CONFIG_STORE_SET_ZONE_CT_CHANNEL      (1u << 16)
+
+// The three per-zone bookkeeping bits the group bit above is derived FROM,
+// exactly mirroring CONFIG_STORE_SET_CT_CHANNEL_MAP_0/_1/_2. SET_PARAM sets
+// one of these per zone as it arrives; nothing outside
+// config_params_finalize_zone_ct_channel() and config_params_is_set() (which
+// reports per-zone progress so an operator can see WHICH zone is still
+// unanswered) may read them, and no guard may key off them -- the group bit
+// is the only thing that licenses trusting the array.
+#define CONFIG_STORE_SET_ZONE_CT_CHANNEL_0    (1u << 17)
+#define CONFIG_STORE_SET_ZONE_CT_CHANNEL_1    (1u << 18)
+#define CONFIG_STORE_SET_ZONE_CT_CHANNEL_2    (1u << 19)
 
 // ct_topology (param 0x031F, CT_COMMISSIONING_PLAN.md step 3) and
 // i_present_a_manual are NOT fields_set bits -- fields_set is completely
@@ -396,6 +439,86 @@ extern "C" {
 // DECODED values guards and config_params.c see.
 #define CONFIG_STORE_CT_TOPOLOGY_PER_ZONE 0u
 #define CONFIG_STORE_CT_TOPOLOGY_SUMMED   1u
+
+// config_store_derive_zone_ct_channel() -- the legacy ct_topology byte's
+// equivalent zone-to-channel map, docs/CT_CHANNEL_MASK_PLAN.md's
+// "old record read by new firmware" rule. PER_ZONE (0) becomes the identity
+// {0,1,2}; SUMMED (1) -- and, deliberately, ANY unrecognised byte -- becomes
+// {2,2,2}.
+//
+// The "anything unrecognised becomes SUMMED" direction is NOT the same
+// fall-through config_store_ct_channel_fitted() applies to a raw topology
+// byte, and the difference is intentional: this function is only ever
+// reached for a record whose ZONE_CT_CHANNEL bit is clear, where the
+// topology byte has already been decoded and range-checked by unpack
+// (config_store.c) to 0 or 1. The default arm therefore exists only as a
+// structural backstop, and it points at the map with strictly FEWER
+// independent thresholds (one pooled channel rather than three per-channel
+// ones), which is the conservative collapse the plan requires.
+static inline void config_store_derive_zone_ct_channel(uint8_t ct_topology, uint8_t out[3])
+{
+    if (ct_topology == CONFIG_STORE_CT_TOPOLOGY_PER_ZONE) {
+        out[0] = 0u; out[1] = 1u; out[2] = 2u;
+        return;
+    }
+    out[0] = 2u; out[1] = 2u; out[2] = 2u;
+}
+
+// config_store_ct_topology_from_zone_ct_channel() -- the reverse direction,
+// docs/CT_CHANNEL_MASK_PLAN.md's "new record read by old firmware" rule.
+// Returns the legacy byte new firmware must keep writing so a downgraded
+// board still reads something meaningful:
+//   identity {0,1,2} (all three distinct) -> PER_ZONE
+//   everything else                        -> SUMMED
+// The collapse of a genuine SPLIT to SUMMED rather than PER_ZONE is the
+// whole point and is deliberately lossy: old firmware reading PER_ZONE would
+// arm each channel against a threshold sized for one zone while a shared CT
+// hands it the sum of two, i.e. a guard that trips on healthy firings.
+// SUMMED instead pools every normal against the one channel, which is
+// blunter but never mis-scaled.
+static inline uint8_t config_store_ct_topology_from_zone_ct_channel(const uint8_t zone_ct_channel[3])
+{
+    bool all_distinct = (zone_ct_channel[0] != zone_ct_channel[1]) &&
+                        (zone_ct_channel[1] != zone_ct_channel[2]) &&
+                        (zone_ct_channel[0] != zone_ct_channel[2]);
+    if (all_distinct && zone_ct_channel[0] == 0u && zone_ct_channel[1] == 1u &&
+        zone_ct_channel[2] == 2u) {
+        return CONFIG_STORE_CT_TOPOLOGY_PER_ZONE;
+    }
+    return CONFIG_STORE_CT_TOPOLOGY_SUMMED;
+}
+
+// config_store_ct_channel_member_count() -- |member(ch)|, the number of
+// zones that read channel `ch`. 0 means no zone claims the channel, i.e.
+// nothing is wired behind it. S15 is gated on >= 2 (a genuinely SHARED
+// channel) -- see safety_guards.c.
+static inline uint8_t config_store_ct_channel_member_count(const uint8_t zone_ct_channel[3],
+                                                            uint8_t ch)
+{
+    uint8_t n = 0u;
+    for (uint8_t z = 0; z < 3u; z++) {
+        if (zone_ct_channel[z] == ch) {
+            n++;
+        }
+    }
+    return n;
+}
+
+// config_store_ct_channel_fitted_map() -- the generalised form of
+// config_store_ct_channel_fitted() below: a channel is fitted iff CTs are
+// installed at all AND at least one zone claims it. Collapses exactly onto
+// the topology-derived predicate for both legacy maps -- {0,1,2} makes all
+// three channels fitted (PER_ZONE), {2,2,2} makes only channel 2 fitted
+// (SUMMED) -- which is the backward-compatibility property the plan requires
+// and test_config_store_zone_ct_channel.c proves case by case.
+static inline bool config_store_ct_channel_fitted_map(uint8_t ch, bool ct_installed_effective,
+                                                       const uint8_t zone_ct_channel[3])
+{
+    if (!ct_installed_effective) {
+        return false;
+    }
+    return config_store_ct_channel_member_count(zone_ct_channel, ch) > 0u;
+}
 
 // config_store_ct_channel_fitted() -- THE single place that answers "does
 // hardware channel `ch` (0-2) have a CT physically wired behind it". Two
@@ -451,7 +574,7 @@ static inline bool config_store_ct_channel_fitted(uint8_t ch, bool ct_installed_
 // in `rec->fields_set`. Small enough to inline; exists so call sites read as
 // "is X commissioned" rather than repeating the `& / ==` bit-test idiom
 // everywhere a caller wants to check one of these fields.
-static inline bool config_store_field_is_set(const void *fields_set_ptr, uint16_t mask)
+static inline bool config_store_field_is_set(const void *fields_set_ptr, uint32_t mask)
 {
     // Takes the bitmask by pointer-to-uint16_t-castable-int rather than by
     // value so callers can write config_store_field_is_set(&rec.fields_set,
@@ -465,7 +588,12 @@ static inline bool config_store_field_is_set(const void *fields_set_ptr, uint16_
     // expression directly, which is why this helper is not exercised by its
     // own dedicated unit test -- it is a trivial, header-only convenience
     // wrapper over that same expression, not independent logic.
-    uint16_t fields_set = *(const uint16_t *)fields_set_ptr;
+    // NOTE the pointee type: uint32_t as of CONFIG_STORE_FORMAT_VERSION 3.
+    // Every caller must pass the address of a uint32_t
+    // (config_store_record_t::fields_set, or a uint32_t local) -- passing a
+    // uint16_t's address here reads two bytes past it, and the compiler
+    // cannot catch that through the void*, which is why this note exists.
+    uint32_t fields_set = *(const uint32_t *)fields_set_ptr;
     return (fields_set & mask) == mask;
 }
 
@@ -520,7 +648,11 @@ typedef struct {
     // bytes underneath an unset bit are whatever config_store_default() or a
     // migrated v1 record happened to leave there (typically 0), never a
     // value to act on.
-    uint16_t fields_set;
+    // Widened from uint16_t to uint32_t at CONFIG_STORE_FORMAT_VERSION 3.
+    // Bits 0-15 keep their exact meanings AND their exact positions, so a
+    // v2 record's 16-bit value zero-extends into this field with no
+    // remapping at all (config_store.c's v2->v3 migration branch).
+    uint32_t fields_set;
 
     // --- CONFIG_REFERENCE.md section 1: commissioning ----------------------
     uint8_t  tc_source;           // CONFIG_STORE_TC_SOURCE_*; gated by _SET_TC_SOURCE
@@ -725,6 +857,20 @@ typedef struct {
     // unchanged -- S3/S4/S9 do not read this field at all, only S14/S15
     // (safety_guards.c) do.
     uint8_t ct_topology;
+
+    // zone_ct_channel[z] -- which physical CT channel (0-2) zone z's current
+    // is read on, params 0x0320-0x0322, docs/CT_CHANNEL_MASK_PLAN.md. The
+    // semantic INVERSE of ct_channel_map[ch] -> relay id above, and strictly
+    // more expressive: many zones may name the same channel (they are summed
+    // on it), which is what makes a two-shared-CT kiln representable at all.
+    //   per-zone (today's default) : {0, 1, 2}
+    //   summed on channel 2        : {2, 2, 2}
+    //   split, z0+z1 on ch0, z2 ch1: {0, 0, 1}
+    // ONLY trustworthy when CONFIG_STORE_SET_ZONE_CT_CHANNEL is set. Readers
+    // must go through config_store_effective_zone_ct_channel() below rather
+    // than reading this array directly, so an uncommissioned record falls
+    // back to the ct_topology-derived map instead of the raw bytes.
+    uint8_t zone_ct_channel[3];
     // i_present_a_manual: true once an operator has written i_present_a
     // directly via SET_PARAM (config_params.c's 0x0301 handler sets this
     // alongside the value) -- false means config_params_finalize_i_present_a()
@@ -799,8 +945,31 @@ typedef struct {
     // config_store.c) -- adding a field later is a struct/pack/unpack/
     // host-test change, not a layout change, same as metadata.h's own
     // signature/sig_required reservation.
-    uint8_t  reserved[269];
+    uint8_t  reserved[264];
 } config_store_record_t;
+
+// config_store_effective_zone_ct_channel() -- THE single place "which CT
+// channel does each zone read" is answered. Every consumer (guards, the
+// fitted predicate below, the ESP-side sweep via the wire params) must come
+// through here rather than reading rec->zone_ct_channel directly, so the
+// "bit clear means derive from ct_topology" rule cannot be forgotten at one
+// call site and remembered at another -- this repo's "reset one side of a
+// pair" bug class, closed structurally.
+static inline void config_store_effective_zone_ct_channel(const config_store_record_t *rec,
+                                                           uint8_t out[3])
+{
+    if (rec == NULL) {
+        config_store_derive_zone_ct_channel(CONFIG_STORE_CT_TOPOLOGY_PER_ZONE, out);
+        return;
+    }
+    if ((rec->fields_set & CONFIG_STORE_SET_ZONE_CT_CHANNEL) != 0u) {
+        out[0] = rec->zone_ct_channel[0];
+        out[1] = rec->zone_ct_channel[1];
+        out[2] = rec->zone_ct_channel[2];
+        return;
+    }
+    config_store_derive_zone_ct_channel(rec->ct_topology, out);
+}
 
 // config_store_current_sensing_commissioned() -- THE single place S9's
 // "is the current reading a MEASUREMENT or a heuristic" gate is decided.

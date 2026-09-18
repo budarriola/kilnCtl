@@ -223,6 +223,16 @@ void config_params_finalize_ct_channel_map(config_store_record_t *rec);
 // exact rule.
 void config_params_finalize_i_present_a(config_store_record_t *rec);
 
+// Derives the zone_ct_channel "confirmed as a whole" bit (config_store.h's
+// CONFIG_STORE_SET_ZONE_CT_CHANNEL) from the three per-zone bookkeeping bits
+// SET_PARAM populates (CONFIG_STORE_SET_ZONE_CT_CHANNEL_0/_1/_2) -- same
+// call site, same timing and same reasoning as
+// config_params_finalize_ct_channel_map() above: two of three zones answered
+// must leave the map untrusted (so readers fall back to the ct_topology-
+// derived map via config_store_effective_zone_ct_channel()), never
+// half-applied. docs/CT_CHANNEL_MASK_PLAN.md step 2.
+void config_params_finalize_zone_ct_channel(config_store_record_t *rec);
+
 // True iff every one of the seven CONFIG_STORE_SET_* bits (config_store.h's
 // bitmask -- the no-safe-default fields CONFIG_REFERENCE.md section 1 names)
 // is set in `rec->fields_set`. COMMIT_CONFIG's handler uses this to decide

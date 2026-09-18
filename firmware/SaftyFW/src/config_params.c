@@ -133,6 +133,11 @@ static const config_param_id_type_t CONFIG_PARAM_TABLE[] = {
     { 0x031Fu, KILNLINK_PARAM_TYPE_U8 },  // ct_topology -- CT_COMMISSIONING_PLAN.md
                                            // step 3, NEW; next unallocated id
                                            // after 0x031E in this section-3 group
+    // zone_ct_channel[0..2] -- CT_CHANNEL_MASK_PLAN.md step 2, NEW; next
+    // three unallocated ids after 0x031F in this section-3 group.
+    { 0x0320u, KILNLINK_PARAM_TYPE_U8 },  // zone_ct_channel[0]
+    { 0x0321u, KILNLINK_PARAM_TYPE_U8 },  // zone_ct_channel[1]
+    { 0x0322u, KILNLINK_PARAM_TYPE_U8 },  // zone_ct_channel[2]
     { 0x0401u, KILNLINK_PARAM_TYPE_U16 }, // context_max_age_s
     { 0x0402u, KILNLINK_PARAM_TYPE_U16 }, // link_timeout_s
     { 0x0403u, KILNLINK_PARAM_TYPE_U16 }, // link_dead_hard_s
@@ -154,6 +159,10 @@ static const config_param_id_type_t CONFIG_PARAM_TABLE[] = {
 // to exactly 65 entries and tripped this assert -- working as designed. The
 // paired array in link_task.c was raised in the same edit; the two numbers
 // are not independent and must never be changed apart.
+//
+// The three zone_ct_channel ids (0x0320-0x0322, CT_CHANNEL_MASK_PLAN.md
+// step 2) took the table to 68 entries, still inside the same 72 bound --
+// no change to this assert or to link_task.c's paired array was needed.
 typedef char config_params_table_fits_72 [(CONFIG_PARAM_TABLE_LEN <= 72u) ? 1 : -1];
 
 size_t config_params_count(void)
@@ -245,6 +254,14 @@ bool config_params_get(const config_store_record_t *rec, uint16_t id, uint8_t *o
     case 0x031Du: *out_type = KILNLINK_PARAM_TYPE_U16; out_value->u16_val = clamp_u16(rec->overcurrent_pct); return true;
     case 0x031Eu: *out_type = KILNLINK_PARAM_TYPE_U16; out_value->u16_val = clamp_u16(rec->overcurrent_time_s); return true;
     case 0x031Fu: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->ct_topology; return true;
+    // zone_ct_channel[0..2] -- the RAW stored bytes, deliberately not the
+    // effective map config_store_effective_zone_ct_channel() would derive.
+    // GET_PARAM's job is to show what is staged/stored so an operator can
+    // see their own answers back; config_params_is_set() on the same id is
+    // what says whether those bytes mean anything yet.
+    case 0x0320u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->zone_ct_channel[0]; return true;
+    case 0x0321u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->zone_ct_channel[1]; return true;
+    case 0x0322u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->zone_ct_channel[2]; return true;
 
     case 0x0401u: *out_type = KILNLINK_PARAM_TYPE_U16; out_value->u16_val = clamp_u16(rec->context_max_age_s); return true;
     case 0x0402u: *out_type = KILNLINK_PARAM_TYPE_U16; out_value->u16_val = clamp_u16(rec->link_timeout_s); return true;
@@ -290,6 +307,12 @@ bool config_params_is_set(const config_store_record_t *rec, uint16_t id)
     case 0x031Au: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_I_NORMAL_A_0);
     case 0x031Bu: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_I_NORMAL_A_1);
     case 0x031Cu: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_I_NORMAL_A_2);
+    // Per-zone bits, not the derived group bit -- same reasoning as
+    // ct_channel_map's three ids above: an operator must be able to see
+    // WHICH zone is still unanswered.
+    case 0x0320u: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_ZONE_CT_CHANNEL_0);
+    case 0x0321u: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_ZONE_CT_CHANNEL_1);
+    case 0x0322u: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_ZONE_CT_CHANNEL_2);
     default: {
         // Every other id in CONFIG_PARAM_TABLE has a real compiled-in
         // default (CONFIG_REFERENCE.md secs 2-5's threshold fields) --
@@ -504,6 +527,14 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     // reasoning as i_present_a above, not the "no safe default" reasoning
     // ct_installed/tc_source use.
     case 0x031Fu: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(CONFIG_STORE_CT_TOPOLOGY_SUMMED); rec->ct_topology = value.u8_val; return true;
+    // zone_ct_channel[0..2] -- per-zone bookkeeping bits only; the group bit
+    // (CONFIG_STORE_SET_ZONE_CT_CHANNEL) is DERIVED at COMMIT_CONFIG by
+    // config_params_finalize_zone_ct_channel() below, exactly like
+    // ct_channel_map's group bit, so answering two zones of three and
+    // committing leaves the map untrusted rather than half-applied.
+    case 0x0320u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(2u); rec->zone_ct_channel[0] = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_ZONE_CT_CHANNEL_0; return true;
+    case 0x0321u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(2u); rec->zone_ct_channel[1] = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_ZONE_CT_CHANNEL_1; return true;
+    case 0x0322u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(2u); rec->zone_ct_channel[2] = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_ZONE_CT_CHANNEL_2; return true;
 
     case 0x0401u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->context_max_age_s = value.u16_val; return true;
     case 0x0402u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->link_timeout_s = value.u16_val; return true;
@@ -589,6 +620,16 @@ bool config_params_validate_ranges(const config_store_record_t *rec,
     RANGE_U8_MAX(rec->tc_placement_mode, CONFIG_STORE_TC_PLACEMENT_EXTERNAL_OVERHEAT, "tc_placement_mode");
     RANGE_U8_MAX(rec->tc_type, 7u, "tc_type");
     RANGE_U8_MAX(rec->borrowed_type_expected, 7u, "borrowed_type_expected");
+    // zone_ct_channel[0..2] -- a CT channel id, so 0-2 and nothing else.
+    // Safe to enforce unconditionally (no fields_set guard, unlike
+    // abs_max_temp_c below): config_store_default() writes the identity map,
+    // the v2-to-v3 migration derives it from ct_topology, and unpack
+    // normalises a garbled record back onto the derived map before this
+    // check ever sees it -- so there is no legitimate record shape in which
+    // an out-of-range byte can reach here.
+    RANGE_U8_MAX(rec->zone_ct_channel[0], 2u, "zone_ct_channel[0]");
+    RANGE_U8_MAX(rec->zone_ct_channel[1], 2u, "zone_ct_channel[1]");
+    RANGE_U8_MAX(rec->zone_ct_channel[2], 2u, "zone_ct_channel[2]");
 
     // abs_max_temp_c: NaN/Inf is refused UNCONDITIONALLY, bit or no bit.
     // Unlike max_expected_power_w below, this field is not carved out of a
@@ -835,6 +876,9 @@ static const config_param_name_id_t CONFIG_PARAM_NAME_TABLE[] = {
     { "overcurrent_pct", 0x031Du },
     { "overcurrent_time_s", 0x031Eu },
     { "ct_topology", 0x031Fu },
+    { "zone_ct_channel[0]", 0x0320u },
+    { "zone_ct_channel[1]", 0x0321u },
+    { "zone_ct_channel[2]", 0x0322u },
     { "firing_margin_c", 0x0201u },
     { "overshoot_margin_c", 0x0202u },
     { "max_rate_c_per_min", 0x0204u },
@@ -885,10 +929,30 @@ void config_params_finalize_ct_channel_map(config_store_record_t *rec)
     // "two-of-three channels" case for the proof this can actually fail to
     // confirm). Monotonic like every other fields_set bit: an incomplete
     // triple never clears a group bit a PRIOR commit already earned.
-    uint16_t need = (uint16_t)(CONFIG_STORE_SET_CT_CHANNEL_MAP_0 | CONFIG_STORE_SET_CT_CHANNEL_MAP_1 |
+    uint32_t need = (uint32_t)(CONFIG_STORE_SET_CT_CHANNEL_MAP_0 | CONFIG_STORE_SET_CT_CHANNEL_MAP_1 |
                                 CONFIG_STORE_SET_CT_CHANNEL_MAP_2);
     if (config_store_field_is_set(&rec->fields_set, need)) {
         rec->fields_set |= CONFIG_STORE_SET_CT_CHANNEL_MAP;
+    }
+}
+
+void config_params_finalize_zone_ct_channel(config_store_record_t *rec)
+{
+    if (!rec) {
+        return;
+    }
+    // CT_CHANNEL_MASK_PLAN.md step 2, and the exact shape of
+    // config_params_finalize_ct_channel_map() above: the group bit is only
+    // ever newly set here, once all three per-zone bits are present. Two of
+    // three leaves it unset on purpose -- a half-answered zone-to-channel
+    // map is a DIFFERENT kiln topology, not a smaller one, since the
+    // unanswered zone keeps the compiled identity default while its siblings
+    // move. Monotonic like every other fields_set bit: an incomplete triple
+    // never clears a group bit a prior commit already earned.
+    uint32_t need = (uint32_t)(CONFIG_STORE_SET_ZONE_CT_CHANNEL_0 | CONFIG_STORE_SET_ZONE_CT_CHANNEL_1 |
+                                CONFIG_STORE_SET_ZONE_CT_CHANNEL_2);
+    if (config_store_field_is_set(&rec->fields_set, need)) {
+        rec->fields_set |= CONFIG_STORE_SET_ZONE_CT_CHANNEL;
     }
 }
 
@@ -1005,13 +1069,13 @@ bool config_params_all_required_set(const config_store_record_t *rec)
     // itself is a plain marker byte with no fields_set bit and a safe
     // PER_ZONE(0) default (config_store.h), so reading it here is always
     // well-defined even on a record that has never touched it.
-    uint16_t required = (uint16_t)(CONFIG_STORE_SET_TC_SOURCE | CONFIG_STORE_SET_BORROWED_ZONE_INDEX |
+    uint32_t required = (uint32_t)(CONFIG_STORE_SET_TC_SOURCE | CONFIG_STORE_SET_BORROWED_ZONE_INDEX |
                                     CONFIG_STORE_SET_TC_PLACEMENT_MODE | CONFIG_STORE_SET_ABS_MAX_TEMP_C |
                                     CONFIG_STORE_SET_MAX_RATE_C_PER_MIN |
                                     CONFIG_STORE_SET_MAINS_VOLTAGE_V | CONFIG_STORE_SET_TC_TYPE |
                                     CONFIG_STORE_SET_CT_INSTALLED);
     if (rec->ct_installed != 0u && rec->ct_topology != CONFIG_STORE_CT_TOPOLOGY_SUMMED) {
-        required = (uint16_t)(required | CONFIG_STORE_SET_CT_CHANNEL_MAP);
+        required = (uint32_t)(required | CONFIG_STORE_SET_CT_CHANNEL_MAP);
     }
     return config_store_field_is_set(&rec->fields_set, required);
 }
