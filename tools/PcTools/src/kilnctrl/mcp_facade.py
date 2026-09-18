@@ -46,6 +46,7 @@ GROUP_PREFIXES = (
     ("log_analyze", "analysis"),
     ("coupled_ident_", "coupled_ident"),
     ("plant_sim_", "plant_sim"),
+    ("zone_current_sweep_", "zones"),
 )
 
 GROUP_OVERRIDES = {
@@ -175,6 +176,15 @@ KEYWORDS = {
                                 "heat-work", "flag", "toggle", "pid", "tuning"),
     "ramp_assist_set_enabled": ("ramp", "assist", "stretch", "dwell", "credit", "cone",
                                 "heat-work", "pin", "toggle", "enable", "disable"),
+    "zone_current_sweep_start": ("current", "sweep", "measure", "measurement", "ct",
+                                 "clamp", "amps", "amperage", "normal current",
+                                 "i_normal", "zone_normals_set", "commissioning",
+                                 "nameplate", "k_ct", "energize", "relay", "calibrate"),
+    "zone_current_sweep_status": ("current", "sweep", "progress", "unmeasured",
+                                  "noise floor", "ct map", "k_ct", "nameplate",
+                                  "i_normal_pushed_mask", "summed_unmeasured_mask"),
+    "zone_current_sweep_abort": ("current", "sweep", "stop", "cancel", "abort",
+                                 "de-energize", "relay off"),
     "adaptive_tune_revert": ("undo", "rollback", "restore", "previous", "one-click"),
     "control_set_zone_pid": ("kp", "ki", "kd", "gains", "loop"),
     "wifi_add_network": ("provision", "credentials", "ssid", "join"),
