@@ -347,8 +347,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * sent so the page can show one coherent switch plus a status line
      * without guessing at either from the other. */
     /* +64 over the previous size for the two new booleans and their keys. */
-    char json[352 + WIFI_PROV_PASSWORD_MAX_LEN * 2 + 24 + 3 * WIFI_PROV_IPV4_STR_MAX + 32 + 64
-              + sizeof(sta_ip_field)];
+    char json[352 + WIFI_PROV_PASSWORD_MAX_LEN * 2 + 24 + 3 * WIFI_PROV_IPV4_STR_MAX + 32 + 64];
     int n = snprintf(json, sizeof(json),
                      "{\"mode\":\"%s\",\"state\":\"%s\",\"ssid\":%s,\"sta_connected\":%s,"
                      "\"sta_ip\":%s,\"ap_ssid\":\"%s\",\"ap_password\":\"%s\",\"sta_rssi\":%d,"
