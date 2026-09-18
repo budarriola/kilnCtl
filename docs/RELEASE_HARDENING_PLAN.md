@@ -582,6 +582,56 @@ verdict unaffected: no source change was needed, since every finding
 resolved to a false zero or a non-production research module — 110 passed,
 0 skipped, 0 failed after this pass (same run as above).
 
+**Status, 2026-09-18 (tenth pass).**
+`docs/audits/release_gate_vacuity_audit_2026-09-18.md`. This pass led with
+*mechanical screens over the whole check population* rather than a
+hand-picked slice, on the reasoning that nine prior passes had already
+negative-tested most individually-interesting gates. Four screens ran across
+all 119 tracked `check_*`/`test_check_*` scripts, and all 34 screen hits were
+resolved by hand: (A) no-failure-path -- 7 flagged, all false positives
+(Python checks signalling failure as `return 1` + `sys.exit(main())`);
+(B) skip-instead-of-fail `Test-Path` guards -- 27 hits, none vacuous
+(`check_test_has_assertions.ps1`'s two are now dead code behind the
+2026-09-17 `throw`; `check_hal_include_boundary.ps1`'s are backed by a hard
+`throw`, a 200-file discovery floor and a `throw` on any unreadable file;
+`check_c_files_in_cmakelists.ps1`'s fails safe by producing *more*
+violations); (C) wrapper-invokes-`.py` -- 14/14 clean.
+
+Screen (D) found the pass's one real defect, in
+`tools/check_no_orphaned_checks.ps1` -- the guard whose entire job is
+detecting lost coverage. It matched filenames against the **raw text** of
+`run_all_checks.ps1`, comments included. That file's header narrates past
+orphan incidents by filename, so `check_saftyfw_task_count.py` was treated as
+wired on the strength of **line 311 -- a comment describing the time it went
+unwired**. The note written to record the bug was what hid it. A second,
+weaker layer accepted a sibling `.ps1` wrapper's mere existence as proof it
+invoked its `.py`. Both closed: the wrapper must now reference the `.py` in
+non-comment code, and the fallback matches a comment-stripped
+`$runAllChecksCode`. Measured before adopting -- all 14 wrapper/`.py` pairs
+reference their `.py` in code, and the only two comment-only-mentioned files
+are absolved by the strengthened wrapper rule instead -- so it flags nothing
+correct; it tightens and loosens nothing.
+
+Negative-tested three ways, which is what separated the two weaknesses:
+against one hand-made sabotage the pre-fix guard **PASSED** (vacuous), the
+wrapper fix alone **still PASSED** (the prose match absolved it), and only
+both fixes together **FAILED, exit 1**, naming the orphan. Had the pass
+stopped at the first fix it would have shipped a change that fixed nothing
+observable. Restored by hand, verified by an empty `git diff` *and* a
+`git hash-object` match against the pre-sabotage blob. No build artifact is
+involved (pure text scans), so no rebuild was required.
+
+Now recorded as structurally un-negative-testable rather than merely
+outstanding: both `check_01_*_pushed_build.ps1` FAIL paths. They build
+`origin/main`'s *own* content, so a local sabotage cannot reach them and the
+only way to drive the FAIL path is to push a knowingly-broken commit to the
+shared branch. The fifth pass's unplanned real failure
+(`-Werror=format-truncation`) stands as the direct evidence that path
+propagates. Suite unchanged at `113 passed, 0 skipped, 0 failed.` -- this
+pass modified an existing glob-discovered check rather than adding one.
+Still open: full Python-side coverage of the zero-production-caller sweep for
+`tools/PcTools/tests`.
+
 **Already covered, name the evidence:** the two `check_01_*_pushed_build.ps1`
 scripts are the strongest single piece of process coverage in the repo. They
 build `origin/main`'s actual content in a clean worktree rather than the local

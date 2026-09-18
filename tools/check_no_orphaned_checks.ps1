@@ -43,7 +43,19 @@ if (-not (Test-Path $runAllChecks)) {
     Write-Host "check_no_orphaned_checks: FAIL -- $runAllChecks not found"
     exit 1
 }
-$runAllChecksText = Get-Content -Raw $runAllChecks
+# 2026-09-18 (release-gate vacuity audit, tenth pass): the "is it named in
+# run_all_checks.ps1?" fallback below must consult run_all_checks.ps1's CODE,
+# not its prose. That file's header narrates past orphan incidents by
+# filename -- e.g. line 311's "the same 'orphaned negative test' shape
+# check_saftyfw_task_count.py was found in" -- and a bare -match over the
+# raw text treats such a mention as WIRING. A file that nothing executes is
+# then reported as covered precisely BECAUSE this repo documented that it
+# once went uncovered. Confirmed live: check_saftyfw_task_count.py and
+# check_saftyfw_task_stack_budgets.py are each named in run_all_checks.ps1
+# only from comment lines. Both are genuinely reached today (via their
+# code-referencing wrappers, handled above), so stripping comments here
+# flags nothing correct -- it removes a false absolution, not real coverage.
+$runAllChecksCode = @(Get-Content -Path $runAllChecks | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
 
 $searchRoots = @(
     (Join-Path $repoRoot "tools"),
@@ -92,12 +104,28 @@ foreach ($f in $candidates) {
         # base name -- which the glob above already reaches. Treat that
         # wrapper's presence as coverage rather than demanding the .py
         # filename appear in run_all_checks.ps1's own source too.
+        #
+        # 2026-09-18 (release-gate vacuity audit, tenth pass): the wrapper
+        # must actually REFERENCE the .py in non-comment code, not merely
+        # exist. Accepting mere existence meant a same-named wrapper that
+        # never invokes its .py would leave that .py orphaned -- executed by
+        # nothing -- while this check reported it covered. That is precisely
+        # the defect check_saftyfw_task_count.py shipped in (see that
+        # wrapper's own header: the .py existed, a sibling's comment claimed
+        # it "fails loud", and it never ran), reproduced one level up in the
+        # guard meant to catch it. Comment lines are stripped first, so a
+        # wrapper that only NAMES its .py in prose does not count as
+        # invoking it. All 14 wrapper/.py pairs in the tree satisfy this
+        # today, so this tightens the rule without flagging correct code.
         $wrapper = Join-Path $f.DirectoryName ($f.BaseName + ".ps1")
         if (Test-Path $wrapper) {
-            continue
+            $wrapperCode = @(Get-Content -Path $wrapper | Where-Object { $_ -notmatch '^\s*#' })
+            if (($wrapperCode -join "`n") -match [regex]::Escape($f.Name)) {
+                continue
+            }
         }
     }
-    if ($runAllChecksText -notmatch [regex]::Escape($f.Name)) {
+    if ($runAllChecksCode -notmatch [regex]::Escape($f.Name)) {
         $orphans += $f.FullName.Substring($repoRoot.Length + 1)
     }
 }
