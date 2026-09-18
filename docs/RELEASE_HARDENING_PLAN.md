@@ -709,21 +709,16 @@ the rehearsal.**
 
 ---
 
-## 9. Desirable, not blocking — a shared-state review pass
+## 9. ~~Desirable, not blocking~~ DONE — a shared-state review pass
 
-The reset-one-side bug class has four confirmed instances, all silent, all
-expensive. It was evaluated for a mechanical check and rejected for good
-reasons: the four have no unifying syntactic shape and any rule general enough
-to catch all four would flag the large majority of correct one-sided resets.
-The standing practice — when code resets a counter, window, timestamp or seed,
-ask who else holds a copy or a derived expectation of it — is the right
-answer and needs no plan.
-
-What is worth doing once before release is a **deliberate sweep with that
-question**, over the cross-processor state specifically: sequence numbers,
-dedup cursors, boot IDs, config revision counters, seqlock generations, and
-the `cfg`-versus-NVS revision comparison. Not a check, a reading pass, with
-findings written down. **Size: M. Desirable.**
+Swept 2026-09-17: `docs/audits/shared_state_review_2026-09-17.md`. All four
+originally-confirmed instances are fixed-and-tested or moot (SimFW/kilnsim
+and `fault_sched.c` no longer exist on `origin/main`); the two web-auth
+instances found later are already fixed (`1179e2d3`). Seven further
+cross-processor/seqlock/cfg-vs-NVS candidates surfaced by the sweep's own
+enumeration all resolved to correct one-sided designs. No new pair found, so
+no code change and no narrow check — the standing rejection of a general
+check for this class stands.
 
 ## 10. Desirable, not blocking — the `cfg` partition is inert and should
 ## either be finished or explicitly parked
