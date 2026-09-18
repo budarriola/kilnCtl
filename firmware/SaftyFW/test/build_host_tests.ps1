@@ -139,6 +139,12 @@ try {
         (Join-Path $testDir "test_link_task_commit_reject.c"),
         (Join-Path $srcDir "tasks\update_task_reboot_policy.c"),
         (Join-Path $testDir "test_update_task_reboot_policy.c"),
+        # 2026-09-18 -- update_task_erase_slot()'s chunk-walk arithmetic, split
+        # out of update_task.c (which cannot be host-compiled) so the 64K -> 4K
+        # erase-chunk change has a real behavioural test rather than only a
+        # source-text scan. See update_task_erase_plan.h.
+        (Join-Path $srcDir "tasks\update_task_erase_plan.c"),
+        (Join-Path $testDir "test_update_task_erase_plan.c"),
         (Join-Path $srcDir "clear_trip_diag_codec.c"),
         (Join-Path $testDir "test_clear_trip_diag_codec.c"),
         (Join-Path $srcDir "watchdog_overdue_diag_codec.c"),

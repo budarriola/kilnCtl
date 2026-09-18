@@ -161,6 +161,12 @@ set(SAFTYFW_APP_SOURCES
     # update_task_reboot_allowed(), split out so it can be host-compiled and
     # behaviourally tested (see update_task_reboot_policy.h for why).
     src/tasks/update_task_reboot_policy.c
+    # 2026-09-18 -- the pure chunk arithmetic behind update_task_erase_slot()'s
+    # walk over the destination slot, split out so the 64K -> 4K erase-chunk
+    # change (docs/audits/pico_ota_erase_watchdog_reset_2026-09-18.md) has a
+    # host test proving the walk still covers the slot exactly, with no gap and
+    # no overrun -- see update_task_erase_plan.h.
+    src/tasks/update_task_erase_plan.c
     # Phase 10 -- update_task.c's own frame-receive/decision logic. These
     # four are the FROZEN, host-tested (272/272, test/build_host_tests.ps1)
     # pure modules from src/update/; bootloader/crc32.c and

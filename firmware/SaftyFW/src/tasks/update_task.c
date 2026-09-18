@@ -82,6 +82,7 @@
 #include "hal_wdt.h"
 
 #include "task_priorities.h"
+#include "update_task_erase_plan.h"
 #include "watchdog_task.h"
 
 #include "current_task.h"
@@ -145,13 +146,28 @@
 // of the confirm gate.
 #define UPDATE_TASK_ADC_FRESH_MS 2000u
 
-// pico-sdk's FLASH_BLOCK_SIZE (hardware/flash.h), reproduced locally now
-// that header is no longer included: the 64K unit update_task_erase_slot()
-// erases at a time, purely a watchdog-feeding granularity choice (any
-// multiple of HAL_FLASH_ERASE_SIZE would be legal) -- see that function's
-// own header comment for why 64K specifically. BOOTLOADER_SLOT_FLASH_SIZE
-// is exactly 13 * this with no remainder (flash_layout.h).
-#define UPDATE_TASK_ERASE_CHUNK_SIZE (64u * 1024u)
+// The unit update_task_erase_slot() erases at a time: one HAL_FLASH_ERASE_SIZE
+// sector, the SMALLEST erase this part supports, which is what bounds a single
+// uninterruptible stall.
+//
+// 2026-09-18 (docs/audits/pico_ota_erase_watchdog_reset_2026-09-18.md): this
+// was 64 KB -- pico-sdk's FLASH_BLOCK_SIZE, reproduced locally -- and that is
+// what hardware-watchdog-reset the safety processor partway through every
+// ESP-driven OTA. Nothing can feed the watchdog while hal_flash_safe_execute()
+// runs (it holds BOTH cores with interrupts disabled), so the erase unit IS
+// the stall, and a 64 KB block erase on this part's flash is specified well
+// past the 1000 ms SAFTYFW_WATCHDOG_TIMEOUT_MS. A 4 KB sector erase is the
+// smallest stall the part can be asked for.
+//
+// 4096 is not a free choice: HAL_FLASH_ERASE_SIZE (hal_flash.h) is the
+// granularity hal_flash_erase() already range-checks every offset and length
+// against, and hal_flash_pico.c pins it to pico-sdk's own FLASH_SECTOR_SIZE
+// with a compile-time cross-check (the hal_flash_erase_size_matches_pico_sdk
+// typedef), so nothing smaller is expressible through this HAL at all.
+// BOOTLOADER_SLOT_FLASH_SIZE (0xD0000) is exactly 208 * this with no
+// remainder (flash_layout.h) -- the _Static_assert below is what actually
+// enforces that, at whatever value this macro holds.
+#define UPDATE_TASK_ERASE_CHUNK_SIZE (4u * 1024u)
 
 // 2026-09-06 review fix: the old code got this cross-check for free --
 // hardware/flash.h's FLASH_BLOCK_SIZE was a real pico-sdk constant, and the
@@ -458,37 +474,71 @@ static void update_erase_cb(void *param)
     a->result = hal_flash_erase(&s_flash_region, a->offset, a->count);
 }
 
-// Erases the whole BOOTLOADER_SLOT_FLASH_SIZE (832K) target slot in
-// FLASH_BLOCK_SIZE (64K) units -- one flash_safe_execute() call, and one
-// watchdog checkin before AND after, per block (this file's header comment
-// / this task's own brief: "the erasing task must check in with
-// watchdog_task_checkin() immediately before and after each erase call, not
-// rely on checking in during it -- nothing CAN run during the actual
-// erase"). A single flash_safe_execute() call covering the whole 832K slot
-// would halt both cores for on the order of a couple of seconds (13 blocks
-// at "hundreds of milliseconds" each, docs/BOOTLOADER.md section 5) -- well
-// past the 1 s hardware watchdog timeout with no chance for anything to feed
-// it in between, so this deliberately does NOT do that; block-at-a-time is
-// what BOOTLOADER.md section 5's still-open "erase up front or block-by-
-// block" question resolves to here, chosen specifically so the watchdog
-// stays fed across the whole operation. BOOTLOADER_SLOT_FLASH_SIZE
-// (0xD0000, 851968 bytes) is exactly 13 * FLASH_BLOCK_SIZE with no
-// remainder (flash_layout.h) -- both slots were sized block-aligned from the
-// start, so no partial-block tail case exists here to get wrong.
+// Erases the whole BOOTLOADER_SLOT_FLASH_SIZE (832K) target slot one
+// UPDATE_TASK_ERASE_CHUNK_SIZE (4K, one flash sector) at a time: one
+// hal_flash_safe_execute() call per sector, a watchdog checkin before AND
+// after each, and -- the part that was missing until 2026-09-18 -- an actual
+// HARDWARE watchdog feed between sectors.
+//
+// docs/audits/pico_ota_erase_watchdog_reset_2026-09-18.md is the diagnosis
+// this shape implements. The two things it established that the previous
+// version of this comment got wrong:
+//
+//  1. watchdog_task_checkin() is BOOKKEEPING ONLY. It writes a tick into
+//     watchdog_task.c's s_last_checkin_tick[] and touches no hardware. The
+//     bracketing check-ins therefore only ensure update_task is not BLAMED by
+//     the software gate; they never reset the hardware timer. The old comment
+//     here claimed block-at-a-time was chosen so "the watchdog stays fed
+//     across the whole operation" -- splitting the work bounds each stall,
+//     but nothing in the loop was feeding anything.
+//  2. The one hardware feed in this firmware lives in watchdog_task, which is
+//     pinned to SAFTYFW_CORE_TRIP_PATH and provably cannot be scheduled while
+//     hal_flash_safe_execute() is running: the pico-sdk FreeRTOS-SMP lockout
+//     path spawns a configMAX_PRIORITIES-1 task on the OTHER core (i.e. core
+//     1, watchdog_task's core) that disables interrupts and spins, then
+//     disables interrupts on this core too. So the feed has to be issued from
+//     HERE, by the task doing the erasing, or it does not happen at all.
+//
+// Hence watchdog_task_feed_if_all_within_deadline() below. It routes through
+// the SAME gate watchdog_task's own loop uses, so this moves only WHO owns
+// the feed, never the POLICY of when one is allowed: if any registered task
+// is past its own deadline, no feed is issued and the watchdog reboots the
+// chip exactly as it would have. A genuinely wedged safety processor is still
+// rebooted mid-update; only a HEALTHY one stops being reset for the crime of
+// erasing flash. update_task runs at the lowest priority on core 0
+// (task_priorities.h), which makes this placement honest in practice too:
+// every higher-priority task on both cores has had its chance to run and
+// check in by the time this line is reached after a lockout ends.
+//
+// Cost of the 64K -> 4K change: ~208 sector erases instead of 13 block
+// erases, trading total wall-clock erase time (roughly 2 s to roughly 9 s at
+// typical per-sector times) for a bounded per-stall time that fits inside
+// SAFTYFW_WATCHDOG_TIMEOUT_MS. That is the right trade on a safety processor,
+// and it is why KilnFW's RELAY_ERASE_TIMEOUT_MS (ota_pico_relay.c) moved with
+// it. BOOTLOADER_SLOT_FLASH_SIZE (0xD0000, 851968 bytes) is exactly 208 * 4K
+// with no remainder, so there is no short tail chunk here to get wrong -- the
+// _Static_assert on UPDATE_TASK_ERASE_CHUNK_SIZE enforces that, and
+// update_erase_plan_chunk() handles a short tail correctly anyway if a future
+// slot size ever stops dividing evenly.
 static bool update_task_erase_slot(uint32_t slot_offset)
 {
     if (!update_task_ensure_flash_region()) {
         return false;
     }
 
-    uint32_t offset = slot_offset;
-    uint32_t remaining = BOOTLOADER_SLOT_FLASH_SIZE;
+    const uint32_t chunk_count =
+        update_erase_plan_chunk_count(BOOTLOADER_SLOT_FLASH_SIZE, UPDATE_TASK_ERASE_CHUNK_SIZE);
 
-    while (remaining > 0u) {
-        uint32_t chunk = (remaining < UPDATE_TASK_ERASE_CHUNK_SIZE) ? remaining : UPDATE_TASK_ERASE_CHUNK_SIZE;
+    for (uint32_t i = 0; i < chunk_count; i++) {
+        uint32_t offset = 0;
+        uint32_t len = 0;
+        if (!update_erase_plan_chunk(slot_offset, BOOTLOADER_SLOT_FLASH_SIZE,
+                                      UPDATE_TASK_ERASE_CHUNK_SIZE, i, &offset, &len)) {
+            return false; // cannot happen for i < chunk_count; fail closed rather than erase a guessed range
+        }
 
         watchdog_task_checkin(WATCHDOG_CHECKIN_UPDATE_TASK);
-        update_erase_args_t args = { .offset = offset, .count = chunk, .result = HAL_NOT_READY };
+        update_erase_args_t args = { .offset = offset, .count = len, .result = HAL_NOT_READY };
         hal_status_t status = hal_flash_safe_execute(update_erase_cb, &args, 2000u);
         watchdog_task_checkin(WATCHDOG_CHECKIN_UPDATE_TASK);
 
@@ -496,8 +546,12 @@ static bool update_task_erase_slot(uint32_t slot_offset)
             return false;
         }
 
-        offset += chunk;
-        remaining -= chunk;
+        // The hardware feed, gated exactly as watchdog_task would gate it.
+        // Deliberately AFTER the post-erase checkin above, so this task's own
+        // entry is fresh when the gate evaluates it, and deliberately not
+        // conditional on anything here -- the gate itself is the only thing
+        // allowed to decide whether a feed happens.
+        (void)watchdog_task_feed_if_all_within_deadline();
     }
 
     return true;

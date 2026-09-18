@@ -371,7 +371,18 @@ CEILING_BYTES = {
     # "pinned at measured, not a padded guess" convention this table's own
     # header comment describes.
     "thermo_task": 1224,
-    "update_task": 2536,
+    # 2026-09-18, the mid-erase watchdog reset fix
+    # (docs/audits/pico_ota_erase_watchdog_reset_2026-09-18.md):
+    # update_task_erase_slot() went from an inline offset/remaining walk over
+    # 13 64K blocks to a chunk-index walk over 208 4K sectors through
+    # update_erase_plan_chunk(), which keeps a chunk_count plus two out-params
+    # (offset, len) live across the hal_flash_safe_execute() call -- moving the
+    # measured total 2536 -> 2544 B. Re-pinned to the new measured value, same
+    # "pinned at measured, not a padded guess" convention this table's own
+    # header comment describes. The declared stack (6144 B) is untouched and
+    # still leaves 3600 B of margin; this table is an anti-drift ratchet, not
+    # the overflow guard.
+    "update_task": 2544,
     "watchdog_task": 304,
 }
 

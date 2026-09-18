@@ -51,6 +51,34 @@ bool watchdog_task_start(void);
 // short critical section, so a caller cannot be delayed by this call.
 void watchdog_task_checkin(watchdog_checkin_id_t id);
 
+// Evaluates the per-task check-in deadline gate RIGHT NOW and feeds the
+// hardware watchdog if -- and only if -- every registered task is within its
+// own deadline. Returns that decision. Latches the overdue diagnostic on a
+// refusal, exactly as watchdog_task's own periodic evaluation does, because
+// this IS that evaluation: watchdog_task_fn() calls this function rather than
+// carrying a second copy of the gate-then-feed sequence.
+//
+// The second caller is update_task_erase_slot() (update_task.c), between
+// sector erases. 2026-09-18,
+// docs/audits/pico_ota_erase_watchdog_reset_2026-09-18.md: nothing can feed
+// the watchdog while hal_flash_safe_execute() is running, because the
+// pico-sdk FreeRTOS-SMP lockout path disables interrupts on BOTH cores --
+// including the core watchdog_task is pinned to -- so an ESP-driven Pico OTA
+// reset the safety processor partway through erasing the destination slot on
+// every attempt. The erasing task therefore has to issue the feed itself.
+//
+// This moves only WHO owns the feed, never the POLICY of when one is allowed:
+// a task past its own deadline still blocks the feed here exactly as it does
+// in the periodic path, so a genuinely wedged safety processor still starves
+// the watchdog and still reboots -- including mid-update. Do NOT add an
+// unconditional hal_wdt_feed() call anywhere as a shortcut around this
+// function; that would create a window in which a wedged board is prevented
+// from rebooting, which is the opposite of what the watchdog is for.
+//
+// Safe to call from any task: same critical-section discipline as
+// watchdog_task_checkin(), no blocking.
+bool watchdog_task_feed_if_all_within_deadline(void);
+
 // True once every registered task has called watchdog_task_checkin() at
 // least once since boot -- CUMULATIVE across the whole run, unlike the
 // internal per-feed-window bitmask watchdog_task_fn() clears every

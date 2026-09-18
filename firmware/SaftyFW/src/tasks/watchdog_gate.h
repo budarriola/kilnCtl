@@ -57,6 +57,34 @@ typedef struct {
 bool watchdog_gate_all_within_deadline(const watchdog_gate_entry_t *entries, uint32_t count,
                                         uint32_t *out_ok_mask);
 
+// Gate AND feed, in one place: evaluates exactly the same deadline rule
+// watchdog_gate_all_within_deadline() implements, and calls `feed` if and
+// only if that rule says every entry is within its own deadline. Returns the
+// same decision and reports the same ok_mask, so a caller can still drive its
+// own side effects (the heartbeat LED, the overdue diagnostic latch) off the
+// one result rather than recomputing the decision independently.
+//
+// WHY THIS EXISTS (2026-09-18,
+// docs/audits/pico_ota_erase_watchdog_reset_2026-09-18.md): the hardware feed
+// used to have exactly one caller, watchdog_task_fn(), which is a FreeRTOS
+// task pinned to SAFTYFW_CORE_TRIP_PATH and therefore cannot be scheduled at
+// all while hal_flash_safe_execute() holds BOTH cores with interrupts
+// disabled. update_task_erase_slot() has to be able to issue the feed itself,
+// between sector erases, or the chip resets partway through a slot erase.
+// What must NOT change when the feed gains a second owner is the POLICY: a
+// feed is still allowed only when every registered task is within its own
+// deadline, so a genuinely wedged safety processor still starves the watchdog
+// and still reboots. Keeping the gate and the feed in ONE function is what
+// holds that true for both callers -- CLAUDE.md's "reset one side of a pair"
+// class is exactly what two hand-copied gate-then-feed sequences would become
+// the next time the rule changes on one side only.
+//
+// `feed` is called at most once per invocation, and never at all when any
+// entry is past its own deadline. A NULL `feed` evaluates the gate and skips
+// the call.
+bool watchdog_gate_feed_if_all_within_deadline(const watchdog_gate_entry_t *entries, uint32_t count,
+                                                uint32_t *out_ok_mask, void (*feed)(void));
+
 #ifdef __cplusplus
 }
 #endif

@@ -125,6 +125,96 @@ static bool s_led_state = false;
 // none of this).
 static volatile uint32_t s_diag_watchdog_loops = 0;
 
+// The one hardware feed in this firmware, wrapped so it can be handed to
+// watchdog_gate_feed_if_all_within_deadline() as the action it performs only
+// when the gate allows it. Deliberately the ONLY hal_wdt_feed() call site --
+// see watchdog_task.h's comment on the public function below.
+static void watchdog_task_feed_hw(void)
+{
+    (void)hal_wdt_feed();
+}
+
+bool watchdog_task_feed_if_all_within_deadline(void)
+{
+    TickType_t now = xTaskGetTickCount();
+
+    // Snapshot last-check-in ticks under a short critical section:
+    // checkin bits set by other tasks concurrently with this read land
+    // either just before or just after the snapshot, which is fine
+    // either way -- worst case this evaluation treats a check-in that
+    // landed a tick or two ago as not-yet-happened, and it will simply
+    // be picked up on the very next evaluation.
+    TickType_t last_checkin[WATCHDOG_CHECKIN_COUNT];
+    taskENTER_CRITICAL();
+    for (unsigned i = 0; i < WATCHDOG_CHECKIN_COUNT; i++) {
+        last_checkin[i] = s_last_checkin_tick[i];
+    }
+    taskEXIT_CRITICAL();
+
+    watchdog_gate_entry_t entries[WATCHDOG_CHECKIN_COUNT];
+    for (unsigned i = 0; i < WATCHDOG_CHECKIN_COUNT; i++) {
+        TickType_t elapsed_ticks = now - last_checkin[i]; // unsigned: wraps correctly
+        entries[i].elapsed_ms = (uint32_t)(elapsed_ticks * portTICK_PERIOD_MS);
+        entries[i].deadline_ms = s_checkin_deadline_ms[i];
+    }
+
+    uint32_t ok_mask = 0;
+    bool all_ok = watchdog_gate_feed_if_all_within_deadline(entries, WATCHDOG_CHECKIN_COUNT,
+                                                            &ok_mask, watchdog_task_feed_hw);
+
+    if (all_ok) {
+        // 2026-09-10, opus review finding A (transient-overdue half):
+        // clear any stale overdue latch a PRIOR, since-recovered miss
+        // left behind, so a later, unrelated reset does not misreport
+        // "check-in overdue" for a boot in which nothing was overdue.
+        // Never touches a genuine fatal latch -- see the callee's own
+        // comment.
+        watchdog_overdue_diag_notify_recovered();
+        return true;
+    }
+
+    // At least one task is past its own deadline. No feed was issued --
+    // the watchdog will reboot the chip in <= 1s, which is the fail-safe
+    // by construction the doc describes.
+    //
+    // 2026-08-23, the CLEAR_TRIP-reboots-the-Pico investigation's
+    // actual conclusion: that reboot was never a fault -- it is
+    // THIS path, firing because some task missed its own deadline
+    // for a still-unidentified reason. watchdog_overdue_diag_mark()
+    // latches exactly which task(s) (a bitmask, ok_mask's
+    // complement) and, for whichever one missed by the largest
+    // margin, by how much -- "missed by 20ms" and "missed by
+    // 2000ms" point at completely different causes, so the worst
+    // offender's overage is recorded, not just its identity.
+    // Reset-surviving (watchdog_overdue_diag.h, scratch[5],
+    // repurposed from this register's old unconditional-every-
+    // evaluation write -- see that file's own header comment for
+    // why that repurposing is safe) precisely because a log sink
+    // cannot report a starvation that reboots the board a few
+    // hundred milliseconds later, and this board has no console
+    // header fitted anyway (TODO.md 0.5a).
+    uint8_t overdue_mask = (uint8_t)((ok_mask ^ WATCHDOG_CHECKIN_ALL_MASK) & 0xFFu);
+    uint8_t worst_task_id = 0;
+    uint32_t worst_overage_ms = 0;
+    for (unsigned i = 0; i < WATCHDOG_CHECKIN_COUNT; i++) {
+        if ((overdue_mask & (1u << i)) == 0u) {
+            continue; // this task was within its own deadline
+        }
+        if (entries[i].elapsed_ms <= entries[i].deadline_ms) {
+            continue; // defensive only -- overdue_mask says it should not be, but never trust a derived value over the raw facts it was derived from
+        }
+        uint32_t overage_ms = entries[i].elapsed_ms - entries[i].deadline_ms;
+        if (overage_ms > worst_overage_ms) {
+            worst_overage_ms = overage_ms;
+            worst_task_id = (uint8_t)i;
+        }
+    }
+    watchdog_overdue_diag_mark(overdue_mask, worst_task_id,
+                                (uint16_t)(worst_overage_ms > 0xFFFFu ? 0xFFFFu : worst_overage_ms));
+
+    return false;
+}
+
 static void watchdog_task_fn(void *arg)
 {
     (void)arg;
@@ -134,92 +224,39 @@ static void watchdog_task_fn(void *arg)
     for (;;) {
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(SAFTYFW_PERIOD_WATCHDOG_TASK_MS));
 
-        TickType_t now = xTaskGetTickCount();
-
-        // Snapshot last-check-in ticks under a short critical section:
-        // checkin bits set by other tasks concurrently with this read land
-        // either just before or just after the snapshot, which is fine
-        // either way -- worst case this evaluation treats a check-in that
-        // landed a tick or two ago as not-yet-happened, and it will simply
-        // be picked up on the very next 250 ms pass.
-        TickType_t last_checkin[WATCHDOG_CHECKIN_COUNT];
-        taskENTER_CRITICAL();
-        for (unsigned i = 0; i < WATCHDOG_CHECKIN_COUNT; i++) {
-            last_checkin[i] = s_last_checkin_tick[i];
-        }
-        taskEXIT_CRITICAL();
-
-        watchdog_gate_entry_t entries[WATCHDOG_CHECKIN_COUNT];
-        for (unsigned i = 0; i < WATCHDOG_CHECKIN_COUNT; i++) {
-            TickType_t elapsed_ticks = now - last_checkin[i]; // unsigned: wraps correctly
-            entries[i].elapsed_ms = (uint32_t)(elapsed_ticks * portTICK_PERIOD_MS);
-            entries[i].deadline_ms = s_checkin_deadline_ms[i];
-        }
-
-        uint32_t ok_mask = 0;
-        bool all_ok = watchdog_gate_all_within_deadline(entries, WATCHDOG_CHECKIN_COUNT, &ok_mask);
+        // The gate evaluation, the feed, and the overdue latch all live in
+        // watchdog_task_feed_if_all_within_deadline() -- shared verbatim with
+        // update_task_erase_slot(), which has to issue the feed itself while
+        // hal_flash_safe_execute() is locking this core out (2026-09-18, see
+        // that function's comment in watchdog_task.h). This loop owns the
+        // 250 ms cadence and the heartbeat LED; it does not own the policy.
+        bool all_ok = watchdog_task_feed_if_all_within_deadline();
 
         s_diag_watchdog_loops++;
 
         if (all_ok) {
-            // 2026-09-10, opus review finding A (transient-overdue half):
-            // clear any stale overdue latch a PRIOR, since-recovered miss
-            // left behind, so a later, unrelated reset does not misreport
-            // "check-in overdue" for a boot in which nothing was overdue.
-            // Never touches a genuine fatal latch -- see the callee's own
-            // comment.
-            watchdog_overdue_diag_notify_recovered();
-            (void)hal_wdt_feed();
-
             // Toggle, not set-high: a steady blink at half the feed period
             // (500 ms full cycle) is what makes this a *heartbeat* rather
             // than just an "ok" lamp -- a light that is merely on can also
             // be a light nobody is driving anymore (stuck GPIO, task
             // crashed after its last write). Toggling only ever happens
-            // here, in the same branch as the real feed, so the LED cannot
-            // physically keep moving once this branch stops running.
+            // here, driven by the SAME all_ok result that decided the real
+            // feed above -- there is still deliberately no second "is
+            // everything ok" computation for the LED to drift out of sync
+            // with -- so the LED cannot physically keep moving once this
+            // branch stops running. (A feed issued by update_task's erase
+            // loop does not toggle the LED: the heartbeat tracks THIS task's
+            // 250 ms cadence, and borrowing it for an occasional erase-loop
+            // feed would make the blink rate mean two different things.)
             s_led_state = !s_led_state;
             (void)hal_gpio_set(SAFTYFW_PIN_HEARTBEAT_LED, s_led_state);
         } else {
-            // At least one task is past its own deadline. Do NOT feed --
-            // the watchdog will reboot the chip in <= 1s, which is the
-            // fail-safe by construction the doc describes.
+            // No feed was issued, and the overdue diagnostic has already
+            // been latched by watchdog_task_feed_if_all_within_deadline()
+            // above -- that is where the whole "which task, by how much"
+            // analysis lives now, so both feed owners record a refusal
+            // identically rather than only the periodic path doing so.
             //
-            // 2026-08-23, the CLEAR_TRIP-reboots-the-Pico investigation's
-            // actual conclusion: that reboot was never a fault -- it is
-            // THIS branch, firing because some task missed its own deadline
-            // for a still-unidentified reason. watchdog_overdue_diag_mark()
-            // latches exactly which task(s) (a bitmask, ok_mask's
-            // complement) and, for whichever one missed by the largest
-            // margin, by how much -- "missed by 20ms" and "missed by
-            // 2000ms" point at completely different causes, so the worst
-            // offender's overage is recorded, not just its identity.
-            // Reset-surviving (watchdog_overdue_diag.h, scratch[5],
-            // repurposed from this register's old unconditional-every-
-            // evaluation write -- see that file's own header comment for
-            // why that repurposing is safe) precisely because a log sink
-            // cannot report a starvation that reboots the board a few
-            // hundred milliseconds later, and this board has no console
-            // header fitted anyway (TODO.md 0.5a).
-            uint8_t overdue_mask = (uint8_t)((ok_mask ^ WATCHDOG_CHECKIN_ALL_MASK) & 0xFFu);
-            uint8_t worst_task_id = 0;
-            uint32_t worst_overage_ms = 0;
-            for (unsigned i = 0; i < WATCHDOG_CHECKIN_COUNT; i++) {
-                if ((overdue_mask & (1u << i)) == 0u) {
-                    continue; // this task was within its own deadline
-                }
-                if (entries[i].elapsed_ms <= entries[i].deadline_ms) {
-                    continue; // defensive only -- overdue_mask says it should not be, but never trust a derived value over the raw facts it was derived from
-                }
-                uint32_t overage_ms = entries[i].elapsed_ms - entries[i].deadline_ms;
-                if (overage_ms > worst_overage_ms) {
-                    worst_overage_ms = overage_ms;
-                    worst_task_id = (uint8_t)i;
-                }
-            }
-            watchdog_overdue_diag_mark(overdue_mask, worst_task_id,
-                                        (uint16_t)(worst_overage_ms > 0xFFFFu ? 0xFFFFu : worst_overage_ms));
-
             // The LED is deliberately left untouched in this branch too: it
             // freezes at whatever level it was last driven to (per TODO.md's
             // "going dark or freezing should track the same condition") instead

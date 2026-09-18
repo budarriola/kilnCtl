@@ -106,9 +106,34 @@ _Static_assert(sizeof(OTA_PICO_RELAY_DEFAULT_VERSION) - 1u == UPDATE_IMAGE_VERSI
 // --- Timeouts/pacing --------------------------------------------------------
 // All generous relative to UPDATE_PROTOCOL.md's own honest throughput math
 // (~35 s minimum for a 200 KB image) and SaftyFW's own erase-time reasoning
-// (update_task.c: up to 13 * 64K blocks, "hundreds of milliseconds" each).
+// (update_task.c: 208 * 4K sector erases -- see RELAY_ERASE_TIMEOUT_MS below).
 #define RELAY_BEGIN_REPLY_TIMEOUT_MS 4000u   // Pico's precondition+header check is synchronous
-#define RELAY_ERASE_TIMEOUT_MS       15000u  // worst case ~832K slot erase
+// Was 15000u, derived from SaftyFW erasing the 832K slot as 13 * 64K blocks at
+// "hundreds of milliseconds" each. 2026-09-18
+// (docs/audits/pico_ota_erase_watchdog_reset_2026-09-18.md) changed that: the
+// 64K block erase stalled both RP2040 cores past its own 1000 ms hardware
+// watchdog and reset the safety processor partway through every update, so
+// update_task.c's UPDATE_TASK_ERASE_CHUNK_SIZE dropped to one 4K sector. The
+// slot is now erased as 0xD0000 / 4096 = 208 sector erases.
+//
+// Sector erase is less efficient per byte than block erase, so the whole-slot
+// erase got slower: roughly 9-10 s at typical per-sector times against roughly
+// 2 s before. 120000 ms is sized against the WORST case instead, which is the
+// number that has to fit here -- a timeout that only covers typical silently
+// turns a slow-but-healthy erase into a reported update failure. At the
+// W25Q16JV-family datasheet MAXIMUM sector-erase time of 400 ms, 208 sectors
+// is 83.2 s; 120000 ms covers that with ~1.44x margin for the per-sector
+// safe-execute handshake and link latency on top.
+//
+// That 400 ms figure is INFERRED, not verified from this repo: the flash die
+// is not named anywhere in-tree (the schematic says only "2MB QSPI flash" on a
+// stock Pico module), so it comes from that module's standard part family
+// rather than from a datasheet this repo owns. It is used here only to widen a
+// timeout on the WAITING side, which is the safe direction to be wrong in --
+// this delays the report of a genuinely stuck Pico and weakens no guard. The
+// Pico's own 1000 ms watchdog, not this constant, is what actually bounds a
+// wedged safety processor.
+#define RELAY_ERASE_TIMEOUT_MS       120000u // 208 * 4K sector erases, sized at datasheet maximum
 #define RELAY_END_REPLY_TIMEOUT_MS   10000u  // read-back CRC over up to 832K
 #define RELAY_STATUS_POLL_MS         150u    // how often this task re-checks the cached status
 #define RELAY_GAP_ROUND_WAIT_MS      2000u   // > SaftyFW's 500ms periodic-status cadence, with margin
