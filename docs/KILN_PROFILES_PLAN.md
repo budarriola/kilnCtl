@@ -1189,7 +1189,8 @@ kiln's identity — with the safety processor attached.
 ### 7.1 Decision: extend the existing kiln-config machinery; share the backup format's conventions; do NOT merge them
 
 - **Extend** `kiln_cfg_store` / `kiln_cfg_http` / the existing
-  `#kilnConfigPicker` UI. Save/clone/rename/delete/apply/active-id already
+  `#kilnConfigPicker` UI, now on its own page (`/settings/kiln_configs`,
+  `kiln_configs_page.html`, moved off the dashboard 2026-09-18). Save/clone/rename/delete/apply/active-id already
   work; this adds the Pico half, the divergence alarm, download, upload, and
   8 → 10.
 - **Share** `backup_json.c`'s reader/writer helpers and `backup_export.c`'s
@@ -1451,7 +1452,8 @@ until the comparison passes.
 finishing with P — the test must fail if "finish the swap" is implemented.
 
 **Item 9 — UI: download / upload / warnings / confirm dialog / divergence banner.**
-Extends the existing `#kilnConfigPicker` section. Confirm dialog per section
+Extends the existing kiln-config management page (`/settings/kiln_configs`,
+`kiln_configs_page.html`, moved off the dashboard 2026-09-18). Confirm dialog per section
 7.3. Backup page gains a pointer link. LCD line and banner per section 7.4.
 *Acceptance:* Apply cannot be pressed without the dialog; hardware-differs
 requires the explicit acknowledgement checkbox; a 404 on the new routes hides

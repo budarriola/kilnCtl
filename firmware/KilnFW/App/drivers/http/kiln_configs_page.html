@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Kiln Configs</title>
+<link rel="stylesheet" href="/theme.css">
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- Own page for the kiln-config selector + management actions (save / clone
+     / rename / delete / export / import / apply), split out of main_page.html
+     2026-09-18 -- previously a <details> disclosure on the dashboard
+     (#kilnConfigPicker/#kcManage). Same shared chrome as every other
+     *_page.html: nav.js derives the header from <title>, app.js supplies the
+     sticky Stop banner + kcConfirm/kcFetchWithSafetyAck this page's apply/
+     import actions use. The dashboard itself keeps only a compact read-only
+     "active config" indicator plus a link here -- see main_page.html's
+     #kilnConfigIndicator for that half of the split. Backing API
+     (/api/kiln_configs and friends, kiln_cfg_http.c) is unchanged; this page
+     is a pure UI relocation. -->
+<script defer src="/nav.js"></script>
+<script defer src="/app.js"></script>
+<style>
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --bad: #b00; --fault-color: var(--bad); --ok: #080;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --bad: var(--ui-accent-5); --fault-color: var(--bad); --ok: var(--ui-accent-2, #4a4);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --bad: var(--ui-accent-5); --fault-color: var(--bad); --ok: var(--ui-accent-2, #4a4);
+  }
+  /* Same box-sizing reset + fluid width convention as backup_page.html /
+     settings_page.html -- see backup_page.html's own comment for why. */
+  *, *::before, *::after { box-sizing: border-box; }
+  body { font-family: sans-serif; width: min(100% - 2rem, var(--kc-shell-max)); margin: 2em auto;
+         background: var(--bg); color: var(--fg); }
+  h1 { font-size: 1.2em; }
+  h2 { font-size: 1em; margin-top: 1.5em; border-top: 1px solid var(--border); padding-top: 1em; }
+  p { color: var(--muted); }
+  .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px;
+          padding: 1em; margin: 1em 0; }
+  .action-row { display: flex; flex-wrap: wrap; gap: 0.6em; align-items: center; }
+  .action-row > * { min-width: 0; }
+  a.button, button { display: inline-flex; align-items: center; justify-content: center;
+         max-width: 100%; padding: 0.6em 1.2em; border-radius: 4px; min-height: 44px;
+         border: 1px solid var(--border); background: var(--button-bg); color: var(--fg);
+         text-decoration: none; cursor: pointer; font-size: 1em; white-space: normal; }
+  select { flex: 1 1 200px; min-width: 0; box-sizing: border-box; padding: 0.7em 1em; font-size: 1em;
+           background: var(--button-bg); color: var(--fg); border: 1px solid var(--border);
+           border-radius: 4px; }
+  /* Copied verbatim (selectors/values) from main_page.html's own
+     #kilnConfigPicker/#kcManage rules -- this is the moved content, not a
+     redesign, so the same layout survives the move. */
+  #kilnConfigPicker { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5em; }
+  .kc-manage-body { margin-top: 0.5em; display: flex; flex-direction: column; gap: 0.5em; }
+  .kc-manage-row { display: flex; flex-wrap: wrap; gap: 0.4em; align-items: center; }
+  .kc-manage-row input[type=text] { flex: 1 1 140px; min-width: 0; box-sizing: border-box;
+    min-height: 44px; padding: 0.5em; font-size: 1em; background: var(--button-bg);
+    color: var(--fg); border: 1px solid var(--border); border-radius: 4px; }
+  .kc-manage-row input[type="file"] { max-width: 100%; box-sizing: border-box; padding: 0.5em; }
+  .kc-active-tag { font-size: 0.8em; color: var(--ok); font-weight: bold; margin-left: 0.3em; }
+  #kcConfigMsg { font-size: 0.85em; color: var(--muted); margin-top: 0.2em; }
+  #kcConfigMsg.kc-error { color: var(--bad); }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+<h1>Kiln Configs</h1>
+<p>A kiln config is a named saved snapshot of the whole zones configuration --
+relay wiring, thermocouple assignment, PID gains, guard thresholds, and
+limits (everything <a href="/settings/zones">Thermocouples &amp; Zones</a>
+covers) -- distinct from a firing PROFILE (a temperature schedule), which is
+managed on the <a href="/profiles">Firing profiles</a> page instead.</p>
+
+<div class="card" id="kilnConfigCard">
+  <div id="kilnConfigPicker" hidden>
+    <label for="kilnConfigSelect">Kiln config</label>
+    <select id="kilnConfigSelect"></select>
+    <button id="kcApplyBtn" type="button">Apply</button>
+    <div id="kcConfigMsg"></div>
+    <div class="kc-manage-body">
+      <div class="kc-manage-row">
+        <input type="text" id="kcSaveNewName" placeholder="Save current setup as...">
+        <button id="kcSaveNewBtn" type="button">Save as new</button>
+      </div>
+      <div class="kc-manage-row">
+        <button id="kcOverwriteBtn" type="button">Overwrite selected with current setup</button>
+      </div>
+      <div class="kc-manage-row">
+        <input type="text" id="kcCloneName" placeholder="New name for the clone">
+        <button id="kcCloneBtn" type="button">Clone selected</button>
+      </div>
+      <div class="kc-manage-row">
+        <input type="text" id="kcRenameName" placeholder="Rename selected to...">
+        <button id="kcRenameBtn" type="button">Rename</button>
+      </div>
+      <div class="kc-manage-row">
+        <button id="kcDeleteBtn" type="button">Delete selected</button>
+      </div>
+      <div class="kc-manage-row">
+        <button id="kcDownloadBtn" type="button">Download selected (.json)</button>
+      </div>
+      <div class="kc-manage-row">
+        <input type="file" id="kcUploadFile" accept="application/json,.json">
+        <button id="kcUploadBtn" type="button">Upload / import</button>
+      </div>
+    </div>
+  </div>
+  <p id="kilnConfigEmpty" hidden>No kiln configs saved yet, or this firmware
+  build does not support them (older firmware / backend not landed). Save the
+  current setup above once it appears, or check
+  <a href="/settings/zones">Thermocouples &amp; Zones</a> is configured.</p>
+</div>
+
+<script>
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀' : '🌙';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+})();
+
+// -- Kiln configs (relay/thermocouple/PID/guard snapshots) ---------------
+//
+// Moved verbatim from main_page.html (behaviour unchanged, including the
+// apply confirm() wording and the degrade-on-old-firmware rule): GET returns
+// {active_id, configs:[{id,name,is_active}], max_count}; POST save/clone/
+// apply/delete/rename. A 404 (older firmware) or a response missing any
+// field this code reads hides the picker and shows the empty-state message
+// instead, rather than showing a broken/empty dropdown.
+var kilnConfigsCache = { active_id: null, configs: [], max_count: 0 };
+function kcHaveWellFormedResponse(data) {
+  return !!data && data.hasOwnProperty('active_id') && Array.isArray(data.configs) &&
+         typeof data.max_count === 'number';
+}
+function kcSetMsg(text, isError) {
+  var el = document.getElementById('kcConfigMsg');
+  el.textContent = text || '';
+  el.classList.toggle('kc-error', !!isError);
+}
+function loadKilnConfigs() {
+  return fetch('/api/kiln_configs').then(function (r) {
+    if (!r.ok) throw 0; // 404 on older firmware -- same treatment as any other missing route
+    return r.json();
+  }).then(function (data) {
+    if (!kcHaveWellFormedResponse(data)) throw 0;
+    kilnConfigsCache = data;
+    var wrap = document.getElementById('kilnConfigPicker');
+    var empty = document.getElementById('kilnConfigEmpty');
+    var sel = document.getElementById('kilnConfigSelect');
+    var prevValue = sel.value;
+    sel.innerHTML = '';
+    data.configs.forEach(function (c) {
+      var opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = c.name + (c.is_active ? ' (active)' : '');
+      sel.appendChild(opt);
+    });
+    // Prefer keeping whatever was selected (e.g. right after a clone/rename)
+    // over silently jumping back to the first entry; fall back to the
+    // active one, then whatever's first.
+    if (data.configs.some(function (c) { return String(c.id) === prevValue; })) {
+      sel.value = prevValue;
+    } else if (data.active_id !== null && data.active_id !== undefined) {
+      sel.value = String(data.active_id);
+    }
+    var haveAny = data.configs.length > 0;
+    wrap.hidden = !haveAny;
+    empty.hidden = haveAny;
+  }).catch(function () {
+    document.getElementById('kilnConfigPicker').hidden = true;
+    document.getElementById('kilnConfigEmpty').hidden = false;
+  });
+}
+
+function kcSelectedId() {
+  var sel = document.getElementById('kilnConfigSelect');
+  return sel.value === '' ? null : sel.value;
+}
+function kcSelectedConfig() {
+  var id = kcSelectedId();
+  if (id === null) return null;
+  return kilnConfigsCache.configs.filter(function (c) { return String(c.id) === String(id); })[0] || null;
+}
+
+// Every mutating call below follows the same shape: POST, then treat a
+// non-2xx OR an {ok:false} body as failure, surface result.error verbatim
+// (name collisions / over-long names come back as this, per the task's
+// "must be reported, not silently truncated" requirement) rather than a
+// generic toast, then reload the list so the UI reflects the board's actual
+// state -- never assumed from the request alone.
+function kcPost(path, formBody) {
+  return window.kcFetchWithSafetyAck(path, {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: formBody,
+  }).then(function (r) {
+    return r.json().catch(function () { return {}; }).then(function (j) { return { httpOk: r.ok, body: j }; });
+  });
+}
+function kcHandleResult(result, okMsg) {
+  var failed = !result.httpOk || result.body.ok === false;
+  if (failed) {
+    kcSetMsg(result.body.error || 'That failed.', true);
+  } else {
+    kcSetMsg(okMsg, false);
+  }
+  return loadKilnConfigs().then(function () { return !failed; });
+}
+
+document.getElementById('kcApplyBtn').addEventListener('click', function () {
+  var cfg = kcSelectedConfig();
+  if (!cfg) return;
+  // Applying REWRITES relay wiring, thermocouple assignment, PID gains AND
+  // guard thresholds -- overwriting the current live setup outright. Must
+  // say so plainly and nudge toward saving first, since there is no "are you
+  // sure" after this point.
+  if (!confirm('Apply kiln config "' + cfg.name + '"?\n\n' +
+               'This REPLACES the current relay wiring, thermocouple assignment, ' +
+               'PID gains, and guard thresholds with what was saved in this config. ' +
+               'If your current settings aren\'t saved anywhere, save them first ' +
+               '(below) or they will be lost.')) return;
+  kcSetMsg('Applying...', false);
+  kcPost('/api/kiln_configs/apply', 'id=' + encodeURIComponent(cfg.id)).then(function (result) {
+    // The backend refuses this outright while a firing is running or heaters
+    // are on -- that refusal must read as a clear, specific refusal, never
+    // as a generic failure and never as if it quietly succeeded. ALSO
+    // re-check the resulting active_id matches what was requested, rather
+    // than trusting a 2xx+ok:true body alone.
+    var failed = !result.httpOk || result.body.ok === false;
+    if (failed) { kcHandleResult(result, ''); return; }
+    loadKilnConfigs().then(function () {
+      if (String(kilnConfigsCache.active_id) === String(cfg.id)) {
+        kcSetMsg('Applied "' + cfg.name + '". Relay/thermocouple/PID/guard settings are now live.', false);
+      } else {
+        // POST reported success but the config that's actually active
+        // afterward doesn't match what we asked for -- do not claim success
+        // for something we can't confirm happened.
+        kcSetMsg('Apply did not take effect as expected -- reload and check the active config before relying on it.', true);
+      }
+    });
+  });
+});
+
+document.getElementById('kcSaveNewBtn').addEventListener('click', function () {
+  var input = document.getElementById('kcSaveNewName');
+  var name = input.value.trim();
+  if (!name) { kcSetMsg('Enter a name first.', true); return; }
+  kcPost('/api/kiln_configs/save', 'name=' + encodeURIComponent(name)).then(function (result) {
+    kcHandleResult(result, 'Saved current setup as "' + name + '".').then(function (ok) {
+      if (ok) input.value = '';
+    });
+  });
+});
+
+document.getElementById('kcOverwriteBtn').addEventListener('click', function () {
+  var cfg = kcSelectedConfig();
+  if (!cfg) return;
+  if (!confirm('Overwrite "' + cfg.name + '" with the CURRENT relay/thermocouple/PID/guard setup?\n\n' +
+               'This replaces whatever was previously saved under that name. This cannot be undone.')) return;
+  kcPost('/api/kiln_configs/save', 'name=' + encodeURIComponent(cfg.name) + '&id=' + encodeURIComponent(cfg.id))
+    .then(function (result) { kcHandleResult(result, 'Overwrote "' + cfg.name + '".'); });
+});
+
+document.getElementById('kcCloneBtn').addEventListener('click', function () {
+  var cfg = kcSelectedConfig();
+  if (!cfg) return;
+  var input = document.getElementById('kcCloneName');
+  var name = input.value.trim();
+  if (!name) { kcSetMsg('Enter a name for the clone first.', true); return; }
+  kcPost('/api/kiln_configs/clone', 'id=' + encodeURIComponent(cfg.id) + '&name=' + encodeURIComponent(name))
+    .then(function (result) {
+      kcHandleResult(result, 'Cloned "' + cfg.name + '" as "' + name + '".').then(function (ok) {
+        if (ok) input.value = '';
+      });
+    });
+});
+
+document.getElementById('kcRenameBtn').addEventListener('click', function () {
+  var cfg = kcSelectedConfig();
+  if (!cfg) return;
+  var input = document.getElementById('kcRenameName');
+  var name = input.value.trim();
+  if (!name) { kcSetMsg('Enter the new name first.', true); return; }
+  kcPost('/api/kiln_configs/rename', 'id=' + encodeURIComponent(cfg.id) + '&name=' + encodeURIComponent(name))
+    .then(function (result) {
+      kcHandleResult(result, 'Renamed to "' + name + '".').then(function (ok) {
+        if (ok) input.value = '';
+      });
+    });
+});
+
+document.getElementById('kcDeleteBtn').addEventListener('click', function () {
+  var cfg = kcSelectedConfig();
+  if (!cfg) return;
+  if (!confirm('Delete kiln config "' + cfg.name + '"? This cannot be undone.')) return;
+  kcPost('/api/kiln_configs/delete', 'id=' + encodeURIComponent(cfg.id))
+    .then(function (result) { kcHandleResult(result, 'Deleted "' + cfg.name + '".'); });
+});
+
+// Download: GET the export envelope as a blob and save it client-side -- a
+// normal page load, so no special ESP-side streaming is needed. Filename
+// mirrors the server's own Content-Disposition naming (kiln_<id>.kilnpkg.json)
+// since fetch() doesn't expose that header value back to script by default.
+document.getElementById('kcDownloadBtn').addEventListener('click', function () {
+  var cfg = kcSelectedConfig();
+  if (!cfg) return;
+  kcSetMsg('Preparing download...', false);
+  fetch('/api/kiln_configs/export?id=' + encodeURIComponent(cfg.id)).then(function (r) {
+    if (!r.ok) return r.text().then(function (t) { throw new Error(t || ('HTTP ' + r.status)); });
+    return r.blob();
+  }).then(function (blob) {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'kiln_' + cfg.id + '.kilnpkg.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    kcSetMsg('Downloaded "' + cfg.name + '".', false);
+  }).catch(function (e) {
+    kcSetMsg('Download failed: ' + (e && e.message ? e.message : 'error'), true);
+  });
+});
+
+// Upload: read the chosen file as text and POST its raw bytes to the import
+// endpoint -- it always creates a NEW slot (never applies), so the result is
+// just "here's the new id" or the server's own refusal text, surfaced
+// verbatim rather than paraphrased.
+document.getElementById('kcUploadBtn').addEventListener('click', function () {
+  var input = document.getElementById('kcUploadFile');
+  var file = input.files && input.files[0];
+  if (!file) { kcSetMsg('Choose a file first.', true); return; }
+  kcSetMsg('Uploading...', false);
+  file.text().then(function (text) {
+    return window.kcFetchWithSafetyAck('/api/kiln_configs/import', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text,
+    });
+  }).then(function (r) {
+    return r.text().then(function (t) {
+      var body = {};
+      try { body = JSON.parse(t); } catch (e) { /* non-JSON error body -- fall through to raw text */ }
+      return { httpOk: r.ok, body: body, raw: t };
+    });
+  }).then(function (result) {
+    if (!result.httpOk || result.body.error) {
+      kcSetMsg(result.body.error || result.raw || ('Import failed (HTTP status).'), true);
+      return;
+    }
+    kcSetMsg('Imported as a new kiln config (id ' + result.body.id + ').', false);
+    input.value = '';
+    loadKilnConfigs();
+  }).catch(function (e) {
+    kcSetMsg('Upload failed: ' + (e && e.message ? e.message : 'error'), true);
+  });
+});
+
+loadKilnConfigs();
+</script>
+</body>
+</html>

@@ -14,9 +14,34 @@
 #include "ota_http.h"
 #include "safety_ceiling_sync.h" /* 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md,
                                    * LOW) -- warn on an explicit save while diverged */
+#include "web_encoding.h" /* GET /settings/kiln_configs page shell -- same gzip-serving
+                             * helper as settings_http.c/backup_export.c */
 #include "wifi_provision_http.h"
 
 static const char *TAG = "kiln_cfg_http";
+
+/* GET /settings/kiln_configs -- the kiln-config selector + management page
+ * (kiln_configs_page.html), split out of main_page.html's own
+ * #kilnConfigPicker/#kcManage disclosure 2026-09-18 so it gets a real URL of
+ * its own instead of living inside the dashboard. Same embed-gzip-at-build
+ * convention as every other *_page.html in this component (see
+ * web_encoding.h's header comment); the dashboard keeps only a compact
+ * read-only "active config" indicator plus a link here. The API this page
+ * calls (/api/kiln_configs and friends, this same file) is unchanged. */
+extern const uint8_t kiln_configs_page_html_gz_start[] asm("_binary_kiln_configs_page_html_gz_start");
+extern const uint8_t kiln_configs_page_html_gz_end[] asm("_binary_kiln_configs_page_html_gz_end");
+
+static esp_err_t kiln_configs_page_get_handler(httpd_req_t *req)
+{
+    if (!web_client_accepts_gzip(req)) {
+        return web_send_gzip_not_acceptable(req, TAG, "kiln_configs_page.html");
+    }
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    web_set_asset_cache_headers(req);
+    return httpd_resp_send(req, (const char *)kiln_configs_page_html_gz_start,
+                           (size_t)(kiln_configs_page_html_gz_end - kiln_configs_page_html_gz_start));
+}
 
 /* Section 5.3 table row 4 (2026-09-16): same per-request header-ack shape as
  * ota_http.c's OTA_ACK_NO_SAFETY_HEADER/ota_http_req_ack_no_safety() --
@@ -514,6 +539,9 @@ esp_err_t kiln_cfg_http_start(void)
         return ESP_ERR_INVALID_STATE;
     }
 
+    static const httpd_uri_t page_uri = {
+        .uri = "/settings/kiln_configs", .method = HTTP_GET, .handler = kiln_configs_page_get_handler,
+    };
     static const httpd_uri_t list_uri = {
         .uri = "/api/kiln_configs", .method = HTTP_GET, .handler = list_get_handler,
     };
@@ -539,7 +567,7 @@ esp_err_t kiln_cfg_http_start(void)
         .uri = "/api/kiln_configs/import", .method = HTTP_POST, .handler = import_post_handler,
     };
 
-    const httpd_uri_t *uris[] = { &list_uri,   &save_uri,  &clone_uri,  &apply_uri,
+    const httpd_uri_t *uris[] = { &page_uri,   &list_uri,   &save_uri,  &clone_uri,  &apply_uri,
                                  &delete_uri, &rename_uri, &export_uri, &import_uri };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         esp_err_t err = kiln_http_register(server, uris[i]);

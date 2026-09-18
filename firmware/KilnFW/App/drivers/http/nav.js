@@ -74,6 +74,10 @@
     { href: '/setup', label: 'Setup wizard' },
     { href: '/readiness', label: 'Ready to fire? (checklist)' },
     { href: '/settings/zones', label: 'Thermocouples & zones' },
+    // Kiln-config selector + management (save/clone/rename/delete/export/
+    // import/apply), split out of main_page.html's own dashboard disclosure
+    // 2026-09-18 into its own page (kiln_configs_page.html, kiln_cfg_http.c).
+    { href: '/settings/kiln_configs', label: 'Kiln configs' },
     // 'Relays & rules' (/settings/relays) removed 2026-08-27: the rule
     // engine was deleted -- relay/IO control is now a firing profile
     // segment (see profile_executor.c's io_seg_* machinery) per the

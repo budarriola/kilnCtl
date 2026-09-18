@@ -337,6 +337,10 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/settings/backup", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/settings/display", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/settings/zones", HTTP_GET, ROUTE_TIER_ADMIN),
+    /* Kiln-config selector + management page, split out of main_page.html
+     * 2026-09-18 (kiln_cfg_http.c). Same tier as every other settings page
+     * shell. */
+    ROUTE_TIER("/settings/kiln_configs", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/settings/safety", HTTP_GET, ROUTE_TIER_ADMIN),
     /* WEB_AUTH_PLAN.md section 6: the admin password/settings page
      * (security_http.c) and the two API routes it calls -- GET returns only

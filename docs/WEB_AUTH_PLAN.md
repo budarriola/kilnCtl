@@ -211,9 +211,12 @@ needs no tier entry until it is; it is not part of the 137.)
 *Network writes:* `POST /provision`, `/forget`, `/ip_config`.
 
 *Page shells other than `/`:* `/status`, `/settings`, `/settings/backup`,
-`/settings/display`, `/settings/zones`, `/settings/safety`, `/safety`,
+`/settings/display`, `/settings/zones`, `/settings/kiln_configs`,
+`/settings/safety`, `/safety`,
 `/safety/commissioning`, `/profiles`, `/diagnostics`, `/readiness`, `/setup`,
-`/ota`. A page shell is HTML only, but an unauthenticated visitor who can load
+`/ota`. (`/settings/kiln_configs` split off from the `/` dashboard 2026-09-18;
+same ADMIN tier as every other `/settings/*` shell here.) A page shell is
+HTML only, but an unauthenticated visitor who can load
 the diagnostics shell learns the board's full feature surface, and it is
 cheaper to gate the shell than to audit every widget inside it.
 

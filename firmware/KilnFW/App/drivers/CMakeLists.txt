@@ -103,6 +103,7 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
         "http/safety_config_page.html"
         "http/zones_page.html"
         "http/setup_wizard_page.html"
+        "http/kiln_configs_page.html"
         "http/commissioning_shared.js"
         "http/login_page.html" "net/security_page.html")
     set(KILNCTL_GZIP_ASSET_FILES "")
