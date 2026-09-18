@@ -800,6 +800,54 @@ and the band derivation from each zone's own autotune model is what makes that
 defensible rather than fixture-trained. No work, one recorded decision.
 **Size: S. Desirable.**
 
+**Status, 2026-09-17: verified closed, no code change needed.** Checked the
+actual shipping default rather than assuming it, per this section's own
+concern about sentinel traps (`project_zone_band_zero_is_default_sentinel`)
+and field-upgrade regressions:
+
+- **Fresh board:** `zones_config_store.c:225`'s `memset(out_cfg, 0,
+  sizeof(*out_cfg))` zero-fills the whole config, and `zone_cfg_t`'s own field
+  comment (`zones_config_json.h:391-392`) documents `fuzzy_strength_pct` as
+  "0 = no fuzzy adjustment, i.e. behaves exactly like classic PID" — 0 lands
+  on the OFF side here, not the sentinel-trap shape.
+- **Upgraded board (pre-v10 record, no `fuzzy_strength_pct` field at all):**
+  `zones_config_convert.c:300`'s `convert_zone_v9()` also starts with
+  `memset(d, 0, sizeof(*d))` and deliberately does not touch
+  `fuzzy_strength_pct` (its own comment at line 331), so an absent record
+  upconverts to 0/OFF, not enabled — the same class of bug the OTA-status and
+  web-auth-enable incidents were, but not present here.
+- **The separate adaptive-tune opt-in flag** (`adaptive_tune.h:60`,
+  `zone_cfg_t::adaptive_tune_enabled`) is likewise struct-zero-default false;
+  `adaptive_tune.c:1331`'s own comment calls this out explicitly: "its
+  struct-zero default: enabled = false. DEFAULT OFF, as required".
+- **Disable path / state hygiene:** `adaptive_tune_set_enabled(zone, false)`
+  (`adaptive_tune.c:842`) only clears the live/persisted opt-in bit; it
+  deliberately leaves any already-committed learned gains in place, because
+  those are written through the same `zones_config_set_pid()`/`set_model()`
+  path autotune's Accept uses (`adaptive_tune.c:20-27`) — "a reader cannot
+  tell a learned gain from a hand-tuned or autotuned one, which is the
+  point." That is not a stranded-state bug: the dedicated restore path is
+  `adaptive_tune_revert()` (`adaptive_tune.c:1156`, "one-click revert",
+  `adaptive_tune.h:19`), a separate, explicit action from the enable toggle,
+  by design. The one real reset-one-side instance in this module
+  (`ki_baseline` never being cleared on re-autotune) was already fixed
+  before this pass, at `adaptive_tune_clear_ki_baseline()`
+  (`adaptive_tune.c:1014`), called from `autotune_engine.c`'s accept path.
+- **Mechanical guard:** `test_zones_http.c:3119` (`nvs_load_from`'s v9→v10
+  migration test) and `test_adaptive_tune.c:462-468` ("opt-in default off")
+  already assert these defaults with real, non-vacuous checks. Negative-tested
+  this pass: temporarily forced `convert_zone_v9()` to write
+  `d->fuzzy_strength_pct = 50.0f`, rebuilt `firmware/KilnFW/App/test/
+  build_host_tests.ps1`'s `zones_http` executable, and confirmed it failed
+  loudly (`test_zones_http.c:3119: zones[0].fuzzy_strength_pct defaults to 0
+  ... got 50.0000, want 0.0000`) before the sabotage was hand-reverted
+  (`git diff` empty, `git hash-object` matched pre-sabotage). No new check
+  was added — the existing assertions already catch this condition; the
+  suite total is unchanged at 107 passed / 0 skipped / 0 failed.
+
+Nothing here touches control-loop math, gains, or the schedule table; no
+`ZONES_CFG_VERSION` bump. **Size: done. Desirable.**
+
 ---
 
 ## 13. Order of work
