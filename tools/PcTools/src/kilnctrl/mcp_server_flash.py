@@ -477,26 +477,31 @@ def _verify_flash_landed(
             "could not be checked."
         )
     if board.fw_build is None:
-        # Distinct from an actual mismatch below: GET /api/status redacts
-        # fw_build to null when web auth is ON and this caller cannot
-        # authenticate as admin (dashboard_status_http.c's
-        # may_see_build_identity gate, corrected 2026-09-17 -- see that
-        # file's comment). This tool holds no session, so a board with auth
-        # enabled will always read back fw_build:null here regardless of
-        # what actually landed. That is a "cannot check" outcome, not
-        # evidence of a stale binary -- reporting it as a build mismatch
-        # (as this function used to, when the pre-fix firmware gate hid
-        # fw_build from EVERYONE including a default, auth-off board) points
-        # the next reader at exactly the wrong thing.
+        # Distinct from an actual mismatch below: GET /api/status did not
+        # report a usable fw_build, but that observation has more than one
+        # possible cause -- capability_preflight.get_board_info() reads
+        # `data.get("fw_build") or None`, which collapses a MISSING key, an
+        # EMPTY string, and a genuinely REDACTED null (dashboard_status_http.c's
+        # may_see_build_identity gate, when web auth is ON and this caller
+        # cannot authenticate as admin) into the same value. It can equally
+        # mean this board's firmware predates the fw_build field entirely
+        # (e.g. a bench board many commits behind). Whichever it is, this is
+        # a "cannot check" outcome, not evidence of a stale binary --
+        # reporting it as a build mismatch (as this function used to, when
+        # the pre-fix firmware gate hid fw_build from EVERYONE including a
+        # default, auth-off board) points the next reader at exactly the
+        # wrong thing, and asserting one specific cause as fact would repeat
+        # that same mistake one layer out.
         return (
             f"WARNING: running partition confirmed {app_partition_name!r}, but "
-            "GET /api/status did not report fw_build (null) so the build "
-            "timestamp could not be checked -- this board has web auth "
-            "enabled and this tool holds no admin session, so build "
-            "identity is redacted for it. This does NOT indicate the wrong "
-            "build landed. Confirm build identity another way (e.g. an "
-            "authenticated admin session, or GET /api/ota/esp/status) if "
-            "certainty is needed."
+            "GET /api/status did not report fw_build (absent or null) so the "
+            "build timestamp could not be checked -- either web auth is "
+            "enabled and this tool holds no admin session (build identity "
+            "redacted), or this firmware predates the fw_build field "
+            "entirely. This does NOT indicate the wrong build landed. "
+            "Confirm build identity another way (e.g. an authenticated "
+            "admin session, or GET /api/ota/esp/status) if certainty is "
+            "needed."
         )
     if not esp_app_desc.build_timestamps_match(app_desc, board.fw_build):
         raise RuntimeError(
