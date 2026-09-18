@@ -1,6 +1,40 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-18, docs/ROADMAP sync
+> **Status:** planning · **Last reviewed:** 2026-09-18, CT commissioning bench
+> check (nineteenth sweep) — live board read of channel 2's CT calibration
+> and of S9/S14/S15 status; no source or firmware changed this sweep.
+> - **Channel 2's CT calibration is correct and complete on the live board:**
+>   `k_ct_v_per_a[2] = 1`, `zero_counts[2] = 63`, `gain[2] = 0.715`,
+>   `ct_installed = 1`, `ct_topology = 1` (summed), `i_present_a = 2.0`;
+>   `safety_get_commissioning` reports `commissioned = True`,
+>   `stale = False`. This closes the earlier open question (below, eleventh
+>   sweep) about whether `gain[ch] = 0.715` reconciles with the owner's CT
+>   transfer function — it does, and nothing further needs to be written to
+>   the board for channel 2's scale/zero.
+> - **S14/S15 remain DORMANT, confirmed hardware-scale-limited, not a
+>   firmware or calibration gap.** `i_normal_a[0..2]` are all still unset
+>   because `zone_sweep_summed_normal_a()` refuses to record anything below
+>   its 0.045 A noise floor, and this ~4 W bench fixture draws only about
+>   70 mA total. No further code or calibration step is pending on this
+>   fixture; arming either guard needs a kiln-scale load (or a different
+>   bench fixture), not more software.
+> - **S9's unclearable `TRIP_INEFFECTIVE` cannot latch on this board, and the
+>   reason is upstream of S9 itself:** `s_current_sensing_commissioned`
+>   (`firmware/SaftyFW/src/tasks/safety_core.c` around line 449) requires
+>   all three `k_ct_v_per_a` entries to be greater than zero, and channels 0
+>   and 1 are zero because no CT is fitted on them — only channel 2's summed
+>   CT exists on this board.
+> - **Latent, not active: the zone current sweep is still entitled to
+>   overwrite `k_ct_v_per_a[2]`.** `safety_get_ct_cal` reports all three
+>   channels `uncalibrated`, so the manual-provenance skip in
+>   `zone_sweep_plan_k_ct()` (`firmware/KilnFW/App/drivers/control/zones_current_sweep_task.c`
+>   around lines 794-806) never engages for channel 2 either, despite its
+>   calibration being correct above. In practice the sweep cannot record
+>   anything on this fixture (see the S14/S15 finding above), so this cannot
+>   fire on the bench today — recorded as a known latent issue for whenever
+>   a kiln-scale sweep becomes possible, not as an active defect.
+>
+> **Reviewed before that:** 2026-09-18, docs/ROADMAP sync
 > (eighteenth sweep, docs-only — no source or firmware changed this sweep).
 > Verified against the named commits and against directly-reported bench
 > state, not against another doc's status marker.
@@ -982,7 +1016,7 @@ open is short:
 | Size | Item | Where |
 |---|---|---|
 | S | Time the firing abort (30 s) with a stopwatch during a real running firing — the 1.5 s staleness ceiling was bench-verified 2026-09-06 (`LINK_PROTOCOL.md` §8) with no firing needed | M6 |
-| M | S9's welded-contactor escalation — by definition needs a welded contactor. **Checked 2026-09-03: SimFW cannot do this — SimFW itself no longer exists** (removed `8553244`, 2026-08-28; `firmware/UnitTestFw` took its place and is unrelated ESP32-S3 bench-instrument firmware — DAC/AD9833/OLED/PCF8575 — with no path to the safety processor's current-sense input at all). Even when SimFW existed, its own removal commit records that `ct_calibration` "needs the fixture to physically drive current into the CT" — S9 (`firmware/SaftyFW/src/safety_guards.c:363-389`) latches only on real `any_current_present`, gated by `in->context_valid`, `in->current_sensing_commissioned` and NOT `in->current_sensing_disabled`; that flag comes from the CT's analog current-transformer signal through `current_sense.c`, not a GPIO a simulator MCU could assert. What would actually be required: a fixture that injects genuine AC current through the CT sense loop while the K4 drive line is confirmed de-energized — i.e. a hardware jig, not firmware simulation — plus a CT actually fitted and commissioned (`ct_installed=yes`; on the bare bench today `ct_installed=no` switches S9 off and reports it off). | M4 |
+| M | S9's welded-contactor escalation — by definition needs a welded contactor. **Checked 2026-09-03: SimFW cannot do this — SimFW itself no longer exists** (removed `8553244`, 2026-08-28; `firmware/UnitTestFw` took its place and is unrelated ESP32-S3 bench-instrument firmware — DAC/AD9833/OLED/PCF8575 — with no path to the safety processor's current-sense input at all). Even when SimFW existed, its own removal commit records that `ct_calibration` "needs the fixture to physically drive current into the CT" — S9 (`firmware/SaftyFW/src/safety_guards.c:363-389`) latches only on real `any_current_present`, gated by `in->context_valid`, `in->current_sensing_commissioned` and NOT `in->current_sensing_disabled`; that flag comes from the CT's analog current-transformer signal through `current_sense.c`, not a GPIO a simulator MCU could assert. What would actually be required: a fixture that injects genuine AC current through the CT sense loop while the K4 drive line is confirmed de-energized — i.e. a hardware jig, not firmware simulation — plus a CT actually fitted and commissioned (`ct_installed=yes`; this was `ct_installed=no` on the bare bench as of the checked date above). **Corrected 2026-09-18:** the board now reads `ct_installed=1` (channel 2's summed CT fitted and calibrated, per the CT-commissioning bench check at the top of this file), but `in->current_sensing_commissioned` still cannot go true — `s_current_sensing_commissioned` (`firmware/SaftyFW/src/tasks/safety_core.c` around line 449) requires all three `k_ct_v_per_a` entries greater than zero, and channels 0/1 stay zero because no CT is fitted on them. S9's `TRIP_INEFFECTIVE` still cannot latch on this board for that reason, independent of the welded-contactor fixture question above. | M4 |
 | M | AP-fallback verified end to end (needs a router with correct *and* deliberately-wrong static config) | M6 |
 | M | Per-channel CT-to-jack commissioning and the ADC noise-floor measurement — see the M-size CT commissioning row far above (M5's table), `CT_COMMISSIONING_PLAN.md` steps 0 and 6 | M5 |
 | M | **HW changes:** relay status LEDs for K1–K4/S9, distinct connector types for the thermocouple daughterboards, I2C broken out on an expansion connector. (LCD backlight control's flying wire is fitted and confirmed — see M1, closed 2026-09-04.) | M1 |
