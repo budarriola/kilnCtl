@@ -612,6 +612,54 @@ aborted or resumed as designed), each recorded. Build them as scripts in
 they are repeatable against the next build rather than being one-off session
 logs. **Size: L overall; the link-abort stopwatch alone is S.**
 
+**Status, 2026-09-17 (host-only pass, no board access).** Failure classes
+named by this section plus one this pass found undocumented (a quarantined/
+downgraded config never actually verified against its real producer): power
+loss mid-write (Pico A/B sectors, argued+host-tested, partially bench-verified
+per the bullet above), a Pico reboot mid-firing (argued, ESP-side dedup-reset
+logic host-tested via real state transitions in `test_safety_link.c`/
+`test_safety_link_compile.c`, never run against a real rebooting Pico), a dead
+link (1.5s bench-verified, 30s abort host-test-pinned only, needs a running
+firing), a thermocouple fault (Guard 6 hardware-verified on KilnFW, Pico-side
+injection not), a welded contactor (bucket C, no jig), and corrupted/
+downgraded config (see below). Rough count: 7 named classes, 1 exercised on
+real hardware (Guard 6), 1 partially exercised (config-store power loss), 5
+argued/host-tested only.
+
+Moved argued -> exercised-by-real-fault-injection this pass, host-only (no
+hardware): the config-quarantine signal chain. Every existing test around
+`zones_config_store.c`'s NEWER/UNREADABLE decode outcomes drove the real
+decode path with real staged bytes, but none of them ever read back the real
+`zones_config_get_load_fault()` accessor that `profile_executor_run()`,
+`dashboard_http.c` and `ui_page_home_refresh.c` actually gate on — the
+consumer side was only ever exercised against a hand-built fault struct
+(`test_profile_executor_prestart.c`'s fake), never the real producer. Added
+`test_nvs_load_from_newer_than_firmware_latches_real_load_fault()` and
+`test_nvs_load_from_bad_crc_latches_real_load_fault_as_unreadable()` to
+`firmware/KilnFW/App/test/test_zones_http.c` (drives real bytes through the
+real `nvs_load_from()`/`zones_config_json_decode_blob()`, reads back the real
+`zones_config_get_load_fault()`). Both negative-tested: each latch call was
+independently removed/altered in `zones_config_store.c` (its blob at the time,
+blob:firmware/KilnFW/App/drivers/persist/zones_config_store.c`b86c2afc11a5a2559b624dd25c7f1cd182103335`),
+confirmed to turn the
+`zones_http` host-test executable red, restored by hand with an empty
+`git diff` and a matching `git hash-object`, then the build directory was
+deleted and a full rebuild confirmed green again. This does not reach
+`profile_executor_run()` itself (that consumer still only compiles against a
+hand-built fake in its own executable) — a real store+consumer link test is
+still open, non-trivial because `test_profile_executor_prestart.c` is a
+separate executable specifically to dodge multiply-defined fakes.
+
+Owner/hardware boundary (cannot be closed without the board): cut power
+mid-flash-write on the Pico repeatedly with intact read-back each time
+(bench-unsafe per the bullet above, tear only via host fault injection);
+reboot the Pico during a live firing and confirm the ESP blocks heat/
+recovers the link/re-establishes dedup; the 30s dead-link firing-abort via
+`bench_firing_abort_stopwatch.py` (needs a running firing); thermocouple
+fault injection on the safety processor's own MAX31856; a welded contactor
+(bucket C, no jig exists, firmware simulation cannot substitute — analog
+CT signal, not a GPIO); S6b's persistent OpenOCD halt session.
+
 ---
 
 ## 6. BLOCKER — OTA, rollback, recovery mode and the first-boot path

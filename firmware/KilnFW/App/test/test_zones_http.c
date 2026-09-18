@@ -1898,6 +1898,50 @@ static void test_nvs_load_from_newer_than_firmware_is_found_but_not_valid(void)
     nvs_test_clear();
 }
 
+// RELEASE_HARDENING_PLAN.md sec 5 (2026-09-17): the ONLY thing profile_executor_run()'s
+// quarantine gate, dashboard_http.c and ui_page_home_refresh.c actually consult is
+// zones_config_get_load_fault() -- not found/valid. Every test above this point drives
+// the REAL nvs_load_from()/zones_config_json_decode_blob() with a real staged blob
+// (not a hand-built fault struct), but none of them ever call the real
+// zones_config_get_load_fault() accessor and check what it actually latched, even
+// though this same test binary links the real zones_config_store.c that owns it. The
+// production consumers' own fake stand-ins (test_profile_executor_prestart.c) only
+// ever exercise a hand-constructed zones_cfg_load_fault_t, never the real producer.
+// This closes that gap: real bytes in, real producer, real accessor read back.
+static void test_nvs_load_from_newer_than_firmware_latches_real_load_fault(void)
+{
+    TEST_SECTION("nvs_load_from -- a refused NEWER blob latches the REAL zones_config_get_load_fault() "
+                 "signal, not just found/valid (this is what profile_executor_run()/dashboard_http.c/ "
+                 "ui_page_home_refresh.c actually consult)");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = (uint8_t)(ZONES_CFG_VERSION + 3);
+    src.thermo_count = 3;
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = true;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+    TEST_CHECK(err == ESP_OK, "refusing to load is a handled outcome");
+
+    zones_cfg_load_fault_t fault;
+    memset(&fault, 0, sizeof(fault));
+    bool occurred = zones_config_get_load_fault(&fault);
+    TEST_CHECK(occurred, "zones_config_get_load_fault() must report a latched fault after a real "
+                         "NEWER-version blob was decoded -- the signal every real consumer gates on");
+    TEST_CHECK(fault.kind == ZONES_CFG_LOAD_FAULT_NEWER, "kind must be NEWER, not UNREADABLE or NONE");
+    TEST_CHECK(fault.on_disk_version == (uint8_t)(ZONES_CFG_VERSION + 3),
+              "on_disk_version must name the actual bytes found, not a placeholder");
+    TEST_CHECK(fault.fw_version == ZONES_CFG_VERSION,
+              "fw_version must be ZONES_CFG_VERSION at capture time, for the operator-facing message");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 // The scenario FIX 1 actually fixes, exercised through zones_http_start()
 // itself rather than nvs_load_from() in isolation: a newer-than-firmware
 // blob staged as "what's on flash" must survive a boot completely
@@ -2145,6 +2189,47 @@ static void test_nvs_load_from_bad_crc_is_rejected(void)
     TEST_CHECK(!found, "a CRC mismatch must be rejected (found=false)");
     TEST_CHECK(!valid, "must not be trustworthy");
     TEST_CHECK(out_cfg.thermo_count == 0, "no field may leak through from a CRC-rejected blob");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// RELEASE_HARDENING_PLAN.md sec 5 (2026-09-17): UNREADABLE half of the same gap closed
+// by test_nvs_load_from_newer_than_firmware_latches_real_load_fault() above -- a
+// corrupt (bad-CRC) current-version blob must ALSO latch the real
+// zones_config_get_load_fault() signal (kind == UNREADABLE), since that is what a real
+// operator-facing surface (ui_page_home_refresh.c/dashboard_http.c) reads to tell a
+// "rolled back past a schema bump" fault apart from "someone's flash is just corrupt".
+static void test_nvs_load_from_bad_crc_latches_real_load_fault_as_unreadable(void)
+{
+    TEST_SECTION("nvs_load_from -- a bad-CRC blob latches the REAL zones_config_get_load_fault() "
+                 "signal as UNREADABLE, not NEWER or NONE");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = ZONES_CFG_VERSION;
+    src.thermo_count = 1;
+    src.zones[0].max_temp_c = 1300.0f;
+    src.crc32 = zones_config_json_compute_crc(&src) ^ 0x1u; // one bit off from the real CRC
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = true, valid = true;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+    TEST_CHECK(err == ESP_OK, "a bad CRC is a handled outcome");
+
+    zones_cfg_load_fault_t fault;
+    memset(&fault, 0, sizeof(fault));
+    bool occurred = zones_config_get_load_fault(&fault);
+    TEST_CHECK(occurred, "zones_config_get_load_fault() must report a latched fault after a real "
+                         "bad-CRC blob was decoded");
+    TEST_CHECK(fault.kind == ZONES_CFG_LOAD_FAULT_UNREADABLE,
+              "kind must be UNREADABLE, not NEWER or NONE -- an operator reading this must be told "
+              "'corrupt', not 'rolled back past a schema bump', since the remediation differs");
+    TEST_CHECK(fault.on_disk_version == ZONES_CFG_VERSION,
+              "on_disk_version must name the actual claimed version byte");
 
     nvs_test_enable(false);
     nvs_test_clear();
@@ -12658,12 +12743,14 @@ void run_test_zones_http(void)
     test_import_blob_pass1_rejects_cyclic_settings_source();
     test_import_blob_pass1_accepts_acyclic_settings_source();
     test_nvs_load_from_newer_than_firmware_is_found_but_not_valid();
+    test_nvs_load_from_newer_than_firmware_latches_real_load_fault();
     test_zones_http_start_refused_newer_blob_not_overwritten();
     test_zones_http_start_persists_migrated_blob_with_real_crc();
     test_zones_http_migration_persist_fault_latches_on_lying_write();
 
     test_nvs_load_from_old_version_wrong_length_is_rejected();
     test_nvs_load_from_bad_crc_is_rejected();
+    test_nvs_load_from_bad_crc_latches_real_load_fault_as_unreadable();
     test_nvs_load_from_failed_validation_is_rejected();
     test_nvs_save_load_round_trip_current_version();
     test_nvs_save_dispatches_the_kiln_config_autosave();
