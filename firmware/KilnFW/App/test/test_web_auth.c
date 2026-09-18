@@ -418,6 +418,77 @@ static void test_client_ip_distinct_ipv6_addresses_do_not_collide(void)
                "client B's session is denied when presented from client A's distinct address");
 }
 
+// *** 2026-09-17 review, Finding 2: both IPv6 tests above use 25- and
+// 20-character addresses -- comfortably short of WEB_AUTH_CLIENT_IP_LEN's
+// full 46-byte (45 usable + NUL) capacity, the same convenient-short-
+// literal habit that let the original 16-byte truncation ship green. This
+// test drives an address at the actual maximum storable length (45
+// characters) to pin the boundary, not merely "longer than the old bug's
+// ceiling". ***
+static void test_client_ip_max_length_round_trips(void)
+{
+    TEST_SECTION("web_auth_effective_role -- a client_ip at the full 45-char maximum round-trips "
+                 "(Finding 2)");
+
+    web_auth_table_t t;
+    web_auth_table_init(&t);
+
+    // 45 characters -- exactly WEB_AUTH_CLIENT_IP_LEN (46) minus the NUL
+    // terminator, the largest string this module ever stores without
+    // hitting the reject-on-overflow path below.
+    const char *ipv6_max = "fe80::1111:2222:3333:4444:5555:6666:7777%eth1";
+    TEST_CHECK(strlen(ipv6_max) == WEB_AUTH_CLIENT_IP_LEN - 1u,
+               "test sanity: this address is exactly the maximum storable length");
+
+    uint8_t issued[WEB_AUTH_TOKEN_HASH_LEN];
+    make_hash(issued, 17);
+    size_t idx = web_auth_table_create_session(&t, issued, ipv6_max, WEB_AUTH_SESSION_ROLE_ADMIN, 0);
+
+    TEST_CHECK(strcmp(t.slots[idx].client_ip, ipv6_max) == 0,
+               "the maximum-length address is stored in full, not truncated by even one byte");
+    TEST_CHECK(web_auth_effective_role(&t, true, issued, ipv6_max, 300, 100) == WEB_AUTH_SESSION_ROLE_ADMIN,
+               "the very next request from the same maximum-length address still resolves its role");
+}
+
+// *** Finding 2's second half: drives web_auth_table_create_session()'s
+// reject-on-overflow branch (web_auth_session.c ~58-65) with a string that
+// does not fit even in the 46-byte buffer. This branch is dead code in
+// production today -- every real producer is ota_http_get_client_ip()'s own
+// `char ip[46]` (http_auth_http.c/web_auth_login_http.c), which can never
+// hand this function a string this long -- so this test is pinning the
+// fail-closed failure mode for a future/hypothetical producer, not
+// reproducing a reachable defect. ***
+static void test_client_ip_overflow_fails_closed(void)
+{
+    TEST_SECTION("web_auth_table_create_session -- an over-length client_ip fails closed rather "
+                 "than truncating (Finding 2; not reachable from any producer today)");
+
+    web_auth_table_t t;
+    web_auth_table_init(&t);
+
+    char too_long[47]; // one byte past WEB_AUTH_CLIENT_IP_LEN (46)
+    memset(too_long, 'a', sizeof(too_long) - 1u);
+    too_long[sizeof(too_long) - 1u] = '\0';
+    TEST_CHECK(strlen(too_long) == WEB_AUTH_CLIENT_IP_LEN,
+               "test sanity: this string is exactly one byte too long to store");
+
+    uint8_t issued[WEB_AUTH_TOKEN_HASH_LEN];
+    make_hash(issued, 19);
+    size_t idx = web_auth_table_create_session(&t, issued, too_long, WEB_AUTH_SESSION_ROLE_ADMIN, 0);
+
+    TEST_CHECK(t.slots[idx].client_ip[0] == '\0',
+               "an over-length client_ip is recorded as empty rather than a guessed-at truncation");
+    TEST_CHECK(web_auth_effective_role(&t, true, issued, too_long, 300, 100) == WEB_AUTH_SESSION_ROLE_NONE,
+               "the over-length address itself can never match the empty stored binding");
+    // NOT asserted here: presenting an empty client_ip WOULD match this
+    // empty stored binding (web_auth_effective_role() is a plain strcmp,
+    // and strcmp("", "") == 0 -- see the create_session comment in
+    // web_auth_session.h, Finding 4 of the 2026-09-17 review). The only
+    // reason that never happens in production is that ota_http_get_client_ip()
+    // never emits an empty string, not anything in this module -- so this
+    // test does not claim a guarantee this code does not actually provide.
+}
+
 void run_test_web_auth(void)
 {
     test_table_init_and_lookup();
@@ -432,6 +503,8 @@ void run_test_web_auth(void)
     test_effective_role_ip_binding();
     test_client_ip_full_length_ipv6_round_trips();
     test_client_ip_distinct_ipv6_addresses_do_not_collide();
+    test_client_ip_max_length_round_trips();
+    test_client_ip_overflow_fails_closed();
     test_lcd_session();
     test_admin_bootstrap_needed();
 }

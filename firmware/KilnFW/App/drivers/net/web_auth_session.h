@@ -61,8 +61,12 @@ typedef enum {
 // Originally "a slot is { token_hash[32], client_ip[16], role, issued_ms,
 // last_seen_ms } -- 56 bytes plus padding" (WEB_AUTH_PLAN.md section 4).
 // client_ip grew from 16 to 46 bytes in the 2026-09-17 review's Finding 1
-// fix (see WEB_AUTH_CLIENT_IP_LEN below) -- +30 bytes/slot, +240 bytes total
-// across the 8-slot table, still RAM-only, no heap. 8 web slots, LRU-evicted.
+// fix (see WEB_AUTH_CLIENT_IP_LEN below). The commit message for that fix
+// said +30 bytes/slot, +240 bytes total; a follow-up review measured
+// sizeof(web_auth_slot_t) with MSVC x64 and found 68 bytes before, 96 after
+// -- struct padding absorbs 2 of the 30 added client_ip bytes per slot, so
+// the real cost is +28 bytes/slot, +224 bytes total across the 8-slot
+// table. Still RAM-only, no heap. 8 web slots, LRU-evicted.
 // The LCD gets exactly one session (a single struct of the same shape), not
 // a slot in this table -- see web_auth_lcd_session_t below.
 #define WEB_AUTH_TOKEN_HASH_LEN 32u
@@ -133,9 +137,19 @@ bool web_auth_session_constant_time_equal(const uint8_t *a, const uint8_t *b, si
 // at a truncated form: it records an empty client_ip for the slot instead,
 // so the slot can never spuriously match a real address later (an empty
 // stored string only matches a caller-supplied client_ip that is itself an
-// empty string, which web_auth_effective_role() already treats as
-// impossible to present legitimately) -- fails closed instead of silently
-// colliding. Returns the index of the slot used. Two distinct calls
+// empty string). web_auth_effective_role() itself does nothing special here
+// -- its compare is a plain strcmp(slot->client_ip, client_ip), and "" would
+// match "" like any other pair of equal strings. The guarantee that this
+// can never actually happen lives entirely in the one production producer
+// of client_ip, ota_http_get_client_ip() (ota_http.c): on every failure path
+// (httpd_req_to_sockfd() or getpeername() failing) it writes the literal
+// string "unknown", never "" -- so a change to that function that ever made
+// it emit an empty string would silently reopen this collision, even though
+// nothing in this file or web_auth_effective_role() itself would change.
+// (Note "unknown" is itself shared by every client that hits that failure
+// path -- a pre-existing, separate property, not something this fix
+// touches.) Fails closed instead of silently colliding. Returns the index
+// of the slot used. Two distinct calls
 // with distinct `token_hash` values always occupy distinct slots (this
 // module performs no dedup); the caller is responsible for minting a fresh
 // random token per login, same as UI_PLAN.md's original design.

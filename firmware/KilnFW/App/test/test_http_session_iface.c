@@ -282,6 +282,15 @@ static void test_status_and_touch_deny_mismatched_client_ip(void)
                "an unresolvable peer address (NULL client_ip) also denies rather than being "
                "treated as an exemption from the check");
 
+    // Advance the clock before the mismatched touches below so before/after
+    // can actually differ if a touch IP check were missing -- minted and
+    // read at the same t=0 instant, before == after trivially regardless of
+    // whether the touch was refused or performed (2026-09-17 review, Finding
+    // 1: this made http_auth_session_touch()'s IP check untested even
+    // though the assertions below looked like they covered it). Same idiom
+    // as test_touch_extends_valid_session() above.
+    fake_time_advance_ms(30000);
+
     uint32_t before = 0;
     TEST_CHECK(http_auth_session_status("tok-ip-bound-2", "10.0.0.5", &role, &before, &timeout_s),
                "sanity read of last_seen_ms before the mismatched touch attempts below");
