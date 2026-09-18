@@ -1122,6 +1122,14 @@ bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, con
     config_store_record_t to_write = *rec;
     to_write.format_version = CONFIG_STORE_FORMAT_VERSION;
     to_write.seq = s_cached_record.seq + 1u;
+    // CT_CHANNEL_MASK_PLAN.md step 3: keep the legacy ct_topology byte in
+    // sync with zone_ct_channel on every write, so a board downgraded to
+    // firmware that cannot see zone_ct_channel still reads a meaningful
+    // topology (a genuine split collapsing to SUMMED, never PER_ZONE).
+    // Applied to the copy that is actually persisted/published, not to
+    // the caller's record, and after the write decision above so it can
+    // never turn a refusal into a write.
+    config_store_backfill_legacy_ct_topology(&to_write);
 
     // config_store.h's "A/B sector arbitration" -- this plan names which
     // sector this write actually targets, and whether that sector needs an
@@ -1330,6 +1338,14 @@ bool config_store_write_volatile(const config_store_record_t *rec, const char **
     config_store_record_t to_write = *rec;
     to_write.format_version = CONFIG_STORE_FORMAT_VERSION;
     to_write.seq = s_cached_record.seq + 1u;
+    // CT_CHANNEL_MASK_PLAN.md step 3: keep the legacy ct_topology byte in
+    // sync with zone_ct_channel on every write, so a board downgraded to
+    // firmware that cannot see zone_ct_channel still reads a meaningful
+    // topology (a genuine split collapsing to SUMMED, never PER_ZONE).
+    // Applied to the copy that is actually persisted/published, not to
+    // the caller's record, and after the write decision above so it can
+    // never turn a refusal into a write.
+    config_store_backfill_legacy_ct_topology(&to_write);
 
     // Seqlock write, not a plain struct assignment -- identical reasoning to
     // config_store_write()'s own call just above: every reader of

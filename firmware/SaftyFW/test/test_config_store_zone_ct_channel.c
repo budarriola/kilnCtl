@@ -392,6 +392,125 @@ static void test_finalize_requires_all_three(void)
     config_params_finalize_zone_ct_channel(NULL); // NULL-safe, must not crash
 }
 
+static void test_backfill_legacy_topology(void)
+{
+    TEST_SECTION("config_store_backfill_legacy_ct_topology: legacy maps are byte-for-byte no-ops");
+
+    // PER_ZONE, the identity map: a commissioned zone map that says exactly
+    // what ct_topology already said must not change one byte of the record.
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.ct_topology = CONFIG_STORE_CT_TOPOLOGY_PER_ZONE;
+    rec.zone_ct_channel[0] = 0u;
+    rec.zone_ct_channel[1] = 1u;
+    rec.zone_ct_channel[2] = 2u;
+    rec.fields_set |= (uint32_t)CONFIG_STORE_SET_ZONE_CT_CHANNEL;
+    uint8_t before[CONFIG_STORE_RECORD_LEN];
+    uint8_t after[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&rec, before);
+    config_store_backfill_legacy_ct_topology(&rec);
+    config_store_pack(&rec, after);
+    TEST_CHECK(rec.ct_topology == CONFIG_STORE_CT_TOPOLOGY_PER_ZONE,
+               "identity map keeps ct_topology at PER_ZONE");
+    TEST_CHECK(memcmp(before, after, CONFIG_STORE_RECORD_LEN) == 0,
+               "PER_ZONE record is byte-for-byte unchanged by the back-fill");
+
+    // SUMMED, the all-channel-2 map: same property.
+    config_store_default(&rec);
+    rec.ct_topology = CONFIG_STORE_CT_TOPOLOGY_SUMMED;
+    rec.zone_ct_channel[0] = 2u;
+    rec.zone_ct_channel[1] = 2u;
+    rec.zone_ct_channel[2] = 2u;
+    rec.fields_set |= (uint32_t)CONFIG_STORE_SET_ZONE_CT_CHANNEL;
+    config_store_pack(&rec, before);
+    config_store_backfill_legacy_ct_topology(&rec);
+    config_store_pack(&rec, after);
+    TEST_CHECK(rec.ct_topology == CONFIG_STORE_CT_TOPOLOGY_SUMMED,
+               "all-channel-2 map keeps ct_topology at SUMMED");
+    TEST_CHECK(memcmp(before, after, CONFIG_STORE_RECORD_LEN) == 0,
+               "SUMMED record is byte-for-byte unchanged by the back-fill");
+}
+
+static void test_backfill_splits_collapse_to_summed(void)
+{
+    TEST_SECTION("config_store_backfill_legacy_ct_topology: a genuine split collapses to SUMMED");
+
+    // Every two-CT split shape, plus a permuted three-CT map. None of them is
+    // the identity, so all of them must write SUMMED -- PER_ZONE would let
+    // downgraded firmware arm a shared CT's channel against a one-zone
+    // threshold.
+    static const uint8_t splits[5][3] = {
+        { 0u, 0u, 1u }, { 0u, 1u, 1u }, { 0u, 1u, 0u }, { 1u, 1u, 1u }, { 2u, 1u, 0u },
+    };
+    for (size_t i = 0; i < sizeof(splits) / sizeof(splits[0]); i++) {
+        config_store_record_t rec;
+        config_store_default(&rec);
+        rec.ct_topology = CONFIG_STORE_CT_TOPOLOGY_PER_ZONE;
+        rec.zone_ct_channel[0] = splits[i][0];
+        rec.zone_ct_channel[1] = splits[i][1];
+        rec.zone_ct_channel[2] = splits[i][2];
+        rec.fields_set |= (uint32_t)CONFIG_STORE_SET_ZONE_CT_CHANNEL;
+        config_store_backfill_legacy_ct_topology(&rec);
+        TEST_CHECK(rec.ct_topology == CONFIG_STORE_CT_TOPOLOGY_SUMMED,
+                   "a non-identity map back-fills ct_topology as SUMMED");
+
+        // Idempotent: a second write of the same record must not move it again.
+        uint8_t once[CONFIG_STORE_RECORD_LEN];
+        uint8_t twice[CONFIG_STORE_RECORD_LEN];
+        config_store_pack(&rec, once);
+        config_store_backfill_legacy_ct_topology(&rec);
+        config_store_pack(&rec, twice);
+        TEST_CHECK(memcmp(once, twice, CONFIG_STORE_RECORD_LEN) == 0,
+                   "back-fill is idempotent across repeated writes");
+    }
+}
+
+static void test_backfill_respects_the_group_bit(void)
+{
+    TEST_SECTION("config_store_backfill_legacy_ct_topology: an untrusted map never rewrites ct_topology");
+
+    // The dangerous direction: a board commissioned SUMMED under v2, upgraded,
+    // never re-commissioned. Its zone bytes are the derived/compiled map and
+    // the group bit is clear, so ct_topology is authoritative and must
+    // survive untouched -- back-filling from the default identity map would
+    // silently downgrade it to PER_ZONE.
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.ct_topology = CONFIG_STORE_CT_TOPOLOGY_SUMMED;
+    rec.zone_ct_channel[0] = 0u;
+    rec.zone_ct_channel[1] = 1u;
+    rec.zone_ct_channel[2] = 2u;
+    TEST_CHECK(!config_store_field_is_set(&rec.fields_set, CONFIG_STORE_SET_ZONE_CT_CHANNEL),
+               "the default record has no committed zone map");
+    uint8_t before[CONFIG_STORE_RECORD_LEN];
+    uint8_t after[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&rec, before);
+    config_store_backfill_legacy_ct_topology(&rec);
+    config_store_pack(&rec, after);
+    TEST_CHECK(rec.ct_topology == CONFIG_STORE_CT_TOPOLOGY_SUMMED,
+               "ct_topology survives a back-fill while the group bit is clear");
+    TEST_CHECK(memcmp(before, after, CONFIG_STORE_RECORD_LEN) == 0,
+               "an uncommitted zone map leaves the record byte-for-byte unchanged");
+
+    // ct_channel_map (channel -> relay id) is deliberately NOT synthesised
+    // from zone_ct_channel; prove the back-fill leaves it alone even for a
+    // committed split map.
+    config_store_default(&rec);
+    rec.ct_channel_map[0] = 2u;
+    rec.ct_channel_map[1] = 0u;
+    rec.ct_channel_map[2] = 1u;
+    rec.zone_ct_channel[0] = 0u;
+    rec.zone_ct_channel[1] = 0u;
+    rec.zone_ct_channel[2] = 1u;
+    rec.fields_set |= (uint32_t)CONFIG_STORE_SET_ZONE_CT_CHANNEL;
+    config_store_backfill_legacy_ct_topology(&rec);
+    TEST_CHECK(rec.ct_channel_map[0] == 2u && rec.ct_channel_map[1] == 0u &&
+               rec.ct_channel_map[2] == 1u,
+               "operator-confirmed ct_channel_map is untouched by the back-fill");
+
+    config_store_backfill_legacy_ct_topology(NULL); // NULL-safe, must not crash
+}
+
 void run_test_config_store_zone_ct_channel(void)
 {
     test_derive();
@@ -405,4 +524,7 @@ void run_test_config_store_zone_ct_channel(void)
     test_garbled_zone_bytes_normalise();
     test_default_record();
     test_finalize_requires_all_three();
+    test_backfill_legacy_topology();
+    test_backfill_splits_collapse_to_summed();
+    test_backfill_respects_the_group_bit();
 }

@@ -971,6 +971,43 @@ static inline void config_store_effective_zone_ct_channel(const config_store_rec
     config_store_derive_zone_ct_channel(rec->ct_topology, out);
 }
 
+// config_store_backfill_legacy_ct_topology() -- docs/CT_CHANNEL_MASK_PLAN.md
+// step 3, the "new record read by old firmware" rule. New firmware must keep
+// the legacy ct_topology byte in sync with whatever zone_ct_channel says on
+// EVERY write, so a board downgraded to firmware that has never heard of
+// zone_ct_channel still reads a meaningful topology out of the same record.
+// The derivation is exactly the reporting one
+// (config_store_ct_topology_from_zone_ct_channel() above), so a genuine
+// SPLIT collapses to SUMMED and never to PER_ZONE.
+//
+// Gated on the group bit: with ZONE_CT_CHANNEL clear the stored zone bytes
+// are the compiled/derived default rather than an operator answer, and
+// ct_topology is then the AUTHORITATIVE side of the pair -- deriving in that
+// direction would let the default map overwrite a commissioned SUMMED board
+// with PER_ZONE. With the bit set the zone map is authoritative and this is
+// a pure projection of it.
+//
+// Deliberately does NOT touch ct_channel_map: despite the similar name that
+// field is channel -> RELAY id (which relay each CT channel watches),
+// confirmed by its own one-relay-at-a-time commissioning pass, not a
+// restatement of zone -> channel. Synthesising it from zone_ct_channel would
+// overwrite operator-confirmed wiring facts with a guess.
+//
+// Idempotent, NULL-safe, and byte-for-byte a no-op for both legacy maps
+// (identity {0,1,2} already implies PER_ZONE, {2,2,2} already implies
+// SUMMED) -- test_config_store_zone_ct_channel.c proves that on packed
+// records.
+static inline void config_store_backfill_legacy_ct_topology(config_store_record_t *rec)
+{
+    if (rec == NULL) {
+        return;
+    }
+    if (!config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_ZONE_CT_CHANNEL)) {
+        return;
+    }
+    rec->ct_topology = config_store_ct_topology_from_zone_ct_channel(rec->zone_ct_channel);
+}
+
 // config_store_current_sensing_commissioned() -- THE single place S9's
 // "is the current reading a MEASUREMENT or a heuristic" gate is decided.
 // safety_core.c's s_current_sensing_commissioned caches this per COMMIT_
