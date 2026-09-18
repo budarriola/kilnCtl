@@ -115,20 +115,27 @@ git worktree add C:\wt\<name> origin/main        # short path: avoids MSVC/xtens
 cd C:\wt\<name>
 git submodule update --init --recursive
 
-# KilnFW needs a real sdkconfig -- gitignored, and defaults to plain "esp32"
-# (not esp32s3) without this, which fails in hal_sysinfo_esp.c with a
-# confusing, unrelated-looking error:
-cd firmware\KilnFW
-idf.py set-target esp32s3
-cd ..\..
-
-# PcTools venv:
-cd tools\PcTools
-uv sync
-cd ..\..
-
 powershell -ExecutionPolicy Bypass -File tools\run_all_checks.ps1
 ```
+
+No manual `idf.py set-target` and no manual `uv sync` are needed before that
+run: `firmware/KilnFW/sdkconfig.defaults` pins `CONFIG_IDF_TARGET="esp32s3"`
+in committed content (since `827dd887`), so a from-scratch `idf.py build` with
+no `sdkconfig` at all targets esp32s3 correctly on its own — confirmed
+directly, not just reasoned about, in `check_01_kilnfw_pushed_build.ps1`'s
+header (2026-09-16) and again empirically in a from-scratch worktree on
+2026-09-17 (see `docs/RELEASE_HARDENING_PLAN.md` section 11). Earlier
+revisions of this doc recommended seeding a set-target step; that premise was
+already false by the time it was written (the target had been pinned all
+along) and following it is no longer necessary. Likewise, `tools/setup.ps1`
+itself now runs `uv sync --project tools/PcTools` as part of its own run (see
+above), so a separate manual `uv sync` before `run_all_checks.ps1` is
+redundant, not required — a bare `git submodule update --init --recursive`
+plus `tools/setup.ps1` is enough. `run_all_checks.ps1` self-provisions the
+rest on first use in a fresh worktree: `check_00_saftyfw_target_build.ps1`
+runs `cmake -G Ninja -B build .` when `build\CMakeCache.txt` is absent, and
+`check_mykicad_golden_suite_runs.ps1` creates `tools/mykicadMcp/.venv` when
+missing.
 
 As of 2026-09-15, `check_00_kilnfw_target_build.ps1` (the check that actually
 builds KilnFW) publishes `compile_commands.json` and this project's own

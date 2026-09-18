@@ -740,15 +740,34 @@ be formatted is the bad third option. **Size: M. Desirable.**
 
 ## 11. Desirable, not blocking — prove a fresh clone builds
 
-`check_01_kilnfw_pushed_build.ps1` copies the main tree's `sdkconfig` into its
-clean worktree because `sdkconfig` is gitignored, and says so honestly in its
-own header. The result is that it proves origin/main's source builds against
-*this machine's* board config, not that a fresh clone builds. A Kconfig default
-change would sail through. Closing this means committing a
-`sdkconfig.defaults`-derived configuration the check can generate from, which
-is a real piece of work and not a release blocker on a single-machine project
-— but it is the gap between the check's name and what it proves, and that gap
-should not be discovered by someone else. **Size: M. Desirable.**
+**Status, 2026-09-17: the sdkconfig-seeding gap this item was written about is
+already closed** (`check_01_kilnfw_pushed_build.ps1` stopped seeding a
+board-tuned `sdkconfig` on 2026-09-16 — `sdkconfig.defaults` pins
+`CONFIG_IDF_TARGET="esp32s3"` in committed content, so a from-scratch build
+targets esp32s3 correctly with no seed). Verified empirically today in an
+independent from-scratch worktree, distinct from that check's own persistent
+one: `git worktree add` + `git submodule update --init --recursive` (all
+three submodules resolve cleanly) + `tools/setup.ps1` (which now also runs
+`uv sync --project tools/PcTools` itself) + `tools\run_all_checks.ps1`, no
+other manual step, reached **106 passed, 1 skipped, 0 failed** — the skip was
+`check_ui_responsive_sweep.ps1`'s known transient CDP/fetch flake, unrelated
+to clone freshness. No generated-and-gitignored file was found without a
+template or a self-provisioning step: `check_00_saftyfw_target_build.ps1`
+configures SaftyFW's `build.ninja` on first use, and
+`check_mykicad_golden_suite_runs.ps1` creates its own `.venv`. `docs/SETUP.md`'s
+clean-worktree recipe (which recommended a now-unnecessary manual
+`idf.py set-target` and a now-redundant manual `uv sync`) was corrected in the
+same change.
+
+**What remains pending:** nothing found. `check_01_kilnfw_pushed_build.ps1`
+and `check_01_saftyfw_pushed_build.ps1` already run this proof, against a real
+fetched `origin/main`, on every `run_all_checks.ps1` invocation — a dedicated
+from-scratch-clone check (fresh submodule init and venv creation on every run,
+not just the first) was considered and rejected as the wrong trade: it would
+add real minutes to every run to re-prove something the self-provisioning
+steps above already establish once per worktree and the two `check_01`
+scripts keep proving on every commit. No further work is planned here unless
+that judgment changes. **Size: done. Desirable.**
 
 ## 12. Desirable, not blocking — adaptive tuning should not ship enabled and
 ## unproven
