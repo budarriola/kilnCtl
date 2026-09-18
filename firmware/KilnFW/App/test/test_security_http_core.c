@@ -393,6 +393,31 @@ static void test_clear_credentials_storage_failure_maps_to_500(void)
     TEST_CHECK(!result.invalidated_sessions, "result does not claim an invalidation that didn't happen");
 }
 
+static void test_clear_credentials_null_backend_member_does_not_crash(void)
+{
+    // Finding 7 fix (2026-09-17 review): a vtable can be non-NULL (the
+    // dispatch-level check at the top of security_http_dispatch() passes)
+    // while an individual member is NULL -- a partially-populated backend.
+    // Before the fix, SECURITY_CMD_CLEAR_CREDENTIALS called
+    // vt->clear_all_credentials() with no per-pointer check, which is a
+    // hard crash (call through a NULL function pointer) on the host build
+    // too, so this test would abort the whole test binary before the fix
+    // rather than merely failing a TEST_CHECK -- that crash IS the
+    // "red before the fix" signal for this finding.
+    TEST_SECTION("CLEAR_CREDENTIALS -- vtable present but clear_all_credentials member is NULL (Finding 7)");
+
+    fake_reset();
+    security_backend_vtable_t partial_vtable = fake_vtable;
+    partial_vtable.clear_all_credentials = NULL;
+
+    security_request_t req = blank_request(SECURITY_CMD_CLEAR_CREDENTIALS);
+    security_result_t result;
+    security_http_dispatch(&partial_vtable, SECURITY_ROLE_ADMIN, &req, &result);
+
+    TEST_CHECK(result.http_status == 500, "a missing backend op maps to 500, not a crash");
+    TEST_CHECK(fake.invalidate_calls == 0, "sessions are never invalidated when the op couldn't run at all");
+}
+
 void run_test_security_http_core(void)
 {
     test_pin_validation();
@@ -408,4 +433,5 @@ void run_test_security_http_core(void)
     test_unknown_command_refused();
     test_clear_credentials_success_invalidates_both_roles();
     test_clear_credentials_storage_failure_maps_to_500();
+    test_clear_credentials_null_backend_member_does_not_crash();
 }

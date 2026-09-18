@@ -472,7 +472,12 @@ heat_interlock_result_t heat_interlock_check(const heat_interlock_snapshot_t *sn
 // ---------------------------------------------------------------------------
 
 #define STUB_HDR_MAX 4
-typedef struct { const char *field; char value[80]; bool set; } stub_hdr_t;
+// value[] widened from 80 to 300 (2026-09-17, Finding 3 coverage) so a test
+// can stage a Cookie header >= the OLD fixed 128-byte httpd-stack buffer
+// http_auth_extract_session_token() used to copy it into -- this is host-
+// test fixture storage on the test binary's own stack/data, not the ESP
+// httpd task's 8 KB stack, so it is not subject to that stack budget.
+typedef struct { const char *field; char value[300]; bool set; } stub_hdr_t;
 static stub_hdr_t s_stub_hdrs[STUB_HDR_MAX];
 
 static void stub_headers_reset(void)
@@ -1772,7 +1777,14 @@ static const char *ota_status_test_make_session(web_auth_session_role_t role, co
     uint8_t hash[32];
     size_t hash_len = 0;
     psa_hash_compute(PSA_ALG_SHA_256, (const uint8_t *)token, strlen(token), hash, sizeof(hash), &hash_len);
-    web_auth_table_create_session(http_session_table(), hash, "10.0.0.9", role, (uint32_t)0);
+    // Finding 1 fix (2026-09-17 web-auth adversarial review):
+    // http_auth_session_resolve() now binds a session to the client IP it
+    // was minted for, exact match. This file's ota_http_get_client_ip()
+    // always falls back to the literal string "unknown" (getpeername()
+    // has nothing real to answer against in a host test) -- the session
+    // must be minted against that same fallback string, or resolution
+    // correctly (and, before this fix, silently) fails.
+    web_auth_table_create_session(http_session_table(), hash, "unknown", role, (uint32_t)0);
     return token;
 }
 
@@ -2048,6 +2060,60 @@ static void test_boot_guard_status_reports_count_and_recovery_mode(void)
 }
 
 // ---------------------------------------------------------------------------
+// Finding 2 / Finding 3 coverage (2026-09-17 web-auth session review) --
+// http_auth_extract_session_token()/extract_named_cookie() (http_auth_http.c)
+// are linked into this executable for real (see the file header above), and
+// this file's own stub_header_set()/stub_headers_reset() (defined further up
+// for the httpd_req_get_hdr_value_len/_str stubs) give exactly the
+// test-controllable "Cookie" header those functions need -- no separate
+// executable required.
+
+static void test_extract_session_token_skips_malformed_occurrence(void)
+{
+    // Finding 2: a malformed (empty-value) kiln_sid occurrence used to abort
+    // the whole scan; the real cookie must still be found afterward.
+    TEST_SECTION("http_auth_extract_session_token -- an earlier empty kiln_sid= does not hide a later valid one "
+                 "(Finding 2)");
+    stub_headers_reset();
+    stub_header_set("Cookie", "kiln_sid=; other=1; kiln_sid=deadbeefcafef00d");
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    char out[128];
+    bool ok = http_auth_extract_session_token(&req, out, sizeof(out));
+
+    TEST_CHECK(ok, "scan continues past the malformed occurrence instead of failing outright");
+    TEST_CHECK(strcmp(out, "deadbeefcafef00d") == 0, "the later, valid kiln_sid value is the one returned");
+}
+
+static void test_extract_session_token_large_cookie_header(void)
+{
+    // Finding 3: a Cookie header >= the old fixed 128-byte stack buffer must
+    // still be parsed correctly (not silently dropped) now that the buffer
+    // is heap-allocated to the header's real length.
+    TEST_SECTION("http_auth_extract_session_token -- a >=128 byte Cookie header is still parsed (Finding 3)");
+    stub_headers_reset();
+    char big_cookie[300];
+    // Several unrelated, longish cookies followed by a real kiln_sid --
+    // total length deliberately well past 128 bytes.
+    snprintf(big_cookie, sizeof(big_cookie),
+             "unrelated_a=%s; unrelated_b=%s; kiln_sid=%s",
+             "1111111111111111111111111111", "2222222222222222222222222222",
+             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd");
+    TEST_CHECK(strlen(big_cookie) >= 128, "test fixture is actually >= 128 bytes (sanity check on the fixture itself)");
+    stub_header_set("Cookie", big_cookie);
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    char out[128];
+    bool ok = http_auth_extract_session_token(&req, out, sizeof(out));
+
+    TEST_CHECK(ok, "a Cookie header >= 128 bytes is still parsed, not silently dropped");
+    TEST_CHECK(strcmp(out, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd") == 0,
+               "the real kiln_sid value at the end of the long header is extracted correctly");
+}
+
+// ---------------------------------------------------------------------------
 
 void run_test_ota_http(void)
 {
@@ -2121,6 +2187,8 @@ void run_test_ota_http(void)
     test_credential_survives_factory_reset_kiln_scope();
     test_credential_survives_factory_reset_profiles_scope();
     test_credential_survives_factory_reset_all_scope();
+    test_extract_session_token_skips_malformed_occurrence();
+    test_extract_session_token_large_cookie_header();
 }
 
 int main(void)

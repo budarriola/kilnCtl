@@ -133,11 +133,15 @@ static http_auth_role_t to_enforce_role(web_auth_session_role_t role) {
 }
 
 http_auth_role_t http_auth_session_resolve(const char *token, const char *client_ip) {
-    (void)client_ip; // the session table's client_ip binding is section 6's
-                      // (login-time capture) concern; this resolver only
-                      // looks a token up by hash, matching
-                      // web_auth_effective_role()'s own signature, which
-                      // does not take a client_ip either.
+    // Finding 1 fix (2026-09-17 review / prior defect 5): client_ip used to
+    // be discarded here (`(void)client_ip;`) even though the slot's binding
+    // is captured at login (web_auth_login_http.c) -- the header's stated
+    // MUST ("a slot whose IP binding does not match client_ip" resolves to
+    // HTTP_AUTH_ROLE_NONE) was unimplemented. web_auth_effective_role() now
+    // takes and enforces this binding; this seam's only remaining job is to
+    // pass the caller's resolved address through unmodified, same
+    // NUL-terminated-or-NULL contract this function's own header already
+    // documents.
     if (!token || token[0] == '\0') {
         return HTTP_AUTH_ROLE_NONE;
     }
@@ -163,7 +167,7 @@ http_auth_role_t http_auth_session_resolve(const char *token, const char *client
     // seam's own header comment for why passing the real flag again here
     // would be redundant, not more correct.
     web_auth_session_role_t role = web_auth_effective_role(http_session_table(), /*web_enabled=*/true,
-                                                             token_hash, timeout.timeout_s,
+                                                             token_hash, client_ip, timeout.timeout_s,
                                                              (uint32_t)hal_time_now_ms());
     return to_enforce_role(role);
 }

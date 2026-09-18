@@ -3,6 +3,7 @@
 // decides comes from the pure functions in http_auth_enforce.c.
 #include "http_auth_http.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -67,12 +68,22 @@ static bool extract_named_cookie(const char *raw, const char *name, char *out, s
             const char *val = p + name_len + 1;
             const char *end = strchr(val, ';');
             size_t val_len = end ? (size_t)(end - val) : strlen(val);
-            if (val_len == 0 || val_len >= out_len) {
-                return false;
+            if (val_len > 0 && val_len < out_len) {
+                memcpy(out, val, val_len);
+                out[val_len] = '\0';
+                return true;
             }
-            memcpy(out, val, val_len);
-            out[val_len] = '\0';
-            return true;
+            // Finding 2 fix (2026-09-17 review): this occurrence's value is
+            // empty or too long to fit `out` -- fall through and keep
+            // scanning for another occurrence of `name` later in the
+            // header, instead of aborting the whole parse. A cookie parser
+            // that stops on the first match, valid or not, lets an
+            // attacker who can plant ANY cookie on this host (e.g.
+            // `kiln_sid=;`, sorted ahead of the real one by path/order)
+            // permanently mask a genuine session cookie later in the same
+            // header -- see the review's failure scenario. Falling through
+            // here still requires advancing past THIS occurrence via the
+            // same separator-search below, not re-scanning from `val`.
         }
         const char *sep = strchr(p, ';');
         if (!sep) {
@@ -108,22 +119,49 @@ static bool extract_named_cookie(const char *raw, const char *name, char *out, s
 // site (http_session_iface.h's own contract). Returns true and leaves `out`
 // non-empty only on a genuine kiln_sid cookie match, false (and out[0]='\0')
 // otherwise -- same contract as extract_named_cookie() above.
+// Finding 3 fix (2026-09-17 review): the old implementation read the whole
+// Cookie header into a fixed `char cookie[128]` local and silently skipped
+// parsing entirely once the header reached 128 bytes -- an ordinary browser
+// carrying `kiln_sid=` (this feature's own 73-byte cookie) plus a couple of
+// unrelated cookies from any other service on the same host crosses that
+// threshold easily, and the operator was logged out with no diagnostic.
+// The fix must not grow that buffer: it lived on the shared 8 KB httpd task
+// stack, and an oversized httpd-task local is exactly the crash class
+// CLAUDE.md's "httpd stack blob class" note warns about. Instead, heap-
+// allocate a buffer sized to the header's own reported length -- no copy of
+// the whole header ever needs to sit on the stack. ESP-IDF's own
+// CONFIG_HTTPD_MAX_REQ_HDR_LEN already bounds cookie_hdr_len (default
+// 512 B) before this ever runs; KILN_HTTP_MAX_COOKIE_HDR_LEN below is a
+// second, explicit cap so a future increase to that Kconfig value cannot
+// turn this into an unbounded per-request allocation -- a header at or
+// above the cap fails closed (no token), same as the old oversized-cookie
+// path did, rather than being served from an ever-larger heap buffer.
+#define KILN_HTTP_MAX_COOKIE_HDR_LEN 4096u
+
 bool http_auth_extract_session_token(httpd_req_t *req, char *out, size_t out_len) {
     if (out == NULL || out_len == 0) {
         return false;
     }
     out[0] = '\0';
 
-    char cookie[128];
-    cookie[0] = '\0';
     size_t cookie_hdr_len = httpd_req_get_hdr_value_len(req, "Cookie");
-    if (cookie_hdr_len > 0 && cookie_hdr_len < sizeof(cookie)) {
-        if (httpd_req_get_hdr_value_str(req, "Cookie", cookie, sizeof(cookie)) != ESP_OK) {
-            cookie[0] = '\0';
-        }
+    if (cookie_hdr_len == 0 || cookie_hdr_len >= KILN_HTTP_MAX_COOKIE_HDR_LEN) {
+        return false;
     }
 
-    return extract_named_cookie(cookie, HTTP_SESSION_COOKIE_NAME, out, out_len);
+    char *cookie = malloc(cookie_hdr_len + 1);
+    if (!cookie) {
+        // Allocation failure fails closed (no token), same as every other
+        // unparsable-header case here -- never falls back to a truncated
+        // stack copy.
+        return false;
+    }
+    bool matched = false;
+    if (httpd_req_get_hdr_value_str(req, "Cookie", cookie, cookie_hdr_len + 1) == ESP_OK) {
+        matched = extract_named_cookie(cookie, HTTP_SESSION_COOKIE_NAME, out, out_len);
+    }
+    free(cookie);
+    return matched;
 }
 
 static void resolve_role_for_request(httpd_req_t *req, http_auth_role_t *out_role, char *out_token,

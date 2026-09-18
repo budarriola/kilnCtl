@@ -13,13 +13,21 @@
 // minted here would then never resolve there. See http_session_iface.c's
 // own header comment, which names this file as the intended adopter.
 //
-// LOCKOUT: web login gets its OWN ota_auth_lockout_state_t instance,
+// LOCKOUT: web login gets its OWN ota_auth_lockout_state_t instances,
 // separate from the OTA-esp/OTA-pico/LCD-PIN lockouts -- WEB_AUTH_PLAN.md
 // section 7's explicit design note that each authentication surface must
-// not share lockout state with any other. One instance for the whole
-// route (not per-IP): this board is a single-operator LAN device, same
-// scale assumption ota_auth_nonce_state_t's own header comment already
-// makes ("a single operator on a LAN, not a multi-tenant service").
+// not share lockout state with any other.
+//
+// Finding 4 fix (2026-09-17 review): a SINGLE global instance meant one
+// remote IP failing three logins locked out every other client on the LAN
+// too, including the legitimate operator -- a trivial denial-of-service
+// against a single-operator device. Lockout state is now tracked per
+// source IP, in a small FIXED-SIZE table (LOGIN_LOCKOUT_MAX_IPS below) so
+// an attacker sending attempts from many spoofed/rotating source addresses
+// cannot grow this table without bound -- once full, the least-recently-
+// active IP's slot is evicted for the new one, the same bounded LRU
+// discipline web_auth_table_create_session() already uses for the (also
+// fixed-size) session table.
 //
 // STACK: no locals here approach the httpd 8 KB stack blob class this
 // codebase watches for (project_httpd_stack_blob_class) -- the largest
@@ -65,12 +73,53 @@ void ota_http_get_client_ip(httpd_req_t *req, char *out, size_t out_len);
 extern const uint8_t login_page_html_gz_start[] asm("_binary_login_page_html_gz_start");
 extern const uint8_t login_page_html_gz_end[] asm("_binary_login_page_html_gz_end");
 
-// This route's own lockout state -- separate from every OTA/LCD-PIN
+// This route's own PER-IP lockout table -- separate from every OTA/LCD-PIN
 // instance, per WEB_AUTH_PLAN.md section 7. Guarded by s_login_lock, same
 // "short critical section around plain state, not around I/O" shape
-// ota_http.c's s_ota_lock uses around ota_auth_nonce_issue().
-static ota_auth_lockout_state_t s_login_lockout;
+// ota_http.c's s_ota_lock uses around ota_auth_nonce_issue(). Fixed size
+// (Finding 4 fix, see this file's header comment) -- bounded LRU eviction,
+// never grows.
+#define LOGIN_LOCKOUT_MAX_IPS 16u
+typedef struct {
+    bool in_use;
+    char ip[46];
+    uint32_t last_activity_ms;
+    ota_auth_lockout_state_t lockout;
+} login_lockout_slot_t;
+static login_lockout_slot_t s_login_lockouts[LOGIN_LOCKOUT_MAX_IPS];
 static SemaphoreHandle_t s_login_lock;
+
+// Must be called with s_login_lock already held. Finds the slot for `ip`,
+// touching its last_activity_ms; if none exists, claims a free slot or,
+// failing that, evicts the least-recently-active slot (bounded table, see
+// header comment) and starts that IP with fresh (unlocked) lockout state.
+static login_lockout_slot_t *login_lockout_slot_for(const char *ip, uint32_t now)
+{
+    int free_idx = -1;
+    int lru_idx = 0;
+    uint32_t lru_time = UINT32_MAX;
+    for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
+        login_lockout_slot_t *s = &s_login_lockouts[i];
+        if (s->in_use && strcmp(s->ip, ip) == 0) {
+            s->last_activity_ms = now;
+            return s;
+        }
+        if (!s->in_use && free_idx < 0) {
+            free_idx = (int)i;
+        }
+        if (s->in_use && s->last_activity_ms < lru_time) {
+            lru_time = s->last_activity_ms;
+            lru_idx = (int)i;
+        }
+    }
+    int idx = (free_idx >= 0) ? free_idx : lru_idx;
+    login_lockout_slot_t *s = &s_login_lockouts[idx];
+    memset(s, 0, sizeof(*s));
+    s->in_use = true;
+    strncpy(s->ip, ip, sizeof(s->ip) - 1);
+    s->last_activity_ms = now;
+    return s;
+}
 
 static uint32_t now_ms(void)
 {
@@ -100,7 +149,8 @@ static esp_err_t login_post_handler(httpd_req_t *req)
 
     bool locked = false;
     if (xSemaphoreTake(s_login_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
-        locked = ota_auth_lockout_is_locked(&s_login_lockout, now_ms());
+        login_lockout_slot_t *slot = login_lockout_slot_for(ip, now_ms());
+        locked = ota_auth_lockout_is_locked(&slot->lockout, now_ms());
         xSemaphoreGive(s_login_lock);
     } else {
         ESP_LOGW(TAG, "login from %s: internal lock timeout, refused", ip);
@@ -118,11 +168,22 @@ static esp_err_t login_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    // Finding 5 fix (2026-09-17 review): httpd_req_recv() is not guaranteed
+    // to fill the whole request in one call -- ESP-IDF's own docs note it
+    // may return fewer bytes than asked even before EOF/error. A single
+    // unlooped call silently truncated the body on any connection that
+    // split it across TCP segments, corrupting username/password field
+    // parsing rather than failing loud. Loop until content_len bytes are
+    // read, same shape as security_http.c's security_post_handler().
     char body[LOGIN_BODY_MAX];
-    int received = httpd_req_recv(req, body, req->content_len);
-    if (received <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "failed to read body");
-        return ESP_OK;
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int ret = httpd_req_recv(req, body + received, (size_t)req->content_len - received);
+        if (ret <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "failed to read body");
+            return ESP_OK;
+        }
+        received += (size_t)ret;
     }
     body[received] = '\0';
 
@@ -157,10 +218,11 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     memset(password, 0, sizeof(password));
 
     if (xSemaphoreTake(s_login_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+        login_lockout_slot_t *slot = login_lockout_slot_for(ip, now_ms());
         if (ok) {
-            ota_auth_lockout_record_success(&s_login_lockout);
+            ota_auth_lockout_record_success(&slot->lockout);
         } else {
-            ota_auth_lockout_record_failure(&s_login_lockout, now_ms());
+            ota_auth_lockout_record_failure(&slot->lockout, now_ms());
         }
         xSemaphoreGive(s_login_lock);
     }
@@ -187,7 +249,13 @@ static esp_err_t login_post_handler(httpd_req_t *req)
         (store_role == WEB_AUTH_ROLE_ADMINISTRATOR) ? WEB_AUTH_SESSION_ROLE_ADMIN : WEB_AUTH_SESSION_ROLE_USER;
     web_auth_table_create_session(http_session_table(), token_hash, ip, session_role, now_ms());
 
-    char cookie[96];
+    // 128 bytes: "kiln_sid=" (9) + 64 hex chars + "; HttpOnly; SameSite=Strict; Path=/"
+    // (36) + NUL = 110 -- the previous 96-byte buffer was too small to hold
+    // a real cookie and made every successful login fail with a spurious
+    // 500 (found by this pass's host tests, not itself one of the seven
+    // audit findings, but blocking their test coverage). Still well under
+    // LOGIN_BODY_MAX (256), this file's stated httpd-stack budget.
+    char cookie[128];
     int cookie_len = snprintf(cookie, sizeof(cookie), HTTP_SESSION_COOKIE_NAME "=%s; HttpOnly; SameSite=Strict; Path=/",
                                token_hex);
     if (cookie_len < 0 || (size_t)cookie_len >= sizeof(cookie)) {

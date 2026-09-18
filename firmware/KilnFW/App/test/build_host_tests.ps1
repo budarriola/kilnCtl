@@ -1672,6 +1672,41 @@ try {
 
     Invoke-HostTestExe -Name "lcd_credential_bridge" -ExePath $exe44 -BuildCmd $cmd44
 
+    # ---- test_web_auth_login_http.c: its own 45th, separate executable ----
+    # docs/audits/web_auth_adversarial_review_2026-09-17.md Findings 4/5:
+    # per-source-IP login lockout and a properly-looped httpd_req_recv().
+    # web_auth_login_http.c is #include'd directly (same convention as
+    # exe43/exe44 above) to reach login_lockout_slot_for() and the per-IP
+    # lockout table it owns, both `static`. This file supplies its OWN
+    # test-controllable httpd_req_recv()/ota_http_get_client_ip() bodies
+    # (never stubs/http_auth_link_stub.c, which is deliberately not
+    # test-controllable) so a test can stage a source IP per call and force
+    # httpd_req_recv() to hand the body back in single-byte chunks. Needs
+    # psa/crypto.h's host stub + fake_kv.h (web_auth_store.c, also
+    # #include'd directly, same as exe43) plus the real session-table/
+    # policy/route seam (http_session_iface.c, web_auth_session.c,
+    # http_auth_http.c, http_auth_enforce.c, http_auth_policy_iface.c)
+    # linked in for real, same "already host-tested elsewhere, needs its
+    # real symbols to link" reasoning used everywhere else those travel
+    # together -- login_post_handler() calls http_session_table()/
+    # http_session_hash_token() and web_auth_table_create_session() against
+    # THIS real table, not a stand-in for it.
+    $exe45 = Join-Path $outDir "kilnctl_host_tests_web_auth_login_http.exe"
+    $walhObjDir = Join-Path $outDir "walh"
+    New-Item -ItemType Directory -Force -Path $walhObjDir | Out-Null
+    $cmd45 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$walhObjDir\\`" /Fe:`"$exe45`" `"$(Join-Path $testDir 'test_web_auth_login_http.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_session_iface.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" " +
+            "`"$(Join-Path $driversDir 'net/ota_auth.c')`" `"$(Join-Path $driversDir 'http/ota_http_util.c')`" " +
+            "`"$(Join-Path $driversDir 'net/web_auth_login.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "web_auth_login_http" -ExePath $exe45 -BuildCmd $cmd45
+
     # ---- sim_iter_tune.exe / sim_wide_temp_sweep.exe: data-generating
     # harnesses (ITER_TUNE_REDESIGN_PLAN.md sec 6/7), not TEST_CHECK
     # pass/fail suites -- their stdout is the evidence for the audit docs
@@ -2085,7 +2120,10 @@ try {
     # Invoke-HostTestExe call -- lcd_credential_bridge.c's role-ordering and
     # effective-enabled-collapse logic, previously untested (see that file's
     # header comment and App/test/test_lcd_credential_bridge.c).
-    $totalExpected = 50
+    # 50 -> 51: this pass (docs/audits/web_auth_adversarial_review_2026-09-17.md
+    # Findings 4/5) added test_web_auth_login_http.c as its own 51st
+    # Invoke-HostTestExe call.
+    $totalExpected = 51
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the

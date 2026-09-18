@@ -229,6 +229,31 @@ static void test_touch_unknown_token_and_never_timeout(void)
                                                        "session module's own NEVER sentinel");
 }
 
+// *** 2026-09-17 adversarial review, Finding 1 / prior defect 5: this is the
+// REAL seam the finding named -- http_auth_session_resolve()'s
+// `(void)client_ip;` used to discard the address entirely, so a valid
+// bearer token replayed from any OTHER host on the LAN resolved to its full
+// stored role. Drives the actual production function, not just the pure
+// web_auth_effective_role() module test in test_web_auth.c. ***
+static void test_resolve_denies_mismatched_client_ip(void)
+{
+    TEST_SECTION("http_auth_session_resolve -- denies a token replayed from a different client_ip "
+                 "(Finding 1)");
+
+    reset_all();
+    set_policy_timeout(60);
+    make_session("tok-ip-bound", WEB_AUTH_SESSION_ROLE_ADMIN, 0); // recorded client_ip: "10.0.0.5"
+
+    TEST_CHECK(http_auth_session_resolve("tok-ip-bound", "10.0.0.5") == HTTP_AUTH_ROLE_ADMIN,
+               "the address the session was actually issued to resolves its real role");
+    TEST_CHECK(http_auth_session_resolve("tok-ip-bound", "10.0.0.99") == HTTP_AUTH_ROLE_NONE,
+               "a valid token replayed from a DIFFERENT address is denied -- the stolen-cookie "
+               "replay scenario Finding 1 describes");
+    TEST_CHECK(http_auth_session_resolve("tok-ip-bound", NULL) == HTTP_AUTH_ROLE_NONE,
+               "an unresolvable peer address (NULL client_ip) also denies rather than being "
+               "treated as an exemption from the check");
+}
+
 void run_test_http_session_iface(void) {
     test_status_reports_without_touching();
     test_status_unknown_and_no_token();
@@ -236,4 +261,5 @@ void run_test_http_session_iface(void) {
     test_touch_never_revives_expired_session();
     test_unreadable_policy_fails_closed();
     test_touch_unknown_token_and_never_timeout();
+    test_resolve_denies_mismatched_client_ip();
 }

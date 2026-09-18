@@ -340,15 +340,28 @@ bool web_auth_store_verify_password(web_auth_role_t role, const char *password)
         return false;
     }
     web_auth_password_record_t rec;
-    if (web_auth_store_load_password(role, &rec) != WEB_AUTH_LOAD_OK) {
-        return false;
-    }
-    if (!rec.configured) {
-        return false;
-    }
+    bool loaded_ok = web_auth_store_load_password(role, &rec) == WEB_AUTH_LOAD_OK;
+    // Finding 6 fix (2026-09-17 review): PBKDF2 must run on every call,
+    // whether or not a role has ever been provisioned, so a caller
+    // measuring response latency cannot use "fast vs slow" to distinguish
+    // "no such account" from "wrong password" -- both must take one
+    // PBKDF2 pass. When there is no real record (never loaded, or
+    // !rec.configured), hash the supplied password against a fixed
+    // decoy salt/iteration-count instead of skipping the work; the
+    // result is discarded below via the ORIGINAL configured-ness check,
+    // never compared against anything meaningful. Never uses the empty
+    // struct's real (all-zero) salt/hash from `rec` in that path -- an
+    // all-zero salt is still a valid-looking salt and would make an
+    // unconfigured role's timing depend on the (all-zero) iterations
+    // field, i.e. skip PBKDF2 entirely via `iterations == 0`.
+    static const uint8_t decoy_salt[WEB_AUTH_SALT_LEN] = {0};
+    const uint8_t *salt = (loaded_ok && rec.configured) ? rec.salt : decoy_salt;
+    uint32_t iterations = (loaded_ok && rec.configured) ? rec.iterations : WEB_AUTH_ITERATIONS;
     uint8_t computed[WEB_AUTH_HASH_LEN];
-    web_auth_hash_compute((const uint8_t *)password, strlen(password), rec.salt, rec.iterations,
-                           computed);
+    web_auth_hash_compute((const uint8_t *)password, strlen(password), salt, iterations, computed);
+    if (!loaded_ok || !rec.configured) {
+        return false;
+    }
     return web_auth_constant_time_equal(computed, rec.hash, WEB_AUTH_HASH_LEN);
 }
 

@@ -53,11 +53,11 @@ static void test_unknown_token_effective_role(void)
 
     uint8_t unknown[WEB_AUTH_TOKEN_HASH_LEN];
     make_hash(unknown, 99);
-    TEST_CHECK(web_auth_effective_role(&t, true, unknown, 300, 100) == WEB_AUTH_SESSION_ROLE_NONE,
+    TEST_CHECK(web_auth_effective_role(&t, true, unknown, "1.2.3.4", 300, 100) == WEB_AUTH_SESSION_ROLE_NONE,
                "a token that was never issued resolves to NONE, not the role of some other slot");
-    TEST_CHECK(web_auth_effective_role(&t, true, issued, 300, 100) == WEB_AUTH_SESSION_ROLE_USER,
-               "sanity: the actually-issued token still resolves correctly");
-    TEST_CHECK(web_auth_effective_role(&t, true, NULL, 300, 100) == WEB_AUTH_SESSION_ROLE_NONE,
+    TEST_CHECK(web_auth_effective_role(&t, true, issued, "1.2.3.4", 300, 100) == WEB_AUTH_SESSION_ROLE_USER,
+               "sanity: the actually-issued token still resolves correctly, from the address it was issued to");
+    TEST_CHECK(web_auth_effective_role(&t, true, NULL, "1.2.3.4", 300, 100) == WEB_AUTH_SESSION_ROLE_NONE,
                "no token presented at all (NULL) is NONE, not a crash");
 }
 
@@ -230,10 +230,10 @@ static void test_auth_disabled_inert_path(void)
 
     uint8_t random_token[WEB_AUTH_TOKEN_HASH_LEN];
     make_hash(random_token, 123);
-    TEST_CHECK(web_auth_effective_role(&t, false, random_token, 60, 1000) == WEB_AUTH_SESSION_ROLE_ADMIN,
+    TEST_CHECK(web_auth_effective_role(&t, false, random_token, "9.9.9.9", 60, 1000) == WEB_AUTH_SESSION_ROLE_ADMIN,
                "auth disabled + no session anywhere still resolves to ADMIN (full access)");
-    TEST_CHECK(web_auth_effective_role(&t, false, NULL, 60, 1000) == WEB_AUTH_SESSION_ROLE_ADMIN,
-               "auth disabled + no token presented at all still resolves to ADMIN");
+    TEST_CHECK(web_auth_effective_role(&t, false, NULL, NULL, 60, 1000) == WEB_AUTH_SESSION_ROLE_ADMIN,
+               "auth disabled + no token or client_ip presented at all still resolves to ADMIN");
 
     // Even an expired/garbage table must not leak through and produce NONE:
     // the whole point of the early return is that the table is never
@@ -241,12 +241,13 @@ static void test_auth_disabled_inert_path(void)
     uint8_t issued[WEB_AUTH_TOKEN_HASH_LEN];
     make_hash(issued, 1);
     web_auth_table_create_session(&t, issued, "0.0.0.0", WEB_AUTH_SESSION_ROLE_USER, 0);
-    TEST_CHECK(web_auth_effective_role(&t, false, issued, 60, 999999999u) == WEB_AUTH_SESSION_ROLE_ADMIN,
-               "auth disabled ignores real (even long-expired) session state and still grants ADMIN");
+    TEST_CHECK(web_auth_effective_role(&t, false, issued, "9.9.9.9", 60, 999999999u) == WEB_AUTH_SESSION_ROLE_ADMIN,
+               "auth disabled ignores real (even long-expired) session state and a mismatched client_ip,"
+               " and still grants ADMIN");
 
     // And the reverse: with auth ENABLED, an unknown/garbage token on a
     // non-empty table must not accidentally resolve to ADMIN.
-    TEST_CHECK(web_auth_effective_role(&t, true, random_token, 60, 1000) == WEB_AUTH_SESSION_ROLE_NONE,
+    TEST_CHECK(web_auth_effective_role(&t, true, random_token, "9.9.9.9", 60, 1000) == WEB_AUTH_SESSION_ROLE_NONE,
                "auth enabled + unrelated token is NONE -- the disabled-path shortcut does not leak"
                " into the enabled path");
 }
@@ -308,6 +309,38 @@ static void test_admin_bootstrap_needed(void)
                "auth off with a credential already configured is still not a bootstrap case");
 }
 
+// *** 2026-09-17 adversarial review, Finding 1 / prior defect 5: a session
+// token replayed from a DIFFERENT client_ip than the one it was issued to
+// must resolve to NONE, not the session's real role -- the stolen-cookie
+// replay scenario the review's Finding 1 walks through. Before the fix,
+// web_auth_effective_role() had no client_ip parameter at all and
+// http_auth_session_resolve() discarded the address entirely
+// ((void)client_ip;), so a captured cookie worked from anywhere on the LAN. ***
+static void test_effective_role_ip_binding(void)
+{
+    TEST_SECTION("web_auth_effective_role -- client_ip binding (Finding 1)");
+
+    web_auth_table_t t;
+    web_auth_table_init(&t);
+
+    uint8_t issued[WEB_AUTH_TOKEN_HASH_LEN];
+    make_hash(issued, 42);
+    web_auth_table_create_session(&t, issued, "192.168.1.50", WEB_AUTH_SESSION_ROLE_ADMIN, 0);
+
+    TEST_CHECK(web_auth_effective_role(&t, true, issued, "192.168.1.50", 300, 100) == WEB_AUTH_SESSION_ROLE_ADMIN,
+               "the address the session was actually issued to still resolves its real role");
+    TEST_CHECK(web_auth_effective_role(&t, true, issued, "192.168.1.99", 300, 100) == WEB_AUTH_SESSION_ROLE_NONE,
+               "a valid token replayed from a DIFFERENT address on the same LAN is denied, not"
+               " granted its stored role -- the cookie-theft/replay scenario this binding exists"
+               " for");
+    TEST_CHECK(web_auth_effective_role(&t, true, issued, NULL, 300, 100) == WEB_AUTH_SESSION_ROLE_NONE,
+               "an unresolvable peer address (NULL) can never match a real binding, so it denies"
+               " too, rather than being treated as \"skip the check\"");
+    TEST_CHECK(web_auth_effective_role(&t, true, issued, "192.168.1.5", 300, 100) == WEB_AUTH_SESSION_ROLE_NONE,
+               "a mere prefix match (192.168.1.5 vs the stored 192.168.1.50) is not a match --"
+               " this binding is exact-string, not prefix-based");
+}
+
 void run_test_web_auth(void)
 {
     test_table_init_and_lookup();
@@ -319,6 +352,7 @@ void run_test_web_auth(void)
     test_prompt_window();
     test_touch_extends_and_clears_prompt();
     test_auth_disabled_inert_path();
+    test_effective_role_ip_binding();
     test_lcd_session();
     test_admin_bootstrap_needed();
 }

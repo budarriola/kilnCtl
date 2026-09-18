@@ -224,8 +224,30 @@ bool web_auth_session_in_prompt_window(uint32_t last_seen_ms, uint32_t timeout_s
 // being re-derived at this call site -- this signature does not need to
 // change to support that; it already only ever takes an already-resolved
 // bool.
+//
+// `client_ip` (2026-09-17 review, Finding 1 / prior defect 5): the caller's
+// resolved peer address, NUL-terminated, or NULL when no peer address could
+// be determined. Ignored entirely while `web_enabled` is false (the
+// short-circuit above never touches the table). Once a live session is
+// found and not expired, this is compared -- exact string match, not a
+// prefix -- against the `client_ip` recorded in the slot at login
+// (web_auth_table_create_session()). A mismatch, including `client_ip ==
+// NULL` (a session token can never legitimately be presented "from no
+// address"), resolves to WEB_AUTH_SESSION_ROLE_NONE exactly like an expired
+// or unknown token -- see http_session_iface.h's MUST list, which names this
+// case explicitly. Exact match, not a /24 or similar prefix, is a
+// deliberate choice: this binding exists to stop a captured cookie being
+// replayed from a DIFFERENT host, and a prefix broad enough to tolerate
+// typical NAT/DHCP churn would also cover most of the same flat LAN the
+// threat model in docs/audits/web_auth_adversarial_review_2026-09-17.md's
+// Finding 1 is defending against. The operational cost is real and
+// intentional: a client whose apparent address changes mid-session (a
+// Wi-Fi/cellular handoff, a NAT re-binding) is logged out and must sign in
+// again -- the header's stated MUST does not carve out an exception for
+// that case, and this implementation does not invent one.
 web_auth_session_role_t web_auth_effective_role(const web_auth_table_t *t, bool web_enabled,
-                                                 const uint8_t *token_hash, uint32_t timeout_s, uint32_t now_ms);
+                                                 const uint8_t *token_hash, const char *client_ip,
+                                                 uint32_t timeout_s, uint32_t now_ms);
 
 // --- Admin-credential bootstrap state (plan items 10 & 11) ------------------
 //

@@ -5,6 +5,7 @@
 // real round trips through fake_kv.h's RAM-backed hal_kv fake.
 #include <stddef.h>
 #include <string.h>
+#include <time.h>
 
 #include "test_common.h"
 
@@ -187,6 +188,65 @@ static void test_set_verify_password(void)
     TEST_CHECK(memmem_local(&blob, sizeof(blob), "CorrectHorse1", strlen("CorrectHorse1")) ==
                    NULL,
                "the plaintext password must never appear in the persisted blob");
+}
+
+// Finding 6 fix (2026-09-17 review): web_auth_store_verify_password() used
+// to return early -- skipping the PBKDF2 pass entirely -- when the target
+// role had never been provisioned (!rec.configured), while a provisioned
+// role with a wrong password always paid the full PBKDF2 cost. That
+// asymmetry is a timing oracle: a caller measuring response latency alone
+// could distinguish "no such account" from "wrong password" without ever
+// seeing a response body. This test proves both paths now run a real
+// PBKDF2 pass by timing them against a THIRD call that is confirmed to
+// return with no hashing at all (password == NULL, an unconditional early
+// return that predates this fix and is not itself in question) -- the
+// unconfigured-role and wrong-password paths must both take much longer
+// than that true no-op, and be within the same order of magnitude as each
+// other, rather than one of them being near-instant like the no-op.
+static double time_verify_calls(web_auth_role_t role, const char *password, int reps)
+{
+    clock_t start = clock();
+    for (int i = 0; i < reps; i++) {
+        (void)web_auth_store_verify_password(role, password);
+    }
+    clock_t end = clock();
+    return (double)(end - start) / CLOCKS_PER_SEC;
+}
+
+static void test_verify_password_timing_oracle_closed(void)
+{
+    TEST_SECTION("web_auth_store_verify_password: no fast-path for an unconfigured role");
+    reset_all();
+
+    // Only USER is ever configured; ADMINISTRATOR is left unconfigured for
+    // this whole test.
+    hal_status_t st = web_auth_store_set_password(WEB_AUTH_ROLE_USER, "operator",
+                                                   "CorrectHorse1", SALT_A, false);
+    TEST_CHECK(st == HAL_OK, "set_password on a fresh store must succeed");
+    TEST_CHECK(web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR) == false,
+               "ADMINISTRATOR must be left unconfigured for this test");
+
+    const int reps = 20;
+    // Confirmed true no-op: NULL password returns before touching the
+    // store or hashing anything, on either role -- this is the "fast"
+    // baseline the two paths under test must NOT resemble.
+    double no_op_s = time_verify_calls(WEB_AUTH_ROLE_USER, NULL, reps);
+    // The path this finding is about: role never provisioned.
+    double unconfigured_s = time_verify_calls(WEB_AUTH_ROLE_ADMINISTRATOR, "AnyPassword1", reps);
+    // The always-hashed comparison path: provisioned, wrong password.
+    double wrong_password_s = time_verify_calls(WEB_AUTH_ROLE_USER, "WrongPassword1", reps);
+
+    TEST_CHECK(unconfigured_s > no_op_s * 3.0,
+               "an unconfigured role must run real PBKDF2 work, not return as fast as the "
+               "confirmed NULL-password no-op");
+    TEST_CHECK(wrong_password_s > no_op_s * 3.0,
+               "sanity check: a provisioned role with a wrong password is the known-slow "
+               "reference and must also clear the no-op bar");
+    // Same order of magnitude in both directions -- guards against a fix
+    // that merely swapped which side is fast rather than equalizing them.
+    TEST_CHECK(unconfigured_s < wrong_password_s * 5.0 && wrong_password_s < unconfigured_s * 5.0,
+               "the unconfigured-role path and the wrong-password path must cost about the "
+               "same, not differ by an order of magnitude");
 }
 
 static void test_set_verify_pin(void)
@@ -722,6 +782,7 @@ int main(void)
     test_pin_strength();
     test_hash_properties();
     test_set_verify_password();
+    test_verify_password_timing_oracle_closed();
     test_set_verify_pin();
     test_policy_absent_is_off();
     test_policy_set_and_load();

@@ -192,6 +192,15 @@ void security_http_dispatch(const security_backend_vtable_t *vt, security_role_t
         // Item 12b's "Clear login credentials" action -- see
         // security_backend.h's clear_all_credentials() comment for the full
         // rationale. No request fields to validate; this command takes none.
+        // Finding 7 fix (2026-09-17 review): `vt` itself is checked for NULL
+        // above, but a vtable can be non-NULL while missing an individual
+        // member (a partially-populated backend under test, or a future
+        // backend that doesn't implement every op) -- calling through a
+        // NULL function pointer is a hard crash, not a clean error path.
+        if (!vt->clear_all_credentials) {
+            set_result(out, 500, "backend does not support clearing credentials");
+            return;
+        }
         security_err_t err = vt->clear_all_credentials();
         if (err != SECURITY_OK) {
             set_result_from_err(out, err);

@@ -175,7 +175,8 @@ bool web_auth_session_in_prompt_window(uint32_t last_seen_ms, uint32_t timeout_s
 }
 
 web_auth_session_role_t web_auth_effective_role(const web_auth_table_t *t, bool web_enabled,
-                                         const uint8_t *token_hash, uint32_t timeout_s, uint32_t now_ms)
+                                         const uint8_t *token_hash, const char *client_ip,
+                                         uint32_t timeout_s, uint32_t now_ms)
 {
     if (!web_enabled) {
         // Section 11: "the enforcement pre-handler's first check is
@@ -194,6 +195,15 @@ web_auth_session_role_t web_auth_effective_role(const web_auth_table_t *t, bool 
     }
     const web_auth_slot_t *slot = &t->slots[(size_t)idx];
     if (!web_auth_session_is_valid(slot->last_seen_ms, timeout_s, now_ms)) {
+        return WEB_AUTH_SESSION_ROLE_NONE;
+    }
+    // Finding 1 fix (2026-09-17 review / prior defect 5): enforce the
+    // client_ip binding the header has always documented as a MUST. Exact
+    // match against what was recorded at login -- see web_auth_session.h's
+    // declaration comment for why exact, not a prefix. `client_ip == NULL`
+    // (no determinable peer address) can never match a real recorded
+    // binding, so it denies rather than being treated as "skip the check".
+    if (!client_ip || strcmp(slot->client_ip, client_ip) != 0) {
         return WEB_AUTH_SESSION_ROLE_NONE;
     }
     return slot->role;

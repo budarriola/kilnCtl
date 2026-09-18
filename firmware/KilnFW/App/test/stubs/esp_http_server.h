@@ -41,6 +41,7 @@ typedef enum {
 
 typedef enum {
     HTTPD_400_BAD_REQUEST = 400,
+    HTTPD_401_UNAUTHORIZED = 401, /* added for web_auth_login_http.c's host tests (Findings 4/5) */
     HTTPD_403_FORBIDDEN = 403, /* added 2026-08-27 for ota_http.c's host tests */
     HTTPD_500_INTERNAL_SERVER_ERROR = 500,
 } httpd_err_code_t;
