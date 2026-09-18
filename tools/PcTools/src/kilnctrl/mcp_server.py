@@ -481,6 +481,8 @@ from .mcp_server_codec import *  # noqa: F401,F403
 from .mcp_server_info import *  # noqa: F401,F403
 from .mcp_server_actions import *  # noqa: F401,F403
 from .mcp_server_log_analysis import *  # noqa: F401,F403
+from .mcp_server_repo_grep import *  # noqa: F401,F403
+from .mcp_server_page_structure import *  # noqa: F401,F403
 from .mcp_server_plant_sim import *  # noqa: F401,F403
 from .mcp_server_coupled_ident import *  # noqa: F401,F403
 from .mcp_server_fixture import _close_fixture  # noqa: F401
