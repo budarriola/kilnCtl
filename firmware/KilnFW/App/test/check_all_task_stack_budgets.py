@@ -669,6 +669,7 @@ TASKS = [
              ("refresh_cb", "ui_page_network.c"),
              ("refresh_cb", "ui_page_network_manage.c"),
              ("refresh_cb", "ui_page_temperature.c"),
+             ("tick_timer_cb", "ui_lcd_lock.c"),
          ]),
     dict(name="screen_idle", root="screen_idle_task",
          stack=lambda: extract_int_literal("drivers/ui/screen_idle.c",
@@ -759,7 +760,29 @@ CEILING_BYTES = {
     # because lv_timer_handler()'s own internals (animations, other lv_obj
     # event callbacks, anything a future page adds) are not covered by
     # extra_roots and are not resolvable at all by this walk.
-    
+    #
+    # Re-verified 2026-09-18 against a freshly rebuilt KilnCtrl.elf
+    # (idf.py build, clean worktree at origin/main): own depth is still
+    # 752 B and ui_home_refresh_cb is still the deepest extra_root at
+    # 4128 B, so the total is UNCHANGED at 4880 B -- no code on this
+    # task's measured paths grew since 2026-09-09. This pass also closed
+    # a coverage gap found while re-verifying: 906170a9 ("Web auth section
+    # 7 + LCD half of section 8") added ui_lcd_lock.c's own
+    # lv_timer_create(tick_timer_cb, ...) -- a periodic UI timer of the
+    # exact same shape as the five refresh_cb timers already enumerated
+    # in extra_roots -- without adding it there, so it was silently
+    # unmeasured (not merely INDETERMINATE: absent from the walk
+    # entirely). Measured on its own: 928 B deepest resolved path
+    # (tick_timer_cb -> ... -> lv_malloc_core, cut short by an unresolved
+    # indirect call inside LVGL's own event-list cleanup), well under
+    # ui_home_refresh_cb's 4128 B, so adding it to extra_roots (below)
+    # does not change this ceiling. Honest free at 4880 B: 3012 B
+    # (36.8% of the declared 8192 B) -- thin relative to some other
+    # tasks in this table, but unchanged from the 2026-09-09 baseline,
+    # and this is the task named in the 2026-09-04 panic post-mortem, so
+    # thin margin here is flagged, not just noted: if a future page or
+    # callback measurably deepens this task's real worst case, treat it
+    # as a hazard needing review, not a routine ceiling bump.
     "lvgl": 4880,
     # 3152 = 3008 (prior baseline, 2026-09-09) + 144, from bfa60679
     # ("Refuse to start a firing on a quarantined zones config, surface it
