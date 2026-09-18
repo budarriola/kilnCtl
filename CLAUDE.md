@@ -375,18 +375,30 @@ script fails to load, and the Bash tool still reports exit 0 for the wrapper
 host-test builds need a short worktree path (e.g. `C:\wt\...`); the default
 `.claude/worktrees/...` path overflows the MSVC command line.
 
-As of 2026-09-15 it runs its ~94 checks in two phases — the two full target
-builds (`check_00_kilnfw_target_build.ps1`, `check_00_saftyfw_target_build.ps1`)
-concurrently, then everything else throttled in parallel (`-MaxParallel`,
-default 8) — so a full run finishes in under 3 minutes on this 24-core
-machine instead of exceeding the 600s tool timeout. `-Only <regex>`/`-Skip
-<regex>` filter by repo-relative path for iterating on one check; `-Fast`
-skips only the two target builds for a caller that just ran one itself,
-never any other check. A SKIP now **fails the overall run by default**
-(some KilnFW stack-budget checkers SKIP on a 0-byte/in-flight ELF, which
-parallel execution can make more likely, so a skip is no longer safely
-ignorable) — pass `-AllowSkips` to opt back into treating skips as
-non-fatal on a machine that genuinely and permanently lacks a prerequisite.
+As of 2026-09-17 it discovers 110 checks (`-ListOnly` at commit `599734f1`;
+re-verify with a fresh `-ListOnly` run since this count drifts as checks are
+added) and runs them in three phases — phase 1 is three full target builds
+(`check_00_kilnfw_target_build.ps1`, `check_00_saftyfw_target_build.ps1`,
+`check_00_kilnfw_recovery_target_build.ps1`) concurrently; phase 2 is
+everything else throttled in parallel (`-MaxParallel`, default 8); phase 3
+is `check_ui_responsive_sweep.ps1` alone (`-MaxParallel 1`, forced serial
+since `eefff2dc` — it drives real headless Chrome over CDP and flaked under
+phase 2's concurrent load) — so a full run finishes in under 3 minutes on
+this 24-core machine instead of exceeding the 600s tool timeout. `-Only
+<regex>`/`-Skip <regex>` filter by repo-relative path for iterating on one
+check; `-Fast` skips all three phase-1 target builds for a caller that just
+ran one itself, never any other check. **Caveat:** `-Fast` then makes
+`check_recovery_image_size.ps1` (phase 2) SKIP, because it grades
+`recovery.bin`, which the skipped `check_00_kilnfw_recovery_target_build.ps1`
+would otherwise have produced — and since a SKIP fails the overall run by
+default (see next), a `-Fast` run on an otherwise perfectly healthy tree
+still comes back red with one unexplained skip, which reads exactly like a
+regression. This is expected from `-Fast`, not a sign anything is broken. A
+SKIP now **fails the overall run by default** (some KilnFW stack-budget
+checkers SKIP on a 0-byte/in-flight ELF, which parallel execution can make
+more likely, so a skip is no longer safely ignorable) — pass `-AllowSkips`
+to opt back into treating skips as non-fatal on a machine that genuinely and
+permanently lacks a prerequisite.
 
 A 2026-09-04 panic (`safety_poll`, `IllegalInstruction`, `exc_addr 0x0`) ran
 five hours unnoticed before `get_heap_status` was fixed to surface it (see
