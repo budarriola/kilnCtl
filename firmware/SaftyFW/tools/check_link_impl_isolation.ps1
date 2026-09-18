@@ -277,7 +277,48 @@ $allowlistPaths = @(
     # called "crc", not a from-scratch reimplementation of the link
     # protocol.
     (Join-Path $firmwareRoot "KilnFW\App\drivers\persist\cfg_fs_format_gate.c"),
-    (Join-Path $firmwareRoot "KilnFW\App\test\test_cfg_fs_format_gate.c")
+    (Join-Path $firmwareRoot "KilnFW\App\test\test_cfg_fs_format_gate.c"),
+
+    # 2026-09-18: ota_image_crc.c/.h -- the ESP's CRC-32 over a STAGED PICO
+    # IMAGE, introduced by fabd270f. Same class as every entry above, and in
+    # fact the weakest possible case for a real violation:
+    #   - Different algorithm and purpose. This is standard CRC-32/zlib
+    #     (0xEDB88320, init 0xFFFFFFFF, final XOR 0xFFFFFFFF) over a firmware
+    #     IMAGE, compared byte-for-byte against SaftyFW's bootloader_crc32()
+    #     -- which is itself the FIRST entry in this very allowlist, for
+    #     exactly this reason. It is not the link's CRC16-CCITT-FALSE
+    #     framing, and has no byte-stuffing anywhere near it.
+    #   - It contains NO CRC arithmetic that could drift. The entire module
+    #     is a delegation to esp_rom_crc32_le(): no polynomial, no bit loop,
+    #     no table, no final XOR. It matches this check's pattern only on the
+    #     shape "integer return type + an identifier containing crc + an open
+    #     paren" -- the same false-positive shape as safety_cfg_store_cached_
+    #     crc() (a plain field accessor) and the esp_crc.h/esp_rom_crc.h
+    #     stubs already allowlisted above.
+    #   - It exists to ELIMINATE a duplicate, not to add one. Before fabd270f
+    #     this CRC was open-coded inline in ota_http_pico.c with the wrong
+    #     parameterization (seed 0xFFFFFFFF plus a caller-side final XOR, on
+    #     top of a primitive that already complements at both ends), so the
+    #     ESP and the Pico disagreed about the ARITHMETIC and no ESP-driven
+    #     Pico firmware update could ever have succeeded -- precisely the
+    #     silent two-implementations-drift failure this check exists to
+    #     prevent. Factoring it into one small, ESP-IDF-free, LINKABLE module
+    #     is what lets a known-answer test exist at all (test_ota_image_crc.c
+    #     asserts CRC-32("123456789") == 0xCBF43926, the same number
+    #     SaftyFW's own bootloader_crc32() test asserts): HTTP handlers in
+    #     this tree are target-build-only and never link into the host suite,
+    #     so a test written against ota_pico_do_stage() would never have run.
+    #     Pushing this arithmetic back out of a linkable module to satisfy a
+    #     name-shaped grep would delete the only thing pinning the fix. See
+    #     docs/audits/pico_ota_staged_crc_mismatch_2026-09-18.md.
+    # Allowlisted by path with a written reason, per this file's standing
+    # convention, rather than by widening $crcPattern: the pattern's breadth
+    # is what makes it catch a genuine from-scratch reimplementation, and an
+    # exemption a reader cannot audit is how a check becomes decorative.
+    # (test_ota_image_crc.c needs no entry -- it defines no function whose
+    # name matches, only void test_* helpers, and must stay scanned.)
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\http\ota_image_crc.c"),
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\http\ota_image_crc.h")
 )
 
 # Concurrent sessions are the norm in this repo: another agent's in-flight
