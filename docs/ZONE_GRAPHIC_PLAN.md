@@ -296,14 +296,38 @@ from it. Vector-drawn only — **no raster images, no data: URIs, no external
 resources of any kind**: the board serves one flash-resident page and cannot
 reach a CDN.
 
-**Payload — measured, and over budget.** The page was 209,656 bytes raw and
-66,986 gzipped before this work. It is now **238,929 raw and 76,466 gzipped:
-+29,273 raw and +9,480 gzipped**, measured with gzip -9, the same compressor
-and level the CMake configure step uses. The budget this section set was **no
-more than 12 KB raw and 4 KB gzipped**, so the delivered graphic is roughly
-2.4x over on the number that matters.
+**Payload — MEASURED, and the budget is now the measurement.** The figure this
+section originally carried (no more than 12 KB raw and 4 KB gzipped) was a
+guess written before the feature had a shape; the delivered feature costs
+roughly 2.4x that gzipped. **The budget is therefore reset to the measured
+cost: +9.5 KB gzipped for the graphic, with the whole page at ~76 KB
+gzipped.** Those are the numbers to hold, and future growth is measured
+against them, not against the old guess.
 
-That budget was written before the feature had a shape, and it did not survive
+The measurements, all `gzip -9` (the same compressor and level the CMake
+configure step uses), taken over committed file content:
+
+| Point | Raw | Gzipped |
+|---|---|---|
+| Before the graphic (`ed9b678c^`) | 206,166 | 66,597 |
+| Graphic landed (`ed9b678c`) | 234,952 | 76,058 |
+| **Delta attributable to the graphic** | **+28,786** | **+9,461** |
+| Page today (`1baa828c`, relay device types) | 236,587 | 76,570 |
+
+Re-measured 2026-09-18 by piping
+`git show <rev>:firmware/KilnFW/App/drivers/http/zones_page.html` through
+`gzip -9 -c | wc -c`. An earlier pass recorded +29,273 raw / +9,480 gzipped
+from the on-disk working copy; the difference is line endings (the checkout is
+CRLF, the committed blob LF) plus the working copy not sitting exactly at the
+commit. Either way the gzipped delta is ~9.5 KB.
+
+**Owner decision, 2026-09-18 — accept the size, keep every click-popup
+explanation string.** The overrun was reviewed and accepted as delivered: the
+popups are the largest single cost and are the feature rather than decoration.
+**The page size is not an open defect and must not be re-opened as one** — it
+is a recorded, accepted cost.
+
+The old budget was written before the feature had a shape, and it did not survive
 three of the owner's own requirements. The click-popups are the largest single
 cost: the owner asked for icons that "pop up information when clicked", so each
 badge carries the explanatory prose it shows, and that prose is the feature

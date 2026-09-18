@@ -450,13 +450,44 @@ Per channel, stored in flash, all **measured**:
 | `zero_counts` | **both** | Mean ADC reading with the CT fitted and **no primary current**, over ≥ 10 s | small positive; op-amp Vos and D14 leakage, *not* 0 |
 | `i_present_a` | **guards** | Set between the noise floor and a conducting element. Coarse by design | 2.0 A |
 | `k_ct_v_per_a` | power estimate, **and the presence threshold's domain conversion** | **Calibrated by the ESP's zone current-sweep (§5.1)**, or manually via the commissioning page's A_fs/zero_mv fields (below) — the operator types the probe's own rated amps and zero-current output, and the ESP derives `k_ct_v_per_a = 1/A_fs`/`zero_counts` and pushes them | e.g. 0.0333 V/A for a 1 V/30 A CT |
-| `gain` | power estimate only | 0.715 nominal, refined if the resistors are not 1 % | 0.715 |
+| `gain` | power estimate, **and the presence threshold's domain conversion** (same commissioned branch as `k_ct_v_per_a` above) | 0.715 nominal, refined if the resistors are not 1 % | 0.715 |
 | `mains_voltage_v` | power estimate only | The installation's nominal supply voltage | 240 |
 
-Only the first two affect guard behaviour. **A wrong `k_ct_v_per_a` produces a
-wrong number on a display and changes nothing else** — which is the whole
-benefit of the scope limit in §0: current accuracy is a display concern, not a
-safety one.
+**Corrected 2026-09-18 — this table used to say `gain` was cosmetic, and that
+was false** (owed as of commit `3fa86a69`). `zero_counts` and `i_present_a`
+affect guard behaviour unconditionally. `k_ct_v_per_a` and `gain` affect it
+**conditionally**: both are factors of the commissioned-branch domain
+conversion in `current_presence_is_flowing()`
+(`firmware/SaftyFW/src/current_presence_policy.c`), which computes
+`v_present = i_present_a · gain · √2 · k_ct_v_per_a` and then tests
+`counts_avg − zero_counts > v_present · 4096 / vref`. Raising either constant
+raises the counts threshold, so a channel reads as *not* flowing sooner;
+lowering either makes it read as flowing sooner. That branch runs whenever
+`k_ct_v_per_a > 0 && i_present_a > 0 && gain > 0`, and `gain` is always `> 0`
+at the only production call site — `current_sense.c` substitutes
+`CS_DEFAULT_GAIN` for a cal field `<= 0.0f` before calling (its
+`resolved_gain`). When `k_ct_v_per_a <= 0` (uncommissioned) the conversion is
+bypassed entirely for the fixed
+`CURRENT_PRESENCE_POLICY_FALLBACK_MARGIN_COUNTS` floor, and neither constant
+matters.
+
+`present[n]` is what `current_any_present()` (`snapshots.h`) ORs across
+channels into `safety_guard_input_t::any_current_present`, so the guards that
+inherit a wrong `gain` are: **S3** (`SAFETY_TRIP_LOAD_STUCK_ON`, the welded-SSR
+guard — presence with nothing commanded), **S9** (presence after K4 was
+de-energized; `trip_ineffective` latch, or `s9_uncommissioned_warn`), **S6b**
+(`SAFETY_TRIP_LINK_DEAD`'s soft `link_timeout_s`-with-current-present branch),
+**S4** (WARN only — `relay_commanded_continuously && !any_current_present`),
+and **S11** (frozen-sensor, armed from the same fact via safety_core.c's
+`.heat_commanded = any_current_present`).
+
+What remains true, and is the scope limit in §0: no guard tests a current
+*magnitude* — there is no over/under-current guard, only presence. But
+presence is a safety fact, so "display concern only" is the wrong summary for
+either constant. Both are coarse-tolerance in practice (`i_present_a` is
+documented as tolerating one to two orders of magnitude of slack, and `gain`
+is a 1 % resistor ratio), so refining `gain` within its tolerance does not
+move the threshold meaningfully — a grossly wrong one does.
 
 **2026-08-24 note, made true by this date's commit, not before it.** From
 Phase 6 (this file's original commit) until 2026-08-24, this claim was
