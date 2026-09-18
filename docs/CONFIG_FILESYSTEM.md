@@ -45,6 +45,19 @@ opposite policy from the `logs` partition, deliberately: silently erasing
 tuning data is the worst failure mode here). It is skipped entirely in
 recovery mode.
 
+**Kiln packages live here too, and they are the one thing in `cfg` that
+spans both processors.** `kiln_cfg_store` keeps up to 10 named slots, each
+holding a zones-config blob *and* a copy of the RP2040's commissioning
+parameters, dual-written to `cfg` alongside NVS on the same NVS-authoritative
+rule as everything else in this document. Applying one is therefore not a
+file write — it is a two-processor transaction (`kiln_cfg_swap.c`), which
+records its progress in a marker so a crash mid-apply is recoverable at the
+next boot rather than leaving the two processors silently holding different
+configurations. The marker states and the recovery rules are owned by
+`docs/KILN_PROFILES_PLAN.md` §4.4; what matters for *this* document is that
+`cfg` is not the authority for the Pico's half — the Pico's own 4 K record
+store is, and the copy here is a snapshot used to re-push it.
+
 **As of 2026-09-07 `cfg_fs_mount_device()` (`main_boot_early.c`) now runs at
 boot and auto-formats any partition with no valid LittleFS filesystem in
 it** — see "Auto-format and the ask-first path" below. This is source and

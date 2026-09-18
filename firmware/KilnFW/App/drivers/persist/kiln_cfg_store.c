@@ -1378,6 +1378,40 @@ static bool apply_hardware_differs(const kiln_pkg_safety_t *pico, char *msg, siz
     return false;
 }
 
+/* Public read-only wrapper over apply_hardware_differs(), for the one caller
+ * that must ask the question WITHOUT applying: kiln_cfg_http.c's apply
+ * handler, since docs/KILN_PROFILES_PLAN.md item 5 moved the actual apply
+ * onto kiln_cfg_swap_apply(), whose signature has no ack_hardware_differs
+ * parameter of its own. Without this, routing the HTTP apply through the
+ * two-processor transaction would silently drop section 5.3 table row 4's
+ * gate entirely -- the gate would still exist in kiln_cfg_store_apply()
+ * while nothing reached it. Exported rather than duplicated so the field
+ * list (ct_installed / ct_topology / safety_tc_installed) keeps exactly one
+ * definition; a second copy here is precisely the "reset one side of a
+ * pair" shape CLAUDE.md warns about.
+ *
+ * Deliberately takes NO lock, matching kiln_cfg_store_apply()'s own call to
+ * apply_hardware_differs() a few lines below (which likewise reads
+ * s_store.entries[idx].pico unlocked) -- taking one only here would
+ * introduce a lock-ordering question against live_pico_param_bits()'s own
+ * module that the existing call site does not have. Returns false for an
+ * unknown id and for a half-package slot (pico_populated == 0): both are
+ * refused by kiln_cfg_store_apply()/kiln_cfg_swap_apply() for their own,
+ * better-worded reasons, and reporting "hardware differs" for a slot that
+ * has no Pico half to compare would send the operator to the wrong
+ * problem. */
+bool kiln_cfg_store_slot_hardware_differs(int32_t id, char *msg, size_t msg_cap)
+{
+    if (msg && msg_cap) {
+        msg[0] = '\0';
+    }
+    int idx = find_index_by_id(id);
+    if (idx < 0 || !s_store.entries[idx].pico_populated) {
+        return false;
+    }
+    return apply_hardware_differs(&s_store.entries[idx].pico, msg, msg_cap);
+}
+
 bool kiln_cfg_store_apply(int32_t id, bool ack_no_safety_processor, bool ack_hardware_differs,
                           char *reason_out, size_t reason_cap)
 {

@@ -420,6 +420,15 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # that gap is caught rather than silently shipping a
                        # host-only module.
                        "persist/kiln_cfg_swap.c"
+                       # docs/KILN_PROFILES_PLAN.md item 5's "TASK PLACEMENT"
+                       # acceptance criterion -- the dedicated task that runs
+                       # kiln_cfg_swap_apply(), which must be neither the
+                       # httpd worker (8192 B stack already at a 4832 B
+                       # measured ceiling, and this transaction blocks for
+                       # minutes) nor the flash worker (zones_config_import_
+                       # blob() dispatches to it internally, so re-entering
+                       # it deadlocks the board). See kiln_cfg_swap_worker.h.
+                       "persist/kiln_cfg_swap_worker.c"
                        # docs/KILN_PROFILES_PLAN.md items 1/2/12 -- Pico-half
                        # packaging and package-identity hash for kiln_cfg_
                        # store.c's saved slots (walks the ESP-side mirror of

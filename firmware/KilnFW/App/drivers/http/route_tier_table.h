@@ -213,6 +213,13 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/api/profile/builtin/hide", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/profile/builtin/restore", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/kiln_configs/apply", HTTP_POST, ROUTE_TIER_ADMIN),
+    /* Read-only progress/outcome of the apply the ADMIN route above starts
+     * (the apply is asynchronous since item 5's worker landed, so its result
+     * needs a route of its own). USER, matching GET /api/kiln_configs
+     * itself: it reports a state enum, the target id and the board's own
+     * refusal text, discloses no configuration content, and cannot start,
+     * alter or cancel a swap. */
+    ROUTE_TIER("/api/kiln_configs/apply_status", HTTP_GET, ROUTE_TIER_USER),
     ROUTE_TIER("/api/kiln_configs/clone", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/kiln_configs/delete", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/kiln_configs/import", HTTP_POST, ROUTE_TIER_ADMIN),

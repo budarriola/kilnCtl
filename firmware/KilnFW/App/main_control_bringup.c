@@ -152,6 +152,21 @@ void main_control_bringup(main_boot_ctx_t *ctx)
      * store_set_swap_pending_source()'s doc comment (kiln_cfg_store.h). */
     kiln_cfg_store_set_swap_pending_source(kiln_cfg_swap_is_pending);
 
+    /* docs/KILN_PROFILES_PLAN.md item 5. kiln_cfg_swap.c holds the safety
+     * link as a module pointer handed to it once at bring-up -- the same
+     * convention safety_ceiling_sync and safety_cfg_http already use, there
+     * being no global safety-link getter in this codebase. Installed HERE,
+     * beside the other two seams registered just above, rather than at the
+     * HTTP call site: safety_link_start() ran at the top of this function,
+     * and kiln_cfg_swap_boot_recover() (called from main_network_http.c
+     * after kiln_cfg_store_init()) needs the link already installed to
+     * finish or roll back an interrupted swap. Passing NULL when
+     * safety_link_start() failed is not a case to special-case away --
+     * kiln_cfg_swap_apply()/_boot_recover() both document refusing with a
+     * reason rather than dereferencing it, and a board with no safety
+     * processor must never be able to swap a kiln package at all. */
+    kiln_cfg_swap_set_link(safety_err == ESP_OK ? &ctx->safety : NULL);
+
     // kiln_io_owner (TODO.md 10.14 Phase 1): the single task that writes
     // relay/expander state from here on -- must start before anything that
     // can issue a relay/IO command does (profile_executor, autotune,

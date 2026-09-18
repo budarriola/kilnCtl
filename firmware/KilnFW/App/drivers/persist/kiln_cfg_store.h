@@ -184,6 +184,25 @@ int32_t kiln_cfg_store_get_active_id(void);
  * not exist, or a NULL/zero-capacity out buffer, leaving *out untouched. */
 bool kiln_cfg_store_get_name(int32_t id, char *out, size_t out_cap);
 
+/* True if slot `id`'s saved Pico half describes a DIFFERENT hardware shape
+ * than what is physically fitted right now (CT count/topology, safety
+ * thermocouple presence), writing a human-readable description of the
+ * difference into *msg. Read-only: asks the question without applying
+ * anything.
+ *
+ * Exists because docs/KILN_PROFILES_PLAN.md item 5 moved the real apply onto
+ * kiln_cfg_swap_apply(), which has no ack_hardware_differs parameter -- so
+ * the HTTP apply handler must ask this itself, before dispatching, or
+ * section 5.3's hardware-differs gate would be left with nothing reaching
+ * it. Exported rather than duplicated at the call site so the compared field
+ * list keeps exactly one definition.
+ *
+ * False for an unknown id, and false for a slot whose Pico half was never
+ * captured -- both are refused further down for their own, better-worded
+ * reasons, and answering "hardware differs" for a slot with no Pico half to
+ * compare would point the operator at the wrong problem. */
+bool kiln_cfg_store_slot_hardware_differs(int32_t id, char *msg, size_t msg_cap);
+
 /* Saves the CURRENT LIVE zones config (zones_config_export_blob()) under
  * `name`.
  *

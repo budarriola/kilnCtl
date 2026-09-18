@@ -745,6 +745,115 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
 
 /* ---- boot recovery (section 4.4 / plan item 8) ---------------------------- */
 
+/* Deliberately its own NON-INLINED frame, not a branch of the switch in
+ * kiln_cfg_swap_boot_recover() below.
+ *
+ * GCC sums the locals of sibling switch branches into one frame, so while
+ * this code sat inline it contributed target_blob[896] + live_blob[896] +
+ * a kiln_pkg_safety_t + two reason buffers to EVERY path through boot
+ * recovery, including the paths that never touch a target slot. Measured,
+ * that made boot_recover's own frame 4928 B, and the deepest path through it
+ * 8192 B once the safety-link push chain beneath it is counted -- which
+ * overflowed the `main` task (check_main_task_stack_budget.ps1, budget
+ * 6144 B) and would equally have overflowed this feature's own 8192 B worker
+ * task, with 112 B to spare. A boot-time stack overflow here is not a clean
+ * crash: it smashes the return address and the board takes an
+ * IllegalInstruction panic with a corrupted backtrace
+ * (docs/audits/boot_hang_2026-09-08.md), which is how this board has been
+ * bricked into a recovery loop before.
+ *
+ * `noinline` is load-bearing, not decorative: without it the compiler is
+ * free to fold this straight back into the caller and silently restore the
+ * oversized frame. The budget check would catch that, but only after it had
+ * already been written. */
+/* Portable noinline, same guard and same reason as safety_cfg_store.c's
+ * SAFETY_CFG_STORE_NOINLINE and autotune_engine.c's AUTOTUNE_ENGINE_NOINLINE:
+ * this file's own host test (test_kiln_cfg_swap.c, MSVC via
+ * build_host_tests.ps1) does not understand GCC/Xtensa's
+ * __attribute__((noinline)) syntax at all -- under cl.exe it is a hard syntax
+ * error, not a no-op, and it cascades into a dozen misleading "undeclared
+ * identifier" errors further down this function. Note that
+ * tools/run_all_checks.ps1 does NOT build the C host suite (only
+ * check_js_host_tests.ps1); that gate is tools/verify.ps1, so a green
+ * run_all_checks does not prove this compiles under MSVC. Behaviour on the
+ * real ESP-IDF (Xtensa GCC) target, which is the only build whose stack
+ * budget is measured, is unchanged. */
+#if defined(_MSC_VER)
+#define KILN_CFG_SWAP_NOINLINE
+#else
+#define KILN_CFG_SWAP_NOINLINE __attribute__((noinline))
+#endif
+
+static void KILN_CFG_SWAP_NOINLINE finish_esp_done(SafetyLinkClass *link, const kiln_cfg_swap_pending_t *p)
+{
+    /* The one case where FINISHING is correct (section 4.4): both sides
+     * already claim P. Re-verify both independently (never either side's
+     * cache) and only then finish. */
+    uint8_t target_blob[sizeof(p->rollback_blob)];
+    uint16_t target_blob_len = 0;
+    kiln_pkg_safety_t target_pico;
+    char sub[KILN_CFG_SWAP_REASON_MAX];
+    sub[0] = '\0';
+    if (!kiln_cfg_store_get_full_package(p->target_id, target_blob, sizeof(target_blob), &target_blob_len,
+                                         &target_pico, sub, sizeof(sub))) {
+        ESP_LOGE(TAG, "boot: ESP_DONE recovery could not re-read target slot %ld: %s -- rolling back "
+                      "to the pre-swap config instead",
+                 (long)p->target_id, sub);
+        if (link && rollback(link, p, /*esp_was_committed=*/true, sub, sizeof(sub))) {
+            clear_pending();
+        } else {
+            ESP_LOGE(TAG, "boot: ESP_DONE fallback rollback also failed: %s -- staying alarmed", sub);
+            char op_reason[KILN_CFG_SWAP_REASON_MAX + 128];
+            snprintf(op_reason, sizeof(op_reason),
+                     "an interrupted kiln-config swap's target slot could not be re-read at boot, and "
+                     "the fallback rollback also failed (%.40s) -- heaters stay alarmed/disabled; apply a "
+                     "kiln config again to clear this", sub);
+            latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_ESP_DONE_UNCONFIRMED, p->target_id, op_reason);
+        }
+        return;
+    }
+    kiln_cfg_store_lock();
+    uint8_t live_blob[sizeof(target_blob)];
+    bool esp_matches = zones_config_export_blob(live_blob, sizeof(live_blob)) &&
+                       memcmp(live_blob, target_blob, target_blob_len) == 0;
+    kiln_cfg_store_unlock();
+    bool pico_matches = false;
+    if (link && safety_cfg_store_refetch(link, 0)) {
+        pico_matches = pico_readback_matches(&target_pico, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, sub, sizeof(sub));
+    }
+    if (esp_matches && pico_matches) {
+        kiln_cfg_store_lock();
+        kiln_cfg_store_set_active_id_raw(p->target_id, sub, sizeof(sub));
+        kiln_cfg_store_unlock();
+        /* step 13, same as kiln_cfg_swap_apply()'s own -- best-effort,
+         * allowed to fail, never affects the outcome already decided
+         * above. */
+        float target_ceiling = 0.0f;
+        bool have_target_ceiling = false;
+        for (uint16_t i = 0; i < target_pico.count; i++) {
+            if (target_pico.entries[i].param_id == SAFETY_PARAM_ID_ABS_MAX_TEMP_C &&
+                (target_pico.entries[i].flags & KILN_PKG_PARAM_FLAG_SET)) {
+                memcpy(&target_ceiling, &target_pico.entries[i].value_bits, sizeof(target_ceiling));
+                have_target_ceiling = true;
+                break;
+            }
+        }
+        persist_pico_flash_fallback(link, &target_pico, target_ceiling, have_target_ceiling);
+        clear_pending();
+        ESP_LOGW(TAG, "boot: ESP_DONE swap confirmed complete on both sides -- finished");
+    } else {
+        ESP_LOGE(TAG, "boot: ESP_DONE could not confirm both sides on the new config (esp_matches=%d "
+                      "pico_matches=%d) -- staying alarmed, will retry",
+                 (int)esp_matches, (int)pico_matches);
+        char op_reason[KILN_CFG_SWAP_REASON_MAX];
+        snprintf(op_reason, sizeof(op_reason),
+                 "an interrupted kiln-config swap could not be confirmed on both processors at boot "
+                 "(esp=%s, pico=%s) -- heaters stay alarmed/disabled; apply a kiln config again to "
+                 "clear this", esp_matches ? "ok" : "mismatch", pico_matches ? "ok" : "mismatch");
+        latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_ESP_DONE_UNCONFIRMED, p->target_id, op_reason);
+    }
+}
+
 void kiln_cfg_swap_boot_recover(void)
 {
     kiln_cfg_swap_pending_t p;
@@ -828,75 +937,12 @@ void kiln_cfg_swap_boot_recover(void)
             latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_FAILED, p.target_id, op_reason);
         }
         return;
-    case KILN_CFG_SWAP_MARKER_ESP_DONE: {
-        /* The one case where FINISHING is correct (section 4.4): both
-         * sides already claim P. Re-verify both independently (never
-         * either side's cache) and only then finish. */
-        uint8_t target_blob[sizeof(p.rollback_blob)];
-        uint16_t target_blob_len = 0;
-        kiln_pkg_safety_t target_pico;
-        char sub[KILN_CFG_SWAP_REASON_MAX];
-        sub[0] = '\0';
-        if (!kiln_cfg_store_get_full_package(p.target_id, target_blob, sizeof(target_blob), &target_blob_len,
-                                             &target_pico, sub, sizeof(sub))) {
-            ESP_LOGE(TAG, "boot: ESP_DONE recovery could not re-read target slot %ld: %s -- rolling back "
-                          "to the pre-swap config instead",
-                     (long)p.target_id, sub);
-            if (link && rollback(link, &p, /*esp_was_committed=*/true, sub, sizeof(sub))) {
-                clear_pending();
-            } else {
-                ESP_LOGE(TAG, "boot: ESP_DONE fallback rollback also failed: %s -- staying alarmed", sub);
-                char op_reason[KILN_CFG_SWAP_REASON_MAX + 128];
-                snprintf(op_reason, sizeof(op_reason),
-                         "an interrupted kiln-config swap's target slot could not be re-read at boot, and "
-                         "the fallback rollback also failed (%.40s) -- heaters stay alarmed/disabled; apply a "
-                         "kiln config again to clear this", sub);
-                latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_ESP_DONE_UNCONFIRMED, p.target_id, op_reason);
-            }
-            return;
-        }
-        kiln_cfg_store_lock();
-        uint8_t live_blob[sizeof(target_blob)];
-        bool esp_matches = zones_config_export_blob(live_blob, sizeof(live_blob)) &&
-                           memcmp(live_blob, target_blob, target_blob_len) == 0;
-        kiln_cfg_store_unlock();
-        bool pico_matches = false;
-        if (link && safety_cfg_store_refetch(link, 0)) {
-            pico_matches = pico_readback_matches(&target_pico, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, sub, sizeof(sub));
-        }
-        if (esp_matches && pico_matches) {
-            kiln_cfg_store_lock();
-            kiln_cfg_store_set_active_id_raw(p.target_id, sub, sizeof(sub));
-            kiln_cfg_store_unlock();
-            /* step 13, same as kiln_cfg_swap_apply()'s own -- best-effort,
-             * allowed to fail, never affects the outcome already decided
-             * above. */
-            float target_ceiling = 0.0f;
-            bool have_target_ceiling = false;
-            for (uint16_t i = 0; i < target_pico.count; i++) {
-                if (target_pico.entries[i].param_id == SAFETY_PARAM_ID_ABS_MAX_TEMP_C &&
-                    (target_pico.entries[i].flags & KILN_PKG_PARAM_FLAG_SET)) {
-                    memcpy(&target_ceiling, &target_pico.entries[i].value_bits, sizeof(target_ceiling));
-                    have_target_ceiling = true;
-                    break;
-                }
-            }
-            persist_pico_flash_fallback(link, &target_pico, target_ceiling, have_target_ceiling);
-            clear_pending();
-            ESP_LOGW(TAG, "boot: ESP_DONE swap confirmed complete on both sides -- finished");
-        } else {
-            ESP_LOGE(TAG, "boot: ESP_DONE could not confirm both sides on the new config (esp_matches=%d "
-                          "pico_matches=%d) -- staying alarmed, will retry",
-                     (int)esp_matches, (int)pico_matches);
-            char op_reason[KILN_CFG_SWAP_REASON_MAX];
-            snprintf(op_reason, sizeof(op_reason),
-                     "an interrupted kiln-config swap could not be confirmed on both processors at boot "
-                     "(esp=%s, pico=%s) -- heaters stay alarmed/disabled; apply a kiln config again to "
-                     "clear this", esp_matches ? "ok" : "mismatch", pico_matches ? "ok" : "mismatch");
-            latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_ESP_DONE_UNCONFIRMED, p.target_id, op_reason);
-        }
+    case KILN_CFG_SWAP_MARKER_ESP_DONE:
+        /* Body lives in finish_esp_done() above, in its own non-inlined
+         * frame -- see that function's comment for the stack arithmetic that
+         * forced the split. Behaviour is unchanged. */
+        finish_esp_done(link, &p);
         return;
-    }
     default:
         ESP_LOGE(TAG, "boot: pending swap record has an unrecognised marker %u -- treating as unrecoverable",
                  (unsigned)p.marker);

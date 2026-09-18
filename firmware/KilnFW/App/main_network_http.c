@@ -66,6 +66,8 @@
 #include "safety_stack_margin_http.h"
 #include "safety_cfg_store.h"
 #include "kiln_cfg_store.h"
+#include "kiln_cfg_swap.h"        /* kiln_cfg_swap_boot_recover() -- plan section 4.4 */
+#include "kiln_cfg_swap_worker.h" /* the dedicated apply task -- plan item 5 */
 #include "zones_http.h"
 
 #include "main_internal.h"
@@ -679,6 +681,36 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
         ESP_LOGW(MAIN_TAG, "kiln_cfg_store_init failed: %s -- saved kiln configs unavailable this boot",
                  esp_err_to_name(kiln_cfg_store_err));
     }
+    /* docs/KILN_PROFILES_PLAN.md item 5 / section 4.4. Boot recovery for an
+     * interrupted two-processor swap is NOT called here -- it runs as the
+     * swap worker task's first act, before that task takes any job (see
+     * kiln_cfg_swap_worker.c). Two reasons, either sufficient: called inline
+     * on the `main` task it contributed a 4928 B frame plus the safety-link
+     * push chain beneath it, overflowing main's stack budget
+     * (check_main_task_stack_budget.ps1); and it performs a full re-push and
+     * verify against the Pico, a multi-second-to-minutes UART exchange that
+     * has no business stalling the rest of boot bringup -- including the
+     * HTTP server that is the operator's only way to see it happening.
+     * kiln_cfg_swap_worker_start() below is therefore also what schedules
+     * recovery, and it is started AFTER kiln_cfg_store_init() just above
+     * (kiln_cfg_swap.h states that ordering explicitly -- recovery reads and
+     * may rewrite the slot store) and after main_control_bringup.c's
+     * kiln_cfg_swap_set_link(). */
+
+    /* The dedicated task that runs kiln_cfg_swap_apply() -- NOT the httpd
+     * worker and NOT the flash worker; kiln_cfg_swap_worker.h carries both
+     * exclusions and the stack arithmetic behind them. Started BEFORE
+     * kiln_cfg_http_start() below so the apply route is never live with no
+     * worker behind it. A failure here is logged, not fatal: the apply
+     * route then refuses every request with that reason, rather than
+     * accepting one and silently doing nothing. */
+    esp_err_t kiln_cfg_swap_worker_err = kiln_cfg_swap_worker_start();
+    if (kiln_cfg_swap_worker_err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "kiln_cfg_swap_worker_start failed: %s -- applying a saved kiln config is "
+                      "unavailable this boot (reading, saving and exporting still work)",
+                 esp_err_to_name(kiln_cfg_swap_worker_err));
+    }
+
     esp_err_t kiln_cfg_http_err = kiln_cfg_http_start();
     if (kiln_cfg_http_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "kiln_cfg_http_start failed: %s -- no /api/kiln_configs this boot",

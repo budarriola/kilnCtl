@@ -68,6 +68,21 @@
   .kc-active-tag { font-size: 0.8em; color: var(--ok); font-weight: bold; margin-left: 0.3em; }
   #kcConfigMsg { font-size: 0.85em; color: var(--muted); margin-top: 0.2em; }
   #kcConfigMsg.kc-error { color: var(--bad); }
+  /* Divergence banner -- plan section 7.3. Deliberately has NO dismiss
+     control: config divergence disables the heaters and stays true until the
+     two processors actually agree again, so a banner the operator could
+     close would be a banner that lies about a live fault. It is hidden only
+     by the condition itself clearing on the next poll. */
+  #kcDivergeBanner { border: 2px solid var(--bad); border-left-width: 6px; border-radius: 4px;
+    background: var(--card-bg); color: var(--fg); padding: 0.8em 1em; margin: 1em 0; }
+  #kcDivergeBanner h2 { margin: 0 0 0.4em 0; border-top: none; padding-top: 0; color: var(--bad);
+    font-size: 1em; }
+  #kcDivergeBanner .kc-diverge-detail { color: var(--muted); font-size: 0.9em; margin: 0.3em 0 0 0; }
+  .kc-scope-note { font-size: 0.9em; }
+  .kc-ack-row { display: flex; flex-wrap: wrap; gap: 0.4em; align-items: flex-start;
+    font-size: 0.85em; color: var(--muted); }
+  .kc-ack-row label { display: flex; gap: 0.4em; align-items: flex-start; cursor: pointer; }
+  .kc-ack-row input[type=checkbox] { min-width: 20px; min-height: 20px; margin-top: 0.15em; }
 </style>
 </head>
 <body>
@@ -79,12 +94,47 @@ limits (everything <a href="/settings/zones">Thermocouples &amp; Zones</a>
 covers) -- distinct from a firing PROFILE (a temperature schedule), which is
 managed on the <a href="/profiles">Firing profiles</a> page instead.</p>
 
+<!-- The exact IN/OUT sentence from docs/KILN_PROFILES_PLAN.md section 1.4.
+     Shipped verbatim on purpose: an operator who guesses wrong about what a
+     package carries either loses work they thought was saved, or ships a
+     kiln package expecting it to move their Wi-Fi settings and firing
+     schedules with it. -->
+<p class="kc-scope-note">A kiln package carries everything about the kiln &mdash; wiring,
+sensors, tuning, guards and the safety processor's limits. It does not carry
+firing schedules, Wi-Fi settings, or this controller's own logs and counters.</p>
+
+<!-- Populated by refreshDivergence() from /api/readiness's
+     "safety_ceiling_match" item, which carries the full reason text; the
+     dashboard's own /api/status "safety_diverged" flag is a bare boolean
+     (dashboard_status_http.c deliberately omits the reason for buffer-size
+     reasons), so it can say THAT but never WHY. No dismiss control. -->
+<div id="kcDivergeBanner" role="alert" hidden>
+  <h2>Safety configuration mismatch &mdash; heaters disabled</h2>
+  <p class="kc-diverge-detail" id="kcDivergeDetail"></p>
+  <p class="kc-diverge-detail">The controller and the safety processor are not holding
+  the same configuration. Applying a kiln config below re-pushes both halves together,
+  which is the normal way to clear this.</p>
+</div>
+
 <div class="card" id="kilnConfigCard">
   <div id="kilnConfigPicker" hidden>
     <label for="kilnConfigSelect">Kiln config</label>
     <select id="kilnConfigSelect"></select>
     <button id="kcApplyBtn" type="button">Apply</button>
     <div id="kcConfigMsg"></div>
+    <!-- Unchecked by default, and NOT remembered between applies: the board
+         refuses with 428 when the saved package describes different physical
+         hardware than what is fitted, and this box is the operator's answer
+         to that specific refusal. A sticky checkbox would silently pre-answer
+         a question about a DIFFERENT slot the next time. -->
+    <div class="kc-ack-row">
+      <label for="kcAckHwDiffers">
+        <input type="checkbox" id="kcAckHwDiffers">
+        <span>Apply even if the saved config expects different hardware (CT count/topology,
+        safety thermocouple) than what is fitted. Only tick this if you know the wiring
+        changed on purpose.</span>
+      </label>
+    </div>
     <div class="kc-manage-body">
       <div class="kc-manage-row">
         <input type="text" id="kcSaveNewName" placeholder="Save current setup as...">
@@ -235,26 +285,134 @@ document.getElementById('kcApplyBtn').addEventListener('click', function () {
                'If your current settings aren\'t saved anywhere, save them first ' +
                '(below) or they will be lost.')) return;
   kcSetMsg('Applying...', false);
-  kcPost('/api/kiln_configs/apply', 'id=' + encodeURIComponent(cfg.id)).then(function (result) {
-    // The backend refuses this outright while a firing is running or heaters
-    // are on -- that refusal must read as a clear, specific refusal, never
-    // as a generic failure and never as if it quietly succeeded. ALSO
-    // re-check the resulting active_id matches what was requested, rather
-    // than trusting a 2xx+ok:true body alone.
-    var failed = !result.httpOk || result.body.ok === false;
-    if (failed) { kcHandleResult(result, ''); return; }
-    loadKilnConfigs().then(function () {
-      if (String(kilnConfigsCache.active_id) === String(cfg.id)) {
-        kcSetMsg('Applied "' + cfg.name + '". Relay/thermocouple/PID/guard settings are now live.', false);
-      } else {
-        // POST reported success but the config that's actually active
-        // afterward doesn't match what we asked for -- do not claim success
-        // for something we can't confirm happened.
-        kcSetMsg('Apply did not take effect as expected -- reload and check the active config before relying on it.', true);
-      }
-    });
+  // Not kcPost(): this one needs its own header. The hardware-differs ack is
+  // a header (X-Kiln-Ack-Hardware-Differs), matching how app.js's
+  // kcFetchWithSafetyAck carries X-Ota-Ack-No-Safety -- but app.js only ever
+  // adds the SAFETY one, so this page must supply this one itself.
+  var headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
+  if (document.getElementById('kcAckHwDiffers').checked) {
+    headers['X-Kiln-Ack-Hardware-Differs'] = '1';
+  }
+  window.kcFetchWithSafetyAck('/api/kiln_configs/apply', {
+    method: 'POST', headers: headers, body: 'id=' + encodeURIComponent(cfg.id),
+  }).then(function (r) {
+    // 428 is the hardware-differs refusal, and the body IS the explanation of
+    // what differs -- surface it verbatim and point at the checkbox, rather
+    // than letting it read as a generic failure the operator cannot act on.
+    if (r.status === 428) {
+      return r.text().then(function (t) {
+        kcSetMsg((t || 'This config expects different hardware than what is fitted.') +
+                 ' Tick the hardware box above if that change was deliberate, then Apply again.', true);
+      });
+    }
+    if (!r.ok) {
+      return r.text().then(function (t) {
+        var msg = t;
+        try { var j = JSON.parse(t); if (j && j.error) msg = j.error; } catch (e) { /* raw text */ }
+        kcSetMsg(msg || 'Apply failed.', true);
+      });
+    }
+    // 202: ACCEPTED, not finished. The apply runs on its own task (it talks
+    // to the safety processor and writes flash), so the real outcome only
+    // exists at /api/kiln_configs/apply_status. Claiming success here would
+    // be claiming an outcome nothing has confirmed.
+    kcSetMsg('Applying "' + cfg.name + '"... (pushing to the safety processor)', false);
+    return pollApplyStatus(cfg);
+  }).catch(function (e) {
+    kcSetMsg('Apply failed: ' + (e && e.message ? e.message : 'error'), true);
   });
 });
+
+// Polls until the worker leaves "running". Bounded: a swap that never
+// reports a terminal state must end as an explicit "cannot confirm", never
+// as a spinner that reads as success or a poll that runs forever.
+function pollApplyStatus(cfg) {
+  var attempts = 0;
+  var MAX_ATTEMPTS = 60; // ~60 s at 1 s cadence
+  return new Promise(function (resolve) {
+    function tick() {
+      fetch('/api/kiln_configs/apply_status').then(function (r) {
+        if (!r.ok) throw 0;
+        return r.json();
+      }).then(function (st) {
+        if (st.state === 'running') {
+          if (++attempts >= MAX_ATTEMPTS) {
+            kcSetMsg('Apply is still running after ' + MAX_ATTEMPTS + 's -- reload and check the ' +
+                     'active config before relying on it.', true);
+            resolve();
+            return;
+          }
+          setTimeout(tick, 1000);
+          return;
+        }
+        if (st.state === 'done_failed') {
+          // diverged is the materially worse outcome: the two processors are
+          // now holding DIFFERENT configs and the heaters are disabled until
+          // that is resolved. Must not read the same as a clean refusal that
+          // changed nothing.
+          kcSetMsg((st.reason || 'Apply failed.') +
+                   (st.diverged ? ' The safety processor is now out of sync and heating is disabled.'
+                                : ' Nothing was changed.'), true);
+          refreshDivergence();
+          loadKilnConfigs();
+          resolve();
+          return;
+        }
+        // done_ok (or idle, if the worker was reset under us): still confirm
+        // against the board's own active_id rather than trusting the status.
+        loadKilnConfigs().then(function () {
+          if (String(kilnConfigsCache.active_id) === String(cfg.id)) {
+            kcSetMsg('Applied "' + cfg.name + '". Relay/thermocouple/PID/guard settings and the ' +
+                     'safety processor\'s limits are now live.', false);
+          } else {
+            kcSetMsg('Apply did not take effect as expected -- reload and check the active config ' +
+                     'before relying on it.', true);
+          }
+          refreshDivergence();
+          resolve();
+        });
+      }).catch(function () {
+        // No apply_status route (older firmware) -- fall back to confirming
+        // via active_id, which is the check this page always had.
+        loadKilnConfigs().then(function () {
+          var ok = String(kilnConfigsCache.active_id) === String(cfg.id);
+          kcSetMsg(ok ? 'Applied "' + cfg.name + '".'
+                      : 'Could not confirm the apply -- reload and check the active config.', !ok);
+          resolve();
+        });
+      });
+    }
+    setTimeout(tick, 500);
+  });
+}
+
+// The standing divergence invariant (plan section 7.3): poll it, show it,
+// never let the operator dismiss it. Reason text comes from /api/readiness's
+// "safety_ceiling_match" item. A missing route or item is treated as "no
+// divergence to report" -- the banner is hidden rather than showing an
+// alarming empty box on firmware that predates the item.
+function refreshDivergence() {
+  return fetch('/api/readiness').then(function (r) {
+    if (!r.ok) throw 0;
+    return r.json();
+  }).then(function (data) {
+    var items = (data && Array.isArray(data.items)) ? data.items : [];
+    var item = items.filter(function (i) { return i && i.key === 'safety_ceiling_match'; })[0];
+    // readiness_http.c's status_name(): "ok" | "not_done" | "cannot_yet" |
+    // "deliberately_off". Only "not_done" means an actual confirmed mismatch.
+    // "cannot_yet" is the safety link being DOWN -- the board cannot read the
+    // Pico's ceiling at all, which is its own separate problem and must not
+    // be shown as "the two processors disagree": claiming a mismatch we
+    // cannot actually see would send the operator to re-push a config that
+    // may be perfectly fine.
+    var bad = !!item && item.status !== 'ok' && item.status !== 'cannot_yet' &&
+              item.status !== 'deliberately_off';
+    document.getElementById('kcDivergeBanner').hidden = !bad;
+    if (bad) document.getElementById('kcDivergeDetail').textContent = item.detail || '';
+  }).catch(function () {
+    document.getElementById('kcDivergeBanner').hidden = true;
+  });
+}
 
 document.getElementById('kcSaveNewBtn').addEventListener('click', function () {
   var input = document.getElementById('kcSaveNewName');
@@ -371,6 +529,11 @@ document.getElementById('kcUploadBtn').addEventListener('click', function () {
 });
 
 loadKilnConfigs();
+refreshDivergence();
+// Keep the banner honest while the page sits open: divergence can begin (or
+// clear) from the LCD, another browser, or a Pico reboot, none of which this
+// page initiates.
+setInterval(refreshDivergence, 10000);
 </script>
 </body>
 </html>

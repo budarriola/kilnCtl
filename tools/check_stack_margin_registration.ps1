@@ -153,7 +153,15 @@ $requiredNames = @(
     "bx_flash_worker", "info_uart_bridge", "system_uart_bridge", "httpd_worker",
     "uart_owner_evt_task", "uart_proto_rx",
     "thermo_uart_bridge", "touch_uart_bridge", "ui_test_uart_bridge",
-    "io_uart_bridge", "uart_log_bridge", "safety_uart_bridge"
+    "io_uart_bridge", "uart_log_bridge", "safety_uart_bridge",
+    # docs/KILN_PROFILES_PLAN.md item 5 -- the dedicated kiln-config swap
+    # worker (kiln_cfg_swap_worker.c), added here in the SAME commit as its
+    # stack_margin_register() call site per this script's own header rule.
+    # It runs the deepest non-httpd call chain that feature has (a stack-
+    # allocated kiln_cfg_swap_pending_t is ~1.7 kB on its own frame), which
+    # is precisely why it is not allowed on the shared httpd worker stack --
+    # so its live margin has to stay measurable.
+    "kiln_cfg_swap"
 )
 # 2026-09-08: the six UART bridge tasks above (thermo/touch/ui_test/io/
 # uart_log/safety) were long-lived (`while (true)`, never self-deleting)

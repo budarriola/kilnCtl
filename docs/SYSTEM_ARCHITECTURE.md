@@ -82,6 +82,8 @@ Summary of what a system-level reader needs:
 | Who commands heat | ESP (K1–K3 element relays) | Refused by `relay_authority_on_blocked()` if the safety link is down or faulted |
 | Who vetoes heat | RP2040 (K4 pilot relay) | Never blockable by the ESP; K4 is the RP2040's own GPIO |
 | Protocol version check | Mutual, both directions (`ANNOUNCE_VERSION`) | A mismatch makes the ESP treat the link as dead; the Pico enters `DEGRADED_NO_CONTEXT` **without** latching a trip — a version skew during development must not read as a dangerous kiln |
+| Who owns the Pico's configuration | The Pico (its own 4 K record store). The ESP holds only a *snapshot* of it inside each saved kiln package | Applying a kiln package pushes both halves in one transaction (`kiln_cfg_swap.c`), on its own task — never on an httpd worker |
+| If the two halves disagree | Standing **config divergence**: alarm, heaters disabled, latched with no operator dismiss control until the halves match again | Compared by format version + hash identity, not field-by-field. Surfaced by `/api/status`'s `safety_diverged` (boolean only) and, with the reason text, by `/api/readiness`'s `safety_ceiling_match` item |
 
 **Ground-bonding hazard, stated once because it matters at the bench, not
 just on paper:** a debug probe or USB cable on the Pico ties `GND_Safty` to

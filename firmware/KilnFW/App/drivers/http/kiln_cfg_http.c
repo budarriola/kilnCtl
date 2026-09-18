@@ -11,6 +11,7 @@
 #include "config_divergence.h" /* CONFIG_DIVERGENCE_REASON_MAX */
 #include "http_form.h"
 #include "kiln_cfg_store.h"
+#include "kiln_cfg_swap_worker.h" /* item 5 -- the apply runs on its own task, not this one */
 #include "ota_http.h"
 #include "safety_ceiling_sync.h" /* 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md,
                                    * LOW) -- warn on an explicit save while diverged */
@@ -341,14 +342,106 @@ static esp_err_t apply_post_handler(httpd_req_t *req)
         return ota_http_send_interlock_refusal(req, gate, reason);
     }
 
+    /* Section 5.3 table row 4, checked HERE rather than inside the apply.
+     *
+     * This gate used to be a parameter of kiln_cfg_store_apply() (the
+     * ESP-only path this handler called before item 5 landed).
+     * kiln_cfg_swap_apply() -- the two-processor transaction this handler
+     * now dispatches -- has no ack_hardware_differs parameter, so routing
+     * the apply through it without this block would silently drop the gate:
+     * it would still exist in kiln_cfg_store_apply() with nothing left
+     * reaching it. kiln_cfg_store_slot_hardware_differs() is the same
+     * predicate that gate always used, exported rather than re-implemented
+     * so the compared field list keeps exactly one definition. Refused with
+     * 428 (not 409) for the same reason the no-safety-processor interlock
+     * uses it: this is a refusal the operator CAN answer, by re-sending
+     * with the ack header -- which is exactly what the page's
+     * "hardware differs" checkbox does. */
+    if (!req_ack_hardware_differs(req)) {
+        char hw_msg[192];
+        if (kiln_cfg_store_slot_hardware_differs(id, hw_msg, sizeof(hw_msg))) {
+            ESP_LOGW(TAG, "kiln config apply id=%ld refused, hardware shape differs: %s", (long)id, hw_msg);
+            httpd_resp_set_status(req, "428 Precondition Required");
+            return httpd_resp_sendstr(req, hw_msg);
+        }
+    }
+
+    /* Item 5: DISPATCHED, never run here. kiln_cfg_swap_apply() performs a
+     * 60+ round-trip UART exchange with the safety processor plus a flash
+     * write, and stack-allocates ~1.7 kB; running it on this httpd worker
+     * would blow an 8192 B stack already measured at a 4832 B ceiling and
+     * wedge every other page on the board for the duration. See
+     * kiln_cfg_swap_worker.h. The interlock pre-check above is therefore no
+     * longer redundant belt-and-braces: it is the only thing that can turn
+     * an interlock refusal into a real HTTP status code, since the worker's
+     * own check runs after this handler has already answered. */
+    /* 96, NOT KILN_CFG_SWAP_REASON_MAX (200), and deliberately the same size
+     * this handler always used. This buffer is on the shared httpd worker
+     * stack, whose honest free margin is already classified LOW; the only
+     * reasons that reach it are the submit-side refusals ("an apply is
+     * already running"), which are far shorter than 96. The long reasons --
+     * the ones actually sized for KILN_CFG_SWAP_REASON_MAX -- come from the
+     * transaction itself and are read back from apply_status_get_handler(),
+     * which keeps its buffers `static` for exactly this reason. */
     char apply_reason[96];
     apply_reason[0] = '\0';
-    const bool ack_hw = req_ack_hardware_differs(req);
-    if (!kiln_cfg_store_apply(id, ack, ack_hw, apply_reason, sizeof(apply_reason))) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, apply_reason[0] ? apply_reason : "apply failed");
-        return ESP_OK;
+    if (!kiln_cfg_swap_worker_submit(id, ack, apply_reason, sizeof(apply_reason))) {
+        /* Set explicitly rather than via httpd_resp_send_err(): esp_http_server
+         * has no HTTPD_409_CONFLICT enumerator. 409 is the right code here --
+         * a refusal the operator cannot argue with (an apply is already in
+         * flight), unlike the 428 above, which they CAN answer with the ack
+         * header. */
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, apply_reason[0] ? apply_reason : "apply could not start");
     }
-    return httpd_resp_sendstr(req, "ok");
+    /* 202, not 200: the swap has been accepted and is running, and is NOT
+     * finished when this returns. A caller that reported "applied" off this
+     * response alone would be claiming an outcome nothing has confirmed --
+     * the exact "logging unchecked success" shape this repo already has a
+     * name for. GET /api/kiln_configs/apply_status is where the real
+     * outcome comes from. */
+    httpd_resp_set_status(req, "202 Accepted");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true,\"state\":\"running\"}");
+}
+
+/* ---- GET /api/kiln_configs/apply_status ------------------------------------
+ *
+ * The outcome half of the asynchronous apply above. Reports the worker's
+ * state enum, the target id, whether a failure left the board DIVERGED
+ * (heaters disabled, banner showing) as opposed to merely refused with
+ * nothing changed, and the board's own refusal text verbatim. */
+static esp_err_t apply_status_get_handler(httpd_req_t *req)
+{
+    kiln_cfg_swap_job_state_t state = KILN_CFG_SWAP_JOB_IDLE;
+    int32_t target_id = -1;
+    bool diverged = false;
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    kiln_cfg_swap_worker_get_status(&state, &target_id, &diverged, reason, sizeof(reason));
+
+    const char *state_str = "idle";
+    switch (state) {
+    case KILN_CFG_SWAP_JOB_RUNNING:     state_str = "running";     break;
+    case KILN_CFG_SWAP_JOB_DONE_OK:     state_str = "done_ok";     break;
+    case KILN_CFG_SWAP_JOB_DONE_FAILED: state_str = "done_failed"; break;
+    case KILN_CFG_SWAP_JOB_IDLE:
+    default:                            state_str = "idle";        break;
+    }
+
+    /* Escaped: `reason` can carry a slot name that came from a POST body at
+     * some point, same reasoning as this file's other json_escape() uses.
+     * Sized against KILN_CFG_SWAP_REASON_MAX (200) doubled for worst-case
+     * escaping, plus the fixed envelope -- a `static` buffer, deliberately,
+     * to keep it off the shared 8192 B httpd worker stack (the same
+     * discipline save_post_handler()'s own divergence_reason buffer uses). */
+    static char escaped[KILN_CFG_SWAP_REASON_MAX * 2 + 8];
+    json_escape(reason, escaped, sizeof(escaped));
+
+    static char out[KILN_CFG_SWAP_REASON_MAX * 2 + 128];
+    int n = snprintf(out, sizeof(out), "{\"state\":\"%s\",\"id\":%ld,\"diverged\":%s,\"reason\":\"%s\"}",
+                     state_str, (long)target_id, diverged ? "true" : "false", escaped);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, out, n > 0 && (size_t)n < sizeof(out) ? (size_t)n : strlen(out));
 }
 
 /* ---- POST /api/kiln_configs/delete -- id=<int> ---------------------------- */
@@ -554,6 +647,9 @@ esp_err_t kiln_cfg_http_start(void)
     static const httpd_uri_t apply_uri = {
         .uri = "/api/kiln_configs/apply", .method = HTTP_POST, .handler = apply_post_handler,
     };
+    static const httpd_uri_t apply_status_uri = {
+        .uri = "/api/kiln_configs/apply_status", .method = HTTP_GET, .handler = apply_status_get_handler,
+    };
     static const httpd_uri_t delete_uri = {
         .uri = "/api/kiln_configs/delete", .method = HTTP_POST, .handler = delete_post_handler,
     };
@@ -567,8 +663,8 @@ esp_err_t kiln_cfg_http_start(void)
         .uri = "/api/kiln_configs/import", .method = HTTP_POST, .handler = import_post_handler,
     };
 
-    const httpd_uri_t *uris[] = { &page_uri,   &list_uri,   &save_uri,  &clone_uri,  &apply_uri,
-                                 &delete_uri, &rename_uri, &export_uri, &import_uri };
+    const httpd_uri_t *uris[] = { &page_uri,   &list_uri,   &save_uri,   &clone_uri,  &apply_uri,
+                                 &apply_status_uri, &delete_uri, &rename_uri, &export_uri, &import_uri };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         esp_err_t err = kiln_http_register(server, uris[i]);
         if (err != ESP_OK) {
