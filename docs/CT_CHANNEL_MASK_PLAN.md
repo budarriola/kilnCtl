@@ -119,49 +119,84 @@ full stop, regardless of topology.
   guard behaviour must not change on a firmware upgrade that merely adds this
   field but is never explicitly re-commissioned with it.
 
-### Does this force a `format_version`/`ZONES_CFG_VERSION` bump?
+### Storage decision: bump `CONFIG_STORE_FORMAT_VERSION` (owner decision, 2026-09-18)
 
-**Recommendation: no `format_version` bump, and `ZONES_CFG_VERSION` (26) is
-untouched — but this needs explicit owner sign-off before landing, flagged
-here prominently, because the `fields_set` widening is the one part of this
-plan that is not a pure append.**
+**Decided: `CONFIG_STORE_FORMAT_VERSION` (`firmware/SaftyFW/src/config_store.h:157`,
+currently 2) bumps to `CONFIG_STORE_FORMAT_VERSION + 1` (3). `fields_set`
+widens to `uint32_t` in place, at its existing offset
+(`REC_OFF_FIELDS_SET`, `config_store.c:126`, 12), adding
+`CONFIG_STORE_SET_ZONE_CT_CHANNEL` at bit 16 — the widening the header
+comment at `config_store.h:373-376` already flagged as needing exactly this.
+The earlier `fields_set2`-second-bitmask idea (a same-length widening
+avoiding a version bump) was shown to the owner alongside this option,
+including the rollback hazard the bump carries (below), and was rejected in
+favor of the bump. This is a decision, not a correction — the analysis that
+produced `fields_set2` was sound; the owner weighed the accepted cost
+differently. Do not implement `fields_set2`.**
 
-Reasoning for "no bump needed": `config_store.c`'s existing migration path
-already treats an old record's unknown/absent bytes as zero-filled (the
-`ct_topology`/`safety_tc_installed_marker` marker-byte convention exists
-precisely so absent-field bytes decode safely), and growing `fields_set` from
-2 to 4 bytes only *adds* meaning to bits that a v2-format record never set
-(bits 16-31 read as 0 on any record written before this change, which is
-exactly "not set" — the correct decode). Every fixed-offset field after
-`REC_OFF_FIELDS_SET` shifts by +2 bytes under the new layout, but since this
-plan is choosing the byte range from the untouched 269-byte reserved block for
-the *new* field's own storage, the shift only has to move `format_version`
-readers off a **hardcoded offset table**, not off actual stored bytes at
-those offsets — i.e. this is a code change to `config_store.c`'s pack/unpack
-functions, not a wire-format break for a record written by *this* build.
+This record format has no `ZONES_CFG_VERSION`-style separate blob-length
+table: `CONFIG_STORE_RECORD_LEN` is a fixed 512 bytes for every format
+version (`config_store.h:143`), and version discrimination is by
+`format_version` field plus a per-version CRC region
+(`REC_OFF_CRC`/`REC_V1_OFF_CRC`), not by exact decoded length. The 5 bytes
+this change needs (2 for the `fields_set` widening, 3 for
+`zone_ct_channel[3]`) come out of the 269-byte reserved block
+(`REC_OFF_RESERVED`/`REC_RESERVED_LEN`, `config_store.c:222-223`), so
+`CONFIG_STORE_RECORD_LEN` itself does not change.
 
-The genuine risk this plan must not paper over: a record written by *new*
-firmware (32-bit `fields_set`, `zone_ct_channel` populated) read by *old*
-firmware that still expects a 16-bit `fields_set` at that offset would
-misparse everything after it (reading `zone_ct_channel`'s low two bytes as
-part of the old 2-byte field, and every subsequent offset 2 bytes short).
-This is the standard "new-record-old-firmware" hazard `ZONES_CFG_VERSION`
-exists to gate — so the concrete owner question is: **is a same-length
-`fields_set` widening achievable without shifting any existing offset**, by
-instead adding a **second bitmask word** (`fields_set2`, new `uint32_t` — or
-even `uint16_t`, since only one new bit is needed — carved out of the 269-byte
-reserved block at a new fixed offset, e.g. immediately after
-`estop_active_level` at offset 235) rather than widening `fields_set` in
-place. That fully avoids the shift-everything-after-it hazard the header
-comment's "last free bit" note was warning about, at the cost of one extra
-bitmask field instead of a wider one. **This plan recommends the
-`fields_set2` approach over widening `fields_set` in place**, specifically
-because it keeps every existing offset byte-for-byte unchanged and therefore
-needs no `format_version` bump and no `ZONES_CFG_VERSION` bump — the
-in-place-widening path in the previous paragraph is described only to show
-why it was rejected, not as a live option. Recommend this to the owner
-explicitly rather than assuming it; it is the one architectural fork in this
-plan with real backward-compatibility stakes.
+**What the bump obliges**, verified against `config_store.c`'s one existing
+migration case (format_version 1 to 2, the only precedent this store has —
+there is no `zones_cfg_vN_t`-style historical struct anywhere in this file;
+migration here works directly off byte-offset constants, and the same style
+carries forward):
+
+- A new pair of frozen offset constants for the layout being superseded,
+  mirroring `REC_V1_OFF_*` (`config_store.c:252-259`): `REC_V2_OFF_*` for
+  every field from `REC_OFF_FIELDS_SET` onward, at their **current** (pre-bump)
+  offsets, plus `REC_V2_OFF_CRC` at the current `REC_OFF_CRC` (504) — the v2
+  CRC region is exactly today's whole record, unchanged. The live `REC_OFF_*`
+  table then moves to the new v3 offsets: unchanged through
+  `REC_OFF_FIELDS_SET` (12, still the start of the field), every offset from
+  `REC_OFF_TC_SOURCE` (today 14) onward shifted by +2, and `zone_ct_channel[3]`
+  and `REC_OFF_CRC` still land inside the (now 264-byte) reserved block, at
+  504, same as today.
+- A new `#define CONFIG_STORE_FORMAT_VERSION_V2 2u`, alongside the existing
+  `CONFIG_STORE_FORMAT_VERSION_V1` (`config_store.h:165`), and a new
+  `if (version == CONFIG_STORE_FORMAT_VERSION_V2)` branch in
+  `config_store_unpack_ex()` (`config_store.c:729` is today's `V1` branch;
+  the new branch is its sibling), same shape: verify the CRC against the OLD
+  (`REC_V2_OFF_CRC`) region, then read every field at its `REC_V2_OFF_*`
+  offset into a scratch record seeded by `config_store_default()` (so
+  `zone_ct_channel` starts at the compiled identity default, `fields_set`'s
+  new bit starts clear), zero-extend the old 16-bit `fields_set` into the new
+  32-bit field (bits 16-31 correctly read as unset — a v2 record never had
+  them), derive `zone_ct_channel` from the migrated `ct_topology` byte using
+  this plan's own old-record rule above, set `scratch.format_version =
+  CONFIG_STORE_FORMAT_VERSION`, then run `config_params_validate_ranges()`
+  exactly as the v1 branch does before accepting. Unlike the v1-to-v2
+  migration, this one must **not** force `calibration_missing = true` — v2's
+  own commissioning surface (current-sense calibration, `i_normal_a`, etc.)
+  is untouched by this plan, so a migrated record is exactly as commissioned
+  as it always was; only `zone_ct_channel` is new, and it has its own
+  documented safe default.
+- The existing `CONFIG_STORE_FORMAT_VERSION_V1` branch needs no change beyond
+  what already happens automatically: it seeds from `config_store_default()`
+  (already giving `zone_ct_channel` the identity default) and stamps
+  `format_version = CONFIG_STORE_FORMAT_VERSION`, which becomes 3 the moment
+  the constant is bumped — a v1 record migrates straight through to v3
+  shape, skipping v2, exactly as today's v1 branch already skips no
+  intermediate version.
+- The static assertions bracketing the offset tables
+  (`config_store.c:267`, checking the current CRC region fits;
+  `config_store.c:277`, the equivalent for `REC_V1_*`) need a third instance
+  for `REC_V2_*`, and the existing one at line 267 needs to keep checking the
+  **new** (v3) `REC_OFF_RESERVED + REC_RESERVED_LEN <= REC_OFF_CRC` bound
+  after the reserved length shrinks from 269 to 264.
+- `config_store_pack()` and `unpack_v2_fields()` (today's names for the
+  current-version pack/unpack helpers) move to the new v3 offsets as part of
+  the same edit that updates the `REC_OFF_*` table — they read the table
+  symbolically, not a hardcoded literal, so this is confirming they need no
+  independent change, not adding one.
 
 ## S3/S4/S9/S11/S14/S15 walk
 
@@ -323,13 +358,16 @@ readiness check can substitute for that.
 1. Land the in-flight `s_current_sensing_commissioned`/channel-fitted helper
    (already in progress elsewhere) unchanged in behaviour for PER_ZONE/SUMMED
    — no dependency on this plan yet.
-2. Add `fields_set2`/the new bit, `zone_ct_channel[3]` storage, param ids
-   `0x0320`-`0x0322`, pack/unpack, and the old-record derivation
-   (`ct_topology` → `zone_ct_channel`) with the compiled default. No guard or
-   sweep behaviour changes yet — this step is purely additive storage,
-   verifiable by round-tripping every existing config-store host test
-   unmodified plus new ones for the derivation. Safe to land alone: nothing
-   reads the new field yet.
+2. Bump `CONFIG_STORE_FORMAT_VERSION` to 3, widen `fields_set` to `uint32_t`
+   in place and add its new bit, add `zone_ct_channel[3]` storage, param ids
+   `0x0320`-`0x0322`, the v2-to-v3 migration branch, and the old-record
+   derivation (`ct_topology` → `zone_ct_channel`) with the compiled default.
+   No guard or sweep behaviour changes yet — this step is purely additive
+   storage, verifiable by round-tripping every existing config-store host
+   test unmodified plus new ones for the migration and the derivation. Safe
+   to land alone: nothing reads the new field yet. This is also the step
+   that incurs the rollback cost recorded below — that cost lands with this
+   step, not with any later one.
 3. Wire the new-record → `ct_topology`/`ct_channel_map` back-fill (new
    firmware keeps old fields in sync on every write) and the collapse-check
    host tests proving PER_ZONE/SUMMED byte-for-byte unchanged. Still no guard
@@ -337,7 +375,8 @@ readiness check can substitute for that.
    Safe to land alone.
 4. Replace S14/S15's boolean branch with the generalised per-channel
    `member()` algorithm, gated so that for any record without the new
-   fields_set2 bit it is mathematically identical to today's two branches
+   `CONFIG_STORE_SET_ZONE_CT_CHANNEL` bit it is mathematically identical to
+   today's two branches
    (proven by the collapse argument above, exercised as negative/positive
    host tests per `SAFETY_MODEL.md`'s conventions — this is the step where a
    forced-wrong-membership negative test matters most, per this repo's
@@ -358,8 +397,36 @@ readiness check can substitute for that.
 silently disarm S14/S15 for a real split kiln (never for the two existing
 topologies, per the collapse proof) — the negative test for that step should
 specifically construct a two-CT-split fixture and confirm a deficit on one
-channel does NOT warn a zone attributed to the other channel. Step 2's
-`fields_set2` choice (rather than widening `fields_set`) is the one item
-flagged above as needing explicit owner sign-off before implementation
-starts, since it is the only fork in this plan with a `format_version`
-question attached.
+channel does NOT warn a zone attributed to the other channel. Step 2 carries
+the accepted rollback cost recorded below — the format_version bump was
+already decided (see the storage-decision section above), so this is a
+known, accepted cost of that step, not an open question.
+
+## Accepted cost: rolling back the Pico firmware after this lands
+
+Once a board has been commissioned with `zone_ct_channel` on `format_version`
+3 firmware, flashing a pre-bump SaftyFW build (`format_version` 2 or
+earlier) back onto the RP2040 makes that build's `config_store_unpack_ex()`
+see a `format_version` (3) greater than its own `CONFIG_STORE_FORMAT_VERSION`
+(2) and **refuse the record outright** (`config_store.c`'s final fallthrough,
+"anything else ... is refused, not reinterpreted"). The caller
+(`config_store_find_latest()`) then falls back to `config_store_default()`
+with `calibration_missing` forced true — every current-sense guard
+(S3/S9/S11/S14/S15) and every other `fields_set`-gated field on that board
+runs on **compiled defaults**, not the values it was actually commissioned
+with, with no separate warning beyond the pre-existing "calibration missing"
+state that condition already produces. This is the same class of hazard
+`CLAUDE.md` records for `ota_rollback_esp()` past a `zones_cfg` schema bump
+on the ESP side, applied here to the Pico's own, separate config store — the
+two are different subsystems on different processors, and this bump does not
+touch the ESP's `ZONES_CFG_VERSION` or its PID gains at all.
+
+The remedy is the same shape: after any rollback of the RP2040 firmware,
+read back the board's commissioned state (`GET_CONFIG_PAGE` / the
+commissioning page's own report of `calibration_missing` and per-channel
+values) before relying on any guard that depends on it, and recommission if
+the readback shows defaults. Flash is untouched by a rollback — reflashing
+the newer SaftyFW build restores the record exactly as it was, since
+`config_store_find_latest()` picks the newest valid slot and the old,
+now-unreadable v3 record is still sitting in flash, unmodified, waiting for
+firmware that understands it again.
