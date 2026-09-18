@@ -754,6 +754,53 @@ off behind something that makes its inertness explicit. Shipping a dormant
 write path that will wake up on the first field unit whose partition happens to
 be formatted is the bad third option. **Size: M. Desirable.**
 
+**Decision, 2026-09-17: PARKED, not finished.** Verified against the code and
+the live bench board rather than assumed:
+
+- The mount call (`cfg_fs_mount_device()`, wired into `main_boot_early.c`) and
+  the auto-format-or-ask gate both already exist in source (landed
+  2026-09-07, `docs/CONFIG_FILESYSTEM.md`). This is further along than
+  "nothing written" — the code is real and host-tested.
+- It has never run on the actual bench board. `get_fw_version()` against the
+  live board (2026-09-17) reports commit `3b0c82e`, built 2026-09-05, 1057
+  commits behind HEAD — i.e. the board's running firmware predates the mount
+  wiring entirely. `GET /api/cfgfs` on that board answers `no such endpoint`.
+  Every claim in `docs/CONFIG_FILESYSTEM.md` that the partition "is live" or
+  "mounts cleanly" describes what the code does, not anything observed on
+  hardware.
+- "Finish it" in the sense this section originally meant — exercise the
+  tie-break and fallback paths for real — requires reflashing the bench board
+  and then meeting `docs/FILESYSTEM_PLAN.md`'s own closing criterion (20
+  consecutive clean boots, one complete file-backed firing, one verified
+  backup/restore round trip). That is bench time and an owner-visible,
+  by-hand step (`docs/CONFIG_FILESYSTEM.md`'s "Dual-write window" section is
+  explicit that nothing may act on `window_may_close` automatically), not
+  something a coding pass can close. **Rejected** as out of scope for this
+  pass specifically because it requires flashing the board, which this pass
+  was not authorized to do.
+- What this pass instead confirmed and hardened is the property that makes
+  parking safe: NVS is authoritative and unconditional. Every one of the 11
+  production `*_cfg_fs_save()`/`*_cfg_fs_resolve()` call sites (across
+  `zones_config_store.c`, `kiln_cfg_store.c`, `profiles_http.c`,
+  `relay_cycles.c`, `unit_pref.c`, `display_power_cfg.c`,
+  `ramp_assist_cfg.c`, `time_sync.c`, `adaptive_tune.c`,
+  `profile_executor_firing_stats.c`) treats the file write as best-effort:
+  logged on failure, never gating the NVS write that follows. That is a
+  claim worth a mechanical guard rather than a one-time read, since it is
+  exactly the kind of cross-module contract this codebase has broken
+  silently before (see CLAUDE.md's "reset one side of a pair" bug class).
+  `tools/check_cfgfs_never_gates_nvs.py` (wired via
+  `tools/check_cfgfs_never_gates_nvs.ps1`) fails the build if any
+  `*_cfg_fs_save()` call site's captured return value ever gates a `return`
+  in the same function — negative-tested by inserting exactly that `return`
+  into `unit_pref.c` and confirming the check catches it, then restoring by
+  hand and confirming an unchanged `git hash-object`.
+- **To un-park:** reflash the bench board with current HEAD (or a clean
+  worktree build), confirm `GET /api/cfgfs` reports `mounted: true`, and run
+  the three-condition closing criterion above before removing any NVS
+  writer. None of that has started. **Size: M, and now dependent on bench
+  time. Desirable, not blocking.**
+
 ## 11. Desirable, not blocking — prove a fresh clone builds
 
 **Status, 2026-09-17: the sdkconfig-seeding gap this item was written about is
