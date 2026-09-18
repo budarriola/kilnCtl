@@ -85,6 +85,18 @@ extern const char *OTA_HTTP_TAG;
 // every mutating handler in the esp/pico/recovery files).
 void ota_http_get_client_ip(httpd_req_t *req, char *out, size_t out_len);
 
+// Checked variant (2026-09-18, d2c51f55 follow-up): same lookup, but
+// returns true only when a real client address was genuinely determined,
+// false when the caller is looking at the shared "unknown" collision
+// sentinel in `out`. A caller that merely COMPARES `out` against an
+// existing session's stored address can keep using the plain form above;
+// a caller that STORES/binds a new session to `out` must check this
+// return value and refuse rather than mint a session bound to a sentinel
+// other undetermined clients also share -- see ota_http.c's definition
+// and web_auth_login_http.c's login_post_handler() for the one call site
+// that needs the distinction today.
+bool ota_http_get_client_ip_checked(httpd_req_t *req, char *out, size_t out_len);
+
 // Formats a JSON response into `buf` (already built by the caller via
 // snprintf), clamped to `cap`, logging if the caller's own snprintf()
 // formatting failed or truncated. Used by every JSON-emitting handler

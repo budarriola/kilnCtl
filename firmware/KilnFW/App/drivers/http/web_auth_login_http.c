@@ -71,12 +71,6 @@
 
 static const char *TAG = "web_auth_login_http";
 
-// GET client IP -- same extraction helper http_auth_http.c already forward-
-// declares against ota_http.c's real (non-static) definition; declared here
-// too rather than pulled from a header ota_http.h does not itself expose it
-// through, matching that file's own precedent.
-void ota_http_get_client_ip(httpd_req_t *req, char *out, size_t out_len);
-
 // Checked variant (ota_http.c, 2026-09-18 follow-up to d2c51f55) -- same
 // lookup, but also reports whether a real address was resolved (true) or
 // the caller is looking at the shared "unknown" collision sentinel (false).
