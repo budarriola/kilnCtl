@@ -503,6 +503,26 @@ by hand, confirmed an empty `git diff` and a matching `git hash-object`,
 deleted the test build directory, forced a full rebuild, and reconfirmed
 182/182 GREEN.
 
+**`GET /api/status` closed the same way, same day (2026-09-17).** The
+analysis above was written against `GET /api/ota/esp/status`, but two of its
+three narrowing fields — the safety processor's exact commit hash and its
+dirty flag — were also reachable one OPEN route away, unauthenticated, on
+`route_tier_table.h`'s `ROUTE_TIER("/api/status", HTTP_GET,
+ROUTE_TIER_OPEN)`: `dashboard_status_get_handler()`
+(`dashboard_status_http.c`) unconditionally emitted `safety_build_commit`,
+`safety_build_datetime` and `safety_build_dirty` (the RP2040's build
+identity) and `fw_build` (the ESP's own build timestamp) to any caller,
+gated by nothing. Fixed with the identical `is_admin =
+http_auth_policy_web_enabled() && http_auth_caller_is_admin(req)` gate this
+section established, redacting only those four fields to JSON `null` for a
+non-admin caller (or when web auth is on but the caller holds no admin
+session); `safety_build_known`, `safety_config_version`,
+`safety_config_crc`, `fw_version` and `fw_version_known` stay unconditional,
+since none of them names a specific known defect and the dashboard needs the
+version/known-flags to render regardless of caller. The build-identity
+disclosure class named above is now closed across both routes that carried
+it.
+
 ---
 
 ## 3. Password and PIN strength rules
@@ -1351,9 +1371,11 @@ record (a "reset one side of a pair" shape), confirming RED —
 `kilnctl_host_tests_web_auth_store.exe` dropped from 149/149 to 144/149, with
 5 named `FAIL` lines pointing at `test_web_auth_store.c:514/520/522/524/537`.
 Restored by hand with Edit; `git diff` on `web_auth_store.c` showed only this
-session's real additions, and `git hash-object` matched the pre-sabotage hash,
-blob:firmware/KilnFW/App/drivers/persist/web_auth_store.c`0bd7cf9fa0ef5f41089eb96803f899f6cc0e9b46`,
-exactly. A forced full rebuild (the
+session's real additions, and `git hash-object` matched the pre-sabotage
+blob exactly (that blob was `web_auth_store.c` as committed in `8714ee31`;
+the file has legitimately moved on since -- most recently `ca7a7d31` -- so
+this is recorded as the point-in-time evidence it was, not a citation meant
+to keep grading against HEAD's current blob). A forced full rebuild (the
 `App/test/build` directory deleted first) then reported "all 50 host test
 executables built and passed", with `kilnctl_host_tests_web_auth_store.exe`
 at 149/149 and the combined `kilnctl_host_tests.exe` at 8789/8789.

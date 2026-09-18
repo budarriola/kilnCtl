@@ -287,8 +287,8 @@ if the Pico's diagnostics are too stale to trust.</p>
     var buildCard = document.getElementById('buildCard');
     if (st.safety_build_known) {
       buildCard.innerHTML =
-        row('Commit', st.safety_build_commit + (st.safety_build_dirty ? ' (dirty)' : '')) +
-        row('Built', st.safety_build_datetime) +
+        row('Commit', (st.safety_build_commit || '(hidden)') + (st.safety_build_dirty ? ' (dirty)' : '')) +
+        row('Built', st.safety_build_datetime || '(hidden)') +
         row('Config version', st.safety_config_version) +
         row('Config CRC', '0x' + hex16(st.safety_config_crc) +
             (st.safety_config_crc === 0 ? ' -- UNCOMMISSIONED (compiled-in defaults)' : ''));

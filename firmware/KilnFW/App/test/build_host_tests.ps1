@@ -753,6 +753,42 @@ try {
 
     Invoke-HostTestExe -Name "ota_http" -ExePath $exe8 -BuildCmd $cmd8
 
+    # ---- test_dashboard_status_http.c: its own NINTH, separate executable ----
+    # 2026-09-17 audit finding 7 follow-up: GET /api/status (ROUTE_TIER_OPEN,
+    # no credentials) leaked the same build-identity fields (fw_build,
+    # safety_build_commit/_datetime/_dirty) that 1a41a972 already redacted on
+    # GET /api/ota/esp/status. dashboard_status_get_handler() is `static` with
+    # no other seam into it, so this file #includes dashboard_status_http.c
+    # directly -- same convention as test_ota_http.c's own #include of
+    # ota_http.c above -- and needs its own executable for the same reason
+    # (file-scope TAG/static collisions with every other test executable).
+    # http_auth_http.c/http_auth_enforce.c/http_auth_policy_iface.c/
+    # http_session_iface.c/web_auth_store.c/web_auth_session.c linked in for
+    # REAL so the tests exercise the actual production gate
+    # (http_auth_policy_web_enabled() && http_auth_caller_is_admin()), not a
+    # transcribed stand-in for it -- same rationale as exe8 above.
+    $exe9 = Join-Path $outDir "kilnctl_host_tests_dashboard_status_http.exe"
+    $dashStatusObjDir = Join-Path $outDir "dashboard_status"
+    New-Item -ItemType Directory -Force -Path $dashStatusObjDir | Out-Null
+    # /I stubs_dashboard_status precedes @hostTestsRsp's own /I list so this
+    # executable's private lvgl_port.h shim (see that file's header comment)
+    # wins over the real drivers/ui/lvgl_port.h without touching the shared
+    # response file or any other executable's include resolution.
+    $dashStatusStubDir = Join-Path $testDir "stubs_dashboard_status"
+    $cmd9 = "call `"$vcvars`" x64 >nul && cl /I`"$dashStatusStubDir`" @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$dashStatusObjDir\\`" /Fe:`"$exe9`" " +
+            "`"$(Join-Path $testDir 'test_dashboard_status_http.c')`" " +
+            "`"$(Join-Path $driversDir 'http/dashboard_json.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "dashboard_status_http" -ExePath $exe9 -BuildCmd $cmd9
+
     # ---- test_uart_protocol_link_delegate.c: its own NINTH, separate executable
     # SaftyFW/TODO.md Phase 1's "KilnFW's uart_protocol.c delegating framing/CRC,
     # proven byte-identical" item -- see that file's own header comment. Needs
@@ -2123,7 +2159,11 @@ try {
     # 50 -> 51: this pass (docs/audits/web_auth_adversarial_review_2026-09-17.md
     # Findings 4/5) added test_web_auth_login_http.c as its own 51st
     # Invoke-HostTestExe call.
-    $totalExpected = 51
+    # 51 -> 52: 2026-09-17 audit finding 7 follow-up added
+    # test_dashboard_status_http.c as its own 52nd Invoke-HostTestExe call,
+    # proving GET /api/status's build-identity redaction (same gate 1a41a972
+    # established for GET /api/ota/esp/status).
+    $totalExpected = 52
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the
