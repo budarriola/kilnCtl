@@ -520,9 +520,67 @@ failed.**
 
 Remaining, unattempted this pass: the eighth pass's leftover items
 (`check_ui_responsive_sweep.ps1` negative test, both `check_00_*_target_
-build.ps1`/`check_01_*_pushed_build.ps1` pairs' FAIL paths), the 107-vs-108
-discovered-count discrepancy, and full Python-side coverage for the
-zero-production-caller sweep.
+build.ps1`/`check_01_*_pushed_build.ps1` pairs' FAIL paths — note these were
+in fact closed by the *other* ninth-pass thread above, which ran
+concurrently and was not cross-referenced here at the time of writing), the
+107-vs-108 discovered-count discrepancy, and full Python-side coverage for
+the zero-production-caller sweep.
+
+**Status, 2026-09-17 (tenth pass, host-only, no board touched).** Closed the
+two items this section's own text left open above.
+
+*Discovered-count discrepancy.* Re-run in a freshly minted worktree at
+current `origin/main`: **110 passed, 0 skipped, 0 failed** — neither 107 nor
+108 nor the 109 this plan's own instructions had been quoting. Traced this
+to the actual cause rather than reconciling a single snapshot: the suite is
+discovered by an unpinned `Get-ChildItem -Recurse -Filter "check_*.ps1"` glob
+(`tools/run_all_checks.ps1:157`) plus a handful of explicitly wired
+`test_*.ps1` files, and `origin/main` has had checks added by other,
+concurrently-running sessions between every one of these passes (the eighth
+pass's `test_check_ui_responsive_sweep.ps1`, the ninth pass's own additions,
+and others outside this plan's own edit history). **This is not a defect to
+reconcile** — the count is expected to keep moving under a shared, actively
+developed tree, exactly as this session's own operating instructions warn
+("expect `origin/main` to move under you"). There is nothing here that a
+fixed constant or a reconciliation table would keep correct for more than a
+few commits; the actionable invariant is what every pass has already been
+checking — `passed + skipped + failed` sums to the discovered total and
+`failed` is 0 — which this run satisfies (110 = 110 + 0 + 0).
+
+*Python-side zero-production-caller sweep.* Ran the same shape of sweep the
+ninth pass ran for C, applied for the first time to
+`tools/PcTools/tests` (137 `test_*.py` files): paired each with its
+production `<subject>.py` under `tools/PcTools/src/kilnctrl`,
+`tools/PcTools/src/mcpkit`, `tools/PcTools/scripts` and
+`tools/PcTools/ui_scripts`, ranked that file's top-level (non-underscore)
+functions by reference count in the test file, and `git grep`'d the 8
+most-referenced names per pairing (264 rows total) for call sites outside
+the defining file and outside any `tests` directory. 62 rows came back
+zero. 59 of the 62 were false zeros of the same shape the C sweep already
+named: a helper called only elsewhere in its own defining file (the
+grep intentionally excludes the defining file to look for *outside*
+callers, which undercounts these). The remaining 3 —
+`fuzzy_load_sweep.find_best_strength_per_load`,
+`http_capture_log.starting_temps_c`, `load_mass_sweep.run_profile7_loaded`
+— have no caller anywhere in the repository outside their own test files,
+confirmed by an unrestricted repo-wide `git grep` on each name (not just
+the ranked-candidate methodology). Checked each by hand against the
+`web_auth_table_create_session` shape this item's acceptance criteria is
+watching for (a live, wired-in production entry point nothing actually
+calls) and found a different, benign shape instead: all three live in
+one-off research/analysis modules (`fuzzy_load_sweep.py`, `load_mass_sweep.py`,
+`http_capture_log.py`) whose own module docstrings describe them as ad hoc,
+interactively-invoked sweep tooling for a specific owner request — none of
+the three files has a `__main__` block, a CLI entry point, or any documented
+invocation other than importing the module by hand. There is no dashboard,
+HTTP route, or scheduled job that should be calling these and silently
+isn't; they are unwired in the same sense every other function in these
+files not already covered above is unwired — by design, pending a human
+running the sweep again. No genuinely unwired *production* (safety- or
+runtime-relevant) function was found in the Python-side sweep. Suite
+verdict unaffected: no source change was needed, since every finding
+resolved to a false zero or a non-production research module — 110 passed,
+0 skipped, 0 failed after this pass (same run as above).
 
 **Already covered, name the evidence:** the two `check_01_*_pushed_build.ps1`
 scripts are the strongest single piece of process coverage in the repo. They
