@@ -13,11 +13,14 @@
 #include "esp_app_desc.h" /* esp_app_desc_t -- esp_ota_get_partition_description() (inactive slot) still uses this directly, out of hal_sysinfo's scope */
 #include "esp_app_format.h" /* esp_image_header_t, ESP_IMAGE_HEADER_MAGIC -- section 3's pre-esp_ota_begin() check */
 #include "hal_sysinfo.h" /* hal_sysinfo_get_build_info()/_get_running_partition() -- the RUNNING image's own version/label, see call sites below */
-#include "http_auth_http.h" /* http_auth_caller_is_admin() -- ota_esp_status_get_handler() below trims
-                              * exact commit/dirty/build-date identity to admins only; see call site */
-#include "http_auth_policy_iface.h" /* http_auth_policy_web_enabled() -- see the is_admin comment
-                                      * below (2026-09-17 audit finding 6) for why this route does
-                                      * not trust http_auth_caller_is_admin() alone */
+#include "http_auth_http.h" /* http_auth_caller_is_admin() -- ota_esp_status_get_handler() below
+                              * redacts exact commit/dirty/build-date identity unless the caller
+                              * may see it; see the may_see_build_identity comment at the call site */
+#include "http_auth_policy_iface.h" /* http_auth_policy_web_enabled() -- see the
+                                      * may_see_build_identity comment below
+                                      * (2026-09-17 audit finding 6, corrected same day)
+                                      * for why this route does not trust
+                                      * http_auth_caller_is_admin() alone */
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
@@ -565,19 +568,28 @@ esp_err_t ota_esp_status_get_handler(httpd_req_t *req)
     // the authorization answer for that confidentiality decision is exactly
     // what made 9c2b1c1b's redaction inert on a default (auth-never-
     // configured) board: everyone is "admin" there, so everyone got the real
-    // values. With no auth system installed, there is no caller anyone can
-    // point to as more trusted than another, so the right default for a
-    // DISCLOSURE decision is to redact for everyone until an administrator
-    // has actually turned auth on and logged in -- i.e. this route must
-    // require both a live policy that enables auth AND caller_is_admin()
-    // resolving a real ADMIN session, not either alone. This does not change
-    // http_auth_caller_is_admin()'s own meaning (still needed as-is for the
-    // bootstrap case above) -- only how this one handler uses it.
-    bool is_admin = http_auth_policy_web_enabled() && http_auth_caller_is_admin(req);
+    // values.
+    //
+    // Corrected 2026-09-17: the AND-of-both-conjuncts gate above had the
+    // opposite defect from 9c2b1c1b's -- instead of leaking on a
+    // default board, it redacted for EVERYONE on a default board, including
+    // this project's own tooling (flash_firmware()'s post-flash
+    // verification has no session and never will), because
+    // http_auth_policy_web_enabled() alone is false there. With auth off,
+    // any caller can already resolve as admin via http_auth_caller_is_admin()
+    // (the deliberate bootstrap behaviour described above), so redacting the
+    // build identity from that same caller protects nothing. The
+    // confidentiality decision only has teeth once auth is actually on: redact
+    // when auth is on and this caller is not an admin; otherwise (auth off,
+    // OR auth on and caller is admin) show the real values. This does not
+    // change http_auth_caller_is_admin()'s own meaning (still needed as-is
+    // for the bootstrap case above) -- only how this one handler uses it.
+    bool may_see_build_identity =
+        !http_auth_policy_web_enabled() || http_auth_caller_is_admin(req);
     char commit_json[64];
     char build_date_json[80];
     const char *dirty_json;
-    if (is_admin) {
+    if (may_see_build_identity) {
         snprintf(commit_json, sizeof(commit_json), "\"%s\"", FW_GIT_COMMIT);
         snprintf(build_date_json, sizeof(build_date_json), "\"%s\"", FW_BUILD_DATE " " FW_BUILD_TIME);
         dirty_json = FW_GIT_DIRTY ? "true" : "false";

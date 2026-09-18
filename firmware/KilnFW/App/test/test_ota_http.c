@@ -1788,22 +1788,25 @@ static const char *ota_status_test_make_session(web_auth_session_role_t role, co
     return token;
 }
 
-// 2026-09-17 audit finding 6: this used to be
-// test_ota_esp_status_web_auth_off_gets_full_payload(), asserting the exact
-// vacuity the finding reported -- http_auth_caller_is_admin() returns true
-// unconditionally when web auth is off (WEB_AUTH_PLAN.md section 11's
-// "auth off = admin", a real and still-needed answer for the bootstrap case
-// in security_http.c), and ota_esp_status_get_handler() used to trust that
-// alone, so 9c2b1c1b's redaction never actually redacted anything on a
-// board that has never had auth configured -- the shipping default. The fix
-// requires BOTH a live policy that enables auth AND caller_is_admin(); with
-// auth off there is no session for anyone to distinguish themselves with,
-// so every caller -- including a genuine future administrator who has not
-// yet turned auth on -- is redacted exactly like an anonymous one.
-static void test_ota_esp_status_web_auth_off_redacts_build_identity(void)
+// 2026-09-17 audit finding 6, corrected the same day: this test previously
+// asserted that auth-off redacts commit/dirty/build_date (the AND-of-both-
+// conjuncts gate, `is_admin = http_auth_policy_web_enabled() &&
+// http_auth_caller_is_admin(req)`) -- but that redacted the build identity
+// from EVERYONE on a default, never-configured board, including this
+// project's own tooling (flash_firmware()'s post-flash verification has no
+// session and never will). With auth off, any caller can already resolve as
+// admin via http_auth_caller_is_admin() (the deliberate bootstrap behaviour
+// WEB_AUTH_PLAN.md section 11 relies on for setting the first admin
+// password), so redacting from that same caller protects nothing. Corrected
+// gate: `may_see_build_identity = !http_auth_policy_web_enabled() ||
+// http_auth_caller_is_admin(req)` -- show the real values whenever auth is
+// off, and redact only once auth is on and the caller isn't an admin (the
+// next three tests below).
+static void test_ota_esp_status_web_auth_off_shows_build_identity(void)
 {
     TEST_SECTION("ota_esp_status_get_handler -- web auth OFF (default/never-configured board): "
-                 "commit/dirty/build_date redacted to null, not trusted to caller_is_admin() alone");
+                 "commit/dirty/build_date show their real values -- redacting from a caller who can "
+                 "already bootstrap as admin protects nothing (corrected 2026-09-17)");
     web_auth_policy_t policy = { .web_enabled = false, .lcd_enabled = false,
                                   .web_timeout_s = -1, .lcd_timeout_s = -1 };
     TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init default nvs partition");
@@ -1816,12 +1819,12 @@ static void test_ota_esp_status_web_auth_off_redacts_build_identity(void)
     esp_err_t err = ota_esp_status_get_handler(&req);
 
     TEST_CHECK(err == ESP_OK, "handler always returns ESP_OK");
-    TEST_CHECK(strstr(s_last_resp_body, "\"commit\":null") != NULL,
-              "auth off (default board) -- commit redacted, no longer inert");
-    TEST_CHECK(strstr(s_last_resp_body, "\"dirty\":null") != NULL,
-              "auth off (default board) -- dirty redacted");
-    TEST_CHECK(strstr(s_last_resp_body, "\"build_date\":null") != NULL,
-              "auth off (default board) -- build_date redacted");
+    TEST_CHECK(strstr(s_last_resp_body, "\"commit\":\"stub\"") != NULL,
+              "auth off (default board) -- real commit value present (stub build_info.h)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"dirty\":false") != NULL,
+              "auth off (default board) -- real dirty value present (FW_GIT_DIRTY stubbed to 0)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"build_date\":\"1970-01-01 00:00:00\"") != NULL,
+              "auth off (default board) -- real build_date value present (stub build_info.h)");
     TEST_CHECK(strstr(s_last_resp_body, "\"recovery_mode\":false") != NULL,
               "recovery_mode still NOT redacted regardless of auth state");
     TEST_CHECK(strstr(s_last_resp_body, "\"version\":") != NULL,
@@ -2145,7 +2148,7 @@ void run_test_ota_http(void)
     test_boot_guard_reset_authenticated_reports_failure_honestly();
     test_boot_guard_status_reports_count_and_recovery_mode();
 
-    test_ota_esp_status_web_auth_off_redacts_build_identity();
+    test_ota_esp_status_web_auth_off_shows_build_identity();
     test_ota_esp_status_unauthenticated_redacts_build_identity();
     test_ota_esp_status_user_session_redacts_build_identity();
     test_ota_esp_status_admin_session_gets_full_payload();

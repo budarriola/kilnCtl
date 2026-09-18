@@ -133,6 +133,29 @@ class VerifyFlashLandedTest(unittest.TestCase):
         self.assertIn("WARNING", result)
         self.assertIn("app", result)
 
+    def test_fw_build_none_warns_not_reported_as_stale_binary(self):
+        """5c92141c's dashboard_status_http.c gate redacted fw_build to null
+        for EVERY caller (including this tool, which holds no session) on a
+        default, auth-off board -- build_timestamps_match(app_desc, None)
+        always returns False, so every successful flash raised the "does not
+        match the binary just flashed" RuntimeError, blaming a stale binary
+        for what was actually a tooling blind spot. Corrected 2026-09-17:
+        fw_build is now only null when web auth is genuinely ON and this
+        caller isn't an admin -- a real "cannot check" case, not a mismatch.
+        This must WARN, not raise, and must say so, not blame a stale
+        binary."""
+        with unittest.mock.patch.object(
+            partition_http_client, "get_partitions",
+            return_value={"running": "app", "partitions": []},
+        ), unittest.mock.patch.object(
+            capability_preflight, "get_board_info",
+            return_value=capability_preflight.BoardInfo(reachable=True, fw_build=None),
+        ):
+            result = mf._verify_flash_landed("192.168.1.50", self.bin_path)
+        self.assertIn("WARNING", result)
+        self.assertNotIn("stale", result.lower())
+        self.assertNotIn("does not match", result)
+
     def test_unparseable_bin_warns_does_not_raise(self):
         bad_bin = tempfile.NamedTemporaryFile(suffix=".bin", delete=False)
         bad_bin.write(b"not a real image")

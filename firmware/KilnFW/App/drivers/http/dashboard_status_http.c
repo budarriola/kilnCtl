@@ -19,13 +19,14 @@
 #include "boot_button.h"
 #include "lvgl_port.h"
 #include "dashboard_json.h"
-#include "http_auth_http.h" /* http_auth_caller_is_admin() -- see the is_admin
-                              * comment below, same gate 1a41a972 established
-                              * for GET /api/ota/esp/status */
-#include "http_auth_policy_iface.h" /* http_auth_policy_web_enabled() -- must
-                                      * be ANDed with caller_is_admin(), not
-                                      * used alone; see the is_admin comment
-                                      * below */
+#include "http_auth_http.h" /* http_auth_caller_is_admin() -- see the
+                              * may_see_build_identity comment below */
+#include "http_auth_policy_iface.h" /* http_auth_policy_web_enabled() -- ORed
+                                      * with !caller_is_admin() being false,
+                                      * i.e. build identity is hidden only
+                                      * when auth is on AND the caller isn't
+                                      * admin; see the may_see_build_identity
+                                      * comment below */
 #include "kiln_io_owner.h"
 #include "nvs_report.h"
 #include "ota_http.h"
@@ -795,19 +796,25 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
      * publishing the RP2040's exact commit hash, dirty flag and build
      * timestamp to any unauthenticated caller -- the same class of
      * build-identity disclosure 1a41a972 redacted on GET /api/ota/esp/status.
-     * Reuse that route's exact gate rather than inventing a new one.
      *
-     * is_admin here deliberately checks BOTH http_auth_policy_web_enabled()
-     * AND http_auth_caller_is_admin(): the latter alone returns true whenever
-     * web auth is disabled (so an operator can still reach the bootstrap
-     * first-admin-password path in security_http.c), which would make an
-     * is_admin gated on caller_is_admin() alone a no-op on a default,
-     * auth-never-configured board -- everyone would read as "admin" and get
-     * the real values. Only redact for everyone until an administrator has
-     * actually turned auth on and logged in. This does not change
-     * http_auth_caller_is_admin()'s own meaning, only how this call site
-     * uses it. */
-    bool is_admin = http_auth_policy_web_enabled() && http_auth_caller_is_admin(req);
+     * Corrected 2026-09-17: the original gate here ANDed
+     * http_auth_policy_web_enabled() with http_auth_caller_is_admin(), which
+     * reads as "only an authenticated admin may see the build identity" but
+     * actually redacted it from EVERYONE whenever web auth is off -- the
+     * board's default, out-of-the-box state. With auth off, anyone on the
+     * LAN can already call http_auth_caller_is_admin() successfully (that is
+     * the intended bootstrap path for setting the first admin password), so
+     * hiding the build timestamp from that same caller protects nothing --
+     * it only blinded this project's own tooling (flash_firmware()'s
+     * post-flash verification, find_crash_elf(), flash_provenance) and the
+     * web UI, unconditionally, on every board that has never had auth
+     * enabled. The redaction is meaningful only in the case the threat model
+     * actually names: web auth ON and the caller not authenticated as admin.
+     * Renamed accordingly -- this is not "is the caller an admin", it is
+     * "is the caller allowed to see build identity", and those two
+     * questions coincide only while auth is on. */
+    bool may_see_build_identity =
+        !http_auth_policy_web_enabled() || http_auth_caller_is_admin(req);
 
     /* TODO.md owner-report item 5: the safety processor's own build identity
      * + config CRC (CommonFW/docs/LINK_PROTOCOL.md sec 7: "Show the safety
@@ -817,12 +824,13 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
      * "operator/build-time string, still worth escaping" reason
      * fw_version/fw_build are above. safety_build_known/safety_config_version/
      * safety_config_crc stay unconditional -- only the two build-identity
-     * strings and the dirty flag are gated (see the is_admin comment above). */
+     * strings and the dirty flag are gated (see the may_see_build_identity
+     * comment above). */
     APPEND(",\"safety_build_known\":%s", ds->safety_build_known ? "true" : "false");
     if (ds->safety_build_known) {
         APPEND(",\"safety_config_version\":%u", (unsigned)ds->safety_config_version);
         APPEND(",\"safety_config_crc\":%u", (unsigned)ds->safety_config_crc);
-        if (is_admin) {
+        if (may_see_build_identity) {
             char commit_esc[sizeof(ds->safety_build_commit) * 2 + 1];
             char datetime_esc[sizeof(ds->safety_build_datetime) * 2 + 1];
             json_escape(ds->safety_build_commit, commit_esc, sizeof(commit_esc));
@@ -875,9 +883,10 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
         APPEND(",\"fw_version_known\":%s", ds->fw_version_known ? "true" : "false");
         APPEND(",\"fw_version\":\"%s\"", fw_version_esc);
         /* fw_build (the ESP's own build timestamp) is gated the same way as
-         * the safety processor's build identity above -- see the is_admin
-         * comment there (2026-09-17 audit finding 7 follow-up / 1a41a972). */
-        if (is_admin) {
+         * the safety processor's build identity above -- see the
+         * may_see_build_identity comment there (2026-09-17 audit finding 7
+         * follow-up / 1a41a972). */
+        if (may_see_build_identity) {
             char fw_build_esc[sizeof(ds->fw_build) * 2 + 1];
             json_escape(ds->fw_build, fw_build_esc, sizeof(fw_build_esc));
             APPEND(",\"fw_build\":\"%s\"", fw_build_esc);

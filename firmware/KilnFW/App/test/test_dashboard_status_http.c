@@ -1,17 +1,27 @@
 // Host tests for GET /api/status's build-identity redaction (2026-09-17
-// audit finding 7 follow-up): route_tier_table.h declares this route
-// ROUTE_TIER_OPEN, reachable with no credentials at all, and
-// dashboard_status_get_handler() (dashboard_status_http.c) used to
+// audit finding 7 follow-up, corrected the same day): route_tier_table.h
+// declares this route ROUTE_TIER_OPEN, reachable with no credentials at
+// all, and dashboard_status_get_handler() (dashboard_status_http.c) used to
 // unconditionally emit the RP2040's exact commit hash/dirty flag/build
 // timestamp (safety_build_commit/_dirty/_datetime) and the ESP's own build
 // timestamp (fw_build) to any caller -- the same class of disclosure
-// 1a41a972 fixed on GET /api/ota/esp/status. This file proves the identical
-// gate (`is_admin = http_auth_policy_web_enabled() &&
-// http_auth_caller_is_admin(req)`, copied from ota_http_esp.c) now redacts
-// those four fields to JSON null for a non-admin caller and reports the
-// real values only to an authenticated administrator, while
-// safety_build_known/safety_config_version/safety_config_crc/fw_version/
-// fw_version_known stay unconditional.
+// 1a41a972 fixed on GET /api/ota/esp/status.
+//
+// The first version of this fix gated the four fields on
+// `is_admin = http_auth_policy_web_enabled() && http_auth_caller_is_admin(req)`,
+// which redacted them from EVERYONE whenever web auth is off -- the board's
+// default, out-of-the-box state -- since anyone can already resolve as
+// "admin" via the bootstrap path in that state, redacting from that same
+// caller protected nothing while blinding this project's own tooling
+// (flash_firmware()'s post-flash verification) and the web UI. Corrected
+// gate: `may_see_build_identity = !http_auth_policy_web_enabled() ||
+// http_auth_caller_is_admin(req)` -- redact only when auth is ON and the
+// caller is not an authenticated admin. This file proves that: real values
+// with auth off (regardless of session), real values with auth on for an
+// ADMIN session, and null for the four fields with auth on and no session
+// or a USER session. safety_build_known/safety_config_version/
+// safety_config_crc/fw_version/fw_version_known stay unconditional in every
+// case.
 //
 // APPROACH: dashboard_status_get_handler() is declared in
 // dashboard_http_internal.h and defined in dashboard_status_http.c with no
@@ -280,11 +290,13 @@ static void reset_fake_status_with_known_build_identity(void)
     strncpy(s_fake_status.fw_build, "Sep 17 2026 00:00:00", sizeof(s_fake_status.fw_build) - 1);
 }
 
-static void test_status_web_auth_off_redacts_build_identity(void)
+static void test_status_web_auth_off_shows_build_identity(void)
 {
     TEST_SECTION("dashboard_status_get_handler -- web auth OFF (default/never-configured board): "
-                 "fw_build/safety_build_commit/_datetime/_dirty redacted to null, not trusted to "
-                 "caller_is_admin() alone (2026-09-17 finding 7 follow-up, same gate as 1a41a972)");
+                 "fw_build/safety_build_commit/_datetime/_dirty show their REAL values -- with auth "
+                 "off anyone can already resolve as admin via the bootstrap path, so redacting from "
+                 "that same caller protects nothing (corrected 2026-09-17, was wrongly redacted by "
+                 "the first version of the finding-7 fix)");
     web_auth_policy_t policy = { .web_enabled = false, .lcd_enabled = false,
                                   .web_timeout_s = -1, .lcd_timeout_s = -1 };
     TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init default nvs partition");
@@ -297,18 +309,20 @@ static void test_status_web_auth_off_redacts_build_identity(void)
     esp_err_t err = dashboard_status_get_handler(&req);
 
     TEST_CHECK(err == ESP_OK, "handler always returns ESP_OK");
-    TEST_CHECK(strstr(s_last_resp_body, "\"fw_build\":null") != NULL,
-              "auth off (default board) -- fw_build redacted, not trusted to caller_is_admin() alone");
-    TEST_CHECK(strstr(s_last_resp_body, "\"safety_build_commit\":null") != NULL,
-              "auth off -- safety_build_commit redacted");
-    TEST_CHECK(strstr(s_last_resp_body, "\"safety_build_datetime\":null") != NULL,
-              "auth off -- safety_build_datetime redacted");
-    TEST_CHECK(strstr(s_last_resp_body, "\"safety_build_dirty\":null") != NULL,
-              "auth off -- safety_build_dirty redacted");
+    TEST_CHECK(strstr(s_last_resp_body, "\"fw_build\":\"Sep 17 2026 00:00:00\"") != NULL,
+              "auth off (default board) -- real fw_build value present");
+    TEST_CHECK(strstr(s_last_resp_body, "\"safety_build_commit\":\"deadbee5\"") != NULL,
+              "auth off -- real safety_build_commit value present");
+    TEST_CHECK(strstr(s_last_resp_body, "\"safety_build_datetime\":\"2026-09-17 00:00:00\"") != NULL,
+              "auth off -- real safety_build_datetime value present");
+    TEST_CHECK(strstr(s_last_resp_body, "\"safety_build_dirty\":true") != NULL,
+              "auth off -- real safety_build_dirty value present");
     TEST_CHECK(strstr(s_last_resp_body, "\"safety_build_known\":true") != NULL,
               "safety_build_known stays unconditional");
     TEST_CHECK(strstr(s_last_resp_body, "\"safety_config_version\":3") != NULL,
               "safety_config_version stays unconditional");
+    TEST_CHECK(strstr(s_last_resp_body, "\"safety_config_crc\":43981") != NULL,
+              "safety_config_crc stays unconditional (0xABCD == 43981)");
     TEST_CHECK(strstr(s_last_resp_body, "\"fw_version_known\":true") != NULL,
               "fw_version_known stays unconditional");
     TEST_CHECK(strstr(s_last_resp_body, "\"fw_version\":\"1.2.3\"") != NULL,
@@ -395,11 +409,13 @@ static void test_status_admin_session_gets_full_payload(void)
               "ADMIN role -- real safety_build_datetime value present");
     TEST_CHECK(strstr(s_last_resp_body, "\"safety_build_dirty\":true") != NULL,
               "ADMIN role -- real safety_build_dirty value present");
+    TEST_CHECK(strstr(s_last_resp_body, "\"safety_config_crc\":43981") != NULL,
+              "safety_config_crc stays unconditional (0xABCD == 43981)");
 }
 
 static void run_test_dashboard_status_http(void)
 {
-    test_status_web_auth_off_redacts_build_identity();
+    test_status_web_auth_off_shows_build_identity();
     test_status_unauthenticated_redacts_build_identity();
     test_status_user_session_redacts_build_identity();
     test_status_admin_session_gets_full_payload();

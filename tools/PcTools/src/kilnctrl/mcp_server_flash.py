@@ -476,6 +476,28 @@ def _verify_flash_landed(
             f"GET /api/status failed ({board.error}) so the build timestamp "
             "could not be checked."
         )
+    if board.fw_build is None:
+        # Distinct from an actual mismatch below: GET /api/status redacts
+        # fw_build to null when web auth is ON and this caller cannot
+        # authenticate as admin (dashboard_status_http.c's
+        # may_see_build_identity gate, corrected 2026-09-17 -- see that
+        # file's comment). This tool holds no session, so a board with auth
+        # enabled will always read back fw_build:null here regardless of
+        # what actually landed. That is a "cannot check" outcome, not
+        # evidence of a stale binary -- reporting it as a build mismatch
+        # (as this function used to, when the pre-fix firmware gate hid
+        # fw_build from EVERYONE including a default, auth-off board) points
+        # the next reader at exactly the wrong thing.
+        return (
+            f"WARNING: running partition confirmed {app_partition_name!r}, but "
+            "GET /api/status did not report fw_build (null) so the build "
+            "timestamp could not be checked -- this board has web auth "
+            "enabled and this tool holds no admin session, so build "
+            "identity is redacted for it. This does NOT indicate the wrong "
+            "build landed. Confirm build identity another way (e.g. an "
+            "authenticated admin session, or GET /api/ota/esp/status) if "
+            "certainty is needed."
+        )
     if not esp_app_desc.build_timestamps_match(app_desc, board.fw_build):
         raise RuntimeError(
             f"flash reported OK and the board is running {app_partition_name!r}, "
