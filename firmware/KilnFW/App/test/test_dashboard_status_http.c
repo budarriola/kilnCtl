@@ -119,11 +119,16 @@ bool zones_config_get_relay_mask(uint8_t zone_index, uint8_t *out_mask)
     *out_mask = 0;
     return false;
 }
+/* Must match the client_ip literal passed to web_auth_table_create_session()
+ * in status_test_make_session() below -- ca7a7d31 bound session cookies to
+ * the caller's IP, so a mismatch here makes http_auth_caller_is_admin()
+ * silently fail to resolve even a real admin session's role. */
 void ota_http_get_client_ip(httpd_req_t *req, char *out, size_t out_len)
 {
     (void)req;
     if (out_len > 0) {
-        out[0] = '\0';
+        strncpy(out, "10.0.0.9", out_len - 1);
+        out[out_len - 1] = '\0';
     }
 }
 
