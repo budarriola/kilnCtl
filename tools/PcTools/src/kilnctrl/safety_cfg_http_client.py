@@ -427,6 +427,93 @@ def apply_safety_fields(host: str, fields: "dict[str, Any]",
     )
 
 
+#: The wire names of the REAL, LIVE per-channel CT calibration record --
+#: A_fs/zero_mv converted via safety_ct_cal_convert() into k_ct_v_per_a[]/
+#: zero_counts[], plus the front-end gain[] and the commissioning-page
+#: scalars around them. NOT to be confused with the legacy ``ct_cal[N].gain``/
+#: ``ct_cal[N].offset``/``ct_cal[N].calibrated`` names also present in the
+#: same params list (config_store.h's old correction table, read separately
+#: by safety_get_ct_cal() / SAFETY_CMD_GET_CT_CAL over the UART link --
+#: config_params.c's own comment block explains why that write path was
+#: retired). An agent has already confused the two tables and reported a
+#: false "no tool exposes CT calibration" gap; ct_cal_raw() below reads only
+#: the names in this tuple/these two constants, never the ``ct_cal[`` ones.
+CT_CAL_RAW_CHANNEL_FIELDS = ("k_ct_v_per_a", "zero_counts", "gain")
+CT_CAL_RAW_SCALAR_FIELDS = ("ct_installed", "ct_topology", "i_present_a")
+
+#: SaftyFW's ``i_present_a_manual`` flag (config_params.c: set the moment an
+#: operator writes 0x0301 by hand, read by config_params_finalize_i_present_a()
+#: to decide whether an idle-current sweep is allowed to overwrite it) is
+#: NEVER put on the wire -- it lives only in the Pico's in-RAM
+#: config_store_record_t and is not one of CONFIG_PARAM_NAME_TABLE's entries,
+#: so GET /api/safety/commissioning cannot report it no matter how this
+#: client parses the response. Confirmed 2026-09-18 by reading
+#: firmware/SaftyFW/src/config_params.c end to end, not by a failed lookup
+#: alone. This is a firmware-side gap, not something a PC-side client can
+#: work around; ct_cal_raw()'s ``i_present_a_manual`` field is always
+#: ``None`` with this note attached, so a caller learns the tool doesn't
+#: know rather than assuming a false "not manual".
+I_PRESENT_A_MANUAL_UNAVAILABLE_NOTE = (
+    "not exposed by GET /api/safety/commissioning: SaftyFW's i_present_a_manual "
+    "flag (config_params.c) is internal-only and never serialized onto the wire "
+    "-- confirmed by reading the firmware source, not inferred from a missing field. "
+    "This is a firmware-side gap; no PC-side client can read it until a route exposes it."
+)
+
+
+def _raw_field(known: "dict[str, dict]", name: str) -> "Optional[dict]":
+    """One named field's raw state from a GET's params list, distinguishing
+    the three outcomes a caller of ct_cal_raw() needs to tell apart:
+
+      * the board's table has no such field at all -- ``None`` (a firmware
+        this old/new does not carry this id; different from "unset")
+      * present but UNSET -- ``{"set": False}``, no "value" key at all, so a
+        caller can never mistake "no value" for a numeric 0
+      * present and SET -- ``{"set": True, "value": <raw JSON number/bool>}``,
+        passed through exactly as the board sent it: no rounding, no
+        reformatting, a 0.0 stays 0.0.
+    """
+    entry = known.get(name)
+    if entry is None:
+        return None
+    if not entry.get("set"):
+        return {"set": False}
+    return {"set": True, "value": entry.get("value")}
+
+
+def ct_cal_raw(current: dict) -> dict:
+    """Extract the REAL, per-channel CT commissioning record from an already
+    -fetched ``get_commissioning()`` response -- the raw
+    ``k_ct_v_per_a[0..2]``/``zero_counts[0..2]``/``gain[0..2]`` plus
+    ``ct_installed``/``ct_topology``/``i_present_a``, faithfully: a
+    channel's real ``0.0`` is returned as ``0.0``, never relabelled
+    "uncalibrated" or hidden -- that relabelling is exactly what makes
+    ``safety_get_ct_cal()``'s LEGACY table useless for this purpose (see this
+    module's ``CT_CAL_RAW_CHANNEL_FIELDS`` comment).
+
+    Pure function, no HTTP -- callers fetch with :func:`get_commissioning`
+    first (or reuse a response they already have), so a caller can tell "the
+    board answered but a field reads unset/absent" (this function returns
+    normally) from "the board never answered at all" (their own
+    :class:`SafetyCfgHttpError` from the GET). Nothing here can raise for a
+    field that is merely missing or unset.
+    """
+    known = params_by_name(current)
+    channels: "dict[str, list]" = {}
+    for base in CT_CAL_RAW_CHANNEL_FIELDS:
+        channels[base] = [_raw_field(known, f"{base}[{ch}]") for ch in range(3)]
+    scalars: "dict[str, Optional[dict]]" = {
+        name: _raw_field(known, name) for name in CT_CAL_RAW_SCALAR_FIELDS
+    }
+    return {
+        "unset_reporting_reliable": bool(current.get("unset_reporting_reliable")),
+        **channels,
+        **scalars,
+        "i_present_a_manual": None,
+        "i_present_a_manual_note": I_PRESENT_A_MANUAL_UNAVAILABLE_NOTE,
+    }
+
+
 #: The preset section holding real, verified-for-this-bench safety values.
 SAFETY_SECTION = "safety"
 #: The preset section holding an ASSUMED, UNMEASURED CT-to-zone map, applied

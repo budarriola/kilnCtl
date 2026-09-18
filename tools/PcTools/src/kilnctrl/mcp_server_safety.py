@@ -446,6 +446,75 @@ def safety_get_ct_cal() -> str:
 
 
 @_srv._tool()
+def safety_get_ct_cal_raw(host: Optional[str] = None) -> str:
+    """READ-ONLY: the REAL, LIVE per-channel CT commissioning record, raw and
+    unrounded, as a JSON object -- ``k_ct_v_per_a[0..2]``, ``zero_counts[0..2]``,
+    ``gain[0..2]``, ``ct_installed``, ``ct_topology``, ``i_present_a``.
+
+    DO NOT CONFUSE THIS WITH safety_get_ct_cal(). That tool reads a
+    DIFFERENT, UNRELATED, legacy table (`config_store.h`'s `ct_cal[]`
+    gain/offset correction, applied to amps AFTER the ADC conversion and fed
+    only to the S14/S15 WARN-only thresholds) and reports every channel
+    "uncalibrated" on boards whose real calibration is fine -- an agent
+    already made exactly that mistake and reported a false gap. THIS tool
+    reads the record that actually gates commissioning and that
+    current_sense.c's A-to-amps conversion actually uses: `A_fs`/`zero_mv`
+    converted via `safety_ct_cal_convert()` into `k_ct_v_per_a`/
+    `zero_counts`, alongside the front-end `gain` and the `ct_installed`/
+    `ct_topology`/`i_present_a` scalars that go with it. Zero means
+    uncalibrated for `k_ct_v_per_a` specifically -- everything else is
+    returned exactly as the board reports it.
+
+    Fetched over the SAME cached GET /api/safety/commissioning
+    safety_get_commissioning() uses (safety_cfg_http_client.get_commissioning()),
+    NOT a fresh live round trip to the Pico -- see that tool's own docstring
+    for the cache/staleness caveat (`stale`/`live_config_crc` vs
+    `cached_config_crc` in the raw response, not surfaced by this tool
+    directly since it reports only the CT fields; call
+    safety_get_commissioning() alongside this one if staleness matters).
+
+    Each field is one of three distinguishable outcomes, never collapsed
+    into each other:
+      * ``{"set": true, "value": 0.0}`` -- the board reports this field
+        SET, and its real value is exactly zero (e.g. an uncalibrated
+        `k_ct_v_per_a` channel, or a genuinely CT-absent `ct_installed`).
+      * ``{"set": false}`` -- the board's table has this field but reports
+        it UNSET; no "value" key is present at all, so an unset field can
+        never be mistaken for a numeric 0.
+      * ``null`` -- the board's own parameter table has no such field at
+        all (older/newer firmware). Different from both of the above.
+    A whole-call failure (board unreachable, HTTP error, bad JSON) returns
+    ``{"ok": false, "error": "..."}`` instead of any field -- never a
+    default, never a guess, and never confused with a reachable board
+    reporting unset/zero fields.
+
+    ``i_present_a_manual`` (whether the idle-current baseline was set by
+    hand vs auto-derived) is always ``null`` here with an explanatory
+    ``i_present_a_manual_note``: SaftyFW's `i_present_a_manual` flag is
+    internal-only and never serialized onto the wire by
+    GET /api/safety/commissioning -- confirmed by reading
+    firmware/SaftyFW/src/config_params.c, not inferred from a failed
+    lookup. That is a firmware-side gap this tool cannot work around; no
+    firmware route was added as part of closing this facade gap.
+
+    Pure GET, no side effects -- safe to call at any time, including during
+    a live firing. Host is auto-resolved the same way
+    safety_get_commissioning() is; pass `host` explicitly for kilnctl.local
+    or a board reachable only from a different network than this link's
+    serial port.
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as safety_get_commissioning()
+
+    resolved = _ota_resolve_host(host)
+    try:
+        data = safety_cfg_http_client.get_commissioning(resolved)
+    except safety_cfg_http_client.SafetyCfgHttpError as exc:
+        return json.dumps({"ok": False, "error": f"error reading safety commissioning over HTTP (host={resolved}): {exc}"})
+    raw = safety_cfg_http_client.ct_cal_raw(data)
+    return json.dumps({"ok": True, "host": resolved, **raw})
+
+
+@_srv._tool()
 def safety_capture_ct_counts(seconds: float = 60.0, out_dir: Optional[str] = None,
                               host: Optional[str] = None) -> str:
     """Capture raw CT ADC counts over GET /api/status for `seconds`, as fast

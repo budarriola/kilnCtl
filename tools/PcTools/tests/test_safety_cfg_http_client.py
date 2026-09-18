@@ -315,5 +315,132 @@ class HttpErrorTest(unittest.TestCase):
                 sc.get_commissioning("host")
 
 
+#: A GET response shaped like the live bench's real answer (2026-09-18):
+#: k_ct_v_per_a=[0,0,1], zero_counts=[0,0,63], gain all 0.715, ct_installed=1,
+#: ct_topology=1, i_present_a=2.0 -- and, deliberately, one channel-field
+#: family (i_normal_a) reported UNSET, and one id (a made-up "gain[3]"-style
+#: absentee is not needed: absence is exercised by simply not naming a field
+#: at all) to cover the "board's table has no such field" outcome.
+def _bench_ct_cal_get() -> dict:
+    def p(id_, name, type_, value=None, set_=True):
+        entry = {"id": id_, "name": name, "type": type_}
+        if set_:
+            entry["set"] = True
+            entry["value"] = value
+        else:
+            entry["set"] = False
+        return entry
+
+    params = [
+        p(770, "zero_counts[0]", "u16", 0),
+        p(771, "zero_counts[1]", "u16", 0),
+        p(772, "zero_counts[2]", "u16", 63),
+        p(776, "k_ct_v_per_a[0]", "f32", 0.0),
+        p(777, "k_ct_v_per_a[1]", "f32", 0.0),
+        p(778, "k_ct_v_per_a[2]", "f32", 1.0),
+        p(779, "gain[0]", "f32", 0.715),
+        p(780, "gain[1]", "f32", 0.715),
+        p(781, "gain[2]", "f32", 0.715),
+        p(265, "ct_installed", "u8", 1),
+        p(799, "ct_topology", "u8", 1),
+        p(769, "i_present_a", "f32", 2.0),
+        # a field the board's table DOES carry, but reports unset -- a real
+        # example of the "present, set=False" outcome (i_normal_a[0] is
+        # genuinely unset on this bench per the earlier live dump).
+        p(794, "i_normal_a[0]", "f32", set_=False),
+        # the legacy, unrelated ct_cal[] table -- present in the SAME params
+        # list, and must NOT leak into ct_cal_raw()'s output at all.
+        p(784, "ct_cal[0].gain", "f32", 0.0),
+        p(790, "ct_cal[0].calibrated", "bool", False),
+    ]
+    return {
+        "link_up": True, "live_config_crc": 53177, "cached_config_crc": 53177, "stale": False,
+        "commissioned": True, "fetched_ms_ago": None,
+        "unset_reporting_reliable": True, "params": params,
+    }
+
+
+class CtCalRawTest(unittest.TestCase):
+    """ct_cal_raw() -- the pure extraction the new safety_get_ct_cal_raw()
+    MCP tool is a thin JSON-dumping wrapper around. No HTTP: exercises the
+    field-classification logic directly against a fixture shaped like the
+    live bench's actual 2026-09-18 answer."""
+
+    def test_matches_live_bench_values(self):
+        raw = sc.ct_cal_raw(_bench_ct_cal_get())
+        self.assertEqual(raw["k_ct_v_per_a"], [
+            {"set": True, "value": 0.0}, {"set": True, "value": 0.0}, {"set": True, "value": 1.0},
+        ])
+        self.assertEqual(raw["zero_counts"], [
+            {"set": True, "value": 0}, {"set": True, "value": 0}, {"set": True, "value": 63},
+        ])
+        self.assertEqual(raw["gain"], [
+            {"set": True, "value": 0.715}, {"set": True, "value": 0.715}, {"set": True, "value": 0.715},
+        ])
+        self.assertEqual(raw["ct_installed"], {"set": True, "value": 1})
+        self.assertEqual(raw["ct_topology"], {"set": True, "value": 1})
+        self.assertEqual(raw["i_present_a"], {"set": True, "value": 2.0})
+
+    def test_zero_is_not_hidden_as_uncalibrated(self):
+        """The single most important property this tool exists for: a real
+        0.0 must read back as a real 0.0, never a string like "uncalibrated"
+        and never collapsed with "unset" or "absent"."""
+        raw = sc.ct_cal_raw(_bench_ct_cal_get())
+        ch0 = raw["k_ct_v_per_a"][0]
+        self.assertTrue(ch0["set"])
+        self.assertIsInstance(ch0["value"], float)
+        self.assertEqual(ch0["value"], 0.0)
+
+    def test_unset_field_has_no_value_key(self):
+        """A field the board's table carries but reports unset is
+        {"set": False} with no "value" key at all -- never a defaulted 0."""
+        raw = sc.ct_cal_raw(_bench_ct_cal_get())
+        # i_normal_a isn't one of ct_cal_raw's fields, so exercise the same
+        # "set=False" path directly through the private helper it shares.
+        entry = sc._raw_field(sc.params_by_name(_bench_ct_cal_get()), "i_normal_a[0]")
+        self.assertEqual(entry, {"set": False})
+        self.assertNotIn("value", entry)
+
+    def test_field_absent_from_board_table_is_none(self):
+        """A field the live board's own parameter table does not carry at
+        all (older/newer firmware) is None -- distinct from both a real
+        value and an explicit unset."""
+        raw = sc.ct_cal_raw(_bench_ct_cal_get())
+        # This fixture never named a fourth channel; ct_cal_raw only ever
+        # asks for indices 0-2, so probe the shared helper directly for a
+        # name genuinely absent from the table.
+        known = sc.params_by_name(_bench_ct_cal_get())
+        self.assertIsNone(sc._raw_field(known, "k_ct_v_per_a[3]"))
+
+    def test_legacy_ct_cal_table_is_not_reported(self):
+        """ct_cal_raw()'s output must never contain the legacy `ct_cal[N].*`
+        names -- that table is safety_get_ct_cal()'s, a different tool
+        entirely, and conflating the two is the exact mistake this tool
+        exists to prevent."""
+        raw = sc.ct_cal_raw(_bench_ct_cal_get())
+        blob = json.dumps(raw)
+        self.assertNotIn("ct_cal[0]", blob)
+
+    def test_i_present_a_manual_is_always_none_with_a_note(self):
+        """SaftyFW's i_present_a_manual flag is never on the wire -- this is
+        a firmware gap, not a lookup failure, and the tool says so rather
+        than guessing false."""
+        raw = sc.ct_cal_raw(_bench_ct_cal_get())
+        self.assertIsNone(raw["i_present_a_manual"])
+        self.assertIn("never serialized onto the wire", raw["i_present_a_manual_note"])
+
+    def test_unreachable_board_is_distinguishable_from_a_zero_field(self):
+        """The GET itself failing (unreachable board) must never be
+        confused with a reachable board reporting a real 0 or an unset
+        field -- get_commissioning() raises, ct_cal_raw() is never even
+        called, and the MCP tool wraps that into {"ok": False, "error":...}
+        rather than any field-shaped answer."""
+        with unittest.mock.patch(
+                "urllib.request.urlopen",
+                unittest.mock.Mock(side_effect=urllib.error.URLError("no route to host"))):
+            with self.assertRaises(sc.SafetyCfgHttpError):
+                sc.get_commissioning("unreachable-host")
+
+
 if __name__ == "__main__":
     unittest.main()
