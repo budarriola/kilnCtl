@@ -114,6 +114,57 @@ if (-not $floorTripped) {
     Write-Host "Assertion 3 OK: blindness floor throws when the counted route total falls below it."
 }
 
+# --- Assertion 3b (2026-09-17 audit finding 7): a table with the SAME
+# (method, uri) key listed twice must make Get-TieredKeys throw, naming the
+# duplicated key -- never silently pick a winner (last-wins was the actual
+# pre-fix behaviour: a plain hashtable assignment overwrites the earlier
+# entry with no error). Uses two DIFFERENT tiers for the duplicate rows on
+# purpose: a same-tier duplicate would pass unnoticed either way, and the
+# real defect this guards against is exactly the case where the duplicate
+# rows disagree. ---
+$dupTableContent = @'
+#define ROUTE_TIER(uri, method, tier) { (uri), (method), (tier) }
+static const route_tier_entry_t kRouteTierTable[] = {
+    ROUTE_TIER("/a", HTTP_GET, ROUTE_TIER_OPEN),
+    ROUTE_TIER("/b", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/a", HTTP_GET, ROUTE_TIER_USER),
+};
+'@
+$dupTableFile = Join-Path $scratchDir "table_dup.h"
+Set-Content -Path $dupTableFile -Value $dupTableContent -Encoding utf8
+
+$dupThrew = $false
+$dupMessage = ""
+try {
+    Get-TieredKeys -Path $dupTableFile | Out-Null
+} catch {
+    $dupThrew = $true
+    $dupMessage = $_.Exception.Message
+}
+if (-not $dupThrew) {
+    $failures += "Assertion 3b FAILED: a table with 'HTTP_GET /a' listed twice (OPEN then USER) did not throw -- a duplicate key can silently pick a winner."
+} elseif ($dupMessage -notmatch [regex]::Escape("HTTP_GET /a")) {
+    $failures += "Assertion 3b FAILED: the duplicate-key error did not name the offending key 'HTTP_GET /a': $dupMessage"
+} else {
+    Write-Host "Assertion 3b OK: a duplicated (method, uri) key throws and names the key, instead of one reader silently taking the last row."
+}
+
+# Also prove Invoke-RouteTierCoverageScan itself (not just the inner
+# helper) surfaces this -- the production entry point every caller
+# (including the real check_route_tier_coverage.ps1 main body) goes
+# through.
+$dupThroughScan = $false
+try {
+    Invoke-RouteTierCoverageScan -DriversDir $synthDriversDir -TableFile $dupTableFile -BlindnessFloor 2
+} catch {
+    $dupThroughScan = $true
+}
+if (-not $dupThroughScan) {
+    $failures += "Assertion 3c FAILED: Invoke-RouteTierCoverageScan did not propagate the duplicate-key failure from Get-TieredKeys."
+} else {
+    Write-Host "Assertion 3c OK: Invoke-RouteTierCoverageScan (the real entry point) also fails on a duplicate key, not just the inner helper."
+}
+
 # --- Assertion 4: run the SAME production function against the REAL
 # production drivers tree and REAL route_tier_table.h (read-only -- this
 # does not modify either). Proves today's real table is not vacuously

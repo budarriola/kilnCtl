@@ -15,6 +15,9 @@
 #include "hal_sysinfo.h" /* hal_sysinfo_get_build_info()/_get_running_partition() -- the RUNNING image's own version/label, see call sites below */
 #include "http_auth_http.h" /* http_auth_caller_is_admin() -- ota_esp_status_get_handler() below trims
                               * exact commit/dirty/build-date identity to admins only; see call site */
+#include "http_auth_policy_iface.h" /* http_auth_policy_web_enabled() -- see the is_admin comment
+                                      * below (2026-09-17 audit finding 6) for why this route does
+                                      * not trust http_auth_caller_is_admin() alone */
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
@@ -545,7 +548,32 @@ esp_err_t ota_esp_status_get_handler(httpd_req_t *req)
     // onlooker at the kiln can already see the board is unhealthy (LCD/relay
     // behaviour), so this is exactly the OPEN test's own "already visible"
     // case, not a narrowing fact like the commit hash is.
-    bool is_admin = http_auth_caller_is_admin(req);
+    //
+    // 2026-09-17 audit finding 6: http_auth_caller_is_admin() alone is NOT
+    // enough to gate this. It returns true unconditionally when web auth is
+    // off (WEB_AUTH_PLAN.md section 11's "a board with auth off is exactly
+    // as open as the board is today" -- deliberate, and load-bearing
+    // elsewhere: security_http.c's /api/auth/security handler relies on
+    // that exact "no auth system yet => admin" answer to let an operator set
+    // the FIRST admin password on a board that has never had one, since
+    // there is no session to resolve an ADMIN role from until one exists.
+    // That is a real, intended use of "admin" meaning "carries admin
+    // authority" for AUTHORIZATION purposes.
+    //
+    // This call site is asking a different question -- "should this
+    // anonymous, pre-auth caller see sensitive build identity" -- and reusing
+    // the authorization answer for that confidentiality decision is exactly
+    // what made 9c2b1c1b's redaction inert on a default (auth-never-
+    // configured) board: everyone is "admin" there, so everyone got the real
+    // values. With no auth system installed, there is no caller anyone can
+    // point to as more trusted than another, so the right default for a
+    // DISCLOSURE decision is to redact for everyone until an administrator
+    // has actually turned auth on and logged in -- i.e. this route must
+    // require both a live policy that enables auth AND caller_is_admin()
+    // resolving a real ADMIN session, not either alone. This does not change
+    // http_auth_caller_is_admin()'s own meaning (still needed as-is for the
+    // bootstrap case above) -- only how this one handler uses it.
+    bool is_admin = http_auth_policy_web_enabled() && http_auth_caller_is_admin(req);
     char commit_json[64];
     char build_date_json[80];
     const char *dirty_json;

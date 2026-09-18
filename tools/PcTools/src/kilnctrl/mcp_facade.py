@@ -59,6 +59,7 @@ GROUP_OVERRIDES = {
     # Firmware's forwarded ESP_LOGx output.
     "get_device_log": "log",
     "get_device_log_json": "log",
+    "fetch_event_log": "log",
     # Whole-board introspection.
     "get_board_state": "system",
     "get_pin_config": "system",
@@ -135,6 +136,9 @@ KEYWORDS = {
                         "display flush", "flush time", "thermocouple read latency",
                         "display_flush_us", "thermo_read_us", "timing"),
     "get_device_log": ("console", "printf", "esp_logx", "serial", "tail"),
+    "fetch_event_log": ("event log", "event_log", "flash log", "log_store", "firing history",
+                        "autotune history", "run started", "run faulted", "binary log",
+                        "api/logs", "decode"),
     "get_cfgfs_status": ("filesystem", "littlefs", "cfg partition", "cfg_fs", "mounted",
                          "capacity", "free space", "used bytes", "file list",
                          "dual-write", "dual write", "zones_rev", "tmp", "stale",

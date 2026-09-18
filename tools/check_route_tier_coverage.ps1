@@ -108,10 +108,33 @@ function Get-TieredKeys {
     $text = [string]::Join("`n", $codeLines)
     $rowPattern = 'ROUTE_TIER\(\s*"([^"]*)"\s*,\s*(HTTP_[A-Za-z0-9_]+)\s*,\s*(ROUTE_TIER_[A-Za-z0-9_]+)\s*\)'
     $rowMatches = [regex]::Matches($text, $rowPattern)
+    # Fail-closed on a duplicate (method, uri) key rather than silently
+    # picking a winner (2026-09-17 audit finding 7): this table is a flat C
+    # array, not a keyed map, so nothing at the language level stops the
+    # same (uri, method) pair from being listed twice with two different
+    # tiers. Before this fix, a duplicate key here silently took the LAST
+    # occurrence (plain hashtable assignment overwrites), while the firmware
+    # reader (http_auth_lookup_tier(), http_auth_enforce.c) scans forward
+    # and stops at the FIRST match -- so a duplicate with differing tiers
+    # would have the checker grade a route differently from what the
+    # firmware actually enforces, with no error from either side. The
+    # property this table exists to provide -- one tier per (method, uri) --
+    # is only real if BOTH readers refuse a duplicate outright, so this
+    # reader now throws naming every duplicated key rather than resolving
+    # one by convention (first, last, or otherwise).
     $keys = @{}
+    $dupes = New-Object System.Collections.Generic.List[string]
     foreach ($m in $rowMatches) {
         $key = "$($m.Groups[2].Value) $($m.Groups[1].Value)"
-        $keys[$key] = $m.Groups[3].Value
+        if ($keys.ContainsKey($key)) {
+            $dupes.Add($key)
+        } else {
+            $keys[$key] = $m.Groups[3].Value
+        }
+    }
+    if ($dupes.Count -gt 0) {
+        $dupeList = ($dupes | Select-Object -Unique) -join ", "
+        throw "check_route_tier_coverage.ps1: $Path lists the same (method, uri) key more than once: $dupeList -- a ROUTE_TIER table must have exactly one tier per key. Delete the duplicate row(s) (see route_tier_table.h's file header) rather than leaving it to whichever reader happens to look first or last."
     }
     return $keys
 }

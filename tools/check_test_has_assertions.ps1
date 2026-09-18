@@ -50,6 +50,20 @@ $violations = @()
 $scannedFiles = 0
 $scannedFns = 0
 
+# Every entry above is a fixed, known-good directory of this repository's
+# own test suites -- not an optional/machine-dependent path. A missing entry
+# here means this checkout is broken (a rename/move that outran this
+# script), not a legitimate reason to scan fewer directories: the
+# scannedFiles-is-zero floor below only catches losing ALL of them, so
+# losing one of several (e.g. SaftyFW's test dir alone) would otherwise
+# silently narrow coverage while still reporting PASS. Fail loud instead of
+# skipping past it. (2026-09-17 gated-out-test sweep, docs/RELEASE_HARDENING_PLAN.md item 3.)
+foreach ($dir in ($cDirs + $pyDirs)) {
+    if (-not (Test-Path $dir)) {
+        throw "check_test_has_assertions: expected test directory not found: $dir -- this is a fixed repo path, not an optional prerequisite; refusing to silently scan fewer directories."
+    }
+}
+
 # ---- C test files -----------------------------------------------------
 # The third alternative covers the hand-rolled form used by the older
 # link/CRC tests (test_uart_protocol_link_delegate.c's compare_one():

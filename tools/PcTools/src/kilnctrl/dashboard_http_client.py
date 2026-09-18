@@ -130,6 +130,32 @@ def get_crash_report(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> di
             f"GET /api/crash_report response was not valid JSON: {body_text!r}") from exc
 
 
+_EVENT_LOG_KINDS = ("firing", "autotune")
+
+
+def get_event_log_bytes(host: str, kind: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> bytes:
+    """GET /api/logs/{firing,autotune} and return the raw response body.
+
+    log_http.c streams the board's binary event_log.h records back to back
+    with no delimiter and no JSON wrapper -- unlike every other function in
+    this module, the body is not decoded as text/JSON here at all; callers
+    hand the returned bytes to kilnctrl.event_log_decoder.decode_stream()
+    (see mcp_server_info.fetch_event_log(), the tool built on this
+    function). ``kind`` must be exactly "firing" or "autotune" -- any other
+    value is refused before a request is even made, since the endpoint has
+    no third kind and a typo should not silently 404 against the board.
+    """
+    if kind not in _EVENT_LOG_KINDS:
+        raise ValueError(f"kind must be one of {_EVENT_LOG_KINDS}, got {kind!r}")
+    req = urllib.request.Request(_url(host, f"/api/logs/{kind}"), method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+    except Exception as exc:  # noqa: BLE001
+        status, detail = _http_error_detail(exc)
+        raise DashboardHttpError(f"GET /api/logs/{kind} failed: {detail}", status, detail) from exc
+
+
 def get_cfgfs_status(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> dict:
     """GET /api/cfgfs and return the full decoded JSON object
     (diagnostics_http.c: cfgfs_status_get_handler()) -- observability for the

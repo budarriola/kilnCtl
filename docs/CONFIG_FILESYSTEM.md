@@ -201,6 +201,18 @@ count.
 
 ## Open items (2026-09-07)
 
+- **Not yet reflashed to the bench board (added 2026-09-17).** Everything
+  below in this section describes what the mount/auto-format code in
+  `main_boot_early.c`/`cfg_fs_mount.c` does; none of it has actually run on
+  the bench board as of 2026-09-17. `get_fw_version()` against the live
+  board reports commit `3b0c82e`, built 2026-09-05 — 1057 commits behind the
+  HEAD this mount wiring landed on — and `GET /api/cfgfs` on that board
+  answers `no such endpoint`. Read every "the bench board's next boot..."
+  and "makes the dual-write bridges live" sentence below as a description of
+  intended behavior on the CURRENT source, not an observed result, until the
+  board is next reflashed and this note is updated with what actually
+  happened. See `docs/RELEASE_HARDENING_PLAN.md` section 10 for the
+  decision this drove (parked, not finished, pending bench time).
 - **Dual-write window.** Every migrated item currently writes both the
   file and its NVS copy; reads prefer the file. This closes — NVS writers
   removed — only once, on the bench board: 20 consecutive clean boots with

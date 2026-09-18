@@ -185,6 +185,48 @@ class FlashFirmwareAdapterPinningTest(unittest.TestCase):
         self.assertIn("flashed and verified OK", result)
 
 
+class FlashFirmwareSizePreflightTest(FlashFirmwareAdapterPinningTest):
+    """RELEASE_HARDENING_PLAN.md section 6: the size preflight in
+    flash_firmware() (mcp_server_flash.py, `if app_bin_size > app_target.size`)
+    refuses before OpenOCD is touched when build/KilnCtrl.bin does not fit the
+    resolved `app` partition -- the guard that would have caught the
+    2026-09-17 incident's overflow into `coredump` before a single byte was
+    written, if it had existed then.
+
+    Every OTHER test in this file (and FlashFirmwareAdapterPinningTest's own
+    setUp, which this class inherits) deliberately fakes getsize() to return
+    1024 bytes specifically so this check is a no-op and does not interfere
+    with what they're testing -- which meant, until this class, the refusal
+    branch itself was never exercised by anything. Negative-tested manually
+    2026-09-17 (see RELEASE_HARDENING_PLAN.md section 6's status line): the
+    guard was disabled by commenting out the `if` fast-fail, the test below
+    failed as expected (result did not start with "error:", OpenOCD WAS
+    called), the file was restored by hand via Edit, `git diff` and
+    `git hash-object` were confirmed to match, and the full test-file build
+    directory was removed before re-measuring."""
+
+    _APP_PARTITION_SIZE = 0x800000  # firmware/KilnFW/partitions.csv: app,ota_0,0x210000,0x800000
+
+    def test_refuses_before_touching_openocd_when_bin_exceeds_partition(self) -> None:
+        oversized = self._APP_PARTITION_SIZE + 1
+        with unittest.mock.patch.object(mf.os.path, "getsize", return_value=oversized), \
+             unittest.mock.patch.object(mf.serial_link, "list_ports", return_value=[_MAIN_BOARD_JTAG]):
+            result = mf.flash_firmware(verify=False)
+        self.assertTrue(result.startswith("error:"), result)
+        self.assertIn(str(oversized), result)
+        self.assertIn(str(self._APP_PARTITION_SIZE), result)
+        self.run_mock.assert_not_called()
+
+    def test_exactly_at_the_boundary_is_not_refused(self) -> None:
+        """size == partition size must be allowed -- only strictly greater
+        is a refusal (mirrors the production `>` in mcp_server_flash.py)."""
+        with unittest.mock.patch.object(mf.os.path, "getsize", return_value=self._APP_PARTITION_SIZE), \
+             unittest.mock.patch.object(mf.serial_link, "list_ports", return_value=[_MAIN_BOARD_JTAG]):
+            result = mf.flash_firmware(verify=False)
+        self.assertIn("flashed and verified OK", result)
+        self.run_mock.assert_called_once()
+
+
 class FixtureFlashTest(unittest.TestCase):
     def setUp(self):
         self._openocd_patch = unittest.mock.patch.object(mf, "_find_openocd_exe", return_value="fake-openocd.exe")

@@ -319,11 +319,20 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/ip_config", HTTP_POST, ROUTE_TIER_ADMIN),
 
     /* Page shells other than / */
-    ROUTE_TIER("/status", HTTP_GET, ROUTE_TIER_OPEN), /* dup key note: this
-        is the SAME (uri, method) as the /status row already in OPEN above
-        (the Wi-Fi status page has both a page-shell and status role) --
-        kept as a single entry, not duplicated, since a table keyed on
-        (uri, method) can only hold one tier per key by construction. */
+    /* NOTE (2026-09-17 audit finding 7): GET /status is intentionally NOT
+     * re-listed here. It already has a ROUTE_TIER_OPEN row above (the Wi-Fi
+     * status page has both a page-shell and status role, one (uri, method)
+     * key). This file is a flat C array, not a keyed map -- nothing
+     * prevented a second literal entry for the same key from actually being
+     * present here for a time, and the two readers of this table
+     * (http_auth_lookup_tier(), which takes the first match, and
+     * check_route_tier_coverage.ps1's Get-TieredKeys, which used to take the
+     * last) disagreed about which row would win the moment a future edit
+     * ever gave the two different tiers. Both rows happened to be OPEN, so
+     * the disagreement was inert -- see the audit for the failure scenario.
+     * Fixed by deleting this duplicate (the surviving row above wins under
+     * both readers) and by check_route_tier_coverage.ps1 now refusing to
+     * build a tier map at all when it finds a repeated (method, uri) key. */
     ROUTE_TIER("/settings", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/settings/backup", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/settings/display", HTTP_GET, ROUTE_TIER_ADMIN),

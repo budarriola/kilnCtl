@@ -444,6 +444,86 @@ Not reached this pass: the Python-side zero-production-caller sweep for
 `tools/PcTools/tests` (explicitly out of scope of the eighth pass's C-only
 sweep) remains unstarted.
 
+**Status, 2026-09-17 (separate ninth-pass thread): the gated-out-test and zero-production-
+caller sweeps, run as fresh scripted passes for the first time since this
+item's acceptance criteria called for them.** Both done in a clean
+`tools/worktree_mint.ps1`-minted worktree, provisioned via `git submodule
+update --init --recursive` + `tools/setup.ps1`.
+
+*Gated-out-test sweep.* A two-stage regex scan (broad shape match, then
+narrowed to prerequisite-check-immediately-followed-by-skip/pass) covered
+492 files under `firmware/*/test/`, `firmware/*/tools/`, `tools/`, and
+`tools/PcTools/tests/`, producing 153 narrowed hits. Every hit resolved to
+one of: (a) a `Get-Command python`/`python3`/`node`/`ffmpeg` fallback
+picking whichever interpreter/tool is on PATH -- not a skip; (b) a
+documented, gitignored-by-design optional-data skip (`test_fuzzy_band_
+probe.py`, `test_noise_floor.py` x2, `test_plant_sim.py`'s hardware-capture
+`self.skipTest`/`pytest.skip` guards -- their `logs/coupling/*.jsonl`
+inputs are covered by `.gitignore`'s `logs/**/*.jsonl` line, confirmed
+absent from `origin/main`'s tree; a pytest skip is counted and printed by
+the runner, so this is visible, not silent); (c) `tools/PcTools/selfcheck.
+py`'s `tools/mykicadMcp` submodule-not-checked-out fallback and `selfcheck_
+commonfw.py`'s CommonFW-vectors-manifest fallback -- both LIVE on a
+provisioned checkout (all referenced files present and confirmed on
+`origin/main`), by design INERT-with-a-printed-message on an unprovisioned
+one; (d) `tools/mykicadMcp/tests/conftest.py`'s `scratch_board` fixture
+skip, unreachable today because its own upstream `kiln_project_path`
+fixture already hard-fails (`pytest.fail`, not skip) if the board is
+missing at all; (e) `test_kicad_cli_acceptance.py`'s documented
+machine-capability skip, LIVE on this bench (KiCad 10 installed). No
+instance of the confirmed defect shape (`if not path.is_file():
+skipTest(...)` masking a renamed/moved prerequisite) was found live today.
+
+One real, narrower gap was found and fixed: `tools/check_test_has_
+assertions.ps1` scans a hardcoded list of three known-good test
+directories (`firmware/KilnFW/App/test`, `firmware/SaftyFW/test`,
+`tools/PcTools/tests`) but only guarded each with `if (-not (Test-Path
+$dir)) { continue }` -- silently scanning fewer directories rather than
+failing, with only a "zero directories total" floor check to catch total
+loss. Negative-tested by renaming `firmware/SaftyFW/test` aside: the
+pre-fix script printed "Test-has-assertions check passed" and exited 0
+with an entire suite's worth of coverage silently dropped (confirmed by
+`git stash`-ing the fix and re-running against the same sabotage). Fixed by
+failing loud (`throw`) if any of the three fixed paths is missing, since
+none of them is an optional/machine-dependent prerequisite in this repo.
+Restored the sabotaged directory by hand; `git hash-object` on the fixed
+script matched pre- and post-verification. This is the only source change
+this pass made.
+
+*Zero-production-caller sweep.* A scripted pass paired each `test_<subject>
+.c` under `firmware/KilnFW/App/test` and `firmware/SaftyFW/test` with its
+matching production `<subject>.c`, extracted that file's function
+definitions, ranked them by reference frequency in the test file, and
+`git grep`'d the top candidates (321 rows) for call sites outside the
+defining file and outside any `test`/`tests` directory. 7 rows came back
+zero. All 7 checked by hand and found NOT genuinely unwired: 5
+(`log_store.c`'s `kind_prefix`, `partition_info_http.c`'s `send_chunk`,
+`ramp_assist_cfg.c`'s `ramp_assist_validate`, `safety_cfg_http.c`'s
+`rate_guard_auto_compute`, `zones_http.c`'s `tuning_rec_body_len`) are
+`static` helpers called only from elsewhere in their own defining file --
+the script's exclude-defining-file rule produced a false zero, not a real
+one; 2 are genuinely indirect-dispatch: `time_sync.c`'s `tz_file_validate`
+is passed by name as a callback to `pref_cfg_fs_load_raw(...)`, and `zones_
+http.c`'s `sweep_status_get_handler` is registered in a static
+`httpd_uri_t` table (`.handler = sweep_status_get_handler`) -- both reached
+in production, just not via a textually-adjacent call. No genuinely
+unwired subject (the `web_auth_table_create_session` shape) was found in
+this pass's scope. Python suites under `tools/PcTools/tests` were not run
+through the same script this pass (time-boxed); this is scoped-out, not
+verified-clean.
+
+Suite: 108 guard scripts discovered by `run_all_checks.ps1` in this
+worktree (one more than the eighth pass's stated 107 -- not reconciled
+here, no check was added or removed this pass, so the discrepancy predates
+this session's change). Full run after the fix: **108 passed, 0 skipped, 0
+failed.**
+
+Remaining, unattempted this pass: the eighth pass's leftover items
+(`check_ui_responsive_sweep.ps1` negative test, both `check_00_*_target_
+build.ps1`/`check_01_*_pushed_build.ps1` pairs' FAIL paths), the 107-vs-108
+discovered-count discrepancy, and full Python-side coverage for the
+zero-production-caller sweep.
+
 **Already covered, name the evidence:** the two `check_01_*_pushed_build.ps1`
 scripts are the strongest single piece of process coverage in the repo. They
 build `origin/main`'s actual content in a clean worktree rather than the local
@@ -516,6 +596,46 @@ safety case saying openly that it ships unproven, or accept the risk with the
 owner's explicit sign-off. Picking silently is the failure mode. **Size: S to
 decide, XL if the answer is "build the jig".**
 
+**Status, 2026-09-17 (host-only pass; no board touched, no flash/reset).**
+Re-derived `SAFETY_CASE.md` section 4's per-guard classification directly
+against `firmware/SaftyFW/src/` rather than trusting the doc: 21 tracked
+guard-level claims, **21 host-tested, 3 hardware-verified, 0 in the (b)
+"provable by host test but not yet done" bucket** — every guard's pure trip
+logic already has a real-function host test (spot-checked S1/S3/S6a/S9/S12/S13
+against current line numbers; also confirmed S14/S15 have dedicated host
+tests in `test_safety_guards.c`). No new host test was added this pass
+because none of the remaining gaps are closeable that way: what's left is
+exclusively hardware-verification (buckets A/B/C above), which this pass's
+hard safety constraints forbid touching (no `flash_firmware`/`debug_reset`/
+`ota_rollback_esp`). **Found and fixed in `SAFETY_CASE.md` while verifying**:
+three stale source-line citations that no longer pointed at the claimed
+check (S3 reachability `current_task.c:197`->`:243`; S6a trip condition
+`safety_core.c:1073`->`safety_guards.c:459-462`, the prior line was a
+different backstop entirely; S9 reachability `safety_core.c:1109`->`:1278`,
+same mix-up with the unconfigured-armed backstop). None of the three changed
+the classification, only the citation.
+
+Owner/hardware boundary, restated concretely from buckets A/B/C so it can be
+acted on without re-deriving anything:
+- **Bucket A (do on this bench, no new equipment):** S1 ceiling, S2
+  overshoot-sustained, S5 fault-injection (out-of-band reading, `tc_type`
+  mismatch), S6b both link-dead tiers, S7 press-to-open, S11 frozen-sensor
+  (once its gate is reachable), KilnFW per-zone guards. Each needs: provoke
+  it, observe the trip, confirm relay state after, record in
+  `GUARD_TEST_MATRIX.md` section 3.4.
+- **Bucket B (owner must finish CT commissioning first):** S3, S4, S9, S14,
+  S15 — blocked on `CT_COMMISSIONING_PLAN.md` steps 0 and 6, both owner
+  actions, before any bench provocation of these five means anything.
+- **Bucket C (cannot close on this fixture, ever — owner must choose a
+  posture, not schedule work):** S9's welded-contactor escalation (needs an
+  AC-injection jig that does not exist), S8's real rate threshold (needs a
+  full-power ramp a 4 W fixture cannot produce), E-stop pole 1 (permanently
+  unwired here by owner decision), and thermal-behaviour magnitudes generally
+  (measured against a plant with no stored energy). For each, the owner picks
+  one of: build the jig, ship with the safety case saying openly it's
+  unproven until commissioned on the installed kiln, or sign off on the risk
+  explicitly. This pass does not pick for them.
+
 ---
 
 ## 5. BLOCKER — failure injection and recovery, exercised rather than argued
@@ -570,6 +690,54 @@ aborted or resumed as designed), each recorded. Build them as scripts in
 `tools/PcTools/scripts/` next to the two bench scripts that already exist, so
 they are repeatable against the next build rather than being one-off session
 logs. **Size: L overall; the link-abort stopwatch alone is S.**
+
+**Status, 2026-09-17 (host-only pass, no board access).** Failure classes
+named by this section plus one this pass found undocumented (a quarantined/
+downgraded config never actually verified against its real producer): power
+loss mid-write (Pico A/B sectors, argued+host-tested, partially bench-verified
+per the bullet above), a Pico reboot mid-firing (argued, ESP-side dedup-reset
+logic host-tested via real state transitions in `test_safety_link.c`/
+`test_safety_link_compile.c`, never run against a real rebooting Pico), a dead
+link (1.5s bench-verified, 30s abort host-test-pinned only, needs a running
+firing), a thermocouple fault (Guard 6 hardware-verified on KilnFW, Pico-side
+injection not), a welded contactor (bucket C, no jig), and corrupted/
+downgraded config (see below). Rough count: 7 named classes, 1 exercised on
+real hardware (Guard 6), 1 partially exercised (config-store power loss), 5
+argued/host-tested only.
+
+Moved argued -> exercised-by-real-fault-injection this pass, host-only (no
+hardware): the config-quarantine signal chain. Every existing test around
+`zones_config_store.c`'s NEWER/UNREADABLE decode outcomes drove the real
+decode path with real staged bytes, but none of them ever read back the real
+`zones_config_get_load_fault()` accessor that `profile_executor_run()`,
+`dashboard_http.c` and `ui_page_home_refresh.c` actually gate on — the
+consumer side was only ever exercised against a hand-built fault struct
+(`test_profile_executor_prestart.c`'s fake), never the real producer. Added
+`test_nvs_load_from_newer_than_firmware_latches_real_load_fault()` and
+`test_nvs_load_from_bad_crc_latches_real_load_fault_as_unreadable()` to
+`firmware/KilnFW/App/test/test_zones_http.c` (drives real bytes through the
+real `nvs_load_from()`/`zones_config_json_decode_blob()`, reads back the real
+`zones_config_get_load_fault()`). Both negative-tested: each latch call was
+independently removed/altered in `zones_config_store.c` (its blob at the time,
+blob:firmware/KilnFW/App/drivers/persist/zones_config_store.c`b86c2afc11a5a2559b624dd25c7f1cd182103335`),
+confirmed to turn the
+`zones_http` host-test executable red, restored by hand with an empty
+`git diff` and a matching `git hash-object`, then the build directory was
+deleted and a full rebuild confirmed green again. This does not reach
+`profile_executor_run()` itself (that consumer still only compiles against a
+hand-built fake in its own executable) — a real store+consumer link test is
+still open, non-trivial because `test_profile_executor_prestart.c` is a
+separate executable specifically to dodge multiply-defined fakes.
+
+Owner/hardware boundary (cannot be closed without the board): cut power
+mid-flash-write on the Pico repeatedly with intact read-back each time
+(bench-unsafe per the bullet above, tear only via host fault injection);
+reboot the Pico during a live firing and confirm the ESP blocks heat/
+recovers the link/re-establishes dedup; the 30s dead-link firing-abort via
+`bench_firing_abort_stopwatch.py` (needs a running firing); thermocouple
+fault injection on the safety processor's own MAX31856; a welded contactor
+(bucket C, no jig exists, firmware simulation cannot substitute — analog
+CT signal, not a GPIO); S6b's persistent OpenOCD halt session.
 
 ---
 
@@ -651,6 +819,65 @@ over to it with a JTAG probe.
   bootloader/metadata gap `firmware/SaftyFW/docs/BOOTLOADER.md` and the update
   protocol's completion checklist imply for a finished one. **Size: L.**
 - Write and rehearse the **first-boot-on-a-real-kiln checklist** — section 8.
+
+**Status, 2026-09-17 (source-level pass, no hardware touched).**
+
+- **Item 1, `otadata` legibility — verified already closed, no code change
+  needed.** Traced (not assumed) `_verify_flash_landed()`
+  (`tools/PcTools/src/kilnctrl/mcp_server_flash.py:353-490`): the running-
+  partition mismatch branch (line 450) raises with the actual `running`
+  value, names `app_partition_name`, explains the `otadata` gap is a KNOWN
+  GAP (`docs/OTA_SINGLE_SLOT_PLAN.md`), states `ota_rollback_esp()` does not
+  fix it, and says what a from-scratch board needs. This exact raise path
+  is exercised by `test_flash_firmware_verify.py` (asserts `"KNOWN GAP"` in
+  the message). The docstring paragraph (lines 777-786) sits on
+  `flash_firmware()` itself, so it surfaces through `kiln_help()`/
+  `kiln_find()` at the point someone would actually invoke the tool, not
+  only in this plan. No further legibility work identified.
+- **Item 2, rollback-past-schema-bump — already closed, `bfa60679`,
+  2026-09-16** (per this section's own strikethrough above; reconfirmed
+  this pass by reading `zones_config_store.c`'s
+  `zones_cfg_load_fault_t` latch and `profile_executor_run()`'s prestart
+  refusal — a rollback to firmware that cannot parse the persisted schema
+  now refuses to start a firing rather than running on default gains).
+- **Item 3, `boot_guard_reset_counter()` default wiring — genuinely still
+  open, and not closeable at the source level.** `ap_password` remains
+  opt-in (`mcp_server_flash.py:605`, `733-754`) because the reset call goes
+  through an *authenticated* HTTP route
+  (`POST /api/ota/esp/boot_guard_reset`) — making it flash_firmware()'s
+  default would mean the tool needs a device credential on every call,
+  which is a credential-handling/architecture decision (where does the
+  password come from by default, and is a wrong guess worse than the
+  status quo of "no attempt, no warning"), not a wiring gap a source-level
+  pass should resolve unilaterally. **Needs an owner decision**, not
+  hardware.
+- **Mechanical coverage added this pass (host-verifiable, no board):**
+  - `tools/PcTools/tests/test_flash_board_pinning.py`'s new
+    `FlashFirmwareSizePreflightTest`: the pre-flight
+    `app_bin_size > app_target.size` refusal in `flash_firmware()`
+    (`mcp_server_flash.py:819-826`) existed but was never exercised by any
+    test — every other test in that file deliberately fakes `getsize()`
+    under the partition size specifically to make this check a no-op.
+    Negative-tested by disabling the guard (`if False and ...`), confirming
+    the new test goes red (result was `"flashed and verified OK"`, OpenOCD
+    WAS called), restoring by hand with Edit, and confirming an empty
+    `git diff` and a matching `git hash-object` before re-running.
+  - `firmware/KilnFW/App/test/check_boot_guard_reset_reachability.ps1`
+    (new): a static guard that `boot_guard_reset_counter()` is called from
+    nowhere except `ota_http_recovery.c` (the authenticated route) and test
+    files — the exact property whose absence the 2026-09-08 audit warned
+    about ("wiring it into every `boot_guard_init()` call instead defeats
+    the counter entirely"). Negative-tested against a throwaway copied tree
+    (never the real one) with a fabricated `boot_guard_reset_counter()`
+    call added to a fake `main_boot_early.c`; the real tree was never
+    modified so no restore was needed.
+- **Still requires the bench board and the owner, and cannot be closed from
+  a source-level pass:** the Pico half of field updates (a real end-to-end
+  transfer has never completed a single byte across the wire — Size L);
+  writing/validating a correct `otadata` blob (deliberately not attempted —
+  a wrong one risks a worse, silently-bricked boot than the current loud
+  refusal, and it cannot be validated without the board); and the
+  first-boot-on-a-real-kiln checklist rehearsal (section 8).
 
 **Already covered, name the evidence:** post-flash verification is genuinely
 solid. `flash_firmware()` polls the board's own API for the running partition
@@ -744,6 +971,60 @@ release cannot ship without:
   one, stating the release-gate property directly in one place
   (`f7233461b4f8069e7b6bdf508cd6535a2655bc13`).
 
+**2026-09-17 verification pass.** Both release-specific bullets above were
+re-checked mechanically against `origin/main` rather than assumed from this
+doc's own prose: `bfa60679` and `f7233461b4f8069e7b6bdf508cd6535a2655bc13`
+are both ancestors of `origin/main`, and `ZONES_CFG_VERSION` is still 26
+(`firmware/KilnFW/App/drivers/persist/zones_config_json.h:63`) — neither
+bullet needed further work. Section 7 is closed; nothing outstanding here.
+
+Also traced mechanically (not from docs) for this pass, since the task
+description raised it as the highest-value risk: whether the Pico's
+`abs_max_temp_c` can ever end up looser than the ESP's, stale, or absent
+while armed.
+- `safety_ceiling_sync.c`'s `enforce_ceiling_divergence()` (called every
+  `safety_poll_task` tick via `safety_ceiling_sync_reconcile_on_link_up()`,
+  `safety_ceiling_sync.c:627-675`) actively forces all relays off and halts
+  any run on every tick the ceilings disagree (`safety_ceiling_sync.c:501-536`)
+  — not a one-shot check, and it runs before the raise-retry backoff so it
+  cannot go quiet during the most common divergent case (Pico ARMED,
+  refusing a raise).
+- The Pico only ever raises its ceiling after a confirmed stage+commit+
+  read-back write (`pico_ceiling_writer()` -> `safety_cfg_write_set_and_
+  confirm_f32()`, `safety_ceiling_sync.c:218-224`); `check_volatile_ceiling_
+  write_callers.ps1` mechanically forbids the RAM-only variant from being
+  substituted anywhere except the one allowlisted two-processor-transaction
+  caller (verified passing 2026-09-17: "4 occurrence(s) total").
+  `safety_ceiling_sync_guard_raise()`/`_apply_lower()` (`safety_ceiling_sync.c:
+  247-283`) are also the only writers, both routed through the same
+  confirmed primitive.
+- On the Pico side, an unset/never-commissioned `abs_max_temp_c` reads back
+  as the sentinel `0.0f` (`config_store.c:820`), which
+  `commissioning_gate_is_commissioned()` (`commissioning_gate.h:85-88`)
+  treats as NOT commissioned, and `link_task.c` refuses to grant
+  `request_enable` for an uncommissioned board rather than arming with no
+  ceiling — the fail direction on a fresh/rebooted/never-heard-from-ESP
+  Pico is refuse-to-enable, never armed-with-a-loose-or-absent-ceiling.
+- No path was found where the Pico's stored ceiling is looser than the
+  ESP's committed one: every write path is raise-with-confirm or
+  lower-with-confirm through the same guarded primitive, and any observed
+  disagreement (including a stale post-reboot value) forces heat off on the
+  very next tick rather than being silently tolerated.
+
+Also confirmed already mechanically covered, both re-run green this pass:
+`tools/check_nvs_key_length.ps1` (458 files scanned, 0 violations — covers
+every `NVS_KEY`/`NVS_NAMESPACE`/`NVS_PARTITION` `#define` literal in
+`firmware/KilnFW/App`, added `ce129d3b`; the historical 16-char
+`zone_normals_cfg` trap was already renamed to the 13-char `zone_norm_cfg`
+on 2026-09-06; SaftyFW carries no NVS keys at all, it is not ESP-IDF) and
+`tools/check_kiln_auth_config_isolation.ps1` (237 files scanned under
+`firmware/KilnFW/App/drivers`, 0 references to `kiln_auth`/`web_auth`/
+`lcd_auth`/`auth_policy` outside the dedicated auth module and its 2
+allowlisted files) — the namespace literal (`WEB_AUTH_NAMESPACE
+"kiln_auth"`, `web_auth_store.c:19`) is confined exactly as CLAUDE.md
+requires. Both checks already existed and already ran green; nothing new
+needed adding or negative-testing this pass.
+
 ---
 
 ## 8. ~~BLOCKER~~ DONE — what must be verified on the installed kiln, and the
@@ -833,6 +1114,53 @@ off behind something that makes its inertness explicit. Shipping a dormant
 write path that will wake up on the first field unit whose partition happens to
 be formatted is the bad third option. **Size: M. Desirable.**
 
+**Decision, 2026-09-17: PARKED, not finished.** Verified against the code and
+the live bench board rather than assumed:
+
+- The mount call (`cfg_fs_mount_device()`, wired into `main_boot_early.c`) and
+  the auto-format-or-ask gate both already exist in source (landed
+  2026-09-07, `docs/CONFIG_FILESYSTEM.md`). This is further along than
+  "nothing written" — the code is real and host-tested.
+- It has never run on the actual bench board. `get_fw_version()` against the
+  live board (2026-09-17) reports commit `3b0c82e`, built 2026-09-05, 1057
+  commits behind HEAD — i.e. the board's running firmware predates the mount
+  wiring entirely. `GET /api/cfgfs` on that board answers `no such endpoint`.
+  Every claim in `docs/CONFIG_FILESYSTEM.md` that the partition "is live" or
+  "mounts cleanly" describes what the code does, not anything observed on
+  hardware.
+- "Finish it" in the sense this section originally meant — exercise the
+  tie-break and fallback paths for real — requires reflashing the bench board
+  and then meeting `docs/FILESYSTEM_PLAN.md`'s own closing criterion (20
+  consecutive clean boots, one complete file-backed firing, one verified
+  backup/restore round trip). That is bench time and an owner-visible,
+  by-hand step (`docs/CONFIG_FILESYSTEM.md`'s "Dual-write window" section is
+  explicit that nothing may act on `window_may_close` automatically), not
+  something a coding pass can close. **Rejected** as out of scope for this
+  pass specifically because it requires flashing the board, which this pass
+  was not authorized to do.
+- What this pass instead confirmed and hardened is the property that makes
+  parking safe: NVS is authoritative and unconditional. Every one of the 11
+  production `*_cfg_fs_save()`/`*_cfg_fs_resolve()` call sites (across
+  `zones_config_store.c`, `kiln_cfg_store.c`, `profiles_http.c`,
+  `relay_cycles.c`, `unit_pref.c`, `display_power_cfg.c`,
+  `ramp_assist_cfg.c`, `time_sync.c`, `adaptive_tune.c`,
+  `profile_executor_firing_stats.c`) treats the file write as best-effort:
+  logged on failure, never gating the NVS write that follows. That is a
+  claim worth a mechanical guard rather than a one-time read, since it is
+  exactly the kind of cross-module contract this codebase has broken
+  silently before (see CLAUDE.md's "reset one side of a pair" bug class).
+  `tools/check_cfgfs_never_gates_nvs.py` (wired via
+  `tools/check_cfgfs_never_gates_nvs.ps1`) fails the build if any
+  `*_cfg_fs_save()` call site's captured return value ever gates a `return`
+  in the same function — negative-tested by inserting exactly that `return`
+  into `unit_pref.c` and confirming the check catches it, then restoring by
+  hand and confirming an unchanged `git hash-object`.
+- **To un-park:** reflash the bench board with current HEAD (or a clean
+  worktree build), confirm `GET /api/cfgfs` reports `mounted: true`, and run
+  the three-condition closing criterion above before removing any NVS
+  writer. None of that has started. **Size: M, and now dependent on bench
+  time. Desirable, not blocking.**
+
 ## 11. Desirable, not blocking — prove a fresh clone builds
 
 **Status, 2026-09-17: the sdkconfig-seeding gap this item was written about is
@@ -878,6 +1206,54 @@ unless and until the adaptive evaluation shows benefit on the installed kiln**,
 and the band derivation from each zone's own autotune model is what makes that
 defensible rather than fixture-trained. No work, one recorded decision.
 **Size: S. Desirable.**
+
+**Status, 2026-09-17: verified closed, no code change needed.** Checked the
+actual shipping default rather than assuming it, per this section's own
+concern about sentinel traps (`project_zone_band_zero_is_default_sentinel`)
+and field-upgrade regressions:
+
+- **Fresh board:** `zones_config_store.c:225`'s `memset(out_cfg, 0,
+  sizeof(*out_cfg))` zero-fills the whole config, and `zone_cfg_t`'s own field
+  comment (`zones_config_json.h:391-392`) documents `fuzzy_strength_pct` as
+  "0 = no fuzzy adjustment, i.e. behaves exactly like classic PID" — 0 lands
+  on the OFF side here, not the sentinel-trap shape.
+- **Upgraded board (pre-v10 record, no `fuzzy_strength_pct` field at all):**
+  `zones_config_convert.c:300`'s `convert_zone_v9()` also starts with
+  `memset(d, 0, sizeof(*d))` and deliberately does not touch
+  `fuzzy_strength_pct` (its own comment at line 331), so an absent record
+  upconverts to 0/OFF, not enabled — the same class of bug the OTA-status and
+  web-auth-enable incidents were, but not present here.
+- **The separate adaptive-tune opt-in flag** (`adaptive_tune.h:60`,
+  `zone_cfg_t::adaptive_tune_enabled`) is likewise struct-zero-default false;
+  `adaptive_tune.c:1331`'s own comment calls this out explicitly: "its
+  struct-zero default: enabled = false. DEFAULT OFF, as required".
+- **Disable path / state hygiene:** `adaptive_tune_set_enabled(zone, false)`
+  (`adaptive_tune.c:842`) only clears the live/persisted opt-in bit; it
+  deliberately leaves any already-committed learned gains in place, because
+  those are written through the same `zones_config_set_pid()`/`set_model()`
+  path autotune's Accept uses (`adaptive_tune.c:20-27`) — "a reader cannot
+  tell a learned gain from a hand-tuned or autotuned one, which is the
+  point." That is not a stranded-state bug: the dedicated restore path is
+  `adaptive_tune_revert()` (`adaptive_tune.c:1156`, "one-click revert",
+  `adaptive_tune.h:19`), a separate, explicit action from the enable toggle,
+  by design. The one real reset-one-side instance in this module
+  (`ki_baseline` never being cleared on re-autotune) was already fixed
+  before this pass, at `adaptive_tune_clear_ki_baseline()`
+  (`adaptive_tune.c:1014`), called from `autotune_engine.c`'s accept path.
+- **Mechanical guard:** `test_zones_http.c:3119` (`nvs_load_from`'s v9→v10
+  migration test) and `test_adaptive_tune.c:462-468` ("opt-in default off")
+  already assert these defaults with real, non-vacuous checks. Negative-tested
+  this pass: temporarily forced `convert_zone_v9()` to write
+  `d->fuzzy_strength_pct = 50.0f`, rebuilt `firmware/KilnFW/App/test/
+  build_host_tests.ps1`'s `zones_http` executable, and confirmed it failed
+  loudly (`test_zones_http.c:3119: zones[0].fuzzy_strength_pct defaults to 0
+  ... got 50.0000, want 0.0000`) before the sabotage was hand-reverted
+  (`git diff` empty, `git hash-object` matched pre-sabotage). No new check
+  was added — the existing assertions already catch this condition; the
+  suite total is unchanged at 107 passed / 0 skipped / 0 failed.
+
+Nothing here touches control-loop math, gains, or the schedule table; no
+`ZONES_CFG_VERSION` bump. **Size: done. Desirable.**
 
 ---
 
