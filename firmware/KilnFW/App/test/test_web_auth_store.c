@@ -114,6 +114,24 @@ static void test_pin_strength(void)
                "a PIN equal to the other role's PIN must be rejected");
     TEST_CHECK(web_auth_pin_check("4321", "1234") == WEB_AUTH_PIN_OK,
                "a differing PIN against an existing other-role PIN must pass");
+
+    // Boundary coverage (buffer-sweep gap 2): web_auth_pin_check() validates
+    // length BEFORE any copy into a fixed-size buffer happens (the digits are
+    // hashed via web_auth_hash_compute(), never memcpy'd into a
+    // WEB_AUTH_PIN_MAX_LEN-sized field here) -- these two assertions are
+    // ordinary boundary-value coverage of WEB_AUTH_PIN_MIN_LEN/_MAX_LEN, not
+    // a buffer-overflow check. Exactly WEB_AUTH_PIN_MIN_LEN (4) digits was
+    // already covered above ("4 digits, nothing to collide with, must
+    // pass"); exactly WEB_AUTH_PIN_MAX_LEN (8) digits was not covered by any
+    // existing test, only 9 (TOO_LONG) and 3 (TOO_SHORT) at one past each
+    // bound.
+    TEST_CHECK(web_auth_pin_check("12345678", NULL) == WEB_AUTH_PIN_OK,
+               "exactly WEB_AUTH_PIN_MAX_LEN (8) digits must be accepted, not rejected as "
+               "too long");
+    TEST_CHECK(web_auth_pin_check("1234", NULL) == WEB_AUTH_PIN_OK,
+               "exactly WEB_AUTH_PIN_MIN_LEN (4) digits must be accepted, not rejected as "
+               "too short (re-asserted here alongside the max-length boundary above so both "
+               "ends of the accepted range are pinned in one place)");
 }
 
 // Tiny local memmem -- MSVC's CRT has no memmem(); avoids pulling in a
@@ -188,6 +206,73 @@ static void test_set_verify_password(void)
     TEST_CHECK(memmem_local(&blob, sizeof(blob), "CorrectHorse1", strlen("CorrectHorse1")) ==
                    NULL,
                "the plaintext password must never appear in the persisted blob");
+}
+
+// Buffer-sweep gap 1: no existing test drove a username at exactly
+// WEB_AUTH_USERNAME_MAX_LEN (32), the boundary the ca7a7d31 client-IP defect
+// (a stored buffer one size smaller than its producer, silently truncating
+// and colliding two distinct values) makes worth pinning explicitly for
+// every fixed-size field sourced from outside this module. `username[33]`
+// (WEB_AUTH_USERNAME_MAX_LEN + 1) must hold all 32 characters plus a NUL in
+// byte 32, with nothing truncated.
+static void test_username_exactly_max_length(void)
+{
+    TEST_SECTION("web_auth_store_set_password: username at exactly WEB_AUTH_USERNAME_MAX_LEN");
+    reset_all();
+
+    char username32[WEB_AUTH_USERNAME_MAX_LEN + 1];
+    for (size_t i = 0; i < WEB_AUTH_USERNAME_MAX_LEN; i++) {
+        username32[i] = (char)('A' + (i % 26));
+    }
+    username32[WEB_AUTH_USERNAME_MAX_LEN] = '\0';
+    TEST_CHECK(strlen(username32) == WEB_AUTH_USERNAME_MAX_LEN,
+               "test fixture sanity: username32 must be exactly 32 characters");
+
+    hal_status_t st = web_auth_store_set_password(WEB_AUTH_ROLE_USER, username32,
+                                                   "CorrectHorse1", SALT_A, false);
+    TEST_CHECK(st == HAL_OK, "set_password with a 32-character username must succeed");
+
+    web_auth_password_record_t rec;
+    TEST_CHECK(web_auth_store_load_password(WEB_AUTH_ROLE_USER, &rec) == WEB_AUTH_LOAD_OK,
+               "the record must load back");
+    TEST_CHECK(memcmp(rec.username, username32, WEB_AUTH_USERNAME_MAX_LEN) == 0,
+               "all 32 characters of the username must round-trip untruncated");
+    TEST_CHECK(rec.username[WEB_AUTH_USERNAME_MAX_LEN] == '\0',
+               "byte 32 (the record's 33rd byte, its only byte beyond the 32 payload "
+               "characters) must be the NUL terminator");
+
+    // One character past the documented limit: web_auth_store.h's
+    // web_auth_store_set_password() doc comment says username is "truncated
+    // to WEB_AUTH_USERNAME_MAX_LEN if longer" -- confirm that is what the
+    // code actually does (truncate to the first 32 characters), not a
+    // rejection and not an overflow into adjacent record fields. If this
+    // ever disagreed with the header's documented behaviour that would be a
+    // real defect to report, not something to paper over here.
+    reset_all();
+    char username33[WEB_AUTH_USERNAME_MAX_LEN + 2];
+    for (size_t i = 0; i < WEB_AUTH_USERNAME_MAX_LEN + 1; i++) {
+        username33[i] = (char)('a' + (i % 26));
+    }
+    username33[WEB_AUTH_USERNAME_MAX_LEN + 1] = '\0';
+    TEST_CHECK(strlen(username33) == WEB_AUTH_USERNAME_MAX_LEN + 1,
+               "test fixture sanity: username33 must be exactly 33 characters");
+
+    st = web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, username33, "AdminPass123",
+                                      SALT_B, false);
+    TEST_CHECK(st == HAL_OK,
+               "set_password with a 33-character (one over max) username must still succeed "
+               "(documented as truncation, not rejection)");
+
+    web_auth_password_record_t admin_rec;
+    TEST_CHECK(web_auth_store_load_password(WEB_AUTH_ROLE_ADMINISTRATOR, &admin_rec) ==
+                   WEB_AUTH_LOAD_OK,
+               "the record must load back");
+    TEST_CHECK(memcmp(admin_rec.username, username33, WEB_AUTH_USERNAME_MAX_LEN) == 0,
+               "the stored username must be exactly the first 32 characters of the "
+               "33-character input (silent truncation, per the documented contract)");
+    TEST_CHECK(admin_rec.username[WEB_AUTH_USERNAME_MAX_LEN] == '\0',
+               "the record's 33rd byte must be the NUL terminator that ends the truncated "
+               "username, not the input's 33rd character");
 }
 
 // Finding 6 fix (2026-09-17 review): web_auth_store_verify_password() used
@@ -782,6 +867,7 @@ int main(void)
     test_pin_strength();
     test_hash_properties();
     test_set_verify_password();
+    test_username_exactly_max_length();
     test_verify_password_timing_oracle_closed();
     test_set_verify_pin();
     test_policy_absent_is_off();
