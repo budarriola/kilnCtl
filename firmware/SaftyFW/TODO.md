@@ -377,13 +377,32 @@ handling are built, host-tested, and audited clean against
 real wire** — the pi↔ESP UART link is currently dead on the bench
 (`link_status`: `frames_received: 0`).
 
-- [~] `boot_id` change resets every correlation window — the change is
-      *detected* (`link_task.c` tracks `s_last_context_boot_id`), but there is
-      no correlation guard yet for it to reset (see S2/S6/S10 below), so the
-      detection is currently a documented no-op.
-- [~] **Honour the `SIM_PLANT` flag**: disable S2/S3/S4 and warn persistently —
-      the seen-tracking/DIAG warning bit is real, but S3/S4 don't exist yet
-      to be disabled (S2 does now — see below).
+- [x] ~~`boot_id` change resets every correlation window — the change is
+      *detected* (`link_task.c` tracks `s_last_context_boot_id`), but there
+      is no correlation guard yet for it to reset (see S2/S6/S10 below), so
+      the detection is currently a documented no-op.~~ **Correction,
+      2026-09-18: that reason was stale.** S2/S3/S4/S10/S13 are all
+      implemented, context-consuming guards (`safety_guards.c`'s
+      "Context-dependent guards" block) that already reset their own
+      elapsed-time accumulators whenever `context_valid` goes false --
+      which it does on any `LINK_TASK_CONTEXT_MAX_AGE_MS` (5 s) gap between
+      `PUSH_CONTEXT` frames. `boot_id_changed` staying unwired is a
+      considered decision, not a missing correlation guard: the only case
+      it could add coverage for is an ESP reboot fast enough to resume
+      within that 5 s window, and leaving the accumulators alone there is
+      the safe direction -- a guard mid-accumulation keeps its progress
+      across a fast reboot, so it fails toward tripping sooner, never later.
+      Wiring a reset here would loosen the guards instead. Full reasoning:
+      `link_task.c`'s `link_task_handle_push_context()` comment, and the
+      "reset one side of a pair" bug class this codebase has hit before.
+- [~] **Honour the `SIM_PLANT` flag**: disable S2/S3/S4 and warn persistently
+      — the seen-tracking/DIAG warning bit is real, but the disable action
+      itself is still not wired into `safety_guards.c`. **Correction,
+      2026-09-18**: the earlier "S3/S4 don't exist yet" reason is stale --
+      S3/S4 are implemented (`safety_guards.c`, gated INERT via
+      `current_sensing_disabled` until CT channel mapping is confirmed, see
+      the Phase 6 bullet below) -- what remains open is only the SIM_PLANT
+      -> disable wiring, not the guards themselves.
 - [x] **`tc_placement_mode` commissioning field** (`CHAMBER_AGREED` /
       `EXTERNAL_OVERHEAT`). **Re-swept 2026-09-03: already landed, this
       checklist had simply never been ticked.** `config_store.h`/`.c` carry

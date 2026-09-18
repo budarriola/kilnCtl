@@ -1250,15 +1250,34 @@ static void link_task_handle_push_context(const kilnlink_frame_t *frame)
 
     // boot_id change detection (LINK_PROTOCOL.md section 4: "the Pico resets
     // every correlation window" on a boot_id change). Tracking the change is
-    // built; acting on it is not -- there is no context-consuming
-    // correlation guard anywhere in this codebase yet (S2/S3/S4/S6/S10 are
-    // all still TODO.md Phase 7 checkboxes), so there is nothing to reset.
-    // This is deliberately NOT wired to a reset call that does not exist;
-    // when S2/S6/S10 land, this is where their window-reset call belongs --
-    // `boot_id_changed` is computed and immediately unused beyond that
-    // future hook, on purpose.
+    // built; acting on it is deliberately NOT -- this is not a stale TODO,
+    // it is a considered decision to stay one-sided (see the "reset one side
+    // of a pair" bug class this codebase has hit four times before; this is
+    // the fifth candidate, examined and rejected).
+    //
+    // safety_guards.c's context-consuming guards (S2, S3, S4, S10, S13; see
+    // its "Context-dependent guards" block, ~line 795) already reset their
+    // own elapsed-time accumulators whenever in->context_valid goes false --
+    // and context_valid itself goes false on any gap of
+    // LINK_TASK_CONTEXT_MAX_AGE_MS (5000 ms, see its #define below) between
+    // PUSH_CONTEXT frames. An ESP reboot slow enough to matter -- anything
+    // at or past that 5 s gap -- is already covered: the accumulators reset
+    // on staleness before boot_id_changed would ever need to fire.
+    //
+    // The only case boot_id_changed could add coverage for is an ESP reboot
+    // FAST enough to resume PUSH_CONTEXT within that 5 s window with a new
+    // boot_id -- fast enough that context never goes stale in between. Not
+    // resetting the accumulators in that residual case is the SAFE
+    // direction: a guard mid-way through accumulating toward a trip keeps
+    // that progress across the reboot, so the guard fails toward tripping
+    // sooner, never later. Wiring boot_id_changed to force a reset here
+    // would LOOSEN every one of those guards by giving a fast-rebooting ESP
+    // a free correlation-window reset on demand -- exactly the wrong
+    // direction for a safety guard. So `boot_id_changed` stays computed and
+    // discarded on purpose; this comment is the record that the omission was
+    // considered, not overlooked.
     bool boot_id_changed = s_context_boot_id_known && snap.boot_id != s_last_context_boot_id;
-    (void)boot_id_changed;
+    (void)boot_id_changed; // suppress unused-variable-as-error; see comment above
     s_last_context_boot_id = snap.boot_id;
     s_context_boot_id_known = true;
 
