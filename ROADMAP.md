@@ -1,6 +1,52 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-17, roadmap-upkeep audit
+> **Status:** planning · **Last reviewed:** 2026-09-18, docs/ROADMAP sync
+> (eighteenth sweep, docs-only — no source or firmware changed this sweep).
+> Verified against the named commits and against directly-reported bench
+> state, not against another doc's status marker.
+> - **Bench board reflashed to `ae3160df` on both processors, 2026-09-18**,
+>   ending a stretch of roughly 1057 commits behind HEAD (the last recorded
+>   flash below this line pinned the ESP at `170f4b75` on 2026-09-10). Live
+>   `/api/readiness` on the bench reports 18 of 19 items
+>   `ok`; the sole `not_done` item is `safety_commissioned` (3 of 65
+>   applicable safety parameters still unset — `i_normal_a[0..2]`, unchanged
+>   from the earlier sweeps below, since no CT sweep has been run against
+>   this build). `cross_zone_max_delta_c` and the thermocouple offsets read
+>   `deliberately_off`, by choice, not by omission. The `cfg` LittleFS
+>   partition now genuinely reports mounted on this board — earlier doc
+>   language calling it inert was written from source inspection, not a
+>   live read; see `docs/CONFIG_FILESYSTEM.md`.
+> - **CT sampling: mains-phase-aliasing hypothesis for the fitted channel's
+>   idle noise refuted, no code change** (`8ae0ca6c`) — the ADC sees a
+>   rectified, RC-smoothed (τ = 1 s) peak envelope, not a raw current
+>   waveform (`firmware/SaftyFW/docs/CURRENT_SENSE.md` §1/§3), so there is
+>   no fast-sine phase for a microsecond-scale conversion burst to alias
+>   against, and the RC values themselves bound even the more charitable
+>   envelope-recharge-phase reading of the hypothesis roughly 10x below the
+>   measured noise. The real, still-open anomaly points at pickup on the CT
+>   lead itself and needs a bench oscilloscope, not a sampling-rate change;
+>   see `docs/audits/ct_sampling_mains_aliasing_review_2026-09-18.md`, and
+>   the CT-commissioning row below (this sweep corrected that row's stale
+>   step-0 claim).
+> - **`kilnctrl` MCP tool count is 160, `kicad` is 86** (`53c323d5`, three
+>   new `zone_current_sweep_start/status/abort` tools wrapping
+>   `zones_http.c`'s current-sweep routes) — `CLAUDE.md` and
+>   `docs/MCP_SERVERS.md` were already updated by that commit; nothing
+>   further to correct here. On this ~4 W bench fixture every zone's
+>   current is structurally below `ZONE_SWEEP_NORMAL_NOISE_FLOOR_A`
+>   (0.045 A vs. ~23 mA/zone), so an "unmeasured" sweep result here is
+>   expected, not a bug — consistent with `i_normal_a` staying unset above.
+> - **`screen_idle`'s stack ceiling is 3152 B**, raised from a stale 3008 B
+>   baseline with cause cited to `bfa60679` (`24d4f465`, direct-measurement
+>   comment fix `1f054189`) — no ROADMAP or other doc here still quoted the
+>   old 3008 B figure; `docs/research/fuzzy_ramp_tracking_2026-09-13.md`'s
+>   mention of 3008 is dated history describing an earlier baseline, not a
+>   current-state claim, and is left as-is.
+> - No unchecked ROADMAP item was closed this sweep on the strength of a
+>   plan document alone; the one substantive content fix was the CT-
+>   commissioning row's stale step-0 claim above.
+>
+> **Reviewed before that:** 2026-09-17, roadmap-upkeep audit
 > (seventeenth sweep) — see the sweep note near the sixteenth sweep's below
 > for what changed. Also folds in the fifteenth sweep that
 > were "work in progress" as of the fourteenth sweep (dimensionless fuzzy
@@ -891,7 +937,7 @@ open is short:
 
 | Size | Item | Where |
 |---|---|---|
-| **M** | ~~CTs — deferred, 2026-09-05~~ — superseded: a summed CT was fitted on GPIO28, 2026-09-05. **CT commissioning, 2026-09-06** — owner wants user-entered probe rating (any rating; real probes 10-100 A, bench probe 1 A), user-entered or auto-measured idle offset, real-amps readout, and a `ct_topology` (per_zone / summed) so S14 works on the one summed CT. Plan with steps 0-6: `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md`. **Steps 1-5 done** (`51c084f`, `7175078`, `9374e8a`, `8a124c4`, `b8f0f47`, `8239b87`: editable calibration fields, auto idle-offset over the wire, `ct_topology`/S15/summed sweep on both Pico and ESP, real-amps display on web/LCD/PcTools, docs). **Open: step 0** (noise-floor capture — the raw-counts path is now built end to end, `c49bb0e9`; the bench capture itself still has not been taken, see `CURRENT_SENSE.md` §4) and **step 6** (bench run with the owner) — both need the board reflashed with the step 1-5 firmware first. | `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md`; `docs/CONTACTOR_FEEDBACK_OPTIONS.md`; M5 |
+| **M** | ~~CTs — deferred, 2026-09-05~~ — superseded: a summed CT was fitted on GPIO28, 2026-09-05. **CT commissioning, 2026-09-06** — owner wants user-entered probe rating (any rating; real probes 10-100 A, bench probe 1 A), user-entered or auto-measured idle offset, real-amps readout, and a `ct_topology` (per_zone / summed) so S14 works on the one summed CT. Plan with steps 0-6: `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md`. **Steps 1-5 done** (`51c084f`, `7175078`, `9374e8a`, `8a124c4`, `b8f0f47`, `8239b87`: editable calibration fields, auto idle-offset over the wire, `ct_topology`/S15/summed sweep on both Pico and ESP, real-amps display on web/LCD/PcTools, docs). **Step 0 done, corrected 2026-09-18: this row was stale.** The noise-floor capture was actually taken and recorded 2026-09-06 (`firmware/SaftyFW/docs/CURRENT_SENSE.md`'s "Measured noise floor — RUN 2026-09-06" section: 262 samples/60.1 s via `safety_capture_ct_counts()`, fitted channel std ≈ 4.678 counts ≈ 3.8 mA), and that doc's own completion checklist already marked step 0 closed — this row alone had not been updated to match. **Still open: step 6** (bench run with the owner to actually arm S14/S15) — see the CT-lead-pickup investigation below (`8ae0ca6c`) for why the fitted channel's *idle* noise is still under active review before that run: a later, larger idle-noise capture (std 9.329 counts on the fitted channel vs. 0.180/0.223 on the two unfitted ones) narrowed the cause to CT-lead pickup, not sampling rate, and needs a bench oscilloscope on the CT lead next — hardware access this doc-only sweep does not have. **This step is hardware-gated, not actionable from software alone:** on this ~4 W bench fixture each zone draws only ~23 mA against the sweep's own 45 mA noise floor, so `i_normal_a` is structurally never recorded here and S14/S15 cannot arm on this fixture regardless of firmware state — a real load (or a different bench fixture) is required, not further code. | `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md`; `docs/CONTACTOR_FEEDBACK_OPTIONS.md`; `docs/audits/ct_sampling_mains_aliasing_review_2026-09-18.md`; M5 |
 | — | ~~LittleFS for flash writes, 2026-09-06~~ — assessed **not adopted** for log retention, then **superseded 2026-09-07**: endurance review confirmed no wear problem exists either, but the owner directed the migration anyway for architectural reasons (structured, inspectable, backup-able user data). In progress — zones config, profiles, and prefs dual-write to a new `cfg` partition; see `docs/CONFIG_FILESYSTEM.md` for state and open items, `docs/LITTLEFS_ASSESSMENT.md`/`docs/FILESYSTEM_USER_DATA_PLAN.md` for the history. **RP2040 `config_store` A/B sectors (flash_endurance_review_2026-09-07.md R2): implemented AND FLASHED, `b7af9ebe` 2026-09-08** (bench-verified: commissioning config read back byte-for-byte across the migration, CRC unchanged) — this row previously read "NOT YET FLASHED" and was stale by a day. **The separate in-RAM-cache defect found 2026-09-09** (`s_cached_record` read with no synchronisation across cores, `safety_config_version` observed changing mid-read during a live heating run), fixed by a seqlock (`b202fe56`, barrier fix `5671ee03`, then a writer-owned-fallback correction `cb1ba325` after review found the first fix's own fallback snapshot could itself race two readers, 169+ host tests including a torn-read reproduction: 20,945/190k writes without the fix, 0 with it) — **IS now flashed** (`ae23aba4` 2026-09-09, `b88ea6ba` 2026-09-10; corrected 2026-09-14 roadmap truth-up — live `safety_get_fw_version` reads Pico build `d957d5fd`, far newer than either landing commit, commissioned). This row previously said "none of the three seqlock commits have been flashed" and was stale. See `docs/CONFIG_FILESYSTEM.md` for detail. | `docs/CONFIG_FILESYSTEM.md` |
 | **XL** | **Whole-kiln setup wizard — NEW, owner request 2026-09-08.** One web page, `/setup`, guiding a new owner from a blank board to a kiln `/api/readiness` reports ready: network/time/units, zones + thermocouples + types, zone type (HEATER vs ON_OFF_DEVICE), relays and names, zone commissioning limits, the safety processor's own commissioning, current sensing + CT verification under load, autotune and the coupling matrix. Modelled on `safety_commissioning_page.html`'s guided flow (stepper, consequence-bearing radio cards, read-back-verified commit) and backed by the existing `/api/readiness` checklist rather than a new model. **DONE (2026-09-09).** All 13 wizard steps and all 11 implementation steps shipped; progress persisted in NVS (not `cfg`) so a filesystem problem cannot lose it. Two steps apply heat (CT sweep, autotune) and five need the owner present. | `docs/SETUP_WIZARD.md` |
 | — | **On/off device zones — owner request 2026-09-07, decisions settled 2026-09-14.** A zone may drive a non-heater on/off device (vent, damper, fan, water feed) instead of a heating element, switched by per-segment rules on ramp phase / direction / temperature / time, with a stalled ramp counting as a dwell. **Not "design only" — steps 1-8 of the 9-step plan are shipped and host-tested** (`d58492c9`, `3d740f78`, `dd1d6ada`, `172e3081`/`b46c120c`, `bf1db47f`, `83c8b28b`/`e8e32c7a`, `be27d461`); this row previously understated remaining work by ~8 steps. Safety core: guards 1/2/3/4/9 disabled for such a zone, per zone (`docs/ON_OFF_ZONE_PLAN.md` sec 1's guard table) — guard 1 (HEATING_FAILED) would otherwise false-trip on a *correctly working* vent, since "duty high, temperature flat" is both its trip condition and the device's normal signature. **2026-09-14: owner asked to decouple an on/off device from the 3-slot heating-zone array so it binds a spare relay instead — investigated and found genuinely large** (the zone array is hard-sized at `MAX31856_CHANNEL_COUNT` = 3 everywhere: guards, coupling matrix, firing records, persisted `zone_cfg_t`, HTTP surface; widening it needs a `ZONES_CFG_VERSION` schema bump, a frozen prior struct, a converter and a CRC check — `docs/audits/on_off_spare_relay_binding_2026-09-14.md`); **not implemented**, per D1 of `docs/audits/on_off_zone_decisions_2026-09-14.md`, which the owner has not yet reconsidered against this new request. Two engineering gaps from that decisions doc closed 2026-09-14: `adaptive_tune`/`firing_score`'s firing-stats snapshot now skip on/off zones as training data (`adaptive_tune.c`, `profile_executor_firing_stats.c`), and `docs/SAFETY_CASE.md` now carries the guard-3 coverage gap and the `max_temp_c == 0` relaxation. **Remaining open item: step 9, a supervised bench session with dry contacts — no on/off zone has ever actuated a physical relay.** | `docs/ON_OFF_ZONE_PLAN.md` |
