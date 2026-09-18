@@ -106,3 +106,21 @@ logs/**/*.aborted
 
 # idf.py menuconfig writes these next to the (already-ignored) sdkconfig.
 firmware/KilnFW/sdkconfig.bak_*
+
+# Host-test scratch dirs from kiln_cfg_store.c / cfg filesystem tests --
+# created relative to CWD (repo root, or firmware/KilnFW/App/test/) whenever
+# the suite runs, same pattern as log_store_test_*/ above.
+cfg_fs_test_*/
+cfg_fs_status_test_*/
+
+# Host-test scratch build dirs for the sim/iter-tune/scenario harnesses --
+# named ad hoc by whichever check invoked them (e.g.
+# build_sim_iter_tune_bars_obj/, build_sim_scenarios_check_obj/), same class
+# of byproduct as build_agent/ above.
+build_sim_*_obj/
+
+# Loose Windows-COFF .obj files land at repo root when a host-test build or a
+# quick sizeof()/probe compile is invoked with cwd left at the repo root
+# instead of a build directory (sizeof_before.obj, probe3.obj, and similar
+# one-off compiler scratch). Not build output anyone commits on purpose.
+/*.obj

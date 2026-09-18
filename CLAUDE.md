@@ -214,6 +214,28 @@ and `$?`-safe), and `commit_guard.ps1` (refuse a commit whose working copy
 differs from `origin/main` until every difference is confirmed as your own).
 Full detail: **docs/MCP_SERVERS.md**'s "Git workflow guards" section.
 
+**What is safe to delete during cleanup.** Many parallel sessions build and
+run checks in this shared tree and under `C:\wt\`, so cleanup passes recur.
+Safe to delete on sight, no owner review needed: untracked build byproducts
+in the main tree (loose `.obj` files, host-test scratch directories like
+`cfg_fs_test_*/`, `log_store_test_*/`, `build_agent/`, `build_sim_*_obj/`),
+and mangled-path files/directories left by a Bash-vs-PowerShell backslash
+quoting accident (a literal `C:\wt\...` argument getting eaten mid-path,
+producing a stray file or directory named after the mangled remainder — this
+is the same class of bug as `worktree_mint.ps1` failing when invoked through
+Bash's POSIX shell instead of the PowerShell tool). If a class of these
+recurs, add a `.gitignore` pattern for it rather than re-deleting by hand
+each time. Under `C:\wt\`, only remove a worktree you can positively confirm
+is both unregistered by `git worktree list` (or registered but the branch/
+commit shows no pending work) and stale — never one with uncommitted
+changes, and never one whose directory shows a file freshly modified in the
+last few minutes, since that is very likely a session still using it. Never
+delete: anything under `firmware/KilnFW/elf_archive/`, `logs/coupling/*` or
+other captured run data, any `.kicad_*` file, or a tracked file with local
+modifications — those need owner review, not deletion, and reverting them
+to investigate is exactly the mistake to avoid (other sessions' uncommitted
+work lives in this same shared tree).
+
 ## Project Structure
 
 The tree is split into hardware and software halves. See `docs/REPO_LAYOUT.md`
