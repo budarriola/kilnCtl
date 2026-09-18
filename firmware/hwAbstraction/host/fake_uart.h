@@ -56,6 +56,36 @@ hal_status_t fake_uart_script_rx(hal_uart_t *u, const uint8_t *data, size_t len)
 size_t fake_uart_rx_dropped_count(const hal_uart_t *u);
 size_t fake_uart_rx_pending_count(const hal_uart_t *u);
 
+/* Rx line-error causes, one per UART event the real ESP backend counts
+ * (hal_uart_esp.c's hal_uart_esp_event_task(): UART_FIFO_OVF,
+ * UART_BUFFER_FULL, UART_BREAK, UART_PARITY_ERR, UART_FRAME_ERR). Kept as
+ * a fake-only enum rather than reusing the IDF's uart_event_type_t so this
+ * header stays portable/host-buildable. */
+typedef enum {
+    FAKE_UART_RX_ERROR_FIFO_OVF,
+    FAKE_UART_RX_ERROR_BUFFER_FULL,
+    FAKE_UART_RX_ERROR_BREAK,
+    FAKE_UART_RX_ERROR_PARITY,
+    FAKE_UART_RX_ERROR_FRAME,
+} fake_uart_rx_error_t;
+
+/* Injects one occurrence of the named rx line-error cause: increments the
+ * counter hal_uart_get_rx_error_count() reports, matching
+ * hal_uart_esp.c's event task exactly (same five causes, same policy).
+ * FIFO_OVF and BUFFER_FULL additionally discard whatever is currently
+ * queued in the rx ring, mirroring the real backend's uart_flush_input()
+ * on those two causes only (bytes are already lost/framing is broken by
+ * definition); BREAK/PARITY/FRAME are counted only and must never touch
+ * queued rx data, since the frame layer above is self-synchronising and
+ * CRC-checked -- flushing on every line glitch would delete good frames
+ * queued behind a bad one (see hal_uart_esp.c's event task comment).
+ * The counter itself is per-slot, plain uint32_t wraparound (no
+ * saturation), and is cleared only by hal_uart_restart()'s RX-only
+ * contract -- never by reading it -- matching hal_uart_esp.c exactly.
+ * Returns HAL_NOT_READY if u is not a live handle, HAL_INVALID_ARG for an
+ * unrecognized cause. */
+hal_status_t fake_uart_inject_rx_error(hal_uart_t *u, fake_uart_rx_error_t cause);
+
 #ifdef __cplusplus
 }
 #endif

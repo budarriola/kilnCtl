@@ -93,6 +93,36 @@ size_t fake_uart_rx_pending_count(const hal_uart_t *u)
     return s ? s->rx_count : 0;
 }
 
+hal_status_t fake_uart_inject_rx_error(hal_uart_t *u, fake_uart_rx_error_t cause)
+{
+    fake_uart_slot_t *s = get_slot(u);
+    if (!s) return HAL_NOT_READY;
+    switch (cause) {
+        case FAKE_UART_RX_ERROR_FIFO_OVF:
+        case FAKE_UART_RX_ERROR_BUFFER_FULL:
+            /* Matches hal_uart_esp.c's event task: these two causes call
+             * uart_flush_input() because bytes are already lost and
+             * framing is broken by definition -- discard whatever is
+             * currently queued in the rx ring. */
+            s->rx_head = 0;
+            s->rx_count = 0;
+            break;
+        case FAKE_UART_RX_ERROR_BREAK:
+        case FAKE_UART_RX_ERROR_PARITY:
+        case FAKE_UART_RX_ERROR_FRAME:
+            /* Counted only -- must NOT touch rx_ring/rx_head/rx_count. The
+             * frame layer above is self-synchronising and CRC-checked, so
+             * flushing on every line glitch would delete good frames
+             * queued behind a bad one (same rationale as the real
+             * backend's event task). */
+            break;
+        default:
+            return HAL_INVALID_ARG;
+    }
+    s->rx_error_count++;
+    return HAL_OK;
+}
+
 hal_status_t hal_uart_init(hal_uart_t *u, const hal_uart_cfg_t *cfg)
 {
     if (u == NULL || cfg == NULL) return HAL_INVALID_ARG;

@@ -146,6 +146,85 @@ int main(void)
         CHECK(hal_uart_deinit(&u4) == HAL_NOT_READY); /* double-deinit */
     }
 
+    /* --- rx error injection: uninitialized handle -> HAL_NOT_READY, count stays 0 --- */
+    CHECK(fake_uart_inject_rx_error(&garbage, FAKE_UART_RX_ERROR_PARITY) == HAL_NOT_READY);
+    CHECK(hal_uart_get_rx_error_count(&garbage) == 0);
+
+    /* --- rx error injection: each of the five causes increments the counter --- */
+    {
+        hal_uart_t u5;
+        memset(&u5, 0, sizeof(u5));
+        CHECK(hal_uart_init(&u5, &cfg) == HAL_OK);
+        CHECK(hal_uart_get_rx_error_count(&u5) == 0);
+
+        CHECK(fake_uart_inject_rx_error(&u5, FAKE_UART_RX_ERROR_FIFO_OVF) == HAL_OK);
+        CHECK(hal_uart_get_rx_error_count(&u5) == 1);
+        CHECK(fake_uart_inject_rx_error(&u5, FAKE_UART_RX_ERROR_BUFFER_FULL) == HAL_OK);
+        CHECK(hal_uart_get_rx_error_count(&u5) == 2);
+        CHECK(fake_uart_inject_rx_error(&u5, FAKE_UART_RX_ERROR_BREAK) == HAL_OK);
+        CHECK(hal_uart_get_rx_error_count(&u5) == 3);
+        CHECK(fake_uart_inject_rx_error(&u5, FAKE_UART_RX_ERROR_PARITY) == HAL_OK);
+        CHECK(hal_uart_get_rx_error_count(&u5) == 4);
+        CHECK(fake_uart_inject_rx_error(&u5, FAKE_UART_RX_ERROR_FRAME) == HAL_OK);
+        CHECK(hal_uart_get_rx_error_count(&u5) == 5);
+
+        /* unrecognized cause -> HAL_INVALID_ARG, does not increment */
+        CHECK(fake_uart_inject_rx_error(&u5, (fake_uart_rx_error_t)999) == HAL_INVALID_ARG);
+        CHECK(hal_uart_get_rx_error_count(&u5) == 5);
+
+        /* get_rx_error_count is NOT clear-on-read -- reading it twice in a
+         * row must return the same value, matching hal_uart_esp.c (a plain
+         * getter, no side effect). */
+        CHECK(hal_uart_get_rx_error_count(&u5) == 5);
+        CHECK(hal_uart_get_rx_error_count(&u5) == 5);
+
+        /* restart() clears it (RX-only contract), matching hal_uart_esp.c's
+         * hal_uart_restart() zeroing rx_error_count on a successful flush. */
+        CHECK(hal_uart_restart(&u5) == HAL_OK);
+        CHECK(hal_uart_get_rx_error_count(&u5) == 0);
+        CHECK(hal_uart_deinit(&u5) == HAL_OK); /* free the slot for the next block */
+    }
+
+    /* --- rx error injection: FIFO_OVF/BUFFER_FULL discard queued rx data
+     * (real backend calls uart_flush_input() on these two causes only,
+     * since bytes are already lost and framing is broken by definition);
+     * BREAK/PARITY/FRAME must NOT touch queued rx data (line errors alone
+     * do not desync the self-synchronising, CRC-checked frame layer above,
+     * so a bad line sample must not silently drop bytes that were already
+     * correctly received and queued ahead of it) --- */
+    {
+        hal_uart_t u6;
+        memset(&u6, 0, sizeof(u6));
+        CHECK(hal_uart_init(&u6, &cfg) == HAL_OK);
+
+        /* line errors: queued data survives untouched */
+        CHECK(fake_uart_script_rx(&u6, (const uint8_t *)"safe", 4) == HAL_OK);
+        CHECK(fake_uart_inject_rx_error(&u6, FAKE_UART_RX_ERROR_BREAK) == HAL_OK);
+        CHECK(fake_uart_rx_pending_count(&u6) == 4);
+        CHECK(fake_uart_inject_rx_error(&u6, FAKE_UART_RX_ERROR_PARITY) == HAL_OK);
+        CHECK(fake_uart_rx_pending_count(&u6) == 4);
+        CHECK(fake_uart_inject_rx_error(&u6, FAKE_UART_RX_ERROR_FRAME) == HAL_OK);
+        CHECK(fake_uart_rx_pending_count(&u6) == 4);
+        memset(rxbuf, 0, sizeof(rxbuf));
+        CHECK(hal_uart_recv(&u6, rxbuf, sizeof(rxbuf)) == 4);
+        CHECK(memcmp(rxbuf, "safe", 4) == 0);
+        CHECK(hal_uart_get_rx_error_count(&u6) == 3);
+
+        /* overflow-class errors: queued data is discarded */
+        CHECK(fake_uart_script_rx(&u6, (const uint8_t *)"lost", 4) == HAL_OK);
+        CHECK(fake_uart_rx_pending_count(&u6) == 4);
+        CHECK(fake_uart_inject_rx_error(&u6, FAKE_UART_RX_ERROR_FIFO_OVF) == HAL_OK);
+        CHECK(fake_uart_rx_pending_count(&u6) == 0);
+        CHECK(hal_uart_get_rx_error_count(&u6) == 4);
+
+        CHECK(fake_uart_script_rx(&u6, (const uint8_t *)"gone", 4) == HAL_OK);
+        CHECK(fake_uart_rx_pending_count(&u6) == 4);
+        CHECK(fake_uart_inject_rx_error(&u6, FAKE_UART_RX_ERROR_BUFFER_FULL) == HAL_OK);
+        CHECK(fake_uart_rx_pending_count(&u6) == 0);
+        CHECK(hal_uart_get_rx_error_count(&u6) == 5);
+        CHECK(hal_uart_deinit(&u6) == HAL_OK); /* free the slot for the next block */
+    }
+
     /* --- pool exhaustion: HAL_NO_MEM once FAKE_UART_MAX_INSTANCES is used --- */
     fake_uart_reset_all();
     {
