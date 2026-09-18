@@ -1,7 +1,8 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-16, roadmap-upkeep audit
-> (sixteenth sweep) — see note below; also folds in the fifteenth sweep that
+> **Status:** planning · **Last reviewed:** 2026-09-17, roadmap-upkeep audit
+> (seventeenth sweep) — see the sweep note near the sixteenth sweep's below
+> for what changed. Also folds in the fifteenth sweep that
 > were "work in progress" as of the fourteenth sweep (dimensionless fuzzy
 > bands, the overshoot re-measurement and its review, the firing_score fix
 > sequence) and records an owner decision. No hardware touched, no firmware
@@ -825,6 +826,26 @@
 > sample of M12's cited commits and `commissioning_gate.c`'s
 > `!calibration_missing && config_params_all_required_set()` check were
 > verified against code, not just against plan prose.
+> **Seventeenth sweep, 2026-09-17 — roadmap-upkeep pass.** No milestone's
+> tick state disagreed with its owning plan (M0-M16 spot-checked against
+> `docs/COMPLETED_2026-09.md`, `docs/HW_ABSTRACTION.md`, and each open
+> milestone's own body text) and no ticked box or completion narrative was
+> found that hadn't already been collapsed by an earlier sweep. Two stale
+> claims found and corrected in place in the "Where each kind of task is
+> planned" table, both about sequencing rather than tick state:
+> `docs/RELEASE_HARDENING_PLAN.md`'s row said it "starts once
+> `docs/KILN_PROFILES_PLAN.md` is finished," but the plan's own doc shows it
+> opened 2026-09-16 with several BLOCKER sub-items already closed
+> (`bfa60679` and others) — it already started, gate or no gate.
+> `docs/WEB_AUTH_PLAN.md`'s row said it "Follows
+> `docs/RELEASE_HARDENING_PLAN.md`," but both opened the same day and have
+> been landing concurrently since, per `docs/WEB_AUTH_PLAN.md`'s own status
+> line. Items left open and unverified because they need hardware or an
+> owner decision, per this file's own upkeep rule against guessing: relay
+> status LEDs, distinct thermocouple-daughterboard connectors, the I2C
+> expansion connector, the DEBUG header, S9's welded-contactor exercise, the
+> AP-fallback router test, and the Pico-update hardware exercise (M8) — none
+> touched. Nothing flashed, no board read, no `.kicad_*` file touched.
 
 
 The system is two firmwares that must agree with each other:
@@ -959,8 +980,8 @@ open is short:
 | [`docs/SYSTEM_ARCHITECTURE.md`](docs/SYSTEM_ARCHITECTURE.md) | The system level spanning both processors: end-to-end command/trip paths, the board-to-board interface, power domains and GND crossings, cross-processor boot/shutdown ordering. Written 2026-09-04 |
 | [`docs/REPO_LAYOUT.md`](docs/REPO_LAYOUT.md) | The hardware/software reorganisation and its blockers |
 | [`docs/SETUP.md`](docs/SETUP.md) | Fresh-clone setup: what is machine-specific, and how `tools/setup.ps1` handles it |
-| [`docs/RELEASE_HARDENING_PLAN.md`](docs/RELEASE_HARDENING_PLAN.md) | What has to be true before this controls a real kiln unattended: coredump readback for the open `profile_executor` panic, a release-gate audit against this repo's own vacuous-pass history, long-duration soak with a machine-checked verdict, guard provocation on hardware split into what the 4 W bench can and cannot ever close, failure injection, OTA/recovery mechanics, and the first-firing checklist (**closed** — [`docs/FIRST_FIRING_CHECKLIST.md`](docs/FIRST_FIRING_CHECKLIST.md), blocker 8). Risk-ordered, remaining blockers marked. **Starts once `docs/KILN_PROFILES_PLAN.md` is finished** |
-| [`docs/WEB_AUTH_PLAN.md`](docs/WEB_AUTH_PLAN.md) | Username/password and roles for the web GUI plus a numeric PIN for the LCD: an always-open Dashboard tier, `user` (start/stop only) and `administrator` (everything else), the full three-tier classification of all 140 HTTP routes, hashed and salted credentials in NVS, a fail-closed enforcement point with a mechanical route-tier check, an inactivity lock with a ten-second stay-unlocked prompt on both interfaces, and an E-stop-gated physical credential reset. Authentication ships defaulted OFF on both interfaces, so a field-upgraded board is unchanged. **Follows `docs/RELEASE_HARDENING_PLAN.md`** |
+| [`docs/RELEASE_HARDENING_PLAN.md`](docs/RELEASE_HARDENING_PLAN.md) | What has to be true before this controls a real kiln unattended: coredump readback for the open `profile_executor` panic, a release-gate audit against this repo's own vacuous-pass history, long-duration soak with a machine-checked verdict, guard provocation on hardware split into what the 4 W bench can and cannot ever close, failure injection, OTA/recovery mechanics, and the first-firing checklist (**closed** — [`docs/FIRST_FIRING_CHECKLIST.md`](docs/FIRST_FIRING_CHECKLIST.md), blocker 8). Risk-ordered, remaining blockers marked. **Corrected 2026-09-17 roadmap-upkeep sweep: this row's "starts once `docs/KILN_PROFILES_PLAN.md` is finished" was stale** — the plan's own doc shows it opened 2026-09-16 and several BLOCKER sub-items already closed (e.g. `bfa60679`, Blocker 6's schema-downgrade-hazard sub-item), regardless of `KILN_PROFILES_PLAN.md`'s status; read that plan's own status line for what remains, not this gating note |
+| [`docs/WEB_AUTH_PLAN.md`](docs/WEB_AUTH_PLAN.md) | Username/password and roles for the web GUI plus a numeric PIN for the LCD: an always-open Dashboard tier, `user` (start/stop only) and `administrator` (everything else), the full three-tier classification of all 140 HTTP routes, hashed and salted credentials in NVS, a fail-closed enforcement point with a mechanical route-tier check, an inactivity lock with a ten-second stay-unlocked prompt on both interfaces, and an E-stop-gated physical credential reset. Authentication ships defaulted OFF on both interfaces, so a field-upgraded board is unchanged. **Corrected 2026-09-17 roadmap-upkeep sweep: "Follows `docs/RELEASE_HARDENING_PLAN.md`" was stale — both plans opened the same day (2026-09-16) and have been landing concurrently since (route tiers, credential storage, LCD PIN entry, the web login surface, admin password/settings page, and the web-GUI inactivity lock all host-tested per `docs/WEB_AUTH_PLAN.md`'s own status line), not sequenced as this row claimed** |
 
 ---
 
