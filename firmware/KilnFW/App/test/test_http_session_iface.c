@@ -53,7 +53,7 @@ static void test_status_reports_without_touching(void)
     web_auth_session_role_t role = WEB_AUTH_SESSION_ROLE_NONE;
     uint32_t last_seen = 12345;
     uint32_t timeout_s = 0;
-    bool ok = http_auth_session_status("tok-status-1", &role, &last_seen, &timeout_s);
+    bool ok = http_auth_session_status("tok-status-1", "10.0.0.5", &role, &last_seen, &timeout_s);
     TEST_CHECK(ok, "a live session within its timeout reports valid");
     TEST_CHECK(role == WEB_AUTH_SESSION_ROLE_USER, "role reported correctly");
     TEST_CHECK(last_seen == 0, "last_seen_ms is still the original issue time -- status must not touch");
@@ -62,12 +62,12 @@ static void test_status_reports_without_touching(void)
     // *** The keepalive-vs-activity distinction section 8 names explicitly:
     // calling status() repeatedly must never itself extend the session. ***
     fake_time_advance_ms(29999); // now at 59.999s -- 1ms before expiry
-    ok = http_auth_session_status("tok-status-1", &role, &last_seen, &timeout_s);
+    ok = http_auth_session_status("tok-status-1", "10.0.0.5", &role, &last_seen, &timeout_s);
     TEST_CHECK(ok, "still valid at timeout-1ms (status polling along the way changed nothing)");
     TEST_CHECK(last_seen == 0, "last_seen_ms UNCHANGED after a second status() call -- proves no touch");
 
     fake_time_advance_ms(2); // now at 60.001s -- 1ms past expiry
-    ok = http_auth_session_status("tok-status-1", &role, &last_seen, &timeout_s);
+    ok = http_auth_session_status("tok-status-1", "10.0.0.5", &role, &last_seen, &timeout_s);
     TEST_CHECK(!ok, "invalid at timeout+1ms -- status() reports expiry, does not mask it");
     TEST_CHECK(role == WEB_AUTH_SESSION_ROLE_NONE, "role collapses to NONE once expired");
 }
@@ -82,13 +82,13 @@ static void test_status_unknown_and_no_token(void)
     web_auth_session_role_t role = WEB_AUTH_SESSION_ROLE_ADMIN; // poison, must be reset to NONE
     uint32_t last_seen = 999;
     uint32_t timeout_s = 0;
-    TEST_CHECK(!http_auth_session_status(NULL, &role, &last_seen, &timeout_s), "NULL token -- not valid");
+    TEST_CHECK(!http_auth_session_status(NULL, "10.0.0.5", &role, &last_seen, &timeout_s), "NULL token -- not valid");
     TEST_CHECK(role == WEB_AUTH_SESSION_ROLE_NONE, "NULL token resets role to NONE, not left poisoned");
     TEST_CHECK(last_seen == 0, "NULL token resets last_seen to 0");
     TEST_CHECK(timeout_s == 120, "timeout_s is still reported even with no token -- caller can render "
                                  "a countdown before any session exists");
 
-    TEST_CHECK(!http_auth_session_status("never-issued", &role, &last_seen, &timeout_s),
+    TEST_CHECK(!http_auth_session_status("never-issued", "10.0.0.5", &role, &last_seen, &timeout_s),
                "a token that was never issued is not valid");
     TEST_CHECK(role == WEB_AUTH_SESSION_ROLE_NONE, "unknown token resolves to NONE");
 }
@@ -102,12 +102,12 @@ static void test_touch_extends_valid_session(void)
     make_session("tok-touch-1", WEB_AUTH_SESSION_ROLE_ADMIN, 0);
     fake_time_advance_ms(50000); // 50s in, still valid
 
-    http_auth_session_touch("tok-touch-1");
+    http_auth_session_touch("tok-touch-1", "10.0.0.5");
 
     web_auth_session_role_t role;
     uint32_t last_seen = 0;
     uint32_t timeout_s = 0;
-    TEST_CHECK(http_auth_session_status("tok-touch-1", &role, &last_seen, &timeout_s),
+    TEST_CHECK(http_auth_session_status("tok-touch-1", "10.0.0.5", &role, &last_seen, &timeout_s),
                "sanity: still valid right after touch");
     TEST_CHECK(last_seen == 50000, "touch moved last_seen_ms to the current time -- extends by the "
                                    "full timeout from now, not merely delaying expiry a little");
@@ -116,7 +116,7 @@ static void test_touch_extends_valid_session(void)
     // touch) -- must STILL be valid, proving the touch really reset the
     // clock rather than just nudging the original deadline.
     fake_time_advance_ms(59000);
-    TEST_CHECK(http_auth_session_status("tok-touch-1", &role, &last_seen, &timeout_s),
+    TEST_CHECK(http_auth_session_status("tok-touch-1", "10.0.0.5", &role, &last_seen, &timeout_s),
                "valid at touch+59s (109s since original issue) -- the touch, not the issue time, "
                "is what the timeout is measured from");
 }
@@ -136,12 +136,12 @@ static void test_touch_never_revives_expired_session(void)
     // buggy client hammering an activity route (or this touch call
     // directly) after the deadline must not be able to resurrect the
     // session. ***
-    http_auth_session_touch("tok-touch-2");
+    http_auth_session_touch("tok-touch-2", "10.0.0.5");
 
     web_auth_session_role_t role;
     uint32_t last_seen = 0;
     uint32_t timeout_s = 0;
-    TEST_CHECK(!http_auth_session_status("tok-touch-2", &role, &last_seen, &timeout_s),
+    TEST_CHECK(!http_auth_session_status("tok-touch-2", "10.0.0.5", &role, &last_seen, &timeout_s),
                "touching an already-expired session leaves it expired -- touch is not a revival path");
     TEST_CHECK(last_seen == 0, "last_seen_ms in the underlying slot was never moved by the touch "
                                "(status reports 0 because the session no longer validates)");
@@ -184,17 +184,17 @@ static void test_unreadable_policy_fails_closed(void)
     web_auth_session_role_t role = WEB_AUTH_SESSION_ROLE_ADMIN; // poison
     uint32_t last_seen = 999;
     uint32_t timeout_s = 999;
-    TEST_CHECK(!http_auth_session_status("tok-unreadable", &role, &last_seen, &timeout_s),
+    TEST_CHECK(!http_auth_session_status("tok-unreadable", "10.0.0.5", &role, &last_seen, &timeout_s),
                "an UNREADABLE policy denies a still-fresh session outright -- fail closed, "
                "not 'never expires'");
     TEST_CHECK(role == WEB_AUTH_SESSION_ROLE_NONE, "role collapses to NONE under UNREADABLE");
 
-    http_auth_session_touch("tok-unreadable");
+    http_auth_session_touch("tok-unreadable", "10.0.0.5");
     // The touch above must have been a no-op: prove the underlying slot's
     // last_seen_ms was never moved by reading it back after the policy is
     // repaired.
     set_policy_timeout(60);
-    TEST_CHECK(http_auth_session_status("tok-unreadable", &role, &last_seen, &timeout_s),
+    TEST_CHECK(http_auth_session_status("tok-unreadable", "10.0.0.5", &role, &last_seen, &timeout_s),
                "sanity: repairing the policy makes the session resolvable again");
     TEST_CHECK(last_seen == 0, "touch() during UNREADABLE never moved last_seen_ms -- "
                                "it is still the original issue time (0), not bumped by the "
@@ -211,19 +211,19 @@ static void test_touch_unknown_token_and_never_timeout(void)
 
     // No session exists for this token at all -- must not crash, must not
     // create one.
-    http_auth_session_touch("never-issued-2");
-    http_auth_session_touch(NULL);
-    http_auth_session_touch("");
+    http_auth_session_touch("never-issued-2", "10.0.0.5");
+    http_auth_session_touch(NULL, "10.0.0.5");
+    http_auth_session_touch("", "10.0.0.5");
 
     set_policy_timeout(-1); // "never" (web_auth_store's -1 sentinel)
     make_session("tok-never", WEB_AUTH_SESSION_ROLE_ADMIN, 0);
     fake_time_advance_ms(1000u * 3600u * 24u); // a full day later
-    http_auth_session_touch("tok-never");
+    http_auth_session_touch("tok-never", "10.0.0.5");
 
     web_auth_session_role_t role;
     uint32_t last_seen = 0;
     uint32_t timeout_s = 0;
-    TEST_CHECK(http_auth_session_status("tok-never", &role, &last_seen, &timeout_s),
+    TEST_CHECK(http_auth_session_status("tok-never", "10.0.0.5", &role, &last_seen, &timeout_s),
                "a 'never' timeout session is always valid, touch or no touch");
     TEST_CHECK(timeout_s == WEB_AUTH_TIMEOUT_NEVER_S, "resolve_timeout_s() maps policy -1 to the "
                                                        "session module's own NEVER sentinel");
@@ -254,6 +254,51 @@ static void test_resolve_denies_mismatched_client_ip(void)
                "treated as an exemption from the check");
 }
 
+// *** 2026-09-17 adversarial review, Finding 3: http_auth_session_status()
+// and http_auth_session_touch() used to take no client_ip at all and applied
+// no IP check -- GET /api/auth/session (ROUTE_TIER_OPEN) could confirm a
+// stolen cookie live/admin from any address, a session oracle for exactly
+// the replay scenario the IP binding exists to deny. Mirrors
+// test_resolve_denies_mismatched_client_ip() above but drives the two
+// functions Finding 1's fix originally missed. ***
+static void test_status_and_touch_deny_mismatched_client_ip(void)
+{
+    TEST_SECTION("http_auth_session_status/_touch -- deny a token replayed from a different "
+                 "client_ip (Finding 3)");
+
+    reset_all();
+    set_policy_timeout(60);
+    make_session("tok-ip-bound-2", WEB_AUTH_SESSION_ROLE_ADMIN, 0); // recorded client_ip: "10.0.0.5"
+
+    web_auth_session_role_t role = WEB_AUTH_SESSION_ROLE_NONE;
+    uint32_t last_seen = 0;
+    uint32_t timeout_s = 0;
+    TEST_CHECK(http_auth_session_status("tok-ip-bound-2", "10.0.0.5", &role, &last_seen, &timeout_s),
+               "the address the session was actually issued to reports the real status");
+    TEST_CHECK(!http_auth_session_status("tok-ip-bound-2", "10.0.0.99", &role, &last_seen, &timeout_s),
+               "a valid token polled from a DIFFERENT address is denied -- the stolen-cookie "
+               "session-oracle scenario Finding 3 describes");
+    TEST_CHECK(!http_auth_session_status("tok-ip-bound-2", NULL, &role, &last_seen, &timeout_s),
+               "an unresolvable peer address (NULL client_ip) also denies rather than being "
+               "treated as an exemption from the check");
+
+    uint32_t before = 0;
+    TEST_CHECK(http_auth_session_status("tok-ip-bound-2", "10.0.0.5", &role, &before, &timeout_s),
+               "sanity read of last_seen_ms before the mismatched touch attempts below");
+
+    http_auth_session_touch("tok-ip-bound-2", "10.0.0.99");
+    uint32_t after_wrong_ip = 0;
+    http_auth_session_status("tok-ip-bound-2", "10.0.0.5", &role, &after_wrong_ip, &timeout_s);
+    TEST_CHECK(after_wrong_ip == before,
+               "a touch from the wrong address must not extend a session it cannot otherwise use");
+
+    http_auth_session_touch("tok-ip-bound-2", NULL);
+    uint32_t after_null_ip = 0;
+    http_auth_session_status("tok-ip-bound-2", "10.0.0.5", &role, &after_null_ip, &timeout_s);
+    TEST_CHECK(after_null_ip == before,
+               "a touch with no determinable peer address must not extend the session either");
+}
+
 void run_test_http_session_iface(void) {
     test_status_reports_without_touching();
     test_status_unknown_and_no_token();
@@ -262,4 +307,5 @@ void run_test_http_session_iface(void) {
     test_unreadable_policy_fails_closed();
     test_touch_unknown_token_and_never_timeout();
     test_resolve_denies_mismatched_client_ip();
+    test_status_and_touch_deny_mismatched_client_ip();
 }

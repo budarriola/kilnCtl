@@ -29,6 +29,15 @@
 // discipline web_auth_table_create_session() already uses for the (also
 // fixed-size) session table.
 //
+// Finding 2 fix (2026-09-17 adversarial review of the Finding 4 fix above):
+// that first cut of eviction considered every in_use slot interchangeable,
+// which let an attacker controlling >= LOGIN_LOCKOUT_MAX_IPS addresses evict
+// his own locked slot to keep guessing from a fresh one -- more permitted
+// guesses than the global lockout this replaced, not fewer. Eviction now
+// skips any slot that is CURRENTLY LOCKED (login_lockout_slot_for()'s own
+// header comment has the full reasoning and the accepted DoS tradeoff for
+// the case where every slot ends up locked at once).
+//
 // STACK: no locals here approach the httpd 8 KB stack blob class this
 // codebase watches for (project_httpd_stack_blob_class) -- the largest
 // local is LOGIN_BODY_MAX (256) bytes, well under the ~256-byte budget
@@ -91,12 +100,38 @@ static SemaphoreHandle_t s_login_lock;
 
 // Must be called with s_login_lock already held. Finds the slot for `ip`,
 // touching its last_activity_ms; if none exists, claims a free slot or,
-// failing that, evicts the least-recently-active slot (bounded table, see
-// header comment) and starts that IP with fresh (unlocked) lockout state.
+// failing that, evicts the least-recently-active slot AMONG THOSE NOT
+// CURRENTLY LOCKED (bounded table, see header comment) and starts that IP
+// with fresh (unlocked) lockout state.
+//
+// Finding 2 fix (2026-09-17 review): the eviction used to consider every
+// in_use slot regardless of lock state, so a slot currently serving a lock
+// (i.e. an attacker mid-lockout) was just as evictable as any other. An
+// attacker controlling >= LOGIN_LOCKOUT_MAX_IPS source addresses (trivial on
+// a LAN, or via NAT churn) could rotate to a fresh address once every
+// address had been used, evicting his own oldest locked slot to make room --
+// three guesses per address, unlimited addresses, which is MORE permitted
+// guesses than the single global lockout ca7a7d31 replaced, not fewer. A
+// slot that is currently locked (ota_auth_lockout_is_locked() true at `now`)
+// is now never a candidate for eviction.
+//
+// Returns NULL when every slot is in_use AND currently locked -- there is no
+// safe slot left to reuse for a new IP without evicting an active lock.
+// Callers MUST treat NULL as "refuse this login attempt" (see
+// login_post_handler()), not as "retry with a fresh slot" -- see this file's
+// header comment for the tradeoff this accepts: while the table is fully
+// saturated with simultaneously-locked attacker IPs, even a legitimate
+// operator's fresh address gets refused rather than bumping one of them.
+// That state requires an attacker to actively maintain LOGIN_LOCKOUT_MAX_IPS
+// concurrent locked-out addresses (each requiring OTA_AUTH_LOCKOUT_THRESHOLD
+// failed attempts to arm, and lock durations that only grow with repeated
+// failures), which is a far narrower and more expensive window than the
+// eviction-bypass this fix closes, and preserves the per-IP design's actual
+// intent -- a real lockout must mean something for its whole duration.
 static login_lockout_slot_t *login_lockout_slot_for(const char *ip, uint32_t now)
 {
     int free_idx = -1;
-    int lru_idx = 0;
+    int lru_idx = -1;
     uint32_t lru_time = UINT32_MAX;
     for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
         login_lockout_slot_t *s = &s_login_lockouts[i];
@@ -107,12 +142,19 @@ static login_lockout_slot_t *login_lockout_slot_for(const char *ip, uint32_t now
         if (!s->in_use && free_idx < 0) {
             free_idx = (int)i;
         }
-        if (s->in_use && s->last_activity_ms < lru_time) {
+        if (s->in_use && !ota_auth_lockout_is_locked(&s->lockout, now) && s->last_activity_ms < lru_time) {
             lru_time = s->last_activity_ms;
             lru_idx = (int)i;
         }
     }
     int idx = (free_idx >= 0) ? free_idx : lru_idx;
+    if (idx < 0) {
+        // Every slot is in_use and currently locked -- see this function's
+        // header comment. Deliberately not falling back to "evict the
+        // globally-oldest slot regardless of lock state": that is exactly
+        // the bypass this fix closes.
+        return NULL;
+    }
     login_lockout_slot_t *s = &s_login_lockouts[idx];
     memset(s, 0, sizeof(*s));
     s->in_use = true;
@@ -150,7 +192,12 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     bool locked = false;
     if (xSemaphoreTake(s_login_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
         login_lockout_slot_t *slot = login_lockout_slot_for(ip, now_ms());
-        locked = ota_auth_lockout_is_locked(&slot->lockout, now_ms());
+        // Finding 2 fix: NULL means every slot is in_use and currently
+        // locked (the table is saturated with active attacker lockouts) --
+        // refuse this attempt outright rather than dereferencing a slot that
+        // does not exist. See login_lockout_slot_for()'s header comment for
+        // the tradeoff.
+        locked = (slot == NULL) || ota_auth_lockout_is_locked(&slot->lockout, now_ms());
         xSemaphoreGive(s_login_lock);
     } else {
         ESP_LOGW(TAG, "login from %s: internal lock timeout, refused", ip);
@@ -219,10 +266,17 @@ static esp_err_t login_post_handler(httpd_req_t *req)
 
     if (xSemaphoreTake(s_login_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
         login_lockout_slot_t *slot = login_lockout_slot_for(ip, now_ms());
-        if (ok) {
-            ota_auth_lockout_record_success(&slot->lockout);
-        } else {
-            ota_auth_lockout_record_failure(&slot->lockout, now_ms());
+        // Finding 2 fix: the pre-check above already refused this request
+        // when the table is saturated with locked IPs, so NULL here would
+        // mean the saturation state changed between the two calls under the
+        // same held lock -- not expected, but handled rather than
+        // dereferencing NULL.
+        if (slot != NULL) {
+            if (ok) {
+                ota_auth_lockout_record_success(&slot->lockout);
+            } else {
+                ota_auth_lockout_record_failure(&slot->lockout, now_ms());
+            }
         }
         xSemaphoreGive(s_login_lock);
     }
@@ -250,11 +304,15 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     web_auth_table_create_session(http_session_table(), token_hash, ip, session_role, now_ms());
 
     // 128 bytes: "kiln_sid=" (9) + 64 hex chars + "; HttpOnly; SameSite=Strict; Path=/"
-    // (36) + NUL = 110 -- the previous 96-byte buffer was too small to hold
-    // a real cookie and made every successful login fail with a spurious
-    // 500 (found by this pass's host tests, not itself one of the seven
-    // audit findings, but blocking their test coverage). Still well under
-    // LOGIN_BODY_MAX (256), this file's stated httpd-stack budget.
+    // (35) + NUL = 109 -- Finding 5 fix (2026-09-17 review): this comment's
+    // arithmetic previously read "36 + NUL = 110", one byte over the actual
+    // 108-byte-plus-NUL total; the buffer itself was already correctly sized
+    // (128 is still comfortably above 109), only the comment's sum was wrong.
+    // The previous 96-byte buffer was too small to hold a real cookie and
+    // made every successful login fail with a spurious 500 (found by this
+    // pass's host tests, not itself one of the seven audit findings, but
+    // blocking their test coverage). Still well under LOGIN_BODY_MAX (256),
+    // this file's stated httpd-stack budget.
     char cookie[128];
     int cookie_len = snprintf(cookie, sizeof(cookie), HTTP_SESSION_COOKIE_NAME "=%s; HttpOnly; SameSite=Strict; Path=/",
                                token_hex);

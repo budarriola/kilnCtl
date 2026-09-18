@@ -108,10 +108,15 @@ static bool extract_named_cookie(const char *raw, const char *name, char *out, s
 // HTTP_AUTH_ROLE_NONE -- so a header this function can't safely parse fails
 // closed, it does not get silently truncated and possibly still matched.
 //
-// Buffer sizes here are the whole of this function's stack budget: 128 + 128
-// + 46 bytes, all fixed, well under the 256-byte-local ceiling this plan
-// (and CLAUDE.md's httpd-stack history) sets for anything running on the
-// shared 8 KB httpd task stack.
+// Finding 4 fix (2026-09-17 review): this comment used to claim a fixed
+// "128 + 128 + 46 bytes" stack budget, describing a 128-byte `char cookie[128]`
+// stack local that no longer exists -- the Cookie header is now malloc'd here
+// (up to KILN_HTTP_MAX_COOKIE_HDR_LEN, 4096 bytes, on the heap, freed before
+// return) precisely so a long header cannot blow the shared 8 KB httpd task
+// stack. The only stack-resident buffer this function itself owns is `out`,
+// sized by the caller (128 bytes at every call site today); the ip[46] buffer
+// referenced by the stale comment belongs to a different function
+// (resolve_role_for_request() below), not this one.
 // Exported so a route that needs the raw session token itself (today: the
 // section 8 status-poll/extend routes, web_auth_session_status_http.c) can
 // reuse this SAME cookie-extraction path rather than parsing the Cookie
@@ -258,7 +263,14 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
     // comment) -- the server, not this call site, is what makes the
     // expiry real.
     if (token[0] != '\0' && http_auth_decision_counts_as_activity(ctx->tier, decision)) {
-        http_auth_session_touch(token);
+        // Finding 3 fix (2026-09-17 review): http_auth_session_touch() now
+        // enforces the same IP binding http_auth_session_resolve() already
+        // does, so it needs the caller's address too -- re-extract it the
+        // same way resolve_role_for_request() did above rather than
+        // threading it back out of that function's own signature.
+        char ip[46];
+        ota_http_get_client_ip(req, ip, sizeof(ip));
+        http_auth_session_touch(token, ip);
     }
     switch (decision) {
         case HTTP_AUTH_DECISION_ALLOW:

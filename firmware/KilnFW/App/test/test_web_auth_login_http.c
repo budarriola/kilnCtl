@@ -272,6 +272,113 @@ static void test_lockout_table_is_bounded(void)
                "the table never holds more live entries than its fixed capacity");
 }
 
+// *** 2026-09-17 adversarial review, Finding 2: the eviction inside
+// login_lockout_slot_for() used to treat every in_use slot as equally
+// evictable, including one that is CURRENTLY LOCKED. An attacker controlling
+// LOGIN_LOCKOUT_MAX_IPS or more source addresses could rotate through them,
+// evicting his own oldest locked slot each time a new address needed one --
+// three guesses per address, unlimited addresses, defeating the whole point
+// of per-IP lockout. test_lockout_table_is_bounded() above only ever
+// asserted in_use == LOGIN_LOCKOUT_MAX_IPS, which stayed true whether or not
+// eviction cleared a locked slot -- vacuous against exactly this bug. ***
+static void test_lockout_eviction_never_evicts_a_locked_slot(void)
+{
+    TEST_SECTION("login lockout table -- eviction must skip currently-locked slots (Finding 2)");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+
+    char ip[46];
+    // Lock every one of the LOGIN_LOCKOUT_MAX_IPS slots (3 failures each is
+    // OTA_AUTH_LOCKOUT_THRESHOLD).
+    for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
+        snprintf(ip, sizeof(ip), "10.2.0.%u", i + 1);
+        strncpy(s_stub_client_ip, ip, sizeof(s_stub_client_ip) - 1);
+        for (int j = 0; j < 3; j++) {
+            do_login("admin", "wrong-password");
+        }
+    }
+    unsigned locked_count = 0;
+    for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
+        if (s_login_lockouts[i].in_use && ota_auth_lockout_is_locked(&s_login_lockouts[i].lockout, now_ms())) {
+            locked_count++;
+        }
+    }
+    TEST_CHECK(locked_count == LOGIN_LOCKOUT_MAX_IPS, "test setup: every slot is now locked");
+
+    // A brand-new, never-seen-before source IP arrives once the table is
+    // saturated with locked attackers. It must be refused outright (429),
+    // NOT granted a slot by evicting one of the locked attackers -- that
+    // eviction is exactly the bypass Finding 2 found.
+    strncpy(s_stub_client_ip, "10.2.9.99", sizeof(s_stub_client_ip) - 1);
+    s_last_status_line = 0;
+    esp_err_t err = do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(err == ESP_OK, "handler still returns ESP_OK when refusing a saturated-table login");
+    TEST_CHECK(s_last_status_line == 429,
+               "a brand-new IP is refused once the table is saturated with locked IPs, "
+               "rather than being handed a slot evicted from a locked attacker");
+
+    // Every one of the originally-locked IPs must still be locked -- none
+    // was evicted to make room for the new arrival.
+    unsigned still_locked = 0;
+    for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
+        if (s_login_lockouts[i].in_use && ota_auth_lockout_is_locked(&s_login_lockouts[i].lockout, now_ms())) {
+            still_locked++;
+        }
+    }
+    TEST_CHECK(still_locked == LOGIN_LOCKOUT_MAX_IPS,
+               "eviction never cleared a locked slot to make room for the new IP -- "
+               "the pre-fix bug would have shown fewer than LOGIN_LOCKOUT_MAX_IPS here");
+
+    // The new IP must never have been granted a slot at all.
+    bool new_ip_got_a_slot = false;
+    for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
+        if (s_login_lockouts[i].in_use && strcmp(s_login_lockouts[i].ip, "10.2.9.99") == 0) {
+            new_ip_got_a_slot = true;
+        }
+    }
+    TEST_CHECK(!new_ip_got_a_slot, "the refused new IP was never given a table slot");
+}
+
+// A slot that is free (never used) or in_use but NOT currently locked must
+// still be evictable/reusable normally -- Finding 2's fix must not turn
+// eviction off altogether, only skip slots that are actively locked.
+static void test_lockout_eviction_still_works_for_unlocked_slots(void)
+{
+    TEST_SECTION("login lockout table -- eviction still reclaims unlocked slots (Finding 2 regression guard)");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+
+    char ip[46];
+    // Fill every slot with a single SUCCESSFUL login each (clears/keeps
+    // lockout state unlocked) so none of them are locked.
+    for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
+        snprintf(ip, sizeof(ip), "10.3.0.%u", i + 1);
+        strncpy(s_stub_client_ip, ip, sizeof(s_stub_client_ip) - 1);
+        do_login("admin", "correct-horse-battery-staple");
+    }
+    unsigned in_use = 0;
+    for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
+        if (s_login_lockouts[i].in_use) { in_use++; }
+    }
+    TEST_CHECK(in_use == LOGIN_LOCKOUT_MAX_IPS, "test setup: table is full of unlocked slots");
+
+    // A new IP must still be able to get a slot via ordinary LRU eviction --
+    // the table is not permanently stuck once nothing is locked.
+    strncpy(s_stub_client_ip, "10.3.9.99", sizeof(s_stub_client_ip) - 1);
+    s_last_status_line = 0;
+    esp_err_t err = do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(s_last_status_line != 429, "a new IP is NOT refused when the table is full of unlocked slots");
+
+    bool new_ip_got_a_slot = false;
+    for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
+        if (s_login_lockouts[i].in_use && strcmp(s_login_lockouts[i].ip, "10.3.9.99") == 0) {
+            new_ip_got_a_slot = true;
+        }
+    }
+    TEST_CHECK(new_ip_got_a_slot, "the new IP was granted a slot via ordinary LRU eviction of an unlocked slot");
+}
+
 static void test_login_body_split_across_recv_calls(void)
 {
     // Finding 5: httpd_req_recv() is not guaranteed to return the whole
@@ -301,6 +408,8 @@ void run_test_web_auth_login_http(void)
 {
     test_lockout_is_per_ip_not_global();
     test_lockout_table_is_bounded();
+    test_lockout_eviction_never_evicts_a_locked_slot();
+    test_lockout_eviction_still_works_for_unlocked_slots();
     test_login_body_split_across_recv_calls();
 }
 

@@ -56,10 +56,16 @@ size_t web_auth_table_create_session(web_auth_table_t *t, const uint8_t token_ha
     if (client_ip) {
         size_t n = strlen(client_ip);
         if (n >= WEB_AUTH_CLIENT_IP_LEN) {
-            n = WEB_AUTH_CLIENT_IP_LEN - 1;
+            // Finding 1 fix (2026-09-17 review): does not fit even in a
+            // buffer sized for a full IPv6 address string -- do not silently
+            // truncate (that is exactly what produced the IPv6 lockout/
+            // collision this fix addresses). Record no binding at all rather
+            // than a guessed-at prefix; see this function's header comment.
+            slot->client_ip[0] = '\0';
+        } else {
+            memcpy(slot->client_ip, client_ip, n);
+            slot->client_ip[n] = '\0';
         }
-        memcpy(slot->client_ip, client_ip, n);
-        slot->client_ip[n] = '\0';
     }
     slot->role = role;
     slot->issued_ms = now_ms;

@@ -115,19 +115,34 @@ http_auth_role_t http_auth_session_resolve(const char *token, const char *client
 // token, no matching slot, or an expired slot; timeout_s is still filled in
 // on a false return so a caller can compute a prompt window even before any
 // session exists.
-bool http_auth_session_status(const char *token, web_auth_session_role_t *role_out,
+//
+// `client_ip` (2026-09-17 review, Finding 3): both this function and
+// http_auth_session_touch() below used to take no client IP at all and
+// applied no IP check, even though http_auth_session_resolve() above enforces
+// the exact-match IP binding this header's own MUST list requires for every
+// other route. GET /api/auth/session is ROUTE_TIER_OPEN, so a stolen cookie
+// presented from ANY address confirmed itself live and admin -- not
+// privilege escalation, but a session oracle for exactly the replay scenario
+// the IP binding exists to deny. Both functions now take `client_ip` (same
+// NUL-terminated-or-NULL contract as resolve()'s parameter) and apply the
+// identical web_auth_effective_role() check -- a mismatched or NULL
+// client_ip resolves to "no session" here exactly as it does for resolve().
+bool http_auth_session_status(const char *token, const char *client_ip, web_auth_session_role_t *role_out,
                                uint32_t *last_seen_ms_out, uint32_t *timeout_s_out);
 
 // Extends a session exactly the way ordinary authenticated activity does:
 // looks the token up, and if (and only if) it is STILL VALID against the
-// current timeout, calls web_auth_table_touch() to bump last_seen_ms to now
-// and clear the prompt flag. A token that is absent, matches no slot, or is
-// already expired is left alone -- this function must never "revive" an
-// expired session, which is what makes server-side expiry independent of
-// the browser: a client that ignores the lock prompt and keeps calling this
-// (or any USER/ADMIN route) after the deadline gets nothing, because the
-// validity check runs before the touch, not after.
-void http_auth_session_touch(const char *token);
+// current timeout AND `client_ip` matches the address the session was
+// issued to (Finding 3, see http_auth_session_status()'s comment above for
+// the full rationale), calls web_auth_table_touch() to bump last_seen_ms to
+// now and clear the prompt flag. A token that is absent, matches no slot, is
+// already expired, or is presented from the wrong address is left alone --
+// this function must never "revive" an expired session, which is what makes
+// server-side expiry independent of the browser: a client that ignores the
+// lock prompt and keeps calling this (or any USER/ADMIN route) after the
+// deadline gets nothing, because the validity check runs before the touch,
+// not after.
+void http_auth_session_touch(const char *token, const char *client_ip);
 
 #ifdef __cplusplus
 }

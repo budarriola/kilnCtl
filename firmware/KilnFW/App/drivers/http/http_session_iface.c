@@ -172,7 +172,7 @@ http_auth_role_t http_auth_session_resolve(const char *token, const char *client
     return to_enforce_role(role);
 }
 
-bool http_auth_session_status(const char *token, web_auth_session_role_t *role_out,
+bool http_auth_session_status(const char *token, const char *client_ip, web_auth_session_role_t *role_out,
                                uint32_t *last_seen_ms_out, uint32_t *timeout_s_out) {
     if (role_out) {
         *role_out = WEB_AUTH_SESSION_ROLE_NONE;
@@ -207,6 +207,16 @@ bool http_auth_session_status(const char *token, web_auth_session_role_t *role_o
     if (!web_auth_session_is_valid(t->slots[idx].last_seen_ms, timeout.timeout_s, now)) {
         return false;
     }
+    // Finding 3 fix (2026-09-17 review): this status poll used to report a
+    // matching, still-valid token's role from ANY address -- no IP check at
+    // all, even though the slot's binding is captured at login. Apply the
+    // same exact-match rule web_auth_effective_role() enforces for every
+    // other route: a NULL client_ip (no determinable peer address) or one
+    // that does not match the address this session was issued to reports
+    // "no session" here too, exactly like an expired or unknown token.
+    if (!client_ip || strcmp(t->slots[idx].client_ip, client_ip) != 0) {
+        return false;
+    }
 
     if (role_out) {
         *role_out = t->slots[idx].role;
@@ -217,7 +227,7 @@ bool http_auth_session_status(const char *token, web_auth_session_role_t *role_o
     return true;
 }
 
-void http_auth_session_touch(const char *token) {
+void http_auth_session_touch(const char *token, const char *client_ip) {
     if (!token || token[0] == '\0') {
         return;
     }
@@ -244,6 +254,12 @@ void http_auth_session_touch(const char *token) {
     // sending requests past the deadline must not be able to extend itself
     // back to life just by trying.
     if (!web_auth_session_is_valid(t->slots[idx].last_seen_ms, timeout.timeout_s, now)) {
+        return;
+    }
+    // Finding 3 fix: same exact-match IP binding as http_auth_session_status()
+    // and http_auth_session_resolve() above -- a request presented from the
+    // wrong address must not extend a session it cannot otherwise use.
+    if (!client_ip || strcmp(t->slots[idx].client_ip, client_ip) != 0) {
         return;
     }
     web_auth_table_touch(t, (size_t)idx, now);

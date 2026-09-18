@@ -15,6 +15,11 @@
 #include "web_auth_session.h"    // web_auth_session_in_prompt_window(), WEB_AUTH_*
 #include "wifi_provision_http.h" // wifi_provision_http_get_server()
 
+// GET client IP -- same extraction helper other routes forward-declare
+// against ota_http.c's real (non-static) definition (see e.g.
+// web_auth_login_http.c's identical forward declaration and comment).
+void ota_http_get_client_ip(httpd_req_t *req, char *out, size_t out_len);
+
 static const char *TAG = "web_auth_session_status_http";
 
 static const char *role_name(web_auth_session_role_t role)
@@ -49,10 +54,19 @@ static esp_err_t session_status_get_handler(httpd_req_t *req)
     char token[128];
     bool have_token = http_auth_extract_session_token(req, token, sizeof(token));
 
+    // Finding 3 fix (2026-09-17 review): this route is ROUTE_TIER_OPEN, so
+    // the shared pre-handler never resolves a role (or an IP) for it --
+    // http_auth_session_status() now requires the caller's address too, the
+    // same binding http_auth_session_resolve() already enforces for every
+    // other route, so a stolen cookie can no longer be confirmed live/admin
+    // from an address it was never issued to.
+    char ip[46];
+    ota_http_get_client_ip(req, ip, sizeof(ip));
+
     web_auth_session_role_t role = WEB_AUTH_SESSION_ROLE_NONE;
     uint32_t last_seen_ms = 0;
     uint32_t timeout_s = 0;
-    bool valid = http_auth_session_status(have_token ? token : NULL, &role, &last_seen_ms, &timeout_s);
+    bool valid = http_auth_session_status(have_token ? token : NULL, ip, &role, &last_seen_ms, &timeout_s);
 
     bool prompt = false;
     long seconds_left = -1; // -1 means "never" or "no session" -- no countdown to show

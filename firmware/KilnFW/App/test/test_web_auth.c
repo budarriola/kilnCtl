@@ -341,6 +341,83 @@ static void test_effective_role_ip_binding(void)
                " this binding is exact-string, not prefix-based");
 }
 
+// *** 2026-09-17 adversarial review, Finding 1: WEB_AUTH_CLIENT_IP_LEN used
+// to be 16 ("enough for a dotted-quad IPv4 string"), which silently
+// truncated any IPv6 address (every real one is longer than 15 characters)
+// to 15 characters before storing it. web_auth_effective_role() then
+// compared that truncated stored copy against the caller's untruncated
+// address on every subsequent request, so an IPv6 client could log in but
+// could never pass the IP-binding check again -- a silent 401 lockout on
+// the very next request. No existing test before this fix used an address
+// longer than 15 characters ("10.0.0.5", "192.168.1.50", "1.2.3.4",
+// "9.9.9.9" are all IPv4 and comfortably short), which is why this shipped.
+// This test uses a realistic IPv6 link-local address (the CLAUDE.md-named
+// "likely first case" once a client reaches the board over IPv6). ***
+static void test_client_ip_full_length_ipv6_round_trips(void)
+{
+    TEST_SECTION("web_auth_effective_role -- a full IPv6 address round-trips (Finding 1)");
+
+    web_auth_table_t t;
+    web_auth_table_init(&t);
+
+    const char *ipv6 = "fe80::a1b2:c3d4:e5f6:7890"; // 25 chars, well past the old 15-char ceiling
+    TEST_CHECK(strlen(ipv6) > 15, "test sanity: this address is longer than the old truncation point");
+
+    uint8_t issued[WEB_AUTH_TOKEN_HASH_LEN];
+    make_hash(issued, 7);
+    size_t idx = web_auth_table_create_session(&t, issued, ipv6, WEB_AUTH_SESSION_ROLE_ADMIN, 0);
+
+    TEST_CHECK(strcmp(t.slots[idx].client_ip, ipv6) == 0,
+               "the full IPv6 address is stored without truncation");
+    TEST_CHECK(web_auth_effective_role(&t, true, issued, ipv6, 300, 100) == WEB_AUTH_SESSION_ROLE_ADMIN,
+               "the very next request from the SAME full address still resolves its real role -- "
+               "before the fix, the stored (truncated) copy never matched this untruncated compare");
+}
+
+// *** Finding 1's second consequence: truncating to 15 characters collapsed
+// two DISTINCT IPv6 clients that merely share a long common prefix (very
+// common for two hosts on the same fe80::/10 link) onto the same stored
+// string -- a cross-client session-binding hole, not merely a lockout. Two
+// sessions minted for two different real addresses must never be
+// indistinguishable from each other. ***
+static void test_client_ip_distinct_ipv6_addresses_do_not_collide(void)
+{
+    TEST_SECTION("web_auth_effective_role -- distinct IPv6 addresses sharing a long prefix do not collide (Finding 1)");
+
+    web_auth_table_t t;
+    web_auth_table_init(&t);
+
+    // Identical in their first 15 characters ("fe80::1111:1111"), distinct
+    // thereafter -- exactly the shape that collapsed under the old 16-byte
+    // (15 usable + NUL) buffer.
+    const char *ip_a = "fe80::1111:1111:0001";
+    const char *ip_b = "fe80::1111:1111:0002";
+    TEST_CHECK(strncmp(ip_a, ip_b, 15) == 0, "test sanity: the two addresses share a 15-character prefix");
+    TEST_CHECK(strcmp(ip_a, ip_b) != 0, "test sanity: the two addresses are still distinct in full");
+
+    uint8_t token_a[WEB_AUTH_TOKEN_HASH_LEN];
+    uint8_t token_b[WEB_AUTH_TOKEN_HASH_LEN];
+    make_hash(token_a, 11);
+    make_hash(token_b, 211);
+
+    web_auth_table_create_session(&t, token_a, ip_a, WEB_AUTH_SESSION_ROLE_ADMIN, 0);
+    web_auth_table_create_session(&t, token_b, ip_b, WEB_AUTH_SESSION_ROLE_USER, 0);
+
+    // Client A's session, presented from client A's real address, resolves.
+    TEST_CHECK(web_auth_effective_role(&t, true, token_a, ip_a, 300, 100) == WEB_AUTH_SESSION_ROLE_ADMIN,
+               "client A's session resolves from client A's own address");
+    // Client A's session must NOT resolve from client B's address -- if the
+    // two addresses had collapsed to the same stored string (the pre-fix
+    // bug), this compare would spuriously match too.
+    TEST_CHECK(web_auth_effective_role(&t, true, token_a, ip_b, 300, 100) == WEB_AUTH_SESSION_ROLE_NONE,
+               "client A's session is denied when presented from client B's distinct address, "
+               "even though the two addresses share a long common prefix");
+    TEST_CHECK(web_auth_effective_role(&t, true, token_b, ip_b, 300, 100) == WEB_AUTH_SESSION_ROLE_USER,
+               "client B's session resolves from client B's own address");
+    TEST_CHECK(web_auth_effective_role(&t, true, token_b, ip_a, 300, 100) == WEB_AUTH_SESSION_ROLE_NONE,
+               "client B's session is denied when presented from client A's distinct address");
+}
+
 void run_test_web_auth(void)
 {
     test_table_init_and_lookup();
@@ -353,6 +430,8 @@ void run_test_web_auth(void)
     test_touch_extends_and_clears_prompt();
     test_auth_disabled_inert_path();
     test_effective_role_ip_binding();
+    test_client_ip_full_length_ipv6_round_trips();
+    test_client_ip_distinct_ipv6_addresses_do_not_collide();
     test_lcd_session();
     test_admin_bootstrap_needed();
 }

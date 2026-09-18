@@ -58,13 +58,30 @@ typedef enum {
 
 // --- Session slots (WEB_AUTH_PLAN.md section 4) -----------------------------
 //
-// "A slot is { token_hash[32], client_ip[16], role, issued_ms, last_seen_ms }
-// -- 56 bytes plus padding." 8 web slots, LRU-evicted, RAM-only, no heap. The
-// LCD gets exactly one session (a single struct of the same shape), not a
-// slot in this table -- see web_auth_lcd_session_t below.
+// Originally "a slot is { token_hash[32], client_ip[16], role, issued_ms,
+// last_seen_ms } -- 56 bytes plus padding" (WEB_AUTH_PLAN.md section 4).
+// client_ip grew from 16 to 46 bytes in the 2026-09-17 review's Finding 1
+// fix (see WEB_AUTH_CLIENT_IP_LEN below) -- +30 bytes/slot, +240 bytes total
+// across the 8-slot table, still RAM-only, no heap. 8 web slots, LRU-evicted.
+// The LCD gets exactly one session (a single struct of the same shape), not
+// a slot in this table -- see web_auth_lcd_session_t below.
 #define WEB_AUTH_TOKEN_HASH_LEN 32u
-#define WEB_AUTH_CLIENT_IP_LEN  16u // enough for a dotted-quad IPv4 string incl. NUL;
-                                     // this module never parses/formats the IP itself
+// 46 == INET6_ADDRSTRLEN, the same size as the producer's own buffer
+// (ota_http_get_client_ip()'s caller-side `char ip[46]` in http_auth_http.c/
+// web_auth_login_http.c). 2026-09-17 review, Finding 1: this used to be 16u
+// ("enough for a dotted-quad IPv4 string"), which silently truncated every
+// IPv6 address to 15 characters -- on a dual-stack (IPv4+IPv6) listener
+// (ESP-IDF's default CONFIG_LWIP_IPV6=y), an IPv6 client could log in but
+// then fail web_auth_effective_role()'s IP-binding compare on every
+// subsequent request (the login handler stored the truncated 15-char form,
+// but the comparison side always received the full untruncated address), a
+// silent, total lockout for every IPv6 client. Worse, two distinct IPv6
+// clients sharing their first 15 characters (e.g. two `fe80::` link-local
+// peers) collapsed onto the same stored string -- a cross-client
+// session-binding collision, not merely a lockout. This module still never
+// parses/formats the IP itself; it only needs to hold whatever the producer
+// hands it without truncating it.
+#define WEB_AUTH_CLIENT_IP_LEN  46u
 #define WEB_AUTH_WEB_SLOT_COUNT 8u
 
 typedef struct {
@@ -104,10 +121,21 @@ bool web_auth_session_constant_time_equal(const uint8_t *a, const uint8_t *b, si
 // the slot with the smallest last_seen_ms (least recently seen) -- "a stale
 // session can never lock out a real operator" (WEB_AUTH_PLAN.md section 4).
 // Stores `token_hash` (already hashed by the caller -- this module never
-// sees or stores a raw token) and `client_ip` (copied, truncated to fit;
-// caller is responsible for NUL-terminating a shorter string) into the
-// chosen slot with `role`, issued_ms == now_ms, last_seen_ms == now_ms,
-// prompted == false. Returns the index of the slot used. Two distinct calls
+// sees or stores a raw token) and `client_ip` (copied; caller is responsible
+// for NUL-terminating a shorter string) into the chosen slot with `role`,
+// issued_ms == now_ms, last_seen_ms == now_ms, prompted == false.
+// `client_ip` is expected to always fit WEB_AUTH_CLIENT_IP_LEN (46, same as
+// the producer's own buffer) -- but 2026-09-17 review, Finding 1, found this
+// module silently truncating an oversized address instead, which is how a
+// 16-byte buffer holding IPv6 addresses caused a cross-client collision. If
+// `client_ip` still does not fit (a producer bug, since none of today's
+// callers can hand this a string this long), this function refuses to guess
+// at a truncated form: it records an empty client_ip for the slot instead,
+// so the slot can never spuriously match a real address later (an empty
+// stored string only matches a caller-supplied client_ip that is itself an
+// empty string, which web_auth_effective_role() already treats as
+// impossible to present legitimately) -- fails closed instead of silently
+// colliding. Returns the index of the slot used. Two distinct calls
 // with distinct `token_hash` values always occupy distinct slots (this
 // module performs no dedup); the caller is responsible for minting a fresh
 // random token per login, same as UI_PLAN.md's original design.
