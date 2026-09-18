@@ -128,6 +128,25 @@ static SemaphoreHandle_t s_login_lock;
 // failures), which is a far narrower and more expensive window than the
 // eviction-bypass this fix closes, and preserves the per-IP design's actual
 // intent -- a real lockout must mean something for its whole duration.
+//
+// ACCEPTED TRADEOFF (owner decision, 2026-09-17, not a defect awaiting a
+// fix -- do not "helpfully" undo this): with LOGIN_LOCKOUT_MAX_IPS == 16,
+// OTA_AUTH_LOCKOUT_THRESHOLD == 3 and lockout_tier never decaying on its own
+// (ota_auth.h:107-109; only ota_auth_lockout_record_success() clears a
+// tier, which an attacker never triggers), the steady-state cost to hold
+// all 16 slots simultaneously locked is 16 addresses x 3 POSTs per lock
+// cycle, and each address's lock settles at the OTA_AUTH_LOCKOUT_MAX_MS
+// (900 s / 15 min) ceiling once its tier has climbed there -- roughly
+// 48 requests per 900 s, i.e. about one POST every 19 s, to keep the whole
+// table saturated indefinitely. While saturated, this function returns NULL
+// for any IP without an existing slot, and login_post_handler() answers
+// that with a bare 429 *before* credentials are examined -- including the
+// legitimate operator's own laptop after a DHCP lease change, or a phone on
+// a different address. There is no admin override and no prune of expired-
+// but-still-in-use slots; recovery is either waiting out the attacker (up
+// to 15 minutes after they stop) or rebooting the board (this table is
+// static RAM, cleared by a reset). See login_post_handler()'s 429 site for
+// the matching oracle-safety note.
 static login_lockout_slot_t *login_lockout_slot_for(const char *ip, uint32_t now)
 {
     int free_idx = -1;
@@ -205,6 +224,15 @@ static esp_err_t login_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
     if (locked) {
+        // Deliberately identical status line and body whether `slot` was a
+        // genuine per-IP lockout or NULL (the whole table saturated with
+        // OTHER IPs' locks -- see login_lockout_slot_for()'s header comment
+        // for the measured cost and the accepted tradeoff, 2026-09-17). If
+        // the saturation case answered any differently, the response itself
+        // would be an oracle telling an attacker whether the table is full,
+        // which is exactly the kind of side channel this lockout exists to
+        // deny -- so a legitimate operator refused here sees the same
+        // "too many failed attempts" message a genuinely locked-out IP does.
         httpd_resp_set_status(req, "429 Too Many Requests");
         httpd_resp_send(req, "too many failed attempts, try again later", HTTPD_RESP_USE_STRLEN);
         return ESP_OK;
