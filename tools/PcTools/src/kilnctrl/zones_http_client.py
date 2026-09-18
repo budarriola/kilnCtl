@@ -650,6 +650,15 @@ _TOP_READONLY_OR_STRUCTURAL_KEYS = {
     # by max_temp_c changes, never posted directly by a client.
     "safety_ceiling",
     "relay_names", "timing_profiles", "zones",
+    # relay_types (docs/ZONE_GRAPHIC_PLAN.md stage 2, 2026-09-18): one small
+    # integer per relay saying what that relay physically drives (damper,
+    # outlet, valve, fan, light, other, or 0 = nobody has said yet), indexed
+    # exactly like relay_names above. Structural, same as relay_names: this
+    # module's scalar map never echoes it back. The POST side does accept it,
+    # but per-relay, under a key built dynamically as "relay<N>_type" -- never
+    # a top-level literal -- so it correctly does not appear in the POST
+    # field table either.
+    "relay_types",
     # docs/ON_OFF_ZONE_PLAN.md step 6 (ZONES_CFG_VERSION 22->23, 2026-09-08):
     # the resolved on/off hysteresis/min-on-off-seconds DEFAULTS, emitted
     # top-level purely so zones_page.html's placeholder text can't drift

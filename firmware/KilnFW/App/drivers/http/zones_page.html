@@ -832,13 +832,13 @@ function kgExtraRelays(z) {
   return out;
 }
 
-/* THE RELAY DEVICE-TYPE SEAM. The per-relay device type (unset = 0) belongs to
-   a CONCURRENT change: a types[] array on relay_names_cfg, version 1 -> 2,
-   surfaced as "relay_types" on GET /api/zones. That storage work is
-   deliberately not implemented or duplicated here. Verified absent on the live
-   board, so today every relay takes the 'unknown' path and draws the dashed
-   hollow glyph -- the honest state. When the array lands, real types render
-   with no other change to the artwork. */
+/* THE RELAY DEVICE-TYPE SEAM. The per-relay device type is stored as a types[]
+   array on relay_names_cfg (version 1 -> 2, stage 1) and reported as the
+   "relay_types" array on GET /api/zones (stage 2, landed) -- one small integer
+   per relay, dense and 0-based, indexed exactly like relay_names. A relay whose
+   type is UNSET (0), or a response from firmware too old to carry the array at
+   all, still takes the 'unknown' path and draws the dashed hollow glyph, which
+   is the honest state rather than an error. */
 var KG_DEVICE_TYPES = ['unset', 'damper', 'outlet', 'valve', 'fan', 'light', 'other'];
 function kgDeviceType(z, relayIndex) {
   if (!z || !Array.isArray(z.relay_types)) return 'unknown';
@@ -1088,8 +1088,8 @@ function renderKilnGraphicHtml(z, st) {
       if (dt === 'unknown') {
         s += kgBadge(ex + 90, ey, 'unknown', 'Relay R' + extras[i] + ' device type not known',
           'No zone claims this relay, so it is an EXTRA relay -- but nothing says what device it ' +
-          'drives. The per-relay device type is a separate storage change still in flight; until it ' +
-          'lands this page cannot know, and shows the unknown glyph rather than guessing.');
+          'drives. Pick its device type in the relay list below and save; until someone does, this ' +
+          'page shows the unknown glyph rather than guessing.');
       }
     }
   }
@@ -2170,10 +2170,25 @@ function clientOwnedRelayMask() {
  * doesn't let the operator edit either. relay_names[] comes from the last
  * GET, dense over every relay slot the board has (regardless of relayCount),
  * indexed the same 0-based way RELAY_NAMES/relay_mask bits are. */
+/* The device-type dropdown's options, one per value of the FIXED, code-defined
+ * relay_device_type_t enum (KG_DEVICE_TYPES is that enum's mirror, index ==
+ * wire value). Value 0 (UNSET) is deliberately a real, selectable option --
+ * "not set" is a legitimate stored answer meaning nobody has classified this
+ * relay, and it renders as the graphic's unknown glyph, not as an error. */
+function relayTypeOptionsHtml(selected) {
+  var h = '';
+  for (var i = 0; i < KG_DEVICE_TYPES.length; i++) {
+    h += '<option value="' + i + '"' + (i === selected ? ' selected' : '') + '>' +
+      (i === 0 ? 'not set' : KG_DEVICE_TYPES[i]) + '</option>';
+  }
+  return h;
+}
+
 function renderRelayNames() {
   var relayCount = parseInt(document.getElementById('relayCount').value, 10) || 0;
   var ownedMask = clientOwnedRelayMask();
   var names = current.relay_names || [];
+  var types = current.relay_types || [];
   var el = document.getElementById('relayNames');
   el.innerHTML = '';
   if (relayCount === 0) {
@@ -2183,6 +2198,8 @@ function renderRelayNames() {
   for (var r = 0; r < relayCount; r++) {
     var owned = (ownedMask & (1 << r)) !== 0;
     var storedName = names[r] || '';
+    var storedType = (typeof types[r] === 'number' && types[r] >= 0 && types[r] < KG_DEVICE_TYPES.length)
+      ? types[r] : 0;
     var div = document.createElement('div');
     div.className = 'relayname';
     div.dataset.relay = r; /* 0-based bit; relay r+1 on the wire (relay<N>_name) */
@@ -2192,12 +2209,18 @@ function renderRelayNames() {
         '<p class="hint">Assigned to a zone above -- named by that zone instead' +
         (storedName ? ' (its own stored name, "' + window.kcEscapeHtml(storedName) +
           '", is kept and returns here if you unassign it)' : '') + '.</p>' +
-        '<input type="hidden" class="relaynameinput" value="' + window.kcEscapeHtml(storedName) + '">';
+        '<input type="hidden" class="relaynameinput" value="' + window.kcEscapeHtml(storedName) + '">' +
+        /* A zone-owned relay drives that zone's heaters, so it gets no device-type
+           control -- but its stored type is echoed so a save from this page cannot
+           change it. */
+        '<input type="hidden" class="relaytypeinput" value="' + storedType + '">';
     } else {
       div.innerHTML =
         '<label>' + RELAY_NAMES[r] + ' name</label>' +
         '<input type="text" class="relaynameinput" maxlength="15" value="' +
-        window.kcEscapeHtml(storedName) + '">';
+        window.kcEscapeHtml(storedName) + '">' +
+        '<label>' + RELAY_NAMES[r] + ' device type</label>' +
+        '<select class="relaytypeinput">' + relayTypeOptionsHtml(storedType) + '</select>';
     }
     el.appendChild(div);
   }
@@ -2769,6 +2792,11 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     var r = parseInt(div.dataset.relay, 10);
     var val = div.querySelector('.relaynameinput').value;
     params.push('relay' + (r + 1) + '_name=' + encodeURIComponent(val));
+    /* Its device-type sibling: a <select> for an unowned relay, a hidden echo of
+       the stored value for a zone-owned one. Always one of the enum's own values,
+       so the server's out-of-range refusal is not reachable from this page. */
+    var tval = div.querySelector('.relaytypeinput').value;
+    params.push('relay' + (r + 1) + '_type=' + encodeURIComponent(tval));
   });
   msg.textContent = 'Saving…';
   fetch('/api/zones', {

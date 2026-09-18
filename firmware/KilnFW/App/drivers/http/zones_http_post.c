@@ -310,6 +310,37 @@ esp_err_t zones_post_handler(httpd_req_t *req)
         }
         /* rlen < 0 (omitted): tmp_relay_names.names[r-1] already holds the
          * current live value, copied above -- left untouched. */
+
+        /* docs/ZONE_GRAPHIC_PLAN.md stage 2: relay<N>_type, the sibling of
+         * relay<N>_name, carrying relay_device_type_t as a small integer.
+         * Same omitted-means-keep convention and the same scratch-copy
+         * discipline as the name above, for the same reason (safety_config_
+         * page.html POSTs to this endpoint and renders no such control).
+         *
+         * An out-of-range or non-numeric value is REFUSED with a 400, never
+         * coerced to UNSET or to any other default: UNSET is a meaningful
+         * operator-visible state ("nobody has said what this relay drives"),
+         * so silently landing there would turn a client bug into a plausible
+         * stored answer. 0 (UNSET) submitted deliberately IS accepted. */
+        char tkey[16];
+        snprintf(tkey, sizeof(tkey), "relay%u_type", r);
+        char tval[8];
+        int tlen = http_form_find_field(body, tkey, tval, sizeof(tval));
+        if (tlen == -2) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay device type out of range");
+            free(body);
+            return ESP_OK;
+        }
+        if (tlen > 0) {
+            char *tend = NULL;
+            long tv = strtol(tval, &tend, 10);
+            if (tend == tval || *tend != '\0' || tv < 0 || tv >= (long)RELAY_DEVICE_TYPE_COUNT) {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay device type out of range");
+                free(body);
+                return ESP_OK;
+            }
+            tmp_relay_names.types[r - 1] = (uint8_t)tv;
+        }
     }
 
     /* Owner request 2026-09-10 ("if i change the max temp in the web gui it

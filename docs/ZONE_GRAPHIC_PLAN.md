@@ -4,10 +4,11 @@
 > storage and its migration, the data layer only. **Stages 3, 4 and 5 landed
 > 2026-09-18** — the artwork, the unknown/fail-closed rules, and the badges
 > with click popups — covered by `tools/check_zone_graphic_render.ps1`.
-> **Stage 2 is still open:** `"relay_types"` is not yet on the wire, so the
-> page renders the unknown glyph for every extra relay's device type, and
-> `kgDeviceType()` is the marked seam that begins returning stage 1's real
-> types with no other edit. The graphic is not verified on hardware: another
+> **Stage 2 landed 2026-09-18:** `"relay_types"` is on the `GET`,
+> `relay_type_N=` on the `POST`, and each unowned relay carries a device-type
+> dropdown beside its name field, so `kgDeviceType()` now receives real types.
+> `UNSET` stays selectable and renders as the unknown glyph. The array costs a
+> measured 24 bytes; no buffer grew. The graphic is not verified on hardware: another
 > task owned flashing, so the bench board runs firmware without this page; the
 > render function is verified against real captured `/api/zones` and
 > `/api/status` JSON instead. **Opened:** 2026-09-18.
@@ -481,11 +482,17 @@ Three things stage 2 needs to know about how stage 1 actually landed:
   runs, leaving the divergence tie-break untouched. It has its own host test.
   Inert on every board today, since no board mounts `cfg` yet.
 
-**Stage 2 — the type on the wire and in the form.** `"relay_types"` on the
-`GET`, `relay_type_N=` on the `POST`, and a dropdown beside each existing relay
-name field. *Verified by:* set a type over HTTP, reboot the board, read it back
-unchanged; and a `json_cap` fit test at maximum width proving the response
-still fits 7360 bytes with no buffer change.
+**Stage 2 — the type on the wire and in the form. LANDED 2026-09-18.**
+`"relay_types"` on the `GET`, `relay_type_N=` on the `POST`, and a dropdown
+beside each unowned relay's name field (a zone-owned relay echoes its stored
+type in a hidden field instead, so no page can wipe it). An out-of-range or
+non-numeric `relay_type_N` is refused with a 400 and commits nothing — never
+coerced to `UNSET`, which is itself a legitimate selectable, persisted value
+rendering as the unknown glyph. Host tests cover every enum value's
+serialization, the `POST`→`GET` round trip, omitted-means-keep, and the
+refusal. *Still owed:* the on-hardware half of the original verification — set
+a type over HTTP, reboot the board, read it back unchanged — which needs a
+board flashed with this firmware.
 
 **Stage 3 — the artwork, static states only.** The SVG shell, the icon set, the
 render function, ring count from `thermo_count`, heater/thermocouple/CT

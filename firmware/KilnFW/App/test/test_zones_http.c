@@ -9555,6 +9555,130 @@ static void test_zones_post_relay_name_present_updates_value(void)
     nvs_test_clear();
 }
 
+/* ---- docs/ZONE_GRAPHIC_PLAN.md stage 2: the device type on the wire --------
+ * "relay_types" on the GET, relay<N>_type on the POST. These drive the REAL
+ * zones_get_handler()/zones_post_handler() (both #included into this single
+ * translation unit at the top of this file), not a transcription of them. */
+static void test_zones_get_reports_every_relay_device_type(void)
+{
+    TEST_SECTION("zones_get_handler -- \"relay_types\" reports one small integer per relay, dense and 0-based, "
+                 "with UNSET (0) reported as a real value rather than omitted");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    reset_relay_names();
+
+    /* Relay 1 deliberately left UNSET; the rest span the enum including its
+     * last value, so a serializer that dropped or clamped a value shows up. */
+    TEST_CHECK(zones_config_set_relay_device_type(2, RELAY_DEVICE_TYPE_DAMPER), "seed relay 2 = damper (1)");
+    TEST_CHECK(zones_config_set_relay_device_type(3, RELAY_DEVICE_TYPE_FAN), "seed relay 3 = fan (4)");
+    TEST_CHECK(zones_config_set_relay_device_type(4, RELAY_DEVICE_TYPE_OTHER), "seed relay 4 = other (6)");
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    s_last_resp_body[0] = '\0';
+    esp_err_t err = zones_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "zones_get_handler must return ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, "\"relay_types\":[0,1,4,6]") != NULL,
+               "every relay's device type is reported in order, UNSET included");
+
+    /* And every single enum value must survive a round trip through the
+     * serializer, not just the four above. */
+    for (uint8_t t = 0; t < RELAY_DEVICE_TYPE_COUNT; t++) {
+        char expect[40];
+        TEST_CHECK(zones_config_set_relay_device_type(1, (relay_device_type_t)t), "seed relay 1 with each enum value");
+        memset(&req, 0, sizeof(req));
+        s_last_resp_body[0] = '\0';
+        TEST_CHECK(zones_get_handler(&req) == ESP_OK, "the GET must still succeed");
+        snprintf(expect, sizeof(expect), "\"relay_types\":[%u,1,4,6]", (unsigned)t);
+        TEST_CHECK(strstr(s_last_resp_body, expect) != NULL, "each device type value serializes as its own number");
+    }
+
+    reset_relay_names();
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_zones_post_relay_type_round_trips_through_the_get(void)
+{
+    TEST_SECTION("zones_post_handler -> zones_get_handler -- a submitted relay<N>_type is stored and reported back, "
+                 "an omitted one keeps its current value, and an explicit 0 (UNSET) is honoured as a real choice");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    reset_relay_names();
+
+    run_zones_post("thermo_count=0&relay_count=0&" MINIMAL_TIMING_PROFILE_BODY "&relay2_type=4&relay3_type=3");
+    TEST_CHECK(!s_test_err_called, "a clean submission carrying device types must not be rejected");
+    TEST_CHECK(s_test_ok_called, "a clean submission carrying device types must report success");
+
+    relay_device_type_t t;
+    TEST_CHECK(zones_config_get_relay_device_type(2, &t) && t == RELAY_DEVICE_TYPE_FAN, "relay 2 stored as fan");
+    TEST_CHECK(zones_config_get_relay_device_type(3, &t) && t == RELAY_DEVICE_TYPE_VALVE, "relay 3 stored as valve");
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    s_last_resp_body[0] = '\0';
+    TEST_CHECK(zones_get_handler(&req) == ESP_OK, "zones_get_handler must return ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, "\"relay_types\":[0,4,3,0]") != NULL,
+               "the GET reports exactly what the POST stored");
+
+    /* A submission that never mentions the field keeps it -- the same
+     * global-field convention relay<N>_name follows, and the reason
+     * safety_config_page.html cannot wipe these. */
+    run_zones_post("thermo_count=0&relay_count=0&" MINIMAL_TIMING_PROFILE_BODY);
+    TEST_CHECK(!s_test_err_called && s_test_ok_called, "a submission that omits every relay type must be accepted");
+    TEST_CHECK(zones_config_get_relay_device_type(2, &t) && t == RELAY_DEVICE_TYPE_FAN,
+               "an omitted relay<N>_type PRESERVES the stored type, it does not clear it");
+
+    /* Explicit 0 is a deliberate operator choice ("nobody has classified this
+     * relay"), so it must be accepted and stored, not treated as garbage. */
+    run_zones_post("thermo_count=0&relay_count=0&" MINIMAL_TIMING_PROFILE_BODY "&relay2_type=0");
+    TEST_CHECK(!s_test_err_called && s_test_ok_called, "an explicit UNSET must be accepted");
+    TEST_CHECK(zones_config_get_relay_device_type(2, &t) && t == RELAY_DEVICE_TYPE_UNSET,
+               "an explicitly submitted 0 lands as UNSET");
+
+    reset_relay_names();
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_zones_post_relay_type_out_of_range_rejected_and_commits_nothing(void)
+{
+    TEST_SECTION("zones_post_handler -- an out-of-range or non-numeric relay<N>_type is REFUSED with a 400, never "
+                 "silently coerced to UNSET or any other default, and nothing at all is committed");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    reset_relay_names();
+    TEST_CHECK(zones_config_set_relay_device_type(1, RELAY_DEVICE_TYPE_LIGHT), "seed a known-good value first");
+    s_zones.cfg.relay_count = 0;
+
+    const char *bad[] = {
+        "&relay1_type=7",   /* exactly RELAY_DEVICE_TYPE_COUNT -- one past the last valid value */
+        "&relay1_type=200", /* wildly out of range */
+        "&relay1_type=-1",  /* negative */
+        "&relay1_type=2X",  /* valid numeric prefix, trailing garbage */
+        "&relay1_type=fan", /* the name, not the number */
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        char body[512];
+        snprintf(body, sizeof(body), "thermo_count=0&relay_count=2&%s%s", MINIMAL_TIMING_PROFILE_BODY, bad[i]);
+        run_zones_post(body);
+        TEST_CHECK(s_test_err_called, "an out-of-range relay device type must be rejected");
+        TEST_CHECK(!s_test_ok_called, "must not report success for a rejected submission");
+        TEST_CHECK(strstr(s_test_err_msg, "relay device type") != NULL, "the refusal names the offending field");
+
+        relay_device_type_t t = RELAY_DEVICE_TYPE_UNSET;
+        TEST_CHECK(zones_config_get_relay_device_type(1, &t) && t == RELAY_DEVICE_TYPE_LIGHT,
+                   "the seeded type must be untouched -- a refused value must not land as UNSET either");
+        TEST_CHECK(s_zones.cfg.relay_count == 0,
+                   "a rejected submission must not have committed relay_count=2 either -- the device-type check "
+                   "runs before the commit point");
+    }
+
+    reset_relay_names();
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 static void test_zones_post_relay_name_too_long_rejected_and_commits_nothing(void)
 {
     TEST_SECTION("zones_post_handler -- an overlong relay<N>_name is rejected outright, and the "
@@ -13044,6 +13168,9 @@ void run_test_zones_http(void)
     test_zones_post_relay_name_omitted_preserves_current_value();
     test_zones_post_relay_name_present_updates_value();
     test_zones_post_relay_name_too_long_rejected_and_commits_nothing();
+    test_zones_get_reports_every_relay_device_type();
+    test_zones_post_relay_type_round_trips_through_the_get();
+    test_zones_post_relay_type_out_of_range_rejected_and_commits_nothing();
 
     test_zone_sweep_check_refusal_each_reason_fires();
     test_zone_sweep_ceiling_hit();

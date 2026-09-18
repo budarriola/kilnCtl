@@ -336,6 +336,26 @@ esp_err_t zones_get_handler(httpd_req_t *req)
         zones_json_escape(s_relay_names.cfg.names[r], rn_escaped, sizeof(rn_escaped));
         APPEND("%s\"%s\"", r == 0 ? "" : ",", rn_escaped);
     }
+    /* docs/ZONE_GRAPHIC_PLAN.md stage 2: one SMALL INTEGER per relay, not a
+     * string per relay, for the json_cap budget's sake -- "relay_types":
+     * [0,0,0,0] costs 24 bytes at KILN_IO_RELAY_COUNT == 4 against the
+     * measured max-width headroom (see this file's json_cap comment and
+     * test_zones_get_handler_max_width_response_fits_json_cap()), where a
+     * per-relay string would cost several times that. Dense over
+     * KILN_IO_RELAY_COUNT and indexed exactly like relay_names above, so
+     * index r is relay r+1 on the wire (relay<N>_type on the POST).
+     * RELAY_DEVICE_TYPE_UNSET (0) is a real, reportable value -- the page's
+     * kgDeviceType() renders it as the unknown glyph, which is the honest
+     * answer for a relay nobody has classified, not an error. The accessor
+     * carries the long _relay_device_type_ name deliberately:
+     * zones_config_get_relay_type() already exists and means the zone's
+     * SWITCHING HARDWARE (SSR/contactor/mercury). */
+    APPEND("],\"relay_types\":[");
+    for (uint8_t r = 0; r < KILN_IO_RELAY_COUNT; r++) {
+        relay_device_type_t dt = RELAY_DEVICE_TYPE_UNSET;
+        (void)zones_config_get_relay_device_type((uint8_t)(r + 1), &dt);
+        APPEND("%s%u", r == 0 ? "" : ",", (unsigned)dt);
+    }
     APPEND("],\"timing_profiles\":[");
     /* 2026-08-27 (ZONES_CFG_VERSION 8->9): exactly timing_profile_count
      * entries, never padded out to MAX31856_CHANNEL_COUNT -- the page derives

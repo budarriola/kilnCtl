@@ -2345,10 +2345,16 @@ bench board reports a ~39-minute-old `trip_reason` alongside a healthy live
 state, which an event-keyed banner would have painted as a permanent false
 trip.
 
-**Stage 2 is still outstanding**, and the graphic is built to survive its
-absence: `"relay_types"` is not yet on the wire, so every extra relay's device
-type renders as the unknown glyph, and `kgDeviceType()` is the marked seam that
-starts returning stage 1's real types with no other edit.
+**Stage 2 CLOSED 2026-09-18 — the type is on the wire and settable.**
+`"relay_types"` is reported by `GET /api/zones` as one small integer per relay,
+dense and 0-based like `relay_names`; `relay_type_N=` on the `POST` stores it,
+refusing an out-of-range or non-numeric value with a 400 rather than coercing it
+to `UNSET`; and each unowned relay gained a device-type dropdown beside its name
+field, with `UNSET` ("not set") a real selectable choice that renders as the
+unknown glyph. Measured cost: 24 bytes on a max-width response (6624 → 6648
+against `json_cap` 7360), so no zones JSON buffer and no httpd stack buffer
+grew. Web only; the LCD gained nothing. Not yet verified on hardware — the
+set-over-HTTP/reboot/read-back check still needs a board flashed with it.
 
 The controlling requirement is the plan's section 6: a graphic that renders
 plausibly while the configuration is unknown is worse than no graphic. So the
