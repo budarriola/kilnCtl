@@ -298,6 +298,30 @@ typedef struct {
      * initialized (false/per_zone) so every existing test and caller keeps
      * today's per-channel behaviour unchanged. */
     bool ct_topology_summed;
+
+    /* zone_ct_channel (config params 0x0320-0x0322,
+     * docs/CT_CHANNEL_MASK_PLAN.md step 4): which physical CT channel (0-2)
+     * each ZONE's current appears on. This generalises ct_topology_summed
+     * above -- the identity map {0,1,2} IS per_zone and {2,2,2} IS summed --
+     * and additionally expresses the split topologies (two CTs across three
+     * zones) that the single boolean cannot represent at all.
+     *
+     * zone_ct_channel_valid is the gate, and it is load-bearing: it is true
+     * only for a record that actually committed the map
+     * (CONFIG_STORE_SET_ZONE_CT_CHANNEL). While it is FALSE, safety_guards.c
+     * runs the pre-existing ct_topology_summed branches completely unchanged,
+     * so every already-commissioned board and every existing test keeps
+     * today's behaviour bit for bit -- a zero-initialized cfg (which would
+     * otherwise read as "all three zones on channel 0") can never be mistaken
+     * for a real answer.
+     *
+     * With the map committed, "which zones are on" is answered per ZONE from
+     * relay_commanded_now_for_zone, and ct_channel_map (channel -> relay id)
+     * is deliberately not consulted: that map only ever existed to work
+     * around not knowing zone -> channel, and zone_ct_channel plus the
+     * zone-indexed relay facts determine the same thing directly. */
+    uint8_t zone_ct_channel[3];
+    bool    zone_ct_channel_valid;
 } safety_guard_cfg_t;
 
 /* One call's worth of input. tc_c/cj_c/fault_bits/spi_failed follow

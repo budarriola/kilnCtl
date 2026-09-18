@@ -1705,6 +1705,209 @@ static void test_s14(void)
  * what a real ADC-counts-derived reading looks like (e.g. 10.04A, not an
  * exact 10.0A), so a comparison that only happens to work against an exact
  * boundary cannot pass here by accident. */
+/* --- CT_CHANNEL_MASK_PLAN.md step 4: the generalised per-channel member()
+ * attribution. Three properties, in order of how much they can hurt:
+ *   1. collapse -- with the committed map set to either legacy shape the
+ *      generalised arm must produce exactly what the legacy arm produces;
+ *   2. split -- a genuine two-CT split attributes each deficit to the zones
+ *      on THAT channel;
+ *   3. the negative test -- forced-wrong membership must not warn a zone
+ *      attributed to the other channel.
+ * amps[] values stay deliberately un-round, same idealized-input discipline
+ * as the summed block below. */
+static void run_ticks(safety_guard_state_t *s, const safety_guard_cfg_t *cfg,
+                      safety_guard_input_t *in, int n)
+{
+    for (int i = 0; i < n; i++) {
+        safety_guards_tick(s, cfg, in);
+    }
+}
+
+static void test_s14_s15_zone_ct_channel_collapse(void)
+{
+    TEST_SECTION("S14/S15 -- a committed identity/all-2 map collapses onto the legacy arms");
+
+    /* 1a. Identity {0,1,2} vs. legacy per_zone, over-current on channel 0.
+     * The legacy per_zone arm reads relay_commanded_now_for_ct[]; the
+     * generalised arm reads relay_commanded_now_for_zone[]. Both are set
+     * here (an identity ct_channel_map, which is what a per_zone board with
+     * an identity zone map has), so the two arms are being compared on the
+     * same physical situation. */
+    {
+        safety_guard_cfg_t legacy = base_cfg();
+        legacy.i_normal_valid[0] = true; legacy.i_normal_a[0] = 10.03f;
+        safety_guard_cfg_t mapped = legacy;
+        mapped.zone_ct_channel_valid = true;
+        mapped.zone_ct_channel[0] = 0u; mapped.zone_ct_channel[1] = 1u; mapped.zone_ct_channel[2] = 2u;
+
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.amps_valid[0] = true;
+        in.amps[0] = 31.07f; /* > 150% of 10.03 */
+        in.relay_commanded_now_for_ct[0] = true;
+        in.relay_commanded_now_for_zone[0] = true;
+        in.dt_s = 5.0f;
+
+        safety_guard_state_t a; safety_guards_reset(&a);
+        safety_guard_state_t b; safety_guards_reset(&b);
+        run_ticks(&a, &legacy, &in, 20);
+        run_ticks(&b, &mapped, &in, 20);
+        TEST_CHECK(a.s14_warn[0] && b.s14_warn[0],
+                   "identity map warns S14 on channel 0 exactly as legacy per_zone does");
+        TEST_CHECK(a.s14_over_elapsed_s[0] == b.s14_over_elapsed_s[0],
+                   "identity map accumulates the same S14 elapsed time as per_zone");
+        TEST_CHECK(!a.s15_warn[0] && !b.s15_warn[0],
+                   "identity map leaves S15 inert, same as per_zone (no shared channel)");
+        TEST_CHECK(b.s15_under_elapsed_s[0] == 0.0f,
+                   "a one-member channel accumulates no S15 time at all");
+    }
+
+    /* 1b. All-2 {2,2,2} vs. legacy summed, a real open-heater deficit:
+     * zones 0 and 1 commanded, expected 10.03 + 5.07 = 15.10 A, channel 2
+     * measuring only 4.91 A. The 10.19 A deficit clears both commanded
+     * zones' 0.7x bars, so both flag -- precisely the "consistent with any
+     * one of them" reading -- and both arms must agree on it zone by zone. */
+    {
+        safety_guard_cfg_t legacy = base_cfg();
+        legacy.ct_topology_summed = true;
+        legacy.i_normal_valid[0] = true; legacy.i_normal_a[0] = 10.03f;
+        legacy.i_normal_valid[1] = true; legacy.i_normal_a[1] = 5.07f;
+        safety_guard_cfg_t mapped = legacy;
+        mapped.zone_ct_channel_valid = true;
+        mapped.zone_ct_channel[0] = 2u; mapped.zone_ct_channel[1] = 2u; mapped.zone_ct_channel[2] = 2u;
+
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.amps_valid[2] = true;
+        in.amps[2] = 4.91f;
+        in.relay_commanded_now_for_zone[0] = true;
+        in.relay_commanded_now_for_zone[1] = true;
+        in.dt_s = 5.0f;
+
+        safety_guard_state_t a; safety_guards_reset(&a);
+        safety_guard_state_t b; safety_guards_reset(&b);
+        run_ticks(&a, &legacy, &in, 20);
+        run_ticks(&b, &mapped, &in, 20);
+        for (int z = 0; z < 3; z++) {
+            TEST_CHECK(a.s15_warn[z] == b.s15_warn[z],
+                       "all-2 map reproduces the summed arm's S15 verdict for every zone");
+            TEST_CHECK(a.s15_under_elapsed_s[z] == b.s15_under_elapsed_s[z],
+                       "all-2 map reproduces the summed arm's S15 elapsed time for every zone");
+            TEST_CHECK(a.s14_warn[z] == b.s14_warn[z],
+                       "all-2 map reproduces the summed arm's S14 verdict for every channel");
+        }
+        TEST_CHECK(b.s15_warn[0] && b.s15_warn[1],
+                   "the fixture really does exercise S15 (both commanded zones flag)");
+        TEST_CHECK(!b.s15_warn[2], "an uncommanded zone never flags S15");
+        TEST_CHECK(!b.s14_warn[0] && !b.s14_warn[1],
+                   "channels with no members stay inert under an all-2 map");
+    }
+
+    /* 1c. The gate itself: the SAME split map with the valid flag clear must
+     * behave exactly like the legacy arm its ct_topology_summed says, not
+     * like the map. This is what protects every already-commissioned board. */
+    {
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.ct_topology_summed = true;
+        cfg.i_normal_valid[0] = true; cfg.i_normal_a[0] = 10.03f;
+        cfg.i_normal_valid[1] = true; cfg.i_normal_a[1] = 5.07f;
+        cfg.zone_ct_channel[0] = 0u; cfg.zone_ct_channel[1] = 0u; cfg.zone_ct_channel[2] = 1u;
+        /* zone_ct_channel_valid deliberately left false */
+
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.amps_valid[2] = true;
+        in.amps[2] = 4.91f;
+        in.relay_commanded_now_for_zone[0] = true;
+        in.relay_commanded_now_for_zone[1] = true;
+        in.dt_s = 5.0f;
+
+        safety_guard_state_t s; safety_guards_reset(&s);
+        run_ticks(&s, &cfg, &in, 20);
+        TEST_CHECK(s.s15_warn[0] && s.s15_warn[1],
+                   "an uncommitted map is ignored: the summed arm still runs off channel 2");
+    }
+}
+
+static void test_s14_s15_two_ct_split(void)
+{
+    TEST_SECTION("S14/S15 -- a genuine two-CT split attributes per channel");
+
+    /* Zones 0 and 1 share channel 0; zone 2 has channel 1 to itself.
+     * Channel 0: expected 10.03 + 5.07 = 15.10 A, measuring 4.91 A.
+     * Channel 1: expected 7.02 A, measuring a healthy 6.98 A. */
+    safety_guard_cfg_t cfg = base_cfg();
+    cfg.zone_ct_channel_valid = true;
+    cfg.zone_ct_channel[0] = 0u; cfg.zone_ct_channel[1] = 0u; cfg.zone_ct_channel[2] = 1u;
+    cfg.i_normal_valid[0] = true; cfg.i_normal_a[0] = 10.03f;
+    cfg.i_normal_valid[1] = true; cfg.i_normal_a[1] = 5.07f;
+    cfg.i_normal_valid[2] = true; cfg.i_normal_a[2] = 7.02f;
+
+    safety_guard_input_t in = base_input();
+    in.context_valid = true;
+    in.amps_valid[0] = true; in.amps[0] = 4.91f;
+    in.amps_valid[1] = true; in.amps[1] = 6.98f;
+    in.relay_commanded_now_for_zone[0] = true;
+    in.relay_commanded_now_for_zone[1] = true;
+    in.relay_commanded_now_for_zone[2] = true;
+    in.dt_s = 5.0f;
+
+    safety_guard_state_t s; safety_guards_reset(&s);
+    run_ticks(&s, &cfg, &in, 20);
+    TEST_CHECK(s.s15_warn[0] && s.s15_warn[1],
+               "the shared channel's deficit flags both of ITS member zones");
+    TEST_CHECK(!s.s15_warn[2],
+               "zone 2, on the healthy dedicated channel, is never flagged by channel 0's deficit");
+    TEST_CHECK(s.s15_under_elapsed_s[2] == 0.0f,
+               "zone 2 accumulates no S15 time at all (one-member channel, and no deficit)");
+    TEST_CHECK(!s.s14_warn[0] && !s.s14_warn[1] && !s.s14_warn[2],
+               "nothing is over-current in this fixture, so S14 stays quiet");
+}
+
+static void test_s14_s15_wrong_membership_negative(void)
+{
+    TEST_SECTION("S14/S15 negative -- forced-wrong membership must not warn the other channel's zone");
+
+    /* The same physical kiln as the split fixture above: the deficit is on
+     * channel 0, whose members are zones 0 and 1. Zone 2 is measured on
+     * channel 1 and is perfectly healthy. If membership were wrong -- zone 2
+     * mistakenly attributed to channel 0 -- channel 0's 10.19 A deficit
+     * would clear 0.7 x 7.02 = 4.91 A and flag a zone with nothing wrong
+     * with it. Pin both halves: the correct map does not flag zone 2, and
+     * the wrong map demonstrably would, so this test cannot pass vacuously
+     * by the fixture simply being too weak to warn anyone. */
+    safety_guard_cfg_t correct = base_cfg();
+    correct.zone_ct_channel_valid = true;
+    correct.zone_ct_channel[0] = 0u; correct.zone_ct_channel[1] = 0u; correct.zone_ct_channel[2] = 1u;
+    correct.i_normal_valid[0] = true; correct.i_normal_a[0] = 10.03f;
+    correct.i_normal_valid[1] = true; correct.i_normal_a[1] = 5.07f;
+    correct.i_normal_valid[2] = true; correct.i_normal_a[2] = 7.02f;
+
+    safety_guard_cfg_t wrong = correct;
+    wrong.zone_ct_channel[2] = 0u; /* zone 2 wrongly attributed to the shared CT */
+
+    safety_guard_input_t in = base_input();
+    in.context_valid = true;
+    in.amps_valid[0] = true; in.amps[0] = 4.91f;
+    in.amps_valid[1] = true; in.amps[1] = 6.98f;
+    in.relay_commanded_now_for_zone[0] = true;
+    in.relay_commanded_now_for_zone[1] = true;
+    in.relay_commanded_now_for_zone[2] = true;
+    in.dt_s = 5.0f;
+
+    safety_guard_state_t sc; safety_guards_reset(&sc);
+    safety_guard_state_t sw; safety_guards_reset(&sw);
+    run_ticks(&sc, &correct, &in, 20);
+    run_ticks(&sw, &wrong, &in, 20);
+    TEST_CHECK(!sc.s15_warn[2],
+               "correct membership: a deficit on channel 0 never warns zone 2");
+    TEST_CHECK(sw.s15_warn[2],
+               "wrong membership demonstrably WOULD warn zone 2 -- the correct-map check above "
+               "is therefore load-bearing, not vacuous");
+    TEST_CHECK(sc.s15_warn[0] && sw.s15_warn[0],
+               "both maps still flag zone 0, so the difference is attribution, not sensitivity");
+}
+
 static void test_s14_s15_summed_topology(void)
 {
     TEST_SECTION("S14/S15 -- ct_topology == summed (shared CT, per-zone attribution)");
@@ -3717,6 +3920,9 @@ void run_test_safety_guards(void)
     test_s3_s4();
     test_s14();
     test_s14_s15_summed_topology();
+    test_s14_s15_zone_ct_channel_collapse();
+    test_s14_s15_two_ct_split();
+    test_s14_s15_wrong_membership_negative();
     test_s6();
     test_s6b_reboot_grace();
     test_s9();

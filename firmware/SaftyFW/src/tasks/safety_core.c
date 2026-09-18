@@ -426,6 +426,20 @@ static void safety_core_load_guard_cfg(const config_store_record_t *rec)
     // answers.
     s_guard_cfg.ct_topology_summed = (rec->ct_topology == CONFIG_STORE_CT_TOPOLOGY_SUMMED);
 
+    // zone_ct_channel (params 0x0320-0x0322, CT_CHANNEL_MASK_PLAN.md step 4).
+    // config_store_effective_zone_ct_channel() is THE single place that knows
+    // whether the stored bytes are an operator answer or the ct_topology-
+    // derived fallback, so this is a straight projection of it -- do not
+    // re-derive the rule here. The _valid flag mirrors the same group bit,
+    // and is what makes safety_guards.c keep running its legacy
+    // ct_topology_summed branches for every board that has not committed a
+    // map: an effective map that is merely DERIVED carries no information
+    // the topology boolean did not already carry, so feeding it into the
+    // generalised arm could only add risk, never accuracy.
+    config_store_effective_zone_ct_channel(rec, s_guard_cfg.zone_ct_channel);
+    s_guard_cfg.zone_ct_channel_valid =
+        (rec->fields_set & CONFIG_STORE_SET_ZONE_CT_CHANNEL) != 0u;
+
     // S9's gate on whether the current reading is a MEASUREMENT or a
     // heuristic. 2026-08-27: safety_guards.c gained
     // in->current_sensing_commissioned so an uncommissioned board cannot latch

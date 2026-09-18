@@ -942,7 +942,111 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
          * normal, never an absolute figure and never compared across
          * channels -- three zones on one kiln can legitimately differ 2x in
          * draw. */
-        if (!cfg->ct_topology_summed) {
+        if (cfg->zone_ct_channel_valid) {
+            /* --- Generalised per-channel attribution (CT_CHANNEL_MASK_PLAN.md
+             * step 4). member(ch) = { z : zone_ct_channel[z] == ch }. Every
+             * channel is evaluated against the sum of its own commanded
+             * members' normals, and S15 -- which needs a SHARED CT to have a
+             * deficit worth attributing -- is gated to channels with at least
+             * two members.
+             *
+             * This arm runs ONLY for a record that committed the map. Both
+             * legacy maps collapse onto the two branches below exactly:
+             * identity {0,1,2} gives every channel one member, so the sum is
+             * that one zone's normal and S15 is inert everywhere (per_zone);
+             * {2,2,2} gives channels 0/1 no members (inert) and channel 2 all
+             * three, i.e. the summed branch. test_safety_guards.c proves both
+             * collapses against the legacy arms' own numbers.
+             *
+             * The one deliberate difference from the per_zone arm below: a
+             * member zone's "commanded now" fact is read per ZONE
+             * (relay_commanded_now_for_zone) rather than through
+             * ct_channel_map's channel -> relay indirection. See the
+             * zone_ct_channel comment in safety_guards.h. */
+            for (int ch = 0; ch < 3; ch++) {
+                int members[3];
+                int member_count = 0;
+                for (int z = 0; z < 3; z++) {
+                    if (cfg->zone_ct_channel[z] == (uint8_t)ch) {
+                        members[member_count++] = z;
+                    }
+                }
+
+                bool any_commanded = false;
+                bool commanded_normals_known = true;
+                float expected_sum_a = 0.0f;
+                for (int m = 0; m < member_count; m++) {
+                    int z = members[m];
+                    if (!in->relay_commanded_now_for_zone[z]) {
+                        continue;
+                    }
+                    any_commanded = true;
+                    if (!cfg->i_normal_valid[z] || cfg->i_normal_a[z] <= 0.0f) {
+                        /* Same rule as both legacy arms: one commanded member
+                         * with no measured normal makes the expected sum
+                         * unknowable, not merely wrong -- skip the whole
+                         * channel entirely rather than compare against a
+                         * partial sum that is guaranteed too small. */
+                        commanded_normals_known = false;
+                        break;
+                    }
+                    expected_sum_a += cfg->i_normal_a[z];
+                }
+                /* member_count == 0 means nothing is wired behind this
+                 * channel, so it reports inert -- never a false pass. */
+                bool sum_valid = member_count > 0 && any_commanded && commanded_normals_known;
+
+                bool s14_active = !in->current_sensing_disabled && sum_valid &&
+                                   in->amps_valid[ch];
+                if (!s14_active) {
+                    state->s14_over_elapsed_s[ch] = 0.0f;
+                    state->s14_warn[ch] = false;
+                } else {
+                    uint16_t pct = effective_u16(cfg->overcurrent_pct, OVERCURRENT_PCT_DEFAULT);
+                    float threshold_a = expected_sum_a * (float)pct / 100.0f;
+                    if (in->amps[ch] > threshold_a) {
+                        state->s14_over_elapsed_s[ch] += in->dt_s;
+                        float time_th = effective_f(cfg->overcurrent_time_s, OVERCURRENT_TIME_S_DEFAULT);
+                        state->s14_warn[ch] = (state->s14_over_elapsed_s[ch] >= time_th);
+                    } else {
+                        state->s14_over_elapsed_s[ch] = 0.0f;
+                        state->s14_warn[ch] = false;
+                    }
+                }
+
+                /* S15: only a SHARED channel (>= 2 members) can produce a
+                 * deficit that has to be attributed to one of several zones.
+                 * A channel with exactly one member has no attribution
+                 * problem -- and no separate guard: an open heater there is
+                 * already an under-reading on that channel, which is S14's
+                 * domain, exactly as in the per_zone arm below where S15 is
+                 * inert. The deficit is ONE scalar per channel, tested
+                 * against each commanded member's own threshold, with the
+                 * same "consistent with any one of them, not all of them"
+                 * reading as the summed arm. */
+                bool s15_base_active = member_count >= 2 && !in->current_sensing_disabled &&
+                                        sum_valid && in->amps_valid[ch];
+                float deficit_a = s15_base_active ? (expected_sum_a - in->amps[ch]) : 0.0f;
+                for (int m = 0; m < member_count; m++) {
+                    int z = members[m];
+                    bool active = s15_base_active && in->relay_commanded_now_for_zone[z] &&
+                                  cfg->i_normal_valid[z] && cfg->i_normal_a[z] > 0.0f;
+                    if (!active) {
+                        state->s15_under_elapsed_s[z] = 0.0f;
+                        state->s15_warn[z] = false;
+                        continue;
+                    }
+                    float threshold_a = cfg->i_normal_a[z] * UNDERCURRENT_FRACTION_DEFAULT;
+                    if (deficit_a > threshold_a) {
+                        state->s15_under_elapsed_s[z] += in->dt_s;
+                        state->s15_warn[z] = (state->s15_under_elapsed_s[z] >= UNDERCURRENT_TIME_S_DEFAULT);
+                    } else {
+                        state->s15_under_elapsed_s[z] = 0.0f;
+                        state->s15_warn[z] = false;
+                    }
+                }
+            }
+        } else if (!cfg->ct_topology_summed) {
             for (int ch = 0; ch < 3; ch++) {
                 bool active = !in->current_sensing_disabled && cfg->i_normal_valid[ch] &&
                               cfg->i_normal_a[ch] > 0.0f &&
