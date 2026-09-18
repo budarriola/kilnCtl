@@ -60,6 +60,7 @@
 #include "ota_http_util.h"   // ota_http_hex_encode()
 #include "security_http_core.h" // SECURITY_HTTP_USERNAME_MAX/PASSWORD_MAX
 #include "web_auth_login.h"  // web_auth_login_role_for_username()
+#include "web_auth_login_ip_gate.h" // web_auth_login_may_mint_session()
 #include "web_auth_session.h"
 #include "web_auth_store.h"
 #include "web_encoding.h"
@@ -75,6 +76,16 @@ static const char *TAG = "web_auth_login_http";
 // too rather than pulled from a header ota_http.h does not itself expose it
 // through, matching that file's own precedent.
 void ota_http_get_client_ip(httpd_req_t *req, char *out, size_t out_len);
+
+// Checked variant (ota_http.c, 2026-09-18 follow-up to d2c51f55) -- same
+// lookup, but also reports whether a real address was resolved (true) or
+// the caller is looking at the shared "unknown" collision sentinel (false).
+// login_post_handler() below is the ONE call site in this codebase that
+// MINTS a session rather than merely comparing against one that already
+// exists, so it is also the one place that distinction matters -- see
+// ota_http.c's own comment on this function and this file's
+// web_auth_login_ip_gate.h include for why.
+bool ota_http_get_client_ip_checked(httpd_req_t *req, char *out, size_t out_len);
 
 /* Embedded via EMBED_TXTFILES, pre-gzipped at configure time by
  * App/drivers/CMakeLists.txt -- same convention as every other *_page.html
@@ -206,7 +217,7 @@ static esp_err_t login_page_get_handler(httpd_req_t *req)
 static esp_err_t login_post_handler(httpd_req_t *req)
 {
     char ip[46];
-    ota_http_get_client_ip(req, ip, sizeof(ip));
+    bool ip_known = ota_http_get_client_ip_checked(req, ip, sizeof(ip));
 
     bool locked = false;
     if (xSemaphoreTake(s_login_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -311,6 +322,32 @@ static esp_err_t login_post_handler(httpd_req_t *req)
 
     if (!ok) {
         ESP_LOGW(TAG, "login failed from %s", ip);
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "invalid username or password");
+        return ESP_OK;
+    }
+
+    // Fail-closed follow-up to d2c51f55 (2026-09-18): credentials verified,
+    // but if this request's own address could not be determined, `ip` is
+    // the shared "unknown" collision sentinel (web_auth_session.h) -- every
+    // OTHER client whose lookup also fails presents the identical string.
+    // Minting a session bound to it would let any of THOSE clients present
+    // "unknown" too and be accepted as this one -- a cross-client binding
+    // hole, not merely a lockout. Refuse instead, via
+    // web_auth_login_may_mint_session() (web_auth_login_ip_gate.h) rather
+    // than re-deriving this from a strcmp() against the sentinel text,
+    // which would just be a second, fragile copy of the same contract.
+    //
+    // The response is deliberately BYTE-IDENTICAL to the "wrong password"
+    // path just above (same status, same body) so this refusal is not
+    // itself an oracle telling a caller its credentials were actually
+    // correct -- same non-disclosure standard this file's per-IP lockout
+    // (Finding 4/2 above) already holds itself to. The only place this
+    // outcome is visible is the log line below, which is not attacker-
+    // reachable.
+    if (!web_auth_login_may_mint_session(ip_known)) {
+        ESP_LOGW(TAG, "login credentials valid but client address could not be determined "
+                      "(ip=%s); refusing to mint a session bound to the shared sentinel",
+                 ip);
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "invalid username or password");
         return ESP_OK;
     }

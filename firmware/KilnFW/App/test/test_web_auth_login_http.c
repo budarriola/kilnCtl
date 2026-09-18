@@ -163,6 +163,27 @@ void ota_http_get_client_ip(httpd_req_t *req, char *out, size_t out_len)
     }
 }
 
+// ---- 2026-09-18 follow-up to d2c51f55: test-controllable "was the address
+// resolved" outcome for login_post_handler()'s session-mint gate. Default
+// true (an ordinary resolvable client) -- individual tests flip this to
+// false to simulate an ota_http_get_client_ip_checked() lookup failure
+// (httpd_req_to_sockfd()/getpeername()/inet_ntop() all live in ota_http.c,
+// which this executable does not link, so this is the only way to drive
+// that path here). s_stub_client_ip is still written the same way a real
+// failure would leave it ("unknown" -- see ota_http_client_ip_finalize()),
+// so a test that forgets to check the mint gate itself would still see the
+// pre-existing sentinel-collision behavior, not a crash.
+static bool s_stub_ip_known = true;
+bool ota_http_get_client_ip_checked(httpd_req_t *req, char *out, size_t out_len)
+{
+    (void)req;
+    if (out && out_len > 0) {
+        strncpy(out, s_stub_ip_known ? s_stub_client_ip : "unknown", out_len - 1);
+        out[out_len - 1] = '\0';
+    }
+    return s_stub_ip_known;
+}
+
 // ---- web_encoding.h -- only reached from login_page_get_handler(), never
 // called by these tests (they only exercise POST /api/auth/login).
 bool web_client_accepts_gzip(httpd_req_t *req) { (void)req; return true; }
@@ -192,6 +213,7 @@ static void reset_all(void)
     s_last_sendstr[0] = '\0';
     s_last_set_cookie[0] = '\0';
     strncpy(s_stub_client_ip, "10.0.0.1", sizeof(s_stub_client_ip) - 1);
+    s_stub_ip_known = true;
 }
 
 static const uint8_t TEST_SALT[WEB_AUTH_SALT_LEN] = {
@@ -404,6 +426,70 @@ static void test_login_body_split_across_recv_calls(void)
                "a body delivered one byte at a time is still fully read and the login succeeds");
 }
 
+// *** 2026-09-18 follow-up to d2c51f55: with correct credentials but an
+// unresolvable client address (ota_http_get_client_ip_checked() reporting
+// false), login_post_handler() must refuse to mint a session -- and that
+// refusal must be indistinguishable from an ordinary wrong-password 401
+// (same status, same body), never a new/different response that would let
+// an attacker use the response itself to learn the credentials were
+// actually correct. ***
+static void test_unresolvable_ip_refuses_to_mint_a_session(void)
+{
+    TEST_SECTION("login_post_handler -- refuses to mint a session when the client IP "
+                 "cannot be determined (2026-09-18 follow-up to d2c51f55)");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+
+    // Baseline: a resolvable IP with correct credentials mints a session
+    // normally, so the negative case below is contrasted against a real
+    // working path, not a handler that never mints anything at all.
+    esp_err_t base_err = do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(base_err == ESP_OK, "test setup: baseline resolvable-IP login returns ESP_OK");
+    TEST_CHECK(strstr(s_last_set_cookie, HTTP_SESSION_COOKIE_NAME "=") != NULL,
+               "test setup: baseline resolvable-IP login with correct credentials mints a session");
+
+    // Now simulate an unresolvable address on a FRESH IP slot (so the
+    // per-IP lockout from the baseline call above cannot confound this
+    // case) with the SAME correct credentials.
+    strncpy(s_stub_client_ip, "10.0.0.77", sizeof(s_stub_client_ip) - 1);
+    s_stub_ip_known = false;
+    s_last_set_cookie[0] = '\0';
+    s_last_err_status = 0;
+    s_last_status_line = 0;
+    esp_err_t err = do_login("admin", "correct-horse-battery-staple");
+
+    TEST_CHECK(err == ESP_OK, "handler still returns ESP_OK when refusing an unresolvable-IP login");
+    TEST_CHECK(s_last_set_cookie[0] == '\0',
+               "no session cookie is set when the client address could not be determined");
+    TEST_CHECK(s_last_err_status == HTTPD_401_UNAUTHORIZED,
+               "the refusal reuses the SAME status as an ordinary wrong-password failure (fail-closed, "
+               "not a distinguishable new response)");
+
+    // Compare directly against the response a genuine wrong-password
+    // failure produces, on the same (now known-again) IP, to prove the two
+    // are byte-for-byte the same shape an attacker could observe.
+    int unresolvable_status = s_last_err_status;
+    s_stub_ip_known = true;
+    s_last_err_status = 0;
+    esp_err_t wrong_pw_err = do_login("admin", "wrong-password");
+    TEST_CHECK(wrong_pw_err == ESP_OK, "test setup: ordinary wrong-password login returns ESP_OK");
+    TEST_CHECK(s_last_err_status == unresolvable_status,
+               "the unresolvable-IP refusal and an ordinary wrong-password failure send the "
+               "identical httpd_resp_send_err() status code -- no new oracle");
+}
+
+// Pure-function coverage for web_auth_login_ip_gate.h's
+// web_auth_login_may_mint_session() in isolation, independent of the httpd
+// plumbing above.
+static void test_may_mint_session_pure_function(void)
+{
+    TEST_SECTION("web_auth_login_may_mint_session() -- pure decision core");
+    TEST_CHECK(web_auth_login_may_mint_session(true) == true,
+               "a resolved address is allowed to mint");
+    TEST_CHECK(web_auth_login_may_mint_session(false) == false,
+               "an unresolved address (ip_known == false) is refused");
+}
+
 void run_test_web_auth_login_http(void)
 {
     test_lockout_is_per_ip_not_global();
@@ -411,6 +497,8 @@ void run_test_web_auth_login_http(void)
     test_lockout_eviction_never_evicts_a_locked_slot();
     test_lockout_eviction_still_works_for_unlocked_slots();
     test_login_body_split_across_recv_calls();
+    test_unresolvable_ip_refuses_to_mint_a_session();
+    test_may_mint_session_pure_function();
 }
 
 int main(void)

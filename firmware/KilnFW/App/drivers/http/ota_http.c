@@ -276,24 +276,33 @@ static uint32_t now_ms(void)
 //      web_auth_session_status_http.c) only ever COMPARES `out` against an
 //      already-existing session's stored client_ip, so leaving "unknown" as
 //      the shared miss/undetermined value there is unchanged and still
-//      correct. RECOMMENDED FOLLOW-UP, not done here: have
-//      login_post_handler() refuse to mint a session (fail closed) when
-//      ota_http_get_client_ip() returns "unknown", rather than binding a
+//      correct. CLOSED 2026-09-18: login_post_handler() now refuses to mint
+//      a session (fail closed) when ota_http_get_client_ip_checked() below
+//      reports the address could not be determined, rather than binding a
 //      real, credential-verified session to a sentinel other undetermined
-//      clients also share.
-void ota_http_get_client_ip(httpd_req_t *req, char *out, size_t out_len)
+//      clients also share -- see that function's own comment and
+//      web_auth_login_http.c's login_post_handler().
+// 2026-09-18 follow-up to the review above: the one MINTING call site
+// (web_auth_login_http.c's login_post_handler()) needs the actual
+// true/false outcome ota_http_client_ip_finalize() already computes
+// internally, not just the (possibly-"unknown") string it wrote -- a
+// caller comparing that string against the literal "unknown" would be a
+// second, fragile copy of the same sentinel contract this file's own
+// review comment above warns about. This checked variant is now the real
+// implementation; ota_http_get_client_ip() below is a thin wrapper over it
+// that keeps every existing compare-only caller's void signature (and
+// every one of their test doubles) unchanged.
+bool ota_http_get_client_ip_checked(httpd_req_t *req, char *out, size_t out_len)
 {
     int sockfd = httpd_req_to_sockfd(req);
     if (sockfd < 0) {
-        ota_http_client_ip_finalize(out, out_len, NULL);
-        return;
+        return ota_http_client_ip_finalize(out, out_len, NULL);
     }
 
     struct sockaddr_in6 addr;
     socklen_t addr_size = sizeof(addr);
     if (getpeername(sockfd, (struct sockaddr *)&addr, &addr_size) != 0) {
-        ota_http_client_ip_finalize(out, out_len, NULL);
-        return;
+        return ota_http_client_ip_finalize(out, out_len, NULL);
     }
 
     char formatted[46]; // INET6_ADDRSTRLEN -- same size as every caller's own buffer
@@ -304,7 +313,12 @@ void ota_http_get_client_ip(httpd_req_t *req, char *out, size_t out_len)
     } else {
         result = inet_ntop(AF_INET6, &addr.sin6_addr, formatted, sizeof(formatted));
     }
-    ota_http_client_ip_finalize(out, out_len, result);
+    return ota_http_client_ip_finalize(out, out_len, result);
+}
+
+void ota_http_get_client_ip(httpd_req_t *req, char *out, size_t out_len)
+{
+    (void)ota_http_get_client_ip_checked(req, out, out_len);
 }
 
 // TODO.md 10.6a: content negotiation lives in web_encoding.h's shared
