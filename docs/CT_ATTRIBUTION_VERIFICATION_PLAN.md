@@ -1,6 +1,10 @@
 # CT attribution verification — commissioning plan
 
-Status: PLANNED. Nothing in this document is built yet.
+Status: PLANNED. Nothing in this document is built yet. Four owner decisions of
+2026-09-18 — settle time, verdict scope, an operator-entered clamp ratio with
+offset/gain trim, and land order — are folded into the body below and summarised
+in "Owner decisions", which replaces this plan's former open-questions list. The
+third of them changes the design, not just a number.
 
 ## The problem
 
@@ -82,22 +86,51 @@ speak for the other.
 The sweep's existing shape is correct and should not be changed. Per zone, in
 index order, with all other zones commanded off through `kiln_io_owner`:
 
-- energize, settle `ZONE_SWEEP_SETTLE_MS` (1000 ms),
+- energize, settle `ZONE_SWEEP_SETTLE_MS` (**10000 ms**, raised from 1000 ms by
+  owner decision 1),
 - sample `ZONE_SWEEP_SAMPLE_MS` (4000 ms), accumulating a per-channel mean over
   all three channels, not just the expected one,
 - de-energize, and require the channels to fall back before the next zone.
 
-The settle window is the one number that deserves scrutiny. The CT front end is
-a rectified peak envelope with a time constant of about 1 s
-(`firmware/SaftyFW/docs/CURRENT_SENSE.md`), so 1000 ms of settling is one time
-constant — roughly 63 % of the step. A zone whose true current is at the decision
-threshold can therefore be measured a third low. The sample window is long
-enough that this mostly averages out, but the honest fix is to raise settling to
-three time constants (3000 ms, about 95 %) for the verification pass and to say
-so, rather than to rely on the sample window to hide an under-settled envelope.
-That lengthens a three-zone pass from 15 s to 21 s, which is not a cost worth
-arguing about. **Open question for the owner**, since it changes an existing
-constant that the k_ct calibration path also uses.
+### Settle time: 10 s, and what it costs (owner decision 1)
+
+The CT front end is a rectified peak envelope with a time constant of about 1 s
+(`firmware/SaftyFW/docs/CURRENT_SENSE.md` §1/§3: R77 ∥ C57 = 1 MΩ ∥ 1 µF,
+τ = 1.0 s), so the original 1000 ms of settling was **one** time constant,
+roughly 63 % of the step — a zone whose true current sat at the decision
+threshold could be measured a third low. This plan first proposed 3000 ms
+(three constants, ~95 %). **The owner chose 10000 ms**, about ten time
+constants — essentially fully settled, deliberately preferred over the ~95 %
+that 3 s would give. Use 10000 ms throughout; nothing in this document is
+predicated on 3000 ms any more.
+
+What it costs, stated plainly:
+
+- The delay is paid **per zone, per sweep**. `ZONE_SWEEP_ENERGIZE_MS` is
+  `ZONE_SWEEP_SETTLE_MS + ZONE_SWEEP_SAMPLE_MS`
+  (`firmware/KilnFW/App/drivers/control/zones_current_sweep_engine.c`), so a
+  zone goes from 5 s to **14 s**. `zone_sweep_run_one_zone()` de-energizes and
+  returns with no separate fall-back wait, and `zone_sweep_run_all_zones()`
+  starts the next zone immediately, so a full **three-zone sweep goes from
+  about 15 s to about 42 s end to end** — heat applied for 14 s per zone, one
+  zone at a time, every other relay off for the whole window.
+- `ZONE_SWEEP_SETTLE_MS` is **shared with the existing k_ct calibration path**,
+  which is the same energizing pass — so that path lengthens identically, from
+  ~15 s to ~42 s for three zones. There is no second sweep to leave at 1 s, and
+  deliberately so: two sweeps with different settle times would be two
+  different measurements of the same quantity.
+- Nothing else is quantized against the old value. The loop advances in
+  `ZONE_SWEEP_POLL_MS` (500 ms) steps, so 10000 ms lands exactly on a poll
+  boundary, and the existing host tests
+  (`firmware/KilnFW/App/test/test_zones_http.c`, the
+  `zone_sweep_should_sample()` / `zone_sweep_zone_done()` cases) assert against
+  the constants symbolically rather than against literals, so they follow the
+  change rather than breaking on it.
+- Two documentation surfaces quote "1 s settle … roughly 5 seconds per zone"
+  and must be corrected in the same commit as the constant, or they become the
+  stale-claim class this repo keeps finding:
+  `tools/PcTools/src/kilnctrl/mcp_server_zones_current_sweep.py` and
+  `tools/PcTools/src/kilnctrl/zones_current_sweep_http_client.py`.
 
 Sample count against noise: publish is 20 Hz, so a 4000 ms window is about 80
 samples. Measured idle standard deviation on the fitted channel is 4.678 counts
@@ -117,18 +150,151 @@ guesses when two channels read within 4x of each other — which is exactly the
 shared-CT case or a foreign load, neither of which is derivable. Its refusal is
 the correct behaviour and must be preserved, not softened.
 
-The verdict then compares the derived channel against the configured one. Plan
-against the concept, not today's encoding: the question is "which CT channel does
-this zone's configuration say it uses, and did a clamp on that channel actually
-respond when this zone and only this zone was energized". Today that is
-`ct_channel_map` plus `ct_topology`; under `docs/CT_CHANNEL_MASK_PLAN.md` it
-becomes per-zone `zone_ct_channel[z]` with `member(ch) = {z : zone_ct_channel[z] == ch}`.
-The verification should read the configured channel through a single accessor so
-that the comparison survives the schema move untouched. Where two or more zones
+The verdict then compares the derived channel against the configured one. Because
+this plan lands after step 4 of `docs/CT_CHANNEL_MASK_PLAN.md` (owner decision 4),
+the configured channel is per-zone `zone_ct_channel[z]`, with
+`member(ch) = {z : zone_ct_channel[z] == ch}`, not the `ct_channel_map` plus
+`ct_topology` pair it replaces. Read it through a single accessor rather than
+indexing the field directly, so a later encoding change touches one function.
+
+"Is this channel wired at all" is a separate question and it already has an
+owner: **`config_store_ct_channel_fitted()`** (`firmware/SaftyFW/src/config_store.h`,
+added by commit bdded44b), the single predicate every call site now goes through
+— the `s_current_sensing_commissioned` gate, the S14 per-channel loop, and
+`config_store_mask_current_present_to_fitted()`, which masks `any_current_present`
+to fitted channels so an unfitted channel's idle ADC floor can no longer read as
+current. That commit's own header comment names this function as the seam the
+per-zone-selection change will cut along. **This verification must call it and
+must not introduce a second notion of fitted.** A channel that is not fitted is
+not a FAIL and not a PASS: it is simply outside the comparison, and a zone whose
+configured channel is not fitted is INCONCLUSIVE with that reason. Where two or
+more zones
 share a channel, per-zone attribution is not derivable by construction and the
 correct verdict for those zones is INCONCLUSIVE with the shared-channel reason,
 never PASS; what can still be verified there is that the shared channel responds
 to each member and that no non-member zone drives it.
+
+## The response threshold: clamp ratio, offset and gain trim (owner decision 3)
+
+The owner rejected both options this plan originally posed — neither the fixed
+`ZONE_SWEEP_CT_RESPOND_A` of 2.0 A nor a threshold silently derived from
+`i_normal_a`. Their words: *"The circuit has a fixed gain but clamp ratios change.
+Allow the user to enter clamp ratio and offset/gain tuning to get more accurate."*
+
+That is the correct reading of the hardware. The board's analog gain really is
+fixed: `CURRENT_SENSE.md` §1 traces it to R46/R43 = 7.15k/10k = 0.715, a
+resistor ratio, and the burden R72 is **DNP on all three channels**, so the
+board expects a self-burdened, voltage-output clamp. Which clamp is fitted is an
+installation choice with its own turns ratio, and that ratio — not the board — is
+what converts a measured secondary voltage into a real primary current. A fixed
+2.0 A threshold bakes one clamp's assumption into firmware.
+
+### Where the ratio belongs in the existing chain — and what already exists
+
+Traced rather than assumed, because a prior agent in this project mistook
+`config_store.h`'s legacy `ct_cal[3]` table (params `0x0310`-`0x0312`, the
+end-to-end amps-correction fit) for the real calibration path. **It is not.** The
+live path is:
+
+| Quantity | Where it lives | Who enters it |
+|---|---|---|
+| `A_fs` — probe rating, amps at 1 V output | ESP-local NVS blob `safetyctcal`, namespace `kiln_cfg` (`safety_cfg_store.c`), per channel, with a `source` marker | operator, web UI |
+| `zero_mv` — probe output at zero current | same blob | operator, or the auto-zero action |
+| `gain` — front-end divider, 0.715 default | Pico params `0x030B`-`0x030D`, `F32`, already settable over `SET_PARAM` | nobody today — **readonly in the UI** |
+| `k_ct_v_per_a` | Pico params `0x0308`-`0x030A`, **derived**, `= 1 / A_fs` | `safety_ct_cal_convert()` |
+| `zero_counts` | Pico params `0x0302`-`0x0304`, **derived**, `= zero_mv/1000 · gain · 4096/3.3` | `safety_ct_cal_convert()` |
+
+and the Pico then computes
+`I = (counts − zero_counts) · (3.3/4096) / (gain · √2 · k_ct_v_per_a)`.
+
+Three conclusions follow, and two of them mean less new work than the decision
+first suggests:
+
+1. **The clamp ratio is already stored — as `A_fs`.** For a self-burdened
+   voltage-output clamp, "amps at 1 V out" *is* the turns ratio expressed in the
+   units this front end sees, which is exactly why `k_ct_v_per_a = 1/A_fs`. This
+   is a **re-expression of an existing field, not a new one**: no new stored
+   field, no new param id, no schema bump on either processor. What is missing
+   is honesty at the entry surface — the field is presented as a probe rating
+   rather than as the clamp ratio the verdict depends on, and nothing tells the
+   operator that every current-derived verdict is scaled by it.
+2. **Gain trim needs no new storage either.** `gain[0..2]` already exists as a
+   per-channel Pico parameter, already travels the generic
+   `SET_PARAM`/`COMMIT_CONFIG` path, and already sits in the denominator of the
+   Pico's amps formula. It is merely marked `readonly: true` on
+   `safety_commissioning_page.html`. Making it operator-editable is a UI change
+   plus a range check, not a storage change. Note one real defect while doing
+   it: `safety_ct_cal_convert()` uses `gain` **only** for `zero_counts` and not
+   for `k_ct_v_per_a`, so today a gain edit moves the zero point but not the
+   scale, while the Pico's own formula divides by `gain` for both. Trim must be
+   applied consistently or it will read as a mysterious offset-only control.
+3. **Offset trim already exists** as `zero_mv`, operator-entered in the same
+   form, with an auto-measure action beside it.
+
+So the only genuinely new quantity is a **scale trim distinct from the nameplate
+ratio** — "my clamp says 30 A at 1 V, but against a reference meter it reads 4 %
+high". Folding that into `A_fs` silently would lose the distinction between what
+the clamp claims and what it measures, which is the thing the operator will want
+to re-edit later. Keeping them separate costs an ESP-local schema step: two more
+floats per channel in `safety_ct_cal_blob_t`, taking
+`SAFETY_CT_CAL_BLOB_VERSION` from 1 to 2. That bump is cheap (ESP-local NVS, not
+a wire format, not the Pico's record) **but must not be taken as the code stands**:
+`load_ct_cal()` has no migration — a version mismatch logs a warning and
+*resets to defaults*, discarding every entered `A_fs`/`zero_mv` on the board.
+The bump must therefore land together with a real v1→v2 branch that carries the
+existing pair forward and seeds the trim at unity. A bump without that migration
+would silently de-commission a commissioned board, which is the same
+"configuration quietly reverts to defaults" hazard recorded for the Pico
+rollback in `docs/CT_CHANNEL_MASK_PLAN.md`.
+
+### What the verification threshold then is
+
+Per zone, the response threshold is derived, never a bare constant:
+
+```
+threshold_a(z) = max( noise_floor_a(ch)                    /* rescaled by the live k_ct, as
+                                                              zone_sweep_summed_normal_a() already does */
+                    , RESPOND_FRACTION * i_normal_a(z) )   /* the zone's own configured normal */
+```
+
+`ZONE_SWEEP_CT_RESPOND_A` stops being the verification's threshold. It stays
+where it is for `zone_sweep_derive_ct_channel()`'s existing "did anything
+conduct" test, whose job is coarse and unchanged; the verdict adds its own,
+calibrated test on top.
+
+### How a wrong or un-entered ratio must fail
+
+This is the part that decides whether the feature is worth having, because a
+mis-entered ratio scales a reading into a **confident wrong answer** — the exact
+defect this plan exists to close, reintroduced one layer up. Rules, all of them
+INCONCLUSIVE-by-construction rather than best-effort:
+
+- **Ratio not entered** — the channel's blob entry has `has_value == 0`, or the
+  committed `k_ct_v_per_a <= 0`. Verdict INCONCLUSIVE, reason "clamp ratio not
+  entered for channel N". **Never substitute a default ratio**, and in particular
+  never `SAFETY_CT_CAL_DEFAULT_GAIN`'s sibling assumption that some clamp is
+  1 V/A: an uncalibrated channel already falls back to a counts-domain presence
+  margin and reports 0 A, so a PASS computed there would be arithmetic on a
+  number the firmware itself declines to believe.
+- **`i_normal_a` not measured for the zone** — INCONCLUSIVE, reason "no normal
+  current recorded". No silent fallback to the old 2.0 A constant; that is the
+  hidden-constant behaviour the owner rejected.
+- **Out-of-range entry** — rejected at the door, nothing written.
+  `safety_ct_cal_convert()` already returns false and leaves its outputs
+  untouched for a non-finite `a_fs`, an `a_fs` outside [0.1, 2000] A, a
+  `zero_mv` outside ±200 mV, or a non-positive `gain`, and the POST handler
+  stages to the Pico *before* persisting locally. Extend the same discipline to
+  the trim fields; do not clamp a bad trim into a plausible-looking one.
+- **Ratio changed since the verdict** — covered structurally by the
+  configuration fingerprint below, which hashes the ratio, the trim, the offset
+  and the provenance marker. A verdict taken under one ratio can never be read
+  as a pass under another.
+- **A wrong but in-range ratio** is not detectable by this firmware and the plan
+  must not pretend otherwise: it is a hardware-truth question like
+  `ct_installed`, and the honest mitigation is that a badly wrong ratio pushes
+  the measured current away from `i_normal_a` and lands on INCONCLUSIVE or
+  FAIL rather than on PASS, because the threshold and the reading are scaled by
+  the same number only when the number is right.
 
 ## Pass, fail, inconclusive
 
@@ -136,15 +302,17 @@ Three states, never two. Per zone for attribution, and separately per zone for
 normal current:
 
 - **PASS** — a dominant channel was resolved, it matches the configured channel,
-  and the response was above the noise floor with all non-configured channels
-  quiet. Only a measurement can produce this.
+  that channel is fitted per `config_store_ct_channel_fitted()`, its clamp ratio
+  has actually been entered, and the response cleared `threshold_a(z)` above with
+  all non-configured channels quiet. Only a measurement can produce this.
 - **FAIL** — a dominant channel was resolved and it is not the configured
   channel, or the configured channel stayed quiet while another responded, or two
   zones both claimed the same channel where the configuration says they are
   distinct (`conflict_mask`).
-- **INCONCLUSIVE** — anything else. Below the floor, no dominant channel, a
-  channel in a shared group, a NaN, an aborted or refused pass, a link drop
-  mid-pass.
+- **INCONCLUSIVE** — anything else. Below the threshold, no dominant channel, a
+  channel in a shared group, a channel that is not fitted, a clamp ratio or a
+  zone normal that was never entered, a NaN, an aborted or refused pass, a link
+  drop mid-pass.
 
 The rule that makes this safe is structural, not a matter of care at each call
 site: **INCONCLUSIVE is the initial value and the only value reachable without a
@@ -160,10 +328,30 @@ run on it will.
 
 The fixture draws about 70 mA total, roughly 23 mA per zone. The sweep refuses to
 record a normal current below `ZONE_SWEEP_NORMAL_NOISE_FLOOR_A` of 0.045 A, so
-every zone is below the floor by a factor of two. Worse for attribution,
-`ZONE_SWEEP_CT_RESPOND_A` is 2.0 A: a zone must pull two amps before the sweep
-treats a channel as having responded at all, which is about 87 times what this
-fixture draws. No adjustment of settling or sample count reaches that. The front
+every zone is below the floor by a factor of two — and that floor, not the old
+2.0 A constant, is what the derived threshold above collapses to when no normal
+current has ever been measured, which on this bench is every zone. Deriving the
+threshold from the clamp ratio therefore does **not** rescue the bench: it
+removes the arbitrary 2 A, but the noise floor remains, and the honest verdict
+is still INCONCLUSIVE.
+
+This is not an arithmetic prediction. It was attempted empirically on
+2026-09-18 and recorded in
+`docs/audits/ct_clamp_channel_identification_2026-09-18.md` (commit 91c41de4):
+each of the four relays was energized in turn for 25 s, one at a time through
+`kiln_io_owner`, against a 65 s all-off baseline, and **no relay produced a CT
+step distinguishable from that channel's own baseline noise, on any channel**.
+Channel 2 — the only channel with a non-trivial reading — drifted 85.6 → 88.2
+counts across the session regardless of which relay was on, inside its own 3.6-
+count baseline standard deviation. The audit's own verdict is that neither
+agreement nor disagreement with the configuration could be established, both
+because the measurement came back negative and because no configured per-zone
+CT attribution exists to compare against yet. That is precisely the gap this
+plan closes on the configuration side and cannot close on the measurement side.
+
+No adjustment of settling or sample count reaches that — including the 10 s
+settle of decision 1, which fixes an under-settled envelope, not a signal
+smaller than the noise. The front
 end is a rectified peak envelope, not a waveform sampler, so per-cycle techniques
 — phase comparison, correlation against relay switching edges, synchronous
 detection — are unavailable in principle, not merely unimplemented. The `sqrt2`
@@ -185,23 +373,29 @@ Splitting it explicitly:
   configuration change; that the step refuses to start during a firing or an
   autotune; that relays are driven only through `kiln_io_owner`.
 - **Requires a real kiln**: any PASS at all; any FAIL from a genuinely swapped
-  clamp; the true settling behaviour of the envelope at real current; whether
-  3000 ms of settling is in fact enough; whether the 4x dominance ratio is the
-  right margin with real elements and real lead coupling.
+  clamp; the true settling behaviour of the envelope at real current (10 s is
+  about ten time constants, so this is expected to be settled rather than
+  marginal, but it has never been measured at real current); whether the 4x
+  dominance ratio is the right margin with real elements and real lead coupling;
+  whether an operator-entered clamp ratio and trim actually bring a real
+  installation's reading onto a reference meter.
 
 ## Reporting and blocking
 
-A wrong clamp is safety-relevant miswiring, not a preference. **Recommendation: a
-FAIL blocks step 9 from completing and blocks the firing interlock.** It should
+A wrong clamp is safety-relevant miswiring, not a preference. **Confirmed by the
+owner (decision 2), as recommended: a FAIL blocks step 9 from completing AND
+blocks the firing interlock.** It should
 be a readiness item, not merely a wizard note, so it reaches the same gate that
 already refuses to fire on a latched trip or an unverified E-stop. The operator
 text should name the zone, the configured channel, and the channel that actually
 responded, because that triple is enough to walk to the panel and move the clamp.
 
-INCONCLUSIVE must **warn and block step 9 from reading done, but not block
-firing.** Blocking firing on inconclusive would brick this bench and every kiln
-too small to reach 2 A, which is a worse outcome than the status quo and would
-get the check disabled. It must be visibly distinct from PASS in every surface —
+INCONCLUSIVE must **warn and block step 9 from reading done, and must never
+block the firing interlock** — also confirmed by the owner. Blocking firing on
+inconclusive would brick this bench and any kiln too small to reach the response
+threshold, which is worse than the status quo: a check that blocks everything
+gets switched off, and a check that is switched off protects nothing. It must be
+visibly distinct from PASS in every surface —
 a distinct status word and colour in the readiness list, an explicit "could not
 determine" in the step 9 text — and must never be summarized alongside PASS as
 "no problems found". The wizard step's stored state for an all-inconclusive run
@@ -217,9 +411,14 @@ the wizard through a readiness key, not squeezed into the progress blob.
 A verdict that outlives the configuration it was taken against is a trap. Store,
 per zone and per verdict kind: the verdict enum, the measured current, the
 channel that responded, the Unix timestamp, and a **configuration fingerprint** —
-a hash over the fields the verdict actually depends on: each zone's configured CT
-channel, `ct_installed`, the per-channel k_ct calibration values and their
-provenance, and the zone-to-relay mapping.
+a hash over the fields the verdict actually depends on: each zone's
+`zone_ct_channel`, `ct_installed` and hence each channel's
+`config_store_ct_channel_fitted()` answer, the per-channel calibration inputs the
+threshold is scaled by (the clamp ratio `A_fs`, `zero_mv`, `gain`, and any trim),
+the derived `k_ct_v_per_a`/`zero_counts` they produce, the `source` provenance
+marker, each zone's `i_normal_a`, and the zone-to-relay mapping. Everything the
+threshold arithmetic reads must be in the hash: a field that scales a reading but
+not the fingerprint is a stale-verdict hole.
 
 Invalidation is then not a matter of remembering to clear it. The readiness item
 recomputes the fingerprint from live config on every read and reports
@@ -251,11 +450,21 @@ times {enum, float, channel byte} plus one timestamp and one 32-bit fingerprint 
 under 64 bytes with a version byte and room to grow. NVS only, not the `cfg`
 LittleFS partition, matching `setup_wizard_progress.c`'s reasoning.
 
-No `ZONES_CFG_VERSION` bump is needed for this feature: it adds a new store
-rather than widening the zones blob. It must, however, be written against the
-accessor that `docs/CT_CHANNEL_MASK_PLAN.md` introduces, and should land after
-that plan's step 4, so the fingerprint hashes the new per-zone field rather than
-a field that is about to be replaced.
+**This feature bumps no config schema version on either processor**, and an
+earlier draft of this section was wrong to reach for `ZONES_CFG_VERSION` even to
+deny it. `ZONES_CFG_VERSION` is KilnFW's zones blob on the ESP32-S3
+(`firmware/KilnFW/App/drivers/persist/zones_config_json.h`); the schema that
+bumps for `zone_ct_channel` is **SaftyFW's `CONFIG_STORE_FORMAT_VERSION`, 2 to
+3** (`firmware/SaftyFW/src/config_store.h`), a different schema on a different
+processor, and that bump belongs to `docs/CT_CHANNEL_MASK_PLAN.md` step 2 — see
+that plan's storage-decision section, revised at 7e517564, and the Pico-rollback
+cost it records. This plan inherits that bump by landing after it; it adds none
+of its own, because it adds a new ESP-side NVS store rather than widening any
+existing blob.
+
+It must be written against the accessor `docs/CT_CHANNEL_MASK_PLAN.md`
+introduces, and lands after that plan's step 4, so the fingerprint hashes
+`zone_ct_channel` rather than the `ct_topology` byte that work supersedes.
 
 New readiness item key `ct_attribution`, alongside the existing `autotune` item
 in `readiness_http.c`. Step 9's `readinessKeys` gains it. `SETUP_WIZARD_STEP_COUNT`
@@ -288,6 +497,18 @@ Required cases:
    config. Expect the readiness item to report INCONCLUSIVE.
 8. **Conflict** — two zones configured distinct, both resolving to the same
    channel. Expect FAIL.
+9. **Clamp ratio never entered** — a channel whose calibration input is unset
+   (`has_value == 0`, committed `k_ct_v_per_a <= 0`) while the channel reads a
+   healthy dominant response in raw terms. Expect INCONCLUSIVE with the
+   ratio-not-entered reason, and assert explicitly that no default ratio was
+   substituted.
+10. **Channel not fitted** — the zone's configured channel answers false to
+    `config_store_ct_channel_fitted()`. Expect INCONCLUSIVE, not FAIL: an
+    unfitted channel is outside the comparison, not evidence of miswiring.
+11. **Threshold scales with the entered ratio** — the same raw measurement,
+    evaluated against two different entered clamp ratios, must produce different
+    verdicts in the direction the arithmetic predicts. This is what proves the
+    threshold is derived rather than a constant wearing a new name.
 
 **The negative test.** The single line that must be broken is the floor
 comparison that gates the PASS branch — the condition requiring the resolved
@@ -321,14 +542,33 @@ subject cannot fail.
 Conversely, a k_ct sweep that does change calibration changes the fingerprint,
 which correctly invalidates any prior verdict.
 
-## Open questions for the owner
+## Owner decisions, 2026-09-18
 
-1. Raise `ZONE_SWEEP_SETTLE_MS` from 1000 ms to 3000 ms (one envelope time
-   constant to three)? It also affects the existing k_ct calibration path.
-2. Confirm that INCONCLUSIVE should block the wizard step but not the firing
-   interlock, while FAIL blocks both.
-3. Is `ZONE_SWEEP_CT_RESPOND_A` at 2.0 A the right response threshold for a real
-   kiln, or should the verification use its own, separate threshold derived from
-   the configured `i_normal_a` rather than a fixed constant?
-4. Land order against `docs/CT_CHANNEL_MASK_PLAN.md` — this plan assumes it lands
-   after that plan's step 4, so the fingerprint hashes `zone_ct_channel`.
+All four of this plan's former open questions are decided. There are no open
+questions for the owner in this document.
+
+1. **Settle time: 10000 ms**, not the 3000 ms proposed — about ten envelope time
+   constants, deliberately chosen over the ~95 % that 3 s would give. Paid per
+   zone per sweep and shared with the k_ct calibration path, taking a three-zone
+   pass from ~15 s to ~42 s end to end. See the Procedure section.
+2. **Verdict scope: confirmed as recommended.** FAIL blocks both the wizard step
+   and the firing interlock. INCONCLUSIVE blocks only the wizard step and never
+   the firing interlock.
+3. **Operator-entered clamp ratio, with offset and gain trim**, rejecting both
+   the fixed 2.0 A constant and a threshold silently derived from `i_normal_a`.
+   The board's gain is fixed in hardware; the fitted clamp's ratio is an
+   installation fact and must be entered. The threshold is derived from the
+   entered ratio, the trim and the zone's configured normal together. Entry is
+   web UI only, on `safety_commissioning_page.html` beside the fields it belongs
+   with, consistent with the owner's standing choice for configuration of this
+   kind — no LCD entry surface and no PcTools-only path, since a value only
+   enterable from a tool is a value a kiln owner cannot correct. Most of it is
+   already expressible in existing fields (`A_fs` is the clamp ratio; `gain` and
+   `zero_mv` already exist and only need to become editable); only a scale trim
+   distinct from the nameplate ratio is new, and it costs an ESP-local
+   `SAFETY_CT_CAL_BLOB_VERSION` 1→2 step that must ship with a real migration.
+   Full derivation in "The response threshold" above.
+4. **Land order: confirmed.** This plan lands after step 4 of
+   `docs/CT_CHANNEL_MASK_PLAN.md`, so the fingerprint hashes `zone_ct_channel`
+   rather than the `ct_topology` byte that work replaces, and the fitted
+   predicate it builds on is `config_store_ct_channel_fitted()` from bdded44b.
