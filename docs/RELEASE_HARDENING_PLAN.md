@@ -365,6 +365,86 @@ zero-production-caller sweep called for by this item's own acceptance
 criteria have not been re-run as a fresh scripted pass in this session --
 the seven prior passes' findings stand but were not re-verified here.
 
+**Status, 2026-09-17 (ninth pass): the gated-out-test and zero-production-
+caller sweeps, run as fresh scripted passes for the first time since this
+item's acceptance criteria called for them.** Both done in a clean
+`tools/worktree_mint.ps1`-minted worktree, provisioned via `git submodule
+update --init --recursive` + `tools/setup.ps1`.
+
+*Gated-out-test sweep.* A two-stage regex scan (broad shape match, then
+narrowed to prerequisite-check-immediately-followed-by-skip/pass) covered
+492 files under `firmware/*/test/`, `firmware/*/tools/`, `tools/`, and
+`tools/PcTools/tests/`, producing 153 narrowed hits. Every hit resolved to
+one of: (a) a `Get-Command python`/`python3`/`node`/`ffmpeg` fallback
+picking whichever interpreter/tool is on PATH -- not a skip; (b) a
+documented, gitignored-by-design optional-data skip (`test_fuzzy_band_
+probe.py`, `test_noise_floor.py` x2, `test_plant_sim.py`'s hardware-capture
+`self.skipTest`/`pytest.skip` guards -- their `logs/coupling/*.jsonl`
+inputs are covered by `.gitignore`'s `logs/**/*.jsonl` line, confirmed
+absent from `origin/main`'s tree; a pytest skip is counted and printed by
+the runner, so this is visible, not silent); (c) `tools/PcTools/selfcheck.
+py`'s `tools/mykicadMcp` submodule-not-checked-out fallback and `selfcheck_
+commonfw.py`'s CommonFW-vectors-manifest fallback -- both LIVE on a
+provisioned checkout (all referenced files present and confirmed on
+`origin/main`), by design INERT-with-a-printed-message on an unprovisioned
+one; (d) `tools/mykicadMcp/tests/conftest.py`'s `scratch_board` fixture
+skip, unreachable today because its own upstream `kiln_project_path`
+fixture already hard-fails (`pytest.fail`, not skip) if the board is
+missing at all; (e) `test_kicad_cli_acceptance.py`'s documented
+machine-capability skip, LIVE on this bench (KiCad 10 installed). No
+instance of the confirmed defect shape (`if not path.is_file():
+skipTest(...)` masking a renamed/moved prerequisite) was found live today.
+
+One real, narrower gap was found and fixed: `tools/check_test_has_
+assertions.ps1` scans a hardcoded list of three known-good test
+directories (`firmware/KilnFW/App/test`, `firmware/SaftyFW/test`,
+`tools/PcTools/tests`) but only guarded each with `if (-not (Test-Path
+$dir)) { continue }` -- silently scanning fewer directories rather than
+failing, with only a "zero directories total" floor check to catch total
+loss. Negative-tested by renaming `firmware/SaftyFW/test` aside: the
+pre-fix script printed "Test-has-assertions check passed" and exited 0
+with an entire suite's worth of coverage silently dropped (confirmed by
+`git stash`-ing the fix and re-running against the same sabotage). Fixed by
+failing loud (`throw`) if any of the three fixed paths is missing, since
+none of them is an optional/machine-dependent prerequisite in this repo.
+Restored the sabotaged directory by hand; `git hash-object` on the fixed
+script matched pre- and post-verification. This is the only source change
+this pass made.
+
+*Zero-production-caller sweep.* A scripted pass paired each `test_<subject>
+.c` under `firmware/KilnFW/App/test` and `firmware/SaftyFW/test` with its
+matching production `<subject>.c`, extracted that file's function
+definitions, ranked them by reference frequency in the test file, and
+`git grep`'d the top candidates (321 rows) for call sites outside the
+defining file and outside any `test`/`tests` directory. 7 rows came back
+zero. All 7 checked by hand and found NOT genuinely unwired: 5
+(`log_store.c`'s `kind_prefix`, `partition_info_http.c`'s `send_chunk`,
+`ramp_assist_cfg.c`'s `ramp_assist_validate`, `safety_cfg_http.c`'s
+`rate_guard_auto_compute`, `zones_http.c`'s `tuning_rec_body_len`) are
+`static` helpers called only from elsewhere in their own defining file --
+the script's exclude-defining-file rule produced a false zero, not a real
+one; 2 are genuinely indirect-dispatch: `time_sync.c`'s `tz_file_validate`
+is passed by name as a callback to `pref_cfg_fs_load_raw(...)`, and `zones_
+http.c`'s `sweep_status_get_handler` is registered in a static
+`httpd_uri_t` table (`.handler = sweep_status_get_handler`) -- both reached
+in production, just not via a textually-adjacent call. No genuinely
+unwired subject (the `web_auth_table_create_session` shape) was found in
+this pass's scope. Python suites under `tools/PcTools/tests` were not run
+through the same script this pass (time-boxed); this is scoped-out, not
+verified-clean.
+
+Suite: 108 guard scripts discovered by `run_all_checks.ps1` in this
+worktree (one more than the eighth pass's stated 107 -- not reconciled
+here, no check was added or removed this pass, so the discrepancy predates
+this session's change). Full run after the fix: **108 passed, 0 skipped, 0
+failed.**
+
+Remaining, unattempted this pass: the eighth pass's leftover items
+(`check_ui_responsive_sweep.ps1` negative test, both `check_00_*_target_
+build.ps1`/`check_01_*_pushed_build.ps1` pairs' FAIL paths), the 107-vs-108
+discovered-count discrepancy, and full Python-side coverage for the
+zero-production-caller sweep.
+
 **Already covered, name the evidence:** the two `check_01_*_pushed_build.ps1`
 scripts are the strongest single piece of process coverage in the repo. They
 build `origin/main`'s actual content in a clean worktree rather than the local
