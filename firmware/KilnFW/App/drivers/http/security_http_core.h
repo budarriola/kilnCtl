@@ -35,6 +35,7 @@ typedef enum {
 // PIN 4-8 digits) plus one byte of slack for a defensive NUL.
 #define SECURITY_HTTP_USERNAME_MAX 32
 #define SECURITY_HTTP_PASSWORD_MAX 128
+#define SECURITY_HTTP_PIN_MIN 4
 #define SECURITY_HTTP_PIN_MAX 8
 
 typedef struct {

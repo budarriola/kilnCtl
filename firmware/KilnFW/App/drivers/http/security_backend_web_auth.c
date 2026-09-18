@@ -74,6 +74,24 @@ _Static_assert(SECURITY_HTTP_PIN_MAX == WEB_AUTH_PIN_MAX_LEN,
                "lets this page's request buffer silently truncate a PIN "
                "before the store's own length check ever sees it");
 
+// Same pairing, the MINIMUM side: security_http_core.c's
+// security_pin_is_valid() rejects a PIN shorter than SECURITY_HTTP_PIN_MIN
+// before it ever reaches the store's own web_auth_pin_check(), whose
+// WEB_AUTH_PIN_MIN_LEN (web_auth_store.h) is the length that actually
+// matters for what gets persisted. They agree today (both 4) only because
+// nothing ties them together -- the same drift shape as the MAX pair above,
+// left half-closed when that one was fixed: widening one side's minimum
+// without the other would either let this page reject a PIN the store
+// would have accepted, or let a PIN through here that the store's own
+// check would have refused, silently masking that rule everywhere this
+// page is the only path used to set one.
+_Static_assert(SECURITY_HTTP_PIN_MIN == WEB_AUTH_PIN_MIN_LEN,
+               "SECURITY_HTTP_PIN_MIN (security_http_core.h) and "
+               "WEB_AUTH_PIN_MIN_LEN (web_auth_store.h) are two views of the "
+               "same LCD PIN minimum length and must stay equal -- a "
+               "mismatch lets this page's validation disagree with the "
+               "store's own length check on what PIN lengths are allowed");
+
 static const char *TAG = "security_backend_web_auth";
 
 // security_role_t (this page's seam) and web_auth_role_t (the store's) are

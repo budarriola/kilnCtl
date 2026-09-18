@@ -9,7 +9,7 @@ bool security_pin_is_valid(const char *pin, const char *other)
         return false;
     }
     size_t len = strlen(pin);
-    if (len < 4 || len > SECURITY_HTTP_PIN_MAX) {
+    if (len < SECURITY_HTTP_PIN_MIN || len > SECURITY_HTTP_PIN_MAX) {
         return false;
     }
     for (size_t i = 0; i < len; i++) {
