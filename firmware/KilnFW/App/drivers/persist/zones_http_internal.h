@@ -132,7 +132,19 @@ extern zones_state_t s_zones;
  * zones_config_accessors.c's zones_config_get_relay_name()/set_relay_name()
  * and zones_http_handlers.c's zones_get_handler()/zones_post_handler() all
  * need the type too, not just zones_config_store.c which owns the storage. */
-#define RELAY_NAMES_CFG_VERSION 1
+/* 1 -> 2 (docs/ZONE_GRAPHIC_PLAN.md stage 1, 2026-09-18): added types[], the
+ * per-relay device type. This is the FIRST version bump this blob has ever
+ * had, so zones_config_store.c grew its first migration at the same time --
+ * see relay_names_decode_any() there. Bumping this without one would have
+ * made relay_names_validate() reject every existing v1 blob and blank every
+ * operator-entered relay name on the next firmware update, silently.
+ *
+ * NOT to be confused with ZONES_CFG_VERSION (zones_config_json.h, the
+ * per-zone on-flash schema carrying the PID gains) or SaftyFW's
+ * CONFIG_STORE_FORMAT_VERSION -- three separate schemas, three separate
+ * constants, on two processors. This one is deliberately independent so
+ * cosmetic per-relay labels do not share the PID gains' rollback fate. */
+#define RELAY_NAMES_CFG_VERSION 2
 #define NVS_KEY_RELAY_NAMES "relay_names_cfg"
 NVS_KEY_LEN_CHECK(NVS_KEY_RELAY_NAMES);
 
@@ -149,11 +161,38 @@ NVS_KEY_LEN_CHECK(NVS_KEY_RELAY_NAMES_REV);
  * relay_names_save()). */
 #define RELAY_NAMES_FILE_PATH "relay_names.dat"
 
+/* FROZEN v1 layout -- the shape that is on every board in the field today.
+ * Never edit this struct: it is not "the old version of relay_names_cfg_t",
+ * it is a permanent description of bytes already written to flash, and the
+ * only thing that can read them correctly. Same discipline zones_cfg_vN_t
+ * follows, and the reason this codebase writes migrations against a named
+ * frozen type instead of memcpy'ing one shape over another. */
 typedef struct {
     uint8_t version;
     char names[KILN_IO_RELAY_COUNT][RELAY_NAME_MAX_LEN + 1];
     uint32_t crc32;
+} relay_names_cfg_v1_t;
+
+typedef struct {
+    uint8_t version;
+    char names[KILN_IO_RELAY_COUNT][RELAY_NAME_MAX_LEN + 1];
+    /* v2: what each relay drives -- relay_device_type_t values, stored one
+     * byte each. Index r is relay r+1, the same dense 1-based mapping
+     * names[] uses. RELAY_DEVICE_TYPE_UNSET (0) is what a migrated v1 board
+     * and a never-configured relay both read as, deliberately. */
+    uint8_t types[KILN_IO_RELAY_COUNT];
+    uint32_t crc32;
 } relay_names_cfg_t;
+
+/* The migration in zones_config_store.c tells v1 from v2 by BYTE LENGTH
+ * before it interprets a single field (the same length-before-interpretation
+ * rule zones_config_json_decode_blob() uses), so these two sizes differing is
+ * load-bearing, not incidental. If a future field ever made them equal, the
+ * length check would silently accept a v1 blob as v2 and read types[] out of
+ * the old blob's padding -- pin it here rather than discovering it on a
+ * board. */
+_Static_assert(sizeof(relay_names_cfg_v1_t) != sizeof(relay_names_cfg_t),
+               "relay_names v1 and v2 must differ in size -- the migration distinguishes them by length");
 
 typedef struct {
     relay_names_cfg_t cfg;

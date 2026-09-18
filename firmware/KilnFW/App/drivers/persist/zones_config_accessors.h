@@ -109,6 +109,45 @@ extern "C" {
  * no budget pressure here motivating a shorter label than a zone gets. */
 #define RELAY_NAME_MAX_LEN 15
 
+/* relay_names_cfg_t::types[] -- what the operator says an extra relay
+ * actually DRIVES (docs/ZONE_GRAPHIC_PLAN.md stage 1, RELAY_NAMES_CFG_VERSION
+ * 1->2). A FIXED, code-defined enum, deliberately NOT operator-extensible:
+ * the zone graphic draws one hand-drawn SVG icon per value, so a value with
+ * no icon could not be rendered at all, and "let the operator invent a type"
+ * would mean either a fallback glyph (the confident-lie failure mode that
+ * plan's section 6 exists to prevent) or shipping a glyph editor.
+ *
+ * UNSET IS ENUM 0, AND THAT IS THE POINT (owner decision, 2026-09-18, closing
+ * that plan's open question 1). Zero is what a migrated v1 blob, a
+ * never-configured relay, and a memset()-zeroed struct all naturally land on,
+ * so making zero mean `other` would have every board that upgrades silently
+ * assert an operator choice nobody made. UNSET renders with the unknown glyph
+ * -- "nobody has told me what this relay does" -- which is a different
+ * statement from OTHER, a deliberate operator selection meaning "none of the
+ * above". This is the same absent-is-not-zero, unknown-is-not-absent
+ * distinction normal_current_measured and safety_wiring.tc_temp_valid already
+ * carry elsewhere in this config.
+ *
+ * Values are ON FLASH (they are persisted in the relay-names blob), so an
+ * existing value's number may never be reused for a different meaning --
+ * append only, and bump RELAY_NAMES_CFG_VERSION if one is ever removed. */
+typedef enum {
+    RELAY_DEVICE_TYPE_UNSET = 0,
+    RELAY_DEVICE_TYPE_DAMPER = 1,
+    RELAY_DEVICE_TYPE_OUTLET = 2,
+    RELAY_DEVICE_TYPE_VALVE = 3,
+    RELAY_DEVICE_TYPE_FAN = 4,
+    RELAY_DEVICE_TYPE_LIGHT = 5,
+    RELAY_DEVICE_TYPE_OTHER = 6,
+} relay_device_type_t;
+
+/* One past the highest valid value -- the range check every setter and every
+ * decode path uses. Derived from the enum rather than written as a literal so
+ * appending a value cannot leave a hand-maintained bound behind (this repo's
+ * single most repeated defect shape; see run_all_checks.ps1's own header on
+ * hardcoded counts). */
+#define RELAY_DEVICE_TYPE_COUNT ((uint8_t)(RELAY_DEVICE_TYPE_OTHER + 1))
+
 
 /* zone_timing_profile_t::name -- the operator-entered label for a named
  * safety-timing profile (2026-08-27, ZONES_CFG_VERSION 8->9, owner's request:
@@ -668,6 +707,25 @@ bool zones_config_get_relay_name(uint8_t relay_n, char *out, size_t out_cap);
  * becomes zone-owned. name may be NULL, treated as an empty string (clears
  * the name), matching zones_config_set_name()'s own convention. */
 bool zones_config_set_relay_name(uint8_t relay_n, const char *name);
+
+/* The device-type companion to the relay-name pair above
+ * (docs/ZONE_GRAPHIC_PLAN.md stage 1): what this relay actually drives.
+ * relay_n is 1-based, same convention as the name pair.
+ *
+ * The getter returns false (leaving *out untouched) only for an out-of-range
+ * relay_n or a NULL out -- "cannot answer". A TRUE return carrying
+ * RELAY_DEVICE_TYPE_UNSET is a real, different case and callers must keep it
+ * distinct: it means the relay exists and nobody has said what it drives,
+ * NOT that it drives nothing and NOT that it is RELAY_DEVICE_TYPE_OTHER.
+ * Rendering UNSET as anything other than the unknown glyph is the exact
+ * regression that plan's section 6 forbids.
+ *
+ * The setter rejects (writing nothing) an out-of-range relay_n or a type at
+ * or past RELAY_DEVICE_TYPE_COUNT -- an unknown type number is never stored
+ * and never guessed at, the same refuse-rather-than-guess discipline
+ * zones_config_json_decode_blob() applies to a newer-than-known version. */
+bool zones_config_get_relay_device_type(uint8_t relay_n, relay_device_type_t *out);
+bool zones_config_set_relay_device_type(uint8_t relay_n, relay_device_type_t type);
 
 
 /* PID_EXPANSION_PLAN.md 3.3, "consolidate the opt-in flag into the zone

@@ -1,6 +1,17 @@
 # Zone graphic — a configuration-verification instrument on the web zones page
 
-> **Status:** planned, nothing built. **Opened:** 2026-09-18.
+> **Status:** **stage 1 landed 2026-09-18** — the relay device type, its
+> storage and its migration, the data layer only. Stages 2 to 5 planned,
+> nothing built. **Opened:** 2026-09-18.
+>
+> **Visual target:** [`docs/images/zone_graphic_reference_stacked_rings.jpg`](images/zone_graphic_reference_stacked_rings.jpg),
+> owner-supplied. The artwork stages build against that image rather than
+> against a prose description: a vertically stacked kiln body on legs, no
+> branding, one glowing ring section per zone, three rings matching the
+> current three-zone setup. **The rings are the load-bearing idea — each zone
+> is a ring, and the ring itself carries that zone's state**, so zone state is
+> a property of the ring rather than a badge parked beside it. Ring count
+> still follows `thermo_count`, never the reference image's own count.
 > **Scope:** `firmware/KilnFW/App/drivers/http/zones_page.html` and the
 > `GET`/`POST /api/zones` handlers, plus one storage change to the relay-names
 > blob. **Out of scope, by owner decision: the on-board LCD zones page.** The
@@ -409,13 +420,41 @@ faked.** Neither is fixed by this plan.
 Each stage is independently verifiable and independently shippable. Nothing in
 stage 1 depends on any artwork existing.
 
-**Stage 1 — relay device type storage.** `relay_device_type_t` enum (damper,
-outlet, valve, fan, light, other), the `types[]` array on `relay_names_cfg_t`,
+**Stage 1 — relay device type storage. LANDED 2026-09-18.** `relay_device_type_t`
+enum (unset, damper, outlet, valve, fan, light, other — `unset` is enum 0 per
+the owner answer in section 10), the `types[]` array on `relay_names_cfg_t`,
 `RELAY_NAMES_CFG_VERSION` 1 → 2, the frozen `relay_names_cfg_v1_t` and its
 migration, and the dual-write path to the `cfg` filesystem kept in step.
 *Verified by:* host tests — a v1 blob migrates with every name preserved and
 every type defaulted; a v2 blob round-trips; a truncated or CRC-broken blob is
 still refused. Plus a build.
+
+Three things stage 2 needs to know about how stage 1 actually landed:
+
+- **The accessors are named `zones_config_get_relay_device_type()` /
+  `_set_relay_device_type()`, not `..._relay_type()`.** That shorter name was
+  already taken, and by something unrelated:
+  `zones_config_get/set_relay_type(zone_index, uint8_t)` is the *zone's
+  switching hardware* (SSR / contactor / mercury) that drives
+  `relay_cycles_budget()`. Two different meanings of "relay type" now coexist
+  in this codebase — the switching hardware per zone, and the driven device
+  per extra relay. The collision was caught only by a duplicate-definition
+  compile error. Stage 2's JSON field is still `relay_types`, per section 4,
+  but any new *function* here needs the longer name.
+- **Version discrimination is by byte length**, which is why
+  `sizeof(relay_names_cfg_v1_t) != sizeof(relay_names_cfg_t)` (72 vs 76) is
+  pinned by a `_Static_assert`. A future field that accidentally equalised the
+  two sizes would make v1 padding readable as `types[]`; it now fails to
+  compile instead. The NVS read path passes the blob's *actual stored length*,
+  never `sizeof(raw)`, for the same reason.
+- **The `cfg` filesystem needed its own separate v1 migration.** The generic
+  `pref_cfg_fs` bridge is parameterised by one fixed item size and rejects any
+  file whose length is not `4 + item_size`, so a v1-length file would have been
+  dropped silently — the same data-loss hazard as the NVS one, through the
+  other door. `relay_names_load()` therefore runs a v1 file pre-pass that
+  upgrades the file in place *at the same rev*, before `pref_cfg_fs_resolve()`
+  runs, leaving the divergence tie-break untouched. It has its own host test.
+  Inert on every board today, since no board mounts `cfg` yet.
 
 **Stage 2 — the type on the wire and in the form.** `"relay_types"` on the
 `GET`, `relay_type_N=` on the `POST`, and a dropdown beside each existing relay
@@ -474,24 +513,29 @@ and force a full rebuild before measuring anything** — an empty `git diff`
 proves the source is restored and says nothing about a stale build artifact,
 which this project has already been bitten by.
 
-## 10. Open questions for the owner
+## 10. Owner answers — all three settled 2026-09-18
 
-1. **What does an un-set relay type look like?** This plan defaults every
-   migrated relay to `other`, but `other` is a *choice the operator made* and a
-   never-configured relay is not the same thing. Recommendation: add a distinct
-   `unset` value as enum 0 that renders with the unknown glyph, so a migrated
-   board visibly says "nobody has told me what this relay does" instead of
-   quietly claiming "other". It costs nothing, and it is the same distinction
-   section 6 is built on. Needs a yes, because it changes the enum the owner
-   already specified.
-2. **Is a global safety trip drawn as a banner across the whole graphic?**
-   Recommendation: yes, banner, never a per-ring badge — trip state is one
-   state machine and per-ring attribution would be invented. Confirming this
-   closes section 7's only judgement call.
-3. **Is a permanently dormant heater-load badge acceptable on the bench?** The
-   never-measured badge is honest and correct, but on this roughly 4 W fixture
-   it can never leave the dormant state, so stage 5 ships a badge nobody can
-   see working until a kiln-scale load exists. Recommendation: ship it anyway —
-   dormant-and-labelled is the accurate rendering, and suppressing it would
-   itself be a silent gap. Alternative is to defer it to the same milestone as
-   the kiln-scale current sweep.
+These are decided. They are recorded here so they are not re-litigated by a
+later stage; each recommendation was accepted as written.
+
+1. **What does an un-set relay type look like? — ANSWERED: it gets its own enum
+   value 0, spelled `unset`.** A migrated board must render as "nobody has told
+   me what this relay does", never as a silent claim of `other`, because
+   `other` is a choice the operator made and a never-configured relay is not
+   the same thing. **Implemented in stage 1**: `RELAY_DEVICE_TYPE_UNSET = 0`,
+   which is deliberately the value a migrated v1 blob, a never-configured
+   relay and a `memset`-zeroed struct all land on. The getter also degrades an
+   unrecognised stored number to `UNSET` rather than surfacing a value with no
+   icon (reachable only by rolling back past a future appended enum value),
+   per section 6. The enum is fixed and code-defined, never
+   operator-extensible, and its numbers are on flash, so values may only ever
+   be appended — never reused.
+2. **Is a global safety trip drawn as a banner across the whole graphic? —
+   ANSWERED: yes, one banner across the whole graphic, never a per-zone
+   badge.** Trip state is one state machine and per-ring attribution would be
+   invented. Stage 5 work; recorded here so section 7's only judgement call
+   stays closed.
+3. **Is a permanently dormant heater-load badge acceptable on the bench? —
+   ANSWERED: yes, ship it dormant and labelled "not measured", do not defer
+   it.** Dormant-and-labelled is the accurate rendering on this roughly 4 W
+   fixture; suppressing the badge would itself be a silent gap. Stage 5 work.

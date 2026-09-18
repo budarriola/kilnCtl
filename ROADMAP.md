@@ -2198,6 +2198,88 @@ Full detail, numbers and bars: [`docs/HW_ABSTRACTION.md`](docs/HW_ABSTRACTION.md
 
 ---
 
+## M17 — The zone graphic: configuration you can look at · *opened 2026-09-18*
+
+An owner request, and a specific kind of instrument rather than decoration. At
+the top of the **web** zones page sits a cartoon of a stacked kiln — octagonal
+brick ring sections on a tube-steel stand with a hinged lid, no controller box
+and no branding of any kind — drawn with exactly as many rings as
+`thermo_count`, annotated per ring with the heaters, thermocouple and current
+sensor that zone is configured for, in icons *and numbers*, plus icons for any
+extra relays. Errors and warnings appear as badges that open detail on click.
+A second, smaller piece: extra relays gain a **device type** — damper, outlet,
+valve, fan, light, other — a fixed code-defined enum, one byte per relay,
+rendered as a dropdown.
+
+The point is at-a-glance confirmation that the right settings exist, which sets
+an unusually harsh acceptance standard: **a graphic that renders plausibly
+while the configuration is wrong or unknown is worse than no graphic**, because
+the operator stops checking the fields under it. The plan's controlling section
+is the one that decides how "unknown" and "not reported" are drawn so neither
+can ever read as "configured and healthy", and its negative test is the one
+that guards it — feed the renderer a response with the sensor associations
+deleted and assert the unknown glyph appears and no configured-state icon does.
+A well-meaning "sensible fallback" is exactly how this feature turns into a
+confident lie.
+
+**Decided, so they are not re-opened:** web only — the LCD zones page is
+explicitly out of scope, it is 480x320 and must not scroll. The artwork is
+inline SVG generated from the zone count inside `zones_page.html` itself, which
+is one `EMBED_TXTFILES` blob, so a separate asset would cost new embed, gzip
+and route plumbing to save bytes it would not save. The data contract extends
+`GET`/`POST /api/zones` by a single `relay_types` array rather than adding a
+route; **no httpd stack buffer and no zones JSON buffer is enlarged**, and the
+graphic contributes zero bytes to any response because it is built in the
+browser from numbers already on the wire. The relay device type lives in
+`relay_names_cfg_t` with its own `RELAY_NAMES_CFG_VERSION` bump — **not** in
+`zones_cfg_t`, even though a zones-schema bump is now authorized for the
+parallel CT-channel work, because cosmetic per-relay data should not share the
+PID gains' rollback fate.
+
+**The one blocking hazard, and it was a data-loss one — CLOSED by stage 1,
+2026-09-18.** `relay_names_validate()` silently discards the entire blob on any
+version mismatch, resetting every relay name to blank, and only one version of
+that blob had ever existed so no migration function existed for it. Bumping it
+without writing one would have wiped every operator-entered relay name on the
+next firmware update, with no notice. The migration landed in the same commit
+as the bump, with the host test that proves a real v1 blob (frozen v1 layout,
+v1 CRC) still yields every name under v2 firmware — negative-tested by breaking
+the name copy and confirming that test goes red.
+
+A second instance of the same hazard, not in the original plan, was found and
+closed alongside it: the generic `pref_cfg_fs` bridge to the `cfg` filesystem
+is parameterised by one fixed item size, so a v1-length *file* would have been
+dropped silently rather than migrated. `relay_names_load()` now upgrades such a
+file in place at the same rev before the divergence tie-break runs, with its
+own host test. Inert today — no board mounts `cfg` yet.
+
+**Stage 1 landed**: `relay_device_type_t` (with `unset` as enum 0), the
+`types[]` array, `RELAY_NAMES_CFG_VERSION` 1 → 2, the frozen
+`relay_names_cfg_v1_t`, both migrations, and the accessors. **Note the
+accessor names**: `zones_config_get/set_relay_device_type()`, because
+`zones_config_get/set_relay_type()` already exists and means something else
+entirely — the zone's *switching hardware* (SSR/contactor/mercury) behind the
+relay-life budget. Two meanings of "relay type" now coexist; the collision
+surfaced only as a duplicate-definition compile error.
+
+Two faults the front end genuinely cannot see are recorded rather than faked:
+there is no per-zone heater-load fault (only `ct_warn_mask`, which is silent on
+any zone whose normal current was never measured, and which cannot assert at
+all on this ~4 W fixture), and there is no live per-channel CT presence or
+calibration-health flag as distinct from the config fields. The three questions
+that were open for the owner are all answered as of 2026-09-18 and recorded in
+the plan's section 10: an un-set relay type **does** get its own enum value 0,
+`unset`, so a migrated board says "nobody has told me what this relay does"
+rather than quietly claiming "other" (built in stage 1); a global safety trip
+is drawn as **one banner across the whole graphic**, never per-zone badges; and
+the per-zone heater-load badge **ships dormant and labelled "not measured"**
+rather than being deferred.
+
+Full detail, five-stage landing sequence and test strategy:
+[`docs/ZONE_GRAPHIC_PLAN.md`](docs/ZONE_GRAPHIC_PLAN.md).
+
+---
+
 ## Future work — KilnFW PC-link command acknowledgement
 
 **CLOSED**, moved out of this file 2026-08-24, closed in the owning doc

@@ -771,21 +771,114 @@ static bool relay_names_validate(const void *bytes, size_t len)
     return true;
 }
 
+/* ---- v1 -> v2 migration (docs/ZONE_GRAPHIC_PLAN.md stage 1) --------------
+ *
+ * WHY THIS EXISTS AT ALL. relay_names_validate() above discards the ENTIRE
+ * blob -- every operator-entered relay name, with no operator-visible notice
+ * -- on any length, version or CRC mismatch. Until 2026-09-18 only one
+ * version of this blob had ever existed, so there was no migration function
+ * of any kind. Bumping RELAY_NAMES_CFG_VERSION 1 -> 2 for types[] without
+ * writing one would therefore have blanked the relay names on every board in
+ * the field, silently, on the next firmware update. That is the blocking
+ * hazard the plan names, and this block is its fix.
+ *
+ * The migration is deliberately boring: recognise the old layout by its own
+ * byte length, validate it with the old CRC over the old struct, copy the
+ * names across field-by-field, and default every new types[] entry to
+ * RELAY_DEVICE_TYPE_UNSET. No memcpy of one struct shape over another, and
+ * no reinterpretation of the old blob's padding bytes as new fields. */
+
+/* The v1 CRC, computed against the FROZEN v1 layout. A separate function
+ * rather than a length parameter on compute_relay_names_crc(): the CRC
+ * covers the whole struct including its trailing alignment padding, so "the
+ * same code over a different number of bytes" would not be the same
+ * computation, and a v1 blob would fail its own integrity check. */
+static uint32_t compute_relay_names_crc_v1(const relay_names_cfg_v1_t *cfg)
+{
+    relay_names_cfg_v1_t tmp = *cfg;
+    tmp.crc32 = 0;
+    return esp_crc32_le(0, (const uint8_t *)&tmp, sizeof(tmp));
+}
+
+/* pref_cfg_fs_validate_fn_t-shaped (so the file pre-pass in relay_names_load()
+ * can hand it straight to pref_cfg_fs_load_raw()) v1 acceptance test: exact
+ * v1 length, version field exactly 1, v1 CRC. Same length-before-
+ * interpretation order as the v2 validator above. */
+static bool relay_names_validate_v1(const void *bytes, size_t len)
+{
+    if (len != sizeof(relay_names_cfg_v1_t)) {
+        return false;
+    }
+    relay_names_cfg_v1_t cand;
+    memcpy(&cand, bytes, sizeof(cand));
+    if (cand.version != 1) {
+        return false;
+    }
+    return compute_relay_names_crc_v1(&cand) == cand.crc32;
+}
+
+/* The migration proper. `old` must already have passed
+ * relay_names_validate_v1(). Produces a fully-formed, self-consistent v2
+ * struct (version stamped, CRC recomputed) so the result is something the v2
+ * validator accepts -- the caller can persist it or adopt it without a
+ * second fixup step. */
+static void relay_names_upgrade_v1(const relay_names_cfg_v1_t *old, relay_names_cfg_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->version = RELAY_NAMES_CFG_VERSION;
+    for (uint8_t r = 0; r < KILN_IO_RELAY_COUNT; r++) {
+        /* Field-by-field, bounded by the v1 array's own width -- THE point
+         * of the migration. The names are the operator data being rescued. */
+        memcpy(out->names[r], old->names[r], RELAY_NAME_MAX_LEN + 1);
+        out->names[r][RELAY_NAME_MAX_LEN] = '\0';
+        /* UNSET, never OTHER: a board upgrading from v1 has never been asked
+         * what its relays drive, and must say so rather than assert a choice
+         * nobody made (owner decision, docs/ZONE_GRAPHIC_PLAN.md q1). */
+        out->types[r] = (uint8_t)RELAY_DEVICE_TYPE_UNSET;
+    }
+    out->crc32 = compute_relay_names_crc(out);
+}
+
+/* Decode a raw stored blob of ANY version this build knows into a v2 struct.
+ * Returns false -- leaving *out untouched -- for anything else, which keeps
+ * the pre-existing "unrecognised blob is discarded, names go blank" behaviour
+ * exactly as it was for a genuinely corrupt or genuinely newer blob. Only the
+ * specific, recognised v1 shape is rescued. */
+static bool relay_names_decode_any(const void *bytes, size_t len, relay_names_cfg_t *out)
+{
+    if (relay_names_validate(bytes, len)) {
+        memcpy(out, bytes, sizeof(*out));
+        return true;
+    }
+    if (relay_names_validate_v1(bytes, len)) {
+        relay_names_cfg_v1_t old;
+        memcpy(&old, bytes, sizeof(old));
+        relay_names_upgrade_v1(&old, out);
+        ESP_LOGW(ZONES_HTTP_TAG,
+                 "relay_names blob is v1 -- migrating to v%u, names preserved, every device type defaults to unset",
+                 (unsigned)RELAY_NAMES_CFG_VERSION);
+        return true;
+    }
+    return false;
+}
+
 /* Loads s_relay_names.cfg from NVS_KEY_RELAY_NAMES (same namespace/partition
  * as the zones blob -- see NVS_NAMESPACE/KILN_NVS_PARTITION above). Resets to
  * all-empty names -- not reported to the caller as a failure, this is purely
  * cosmetic data, unlike s_zones_config_valid's safety-relevant "cannot
  * trust this" gate -- on: namespace/key not found (first boot, or a board
- * that has never named a relay), a blob whose length doesn't match
- * sizeof(relay_names_cfg_t) (only one version exists so far, so there is
- * only one valid length, but the check is written the same "length before
- * interpretation" way zones_config_json_decode_blob() uses for the zones blob, not
- * skipped just because there is nothing to switch on yet), an unrecognized
- * version, or a CRC mismatch. RELAY_NAMES_CFG_VERSION exists now, before
- * there is a second version to get wrong, specifically so a future format
- * change has an established version field to switch on instead of repeating
- * this codebase's own "grew the struct, forgot the old layout" history (see
- * ZONES_CFG_VERSION's 6->7 comment for exactly what that mistake cost). */
+ * that has never named a relay), a blob whose length matches no version this
+ * build knows (the same "length before interpretation" order
+ * zones_config_json_decode_blob() uses for the zones blob), an unrecognized
+ * version, or a CRC mismatch.
+ *
+ * A v1 blob is NOT one of those cases any more -- it is migrated in place by
+ * relay_names_decode_any() above, preserving every name. That version field
+ * was added before there was a second version to get wrong, specifically so
+ * this moment would have something to switch on instead of repeating this
+ * codebase's own "grew the struct, forgot the old layout" history (see
+ * ZONES_CFG_VERSION's 6->7 comment for exactly what that mistake cost); the
+ * v1 -> v2 bump is the first time that foresight actually paid out. */
 void relay_names_load(void)
 {
     memset(&s_relay_names.cfg, 0, sizeof(s_relay_names.cfg));
@@ -803,16 +896,17 @@ void relay_names_load(void)
         size_t len = sizeof(raw);
         hal_status_t rerr = hal_kv_get_blob(&h, NVS_KEY_RELAY_NAMES, raw, &len);
         if (rerr == HAL_OK) {
-            if (len != sizeof(relay_names_cfg_t)) {
-                ESP_LOGE(ZONES_HTTP_TAG,
-                         "relay_names blob is %u bytes, expected %u -- discarding NVS candidate",
-                         (unsigned)len, (unsigned)sizeof(relay_names_cfg_t));
-            } else if (!relay_names_validate(raw, sizeof(raw))) {
-                ESP_LOGE(ZONES_HTTP_TAG,
-                         "relay_names NVS blob failed version/CRC validation -- discarding NVS candidate");
-            } else {
-                memcpy(&nvs_cand, raw, sizeof(nvs_cand));
+            /* `len` is the blob's ACTUAL stored length, which is how v1 and
+             * v2 are told apart -- do not substitute sizeof(raw) here. The
+             * buffer is v2-sized and v2 is the larger layout, so a v1 blob
+             * reads into it whole and reports its own shorter length. */
+            if (relay_names_decode_any(raw, len, &nvs_cand)) {
                 nvs_valid = true;
+            } else {
+                ESP_LOGE(ZONES_HTTP_TAG,
+                         "relay_names NVS blob (%u bytes) matches no known version, or failed version/CRC "
+                         "validation -- discarding NVS candidate",
+                         (unsigned)len);
             }
         } /* else HAL_NOT_FOUND (never saved) or a real error -- blank NVS candidate is safe either way */
         if (nvs_valid) {
@@ -823,6 +917,43 @@ void relay_names_load(void)
         }
         hal_kv_close(&h);
     } /* else namespace not yet created -- first boot, blank NVS candidate */
+
+    /* v1 FILE PRE-PASS. The generic bridge below is parameterized by ONE
+     * fixed item size, so it can only ever see a v2-length file -- a v1-length
+     * one fails its `len != 4 + item_size` check and is ignored, which for
+     * relay names would mean silently dropping the names a v1 board had
+     * dual-written. Upgrade it in place first, at the SAME rev, so resolve()
+     * below then sees an ordinary v2 file and the tie-break is unaffected.
+     *
+     * The two reads are mutually exclusive by construction (one file, and
+     * 4 + sizeof(v1) != 4 + sizeof(v2), pinned by the _Static_assert in
+     * zones_http_internal.h), so this cannot fight a valid v2 file.
+     *
+     * Inert on every board today: no `cfg` partition is mounted, so
+     * pref_cfg_fs_load_raw() returns "no file" before touching any of this. */
+    {
+        relay_names_cfg_v1_t file_v1;
+        uint32_t v1_rev = 0;
+        bool v1_valid = false;
+        pref_cfg_fs_load_raw(RELAY_NAMES_FILE_PATH, sizeof(file_v1), relay_names_validate_v1, &file_v1, &v1_rev,
+                             &v1_valid);
+        if (v1_valid) {
+            relay_names_cfg_t upgraded;
+            relay_names_upgrade_v1(&file_v1, &upgraded);
+            esp_err_t uerr = pref_cfg_fs_save(RELAY_NAMES_FILE_PATH, &upgraded, sizeof(upgraded), v1_rev);
+            if (uerr != ESP_OK && uerr != ESP_ERR_INVALID_STATE) {
+                /* Not fatal: NVS is the persistence guarantee, and the NVS
+                 * candidate above has already been migrated independently.
+                 * The file simply stays v1 and keeps being ignored until a
+                 * later save rewrites it. */
+                ESP_LOGW(ZONES_HTTP_TAG, "could not upgrade the v1 relay-names file to v%u: %s",
+                         (unsigned)RELAY_NAMES_CFG_VERSION, esp_err_to_name(uerr));
+            } else if (uerr == ESP_OK) {
+                ESP_LOGW(ZONES_HTTP_TAG, "relay-names file was v1 -- upgraded in place at rev %lu, names preserved",
+                         (unsigned long)v1_rev);
+            }
+        }
+    }
 
     /* Hand off to the generic file-vs-NVS read-through/tie-break policy
      * (pref_cfg_fs.h) -- see this file's top-of-file include comment. On

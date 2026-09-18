@@ -52,8 +52,10 @@ extern "C" {
 #endif
 
 // Generous upper bound on any one preference item's raw byte size --
-// relay_names_cfg_t (docs/FILESYSTEM_USER_DATA_PLAN.md item 3, 1 + 4*16 + 4 =
-// 69 bytes) is the largest today, previously display_power_cfg_blob_t
+// relay_names_cfg_t (docs/FILESYSTEM_USER_DATA_PLAN.md item 3, 1 + 4*16 + 4
+// types + 4 crc = 73 bytes of fields, 76 with alignment padding as of
+// RELAY_NAMES_CFG_VERSION 2; it was 69/72 at v1) is the largest today,
+// previously display_power_cfg_blob_t
 // (5 bytes). Raised from 32 to 128 to fit relay names with headroom, rather
 // than giving relay names its own bespoke bridge module -- it has no
 // migration chain of its own, just a fixed-size struct, exactly the shape

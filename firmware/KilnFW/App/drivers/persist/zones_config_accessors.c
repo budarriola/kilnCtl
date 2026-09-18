@@ -372,6 +372,42 @@ bool zones_config_set_relay_name(uint8_t relay_n, const char *name)
     return relay_names_save() == ESP_OK;
 }
 
+/* See zones_config_accessors.h's doc comment on this pair. Note the getter
+ * reports UNSET as a successful answer, not a failure -- "nobody has said"
+ * is a fact about this relay, not an inability to look it up. */
+bool zones_config_get_relay_device_type(uint8_t relay_n, relay_device_type_t *out)
+{
+    if (relay_n < 1 || relay_n > KILN_IO_RELAY_COUNT || !out) {
+        return false;
+    }
+    uint8_t stored = s_relay_names.cfg.types[relay_n - 1];
+    /* A stored value this build does not recognise reads as UNSET rather
+     * than being passed through to a caller that would have to invent a
+     * rendering for it. This is reachable only from a blob written by newer
+     * firmware that appended an enum value, then rolled back -- the same
+     * direction zones_config_json_decode_blob() refuses outright. Degrading
+     * to "unknown" is the honest answer here (the whole point of UNSET), and
+     * it is strictly safer than surfacing a number with no icon. */
+    if (stored >= RELAY_DEVICE_TYPE_COUNT) {
+        *out = RELAY_DEVICE_TYPE_UNSET;
+        return true;
+    }
+    *out = (relay_device_type_t)stored;
+    return true;
+}
+
+bool zones_config_set_relay_device_type(uint8_t relay_n, relay_device_type_t type)
+{
+    if (relay_n < 1 || relay_n > KILN_IO_RELAY_COUNT) {
+        return false;
+    }
+    if ((uint8_t)type >= RELAY_DEVICE_TYPE_COUNT) {
+        return false;
+    }
+    s_relay_names.cfg.types[relay_n - 1] = (uint8_t)type;
+    return relay_names_save() == ESP_OK;
+}
+
 bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, float *out_kd)
 {
     if (!out_kp || !out_ki || !out_kd || zone_index >= s_zones.cfg.thermo_count) {

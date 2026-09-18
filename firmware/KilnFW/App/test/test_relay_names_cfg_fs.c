@@ -339,8 +339,67 @@ static void test_mount_failed_falls_through_to_nvs_only(void)
     cfg_fs_deinit();
 }
 
+// ---------------------------------------------------------------------
+// 8. A v1-LENGTH file is migrated, not silently ignored.
+//
+// The generic bridge is parameterized by ONE fixed item size, so it can only
+// ever see a v2-length file: a v1-length one fails pref_cfg_fs_load_raw()'s
+// `len != 4 + item_size` check and is dropped without a word. For relay
+// names that would mean losing the names a v1 board had dual-written, which
+// is the same data-loss hazard the NVS-side migration exists to close --
+// just through the other door. relay_names_load() runs a v1 file pre-pass to
+// cover it; this test is what proves that pre-pass is real.
+// ---------------------------------------------------------------------
+static void test_v1_file_is_migrated_not_ignored(void)
+{
+    TEST_SECTION("relay names cfg_fs: a v1-LENGTH file is migrated to v2 in place, names preserved, rather than "
+                 "being dropped by the fixed-item-size bridge");
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    prime_rev_to_zero();
+
+    /* A production-shaped v1 file at rev 5, with NVS left empty -- so the
+     * file is the ONLY place these names exist. If the pre-pass does not
+     * work, they are gone. */
+    relay_names_cfg_v1_t v1;
+    memset(&v1, 0, sizeof(v1));
+    v1.version = 1;
+    strncpy(v1.names[0], "FileOnlyName", RELAY_NAME_MAX_LEN);
+    strncpy(v1.names[2], "ThirdRelay", RELAY_NAME_MAX_LEN);
+    /* Same crc primitive compute_relay_names_crc_v1() uses (that function is
+     * file-scope-static in the other TU), over the frozen v1 layout. */
+    relay_names_cfg_v1_t crc_tmp = v1;
+    crc_tmp.crc32 = 0;
+    v1.crc32 = esp_crc32_le(0, (const uint8_t *)&crc_tmp, sizeof(crc_tmp));
+
+    TEST_CHECK(pref_cfg_fs_save(RELAY_NAMES_FILE_PATH, &v1, sizeof(v1), 5) == ESP_OK,
+               "test setup: a v1-length file is written at rev 5");
+
+    memset(&s_relay_names.cfg, 0, sizeof(s_relay_names.cfg));
+    relay_names_load();
+
+    TEST_CHECK(strcmp(s_relay_names.cfg.names[0], "FileOnlyName") == 0,
+               "the v1 file's name must survive the migration -- it exists nowhere else");
+    TEST_CHECK(strcmp(s_relay_names.cfg.names[2], "ThirdRelay") == 0,
+               "every populated slot survives, not just the first");
+    TEST_CHECK(s_relay_names.cfg.version == RELAY_NAMES_CFG_VERSION, "the adopted config is stamped v2");
+    TEST_CHECK(s_relay_names.cfg.types[0] == 0 && s_relay_names.cfg.types[2] == 0,
+               "every migrated device type defaults to UNSET (0)");
+
+    /* And the file itself was rewritten at v2 length, at the SAME rev -- so
+     * the upgrade is durable and does not disturb the tie-break. */
+    relay_names_cfg_t raw;
+    uint32_t rev = 0;
+    bool raw_valid = false;
+    pref_cfg_fs_load_raw(RELAY_NAMES_FILE_PATH, sizeof(raw), NULL, &raw, &rev, &raw_valid);
+    TEST_CHECK(raw_valid, "the file now reads back at the v2 item size -- it was rewritten, not left v1");
+    TEST_CHECK(rev == 5, "the in-place upgrade preserves the rev, so the file/NVS tie-break is unaffected");
+    TEST_CHECK(strcmp(raw.names[0], "FileOnlyName") == 0, "the rewritten v2 file carries the migrated names");
+}
+
 void run_test_relay_names_cfg_fs(void)
 {
+    test_v1_file_is_migrated_not_ignored();
     test_partition_absent_falls_through_to_nvs_only();
     test_nvs_fallback_then_file_preferred_after_migration();
     test_dual_write_keeps_file_and_nvs_in_sync();

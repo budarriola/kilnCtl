@@ -9329,6 +9329,182 @@ static void test_relay_names_save_load_round_trip_preserves_distinct_values(void
     reset_relay_names();
 }
 
+/* ---- RELAY_NAMES_CFG_VERSION 1 -> 2 migration (docs/ZONE_GRAPHIC_PLAN.md
+ * stage 1) --------------------------------------------------------------
+ *
+ * THIS IS THE TEST THE STAGE EXISTS FOR. relay_names_validate() discards the
+ * whole blob -- every operator-entered name, with no notice -- on a version
+ * mismatch, and before this stage only one version had ever existed, so
+ * bumping to 2 without a migration would have blanked the relay names on
+ * every board in the field on the next firmware update. This test is what
+ * proves that did not happen: it writes a REAL v1 blob (frozen v1 layout, v1
+ * CRC, version byte 1) and asserts every name comes back out.
+ *
+ * It fails the moment the migration is removed, weakened to a memcpy of one
+ * struct shape over another, or bypassed by a length check that accepts v1
+ * bytes as v2. */
+
+/* Build a production-shaped v1 blob: the frozen layout, stamped version 1,
+ * with the CRC the v1 code computed over it. compute_relay_names_crc_v1() is
+ * file-scope-static in zones_config_store.c, which this test file #includes
+ * directly, so the fixture uses the REAL v1 CRC function rather than a
+ * hand-copied second implementation that could drift from it. */
+static void make_v1_blob(relay_names_cfg_v1_t *out, const char *n1, const char *n2, const char *n3, const char *n4)
+{
+    memset(out, 0, sizeof(*out));
+    out->version = 1;
+    const char *names[KILN_IO_RELAY_COUNT] = {n1, n2, n3, n4};
+    for (uint8_t r = 0; r < KILN_IO_RELAY_COUNT; r++) {
+        strncpy(out->names[r], names[r], RELAY_NAME_MAX_LEN);
+        out->names[r][RELAY_NAME_MAX_LEN] = '\0';
+    }
+    out->crc32 = compute_relay_names_crc_v1(out);
+}
+
+static void test_relay_names_v1_blob_migrates_preserving_every_name(void)
+{
+    TEST_SECTION("relay_names_load -- a v1 blob MIGRATES to v2 with every operator-entered name preserved "
+                 "(the data-loss hazard the version bump would otherwise have caused), and every device "
+                 "type defaults to UNSET, never OTHER");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    relay_names_cfg_v1_t v1;
+    make_v1_blob(&v1, "Vent fan", "Bottom elem", "Top elem", "");
+    stage_relay_names_blob(&v1, sizeof(v1));
+
+    reset_relay_names();
+    relay_names_load();
+
+    char out[RELAY_NAME_MAX_LEN + 1];
+    TEST_CHECK(zones_config_get_relay_name(1, out, sizeof(out)) && strcmp(out, "Vent fan") == 0,
+               "relay 1's name must survive the v1->v2 migration exactly");
+    TEST_CHECK(zones_config_get_relay_name(2, out, sizeof(out)) && strcmp(out, "Bottom elem") == 0,
+               "relay 2's name must survive the v1->v2 migration exactly");
+    TEST_CHECK(zones_config_get_relay_name(3, out, sizeof(out)) && strcmp(out, "Top elem") == 0,
+               "relay 3's name must survive the v1->v2 migration exactly");
+    TEST_CHECK(zones_config_get_relay_name(4, out, sizeof(out)) && out[0] == '\0',
+               "relay 4's blank must migrate as blank, not pick up another slot's bytes");
+
+    TEST_CHECK(s_relay_names.cfg.version == RELAY_NAMES_CFG_VERSION,
+               "the migrated in-RAM config must be stamped with the CURRENT version, not left at 1");
+
+    /* UNSET, not OTHER -- the owner decision this enum's 0 value exists for.
+     * A migrated board has never been asked what its relays drive. */
+    for (uint8_t r = 1; r <= KILN_IO_RELAY_COUNT; r++) {
+        relay_device_type_t t = RELAY_DEVICE_TYPE_OTHER; /* seeded wrong on purpose */
+        TEST_CHECK(zones_config_get_relay_device_type(r, &t), "the type getter must answer for every migrated relay");
+        TEST_CHECK(t == RELAY_DEVICE_TYPE_UNSET,
+                   "a migrated relay's device type must be UNSET -- claiming OTHER would assert a choice the "
+                   "operator never made");
+    }
+
+    /* The migration must also be DURABLE: a save after it writes a real v2
+     * blob, and the next load reads that back without needing to migrate
+     * again. A migration that only ever lived in RAM would re-run forever
+     * and mask a broken save path. */
+    TEST_CHECK(relay_names_save() == ESP_OK, "saving the migrated config must succeed");
+    reset_relay_names();
+    relay_names_load();
+    TEST_CHECK(zones_config_get_relay_name(1, out, sizeof(out)) && strcmp(out, "Vent fan") == 0,
+               "the names must still be there after the migrated config was persisted and reloaded as v2");
+    TEST_CHECK(s_relay_names.cfg.version == RELAY_NAMES_CFG_VERSION,
+               "the reloaded config is v2 -- the migration persisted rather than repeating every boot");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+    reset_relay_names();
+}
+
+static void test_relay_names_v1_blob_with_a_bad_crc_is_still_rejected(void)
+{
+    TEST_SECTION("relay_names_load -- accepting v1 must not become a hole: a v1-LENGTH blob with a bad v1 CRC "
+                 "is still discarded, not migrated");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    relay_names_cfg_v1_t v1;
+    make_v1_blob(&v1, "should not show", "", "", "");
+    v1.crc32 ^= 0xFFFFFFFFu; /* deliberately wrong, the v1 length still matches */
+    stage_relay_names_blob(&v1, sizeof(v1));
+
+    reset_relay_names();
+    relay_names_load();
+    TEST_CHECK(s_relay_names.cfg.names[0][0] == '\0',
+               "a corrupt v1 blob must be discarded exactly as a corrupt v2 blob is -- the migration path "
+               "validates, it does not merely measure length");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+    reset_relay_names();
+}
+
+static void test_relay_names_v2_types_survive_the_save_load_round_trip(void)
+{
+    TEST_SECTION("relay device type -- a type set on each relay survives the full save->load round trip, "
+                 "independently of the names");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    reset_relay_names();
+
+    TEST_CHECK(zones_config_set_relay_name(1, "Vent fan"), "seed a name alongside the type");
+    TEST_CHECK(zones_config_set_relay_device_type(1, RELAY_DEVICE_TYPE_FAN), "set relay 1's type");
+    TEST_CHECK(zones_config_set_relay_device_type(2, RELAY_DEVICE_TYPE_DAMPER), "set relay 2's type");
+    TEST_CHECK(zones_config_set_relay_device_type(3, RELAY_DEVICE_TYPE_OTHER), "set relay 3's type to a deliberate OTHER");
+    /* relay 4 deliberately left alone -- it must read UNSET, and UNSET must
+     * be distinguishable from relay 3's deliberate OTHER. That distinction
+     * is the whole reason enum 0 exists. */
+
+    reset_relay_names();
+    relay_names_load();
+
+    relay_device_type_t t;
+    TEST_CHECK(zones_config_get_relay_device_type(1, &t) && t == RELAY_DEVICE_TYPE_FAN, "relay 1's type round-trips");
+    TEST_CHECK(zones_config_get_relay_device_type(2, &t) && t == RELAY_DEVICE_TYPE_DAMPER, "relay 2's type round-trips");
+    TEST_CHECK(zones_config_get_relay_device_type(3, &t) && t == RELAY_DEVICE_TYPE_OTHER,
+               "relay 3's deliberate OTHER round-trips as OTHER");
+    TEST_CHECK(zones_config_get_relay_device_type(4, &t) && t == RELAY_DEVICE_TYPE_UNSET,
+               "relay 4, never configured, reads UNSET -- NOT the same value as relay 3's deliberate OTHER");
+
+    char out[RELAY_NAME_MAX_LEN + 1];
+    TEST_CHECK(zones_config_get_relay_name(1, out, sizeof(out)) && strcmp(out, "Vent fan") == 0,
+               "adding types must not disturb the names sharing the blob");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+    reset_relay_names();
+}
+
+static void test_relay_type_setter_rejects_out_of_range(void)
+{
+    TEST_SECTION("zones_config_set_relay_device_type -- an out-of-range relay or an unknown type number is rejected "
+                 "and nothing is written");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    reset_relay_names();
+
+    TEST_CHECK(zones_config_set_relay_device_type(1, RELAY_DEVICE_TYPE_VALVE), "seed a known-good value first");
+
+    TEST_CHECK(!zones_config_set_relay_device_type(0, RELAY_DEVICE_TYPE_FAN), "relay 0 does not exist (1-based numbering)");
+    TEST_CHECK(!zones_config_set_relay_device_type((uint8_t)(KILN_IO_RELAY_COUNT + 1), RELAY_DEVICE_TYPE_FAN),
+               "a relay past KILN_IO_RELAY_COUNT does not exist");
+    TEST_CHECK(!zones_config_set_relay_device_type(1, (relay_device_type_t)RELAY_DEVICE_TYPE_COUNT),
+               "a type number one past the last valid value is refused, never stored");
+    TEST_CHECK(!zones_config_set_relay_device_type(1, (relay_device_type_t)200), "a wildly out-of-range type is refused");
+
+    relay_device_type_t t;
+    TEST_CHECK(zones_config_get_relay_device_type(1, &t) && t == RELAY_DEVICE_TYPE_VALVE,
+               "the seeded value must be untouched by every rejected write");
+
+    relay_device_type_t ignored;
+    TEST_CHECK(!zones_config_get_relay_device_type(0, &ignored), "the getter must reject relay 0 too");
+    TEST_CHECK(!zones_config_get_relay_device_type(1, NULL), "the getter must reject a NULL out pointer");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+    reset_relay_names();
+}
+
 static void test_zones_post_relay_name_omitted_preserves_current_value(void)
 {
     TEST_SECTION("zones_post_handler -- an omitted relay<N>_name PRESERVES the current stored name "
@@ -12861,6 +13037,10 @@ void run_test_zones_http(void)
     test_relay_names_load_wrong_version_is_rejected();
     test_relay_names_load_bad_crc_is_rejected();
     test_relay_names_save_load_round_trip_preserves_distinct_values();
+    test_relay_names_v1_blob_migrates_preserving_every_name();
+    test_relay_names_v1_blob_with_a_bad_crc_is_still_rejected();
+    test_relay_names_v2_types_survive_the_save_load_round_trip();
+    test_relay_type_setter_rejects_out_of_range();
     test_zones_post_relay_name_omitted_preserves_current_value();
     test_zones_post_relay_name_present_updates_value();
     test_zones_post_relay_name_too_long_rejected_and_commits_nothing();
