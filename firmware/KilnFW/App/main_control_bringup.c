@@ -24,6 +24,8 @@
 #include "kiln_cfg_swap.h" /* kiln_cfg_swap_is_pending() -- kiln_cfg_store_autosave_from_live()'s
                              * swap-pending seam, review_autosave_rework_5bc9afb5_2026-09-15.md MEDIUM */
 #include "kiln_io_owner.h"
+#include "pico_auto_update_boot.h" /* docs/PICO_AUTO_UPDATE_PLAN.md G3 -- the boot-time
+                                      * safety-processor firmware check started below */
 #include "profile_executor.h"
 #include "autotune_engine.h"
 #include "relay_cycles.h"
@@ -194,6 +196,43 @@ void main_control_bringup(main_boot_ctx_t *ctx)
                           "unaffected)",
                      esp_err_to_name(owner_err));
         }
+    }
+
+    // --- Boot-time safety-processor firmware check (docs/PICO_AUTO_UPDATE_
+    // PLAN.md G3) ---------------------------------------------------------
+    // Asks, once per boot, whether the RP2040 is running the build this board
+    // has staged for it, and attempts one update inside a persisted,
+    // read-back-verified budget if not. Everything slow about that (a bounded
+    // wait for the Pico's FW_VERSION, a scan of the staged image) happens on
+    // its own task -- this call only creates it.
+    //
+    // Placed after kiln_io_owner_start() and heat_enable_init() above, and
+    // before anything that can start a firing (profile_executor_start() /
+    // autotune_engine_start() below), so the interlock it consults
+    // (ota_http_check_interlocks()) sees a fully-formed picture of whether
+    // heat is in play.
+    //
+    // RECOVERY MODE gate, same shape as profile_executor_start() and
+    // autotune_engine_start() below: recovery mode deliberately skips
+    // starting subsystems, and this board has been bricked into a permanent
+    // recovery loop three times from this area. A board in recovery mode also
+    // has no business reflashing its safety processor.
+    //
+    // A failed safety_link_start() means there is no channel to learn the
+    // Pico's identity over, so there is nothing to decide -- skipped, not
+    // escalated (the missing link is already reported, loudly, above).
+    if (!ctx->recovery_mode && safety_err == ESP_OK) {
+        esp_err_t pau_err = pico_auto_update_boot_start(&ctx->safety);
+        if (pau_err != ESP_OK) {
+            /* Not fatal and not a block: no verdict is published, so the
+             * readiness gate stays open. The only thing lost is this boot's
+             * automatic update check. */
+            ESP_LOGW(MAIN_TAG, "pico_auto_update_boot_start failed: %s -- the safety processor's "
+                          "firmware will not be checked against the staged image this boot",
+                     esp_err_to_name(pau_err));
+        }
+    } else if (ctx->recovery_mode) {
+        ESP_LOGW(MAIN_TAG, "RECOVERY MODE: pico_auto_update_boot_start() skipped");
     }
 
 #if CONFIG_KILNCTL_SIM_PLANT

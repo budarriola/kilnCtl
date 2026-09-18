@@ -88,5 +88,12 @@ idf_component_register(
          # VERSION 13. docs/audits/saftyfw_live_stack_reporting_impl_2026-09-14.md.
          "${KILNLINK_DIR}/src/kilnlink_get_stack_margin.c"
          "${KILNLINK_DIR}/src/kilnlink_stack_margin.c"
+         # docs/PICO_AUTO_UPDATE_PLAN.md G1/G2 -- the pure scanner that finds
+         # a SaftyFW image's self-declared build identity. Not a wire codec,
+         # but shared between the two firmwares for the same reason every
+         # codec above is, and subject to the same rule this list's comments
+         # repeat: unlisted here means invisible to the ESP-IDF build. Its
+         # ESP-side caller is App/drivers/net/pico_image_source.c.
+         "${KILNLINK_DIR}/src/saftyfw_image_identity.c"
     INCLUDE_DIRS "${KILNLINK_DIR}/include"
 )

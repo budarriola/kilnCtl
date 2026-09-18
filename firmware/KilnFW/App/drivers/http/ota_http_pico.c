@@ -37,6 +37,8 @@
                             * parameterization SaftyFW's bootloader_crc32() agrees with */
 #include "ota_pico_relay.h"
 #include "ota_record.h"
+#include "pico_image_manifest.h" /* pico_image_manifest_store() -- record what was staged, so a
+                                  * LATER BOOT can re-use this image (PICO_AUTO_UPDATE_PLAN.md G1) */
 #include "profile_executor.h" /* PROFILE_EXEC_* enum only, not its live state -- see below */
 #include "run_state.h"
 #include "stack_margin.h"
@@ -231,6 +233,26 @@ static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
 
     ESP_LOGI(OTA_HTTP_TAG, "OTA pico update from %s: staged %u bytes to pico_img, crc32=0x%08X -- starting relay",
              ip, (unsigned)written, (unsigned)crc);
+
+    // docs/PICO_AUTO_UPDATE_PLAN.md G1: remember what was just staged, so a
+    // LATER BOOT can re-use this image. Until now the bytes were written,
+    // handed straight to the relay, and never described -- which left a
+    // perfectly good image in pico_img that nothing could identify or trust
+    // after a reboot, and left the boot-time auto-updater with no image
+    // source at all. Written BEFORE the relay starts on purpose: if this
+    // relay attempt fails, the staged image is still good and the next boot
+    // should be able to retry with it.
+    //
+    // Deliberately not fatal to this request. The bytes are staged and the
+    // relay can still run; all that is lost is the ability for a future boot
+    // to re-use them. pico_image_manifest_store() read-back verifies and logs
+    // loudly on its own if the record did not reach flash.
+    if (!pico_image_manifest_store((uint32_t)written, crc)) {
+        ESP_LOGW(OTA_HTTP_TAG, "OTA pico update from %s: the staged-image manifest did not verify -- "
+                      "this update proceeds, but a later boot will not be able to re-use this "
+                      "staged image for an automatic update",
+                 ip);
+    }
 
     if (!ota_pico_relay_start(ota_http_safety, (uint32_t)written, crc, NULL, have_sha_digest ? sha_digest : NULL)) {
         snprintf(fail_reason, sizeof(fail_reason), "image staged, but the relay task could not be started");

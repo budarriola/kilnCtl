@@ -242,6 +242,13 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "control/run_state.c"
                        "persist/boot_guard.c"
                        "persist/pico_update_attempts.c"
+                       # docs/PICO_AUTO_UPDATE_PLAN.md G1 -- the persisted
+                       # description of whatever SaftyFW image is staged in
+                       # the pico_img partition, which is what turns a staged
+                       # image into a re-usable boot-time update source. See
+                       # its header for why the plan's "embed the image in
+                       # the ESP build" shape is not implementable here.
+                       "persist/pico_image_manifest.c"
                        "bridge/boot_button.c"
                        "safety/danger_mode.c"
                        "safety/watchdog_cfg.c"
@@ -269,6 +276,12 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "net/time_sync.c"
                        "net/time_sync_tz.c"
                        "net/pico_auto_update_state.c"
+                       # docs/PICO_AUTO_UPDATE_PLAN.md G1/G2/G3: the staged
+                       # image's verified description and self-declared build
+                       # identity, and the one-shot boot task that compares it
+                       # against what the Pico reports and acts on the answer.
+                       "net/pico_image_source.c"
+                       "net/pico_auto_update_boot.c"
                        "http/backup_http.c"
                        "persist/backup_json.c"
                        "http/backup_export.c"

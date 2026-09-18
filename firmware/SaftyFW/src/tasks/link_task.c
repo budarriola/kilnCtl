@@ -89,6 +89,12 @@
 // (test/build_host_tests.ps1 pulls in link_frame.c, not link_task.c), so no
 // host-side shim is needed for it.
 #include "saftyfw_build_info.h"
+// The build-identity record compiled into this image. link_task_send_fw_version()
+// packs the commit/dirty fields it reports on the wire straight out of this
+// record so "what the Pico says it is" and "what the image says it is" cannot
+// drift apart -- see the comment at that call site, and
+// kilnlink/saftyfw_image_identity.h for why the ESP needs them identical.
+#include "saftyfw_image_identity_record.h"
 
 #include "kilnlink/kilnlink_ceiling.h" // SAFETY_CMD_SET_FIRING_CEILING, see link_task_handle_set_firing_ceiling()
 #include "kilnlink/kilnlink_clear_trip.h"
@@ -911,12 +917,23 @@ static void link_task_send_fw_version(void)
     // than overflowing if this is ever too small, so a short buffer would
     // silently stop the frame being sent at all -- hence sizing it from the
     // generated strings themselves rather than a guessed constant.
-    static const char commit_str[] = SAFTYFW_GIT_COMMIT;
+    //
+    // COMMIT/DIRTY COME FROM THE EMBEDDED IMAGE-IDENTITY RECORD, NOT FROM THE
+    // GENERATED MACROS DIRECTLY (docs/PICO_AUTO_UPDATE_PLAN.md G2). The ESP
+    // answers "is this Pico out of date?" by comparing what THIS frame
+    // reports against the identity it scans out of the image it is about to
+    // push at us. Those two have to be the same bytes or the comparison means
+    // nothing -- and two files each reading the same macros independently is
+    // exactly how they would silently stop being the same bytes one day. So
+    // src/update/saftyfw_image_identity_record.c is the single source and
+    // this frame reads it. Doing so also gives that record a live reference,
+    // which is what stops --gc-sections deleting it out of the image.
+    const saftyfw_image_identity_t *ident = saftyfw_image_identity_get();
     static const char datetime_str[] = SAFTYFW_BUILD_DATE " " SAFTYFW_BUILD_TIME;
-    uint8_t payload[16 + sizeof(commit_str) + sizeof(datetime_str)];
+    uint8_t payload[16 + SAFTYFW_IMAGE_IDENTITY_COMMIT_MAX + 1u + sizeof(datetime_str)];
     size_t len = link_frame_pack_fw_version(
         payload, sizeof(payload), KILNLINK_PROTOCOL_VERSION, KILNLINK_MIN_COMPATIBLE,
-        SAFTYFW_GIT_DIRTY ? 1u : 0u, commit_str, sizeof(commit_str) - 1u, datetime_str,
+        ident->dirty ? 1u : 0u, ident->commit, ident->commit_len, datetime_str,
         sizeof(datetime_str) - 1u, s_boot_id, config_store_get_config_version(),
         config_store_get_config_crc());
     if (len == 0) {

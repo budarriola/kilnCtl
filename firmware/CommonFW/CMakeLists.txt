@@ -69,6 +69,13 @@ add_library(kilnlink STATIC
     src/kilnlink_ct_auto_zero_status.c
     src/kilnlink_get_stack_margin.c
     src/kilnlink_stack_margin.c
+    # Not a wire codec: the pure scanner for the build-identity record every
+    # SaftyFW slot image carries inside itself. It lives here rather than in
+    # either firmware because BOTH sides need it -- SaftyFW to emit the record
+    # (src/update/saftyfw_image_identity_record.c) and KilnFW to find it in a
+    # staged image (App/drivers/net/pico_image_source.c) -- which is exactly
+    # what CommonFW is for. docs/PICO_AUTO_UPDATE_PLAN.md G1/G2.
+    src/saftyfw_image_identity.c
 )
 target_include_directories(kilnlink PUBLIC include)
 set_target_properties(kilnlink PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)

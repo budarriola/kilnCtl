@@ -179,6 +179,14 @@ set(SAFTYFW_APP_SOURCES
     src/update/received_ranges.c
     src/update/update_receiver.c
     src/update/confirm.c
+    # docs/PICO_AUTO_UPDATE_PLAN.md G2 -- the one instance of the
+    # build-identity record this image declares about itself, which the ESP
+    # scans out of a staged image to decide whether the running Pico is out of
+    # date. Compiled into ALL THREE targets that share this source list
+    # (SaftyFW, SaftyFW_slotA, SaftyFW_slotB): the slot images are precisely
+    # the ones the ESP might ever stage, so they are the ones that must carry
+    # it.
+    src/update/saftyfw_image_identity_record.c
     bootloader/crc32.c
     bootloader/metadata.c
 )

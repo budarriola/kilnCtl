@@ -83,6 +83,11 @@ try {
         # joins this combined executable rather than needing its own).
         (Join-Path $testDir "test_pico_auto_update_decision.c"),
         (Join-Path $testDir "test_pico_update_attempts.c"),
+        # G2's shared scanner: the build-identity record a SaftyFW image
+        # carries about itself. Pure, freestanding, and compiled into BOTH
+        # firmwares from firmware/CommonFW -- which is exactly why it is
+        # host-tested here rather than trusted to two target builds.
+        (Join-Path $testDir "test_pico_image_identity.c"),
         (Join-Path $testDir "test_boot_button.c"),
         (Join-Path $testDir "test_backlight_pwm.c"),
         (Join-Path $testDir "test_display_power_policy.c"),
@@ -715,6 +720,13 @@ try {
             "`"$(Join-Path $testDir 'test_ota_http.c')`" " +
             "`"$(Join-Path $driversDir 'net/ota_auth.c')`" `"$(Join-Path $driversDir 'net/ota_interlock.c')`" " +
             "`"$(Join-Path $driversDir 'persist/ota_record.c')`" `"$(Join-Path $driversDir 'http/ota_http_util.c')`" " +
+            # PICO_AUTO_UPDATE_PLAN.md G1: ota_http_pico.c (#included into
+            # test_ota_http.c above) now records what it staged, so a later
+            # boot can re-use the image. Linked in for REAL rather than faked,
+            # same rationale as ota_record.c beside it -- it is a plain
+            # hal_kv_* record store and fake_kv.c below already supplies its
+            # backing store.
+            "`"$(Join-Path $driversDir 'persist/pico_image_manifest.c')`" " +
             "`"$(Join-Path $driversDir 'http/ota_image_crc.c')`" " +
             "`"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
             "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
