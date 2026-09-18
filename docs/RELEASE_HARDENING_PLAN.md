@@ -764,6 +764,60 @@ release cannot ship without:
   one, stating the release-gate property directly in one place
   (`f7233461b4f8069e7b6bdf508cd6535a2655bc13`).
 
+**2026-09-17 verification pass.** Both release-specific bullets above were
+re-checked mechanically against `origin/main` rather than assumed from this
+doc's own prose: `bfa60679` and `f7233461b4f8069e7b6bdf508cd6535a2655bc13`
+are both ancestors of `origin/main`, and `ZONES_CFG_VERSION` is still 26
+(`firmware/KilnFW/App/drivers/persist/zones_config_json.h:63`) — neither
+bullet needed further work. Section 7 is closed; nothing outstanding here.
+
+Also traced mechanically (not from docs) for this pass, since the task
+description raised it as the highest-value risk: whether the Pico's
+`abs_max_temp_c` can ever end up looser than the ESP's, stale, or absent
+while armed.
+- `safety_ceiling_sync.c`'s `enforce_ceiling_divergence()` (called every
+  `safety_poll_task` tick via `safety_ceiling_sync_reconcile_on_link_up()`,
+  `safety_ceiling_sync.c:627-675`) actively forces all relays off and halts
+  any run on every tick the ceilings disagree (`safety_ceiling_sync.c:501-536`)
+  — not a one-shot check, and it runs before the raise-retry backoff so it
+  cannot go quiet during the most common divergent case (Pico ARMED,
+  refusing a raise).
+- The Pico only ever raises its ceiling after a confirmed stage+commit+
+  read-back write (`pico_ceiling_writer()` -> `safety_cfg_write_set_and_
+  confirm_f32()`, `safety_ceiling_sync.c:218-224`); `check_volatile_ceiling_
+  write_callers.ps1` mechanically forbids the RAM-only variant from being
+  substituted anywhere except the one allowlisted two-processor-transaction
+  caller (verified passing 2026-09-17: "4 occurrence(s) total").
+  `safety_ceiling_sync_guard_raise()`/`_apply_lower()` (`safety_ceiling_sync.c:
+  247-283`) are also the only writers, both routed through the same
+  confirmed primitive.
+- On the Pico side, an unset/never-commissioned `abs_max_temp_c` reads back
+  as the sentinel `0.0f` (`config_store.c:820`), which
+  `commissioning_gate_is_commissioned()` (`commissioning_gate.h:85-88`)
+  treats as NOT commissioned, and `link_task.c` refuses to grant
+  `request_enable` for an uncommissioned board rather than arming with no
+  ceiling — the fail direction on a fresh/rebooted/never-heard-from-ESP
+  Pico is refuse-to-enable, never armed-with-a-loose-or-absent-ceiling.
+- No path was found where the Pico's stored ceiling is looser than the
+  ESP's committed one: every write path is raise-with-confirm or
+  lower-with-confirm through the same guarded primitive, and any observed
+  disagreement (including a stale post-reboot value) forces heat off on the
+  very next tick rather than being silently tolerated.
+
+Also confirmed already mechanically covered, both re-run green this pass:
+`tools/check_nvs_key_length.ps1` (458 files scanned, 0 violations — covers
+every `NVS_KEY`/`NVS_NAMESPACE`/`NVS_PARTITION` `#define` literal in
+`firmware/KilnFW/App`, added `ce129d3b`; the historical 16-char
+`zone_normals_cfg` trap was already renamed to the 13-char `zone_norm_cfg`
+on 2026-09-06; SaftyFW carries no NVS keys at all, it is not ESP-IDF) and
+`tools/check_kiln_auth_config_isolation.ps1` (237 files scanned under
+`firmware/KilnFW/App/drivers`, 0 references to `kiln_auth`/`web_auth`/
+`lcd_auth`/`auth_policy` outside the dedicated auth module and its 2
+allowlisted files) — the namespace literal (`WEB_AUTH_NAMESPACE
+"kiln_auth"`, `web_auth_store.c:19`) is confined exactly as CLAUDE.md
+requires. Both checks already existed and already ran green; nothing new
+needed adding or negative-testing this pass.
+
 ---
 
 ## 8. ~~BLOCKER~~ DONE — what must be verified on the installed kiln, and the
