@@ -361,6 +361,39 @@ static void test_every_table_row_reachable_via_lookup(void) {
     }
 }
 
+// Section 11 acceptance criterion, taken literally: "a host test asserts an
+// absent policy record reads as both-off ... and that every route in the
+// table returns ALLOW in that state." Walks the REAL kRouteTierTable row by
+// row (not the small hand-written kTiers enum list
+// test_full_matrix_every_tier_role_auth_bootstrap() uses above, which is
+// exhaustive over the route_tier_t enum but not literally "every route in
+// the table") and calls the real http_auth_check() with web_enabled==false
+// for each one. This closes the gap a hand-written tier list would leave: a
+// future ROUTE_TIER_* enumerator added to route_tier_table.h without a
+// matching entry in that other test's kTiers array would silently go
+// unchecked there, while this loop -- driven by ROUTE_TIER_TABLE_COUNT
+// itself -- picks up every row automatically, new tiers included.
+static void test_every_real_route_allows_with_auth_off(void) {
+    TEST_SECTION("http_auth_check -- every row in the real kRouteTierTable ALLOWs with "
+                 "web_enabled==false (plan section 11 acceptance criterion, literal table walk)");
+
+    size_t n = ROUTE_TIER_TABLE_COUNT;
+    TEST_CHECK(n > 100, "the real table has a plausible number of rows (sanity floor)");
+
+    for (size_t i = 0; i < n; i++) {
+        const route_tier_entry_t *e = &kRouteTierTable[i];
+        // bootstrap_needed and role are irrelevant once web_enabled is
+        // false -- http_auth_check()'s very first line returns ALLOW before
+        // consulting either, so exercise the two extremes of each to prove
+        // the table walk is not accidentally hiding behind one lucky
+        // combination.
+        http_auth_decision_t d1 = http_auth_check(e->tier, HTTP_AUTH_ROLE_NONE, false, false);
+        http_auth_decision_t d2 = http_auth_check(e->tier, HTTP_AUTH_ROLE_ADMIN, false, true);
+        TEST_CHECK(d1 == HTTP_AUTH_DECISION_ALLOW && d2 == HTTP_AUTH_DECISION_ALLOW,
+                   "every real route_tier_table.h row ALLOWs with auth off, regardless of role/bootstrap");
+    }
+}
+
 static void test_decision_counts_as_activity(void) {
     TEST_SECTION("http_auth_decision_counts_as_activity -- section 8's activity predicate");
 
@@ -413,5 +446,6 @@ void run_test_http_auth_enforce(void) {
     test_admin_tier_denied_while_bootstrap_needed();
     test_full_matrix_every_tier_role_auth_bootstrap();
     test_every_table_row_reachable_via_lookup();
+    test_every_real_route_allows_with_auth_off();
     test_decision_counts_as_activity();
 }

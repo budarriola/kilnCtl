@@ -1082,6 +1082,43 @@ section's own wiring, both fixed:**
    `web_auth_backend_set_policy()` (`web_auth_table_destroy_all()` against
    `http_session_table()`, and `ui_lcd_lock_force_lock()` for the LCD side).
 
+**Status, 2026-09-17: Landed, verified against origin/main in a clean
+worktree.** All three acceptance clauses hold non-vacuously in production
+code with real callers, plus the field-upgrade negative test:
+- Absent-policy-both-off: `web_auth_store.c`'s `WEB_AUTH_LOAD_ABSENT` case
+  collapses to `false`; proven by `test_web_auth_store.c`'s
+  `test_policy_absent_is_off()`. Route-table coverage strengthened: added
+  `test_every_real_route_allows_with_auth_off()` in
+  `test_http_auth_enforce.c`, which now walks the real `kRouteTierTable`
+  (via `ROUTE_TIER_TABLE_COUNT`) rather than a hand-written tier list.
+- No-admin-credential refusal and enable-clears/disable-preserves-sessions:
+  both hold via `web_auth_policy_check_transition()`, with
+  `web_auth_backend_set_policy()` delegating to it and wiring
+  `web_auth_table_destroy_all()`/`ui_lcd_lock_force_lock()` (the two
+  2026-09-17 defects above), and a real production call site at
+  `security_http_core.c`'s `vt->set_policy(&req->policy)`.
+- `web_enabled`/`lcd_enabled` are the literal first checks in
+  `http_auth_check()` (`http_auth_enforce.c`), ALLOW before session lookup.
+- The nine OTA-family routes fall back to AP-password/HMAC challenge with
+  auth off (`ota_http.c`), never becoming open; confirmed both by reading
+  and by collateral RED in `test_ota_http.c` during the negative test below.
+- Negative test performed: flipped `WEB_AUTH_LOAD_ABSENT` to `true` in
+  `web_auth_store.c`, confirmed RED in `test_web_auth_store.c` (and
+  collateral RED in `test_ota_http.c`), hand-restored via `Edit`, confirmed
+  empty `git diff` and matching `git hash-object`, deleted `build/`, forced
+  a full rebuild, confirmed GREEN.
+- Gap found and closed: the setup wizard had no "enable authentication"
+  step at all. Added step 13 to `setup_wizard_page.html`'s `WIZARD_STEPS`
+  (skippable, checkbox default off, one-line stakes statement, links to
+  `/settings/security` rather than duplicating that UI), covered by a new
+  test in `test_setup_wizard.js`.
+- `ZONES_CFG_VERSION` unchanged at 26 (`zones_config_json.h:63`).
+- Full suite (`tools/run_all_checks.ps1`, clean rebuilt worktree): 106
+  passed, 0 skipped, 1 failed (107 total, matches expected tip) — the one
+  failure was `check_ui_responsive_sweep.ps1` (headless browser
+  `Page.loadEventFired` timeout), confirmed flaky and unrelated by an
+  isolated re-run that passed standalone.
+
 ---
 
 ## 12. Testing

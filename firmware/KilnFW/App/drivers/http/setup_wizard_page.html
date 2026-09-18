@@ -242,6 +242,7 @@ from the board (<code>GET /api/readiness</code>), never trusted from memory alon
   <div id="stepBody10" hidden></div>
   <div id="stepBody11" hidden></div>
   <div id="stepBody12" hidden></div>
+  <div id="stepBody13" hidden></div>
 
   <div id="stepGenericContent" hidden>
     <p class="hint">This step's own screen (fields, live validation, the commit path) is not built yet
@@ -296,6 +297,7 @@ var WIZARD_STEPS = [
   { id: 10, title: 'PID gains (autotune or by hand)', readinessKeys: ['autotune'], safety: false },
   { id: 11, title: 'Coupling matrix (optional)', readinessKeys: [], safety: false },
   { id: 12, title: 'First profile & final readiness gate', readinessKeys: ['profile_saved', 'storage'], safety: false },
+  { id: 13, title: 'Authentication (optional)', readinessKeys: [], safety: false },
 ];
 
 function defaultProgress() {
@@ -332,8 +334,8 @@ function computeStepState(step, storedStep, readinessByKey) {
   // truncated and dropped exactly this step's key(s)) must never fall
   // through to trusting the stored blob -- absence of data is not absence
   // of problems. Steps that legitimately declare no readinessKeys (8, 9,
-  // 11 -- see the comment above WIZARD_STEPS) are unaffected: this can only
-  // be true for a step that named keys and got none of them back.
+  // 11, 13 -- see the comment above WIZARD_STEPS) are unaffected: this can
+  // only be true for a step that named keys and got none of them back.
   var readinessUnresolved = step.readinessKeys.length > 0 && items.length === 0;
 
   if (storedState === 'skipped') {
@@ -1284,6 +1286,60 @@ function renderStep12() {
     html += '<p class="hint">' + ((profiles && profiles.length) ? profiles.length + ' profile(s) saved.' :
       'No profile saved yet.') + ' <a href="/profiles">Manage profiles &rarr;</a></p>';
     el.innerHTML = html;
+  });
+}
+
+/* ---- Step 13 (WEB_AUTH_PLAN.md section 11): "the setup wizard should
+ * recommend enabling it. It presents an 'enable authentication' step that is
+ * skippable, defaults the checkbox to off to match the shipped default, and
+ * states in one line what is at stake ... Recommend without overriding the
+ * owner's default." This step never itself decides transition legality or
+ * touches sessions -- it only reads GET /api/security/policy for the current
+ * state and, when the owner opts in, links to the real security settings
+ * page (/settings/security) where web_auth_policy_check_transition() (via
+ * POST /api/security/policy) is the one place that enforces "no
+ * administrator credential -> refused" and clears sessions on enable. The
+ * checkbox here is a plain, unpersisted intent toggle -- checking it never
+ * calls the enable API by itself, it only reveals the link, so leaving this
+ * step without following the link changes nothing on the board (the shipped
+ * default is preserved either way). readinessKeys: [] -- like steps 8/9/11,
+ * this step is optional and never blocks the final completeness gate. */
+function renderStep13() {
+  var el = document.getElementById('stepBody13');
+  el.innerHTML = '<p class="hint">Loading&hellip;</p>';
+  return fetchJsonOr('/api/security/policy', null).then(function (cfg) {
+    var webOn = !!(cfg && cfg.web_enabled);
+    var lcdOn = !!(cfg && cfg.lcd_enabled);
+    var statusLine = (webOn || lcdOn)
+      ? ('<p class="hint">Currently: web login ' + (webOn ? 'ON' : 'off') + ', LCD lock ' +
+         (lcdOn ? 'ON' : 'off') + '.</p>')
+      : '<p class="hint">Currently off for both the web UI and the LCD (the shipped default).</p>';
+    var html = '<p class="hint">Optional. With authentication off, anyone on the network can start a ' +
+      'firing or change a safety limit -- the OTA/factory-reset/system-reset routes still require the ' +
+      'AP password either way.</p>' +
+      statusLine +
+      '<label style="display:flex;align-items:center;gap:0.5em;min-height:32px;">' +
+      '<input type="checkbox" id="step13Enable"> I want to enable authentication for this kiln</label>' +
+      '<p class="hint" id="step13Link" hidden>Set an administrator password/PIN and turn it on here: ' +
+      '<a href="/settings/security">Security settings &rarr;</a> (enabling is refused until an ' +
+      'administrator credential is set for that interface).</p>' +
+      '<div class="gnav"><button type="button" id="step13Skip">Skip (optional) &amp; mark done</button>' +
+      '<button type="button" id="step13Done">Mark reviewed</button></div>';
+    el.innerHTML = html;
+    // Deliberately always unchecked on render -- plan section 11: "defaults
+    // the checkbox to off to match the shipped default" -- this reflects
+    // intent to opt in during THIS visit, not whatever the board's current
+    // policy already is (shown separately in statusLine above).
+    document.getElementById('step13Enable').checked = false;
+    document.getElementById('step13Enable').addEventListener('change', function (e) {
+      document.getElementById('step13Link').hidden = !e.target.checked;
+    });
+    document.getElementById('step13Skip').addEventListener('click', function () {
+      postStepState(13, 'skipped', 'optional, deferred').then(function () { loadAll(); });
+    });
+    document.getElementById('step13Done').addEventListener('click', function () {
+      postStepState(13, 'done').then(function () { loadAll(); });
+    });
   });
 }
 
@@ -2539,12 +2595,13 @@ function gRenderStepDetail(stepId) {
   // Dispatch to this step's real content (0-6, 8-12) or the generic
   // not-built-yet placeholder (7 only, as of this pass -- a different pass
   // owns that step). Only one body div is ever visible at a time.
-  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].forEach(function (id) {
+  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].forEach(function (id) {
     var body = document.getElementById('stepBody' + id);
     if (body) body.hidden = (stepId !== id);
   });
-  // Every step 0-12 has real content as of this pass (step 7 landed here;
-  // 8-12 landed in a concurrent pass) -- the generic placeholder never shows.
+  // Every step 0-13 has real content as of this pass (step 7 landed here;
+  // 8-12 landed in a concurrent pass; 13 is WEB_AUTH_PLAN.md item 11's
+  // wizard step) -- the generic placeholder never shows.
   document.getElementById('stepGenericContent').hidden = true;
   if (step2Poll) { clearInterval(step2Poll); step2Poll = null; }
   if (step3PollTimer) { clearTimeout(step3PollTimer); step3PollTimer = null; }
@@ -2563,6 +2620,7 @@ function gRenderStepDetail(stepId) {
   else if (stepId === 10) renderPromise = renderStep10();
   else if (stepId === 11) renderPromise = renderStep11();
   else if (stepId === 12) renderPromise = renderStep12();
+  else if (stepId === 13) renderPromise = renderStep13();
   // Apply a save confirmation armed for THIS step (see armStepMessage()
   // above) only after this step's own render has actually finished
   // rebuilding the DOM -- applying it any earlier would just get overwritten
