@@ -397,6 +397,56 @@ extern "C" {
 #define CONFIG_STORE_CT_TOPOLOGY_PER_ZONE 0u
 #define CONFIG_STORE_CT_TOPOLOGY_SUMMED   1u
 
+// config_store_ct_channel_fitted() -- THE single place that answers "does
+// hardware channel `ch` (0-2) have a CT physically wired behind it". Two
+// call sites used to encode this rule independently (safety_core.c's
+// s_current_sensing_commissioned gate and its S14 per-channel amps_valid_
+// for_ct loop) -- exactly the "reset one side of a pair" drift shape this
+// codebase has shipped four times before (see safety_link_frames.c's
+// boot_id_changed comment for the class). Every reader of "is this channel
+// fitted" must call this function rather than re-deriving the rule inline,
+// so the two/three/N call sites cannot drift apart again.
+//
+// `ct_installed_effective` is the CALLER-resolved answer to "are CTs
+// installed on this board at all", with the CONFIG_STORE_SET_CT_INSTALLED
+// fields_set gate already applied (an unanswered ct_installed question
+// means "installed", the same safe default every other CT-optional-
+// hardware check in this codebase uses -- see CONFIG_STORE_SET_CT_INSTALLED's
+// own doc comment above). This function does not take fields_set/ct_installed
+// raw and re-derive that gate itself, on purpose: the gate already has one
+// documented owner (safety_core.c's `cts_disabled` local, load_guard_cfg's
+// mirror of it) and this function's only job is the TOPOLOGY half of the
+// rule, not a second copy of the fields_set gate.
+//
+// `ct_topology` is the raw/decoded config_store_record_t::ct_topology value
+// (CONFIG_STORE_CT_TOPOLOGY_PER_ZONE or _SUMMED; any other byte, including a
+// legacy/erased record's fill value, already decodes to PER_ZONE before it
+// reaches here -- see this file's comment above CONFIG_STORE_CT_TOPOLOGY_
+// PER_ZONE).
+//
+// Today's data model: a channel is fitted iff CTs are installed AND (this
+// is PER_ZONE topology, where all three channels have their own CT, OR this
+// is SUMMED topology and `ch` is the one shared CT's channel, index 2 --
+// HARDWARE.md's "channel 3"/GPIO28). A later change is expected to replace
+// the ct_topology-derived rule inside this function with a per-zone
+// CT-selection lookup (each zone will pick which CT channel it uses, and
+// "fitted" becomes "some zone selects this channel") -- this function is
+// deliberately the seam that change will cut along: its signature stays a
+// simple per-channel predicate, and every caller already goes through it
+// rather than reading ct_installed/ct_topology directly, so that future
+// swap touches this one body, not each call site.
+static inline bool config_store_ct_channel_fitted(uint8_t ch, bool ct_installed_effective,
+                                                    uint8_t ct_topology)
+{
+    if (!ct_installed_effective) {
+        return false;
+    }
+    if (ct_topology == CONFIG_STORE_CT_TOPOLOGY_SUMMED) {
+        return ch == 2u; // the one shared CT, wired to channel index 2
+    }
+    return true; // PER_ZONE (and any unrecognized/legacy byte, which decodes to PER_ZONE)
+}
+
 // True iff every bit in `mask` (some OR of CONFIG_STORE_SET_* above) is set
 // in `rec->fields_set`. Small enough to inline; exists so call sites read as
 // "is X commissioned" rather than repeating the `& / ==` bit-test idiom
@@ -751,6 +801,89 @@ typedef struct {
     // signature/sig_required reservation.
     uint8_t  reserved[269];
 } config_store_record_t;
+
+// config_store_current_sensing_commissioned() -- THE single place S9's
+// "is the current reading a MEASUREMENT or a heuristic" gate is decided.
+// safety_core.c's s_current_sensing_commissioned caches this per COMMIT_
+// CONFIG (safety_core_load_guard_cfg()'s own doc comment explains why it is
+// cached rather than read fresh every tick).
+//
+// 2026-09-18 (owner-directed fix, summed-CT-topology support): commissioned
+// now requires k_ct_v_per_a > 0 on every FITTED channel (config_store_ct_
+// channel_fitted() just above) and requires at least one channel be fitted
+// at all -- NOT all three unconditionally, which is what this used to
+// require and which made this flag permanently false on every summed-CT
+// board (channels 0/1 have no CT behind them and can never be calibrated),
+// permanently downgrading S9 (TRIP_INEFFECTIVE, the welded-contactor guard)
+// to a warning. A board with no fitted channel at all (ct_installed == 0)
+// still reports NOT commissioned -- there is no measurement to certify.
+// PER_ZONE with all three channels calibrated is bit-for-bit the same
+// answer as before this fix (all three are fitted, so "every fitted
+// channel calibrated" is still "all three calibrated").
+//
+// This relaxation is safe only together with config_store_mask_current_
+// present_to_fitted() below being wired into every any_current_present
+// derivation: S9 is unclearable once latched
+// (safety_guards_try_clear()/link_frame_decide_clear_trip() both refuse it
+// unconditionally), so relaxing this gate alone would let it arm while it
+// could still latch off an UNFITTED channel's raw ADC noise floor
+// (current_presence_policy.c's fallback-margin branch, taken whenever
+// k_ct_v_per_a <= 0 -- measured ~16-17 counts idle on this bench board's
+// unfitted channels, against a 25-count margin). Masking removes exactly
+// that noise from any_current_present, so there is nothing left for a
+// relaxed commissioned gate to arm against.
+static inline bool config_store_current_sensing_commissioned(const config_store_record_t *rec)
+{
+    bool ct_installed_effective =
+        ((rec->fields_set & CONFIG_STORE_SET_CT_INSTALLED) == 0u) || (rec->ct_installed != 0u);
+    bool any_channel_fitted = false;
+    bool every_fitted_channel_calibrated = true;
+    for (uint8_t ch = 0; ch < 3u; ch++) {
+        if (!config_store_ct_channel_fitted(ch, ct_installed_effective, rec->ct_topology)) {
+            continue;
+        }
+        any_channel_fitted = true;
+        if (!(rec->k_ct_v_per_a[ch] > 0.0f)) {
+            every_fitted_channel_calibrated = false;
+        }
+    }
+    return any_channel_fitted && every_fitted_channel_calibrated;
+}
+
+// config_store_mask_current_present_to_fitted() -- THE single place
+// current_any_present()'s (snapshots.h) per-channel OR is masked down to
+// FITTED channels only. Two call sites need this (safety_core.c's
+// safety_core_build_input() and current_task.c's current_task_any_current_
+// present(), see each file's own comment on why both exist) -- factored
+// here, once, so they cannot drift apart the way this codebase's "reset one
+// side of a pair" bug class has four times before.
+//
+// Why masking at all: a channel with no CT connected carries no current
+// information whatsoever -- only an op-amp DC offset floor read through an
+// uncalibrated chain -- so removing its contribution removes NOISE, not
+// detection capability. current_presence_policy.h's header comment argues
+// the loose fallback margin (25 counts) deliberately biases toward
+// DETECTING current for S3/S9 on an uncalibrated channel that might still
+// be real; that bias is the right default for a channel that MIGHT have a
+// CT and simply hasn't been calibrated yet, but it is actively wrong for a
+// channel this topology says can never have one at all -- there, the
+// "detection" that bias produces is unconditionally noise, not caution.
+// Masking restores the fail-safe direction for this specific case: a
+// FITTED channel's real present[] fact is never touched by this function
+// (so genuine current flow is never hidden), only an unfitted channel's
+// noise floor is removed from the OR.
+static inline bool config_store_mask_current_present_to_fitted(const bool present[3],
+                                                                 bool ct_installed_effective,
+                                                                 uint8_t ct_topology)
+{
+    for (uint8_t ch = 0; ch < 3u; ch++) {
+        if (config_store_ct_channel_fitted(ch, ct_installed_effective, ct_topology) &&
+            present[ch]) {
+            return true;
+        }
+    }
+    return false;
+}
 
 // Compile-time budget check, mirroring bootloader/metadata.c's
 // bootloader_metadata_record_budget_check: the fixed header + every field +

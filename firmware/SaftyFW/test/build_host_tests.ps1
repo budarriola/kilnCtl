@@ -74,6 +74,8 @@ try {
         (Join-Path $testDir "test_tx_watermark.c"),
         (Join-Path $testDir "test_relay_grace.c"),
         (Join-Path $testDir "test_config_store.c"),
+        (Join-Path $testDir "test_config_store_ct_channel_fitted.c"),
+        (Join-Path $testDir "test_ct_summed_topology_call_sites.c"),
         (Join-Path $testDir "test_ct_amps_cal.c"),
         (Join-Path $testDir "test_snapshots.c"),
         (Join-Path $testDir "test_boot_checkin_coverage.c"),

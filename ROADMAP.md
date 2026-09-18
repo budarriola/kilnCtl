@@ -18,12 +18,29 @@
 >   70 mA total. No further code or calibration step is pending on this
 >   fixture; arming either guard needs a kiln-scale load (or a different
 >   bench fixture), not more software.
-> - **S9's unclearable `TRIP_INEFFECTIVE` cannot latch on this board, and the
->   reason is upstream of S9 itself:** `s_current_sensing_commissioned`
->   (`firmware/SaftyFW/src/tasks/safety_core.c` around line 449) requires
->   all three `k_ct_v_per_a` entries to be greater than zero, and channels 0
->   and 1 are zero because no CT is fitted on them — only channel 2's summed
->   CT exists on this board.
+> - **Superseded 2026-09-18, CT-summed-topology fix:** the all-three
+>   `k_ct_v_per_a > 0` gate recorded just above was a deliberate, documented
+>   decision, not an oversight — but it permanently excluded any board wired
+>   in SUMMED topology (one shared CT on channel 2 only) from ever reporting
+>   commissioned, which downgrades S9 to a warning forever on exactly the
+>   boards this bench represents. `s_current_sensing_commissioned` now calls
+>   `config_store_current_sensing_commissioned()` (`firmware/SaftyFW/src/config_store.h`),
+>   which requires `k_ct_v_per_a > 0` only on channels that are actually
+>   *fitted* (all three for PER_ZONE, only channel 2 for SUMMED, via the new
+>   `config_store_ct_channel_fitted()` helper), and requires at least one
+>   fitted channel. Landing this alone would have been unsafe: `current_task.c`
+>   and `safety_core.c`'s `any_current_present` also had to be masked to
+>   fitted channels in the same change, because unfitted channels 0/1 read
+>   16-17 raw ADC counts of idle noise against only a 25-count presence
+>   margin — without masking, S9 (unclearable once latched) could arm and
+>   then latch off that noise alone, strictly worse than the bug being fixed.
+>   **Net effect on this bench: S9's `TRIP_INEFFECTIVE` is now armable here
+>   for the first time** — channel 2's CT is fitted and calibrated (see the
+>   commissioning check above), so `current_sensing_commissioned` now goes
+>   true, and channels 0/1's noise no longer counts toward
+>   `any_current_present`. This changes the bench's live safety posture, not
+>   only its source: a welded-contactor exercise that could previously never
+>   latch S9 here can now do so, once the fix is flashed.
 > - **Latent, not active: the zone current sweep is still entitled to
 >   overwrite `k_ct_v_per_a[2]`.** `safety_get_ct_cal` reports all three
 >   channels `uncalibrated`, so the manual-provenance skip in
@@ -1017,7 +1034,7 @@ open is short:
 | Size | Item | Where |
 |---|---|---|
 | S | Time the firing abort (30 s) with a stopwatch during a real running firing — the 1.5 s staleness ceiling was bench-verified 2026-09-06 (`LINK_PROTOCOL.md` §8) with no firing needed | M6 |
-| M | S9's welded-contactor escalation — by definition needs a welded contactor. **Checked 2026-09-03: SimFW cannot do this — SimFW itself no longer exists** (removed `8553244`, 2026-08-28; `firmware/UnitTestFw` took its place and is unrelated ESP32-S3 bench-instrument firmware — DAC/AD9833/OLED/PCF8575 — with no path to the safety processor's current-sense input at all). Even when SimFW existed, its own removal commit records that `ct_calibration` "needs the fixture to physically drive current into the CT" — S9 (`firmware/SaftyFW/src/safety_guards.c:363-389`) latches only on real `any_current_present`, gated by `in->context_valid`, `in->current_sensing_commissioned` and NOT `in->current_sensing_disabled`; that flag comes from the CT's analog current-transformer signal through `current_sense.c`, not a GPIO a simulator MCU could assert. What would actually be required: a fixture that injects genuine AC current through the CT sense loop while the K4 drive line is confirmed de-energized — i.e. a hardware jig, not firmware simulation — plus a CT actually fitted and commissioned (`ct_installed=yes`; this was `ct_installed=no` on the bare bench as of the checked date above). **Corrected 2026-09-18:** the board now reads `ct_installed=1` (channel 2's summed CT fitted and calibrated, per the CT-commissioning bench check at the top of this file), but `in->current_sensing_commissioned` still cannot go true — `s_current_sensing_commissioned` (`firmware/SaftyFW/src/tasks/safety_core.c` around line 449) requires all three `k_ct_v_per_a` entries greater than zero, and channels 0/1 stay zero because no CT is fitted on them. S9's `TRIP_INEFFECTIVE` still cannot latch on this board for that reason, independent of the welded-contactor fixture question above. | M4 |
+| M | S9's welded-contactor escalation — by definition needs a welded contactor. **Checked 2026-09-03: SimFW cannot do this — SimFW itself no longer exists** (removed `8553244`, 2026-08-28; `firmware/UnitTestFw` took its place and is unrelated ESP32-S3 bench-instrument firmware — DAC/AD9833/OLED/PCF8575 — with no path to the safety processor's current-sense input at all). Even when SimFW existed, its own removal commit records that `ct_calibration` "needs the fixture to physically drive current into the CT" — S9 (`firmware/SaftyFW/src/safety_guards.c:363-389`) latches only on real `any_current_present`, gated by `in->context_valid`, `in->current_sensing_commissioned` and NOT `in->current_sensing_disabled`; that flag comes from the CT's analog current-transformer signal through `current_sense.c`, not a GPIO a simulator MCU could assert. What would actually be required: a fixture that injects genuine AC current through the CT sense loop while the K4 drive line is confirmed de-energized — i.e. a hardware jig, not firmware simulation — plus a CT actually fitted and commissioned (`ct_installed=yes`; this was `ct_installed=no` on the bare bench as of the checked date above). **Corrected 2026-09-18, then superseded the same day by the CT-summed-topology fix:** the board reads `ct_installed=1` (channel 2's summed CT fitted and calibrated, per the CT-commissioning bench check at the top of this file); `s_current_sensing_commissioned` used to require all three `k_ct_v_per_a` entries greater than zero regardless of topology — a deliberate decision at the time, but one that permanently blocked any SUMMED-topology board (only one CT, wired to channel 2) from ever reporting commissioned. It now instead requires `k_ct_v_per_a > 0` only on channels that are actually fitted for the board's topology (`config_store_current_sensing_commissioned()`, `firmware/SaftyFW/src/config_store.h`), landed together with masking `any_current_present` to fitted channels only (channels 0/1's idle ADC noise must not count) so the unclearable S9 latch cannot arm off noise. **S9's `TRIP_INEFFECTIVE` is now armable on this board for the first time** — this is a live change to the bench's safety posture, not only to source, once flashed: a welded-contactor exercise here can now actually latch S9, independent of the fixture-availability question above. | M4 |
 | M | AP-fallback verified end to end (needs a router with correct *and* deliberately-wrong static config) | M6 |
 | M | Per-channel CT-to-jack commissioning and the ADC noise-floor measurement — see the M-size CT commissioning row far above (M5's table), `CT_COMMISSIONING_PLAN.md` steps 0 and 6 | M5 |
 | M | **HW changes:** relay status LEDs for K1–K4/S9, distinct connector types for the thermocouple daughterboards, I2C broken out on an expansion connector. (LCD backlight control's flying wire is fitted and confirmed — see M1, closed 2026-09-04.) | M1 |
@@ -2178,66 +2195,6 @@ frame time, and thermo read latency — got its last two live-board numbers on
 plan (Wi-Fi/httpd/LVGL, OTA partition writes, the SaftyFW bootloader,
 `firmware/UnitTestFw`) is an owner-decided permanent holdout, not open work.
 Full detail, numbers and bars: [`docs/HW_ABSTRACTION.md`](docs/HW_ABSTRACTION.md).
-
----
-
-## M17 — The zone graphic: configuration you can look at · *opened 2026-09-18*
-
-An owner request, and a specific kind of instrument rather than decoration. At
-the top of the **web** zones page sits a cartoon of a stacked kiln — octagonal
-brick ring sections on a tube-steel stand with a hinged lid, no controller box
-and no branding of any kind — drawn with exactly as many rings as
-`thermo_count`, annotated per ring with the heaters, thermocouple and current
-sensor that zone is configured for, in icons *and numbers*, plus icons for any
-extra relays. Errors and warnings appear as badges that open detail on click.
-A second, smaller piece: extra relays gain a **device type** — damper, outlet,
-valve, fan, light, other — a fixed code-defined enum, one byte per relay,
-rendered as a dropdown.
-
-The point is at-a-glance confirmation that the right settings exist, which sets
-an unusually harsh acceptance standard: **a graphic that renders plausibly
-while the configuration is wrong or unknown is worse than no graphic**, because
-the operator stops checking the fields under it. The plan's controlling section
-is the one that decides how "unknown" and "not reported" are drawn so neither
-can ever read as "configured and healthy", and its negative test is the one
-that guards it — feed the renderer a response with the sensor associations
-deleted and assert the unknown glyph appears and no configured-state icon does.
-A well-meaning "sensible fallback" is exactly how this feature turns into a
-confident lie.
-
-**Decided, so they are not re-opened:** web only — the LCD zones page is
-explicitly out of scope, it is 480x320 and must not scroll. The artwork is
-inline SVG generated from the zone count inside `zones_page.html` itself, which
-is one `EMBED_TXTFILES` blob, so a separate asset would cost new embed, gzip
-and route plumbing to save bytes it would not save. The data contract extends
-`GET`/`POST /api/zones` by a single `relay_types` array rather than adding a
-route; **no httpd stack buffer and no zones JSON buffer is enlarged**, and the
-graphic contributes zero bytes to any response because it is built in the
-browser from numbers already on the wire. The relay device type lives in
-`relay_names_cfg_t` with its own `RELAY_NAMES_CFG_VERSION` bump — **not** in
-`zones_cfg_t`, even though a zones-schema bump is now authorized for the
-parallel CT-channel work, because cosmetic per-relay data should not share the
-PID gains' rollback fate.
-
-**The one blocking hazard, and it is a data-loss one.** `relay_names_validate()`
-silently discards the entire blob on any version mismatch, resetting every
-relay name to blank, and only one version of that blob has ever existed so no
-migration function exists for it. Bumping it without writing one wipes every
-operator-entered relay name on the next firmware update, with no notice. The
-migration is trivial and is a named stage-1 deliverable with its own host test,
-not a footnote.
-
-Two faults the front end genuinely cannot see are recorded rather than faked:
-there is no per-zone heater-load fault (only `ct_warn_mask`, which is silent on
-any zone whose normal current was never measured, and which cannot assert at
-all on this ~4 W fixture), and there is no live per-channel CT presence or
-calibration-health flag as distinct from the config fields. Three questions are
-open for the owner, the substantive one being whether an un-set relay type gets
-its own enum value so a migrated board says "nobody has told me what this relay
-does" instead of quietly claiming "other".
-
-Full detail, five-stage landing sequence and test strategy:
-[`docs/ZONE_GRAPHIC_PLAN.md`](docs/ZONE_GRAPHIC_PLAN.md).
 
 ---
 

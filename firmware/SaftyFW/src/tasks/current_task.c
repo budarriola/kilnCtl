@@ -51,6 +51,24 @@ static TaskHandle_t s_task_handle = NULL;
 static current_snapshot_t     s_published_snapshot;
 static current_sense_power_t  s_published_power;
 
+// 2026-09-18 (owner-directed fix, summed-CT-topology support): the two
+// inputs config_store_mask_current_present_to_fitted()/config_store_ct_
+// channel_fitted() (config_store.h -- THE single place those predicates
+// live) need, cached rather than read fresh via config_store_get_full_
+// record() inside current_task_any_current_present() itself. That function
+// was deliberately added (2026-09-15, Opus review F1) to avoid a whole
+// current_snapshot_t landing on link_task's own tight stack budget via its
+// SET_CONFIG/COMMIT_CONFIG call chain -- a config_store_record_t is far
+// larger still, so this caches just the two resolved scalars the mask
+// actually needs, not the whole record. Refreshed only inside current_
+// task_reload_cal() (called at boot and after every COMMIT_CONFIG,
+// current_task.h's own doc comment on that function). Same
+// taskENTER_CRITICAL()/EXIT discipline as s_published_snapshot above when
+// read from current_task_any_current_present(): small fixed fields, no
+// blocking call inside the guarded region.
+static bool    s_ct_installed_effective = true;
+static uint8_t s_ct_topology = CONFIG_STORE_CT_TOPOLOGY_PER_ZONE;
+
 // CT_COMMISSIONING_PLAN.md step 2 -- see current_task.h's header comment for
 // why this accumulates incrementally here rather than calling current_
 // sense_recalibrate_zero() (which blocks its caller) from link_task.
@@ -160,8 +178,15 @@ void current_task_get_snapshot(current_snapshot_t *out)
 bool current_task_any_current_present(void)
 {
     taskENTER_CRITICAL();
-    bool any = s_published_snapshot.present[0] || s_published_snapshot.present[1] ||
-               s_published_snapshot.present[2];
+    // Masked to fitted channels only, through config_store_mask_current_
+    // present_to_fitted() (config_store.h -- THE single place this masking
+    // lives, same function safety_core.c's own any_current_present
+    // derivation calls). An unfitted channel carries only an uncalibrated
+    // op-amp DC offset floor, never real current information, so it must
+    // not be able to contribute to this fact -- see that function's doc
+    // comment for the full fail-safe-direction argument.
+    bool any = config_store_mask_current_present_to_fitted(
+        s_published_snapshot.present, s_ct_installed_effective, s_ct_topology);
     taskEXIT_CRITICAL();
     return any;
 }
@@ -241,6 +266,21 @@ void current_task_reload_cal(void)
     }
 
     current_sense_set_cal(&cal);
+
+    // Refresh the two scalars current_task_any_current_present() hands to
+    // config_store_mask_current_present_to_fitted() -- same "unanswered
+    // ct_installed means installed" effective-installed resolution
+    // safety_core.c's own cts_disabled local applies. taskENTER_CRITICAL()
+    // here matches the critical section current_task_any_current_present()
+    // reads these two fields under; s_published_snapshot's own critical
+    // section above this function's call site is a separate, already-
+    // existing guarded region.
+    bool ct_installed_effective =
+        ((rec.fields_set & CONFIG_STORE_SET_CT_INSTALLED) == 0u) || (rec.ct_installed != 0u);
+    taskENTER_CRITICAL();
+    s_ct_installed_effective = ct_installed_effective;
+    s_ct_topology = rec.ct_topology;
+    taskEXIT_CRITICAL();
 }
 
 // CT_COMMISSIONING_PLAN.md step 2 -- see current_task.h's header comment.

@@ -439,16 +439,47 @@ static void safety_core_load_guard_cfg(const config_store_record_t *rec)
     // even after commissioning -- the failure that would have been found
     // months later, by a welded contactor.
     //
-    // ALL three channels, not any: current_any_present() (snapshots.h) reports
-    // presence across the whole set, so a single uncalibrated channel is
-    // enough to make that answer a heuristic. Mirrors the exact branch
-    // current_presence_is_flowing() itself takes on k_ct_v_per_a > 0.
-    // It lives on safety_guard_input_t, not safety_guard_cfg_t, so it is
-    // cached here and applied per tick in safety_core_build_input() -- the
-    // same shape as the other caller-computed input facts.
-    s_current_sensing_commissioned =
-        (rec->k_ct_v_per_a[0] > 0.0f) && (rec->k_ct_v_per_a[1] > 0.0f) &&
-        (rec->k_ct_v_per_a[2] > 0.0f);
+    // 2026-09-18 (owner-directed fix, summed-CT-topology support): this used
+    // to require ALL THREE channels calibrated, unconditionally -- correct
+    // for PER_ZONE (every channel has its own CT and an uncalibrated one is
+    // a real gap), but permanently, silently WRONG for SUMMED topology,
+    // where channels 0/1 have no CT behind them at all and can never be
+    // calibrated. That made this flag permanently false on every summed-CT
+    // board, permanently downgrading S9 (TRIP_INEFFECTIVE, the welded-
+    // contactor guard) to a warning -- the live bench board's actual state.
+    //
+    // Now: require k_ct_v_per_a > 0 on every FITTED channel (config_store_ct_
+    // channel_fitted() -- THE single place "is this channel fitted" is
+    // decided, see its doc comment) and require at least one channel be
+    // fitted at all. A board with ct_installed == 0 (no channel fitted)
+    // must not report commissioned -- there is no measurement to certify.
+    // PER_ZONE with all three calibrated is bit-for-bit the same answer as
+    // before (all three are fitted, so this is still "all three
+    // calibrated"); SUMMED with channel 2 calibrated now correctly reports
+    // commissioned, since channel 2 is the only fitted channel.
+    //
+    // This relaxation is safe ONLY because it lands together with this same
+    // commit's presence-masking fix (safety_core_build_input()'s
+    // any_current_present derivation and current_task_any_current_present(),
+    // both now masked through the identical config_store_ct_channel_fitted()
+    // predicate): before that companion fix, relaxing this gate alone would
+    // let S9 (unclearable once latched -- safety_guards_try_clear() and
+    // link_frame_decide_clear_trip() both refuse it unconditionally) arm
+    // while it could still latch off an UNFITTED channel's raw ADC noise
+    // floor (current_presence_policy.c's fallback-margin branch, taken
+    // whenever k_ct_v_per_a <= 0 -- measured ~16-17 counts idle on this
+    // bench board's unfitted channels, against a 25-count margin). With
+    // presence masked to fitted channels only, an unfitted channel's noise
+    // can no longer contribute to the current_any_present fact S9 reads, so
+    // there is nothing left for a relaxed commissioned gate to arm against.
+    //
+    // The actual decision -- ct_installed-effective resolution, the per-
+    // channel fitted/calibrated loop, and the "at least one fitted" rule --
+    // lives in config_store_current_sensing_commissioned() (config_store.h),
+    // not here, so this is the ONLY place that reads it: host-testable
+    // directly, and the one thing this codebase's own reset-one-side-of-a-
+    // pair bug class says never to re-derive inline a second time.
+    s_current_sensing_commissioned = config_store_current_sensing_commissioned(rec);
 }
 
 // CLEAR_TRIP queue -- see safety_core_request_clear_trip()'s doc comment in
@@ -1135,6 +1166,29 @@ static safety_guard_input_t safety_core_build_input(void)
         any_current_present = false;
     }
 
+    // 2026-09-18 (owner-directed fix, summed-CT-topology support): mask
+    // any_current_present down to FITTED channels only, via config_store_
+    // mask_current_present_to_fitted() (config_store.h -- THE single place
+    // this masking lives; see its doc comment for the full fail-safe-
+    // direction argument, and this file's comment on s_current_sensing_
+    // commissioned's assignment for why this half is mandatory alongside
+    // that one). Recomputed here from `current.present[]` rather than the
+    // earlier current_any_present(&current)-derived value above, because
+    // that call already collapsed the three channels into one bool before
+    // cfg_rec (read further up this same tick) was available -- same
+    // "compute early, mask once config is known" shape the cts_disabled
+    // block just above already uses.
+    //
+    // AND'd into the existing value rather than overwritten: current_fresh/
+    // cts_disabled already gate any_current_present above (a stale reading
+    // or a fully-disabled board must stay false regardless of this mask),
+    // so this can only ever narrow the fact, never widen it back past either
+    // existing gate.
+    any_current_present =
+        any_current_present &&
+        config_store_mask_current_present_to_fitted(current.present, !cts_disabled,
+                                                      cfg_rec.ct_topology);
+
     // S14 (COMMISSIONING_UX.md section 3.3). amps[ch] comes straight from
     // current_snapshot_t, gated by the SAME freshness fact any_current_
     // present already uses (current_fresh) -- a stale amps[] reading must
@@ -1152,14 +1206,20 @@ static safety_guard_input_t safety_core_build_input(void)
     float amps_for_ct[3] = { 0.0f, 0.0f, 0.0f };
     bool  amps_valid_for_ct[3] = { false, false, false };
     bool  relay_commanded_now_for_ct[3] = { false, false, false };
-    bool  ct_summed = (cfg_rec.ct_topology == CONFIG_STORE_CT_TOPOLOGY_SUMMED);
     if (current_fresh && !cts_disabled) {
         for (unsigned ch = 0; ch < 3; ch++) {
             // Summed topology: only channel 2 (index 2, "channel 3"/GPIO28
             // per HARDWARE.md) has a CT behind it at all -- channels 0/1
             // must report "not fitted", never a plausible-looking 0.00 A,
             // same discipline as ct_installed==0's per-channel treatment.
-            if (ct_summed && ch != 2u) {
+            // Routed through config_store_ct_channel_fitted() (config_store.h)
+            // rather than a second inline `ct_topology == SUMMED && ch != 2`
+            // check -- this file used to carry exactly that duplicate, and
+            // this codebase has a documented history of two sites encoding
+            // the same contract drifting apart ("reset one side of a pair").
+            // !cts_disabled is already established by the loop guard above,
+            // so this is the topology half of the predicate only.
+            if (!config_store_ct_channel_fitted((uint8_t)ch, true, cfg_rec.ct_topology)) {
                 continue;
             }
             // Opus review finding 1: cs_counts_to_amps() (current_sense.c)
