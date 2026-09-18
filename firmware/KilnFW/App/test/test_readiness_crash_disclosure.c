@@ -62,6 +62,7 @@ int g_test_count = 0;
 #include "psa/crypto.h"
 psa_status_t g_stub_psa_import_key_result = PSA_SUCCESS;
 
+#include "http_auth_disclosure_gate.h"
 #include "http_auth_http.h"
 #include "http_auth_policy_iface.h"
 #include "web_auth_session.h"
@@ -176,7 +177,16 @@ static bool compute_may_disclose(void)
 {
     httpd_req_t req;
     memset(&req, 0, sizeof(req));
-    return !http_auth_policy_web_enabled() || http_auth_caller_is_admin(&req);
+    /* 2026-09-17 adversarial-review follow-up: calls the real, shared
+     * http_auth_may_disclose() (http_auth_disclosure_gate.c, linked below
+     * for real, never stubbed) rather than re-deriving the disjunction by
+     * hand here -- the original version of this test file did the latter,
+     * which is exactly why it could not detect readiness_http.c's call
+     * site being replaced with `bool may_disclose = true;`: the test and
+     * the (uncompilable) production call site were two independent copies
+     * of the same expression. This is now the one production function both
+     * the readiness handler and this test call. */
+    return http_auth_may_disclose(&req);
 }
 
 // ---------------------------------------------------------------------------

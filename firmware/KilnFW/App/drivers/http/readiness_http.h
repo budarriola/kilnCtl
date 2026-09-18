@@ -340,13 +340,16 @@ static inline readiness_status_t readiness_crash_report_status(bool have_record,
  * `acknowledged` decide whether a crash is on record and unacknowledged at
  * all (an operational fact -- capability_preflight refuses on it -- so it
  * is NEVER hidden), while `may_disclose` gates only the cause string and
- * task name themselves. Callers pass
- * `!http_auth_policy_web_enabled() || http_auth_caller_is_admin(req)` for
- * `may_disclose` -- a disjunction, not `&&`, because
- * http_auth_caller_is_admin() already returns true when web auth is OFF
- * (that's what lets an operator set the first admin password on a fresh
- * board); `&&` here would hide the detail from that operator and from this
- * project's own commissioning tooling on an unprovisioned board. */
+ * task name themselves. Callers pass `http_auth_may_disclose(req)`
+ * (http_auth_disclosure_gate.h) for `may_disclose` -- a disjunction of
+ * `!http_auth_policy_web_enabled()` and `http_auth_caller_is_admin(req)`,
+ * not `&&`, because http_auth_caller_is_admin() already returns true when
+ * web auth is OFF (that's what lets an operator set the first admin
+ * password on a fresh board); `&&` here would hide the detail from that
+ * operator and from this project's own commissioning tooling on an
+ * unprovisioned board. See http_auth_disclosure_gate.h's own header
+ * comment for why this composition lives in its own translation unit
+ * rather than spelled out at each call site. */
 static inline void readiness_crash_report_detail(bool have_record, bool acknowledged, bool may_disclose,
                                                   const char *exc_cause_str, const char *exc_task,
                                                   char *out, size_t out_cap)

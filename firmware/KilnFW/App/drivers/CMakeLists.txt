@@ -306,6 +306,14 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "http/http_auth_http.c"
                        "http/http_session_iface.c"
                        "http/http_auth_policy_iface.c"
+                       # 2026-09-17 adversarial-review follow-up (disclosure
+                       # audit finding 2): the one shared, host-tested
+                       # `may_disclose = !http_auth_policy_web_enabled() ||
+                       # http_auth_caller_is_admin(req)` composition, used by
+                       # wifi_provision_http.c's GET /status and
+                       # readiness_http.c's crash-report checklist item --
+                       # see http_auth_disclosure_gate.h's header comment.
+                       "http/http_auth_disclosure_gate.c"
                        # WEB_AUTH_PLAN.md items 2/3/6/11 -- the security page's
                        # dispatch core (security_http_core.c, host-tested
                        # against a hand-built fake vtable) and its two real

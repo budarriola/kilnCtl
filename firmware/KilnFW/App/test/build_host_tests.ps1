@@ -1755,8 +1755,13 @@ try {
     # the actual http_auth_http.c/http_auth_enforce.c/http_auth_policy_iface.c/
     # http_session_iface.c/web_auth_session.c/web_auth_store.c stack -- same
     # link set and rationale as exe9 (test_dashboard_status_http.c) and
-    # exe45 immediately above. See the test file's own header comment for
-    # the full split.
+    # exe45 immediately above. 2026-09-17 adversarial-review follow-up: also
+    # links http_auth_disclosure_gate.c for real (never stubbed) -- that is
+    # now the ONE function (http_auth_may_disclose()) both this test and
+    # readiness_http.c's actual call site invoke, closing the vacuous-test
+    # gap a negative test found in the original version of this file (see
+    # http_auth_disclosure_gate.h's own header comment). See the test
+    # file's own header comment for the full split.
     $exe46 = Join-Path $outDir "kilnctl_host_tests_readiness_crash_disclosure.exe"
     $rcdObjDir = Join-Path $outDir "rcd"
     New-Item -ItemType Directory -Force -Path $rcdObjDir | Out-Null
@@ -1766,6 +1771,7 @@ try {
             "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_disclosure_gate.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
@@ -1791,6 +1797,7 @@ try {
             "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_disclosure_gate.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +

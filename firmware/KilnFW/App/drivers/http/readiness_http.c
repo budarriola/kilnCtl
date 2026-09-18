@@ -1,4 +1,5 @@
 #include "readiness_http.h"
+#include "http_auth_disclosure_gate.h" // http_auth_may_disclose()
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 #include "http_auth_policy_iface.h" // http_auth_policy_web_enabled()
 
@@ -815,8 +816,11 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
          * doc comment in readiness_http.h for the full reasoning (why this
          * route stays OPEN, why the item's existence is never hidden, and
          * why may_disclose is a disjunction, not `&&`, with the enabled
-         * check). */
-        bool may_disclose = !http_auth_policy_web_enabled() || http_auth_caller_is_admin(req);
+         * check). 2026-09-17 adversarial-review follow-up: composed via the
+         * shared http_auth_may_disclose() rather than spelled out inline --
+         * see http_auth_disclosure_gate.h's header comment for why. Do not
+         * re-inline the disjunction here. */
+        bool may_disclose = http_auth_may_disclose(req);
         readiness_crash_report_detail(have_record, acknowledged, may_disclose,
                                       have_record ? rec.exc_cause_str : NULL,
                                       have_record ? rec.exc_task : NULL, detail, sizeof(detail));

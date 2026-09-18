@@ -7,6 +7,7 @@
 
 #include "esp_log.h"
 #include "esp_http_server.h"
+#include "http_auth_disclosure_gate.h" // http_auth_may_disclose()
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 #include "http_auth_policy_iface.h" // http_auth_policy_web_enabled()
 #include "freertos/FreeRTOS.h"
@@ -251,13 +252,16 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * to answer /status before anyone can authenticate -- so the fix is in
      * the payload, same as the ap_password narrowing just above and the
      * on_ap gate two fixes of this class already landed for other routes.
-     * Disjunction, not conjunction, with the enabled check, for the same
-     * reason as ap_password/on_ap and the readiness crash-detail fix:
-     * http_auth_caller_is_admin() already returns true when web auth is
-     * OFF (that's what lets an operator set the first admin password on a
-     * fresh board), so `&&` here would hide these fields from that
-     * operator and from this project's own commissioning tooling. */
-    bool may_disclose = !http_auth_policy_web_enabled() || http_auth_caller_is_admin(req);
+     *
+     * 2026-09-17 adversarial-review follow-up: the disjunction used to be
+     * spelled out inline here (and independently in readiness_http.c) with
+     * 661 lines of tests that never actually executed either call site --
+     * see http_auth_disclosure_gate.h's header comment for the full
+     * negative-test writeup. It is now the one shared
+     * http_auth_may_disclose() function, real object code linked into the
+     * host tests, so the call sites and the tests exercise the same
+     * function. Do not re-inline the disjunction here. */
+    bool may_disclose = http_auth_may_disclose(req);
 
     char ssid_escaped[WIFI_PROV_SSID_MAX_LEN * 2 + 1];
     json_escape(may_disclose ? wifi_prov_get_saved_ssid() : "", ssid_escaped, sizeof(ssid_escaped));
@@ -294,6 +298,23 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     if (!sta_connected || wifi_prov_get_sta_ip(sta_ip, sizeof(sta_ip)) != ESP_OK) {
         sta_ip[0] = '\0';
     }
+    /* 2026-09-17 disclosure fix, part 2 (adversarial review of 6de75575):
+     * sta_ip is the board's own home-LAN address. The original reasoning --
+     * "a caller able to reach this route at all already used an address to
+     * get here" -- holds for a caller on the home LAN, but not for one
+     * associated to the board's own SoftAP: WIFI_MODE_APSTA (wifi_prov.c)
+     * keeps both interfaces up whenever saved credentials exist, so such a
+     * caller reaches this route at 192.168.4.x and learns nothing about the
+     * home LAN from that connection alone. Unconditionally disclosing sta_ip
+     * handed that caller exactly the home-LAN-subnet fact the ssid/
+     * static_ip/static_netmask/static_gateway redactions above exist to
+     * withhold, undoing them. Gated on `on_ap` (computed above for
+     * ap_password) independently of may_disclose, same disjunction shape as
+     * that field: an admin always sees it; a non-admin sees it only when
+     * they did NOT arrive over the SoftAP, since such a caller already used
+     * a station-side address to get here. */
+    char sta_ip_field[sizeof(sta_ip) + 3];
+    wifi_prov_status_redact_field(may_disclose || !on_ap, sta_ip, sta_ip_field, sizeof(sta_ip_field));
 
     int8_t sta_rssi = wifi_prov_get_sta_rssi();
     uint8_t ap_clients = wifi_prov_get_ap_client_count();
@@ -308,11 +329,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     /* static_ip/netmask/gateway describe the home network's addressing
      * scheme (and, via the gateway, likely the router's admin address) --
      * redacted to JSON null under the same may_disclose gate as ssid above.
-     * sta_ip is deliberately NOT included in this set: a caller able to
-     * reach this route at all already used an address to get here (the
-     * board's own current LAN address, learned from the same connection),
-     * so withholding it narrows nothing an unauthenticated LAN caller
-     * doesn't already have. */
+     * sta_ip is gated separately, on `on_ap` rather than may_disclose alone
+     * -- see sta_ip_field's own comment above. */
     char static_ip_field[WIFI_PROV_IPV4_STR_MAX + 3];
     char static_netmask_field[WIFI_PROV_IPV4_STR_MAX + 3];
     char static_gateway_field[WIFI_PROV_IPV4_STR_MAX + 3];
@@ -329,15 +347,16 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * sent so the page can show one coherent switch plus a status line
      * without guessing at either from the other. */
     /* +64 over the previous size for the two new booleans and their keys. */
-    char json[352 + WIFI_PROV_PASSWORD_MAX_LEN * 2 + 24 + 3 * WIFI_PROV_IPV4_STR_MAX + 32 + 64];
+    char json[352 + WIFI_PROV_PASSWORD_MAX_LEN * 2 + 24 + 3 * WIFI_PROV_IPV4_STR_MAX + 32 + 64
+              + sizeof(sta_ip_field)];
     int n = snprintf(json, sizeof(json),
                      "{\"mode\":\"%s\",\"state\":\"%s\",\"ssid\":%s,\"sta_connected\":%s,"
-                     "\"sta_ip\":\"%s\",\"ap_ssid\":\"%s\",\"ap_password\":\"%s\",\"sta_rssi\":%d,"
+                     "\"sta_ip\":%s,\"ap_ssid\":\"%s\",\"ap_password\":\"%s\",\"sta_rssi\":%d,"
                      "\"ap_clients\":%u,\"ip_mode\":\"%s\",\"static_ip\":%s,"
                      "\"static_netmask\":%s,\"static_gateway\":%s,"
                      "\"ap_password_known\":%s,\"ap_password_set\":%s}",
                      mode_name(wifi_prov_get_mode()), state_name(wifi_prov_get_state()), ssid_field,
-                     sta_connected ? "true" : "false", sta_ip, ap_ssid_escaped, ap_password_escaped,
+                     sta_connected ? "true" : "false", sta_ip_field, ap_ssid_escaped, ap_password_escaped,
                      (int)sta_rssi, (unsigned)ap_clients, ip_mode, static_ip_field, static_netmask_field,
                      static_gateway_field, on_ap ? "true" : "false",
                      wifi_prov_get_ap_password()[0] ? "true" : "false");
