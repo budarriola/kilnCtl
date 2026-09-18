@@ -613,6 +613,65 @@ over to it with a JTAG probe.
   protocol's completion checklist imply for a finished one. **Size: L.**
 - Write and rehearse the **first-boot-on-a-real-kiln checklist** — section 8.
 
+**Status, 2026-09-17 (source-level pass, no hardware touched).**
+
+- **Item 1, `otadata` legibility — verified already closed, no code change
+  needed.** Traced (not assumed) `_verify_flash_landed()`
+  (`tools/PcTools/src/kilnctrl/mcp_server_flash.py:353-490`): the running-
+  partition mismatch branch (line 450) raises with the actual `running`
+  value, names `app_partition_name`, explains the `otadata` gap is a KNOWN
+  GAP (`docs/OTA_SINGLE_SLOT_PLAN.md`), states `ota_rollback_esp()` does not
+  fix it, and says what a from-scratch board needs. This exact raise path
+  is exercised by `test_flash_firmware_verify.py` (asserts `"KNOWN GAP"` in
+  the message). The docstring paragraph (lines 777-786) sits on
+  `flash_firmware()` itself, so it surfaces through `kiln_help()`/
+  `kiln_find()` at the point someone would actually invoke the tool, not
+  only in this plan. No further legibility work identified.
+- **Item 2, rollback-past-schema-bump — already closed, `bfa60679`,
+  2026-09-16** (per this section's own strikethrough above; reconfirmed
+  this pass by reading `zones_config_store.c`'s
+  `zones_cfg_load_fault_t` latch and `profile_executor_run()`'s prestart
+  refusal — a rollback to firmware that cannot parse the persisted schema
+  now refuses to start a firing rather than running on default gains).
+- **Item 3, `boot_guard_reset_counter()` default wiring — genuinely still
+  open, and not closeable at the source level.** `ap_password` remains
+  opt-in (`mcp_server_flash.py:605`, `733-754`) because the reset call goes
+  through an *authenticated* HTTP route
+  (`POST /api/ota/esp/boot_guard_reset`) — making it flash_firmware()'s
+  default would mean the tool needs a device credential on every call,
+  which is a credential-handling/architecture decision (where does the
+  password come from by default, and is a wrong guess worse than the
+  status quo of "no attempt, no warning"), not a wiring gap a source-level
+  pass should resolve unilaterally. **Needs an owner decision**, not
+  hardware.
+- **Mechanical coverage added this pass (host-verifiable, no board):**
+  - `tools/PcTools/tests/test_flash_board_pinning.py`'s new
+    `FlashFirmwareSizePreflightTest`: the pre-flight
+    `app_bin_size > app_target.size` refusal in `flash_firmware()`
+    (`mcp_server_flash.py:819-826`) existed but was never exercised by any
+    test — every other test in that file deliberately fakes `getsize()`
+    under the partition size specifically to make this check a no-op.
+    Negative-tested by disabling the guard (`if False and ...`), confirming
+    the new test goes red (result was `"flashed and verified OK"`, OpenOCD
+    WAS called), restoring by hand with Edit, and confirming an empty
+    `git diff` and a matching `git hash-object` before re-running.
+  - `firmware/KilnFW/App/test/check_boot_guard_reset_reachability.ps1`
+    (new): a static guard that `boot_guard_reset_counter()` is called from
+    nowhere except `ota_http_recovery.c` (the authenticated route) and test
+    files — the exact property whose absence the 2026-09-08 audit warned
+    about ("wiring it into every `boot_guard_init()` call instead defeats
+    the counter entirely"). Negative-tested against a throwaway copied tree
+    (never the real one) with a fabricated `boot_guard_reset_counter()`
+    call added to a fake `main_boot_early.c`; the real tree was never
+    modified so no restore was needed.
+- **Still requires the bench board and the owner, and cannot be closed from
+  a source-level pass:** the Pico half of field updates (a real end-to-end
+  transfer has never completed a single byte across the wire — Size L);
+  writing/validating a correct `otadata` blob (deliberately not attempted —
+  a wrong one risks a worse, silently-bricked boot than the current loud
+  refusal, and it cannot be validated without the board); and the
+  first-boot-on-a-real-kiln checklist rehearsal (section 8).
+
 **Already covered, name the evidence:** post-flash verification is genuinely
 solid. `flash_firmware()` polls the board's own API for the running partition
 and compares the reported build timestamp against the binary's embedded
