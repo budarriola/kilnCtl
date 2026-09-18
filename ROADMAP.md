@@ -2222,11 +2222,14 @@ built and verified distinct; every plan here is expected to do the same.
 
 ## Roadmap upkeep
 
-- [ ] Milestone ticks mirrored into the owning plan, not only here
-- [ ] `Last reviewed` date bumped whenever a milestone changes state
-- [ ] New work filed under a milestone, or a new milestone added with its owner
-- [ ] **A finished item leaves this plan.** Either it moves to a
-      reference/doc file (a decision, hazard, or reasoning someone will re-hit
-      — a one-line pointer here is enough) or it is deleted. Ticked boxes and
-      completion narratives do not accumulate here; a milestone that is fully
-      done collapses to one line
+Standing rules, not a to-do list — apply them every time this file changes,
+they never get "checked off":
+
+- Milestone ticks mirrored into the owning plan, not only here
+- `Last reviewed` date bumped whenever a milestone changes state
+- New work filed under a milestone, or a new milestone added with its owner
+- **A finished item leaves this plan.** Either it moves to a
+  reference/doc file (a decision, hazard, or reasoning someone will re-hit
+  — a one-line pointer here is enough) or it is deleted. Ticked boxes and
+  completion narratives do not accumulate here; a milestone that is fully
+  done collapses to one line

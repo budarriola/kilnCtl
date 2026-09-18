@@ -174,13 +174,18 @@ topology fields (superseded citation 0821916d, prefix not backtick-quoted
 here for the same reason), then commit ca202dbf's revert of an unnecessary
 `+ sizeof(sta_ip_field)` term in the `json[]` buffer sizing --
 blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`873f06c8`
-is the current one; see check_doc_hash_citations.ps1). Re-run: PASS, with an
-informational note (not a defect) that headroom is thin — 3 spare slots for
-137 routes against a cap of 140.
+is the current one; see check_doc_hash_citations.ps1). Re-run at that time:
+PASS, with an informational note (not a defect) that headroom was thin — 3
+spare slots for 137 routes against a cap of 140. That cap/count pair is
+itself now stale (superseded, like the blob above, by ordinary route/cap
+changes unrelated to this check's subject): re-running today
+(2026-09-18) reports 145 routes against a cap of 151 — 6 spare slots.
 
 **Verdict: load-bearing.** (Informational: cap headroom is thin enough that
 the next added route may need another bump — not a fix, since the check is
-correctly reporting current reality, not failing.)
+correctly reporting current reality, not failing. The specific spare-slot
+count drifts with ordinary route additions; re-run the check rather than
+trusting a number quoted here.)
 
 ### 6. `tools/check_test_c_files_wired.ps1`
 **Guards:** every test `.c` file under the two `test/` trees is reachable
