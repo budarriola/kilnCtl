@@ -344,6 +344,27 @@ eight more gates -- `check_c_files_in_cmakelists`, `check_no_duplicate_crc`,
 cross-language PC/firmware heartbeat producer-consumer pair) -- all found
 load-bearing.
 
+**Status, 2026-09-17 (eighth pass, partial).** Closed three of the sixth
+pass's remaining five untested UI/layout gates: `check_kv_narrow_stack.ps1`
+(sabotaged `ota_page.html`'s `.kv dd { min-width: 0 }`, confirmed RED),
+`check_label_column_overflow_wrap.ps1` (sabotaged `diagnostics_page.html`'s
+`.row .label` rule to `overflow-wrap: anywhere`, confirmed RED), and
+`check_stop_bar_body_padding.ps1` (sabotaged `app.js`'s `ResizeObserver`
+reference, confirmed RED) -- each restored by hand, confirmed by an empty
+`git diff` AND a matching `git hash-object` against the pre-sabotage blob,
+then re-run and confirmed PASS again through `run_all_checks.ps1` itself
+(not just the standalone script). No production/build artifact involved for
+any of the three (pure static-file greps), so no rebuild step was needed.
+All three found load-bearing. This adds no new checks, so the suite total is
+unchanged at 107. Remaining in this item, not attempted this pass:
+`check_ui_responsive_sweep.ps1` (the one UI/layout gate left untested -- a
+headless-Chrome sweep, expensive to sabotage safely) and both
+`check_00_*_target_build.ps1`/`check_01_*_pushed_build.ps1` pairs' FAIL
+paths. Also unrevisited: item 1's gated-out-test sweep and the
+zero-production-caller sweep called for by this item's own acceptance
+criteria have not been re-run as a fresh scripted pass in this session --
+the seven prior passes' findings stand but were not re-verified here.
+
 **Already covered, name the evidence:** the two `check_01_*_pushed_build.ps1`
 scripts are the strongest single piece of process coverage in the repo. They
 build `origin/main`'s actual content in a clean worktree rather than the local
