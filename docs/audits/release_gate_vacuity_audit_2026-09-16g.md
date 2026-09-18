@@ -165,9 +165,13 @@ bench three times before as a silent 404.
 1040). Result: FAILED — "max_uri_handlers (1) is below the real worst-case
 route count (137)...". Restored to `140`; `git diff --quiet` empty;
 `git hash-object` matched HEAD at the time (this doc's own blob citation for
-this file has since been superseded by later legitimate edits to it --
-WEB_AUTH_PLAN.md section 8's cap bump to 151 --
-blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`8b14215d`
+this file has since been superseded twice by later legitimate edits to it
+unrelated to this check's subject -- first WEB_AUTH_PLAN.md section 8's cap
+bump to 151 (superseded citation 8b14215d, prefix not backtick-quoted here
+so this check does not try to grade a hash that is expected not to resolve),
+then commit `6de75575`'s disclosure gating for the saved SSID and static-IP
+topology fields --
+blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`0821916d`
 is the current one; see check_doc_hash_citations.ps1). Re-run: PASS, with an
 informational note (not a defect) that headroom is thin — 3 spare slots for
 137 routes against a cap of 140.
