@@ -402,8 +402,8 @@ function renderEspInfo(s) {
   var info = document.getElementById('espInfo');
   info.innerHTML =
     '<dt>Running version</dt><dd>' + esc(s.version || '(unknown)') + '</dd>' +
-    '<dt>Build commit</dt><dd>' + esc(s.commit) + (s.dirty ? ' (dirty)' : '') + '</dd>' +
-    '<dt>Build date</dt><dd>' + esc(s.build_date) + '</dd>' +
+    '<dt>Build commit</dt><dd>' + esc(s.commit || '(hidden)') + (s.dirty ? ' (dirty)' : '') + '</dd>' +
+    '<dt>Build date</dt><dd>' + esc(s.build_date || '(hidden)') + '</dd>' +
     '<dt>Active slot</dt><dd>' + esc(s.active_slot) + '</dd>' +
     '<dt>Inactive slot</dt><dd>' + esc(s.inactive_slot) +
       ' (' + esc(s.inactive_version ? s.inactive_version : '(empty)') + ')</dd>';
