@@ -434,9 +434,16 @@ static void test_client_ip_max_length_round_trips(void)
     web_auth_table_init(&t);
 
     // 45 characters -- exactly WEB_AUTH_CLIENT_IP_LEN (46) minus the NUL
-    // terminator, the largest string this module ever stores without
-    // hitting the reject-on-overflow path below.
-    const char *ipv6_max = "fe80::1111:2222:3333:4444:5555:6666:7777%eth1";
+    // terminator, the longest string this module ever stores without
+    // hitting the reject-on-overflow path below. This is the IPv4-mapped
+    // IPv6 form, the genuine longest output of the one real producer,
+    // ota_http_get_client_ip()'s inet_ntop(AF_INET6, ...) call
+    // (ota_http.c) -- not a %scope-suffixed literal like the one this test
+    // used before the 2026-09-17 review's follow-up pass: that call passes
+    // inet_ntop only the bare 16-byte in6_addr, never sin6_scope_id, so a
+    // "%eth1" suffix can never actually be produced here. The length (45)
+    // was already right; only the form was unreachable.
+    const char *ipv6_max = "ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255";
     TEST_CHECK(strlen(ipv6_max) == WEB_AUTH_CLIENT_IP_LEN - 1u,
                "test sanity: this address is exactly the maximum storable length");
 
