@@ -605,14 +605,32 @@ Fitted here only, reading **summed** current of all heaters (not per-zone):
 1 A/V, ~+59 mV pin offset. Same rectifier/peak-hold front end as channels 1/2
 (HARDWARE.md §9) — no new model needed. +59 mV is this channel's
 `zero_counts[2]` (measure per the Commissioning check step 1, not a manual
-mV-to-counts conversion); `k_ct_v_per_a[2] = 0.989` gives 1 A/V at the pin
-(0.715·√2 ≈ 1.011, so 1/1.011 ≈ 0.989). Commission via the existing
-`config_params.c` ids: `0x0304` (`zero_counts[2]`, U16) and `0x030Au`
-(`k_ct_v_per_a[2]`, F32). Both refused unconditionally while ARMED, no grace
-exception (`config_store_decide_write()`). Once committed,
-`current_presence_is_flowing()` (`current_presence_policy.h`) reads these
-same two fields, so S9/S11 whole-board presence works immediately — no
-firmware change needed.
+mV-to-counts conversion); for a 1 A/V probe, `k_ct_v_per_a[2] = 1.000`, not
+0.989 as an earlier revision of this section claimed. `k_ct_v_per_a` is
+simply `1/A_fs` (`safety_ct_cal_convert()` in
+`firmware/KilnFW/App/drivers/safety/safety_cfg_store.c`) — for a probe rated
+1 A/V, `A_fs = 1`, so `k_ct_v_per_a = 1`. The front-end gain (`gain[n]`,
+`0.715` default, `config_store.c`) and the `√2` peak-to-RMS factor are
+**applied separately** by `cs_counts_to_amps()`
+(`firmware/SaftyFW/src/current_sense.c`: `amps = v_adc / (gain * CS_SQRT2 *
+k_ct)`) — they must not be folded into `k_ct` itself. The earlier
+`0.715·√2 ≈ 1.011, so 1/1.011 ≈ 0.989` derivation double-counted both
+factors: at any `gain` other than 0.715 it would silently produce a wrong
+`k_ct`, because the conversion multiplies `gain` back in on top of it.
+Commission via the existing `config_params.c` ids: `0x0304`
+(`zero_counts[2]`, U16) and `0x030Au` (`k_ct_v_per_a[2]`, F32). Both refused
+unconditionally while ARMED, no grace exception
+(`config_store_decide_write()`). Once committed, `current_presence_is_flowing()`
+(`current_presence_policy.h`) reads these same two fields, so S9/S11
+whole-board presence works immediately — no firmware change needed.
+
+**Bench state (2026-09-18):** the live board's own
+`GET /api/safety/commissioning` now reads `k_ct_v_per_a[2] = 1`,
+`zero_counts[2] = 63`, `gain[2] = 0.715` — the gain half is committed, not
+merely outstanding. This does not arm S14/S15: they remain DORMANT because
+`i_normal_a` (the per-zone expected-current baseline) is still unmeasured,
+a separate, still-true limitation. See §5.3's now-superseded "Bench state
+(2026-09-08)" note below.
 
 ### 5.3 Legacy `ct_cal[]` gain/offset correction — PC write surface removed 2026-09-08
 
@@ -663,6 +681,13 @@ and holding the S3 trip clear. Gain calibration (`A_fs`/`zero_mv` →
 bench step needing a known load with the owner present — so `amps[2]`
 reads `0.00 A` and S14/S15 stay DORMANT on that channel until it is done.
 
+**Superseded 2026-09-18:** the gain half is now committed —
+`GET /api/safety/commissioning` reads `k_ct_v_per_a[2] = 1`,
+`zero_counts[2] = 63`, `gain[2] = 0.715` (see §5.2's 2026-09-18 bench-state
+note) — so `amps[2]` no longer reads a hard `0.00 A` from an uncalibrated
+gain. S14/S15 still stay DORMANT, but for the separate, still-true reason
+that `i_normal_a` is unmeasured, not because the gain was never entered.
+
 ---
 
 ## 4. Measured noise floor — MEASURED 2026-09-06 (history below predates the measurement)
@@ -702,8 +727,12 @@ history; do not use it to conclude the gap is still open.
   formula (`zero_counts = zero_mv/1000 * gain * 4096/3.3`) is not possible
   either: there is no committed `zero_mv`/`k_ct` for channel 3 yet (§5.2
   gives the intended values, `zero_counts[2]` from param `0x0304`,
-  `k_ct_v_per_a[2] = 0.989` from `0x030A`, but neither has been committed on
-  this board — `safety_get_ct_cal` reports channel 2 uncalibrated).
+  `k_ct_v_per_a[2] = 1.000` (1/A_fs for a 1 A/V probe — see §5.2's
+  2026-09-18 correction; an earlier revision of this section wrongly said
+  0.989) from `0x030A`, but neither had been committed on this board as of
+  this pre-2026-09-06 snapshot — `safety_get_ct_cal` reported channel 2
+  uncalibrated. Both are committed on the board today; see §5.2/§5.3's
+  2026-09-18 bench-state notes).
 - Setting a calibration value to unlock the amps path was in scope for this
   task's task order **but was excluded by the task's own constraints** (no
   `SET_PARAM`/`COMMIT_CONFIG`), since that is exactly the kind of

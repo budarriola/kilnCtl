@@ -389,10 +389,14 @@ waiting to happen.
   `current_sense.c` reads them directly for both the §5 amps conversion
   and `current_presence_is_flowing()`. This is a single, live path with no
   second calibration stage in front of the guards. **Works today for
-  channel 2 (the summed topology channel)** for the zero half
-  (`zero_counts[2]=63`, confirmed holding); the gain half
-  (`A_fs`/`k_ct_v_per_a[2]`) is not yet entered, so `amps[2]`/S14/S15 read
-  `0.00 A`/DORMANT until that bench step (known load, owner present) runs.
+  channel 2 (the summed topology channel)** for both halves: the zero half
+  (`zero_counts[2]=63`, confirmed holding) and, as of 2026-09-18, the gain
+  half too — the live board's `GET /api/safety/commissioning` reads
+  `k_ct_v_per_a[2] = 1`, `gain[2] = 0.715` (`CURRENT_SENSE.md` §5.2's
+  2026-09-18 bench-state note), so `amps[2]` no longer reads a hard
+  `0.00 A`. S14/S15 remain DORMANT, but for the separate, still-true reason
+  that `i_normal_a` (the per-zone expected-current baseline) is unmeasured —
+  not because the gain was never entered.
 
 ## Order and ownership
 
