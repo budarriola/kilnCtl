@@ -267,6 +267,32 @@ if (Test-Path $stopPathNegativeTest) {
     Write-Host "         without it because -AllowFewerChecks was passed." -ForegroundColor Yellow
 }
 
+# test_check_ui_responsive_sweep.ps1 is a negative test, not a guard -- it
+# proves ui_responsive_sweep.mjs's isTransientHarnessError() classifier (used
+# by check_ui_responsive_sweep.ps1, itself glob-discovered above) can still
+# tell a transient CDP/harness error apart from a genuine layout-regression
+# FAIL. Added 2026-09-17 alongside the fix for the classifier's gap that
+# caused three real misfires under this script's own parallel phase that day
+# (see ui_responsive_sweep.mjs's comment on isTransientHarnessError() and
+# check_ui_responsive_sweep.ps1's phase-3 note below). Named test_*, not
+# check_*, so the glob above does not pick it up; wired explicitly here, same
+# pattern as the other negative tests above.
+$uiResponsiveSweepNegativeTest = Join-Path $repoRoot "firmware\KilnFW\App\test\test_check_ui_responsive_sweep.ps1"
+if (Test-Path $uiResponsiveSweepNegativeTest) {
+    $checks += Get-Item $uiResponsiveSweepNegativeTest
+    $checks = $checks | Sort-Object FullName
+} elseif (-not $AllowFewerChecks) {
+    Write-Host ""
+    Write-Host "FAILED: expected negative test $uiResponsiveSweepNegativeTest not found --" -ForegroundColor Red
+    Write-Host "        has it moved? A missing negative test must not read as a clean run." -ForegroundColor Red
+    Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+    exit 2
+} else {
+    Write-Host ""
+    Write-Host "WARNING: expected negative test $uiResponsiveSweepNegativeTest not found -- proceeding" -ForegroundColor Yellow
+    Write-Host "         without it because -AllowFewerChecks was passed." -ForegroundColor Yellow
+}
+
 # firmware/hwAbstraction/test/{compile_esp_backends,compile_pico_backends,
 # test_host_fakes}.ps1 are named compile_*/test_* rather than check_*, so
 # the glob above does not pick them up on its own -- added explicitly here,
@@ -581,21 +607,47 @@ $buildChecks = $checks | Where-Object {
     $_.FullName -match 'check_00_saftyfw_target_build\.ps1$' -or
     $_.FullName -match 'check_00_kilnfw_recovery_target_build\.ps1$'
 }
+# check_ui_responsive_sweep.ps1 (2026-09-17, diagnosed): drives real headless
+# Chrome over CDP with its own internal wall-clock timeouts
+# (Page.loadEventFired waits, a 20s per-CDP-call cap). Confirmed via
+# `tasklist` at the time of the 2026-09-17 misfires that this machine was
+# running a dozen-plus concurrent chrome.exe from sibling agents/checks
+# during Phase 2's default 8-way parallel throttle -- CPU/IO contention that
+# a standalone rerun never sees, which is exactly why every misfire that day
+# passed clean immediately afterward in isolation. The classifier gap that
+# turned one such contention-caused timeout into a hard, unretried FAIL is
+# fixed above (isTransientHarnessError() now matches
+# CdpSession.waitForEvent()'s timeout string), but contention itself can
+# still stretch this check's own internal timeouts even when every result is
+# classified correctly, so it is pulled into its own phase here, run alone
+# (-MaxParallel 1), never sharing a scheduling slot with up to 7 other
+# concurrently-running checks the way Phase 2 would otherwise give it.
 $restChecks = $checks | Where-Object {
     $_.FullName -notmatch 'check_00_kilnfw_target_build\.ps1$' -and
     $_.FullName -notmatch 'check_00_saftyfw_target_build\.ps1$' -and
     $_.FullName -notmatch 'check_00_kilnfw_recovery_target_build\.ps1$'
 }
+$uiSweepChecks = $restChecks | Where-Object {
+    $_.FullName -match 'check_ui_responsive_sweep\.ps1$'
+}
+$restChecks = $restChecks | Where-Object {
+    $_.FullName -notmatch 'check_ui_responsive_sweep\.ps1$'
+}
 
 $results = @()
 if ($buildChecks.Count -gt 0) {
-    Write-Host "Phase 1/2: target builds ($($buildChecks.Count))" -ForegroundColor Cyan
+    Write-Host "Phase 1/3: target builds ($($buildChecks.Count))" -ForegroundColor Cyan
     $results += Invoke-ChecksParallel -ChecksToRun $buildChecks -MaxParallel ([Math]::Max(1, $buildChecks.Count)) `
         -RepoRoot $repoRoot -SelfcheckPy $selfcheckPy -SelfcheckPython $selfcheckPython -ScratchDir $scratchDir -SkipExitCode $SkipExitCode
 }
 if ($restChecks.Count -gt 0) {
-    Write-Host "Phase 2/2: remaining checks ($($restChecks.Count))" -ForegroundColor Cyan
+    Write-Host "Phase 2/3: remaining checks ($($restChecks.Count))" -ForegroundColor Cyan
     $results += Invoke-ChecksParallel -ChecksToRun $restChecks -MaxParallel $MaxParallel `
+        -RepoRoot $repoRoot -SelfcheckPy $selfcheckPy -SelfcheckPython $selfcheckPython -ScratchDir $scratchDir -SkipExitCode $SkipExitCode
+}
+if ($uiSweepChecks.Count -gt 0) {
+    Write-Host "Phase 3/3: serial-only checks ($($uiSweepChecks.Count))" -ForegroundColor Cyan
+    $results += Invoke-ChecksParallel -ChecksToRun $uiSweepChecks -MaxParallel 1 `
         -RepoRoot $repoRoot -SelfcheckPy $selfcheckPy -SelfcheckPython $selfcheckPython -ScratchDir $scratchDir -SkipExitCode $SkipExitCode
 }
 

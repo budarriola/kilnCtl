@@ -58,7 +58,8 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const require = createRequire(import.meta.url);
 const { resolveDriversDir, listDriverFiles, walkFiles } = require('./_drivers_layout.js');
 const DEFAULT_DRIVERS_DIR = resolveDriversDir(__dirname);
@@ -868,7 +869,28 @@ async function sweepOnePage(port, fileUrl, width, fixtureScript) {
 // actual phrasings Node's native WebSocket implementation uses for a
 // connection-establishment/transport failure, matching this file's own
 // convention of anchoring on ^ where the signature is a whole-message shape.
-function isTransientHarnessError(e) {
+// 2026-09-17: added `^timed out waiting for ` -- CdpSession.waitForEvent()'s
+// own timeout (used by sweepOnePage() for Page.loadEventFired) throws this
+// exact message shape, and it was NOT matched by any pattern below despite
+// every other CDP-timeout source (CdpSession.send(), the per-call timeout)
+// already being covered by `^CDP call .* timed out`. Under real contention
+// (this machine routinely runs a dozen-plus concurrent headless Chrome
+// instances from other agents/checks -- confirmed directly via `tasklist`
+// during diagnosis) a real page can legitimately take longer than the 15s
+// Page.loadEventFired budget to finish loading for reasons that have nothing
+// to do with the page's own layout/JS -- CPU starvation from sibling Chrome
+// processes, not a regression. Before this fix that timeout fell through to
+// the "real exception" branch in main()'s retry loop below (isTransient
+// HarnessError returning false skips the retry entirely and reports a hard,
+// unretried FAIL) -- reproduced 2026-09-17 across three independent agent
+// runs of check_ui_responsive_sweep.ps1 under run_all_checks.ps1's default
+// 8-way parallel phase: twice as a SKIP (the DevTools-port/420s wrapper
+// budget losing the same race), once as exactly this FAIL shape ("sweep
+// threw: timed out waiting for Page.loadEventFired"), and passing every time
+// on an immediate standalone rerun -- the signature of resource contention,
+// not a layout defect. See test_check_ui_responsive_sweep.ps1's
+// unit-level assertion against this exact string for the negative test.
+export function isTransientHarnessError(e) {
   const msg = (e && e.message) || String(e);
   if (/^fixture script threw:|^setup script threw:|^page script threw:/.test(msg)) {
     return false;
@@ -876,6 +898,7 @@ function isTransientHarnessError(e) {
   return /fetch failed/i.test(msg)
       || /ECONNREFUSED|ECONNRESET|ETIMEDOUT|EPIPE|ENOTFOUND/i.test(msg)
       || /^CDP call .* timed out/i.test(msg)
+      || /^timed out waiting for /i.test(msg)
       || /^CDP connection closed:/i.test(msg)
       || /^WebSocket (was closed before the connection was established|is already in CLOSING or CLOSED state)/i.test(msg)
       || /^WebSocket connection to .* failed/i.test(msg);
@@ -1249,7 +1272,19 @@ async function main() {
   process.exit(0);
 }
 
-main().catch((e) => {
-  console.error('ui_responsive_sweep: fatal: ' + (e && e.stack || e));
-  process.exit(2);
-});
+// Guarded, not a bare top-level call: test_check_ui_responsive_sweep.ps1's
+// negative test imports this module (via a plain ESM `import`) to reach
+// isTransientHarnessError() directly, without spinning up a real headless
+// Chrome sweep as an unavoidable side effect of the import itself -- an
+// unguarded top-level main() call runs on EVERY import, which is how this
+// gap was first noticed (a throwaway import-and-call probe during this
+// fix's own diagnosis silently launched a full ~130-row Chrome sweep).
+// Only run main() when this file is the actual entry point (`node
+// ui_responsive_sweep.mjs ...`), same convention Node's own docs recommend
+// for CommonJS's require.main === module, ported to ESM via import.meta.url.
+if (path.resolve(process.argv[1] || '') === __filename) {
+  main().catch((e) => {
+    console.error('ui_responsive_sweep: fatal: ' + (e && e.stack || e));
+    process.exit(2);
+  });
+}
