@@ -1,6 +1,6 @@
 # Current Sensing
 
-> **Status:** planning · **Last reviewed:** 2026-09-06
+> **Status:** planning · **Last reviewed:** 2026-09-18
 > **Keep this file current.** If the front end, the sampling, or the calibration
 > procedure changes, update it in the same commit. If it disagrees with the
 > code, **the code wins.** Checklist at the bottom.
@@ -365,18 +365,67 @@ fine at that accuracy; billing is not.
 Because the front end has already done the demodulation, the sampler is
 simple. Deliberately so.
 
-- **Sample rate: 20 Hz per channel** (round-robin across ADC0/1/2 in the
-  RP2040's single SAR, so 60 conversions/s total — a rounding error against
-  the ADC's 500 kS/s).
+- **Acquisition rate: 100 Hz per channel, publish rate unchanged at 20 Hz**
+  (owner-directed increase, 2026-09-18, reconciled below). Round-robin
+  across ADC0/1/2 in the RP2040's single SAR either way.
 - **Oversample and average**: take 16 back-to-back conversions per channel per
-  sample and mean them. Cheap, and it buys ~2 bits against the RP2040 ADC's
-  well-documented noise.
-- **No DMA, no free-running capture, no FFT, no RMS accumulator.** All of that
-  is what you would need if the ADC saw the raw waveform. It does not.
+  acquisition tick and mean them. Cheap, and it buys ~2 bits against the
+  RP2040 ADC's well-documented noise, per tick.
+- **No DMA, no free-running/round-robin FIFO capture, no FFT, no RMS
+  accumulator.** All of that is what you would need if the ADC saw the raw
+  waveform. It does not — see the reconciliation note immediately below for
+  why this still holds at the higher rate.
 - Feed a **slow first-order filter** (τ ≈ 0.5 s) on top, for reporting only.
   **Guards evaluate the unfiltered sample**, so that filter can never delay a
   trip — the same discipline `KilnFW` applies to raw-versus-calibrated
   readings in `thermal_guard.h`.
+
+### 2026-09-18 reconciliation: 100 Hz acquisition, and why the four bans above still stand
+
+The owner directed a rate increase to 100 Hz. That is built
+(`current_sense_acquire_tick()`/`current_sense.c`), but it is built as
+**5 bounded acquisition ticks per existing 50 ms publish pass**, not as a
+change to the publish cadence, the filter time constant, or the power
+window — none of `CS_FILTER_TAU_S`, `SAFTYFW_PERIOD_CURRENT_TASK_MS`,
+`CS_POWER_WINDOW_S`/`CS_POWER_WINDOW_SAMPLES`, or
+`CURRENT_TASK_CT_AUTO_ZERO_TARGET_SAMPLES` needed to change, because none of
+them are paired against the *acquisition* rate — they are paired against the
+*publish* rate, which this change does not touch. See
+`docs/audits/ct_sampling_mains_aliasing_review_2026-09-18.md` for the full
+paired-constant audit.
+
+**What this buys, honestly.** Going from 16x to effectively 5×16=80x
+oversample per publish pass buys roughly `sqrt(80/16) = sqrt(5) ≈ 2.24×`
+further reduction in the ADC's own broadband/quantization noise, **if that
+noise is uncorrelated sample to sample** — the same assumption the existing
+16x oversample already leans on. Measured idle noise on the one fitted
+channel (§4 above, 2026-09-06 run): std ≈ 4.678 counts / ≈3.8 mA. A 2.24×
+reduction on that figure is std ≈ 2.09 counts / ≈1.7 mA, if the noise source
+is genuinely broadband. **This does NOT apply to correlated pickup** — mains
+hum coupled into the front end, ripple on the unregulated `3.3v_Safty`
+reference rail, anything periodic — averaging more samples of a correlated
+signal does not shrink it, because the samples are not independent draws of
+random noise. Nobody has re-measured the noise floor at the new rate against
+real hardware to confirm which regime dominates; the number above is a
+projection from the 2026-09-06 measurement's own std, not a new
+measurement, and should be re-taken (same `safety_capture_ct_counts()`
+procedure) before it is trusted for anything more than "probably better,
+possibly by a lot less than 2.24×."
+
+**Why free-running/round-robin FIFO capture, DMA, FFT and an RMS
+accumulator are all still banned, at 100 Hz exactly as at 20 Hz:** every one
+of those techniques is a way of getting more information out of a *raw AC
+waveform*. The front end in front of this ADC is not one — it is a
+rectified peak-envelope with a 1 s decay (§1, R77‖C57). There is no
+waveform for an RMS accumulator to integrate, no periodic signal for an FFT
+to resolve, and free-running/round-robin FIFO capture only buys anything
+over manual `adc_select_input()`+bounded-`adc_read()` polling when the goal
+is to keep up with a fast-changing analog input across many channels — this
+module's own discard+16-oversample-per-tick burst, called 5x per publish
+pass, already achieves the round-robin-across-ADC0/1/2 requirement without
+free-running mode's FIFO-reordering cost (see `current_sense.c`'s header
+comment). A mains-cycle-locked sampler was also explicitly NOT built, for
+the same reason: there is no mains cycle visible at this ADC to lock to.
 
 ### RP2040 ADC errata
 

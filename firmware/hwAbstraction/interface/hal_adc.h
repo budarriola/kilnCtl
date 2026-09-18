@@ -38,6 +38,20 @@ hal_status_t hal_adc_gpio_enable(int pin);
 hal_status_t hal_adc_select(int channel);
 uint16_t     hal_adc_read_raw(void);
 
+/* Bounded variant of hal_adc_read_raw(): same single-shot conversion, but
+ * the wait for "conversion done" is capped at a documented, generous spin
+ * count instead of spinning forever. Returns HAL_OK with *out_counts set on
+ * a normal conversion, or HAL_TIMEOUT (out_counts left unwritten) if the
+ * bound is exceeded -- a caller must treat HAL_TIMEOUT as "no reading this
+ * attempt", never substitute 0 or a stale value itself (see current_sense.c
+ * for how the accumulator layer surfaces this as a degraded window rather
+ * than a silently-wrong average). Added so current_sense.c's acquisition
+ * path can honor "every hardware read path bounded, with a stated bound and
+ * named degraded-result behavior on timeout" without ever holding a lock
+ * across a hardware wait -- see hal_adc_pico.c / fake_adc.c for the bound
+ * each backend enforces. */
+hal_status_t hal_adc_read_raw_bounded(uint16_t *out_counts);
+
 #ifdef __cplusplus
 }
 #endif

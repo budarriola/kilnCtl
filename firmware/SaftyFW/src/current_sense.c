@@ -23,6 +23,28 @@
 // letter. This is documented here explicitly as a judgement call because
 // the two docs read as being in tension until you notice one is general
 // platform guidance and the other is this module's own spec.
+//
+// 2026-09-18, owner-directed 100 Hz rate increase: still no DMA, no free-
+// running/round-robin FIFO capture, no FFT, no RMS accumulator -- those four
+// bans still stand, and for the same reason as always: the front end is a
+// rectified peak-envelope with a 1 s decay (R77||C57, tau=1.0s), not a raw
+// AC waveform, so there is no waveform for an RMS accumulator or an FFT to
+// operate on, and free-running capture buys nothing this module's own
+// discard+oversample burst per channel doesn't already do more simply. What
+// changed: current_sense_acquire_tick() now runs FIVE bounded, single-shot,
+// manually-muxed rounds (still exactly the adc_select_input()+bounded-
+// adc_read() polling described above, still no FIFO) per current_sense_
+// sample() publish pass instead of one, at the SAME manually-muxed,
+// non-free-running discipline -- see current_sense.h's CURRENT_SENSE_TICKS_
+// PER_SAMPLE comment. This buys sqrt(5*16 / 16) ~= sqrt(5) ~= 2.24x
+// reduction in the ADC's own broadband/quantization noise on top of the
+// existing 16x-oversample's sqrt(16)=4x, IF that noise is uncorrelated
+// sample to sample -- honestly, NOT for correlated pickup (mains hum
+// coupled into the front end, supply ripple) since averaging more samples
+// of a correlated signal does not shrink it. See docs/CURRENT_SENSE.md
+// section 4's reconciliation note and docs/audits/
+// ct_sampling_mains_aliasing_review_2026-09-18.md for the full reasoning
+// this rate increase was built against.
 #include "current_sense.h"
 
 #include <math.h>
@@ -100,6 +122,24 @@ static cs_conduction_window_t s_window[3];
 static float s_filtered_amps[3];
 static bool  s_filter_initialized[3];
 
+// Acquisition accumulator, filled by current_sense_acquire_tick(), drained
+// by current_sense_sample() -- see current_sense.h's comments on both. Only
+// the merge into these fields runs under taskENTER_CRITICAL(); the ADC
+// reads and the oversample-average arithmetic that feed the merge run
+// outside it, and the divide-by-count arithmetic in the drain step also
+// runs outside it (a local copy is taken under the critical section, then
+// the copy is used unlocked) -- "accumulate under a short critical section,
+// do arithmetic outside" per this task's acquisition requirements.
+typedef struct {
+    uint64_t sum;      // sum of this tick's 16x-oversampled per-tick averages
+    uint16_t count;    // successful ticks accumulated since the last drain
+    uint16_t timeouts; // ticks this channel aborted on a bounded-read timeout
+} cs_accum_t;
+
+static cs_accum_t s_accum[3];
+
+static uint32_t s_degraded_window_count;
+
 void current_sense_set_cal(const current_sense_cal_t *cal)
 {
     s_cal = *cal;
@@ -145,7 +185,12 @@ void current_sense_init(void)
         }
         s_filtered_amps[n] = 0.0f;
         s_filter_initialized[n] = false;
+
+        s_accum[n].sum = 0;
+        s_accum[n].count = 0;
+        s_accum[n].timeouts = 0;
     }
+    s_degraded_window_count = 0;
 }
 
 // One 16x-oversampled, first-discarded read of the given ADC channel index
@@ -165,6 +210,55 @@ static uint32_t cs_read_channel_counts(int n)
         sum += hal_adc_read_raw();
     }
     return sum / CS_OVERSAMPLE_N;
+}
+
+// One bounded, non-blocking round-robin acquisition tick -- see
+// current_sense.h's comment. Each individual conversion goes through
+// hal_adc_read_raw_bounded() (HAL_OK / HAL_TIMEOUT), never the old unbounded
+// hal_adc_read_raw() -- that stays reserved for cs_read_channel_counts()/
+// current_sense_recalibrate_zero(), an explicitly blocking, commissioning-
+// only, hardware-unvalidated path (current_sense.h's own doc comment on
+// that function). A channel that times out on ANY conversion this tick
+// (the discard read or any of the 16 oversamples) aborts just that
+// channel's loop immediately and records a timeout -- it never averages a
+// partial set of samples and calls that a reading.
+void current_sense_acquire_tick(void)
+{
+    for (int n = 0; n < 3; n++) {
+        hal_adc_select(s_adc_channel[n]);
+
+        bool timed_out = false;
+        uint16_t v;
+
+        // Discard-first-after-mux-switch, same policy as cs_read_channel_
+        // counts() -- see this file's header comment.
+        if (hal_adc_read_raw_bounded(&v) != HAL_OK) {
+            timed_out = true;
+        }
+
+        uint32_t sum = 0;
+        if (!timed_out) {
+            for (uint32_t i = 0; i < CS_OVERSAMPLE_N; i++) {
+                if (hal_adc_read_raw_bounded(&v) != HAL_OK) {
+                    timed_out = true;
+                    break;
+                }
+                sum += v;
+            }
+        }
+
+        // Merge into the shared accumulator. Only this handful of integer
+        // updates runs inside the critical section -- no hardware access,
+        // no division, bounded to a few instructions per channel per tick.
+        taskENTER_CRITICAL();
+        if (timed_out) {
+            s_accum[n].timeouts++;
+        } else {
+            s_accum[n].sum += (sum / CS_OVERSAMPLE_N);
+            s_accum[n].count++;
+        }
+        taskEXIT_CRITICAL();
+    }
 }
 
 // Section 5's exact formula:
@@ -224,20 +318,63 @@ static float cs_window_fraction(int n)
 
 void current_sense_sample(void)
 {
+    // Drive the 100 Hz acquisition ourselves: CURRENT_SENSE_TICKS_PER_SAMPLE
+    // (5) bounded, non-blocking ticks against the existing 50 ms/20 Hz
+    // publish cadence current_task.c's loop already calls us at -- see
+    // current_sense.h's header comment on CURRENT_SENSE_TICKS_PER_SAMPLE for
+    // why this needs no change to current_task.c, SAFTYFW_PERIOD_CURRENT_
+    // TASK_MS, or any constant paired against that period.
+    for (uint32_t t = 0; t < CURRENT_SENSE_TICKS_PER_SAMPLE; t++) {
+        current_sense_acquire_tick();
+    }
+
+    // Drain: snapshot-and-clear the accumulator under a short critical
+    // section (no arithmetic inside it), then do the divide-by-count
+    // arithmetic unlocked.
+    cs_accum_t local[3];
+    taskENTER_CRITICAL();
+    for (int n = 0; n < 3; n++) {
+        local[n] = s_accum[n];
+        s_accum[n].sum = 0;
+        s_accum[n].count = 0;
+        s_accum[n].timeouts = 0;
+    }
+    taskEXIT_CRITICAL();
+
+    uint32_t counts_avg[3];
+    bool degraded = false;
+    for (int n = 0; n < 3; n++) {
+        if (local[n].count == 0 || local[n].timeouts > 0) {
+            degraded = true;
+        } else {
+            counts_avg[n] = (uint32_t)(local[n].sum / local[n].count);
+        }
+    }
+
+    if (degraded) {
+        // Never publish a partial/aborted window as complete: hold
+        // s_snapshot/s_power (and their timestamp_ms) exactly as they were.
+        // safety_core.c's existing snapshot_is_fresh()/CURRENT_MAX_AGE_MS
+        // staleness gate ages this out on its own if degraded windows keep
+        // happening -- nothing here needs to know about guards to be safe.
+        if (s_degraded_window_count < UINT32_MAX) {
+            s_degraded_window_count++;
+        }
+        return;
+    }
+
     current_snapshot_t snap = {0};
     snap.timestamp_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
     snap.calibrated = s_cal.calibrated;
 
     for (int n = 0; n < 3; n++) {
-        uint32_t counts_avg = cs_read_channel_counts(n);
-
         // Published unconditionally, independent of calibration state --
         // see snapshots.h's counts_avg field comment. Always fits u16
         // (12-bit ADC, CS_ADC_MAX_COUNTS == 4095).
-        snap.counts_avg[n] = (uint16_t)counts_avg;
+        snap.counts_avg[n] = (uint16_t)counts_avg[n];
 
-        bool clipped = (counts_avg >= CS_CLIP_THRESHOLD_COUNTS);
-        float amps = cs_counts_to_amps(n, counts_avg);
+        bool clipped = (counts_avg[n] >= CS_CLIP_THRESHOLD_COUNTS);
+        float amps = cs_counts_to_amps(n, counts_avg[n]);
 
         // S3/S9/S11/S6b's presence fact, decoupled from k_ct_v_per_a -- see
         // current_presence_policy.h's header comment. Computed from the
@@ -247,7 +384,7 @@ void current_sense_sample(void)
         // the two functions never disagree about which gain a commissioned
         // channel is using).
         float resolved_gain = (s_cal.gain[n] > 0.0f) ? s_cal.gain[n] : CS_DEFAULT_GAIN;
-        bool present = current_presence_is_flowing(counts_avg, s_cal.zero_counts[n],
+        bool present = current_presence_is_flowing(counts_avg[n], s_cal.zero_counts[n],
                                                      s_cal.i_present_a, s_cal.k_ct_v_per_a[n],
                                                      resolved_gain);
 
@@ -330,6 +467,11 @@ void current_sense_sample(void)
 
     s_snapshot = snap;
     s_power.timestamp_ms = snap.timestamp_ms;
+}
+
+uint32_t current_sense_get_degraded_window_count(void)
+{
+    return s_degraded_window_count;
 }
 
 void current_sense_get_snapshot(current_snapshot_t *out)

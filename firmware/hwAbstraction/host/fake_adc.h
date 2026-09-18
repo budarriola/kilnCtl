@@ -40,6 +40,14 @@ int    fake_adc_current_channel(void); /* -1 if none selected / not initialized 
 bool   fake_adc_is_gpio_enabled(int pin);
 size_t fake_adc_read_count(void); /* total hal_adc_read_raw() calls made */
 
+/* Forces the next `count` hal_adc_read_raw_bounded() calls made while
+ * `channel` is selected to return HAL_TIMEOUT instead of consuming a
+ * scripted sample -- the negative-test hook for current_sense.c's bounded-
+ * read timeout/degraded-window handling, since a host build has no real
+ * ADC hardware to actually wedge. Returns HAL_INVALID_ARG for an
+ * out-of-range channel. Cleared by fake_adc_reset(). */
+hal_status_t fake_adc_script_timeout(int channel, size_t count);
+
 #ifdef __cplusplus
 }
 #endif

@@ -16,6 +16,7 @@ static bool                s_gpio_enabled[FAKE_ADC_NUM_GPIO_PINS];
 static int                 s_selected_channel = -1;
 static fake_adc_channel_t  s_channels[FAKE_ADC_NUM_CHANNELS];
 static size_t              s_read_count;
+static size_t              s_forced_timeouts[FAKE_ADC_NUM_CHANNELS];
 
 static bool chan_in_range(int ch)
 {
@@ -26,9 +27,17 @@ void fake_adc_reset(void)
 {
     memset(s_gpio_enabled, 0, sizeof(s_gpio_enabled));
     memset(s_channels, 0, sizeof(s_channels));
+    memset(s_forced_timeouts, 0, sizeof(s_forced_timeouts));
     s_initialized = false;
     s_selected_channel = -1;
     s_read_count = 0;
+}
+
+hal_status_t fake_adc_script_timeout(int channel, size_t count)
+{
+    if (!chan_in_range(channel)) return HAL_INVALID_ARG;
+    s_forced_timeouts[channel] += count;
+    return HAL_OK;
 }
 
 hal_status_t fake_adc_script_samples(int channel, const uint16_t *samples, size_t count)
@@ -105,4 +114,24 @@ uint16_t hal_adc_read_raw(void)
     c->head = (c->head + 1) % FAKE_ADC_SCRIPT_CAP;
     c->count--;
     return v;
+}
+
+hal_status_t hal_adc_read_raw_bounded(uint16_t *out_counts)
+{
+    s_read_count++;
+    if (!s_initialized || s_selected_channel < 0) return HAL_NOT_READY;
+    if (s_forced_timeouts[s_selected_channel] > 0) {
+        s_forced_timeouts[s_selected_channel]--;
+        return HAL_TIMEOUT;
+    }
+    fake_adc_channel_t *c = &s_channels[s_selected_channel];
+    if (c->count == 0) return HAL_NOT_READY; /* script exhausted -- distinct
+        from a forced timeout so a test asserting on HAL_TIMEOUT specifically
+        cannot be satisfied by accident, e.g. by simply forgetting to script
+        enough samples. */
+    uint16_t v = c->samples[c->head];
+    c->head = (c->head + 1) % FAKE_ADC_SCRIPT_CAP;
+    c->count--;
+    if (out_counts) *out_counts = v;
+    return HAL_OK;
 }

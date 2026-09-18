@@ -37,6 +37,22 @@ extern "C" {
 // from this value without either side's build failing.
 #define CURRENT_SENSE_OVERSAMPLE_N 16u
 
+// Owner-directed rate increase, 2026-09-18: acquire 5 bounded, non-blocking
+// round-robin ticks (current_sense_acquire_tick()) per current_sense_sample()
+// publish pass -- SAFTYFW_PERIOD_CURRENT_TASK_MS (50 ms/20 Hz) stays the
+// publish cadence (unchanged, so CS_FILTER_TAU_S/CS_POWER_WINDOW_SAMPLES and
+// every other constant paired against it needs no change -- see
+// current_sense.c's audit comment above current_sense_sample()), so 5 ticks
+// per 50 ms publish = 100 Hz effective per-channel acquisition rate. Public
+// for the same reason CURRENT_SENSE_OVERSAMPLE_N is: test/test_current_sense_
+// hal_adc.c derives its scripted tick/sample counts from this constant
+// rather than a separately-typed mirror. See docs/CURRENT_SENSE.md section 4
+// for why this is oversampling against the ADC's own broadband noise, NOT a
+// mains-cycle-locked sampler or an RMS accumulator -- the front end this
+// module reads is a rectified peak-envelope with a 1 s decay, not a raw AC
+// waveform (docs/audits/ct_sampling_mains_aliasing_review_2026-09-18.md).
+#define CURRENT_SENSE_TICKS_PER_SAMPLE 5u
+
 // Per-channel calibration, docs/CURRENT_SENSE.md section 5 -- "measured
 // configuration, stored in flash, never compiled-in constants". Real values
 // come from config_store.c, which does not exist yet (TODO.md Phase 9), so
@@ -158,13 +174,61 @@ void current_sense_set_ct_cal(const ct_amps_cal_table_t *ct_cal);
 // current_task.c -- current_task_start() already does both).
 void current_sense_init(void);
 
-// Runs one full round-robin pass across ADC0/1/2 (16x oversample each,
-// first-after-mux-switch conversion discarded) and updates internal state.
-// Not reentrant; call only from current_task's own loop, at
-// SAFTYFW_PERIOD_CURRENT_TASK_MS. Touches real hardware -- see
-// current_sense.c's header comment for why this is manual adc_select_input()
-// polling rather than adc_run()/round-robin FIFO capture.
+// One bounded, non-blocking round-robin acquisition tick across ADC0/1/2
+// (16x oversample each, first-after-mux-switch conversion discarded, each
+// individual conversion bounded via hal_adc_read_raw_bounded()). Accumulates
+// into a small internal per-channel accumulator (sum/count/timeout) under a
+// short critical section -- the arithmetic itself runs OUTSIDE the critical
+// section, only the accumulator update is guarded, so this never holds a
+// lock across a hardware wait. Meant to be called CURRENT_SENSE_TICKS_PER_
+// SAMPLE times per current_sense_sample() call (current_sense_sample() does
+// this itself -- see its own comment) to reach 100 Hz effective per-channel
+// acquisition against the existing 50 ms/20 Hz publish cadence. Directly
+// callable on its own too -- this is what makes the acquisition path host-
+// testable: the host FreeRTOS stub (test/stubs/freertos_min) never actually
+// runs a created task, so a test simulates elapsed acquisition time by
+// calling this function directly, the same number of times a real 10 ms-
+// paced on-target driver would have by then. A single channel timing out
+// (hal_adc_read_raw_bounded() returning HAL_TIMEOUT) aborts only that
+// channel's oversample loop for this tick and records a timeout, never a
+// partial/garbage average -- current_sense_sample()'s drain step is what
+// turns an accumulated timeout into a degraded, unpublished window (see its
+// comment). Not reentrant; call only from current_task's own context.
+void current_sense_acquire_tick(void);
+
+// Drains the accumulator current_sense_acquire_tick() has been filling
+// (CURRENT_SENSE_TICKS_PER_SAMPLE ticks' worth, nominally) and, if every
+// channel accumulated at least one successful tick and zero timeouts this
+// window, publishes a new current_snapshot_t/current_sense_power_t exactly
+// as before. If ANY channel has zero successful ticks or at least one
+// timeout, this pass publishes NOTHING: the previous s_snapshot/s_power
+// (and their timestamp_ms) are left untouched, and the degraded-window
+// counter (current_sense_get_degraded_window_count()) increments instead --
+// see that getter's comment for why this is enough, on its own, for a
+// downstream consumer to degrade safely without current_sense.c having to
+// know anything about guard logic. Still call this once per current_task's
+// existing SAFTYFW_PERIOD_CURRENT_TASK_MS period -- it calls current_sense_
+// acquire_tick() CURRENT_SENSE_TICKS_PER_SAMPLE times itself first, so a
+// caller must NOT also call current_sense_acquire_tick() directly in
+// production use (only host tests, simulating a real on-target driver's
+// ticks, call current_sense_acquire_tick() on its own). Not reentrant; call
+// only from current_task's own loop, at SAFTYFW_PERIOD_CURRENT_TASK_MS.
+// Touches real hardware -- see current_sense.c's header comment for why
+// this is manual adc_select_input() polling rather than adc_run()/round-
+// robin FIFO capture.
 void current_sense_sample(void);
+
+// Count of publish passes current_sense_sample() has skipped because at
+// least one channel's accumulated window this pass was degraded (zero
+// successful ticks, or any bounded-read timeout) -- diagnostic only, not
+// wired to any guard or wire frame yet. A nonzero, growing count here means
+// the ADC acquisition path is missing its 100 Hz budget or hitting real
+// hardware timeouts; the LAST GOOD snapshot/power reading is still whatever
+// current_sense_get_snapshot()/current_sense_get_power() return, aging
+// naturally via current_snapshot_t.timestamp_ms not advancing -- the same
+// staleness mechanism safety_core.c already applies (CURRENT_MAX_AGE_MS/
+// snapshot_is_fresh()), unchanged by this module.
+uint32_t current_sense_get_degraded_window_count(void);
 
 // Copies out the most recent unfiltered snapshot. Safe to call from any
 // task; current_sense.c itself does no locking, so current_task.c wraps

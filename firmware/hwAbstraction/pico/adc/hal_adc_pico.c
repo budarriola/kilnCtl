@@ -21,6 +21,8 @@
 #include "hal_adc.h"
 
 #include "hardware/adc.h"
+#include "hardware/structs/adc.h"
+#include "hardware/address_mapped.h" /* hw_set_bits() */
 
 hal_status_t hal_adc_init(void) {
     adc_init();
@@ -41,6 +43,34 @@ hal_status_t hal_adc_select(int channel) {
 
 uint16_t hal_adc_read_raw(void) {
     return adc_read();
+}
+
+/* Bounded variant of adc_read()'s own body (pico-sdk's adc_read() spins
+ * forever on ADC_CS_READY_BITS): same START_ONCE trigger and the same
+ * result register, but the wait loop is capped.
+ *
+ * Bound: a single RP2040 ADC conversion is documented at 96 cycles of the
+ * (default) 48 MHz ADC clock, ~2 us. HAL_ADC_BOUNDED_SPIN_LIMIT below is
+ * 100,000 iterations of a tight_loop_contents() spin -- at even a
+ * pessimistic 10 cycles/iteration overhead on a 125 MHz M0+, that is
+ * >=8 ms of margin, roughly 4000x the nominal 2 us conversion time. This
+ * has NOT been measured against real hardware (no RP2040 attached to the
+ * build machine, same caveat as the rest of this module) -- it is sized to
+ * be generous enough that a genuine timeout can only mean "the ADC
+ * peripheral itself is wedged", not "the bound was cut too close", while
+ * still being a hard, finite cap rather than adc_read()'s unbounded spin. */
+#define HAL_ADC_BOUNDED_SPIN_LIMIT 100000u
+
+hal_status_t hal_adc_read_raw_bounded(uint16_t *out_counts) {
+    hw_set_bits(&adc_hw->cs, ADC_CS_START_ONCE_BITS);
+    for (uint32_t spins = 0; spins < HAL_ADC_BOUNDED_SPIN_LIMIT; spins++) {
+        if (adc_hw->cs & ADC_CS_READY_BITS) {
+            *out_counts = (uint16_t)adc_hw->result;
+            return HAL_OK;
+        }
+        tight_loop_contents();
+    }
+    return HAL_TIMEOUT;
 }
 
 /* No INTERFACE MISMATCH here: pico-sdk's adc_init/adc_gpio_init/
