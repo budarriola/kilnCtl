@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
+#include "http_auth_policy_iface.h" // http_auth_policy_web_enabled()
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -242,8 +243,26 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * comment. Cheap no-op unless ip_mode is STATIC and unconfirmed. */
     wifi_prov_note_possible_static_reachability(httpd_req_to_sockfd(req));
 
+    /* 2026-09-17 disclosure fix: the saved home network's SSID, and (below)
+     * the STA static-IP topology, were unconditionally readable by any
+     * unauthenticated caller on the LAN even though this route is one of
+     * the ones a client had to already be ON the LAN to reach at all. This
+     * route stays ROUTE_TIER_OPEN on purpose -- an unprovisioned board has
+     * to answer /status before anyone can authenticate -- so the fix is in
+     * the payload, same as the ap_password narrowing just above and the
+     * on_ap gate two fixes of this class already landed for other routes.
+     * Disjunction, not conjunction, with the enabled check, for the same
+     * reason as ap_password/on_ap and the readiness crash-detail fix:
+     * http_auth_caller_is_admin() already returns true when web auth is
+     * OFF (that's what lets an operator set the first admin password on a
+     * fresh board), so `&&` here would hide these fields from that
+     * operator and from this project's own commissioning tooling. */
+    bool may_disclose = !http_auth_policy_web_enabled() || http_auth_caller_is_admin(req);
+
     char ssid_escaped[WIFI_PROV_SSID_MAX_LEN * 2 + 1];
-    json_escape(wifi_prov_get_saved_ssid(), ssid_escaped, sizeof(ssid_escaped));
+    json_escape(may_disclose ? wifi_prov_get_saved_ssid() : "", ssid_escaped, sizeof(ssid_escaped));
+    char ssid_field[WIFI_PROV_SSID_MAX_LEN * 2 + 3];
+    wifi_prov_status_redact_field(may_disclose, ssid_escaped, ssid_field, sizeof(ssid_field));
 
     char ap_ssid_escaped[WIFI_PROV_SSID_MAX_LEN * 2 + 1];
     json_escape(wifi_prov_get_ap_ssid(), ap_ssid_escaped, sizeof(ap_ssid_escaped));
@@ -286,9 +305,23 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * server validated), so no json_escape() needed -- same as sta_ip just
      * above. */
     const char *ip_mode = ip_mode_name(wifi_prov_get_ip_mode());
-    const char *static_ip = wifi_prov_get_static_ip();
-    const char *static_netmask = wifi_prov_get_static_netmask();
-    const char *static_gateway = wifi_prov_get_static_gateway();
+    /* static_ip/netmask/gateway describe the home network's addressing
+     * scheme (and, via the gateway, likely the router's admin address) --
+     * redacted to JSON null under the same may_disclose gate as ssid above.
+     * sta_ip is deliberately NOT included in this set: a caller able to
+     * reach this route at all already used an address to get here (the
+     * board's own current LAN address, learned from the same connection),
+     * so withholding it narrows nothing an unauthenticated LAN caller
+     * doesn't already have. */
+    char static_ip_field[WIFI_PROV_IPV4_STR_MAX + 3];
+    char static_netmask_field[WIFI_PROV_IPV4_STR_MAX + 3];
+    char static_gateway_field[WIFI_PROV_IPV4_STR_MAX + 3];
+    wifi_prov_status_redact_field(may_disclose, wifi_prov_get_static_ip(), static_ip_field,
+                                   sizeof(static_ip_field));
+    wifi_prov_status_redact_field(may_disclose, wifi_prov_get_static_netmask(), static_netmask_field,
+                                   sizeof(static_netmask_field));
+    wifi_prov_status_redact_field(may_disclose, wifi_prov_get_static_gateway(), static_gateway_field,
+                                   sizeof(static_gateway_field));
 
     /* mode is the one explicit toggle the page renders; state is the
      * finer-grained detail of what's happening while home mode acts on a
@@ -298,15 +331,15 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     /* +64 over the previous size for the two new booleans and their keys. */
     char json[352 + WIFI_PROV_PASSWORD_MAX_LEN * 2 + 24 + 3 * WIFI_PROV_IPV4_STR_MAX + 32 + 64];
     int n = snprintf(json, sizeof(json),
-                     "{\"mode\":\"%s\",\"state\":\"%s\",\"ssid\":\"%s\",\"sta_connected\":%s,"
+                     "{\"mode\":\"%s\",\"state\":\"%s\",\"ssid\":%s,\"sta_connected\":%s,"
                      "\"sta_ip\":\"%s\",\"ap_ssid\":\"%s\",\"ap_password\":\"%s\",\"sta_rssi\":%d,"
-                     "\"ap_clients\":%u,\"ip_mode\":\"%s\",\"static_ip\":\"%s\","
-                     "\"static_netmask\":\"%s\",\"static_gateway\":\"%s\","
+                     "\"ap_clients\":%u,\"ip_mode\":\"%s\",\"static_ip\":%s,"
+                     "\"static_netmask\":%s,\"static_gateway\":%s,"
                      "\"ap_password_known\":%s,\"ap_password_set\":%s}",
-                     mode_name(wifi_prov_get_mode()), state_name(wifi_prov_get_state()), ssid_escaped,
+                     mode_name(wifi_prov_get_mode()), state_name(wifi_prov_get_state()), ssid_field,
                      sta_connected ? "true" : "false", sta_ip, ap_ssid_escaped, ap_password_escaped,
-                     (int)sta_rssi, (unsigned)ap_clients, ip_mode, static_ip, static_netmask,
-                     static_gateway, on_ap ? "true" : "false",
+                     (int)sta_rssi, (unsigned)ap_clients, ip_mode, static_ip_field, static_netmask_field,
+                     static_gateway_field, on_ap ? "true" : "false",
                      wifi_prov_get_ap_password()[0] ? "true" : "false");
     if (n < 0) {
         n = 0;

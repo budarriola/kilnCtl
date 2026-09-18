@@ -327,6 +327,47 @@ static inline readiness_status_t readiness_crash_report_status(bool have_record,
     return READY_OK;
 }
 
+/* 2026-09-17 disclosure fix: this same crash_report_record_t is also the
+ * subject of GET /api/crash_report, which route_tier_table.h deliberately
+ * classifies ROUTE_TIER_ADMIN because exc_cause_str/exc_task can hint at
+ * what code is running and how it broke. GET /api/readiness is
+ * ROUTE_TIER_OPEN on purpose (an unprovisioned board must answer readiness
+ * before anyone can authenticate) and stays that way -- but the checklist
+ * item's `detail` string was folding in the same cause/task with no gate at
+ * all, sidestepping the dedicated route's ADMIN tier. Pure formatter (facts
+ * in, string out) for the same host-testability reason every other
+ * readiness_*_status() predicate in this header is pure: `have_record`/
+ * `acknowledged` decide whether a crash is on record and unacknowledged at
+ * all (an operational fact -- capability_preflight refuses on it -- so it
+ * is NEVER hidden), while `may_disclose` gates only the cause string and
+ * task name themselves. Callers pass
+ * `!http_auth_policy_web_enabled() || http_auth_caller_is_admin(req)` for
+ * `may_disclose` -- a disjunction, not `&&`, because
+ * http_auth_caller_is_admin() already returns true when web auth is OFF
+ * (that's what lets an operator set the first admin password on a fresh
+ * board); `&&` here would hide the detail from that operator and from this
+ * project's own commissioning tooling on an unprovisioned board. */
+static inline void readiness_crash_report_detail(bool have_record, bool acknowledged, bool may_disclose,
+                                                  const char *exc_cause_str, const char *exc_task,
+                                                  char *out, size_t out_cap)
+{
+    if (!have_record) {
+        snprintf(out, out_cap, "no crash on record");
+    } else if (!acknowledged) {
+        if (may_disclose) {
+            snprintf(out, out_cap, "unacknowledged crash on record (%s, task %s) -- review /diagnostics "
+                     "before firing",
+                     (exc_cause_str && exc_cause_str[0]) ? exc_cause_str : "unknown cause",
+                     exc_task ? exc_task : "");
+        } else {
+            snprintf(out, out_cap, "unacknowledged crash on record (details require admin sign-in) -- "
+                     "review /diagnostics before firing");
+        }
+    } else {
+        snprintf(out, out_cap, "last crash on record has been acknowledged");
+    }
+}
+
 /* Pure decision for the "Recovery-mode boot" item (boot_guard.h,
  * RECOVERY_MODE_ENABLED): a board that booted into recovery mode has
  * deliberately skipped starting profile_executor/autotune_engine/rules_task

@@ -1743,6 +1743,61 @@ try {
 
     Invoke-HostTestExe -Name "web_auth_login_http" -ExePath $exe45 -BuildCmd $cmd45
 
+    # ---- test_readiness_crash_disclosure.c: its own 46th, separate
+    # executable -- 2026-09-17 ROUTE_TIER_OPEN disclosure audit finding 2:
+    # GET /api/readiness's crash-report checklist item leaked
+    # exc_cause_str/exc_task with no auth check, sidestepping
+    # GET /api/crash_report's deliberate ROUTE_TIER_ADMIN classification.
+    # readiness_http.c itself cannot be host-compiled (two GCC-only
+    # asm("_binary_...") blob externs `cl` cannot parse), so this file tests
+    # the pure formatter (readiness_crash_report_detail(), readiness_http.h,
+    # header-only) directly, plus the real may_disclose gate composed from
+    # the actual http_auth_http.c/http_auth_enforce.c/http_auth_policy_iface.c/
+    # http_session_iface.c/web_auth_session.c/web_auth_store.c stack -- same
+    # link set and rationale as exe9 (test_dashboard_status_http.c) and
+    # exe45 immediately above. See the test file's own header comment for
+    # the full split.
+    $exe46 = Join-Path $outDir "kilnctl_host_tests_readiness_crash_disclosure.exe"
+    $rcdObjDir = Join-Path $outDir "rcd"
+    New-Item -ItemType Directory -Force -Path $rcdObjDir | Out-Null
+    $cmd46 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$rcdObjDir\\`" /Fe:`"$exe46`" " +
+            "`"$(Join-Path $testDir 'test_readiness_crash_disclosure.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "readiness_crash_disclosure" -ExePath $exe46 -BuildCmd $cmd46
+
+    # ---- test_wifi_prov_status_disclosure.c: its own 47th, separate
+    # executable -- 2026-09-17 ROUTE_TIER_OPEN disclosure audit finding 1:
+    # GET /status leaked the saved home network's SSID and static-IP
+    # topology with no auth check. wifi_provision_http.c itself cannot be
+    # host-compiled (twelve GCC-only asm("_binary_...") blob externs plus an
+    # #include <sys/socket.h> with no host stub anywhere in this repo), so
+    # this file tests the pure formatter (wifi_prov_status_redact_field(),
+    # wifi_prov.h, header-only) directly, plus the real may_disclose gate --
+    # same link set and rationale as exe46 immediately above.
+    $exe47 = Join-Path $outDir "kilnctl_host_tests_wifi_prov_status_disclosure.exe"
+    $wpsdObjDir = Join-Path $outDir "wpsd"
+    New-Item -ItemType Directory -Force -Path $wpsdObjDir | Out-Null
+    $cmd47 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$wpsdObjDir\\`" /Fe:`"$exe47`" " +
+            "`"$(Join-Path $testDir 'test_wifi_prov_status_disclosure.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "wifi_prov_status_disclosure" -ExePath $exe47 -BuildCmd $cmd47
+
     # ---- sim_iter_tune.exe / sim_wide_temp_sweep.exe: data-generating
     # harnesses (ITER_TUNE_REDESIGN_PLAN.md sec 6/7), not TEST_CHECK
     # pass/fail suites -- their stdout is the evidence for the audit docs
@@ -2163,7 +2218,14 @@ try {
     # test_dashboard_status_http.c as its own 52nd Invoke-HostTestExe call,
     # proving GET /api/status's build-identity redaction (same gate 1a41a972
     # established for GET /api/ota/esp/status).
-    $totalExpected = 52
+    # 52 -> 54: 2026-09-17 ROUTE_TIER_OPEN disclosure audit (findings 1/2)
+    # added test_readiness_crash_disclosure.c (53rd) and
+    # test_wifi_prov_status_disclosure.c (54th) as their own Invoke-HostTestExe
+    # calls -- readiness_http.c/wifi_provision_http.c both cannot be
+    # host-compiled directly (GCC-only asm blob externs; wifi_provision_http.c
+    # also #includes <sys/socket.h> with no host stub), so each tests its
+    # fix's pure formatter plus the real may_disclose gate composition.
+    $totalExpected = 54
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the

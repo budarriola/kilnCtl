@@ -88,7 +88,9 @@
 #define WIFI_PROV_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "esp_err.h"
 
@@ -379,6 +381,44 @@ void wifi_prov_note_possible_static_reachability(int sockfd);
  * the same field served over the STA interface hands it to every device on
  * the LAN. Fails closed -- an uninspectable socket reports false. */
 bool wifi_prov_request_arrived_on_ap(int sockfd);
+
+/* 2026-09-17 disclosure fix: GET /status (ROUTE_TIER_OPEN -- an
+ * unprovisioned board must answer it before anyone can authenticate, same
+ * reasoning as wifi_prov_request_arrived_on_ap() above) used to
+ * unconditionally emit the saved home network's SSID and, when configured,
+ * the STA static-IP topology (static_ip/static_netmask/static_gateway) to
+ * any unauthenticated caller on the LAN. The route stays OPEN; the fix is
+ * in the payload. Pure formatter (facts in, JSON fragment out) for the same
+ * host-testability reason readiness_http.h's readiness_*_status()
+ * predicates are pure: given the caller's disclosure eligibility and an
+ * already-prepared value (already JSON-escaped by the caller if it needs
+ * escaping -- an SSID can contain '"'/'\\'; a dotted-quad IP string never
+ * does and needs none), emits either `"value"` or JSON `null` -- never
+ * omits the key, so key presence itself never becomes a signal, and the
+ * existing web UI keeps parsing the same shape either way.
+ *
+ * Callers pass `may_disclose = !http_auth_policy_web_enabled() ||
+ * http_auth_caller_is_admin(req)` -- a disjunction, not `&&`, because
+ * http_auth_caller_is_admin() already returns true when web auth is OFF
+ * (that's what lets an operator set the first admin password on a fresh
+ * board); `&&` here would hide these fields from that operator and from
+ * this project's own commissioning tooling on an unprovisioned board.
+ * sta_ip is deliberately NOT run through this redaction anywhere it's used:
+ * a caller able to reach this route at all already used an address to get
+ * here, so withholding it narrows nothing an unauthenticated LAN caller
+ * doesn't already have. out_cap must be at least strlen(value)+3 (two
+ * quotes plus NUL) for a full, non-truncated value when may_disclose is
+ * true -- same "truncation is fine, overrun is not" convention as
+ * wifi_provision_http.c's json_escape(). */
+static inline void wifi_prov_status_redact_field(bool may_disclose, const char *value, char *out,
+                                                  size_t out_cap)
+{
+    if (may_disclose) {
+        snprintf(out, out_cap, "\"%s\"", value ? value : "");
+    } else {
+        snprintf(out, out_cap, "null");
+    }
+}
 
 #ifdef __cplusplus
 }

@@ -1,5 +1,6 @@
 #include "readiness_http.h"
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
+#include "http_auth_policy_iface.h" // http_auth_policy_web_enabled()
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -810,15 +811,15 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         bool acknowledged = have_record && rec.acknowledged != 0;
         readiness_status_t st = readiness_crash_report_status(have_record, acknowledged);
         char detail[READINESS_DETAIL_MAX];
-        if (!have_record) {
-            snprintf(detail, sizeof(detail), "no crash on record");
-        } else if (!acknowledged) {
-            snprintf(detail, sizeof(detail),
-                     "unacknowledged crash on record (%s, task %s) -- review /diagnostics before firing",
-                     rec.exc_cause_str[0] ? rec.exc_cause_str : "unknown cause", rec.exc_task);
-        } else {
-            snprintf(detail, sizeof(detail), "last crash on record has been acknowledged");
-        }
+        /* 2026-09-17 disclosure fix: see readiness_crash_report_detail()'s
+         * doc comment in readiness_http.h for the full reasoning (why this
+         * route stays OPEN, why the item's existence is never hidden, and
+         * why may_disclose is a disjunction, not `&&`, with the enabled
+         * check). */
+        bool may_disclose = !http_auth_policy_web_enabled() || http_auth_caller_is_admin(req);
+        readiness_crash_report_detail(have_record, acknowledged, may_disclose,
+                                      have_record ? rec.exc_cause_str : NULL,
+                                      have_record ? rec.exc_task : NULL, detail, sizeof(detail));
         size_t before_o = o;
         o = append_item(json, item_cap, o, first, "crash_report", "Unacknowledged crash report", st, detail,
                         "/diagnostics", &dropped);
