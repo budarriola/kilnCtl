@@ -391,10 +391,17 @@ esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result
 //
 //   1. The body streams into the `pico_img` partition (esp_partition_write(),
 //      same 4 KB static-chunk-buffer convention as the ESP path), with a
-//      running CRC32 computed alongside it (esp_rom_crc32_le() -- the same
-//      IEEE 802.3/zlib algorithm SaftyFW's bootloader/crc32.c implements, so
-//      the value this ESP sends in UPDATE_BEGIN/_END is byte-for-byte what
-//      the Pico's own read-back CRC will compute).
+//      running CRC32 computed alongside it (ota_image_crc.h, which owns the
+//      parameterization: standard CRC-32, reflected poly 0xEDB88320, init
+//      0xFFFFFFFF, final XOR 0xFFFFFFFF -- the same algorithm SaftyFW's
+//      bootloader/crc32.c implements, so the value this ESP sends in
+//      UPDATE_BEGIN/_END is byte-for-byte what the Pico's own read-back CRC
+//      will compute). Reaching that parameterization through
+//      esp_rom_crc32_le() means seeding 0 and applying NO final XOR -- that
+//      function performs both inversions itself. Seeding 0xFFFFFFFF and
+//      XORing the result, which this path did until 2026-09-18, computes a
+//      DIFFERENT variant the Pico rejects for every image; see
+//      docs/audits/pico_ota_staged_crc_mismatch_2026-09-18.md.
 //   2. Once the whole body is staged, ota_pico_relay_start()
 //      (ota_pico_relay.h) is called to kick off the ~35+ second relay as a
 //      BACKGROUND task, and this handler responds immediately -- 202

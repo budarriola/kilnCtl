@@ -15,7 +15,6 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
-#include "esp_rom_crc.h" /* esp_rom_crc32_le() -- section 4's Pico-image running CRC32, see ota_pico_do_stage() */
 #include "hal_time.h"
 
 #include "freertos/FreeRTOS.h"
@@ -34,6 +33,8 @@
 #include "kiln_io.h"
 #include "MAX31856.h"
 #include "ota_auth.h"
+#include "ota_image_crc.h" /* ota_image_crc32_update() -- the staging CRC32, in the one
+                            * parameterization SaftyFW's bootloader_crc32() agrees with */
 #include "ota_pico_relay.h"
 #include "ota_record.h"
 #include "profile_executor.h" /* PROFILE_EXEC_* enum only, not its live state -- see below */
@@ -55,14 +56,25 @@
 static uint8_t s_ota_pico_chunk[OTA_PICO_CHUNK_SIZE];
 
 // Streams the browser upload into `pico_img`, computing a running CRC32
-// alongside it (esp_rom_crc32_le() -- see ota_http.h's header comment for
-// why this, not a second hand-rolled CRC32, is used: it is the same
-// IEEE 802.3/zlib algorithm SaftyFW's bootloader/crc32.c implements,
-// confirmed by reading both this header's own doc comment and that file --
-// same poly 0xEDB88320 reflected, same init/final XOR 0xFFFFFFFF, reached
-// via esp_rom_crc32_le(0xFFFFFFFF, ...) chained across chunks then a final
-// XOR, per esp_rom_crc.h's own "add ~ at the beginning and the end" chaining
-// recipe). On success, hands off to ota_pico_relay_start() and returns
+// alongside it via ota_image_crc.h -- NOT by calling esp_rom_crc32_le()
+// here directly. That module owns the parameterization, because this CRC
+// is compared on the other processor against SaftyFW bootloader_crc32()'s
+// own reading of the same bytes, and the two must agree on the arithmetic
+// as well as the data: standard CRC-32 (reflected poly 0xEDB88320, init
+// 0xFFFFFFFF, final XOR 0xFFFFFFFF).
+//
+// Reaching that means seeding OTA_IMAGE_CRC32_INIT (zero), chaining each
+// chunk's return value into the next call, and applying NO final XOR: the
+// CRC primitive underneath complements the seed on entry and the result on
+// exit itself. esp_rom_crc.h's "add ~ at the beginning and the end" note
+// describes what that function does FOR the caller, not something the
+// caller is meant to do as well. This code used to do it as well --
+// seeding 0xFFFFFFFF and then XORing the result -- which does not cancel;
+// it silently computes a different CRC-32 variant (init 0, no output XOR)
+// that the Pico could never agree with, for any image. See
+// docs/audits/pico_ota_staged_crc_mismatch_2026-09-18.md.
+//
+// On success, hands off to ota_pico_relay_start() and returns
 // without releasing the update mutex (see ota_http.h's header comment for
 // why); on any failure, releases the mutex itself and responds with a
 // specific error.
@@ -76,7 +88,7 @@ static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
     // ota_esp_do_transfer() uses for handle/ota_began/target.
     size_t content_len = 0;
     const esp_partition_t *part = NULL;
-    uint32_t crc = 0xFFFFFFFFu; // esp_rom_crc.h's own chaining recipe -- see this function's doc comment
+    uint32_t crc = OTA_IMAGE_CRC32_INIT; // seed 0, no final XOR -- see ota_image_crc.h
     size_t written = 0;
 
     // Image SHA-256 over every byte staged into pico_img -- same
@@ -190,7 +202,7 @@ static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "flash write failed");
             goto cleanup;
         }
-        crc = esp_rom_crc32_le(crc, s_ota_pico_chunk, (uint32_t)ret);
+        crc = ota_image_crc32_update(crc, s_ota_pico_chunk, (size_t)ret);
         if (sha_op_active) {
             (void)psa_hash_update(&sha_op, s_ota_pico_chunk, (size_t)ret);
         }
@@ -203,7 +215,6 @@ static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
                      (unsigned)((written * 100u) / content_len), (unsigned)written, (unsigned)content_len);
         }
     }
-    crc ^= 0xFFFFFFFFu; // final XOR -- see this function's doc comment
 
     if (sha_op_active) {
         size_t digest_len = 0;

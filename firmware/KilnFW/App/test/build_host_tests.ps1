@@ -49,6 +49,7 @@ try {
         (Join-Path $testDir "test_sim_kiln.c"),
         (Join-Path $testDir "test_sim_plant_three_node.c"),
         (Join-Path $testDir "test_ota_auth.c"),
+        (Join-Path $testDir "test_ota_image_crc.c"),
         (Join-Path $testDir "test_auth_reset_gesture.c"),
         # docs/WEB_AUTH_PLAN.md section 7/8 (LCD half only) -- the LCD's
         # own two-PIN keypad and inactivity lock. #includes lcd_auth_state.c
@@ -152,6 +153,7 @@ try {
         (Join-Path $driversDir "control/pid_fuzzy.c"),
         (Join-Path $driversDir "control/pid_fuzzy_confidence.c"),
         (Join-Path $driversDir "net/ota_auth.c"),
+        (Join-Path $driversDir "http/ota_image_crc.c"),
         (Join-Path $driversDir "net/auth_reset_gesture.c"),
         (Join-Path $driversDir "ui/lcd_auth_state.c"),
         (Join-Path $driversDir "net/web_auth_session.c"),
@@ -713,6 +715,7 @@ try {
             "`"$(Join-Path $testDir 'test_ota_http.c')`" " +
             "`"$(Join-Path $driversDir 'net/ota_auth.c')`" `"$(Join-Path $driversDir 'net/ota_interlock.c')`" " +
             "`"$(Join-Path $driversDir 'persist/ota_record.c')`" `"$(Join-Path $driversDir 'http/ota_http_util.c')`" " +
+            "`"$(Join-Path $driversDir 'http/ota_image_crc.c')`" " +
             "`"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
             "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +

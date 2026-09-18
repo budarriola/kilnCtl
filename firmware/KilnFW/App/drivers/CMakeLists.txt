@@ -291,6 +291,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "http/ota_http_pico.c"
                        "http/ota_http_recovery.c"
                        "http/ota_http_util.c"
+                       "http/ota_image_crc.c"
                        # WEB_AUTH_PLAN.md section 5 -- fail-closed HTTP
                        # enforcement point. http_auth_enforce.c is pure
                        # logic (host-tested, test_http_auth_enforce.c);
