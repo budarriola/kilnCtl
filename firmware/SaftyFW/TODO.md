@@ -688,14 +688,20 @@ cached safety status showed no trip at the same moment, so this is the
 Pico's independent precondition check working, not a bug. The actual
 UART1 transfer this phase's checklist items (10.0's error-rate measurement,
 10.8c's round-cap timing) are about was not reached. Also relevant given
-10.9 below: this bench Pico is still running `SaftyFW.elf` directly (not
-booted through the bootloader), consistent with a `debug_read_memory` scan
-of the metadata sector (`0x10010000`) reading back as ordinary code rather
-than a `"KLN1"`-magic record — so even a transfer that clears the
-precondition and passes CRC today would stage a slot the current boot
-vector does not consult — a real prerequisite gap, but see 10.9 below: the
-bootloader hand-off itself is not the blocker, only this bench Pico's
-current image is.
+10.9 below: at the time of that attempt this bench Pico was still running
+`SaftyFW.elf` directly (not booted through the bootloader), consistent with
+a `debug_read_memory` scan of the metadata sector (`0x10010000`) reading
+back as ordinary code rather than a `"KLN1"`-magic record — so even a
+transfer that cleared the precondition and passed CRC would have staged a
+slot the boot vector did not consult. **That prerequisite gap is CLOSED as
+of 2026-09-18**: the bench Pico now boots through the two-slot bootloader,
+slot A active, with a `"KLN1"` metadata record present. A later attempt the
+same day reached the erase phase and failed there instead — the RP2040
+hardware-watchdog-reset mid-erase and the ESP failed the relay at its
+15000 ms erase timeout, safely (relays off, no trip latched, configuration
+unchanged); see
+`../../docs/audits/pico_ota_erase_watchdog_reset_2026-09-18.md` and
+ROADMAP.md M8.
 
 - [x] **10.0 Measure the isolated link's error rate — done 2026-08-23, and
       it was not 115200 at the time.** The TCMT1109 optocoupler pair then
@@ -749,14 +755,15 @@ current image is.
       faithfully booting an application built for a different wire
       configuration — a stale-artifact bug, not a hand-off defect. Always
       rebuild slot images in the same pass as any link-config change.
-      **Remaining blocker for a bench Pico update is separate and still
+      ~~**Remaining blocker for a bench Pico update is separate and still
       open**: this bench Pico is currently running the monolithic
-      `SaftyFW.elf` directly, not booted through the bootloader from a slot
-      (`debug_read_memory` at the metadata sector reads ordinary code, not a
-      `"KLN1"` record — see the 2026-09-06 exercise note above). The
-      prerequisite next step is flashing the bootloader + a freshly built
-      `SaftyFW_slotA` image via `debug_program(peer="pico")` — not done as
-      part of this pass.
+      `SaftyFW.elf` directly~~ — **closed 2026-09-18**: the bootloader plus a
+      slot image are flashed and the Pico boots through the bootloader, slot
+      A active, with a `"KLN1"` metadata record present. The blocker now is
+      different — an ESP-driven relay cannot reach the data phase, failing at
+      the ESP's 15000 ms erase timeout after the RP2040 watchdog-reset
+      mid-erase; see
+      `../../docs/audits/pico_ota_erase_watchdog_reset_2026-09-18.md`.
 - [ ] 10.10 Verification: power cut during erase, during streaming, and during
       the metadata write; corrupt slot rejected; bad-but-booting image rolled
       back; both slots invalidated and recovered over the link with no probe.

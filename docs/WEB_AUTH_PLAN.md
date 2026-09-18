@@ -1020,6 +1020,19 @@ this is testable headlessly without naming the hit zones — and
 *Negative test:* invert the E-stop condition in the production predicate,
 confirm the "refused with E-stop clear" assertion goes RED, restore by hand.
 
+**Status, 2026-09-18 — hardware-gated, not merely not-done.** The gesture and
+its host tests have landed (section 0); what is outstanding is the bench
+exercise, and no software change can unblock it. Step 1 of the gesture
+requires `SAFETY_FLAG_ESTOP` actually asserted, and on this fixture the E-stop
+jumper is **fitted**, which means the normally-closed loop is closed and
+E-stop is *not* asserted — GPIO9 reads low and S7 correctly stays quiet
+(`firmware/SaftyFW/docs/HARDWARE.md` §5). **What the owner must do:**
+physically break the E-stop loop for the duration of the exercise — unplug
+that jumper, or open a real E-stop contact fitted in its place — and confirm
+the flag reads asserted before running the four-corner sequence. The bit is
+read by the RP2040 from a physical contact and is not writable, so it cannot
+be forced from a tool.
+
 ---
 
 ## 11. Auth disabled, first boot, and field upgrade
@@ -1180,6 +1193,15 @@ behavioural test result and must not be recorded as one.
   against the 27,015 B baseline.
 - The session table under real concurrent browsers, against the ~6-socket
   accept-mailbox ceiling.
+
+**Blocked on the owner, 2026-09-18.** Live verification of web auth against
+the board needs `KILNCTL_WEB_USERNAME` and `KILNCTL_WEB_PASSWORD` set as
+Windows *user* environment variables: the PcTools HTTP clients read the
+credential from those two variables and from nowhere else
+(`tools/PcTools/src/kilnctrl/http_auth.py:56`-`57`), so while they are unset
+every authenticated request from the tooling goes out unauthenticated and the
+policy cannot be exercised. No credential value belongs in any file in this
+repository — only the variable names.
 
 ---
 

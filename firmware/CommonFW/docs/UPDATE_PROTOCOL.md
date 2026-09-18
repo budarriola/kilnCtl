@@ -1284,6 +1284,17 @@ this path is retried for real. Not itself confirmed by flashing anything —
 inferred from the memory read plus TODO.md's own status, not proven by
 forcing a transfer through.
 
+**Superseded 2026-09-18.** That prerequisite gap is closed: the bench Pico
+now boots through the two-slot bootloader, slot A active, with a `KLN1`
+metadata record present. A retry the same day therefore got past staging and
+failed at a different place — the RP2040 hardware-watchdog-reset partway
+through erasing the destination slot, never confirming `RECEIVING`, so the
+ESP failed the relay at its 15000 ms erase timeout. Safe outcome (relays off
+throughout, no trip latched, configuration unchanged), but the ESP-driven
+Pico update path is non-functional on this hardware today. Observed facts
+under ROADMAP.md M8; diagnosis in
+`../../../docs/audits/pico_ota_erase_watchdog_reset_2026-09-18.md`.
+
 **Version-mismatch path (step 4 of this pass's brief) — not exercised, and
 not fakeable with today's tooling.** `ota_pico_relay.c` always sends the
 ESP's own live `KILNLINK_PROTOCOL_VERSION` in the header it builds; nothing
