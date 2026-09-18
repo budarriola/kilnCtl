@@ -223,11 +223,61 @@ first suggests:
    `SET_PARAM`/`COMMIT_CONFIG` path, and already sits in the denominator of the
    Pico's amps formula. It is merely marked `readonly: true` on
    `safety_commissioning_page.html`. Making it operator-editable is a UI change
-   plus a range check, not a storage change. Note one real defect while doing
-   it: `safety_ct_cal_convert()` uses `gain` **only** for `zero_counts` and not
-   for `k_ct_v_per_a`, so today a gain edit moves the zero point but not the
-   scale, while the Pico's own formula divides by `gain` for both. Trim must be
-   applied consistently or it will read as a mysterious offset-only control.
+   plus a range check, not a storage change.
+
+   **The arithmetic is already correct — do not "fix" it.** An earlier revision
+   of this plan asserted a defect here: that `safety_ct_cal_convert()` applies
+   `gain` to `zero_counts` only and not to `k_ct_v_per_a`, so a gain edit would
+   move the zero point but not the scale. That assertion was wrong, and it is
+   retracted. The host and the Pico apply the same divider once each, in
+   opposite directions, on the two sides of the counts domain:
+
+   - host, `safety_cfg_store.c:845` and `:856` — `k = 1.0f / a_fs`, then
+     `counts_f = (zero_mv / 1000.0f) * gain * (4096.0f / 3.3f)`: multiplies by
+     `gain` to carry probe millivolts *into* ADC counts.
+   - Pico, `current_sense.c:287` and `:288` —
+     `v_adc = delta_counts * CS_ADC_VREF_V / CS_ADC_FULL_SCALE`, then
+     `amps = v_adc / (gain * CS_SQRT2 * k_ct)`: divides by `gain` to carry ADC
+     counts back *out* to probe volts.
+
+   `k_ct_v_per_a` is deliberately gain-free precisely because the Pico applies
+   `gain` itself, exactly once. Composing the two halves gives the end-to-end,
+   operator-visible conversion:
+
+   ```
+   I(counts) = [ counts * 3.3/(4096 * gain) - zero_mv/1000 ] * A_fs / sqrt(2)
+   slope     = 3.3 * A_fs / (4096 * sqrt(2) * gain)     depends on 1/gain
+   offset    = - zero_mv * A_fs / (1000 * sqrt(2))      independent of gain
+   ```
+
+   So `gain` is already a **pure slope control** and `zero_mv` is the offset —
+   exactly the split an operator trimming against a reference meter wants. The
+   `gain` inside `zero_counts` cancels against the Pico's own `/gain`, and that
+   cancellation is what makes the offset term gain-independent.
+
+   **Applying `gain` to `k_ct_v_per_a` as well would cancel against the Pico's
+   divider, removing `gain` from the slope entirely and leaving it scaling the
+   offset — which is precisely the offset-only control the retracted claim
+   described.** The "fix" would have created the defect it was reported as.
+   Nobody should re-propose it. `ct_auto_zero_counts_to_mv()`
+   (`safety_cfg_http.c:1023`) is the exact algebraic inverse of `:856` and
+   confirms the single-application convention from a third site.
+   `firmware/SaftyFW/docs/CURRENT_SENSE.md` section 5 corroborates the Pico
+   half directly, writing the composed formula with `0.715` as a literal in the
+   denominator; it covers the host half only obliquely, via its `k_ct_v_per_a`
+   row, so it is not independent confirmation of both halves.
+
+   **Risk labelling corrected alongside the unlock.** The page carried
+   `risk: 'cosmetic'` and `guards: ['(power estimate only)']` on `gain[0..2]`,
+   and section 5's table says the same. That is wrong: `gain` is not
+   power-estimate-only. `current_presence_is_flowing()`
+   (`current_presence_policy.h:120-121`) takes `gain` as a parameter and derives
+   its counts-domain presence threshold from it; that predicate feeds
+   `current_snapshot_t.present[]`, which `current_any_present()` returns, which
+   S3/S4/S9 and S6b's current-gated trip read. A bad `gain` therefore moves a
+   guard input, not only a wattage display. The three `gain[0..2]` rows are
+   relabelled to match; no other field's labelling was touched, and
+   `CURRENT_SENSE.md` section 5's table row remains to be corrected separately.
 3. **Offset trim already exists** as `zero_mv`, operator-entered in the same
    form, with an auto-measure action beside it.
 

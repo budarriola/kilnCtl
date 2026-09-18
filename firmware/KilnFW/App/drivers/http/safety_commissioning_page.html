@@ -637,10 +637,35 @@ var GROUPS = [
         guards: ['(power estimate only)'], derivedK: 1, note: 'Same as k_ct_v_per_a[0], for CT1.' },
       { id: 778, name: 'k_ct_v_per_a[2]', type: 'f32', risk: 'cosmetic', unit: 'V/A', readonly: true,
         guards: ['(power estimate only)'], derivedK: 2, note: 'Same as k_ct_v_per_a[0], for CT2.' },
-      { id: 779, name: 'gain[0]', type: 'f32', risk: 'cosmetic', def: 0.715, readonly: true, guards: ['(power estimate only)'],
-        note: 'R46/R43; refine only if the resistors are not 1%.' },
-      { id: 780, name: 'gain[1]', type: 'f32', risk: 'cosmetic', def: 0.715, readonly: true, guards: ['(power estimate only)'] },
-      { id: 781, name: 'gain[2]', type: 'f32', risk: 'cosmetic', def: 0.715, readonly: true, guards: ['(power estimate only)'] },
+      // Owner request: "The circuit has a fixed gain but clamp ratios change.
+      // Allow the user to enter clamp ratio and offset/gain tuneing to get
+      // more accurate." gain is the SCALE trim that sits beside the clamp
+      // ratio (A_fs) and the offset (zero_mv), both already operator-entered
+      // above: end to end the Pico computes
+      //   I = [counts * 3.3/(4096*gain) - zero_mv/1000] * A_fs / sqrt(2),
+      // so gain scales the slope and nothing else. (The host multiplies by
+      // gain to reach counts, safety_cfg_store.c:856; the Pico divides by it
+      // to come back, current_sense.c:288 -- once each, deliberately. Do NOT
+      // "fix" k_ct_v_per_a to also carry gain: it would cancel against that
+      // divider and turn this into an offset control. See
+      // docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md.)
+      //
+      // NOT "power estimate only", despite what these rows used to claim and
+      // what CURRENT_SENSE.md section 5's table still says: gain is a
+      // parameter of current_presence_is_flowing() (current_presence_policy.h:120),
+      // whose verdict feeds current_any_present() and therefore S3/S4/S9 and
+      // S6b's current-gated trip. A wrong gain moves a guard input.
+      { id: 779, name: 'gain[0]', type: 'f32', risk: 'nuisance', def: 0.715, min: 0.05, max: 2.0,
+        guards: ['S3', 'S4', 'S9'],
+        note: 'Front-end divider R46/R43 (nominal 0.715), the SCALE trim for CT0. Raise it if ' +
+          'the board reads high against a reference meter, lower it if it reads low. Leave it ' +
+          'at the default unless you have measured a disagreement -- this is a trim, not a ' +
+          'nameplate: the clamp\'s own ratio belongs in "CT0 probe rating (A_fs)" above. ' +
+          'Accepted range 0.05 to 2.0; a value outside it is refused, never quietly defaulted.' },
+      { id: 780, name: 'gain[1]', type: 'f32', risk: 'nuisance', def: 0.715, min: 0.05, max: 2.0,
+        guards: ['S3', 'S4', 'S9'], note: 'Same as gain[0], for CT1.' },
+      { id: 781, name: 'gain[2]', type: 'f32', risk: 'nuisance', def: 0.715, min: 0.05, max: 2.0,
+        guards: ['S3', 'S4', 'S9'], note: 'Same as gain[0], for CT2.' },
       { id: 782, name: 'mains_voltage_v', type: 'voltage', risk: 'cosmetic', unit: 'V', guards: ['(power estimate only)'],
         note: 'Nominal. Power goes as V^2, so a 5% sag is a 10% error. Unset means report ' +
           '"--", never assume. "Not set" stays selectable at any time -- picking it is a ' +
@@ -771,6 +796,32 @@ function checkTcMaxContradiction() {
   if (maxVal > limit) {
     return 'abs_max_temp_c (' + maxVal + ' °C) exceeds the selected thermocouple type\'s own maximum ' +
       '(' + limit + ' °C) -- the kiln ceiling cannot exceed what the sensor itself can report.';
+  }
+  return null;
+}
+
+/* Refuse an out-of-range entry for any field that declares its own accepted
+ * range (f.min/f.max), before a request body is ever sent. Same advisory
+ * status as checkTcMaxContradiction() above -- the ESP's own handler
+ * (safety_cfg_http.c) is what actually enforces this; catching it here names
+ * the field and both bounds immediately instead of surfacing a generic 400.
+ *
+ * Operates on bodyPairs, not the DOM: the save walk has already applied the
+ * empty-means-skip rule, so a field the operator left blank is simply absent
+ * here and cannot be mistaken for a zero entry. Returns a message, or null. */
+function checkFieldRanges(bodyPairs) {
+  for (var i = 0; i < bodyPairs.length; i++) {
+    var pair = bodyPairs[i];
+    var f = FIELD_BY_ID[pair.id];
+    if (!f || (f.min === undefined && f.max === undefined)) continue;
+    var v = parseFloat(pair.value);
+    if (!isFinite(v)) {
+      return (f.name || ('id ' + pair.id)) + ' must be a number, not "' + pair.value + '".';
+    }
+    if ((f.min !== undefined && v < f.min) || (f.max !== undefined && v > f.max)) {
+      return (f.name || ('id ' + pair.id)) + ' (' + pair.value + ') is outside the accepted range ' +
+        f.min + ' to ' + f.max + ' -- refused. Correct the value; it will not be defaulted for you.';
+    }
   }
   return null;
 }
@@ -1016,12 +1067,19 @@ function fieldInputHtml(f, paramsById) {
   var tcMax = f.prefillFromTcMax ? tcTypeMaxFor(paramsById) : undefined;
   var valueAttr = isSet ? (' value="' + window.kcEscapeHtml(val) + '"') : '';
   var maxAttr = (tcMax !== undefined) ? (' max="' + tcMax + '"') : '';
+  // A field may declare its own accepted range (f.min/f.max). The browser
+  // then refuses an out-of-range entry before checkFieldRanges() does, the
+  // same belt-and-braces shape the tcMax `max` above uses -- neither is the
+  // authority, the ESP handler is. tcMax keeps precedence when both exist so
+  // this can never emit two `max` attributes for one input.
+  var rangeAttr = (f.min !== undefined ? ' min="' + f.min + '"' : '') +
+    ((f.max !== undefined && tcMax === undefined) ? ' max="' + f.max + '"' : '');
   var placeholder = isSet ? ''
     : (tcMax !== undefined
         ? (' placeholder="not set -- ' + tcMax + ' is the selected thermocouple\'s own limit"')
         : (' placeholder="not set' + (f.def !== undefined ? ' -- firmware default ' + f.def : '') + '"'));
   return '<input type="number" step="' + step + '" data-id="' + f.id + '" data-type="' + f.type + '"' +
-    valueAttr + maxAttr + placeholder + '>';
+    valueAttr + maxAttr + rangeAttr + placeholder + '>';
 }
 
 function fieldBlock(f, paramsById) {
@@ -1606,6 +1664,16 @@ document.getElementById('saveBtn').addEventListener('click', function () {
   // independent of everything else on this board. Treat any such change as
   // the safety-critical write it is: refuse mid-run, then require an
   // explicit, NAMED confirmation before this ever reaches the wire.
+  // Refuse an out-of-range entry (e.g. a gain of 0) before anything is sent,
+  // and before the confirm prompt below -- an operator must not be asked to
+  // confirm a value that was never going to be accepted. See
+  // checkFieldRanges() for why this is advisory and not the boundary.
+  var rangeProblem = checkFieldRanges(bodyPairs);
+  if (rangeProblem) {
+    msg.textContent = 'Rejected: ' + rangeProblem;
+    return;
+  }
+
   var criticalChanges = findCriticalChanges(bodyPairs);
   // Retrofitted 2026-09-08 (review 5d03f8c2) onto commissioning_shared.js's
   // kcCommissioningCommitAndVerify() -- was this page's own second copy of

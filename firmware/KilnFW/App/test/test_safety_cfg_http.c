@@ -108,9 +108,21 @@ esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *buf, size_t buf_len)
 {
     (void)r; (void)buf; (void)buf_len; return ESP_OK;
 }
+/* The refusal message is the thing under test for the entry-range gate -- a
+ * handler that returns ESP_OK having refused looks identical to one that
+ * accepted unless the message it sent is captured and asserted on. */
+static char s_stub_last_httpd_err[256];
+static int s_stub_httpd_err_calls = 0;
 esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char *msg)
 {
-    (void)r; (void)error; (void)msg; return ESP_OK;
+    (void)r; (void)error;
+    s_stub_httpd_err_calls++;
+    if (msg) {
+        snprintf(s_stub_last_httpd_err, sizeof(s_stub_last_httpd_err), "%s", msg);
+    } else {
+        s_stub_last_httpd_err[0] = '\0';
+    }
+    return ESP_OK;
 }
 esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status) { (void)r; (void)status; return ESP_OK; }
 /* Controllable request body -- most callers leave content_len==0 (read_body()
@@ -683,6 +695,8 @@ bool safety_link_take_stashed_commit_rejected(SafetyLinkClass *link, uint16_t *o
 
 static void reset_all(void)
 {
+    s_stub_last_httpd_err[0] = '\0';
+    s_stub_httpd_err_calls = 0;
     memset(s_stub_params, 0, sizeof(s_stub_params));
     s_stub_lookup_result = true;
     s_stub_lookup_type = KILNLINK_PARAM_TYPE_U16;
@@ -2274,6 +2288,112 @@ static void test_commissioning_post_failed_recapture_still_reports_ok(void)
     TEST_CHECK(s_stub_recapture_calls == 1, "the recapture was still attempted and its result observed");
 }
 
+/* ---- Per-channel gain (0x030B-0x030D) entry-range gate -------------------
+ *
+ * The commissioning page makes gain operator-editable so a clamp can be
+ * trimmed against a reference meter. gain is the slope control in
+ *   I = [counts * 3.3/(4096*gain) - zero_mv/1000] * A_fs / sqrt(2)
+ * and also sets current_presence_is_flowing()'s presence threshold, so a
+ * nonsensical entry must be refused at the door. It must NOT be quietly
+ * repaired: cs_counts_to_amps() falls back to CS_DEFAULT_GAIN for a stored
+ * value <= 0, which would leave a bad entry persisted, unused, and invisible.
+ */
+static void test_commissioning_post_gain_zero_is_refused(void)
+{
+    TEST_SECTION("commissioning_post_handler -- a gain of 0 is REFUSED with a message naming the "
+                 "field and the bound, and nothing whatsoever is staged to the Pico (never "
+                 "silently replaced by CS_DEFAULT_GAIN)");
+    reset_all();
+    s_stub_lookup_type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_lookup_name = "gain";
+
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    s_link = &fake_link;
+
+    static char body[128];
+    snprintf(body, sizeof(body), "id=779&value=0&commit=1"); // 0x030B == 779
+    s_stub_req_body = body;
+    s_stub_req_body_sent = 0;
+    httpd_req_t req = { .content_len = (int)strlen(body) };
+    esp_err_t err = commissioning_post_handler(&req);
+    s_link = NULL;
+
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK (the refusal is the HTTP 400, not a tool error)");
+    TEST_CHECK(s_stub_httpd_err_calls == 1, "exactly one error response was sent");
+    TEST_CHECK(strstr(s_stub_last_httpd_err, "gain[0]") != NULL,
+               "the refusal names the offending field");
+    TEST_CHECK(strstr(s_stub_last_httpd_err, "refused, not defaulted") != NULL,
+               "the refusal says the value was not substituted");
+    TEST_CHECK(s_stub_set_param_calls == 0, "nothing was staged to the Pico");
+    TEST_CHECK(s_stub_commit_calls == 0, "no commit was issued");
+}
+
+static void test_commissioning_post_gain_out_of_range_is_refused(void)
+{
+    TEST_SECTION("commissioning_post_handler -- a gain above SAFETY_CT_CAL_GAIN_MAX is refused the "
+                 "same way, on the correct channel, and a negative one too");
+    reset_all();
+    s_stub_lookup_type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_lookup_name = "gain";
+
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    s_link = &fake_link;
+
+    static char body[128];
+    snprintf(body, sizeof(body), "id=781&value=25.0&commit=1"); // 0x030D == 781
+    s_stub_req_body = body;
+    s_stub_req_body_sent = 0;
+    httpd_req_t req = { .content_len = (int)strlen(body) };
+    esp_err_t err = commissioning_post_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strstr(s_stub_last_httpd_err, "gain[2]") != NULL,
+               "the refusal names the channel that was actually submitted");
+    TEST_CHECK(s_stub_set_param_calls == 0, "an over-range gain stages nothing");
+
+    /* Negative: the direction cs_counts_to_amps()'s fallback would mask. */
+    reset_all();
+    s_stub_lookup_type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_lookup_name = "gain";
+    snprintf(body, sizeof(body), "id=780&value=-0.715&commit=1"); // 0x030C == 780
+    s_stub_req_body = body;
+    s_stub_req_body_sent = 0;
+    httpd_req_t req2 = { .content_len = (int)strlen(body) };
+    esp_err_t err2 = commissioning_post_handler(&req2);
+    s_link = NULL;
+
+    TEST_CHECK(err2 == ESP_OK, "handler returns ESP_OK for the negative case too");
+    TEST_CHECK(strstr(s_stub_last_httpd_err, "gain[1]") != NULL, "the negative refusal names gain[1]");
+    TEST_CHECK(s_stub_set_param_calls == 0, "a negative gain stages nothing");
+}
+
+static void test_commissioning_post_in_range_gain_is_accepted(void)
+{
+    TEST_SECTION("commissioning_post_handler -- an in-range gain trim IS accepted and staged; without "
+                 "this the two refusal tests above would still pass if the gate rejected everything");
+    reset_all();
+    s_stub_lookup_type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_lookup_name = "gain";
+
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    s_link = &fake_link;
+
+    static char body[128];
+    snprintf(body, sizeof(body), "id=779&value=0.73"); // stage only, in range
+    s_stub_req_body = body;
+    s_stub_req_body_sent = 0;
+    httpd_req_t req = { .content_len = (int)strlen(body) };
+    esp_err_t err = commissioning_post_handler(&req);
+    s_link = NULL;
+
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(s_stub_httpd_err_calls == 0, "no error response for a valid trim");
+    TEST_CHECK(s_stub_set_param_calls == 1, "the trim was staged to the Pico");
+}
+
 int main(void)
 {
     test_rate_guard_gather_no_zone_identified_is_no_data();
@@ -2338,6 +2458,10 @@ int main(void)
     test_commissioning_post_confirmed_commit_calls_recapture();
     test_commissioning_post_stage_only_does_not_recapture();
     test_commissioning_post_failed_recapture_still_reports_ok();
+
+    test_commissioning_post_gain_zero_is_refused();
+    test_commissioning_post_gain_out_of_range_is_refused();
+    test_commissioning_post_in_range_gain_is_accepted();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

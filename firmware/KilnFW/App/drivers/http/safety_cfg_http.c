@@ -564,6 +564,49 @@ static int parse_set_param_body(const char *body, safety_cfg_post_pair_t *out, s
 }
 
 
+/* Per-id entry-range gate for this otherwise generic endpoint.
+ *
+ * Today it covers the per-channel front-end gain (0x030B-0x030D), which the
+ * commissioning page made operator-editable so a clamp can be trimmed against
+ * a reference meter. gain is the SLOPE control in the end-to-end conversion
+ * (I = [counts * 3.3/(4096*gain) - zero_mv/1000] * A_fs / sqrt(2)) and sits in
+ * the denominator of current_presence_is_flowing()'s presence threshold too,
+ * so a zero/negative/absurd entry is not a cosmetic mistake.
+ *
+ * It must fail LOUD rather than be quietly repaired. cs_counts_to_amps()
+ * substitutes CS_DEFAULT_GAIN for a stored value <= 0, and the Pico's own
+ * range check is finiteness-only (config_params.c, deliberately -- see
+ * SAFETY_CT_CAL_GAIN_MIN's comment), so without this gate a nonsensical entry
+ * would be accepted, persisted, and then silently not used: the operator would
+ * be looking at a number the board is ignoring. Refusing at entry is the only
+ * place that mismatch can be prevented.
+ *
+ * Returns true and fills `msg` when a pair is bad; nothing is applied. */
+static bool commissioning_pair_range_problem(const safety_cfg_post_pair_t *pairs, int n,
+                                              char *msg, size_t msg_len)
+{
+    for (int i = 0; i < n; i++) {
+        if (pairs[i].param_id < 0x030B || pairs[i].param_id > 0x030D) {
+            continue;
+        }
+        unsigned ch = (unsigned)(pairs[i].param_id - 0x030B);
+        char *end = NULL;
+        float gain = strtof(pairs[i].value_text, &end);
+        if (end == pairs[i].value_text || *end != '\0' || !isfinite(gain)) {
+            snprintf(msg, msg_len, "gain[%u] must be a number", ch);
+            return true;
+        }
+        if (gain < SAFETY_CT_CAL_GAIN_MIN || gain > SAFETY_CT_CAL_GAIN_MAX) {
+            snprintf(msg, msg_len,
+                     "gain[%u] must be between %g and %g (got %g) -- refused, not defaulted",
+                     ch, (double)SAFETY_CT_CAL_GAIN_MIN, (double)SAFETY_CT_CAL_GAIN_MAX,
+                     (double)gain);
+            return true;
+        }
+    }
+    return false;
+}
+
 static esp_err_t commissioning_post_handler(httpd_req_t *req)
 {
     /* 2026-09-05 DRAM_PSRAM_PLAN.md: same rationale as commissioning_get_
@@ -596,6 +639,14 @@ static esp_err_t commissioning_post_handler(httpd_req_t *req)
     if (n == 0 && !commit) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                             "no recognised id/value pairs in body -- expected id=<decimal>&value=<v>");
+        return ESP_OK;
+    }
+
+    /* Entry-range refusal, before anything is staged to the Pico: a bad pair
+     * must not be half-applied alongside good ones in the same body. */
+    char range_msg[120];
+    if (commissioning_pair_range_problem(pairs, n, range_msg, sizeof(range_msg))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, range_msg);
         return ESP_OK;
     }
 

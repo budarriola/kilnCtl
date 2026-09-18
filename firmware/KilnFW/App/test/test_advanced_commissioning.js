@@ -300,6 +300,74 @@ function clickSave(ctx) {
   });
 })();
 
+// ---- Test 6: the per-channel gain field is operator-editable, and an
+// out-of-range entry is REFUSED at the client before any request is built --
+// never silently replaced by a default. gain sits in the denominator of the
+// Pico's amps formula and of the presence threshold, so a 0 entry would
+// otherwise be accepted here and then quietly ignored by cs_counts_to_amps()'s
+// CS_DEFAULT_GAIN fallback, leaving the operator reading a number the board
+// is not using.
+(function testGainZeroIsRefusedClientSide() {
+  let postCalled = false;
+  const fetchImpl = (url, opts) => {
+    if (url === '/api/safety/commissioning' && opts && opts.method === 'POST') { postCalled = true; return { ok: true, status: 200, body: { ok: true } }; }
+    if (url === '/api/profile_exec') return { ok: true, status: 200, body: { state: 'idle' } };
+    if (url === '/api/autotune') return { ok: true, status: 200, body: { state: 'idle' } };
+    if (url === '/api/safety/commissioning') return { ok: true, status: 200, body: { params: BASE_PARAMS } };
+    return { ok: true, status: 200, body: {} };
+  };
+  const fields = [makeFieldEl(779, 'f32', '0')];
+  const ctx = loadContext({ fetchImpl: makeFetch(fetchImpl), confirmImpl: () => true, fields });
+  return waitForPageLoad().then(() => clickSave(ctx)).then(() => runMicrotasks()).then(() => {
+    const msg = ctx.document.getElementById('msg').textContent;
+    assertIncludes(msg, 'Rejected:', 'gain/zero: refused loudly');
+    assertIncludes(msg, 'gain[0]', 'gain/zero: names the field');
+    assertIncludes(msg, '0.05', 'gain/zero: names the accepted range');
+    assert(postCalled === false, 'gain/zero: never POSTs');
+  });
+})();
+
+// ---- Test 7: a gain above the accepted ceiling is refused the same way.
+(function testGainAboveMaxIsRefusedClientSide() {
+  let postCalled = false;
+  const fetchImpl = (url, opts) => {
+    if (url === '/api/safety/commissioning' && opts && opts.method === 'POST') { postCalled = true; return { ok: true, status: 200, body: { ok: true } }; }
+    if (url === '/api/profile_exec') return { ok: true, status: 200, body: { state: 'idle' } };
+    if (url === '/api/autotune') return { ok: true, status: 200, body: { state: 'idle' } };
+    if (url === '/api/safety/commissioning') return { ok: true, status: 200, body: { params: BASE_PARAMS } };
+    return { ok: true, status: 200, body: {} };
+  };
+  const fields = [makeFieldEl(781, 'f32', '25')];
+  const ctx = loadContext({ fetchImpl: makeFetch(fetchImpl), confirmImpl: () => true, fields });
+  return waitForPageLoad().then(() => clickSave(ctx)).then(() => runMicrotasks()).then(() => {
+    const msg = ctx.document.getElementById('msg').textContent;
+    assertIncludes(msg, 'Rejected:', 'gain/above-max: refused loudly');
+    assertIncludes(msg, 'gain[2]', 'gain/above-max: names the field');
+    assert(postCalled === false, 'gain/above-max: never POSTs');
+  });
+})();
+
+// ---- Test 8: an in-range gain trim is accepted and actually sent. Without
+// this, Tests 6 and 7 would still pass if the field were simply un-editable
+// or every entry were refused.
+(function testInRangeGainIsAccepted() {
+  let postBody = null;
+  const fetchImpl = (url, opts) => {
+    if (url === '/api/safety/commissioning' && opts && opts.method === 'POST') { postBody = opts.body; return { ok: true, status: 200, body: { ok: true } }; }
+    if (url === '/api/profile_exec') return { ok: true, status: 200, body: { state: 'idle' } };
+    if (url === '/api/autotune') return { ok: true, status: 200, body: { state: 'idle' } };
+    if (url === '/api/safety/commissioning') return { ok: true, status: 200, body: { params: BASE_PARAMS } };
+    return { ok: true, status: 200, body: {} };
+  };
+  const fields = [makeFieldEl(779, 'f32', '0.73')];
+  const ctx = loadContext({ fetchImpl: makeFetch(fetchImpl), confirmImpl: () => true, fields });
+  return waitForPageLoad().then(() => clickSave(ctx)).then(() => runMicrotasks()).then(() => runMicrotasks()).then(() => {
+    assert(postBody !== null, 'gain/in-range: the trim is actually POSTed');
+    assertIncludes(String(postBody), 'id=779', 'gain/in-range: carries the gain param id');
+    assertIncludes(String(postBody), '0.73', 'gain/in-range: carries the entered value');
+  });
+})();
+
 Promise.resolve()
   .then(() => new Promise((resolve) => setTimeout(resolve, 50)))
   .then(() => {

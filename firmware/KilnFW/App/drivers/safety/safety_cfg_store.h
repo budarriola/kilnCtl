@@ -360,6 +360,35 @@ typedef enum {
 #define SAFETY_CT_CAL_ZERO_MV_MIN (-200.0f)
 #define SAFETY_CT_CAL_ZERO_MV_MAX 200.0f
 
+/* Operator-entry sanity range for the per-channel front-end divider gain
+ * (Pico params 0x030B-0x030D), used by the web commissioning surface.
+ *
+ * `gain` sits in the DENOMINATOR of both cs_counts_to_amps() (current_sense.c)
+ * and current_presence_is_flowing()'s presence threshold, so a near-zero entry
+ * does not merely mis-scale a wattage display -- it inflates every derived
+ * amp reading without bound and moves a guard input. The front end is a
+ * passive resistor divider (R46/R43 = 0.715), so a physical gain cannot
+ * exceed 1.0; the 2.0 ceiling leaves headroom for a reworked or
+ * differently-populated divider without admitting an absurd value. The 0.05
+ * floor is ~14x below nominal -- far outside any 1%-resistor trim -- and caps
+ * the worst honest mis-entry at roughly a 20x over-read instead of an
+ * unbounded one.
+ *
+ * This bound deliberately lives HERE, on the ESP entry surface, and not on
+ * the Pico: config_params.c range-checks gain for finiteness only, because
+ * CONFIG_REFERENCE.md documents no constraint on it and inventing one at the
+ * protocol layer is exactly the unstated "tight sensible bound" COMMISSIONING.md's
+ * discipline forbids. Refusing a nonsensical ENTRY is a different thing from
+ * narrowing the protocol's accepted range.
+ *
+ * Note that cs_counts_to_amps() already substitutes CS_DEFAULT_GAIN for a
+ * stored value <= 0. That fallback is a last-ditch guard against an
+ * uninitialised field, NOT a licence to accept a bad entry: a silently
+ * substituted default would leave the operator looking at a value the board
+ * is not using. Entry is refused loudly instead. */
+#define SAFETY_CT_CAL_GAIN_MIN 0.05f
+#define SAFETY_CT_CAL_GAIN_MAX 2.0f
+
 /* R46/R43 physical default -- the fallback used whenever a channel's gain
  * (0x030B/0x030C/0x030D) has never been fetched/set. Shared here (rather
  * than kept file-local to safety_cfg_store.c) so every other caller that
