@@ -219,6 +219,52 @@ def get_heap_status(host: Optional[str] = None) -> str:
 
 
 @_srv._tool()
+def fetch_event_log(kind: str, host: Optional[str] = None) -> str:
+    """Fetch and decode the board's on-flash binary event log, over HTTP
+    GET /api/logs/{firing,autotune}.
+
+    2026-09-17 vacuity sweep finding: kilnctrl.event_log_decoder.py (the
+    documented PC-side counterpart to event_log.c, see FLASH_BUDGET.md sec
+    5.2) had a full test suite but no production caller anywhere in this
+    tree -- nothing fetched a real board's event log and ran it through the
+    decoder. This is that caller.
+
+    ``kind`` is "firing" or "autotune" (log_http.c has no third kind). Same
+    host-resolution order as get_heap_status/every ota_*/adaptive_tune_*
+    tool: explicit `host` argument, else the STA IP if Wi-Fi reports one
+    connected, else the board's own softAP address.
+
+    Returns one human-readable line per decoded record (oldest first, as
+    the board stores them), or an ``error:`` string on a transport failure
+    or an unrecognized/old-format log (event_log_decoder refuses rather
+    than misreading a pre-2026-09-02 text-format log -- see that module's
+    migration note). An empty log (nothing logged yet, or freshly erased)
+    reports that explicitly rather than an empty string, so it isn't
+    mistaken for a fetch failure.
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
+    from . import event_log_decoder
+
+    kind = kind.strip().lower()
+    resolved = _ota_resolve_host(host)
+    try:
+        raw = dashboard_http_client.get_event_log_bytes(resolved, kind)
+    except ValueError as exc:
+        return f"error: {exc}"
+    except dashboard_http_client.DashboardHttpError as exc:
+        return f"error: {exc} (host={resolved})"
+    try:
+        records = event_log_decoder.decode_stream(raw)
+    except event_log_decoder.EventLogFormatError as exc:
+        return f"error: could not decode {kind} event log from {resolved}: {exc}"
+    if not records:
+        return f"host={resolved} kind={kind}: log is empty (0 records)"
+    lines = [f"host={resolved} kind={kind}: {len(records)} record(s)"]
+    lines.extend(event_log_decoder.format_record(r) for r in records)
+    return "\n".join(lines)
+
+
+@_srv._tool()
 def get_cfgfs_status(host: Optional[str] = None) -> str:
     """Report the `cfg` LittleFS partition's live state, over HTTP GET
     /api/cfgfs (diagnostics_http.c: cfgfs_status_get_handler()).
