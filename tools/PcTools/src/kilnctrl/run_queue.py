@@ -94,6 +94,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from . import http_auth
 from typing import Callable, Optional, Sequence
 
 from kilnctrl import capability_preflight, ramp_assist_http_client, zones_http_client
@@ -443,7 +445,7 @@ def _url(host: str, path: str) -> str:
 def _get_json(host: str, path: str, timeout: float) -> dict:
     req = urllib.request.Request(_url(host, path), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
     except urllib.error.URLError as exc:
         raise RunQueueError(f"GET {path} failed: {exc}") from exc
@@ -459,7 +461,7 @@ def _post_form(host: str, path: str, fields: dict, timeout: float) -> str:
         _url(host, path), data=data, method="POST",
         headers={"Content-Type": "application/x-www-form-urlencoded"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             return resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace") if exc.fp else str(exc)

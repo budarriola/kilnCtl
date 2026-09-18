@@ -19,6 +19,8 @@ import tkinter as tk
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from . import http_auth
 import webbrowser
 from collections import deque
 from pathlib import Path
@@ -288,7 +290,7 @@ class WifiFiringMixin:
 
     def _wifi_http_get(self, path: str) -> object:
         url = f"http://{self._wifi_host()}{path}"
-        with urllib.request.urlopen(url, timeout=_WIFI_HTTP_TIMEOUT_S) as resp:
+        with http_auth.urlopen(url, timeout=_WIFI_HTTP_TIMEOUT_S) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
     def _wifi_http_post_form(self, path: str, fields: dict[str, str]) -> None:
@@ -297,7 +299,7 @@ class WifiFiringMixin:
         req = urllib.request.Request(
             url, data=body, headers={"Content-Type": "application/x-www-form-urlencoded"}
         )
-        with urllib.request.urlopen(req, timeout=_WIFI_HTTP_TIMEOUT_S) as resp:
+        with http_auth.urlopen(req, timeout=_WIFI_HTTP_TIMEOUT_S) as resp:
             resp.read()
 
     @staticmethod
@@ -736,7 +738,7 @@ class WifiFiringMixin:
         Status popup has its own host field so it can point at a device
         without opening the Wi-Fi Settings popup too."""
         url = f"http://{host}{path}"
-        with urllib.request.urlopen(url, timeout=_WIFI_HTTP_TIMEOUT_S) as resp:
+        with http_auth.urlopen(url, timeout=_WIFI_HTTP_TIMEOUT_S) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
     # -- popups ------------------------------------------------------------

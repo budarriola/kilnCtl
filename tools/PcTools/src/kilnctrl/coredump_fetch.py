@@ -47,6 +47,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from . import http_auth
 from dataclasses import dataclass
 from typing import Optional
 
@@ -97,7 +99,7 @@ class CoredumpInfo:
 
 def _http_get_json(url: str, timeout: float) -> dict:
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with http_auth.urlopen(url, timeout=timeout) as resp:
             body = resp.read()
     except urllib.error.URLError as exc:
         raise CoredumpFetchError(f"GET {url} failed: {exc}") from exc
@@ -109,7 +111,7 @@ def _http_get_json(url: str, timeout: float) -> dict:
 
 def _http_get_bytes(url: str, timeout: float) -> bytes:
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with http_auth.urlopen(url, timeout=timeout) as resp:
             return resp.read()
     except urllib.error.URLError as exc:
         raise CoredumpFetchError(f"GET {url} failed: {exc}") from exc

@@ -16,6 +16,8 @@ from __future__ import annotations
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from . import http_auth
 from html.parser import HTMLParser
 from typing import Optional
 
@@ -94,7 +96,7 @@ class WebUiClient:
         """GET ``path`` off ``base_url``, store and return the response HTML."""
         url = self.base_url + path
         try:
-            with urllib.request.urlopen(url, timeout=self.timeout) as resp:
+            with http_auth.urlopen(url, timeout=self.timeout) as resp:
                 body = resp.read()
         except (urllib.error.URLError, OSError) as exc:
             raise WebUiError(f"GET {url} failed: {exc}") from exc
@@ -128,7 +130,7 @@ class WebUiClient:
         headers = {"Content-Type": "application/x-www-form-urlencoded"} if data else {}
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with http_auth.urlopen(req, timeout=self.timeout) as resp:
                 return resp.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")

@@ -36,6 +36,8 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+
+from . import http_auth
 from typing import Optional
 
 PARTITION_HTTP_TIMEOUT_S = 5.0
@@ -86,7 +88,7 @@ def get_partitions(host: str, timeout: float = PARTITION_HTTP_TIMEOUT_S) -> dict
     dangerously wrong reading of the board's real state."""
     req = urllib.request.Request(_url(host, "/api/partitions"), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         status, detail = _http_error_detail(exc)

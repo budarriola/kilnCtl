@@ -33,6 +33,8 @@ import logging
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from . import http_auth
 from typing import Optional
 
 _module_log = logging.getLogger(__name__)
@@ -84,7 +86,7 @@ def get_enabled(host: str, timeout: float = RAMP_ASSIST_HTTP_TIMEOUT_S) -> bool:
     safe default)."""
     req = urllib.request.Request(_url(host, _RAMP_ASSIST_PATH), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         status, detail = _http_error_detail(exc)
@@ -119,7 +121,7 @@ def set_enabled(host: str, enabled: bool, timeout: float = RAMP_ASSIST_HTTP_TIME
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         status, detail = _http_error_detail(exc)

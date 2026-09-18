@@ -96,6 +96,8 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from . import http_auth
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -161,7 +163,7 @@ def get_zones(host: str, timeout: float = ZONES_HTTP_TIMEOUT_S) -> dict:
     module makes -- see the module docstring's whole-page-submit trap."""
     req = urllib.request.Request(_url(host, "/api/zones"), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         status, detail = _http_error_detail(exc)
@@ -191,7 +193,7 @@ def get_zones_diag(host: str, timeout: float = ZONES_HTTP_TIMEOUT_S) -> dict:
     "index" -- see merge_zones_diag() below for exactly that."""
     req = urllib.request.Request(_url(host, "/api/zones_diag"), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         status, detail = _http_error_detail(exc)
@@ -297,7 +299,7 @@ def post_zones(host: str, body: str, timeout: float = ZONES_HTTP_TIMEOUT_S) -> s
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             return resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         status_code, detail = _http_error_detail(exc)

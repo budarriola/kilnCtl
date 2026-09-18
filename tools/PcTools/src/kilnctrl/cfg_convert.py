@@ -94,6 +94,8 @@ import re
 import sys
 import urllib.error
 import urllib.request
+
+from . import http_auth
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -435,7 +437,7 @@ def convert(doc: dict, target_version: int) -> "tuple[dict, ConversionReport]":
 def fetch_board_backup_version(host: str, timeout_s: float = DEFAULT_HTTP_TIMEOUT_S) -> int:
     url = f"http://{host}/api/backup/export"
     try:
-        with urllib.request.urlopen(url, timeout=timeout_s) as resp:
+        with http_auth.urlopen(url, timeout=timeout_s) as resp:
             body = resp.read()
     except urllib.error.HTTPError as exc:
         raise CfgConvertError(f"board at {host} returned HTTP {exc.code} for {url}") from exc

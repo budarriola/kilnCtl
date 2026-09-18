@@ -41,6 +41,8 @@ import json
 import logging
 import urllib.error
 import urllib.request
+
+from . import http_auth
 from typing import Optional
 
 _module_log = logging.getLogger(__name__)
@@ -123,7 +125,7 @@ def start(host: str, timeout: float = ZONE_SWEEP_HTTP_TIMEOUT_S) -> dict:
     zone_current_sweep_start() tool for both."""
     req = urllib.request.Request(_url(host, _SWEEP_START_PATH), data=b"", method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         status, detail = _http_error_detail(exc)
@@ -158,7 +160,7 @@ def abort(host: str, timeout: float = ZONE_SWEEP_HTTP_TIMEOUT_S) -> dict:
     normal response."""
     req = urllib.request.Request(_url(host, _SWEEP_ABORT_PATH), data=b"", method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         status, detail = _http_error_detail(exc)
@@ -200,7 +202,7 @@ def status(host: str, timeout: float = ZONE_SWEEP_HTTP_TIMEOUT_S) -> dict:
     shared string could only ever report one of them."""
     req = urllib.request.Request(_url(host, _SWEEP_STATUS_PATH), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         status_code, detail = _http_error_detail(exc)

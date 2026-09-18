@@ -60,6 +60,8 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from . import http_auth
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -118,7 +120,7 @@ def get_commissioning(host: str, timeout: float = SAFETY_CFG_HTTP_TIMEOUT_S) -> 
     distinction rather than defaulting the value."""
     req = urllib.request.Request(_url(host), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         status, detail = _http_error_detail(exc)
@@ -233,7 +235,7 @@ def post_commissioning(host: str, body: str, timeout: float = SAFETY_CFG_HTTP_TI
                  "Content-Length": str(len(data))},
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             text = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         status, detail = _http_error_detail(exc)

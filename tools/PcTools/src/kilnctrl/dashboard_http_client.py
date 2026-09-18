@@ -26,6 +26,8 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+
+from . import http_auth
 from typing import Optional
 
 DASHBOARD_HTTP_TIMEOUT_S = 5.0
@@ -75,7 +77,7 @@ def get_status(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> dict:
     needs more of the payload without a second GET."""
     req = urllib.request.Request(_url(host, "/api/status"), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         status, detail = _http_error_detail(exc)
@@ -118,7 +120,7 @@ def get_crash_report(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> di
     person (or an explicit, separately-invoked tool) decides otherwise."""
     req = urllib.request.Request(_url(host, "/api/crash_report"), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         status, detail = _http_error_detail(exc)
@@ -149,7 +151,7 @@ def get_event_log_bytes(host: str, kind: str, timeout: float = DASHBOARD_HTTP_TI
         raise ValueError(f"kind must be one of {_EVENT_LOG_KINDS}, got {kind!r}")
     req = urllib.request.Request(_url(host, f"/api/logs/{kind}"), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             return resp.read()
     except Exception as exc:  # noqa: BLE001
         status, detail = _http_error_detail(exc)
@@ -167,7 +169,7 @@ def get_cfgfs_status(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> di
     have diverged)."""
     req = urllib.request.Request(_url(host, "/api/cfgfs"), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         status, detail = _http_error_detail(exc)
@@ -197,7 +199,7 @@ def get_diagnostics_timing(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S)
     until then, not a real measurement)."""
     req = urllib.request.Request(_url(host, "/api/diagnostics/timing"), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         status, detail = _http_error_detail(exc)

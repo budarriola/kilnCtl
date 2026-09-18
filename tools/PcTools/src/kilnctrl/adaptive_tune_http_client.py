@@ -42,6 +42,8 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from . import http_auth
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -172,7 +174,7 @@ def get_status(host: str, timeout: float = ADAPTIVE_TUNE_HTTP_TIMEOUT_S) -> "lis
     observations, no applied change)."""
     req = urllib.request.Request(_url(host, _STATUS_PATH), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         status, detail = _http_error_detail(exc)
@@ -210,7 +212,7 @@ def set_enabled(host: str, zone: int, enabled: bool,
                  "Content-Length": str(len(body))},
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             text = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         status, detail = _http_error_detail(exc)
@@ -249,7 +251,7 @@ def revert(host: str, zone: int, timeout: float = ADAPTIVE_TUNE_HTTP_TIMEOUT_S) 
                  "Content-Length": str(len(body))},
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             text = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         status, detail = _http_error_detail(exc)

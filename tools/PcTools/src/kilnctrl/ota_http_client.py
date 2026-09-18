@@ -64,6 +64,8 @@ import logging
 import os
 import urllib.error
 import urllib.request
+
+from . import http_auth
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -161,7 +163,7 @@ def get_challenge(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> bytes:
     a 403 ("no valid challenge...") from the push call, not from here."""
     req = urllib.request.Request(_url(host, "/api/ota/challenge"), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001 - normalized into OtaHttpError below
         status, detail = _http_error_detail(exc)
@@ -232,7 +234,7 @@ def _push_image(host: str, path: str, endpoint: str, context: str, ap_password: 
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             status_code = resp.status
             body_text = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
@@ -305,7 +307,7 @@ def get_pico_status(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
     begin, erasing, sending, retransmit, finishing, done, failed)."""
     req = urllib.request.Request(_url(host, "/api/ota/pico/status"), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         status, detail = _http_error_detail(exc)
@@ -328,7 +330,7 @@ def get_esp_status(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
     version_after/success/reason/uptime_s, mirroring ota_record_t."""
     req = urllib.request.Request(_url(host, "/api/ota/esp/status"), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         status, detail = _http_error_detail(exc)
@@ -381,7 +383,7 @@ def rollback_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_
     )
     log.info("OTA rollback requested: host=%s", host)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         status_code, detail = _http_error_detail(exc)
@@ -445,7 +447,7 @@ def recovery_exit_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_TIM
     )
     log.info("OTA recovery-exit requested: host=%s", host)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         status_code, detail = _http_error_detail(exc)
@@ -522,7 +524,7 @@ def boot_guard_reset_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_
     )
     log.info("OTA boot_guard_reset requested: host=%s", host)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         status_code, detail = _http_error_detail(exc)
@@ -560,7 +562,7 @@ def get_boot_guard_status(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dic
     """
     req = urllib.request.Request(_url(host, "/api/boot_guard"), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         status_code, detail = _http_error_detail(exc)
@@ -639,7 +641,7 @@ def sw_reset(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -
     )
     log.info("sw_reset requested: host=%s", host)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             status_code = resp.status
             body_text = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:

@@ -73,6 +73,8 @@ import json
 import logging
 import urllib.error
 import urllib.request
+
+from . import http_auth
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -120,7 +122,7 @@ def _get_json(host: str, path: str, timeout: float) -> "tuple[Optional[dict], Op
     "board did not answer this question", full stop."""
     req = urllib.request.Request(_url(host, path), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         try:
