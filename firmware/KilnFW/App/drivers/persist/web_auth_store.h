@@ -99,10 +99,18 @@ typedef enum {
 web_auth_pw_check_t web_auth_password_check(const char *password, const char *username,
                                              const char *ap_ssid, const char *ap_password);
 
+// The PIN length bounds this store actually enforces (web_auth_pin_check(),
+// web_auth_store_set_pin()) -- named so security_http_core.h's
+// SECURITY_HTTP_PIN_MAX (the request buffer's sizing limit, one file over)
+// has something to be checked against instead of two independently-chosen
+// literal 8s. See security_backend_web_auth.c's static assert.
+#define WEB_AUTH_PIN_MIN_LEN 4u
+#define WEB_AUTH_PIN_MAX_LEN 8u
+
 typedef enum {
     WEB_AUTH_PIN_OK = 0,
-    WEB_AUTH_PIN_TOO_SHORT,   // < 4 digits
-    WEB_AUTH_PIN_TOO_LONG,    // > 8 digits
+    WEB_AUTH_PIN_TOO_SHORT,   // < WEB_AUTH_PIN_MIN_LEN digits
+    WEB_AUTH_PIN_TOO_LONG,    // > WEB_AUTH_PIN_MAX_LEN digits
     WEB_AUTH_PIN_NOT_DIGITS,  // contains a non-digit character
     WEB_AUTH_PIN_SAME_AS_OTHER, // equals the other role's PIN (plan item 3:
                                   // "the two PINs must also differ from

@@ -167,10 +167,10 @@ web_auth_pin_check_t web_auth_pin_check(const char *pin, const char *other_pin_o
         return WEB_AUTH_PIN_TOO_SHORT;
     }
     size_t len = strlen(pin);
-    if (len < 4u) {
+    if (len < WEB_AUTH_PIN_MIN_LEN) {
         return WEB_AUTH_PIN_TOO_SHORT;
     }
-    if (len > 8u) {
+    if (len > WEB_AUTH_PIN_MAX_LEN) {
         return WEB_AUTH_PIN_TOO_LONG;
     }
     for (size_t i = 0; i < len; i++) {
@@ -470,7 +470,7 @@ hal_status_t web_auth_store_set_pin(web_auth_role_t role, const char *pin,
         return HAL_INVALID_ARG;
     }
     size_t plen = strlen(pin);
-    if (plen < 4u || plen > 8u) {
+    if (plen < WEB_AUTH_PIN_MIN_LEN || plen > WEB_AUTH_PIN_MAX_LEN) {
         return HAL_INVALID_ARG;
     }
 

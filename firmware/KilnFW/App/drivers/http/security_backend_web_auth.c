@@ -28,6 +28,52 @@
 #include "wifi_prov.h"
 #include "wifi_provision_http.h" // wifi_provision_http_get_server()
 
+// SECURITY_HTTP_USERNAME_MAX (security_http_core.h) and
+// WEB_AUTH_USERNAME_MAX_LEN (web_auth_store.h) are two views of the SAME
+// limit -- the page's request-field size vs. the store's on-disk record
+// size -- kept as two separate literals in two separate modules on purpose
+// (security_http_core.c must stay storage-agnostic, per this file's own
+// header comment), with no shared type or macro tying them together. This
+// is exactly the shape of the CRITICAL fixed today: a stored-copy buffer
+// and its producer's buffer sized independently and drifting apart with no
+// compiler or test signal, discovered only because every real IPv6 address
+// overflowed the smaller one and left clients logged in but permanently
+// 401. Here the two currently agree (both 32), but nothing stops a future
+// "widen the username field" edit from touching only one side. If they
+// ever disagree, `username[SECURITY_HTTP_USERNAME_MAX + 1]` either gets
+// silently truncated before reaching web_auth_store_set_password() (this
+// macro smaller) or the store's fixed-size `username[WEB_AUTH_USERNAME_MAX_LEN
+// + 1]` record silently truncates what this page already accepted as valid
+// (that macro smaller) -- either way, a username a user believes they set
+// is not the one that ends up persisted. This is the one file that
+// includes both headers, so it is the only place this relationship can be
+// checked at compile time.
+_Static_assert(SECURITY_HTTP_USERNAME_MAX == WEB_AUTH_USERNAME_MAX_LEN,
+               "SECURITY_HTTP_USERNAME_MAX (security_http_core.h) and "
+               "WEB_AUTH_USERNAME_MAX_LEN (web_auth_store.h) are two views of "
+               "the same username length limit and must stay equal -- a "
+               "mismatch silently truncates or rejects a username between "
+               "the HTTP request layer and the credential store");
+
+// Same relationship, same reasoning, for the LCD PIN length: this page's
+// request buffer `lcd_pin[SECURITY_HTTP_PIN_MAX + 1]` /
+// `lcd_pin_other[SECURITY_HTTP_PIN_MAX + 1]` (security_http_core.h) must be
+// sized to hold the longest PIN the store will ever accept
+// (WEB_AUTH_PIN_MAX_LEN, web_auth_store.h -- web_auth_pin_check() and
+// web_auth_store_set_pin() are the two functions that actually enforce it).
+// If this page's buffer were ever smaller than the store's real maximum, a
+// valid long PIN would be silently truncated before it ever reached
+// web_auth_pin_check(), so the store's own upper-bound rejection could never
+// fire and the truncated value would be what actually gets hashed and
+// stored -- a PIN entry a user believes they set is not the one that ends
+// up persisted.
+_Static_assert(SECURITY_HTTP_PIN_MAX == WEB_AUTH_PIN_MAX_LEN,
+               "SECURITY_HTTP_PIN_MAX (security_http_core.h) and "
+               "WEB_AUTH_PIN_MAX_LEN (web_auth_store.h) are two views of the "
+               "same LCD PIN length limit and must stay equal -- a mismatch "
+               "lets this page's request buffer silently truncate a PIN "
+               "before the store's own length check ever sees it");
+
 static const char *TAG = "security_backend_web_auth";
 
 // security_role_t (this page's seam) and web_auth_role_t (the store's) are

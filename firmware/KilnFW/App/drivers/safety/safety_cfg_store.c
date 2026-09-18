@@ -175,7 +175,7 @@ typedef struct {
     const char *name;
 } safety_cfg_table_row_t;
 
-static const safety_cfg_table_row_t SAFETY_CFG_PARAM_TABLE[SAFETY_CFG_PARAM_COUNT] = {
+static const safety_cfg_table_row_t SAFETY_CFG_PARAM_TABLE[] = {
     /* sec 1 -- commissioning, no compiled-in default */
     { 0x0101, KILNLINK_PARAM_TYPE_U8, "tc_source" },
     { 0x0102, KILNLINK_PARAM_TYPE_U8, "borrowed_zone_index" },
@@ -280,6 +280,27 @@ static const safety_cfg_table_row_t SAFETY_CFG_PARAM_TABLE[SAFETY_CFG_PARAM_COUN
      * authority on the value; this table only names it. */
     { 0x0212, KILNLINK_PARAM_TYPE_U8, "estop_active_level" },
 };
+
+// SAFETY_CFG_PARAM_COUNT (safety_cfg_store.h) is a hand-maintained literal,
+// not derived from this table -- it also sizes safety_cfg_store_blob_t's
+// on-flash `entries[]` array below and SAFETY_CFG_POST_MAX_PAIRS
+// (safety_cfg_write.h). Declaring the table above as `[]` (rather than
+// `[SAFETY_CFG_PARAM_COUNT]`) makes the compiler count its own initializers
+// so this assert can catch a real divergence: if a row is ever added
+// without bumping SAFETY_CFG_PARAM_COUNT, or the macro is bumped without a
+// matching row appended, an explicit `[SAFETY_CFG_PARAM_COUNT]` array size
+// would silently accept either mistake -- too many initializers is a
+// compile error, but too FEW is not: the remaining slots just zero-fill,
+// producing a bogus id-0/type-0 row that this cache's lookups
+// (SAFETY_CFG_PARAM_TABLE[i].id, safety_cfg_get_row_at()) would then read
+// back as real. This is the same "count and table drift" shape as the enum
+// count that once silently grew an unintended vote (CLAUDE.md's "An enum
+// count granted a vote" note) -- catch it here at compile time instead.
+_Static_assert((sizeof(SAFETY_CFG_PARAM_TABLE) / sizeof(SAFETY_CFG_PARAM_TABLE[0])) == SAFETY_CFG_PARAM_COUNT,
+               "SAFETY_CFG_PARAM_TABLE's row count must equal SAFETY_CFG_PARAM_COUNT "
+               "(safety_cfg_store.h) -- update the macro whenever a row is appended or "
+               "removed, or every dependent buffer (safety_cfg_store_blob_t.entries[], "
+               "SAFETY_CFG_POST_MAX_PAIRS) silently mis-sizes against the real table");
 
 typedef struct {
     uint8_t set;
