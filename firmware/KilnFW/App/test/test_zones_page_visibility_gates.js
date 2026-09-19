@@ -1,6 +1,6 @@
 /* Node-only test for zones_page.html's section visibility gates (ROADMAP.md
  * "Visually simplify the Thermocouples & Zones web page", decision (a)):
- * seven sections render only when their feature is enabled/present on at
+ * five sections render only when their feature is enabled/present on at
  * least one zone (or, for Measure Zone Normal Current, when the safety
  * processor's ct_installed says CTs are fitted); otherwise the section is
  * hidden (via the `hidden` DOM property, never inline display) and a single
@@ -140,6 +140,30 @@ PAIRS.forEach(([sectionId, hintId]) => {
   assert(sectionRe.test(SRC), 'markup: #' + sectionId + ' wrapper exists');
   assert(hintRe.test(SRC), 'markup: #' + hintId + ' is a hidden-by-default class="hint" paragraph');
 });
+
+// ---------------------------------------------------------------------------
+// Regression: the PID Autotune "Run status" block (Abort/Accept/status/
+// refusal) must sit INSIDE #pidAutotuneSection's own wrapper div, not after
+// its closing </div> -- otherwise a board with no PID/fuzzy zone hides the
+// step-test controls but still shows a bare "Run status" heading with live
+// Abort/Accept buttons. Checked by slicing the markup between the section's
+// opening tag and its paired hint paragraph (which, per the PAIRS check
+// above, immediately follows the section's closing </div>) and requiring
+// the Run status heading and #atAcceptBtn to both fall inside that slice.
+// ---------------------------------------------------------------------------
+{
+  const openIdx = SRC.indexOf('id="pidAutotuneSection"');
+  const hintIdx = SRC.indexOf('id="pidAutotuneHint"');
+  assert(openIdx !== -1 && hintIdx !== -1 && openIdx < hintIdx,
+    'markup: #pidAutotuneSection appears before #pidAutotuneHint');
+  const sectionSlice = SRC.slice(openIdx, hintIdx);
+  assert(/<h3>Run status<\/h3>/.test(sectionSlice),
+    'markup: Run status heading is inside #pidAutotuneSection (negative case: was orphaned outside it)');
+  assert(/id="atAcceptBtn"/.test(sectionSlice),
+    'markup: #atAcceptBtn is inside #pidAutotuneSection, not orphaned after its close (negative case)');
+  assert(/id="atAbortBtn"/.test(sectionSlice),
+    'markup: #atAbortBtn is inside #pidAutotuneSection');
+}
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed.');
 if (failed > 0) {
