@@ -48,10 +48,52 @@ Status: PARTIALLY BUILT. Landed so far (this commit):
     the plan's cases 1-6 and 8-11, plus a no-recorded-normal case and a
     bad-input case. Case 7 (a stale verdict) lands with the store.
 
-Still unbuilt: the firing-interlock consequence of FAIL, the
-`ct_verify`/`verdict_v1` store and its configuration fingerprint (with the
-plan's stale-fingerprint test and its negative test), the `ct_attribution`
-readiness item, and the `SAFETY_CT_CAL_BLOB_VERSION` 1->2 migration.
+- The `ct_verify`/`verdict_v1` store, its configuration fingerprint, the
+  `ct_attribution` readiness item and the firing interlock are built, and they
+  are deliberately ONE piece: a verdict nothing can act on, and an interlock
+  with no verdict behind it, are each half a feature.
+  - `firmware/KilnFW/App/drivers/persist/ct_verify_store.c` holds the blob
+    (namespace `ct_verify`, key `verdict_v1`, 52 bytes, NVS only -- never the
+    `cfg` filesystem, because a measurement about one board's clamps must not
+    travel with a config backup). It depends on nothing but `hal_kv` and libc,
+    which is what lets it link into any host-test executable.
+  - `ct_verify_fingerprint()` is an FNV-1a hash over every configuration input
+    that can change what a CT reading MEANS, field by field in a fixed order
+    with floats canonicalized (all NaNs alike, -0.0f as +0.0f). It is hashed
+    field-wise rather than as a struct memcpy on purpose: padding bytes are
+    uninitialized, and hashing them would re-take every verdict at random.
+  - The producer lives in
+    `firmware/KilnFW/App/drivers/control/zones_current_sweep_task.c`, because
+    gathering today's configuration needs the committed safety-config cache
+    and the zones config. It records the verdict at end-of-run AFTER
+    `zone_sweep_push_kct_and_inormal()` -- a verdict taken against the
+    pre-push `k_ct` would be stale the moment it was written.
+  - `ct_verify_current_fact()` is the ONLY reader of the stored verdict, and
+    it compares the stored fingerprint against today's in the same expression
+    that resolves the verdict. That is what makes a stale verdict impossible
+    to act on: `readiness_http.c` (the displayed item) and `readiness_gate.c`
+    (the interlock) both call it, so the page and the gate cannot drift.
+  - The owner's rule is mapped onto the existing machinery without being
+    re-derived: FAIL -> `READY_NOT_DONE`, which is the only status
+    `readiness_gate_evaluate()` blocks on, so FAIL blocks both step 9 and
+    firing; INCONCLUSIVE / STALE / never-run -> `READY_CANNOT_YET`, which
+    blocks step 9 through the page's `anyCannotYet` arm and never reaches the
+    gate; PASS -> `READY_OK`; `ct_installed == 0` -> `READY_DELIBERATELY_OFF`.
+  - Step 9's `readinessKeys` is now `['ct_attribution']`
+    (`setup_wizard_page.html`), so the step regresses when the fact regresses.
+  - Tests: six new cases in `test_zones_http.c` (fingerprint stability and
+    canonicalization, a per-field sensitivity sweep over all fifteen fields of
+    `ct_verify_fingerprint_in_t`, blob validation, the NVS round trip, the
+    resolved fact, and the plan's case 7 -- a stored PASS reading STALE after
+    the CT map or `k_ct` changes, and returning when the configuration does),
+    plus two in `test_readiness_gate.c` (a FAIL alone refuses a start; the
+    other five facts never do) and the gate/display cross product widened from
+    256 to 1536 combinations so the enum's six values are actually walked.
+
+Still unbuilt: the `SAFETY_CT_CAL_BLOB_VERSION` 1->2 migration that adds the
+operator-entered offset/gain trim. The fingerprint already hashes
+`trim_offset_a`/`trim_gain` at their identity values, so landing the trim is a
+one-line producer change that cannot forget to invalidate standing verdicts.
 
 Four owner decisions of
 2026-09-18 — settle time, verdict scope, an operator-entered clamp ratio with

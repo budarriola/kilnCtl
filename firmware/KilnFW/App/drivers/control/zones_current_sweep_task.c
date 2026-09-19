@@ -17,6 +17,9 @@
 #include "relay_authority.h"
 #include "safety_cfg_store.h"
 #include "uart_task_ids.h" /* SAFETY_FLAG_* for zones_get_safety_wiring() */
+#include <time.h>
+#include "ct_verify_store.h"
+#include "readiness_http.h" /* readiness_ct_attribution_fact_t -- pure inline header */
 
 /* opus review finding (LOW): zone_sweep_task_record_ct_channels()'s summed-
  * topology unmeasured path packs zone index zi into a uint8_t bitmask
@@ -226,6 +229,16 @@ static struct {
      * path-specific masks (unresolved_zone_mask / summed_unmeasured_mask),
      * which between them cover the same ground but only one topology each. */
     uint8_t measured_zone_mask;
+    /* CT ATTRIBUTION (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md): every
+     * zone's per-channel averages, kept because per_ch_avg_a is alive only
+     * for the length of ONE zone_sweep_run_all_zones() iteration while the
+     * verdict is only written once, after the whole run finishes. Held here
+     * rather than recomputed for the same reason measured_total_a is.
+     * `verify_zone_mask` says which rows were actually filled: a zero row
+     * and a row of genuine zeros are different facts, and only the mask can
+     * tell them apart. */
+    float   zone_per_ch_a[CT_VERIFY_MAX_ZONES][ZONE_CT_CHANNEL_COUNT];
+    uint8_t verify_zone_mask;
 } s_ct_derive;
 
 /* Forward declaration + identical redefinition (legal in C when the token
@@ -236,11 +249,25 @@ static struct {
  * file's M12b section. */
 #define ZONE_KCT_PARAM_ID(ch) ((uint16_t)(0x0308u + (ch)))
 static bool zone_cfg_committed_f32(uint16_t param_id, float *out);
+static void zone_sweep_record_ct_attribution(void);
 
 static void zone_sweep_task_record_ct_channels(void *ctx, uint8_t zi, uint8_t relay_mask,
                                                 const float *per_ch_avg_a)
 {
     (void)ctx;
+    /* CT ATTRIBUTION: capture this zone's per-channel averages BEFORE any of
+     * the early returns below. Every one of those returns is a case the
+     * attribution verdict still has to describe (a shared channel, an
+     * unresolvable relay mask, a conflict) -- recording only on the
+     * unambiguous path would silently leave exactly the miswired zones with
+     * no measurement at all, and the engine would report them NO_INPUT
+     * instead of the reason they really failed. */
+    if (per_ch_avg_a != NULL && zi < CT_VERIFY_MAX_ZONES) {
+        for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+            s_ct_derive.zone_per_ch_a[zi][c] = per_ch_avg_a[c];
+        }
+        s_ct_derive.verify_zone_mask |= (uint8_t)(1u << zi);
+    }
     uint8_t shared_ch = 0u;
     if (zone_sweep_shared_ch_for_zone(zi, &shared_ch)) {
         /* CT_COMMISSIONING_PLAN.md step 3 / CT_CHANNEL_MASK_PLAN.md step 5: a
@@ -1844,6 +1871,13 @@ static void zone_sweep_task(void *arg)
          * ESP-local, no link traffic, runs after the push above purely to
          * keep every sweep-completion side effect together in one place. */
         zone_sweep_check_nameplate_all();
+        /* CT ATTRIBUTION (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md): last,
+         * and only on a run that completed every zone. It reads the derived
+         * map, the conflict mask and the committed calibration that the two
+         * pushes above have just finished writing, so it must run after
+         * them: a verdict taken against the PRE-push k_ct would be stale the
+         * instant it was written. */
+        zone_sweep_record_ct_attribution();
         /* DONE goes up only AFTER the push has finished (opus review,
          * 2026-08-28). Setting it first left a window two link round trips
          * wide in which a status poll saw state=done with
@@ -1864,6 +1898,268 @@ static void zone_sweep_task(void *arg)
     s_sweep.active = false;
     s_sweep.task = NULL;
     vTaskDelete(NULL);
+}
+
+/* ---- CT ATTRIBUTION VERIFICATION: the producer half -----------------------
+ * docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md. The VERDICT is computed by the
+ * pure engine (zone_sweep_verify_ct_attribution(), zones_current_sweep_
+ * engine.c); the STORE is dependency-free (ct_verify_store.c). This section
+ * is the only place that knows both, and it lives here because gathering
+ * today's configuration needs the committed safety-config cache and the
+ * zones config -- the two dependencies the other halves are kept free of.
+ *
+ * On this bench fixture every zone must come out INCONCLUSIVE (~23 mA drawn
+ * against a ~45 mA sweep noise floor), so a PASS appearing here would be
+ * evidence of a defect, not of a well-attributed clamp. */
+
+/* U8 / U16 twins of zone_cfg_committed_f32(). Same all-or-nothing rule: a
+ * row that does not exist, or exists but was never `set`, answers false and
+ * the caller keeps its documented default rather than hashing a zero that
+ * would be indistinguishable from a real answer of zero. */
+static bool zone_cfg_committed_u8(uint16_t param_id, uint8_t *out)
+{
+    size_t count = safety_cfg_store_param_count();
+    for (size_t i = 0; i < count; i++) {
+        safety_cfg_param_t row;
+        memset(&row, 0, sizeof(row));
+        if (!safety_cfg_store_get_by_index(i, &row) || row.param_id != param_id) {
+            continue;
+        }
+        if (!row.set) {
+            return false;
+        }
+        if (out) {
+            *out = row.value.u8_val;
+        }
+        return true;
+    }
+    return false;
+}
+
+static bool zone_cfg_committed_u16(uint16_t param_id, uint16_t *out)
+{
+    size_t count = safety_cfg_store_param_count();
+    for (size_t i = 0; i < count; i++) {
+        safety_cfg_param_t row;
+        memset(&row, 0, sizeof(row));
+        if (!safety_cfg_store_get_by_index(i, &row) || row.param_id != param_id) {
+            continue;
+        }
+        if (!row.set) {
+            return false;
+        }
+        if (out) {
+            *out = row.value.u16_val;
+        }
+        return true;
+    }
+    return false;
+}
+
+/* The wire ids the fingerprint hashes, one place each. */
+#define ZONE_CT_INSTALLED_PARAM_ID   ((uint16_t)0x0109u)
+#define ZONE_CT_ZERO_COUNTS_PARAM_ID(ch) ((uint16_t)(0x0302u + (ch)))
+#define ZONE_CT_GAIN_PARAM_ID(ch)        ((uint16_t)(0x030Bu + (ch)))
+
+/* ct_installed as cached, defaulting to 1 when the row was never set --
+ * readiness_http.h's documented default-safe direction for this exact field:
+ * an unknown ct_installed must never RELAX a CT requirement. */
+static uint8_t zone_cfg_committed_ct_installed(void)
+{
+    uint8_t v = 1u;
+    (void)zone_cfg_committed_u8(ZONE_CT_INSTALLED_PARAM_ID, &v);
+    return v;
+}
+
+void ct_verify_collect_fingerprint_in(ct_verify_fingerprint_in_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+
+    uint8_t zone_count = s_zones.cfg.thermo_count;
+    if (zone_count > CT_VERIFY_MAX_ZONES) {
+        zone_count = CT_VERIFY_MAX_ZONES;
+    }
+    out->zone_count = zone_count;
+    out->ct_installed = zone_cfg_committed_ct_installed();
+    out->ct_topology = zone_cfg_committed_ct_topology();
+
+    uint8_t map[ZONE_CT_CHANNEL_COUNT] = {0u, 1u, 2u};
+    /* The same identity fallback zone_sweep_task() uses when the map is not
+     * fully answered -- hashing the fallback is correct, because the
+     * fallback is what the verdict was actually taken against. */
+    (void)zone_cfg_committed_zone_ct_channel(map);
+    for (uint8_t z = 0; z < CT_VERIFY_MAX_ZONES; z++) {
+        out->zone_ct_channel[z] = (z < ZONE_CT_CHANNEL_COUNT) ? map[z] : 0u;
+        out->zone_relay_mask[z] = (z < zone_count) ? s_zones.cfg.zones[z].relay_mask : 0u;
+        out->i_normal_a[z] = 0.0f;
+        (void)zone_cfg_committed_f32(ZONE_INORMAL_PARAM_ID(z), &out->i_normal_a[z]);
+    }
+
+    for (uint8_t c = 0; c < CT_VERIFY_CHANNELS; c++) {
+        float a_fs = 0.0f;
+        float zero_mv = 0.0f;
+        safety_ct_cal_source_t source = SAFETY_CT_CAL_SOURCE_MANUAL;
+        bool have = safety_cfg_store_get_ct_cal_input(c, &a_fs, &zero_mv, &source);
+        out->a_fs[c] = have ? a_fs : 0.0f;
+        out->zero_mv[c] = have ? zero_mv : 0.0f;
+        out->ct_source[c] = (uint8_t)source;
+        /* "Fitted", as far as the ESP can know it: SaftyFW owns the real
+         * predicate (config_store_ct_channel_fitted()), and the ESP's only
+         * evidence of it is whether an operator has entered a clamp ratio
+         * for the channel. That is deliberately the SAME question
+         * zone_ct_verify_in_t.ratio_entered asks -- both are hashed, so if
+         * the two ever stop agreeing the fingerprint changes and every
+         * standing verdict is re-taken rather than silently reinterpreted. */
+        out->ch_fitted[c] = (have && a_fs > 0.0f) ? 1u : 0u;
+        out->gain[c] = 0.0f;
+        (void)zone_cfg_committed_f32(ZONE_CT_GAIN_PARAM_ID(c), &out->gain[c]);
+        out->k_ct_v_per_a[c] = 0.0f;
+        (void)zone_cfg_committed_f32(ZONE_KCT_PARAM_ID(c), &out->k_ct_v_per_a[c]);
+        out->zero_counts[c] = 0u;
+        (void)zone_cfg_committed_u16(ZONE_CT_ZERO_COUNTS_PARAM_ID(c), &out->zero_counts[c]);
+        /* Identity until safety_ct_cal_blob_t v2 stores a real trim -- see
+         * ct_verify_fingerprint_in_t's own note on why these are hashed
+         * before they exist. */
+        out->trim_offset_a[c] = 0.0f;
+        out->trim_gain[c] = 1.0f;
+    }
+}
+
+/* Idempotent, and deliberately lazy rather than a boot-order dependency: the
+ * store's only state is one small NVS blob, every reader here is already off
+ * the critical path, and a missing key is a normal answer rather than an
+ * error -- so there is nothing a start ordering could protect. */
+static void ct_verify_lazy_start(void)
+{
+    static bool started = false;
+    if (!started) {
+        started = true;
+        (void)ct_verify_store_start();
+    }
+}
+
+int ct_verify_current_fact(void)
+{
+    ct_verify_lazy_start();
+
+    if (zone_cfg_committed_ct_installed() == 0u) {
+        return (int)READINESS_CT_ATTR_NOT_INSTALLED;
+    }
+
+    ct_verify_blob_t blob;
+    if (!ct_verify_store_get(&blob)) {
+        return (int)READINESS_CT_ATTR_NEVER_RUN;
+    }
+
+    /* THE staleness check, in the same expression as every use of the stored
+     * verdict -- see ct_verify_store.h. A verdict taken against a
+     * configuration that has since changed is reported as STALE, never as
+     * the verdict it was. */
+    ct_verify_fingerprint_in_t live;
+    ct_verify_collect_fingerprint_in(&live);
+    if (blob.fingerprint != ct_verify_fingerprint(&live)) {
+        return (int)READINESS_CT_ATTR_STALE;
+    }
+
+    bool any_inconclusive = (blob.zone_count == 0u);
+    for (uint8_t z = 0; z < blob.zone_count && z < CT_VERIFY_MAX_ZONES; z++) {
+        if (blob.zone[z].verdict == (uint8_t)ZONE_CT_VERDICT_FAIL) {
+            /* One miswired clamp is enough: the over-current guard for that
+             * zone is aimed at the wrong conductor, so it reads armed and
+             * protects nothing. FAIL wins over every other zone's verdict. */
+            return (int)READINESS_CT_ATTR_FAIL;
+        }
+        if (blob.zone[z].verdict != (uint8_t)ZONE_CT_VERDICT_PASS) {
+            any_inconclusive = true;
+        }
+    }
+    return any_inconclusive ? (int)READINESS_CT_ATTR_INCONCLUSIVE : (int)READINESS_CT_ATTR_PASS;
+}
+
+/* Runs once, at the end of a sweep that completed every zone -- the same
+ * precondition the CT map push has, and for the same reason: a partial run
+ * cannot see the two-zones-one-channel conflict, so a verdict derived from
+ * one would look taken and not be. */
+static void zone_sweep_record_ct_attribution(void)
+{
+    ct_verify_lazy_start();
+
+    ct_verify_blob_t blob;
+    memset(&blob, 0, sizeof(blob));
+    blob.version = CT_VERIFY_BLOB_VERSION;
+
+    uint8_t zone_count = s_sweep.zones_total;
+    if (zone_count > CT_VERIFY_MAX_ZONES) {
+        zone_count = CT_VERIFY_MAX_ZONES;
+    }
+    blob.zone_count = zone_count;
+
+    uint8_t map[ZONE_CT_CHANNEL_COUNT] = {0u, 1u, 2u};
+    (void)zone_cfg_committed_zone_ct_channel(map);
+
+    for (uint8_t zi = 0; zi < zone_count; zi++) {
+        zone_ct_verify_in_t in;
+        memset(&in, 0, sizeof(in));
+        for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+            /* A zone this run never measured hashes in as NaN, which the
+             * engine reports as NO_INPUT/INCONCLUSIVE -- never as a zero
+             * reading, which would look like a dead heater instead of a
+             * missing measurement. */
+            in.per_ch_a[c] = ((s_ct_derive.verify_zone_mask & (1u << zi)) != 0u)
+                                 ? s_ct_derive.zone_per_ch_a[zi][c]
+                                 : NAN;
+        }
+        in.configured_ch = map[zi];
+        in.configured_ch_shared = (zone_ct_member_count(map[zi]) > 1u);
+        in.conflict = ((s_ct_derive.conflict_mask & (1u << map[zi])) != 0u);
+
+        float a_fs = 0.0f;
+        float zero_mv = 0.0f;
+        safety_ct_cal_source_t source = SAFETY_CT_CAL_SOURCE_MANUAL;
+        bool have = safety_cfg_store_get_ct_cal_input(map[zi], &a_fs, &zero_mv, &source);
+        in.ratio_entered = (have && a_fs > 0.0f);
+        in.configured_ch_fitted = in.ratio_entered; /* see the note in the gatherer above */
+
+        in.live_k_ct_v_per_a = 0.0f;
+        (void)zone_cfg_committed_f32(ZONE_KCT_PARAM_ID(map[zi]), &in.live_k_ct_v_per_a);
+        in.i_normal_a = 0.0f;
+        (void)zone_cfg_committed_f32(ZONE_INORMAL_PARAM_ID(zi), &in.i_normal_a);
+
+        zone_ct_verify_out_t out;
+        memset(&out, 0, sizeof(out));
+        (void)zone_sweep_verify_ct_attribution(&in, &out);
+
+        blob.zone[zi].verdict = (uint8_t)out.verdict;
+        blob.zone[zi].reason = (uint8_t)out.reason;
+        /* The blob's "nothing responded" marker is CT_VERIFY_CHANNELS, not
+         * the engine's 0xFF -- ct_verify_blob_validate() rejects anything
+         * above it, so the translation has to happen here rather than
+         * storing a value the validator would (correctly) throw away. */
+        blob.zone[zi].responded_ch =
+            (out.responded_ch < CT_VERIFY_CHANNELS) ? out.responded_ch : (uint8_t)CT_VERIFY_CHANNELS;
+        blob.zone[zi].measured_a = out.measured_a;
+        blob.zone[zi].threshold_a = out.threshold_a;
+
+        ESP_LOGI(ZONES_HTTP_TAG, "zone %u CT attribution: %s (%s)", zi, zone_ct_verdict_str(out.verdict),
+                 zone_ct_verify_reason_str(out.reason));
+    }
+
+    ct_verify_fingerprint_in_t fp;
+    ct_verify_collect_fingerprint_in(&fp);
+    blob.fingerprint = ct_verify_fingerprint(&fp);
+    /* 0 when the clock was never set: honest, and readers only ever display
+     * it -- nothing branches on the timestamp, so an unset clock cannot
+     * change a verdict. */
+    blob.taken_unix = (int64_t)time(NULL);
+
+    esp_err_t err = ct_verify_store_save(&blob);
+    if (err != ESP_OK) {
+        ESP_LOGW(ZONES_HTTP_TAG,
+                 "CT attribution verdict not persisted (err %d) -- it holds for this boot only", (int)err);
+    }
 }
 
 zone_sweep_refusal_t zones_current_sweep_start(void)

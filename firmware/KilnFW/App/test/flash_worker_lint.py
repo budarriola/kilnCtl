@@ -144,6 +144,17 @@ ALLOWLIST = {
     # so the re-entrancy half of this lint does not apply here -- only the
     # direct-hal_kv-write half, which the guard covers.
     "dualwrite_window.c",
+    # Pattern 3 (internal-SRAM-stack caller, reached live, not init-time) --
+    # same shape as display_power_cfg.c's entry immediately below.
+    # ct_verify_store_save()'s only caller is
+    # zone_sweep_record_ct_attribution() (zones_current_sweep_task.c), which
+    # runs on the sweep task's own internal-SRAM stack at the end of a sweep
+    # run; ct_verify_store_start()/_get() never write at all. That task does
+    # not dispatch through uart_bridge_ext_run_on_flash_worker(), so only the
+    # direct-hal_kv-write half of this lint applies. ct_verify_store.h states
+    # the PSRAM-stack restriction explicitly, so a future second caller has
+    # to confront it rather than discover it on hardware.
+    "ct_verify_store.c",
     # Pattern 3 (init-time only): display_power_cfg_set() runs from
     # settings_http.c's POST /api/settings/display_power handler, on that
     # handler's own internal-SRAM-stack httpd task -- same story as

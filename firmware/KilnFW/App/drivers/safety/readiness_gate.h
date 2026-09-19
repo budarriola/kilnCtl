@@ -93,6 +93,21 @@ typedef enum {
      * Pico's version, so the four link-independent/link-surfacing
      * conditions above take priority. */
     READINESS_GATE_BLOCK_PICO_UPDATE,
+    /* docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md, owner decision 2, verbatim:
+     * "FAIL blocks both the wizard step and the firing interlock.
+     * INCONCLUSIVE blocks only the wizard step and never the firing
+     * interlock." A FAIL means a current transformer is not on the conductor
+     * the configuration names -- so the over-current guard is aimed at the
+     * wrong zone, which is safety-relevant miswiring, not a preference.
+     *
+     * Only FAIL reaches this gate, and it reaches it through the SAME
+     * readiness_ct_attribution_status() the page renders: that predicate maps
+     * INCONCLUSIVE/STALE/NEVER_RUN to READY_CANNOT_YET, and this gate blocks
+     * on READY_NOT_DONE alone. The owner's asymmetry is therefore expressed
+     * once, in that predicate, rather than re-derived here. Ordered last: a
+     * verdict needs the safety link to have supplied the configuration it was
+     * taken against, so the link-independent conditions come first. */
+    READINESS_GATE_BLOCK_CT_ATTRIBUTION,
 } readiness_gate_block_t;
 
 /* The `key` strings /api/readiness uses for these same items. The
@@ -105,6 +120,7 @@ typedef enum {
 #define READINESS_GATE_KEY_ESTOP         "estop_verified"
 #define READINESS_GATE_KEY_CEILING_MATCH "safety_ceiling_match"
 #define READINESS_GATE_KEY_PICO_UPDATE   "pico_update"
+#define READINESS_GATE_KEY_CT_ATTRIBUTION "ct_attribution"
 
 /* The /api/readiness item key a refusal corresponds to, or NULL for
  * READINESS_GATE_OK. Exists so a refusal can hand the operator's browser the
@@ -122,6 +138,7 @@ static inline const char *readiness_gate_item_key(readiness_gate_block_t which)
     case READINESS_GATE_BLOCK_ESTOP_VERIFIED: return READINESS_GATE_KEY_ESTOP;
     case READINESS_GATE_BLOCK_CEILING_MISMATCH: return READINESS_GATE_KEY_CEILING_MATCH;
     case READINESS_GATE_BLOCK_PICO_UPDATE: return READINESS_GATE_KEY_PICO_UPDATE;
+    case READINESS_GATE_BLOCK_CT_ATTRIBUTION: return READINESS_GATE_KEY_CT_ATTRIBUTION;
     case READINESS_GATE_OK:
     default:
         return NULL;
@@ -144,6 +161,11 @@ typedef struct {
     bool     pico_update_blocked; /* pico_auto_update_state_is_blocking() -- true only for an
                                     * unrecoverable version mismatch (docs/PICO_AUTO_UPDATE_PLAN.md's
                                     * ABANDONED_* causes), the SAME verdict the boot-time glue computes */
+    readiness_ct_attribution_fact_t ct_attribution; /* the stored CT attribution verdict, resolved against
+                                    * TODAY's configuration fingerprint (ct_verify_current_fact(),
+                                    * zones_current_sweep_task.c) -- never the raw stored enum, so a
+                                    * verdict that outlived its configuration can never reach this gate
+                                    * as the verdict it once was */
 } readiness_gate_facts_t;
 
 /* Reads the eight facts above off the live board. Target-only
@@ -209,6 +231,10 @@ static inline readiness_gate_block_t readiness_gate_evaluate(const readiness_gat
         which = READINESS_GATE_BLOCK_PICO_UPDATE;
         text = "refused -- the safety processor's firmware VERSION does not match and could not be "
                "auto-updated. Check the Firmware update page.";
+    } else if (readiness_ct_attribution_status(f->ct_attribution) == READY_NOT_DONE) {
+        which = READINESS_GATE_BLOCK_CT_ATTRIBUTION;
+        text = "refused -- CT ATTRIBUTION failed: a current clamp is not on the conductor the config "
+               "names. Re-run the CT mapping step in Setup and move the clamp.";
     }
 
     if (which != READINESS_GATE_OK && msg != NULL && cap > 0 && text != NULL) {

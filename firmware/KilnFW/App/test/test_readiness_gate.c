@@ -92,6 +92,12 @@ static void set_fully_ready(void)
      * Pico's firmware version matches (or the boot-time glue has not
      * flagged an unrecoverable mismatch). */
     s_fake_facts.pico_update_blocked = false;
+    /* docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md's new item. PASS is the only
+     * fact that reads READY_OK; on the actual bench fixture the reachable
+     * value is INCONCLUSIVE, which deliberately does NOT block a start --
+     * test_ct_attribution_non_fail_verdicts_do_not_block() below is the half
+     * of the owner's rule that a FAIL-only test would miss. */
+    s_fake_facts.ct_attribution = READINESS_CT_ATTR_PASS;
 }
 
 /* ---- 2. the allowed case ------------------------------------------------- */
@@ -202,7 +208,61 @@ static void test_pico_update_blocked_alone_refuses(void)
                             "VERSION");
 }
 
+static void test_ct_attribution_fail_alone_refuses(void)
+{
+    /* docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md, owner decision: "a FAIL
+     * blocks both the step and firing". A FAIL means a current clamp is not
+     * on the conductor the configuration names, so the over-current guard is
+     * aimed at the wrong zone -- it reads as armed and healthy while
+     * protecting nothing. */
+    TEST_SECTION("a FAILED CT attribution alone refuses a start (the NEW enforcement)");
+    set_fully_ready();
+    s_fake_facts.ct_attribution = READINESS_CT_ATTR_FAIL;
+    check_one_blocking_item("a failed CT attribution refuses the start",
+                            READINESS_GATE_BLOCK_CT_ATTRIBUTION, "CT ATTRIBUTION");
+}
+
 /* ---- the cases that must NOT block --------------------------------------- */
+
+/* THE OTHER HALF of the owner's rule, and the half a careless implementation
+ * gets wrong: an INCONCLUSIVE verdict blocks only the wizard step, never the
+ * firing interlock. On the ~4 W bench fixture every zone draws about 23 mA
+ * against a 45 mA sweep floor, so INCONCLUSIVE is the ONLY outcome this
+ * hardware can produce -- a gate that blocked on it could never fire at all.
+ * NEVER_RUN and STALE ride the same rule: neither is evidence of miswiring,
+ * and a board that has simply never run the step must not be bricked by it. */
+static void test_ct_attribution_non_fail_verdicts_do_not_block(void)
+{
+    TEST_SECTION("INCONCLUSIVE / STALE / never-run CT attribution never blocks firing");
+    readiness_ct_attribution_fact_t non_blocking[] = {
+        READINESS_CT_ATTR_NOT_INSTALLED,
+        READINESS_CT_ATTR_NEVER_RUN,
+        READINESS_CT_ATTR_STALE,
+        READINESS_CT_ATTR_INCONCLUSIVE,
+        READINESS_CT_ATTR_PASS,
+    };
+    for (size_t i = 0; i < sizeof(non_blocking) / sizeof(non_blocking[0]); i++) {
+        set_fully_ready();
+        s_fake_facts.ct_attribution = non_blocking[i];
+        char msg[192];
+        strcpy(msg, "untouched");
+        TEST_CHECK(!readiness_gate_refuses_start(msg, sizeof(msg), NULL),
+                   "a CT attribution verdict short of FAIL does not refuse a start");
+        TEST_CHECK(strcmp(msg, "untouched") == 0, "no message written when nothing blocks");
+    }
+    /* And the asymmetry is real, not an accident of all five reading OK: the
+     * three "cannot yet" values must still be visibly NOT ready on the page,
+     * which is what blocks the wizard step. */
+    TEST_CHECK(readiness_ct_attribution_status(READINESS_CT_ATTR_INCONCLUSIVE) == READY_CANNOT_YET,
+               "INCONCLUSIVE displays as CANNOT_YET -- blocks the wizard step, not the firing");
+    TEST_CHECK(readiness_ct_attribution_status(READINESS_CT_ATTR_STALE) == READY_CANNOT_YET,
+               "a STALE verdict displays as CANNOT_YET, never as the verdict it once was");
+    TEST_CHECK(readiness_ct_attribution_status(READINESS_CT_ATTR_NEVER_RUN) == READY_CANNOT_YET,
+               "a never-run check displays as CANNOT_YET");
+    TEST_CHECK(readiness_ct_attribution_status(READINESS_CT_ATTR_FAIL) == READY_NOT_DONE,
+               "and only FAIL reads NOT_DONE, which is what this gate blocks on");
+}
+
 
 static void test_acknowledged_crash_does_not_block(void)
 {
@@ -286,12 +346,19 @@ static readiness_gate_block_t first_not_done_item(const readiness_gate_facts_t *
     if (readiness_pico_update_status(f->pico_update_blocked) == READY_NOT_DONE) {
         return READINESS_GATE_BLOCK_PICO_UPDATE;
     }
+    if (readiness_ct_attribution_status(f->ct_attribution) == READY_NOT_DONE) {
+        return READINESS_GATE_BLOCK_CT_ATTRIBUTION;
+    }
     return READINESS_GATE_OK;
 }
 
 static void test_gate_and_display_agree_over_the_cross_product(void)
 {
-    TEST_SECTION("gate blocks item X <=> item X's DISPLAYED status is NOT_DONE (all 256 combinations)");
+    /* 256 boolean combinations x the 6 values of the CT attribution fact,
+     * which is an enum, not a bool -- a cross product that only walked its
+     * false/true would never exercise STALE or INCONCLUSIVE, the two values
+     * the owner's asymmetry actually turns on. */
+    TEST_SECTION("gate blocks item X <=> item X's DISPLAYED status is NOT_DONE (all 1536 combinations)");
     int mismatches = 0;
     int blocked = 0;
     int allowed = 0;
@@ -307,17 +374,23 @@ static void test_gate_and_display_agree_over_the_cross_product(void)
         f.ceiling_diverged = (bits & 64u) != 0u;
         f.pico_update_blocked = (bits & 128u) != 0u;
 
-        readiness_gate_block_t expect = first_not_done_item(&f);
-        readiness_gate_block_t got = readiness_gate_evaluate(&f, NULL, 0);
-        if (got != expect) {
-            mismatches++;
-        }
-        if (expect == READINESS_GATE_OK) {
-            allowed++;
-        } else {
-            blocked++;
+        for (unsigned ct = 0; ct <= (unsigned)READINESS_CT_ATTR_FAIL; ct++) {
+            f.ct_attribution = (readiness_ct_attribution_fact_t)ct;
+
+            readiness_gate_block_t expect = first_not_done_item(&f);
+            readiness_gate_block_t got = readiness_gate_evaluate(&f, NULL, 0);
+            if (got != expect) {
+                mismatches++;
+            }
+            if (expect == READINESS_GATE_OK) {
+                allowed++;
+            } else {
+                blocked++;
+            }
         }
     }
+    TEST_CHECK(blocked + allowed == 256 * 6,
+               "every combination was walked, CT attribution's six values included");
     TEST_CHECK(mismatches == 0, "gate blocks <=> some displayed item is NOT_DONE, and names the same item");
     /* Both arms must actually be exercised, or "0 mismatches" is vacuous --
      * this is the same lesson as the vacuous-check history in CLAUDE.md. */
@@ -337,6 +410,7 @@ static void test_gate_keys_match_the_api_item_keys(void)
     TEST_CHECK(strcmp(READINESS_GATE_KEY_ESTOP, "estop_verified") == 0, "estop_verified key");
     TEST_CHECK(strcmp(READINESS_GATE_KEY_CEILING_MATCH, "safety_ceiling_match") == 0, "safety_ceiling_match key");
     TEST_CHECK(strcmp(READINESS_GATE_KEY_PICO_UPDATE, "pico_update") == 0, "pico_update key");
+    TEST_CHECK(strcmp(READINESS_GATE_KEY_CT_ATTRIBUTION, "ct_attribution") == 0, "ct_attribution key");
 }
 
 /* dashboard_exec_http.c embeds these messages verbatim into a JSON body,
@@ -358,6 +432,7 @@ static void test_messages_are_json_safe(void)
         READINESS_GATE_BLOCK_ESTOP_VERIFIED,
         READINESS_GATE_BLOCK_CEILING_MISMATCH,
         READINESS_GATE_BLOCK_PICO_UPDATE,
+        READINESS_GATE_BLOCK_CT_ATTRIBUTION,
     };
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
         set_fully_ready();
@@ -367,6 +442,7 @@ static void test_messages_are_json_safe(void)
         case READINESS_GATE_BLOCK_CRASH_REPORT: s_fake_facts.crash_have_record = true; break;
         case READINESS_GATE_BLOCK_CEILING_MISMATCH: s_fake_facts.ceiling_diverged = true; break;
         case READINESS_GATE_BLOCK_PICO_UPDATE: s_fake_facts.pico_update_blocked = true; break;
+        case READINESS_GATE_BLOCK_CT_ATTRIBUTION: s_fake_facts.ct_attribution = READINESS_CT_ATTR_FAIL; break;
         default: s_fake_facts.estop_verified = false; break;
         }
         char msg[192];
@@ -399,6 +475,8 @@ int main(void)
     test_null_facts_are_not_a_green_light();
     test_no_message_buffer_does_not_change_the_decision();
     test_gate_and_display_agree_over_the_cross_product();
+    test_ct_attribution_fail_alone_refuses();
+    test_ct_attribution_non_fail_verdicts_do_not_block();
     test_gate_keys_match_the_api_item_keys();
     test_messages_are_json_safe();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);

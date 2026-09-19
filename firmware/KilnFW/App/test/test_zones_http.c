@@ -10380,6 +10380,270 @@ static zone_ct_verify_in_t ctv_base(void)
     return in;
 }
 
+
+// ---- the PERSISTED verdict and its configuration fingerprint --------------
+// docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md, storage section + case 7.
+//
+// The fingerprint is the single expression of the verdict<->configuration
+// contract (CLAUDE.md's "reset one side of a pair" class). A verdict that
+// outlives the configuration it was taken against is the exact defect this
+// store exists to prevent, so these tests walk EVERY field of
+// ct_verify_fingerprint_in_t and require each one, alone, to change the
+// hash. A field silently left out of the hash is invisible in every other
+// test -- it looks like a pass.
+
+static ct_verify_fingerprint_in_t ctf_base(void)
+{
+    ct_verify_fingerprint_in_t in;
+    memset(&in, 0, sizeof(in));
+    in.zone_count = 3;
+    in.ct_installed = 1;
+    in.ct_topology = 0;
+    for (uint8_t z = 0; z < CT_VERIFY_MAX_ZONES; z++) {
+        in.zone_ct_channel[z] = z;
+        in.zone_relay_mask[z] = (uint8_t)(1u << z);
+        in.i_normal_a[z] = 12.0f;
+    }
+    for (uint8_t c = 0; c < CT_VERIFY_CHANNELS; c++) {
+        in.ch_fitted[c] = 1;
+        in.ct_source[c] = 0;
+        in.a_fs[c] = 30.0f;
+        in.zero_mv[c] = 1650.0f;
+        in.gain[c] = 0.715f;
+        in.k_ct_v_per_a[c] = 0.0333f;
+        in.zero_counts[c] = 2048;
+        in.trim_offset_a[c] = 0.0f;
+        in.trim_gain[c] = 1.0f;
+    }
+    return in;
+}
+
+static void test_ct_fingerprint_is_stable_and_never_zero(void)
+{
+    ct_verify_fingerprint_in_t a = ctf_base();
+    ct_verify_fingerprint_in_t b = ctf_base();
+    uint32_t fa = ct_verify_fingerprint(&a);
+    TEST_CHECK(fa == ct_verify_fingerprint(&b), "ct fingerprint: identical configurations hash identically");
+    TEST_CHECK(fa != CT_VERIFY_FINGERPRINT_NONE, "ct fingerprint: never returns the reserved 'none' value");
+    TEST_CHECK(ct_verify_fingerprint(NULL) == CT_VERIFY_FINGERPRINT_NONE,
+               "ct fingerprint: NULL input is 'none', which can never equal a live fingerprint");
+    // -0.0f and +0.0f are the same configuration; a raw bit hash would
+    // disagree and re-take every verdict for no reason.
+    a.trim_offset_a[1] = -0.0f;
+    b.trim_offset_a[1] = 0.0f;
+    TEST_CHECK(ct_verify_fingerprint(&a) == ct_verify_fingerprint(&b),
+               "ct fingerprint: -0.0f and +0.0f are the same configuration");
+    // Two different NaN payloads are both "no value"; they must not look
+    // like two different configurations either.
+    a.a_fs[0] = NAN;
+    b.a_fs[0] = -NAN;
+    TEST_CHECK(ct_verify_fingerprint(&a) == ct_verify_fingerprint(&b),
+               "ct fingerprint: all NaNs hash alike");
+}
+
+// The load-bearing test: each field, alone, moves the hash.
+static void test_ct_fingerprint_notices_every_field(void)
+{
+    ct_verify_fingerprint_in_t base = ctf_base();
+    uint32_t f0 = ct_verify_fingerprint(&base);
+
+#define CTF_CHANGED(mutation, what)                                                \
+    do {                                                                           \
+        ct_verify_fingerprint_in_t m = ctf_base();                                 \
+        mutation;                                                                  \
+        TEST_CHECK(ct_verify_fingerprint(&m) != f0,                                \
+                   "ct fingerprint: a change to " what " invalidates the verdict"); \
+    } while (0)
+
+    CTF_CHANGED(m.zone_count = 2, "zone_count");
+    CTF_CHANGED(m.ct_installed = 0, "ct_installed");
+    CTF_CHANGED(m.ct_topology = 1, "ct_topology");
+    CTF_CHANGED(m.zone_ct_channel[2] = 0, "the zone-to-CT-channel map");
+    CTF_CHANGED(m.zone_relay_mask[1] = 0x04, "the zone-to-relay map");
+    CTF_CHANGED(m.ch_fitted[1] = 0, "whether a channel is fitted");
+    CTF_CHANGED(m.ct_source[0] = 1, "the calibration's provenance");
+    CTF_CHANGED(m.i_normal_a[0] = 11.0f, "a zone's recorded normal current");
+    CTF_CHANGED(m.a_fs[0] = 60.0f, "an entered clamp ratio (A_fs)");
+    CTF_CHANGED(m.zero_mv[2] = 1600.0f, "an entered zero (zero_mv)");
+    CTF_CHANGED(m.gain[1] = 0.5f, "a channel gain");
+    CTF_CHANGED(m.k_ct_v_per_a[0] = 0.02f, "a derived k_ct_v_per_a");
+    CTF_CHANGED(m.zero_counts[1] = 2000, "a derived zero_counts");
+    CTF_CHANGED(m.trim_offset_a[0] = 0.5f, "a scale trim offset");
+    CTF_CHANGED(m.trim_gain[2] = 1.02f, "a scale trim gain");
+#undef CTF_CHANGED
+}
+
+static ct_verify_blob_t ctb_base(void)
+{
+    ct_verify_blob_t b;
+    memset(&b, 0, sizeof(b));
+    b.version = CT_VERIFY_BLOB_VERSION;
+    b.zone_count = 3;
+    b.fingerprint = 0xABCD1234u;
+    b.taken_unix = 1700000000;
+    for (uint8_t z = 0; z < CT_VERIFY_MAX_ZONES; z++) {
+        b.zone[z].verdict = (uint8_t)ZONE_CT_VERDICT_INCONCLUSIVE;
+        b.zone[z].reason = (uint8_t)ZONE_CT_VERIFY_BELOW_THRESHOLD;
+        b.zone[z].responded_ch = (uint8_t)CT_VERIFY_CHANNELS;
+        b.zone[z].measured_a = 0.023f;
+        b.zone[z].threshold_a = 0.045f;
+    }
+    return b;
+}
+
+static void test_ct_blob_validate_rejects_what_it_must(void)
+{
+    ct_verify_blob_t ok = ctb_base();
+    TEST_CHECK(ct_verify_blob_validate(&ok, sizeof(ok)), "ct blob: a well-formed blob validates");
+    TEST_CHECK(!ct_verify_blob_validate(NULL, sizeof(ok)), "ct blob: NULL is not a blob");
+    TEST_CHECK(!ct_verify_blob_validate(&ok, sizeof(ok) - 1), "ct blob: a short read is not a blob");
+
+    ct_verify_blob_t bad = ctb_base();
+    bad.version = (uint8_t)(CT_VERIFY_BLOB_VERSION + 1u);
+    TEST_CHECK(!ct_verify_blob_validate(&bad, sizeof(bad)),
+               "ct blob: an unknown version is treated as no verdict, never partially trusted");
+
+    bad = ctb_base();
+    bad.zone_count = (uint8_t)(CT_VERIFY_MAX_ZONES + 1u);
+    TEST_CHECK(!ct_verify_blob_validate(&bad, sizeof(bad)), "ct blob: zone_count out of range is refused");
+
+    bad = ctb_base();
+    bad.fingerprint = CT_VERIFY_FINGERPRINT_NONE;
+    TEST_CHECK(!ct_verify_blob_validate(&bad, sizeof(bad)),
+               "ct blob: a verdict with no fingerprint is refused -- it could never be checked for staleness");
+
+    bad = ctb_base();
+    bad.zone[1].verdict = 3;
+    TEST_CHECK(!ct_verify_blob_validate(&bad, sizeof(bad)), "ct blob: a verdict outside the enum is refused");
+
+    bad = ctb_base();
+    bad.zone[0].responded_ch = (uint8_t)(CT_VERIFY_CHANNELS + 1u);
+    TEST_CHECK(!ct_verify_blob_validate(&bad, sizeof(bad)), "ct blob: a channel outside the array is refused");
+
+    bad = ctb_base();
+    bad.reserved[1] = 7;
+    TEST_CHECK(!ct_verify_blob_validate(&bad, sizeof(bad)), "ct blob: nonzero reserved bytes are refused");
+}
+
+static void test_ct_store_round_trips_through_nvs(void)
+{
+    fake_kv_reset_all();
+    TEST_CHECK(!ct_verify_store_get(NULL), "ct store: nothing stored before anything is saved");
+
+    ct_verify_blob_t in = ctb_base();
+    in.zone[2].verdict = (uint8_t)ZONE_CT_VERDICT_FAIL;
+    TEST_CHECK(ct_verify_store_save(&in) == ESP_OK, "ct store: a valid blob saves");
+
+    ct_verify_blob_t out;
+    memset(&out, 0, sizeof(out));
+    TEST_CHECK(ct_verify_store_get(&out), "ct store: the saved verdict reads back");
+    TEST_CHECK(memcmp(&in, &out, sizeof(in)) == 0, "ct store: it reads back byte for byte");
+
+    // A reboot: RAM is gone, NVS is not.
+    ct_verify_blob_t bad = ctb_base();
+    bad.version = 99;
+    TEST_CHECK(ct_verify_store_save(&bad) == ESP_ERR_INVALID_ARG,
+               "ct store: an invalid blob is refused and changes nothing");
+    memset(&out, 0, sizeof(out));
+    TEST_CHECK(ct_verify_store_get(&out) && out.zone[2].verdict == (uint8_t)ZONE_CT_VERDICT_FAIL,
+               "ct store: the refused save left the good verdict standing");
+    fake_kv_reset_all();
+}
+
+// ---- plan case 7: a verdict must not survive its configuration -----------
+// The fact ct_verify_current_fact() resolves is what BOTH the readiness page
+// and the firing interlock act on, so this is the test that decides whether
+// a stale PASS can ever block-or-permit anything.
+static void ctf_install_live_config(void)
+{
+    test_cfg_rows_reset();
+    test_cfg_set_u8(0x0109u, 1u, true);  // ct_installed
+    test_cfg_set_u8(0x031Fu, 0u, true);  // ct_topology = per_zone
+    for (uint8_t z = 0; z < 3u; z++) {
+        test_cfg_set_u8((uint16_t)(0x0320u + z), z, true);          // zone_ct_channel
+        test_cfg_set_f32((uint16_t)(0x031Au + z), 12.0f, true);     // i_normal_a
+        test_cfg_set_f32((uint16_t)(0x0308u + z), 0.0333f, true);   // k_ct_v_per_a
+    }
+}
+
+static void test_ct_current_fact_tracks_the_stored_verdict(void)
+{
+    fake_kv_reset_all();
+    ctf_install_live_config();
+
+    TEST_CHECK(ct_verify_current_fact() == (int)READINESS_CT_ATTR_NEVER_RUN,
+               "ct fact: with nothing stored the answer is NEVER RUN -- never a pass");
+
+    ct_verify_fingerprint_in_t live;
+    ct_verify_collect_fingerprint_in(&live);
+
+    ct_verify_blob_t b = ctb_base();
+    b.fingerprint = ct_verify_fingerprint(&live);
+    for (uint8_t z = 0; z < 3u; z++) {
+        b.zone[z].verdict = (uint8_t)ZONE_CT_VERDICT_PASS;
+    }
+    TEST_CHECK(ct_verify_store_save(&b) == ESP_OK, "ct fact: a fresh all-PASS verdict saves");
+    TEST_CHECK(ct_verify_current_fact() == (int)READINESS_CT_ATTR_PASS,
+               "ct fact: a verdict taken against TODAY's configuration reads PASS");
+
+    b.zone[1].verdict = (uint8_t)ZONE_CT_VERDICT_INCONCLUSIVE;
+    TEST_CHECK(ct_verify_store_save(&b) == ESP_OK, "ct fact: save the mixed verdict");
+    TEST_CHECK(ct_verify_current_fact() == (int)READINESS_CT_ATTR_INCONCLUSIVE,
+               "ct fact: one inconclusive zone makes the whole board inconclusive, not passed");
+
+    b.zone[2].verdict = (uint8_t)ZONE_CT_VERDICT_FAIL;
+    TEST_CHECK(ct_verify_store_save(&b) == ESP_OK, "ct fact: save the failing verdict");
+    TEST_CHECK(ct_verify_current_fact() == (int)READINESS_CT_ATTR_FAIL,
+               "ct fact: one FAILED zone fails the board -- FAIL wins over inconclusive");
+
+    // ct_installed answers the question before the store is even consulted:
+    // a board with no clamps has nothing to attribute.
+    test_cfg_set_u8(0x0109u, 0u, true);
+    TEST_CHECK(ct_verify_current_fact() == (int)READINESS_CT_ATTR_NOT_INSTALLED,
+               "ct fact: no CTs fitted means the item is deliberately off, not failed");
+    fake_kv_reset_all();
+}
+
+// PLAN CASE 7, and the one the fingerprint exists for.
+static void test_ct_stale_verdict_is_never_reported_as_the_verdict_it_was(void)
+{
+    fake_kv_reset_all();
+    ctf_install_live_config();
+
+    ct_verify_fingerprint_in_t live;
+    ct_verify_collect_fingerprint_in(&live);
+    ct_verify_blob_t b = ctb_base();
+    b.fingerprint = ct_verify_fingerprint(&live);
+    for (uint8_t z = 0; z < 3u; z++) {
+        b.zone[z].verdict = (uint8_t)ZONE_CT_VERDICT_PASS;
+    }
+    TEST_CHECK(ct_verify_store_save(&b) == ESP_OK, "case 7: an all-PASS verdict is stored");
+    TEST_CHECK(ct_verify_current_fact() == (int)READINESS_CT_ATTR_PASS, "case 7: it reads PASS while the config holds");
+
+    // Now move zone 2's clamp to another channel in the CONFIG only. The
+    // stored bytes are untouched and still say PASS; nothing about them
+    // knows the board changed. Only the fingerprint does.
+    test_cfg_set_u8(0x0322u, 0u, true);
+    TEST_CHECK(ct_verify_current_fact() == (int)READINESS_CT_ATTR_STALE,
+               "case 7: after the CT map changes the stored PASS reads STALE, never PASS");
+    TEST_CHECK(readiness_ct_attribution_status(READINESS_CT_ATTR_STALE) == READY_CANNOT_YET,
+               "case 7: STALE displays as CANNOT_YET -- it blocks the wizard step and never claims a pass");
+
+    // And it comes back on its own once the configuration is put back: a
+    // stale verdict is invalidated, not destroyed.
+    test_cfg_set_u8(0x0322u, 2u, true);
+    TEST_CHECK(ct_verify_current_fact() == (int)READINESS_CT_ATTR_PASS,
+               "case 7: restoring the configuration restores the verdict it was taken against");
+
+    // A calibration change alone is enough, too -- the plan lists k_ct
+    // explicitly, because rescaling it changes what every reading MEANS.
+    test_cfg_set_f32(0x0308u, 0.02f, true);
+    TEST_CHECK(ct_verify_current_fact() == (int)READINESS_CT_ATTR_STALE,
+               "case 7: a k_ct recalibration alone invalidates the stored verdict");
+    fake_kv_reset_all();
+    test_cfg_rows_reset();
+}
+
 // Case 1: correct attribution.
 static void test_ct_verify_correct_attribution_passes(void)
 {
@@ -13777,6 +14041,12 @@ void run_test_zones_http(void)
     test_ct_verify_threshold_scales_with_the_entered_ratio();
     test_ct_verify_no_recorded_normal_is_inconclusive();
     test_ct_verify_bad_input_lands_on_inconclusive();
+    test_ct_fingerprint_is_stable_and_never_zero();
+    test_ct_fingerprint_notices_every_field();
+    test_ct_blob_validate_rejects_what_it_must();
+    test_ct_store_round_trips_through_nvs();
+    test_ct_current_fact_tracks_the_stored_verdict();
+    test_ct_stale_verdict_is_never_reported_as_the_verdict_it_was();
     test_zone_sweep_record_ct_refuses_a_zone_whose_relay_is_not_its_own_bit();
     test_zone_sweep_record_ct_refuses_two_zones_claiming_one_channel();
     test_zone_sweep_run_all_zones_never_energizes_two_zones_at_once();

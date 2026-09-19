@@ -64,6 +64,7 @@ PAIRS = {
     # structural block, promoted into the gate the same way
     # safety_ceiling_match was on 2026-09-14.
     "pico_update": "readiness_pico_update_status",
+    "ct_attribution": "readiness_ct_attribution_status",
 }
 
 REPO_TEST_DIR = Path(__file__).resolve().parent

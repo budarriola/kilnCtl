@@ -510,6 +510,70 @@ static inline readiness_status_t readiness_safety_context_status(bool link_up, b
  * of one extra confirmation click on a board that has never seen line
  * voltage is far smaller than the cost of this item going quiet exactly when
  * it starts to matter. */
+/* ---- CT attribution (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md) ----------
+ *
+ * The one fact the `ct_attribution` item and the firing interlock share.
+ * Six values rather than a bool because the OWNER'S RULE distinguishes them,
+ * verbatim from the plan's decision 2: "FAIL blocks both the wizard step and
+ * the firing interlock. INCONCLUSIVE blocks only the wizard step and never
+ * the firing interlock."
+ *
+ * That rule maps onto the existing four readiness statuses exactly, with no
+ * new machinery and nothing re-derived:
+ *
+ *   FAIL          -> READY_NOT_DONE       blocks the step AND, by the
+ *                                         gate's biconditional, firing.
+ *   INCONCLUSIVE  -> READY_CANNOT_YET     blocks the step (the wizard's
+ *   STALE         -> READY_CANNOT_YET     computeStepState() refuses `done`
+ *   NEVER_RUN     -> READY_CANNOT_YET     on any cannot_yet item) and never
+ *                                         reaches the gate, which blocks on
+ *                                         READY_NOT_DONE alone.
+ *   PASS          -> READY_OK
+ *   NOT_INSTALLED -> READY_DELIBERATELY_OFF
+ *
+ * Why INCONCLUSIVE must not block firing, in the plan's own words: "Blocking
+ * firing on inconclusive would brick this bench and any kiln too small to
+ * reach the response threshold ... a check that blocks everything gets
+ * switched off, and a check that is switched off protects nothing." On this
+ * ~4 W fixture INCONCLUSIVE is the ONLY reachable outcome, so a build that
+ * blocked firing on it could never fire at all.
+ *
+ * STALE is a separate value from INCONCLUSIVE even though both map to
+ * CANNOT_YET, because the two need different operator text: "could not
+ * determine" versus "the configuration changed since this was verified".
+ * They are never summarized together, and neither is ever summarized
+ * alongside PASS as "no problems found". */
+typedef enum {
+    READINESS_CT_ATTR_NOT_INSTALLED = 0, /* ct_installed == 0 -- no clamps to attribute */
+    READINESS_CT_ATTR_NEVER_RUN,         /* no verdict stored: the state of a new board */
+    READINESS_CT_ATTR_STALE,             /* stored verdict's fingerprint != today's config */
+    READINESS_CT_ATTR_INCONCLUSIVE,      /* ran, could not decide (the bench's normal outcome) */
+    READINESS_CT_ATTR_PASS,
+    READINESS_CT_ATTR_FAIL,              /* a CT is not on the conductor the config names */
+} readiness_ct_attribution_fact_t;
+
+/* The single shared predicate: readiness_http.c renders this item with it and
+ * readiness_gate.h blocks on it, so the two are physically incapable of
+ * disagreeing (this header's top comment, and readiness_gate.h's). */
+static inline readiness_status_t readiness_ct_attribution_status(readiness_ct_attribution_fact_t fact)
+{
+    switch (fact) {
+    case READINESS_CT_ATTR_NOT_INSTALLED:
+        return READY_DELIBERATELY_OFF;
+    case READINESS_CT_ATTR_PASS:
+        return READY_OK;
+    case READINESS_CT_ATTR_FAIL:
+        return READY_NOT_DONE;
+    case READINESS_CT_ATTR_NEVER_RUN:
+    case READINESS_CT_ATTR_STALE:
+    case READINESS_CT_ATTR_INCONCLUSIVE:
+    default:
+        /* An unrecognized value lands here too, which is the safe direction:
+         * the one reading that must never be reached by accident is PASS. */
+        return READY_CANNOT_YET;
+    }
+}
+
 static inline readiness_status_t readiness_estop_verification_status(bool verified)
 {
     return verified ? READY_OK : READY_NOT_DONE;

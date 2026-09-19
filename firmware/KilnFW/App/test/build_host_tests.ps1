@@ -423,6 +423,12 @@ try {
             "`"$(Join-Path $driversDir 'persist/zones_config_migrate.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/zones_config_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
+            # docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md: the CT attribution
+            # verdict store. Linked as a plain .c (not #included) because it
+            # depends only on hal_kv -- fake_kv.c below supplies that -- and
+            # test_zones_http.c's fingerprint/round-trip tests drive it
+            # through its public header like any other linked module.
+            "`"$(Join-Path $driversDir 'persist/ct_verify_store.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
             # Owner request 2026-09-10: zones_http_post.c (#included above via

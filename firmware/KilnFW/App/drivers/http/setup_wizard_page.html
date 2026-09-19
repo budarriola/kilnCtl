@@ -293,7 +293,7 @@ var WIZARD_STEPS = [
   { id: 6, title: 'Zone commissioning limits', readinessKeys: ['guard_max_temp', 'guard_cross_zone'], safety: true },
   { id: 7, title: 'Safety processor commissioning', readinessKeys: ['safety_commissioned'], safety: true },
   { id: 8, title: 'Current sensing: install & calibrate', readinessKeys: [], safety: true },
-  { id: 9, title: 'CT mapping verification', readinessKeys: [], safety: true },
+  { id: 9, title: 'CT mapping verification', readinessKeys: ['ct_attribution'], safety: true },
   { id: 10, title: 'PID gains (autotune or by hand)', readinessKeys: ['autotune'], safety: false },
   { id: 11, title: 'Coupling matrix (optional)', readinessKeys: [], safety: false },
   { id: 12, title: 'First profile & final readiness gate', readinessKeys: ['profile_saved', 'storage'], safety: false },
@@ -333,8 +333,11 @@ function computeStepState(step, storedStep, readinessByKey) {
   // back to an empty item list, or readiness_http.c's own checklist got
   // truncated and dropped exactly this step's key(s)) must never fall
   // through to trusting the stored blob -- absence of data is not absence
-  // of problems. Steps that legitimately declare no readinessKeys (8, 9,
-  // 11, 13 -- see the comment above WIZARD_STEPS) are unaffected: this can
+  // of problems. Steps that legitimately declare no readinessKeys (8, 11
+  // and 13 -- step 9 gained 'ct_attribution' with
+  // docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md, which is exactly what lets
+  // this file's existing regression machinery refuse a stale 'done' there;
+  // see the comment above WIZARD_STEPS) are unaffected: this can
   // only be true for a step that named keys and got none of them back.
   var readinessUnresolved = step.readinessKeys.length > 0 && items.length === 0;
 

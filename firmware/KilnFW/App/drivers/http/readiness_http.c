@@ -14,6 +14,7 @@
 #include "boot_guard.h"
 #include "cfg_fs.h"
 #include "crash_report.h"
+#include "ct_verify_store.h"
 #include "dashboard_http.h"
 #include "estop_verification.h"
 #include "nvs_report.h"
@@ -729,6 +730,53 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         size_t before_o = o;
         o = append_item(json, item_cap, o, first, "pico_update", "Safety processor firmware version", st,
                         detail, "/ota", &dropped);
+        if (o != before_o) {
+            first = false;
+        }
+    }
+
+    /* 10a4. CT attribution. docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md: proof
+     * that each current clamp sits on the conductor the configuration names,
+     * which is what the over-current guard's whole meaning rests on. Same
+     * shape as the two items above -- one verdict, computed once by
+     * ct_verify_current_fact(), displayed here and blocked on by
+     * readiness_gate.c without either of them recomputing it.
+     *
+     * Every fact gets its OWN sentence. INCONCLUSIVE in particular must
+     * never be worded like a pass: on this ~4 W bench fixture it is the only
+     * outcome the hardware can produce (each zone draws about 23 mA against
+     * a ~45 mA sweep noise floor), so an operator who reads it as "fine"
+     * would be reading the normal case as proof, which is exactly the
+     * unearned green verdict this feature exists to remove. */
+    {
+        readiness_ct_attribution_fact_t fact =
+            (readiness_ct_attribution_fact_t)ct_verify_current_fact();
+        readiness_status_t st = readiness_ct_attribution_status(fact);
+        char detail[READINESS_DETAIL_MAX];
+        switch (fact) {
+        case READINESS_CT_ATTR_NOT_INSTALLED:
+            snprintf(detail, sizeof(detail), "%s", "no current transformers are fitted, so there is nothing to attribute");
+            break;
+        case READINESS_CT_ATTR_PASS:
+            snprintf(detail, sizeof(detail), "%s", "every zone's current appeared on the CT channel the config names");
+            break;
+        case READINESS_CT_ATTR_FAIL:
+            snprintf(detail, sizeof(detail), "%s", "a zone's current appeared on the WRONG CT channel -- move the clamp and re-run the sweep");
+            break;
+        case READINESS_CT_ATTR_STALE:
+            snprintf(detail, sizeof(detail), "%s", "the CT configuration changed since the last check -- re-run the sweep to re-take it");
+            break;
+        case READINESS_CT_ATTR_INCONCLUSIVE:
+            snprintf(detail, sizeof(detail), "%s", "the load drew too little current to tell the channels apart -- NOT a pass, just no evidence");
+            break;
+        case READINESS_CT_ATTR_NEVER_RUN:
+        default:
+            snprintf(detail, sizeof(detail), "%s", "the CT attribution check has never run on this board");
+            break;
+        }
+        size_t before_o = o;
+        o = append_item(json, item_cap, o, first, "ct_attribution", "CT clamp attribution", st,
+                        detail, "/setup", &dropped);
         if (o != before_o) {
             first = false;
         }

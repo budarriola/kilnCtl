@@ -38,6 +38,7 @@
 #include <string.h>
 
 #include "boot_guard.h"
+#include "ct_verify_store.h"
 #include "crash_report.h"
 #include "dashboard_http.h"
 #include "estop_verification.h"
@@ -77,4 +78,14 @@ void readiness_gate_collect(readiness_gate_facts_t *out)
      * UPDATE_PLAN.md's boot-time glue lands in a later commit; this call
      * is stable, standalone and safe to add now. */
     out->pico_update_blocked = pico_auto_update_state_is_blocking();
+
+    /* The SAME resolved fact /api/readiness renders -- one producer, so the
+     * page and the interlock cannot drift apart, and the stored verdict is
+     * never read without its configuration fingerprint being checked in the
+     * same expression (ct_verify_store.h). Fail-safe direction: a store that
+     * was never started, a missing key or a blob that fails validation all
+     * read NEVER_RUN, which displays as CANNOT_YET and blocks only the
+     * wizard step -- never a start, per the owner's rule that only a FAIL
+     * blocks firing. */
+    out->ct_attribution = (readiness_ct_attribution_fact_t)ct_verify_current_fact();
 }
