@@ -851,7 +851,32 @@ de-energized and again energized; the ON state uses the existing
 — no new colour. Require a measured channel difference, with a bezel reference
 sampled in the same run.
 
+**Bench verification 2026-09-19 (partial — off state only).** Board flashed
+from a clean worktree at `73c1da94` and photographed with
+`capture_lcd.ps1`; regions sampled numerically (ffmpeg `rawvideo`/`rgb24`),
+never judged by eye. The line renders as `Safety (K4): off`. Mean RGB of the
+brightest 12% of pixels: label cell `(164.7, 205.2, 220.3)`, the `off` word
+`(163.0, 199.3, 217.3)`, card background `(177.2, 213.3, 215.1)`, black-bezel
+reference in the same frame `(0.0, 0.0, 4.5)`. The `off` word's green channel
+is *below* its blue channel (199.3 < 217.3), so it is not being drawn in
+`ACCENT_4` `0x5cc06e` — the de-energized colour is correct. **The ON state was
+not exercised:** energizing K4 means granting heat enable, which is out of
+scope for a no-heat bench task, so the ACCENT_4 half of this check is still
+owed. Note also that the safety line sits inside a specular glare band from
+the bench lamp, which inflates all three channels and rules out an absolute
+match against `0x9aa0ae`; only the channel *ordering* above is load-bearing.
+
 ### 6.4 The LCD loses the ability to reset relay life — done 2026-09-19, commit dcfadd79
+
+Bench-verified 2026-09-19 on firmware built from `73c1da94`: Diagnostics page
+7 of 8 ("Relay Life") shows five display-only rows (Relay 1-4, Safety (K4))
+and no control below them. Numerically, on an 853x578 capture the text rows
+read top-12% luminance 212.1 (Relay 1) and 213.3 (Safety (K4)), while the
+whole area below the last row reads top-12% 143.5 with a peak of 179.1 —
+below even the dimmest glyph — i.e. nothing is rendered there. Black-bezel
+reference in the same frame: mean RGB `(1.9, 0.0, 0.4)`. Source side,
+`ui_page_diagnostics.c` contains no reset control; its only `Safety (K4)`
+reference is the display-only `build_relay_life_row()` call.
 
 ### 6.5 Right quarter of the dashboard: relays, zone temperatures, zone power
 
@@ -935,6 +960,18 @@ relay commanded on and off and require a measured difference. Bezel reference
 in every run.
 
 ### 6.6 Dashboard Settings button flush top-right — done 2026-09-19, commit dcfadd79
+
+Bench-verified 2026-09-19 on firmware built from `73c1da94`. Full-frame
+capture of the dashboard, luminance column scan across the topbar band: the
+gear glyph occupies frame x 1090-1111 (peak luminance 213) and the panel's
+right edge is at frame x ~1147; columns 1112-1146 are flat background
+(104-115) with no second glyph, so the gear is the rightmost rendered element
+and sits within the topbar container's own right padding. Scaling by the
+measured panel width (298-1147 for 480 LCD px, 1.769 px per LCD px) puts the
+glyph centre at LCD x 453.7, matching the firmware's own tap-target dump
+centre of 453.5 exactly. The hidden warning indicator's slot (LCD x 396-431,
+frame 998-1060) reads flat background in the same scan, confirming it
+collapses to zero width without pushing the gear off the right edge.
 
 ### 6.7 Parallelisation and file collisions
 
