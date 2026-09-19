@@ -392,38 +392,16 @@ a different physical sensor from any of the channels below, so this never follow
 Change it on the <a href="/safety/commissioning">safety commissioning page</a>, under
 Advanced -- it is not one of that page's four guided questions.</p>
 
-<!-- 2026-08-27+2 (Task 3): the safety thermocouple/relay's LIVE reading,
-     READ-ONLY -- reassigning either is not an operator decision (they are
-     fixed hardware, K4 and the RP2040's own MAX31856), so there is
-     deliberately no input here, only text. The safety-processor link this
-     data travels over is being repaired by another pass as of this write;
-     "UNSET" (not 0/off) is what a value not yet trustworthy renders as --
-     see zones_http.h's zone_safety_wiring_t doc comment. -->
+<!-- Safety wiring/ceiling: see zones_http.h's zone_safety_wiring_t and
+     safety_ceiling_policy.h for the invariants these render. -->
 <label>Safety processor wiring (read-only)</label>
-<p class="hint">The RP2040 safety processor's own thermocouple and its relay (K4) --
-shown here for the same wiring picture the zones above give, never editable from
-this page.</p>
+<p class="hint">The RP2040 safety processor's own thermocouple and relay (K4), shown here for reference. Not editable from this page.</p>
 <div id="safetyWiring" class="hint"></div>
 
-<!-- Owner request 2026-09-10: "if i change the max temp in the web gui it
-     should change it in the pico too." The Pico's abs_max_temp_c ceiling now
-     TRACKS the highest configured zone max_temp_c (plus headroom) -- shown
-     here, read-only, so the relationship (and any lag between them, e.g.
-     because the Pico refused a raise while ARMED) is visible rather than a
-     silent number nobody can see. See safety_ceiling_policy.h for the
-     invariant/ordering rule this reflects. -->
 <label>Safety processor ceiling (read-only)</label>
-<p class="hint">The RP2040 safety processor's own absolute temperature ceiling tracks
-the highest configured zone's max temp (+5&deg;C headroom) -- it is raised before a
-zone's limit is, and only lowered after, so it can never end up tighter than your
-zones. If the safety processor cannot be reached right now (e.g. it is armed),
-raising a zone's limit is refused rather than silently left unenforced.</p>
+<p class="hint">The safety processor's absolute temperature ceiling tracks your highest zone's max temp (+5&deg;C). If the safety processor can't be reached, a limit raise is refused rather than left unenforced.</p>
 <div id="safetyCeiling" class="hint"></div>
 
-<!-- 2026-08-27+2 (Task 2): CT-to-zone mapping mismatch warnings, computed
-     from the same GET /api/zones response (ct_warn_mask) -- silent for any
-     zone whose normal current was never measured (Task 1), a WARNING never
-     a trip. See zones_http.h's zones_ct_mapping_mismatch() doc comment. -->
 <div id="ctWarnings"></div>
 
 <div id="zones"><p class="empty">Loading&hellip;</p></div>
@@ -431,129 +409,40 @@ raising a zone's limit is refused rather than silently left unenforced.</p>
 <button id="saveBtn" type="button">Save</button>
 <p id="msg"></p>
 
-<!-- 2026-08-27+2 (Task 1): per-zone normal-current measurement sweep.
-     Energizes one zone's relay(s) at a time and records the steady-state
-     current SaftyFW's current-sense channels report -- see
-     zones_http.c's ZONE_SWEEP_SETTLE_MS/ZONE_SWEEP_SAMPLE_MS comment for
-     the timing and its justification. The button itself carries no
-     confirmation dialog beyond the refusal reasons the board already
-     enforces (profile running, autotune running, link down, trip latched,
-     invalid config) -- those are real interlocks; a client-side "are you
-     sure" would only be decoration on top of them. -->
+<!-- ROADMAP.md "Visually simplify the Thermocouples & Zones web page",
+     decision (a): hidden unless ct_installed says CTs are fitted -- see
+     gateMeasureNormalCurrentSection(). -->
+<div id="measureNormalCurrentSection">
 <h2>Measure Zone Normal Current</h2>
-<p class="hint">Energizes each configured zone's relay(s) ONE AT A TIME, in turn, and
-records its steady-state current -- used by the mismatch warning below the zone list
-to catch a current-transformer plugged into the wrong jack. Refuses to run while a
-profile or autotune is active, while the safety link is down, or while a trip is
-latched. Interruptible with Abort; every exit path leaves every relay off.</p>
+<p class="hint">Energizes each zone's relay(s) one at a time and records its steady-state current, used to catch a current transformer plugged into the wrong jack. Refuses to run during a profile, autotune, link-down, or a latched trip.</p>
 <button id="sweepStartBtn" type="button">Measure Normal Current</button>
 <button id="sweepAbortBtn" type="button" style="display:none;">Abort</button>
 <p id="sweepStatus" class="hint"></p>
-
-<h2>PID Autotune</h2>
-<h3>Which tuning method should I use?</h3>
-<!-- OWNER REQUEST 2026-09-02, part 2 of 2: "the pid tuneing will be done with
-     an empty kiln, try the diffrent tuneing methods and test fire to
-     diffrent temps in the simulator with diffrent masses. use all this info
-     to create recomendations in the web gui for what to use for tuneing
-     pid". This panel reads the simulation campaign's evidence artifact
-     (tools/PcTools/config_presets/tuning_recommendations.json, embedded into
-     flash at build time -- see zones_http.c's tuning_rec_get_handler and
-     CMakeLists.txt's KILNCTL_TUNING_REC_JSON logic) and answers, for the
-     peak temperature and load the operator is about to fire, which method's
-     result to trust and how much.
-
-     Confidence is the point of this panel, not a nice-to-have: a
-     recommendation for a peak above the simulator's own
-     sim_confidence.extrapolation_boundary_c rests on ASSUMED physics
-     (emissivity, element power, insulation) that were never checked against
-     a held-out run, not measurement. It must never look as certain as one
-     that was. Three renderings, and only three -- see
-     pickTuningRecommendation()/tuningRecStatusClass() below:
-       measured        -- var(--ok),   "confirmed by held-out simulation runs"
-       extrapolated     -- var(--warn), "beyond the simulator's checked range -- treat as a starting point, not a verdict"
-       indistinguishable -- var(--warn), BOTH methods shown with the measured
-                            margin between them, no winner picked -- picking
-                            one when the campaign couldn't tell them apart
-                            would show confidence the evidence does not
-                            support.
-     A missing/unreadable artifact or a schema_version this page does not
-     understand renders the same as "no data yet", never a stale or invented
-     answer -- see tuningRecArtifactUsable(). -->
-<p class="hint">Tuning always runs on an <b>empty</b> kiln (autotune needs a
-clean, repeatable thermal response -- a load changes the mass the fitted
-model is measuring). Firing never is. The recommendation below is about
-which method's empty-kiln gains hold up once the kiln is loaded and fired --
-not which method fits the empty-kiln data best on its own; a method that
-fits beautifully empty and drifts badly loaded is not the one to prefer.
-Basis for each recommendation is shown next to it: <b>measured</b> means the
-simulation campaign held out real runs at this temperature/load and checked
-the recommendation against them; <b>extrapolated</b> means this peak is
-past the simulator's checked range (see the boundary noted below) and the
-answer rests on assumed physics, not a checked run; <b>indistinguishable</b>
-means the campaign could not tell the two leading methods apart at this
-point and neither is picked.</p>
-<div class="card" id="tuningRecPanel">
-  <label>Intended peak temp (&deg;C):
-    <input type="number" id="tuningRecPeak" min="0" max="1400" step="1" placeholder="e.g. 1000"></label>
-  <label style="margin-left:1em;">Load:
-    <select id="tuningRecLoad">
-      <option value="any">Unknown / not sure</option>
-      <option value="empty">Empty (test fire)</option>
-      <option value="light">Light load</option>
-      <option value="full">Full load</option>
-    </select></label>
-  <button id="tuningRecGoBtn" type="button" style="margin-left:1em;">Recommend</button>
-  <div id="tuningRecResult"><p class="empty">Enter a peak temperature above and click Recommend.</p></div>
 </div>
+<p id="measureNormalCurrentHint" class="hint" hidden>Enable "CT installed" in Safety Processor Commissioning to see this section.</p>
 
-<h3>How much can a small difference actually tell you?</h3>
-<!-- REAL MEASUREMENT 2026-09-03: a six-firing repeat campaign on the bench
-     kiln (same preset, same profile) gives an actual measured noise floor
-     per metric -- see tools/PcTools/config_presets/noise_floor.json, folded
-     into the same tuning_recommendations.json artifact above as
-     `noise_floor` (schema-additive: schema_version stays 1, older
-     consumers/pages that don't know this field simply never read it). The
-     recommendation panel above answers "which method to start from"; this
-     one answers "given the number the board just reported, is that
-     difference even real, or is it noise this rig itself produces
-     firing-to-firing". Same idiom as the panel above on purpose (bracket
-     badge + hint paragraphs, var(--ok)/var(--bad), no new visual language) --
-     see noiseFloorUsable()/renderNoiseFloorHtml() below, and
-     test/test_noise_floor_panel.js.
-
-     2026-09-03, SAME DAY -- the noise_floor block is now DERIVED, not
-     hand-copied: tools/PcTools/scripts/gen_noise_floor_panel.py regenerates
-     it straight from noise_floor.json using the exact same
-     reliable/unreliable rule pid_ab_compare.py itself uses
-     (summarize_metric_floor_reliability, FLOOR_RELIABILITY_RATIO), so a
-     rebuilt noise_floor.json cannot silently drift out of sync with what
-     this page claims. This page still just renders whatever `reliable`/
-     `min_c`/`max_c`/`note` values are in the JSON -- it does not recompute
-     anything -- so no code below needed to change for the ramp_worst_error_c
-     reclassification (was falsely "cannot resolve anything useful" on
-     contaminated data; is now RESOLVES at a 2.57x floor ratio). Also carries
-     a `multiplicity_caveat`: this report scores ~48 keys with no
-     multiplicity correction, so a single flagged metric is close to chance
-     (~12% per-key at the common n=6) -- only a same-metric, same-direction
-     pattern across several zones is worth trusting. -->
-<p class="hint">This is a measured bench result, not simulator output: six back-to-back
-firings of the exact same tuning on the reference bench rig, showing how much each metric
-moved between runs that should have agreed. A difference smaller than a metric's floor is
-not attributable to whatever you are comparing.</p>
-<div class="card" id="noiseFloorPanel"><p class="empty">Loading&hellip;</p></div>
-
-<h3>Step test (start here)</h3>
-<p>Runs an open-loop step test on one zone: holds heat off to settle, then
-applies a fixed duty and records the response until it looks settled or 4
-hours pass. Fits a plant model from the response and proposes Kp/Ki/Kd using
-the tuning rule picked below -- nothing is written to the zone above until
-you click Accept.
-Owns that zone's relay(s) while running; refuses to start while a firing
-profile is running, and a firing profile refuses to start while this is
-running. Guard suite is fully armed during the test. This is a real heat
-test, not a simulation -- only run it with the kiln empty and attended.</p>
-<label for="atZone">Zone (both tests below)</label>
+<div id="pidAutotuneSection">
+<h2>PID Autotune</h2>
+<p class="hint">Runs a real heat test on one zone with the guard suite fully armed -- only run it with the kiln empty and attended. Owns that zone's relay(s) while running.</p>
+<details class="info">
+  <summary>Which tuning method should I use?</summary>
+  <p class="hint">Enter your intended peak temperature and load below for a recommendation
+  based on held-out test data where available.</p>
+  <div class="card" id="tuningRecPanel">
+    <label>Intended peak temp (&deg;C):
+      <input type="number" id="tuningRecPeak" min="0" max="1400" step="1" placeholder="e.g. 1000"></label>
+    <label style="margin-left:1em;">Load:
+      <select id="tuningRecLoad">
+        <option value="any">Unknown / not sure</option>
+        <option value="empty">Empty (test fire)</option>
+        <option value="light">Light load</option>
+        <option value="full">Full load</option>
+      </select></label>
+    <button id="tuningRecGoBtn" type="button" style="margin-left:1em;">Recommend</button>
+    <div id="tuningRecResult"><p class="empty">Enter a peak temperature above and click Recommend.</p></div>
+  </div>
+</details>
+<label for="atZone">Zone</label>
 <select id="atZone"></select>
 <label for="atDuty">Step duty (0-1, e.g. 0.5)</label>
 <input type="number" id="atDuty" min="0.05" max="1" step="0.05" value="0.5">
@@ -564,45 +453,8 @@ test, not a simulation -- only run it with the kiln empty and attended.</p>
 </select>
 <p id="atStepRuleDesc" class="hint"></p>
 <button id="atStartBtn" type="button">Start step test</button>
-
-<h3>Relay-feedback test (Åström–Hägglund) -- read this first</h3>
-<p class="verdict-bad"><b>This test heats the kiln to a temperature you choose and then
-deliberately makes it oscillate around that temperature, over and over, for at least five
-full cycles.</b> On a kiln one cycle is ten minutes or more, so the chamber spends hours
-swinging above and below your setpoint. That thermal cycling is hard on the ware --
-anything in the kiln is being held at temperature and repeatedly heated and cooled, which
-is exactly what glaze and cone schedules are designed to avoid -- and it is hard on the
-elements, which age with every hot/cold cycle. Do not run it on a real firing, and do not
-run it at cone temperature. The step test above asks nothing like this of the kiln and
-also gives you a plant model, which this test does not.</p>
-<p>What it measures: the ultimate gain and period (Ku, Tu) at the setpoint you pick, and
-proposes gains from them. It writes <b>no plant model</b> -- so if a step test already
-measured one for this zone, accepting a relay result leaves that model alone rather than
-replacing it. Guard suite is fully armed exactly as it is for the step test: any guard trip
-ends the run with the relays off. Aborts on its own if the zone can't reach the setpoint in
-4 hours, or if it hasn't produced enough cycles within 4 hours of oscillating. The setpoint
-is refused if it is within 50&nbsp;°C of this zone's max/min temperature limits, because the
-oscillation overshoots its band and would trip its own guard.</p>
-<p class="hint">Honesty note, same as everywhere else on this page: this path has never
-completed on real hardware. The identification math is tested against a simulated plant;
-the on-target state machine that drives the relay has never seen a thermocouple, because
-this bench unit has none attached and every live autotune run so far aborts on the
-sensor guard within seconds.</p>
-<label for="atSetpoint">Oscillation setpoint (&deg;C) -- required, no default. Pick the
-temperature you actually care about controlling; that is the only place this test measures.</label>
-<input type="number" id="atSetpoint" min="0" max="1400" step="5" value="">
-<label for="atRelayD">Relay half-amplitude d (duty, blank = 0.35 -- swings duty between
-0.5&minus;d and 0.5+d)</label>
-<input type="number" id="atRelayD" min="0.05" max="0.5" step="0.05" value="">
-<label for="atRelayH">Hysteresis h (&deg;C, blank = 2.0 -- half-width, so the relay switches
-across a band twice this wide)</label>
-<input type="number" id="atRelayH" min="0.5" max="20" step="0.5" value="">
-<label for="atRule">Tuning rule</label>
-<select id="atRule">
-  <option value="tl" selected>Tyreus-Luyben (conservative -- recommended)</option>
-  <option value="zn">Ziegler-Nichols (aggressive -- designed to leave the loop oscillating)</option>
-</select>
-<button id="atRelayStartBtn" type="button">Start relay test</button>
+</div>
+<p id="pidAutotuneHint" class="hint" hidden>Set a zone's control mode to PID or PID (fuzzy-adjusted) to see PID Autotune here.</p>
 
 <h3>Run status</h3>
 <button id="atAbortBtn" type="button">Abort</button>
@@ -650,62 +502,33 @@ across a band twice this wide)</label>
      never refused should show nothing extra here. -->
 <p id="atRefusal" class="verdict-bad" style="display:none;"></p>
 
+<div id="tuningQualitySection">
 <h3>Tuning quality</h3>
-<!-- 2026-09-01: set 1 of the owner's two-sets request ("one for the pid
-     tuneing that stays unless retuned, and another for the last fireing
-     run"). This is the ONE-PER-ZONE record of how well the CURRENTLY-
-     ACTIVE gains were fitted -- it survives until the zone is next
-     re-tuned (an autotune accept, NOT a firing) and is invalidated the
-     instant those gains change any other way (a manual PID edit, an
-     adaptive-tune re-blend, a backup restore). This is deliberately a
-     DIFFERENT thing from "Firing quality" just below, which is set 2: a
-     history of how well the kiln actually tracked target during past
-     RUNS, using whatever gains happened to be active at the time. A zone
-     can have excellent tuning quality (a clean, converged fit) and still
-     fire badly (a cold load, a draft, a bad element) -- or the reverse --
-     so the two tables are kept visually and textually separate rather than
-     merged into one "quality" column that would blur which question is
-     being answered. -->
-<p class="hint">One row per zone, read-only. <b>Unknown</b> means this
-zone has never been autotuned (or was hand-edited since), not that the fit
-was bad. <b>Settled/Converged/Tau ok</b> are the three fit-confidence flags
-autotune_engine_accept() gates acceptance on -- see the Autotune section
-above for what each means; a fit that reached DONE with one or more of these
-false can still have been accepted (with an explicit override), so seeing
-"no" here does not mean the currently-active gains are wrong, only that they
-came from a lower-confidence fit. <b>Extrap. correction</b> is how much of
-the fitted gain was extrapolated past the trace's own data rather than
-directly measured (rise at infinity minus the trace's raw last-sample rise)
--- a large correction means a weaker fit even when every flag above reads
-yes.</p>
+<p class="hint">One row per zone: how well the currently-active gains were fitted. <b>Unknown</b> means never autotuned or hand-edited since.</p>
+<details class="info">
+  <summary>What do the columns mean?</summary>
+  <p class="hint"><b>Settled/Converged/Tau ok</b> are fit-confidence flags; a fit can be
+  accepted with one or more false via an explicit override, so "no" doesn't mean the
+  active gains are wrong, only lower-confidence. <b>Extrap. correction</b> is how much of
+  the fitted gain was extrapolated past the trace's own data -- a large correction means a
+  weaker fit even when every flag reads yes. This is separate from Firing quality below:
+  a clean fit here can still fire badly (cold load, draft, bad element), or the reverse.</p>
+</details>
 <div class="table-scroll">
 <div id="tuningQuality"><p class="empty">Loading…</p></div>
 </div>
+</div>
+<p id="tuningQualityHint" class="hint" hidden>Autotune a zone to see tuning quality here.</p>
 
 <h3>Firing quality</h3>
-<!-- 2026-09-01 follow-up: moved here from main_page.html (owner: "this is
-     far too messy, put this in the zones page and make it readable" --
-     screenshot showed a dense run-on sentence per zone). Per-zone tuning
-     detail belongs next to the PID parameters and the coupling matrix, not
-     on the live "what is the kiln doing right now" dashboard -- the
-     dashboard keeps only a one-line "worst zone" headline that links here.
-     Explained ONCE here, not per metric per zone, per the owner's own
-     instruction. -->
-<p class="hint">Live while a firing is RUNNING (the numbers are still
-accumulating -- read them as "so far", not final) and frozen once it ends
-(DONE/FAULTED). <b>Mean err</b> is SIGNED: positive means this zone ran hot
-(above its ramp/dwell target on average), negative means it ran cold.
-<b>Max over/under</b> are separate figures on purpose -- a zone that
-overshoots on the way up and undershoots settling into a dwell has two
-different failure modes, not one "error", and averaging them together would
-hide both. <b>IAE(norm)</b> is the integral of absolute error, normalized by
-this run's own duration and setpoint span so a short profile and a 12-hour
-one -- or a 50&deg;C bisque and a 300&deg;C glaze firing -- produce
-comparable numbers; it is the one figure worth comparing ACROSS different
-profiles, which is the entire reason it exists. <b>Ramp</b>/<b>dwell</b>
-columns split the same mean/max error by which kind of segment the zone was
-in when it happened, since chasing a moving ramp target and holding a fixed
-dwell target are different jobs.</p>
+<p class="hint">How well the kiln tracked target during past firings. Live while a firing runs, frozen once it ends.</p>
+<details class="info">
+  <summary>What do the columns mean?</summary>
+  <p class="hint"><b>Mean err</b> is signed: positive means the zone ran hot, negative cold.
+  <b>Max over/under</b> are separate since overshoot and undershoot are different failure
+  modes. <b>IAE(norm)</b> is normalized so different profile lengths/peaks are comparable.
+  <b>Ramp</b>/<b>dwell</b> split the same error by segment type.</p>
+</details>
 <div class="table-scroll">
 <div id="firingStatsCurrent"><p class="empty">No firing this session yet.</p></div>
 </div>
@@ -713,73 +536,36 @@ dwell target are different jobs.</p>
 <div id="firingStatsHistory"></div>
 </div>
 
+<div id="couplingSection">
 <h3>Cross-zone coupling matrix (measured this session)</h3>
-<p class="hint">Filled in one row at a time: when zone i's autotune step test
-runs, every zone's response to it is logged, not just zone i's -- so K[i][j]
-is zone j's steady-state gain (&deg;C per unit duty) to zone i's step. The
-diagonal is each zone's own direct gain (same number the Autotune result
-above shows). Empty until that row's zone has completed a run this session
-(not persisted across reboot). This is what autotune <i>measured</i> --
-it is not saved and does not feed the controller; the "Cross-zone coupling
-to feedforward" field in each zone's settings above is what actually gets
-<i>used</i>, and is only updated when you copy a number over and save.</p>
-<!-- UI_PLAN.md section 3, Web item 1: wrapper, not the table itself -- the
-     <table class="coupling"> is built by buildCouplingTable-style JS below
-     (see line ~612's html += '<table class="coupling">...') and replaces
-     this div's innerHTML, so wrapping the container itself (rather than
-     patching every JS string-concat call site) picks up the scroll
-     behavior for free regardless of how the JS renders. -->
+<p class="hint">One row per zone that has completed an autotune step test this session: K[i][j] is zone j's response to zone i's step. Not persisted or used by the controller -- copy a number into a zone's own feedforward field to use it.</p>
 <div class="table-scroll">
 <div id="couplingMatrix"><p class="empty">No autotune runs completed yet this session.</p></div>
 </div>
 
 <h3>Do the zones interfere? (Relative Gain Array)</h3>
-<p class="hint">Computed from the matrix above. Read only the <b>bold diagonal</b>:
-it is a score for &quot;can this zone be controlled on its own?&quot;. <b>1.00 means
-yes</b> -- what this zone's heater does to this zone's temperature doesn't change
-when the other zones are also regulating, so one independent PID per zone is the
-right thing and nothing more is needed. Numbers well above 1 mean the zones are
-propping each other up and each loop has to work harder than it thinks;
-<b>negative</b> means the neighbours' loops actually reverse this zone's response,
-and the zones would fight each other all firing. It is only computed over zones
-that have <em>all</em> their cross-gains measured, and it is refused outright
-rather than estimated when the matrix has a hole in it or is degenerate -- a
-wrong answer here would say &quot;your zones are independent&quot; about a kiln
-where they are not.</p>
-<!-- Same table-scroll wrapper reasoning as #couplingMatrix above. -->
+<p class="hint">Computed from the matrix above. The bold diagonal answers "can this zone be controlled on its own?" -- 1.00 means yes.</p>
+<details class="info">
+  <summary>What do other values mean?</summary>
+  <p class="hint">Numbers above 1 mean the zones prop each other up and each loop works
+  harder than it thinks; negative means the neighbours' loops reverse this zone's
+  response. Refused outright, never estimated, when the matrix has a hole or is
+  degenerate.</p>
+</details>
 <div class="table-scroll">
 <div id="rgaMatrix"><p class="empty">Not computable yet.</p></div>
 </div>
+</div>
+<p id="couplingSectionHint" class="hint" hidden>Run a PID Autotune step test on a zone to see the coupling matrix here.</p>
 
-<!-- PID_EXPANSION_PLAN.md Phase 7d: continuous/adaptive tuning
-     (adaptive_tune.c/adaptive_tune_http.c). Deliberately its own section,
-     visually distinct from "PID Autotune" above -- Autotune RUNS A TEST NOW
-     (owns the zone's relay, heats it on purpose, needs the kiln empty and
-     attended); this is the opposite shape: it opts a zone in to quietly
-     learning from firings it would be running anyway, with no test of its
-     own and no extra heat. Confusing the two would mean an operator either
-     expects a step test to be running when it never will be, or skips this
-     because "I already ran Autotune" -- unrelated questions. -->
+<div id="continuousTuningSection">
 <h2>Continuous Tuning (learn from firings)</h2>
-<p class="hint">A different thing from PID Autotune above: this runs <b>no
-test of its own</b> and applies <b>no extra heat</b>. When a zone is opted
-in here, every ORDINARY firing profile you run doubles as tuning data --
-once a dwell segment settles, this quietly banks one (duty, steady-state
-rise) observation for that zone. At the END of a clean run (never during
-one -- see below), if enough good observations have piled up, it refits
-that zone's steady-state gain (K_dc), blends it a little at a time with the
-existing model, and recomputes Kp/Ki/Kd through the exact same SIMC rule
-Autotune's own Accept button uses. <b>Off by default, per zone</b> -- opting
-in is a deliberate choice, not something that starts on its own.</p>
-<p class="hint" style="color: var(--ok);"><b>Safety property:</b> gains are
-only ever changed at the very end of a run, after that zone's relay(s) are
-already off and it is no longer being actively controlled -- never
-mid-firing. A change here can never bump a firing that is currently in
-progress; the earliest it can affect anything is the NEXT time that zone
-fires.</p>
+<p class="hint">Runs no test of its own and applies no extra heat. An opted-in zone banks tuning data from its ordinary firings and, at the end of a clean run, refits its gains through the same rule Autotune's Accept button uses. Off by default per zone.</p>
 <div class="table-scroll">
 <div id="adaptiveTuneZones"><p class="empty">Loading&hellip;</p></div>
 </div>
+</div>
+<p id="continuousTuningHint" class="hint" hidden>Enable continuous tuning on a zone to see learning results here.</p>
 
 <script>
 // Display labels only -- R0-3, matching the thermocouple channels' 0-based
@@ -2523,10 +2309,43 @@ function renderCtWarnings(ctWarnMask, zones) {
 
 var sweepPollTimer = null;
 
+// ROADMAP.md "Visually simplify the Thermocouples & Zones web page",
+// decision (a): each gate toggles a section's wrapper div and its paired
+// hint paragraph inversely via the `hidden` property (never inline display).
+function gateMeasureNormalCurrentSection(installed) {
+  document.getElementById('measureNormalCurrentSection').hidden = !installed;
+  document.getElementById('measureNormalCurrentHint').hidden = !!installed;
+}
+
+function gatePidAutotuneSection(zones) {
+  var show = Array.isArray(zones) && zones.some(function (z) { return z && (z.control_mode === 2 || z.control_mode === 3); });
+  document.getElementById('pidAutotuneSection').hidden = !show;
+  document.getElementById('pidAutotuneHint').hidden = show;
+}
+
+function gateTuningQualitySection(zones) {
+  var show = Array.isArray(zones) && zones.some(function (z) { return z && z.tuning_valid; });
+  document.getElementById('tuningQualitySection').hidden = !show;
+  document.getElementById('tuningQualityHint').hidden = show;
+}
+
+function gateCouplingSection(measuredRows) {
+  var show = !!measuredRows;
+  document.getElementById('couplingSection').hidden = !show;
+  document.getElementById('couplingSectionHint').hidden = show;
+}
+
+function gateContinuousTuningSection(zones) {
+  var show = Array.isArray(zones) && zones.some(function (z) { return z && z.enabled; });
+  document.getElementById('continuousTuningSection').hidden = !show;
+  document.getElementById('continuousTuningHint').hidden = show;
+}
+
 function renderSweepStatus(st) {
   var msg = document.getElementById('sweepStatus');
   var startBtn = document.getElementById('sweepStartBtn');
   var abortBtn = document.getElementById('sweepAbortBtn');
+  if (st && typeof st.ct_installed === 'boolean') gateMeasureNormalCurrentSection(st.ct_installed);
   if (!st) { msg.textContent = ''; return; }
   var running = st.state === 'running';
   startBtn.disabled = running;
@@ -2658,6 +2477,8 @@ function loadCurrent() {
       renderSafetyCeiling(data.safety_ceiling);
       renderCtWarnings(data.ct_warn_mask, data.zones);
       renderTuningQuality(data.zones);
+      gatePidAutotuneSection(data.zones);
+      gateTuningQualitySection(data.zones);
       drawKilnGraphic();
     } catch (err) {
       if (window.console) console.error('zones page render failed', err);
@@ -3297,75 +3118,8 @@ function tuningRecStatusClass(confidence) {
 }
 // TUNING_REC_LOOKUP_END
 
-// -----------------------------------------------------------------------
-// Measured noise-floor panel (2026-09-03). Reads the same artifact's
-// optional `noise_floor` field (see tuning_recommendations.json's own
-// comment on it) -- absent entirely on an artifact built before this field
-// existed, or on the fallback placeholder, in which case this degrades to
-// "no data" exactly like the recommendation panel above does for its own
-// missing/unusable cases. Pure (no DOM) between the NOISE_FLOOR_START/END
-// markers so test/test_noise_floor_panel.js can exercise it directly --
-// same extraction convention as TUNING_REC_LOOKUP above.
-//
-// noise_floor.reliable per metric is derived upstream (see
-// gen_noise_floor_panel.py) from the same ratio rule pid_ab_compare.py
-// gates its own verdicts on -- this file only renders what it is given,
-// including the optional `multiplicity_caveat` string.
-// -----------------------------------------------------------------------
-// NOISE_FLOOR_START
-function noiseFloorUsable(artifact) {
-  return !!(artifact && artifact.noise_floor && typeof artifact.noise_floor === 'object' &&
-    artifact.noise_floor.metrics && typeof artifact.noise_floor.metrics === 'object');
-}
-
-// Looks up one metric's floor row. Returns null when the artifact is
-// unusable OR the metric simply has no entry (e.g. a metric this page
-// knows about but the campaign never measured) -- callers must treat both
-// the same way: no claim, not an error.
-function noiseFloorMetricRow(artifact, metric) {
-  if (!noiseFloorUsable(artifact)) return null;
-  var m = artifact.noise_floor.metrics[metric];
-  if (!m || typeof m !== 'object' || typeof m.min_c !== 'number' || typeof m.max_c !== 'number') return null;
-  return m;
-}
-
-function renderNoiseFloorHtml(artifact) {
-  if (!noiseFloorUsable(artifact)) {
-    return '<p class="empty">No measured noise-floor data on this board yet (evidence artifact not built in, ' +
-      'older than this field, or its schema is newer than this page understands).</p>';
-  }
-  var nf = artifact.noise_floor;
-  var html = '';
-  html += '<p class="hint">Measured on the <b>' + window.kcEscapeHtml(nf.rig || 'reference bench rig') + '</b>, n=' +
-    (typeof nf.n_repeats === 'number' ? nf.n_repeats : '?') + ' repeat firings. ' +
-    window.kcEscapeHtml(nf.transfer_caveat || 'This does not transfer to your own kiln -- run your own repeat campaign for your own floor.') +
-    '</p>';
-  if (nf.like_for_like === false && nf.warning) {
-    html += '<p class="hint" style="color:var(--warn);">' + window.kcEscapeHtml(nf.warning) + '</p>';
-  }
-  if (nf.stat_caveat) {
-    html += '<p class="hint">' + window.kcEscapeHtml(nf.stat_caveat) + '</p>';
-  }
-  if (nf.multiplicity_caveat) {
-    html += '<p class="hint">' + window.kcEscapeHtml(nf.multiplicity_caveat) + '</p>';
-  }
-  var names = Object.keys(nf.metrics).sort();
-  names.forEach(function (name) {
-    var m = nf.metrics[name];
-    if (!m || typeof m.min_c !== 'number' || typeof m.max_c !== 'number') return;
-    var cls = m.reliable ? 'ok' : 'bad';
-    var badge = m.reliable ? 'RESOLVES' : 'UNRELIABLE';
-    var unit = (typeof m.unit === 'string' && m.unit) ? m.unit : 'C';
-    html += '<p><span style="color:var(--' + cls + ');font-weight:bold;">[' + badge + ']</span> <b>' +
-      window.kcEscapeHtml(name) + '</b>: measured floor ' + m.min_c + '–' + m.max_c + '°' + unit +
-      (m.reliable
-        ? ' -- a smaller difference is likely real.'
-        : ' -- floor too large/unstable here; do not read a small difference on this metric as real.') +
-      (m.note ? ' <span class="hint">(' + window.kcEscapeHtml(m.note) + ')</span>' : '') + '</p>';
-  });
-  return html;
-}
-// NOISE_FLOOR_END
+// Noise-floor section removed, ROADMAP.md decision (d); noise_floor.json
+// generation and the tuning_recommendations.json field are untouched.
 
 var tuningRecArtifact = null;
 fetch('/api/tuning_recommendations').then(function (r) {
@@ -3373,10 +3127,8 @@ fetch('/api/tuning_recommendations').then(function (r) {
   return r.json();
 }).then(function (data) {
   tuningRecArtifact = data;
-  document.getElementById('noiseFloorPanel').innerHTML = renderNoiseFloorHtml(tuningRecArtifact);
 }).catch(function () {
   tuningRecArtifact = null;
-  document.getElementById('noiseFloorPanel').innerHTML = renderNoiseFloorHtml(null);
 });
 
 function renderTuningRecommendation() {
@@ -3811,6 +3563,7 @@ function pollCouplingMatrix() {
       }
       if (rowHasValid) measuredRows++;
     }
+    gateCouplingSection(measuredRows);
 
     var html = '';
     if (measuredRows === 0) {
@@ -3906,6 +3659,7 @@ function pollAdaptiveTune() {
   if (!el) return;
   var thermoCount = parseInt(document.getElementById('thermoCount').value, 10) || 0;
   fetch('/api/adaptive_tune').then(function (r) { return r.json(); }).then(function (s) {
+    gateContinuousTuningSection(s.zones);
     if (thermoCount === 0 || !s.zones || !s.zones.length) {
       el.innerHTML = '<p class="empty">No zones configured.</p>';
       return;
@@ -4007,38 +3761,11 @@ document.getElementById('atStartBtn').addEventListener('click', function () {
   }).catch(function () {});
 });
 
-document.getElementById('atRelayStartBtn').addEventListener('click', function () {
-  var status = document.getElementById('atStatus');
-  var zone = document.getElementById('atZone').value;
-  var sp = document.getElementById('atSetpoint').value;
-  if (zone === '') { status.textContent = 'No zone configured/selected.'; return; }
-  if (sp === '') { status.textContent = 'A relay test needs an oscillation setpoint -- there is no default.'; return; }
-  /* Deliberately blunt and deliberately not styleable away: this is the one
-     control on the page that makes the kiln misbehave on purpose, and the
-     operator should have to say so out loud before it starts. */
-  if (!confirm('Start a RELAY test on zone ' + zone + ' at ' + sp + '°C?\n\n' +
-               'The kiln will be heated to that temperature and then deliberately oscillated ' +
-               'around it for at least 5 cycles (10+ minutes each). This thermally cycles the ' +
-               'ware and the elements. It can run for up to 8 hours. Do not do this during a ' +
-               'real firing.')) {
-    return;
-  }
-  /* d and h are sent only when the operator filled them in; the firmware's
-     documented defaults apply otherwise, so the page never has to hold a
-     second copy of them that could drift out of step. */
-  var body = 'method=relay&zone=' + zone + '&setpoint_c=' + encodeURIComponent(sp) +
-             '&rule=' + document.getElementById('atRule').value;
-  var d = document.getElementById('atRelayD').value;
-  var h = document.getElementById('atRelayH').value;
-  if (d !== '') body += '&relay_d=' + encodeURIComponent(d);
-  if (h !== '') body += '&relay_h=' + encodeURIComponent(h);
-  fetch('/api/autotune/start', {
-    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
-  }).then(function (r) { return r.json(); }).then(function (j) {
-    if (!j.ok) status.textContent = 'Start failed: ' + j.error;
-    else pollAutotune();
-  }).catch(function () {});
-});
+// Relay-feedback (Åström–Hägglund) UI removed, ROADMAP.md decision (b).
+// The firmware engine (autotune_engine_relay.c) and /api/autotune/start's
+// shared method=relay branch are left in place: test_autotune_engine_prestart.c
+// host-tests the relay engine directly, and the route is shared with the
+// step test (no separate route existed to remove).
 document.getElementById('atAbortBtn').addEventListener('click', function () {
   fetch('/api/autotune/abort', { method: 'POST' }).then(pollAutotune).catch(function () {});
 });

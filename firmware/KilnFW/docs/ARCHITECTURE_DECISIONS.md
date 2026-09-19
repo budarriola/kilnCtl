@@ -453,3 +453,49 @@ is the surviving reference for the code that cites it):
   ~40-line pointer-drag window if that's ever wanted.
 - **Display-power Save button** (formerly "section 4"): already fixed
   2026-09-04, confirmed flashed in `05087f0`.
+
+## Zones page visual simplification and prose shortening (2026-09-19)
+
+Owner request, ROADMAP.md "Visually simplify the Thermocouples & Zones web
+page" plus a same-day follow-up scope addition to shorten all
+operator-visible prose on the page:
+
+- **Show-when-enabled sections**: Continuous Tuning, the cross-zone coupling
+  matrix + RGA, Tuning quality, PID Autotune, and Measure Zone Normal
+  Current now render only when their feature is actually in use on the
+  board (a zone opted into continuous tuning, a measured coupling row, a
+  zone with `tuning_valid`, a zone in PID/fuzzy control mode, and the
+  safety processor's `ct_installed` setting respectively) — see
+  `gateMeasureNormalCurrentSection()`/`gatePidAutotuneSection()`/
+  `gateTuningQualitySection()`/`gateCouplingSection()`/
+  `gateContinuousTuningSection()` in `zones_page.html`. Each hides via the
+  `hidden` DOM property, never inline `display`, and shows a single muted
+  `class="hint"` line in its place — the answered owner question on the
+  ROADMAP row. `ct_installed` reached the page as a new boolean field on the
+  already-polled `GET /api/zones/current_sweep/status` response (no new
+  HTTP route); it mirrors `zone_cfg_committed_ct_installed()`'s existing
+  default-to-installed rule.
+- **Relay-feedback (Åström–Hägglund) test**: removed from the UI entirely.
+  The firmware engine (`autotune_engine_relay.c`) and its shared
+  `/api/autotune/start` route (`method=relay`, always shared with the step
+  test — there was never a separate relay-only route) were left in place:
+  `test_autotune_engine_prestart.c` host-tests the relay engine directly,
+  so no URI-handler slot was freed by this change.
+- **PID Autotune**: the separate "Step test" panel and the "Which tuning
+  method should I use?" panel were folded into one "PID Autotune" section;
+  the method-recommendation panel is now inside that section's info-glyph
+  `<details>` rather than a always-visible panel of its own.
+- **Noise floor section**: "How much can a small difference actually tell
+  you?" and its `noiseFloorUsable()`/`renderNoiseFloorHtml()` renderers were
+  removed outright (`test_noise_floor_panel.js` deleted with them).
+  `tuning_recommendations.json`'s `noise_floor` field and its generator are
+  untouched — schema-additive, unread by the page now, not deleted.
+- **Prose**: descriptions across these sections were cut to one or two
+  plain sentences, repository/plan-doc/commit-hash references and
+  "honesty note" bench-provenance paragraphs were dropped from
+  operator-visible text, and the guard-suite/empty-kiln warning is now
+  stated once at the top of the PID Autotune section rather than per
+  sub-section. Longer explanations moved into existing info-glyph
+  `<details>` blocks rather than being deleted. This pass covered the
+  page's top-level sections; per-zone/per-field prose elsewhere on the page
+  was out of scope for this change.

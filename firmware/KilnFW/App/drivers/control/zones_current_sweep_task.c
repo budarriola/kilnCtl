@@ -2347,6 +2347,11 @@ void zones_current_sweep_get_status(zone_sweep_status_t *out)
     out->nameplate_mismatch_mask = s_sweep.nameplate_mismatch_mask;
     strncpy(out->nameplate_reason, (const char *)s_sweep.nameplate_reason, sizeof(out->nameplate_reason) - 1);
     out->nameplate_reason[sizeof(out->nameplate_reason) - 1] = '\0';
+    /* ROADMAP.md zones-page-simplify (a): read straight from the committed
+     * param, not from s_sweep (which only ever describes a sweep RUN) --
+     * ct_installed is a standing commissioning setting, not something a
+     * sweep measures. */
+    out->ct_installed = zone_cfg_committed_ct_installed();
 }
 
 /* ---- Task 2: runtime CT-to-zone mapping check ----------------------------- */

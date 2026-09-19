@@ -1823,6 +1823,16 @@ typedef struct {
      * same convention as the other *_reason fields above. */
     uint8_t nameplate_mismatch_mask;
     char    nameplate_reason[96];
+    /* ROADMAP.md "Visually simplify the Thermocouples & Zones web page",
+     * decision (a): the "Measure Zone Normal Current" section on the web
+     * page is only useful on a board that actually has current transformers
+     * wired up, so the page needs this to decide whether to show it at all.
+     * Mirrors zone_cfg_committed_ct_installed()'s own default-safe-to-1
+     * rule (an unset/unfetched param reads as "installed", never as "not
+     * installed" -- see that function's doc comment) -- this field is a
+     * read-only mirror of the same committed param, not a new source of
+     * truth. */
+    uint8_t ct_installed;
 } zone_sweep_status_t;
 
 void zones_current_sweep_get_status(zone_sweep_status_t *out);
