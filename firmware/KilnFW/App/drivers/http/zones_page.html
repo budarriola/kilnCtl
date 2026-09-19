@@ -1671,15 +1671,47 @@ function settingsSourceOf(k) {
 // cycle; settingsSourceOf(0) is 255 for a zone that has never set a
 // dropdown (its own default), so an untouched zone 0 still resolves to
 // itself exactly as before.
+//
+// `resetZone` names the ONE zone whose own select should actually be
+// collapsed to Custom when `forced` is true, matching
+// zones_config_json_normalize_settings_source_cycles()'s server-side
+// tie-break exactly (zones_config_json.c): for a genuine cycle (the walk
+// revisits a node, including a 1-hop self-reference) it is the
+// HIGHEST-INDEXED zone actually on the cycle -- not necessarily `k`, and not
+// necessarily the walk's starting point -- so a live 0<->1 cycle resets zone
+// 1 regardless of which of the two is edited last, exactly like the server
+// resets whichever load first observes it. For a chain that simply points at
+// a disabled (out-of-range) zone -- not a cycle -- the broken link is `k`'s
+// own, so `resetZone` is `k` there, same as before this function tracked it.
 function resolveTerminal(k, thermoCount) {
-  var visited = {};
+  var path = [];
+  var pathPos = {};
   var cur = k;
   while (true) {
-    if (visited[cur]) return { terminal: cur, forced: true };
-    visited[cur] = true;
+    if (pathPos.hasOwnProperty(cur)) {
+      // Cycle: membership is path[pathPos[cur]..path.length), same as the
+      // server's path[cycle_start_pos..path_len) -- reset only the
+      // highest-indexed member of that set.
+      var cycleStart = pathPos[cur];
+      var resetZone = path[cycleStart];
+      for (var p = cycleStart + 1; p < path.length; p++) {
+        if (path[p] > resetZone) resetZone = path[p];
+      }
+      return { terminal: cur, forced: true, resetZone: resetZone };
+    }
+    pathPos[cur] = path.length;
+    path.push(cur);
     var src = settingsSourceOf(cur);
-    if (src === 255 || src === cur || src < 0 || src >= thermoCount) {
-      return { terminal: cur, forced: (src !== 255) };
+    if (src === 255) {
+      return { terminal: cur, forced: false };
+    }
+    if (src === cur) {
+      // 1-hop cycle: the only member is cur itself.
+      return { terminal: cur, forced: true, resetZone: cur };
+    }
+    if (src < 0 || src >= thermoCount) {
+      // Not a cycle -- k's own lead-in link is the one pointing off the end.
+      return { terminal: cur, forced: true, resetZone: k };
     }
     cur = src;
   }
@@ -1724,6 +1756,16 @@ function updateInheritance(k) {
   }
   var result = resolveTerminal(k, thermoCount);
   if (result.forced) {
+    if (result.resetZone !== k) {
+      /* A cycle whose highest-indexed member is some OTHER zone -- that
+         zone's own updateInheritance() call (see refreshAllInheritance())
+         performs the actual collapse, matching the server's tie-break
+         (zones_config_json_normalize_settings_source_cycles(), which also
+         resets only the highest-indexed cycle member). Leave this zone's
+         own select untouched and just report a collapse happened so the
+         second pass re-resolves it once resetZone's select has settled. */
+      return true;
+    }
     /* Collapse to Custom in place: fix the select, drop the stale
        out-of-range marker, and say why so this isn't a silent change. */
     delete sel.dataset.storedInvalid;
@@ -2543,14 +2585,15 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     });
     /* docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs (ZONES_CFG_VERSION 20->21): settings_source
      * is now five INDEPENDENT per-group choices, not one whole-zone one.
-     * srcVal/terminal (the whole-zone select) still exist and are still
-     * sent (zones_http_post_parse.c accepts the legacy scalar key as a
-     * default applied to whichever group has no more-specific key in the
-     * same submission -- older clients keep working), but every field
-     * below is now resolved through ITS OWN group's terminal, computed
-     * fresh here exactly like the whole-zone terminal used to be. */
+     * srcVal (the whole-zone select) still exists and is still sent
+     * (zones_http_post_parse.c accepts the legacy scalar key as a default
+     * applied to whichever group has no more-specific key in the same
+     * submission -- older clients keep working), but every field below is
+     * now resolved through ITS OWN group's terminal, computed fresh below
+     * exactly like the whole-zone terminal used to be (the whole-zone
+     * terminal itself is no longer needed here -- nothing in this loop
+     * reads it any more). */
     var srcVal = settingsSourceOf(i);
-    var terminal = resolveTerminal(i, thermoCount).terminal;
     var ownStack = div.querySelector('.customStack');
     var srcLimits = groupSettingsSourceOf(i, 'limits');
     var srcRelayTiming = groupSettingsSourceOf(i, 'relaytiming');
@@ -2647,10 +2690,9 @@ document.getElementById('saveBtn').addEventListener('click', function () {
       var ccEl = couplingCells[cc];
       params.push('z' + i + '_coupling_c' + ccEl.dataset.neighbor + '=' + ccEl.value);
     }
-    /* settings_source itself: this zone's OWN dropdown choice (255/CUSTOM
-       for zone 0, which has no dropdown) -- always sent explicitly, per
-       zones_http.c's comment that an omission here must NOT be read as
-       "keep the current value" the way the fields above are. */
+    /* settings_source itself: this zone's OWN dropdown choice -- always sent
+       explicitly, per zones_http.c's comment that an omission here must NOT
+       be read as "keep the current value" the way the fields above are. */
     params.push('z' + i + '_settings_source=' + srcVal);
 
     /* tc_type fan-out below now follows the TC GROUP's own terminal, not
@@ -2664,7 +2706,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
      by more than one zone, means this can't be resolved inside the loop
      above. One pass, zone index ascending, deciding per zone HOW its select
      addresses storage (PID_EXPANSION_PLAN.md 3.5, corrected 2026-08-30):
-     - A zone that is its OWN terminal (Custom, or zone 0) is the identity
+     - A zone that is its OWN terminal (Custom) is the identity
        case the select has always been -- "Thermocouple type wired to
        channel i" -- so it writes straight to channel i, never fanned out
        over thermo_mask. Fanning it out here is exactly the bug 3.5 warns

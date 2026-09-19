@@ -238,8 +238,109 @@ function loadChain(zones) {
   const ctx = loadChain(zones);
   const result0 = ctx.resolveTerminal(0, 2);
   assert(result0.forced === true, 'a direct 0<->1 cycle is detected walking from zone 0, forced to collapse');
+  assert(result0.resetZone === 1,
+    'resolveTerminal(0, ...) reports the HIGHEST-indexed cycle member (zone 1) as resetZone, ' +
+    'matching zones_config_json_normalize_settings_source_cycles()\'s server-side tie-break -- not zone 0 itself');
   const result1 = ctx.resolveTerminal(1, 2);
   assert(result1.forced === true, 'the same 0<->1 cycle is detected walking from zone 1 too');
+  assert(result1.resetZone === 1,
+    'resolveTerminal(1, ...) reports the SAME resetZone (1) as resolveTerminal(0, ...) -- the tie-break ' +
+    'does not depend on which member of the cycle is walked first');
+})();
+
+// ---------------------------------------------------------------------------
+// MEDIUM fix, review of f8aa106e: updateInheritance()/refreshAllInheritance()
+// used to reset whichever zone happened to be the CALLER (k itself) on a
+// forced collapse, the opposite tie-break from the server's "reset the
+// highest-indexed cycle member" for a live 0<->1 cycle -- editing zone 0 to
+// point at zone 1 (which already pointed back at zone 0) would flip zone 0's
+// own just-made choice back to Custom instead of resetting zone 1, undoing
+// the operator's edit. This drives the full DOM-backed path
+// (updateInheritance/refreshAllInheritance), not just resolveTerminal(), so
+// a regression in either the resetZone computation OR in how updateInheritance
+// consumes it would be caught.
+// ---------------------------------------------------------------------------
+function makeLiveZoneDom(zones, thermoCount) {
+  // zones: { [k]: { settingsSource: number, tcType?: string } } -- every
+  // zone here has a real .settingssrc select (unlike makeZoneDom() above,
+  // which models zone 0 having none).
+  const divs = {};
+  Object.keys(zones).forEach((kStr) => {
+    const k = Number(kStr);
+    const z = zones[k];
+    const sel = {
+      dataset: {},
+      value: String(z.settingsSource),
+      style: {},
+    };
+    const stackFields = { mode: '0', kp: '1', ki: '1', kd: '1', tctype: z.tcType === undefined ? '3' : String(z.tcType) };
+    const customStack = {
+      style: {},
+      querySelector(sub) {
+        const m = /^\.(\w+)$/.exec(sub);
+        if (!m) return null;
+        const key = m[1];
+        if (!(key in stackFields)) return null;
+        return { value: stackFields[key] };
+      },
+    };
+    const summary = { style: {}, className: '', textContent: '' };
+    divs[k] = {
+      sel, customStack, summary,
+      querySelector(sub) {
+        if (sub === '.settingssrc') return sel;
+        if (sub === '.customStack') return customStack;
+        if (sub === '.inheritedSummary') return summary;
+        return null;
+      },
+    };
+  });
+  const document = {
+    getElementById(id) { return id === 'thermoCount' ? { value: String(thermoCount) } : null; },
+    querySelector(sel) {
+      const m = /^#zones \.zone\[data-index="(\d+)"\]$/.exec(sel);
+      if (!m) return null;
+      return divs[Number(m[1])] || null;
+    },
+  };
+  return { document, divs };
+}
+
+const LIVE_SRC =
+  extractRange('function zoneDiv(k) {', '}') + '\n' +
+  extractRange('function settingsSourceOf(k) {', '}') + '\n' +
+  extractRange('function resolveTerminal(k, thermoCount) {', '}') + '\n' +
+  extractRange('function renderInheritedSummaryText(div, terminalIdx, directSrcIdx) {', '}') + '\n' +
+  extractRange('function updateInheritance(k) {', '}') + '\n' +
+  extractRange('function refreshAllInheritance() {', '}');
+
+function loadLive(zones, thermoCount) {
+  const dom = makeLiveZoneDom(zones, thermoCount);
+  const ctx = vm.createContext({
+    console, document: dom.document, parseInt, isNaN, Date,
+    window: { kcEscapeHtml: (s) => s },
+    TC_TYPES: [], MODE_NAMES: [],
+    updateZonePanel: () => {}, // not under test here -- see test_firing_chart.js/other files for that logic
+  });
+  new vm.Script(LIVE_SRC, { filename: 'zones_page.html (live inheritance slice)' }).runInContext(ctx);
+  return { ctx, dom };
+}
+
+(function testLiveZeroOneCycleResetsZoneOneNotZoneZero() {
+  // Both zones start pointing at each other (a live cycle just formed by an
+  // edit) -- thermoCount=2 so there is no third zone to confuse the walk.
+  const zones = {
+    0: { settingsSource: 1, tcType: '3' },
+    1: { settingsSource: 0, tcType: '3' },
+  };
+  const { ctx, dom } = loadLive(zones, 2);
+  ctx.refreshAllInheritance();
+  assert(dom.divs[0].sel.value === '1',
+    'live 0<->1 collapse: zone 0\'s select is left at 1 (its own just-made edit survives) -- ' +
+    'the OLD (pre-fix) behavior reset zone 0 itself here, undoing the edit');
+  assert(dom.divs[1].sel.value === '255',
+    'live 0<->1 collapse: zone 1\'s select is the one reset to 255 (Custom), matching the server\'s ' +
+    'highest-indexed tie-break for the same cycle');
 })();
 
 // ---------------------------------------------------------------------------

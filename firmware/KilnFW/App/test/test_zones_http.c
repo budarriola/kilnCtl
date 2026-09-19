@@ -1825,11 +1825,13 @@ static void test_nvs_load_from_cycle_normalization_does_not_touch_lead_in_zone(v
     TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == 1,
               "zone 0's link (0 -> 1) survives untouched -- it was never ON the cycle, only LEADING "
               "INTO it, and breaking the real 1<->2 cycle alone is sufficient to fix zone 0's chain too");
-    TEST_CHECK(out_cfg.zones[1].settings_source[SRC_GROUP_LIMITS] != 2 || out_cfg.zones[2].settings_source[SRC_GROUP_LIMITS] != 1,
-              "the actual 1<->2 cycle no longer exists -- at least one of its two links was broken");
-    uint8_t s1 = out_cfg.zones[1].settings_source[SRC_GROUP_LIMITS], s2 = out_cfg.zones[2].settings_source[SRC_GROUP_LIMITS];
-    TEST_CHECK(s1 == ZONE_SETTINGS_SOURCE_CUSTOM || s2 == ZONE_SETTINGS_SOURCE_CUSTOM,
-              "the break was made by collapsing (at least) one of the two cyclic zones to Custom");
+    // Exact outcome, not just "some link broke": the tie-break resets only
+    // the HIGHEST-indexed member of a non-zone-0 cycle too, so zone 1 stays
+    // a follower of zone 2 and only zone 2 collapses to Custom.
+    TEST_CHECK(out_cfg.zones[1].settings_source[SRC_GROUP_LIMITS] == 2,
+              "zone 1's link (1 -> 2) survives untouched -- it is not the highest-indexed cycle member");
+    TEST_CHECK(out_cfg.zones[2].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "zone 2, the highest-indexed member of the 1<->2 cycle, is the one collapsed to Custom");
 
     nvs_test_enable(false);
     nvs_test_clear();

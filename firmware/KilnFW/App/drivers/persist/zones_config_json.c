@@ -95,10 +95,14 @@ bool zones_config_json_settings_source_chain_has_cycle(const zone_cfg_t zones[MA
  * don't reject. Breaking any ONE link on the cycle is sufficient to free
  * every member (and every lead-in zone that merely walks into it), so this
  * resets only the HIGHEST-INDEXED zone actually ON the cycle to
- * ZONE_SETTINGS_SOURCE_CUSTOM (the same "collapse to Custom" resolution
- * zones_page.html's client-side resolveTerminal() already performs on a
- * stale page load) and a loud log line naming it -- every other member's
- * link, and any zone that merely LEADS INTO the cycle, is left untouched.
+ * ZONE_SETTINGS_SOURCE_CUSTOM -- the exact same tie-break
+ * zones_page.html's client-side resolveTerminal()/updateInheritance() apply
+ * (resolveTerminal() reports the cycle's highest-indexed member as
+ * `resetZone`, and only that zone's own updateInheritance() call performs
+ * the collapse), so a live 0<->1 cycle and a stored 0<->1 cycle land on the
+ * same result: zone 1 reset, zone 0's link untouched. A loud log line names
+ * the reset zone here -- every other member's link, and any zone that
+ * merely LEADS INTO the cycle, is left untouched.
  *
  * Zone-0-gets-a-real-follower tie-break (owner request 2026-09-19, the
  * "Zone 0 gets the same per-group selectors" work): a direct 0<->1 cycle
@@ -152,6 +156,7 @@ void zones_config_json_normalize_settings_source_cycles(zones_cfg_t *cfg, const 
              * here stops exactly one iteration too early and would silently
              * treat a genuine cycle as "terminated cleanly," leaving it
              * unbroken. */
+            bool repeated_any = false;
             for (uint8_t hop = 0; hop <= MAX31856_CHANNEL_COUNT; hop++) {
                 uint8_t repeat_pos = 0;
                 bool repeated = false;
@@ -164,6 +169,7 @@ void zones_config_json_normalize_settings_source_cycles(zones_cfg_t *cfg, const 
                 }
                 if (repeated) {
                     cycle_start_pos = repeat_pos;
+                    repeated_any = true;
                     break;
                 }
                 path[path_len++] = cur;
@@ -173,6 +179,14 @@ void zones_config_json_normalize_settings_source_cycles(zones_cfg_t *cfg, const 
                             * iteration already fixed the cycle this start used to reach */
                 }
                 cur = src;
+            }
+            /* Defensive: the outer zones_config_json_settings_source_chain_has_cycle()
+             * check already guarantees this re-walk hits a repeat, so this is
+             * unreachable today -- but if it ever weren't, falling through with
+             * cycle_start_pos left at its 0 default would reset path[0], an
+             * innocent lead-in zone that was never on the cycle. Skip instead. */
+            if (!repeated_any) {
+                continue;
             }
             /* Cycle membership is path[cycle_start_pos..path_len) -- reset
              * only its highest-indexed member (see the tie-break rationale

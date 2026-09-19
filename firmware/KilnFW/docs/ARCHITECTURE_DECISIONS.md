@@ -474,7 +474,12 @@ is the surviving reference for the code that cites it):
   cycle, matching the page's long-standing "lowest index is the root"
   intuition. This is also strictly less destructive than the prior
   every-member reset: breaking any single node's outgoing edge already
-  breaks a cycle.
+  breaks a cycle. This highest-indexed tie-break isn't zone-0-specific: a
+  non-zone-0 cycle (e.g. a stored 1<->2 link) resets only zone 2, leaving
+  zone 1 as a follower. Follow-up review fix (same day): the client's
+  `resolveTerminal()`/`updateInheritance()` used to reset whichever zone
+  called them, the opposite tie-break from the server for a live 0<->1
+  cycle; it now also resets only the cycle's highest-indexed member.
 
 ## Zones page visual simplification and prose shortening (2026-09-19)
 
