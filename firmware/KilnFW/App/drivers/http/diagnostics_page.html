@@ -160,6 +160,40 @@
                 white-space: nowrap; }
   .relay-reset-btn:hover { background: var(--fault-color); color: #fff; }
   .relay-reset-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  /* Relay-wear table -- narrow-phone fix (owner report, phone screenshot,
+     2026-09-18): this table had NO rules of its own anywhere in this file or
+     theme.css before this pass -- a bare native <table>, which is exactly why
+     it broke three ways on a ~900 CSS px (3x, portrait) phone: (1) with no
+     column width discipline the "Rated life" text ("n/a (SSR: no rated
+     life)") wrapped across five lines per row, making every row enormous;
+     (2) with no cell borders/padding, adjacent columns had no visual
+     separation, so a wrapped label ("Relay 5 (safety, K4)") ran straight
+     into the next column's text with nothing to show where one cell ended
+     and the next began; (3) with no width cap the table simply grew to fit
+     its widest row and pushed the last column's Reset button off the right
+     edge of the phone screen, with no way to reach it.
+     Fix follows this codebase's existing idiom for a wide table on a narrow
+     screen (UI_PLAN.md section 3, Web item 1 / theme.css's .table-scroll,
+     already used by zones_page.html's coupling/RGA matrices and
+     profiles_page.html's segment/history tables) rather than inventing a
+     second one: the table keeps its normal column layout and cell
+     white-space: nowrap (so "Rated life" and the relay label each stay on
+     one line -- and one line is legible even in the Reset-column-cut-off
+     case since the two problems shared one root cause, undeclared column
+     styling), and renderRelayWear() below wraps the whole <table> in a
+     `.table-scroll` div, which is what actually keeps the Reset button
+     reachable: on a phone too narrow for every column, the table scrolls
+     horizontally INSIDE that box (overflow-x: auto) rather than stretching
+     the page body itself sideways -- every column, reset button included, is
+     still one swipe away. table.coupling in theme.css uses the same
+     border/padding/header-background shape; reused verbatim (var(--border),
+     var(--card-bg)) rather than inventing new values, text-align left since
+     these rows read as label/value/action, not the coupling matrix's
+     symmetric numeric grid. */
+  .relay-life-table { border-collapse: collapse; width: 100%; font-size: 0.9em; }
+  .relay-life-table th, .relay-life-table td { border: 1px solid var(--border);
+                padding: 0.35em 0.6em; text-align: left; white-space: nowrap; }
+  .relay-life-table th { background: var(--card-bg); }
   /* Danger Zone -- deliberately the loudest thing on this page, same
      solid-fill treatment main_page.html's safety-trip banner uses (not the
      border-only .card everything else here gets), so it never reads as just
@@ -680,9 +714,15 @@ here:</p>
           '<td><button type="button" class="relay-reset-btn" data-relay="' + r.relay + '">Reset count</button></td>' +
           '</tr>';
       }
-      card.innerHTML = '<table class="relay-life-table"><thead><tr>' +
+      // .table-scroll (theme.css) -- same wide-table-on-a-phone wrapper
+      // zones_page.html/profiles_page.html already use: lets the table
+      // scroll horizontally inside its own box instead of the whole page
+      // scrolling sideways, so the Reset button in the last column stays
+      // reachable on a narrow phone. See the .relay-life-table CSS comment
+      // above for the full story.
+      card.innerHTML = '<div class="table-scroll"><table class="relay-life-table"><thead><tr>' +
         '<th>Relay</th><th>Type</th><th>Cycles</th><th>Rated life</th><th>% of rated</th><th></th>' +
-        '</tr></thead><tbody>' + rows + '</tbody></table>';
+        '</tr></thead><tbody>' + rows + '</tbody></table></div>';
       return;
     }
     if (!cycles || !cycles.length) {
