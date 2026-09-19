@@ -104,6 +104,14 @@
   and the guard-threshold overrides.</p>
   <p><strong>This file does NOT include Wi-Fi credentials</strong> (see
   Restore below for why).</p>
+  <p><strong>It also does NOT include your saved kiln configurations.</strong>
+  Those are the named slots that let this controller be moved between kilns;
+  each one is a complete kiln identity spanning both processors, and they are
+  downloaded and uploaded one at a time on the
+  <a href="/settings/kiln_configs">Kiln configurations</a> page. A backup taken
+  here is not a substitute for downloading them -- if you are about to do
+  something risky, save each kiln configuration from that page as well. The web
+  login password is likewise never included, on either side.</p>
   <div class="action-row">
     <a class="button" href="/api/backup/export" download="kilnctl_backup.json">Download backup</a>
   </div>
@@ -120,6 +128,11 @@
   join, and this page has no way to know whether that's true, so it never
   guesses. Set up Wi-Fi on the <a href="/wifi">Wi-Fi</a> page after
   restoring, same as on a brand-new board.</p>
+  <p>Restoring does not create, overwrite or delete any saved kiln
+  configuration slot, and never changes which kiln configuration is active --
+  restore this file and your kiln configurations are exactly as they were.
+  Restore them from the <a href="/settings/kiln_configs">Kiln configurations</a>
+  page instead.</p>
   <p>Restore is refused outright (nothing is written) while a profile is
   running, the heaters are commanded on, or a firmware update is already in
   progress -- the same check this board's own OTA update uses before writing

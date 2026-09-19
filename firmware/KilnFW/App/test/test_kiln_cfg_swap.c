@@ -992,6 +992,115 @@ static void test_credential_survives_a_slot_swap(void)
               "the user PIN must still verify after a slot swap");
 }
 
+// --- ESP_DONE boot-recovery coverage (docs/KILN_PROFILES_PLAN.md item 8) ---
+//
+// finish_esp_done() is the one boot-recovery row where FINISHING the
+// interrupted swap is correct rather than rolling back, and it is gated on
+// re-verifying BOTH processors independently (never either side's cache).
+// Before these three cases the whole gate was uncovered: forcing
+// esp_matches and pico_matches both true produced zero behavioural failures
+// across this file's other parent tests. The two mismatch cases below are
+// what make that gate load-bearing -- each one fails if the confirmation is
+// short-circuited.
+
+static void test_boot_recovery_esp_done_both_match_finishes(void)
+{
+    TEST_SECTION("boot recovery: ESP_DONE with BOTH sides confirmed on the target finishes the swap");
+    reset_state();
+    memset(&s_boot_fault, 0, sizeof(s_boot_fault));
+    // Both independent read-backs must land on the TARGET package: the live
+    // ESP blob equals the slot's blob, and the Pico's confirmed params are
+    // the slot's params (0x0201 == 42), not the pre-swap snapshot's (7).
+    memcpy(s_live_blob, s_slot_blob, sizeof(s_live_blob));
+    s_live_blob_len = s_slot_blob_len;
+    s_pico_committed = s_slot_pico;
+
+    kiln_cfg_swap_pending_t p;
+    memset(&p, 0, sizeof(p));
+    p.marker = KILN_CFG_SWAP_MARKER_ESP_DONE;
+    p.target_id = 7;
+    p.previous_active_id = 3;
+    p.rollback_blob_len = 32;
+    memset(p.rollback_blob, 0xEE, sizeof(p.rollback_blob));
+    p.rollback_pico = s_current_pico_snapshot;
+    p.crc32 = pending_crc(&p);
+    TEST_CHECK(save_pending(&p), "ESP_DONE record persists");
+
+    kiln_cfg_swap_boot_recover();
+
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_NONE,
+               "pending record cleared -- the swap was finished, not left pending");
+    TEST_CHECK(s_active_id == 7, "active_id advanced to the target slot, and only after both read-backs passed");
+    TEST_CHECK(!kiln_cfg_swap_get_boot_fault(NULL),
+               "no boot fault latched when both processors genuinely confirm the new config");
+}
+
+static void test_boot_recovery_esp_done_esp_mismatch_stays_alarmed(void)
+{
+    TEST_SECTION("boot recovery: ESP_DONE with the ESP half NOT on the target stays alarmed, never finishes");
+    reset_state();
+    memset(&s_boot_fault, 0, sizeof(s_boot_fault));
+    // Pico confirms the target, but the live ESP blob is still something
+    // else (reset_state's 0xCD live vs 0xAB slot) -- the swap must NOT be
+    // declared complete on one processor's word.
+    s_pico_committed = s_slot_pico;
+
+    kiln_cfg_swap_pending_t p;
+    memset(&p, 0, sizeof(p));
+    p.marker = KILN_CFG_SWAP_MARKER_ESP_DONE;
+    p.target_id = 7;
+    p.previous_active_id = 3;
+    p.rollback_blob_len = 32;
+    memset(p.rollback_blob, 0xEE, sizeof(p.rollback_blob));
+    p.rollback_pico = s_current_pico_snapshot;
+    p.crc32 = pending_crc(&p);
+    TEST_CHECK(save_pending(&p), "ESP_DONE record persists");
+
+    kiln_cfg_swap_boot_recover();
+
+    TEST_CHECK(s_active_id != 7, "active_id did NOT advance to the target on an unconfirmed ESP half");
+    kiln_cfg_swap_boot_fault_t fault;
+    TEST_CHECK(kiln_cfg_swap_get_boot_fault(&fault), "boot fault latched -- the operator can see why heaters stay off");
+    TEST_CHECK(fault.kind == KILN_CFG_SWAP_BOOT_FAULT_ESP_DONE_UNCONFIRMED,
+               "fault kind names the ESP_DONE could-not-confirm case");
+    TEST_CHECK(strstr(fault.reason, "apply a kiln config again") != NULL,
+               "reason names the concrete recovery action, not just the failure");
+}
+
+static void test_boot_recovery_esp_done_pico_mismatch_stays_alarmed(void)
+{
+    TEST_SECTION("boot recovery: ESP_DONE with the Pico half NOT on the target stays alarmed, never finishes");
+    reset_state();
+    memset(&s_boot_fault, 0, sizeof(s_boot_fault));
+    // The mirror image of the case above: the ESP is genuinely on the
+    // target, but the Pico still confirms the PRE-swap params (0x0201 == 7,
+    // not 42). This is the case that matters most -- an ESP-only check
+    // would call this a completed swap and leave the safety processor
+    // holding the previous kiln's commissioning values.
+    memcpy(s_live_blob, s_slot_blob, sizeof(s_live_blob));
+    s_live_blob_len = s_slot_blob_len;
+    s_pico_committed = s_current_pico_snapshot;
+
+    kiln_cfg_swap_pending_t p;
+    memset(&p, 0, sizeof(p));
+    p.marker = KILN_CFG_SWAP_MARKER_ESP_DONE;
+    p.target_id = 7;
+    p.previous_active_id = 3;
+    p.rollback_blob_len = 32;
+    memset(p.rollback_blob, 0xEE, sizeof(p.rollback_blob));
+    p.rollback_pico = s_current_pico_snapshot;
+    p.crc32 = pending_crc(&p);
+    TEST_CHECK(save_pending(&p), "ESP_DONE record persists");
+
+    kiln_cfg_swap_boot_recover();
+
+    TEST_CHECK(s_active_id != 7, "active_id did NOT advance to the target on an unconfirmed Pico half");
+    kiln_cfg_swap_boot_fault_t fault;
+    TEST_CHECK(kiln_cfg_swap_get_boot_fault(&fault), "boot fault latched for the unconfirmed Pico half");
+    TEST_CHECK(fault.kind == KILN_CFG_SWAP_BOOT_FAULT_ESP_DONE_UNCONFIRMED,
+               "fault kind names the ESP_DONE could-not-confirm case");
+}
+
 int main(void)
 {
     test_clean_swap_applies_both_halves();
@@ -1009,6 +1118,9 @@ int main(void)
     test_pico_reboot_before_flash_fallback_caught_by_existing_check();
     test_boot_recovery_staged_discards();
     test_boot_recovery_pico_done_reapplies_rollback();
+    test_boot_recovery_esp_done_both_match_finishes();
+    test_boot_recovery_esp_done_esp_mismatch_stays_alarmed();
+    test_boot_recovery_esp_done_pico_mismatch_stays_alarmed();
     test_boot_recovery_corrupt_marker_stays_alarmed();
     test_boot_recovery_fault_latches_first_only();
     test_negative_generation_check_is_load_bearing();
