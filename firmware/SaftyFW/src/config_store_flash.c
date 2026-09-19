@@ -1077,8 +1077,19 @@ bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, con
     // for why the RAM record can already carry an unpersisted volatile
     // install's other param changes at this point.
     bool tc_type_only_change = config_store_only_tc_type_differs(&s_persisted_record, rec);
+    // 2026-09-18 CT-auto-zero deadlock fix: a single channel's
+    // zero_counts/k_ct_v_per_a-only change is the second (and, today, only
+    // other) narrow-change shape this decision accepts -- see
+    // config_store_only_ct_cal_differs()'s header comment (config_store.h)
+    // for the safety argument. The two comparators are mutually exclusive
+    // by construction (they compare disjoint field sets), so ORing them is
+    // safe: a record can satisfy both only if NEITHER actually changed
+    // anything, which config_store_write_ex()'s caller never does (a
+    // no-op write is not on any call path here).
+    bool ct_cal_only_change = config_store_only_ct_cal_differs(&s_persisted_record, rec);
+    bool narrow_change_only = tc_type_only_change || ct_cal_only_change;
     config_store_write_decision_t decision =
-        config_store_decide_write_ex(armed, tc_type_only_change, heat_safe);
+        config_store_decide_write_ex(armed, narrow_change_only, heat_safe);
     if (decision != CONFIG_STORE_WRITE_OK) {
         if (out_reason != NULL) {
             // 2026-09-15 (Opus re-review N4): a MIXED change while ARMED

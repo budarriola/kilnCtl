@@ -1288,22 +1288,25 @@ config_store_write_decision_t config_store_decide_write(bool armed)
     return config_store_decide_write_ex(armed, false, false);
 }
 
-config_store_write_decision_t config_store_decide_write_ex(bool armed, bool tc_type_only_change,
+config_store_write_decision_t config_store_decide_write_ex(bool armed, bool narrow_change_only,
                                                               bool heat_safe)
 {
-    // 2026-09-15 owner decision on the Opus review's F1: while ARMED, a
-    // tc_type-only change is accepted when the Pico's own inputs say heat
-    // is not currently being delivered (heat_safe) -- the Pico stays ARMED
-    // throughout, never disarms or drops to GRACE. Every other change (a
-    // record differing in ANY other field, or a tc_type change bundled with
-    // other field changes) keeps the original unconditional ARMED refusal --
-    // there is still no "this field is harmless" carve-out for anything
-    // else, matching this codebase's general preference for a simple,
-    // honest rule.
+    // 2026-09-15 owner decision on the Opus review's F1 (widened 2026-09-18,
+    // see config_store_only_ct_cal_differs()'s header comment): while
+    // ARMED, a narrow change -- today either a tc_type-only change or a
+    // single channel's zero_counts/k_ct_v_per_a-only change -- is accepted
+    // when the Pico's own inputs say heat is not currently being delivered
+    // (heat_safe) -- the Pico stays ARMED throughout, never disarms or
+    // drops to GRACE. Every other change (a record differing in ANY other
+    // field, or a narrow-eligible field change bundled with other field
+    // changes) keeps the original unconditional ARMED refusal -- there is
+    // still no "this field is harmless" carve-out for anything else,
+    // matching this codebase's general preference for a simple, honest
+    // rule.
     if (!armed) {
         return CONFIG_STORE_WRITE_OK;
     }
-    if (tc_type_only_change) {
+    if (narrow_change_only) {
         return heat_safe ? CONFIG_STORE_WRITE_OK : CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON;
     }
     return CONFIG_STORE_WRITE_REFUSED_ARMED;
@@ -1401,6 +1404,78 @@ bool config_store_only_tc_type_differs(const config_store_record_t *current,
 
     bool equal = memcmp(a, b, REC_OFF_CRC) == 0;
     s_call_in_progress = false;
+    return equal;
+}
+
+// 2026-09-18 CT-auto-zero deadlock fix -- see this function's header comment
+// (config_store.h) for the safety argument. zero_counts[]/k_ct_v_per_a[]
+// carry no fields_set gating bit (unlike tc_type's CONFIG_STORE_SET_TC_TYPE),
+// so unlike config_store_only_tc_type_differs() above there is no bit to
+// neutralize -- only the two per-channel fields themselves.
+//
+// Own static scratch buffers and own reentrancy trip-wire, deliberately not
+// shared with config_store_only_tc_type_differs()'s -- see that function's
+// comment for why `static` (this call chain's stack-budget grading) and why
+// a plain volatile bool is an adequate straight-line trip-wire here (single
+// caller, config_store_write_ex(), same as that function).
+bool config_store_only_ct_cal_differs(const config_store_record_t *current,
+                                       const config_store_record_t *candidate)
+{
+    // First, cheaply find whether exactly one channel's zero_counts/
+    // k_ct_v_per_a pair differs -- comparing the struct fields directly is
+    // simpler and just as correct as packing for this part, since neither
+    // field carries a fields_set gate to normalize.
+    int changed_channel = -1;
+    unsigned changed_count = 0u;
+    for (size_t ch = 0; ch < CONFIG_STORE_CT_CAL_NUM_CHANNELS; ch++) {
+        bool differs = (current->zero_counts[ch] != candidate->zero_counts[ch]) ||
+                       (current->k_ct_v_per_a[ch] != candidate->k_ct_v_per_a[ch]);
+        if (differs) {
+            changed_count++;
+            changed_channel = (int)ch;
+        }
+    }
+    if (changed_count != 1u) {
+        // Neither field changed anywhere (nothing to relax for), or more
+        // than one channel's pair changed -- config_store_write_ex()'s
+        // real caller (the CT auto-zero HTTP flow) only ever proposes one
+        // channel per commit, so two-or-more-channels-at-once is refused,
+        // not narrowed for.
+        return false;
+    }
+
+    static uint8_t a[CONFIG_STORE_RECORD_LEN];
+    static uint8_t b[CONFIG_STORE_RECORD_LEN];
+    static volatile bool s_ct_cal_call_in_progress = false;
+    if (s_ct_cal_call_in_progress) {
+        // Same fail-closed reasoning as config_store_only_tc_type_differs()'s
+        // own re-entrancy trip-wire above: no real re-entry seam exists
+        // today (single caller, single task), so this is defence in depth,
+        // not a reachable path -- refusing as "not a narrow change" routes
+        // the caller into the existing unconditional ARMED refusal instead
+        // of trusting two shared static buffers a second concurrent call
+        // could be mutating.
+        log_task_log(LOG_LEVEL_ERROR, "config_store",
+                     "config_store_only_ct_cal_differs re-entered -- refusing "
+                     "as not-ct-cal-only, chip stays armed");
+        return false;
+    }
+    s_ct_cal_call_in_progress = true;
+    config_store_pack(current, a);
+    config_store_pack(candidate, b);
+
+    put_u16_le(&a[REC_OFF_FORMAT_VERSION], 0);
+    put_u16_le(&b[REC_OFF_FORMAT_VERSION], 0);
+    put_u32_le(&a[REC_OFF_SEQ], 0);
+    put_u32_le(&b[REC_OFF_SEQ], 0);
+    size_t ch = (size_t)changed_channel;
+    put_u16_le(&a[REC_OFF_ZERO_COUNTS + ch * 2u], 0);
+    put_u16_le(&b[REC_OFF_ZERO_COUNTS + ch * 2u], 0);
+    put_f32_le(&a[REC_OFF_K_CT_V_PER_A + ch * 4u], 0.0f);
+    put_f32_le(&b[REC_OFF_K_CT_V_PER_A + ch * 4u], 0.0f);
+
+    bool equal = memcmp(a, b, REC_OFF_CRC) == 0;
+    s_ct_cal_call_in_progress = false;
     return equal;
 }
 

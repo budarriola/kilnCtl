@@ -666,6 +666,90 @@ static void test_only_tc_type_differs(void)
                "tc_type unchanged, another field differs: false (no tc_type change to relax for)");
 }
 
+static void test_only_ct_cal_differs(void)
+{
+    TEST_SECTION("config_store_only_ct_cal_differs -- 2026-09-18 CT-auto-zero deadlock fix, "
+                 "pure comparator behind decide_write_ex's narrow-change relaxation");
+
+    config_store_record_t a;
+    memset(&a, 0, sizeof(a));
+    a.format_version = CONFIG_STORE_FORMAT_VERSION;
+    a.seq = 5;
+    a.tc_type = 0x03u; // MAX31856_TC_TYPE_K
+    a.abs_max_temp_c = 1200.0f;
+    a.zero_counts[0] = 10u;
+    a.zero_counts[1] = 20u;
+    a.zero_counts[2] = 30u;
+    a.k_ct_v_per_a[0] = 1.0f;
+    a.k_ct_v_per_a[1] = 2.0f;
+    a.k_ct_v_per_a[2] = 3.0f;
+
+    config_store_record_t b = a;
+
+    // Identical records: nothing changed at all.
+    TEST_CHECK(!config_store_only_ct_cal_differs(&a, &b), "identical records: not a ct_cal-only change");
+
+    // Only channel 1's zero_counts differs -- true.
+    b = a;
+    b.zero_counts[1] = 63u;
+    TEST_CHECK(config_store_only_ct_cal_differs(&a, &b), "channel 1 zero_counts alone differs: true");
+
+    // Only channel 2's k_ct_v_per_a differs -- true.
+    b = a;
+    b.k_ct_v_per_a[2] = 0.715f;
+    TEST_CHECK(config_store_only_ct_cal_differs(&a, &b), "channel 2 k_ct_v_per_a alone differs: true");
+
+    // Both fields of the SAME channel differ (the real auto-zero commit shape: one
+    // SET_PARAM for k_ct_v_per_a[ch] and one for zero_counts[ch], then one COMMIT_CONFIG) --
+    // still counts as one channel's ct-cal-only change.
+    b = a;
+    b.zero_counts[2] = 63u;
+    b.k_ct_v_per_a[2] = 0.715f;
+    TEST_CHECK(config_store_only_ct_cal_differs(&a, &b),
+               "channel 2's zero_counts AND k_ct_v_per_a both differ: still ct_cal-only (one channel)");
+
+    // format_version/seq also differ (caller-overwritten before a real write, not operator
+    // content) -- still counts as ct_cal-only, same neutralization tc_type's comparator does.
+    b = a;
+    b.zero_counts[2] = 63u;
+    b.format_version = (uint16_t)(a.format_version + 1u);
+    b.seq = a.seq + 1u;
+    TEST_CHECK(config_store_only_ct_cal_differs(&a, &b),
+               "channel 2 zero_counts differs, format_version/seq also differ: still ct_cal-only");
+
+    // Two DIFFERENT channels change at once -- NOT narrowed for; the real caller (CT
+    // auto-zero) only ever proposes one channel per commit.
+    b = a;
+    b.zero_counts[0] = 11u;
+    b.zero_counts[2] = 63u;
+    TEST_CHECK(!config_store_only_ct_cal_differs(&a, &b),
+               "two channels' zero_counts differ at once: NOT ct_cal-only -- no relaxation");
+
+    // One channel's ct_cal fields differ AND an unrelated field also differs -- NOT
+    // ct_cal-only, same "bundled change" refusal shape as tc_type's own MIXED case.
+    b = a;
+    b.zero_counts[2] = 63u;
+    b.abs_max_temp_c = 1300.0f;
+    TEST_CHECK(!config_store_only_ct_cal_differs(&a, &b),
+               "channel 2 zero_counts differs AND an unrelated field differs: NOT ct_cal-only");
+
+    // No ct_cal field changed at all, but an unrelated field differs: false.
+    b = a;
+    b.abs_max_temp_c = 1300.0f;
+    TEST_CHECK(!config_store_only_ct_cal_differs(&a, &b),
+               "no ct_cal field changed, another field differs: false (nothing to relax for)");
+
+    // A tc_type-only change must NOT also read as a ct_cal-only change (the two
+    // comparators check disjoint field sets, by construction).
+    b = a;
+    b.tc_type = 0x07u;
+    TEST_CHECK(!config_store_only_ct_cal_differs(&a, &b),
+               "tc_type-only change: not a ct_cal-only change (disjoint comparators)");
+    TEST_CHECK(config_store_only_tc_type_differs(&a, &b),
+               "...and it IS a tc_type-only change, confirming the two comparators partition "
+               "correctly rather than one silently swallowing the other's case");
+}
+
 static void test_record_crc(void)
 {
     TEST_SECTION("config_store_record_crc -- matches the packed record's trailing CRC");
@@ -2843,6 +2927,7 @@ void run_test_config_store(void)
     test_decide_write();
     test_decide_write_ex_tc_type_armed_relaxation();
     test_only_tc_type_differs();
+    test_only_ct_cal_differs();
     test_record_crc();
     test_ct_cal_defaults_on_blank();
     test_ct_cal_corrupt_or_unknown_version();

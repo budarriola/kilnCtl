@@ -441,6 +441,99 @@ static void test_mixed_armed_refusal_wire_reason_uses_persisted_not_cached_tc_ty
                "that makes them identical and quietly turns this test vacuous)");
 }
 
+// 2026-09-18 -- CT auto-zero commissioning deadlock fix, end-to-end through
+// config_store_write_ex(). Bench evidence (Pico build 49683b45, channel 2):
+// ct_auto_zero_check_preconditions() requires K4 closed, which only happens
+// while the Pico is ARMED, but every prior write path refused ANY config
+// write while ARMED except a tc_type-only change -- so a CT-zero commit
+// (which changes zero_counts[ch]/k_ct_v_per_a[ch], never tc_type) could
+// never land. This widens config_store_write_ex()'s narrow ARMED exemption
+// to also cover a single channel's zero_counts+k_ct_v_per_a pair, gated by
+// the SAME heat_safe check already used for the tc_type exemption -- no new
+// gate, no protocol change. These three cases are the ones that matter on
+// the wire: the exact deadlocked scenario now succeeds; the exemption still
+// fails closed when heat_safe is false; and it does not widen to cover an
+// unrelated bundled field change.
+static void test_write_ex_ct_cal_only_armed_exemption(void)
+{
+    TEST_SECTION("config_store_flash: a single channel's zero_counts/k_ct_v_per_a-only change is "
+                 "exempted from the ARMED write refusal when heat_safe, exactly like tc_type "
+                 "(2026-09-18 CT auto-zero deadlock fix)");
+    reset_all();
+    config_store_boot_load(); // persisted record: all-default, uncommissioned
+
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
+
+    // Case 1: the deadlocked scenario itself -- ARMED, heat_safe true (K4
+    // closed, no active heat owner), candidate differs from persisted in
+    // exactly one channel's zero_counts+k_ct_v_per_a. Must now succeed.
+    config_store_record_t candidate_ok;
+    config_store_default(&candidate_ok); // persisted record is all-default after boot_load above
+    candidate_ok.zero_counts[1] = (uint16_t)(candidate_ok.zero_counts[1] + 5u);
+    candidate_ok.k_ct_v_per_a[1] = candidate_ok.k_ct_v_per_a[1] + 0.01f;
+
+    const char *reason_ok = NULL;
+    config_store_write_decision_t decision_ok = CONFIG_STORE_WRITE_REFUSED_ARMED;
+    bool written_ok = config_store_write_ex(&candidate_ok, /*heat_safe=*/true, &reason_ok,
+                                             &decision_ok);
+    TEST_CHECK(written_ok == true,
+               "a ct-cal-only (zero_counts+k_ct_v_per_a, one channel) change while ARMED with "
+               "heat_safe succeeds -- this is the bench deadlock case");
+    TEST_CHECK(decision_ok == CONFIG_STORE_WRITE_OK, "decision is OK, not a refusal");
+
+    // Case 2: same shape of change, but heat_safe is false (K4 not actually
+    // closed, or no recent REQUEST_ENABLE, or an active heat owner) -- must
+    // still fail closed, exactly like the tc_type exemption does. Reset
+    // first: case 1's successful write above already moved the PERSISTED
+    // record away from all-default (channel 1 now differs), so building this
+    // candidate from a fresh default would make it differ from the new
+    // persisted record in TWO channels (1 and 2), not one, and wrongly
+    // exercise the "more than one channel changed" refusal instead of the
+    // heat_safe gate this case means to test.
+    reset_all();
+    config_store_boot_load();
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
+    config_store_record_t candidate_unsafe;
+    config_store_default(&candidate_unsafe);
+    candidate_unsafe.zero_counts[2] = (uint16_t)(candidate_unsafe.zero_counts[2] + 5u);
+    candidate_unsafe.k_ct_v_per_a[2] = candidate_unsafe.k_ct_v_per_a[2] + 0.01f;
+
+    const char *reason_unsafe = NULL;
+    config_store_write_decision_t decision_unsafe = CONFIG_STORE_WRITE_OK;
+    bool written_unsafe = config_store_write_ex(&candidate_unsafe, /*heat_safe=*/false,
+                                                 &reason_unsafe, &decision_unsafe);
+    TEST_CHECK(written_unsafe == false,
+               "the same class of change is REFUSED while ARMED when heat_safe is false -- the "
+               "exemption never bypasses the heat-safety gate");
+    TEST_CHECK(decision_unsafe == CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON,
+               "refused specifically as the heat-unsafe narrow-change refusal, not silently "
+               "swallowed some other way");
+
+    // Case 3: bundling the ct-cal change with an unrelated field change must
+    // NOT ride the exemption, even with heat_safe true -- the exemption is
+    // narrow by construction (config_store_only_ct_cal_differs() requires
+    // everything else to match byte-for-byte). Reset again for the same
+    // reason as case 2.
+    reset_all();
+    config_store_boot_load();
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
+    config_store_record_t candidate_mixed;
+    config_store_default(&candidate_mixed);
+    candidate_mixed.zero_counts[0] = (uint16_t)(candidate_mixed.zero_counts[0] + 5u);
+    candidate_mixed.k_ct_v_per_a[0] = candidate_mixed.k_ct_v_per_a[0] + 0.01f;
+    candidate_mixed.mains_voltage_v = 240.0f;
+
+    const char *reason_mixed = NULL;
+    config_store_write_decision_t decision_mixed = CONFIG_STORE_WRITE_OK;
+    bool written_mixed = config_store_write_ex(&candidate_mixed, /*heat_safe=*/true,
+                                                &reason_mixed, &decision_mixed);
+    TEST_CHECK(written_mixed == false,
+               "a ct-cal change bundled with an unrelated field change is refused while ARMED "
+               "even with heat_safe true -- the exemption does not widen to cover it");
+    TEST_CHECK(decision_mixed == CONFIG_STORE_WRITE_REFUSED_ARMED,
+               "the mixed change gets the plain ARMED refusal, not the narrow-change one");
+}
+
 // 2026-09-14 review, Finding A -- config_store_write_volatile() must refuse
 // a narrow class of installs while ARMED: raising or clearing an already-
 // commissioned abs_max_temp_c/max_rate_c_per_min, or changing an already-
@@ -1401,6 +1494,7 @@ int main(void)
     test_write_volatile_repeated_then_flash_commit_still_gated();
     test_write_uses_persisted_record_not_ram_after_volatile_install();
     test_mixed_armed_refusal_wire_reason_uses_persisted_not_cached_tc_type();
+    test_write_ex_ct_cal_only_armed_exemption();
     test_write_volatile_refuses_loosening_while_armed();
     test_seq_increments_and_survives_wraparound();
     test_safe_execute_timeout_is_reported_and_leaves_cache_unchanged();

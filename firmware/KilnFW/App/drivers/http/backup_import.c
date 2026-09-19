@@ -36,15 +36,19 @@
 
 #include <ctype.h>
 #include <math.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h> /* strcasecmp() -- kiln_configs[] name matching, case-insensitive
+                      * same as kiln_cfg_store.c's own name comparisons */
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #include "MAX31856.h"
+#include "kiln_cfg_store.h" /* KILN_PROFILES_PLAN.md item 17 follow-up -- kiln_configs[] restore */
 #include "ota_http.h" /* ota_http_check_interlocks() -- see backup_http.h's header comment */
 #include "profiles_http.h"
 #include "safety_ceiling_sync.h" /* 2026-09-10: a restored backup can raise max_temp_c same as a POST -- see
@@ -273,6 +277,334 @@ typedef struct {
     float progress_duty_min, progress_window_s, drift_hysteresis_c, frozen_eps_c, cross_zone_period_s,
         bangbang_hysteresis_c, cooling_limited_margin_c, cooling_limited_hold_s, ramp_lock_band_c;
 } timing_profile_candidate_t;
+
+// ---- kiln_configs[] restore (KILN_PROFILES_PLAN.md item 17 follow-up) -----
+//
+// Deliberately NOT folded into backup_import_apply_locked()'s own two-pass
+// body above: kiln config slots are validated and committed via
+// kiln_cfg_store.h's own API (kiln_cfg_store_validate_package_json()/
+// kiln_cfg_store_import_package_json_as()/_rename()/_delete()/
+// _set_active_id_raw()), not via the profiles_http_save()/
+// zones_config_set_*() calls that function's pass 2 uses -- a different
+// commit surface entirely. Kept as its own small pair of functions
+// (validate/plan-only vs. commit) called from backup_import_apply() around
+// backup_import_apply_locked(), same "validate everything, THEN apply"
+// discipline, just sequenced as its own step rather than interleaved with
+// the profile/zone candidate arrays. No httpd_req_t anywhere in this pair --
+// host-testable exactly like backup_import_apply_locked() itself.
+//
+// Absent "kiln_configs" key entirely = pre-item-17 backup: do nothing, in
+// either mode, exactly today's behaviour (old backups must keep restoring
+// unchanged). PRESENT-but-empty ("kiln_configs":[]) is an explicit "this
+// board should have no saved kiln configs": MERGE makes no changes (nothing
+// to add, nothing matches to update); MIRROR deletes every existing slot
+// (naming each one first, like any other mirror deletion).
+typedef enum {
+    KILN_CFG_RESTORE_MERGE = 0,
+    KILN_CFG_RESTORE_MIRROR = 1,
+} kiln_cfg_restore_mode_t;
+
+#define KILN_CFG_PLAN_LINE_MAX 128
+#define KILN_CFG_PLAN_MAX_LINES 32
+
+typedef struct {
+    char lines[KILN_CFG_PLAN_MAX_LINES][KILN_CFG_PLAN_LINE_MAX];
+    size_t count;
+} kiln_cfg_plan_t;
+
+static void kiln_cfg_plan_add(kiln_cfg_plan_t *plan, const char *fmt, ...)
+{
+    if (!plan || plan->count >= KILN_CFG_PLAN_MAX_LINES) {
+        return; /* plan is informational for the confirm dialog -- silently
+                  * capping it is acceptable; KILN_CFG_PLAN_MAX_LINES (32) is
+                  * already well over 3x KILN_CFG_MAX_COUNT (10), the most
+                  * create+rename+delete lines a single restore can ever
+                  * produce (at most one line per board slot plus one per
+                  * file entry). */
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(plan->lines[plan->count], KILN_CFG_PLAN_LINE_MAX, fmt, ap);
+    va_end(ap);
+    plan->count++;
+}
+
+static bool kiln_cfg_json_field_bool(const char *obj, const char *key, bool *out)
+{
+    const char *v = backup_json_obj_find(obj, key);
+    if (!v) {
+        return false;
+    }
+    v = backup_json_skip_ws(v);
+    if (strncmp(v, "true", 4) == 0) {
+        *out = true;
+        return true;
+    }
+    if (strncmp(v, "false", 5) == 0) {
+        *out = false;
+        return true;
+    }
+    return false;
+}
+
+// One parsed "kiln_configs[]" file entry.
+typedef struct {
+    bool has_package;    // false => this was an "omitted" (legacy, no Pico half) entry
+    bool is_active;
+    char name[KILN_CFG_NAME_MAX_LEN + 1]; // normalized name from validate() when has_package
+    uint16_t pkg_schema;
+    uint32_t pkg_hash;
+    const char *package_json; // pointer into `body`, valid only when has_package
+} kiln_cfg_file_entry_t;
+
+// Suffix a colliding name until BOTH the live store (via
+// kiln_cfg_store_name_would_collide(), excluding `exclude_id`) and this same
+// restore's own already-claimed names (`claimed`, `claimed_count`) agree it
+// is unique. Per the coordinator's explicit instruction: keep suffixing
+// until would_collide() returns false, never assume one attempt suffices.
+static void kiln_cfg_unique_name(const char *base, int32_t exclude_id, char claimed[][KILN_CFG_NAME_MAX_LEN + 1],
+                                  size_t claimed_count, char *out, size_t out_cap)
+{
+    snprintf(out, out_cap, "%s", base);
+    int suffix = 1;
+    for (;;) {
+        bool taken = kiln_cfg_store_name_would_collide(out, exclude_id);
+        if (!taken) {
+            for (size_t i = 0; i < claimed_count; i++) {
+                if (strcasecmp(claimed[i], out) == 0) {
+                    taken = true;
+                    break;
+                }
+            }
+        }
+        if (!taken) {
+            return;
+        }
+        suffix++;
+        char base_trunc[KILN_CFG_NAME_MAX_LEN + 1];
+        snprintf(base_trunc, sizeof(base_trunc), "%s", base);
+        char tail[16];
+        snprintf(tail, sizeof(tail), " (%d)", suffix);
+        size_t max_base = KILN_CFG_NAME_MAX_LEN - strlen(tail);
+        if (strlen(base_trunc) > max_base) {
+            base_trunc[max_base] = '\0';
+        }
+        snprintf(out, out_cap, "%s%s", base_trunc, tail);
+    }
+}
+
+// Parses "kiln_configs" (if present) and, if `commit` is false, only
+// validates and fills `plan`; if `commit` is true, actually performs every
+// create/rename/active-reassignment/delete. Either way, on success `plan` is
+// filled with a human-readable line per action taken/to-be-taken. Returns
+// false (nothing written, even under commit=true, since this function does
+// not touch the store until every file entry has already validated) on any
+// malformed/invalid entry.
+static bool backup_import_kiln_configs(const char *body, kiln_cfg_restore_mode_t mode, bool commit,
+                                        kiln_cfg_plan_t *plan, char *err_msg, size_t err_cap)
+{
+    plan->count = 0;
+    const char *arr = backup_json_obj_find(body, "kiln_configs");
+    if (!arr) {
+        return true; /* pre-item-17 backup -- untouched, either mode */
+    }
+
+    kiln_cfg_file_entry_t files[KILN_CFG_MAX_COUNT];
+    size_t file_n = 0;
+    const char *elem = backup_json_arr_first(arr);
+    while (elem) {
+        if (file_n >= KILN_CFG_MAX_COUNT) {
+            snprintf(err_msg, err_cap, "kiln_configs has more than %d entries", KILN_CFG_MAX_COUNT);
+            return false;
+        }
+        kiln_cfg_file_entry_t *f = &files[file_n];
+        memset(f, 0, sizeof(*f));
+        bool active_field = false;
+        kiln_cfg_json_field_bool(elem, "is_active", &active_field);
+        f->is_active = active_field;
+
+        const char *pkg = backup_json_obj_find(elem, "package");
+        if (pkg) {
+            f->has_package = true;
+            f->package_json = pkg;
+            char reason[128];
+            if (!kiln_cfg_store_validate_package_json(pkg, f->name, sizeof(f->name), &f->pkg_schema, &f->pkg_hash,
+                                                      reason, sizeof(reason))) {
+                snprintf(err_msg, err_cap, "kiln_configs[%u]: %s", (unsigned)file_n, reason);
+                return false;
+            }
+        } else {
+            f->has_package = false; /* "omitted" legacy entry -- carries no identity;
+                                       * cannot be matched/preserved, see this file's
+                                       * header comment above. */
+        }
+        file_n++;
+        elem = backup_json_arr_next(elem);
+    }
+
+    // ---- Match file entries against the board's current slots -----------
+    kiln_cfg_summary_t board[KILN_CFG_MAX_COUNT];
+    uint8_t board_n = kiln_cfg_store_list(board, KILN_CFG_MAX_COUNT);
+    bool board_matched[KILN_CFG_MAX_COUNT] = {0};
+    uint16_t board_schema[KILN_CFG_MAX_COUNT];
+    uint32_t board_hash[KILN_CFG_MAX_COUNT];
+    bool board_has_identity[KILN_CFG_MAX_COUNT];
+    for (uint8_t b = 0; b < board_n; b++) {
+        bool pico_populated = false;
+        board_has_identity[b] =
+            kiln_cfg_store_get_package_identity(board[b].id, &pico_populated, &board_schema[b], &board_hash[b]) &&
+            pico_populated;
+    }
+
+    char claimed[KILN_CFG_MAX_COUNT * 2][KILN_CFG_NAME_MAX_LEN + 1];
+    size_t claimed_n = 0;
+    for (uint8_t b = 0; b < board_n; b++) {
+        snprintf(claimed[claimed_n++], sizeof(claimed[0]), "%s", board[b].name);
+    }
+
+    // Per-file-entry decision, applied in commit order below.
+    typedef enum { ACT_NONE, ACT_RENAME, ACT_CREATE } file_action_t;
+    file_action_t action[KILN_CFG_MAX_COUNT];
+    int32_t action_board_id[KILN_CFG_MAX_COUNT]; // for ACT_RENAME: which board id
+    char action_name[KILN_CFG_MAX_COUNT][KILN_CFG_NAME_MAX_LEN + 1]; // final name to use
+    int32_t mapped_active_id = -999; // sentinel: "no file entry claimed is_active"; -1 (KILN_CFG_NO_ACTIVE_ID) is valid
+
+    for (size_t i = 0; i < file_n; i++) {
+        kiln_cfg_file_entry_t *f = &files[i];
+        action[i] = ACT_NONE;
+        if (!f->has_package) {
+            continue; /* legacy "omitted" entry: nothing to create/rename against */
+        }
+
+        int idx_identity = -1;
+        for (uint8_t b = 0; b < board_n; b++) {
+            if (!board_matched[b] && board_has_identity[b] && board_schema[b] == f->pkg_schema &&
+                board_hash[b] == f->pkg_hash) {
+                idx_identity = b;
+                break;
+            }
+        }
+
+        if (idx_identity >= 0) {
+            board_matched[idx_identity] = true;
+            if (strcasecmp(board[idx_identity].name, f->name) == 0) {
+                // Case 1: same identity, same name -- no-op.
+                if (f->is_active) {
+                    mapped_active_id = board[idx_identity].id;
+                }
+                continue;
+            }
+            // Case 2: same identity, different name -- file's name wins.
+            action[i] = ACT_RENAME;
+            action_board_id[i] = board[idx_identity].id;
+            kiln_cfg_unique_name(f->name, board[idx_identity].id, claimed, claimed_n, action_name[i],
+                                 sizeof(action_name[i]));
+            snprintf(claimed[claimed_n++], sizeof(claimed[0]), "%s", action_name[i]);
+            kiln_cfg_plan_add(plan, "rename \"%s\" -> \"%s\"", board[idx_identity].name, action_name[i]);
+            if (f->is_active) {
+                mapped_active_id = board[idx_identity].id;
+            }
+            continue;
+        }
+
+        // No identity match: does the file's name collide with a DIFFERENT
+        // board slot? Per the owner's rule, that is Case 3 -- a real
+        // collision, not the same slot -- so this is always a CREATE, never
+        // an update of that other slot.
+        int idx_name = -1;
+        for (uint8_t b = 0; b < board_n; b++) {
+            if (strcasecmp(board[b].name, f->name) == 0) {
+                idx_name = b;
+                break;
+            }
+        }
+        action[i] = ACT_CREATE;
+        kiln_cfg_unique_name(f->name, KILN_CFG_NO_ACTIVE_ID, claimed, claimed_n, action_name[i],
+                             sizeof(action_name[i]));
+        snprintf(claimed[claimed_n++], sizeof(claimed[0]), "%s", action_name[i]);
+        if (idx_name >= 0 && strcmp(action_name[i], f->name) != 0) {
+            kiln_cfg_plan_add(plan, "create \"%s\" (renamed from \"%s\" to avoid colliding with existing slot)",
+                              action_name[i], f->name);
+        } else {
+            kiln_cfg_plan_add(plan, "create \"%s\"", action_name[i]);
+        }
+        // is_active for a not-yet-created slot is resolved after creation
+        // (commit path only, once the new id is known); dry-run just notes
+        // it in the plan text below.
+        if (f->is_active) {
+            kiln_cfg_plan_add(plan, "(the above create becomes the active kiln config)");
+        }
+    }
+
+    // ---- MIRROR: name every unmatched board slot for deletion, before ----
+    // ---- deleting anything (owner requirement: never delete silently). ---
+    bool board_delete[KILN_CFG_MAX_COUNT] = {0};
+    if (mode == KILN_CFG_RESTORE_MIRROR) {
+        for (uint8_t b = 0; b < board_n; b++) {
+            if (!board_matched[b]) {
+                board_delete[b] = true;
+                kiln_cfg_plan_add(plan, "delete \"%s\"", board[b].name);
+            }
+        }
+    }
+
+    if (!commit) {
+        return true; // dry-run / pass-1 validation only -- nothing written
+    }
+
+    // ---- Commit: renames first, then creates, then active reassignment, --
+    // ---- then MIRROR deletes last (so a slot slated for deletion is never
+    // ---- still the active one when kiln_cfg_store_delete() runs). --------
+    for (size_t i = 0; i < file_n; i++) {
+        if (action[i] == ACT_RENAME) {
+            if (!kiln_cfg_store_rename(action_board_id[i], action_name[i])) {
+                snprintf(err_msg, err_cap, "kiln_configs[%u]: rename to \"%s\" failed at commit", (unsigned)i,
+                         action_name[i]);
+                return false;
+            }
+            if (files[i].is_active) {
+                mapped_active_id = action_board_id[i];
+            }
+        }
+    }
+    for (size_t i = 0; i < file_n; i++) {
+        if (action[i] == ACT_CREATE) {
+            int32_t new_id = 0;
+            char reason[128];
+            if (!kiln_cfg_store_import_package_json_as(files[i].package_json, action_name[i], &new_id, reason,
+                                                       sizeof(reason))) {
+                snprintf(err_msg, err_cap, "kiln_configs[%u]: create \"%s\" failed at commit: %s", (unsigned)i,
+                         action_name[i], reason);
+                return false;
+            }
+            if (files[i].is_active) {
+                mapped_active_id = new_id;
+            }
+        }
+    }
+    if (mapped_active_id != -999) {
+        char reason[128];
+        if (!kiln_cfg_store_set_active_id_raw(mapped_active_id, reason, sizeof(reason))) {
+            snprintf(err_msg, err_cap, "kiln_configs: could not set restored active slot: %s", reason);
+            return false;
+        }
+    }
+    for (uint8_t b = 0; b < board_n; b++) {
+        if (board_delete[b]) {
+            char reason[128];
+            if (!kiln_cfg_store_delete(board[b].id, true /* ack_no_safety_processor -- this is a config
+                                                            * restore, not a live-apply; no safety
+                                                            * package is being applied to a running
+                                                            * kiln by this call */,
+                                       reason, sizeof(reason))) {
+                snprintf(err_msg, err_cap, "kiln_configs: could not delete \"%s\" for mirror: %s", board[b].name,
+                         reason);
+                return false;
+            }
+        }
+    }
+    return true;
+}
 
 static bool backup_import_apply_locked(const char *body, char *err_msg, size_t err_cap,
                                         profile_candidate_t *candidates, zone_candidate_t *zone_candidates,
@@ -1897,8 +2229,23 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
  * reported exactly like any other pass-1 validation failure -- false plus an
  * err_msg, nothing touched -- so backup_import_post_handler's existing
  * "!ok -> 400, err_msg body" path handles it without change. */
-static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
+static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, bool dry_run,
+                                 kiln_cfg_plan_t *plan, char *err_msg, size_t err_cap)
 {
+    // Pass 1 for kiln_configs[] runs FIRST, unconditionally, before any
+    // profile/zone candidate is even parsed -- same "validate everything,
+    // then apply" discipline this file's own header comment describes for
+    // the profiles/zones pass, just as its own separate step (kiln_cfg_store.h's
+    // commit surface is not profiles_http_save()/zones_config_set_*()). A
+    // malformed kiln_configs entry refuses the WHOLE restore, including
+    // profiles/zones, exactly like a malformed profile/zone entry does today.
+    if (!backup_import_kiln_configs(body, mode, false, plan, err_msg, err_cap)) {
+        return false;
+    }
+    if (dry_run) {
+        return true; // plan filled above; nothing written anywhere, profiles/zones untouched
+    }
+
     profile_candidate_t *candidates = heap_caps_malloc(sizeof(profile_candidate_t) * PROFILES_MAX_COUNT,
                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!candidates) {
@@ -1938,7 +2285,20 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
     free(timing_profile_candidates);
     free(zone_candidates);
     free(candidates);
-    return ok;
+    if (!ok) {
+        return false;
+    }
+
+    // Pass 2 for kiln_configs[]: profiles/zones just committed successfully
+    // above, so now actually create/rename/reassign-active/mirror-delete
+    // kiln config slots. Re-parses/re-validates (cheap, no writes happen in
+    // pass 1) rather than caching pass-1 state across the profiles/zones
+    // commit, keeping this function's own control flow a plain two-call
+    // sequence with no extra state to keep in sync.
+    if (!backup_import_kiln_configs(body, mode, true, plan, err_msg, err_cap)) {
+        return false;
+    }
+    return true;
 }
 
 esp_err_t backup_import_post_handler(httpd_req_t *req)
@@ -2011,8 +2371,30 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
     }
     body[received] = '\0';
 
+    /* X-Kiln-Config-Mode: merge|mirror (default merge -- the safer choice,
+     * per the owner decision), X-Kiln-Config-Dry-Run: 1 -- same header-ack
+     * convention as OTA_ACK_NO_SAFETY_HEADER above (ota_http.c's
+     * ota_http_req_ack_no_safety()). Dry-run computes and returns the
+     * merge/mirror plan (every create/rename/delete, named) WITHOUT writing
+     * anything -- profiles/zones/kiln_configs all untouched -- so
+     * backup_page.html's confirm dialog can show the operator exactly what
+     * a real restore would do before they commit to it. */
+    kiln_cfg_restore_mode_t mode = KILN_CFG_RESTORE_MERGE;
+    char mode_val[8];
+    if (httpd_req_get_hdr_value_str(req, "X-Kiln-Config-Mode", mode_val, sizeof(mode_val)) == ESP_OK &&
+        strcasecmp(mode_val, "mirror") == 0) {
+        mode = KILN_CFG_RESTORE_MIRROR;
+    }
+    bool dry_run = false;
+    char dry_run_val[8];
+    if (httpd_req_get_hdr_value_str(req, "X-Kiln-Config-Dry-Run", dry_run_val, sizeof(dry_run_val)) == ESP_OK &&
+        dry_run_val[0] == '1') {
+        dry_run = true;
+    }
+
     char err_msg[160];
-    bool ok = backup_import_apply(body, err_msg, sizeof(err_msg));
+    kiln_cfg_plan_t plan;
+    bool ok = backup_import_apply(body, mode, dry_run, &plan, err_msg, sizeof(err_msg));
     free(body);
 
     if (!ok) {
@@ -2020,6 +2402,36 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
         httpd_resp_set_type(req, "text/plain");
         httpd_resp_send(req, err_msg, strlen(err_msg));
         return ESP_OK;
+    }
+
+    if (dry_run) {
+        /* Plain text, one plan line per line -- deliberately not JSON: plan
+         * lines are built from operator-chosen kiln config names, which
+         * name_charset_and_utf8_valid() does not forbid quote/backslash
+         * characters from (kiln_cfg_store.c), so treating them as JSON
+         * string content would need escaping this endpoint has no other
+         * reason to carry. The client already reads this as plain text (see
+         * backup_page.html's dry-run fetch) and joins it into the confirm
+         * dialog verbatim. An empty plan (no lines) means this restore
+         * changes no kiln config slots at all. */
+        httpd_resp_set_type(req, "text/plain");
+        char *out = heap_caps_malloc(KILN_CFG_PLAN_MAX_LINES * (KILN_CFG_PLAN_LINE_MAX + 1) + 1,
+                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!out) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+            return ESP_OK;
+        }
+        size_t off = 0;
+        out[0] = '\0';
+        for (size_t i = 0; i < plan.count; i++) {
+            int n = snprintf(out + off, KILN_CFG_PLAN_LINE_MAX + 2, "%s\n", plan.lines[i]);
+            if (n > 0) {
+                off += (size_t)n;
+            }
+        }
+        esp_err_t send_err = httpd_resp_send(req, out, off);
+        free(out);
+        return send_err;
     }
 
     httpd_resp_set_type(req, "application/json");

@@ -39,6 +39,9 @@
                                  * docs/audits for the field-by-field enumeration */
 #include "zones_http_internal.h" /* zone_normals_set()/zones_config_get_normal_current()
                                    * -- CT normals, the owner's own named example */
+#include "kiln_cfg_store.h" /* KILN_PROFILES_PLAN.md item 17 follow-up: "kiln_configs"
+                              * array below -- every saved kiln config slot, not just
+                              * the active one, is now part of the backup document. */
 
 /* Embedded via EMBED_TXTFILES, pre-gzipped at configure time by
  * App/drivers/CMakeLists.txt -- same convention as every other *_page.html
@@ -84,6 +87,30 @@ static void backup_stream_flush(backup_stream_t *s)
     }
     s->err = httpd_resp_send_chunk(s->req, s->buf, s->len);
     s->len = 0;
+}
+
+/* Streams `len` raw bytes verbatim (no vsnprintf, no escaping) -- used only
+ * for splicing an already-valid JSON fragment (kiln_cfg_store_export_package_
+ * json()'s output, up to KILN_CFG_EXPORT_JSON_MAX_LEN=6144 bytes) into the
+ * document as-is. backup_stream_printf()'s 192-byte tmp[] can't hold a
+ * fragment this large; this bypasses that buffer and feeds
+ * BACKUP_STREAM_BUF-sized pieces straight from the source. */
+static void backup_stream_raw(backup_stream_t *s, const char *data, size_t len)
+{
+    size_t off = 0;
+    while (off < len) {
+        if (s->err != ESP_OK) {
+            return;
+        }
+        size_t space = BACKUP_STREAM_BUF - s->len;
+        size_t take = (len - off) < space ? (len - off) : space;
+        memcpy(s->buf + s->len, data + off, take);
+        s->len += take;
+        off += take;
+        if (s->len == BACKUP_STREAM_BUF) {
+            backup_stream_flush(s);
+        }
+    }
 }
 
 static void backup_stream_printf(backup_stream_t *s, const char *fmt, ...)
@@ -177,10 +204,15 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
      * same "allocate before the first byte goes out" ordering as buf above. */
     backup_export_profile_scratch_t *ps = heap_caps_malloc(sizeof(*ps), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     backup_export_zone_scratch_t *zs = heap_caps_malloc(sizeof(*zs), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!buf || !ps || !zs) {
+    /* kiln_configs[] scratch (item 17 follow-up) -- allocated here, up front
+     * with everything else, for the same "OOM is a clean 500, never a
+     * truncated mid-stream response" reason. */
+    char *pkg_json_scratch = heap_caps_malloc(KILN_CFG_EXPORT_JSON_MAX_LEN, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf || !ps || !zs || !pkg_json_scratch) {
         free(buf);
         free(ps);
         free(zs);
+        free(pkg_json_scratch);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
         return ESP_OK;
     }
@@ -652,12 +684,62 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
     if (!safety_tc_type_known) {
         safety_tc_type = 0;
     }
-    backup_stream_printf(&s, ",\"safety_tc_type\":%u}", safety_tc_type);
+    backup_stream_printf(&s, ",\"safety_tc_type\":%u", safety_tc_type);
+
+    /* docs/KILN_PROFILES_PLAN.md item 17 follow-up: every SAVED kiln config
+     * slot (not just the live/active one, which is already fully covered by
+     * every field above). Each populated (pico_populated) slot embeds its
+     * full section-5.1 package envelope verbatim -- kiln_cfg_store_export_
+     * package_json()'s output is already valid, complete JSON, so it is
+     * spliced in raw (backup_stream_raw()) rather than re-escaped/re-parsed.
+     * A slot saved by pre-v3 firmware and never re-saved since (pico_
+     * populated == 0) cannot be captured as a complete package -- same
+     * refusal kiln_cfg_store_export_package_json() itself gives for that
+     * case -- so it is listed by id/name/active only, with "omitted" naming
+     * why, rather than silently dropped: a restore reading this array still
+     * learns the slot existed, even though it cannot recreate its content
+     * (the operator's only recourse is what it always was -- re-save that
+     * slot on the original board first, which populates its Pico half). */
+    {
+        kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
+        uint8_t n = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+        backup_stream_printf(&s, ",\"kiln_configs\":[");
+        for (uint8_t i = 0; i < n; i++) {
+            char name_escaped[KILN_CFG_NAME_MAX_LEN * 2 + 1];
+            json_escape(rows[i].name, name_escaped, sizeof(name_escaped));
+            bool pico_populated = false;
+            kiln_cfg_store_get_package_identity(rows[i].id, &pico_populated, NULL, NULL);
+            backup_stream_printf(&s, "%s{\"id\":%d,\"name\":\"%s\",\"is_active\":%s", i == 0 ? "" : ",",
+                                (int)rows[i].id, name_escaped, rows[i].is_active ? "true" : "false");
+            if (pico_populated) {
+                size_t pkg_len = 0;
+                char reason[96];
+                if (kiln_cfg_store_export_package_json(rows[i].id, pkg_json_scratch, sizeof(pkg_json_scratch),
+                                                       &pkg_len, reason, sizeof(reason))) {
+                    backup_stream_printf(&s, ",\"package\":");
+                    backup_stream_raw(&s, pkg_json_scratch, pkg_len);
+                } else {
+                    /* Should not happen (pico_populated was just true), but
+                     * fail visibly in the document rather than silently
+                     * emitting a package-less entry with no explanation. */
+                    char reason_escaped[192];
+                    json_escape(reason, reason_escaped, sizeof(reason_escaped));
+                    backup_stream_printf(&s, ",\"omitted\":\"export_failed: %s\"", reason_escaped);
+                }
+            } else {
+                backup_stream_printf(&s, ",\"omitted\":\"no_pico_half\"");
+            }
+            backup_stream_printf(&s, "}");
+        }
+        backup_stream_printf(&s, "]");
+    }
+    backup_stream_printf(&s, "}");
 
     backup_stream_flush(&s);
     free(buf);
     free(ps);
     free(zs);
+    free(pkg_json_scratch);
     if (s.err == ESP_OK) {
         httpd_resp_send_chunk(req, NULL, 0); /* terminates the chunked response */
     }

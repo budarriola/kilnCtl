@@ -1924,18 +1924,29 @@ typedef struct {
     kiln_pkg_safety_t pico;
 } kiln_cfg_import_scratch_t;
 
-bool kiln_cfg_store_import_package_json(const char *json, int32_t *out_id, char *reason_out,
-                                        size_t reason_cap)
+/* ---- Shared validate-only core, factored out of kiln_cfg_store_import_
+ * package_json() (docs/KILN_PROFILES_PLAN.md item 17, backup-restore
+ * follow-up): the backup/restore path needs a two-pass "validate every
+ * incoming kiln-config slot, THEN commit" sequence -- the same
+ * validate-then-commit shape backup_import_apply() already uses for
+ * profiles/zones -- and kiln_package_import_json() alone is NOT that seam
+ * (kiln_package.h:295-320: it validates the envelope only, never pkg_hash,
+ * the ESP half, or hardware compatibility). Everything below through the
+ * "everything passed" comment is a byte-for-byte move of what used to be
+ * the first two-thirds of kiln_cfg_store_import_package_json() -- same
+ * checks, same order, same messages -- so neither this function's own
+ * existing behavior nor its host tests change. On success, populates
+ * `s->cand`/`s->esp_blob`/`esp_blob_len_out`/`s->pico` (already-mutated for
+ * the foreign-board calibration reset, same as before) plus name_out/
+ * pkg_schema_out/pkg_hash_out (the recomputed, possibly-post-reset hash --
+ * the SAME value a caller must persist as pkg_hash if it goes on to create
+ * a slot from this candidate). Never touches NVS or s_store -- this is
+ * pure validation over `json` plus this firmware's own compiled-in
+ * compatibility rules. */
+static bool validate_package_json_common(const char *json, kiln_cfg_import_scratch_t *s, char *name_out,
+                                         size_t name_cap, uint16_t *pkg_schema_out, uint16_t *esp_blob_len_out,
+                                         uint32_t *pkg_hash_out, char *reason_out, size_t reason_cap)
 {
-    if (refuse_if_quarantined(reason_out, reason_cap)) {
-        return false;
-    }
-
-    kiln_cfg_import_scratch_t *s = (kiln_cfg_import_scratch_t *)malloc(sizeof(*s));
-    if (!s) {
-        return set_reason(reason_out, reason_cap, "out of memory");
-    }
-    bool result = false;
     char name[KILN_CFG_NAME_MAX_LEN + 1];
     uint16_t pkg_schema = 0;
     uint16_t esp_blob_len = 0;
@@ -1947,6 +1958,7 @@ bool kiln_cfg_store_import_package_json(const char *json, int32_t *out_id, char 
         set_reason(reason_out, reason_cap, __VA_ARGS__);                                                        \
         goto done;                                                                                              \
     } while (0)
+    bool result = false;
 
     if (!kiln_package_import_json(json, name, sizeof(name), &pkg_schema, s->esp_blob, sizeof(s->esp_blob),
                                   &esp_blob_len, &s->pico, &declared_hash, &has_source_board, &source_board_id,
@@ -2181,6 +2193,101 @@ bool kiln_cfg_store_import_package_json(const char *json, int32_t *out_id, char 
         }
     }
 
+    /* ---- Everything passed: hand the validated candidate back to the
+     * caller. Neither NVS nor s_store is touched here -- see this
+     * function's own doc comment; the two callers below decide what to do
+     * with a validated candidate (one creates a slot, the other -- restore's
+     * dry-run pass -- just reports the identity). */
+    if (!normalize_name(name, name_out, name_cap)) {
+        IMPORT_REFUSE("package's name is missing, too long, or invalid");
+    }
+    *pkg_schema_out = pkg_schema;
+    *esp_blob_len_out = esp_blob_len;
+    *pkg_hash_out = recomputed;
+    result = true;
+
+done:
+#undef IMPORT_REFUSE
+    return result;
+}
+
+/* Validate-only entry point (docs/KILN_PROFILES_PLAN.md item 17): runs every
+ * check kiln_cfg_store_import_package_json() runs -- envelope, ESP-half
+ * validity, Pico-half param-id validity, hash, foreign-board calibration
+ * reset, hardware compatibility -- and returns the package's identity
+ * (its NORMALIZED name, pkg_schema, and the pkg_hash a slot created from it
+ * would actually carry -- post foreign-board reset, same value
+ * kiln_cfg_store_import_package_json() would persist) without creating a
+ * slot, writing NVS, or checking quarantine (a caller deciding whether a
+ * FILE is valid does not need this board's store to be writable -- only
+ * actually creating a slot does, and kiln_cfg_store_import_package_json()
+ * below still checks it). Returns false (all outputs untouched) on any
+ * refusal, with the same specific reason_out kiln_cfg_store_import_
+ * package_json() would give for the identical input. */
+bool kiln_cfg_store_validate_package_json(const char *json, char *name_out, size_t name_cap,
+                                          uint16_t *out_pkg_schema, uint32_t *out_pkg_hash, char *reason_out,
+                                          size_t reason_cap)
+{
+    if (!name_out || name_cap == 0 || !out_pkg_schema || !out_pkg_hash) {
+        return set_reason(reason_out, reason_cap, "internal error: NULL output buffer");
+    }
+    kiln_cfg_import_scratch_t *s = (kiln_cfg_import_scratch_t *)malloc(sizeof(*s));
+    if (!s) {
+        return set_reason(reason_out, reason_cap, "out of memory");
+    }
+    uint16_t esp_blob_len = 0;
+    bool ok = validate_package_json_common(json, s, name_out, name_cap, out_pkg_schema, &esp_blob_len,
+                                           out_pkg_hash, reason_out, reason_cap);
+    free(s);
+    return ok;
+}
+
+bool kiln_cfg_store_import_package_json(const char *json, int32_t *out_id, char *reason_out,
+                                        size_t reason_cap)
+{
+    return kiln_cfg_store_import_package_json_as(json, NULL, out_id, reason_out, reason_cap);
+}
+
+bool kiln_cfg_store_import_package_json_as(const char *json, const char *name_override, int32_t *out_id,
+                                           char *reason_out, size_t reason_cap)
+{
+    if (refuse_if_quarantined(reason_out, reason_cap)) {
+        return false;
+    }
+
+    kiln_cfg_import_scratch_t *s = (kiln_cfg_import_scratch_t *)malloc(sizeof(*s));
+    if (!s) {
+        return set_reason(reason_out, reason_cap, "out of memory");
+    }
+    bool result = false;
+    char normalized[KILN_CFG_NAME_MAX_LEN + 1];
+    uint16_t pkg_schema = 0;
+    uint16_t esp_blob_len = 0;
+    uint32_t recomputed = 0;
+#define IMPORT_REFUSE(...)                                                                                      \
+    do {                                                                                                         \
+        set_reason(reason_out, reason_cap, __VA_ARGS__);                                                        \
+        goto done;                                                                                              \
+    } while (0)
+
+    if (!validate_package_json_common(json, s, normalized, sizeof(normalized), &pkg_schema, &esp_blob_len,
+                                      &recomputed, reason_out, reason_cap)) {
+        goto done; /* reason already filled */
+    }
+
+    if (name_override) {
+        /* Restore path (backup_import.c): caller already picked a unique
+         * name via kiln_cfg_store_name_would_collide() -- use it instead of
+         * the name embedded in the package JSON. Still runs through the
+         * same normalize_name() validation as any other stored name. */
+        char override_normalized[KILN_CFG_NAME_MAX_LEN + 1];
+        if (!normalize_name(name_override, override_normalized, sizeof(override_normalized))) {
+            IMPORT_REFUSE("name_override is not a valid kiln config name");
+        }
+        strncpy(normalized, override_normalized, sizeof(normalized) - 1);
+        normalized[sizeof(normalized) - 1] = '\0';
+    }
+
     /* ---- Everything passed: create a NEW slot only -- never overwrite,
      * never apply (section 5.3: "a rejected upload leaves the active
      * configuration bit-for-bit untouched... upload writes into a new slot
@@ -2189,13 +2296,14 @@ bool kiln_cfg_store_import_package_json(const char *json, int32_t *out_id, char 
      * but sourcing its blob from the UPLOADED candidate rather than the
      * live config -- so it duplicates that function's slot-allocation and
      * persistence tail rather than routing the live config through it. */
-    char normalized[KILN_CFG_NAME_MAX_LEN + 1];
-    if (!normalize_name(name, normalized, sizeof(normalized))) {
-        IMPORT_REFUSE("package's name is missing, too long, or invalid");
-    }
     if (name_collides(normalized, KILN_CFG_NO_ACTIVE_ID)) {
         /* Same treatment save/clone already give a name collision -- append
-         * nothing automatically; the operator renames afterward. */
+         * nothing automatically; the operator renames afterward. Restore's
+         * own caller (backup_import.c) never hits this: it disambiguates a
+         * colliding name itself, in the SAME case-insensitive/trimmed space
+         * this check uses (via kiln_cfg_store_name_would_collide()), before
+         * ever calling this function, and passes the result as
+         * name_override above. */
         IMPORT_REFUSE("a saved kiln config already has that name -- rename it and upload again");
     }
     int idx = find_free_slot();

@@ -435,6 +435,39 @@ bool kiln_cfg_store_export_package_json(int32_t id, char *out, size_t out_cap, s
 bool kiln_cfg_store_import_package_json(const char *json, int32_t *out_id, char *reason_out,
                                         size_t reason_cap);
 
+/* Restore follow-up (backup_import.c, item 17): same as
+ * kiln_cfg_store_import_package_json() but the created slot's name is
+ * `name_override` (already trimmed/validated/disambiguated by the caller
+ * via kiln_cfg_store_name_would_collide()) instead of the name embedded in
+ * `json`. Needed for the "different identity, same name" collision case --
+ * the file's own name collides with an existing, different board slot by
+ * definition, so calling the plain function would always refuse; this lets
+ * the restore path create the slot under its own already-unique name in one
+ * step. Pass NULL for name_override to get identical behaviour to
+ * kiln_cfg_store_import_package_json() (that function is now a thin
+ * wrapper over this one). name_override, if non-NULL, is still length- and
+ * charset-validated the same way any other stored name is. */
+bool kiln_cfg_store_import_package_json_as(const char *json, const char *name_override,
+                                           int32_t *out_id, char *reason_out, size_t reason_cap);
+
+/* Validate-only seam (docs/KILN_PROFILES_PLAN.md item 17, backup-restore
+ * follow-up): runs every check kiln_cfg_store_import_package_json() runs
+ * (envelope, ESP-half validity, Pico-half param-id validity, hash,
+ * foreign-board calibration reset, hardware compatibility) but never
+ * creates a slot, writes NVS, or checks quarantine. On success writes the
+ * package's NORMALIZED name into name_out, its pkg_schema into
+ * *out_pkg_schema, and the pkg_hash a slot created from it would actually
+ * carry (post foreign-board reset if applicable) into *out_pkg_hash --
+ * exactly the identity backup_import.c's merge/mirror matching needs
+ * to compare a file's slot against this board's own
+ * kiln_cfg_store_get_package_identity() output, before deciding whether to
+ * create, update, or rename anything. Returns false (outputs untouched) on
+ * any refusal, with the same specific reason kiln_cfg_store_import_
+ * package_json() would give for the identical input. */
+bool kiln_cfg_store_validate_package_json(const char *json, char *name_out, size_t name_cap,
+                                          uint16_t *out_pkg_schema, uint32_t *out_pkg_hash, char *reason_out,
+                                          size_t reason_cap);
+
 /* Section 2.4's auto-save, in its simplest correct form: if a kiln config is
  * currently marked active, re-saves the CURRENTLY LIVE zones config over
  * that same slot (id unchanged, name unchanged) via the existing, already
