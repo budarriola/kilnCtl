@@ -103,8 +103,39 @@
    the bare-tag selector below does not match it, so that one rule keeps its
    own explicit min-height (see main_page.html). readiness_page.html has no
    real <button> elements needing this (its only button is `.theme-btn` above,
-   a small icon toggle, not a 72px action target) -- nothing to remove there. */
-button { min-height: var(--ui-touch); }
+   a small icon toggle, not a 72px action target) -- nothing to remove there.
+
+   2026-09-18 (owner report, phone screenshot, dark mode): min-height was the
+   ONLY property this rule ever set, so a classless <button> with no page-
+   local `button {}` rule of its own (e.g. settings_page.html's "Reboot both
+   processors" button, main_page.html's PID-popup Close/Cancel/"Use these"
+   buttons living inside `.pid-popup .btnrow button`, which sets only flex/
+   min-height) fell through to the browser's UA default chrome -- white
+   background, black text, default border -- sitting next to fully themed
+   siblings. Whether any given button looked right was purely a function of
+   whether its host page happened to redeclare `button {}` with colors in its
+   own <style> block; pages that never did kept shipping white buttons every
+   time a new one was added, which is why the owner reports "these keep
+   popping up". Fixed at the root by giving the shared, bare-tag rule the
+   same background/color/border/radius every page-local copy of it already
+   used, so a classless button anywhere is themed by default. This is
+   additive, not a repaint: every page-local `button {}` rule (login_page,
+   profiles_page, safety_commissioning_page, safety_config_page,
+   setup_wizard_page, zones_page, ota_page, wifi_provision_page) and the
+   scoped `a.button, button {}` rule (backup_page, kiln_configs_page) are
+   parsed AFTER this stylesheet and already set these same properties, so
+   they continue to win at equal specificity and nothing already-themed
+   changes appearance -- confirmed by rendering both before/after.
+   var(--button-bg)/var(--fg)/var(--border) are NOT defined in this file (see
+   this file's own header comment) -- they're page-local tokens every OTHER
+   page already declares in its own :root block. login_page.html is the one
+   exception (it has no --bg/--fg toggle at all, light-mode-only, no dark
+   mode support), so literal fallbacks matching the light-mode default every
+   other page uses (`#f2f2f2`/`#111`/`#888`) keep login's button themed too
+   without inventing a new color. */
+button { min-height: var(--ui-touch); background: var(--button-bg, #f2f2f2);
+         color: var(--fg, #111); border: 1px solid var(--border, #888);
+         border-radius: var(--ui-radius); font-family: inherit; cursor: pointer; }
 /* UI_PLAN.md section 3, Web item 1: shared horizontal-scroll wrapper for any
    data table that could overflow a phone-width (~390px) viewport --
    rules_page.html's #cycleTable and zones_page.html's generated

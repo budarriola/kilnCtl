@@ -495,7 +495,8 @@ const SETUP_SCRIPT = `
 // grown to fit the (now fully mutated) document. Deliberately framework-free
 // (no injected library) -- just DOM/CSSOM calls every evergreen browser
 // supports.
-const IN_PAGE_SCRIPT = `
+function buildInPageScript(uaDefaultButtonBg) {
+return `
 (function () {
   function isVisible(el) {
     if (!(el instanceof Element)) return false;
@@ -632,6 +633,30 @@ const IN_PAGE_SCRIPT = `
     }
   }
 
+  // Unthemed-button check (owner report 2026-09-18): a visible <button>
+  // whose COMPUTED background color still equals this browser's own UA
+  // default for a bare, unstyled button (measured once per sweep run by
+  // measureUaButtonDefaultBg(), see that function's comment -- NOT a
+  // hardcoded literal, so this does not silently stop matching on a
+  // different Chrome version/OS render theme) got no author styling at all,
+  // which is exactly the "white browser-default box" bug class. This is
+  // deliberately NOT "backgroundColor === white/#fff": a page's legitimate
+  // light-mode button token (e.g. --button-bg: #f2f2f2) is pale but is
+  // still an intentional theme color, not the browser default, and must not
+  // trip this. A button that intentionally uses a fully transparent
+  // background (e.g. diagnostics_page.html's .danger-actions button.exit,
+  // .relay-grid button) computes to 'rgba(0, 0, 0, 0)', which also does not
+  // equal the UA default (an opaque gray) and correctly passes.
+  var unthemedButtons = [];
+  for (var m = 0; m < all.length; m++) {
+    var elB = all[m];
+    if (elB.tagName.toLowerCase() !== 'button') continue;
+    var bg = getComputedStyle(elB).backgroundColor;
+    if (bg === ${JSON.stringify(uaDefaultButtonBg)}) {
+      unthemedButtons.push({ el: describeEl(elB), backgroundColor: bg });
+    }
+  }
+
   function describeEl(el) {
     var id = el.id ? ('#' + el.id) : '';
     var cls = el.className && typeof el.className === 'string' ? ('.' + el.className.trim().split(/\\s+/).join('.')) : '';
@@ -660,6 +685,7 @@ const IN_PAGE_SCRIPT = `
     pairsOverlap: pairsOverlap,
     undersized: undersized,
     clipped: clipped,
+    unthemedButtons: unthemedButtons,
     interactiveCount: all.length,
     tuningBadge: tuningBadge,
     // docHeightAtCheck: the document's real scrollHeight AT THE MOMENT this
@@ -675,6 +701,7 @@ const IN_PAGE_SCRIPT = `
   });
 })()
 `;
+}
 
 async function newTab(port) {
   const r = await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT' });
@@ -685,7 +712,49 @@ async function closeTab(port, id) {
   try { await fetch(`http://127.0.0.1:${port}/json/close/${id}`); } catch { /* best-effort */ }
 }
 
-async function sweepOnePage(port, fileUrl, width, fixtureScript) {
+// Owner report 2026-09-18 (phone screenshot, dark mode): settings_page.html's
+// "Reboot both processors" button rendered as a glaring white browser-default
+// box next to correctly-themed siblings. Root cause: theme.css's shared bare
+// `button { min-height: ... }` rule (the one rule EVERY page's <button> is
+// guaranteed to inherit, whether or not that page also declares its own
+// `button {}` with colors) set only min-height, so a classless button on a
+// page with no page-local override fell through to the browser's UA default
+// chrome. Fixed at the source in theme.css; this measures the actual UA
+// default background color THIS browser/OS renders for a bare, unstyled
+// <button> (a plain `data:` page, no stylesheet at all) so the assertion
+// below can catch a REGRESSION of that fix without hardcoding a literal
+// color string that would silently stop matching on a different Chrome
+// version/OS theme. Measured directly during development on this machine's
+// headless Chrome: rgb(240, 240, 240) -- close enough to white to read as
+// "unthemed" in a screenshot, but not literally #fff, which is exactly why a
+// naive `=== white` check would have been the wrong fingerprint to hardcode
+// even if a hardcoded one were desired at all.
+async function measureUaButtonDefaultBg(port) {
+  const tab = await newTab(port);
+  const ws = new WebSocket(tab.webSocketDebuggerUrl);
+  await new Promise((resolve, reject) => {
+    ws.addEventListener('open', resolve);
+    ws.addEventListener('error', reject);
+  });
+  const cdp = new CdpSession(ws);
+  try {
+    await cdp.send('Page.enable');
+    await cdp.send('Runtime.enable');
+    const navPromise = cdp.waitForEvent('Page.loadEventFired', 15000);
+    await cdp.send('Page.navigate', { url: 'data:text/html,<button id=kcUaProbe>x</button>' });
+    await navPromise;
+    const res = await cdp.send('Runtime.evaluate', {
+      expression: `getComputedStyle(document.getElementById('kcUaProbe')).backgroundColor`,
+      returnByValue: true,
+    });
+    return res.result.value;
+  } finally {
+    ws.close();
+    await closeTab(port, tab.id);
+  }
+}
+
+async function sweepOnePage(port, fileUrl, width, fixtureScript, uaDefaultButtonBg) {
   const tab = await newTab(port);
   const ws = new WebSocket(tab.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => {
@@ -816,7 +885,7 @@ async function sweepOnePage(port, fileUrl, width, fixtureScript) {
         if (settled) break;
       }
 
-      const attemptResult = await cdp.send('Runtime.evaluate', { expression: IN_PAGE_SCRIPT, returnByValue: true });
+      const attemptResult = await cdp.send('Runtime.evaluate', { expression: buildInPageScript(uaDefaultButtonBg), returnByValue: true });
       if (attemptResult.exceptionDetails) {
         throw new Error('page script threw: ' + JSON.stringify(attemptResult.exceptionDetails));
       }
@@ -918,6 +987,7 @@ function formatFailures(page, width, r) {
   for (const p of r.pairsOverlap) lines.push(`  [overlap]  ${page} @${width}px: ${p.a} overlaps ${p.b}`);
   for (const u of r.undersized) lines.push(`  [target]   ${page} @${width}px: ${u.el} is ${u.width}x${u.height}px (< ${MIN_TARGET_PX}px)`);
   for (const c of r.clipped) lines.push(`  [clipped]  ${page} @${width}px: ${c} is off-viewport`);
+  for (const u of r.unthemedButtons || []) lines.push(`  [unthemed] ${page} @${width}px: ${u.el} has browser-default background ${u.backgroundColor} (no theme.css/page-local styling applied)`);
   return lines;
 }
 
@@ -1022,6 +1092,20 @@ async function main() {
       devtoolsSkip = portErr && portErr.message || String(portErr);
     }
 
+    // Measured once, up front, against THIS sweep's own Chrome process --
+    // see measureUaButtonDefaultBg()'s comment for why this must be a live
+    // measurement rather than a hardcoded literal. If Chrome never came up
+    // at all, devtoolsSkip above already short-circuits the page loop below
+    // to [], so this call is unreached in that case.
+    let uaDefaultButtonBg = null;
+    if (!devtoolsSkip) {
+      try {
+        uaDefaultButtonBg = await measureUaButtonDefaultBg(args.port);
+      } catch (e) {
+        devtoolsSkip = 'failed to measure UA default button background: ' + (e && e.message || String(e));
+      }
+    }
+
     for (const pf of devtoolsSkip ? [] : pageFiles) {
       const pageUrl = `http://127.0.0.1:${staticPort}/${pf}`;
       const fixture = PAGE_FIXTURES[pf];
@@ -1046,7 +1130,7 @@ async function main() {
           let result, failures = [], harnessErrorMsg = null;
           for (let attempt = 1; attempt <= HARNESS_ERROR_MAX_ATTEMPTS; attempt++) {
             try {
-              result = await sweepOnePage(args.port, pageUrl, width, variant.script);
+              result = await sweepOnePage(args.port, pageUrl, width, variant.script, uaDefaultButtonBg);
               failures = formatFailures(label, width, result);
               harnessErrorMsg = null;
               if (variant.suffix && result && result.tuningBadge && !(variant.suffix in badgesBySuffix)) {
