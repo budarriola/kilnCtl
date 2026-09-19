@@ -1379,17 +1379,28 @@ typedef enum {
 config_store_write_decision_t config_store_decide_write(bool armed);
 
 // 2026-09-15 owner decision (Opus review F1): the same decision as
-// config_store_decide_write() above, except a tc_type-ONLY change (see
-// config_store_only_tc_type_differs() below) is allowed through while ARMED
+// config_store_decide_write() above, except a NARROW change (see
+// config_store_only_tc_type_differs() and, 2026-09-18,
+// config_store_only_ct_cal_differs() below) is allowed through while ARMED
 // when `heat_safe` is true -- the caller's own answer to "as far as the
 // Pico can tell from its own inputs, is heat currently NOT being
 // delivered" (link_task.c: no relay reported on by the ESP AND no CT
 // current sensed). The Pico stays ARMED throughout this path; it never
 // disarms or drops to GRACE to accept the change. Every other field, and a
-// tc_type change bundled with any other field change, is still refused
-// unconditionally while ARMED -- config_store_decide_write(armed) is
-// exactly config_store_decide_write_ex(armed, false, false).
-config_store_write_decision_t config_store_decide_write_ex(bool armed, bool tc_type_only_change,
+// narrow-eligible field change bundled with any other field change, is
+// still refused unconditionally while ARMED -- config_store_decide_write(armed)
+// is exactly config_store_decide_write_ex(armed, false, false).
+//
+// `narrow_change_only` was named `tc_type_only_change` until the 2026-09-18
+// CT-auto-zero deadlock fix (docs/audits/) widened it to also accept a
+// single channel's zero_counts/k_ct_v_per_a-only change -- the parameter
+// itself has no opinion on WHICH narrow field changed, only that the
+// caller has already confirmed exactly one such field (and nothing else)
+// differs. It stays a single bool, not a bitmask of which narrow field
+// applies, because the ARMED+heat_safe decision below is identical either
+// way; only the caller-facing refusal message (config_store_write_ex()'s
+// MIXED-change naming) needs to know which field it was.
+config_store_write_decision_t config_store_decide_write_ex(bool armed, bool narrow_change_only,
                                                               bool heat_safe);
 
 // True iff `candidate` differs from `current` ONLY in tc_type (plus the
@@ -1401,6 +1412,31 @@ config_store_write_decision_t config_store_decide_write_ex(bool armed, bool tc_t
 // write.
 bool config_store_only_tc_type_differs(const config_store_record_t *current,
                                         const config_store_record_t *candidate);
+
+// 2026-09-18 CT-auto-zero deadlock fix: true iff `candidate` differs from
+// `current` ONLY in exactly ONE CT channel's zero_counts[ch]/k_ct_v_per_a[ch]
+// pair -- false if neither field changed on any channel, if more than one
+// channel's pair changed, or if ANY other field (including another
+// channel's zero_counts/k_ct_v_per_a) also differs. Pure, host-tested, same
+// shape and same single-caller (config_store_write_ex()) as
+// config_store_only_tc_type_differs() above.
+//
+// Why this one is safety-argued to be at least as narrow as the tc_type
+// carve-out it mirrors: the two fields it allows are exactly what
+// current_sense.c's S3/S4/S9 (and, in summed-CT topology, S14/S15) convert
+// raw ADC counts through -- comparably safety-relevant to tc_type, which
+// feeds S1's abs_max_temp comparison. Unlike a hand-typed manual value,
+// the one caller that actually exercises this path (KilnFW's CT auto-zero
+// commissioning flow, safety_cfg_http.c's ct_auto_zero_post_handler())
+// only ever proposes a value that was itself measured with every relay
+// verified off for >=5s continuously through the whole measurement window
+// (both before AND after, ct_auto_zero_check_preconditions()/
+// _check_postconditions()) and sanity-bounded to within 100mV of the
+// previously stored value -- so the write this exemption admits is no
+// less trustworthy than the state heat_safe already requires of the
+// write itself.
+bool config_store_only_ct_cal_differs(const config_store_record_t *current,
+                                       const config_store_record_t *candidate);
 
 // Human-readable reason for a config_store_write_decision_t, for surfacing
 // over HTTP/PC UART the same way other refusal reasons in this codebase are
