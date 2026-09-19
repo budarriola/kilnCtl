@@ -823,6 +823,15 @@ typedef struct {
      * known point in the tick, with the executor's own lock already held. */
     uint32_t config_generation;
 
+    /* live_profile_generation() as of the last time this run polled the
+     * live-edit working slot (docs/LIVE_PROFILE_EDIT_PLAN.md pass 1, section
+     * 3) -- same one-counter-per-tick poll shape as config_generation just
+     * above, so an unedited run pays nothing beyond the comparison. Zeroed by
+     * profile_executor_run() like the rest of this struct's per-run state;
+     * an edit fork()ed before this run started is picked up on its very
+     * first tick because live_profile_generation() already differs from 0. */
+    uint32_t live_edit_generation;
+
     /* Every relay bit this run has ever been in a position to command, ORed
      * together and never cleared until the next run starts (TODO.md 6A.7's
      * unowned-relay sweep). This is what keeps the sweep from being a

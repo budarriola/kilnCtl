@@ -515,6 +515,12 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # favorite is a shortcut, not a move -- see
                        # profiles_favorites.h.
                        "persist/profiles_favorites.c"
+                       # docs/LIVE_PROFILE_EDIT_PLAN.md pass 1: the structural
+                       # live-edit working slot + live_edit_v1 record, and the
+                       # pure executor-side pickup/decision logic. No HTTP
+                       # routes yet (pass 2).
+                       "persist/live_profile.c"
+                       "control/profile_executor_live_pickup.c"
                        "control/profile_feasibility.c"
                        "http/readiness_http.c"
                        # SETUP_WIZARD_PLAN.md step 3: the /setup page shell.

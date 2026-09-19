@@ -19,7 +19,18 @@
 #include "heat_enable.h"
 #include "heater_output.h"
 #include "kiln_io_owner.h"
+#include "live_profile.h" /* live_profile_generation()/live_profile_load_working() -- pass 1 pickup poll */
 #include "ota_state.h" /* ota_http_heat_blocked_by_update() -- heat_interlock.h's own doc comment */
+#include "profile_executor_live_pickup.h"
+/* profiles_validate_candidate() lives in profiles_http_internal.h, which pulls
+ * in esp_http_server.h -- NOT host-safe, and test_profile_executor_prestart.c
+ * #includes this whole file directly (host-only translation unit). Declared
+ * locally instead, matching that header's real signature exactly (types come
+ * from profiles_types.h, already visible), so this stays a thin extern
+ * reference rather than dragging the httpd tier into a control-tier file. */
+typedef enum { PROFILE_VALIDATE_ADVISORY_LOCAL = 0, PROFILE_VALIDATE_HARD_LOCAL = 1 } profile_validate_mode_local_t;
+extern bool profiles_validate_candidate(const profile_t *candidate, int mode, char *warnings_json,
+                                         size_t warnings_json_cap, char *err_msg, size_t err_cap);
 #include "pid.h"
 #include "pid_fuzzy.h"
 #include "ramp_assist_cfg.h"
@@ -284,6 +295,66 @@ static void reload_config_if_changed(void)
              (unsigned long)prev, (unsigned long)gen, rechecked, changed_mask);
 }
 
+static bool live_pickup_validate_hard(void *ctx, const profile_t *candidate, char *err_msg, size_t err_cap)
+{
+    (void)ctx;
+    return profiles_validate_candidate(candidate, (int)PROFILE_VALIDATE_HARD_LOCAL, NULL, 0, err_msg, err_cap);
+}
+
+/* docs/LIVE_PROFILE_EDIT_PLAN.md pass 1, section 3/7: same one-counter-per-
+ * tick poll shape as reload_config_if_changed() just above, called
+ * immediately alongside it for the same "every edit lands at one known
+ * point in the tick" reason. Only RUNNING adopts a swap (plan section 3) --
+ * PAUSED/FAULTED runs have no control math for a swap to stay bumpless
+ * against, and per owner decision 4 editing is still ALLOWED while paused or
+ * faulted, it just doesn't take effect until the run is RUNNING again, at
+ * which point this same poll picks it up (the generation counter does not
+ * reset just because a tick was skipped). */
+static void reload_live_profile_if_changed(void)
+{
+    uint32_t gen = live_profile_generation();
+    if (gen == s_exec.live_edit_generation) {
+        return;
+    }
+    s_exec.live_edit_generation = gen;
+
+    if (s_exec.state != PROFILE_EXEC_RUNNING) {
+        return;
+    }
+
+    /* static, not a stack local: check_executor_task_stack_budget.ps1's
+     * ceiling (executor_task_entry's own reachable stack) is exceeded once
+     * this profile_t-sized candidate sits on top of live_profile_load_
+     * working()'s own internal decode buffer and profile_decode_blob()'s
+     * frame further down the same call chain. Safe as `static` because
+     * reload_live_profile_if_changed() is only ever called serially, from
+     * this one task's own tick loop -- never re-entered, never called from
+     * any other task -- the same "single dedicated caller, no concurrency"
+     * argument kiln_cfg_swap.c's flash_worker_lint.py allowlist entry makes
+     * for its own worker-task-only buffers. */
+    static profile_t candidate;
+    if (!live_profile_load_working(&candidate)) {
+        return; /* nothing pending, or it's not for this run -- pass 2's HTTP
+                  * layer is the only writer and only ever targets this run's
+                  * own origin id, so a mismatch here just means "no-op". */
+    }
+
+    char err_msg[128];
+    profile_live_pickup_result_t result = profile_executor_live_pickup_check(
+        &s_exec.profile, &candidate, s_exec.segment_index, live_pickup_validate_hard, NULL, err_msg, sizeof(err_msg));
+    if (result != PROFILE_LIVE_PICKUP_OK) {
+        ESP_LOGW(PE_TAG, "live profile edit NOT adopted (result %d): %s", (int)result, err_msg);
+        return;
+    }
+
+    /* Swap CONTENT only -- segment_index/segment_elapsed_s/dwelling/io_segs/
+     * every firing-stats accumulator are left exactly as they were, which is
+     * the continuity guarantee plan section 1 asks for ("the running segment
+     * keeps running"). */
+    s_exec.profile = candidate;
+    ESP_LOGW(PE_TAG, "OPERATOR ACTION MID-FIRING: live profile edit adopted at segment %u", s_exec.segment_index);
+}
+
 /* profile_resolve_on_off_rule() -- see profile_executor_internal.h for the
  * full contract. Pure lookup: linear scan of at most PROFILE_MAX_ON_OFF_RULES
  * entries, no side effects. */
@@ -497,6 +568,7 @@ void executor_task_entry(void *arg)
          * below read must already be the post-edit one, so an edit can never
          * be half-applied across a single tick's decide/apply split. */
         reload_config_if_changed();
+        reload_live_profile_if_changed();
 
         /* --- Ramp-lock (TODO.md 6A.5(d)): is every active, not-already-
          * faulted zone within band of the CURRENT shared target? Only

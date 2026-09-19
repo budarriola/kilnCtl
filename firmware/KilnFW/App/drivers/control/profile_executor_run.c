@@ -18,6 +18,7 @@
 #include "autotune_engine.h"
 #include "heat_enable.h"
 #include "kiln_io_owner.h"
+#include "live_profile.h"
 #include "ota_state.h"
 #include "profiles_store.h"
 #include "readiness_gate.h"
@@ -473,6 +474,11 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * redundant reload costs one log line; a missed one costs a firing run
      * with settings the operator believes they changed. */
     s_exec.config_generation = zones_config_generation();
+    /* Same "sample before this run can miss an edit" reasoning as the line
+     * above, for the live-edit working slot (pass 1, section 3): a fork()
+     * that landed moments before profile_executor_run() must not be lost
+     * because this run's first tick already believed generation 0. */
+    s_exec.live_edit_generation = live_profile_generation();
 
     /* TODO.md 6A.5 load-staggering: n_zones for the phase-offset formula
      * "zone i starts its window at i*window_ms/n_zones" -- i is this run's
