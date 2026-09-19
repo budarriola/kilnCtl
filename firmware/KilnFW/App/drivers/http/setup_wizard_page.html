@@ -89,7 +89,15 @@
 
   /* ---- Reused verbatim from safety_commissioning_page.html's guided flow. ---- */
   .gstepper { display: flex; gap: 0.4em; margin: 0.8em 0; flex-wrap: wrap; }
-  .gstepper span { font-size: 0.75em; padding: 0.2em 0.6em; border-radius: 999px;
+  /* > (child), not a descendant selector: gRenderStepper() now nests
+     .gstep-num/.gstep-title spans INSIDE the pill span, and a plain
+     `.gstepper span` also matches those two -- each one then got its own
+     border/background/radius/padding and a compounded font-size (a ring
+     inside a ring), and .gstep-title's own color: var(--muted) sat on top
+     of and hid the outer pill's .done/.current/.unknown/.regressed color.
+     Restricting this rule (and the phone-width padding tweak below) to the
+     pill itself leaves the inner spans as plain inline text. */
+  .gstepper > span { font-size: 0.75em; padding: 0.2em 0.6em; border-radius: 999px;
     background: var(--card-bg); border: 1px solid var(--border); color: var(--muted); }
   .gstepper span.current { border-color: var(--link); color: var(--fg); font-weight: bold; }
   .gstepper span.done { color: var(--ok); border-color: var(--ok); }
@@ -204,19 +212,25 @@
     .steprow .steptitle { flex: 1 1 auto; }
     .steprow { align-items: center; row-gap: 0.25em; }
     .wfield input[type=text], .wfield input[type=number], .wfield select { max-width: 100%; }
-    /* Owner report ("setup wizard looks horrible on a phone"): the top
-       .gstepper used to render "N. Full Step Title" per pill -- at phone
-       width every one of the 14 pills wrapped to (or near) its own
-       full-width line, turning the very top of the page into ~2000px of
-       redundant text that the detailed #stepRows overview below (which
-       already spells out every title, its safety flag and its readiness
-       detail) repeats in full. Hiding .gstep-title here collapses each
-       pill down to just its number ("1.", "2.", ...) so the whole 14-step
-       stepper wraps into a compact grid a couple of rows tall -- state
-       colour (done/current/regressed/...) and the hover/aria-label full
-       title are unchanged, only the duplicated inline text is gone. */
+  }
+  /* Owner report ("setup wizard looks horrible on a phone"): the top
+     .gstepper used to render "N. Full Step Title" per pill -- at phone
+     width every one of the 14 pills wrapped to (or near) its own
+     full-width line, turning the very top of the page into ~2000px of
+     redundant text that the detailed #stepRows overview below (which
+     already spells out every title, its safety flag and its readiness
+     detail) repeats in full. Hiding .gstep-title here collapses each
+     pill down to just its number ("1.", "2.", ...) so the whole 14-step
+     stepper wraps into a compact grid a couple of rows tall -- state
+     colour (done/current/regressed/...) and the hover/aria-label full
+     title are unchanged, only the duplicated inline text is gone.
+     Own breakpoint at 480px, not the 420px one above: 428/430px phones
+     (iPhone Plus/Pro Max, Pixel Pro) still hit the same wall of text at
+     420px and are common enough to matter, while the .steprow/.wfield
+     rules above were tuned narrower on purpose and are left alone. */
+  @media (max-width: 480px) {
     .gstep-title { display: none; }
-    .gstepper span { padding: 0.25em 0.55em; }
+    .gstepper > span { padding: 0.25em 0.55em; }
   }
 </style>
 </head>
@@ -1505,11 +1519,14 @@ function gRenderStepper() {
     // turning 14 near-full-width wrapped lines (one per step, each padded
     // out to the longest title) into a compact wrapped grid of number
     // chips -- the full title is still present for a mouse hover (title=)
-    // and for a screen reader (aria-label=), and the overview list below
-    // already spells out every title in full, so nothing here is lost,
-    // only the redundant, space-hungry duplicate.
+    // and the overview list below already spells out every title in full,
+    // so nothing here is lost, only the redundant, space-hungry duplicate.
+    // role="group": a bare <span> has no implicit ARIA role, and a
+    // "generic" element's aria-label is not reliably exposed by every
+    // assistive-technology/browser pairing; group is a real container role
+    // that unambiguously supports an author-supplied accessible name.
     var title = window.kcEscapeHtml(s.title);
-    return '<span class="' + cls + '" title="' + title + '" aria-label="' + (s.id + 1) + '. ' + title + '">' +
+    return '<span class="' + cls + '" role="group" title="' + title + '" aria-label="' + (s.id + 1) + '. ' + title + '">' +
       '<span class="gstep-num">' + (s.id + 1) + '.</span>' +
       '<span class="gstep-title"> ' + title + '</span></span>';
   }).join('');
