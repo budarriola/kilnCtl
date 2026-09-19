@@ -2469,6 +2469,129 @@ static void test_backup_export_kiln_config_package_present(void)
     }
 }
 
+// Task 4 (bkfinish_assessment.md): backup_import_kiln_configs()'s three
+// documented restore-side contracts for the "kiln_configs" array itself,
+// none of which had any test coverage before this.
+static void test_kiln_configs_absent_key_is_a_no_op(void)
+{
+    TEST_SECTION("backup_import_apply -- an absent \"kiln_configs\" key behaves exactly like today's "
+                 "pre-item-17 backups: a pre-existing kiln config slot must survive untouched");
+    reset_stub_state();
+
+    // kiln_cfg_store.c is linked as a real, once-loaded module shared by
+    // every test in this executable (unlike test_kiln_cfg_store.c, this file
+    // has no access to its file-static reset_to_defaults() -- it only
+    // #includes the header, not the .c), so slots saved by earlier tests in
+    // this run may already be present. Snapshot the count/name-set BEFORE
+    // this test's own save rather than assuming a fresh store.
+    kiln_cfg_summary_t before[KILN_CFG_MAX_COUNT];
+    uint8_t n_before = kiln_cfg_store_list(before, KILN_CFG_MAX_COUNT);
+
+    int32_t id1 = -1;
+    char reason[160] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Untouched Marker Slot", -1, &id1, reason, sizeof(reason)),
+              "setup: one kiln config slot already exists on the board");
+
+    const char *body = "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],\"zones\":[]}";
+    char err[160] = {0};
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+    TEST_CHECK(ok, "a body with no \"kiln_configs\" key at all must still import cleanly");
+
+    kiln_cfg_summary_t after[KILN_CFG_MAX_COUNT];
+    uint8_t n_after = kiln_cfg_store_list(after, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(n_after == n_before + 1,
+              "the count is exactly one more than before this test's own setup save -- nothing added, "
+              "nothing removed, by the restore itself");
+    bool found = false;
+    for (uint8_t i = 0; i < n_after; i++) {
+        if (strcmp(after[i].name, "Untouched Marker Slot") == 0) {
+            found = true;
+            break;
+        }
+    }
+    TEST_CHECK(found, "this test's own slot is exactly as it was named -- untouched, not renamed");
+}
+
+static void test_kiln_configs_present_empty_merge_is_a_no_op(void)
+{
+    TEST_SECTION("backup_import_apply -- \"kiln_configs\":[] (present but empty) under MERGE mode makes "
+                 "no change to the board's existing kiln config slots");
+    reset_stub_state();
+
+    // See test_kiln_configs_absent_key_is_a_no_op()'s comment: this file has
+    // no way to reset kiln_cfg_store.c's own state, so compare against a
+    // BEFORE snapshot rather than an assumed-empty store.
+    kiln_cfg_summary_t before[KILN_CFG_MAX_COUNT];
+    uint8_t n_before = kiln_cfg_store_list(before, KILN_CFG_MAX_COUNT);
+
+    int32_t id1 = -1;
+    char reason[160] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Still Here Marker Slot", -1, &id1, reason, sizeof(reason)),
+              "setup: one kiln config slot already exists on the board");
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],\"zones\":[],\"kiln_configs\":[]}";
+    char err[160] = {0};
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+    TEST_CHECK(ok, "an explicit empty kiln_configs array must still import cleanly under MERGE");
+
+    kiln_cfg_summary_t after[KILN_CFG_MAX_COUNT];
+    uint8_t n_after = kiln_cfg_store_list(after, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(n_after == n_before + 1,
+              "MERGE with nothing in the backup's kiln_configs array adds/removes nothing beyond this "
+              "test's own setup save");
+    bool found = false;
+    for (uint8_t i = 0; i < n_after; i++) {
+        if (strcmp(after[i].name, "Still Here Marker Slot") == 0) {
+            found = true;
+            break;
+        }
+    }
+    TEST_CHECK(found, "the pre-existing slot survives an empty-array MERGE untouched");
+}
+
+static void test_kiln_configs_malformed_entry_refuses_whole_restore(void)
+{
+    TEST_SECTION("backup_import_apply -- a malformed kiln_configs[] entry refuses the WHOLE restore "
+                 "(profiles/zones included), naming the entry index, with nothing written");
+    reset_stub_state();
+
+    // See test_kiln_configs_absent_key_is_a_no_op()'s comment: compare
+    // against a BEFORE snapshot, not an assumed-empty store.
+    kiln_cfg_summary_t before[KILN_CFG_MAX_COUNT];
+    uint8_t n_before = kiln_cfg_store_list(before, KILN_CFG_MAX_COUNT);
+
+    int32_t id1 = -1;
+    char reason[160] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Before Restore Marker", -1, &id1, reason, sizeof(reason)),
+              "setup: one kiln config slot already exists on the board");
+
+    // A "package" object present but missing required fields (no "kind"/
+    // "esp_blob_hex"/"pkg_hash" at all) is refused by
+    // kiln_cfg_store_validate_package_json() -- same malformed-envelope path
+    // test_kiln_cfg_store.c's own import-refuses-malformed tests exercise,
+    // just reached this time through the restore's kiln_configs[] array
+    // rather than a direct call.
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":5,"
+        "\"profiles\":[{\"id\":0,\"name\":\"Should Not Land\",\"segment_count\":0}],\"zones\":[],"
+        "\"kiln_configs\":[{\"name\":\"Bad Entry\",\"package\":{}}]}";
+    char err[160] = {0};
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(!ok, "a malformed kiln_configs[] entry must refuse the whole restore");
+    TEST_CHECK(strstr(err, "kiln_configs[0]") != NULL, "the error names the specific entry index that failed");
+
+    kiln_cfg_summary_t after[KILN_CFG_MAX_COUNT];
+    uint8_t n_after = kiln_cfg_store_list(after, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(n_after == n_before + 1,
+              "only this test's own setup save landed -- the malformed restore itself wrote nothing "
+              "further (no rename/create/delete from the refused body)");
+    TEST_CHECK(g_profile_save_calls == 0,
+              "the profiles pass never even ran -- kiln_configs[] is validated FIRST, before any profile "
+              "candidate is committed, so the whole restore is refused with nothing written anywhere");
+}
+
 // 2026-09-15 (Opus adversarial re-review, F6): before this fix,
 // backup_export.c read zones_config_get_safety_tc_type() -- the ESP's own
 // cache, which can be stale relative to the Pico's actual configured
@@ -3122,6 +3245,9 @@ void run_test_backup_import(void)
 
     test_export_emits_expected_keys_and_values_for_a_known_config();
     test_backup_export_kiln_config_package_present();
+    test_kiln_configs_absent_key_is_a_no_op();
+    test_kiln_configs_present_empty_merge_is_a_no_op();
+    test_kiln_configs_malformed_entry_refuses_whole_restore();
     test_export_emits_live_pico_tc_type_not_stale_esp_cache();
     test_export_round_trips_through_import_to_identical_config();
     test_ct_normals_and_new_fields_round_trip_through_export_import();
