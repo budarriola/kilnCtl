@@ -73,6 +73,14 @@ without further reclamation.
 | *unallocated tail* | 0xDB0000 | 2368 K | contiguous, the largest this table has ever had |
 | **total** | | **16,384 K** | = 16,777,216 B ✓ |
 
+**Stale as of 2026-09-19**: this table predates both `docs/OTA_SINGLE_SLOT_PLAN.md`'s
+`ota_0`/`ota_1`/`factory` -> `app`/`recovery` redesign and `cfg`, the LittleFS
+partition that now occupies the "unallocated tail" row above -- `cfg` was
+grown to take the entire remaining tail 2026-09-19
+(docs/PROFILE_SLOTS_100_PLAN.md section 7 task 5), `0xDB0000`, size
+`0x250000` (2.31 MiB), per `partitions.csv`'s own comment block. A full
+re-measurement against the current table is a separate task, not done here.
+
 One item dominates what is *spent*: **9 MB of app slots**, 56% of the chip.
 
 The 9 MB is the price of dual-OTA plus a factory recovery image, and all three
