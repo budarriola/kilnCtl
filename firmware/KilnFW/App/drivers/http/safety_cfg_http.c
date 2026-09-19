@@ -145,6 +145,15 @@ typedef struct {
     float ct_cal_zero_mv[SAFETY_CT_CAL_CHANNELS];
     safety_ct_cal_source_t ct_cal_source[SAFETY_CT_CAL_CHANNELS];
 
+    /* The operator-entered scale trim (safety_cfg_store_get_ct_cal_trim()).
+     * NOT gated on ct_cal_has_value, unlike a_fs/zero_mv above: the trim is
+     * always defined -- identity (0.0 A / 1.0x) on a fresh board and after the
+     * v1->v2 blob migration -- so build_commissioning_json() emits it
+     * unconditionally and the entry field always has a real stored value to
+     * round-trip against. */
+    float ct_cal_trim_offset_a[SAFETY_CT_CAL_CHANNELS];
+    float ct_cal_trim_gain[SAFETY_CT_CAL_CHANNELS];
+
     /* S8 rate-guard write provenance (docs/audits/s8_auto_calc_design_2026-
      * 09-09.md "Part 3") -- ESP-local, same "always known" reasoning as
      * relay_type/ct_cal above. rate_guard_has_provenance false means "never
@@ -288,6 +297,13 @@ static size_t build_commissioning_json(const safety_cfg_http_snapshot_t *s, char
             APPEND(",\"a_fs\":%.6g,\"zero_mv\":%.6g,\"source\":\"%s\"", (double)s->ct_cal_a_fs[ch],
                    (double)s->ct_cal_zero_mv[ch], ct_cal_source_name(s->ct_cal_source[ch]));
         }
+        /* Outside the has_value guard on purpose -- see the snapshot field's
+         * own comment. A trim that appeared only once a channel had been
+         * commissioned would leave the entry field with nothing to show on a
+         * fresh board, which is exactly the "posts but does not read back"
+         * failure this pass exists to avoid. */
+        APPEND(",\"trim_offset_a\":%.6g,\"trim_gain\":%.6g", (double)s->ct_cal_trim_offset_a[ch],
+               (double)s->ct_cal_trim_gain[ch]);
         APPEND("}");
     }
     APPEND("]");
@@ -435,6 +451,13 @@ static esp_err_t commissioning_get_handler(httpd_req_t *req)
     for (size_t ch = 0; ch < SAFETY_CT_CAL_CHANNELS; ch++) {
         snap.ct_cal_has_value[ch] = safety_cfg_store_get_ct_cal_input(
             ch, &snap.ct_cal_a_fs[ch], &snap.ct_cal_zero_mv[ch], &snap.ct_cal_source[ch]);
+        /* Pre-seeded with the identity so a false return -- only possible for
+         * an out-of-range channel, which this loop cannot produce -- still
+         * emits a meaningful trim rather than a zero gain. */
+        snap.ct_cal_trim_offset_a[ch] = 0.0f;
+        snap.ct_cal_trim_gain[ch] = 1.0f;
+        (void)safety_cfg_store_get_ct_cal_trim(ch, &snap.ct_cal_trim_offset_a[ch],
+                                                &snap.ct_cal_trim_gain[ch]);
     }
     (void)safety_cfg_store_get_rate_guard_meta(&snap.rate_guard_source, &snap.rate_guard_value,
                                                 &snap.rate_guard_has_provenance);
@@ -1017,6 +1040,108 @@ static esp_err_t ct_cal_post_handler(httpd_req_t *req)
         }
         escaped[o] = '\0';
         len = snprintf(resp, sizeof(resp), "{\"ok\":false,\"reason\":\"%s\"}", escaped);
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
+}
+
+/* ---------------------------------------------------------------------- */
+/* POST /api/safety/commissioning/ct_trim                                 */
+/* ---------------------------------------------------------------------- */
+
+/* docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md, owner decision 3: the operator
+ * enters the clamp ratio (A_fs, the handler above) and, separately, the
+ * offset/gain trim that corrects what the board actually reads against a
+ * reference meter. Body: "ch=<0-2>&trim_offset_a=<v>&trim_gain=<v>".
+ *
+ * WHY THIS IS NOT PART OF ct_cal_post_handler(), AND WHY IT STAGES NOTHING TO
+ * THE PICO. The trim is a THIRD quantity, distinct from A_fs (the clamp's
+ * nameplate claim) and from gain (the board's fixed front-end divider, params
+ * 0x030B-0x030D). It is applied ESP-side, by the sweep task's consumers, and
+ * has no wire parameter -- so there are no pairs to stage and no commit to
+ * confirm. Folding it into ct_cal's body would have made two of the four
+ * fields in that request silently skip the Pico round-trip the other two
+ * depend on.
+ *
+ * Range refusal, not clamping, matches safety_cfg_store_set_ct_cal_trim()'s
+ * own contract: a trim quietly clamped to a bound the operator did not ask
+ * for would read back as a value they never entered. A changed trim also
+ * invalidates any stored CT attribution verdict, because ct_verify_fingerprint()
+ * already hashes both fields -- that happens on the next read of the verdict,
+ * with nothing to do here. */
+#define SAFETY_CT_TRIM_BODY_MAX 128
+
+static esp_err_t ct_trim_post_handler(httpd_req_t *req)
+{
+    char body[SAFETY_CT_TRIM_BODY_MAX];
+    if (!read_body(req, body, sizeof(body))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or oversized body");
+        return ESP_OK;
+    }
+
+    char ch_text[8] = {0}, off_text[24] = {0}, gain_text[24] = {0};
+    if (http_form_find_field(body, "ch", ch_text, sizeof(ch_text)) < 0 ||
+        http_form_find_field(body, "trim_offset_a", off_text, sizeof(off_text)) < 0 ||
+        http_form_find_field(body, "trim_gain", gain_text, sizeof(gain_text)) < 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                             "expected ch=<0-2>&trim_offset_a=<v>&trim_gain=<v>");
+        return ESP_OK;
+    }
+
+    char *end = NULL;
+    long ch_l = strtol(ch_text, &end, 10);
+    if (end == ch_text || *end != '\0' || ch_l < 0 || ch_l >= (long)SAFETY_CT_CAL_CHANNELS) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ch must be 0, 1, or 2");
+        return ESP_OK;
+    }
+    size_t ch = (size_t)ch_l;
+
+    float trim_offset_a = strtof(off_text, &end);
+    if (end == off_text || *end != '\0' || !isfinite(trim_offset_a)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid trim_offset_a value");
+        return ESP_OK;
+    }
+    if (trim_offset_a < SAFETY_CT_CAL_TRIM_OFFSET_A_MIN ||
+        trim_offset_a > SAFETY_CT_CAL_TRIM_OFFSET_A_MAX) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "trim_offset_a must be between %g and %g A",
+                 (double)SAFETY_CT_CAL_TRIM_OFFSET_A_MIN, (double)SAFETY_CT_CAL_TRIM_OFFSET_A_MAX);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, msg);
+        return ESP_OK;
+    }
+
+    float trim_gain = strtof(gain_text, &end);
+    if (end == gain_text || *end != '\0' || !isfinite(trim_gain)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid trim_gain value");
+        return ESP_OK;
+    }
+    if (trim_gain < SAFETY_CT_CAL_TRIM_GAIN_MIN || trim_gain > SAFETY_CT_CAL_TRIM_GAIN_MAX) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "trim_gain must be between %g and %g",
+                 (double)SAFETY_CT_CAL_TRIM_GAIN_MIN, (double)SAFETY_CT_CAL_TRIM_GAIN_MAX);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, msg);
+        return ESP_OK;
+    }
+
+    esp_err_t nvs_err = ESP_OK;
+    bool ok = safety_cfg_store_set_ct_cal_trim(ch, trim_offset_a, trim_gain, &nvs_err);
+
+    char resp[192];
+    int len;
+    if (ok && nvs_err == ESP_OK) {
+        len = snprintf(resp, sizeof(resp),
+                        "{\"ok\":true,\"trim_offset_a\":%.6g,\"trim_gain\":%.6g,\"persisted\":true}",
+                        (double)trim_offset_a, (double)trim_gain);
+    } else if (ok) {
+        /* In RAM now, but it will not survive a reboot -- reported as a
+         * failure of PERSISTENCE, never as a plain success. */
+        len = snprintf(resp, sizeof(resp),
+                        "{\"ok\":true,\"trim_offset_a\":%.6g,\"trim_gain\":%.6g,\"persisted\":false,"
+                        "\"err\":\"%s\"}",
+                        (double)trim_offset_a, (double)trim_gain, esp_err_to_name(nvs_err));
+    } else {
+        len = snprintf(resp, sizeof(resp),
+                        "{\"ok\":false,\"reason\":\"CT trim rejected by the store\"}");
     }
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
@@ -1920,6 +2045,10 @@ esp_err_t safety_cfg_http_start(SafetyLinkClass *link_or_null, kiln_io_t *io_or_
         .uri = "/api/safety/commissioning/ct_cal", .method = HTTP_POST,
         .handler = ct_cal_post_handler,
     };
+    static const httpd_uri_t ct_trim_uri = {
+        .uri = "/api/safety/commissioning/ct_trim", .method = HTTP_POST,
+        .handler = ct_trim_post_handler,
+    };
     static const httpd_uri_t ct_auto_zero_uri = {
         .uri = "/api/safety/commissioning/ct_auto_zero", .method = HTTP_POST,
         .handler = ct_auto_zero_post_handler,
@@ -1944,7 +2073,8 @@ esp_err_t safety_cfg_http_start(SafetyLinkClass *link_or_null, kiln_io_t *io_or_
     };
 
     const httpd_uri_t *uris[] = { &page_uri,       &get_uri,          &post_uri,       &bench_uri,
-                                   &relay_type_uri, &ct_cal_uri,       &ct_auto_zero_uri,
+                                   &relay_type_uri, &ct_cal_uri,       &ct_trim_uri,
+                                   &ct_auto_zero_uri,
                                    &rate_guard_auto_get_uri, &rate_guard_auto_post_uri };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         esp_err_t err = kiln_http_register(server, uris[i]);

@@ -233,6 +233,7 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/api/safety/commissioning/bench_preset", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/safety/commissioning/ct_auto_zero", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/safety/commissioning/ct_cal", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/safety/commissioning/ct_trim", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/safety/commissioning/relay_type", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/safety/log_level", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/safety/rate_guard/auto", HTTP_POST, ROUTE_TIER_ADMIN),

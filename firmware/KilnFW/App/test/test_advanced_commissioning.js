@@ -368,6 +368,140 @@ function clickSave(ctx) {
   });
 })();
 
+// ---- Tests 9-12: the operator-entered CT scale trim
+// (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md owner decision 3). These drive
+// ctTrimRowHtml()/wireCtTrimButtons() directly rather than through a full
+// render, because this harness's stub DOM has no real element tree for the
+// ct_cal rows to be rendered into.
+
+const TRIM_FETCH_BASE = (url, opts) => {
+  if (url === '/api/profile_exec') return { ok: true, status: 200, body: { state: 'idle' } };
+  if (url === '/api/autotune') return { ok: true, status: 200, body: { state: 'idle' } };
+  if (url === '/api/safety/commissioning') return { ok: true, status: 200, body: { params: BASE_PARAMS } };
+  return { ok: true, status: 200, body: {} };
+};
+
+// A stand-in for one rendered .ct-trim-row, carrying the two inputs and the
+// result span wireCtTrimButtons() reaches through querySelector().
+function makeTrimRow(ch, offValue, gainValue) {
+  const parts = {
+    '.ct-trim-offset': { value: String(offValue) },
+    '.ct-trim-gain': { value: String(gainValue) },
+    '.ct-trim-apply': { disabled: false, onclick: null },
+    '.ct-trim-result': { textContent: '', className: '' },
+  };
+  return {
+    _parts: parts,
+    getAttribute(name) { return name === 'data-ct-trim-ch' ? String(ch) : null; },
+    querySelector(sel) { return parts[sel] || null; },
+  };
+}
+
+function wireTrimRow(ctx, row) {
+  ctx.document.querySelectorAll = (sel) => (sel === '.ct-trim-row' ? [row] : []);
+  ctx.wireCtTrimButtons();
+}
+
+// ---- Test 9: the row shows what is actually STORED -- the round-trip the
+// whole field exists for. A field that posts but renders a blank or a
+// hardcoded default would pass every POST test below and still be useless.
+(function testTrimRowRendersStoredValues() {
+  const ctx = loadContext({ fetchImpl: makeFetch(TRIM_FETCH_BASE), confirmImpl: () => true, fields: [] });
+  return waitForPageLoad().then(() => {
+    const html = ctx.ctTrimRowHtml(1, { has_value: false, trim_offset_a: -0.4, trim_gain: 1.04 });
+    assertIncludes(html, 'value="-0.4"', 'trim/render: shows the stored offset trim');
+    assertIncludes(html, 'value="1.04"', 'trim/render: shows the stored gain trim');
+    assertIncludes(html, 'data-ct-trim-ch="1"', 'trim/render: carries its channel');
+    // has_value:false above is deliberate: the trim is NOT gated on a channel
+    // having been commissioned, so an uncommissioned channel must still show
+    // its real stored trim rather than an empty box.
+    assertNotIncludes(html, 'data-id', 'trim/render: no data-id, so the generic "Save all" pass cannot sweep it up');
+  });
+})();
+
+// ---- Test 10: identity fallback when the firmware's JSON predates these
+// fields -- 0 A / 1.0x, never a blank or a NaN.
+(function testTrimRowFallsBackToIdentity() {
+  const ctx = loadContext({ fetchImpl: makeFetch(TRIM_FETCH_BASE), confirmImpl: () => true, fields: [] });
+  return waitForPageLoad().then(() => {
+    const html = ctx.ctTrimRowHtml(0, {});
+    assertIncludes(html, 'value="0"', 'trim/fallback: offset falls back to the identity 0 A');
+    assertIncludes(html, 'value="1"', 'trim/fallback: gain falls back to the identity 1.0x');
+  });
+})();
+
+// ---- Test 11: Apply actually POSTs the entered pair to the trim endpoint,
+// and a persisted success re-reads the page (the read-back).
+(function testTrimApplyPostsAndReloads() {
+  let postUrl = null, postBody = null, commissioningGets = 0;
+  const fetchImpl = (url, opts) => {
+    if (url === '/api/safety/commissioning/ct_trim') {
+      postUrl = url; postBody = opts.body;
+      return { ok: true, status: 200, body: { ok: true, persisted: true, trim_offset_a: -0.4, trim_gain: 1.04 } };
+    }
+    if (url === '/api/safety/commissioning' && !(opts && opts.method === 'POST')) commissioningGets++;
+    return TRIM_FETCH_BASE(url, opts);
+  };
+  const ctx = loadContext({ fetchImpl: makeFetch(fetchImpl), confirmImpl: () => true, fields: [] });
+  return waitForPageLoad().then(() => {
+    const row = makeTrimRow(2, '-0.4', '1.04');
+    wireTrimRow(ctx, row);
+    const getsBefore = commissioningGets;
+    row._parts['.ct-trim-apply'].onclick();
+    return runMicrotasks().then(() => {
+      assert(postUrl === '/api/safety/commissioning/ct_trim', 'trim/apply: POSTs to the trim endpoint');
+      assertIncludes(String(postBody), 'ch=2', 'trim/apply: carries the channel');
+      assertIncludes(String(postBody), 'trim_offset_a=-0.4', 'trim/apply: carries the offset trim');
+      assertIncludes(String(postBody), 'trim_gain=1.04', 'trim/apply: carries the gain trim');
+      assert(commissioningGets > getsBefore, 'trim/apply: re-reads the page so the row shows what was stored');
+      assertNotIncludes(row._parts['.ct-trim-result'].className, 'crc-mismatch', 'trim/apply: success is not styled as an error');
+    });
+  });
+})();
+
+// ---- Test 12: ok:true with persisted:false means "applied but will not
+// survive a reboot". Reporting that as a plain success is the failure mode
+// this asserts against.
+(function testTrimUnpersistedIsReportedAsFailure() {
+  const fetchImpl = (url, opts) => {
+    if (url === '/api/safety/commissioning/ct_trim') {
+      return { ok: true, status: 200, body: { ok: true, persisted: false, err: 'ESP_ERR_NVS_NOT_ENOUGH_SPACE' } };
+    }
+    return TRIM_FETCH_BASE(url, opts);
+  };
+  const ctx = loadContext({ fetchImpl: makeFetch(fetchImpl), confirmImpl: () => true, fields: [] });
+  return waitForPageLoad().then(() => {
+    const row = makeTrimRow(0, '1', '1.02');
+    wireTrimRow(ctx, row);
+    row._parts['.ct-trim-apply'].onclick();
+    return runMicrotasks().then(() => {
+      const res = row._parts['.ct-trim-result'];
+      assertIncludes(res.textContent, 'NOT SAVED', 'trim/unpersisted: says it was not saved');
+      assertIncludes(res.className, 'crc-mismatch', 'trim/unpersisted: styled as an error');
+    });
+  });
+})();
+
+// ---- Test 13: an empty box is refused before any request is built, so a
+// half-filled row cannot post a partial pair.
+(function testTrimEmptyFieldIsRefusedClientSide() {
+  let posted = false;
+  const fetchImpl = (url, opts) => {
+    if (url === '/api/safety/commissioning/ct_trim') { posted = true; return { ok: true, status: 200, body: { ok: true, persisted: true } }; }
+    return TRIM_FETCH_BASE(url, opts);
+  };
+  const ctx = loadContext({ fetchImpl: makeFetch(fetchImpl), confirmImpl: () => true, fields: [] });
+  return waitForPageLoad().then(() => {
+    const row = makeTrimRow(0, '', '1.04');
+    wireTrimRow(ctx, row);
+    row._parts['.ct-trim-apply'].onclick();
+    return runMicrotasks().then(() => {
+      assert(posted === false, 'trim/empty: never POSTs a partial pair');
+      assertIncludes(row._parts['.ct-trim-result'].className, 'crc-mismatch', 'trim/empty: refused visibly');
+    });
+  });
+})();
+
 Promise.resolve()
   .then(() => new Promise((resolve) => setTimeout(resolve, 50)))
   .then(() => {

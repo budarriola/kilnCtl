@@ -94,8 +94,12 @@ Status: PARTIALLY BUILT. Landed so far (this commit):
 `trim_offset_a`/`trim_gain`, `load_ct_cal()` migrates a stored v1 blob forward
 (discriminating on length before version, since the two layouts differ in
 size) and seeds the trim at identity, and the fingerprint producer reads the
-real values through `safety_cfg_store_get_ct_cal_trim()`. Entry surface on
-`safety_commissioning_page.html` (owner decision 3 below) is still to come.
+real values through `safety_cfg_store_get_ct_cal_trim()`. The entry surface on
+`safety_commissioning_page.html` (owner decision 3 below) has landed: one trim
+row per CT channel, reading back from the commissioning JSON's `ct_cal[]`
+entries (emitted unconditionally, since the trim is defined even for a channel
+that was never commissioned) and committing to `POST
+/api/safety/commissioning/ct_trim` -- ESP-local, with no Pico wire parameter.
 
 Four owner decisions of
 2026-09-18 — settle time, verdict scope, an operator-entered clamp ratio with

@@ -331,6 +331,42 @@ bool safety_cfg_store_set_ct_cal_input(size_t ch, float a_fs, float zero_mv, saf
     return true;
 }
 
+// The operator-entered scale trim (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md,
+// owner decision 3). Its own statics rather than the ct_cal set above,
+// because the real store keeps the trim outside the has_value gate: the
+// getter answers for EVERY in-range channel, including one that was never
+// commissioned, and the commissioning JSON emits it unconditionally on the
+// strength of that. Seeded to the identity, matching a fresh board and the
+// v1->v2 blob migration.
+static float s_stub_ct_trim_offset_a[SAFETY_CT_CAL_CHANNELS];
+static float s_stub_ct_trim_gain[SAFETY_CT_CAL_CHANNELS];
+static bool s_stub_set_ct_cal_trim_result = true;
+static esp_err_t s_stub_set_ct_cal_trim_nvs_err = ESP_OK;
+static int s_stub_set_ct_cal_trim_calls = 0;
+
+bool safety_cfg_store_get_ct_cal_trim(size_t ch, float *out_trim_offset_a, float *out_trim_gain)
+{
+    if (ch >= SAFETY_CT_CAL_CHANNELS) {
+        return false;
+    }
+    if (out_trim_offset_a) *out_trim_offset_a = s_stub_ct_trim_offset_a[ch];
+    if (out_trim_gain) *out_trim_gain = s_stub_ct_trim_gain[ch];
+    return true;
+}
+
+bool safety_cfg_store_set_ct_cal_trim(size_t ch, float trim_offset_a, float trim_gain,
+                                       esp_err_t *out_nvs_err)
+{
+    s_stub_set_ct_cal_trim_calls++;
+    if (out_nvs_err) *out_nvs_err = s_stub_set_ct_cal_trim_nvs_err;
+    if (ch >= SAFETY_CT_CAL_CHANNELS || !s_stub_set_ct_cal_trim_result) {
+        return false;
+    }
+    s_stub_ct_trim_offset_a[ch] = trim_offset_a;
+    s_stub_ct_trim_gain[ch] = trim_gain;
+    return true;
+}
+
 // ct_cal_post_handler() (safety_cfg_http.c, 2026-09-06 reorder) now calls
 // these two directly for pure validation/preview BEFORE it commits anything
 // to the Pico or to safety_cfg_store_set_ct_cal_input() above -- see that
@@ -731,6 +767,13 @@ static void reset_all(void)
     s_stub_set_ct_cal_input_k = 1.0f;
     s_stub_set_ct_cal_input_zc = 0;
     s_stub_set_ct_cal_input_calls = 0;
+    for (size_t i = 0; i < SAFETY_CT_CAL_CHANNELS; i++) {
+        s_stub_ct_trim_offset_a[i] = 0.0f;
+        s_stub_ct_trim_gain[i] = 1.0f;
+    }
+    s_stub_set_ct_cal_trim_result = true;
+    s_stub_set_ct_cal_trim_nvs_err = ESP_OK;
+    s_stub_set_ct_cal_trim_calls = 0;
     s_stub_estop_verif_clear_calls = 0;
     s_stub_recapture_calls = 0;
     s_stub_recapture_result = true;

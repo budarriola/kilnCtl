@@ -113,8 +113,8 @@ typedef struct {
     float   gain[CT_VERIFY_CHANNELS];              /* params 0x030B-0x030D */
     float   k_ct_v_per_a[CT_VERIFY_CHANNELS];      /* params 0x0308-0x030A, derived */
     uint16_t zero_counts[CT_VERIFY_CHANNELS];      /* params 0x0302-0x0304, derived (U16 on the wire) */
-    float   trim_offset_a[CT_VERIFY_CHANNELS];     /* operator-entered offset trim, amps */
-    float   trim_gain[CT_VERIFY_CHANNELS];         /* operator-entered scale trim, dimensionless */
+    float   trim_offset_a[CT_VERIFY_CHANNELS];     /* operator-entered offset trim */
+    float   trim_gain[CT_VERIFY_CHANNELS];         /* operator-entered gain trim */
 } ct_verify_fingerprint_in_t;
 
 /* PURE. FNV-1a over the fields above, in a fixed order, with every float

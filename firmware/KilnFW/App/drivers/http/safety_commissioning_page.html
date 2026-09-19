@@ -1085,7 +1085,8 @@ function fieldInputHtml(f, paramsById) {
       ' <span class="ct-cal-source">source: ' + window.kcEscapeHtml(sourceWord) + '</span>' +
       ' <span class="ct-cal-result"></span>' +
       ' <span class="ct-auto-zero-result"></span>' +
-      '</div>';
+      '</div>' +
+      ctTrimRowHtml(ch, c);
     return html;
   }
   if (f.type === 'enum') {
@@ -1240,6 +1241,7 @@ function renderGroups(data) {
   wireCtManualToggles();
   wireCtInstalledToggle();
   wireCtCalButtons();
+  wireCtTrimButtons();
   wireCtAutoZeroButtons();
 }
 
@@ -1335,6 +1337,92 @@ function wireCtAutoZeroButtons() {
 // badge) reflects the just-applied values. Separate from the page's big
 // "Save all" pass on purpose: A_fs/zero_mv are not Pico param ids at all
 // (fieldInputHtml's 'ct_cal' comment), so they cannot ride that pass.
+// The operator-entered scale trim, docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md
+// owner decision 3: "The circuit has a fixed gain but clamp ratios change.
+// Allow the user to enter clamp ratio and offset/gain tuneing to get more
+// accurate." A_fs above IS the clamp ratio; these two are the correction on
+// top of it, measured against a reference meter.
+//
+// Rendered as its own row rather than two more inputs in the ct-cal-row
+// because they commit to a DIFFERENT endpoint: A_fs/zero_mv convert into
+// real Pico wire params (k_ct_v_per_a/zero_counts) and need that commit to
+// land, while the trim is ESP-local and has no wire parameter at all. One
+// Apply button covering both would have claimed a Pico round-trip for two
+// fields that never make one.
+//
+// Same deliberate omission of data-id as the ct-cal inputs: the generic
+// "Save all" pass walks `#fields input[data-id]`, and a data-id here would
+// make it SET_PARAM a param id that does not exist.
+//
+// Values come from the commissioning JSON UNCONDITIONALLY -- unlike
+// a_fs/zero_mv there is no has_value gate, because a channel that was never
+// commissioned still has a real, meaningful trim (the identity). The `!= null`
+// fallbacks cover an older firmware whose JSON predates these two fields, not
+// a fresh board.
+function ctTrimRowHtml(ch, c) {
+  var offVal = (c && c.trim_offset_a != null) ? c.trim_offset_a : 0;
+  var gainVal = (c && c.trim_gain != null) ? c.trim_gain : 1;
+  return '<div class="ct-trim-row" data-ct-trim-ch="' + ch + '">' +
+    '<label>offset trim <input type="number" step="any" min="-50" max="50" ' +
+    'class="ct-trim-offset" value="' + window.kcEscapeHtml(String(offVal)) +
+    '" placeholder="e.g. 0, -0.4"> A</label> ' +
+    '<label>gain trim <input type="number" step="any" min="0.5" max="2" ' +
+    'class="ct-trim-gain" value="' + window.kcEscapeHtml(String(gainVal)) +
+    '" placeholder="e.g. 1, 1.04"> x</label> ' +
+    '<button type="button" class="ct-trim-apply">Apply trim</button>' +
+    ' <span class="ct-trim-result"></span>' +
+    '</div>';
+}
+
+function wireCtTrimButtons() {
+  document.querySelectorAll('.ct-trim-row').forEach(function (row) {
+    var ch = row.getAttribute('data-ct-trim-ch');
+    var btn = row.querySelector('.ct-trim-apply');
+    var result = row.querySelector('.ct-trim-result');
+    if (!btn) return;
+    btn.onclick = function () {
+      var off = row.querySelector('.ct-trim-offset').value;
+      var gain = row.querySelector('.ct-trim-gain').value;
+      if (off === '' || gain === '') {
+        result.textContent = 'enter both offset trim and gain trim first';
+        result.className = 'ct-trim-result crc-mismatch';
+        return;
+      }
+      btn.disabled = true;
+      result.textContent = 'applying...';
+      result.className = 'ct-trim-result';
+      var body = 'ch=' + encodeURIComponent(ch) + '&trim_offset_a=' + encodeURIComponent(off) +
+        '&trim_gain=' + encodeURIComponent(gain);
+      fetch('/api/safety/commissioning/ct_trim', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body,
+      }).then(function (r) { return r.json().catch(function () { return { ok: false, reason: 'bad response' }; }); })
+        .then(function (j) {
+          btn.disabled = false;
+          // persisted:false means the value took effect in RAM but the NVS
+          // write failed -- shown as a failure, since it will not survive a
+          // reboot and the operator would otherwise believe it was stored.
+          if (j.ok && j.persisted) {
+            result.textContent = 'ok -- offset=' + j.trim_offset_a + ' A, gain=' + j.trim_gain + 'x';
+            result.className = 'ct-trim-result';
+            loadCommissioning();
+          } else if (j.ok) {
+            result.textContent = 'NOT SAVED: applied but not persisted (' + (j.err || 'unknown') + ')';
+            result.className = 'ct-trim-result crc-mismatch';
+          } else {
+            result.textContent = 'FAILED: ' + (j.reason || 'unknown error');
+            result.className = 'ct-trim-result crc-mismatch';
+          }
+        }).catch(function () {
+          btn.disabled = false;
+          result.textContent = 'FAILED: request error';
+          result.className = 'ct-trim-result crc-mismatch';
+        });
+    };
+  });
+}
+
 function wireCtCalButtons() {
   document.querySelectorAll('.ct-cal-row').forEach(function (row) {
     var ch = row.getAttribute('data-ct-cal-ch');
