@@ -11476,13 +11476,16 @@ static void test_zone_sweep_summed_normal_a_basic(void)
     // Opus review finding 1 (S15 false-WARN): equal on/idle (delta exactly
     // 0) used to be accepted as "a real zero normal". That is exactly the
     // shape of a single ADC count of drift -- indistinguishable from noise
-    // -- and this bench's own measured idle wander (channel 2: 60-79 counts
-    // around zero_counts=63) means a difference has to clear a real noise
-    // floor before it can be trusted as a measurement at all, not merely be
-    // non-negative. See ZONE_SWEEP_NORMAL_NOISE_FLOOR_A's own comment for
-    // where 45 mA comes from. A delta of exactly 0 is now refused, same as
-    // any other below-floor delta -- there is no such thing as a
-    // noise-floor-exempt "real zero" for a heater channel.
+    // -- so a difference has to clear a real noise floor before it can be
+    // trusted as a measurement at all, not merely be non-negative. See
+    // ZONE_SWEEP_NORMAL_NOISE_FLOOR_A's own comment for where 45 mA comes
+    // from -- as of 2026-09-18 that is a heat-enabled bench measurement
+    // (the earlier idle-wander figure this comment used to cite was taken
+    // on a circuit the K4 relay was never actually closing; see
+    // heat_enable.h and this constant's own comment for the corrected
+    // story). A delta of exactly 0 is now refused, same as any other
+    // below-floor delta -- there is no such thing as a noise-floor-exempt
+    // "real zero" for a heater channel.
     n = -1.0f;
     TEST_CHECK(zone_sweep_summed_normal_a(2.0f, 2.0f, 1.0f, &n) == false,
               "on == idle (delta 0) is below the noise floor -- refused, not persisted as zero");

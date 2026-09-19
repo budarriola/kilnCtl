@@ -190,31 +190,65 @@ bool zone_sweep_derive_ct_channel(const float *per_ch_a, uint8_t *out_ch)
  * single ADC count of drift -- indistinguishable from real load current.
  * ZONE_SWEEP_CT_RESPOND_A (2.0A) is the wrong floor to reuse here: it exists
  * to gate k_ct CALIBRATION confidence against a normal kiln heater element,
- * and this bench's own ~4W/120V fixture (roughly 33-90 mA) never reaches it
- * -- reusing it would make i_normal_a un-measurable on this bench forever,
- * not just noise-safe.
+ * and this bench's own ~4W/120V fixture never reaches it -- reusing it would
+ * make i_normal_a un-measurable on this bench forever, not just noise-safe.
  *
- * This floor is instead sized off the bench's own measured ADC noise:
- * channel 2's idle counts wander 60-79 around zero_counts[2]=63 (a
- * peak-to-peak band of ~19 raw 12-bit counts), while the one observed real
- * load swing was 60 -> 283 counts (~223 counts) -- more than 10x the noise
- * band, so a floor well above the noise and still well below that real
- * signal exists. Converting the noise band to amps needs current_sense.c's
- * own formula (I = delta_counts * Vref / 4096 / (gain * sqrt(2) * k_ct)):
- * at Vref=3.3V, k_ct=1.0 V/A (the CT probe's own owner-stated spec) and the
- * CURRENTLY COMMITTED default gain of 0.715 (current_sense.c's
- * CS_DEFAULT_GAIN, NOT the owner-stated 2.0 V DC/V rms conditioning figure
- * -- that discrepancy is flagged, not resolved, here; using the smaller
- * 0.715 is the conservative choice since amps-per-count is inversely
- * proportional to gain and a smaller gain therefore reports a LARGER, more
- * cautious floor), 19 counts ~= 15 mA. 3x that (~45 mA) clears the noise
- * band with margin while staying far below the 223-count real signal this
- * bench actually produced; it may still be close to or above this
- * particular fixture's own tiny normal current, in which case the sweep
- * correctly reports "not measured" rather than persisting a noise-derived
- * threshold -- see this function's own zero-clamp comment below for why
- * that is the safe failure direction. Revisit once the k_ct/gain
- * discrepancy above is resolved for real hardware. */
+ * REVISITED 2026-09-18, constant UNCHANGED. The derivation this comment used
+ * to document was built on two numbers that both turned out to be measuring
+ * the wrong thing:
+ *
+ *   - The original "one observed real load swing was 60 -> 283 counts"
+ *     figure, and every earlier live-fixture reading in this area's history,
+ *     was taken with the relays driven via io_set_relay_mask but WITHOUT
+ *     ever asking the RP2040 to close K4 via SAFETY_CMD_REQUEST_ENABLE (see
+ *     heat_enable.h's own top-of-file note) -- i.e. against a circuit that
+ *     was never actually energized. Every "no load response" or "tiny load
+ *     swing" number measured that way is void and must not be used to size
+ *     anything.
+ *   - The "channel 2's idle counts wander 60-79" band this floor was
+ *     originally built from is a LONG-WINDOW figure (minutes), but the
+ *     quantity this floor actually has to survive is the drift between the
+ *     ONE idle baseline sample zone_sweep_task() takes before its whole
+ *     multi-zone loop and each zone's own on-sample tens of seconds later
+ *     (up to ~30-45 s for the last zone of three, at
+ *     ZONE_SWEEP_SETTLE_MS=10000 per zone) -- a different, shorter window
+ *     than the one that band was measured over.
+ *
+ * Corrected bench measurement, 2026-09-18, with heat genuinely enabled
+ * (safety_request_enable(true), summed topology, channel 2, 10 s settle
+ * discarded before each measurement window -- the settle time matters: the
+ * peak-hold front end's own charge-up transient reads std=63.5 counts
+ * mid-settle vs std=6.6 once settled, so an unsettled window measures the
+ * turn-on ramp, not noise):
+ *
+ *   all relays off,  20 s: mean  72.30  std 3.510  (range 66-76)
+ *   all zones on, settle (10s, discarded): mean 237.94  std 63.495
+ *   all zones on, settled, 60 s: mean 261.25  std 6.573  (range 251-275)
+ *
+ * Delta = 188.95 counts summed across 3 zones, confirmed as real load by a
+ * ~5 C thermocouple rise over the same 60 s window (not an ADC artifact).
+ * Converting counts to amps uses current_sense.c's own formula
+ * (I = delta_counts * Vref / 4096 / (gain * sqrt(2) * k_ct)), at Vref=3.3V,
+ * k_ct=1.0 V/A (this floor's own reference, see
+ * ZONE_SWEEP_NORMAL_NOISE_FLOOR_REF_K_CT below) and the committed
+ * CS_DEFAULT_GAIN of 0.715: ~0.8 mA/count, so the summed delta is
+ * ~151 mA, or roughly 50 mA per zone (~63 counts/zone).
+ *
+ * That per-zone signal is ABOVE the existing 45 mA (~56-count) floor, not
+ * below it -- the premise that this bench's fixture could never clear the
+ * floor was wrong; it was the K4/energize bug making every earlier reading
+ * look tiny, not an undersized fixture. The floor is not currently blocking
+ * a sweep on this bench. The margin is thin (~1.1x over the corrected ~50 mA
+ * signal) rather than the originally-claimed wide margin, and the natural
+ * idle-to-idle drift this floor actually has to survive (per the settled
+ * data above, on the order of single-digit-to-tens of counts over the
+ * relevant tens-of-seconds gap) has not been characterized per-zone or over
+ * the full baseline-to-onset window -- so the number is left UNCHANGED
+ * rather than moved on a still-incomplete basis: there is currently no
+ * measured evidence that 45 mA is either overshooting the real noise floor
+ * by an unsafe amount or actively blocking anything. A future re-derivation
+ * should be sized from a per-zone, heat-enabled capture spanning the actual
+ * idle-sample-to-onset gap, not from a same-window std alone. */
 #define ZONE_SWEEP_NORMAL_NOISE_FLOOR_A 0.045f
 /* The k_ct_v_per_a this floor was DERIVED against (see the comment above --
  * "k_ct=1.0 V/A, the CT probe's own owner-stated spec"). 2026-09-10 fix
