@@ -1243,8 +1243,59 @@ function zoneListText(mask) {
   return names.join(', ') || 'no zones';
 }
 
+// Favorites in the firing-profile picker (owner request): favorited
+// profiles sort to the top of the list and carry a star so the reason for
+// the ordering is visible. A favorite is a SHORTCUT, not a move -- the
+// profile keeps its identity and still appears in the same underlying set,
+// it is only grouped first here. The star is therefore a text marker on the
+// <option> label and NOT a control: an <option> cannot hold a button, so it
+// cannot be mistaken for the favorite/unfavorite toggle that lives on the
+// /profiles management page. Option VALUES are untouched (still p.id), so
+// starting a firing posts exactly the identifier it posted before.
+var FAVORITE_STAR = '\u2605';
+
+// Stable partition: favorites first, everything else after, each group in
+// the order the caller already had. Array#concat and forEach both preserve
+// relative order, so this changes the GROUPING only and never the sort
+// inside a group.
+function orderProfilesByFavorite(list, favIds) {
+  const favSet = {};
+  (favIds || []).forEach(function (id) { favSet[String(id)] = true; });
+  const favs = [], rest = [];
+  (list || []).forEach(function (p) {
+    if (favSet[String(p.id)]) favs.push(p); else rest.push(p);
+  });
+  return favs.concat(rest);
+}
+
+function isFavoriteProfile(p, favIds) {
+  return (favIds || []).some(function (id) { return String(id) === String(p.id); });
+}
+
+function profileOptionLabel(p, isFav) {
+  return (isFav ? FAVORITE_STAR + ' ' : '') + profileDisplayName(p) +
+         ' (' + zoneListText(p.zone_mask) + ')';
+}
+
+// Same degrade-on-old-firmware rule the kiln-config indicator below uses: a
+// 404 (firmware without the favorites route) or a malformed body yields an
+// empty list, which makes the picker behave exactly as it did before
+// favorites existed -- no reordering, no stars, never a broken page.
+function loadFavoriteIds() {
+  return fetch('/api/profiles/favorites').then(function (r) {
+    if (!r.ok) throw 0;
+    return r.json();
+  }).then(function (d) {
+    return (d && Array.isArray(d.ids)) ? d.ids : [];
+  }).catch(function () { return []; });
+}
+
 function loadProfileList() {
-  return fetch('/api/profiles').then(function (r) { return r.json(); }).then(function (list) {
+  return Promise.all([
+    fetch('/api/profiles').then(function (r) { return r.json(); }),
+    loadFavoriteIds()
+  ]).then(function (both) {
+    const list = both[0], favIds = both[1];
     const sel = document.getElementById('profileSelect');
     sel.innerHTML = '';
     profileTitleById = {};
@@ -1265,10 +1316,10 @@ function loadProfileList() {
     }
     runBtn.dataset.noProfiles = 'false';
     runBtn.disabled = runBtn.dataset.recoveryDisabled === 'true';
-    list.forEach(function (p) {
+    orderProfilesByFavorite(list, favIds).forEach(function (p) {
       const opt = document.createElement('option');
       opt.value = p.id;
-      opt.textContent = profileDisplayName(p) + ' (' + zoneListText(p.zone_mask) + ')';
+      opt.textContent = profileOptionLabel(p, isFavoriteProfile(p, favIds));
       sel.appendChild(opt);
     });
   }).catch(function () {});

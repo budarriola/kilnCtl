@@ -153,7 +153,8 @@ Also OPEN, read-only and needed before anyone can log in at all:
 `/api/profile_exec/pause`, `/api/profile_exec/resume`,
 `/api/profile_exec/ack_last_run`.
 Plus the reads a start needs: `GET /api/profile`, `/api/profiles`,
-`/api/profiles/builtin`, `/api/profile/export`, `/api/kiln_configs`.
+`/api/profiles/builtin`, `/api/profile/export`, `/api/kiln_configs`,
+`/api/profiles/favorites`.
 
 `/api/profile_exec/stop` is reached from the dashboard by `app.js` today. See
 item 9 — stop is **never** blocked by a missing session.
@@ -174,7 +175,8 @@ and the reads `GET /api/zones`, `/api/zones/ct_channel_map`,
 
 *Profiles as data (not execution):* `POST /api/profile`,
 `/api/profile/delete`, `/api/profile/import`, `/api/profile/builtin/hide`,
-`/api/profile/builtin/restore`, `POST /api/kiln_configs/{apply,clone,delete,import,rename,save}`.
+`/api/profile/builtin/restore`, `/api/profile/favorite`,
+`POST /api/kiln_configs/{apply,clone,delete,import,rename,save}`.
 
 *Safety and calibration:* `POST /api/safety/clear_trip`,
 `/api/safety/commissioning`, `/api/safety/commissioning/{bench_preset,ct_auto_zero,ct_cal,relay_type}`,

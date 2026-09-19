@@ -167,6 +167,10 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/api/profile", HTTP_GET, ROUTE_TIER_USER),
     ROUTE_TIER("/api/profiles", HTTP_GET, ROUTE_TIER_USER),
     ROUTE_TIER("/api/profiles/builtin", HTTP_GET, ROUTE_TIER_USER),
+    /* Reads which profiles the operator marked favorite. Same tier as the
+     * profile listings it annotates -- it reports marks on those same
+     * profiles and nothing else. */
+    ROUTE_TIER("/api/profiles/favorites", HTTP_GET, ROUTE_TIER_USER),
     ROUTE_TIER("/api/profile/export", HTTP_GET, ROUTE_TIER_USER),
     ROUTE_TIER("/api/kiln_configs", HTTP_GET, ROUTE_TIER_USER),
 
@@ -212,6 +216,10 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/api/profile/import", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/profile/builtin/hide", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/profile/builtin/restore", HTTP_POST, ROUTE_TIER_ADMIN),
+    /* Writes a persisted favorite mark. A write, so at least USER; ADMIN to
+     * match its sibling persisted-preference writes above (builtin hide/
+     * restore), which likewise only change what the UI shows. */
+    ROUTE_TIER("/api/profile/favorite", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/kiln_configs/apply", HTTP_POST, ROUTE_TIER_ADMIN),
     /* Read-only progress/outcome of the apply the ADMIN route above starts
      * (the apply is asynchronous since item 5's worker landed, so its result

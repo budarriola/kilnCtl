@@ -173,6 +173,7 @@ esp_err_t profiles_page_get_handler(httpd_req_t *req);
 esp_err_t profiles_list_get_handler(httpd_req_t *req);
 esp_err_t profile_detail_get_handler(httpd_req_t *req);
 esp_err_t builtin_list_get_handler(httpd_req_t *req);
+esp_err_t favorites_list_get_handler(httpd_req_t *req);
 
 /* ---- profiles_edit_http.c --------------------------------------------------
  * Registered by profiles_http_start() in profiles_http.c. */
@@ -180,5 +181,6 @@ esp_err_t profile_post_handler(httpd_req_t *req);
 esp_err_t profile_delete_post_handler(httpd_req_t *req);
 esp_err_t builtin_hide_post_handler(httpd_req_t *req);
 esp_err_t builtin_restore_post_handler(httpd_req_t *req);
+esp_err_t profile_favorite_post_handler(httpd_req_t *req);
 
 #endif /* PROFILES_HTTP_INTERNAL_H */

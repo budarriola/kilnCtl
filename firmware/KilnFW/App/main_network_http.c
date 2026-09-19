@@ -46,6 +46,7 @@
 #include "ota_http.h"
 #include "profile_executor.h"
 #include "profiles_builtin.h"
+#include "profiles_favorites.h"
 #include "ramp_assist_cfg.h"
 #include "unit_pref.h"
 #include "profiles_http.h"
@@ -372,6 +373,17 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (builtin_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "profiles_builtin_start failed: %s -- built-in schedules shown unfiltered this boot",
                  esp_err_to_name(builtin_err));
+    }
+    // The operator's persisted "favorite" marks, on both saved slots and
+    // shipped catalogue entries. Must load before profiles_http_start()
+    // registers the read path that reports them, for the same reason the
+    // hidden-mask above must. Non-fatal in the same way: a failed load means
+    // nothing shows as favorited this boot, and nothing is lost -- a
+    // favorite is a shortcut, never the profile's only home.
+    esp_err_t fav_err = profiles_favorites_start();
+    if (fav_err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "profiles_favorites_start failed: %s -- no favorites shown this boot",
+                 esp_err_to_name(fav_err));
     }
     esp_err_t profiles_err = profiles_http_start();
     if (profiles_err != ESP_OK) {

@@ -507,6 +507,11 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # machine-generated profiles_builtin_table.inc, which is
                        # NOT listed here (it is not a translation unit).
                        "persist/profiles_builtin.c"
+                       # Persisted "favorite" marks on profiles of BOTH kinds
+                       # (saved slots and shipped catalogue entries). A
+                       # favorite is a shortcut, not a move -- see
+                       # profiles_favorites.h.
+                       "persist/profiles_favorites.c"
                        "control/profile_feasibility.c"
                        "http/readiness_http.c"
                        # SETUP_WIZARD_PLAN.md step 3: the /setup page shell.

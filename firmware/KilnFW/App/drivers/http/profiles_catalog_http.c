@@ -9,6 +9,7 @@
 
 #include "profile_feasibility.h"
 #include "profiles_builtin.h"
+#include "profiles_favorites.h"
 #include "web_encoding.h"
 #include "zones_config_query.h"  /* zones_config_get_thermo_count() -- builtin_effective_zone_mask() */
 
@@ -522,3 +523,66 @@ send:
     return send_err;
 }
 #undef PROFILE_DETAIL_JSON_CAP
+
+/* ---- Favorites listing ------------------------------------------------------
+ *
+ * GET /api/profiles/favorites -> {"user_mask":N,"builtin_mask":N,"ids":[...]}
+ *
+ * Reports the marks only; it deliberately does NOT repeat the profiles
+ * themselves. A favorite is a shortcut, not a move (profiles_favorites.h), so
+ * every favorited profile is already present in the ordinary listings that
+ * GET /api/profiles and GET /api/profiles/builtin return, and the page draws
+ * its Favorites section by picking those ids out of the list it already has.
+ * That also means this response cannot grow with profile size: it is bounded
+ * by the id COUNT (8 saved slots plus the shipped catalogue), so the small
+ * fixed local below is sufficient and no heap or chunking is needed.
+ */
+esp_err_t favorites_list_get_handler(httpd_req_t *req)
+{
+    uint32_t user_mask = 0, builtin_mask = 0;
+    profiles_favorites_masks(&user_mask, &builtin_mask);
+
+    /* Worst case is every id favorited: PROFILES_MAX_COUNT plus the
+     * catalogue count, each at most 3 digits and a comma, inside a ~64-byte
+     * envelope. The static assert keeps that reasoning true if either count
+     * grows later rather than letting it silently overflow. */
+    char json[320];
+    _Static_assert(PROFILES_MAX_COUNT + 32 <= 60, "favorites id list must still fit json[320]");
+
+    int o = snprintf(json, sizeof(json), "{\"user_mask\":%lu,\"builtin_mask\":%lu,\"ids\":[",
+                     (unsigned long)user_mask, (unsigned long)builtin_mask);
+    if (o < 0 || (size_t)o >= sizeof(json)) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "favorites encode failed");
+        return ESP_OK;
+    }
+    bool first = true;
+    for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) {
+        if (!(user_mask & (1u << i))) {
+            continue;
+        }
+        int n = snprintf(json + o, sizeof(json) - (size_t)o, "%s%u", first ? "" : ",", (unsigned)i);
+        if (n < 0 || (size_t)n >= sizeof(json) - (size_t)o) {
+            break;
+        }
+        o += n;
+        first = false;
+    }
+    for (size_t i = 0; i < g_builtin_profile_count && i < 32; i++) {
+        if (!(builtin_mask & (1u << i))) {
+            continue;
+        }
+        int n = snprintf(json + o, sizeof(json) - (size_t)o, "%s%u", first ? "" : ",",
+                         (unsigned)(PROFILE_BUILTIN_ID_BASE + i));
+        if (n < 0 || (size_t)n >= sizeof(json) - (size_t)o) {
+            break;
+        }
+        o += n;
+        first = false;
+    }
+    int n = snprintf(json + o, sizeof(json) - (size_t)o, "]}");
+    if (n > 0 && (size_t)n < sizeof(json) - (size_t)o) {
+        o += n;
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, (size_t)o);
+}

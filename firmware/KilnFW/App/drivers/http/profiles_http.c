@@ -1401,6 +1401,12 @@ esp_err_t profiles_http_start(void)
     static const httpd_uri_t builtin_restore_uri = {
         .uri = "/api/profile/builtin/restore", .method = HTTP_POST, .handler = builtin_restore_post_handler,
     };
+    static const httpd_uri_t favorites_list_uri = {
+        .uri = "/api/profiles/favorites", .method = HTTP_GET, .handler = favorites_list_get_handler,
+    };
+    static const httpd_uri_t favorite_post_uri = {
+        .uri = "/api/profile/favorite", .method = HTTP_POST, .handler = profile_favorite_post_handler,
+    };
     err = kiln_http_register(server, &page_uri);
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "httpd_register_uri_handler(/profiles) failed: %s", esp_err_to_name(err));
@@ -1441,6 +1447,19 @@ esp_err_t profiles_http_start(void)
     err = kiln_http_register(server, &builtin_restore_uri);
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "httpd_register_uri_handler(POST /api/profile/builtin/restore) failed: %s",
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    err = kiln_http_register(server, &favorites_list_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(PROFILES_TAG, "httpd_register_uri_handler(GET /api/profiles/favorites) failed: %s",
+                 esp_err_to_name(err));
+        return err;
+    }
+    err = kiln_http_register(server, &favorite_post_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(PROFILES_TAG, "httpd_register_uri_handler(POST /api/profile/favorite) failed: %s",
                  esp_err_to_name(err));
         return err;
     }

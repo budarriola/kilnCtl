@@ -11,6 +11,7 @@
 #include "MAX31856.h"
 #include "http_form.h"
 #include "profiles_builtin.h"
+#include "profiles_favorites.h"
 #include "zones_config_accessors.h"
 
 
@@ -535,6 +536,13 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
         ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%ld) failed: %s -- deleted live but may reappear after reboot", id,
                  esp_err_to_name(err));
     }
+    /* The slot is now empty, so a favorite pointing at it would reference
+     * nothing. Clearing it here is what keeps deletion from leaving a
+     * dangling favorite; see profiles_favorites.h for why an IMPORT over an
+     * occupied slot deliberately does the opposite and keeps the mark. A
+     * failed save is logged inside the module and does not fail the delete,
+     * which has already happened. */
+    (void)profiles_favorites_set((uint8_t)id, false);
     return httpd_resp_sendstr(req, "ok");
 }
 
@@ -611,3 +619,51 @@ esp_err_t builtin_restore_post_handler(httpd_req_t *req)
     return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
 }
 
+
+/* ---- Favorite / unfavorite --------------------------------------------------
+ *
+ * POST /api/profile/favorite  body: id=<0..>&favorite=0|1
+ *
+ * Accepts an id in EITHER namespace -- a saved slot or a shipped catalogue
+ * entry -- because any profile can be favorited. Unlike the delete route
+ * above, this one therefore does not refuse builtin ids: favoriting a shipped
+ * schedule is a supported operation, not an attempt to modify read-only
+ * flash. Nothing about the profile itself changes; only the mark does.
+ */
+esp_err_t profile_favorite_post_handler(httpd_req_t *req)
+{
+    char body[65];
+    if (!read_small_body(req, body, sizeof(body))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing, too large, or read failed");
+        return ESP_OK;
+    }
+
+    char id_val[8];
+    int id_len = http_form_find_field(body, "id", id_val, sizeof(id_val));
+    char *end = NULL;
+    long id = (id_len > 0) ? strtol(id_val, &end, 10) : -1;
+    if (id_len <= 0 || end == id_val || id < 0 || id > 255) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id missing or out of range");
+        return ESP_OK;
+    }
+    bool known = (id < PROFILES_MAX_COUNT) || profiles_builtin_id_valid((uint8_t)id);
+    if (!known) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such profile");
+        return ESP_OK;
+    }
+
+    /* Missing "favorite" defaults to 1: the endpoint is named "favorite", so
+     * the request with no qualifier means favorite. Unfavoriting takes an
+     * explicit favorite=0 -- the same convention builtin_hide_post_handler
+     * uses for "hidden". */
+    char fav_val[8];
+    int fav_len = http_form_find_field(body, "favorite", fav_val, sizeof(fav_val));
+    bool favorite = (fav_len <= 0) || (fav_val[0] != '0');
+
+    esp_err_t err = profiles_favorites_set((uint8_t)id, favorite);
+    char json[128];
+    int n = snprintf(json, sizeof(json), "{\"ok\":true,\"id\":%ld,\"favorite\":%s,\"persisted\":%s}", id,
+                     favorite ? "true" : "false", err == ESP_OK ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}

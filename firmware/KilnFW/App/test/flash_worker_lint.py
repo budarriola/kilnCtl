@@ -256,6 +256,20 @@ ALLOWLIST = {
     # .bss-resident, never PSRAM. No caller of either write function reaches
     # it from a PSRAM-stacked task.
     "profiles_builtin.c",
+    # Pattern 3 (internal-SRAM-stack caller, reached live, not init-time),
+    # the same shape and the same established facts as profiles_builtin.c's
+    # entry directly above -- this file stores the favorite masks the way
+    # that one stores the hidden mask. Three write call sites, one per
+    # caller: profiles_favorites_start() is init-time, called once from
+    # main_network_http.c's bringup on app_main's own task before the httpd
+    # task exists; profiles_favorites_set() is reached live from
+    # profiles_edit_http.c's POST /api/profile/favorite handler and from the
+    # dangling-favorite cleanup at the end of its profile_delete_post_handler
+    # -- both on the httpd task, internal-SRAM stack, the same fact
+    # profiles_builtin.c's/zones_config_store.c's entries already rely on.
+    # No caller reaches either function from a PSRAM-stacked task, and
+    # neither runs on the flash worker, so there is no re-entrancy path.
+    "profiles_favorites.c",
     # Pattern 2 (local caller_stack_is_external() guard), added after the
     # "earlier pass treated this file as always-internal-stack" incident --
     # see this file's own comment.
