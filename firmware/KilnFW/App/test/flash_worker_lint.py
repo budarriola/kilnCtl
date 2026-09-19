@@ -444,6 +444,12 @@ CFG_FS_ALLOWLIST = {
     "pref_cfg_fs.c",
     "profiles_cfg_fs.c",
     "zones_config_cfg_fs.c",
+    # firing_stats_cfg_fs_delete() (PROFILE_SLOTS_100_PLAN.md sec 7 task 10):
+    # deletes the firing-history mirror file for a profile id being erased,
+    # called only from profile_executor_firing_stats.c's firing_stats_erase(),
+    # itself only reached through profiles_http.c's nvs_erase_slot() -- same
+    # caller-guarded shape as profiles_cfg_fs.c's own delete path above.
+    "firing_stats_cfg_fs.c",
 }
 
 WRITE_CALL_RE = re.compile(

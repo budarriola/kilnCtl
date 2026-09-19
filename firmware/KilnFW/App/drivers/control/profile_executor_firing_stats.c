@@ -605,13 +605,25 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
  * profiles_http.c): a failure here is logged and swallowed, never turned
  * into a failed slot delete. Safe (a clean no-op) for an id that never
  * fired -- HAL_NOT_FOUND on the NVS erase is treated as success, matching
- * nvs_erase_slot()'s own hal_kv_erase_key() call. Does NOT check
- * caller_stack_is_external(): both of today's callers are the same
- * httpd_worker path nvs_erase_slot() already guards before reaching this
- * point, and this function only erases (frees flash), never allocates a
- * heap blob the way firing_stats_persist() above does. */
+ * nvs_erase_slot()'s own hal_kv_erase_key() call. Checks
+ * caller_stack_is_external() itself (check_nvs_write_guard_coverage.ps1
+ * requires every NVS-writing function in this file to, not just its
+ * callers) -- defense in depth, same reasoning as firing_stats_persist()
+ * above: today's only caller (nvs_erase_slot(), on the httpd_worker path)
+ * already guards before reaching here, but a future caller on a
+ * PSRAM-stacked task must not be able to bypass this by skipping that
+ * caller's own check. */
 void firing_stats_erase(uint8_t profile_id)
 {
+    if (caller_stack_is_external()) {
+        ESP_LOGE(PE_TAG, "firing_stats_erase: REFUSING -- calling task's stack is in external "
+                         "RAM (PSRAM). A flash/NVS write from here would abort the whole board "
+                         "(ESP-IDF's esp_task_stack_is_sane_cache_disabled()). Route this call "
+                         "through a task with an internal-SRAM stack instead -- see "
+                         "DRAM_PSRAM_PLAN.md section 7.2 and uart_bridge_ext.c's flash-safe "
+                         "worker for the established pattern.");
+        return;
+    }
     char key[16];
     snprintf(key, sizeof(key), "fs_%u", (unsigned)profile_id);
     hal_kv_handle_t h;
