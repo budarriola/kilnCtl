@@ -201,6 +201,18 @@ ALLOWLIST = {
     # itself -- this guard is the defensive backstop if that is ever
     # violated, not the primary safety argument.
     "kiln_cfg_swap.c",
+    # Pattern 2 (local caller_stack_is_external() guard, via the SAME shared
+    # hal_kv_write_safe_here() predicate kiln_cfg_store.c's/kiln_cfg_swap.c's
+    # entries above use -- not a re-derived copy). docs/LIVE_PROFILE_EDIT_
+    # PLAN.md pass 1: live_profile_save_record()/_save_working()/_clear()
+    # each guard with `if (caller_stack_is_external()) { ... refuse ... }`
+    # as the first thing they do. Callers today are host tests only; from
+    # pass 2 on, the profile-edit HTTP handler and profile_executor's own
+    # end-of-firing decision path call in -- neither a PSRAM-stacked task
+    # nor the flash worker itself, but this guard is the defensive backstop
+    # rather than the primary argument, same shape as kiln_cfg_swap.c's
+    # entry above.
+    "live_profile.c",
     # Pattern 3 (init-time / recovery path): ota_http.c's pico-firmware
     # esp_partition_erase_range()/esp_partition_write() calls run from the
     # single-threaded OTA apply sequence, not a PSRAM-stacked handler task.
