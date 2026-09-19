@@ -8,27 +8,32 @@
 <script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
 <!-- docs/WEB_AUTH_PLAN.md section 6: the ADMIN-only page for setting/changing
      the web password (admin + user), both LCD PINs, the web/LCD auth-enabled
-     switches, and the two inactivity timeouts. Follows settings_display_page.html's
+     switches, the two inactivity timeouts, and item 12b's "Clear login
+     credentials" action. Follows settings_display_page.html's
      structure/token idiom (theme.css does all the real styling; this block is
      only the page-local --bg/--fg/etc names theme.css's shared rules read).
 
-     DEFERRED, all pending docs/WEB_AUTH_PLAN.md item 5 (the session/enforcement
-     point -- web_auth_session.h, not yet landed on main as of this writing):
-       - Route registration (no httpd_register_uri_handler call exists yet for
-         this page or for the /api/auth/* endpoints it calls).
-       - security_http.c, the ESP HTTP layer that would dispatch those requests
-         into security_http_core.c's security_http_dispatch().
-       - CMakeLists.txt SRCS / KILNCTL_GZIP_ASSETS wiring for this file.
-       - nav.js's NAV_LINKS entry (so this page is not reachable from the menu
-         yet either).
-     None of that affects this file's own correctness: the markup, the client-
-     side validation, and the fetch() calls below stand on their own and will
-     start working the moment the four items above land. See the wire-contract
-     comment on the inline <script> below for the exact JSON shape this page
-     expects from /api/auth/config and posts to /api/auth/security -- that
-     contract does not exist anywhere else yet, since security_http.c has not
-     been written; this page defines it so the two sides can be wired together
-     without re-deriving field names later. -->
+     This page is fully wired on the device. The four items this comment once
+     listed as DEFERRED pending item 5's session/enforcement point have all
+     landed:
+       - Route registration: security_http.c's security_http_start() registers
+         GET /settings/security, GET /api/auth/config and POST
+         /api/auth/security through kiln_http_register(), and is called from
+         main_network_http.c.
+       - security_http.c itself -- the ESP HTTP layer that parses those
+         requests and dispatches them into security_http_core.c's
+         security_http_dispatch().
+       - App/drivers/CMakeLists.txt: this file is in KILNCTL_GZIP_ASSETS (it is
+         served pre-gzipped), and security_http.c plus security_http_core.c are
+         in that component's SRCS.
+       - nav.js's NAV_LINKS entry, so the page is reachable from the menu.
+     All three routes are ROUTE_TIER_ADMIN in route_tier_table.h, so
+     kiln_http_register()'s pre-handler refuses a non-admin caller before any
+     handler body runs; security_http_dispatch() then re-checks ADMIN on its
+     own terms (defence in depth). See the wire-contract comment on the inline
+     <script> below for the exact JSON shape this page expects from
+     /api/auth/config and posts to /api/auth/security -- security_http.c
+     implements that contract, so the two sides must be changed together. -->
 <script defer src="/nav.js"></script>
 <script defer src="/app.js"></script>
 <style>
@@ -225,8 +230,9 @@ password below for at least the administrator account before turning authenticat
 <script>
 (function () {
   // ---------------------------------------------------------------------
-  // Wire contract (this page's own design -- security_http.c does not exist
-  // yet, so there is no other source for these field names today):
+  // Wire contract -- implemented on the device by security_http.c's
+  // security_config_get_handler() and security_post_handler(); that file's
+  // own comments point back here, and the two must be changed together:
   //
   //   GET /api/auth/config ->
   //     { web_enabled, lcd_enabled,           // effective booleans, already
@@ -266,8 +272,8 @@ password below for at least the administrator account before turning authenticat
   //      web_auth_store.h line/comment it mirrors (see below), so a diff to
   //      that header is easy to notice when re-reading this file.
   //   2. Neither function is authoritative. The server call
-  //      (web_auth_backend_set_web_password/set_lcd_pin, once security_http.c
-  //      exists) always re-runs the real web_auth_password_check()/
+  //      (web_auth_backend_set_web_password/set_lcd_pin, reached through
+  //      security_http.c) always re-runs the real web_auth_password_check()/
   //      web_auth_pin_check() before writing anything -- this page's checks
   //      only ever produce an early "that will be rejected" message, never a
   //      bypass. A drift between the two copies can make this page too

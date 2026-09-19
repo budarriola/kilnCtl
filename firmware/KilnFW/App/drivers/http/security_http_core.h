@@ -63,6 +63,10 @@ typedef struct {
 
 typedef struct {
     int http_status;                         // 200/400/403/501/500
+    // Failure text only, from this module's own fixed set of static strings
+    // (never caller-supplied). EMPTY on http_status 200 -- success needs no
+    // message, and the only consumer (security_http.c) reads this field on
+    // the failure branch alone, per net/security_page.html's wire contract.
     char message[SECURITY_HTTP_MESSAGE_MAX];
     bool invalidated_sessions;
     security_role_t invalidated_role;        // meaningful only if invalidated_sessions

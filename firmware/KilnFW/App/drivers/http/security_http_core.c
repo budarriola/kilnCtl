@@ -47,6 +47,19 @@ static void set_result(security_result_t *out, int status, const char *msg)
     out->message[n] = '\0';
 }
 
+// The success result. `out->message` is deliberately left EMPTY: the only
+// consumer of that field, security_http.c's security_post_handler(), sends
+// a bare {"ok":true} on http_status 200 and reads result.message only on
+// the failure branch -- which is also exactly the wire contract
+// net/security_page.html documents and its fetch() handlers implement
+// ({ok:true} / {ok:false,error:"..."}). Success strings here were
+// constructed and then discarded on every successful call; rather than
+// widen the response to carry them, they are no longer built at all.
+static void set_ok(security_result_t *out)
+{
+    set_result(out, 200, "");
+}
+
 static bool username_is_valid(const char *username)
 {
     size_t len = strlen(username);
@@ -122,7 +135,7 @@ void security_http_dispatch(const security_backend_vtable_t *vt, security_role_t
             return;
         }
         vt->invalidate_sessions_for_role(SECURITY_ROLE_ADMIN);
-        set_result(out, 200, "administrator password updated");
+        set_ok(out);
         out->invalidated_sessions = true;
         out->invalidated_role = SECURITY_ROLE_ADMIN;
         return;
@@ -141,7 +154,7 @@ void security_http_dispatch(const security_backend_vtable_t *vt, security_role_t
             return;
         }
         vt->invalidate_sessions_for_role(SECURITY_ROLE_USER);
-        set_result(out, 200, "user password updated");
+        set_ok(out);
         out->invalidated_sessions = true;
         out->invalidated_role = SECURITY_ROLE_USER;
         return;
@@ -161,7 +174,7 @@ void security_http_dispatch(const security_backend_vtable_t *vt, security_role_t
         // decides what that means; this call site's contract is simply
         // "a PIN changed, tell the session layer which role's PIN it was".
         vt->invalidate_sessions_for_role(req->lcd_pin_role);
-        set_result(out, 200, "LCD PIN updated");
+        set_ok(out);
         out->invalidated_sessions = true;
         out->invalidated_role = req->lcd_pin_role;
         return;
@@ -185,7 +198,7 @@ void security_http_dispatch(const security_backend_vtable_t *vt, security_role_t
         // (disable keeps sessions, enable clears them) belongs to the
         // backend that actually owns the session table, not to this
         // dispatch, which only forwards the requested policy.
-        set_result(out, 200, "policy updated");
+        set_ok(out);
         return;
     }
     case SECURITY_CMD_CLEAR_CREDENTIALS: {
@@ -216,7 +229,7 @@ void security_http_dispatch(const security_backend_vtable_t *vt, security_role_t
         // web-session slots; the LCD side is covered by the first call.
         vt->invalidate_sessions_for_role(SECURITY_ROLE_ADMIN);
         vt->invalidate_sessions_for_role(SECURITY_ROLE_USER);
-        set_result(out, 200, "login credentials cleared");
+        set_ok(out);
         out->invalidated_sessions = true;
         out->invalidated_role = SECURITY_ROLE_ADMIN;
         return;
