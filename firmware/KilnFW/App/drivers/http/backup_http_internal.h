@@ -62,7 +62,40 @@ extern const char *BACKUP_TAG;
 // BACKUP_FORMAT_VERSION rather than moving into backup_import.c alone, since
 // a reader of this header wants the whole size/version contract in one
 // place.
-#define BACKUP_BODY_MAX 16384
+//
+// Raised 16384 -> 131072 (128 KiB) for the kiln_configs[] array (item 17
+// follow-up): a full board carries up to KILN_CFG_MAX_COUNT (10) slots, each
+// embedding a full package envelope up to KILN_CFG_EXPORT_JSON_MAX_LEN
+// (6144) bytes, so a worst-case multi-slot backup alone is ~61 KB before
+// profiles/zones/timing_profiles are even counted -- already over the old
+// 16 KiB ceiling. 128 KiB gives roughly 2x headroom over that worst case
+// plus everything else this document already carries, comfortably, without
+// tuning to the exact byte count of today's KILN_CFG_MAX_COUNT/
+// KILN_CFG_EXPORT_JSON_MAX_LEN (both of which may grow later).
+//
+// Why this is safe to just raise (owner-confirmed, see docs/KILN_PROFILES_
+// PLAN.md item 17's restore section): backup_import.c's body buffer
+// (backup_import_post_handler(), the `heap_caps_malloc((size_t)req->
+// content_len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)` call) is ALREADY a
+// dynamically-sized SPIRAM-only allocation, sized to the actual request,
+// never a fixed buffer -- raising this ceiling changes nothing about HOW
+// that memory is allocated, only how large a request is accepted before the
+// pre-flight `content_len > BACKUP_BODY_MAX` check refuses it outright (with
+// a clean 400, before any allocation is attempted at all -- an oversized or
+// malicious body still fails cleanly, it just fails at a higher line). This is
+// explicitly NOT the httpd worker's own internal-DRAM task stack, and NOT
+// zones_config_json.c's internal zones-JSON buffer -- the two buffers this
+// codebase's standing rule prohibits enlarging, both of which live in
+// internal DRAM where this board is genuinely tight. MALLOC_CAP_SPIRAM forces
+// external-RAM-only allocation (ESP-IDF gives no internal-DRAM fallback for
+// that flag), so this allocation cannot land in, or compete with, internal
+// DRAM regardless of size. This board's PSRAM is plentiful and not a scarce
+// resource the way internal DRAM is (see this codebase's PSRAM-stack-vs-NVS-
+// write caution elsewhere, which is about STACK placement, not this kind of
+// plain data buffer -- backup_import_apply()'s NVS writes still run on the
+// httpd worker task, whose own stack is unchanged, internal-SRAM, and was
+// never moved by this change).
+#define BACKUP_BODY_MAX 131072
 
 // --- Route handlers registered by backup_http_start() (backup_http.c) but --
 // defined in one of the other split files. Each was `static` in the
