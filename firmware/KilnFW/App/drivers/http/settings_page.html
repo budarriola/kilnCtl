@@ -55,6 +55,17 @@
   h1 { font-size: 1.2em; }
   h2 { font-size: 1em; margin-top: 1.5em; border-top: 1px solid var(--border); padding-top: 1em; }
   p { color: var(--muted); }
+  /* New shared AP-password field (2026-09-18 OTA-handshake de-dup fix) --
+     this page had zero input[type] rules before, so the bare <input> landed
+     at the browser default (~177x21px), failing check_ui_responsive_sweep.ps1's
+     32px touch-target minimum at every width. Mirrors net/security_page.html's
+     input[type="text"], input[type="password"] rule (same padding/min-height/
+     border convention) rather than inventing a new one. */
+  label[for="apPassword"] { display: block; margin-top: 0.7em; font-weight: bold; font-size: 0.9em; }
+  input[type="password"] {
+    width: 100%; box-sizing: border-box; padding: 0.5em; font-size: 1em; min-height: 2.4em;
+    background: var(--card-bg); color: var(--fg); border: 1px solid var(--border);
+  }
 </style>
 </head>
 <body>
@@ -137,6 +148,26 @@
      did -- the "Clear latched trip" button on the Safety page (and the
      dashboard's own Clear Trip button), both POSTing /api/safety/clear_trip.
      That is where this copy now points. -->
+<!-- Owner report 2026-09-18: this button used to send a bare, unauthenticated
+     POST /api/sw_reset and always failed ("missing or malformed X-Ota-Mac
+     header") -- the server route requires the same challenge/HMAC handshake
+     every OTA-family mutating route requires (ota_http.c's
+     ota_http_authenticate_request(), context "sw-reset"), and this page had
+     no way to sign a request at all. The factory-reset buttons below have
+     the identical defect (context "factory-reset"). Fixed by signing both
+     with the SAME shared handshake net/ota_page.html already uses
+     (window.kcOtaAuthedFetch, moved into app.js so there is exactly one
+     implementation) -- see app.js's own header comment. One password field
+     serves both sections below; see ota_page.html for the identical
+     "AP password as the update key, never sent to the board" wording this
+     borrows. -->
+<label for="apPassword">Wi-Fi AP password (update key)</label>
+<input type="password" id="apPassword" autocomplete="off">
+<p class="note">Required to reboot or reset below -- proves you're on the
+network with the AP password, it does not stop anyone else who also knows
+it. See <a href="/ota">Firmware update</a>'s identical note for the full
+UPDATE_PROTOCOL.md reasoning.</p>
+
 <h2 id="sw-reset">Reboot</h2>
 <p>Reboots <strong>both</strong> processors right now: this controller, and
 the safety processor, which is commanded to restart in place -- same
@@ -270,8 +301,17 @@ document.getElementById('cfgFsFormatConfirmBtn').addEventListener('click', funct
     return;
   }
   var status = document.getElementById('cfgFsFormatStatus');
+  var pw = document.getElementById('apPassword').value;
+  if (!pw) {
+    status.textContent = 'Enter the Wi-Fi AP password first.';
+    return;
+  }
   status.textContent = 'Formatting...';
-  fetch('/api/cfgfs/format_confirm', { method: 'POST' }).then(function (r) {
+  // cfg_fs_format_http.c's format_confirm_post_handler() deliberately reuses
+  // OTA_HTTP_CONTEXT_FACTORY_RESET (see that file's own header comment) --
+  // not a separate context of its own -- so this signs with "factory-reset",
+  // same as the Danger-zone buttons below.
+  window.kcOtaAuthedFetch('/api/cfgfs/format_confirm', 'factory-reset', pw, { method: 'POST' }).then(function (r) {
     return r.text().then(function (t) { return { ok: r.ok, text: t }; });
   }).then(function (res) {
     status.textContent = res.ok ? res.text : ('Failed: ' + res.text);
@@ -297,8 +337,13 @@ document.getElementById('swResetBtn').addEventListener('click', function () {
     return;
   }
   var status = document.getElementById('swResetStatus');
+  var pw = document.getElementById('apPassword').value;
+  if (!pw) {
+    status.textContent = 'Enter the Wi-Fi AP password first.';
+    return;
+  }
   status.textContent = 'Rebooting both processors...';
-  fetch('/api/sw_reset', { method: 'POST' }).then(function (r) {
+  window.kcOtaAuthedFetch('/api/sw_reset', 'sw-reset', pw, { method: 'POST' }).then(function (r) {
     return r.text().then(function (t) { return { ok: r.ok, text: t }; });
   }).then(function (res) {
     status.textContent = res.ok ? res.text : ('Failed: ' + res.text);
@@ -316,8 +361,13 @@ document.querySelectorAll('.danger-btn').forEach(function (b) {
       return;
     }
     var status = document.getElementById('resetStatus');
+    var pw = document.getElementById('apPassword').value;
+    if (!pw) {
+      status.textContent = 'Enter the Wi-Fi AP password first.';
+      return;
+    }
     status.textContent = 'Erasing and rebooting...';
-    fetch('/api/factory_reset', {
+    window.kcOtaAuthedFetch('/api/factory_reset', 'factory-reset', pw, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: 'scope=' + encodeURIComponent(scope),

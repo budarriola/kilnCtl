@@ -240,5 +240,42 @@ function extract_js_var_string(src, varName) {
   }
 }
 
+{
+  // Guard against re-introducing the exact bug this de-duplication pass
+  // fixed (2026-09-18): net/ota_page.html used to carry its own inline
+  // sha256()/hmacSha256() and set 'X-Ota-Mac' by hand; settings_page.html
+  // needed the identical handshake and had NO copy at all, so its
+  // Reboot/factory-reset buttons always failed with "missing or malformed
+  // X-Ota-Mac header". The fix moved the one true implementation into
+  // app.js (window.kcOtaAuthedFetch et al.) -- this check is what stops a
+  // future page from quietly growing a second copy instead of calling it.
+  //
+  // Mechanical and narrow, same shape as the two string-drift checks above:
+  // any page/script under `dir` other than app.js itself that (a) defines
+  // its own sha256/hmacSha256 function, or (b) references the literal
+  // header name 'X-Ota-Mac' (case-insensitive, either quote style) is
+  // failing, full stop -- the only sanctioned place either of those may
+  // appear is inside app.js's kcOta* helpers.
+  const appJsPath = find_file(dir, 'app.js');
+  const reOwnCrypto = /\bfunction\s+(sha256|hmacSha256)\s*\(/;
+  const reOtaMacHeader = /['"]x-ota-mac['"]/i;
+  for (const fullPath of walk_files(dir).filter(p => /\.(html|js)$/.test(p))) {
+    if (appJsPath && path.resolve(fullPath) === path.resolve(appJsPath)) continue;
+    checked++;
+    const src = fs.readFileSync(fullPath, 'utf8');
+    const f = path.relative(dir, fullPath).split(path.sep).join('/');
+    if (reOwnCrypto.test(src)) {
+      bad++;
+      console.log(`${f}: defines its own sha256/hmacSha256 instead of using ` +
+                   `window.kcOtaCrypto (app.js) -- the OTA handshake must have exactly one implementation.`);
+    }
+    if (reOtaMacHeader.test(src)) {
+      bad++;
+      console.log(`${f}: sets the X-Ota-Mac header directly instead of going through ` +
+                   `window.kcOtaAuthedFetch (app.js) -- that is exactly the duplication this check exists to catch.`);
+    }
+  }
+}
+
 console.log(`\nchecked ${checked} script/style blocks, ${bad} problem(s)`);
 process.exit(bad ? 1 : 0);
