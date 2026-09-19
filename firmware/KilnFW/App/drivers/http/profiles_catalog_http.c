@@ -286,40 +286,25 @@ esp_err_t builtin_list_get_handler(httpd_req_t *req)
                                      * +37 (PROFILE_SLOTS_100_PLAN.md task 8) for
                                      * ",\"last_run_started_unix_s\":4294967295" (10-digit uint32 max) */
 
-/* Bytes reserved at the tail of `json` that no per-slot APPEND is ever
- * allowed to write into -- so the fallback "listing truncated" notice below
- * always has guaranteed room to land, and the array's own close (sent as a
- * separate chunk, never through this buffer) is never the thing at risk.
- * Same discipline as readiness_http.c's append_item() reserve. */
-#define PROFILE_LIST_CLOSE_RESERVE 96
-
+/* Chunked (2026-09-19, 100-slot plan task 2): the old shape built the ENTIRE
+ * user-slot section into one stack-local `json[PROFILES_MAX_COUNT *
+ * PROFILE_LIST_ENTRY_MAX + ...]` array before ever calling
+ * httpd_resp_send_chunk() -- fine at 8 slots (~1.6 KB), but
+ * PROFILES_MAX_COUNT growing toward 100 would put ~19 KB on the 8 KB
+ * httpd_worker stack, the exact `httpd_stack_blob` class
+ * check_httpd_task_stack_budget.py exists to catch. Each entry is now built
+ * into, and sent from, its own small per-entry buffer -- the same
+ * send_chunk_checked() pattern send_builtin_summary()/send_builtin_full()
+ * already use just above in this file -- so the stack cost is O(1) in
+ * PROFILES_MAX_COUNT, not O(N). At the current 8 slots the emitted bytes are
+ * unchanged: same fields, same order (user slots, then visible builtins),
+ * same JSON. */
 esp_err_t profiles_list_get_handler(httpd_req_t *req)
 {
-    char json[PROFILES_MAX_COUNT * PROFILE_LIST_ENTRY_MAX + PROFILE_LIST_CLOSE_RESERVE + 16];
-    size_t o = 0;
-    int n;
-    bool dropped = false; /* an item didn't fit even the enlarged budget -- report it, don't hide it */
-
-    /* Never writes past sizeof(json) - PROFILE_LIST_CLOSE_RESERVE -- `avail`
-     * is clamped to 0 once `o` reaches that line, so a would-be write past it
-     * is treated exactly like any other overflow (dropped, not truncated
-     * into the reserve). */
-#define APPEND(...)                                                                              \
-    do {                                                                                          \
-        size_t avail = (o + PROFILE_LIST_CLOSE_RESERVE < sizeof(json))                             \
-                           ? sizeof(json) - PROFILE_LIST_CLOSE_RESERVE - o                          \
-                           : 0;                                                                     \
-        n = snprintf(json + o, avail, __VA_ARGS__);                                               \
-        if (n < 0 || (size_t)n >= avail) {                                                         \
-            dropped = true;                                                                        \
-            goto list_done;                                                                        \
-        }                                                                                          \
-        o += (size_t)n;                                                                            \
-    } while (0)
-
-    json[o++] = '[';
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_send_chunk(req, "[", 1);
     bool first = true;
-    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT && err == ESP_OK; id++) {
         if (!(s_profiles.used_bitmap & (1u << id))) {
             continue;
         }
@@ -335,43 +320,22 @@ esp_err_t profiles_list_get_handler(httpd_req_t *req)
          * this never blocks the save/list, only the actual run start. */
         bool exceeds = profile_exceeds_zone_ceiling(p, NULL, 0);
         uint32_t last_run = profile_executor_last_run_started_unix_s(id);
-        APPEND("%s{\"id\":%u,\"builtin\":false,\"name\":\"%s\",\"zone_mask\":%u,\"segment_count\":%u,"
-               "\"exceeds_ceiling\":%s,\"last_run_started_unix_s\":%lu}",
-               first ? "" : ",", id, name_escaped, p->zone_mask, p->segment_count,
-               exceeds ? "true" : "false", (unsigned long)last_run);
+        char chunk[PROFILE_LIST_ENTRY_MAX];
+        int n = snprintf(chunk, sizeof(chunk),
+                         "%s{\"id\":%u,\"builtin\":false,\"name\":\"%s\",\"zone_mask\":%u,\"segment_count\":%u,"
+                         "\"exceeds_ceiling\":%s,\"last_run_started_unix_s\":%lu}",
+                         first ? "" : ",", id, name_escaped, p->zone_mask, p->segment_count,
+                         exceeds ? "true" : "false", (unsigned long)last_run);
+        err = send_chunk_checked(req, chunk, n, sizeof(chunk), "profile list entry");
         first = false;
     }
 
-#undef APPEND
-
-list_done:
-    if (dropped) {
-        /* Guaranteed to fit: PROFILE_LIST_CLOSE_RESERVE bytes at json+o were
-         * never touched by any APPEND above. Reported AS an item -- a
-         * silently shortened list looks exactly like a pass, which is the
-         * failure mode this exists to prevent (same rule readiness_http.c's
-         * append_item() dropped-item notice follows). */
-        int n2 = snprintf(json + o, sizeof(json) - o,
-                          "%s{\"id\":null,\"builtin\":false,\"error\":\"one or more profiles omitted -- "
-                          "listing too large\"}",
-                          first ? "" : ",");
-        if (n2 > 0 && (size_t)n2 < sizeof(json) - o) {
-            o += (size_t)n2;
-            first = false;
-        } else {
-            ESP_LOGE(PROFILES_TAG, "profiles listing: dropped-item notice itself didn't fit -- "
-                         "PROFILE_LIST_CLOSE_RESERVE is too small");
-        }
-    }
-
-    /* Chunked, because the visible builtin summaries appended after the user
-     * slots would not fit alongside them in one stack buffer -- see the
-     * response-size note above builtin_list_get_handler(). Segments are
-     * deliberately NOT included here; a listing does not need 136 of them,
-     * and GET /api/profile?id=<builtin> / GET /api/profiles/builtin serve
-     * them when something actually does. */
-    httpd_resp_set_type(req, "application/json");
-    esp_err_t err = httpd_resp_send_chunk(req, json, o);
+    /* Visible builtin summaries appended after the user slots -- unchanged
+     * from before this pass; see the response-size note above
+     * builtin_list_get_handler(). Segments are deliberately NOT included
+     * here; a listing does not need 136 of them, and
+     * GET /api/profile?id=<builtin> / GET /api/profiles/builtin serve them
+     * when something actually does. */
     for (size_t i = 0; i < g_builtin_profile_count && err == ESP_OK; i++) {
         uint8_t bid = (uint8_t)(PROFILE_BUILTIN_ID_BASE + i);
         if (profiles_builtin_is_hidden(bid)) {
@@ -556,56 +520,62 @@ send:
  * every favorited profile is already present in the ordinary listings that
  * GET /api/profiles and GET /api/profiles/builtin return, and the page draws
  * its Favorites section by picking those ids out of the list it already has.
- * That also means this response cannot grow with profile size: it is bounded
- * by the id COUNT (8 saved slots plus the shipped catalogue), so the small
- * fixed local below is sufficient and no heap or chunking is needed.
- */
+ *
+ * Chunked (2026-09-19, 100-slot plan task 2): the old shape built the WHOLE
+ * response into one `json[320]` stack local, guarded by
+ * `_Static_assert(PROFILES_MAX_COUNT + 32 <= 60, ...)` -- true at 8 slots,
+ * false by construction once PROFILES_MAX_COUNT reaches 100. Streaming one
+ * id at a time removes the dependency on the total id count entirely, so
+ * there is no total-capacity assert left to get wrong as that count grows;
+ * the _Static_assert below instead pins the one thing that actually could
+ * overflow regardless of id count -- a single id's own rendered width -- so
+ * it stays correct at 100 (and at any other id count PROFILE_BUILTIN_ID_BASE
+ * plus a byte range can produce). The wire format (a single
+ * `{"user_mask":N,"builtin_mask":N,"ids":[...]}` object) is unchanged. */
 esp_err_t favorites_list_get_handler(httpd_req_t *req)
 {
     uint32_t user_mask = 0, builtin_mask = 0;
     profiles_favorites_masks(&user_mask, &builtin_mask);
 
-    /* Worst case is every id favorited: PROFILES_MAX_COUNT plus the
-     * catalogue count, each at most 3 digits and a comma, inside a ~64-byte
-     * envelope. The static assert keeps that reasoning true if either count
-     * grows later rather than letting it silently overflow. */
-    char json[320];
-    _Static_assert(PROFILES_MAX_COUNT + 32 <= 60, "favorites id list must still fit json[320]");
+    /* Widest one id can ever render as: a comma plus up to 3 digits (ids are
+     * uint8_t, max 255) plus a NUL. This bound does not depend on
+     * PROFILES_MAX_COUNT or the builtin catalogue count, so it holds at 8
+     * slots, at 100, and beyond. */
+#define FAV_ID_CHUNK_MAX 8
+    _Static_assert(FAV_ID_CHUNK_MAX >= 1 + 3 + 1, "one favorited id (comma + 3 digits + NUL) must fit");
 
-    int o = snprintf(json, sizeof(json), "{\"user_mask\":%lu,\"builtin_mask\":%lu,\"ids\":[",
+    char header[64];
+    int n = snprintf(header, sizeof(header), "{\"user_mask\":%lu,\"builtin_mask\":%lu,\"ids\":[",
                      (unsigned long)user_mask, (unsigned long)builtin_mask);
-    if (o < 0 || (size_t)o >= sizeof(json)) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "favorites encode failed");
-        return ESP_OK;
-    }
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = send_chunk_checked(req, header, n, sizeof(header), "favorites header");
+
     bool first = true;
-    for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) {
+    for (uint8_t i = 0; i < PROFILES_MAX_COUNT && err == ESP_OK; i++) {
         if (!(user_mask & (1u << i))) {
             continue;
         }
-        int n = snprintf(json + o, sizeof(json) - (size_t)o, "%s%u", first ? "" : ",", (unsigned)i);
-        if (n < 0 || (size_t)n >= sizeof(json) - (size_t)o) {
-            break;
-        }
-        o += n;
+        char idbuf[FAV_ID_CHUNK_MAX];
+        int in = snprintf(idbuf, sizeof(idbuf), "%s%u", first ? "" : ",", (unsigned)i);
+        err = send_chunk_checked(req, idbuf, in, sizeof(idbuf), "favorites user id");
         first = false;
     }
-    for (size_t i = 0; i < g_builtin_profile_count && i < 32; i++) {
+    for (size_t i = 0; i < g_builtin_profile_count && i < 32 && err == ESP_OK; i++) {
         if (!(builtin_mask & (1u << i))) {
             continue;
         }
-        int n = snprintf(json + o, sizeof(json) - (size_t)o, "%s%u", first ? "" : ",",
-                         (unsigned)(PROFILE_BUILTIN_ID_BASE + i));
-        if (n < 0 || (size_t)n >= sizeof(json) - (size_t)o) {
-            break;
-        }
-        o += n;
+        char idbuf[FAV_ID_CHUNK_MAX];
+        int in = snprintf(idbuf, sizeof(idbuf), "%s%u", first ? "" : ",",
+                          (unsigned)(PROFILE_BUILTIN_ID_BASE + i));
+        err = send_chunk_checked(req, idbuf, in, sizeof(idbuf), "favorites builtin id");
         first = false;
     }
-    int n = snprintf(json + o, sizeof(json) - (size_t)o, "]}");
-    if (n > 0 && (size_t)n < sizeof(json) - (size_t)o) {
-        o += n;
+    if (err == ESP_OK) {
+        err = httpd_resp_send_chunk(req, "]}", 2);
     }
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, (size_t)o);
+    if (err == ESP_OK) {
+        err = httpd_resp_send_chunk(req, NULL, 0);
+    }
+    return err;
 }
+#undef FAV_ID_CHUNK_MAX
