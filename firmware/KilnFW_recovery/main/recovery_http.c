@@ -77,17 +77,34 @@ static void hex_encode(const uint8_t *in, size_t len, char *out)
     out[len * 2] = '\0';
 }
 
+// Mirrors firmware/KilnFW/App/drivers/http/ota_http_util.c's
+// ota_http_hex_decode() nibble-by-nibble: strict [0-9a-fA-F] table, no
+// sscanf (which also accepts a leading sign/space/"0x" per byte). Kept
+// textually identical to that function's per-nibble logic on purpose --
+// see check_recovery_ota_auth_mirror.ps1, which diffs this against it so
+// the two cannot silently diverge again. Length here is always out_len*2
+// (the caller already enforced the header's exact 64-char length before
+// calling this), unlike ota_http_hex_decode() which takes hex_len
+// explicitly; the decode logic itself is the same.
 static bool hex_decode(const char *in, uint8_t *out, size_t out_len)
 {
     if (strlen(in) != out_len * 2) {
         return false;
     }
     for (size_t i = 0; i < out_len; i++) {
-        unsigned v;
-        if (sscanf(in + i * 2, "%2x", &v) != 1) {
+        int hi = -1, lo = -1;
+        char ch = in[2 * i];
+        if (ch >= '0' && ch <= '9') hi = ch - '0';
+        else if (ch >= 'a' && ch <= 'f') hi = ch - 'a' + 10;
+        else if (ch >= 'A' && ch <= 'F') hi = ch - 'A' + 10;
+        ch = in[2 * i + 1];
+        if (ch >= '0' && ch <= '9') lo = ch - '0';
+        else if (ch >= 'a' && ch <= 'f') lo = ch - 'a' + 10;
+        else if (ch >= 'A' && ch <= 'F') lo = ch - 'A' + 10;
+        if (hi < 0 || lo < 0) {
             return false;
         }
-        out[i] = (uint8_t)v;
+        out[i] = (uint8_t)((hi << 4) | lo);
     }
     return true;
 }
@@ -163,20 +180,34 @@ static esp_err_t challenge_get(httpd_req_t *req)
 static esp_err_t ota_esp_post(httpd_req_t *req)
 {
     uint32_t t = now_ms();
-    if (ota_auth_lockout_is_locked(&s_lockout, t)) {
-        httpd_resp_set_status(req, "429 Too Many Requests");
-        return httpd_resp_send(req, "locked out, retry later", HTTPD_RESP_USE_STRLEN);
-    }
 
-    char mac_hex[128];
+    // Header well-formed BEFORE lockout, matching ota_http_authenticate_
+    // request()'s ordering (ota_http.c:935-966): a headerless/malformed
+    // request is a client mistake (400), not a wrong-password guess, and
+    // must not be answered with the same "locked out" status a genuine
+    // failed-MAC attempt gets, nor be allowed to probe lockout state
+    // without ever presenting a candidate MAC.
+    size_t mac_hex_len = httpd_req_get_hdr_value_len(req, "X-Ota-Mac");
+    if (mac_hex_len != 64) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_send(req, "missing or malformed X-Ota-Mac header (want 64 hex chars)",
+                                HTTPD_RESP_USE_STRLEN);
+    }
+    char mac_hex[65];
     if (httpd_req_get_hdr_value_str(req, "X-Ota-Mac", mac_hex, sizeof(mac_hex)) != ESP_OK) {
         httpd_resp_set_status(req, "400 Bad Request");
-        return httpd_resp_send(req, "missing X-Ota-Mac", HTTPD_RESP_USE_STRLEN);
+        return httpd_resp_send(req, "missing or malformed X-Ota-Mac header (want 64 hex chars)",
+                                HTTPD_RESP_USE_STRLEN);
     }
     uint8_t claimed_mac[32];
     if (!hex_decode(mac_hex, claimed_mac, sizeof(claimed_mac))) {
         httpd_resp_set_status(req, "400 Bad Request");
-        return httpd_resp_send(req, "malformed X-Ota-Mac", HTTPD_RESP_USE_STRLEN);
+        return httpd_resp_send(req, "X-Ota-Mac must be 64 hex characters", HTTPD_RESP_USE_STRLEN);
+    }
+
+    if (ota_auth_lockout_is_locked(&s_lockout, t)) {
+        httpd_resp_set_status(req, "429 Too Many Requests");
+        return httpd_resp_send(req, "locked out, retry later", HTTPD_RESP_USE_STRLEN);
     }
 
     ota_auth_nonce_check_t check = ota_auth_nonce_check(&s_nonce, t);
