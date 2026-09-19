@@ -26,27 +26,36 @@ static const char *TAG = "zone_sweep";
  * reading is < 10 ms once current actually flows through the CT -- that part
  * of the path is effectively instant and does not gate anything here.
  *
- * The real settle time is mechanical + protocol. The relay coil (EE2-12NUH,
- * kiln_io.h) needs to physically close, and this ESP only LEARNS the new
- * current_a[] reading once the next SAFETY_LINK status poll lands --
- * safety_link.h's poll_period_ms is 500 ms (SAFETY_LINK_UP_PERIODS=3 *
- * 500ms comment on link_up). ZONE_SWEEP_SETTLE_MS (1000ms = two full poll
- * periods) guarantees at least one FRESH sample has arrived after the relay
- * physically closed, with margin for a poll that happened to land just
- * before the relay engaged.
+ * The real settle time is mechanical + protocol + analog. The relay coil
+ * (EE2-12NUH, kiln_io.h) needs to physically close; this ESP only LEARNS the
+ * new current_a[] reading once the next SAFETY_LINK status poll lands
+ * (safety_link.h's poll_period_ms is 500 ms); and the CT front end is a
+ * peak-hold RECTIFIED ENVELOPE with a time constant of about one second
+ * (SaftyFW/docs/CURRENT_SENSE.md, and the project's own bench measurements),
+ * not a sampled waveform -- so the reading approaches its final value
+ * exponentially over several seconds after the relay closes, long after the
+ * relay itself has settled.
+ *
+ * ZONE_SWEEP_SETTLE_MS is therefore 10000 ms: roughly ten envelope time
+ * constants, so the envelope is settled to well under a percent of its step
+ * before any sample is taken, and many poll periods, so a poll that happened
+ * to land just before the relay engaged cannot contribute. A shorter settle
+ * biases every measured current LOW by an amount that depends on how long
+ * ago the relay closed -- a systematic error that looks like a calibration
+ * problem rather than a timing one. This value is an owner decision; it is
+ * not derived from the poll period.
  *
  * After settling, ZONE_SWEEP_SAMPLE_MS (4000ms, ~8 more polls at 500ms) of
  * current_a[] readings are averaged -- the same "oversample and average"
- * discipline CURRENT_SENSE.md §4 documents for the ADC itself (16x per
+ * discipline CURRENT_SENSE.md sec 4 documents for the ADC itself (16x per
  * sample there), applied one level up here to average out poll-to-poll
  * noise on the already-demodulated current reading.
  *
- * Total 5000ms/zone is short and bounded: swept back-to-back across
- * MAX31856_CHANNEL_COUNT zones that is at most ~5s * count, well under a
- * minute even for a fully populated board, and every zone but the one being
+ * Total 14000ms/zone: swept back-to-back across MAX31856_CHANNEL_COUNT
+ * zones that is about 42 s for three zones, and every zone but the one being
  * measured has its relay(s) OFF for the whole sweep (structural, not a
  * convention -- see zone_sweep_task() below). */
-#define ZONE_SWEEP_SETTLE_MS 1000u
+#define ZONE_SWEEP_SETTLE_MS 10000u
 #define ZONE_SWEEP_SAMPLE_MS 4000u
 #define ZONE_SWEEP_ENERGIZE_MS (ZONE_SWEEP_SETTLE_MS + ZONE_SWEEP_SAMPLE_MS)
 #define ZONE_SWEEP_POLL_MS 500u /* matches safety_link.h's poll_period_ms */

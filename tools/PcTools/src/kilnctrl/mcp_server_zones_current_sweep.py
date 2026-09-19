@@ -20,9 +20,9 @@ own module docstring for the wire-level detail, and
 zones_current_sweep_task.c/zones_current_sweep_engine.c for the
 implementation): for each configured zone in turn, it forces every OTHER
 zone's relay(s) off, turns THIS zone's own relay(s) ON for
-ZONE_SWEEP_SETTLE_MS (1000 ms), then samples the shared CT for
+ZONE_SWEEP_SETTLE_MS (10000 ms), then samples the shared CT for
 ZONE_SWEEP_SAMPLE_MS (4000 ms, about 8 safety-link polls averaged) before
-moving on -- roughly 5 seconds per zone, one zone energized at a time,
+moving on -- roughly 14 seconds per zone, one zone energized at a time,
 never two at once. In summed-CT topology it also samples a fresh idle
 baseline and subtracts it. On a successful measurement it calls
 zone_normals_set(zone, normal_a), WRITING i_normal_a[zone] (wire ids
@@ -85,8 +85,8 @@ def _zone_sweep_resolve_host(host: Optional[str]) -> str:
 @_srv._tool()
 def zone_current_sweep_start(confirm: bool = False, host: Optional[str] = None) -> str:
     """Start the per-zone current-measurement sweep. THIS ENERGIZES HEATER
-    RELAYS, one zone at a time, for roughly 5 seconds per zone (1 s settle +
-    4 s sample -- see this module's own docstring for the full sequence).
+    RELAYS, one zone at a time, for roughly 14 seconds per zone (10 s settle
+    + 4 s sample -- see this module's own docstring for the full sequence).
     On success it WRITES i_normal_a[zone] to the safety processor for every
     zone it could measure, and derives the CT's volts-per-amp scale.
 

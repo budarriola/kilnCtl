@@ -1,6 +1,31 @@
 # CT attribution verification — commissioning plan
 
-Status: PLANNED. Nothing in this document is built yet. Four owner decisions of
+Status: PARTIALLY BUILT. Landed so far (this commit):
+
+- Step 9's false verdict is fixed. `step9SweepVerdict()`
+  (`firmware/KilnFW/App/drivers/http/setup_wizard_page.html`) is now the single
+  place that decides, and it calls a finished sweep a pass only when
+  `ct_map_derived_mask` shows a CT channel resolved for every zone swept. An
+  inconclusive run renders the inconclusive text with the firmware's own reason
+  and posts nothing, leaving step 9 PENDING â€” deliberately not `skipped`, which
+  `computeCompleteness()` would treat as an outstanding reason forever. Covered
+  by seven new assertions in `firmware/KilnFW/App/test/test_setup_wizard.js`,
+  including the all-inconclusive case that is this bench's normal outcome.
+- `ZONE_SWEEP_SETTLE_MS` is 10000 ms
+  (`firmware/KilnFW/App/drivers/control/zones_current_sweep_engine.c`), with the
+  comment block above it rewritten: it previously justified 1000 ms as "two full
+  poll periods" and claimed a 5000 ms/zone total, neither of which survives the
+  peak-hold envelope's ~1 s time constant. No sweep-wide deadline exists to
+  overrun; the PcTools client's timeouts are per-HTTP-request and say so.
+- Both PcTools documentation surfaces now state 10 s settle and ~14 s/zone.
+
+Still unbuilt: the derived threshold, the PASS/FAIL/INCONCLUSIVE verdict
+function and its firing-interlock consequence, the `ct_verify`/`verdict_v1`
+store and its configuration fingerprint, the `ct_attribution` readiness item,
+the `SAFETY_CT_CAL_BLOB_VERSION` 1â†’2 migration, and the eleven host tests plus
+two negative tests in "Testing".
+
+Four owner decisions of
 2026-09-18 — settle time, verdict scope, an operator-entered clamp ratio with
 offset/gain trim, and land order — are folded into the body below and summarised
 in "Owner decisions", which replaces this plan's former open-questions list. The

@@ -12,9 +12,9 @@ WHAT THIS ENDPOINT TRIGGERS: a hardware measurement pass that ENERGIZES
 HEATER RELAYS, one zone at a time. POST .../start kicks off
 zones_current_sweep_start(), a background task that, for each configured
 zone in turn: forces every OTHER zone's relay(s) off, turns this zone's own
-relay(s) on for ZONE_SWEEP_SETTLE_MS (1000 ms), then samples the shared CT
+relay(s) on for ZONE_SWEEP_SETTLE_MS (10000 ms), then samples the shared CT
 for ZONE_SWEEP_SAMPLE_MS (4000 ms, about 8 safety-link polls averaged) before
-moving to the next zone -- roughly 5 s/zone, never two zones energized at
+moving to the next zone -- roughly 14 s/zone, never two zones energized at
 once. On success it derives a per-zone baseline current (subtracting a
 freshly sampled idle baseline in summed-CT topology) and calls
 zone_normals_set() to push i_normal_a[zone] to the safety processor, plus

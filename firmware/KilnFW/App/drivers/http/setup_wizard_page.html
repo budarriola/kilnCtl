@@ -1009,6 +1009,30 @@ function step9CheckBusy() {
   });
 }
 
+// Step 9's verdict, kept top-level so it is testable on its own
+// (test_setup_wizard.js). A finished sweep is a pass for the wizard only if
+// the firmware actually attributed a CT channel to every zone it swept:
+// ct_map_derived_mask carries one bit per resolved CT channel. Everything
+// else -- no zones swept, a partial mask, a missing mask -- is INCONCLUSIVE,
+// and an inconclusive run must never render or persist a green verdict.
+function step9SweepVerdict(st) {
+  if (!st || st.state !== 'done') {
+    return { resolved: false, text: 'The CT verification sweep did not finish.' };
+  }
+  var total = Number(st.zones_total) || 0;
+  var mask = Number(st.ct_map_derived_mask) || 0;
+  var resolved = 0;
+  for (var b = 0; b < 32; b++) { if (mask & (1 << b)) { resolved++; } }
+  if (total > 0 && resolved >= total) {
+    return { resolved: true, text: 'Verification complete: a CT channel was resolved for all ' +
+      total + ' zone(s).' };
+  }
+  var why = st.ct_map_reason ? (' ' + st.ct_map_reason) : '';
+  return { resolved: false, text: 'Sweep finished, but CT attribution was NOT resolved (' +
+    resolved + ' of ' + total + ' zone(s) resolved).' + why +
+    ' This step is not complete -- the result is inconclusive, not a pass.' };
+}
+
 function renderStep9() {
   var el = document.getElementById('stepBody9');
   step9StopPoll();
@@ -1062,11 +1086,25 @@ function renderStep9() {
         (st.ct_map_reason ? ' CT mapping: ' + st.ct_map_reason : '');
       if (st.state === 'done') {
         step9StopPoll();
-        document.getElementById('step9Ok').innerHTML = '<p class="wok">Verification complete.</p>';
+        var v = step9SweepVerdict(st);
+        var okEl = document.getElementById('step9Ok');
+        if (!v.resolved) {
+          // A sweep that RAN is not a sweep that RESOLVED anything. The
+          // firmware reports which CT channels it could actually attribute
+          // (ct_map_derived_mask); if it could not attribute every zone the
+          // run is INCONCLUSIVE and must not print or persist a green
+          // verdict. Nothing is posted, so the step stays PENDING -- posting
+          // 'skipped' would make computeCompleteness() treat this safety step
+          // as an outstanding reason forever.
+          okEl.innerHTML = '<p class="werr">' + v.text + '</p>';
+          loadAll();
+          return;
+        }
+        okEl.innerHTML = '<p class="wok">' + v.text + '</p>';
         postStepState(9, 'done').then(function () {
           armStepMessage(9, function () {
             var ok2 = document.getElementById('step9Ok');
-            if (ok2) ok2.innerHTML = '<p class="wok">Verification complete.</p>';
+            if (ok2) ok2.innerHTML = '<p class="wok">' + v.text + '</p>';
           });
           loadAll();
         });

@@ -650,6 +650,58 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   assert(/does NOT stop it/.test(html), 'step9: closing the tab not stopping a running sweep is stated, not implied');
 })();
 
+// Step 9 used to print "Verification complete." and post state 'done' for
+// ANY sweep that reached state 'done', whether or not it had resolved a
+// single CT channel -- a confident false statement about a safety-relevant
+// commissioning step. On this bench every zone is expected to come out
+// INCONCLUSIVE (a ~4 W fixture draws far too little current to attribute),
+// so the all-inconclusive case below is the NORMAL case here, not an edge.
+(function testStep9VerdictRefusesGreenWhenNothingResolved() {
+  const ctx = loadPageScript(noopFetch);
+
+  const nothing = ctx.step9SweepVerdict({ state: 'done', zones_total: 3, ct_map_derived_mask: 0,
+    ct_map_reason: 'no channel above the respond floor' });
+  assert(nothing.resolved === false, 'step9 verdict: a done sweep that resolved NO channel is not a pass');
+  assert(/NOT resolved/.test(nothing.text), 'step9 verdict: the inconclusive text says so plainly');
+  assert(!/^Verification complete/.test(nothing.text),
+    'step9 verdict: an inconclusive run never claims verification is complete');
+  assert(/no channel above the respond floor/.test(nothing.text),
+    'step9 verdict: the firmware reason is carried through, not swallowed');
+
+  const partial = ctx.step9SweepVerdict({ state: 'done', zones_total: 3, ct_map_derived_mask: 0x3 });
+  assert(partial.resolved === false, 'step9 verdict: 2 of 3 zones resolved is still not a pass');
+
+  const all = ctx.step9SweepVerdict({ state: 'done', zones_total: 3, ct_map_derived_mask: 0x7 });
+  assert(all.resolved === true, 'step9 verdict: a channel resolved for every zone is a pass');
+
+  const noZones = ctx.step9SweepVerdict({ state: 'done', zones_total: 0, ct_map_derived_mask: 0 });
+  assert(noZones.resolved === false, 'step9 verdict: a sweep over zero zones proves nothing');
+
+  const missing = ctx.step9SweepVerdict({ state: 'done', zones_total: 3 });
+  assert(missing.resolved === false,
+    'step9 verdict: an absent ct_map_derived_mask is inconclusive, never a pass');
+
+  const running = ctx.step9SweepVerdict({ state: 'running', zones_total: 3, ct_map_derived_mask: 0x7 });
+  assert(running.resolved === false, 'step9 verdict: only a finished sweep can be a pass');
+})();
+
+(function testStep9InconclusiveDoesNotPersistDone() {
+  const html = fs.readFileSync(PAGE_PATH, 'utf8');
+  assert(!/document\.getElementById\('step9Ok'\)\.innerHTML = '<p class="wok">Verification complete\.<\/p>'/.test(html),
+    'step9: the unconditional green verdict on state=done is gone');
+  assert(/if \(!v\.resolved\)[\s\S]{0,800}?postStepState\(9, 'done'\)/.test(html),
+    'step9: postStepState(9, done) is reached only after the resolved check');
+  // The only legitimate 'skipped' post for step 9 is the operator's own
+  // explicit "Skip for now" button. An inconclusive SWEEP must leave the step
+  // PENDING instead: computeCompleteness() treats a skipped safety step as an
+  // outstanding reason forever, so posting skipped from the result path would
+  // trade one wrong verdict for another.
+  const skipped = html.match(/postStepState\(9, 'skipped'/g) || [];
+  assert(skipped.length === 1, 'step9: exactly one skipped post exists (the explicit operator button)');
+  assert(/postStepState\(9, 'skipped', 'deferred/.test(html),
+    'step9: that one skipped post is the deferred/Skip-for-now path, not a sweep result');
+})();
+
 // The state strings below are the ones the firmware actually emits --
 // exec_state_name() (dashboard_exec_http.c) and autotune_state_name()
 // (dashboard_json.c) are both lowercase. The original version of this test
