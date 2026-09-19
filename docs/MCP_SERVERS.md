@@ -388,6 +388,37 @@ powershell -ExecutionPolicy Bypass -File tools\worktree_mint.ps1 -Remove -Path C
     # (tracked or untracked) unless -Force is also passed
 ```
 
+As of 2026-09-19 the mint step also runs `git submodule update --init
+--recursive` in the new worktree by default (`-NoSubmodules` opts out).
+`git worktree add` never initializes submodules on its own, so a fresh mint
+used to leave `firmware/KilnFW/components/lvgl` and `tools/mykicadMcp` as
+empty directories -- failing every KilnFW target build
+(`check_00_kilnfw_target_build.ps1` / its `_recovery_` sibling, "Failed to
+resolve component 'lvgl'") and both mykicadMcp-dependent checks
+(`check_mcp_facade_coverage.ps1`, `check_mykicad_golden_suite_runs.ps1`)
+until someone ran that command by hand. A submodule-init failure is printed
+loudly but never fails the mint itself -- the worktree is still handed back.
+
+`check_00_kilnfw_recovery_target_build.ps1` separately picked up the same
+per-tree stale-directory prune that `check_00_kilnfw_target_build.ps1`
+already had (2026-09-19): it reuses one persistent
+`C:\wt\checkbuild_recovery_<hash-of-tree-path>` directory per invoking tree
+(good for incremental build speed) but, before this fix, never cleaned one up
+once its owning tree (a removed agent worktree) was gone -- 29 accumulated,
+~4.8 GB. It now writes the same kind of `.checkbuild_source` ownership marker
+and prunes a stale directory only once its named owner no longer exists on
+disk and its per-tree build lock is not currently held, exactly mirroring the
+main check's existing logic. Separately, `check_00_kilnfw_target_build.ps1`'s
+own "am I the main worktree" test used to ask the invoking tree's own `git
+worktree list` whether it was the first (therefore "main") entry -- true for
+ANY standalone clone of its own accord, so an unrelated private repo copy
+could claim the shared, pre-warmed `C:\wt\checkbuild` directory and mix its
+source into the real main tree's build (a bogus undefined-reference link
+failure was traced to exactly this). It now compares against one fixed,
+known absolute path for the real shared tree instead of a self-reported
+claim, so a distinct source tree always gets its own hash-tagged directory
+and never shares a mirror with another tree.
+
 **`tools/push_verify.ps1`** -- verify a commit actually landed on
 `origin/main`, in one unambiguous verdict line. This project has produced
 four false "landed" reports from two specific causes: (1) running the

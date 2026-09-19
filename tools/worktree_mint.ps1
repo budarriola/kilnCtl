@@ -27,6 +27,12 @@
 #       at origin/main (detached), and prints the path on its own line
 #       prefixed "WORKTREE: " so a caller can grep it out reliably.
 #
+#   powershell -ExecutionPolicy Bypass -File tools\worktree_mint.ps1 -Label myfeature -NoSubmodules
+#       Same, but skips `git submodule update --init --recursive` (lvgl,
+#       mykicadMcp, TFT35-SPI). Use only when the check suite / KilnFW build
+#       is not needed -- see the "SUBMODULES A FRESH WORKTREE NEEDS" note
+#       below for what breaks without them.
+#
 #   powershell -ExecutionPolicy Bypass -File tools\worktree_mint.ps1 -Label myfeature -RunSetup
 #       Same, then also runs tools\setup.ps1 inside the new worktree. A
 #       freshly minted worktree has no tools\PcTools\.venv (gitignored,
@@ -60,8 +66,32 @@ param(
     [string]$Path,
     [switch]$Force,
     [string]$WtRoot = "C:\wt",
-    [switch]$RunSetup
+    [switch]$RunSetup,
+    [switch]$NoSubmodules
 )
+
+# SUBMODULES A FRESH WORKTREE NEEDS (2026-09-19). `git worktree add` does NOT
+# initialise submodules -- each submodule path stays an empty directory until
+# something runs `git submodule update --init`. Two agents reported today
+# that a fresh worktree from this script therefore fails the very checks it
+# exists to let them run:
+#   * firmware/KilnFW/components/lvgl -- required by every KilnFW target
+#     build (check_00_kilnfw_target_build.ps1 / _recovery_ variant); without
+#     it CMake fails with "Failed to resolve component 'lvgl'".
+#   * tools/mykicadMcp -- required by check_mcp_facade_coverage.ps1 and
+#     check_mykicad_golden_suite_runs.ps1.
+# The third registered submodule, parts/TFT35-SPI (hardware/mainBoard/parts/
+# TFT35-SPI), is reference vendor data for a KiCad footprint, not consumed by
+# any check_*.ps1 in the standing suite -- included anyway via --recursive
+# below since it costs little and a caller doing hardware work may want it
+# populated too.
+#
+# `--recursive` in case either submodule nests its own (lvgl in particular
+# has had submodules of its own upstream). `-NoSubmodules` opts back out for
+# a caller who wants a bare checkout fast and does not need the check suite
+# to pass -- the mint itself never fails because of this step; a submodule
+# init failure is printed loudly but the worktree that was already created
+# is still handed back.
 
 # NOTE: deliberately "Continue", not "Stop". PowerShell 5.1 treats a native
 # command's stderr output as a terminating NativeCommandError under
@@ -176,6 +206,18 @@ git -C $repoRoot worktree add --detach $target origin/main *>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ERROR: git worktree add failed for '$target'." -ForegroundColor Red
     exit 1
+}
+
+if (-not $NoSubmodules) {
+    Write-Host "Initializing submodules in $target (git submodule update --init --recursive) ..." -ForegroundColor Cyan
+    git -C $target submodule update --init --recursive *>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "WARNING: git submodule update --init --recursive failed (exit $LASTEXITCODE) in $target -- KilnFW target builds and mykicadMcp-dependent checks will fail until this is resolved by hand (e.g. re-run: git -C `"$target`" submodule update --init --recursive). The worktree itself was created successfully; this does not fail the mint." -ForegroundColor Yellow
+    } else {
+        Write-Host "Submodules initialized." -ForegroundColor Green
+    }
+} else {
+    Write-Host "Skipping submodule initialization (-NoSubmodules). KilnFW target builds and mykicadMcp-dependent checks will fail until 'git submodule update --init --recursive' is run by hand in $target." -ForegroundColor Yellow
 }
 
 Write-Host "WORKTREE: $target" -ForegroundColor Green

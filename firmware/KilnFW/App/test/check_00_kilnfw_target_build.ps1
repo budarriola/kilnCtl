@@ -179,19 +179,26 @@ if (-not $headCommit) {
     Fail "could not resolve HEAD in $repoRoot"
 }
 
-# Which tree am I? The MAIN worktree is always the first entry of
-# `git worktree list --porcelain`; every other entry is a linked worktree.
-# Comparing the invoking $repoRoot against it is how this check decides
-# between the historical shared path and a private per-tree one -- see the
-# "BUILD DIRECTORY IS PER-INVOKING-TREE" block at the top of this file.
+# Which tree am I? The shared "C:\wt\checkbuild" path is reserved for the
+# ONE known shared main tree on this machine, named here as a fixed literal
+# constant -- NOT derived by asking the invoking tree's own git metadata
+# "am I the first entry of my own `git worktree list`". That self-referential
+# test is trivially true for ANY standalone repository (a `git clone` that is
+# not even a linked worktree of the shared repo reports itself as the sole,
+# and therefore first, entry of its OWN worktree list), so it previously let
+# a private git-repo copy claim the shared "C:\wt\checkbuild" path and mix its
+# sources into the real main tree's build directory (reviewer finding,
+# 2026-09-19: a bogus undefined-reference link failure traced back to exactly
+# this). Comparing against a fixed, known absolute path closes that: only
+# invocations from that one real tree ever get the shared, pre-warmed
+# directory; every other tree -- including a linked worktree, a throwaway
+# agent worktree under C:\wt\, or an unrelated private clone that happens to
+# consider itself "main" by its own git's reckoning -- always gets its own
+# hash-tagged directory below, so distinct source trees never share a mirror.
 $repoRootFull = ([System.IO.Path]::GetFullPath($repoRoot.Path)).TrimEnd('\')
-$mainWorktreeRaw = (((& git -C $repoRoot worktree list --porcelain) | Select-Object -First 1) -replace '^worktree\s+', '').Trim()
-if (-not $mainWorktreeRaw) {
-    Fail "could not determine the main worktree path ('git worktree list --porcelain' produced nothing for $repoRoot) -- refusing to guess which build directory this tree owns."
-}
-$mainWorktreeFull = ([System.IO.Path]::GetFullPath($mainWorktreeRaw.Replace('/', '\'))).TrimEnd('\')
+$KnownMainRepoRoot = "C:\Users\budar\OneDrive\Desktop\kilnCtl"
 
-if ([string]::Equals($repoRootFull, $mainWorktreeFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+if ([string]::Equals($repoRootFull, $KnownMainRepoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
     $WorktreePath = "C:\wt\checkbuild"
     $LockName = "kilnfw_checkbuild_worktree"
 } else {
@@ -243,12 +250,12 @@ Write-Host "Build worktree:  $WorktreePath"
 # toolchain to shrug at).
 $MainSdkconfig = Join-Path $repoRoot "firmware\KilnFW\sdkconfig"
 if (-not (Test-Path -LiteralPath $MainSdkconfig)) {
-    $fallbackSdkconfig = Join-Path $mainWorktreeFull "firmware\KilnFW\sdkconfig"
+    $fallbackSdkconfig = Join-Path $KnownMainRepoRoot "firmware\KilnFW\sdkconfig"
     if (Test-Path -LiteralPath $fallbackSdkconfig) {
         Write-Host "NOTE: $repoRootFull has no firmware\KilnFW\sdkconfig (gitignored; absent in a fresh worktree) -- using the main worktree's board-tuned config at $fallbackSdkconfig" -ForegroundColor Yellow
         $MainSdkconfig = $fallbackSdkconfig
     } else {
-        Fail "no firmware\KilnFW\sdkconfig in the invoking tree ($repoRootFull) and none in the main worktree ($mainWorktreeFull) either. This check must build against the BOARD-TUNED config rather than one regenerated from Kconfig defaults -- a regenerated config does build correctly for esp32s3 (sdkconfig.defaults pins CONFIG_IDF_TARGET), but it answers check_01's question, 'does a fresh clone of origin/main build', instead of this check's, 'does this tree build the way the board is actually configured'. Run the IDE workspace setup, or copy a known-good sdkconfig into the main tree, before this check can say anything truthful."
+        Fail "no firmware\KilnFW\sdkconfig in the invoking tree ($repoRootFull) and none in the main worktree ($KnownMainRepoRoot) either. This check must build against the BOARD-TUNED config rather than one regenerated from Kconfig defaults -- a regenerated config does build correctly for esp32s3 (sdkconfig.defaults pins CONFIG_IDF_TARGET), but it answers check_01's question, 'does a fresh clone of origin/main build', instead of this check's, 'does this tree build the way the board is actually configured'. Run the IDE workspace setup, or copy a known-good sdkconfig into the main tree, before this check can say anything truthful."
     }
 }
 

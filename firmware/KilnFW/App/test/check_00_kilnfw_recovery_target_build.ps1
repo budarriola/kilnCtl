@@ -92,13 +92,77 @@ try {
 $treeTag = (($hashBytes | ForEach-Object { $_.ToString("x2") }) -join "").Substring(0, 10)
 $WorktreePath = "C:\wt\checkbuild_recovery_$treeTag"
 $LockName = "kilnfw_recovery_checkbuild_worktree_$treeTag"
+$MarkerFile = Join-Path $WorktreePath ".checkbuild_source"
 
 Write-Host "Invoking tree:   $repoRootFull"
 Write-Host "Build directory: $WorktreePath"
 
+# PRUNE STALE PER-TREE DIRECTORIES (2026-09-19). Until now this directory was
+# reused across runs from the same tree (good -- no thrash) but NEVER cleaned
+# up once the owning tree (a throwaway agent worktree under C:\wt\) was
+# removed, because nothing recorded which tree owned which directory. 29 such
+# directories (~4.8 GB) were found accumulated before this fix. This mirrors
+# check_00_kilnfw_target_build.ps1's own prune pass exactly: only a directory
+# matching this script's own naming scheme AND carrying this script's own
+# ownership marker is ever considered, and only once its named owner tree no
+# longer exists on disk, and only after taking that owner's own per-tree
+# build lock (zero timeout) so a run still in progress is never deleted out
+# from under itself.
+foreach ($stale in (Get-ChildItem -LiteralPath "C:\wt" -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -cmatch '^checkbuild_recovery_[0-9a-f]{10}$' })) {
+    if ([string]::Equals($stale.FullName, $WorktreePath, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+    $staleMarker = Join-Path $stale.FullName ".checkbuild_source"
+    if (-not (Test-Path -LiteralPath $staleMarker)) { continue }
+    $owner = $null
+    try { $owner = [System.IO.File]::ReadAllText($staleMarker, [System.Text.Encoding]::UTF8) } catch { $owner = $null }
+    if (-not $owner) { continue }
+    $owner = $owner.Trim()
+    if ([System.IO.Directory]::Exists($owner) -or [System.IO.File]::Exists($owner)) { continue }
+
+    $staleTag = $stale.Name.Substring("checkbuild_recovery_".Length)
+    $staleMutex = New-Object System.Threading.Mutex($false, (Get-BuildLockMutexName -Name "kilnfw_recovery_checkbuild_worktree_$staleTag"))
+    $staleHeld = $false
+    try {
+        try {
+            $staleHeld = $staleMutex.WaitOne(0)
+        } catch [System.Threading.AbandonedMutexException] {
+            $staleHeld = $true
+        }
+        if (-not $staleHeld) {
+            Write-Host "Not pruning $($stale.FullName): its owning tree '$owner' is gone, but its build lock is currently HELD -- a run is still using that directory. Leaving it for a later invocation." -ForegroundColor Yellow
+            continue
+        }
+        if ([System.IO.Directory]::Exists($owner) -or [System.IO.File]::Exists($owner)) {
+            Write-Host "Not pruning $($stale.FullName): its owning tree '$owner' reappeared between the first check and acquiring its build lock." -ForegroundColor Yellow
+            continue
+        }
+        Write-Host "Pruning stale build directory $($stale.FullName) -- its tree '$owner' no longer exists"
+        Remove-Item -LiteralPath $stale.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    } finally {
+        if ($staleHeld) {
+            try { $staleMutex.ReleaseMutex() } catch { }
+        }
+        $staleMutex.Dispose()
+    }
+}
+
 $lock = Enter-BuildLock -Name $LockName
 try {
     New-Item -ItemType Directory -Force -Path $WorktreePath | Out-Null
+
+    # WRITE THE OWNERSHIP MARKER IMMEDIATELY, under the lock, the moment the
+    # directory is known to exist -- same rationale as
+    # check_00_kilnfw_target_build.ps1's D5 fix: a run that dies between
+    # directory creation and this write would otherwise leave an unmarked,
+    # unreclaimable directory forever (the prune above skips markerless
+    # directories by design). UTF-8, no BOM, so any path NTFS can name
+    # round-trips through the marker exactly.
+    try {
+        [System.IO.File]::WriteAllText($MarkerFile, $repoRootFull, (New-Object System.Text.UTF8Encoding($false)))
+    } catch {
+        Fail "could not write the ownership marker $MarkerFile ($($_.Exception.Message)) -- refusing to continue, because an unmarked build directory is never reclaimed by the prune pass above and would leak disk permanently."
+    }
+
     $dstRoot = Join-Path $WorktreePath "KilnFW_recovery"
 
     # Mirror current source (uncommitted edits included, same rationale as
