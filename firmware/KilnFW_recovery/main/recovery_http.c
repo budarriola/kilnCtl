@@ -10,6 +10,14 @@
 // verbatim -- see main/ota_auth.c's header for why it is pure/host-testable
 // and therefore safe to reuse unmodified rather than re-derive).
 //
+// Every mutating POST route in this file (POST /api/ota/esp, POST
+// /api/ota/esp/boot_guard_reset, POST /api/sw_reset) authenticates via the
+// single shared recovery_authenticate_request() below -- 2026-09-19 closed
+// docs/audits/web_code_duplication_drift_2026-09-18.md section 2.2's open
+// follow-up, which found the latter two routes had no X-Ota-Mac check at
+// all. A new mutating route must call it too, or
+// check_recovery_ota_auth_mirror.ps1's route-coverage assertion fails.
+//
 // SCOPE OF THIS PASS: uses mbedtls's classic mbedtls_md_hmac() API rather
 // than the main app's PSA Crypto calls (psa_import_key()/psa_mac_compute())
 // -- both compute the same standard HMAC-SHA256, but PSA needs its own
@@ -176,8 +184,27 @@ static esp_err_t challenge_get(httpd_req_t *req)
     return httpd_resp_send(req, body, n);
 }
 
-// POST /api/ota/esp
-static esp_err_t ota_esp_post(httpd_req_t *req)
+// Shared X-Ota-Mac authentication sequence -- every mutating recovery-image
+// POST route (POST /api/ota/esp, POST /api/ota/esp/boot_guard_reset,
+// POST /api/sw_reset) must call this before acting, rather than hand-
+// rolling the header/hex/lockout/nonce/password/HMAC sequence again. This
+// used to live inline in ota_esp_post() only -- the other two routes had
+// no auth check at all
+// (docs/audits/web_code_duplication_drift_2026-09-18.md section 2.2's open
+// follow-up, closed here). Factoring it out means a future new mutating
+// route gets this for free by calling it, instead of becoming a ninth
+// hand-copy.
+//
+// On success: returns true, sends nothing (caller proceeds).
+// On failure: returns false, having already sent the appropriate error
+// status/body itself via *out_err -- caller must return *out_err
+// immediately without sending anything further.
+//
+// check_recovery_ota_auth_mirror.ps1 diffs this function's body (not
+// ota_esp_post()'s, now just a caller) against ota_http_authenticate_
+// request()/ota_http_hex_decode() in the main app -- see that check's
+// header comment before changing wire strings or ordering here.
+static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err)
 {
     uint32_t t = now_ms();
 
@@ -190,36 +217,42 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
     size_t mac_hex_len = httpd_req_get_hdr_value_len(req, "X-Ota-Mac");
     if (mac_hex_len != 64) {
         httpd_resp_set_status(req, "400 Bad Request");
-        return httpd_resp_send(req, "missing or malformed X-Ota-Mac header (want 64 hex chars)",
-                                HTTPD_RESP_USE_STRLEN);
+        *out_err = httpd_resp_send(req, "missing or malformed X-Ota-Mac header (want 64 hex chars)",
+                                    HTTPD_RESP_USE_STRLEN);
+        return false;
     }
     char mac_hex[65];
     if (httpd_req_get_hdr_value_str(req, "X-Ota-Mac", mac_hex, sizeof(mac_hex)) != ESP_OK) {
         httpd_resp_set_status(req, "400 Bad Request");
-        return httpd_resp_send(req, "could not read X-Ota-Mac header", HTTPD_RESP_USE_STRLEN);
+        *out_err = httpd_resp_send(req, "could not read X-Ota-Mac header", HTTPD_RESP_USE_STRLEN);
+        return false;
     }
     uint8_t claimed_mac[32];
     if (!hex_decode(mac_hex, claimed_mac, sizeof(claimed_mac))) {
         httpd_resp_set_status(req, "400 Bad Request");
-        return httpd_resp_send(req, "X-Ota-Mac must be 64 hex characters", HTTPD_RESP_USE_STRLEN);
+        *out_err = httpd_resp_send(req, "X-Ota-Mac must be 64 hex characters", HTTPD_RESP_USE_STRLEN);
+        return false;
     }
 
     if (ota_auth_lockout_is_locked(&s_lockout, t)) {
         httpd_resp_set_status(req, "429 Too Many Requests");
-        return httpd_resp_send(req, "locked out, retry later", HTTPD_RESP_USE_STRLEN);
+        *out_err = httpd_resp_send(req, "locked out, retry later", HTTPD_RESP_USE_STRLEN);
+        return false;
     }
 
     ota_auth_nonce_check_t check = ota_auth_nonce_check(&s_nonce, t);
     if (check != OTA_AUTH_NONCE_OK) {
         httpd_resp_set_status(req, "403 Forbidden");
-        return httpd_resp_send(req, "no valid challenge outstanding", HTTPD_RESP_USE_STRLEN);
+        *out_err = httpd_resp_send(req, "no valid challenge outstanding", HTTPD_RESP_USE_STRLEN);
+        return false;
     }
 
     char ap_password[65];
     if (!recovery_wifi_get_ap_password(ap_password, sizeof(ap_password))) {
         ota_auth_nonce_invalidate(&s_nonce);
         httpd_resp_set_status(req, "500 Internal Server Error");
-        return httpd_resp_send(req, "no AP password on record", HTTPD_RESP_USE_STRLEN);
+        *out_err = httpd_resp_send(req, "no AP password on record", HTTPD_RESP_USE_STRLEN);
+        return false;
     }
 
     uint8_t key[32];
@@ -239,9 +272,20 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
     if (!ota_auth_constant_time_equal(claimed_mac, expected_mac, sizeof(expected_mac))) {
         ota_auth_lockout_record_failure(&s_lockout, t);
         httpd_resp_set_status(req, "403 Forbidden");
-        return httpd_resp_send(req, "bad MAC", HTTPD_RESP_USE_STRLEN);
+        *out_err = httpd_resp_send(req, "bad MAC", HTTPD_RESP_USE_STRLEN);
+        return false;
     }
     ota_auth_lockout_record_success(&s_lockout);
+    return true;
+}
+
+// POST /api/ota/esp
+static esp_err_t ota_esp_post(httpd_req_t *req)
+{
+    esp_err_t auth_err = ESP_OK;
+    if (!recovery_authenticate_request(req, &auth_err)) {
+        return auth_err;
+    }
 
     const esp_partition_t *target = esp_ota_get_next_update_partition(NULL);
     if (!target) {
@@ -333,6 +377,11 @@ static esp_err_t boot_guard_get(httpd_req_t *req)
 // POST /api/ota/esp/boot_guard_reset
 static esp_err_t boot_guard_reset_post(httpd_req_t *req)
 {
+    esp_err_t auth_err = ESP_OK;
+    if (!recovery_authenticate_request(req, &auth_err)) {
+        return auth_err;
+    }
+
     nvs_handle_t h;
     esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, BOOT_GUARD_NAMESPACE,
                                              NVS_READWRITE, &h);
@@ -354,6 +403,11 @@ static esp_err_t boot_guard_reset_post(httpd_req_t *req)
 // POST /api/sw_reset
 static esp_err_t sw_reset_post(httpd_req_t *req)
 {
+    esp_err_t auth_err = ESP_OK;
+    if (!recovery_authenticate_request(req, &auth_err)) {
+        return auth_err;
+    }
+
     httpd_resp_sendstr(req, "resetting");
     vTaskDelay(pdMS_TO_TICKS(200));
     esp_restart();
