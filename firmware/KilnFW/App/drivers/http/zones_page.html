@@ -1680,9 +1680,11 @@ function settingsSourceOf(k) {
 // HIGHEST-INDEXED zone actually on the cycle -- not necessarily `k`, and not
 // necessarily the walk's starting point -- so a live 0<->1 cycle resets zone
 // 1 regardless of which of the two is edited last, exactly like the server
-// resets whichever load first observes it. For a chain that simply points at
-// a disabled (out-of-range) zone -- not a cycle -- the broken link is `k`'s
-// own, so `resetZone` is `k` there, same as before this function tracked it.
+// resets whichever load first observes it. For a chain that walks into a
+// disabled (out-of-range) link -- not a cycle -- `resetZone` is the zone whose
+// OWN link points off the end (`cur`), never the zone the walk started from:
+// the server leaves such a chain alone entirely, so no upstream zone's valid
+// link may be collapsed here.
 function resolveTerminal(k, thermoCount) {
   var path = [];
   var pathPos = {};
@@ -1714,6 +1716,10 @@ function resolveTerminal(k, thermoCount) {
       // which only ever walks zones_config_json_settings_source_chain_has_cycle())
       // leaves a dangling (out-of-range) link alone when it isn't part of a
       // cycle, so a downstream zone's own valid link must not be touched here.
+      // The client still collapses the offending zone itself, which the server
+      // does not, because the page has to display something for it; the
+      // server/client agreement asserted here is only that no zone other than
+      // the offending one is touched.
       // The zone whose OWN stored link is out of range is `cur`, not the
       // original `k` this walk started from -- reset that one, matching the
       // cycle branches above where a zone's own updateInheritance() call only

@@ -747,7 +747,7 @@ What that exactness costs, stated plainly so it is not discovered later:
   therefore depends on 6.6** — see the revised wave order in 6.7. (6.6's own
   body was trimmed once it shipped; what it actually did is the
   `LV_FLEX_ALIGN_END` right-alignment and build-order change described in
-  `check_ui_relay_reset_removed.ps1`'s header comment, which also enforces
+  `firmware/KilnFW/App/test/check_ui_relay_reset_removed.ps1`'s header comment, which also enforces
   that shape stays intact.)
 * **The "N of M" page indicator moves into the topbar title** (title string
   becomes e.g. `Profiles 1/2`) rather than a content row, for the same reason.
