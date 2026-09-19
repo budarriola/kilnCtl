@@ -1937,6 +1937,379 @@ static void test_export_package_json_never_contains_or_disturbs_credential(void)
     free(json);
 }
 
+// ---------------------------------------------------------------------------
+// Task 3 (bkfinish_assessment.md item 3): host tests for the validate-only
+// seam added by docs/KILN_PROFILES_PLAN.md item 17
+// (kiln_cfg_store_validate_package_json()) and the name-override import
+// entry point (kiln_cfg_store_import_package_json_as()) that backup_import.c
+// (task 4/6/7) needs. Neither had ANY coverage before this task -- the WIP
+// assessment named this explicitly ("both new entry points ship with zero
+// coverage").
+// ---------------------------------------------------------------------------
+
+static void test_validate_package_json_writes_nothing_on_success(void)
+{
+    TEST_SECTION("kiln_cfg_store_validate_package_json -- a valid package normalizes name/schema/hash and "
+                 "writes NOTHING (slot count unchanged, no NVS write)");
+    reset_state();
+
+    int32_t id1 = -1;
+    char reason[160] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("  Validate Me  ", -1, &id1, reason, sizeof(reason)), "setup: save succeeds");
+
+    char *json = (char *)malloc(KILN_CFG_EXPORT_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    TEST_CHECK(kiln_cfg_store_export_package_json(id1, json, KILN_CFG_EXPORT_JSON_MAX_LEN, &len, reason,
+                                                  sizeof(reason)),
+               "setup: export succeeds");
+
+    kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
+    uint8_t before = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+
+    char name_out[KILN_CFG_NAME_MAX_LEN + 1] = {0};
+    uint16_t out_schema = 0;
+    uint32_t out_hash = 0;
+    reason[0] = '\0';
+    bool ok = kiln_cfg_store_validate_package_json(json, name_out, sizeof(name_out), &out_schema, &out_hash, reason,
+                                                   sizeof(reason));
+    TEST_CHECK(ok, "a valid, just-exported package validates");
+    TEST_CHECK(strcmp(name_out, "Validate Me") == 0, "name_out is trimmed/normalized exactly as stored");
+    TEST_CHECK(out_schema != 0, "pkg_schema is reported");
+    TEST_CHECK(out_hash != 0, "pkg_hash is reported (non-zero for a real populated package)");
+
+    uint8_t after = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(after == before, "slot count is UNCHANGED -- validate-only never creates a slot");
+    TEST_CHECK(kiln_cfg_store_get_active_id() == id1, "active id is unchanged");
+
+    // Confirm the identity validate() reported matches what actually
+    // committing the same bytes would produce -- this is the whole point of
+    // the seam (backup_import.c compares this against a live board's own
+    // kiln_cfg_store_get_package_identity() before deciding create/rename).
+    // The file's own name ("Validate Me") collides with id1's existing slot
+    // by construction (it's a self-export), so rename it first -- same trick
+    // as test_export_import_new_slot_round_trip() above; the pkg_schema/
+    // pkg_hash identity being compared is unaffected by the name field.
+    char *name_field_commit = strstr(json, "\"name\":\"Validate Me\"");
+    TEST_CHECK(name_field_commit != NULL, "found the name field to rename before the real commit");
+    if (name_field_commit) {
+        name_field_commit[strlen("\"name\":\"Validate M")] = 'f'; // "Me" -> "Mf", same length
+    }
+    int32_t id2 = -1;
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_import_package_json(json, &id2, reason, sizeof(reason)),
+              "committing the identical (renamed) bytes for real must still succeed");
+    bool committed_pico_populated = false;
+    uint16_t committed_schema = 0;
+    uint32_t committed_hash = 0;
+    TEST_CHECK(kiln_cfg_store_get_package_identity(id2, &committed_pico_populated, &committed_schema,
+                                                   &committed_hash),
+              "read back the committed slot's identity");
+    TEST_CHECK(committed_schema == out_schema, "validate()'s reported pkg_schema matches the real committed one");
+    TEST_CHECK(committed_hash == out_hash, "validate()'s reported pkg_hash matches the real committed one");
+
+    free(json);
+}
+
+static void test_validate_package_json_refuses_bad_hash_same_reason_as_import(void)
+{
+    TEST_SECTION("kiln_cfg_store_validate_package_json -- refuses a pkg_hash mismatch with the SAME reason "
+                 "the committing call gives, writes nothing");
+    reset_state();
+    int32_t id1 = -1;
+    char reason[160] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Original", -1, &id1, reason, sizeof(reason)), "setup: save succeeds");
+
+    char *json_for_validate = (char *)malloc(KILN_CFG_EXPORT_JSON_MAX_LEN);
+    char *json_for_import = (char *)malloc(KILN_CFG_EXPORT_JSON_MAX_LEN);
+    TEST_CHECK(json_for_validate != NULL && json_for_import != NULL, "test scratch alloc");
+    size_t len = 0;
+    TEST_CHECK(kiln_cfg_store_export_package_json(id1, json_for_validate, KILN_CFG_EXPORT_JSON_MAX_LEN, &len, reason,
+                                                  sizeof(reason)),
+               "setup: export succeeds (copy 1, for validate)");
+    len = 0;
+    TEST_CHECK(kiln_cfg_store_export_package_json(id1, json_for_import, KILN_CFG_EXPORT_JSON_MAX_LEN, &len, reason,
+                                                  sizeof(reason)),
+               "setup: export succeeds (copy 2, identically tampered, for import)");
+
+    // Flip one hex nibble inside esp_blob_hex in both copies -- envelope
+    // stays well-formed (same length, still valid hex), so this exercises
+    // the HASH check specifically, not the envelope parser. Same recipe as
+    // test_import_refuses_hash_mismatch_nothing_written() above (pkg_hash
+    // itself is a quoted hex STRING, not a bare number -- corrupting it
+    // directly breaks JSON structure and gets refused by the parser instead
+    // of the hash comparison, which is not what this test means to exercise).
+    {
+        char *h1 = strstr(json_for_validate, "\"esp_blob_hex\":\"");
+        char *h2 = strstr(json_for_import, "\"esp_blob_hex\":\"");
+        TEST_CHECK(h1 != NULL && h2 != NULL, "found esp_blob_hex to tamper in both copies");
+        if (h1) {
+            char *digit = h1 + strlen("\"esp_blob_hex\":\"");
+            *digit = (*digit == '0') ? '1' : '0';
+        }
+        if (h2) {
+            char *digit = h2 + strlen("\"esp_blob_hex\":\"");
+            *digit = (*digit == '0') ? '1' : '0';
+        }
+    }
+
+    kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
+    uint8_t before = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+
+    char name_out[KILN_CFG_NAME_MAX_LEN + 1] = {0};
+    uint16_t out_schema = 0;
+    uint32_t out_hash = 0;
+    char validate_reason[160] = {0};
+    bool validate_ok = kiln_cfg_store_validate_package_json(json_for_validate, name_out, sizeof(name_out),
+                                                            &out_schema, &out_hash, validate_reason,
+                                                            sizeof(validate_reason));
+    TEST_CHECK(!validate_ok, "validate refuses the hash-mismatched package");
+    TEST_CHECK(strstr(validate_reason, "hash") != NULL, "reason names the hash mismatch specifically");
+
+    int32_t new_id = -1;
+    char import_reason[160] = {0};
+    bool import_ok = kiln_cfg_store_import_package_json(json_for_import, &new_id, import_reason,
+                                                        sizeof(import_reason));
+    TEST_CHECK(!import_ok, "the committing call refuses the identically-tampered package too");
+    TEST_CHECK(strcmp(validate_reason, import_reason) == 0,
+              "validate-only gives the SAME reason string the committing call gives for identical input");
+
+    uint8_t after = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(after == before, "no slot was allocated by either the validate-only or the committing call");
+
+    free(json_for_validate);
+    free(json_for_import);
+}
+
+static void test_validate_package_json_succeeds_while_quarantined(void)
+{
+    TEST_SECTION("kiln_cfg_store_validate_package_json -- succeeds while the store is QUARANTINED, unlike "
+                 "the committing call which still refuses");
+    reset_state();
+
+    int32_t id1 = -1;
+    char reason[160] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Pre-Quarantine", -1, &id1, reason, sizeof(reason)), "setup: save succeeds");
+
+    char *json = (char *)malloc(KILN_CFG_EXPORT_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    TEST_CHECK(kiln_cfg_store_export_package_json(id1, json, KILN_CFG_EXPORT_JSON_MAX_LEN, &len, reason,
+                                                  sizeof(reason)),
+               "setup: export succeeds");
+    // Give it a distinct name so import doesn't self-collide (same trick as
+    // test_export_import_new_slot_round_trip() above).
+    char *name_field = strstr(json, "\"name\":\"Pre-Quarantine\"");
+    TEST_CHECK(name_field != NULL, "found the name field to rename before import");
+    if (name_field) {
+        name_field[strlen("\"name\":\"Pre-Quarantin")] = '3'; // same length
+    }
+
+    // Now corrupt the store's own NVS blob and reload -- same recipe as
+    // test_corrupt_store_quarantines_and_blocks_writes() above.
+    hal_kv_handle_t h;
+    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    kiln_cfg_store_blob_t garbage;
+    memset(&garbage, 0xAB, sizeof(garbage));
+    garbage.version = KILN_CFG_STORE_VERSION;
+    hal_kv_set_blob(&h, NVS_KEY_STORE, &garbage, sizeof(garbage) - 1); // one byte short
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+    TEST_CHECK(!nvs_load_store(), "setup: the wrong-size blob is not trustworthy");
+    TEST_CHECK(kiln_cfg_store_is_quarantined(NULL, 0), "setup: the store is now quarantined");
+
+    char name_out[KILN_CFG_NAME_MAX_LEN + 1] = {0};
+    uint16_t out_schema = 0;
+    uint32_t out_hash = 0;
+    char validate_reason[160] = {0};
+    bool validate_ok = kiln_cfg_store_validate_package_json(json, name_out, sizeof(name_out), &out_schema, &out_hash,
+                                                            validate_reason, sizeof(validate_reason));
+    TEST_CHECK(validate_ok, "validate-only succeeds even while the store is quarantined -- it never checks "
+                           "quarantine, by design (the quarantine gate belongs on the committing path only)");
+
+    int32_t new_id = -1;
+    char import_reason[160] = {0};
+    bool import_ok = kiln_cfg_store_import_package_json(json, &new_id, import_reason, sizeof(import_reason));
+    TEST_CHECK(!import_ok, "the committing call still refuses while quarantined");
+    TEST_CHECK(strstr(import_reason, "quarantine") != NULL, "the committing refusal names the quarantine");
+
+    free(json);
+}
+
+static void test_import_package_json_as_honours_name_override(void)
+{
+    TEST_SECTION("kiln_cfg_store_import_package_json_as -- creates the slot under name_override, not the "
+                 "name embedded in the file");
+    reset_state();
+
+    int32_t id1 = -1;
+    char reason[160] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Same Name", -1, &id1, reason, sizeof(reason)), "setup: save succeeds");
+
+    char *json = (char *)malloc(KILN_CFG_EXPORT_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    TEST_CHECK(kiln_cfg_store_export_package_json(id1, json, KILN_CFG_EXPORT_JSON_MAX_LEN, &len, reason,
+                                                  sizeof(reason)),
+               "setup: export succeeds");
+
+    // Deliberately do NOT rename the embedded name -- the whole point of
+    // name_override is the "different identity, same name" collision case:
+    // the file's own name ("Same Name") collides with id1's existing slot,
+    // which the plain kiln_cfg_store_import_package_json() would refuse.
+    int32_t id2 = -1;
+    reason[0] = '\0';
+    bool ok = kiln_cfg_store_import_package_json_as(json, "Renamed Copy", &id2, reason, sizeof(reason));
+    TEST_CHECK(ok, "import_package_json_as succeeds under a distinct override name despite the file's own "
+                  "name colliding with an existing slot");
+    TEST_CHECK(id2 > 0 && id2 != id1, "a brand new slot was created");
+
+    kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
+    uint8_t n = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    bool found_override = false, found_original_name_only_once = false;
+    int original_name_count = 0;
+    for (uint8_t i = 0; i < n; i++) {
+        if (strcmp(rows[i].name, "Renamed Copy") == 0) {
+            found_override = true;
+            TEST_CHECK(rows[i].id == id2, "the override-named row is the newly-created slot");
+        }
+        if (strcmp(rows[i].name, "Same Name") == 0) {
+            original_name_count++;
+        }
+    }
+    found_original_name_only_once = (original_name_count == 1);
+    TEST_CHECK(found_override, "a slot named exactly \"Renamed Copy\" exists");
+    TEST_CHECK(found_original_name_only_once,
+              "\"Same Name\" still names exactly the ORIGINAL slot -- the override name never touched it");
+}
+
+static void test_import_package_json_as_rejects_invalid_override(void)
+{
+    TEST_SECTION("kiln_cfg_store_import_package_json_as -- rejects an invalid override name, writes nothing");
+    reset_state();
+
+    int32_t id1 = -1;
+    char reason[160] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Original", -1, &id1, reason, sizeof(reason)), "setup: save succeeds");
+
+    char *json = (char *)malloc(KILN_CFG_EXPORT_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    TEST_CHECK(kiln_cfg_store_export_package_json(id1, json, KILN_CFG_EXPORT_JSON_MAX_LEN, &len, reason,
+                                                  sizeof(reason)),
+               "setup: export succeeds");
+
+    kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
+    uint8_t before = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+
+    // An empty/whitespace-only override name is invalid by the same
+    // character-set/length rule every other stored name is held to (see
+    // test_empty_or_whitespace_only_name_rejected() above).
+    int32_t new_id = -1;
+    reason[0] = '\0';
+    bool ok = kiln_cfg_store_import_package_json_as(json, "   ", &new_id, reason, sizeof(reason));
+    TEST_CHECK(!ok, "an empty/whitespace-only override name is refused");
+    TEST_CHECK(reason[0] != '\0', "a specific reason is given");
+
+    uint8_t after = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(after == before, "no slot was allocated on refusal");
+
+    free(json);
+}
+
+static void test_import_package_json_as_null_override_matches_plain_import(void)
+{
+    TEST_SECTION("kiln_cfg_store_import_package_json_as(..., NULL, ...) -- behaviourally identical to "
+                 "kiln_cfg_store_import_package_json()");
+    reset_state();
+
+    int32_t id1 = -1;
+    char reason[160] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Base", -1, &id1, reason, sizeof(reason)), "setup: save succeeds");
+
+    char *json = (char *)malloc(KILN_CFG_EXPORT_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    TEST_CHECK(kiln_cfg_store_export_package_json(id1, json, KILN_CFG_EXPORT_JSON_MAX_LEN, &len, reason,
+                                                  sizeof(reason)),
+               "setup: export succeeds");
+    char *name_field = strstr(json, "\"name\":\"Base\"");
+    TEST_CHECK(name_field != NULL, "found the name field to rename before import (avoid self-collision)");
+    if (name_field) {
+        name_field[strlen("\"name\":\"Bas")] = 'e' + 1; // "Base" -> "Basf", same length, distinct
+    }
+
+    int32_t id2 = -1;
+    reason[0] = '\0';
+    bool ok = kiln_cfg_store_import_package_json_as(json, NULL, &id2, reason, sizeof(reason));
+    TEST_CHECK(ok, "a NULL override imports exactly as the plain function would");
+    TEST_CHECK(id2 > 0 && id2 != id1, "a brand new slot was created, using the file's own embedded name");
+
+    kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
+    uint8_t n = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    bool found = false;
+    for (uint8_t i = 0; i < n; i++) {
+        if (rows[i].id == id2) {
+            TEST_CHECK(strcmp(rows[i].name, "Basf") == 0, "the slot's name is the file's own embedded name, "
+                                                          "unchanged by a NULL override");
+            found = true;
+        }
+    }
+    TEST_CHECK(found, "the new slot is present in the listing");
+
+    free(json);
+}
+
+// NEGATIVE TEST (task 3, per-instructions protocol): confirms
+// validate_package_json_common()'s hash check is load-bearing, not a check
+// that happens to never fire. Sabotaged by hand at review time -- see the
+// commit message for the exact one-line change, the observed failure (this
+// test's TEST_CHECK(!ok, ...) assertions flipping to FAIL), the by-hand
+// restore, and the git hash-object verification performed before the fix
+// was measured again. This function intentionally duplicates
+// test_validate_package_json_refuses_bad_hash_same_reason_as_import() above
+// rather than replacing it -- that test also proves the reason STRING
+// matches between the two entry points, which is a distinct property from
+// "the hash check exists at all".
+static void test_validate_package_json_hash_check_is_load_bearing(void)
+{
+    TEST_SECTION("kiln_cfg_store_validate_package_json -- NEGATIVE-TEST-VERIFIED: the pkg_hash check is real, "
+                 "not vacuous (see commit message for the sabotage/restore/rebuild protocol actually run)");
+    reset_state();
+    int32_t id1 = -1;
+    char reason[160] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Original", -1, &id1, reason, sizeof(reason)), "setup: save succeeds");
+
+    char *json = (char *)malloc(KILN_CFG_EXPORT_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    TEST_CHECK(kiln_cfg_store_export_package_json(id1, json, KILN_CFG_EXPORT_JSON_MAX_LEN, &len, reason,
+                                                  sizeof(reason)),
+               "setup: export succeeds");
+    // Flip one hex nibble inside esp_blob_hex -- same recipe as
+    // test_import_refuses_hash_mismatch_nothing_written() (pkg_hash is a
+    // quoted hex STRING; corrupting it directly breaks JSON structure and
+    // gets refused by the envelope parser instead of the hash comparison).
+    char *hexval = strstr(json, "\"esp_blob_hex\":\"");
+    TEST_CHECK(hexval != NULL, "found esp_blob_hex to tamper");
+    if (hexval) {
+        char *digit = hexval + strlen("\"esp_blob_hex\":\"");
+        *digit = (*digit == '0') ? '1' : '0';
+    }
+
+    char name_out[KILN_CFG_NAME_MAX_LEN + 1] = {0};
+    uint16_t out_schema = 0;
+    uint32_t out_hash = 0;
+    reason[0] = '\0';
+    bool ok = kiln_cfg_store_validate_package_json(json, name_out, sizeof(name_out), &out_schema, &out_hash, reason,
+                                                   sizeof(reason));
+    TEST_CHECK(!ok, "a tampered esp_blob_hex must be refused via the hash check (this assertion is the one "
+                   "that FAILED during the negative test, when the check was sabotaged out)");
+    TEST_CHECK(strstr(reason, "hash") != NULL, "reason names the hash mismatch specifically");
+
+    free(json);
+}
+
 static void test_import_refuses_malformed(void)
 {
     TEST_SECTION("kiln_cfg_store_import_package_json -- refuses a malformed file, writes nothing");
@@ -3352,6 +3725,14 @@ void run_test_kiln_cfg_store(void)
     test_capture_expected_pico_fields_excludes_abs_max_and_tc_type();
     test_set_active_id_raw_drops_pending_flag_owned_by_old_slot();
     test_home_rail_kiln_count_matches_list_and_decides_threshold();
+
+    test_validate_package_json_writes_nothing_on_success();
+    test_validate_package_json_refuses_bad_hash_same_reason_as_import();
+    test_validate_package_json_succeeds_while_quarantined();
+    test_import_package_json_as_honours_name_override();
+    test_import_package_json_as_rejects_invalid_override();
+    test_import_package_json_as_null_override_matches_plain_import();
+    test_validate_package_json_hash_check_is_load_bearing();
 
     cfg_fs_deinit();
 }
