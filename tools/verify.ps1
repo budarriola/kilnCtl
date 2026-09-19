@@ -83,12 +83,14 @@ $Stages = [ordered]@{
     }
     "lint"    = @{
         Desc     = "Web page lint"
-        Exe      = "node"
-        # lint_pages.js takes the directory to scan as argv[2]; with no
-        # argument it throws ERR_INVALID_ARG_TYPE rather than defaulting.
-        Args     = @("$repoRoot\firmware\KilnFW\App\test\lint_pages.js", "$repoRoot\firmware\KilnFW\App\drivers")
-        Decisive = 'problem|error|FAIL'
-        Cwd      = "$repoRoot\firmware\KilnFW\App\test"
+        Exe      = "powershell"
+        # Delegates to tools/check_lint_pages.ps1, which now also runs as
+        # part of tools/run_all_checks.ps1 (globbed by its check_*.ps1 name)
+        # -- this keeps exactly ONE invocation of lint_pages.js rather than
+        # two divergent ones (this stage used to call node directly).
+        Args     = @("-ExecutionPolicy", "Bypass", "-File", "$repoRoot\tools\check_lint_pages.ps1")
+        Decisive = 'FAIL|problem|error'
+        Cwd      = $repoRoot
     }
 }
 
