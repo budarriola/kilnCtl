@@ -41,8 +41,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h> /* strcasecmp() -- kiln_configs[] name matching, case-insensitive
-                      * same as kiln_cfg_store.c's own name comparisons */
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -362,6 +360,23 @@ typedef struct {
 // restore's own already-claimed names (`claimed`, `claimed_count`) agree it
 // is unique. Per the coordinator's explicit instruction: keep suffixing
 // until would_collide() returns false, never assume one attempt suffices.
+/* Hand-rolled rather than strcasecmp()/_stricmp(): this file is built both
+ * by ESP-IDF's toolchain (on-target) and, unmodified, by MSVC's cl for the
+ * host test harness (build_host_tests.ps1), which disagree on which
+ * non-standard name/header exposes a case-insensitive compare -- same
+ * portability note and same fix as kiln_cfg_store.c's names_equal_ci(). */
+static bool backup_names_equal_ci(const char *a, const char *b)
+{
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) {
+            return false;
+        }
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
 static void kiln_cfg_unique_name(const char *base, int32_t exclude_id, char claimed[][KILN_CFG_NAME_MAX_LEN + 1],
                                   size_t claimed_count, char *out, size_t out_cap)
 {
@@ -371,7 +386,7 @@ static void kiln_cfg_unique_name(const char *base, int32_t exclude_id, char clai
         bool taken = kiln_cfg_store_name_would_collide(out, exclude_id);
         if (!taken) {
             for (size_t i = 0; i < claimed_count; i++) {
-                if (strcasecmp(claimed[i], out) == 0) {
+                if (backup_names_equal_ci(claimed[i], out)) {
                     taken = true;
                     break;
                 }
@@ -416,8 +431,17 @@ static void kiln_cfg_unique_name(const char *base, int32_t exclude_id, char clai
 // false (nothing written, even under commit=true, since this function does
 // not touch the store until every file entry has already validated) on any
 // malformed/invalid entry.
+// `ack_delete_count`: the operator's X-Kiln-Config-Ack-Delete header value
+// (see backup_import_post_handler()), or -1 if the header was absent. Only
+// consulted when `commit` is true and MIRROR mode actually has slots slated
+// for deletion (task 8/11): the caller must echo back exactly how many
+// slots this restore will delete, matching "MIRROR names every deletion
+// before applying" for any client, not just backup_page.html's own dry-run
+// round trip -- a MIRROR POST that omits or gets the count wrong is refused
+// before ANY write (rename/create/delete) happens this pass.
 static bool backup_import_kiln_configs(const char *body, kiln_cfg_restore_mode_t mode, bool commit,
-                                        kiln_cfg_plan_t *plan, char *err_msg, size_t err_cap)
+                                        int32_t ack_delete_count, kiln_cfg_plan_t *plan, char *err_msg,
+                                        size_t err_cap)
 {
     plan->count = 0;
     const char *arr = backup_json_obj_find(body, "kiln_configs");
@@ -483,7 +507,16 @@ static bool backup_import_kiln_configs(const char *body, kiln_cfg_restore_mode_t
     file_action_t action[KILN_CFG_MAX_COUNT];
     int32_t action_board_id[KILN_CFG_MAX_COUNT]; // for ACT_RENAME: which board id
     char action_name[KILN_CFG_MAX_COUNT][KILN_CFG_NAME_MAX_LEN + 1]; // final name to use
-    int32_t mapped_active_id = -999; // sentinel: "no file entry claimed is_active"; -1 (KILN_CFG_NO_ACTIVE_ID) is valid
+    // Coordinator decision (assessment task 7): active-slot restoration is
+    // dropped entirely. kiln_cfg_store_set_active_id_raw() is bookkeeping-
+    // only for kiln_cfg_swap.c's own transaction ("does NOT apply the slot's
+    // blob", per its header) -- using it here to restore `is_active` let
+    // `active_id` point at a slot the live zones config could then be
+    // autosaved OVER (section 2.4), silently corrupting the just-restored
+    // slot the moment nothing else changed it first. `is_active` is now
+    // purely informational in the plan text below; the operator re-applies
+    // the desired kiln config from Kiln configs after a restore, exactly the
+    // same as any other config change made outside a live-apply.
 
     for (size_t i = 0; i < file_n; i++) {
         kiln_cfg_file_entry_t *f = &files[i];
@@ -503,10 +536,13 @@ static bool backup_import_kiln_configs(const char *body, kiln_cfg_restore_mode_t
 
         if (idx_identity >= 0) {
             board_matched[idx_identity] = true;
-            if (strcasecmp(board[idx_identity].name, f->name) == 0) {
+            if (backup_names_equal_ci(board[idx_identity].name, f->name)) {
                 // Case 1: same identity, same name -- no-op.
                 if (f->is_active) {
-                    mapped_active_id = board[idx_identity].id;
+                    kiln_cfg_plan_add(plan,
+                                     "\"%s\" was the active kiln config in the backup (informational only -- "
+                                     "re-apply from Kiln configs after restore)",
+                                     board[idx_identity].name);
                 }
                 continue;
             }
@@ -518,7 +554,10 @@ static bool backup_import_kiln_configs(const char *body, kiln_cfg_restore_mode_t
             snprintf(claimed[claimed_n++], sizeof(claimed[0]), "%.23s", action_name[i]);
             kiln_cfg_plan_add(plan, "rename \"%s\" -> \"%s\"", board[idx_identity].name, action_name[i]);
             if (f->is_active) {
-                mapped_active_id = board[idx_identity].id;
+                kiln_cfg_plan_add(plan,
+                                 "\"%s\" was the active kiln config in the backup (informational only -- "
+                                 "re-apply from Kiln configs after restore)",
+                                 action_name[i]);
             }
             continue;
         }
@@ -529,7 +568,7 @@ static bool backup_import_kiln_configs(const char *body, kiln_cfg_restore_mode_t
         // an update of that other slot.
         int idx_name = -1;
         for (uint8_t b = 0; b < board_n; b++) {
-            if (strcasecmp(board[b].name, f->name) == 0) {
+            if (backup_names_equal_ci(board[b].name, f->name)) {
                 idx_name = b;
                 break;
             }
@@ -544,11 +583,14 @@ static bool backup_import_kiln_configs(const char *body, kiln_cfg_restore_mode_t
         } else {
             kiln_cfg_plan_add(plan, "create \"%s\"", action_name[i]);
         }
-        // is_active for a not-yet-created slot is resolved after creation
-        // (commit path only, once the new id is known); dry-run just notes
-        // it in the plan text below.
+        // is_active is informational only (task 7): the create above never
+        // touches active_id, on this build or any other -- see this
+        // function's `action_name`/mapped-active comment above.
         if (f->is_active) {
-            kiln_cfg_plan_add(plan, "(the above create becomes the active kiln config)");
+            kiln_cfg_plan_add(plan,
+                             "\"%s\" was the active kiln config in the backup (informational only -- "
+                             "re-apply from Kiln configs after restore)",
+                             action_name[i]);
         }
     }
 
@@ -568,18 +610,38 @@ static bool backup_import_kiln_configs(const char *body, kiln_cfg_restore_mode_t
         return true; // dry-run / pass-1 validation only -- nothing written
     }
 
-    // ---- Commit: renames first, then creates, then active reassignment, --
-    // ---- then MIRROR deletes last (so a slot slated for deletion is never
-    // ---- still the active one when kiln_cfg_store_delete() runs). --------
+    // ---- Ack gate for MIRROR deletes (task 8/11) -- checked BEFORE any ----
+    // ---- write this pass, renames/creates included, so a missing/wrong ---
+    // ---- ack refuses the whole restore rather than half-applying it. The
+    // ---- same match also derives the ack_no_safety_processor argument the
+    // ---- delete loop below passes -- never a hardcoded `true` -- so an
+    // ---- operator acknowledgement is actually OBTAINED, not merely
+    // ---- asserted by comment (assessment defect 5). */
+    int32_t mirror_delete_count = 0;
+    for (uint8_t b = 0; b < board_n; b++) {
+        if (board_delete[b]) {
+            mirror_delete_count++;
+        }
+    }
+    bool mirror_delete_ack = (ack_delete_count == mirror_delete_count);
+    if (mode == KILN_CFG_RESTORE_MIRROR && mirror_delete_count > 0 && !mirror_delete_ack) {
+        snprintf(err_msg, err_cap,
+                "mirror restore would delete %d kiln config slot(s); refusing without "
+                "X-Kiln-Config-Ack-Delete: %d",
+                (int)mirror_delete_count, (int)mirror_delete_count);
+        return false;
+    }
+
+    // ---- Commit: renames first, then creates, then MIRROR deletes last ---
+    // ---- (so a slot slated for deletion is never renamed/recreated under
+    // ---- it first). Active-slot restoration is deliberately NOT part of
+    // ---- this commit -- see the `is_active` comment above.
     for (size_t i = 0; i < file_n; i++) {
         if (action[i] == ACT_RENAME) {
             if (!kiln_cfg_store_rename(action_board_id[i], action_name[i])) {
                 snprintf(err_msg, err_cap, "kiln_configs[%u]: rename to \"%.23s\" failed at commit", (unsigned)i,
                          action_name[i]);
                 return false;
-            }
-            if (files[i].is_active) {
-                mapped_active_id = action_board_id[i];
             }
         }
     }
@@ -593,26 +655,19 @@ static bool backup_import_kiln_configs(const char *body, kiln_cfg_restore_mode_t
                          action_name[i], reason);
                 return false;
             }
-            if (files[i].is_active) {
-                mapped_active_id = new_id;
-            }
-        }
-    }
-    if (mapped_active_id != -999) {
-        char reason[128];
-        if (!kiln_cfg_store_set_active_id_raw(mapped_active_id, reason, sizeof(reason))) {
-            snprintf(err_msg, err_cap, "kiln_configs: could not set restored active slot: %.60s", reason);
-            return false;
         }
     }
     for (uint8_t b = 0; b < board_n; b++) {
         if (board_delete[b]) {
             char reason[128];
-            if (!kiln_cfg_store_delete(board[b].id, true /* ack_no_safety_processor -- this is a config
-                                                            * restore, not a live-apply; no safety
-                                                            * package is being applied to a running
-                                                            * kiln by this call */,
-                                       reason, sizeof(reason))) {
+            /* ack_no_safety_processor: derived above, not hardcoded -- true
+             * only once mirror_delete_ack confirmed the caller's
+             * X-Kiln-Config-Ack-Delete header actually echoed this exact
+             * deletion count (we would already have returned false above
+             * otherwise, so this is always true by the time we get here;
+             * kept explicit rather than a bare `true` so the next reader
+             * doesn't have to re-derive that from the guard above). */
+            if (!kiln_cfg_store_delete(board[b].id, mirror_delete_ack, reason, sizeof(reason))) {
                 snprintf(err_msg, err_cap, "kiln_configs: could not delete \"%.23s\" for mirror: %.60s", board[b].name,
                          reason);
                 return false;
@@ -2244,10 +2299,26 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
  * previous backup_import_apply() body. An allocation failure here is
  * reported exactly like any other pass-1 validation failure -- false plus an
  * err_msg, nothing touched -- so backup_import_post_handler's existing
- * "!ok -> 400, err_msg body" path handles it without change. */
+ * "!ok -> 400, err_msg body" path handles it without change.
+ *
+ * `*partial_write_out` (task 6): the assessment's defect 2 was that
+ * kiln_configs[] used to commit AFTER profiles/zones, so a mid-restore
+ * failure there left profiles/zones (and an arbitrary already-applied
+ * prefix of the kiln-config actions) persisted while the handler still
+ * replied 400 -- a code that promises nothing changed. Fixed by committing
+ * kiln_configs[] FIRST: if that fails, profiles/zones are still completely
+ * untouched (the common, honest "nothing written" case, still a 400). Only
+ * once kiln_configs[] has fully committed do we touch profiles/zones; if
+ * THAT then fails, kiln_configs[] changes have already landed, so this sets
+ * *partial_write_out = true and the caller reports a distinct 500 naming
+ * what landed rather than a 400 implying nothing did. Always set on entry;
+ * never left indeterminate on any return path. */
 static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, bool dry_run,
-                                 kiln_cfg_plan_t *plan, char *err_msg, size_t err_cap)
+                                 int32_t ack_delete_count, kiln_cfg_plan_t *plan, bool *partial_write_out,
+                                 char *err_msg, size_t err_cap)
 {
+    *partial_write_out = false;
+
     // Pass 1 for kiln_configs[] runs FIRST, unconditionally, before any
     // profile/zone candidate is even parsed -- same "validate everything,
     // then apply" discipline this file's own header comment describes for
@@ -2255,11 +2326,18 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     // commit surface is not profiles_http_save()/zones_config_set_*()). A
     // malformed kiln_configs entry refuses the WHOLE restore, including
     // profiles/zones, exactly like a malformed profile/zone entry does today.
-    if (!backup_import_kiln_configs(body, mode, false, plan, err_msg, err_cap)) {
+    if (!backup_import_kiln_configs(body, mode, false, ack_delete_count, plan, err_msg, err_cap)) {
         return false;
     }
     if (dry_run) {
         return true; // plan filled above; nothing written anywhere, profiles/zones untouched
+    }
+
+    // Pass 2 for kiln_configs[] now runs BEFORE profiles/zones (task 6):
+    // create/rename/mirror-delete kiln config slots. If this fails, nothing
+    // else has been touched yet.
+    if (!backup_import_kiln_configs(body, mode, true, ack_delete_count, plan, err_msg, err_cap)) {
+        return false;
     }
 
     profile_candidate_t *candidates = heap_caps_malloc(sizeof(profile_candidate_t) * PROFILES_MAX_COUNT,
@@ -2268,7 +2346,8 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
         candidates = malloc(sizeof(profile_candidate_t) * PROFILES_MAX_COUNT);
     }
     if (!candidates) {
-        snprintf(err_msg, err_cap, "out of memory (profile candidates)");
+        snprintf(err_msg, err_cap, "out of memory (profile candidates) -- kiln configs were already restored");
+        *partial_write_out = true;
         return false;
     }
     zone_candidate_t *zone_candidates = heap_caps_malloc(sizeof(zone_candidate_t) * MAX31856_CHANNEL_COUNT,
@@ -2278,7 +2357,8 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     }
     if (!zone_candidates) {
         free(candidates);
-        snprintf(err_msg, err_cap, "out of memory (zone candidates)");
+        snprintf(err_msg, err_cap, "out of memory (zone candidates) -- kiln configs were already restored");
+        *partial_write_out = true;
         return false;
     }
 
@@ -2291,7 +2371,8 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     if (!timing_profile_candidates) {
         free(zone_candidates);
         free(candidates);
-        snprintf(err_msg, err_cap, "out of memory (timing profile candidates)");
+        snprintf(err_msg, err_cap, "out of memory (timing profile candidates) -- kiln configs were already restored");
+        *partial_write_out = true;
         return false;
     }
 
@@ -2302,16 +2383,9 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     free(zone_candidates);
     free(candidates);
     if (!ok) {
-        return false;
-    }
-
-    // Pass 2 for kiln_configs[]: profiles/zones just committed successfully
-    // above, so now actually create/rename/reassign-active/mirror-delete
-    // kiln config slots. Re-parses/re-validates (cheap, no writes happen in
-    // pass 1) rather than caching pass-1 state across the profiles/zones
-    // commit, keeping this function's own control flow a plain two-call
-    // sequence with no extra state to keep in sync.
-    if (!backup_import_kiln_configs(body, mode, true, plan, err_msg, err_cap)) {
+        // kiln_configs[] already committed above -- this restore is a
+        // partial write, not the clean "nothing changed" a 400 implies.
+        *partial_write_out = true;
         return false;
     }
     return true;
@@ -2398,7 +2472,7 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
     kiln_cfg_restore_mode_t mode = KILN_CFG_RESTORE_MERGE;
     char mode_val[8];
     if (httpd_req_get_hdr_value_str(req, "X-Kiln-Config-Mode", mode_val, sizeof(mode_val)) == ESP_OK &&
-        strcasecmp(mode_val, "mirror") == 0) {
+        backup_names_equal_ci(mode_val, "mirror")) {
         mode = KILN_CFG_RESTORE_MIRROR;
     }
     bool dry_run = false;
@@ -2408,13 +2482,39 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
         dry_run = true;
     }
 
+    /* X-Kiln-Config-Ack-Delete: <count> (task 8/11): a non-dry-run MIRROR
+     * restore that would delete kiln config slots refuses unless this
+     * header's value exactly equals the number of slots about to be
+     * deleted -- an explicit, structural acknowledgement from the caller,
+     * not just the shipped page's own confirm dialog, so any client hitting
+     * this route is held to the same check. Absent/unparseable defaults to
+     * -1, which can never equal a real (>=0) delete count, so an omitted
+     * header behaves as "not acknowledged" rather than silently trusting a
+     * missing value. */
+    int32_t ack_delete_count = -1;
+    char ack_delete_val[16];
+    if (httpd_req_get_hdr_value_str(req, "X-Kiln-Config-Ack-Delete", ack_delete_val, sizeof(ack_delete_val)) ==
+        ESP_OK) {
+        char *endp = NULL;
+        long parsed = strtol(ack_delete_val, &endp, 10);
+        if (endp != ack_delete_val && parsed >= 0 && parsed <= INT32_MAX) {
+            ack_delete_count = (int32_t)parsed;
+        }
+    }
+
     char err_msg[160];
     kiln_cfg_plan_t plan;
-    bool ok = backup_import_apply(body, mode, dry_run, &plan, err_msg, sizeof(err_msg));
+    bool partial_write = false;
+    bool ok = backup_import_apply(body, mode, dry_run, ack_delete_count, &plan, &partial_write, err_msg,
+                                  sizeof(err_msg));
     free(body);
 
     if (!ok) {
-        httpd_resp_set_status(req, "400 Bad Request");
+        /* task 6: a partial write (kiln_configs[] already committed before
+         * profiles/zones failed) is a distinct 500 naming what already
+         * landed -- a 400 promises nothing changed, and that would be a lie
+         * here. */
+        httpd_resp_set_status(req, partial_write ? "500 Internal Server Error" : "400 Bad Request");
         httpd_resp_set_type(req, "text/plain");
         httpd_resp_send(req, err_msg, strlen(err_msg));
         return ESP_OK;
