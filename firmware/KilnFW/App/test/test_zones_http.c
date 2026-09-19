@@ -10682,6 +10682,110 @@ static void test_ct_stale_verdict_is_never_reported_as_the_verdict_it_was(void)
     test_cfg_rows_reset();
 }
 
+// ---- CT VERDICT PRODUCER (opus review, 2026-09-18, CRITICAL) --------------
+// zone_sweep_verify_ct_attribution() (the ENGINE) is exercised extensively
+// below with hand-set inputs, but nothing here drove
+// zone_sweep_record_ct_attribution() (the PRODUCER, static, #included into
+// this TU like every other split of this file) -- the function that
+// actually decides what those inputs ARE on real hardware. That gap is
+// exactly how the bug survived: on a summed-topology board whose per-zone CT
+// map was never committed (the bench board's own state -- v2->v3 migration
+// leaves group bit 16 clear and nothing writes per-zone bits 17-19), the
+// producer used to fall back to a bare identity map {0,1,2} with
+// configured_ch_shared hardcoded false for every zone, regardless of
+// s_ct_topology_summed. Two zones then resolved WRONG_CHANNEL (their
+// configured channel differs from the one three zones actually share) and
+// the third became eligible for an undecidable PASS -- a fabricated
+// disagreement between the measurement and verdict paths that refuses a
+// correctly wired kiln and tells the operator to move a clamp that was never
+// wrong. The fix: one shared helper, zone_ct_effective_channel_map(),
+// feeding BOTH paths so they cannot drift apart again.
+static void ctp_setup_summed_uncommitted_map(void)
+{
+    fake_kv_reset_all();
+    test_cfg_rows_reset();
+    memset(&s_ct_derive, 0, sizeof(s_ct_derive));
+    zone_k_ct_clear();
+
+    s_zones.cfg.thermo_count = 3;
+    s_sweep.zones_total = 3;
+    s_ct_topology_summed = true; /* committed topology: summed */
+
+    test_cfg_set_u8(0x0109u, 1u, true); /* ct_installed */
+    test_cfg_set_u8(0x031Fu, 1u, true); /* ct_topology = summed, matches the module static above */
+    /* Deliberately NOT setting 0x0320-0x0322 (the per-zone CT channel map) --
+     * this is the exact "answered group bit, unanswered per-zone bits"
+     * state the v2->v3 migration leaves behind. */
+
+    const uint8_t shared_ch = (uint8_t)(ZONE_CT_CHANNEL_COUNT - 1);
+    test_cfg_set_f32(ZONE_KCT_PARAM_ID(shared_ch), 0.0333f, true);
+    test_ct_cal_set(shared_ch, 1.0f, 0.0f, SAFETY_CT_CAL_SOURCE_MANUAL);
+
+    for (uint8_t z = 0; z < 3u; z++) {
+        test_cfg_set_f32((uint16_t)(0x031Au + z), 12.0f, true); /* i_normal_a */
+        for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+            /* All three zones are physically read on the one shared
+             * channel -- exactly what "summed" means. */
+            s_ct_derive.zone_per_ch_a[z][c] = (c == shared_ch) ? 12.0f : 0.05f;
+        }
+        s_ct_derive.verify_zone_mask |= (uint8_t)(1u << z);
+    }
+}
+
+static void test_ct_producer_summed_uncommitted_map_is_shared_not_wrong_channel(void)
+{
+    TEST_SECTION("zone_sweep_record_ct_attribution -- summed topology, uncommitted per-zone map: "
+                 "the PRODUCER's effective map must agree with the measurement path (both now go "
+                 "through zone_ct_effective_channel_map()), so every zone reports "
+                 "SHARED_CHANNEL/INCONCLUSIVE, never a spurious WRONG_CHANNEL FAIL or an undecidable "
+                 "PASS");
+
+    ctp_setup_summed_uncommitted_map();
+
+    /* Confirm the fixture's premise before trusting anything below: the
+     * per-zone map really is uncommitted. */
+    uint8_t committed[ZONE_CT_CHANNEL_COUNT] = {0};
+    TEST_CHECK(!zone_cfg_committed_zone_ct_channel(committed),
+               "fixture: the per-zone CT map is genuinely uncommitted");
+
+    /* And the effective map the fix computes really does resolve to the
+     * shared channel for every zone, with shared=true -- the two facts the
+     * old identity-map fallback got wrong. */
+    uint8_t eff[ZONE_CT_CHANNEL_COUNT] = {0};
+    zone_ct_effective_channel_map(eff);
+    const uint8_t shared_ch = (uint8_t)(ZONE_CT_CHANNEL_COUNT - 1);
+    for (uint8_t z = 0; z < ZONE_CT_CHANNEL_COUNT; z++) {
+        TEST_CHECK(eff[z] == shared_ch,
+                   "effective map: every zone falls back to the shared channel under summed topology");
+    }
+    TEST_CHECK(zone_ct_member_count_in_map(eff, shared_ch) == ZONE_CT_CHANNEL_COUNT,
+               "effective map: the shared channel has every zone as a member");
+
+    zone_sweep_record_ct_attribution();
+
+    ct_verify_blob_t blob;
+    memset(&blob, 0, sizeof(blob));
+    TEST_CHECK(ct_verify_store_get(&blob), "producer: a verdict was saved");
+
+    for (uint8_t z = 0; z < 3u; z++) {
+        TEST_CHECK(blob.zone[z].verdict == (uint8_t)ZONE_CT_VERDICT_INCONCLUSIVE,
+                   "producer: every zone is INCONCLUSIVE on the fallback summed map -- never FAIL, "
+                   "never PASS");
+        TEST_CHECK(blob.zone[z].reason == (uint8_t)ZONE_CT_VERIFY_SHARED_CHANNEL,
+                   "producer: the reason is SHARED_CHANNEL -- undecidable attribution, not a wiring "
+                   "fault an operator needs to chase");
+    }
+
+    TEST_CHECK(ct_verify_current_fact() == (int)READINESS_CT_ATTR_INCONCLUSIVE,
+               "producer: the board-level fact is INCONCLUSIVE -- blocks the wizard step only, "
+               "never firing");
+
+    fake_kv_reset_all();
+    test_cfg_rows_reset();
+    s_ct_topology_summed = false;
+    s_sweep.zones_total = 0;
+}
+
 // Case 1: correct attribution.
 static void test_ct_verify_correct_attribution_passes(void)
 {
@@ -14304,6 +14408,7 @@ void run_test_zones_http(void)
     test_ct_store_round_trips_through_nvs();
     test_ct_current_fact_tracks_the_stored_verdict();
     test_ct_stale_verdict_is_never_reported_as_the_verdict_it_was();
+    test_ct_producer_summed_uncommitted_map_is_shared_not_wrong_channel();
     test_zone_sweep_record_ct_refuses_a_zone_whose_relay_is_not_its_own_bit();
     test_zone_sweep_record_ct_refuses_two_zones_claiming_one_channel();
     test_zone_sweep_run_all_zones_never_energizes_two_zones_at_once();

@@ -138,17 +138,56 @@ static bool zone_cfg_committed_zone_ct_channel(uint8_t *out_ch)
     return true;
 }
 
-/* member(ch) = { z : zone_ct_channel[z] == ch }, the same predicate
- * safety_guards.c's step-4 arm uses. Only meaningful with a valid map. */
-static uint8_t zone_ct_member_count(uint8_t ch)
+/* member(ch) = { z : map[z] == ch }, over an arbitrary map array -- the
+ * building block zone_ct_member_count() below and the CT-verdict producer
+ * both need, so neither has to re-walk ZONE_CT_CHANNEL_COUNT by hand. */
+static uint8_t zone_ct_member_count_in_map(const uint8_t *map, uint8_t ch)
 {
     uint8_t n = 0u;
     for (uint8_t z = 0; z < ZONE_CT_CHANNEL_COUNT; z++) {
-        if (s_zone_ct_channel[z] == ch) {
+        if (map[z] == ch) {
             n++;
         }
     }
     return n;
+}
+
+/* member(ch) = { z : zone_ct_channel[z] == ch }, the same predicate
+ * safety_guards.c's step-4 arm uses. Only meaningful with a valid map. */
+static uint8_t zone_ct_member_count(uint8_t ch)
+{
+    return zone_ct_member_count_in_map(s_zone_ct_channel, ch);
+}
+
+/* opus review, 2026-09-18 (CRITICAL): the single effective per-zone CT
+ * channel map, used everywhere a caller needs "what channel does this zone
+ * read on, absent a committed answer" -- matching
+ * zone_sweep_shared_ch_for_zone()'s own fallback order exactly, so the
+ * measurement path and the CT-verdict producer/fingerprint can never
+ * disagree about topology again the way they used to (the verdict side used
+ * to hardcode an identity map {0,1,2} regardless of s_ct_topology_summed,
+ * so a summed board with an uncommitted per-zone map fed the engine
+ * configured_ch_shared=false for every zone and FAILed instead of reporting
+ * the correct SHARED_CHANNEL/INCONCLUSIVE).
+ *
+ * Same three-tier fallback as the measurement path:
+ *   1. a fully committed per-zone map -- authoritative, used verbatim.
+ *   2. no map, topology committed summed -- every zone reads the shared
+ *      (legacy) channel, ZONE_CT_CHANNEL_COUNT - 1.
+ *   3. no map, topology per_zone (the default, and every board before this
+ *      field existed) -- identity, {0, 1, 2, ...}, today's unmodified
+ *      behaviour.
+ * Always fills every entry of out_map; never leaves a caller reading a
+ * partially-initialised array. */
+static void zone_ct_effective_channel_map(uint8_t *out_map)
+{
+    if (zone_cfg_committed_zone_ct_channel(out_map)) {
+        return;
+    }
+    uint8_t shared_ch = (uint8_t)(ZONE_CT_CHANNEL_COUNT - 1);
+    for (uint8_t z = 0; z < ZONE_CT_CHANNEL_COUNT; z++) {
+        out_map[z] = s_ct_topology_summed ? shared_ch : z;
+    }
 }
 
 /* The single predicate both record callbacks branch on, so they can never
@@ -1986,11 +2025,12 @@ void ct_verify_collect_fingerprint_in(ct_verify_fingerprint_in_t *out)
     out->ct_installed = zone_cfg_committed_ct_installed();
     out->ct_topology = zone_cfg_committed_ct_topology();
 
-    uint8_t map[ZONE_CT_CHANNEL_COUNT] = {0u, 1u, 2u};
-    /* The same identity fallback zone_sweep_task() uses when the map is not
-     * fully answered -- hashing the fallback is correct, because the
-     * fallback is what the verdict was actually taken against. */
-    (void)zone_cfg_committed_zone_ct_channel(map);
+    uint8_t map[ZONE_CT_CHANNEL_COUNT];
+    /* The same effective-map fallback zone_sweep_shared_ch_for_zone() uses
+     * (committed map, else the topology-aware fallback) -- hashing the
+     * fallback is correct, because the fallback is what the verdict was
+     * actually taken against. */
+    zone_ct_effective_channel_map(map);
     for (uint8_t z = 0; z < CT_VERIFY_MAX_ZONES; z++) {
         out->zone_ct_channel[z] = (z < ZONE_CT_CHANNEL_COUNT) ? map[z] : 0u;
         out->zone_relay_mask[z] = (z < zone_count) ? s_zones.cfg.zones[z].relay_mask : 0u;
@@ -2099,8 +2139,8 @@ static void zone_sweep_record_ct_attribution(void)
     }
     blob.zone_count = zone_count;
 
-    uint8_t map[ZONE_CT_CHANNEL_COUNT] = {0u, 1u, 2u};
-    (void)zone_cfg_committed_zone_ct_channel(map);
+    uint8_t map[ZONE_CT_CHANNEL_COUNT];
+    zone_ct_effective_channel_map(map);
 
     for (uint8_t zi = 0; zi < zone_count; zi++) {
         zone_ct_verify_in_t in;
@@ -2115,7 +2155,12 @@ static void zone_sweep_record_ct_attribution(void)
                                  : NAN;
         }
         in.configured_ch = map[zi];
-        in.configured_ch_shared = (zone_ct_member_count(map[zi]) > 1u);
+        /* Member count WITHIN the effective map just computed above, not
+         * s_zone_ct_channel (which is only ever populated by a genuinely
+         * committed map, and stays all-zero otherwise) -- the two agree
+         * whenever the map is committed, but only the local map is correct
+         * for the summed/per_zone fallback tiers. */
+        in.configured_ch_shared = (zone_ct_member_count_in_map(map, map[zi]) > 1u);
         in.conflict = ((s_ct_derive.conflict_mask & (1u << map[zi])) != 0u);
 
         float a_fs = 0.0f;
