@@ -222,8 +222,22 @@ static void touch_bridge_task(void *arg)
                  * frame, which msg.length >= 1 above has already
                  * established. Fire-and-forget, same as INJECT and
                  * SET_TAP_DUMP: the actual dump goes out as ESP_LOGI lines
-                 * over uart_log_bridge, not as a reply on this task. */
-                kiln_ui_log_tap_targets();
+                 * over uart_log_bridge, not as a reply on this task.
+                 *
+                 * Routed through lvgl_port_request_tap_dump() rather than
+                 * calling kiln_ui_log_tap_targets() directly (bench-
+                 * reproduced 2026-09-19: IllegalInstruction panic,
+                 * exc_task='touch_uart_brid'). This task's stack is only
+                 * 3072 B; kiln_ui_log_tap_targets() recurses the live LVGL
+                 * tree and calls ESP_LOGI (itself stack-hungry, formatting
+                 * a line per widget) at every node, which does not fit
+                 * alongside this task's other locals with the ~176 B that
+                 * was free at idle. lvgl_port_request_tap_dump() instead
+                 * flags lvgl_port_task -- which already owns every other
+                 * LVGL access and carries an 8192 B stack -- to run the
+                 * dump on ITS next loop tick. See lvgl_port.h's declaration
+                 * comment for the thread-safety angle this also fixes. */
+                lvgl_port_request_tap_dump();
                 err = ESP_OK;
                 break;
             }

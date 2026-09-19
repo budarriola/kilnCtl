@@ -834,12 +834,35 @@ static void lvgl_port_service_idle_wake(void)
     }
 }
 
+/* Set by lvgl_port_request_tap_dump() (any task), cleared here once
+ * serviced. A plain bool is enough: the only write from outside this task
+ * is "set true", this task only ever reads it and (on that one path) writes
+ * it back to false, so there is no read-modify-write race to protect --
+ * same single-writer-per-field reasoning lvgl_port_get_touch_diag()'s header
+ * comment already applies to this module's other cross-task counters.
+ * volatile so the compiler doesn't hoist the check-and-clear out of the
+ * loop. */
+static volatile bool s_tap_dump_requested;
+
+void lvgl_port_request_tap_dump(void)
+{
+    s_tap_dump_requested = true;
+}
+
 static void lvgl_port_task(void *arg)
 {
     (void)arg;
     while (true) {
         lvgl_port_service_idle_blank();
         lvgl_port_service_idle_wake();
+        if (s_tap_dump_requested) {
+            /* Cleared BEFORE the call, not after: a second request arriving
+             * while the dump is running is picked up on the NEXT loop
+             * iteration this way, rather than being silently dropped by a
+             * clear-after-call that would stomp on it. */
+            s_tap_dump_requested = false;
+            kiln_ui_log_tap_targets();
+        }
         s_timer_handler_calls++;
         uint32_t sleep_ms = lv_timer_handler();
         if (sleep_ms == LV_NO_TIMER_READY) sleep_ms = 50;

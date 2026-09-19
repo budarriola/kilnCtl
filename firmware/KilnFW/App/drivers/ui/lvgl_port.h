@@ -192,6 +192,25 @@ void lvgl_port_set_input_enabled(bool enabled);
  * touch_read_cb's comment for why this isn't gated). */
 void lvgl_port_inject_touch(uint16_t x, uint16_t y, bool pressed);
 
+/* Requests the next lvgl_port_task loop iteration run
+ * kiln_ui_log_tap_targets() on ITS OWN stack (8192 B, static, internal SRAM)
+ * instead of the caller's. Callable from any task -- in particular from
+ * touch_uart_bridge (uart_bridge_touch.c's TOUCH_CMD_LOG_TAP_TARGETS
+ * handler), whose own stack is only 3072 B and does not have room for a
+ * recursive LVGL tree walk plus the ESP_LOGI formatting it does at every
+ * node (see lvgl_port.c's definition comment for the bench-reproduced
+ * panic this replaced). Fire-and-forget, same contract as the command
+ * handler it serves: the dump goes out as ESP_LOGI lines over
+ * uart_log_bridge on whatever the next lvgl_port_task tick is (well under
+ * its usual 50 ms poll), not as an immediate synchronous call. A second
+ * request arriving before the first is serviced simply keeps the flag set
+ * -- one dump still runs, no queue to overflow. This also fixes a
+ * pre-existing thread-safety gap: kiln_ui_log_tap_targets() walks live LVGL
+ * objects, and lvgl_port_task is the only task LVGL itself may be called
+ * from (see this file's header comment); routing the walk through it makes
+ * that true here too, not just for every other lv_* caller. */
+void lvgl_port_request_tap_dump(void);
+
 /* Pull-based touch/input diagnostics -- see the s_input_enabled /
  * s_touch_read_cb_count / s_injected_delivered_count declaration comment in
  * lvgl_port.c for what each counter means and why it replaced push-based
