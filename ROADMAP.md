@@ -1042,6 +1042,7 @@ open is short:
 | L | **ESP32-S3 OTA: single 8 MiB `app` slot plus a ~1.9 MB non-firing `recovery` image** — replaces today's two 3 MB `ota_0`/`ota_1` A/B application slots with one large slot, giving the application headroom (today's image is ~2.29 MB against a 3 MB slot) instead of eating into it every release; `factory` becomes a small `recovery` image whose only job is to receive and write an application image over Wi-Fi, deliberately unable to fire the kiln. No data partition moves or resizes, so `coredump`, `cfg`, `logs`, `nvs`/`wifi_nvs`/`kiln_nvs`/`profiles_nvs` (config, profiles, Wi-Fi credentials) all survive the migration by construction. `otadata` must be erased and rewritten because the app-partition offsets and sizes change. In-app RECOVERY MODE is deleted outright in favor of the separate image — it is the source of three prior board brickings. Migration itself is a one-time, cable-attached, per-board operation; see the plan for the Wi-Fi-password owner action that gates it | M8; `docs/OTA_SINGLE_SLOT_PLAN.md` |
 | **M** | **The ESP application checks the Pico's firmware version on every boot and updates it automatically if needed — owner requirement 2026-09-16.** Most of the machinery already exists (the whole `UPDATE_BEGIN`/`DATA`/`END` relay, the `pico_img` staging partition, the interlock check, the auth and the single update mutex); the real gaps are three — no `SaftyFW` image is embedded in the ESP application, so there is nothing to update from at boot; no *expected* Pico identity exists anywhere in the tree, so "if needed" is undecidable; and there is no boot-time trigger with a persisted, read-back-verified attempt bound. Favourable finding: the Pico's config store lives outside both application slots, so an update preserves `abs_max_temp_c`, the arming state and the CT normals `i_normal_a` by construction. Four of five owner decisions settled the same day: an ESP rollback downgrades the Pico; the attempt budget is 3, persisted; an unrecoverable version mismatch (OVERRIDE) refuses to fire until resolved at the bench, surfaced on both the LCD and `/readiness`; and a `CONFIG_STORE_FORMAT_VERSION` bump (OVERRIDE) is carried automatically via in-place migration-chain steps in the Pico's own config store, per a project-wide config-migration policy, rather than excluded. ~~Hard prerequisite: this bench Pico still runs `SaftyFW.elf` directly rather than through the two-slot bootloader~~ — **P1 CLOSED 2026-09-18: the bench Pico now boots through the two-slot bootloader, slot A active, with a `KLN1` metadata record present**, so a relayed image now lands in a slot the boot vector does consult. What blocks the feature end to end is a different, newly observed defect — an ESP-driven relay cannot reach the data phase (see M8). **Progress 2026-09-16**: the hardware-independent slice landed in two commits (`aec61cb9`, `1c41a9e8`) — the pure boot-time decision function and its persisted 3-attempt counter, and a genuine sixth `readiness_gate` key (`pico_update`) that structurally refuses every firing-start path (web, LCD, benchproto) on an unrecoverable mismatch, fed today by an honest stub that always reports "no mismatch." Deliberately stopped there: wiring the stub to a real verdict needs the embedded expected image (plan steps 1-2), since arming the decision function without one would resolve every board's boot to the unrecoverable "no image" outcome and, with the gate now real, brick firing fleet-wide — that wiring no longer waits on the two-slot bootloader (P1, closed 2026-09-18) but on the relay's erase-phase failure recorded under M8. Plan with steps 0-11 and owner decisions §10: `docs/PICO_AUTO_UPDATE_PLAN.md`. | `docs/PICO_AUTO_UPDATE_PLAN.md`; M8 |
 | **L** | **One-step-at-a-time config migration — owner requirement 2026-09-16:** "Each new fw should support migration of the nearest configuration forward allowing a one way one step at a time config update path". From the next schema bump onward, a release that bumps a persisted config version ships exactly one new step (N-1 -> N) and carries **only** that step, so a board more than one version behind cannot read its own config and must be upgraded one release at a time (settled by the owner 2026-09-16 as "one way one step at a time"). **Settled by the owner the same day: forward-only, NOT retroactive** — `convert_versioned_blob_to_current()` (`firmware/KilnFW/App/drivers/persist/zones_config_migrate.c`) stays as the pre-v26 tail, unchanged, and the chain's input floor is v26, so the step table is empty until `ZONES_CFG_VERSION` moves to 27. `ZONES_CFG_VERSION` is **not** bumped by this work. Governs the zones config, the kiln-config slots (`KILN_CFG_STORE_VERSION`, already a real two-step chain and the shape to copy), fire profiles, and the RP2040's `CONFIG_STORE_FORMAT_VERSION`; not the boot-critical NVS items nor the `cfg` partition bridges, which re-use the same versioned blob. Carries three dependent pieces: a per-step `calibration_missing`/`fields_set` policy on the Pico — the actual mechanism that lets a `CONFIG_STORE_FORMAT_VERSION` bump carry the CT normals `i_normal_a` forward instead of forcing recalibration; a firing-blocking quarantine for a newer-than-known blob, closing the "runs on firmware-default PID gains after a rollback, unannounced" hazard; and `tools/check_config_migration_steps.ps1` (landed 2026-09-17 — scoped to the zones store, the only governed store with an empty D1-shaped step table today; the kiln-config/profiles/RP2040 stores are follow-up, see `docs/CONFIG_MIGRATION_CHAIN_PLAN.md` §5), failing a build that bumps `ZONES_CFG_VERSION` without its step, its frozen-struct asserts and its captured-blob test. Testing is deliberately asymmetric: the existing tail keeps the coverage it has, every new step owes a real captured blob at its input version from the day it lands. All four owner decisions are now settled (one step only; steps expire past a fixed age; quarantine firing; mandatory pre-bump blob capture). **The blocking prerequisite (a migrated blob was never written back on the ordinary `nvs_load()` load path) is CLOSED, corrected 2026-09-17** — `d3f74d67` persists a migrated blob immediately, read-back verified, and `6985c89b` surfaces a write-back verify failure to the operator (`zones_cfg_migration_persist_fault_t`, wired through `/api/status` and the LCD trip strip). See `docs/CONFIG_MIGRATION_CHAIN_PLAN.md` §1.6, itself corrected the same day. The step table itself is still empty pending the first schema bump past v26 | `docs/CONFIG_MIGRATION_CHAIN_PLAN.md`; `docs/PICO_AUTO_UPDATE_PLAN.md`; `docs/OTA_SINGLE_SLOT_PLAN.md` |
+| **M** | **Edit the running profile mid-firing, from the web UI — NEW, owner request 2026-09-18. Planned, not built.** A web-only page that changes the profile a firing is currently executing, so a firing can be improved in progress. Editing forks immediately into a new profile (an ordinary user slot, so it inherits NVS, the `cfg` dual-write and migration, and survives a reboot mid-firing), leaving the original untouched on disk; at the end of the firing the operator is asked to name-and-save the copy or overwrite the original, with overwriting a shipped/builtin schedule refused outright server-side — structurally, since builtin ids are `>= PROFILE_BUILTIN_ID_BASE` and back a `const` table with no writable storage at all, so a forged request cannot express the attack. **Two hard requirements shape it:** an edit that would exceed the running zones' `max_temp_c` (or their ramp ceiling) is *rejected* server-side before the working copy is written, not warned about in the browser — deliberately stricter than ordinary save-time validation, which is advisory because profiles are portable while a live edit is not — and re-checked inside the executor before the swap is adopted, closing the ceiling-changed-underneath window; and both profile editors must share one implementation, which means factoring `parse_profile_fields()` and one `profiles_validate_candidate()` out of `profiles_edit_http.c`/`profiles_http.c` and the segment editor out of `profiles_page.html` into a served `profile_editor.js`. The Pico's `abs_max_temp_c` is never written, read as a limit, or derived from — there is no code path from this feature to any Pico parameter, which is how "never exceeded, never tightened" is met. Pickup is a generation counter polled by the control task, the same shape as the existing mid-run zones-config reload, and is continuous by construction because the ramp state lives in `s_exec`, not in the profile. **Sequencing dependency:** the shared factoring rewrites files the kiln-profiles and in-flight favorites work also touch. Five owner decisions are open (slot budget, a ceiling lowered mid-firing, name collisions, editing while PAUSED/FAULTED, the prompt under web auth) — none of them block starting | `docs/LIVE_PROFILE_EDIT_PLAN.md` |
 
 ### Blocked on hardware that does not exist yet
 
@@ -1075,6 +1076,7 @@ open is short:
 | [`firmware/KilnFW/docs/ARCHITECTURE.md`](firmware/KilnFW/docs/ARCHITECTURE.md) | Tasks, priorities, owner-task queues, single-writer ownership doctrine |
 | [`docs/SETUP_WIZARD.md`](docs/SETUP_WIZARD.md) | The whole-kiln setup wizard: step order, dependencies, which steps need heat or the owner, and where progress persists |
 | [`docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md`](docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md) | Commissioning-time proof that each CT clamp is on the conductor the configuration claims, and that each zone's normal current is what it should be: the pass/fail/**inconclusive** verdict, its configuration fingerprint and staleness rule, where it is stored and surfaced, and what this ~4 W bench can and cannot ever determine |
+| [`docs/LIVE_PROFILE_EDIT_PLAN.md`](docs/LIVE_PROFILE_EDIT_PLAN.md) | Editing the profile a firing is currently running, from the web UI: what is editable past/current/future, the fork-on-edit working copy and where it survives a reboot, the end-of-firing save-or-overwrite prompt and its builtin refusal, the server-side temperature and ramp bounds and their re-check at pickup, and the shared factoring that keeps both profile editors on one implementation |
 | [`docs/HW_ABSTRACTION.md`](docs/HW_ABSTRACTION.md) | KilnFW `drivers/` layering into role directories, and the `firmware/hwAbstraction/` tree (interface/esp/pico/host) for both firmwares — M16 |
 | [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) | Safety firmware, phases 0–10 |
 | [`firmware/SaftyFW/docs/SAFETY_MODEL.md`](firmware/SaftyFW/docs/SAFETY_MODEL.md) | What trips, why, and the anti-nuisance doctrine |
@@ -2041,8 +2043,21 @@ path. Two facts set the shape of this milestone:
         — so `SAFETY_TRIP_LINK_DEAD` latches, polling the relays throughout)
         and the slot image is built. The only missing thing is that the
         update cannot reach the data phase at all.
-- [ ] **An ESP-driven Pico OTA cannot reach the data phase — NEW, observed on
-      real hardware 2026-09-18.** The ESP staged the image and started the
+- [x] **An ESP-driven Pico OTA cannot reach the data phase — observed on real
+      hardware 2026-09-18, FIXED the same day by `e59b0328`; only the hardware
+      exercise remains.** The fix erases the Pico's destination slot in 4K
+      sectors instead of 64K blocks (`UPDATE_TASK_ERASE_CHUNK_SIZE`, pinned to
+      `HAL_FLASH_ERASE_SIZE`, the smallest unit the HAL can express) and feeds
+      the hardware watchdog between sectors through one shared owning
+      function, `watchdog_task_feed_if_all_within_deadline()`, which
+      `watchdog_task_fn()` now calls too rather than carrying its own copy of
+      the gate-then-feed sequence. The feed policy is unchanged — it happens
+      only if every registered task is within its own deadline, so a wedged
+      safety processor still starves the watchdog and still reboots, including
+      mid-update. **Still needed: a real ESP-driven Pico OTA on hardware,
+      reaching and completing the data phase.** The original observation, kept
+      because it is the evidence the fix is graded against: the ESP staged the
+      image and started the
       relay; the RP2040 then hardware-watchdog-reset partway through erasing
       the destination slot, so it never confirmed `RECEIVING`, and the ESP
       failed the relay at its 15000 ms erase timeout with `Pico did not
@@ -2058,17 +2073,33 @@ path. Two facts set the shape of this milestone:
       this hardware today. Observed facts only, no root cause asserted here;
       the diagnosis lives in
       `docs/audits/pico_ota_erase_watchdog_reset_2026-09-18.md`
-- [ ] **A second, independent defect blocks the same path: the ESP stages the
-      Pico image with the wrong CRC-32 parameterization — NEW 2026-09-18.**
-      `ota_http_pico.c` seeds the accumulator with `0xFFFFFFFF` and applies a
+- [x] **A second, independent defect blocked the same path: the ESP staged the
+      Pico image with the wrong CRC-32 parameterization — 2026-09-18, FIXED
+      the same day by `fabd270f`; only the hardware exercise remains.** The
+      arithmetic moved into its own module,
+      `App/drivers/http/ota_image_crc.c`, specifically so it could be pinned
+      by a known-answer test (`test_ota_image_crc.c`) — HTTP handlers in this
+      project are target-build-only and do not link into the host suite, so a
+      test written against `ota_pico_do_stage()` would never have run. Both
+      ends of the comparison are now pinned to one value: SaftyFW's half has
+      been held to the standard CRC-32 check value by
+      `test_bootloader_metadata.c` the whole time. Reproduced numerically
+      before the fix over a real 114796-byte image — the firmware's
+      parameterization yielded `0xBA38A716`, exactly what the board reported
+      when staging, against `0x83C472EF` for true CRC-32/zlib; the file was
+      never wrong. **Still needed: an ESP-driven Pico update on hardware
+      passing the verify step it could never previously pass.** The original
+      diagnosis, kept as the evidence the fix is graded against:
+      `ota_http_pico.c` seeded the accumulator with `0xFFFFFFFF` and applied a
       final XOR on top of `esp_rom_crc32_le()`, which already performs both
-      inversions internally, so the ESP sends a different CRC-32 variant of
-      the same, correct bytes and the Pico's verify step can never agree. It
-      fails closed — a corrupt image cannot reach the active slot — but every
-      ESP-driven Pico update must end in `ERR_CRC_MISMATCH` regardless of link
-      quality. **The two defects are serial, not alternative: fixing the
-      erase/watchdog failure alone will advance the failure to the CRC check
-      rather than produce a working update.** Diagnosis and proposed fix:
+      inversions internally, so the ESP sent a different CRC-32 variant of
+      the same, correct bytes and the Pico's verify step could never agree. It
+      failed closed — a corrupt image could not reach the active slot — but every
+      ESP-driven Pico update ended in `ERR_CRC_MISMATCH` regardless of link
+      quality. **The two defects were serial, not alternative: fixing the
+      erase/watchdog failure alone only advanced the failure to the CRC check
+      rather than producing a working update — which is why both fixes are
+      prerequisites of the one remaining hardware exercise.** Diagnosis:
       `docs/audits/pico_ota_staged_crc_mismatch_2026-09-18.md`. This also
       identifies the cause behind `firmware/SaftyFW/TODO.md` Phase 10's open
       "reconcile host-side vs ESP-side UPDATE_BEGIN image CRC" item, which
