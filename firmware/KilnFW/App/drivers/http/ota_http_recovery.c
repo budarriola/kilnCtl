@@ -107,38 +107,12 @@ static void ota_recovery_exit_reboot_task(void *arg)
 
 esp_err_t ota_recovery_exit_post_handler(httpd_req_t *req)
 {
+    // 1-2. X-Ota-Mac header parse + auth (OTA_HTTP_CONTEXT_RECOVERY_EXIT) --
+    // consolidated in ota_http_authenticate_request(); see its doc comment
+    // in ota_http.h. Auth still runs before the recovery-mode check below,
+    // not after -- see the doc comment above this handler for why.
     char ip[46];
-    ota_http_get_client_ip(req, ip, sizeof(ip));
-
-    // 1. X-Ota-Mac header present and exactly 64 hex chars -- same order as
-    // every other mutating handler in this file, before anything else is
-    // checked.
-    size_t mac_hex_len = httpd_req_get_hdr_value_len(req, OTA_MAC_HEADER);
-    if (mac_hex_len != 64) {
-        ESP_LOGW(OTA_HTTP_TAG, "OTA recovery_exit from %s: missing or malformed X-Ota-Mac header (len %u, want 64)",
-                 ip, (unsigned)mac_hex_len);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or malformed X-Ota-Mac header (want 64 hex chars)");
-        return ESP_OK;
-    }
-    char mac_hex[65];
-    if (httpd_req_get_hdr_value_str(req, OTA_MAC_HEADER, mac_hex, sizeof(mac_hex)) != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not read X-Ota-Mac header");
-        return ESP_OK;
-    }
-    uint8_t mac[32];
-    if (!hex_decode(mac_hex, 64, mac)) {
-        ESP_LOGW(OTA_HTTP_TAG, "OTA recovery_exit from %s: X-Ota-Mac is not valid hex", ip);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Ota-Mac must be 64 hex characters");
-        return ESP_OK;
-    }
-
-    // 2. Auth -- its own context (OTA_HTTP_CONTEXT_RECOVERY_EXIT), see
-    // ota_http.h's doc comment on that enum value and the doc comment above
-    // this handler for why auth runs before the recovery-mode check below,
-    // not after.
-    ota_http_verify_result_t vr = ota_http_verify_request(OTA_HTTP_CONTEXT_RECOVERY_EXIT, mac, ip);
-    if (vr != OTA_HTTP_VERIFY_OK) {
-        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, verify_result_str(vr));
+    if (!ota_http_authenticate_request(req, OTA_HTTP_CONTEXT_RECOVERY_EXIT, ip)) {
         return ESP_OK;
     }
 
@@ -220,37 +194,13 @@ esp_err_t ota_recovery_exit_post_handler(httpd_req_t *req)
 // therefore this call) runs.
 esp_err_t ota_boot_guard_reset_post_handler(httpd_req_t *req)
 {
+    // 1-2. X-Ota-Mac header parse + auth (OTA_HTTP_CONTEXT_BOOT_GUARD_RESET,
+    // not interchangeable with any other route's MAC) -- consolidated in
+    // ota_http_authenticate_request(); see its doc comment in ota_http.h.
+    // No recovery-mode check after this, unlike recovery_exit -- see this
+    // handler's own doc comment above for why.
     char ip[46];
-    ota_http_get_client_ip(req, ip, sizeof(ip));
-
-    // 1. X-Ota-Mac header present and exactly 64 hex chars -- same order as
-    // every other mutating handler in this file.
-    size_t mac_hex_len = httpd_req_get_hdr_value_len(req, OTA_MAC_HEADER);
-    if (mac_hex_len != 64) {
-        ESP_LOGW(OTA_HTTP_TAG, "OTA boot_guard_reset from %s: missing or malformed X-Ota-Mac header (len %u, want 64)",
-                 ip, (unsigned)mac_hex_len);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or malformed X-Ota-Mac header (want 64 hex chars)");
-        return ESP_OK;
-    }
-    char mac_hex[65];
-    if (httpd_req_get_hdr_value_str(req, OTA_MAC_HEADER, mac_hex, sizeof(mac_hex)) != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not read X-Ota-Mac header");
-        return ESP_OK;
-    }
-    uint8_t mac[32];
-    if (!hex_decode(mac_hex, 64, mac)) {
-        ESP_LOGW(OTA_HTTP_TAG, "OTA boot_guard_reset from %s: X-Ota-Mac is not valid hex", ip);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Ota-Mac must be 64 hex characters");
-        return ESP_OK;
-    }
-
-    // 2. Auth -- its own context (OTA_HTTP_CONTEXT_BOOT_GUARD_RESET), not
-    // interchangeable with any other route's MAC. No recovery-mode check
-    // after this, unlike recovery_exit -- see this handler's own doc
-    // comment above for why.
-    ota_http_verify_result_t vr = ota_http_verify_request(OTA_HTTP_CONTEXT_BOOT_GUARD_RESET, mac, ip);
-    if (vr != OTA_HTTP_VERIFY_OK) {
-        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, verify_result_str(vr));
+    if (!ota_http_authenticate_request(req, OTA_HTTP_CONTEXT_BOOT_GUARD_RESET, ip)) {
         return ESP_OK;
     }
 

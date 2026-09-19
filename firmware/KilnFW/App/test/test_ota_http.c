@@ -1637,6 +1637,199 @@ static void test_sw_reset_pico_sentences_are_honest(void)
 }
 
 // ---------------------------------------------------------------------------
+// X-Ota-Mac header parse/length-check drift guard -- docs/audits/
+// web_code_duplication_drift_2026-09-18.md found the "header present ->
+// exactly 64 hex chars -> hex-decode -> ota_http_verify_request()" sequence
+// hand-copied at all six mutating OTA routes below, in addition to the
+// consolidated ota_http_authenticate_request() helper (ota_http.c) that
+// factory_reset.c already used. They agreed verbatim, which is exactly the
+// kind of latent drift that stays green until one copy is edited and the
+// others are not -- this file's own pre-existing coverage only exercised a
+// SUBSET of routes (boot_guard_reset, pico_rollback) and only a SUBSET of
+// malformed-header shapes (missing only), so a copy that quietly loosened,
+// say, the length check at one other route would not have been caught.
+//
+// All six routes now delegate steps 1-2 to that one helper (this pass's own
+// refactor), so this table drives every one of them, directly, through the
+// same four edge cases: missing header, too-short, too-long, and non-hex
+// content, plus a well-formed-but-wrong-context MAC to confirm the 403 path
+// still runs. Any future divergence -- a route accidentally reverting to an
+// inline copy, or the shared helper itself changing behavior for only one
+// caller -- fails every route it stops matching, not just the one someone
+// happened to hand-test.
+// ---------------------------------------------------------------------------
+
+typedef esp_err_t (*ota_mutating_handler_fn)(httpd_req_t *req);
+
+typedef struct {
+    const char *name;
+    ota_mutating_handler_fn fn;
+    ota_http_context_t ctx;
+} ota_mutating_route_t;
+
+static const ota_mutating_route_t OTA_MUTATING_ROUTES[] = {
+    { "ota_esp_post_handler",             ota_esp_post_handler,             OTA_HTTP_CONTEXT_ESP },
+    { "ota_esp_rollback_post_handler",    ota_esp_rollback_post_handler,    OTA_HTTP_CONTEXT_ESP_ROLLBACK },
+    { "ota_pico_post_handler",            ota_pico_post_handler,            OTA_HTTP_CONTEXT_PICO },
+    { "ota_pico_rollback_post_handler",   ota_pico_rollback_post_handler,   OTA_HTTP_CONTEXT_PICO_ROLLBACK },
+    { "ota_recovery_exit_post_handler",   ota_recovery_exit_post_handler,   OTA_HTTP_CONTEXT_RECOVERY_EXIT },
+    { "ota_boot_guard_reset_post_handler", ota_boot_guard_reset_post_handler, OTA_HTTP_CONTEXT_BOOT_GUARD_RESET },
+};
+#define OTA_MUTATING_ROUTE_COUNT (sizeof(OTA_MUTATING_ROUTES) / sizeof(OTA_MUTATING_ROUTES[0]))
+
+static void test_all_mutating_routes_reject_missing_header(void)
+{
+    TEST_SECTION("all six mutating OTA routes -- a MISSING X-Ota-Mac header is refused with 400 "
+                 "and the exact shared error string");
+    for (size_t i = 0; i < OTA_MUTATING_ROUTE_COUNT; i++) {
+        reset_all_lockouts();
+        stub_headers_reset(); // no X-Ota-Mac at all
+        s_last_err_code = 0;
+        s_last_err_msg[0] = '\0';
+        char msg[160];
+
+        httpd_req_t req;
+        memset(&req, 0, sizeof(req));
+        esp_err_t err = OTA_MUTATING_ROUTES[i].fn(&req);
+
+        snprintf(msg, sizeof(msg), "%s: handler must return ESP_OK", OTA_MUTATING_ROUTES[i].name);
+        TEST_CHECK(err == ESP_OK, msg);
+        snprintf(msg, sizeof(msg), "%s: missing header must be refused with 400", OTA_MUTATING_ROUTES[i].name);
+        TEST_CHECK(s_last_err_code == 400, msg);
+        snprintf(msg, sizeof(msg), "%s: must send the exact shared error string", OTA_MUTATING_ROUTES[i].name);
+        TEST_CHECK(strcmp(s_last_err_msg, "missing or malformed X-Ota-Mac header (want 64 hex chars)") == 0, msg);
+    }
+}
+
+static void test_all_mutating_routes_reject_wrong_length_header(void)
+{
+    TEST_SECTION("all six mutating OTA routes -- a 63-char and a 65-char X-Ota-Mac are both refused "
+                 "with 400 and the exact shared error string");
+    for (size_t i = 0; i < OTA_MUTATING_ROUTE_COUNT; i++) {
+        const char *bad_lens[2] = {
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde",  // 63 chars
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0", // 65 chars
+        };
+        for (int j = 0; j < 2; j++) {
+            reset_all_lockouts();
+            stub_headers_reset();
+            stub_header_set("X-Ota-Mac", bad_lens[j]);
+            s_last_err_code = 0;
+            s_last_err_msg[0] = '\0';
+            char msg[160];
+
+            httpd_req_t req;
+            memset(&req, 0, sizeof(req));
+            esp_err_t err = OTA_MUTATING_ROUTES[i].fn(&req);
+
+            snprintf(msg, sizeof(msg), "%s: %d-char header, handler must return ESP_OK",
+                     OTA_MUTATING_ROUTES[i].name, (int)strlen(bad_lens[j]));
+            TEST_CHECK(err == ESP_OK, msg);
+            snprintf(msg, sizeof(msg), "%s: %d-char header must be refused with 400",
+                     OTA_MUTATING_ROUTES[i].name, (int)strlen(bad_lens[j]));
+            TEST_CHECK(s_last_err_code == 400, msg);
+            snprintf(msg, sizeof(msg), "%s: %d-char header must send the exact shared error string",
+                     OTA_MUTATING_ROUTES[i].name, (int)strlen(bad_lens[j]));
+            TEST_CHECK(strcmp(s_last_err_msg, "missing or malformed X-Ota-Mac header (want 64 hex chars)") == 0, msg);
+        }
+    }
+}
+
+static void test_all_mutating_routes_reject_non_hex_header(void)
+{
+    TEST_SECTION("all six mutating OTA routes -- a 64-char header containing a non-hex byte ('g') "
+                 "is refused with 400 and the exact shared error string; uppercase HEX digits, by "
+                 "contrast, ARE accepted (ota_http_hex_decode() takes A-F same as a-f)");
+    for (size_t i = 0; i < OTA_MUTATING_ROUTE_COUNT; i++) {
+        // 64 chars, one of which ('g') is not a hex digit.
+        const char *bad_hex = "g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        TEST_CHECK(strlen(bad_hex) == 64, "test fixture sanity: bad_hex literal must itself be 64 chars");
+
+        reset_all_lockouts();
+        stub_headers_reset();
+        stub_header_set("X-Ota-Mac", bad_hex);
+        s_last_err_code = 0;
+        s_last_err_msg[0] = '\0';
+        char msg[160];
+
+        httpd_req_t req;
+        memset(&req, 0, sizeof(req));
+        esp_err_t err = OTA_MUTATING_ROUTES[i].fn(&req);
+
+        snprintf(msg, sizeof(msg), "%s: non-hex header, handler must return ESP_OK", OTA_MUTATING_ROUTES[i].name);
+        TEST_CHECK(err == ESP_OK, msg);
+        snprintf(msg, sizeof(msg), "%s: non-hex header must be refused with 400", OTA_MUTATING_ROUTES[i].name);
+        TEST_CHECK(s_last_err_code == 400, msg);
+        snprintf(msg, sizeof(msg), "%s: non-hex header must send the 'must be 64 hex characters' string",
+                 OTA_MUTATING_ROUTES[i].name);
+        TEST_CHECK(strcmp(s_last_err_msg, "X-Ota-Mac must be 64 hex characters") == 0, msg);
+    }
+
+    // Positive control for the uppercase-hex claim above: an all-uppercase,
+    // well-formed-but-wrong MAC must NOT be refused for being "not hex" --
+    // it must reach ota_http_verify_request() and fail there (403), proving
+    // hex_decode()'s A-F acceptance rather than assuming it.
+    {
+        reset_all_lockouts();
+        g_stub_ap_password = "uppercase-hex-control-password";
+        stub_headers_reset();
+        stub_header_set("X-Ota-Mac", "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF");
+        s_last_err_code = 0;
+        s_last_err_msg[0] = '\0';
+
+        httpd_req_t req;
+        memset(&req, 0, sizeof(req));
+        esp_err_t err = ota_boot_guard_reset_post_handler(&req);
+
+        TEST_CHECK(err == ESP_OK, "uppercase-hex control: handler must return ESP_OK");
+        TEST_CHECK(s_last_err_code == 403,
+                  "uppercase-hex control: a well-formed uppercase-hex MAC must reach auth (403 on a "
+                  "wrong MAC), not be refused as non-hex (which would be 400)");
+    }
+}
+
+static void test_all_mutating_routes_reject_wrong_mac_via_403_not_400(void)
+{
+    TEST_SECTION("all six mutating OTA routes -- a well-formed but WRONG MAC is refused via the "
+                 "existing 403 auth path, not 400 (proves the header-shape checks and the MAC check "
+                 "are still ordered/routed exactly as before)");
+    for (size_t i = 0; i < OTA_MUTATING_ROUTE_COUNT; i++) {
+        reset_all_lockouts();
+        g_stub_boot_button_bypass = false;
+        g_stub_ap_password = "wrong-mac-drift-guard-password";
+
+        uint8_t nonce[OTA_AUTH_NONCE_LEN];
+        issue_nonce(nonce);
+        // Signed for a DIFFERENT context than the route under test (borrows
+        // test_mac_for_one_context_rejected_for_another()'s technique) --
+        // guaranteed wrong, well-formed, 64 hex chars.
+        ota_http_context_t wrong_ctx = (OTA_MUTATING_ROUTES[i].ctx == OTA_HTTP_CONTEXT_ESP)
+                                            ? OTA_HTTP_CONTEXT_PICO
+                                            : OTA_HTTP_CONTEXT_ESP;
+        uint8_t mac[32];
+        compute_mac(g_stub_ap_password, nonce, ctx_str_for(wrong_ctx), mac);
+        char hex[65];
+        hex_encode(mac, sizeof(mac), hex);
+        stub_headers_reset();
+        stub_header_set("X-Ota-Mac", hex);
+        s_last_err_code = 0;
+        s_last_err_msg[0] = '\0';
+        char msg[160];
+
+        httpd_req_t req;
+        memset(&req, 0, sizeof(req));
+        esp_err_t err = OTA_MUTATING_ROUTES[i].fn(&req);
+
+        snprintf(msg, sizeof(msg), "%s: handler must return ESP_OK", OTA_MUTATING_ROUTES[i].name);
+        TEST_CHECK(err == ESP_OK, msg);
+        snprintf(msg, sizeof(msg),
+                 "%s: a well-formed but wrong-context MAC must be refused via 403, not 400",
+                 OTA_MUTATING_ROUTES[i].name);
+        TEST_CHECK(s_last_err_code == 403, msg);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // POST /api/ota/esp/boot_guard_reset -- docs/audits/
 // boot_guard_post_flash_recovery_footgun_2026-09-08.md's tool-driven trigger.
 // boot_guard_reset_counter() itself (NVS write/verify/retry) is covered by
@@ -2188,6 +2381,11 @@ void run_test_ota_http(void)
 
     test_check_interlocks_refuses_during_zone_sweep();
     test_check_interlocks_ok_when_no_sweep();
+
+    test_all_mutating_routes_reject_missing_header();
+    test_all_mutating_routes_reject_wrong_length_header();
+    test_all_mutating_routes_reject_non_hex_header();
+    test_all_mutating_routes_reject_wrong_mac_via_403_not_400();
 
     test_boot_guard_reset_missing_auth_refused();
     test_boot_guard_reset_wrong_context_mac_refused();

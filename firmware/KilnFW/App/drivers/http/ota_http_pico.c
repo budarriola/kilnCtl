@@ -300,34 +300,12 @@ cleanup:
 
 esp_err_t ota_pico_post_handler(httpd_req_t *req)
 {
-    char ip[46];
-    ota_http_get_client_ip(req, ip, sizeof(ip));
-
     // Same four-step order as ota_esp_post_handler() -- see ota_http.h's
     // documented order and that handler's own comments for why each step
-    // precedes the next.
-    size_t mac_hex_len = httpd_req_get_hdr_value_len(req, OTA_MAC_HEADER);
-    if (mac_hex_len != 64) {
-        ESP_LOGW(OTA_HTTP_TAG, "OTA pico update from %s: missing or malformed X-Ota-Mac header (len %u, want 64)",
-                 ip, (unsigned)mac_hex_len);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or malformed X-Ota-Mac header (want 64 hex chars)");
-        return ESP_OK;
-    }
-    char mac_hex[65];
-    if (httpd_req_get_hdr_value_str(req, OTA_MAC_HEADER, mac_hex, sizeof(mac_hex)) != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not read X-Ota-Mac header");
-        return ESP_OK;
-    }
-    uint8_t mac[32];
-    if (!hex_decode(mac_hex, 64, mac)) {
-        ESP_LOGW(OTA_HTTP_TAG, "OTA pico update from %s: X-Ota-Mac is not valid hex", ip);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Ota-Mac must be 64 hex characters");
-        return ESP_OK;
-    }
-
-    ota_http_verify_result_t vr = ota_http_verify_request(OTA_HTTP_CONTEXT_PICO, mac, ip);
-    if (vr != OTA_HTTP_VERIFY_OK) {
-        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, verify_result_str(vr));
+    // precedes the next. Steps 1-2 (header parse + auth) are consolidated
+    // in ota_http_authenticate_request(); see its doc comment in ota_http.h.
+    char ip[46];
+    if (!ota_http_authenticate_request(req, OTA_HTTP_CONTEXT_PICO, ip)) {
         return ESP_OK;
     }
 
@@ -450,36 +428,12 @@ static void ota_pico_rollback_task(void *arg)
 // defined right after this handler) for the eventual outcome.
 esp_err_t ota_pico_rollback_post_handler(httpd_req_t *req)
 {
+    // 1-2. X-Ota-Mac header parse + auth (OTA_HTTP_CONTEXT_PICO_ROLLBACK,
+    // not interchangeable with a plain-pico-update or an esp-rollback MAC)
+    // -- consolidated in ota_http_authenticate_request(); see its doc
+    // comment in ota_http.h.
     char ip[46];
-    ota_http_get_client_ip(req, ip, sizeof(ip));
-
-    // 1. X-Ota-Mac header present and exactly 64 hex chars -- same order as
-    // every other mutating OTA handler.
-    size_t mac_hex_len = httpd_req_get_hdr_value_len(req, OTA_MAC_HEADER);
-    if (mac_hex_len != 64) {
-        ESP_LOGW(OTA_HTTP_TAG, "OTA pico rollback from %s: missing or malformed X-Ota-Mac header (len %u, want 64)",
-                 ip, (unsigned)mac_hex_len);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or malformed X-Ota-Mac header (want 64 hex chars)");
-        return ESP_OK;
-    }
-    char mac_hex[65];
-    if (httpd_req_get_hdr_value_str(req, OTA_MAC_HEADER, mac_hex, sizeof(mac_hex)) != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not read X-Ota-Mac header");
-        return ESP_OK;
-    }
-    uint8_t mac[32];
-    if (!hex_decode(mac_hex, 64, mac)) {
-        ESP_LOGW(OTA_HTTP_TAG, "OTA pico rollback from %s: X-Ota-Mac is not valid hex", ip);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Ota-Mac must be 64 hex characters");
-        return ESP_OK;
-    }
-
-    // 2. Auth -- its own context (OTA_HTTP_CONTEXT_PICO_ROLLBACK), see this
-    // handler's own doc comment above for why a rollback MAC is not
-    // interchangeable with a plain-pico-update or an esp-rollback MAC.
-    ota_http_verify_result_t vr = ota_http_verify_request(OTA_HTTP_CONTEXT_PICO_ROLLBACK, mac, ip);
-    if (vr != OTA_HTTP_VERIFY_OK) {
-        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, verify_result_str(vr));
+    if (!ota_http_authenticate_request(req, OTA_HTTP_CONTEXT_PICO_ROLLBACK, ip)) {
         return ESP_OK;
     }
 
