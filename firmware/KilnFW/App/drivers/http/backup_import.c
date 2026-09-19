@@ -2503,9 +2503,21 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
     }
 
     char err_msg[160];
-    kiln_cfg_plan_t plan;
+    /* Task 5: kiln_cfg_plan_t (32 * 128 = 4096 bytes, KILN_CFG_PLAN_MAX_LINES *
+     * KILN_CFG_PLAN_LINE_MAX) is heap-allocated rather than a local of this
+     * httpd handler -- the same reasoning as the profiles/zones candidate
+     * arrays in backup_import_apply_locked() above (check_httpd_task_stack_budget.py
+     * / check_all_task_stack_budgets.py grade the httpd task's 8 KB stack
+     * against every handler's own locals, and this struct alone was a
+     * sizable chunk of it). Freed on every exit path below. */
+    kiln_cfg_plan_t *plan = heap_caps_malloc(sizeof(kiln_cfg_plan_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!plan) {
+        free(body);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_OK;
+    }
     bool partial_write = false;
-    bool ok = backup_import_apply(body, mode, dry_run, ack_delete_count, &plan, &partial_write, err_msg,
+    bool ok = backup_import_apply(body, mode, dry_run, ack_delete_count, plan, &partial_write, err_msg,
                                   sizeof(err_msg));
     free(body);
 
@@ -2517,6 +2529,7 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
         httpd_resp_set_status(req, partial_write ? "500 Internal Server Error" : "400 Bad Request");
         httpd_resp_set_type(req, "text/plain");
         httpd_resp_send(req, err_msg, strlen(err_msg));
+        free(plan);
         return ESP_OK;
     }
 
@@ -2534,22 +2547,25 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
         char *out = heap_caps_malloc(KILN_CFG_PLAN_MAX_LINES * (KILN_CFG_PLAN_LINE_MAX + 1) + 1,
                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!out) {
+            free(plan);
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
             return ESP_OK;
         }
         size_t off = 0;
         out[0] = '\0';
-        for (size_t i = 0; i < plan.count; i++) {
-            int n = snprintf(out + off, KILN_CFG_PLAN_LINE_MAX + 2, "%s\n", plan.lines[i]);
+        for (size_t i = 0; i < plan->count; i++) {
+            int n = snprintf(out + off, KILN_CFG_PLAN_LINE_MAX + 2, "%s\n", plan->lines[i]);
             if (n > 0) {
                 off += (size_t)n;
             }
         }
         esp_err_t send_err = httpd_resp_send(req, out, off);
         free(out);
+        free(plan);
         return send_err;
     }
 
+    free(plan);
     httpd_resp_set_type(req, "application/json");
     const char *ok_json = "{\"ok\":true}";
     return httpd_resp_send(req, ok_json, strlen(ok_json));
