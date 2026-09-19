@@ -264,28 +264,16 @@ static const char *TAG __attribute__((unused)) = "ui_page_diagnostics";
 #define UI_PAGE_DIAGNOSTICS_PAGE_CRASH_REPORT 7
 #define UI_PAGE_DIAGNOSTICS_PAGE_COUNT (UI_PAGE_DIAGNOSTICS_PAGE_CRASH_REPORT + 1)
 
-/* Two-tap confirm window (RELAY_LIFE_BUDGET.md's "Reset" design: "press
- * Reset, button turns into Confirm? for 5 s"). No dialog widget exists on
- * this page (the plan's own "What exists" note), hence the in-place label
- * swap instead of a modal. */
-#define UI_PAGE_DIAGNOSTICS_RELAY_RESET_CONFIRM_US (5 * 1000 * 1000)
-
 /* LOW-4 fix (docs/audits/review_crash_gate_followups_62e95bbd_2026-09-15.md):
- * minimum gap a confirm tap must arrive after the arming tap, for every
- * two-tap confirm button on this page (Relay Life Reset and Crash Report
- * Acknowledge). Without this, a touch bounce or a release/press glitch from
- * the FT6336U panel can deliver two LV_EVENT_CLICKED events milliseconds
- * apart from a single physical tap, which arms AND confirms in one touch --
- * defeating the two-tap confirm's whole purpose. 300 ms is comfortably above
- * any observed bounce interval and well under a deliberate second tap. */
+ * minimum gap a confirm tap must arrive after the arming tap, for the
+ * two-tap confirm button on this page (Crash Report Acknowledge -- the
+ * Relay Life page's own Reset control was removed, UI_PLAN.md section 6.4).
+ * Without this, a touch bounce or a release/press glitch from the FT6336U
+ * panel can deliver two LV_EVENT_CLICKED events milliseconds apart from a
+ * single physical tap, which arms AND confirms in one touch -- defeating the
+ * two-tap confirm's whole purpose. 300 ms is comfortably above any observed
+ * bounce interval and well under a deliberate second tap. */
 #define UI_PAGE_DIAGNOSTICS_CONFIRM_DEBOUNCE_US (300 * 1000)
-
-/* Bound on ACQUIRING the flash worker for the Relay Life Reset control --
- * same value and reasoning as UI_PAGE_DIAGNOSTICS_CRASH_ACK_WAIT_MS below
- * (not the write itself, which is this caller's own short job): 300 ms is
- * comfortably longer than any of today's flash-worker jobs normally take
- * but short enough that a genuine freeze reads as a momentary pause. */
-#define UI_PAGE_DIAGNOSTICS_RELAY_RESET_WAIT_MS 300u
 
 /* ---- No-scroll budget proofs --------------------------------------------
  * Compile-time mirrors of this file's own header-comment arithmetic, same
@@ -347,25 +335,17 @@ _Static_assert(UI_PAGE_DIAGNOSTICS_THERMO_FAULT_WORST_CASE_HEIGHT_PX <= UI_THEME
 
 /* Relay Life page (RELAY_LIFE_BUDGET.md): RELAY_CYCLES_COUNT
  * rows, each build_stat_row()-height (measured 23px, see this file's header
- * comment's per-row arithmetic) since the row's fixed-size button
- * (UI_PAGE_DIAGNOSTICS_RELAY_ROW_BTN_H_PX = 22px, set in
- * build_relay_life_row()) is shorter than that.
+ * comment's per-row arithmetic).
  *
- * opus review (LOW): the inter-row gap here used to be the page-wide default
- * (UI_THEME_PADDING_PX / 2 = 4px, build_page()'s own pad_gap), but each
- * button's own compact touch-area extension (ui_theme_apply_touch_area(),
- * "true" for compact) reaches out UI_THEME_PADDING_PX / 2 = 4px on every
- * side -- exactly the whole 4px gap, not half of it (that function's own
- * comment says the compact extension is "capped at half of the standard
- * inter-cell gap" so two expanded neighbours can't meet in the middle, but
- * this page's 4px gap made the extension the WHOLE gap, not half of it: two
- * vertically-adjacent Reset buttons' extended hit-boxes could touch or
- * overlap, so a tap near the row boundary during the two-tap confirm could
- * land on the wrong relay's button). Fixed by giving this one page the
- * FULL UI_THEME_PADDING_PX (8px) gap the touch-area helper's own math
- * assumes, rather than the half-padding gap every other stat-row page uses
- * -- there is no shortage of vertical room here (worst case is 147px against
- * a 267px budget) to justify staying tight. */
+ * opus review (LOW), historical: this page used to have a per-row Reset
+ * button whose compact touch-area extension needed the full
+ * UI_THEME_PADDING_PX (8px) inter-row gap rather than every other stat-row
+ * page's half-padding gap, to keep two vertically-adjacent buttons' hit-boxes
+ * from touching. UI_PLAN.md section 6.4 (2026-09-19) removed that button
+ * (the LCD's own Reset control -- the web UI keeps the capability), but the
+ * gap stays 8px: shrinking it now that the touch-area reason is gone is a
+ * separate change, out of scope here, and there is no shortage of vertical
+ * room to justify it anyway (worst case is 147px against a 267px budget). */
 #define UI_PAGE_DIAGNOSTICS_RELAY_LIFE_ROW_GAP_PX UI_THEME_PADDING_PX
 #define UI_PAGE_DIAGNOSTICS_RELAY_LIFE_WORST_CASE_HEIGHT_PX \
     ((RELAY_CYCLES_COUNT * 23) + ((RELAY_CYCLES_COUNT - 1) * UI_PAGE_DIAGNOSTICS_RELAY_LIFE_ROW_GAP_PX))
@@ -465,20 +445,16 @@ static lv_obj_t *s_td_source_label;
 static lv_obj_t *s_td_latch_label;
 
 /* --- Page 7: Relay Life -- RELAY_LIFE_BUDGET.md. One row per
- * RELAY_CYCLES_COUNT slot (4 heater relays + the safety relay's K4 slot).
- * s_rl_confirm_deadline_us[r] is 0 when relay r's Reset button is in its
- * normal state, else the hal_time_now_us() deadline at which a lone first
- * tap (no second tap yet) reverts -- checked in refresh_cb() below, which
- * already runs every UI_PAGE_DIAGNOSTICS_REFRESH_MS (2s), well under the 5s
- * window, so no separate timer is needed for the revert either. */
+ * RELAY_CYCLES_COUNT slot (4 heater relays + the safety relay's K4 slot),
+ * read-only display. UI_PLAN.md section 6.4 (2026-09-19) removed the LCD's
+ * own Reset control -- the web UI keeps the capability via
+ * relay_cycles_reset_timeout(), which stays in the driver. */
 static lv_obj_t *s_rl_value_label[RELAY_CYCLES_COUNT];
-static lv_obj_t *s_rl_reset_btn[RELAY_CYCLES_COUNT];
-static lv_obj_t *s_rl_reset_label[RELAY_CYCLES_COUNT];
-static int64_t   s_rl_confirm_deadline_us[RELAY_CYCLES_COUNT];
 
 /* --- Page 8: Crash Report -- 2026-09-15 MEDIUM fix. s_cr_ack_deadline_us is
- * the same one-button two-tap-confirm state s_rl_confirm_deadline_us[] holds
- * per relay, just for the single Acknowledge button here. */
+ * the two-tap-confirm state for the single Acknowledge button here (the
+ * Relay Life page's own equivalent state was removed, UI_PLAN.md section
+ * 6.4). */
 static lv_obj_t *s_cr_summary_label;
 static lv_obj_t *s_cr_ack_row; /* LOW-5 fix: the whole row, hidden as a unit -- see refresh_cb() */
 static lv_obj_t *s_cr_ack_btn;
@@ -1204,20 +1180,10 @@ static void refresh_cb(lv_timer_t *timer)
         }
     }
 
-    /* Relay Life page (RELAY_LIFE_BUDGET.md). Two independent
-     * things per relay: the value text (type/cycles/percent, always
-     * refreshed), and the Reset button's two-tap confirm window (only
-     * touched here to REVERT an expired arm -- the arm/actual-reset
-     * transitions happen in relay_reset_btn_clicked_cb() above, on a tap).
-     * hal_time_now_us() matches every other elapsed-time comparison in this
-     * file (format_uptime() above). */
-    int64_t rl_now = (int64_t)hal_time_now_us();
+    /* Relay Life page (RELAY_LIFE_BUDGET.md), read-only display: the value
+     * text (type/cycles/percent), always refreshed. The LCD's own Reset
+     * control was removed (UI_PLAN.md section 6.4, 2026-09-19). */
     for (unsigned r = 0; r < RELAY_CYCLES_COUNT; r++) {
-        if (s_rl_confirm_deadline_us[r] != 0 && rl_now >= s_rl_confirm_deadline_us[r]) {
-            s_rl_confirm_deadline_us[r] = 0;
-            lv_label_set_text(s_rl_reset_label[r], "Reset");
-        }
-
         relay_type_t rl_type;
         relay_cycles_get_type((uint8_t)r, &rl_type, NULL);
         char rl_type_letter;
@@ -1251,10 +1217,11 @@ static void refresh_cb(lv_timer_t *timer)
     }
 
     /* Crash Report page -- 2026-09-15 MEDIUM fix. Revert an expired
-     * Acknowledge confirm-arm the same way the Relay Life loop above does.
-     * This is cheap (RAM-only) and kept unconditional so a confirm window
-     * armed while the page was visible still reverts on schedule even if
-     * the operator navigates away before it expires.
+     * Acknowledge confirm-arm. This is cheap (RAM-only) and kept
+     * unconditional so a confirm window armed while the page was visible
+     * still reverts on schedule even if the operator navigates away before
+     * it expires. hal_time_now_us() matches every other elapsed-time
+     * comparison in this file (format_uptime() above).
      *
      * INFO fix (docs/audits/review_crash_gate_followups_62e95bbd_2026-09-15.md):
      * the actual crash_report_get() call below is a blocking NVS read, and
@@ -1264,7 +1231,8 @@ static void refresh_cb(lv_timer_t *timer)
      * I/O-free flag and stays cheap enough to leave unconditional, but the
      * full record is only needed to paint cr_buf/s_cr_summary_label while
      * that page is on screen. */
-    if (s_cr_ack_deadline_us != 0 && rl_now >= s_cr_ack_deadline_us) {
+    int64_t cr_now = (int64_t)hal_time_now_us();
+    if (s_cr_ack_deadline_us != 0 && cr_now >= s_cr_ack_deadline_us) {
         s_cr_ack_deadline_us = 0;
         lv_label_set_text(s_cr_ack_label, "Acknowledge");
     }
@@ -1420,106 +1388,11 @@ static void build_thermo_fault_row(lv_obj_t *parent, uint8_t channel, lv_color_t
     s_tf_status_label[channel] = status_label;
 }
 
-/* Reset button tap -- RELAY_LIFE_BUDGET.md's two-tap confirm (no dialog
- * widget exists on this page, so the button's own label does the asking).
- * First tap: arm a 5s window and relabel to "Confirm?". Second tap inside
- * that window: actually reset. A tap after the window expired is treated as
- * a fresh first tap, not a reset -- refresh_cb() below already reverts the
- * label once the deadline passes, so by the time a real "too late" tap
- * could land the label has already gone back to "Reset" and this branch is
- * unreachable in practice; the deadline re-check here is defense in depth
- * against refresh_cb() not yet having run (a tap that lands in the same
- * <2s tick refresh_cb() would have caught the expiry in). */
-static void relay_reset_btn_clicked_cb(lv_event_t *e)
-{
-    unsigned relay = (unsigned)(uintptr_t)lv_event_get_user_data(e);
-    if (relay >= RELAY_CYCLES_COUNT) {
-        return;
-    }
-
-    int64_t now = (int64_t)hal_time_now_us();
-    /* LOW-4 debounce: the arm tap set the deadline to now_arm + CONFIRM_US,
-     * so a confirm tap counts only once at least DEBOUNCE_US has elapsed
-     * since that arm -- i.e. once `now` is past (deadline - CONFIRM_US +
-     * DEBOUNCE_US). A tap inside the debounce window is silently ignored
-     * (treated as neither an arm nor a confirm) rather than re-arming, since
-     * a bounce pair from a single physical tap should not restart the
-     * window either. */
-    bool armed = s_rl_confirm_deadline_us[relay] != 0 && now < s_rl_confirm_deadline_us[relay];
-    if (armed && now < s_rl_confirm_deadline_us[relay] - UI_PAGE_DIAGNOSTICS_RELAY_RESET_CONFIRM_US
-                        + UI_PAGE_DIAGNOSTICS_CONFIRM_DEBOUNCE_US) {
-        return;
-    }
-
-    if (armed) {
-        s_rl_confirm_deadline_us[relay] = 0;
-        /* relay_cycles_reset_timeout() dispatches its own NVS write onto the
-         * flash-safe worker (see that function's header comment) and blocks
-         * this LVGL-task callback until the write lands -- this file must
-         * NOT call anything in relay_cycles.c that writes NVS directly.
-         * lvgl_task's own stack is actually static internal SRAM (lvgl_
-         * port.c's s_lvgl_task_stack, since the 2026-08-21 "REVERTED TO
-         * INTERNAL SRAM" fix), NOT PSRAM as DRAM_PSRAM_PLAN.md section 7.2
-         * and an earlier version of this comment both claimed (corrected
-         * 2026-09-15 to match crash_report.c's identical correction,
-         * docs/audits/review_crash_gate_low_fixes_c534a0df_2026-09-15.md LOW
-         * 4) -- routing through the flash worker here is still required, but
-         * for a different reason: it SERIALIZES this write against every
-         * other flash-worker job (including a concurrent crash-report ack or
-         * web write), not because this task's own stack is unsafe under a
-         * cache-disabled flash op.
-         *
-         * LOW fix (docs/audits/review_crash_gate_medium_fixes_aa2c484d_
-         * 2026-09-15.md): this used to call the UNBOUNDED relay_cycles_
-         * reset(), on the very same lvgl_task the Crash Report page's
-         * Acknowledge control was already bounded for -- a long job queued
-         * by some OTHER caller (a profile/package import, a cfg_fs write)
-         * could freeze this control (and the whole LCD) for as long as that
-         * job takes. Bounded the same way, with the same "Busy" distinct
-         * result on a timed-out acquire (nothing read or written) rather
-         * than silently behaving like a normal reset. A failed/timed-out
-         * persist still zeroes the count in RAM (relay_cycles_reset_
-         * timeout()'s documented contract) and is retried by the next
-         * periodic persist -- its own ESP_LOGW already says so.
-         *
-         * N2 fix (docs/audits/review_crash_gate_followups_f07ad24d_2026-09-15.md):
-         * this used to set the label back to "Reset" unconditionally before
-         * dispatching, then discard `ok` with a (void) cast -- a non-timeout
-         * persist failure logged nothing and left the button reading "Reset"
-         * exactly as if it had succeeded, while the RAM count was already
-         * zeroed and s_rc.dirty left set. Matched to crash_ack_btn_clicked_
-         * cb()'s precedent above: label is only set to "Reset" in the
-         * non-timeout branch (mirroring that function restoring "Acknowledge"
-         * there), and a non-timeout failure gets its own ESP_LOGW so it is
-         * not silent. */
-        bool timed_out = false;
-        bool ok = relay_cycles_reset_timeout(relay, UI_PAGE_DIAGNOSTICS_RELAY_RESET_WAIT_MS, &timed_out);
-        if (timed_out) {
-            lv_label_set_text(s_rl_reset_label[relay], "Busy");
-            ESP_LOGW(TAG, "LCD: relay_cycles_reset_timeout(%u) timed out waiting for the flash "
-                          "worker -- try again", relay);
-        } else {
-            lv_label_set_text(s_rl_reset_label[relay], "Reset");
-            if (!ok) {
-                ESP_LOGW(TAG, "LCD: relay_cycles_reset_timeout(%u) failed -- count zeroed in RAM "
-                              "only, try again", relay);
-            }
-        }
-    } else {
-        s_rl_confirm_deadline_us[relay] = now + UI_PAGE_DIAGNOSTICS_RELAY_RESET_CONFIRM_US;
-        lv_label_set_text(s_rl_reset_label[relay], "Confirm?");
-    }
-}
-
-/* One relay's row: name+type on the left, cycles/percent in the middle,
- * a two-tap Reset button on the right -- same "label(s) + trailing button"
- * shape as ui_page_network_manage.c's saved-network rows, sized down to
- * build_stat_row()'s ~23px row height (fixed button size, not
- * LV_SIZE_CONTENT, so 5 of these rows are cheap to prove fit the page's
- * ~267px budget the same way this file proves every other page does -- see
- * the _Static_assert just above ui_page_diagnostics_build()). */
-#define UI_PAGE_DIAGNOSTICS_RELAY_ROW_BTN_W_PX 64
-#define UI_PAGE_DIAGNOSTICS_RELAY_ROW_BTN_H_PX 22
+/* One relay's row: name+type on the left, cycles/percent on the right --
+ * read-only, same "label(s)" shape minus the trailing button UI_PLAN.md
+ * section 6.4 (2026-09-19) removed. relay_cycles_reset_timeout() stays in
+ * the driver -- the web UI keeps the reset capability, only the LCD's path
+ * to it goes. */
 static void build_relay_life_row(lv_obj_t *parent, unsigned relay, const char *name, lv_color_t accent)
 {
     lv_obj_t *row = lv_obj_create(parent);
@@ -1544,36 +1417,11 @@ static void build_relay_life_row(lv_obj_t *parent, unsigned relay, const char *n
     lv_obj_set_style_text_color(value_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
     lv_label_set_text(value_label, "--");
     s_rl_value_label[relay] = value_label;
-
-    lv_obj_t *btn = lv_button_create(row);
-    lv_obj_set_size(btn, UI_PAGE_DIAGNOSTICS_RELAY_ROW_BTN_W_PX, UI_PAGE_DIAGNOSTICS_RELAY_ROW_BTN_H_PX);
-    lv_obj_set_style_bg_color(btn, UI_THEME_ACCENT_5, 0);
-    lv_obj_set_style_radius(btn, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_set_style_pad_all(btn, 0, 0);
-    lv_obj_add_event_cb(btn, relay_reset_btn_clicked_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)relay);
-    s_rl_reset_btn[relay] = btn;
-
-    lv_obj_t *btn_label = lv_label_create(btn);
-    lv_obj_set_style_text_color(btn_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(btn_label, "Reset");
-    lv_obj_center(btn_label);
-    s_rl_reset_label[relay] = btn_label;
-
-    lv_obj_update_layout(btn);
-    /* COMPACT, not the sparse case -- same measured-on-hardware reasoning as
-     * ui_topbar.c's build_icon(): this button is one of several tappable
-     * things in a tight row and the wide extension has been shown to shadow
-     * a neighbour. There is no neighbouring tappable icon in THIS row (only
-     * one button per row), but the row below/above sits close by, so this
-     * stays compact rather than risk shadowing across rows for the same
-     * reason. */
-    ui_theme_apply_touch_area(btn, true);
 }
-#undef UI_PAGE_DIAGNOSTICS_RELAY_ROW_BTN_W_PX
-#undef UI_PAGE_DIAGNOSTICS_RELAY_ROW_BTN_H_PX
 
-/* Acknowledge button tap -- same two-tap confirm shape as
- * relay_reset_btn_clicked_cb() above. Second tap calls crash_report_
+/* Acknowledge button tap -- two-tap confirm (the Relay Life page's own
+ * former Reset button used the same shape before UI_PLAN.md section 6.4
+ * removed it). Second tap calls crash_report_
  * acknowledge_timeout(), not crash_report_acknowledge(): that function
  * dispatches its own NVS write onto the flash worker internally (see
  * crash_report.c) and is safe to call from this LVGL-task callback -- this
@@ -1601,9 +1449,9 @@ static void crash_ack_btn_clicked_cb(lv_event_t *e)
 {
     (void)e;
     int64_t now = (int64_t)hal_time_now_us();
-    /* LOW-4 debounce -- same reasoning as relay_reset_btn_clicked_cb() above:
-     * ignore a confirm tap that arrives less than DEBOUNCE_US after the arm
-     * tap, so a touch bounce cannot arm-and-confirm from one physical tap. */
+    /* LOW-4 debounce: ignore a confirm tap that arrives less than DEBOUNCE_US
+     * after the arm tap, so a touch bounce cannot arm-and-confirm from one
+     * physical tap. */
     bool armed = s_cr_ack_deadline_us != 0 && now < s_cr_ack_deadline_us;
     if (armed && now < s_cr_ack_deadline_us - UI_PAGE_DIAGNOSTICS_CRASH_ACK_CONFIRM_US
                          + UI_PAGE_DIAGNOSTICS_CONFIRM_DEBOUNCE_US) {
