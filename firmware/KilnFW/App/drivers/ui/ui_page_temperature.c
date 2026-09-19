@@ -11,6 +11,8 @@
 #include "safety_trip_words.h" /* safety_fault_source_words() -- decode the safety fault-source
                                  * mask instead of showing the operator a bare hex value
                                  * (ROADMAP.md M13). */
+#include "ui_page_temperature_safety.h" /* UI_PLAN.md 6.3: the K4 safety-relay label text, pure
+                                          * and host-testable -- see that file's header comment. */
 #include "ui_theme.h"
 #include "ui_topbar.h"
 #include "zones_config_accessors.h"
@@ -131,12 +133,20 @@ _Static_assert(UI_PAGE_TEMPERATURE_MAX_RELAYS_PER_ZONE == KILN_IO_RELAY_COUNT,
                "KILN_IO_RELAY_COUNT (kiln_io.h) -- a single zone can never claim more relays "
                "than the whole board has; update both together if this ever needs to change.");
 
+/* UI_PLAN.md section 6.3: one more line inside this same card, for the
+ * safety processor's own K4 relay state ("Safety (K4): ON / off / n/a") --
+ * not a new card, see that section's arithmetic. One font line plus a
+ * quarter-padding gap above it (matching the header<->relay_row gap
+ * already in this card). */
+#define UI_PAGE_TEMPERATURE_SAFETY_LINE_PX \
+    (UI_THEME_FONT_LINE_HEIGHT_PX + (UI_THEME_PADDING_PX / 4))
+
 /* One "Relays" card: its own top+bottom pad_all, one header line ("Relays --
- * zone relays are view-only"), the header<->relay_row gap, and the fixed
- * relay_row. */
+ * zone relays are view-only"), the header<->relay_row gap, the fixed
+ * relay_row, and (UI_PLAN.md 6.3) the safety-relay line below it. */
 #define UI_PAGE_TEMPERATURE_RELAYS_CARD_HEIGHT_PX \
     (((UI_THEME_PADDING_PX / 2) * 2) + UI_THEME_FONT_LINE_HEIGHT_PX + (UI_THEME_PADDING_PX / 4) + \
-     UI_PAGE_TEMPERATURE_RELAY_ROW_HEIGHT_PX)
+     UI_PAGE_TEMPERATURE_RELAY_ROW_HEIGHT_PX + UI_PAGE_TEMPERATURE_SAFETY_LINE_PX)
 
 /* Worst case: MAX31856_CHANNEL_COUNT zone rows, the one Relays card, and
  * s_msg_label (one line) stacked in `content`, with a UI_THEME_PADDING_PX/2
@@ -176,6 +186,10 @@ static lv_obj_t *s_relay_btn[KILN_IO_RELAY_COUNT];
 static lv_obj_t *s_relay_label[KILN_IO_RELAY_COUNT];
 
 static lv_obj_t *s_msg_label; /* last refusal (or "") -- see this file's header comment */
+
+/* UI_PLAN.md 6.3: the safety processor's own K4 relay line, inside the
+ * Relays card. */
+static lv_obj_t *s_safety_label;
 
 /* THE reuse point for "in the lcd. the temp page should not allow the manual
  * toggeling of zone relays but should allow the toggel of non zone ralays".
@@ -291,6 +305,23 @@ static void refresh_cb(lv_timer_t *timer)
             lv_obj_set_style_bg_color(s_relay_btn[r], on ? UI_THEME_ACCENT_5 : UI_THEME_COLOR_CARD, 0);
             lv_obj_set_style_text_color(s_relay_label[r], UI_THEME_COLOR_TEXT_PRIMARY, 0);
         }
+    }
+
+    /* UI_PLAN.md 6.3: from the SAME dashboard_get_status() snapshot already
+     * fetched above -- no new poll of the Pico. Deliberately reads
+     * safety_relay_known/safety_relay_energized, never safety_heating_enabled
+     * (see dashboard_http.h's doc comment and this file's header comment on
+     * why that flag means ARMED, not "relay energized"). */
+    if (s_safety_label) {
+        char safety_buf[24];
+        ui_page_temperature_safety_text(ds.safety_relay_known, ds.safety_relay_energized, safety_buf,
+                                         sizeof(safety_buf));
+        lv_label_set_text(s_safety_label, safety_buf);
+        lv_obj_set_style_text_color(s_safety_label,
+                                     (ds.safety_relay_known && ds.safety_relay_energized)
+                                         ? UI_THEME_ACCENT_4
+                                         : UI_THEME_COLOR_TEXT_SECONDARY,
+                                     0);
     }
 }
 
@@ -495,6 +526,14 @@ static void build_relays_section(lv_obj_t *parent)
         s_relay_btn[r] = btn;
         s_relay_label[r] = label;
     }
+
+    /* UI_PLAN.md 6.3: safety relay line, inside this same card (see
+     * UI_PAGE_TEMPERATURE_SAFETY_LINE_PX's comment for why not a new card).
+     * Text/color set by refresh_cb() every tick; this only builds the
+     * widget. */
+    s_safety_label = lv_label_create(card);
+    lv_obj_set_style_text_color(s_safety_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(s_safety_label, "Safety (K4): n/a");
 }
 
 lv_obj_t *ui_page_temperature_build(void)
