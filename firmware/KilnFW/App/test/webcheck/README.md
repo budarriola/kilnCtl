@@ -25,6 +25,11 @@ KILN_BASE=http://192.168.1.156 node firmware/KilnFW/App/test/webcheck/ui_sweep.j
 Playwright is not vendored here. Install it wherever you run these:
 `npm i playwright && npx playwright install chromium`.
 
+`lint_pages.js` is also run automatically, no manual invocation needed, by
+`tools/check_lint_pages.ps1` as part of the standing `tools/run_all_checks.ps1`
+suite, and by `tools/verify.ps1`'s `lint` stage (which delegates to that same
+script).
+
 ## Why each exists
 
 **`lint_pages.js`** — a comment written as `MAX31856_MASK_*` followed by `/`

@@ -40,6 +40,14 @@ no such pattern, so a full `run_all_checks.ps1` run does not execute it at all. 
 claim that the page lint "runs in CI" should be checked against which entry point was
 actually used.
 
+**Closing note, 2026-09-19:** the reach limit above is closed. `a42ac369` added
+`tools/check_lint_pages.ps1`, which `run_all_checks.ps1`'s glob now discovers and
+which `tools/verify.ps1`'s `lint` stage was repointed to delegate to, so
+`lint_pages.js` runs exactly once per invocation of either entry point and is now
+part of the standing check suite. The duplication-coverage scope described above
+(two hand-written C↔JS string pairs, nothing more) is unchanged by this fix and
+still stands as written.
+
 **`firmware/KilnFW/App/test/check_no_duplicate_commissioning_impl.ps1`** is the one
 check in the tree built specifically against this failure class, and it is built
 correctly: it is keyed on three distinctive marker strings rather than on file paths,

@@ -119,6 +119,13 @@ if ($ListOnly) {
     exit 0
 }
 
+# Reserved exit code across the check-suite convention (tools/run_all_checks.ps1):
+# 0 = PASS, 3 = SKIP (prerequisite absent, not a failure), anything else = FAIL.
+# The lint stage delegates to tools/check_lint_pages.ps1, which follows this
+# convention -- treat its exit 3 as SKIP here too rather than FAIL, or a
+# missing prerequisite (e.g. no node on PATH) reads as a verification failure.
+$SkipExitCode = 3
+
 $results = [ordered]@{}
 $procs = @{}
 $swAll = [Diagnostics.Stopwatch]::StartNew()
@@ -165,6 +172,9 @@ foreach ($name in $results.Keys) {
     $desc = $Stages[$name].Desc
     if ($r.Code -eq 0) {
         Write-Host ("  PASS  {0,-32} {1,6}s" -f $desc, $r.Seconds) -ForegroundColor Green
+    }
+    elseif ($r.Code -eq $SkipExitCode) {
+        Write-Host ("  SKIP  {0,-32} {1,6}s" -f $desc, $r.Seconds) -ForegroundColor Yellow
     }
     else {
         Write-Host ("  FAIL  {0,-32} {1,6}s  (exit {2})" -f $desc, $r.Seconds, $r.Code) -ForegroundColor Red
