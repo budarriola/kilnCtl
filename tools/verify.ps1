@@ -45,7 +45,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$logDir = Join-Path $env:TEMP "kilnctl-verify"
+# Unique per invocation, not a fixed shared path: many parallel sessions run
+# this script on this machine, and a fixed "$env:TEMP\kilnctl-verify" path let
+# one session's run overwrite another's log out from under it -- a session has
+# already read another session's failure log this way. PID + timestamp keeps
+# concurrent runs from colliding.
+$logDir = Join-Path $env:TEMP "kilnctl-verify-$PID-$(Get-Date -Format 'yyyyMMdd_HHmmss_fff')"
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 
 # Each stage names the command to run and how to recognise its failure lines.

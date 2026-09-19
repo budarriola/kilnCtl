@@ -397,7 +397,7 @@ script fails to load, and the Bash tool still reports exit 0 for the wrapper
 host-test builds need a short worktree path (e.g. `C:\wt\...`); the default
 `.claude/worktrees/...` path overflows the MSVC command line.
 
-As of 2026-09-17 it discovers 110 checks (`-ListOnly` at commit `599734f1`;
+As of 2026-09-18 it discovers 113 checks (`-ListOnly` at commit `ac5a1392`;
 re-verify with a fresh `-ListOnly` run since this count drifts as checks are
 added) and runs them in three phases — phase 1 is three full target builds
 (`check_00_kilnfw_target_build.ps1`, `check_00_saftyfw_target_build.ps1`,
@@ -528,6 +528,16 @@ enforces this. Equally, never hold a module lock across the producer calls a
 policy tick makes (`dashboard_get_status()` alone does three MAX31856 SPI reads,
 a 200 ms-capable queue wait and four interrupts-disabled heap walks): cache a
 snapshot outside the lock instead (`7a8594d`).
+
+**The URI handler cap has essentially no headroom left.** `check_uri_handler_cap.ps1`
+(as of 2026-09-18) reports 150 `httpd_uri_t` routes registered under
+`firmware/KilnFW/App/drivers/*.c` against `wifi_provision_http.c`'s
+`config.max_uri_handlers = 151` — one spare slot. The next route added
+anywhere under `drivers/` will need that cap bumped in the same change, or
+the check fails; see the check script's own header comment for why this is a
+compile-time array size shared by every build configuration (including
+`CONFIG_KILNCTL_SIM_PLANT`'s two extra routes) and why past bumps were
+allowed to fall behind three times running before this check existed.
 
 **"Reset one side of a pair" bug class — no mechanical check, review by hand.**
 Four confirmed instances so far, all silent, all cost real debugging time:
