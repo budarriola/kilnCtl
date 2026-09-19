@@ -215,7 +215,20 @@ button { min-height: var(--ui-touch); }
    to ten entries plus Reset; verified by eye at a 375x667-rotated
    (landscape, ~375px tall) viewport with all eleven NAV_LINKS entries --
    the panel caps at 70% of that height and scrolls internally rather than
-   pushing the backdrop or clipping off-screen. */
+   pushing the backdrop or clipping off-screen.
+
+   2026-09-18: that eleven-entry sentence no longer describes the CLOSED
+   menu. NAV_LINKS is now three top-level groups with all fifteen
+   destinations nested inside them (see nav.js), so the menu opens as three
+   summary rows plus the children of whichever single group auto-expands
+   around the current page -- far short of the eleven rows measured above.
+   The 70vh cap still matters and is still correct, because the expanded
+   case is the tall one: three summaries plus the largest group's six
+   children ("Kiln setup") is nine rows, still under the eleven already
+   shown to scroll cleanly at that viewport. The original wording is kept
+   rather than rewritten because it records what was actually measured on a
+   real screen; this note records why that measurement still bounds the new
+   shape. The new shape itself has NOT been re-measured on a screen. */
 .kc-menu-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); z-index: 1000;
                    display: flex; align-items: flex-start; }
 .kc-menu-overlay[hidden] { display: none; }
@@ -227,9 +240,13 @@ button { min-height: var(--ui-touch); }
                     box-sizing: border-box; display: flex; align-items: center; }
 .kc-menu-panel a:last-child { border-bottom: none; }
 .kc-menu-panel a.kc-menu-active { font-weight: bold; color: var(--ui-accent-3); }
-/* Expanding "Safety" group (nav.js's NAV_LINKS `children` shape, owner
-   request 2026-08-27: "the menu should just show them as sub items when the
+/* Expanding group (nav.js's NAV_LINKS `children` shape, owner request
+   2026-08-27: "the menu should just show them as sub items when the
    main safty item is opened not a seprate page to hold the 3 page links").
+   This originally styled the one "Safety" group; since the 2026-09-18 menu
+   reorganisation it styles all three (Firing / Kiln setup / System), which
+   needed no rule change -- the markup shape is identical, only the count
+   of groups grew.
    <details>/<summary> is the native disclosure widget nav.js builds this
    from -- these rules make it read as part of the same list every plain
    <a> sits in, not a visually distinct control. */

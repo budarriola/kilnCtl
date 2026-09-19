@@ -963,7 +963,7 @@ function fieldInputHtml(f, paramsById) {
     var dk = ctKDerived.k[f.derivedK];
     var kh = '<output class="readonly-field">' + window.kcEscapeHtml(dk) + ' V/A</output>';
     kh += '<p class="note">DERIVED by the zone current-sweep on the ' +
-      '<a href="/zones.html">zones page</a>: the whole-kiln current it measured was ' +
+      '<a href="/settings/zones">zones page</a>: the whole-kiln current it measured was ' +
       'compared against the nameplate current implied by the mains voltage and ' +
       'full-output power answered above, and CT' + f.derivedK + '’s scale was corrected by ' +
       'that ratio and written to the safety processor.';
@@ -992,7 +992,7 @@ function fieldInputHtml(f, paramsById) {
     }
     return '<output class="readonly-field">' + text + '</output>' +
       '<p class="note">From the zones configuration -- set on the ' +
-      '<a href="/zones.html">zones page</a>, not here.</p>';
+      '<a href="/settings/zones">zones page</a>, not here.</p>';
   }
   // Task 2 (COMMISSIONING_UX.md sec 2.1): mains_voltage_v is a dropdown, not
   // a number box, with "Not set" as a first-class, reachable, initially-
@@ -1043,7 +1043,7 @@ function fieldInputHtml(f, paramsById) {
     var dz = ctMapDerived.zone[f.derivedCt];
     var h = '<output class="readonly-field">' + window.kcEscapeHtml(dz) + '</output>';
     h += '<p class="note">DERIVED from the zone current-sweep on the ' +
-      '<a href="/zones.html">zones page</a>: CT' + f.derivedCt + ' was the only channel ' +
+      '<a href="/settings/zones">zones page</a>: CT' + f.derivedCt + ' was the only channel ' +
       'carrying load while zone ' + (dz + 1) + ' was energized, and that value was written ' +
       'to the safety processor at the end of the sweep.';
     if (isSet && Number(val) !== dz) {

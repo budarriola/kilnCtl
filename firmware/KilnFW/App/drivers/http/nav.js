@@ -67,17 +67,96 @@
   //
   // A plain entry is `{ href, label }`, same shape as before. A group entry
   // is `{ label, children: [...] }` -- no href of its own, since (b) is
-  // explicit that opening "Safety" must never navigate anywhere, only reveal
-  // its children in place.
+  // explicit that opening a group must never navigate anywhere, only reveal
+  // its children in place. That rule is an owner instruction, not an
+  // implementation convenience: it survives the 2026-09-18 reorganisation
+  // below unchanged, and now governs three groups instead of one.
+  //
+  // 2026-09-18 reorganisation (the owner's chosen structure, implemented as
+  // given rather than re-derived). The list is no longer a flat run of
+  // entries with a single "Safety" group at the end: all fifteen
+  // destinations now sit under exactly one of three top-level groups --
+  // Firing, Kiln setup, System -- and none of those three navigates
+  // anywhere itself. The former "Safety" group is DISSOLVED, its three
+  // pages moved into "Kiln setup" at full depth keeping their existing
+  // labels, because this menu supports exactly ONE level of nesting: a
+  // group nested inside a group has nowhere to render. Every destination
+  // that existed before the move still exists after it; nothing was
+  // dropped, and no entry is hidden by role or state -- this is a static
+  // array and stays one.
+  //
+  // With every page now nested, buildMenuOverlay()'s auto-expand (a group
+  // opens when the current page is one of its children) stops being a
+  // nicety and becomes load-bearing: without it the drop-down would open
+  // fully collapsed to three words and tell the operator nothing about
+  // where they are.
   var NAV_LINKS = [
-    { href: '/profiles', label: 'Firing profiles' },
-    { href: '/setup', label: 'Setup wizard' },
-    { href: '/readiness', label: 'Ready to fire? (checklist)' },
-    { href: '/settings/zones', label: 'Thermocouples & zones' },
-    // Kiln-config selector + management (save/clone/rename/delete/export/
-    // import/apply), split out of main_page.html's own dashboard disclosure
-    // 2026-09-18 into its own page (kiln_configs_page.html, kiln_cfg_http.c).
-    { href: '/settings/kiln_configs', label: 'Kiln configs' },
+    {
+      label: 'Firing',
+      children: [
+        // Owner, 2026-08-27: "fireing profiles should be the top menu item".
+        // Still the first thing in the menu -- now the first child of the
+        // first group, which is the closest the nested structure allows.
+        { href: '/profiles', label: 'Firing profiles' },
+        { href: '/readiness', label: 'Ready to fire? (checklist)' },
+        { href: '/diagnostics', label: 'Diagnostics' },
+      ],
+    },
+    {
+      label: 'Kiln setup',
+      children: [
+        { href: '/setup', label: 'Setup wizard' },
+        { href: '/settings/zones', label: 'Thermocouples & zones' },
+        // Kiln-config selector + management (save/clone/rename/delete/export/
+        // import/apply), split out of main_page.html's own dashboard
+        // disclosure 2026-09-18 into its own page (kiln_configs_page.html,
+        // kiln_cfg_http.c).
+        { href: '/settings/kiln_configs', label: 'Kiln configs' },
+        // The three entries below are the whole of the former top-level
+        // "Safety" group (owner request (b), 2026-08-27), moved here intact
+        // 2026-09-18. They keep their labels deliberately: "Safety timings"
+        // and "Safety processor" still have to be told apart from each
+        // other now that the word "Safety" is no longer supplied by a
+        // heading standing above them.
+        { href: '/settings/safety', label: 'Safety timings' },
+        { href: '/safety', label: 'Safety processor' },
+        { href: '/safety/commissioning', label: 'Safety commissioning' },
+      ],
+    },
+    {
+      label: 'System',
+      children: [
+        { href: '/wifi', label: 'Network settings' },
+        { href: '/ota', label: 'Firmware update' },
+        { href: '/settings/backup', label: 'Backup & restore' },
+        // 2026-08-21: /settings gained a Display section (theme + °C/°F,
+        // moved off the topbar at the owner's request), so it needs a way
+        // in that is not the reset entry below -- an operator looking for
+        // the units toggle should not have to guess it lives behind a link
+        // labelled "Reset".
+        //
+        // 2026-08-22: that Display section moved again, this time to its
+        // own page (/settings/display, settings_display_page.html) -- owner
+        // report: "both display theme and reset menu items take me to the
+        // same page." The two entries used to be /settings#display and
+        // /settings#danger, two anchors on the ONE settings page, so picking
+        // either menu item visibly landed on the same document. They now
+        // point at genuinely different routes.
+        { href: '/settings/display', label: 'Display (theme & units)' },
+        // WEB_AUTH_PLAN.md section 6: the admin password/settings page.
+        { href: '/settings/security', label: 'Security (passwords & PINs)' },
+        // Relabelled from "Reset" 2026-09-18. /settings carries a Reboot
+        // section (settings_page.html's <h2 id="sw-reset">Reboot</h2>) as
+        // well as the Danger zone below it, and an entry labelled just
+        // "Reset" hid the reboot control behind a word that does not name
+        // it. The #danger fragment stays: that is still the part of the
+        // page this entry has always been for. See isActive() below for why
+        // an href carrying a fragment needs `activeFor` to highlight at all.
+        { href: '/settings#danger', label: 'Reboot & reset', activeFor: '/settings' },
+      ],
+    },
+    // Two destinations removed in earlier passes, recorded here so they are
+    // not re-added by someone reading the route table and finding a gap.
     // 'Relays & rules' (/settings/relays) removed 2026-08-27: the rule
     // engine was deleted -- relay/IO control is now a firing profile
     // segment (see profile_executor.c's io_seg_* machinery) per the
@@ -90,34 +169,6 @@
     // /api/diagnostics/danger/relay) is the one sanctioned place left to
     // move a relay by hand; it carries its own explicit accept-the-risk
     // gate and auto-exit timer, which the removed page did not.
-    { href: '/wifi', label: 'Network settings' },
-    { href: '/ota', label: 'Firmware update' },
-    { href: '/diagnostics', label: 'Diagnostics' },
-    {
-      label: 'Safety',
-      children: [
-        { href: '/settings/safety', label: 'Safety timings' },
-        { href: '/safety', label: 'Safety processor' },
-        { href: '/safety/commissioning', label: 'Safety commissioning' },
-      ],
-    },
-    { href: '/settings/backup', label: 'Backup & restore' },
-    // 2026-08-21: /settings gained a Display section (theme + °C/°F, moved
-    // off the topbar at the owner's request), so it needs a way in that is
-    // not the Reset entry below -- an operator looking for the units toggle
-    // should not have to guess it lives behind a link labelled "Reset".
-    //
-    // 2026-08-22: that Display section moved again, this time to its own
-    // page (/settings/display, settings_display_page.html) -- owner report:
-    // "both display theme and reset menu items take me to the same page."
-    // The two entries used to be /settings#display and /settings#danger, two
-    // anchors on the ONE settings page, so picking either menu item visibly
-    // landed on the same document. They now point at genuinely different
-    // routes.
-    { href: '/settings/display', label: 'Display (theme & units)' },
-    // WEB_AUTH_PLAN.md section 6: the admin password/settings page.
-    { href: '/settings/security', label: 'Security (passwords & PINs)' },
-    { href: '/settings#danger', label: 'Reset' },
   ];
 
   function currentPath() {
@@ -125,6 +176,28 @@
     // these routes today, but stripping them costs nothing and avoids a
     // near-miss on "active" highlighting if one ever does.
     return window.location.pathname;
+  }
+
+  // Is this entry the page we are standing on? An entry normally matches on
+  // its own href, compared exactly. `activeFor` is an explicit per-entry
+  // opt-in override, and it exists for one reason: an href carrying a
+  // fragment can never equal a pathname. '/settings#danger' is compared
+  // against window.location.pathname, which on that page is '/settings' --
+  // so until 2026-09-18 the "Reboot & reset" entry was the one item in this
+  // menu that could never highlight as active, no matter where you stood.
+  //
+  // Deliberately an EXACT comparison against a field the entry opts into,
+  // and deliberately NOT a prefix match on href. A prefix match would close
+  // that one false negative by opening six false positives: '/settings' is
+  // a prefix of '/settings/zones', '/settings/kiln_configs',
+  // '/settings/safety', '/settings/backup', '/settings/display' and
+  // '/settings/security', every one of which is its own entry in this menu,
+  // so standing on any of them would light up "Reboot & reset" as well --
+  // strictly worse than the bug being fixed. With an exact comparison those
+  // six match only their own hrefs, and '/settings' matches only the one
+  // entry that names it. Exactly one entry carries `activeFor` today.
+  function isActive(entry, here) {
+    return (entry.activeFor || entry.href) === here;
   }
 
   function buildMenuOverlay() {
@@ -152,7 +225,12 @@
         // children, so landing on e.g. /safety/commissioning from a
         // bookmark or a refresh shows the group already expanded around the
         // active item instead of hiding it behind a collapsed heading.
-        var hasActiveChild = link.children.some(function (c) { return c.href === here; });
+        //
+        // Since the 2026-09-18 reorganisation every page is a child of some
+        // group, which makes this the only thing standing between the
+        // operator and a menu that opens as three collapsed words. It is
+        // load-bearing behaviour now, not a nicety -- do not drop it.
+        var hasActiveChild = link.children.some(function (c) { return isActive(c, here); });
         if (hasActiveChild) {
           details.setAttribute('open', '');
         }
@@ -163,7 +241,7 @@
           var a = document.createElement('a');
           a.href = child.href;
           a.textContent = child.label;
-          if (child.href === here) {
+          if (isActive(child, here)) {
             a.className = 'kc-menu-active';
           }
           details.appendChild(a);
@@ -174,7 +252,7 @@
       var a = document.createElement('a');
       a.href = link.href;
       a.textContent = link.label;
-      if (link.href === here) {
+      if (isActive(link, here)) {
         a.className = 'kc-menu-active';
       }
       panel.appendChild(a);
