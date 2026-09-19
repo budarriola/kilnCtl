@@ -14,8 +14,8 @@
   1280x720 frame costs several times the tokens of the default 640x360 crop
   for no diagnostic gain.
 
-  The crop rectangle was re-measured from a full-frame capture on 2026-09-10
-  after the camera was re-aimed (see CLAUDE.md's "Camera aim" note). If the
+  The crop rectangle was re-measured from a full-frame capture on 2026-09-19
+  after the LCD was moved and put back (see CLAUDE.md's "Camera aim" note). If the
   camera or board is ever moved again, re-run with -Full to get an uncropped
   frame, re-measure by numeric pixel sampling (never by eye) with
   sample_lcd_region.ps1, and update the defaults here.
@@ -43,19 +43,21 @@ param(
     [int]$Width = 640,
     [string]$Device = "HD Pro Webcam C920",
     # Active-area rectangle of the LCD within a 1280x720 frame, re-measured
-    # 2026-09-10 by numeric pixel sampling (sample_lcd_region.ps1, edge scans
-    # against a black-bezel reference) after the camera was re-aimed and the
-    # whole panel is now inside the frame. The panel is still slightly
-    # perspective-skewed (edges vary by ~4-6px corner to corner: left edge
-    # ~102-108, right edge ~1006-1009, top edge ~13-16, bottom edge
-    # ~614-620), so this rectangle is the smallest axis-aligned box that
-    # contains all four corners of the screen content -- it includes a few
-    # pixels of bezel on some sides rather than clipping any UI, since
-    # losing content is worse than a small margin.
-    [int]$CropX = 102,
-    [int]$CropY = 12,
-    [int]$CropW = 907,
-    [int]$CropH = 609
+    # 2026-09-19 by numeric pixel sampling (luminance edge scans against the
+    # black-bezel reference) after the owner moved the LCD and put it back --
+    # the panel shifted right ~195px and down ~46px from the 2026-09-10
+    # numbers, far beyond the few-px tolerance, so the old crop clipped most
+    # of the screen. The board now sits rotated a few degrees (its right side
+    # is ~25px higher than its left): left edge runs 298 (top) to 323
+    # (bottom), right edge ~1145-1147, top edge 60 (right) to 86 (left),
+    # bottom edge 617 (right) to 635 (left). This rectangle is the smallest
+    # axis-aligned box that contains all four corners of the screen content --
+    # it includes a few pixels of bezel on some sides rather than clipping any
+    # UI, since losing content is worse than a small margin.
+    [int]$CropX = 296,
+    [int]$CropY = 58,
+    [int]$CropW = 853,
+    [int]$CropH = 578
 )
 
 $ErrorActionPreference = "Stop"
