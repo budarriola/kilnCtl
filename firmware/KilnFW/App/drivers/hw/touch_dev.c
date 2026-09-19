@@ -4,6 +4,32 @@
 // App/test/test_touch_dev.c.
 #include "touch_dev.h"
 
+touch_cal_support_t touch_dev_cal_support(const touch_dev_t *dev)
+{
+    /* Presence FIRST -- see touch_dev.h. A zeroed touch_dev_t has
+     * self_calibrating == false, so testing that flag first would report a
+     * board with no working touch controller as a present resistive one. */
+    if (!dev || !dev->read) {
+        return TOUCH_CAL_SUPPORT_NO_TOUCH;
+    }
+    if (dev->self_calibrating) {
+        return TOUCH_CAL_SUPPORT_SELF_CALIBRATING;
+    }
+    return TOUCH_CAL_SUPPORT_SUPPORTED;
+}
+
+const char *touch_cal_support_name(touch_cal_support_t support)
+{
+    switch (support) {
+        case TOUCH_CAL_SUPPORT_SUPPORTED:        return "supported";
+        case TOUCH_CAL_SUPPORT_SELF_CALIBRATING: return "self_calibrating";
+        case TOUCH_CAL_SUPPORT_NO_TOUCH:         return "no_touch";
+    }
+    /* Unreachable for any declared value; returned rather than asserted so a
+     * %s caller can never be handed NULL. */
+    return "unknown";
+}
+
 int32_t touch_dev_axis_to_px(uint16_t raw, uint16_t raw_max, uint16_t panel_extent, bool invert)
 {
     if (raw_max == 0 || panel_extent == 0) return 0;

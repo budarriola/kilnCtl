@@ -115,6 +115,87 @@ static inline bool touch_dev_use_calibrated_fit(const touch_dev_t *dev, bool tou
     return !dev->self_calibrating && touch_cal_calibrated;
 }
 
+/* Whether a USER-RUN calibration step (the 3x3 target grid in
+ * ui_page_touch_cal.c, fitted and persisted through touch_cal_store.h) is a
+ * meaningful thing to OFFER for the controller actually wired in right now.
+ *
+ * THE ONE SHARED PREDICATE. Every surface that offers, hides, or refuses
+ * calibration answers this question through touch_dev_cal_support() below --
+ * the LCD config hub's nav cell (ui_page_config.c), kiln_ui.c's forced
+ * first-boot gate, ui_page_touch_cal.c's own build(), and the web UI (via
+ * /api/status's touch_cal_supported field). They used to ask three subtly
+ * different questions instead (`!self_calibrating`; `!self_calibrating &&
+ * !touch_cal_store_is_calibrated()`; and nothing at all on the web side),
+ * which is this repo's documented drift class: independent conditions that
+ * agree today and diverge silently the moment one of them is edited.
+ *
+ * Deliberately a THREE-state answer, not a bool. "No touch controller came
+ * up" is a genuinely different state from "this controller self-calibrates",
+ * and collapsing them into one `false` is exactly how an unknown gets
+ * silently reported as a confident "not supported" -- see each value's note. */
+typedef enum {
+    /* A resistive-style controller reporting raw ADC counts IS present.
+     * Calibration is both meaningful and performable: offer it. */
+    TOUCH_CAL_SUPPORT_SUPPORTED = 0,
+
+    /* A self-calibrating controller (FT6336U) is present. It reports panel
+     * coordinates directly and never populates touch_cal_store, so the grid
+     * could never complete and the fit would never be read back. A CONFIDENT
+     * "not supported": the hardware is known, and known not to need it. */
+    TOUCH_CAL_SUPPORT_SELF_CALIBRATING,
+
+    /* No touch controller is wired in at all -- a zeroed touch_dev_t: either
+     * bring-up failed (main_boot_early.c logs a WARN and leaves the struct
+     * zeroed) or the board has no touch hardware. NOT the same claim as
+     * SELF_CALIBRATING above: the part that WOULD be there may well be one
+     * calibration is meaningful for; bring-up simply got no answer from it
+     * this boot.
+     *
+     * The option is still hidden, because the calibration flow needs the
+     * operator to physically tap nine targets and there is nothing to read
+     * those taps with -- a grid that cannot register a single press is a
+     * worse lie than hiding it. But every surface reports THIS value
+     * distinctly ("touch controller not detected"), never as the plain
+     * "self-calibrating, none needed" message, so an unreported bring-up
+     * failure can never masquerade as a panel that simply does not need
+     * calibrating. Unknown is shown as unknown. */
+    TOUCH_CAL_SUPPORT_NO_TOUCH,
+} touch_cal_support_t;
+
+/* The predicate itself. Pure (reads only the struct handed to it), so it is
+ * host-testable -- which matters beyond tidiness here: HTTP handlers in this
+ * tree are target-build-only (only a handful of 50 link into the host
+ * suite), so a test written against the /api/status handler would never
+ * actually run. Keeping the decision in this file, which IS in the host
+ * build (build_host_tests.ps1's touch_dev.c entry), is what makes it
+ * coverable at all. See test_touch_dev.c.
+ *
+ * `dev` NULL, or a dev with no read function, is NO_TOUCH -- a zeroed
+ * touch_dev_t is precisely how main_boot_early.c represents "nothing came
+ * up", and lvgl_port.c's touch_dev field comment says the same. Note the
+ * ordering that matters: presence is checked BEFORE self_calibrating,
+ * because a zeroed struct has self_calibrating == false and would otherwise
+ * read as a present resistive controller -- i.e. a board whose capacitive
+ * bring-up failed would be told calibration is SUPPORTED and sent into a
+ * grid it cannot complete. Not hypothetical: that is the exact shape of the
+ * pre-existing bug this predicate replaces, where every surface asked
+ * `!self_calibrating` and a failed FT6336U bring-up answered "resistive". */
+touch_cal_support_t touch_dev_cal_support(const touch_dev_t *dev);
+
+/* The single "should this surface show the option?" test, so no caller has
+ * to re-derive it by comparing against the enum and risk picking a different
+ * set of values than its sibling surfaces did. */
+static inline bool touch_cal_support_is_offerable(touch_cal_support_t support)
+{
+    return support == TOUCH_CAL_SUPPORT_SUPPORTED;
+}
+
+/* Stable machine-readable spelling for the wire (/api/status's
+ * touch_cal_supported) and for logs: "supported", "self_calibrating",
+ * "no_touch". Never NULL, even for an out-of-range value ("unknown"), so a
+ * caller can hand this straight to a %s. */
+const char *touch_cal_support_name(touch_cal_support_t support);
+
 /* Pure raw-count -> panel-pixel scaling for ONE axis: clamp raw to
  * [0, raw_max], scale linearly onto [0, panel_extent-1], then optionally
  * invert. Same formula lvgl_port.c's old touch_raw_to_px() used for NS2009

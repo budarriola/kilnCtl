@@ -273,20 +273,37 @@ esp_err_t kiln_ui_init(void)
      * its own once calibration completes (see its header comment) -- this
      * is only what happens at boot, before that has ever run.
      *
-     * Gated on lvgl_port_touch_is_self_calibrating() (DISPLAY_ST7796_PLAN.md
-     * section 7, Phase 5): touch_cal_store_is_calibrated() is permanently
-     * false for a self-calibrating controller (FT6336U.h) -- it never calls
-     * touch_cal_store_save(), by design, because it never runs that fit at
-     * all (touch_dev.h). Without this gate a board on that controller would
-     * boot straight into a 3x3 target grid it can never complete, every
-     * single boot, forever -- a hard boot-path breakage the plan calls out
-     * explicitly. Always takes the "!self_calibrating" branch today: no
-     * board built by this firmware has ever wired in a self-calibrating
-     * touch_dev_t (see lvgl_port_touch_is_self_calibrating()'s own comment),
-     * so this is currently a no-op that only matters once one does. */
-    if (!lvgl_port_touch_is_self_calibrating() && !touch_cal_store_is_calibrated()) {
+     * Gated on the SHARED calibration-support predicate (touch_dev.h's
+     * touch_dev_cal_support(), reached here through lvgl_port), the same one
+     * ui_page_config.c's nav cell, ui_page_touch_cal_build() and
+     * /api/status's touch_cal_supported field consult -- so this boot gate
+     * cannot drift out of agreement with what the rest of the UI offers.
+     *
+     * This gate used to ask `!lvgl_port_touch_is_self_calibrating()`, which
+     * is one INPUT to the decision, not the decision. touch_cal_store_is_
+     * calibrated() is permanently false for a self-calibrating controller
+     * (FT6336U.h) -- it never calls touch_cal_store_save(), by design,
+     * because it never runs that fit at all (touch_dev.h) -- so without a
+     * gate such a board would boot into a 3x3 target grid it can never
+     * complete, every boot, forever. But `self_calibrating` also reads false
+     * for a ZEROED touch_dev_t, i.e. a board whose touch bring-up FAILED
+     * (main_boot_early.c logs a WARN and leaves the struct zeroed), so the
+     * old condition sent exactly those boards -- the ones with no working
+     * touch controller at all -- into that same uncompletable grid, with no
+     * way to tap out of it. touch_dev_cal_support() distinguishes the two
+     * (see its comment); only a genuinely SUPPORTED controller is forced
+     * into calibration, and the other two cases are logged by name rather
+     * than silently treated alike. */
+    const touch_cal_support_t cal_support = lvgl_port_touch_cal_support();
+    if (touch_cal_support_is_offerable(cal_support) && !touch_cal_store_is_calibrated()) {
         ESP_LOGI(TAG, "no touch calibration on file -- starting calibration instead of home");
         return kiln_ui_show("touch_cal");
+    }
+    if (cal_support == TOUCH_CAL_SUPPORT_NO_TOUCH) {
+        /* Never silent: a board that reaches home with no touch controller
+         * looks identical to a healthy one until something is tapped. */
+        ESP_LOGW(TAG, "no touch controller detected -- touch calibration is not being offered, "
+                      "and the LCD will not respond to taps this boot");
     }
 
     /* docs/WEB_AUTH_PLAN.md section 7/8 (LCD half): one-time setup for the

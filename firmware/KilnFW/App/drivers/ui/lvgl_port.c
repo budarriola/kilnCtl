@@ -1091,16 +1091,14 @@ bool lvgl_port_touch_is_calibrated(void)
     return s_touch_cal.calibrated;
 }
 
-/* kiln_ui.c's boot-time forced-calibration gate (DISPLAY_ST7796_PLAN.md
- * section 7) needs to know this BEFORE deciding whether
- * touch_cal_store_is_calibrated() == false means "show the calibration grid"
- * or "this controller never populates that store, go to home instead" --
- * see kiln_ui_init()'s call site. Always false today (no self_calibrating
- * touch_dev_t is ever built -- see the touch_dev field comment), so this is
- * behaviourally a no-op on every board that exists. */
-bool lvgl_port_touch_is_self_calibrating(void)
+/* The shared calibration-visibility predicate -- see lvgl_port.h. Delegates
+ * to touch_dev.h's pure touch_dev_cal_support() rather than re-deriving the
+ * answer here, so the host tests covering that function cover this path too
+ * (nothing in this file is in the host build: it pulls in LVGL and the whole
+ * LCD driver stack). */
+touch_cal_support_t lvgl_port_touch_cal_support(void)
 {
-    return s_port.touch_dev.self_calibrating;
+    return touch_dev_cal_support(&s_port.touch_dev);
 }
 
 void lvgl_port_set_input_enabled(bool enabled)

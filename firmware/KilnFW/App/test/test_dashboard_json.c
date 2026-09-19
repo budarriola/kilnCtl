@@ -894,6 +894,11 @@ static bool render_worst_case_status_json(char *json, size_t cap, size_t channel
     STATUS_APPEND(",\"ota_auth_disabled\":%s", "true");
     STATUS_APPEND(",\"boot_button_bypass_remaining_s\":%lu", (unsigned long)0xFFFFFFFFu);
     STATUS_APPEND(",\"touch_calibrated\":%s", "false");
+    /* Mirrors dashboard_status_http.c's touch_cal_supported. Worst case is
+     * the LONGEST value touch_cal_support_name() can return -- "unknown" and
+     * "no_touch" are shorter, so "self_calibrating" is the one that must be
+     * budgeted for here. */
+    STATUS_APPEND(",\"touch_cal_supported\":\"%s\"", "self_calibrating");
 
     if (extra_field) {
         /* A plausible future field of the same shape/width as the real

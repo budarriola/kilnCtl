@@ -173,7 +173,7 @@ guess):
 | `ui_page_profiles_family.c` | 148 | 120 | |
 | `ui_page_profiles_mine.c` | 172 | 96 | |
 | `ui_page_temperature.c` | 194 (3 zones today) | 74 | |
-| `ui_page_touch_cal.c` | self-fitting | n/a, safe by construction | targets placed from real `lv_display_get_*_resolution()`, never a fixed row stack |
+| `ui_page_touch_cal.c` | self-fitting | n/a, safe by construction | targets placed from real `lv_display_get_*_resolution()`, never a fixed row stack; on an unsupported controller it builds a centered-notice screen instead (no grid), also self-fitting |
 | `ui_page_touch_test.c` | self-fitting | n/a, safe by construction | `s_canvas_h` derived from real resolution minus fixed chrome |
 
 **Spacing migration: nothing was migrated.** Every non-zero

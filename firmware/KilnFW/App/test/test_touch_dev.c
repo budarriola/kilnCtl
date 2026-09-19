@@ -9,8 +9,25 @@
 //   3. touch_dev_use_calibrated_fit(): the self_calibrating/calibrated
 //      branch selection itself -- the one decision the whole Phase 5 design
 //      hinges on (touch_dev.h's header comment).
+#include <string.h> /* strcmp() -- touch_cal_support_name()'s wire spellings */
+
 #include "test_common.h"
 #include "../drivers/hw/touch_dev.h"
+
+/* A stand-in `read` function, only ever used as a non-NULL member: what
+ * touch_dev_cal_support() checks is PRESENCE (a controller came up and
+ * populated the struct), never the function's behaviour. A real function
+ * rather than a cast integer so the pointer is genuinely valid. */
+static esp_err_t fake_touch_read(void *ctx, bool *out_pressed, uint16_t *out_x, uint16_t *out_y,
+                                 uint16_t *out_z1)
+{
+    (void)ctx;
+    if (out_pressed) *out_pressed = false;
+    if (out_x) *out_x = 0;
+    if (out_y) *out_y = 0;
+    if (out_z1) *out_z1 = TOUCH_DEV_NO_PRESSURE_SENTINEL;
+    return 0;
+}
 
 void run_test_touch_dev(void)
 {
@@ -184,4 +201,73 @@ void run_test_touch_dev(void)
      * FT6336U.c is not in this host-test build at all (it talks directly to
      * ESP-IDF's i2c_master_bus_handle_t, unlike touch_dev.c's pure math),
      * so that producer side is genuinely untested off-target today. */
+
+    /* --- touch_dev_cal_support: the shared "is calibration offerable?"
+     * predicate every surface consults (the LCD config hub's nav cell,
+     * kiln_ui.c's boot gate, ui_page_touch_cal_build()'s refusal, and
+     * /api/status's touch_cal_supported field). Those surfaces themselves
+     * cannot be host-tested -- the UI files pull in LVGL and the HTTP
+     * handlers are target-build-only -- which is exactly why the decision
+     * was factored down into this pure function: this is the only place it
+     * CAN be covered, so all three states plus NULL are covered here. */
+    {
+        /* A present resistive controller: `read` non-NULL is what "a
+         * controller actually came up" means (lvgl_port.c's touch_dev
+         * comment), self_calibrating false means it needs the per-board
+         * affine fit. The one case that may offer calibration. */
+        touch_dev_t resistive = { .read = fake_touch_read, .self_calibrating = false };
+        touch_dev_t capacitive = { .read = fake_touch_read, .self_calibrating = true };
+        /* A zeroed struct -- precisely what main_boot_early.c leaves behind
+         * when FT6336U_start()/NS2009_start() fails. */
+        touch_dev_t absent = { 0 };
+
+        TEST_CHECK(touch_dev_cal_support(&resistive) == TOUCH_CAL_SUPPORT_SUPPORTED,
+                   "present resistive controller -> SUPPORTED");
+        TEST_CHECK(touch_cal_support_is_offerable(touch_dev_cal_support(&resistive)),
+                   "present resistive controller -> calibration IS offered (the supported case)");
+
+        TEST_CHECK(touch_dev_cal_support(&capacitive) == TOUCH_CAL_SUPPORT_SELF_CALIBRATING,
+                   "present self-calibrating controller -> SELF_CALIBRATING");
+        TEST_CHECK(!touch_cal_support_is_offerable(touch_dev_cal_support(&capacitive)),
+                   "self-calibrating controller -> calibration is NOT offered (the bench unit's "
+                   "own FT6336U panel -- the motivating case)");
+
+        /* THE ORDERING CHECK. A zeroed touch_dev_t has self_calibrating ==
+         * false, so a predicate that tested that flag before testing
+         * presence would answer SUPPORTED here -- sending a board whose
+         * touch bring-up failed into a 3x3 grid it cannot register a single
+         * tap on. Reversing those two tests in touch_dev.c reddens exactly
+         * this check and the is_offerable one below it. */
+        TEST_CHECK(touch_dev_cal_support(&absent) == TOUCH_CAL_SUPPORT_NO_TOUCH,
+                   "zeroed touch_dev_t (failed/absent bring-up) -> NO_TOUCH, NOT SUPPORTED -- "
+                   "presence is tested before self_calibrating");
+        TEST_CHECK(!touch_cal_support_is_offerable(touch_dev_cal_support(&absent)),
+                   "no touch controller -> calibration is NOT offered (a grid nothing can tap)");
+        /* ...and it must stay DISTINGUISHABLE from the self-calibrating
+         * case, not merely equally-unsupported: an undetected controller is
+         * an unknown, and must never be reported as a confident "no
+         * calibration needed". */
+        TEST_CHECK(touch_dev_cal_support(&absent) != touch_dev_cal_support(&capacitive),
+                   "NO_TOUCH and SELF_CALIBRATING are distinct states, so a bring-up failure "
+                   "cannot be shown as 'self-calibrates, none needed'");
+
+        TEST_CHECK(touch_dev_cal_support(NULL) == TOUCH_CAL_SUPPORT_NO_TOUCH,
+                   "NULL device -> NO_TOUCH, not a crash");
+    }
+
+    /* --- touch_cal_support_name: the wire spelling /api/status emits.
+     * Pinned because diagnostics_page.html compares against these exact
+     * strings -- a rename on either side silently reverts that page to the
+     * old "NOT CALIBRATED" message for every panel. */
+    {
+        TEST_CHECK(strcmp(touch_cal_support_name(TOUCH_CAL_SUPPORT_SUPPORTED), "supported") == 0,
+                   "wire name: SUPPORTED -> \"supported\"");
+        TEST_CHECK(strcmp(touch_cal_support_name(TOUCH_CAL_SUPPORT_SELF_CALIBRATING),
+                          "self_calibrating") == 0,
+                   "wire name: SELF_CALIBRATING -> \"self_calibrating\"");
+        TEST_CHECK(strcmp(touch_cal_support_name(TOUCH_CAL_SUPPORT_NO_TOUCH), "no_touch") == 0,
+                   "wire name: NO_TOUCH -> \"no_touch\"");
+        TEST_CHECK(touch_cal_support_name((touch_cal_support_t)99) != NULL,
+                   "out-of-range value still returns a printable string, never NULL");
+    }
 }

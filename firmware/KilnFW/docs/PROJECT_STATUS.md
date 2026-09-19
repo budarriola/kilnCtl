@@ -81,8 +81,8 @@ an RP2040 safety processor (`firmware/SaftyFW`).
     `lvgl_port.c`/`touch_dev.c`, gated by `!self_calibrating`. This bench's
     panel is the FT6336U capacitive touch controller, which is
     `self_calibrating = true` (see the "touch self-calibrating -- touch_cal_store's
-    per-board fit does not apply" boot log line, `lvgl_port.c` around
-    `lvgl_port_touch_is_self_calibrating()`), so `TOUCH_CAL_SWAP_XY` is never
+    per-board fit does not apply" boot log line at the end of
+    `lvgl_port_start()`, `lvgl_port.c`), so `TOUCH_CAL_SWAP_XY` is never
     read at all on this hardware — it is inert, not a real per-board
     calibration value. The FT6336U's own axis orientation is controlled by
     the separate, panel-conditional `KILNCTL_TOUCH_CAP_SWAP_XY` /
@@ -90,6 +90,16 @@ an RP2040 safety processor (`firmware/SaftyFW`).
     defaults correctly for `KILNCTL_DISPLAY_PANEL_ST7796`. No Kconfig change
     needed for `CAL_SWAP_XY`; the local `y` is stale/harmless, most likely a
     leftover from before this board moved to the capacitive panel.
+
+    Consequence for the UI (2026-09-18): because this panel self-calibrates,
+    **touch calibration is not offered on this unit at all** — the LCD's
+    Configuration hub shows no "Touch Calibration" cell, the forced
+    first-boot calibration flow never triggers, and the web Diagnostics page
+    reports touch calibration as "not required (self-calibrating
+    controller)" rather than as uncalibrated. All of those read one shared
+    predicate, `touch_dev_cal_support()` (`touch_dev.h`), which also
+    distinguishes a FAILED touch bring-up ("no touch controller detected")
+    from this deliberate not-needed case. See `DISPLAY_ST7796_PLAN.md` §7.
 - **MAX31856 thermocouple ICs: fitted.** Three channels populated via the J6
   daughterboard; channels 0/1/2 read plausible room temperature with tracking
   cold junctions and no faults; `CR1` reads back the configured value where it

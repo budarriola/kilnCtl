@@ -5,6 +5,7 @@
 #include "esp_log.h"
 
 #include "kiln_ui.h"
+#include "lvgl_port.h" /* lvgl_port_touch_cal_support() -- gates the Touch Calibration cell */
 #include "ui_theme.h"
 #include "ui_topbar.h"
 #include "unit_pref.h"
@@ -55,7 +56,10 @@ static const char *TAG __attribute__((unused)) = "ui_page_config";
 // (UI_THEME_PAGE_CONTENT_BUDGET_PX, ui_theme.h) with the same margin the old
 // per-page arithmetic always had -- six cells fill the grid exactly, so
 // there is no seventh slot to grow into without either a fourth (shorter,
-// budget-violating) row or a return to paging.
+// budget-violating) row or a return to paging. (The Touch Calibration cell
+// is conditional -- see its build site -- so the hub renders five or six
+// cells; both occupy three rows of a ROW_WRAP grid, 2+2+2 and 2+2+1, so the
+// fixed grid height is right either way and neither can scroll.)
 static void temperature_nav_cb(lv_event_t *e)
 {
     (void)e;
@@ -237,7 +241,19 @@ lv_obj_t *ui_page_config_build(void)
     build_nav_item(grid, "Profiles", profiles_nav_cb);
     build_nav_item(grid, "Temperature", temperature_nav_cb);
     build_nav_item(grid, "Network / Wi-Fi", network_nav_cb);
-    build_nav_item(grid, "Touch Calibration", touch_cal_nav_cb);
+    /* Offered only when the touch controller actually wired in supports a
+     * user-run calibration -- the shared predicate (touch_dev.h's
+     * touch_dev_cal_support(), via lvgl_port), the same one kiln_ui.c's boot
+     * gate, ui_page_touch_cal_build() and /api/status's touch_cal_supported
+     * field consult. Hidden outright rather than shown-and-disabled: a
+     * greyed cell still claims the device has the capability, and the bench
+     * panel (FT6336U, capacitive) genuinely does not. The page is a
+     * ROW_WRAP grid, so dropping this cell leaves five, which still occupies
+     * three rows (2+2+1) -- UI_CONFIG_HUB_GRID_HEIGHT_PX is unchanged and
+     * the page still fits the 480x320 budget without scrolling. */
+    if (touch_cal_support_is_offerable(lvgl_port_touch_cal_support())) {
+        build_nav_item(grid, "Touch Calibration", touch_cal_nav_cb);
+    }
     build_nav_item(grid, "Diagnostics", diagnostics_nav_cb);
     build_unit_toggle_item(grid);
 

@@ -84,6 +84,12 @@ web_auth_table_t *http_session_table(void);
 #include "nvs_report.h"
 #include "unit_pref.h"
 #include "safety_cfg_store.h"
+/* The real touch_dev.h (pure stdint/stdbool math, host-compilable, and this
+ * executable links the real touch_dev.c) for touch_cal_support_t. Included
+ * here at file scope because the fake lvgl_port_touch_cal_support() below is
+ * defined BEFORE the #include of dashboard_status_http.c that would
+ * otherwise pull the type in via the exe9 lvgl_port.h shim. */
+#include "touch_dev.h"
 
 // ---------------------------------------------------------------------------
 // dashboard_get_status() fake -- the ONE seam these tests drive directly.
@@ -106,6 +112,13 @@ void dashboard_get_status(dashboard_status_t *out)
 uint32_t boot_button_bypass_remaining_ms(void) { return 0; }
 bool boot_button_ota_bypass_active(void) { return false; }
 bool lvgl_port_touch_is_calibrated(void) { return false; }
+/* Test-settable, because the whole point of touch_cal_supported is that its
+ * three values render differently on the web Diagnostics page -- a fixed
+ * fake would only ever exercise one of them. The VALUE is faked here (this
+ * executable cannot run lvgl_port.c); the mapping from value to wire string
+ * is the real touch_cal_support_name(), linked in for real. */
+static touch_cal_support_t s_fake_touch_cal_support = TOUCH_CAL_SUPPORT_SUPPORTED;
+touch_cal_support_t lvgl_port_touch_cal_support(void) { return s_fake_touch_cal_support; }
 const nvs_report_section_t *nvs_report_get(size_t *out_count) { *out_count = 0; return NULL; }
 bool safety_ceiling_sync_is_standing_diverged(char *reason_out, size_t reason_cap)
 {
@@ -413,8 +426,76 @@ static void test_status_admin_session_gets_full_payload(void)
               "safety_config_crc stays unconditional (0xABCD == 43981)");
 }
 
+/* The WEB half of "do not offer calibration where it is unsupported". The
+ * web UI has no calibration ACTION to hide -- /api/status is read-only and
+ * no route can start a calibration (the only invokers are the LCD's own
+ * config nav cell and kiln_ui.c's boot gate) -- so what it must not do is
+ * TELL the operator to run one on a panel that does not support it, which
+ * is exactly what diagnostics_page.html did while touch_calibrated:false
+ * was the only signal it had.
+ *
+ * ROUTE_TIER_OPEN: this field is unauthenticated on purpose, like the
+ * touch_calibrated flag beside it -- it is a hardware capability, carrying
+ * no build identity or credential material (2026-09-17 disclosure audit). */
+static void test_status_touch_cal_supported_reports_each_state(void)
+{
+    TEST_SECTION("dashboard_status_get_handler -- touch_cal_supported reports the panel's real "
+                 "calibration capability, so the web UI cannot demand a calibration run the "
+                 "device does not offer");
+    web_auth_policy_t policy = { .web_enabled = false, .lcd_enabled = false,
+                                  .web_timeout_s = -1, .lcd_timeout_s = -1 };
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init default nvs partition");
+    TEST_CHECK(web_auth_store_set_policy(&policy) == HAL_OK, "setup: policy persisted");
+
+    httpd_req_t req;
+
+    /* Resistive panel: calibration IS supported, and touch_calibrated stays
+     * the actionable signal (the fake above returns false). */
+    reset_fake_status_with_known_build_identity();
+    stub_headers_reset();
+    s_fake_touch_cal_support = TOUCH_CAL_SUPPORT_SUPPORTED;
+    memset(&req, 0, sizeof(req));
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (supported)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"touch_cal_supported\":\"supported\"") != NULL,
+              "supported panel -- touch_cal_supported:\"supported\"");
+    TEST_CHECK(strstr(s_last_resp_body, "\"touch_calibrated\":false") != NULL,
+              "supported panel -- touch_calibrated still reported independently (a supported "
+              "panel that has never been calibrated is the normal first-boot state)");
+
+    /* The bench unit's own FT6336U: no calibration is offered anywhere, and
+     * the web page must say "not required", not "NOT CALIBRATED". */
+    reset_fake_status_with_known_build_identity();
+    stub_headers_reset();
+    s_fake_touch_cal_support = TOUCH_CAL_SUPPORT_SELF_CALIBRATING;
+    memset(&req, 0, sizeof(req));
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK,
+              "handler returns ESP_OK (self-calibrating)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"touch_cal_supported\":\"self_calibrating\"") != NULL,
+              "self-calibrating panel -- touch_cal_supported:\"self_calibrating\" (the motivating "
+              "case: this bench unit's capacitive panel)");
+
+    /* Bring-up failed / no touch hardware. Must be DISTINGUISHABLE on the
+     * wire from the self-calibrating case above -- an undetected controller
+     * is an unknown and must never be published as "none needed". */
+    reset_fake_status_with_known_build_identity();
+    stub_headers_reset();
+    s_fake_touch_cal_support = TOUCH_CAL_SUPPORT_NO_TOUCH;
+    memset(&req, 0, sizeof(req));
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (no touch)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"touch_cal_supported\":\"no_touch\"") != NULL,
+              "no touch controller -- touch_cal_supported:\"no_touch\", NOT \"self_calibrating\"");
+    TEST_CHECK(strstr(s_last_resp_body, "\"self_calibrating\"") == NULL,
+              "no touch controller -- the self-calibrating spelling appears nowhere in the "
+              "payload, so a bring-up failure cannot be read as 'no calibration needed'");
+
+    /* Leave the module-level fake where every other test in this file found
+     * it -- these tests run in sequence in one process. */
+    s_fake_touch_cal_support = TOUCH_CAL_SUPPORT_SUPPORTED;
+}
+
 static void run_test_dashboard_status_http(void)
 {
+    test_status_touch_cal_supported_reports_each_state();
     test_status_web_auth_off_shows_build_identity();
     test_status_unauthenticated_redacts_build_identity();
     test_status_user_session_redacts_build_identity();

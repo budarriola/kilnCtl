@@ -800,6 +800,12 @@ try {
             "/Fo:`"$dashStatusObjDir\\`" /Fe:`"$exe9`" " +
             "`"$(Join-Path $testDir 'test_dashboard_status_http.c')`" " +
             "`"$(Join-Path $driversDir 'http/dashboard_json.c')`" " +
+            # touch_dev.c linked for REAL (not stubbed): /api/status's
+            # touch_cal_supported value is produced by the production
+            # touch_cal_support_name(), so the exact strings on the wire --
+            # which diagnostics_page.html compares against literally -- are
+            # asserted against the real function rather than a copy of it.
+            "`"$(Join-Path $driversDir 'hw/touch_dev.c')`" " +
             "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +

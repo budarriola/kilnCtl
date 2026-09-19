@@ -408,7 +408,11 @@ survives a reboot; it is shown here and in the dashboard status so it is never s
        false means this board is still running the known-inaccurate Kconfig
        swap/invert bootstrap guess: small controls (the topbar back/home
        icons in particular) may not register touches until a calibration
-       run completes. -->
+       run completes -- but ONLY on a controller that supports calibration
+       at all. This row is rendered against touch_cal_supported as well (see
+       the script below): a self-calibrating panel and a board with no touch
+       controller each say so in their own words instead of demanding a
+       calibration run that is not on offer. -->
   <div class="row"><span class="label">Touch calibration</span><span class="value" id="touchCal">--</span></div>
 </div>
 <div class="card" id="nvsCard"><div class="row"><span class="label">NVS sections</span><span class="value">loading&hellip;</span></div></div>
@@ -586,8 +590,30 @@ here:</p>
     // Same ok/warn color convention as the NVS-sections block below --
     // false is the actionable state an operator with dead LCD buttons needs
     // to see at a glance, not just read past.
-    set('touchCal', st.touch_calibrated ? 'calibrated' : 'NOT CALIBRATED -- small controls may not respond', true);
-    document.getElementById('touchCal').style.color = st.touch_calibrated ? 'var(--ok)' : 'var(--warn)';
+    // touch_cal_supported (firmware's shared predicate) decides what false
+    // MEANS here. Before it existed this row read "NOT CALIBRATED -- small
+    // controls may not respond" for a capacitive panel that self-calibrates
+    // and for a board with no touch controller at all, telling the operator
+    // to run a calibration the device does not offer on either. Each of the
+    // three states now says its own thing, and only the genuinely
+    // actionable one is painted as a warning.
+    // Older firmware that predates the field sends no touch_cal_supported;
+    // treating that as 'supported' keeps the original behaviour for it
+    // rather than silently reporting an unsupported panel.
+    var tcs = st.touch_cal_supported || 'supported';
+    if (tcs === 'self_calibrating') {
+      set('touchCal', 'not required (self-calibrating controller)', true);
+      document.getElementById('touchCal').style.color = 'var(--ok)';
+    } else if (tcs === 'no_touch') {
+      // A detection failure, deliberately NOT reported as "none needed":
+      // the controller that should be there may well be one calibration
+      // applies to -- it did not answer at startup.
+      set('touchCal', 'no touch controller detected', true);
+      document.getElementById('touchCal').style.color = 'var(--warn)';
+    } else {
+      set('touchCal', st.touch_calibrated ? 'calibrated' : 'NOT CALIBRATED -- small controls may not respond', true);
+      document.getElementById('touchCal').style.color = st.touch_calibrated ? 'var(--ok)' : 'var(--warn)';
+    }
 
     // Same rendering as safety_page.html's buildCard -- kept as an inline
     // row()/hex16() pair rather than a shared helper module because these

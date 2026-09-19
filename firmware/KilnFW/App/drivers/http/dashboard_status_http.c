@@ -984,6 +984,25 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
      * (topbar back/home icons) may not register touches until a
      * calibration run completes. */
     APPEND(",\"touch_calibrated\":%s", lvgl_port_touch_is_calibrated() ? "true" : "false");
+    /* ADDITIVE field (older clients simply never heard of this key). Whether
+     * a user-run calibration is SUPPORTED at all on the controller wired in
+     * -- touch_dev.h's shared predicate, the same answer the LCD's config
+     * hub, boot gate and calibration page act on, so the web UI cannot
+     * disagree with the device about what it can do.
+     *
+     * Needed because touch_calibrated above is false for THREE different
+     * reasons, only one of which is actionable: a supported panel that has
+     * never been calibrated (act on it), a self-calibrating panel that never
+     * will be (nothing to do), and a board with no touch controller at all
+     * (a detection failure worth surfacing on its own terms). Rendering all
+     * three as "NOT CALIBRATED -- small controls may not respond", which is
+     * what diagnostics_page.html did before this field existed, told the
+     * operator of a capacitive bench unit to go run a calibration this
+     * firmware deliberately does not offer. A string ("supported",
+     * "self_calibrating", "no_touch" -- touch_cal_support_name()), not a
+     * bool, so the two unsupported cases stay distinguishable on the wire. */
+    APPEND(",\"touch_cal_supported\":\"%s\"",
+           touch_cal_support_name(lvgl_port_touch_cal_support()));
 
     APPEND("}");
 

@@ -180,9 +180,29 @@
      apply heat", not "something already went wrong". ---- */
   .heatwarn { margin-bottom: 0.8em; }
 
+  /* ---- Phone layout. FIXED 2026-09-18: this block used to say
+     `.steprow { flex-direction: column; }`, which silently changed what the
+     base rule's `.steptitle { flex: 1 1 260px; }` MEANS. flex-basis is the
+     MAIN-axis size, so in a row that 260px is a comfortable minimum title
+     column (correct, and still what desktop gets); the moment the direction
+     flips to column the same 260px is re-read as a HEIGHT, and flex-grow: 1
+     then stretched it further. Measured at a real 390x844 viewport before
+     the fix: every one of the 14 step rows was 383px tall, its .steptitle
+     box 298px tall, so the DONE pill and the Open button rendered roughly
+     300px BELOW the title they belong to -- reading as though they belonged
+     to the next step -- and only ~1.5 steps fitted on a phone screen
+     (document scrollHeight 6355px).
+     The row stays HORIZONTAL and wraps instead (the base rule already has
+     flex-wrap: wrap, and .stepdetail's flex-basis: 100% already relies on
+     that): number, title, pill and Open flow on one line and wrap onto the
+     next only when they genuinely do not fit, so the status and the action
+     stay visually attached to their own step, and each card is sized by its
+     own content. Nothing here introduces a colour, a dependency or an
+     external fetch. ---- */
   @media (max-width: 420px) {
-    .steprow { flex-direction: column; align-items: flex-start; }
-    .steprow .stepgo { align-self: flex-start; }
+    /* auto, not 260px: on this axis the basis must come from the content. */
+    .steprow .steptitle { flex: 1 1 auto; }
+    .steprow { align-items: center; row-gap: 0.25em; }
     .wfield input[type=text], .wfield input[type=number], .wfield select { max-width: 100%; }
   }
 </style>

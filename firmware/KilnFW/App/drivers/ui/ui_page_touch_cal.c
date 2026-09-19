@@ -266,29 +266,43 @@ static void on_screen_loaded(lv_event_t *e)
     }
 }
 
-/* DISPLAY_ST7796_PLAN.md section 7 (Phase 5): a self-calibrating controller
- * (touch_dev.h; FT6336U.h) never populates touch_cal_store -- it bypasses
- * that fit entirely, by design -- so the 3x3 target grid below can never be
- * completed on one: every tap would append to a calibration that is never
- * read back by anything (touch_read_cb() never even checks
- * s_touch_cal.calibrated for a self_calibrating device -- see lvgl_port.c).
- * kiln_ui.c's boot path already skips straight past this page for that
- * case; this covers the OTHER way in, Config's manual "Touch Calibration"
- * nav button, with a plain explanatory screen instead of a grid that would
- * silently do nothing. Always false on every board that exists today (see
- * lvgl_port_touch_is_self_calibrating()'s own comment) -- this branch is
- * unreached dead code until a self-calibrating touch_dev_t is ever wired
- * in, same status as the FT6336U driver itself. */
-static lv_obj_t *build_self_calibrating_notice(void)
+/* THE REFUSAL PATH. Every surface that OFFERS calibration hides the option
+ * when the wired-in controller does not support it, but hiding a button in
+ * front of a live page is the same lie one layer down -- this page is
+ * registered by name in kiln_ui.c's page table, so any present or future
+ * kiln_ui_show("touch_cal") reaches it regardless of which buttons exist.
+ * So the page itself refuses, and says which of the two unsupported cases
+ * it is rather than presenting one message for both:
+ *
+ *  - SELF_CALIBRATING: a self-calibrating controller (touch_dev.h;
+ *    FT6336U.h -- the bench unit's actual panel) never populates
+ *    touch_cal_store; it bypasses that fit entirely, by design. The 3x3 grid
+ *    below could never be completed on one: every tap would append to a
+ *    calibration nothing ever reads back (touch_read_cb() does not even
+ *    check s_touch_cal.calibrated for a self_calibrating device -- see
+ *    lvgl_port.c).
+ *  - NO_TOUCH: no controller came up at all. Presenting a grid that cannot
+ *    register a single press would leave the operator stuck on a page with
+ *    no working way off it. This case is stated as a DETECTION FAILURE, not
+ *    as "none needed" -- the part that would be there may well be one
+ *    calibration is meaningful for; nothing answered this boot. An unknown
+ *    must not read as a confident "not supported". */
+static lv_obj_t *build_unsupported_notice(touch_cal_support_t support)
 {
+    const char *body =
+        (support == TOUCH_CAL_SUPPORT_NO_TOUCH)
+            ? "No touch controller was detected at startup.\n"
+              "Touch calibration is unavailable until one responds."
+            : "This touch controller self-calibrates.\n"
+              "No calibration step is needed or available.";
+
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr, UI_THEME_COLOR_BG, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *label = lv_label_create(scr);
-    lv_label_set_text(label, "This touch controller self-calibrates.\n"
-                              "No calibration step is needed or available.");
+    lv_label_set_text(label, body);
     lv_obj_set_style_text_color(label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
     lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(label, lv_pct(80));
@@ -311,8 +325,13 @@ static lv_obj_t *build_self_calibrating_notice(void)
 
 lv_obj_t *ui_page_touch_cal_build(void)
 {
-    if (lvgl_port_touch_is_self_calibrating()) {
-        return build_self_calibrating_notice();
+    /* Refuse rather than pretend -- see build_unsupported_notice(). The
+     * shared predicate, not a locally re-derived condition: this page, the
+     * config hub's nav cell, kiln_ui.c's boot gate and /api/status all read
+     * the same touch_dev_cal_support() answer. */
+    const touch_cal_support_t support = lvgl_port_touch_cal_support();
+    if (!touch_cal_support_is_offerable(support)) {
+        return build_unsupported_notice(support);
     }
 
     lv_obj_t *scr = lv_obj_create(NULL);

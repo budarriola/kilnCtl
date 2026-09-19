@@ -817,6 +817,31 @@ Things that break and must be handled, not discovered later:
   "known-inaccurate bootstrap mapping". It would become permanently wrong.
 - **`ui_page_touch_cal.c`** should say "this controller self-calibrates" rather
   than present a grid that does nothing.
+
+**Superseded by the shared support predicate (2026-09-18).** The three gates
+above were written as three independent conditions and drifted in the
+predictable way: each asked some form of `!self_calibrating`, which also reads
+false for a **zeroed** `touch_dev_t` — i.e. a board whose touch bring-up
+FAILED. Those boards, the ones with no working touch controller at all, were
+sent into the same uncompletable grid with no way to tap out of it. All
+calibration surfaces now consult one predicate,
+`touch_dev_cal_support()` (`touch_dev.h`/`.c`, pure and host-tested in
+`test_touch_dev.c`), reaching the UI through `lvgl_port_touch_cal_support()`:
+
+| `touch_cal_support_t` | Meaning | Calibration offered? |
+| --- | --- | --- |
+| `SUPPORTED` | resistive-style controller present | yes |
+| `SELF_CALIBRATING` | FT6336U present; fit never applies | no — "self-calibrates, none needed" |
+| `NO_TOUCH` | zeroed `touch_dev_t`: bring-up failed or no hardware | no — reported as a **detection failure**, never as "none needed" |
+
+Consumers: `kiln_ui.c`'s boot gate, `ui_page_config.c`'s nav cell (hidden
+outright, not greyed — five cells still fill three `ROW_WRAP` rows, so the
+fixed grid height and the no-scroll budget are unchanged),
+`ui_page_touch_cal_build()`'s refusal (the page refuses on its own, since it
+stays reachable by name through `kiln_ui_show("touch_cal")` however the
+buttons are arranged), and `/api/status`'s `touch_cal_supported` string
+rendered by `diagnostics_page.html`. The pure predicate is the testable seam:
+the UI files pull in LVGL and the HTTP handlers are target-build-only.
 - **`lvgl_port_get_last_raw_touch()`** (`lvgl_port.h:62`) returns raw ADC plus Z1
   pressure, consumed by `ui_page_touch_test.c` and exposed over
   `TOUCH_CMD_GET_STATE` (`uart_bridge.c:1482`). **FT6336U has no pressure.**
@@ -1394,9 +1419,15 @@ Each phase ends somewhere the firmware still boots and drives the existing panel
       HARDWARE**; identity is verified (`FOCALTECH_ID`/`CIPHER_MID`/
       `CIPHER_HIGH`) rather than accepting any device answering at 0x38.
 - [x] `kiln_ui.c:273` forced-calibration boot path gated for self-calibrating
-      devices.
+      devices — re-gated 2026-09-18 on the shared `touch_dev_cal_support()`
+      predicate, which also covers the failed-bring-up case the original
+      `!self_calibrating` test mistook for a resistive panel (§7).
 - [x] `ui_page_touch_cal` and the raw-touch/pressure reporting handled (§7) —
-      shows a notice instead of the 3×3 grid on self-calibrating devices.
+      shows a notice instead of the 3×3 grid on self-calibrating devices, and
+      a distinct "no touch controller detected" notice when bring-up failed.
+- [x] Calibration is no longer OFFERED where it is unsupported (2026-09-18):
+      the config hub's nav cell is hidden and `/api/status` carries
+      `touch_cal_supported` for the web UI, both off the same predicate (§7).
 
 ### Phase 6 — SPI async/DMA — PARTIALLY LANDED, REST HARDWARE-GATED
 - [x] 9.2 `max_transfer_sz` raised to 32768 (`KILNCTL_SPI_MAX_TRANSFER_SZ`,
