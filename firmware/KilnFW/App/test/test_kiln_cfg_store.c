@@ -101,6 +101,19 @@ static size_t s_stub_blob_size = 16;
 static bool s_stub_export_ok = true;
 static uint8_t s_stub_export_content[ZONES_CONFIG_BLOB_MAX_SIZE];
 
+// Cross-file test hook (same convention as test_stub_zones_set_thermo_count(),
+// defined in test_profile_feasibility.c and declared extern by every TU that
+// needs it): flips one byte of the "live" export content this stub's
+// zones_config_export_blob() returns, so a caller in another translation
+// unit (test_backup_import.c) can make two kiln_cfg_store_save_current()
+// calls produce genuinely DIFFERENT identities (schema/hash), without this
+// file's own s_stub_export_content being reachable across TUs directly (it
+// has internal linkage on purpose -- see this section's header comment).
+void test_stub_kiln_cfg_export_content_toggle_byte0(void)
+{
+    s_stub_export_content[0] ^= 0xFF;
+}
+
 static bool s_stub_import_result = true;
 static char s_stub_import_reason[96] = "";
 static int s_stub_import_call_count = 0;

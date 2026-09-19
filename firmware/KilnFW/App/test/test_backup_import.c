@@ -64,6 +64,10 @@
 void test_stub_zones_set_thermo_count(uint8_t n);
 void test_stub_zones_set_max_ramp(uint8_t zone_index, bool answers, float c_per_hr);
 
+// Defined in test_kiln_cfg_store.c -- see its own doc comment; flips one
+// byte of the shared zones_config_export_blob() stub content.
+void test_stub_kiln_cfg_export_content_toggle_byte0(void);
+
 // backup_http.c split into four files 2026-09-04 (ROADMAP.md M15's
 // 1500-line item) -- backup_json.c/backup_export.c/backup_import.c/
 // backup_http.c, see backup_http_internal.h for the map. All four are still
@@ -2592,6 +2596,149 @@ static void test_kiln_configs_malformed_entry_refuses_whole_restore(void)
               "candidate is committed, so the whole restore is refused with nothing written anywhere");
 }
 
+// Task 7 (bkfinish_assessment.md): active-slot restoration was dropped
+// entirely -- a restore's CREATE/RENAME actions never touch active_id (see
+// backup_import.c's comment above the file_action_t loop). This is the host
+// test that comment promised: a freshly restored slot must not get
+// overwritten the moment an unrelated autosave fires, because autosave
+// dispatches onto whatever active_id ALREADY was, never onto the slot a
+// restore just created.
+static void test_kiln_configs_restore_create_leaves_autosave_targeting_the_prior_active_slot(void)
+{
+    TEST_SECTION("backup_import_apply -- a restored (CREATE) kiln_configs[] slot is not the autosave target: "
+                 "active_id survives the restore untouched, and a later autosave_from_live() re-captures the "
+                 "PRIOR active slot, not the freshly restored one");
+    reset_stub_state();
+
+    // Defensive: this combined test binary shares one fake_kv.c partition
+    // table across every test_*.c linked into it (see test_kiln_cfg_store.c),
+    // and at least one earlier-running test elsewhere in that shared table
+    // calls fake_kv_reset_all() without a same-test hal_kv_init_partition()
+    // follow-up, which otherwise leaves kiln_nvs deregistered by the time
+    // this test's restore reaches kiln_cfg_store_import_package_json_as()'s
+    // commit (observed as HAL_NOT_READY there). hal_kv_init_partition() is
+    // documented idempotent (a no-op if already up), so this is safe
+    // regardless of what ran before.
+    TEST_CHECK(hal_kv_init_partition("kiln_nvs") == HAL_OK, "setup: kiln_nvs partition is up");
+
+    // Slot A: today's live state (thermo_count 3, from reset_stub_state()),
+    // saved and therefore active.
+    int32_t id_a = -1;
+    char reason[160] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Active Original", -1, &id_a, reason, sizeof(reason)),
+              "setup: slot A saved from the current live state");
+    TEST_CHECK(kiln_cfg_store_get_active_id() == id_a, "setup: slot A is active");
+
+    // Change the live state so a package built from it has a genuinely
+    // DIFFERENT identity (schema/hash) than slot A's -- otherwise the
+    // restore below would match slot A by identity (Case 1/2) instead of
+    // creating a new slot, and this test would not be exercising CREATE at
+    // all. Neither test_stub_zones_set_thermo_count() nor
+    // zones_config_set_pid() reach the byte content
+    // kiln_cfg_store_save_current() actually exports in this combined test
+    // binary (test_kiln_cfg_store.c's zones_config_export_blob() stub
+    // returns a fixed, shared s_stub_export_content buffer, unrelated to
+    // either of those setters) -- toggle that buffer's own content directly
+    // via its exported test hook instead.
+    test_stub_kiln_cfg_export_content_toggle_byte0();
+
+    // Capture that new state as a temporary slot B purely to get a real,
+    // validly-hashed package JSON for it (kiln_cfg_store_export_package_json
+    // exports an already-saved slot's stored blob, not raw live state), then
+    // delete B so the board's only real slot is A again -- the restore body
+    // built from B's export must land as a CREATE, not match anything.
+    int32_t id_b = -1;
+    TEST_CHECK(kiln_cfg_store_save_current("Temp For Export", -1, &id_b, reason, sizeof(reason)),
+              "setup: slot B (the distinct-identity source) saved");
+    char *pkg_json = (char *)malloc(KILN_CFG_EXPORT_JSON_MAX_LEN);
+    TEST_CHECK(pkg_json != NULL, "test scratch alloc");
+    size_t pkg_len = 0;
+    TEST_CHECK(kiln_cfg_store_export_package_json(id_b, pkg_json, KILN_CFG_EXPORT_JSON_MAX_LEN, &pkg_len, reason,
+                                                  sizeof(reason)),
+              "setup: slot B exports a real, validly-hashed package");
+    // save_current() made B active; kiln_cfg_store_delete() refuses to
+    // delete the active slot outright (finding H5), so point active_id back
+    // at A first -- pure bookkeeping, same call this test later proves the
+    // real restore path must NOT make (see the comment on the file_action_t
+    // loop in backup_import.c).
+    TEST_CHECK(kiln_cfg_store_set_active_id_raw(id_a, reason, sizeof(reason)), "setup: active_id restored to A");
+    TEST_CHECK(kiln_cfg_store_delete(id_b, true, reason, sizeof(reason)), "setup: slot B removed after export");
+
+    // Rename the package's own name field so the restored slot is
+    // unambiguously identifiable ("Temp For Export" -> "Restored Slot",
+    // same length so no JSON length/offset bookkeeping is needed).
+    char *name_field = strstr(pkg_json, "\"name\":\"Temp For Export\"");
+    TEST_CHECK(name_field != NULL, "found the name field to rename before restoring");
+    if (name_field) {
+        memcpy(name_field, "\"name\":\"Restored Slot  \"", strlen("\"name\":\"Restored Slot  \""));
+    }
+
+    char *body = (char *)malloc(KILN_CFG_EXPORT_JSON_MAX_LEN + 256);
+    TEST_CHECK(body != NULL, "test scratch alloc");
+    snprintf(body, KILN_CFG_EXPORT_JSON_MAX_LEN + 256,
+             "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],\"zones\":[],"
+             "\"kiln_configs\":[{\"is_active\":true,\"package\":%s}]}",
+             pkg_json);
+
+    char err[160] = {0};
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+    TEST_CHECK(ok, "the restore (a CREATE, distinct identity from slot A) must succeed");
+
+    TEST_CHECK(kiln_cfg_store_get_active_id() == id_a,
+              "active_id is UNCHANGED by the restore -- the freshly created slot never becomes active "
+              "(task 7: active-slot restoration is dropped entirely)");
+
+    kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
+    uint8_t n = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    int32_t id_restored = -1;
+    for (uint8_t i = 0; i < n; i++) {
+        if (strcmp(rows[i].name, "Restored Slot") == 0) {
+            id_restored = rows[i].id;
+            break;
+        }
+    }
+    TEST_CHECK(id_restored != -1, "the restored slot exists under its restored name");
+
+    bool restored_pico_populated = false;
+    uint16_t restored_schema_before = 0;
+    uint32_t restored_hash_before = 0;
+    TEST_CHECK(kiln_cfg_store_get_package_identity(id_restored, &restored_pico_populated, &restored_schema_before,
+                                                   &restored_hash_before),
+              "read back the restored slot's identity right after the restore");
+
+    // The live state is still the byte-toggled export state set above
+    // (nothing since has changed it). An autosave now must recapture SLOT A (the
+    // prior active slot) -- never the freshly restored slot, which
+    // active_id was never pointed at.
+    TEST_CHECK(kiln_cfg_store_autosave_from_live(reason, sizeof(reason)), "autosave_from_live() succeeds");
+    TEST_CHECK(kiln_cfg_store_get_active_id() == id_a, "active_id is still slot A after the autosave");
+
+    uint16_t restored_schema_after = 0;
+    uint32_t restored_hash_after = 0;
+    TEST_CHECK(kiln_cfg_store_get_package_identity(id_restored, &restored_pico_populated, &restored_schema_after,
+                                                   &restored_hash_after),
+              "read back the restored slot's identity again after the autosave");
+    TEST_CHECK(restored_schema_after == restored_schema_before && restored_hash_after == restored_hash_before,
+              "the freshly restored slot's content is BIT-FOR-BIT UNCHANGED by the autosave -- it was not the "
+              "autosave's target");
+
+    // Sanity: prove the autosave was not simply a no-op -- slot A's own
+    // identity must now match the restored slot's (both were captured from
+    // the same byte-toggled live state, at different times), confirming
+    // autosave really did re-capture SOMETHING.
+    bool a_pico_populated = false;
+    uint16_t a_schema_after = 0;
+    uint32_t a_hash_after = 0;
+    TEST_CHECK(kiln_cfg_store_get_package_identity(id_a, &a_pico_populated, &a_schema_after, &a_hash_after),
+              "read back slot A's identity after the autosave");
+    TEST_CHECK(a_schema_after == restored_schema_before && a_hash_after == restored_hash_before,
+              "slot A's identity now matches the live state actually captured by the autosave, proving the "
+              "autosave really ran (not a silent no-op) against the RIGHT slot");
+
+    free(pkg_json);
+    free(body);
+}
+
 // 2026-09-15 (Opus adversarial re-review, F6): before this fix,
 // backup_export.c read zones_config_get_safety_tc_type() -- the ESP's own
 // cache, which can be stale relative to the Pico's actual configured
@@ -3248,6 +3395,7 @@ void run_test_backup_import(void)
     test_kiln_configs_absent_key_is_a_no_op();
     test_kiln_configs_present_empty_merge_is_a_no_op();
     test_kiln_configs_malformed_entry_refuses_whole_restore();
+    test_kiln_configs_restore_create_leaves_autosave_targeting_the_prior_active_slot();
     test_export_emits_live_pico_tc_type_not_stale_esp_cache();
     test_export_round_trips_through_import_to_identical_config();
     test_ct_normals_and_new_fields_round_trip_through_export_import();
