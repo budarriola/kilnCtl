@@ -22,11 +22,11 @@ allowed at any budget level).
   `rated_override` (0 = use the table). No datasheet for a specific
   contactor or mercury-wetted relay is in this tree — these are
   industry-typical defaults, not measured facts.
-- **Reset**: a per-relay cycle-count reset requiring confirmation — web
-  diagnostics page (`kcConfirm()`) and LCD diagnostics page (two-tap:
-  "Reset" becomes "Confirm?" for 5 s, no dialog widget exists on the LCD).
-  Reset writes through the flash worker and logs an INFO event with the
-  old count.
+- **Reset**: a per-relay cycle-count reset requiring confirmation, **web
+  diagnostics page only** (`kcConfirm()`). The LCD's own two-tap Reset
+  control was removed 2026-09-19 (UI_PLAN.md section 6.4); the Relay Life
+  page is read-only. Reset writes through the flash worker and logs an
+  INFO event with the old count.
 
 ## K4 counting
 

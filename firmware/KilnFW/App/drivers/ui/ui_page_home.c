@@ -597,26 +597,29 @@ lv_obj_t *ui_page_home_build(void)
      * needless distraction and redraw cost. Text stays left-aligned (the
      * label's default) so short strings look exactly as they did before.
      *
-     * ui_topbar_t.icons_w (see ui_topbar.h) is the single icon (the gear)
-     * this page reserves, replacing the old hand-rolled gear_hit_area_w
-     * literal. It is NOT the same number: the old hand-rolled proxy was
-     * 80px wide (chosen generously, sideways headroom with nothing else
-     * clickable in the bar); ui_topbar_create()'s icons_w for one icon is
+     * ui_topbar_t.icons_w (see ui_topbar.h) is the icon slots (gear +
+     * warning) this page reserves, replacing the old hand-rolled
+     * gear_hit_area_w literal. It is NOT the same number: the old
+     * hand-rolled proxy was 80px wide (chosen generously, sideways headroom
+     * with nothing else clickable in the bar); with this page's
+     * `.warning_icon = true` (a second, non-clickable slot next to the
+     * gear), ui_topbar_create()'s icons_w is
      * icon_count * UI_TOPBAR_ICON_W_PX + (icon_count-1) * UI_TOPBAR_ICON_GAP_PX
-     * = 1 * 36 + 0 = 36px (ui_topbar.h's UI_TOPBAR_ICON_W_PX/GAP_PX). Width
+     * = 2 * 36 + 4 = 76px (ui_topbar.h's UI_TOPBAR_ICON_W_PX/GAP_PX). Width
      * derivation: cap = bar_width - icons_w - gap.
      *
      * PRE-topbar measurement, superseded: on hardware 2026-08-20 (before
      * this module existed, same physical 463px bar) the 80px-wide proxy
      * gave a ~379px cap. That 80px/~379px pair no longer describes what
-     * this code computes -- with the topbar's 36px icons_w the same 463px
-     * bar now yields cap = 463 - 36 - 4 = ~423px. The bar-width figure
-     * (463px) and the underlying bug this cap fixes (align_to() sets a
-     * POSITION only and never constrains WIDTH, so an uncapped label box
-     * still renders text under the gear) are still real and still true;
-     * only the old proxy's specific width and resulting cap are stale.
-     * Not re-measured on hardware since the topbar move -- s_ui_home_topbar.icons_w
-     * is logged below so a future boot can confirm the ~423px figure. */
+     * this code computes -- with the topbar's 76px icons_w (gear + warning)
+     * the same 463px bar now yields cap = 463 - 76 - 4 = ~383px. The
+     * bar-width figure (463px) and the underlying bug this cap fixes
+     * (align_to() sets a POSITION only and never constrains WIDTH, so an
+     * uncapped label box still renders text under the gear) are still real
+     * and still true; only the old proxy's specific width and resulting cap
+     * are stale. Not re-measured on hardware since the topbar move --
+     * s_ui_home_topbar.icons_w is logged below so a future boot can confirm
+     * the ~383px figure. */
     lv_obj_update_layout(bar);
     int32_t bar_w = lv_obj_get_width(bar);
     int32_t status_label_max_w = bar_w - s_ui_home_topbar.icons_w - (UI_THEME_PADDING_PX / 2);

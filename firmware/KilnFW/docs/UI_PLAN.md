@@ -851,43 +851,7 @@ de-energized and again energized; the ON state uses the existing
 — no new colour. Require a measured channel difference, with a bezel reference
 sampled in the same run.
 
-### 6.4 The LCD loses the ability to reset relay life
-
-**File.** `ui_page_diagnostics.c` — **not** the Temperature page. The control
-lives on the Relay Life page: `relay_reset_btn_clicked_cb()` (around lines
-1433-1570) and `build_relay_life_row()`.
-
-**What to remove.** The 64x22 `UI_THEME_COLOR_ACCENT_5` button built in
-`build_relay_life_row()`; the `s_rl_reset_btn[]` / `s_rl_reset_label[]`
-statics; the two-tap arm/confirm state (`s_rl_confirm_deadline_us[]`,
-`UI_PAGE_DIAGNOSTICS_RELAY_RESET_CONFIRM_US`,
-`UI_PAGE_DIAGNOSTICS_CONFIRM_DEBOUNCE_US`,
-`UI_PAGE_DIAGNOSTICS_RELAY_RESET_WAIT_MS`); the callback itself; the
-deadline-expiry handling in the refresh tick; and the
-`UI_PAGE_DIAGNOSTICS_RELAY_ROW_BTN_W_PX` / `_H_PX` defines with their trailing
-`#undef`s. **Keep** `s_rl_value_label[]` and the whole read-only life display,
-including the `RELAY_CYCLES_SAFETY_INDEX` "Safety (K4)" row.
-`relay_cycles_reset_timeout()` stays in the driver — the web keeps the
-capability; only the LCD's path to it goes.
-
-**Layout.** The row is 23px and the removed button was 22px, so the removed
-control never set the row height:
-`UI_PAGE_DIAGNOSTICS_RELAY_LIFE_WORST_CASE_HEIGHT_PX` stays `5*23 + 4*8 = 147`
-against 268 and its assert text is unchanged — `check_ui_budget_asserts.ps1`
-needs no edit for this item either. The 8px row gap must **stay** 8 even
-though the touch-area reason for it goes away with the button; shrinking it is
-a separate change and is not in scope.
-
-**Tests owed.** A grep-based assertion that no LVGL translation unit
-references `relay_cycles_reset` or `relay_cycles_reset_timeout` — cheapest as
-a new stanza in an existing `check_*.ps1` rather than a new script. That is the
-only thing standing between this removal and a future re-add.
-
-**Numeric verification.** Capture the Relay Life page and sample where a Reset
-button used to be — the rightmost 64px of the first row, LCD `(392, 14)`,
-frame `(843, 38)`, `-W 40 -H 12`: the mean RGB must be the page background or
-card colour and must **not** be `ACCENT_5` `0xd6555f` (dominant red channel).
-This is the numeric form of "the button is gone".
+### 6.4 The LCD loses the ability to reset relay life — done 2026-09-19, commit dcfadd79
 
 ### 6.5 Right quarter of the dashboard: relays, zone temperatures, zone power
 
@@ -970,45 +934,7 @@ says. Then sample a relay pill at LCD `(360, 40)`, frame `(782, 88)`, with the
 relay commanded on and off and require a measured difference. Bezel reference
 in every run.
 
-### 6.6 Dashboard Settings button flush top-right
-
-**File.** `ui_topbar.c` (`ui_topbar_create()`) only.
-
-**Root cause, not a guess.** The floating `icons` container is sized for both
-icons — `icons_w = icon_count * UI_TOPBAR_ICON_W_PX(36) + (icon_count - 1) *
-UI_TOPBAR_ICON_GAP_PX(4)` = 76 for the home page, which passes
-`.warning_icon = true` — and is aligned `LV_ALIGN_TOP_RIGHT`. But the warning
-indicator is built **after** the gear and `build_indicator()` ends with
-`lv_obj_add_flag(box, LV_OBJ_FLAG_HIDDEN)`. A hidden flex child collapses to
-zero width, and the row's main axis is `LV_FLEX_ALIGN_START`, so the gear packs
-to the container's left edge and sits `36 + 4 = 40px` short of flush right.
-That is exactly the offset the owner is reporting.
-
-**Fix — both halves are required.** Build the warning indicator **before** the
-gear (so the gear is always the rightmost child), **and** change the icons
-row's main-axis alignment to `LV_FLEX_ALIGN_END` (so the gear reaches the
-container's right edge while the warning is hidden). Either alone is
-insufficient: reordering with `ALIGN_START` still leaves the gear 40px in;
-`ALIGN_END` with today's order puts the hidden warning's slot to the gear's
-right. `ui_topbar_set_warning()` is untouched — un-hiding still expands the
-warning into the 40px to the gear's left, which is where it belongs.
-
-**Layout.** `icons_w` is unchanged at 76, the status bar height is unchanged,
-and pages without the optional warning slot have content width exactly equal to
-`icons_w`, so `ALIGN_END` is a no-op for them. The Wi-Fi status label's
-`status_label_max_w = bar_w - icons_w - (UI_THEME_PADDING_PX / 2)` is
-unchanged. **No page's height arithmetic moves and no assert changes.**
-
-**Tests owed.** No host test can see LVGL alignment; this item is verified by
-capture only. Optionally add a grep check that `ui_topbar.c`'s icon row uses
-`LV_FLEX_ALIGN_END`, to stop a future edit reverting it silently.
-
-**Numeric verification.** The gear's right edge must be at LCD `x = 480 - 8 =
-472`, i.e. frame `x = 102 + 1.890*472 = 994`. Sample frame `(984, 26)` `-W 8
--H 8` (inside the gear glyph's box) and frame `(1000, 26)` (outside it, page
-background): before the fix the first reads background, after the fix it reads
-glyph. Sampling *both* is what distinguishes "the gear moved right" from "the
-whole bar shifted".
+### 6.6 Dashboard Settings button flush top-right — done 2026-09-19, commit dcfadd79
 
 ### 6.7 Parallelisation and file collisions
 
