@@ -105,7 +105,8 @@ static const char *TAG = "ui_page_profile_detail";
 
 static uint8_t s_profile_id;
 /* Back destination is NOT fixed like every other page in this pass -- this
- * page is reached from both ui_page_profiles_mine.c and
+ * page is reached from both "profiles" (ui_page_profile_picker.c's MANAGE
+ * mode, which replaced ui_page_profiles_mine.c, UI_PLAN.md Section 6.2) and
  * ui_page_profiles_builtin_list.c, and ui_page_profile_detail_set_id() is how
  * the caller says which one to return to. ui_topbar_cfg_t::back_page is a
  * plain `const char *` handed to nav_cb as event user_data and read again at
@@ -116,7 +117,7 @@ static uint8_t s_profile_id;
  * ui_topbar_create() is handed its address once, at build time, and
  * ui_page_profile_detail_set_id() rewrites its CONTENTS (never reallocates
  * it) on every navigation here. */
-static char s_back_target[32] = "profiles_mine";
+static char s_back_target[32] = "profiles";
 
 static lv_obj_t *s_info_card;
 static lv_obj_t *s_name_label;
@@ -426,7 +427,7 @@ static void refresh(void)
 void ui_page_profile_detail_set_id(uint8_t profile_id, const char *back_page)
 {
     s_profile_id = profile_id;
-    snprintf(s_back_target, sizeof(s_back_target), "%s", back_page ? back_page : "profiles_mine");
+    snprintf(s_back_target, sizeof(s_back_target), "%s", back_page ? back_page : "profiles");
     refresh();
 }
 

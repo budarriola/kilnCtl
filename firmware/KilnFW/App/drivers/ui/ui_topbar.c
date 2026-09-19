@@ -133,6 +133,7 @@ void ui_topbar_create(lv_obj_t *scr, const ui_topbar_cfg_t *cfg, ui_topbar_t *ou
     if (cfg->show_home)  icon_count++;
     if (cfg->prev_cb)    icon_count++;
     if (cfg->next_cb)    icon_count++;
+    if (cfg->add_cb)     icon_count++;
     if (cfg->gear_cb)    icon_count++;
     if (cfg->warning_icon) icon_count++;
 
@@ -192,6 +193,9 @@ void ui_topbar_create(lv_obj_t *scr, const ui_topbar_cfg_t *cfg, ui_topbar_t *ou
         if (cfg->warning_icon) {
             out->warning_btn = build_indicator(icons, LV_SYMBOL_WARNING);
         }
+        if (cfg->add_cb) {
+            out->add_btn = build_icon(icons, LV_SYMBOL_FILE, cfg->add_cb, NULL);
+        }
         if (cfg->gear_cb) {
             out->gear_btn = build_icon(icons, LV_SYMBOL_SETTINGS, cfg->gear_cb, NULL);
         }
@@ -210,12 +214,13 @@ void ui_topbar_create(lv_obj_t *scr, const ui_topbar_cfg_t *cfg, ui_topbar_t *ou
          * Registering the whole row as one touch group switches overlap
          * resolution to nearest-center instead of z-order, using the
          * arbiter ui_theme.c already provides for exactly this case. */
-        lv_obj_t *members[5];
+        lv_obj_t *members[6];
         size_t member_count = 0;
         if (out->back_btn) members[member_count++] = out->back_btn;
         if (out->home_btn) members[member_count++] = out->home_btn;
         if (out->prev_btn) members[member_count++] = out->prev_btn;
         if (out->next_btn) members[member_count++] = out->next_btn;
+        if (out->add_btn) members[member_count++] = out->add_btn;
         if (out->gear_btn) members[member_count++] = out->gear_btn;
         if (member_count >= 2) {
             ui_theme_register_touch_group(members, member_count);

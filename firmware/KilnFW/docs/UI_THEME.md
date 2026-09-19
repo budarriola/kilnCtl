@@ -167,11 +167,10 @@ guess):
 | `ui_page_profile_builder_segment.c` | 162 | 106 | |
 | `ui_page_profile_builder_zones.c` | 208 | 60 | |
 | `ui_page_profile_detail.c` | 258 | **10 -- TIGHT** | do not touch |
+| `ui_page_profile_picker.c` | 268 | 4 -- zero slack, see the file's own `_Static_assert` | replaced `ui_page_profiles_mine.c`/`ui_page_profiles_family.c`, both deleted |
 | `ui_page_profile_segments.c` | 204 | 64 | |
 | `ui_page_profiles.c` | 148 | 120 | |
 | `ui_page_profiles_builtin_list.c` | 172 | 96 | |
-| `ui_page_profiles_family.c` | 148 | 120 | |
-| `ui_page_profiles_mine.c` | 172 | 96 | |
 | `ui_page_temperature.c` | 194 (3 zones today) | 74 | |
 | `ui_page_touch_cal.c` | self-fitting | n/a, safe by construction | targets placed from real `lv_display_get_*_resolution()`, never a fixed row stack; on an unsupported controller it builds a centered-notice screen instead (no grid), also self-fitting |
 | `ui_page_touch_test.c` | self-fitting | n/a, safe by construction | `s_canvas_h` derived from real resolution minus fixed chrome |

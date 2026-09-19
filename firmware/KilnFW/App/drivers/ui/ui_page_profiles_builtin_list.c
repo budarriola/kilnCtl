@@ -212,7 +212,13 @@ lv_obj_t *ui_page_profiles_builtin_list_build(void)
 
     ui_topbar_create(scr, &(ui_topbar_cfg_t){
         .title = profiles_builtin_firing_type_label(s_type),
-        .back_page = "profiles_family",
+        /* "profiles_family" was deleted (UI_PLAN.md 6.2 -- its firing-type
+         * cells collapsed into "profiles"'s unified list). This page is
+         * itself unreachable from that new list (nothing currently
+         * navigates to it -- out of Section 6.2's file list), but the back
+         * target is corrected regardless so it does not point at a
+         * deregistered page if something reaches it in the future. */
+        .back_page = "profiles",
         .show_home = true,
         .prev_cb = prev_cb,
         .next_cb = next_cb,

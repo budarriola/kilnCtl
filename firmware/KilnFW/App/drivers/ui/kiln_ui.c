@@ -19,10 +19,9 @@
 #include "ui_page_profile_builder_zones.h"
 #include "ui_page_profile_detail.h"
 #include "ui_page_profile_segments.h"
+#include "ui_page_profile_picker.h"
 #include "ui_page_profiles.h"
 #include "ui_page_profiles_builtin_list.h"
-#include "ui_page_profiles_family.h"
-#include "ui_page_profiles_mine.h"
 #include "ui_page_temperature.h"
 #include "ui_page_touch_cal.h"
 #include "ui_page_touch_test.h"
@@ -220,19 +219,21 @@ esp_err_t kiln_ui_init(void)
     err = kiln_ui_register_page("touch_cal", ui_page_touch_cal_build);
     if (err != ESP_OK) return err;
 
-    /* LCD profile browse/start (this pass): "Profiles" hub off
-     * ui_page_config.c's nav hub, then My Profiles / Built-ins (family
-     * picker -> per-family list) / Restore hidden, then a per-profile detail
-     * screen (title, segment count, feasibility colour, START) and a
-     * paginated segment list. Closes the gap the user reported: the home
-     * page's Start button previously had no way to pick a DIFFERENT profile
-     * than whatever the fallback chain resolved to. See
-     * ui_page_profiles.c's header comment for the full tree. */
+    /* LCD profile browse/start: "Profiles" off ui_page_config.c's nav hub is
+     * now the unified, favorites-first, paginated list
+     * (ui_page_profile_picker.c's MANAGE mode, UI_PLAN.md Section 6.2) --
+     * replacing the old My Profiles / Built-ins (family picker -> per-family
+     * list) / Restore hidden four-cell hub and its two sub-pages, deleted the
+     * same pass. "profile_picker" is the same widget's PICK mode, for
+     * Section 6.1's dashboard picker (wired up in a later wave). Then a
+     * per-profile detail screen (title, segment count, feasibility colour,
+     * START) and a paginated segment list, unchanged. Closes the gap the
+     * user reported: the home page's Start button previously had no way to
+     * pick a DIFFERENT profile than whatever the fallback chain resolved to.
+     * See ui_page_profiles.c's header comment for the full tree. */
     err = kiln_ui_register_page("profiles", ui_page_profiles_build);
     if (err != ESP_OK) return err;
-    err = kiln_ui_register_page("profiles_mine", ui_page_profiles_mine_build);
-    if (err != ESP_OK) return err;
-    err = kiln_ui_register_page("profiles_family", ui_page_profiles_family_build);
+    err = kiln_ui_register_page("profile_picker", ui_page_profile_picker_build_pick);
     if (err != ESP_OK) return err;
     err = kiln_ui_register_page("profiles_builtin_list", ui_page_profiles_builtin_list_build);
     if (err != ESP_OK) return err;

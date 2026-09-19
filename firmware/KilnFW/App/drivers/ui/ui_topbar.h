@@ -116,6 +116,14 @@ typedef struct {
     lv_event_cb_t prev_cb;
     lv_event_cb_t next_cb;
 
+    /* "New" icon (LV_SYMBOL_FILE / LV_SYMBOL_PLUS-shaped affordance built by
+     * ui_topbar.c). NULL for a page with nothing to create. Built just
+     * before the gear (see ui_topbar_create()'s left-to-right order comment)
+     * -- ui_page_profile_picker.c's manage mode is the first caller,
+     * replacing the old "New Profile" grid cell that the unified list page
+     * has no spare row for. */
+    lv_event_cb_t add_cb;
+
     /* Settings gear. Home only; every other page reaches config through the
      * hub it came from. */
     lv_event_cb_t gear_cb;
@@ -138,6 +146,7 @@ typedef struct {
     lv_obj_t *prev_btn;
     lv_obj_t *next_btn;
     lv_obj_t *gear_btn;
+    lv_obj_t *add_btn;
     lv_obj_t *warning_btn;   /* NULL unless cfg->warning_icon was set; starts hidden */
 
     /* Horizontal px the icon proxy occupies on the right-hand side. A page

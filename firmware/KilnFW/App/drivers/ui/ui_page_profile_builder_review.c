@@ -11,6 +11,7 @@
 #include "profiles_http.h"
 #include "ui_confirm.h"
 #include "ui_page_profile_builder_zones.h"
+#include "ui_page_profiles.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
 #include "unit_pref.h"
@@ -115,7 +116,12 @@ static void do_save(uint8_t slot)
         .user_data = NULL,
     };
     ui_confirm_show(&params);
-    kiln_ui_show("profiles_mine");
+    /* "profiles_mine" was deleted (UI_PLAN.md 6.2 -- the unified list at
+     * "profiles" now owns this slot). Refresh before showing: "profiles" is
+     * cached after its first build, so a stale render would otherwise still
+     * show the pre-save list. */
+    ui_page_profiles_refresh();
+    kiln_ui_show("profiles");
 }
 
 static void confirm_overwrite_cb(void *user_data)

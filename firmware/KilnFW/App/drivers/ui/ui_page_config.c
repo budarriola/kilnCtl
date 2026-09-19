@@ -6,6 +6,7 @@
 
 #include "kiln_ui.h"
 #include "lvgl_port.h" /* lvgl_port_touch_cal_support() -- gates the Touch Calibration cell */
+#include "ui_page_profiles.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
 #include "unit_pref.h"
@@ -87,6 +88,11 @@ static void diagnostics_nav_cb(lv_event_t *e)
 static void profiles_nav_cb(lv_event_t *e)
 {
     (void)e;
+    /* "profiles" is now the unified live list (UI_PLAN.md 6.2) -- refresh
+     * before showing, since kiln_ui_show() caches the page after its first
+     * build and a stale render would otherwise survive a delete/import made
+     * elsewhere (e.g. the web dashboard). */
+    ui_page_profiles_refresh();
     kiln_ui_show("profiles");
 }
 
