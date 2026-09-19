@@ -40,7 +40,12 @@ param(
     [string[]]$Only,
 
     # Print the plan and run nothing.
-    [switch]$ListOnly
+    [switch]$ListOnly,
+
+    # Same name and semantics as run_all_checks.ps1's switch: without it, any
+    # stage that reports SKIP fails the overall run (a skip is not a pass).
+    # Pass it to opt back into treating skips as non-fatal.
+    [switch]$AllowSkips
 )
 
 $ErrorActionPreference = "Stop"
@@ -121,9 +126,14 @@ if ($ListOnly) {
 
 # Reserved exit code across the check-suite convention (tools/run_all_checks.ps1):
 # 0 = PASS, 3 = SKIP (prerequisite absent, not a failure), anything else = FAIL.
-# The lint stage delegates to tools/check_lint_pages.ps1, which follows this
-# convention -- treat its exit 3 as SKIP here too rather than FAIL, or a
-# missing prerequisite (e.g. no node on PATH) reads as a verification failure.
+# Checked against every stage here, not just lint: run_all_checks.ps1 itself
+# only ever exits 0/1/2, KilnFW's build_host_tests.ps1 only exits 0/1, and
+# SaftyFW's build_host_tests.ps1 passes each test executable's exit code
+# through raw, but every test main returns 0 or 1 -- so 3 cannot collide with
+# a genuine result from those three. Only the lint stage (which delegates to
+# tools/check_lint_pages.ps1, itself a check_*.ps1 script under the suite's
+# own exit-code contract) can actually produce it today, but the convention
+# is applied uniformly rather than special-cased to one stage.
 $SkipExitCode = 3
 
 $results = [ordered]@{}
@@ -167,6 +177,7 @@ $swAll.Stop()
 
 Write-Host ""
 $failed = @()
+$skipped = @()
 foreach ($name in $results.Keys) {
     $r = $results[$name]
     $desc = $Stages[$name].Desc
@@ -174,7 +185,20 @@ foreach ($name in $results.Keys) {
         Write-Host ("  PASS  {0,-32} {1,6}s" -f $desc, $r.Seconds) -ForegroundColor Green
     }
     elseif ($r.Code -eq $SkipExitCode) {
-        Write-Host ("  SKIP  {0,-32} {1,6}s" -f $desc, $r.Seconds) -ForegroundColor Yellow
+        # Same convention as run_all_checks.ps1: grep the child's own output
+        # for the SKIP line so the reason travels with the summary instead of
+        # requiring a trip to the full log.
+        $reasonLine = $null
+        foreach ($f in @($r.Log, $r.ErrLog)) {
+            if (-not $reasonLine -and (Test-Path $f)) {
+                $reasonLine = (Get-Content $f | Where-Object { $_ -match 'SKIP' } | Select-Object -First 1)
+            }
+        }
+        if (-not $reasonLine) {
+            $reasonLine = "(no SKIP reason line found in output -- check violates the SKIP contract)"
+        }
+        Write-Host ("  SKIP  {0,-32} {1,6}s  -- {2}" -f $desc, $r.Seconds, $reasonLine.Trim()) -ForegroundColor Yellow
+        $skipped += @{ Name = $name; Reason = $reasonLine.Trim() }
     }
     else {
         Write-Host ("  FAIL  {0,-32} {1,6}s  (exit {2})" -f $desc, $r.Seconds, $r.Code) -ForegroundColor Red
@@ -206,12 +230,22 @@ foreach ($name in $failed) {
 
 Write-Host ""
 $wall = [math]::Round($swAll.Elapsed.TotalSeconds, 1)
-if ($failed.Count -eq 0) {
+if ($failed.Count -gt 0) {
+    Write-Host "FAILED: $($failed -join ', ')  ($($results.Count) stages, ${wall}s wall)" -ForegroundColor Red
+    exit 1
+}
+elseif ($skipped.Count -gt 0 -and -not $AllowSkips) {
+    # Mirror run_all_checks.ps1's default posture: a skip is not a pass. An
+    # unnoticed SKIP here previously fell through to "ALL PASS" and exit 0,
+    # contradicting this script's own contract at the top of the file.
+    $names = ($skipped | ForEach-Object { $_.Name }) -join ', '
+    Write-Host "SKIPPED: $names -- a skip is not a pass  ($($results.Count) stages, ${wall}s wall)" -ForegroundColor Red
+    Write-Host "Pass -AllowSkips if a missing prerequisite on this machine is genuinely expected." -ForegroundColor Red
+    Write-Host "logs: $logDir"
+    exit 1
+}
+else {
     Write-Host "ALL PASS ($($results.Count) stages, ${wall}s wall)" -ForegroundColor Green
     Write-Host "logs: $logDir"
     exit 0
-}
-else {
-    Write-Host "FAILED: $($failed -join ', ')  ($($results.Count) stages, ${wall}s wall)" -ForegroundColor Red
-    exit 1
 }
