@@ -110,7 +110,7 @@ function Test-KilnCfgStoreMigrationStep {
     }
     $current = [int]$verMatch.Groups[1].Value
     $expectedFrom = $current - 1
-    $stepPattern = "migrate_store_v${expectedFrom}_to_v${current}\s*\("
+    $stepPattern = "(?m)^\s*static\s+[\w\*\s]+\bmigrate_store_v${expectedFrom}_to_v${current}\s*\("
     if ($SourceText -notmatch $stepPattern) {
         $failures.Add("kiln-config slot store: KILN_CFG_STORE_VERSION is $current but no " +
             "migrate_store_v${expectedFrom}_to_v${current}(...) step function exists in kiln_cfg_store.c")
@@ -144,7 +144,7 @@ function Test-ProfilesMigrationStep {
     }
     $current = [int]$verMatch.Groups[1].Value
     $expectedFrom = $current - 1
-    $stepPattern = "convert_profile_v${expectedFrom}\s*\("
+    $stepPattern = "(?m)^\s*static\s+[\w\*\s]+\bconvert_profile_v${expectedFrom}\s*\("
     if ($SourceText -notmatch $stepPattern) {
         $failures.Add("fire profiles store: PROFILE_VERSION is $current but no " +
             "convert_profile_v${expectedFrom}(...) converter exists in profiles_http.c")
@@ -185,7 +185,7 @@ function Test-SaftyConfigStoreMigrationStep {
             "$macroName macro naming the immediately preceding format is defined in config_store.h")
     } else {
         $branchPattern = "==\s*${macroName}\b"
-        if ($SourceText -notmatch $branchPattern -and $VersionHeaderText -notmatch $branchPattern) {
+        if ($SourceText -notmatch $branchPattern) {
             $failures.Add("RP2040 safety config store: $macroName is defined but config_store.c has no " +
                 "'== $macroName' branch actually handling it -- an orphaned macro")
         }

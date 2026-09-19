@@ -36,10 +36,17 @@
 #      (Test-KilnCfgStoreMigrationStep), fire profiles
 #      (Test-ProfilesMigrationStep), and RP2040 safety config
 #      (Test-SaftyConfigStoreMigrationStep).
+#  16-17. A comment-only mention of the expected step/converter name (not a
+#      real definition) does NOT satisfy the kiln-config/profiles rules --
+#      proves the patterns are anchored to a definition, not raw text.
+#   18. RP2040 safety config: the expected macro is defined but never
+#      branched on in config_store.c (only mentioned in a header comment)
+#      -> FAIL, the orphaned-macro path distinct from assertion 14's
+#      missing-macro path.
 #
-# This does not touch the real repo tree; assertions 1-8, 10, 12, 14 are
-# entirely synthetic text, and assertions 9, 11, 13, 15 only READ the real
-# tree (none of these functions ever writes anything).
+# This does not touch the real repo tree; assertions 1-8, 10, 12, 14, 16-18
+# are entirely synthetic text, and assertions 9, 11, 13, 15 only READ the
+# real tree (none of these functions ever writes anything).
 #
 # Usage: powershell -ExecutionPolicy Bypass -File App\test\test_check_config_migration_steps.ps1
 
@@ -302,6 +309,43 @@ if (-not $r15.Ok) {
     Write-Host "Assertion 15 OK: the real RP2040 safety config store (CONFIG_STORE_FORMAT_VERSION_V2 for version 3) passes."
 }
 
+# --- Assertion 16: kiln-config slots, a COMMENT naming the step text does
+# NOT satisfy the rule -- must be anchored to a real definition. ---
+$r16 = Test-KilnCfgStoreMigrationStep -VersionHeaderText "#define KILN_CFG_STORE_VERSION 4`n" `
+    -SourceText "/* see migrate_store_v3_to_v4( ) for the shape */`nstatic void migrate_store_v2_to_v3(const kiln_cfg_store_blob_v2_t *src, kiln_cfg_store_blob_t *dst) { }`n"
+if ($r16.Ok) {
+    $failures += "Assertion 16 FAILED: a comment-only mention of migrate_store_v3_to_v4 satisfied the rule -- pattern is not anchored to a definition."
+} elseif (($r16.Failures -join " ") -notmatch "migrate_store_v3_to_v4") {
+    $failures += "Assertion 16 FAILED: failure did not name the missing kiln-config step: $($r16.Failures -join '; ')"
+} else {
+    Write-Host "Assertion 16 OK: a comment-only mention of the kiln-config step does not satisfy the rule."
+}
+
+# --- Assertion 17: fire profiles, a COMMENT naming the converter does NOT
+# satisfy the rule -- must be anchored to a real definition. ---
+$r17 = Test-ProfilesMigrationStep -VersionHeaderText "#define PROFILE_VERSION 5`n" `
+    -SourceText "/* v5 will need convert_profile_v4() eventually */`nstatic void convert_profile_v3(const profile_persisted_v3_t *src, profile_t *out) { }`n"
+if ($r17.Ok) {
+    $failures += "Assertion 17 FAILED: a comment-only mention of convert_profile_v4 satisfied the rule -- pattern is not anchored to a definition."
+} elseif (($r17.Failures -join " ") -notmatch "convert_profile_v4") {
+    $failures += "Assertion 17 FAILED: failure did not name the missing profiles converter: $($r17.Failures -join '; ')"
+} else {
+    Write-Host "Assertion 17 OK: a comment-only mention of the profiles converter does not satisfy the rule."
+}
+
+# --- Assertion 18: RP2040 safety config, macro defined but NEVER branched on
+# in the .c file (only mentioned in a header comment) -> FAIL, orphaned-macro
+# path, distinct from assertion 14's missing-macro path. ---
+$r18 = Test-SaftyConfigStoreMigrationStep -VersionHeaderText "#define CONFIG_STORE_FORMAT_VERSION 4u`n#define CONFIG_STORE_FORMAT_VERSION_V1 1u`n#define CONFIG_STORE_FORMAT_VERSION_V2 2u`n#define CONFIG_STORE_FORMAT_VERSION_V3 3u`n// format_version == CONFIG_STORE_FORMAT_VERSION_V3 (legacy note only)`n" `
+    -SourceText "if (version == CONFIG_STORE_FORMAT_VERSION_V1) { } if (version == CONFIG_STORE_FORMAT_VERSION_V2) { }`n"
+if ($r18.Ok) {
+    $failures += "Assertion 18 FAILED: expected FAIL when CONFIG_STORE_FORMAT_VERSION_V3 is defined (and only mentioned in a header comment) but never branched on in config_store.c, got PASS."
+} elseif (($r18.Failures -join " ") -notmatch "orphaned macro") {
+    $failures += "Assertion 18 FAILED: failure did not name the orphaned-macro condition: $($r18.Failures -join '; ')"
+} else {
+    Write-Host "Assertion 18 OK: a macro defined but only mentioned in a header comment (never branched on in the .c file) is caught as orphaned."
+}
+
 if ($failures.Count -gt 0) {
     Write-Host ""
     Write-Host "test_check_config_migration_steps: $($failures.Count) assertion(s) FAILED:" -ForegroundColor Red
@@ -310,5 +354,5 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ""
-Write-Host "test_check_config_migration_steps: all 15 assertions passed." -ForegroundColor Green
+Write-Host "test_check_config_migration_steps: all 18 assertions passed." -ForegroundColor Green
 exit 0
