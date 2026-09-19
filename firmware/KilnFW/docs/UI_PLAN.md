@@ -600,3 +600,429 @@ preference:
    chart instead.
 
 (Options 1 and 2 above were offered and not chosen.)
+
+---
+
+## Section 6 — LCD dashboard and profiles rework, owner request 2026-09-19
+
+Six LCD items (ROADMAP.md row "LCD dashboard and profiles rework — owner
+request 2026-09-19"). Nothing here is built yet. All of it is LVGL-side:
+no new HTTP route (the URI handler cap is 150 used of 151), no new task, no
+new timer, no new colour, no page that scrolls.
+
+Two facts hold for every item and are not repeated per item:
+
+* **The 1 Hz tick already fetches everything.**
+  `ui_page_home_refresh.c:102-104` already calls `dashboard_get_status(&ds)`
+  and `profile_executor_get_status(&st)` every tick. Both return a snapshot
+  and take whatever lock they need *internally*
+  (`profile_executor_status.c:250` takes `s_exec.lock` and is prestart-
+  hardened), so a caller holds no lock and crosses no producer call. Items 1,
+  3 and 5 read from those two structs and add no producer call of their own.
+* **The budget.** `UI_THEME_PAGE_CONTENT_BUDGET_PX` = `DISPLAY_WIDTH(320)
+  - 2*8 - 32 - 4` = **268px** of content height (some page comments round it
+  to "267"; use the macro, never a literal). Usable content width is
+  `480 - 2*UI_THEME_PADDING_PX` = **464px**. Font line height is
+  `UI_THEME_FONT_LINE_HEIGHT_PX` = 20 (montserrat_14, the default);
+  `lv_font_montserrat_10` is the only smaller font enabled in
+  `sdkconfig.defaults` and renders ~14px per line. montserrat_12 is **not**
+  enabled — do not use it without enabling it and re-checking flash size.
+
+### 6.1 Dashboard: selected profile name left of Start, tapping it opens a picker
+
+**Files.** `ui_page_home.c` (`ui_page_home_build()`, the `action_row` block
+at the end), `ui_page_home_internal.h` (declare the new
+`s_ui_home_profile_btn` / `s_ui_home_profile_label`),
+`ui_page_home_refresh.c` (`ui_home_refresh_cb()`, set the label text), the
+new picker page from 6.2, and `ui_profile_list_order.c/.h` (new pure module,
+see 6.2).
+
+**Data source and locks.** The selected profile is `profile_exec_status_t`'s
+profile id from the `profile_executor_get_status()` snapshot the refresh tick
+already holds; the display name is built from `profiles_http_get(id, &prof)`
+(`persist/profiles_store.h`, plain C, no httpd) plus `profiles_builtin_get()`
+for ids `>= PROFILE_BUILTIN_ID_BASE` (128). No lock is held by the caller.
+
+**Layout (464px wide row).** `action_row` today is `LV_FLEX_FLOW_ROW`, gap 4,
+`LV_SIZE_CONTENT`, holding the hidden `s_ui_home_pause_btn` and
+`s_ui_home_fire_btn`. Change it to `lv_obj_set_width(action_row, lv_pct(100))`
+with `LV_FLEX_ALIGN_END` on the main axis, and insert the profile button as
+the **first** child with `lv_obj_set_flex_grow(profile_btn, 1)`. Widths:
+Start is about 96px drawn, Pause about 96px when visible (0 when hidden —
+LVGL skips hidden children in flex, the idiom this page already relies on),
+gaps 4. Profile button width is therefore `464 - 4 - 96 = 364` idle and
+`464 - 4 - 96 - 4 - 96 = 264` while running. Both hold a `LV_LABEL_LONG_DOT`
+name label at montserrat_14 (about 33 and about 24 characters). Height stays
+36px, matching Start, so `action_row`'s contribution to the column is
+unchanged at 36px and **no page-height arithmetic moves**. Touch:
+`ui_theme_apply_touch_area(profile_btn, true)` gives the 36px control the
+required `UI_THEME_MIN_TOUCH_TARGET_PX` (72) effective height, exactly as the
+Start button already does.
+
+**Tests owed.** No new `_Static_assert` (no height change). The picker's
+ordering is covered by 6.2's host test. This item owes no new C test unless
+the label-truncation helper is factored out, in which case it joins
+`test_ui_page_home_graph.c`.
+
+**Numeric verification.** `capture_lcd.ps1 -Full` maps LCD `(x,y)` to frame
+`(102 + 1.890*x, 12 + 1.903*y)`. The profile button's left edge is LCD `x=8`,
+its vertical centre about LCD `y=250`, giving frame `(117, 488)`. Sample an
+8x8 box there with `sample_lcd_region.ps1 -X 117 -Y 488 -W 8 -H 8` and require
+the mean RGB to be `UI_THEME_COLOR_CARD` `0x242a3a` (not `BG` `0x1a1f2b`),
+proving a card-backed control is present where empty background used to be,
+against the script's own bezel reference.
+
+### 6.2 LCD Profiles page becomes that list, with New and per-profile delete
+
+**Files.** `ui_page_profiles.c` (rewritten — the four `build_nav_item()` cells
+"My Profiles", "Built-ins (28)", "Restore hidden", "New Profile" and their
+callbacks `mine_nav_cb` / `builtins_nav_cb` / `restore_hidden_cb` /
+`new_profile_nav_cb` all go away), `ui_page_profiles_mine.c` and
+`ui_page_profiles_family.c` (delete them, and drop their
+`kiln_ui_register_page()` calls), `kiln_ui.c` (register the new
+`"profile_picker"` page; drop `"profiles_mine"` / `"profiles_family"`), plus
+the new `ui_page_profile_picker.c/.h` and `ui_profile_list_order.c/.h`.
+
+**The list is one widget used twice** — the Profiles page and 6.1's picker are
+the same builder with a `mode` flag: picker mode returns a selection, manage
+mode shows New and per-row Delete. Build it once in
+`ui_page_profile_picker.c`; do not fork it.
+
+**Data source and locks.** Ids come from `profiles_http_get()` over slots
+0..`PROFILES_MAX_COUNT-1` (8) plus `profiles_builtin_entry()` over the builtin
+table, skipping `profiles_builtin_is_hidden()`. Favorites come from
+`profiles_favorites_is(id)` / `profiles_favorites_masks(&user, &builtin)`
+(`persist/profiles_favorites.h`). **`profiles_favorites.c` contains no mutex,
+semaphore or critical section** — reads are plain RAM reads, safe directly on
+the LVGL tick, and no new HTTP route is needed to reach them.
+
+**Ordering must match the web dashboard exactly.** `main_page.html`'s
+`orderProfilesByFavorite()` (around line 1246) is a **stable partition**:
+favorites first, intra-group order untouched, nothing dropped; and
+`profileOptionLabel()` prepends a star as a **display-only label prefix** —
+the option's value stays `p.id`. `ui_profile_list_order()` must have the same
+three properties: stable partition, set equality, star only in the rendered
+text and never in the id the row carries. Do not re-derive the favorite set
+from a second source.
+
+**Delete parity with the web.** `profiles_edit_http.c` (around line 603)
+deletes and then calls `(void)profiles_favorites_set((uint8_t)id, false)` so
+no dangling favorite survives. The LCD delete owes **both** calls, in that
+order. Builtins (`id >= PROFILE_BUILTIN_ID_BASE`) are a `const` table with no
+writable storage — the row must not offer Delete for them at all, matching the
+web page's exportable-but-not-deletable rule.
+
+**Layout.** Rows must be `UI_THEME_MIN_TOUCH_TARGET_PX` = 72px tall, so three
+rows per page with a 36px header row:
+
+```
+UI_PAGE_PROFILE_PICKER_ROWS_PER_PAGE      3
+UI_PAGE_PROFILE_PICKER_ROW_H_PX           UI_THEME_MIN_TOUCH_TARGET_PX      /* 72 */
+UI_PAGE_PROFILE_PICKER_HEADER_H_PX        36
+UI_PAGE_PROFILE_PICKER_WORST_CASE_HEIGHT_PX =
+    HEADER(36) + GAP(4) + 3*72 + 2*4 = 264  <=  268
+```
+
+Four rows (`36 + 4 + 4*72 + 3*4 = 340`) does not fit, and shrinking rows below
+72px breaks the touch-target policy — hence three, with the existing
+`ui_topbar_set_prev_enabled()` / `_set_next_enabled()` paging and the "N of M"
+indicator `ui_page_profiles_mine.c` already demonstrates. Page count is
+`ceil(total_visible / 3)`.
+
+**The New button goes in the page's own 36px header row, not the topbar.**
+This is deliberate: adding an icon slot to `ui_topbar.c` would collide head-on
+with 6.6, which rewrites that same file's icon-row alignment. The header row
+is "at the top of the screen" as requested and keeps the two items in separate
+files. New button: 36x36 with `LV_SYMBOL_FILE` (no new colour —
+`UI_THEME_COLOR_ACCENT_4`, as Start already uses),
+`ui_theme_apply_touch_area(btn, true)`, calling
+`ui_page_profile_builder_start_new()` then
+`kiln_ui_show("profile_builder_zones")` — the same two calls
+`new_profile_nav_cb()` makes today.
+
+Row internals (464px): star/name label `flex_grow(1)` with
+`LV_LABEL_LONG_DOT`, then a 64x36 Delete button right-aligned for user slots
+only. Name width is `464 - 8 (pad) - 4 - 64 = 388` with Delete, 452 without.
+
+**Tests owed.**
+
+* New pure module `ui_profile_list_order.c/.h`, host test
+  `firmware/KilnFW/App/test/test_ui_profile_list_order.c`. It **must be added
+  to the hardcoded list in `build_host_tests.ps1`** (beside
+  `test_ui_page_home_graph.c`, around line 103) — that script does not glob.
+  Assertions mirroring `test_profile_favorites_order.js`: (a) favorites first
+  and intra-group order preserved; (b) output is a set-equal permutation of
+  the input, nothing dropped; (c) the star appears in the label only and the
+  row's id is unchanged; (d) a builtin id never yields a deletable row.
+* `check_ui_budget_asserts.ps1` must gain an entry requiring
+  `ui_page_profile_picker.c`'s `_Static_assert`, and must lose the
+  `ui_page_profiles_mine.c` entry when that file is deleted — the script greps
+  exact literals, so a stale entry fails the build.
+* Negative-test both: flip the partition to unstable and confirm the host test
+  goes red; bump the picker's row count to 4 and confirm the `_Static_assert`
+  fires. A check that has not been seen failing is vacuous.
+
+**Numeric verification.** With a known favorite set, capture and sample the
+first row's star glyph cell — LCD `(16, 60)`, frame `(132, 126)`, `-W 10
+-H 10`: a lit star is `UI_THEME_COLOR_TEXT_PRIMARY` `0xf0f0f0` against `CARD`
+`0x242a3a`, so the mean RGB of the star cell must be measurably brighter than
+the same cell on a non-favorite row further down (LCD `(16, 204)`, frame
+`(132, 400)`). Judge this numerically only.
+
+### 6.3 Temperature page also shows the safety relay's state
+
+**File.** `ui_page_temperature.c` — the "Relays" card builder and its refresh
+tick.
+
+**Data source and locks.** `dashboard_status_t`'s `safety_relay_known` and
+`safety_relay_energized` (`dashboard_http.h`), already populated from the
+existing safety-link status on the poll the page performs. **No new poll of
+the Pico.** Render `safety_relay_known == false` as `n/a`, never as `off` —
+unknown and de-energized are different states. Do **not** use
+`safety_heating_enabled` for this; that header warns it means
+`SAFETY_FLAG_ENABLED`, not "heat was granted", and reading it as the latter
+already shipped as a bug once (`danger_mode.c`, 2026-08-27).
+
+**Layout.** Today's worst case is `3*28 (zone rows) + 70 (Relays card) + 20
+(msg) + 5*4 (gaps) = 194` against 268. Add one line inside the existing Relays
+card rather than a new card:
+
+```
+UI_PAGE_TEMPERATURE_SAFETY_LINE_PX  (UI_THEME_FONT_LINE_HEIGHT_PX + (UI_THEME_PADDING_PX / 4))   /* 22 */
+```
+
+added to `UI_PAGE_TEMPERATURE_RELAYS_CARD_HEIGHT_PX`, giving `194 + 22 = 216
+<= 268`. The existing `UI_PAGE_TEMPERATURE_WORST_CASE_HEIGHT_PX` assert then
+recomputes itself; its literal text is unchanged, so
+`check_ui_budget_asserts.ps1` needs no edit. Label text follows the web's own
+wording in `renderSafetyCard()` and the page's 0-based display convention:
+`Safety (K4): ON / off / n/a`.
+
+**Tests owed.** `test_safety_relay_pill.js` pins the web rendering of the same
+three states; the LCD string formatter should be a small pure helper
+(`ui_page_temperature_safety_text(known, energized)`) with a host-test
+assertion for all three, so the two surfaces cannot drift apart silently.
+
+**Numeric verification.** Sample the safety line's text cell with the relay
+de-energized and again energized; the ON state uses the existing
+`UI_THEME_COLOR_ACCENT_4` `0x5cc06e` and off uses `TEXT_SECONDARY` `0x9aa0ae`
+— no new colour. Require a measured channel difference, with a bezel reference
+sampled in the same run.
+
+### 6.4 The LCD loses the ability to reset relay life
+
+**File.** `ui_page_diagnostics.c` — **not** the Temperature page. The control
+lives on the Relay Life page: `relay_reset_btn_clicked_cb()` (around lines
+1433-1570) and `build_relay_life_row()`.
+
+**What to remove.** The 64x22 `UI_THEME_COLOR_ACCENT_5` button built in
+`build_relay_life_row()`; the `s_rl_reset_btn[]` / `s_rl_reset_label[]`
+statics; the two-tap arm/confirm state (`s_rl_confirm_deadline_us[]`,
+`UI_PAGE_DIAGNOSTICS_RELAY_RESET_CONFIRM_US`,
+`UI_PAGE_DIAGNOSTICS_CONFIRM_DEBOUNCE_US`,
+`UI_PAGE_DIAGNOSTICS_RELAY_RESET_WAIT_MS`); the callback itself; the
+deadline-expiry handling in the refresh tick; and the
+`UI_PAGE_DIAGNOSTICS_RELAY_ROW_BTN_W_PX` / `_H_PX` defines with their trailing
+`#undef`s. **Keep** `s_rl_value_label[]` and the whole read-only life display,
+including the `RELAY_CYCLES_SAFETY_INDEX` "Safety (K4)" row.
+`relay_cycles_reset_timeout()` stays in the driver — the web keeps the
+capability; only the LCD's path to it goes.
+
+**Layout.** The row is 23px and the removed button was 22px, so the removed
+control never set the row height:
+`UI_PAGE_DIAGNOSTICS_RELAY_LIFE_WORST_CASE_HEIGHT_PX` stays `5*23 + 4*8 = 147`
+against 268 and its assert text is unchanged — `check_ui_budget_asserts.ps1`
+needs no edit for this item either. The 8px row gap must **stay** 8 even
+though the touch-area reason for it goes away with the button; shrinking it is
+a separate change and is not in scope.
+
+**Tests owed.** A grep-based assertion that no LVGL translation unit
+references `relay_cycles_reset` or `relay_cycles_reset_timeout` — cheapest as
+a new stanza in an existing `check_*.ps1` rather than a new script. That is the
+only thing standing between this removal and a future re-add.
+
+**Numeric verification.** Capture the Relay Life page and sample where a Reset
+button used to be — the rightmost 64px of the first row, LCD `(392, 14)`,
+frame `(843, 38)`, `-W 40 -H 12`: the mean RGB must be the page background or
+card colour and must **not** be `ACCENT_5` `0xd6555f` (dominant red channel).
+This is the numeric form of "the button is gone".
+
+### 6.5 Right quarter of the dashboard: relays, zone temperatures, zone power
+
+**Files.** `ui_page_home.c` (`ui_page_home_build()`, wrap the chart in a new
+row container), `ui_page_home_internal.h` (declare the rail's shared widgets),
+`ui_page_home_refresh.c` (`ui_home_refresh_cb()`, fill it), and a new pure
+`ui_page_home_rail.c/.h` for the row-composition logic, following the
+`ui_page_home_graph.c/.h` split that exists precisely so layout logic is
+host-testable off-target.
+
+**Data source and locks.** Everything comes from the two snapshots the tick
+already has — relays from `ds.relay_on[KILN_IO_RELAY_COUNT]`, temperatures and
+staleness from `ds.channels[]` (`temp_c`, `valid`, `stale`), per-zone power
+from `st.zones[].duty`, whole-kiln watts from `ds.power_w` gated on
+`ds.power_valid`. Zone naming reuses the existing `zones_config_*` accessors
+the page already calls. **No new producer call and no new task, so nothing is
+owed to `check_stack_margin_registration.ps1`.**
+
+**Layout.** Today the chart is a direct child of `content` with `lv_pct(100)`
+and `flex_grow(1)`. Insert a `graph_row` (`LV_FLEX_FLOW_ROW`, `lv_pct(100)`,
+`flex_grow(1)`, `pad_gap UI_THEME_SPACE_1` = 4, non-scrollable) and move the
+chart into it at `lv_pct(74)`, with the rail at `lv_pct(25)`:
+
+```
+row inner width     = 464
+chart               = 0.74 * 464 = 343
+rail                = 0.25 * 464 = 116
+gap                 = 4          (343 + 4 + 116 = 463 <= 464)
+```
+
+Vertically the row inherits the chart's old height, which on the idle page is
+`268 - 36 (action row) - 4 (gap) = 228px` (the trip strip, lag notice and
+progress wrap are hidden and cost zero). Rail contents, at 108px inner width
+after its own 4px padding:
+
+```
+"Relays" caption   (montserrat_10)                 14
+gap                                                 4
+4 relay pills, 24px wide, 4px gaps: 4*24+3*4 = 108  22
+gap                                                 4
+3 zone blocks, each
+     zone name (montserrat_10)          14
+     temperature (montserrat_14)        20
+     duty bar                            8
+     2 internal gaps                     4
+                                     = 46          138
+2 inter-block gaps                                  8
+gap                                                 4
+kiln power line (montserrat_10, hidden unless
+     ds.power_valid -- zero height when hidden)     14
+                                        TOTAL     208   <= 228
+```
+
+20px of slack. Pin it with a new `UI_PAGE_HOME_RAIL_WORST_CASE_HEIGHT_PX`
+`_Static_assert` in `ui_page_home.c` against the same 228px expression
+(derived from `UI_THEME_PAGE_CONTENT_BUDGET_PX`, not a literal) and add that
+file to `check_ui_budget_asserts.ps1` — `ui_page_home.c` has no entry there
+today because the chart was pure `flex_grow`; a fixed-height rail changes that.
+Colours are the existing relay and zone accents already used by the legend and
+the temperature page; **no new colour is defined**.
+
+**Style parity with the web.** `relayStatusHtml()` prints `R<n-1>: ON / off /
+n/a`, and `renderChannels()` shows zone name, temperature, a stale marker and
+`(duty NN%)`. The rail is the same information set with the graphic dropped,
+and the same 0-based relay display convention (`UI_RELAY_DISPLAY`) the LCD
+already uses.
+
+**Tests owed.** `test_ui_page_home_rail.c` (new, register it in
+`build_host_tests.ps1`) over the pure composition helper: a stale channel
+renders the stale form rather than a plausible stale number; an invalid channel
+renders `--.-` and never `0.0`; `power_valid == false` hides the kiln power
+line entirely rather than printing `0 W`; duty clamps to 0..100.
+Negative-test each by inverting the condition under test.
+
+**Numeric verification.** Sample the rail's left edge, LCD `x=352`, against the
+chart's own area at LCD `x=300`, both at LCD `y=120`, giving frames `(767,
+240)` and `(669, 240)`: the rail must read `CARD` while the chart area reads
+the chart's own background, proving the 3/4 split landed where the arithmetic
+says. Then sample a relay pill at LCD `(360, 40)`, frame `(782, 88)`, with the
+relay commanded on and off and require a measured difference. Bezel reference
+in every run.
+
+### 6.6 Dashboard Settings button flush top-right
+
+**File.** `ui_topbar.c` (`ui_topbar_create()`) only.
+
+**Root cause, not a guess.** The floating `icons` container is sized for both
+icons — `icons_w = icon_count * UI_TOPBAR_ICON_W_PX(36) + (icon_count - 1) *
+UI_TOPBAR_ICON_GAP_PX(4)` = 76 for the home page, which passes
+`.warning_icon = true` — and is aligned `LV_ALIGN_TOP_RIGHT`. But the warning
+indicator is built **after** the gear and `build_indicator()` ends with
+`lv_obj_add_flag(box, LV_OBJ_FLAG_HIDDEN)`. A hidden flex child collapses to
+zero width, and the row's main axis is `LV_FLEX_ALIGN_START`, so the gear packs
+to the container's left edge and sits `36 + 4 = 40px` short of flush right.
+That is exactly the offset the owner is reporting.
+
+**Fix — both halves are required.** Build the warning indicator **before** the
+gear (so the gear is always the rightmost child), **and** change the icons
+row's main-axis alignment to `LV_FLEX_ALIGN_END` (so the gear reaches the
+container's right edge while the warning is hidden). Either alone is
+insufficient: reordering with `ALIGN_START` still leaves the gear 40px in;
+`ALIGN_END` with today's order puts the hidden warning's slot to the gear's
+right. `ui_topbar_set_warning()` is untouched — un-hiding still expands the
+warning into the 40px to the gear's left, which is where it belongs.
+
+**Layout.** `icons_w` is unchanged at 76, the status bar height is unchanged,
+and pages without the optional warning slot have content width exactly equal to
+`icons_w`, so `ALIGN_END` is a no-op for them. The Wi-Fi status label's
+`status_label_max_w = bar_w - icons_w - (UI_THEME_PADDING_PX / 2)` is
+unchanged. **No page's height arithmetic moves and no assert changes.**
+
+**Tests owed.** No host test can see LVGL alignment; this item is verified by
+capture only. Optionally add a grep check that `ui_topbar.c`'s icon row uses
+`LV_FLEX_ALIGN_END`, to stop a future edit reverting it silently.
+
+**Numeric verification.** The gear's right edge must be at LCD `x = 480 - 8 =
+472`, i.e. frame `x = 102 + 1.890*472 = 994`. Sample frame `(984, 26)` `-W 8
+-H 8` (inside the gear glyph's box) and frame `(1000, 26)` (outside it, page
+background): before the fix the first reads background, after the fix it reads
+glyph. Sampling *both* is what distinguishes "the gear moved right" from "the
+whole bar shifted".
+
+### 6.7 Parallelisation and file collisions
+
+Wave 1 — four implementers, zero shared files:
+
+| Worker | Item | Files owned |
+| --- | --- | --- |
+| A | 6.6 | `ui_topbar.c` |
+| B | 6.4 | `ui_page_diagnostics.c` |
+| C | 6.3 | `ui_page_temperature.c` |
+| D | 6.2's pure half | **new** `ui_profile_list_order.c/.h`, **new** `test_ui_profile_list_order.c`, `build_host_tests.ps1` |
+
+Wave 2 — after D lands (both consume its ordering helper):
+
+| Worker | Item | Files owned |
+| --- | --- | --- |
+| E | 6.2 | **new** `ui_page_profile_picker.c/.h`, `ui_page_profiles.c`, delete `ui_page_profiles_mine.c` / `ui_page_profiles_family.c`, `kiln_ui.c`, `check_ui_budget_asserts.ps1` |
+| F | 6.5 | `ui_page_home.c`, `ui_page_home_internal.h`, `ui_page_home_refresh.c`, **new** `ui_page_home_rail.c/.h` |
+
+Wave 3 — 6.1, which needs E's picker page *and* F's home-page edits.
+
+**Collisions, stated explicitly.** 6.1 and 6.5 both edit `ui_page_home.c`,
+`ui_page_home_internal.h` and `ui_page_home_refresh.c` — give them to the same
+implementer (F, sequentially) rather than merging two worktrees over the same
+three files. 6.1 and 6.2 share the list widget and the ordering helper; D
+isolates that into files neither of the others owns. `build_host_tests.ps1` is
+touched by D and by F (its new rail test) — order those two edits, or let F
+append after D lands. `check_ui_budget_asserts.ps1` is touched by E (picker
+entry) and F (home entry); same treatment. `ui_topbar.c` is touched **only** by
+A — which is why 6.2's New button goes in a page header row and not the topbar.
+
+Nothing in waves 1-3 touches `main_page.html`, any HTTP handler, any
+`httpd_uri_t` registration, or any task creation.
+
+### 6.8 Owner decisions genuinely required
+
+1. **What "zone / zone-group power" means on the rail (6.5).** Per-zone duty
+   (the web's `duty NN%`, from `st.zones[].duty`) or watts? The only watts
+   source is `ds.power_w`, which is whole-kiln, comes from the Pico's Frame E,
+   and reports `power_valid == false` on this bench. *Recommended:* per-zone
+   duty %, plus one kiln-total watts line shown only when `power_valid` — the
+   arithmetic in 6.5 already budgets that line as hidden-costs-nothing.
+2. **Tapping the profile name while a firing is running (6.1).** Open the
+   picker and allow a change, or refuse? *Recommended:* refuse — render the
+   button with `UI_THEME_COLOR_TEXT_SECONDARY` and make it non-clickable unless
+   the executor snapshot says IDLE. Changing the profile under a running firing
+   is a separate feature (see ROADMAP's live-profile-edit row) and must not
+   arrive by accident through a picker.
+3. **Where "Restore hidden" goes (6.2).** Removing the four hub buttons removes
+   the LCD's only path to unhide a hidden builtin. *Recommended:* web-only.
+   Hidden builtins simply do not appear in the LCD list;
+   `profiles_builtin_restore_all()` stays reachable from the web page.
+4. **Delete confirmation style on the LCD (6.2).** *Recommended:* the two-tap
+   arm/confirm idiom with a roughly 5 s window — the same pattern 6.4 is
+   deleting from the relay-life page, which is well understood here and needs
+   no modal, no new page and no new colour.
+5. **Three rows per profile page (6.2).** Three is what fits above the 72px
+   touch minimum; four requires 64px rows. *Recommended:* three, with prev/next
+   paging. Do not shrink the rows.
