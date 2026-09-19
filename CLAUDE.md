@@ -192,18 +192,20 @@ region's mean RGB alongside the same for a bezel reference region, so this
 recipe doesn't have to be re-derived by hand each time
 (`.\sample_lcd_region.ps1 -Image full.jpg -X 500 -Y 650 -W 8 -H 8`).
 
-**Camera aim (2026-09-10):** the owner re-aimed the bench webcam after the
-2026-09-06 note above (bottom edge off-frame) — the whole panel is now
-inside the 1280x720 frame, closing that owner action. A fresh `-Full`
-capture and numeric edge scans (`sample_lcd_region.ps1` plus raw
-crop/rawvideo sampling against a black-bezel reference) found the panel at
-roughly `X=102-108` (left), `X=1006-1009` (right), `Y=12-16` (top),
-`Y=614-620` (bottom) — still mildly perspective-skewed corner to corner
-(~4-6px), not a clean rectangle, but no longer clipped. `capture_lcd.ps1`'s
-defaults are now the smallest axis-aligned box containing all four
-corners, `X=102 Y=12 W=907 H=609` (`tools/PcTools/scripts/capture_lcd.ps1:53-56`),
-which includes a few pixels of bezel on the tighter sides rather than
-clipping any UI content.
+**Camera aim (2026-09-19):** the owner moved the LCD and put it back, so the
+2026-09-10 numbers below are stale by far more than the few-px tolerance --
+the panel shifted ~195px right and ~46px down in the 1280x720 frame, and the
+old crop clipped away most of the screen. A fresh `-Full` capture and numeric
+luminance edge scans against the black-bezel reference (never by eye) put the
+panel at left edge `X=298` (top) to `X=323` (bottom), right edge `X=1145-1147`,
+top edge `Y=60` (right) to `Y=86` (left), bottom edge `Y=617` (right) to
+`Y=635` (left) -- the board now sits rotated a few degrees with its right side
+about 25px higher than its left, so it is markedly less square in frame than
+before. `capture_lcd.ps1`'s defaults are now the smallest axis-aligned box
+containing all four corners, `X=296 Y=58 W=853 H=578`
+(`tools/PcTools/scripts/capture_lcd.ps1:55-58`), which includes a few pixels of
+bezel on the tighter sides rather than clipping any UI content. (The previous,
+2026-09-10 rectangle was `X=102 Y=12 W=907 H=609`.)
 
 Full rationale, token measurements, and how to add a tool: **docs/MCP_SERVERS.md**.
 
