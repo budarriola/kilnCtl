@@ -408,24 +408,84 @@ undisturbed.
 
 ---
 
-## 12. Owner decisions needed
+## 12. Owner decisions (resolved 2026-09-18)
 
-1. **Slot budget.** A live fork consumes one of the 8 user profile slots. Is
-   refusing the fork when all 8 are full acceptable, or should
-   `PROFILES_MAX_COUNT` be raised? (Raising it touches the `used_bitmap`
-   uint8_t, the UART protocol and the LCD id space, so it is not free.)
-2. **A ceiling lowered mid-firing below the running setpoint.** This feature
-   refuses to adopt an edit in that state and leaves the firing to guard 5 and
-   the Pico, unchanged. Should that existing behaviour instead become an
-   active response (abort the firing, or clamp the setpoint)? It is a
-   pre-existing question this feature makes visible, not one it creates.
-3. **Name collisions on save-as.** Profile names are not unique today. Refuse
-   a duplicate name at save-as, or allow it?
-4. **Editing while PAUSED and while FAULTED.** Recommendation: allow while
-   PAUSED (the run is still live and the operator is most likely to want a
-   change there), refuse while FAULTED (the run is over; the pending-decision
-   prompt is the right surface, not the editor). Confirm.
-5. **Web auth and the prompt.** If authentication is on and the firing ends
-   with nobody logged in, the prompt simply waits until an admin logs in —
-   the working copy is safe in the meantime. Confirm that waiting is
-   acceptable rather than, say, auto-keeping the copy under a derived name.
+1. **Slot budget -- does NOT fit as requested; `PROFILES_MAX_COUNT` left
+   unchanged pending a follow-up decision.** The owner asked for 100 user
+   slots + 1 reserved live-edit slot, reasoning "I cant imagine that they are
+   large." Verified against the actual `cfg` LittleFS partition sizing
+   comment (`firmware/KilnFW/partitions.csv:490-515`, itself measured
+   against a real board export 2026-09-07):
+
+   - `sizeof(profile_t)` (from `profiles_types.h`'s layout: `name[16]` +
+     `zone_mask` + `segment_count` + `segments[12]` at 20 bytes each +
+     padding + `on_off_rule_count` + `on_off_rules[8]` at 20 bytes each) is
+     ~424 bytes -- small, confirming the owner's instinct about the raw
+     struct in RAM/NVS.
+   - But **two files on the `cfg` LittleFS partition are keyed per profile
+     id, not one**: `/cfg/profiles/<id>.json` (measured ~2K worst case,
+     pretty-printed, every field filled) AND `/cfg/stats/<id>.json`
+     (`PROFILE_FIRING_HISTORY_BLOB_SIZE_V1` = 1364 B x
+     `PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH` (5), pretty-printed, measured
+     ~4K worst case per the same comment). Raising the profile count scales
+     BOTH, at ~6K/slot combined -- not the ~2K/slot the owner's "they're
+     small" mental model implies.
+   - At 8 slots today: profiles 8x2K=16K + stats 8x4K=32K + zones ~8K +
+     kilncfg (unrelated to profile count, its own 8-slot cap) 64K + misc 4K
+     = **124K logical worst case**, block-rounded (LittleFS 4 KiB sectors,
+     ~1.29x per the comment) to ~160K, against a 512K partition -- roughly a
+     3.2x margin over the block-rounded figure, with the comment's own 2x
+     GC-headroom rule already folded into that sizing.
+   - At the requested 101 slots: profiles 101x2K=202K + stats 101x4K=404K +
+     zones 8K + kilncfg 64K + misc 4K = **682K logical worst case** --
+     already larger than the entire 512K partition before block-rounding or
+     GC headroom. **100+1 overflows `cfg` and was not implemented.**
+   - Solving for the same margin the partition was actually sized against
+     (logical worst case <= ~197K, so that 2x block-rounded stays under
+     512K): fixed costs (zones 8K + kilncfg 64K + misc 4K) = 76K, leaving
+     ~121K for profiles+stats at 6K/slot => **~20 slots** is the largest
+     count that preserves that margin. A count in the 16-24 range is
+     defensible on this partition; 101 is not, without also resizing `cfg`
+     (1.81 MiB sits contiguous and unused directly above it per the same
+     file -- a real option, but its own change with its own review, not a
+     rider on this feature).
+   - **Decision:** `PROFILES_MAX_COUNT` stays at 8 pending the owner picking
+     a number in the ~16-24 range, or approving a `cfg` resize instead. This
+     pass does not raise user capacity. The dedicated live-edit slot is
+     still delivered as a 9th, structural slot (index `PROFILES_MAX_COUNT`,
+     i.e. 8) held outside the 0..7 user-visible range and outside
+     `PROFILES_MAX_COUNT` itself, exactly as section 4 describes, so a live
+     edit can always start even with all 8 user slots full. That alone adds
+     one profile+stats pair (~6K worst case) to the on-disk footprint, which
+     fits the existing margin trivially and needs no partition change.
+2. **A ceiling lowered mid-firing below the running setpoint: REFUSE THE
+   CEILING CHANGE.** This overrides the plan's original "leave it to guard 5
+   and the Pico" position (end of section 7). The config-edit path
+   (`kiln_cfg_store_apply()`, `kiln_cfg_store.c:767`) must itself refuse to
+   accept a new `max_temp_c` below any zone's currently commanded setpoint
+   while a firing is in progress, naming the zone and both values -- not
+   merely refuse to adopt the change into the executor after the fact. This
+   is a change to the general config-edit path, not only to the live-edit
+   feature, and is independent of section 7's pickup-time re-validation
+   (which still exists, for a ceiling that drops between accept and pickup
+   by some other route).
+
+   **Sequencing note (2026-09-18):** `kiln_cfg_store.c`/`.h` are carrying
+   another session's uncommitted changes (confirmed via `git status` in the
+   shared tree before this pass touched anything). Per the standing
+   sequencing rule, that file was NOT edited here. Decision 2 is recorded as
+   a settled requirement, not landed code, and is the direct next step once
+   that file's in-flight work lands.
+3. **Name collisions on save-as: REFUSE**, reusing the kiln-config store's
+   existing `normalize_name`/`name_collides` rule (case-insensitive,
+   whitespace-trimmed) rather than writing a second predicate, per the
+   "one implementation" requirement.
+4. **Editing while PAUSED and while FAULTED: ALLOW BOTH.** This overrides the
+   plan's original recommendation (which proposed refusing while FAULTED).
+   The end-of-firing prompt is still the surface for the *decision* about
+   what to do with the working copy; live editing itself is available in
+   RUNNING, PAUSED and FAULTED alike.
+5. **Web auth and the prompt: wait indefinitely, confirmed.** No timeout, no
+   auto-save, no auto-discard -- the working copy and its pending-decision
+   record stay on disk exactly as section 5 describes until an authenticated
+   admin answers.

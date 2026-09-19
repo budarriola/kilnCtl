@@ -334,7 +334,7 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
          * buffer, but still detectably over the limit), so the length check
          * that follows can actually fire -- matching the "name too long"
          * rejection the interactive POST /api/profile path already gives
-         * for the same input (parse_profile_fields(), via
+         * for the same input (profiles_parse_profile_fields(), via
          * http_form_find_field()'s -2 return). Without this, import
          * silently accepted what the interactive path refuses. */
         char name[PROFILE_NAME_MAX_LEN + 2];

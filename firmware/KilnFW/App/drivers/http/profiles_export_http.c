@@ -158,7 +158,7 @@ static esp_err_t export_get_handler(httpd_req_t *req)
  * this is a single, much smaller document with no cross-version migration
  * concerns yet). All the real range/feasibility/zone-mask validation is
  * profiles_http_save()'s -- this handler's only job is decoding the JSON
- * into a profile_t candidate, exactly the shape parse_profile_fields()
+ * into a profile_t candidate, exactly the shape profiles_parse_profile_fields()
  * decodes from a form body for the interactive Save path. */
 static esp_err_t import_post_handler(httpd_req_t *req)
 {

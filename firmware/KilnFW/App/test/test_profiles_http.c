@@ -338,7 +338,7 @@ httpd_handle_t wifi_provision_http_get_server(void)
 // getters. Fixed, generous stand-ins: thermo_count=8 (every zone_mask bit
 // legal) and a high ramp ceiling (so the feasibility gate never blocks a
 // test unrelated to it). None of this file's tests exercises feasibility
-// rejection -- that is parse_profile_fields()/profile_post_handler()
+// rejection -- that is profiles_parse_profile_fields()/profile_post_handler()
 // territory, already covered indirectly by zones_http.c's own tests using
 // the same pattern for zones config.
 // Overridable so the builtin-catalogue emitter test below can pin a
@@ -351,10 +351,14 @@ uint8_t zones_config_get_thermo_count(void)
 {
     return g_stub_thermo_count;
 }
+// 1000.0f by default (never a feasibility constraint unless a test opts in),
+// overridable per-zone for the live-edit HARD-mode ramp-ceiling refusal
+// tests below.
+static float g_stub_zone_max_ramp_c_per_hr[8] = {1000.0f, 1000.0f, 1000.0f, 1000.0f,
+                                                  1000.0f, 1000.0f, 1000.0f, 1000.0f};
 bool zones_config_get_max_ramp(uint8_t zone_index, float *out_c_per_hr)
 {
-    (void)zone_index;
-    if (out_c_per_hr) *out_c_per_hr = 1000.0f;
+    if (out_c_per_hr) *out_c_per_hr = (zone_index < 8) ? g_stub_zone_max_ramp_c_per_hr[zone_index] : 1000.0f;
     return true;
 }
 
@@ -1656,6 +1660,120 @@ static void test_profiles_list_marks_exceeds_ceiling(void)
               "the over-ceiling profile must be marked exceeds_ceiling:true in the list");
 }
 
+// ---- profiles_validate_candidate() -- docs/LIVE_PROFILE_EDIT_PLAN.md section 7/8 -------
+// The one function the save handler, the live-edit handler and the executor's pickup
+// check all share. These tests exercise it directly (no httpd_req_t needed -- it reads
+// only zone config), proving HARD refuses what ADVISORY only warns about, and that the
+// two modes otherwise agree.
+
+static void test_validate_candidate_hard_mode_refuses_target_above_zone_ceiling(void)
+{
+    TEST_SECTION("profiles_validate_candidate HARD -- a target above the zone's max_temp_c is refused, "
+                 "not merely warned (the live-edit rule, stricter than save-time)");
+    g_stub_zone_max_temp_c[0] = 80.0f;
+    g_stub_zone_max_ramp_c_per_hr[0] = 1000.0f;
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    strcpy(p.name, "Over Ceiling");
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0].target_c = 80.1f;
+    p.segments[0].ramp_c_per_hr = 0.0f;
+    p.segments[0].dwell_min = 5;
+
+    char err[224] = "";
+    bool ok = profiles_validate_candidate(&p, PROFILE_VALIDATE_HARD, NULL, 0, err, sizeof(err));
+    TEST_CHECK(!ok, "80.1C against an 80C ceiling must be refused in HARD mode");
+    TEST_CHECK(strstr(err, "segment 1") != NULL, "the refusal must name the segment");
+
+    // Same candidate in ADVISORY mode must still save (this is the existing,
+    // unchanged save-time behavior -- proves the two modes share one function
+    // and differ only by mode, per section 11's test-coverage requirement).
+    char warn[512] = "";
+    char err2[224] = "";
+    bool ok2 = profiles_validate_candidate(&p, PROFILE_VALIDATE_ADVISORY, warn, sizeof(warn), err2, sizeof(err2));
+    TEST_CHECK(ok2, "the identical candidate must still be ACCEPTED in ADVISORY mode");
+    TEST_CHECK(strstr(warn, "80") != NULL, "ADVISORY mode must still surface the condition as a warning");
+}
+
+static void test_validate_candidate_hard_mode_refuses_ramp_above_zone_ceiling(void)
+{
+    TEST_SECTION("profiles_validate_candidate HARD -- a ramp rate above the zone's max_ramp_c_per_hr "
+                 "is refused");
+    g_stub_zone_max_temp_c[0] = 200.0f;
+    g_stub_zone_max_ramp_c_per_hr[0] = 100.0f;
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    strcpy(p.name, "Over Ramp");
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0].target_c = 150.0f;
+    p.segments[0].ramp_c_per_hr = 150.0f; /* > the 100 C/hr ceiling */
+    p.segments[0].dwell_min = 5;
+
+    char err[224] = "";
+    bool ok = profiles_validate_candidate(&p, PROFILE_VALIDATE_HARD, NULL, 0, err, sizeof(err));
+    TEST_CHECK(!ok, "150 C/hr against a 100 C/hr ceiling must be refused in HARD mode");
+}
+
+static void test_validate_candidate_hard_mode_refuses_uncommissioned_zone(void)
+{
+    TEST_SECTION("profiles_validate_candidate HARD -- max_temp_c == 0 (uncommissioned) is refused, "
+                 "never treated as an infinite ceiling");
+    g_stub_zone_max_temp_c[0] = 0.0f;
+    g_stub_zone_max_ramp_c_per_hr[0] = 1000.0f;
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    strcpy(p.name, "Uncommissioned");
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0].target_c = 50.0f;
+    p.segments[0].ramp_c_per_hr = 0.0f;
+    p.segments[0].dwell_min = 5;
+
+    char err[224] = "";
+    bool ok = profiles_validate_candidate(&p, PROFILE_VALIDATE_HARD, NULL, 0, err, sizeof(err));
+    TEST_CHECK(!ok, "an uncommissioned zone (max_temp_c == 0) must refuse a HARD-mode edit, not pass it "
+                    "as if there were no ceiling");
+}
+
+static void test_validate_candidate_hard_mode_20pct_ramp_band_still_only_warns(void)
+{
+    TEST_SECTION("profiles_validate_candidate HARD -- a ramp rate within 20%% of the ceiling (but not "
+                 "over it) still only warns, in both modes, matching PROFILE_RAMP_WARN_FRACTION");
+    g_stub_zone_max_temp_c[0] = 200.0f;
+    g_stub_zone_max_ramp_c_per_hr[0] = 100.0f;
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    strcpy(p.name, "Near Ramp Ceiling");
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0].target_c = 150.0f;
+    p.segments[0].ramp_c_per_hr = 85.0f; /* within 20% of 100, but not over it */
+    p.segments[0].dwell_min = 5;
+
+    char warn[512] = "";
+    char err[224] = "";
+    bool ok = profiles_validate_candidate(&p, PROFILE_VALIDATE_HARD, warn, sizeof(warn), err, sizeof(err));
+    TEST_CHECK(ok, "85 C/hr against a 100 C/hr ceiling is within the warn band, not over it -- must be accepted");
+    TEST_CHECK(strstr(warn, "20%") != NULL, "the 20%% warning must still fire in HARD mode");
+
+    // Restore every zone's stub ramp/temp ceiling to its pre-existing
+    // default. g_stub_zone_max_ramp_c_per_hr is a global this group of tests
+    // is the only caller to override away from 1000.0f -- leaving zone 0 at
+    // 100.0f here would silently poison every later test in this file that
+    // exercises a >100 C/hr ramp on zone 0 (e.g. make_stored_profile()'s
+    // 150 C/hr segment), since nothing else in the file resets it.
+    for (int zi = 0; zi < 8; zi++) {
+        g_stub_zone_max_ramp_c_per_hr[zi] = 1000.0f;
+    }
+    g_stub_zone_max_temp_c[0] = 0.0f;
+}
+
 static void test_nvs_save_slot_refuses_when_calling_stack_is_external_ram(void)
 {
     TEST_SECTION("nvs_save_slot -- refuses (does not crash) when called with a PSRAM stack "
@@ -1805,6 +1923,10 @@ void run_test_profiles_http(void)
     test_profiles_http_save_accepts_one_degree_over_zone_limit();
     test_profiles_http_save_accepts_2015c_gas_kiln_profile_on_80c_zone();
     test_profiles_list_marks_exceeds_ceiling();
+    test_validate_candidate_hard_mode_refuses_target_above_zone_ceiling();
+    test_validate_candidate_hard_mode_refuses_ramp_above_zone_ceiling();
+    test_validate_candidate_hard_mode_refuses_uncommissioned_zone();
+    test_validate_candidate_hard_mode_20pct_ramp_band_still_only_warns();
     test_nvs_save_slot_refuses_when_calling_stack_is_external_ram();
     test_nvs_save_slot_proceeds_normally_on_an_internal_ram_stack();
     test_builtin_json_emits_seg_kind_and_resolved_zone_mask();

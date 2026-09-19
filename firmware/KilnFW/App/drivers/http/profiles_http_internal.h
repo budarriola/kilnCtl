@@ -167,6 +167,47 @@ bool validate_on_off_rules(const profile_t *candidate, char *err_msg, size_t err
  * design rule. */
 bool validate_io_segment(const profile_segment_t *seg, uint8_t seg_num, char *err_msg, size_t err_cap);
 
+/* Widened non-`static` (docs/LIVE_PROFILE_EDIT_PLAN.md section 8 item 1) so
+ * the live-edit handler decodes the identical x-www-form-urlencoded shape
+ * profiles_edit_http.c's own POST /api/profile does -- two decoders would
+ * drift on the first new field. Renamed from the original `static
+ * parse_profile_fields` per the CLAUDE.md rule on widening a `static` (a
+ * prefix rename even when the repo-wide grep for the bare name is clean). */
+bool profiles_parse_profile_fields(const char *body, profile_t *p, char *err_msg, size_t err_cap);
+
+/* Selects which rule profiles_validate_candidate() applies to a ZONE_RAMP
+ * segment's target_c against its zone's CURRENTLY configured max_temp_c
+ * (docs/LIVE_PROFILE_EDIT_PLAN.md section 7). PROFILE_VALIDATE_ADVISORY is
+ * today's save-time behavior (profile_exceeds_zone_ceiling(): a profile
+ * exceeding the live ceiling still saves, with a warning -- profiles are
+ * portable between kilns, and only *starting* one enforces the ceiling).
+ * PROFILE_VALIDATE_HARD is the live-edit rule: a target above the zone's
+ * max_temp_c, or a ramp above the zone's max_ramp_c_per_hr, or a zone with
+ * max_temp_c == 0 (uncommissioned -- no ceiling to check against, and a
+ * missing ceiling must never read as an infinite one), is refused outright.
+ * The two modes share every other check (segment_count, target/ramp/dwell
+ * bounds, IO-segment validation, on/off-rule validation) identically. */
+typedef enum {
+    PROFILE_VALIDATE_ADVISORY = 0, /* save-time: over-ceiling warns, does not refuse */
+    PROFILE_VALIDATE_HARD = 1,     /* live-edit accept/pickup: over-ceiling refuses */
+} profile_validate_mode_t;
+
+/* The one place a candidate profile_t is checked before it is written
+ * anywhere. Called by profile_post_handler() (mode ADVISORY, unchanged
+ * behavior), the live-edit POST handler (mode HARD, docs/LIVE_PROFILE_EDIT_PLAN.md
+ * section 7), and the executor's pickup re-check (mode HARD, against the
+ * *live* zone config, under s_exec.lock) -- three call sites, one rule.
+ * Reads zone config; touches no httpd state, so it host-tests directly
+ * without a request context. `warnings_json` (may be NULL to skip) receives
+ * a JSON array of advisory warning strings (ramp within 20% of a zone
+ * ceiling, or -- ADVISORY mode only -- a target above the current zone
+ * ceiling); `err_msg`/`err_cap` receive the refusal reason on a `false`
+ * return. Returns false on the first hard violation encountered (segment
+ * index named in `err_msg`); a HARD-mode over-ceiling target/ramp is such a
+ * violation, an ADVISORY-mode one is not (it becomes a warning instead). */
+bool profiles_validate_candidate(const profile_t *candidate, profile_validate_mode_t mode, char *warnings_json,
+                                  size_t warnings_json_cap, char *err_msg, size_t err_cap);
+
 /* ---- profiles_catalog_http.c ----------------------------------------------
  * Registered by profiles_http_start() in profiles_http.c. */
 esp_err_t profiles_page_get_handler(httpd_req_t *req);

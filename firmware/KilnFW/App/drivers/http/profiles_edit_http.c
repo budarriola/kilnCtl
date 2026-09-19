@@ -27,7 +27,7 @@
  * executor, not this page, and profile_executor.c does exactly that against
  * every participating zone's ceiling as it stands at start. */
 
-static bool parse_profile_fields(const char *body, profile_t *p, char *err_msg, size_t err_cap)
+bool profiles_parse_profile_fields(const char *body, profile_t *p, char *err_msg, size_t err_cap)
 {
     char name[PROFILE_NAME_MAX_LEN + 1];
     int name_len = http_form_find_field(body, "name", name, sizeof(name));
@@ -289,6 +289,122 @@ static bool append_warning(char *json, size_t cap, size_t *o, bool *first, const
     return true;
 }
 
+/* docs/LIVE_PROFILE_EDIT_PLAN.md section 7/8 -- the single validation body
+ * shared by profile_post_handler() (mode ADVISORY, below), the live-edit
+ * accept handler and the executor's pickup re-check (both mode HARD). Reads
+ * zone config only; no httpd state, so it host-tests directly. `warnings_json`
+ * (may be NULL/0-cap to skip) is filled with a JSON array of warning
+ * strings, matching profile_post_handler()'s pre-extraction wire format
+ * exactly (empty array "[]" when there is nothing to warn about). Returns
+ * false on the first HARD violation, naming the segment/value/ceiling in
+ * `err_msg`; in ADVISORY mode the same conditions become warnings instead
+ * and the function keeps checking every segment/zone rather than stopping
+ * at the first one. */
+bool profiles_validate_candidate(const profile_t *candidate, profile_validate_mode_t mode, char *warnings_json,
+                                  size_t warnings_json_cap, char *err_msg, size_t err_cap)
+{
+    size_t warn_o = 0;
+    bool warn_first = true;
+    bool have_warn_buf = warnings_json != NULL && warnings_json_cap > 0;
+    if (have_warn_buf) {
+        warnings_json[warn_o++] = '[';
+    }
+
+    /* Multi-zone (TODO.md 6A.5): check every participating zone's ceiling
+     * against every ramped segment -- a profile is only feasible if ALL of
+     * its zones can sustain the requested rate, since ramp-lock will hold
+     * the shared setpoint back to whichever zone is slowest anyway. */
+    for (uint8_t i = 0; i < candidate->segment_count; i++) {
+        if (candidate->segments[i].seg_kind != PROFILE_SEG_KIND_ZONE_RAMP) {
+            continue; /* a relay/IO segment has no ramp rate/target to check against a zone's ceiling */
+        }
+        float rate = candidate->segments[i].ramp_c_per_hr;
+        float target = candidate->segments[i].target_c;
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            if (!(candidate->zone_mask & (1u << zi))) {
+                continue;
+            }
+
+            if (mode == PROFILE_VALIDATE_HARD) {
+                /* Section 7's stricter live-edit rule: max_temp_c == 0 means
+                 * "uncommissioned", never "no limit" -- refuse rather than
+                 * let a missing ceiling read as an infinite one. */
+                float max_temp_c = 0.0f, min_temp_c = 0.0f;
+                bool have_limits = zones_config_get_temp_limits(zi, &max_temp_c, &min_temp_c);
+                if (!have_limits || max_temp_c <= 0.0f) {
+                    snprintf(err_msg, err_cap,
+                            "segment %u: zone %u has no configured temperature ceiling (uncommissioned)", i + 1, zi);
+                    return false;
+                }
+                if (target > max_temp_c) {
+                    snprintf(err_msg, err_cap, "segment %u: target %.1f C exceeds zone %u's %.1f C ceiling", i + 1,
+                            (double)target, zi, (double)max_temp_c);
+                    return false;
+                }
+            }
+
+            if (rate <= 0.0f) {
+                continue; /* no ramp-rate constraint on this segment (TODO.md section 5) */
+            }
+            float ramp_ceiling = 0.0f;
+            zones_config_get_max_ramp(zi, &ramp_ceiling); /* zone already validated < thermo_count */
+            if (rate > ramp_ceiling) {
+                if (mode == PROFILE_VALIDATE_HARD) {
+                    snprintf(err_msg, err_cap, "segment %u: ramp rate %.1f C/hr exceeds zone %u's %.1f C/hr ceiling",
+                            i + 1, (double)rate, zi, (double)ramp_ceiling);
+                    return false;
+                }
+                if (have_warn_buf) {
+                    char text[96];
+                    snprintf(text, sizeof(text), "segment %u: ramp rate %.1f C/hr exceeds zone %u's %.1f C/hr ceiling",
+                            i + 1, (double)rate, zi, (double)ramp_ceiling);
+                    append_warning(warnings_json, warnings_json_cap, &warn_o, &warn_first, text);
+                }
+                /* ADVISORY mode historically refused this exact condition
+                 * (a hard over-ramp-ceiling save) via profile_post_handler's
+                 * own inline check before this extraction -- preserved
+                 * as a refusal in ADVISORY too, since profile feasibility
+                 * (unlike the temp ceiling) was never made portable/advisory
+                 * by the 2026-09-02 owner correction below. */
+                if (mode == PROFILE_VALIDATE_ADVISORY) {
+                    snprintf(err_msg, err_cap, "segment %u: ramp rate %.1f C/hr exceeds zone %u's %.1f C/hr ceiling",
+                            i + 1, (double)rate, zi, (double)ramp_ceiling);
+                    return false;
+                }
+            } else if (rate > PROFILE_RAMP_WARN_FRACTION * ramp_ceiling && have_warn_buf) {
+                char text[96];
+                snprintf(text, sizeof(text),
+                        "segment %u: ramp rate %.1f C/hr is within 20%% of zone %u's %.1f C/hr ceiling", i + 1,
+                        (double)rate, zi, (double)ramp_ceiling);
+                append_warning(warnings_json, warnings_json_cap, &warn_o, &warn_first, text);
+            }
+        }
+    }
+
+    /* OWNER CORRECTION (2026-09-02): at save time (ADVISORY), a target
+     * exceeding the zone's CURRENT max_temp_c is a warning, not a refusal --
+     * profiles are portable between kilns (profile_exceeds_zone_ceiling()'s
+     * own comment); enforcement stays profile_executor_run.c's run-start
+     * re-check. Section 7 makes HARD mode stricter on purpose: a live edit
+     * is not portable, it reaches the elements within one tick, so this
+     * exact condition is a hard target/ceiling refusal above instead, and is
+     * skipped here to avoid double-reporting it as a warning too. */
+    if (mode == PROFILE_VALIDATE_ADVISORY && have_warn_buf) {
+        char ceiling_note[256];
+        if (profile_exceeds_zone_ceiling(candidate, ceiling_note, sizeof(ceiling_note))) {
+            append_warning(warnings_json, warnings_json_cap, &warn_o, &warn_first, ceiling_note);
+        }
+    }
+
+    if (have_warn_buf) {
+        if (warn_o + 1 < warnings_json_cap) {
+            warnings_json[warn_o++] = ']';
+        }
+        warnings_json[warn_o < warnings_json_cap ? warn_o : warnings_json_cap - 1] = '\0';
+    }
+    return true;
+}
+
 esp_err_t profile_post_handler(httpd_req_t *req)
 {
     if (req->content_len <= 0 || req->content_len > PROFILE_BODY_MAX) {
@@ -296,13 +412,13 @@ esp_err_t profile_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    /* HEAP (PSRAM), not stack, and freed the moment parse_profile_fields()
+    /* HEAP (PSRAM), not stack, and freed the moment profiles_parse_profile_fields()
      * is done with it, BEFORE warn_json below is even allocated -- this used
      * to be the biggest of three buffers (2049B) that all lived on the
      * stack simultaneously for the whole function (body + warn_json[1168] +
      * the final json[1424] = 4641B in one frame, coordinator review,
      * 2026-08-31 httpd_worker stack-overflow audit). `body` is never
-     * referenced again after the parse_profile_fields() call a few lines
+     * referenced again after the profiles_parse_profile_fields() call a few lines
      * down (the id_val lookup and that one call are its only two uses), so
      * it does not genuinely need to overlap with warn_json/json at all --
      * sequencing it out drops this function's peak transient allocation
@@ -360,7 +476,7 @@ esp_err_t profile_post_handler(httpd_req_t *req)
     profile_t tmp;
     memset(&tmp, 0, sizeof(tmp));
     char err_msg[128];
-    bool parse_ok = parse_profile_fields(body, &tmp, err_msg, sizeof(err_msg));
+    bool parse_ok = profiles_parse_profile_fields(body, &tmp, err_msg, sizeof(err_msg));
     /* Last use of `body` in this function either way -- free it here, before
      * warn_json is allocated below, rather than holding it until the
      * function returns. */
@@ -374,21 +490,19 @@ esp_err_t profile_post_handler(httpd_req_t *req)
         return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
     }
 
-    /* Feasibility check (TODO.md section 5): a segment with ramp_c_per_hr ==
-     * 0 has no ramp-rate constraint at all (dwell/hold segment) and is
-     * exempt. For a segment that does specify a rate, no ceiling on record
-     * for the zone (zones_config_get_max_ramp returning a ceiling of 0.0,
-     * which is also its "never configured" default) makes every nonzero
-     * rate infeasible -- correct, since there is nothing to feasibility
-     * check against until the zone's max ramp rate is set on the
-     * Thermocouples & Zones page.
+    /* Feasibility + ceiling check, docs/LIVE_PROFILE_EDIT_PLAN.md section 8
+     * item 2 -- profiles_validate_candidate() is the one function the save
+     * handler here, the live-edit handler and the executor's pickup check
+     * all call. ADVISORY mode reproduces this handler's pre-extraction
+     * behavior exactly: an over-ramp-ceiling segment still refuses (a hard
+     * 400, unchanged), an over-temp-ceiling one only warns (the 2026-09-02
+     * owner correction, profiles are portable between kilns).
      *
      * HEAP (PSRAM): `body` above is already freed by the time this is
      * allocated, so this and the final `json` below (which embeds this
      * buffer's text) are the only two transient buffers actually coexisting
      * in this function -- see this function's own opening comment for the
-     * peak-size accounting. Freed on every return path below (both the
-     * feasibility-rejection 400 and the final 200). */
+     * peak-size accounting. Freed on every return path below. */
     const size_t warn_json_cap = PROFILE_MAX_SEGMENTS * 96 + 16;
     char *warn_json = heap_caps_malloc(warn_json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (warn_json == NULL) {
@@ -399,67 +513,17 @@ esp_err_t profile_post_handler(httpd_req_t *req)
         return httpd_resp_sendstr(req,
                                   "{\"ok\":false,\"error\":\"out of memory building the response\"}");
     }
-    size_t warn_o = 0;
-    bool warn_first = true;
-    warn_json[warn_o++] = '[';
-    /* Multi-zone (TODO.md 6A.5): check every participating zone's ceiling
-     * against every ramped segment -- a profile is only feasible if ALL of
-     * its zones can sustain the requested rate, since ramp-lock will hold
-     * the shared setpoint back to whichever zone is slowest anyway; a
-     * profile that's infeasible for even one zone would just always be
-     * ramp-locked against that zone forever. */
-    for (uint8_t i = 0; i < tmp.segment_count; i++) {
-        if (tmp.segments[i].seg_kind != PROFILE_SEG_KIND_ZONE_RAMP) {
-            continue; /* a relay/IO segment has no ramp rate to check against a zone's ceiling */
-        }
-        float rate = tmp.segments[i].ramp_c_per_hr;
-        if (rate <= 0.0f) {
-            continue;
-        }
-        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
-            if (!(tmp.zone_mask & (1u << zi))) {
-                continue;
-            }
-            float ceiling = 0.0f;
-            zones_config_get_max_ramp(zi, &ceiling); /* zone already validated < thermo_count */
-            if (rate > ceiling) {
-                char json[224];
-                int n = snprintf(json, sizeof(json),
-                                 "{\"ok\":false,\"error\":\"segment %u: ramp rate %.1f C/hr exceeds zone %u's "
-                                 "%.1f C/hr ceiling\"}",
-                                 i + 1, (double)rate, zi, (double)ceiling);
-                httpd_resp_set_status(req, "400 Bad Request");
-                httpd_resp_set_type(req, "application/json");
-                esp_err_t ret = httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
-                free(warn_json);
-                return ret;
-            }
-            if (rate > PROFILE_RAMP_WARN_FRACTION * ceiling) {
-                char text[96];
-                snprintf(text, sizeof(text),
-                        "segment %u: ramp rate %.1f C/hr is within 20%% of zone %u's %.1f C/hr ceiling",
-                        i + 1, (double)rate, zi, (double)ceiling);
-                append_warning(warn_json, warn_json_cap, &warn_o, &warn_first, text);
-            }
-        }
+    char validate_err[224];
+    if (!profiles_validate_candidate(&tmp, PROFILE_VALIDATE_ADVISORY, warn_json, warn_json_cap, validate_err,
+                                     sizeof(validate_err))) {
+        char json[256];
+        int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", validate_err);
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        esp_err_t ret = httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+        free(warn_json);
+        return ret;
     }
-    /* OWNER CORRECTION (2026-09-02): a target exceeding the zone's CURRENT
-     * max_temp_c is no longer a save-time refusal (profiles are portable
-     * between kilns -- see profile_exceeds_zone_ceiling()'s own comment).
-     * Surfaced here as a warning instead, so the web editor's response makes
-     * the condition visible immediately rather than leaving the user to
-     * discover it only when a run is refused hours later. Enforcement stays
-     * profile_executor_run.c's run-start re-check. */
-    {
-        char ceiling_note[256];
-        if (profile_exceeds_zone_ceiling(&tmp, ceiling_note, sizeof(ceiling_note))) {
-            append_warning(warn_json, warn_json_cap, &warn_o, &warn_first, ceiling_note);
-        }
-    }
-    if (warn_o + 1 < warn_json_cap) {
-        warn_json[warn_o++] = ']';
-    }
-    warn_json[warn_o < warn_json_cap ? warn_o : warn_json_cap - 1] = '\0';
 
     s_profiles.profiles[target_id] = tmp;
     s_profiles.used_bitmap |= (1u << target_id);
