@@ -85,14 +85,19 @@ void ui_home_refresh_cb(lv_timer_t *timer)
      * _get_name() are cheap RAM reads (no NVS access), safe on this 1 Hz
      * LVGL-task tick. "(none)" matches KILN_CFG_NO_ACTIVE_ID's own "nothing
      * has ever been applied/saved as the starting point" meaning. */
+    /* Owner rule 2026-09-19 (UI_PLAN.md section 6.8 item 6): the suffix is
+     * shown only when the board holds two or more saved kiln configs --
+     * ui_page_home_kiln_suffix_visible()/_append_kiln_suffix() own that
+     * decision (host-tested with counts 0, 1, 2). The list buffer itself
+     * isn't consulted, just the count kiln_cfg_store_list() returns. */
+    kiln_cfg_summary_t kiln_cfg_list[KILN_CFG_MAX_COUNT];
+    uint8_t kiln_cfg_count = kiln_cfg_store_list(kiln_cfg_list, KILN_CFG_MAX_COUNT);
     int32_t active_kiln_id = kiln_cfg_store_get_active_id();
     char kiln_name[KILN_CFG_NAME_MAX_LEN + 1];
-    size_t used = strlen(status_buf);
-    if (active_kiln_id != KILN_CFG_NO_ACTIVE_ID && kiln_cfg_store_get_name(active_kiln_id, kiln_name, sizeof(kiln_name))) {
-        snprintf(status_buf + used, sizeof(status_buf) - used, "  Kiln: %s", kiln_name);
-    } else {
-        snprintf(status_buf + used, sizeof(status_buf) - used, "  Kiln: (none)");
-    }
+    bool have_kiln_name = (active_kiln_id != KILN_CFG_NO_ACTIVE_ID) &&
+                           kiln_cfg_store_get_name(active_kiln_id, kiln_name, sizeof(kiln_name));
+    ui_page_home_append_kiln_suffix(status_buf, sizeof(status_buf), kiln_cfg_count, have_kiln_name,
+                                     have_kiln_name ? kiln_name : NULL);
     lv_label_set_text(s_ui_home_status_label, status_buf);
 
     /* Same plain-C getters dashboard_http.c's GET /api/status and

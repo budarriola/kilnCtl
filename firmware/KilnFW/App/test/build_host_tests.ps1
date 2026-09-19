@@ -101,6 +101,7 @@ try {
         (Join-Path $testDir "test_watchdog_cfg.c"),
         (Join-Path $testDir "test_ramp_assist_cfg.c"),
         (Join-Path $testDir "test_ui_page_home_graph.c"),
+        (Join-Path $testDir "test_ui_page_home_rail.c"),
         (Join-Path $testDir "test_ui_profile_list_order.c"),
         # UI_PLAN.md 6.3 -- the LCD Temperature page's safety-relay label text.
         (Join-Path $testDir "test_ui_page_temperature_safety.c"),
@@ -176,6 +177,7 @@ try {
         (Join-Path $driversDir "control/thermo_combine.c"),
         (Join-Path $driversDir "control/profile_feasibility.c"),
         (Join-Path $driversDir "ui/ui_page_home_graph.c"),
+        (Join-Path $driversDir "ui/ui_page_home_rail.c"),
         (Join-Path $driversDir "ui/ui_profile_list_order.c"),
         (Join-Path $driversDir "ui/ui_page_temperature_safety.c"),
         (Join-Path $driversDir "hw/max31856_codec.c"),

@@ -73,6 +73,7 @@ void run_test_dualwrite_window(void);
 void run_test_watchdog_cfg(void);
 void run_test_ramp_assist_cfg(void);
 void run_test_ui_page_home_graph(void);
+void run_test_ui_page_home_rail(void);
 void run_test_ui_profile_list_order(void);
 void run_test_ui_page_temperature_safety(void);
 void run_test_max31856_codec(void);
@@ -178,6 +179,7 @@ int main(void)
     run_test_watchdog_cfg();
     run_test_ramp_assist_cfg();
     run_test_ui_page_home_graph();
+    run_test_ui_page_home_rail();
     run_test_ui_profile_list_order();
     run_test_ui_page_temperature_safety();
     run_test_max31856_codec();

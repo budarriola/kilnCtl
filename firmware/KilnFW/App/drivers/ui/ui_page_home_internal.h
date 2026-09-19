@@ -61,6 +61,7 @@
 #include "heat_enable.h" /* heat_enable_is_granted() -- one of the gesture's three
                             * live preconditions. */
 #include "ui_page_home_graph.h"
+#include "ui_page_home_rail.h"
 #include "run_state.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
