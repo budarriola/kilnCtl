@@ -3,8 +3,10 @@
 #include "live_profile.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #include "hal_kv.h"
@@ -370,15 +372,32 @@ bool live_profile_load_working(profile_t *out)
     if (kv_err != HAL_OK) {
         return false;
     }
-    uint8_t buf[PROFILE_BLOB_MAX_SIZE];
-    size_t len = sizeof(buf);
+    /* Heap-allocated, not a stack local -- same reasoning as
+     * profile_executor.c's reload_live_profile_if_changed() candidate blob:
+     * this function sits on executor_task_entry's call chain
+     * (check_executor_task_stack_budget.ps1), and PROFILE_BLOB_MAX_SIZE is
+     * cumulative on top of every other frame in that chain. Established
+     * pattern per firing_stats_persist()/firing_stats_load(): heap_caps_malloc
+     * + free() on every return path, never a bigger stack. Internal DRAM: this
+     * path reads NVS via hal_kv, same reasoning as firing_stats_load()'s own
+     * MALLOC_CAP_INTERNAL comment. */
+    uint8_t *buf = heap_caps_malloc(PROFILE_BLOB_MAX_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (buf == NULL) {
+        ESP_LOGE(LIVE_PROFILE_TAG, "live_profile_load_working: malloc(%u) failed",
+                 (unsigned)PROFILE_BLOB_MAX_SIZE);
+        hal_kv_close(&h);
+        return false;
+    }
+    size_t len = PROFILE_BLOB_MAX_SIZE;
     kv_err = hal_kv_get_blob(&h, NVS_KEY_LIVE_PROFILE, buf, &len);
     hal_kv_close(&h);
     if (kv_err != HAL_OK) {
+        free(buf);
         return false;
     }
     const char *reason = "";
     profile_decode_result_t dres = profile_decode_blob(buf, len, out, &reason);
+    free(buf);
     return dres == PROFILE_DECODE_OK;
 }
 
