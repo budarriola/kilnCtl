@@ -238,6 +238,213 @@ bool zone_sweep_derive_ct_channel(const float *per_ch_a, uint8_t *out_ch)
  * provenance. */
 #define ZONE_SWEEP_NORMAL_NOISE_FLOOR_REF_K_CT 1.0f
 
+/* ---- CT attribution verification (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md)
+ *
+ * The verdict is deliberately SEPARATE from zone_sweep_derive_ct_channel()
+ * above. That function's job is coarse and unchanged: "did anything conduct,
+ * and was one channel dominant", with a fixed ZONE_SWEEP_CT_RESPOND_A floor of
+ * 2.0 A. The verification needs a CALIBRATED floor instead, because the
+ * threshold a real installation must clear depends on the clamp ratio the
+ * operator entered and on the zone's own recorded normal current -- a fixed
+ * 2.0 A bakes one clamp's assumption into firmware.
+ *
+ *   threshold_a(z) = max( noise_floor_a(ch), RESPOND_FRACTION * i_normal_a(z) )
+ *
+ * where noise_floor_a(ch) is ZONE_SWEEP_NORMAL_NOISE_FLOOR_A rescaled by the
+ * live committed k_ct exactly as zone_sweep_summed_normal_a() already does --
+ * same derivation, same reference constant, so the two cannot drift apart.
+ *
+ * Structural rule that makes this safe, and the reason the function is shaped
+ * this way rather than as a chain of ifs each able to assign any value:
+ * INCONCLUSIVE is the initial value and the only value reachable without a
+ * measurement, and PASS is written in EXACTLY ONE place, at the bottom, on a
+ * branch that has already established a resolved dominant channel matching the
+ * configured one, on a fitted channel, with an entered clamp ratio, above
+ * threshold_a. Absence of evidence therefore cannot fall through to PASS; it
+ * lands on the value it started at.
+ *
+ * Everything is a plain scalar the caller gathers. In particular `fitted` is
+ * passed in rather than looked up, so this stays pure and host-testable and so
+ * the single fitted predicate (config_store_ct_channel_fitted(), SaftyFW) stays
+ * the one owner of that question -- this must not become a second notion of
+ * fitted. */
+
+/* Fraction of a zone's own recorded normal current the response must clear.
+ * NOT an owner-settled number (the owner settled the settle time, the verdict
+ * scope, the ratio-entry design and the land order; this constant was not among
+ * them). 0.5 is chosen as the loosest value that still means "this zone drew
+ * something like the current it is on record as drawing": a zone responding at
+ * under half its recorded normal is reporting something the verdict should not
+ * call verified. It only ever TIGHTENS the decision above the noise floor --
+ * the floor is a hard lower bound that a small RESPOND_FRACTION cannot erode --
+ * so a wrong value here cannot manufacture a PASS out of noise. */
+#define ZONE_CT_VERIFY_RESPOND_FRACTION 0.5f
+
+/* Dominance-only resolution: NaN-safe, no absolute current floor. The absolute
+ * floor is the verdict's own calibrated threshold_a, applied below. Keeping the
+ * 2.0 A constant out of here is what lets a real bench reading of 23 mA reach
+ * the threshold comparison at all -- if this refused on an absolute floor
+ * first, every small-fixture measurement would exit as "ambiguous" and the
+ * floor comparison that gates PASS would never be exercised, which would make
+ * its mandated negative test vacuous. */
+static bool zone_ct_dominant_channel(const float *per_ch_a, uint8_t *out_ch, float *out_best_a)
+{
+    uint8_t best = 0;
+    float best_a = -1.0f, second_a = -1.0f;
+    for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+        if (!isfinite(per_ch_a[c])) {
+            return false; /* a NaN entry makes the whole call ambiguous, never a zero */
+        }
+        if (per_ch_a[c] > best_a) {
+            second_a = best_a;
+            best_a = per_ch_a[c];
+            best = c;
+        } else if (per_ch_a[c] > second_a) {
+            second_a = per_ch_a[c];
+        }
+    }
+    if (best_a <= 0.0f) {
+        return false;
+    }
+    if (second_a > 0.0f && best_a < second_a * ZONE_SWEEP_CT_DOMINANCE) {
+        return false; /* two channels saw this zone -- shared CT or foreign load */
+    }
+    if (out_ch) { *out_ch = best; }
+    if (out_best_a) { *out_best_a = best_a; }
+    return true;
+}
+
+/* The calibrated response threshold. Exposed (not static) so a host test can
+ * assert it is genuinely derived from the entered ratio rather than a constant
+ * wearing a new name. */
+float zone_ct_verify_threshold_a(float live_k_ct_v_per_a, float i_normal_a)
+{
+    float noise_floor_a = ZONE_SWEEP_NORMAL_NOISE_FLOOR_A;
+    if (isfinite(live_k_ct_v_per_a) && live_k_ct_v_per_a > 0.0f) {
+        noise_floor_a = ZONE_SWEEP_NORMAL_NOISE_FLOOR_A *
+                        (ZONE_SWEEP_NORMAL_NOISE_FLOOR_REF_K_CT / live_k_ct_v_per_a);
+    }
+    float from_normal_a = -1.0f;
+    if (isfinite(i_normal_a) && i_normal_a > 0.0f) {
+        from_normal_a = ZONE_CT_VERIFY_RESPOND_FRACTION * i_normal_a;
+    }
+    return (from_normal_a > noise_floor_a) ? from_normal_a : noise_floor_a;
+}
+
+zone_ct_verdict_t zone_sweep_verify_ct_attribution(const zone_ct_verify_in_t *in,
+                                                   zone_ct_verify_out_t *out)
+{
+    /* INCONCLUSIVE is the initial value -- see this block's header comment. */
+    zone_ct_verify_out_t r;
+    uint8_t resolved = 0xFFu;
+    float measured_a = NAN;
+
+    r.verdict = ZONE_CT_VERDICT_INCONCLUSIVE;
+    r.reason = ZONE_CT_VERIFY_NO_INPUT;
+    r.responded_ch = 0xFFu;
+    r.measured_a = NAN;
+    r.threshold_a = NAN;
+
+    if (in == NULL || in->configured_ch >= ZONE_CT_CHANNEL_COUNT) {
+        goto done;
+    }
+
+    /* Not fitted is outside the comparison, not evidence of miswiring: never a
+     * FAIL. The fitted answer comes from the caller's single predicate. */
+    if (!in->configured_ch_fitted) {
+        r.reason = ZONE_CT_VERIFY_NOT_FITTED;
+        goto done;
+    }
+    /* Never substitute a default clamp ratio. An uncalibrated channel already
+     * falls back to a counts-domain presence margin and reports 0 A, so a PASS
+     * computed here would be arithmetic on a number the firmware itself
+     * declines to believe. */
+    if (!in->ratio_entered || !isfinite(in->live_k_ct_v_per_a) || in->live_k_ct_v_per_a <= 0.0f) {
+        r.reason = ZONE_CT_VERIFY_RATIO_NOT_ENTERED;
+        goto done;
+    }
+    /* Two zones on one channel: per-zone attribution is not derivable by
+     * construction, so it is INCONCLUSIVE -- not FAIL, and never PASS. */
+    if (in->configured_ch_shared) {
+        r.reason = ZONE_CT_VERIFY_SHARED_CHANNEL;
+        goto done;
+    }
+    if (!isfinite(in->i_normal_a) || in->i_normal_a <= 0.0f) {
+        r.reason = ZONE_CT_VERIFY_NO_NORMAL_CURRENT;
+        goto done;
+    }
+
+    if (!zone_ct_dominant_channel(in->per_ch_a, &resolved, &measured_a)) {
+        r.reason = ZONE_CT_VERIFY_NO_DOMINANT_CHANNEL;
+        goto done;
+    }
+    r.responded_ch = resolved;
+    r.measured_a = measured_a;
+
+    /* Two zones the configuration says are distinct both resolved to one
+     * channel: that is miswiring, and it is a FAIL. */
+    if (in->conflict) {
+        r.verdict = ZONE_CT_VERDICT_FAIL;
+        r.reason = ZONE_CT_VERIFY_CONFLICT;
+        goto done;
+    }
+    /* A clamp on the wrong conductor. The triple (zone, configured, responded)
+     * is what lets an operator walk to the panel and move it. */
+    if (resolved != in->configured_ch) {
+        r.verdict = ZONE_CT_VERDICT_FAIL;
+        r.reason = ZONE_CT_VERIFY_WRONG_CHANNEL;
+        goto done;
+    }
+
+    r.threshold_a = zone_ct_verify_threshold_a(in->live_k_ct_v_per_a, in->i_normal_a);
+    /* THE floor comparison that gates PASS. Deleting or inverting this line
+     * must make the below-floor test report PASS -- that is the plan's mandated
+     * negative test, and it is the single line standing between a noise-level
+     * reading and a green verdict. Written as !(a >= b) so a NaN measurement
+     * refuses rather than passing. */
+    if (!(measured_a >= r.threshold_a)) {
+        r.reason = ZONE_CT_VERIFY_BELOW_THRESHOLD;
+        goto done;
+    }
+
+    /* The one and only place PASS is written. */
+    r.verdict = ZONE_CT_VERDICT_PASS;
+    r.reason = ZONE_CT_VERIFY_OK;
+
+done:
+    if (out) { *out = r; }
+    return r.verdict;
+}
+
+const char *zone_ct_verdict_str(zone_ct_verdict_t v)
+{
+    switch (v) {
+    case ZONE_CT_VERDICT_PASS: return "pass";
+    case ZONE_CT_VERDICT_FAIL: return "fail";
+    case ZONE_CT_VERDICT_INCONCLUSIVE: return "inconclusive";
+    }
+    return "inconclusive";
+}
+
+const char *zone_ct_verify_reason_str(zone_ct_verify_reason_t r)
+{
+    switch (r) {
+    case ZONE_CT_VERIFY_OK: return "verified";
+    case ZONE_CT_VERIFY_NO_INPUT: return "no measurement was taken";
+    case ZONE_CT_VERIFY_NOT_FITTED: return "the configured CT channel is not fitted";
+    case ZONE_CT_VERIFY_RATIO_NOT_ENTERED: return "clamp ratio not entered for this channel";
+    case ZONE_CT_VERIFY_SHARED_CHANNEL:
+        return "two zones share this CT channel, so per-zone attribution is not derivable";
+    case ZONE_CT_VERIFY_NO_NORMAL_CURRENT: return "no normal current recorded for this zone";
+    case ZONE_CT_VERIFY_NO_DOMINANT_CHANNEL: return "no single CT channel responded dominantly";
+    case ZONE_CT_VERIFY_BELOW_THRESHOLD: return "the response was below the calibrated threshold";
+    case ZONE_CT_VERIFY_WRONG_CHANNEL: return "a different CT channel responded than the one configured";
+    case ZONE_CT_VERIFY_CONFLICT: return "two zones resolved to the same CT channel";
+    }
+    return "no measurement was taken";
+}
+
+
 /* zone_kct_derive_t moved to zones_http_internal.h -- zones_current_sweep_
  * task.c calls zone_sweep_derive_k_ct()/zone_kct_derive_str() too. */
 

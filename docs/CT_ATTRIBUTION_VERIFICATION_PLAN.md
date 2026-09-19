@@ -19,11 +19,39 @@ Status: PARTIALLY BUILT. Landed so far (this commit):
   overrun; the PcTools client's timeouts are per-HTTP-request and say so.
 - Both PcTools documentation surfaces now state 10 s settle and ~14 s/zone.
 
-Still unbuilt: the derived threshold, the PASS/FAIL/INCONCLUSIVE verdict
-function and its firing-interlock consequence, the `ct_verify`/`verdict_v1`
-store and its configuration fingerprint, the `ct_attribution` readiness item,
-the `SAFETY_CT_CAL_BLOB_VERSION` 1â†’2 migration, and the eleven host tests plus
-two negative tests in "Testing".
+- The derived threshold and the three-state verdict are built, pure and
+  host-tested. `zone_ct_verify_threshold_a()` returns
+  `max(noise_floor_a(channel), RESPOND_FRACTION * i_normal_a(zone))`, where the
+  noise floor is the existing `ZONE_SWEEP_NORMAL_NOISE_FLOOR_A` rescaled by the
+  live `k_ct_v_per_a` exactly as `zone_sweep_summed_normal_a()` already does, so
+  the threshold genuinely moves with the entered clamp ratio instead of being a
+  constant under a new name. `zone_sweep_verify_ct_attribution()` sits beside
+  `zone_sweep_derive_ct_channel()` in
+  `firmware/KilnFW/App/drivers/control/zones_current_sweep_engine.c`; it takes
+  plain scalars, so the fitted question keeps its single owner on SaftyFW and
+  the whole verdict is testable off-target. INCONCLUSIVE is the initial value
+  and the only one reachable without a measurement, and PASS is written in
+  exactly one place, behind one floor comparison.
+  - Not fitted, no entered clamp ratio, a shared channel, no recorded normal
+    current, no dominant channel (any NaN channel included), and a response
+    below the derived threshold are all INCONCLUSIVE -- never FAIL, since none
+    of them is evidence of miswiring.
+  - A channel other than the configured one responding, and two distinct zones
+    resolving to one channel, are FAIL.
+  - Dominance resolution and the threshold comparison are deliberately separate
+    steps. The plan's test 3 as originally written ("all three channels at
+    0.023 A") exits on the dominance refusal and never reaches the floor
+    comparison, which would have made the mandated negative test vacuous. That
+    test is written as the real bench case instead -- one channel at ~23 mA, the
+    others near zero -- with the all-equal form kept as its own assertion.
+  - Twelve host test cases in `firmware/KilnFW/App/test/test_zones_http.c`:
+    the plan's cases 1-6 and 8-11, plus a no-recorded-normal case and a
+    bad-input case. Case 7 (a stale verdict) lands with the store.
+
+Still unbuilt: the firing-interlock consequence of FAIL, the
+`ct_verify`/`verdict_v1` store and its configuration fingerprint (with the
+plan's stale-fingerprint test and its negative test), the `ct_attribution`
+readiness item, and the `SAFETY_CT_CAL_BLOB_VERSION` 1->2 migration.
 
 Four owner decisions of
 2026-09-18 — settle time, verdict scope, an operator-entered clamp ratio with

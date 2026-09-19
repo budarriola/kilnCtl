@@ -10352,6 +10352,245 @@ static void test_zone_sweep_derive_ct_channel_refuses_nan(void)
     TEST_CHECK(!zone_sweep_derive_ct_channel(per_ch, &ch), "a NaN channel resolves nothing");
 }
 
+// ---------------------------------------------------------------------------
+// CT attribution verification (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md,
+// "Testing"). These exercise zone_sweep_verify_ct_attribution(), the
+// three-state verdict, which is a DIFFERENT decision from
+// zone_sweep_derive_ct_channel() above: that one answers "did something
+// conduct dominantly" against a fixed 2.0 A constant, this one answers "is
+// the clamp on the conductor the configuration claims" against a threshold
+// derived from the entered clamp ratio and the zone's own recorded normal.
+//
+// The rule these tests exist to defend is structural: INCONCLUSIVE is the
+// initial value and the only value reachable without a measurement, and PASS
+// is written in exactly one place. A verification that can report PASS when
+// it measured nothing is worse than no verification, because the guards
+// downstream (S3, S9, S11, S14, S15) then trust it.
+static zone_ct_verify_in_t ctv_base(void)
+{
+    zone_ct_verify_in_t in;
+    memset(&in, 0, sizeof(in));
+    in.configured_ch = 0;
+    in.configured_ch_fitted = true;
+    in.configured_ch_shared = false;
+    in.conflict = false;
+    in.ratio_entered = true;
+    in.live_k_ct_v_per_a = 1.0f;
+    in.i_normal_a = 12.0f;
+    return in;
+}
+
+// Case 1: correct attribution.
+static void test_ct_verify_correct_attribution_passes(void)
+{
+    zone_ct_verify_in_t in = ctv_base();
+    in.per_ch_a[0] = 12.0f;
+    zone_ct_verify_out_t out;
+    TEST_CHECK(zone_sweep_verify_ct_attribution(&in, &out) == ZONE_CT_VERDICT_PASS,
+               "ct verify: zone drives its configured channel well above threshold -- PASS");
+    TEST_CHECK(out.reason == ZONE_CT_VERIFY_OK, "ct verify: a pass reports the verified reason");
+    TEST_CHECK(out.responded_ch == 0, "ct verify: the responding channel is reported");
+}
+
+// Case 2: swapped clamp. The responded channel must be named -- that triple is
+// what lets an operator walk to the panel and move the clamp.
+static void test_ct_verify_swapped_clamp_fails_and_names_the_channel(void)
+{
+    zone_ct_verify_in_t in = ctv_base();
+    in.per_ch_a[1] = 12.0f;
+    zone_ct_verify_out_t out;
+    TEST_CHECK(zone_sweep_verify_ct_attribution(&in, &out) == ZONE_CT_VERDICT_FAIL,
+               "ct verify: a channel other than the configured one responded -- FAIL");
+    TEST_CHECK(out.reason == ZONE_CT_VERIFY_WRONG_CHANNEL, "ct verify: the reason is the wrong channel");
+    TEST_CHECK(out.responded_ch == 1, "ct verify: the channel that actually responded is named");
+}
+
+// Case 3: THE bench case. Every zone on this ~4 W fixture draws roughly 23 mA
+// against a 45 mA sweep floor, so a PASS here is physically impossible and an
+// implementation that can report one is wrong. This is also the test the
+// mandated negative test targets: deleting the floor comparison that gates
+// PASS must make THIS test report PASS.
+static void test_ct_verify_below_floor_is_inconclusive_never_pass(void)
+{
+    zone_ct_verify_in_t in = ctv_base();
+    in.per_ch_a[0] = 0.023f;   // the fixture's real per-zone draw
+    in.per_ch_a[1] = 0.0005f;
+    in.per_ch_a[2] = 0.0005f;
+    in.i_normal_a = 0.02f;     // so RESPOND_FRACTION * i_normal stays under the noise floor
+    zone_ct_verify_out_t out;
+    zone_ct_verdict_t v = zone_sweep_verify_ct_attribution(&in, &out);
+    TEST_CHECK(v != ZONE_CT_VERDICT_PASS,
+               "ct verify: a 23 mA response against a 45 mA floor is NEVER a pass");
+    TEST_CHECK(v == ZONE_CT_VERDICT_INCONCLUSIVE,
+               "ct verify: below the calibrated floor is INCONCLUSIVE, not FAIL");
+    TEST_CHECK(out.reason == ZONE_CT_VERIFY_BELOW_THRESHOLD,
+               "ct verify: the reason names the threshold, so the operator is not told it is miswired");
+
+    // The plan writes this case as "all three channels at 0.023 A". That form
+    // is also INCONCLUSIVE, but it exits on the DOMINANCE refusal and never
+    // reaches the floor comparison -- which would make the negative test
+    // vacuous. Both forms are asserted so the distinction stays visible.
+    zone_ct_verify_in_t flat = ctv_base();
+    flat.per_ch_a[0] = flat.per_ch_a[1] = flat.per_ch_a[2] = 0.023f;
+    flat.i_normal_a = 0.02f;
+    zone_ct_verify_out_t out2;
+    TEST_CHECK(zone_sweep_verify_ct_attribution(&flat, &out2) == ZONE_CT_VERDICT_INCONCLUSIVE,
+               "ct verify: three equal channels resolve nothing");
+    TEST_CHECK(out2.reason == ZONE_CT_VERIFY_NO_DOMINANT_CHANNEL,
+               "ct verify: the all-equal form exits on dominance, not on the floor");
+}
+
+// Case 4: no dominant channel -- never a guess at the larger one.
+static void test_ct_verify_no_dominant_channel_is_inconclusive(void)
+{
+    zone_ct_verify_in_t in = ctv_base();
+    in.per_ch_a[0] = 10.0f;
+    in.per_ch_a[1] = 8.0f;
+    zone_ct_verify_out_t out;
+    TEST_CHECK(zone_sweep_verify_ct_attribution(&in, &out) == ZONE_CT_VERDICT_INCONCLUSIVE,
+               "ct verify: two channels within the dominance factor resolve nothing");
+    TEST_CHECK(out.reason == ZONE_CT_VERIFY_NO_DOMINANT_CHANNEL, "ct verify: the ambiguous reason is reported");
+    TEST_CHECK(out.responded_ch == 0xFFu, "ct verify: no channel is named when none was resolved");
+}
+
+// Case 5: NaN must read as "cannot tell", never as 0 A on that channel.
+static void test_ct_verify_nan_channel_is_inconclusive(void)
+{
+    zone_ct_verify_in_t in = ctv_base();
+    in.per_ch_a[0] = 12.0f;
+    in.per_ch_a[1] = NAN;
+    zone_ct_verify_out_t out;
+    TEST_CHECK(zone_sweep_verify_ct_attribution(&in, &out) == ZONE_CT_VERDICT_INCONCLUSIVE,
+               "ct verify: a NaN channel makes the whole call ambiguous, not a zero substitution");
+    TEST_CHECK(out.reason == ZONE_CT_VERIFY_NO_DOMINANT_CHANNEL, "ct verify: NaN reports the ambiguous reason");
+}
+
+// Case 6: a shared channel is not derivable per zone -- INCONCLUSIVE, and in
+// particular not FAIL: nothing about sharing is evidence of miswiring.
+static void test_ct_verify_shared_channel_is_inconclusive_not_fail(void)
+{
+    zone_ct_verify_in_t in = ctv_base();
+    in.configured_ch_shared = true;
+    in.per_ch_a[0] = 12.0f;
+    zone_ct_verify_out_t out;
+    zone_ct_verdict_t v = zone_sweep_verify_ct_attribution(&in, &out);
+    TEST_CHECK(v == ZONE_CT_VERDICT_INCONCLUSIVE, "ct verify: a shared channel is INCONCLUSIVE");
+    TEST_CHECK(v != ZONE_CT_VERDICT_FAIL, "ct verify: sharing a channel is not miswiring");
+    TEST_CHECK(out.reason == ZONE_CT_VERIFY_SHARED_CHANNEL, "ct verify: the shared-channel reason is reported");
+}
+
+// Case 8: two zones the configuration says are distinct resolving to one
+// channel is miswiring, and it is a FAIL.
+static void test_ct_verify_conflict_is_fail(void)
+{
+    zone_ct_verify_in_t in = ctv_base();
+    in.conflict = true;
+    in.per_ch_a[0] = 12.0f;
+    zone_ct_verify_out_t out;
+    TEST_CHECK(zone_sweep_verify_ct_attribution(&in, &out) == ZONE_CT_VERDICT_FAIL,
+               "ct verify: two distinct zones resolving to one channel is a FAIL");
+    TEST_CHECK(out.reason == ZONE_CT_VERIFY_CONFLICT, "ct verify: the conflict reason is reported");
+}
+
+// Case 9: no clamp ratio entered. A healthy raw response must NOT be enough --
+// an uncalibrated channel reports 0 A and falls back to a counts-domain
+// margin, so a PASS computed here would be arithmetic on a number the firmware
+// itself declines to believe. No default ratio may be substituted.
+static void test_ct_verify_ratio_not_entered_is_inconclusive(void)
+{
+    zone_ct_verify_in_t in = ctv_base();
+    in.ratio_entered = false;
+    in.live_k_ct_v_per_a = 0.0f;
+    in.per_ch_a[0] = 12.0f; // a healthy dominant response in raw terms
+    zone_ct_verify_out_t out;
+    TEST_CHECK(zone_sweep_verify_ct_attribution(&in, &out) == ZONE_CT_VERDICT_INCONCLUSIVE,
+               "ct verify: no entered clamp ratio means no verdict, however healthy the reading");
+    TEST_CHECK(out.reason == ZONE_CT_VERIFY_RATIO_NOT_ENTERED, "ct verify: the ratio-not-entered reason is reported");
+    TEST_CHECK(isnan(out.threshold_a),
+               "ct verify: no threshold was computed, so no default ratio was substituted");
+
+    // A committed k_ct of zero with has_value set is the same non-answer.
+    zone_ct_verify_in_t in2 = ctv_base();
+    in2.live_k_ct_v_per_a = 0.0f;
+    in2.per_ch_a[0] = 12.0f;
+    TEST_CHECK(zone_sweep_verify_ct_attribution(&in2, NULL) == ZONE_CT_VERDICT_INCONCLUSIVE,
+               "ct verify: a committed k_ct <= 0 is also 'ratio not entered'");
+}
+
+// Case 10: an unfitted channel is outside the comparison, not evidence of
+// miswiring -- INCONCLUSIVE, never FAIL.
+static void test_ct_verify_channel_not_fitted_is_inconclusive_not_fail(void)
+{
+    zone_ct_verify_in_t in = ctv_base();
+    in.configured_ch_fitted = false;
+    in.per_ch_a[1] = 12.0f; // even a foreign channel responding must not make this a FAIL
+    zone_ct_verify_out_t out;
+    zone_ct_verdict_t v = zone_sweep_verify_ct_attribution(&in, &out);
+    TEST_CHECK(v == ZONE_CT_VERDICT_INCONCLUSIVE, "ct verify: an unfitted configured channel is INCONCLUSIVE");
+    TEST_CHECK(v != ZONE_CT_VERDICT_FAIL, "ct verify: not fitted is not miswiring");
+    TEST_CHECK(out.reason == ZONE_CT_VERIFY_NOT_FITTED, "ct verify: the not-fitted reason is reported");
+}
+
+// Case 11: the threshold is genuinely DERIVED from the entered clamp ratio,
+// not a constant wearing a new name. The same raw measurement evaluated
+// against two different entered ratios must land on different verdicts, in the
+// direction the arithmetic predicts: counts->amps is inversely proportional to
+// k_ct, so a smaller k_ct means the same ADC noise band converts to a larger
+// amps figure and the floor must rise to match.
+static void test_ct_verify_threshold_scales_with_the_entered_ratio(void)
+{
+    zone_ct_verify_in_t in = ctv_base();
+    in.per_ch_a[0] = 0.2f;
+    in.i_normal_a = 0.3f; // RESPOND_FRACTION * 0.3 = 0.15
+
+    in.live_k_ct_v_per_a = 1.0f; // floor 0.045 -> threshold 0.15, measurement 0.2 clears it
+    zone_ct_verify_out_t hi;
+    TEST_CHECK(zone_sweep_verify_ct_attribution(&in, &hi) == ZONE_CT_VERDICT_PASS,
+               "ct verify: at the reference ratio this measurement clears the threshold");
+
+    in.live_k_ct_v_per_a = 0.1f; // floor rescales to 0.45 -> same 0.2 A no longer clears it
+    zone_ct_verify_out_t lo;
+    TEST_CHECK(zone_sweep_verify_ct_attribution(&in, &lo) == ZONE_CT_VERDICT_INCONCLUSIVE,
+               "ct verify: the same measurement against a 10x smaller ratio no longer verifies");
+    TEST_CHECK(lo.reason == ZONE_CT_VERIFY_BELOW_THRESHOLD, "ct verify: it fails on the threshold, not on dominance");
+    TEST_CHECK(lo.threshold_a > hi.threshold_a,
+               "ct verify: the threshold moved with the entered ratio -- it is derived, not a constant");
+
+    TEST_CHECK_NEAR(zone_ct_verify_threshold_a(1.0f, 0.3f), 0.15f, 1e-6f,
+                    "ct verify: threshold is RESPOND_FRACTION * i_normal when that dominates");
+    TEST_CHECK_NEAR(zone_ct_verify_threshold_a(1.0f, 0.01f), 0.045f, 1e-6f,
+                    "ct verify: threshold falls back to the noise floor when i_normal is tiny");
+    TEST_CHECK_NEAR(zone_ct_verify_threshold_a(0.1f, 0.01f), 0.45f, 1e-6f,
+                    "ct verify: the noise floor rescales with the live k_ct, as summed_normal_a already does");
+}
+
+// A zone with no recorded normal current has nothing to scale against, and the
+// old fixed 2.0 A constant must NOT be silently reused as a fallback.
+static void test_ct_verify_no_recorded_normal_is_inconclusive(void)
+{
+    zone_ct_verify_in_t in = ctv_base();
+    in.i_normal_a = 0.0f;
+    in.per_ch_a[0] = 12.0f;
+    zone_ct_verify_out_t out;
+    TEST_CHECK(zone_sweep_verify_ct_attribution(&in, &out) == ZONE_CT_VERDICT_INCONCLUSIVE,
+               "ct verify: no recorded normal current means no verdict");
+    TEST_CHECK(out.reason == ZONE_CT_VERIFY_NO_NORMAL_CURRENT, "ct verify: the no-normal reason is reported");
+}
+
+// A NULL input, or a configured channel outside the array, must land on the
+// initial value rather than reading past the end or falling through to PASS.
+static void test_ct_verify_bad_input_lands_on_inconclusive(void)
+{
+    zone_ct_verify_out_t out;
+    TEST_CHECK(zone_sweep_verify_ct_attribution(NULL, &out) == ZONE_CT_VERDICT_INCONCLUSIVE,
+               "ct verify: a NULL input is INCONCLUSIVE, the initial value");
+    zone_ct_verify_in_t in = ctv_base();
+    in.configured_ch = ZONE_CT_CHANNEL_COUNT;
+    in.per_ch_a[0] = 12.0f;
+    TEST_CHECK(zone_sweep_verify_ct_attribution(&in, &out) == ZONE_CT_VERDICT_INCONCLUSIVE,
+               "ct verify: an out-of-range configured channel is INCONCLUSIVE");
+}
+
 // M12 / opus review 2026-08-28: zone_sweep_derive_ct_channel() above is only
 // HALF the derivation. zone_sweep_task_record_ct_channels() is the other
 // half, and it owns the two refusals nothing above can express -- the
@@ -13526,6 +13765,18 @@ void run_test_zones_http(void)
     test_zone_sweep_derive_ct_channel_refuses_below_the_load_threshold();
     test_zone_sweep_derive_ct_channel_refuses_a_shared_ct();
     test_zone_sweep_derive_ct_channel_refuses_nan();
+    test_ct_verify_correct_attribution_passes();
+    test_ct_verify_swapped_clamp_fails_and_names_the_channel();
+    test_ct_verify_below_floor_is_inconclusive_never_pass();
+    test_ct_verify_no_dominant_channel_is_inconclusive();
+    test_ct_verify_nan_channel_is_inconclusive();
+    test_ct_verify_shared_channel_is_inconclusive_not_fail();
+    test_ct_verify_conflict_is_fail();
+    test_ct_verify_ratio_not_entered_is_inconclusive();
+    test_ct_verify_channel_not_fitted_is_inconclusive_not_fail();
+    test_ct_verify_threshold_scales_with_the_entered_ratio();
+    test_ct_verify_no_recorded_normal_is_inconclusive();
+    test_ct_verify_bad_input_lands_on_inconclusive();
     test_zone_sweep_record_ct_refuses_a_zone_whose_relay_is_not_its_own_bit();
     test_zone_sweep_record_ct_refuses_two_zones_claiming_one_channel();
     test_zone_sweep_run_all_zones_never_energizes_two_zones_at_once();

@@ -386,6 +386,54 @@ zone_kct_derive_t zone_sweep_derive_k_ct(float measured_total_a, float expected_
                                          float k_old, float *out_k);
 const char *zone_kct_derive_str(zone_kct_derive_t r);
 
+/* ---- CT attribution verification (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md)
+ * Defined in zones_current_sweep_engine.c. Pure: every input is a plain number
+ * the caller gathers, so the whole verdict is host-testable off-target and so
+ * the fitted question keeps its single owner (config_store_ct_channel_fitted()
+ * on SaftyFW) instead of gaining a second implementation here. */
+typedef enum {
+    ZONE_CT_VERDICT_INCONCLUSIVE = 0, /* initial value, and the only one reachable without a measurement */
+    ZONE_CT_VERDICT_PASS,
+    ZONE_CT_VERDICT_FAIL,
+} zone_ct_verdict_t;
+
+typedef enum {
+    ZONE_CT_VERIFY_OK = 0,
+    ZONE_CT_VERIFY_NO_INPUT,
+    ZONE_CT_VERIFY_NOT_FITTED,
+    ZONE_CT_VERIFY_RATIO_NOT_ENTERED,
+    ZONE_CT_VERIFY_SHARED_CHANNEL,
+    ZONE_CT_VERIFY_NO_NORMAL_CURRENT,
+    ZONE_CT_VERIFY_NO_DOMINANT_CHANNEL,
+    ZONE_CT_VERIFY_BELOW_THRESHOLD,
+    ZONE_CT_VERIFY_WRONG_CHANNEL,
+    ZONE_CT_VERIFY_CONFLICT,
+} zone_ct_verify_reason_t;
+
+typedef struct {
+    float per_ch_a[ZONE_CT_CHANNEL_COUNT]; /* averaged per-channel amps for this zone's window */
+    uint8_t configured_ch;                 /* zone_ct_channel[z], read through its accessor */
+    bool configured_ch_fitted;             /* config_store_ct_channel_fitted() -- caller asks, never this file */
+    bool configured_ch_shared;             /* another zone maps to the same channel */
+    bool conflict;                         /* another zone resolved to this channel though config says distinct */
+    bool ratio_entered;                    /* safety_cfg_store's has_value for the channel */
+    float live_k_ct_v_per_a;               /* committed; <= 0 or non-finite means never commissioned */
+    float i_normal_a;                      /* this zone's recorded normal; <= 0 or non-finite means unrecorded */
+} zone_ct_verify_in_t;
+
+typedef struct {
+    zone_ct_verdict_t verdict;
+    zone_ct_verify_reason_t reason;
+    uint8_t responded_ch; /* 0xFF when nothing resolved */
+    float measured_a;     /* NaN when nothing resolved */
+    float threshold_a;    /* NaN unless the threshold was actually reached in the decision */
+} zone_ct_verify_out_t;
+
+float zone_ct_verify_threshold_a(float live_k_ct_v_per_a, float i_normal_a);
+zone_ct_verdict_t zone_sweep_verify_ct_attribution(const zone_ct_verify_in_t *in, zone_ct_verify_out_t *out);
+const char *zone_ct_verdict_str(zone_ct_verdict_t v);
+const char *zone_ct_verify_reason_str(zone_ct_verify_reason_t r);
+
 typedef enum {
     ZONE_NAMEPLATE_CHECK_OK = 0,
     ZONE_NAMEPLATE_CHECK_NO_NAMEPLATE, /* no usable expected current -- nameplate/coil share/mains_v missing */
