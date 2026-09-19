@@ -48,12 +48,17 @@
 // moment two translation units of this split end up in the same link.
 extern const char *BACKUP_TAG;
 
-// Backup document format version -- see backup_http.c's own
-// BACKUP_FORMAT_VERSION comment (the full history of what each bump added)
-// for the rationale; unchanged by this split, just relocated so both the
-// export side (backup_export.c) and the import side (backup_import.c) can
-// see it.
-#define BACKUP_FORMAT_VERSION 4
+// Backup document format version. Bumped 4 -> 5 (task 9,
+// bkfinish_assessment.md / docs/KILN_PROFILES_PLAN.md item 17 follow-up):
+// version 5 adds the top-level "kiln_configs" array (every saved kiln
+// config slot, each embedding its full section-5.1 package envelope when
+// its Pico half is populated -- see backup_export.c's own comment on that
+// array) and the "safety_tc_type" key. A v4-or-older backup has neither key
+// and still imports cleanly under the v5 reader (kiln_configs[] simply
+// absent = today's pre-item-17 behaviour, exactly); BACKUP_FORMAT_VERSION_MIN
+// stays 1 for that reason -- only the WRITER (export) advanced, the READER
+// (import) remains backward-compatible all the way down.
+#define BACKUP_FORMAT_VERSION 5
 #define BACKUP_FORMAT_VERSION_MIN 1
 
 // Generous headroom over a legitimate full backup -- see backup_http.c's own

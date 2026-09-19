@@ -1638,12 +1638,15 @@ static void test_unknown_version_refused(void)
     /* 2026-08-30 (ZONES_CFG_VERSION 10->11): BACKUP_FORMAT_VERSION moved
      * 3 -> 4 (coupling_coeff/coupling_neighbor_zone -> indexed
      * coupling_c0..coupling_cN-1), so 4 is now a real, supported version --
-     * this test moved to version 5, the new too-new boundary. */
-    const char *body = "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],\"zones\":[]}";
+     * this test moved to version 5, the new too-new boundary. Task 9
+     * (bkfinish_assessment.md): BACKUP_FORMAT_VERSION moved 4 -> 5 (top-level
+     * kiln_configs[] array, safety_tc_type key), so 5 is now real/supported
+     * too -- this test moves again, to version 6, the new too-new boundary. */
+    const char *body = "{\"kind\":\"kilnctl_backup\",\"version\":6,\"profiles\":[],\"zones\":[]}";
     char err[160];
     bool ok = test_backup_import_apply(body, err, sizeof(err));
 
-    TEST_CHECK(!ok, "version 5 is newer than this firmware's BACKUP_FORMAT_VERSION (4) -- must be refused");
+    TEST_CHECK(!ok, "version 6 is newer than this firmware's BACKUP_FORMAT_VERSION (5) -- must be refused");
     TEST_CHECK(g_total_write_calls == 0, "nothing written for an unsupported version");
 }
 
@@ -1845,8 +1848,8 @@ static void test_no_hostile_backup_input_produces_a_bootable_heat_commanding_sta
         "{",
         // wrong "kind"
         "{\"kind\":\"something_else\",\"version\":2,\"profiles\":[],\"zones\":[]}",
-        // version newer than this firmware's BACKUP_FORMAT_VERSION (4)
-        "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],\"zones\":[]}",
+        // version newer than this firmware's BACKUP_FORMAT_VERSION (5)
+        "{\"kind\":\"kilnctl_backup\",\"version\":6,\"profiles\":[],\"zones\":[]}",
         // a version number "from the future", far past anything ever issued
         "{\"kind\":\"kilnctl_backup\",\"version\":9999,\"profiles\":[],\"zones\":[]}",
         // valid JSON, in-range "kind"/"version", but a value outside the
@@ -2377,7 +2380,7 @@ static void test_export_emits_expected_keys_and_values_for_a_known_config(void)
     TEST_CHECK(s_export_body != NULL && s_export_len > 0, "the handler must have streamed something");
 
     TEST_CHECK(strstr(s_export_body, "\"kind\":\"kilnctl_backup\"") != NULL, "top-level kind key");
-    TEST_CHECK(strstr(s_export_body, "\"version\":4") != NULL, "top-level version is the CURRENT BACKUP_FORMAT_VERSION (4)");
+    TEST_CHECK(strstr(s_export_body, "\"version\":5") != NULL, "top-level version is the CURRENT BACKUP_FORMAT_VERSION (5)");
 
     TEST_CHECK(strstr(s_export_body, "\"id\":0,\"name\":\"Cone6\",\"zone_mask\":3") != NULL,
               "the seeded profile's id/name/zone_mask are emitted exactly");

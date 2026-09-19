@@ -106,7 +106,7 @@ from typing import Any, Optional
 # drift check (see module docstring) is what keeps them honest, not an
 # import-time reach into firmware/.
 # ---------------------------------------------------------------------------
-BACKUP_FORMAT_VERSION = 4
+BACKUP_FORMAT_VERSION = 5
 BACKUP_FORMAT_VERSION_MIN = 1
 
 # Every zone-level key this module knows firmware can emit/read today, by the
@@ -168,6 +168,14 @@ KNOWN_ADDITIVE_ZONE_KEYS = frozenset({
     # per-entry field names.
     "ct_map_informational_only", "k_ct_v_per_a_informational_only", "zone", "ct_channel",
     "k_v_per_a",
+    # BACKUP_FORMAT_VERSION 5 (task 9, KILN_PROFILES_PLAN.md item 17
+    # follow-up): the top-level kiln_configs[] array and its per-entry
+    # fields -- like the CT-map group above, cfg_convert.py deliberately
+    # never restores this array (kiln_cfg_store slots are a device-local
+    # concept the converter has no business fabricating or cross-board
+    # transplanting), so these are listed here purely so the mirror-drift
+    # check can confirm this module has not simply never heard of them.
+    "kiln_configs", "is_active", "package", "omitted",
 })
 
 # Calibration fields this module will NEVER fabricate, default, or derive.
