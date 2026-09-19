@@ -8,8 +8,10 @@
  * Why this exists as a test rather than an eyeball: the visibility rule has
  * three ways to go quietly wrong, and none of them look broken on a page
  * that renders. It can invert (hiding the Custom case, showing the
- * inherited one); it can hide zone 0, whose frames must never hide because
- * zone 0 has no selects and is always its own source; and it can hide by
+ * inherited one); it can special-case zone 0 (owner request 2026-09-19 gave
+ * zone 0 the same per-group `groupsrc` selects as every other zone, so its
+ * frames must hide/show exactly like any other zone's -- a regression that
+ * silently skips zone 0 again must be caught here); and it can hide by
  * writing an inline display style, which the request explicitly rules out
  * because a later render would then have to remember to clear it. Each of
  * those is asserted below.
@@ -75,7 +77,8 @@ const SRC_GROUP_NAMES = ['limits', 'relaytiming', 'control', 'guards', 'tc'];
 
 function makeZone(sources) {
   // sources: { group: number } -- omit a group to give that zone no select
-  // for it at all (which is what zone 0 renders).
+  // for it at all (a zone whose select markup is somehow missing -- every
+  // zone, including zone 0 since 2026-09-19, normally renders one).
   const frames = {};
   const selects = {};
   SRC_GROUP_NAMES.forEach((g) => {
@@ -146,15 +149,34 @@ function run(zones, thermoCount) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Zone 0 is always its own source: every frame stays visible, even though
-//    it renders no .groupsrc selects at all.
+// 2. Owner request 2026-09-19: zone 0 gets the same per-group selectors as
+//    every other zone, so it hides/shows its frames the same way too -- set
+//    to "same as zone 1" (1), its frames hide; left at Custom (255), they
+//    stay shown. (Before this change zone 0 rendered no `.groupsrc` selects
+//    at all and its frames could never hide -- this is the inverted form of
+//    that old assertion; a regression that special-cases zone 0 back to
+//    "never hidden" must fail this.)
 // ---------------------------------------------------------------------------
 {
-  const zones = [makeZone(null), makeZone({ limits: 0, relaytiming: 0, control: 0, guards: 0, tc: 0 })];
+  const zones = [
+    makeZone({ limits: 1, relaytiming: 1, control: 1, guards: 1, tc: 1 }),
+    makeZone({ limits: 255, relaytiming: 255, control: 255, guards: 255, tc: 255 }),
+  ];
+  run(zones, 2);
+  SRC_GROUP_NAMES.forEach((g) => {
+    assert(zones[0].frames[g].hidden === true,
+      'zone 0 ' + g + ' set to "same as zone 1" -> frame hidden, exactly like any other zone');
+  });
+}
+{
+  const zones = [
+    makeZone({ limits: 255, relaytiming: 255, control: 255, guards: 255, tc: 255 }),
+    makeZone({ limits: 0, relaytiming: 0, control: 0, guards: 0, tc: 0 }),
+  ];
   run(zones, 2);
   SRC_GROUP_NAMES.forEach((g) => {
     assert(zones[0].frames[g].hidden === false,
-      'zone 0 ' + g + ' frame is never hidden');
+      'zone 0 left at Custom -> its ' + g + ' frame still shows');
   });
 }
 

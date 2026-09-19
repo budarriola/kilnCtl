@@ -1835,6 +1835,118 @@ static void test_nvs_load_from_cycle_normalization_does_not_touch_lead_in_zone(v
     nvs_test_clear();
 }
 
+// Owner request 2026-09-19: zone 0 gets the same per-group selectors as
+// every other zone, so it must be able to submit a non-Custom
+// settings_source (following zone 1) through the ordinary whole-page POST
+// path, exactly like any other zone -- zones_http_parse_zone_fields() was
+// already fully generic across zone index (no zone-0 special case exists in
+// it), but this is the first direct test proving zone 0 as a FOLLOWER is
+// accepted and committed, not just implied by other tests.
+static void test_post_zone0_follows_zone1_accepted(void)
+{
+    TEST_SECTION("zones_post_handler -- zone 0 setting settings_source to a real other zone (1) is "
+                "accepted, exactly like any other zone can follow another (owner request 2026-09-19)");
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 2;
+    for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            s_zones.cfg.zones[z].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
+    }
+    run_zones_post(TWO_ZONE_MINIMAL_BODY("1", "255"));
+    TEST_CHECK(!s_test_err_called, "zone 0 -> zone 1 (Custom) is a legal acyclic chain, must not be refused");
+    TEST_CHECK(s_test_ok_called, "and must report success");
+    uint8_t s0 = 0xAA;
+    TEST_CHECK(zones_config_get_settings_source(0, SRC_GROUP_LIMITS, &s0) && s0 == 1,
+              "zone 0's own link committed as 1 (follows zone 1) -- zone 0 is no longer forced to Custom");
+}
+
+// Owner-decided tie-break (2026-09-19): when a stored settings_source cycle
+// includes zone 0, zone 0's own link must survive -- the HIGHEST-indexed
+// zone actually on the cycle is the one collapsed to Custom, matching the
+// "lowest index is the root" intuition the page's UI already implies.
+// zones_config_json_normalize_settings_source_cycles() used to reset EVERY
+// member of a detected cycle; this pins down the new one-member,
+// highest-index-first behavior with an exact (not "at least one of")
+// assertion, for a direct 0<->1 cycle.
+static void test_nvs_load_from_zero_one_cycle_keeps_zero_resets_one(void)
+{
+    TEST_SECTION("nvs_load_from -- a direct 0<->1 settings_source cycle collapses by resetting ONLY "
+                "zone 1 (the higher index), leaving zone 0's link untouched");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    zones_cfg_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = ZONES_CFG_VERSION;
+    src.thermo_count = 2;
+    src.timing_profile_count = 1;
+    for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            src.zones[z].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
+    }
+    src.zones[0].settings_source[SRC_GROUP_LIMITS] = 1; // 0 -> 1
+    src.zones[1].settings_source[SRC_GROUP_LIMITS] = 0; // 1 -> 0: the cycle
+    src.crc32 = zones_config_json_compute_crc(&src);
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a stored cycle collapses, it does not get treated as corrupt");
+    TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == 1,
+              "zone 0's link (0 -> 1) survives EXACTLY unchanged -- the tie-break protects the lower index");
+    TEST_CHECK(out_cfg.zones[1].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "zone 1 (the higher index on the cycle) is the one collapsed to Custom");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// Same tie-break, a three-member cycle: 0 -> 1 -> 2 -> 0. The highest index
+// actually ON the cycle (2) is the one reset; zones 0 and 1's links must
+// both survive untouched.
+static void test_nvs_load_from_three_cycle_keeps_zero_and_one_resets_two(void)
+{
+    TEST_SECTION("nvs_load_from -- a 0->1->2->0 three-member settings_source cycle collapses by "
+                "resetting ONLY zone 2 (the highest index on the cycle)");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    zones_cfg_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = ZONES_CFG_VERSION;
+    src.thermo_count = 3;
+    src.timing_profile_count = 1;
+    for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            src.zones[z].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
+    }
+    src.zones[0].settings_source[SRC_GROUP_LIMITS] = 1; // 0 -> 1
+    src.zones[1].settings_source[SRC_GROUP_LIMITS] = 2; // 1 -> 2
+    src.zones[2].settings_source[SRC_GROUP_LIMITS] = 0; // 2 -> 0: closes the three-cycle
+    src.crc32 = zones_config_json_compute_crc(&src);
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a stored three-cycle collapses, it does not get treated as corrupt");
+    TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == 1,
+              "zone 0's link (0 -> 1) survives untouched");
+    TEST_CHECK(out_cfg.zones[1].settings_source[SRC_GROUP_LIMITS] == 2,
+              "zone 1's link (1 -> 2) survives untouched too -- only the cycle's highest member is reset");
+    TEST_CHECK(out_cfg.zones[2].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "zone 2 (the highest index on the cycle) is the one collapsed to Custom");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 // zones_config_import_blob()'s own pass-1 settings_source cycle check (added
 // alongside the two-pass restore fix -- see backup_http.c's importer, which
 // calls THIS function to apply a decoded blob) had no test at all before
@@ -14216,6 +14328,7 @@ void run_test_zones_http(void)
     test_zones_post_accepts_clean_minimal_body();
     test_post_whole_page_cross_zone_cycle_refused();
     test_post_whole_page_cross_zone_legal_chain_accepted();
+    test_post_zone0_follows_zone1_accepted();
 
     test_zones_pid_post_accepts_while_profile_running();
     test_zones_pid_post_bumps_generation();
@@ -14241,6 +14354,8 @@ void run_test_zones_http(void)
     test_nvs_load_from_current_version_happy_path();
     test_nvs_load_from_pre_existing_cycle_normalizes_not_wipes();
     test_nvs_load_from_cycle_normalization_does_not_touch_lead_in_zone();
+    test_nvs_load_from_zero_one_cycle_keeps_zero_resets_one();
+    test_nvs_load_from_three_cycle_keeps_zero_and_one_resets_two();
     test_import_blob_pass1_rejects_cyclic_settings_source();
     test_import_blob_pass1_accepts_acyclic_settings_source();
     test_nvs_load_from_newer_than_firmware_is_found_but_not_valid();

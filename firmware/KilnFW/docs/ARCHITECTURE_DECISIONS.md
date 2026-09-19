@@ -453,6 +453,28 @@ is the surviving reference for the code that cites it):
   ~40-line pointer-drag window if that's ever wanted.
 - **Display-power Save button** (formerly "section 4"): already fixed
   2026-09-04, confirmed flashed in `05087f0`.
+- **Zone 0 gets the same per-group selectors, owner request 2026-09-19**:
+  zone 0 was previously hardcoded as the fixed inheritance root — no
+  `settingssrc`/`groupsrc` selects rendered for it, and both
+  `resolveTerminal()`/`resolveGroupTerminal()` (client) short-circuited to
+  "terminal 0, never forced" the moment the walk reached it. Zone 0 now
+  renders the same whole-zone `settingssrc` select and five per-group
+  `groupsrc` selects as zones 1..N-1, defaulting a *new* zone 0 to Custom
+  (255, unchanged from before) and can copy any other enabled zone's
+  settings; the existing frame-and-hide rule (a group's fields show only
+  while its select says Custom) applies to zone 0 identically.
+  `zones_http_post_parse.c`'s per-zone parser and
+  `zone_settings_source_chain.h`'s shared chain-walk were already fully
+  generic across zone index — no server-side change was needed there. The
+  one real server-side change is the tie-break for a settings_source cycle
+  that includes zone 0 (e.g. a stored/tampered 0<->1 link):
+  `zones_config_json_normalize_settings_source_cycles()` now resets only the
+  **highest-indexed** zone actually on a detected cycle (previously it reset
+  every member), so zone 0's own link survives whenever it's part of a
+  cycle, matching the page's long-standing "lowest index is the root"
+  intuition. This is also strictly less destructive than the prior
+  every-member reset: breaking any single node's outgoing edge already
+  breaks a cycle.
 
 ## Zones page visual simplification and prose shortening (2026-09-19)
 

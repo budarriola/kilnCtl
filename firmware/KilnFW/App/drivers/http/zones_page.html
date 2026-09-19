@@ -1506,46 +1506,46 @@ function zoneBlock(z, i, relayCount, thermoCount) {
      * reaches temperature. */
     '<p class="thermowarn hint" style="display:none"></p>';
 
-  if (i === 0) {
-    /* PID_EXPANSION_PLAN.md 3.5: "Only the first zone shows the settings
-     * stack expanded." Zone 0 is always the potential source of "same as",
-     * never itself a follower -- no dropdown, its .customStack is always
-     * visible, and it always saves as settings_source=CUSTOM (see saveBtn). */
-    bodyHtml += '<div class="customStack">' + settingsStackHtml + '</div>';
-  } else {
-    /* Same-as-another-zone dropdown + read-only inherited summary + the
-     * (initially hidden) full stack pre-filled with what it was inheriting,
-     * per 3.5. updateInheritance() (below, called once all zone divs exist)
-     * fills in the option list, the selected value and the summary text --
-     * it needs every zone's div in the DOM first, which zoneBlock() alone
-     * cannot guarantee while still building this one. */
-    bodyHtml +=
-      '<label>Thermocouple type + settings (quick -- sets every group below the same way) ' +
-      infoDetailsHtml('settingsSrcGroups', 'per-item "same as zone N"') +
-      '</label>' +
-      '<select class="settingssrc"></select>' +
-      '<div class="inheritedSummary hint"></div>' +
-      /* docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs: the whole-zone select above stays as a
-       * shortcut (it sets all five of these at once, see the 'settingssrc'
-       * change handler below) -- these five are the real, independent
-       * per-group choice. A group set to "Same as zone K" disables its own
-       * fields in .customStack below (still visible, so the operator sees
-       * what it resolved to) and its live values are overwritten from zone
-       * K's own fields at save time, same "resolved at save, not a live
-       * pointer" model the whole-zone select already used. Measured fields
-       * (model/coupling/normals) and topology (name/masks/relay_type) are
-       * not offered here -- see docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs's table -- they
-       * are never part of any group's <select> because they are rendered
-       * outside settingsStackHtml entirely (relayTypeHtml et al, above). */
-      '<div class="groupsrcList">' +
-        '<label>Limits (max/min temp, ramp, rise rate) <select class="groupsrc" data-group="limits"></select></label>' +
-        '<label>Relay timing (window/min-on/min-off) <select class="groupsrc" data-group="relaytiming"></select></label>' +
-        '<label>Control (mode, Kp/Ki/Kd, fuzzy strength) <select class="groupsrc" data-group="control"></select></label>' +
-        '<label>Guards (the 8 thresholds + cross-zone) <select class="groupsrc" data-group="guards"></select></label>' +
-        '<label>Thermocouple type (not cal offset) <select class="groupsrc" data-group="tc"></select></label>' +
-      '</div>' +
-      '<div class="customStack" style="display:none">' + settingsStackHtml + '</div>';
-  }
+  /* Owner request 2026-09-19 ("Zone 0 gets the same per-group selectors"):
+   * zone 0 gets exactly the same whole-zone dropdown + five per-group
+   * dropdowns + read-only inherited summary + (initially hidden) full stack
+   * every other zone has -- it can now copy any other enabled zone's
+   * settings, not just be copied from. settingsSourceOptionsHtml(i, ...)
+   * already skips k===i when building the option list, so zone 0's list is
+   * naturally "every OTHER enabled zone, plus Custom" with no special case
+   * needed here. updateInheritance()/initInheritanceControls() (below) fill
+   * in the option list, the selected value and the summary text -- they need
+   * every zone's div in the DOM first, which zoneBlock() alone cannot
+   * guarantee while still building this one. A newly-created zone 0 still
+   * defaults to settings_source=CUSTOM (see renderZones()'s newZoneDefaults),
+   * so an existing board's stored config is unaffected until an operator
+   * deliberately changes it. */
+  bodyHtml +=
+    '<label>Thermocouple type + settings (quick -- sets every group below the same way) ' +
+    infoDetailsHtml('settingsSrcGroups', 'per-item "same as zone N"') +
+    '</label>' +
+    '<select class="settingssrc"></select>' +
+    '<div class="inheritedSummary hint"></div>' +
+    /* docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs: the whole-zone select above stays as a
+     * shortcut (it sets all five of these at once, see the 'settingssrc'
+     * change handler below) -- these five are the real, independent
+     * per-group choice. A group set to "Same as zone K" disables its own
+     * fields in .customStack below (still visible, so the operator sees
+     * what it resolved to) and its live values are overwritten from zone
+     * K's own fields at save time, same "resolved at save, not a live
+     * pointer" model the whole-zone select already used. Measured fields
+     * (model/coupling/normals) and topology (name/masks/relay_type) are
+     * not offered here -- see docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs's table -- they
+     * are never part of any group's <select> because they are rendered
+     * outside settingsStackHtml entirely (relayTypeHtml et al, above). */
+    '<div class="groupsrcList">' +
+      '<label>Limits (max/min temp, ramp, rise rate) <select class="groupsrc" data-group="limits"></select></label>' +
+      '<label>Relay timing (window/min-on/min-off) <select class="groupsrc" data-group="relaytiming"></select></label>' +
+      '<label>Control (mode, Kp/Ki/Kd, fuzzy strength) <select class="groupsrc" data-group="control"></select></label>' +
+      '<label>Guards (the 8 thresholds + cross-zone) <select class="groupsrc" data-group="guards"></select></label>' +
+      '<label>Thermocouple type (not cal offset) <select class="groupsrc" data-group="tc"></select></label>' +
+    '</div>' +
+    '<div class="customStack" style="display:none">' + settingsStackHtml + '</div>';
   div.innerHTML = bodyHtml;
   return div;
 }
@@ -1652,7 +1652,6 @@ function settingsSourceOptionsHtml(i, thermoCount, zones) {
 // collapse it to Custom, instead of the <select> silently normalizing it to
 // whatever option happens to be first.
 function settingsSourceOf(k) {
-  if (k === 0) return 255; /* zone 0 has no dropdown -- always the source, never a follower */
   var div = zoneDiv(k);
   var sel = div && div.querySelector('.settingssrc');
   if (!sel) return 255;
@@ -1662,18 +1661,22 @@ function settingsSourceOf(k) {
 }
 
 // Walks a zone's settings_source chain to the zone whose OWN values are
-// authoritative (255/CUSTOM, or zone 0). thermoCount bounds a cycle can only
-// occur within, so a plain visited-set is enough. `forced` is true when the
-// chain had to be broken because it pointed at a disabled zone, itself, or a
-// cycle -- PID_EXPANSION_PLAN.md 3.5's "collapse to custom rather than
-// resolve to nothing".
+// authoritative (255/CUSTOM). thermoCount bounds a cycle can only occur
+// within, so a plain visited-set is enough. `forced` is true when the chain
+// had to be broken because it pointed at a disabled zone, itself, or a cycle
+// -- PID_EXPANSION_PLAN.md 3.5's "collapse to custom rather than resolve to
+// nothing". Zone 0 is walked exactly like any other zone (owner request
+// 2026-09-19, "Zone 0 gets the same per-group selectors") -- it has no
+// special-cased terminal any more, and can itself be a follower or part of a
+// cycle; settingsSourceOf(0) is 255 for a zone that has never set a
+// dropdown (its own default), so an untouched zone 0 still resolves to
+// itself exactly as before.
 function resolveTerminal(k, thermoCount) {
   var visited = {};
   var cur = k;
   while (true) {
     if (visited[cur]) return { terminal: cur, forced: true };
     visited[cur] = true;
-    if (cur === 0) return { terminal: 0, forced: false };
     var src = settingsSourceOf(cur);
     if (src === 255 || src === cur || src < 0 || src >= thermoCount) {
       return { terminal: cur, forced: (src !== 255) };
@@ -1773,27 +1776,29 @@ function copyCustomStackValues(srcStack, dstStack) {
 function refreshAllInheritance() {
   var thermoCount = parseInt(document.getElementById('thermoCount').value, 10) || 0;
   var anyCollapsed = false;
-  for (var k = 1; k < thermoCount; k++) {
+  for (var k = 0; k < thermoCount; k++) {
     if (updateInheritance(k)) anyCollapsed = true;
   }
   if (anyCollapsed) {
-    for (var k2 = 1; k2 < thermoCount; k2++) updateInheritance(k2);
+    for (var k2 = 0; k2 < thermoCount; k2++) updateInheritance(k2);
   }
 }
 
-// Populates every non-zone-0 zone's "same as / custom" dropdown from its
-// stored settings_source (default: same as zone 0, per 3.5) and resolves
-// every zone's initial displayed state. Needs every zone div already in the
-// DOM (option lists reference other zones' names), so this runs once after
-// renderZones()'s loop, not from inside zoneBlock().
+// Populates every zone's "same as / custom" dropdown (zone 0 included, owner
+// request 2026-09-19) from its stored settings_source (default: Custom for
+// zone 0 -- it cannot default to "same as zone 0", that would be a
+// self-reference -- same as zone 0 for every other zone, per 3.5) and
+// resolves every zone's initial displayed state. Needs every zone div
+// already in the DOM (option lists reference other zones' names), so this
+// runs once after renderZones()'s loop, not from inside zoneBlock().
 function initInheritanceControls() {
   var thermoCount = parseInt(document.getElementById('thermoCount').value, 10) || 0;
-  for (var k = 1; k < thermoCount; k++) {
+  for (var k = 0; k < thermoCount; k++) {
     var div = zoneDiv(k);
     var sel = div && div.querySelector('.settingssrc');
     if (!sel) continue;
     var z = current.zones[k] || {};
-    var stored = (z.settings_source != null) ? z.settings_source : 0;
+    var stored = (z.settings_source != null) ? z.settings_source : (k === 0 ? 255 : 0);
     sel.innerHTML = settingsSourceOptionsHtml(k, thermoCount, current.zones || []);
     var optionExists = false;
     Array.prototype.forEach.call(sel.options, function (o) { if (parseInt(o.value, 10) === stored) optionExists = true; });
@@ -1804,8 +1809,11 @@ function initInheritanceControls() {
       sel.dataset.storedInvalid = stored;
     }
   }
+  /* refreshAllInheritance() now covers zone 0 too (it walks k=0..thermoCount-1,
+     owner request 2026-09-19) and updateInheritance() already calls
+     updateZonePanel() for the zone(s) it touches, so no separate zone-0 call
+     is needed here any more. */
   refreshAllInheritance();
-  updateZonePanel(zoneDiv(0));
   initGroupSourceControls();
   /* AFTER initGroupSourceControls(), which is what gives the .groupsrc selects
      their stored values -- running it before would read every group as Custom
@@ -1821,7 +1829,6 @@ function initInheritanceControls() {
 // response shape, same "old clients/old data keep working" discipline the
 // HTTP layer's own accept-the-scalar-too rule follows).
 function groupSettingsSourceOf(k, group) {
-  if (k === 0) return 255;
   var div = zoneDiv(k);
   var sel = div && div.querySelector('.groupsrc[data-group="' + group + '"]');
   if (!sel) return 255;
@@ -1840,7 +1847,6 @@ function resolveGroupTerminal(k, group, thermoCount) {
   while (true) {
     if (visited[cur]) return { terminal: cur, forced: true };
     visited[cur] = true;
-    if (cur === 0) return { terminal: 0, forced: false };
     var src = groupSettingsSourceOf(cur, group);
     if (src === 255 || src === cur || src < 0 || src >= thermoCount) {
       return { terminal: cur, forced: (src !== 255) };
@@ -1851,12 +1857,12 @@ function resolveGroupTerminal(k, group, thermoCount) {
 
 function initGroupSourceControls() {
   var thermoCount = parseInt(document.getElementById('thermoCount').value, 10) || 0;
-  for (var k = 1; k < thermoCount; k++) {
+  for (var k = 0; k < thermoCount; k++) {
     var div = zoneDiv(k);
     if (!div) continue;
     var z = current.zones[k] || {};
     var groups = z.settings_source_groups || {};
-    var legacy = (z.settings_source != null) ? z.settings_source : 0;
+    var legacy = (z.settings_source != null) ? z.settings_source : (k === 0 ? 255 : 0);
     SRC_GROUPS.forEach(function (group) {
       var sel = div.querySelector('.groupsrc[data-group="' + group + '"]');
       if (!sel) return;
@@ -1898,9 +1904,10 @@ function applyGroupFrames(k) {
   SRC_GROUPS.forEach(function (group) {
     var frame = div.querySelector('.groupFrame[data-group="' + group + '"]');
     if (!frame) return;
-    /* 255 is "Custom settings for this zone". groupSettingsSourceOf() returns
-       255 for zone 0 unconditionally (it has no selects and is always its own
-       source), so zone 0's frames are never hidden. */
+    /* 255 is "Custom settings for this zone". Zone 0 is no longer a special
+       case (owner request 2026-09-19) -- groupSettingsSourceOf(0, group)
+       reads zone 0's own .groupsrc select exactly like any other zone, so
+       zone 0's frames hide/show the same as zones 1..N-1. */
     var wasHidden = frame.hidden;
     var nowCustom = (groupSettingsSourceOf(k, group) === 255);
     frame.hidden = !nowCustom;

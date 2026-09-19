@@ -207,6 +207,42 @@ function loadChain(zones) {
 })();
 
 // ---------------------------------------------------------------------------
+// Owner request 2026-09-19 ("Zone 0 gets the same per-group selectors"):
+// zone 0 can now itself be a follower, and can itself be part of a cycle --
+// resolveTerminal() no longer hardcodes zone 0 as the fixed root. Proves both
+// halves: a real 0 -> 1 link resolves cleanly, and a direct 0 <-> 1 cycle is
+// detected exactly like any other 2-zone cycle (see
+// testTwoZoneCycleCollapsesToCustom above for the pre-existing non-zone-0
+// case this mirrors).
+// ---------------------------------------------------------------------------
+(function testZone0CanFollowAnotherZone() {
+  const zones = {
+    0: { settingsSource: 1, tcType: '9' }, // zone 0 now follows zone 1
+    1: { settingsSource: 255, tcType: '4' },
+    2: { settingsSource: 0, tcType: '9' },
+  };
+  const ctx = loadChain(zones);
+  const result = ctx.resolveTerminal(0, 3);
+  assert(result.terminal === 1 && result.forced === false,
+    'zone 0 following zone 1 resolves cleanly to terminal zone 1, not to itself');
+  const resultViaZone2 = ctx.resolveTerminal(2, 3);
+  assert(resultViaZone2.terminal === 1 && resultViaZone2.forced === false,
+    'a zone following zone 0, which itself follows zone 1, resolves through both hops to zone 1');
+})();
+
+(function testDirectZeroOneCycleIsDetected() {
+  const zones = {
+    0: { settingsSource: 1, tcType: '3' }, // 0 -> 1
+    1: { settingsSource: 0, tcType: '3' }, // 1 -> 0: the cycle
+  };
+  const ctx = loadChain(zones);
+  const result0 = ctx.resolveTerminal(0, 2);
+  assert(result0.forced === true, 'a direct 0<->1 cycle is detected walking from zone 0, forced to collapse');
+  const result1 = ctx.resolveTerminal(1, 2);
+  assert(result1.forced === true, 'the same 0<->1 cycle is detected walking from zone 1 too');
+})();
+
+// ---------------------------------------------------------------------------
 // GAP 2, test 3: shared-channel-consistency invariant -- a zone claiming
 // MORE THAN ONE physical thermocouple channel via thermo_mask, while
 // inheriting, must fan its resolved (terminal's) tc_type out to EVERY

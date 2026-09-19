@@ -92,24 +92,38 @@ bool zones_config_json_settings_source_chain_has_cycle(const zone_cfg_t zones[MA
  * commissioned config over one stale UI-only provenance link (this repo has
  * lost configs to exactly that shape of overreaction twice already -- see
  * raise_heater_timing_to_floors()'s neighboring precedent). So: collapse,
- * don't reject. ONLY the zones actually ON the cycle get their link reset to
+ * don't reject. Breaking any ONE link on the cycle is sufficient to free
+ * every member (and every lead-in zone that merely walks into it), so this
+ * resets only the HIGHEST-INDEXED zone actually ON the cycle to
  * ZONE_SETTINGS_SOURCE_CUSTOM (the same "collapse to Custom" resolution
  * zones_page.html's client-side resolveTerminal() already performs on a
- * stale page load) and a loud log line naming each -- a zone that merely
- * LEADS INTO a cycle (its own chain is fine, it just happens to walk into
- * one) is left untouched, since breaking any single edge on the cycle itself
- * already frees every lead-in zone's chain too. Getting this wrong is not
- * just cosmetic: resetting `start`'s own link (an earlier version of this
- * function did exactly that) is index-order dependent -- given a stored
- * 1<->2 cycle with zone 0 -> 1 merely leading into it, the walk starting at
- * i=0 hits the cycle and would reset zone 0's OWN link first, even though
- * zone 0 was never part of the cycle and breaking 1<->2 alone would have
- * sufficed. Identifying the exact cycle membership (the walked path from the
- * first repeated node onward, not every node visited on the way there)
- * avoids that: this reaches the same fixed point regardless of which index
- * is scanned first, and breaking one link at a time is guaranteed to
- * terminate within MAX31856_CHANNEL_COUNT passes since each pass strictly
- * shrinks the number of zones still mid-chain. */
+ * stale page load) and a loud log line naming it -- every other member's
+ * link, and any zone that merely LEADS INTO the cycle, is left untouched.
+ *
+ * Zone-0-gets-a-real-follower tie-break (owner request 2026-09-19, the
+ * "Zone 0 gets the same per-group selectors" work): a direct 0<->1 cycle
+ * (or any cycle zone 0 is a member of) now resets the OTHER, higher-index
+ * member rather than zone 0's own link, matching the page's long-standing
+ * "lowest index is the root" intuition -- zone 0 is the one operators expect
+ * to survive as a source. Picking the maximum rather than resetting every
+ * member is also strictly less destructive than an earlier draft of this
+ * function, which reset every zone ON the cycle: a cycle is a closed loop,
+ * so removing any single node's outgoing edge already breaks it, and there
+ * is no need to also collapse the other members' links.
+ *
+ * Getting this wrong is not just cosmetic: resetting `start`'s own link (an
+ * earlier version of this function did exactly that) is index-order
+ * dependent -- given a stored 1<->2 cycle with zone 0 -> 1 merely leading
+ * into it, the walk starting at i=0 hits the cycle and would reset zone 0's
+ * OWN link first, even though zone 0 was never part of the cycle and
+ * breaking 1<->2 alone would have sufficed. Identifying the exact cycle
+ * membership (the walked path from the first repeated node onward, not
+ * every node visited on the way there) and always resetting the same
+ * (highest-index) member of that set avoids that: this reaches the same
+ * fixed point regardless of which index is scanned first, and breaking one
+ * link at a time is guaranteed to terminate within MAX31856_CHANNEL_COUNT
+ * passes since each pass strictly shrinks the number of zones still
+ * mid-chain. */
 void zones_config_json_normalize_settings_source_cycles(zones_cfg_t *cfg, const char *partition)
 {
     uint8_t thermo_count = cfg->thermo_count > MAX31856_CHANNEL_COUNT ? MAX31856_CHANNEL_COUNT : cfg->thermo_count;
@@ -160,14 +174,22 @@ void zones_config_json_normalize_settings_source_cycles(zones_cfg_t *cfg, const 
                 }
                 cur = src;
             }
-            for (uint8_t p = cycle_start_pos; p < path_len; p++) {
-                uint8_t zone = path[p];
-                ESP_LOGW(ZONES_CFG_TAG, "zones_cfg from '%s': zone %u group %u's settings_source chain forms a "
-                              "cycle -- collapsing zone %u group %u to Custom (was %u)",
-                         partition, (unsigned)zone, (unsigned)group, (unsigned)zone, (unsigned)group,
-                         (unsigned)cfg->zones[zone].settings_source[group]);
-                cfg->zones[zone].settings_source[group] = ZONE_SETTINGS_SOURCE_CUSTOM;
+            /* Cycle membership is path[cycle_start_pos..path_len) -- reset
+             * only its highest-indexed member (see the tie-break rationale
+             * above), leaving every other member's link, and any lead-in
+             * zone before cycle_start_pos, untouched. */
+            uint8_t reset_zone = path[cycle_start_pos];
+            for (uint8_t p = cycle_start_pos + 1; p < path_len; p++) {
+                if (path[p] > reset_zone) {
+                    reset_zone = path[p];
+                }
             }
+            ESP_LOGW(ZONES_CFG_TAG, "zones_cfg from '%s': zone %u group %u's settings_source chain forms a "
+                          "cycle -- collapsing zone %u group %u to Custom (was %u), the highest-indexed "
+                          "member of that cycle",
+                     partition, (unsigned)path[cycle_start_pos], (unsigned)group, (unsigned)reset_zone,
+                     (unsigned)group, (unsigned)cfg->zones[reset_zone].settings_source[group]);
+            cfg->zones[reset_zone].settings_source[group] = ZONE_SETTINGS_SOURCE_CUSTOM;
         }
     }
 }
