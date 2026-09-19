@@ -73,6 +73,26 @@ void test_stub_zones_set_max_ramp(uint8_t zone_index, bool answers, float c_per_
 #include "../drivers/persist/backup_json.c"
 #include "../drivers/http/backup_export.c"
 #include "../drivers/http/backup_import.c"
+
+// backup_import_apply() gained mode/dry_run/ack_delete_count/plan/
+// partial_write parameters (kiln_configs[] restore, 2026-09-19) -- every
+// pre-existing call site in this file predates that and only cares about
+// the profiles/zones behaviour, always wants a real (non-dry-run) MERGE
+// apply with no pending mirror-deletes to acknowledge, and has no reason to
+// inspect the plan or the partial-write flag. Rather than hand-edit all of
+// them, this thin wrapper supplies KILN_CFG_RESTORE_MERGE/false/-1/scratch
+// plan+flag so every old call site unchanged in spirit still compiles and
+// behaves exactly as before; tests that specifically exercise
+// kiln_configs[]/mode/dry_run/ack-delete call backup_import_apply() directly
+// instead.
+static kiln_cfg_plan_t s_test_backup_plan;
+static bool test_backup_import_apply(const char *body, char *err_msg, size_t err_cap)
+{
+    memset(&s_test_backup_plan, 0, sizeof(s_test_backup_plan));
+    bool partial_write = false;
+    return backup_import_apply(body, KILN_CFG_RESTORE_MERGE, false, -1, &s_test_backup_plan, &partial_write, err_msg,
+                               err_cap);
+}
 #include "../drivers/http/backup_http.c"
 
 #undef asm
@@ -1589,7 +1609,7 @@ static void test_malformed_body_writes_nothing(void)
     reset_stub_state();
 
     char err[160];
-    bool ok = backup_import_apply("{", err, sizeof(err));
+    bool ok = test_backup_import_apply("{", err, sizeof(err));
 
     TEST_CHECK(!ok, "a truncated/malformed body must be refused, not crash or silently accept");
     TEST_CHECK(g_total_write_calls == 0, "no setter may run when the body cannot even be parsed for \"kind\"");
@@ -1603,7 +1623,7 @@ static void test_wrong_kind_refused(void)
 
     const char *body = "{\"kind\":\"something_else\",\"version\":2,\"profiles\":[],\"zones\":[]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(!ok, "a body whose \"kind\" isn't kilnctl_backup must be refused");
     TEST_CHECK(strstr(err, "kilnCtl backup") != NULL, "error names the actual problem (wrong kind)");
@@ -1621,7 +1641,7 @@ static void test_unknown_version_refused(void)
      * this test moved to version 5, the new too-new boundary. */
     const char *body = "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],\"zones\":[]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(!ok, "version 5 is newer than this firmware's BACKUP_FORMAT_VERSION (4) -- must be refused");
     TEST_CHECK(g_total_write_calls == 0, "nothing written for an unsupported version");
@@ -1638,7 +1658,7 @@ static void test_version1_body_imports_under_v2_reader(void)
         "\"segments\":[{\"target_c\":100,\"ramp_c_per_hr\":50,\"dwell_min\":30}]}],"
         "\"zones\":[{\"index\":0,\"pid_kp\":1.5,\"pid_ki\":0.2,\"pid_kd\":0.05}]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(ok, "a version-1-shaped body (no v2-only keys) must import cleanly");
     TEST_CHECK(s_writes[0].set_pid_called, "zone 0's PID gains were committed");
@@ -1662,7 +1682,7 @@ static void test_out_of_range_model_rejected(void)
              "\"model_k_dc\":%.1f,\"model_tau_s\":100,\"model_dead_time_s\":30}]}",
              (double)(ZONE_MODEL_K_MAX + 1000.0f));
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(!ok, "model_k_dc over ZONE_MODEL_K_MAX must be rejected in validation");
     TEST_CHECK(g_total_write_calls == 0,
@@ -1681,7 +1701,7 @@ static void test_overlong_zone_name_rejected(void)
         "\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
         "\"name\":\"ThisNameIsWayTooLongForOneZone\"}]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(!ok, "a zone name over ZONE_NAME_MAX_LEN must be rejected in validation");
     TEST_CHECK(g_total_write_calls == 0, "nothing written -- not even pid_kp/ki/kd from the same entry");
@@ -1712,7 +1732,7 @@ static void test_v2_body_without_sentinel_imports(void)
         "\"guard_sensor_fault_debounce_ticks\":0,\"guard_frozen_window_s\":0,"
         "\"cross_zone_max_delta_c\":0}]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     (void)err;
     TEST_CHECK(ok, "a well-formed v2 zone entry with no sentinel key must import");
@@ -1737,7 +1757,7 @@ static void test_v2_body_with_stale_sentinel_still_imports(void)
         "\"guard_sensor_fault_debounce_ticks\":0,\"guard_frozen_window_s\":0,"
         "\"cross_zone_max_delta_c\":0,\"_\":0}]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     (void)err;
     TEST_CHECK(ok, "an old-shaped v2 zone entry carrying the now-removed \"_\":0 sentinel must still import "
@@ -1766,7 +1786,7 @@ static void test_overlong_profile_name_rejected(void)
         "\"segments\":[{\"target_c\":100,\"ramp_c_per_hr\":50,\"dwell_min\":30}]}],"
         "\"zones\":[]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(!ok, "a profile name over PROFILE_NAME_MAX_LEN must be rejected in validation");
     TEST_CHECK(strstr(err, "name too long") != NULL, "error message should say what's wrong");
@@ -1789,7 +1809,7 @@ static void test_profile_name_at_limit_accepted(void)
         "\"segments\":[{\"target_c\":100,\"ramp_c_per_hr\":50,\"dwell_min\":30}]}],"
         "\"zones\":[]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(strlen("ExactlyFifteenC") == PROFILE_NAME_MAX_LEN, "test setup sanity: name is exactly at the limit");
     TEST_CHECK(ok, "a name exactly at the limit must be accepted, not rejected as \"too long\"");
@@ -1853,7 +1873,7 @@ static void test_no_hostile_backup_input_produces_a_bootable_heat_commanding_sta
     for (size_t i = 0; i < sizeof(kHostileBodies) / sizeof(kHostileBodies[0]); i++) {
         reset_stub_state();
         char err[160];
-        bool ok = backup_import_apply(kHostileBodies[i], err, sizeof(err));
+        bool ok = test_backup_import_apply(kHostileBodies[i], err, sizeof(err));
 
         char msg[256];
         snprintf(msg, sizeof(msg), "hostile body #%zu must be refused, not accepted", i);
@@ -1893,7 +1913,7 @@ static void test_v4_new_fields_round_trip_distinct_values(void)
         "\"fuzzy_strength_pct\":37.25,\"coupling_c0\":10.887,\"coupling_c2\":3.332,"
         "\"settings_source\":0}]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(ok, "a well-formed version-4 zone entry must import");
     TEST_CHECK(s_writes[1].set_fuzzy_strength_called, "fuzzy_strength_pct was committed");
@@ -1926,7 +1946,7 @@ static void test_coupling_diag_k_dc_round_trips_distinct_value(void)
         "\"fuzzy_strength_pct\":37.25,\"coupling_c0\":10.887,"
         "\"coupling_diag_k_dc\":21.6,\"settings_source\":0}]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(ok, "a well-formed coupling_diag_k_dc entry must import");
     TEST_CHECK(s_writes[1].set_coupling_diag_k_dc_called, "coupling_diag_k_dc was committed");
@@ -1947,7 +1967,7 @@ static void test_v2_body_imports_new_fields_default_floats_zero_source_custom(vo
         "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],"
         "\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0}]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(ok, "a version-2-shaped body (no v3-only keys) must import cleanly under the v3 reader");
     TEST_CHECK(!s_writes[0].set_fuzzy_strength_called, "no fuzzy_strength_pct key present -- setter must not run");
@@ -1978,7 +1998,7 @@ static void test_v3_fuzzy_strength_out_of_range_rejected(void)
              "\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"fuzzy_strength_pct\":%.1f}]}",
              (double)(ZONE_FUZZY_STRENGTH_PCT_MAX + 1.0f));
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(!ok, "fuzzy_strength_pct over ZONE_FUZZY_STRENGTH_PCT_MAX must be rejected in validation");
     TEST_CHECK(g_total_write_calls == 0,
@@ -2002,7 +2022,7 @@ static void test_v3_coupling_neighbor_fractional_rejected(void)
         "\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
         "\"coupling_coeff\":1,\"coupling_neighbor_zone\":1.5}]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(!ok, "a fractional, in-range coupling_neighbor_zone must be refused");
     TEST_CHECK(strstr(err, "coupling_neighbor_zone") != NULL, "the refusal names the field");
@@ -2023,7 +2043,7 @@ static void test_v3_legacy_pair_maps_into_row_cell(void)
         "\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
         "\"coupling_coeff\":6.75,\"coupling_neighbor_zone\":2}]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(ok, "a legacy version-3 pair must import cleanly under the v4 reader");
     TEST_CHECK(s_writes[0].set_coupling_cell_called[2], "the legacy pair committed cell 2 (the named neighbor)");
@@ -2055,7 +2075,7 @@ static void test_v3_legacy_pair_self_reference_rejected_before_any_commit(void)
         "{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
         "\"coupling_coeff\":4.0,\"coupling_neighbor_zone\":1}]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(!ok, "a self-referencing legacy pair must be refused");
     TEST_CHECK(strstr(err, "coupling_neighbor_zone") != NULL, "the refusal names the field");
@@ -2079,7 +2099,7 @@ static void test_v4_key_wins_over_legacy_pair_for_the_same_cell(void)
         "\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
         "\"coupling_c2\":9.0,\"coupling_coeff\":1.0,\"coupling_neighbor_zone\":2}]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(ok, "a body with both an explicit key and a legacy pair for the same cell must still import");
     TEST_CHECK(s_writes[0].set_coupling_cell_called[2], "cell 2 was committed");
@@ -2100,7 +2120,7 @@ static void test_v4_coupling_diagonal_rejected(void)
         "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
         "\"zones\":[{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"coupling_c1\":2.5}]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(!ok, "a nonzero diagonal cell must be rejected");
     TEST_CHECK(strstr(err, "coupling_c1") != NULL, "the refusal names the specific cell key");
@@ -2116,7 +2136,7 @@ static void test_v3_settings_source_self_reference_rejected(void)
         "{\"kind\":\"kilnctl_backup\",\"version\":3,\"profiles\":[],"
         "\"zones\":[{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":1}]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(!ok, "zone 1 claiming settings_source=1 (itself) must be refused");
     TEST_CHECK(strstr(err, "settings_source") != NULL, "the refusal names the field");
@@ -2151,7 +2171,7 @@ static void test_settings_source_cross_entry_cycle_rejected_before_any_commit(vo
         "{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":1},"
         "{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":0}]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(!ok, "a 2-zone settings_source cycle spanning two entries in the same import must be "
               "refused");
@@ -2184,7 +2204,7 @@ static void test_settings_source_cross_entry_legal_chain_still_imports(void)
         "{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":1},"
         "{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":255}]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(ok, "a legal two-entry chain (0 -> 1 -> Custom) must import cleanly");
     uint8_t s0 = 0xAA, s1 = 0xAA;
@@ -2233,7 +2253,7 @@ static void test_settings_source_restore_onto_differently_configured_board_succe
         "{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":1},"
         "{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":255}]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(ok, "the restore succeeds end-to-end -- pass 1 already proved the FINAL state "
               "(0->1, 1->Custom) is acyclic, so pass 2 must not be able to fail committing it one "
@@ -2278,7 +2298,7 @@ static void test_settings_source_commit_failure_restores_pre_import_values(void)
         "{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":1},"
         "{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":255}]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     s_force_fail_settings_source_zone = 0xFFu;
     s_force_fail_settings_source_group = 0xFFu;
@@ -2406,6 +2426,46 @@ static void test_export_emits_expected_keys_and_values_for_a_known_config(void)
     }
 }
 
+// Task 2 (bkfinish_assessment.md): backup_export_get_handler's kiln_configs[]
+// loop used to pass sizeof(pkg_json_scratch) -- a heap POINTER, not the
+// KILN_CFG_EXPORT_JSON_MAX_LEN buffer it actually allocated -- as the output
+// capacity to kiln_cfg_store_export_package_json(). sizeof(char*) is far
+// smaller than any real package JSON, so every populated slot's package was
+// silently refused and replaced with an "omitted":"export_failed: ..." entry
+// instead of its real content. This proves a populated slot's package now
+// actually appears with real content.
+static void test_backup_export_kiln_config_package_present(void)
+{
+    TEST_SECTION("backup_export_get_handler -- a populated kiln config slot's \"package\" is "
+                 "the real package JSON, not an export_failed omission (task 2 sizeof-pointer fix)");
+    reset_stub_state();
+
+    int32_t id1 = -1;
+    char reason[160] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Pkg-Present-Test", -1, &id1, reason, sizeof(reason)),
+              "setup: save a kiln config slot from the current (stubbed) board state");
+
+    esp_err_t err = run_export();
+    TEST_CHECK(err == ESP_OK, "backup_export_get_handler must return ESP_OK");
+    TEST_CHECK(s_export_body != NULL && s_export_len > 0, "the handler must have streamed something");
+
+    TEST_CHECK(strstr(s_export_body, "\"omitted\":\"export_failed") == NULL,
+              "no kiln_configs[] entry is silently omitted as export_failed");
+    char *needle = strstr(s_export_body, "\"name\":\"Pkg-Present-Test\"");
+    TEST_CHECK(needle != NULL, "the saved slot appears in kiln_configs[]");
+    if (needle) {
+        // The slot's own "package" key should follow shortly after its name
+        // within the same object -- look for it in a small window rather
+        // than scanning the whole body, so a DIFFERENT slot's package
+        // (there is only one here, but keep the test honest about what it's
+        // actually checking) can't accidentally satisfy this.
+        char window[256] = {0};
+        strncpy(window, needle, sizeof(window) - 1);
+        TEST_CHECK(strstr(window, "\"package\":{") != NULL,
+                  "the slot's own package is present as real, non-empty JSON, not an omission");
+    }
+}
+
 // 2026-09-15 (Opus adversarial re-review, F6): before this fix,
 // backup_export.c read zones_config_get_safety_tc_type() -- the ESP's own
 // cache, which can be stale relative to the Pico's actual configured
@@ -2506,7 +2566,7 @@ static void test_export_round_trips_through_import_to_identical_config(void)
     g_total_write_calls = 0;
 
     char import_err[256];
-    bool ok = backup_import_apply(s_export_body, import_err, sizeof(import_err));
+    bool ok = test_backup_import_apply(s_export_body, import_err, sizeof(import_err));
     TEST_CHECK(ok, "re-importing exactly what was just exported must succeed");
 
     TEST_CHECK_NEAR(s_writes[1].kp, 5.0, 1e-6, "pid_kp round-trips through export->import");
@@ -2569,7 +2629,7 @@ static void test_timing_profiles_bundle_round_trips_nonempty(void)
         "\"zones\":["
         "{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"timing_profile\":1}]}";
     char err[256];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
     TEST_CHECK(ok, "importing a real, non-empty timing_profiles[] bundle with a zone index inside it must succeed");
     TEST_CHECK(s_timing_profile_count == 2, "both timing_profiles[] entries were committed");
     TEST_CHECK(strcmp(s_timing_profiles[0].name, "Slow") == 0, "profile 0 name round-trips");
@@ -2592,7 +2652,7 @@ static void test_timing_profiles_bundle_round_trips_nonempty(void)
         "\"zones\":["
         "{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"timing_profile\":1}]}";
     char err2[256];
-    bool ok2 = backup_import_apply(bad_body, err2, sizeof(err2));
+    bool ok2 = test_backup_import_apply(bad_body, err2, sizeof(err2));
     TEST_CHECK(!ok2, "a timing_profile index (1) that overflows a NON-empty 1-entry bundle must be refused");
     TEST_CHECK(!s_writes[0].set_timing_profile_index_called, "the refused import must not have written anything");
 }
@@ -2622,7 +2682,7 @@ static void test_v4_coupling_tau_dead_time_round_trip_asymmetric_per_pair(void)
         "{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
         "\"coupling_c0\":7.0,\"coupling_tau_c0\":450.0,\"coupling_dead_time_c0\":95.0}]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(ok, "a well-formed coupling_tau_c%u/coupling_dead_time_c%u entry must import");
     TEST_CHECK(s_writes[0].set_coupling_cell_called[1], "zone 0's cell 1 (pair (0,1)) was committed");
@@ -2659,7 +2719,7 @@ static void test_v4_coupling_tau_dead_time_omitted_entirely_preserves_measured_v
         "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
         "\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"coupling_c1\":9.0}]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(ok, "an old-format entry with only coupling_c%u must still import");
     TEST_CHECK(s_writes[0].set_coupling_cell_called[1],
@@ -2693,7 +2753,7 @@ static void test_v4_coupling_tau_dead_time_partial_per_cell_presence(void)
         "\"zones\":[{\"index\":2,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
         "\"coupling_c0\":8.5,\"coupling_tau_c0\":200.0,\"coupling_dead_time_c0\":40.0}]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(ok, "a partial-cell entry must import");
     TEST_CHECK(s_writes[2].set_coupling_cell_called[0], "cell 0 (keys present) was committed");
@@ -2777,7 +2837,7 @@ static void test_ct_normals_and_new_fields_round_trip_through_export_import(void
     g_total_write_calls = 0;
 
     char import_err[256];
-    bool ok = backup_import_apply(s_export_body, import_err, sizeof(import_err));
+    bool ok = test_backup_import_apply(s_export_body, import_err, sizeof(import_err));
     TEST_CHECK(ok, "re-importing exactly what was just exported must succeed");
 
     TEST_CHECK(s_writes[1].set_normal_current_called,
@@ -2860,7 +2920,7 @@ static void test_safety_i_normal_a_round_trips_through_export_import(void)
     g_total_write_calls = 0;
 
     char import_err[256];
-    bool ok = backup_import_apply(s_export_body, import_err, sizeof(import_err));
+    bool ok = test_backup_import_apply(s_export_body, import_err, sizeof(import_err));
     TEST_CHECK(ok, "re-importing exactly what was just exported must succeed");
     TEST_CHECK(g_stub_safety_cfg_write_n_pairs == 1,
               "safety_cfg_write_apply_pairs() was called with exactly one pair");
@@ -2888,7 +2948,7 @@ static void test_safety_i_normal_a_write_failure_aborts_whole_import(void)
         "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
         "\"zones\":[{\"index\":1,\"pid_kp\":9.0,\"pid_ki\":0,\"pid_kd\":0,\"safety_i_normal_a\":3.0}]}";
     char err[256];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(!ok, "the import must fail loudly, not complete quietly, when the Pico write is unconfirmed");
     TEST_CHECK(strstr(err, "relay ARMED") != NULL || strstr(err, "refused") != NULL || strstr(err, "unconfirmed") != NULL,
@@ -2910,7 +2970,7 @@ static void test_safety_i_normal_a_absent_key_never_calls_write(void)
         "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
         "\"zones\":[{\"index\":0,\"pid_kp\":2.0,\"pid_ki\":0,\"pid_kd\":0}]}";
     char err[160];
-    bool ok = backup_import_apply(body, err, sizeof(err));
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
 
     TEST_CHECK(ok, "an ordinary backup with no safety_i_normal_a key still imports");
     TEST_CHECK(g_stub_safety_cfg_write_n_pairs == -1,
@@ -3058,6 +3118,7 @@ void run_test_backup_import(void)
     test_settings_source_commit_failure_restores_pre_import_values();
 
     test_export_emits_expected_keys_and_values_for_a_known_config();
+    test_backup_export_kiln_config_package_present();
     test_export_emits_live_pico_tc_type_not_stale_esp_cache();
     test_export_round_trips_through_import_to_identical_config();
     test_ct_normals_and_new_fields_round_trip_through_export_import();

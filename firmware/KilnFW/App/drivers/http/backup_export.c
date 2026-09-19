@@ -714,7 +714,7 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
             if (pico_populated) {
                 size_t pkg_len = 0;
                 char reason[96];
-                if (kiln_cfg_store_export_package_json(rows[i].id, pkg_json_scratch, sizeof(pkg_json_scratch),
+                if (kiln_cfg_store_export_package_json(rows[i].id, pkg_json_scratch, KILN_CFG_EXPORT_JSON_MAX_LEN,
                                                        &pkg_len, reason, sizeof(reason))) {
                     backup_stream_printf(&s, ",\"package\":");
                     backup_stream_raw(&s, pkg_json_scratch, pkg_len);
