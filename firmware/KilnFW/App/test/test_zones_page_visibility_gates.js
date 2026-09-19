@@ -163,6 +163,42 @@ PAIRS.forEach(([sectionId, hintId]) => {
     'markup: #atAcceptBtn is inside #pidAutotuneSection, not orphaned after its close (negative case)');
   assert(/id="atAbortBtn"/.test(sectionSlice),
     'markup: #atAbortBtn is inside #pidAutotuneSection');
+
+  // The checks above only prove ORDERING (the heading/buttons' text offsets
+  // fall before pidAutotuneHint's) -- that is satisfied just as well by a
+  // markup shape where the wrapper div closes right after <h3>Run status</h3>
+  // and everything from there on (including #atAcceptBtn) sits as SIBLING
+  // markup after the section, still textually before the hint paragraph.
+  // Prove NESTING instead: walk every <div ...> / </div> tag from #atRefusal
+  // (the last element that must be INSIDE the wrapper) up to #pidAutotuneHint
+  // and track the open/close balance. The wrapper must still be open (balance
+  // never drops to 0) until the very last </div> in that range, which is the
+  // wrapper's own closing tag immediately preceding the hint paragraph.
+  const refusalIdx = SRC.indexOf('id="atRefusal"');
+  assert(refusalIdx !== -1 && refusalIdx < hintIdx, 'markup: #atRefusal appears before #pidAutotuneHint');
+  const tailSlice = SRC.slice(refusalIdx, hintIdx);
+  const divTags = tailSlice.match(/<\/?div\b[^>]*>/g) || [];
+  assert(divTags.length > 0, 'sanity: at least one div tag between #atRefusal and #pidAutotuneHint');
+  let balance = 1; // the wrapper div (opened back at #pidAutotuneSection) is already open here
+  let closedEarly = false;
+  divTags.forEach((tag, i) => {
+    if (/^<div\b/.test(tag)) {
+      balance++;
+    } else {
+      balance--;
+      // A close that drops the balance to 0 before the LAST div tag in this
+      // range means something closed the wrapper (or an ancestor of it)
+      // early, orphaning whatever follows -- exactly the bug this test
+      // guards against.
+      if (balance === 0 && i !== divTags.length - 1) closedEarly = true;
+    }
+  });
+  assert(!closedEarly,
+    'markup: no </div> between #atRefusal and #pidAutotuneHint closes #pidAutotuneSection\'s wrapper early ' +
+    '(negative case: the section must stay open, nesting #atRefusal and everything after it, until its OWN closing tag)');
+  assert(balance === 0,
+    'markup: the wrapper\'s own closing </div> is the LAST div tag before #pidAutotuneHint, ' +
+    'immediately preceding the hint paragraph as PAIRS above assumes');
 }
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed.');

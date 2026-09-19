@@ -249,6 +249,36 @@ function loadChain(zones) {
 })();
 
 // ---------------------------------------------------------------------------
+// Review fix: a DANGLING (out-of-range) lead-in link is not a cycle, and
+// zones_config_json_normalize_settings_source_cycles() (the server) only
+// ever resets a zone whose link is ON a detected cycle -- it leaves a
+// non-cycle chain that merely walks into an out-of-range link untouched.
+// resolveTerminal() used to hardcode resetZone to the ORIGINAL k the walk
+// started from, which wrongly forced zone 0's own valid, freshly-resolved
+// link back to Custom whenever the zone it (transitively) pointed at had a
+// broken link of ITS OWN. Chain: 0 -> 1 -> 3, where zone 3 is disabled
+// (thermoCount=3, so index 3 is out of range) -- zone 1's own link is the
+// broken one, not zone 0's.
+// ---------------------------------------------------------------------------
+(function testDanglingLinkResetsOwnZoneNotOriginalCaller() {
+  const zones = {
+    0: { settingsSource: 1, tcType: '3' }, // 0 -> 1 (zone 0's own link is fine)
+    1: { settingsSource: 3, tcType: '3' }, // 1 -> 3, but zone 3 is disabled/out of range
+    2: { settingsSource: 0, tcType: '3' },
+  };
+  const ctx = loadChain(zones);
+  const result0 = ctx.resolveTerminal(0, 3);
+  assert(result0.forced === true, 'walking from zone 0 through the dangling 1->3 link is still forced (unresolvable)');
+  assert(result0.resetZone === 1,
+    'resolveTerminal(0, ...) reports zone 1 (the zone whose OWN link is out of range) as resetZone, ' +
+    'not zone 0 (the original caller) -- the server never touches zone 0\'s own valid link for this chain');
+  const result1 = ctx.resolveTerminal(1, 3);
+  assert(result1.resetZone === 1,
+    'resolveTerminal(1, ...) called directly on the offending zone reports itself (1) as resetZone, ' +
+    'matching resolveTerminal(0, ...)\'s answer for the same chain');
+})();
+
+// ---------------------------------------------------------------------------
 // MEDIUM fix, review of f8aa106e: updateInheritance()/refreshAllInheritance()
 // used to reset whichever zone happened to be the CALLER (k itself) on a
 // forced collapse, the opposite tie-break from the server's "reset the
@@ -341,6 +371,26 @@ function loadLive(zones, thermoCount) {
   assert(dom.divs[1].sel.value === '255',
     'live 0<->1 collapse: zone 1\'s select is the one reset to 255 (Custom), matching the server\'s ' +
     'highest-indexed tie-break for the same cycle');
+})();
+
+// Same review fix, driven through the full DOM path: 0 -> 1 -> 3(disabled).
+// Zone 1's own link is the one pointing off the end (thermoCount=3, so index
+// 3 does not exist) -- zone 0's own link (to zone 1) is perfectly valid and
+// must be left alone. The OLD (pre-fix) code reset zone 0 (the original
+// resolveTerminal(0, ...) caller) instead of zone 1, collapsing zone 0's
+// select to Custom for no reason of its own.
+(function testLiveDanglingLinkResetsOwnZoneNotUpstreamCaller() {
+  const zones = {
+    0: { settingsSource: 1, tcType: '3' }, // 0 -> 1: zone 0's own link is fine
+    1: { settingsSource: 3, tcType: '3' }, // 1 -> 3, but zone 3 is disabled/out of range
+  };
+  const { ctx, dom } = loadLive(zones, 3);
+  ctx.refreshAllInheritance();
+  assert(dom.divs[0].sel.value === '1',
+    'live dangling-link chain: zone 0\'s select is untouched (still 1) -- its own link was never broken');
+  assert(dom.divs[1].sel.value === '255',
+    'live dangling-link chain: zone 1\'s select is the one reset to 255 (Custom), since ITS OWN link ' +
+    'is the one pointing at the disabled zone 3');
 })();
 
 // ---------------------------------------------------------------------------

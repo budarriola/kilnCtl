@@ -1710,8 +1710,15 @@ function resolveTerminal(k, thermoCount) {
       return { terminal: cur, forced: true, resetZone: cur };
     }
     if (src < 0 || src >= thermoCount) {
-      // Not a cycle -- k's own lead-in link is the one pointing off the end.
-      return { terminal: cur, forced: true, resetZone: k };
+      // Not a cycle -- the server (zones_config_json_normalize_settings_source_cycles(),
+      // which only ever walks zones_config_json_settings_source_chain_has_cycle())
+      // leaves a dangling (out-of-range) link alone when it isn't part of a
+      // cycle, so a downstream zone's own valid link must not be touched here.
+      // The zone whose OWN stored link is out of range is `cur`, not the
+      // original `k` this walk started from -- reset that one, matching the
+      // cycle branches above where a zone's own updateInheritance() call only
+      // collapses when resetZone === that zone itself.
+      return { terminal: cur, forced: true, resetZone: cur };
     }
     cur = src;
   }
