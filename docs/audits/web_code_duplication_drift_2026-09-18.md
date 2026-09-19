@@ -161,6 +161,34 @@ the error strings or check ordering were deliberately changed, and the PC-side c
 "the exact order `ota_esp_post_handler()`" uses — i.e. against the main app's order,
 not recovery's.
 
+**2026-09-19: fixed, guarded by `check_recovery_ota_auth_mirror.ps1`.**
+`recovery_http.c`'s `ota_esp_post()` now matches `ota_http_authenticate_request()`
+on all four axes above: same wire strings (including the header-read-failure
+string, "could not read X-Ota-Mac header", found missing from the table above
+during review), an explicit `httpd_req_get_hdr_value_len() != 64` check before any
+read, a strict `[0-9a-fA-F]` nibble table replacing `sscanf`, and header/hex
+validation running before the lockout check. `firmware/KilnFW_recovery/main/
+recovery_ota_auth_mirror_drift_check.py` (wired into `run_all_checks.ps1` as
+`check_recovery_ota_auth_mirror.ps1`) now pins the hex-decode nibble logic and the
+handler's check ordering/wire strings against the main app's copy so this cannot
+silently drift again. The crypto-backend and `boot_guard`-non-decode differences
+above remain unchanged, as documented -- both are deliberate.
+
+**Open follow-up, not fixed here:** `recovery_http.c`'s `boot_guard_reset_post()`
+(`POST /api/ota/esp/boot_guard_reset`) and `sw_reset_post()` (`POST /api/sw_reset`)
+have no `X-Ota-Mac` check at all -- any request to either route is accepted
+unauthenticated. The main app authenticates the equivalent operations: its
+boot_guard-reset path only runs after `flash_firmware()`'s own verified
+post-flash success calls it with an `ap_password` (see CLAUDE.md's flash section),
+and `sw_reset_http.c` claims `ota_http_verify_request(OTA_HTTP_CONTEXT_SW_RESET,
+...)` before acting, per `ota_http.c:402-417`'s context table. The recovery
+image's two equivalents are reachable by anyone who can reach the board's
+recovery-mode AP with no password check at all. This is a real gap on the more
+privileged of the two images (recovery mode already implies OTA write access via
+`/api/ota/esp`, which *is* authenticated) and should be closed in a follow-up
+pass, not folded into this fix, which was scoped to the drifted `X-Ota-Mac` check
+on `/api/ota/esp` only.
+
 ### 2.3 `/api/boot_guard` and `/api/partitions` return different JSON shapes in the two images
 
 Same route, same method, two incompatible response bodies:

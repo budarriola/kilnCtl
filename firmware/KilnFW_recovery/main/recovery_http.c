@@ -196,8 +196,7 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
     char mac_hex[65];
     if (httpd_req_get_hdr_value_str(req, "X-Ota-Mac", mac_hex, sizeof(mac_hex)) != ESP_OK) {
         httpd_resp_set_status(req, "400 Bad Request");
-        return httpd_resp_send(req, "missing or malformed X-Ota-Mac header (want 64 hex chars)",
-                                HTTPD_RESP_USE_STRLEN);
+        return httpd_resp_send(req, "could not read X-Ota-Mac header", HTTPD_RESP_USE_STRLEN);
     }
     uint8_t claimed_mac[32];
     if (!hex_decode(mac_hex, claimed_mac, sizeof(claimed_mac))) {

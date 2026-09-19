@@ -27,17 +27,18 @@ WHAT IS COMPARED, and why each normalization exists:
 2. Ordering + wire strings in the POST /api/ota/esp handler
    (recovery_http.c's ota_esp_post()): the header-length check, the
    "missing or malformed X-Ota-Mac header (want 64 hex chars)" string, the
-   "X-Ota-Mac must be 64 hex characters" string, and the lockout check must
-   appear in that literal order in the handler source (header check, then
-   hex-validity check, then lockout) -- matching ota_http_authenticate_
-   request() running fully before ota_http_verify_request()'s lockout test
-   (ota_http.c:935-966, :465-481). A regression that reorders these four
-   or changes either wire string is exactly the class of drift this check
-   exists to catch, since none of it is exercised by a positive test (both
-   the old and new ordering return 400/429 on the same malformed-input
-   fixture; only the numeric HTTP status told them apart, and both are
-   assigned in this same file so an accidental swap does not fail to
-   compile).
+   "could not read X-Ota-Mac header" string, the "X-Ota-Mac must be 64 hex
+   characters" string, and the lockout check must appear in that literal
+   order in the handler source (header-length check, then header-read
+   check, then hex-validity check, then lockout) -- matching
+   ota_http_authenticate_request() running fully before
+   ota_http_verify_request()'s lockout test (ota_http.c:935-966, :465-481).
+   A regression that reorders these five or changes any wire string is
+   exactly the class of drift this check exists to catch, since none of it
+   is exercised by a positive test (both the old and new ordering return
+   400/429 on the same malformed-input fixture; only the numeric HTTP
+   status told them apart, and both are assigned in this same file so an
+   accidental swap does not fail to compile).
 
 Usage: python recovery_ota_auth_mirror_drift_check.py [repo_root]
 Exit 0: both comparisons pass.
@@ -85,8 +86,13 @@ def normalize(body: str, only_line_res: list) -> list:
         line = raw_line.strip()
         if not line:
             continue
-        if line == "return false;" or line == "return true;":
-            continue  # structurally required on both sides, uninteresting
+        # `return false;`/`return true;` are NOT skipped here -- an earlier
+        # version of this check dropped them as "structurally required on
+        # both sides, uninteresting", which let a flipped invalid-nibble
+        # guard (`return true;` instead of `return false;` when hi/lo < 0)
+        # pass silently, since both sides still had the same COUNT of
+        # return statements even though one now claims success on invalid
+        # input. Every return line is compared like any other.
         line = line.replace("in[2 * i]", "SRC[IDX]")
         line = line.replace("in[2 * i + 1]", "SRC[IDX+1]")
         line = line.replace("hex[2 * i]", "SRC[IDX]")
@@ -111,6 +117,7 @@ def find_body(text: str, pattern: re.Pattern, label: str, path: Path):
 ORDER_MARKERS = [
     ('httpd_req_get_hdr_value_len(req, "X-Ota-Mac")', "header length check"),
     ("missing or malformed X-Ota-Mac header (want 64 hex chars)", "missing/malformed header string"),
+    ("could not read X-Ota-Mac header", "header-read-failure string"),
     ("X-Ota-Mac must be 64 hex characters", "bad hex string"),
     ("ota_auth_lockout_is_locked(&s_lockout, t)", "lockout check"),
 ]
