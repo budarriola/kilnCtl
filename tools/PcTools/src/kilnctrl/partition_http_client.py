@@ -30,6 +30,28 @@ Response shape (partition_info_http.c's api_partitions_get_handler()):
         "size": 24576, "encrypted": false},
        ...
      ]}
+
+The recovery image (firmware/KilnFW_recovery/main/recovery_http.c's
+partitions_get()) answers the same route with a different, size-budget-
+driven shape instead -- it is a separate, much smaller build
+(check_recovery_image_size.ps1 grades it) that never links
+partition_info_http.c:
+
+    {"running": "recovery", "running_offset": "0x009000", "next_update": "app"}
+
+docs/audits/web_code_duplication_drift_2026-09-18.md section 2.3 recorded
+that get_partitions() used to reject this second shape outright ("response
+missing 'running'/'partitions'"), which meant a board that came up in
+recovery mode -- something CLAUDE.md records happening from ordinary
+flashing -- was misdiagnosed as returning a malformed response instead of
+reporting the much more useful fact that it is running the recovery image.
+Per that audit, the fix belongs on this client (recognizing the recovery
+shape) rather than growing the recovery image to match the main app's
+shape. get_partitions() now recognizes both: a recovery-shaped response is
+normalized to also carry ``"partitions": []`` and ``"is_recovery_shape":
+True`` so every caller can keep reading ``data["running"]`` unconditionally
+-- callers that care about telling the two images apart check
+``is_recovery_shape``.
 """
 from __future__ import annotations
 
@@ -80,12 +102,17 @@ def _http_error_detail(exc: Exception) -> "tuple[Optional[int], str]":
 
 def get_partitions(host: str, timeout: float = PARTITION_HTTP_TIMEOUT_S) -> dict:
     """GET /api/partitions and return the decoded JSON object
-    ``{"running": <label>, "partitions": [...]}``. Raises
+    ``{"running": <label>, "partitions": [...]}`` (main app), or the
+    recovery image's ``{"running": <label>, "running_offset": <hex str>,
+    "next_update": <label>}`` normalized to also carry ``"partitions": []``
+    and ``"is_recovery_shape": True`` -- see this module's docstring for why
+    both shapes are legitimate rather than one being malformed. Raises
     PartitionHttpError on any transport failure, non-2xx response, invalid
-    JSON, or a response missing the top-level "running"/"partitions" keys
-    or any per-entry required field -- loud failure rather than a partial
-    or empty table read back as "MATCH: no partitions" would be a
-    dangerously wrong reading of the board's real state."""
+    JSON, or a response missing "running" entirely, missing "partitions"
+    without also looking like the recovery shape, or any per-entry required
+    field on the main-app shape -- loud failure rather than a partial or
+    empty table read back as "MATCH: no partitions" would be a dangerously
+    wrong reading of the board's real state."""
     req = urllib.request.Request(_url(host, "/api/partitions"), method="GET")
     try:
         with http_auth.urlopen(req, timeout=timeout) as resp:
@@ -99,10 +126,27 @@ def get_partitions(host: str, timeout: float = PARTITION_HTTP_TIMEOUT_S) -> dict
     except Exception as exc:
         raise PartitionHttpError(f"GET /api/partitions response was not valid JSON: {body_text!r}") from exc
 
-    if not isinstance(data, dict) or "running" not in data or "partitions" not in data:
+    if not isinstance(data, dict) or "running" not in data:
         raise PartitionHttpError(
             f"GET /api/partitions response missing 'running'/'partitions': {body_text!r}"
         )
+
+    if "partitions" not in data:
+        # Not the main app's shape. The recovery image
+        # (KilnFW_recovery/main/recovery_http.c's partitions_get()) answers
+        # this same route with {"running", "running_offset", "next_update"}
+        # instead -- a valid, deliberately smaller response, not a
+        # malformed one. Normalize it so every caller can keep reading
+        # data["running"] unconditionally.
+        if "next_update" in data or "running_offset" in data:
+            normalized = dict(data)
+            normalized["partitions"] = []
+            normalized["is_recovery_shape"] = True
+            return normalized
+        raise PartitionHttpError(
+            f"GET /api/partitions response missing 'running'/'partitions': {body_text!r}"
+        )
+
     if not isinstance(data["partitions"], list):
         raise PartitionHttpError(
             f"GET /api/partitions 'partitions' was not a list: {body_text!r}"
@@ -115,4 +159,6 @@ def get_partitions(host: str, timeout: float = PARTITION_HTTP_TIMEOUT_S) -> dict
             raise PartitionHttpError(
                 f"GET /api/partitions entry {i} ({entry.get('label', '?')!r}) missing {missing}"
             )
+    data = dict(data)
+    data["is_recovery_shape"] = False
     return data

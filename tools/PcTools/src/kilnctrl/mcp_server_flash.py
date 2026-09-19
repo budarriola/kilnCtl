@@ -448,6 +448,26 @@ def _verify_flash_landed(
 
     running = partitions_data.get("running")
     if running != app_partition_name:
+        if partitions_data.get("is_recovery_shape"):
+            # docs/audits/web_code_duplication_drift_2026-09-18.md section
+            # 2.3: the recovery image answers GET /api/partitions with its
+            # own smaller shape (running/running_offset/next_update, no
+            # partitions array). partition_http_client.get_partitions()
+            # normalizes that into this same dict rather than raising a
+            # "malformed response" error, but it is still the same
+            # underlying fact this whole check exists to report: the board
+            # did not boot the app image just flashed.
+            raise RuntimeError(
+                f"flash reported OK, but the board came up running the RECOVERY "
+                f"image (partition {running!r}, next_update={partitions_data.get('next_update')!r}), "
+                f"not {app_partition_name!r}. flash_firmware() wrote the app image to "
+                f"the {app_partition_name!r} partition, but the bootloader fell back "
+                "to recovery -- see CLAUDE.md's boot_guard recovery-mode notes and "
+                "docs/OTA_SINGLE_SLOT_PLAN.md for the blank/unset `otadata` gap "
+                "this can indicate. ota_rollback_esp() does NOT fix this (it reverts "
+                "between OTA images over the app's own HTTP API, which recovery does "
+                "not run)."
+            )
         raise RuntimeError(
             f"flash reported OK, but the board is running partition {running!r}, "
             f"not {app_partition_name!r} -- flash_firmware() wrote the app image to "
