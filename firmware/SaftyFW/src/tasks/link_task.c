@@ -2468,10 +2468,25 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
         return; // writes NOTHING -- s_staged_config is untouched by validate_ex()
     }
 
+    // Captured BEFORE this commit's staged changes are finalized/written --
+    // config_params_finalize_i_normal_a_invalidation() below needs the
+    // effective CT channel map as it stood BEFORE this commit, to detect a
+    // topology/channel remap that must invalidate i_normal_a[]. s_staged_
+    // config already carries this commit's own SET_PARAM changes, so it
+    // cannot serve as "before"; the last record actually committed can.
+    config_store_record_t before_commit;
+    config_store_get_full_record(&before_commit);
+
     config_store_record_t to_write = s_staged_config;
     config_params_finalize_ct_channel_map(&to_write);
-    config_params_finalize_i_present_a(&to_write); // CT_COMMISSIONING_PLAN.md step 3
     config_params_finalize_zone_ct_channel(&to_write); // CT_CHANNEL_MASK_PLAN.md step 2
+    // Must run AFTER finalize_zone_ct_channel() (so to_write's group bit is
+    // settled) and BEFORE finalize_i_present_a() (so an invalidated zone
+    // cannot still win that function's smallest-normal search). Closes the
+    // CT-commissioning HIGH finding: a topology/channel-map change must not
+    // leave a stale per-zone i_normal_a feeding S14/S15.
+    config_params_finalize_i_normal_a_invalidation(&before_commit, &to_write);
+    config_params_finalize_i_present_a(&to_write); // CT_COMMISSIONING_PLAN.md step 3
     to_write.calibration_missing = !config_params_all_required_set(&to_write);
 
     uint8_t prev_tc_type = config_store_get_tc_type(); // captured BEFORE the write, see tc_type_reapply_policy.h
@@ -2601,10 +2616,24 @@ static void link_task_handle_apply_config_volatile(const kilnlink_frame_t *frame
         return; // writes NOTHING -- s_staged_config is untouched by validate_ex()
     }
 
+    // See link_task_handle_commit_config()'s matching comment: this is the
+    // record actually installed (flash or a prior volatile install) before
+    // THIS commit's staged changes are applied, needed by config_params_
+    // finalize_i_normal_a_invalidation() below to detect a topology/channel
+    // remap.
+    config_store_record_t before_commit;
+    config_store_get_full_record(&before_commit);
+
     config_store_record_t to_write = s_staged_config;
     config_params_finalize_ct_channel_map(&to_write);
-    config_params_finalize_i_present_a(&to_write);
     config_params_finalize_zone_ct_channel(&to_write); // CT_CHANNEL_MASK_PLAN.md step 2
+    // Same ordering requirement as link_task_handle_commit_config(): after
+    // finalize_zone_ct_channel(), before finalize_i_present_a(). Closes the
+    // CT-commissioning HIGH finding for the volatile-install path too --
+    // APPLY_CONFIG_VOLATILE can change ct_topology/zone_ct_channel exactly
+    // like COMMIT_CONFIG can.
+    config_params_finalize_i_normal_a_invalidation(&before_commit, &to_write);
+    config_params_finalize_i_present_a(&to_write);
     to_write.calibration_missing = !config_params_all_required_set(&to_write);
 
     // config_store_write_volatile() can still fail for exactly one reason

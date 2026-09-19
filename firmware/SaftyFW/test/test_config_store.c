@@ -2311,6 +2311,114 @@ static void test_config_params_finalize_i_present_a(void)
     }
 }
 
+static void test_config_params_finalize_i_normal_a_invalidation(void)
+{
+    TEST_SECTION("config_params_finalize_i_normal_a_invalidation -- a topology/channel remap invalidates the "
+                 "per-zone normals measured under the OLD wiring, not the ones that did not move");
+
+    // Helper values reused below.
+    kilnlink_param_value_t v;
+
+    // Baseline "before": default record (ct_topology PER_ZONE, identity map
+    // {0,1,2} derived since zone_ct_channel's group bit is unset) with all
+    // three zone normals measured and confirmed.
+    config_store_record_t before;
+    config_store_default(&before);
+    v.f32_val = 3.10f;
+    TEST_CHECK(config_params_set(&before, 0x031Au, KILNLINK_PARAM_TYPE_F32, v), "stage i_normal_a[0]");
+    v.f32_val = 3.20f;
+    TEST_CHECK(config_params_set(&before, 0x031Bu, KILNLINK_PARAM_TYPE_F32, v), "stage i_normal_a[1]");
+    v.f32_val = 3.30f;
+    TEST_CHECK(config_params_set(&before, 0x031Cu, KILNLINK_PARAM_TYPE_F32, v), "stage i_normal_a[2]");
+    TEST_CHECK(config_store_field_is_set(&before.fields_set, CONFIG_STORE_SET_I_NORMAL_A_0) &&
+               config_store_field_is_set(&before.fields_set, CONFIG_STORE_SET_I_NORMAL_A_1) &&
+               config_store_field_is_set(&before.fields_set, CONFIG_STORE_SET_I_NORMAL_A_2),
+               "all three zone normals confirmed before the remap");
+
+    // Case 1: a topology flip PER_ZONE -> SUMMED. Effective map goes from
+    // {0,1,2} to {2,2,2} (config_store_derive_zone_ct_channel()) -- zones 0
+    // and 1 moved onto a different physical channel, zone 2 happened to
+    // already read channel 2 and did not move.
+    {
+        config_store_record_t to_write = before;
+        v.u8_val = CONFIG_STORE_CT_TOPOLOGY_SUMMED;
+        TEST_CHECK(config_params_set(&to_write, 0x031Fu, KILNLINK_PARAM_TYPE_U8, v), "stage ct_topology = SUMMED");
+        config_params_finalize_zone_ct_channel(&to_write); // no-op: zone_ct_channel was never touched
+        config_params_finalize_i_normal_a_invalidation(&before, &to_write);
+
+        TEST_CHECK(!config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_I_NORMAL_A_0),
+                   "topology flip: zone 0's normal (moved 0 -> 2) is invalidated");
+        TEST_CHECK(!config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_I_NORMAL_A_1),
+                   "topology flip: zone 1's normal (moved 1 -> 2) is invalidated");
+        TEST_CHECK(config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_I_NORMAL_A_2),
+                   "topology flip: zone 2's normal (2 -> 2, did not move) survives");
+        TEST_CHECK(to_write.i_normal_a[0] == 0.0f && to_write.i_normal_a[1] == 0.0f,
+                   "invalidated zones' stored floats are zeroed (hygiene)");
+        TEST_CHECK(to_write.i_normal_a[2] == 3.30f, "the surviving zone's stored float is untouched");
+    }
+
+    // Case 2: a full, genuinely committed per-zone remap (all three
+    // zone_ct_channel bits set, so the group bit is derived) that moves two
+    // zones and leaves one in place -- proves this is keyed on the EFFECTIVE
+    // map, not merely "did ct_topology change", since ct_topology is never
+    // touched in this case at all.
+    {
+        config_store_record_t to_write = before;
+        v.u8_val = 2u;
+        TEST_CHECK(config_params_set(&to_write, 0x0320u, KILNLINK_PARAM_TYPE_U8, v), "stage zone_ct_channel[0] = 2");
+        v.u8_val = 1u;
+        TEST_CHECK(config_params_set(&to_write, 0x0321u, KILNLINK_PARAM_TYPE_U8, v), "stage zone_ct_channel[1] = 1 (unchanged)");
+        v.u8_val = 0u;
+        TEST_CHECK(config_params_set(&to_write, 0x0322u, KILNLINK_PARAM_TYPE_U8, v), "stage zone_ct_channel[2] = 0");
+        config_params_finalize_zone_ct_channel(&to_write);
+        TEST_CHECK(config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_ZONE_CT_CHANNEL),
+                   "all three per-zone bits present: group bit derived");
+        config_params_finalize_i_normal_a_invalidation(&before, &to_write);
+
+        TEST_CHECK(!config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_I_NORMAL_A_0),
+                   "per-zone remap: zone 0's normal (0 -> 2) is invalidated");
+        TEST_CHECK(config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_I_NORMAL_A_1),
+                   "per-zone remap: zone 1's normal (1 -> 1, did not move) survives");
+        TEST_CHECK(!config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_I_NORMAL_A_2),
+                   "per-zone remap: zone 2's normal (2 -> 0) is invalidated");
+    }
+
+    // Case 3: no change at all -- every zone's normal survives.
+    {
+        config_store_record_t to_write = before;
+        config_params_finalize_zone_ct_channel(&to_write);
+        config_params_finalize_i_normal_a_invalidation(&before, &to_write);
+        TEST_CHECK(config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_I_NORMAL_A_0) &&
+                   config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_I_NORMAL_A_1) &&
+                   config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_I_NORMAL_A_2),
+                   "no topology/channel change: all three normals survive untouched");
+    }
+
+    // NEGATIVE TEST (negative-test-every-check discipline): confirm this is
+    // not a vacuous pass by showing the PRE-FIX behavior (simply never
+    // calling the invalidation function, which is exactly what link_task.c
+    // did before this change) leaves the finding's stale value standing.
+    {
+        config_store_record_t to_write = before;
+        v.u8_val = CONFIG_STORE_CT_TOPOLOGY_SUMMED;
+        config_params_set(&to_write, 0x031Fu, KILNLINK_PARAM_TYPE_U8, v);
+        config_params_finalize_zone_ct_channel(&to_write);
+        // Deliberately NOT calling config_params_finalize_i_normal_a_invalidation() here.
+        TEST_CHECK(config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_I_NORMAL_A_0),
+                   "without the fix, a topology flip leaves zone 0's stale normal marked valid -- "
+                   "this is the exact defect the cases above prove is now closed");
+    }
+
+    // NEGATIVE TEST for NULL inputs: must not crash, must not touch to_write.
+    {
+        config_store_record_t to_write = before;
+        config_params_finalize_i_normal_a_invalidation(NULL, &to_write);
+        TEST_CHECK(config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_I_NORMAL_A_0),
+                   "NULL `before` is a no-op, not a crash or a spurious invalidation");
+        config_params_finalize_i_normal_a_invalidation(&before, NULL); // must not crash
+    }
+}
+
 static void test_config_params_all_required_set(void)
 {
     TEST_SECTION("config_params_all_required_set -- every no-safe-default field, and only that set");
@@ -2962,6 +3070,7 @@ void run_test_config_store(void)
     test_ct_topology_legacy_decode();
     test_config_params_ct_topology_set();
     test_config_params_finalize_i_present_a();
+    test_config_params_finalize_i_normal_a_invalidation();
     test_config_params_all_required_set();
     test_config_params_get_config_page_roundtrip();
     test_config_params_is_set_through_get_config_page();

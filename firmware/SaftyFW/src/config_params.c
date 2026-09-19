@@ -956,6 +956,60 @@ void config_params_finalize_zone_ct_channel(config_store_record_t *rec)
     }
 }
 
+// docs/CT_CHANNEL_MASK_PLAN.md / the CT commissioning HIGH-severity finding
+// this closes: i_normal_a[z] is a per-ZONE "normal current" measurement, and
+// it is only meaningful under the CT wiring that was in effect the moment it
+// was measured. Neither ct_topology's SET_PARAM handler (0x031F) nor
+// zone_ct_channel's (0x0320-0x0322) touch the CONFIG_STORE_SET_I_NORMAL_A_x
+// bits -- so before this function existed, remapping a zone to a different
+// physical channel (or flipping topology) left the OLD normal standing,
+// still trusted, now describing current on a channel the zone no longer
+// reads. safety_guards.c's S14/S15 have no way to tell a stale value from a
+// fresh one; both read as "measured" via i_normal_valid[].
+//
+// `before` is the record actually committed to flash/RAM before this commit
+// (link_task.c's COMMIT_CONFIG/APPLY_CONFIG_VOLATILE handlers fetch it via
+// config_store_get_full_record() before building `to_write`); `to_write` is
+// this commit's candidate record, AFTER config_params_finalize_zone_ct_
+// channel() has run (so its ZONE_CT_CHANNEL group bit already reflects a
+// per-zone answer this same commit may have just completed). Both sides are
+// resolved through config_store_effective_zone_ct_channel() -- the one
+// function every other reader of "which channel does zone Z read" already
+// goes through (its own header comment names this exact "reset one side of
+// a pair" hazard) -- so a topology flip and a direct channel remap are
+// caught the same way, and a zone whose effective channel did NOT move
+// (including one whose committed channel is reasserted verbatim) is left
+// alone.
+//
+// Any zone whose effective channel changed has its I_NORMAL_A_x bit cleared
+// and its stored value zeroed (the zero is hygiene only -- config_store.c's
+// pack/unpack and safety_core.c's cfg->i_normal_valid[]/i_normal_a[] mirror
+// pair both gate on the bit, never on the float alone -- see safety_core.c
+// around s_guard_cfg.i_normal_valid[]). S14/S15 then see "not yet measured
+// under this wiring" for that zone, exactly like a freshly-commissioned
+// board, rather than a number measured somewhere else entirely.
+void config_params_finalize_i_normal_a_invalidation(const config_store_record_t *before,
+                                                      config_store_record_t *to_write)
+{
+    if (!before || !to_write) {
+        return;
+    }
+    uint8_t old_map[3];
+    uint8_t new_map[3];
+    config_store_effective_zone_ct_channel(before, old_map);
+    config_store_effective_zone_ct_channel(to_write, new_map);
+
+    static const uint32_t I_NORMAL_A_BITS[3] = {
+        CONFIG_STORE_SET_I_NORMAL_A_0, CONFIG_STORE_SET_I_NORMAL_A_1, CONFIG_STORE_SET_I_NORMAL_A_2
+    };
+    for (unsigned z = 0; z < 3u; z++) {
+        if (old_map[z] != new_map[z]) {
+            to_write->fields_set &= ~I_NORMAL_A_BITS[z];
+            to_write->i_normal_a[z] = 0.0f;
+        }
+    }
+}
+
 void config_params_finalize_i_present_a(config_store_record_t *rec)
 {
     if (!rec || rec->i_present_a_manual) {

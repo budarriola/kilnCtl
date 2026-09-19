@@ -233,6 +233,27 @@ void config_params_finalize_i_present_a(config_store_record_t *rec);
 // half-applied. docs/CT_CHANNEL_MASK_PLAN.md step 2.
 void config_params_finalize_zone_ct_channel(config_store_record_t *rec);
 
+// Closes the CT-commissioning finding: a topology flip (0x031F) or a
+// per-zone channel remap (0x0320-0x0322) invalidates the CT verdict
+// fingerprint on the ESP (ct_verify_store.h) but did NOT invalidate
+// i_normal_a[] here on the Pico, which is indexed BY ZONE and keeps feeding
+// S14/S15 (safety_guards.c) a "normal current" measured under whatever
+// wiring was in effect when it was recorded. Must be called by COMMIT_CONFIG/
+// APPLY_CONFIG_VOLATILE's handlers (link_task.c) AFTER config_params_
+// finalize_zone_ct_channel() (so `to_write`'s ZONE_CT_CHANNEL group bit is
+// already settled) and BEFORE config_params_finalize_i_present_a() (so a
+// zone this call invalidates cannot still win that function's "smallest
+// confirmed normal" search). `before` is the record actually committed
+// before this commit (config_store_get_full_record(), fetched by the caller
+// before applying this commit's SET_PARAM changes on top of it) --
+// resolving both sides through config_store_effective_zone_ct_channel()
+// (the one function every other "which channel does this zone read" reader
+// already goes through) is what lets a topology flip and a direct channel
+// remap be caught the same way. See the .c file for the exact per-zone
+// clear-and-zero rule.
+void config_params_finalize_i_normal_a_invalidation(const config_store_record_t *before,
+                                                      config_store_record_t *to_write);
+
 // True iff every one of the seven CONFIG_STORE_SET_* bits (config_store.h's
 // bitmask -- the no-safe-default fields CONFIG_REFERENCE.md section 1 names)
 // is set in `rec->fields_set`. COMMIT_CONFIG's handler uses this to decide
