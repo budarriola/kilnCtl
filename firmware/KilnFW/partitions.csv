@@ -278,7 +278,7 @@ app,          app,  ota_0,     0x210000, 0x800000,
 recovery,     app,  factory,   0xA10000, 0x1E0000,
 coredump,     data, coredump,  0xBF0000, 0x100000,
 logs,         data, spiffs,    0xCF0000, 0xC0000,
-cfg,          data, littlefs,  0xDB0000, 0x80000,
+cfg,          data, littlefs,  0xDB0000, 0x250000,
 
 # --- `logs` partition, added 2026-09-01 (external-flash log storage gap) ---
 #
@@ -638,3 +638,74 @@ cfg,          data, littlefs,  0xDB0000, 0x80000,
 # edit alone -- that wiring (retargeting `boot_guard`'s action, deleting
 # in-app RECOVERY MODE) is separate follow-on work (plan section 8 steps 4
 # and 7), not part of this table-only pass.
+
+# --- `cfg` grown to take the entire remaining tail, added 2026-09-19
+#     (docs/PROFILE_SLOTS_100_PLAN.md section 1, owner decision: "take the
+#     entire 1.81 MiB tail for cfg") -----------------------------------------
+#
+# APPEND-IN-PLACE SIZE CHANGE to `cfg` ONLY. Offset (0xDB0000) is UNCHANGED --
+# this is a pure grow-in-place, not a move. `cfg` sits last in the table, so
+# growing it cannot collide with or displace anything after it; nothing above
+# 0xDB0000 (nvs, phy_init, pico_img, wifi_nvs, kiln_nvs, profiles_nvs,
+# otadata, app, recovery, coredump, logs) moves, resizes, or changes subtype.
+#
+# WHY NOW: docs/PROFILE_SLOTS_100_PLAN.md raises PROFILES_MAX_COUNT from 8 to
+# 100 (task 6, not part of this commit) and its own section 3 capacity
+# arithmetic recomputes cfg's worst-case block-rounded footprint at that
+# count -- see tools/check_profiles_capacity.py (task 4, already landed at
+# c2e074c1) for the live numbers. The 512K (0x80000) size chosen on
+# 2026-09-07 was sized against an 8-slot worst case ("every count in the
+# inventory above is HARD-CAPPED by a compile-time constant" -- true then,
+# but that cap is about to move by 12.5x). Rather than re-deriving a new
+# "just enough" figure that would need a THIRD resize whenever
+# PROFILES_MAX_COUNT changes again, the owner's decision was to stop
+# rationing this partition against a moving compile-time constant and instead
+# take the entire remaining contiguous tail once, since nothing else in this
+# table has any present or planned claim on it (see the 2026-09-07 block
+# above: "the 1.81 MiB left contiguous above it is worth more unspent" --
+# that reasoning is superseded by this decision, not contradicted by it; the
+# 2026-09-07 pass simply had a different, smaller consumer in mind for the
+# leftover space than materialized).
+#
+# WHY THE WHOLE TAIL, NOT A SMALLER GROWN FIGURE: `cfg` is the last row in
+# the table and there is no other row above or below this line with any
+# claim, present or documented-planned, on the flash past 0xDB0000. Leaving
+# a fragment of it "spare" the way 0xFF0000..0x1000000 was left spare after
+# `logs` (2026-09-01 block above) only makes sense when something else might
+# plausibly want that fragment later; nothing does here, `logs` already grew
+# in 2026-09-01/09-02 and has its own separate rationale, and a future
+# resize of `cfg` past a partial grow would cost exactly the same
+# otadata-untouched, no-data-loss revision as this one, for no benefit over
+# doing it once now.
+#
+# Arithmetic: old cfg 0xDB0000/0x80000 ended at 0xE30000, leaving
+# 0x1000000 - 0xE30000 = 0x1D0000 (1,900,544 B, ~1.81 MiB) unallocated tail
+# (matching the 2026-09-07 block's own "contiguous tail" figure above).
+# New cfg size = old size + tail = 0x80000 + 0x1D0000 = 0x250000
+# (2,424,832 B, ~2.31 MiB). New end offset: 0xDB0000 + 0x250000 = 0x1000000,
+# exactly the 16 MiB chip boundary -- the tail is now fully consumed, by
+# construction, not by a rounded-down approximation.
+# 0x250000 = 37 x 0x10000, so the new size stays 64K-aligned, matching every
+# other entry in this table (a `data` partition only requires 4K alignment,
+# but the arithmetic stays simple and consistent with the rest of the file).
+#
+# NO DATA LOSS: LittleFS on `cfg` is mounted with format_if_mount_failed=
+# FALSE (2026-09-07 block above). Growing the partition's declared size
+# without touching its start offset or its existing superblock-formatted
+# region is the same class of change ESP-IDF's own wear-levelling/littlefs
+# examples treat as safe -- the filesystem's existing blocks are untouched;
+# only newly-available blocks past the old 0x80000 boundary become usable
+# once the board boots against this new table. (This has NOT been verified
+# against real hardware as part of this commit -- see the "still open" note
+# below.)
+#
+# otadata does NOT need erasing for this revision: no `app`-type partition's
+# offset or size changed (same rule stated in the 2026-09-07 and 2026-09-16
+# blocks above for their own append-only/tail-only edits).
+#
+# Still open, per this pass's source-and-build-only scope (matching every
+# other partition-table revision in this file): this has NOT been flashed to
+# or verified against the bench board. `tools/check_recovery_image_size.ps1`
+# and `tools/check_profiles_capacity.ps1` were both re-run against this
+# change in the same worktree (host-verification only) to confirm the parser
+# picks up the new bound and nothing else regresses.
