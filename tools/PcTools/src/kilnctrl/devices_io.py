@@ -384,7 +384,12 @@ class IoState:
 
     def describe(self) -> str:
         relays = " ".join(
-            f"R{n}={int(self.relay(n))}" for n in range(1, IO_RELAY_COUNT + 1)
+            f"R{n}={int(self.relay(n))}" for n in range(1, IO_RELAY_COUNT)
+        )
+        relays += (
+            f"  K4_bit={int(self.relay(IO_RELAY_COUNT))} (expander bit only; NOT heat "
+            "state -- K4 is Pico-owned via SAFETY_CMD_REQUEST_ENABLE, see "
+            "safety_request_enable)"
         )
         ios = " ".join(
             f"IO{n}={int(self.io_level(n))}{'i' if self.io_is_input(n) else 'o'}"

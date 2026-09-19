@@ -97,7 +97,19 @@ def io_set_relay(relay: int, on: bool) -> str:
     firmware can refuse this because a running profile owns the relay, a
     safety fault is asserted, or an OTA is in progress -- distinguishable
     reasons that a bare transport ACK cannot tell apart from "energized".
+
+    Relay4's expander bit does NOT control K4/J11: K4 is closed only by the
+    RP2040 safety processor in response to SAFETY_CMD_REQUEST_ENABLE (see
+    firmware/KilnFW/App/drivers/control/heat_enable.h). Driving this bit
+    directly cannot energize the heater and would read back as "on" with no
+    heat ever granted, so this refuses -- use safety_request_enable instead.
     """
+    if relay == 4:
+        return (
+            "refused - relay 4's expander bit is NOT K4/heat state; K4 is "
+            "Pico-owned via SAFETY_CMD_REQUEST_ENABLE -- use "
+            "safety_request_enable(true) instead"
+        )
     try:
         result = _srv._io.set_relay(relay, on)
     except IoQueryError as exc:
@@ -116,8 +128,18 @@ def io_set_relay_mask(mask: int, value: int) -> str:
     Bits 0-3 are Relay1..Relay4 (K3/J8, K1/J3, K2/J4, K5/J11) in both `mask`
     (which relays to change) and `value` (their new levels).
 
-    Same refusal-aware wait as :func:`io_set_relay` -- see its docstring.
+    Same refusal-aware wait as :func:`io_set_relay` -- see its docstring,
+    including why bit 3 (Relay4/K4) is refused here too: that expander bit is
+    not heat state, K4 is Pico-owned via SAFETY_CMD_REQUEST_ENABLE, and this
+    tool refuses whole-call rather than silently no-op'ing on that one bit.
     """
+    if mask & 0x08:
+        return (
+            "refused - mask bit 3 (relay 4) is NOT K4/heat state; K4 is "
+            "Pico-owned via SAFETY_CMD_REQUEST_ENABLE -- use "
+            "safety_request_enable(true) instead, and retry this call "
+            "without bit 3 for the other relays"
+        )
     try:
         result = _srv._io.set_relay_mask(mask, value)
     except IoQueryError as exc:

@@ -48,6 +48,45 @@ class IoSetRelayHappyPathTests(unittest.TestCase):
         mock_set.assert_called_once_with(1, True)
 
 
+class IoSetRelay4TrapTests(unittest.TestCase):
+    """Relay4's expander bit is not K4/heat state -- K4 closes only via
+    SAFETY_CMD_REQUEST_ENABLE to the RP2040 safety processor (see
+    firmware/KilnFW/App/drivers/control/heat_enable.h). Driving this bit
+    directly can never energize the heater; it must refuse before ever
+    reaching the wire, not merely warn after the fact."""
+
+    def test_io_set_relay_refuses_relay_4_without_touching_client(self):
+        with unittest.mock.patch.object(mcp_server._io, "set_relay") as mock_set:
+            result = mcp_server.io_set_relay(4, True)
+        mock_set.assert_not_called()
+        self.assertTrue(result.startswith("refused"))
+        self.assertIn("K4", result)
+        self.assertIn("safety_request_enable", result)
+
+    def test_io_set_relay_mask_refuses_when_bit3_set(self):
+        with unittest.mock.patch.object(mcp_server._io, "set_relay_mask") as mock_set:
+            result = mcp_server.io_set_relay_mask(0x08, 0x08)
+        mock_set.assert_not_called()
+        self.assertTrue(result.startswith("refused"))
+        self.assertIn("K4", result)
+        self.assertIn("safety_request_enable", result)
+
+    def test_io_set_relay_mask_refuses_bit3_even_combined_with_other_relays(self):
+        with unittest.mock.patch.object(mcp_server._io, "set_relay_mask") as mock_set:
+            result = mcp_server.io_set_relay_mask(0x0F, 0x01)
+        mock_set.assert_not_called()
+        self.assertTrue(result.startswith("refused"))
+
+    def test_io_set_relay_mask_without_bit3_still_reaches_client(self):
+        result_obj = RelayResult(ok=True, reason_text=None, refusal=RelayRefusal.OTHER)
+        with unittest.mock.patch.object(
+            mcp_server._io, "set_relay_mask", return_value=result_obj
+        ) as mock_set:
+            result = mcp_server.io_set_relay_mask(0x07, 0x01)
+        mock_set.assert_called_once_with(0x07, 0x01)
+        self.assertTrue(result.startswith("ok"))
+
+
 class IoSetRelayRefusalTests(unittest.TestCase):
     def test_owned_by_profile_refusal_reports_reason(self):
         result_obj = RelayResult(ok=False, reason_text="owned", refusal=RelayRefusal.OWNED)

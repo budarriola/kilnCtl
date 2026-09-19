@@ -42,6 +42,21 @@ class IoReadHappyPathTests(unittest.TestCase):
         self.assertIn("DRDY1=1", result)
         mock_read.assert_called_once()
 
+    def test_relay4_never_rendered_as_plain_relay_state(self):
+        """R4's expander bit is not heat state -- K4 closes only via
+        SAFETY_CMD_REQUEST_ENABLE (see firmware/KilnFW/App/drivers/control/
+        heat_enable.h). io_read() must not print it in the same "R4=<n>"
+        shape as R1-R3, which is exactly the confusion that cost a bench
+        session (K4 bit read back 1, no element current ever flowed)."""
+        state = IoState(data=0x000F, dir=0x0000, relays=0x0F, io_levels=0, drdy=0, flags=0x00)
+        with unittest.mock.patch.object(mcp_server._io, "read", return_value=state):
+            result = mcp_server.io_read()
+        self.assertNotIn("R4=", result)
+        self.assertIn("K4_bit=1", result)
+        self.assertIn("NOT heat", result)
+        self.assertIn("SAFETY_CMD_REQUEST_ENABLE", result)
+        self.assertIn("safety_request_enable", result)
+
     def test_i2c_failure_flag_surfaced(self):
         state = IoState(data=0, dir=0, relays=0, io_levels=0, drdy=0, flags=IoState.FLAG_I2C_FAILED)
         with unittest.mock.patch.object(mcp_server._io, "read", return_value=state):
