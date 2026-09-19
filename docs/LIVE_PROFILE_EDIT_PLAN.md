@@ -458,6 +458,17 @@ undisturbed.
      edit can always start even with all 8 user slots full. That alone adds
      one profile+stats pair (~6K worst case) to the on-disk footprint, which
      fits the existing margin trivially and needs no partition change.
+   - **Superseded 2026-09-19**: the owner instead approved the `cfg` resize
+     option named above, at 100+1 slots, not a number in the ~16-24 range —
+     see `docs/PROFILE_SLOTS_100_PLAN.md`. `cfg` was grown 2026-09-19 (that
+     plan's section 7 task 5) from 512 KiB to 2.31 MiB, comfortably covering
+     the ~682K logical worst case computed above. `PROFILES_MAX_COUNT` itself
+     is still 8 as of this writing — raising it is that plan's task 6, gated
+     on its task 1 (widening `used_bitmap`/the favorites mask past 32 bits,
+     both currently `1u << id`-style bit tests undefined beyond that). This
+     section's arithmetic is otherwise still the correct sizing reference;
+     only its 512 KiB partition size and its "16-24 slots" recommendation are
+     stale.
 2. **A ceiling lowered mid-firing below the running setpoint: REFUSE THE
    CEILING CHANGE.** This overrides the plan's original "leave it to guard 5
    and the Pico" position (end of section 7). The config-edit path

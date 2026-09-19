@@ -265,6 +265,29 @@ One commit each, sized for a sonnet implementer, each independently buildable an
     §12.1 to record that its 20-slot conclusion is superseded by this plan.
 12. **Bench migration** per section 6, in its own session, with the backup taken first.
 
+### Status (2026-09-19, Opus review of phase A)
+
+Phase A landed: tasks 2, 4, 5, 9 (reverted, see below), 10, 11 (this section).
+Tasks 1, 3, 6, 7, 8, 12 are NOT started.
+
+**Task 1 is a hard, unstarted prerequisite for task 6** — do not raise
+`PROFILES_MAX_COUNT` past 32 before it lands. Two sites already do a bit test
+past what their current (narrower) types can hold once ids reach 32:
+`profiles_catalog_http.c`'s `profiles_list_get_handler()`
+(`s_profiles.used_bitmap & (1u << id)` — `used_bitmap` is a `uint8_t`) and
+its `favorites_get_handler()` (`user_mask & (1u << i)` on a 32-bit mask,
+undefined at `i` == 32). Both are inert at today's 8 slots but must not be
+carried forward silently when task 6 runs.
+
+**Task 9 was superseded, not completed as originally planned** and its
+commit was reverted: `docs/UI_PLAN.md` section 6 Wave 2 E (already
+owner-decided, on `origin/main` before task 9 was attempted) deletes
+`ui_page_profiles_mine.c` entirely and replaces it with a full-list picker
+built on a shared ordering module (`ui_profile_list_order.c`, built by a
+separate concurrent session). Trimming the doomed page to favorites+recent
+only would have been thrown away by that replacement; UI_PLAN owns the LCD
+profile list going forward, not this plan.
+
 ---
 
 ## Status

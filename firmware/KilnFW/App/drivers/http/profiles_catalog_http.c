@@ -121,9 +121,17 @@ static esp_err_t send_chunk_checked(httpd_req_t *req, const char *buf, int n, si
         return ESP_OK; /* encoding error -- skip this fragment, keep the response alive */
     }
     if ((size_t)n >= cap) {
-        ESP_LOGW(PROFILES_TAG, "%s JSON truncated at %u bytes -- response will be malformed", what,
+        /* Opus review, docs/PROFILE_SLOTS_100_PLAN.md sec 7 task 11 item 4:
+         * this used to clamp and still send ESP_OK, shipping a truncated
+         * fragment as if it were a complete, valid 200. Unreachable at
+         * today's field widths (~127 B max vs the smallest cap here, 190 B)
+         * but a caller checking `err == ESP_OK` in a loop has no way to
+         * learn the body was cut short. Fail the call instead so the loop's
+         * own err-checked exit takes over, same as any other write failure
+         * these handlers already treat as fatal. */
+        ESP_LOGE(PROFILES_TAG, "%s JSON truncated at %u bytes -- refusing to send a malformed fragment", what,
                  (unsigned)cap);
-        n = (int)(cap - 1);
+        return ESP_FAIL;
     }
     return httpd_resp_send_chunk(req, buf, (size_t)n);
 }

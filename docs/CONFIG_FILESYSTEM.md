@@ -37,9 +37,13 @@ MOVE/KEEP table (24 items).
 
 ## What the `cfg` partition is
 
-512 KiB of LittleFS at `0xDB0000` on the ESP32-S3's 16 MB flash, added as
-an append-only row in `firmware/KilnFW/partitions.csv` — no existing
-partition moved or resized. It mounts with `format_if_mount_failed=false`
+LittleFS at `0xDB0000` on the ESP32-S3's 16 MB flash, added as an
+append-only row in `firmware/KilnFW/partitions.csv` — no existing partition
+moved or resized. **Grown 2026-09-19** (`docs/PROFILE_SLOTS_100_PLAN.md`
+section 7 task 5) from its original 512 KiB to `0x250000` (2.31 MiB), taking
+the entire remaining flash tail, to hold the 100-profile-slot table a future
+task (plan task 6, gated on plan task 1) will need; `check_flash_partition_map.ps1`
+pins the new size. It mounts with `format_if_mount_failed=false`
 (a corrupt or blank `cfg` is reported, never silently reformatted — the
 opposite policy from the `logs` partition, deliberately: silently erasing
 tuning data is the worst failure mode here). It is skipped entirely in

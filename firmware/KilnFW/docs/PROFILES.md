@@ -74,6 +74,33 @@ blobs.
 reads through `profiles_http_get()` and never touches NVS — the same
 one-owner discipline `zones_http.c` established for zone config.
 
+### 100-slot work in progress (docs/PROFILE_SLOTS_100_PLAN.md, 2026-09-19)
+
+`PROFILES_MAX_COUNT` is still 8 as of this writing — the plan's phase A
+(tasks 2, 4, 5, 9, 10, 11) landed the groundwork without yet raising the
+count:
+
+- The `cfg` LittleFS partition (see `docs/CONFIG_FILESYSTEM.md`) was grown
+  in place to take the entire remaining flash tail, `0x250000` (2.31 MiB) —
+  the byte budget a 100-slot `used_bitmap`/blob table will need once task 6
+  raises `PROFILES_MAX_COUNT`.
+- Deleting a profile slot (`nvs_erase_slot()`, `profiles_http.c`) now also
+  prunes that id's firing-history ring (`firing_stats_erase()`,
+  `profile_executor_firing_stats.c`) — both the "fs_<id>" NVS blob and its
+  cfg-fs mirror file. Before this, a slot id reused for a new, never-fired
+  profile would read back the PREVIOUS occupant's history the first time its
+  history page was opened.
+
+**Hard, unstarted prerequisite for raising `PROFILES_MAX_COUNT` past 32
+(plan task 6): plan task 1** — widening `used_bitmap` from `uint8_t` to
+`uint32_t[4]` (plus widening the favorites mask) behind accessors. Not part
+of phase A; nobody has started it as of this writing. Two concrete
+undefined-behavior sites in `profiles_catalog_http.c` depend on it:
+`profiles_list_get_handler()`'s `s_profiles.used_bitmap & (1u << id)` (line
+286, `used_bitmap` is a `uint8_t`) and `favorites_get_handler()`'s 32-bit
+`user_mask & (1u << i)` — both are undefined once `id`/`i` reaches 32. Do
+not raise `PROFILES_MAX_COUNT` above 32 until task 1 lands.
+
 ### Built-in schedules (2026-08-20)
 
 28 published [Digital Fire](https://digitalfire.com/schedule) firing
