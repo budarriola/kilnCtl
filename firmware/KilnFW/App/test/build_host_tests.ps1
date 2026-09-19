@@ -673,6 +673,19 @@ try {
             "/Fo:`"$phObjDir\\`" /Fe:`"$exe7`" `"$(Join-Path $testDir 'test_profiles_http.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/profiles_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
+            # profiles_edit_http.c/profiles_catalog_http.c (both reached from
+            # profiles_http.c, #included above) now call profiles_favorites_*(),
+            # so this executable needs that module linked in as a plain
+            # separate .c file -- same convention as the cfg_fs.c/
+            # profiles_cfg_fs.c entries on the line above. Linked for REAL
+            # rather than faked: it is a small pure-mask module over hal_kv,
+            # the host hal_kv backend (fake_kv.c) is already linked below, and
+            # a fake would not exercise the delete-clears-the-favorite path
+            # that profile_delete_post_handler now depends on. It resolves
+            # profiles_builtin_id_valid() against this test file's own fake
+            # (test_profiles_http.c:444), the same fake the rest of the
+            # executable already uses.
+            "`"$(Join-Path $driversDir 'persist/profiles_favorites.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
             # kiln_http_register() rewiring: profiles_http.c (#included
