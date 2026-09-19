@@ -526,3 +526,27 @@ operator-visible prose on the page:
   `<details>` blocks rather than being deleted. This pass covered the
   page's top-level sections; per-zone/per-field prose elsewhere on the page
   was out of scope for this change.
+
+## Per-zone on/off vs PID relay-mode field — no schema bump (2026-09-19)
+
+Owner decision, 2026-09-19: the per-zone on/off (bang-bang) vs PID relay-mode
+setting is stored as a **new optional field** in the zones config JSON, with
+**no `ZONES_CFG_VERSION` bump**. Older firmware ignores the unknown key; a
+missing key means PID, today's behaviour — so the field is additive only,
+never a breaking schema change.
+
+Rationale: a version bump would revive the `ota_rollback_esp()` hazard
+already on record (`firmware/CommonFW/docs/UPDATE_PROTOCOL.md`) — older
+firmware refusing a newer-than-it-knows blob and running a firing on
+firmware-default PID gains after a rollback, with no separate warning. An
+optional, ignorable key sidesteps that entirely.
+
+Design constraint for whoever implements this: **optional key, absent = PID,
+no version bump; loader must accept both and the migration check must not
+require a step.** This field must NOT be added to
+`check_config_migration_steps.ps1`'s per-store step-table requirement (see
+ROADMAP.md's "One-step-at-a-time config migration" row) — that check exists
+for actual schema version bumps, and this field is deliberately not one.
+
+Not implemented by this decision — recorded here so the constraint isn't
+lost before the field lands.
