@@ -117,10 +117,12 @@
   /* Saved-profile rows (owner request 2026-09-18: "I want the saved profiles
      to display like the shiped profiles, with an folding object and the
      table"). They reuse the shipped catalogue's <details class="ci"> shell
-     and its step table verbatim -- savedItem() below builds the same
-     structure catalogueItem() does, and both render their steps through the
-     one shared segmentTableHtml() -- so the only thing this block adds is
-     the header action group the shipped entries have no equivalent of.
+     and its step table verbatim -- buildProfileItem() below (2026-09-18:
+     now the ONE builder for both a saved profile and a shipped schedule,
+     see its own header comment) renders both kinds through the one shared
+     segmentTableHtml() -- so the only thing a saved row's header adds is
+     the Export/Edit/Delete action group the shipped entries have no
+     equivalent of.
      Floated (the same idiom #restoreBtn already uses in an <h2> below)
      rather than making <summary> a flex container: `display: flex` on a
      <summary> drops its disclosure triangle in Chromium, and that triangle
@@ -142,6 +144,25 @@
      and title, and the kcConfirm() step this call site has carried since
      UI_PLAN.md Web section 4 item 5. */
   .icon-btn.danger { color: var(--bad); border-color: var(--bad); margin-left: 0.5em; }
+  /* Favorite star toggle (owner request 2026-09-18: "Add a separate section
+     ... called Favorites... favorites appear at the top of the list with a
+     star next to them"). Text glyph, not a new <symbol>, since a favorite
+     is not one of the three actions ("export, edit and delete") the owner
+     asked to be icon-ified -- reuses the existing --warn token for the
+     filled state rather than introducing a colour. */
+  .fav-btn { font-size: 1.1em; line-height: 1; color: var(--muted); }
+  .fav-btn.active { color: var(--warn); }
+  /* Bulk select/export/delete (owner request 2026-09-18, items 3/4/5/6): a
+     checkbox per row when a mode is active, plus an on-screen indicator of
+     which mode ("Export mode"/"Delete mode") is live -- reuses --link for
+     the active mode button the same way other active/selected states on
+     this page already borrow an existing token. */
+  #bulkBar { display: flex; flex-wrap: wrap; gap: 0.4em; align-items: center; margin-top: 0.6em; }
+  #modeExportBtn.active, #modeDeleteBtn.active { border-color: var(--link); color: var(--link); }
+  #modeIndicator { font-size: 0.85em; }
+  .sel-cb-wrap { display: inline-flex; align-items: center; justify-content: center;
+                 min-width: 32px; min-height: 32px; margin-right: 0.2em; }
+  .sel-cb-wrap input[type=checkbox] { width: 20px; height: 20px; }
   #msg { margin-top: 1em; }
   #msg .err { color: var(--bad); font-weight: bold; }
   #msg .warn { color: var(--warn); }
@@ -235,26 +256,32 @@ shares one ramp/dwell schedule and the schedule waits for the slowest zone
 to catch up before advancing (ramp-lock, TODO.md 6A.5) -- each zone still
 runs its own PID/bang-bang loop and thermal guards independently.</p>
 
-<h2>Saved profiles</h2>
-<p class="hint">Expand a profile to see its steps, the same way the shipped schedules
-below work. Export a profile to a .json file, or import one exported from this
-board (or another kilnCtl board running the same firmware). Import always creates or
-overwrites a slot the same way Save does -- feasibility/range checks run identically
-either way.</p>
+<h2>Favorites</h2>
+<p class="hint">A shortcut, not a move -- starring a profile below leaves it in its
+original place and also lists it here for quick access.</p>
+<div id="favList"><p class="empty">Loading&hellip;</p></div>
+
+<h2>Profiles <button id="restoreBtn" type="button" class="small" style="display:none;float:right">Restore removed</button></h2>
+<p class="hint">Saved profiles and read-only shipped schedules in one list. Expand a
+profile to see its steps. A schedule with a dark red background is not usable on
+this kiln as tuned -- its ramp is faster than a zone can sustain, or its target is
+above what a zone can reach.</p>
 <div>
   <input type="file" id="importFile" accept="application/json,.json" style="display:none">
   <button id="importBtn" type="button" class="small">Import profile&hellip;</button>
 </div>
 <div id="importMsg"></div>
-<div id="list"><p class="empty">Loading&hellip;</p></div>
-
-<h2>Shipped schedules <button id="restoreBtn" type="button" class="small" style="display:none;float:right">Restore removed</button></h2>
-<p class="hint">Read-only reference schedules stored in flash. Expand one to see its
-steps. A schedule with a dark red background is not usable on this kiln as tuned --
-its ramp is faster than a zone can sustain, or its target is above what a zone can
-reach.</p>
 <div id="tuneNotice" class="tune-notice" style="display:none"></div>
-<div id="cat"><p class="empty">Loading&hellip;</p></div>
+<div id="bulkBar">
+  <button id="modeExportBtn" type="button" class="small">Select to export</button>
+  <button id="modeDeleteBtn" type="button" class="small">Select to delete</button>
+  <span id="modeIndicator" class="badge" style="display:none"></span>
+</div>
+<div id="bulkActionBar" style="display:none;margin-top:0.4em">
+  <button id="bulkActionBtn" type="button" class="small"></button>
+  <button id="bulkCancelBtn" type="button" class="small">Cancel</button>
+</div>
+<div id="list"><p class="empty">Loading&hellip;</p></div>
 <div id="catMsg"></div>
 
 <h2 id="editorTitle">New profile</h2>
@@ -354,9 +381,9 @@ function loadZones() {
     }
     updateZoneCeiling();
   }).catch(function () {
-    // Resolve rather than reject on failure: callers chain loadList()/
-    // loadCatalogue() off this promise (see the page-boot call below), and
-    // a network hiccup reading /api/zones must not leave those stuck on
+    // Resolve rather than reject on failure: callers chain refreshAll() off
+    // this promise (see the page-boot call below), and a network hiccup
+    // reading /api/zones must not leave that stuck on
     // "Loading..." forever just because this fetch failed first.
     document.getElementById('pzone').innerHTML = '<span class="empty">Could not load zones.</span>';
   });
@@ -783,21 +810,234 @@ function resetEditor() {
   document.getElementById('msg').innerHTML = '';
 }
 
-function loadList() {
-  fetch('/api/profiles').then(function (r) { return r.json(); }).then(function (list) {
-    var el = document.getElementById('list');
-    /* /api/profiles lists the visible builtin summaries alongside the user
-     * slots now; the catalogue owns those, so this section shows user slots
-     * only (they are the only editable/deletable ones). */
-    list = list.filter(function (p) { return !p.builtin; });
-    if (list.length === 0) {
-      el.innerHTML = '<p class="empty">No saved profiles.</p>';
-      return;
+/* ---- Combined list state (owner request 2026-09-18, items 2/3/4/5/6/7) --
+ * Saved profiles and shipped schedules now render into one <div id="list">
+ * column instead of two, with an optional select mode (export/delete) that
+ * overlays a checkbox on eligible rows, and a Favorites section above it
+ * that is a SHORTCUT view, not a second copy of the data -- it filters the
+ * same two cached arrays rather than owning any state of its own. */
+var savedProfiles = null;  // array from /api/profiles, filtered to !builtin
+var catalogEntries = null; // array from /api/profiles/builtin?all=1, hidden ones excluded
+var favoriteIds = [];      // from /api/profiles/favorites
+var selectMode = null;     // null | 'export' | 'delete'
+var selectedIds = {};      // id -> true, only while selectMode is set
+
+function isFav(id) {
+  return favoriteIds.some(function (x) { return String(x) === String(id); });
+}
+
+function loadFavorites() {
+  return fetch('/api/profiles/favorites').then(function (r) {
+    return r.ok ? r.json() : { ids: [] };
+  }).then(function (d) {
+    return d.ids || [];
+  }).catch(function () {
+    // Old-firmware-safe: a board without this route degrades to "no
+    // favorites" rather than breaking the rest of the page.
+    return [];
+  });
+}
+
+function refreshAll() {
+  return Promise.all([
+    fetch('/api/profiles').then(function (r) { return r.json(); }),
+    fetch('/api/profiles/builtin?all=1').then(function (r) { return r.json(); }),
+    loadFavorites(),
+  ]).then(function (res) {
+    savedProfiles = res[0].filter(function (p) { return !p.builtin; });
+    var hiddenCount = 0;
+    var anyUnknown = false;
+    catalogEntries = [];
+    res[1].forEach(function (p) {
+      if (p.hidden) { hiddenCount++; return; }
+      if (p.feasibility === 'unknown') anyUnknown = true;
+      catalogEntries.push(p);
+    });
+    favoriteIds = res[2];
+
+    var rb = document.getElementById('restoreBtn');
+    rb.style.display = hiddenCount > 0 ? '' : 'none';
+    rb.textContent = 'Restore ' + hiddenCount + ' removed';
+
+    var notice = document.getElementById('tuneNotice');
+    if (anyUnknown) {
+      notice.style.display = '';
+      notice.innerHTML = 'This kiln has not been tuned yet, so these schedules can\'t be ' +
+        'checked against it. <a href="/settings/zones">Run autotune from the zone settings</a> ' +
+        'to enable that check.';
+    } else {
+      notice.style.display = 'none';
     }
-    el.innerHTML = '';
-    list.forEach(function (p) { el.appendChild(savedItem(p)); });
+
+    renderList();
+    renderFavorites();
   }).catch(function () {
     document.getElementById('list').innerHTML = '<p class="empty">Could not load profiles.</p>';
+    document.getElementById('favList').innerHTML = '<p class="empty">Could not load favorites.</p>';
+  });
+}
+
+function renderList() {
+  var el = document.getElementById('list');
+  if (savedProfiles === null || catalogEntries === null) return;
+  var items = savedProfiles.concat(catalogEntries);
+  if (items.length === 0) {
+    el.innerHTML = '<p class="empty">No profiles.</p>';
+  } else {
+    el.innerHTML = '';
+    items.forEach(function (p) { el.appendChild(buildProfileItem(p, true)); });
+  }
+  updateSelectionBar();
+}
+
+function renderFavorites() {
+  var el = document.getElementById('favList');
+  if (savedProfiles === null || catalogEntries === null) return;
+  var items = savedProfiles.concat(catalogEntries).filter(function (p) { return isFav(p.id); });
+  if (items.length === 0) {
+    el.innerHTML = '<p class="empty">No favorites yet -- tap the star on any profile below to add it here.</p>';
+    return;
+  }
+  el.innerHTML = '';
+  items.forEach(function (p) { el.appendChild(buildProfileItem(p, false)); });
+}
+
+/* ---- Bulk select mode (owner request 2026-09-18, items 3/4/6) ----------- */
+function toggleMode(m) {
+  selectMode = (selectMode === m) ? null : m;
+  selectedIds = {};
+  renderList();
+}
+
+function exitSelectMode() {
+  selectMode = null;
+  selectedIds = {};
+  renderList();
+}
+
+function updateSelectionBar() {
+  var indicator = document.getElementById('modeIndicator');
+  var bar = document.getElementById('bulkActionBar');
+  var actionBtn = document.getElementById('bulkActionBtn');
+  document.getElementById('modeExportBtn').classList.toggle('active', selectMode === 'export');
+  document.getElementById('modeDeleteBtn').classList.toggle('active', selectMode === 'delete');
+  if (!selectMode) {
+    indicator.style.display = 'none';
+    bar.style.display = 'none';
+    return;
+  }
+  indicator.style.display = '';
+  indicator.textContent = selectMode === 'export'
+    ? 'Export mode -- select profiles below, then Export selected.'
+    : 'Delete mode -- select saved profiles below, then Delete selected.';
+  bar.style.display = '';
+  var n = Object.keys(selectedIds).length;
+  actionBtn.disabled = n === 0;
+  actionBtn.textContent = selectMode === 'export'
+    ? ('Export selected (' + n + ')')
+    : ('Delete selected (' + n + ')');
+}
+
+document.getElementById('modeExportBtn').addEventListener('click', function () { toggleMode('export'); });
+document.getElementById('modeDeleteBtn').addEventListener('click', function () { toggleMode('delete'); });
+document.getElementById('bulkCancelBtn').addEventListener('click', exitSelectMode);
+document.getElementById('bulkActionBtn').addEventListener('click', function () {
+  var ids = Object.keys(selectedIds).map(function (s) { return parseInt(s, 10); });
+  if (ids.length === 0) return;
+  if (selectMode === 'export') bulkExport(ids);
+  else if (selectMode === 'delete') bulkDelete(ids);
+});
+
+function selectionCheckbox(p) {
+  if (!selectMode) return null;
+  if (selectMode === 'delete' && p.builtin) return null; // item 4: shipped profiles never get a delete checkbox
+  var wrap = document.createElement('label');
+  wrap.className = 'sel-cb-wrap';
+  wrap.addEventListener('click', function (ev) { ev.stopPropagation(); });
+  var cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.checked = !!selectedIds[p.id];
+  cb.setAttribute('aria-label', (selectMode === 'export' ? 'Select "' : 'Select "') + p.name + '" for ' + selectMode);
+  cb.addEventListener('change', function () {
+    if (cb.checked) selectedIds[p.id] = true; else delete selectedIds[p.id];
+    updateSelectionBar();
+  });
+  wrap.appendChild(cb);
+  return wrap;
+}
+
+/* ---- Bundle export/delete, client-side (owner request 2026-09-18, items
+ * 5/6): GET /api/profile?id=N already serves full segment data uniformly
+ * for both a builtin and a user-slot id (profile_detail_get_handler), so
+ * bundling needs no new backend route -- just N of that existing fetch,
+ * reshaped into the same per-profile object /api/profile/export already
+ * produces, wrapped in one array and downloaded as one file. */
+function profileToExportObj(full) {
+  return {
+    kind: 'kilnctl_profile',
+    version: 2,
+    name: full.name,
+    zone_mask: full.zone_mask || 0,
+    segments: (full.segments || []).map(function (seg) {
+      return {
+        seg_kind: seg.seg_kind || 0,
+        target_c: seg.target_c,
+        ramp_c_per_hr: seg.ramp_c_per_hr,
+        dwell_min: seg.dwell_min,
+        io_target: seg.io_target,
+        io_state: seg.io_state,
+        io_blocking: seg.io_blocking,
+        io_leave_on_at_end: seg.io_leave_on_at_end,
+      };
+    }),
+    on_off_rules: full.on_off_rules || [],
+  };
+}
+
+function downloadJson(obj, filename) {
+  var blob = new Blob([JSON.stringify(obj)], { type: 'application/json' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+}
+
+function bulkExport(ids) {
+  var msg = document.getElementById('catMsg');
+  msg.textContent = 'Preparing ' + ids.length + ' profile' + (ids.length === 1 ? '' : 's') + ' for export…';
+  Promise.all(ids.map(function (id) {
+    return fetch('/api/profile?id=' + id).then(function (r) { return r.json(); });
+  })).then(function (fulls) {
+    var bundle = { kind: 'kilnctl_profile_bundle', version: 1, profiles: fulls.map(profileToExportObj) };
+    downloadJson(bundle, 'kilnctl_profiles_' + ids.length + '.json');
+    msg.textContent = 'Exported ' + ids.length + ' profile' + (ids.length === 1 ? '' : 's') + '.';
+    exitSelectMode();
+  }).catch(function () {
+    msg.innerHTML = '<span class="err">Export failed -- could not reach the board.</span>';
+  });
+}
+
+function bulkDelete(ids) {
+  // Item 6: the confirm must name the count being deleted.
+  if (!kcConfirm('Delete ' + ids.length + ' fire profile' + (ids.length === 1 ? '' : 's') +
+      '? This cannot be undone.')) return;
+  var msg = document.getElementById('catMsg');
+  msg.textContent = 'Deleting…';
+  Promise.all(ids.map(function (id) {
+    return fetch('/api/profile/delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'id=' + id,
+    });
+  })).then(function () {
+    if (ids.indexOf(editingId) !== -1) resetEditor();
+    msg.textContent = 'Deleted ' + ids.length + ' profile' + (ids.length === 1 ? '' : 's') + '.';
+    exitSelectMode();
+    refreshAll();
+  }).catch(function () {
+    msg.innerHTML = '<span class="err">Delete failed -- could not reach the board.</span>';
   });
 }
 
@@ -821,99 +1061,181 @@ function iconBtn(glyph, name, extraClass) {
  * insted of words for export, edit and delete"). They live inside the
  * <summary>, so every handler must stop the click reaching the disclosure
  * triangle -- without that, acting on a row would also fold or unfold it. */
-function profileActions(p) {
+/* Favorite star toggle -- any profile, saved or shipped (owner request
+ * 2026-09-18, item 7: "Any profile can be favorited or unfavorited"). A
+ * favorite is a shortcut only: toggling it never removes/moves the profile
+ * from savedProfiles/catalogEntries, it just changes what renderFavorites()
+ * filters in. */
+function favToggleBtn(p) {
+  var fav = isFav(p.id);
+  var b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'small icon-btn fav-btn' + (fav ? ' active' : '');
+  var label = (fav ? 'Remove "' : 'Add "') + p.name + (fav ? '" from favorites' : '" to favorites');
+  b.setAttribute('aria-label', label);
+  b.title = label;
+  b.textContent = fav ? '★' : '☆';
+  b.addEventListener('click', function (ev) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    var newFav = !fav;
+    fetch('/api/profile/favorite', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'id=' + p.id + '&favorite=' + (newFav ? 1 : 0),
+    }).then(function () {
+      return loadFavorites();
+    }).then(function (ids) {
+      favoriteIds = ids;
+      renderList();
+      renderFavorites();
+    }).catch(function () {});
+  });
+  return b;
+}
+
+/* The per-row action group in the <summary>. A saved profile gets the
+ * existing Export/Edit/Delete icons (owner request 2026-09-18, item 9); a
+ * shipped one gets only the favorite star here -- its Use/Remove controls
+ * stay below the table, same as before, since those are not one of the
+ * three actions the owner asked to be icon-ified. */
+function profileActionsGroup(p) {
   var g = document.createElement('span');
   g.className = 'pi-acts';
+  g.appendChild(favToggleBtn(p));
 
-  var exportBtn = iconBtn('kgIconExport', 'Export "' + p.name + '" as a .json file');
-  exportBtn.addEventListener('click', function (ev) {
-    ev.preventDefault();
-    ev.stopPropagation();
-    /* This was a bare teal <a> sitting between two outlined buttons -- the
-     * inconsistency the owner's screenshot shows. Navigating from a real
-     * button makes all three controls siblings of the same shape; the
-     * server's own Content-Disposition header (profiles_export_http.c) is
-     * what names the saved file, exactly as it did for the <a download>. */
-    window.location.href = profileExportUrl(p.id);
-  });
+  if (!p.builtin) {
+    var exportBtn = iconBtn('kgIconExport', 'Export "' + p.name + '" as a .json file');
+    exportBtn.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      /* This was a bare teal <a> sitting between two outlined buttons -- the
+       * inconsistency the owner's screenshot shows. Navigating from a real
+       * button makes all three controls siblings of the same shape; the
+       * server's own Content-Disposition header (profiles_export_http.c) is
+       * what names the saved file, exactly as it did for the <a download>. */
+      window.location.href = profileExportUrl(p.id);
+    });
 
-  var editBtn = iconBtn('kgIconEdit', 'Edit "' + p.name + '"');
-  editBtn.addEventListener('click', function (ev) {
-    ev.preventDefault();
-    ev.stopPropagation();
-    editProfile(p.id);
-  });
+    var editBtn = iconBtn('kgIconEdit', 'Edit "' + p.name + '"');
+    editBtn.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      editProfile(p.id);
+    });
 
-  var delBtn = iconBtn('kgIconDelete', 'Delete "' + p.name + '"', 'danger');
-  delBtn.addEventListener('click', function (ev) {
-    ev.preventDefault();
-    ev.stopPropagation();
-    // UI_PLAN.md Web section 4 item 5: deleting a profile is destructive
-    // and irreversible (no undo endpoint exists), so it gets an explicit
-    // confirm. kcConfirm comes from app.js (deferred <script> in <head>);
-    // safe here because it only runs inside this click handler, not at
-    // page-load time. Now that the control is an icon rather than the word
-    // "Delete", this confirm is also the thing that makes a mis-tap
-    // recoverable -- it names the profile it is about to destroy.
-    if (!kcConfirm('Delete fire profile "' + p.name + '"? This cannot be undone.')) return;
-    deleteProfile(p.id);
-  });
+    var delBtn = iconBtn('kgIconDelete', 'Delete "' + p.name + '"', 'danger');
+    delBtn.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      // UI_PLAN.md Web section 4 item 5: deleting a profile is destructive
+      // and irreversible (no undo endpoint exists), so it gets an explicit
+      // confirm. kcConfirm comes from app.js (deferred <script> in <head>);
+      // safe here because it only runs inside this click handler, not at
+      // page-load time. Now that the control is an icon rather than the word
+      // "Delete", this confirm is also the thing that makes a mis-tap
+      // recoverable -- it names the profile it is about to destroy.
+      if (!kcConfirm('Delete fire profile "' + p.name + '"? This cannot be undone.')) return;
+      deleteProfile(p.id);
+    });
 
-  g.appendChild(exportBtn);
-  g.appendChild(editBtn);
-  g.appendChild(delBtn);
+    g.appendChild(exportBtn);
+    g.appendChild(editBtn);
+    g.appendChild(delBtn);
+  }
   return g;
 }
 
-/* A saved profile, presented exactly like a shipped one (owner request
- * 2026-09-18): the same <details class="ci"> folding shell and the same step
- * table, built by the same segmentTableHtml() the catalogue calls. The only
- * structural differences are the ones a user slot genuinely needs -- the
- * Export/Edit/Delete action group in the header, and the fact that its steps
- * are fetched on first expand: /api/profiles deliberately omits segments
- * (see profile_list_get_handler's "Segments are deliberately NOT included
- * here" comment), so loading them up front would mean one round trip per
- * saved profile on every page load. */
-function savedItem(p) {
+/* One combined-list row, for EITHER a saved profile or a shipped schedule
+ * (owner request 2026-09-18, items 1/2: "same way shipped profiles do" /
+ * "same column, one combined list") -- the same <details class="ci"> shell
+ * and the same step table (segmentTableHtml()) either way. `selectable`
+ * gates whether a bulk-mode checkbox can appear at all (the Favorites
+ * section never shows one -- selection only applies to the main list). A
+ * saved profile's steps are fetched on first expand (see the comment this
+ * replaced); a shipped entry's segments are already present from
+ * /api/profiles/builtin?all=1. */
+function buildProfileItem(p, selectable) {
   var d = document.createElement('details');
   d.className = 'ci pi';
   fzMark(d, p.feasibility);
 
-  var zoneList = [];
-  for (var zb = 0; zb < 8; zb++) { if (p.zone_mask & (1 << zb)) zoneList.push(zb); }
-
   var s = document.createElement('summary');
-  /* The float sits on the first line only if it PRECEDES the text it floats
-   * alongside, so the action group is appended before the name. */
-  s.appendChild(profileActions(p));
-  s.appendChild(document.createTextNode(
-    p.name + ' (zone' + (zoneList.length === 1 ? ' ' : 's ') + zoneList.join(',') +
-    ', ' + p.segment_count + ' steps)'));
+  var cb = selectable ? selectionCheckbox(p) : null;
+  if (cb) s.appendChild(cb);
+  s.appendChild(profileActionsGroup(p));
+
+  var label;
+  if (p.builtin) {
+    label = (p.title || p.name) + ' (' + p.segment_count + ' steps)';
+  } else {
+    var zoneList = [];
+    for (var zb = 0; zb < 8; zb++) { if (p.zone_mask & (1 << zb)) zoneList.push(zb); }
+    label = p.name + ' (zone' + (zoneList.length === 1 ? ' ' : 's ') + zoneList.join(',') +
+      ', ' + p.segment_count + ' steps)';
+  }
+  s.appendChild(document.createTextNode(label));
+  if (isMarked(p.feasibility)) {
+    var b = document.createElement('span');
+    b.className = 'badge';
+    b.textContent = FZ_LABEL[p.feasibility] || p.feasibility;
+    s.appendChild(b);
+  }
   d.appendChild(s);
 
   var body = document.createElement('div');
   body.className = 'table-scroll';
-  body.innerHTML = '<p class="empty">Loading steps&hellip;</p>';
+  if (p.segments) {
+    body.innerHTML = segmentTableHtml(p.segments);
+  } else {
+    body.innerHTML = '<p class="empty">Loading steps&hellip;</p>';
+    var loaded = false;
+    d.addEventListener('toggle', function () {
+      if (!d.open || loaded) return;
+      loaded = true;
+      fetch('/api/profile?id=' + p.id).then(function (r) { return r.json(); }).then(function (full) {
+        body.innerHTML = segmentTableHtml(full.segments);
+      }).catch(function () {
+        loaded = false; // let a retry happen on the next expand
+        body.innerHTML = '<p class="empty">Could not load steps.</p>';
+      });
+    });
+  }
   d.appendChild(body);
 
-  var loaded = false;
-  d.addEventListener('toggle', function () {
-    if (!d.open || loaded) return;
-    loaded = true;
-    fetch('/api/profile?id=' + p.id).then(function (r) { return r.json(); }).then(function (full) {
-      body.innerHTML = segmentTableHtml(full.segments);
-    }).catch(function () {
-      loaded = false; // let a retry happen on the next expand
-      body.innerHTML = '<p class="empty">Could not load steps.</p>';
-    });
-  });
+  if (isMarked(p.feasibility)) {
+    var cap = document.createElement('p');
+    cap.className = 'hint';
+    cap.textContent = FZ_WHY[p.feasibility] || '';
+    d.appendChild(cap);
+  }
+
+  if (p.builtin) {
+    var acts = document.createElement('div');
+    var useBtn = document.createElement('button');
+    useBtn.type = 'button';
+    useBtn.className = 'small';
+    useBtn.textContent = 'Use / Save a copy';
+    useBtn.addEventListener('click', function () { copyBuiltin(p); });
+    var hideBtn = document.createElement('button');
+    hideBtn.type = 'button';
+    hideBtn.className = 'small';
+    hideBtn.textContent = 'Remove';
+    hideBtn.addEventListener('click', function () { hideBuiltin(p.id); });
+    acts.appendChild(useBtn);
+    acts.appendChild(hideBtn);
+    if (p.url) {
+      var a = document.createElement('a');
+      a.href = p.url;
+      a.textContent = ' source';
+      a.style.marginLeft = '0.5em';
+      a.style.fontSize = '0.85em';
+      acts.appendChild(a);
+    }
+    d.appendChild(acts);
+  }
   return d;
 }
 
-/* ---- Shipped (builtin) catalogue -------------------------------------- *
- * One fetch of /api/profiles/builtin?all=1 covers both jobs: it carries the
- * hidden entries (so we know whether "Restore removed" is worth showing) and
- * every segment, so no per-schedule round trip is needed on expand. */
 // "unknown" (no autotune run yet) is deliberately NOT in these tables: it is
 // not marked in the UI at all (see the .ci.fz-* CSS comment above), so there
 // is no label or per-item explanation for it -- just the one-time notice
@@ -986,95 +1308,6 @@ function segmentTableHtml(segments) {
          '<th>Hold min</th></tr>' + rows + '</table>';
 }
 
-function catalogueItem(p) {
-  var d = document.createElement('details');
-  d.className = 'ci';
-  fzMark(d, p.feasibility);
-
-  var s = document.createElement('summary');
-  s.appendChild(document.createTextNode(p.title || p.name));
-  if (isMarked(p.feasibility)) {
-    var b = document.createElement('span');
-    b.className = 'badge';
-    b.textContent = FZ_LABEL[p.feasibility] || p.feasibility;
-    s.appendChild(b);
-  }
-  s.appendChild(document.createTextNode(' (' + p.segment_count + ' steps)'));
-  d.appendChild(s);
-
-  // Steps render through the shared segmentTableHtml() above -- the saved
-  // list draws the identical table from the identical helper.
-  var tbl = document.createElement('div');
-  tbl.className = 'table-scroll';
-  tbl.innerHTML = segmentTableHtml(p.segments);
-  d.appendChild(tbl);
-
-  if (isMarked(p.feasibility)) {
-    var cap = document.createElement('p');
-    cap.className = 'hint';
-    cap.textContent = FZ_WHY[p.feasibility] || '';
-    d.appendChild(cap);
-  }
-
-  var acts = document.createElement('div');
-  var useBtn = document.createElement('button');
-  useBtn.type = 'button';
-  useBtn.className = 'small';
-  useBtn.textContent = 'Use / Save a copy';
-  useBtn.addEventListener('click', function () { copyBuiltin(p); });
-  var hideBtn = document.createElement('button');
-  hideBtn.type = 'button';
-  hideBtn.className = 'small';
-  hideBtn.textContent = 'Remove';
-  hideBtn.addEventListener('click', function () { hideBuiltin(p.id); });
-  acts.appendChild(useBtn);
-  acts.appendChild(hideBtn);
-  if (p.url) {
-    var a = document.createElement('a');
-    a.href = p.url;
-    a.textContent = ' source';
-    a.style.marginLeft = '0.5em';
-    a.style.fontSize = '0.85em';
-    acts.appendChild(a);
-  }
-  d.appendChild(acts);
-  return d;
-}
-
-function loadCatalogue() {
-  fetch('/api/profiles/builtin?all=1').then(function (r) { return r.json(); }).then(function (list) {
-    var el = document.getElementById('cat');
-    el.innerHTML = '';
-    var hiddenCount = 0;
-    var anyUnknown = false;
-    list.forEach(function (p) {
-      if (p.hidden) { hiddenCount++; return; }
-      if (p.feasibility === 'unknown') anyUnknown = true;
-      el.appendChild(catalogueItem(p));
-    });
-    if (!el.firstChild) {
-      el.innerHTML = '<p class="empty">All shipped schedules have been removed.</p>';
-    }
-    var rb = document.getElementById('restoreBtn');
-    rb.style.display = hiddenCount > 0 ? '' : 'none';
-    rb.textContent = 'Restore ' + hiddenCount + ' removed';
-
-    // One plain-language notice instead of a badge on every card (they'd all
-    // say the same thing until at least one zone is autotuned).
-    var notice = document.getElementById('tuneNotice');
-    if (anyUnknown) {
-      notice.style.display = '';
-      notice.innerHTML = 'This kiln has not been tuned yet, so these schedules can\'t be ' +
-        'checked against it. <a href="/settings/zones">Run autotune from the zone settings</a> ' +
-        'to enable that check.';
-    } else {
-      notice.style.display = 'none';
-    }
-  }).catch(function () {
-    document.getElementById('cat').innerHTML = '<p class="empty">Could not load shipped schedules.</p>';
-  });
-}
-
 /* Saving with a builtin id means "copy into the first free user slot" (the
  * board picks the slot and reports it back). The catalogue itself is
  * zone-agnostic -- zone_mask 0 -- and the board rejects that, so a copy needs
@@ -1105,7 +1338,7 @@ function copyBuiltin(p) {
         return;
       }
       msg.textContent = 'Saved a copy into profile slot ' + res.data.id + '.';
-      loadList();
+      refreshAll();
     }).catch(function () {
       msg.innerHTML = '<span class="err">Copy failed -- could not reach the board.</span>';
     });
@@ -1130,7 +1363,7 @@ function loadIntoEditor(p) {
 function builtinPost(path, body) {
   return fetch(path, {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
-  }).then(function () { loadCatalogue(); loadList(); }).catch(function () {
+  }).then(function () { refreshAll(); }).catch(function () {
     document.getElementById('catMsg').innerHTML = '<span class="err">Could not reach the board.</span>';
   });
 }
@@ -1169,7 +1402,7 @@ function editProfile(id) {
 function deleteProfile(id) {
   fetch('/api/profile/delete', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'id=' + id,
-  }).then(function () { loadList(); if (editingId === id) resetEditor(); }).catch(function () {
+  }).then(function () { refreshAll(); if (editingId === id) resetEditor(); }).catch(function () {
     document.getElementById('msg').innerHTML = '<span class="err">Could not reach the board -- delete not confirmed.</span>';
   });
 }
@@ -1189,6 +1422,12 @@ function profileExportUrl(id) {
 // NOT the authoritative validation -- profiles_http_save() on the board runs
 // the real range/feasibility checks the same way Save does; this only saves
 // a round trip for the common "wrong file" mistake.
+//
+// Owner request 2026-09-18, item 8: also accept a BUNDLE (the shape
+// bulkExport() above produces) -- `data.profiles`, an array of the same
+// name/segments-shaped objects, rather than one at top level. `bundle: true`
+// tells the caller which import path to take; every existing single-profile
+// caller/test only ever reads `ok`/`data`/`error`, so this is additive.
 function validateImportJson(text) {
   var data;
   try {
@@ -1199,10 +1438,48 @@ function validateImportJson(text) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
     return { ok: false, error: 'File does not contain a profile object.' };
   }
+  if (data.kind === 'kilnctl_profile_bundle') {
+    if (!Array.isArray(data.profiles) || data.profiles.length === 0) {
+      return { ok: false, error: 'Bundle file has no profiles.' };
+    }
+    for (var i = 0; i < data.profiles.length; i++) {
+      var pr = data.profiles[i];
+      if (!pr || typeof pr.name !== 'string' || !Array.isArray(pr.segments)) {
+        return { ok: false, error: 'Bundle entry ' + (i + 1) + ' is missing "name" or "segments".' };
+      }
+    }
+    return { ok: true, bundle: true, data: data };
+  }
   if (typeof data.name !== 'string' || !Array.isArray(data.segments)) {
     return { ok: false, error: 'File is missing "name" or "segments" -- not a profile export.' };
   }
   return { ok: true, data: data };
+}
+
+// Owner request 2026-09-18, item 8: a bundle imports as N sequential calls
+// to the SAME single-profile /api/profile/import endpoint bulkExport() reads
+// from -- no new backend route, matching the "assembled client-side" bundle
+// export above. Sequential (not Promise.all) on purpose: this board's httpd
+// has few worker threads, and one profile save touching NVS per request is
+// cheap insurance against piling up N concurrent writes on a small MCU.
+function importBundle(profiles, msg) {
+  msg.textContent = 'Importing ' + profiles.length + ' profiles…';
+  var ok = 0, fail = 0;
+  function next(i) {
+    if (i >= profiles.length) {
+      msg.innerHTML = 'Imported ' + ok + ' of ' + profiles.length + ' profile' +
+        (profiles.length === 1 ? '' : 's') + (fail ? ' (' + fail + ' failed)' : '') + '.';
+      refreshAll();
+      return;
+    }
+    fetch('/api/profile/import', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(profiles[i]),
+    }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+      .then(function (res) { if (res.ok && res.data.ok !== false) ok++; else fail++; })
+      .catch(function () { fail++; })
+      .then(function () { next(i + 1); });
+  }
+  next(0);
 }
 
 document.getElementById('importBtn').addEventListener('click', function () {
@@ -1222,6 +1499,10 @@ document.getElementById('importFile').addEventListener('change', function (evt) 
       msg.innerHTML = '<span class="err">' + window.kcEscapeHtml(check.error) + '</span>';
       return;
     }
+    if (check.bundle) {
+      importBundle(check.data.profiles, msg);
+      return;
+    }
     msg.textContent = 'Importing…';
     fetch('/api/profile/import', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(check.data),
@@ -1232,7 +1513,7 @@ document.getElementById('importFile').addEventListener('change', function (evt) 
           return;
         }
         msg.textContent = 'Imported into profile slot ' + res.data.id + '.';
-        loadList();
+        refreshAll();
       }).catch(function () {
         msg.innerHTML = '<span class="err">Import failed -- could not reach the board.</span>';
       });
@@ -1297,18 +1578,21 @@ document.getElementById('saveBtn').addEventListener('click', function () {
       }
       msg.innerHTML = html;
       editingId = result.data.id;
-      loadList();
+      refreshAll();
     }).catch(function () {
       msg.innerHTML = '<span class="err">Save failed -- could not reach the board.</span>';
     });
 });
 
-loadZones().then(function () { resetEditor(); loadList(); loadCatalogue(); });
+loadZones().then(function () { resetEditor(); refreshAll(); });
 
-// UI_PLAN.md item 7: re-render the catalogue's Target column in the new
-// unit immediately on toggle. loadList()'s user-slot cards show zone/segment
-// COUNTS only, no temperatures, so they don't need a re-render here.
-window.addEventListener('kcunitchange', function () { loadCatalogue(); });
+// UI_PLAN.md item 7: re-render Target columns in the new unit immediately on
+// toggle. renderList()/renderFavorites() rebuild from the already-fetched
+// savedProfiles/catalogEntries caches (no round trip) -- segmentTableHtml()
+// re-reads window.kcUnit at render time, so a fresh build picks up the new
+// unit; any row expanded before the toggle just collapses back to unopened,
+// the same as it already did for the catalogue pre-combination.
+window.addEventListener('kcunitchange', function () { renderList(); renderFavorites(); });
 
 (function () {
   var btn = document.getElementById('themeBtn');
