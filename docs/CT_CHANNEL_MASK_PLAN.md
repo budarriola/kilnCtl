@@ -383,10 +383,17 @@ readiness check can substitute for that.
    negative-test discipline). This is the first step with real guard-logic
    risk; land it in isolation from the sweep change below so a regression is
    attributable to one commit.
-5. Generalise the ESP-side sweep's `k_ct`/normal derivation to use
-   `member(ch)` instead of the two hardcoded branches, with its own collapse
-   tests against both existing topologies (host-testable per
-   `firmware/KilnFW/App/test/`'s existing sim-plant harnesses).
+5. **Done.** The ESP-side sweep's `k_ct`/normal derivation uses `member(ch)`
+   (`zone_sweep_plan_k_ct_mapped()`) instead of the two hardcoded branches,
+   with collapse tests against both existing topologies in
+   `firmware/KilnFW/App/test/test_zones_http.c`: identity map ≡ per_zone
+   channel-for-channel and value-for-value, all-2 map ≡ summed (one channel,
+   the other two left inert), a genuine `{0,0,1}` split, a forced-wrong-
+   membership negative test, and a vacuity guard recording that the planner's
+   completeness gate (`measured_zone_mask` vs `s_sweep.zones_total`) is
+   satisfied by an empty run when `zones_total` is 0 — which is why the
+   fixture sets both sides explicitly rather than reusing the bare
+   clean-run fixture.
 6. Update `safety_commissioning_page.html` and
    `CT_COMMISSIONING_PLAN.md` to the per-zone selector surface; this is the
    only step requiring an actual operator workflow change and should land

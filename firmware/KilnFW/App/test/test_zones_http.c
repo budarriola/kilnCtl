@@ -12763,6 +12763,225 @@ static void test_zone_sweep_plan_k_ct_implausible_reason_is_not_truncated(void)
                "the operator sees the WHOLE reason, not a %.70s-truncated fragment of it");
 }
 
+// ---- docs/CT_CHANNEL_MASK_PLAN.md step 5: the member()-aware planner ------
+//
+// Why these need their own fixture, rather than reusing kct_setup_clean_run()
+// directly (this is exactly what two earlier passes stalled on): the mapped
+// planner's FIRST gate is
+//
+//     required = every zone z < s_sweep.zones_total
+//     if ((s_ct_derive.measured_zone_mask & required) != required) refuse
+//
+// and kct_setup_clean_run() sets NEITHER side of it. It memsets s_ct_derive,
+// so measured_zone_mask is 0, and it never touches s_sweep.zones_total. Used
+// unchanged, a "collapse" test either refuses at that gate before reaching a
+// single k_ct comparison, or -- when a previous test happens to have left
+// zones_total at 0 -- sails through it with required == 0, which is the
+// vacuous pass test_..._completeness_gate_is_not_vacuous() below demonstrates
+// deliberately. Both shapes prove nothing about the collapse, so this fixture
+// states both sides of the gate explicitly.
+static void kct_setup_mapped_run(const uint8_t map[ZONE_CT_CHANNEL_COUNT])
+{
+    kct_setup_clean_run();
+    s_sweep.zones_total = ZONE_CT_CHANNEL_COUNT;
+    s_ct_derive.measured_zone_mask = 0x07u;
+    s_zone_ct_channel_valid = true;
+    for (uint8_t z = 0; z < ZONE_CT_CHANNEL_COUNT; z++) {
+        s_zone_ct_channel[z] = map[z];
+    }
+}
+
+static void kct_mapped_restore(void)
+{
+    s_zone_ct_channel_valid = false;
+    s_zone_ct_channel[0] = 0u; s_zone_ct_channel[1] = 1u; s_zone_ct_channel[2] = 2u;
+    s_sweep.zones_total = 0;
+    s_ct_topology_summed = false;
+    test_ct_cal_reset();
+}
+
+static void test_zone_sweep_plan_k_ct_identity_map_collapses_onto_per_zone(void)
+{
+    TEST_SECTION("zone_sweep_plan_k_ct -- step 5 collapse: a committed IDENTITY map plans exactly "
+                 "what the legacy per_zone planner plans on the same run, channel for channel and "
+                 "value for value");
+
+    // Legacy per_zone arm (no committed map at all).
+    kct_setup_clean_run();
+    s_zone_ct_channel_valid = false;
+    float legacy_k[ZONE_CT_CHANNEL_COUNT] = {0};
+    char legacy_note[96] = "";
+    uint8_t legacy_mask = zone_sweep_plan_k_ct(legacy_k, legacy_note, sizeof(legacy_note));
+    TEST_CHECK(legacy_mask == 0x07u, "the per_zone reference arm really does plan all three "
+                                     "channels -- a collapse cannot pass by both arms refusing");
+
+    // Same run under a committed identity map.
+    const uint8_t identity[ZONE_CT_CHANNEL_COUNT] = {0u, 1u, 2u};
+    kct_setup_mapped_run(identity);
+    float mapped_k[ZONE_CT_CHANNEL_COUNT] = {0};
+    char mapped_note[96] = "";
+    uint8_t mapped_mask = zone_sweep_plan_k_ct(mapped_k, mapped_note, sizeof(mapped_note));
+
+    TEST_CHECK(mapped_mask == legacy_mask, "identity map plans the same channel set as per_zone");
+    TEST_CHECK(mapped_note[0] == '\0', "and says nothing, same as a clean per_zone plan");
+    for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+        TEST_CHECK(fabsf(mapped_k[c] - legacy_k[c]) < 1e-6f,
+                   "and derives the same k_ct for every channel");
+    }
+
+    kct_mapped_restore();
+}
+
+static void test_zone_sweep_plan_k_ct_all_two_map_collapses_onto_summed(void)
+{
+    TEST_SECTION("zone_sweep_plan_k_ct -- step 5 collapse: a committed ALL-2 map plans exactly "
+                 "what the legacy summed planner plans -- the one shared channel, nothing else");
+
+    // Legacy summed arm.
+    s_ct_topology_summed = true;
+    kct_setup_clean_summed_run();
+    float legacy_k[ZONE_CT_CHANNEL_COUNT] = {0};
+    char legacy_note[96] = "";
+    uint8_t legacy_mask = zone_sweep_plan_k_ct(legacy_k, legacy_note, sizeof(legacy_note));
+    TEST_CHECK(legacy_mask == (uint8_t)(1u << (ZONE_CT_CHANNEL_COUNT - 1)),
+               "the summed reference arm really does plan the shared channel");
+    s_ct_topology_summed = false;
+
+    // Same measurement under a committed all-2 map, topology byte deliberately
+    // left false: the map, not the legacy byte, must be what produces this.
+    const uint8_t all_two[ZONE_CT_CHANNEL_COUNT] = {2u, 2u, 2u};
+    kct_setup_mapped_run(all_two);
+    float mapped_k[ZONE_CT_CHANNEL_COUNT] = {0};
+    char mapped_note[96] = "";
+    uint8_t mapped_mask = zone_sweep_plan_k_ct(mapped_k, mapped_note, sizeof(mapped_note));
+
+    TEST_CHECK(mapped_mask == legacy_mask,
+               "all-2 map plans only channel 2, exactly as the summed planner hardcodes");
+    TEST_CHECK(mapped_note[0] == '\0', "and says nothing");
+    TEST_CHECK(fabsf(mapped_k[2] - legacy_k[2]) < 1e-6f,
+               "with the same derived k_ct on the shared channel");
+    TEST_CHECK(mapped_k[0] == 0.0f && mapped_k[1] == 0.0f,
+               "and the two member-less channels are left entirely untouched, not handed a scale "
+               "factor for current they never see");
+
+    kct_mapped_restore();
+}
+
+static void test_zone_sweep_plan_k_ct_split_map_plans_only_member_channels(void)
+{
+    TEST_SECTION("zone_sweep_plan_k_ct -- step 5, the genuine split neither legacy topology can "
+                 "express: map {0,0,1} plans channels 0 and 1 and skips member-less channel 2");
+
+    const uint8_t split[ZONE_CT_CHANNEL_COUNT] = {0u, 0u, 1u};
+    kct_setup_mapped_run(split);
+    float k[ZONE_CT_CHANNEL_COUNT] = {0};
+    char note[96] = "";
+    uint8_t mask = zone_sweep_plan_k_ct(k, note, sizeof(note));
+
+    TEST_CHECK(mask == 0x03u, "both channels with member zones are planned, and only those");
+    TEST_CHECK(note[0] == '\0', "a complete split run is not a refusal");
+    TEST_CHECK(k[2] == 0.0f, "channel 2 has no member zone -- it is inert, not calibrated");
+    TEST_CHECK(fabsf(k[0] - k[1]) < 1e-6f,
+               "both planned channels take the SAME whole-kiln scale factor -- the nameplate "
+               "(ZONE_MAX_POWER_PARAM_ID) is a whole-kiln figure, never split per channel");
+
+    kct_mapped_restore();
+}
+
+static void test_zone_sweep_plan_k_ct_map_membership_decides_the_channel(void)
+{
+    TEST_SECTION("zone_sweep_plan_k_ct -- FORCED-WRONG-MEMBERSHIP NEGATIVE TEST: with every zone "
+                 "mapped onto channel 1, ONLY channel 1 may be planned -- if the planner were "
+                 "still reading derived_mask instead of member(ch), it would plan all three here "
+                 "and this fails");
+
+    const uint8_t all_one[ZONE_CT_CHANNEL_COUNT] = {1u, 1u, 1u};
+    kct_setup_mapped_run(all_one);
+    // derived_mask is left at kct_setup_clean_run()'s 0x07 on purpose: the
+    // legacy per_zone gate would plan all three off it.
+    TEST_CHECK(s_ct_derive.derived_mask == 0x07u, "the fixture really does leave the legacy "
+                                                  "per-channel gate wide open");
+    float k[ZONE_CT_CHANNEL_COUNT] = {0};
+    char note[96] = "";
+    uint8_t mask = zone_sweep_plan_k_ct(k, note, sizeof(note));
+
+    TEST_CHECK(mask == 0x02u, "only the channel the map actually names is planned");
+    TEST_CHECK(k[0] == 0.0f && k[2] == 0.0f, "and no other channel's k_ct is written");
+
+    kct_mapped_restore();
+}
+
+static void test_zone_sweep_plan_k_ct_mapped_refuses_an_incomplete_run(void)
+{
+    TEST_SECTION("zone_sweep_plan_k_ct -- step 5 completeness: under a committed map, a zone that "
+                 "was never measured refuses rather than scaling k_ct off a short total");
+
+    const uint8_t identity[ZONE_CT_CHANNEL_COUNT] = {0u, 1u, 2u};
+    kct_setup_mapped_run(identity);
+    s_ct_derive.measured_zone_mask = 0x03u; // zone 2 never cleared the floor
+    float k[ZONE_CT_CHANNEL_COUNT] = {0};
+    char note[96] = "";
+    TEST_CHECK(zone_sweep_plan_k_ct(k, note, sizeof(note)) == 0,
+               "an unmeasured zone calibrates nothing");
+    TEST_CHECK(strstr(note, "not every zone was measured") != NULL, "and the operator is told why");
+
+    // The same run with that zone measured plans normally -- so the refusal
+    // above is the completeness gate, not some other failure.
+    s_ct_derive.measured_zone_mask = 0x07u;
+    TEST_CHECK(zone_sweep_plan_k_ct(k, note, sizeof(note)) == 0x07u,
+               "measuring the missing zone lets the same run calibrate");
+
+    kct_mapped_restore();
+}
+
+static void test_zone_sweep_plan_k_ct_mapped_completeness_gate_is_not_vacuous(void)
+{
+    TEST_SECTION("zone_sweep_plan_k_ct -- VACUITY GUARD for the collapse fixture above: with "
+                 "s_sweep.zones_total left at 0 the completeness gate requires nothing and passes "
+                 "on a run where NOTHING was measured, which is why kct_setup_mapped_run() sets "
+                 "zones_total explicitly");
+
+    const uint8_t identity[ZONE_CT_CHANNEL_COUNT] = {0u, 1u, 2u};
+    kct_setup_mapped_run(identity);
+    s_sweep.zones_total = 0;            // as kct_setup_clean_run() leaves it
+    s_ct_derive.measured_zone_mask = 0; // as memset leaves it
+    float k[ZONE_CT_CHANNEL_COUNT] = {0};
+    char note[96] = "";
+    TEST_CHECK(zone_sweep_plan_k_ct(k, note, sizeof(note)) == 0x07u,
+               "required == 0 -- the gate is satisfied by an empty run, so a test written on the "
+               "bare clean-run fixture would assert a collapse it never actually exercised");
+
+    // And with zones_total restored, the identical unmeasured run refuses --
+    // proving the gate is live, not merely present.
+    s_sweep.zones_total = ZONE_CT_CHANNEL_COUNT;
+    TEST_CHECK(zone_sweep_plan_k_ct(k, note, sizeof(note)) == 0,
+               "the same unmeasured run refuses once zones_total states what was required");
+
+    kct_mapped_restore();
+}
+
+static void test_zone_sweep_plan_k_ct_mapped_skips_a_manually_calibrated_channel(void)
+{
+    TEST_SECTION("zone_sweep_plan_k_ct -- step 5: CT_COMMISSIONING_PLAN.md step 1 still holds "
+                 "under a committed map -- a hand-entered channel is never overwritten");
+
+    const uint8_t split[ZONE_CT_CHANNEL_COUNT] = {0u, 0u, 1u};
+    kct_setup_mapped_run(split);
+    test_ct_cal_set(0, 1.0f, 0.0f, SAFETY_CT_CAL_SOURCE_MANUAL);
+    float k[ZONE_CT_CHANNEL_COUNT] = {0};
+    char note[96] = "";
+    uint8_t mask = zone_sweep_plan_k_ct(k, note, sizeof(note));
+    TEST_CHECK(mask == 0x02u, "the manual channel is excluded, the other member channel is not");
+
+    // Every member channel manual -> nothing is rederived, and it says so.
+    test_ct_cal_set(1, 1.0f, 0.0f, SAFETY_CT_CAL_SOURCE_MANUAL);
+    mask = zone_sweep_plan_k_ct(k, note, sizeof(note));
+    TEST_CHECK(mask == 0, "with every member channel manual, nothing is planned");
+    TEST_CHECK(strstr(note, "manually") != NULL, "and the operator is told why");
+
+    kct_mapped_restore();
+}
+
 // ---- zone_sweep_plan_i_normal() -- nameplate current -> S14/S15 arming ----
 
 static void test_zone_sweep_plan_i_normal_nothing_measured_yet(void)
@@ -14128,6 +14347,14 @@ void run_test_zones_http(void)
     test_zone_sweep_plan_k_ct_refuses_after_a_failed_map_push();
     test_zone_sweep_plan_k_ct_refuses_an_unanswered_nameplate();
     test_zone_sweep_plan_k_ct_implausible_reason_is_not_truncated();
+    /* docs/CT_CHANNEL_MASK_PLAN.md step 5 -- the mapped planner's collapse tests. */
+    test_zone_sweep_plan_k_ct_identity_map_collapses_onto_per_zone();
+    test_zone_sweep_plan_k_ct_all_two_map_collapses_onto_summed();
+    test_zone_sweep_plan_k_ct_split_map_plans_only_member_channels();
+    test_zone_sweep_plan_k_ct_map_membership_decides_the_channel();
+    test_zone_sweep_plan_k_ct_mapped_refuses_an_incomplete_run();
+    test_zone_sweep_plan_k_ct_mapped_completeness_gate_is_not_vacuous();
+    test_zone_sweep_plan_k_ct_mapped_skips_a_manually_calibrated_channel();
     test_zone_sweep_push_k_ct_happy_path_writes_and_confirms();
     test_zone_sweep_push_k_ct_unconfirmed_readback_derives_nothing_and_backs_out();
     test_zone_sweep_push_k_ct_rejected_commit_backs_the_staging_out();
