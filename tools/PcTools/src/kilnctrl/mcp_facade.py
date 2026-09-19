@@ -47,6 +47,7 @@ GROUP_PREFIXES = (
     ("coupled_ident_", "coupled_ident"),
     ("plant_sim_", "plant_sim"),
     ("zone_current_sweep_", "zones"),
+    ("bench_test_", "bench_test"),
 )
 
 GROUP_OVERRIDES = {
@@ -208,6 +209,10 @@ KEYWORDS = {
                                    "benign", "reflash", "firmware", "version", "campaign",
                                    "unattended", "ramp_assist", "no such endpoint"),
     "factory_default_then_load_preset": ("factory", "reset", "consistent", "baseline", "bench", "fixture"),
+    "bench_test_run": ("standardized", "test", "suite", "smoke", "nightly", "full", "regression",
+                        "run all tests", "self-test", "verify the board", "log"),
+    "bench_test_list": ("standardized", "test", "suite", "catalogue", "case", "registry"),
+    "bench_test_last": ("standardized", "test", "suite", "history", "last run", "summary"),
     "ui_list_scripts": ("regression", "script", "test", "lcd", "web", "json"),
     "ui_run_script": ("regression", "script", "click", "tap-target", "wait", "assert", "lcd", "web"),
     "ui_step": ("regression", "click", "tap-target", "wait", "assert", "debug", "single", "step"),

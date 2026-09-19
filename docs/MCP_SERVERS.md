@@ -153,7 +153,7 @@ tools\PcTools\.venv\Scripts\python.exe -m kilnctrl.mcp_server --transport stdio
 
 ### Decision 2 — a search facade instead of 220 published tools
 
-`kilnctrl` registers 163 tools and `kicad` 86. Published as MCP
+`kilnctrl` registers 166 tools and `kicad` 86. Published as MCP
 schemas that is roughly 20,000 tokens each for `kilnctrl` and `kicad`, spent in
 *every* context window before the model has read a word of the request.
 
@@ -227,6 +227,9 @@ KiCad server has no equivalent -- there is nothing to compile there:
 | `build_saftyfw(jobs)` | kilnctrl | ninja in `firmware/SaftyFW/build` |
 | `build_saftyfw_host_tests()` | kilnctrl | off-target MSVC unit tests |
 | `run_pctools_tests(pattern)` | kilnctrl | the pytest suite |
+| `bench_test_run(suite, cases, dry_run, allow_heat, ap_password, tag, host)` | kilnctrl | standardized bench regression testing (docs/BENCH_TEST_SYSTEM_PLAN.md); Wave 0 only runs read-only cases -- calls existing tool functions in-process, never a second MCP server or hardware directly |
+| `bench_test_list(suite)` | kilnctrl | lists known suites, or one suite's case ids/descriptions and whether each has a judge function implemented yet |
+| `bench_test_last(n)` | kilnctrl | the most recent run(s)' `summary.json`, read back from `logs/bench_test/` |
 
 They run their PowerShell scripts through `subprocess`, deliberately. Those
 scripts set `$ErrorActionPreference = "Stop"` and `vcvarsall.bat` writes a

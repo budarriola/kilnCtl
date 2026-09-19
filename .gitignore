@@ -104,6 +104,14 @@ logs/**/*_campaign_state.json
 logs/**/*_run_queue.log
 logs/**/*.aborted
 
+# bench_test run directories (docs/BENCH_TEST_SYSTEM_PLAN.md §2.3, §7 Q1
+# "recommend (a)"): one directory per run under logs/bench_test/, entirely
+# machine-generated (summary.json, transcript.md, captures/, board_before/
+# after.json) -- gitignored like the coupling logs above. Committed evidence
+# for a notable run is a human's one-line sentence in docs/BENCH_TEST_LOG.md
+# (added in a later wave), not this JSON.
+logs/bench_test/
+
 # idf.py menuconfig writes these next to the (already-ignored) sdkconfig.
 firmware/KilnFW/sdkconfig.bak_*
 

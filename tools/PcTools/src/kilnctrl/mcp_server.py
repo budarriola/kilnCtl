@@ -487,6 +487,7 @@ from .mcp_server_plant_sim import *  # noqa: F401,F403
 from .mcp_server_coupled_ident import *  # noqa: F401,F403
 from .mcp_server_fixture import _close_fixture  # noqa: F401
 from .mcp_server_fixture import *  # noqa: F401,F403
+from .mcp_server_bench_test import *  # noqa: F401,F403
 
 # ---------------------------------------------------------------------------
 # facade + entry point
