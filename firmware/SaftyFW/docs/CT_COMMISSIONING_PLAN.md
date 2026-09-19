@@ -181,6 +181,36 @@ document, do not solve.
    on this side before -- wired into `safety_page.html`'s "Warn mask" row.
    Dashboard/LCD real-amps display and the "channels 0/1 read not fitted"
    presentation remain step 4, not touched by this pass.
+
+   **Superseded by the per-zone selector surface (2026-09-18,
+   `docs/CT_CHANNEL_MASK_PLAN.md`).** The commissioning question an operator
+   answers is no longer one whole-kiln `ct_topology` enum but three per-zone
+   ones: `zone_ct_channel[0..2]` (params `0x0320-0x0322`, U8, 0-2), asked on
+   `safety_commissioning_page.html` immediately below the `ct_topology` row
+   as "zone N CT channel". The two topologies this step shipped are just two
+   answers to those three questions — per-zone is `{0, 1, 2}`, summed is
+   `{2, 2, 2}` — and a genuine split (zones 0 and 1 sharing one clamp, zone
+   2 on its own) is now expressible, which `ct_topology` could not say at
+   all. `member(ch) = { z : zone_ct_channel[z] == ch }`; a channel with two
+   or more members is shared, and every zone on a shared channel gets the
+   idle-subtracted derivation this step gave the summed case, while a zone
+   alone on its channel keeps the per-zone path.
+
+   `ct_topology` is NOT removed and is still written. The map is honoured
+   only when it is committed all-or-nothing — every zone answered, `set`,
+   and in range — and while it is not, both the Pico's S14/S15 and the ESP's
+   sweep run the `ct_topology` branches exactly as this step built them. That
+   is what leaves every already-commissioned board's behaviour unchanged and
+   what keeps a board mid-commissioning, with a half-entered map, from being
+   guarded against a mapping nobody finished answering. The three rows are
+   also disabled and cleared alongside `ct_channel_map` when `ct_installed`
+   is answered "No".
+
+   Bench-gated, not software-gated: which channel each zone is actually read
+   on is a fact about the wiring loom, so nothing in software can check the
+   answer. A wrong answer points a guard at another zone's conductor —
+   `docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md` is the (still PLANNED)
+   energize-one-zone-at-a-time check that would catch it.
 4. **Real-amps display: done (2026-09-06)**, ESP + web dashboard + LCD +
    PcTools (`safety_get_status`, `devices_safety.py`/`mcp_server_safety.py`,
    done 2026-09-06 -- see below).

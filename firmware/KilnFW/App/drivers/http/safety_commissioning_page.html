@@ -603,16 +603,40 @@ var GROUPS = [
       { id: 769, name: 'i_present_a', type: 'f32', risk: 'nuisance', unit: 'A', def: 2.0,
         guards: ['S3', 'S4', 'S9'], note: 'A load-active threshold -- only has to separate noise ' +
           'from a conducting element.' },
-      { id: 800, name: 'CT0 probe rating (A_fs)', type: 'ct_cal', chIndex: 0, unit: 'A', risk: 'nuisance',
+      /* A_fs/zero_mv are NOT Pico param ids (see fieldInputHtml's 'ct_cal'
+       * branch) -- they live on this ESP and reach the wire only as
+       * k_ct_v_per_a/zero_counts via POST /api/safety/commissioning/ct_cal.
+       * Their `id` here is a DISPLAY key: it names the DOM node and the
+       * <label for=...>, nothing more.
+       *
+       * These three used to be 800/801/802, which is decimal for 0x0320-
+       * 0x0322 -- unallocated param space at the time, and allocated to
+       * zone_ct_channel[0..2] by docs/CT_CHANNEL_MASK_PLAN.md step 2. That
+       * collision was never visible as a wrong number (the ct_cal branch
+       * ignores paramsById entirely, and these inputs deliberately carry no
+       * data-id so the save pass cannot SET_PARAM them), but fieldBlock()
+       * reads paramsById[f.id] for `isSet` -- so once an operator committed
+       * a per-zone channel map, all three probe-rating rows would have
+       * dropped their "unset" styling and their "Disabled while unset: S3,
+       * S4, S9" banner while no probe rating had ever been entered. An
+       * uncommissioned CT calibration reading as commissioned is exactly the
+       * "disabled guard that looks enabled" this page's own banner text
+       * calls worse than no guard.
+       *
+       * Display-only keys now live at 900000+, which is outside the 16-bit
+       * param id space entirely and therefore cannot be allocated to a real
+       * param by any future append. Do not give a display-only row an id
+       * that could ever be a wire id. */
+      { id: 900800, name: 'CT0 probe rating (A_fs)', type: 'ct_cal', chIndex: 0, unit: 'A', risk: 'nuisance',
         guards: ['S3', 'S4', 'S9'],
         note: 'The number printed on the probe: amps at 1V full-scale output (1A bench probe, ' +
           '10-100A on a real kiln -- any rating is accepted). Also asks the probe\'s own zero-current ' +
           'output (zero_mv, mV) -- both are converted here into k_ct_v_per_a and zero_counts below, ' +
           'which is what actually gets sent to the safety processor. A value you type here (source ' +
           '"manual") is never silently overwritten by the zone-current sweep\'s own calibration.' },
-      { id: 801, name: 'CT1 probe rating (A_fs)', type: 'ct_cal', chIndex: 1, unit: 'A', risk: 'nuisance',
+      { id: 900801, name: 'CT1 probe rating (A_fs)', type: 'ct_cal', chIndex: 1, unit: 'A', risk: 'nuisance',
         guards: ['S3', 'S4', 'S9'], note: 'Same as CT0, for channel 1.' },
-      { id: 802, name: 'CT2 probe rating (A_fs)', type: 'ct_cal', chIndex: 2, unit: 'A', risk: 'nuisance',
+      { id: 900802, name: 'CT2 probe rating (A_fs)', type: 'ct_cal', chIndex: 2, unit: 'A', risk: 'nuisance',
         guards: ['S3', 'S4', 'S9'], note: 'Same as CT0, for channel 2.' },
       { id: 770, name: 'zero_counts[0]', type: 'u16', risk: 'nuisance', unit: 'ADC counts', readonly: true,
         guards: ['S3', 'S4', 'S9'], note: 'Re-measured at runtime after >=5 min idle. Not zero -- ' +
@@ -715,10 +739,40 @@ var GROUPS = [
       { id: 798, name: 'overcurrent_time_s', type: 'u16', risk: 'nuisance', unit: 's', def: 30, guards: ['S14'] },
       { id: 799, name: 'ct_topology', type: 'enum', risk: 'dangerous', guards: ['S14', 'S15'],
         enumOpts: [ [0, 'Per-zone (one CT per zone -- default)'], [1, 'Summed (one shared CT, channel 3, reads every zone)'] ],
-        note: 'CT_COMMISSIONING_PLAN.md step 3. In "summed" mode the zone current sweep records ' +
-          'per-zone normals from channel 3 alone and skips the one-relay-one-channel check; ' +
-          'channels 0/1 report "not fitted" wherever amps are shown. S15 (new, WARN-only) flags a ' +
-          'likely open heater in this mode.' },
+        note: 'SUPERSEDED by the three per-zone "zone N CT channel" selectors below ' +
+          '(docs/CT_CHANNEL_MASK_PLAN.md step 6), which say the same thing and more: ' +
+          'per-zone is every zone on its own channel, summed is every zone on channel 2. ' +
+          'Kept, still written, and still what the guards use on any board that has not ' +
+          'answered the per-zone selectors -- answer those three and this one stops ' +
+          'deciding anything. It cannot describe a kiln where only SOME zones share a CT.' },
+      /* docs/CT_CHANNEL_MASK_PLAN.md step 6: the per-zone selector surface.
+       * These are real wire params (0x0320-0x0322 = 800-802), U8, range-
+       * checked to 0-2 by the Pico's own config_params.c.
+       *
+       * All three must be answered: the ESP sweep and the Pico's S14/S15 both
+       * gate their generalised arm on a map where EVERY zone is set, in range,
+       * and committed -- a partial answer is ignored entirely and the legacy
+       * ct_topology branch keeps running, which is what protects a board
+       * mid-commissioning from a half-entered map. */
+      { id: 800, name: 'zone 0 CT channel', type: 'enum', risk: 'dangerous', guards: ['S14', 'S15'],
+        enumOpts: [ [0, 'CT channel 0'], [1, 'CT channel 1'], [2, 'CT channel 2'] ],
+        note: 'Which current-transformer channel zone 0\'s current is actually read on. Two or ' +
+          'more zones naming the SAME channel means that CT is shared and reads all of them at ' +
+          'once: S15 (open-heater deficit) then applies to those zones, and the sweep derives ' +
+          'their normals from that one channel minus its idle draw. The two common kilns are ' +
+          'one CT per zone -- answer 0, 1, 2 -- and one shared CT -- answer 2, 2, 2, matching ' +
+          'today\'s "summed". A genuine split (say zones 0 and 1 on one clamp, zone 2 on its ' +
+          'own) is now expressible too, and was not before. This says only WHICH channel a ' +
+          'zone is read on; the normal-current numbers the guards compare against still come ' +
+          'only from the zone-current sweep, never from a value typed here. Getting it wrong ' +
+          'is a hardware-truth error no readiness check can catch -- it points a guard at ' +
+          'another zone\'s conductor.' },
+      { id: 801, name: 'zone 1 CT channel', type: 'enum', risk: 'dangerous', guards: ['S14', 'S15'],
+        enumOpts: [ [0, 'CT channel 0'], [1, 'CT channel 1'], [2, 'CT channel 2'] ],
+        note: 'Same as zone 0. One CT per zone: answer 1 here. One shared CT: answer 2.' },
+      { id: 802, name: 'zone 2 CT channel', type: 'enum', risk: 'dangerous', guards: ['S14', 'S15'],
+        enumOpts: [ [0, 'CT channel 0'], [1, 'CT channel 1'], [2, 'CT channel 2'] ],
+        note: 'Same as zone 0. One CT per zone: answer 2 here. One shared CT: answer 2 as well.' },
     ] },
 
   { title: '4. Link and liveness', fields: [
@@ -1339,7 +1393,13 @@ function wireCtCalButtons() {
 // stale typed value
 // silently restaged under an answer of "no CTs" would write a mapping nobody
 // confirmed, the precise failure the backup-map mechanism was retired for.
-var CT_MAP_FIELD_IDS = [262, 263, 264];
+// 262-264 are ct_channel_map[0..2] (channel -> relay); 800-802 are
+// zone_ct_channel[0..2] (zone -> channel, docs/CT_CHANNEL_MASK_PLAN.md).
+// Both are CT wiring answers, and both are unanswerable on a board that
+// declares no CTs, so both are struck out and CLEARED together -- leaving
+// the per-zone map typed-but-hidden under an answer of "no CTs" would
+// restage a mapping nobody confirmed, the exact failure described above.
+var CT_MAP_FIELD_IDS = [262, 263, 264, 800, 801, 802];
 function wireCtInstalledToggle() {
   var sel = document.querySelector('#fields select[data-id="265"]');
   if (!sel) return;
