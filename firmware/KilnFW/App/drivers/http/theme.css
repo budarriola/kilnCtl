@@ -434,8 +434,18 @@ details.info > *:not(summary) { display: block; margin: 0.4em 0 0; }
    before this pass split it out -- these rules are a MOVE, not a redesign.
    a.button is also still used by main_page.html itself (the "Manage fire
    profiles" link), so it stays here rather than duplicated per page now
-   that two pages need it. */
-a.button { display: inline-flex; align-items: center; min-height: var(--ui-touch);
+   that two pages need it.
+   2026-09-18: the selector now also matches `button.button`, so a real
+   <button> can opt into this exact treatment instead of each page declaring
+   its own copy of it. That per-page copy is what this file's header comment
+   calls the mistake to avoid, and it had already happened twice
+   (backup_page.html's `a.button, button { ... }`, safety_config_page.html's
+   `button { ... }`) -- both of which restate these same four
+   border/radius/color/background declarations. Nothing is repainted by this:
+   the declarations are unchanged, and a page only picks them up by adding
+   class="button" to a button that previously had no shared class at all
+   (security_page.html's Save controls). */
+a.button, button.button { display: inline-flex; align-items: center; min-height: var(--ui-touch);
            box-sizing: border-box; margin-top: 1.5em; padding: 0.7em 1.5em; font-size: 1em;
            border: 1px solid var(--border); border-radius: var(--ui-radius); text-decoration: none;
            color: var(--fg); background: var(--button-bg); }

@@ -35,18 +35,32 @@
   :root {
     --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
     --card-bg: #f7f7f7; --input-bg: #fff; --input-border: #999;
+    /* --bad/--fault-color/--ok: the same names and the same values
+       settings_page.html and backup_page.html already carry. This page READ
+       --fault-color and --ok (.kc-sec-status.err/.ok below) and now also
+       reaches theme.css's shared button.danger-btn, which reads
+       --fault-color -- but it never DEFINED either name, so all three
+       resolved to nothing. That is the identical mismatch recorded in
+       diagnostics_page.html's own --fault-color comment (owner report: "the
+       dissable panic button ... does not match the theme of anything else"):
+       the shared rule was fine, the page simply never supplied the token the
+       rule reads. No new colour is introduced here -- these are the existing
+       palette values, aliased the same way every other page aliases them. */
+    --bad: #b00; --fault-color: var(--bad); --ok: #1a7a1a;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
       --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
       --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary);
+      --bad: var(--ui-accent-5); --fault-color: var(--bad); --ok: var(--ui-accent-4);
     }
   }
   :root[data-theme="dark"] {
     --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
     --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
     --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary);
+    --bad: var(--ui-accent-5); --fault-color: var(--bad); --ok: var(--ui-accent-4);
   }
   *, *::before, *::after { box-sizing: border-box; }
   body { font-family: sans-serif; width: min(100% - 2rem, var(--kc-shell-max)); margin: 2em auto;
@@ -106,7 +120,14 @@ password below for at least the administrator account before turning authenticat
   <p class="hint">10-64 characters, not all lowercase, and not "password", "kiln", the
     username, the Wi-Fi network name, or the Wi-Fi password.</p>
 
-  <button type="button" id="kcSecAdminPwSave">Save administrator password</button>
+  <!-- class="button" -- theme.css's shared neutral-action treatment (the same
+       rule backup_page.html's "Download backup" control uses). These five Save
+       controls previously carried no class at all, so they inherited only
+       theme.css's bare `button { min-height }` rule and rendered as native UA
+       buttons: light-grey chrome on the dark theme, matching nothing else on
+       the site. The destructive control at the bottom of this page uses
+       .danger-btn instead, deliberately -- see its own comment. -->
+  <button type="button" class="button" id="kcSecAdminPwSave">Save administrator password</button>
   <span id="kcSecAdminPwStatus" class="kc-sec-status"></span>
 </div>
 
@@ -120,7 +141,7 @@ password below for at least the administrator account before turning authenticat
     fixed word list and the Wi-Fi credentials (the user account has no separate
     username to check against).</p>
 
-  <button type="button" id="kcSecUserPwSave">Save user password</button>
+  <button type="button" class="button" id="kcSecUserPwSave">Save user password</button>
   <span id="kcSecUserPwStatus" class="kc-sec-status"></span>
 </div>
 
@@ -128,12 +149,12 @@ password below for at least the administrator account before turning authenticat
 <div class="card">
   <label for="kcSecUserPin">User PIN <span class="kc-sec-badge" id="kcSecUserPinBadge"></span></label>
   <input type="password" id="kcSecUserPin" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off">
-  <button type="button" id="kcSecUserPinSave">Save user PIN</button>
+  <button type="button" class="button" id="kcSecUserPinSave">Save user PIN</button>
   <span id="kcSecUserPinStatus" class="kc-sec-status"></span>
 
   <label for="kcSecAdminPin">Administrator PIN <span class="kc-sec-badge" id="kcSecAdminPinBadge"></span></label>
   <input type="password" id="kcSecAdminPin" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off">
-  <button type="button" id="kcSecAdminPinSave">Save administrator PIN</button>
+  <button type="button" class="button" id="kcSecAdminPinSave">Save administrator PIN</button>
   <span id="kcSecAdminPinStatus" class="kc-sec-status"></span>
 
   <p class="hint">4-8 digits. The user and administrator PINs must be different from
@@ -169,7 +190,13 @@ password below for at least the administrator account before turning authenticat
     <option value="-1">Never</option>
   </select>
 
-  <button type="button" id="kcSecPolicySave">Save</button>
+  <!-- aria-label, not a longer visible label: the visible text stays "Save"
+       (unchanged), but "Save" alone is the only control on this page whose
+       accessible name does not say what it saves -- the other four name their
+       credential. The label supplies that for a screen reader without
+       changing the rendered button. -->
+  <button type="button" class="button" id="kcSecPolicySave"
+          aria-label="Save authentication settings">Save</button>
   <span id="kcSecPolicyStatus" class="kc-sec-status"></span>
   <p class="hint">The Dashboard and stopping a running firing never require a password,
     regardless of these settings.</p>
@@ -180,7 +207,18 @@ password below for at least the administrator account before turning authenticat
   <p class="hint">Resets the administrator and user web passwords and both LCD PINs to
     unconfigured. This is separate from a factory reset -- a factory reset does not touch
     login credentials at all. Use this only when every password/PIN is lost.</p>
-  <button type="button" id="kcSecClearCreds">Clear login credentials</button>
+  <!-- class="danger-btn" -- theme.css's shared dangerous-action button, the
+       same class settings_page.html's Reset/Factory-default controls and
+       diagnostics_page.html's Danger Zone toggles already use. This control
+       clears both web passwords and both LCD PINs and cannot be undone from
+       this page, so it must NOT read as another Save: .danger-btn is
+       `display: block; width: 100%`, left-aligned, outlined and lettered in
+       --fault-color, and fills solid red on hover -- full-width and red
+       against the four inline, neutral, --button-bg Save controls above. The
+       shape difference (full-width block vs inline) and the button's own text
+       carry the distinction, not colour alone. Its confirm() gate in the
+       script below is unchanged; this pass touched no behaviour. -->
+  <button type="button" class="danger-btn" id="kcSecClearCreds">Clear login credentials</button>
   <span id="kcSecClearCredsStatus" class="kc-sec-status"></span>
 </div>
 
