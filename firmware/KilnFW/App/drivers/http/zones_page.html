@@ -145,8 +145,14 @@
      regardless of the element's open/closed disclosure state. */
   .groupFrame { border: 1px solid var(--border); border-radius: var(--ui-radius);
                 padding: 0.5em 0.7em; margin: 0.6em 0; }
+  /* display:list-item (the UA default for <summary>) is kept rather than
+     block/flex specifically so the disclosure triangle survives -- an
+     earlier version of this rule used display:flex to center the 32px
+     tap-target box, which silently drops the ::marker the same way
+     list-style:none does. line-height/padding grow the box to the 32px
+     floor without touching display. */
   .groupFrameTitle { margin: 0; font-size: 0.85em; font-weight: 600; color: var(--muted); cursor: pointer;
-                      min-height: 32px; box-sizing: border-box; padding: 0.5em 0; display: flex; align-items: center; }
+                      min-height: 32px; box-sizing: border-box; padding: 0.5em 0; line-height: 1.6; }
   .groupFrame[open] > .groupFrameTitle { margin: 0 0 0.4em; }
   /* Same closed-<details>-still-lays-out-its-children Chromium quirk as
      details.advguards below (see that rule's long comment) -- a closed
@@ -2109,7 +2115,17 @@ function applyGroupFrames(k) {
     /* 255 is "Custom settings for this zone". groupSettingsSourceOf() returns
        255 for zone 0 unconditionally (it has no selects and is always its own
        source), so zone 0's frames are never hidden. */
-    frame.hidden = (groupSettingsSourceOf(k, group) !== 255);
+    var wasHidden = frame.hidden;
+    var nowCustom = (groupSettingsSourceOf(k, group) === 255);
+    frame.hidden = !nowCustom;
+    /* 2026-09-19 review fix: the frame is also a closed-by-default <details>
+       (collapse pass above). Un-hiding it alone leaves it collapsed -- an
+       operator switching a group from inherited to Custom would see a bare
+       summary bar with no fields to edit, since nothing else ever opens it.
+       Force it open exactly on the hidden->visible transition, never on an
+       already-visible frame (that would re-open one the operator just
+       closed on every unrelated re-render/applyAllGroupFrames() pass). */
+    if (wasHidden && nowCustom) frame.open = true;
   });
 }
 
@@ -2370,6 +2386,10 @@ function onZoneEnableToggleChanged(ev) {
   renderZones(); /* re-renders zone cards AND calls renderZoneEnableToggles() again */
 }
 
+/* Rebuilds every zone card from scratch (zoneBlock()), so any .groupFrame
+ * open/closed disclosure state an operator set by hand is lost across a
+ * save/reload -- every frame reverts to its zoneBlock()-rendered default
+ * (closed) the next time this runs, same as it would on a fresh page load. */
 function renderZones() {
   var thermoCount = parseInt(document.getElementById('thermoCount').value, 10) || 0;
   var relayCount = parseInt(document.getElementById('relayCount').value, 10) || 0;

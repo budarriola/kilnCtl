@@ -84,7 +84,7 @@ function makeZone(sources) {
     // which is exactly how the zone-0 case first shipped vacuous here: a
     // sabotage that skipped zone 0 entirely left its frames at their default
     // and the test stayed green.
-    frames[g] = { hidden: true, style: {} };
+    frames[g] = { hidden: true, open: false, style: {} };
     if (sources && sources[g] !== undefined) {
       selects[g] = { value: String(sources[g]), dataset: {} };
     }
@@ -185,6 +185,31 @@ function run(zones, thermoCount) {
   run(zones, 2);
   assert(zones[1].frames.limits.hidden === false,
     'switching that select back to Custom shows the frame again');
+}
+
+// ---------------------------------------------------------------------------
+// 5. 2026-09-19 review fix: un-hiding a frame is not enough -- it is also a
+//    closed-by-default <details>, so switching a group to Custom must open
+//    it, or the operator sees a bare summary bar with no fields. And the
+//    reopen must be gated on the hidden->visible transition specifically:
+//    an already-visible frame the operator closed by hand must NOT be
+//    forced back open on every unrelated re-render.
+// ---------------------------------------------------------------------------
+{
+  const zones = [makeZone(null), makeZone({ limits: 0, relaytiming: 0, control: 0, guards: 0, tc: 0 })];
+  run(zones, 2);
+  assert(zones[1].frames.limits.open === false, 'inherited frame starts closed');
+  zones[1].querySelector('.groupsrc[data-group="limits"]').value = '255';
+  run(zones, 2);
+  assert(zones[1].frames.limits.open === true,
+    'switching inherited -> Custom (hidden -> visible) also opens the details');
+
+  // Now already-Custom and already-visible: close it by hand, re-run, and
+  // confirm the code does not force it back open just because it is Custom.
+  zones[1].frames.limits.open = false;
+  run(zones, 2);
+  assert(zones[1].frames.limits.open === false,
+    'a frame already visible before the re-run is not force-reopened, only the hidden->visible transition opens it');
 }
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed.');
