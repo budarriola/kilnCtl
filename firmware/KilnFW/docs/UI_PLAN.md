@@ -712,37 +712,71 @@ order. Builtins (`id >= PROFILE_BUILTIN_ID_BASE`) are a `const` table with no
 writable storage — the row must not offer Delete for them at all, matching the
 web page's exportable-but-not-deletable rule.
 
-**Layout.** Rows must be `UI_THEME_MIN_TOUCH_TARGET_PX` = 72px tall, so three
-rows per page with a 36px header row:
+**Layout — four 64px rows, per the owner's decision (6.8 item 5).** Four rows
+fit the 268px budget, but only exactly, and only with the whole content column
+given over to rows:
 
 ```
-UI_PAGE_PROFILE_PICKER_ROWS_PER_PAGE      3
-UI_PAGE_PROFILE_PICKER_ROW_H_PX           UI_THEME_MIN_TOUCH_TARGET_PX      /* 72 */
-UI_PAGE_PROFILE_PICKER_HEADER_H_PX        36
+UI_PAGE_PROFILE_PICKER_ROWS_PER_PAGE      4
+UI_PAGE_PROFILE_PICKER_ROW_H_PX           64
+UI_PAGE_PROFILE_PICKER_ROW_GAP_PX         (UI_THEME_PADDING_PX / 2)         /* 4 */
 UI_PAGE_PROFILE_PICKER_WORST_CASE_HEIGHT_PX =
-    HEADER(36) + GAP(4) + 3*72 + 2*4 = 264  <=  268
+    (4 * 64) + (3 * 4) = 256 + 12 = 268   <=  268
 ```
 
-Four rows (`36 + 4 + 4*72 + 3*4 = 340`) does not fit, and shrinking rows below
-72px breaks the touch-target policy — hence three, with the existing
-`ui_topbar_set_prev_enabled()` / `_set_next_enabled()` paging and the "N of M"
-indicator `ui_page_profiles_mine.c` already demonstrates. Page count is
-`ceil(total_visible / 3)`.
+**Zero slack.** 268 equals the budget exactly, so the `_Static_assert` passes
+(`<=`) and any later addition to this page's content column — a header, a
+status line, a wider gap — fails the build. That is the intended behaviour, not
+a problem to route around: this page has no room left and the compiler now says
+so.
 
-**The New button goes in the page's own 36px header row, not the topbar.**
-This is deliberate: adding an icon slot to `ui_topbar.c` would collide head-on
-with 6.6, which rewrites that same file's icon-row alignment. The header row
-is "at the top of the screen" as requested and keeps the two items in separate
-files. New button: 36x36 with `LV_SYMBOL_FILE` (no new colour —
-`UI_THEME_COLOR_ACCENT_4`, as Start already uses),
-`ui_theme_apply_touch_area(btn, true)`, calling
+What that exactness costs, stated plainly so it is not discovered later:
+
+* **The page has no header row at all.** The 36px header the 3-row layout used
+  is gone. `36 + 4 + 4*64 + 3*4 = 308 > 268`, so a header and four 64px rows
+  cannot coexist under any gap arithmetic (even a 0px gap leaves
+  `36 + 4*64 = 292 > 268`).
+* **So the New button moves to the topbar**, as a second icon slot beside the
+  gear on the Profiles page. The topbar sits above the content column and is
+  already subtracted out of `UI_THEME_PAGE_CONTENT_BUDGET_PX`, so it is free
+  height — it is the only place left that is. This is still "at the top of the
+  screen". `ui_topbar_create()` already sizes its icon row from `icon_count`,
+  so this is one more `build_icon()` call, not new layout machinery; with 6.6's
+  `LV_FLEX_ALIGN_END` in place the gear stays flush right and New lands
+  immediately to its left. **Consequence: 6.2 now edits `ui_topbar.c` and
+  therefore depends on 6.6** — see the revised wave order in 6.7.
+* **The "N of M" page indicator moves into the topbar title** (title string
+  becomes e.g. `Profiles 1/2`) rather than a content row, for the same reason.
+  Paging itself is unchanged: `ui_topbar_set_prev_enabled()` /
+  `_set_next_enabled()`, exactly as `ui_page_profiles_mine.c` does today.
+  Page count is `ceil(total_visible / 4)`.
+* **Rows are 64px drawn with no touch-area extension, 8px under
+  `UI_THEME_MIN_TOUCH_TARGET_PX` (72).** This is a real deviation from the
+  touch policy and follows directly from the 64px decision. Do **not** try to
+  recover it with `ui_theme_apply_touch_area(row, true)`: the compact extension
+  is `UI_THEME_PADDING_PX / 2` = 4px per side, which would reach 72px effective
+  only by consuming the entire 4px inter-row gap from both sides at once, so
+  two vertically adjacent rows' hit-boxes would overlap. That is precisely the
+  mis-tap defect documented and fixed on the relay-life page
+  (`ui_page_diagnostics.c`'s `UI_PAGE_DIAGNOSTICS_RELAY_LIFE_ROW_GAP_PX`
+  comment), and re-creating it under a Delete button would be worse there than
+  it was there. 64px rows, plain hit-boxes, no extension.
+
+New button: 36x36 topbar icon with `LV_SYMBOL_FILE` (no new colour —
+`UI_THEME_COLOR_ACCENT_4`, as Start already uses), calling
 `ui_page_profile_builder_start_new()` then
 `kiln_ui_show("profile_builder_zones")` — the same two calls
 `new_profile_nav_cb()` makes today.
 
-Row internals (464px): star/name label `flex_grow(1)` with
-`LV_LABEL_LONG_DOT`, then a 64x36 Delete button right-aligned for user slots
-only. Name width is `464 - 8 (pad) - 4 - 64 = 388` with Delete, 452 without.
+**The picker (6.1) uses the identical 4x64 column** and never had a header, so
+opening it over the dashboard changes nothing about this arithmetic.
+
+Row internals (464px wide, 64px tall): star/name label `flex_grow(1)` with
+`LV_LABEL_LONG_DOT`, then a 64x36 Delete button right-aligned and vertically
+centred, for user slots only. Name width is `464 - 8 (pad) - 4 - 64 = 388`
+with Delete, 452 without. The row's own vertical padding is
+`(64 - 36) / 2 = 14` above and below the Delete button; the name label is a
+single montserrat_14 line (20px) centred in the same 64px.
 
 **Tests owed.**
 
@@ -757,17 +791,25 @@ only. Name width is `464 - 8 (pad) - 4 - 64 = 388` with Delete, 452 without.
 * `check_ui_budget_asserts.ps1` must gain an entry requiring
   `ui_page_profile_picker.c`'s `_Static_assert`, and must lose the
   `ui_page_profiles_mine.c` entry when that file is deleted — the script greps
-  exact literals, so a stale entry fails the build.
+  exact literals, so a stale entry fails the build. The literal the new entry
+  pins is:
+  `_Static_assert(UI_PAGE_PROFILE_PICKER_WORST_CASE_HEIGHT_PX <= UI_THEME_PAGE_CONTENT_BUDGET_PX, ...)`
+  with the same "split across more pages, don't scroll" message shape the other
+  pages use. No existing entry's text changes: 6.3 grows a macro the
+  `ui_page_temperature.c` assert already references, and 6.4 removes a control
+  shorter than its row, so both of those asserts keep their current literals.
 * Negative-test both: flip the partition to unstable and confirm the host test
-  goes red; bump the picker's row count to 4 and confirm the `_Static_assert`
-  fires. A check that has not been seen failing is vacuous.
+  goes red; bump the picker's row count to 5 and confirm the `_Static_assert`
+  fires (at 4 rows the page sits exactly on the budget, so a single extra row
+  is enough to prove the check is live). A check that has not been seen failing is vacuous.
 
 **Numeric verification.** With a known favorite set, capture and sample the
-first row's star glyph cell — LCD `(16, 60)`, frame `(132, 126)`, `-W 10
--H 10`: a lit star is `UI_THEME_COLOR_TEXT_PRIMARY` `0xf0f0f0` against `CARD`
-`0x242a3a`, so the mean RGB of the star cell must be measurably brighter than
-the same cell on a non-favorite row further down (LCD `(16, 204)`, frame
-`(132, 400)`). Judge this numerically only.
+first row's star glyph cell. With 64px rows and 4px gaps, row N's vertical
+centre is LCD `y = N*68 + 32`, so row 0 is LCD `(16, 32)`, frame `(132, 73)`,
+and row 3 is LCD `(16, 236)`, frame `(132, 461)`; sample `-W 10 -H 10`. A lit
+star is `UI_THEME_COLOR_TEXT_PRIMARY` `0xf0f0f0` against `CARD` `0x242a3a`, so
+the mean RGB of a favorite row's star cell must be measurably brighter than the
+same cell on a non-favorite row. Judge this numerically only.
 
 ### 6.3 Temperature page also shows the safety relay's state
 
@@ -979,11 +1021,13 @@ Wave 1 — four implementers, zero shared files:
 | C | 6.3 | `ui_page_temperature.c` |
 | D | 6.2's pure half | **new** `ui_profile_list_order.c/.h`, **new** `test_ui_profile_list_order.c`, `build_host_tests.ps1` |
 
-Wave 2 — after D lands (both consume its ordering helper):
+Wave 2 — after D lands (both consume its ordering helper), and E additionally
+after A, because the owner's 4x64 row decision moved the New button into the
+topbar (see 6.2):
 
 | Worker | Item | Files owned |
 | --- | --- | --- |
-| E | 6.2 | **new** `ui_page_profile_picker.c/.h`, `ui_page_profiles.c`, delete `ui_page_profiles_mine.c` / `ui_page_profiles_family.c`, `kiln_ui.c`, `check_ui_budget_asserts.ps1` |
+| E | 6.2 | **new** `ui_page_profile_picker.c/.h`, `ui_page_profiles.c`, delete `ui_page_profiles_mine.c` / `ui_page_profiles_family.c`, `kiln_ui.c`, `check_ui_budget_asserts.ps1`, and `ui_topbar.c` (one extra icon slot) **after A** |
 | F | 6.5 | `ui_page_home.c`, `ui_page_home_internal.h`, `ui_page_home_refresh.c`, **new** `ui_page_home_rail.c/.h` |
 
 Wave 3 — 6.1, which needs E's picker page *and* F's home-page edits.
@@ -995,34 +1039,43 @@ three files. 6.1 and 6.2 share the list widget and the ordering helper; D
 isolates that into files neither of the others owns. `build_host_tests.ps1` is
 touched by D and by F (its new rail test) — order those two edits, or let F
 append after D lands. `check_ui_budget_asserts.ps1` is touched by E (picker
-entry) and F (home entry); same treatment. `ui_topbar.c` is touched **only** by
-A — which is why 6.2's New button goes in a page header row and not the topbar.
+entry) and F (home entry); same treatment. `ui_topbar.c` is touched by A (6.6's
+alignment fix) and now also by E (6.2's New icon), because four 64px rows leave
+no content height for a page header — A must land first, and E's icon addition
+is then a one-line `build_icon()` call on top of A's corrected alignment. A and
+E are the only two items that touch that file.
 
 Nothing in waves 1-3 touches `main_page.html`, any HTTP handler, any
 `httpd_uri_t` registration, or any task creation.
 
-### 6.8 Owner decisions genuinely required
+### 6.8 Owner decisions — all five answered 2026-09-19
 
-1. **What "zone / zone-group power" means on the rail (6.5).** Per-zone duty
-   (the web's `duty NN%`, from `st.zones[].duty`) or watts? The only watts
-   source is `ds.power_w`, which is whole-kiln, comes from the Pico's Frame E,
-   and reports `power_valid == false` on this bench. *Recommended:* per-zone
-   duty %, plus one kiln-total watts line shown only when `power_valid` — the
-   arithmetic in 6.5 already budgets that line as hidden-costs-nothing.
-2. **Tapping the profile name while a firing is running (6.1).** Open the
-   picker and allow a change, or refuse? *Recommended:* refuse — render the
-   button with `UI_THEME_COLOR_TEXT_SECONDARY` and make it non-clickable unless
-   the executor snapshot says IDLE. Changing the profile under a running firing
-   is a separate feature (see ROADMAP's live-profile-edit row) and must not
-   arrive by accident through a picker.
-3. **Where "Restore hidden" goes (6.2).** Removing the four hub buttons removes
-   the LCD's only path to unhide a hidden builtin. *Recommended:* web-only.
-   Hidden builtins simply do not appear in the LCD list;
-   `profiles_builtin_restore_all()` stays reachable from the web page.
-4. **Delete confirmation style on the LCD (6.2).** *Recommended:* the two-tap
-   arm/confirm idiom with a roughly 5 s window — the same pattern 6.4 is
-   deleting from the relay-life page, which is well understood here and needs
-   no modal, no new page and no new colour.
-5. **Three rows per profile page (6.2).** Three is what fits above the 72px
-   touch minimum; four requires 64px rows. *Recommended:* three, with prev/next
-   paging. Do not shrink the rows.
+These are **decided**, not open. They are recorded here because the arithmetic
+and the wave order above depend on them.
+
+1. **Rail power readout (6.5): per-zone duty %, plus one kiln-total watts line
+   shown only when `ds.power_valid`.** As recommended. The watts line is hidden
+   when `power_valid` is false and costs zero height when hidden, which is how
+   6.5's 208px total already budgets it.
+2. **Profile name while a firing runs (6.1): greyed and non-clickable whenever
+   the executor snapshot is not IDLE.** As recommended — render with
+   `UI_THEME_COLOR_TEXT_SECONDARY` and clear the clickable flag. Changing the
+   profile under a running firing stays out of scope.
+3. **Restore hidden is web-only.** Hidden builtins do not appear in the LCD
+   list at all; `profiles_builtin_restore_all()` remains reachable only from the
+   web page.
+4. **LCD delete uses the two-tap arm/confirm idiom with a roughly 5 s window.**
+   The same pattern 6.4 removes from the relay-life page. No modal, no new page,
+   no new colour.
+5. **Four rows per page at 64px, with prev/next paging — the owner overrode the
+   3x72 recommendation.** It fits, exactly: `4*64 + 3*4 = 268`, equal to
+   `UI_THEME_PAGE_CONTENT_BUDGET_PX`. Three consequences follow and are already
+   written into 6.2 and 6.7 — the page loses its header row entirely (a header
+   plus four 64px rows is `36 + 4 + 256 + 12 = 308 > 268`, and even at a 0px
+   gap `36 + 256 = 292 > 268`); the New button and the "N of M" indicator
+   therefore move into the topbar, which makes 6.2 depend on 6.6; and rows are
+   64px drawn with **no** touch-area extension, 8px under
+   `UI_THEME_MIN_TOUCH_TARGET_PX`, because the compact extension would need the
+   whole 4px inter-row gap from both sides and would let adjacent rows'
+   hit-boxes overlap — the mis-tap defect already fixed once on the relay-life
+   page. The 8px touch-target shortfall is the accepted cost of this decision.
