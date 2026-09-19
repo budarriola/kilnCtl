@@ -197,6 +197,30 @@ privileged of the two images (recovery mode already implies OTA write access via
 pass, not folded into this fix, which was scoped to the drifted `X-Ota-Mac` check
 on `/api/ota/esp` only.
 
+**2026-09-19: closed.** The auth sequence that used to live inline in
+`ota_esp_post()` (header length/read, hex decode, lockout, nonce, password,
+HMAC, constant-time compare) is now factored into a shared
+`recovery_authenticate_request()` in `recovery_http.c`, and
+`boot_guard_reset_post()` and `sw_reset_post()` both call it before acting,
+returning the same status/body shape `ota_esp_post()` does on any failure.
+This closes the gap by construction rather than by a ninth hand-copy of the
+check -- a future new mutating route in this file gets authentication for
+free by calling the helper. `recovery_ota_auth_mirror_drift_check.py` (still
+wired in as `check_recovery_ota_auth_mirror.ps1`) was extended two ways: its
+ordering/wire-string comparison now targets `recovery_authenticate_request()`
+instead of `ota_esp_post()` (which is now just a caller), and a new
+route-coverage assertion walks a fixed list of every mutating POST handler
+registered in `recovery_http.c`'s `routes[]` table
+(`ota_esp_post`/`boot_guard_reset_post`/`sw_reset_post`) and fails if any of
+them no longer calls the helper -- so a future unauthenticated mutating
+route fails this check instead of sitting undetected next to it, which is
+exactly how these two got missed the first time. Negative-tested: removing
+the call from `sw_reset_post()` failed the check with a named-handler
+message, and restoring by hand reproduced the exact previously-committed
+blob (`git diff` clean, `git hash-object` match) before re-confirming green.
+`check_00_kilnfw_recovery_target_build.ps1`, `check_recovery_image_size.ps1`
+and `check_recovery_ota_auth_mirror.ps1` all pass. Fixed in `ea09ba0a`.
+
 ### 2.3 `/api/boot_guard` and `/api/partitions` return different JSON shapes in the two images
 
 Same route, same method, two incompatible response bodies:
