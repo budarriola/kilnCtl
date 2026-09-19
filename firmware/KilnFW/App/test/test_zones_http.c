@@ -726,6 +726,33 @@ static void test_cfg_set_f32(uint16_t param_id, float v, bool is_set)
     s_cfg_row_count++;
 }
 
+// u8 twin of test_cfg_set_f32 above, added for docs/CT_CHANNEL_MASK_PLAN.md
+// step 5's zone_ct_channel map (0x0320-0x0322). Deliberately a separate
+// setter rather than a widened one: the two write DIFFERENT members of the
+// same union, and a test that set a u8 field through the f32 setter would
+// hand the sweep a reinterpreted float -- the same trap
+// safety_cfg_store_refetch() above already documents for the map push.
+static void test_cfg_set_u8(uint16_t param_id, uint8_t v, bool is_set)
+{
+    for (size_t i = 0; i < s_cfg_row_count; i++) {
+        if (s_cfg_rows[i].param_id == param_id) {
+            s_cfg_rows[i].type = KILNLINK_PARAM_TYPE_U8;
+            s_cfg_rows[i].value.u8_val = v;
+            s_cfg_rows[i].set = is_set;
+            return;
+        }
+    }
+    TEST_CHECK(s_cfg_row_count < TEST_CFG_ROWS_MAX, "test config row table has room");
+    if (s_cfg_row_count >= TEST_CFG_ROWS_MAX) {
+        return;
+    }
+    s_cfg_rows[s_cfg_row_count].param_id = param_id;
+    s_cfg_rows[s_cfg_row_count].type = KILNLINK_PARAM_TYPE_U8;
+    s_cfg_rows[s_cfg_row_count].value.u8_val = v;
+    s_cfg_rows[s_cfg_row_count].set = is_set;
+    s_cfg_row_count++;
+}
+
 bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc)
 {
     (void)link; (void)config_crc;
@@ -10893,7 +10920,7 @@ static void test_record_ct_channels_summed_mode_derives_normal_from_channel3(voi
     memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
 
     s_ct_topology_summed = true;
-    s_ct_summed_idle_a = 0.3f;
+    s_ct_idle_a[ZONE_CT_CHANNEL_COUNT - 1] = 0.3f;
 
     float per_ch_avg_a[ZONE_CT_CHANNEL_COUNT] = { NAN, NAN, 2.3f }; // channels 0/1 not fitted in this mode
     zone_sweep_task_record_ct_channels(NULL, /*zi=*/1, /*relay_mask=*/0x02u, per_ch_avg_a);
@@ -10909,7 +10936,7 @@ static void test_record_ct_channels_summed_mode_derives_normal_from_channel3(voi
                "mode -- the one-relay-one-channel check never even runs, it is not run-and-refused");
 
     s_ct_topology_summed = false;
-    s_ct_summed_idle_a = 0.0f;
+    s_ct_idle_a[ZONE_CT_CHANNEL_COUNT - 1] = 0.0f;
     memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
     nvs_test_enable(false);
     nvs_test_clear();
@@ -10928,7 +10955,7 @@ static void test_record_ct_channels_summed_mode_negative_delta_leaves_zone_unmea
     memset((void *)&s_sweep, 0, sizeof(s_sweep));
 
     s_ct_topology_summed = true;
-    s_ct_summed_idle_a = 2.0f;
+    s_ct_idle_a[ZONE_CT_CHANNEL_COUNT - 1] = 2.0f;
 
     float per_ch_avg_a[ZONE_CT_CHANNEL_COUNT] = { NAN, NAN, 1.9f }; // below idle -- noise/settling
     zone_sweep_task_record_ct_channels(NULL, /*zi=*/2, /*relay_mask=*/0x04u, per_ch_avg_a);
@@ -10941,7 +10968,7 @@ static void test_record_ct_channels_summed_mode_negative_delta_leaves_zone_unmea
               "zone 2's bit is set in summed_unmeasured_mask so the operator can see it was skipped");
 
     s_ct_topology_summed = false;
-    s_ct_summed_idle_a = 0.0f;
+    s_ct_idle_a[ZONE_CT_CHANNEL_COUNT - 1] = 0.0f;
     memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
     memset((void *)&s_sweep, 0, sizeof(s_sweep));
     nvs_test_enable(false);
@@ -10963,7 +10990,7 @@ static void test_record_ct_channels_summed_mode_nan_sample_leaves_zone_unmeasure
     memset((void *)&s_sweep, 0, sizeof(s_sweep));
 
     s_ct_topology_summed = true;
-    s_ct_summed_idle_a = 0.3f;
+    s_ct_idle_a[ZONE_CT_CHANNEL_COUNT - 1] = 0.3f;
 
     float per_ch_avg_a[ZONE_CT_CHANNEL_COUNT] = { NAN, NAN, NAN }; // shared channel sample itself is NaN
     zone_sweep_task_record_ct_channels(NULL, /*zi=*/1, /*relay_mask=*/0x02u, per_ch_avg_a);
@@ -10979,11 +11006,318 @@ static void test_record_ct_channels_summed_mode_nan_sample_leaves_zone_unmeasure
                "a NaN sample never contributes to measured_total_a, matching the refusal signal above");
 
     s_ct_topology_summed = false;
-    s_ct_summed_idle_a = 0.0f;
+    s_ct_idle_a[ZONE_CT_CHANNEL_COUNT - 1] = 0.0f;
     memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
     memset((void *)&s_sweep, 0, sizeof(s_sweep));
     nvs_test_enable(false);
     nvs_test_clear();
+}
+
+/* --- docs/CT_CHANNEL_MASK_PLAN.md step 5: the generalised member() sweep ---
+ * Same three properties, in the same order of how much they can hurt, as the
+ * step-4 guard tests: collapse onto both legacy topologies, a genuine split,
+ * and a forced-wrong-membership negative test. Readings stay deliberately
+ * un-round, same idealized-input discipline as the summed block above. */
+static void step5_reset(void)
+{
+    nvs_test_enable(true);
+    nvs_test_clear();
+    memset(&s_ct_derive, 0, sizeof(s_ct_derive));
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    memset((void *)&s_sweep, 0, sizeof(s_sweep));
+    memset(s_ct_idle_a, 0, sizeof(s_ct_idle_a));
+    s_ct_topology_summed = false;
+    s_zone_ct_channel_valid = false;
+    s_zone_ct_channel[0] = 0u; s_zone_ct_channel[1] = 1u; s_zone_ct_channel[2] = 2u;
+}
+
+static void step5_restore(void)
+{
+    s_zone_ct_channel_valid = false;
+    s_zone_ct_channel[0] = 0u; s_zone_ct_channel[1] = 1u; s_zone_ct_channel[2] = 2u;
+    s_ct_topology_summed = false;
+    memset(s_ct_idle_a, 0, sizeof(s_ct_idle_a));
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    memset((void *)&s_sweep, 0, sizeof(s_sweep));
+    test_cfg_rows_reset();
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_zone_ct_channel_accessor_is_all_or_nothing(void)
+{
+    TEST_SECTION("zone_cfg_committed_zone_ct_channel -- a map is only a map once ALL three zones "
+                 "are answered, in range, and set; anything less must not arm the generalised arm");
+
+    step5_reset();
+    uint8_t got[ZONE_CT_CHANNEL_COUNT] = {9u, 9u, 9u};
+
+    test_cfg_rows_reset();
+    TEST_CHECK(!zone_cfg_committed_zone_ct_channel(got),
+               "an empty cache (an older Pico, or one that never committed the field) is not a map");
+
+    test_cfg_rows_reset();
+    test_cfg_set_u8(0x0320u, 0u, true);
+    test_cfg_set_u8(0x0321u, 0u, true);
+    TEST_CHECK(!zone_cfg_committed_zone_ct_channel(got),
+               "two of three answered is NOT a map -- a partial answer must never read as confirmed");
+
+    test_cfg_rows_reset();
+    test_cfg_set_u8(0x0320u, 0u, true);
+    test_cfg_set_u8(0x0321u, 0u, true);
+    test_cfg_set_u8(0x0322u, 1u, false); /* present but never set */
+    TEST_CHECK(!zone_cfg_committed_zone_ct_channel(got),
+               "a row that exists but is not `set` is an unanswered zone, not a defaulted one");
+
+    test_cfg_rows_reset();
+    test_cfg_set_u8(0x0320u, 0u, true);
+    test_cfg_set_u8(0x0321u, 0u, true);
+    test_cfg_set_u8(0x0322u, 7u, true); /* out of range */
+    TEST_CHECK(!zone_cfg_committed_zone_ct_channel(got),
+               "an out-of-range channel byte disqualifies the whole map rather than being clamped");
+
+    test_cfg_rows_reset();
+    test_cfg_set_u8(0x0320u, 0u, true);
+    test_cfg_set_u8(0x0321u, 0u, true);
+    test_cfg_set_u8(0x0322u, 1u, true);
+    TEST_CHECK(zone_cfg_committed_zone_ct_channel(got), "all three answered and in range IS a map");
+    TEST_CHECK(got[0] == 0u && got[1] == 0u && got[2] == 1u,
+               "and it reads back exactly what was committed");
+
+    step5_restore();
+}
+
+static void test_shared_ch_predicate_collapses_onto_both_legacy_topologies(void)
+{
+    TEST_SECTION("zone_sweep_shared_ch_for_zone -- the one predicate both record callbacks branch "
+                 "on collapses onto per_zone for an identity map and onto summed for an all-2 map");
+
+    step5_reset();
+    uint8_t ch = 9u;
+
+    /* No map at all, per_zone: nobody is on a shared channel. */
+    for (uint8_t z = 0; z < ZONE_CT_CHANNEL_COUNT; z++) {
+        TEST_CHECK(!zone_sweep_shared_ch_for_zone(z, &ch),
+                   "no committed map + per_zone topology: no zone is shared (today's behaviour)");
+    }
+
+    /* No map, legacy summed: every zone is shared, on channel 2. */
+    s_ct_topology_summed = true;
+    for (uint8_t z = 0; z < ZONE_CT_CHANNEL_COUNT; z++) {
+        ch = 9u;
+        TEST_CHECK(zone_sweep_shared_ch_for_zone(z, &ch) && ch == (ZONE_CT_CHANNEL_COUNT - 1),
+                   "no committed map + summed topology: every zone is shared on the last channel");
+    }
+    s_ct_topology_summed = false;
+
+    /* Committed identity map -- must reproduce the per_zone answer exactly,
+     * and must do so even when the stale topology byte still says summed. */
+    s_zone_ct_channel_valid = true;
+    s_zone_ct_channel[0] = 0u; s_zone_ct_channel[1] = 1u; s_zone_ct_channel[2] = 2u;
+    s_ct_topology_summed = true; /* deliberately contradictory: the map wins */
+    for (uint8_t z = 0; z < ZONE_CT_CHANNEL_COUNT; z++) {
+        TEST_CHECK(!zone_sweep_shared_ch_for_zone(z, &ch),
+                   "identity map: every channel has exactly one member, so no zone is shared");
+    }
+
+    /* Committed all-2 map -- must reproduce the summed answer exactly. */
+    s_ct_topology_summed = false;
+    s_zone_ct_channel[0] = 2u; s_zone_ct_channel[1] = 2u; s_zone_ct_channel[2] = 2u;
+    for (uint8_t z = 0; z < ZONE_CT_CHANNEL_COUNT; z++) {
+        ch = 9u;
+        TEST_CHECK(zone_sweep_shared_ch_for_zone(z, &ch) && ch == 2u,
+                   "all-2 map: every zone is shared on channel 2, exactly as summed hardcodes");
+    }
+
+    /* The gate: the same split map with the valid flag clear must behave like
+     * the legacy topology it is paired with, never like the map. */
+    s_zone_ct_channel_valid = false;
+    s_zone_ct_channel[0] = 0u; s_zone_ct_channel[1] = 0u; s_zone_ct_channel[2] = 1u;
+    for (uint8_t z = 0; z < ZONE_CT_CHANNEL_COUNT; z++) {
+        TEST_CHECK(!zone_sweep_shared_ch_for_zone(z, &ch),
+                   "an uncommitted split map is ignored entirely -- this is what protects every "
+                   "already-commissioned board");
+    }
+
+    step5_restore();
+}
+
+static void test_record_ct_channels_all_two_map_collapses_onto_summed(void)
+{
+    TEST_SECTION("zone_sweep_task_record_ct_channels -- a committed all-2 map derives the normal "
+                 "from the shared channel minus its idle baseline, byte for byte what the legacy "
+                 "summed topology does on the same input");
+
+    /* The legacy summed arm, on a real reading. */
+    step5_reset();
+    s_ct_topology_summed = true;
+    s_ct_idle_a[2] = 0.31f;
+    float per_ch[ZONE_CT_CHANNEL_COUNT] = { NAN, NAN, 2.37f };
+    zone_sweep_task_record_ct_channels(NULL, /*zi=*/1, /*relay_mask=*/0x02u, per_ch);
+    float legacy_a = -1.0f; bool legacy_measured = false;
+    TEST_CHECK(zones_config_get_normal_current(1, &legacy_a, &legacy_measured), "legacy getter answers");
+    float legacy_total = s_ct_derive.measured_total_a;
+    uint8_t legacy_derived = s_ct_derive.derived_mask;
+    step5_restore();
+
+    /* The same input under a committed all-2 map, topology byte cleared. */
+    step5_reset();
+    s_zone_ct_channel_valid = true;
+    s_zone_ct_channel[0] = 2u; s_zone_ct_channel[1] = 2u; s_zone_ct_channel[2] = 2u;
+    s_ct_idle_a[2] = 0.31f;
+    float per_ch2[ZONE_CT_CHANNEL_COUNT] = { NAN, NAN, 2.37f };
+    zone_sweep_task_record_ct_channels(NULL, /*zi=*/1, /*relay_mask=*/0x02u, per_ch2);
+    float mapped_a = -1.0f; bool mapped_measured = false;
+    TEST_CHECK(zones_config_get_normal_current(1, &mapped_a, &mapped_measured), "mapped getter answers");
+
+    TEST_CHECK(legacy_measured && mapped_measured,
+               "the fixture really does measure something in both arms -- a collapse cannot pass "
+               "by both arms staying silent");
+    TEST_CHECK(fabsf(legacy_a - mapped_a) < 1e-6f,
+               "all-2 map records the same normal as the summed topology (2.37 - 0.31 = 2.06A)");
+    TEST_CHECK(fabsf(legacy_total - s_ct_derive.measured_total_a) < 1e-6f,
+               "and contributes the same amount to the whole-kiln measured total");
+    TEST_CHECK(legacy_derived == 0 && s_ct_derive.derived_mask == 0,
+               "neither arm derives a ct_channel_map entry for a shared channel -- one relay id "
+               "genuinely cannot name two member zones");
+    TEST_CHECK((s_ct_derive.measured_zone_mask & (1u << 1)) != 0,
+               "zone 1 is recorded as measured, which is what the generalised planner reads");
+    step5_restore();
+}
+
+static void test_record_ct_channels_identity_map_collapses_onto_per_zone(void)
+{
+    TEST_SECTION("zone_sweep_task_record_ct_channels -- a committed identity map leaves the "
+                 "per-zone derivation completely untouched: same derived channel, same total, and "
+                 "NO idle subtraction (a dedicated CT's reading is the zone's current)");
+
+    /* Legacy per_zone on a dominant-channel-1 reading. */
+    step5_reset();
+    float per_ch[ZONE_CT_CHANNEL_COUNT] = { 0.07f, 3.11f, 0.05f };
+    zone_sweep_task_record_ct_channels(NULL, /*zi=*/1, /*relay_mask=*/0x02u, per_ch);
+    uint8_t legacy_derived = s_ct_derive.derived_mask;
+    uint8_t legacy_zone_for_ch1 = s_ct_derive.zone_for_ch[1];
+    float legacy_total = s_ct_derive.measured_total_a;
+    step5_restore();
+
+    /* Same input, committed identity map, and an idle baseline deliberately
+     * loaded on channel 1: a one-member channel must NOT subtract it. */
+    step5_reset();
+    s_zone_ct_channel_valid = true;
+    s_zone_ct_channel[0] = 0u; s_zone_ct_channel[1] = 1u; s_zone_ct_channel[2] = 2u;
+    s_ct_idle_a[1] = 0.53f;
+    float per_ch2[ZONE_CT_CHANNEL_COUNT] = { 0.07f, 3.11f, 0.05f };
+    zone_sweep_task_record_ct_channels(NULL, /*zi=*/1, /*relay_mask=*/0x02u, per_ch2);
+
+    TEST_CHECK(legacy_derived != 0 && s_ct_derive.derived_mask == legacy_derived,
+               "identity map derives the same ct_channel_map entry the per_zone path derives, and "
+               "the fixture really does derive one");
+    TEST_CHECK(s_ct_derive.zone_for_ch[1] == legacy_zone_for_ch1,
+               "and attributes it to the same zone");
+    TEST_CHECK(fabsf(legacy_total - s_ct_derive.measured_total_a) < 1e-6f,
+               "and contributes the same measured total -- the channel-1 idle baseline is NOT "
+               "subtracted, because a channel with one member is a dedicated per-zone CT");
+    step5_restore();
+}
+
+static void test_record_ct_channels_two_ct_split_attributes_per_channel(void)
+{
+    TEST_SECTION("zone_sweep_task_record_ct_channels -- a genuine split (zones 0+1 share channel "
+                 "0, zone 2 owns channel 1) idle-subtracts ONLY on the shared channel");
+
+    step5_reset();
+    s_zone_ct_channel_valid = true;
+    s_zone_ct_channel[0] = 0u; s_zone_ct_channel[1] = 0u; s_zone_ct_channel[2] = 1u;
+    s_ct_idle_a[0] = 0.23f;
+    s_ct_idle_a[1] = 0.41f; /* present, and must be ignored: channel 1 has one member */
+
+    /* Every reading is finite: zone_sweep_derive_ct_channel() refuses a sample
+     * carrying a NaN outright, which would mask the attribution under test. */
+    float z0[ZONE_CT_CHANNEL_COUNT] = { 4.17f, 0.04f, 0.03f };
+    zone_sweep_task_record_ct_channels(NULL, /*zi=*/0, /*relay_mask=*/0x01u, z0);
+    float total_after_z0 = s_ct_derive.measured_total_a;
+    float z2[ZONE_CT_CHANNEL_COUNT] = { 0.06f, 2.72f, 0.03f };
+    zone_sweep_task_record_ct_channels(NULL, /*zi=*/2, /*relay_mask=*/0x04u, z2);
+
+    /* Zone 0 is on the SHARED channel, so this callback is what records its
+     * normal: the reading minus that channel's idle baseline. */
+    float a0 = -1.0f; bool m0 = false;
+    TEST_CHECK(zones_config_get_normal_current(0, &a0, &m0), "getter answers for zone 0");
+    TEST_CHECK(m0 && fabsf(a0 - (4.17f - 0.23f)) < 1e-6f,
+               "zone 0, on the SHARED channel, is its reading minus that channel's idle baseline");
+    TEST_CHECK(fabsf(total_after_z0 - (4.17f - 0.23f)) < 1e-6f,
+               "and that same idle-subtracted value is what it contributes to the kiln total");
+
+    /* Zone 2 is on a DEDICATED channel, so it takes the per_zone path
+     * unchanged: a ct_channel_map entry IS derived, its RAW reading enters the
+     * total, and no normal is recorded here (record_normal does that for a
+     * dedicated CT). */
+    TEST_CHECK((s_ct_derive.derived_mask & (1u << 1)) != 0 && s_ct_derive.zone_for_ch[1] == 2u,
+               "the dedicated channel still derives its ct_channel_map entry normally");
+    TEST_CHECK((s_ct_derive.derived_mask & (1u << 0)) == 0,
+               "the shared channel derives no ct_channel_map entry");
+    TEST_CHECK(fabsf(s_ct_derive.measured_total_a - (total_after_z0 + 2.72f)) < 1e-6f,
+               "zone 2 contributes its RAW channel-1 reading -- the 0.41A idle baseline loaded on "
+               "channel 1 is never subtracted from a one-member channel");
+    TEST_CHECK((s_ct_derive.measured_zone_mask & ((1u << 0) | (1u << 2))) == ((1u << 0) | (1u << 2)),
+               "both zones are recorded as measured, each by its own path");
+    step5_restore();
+}
+
+static void test_record_ct_channels_wrong_membership_negative(void)
+{
+    TEST_SECTION("zone_sweep_task_record_ct_channels NEGATIVE -- forced-wrong membership changes "
+                 "the recorded normal, so the correct-map assertions above are load-bearing");
+
+    /* The same physical kiln as the split fixture, sampled the way the sweep
+     * actually samples it: zone 2's relay is the ONLY one energised
+     * (zone_sweep_hw_energize()'s 0xFF mask forces every other relay off), so
+     * channel 0 -- the CT shared by zones 0 and 1 -- sits at its idle
+     * baseline, and zone 2's current appears on channel 1 alone.
+     *
+     * Correct membership: zone 2 owns channel 1, takes the per_zone path, and
+     * contributes its raw 2.72A to the total. Wrong membership -- zone 2
+     * attributed to the shared channel 0 -- reads 0.25A against a 0.23A idle
+     * baseline instead, which is below the noise floor, so zone 2 is recorded
+     * as UNMEASURED and contributes nothing at all. Pin BOTH halves, so this
+     * cannot pass vacuously by the fixture being too weak to tell them
+     * apart. */
+    step5_reset();
+    s_zone_ct_channel_valid = true;
+    s_zone_ct_channel[0] = 0u; s_zone_ct_channel[1] = 0u; s_zone_ct_channel[2] = 1u;
+    s_ct_idle_a[0] = 0.23f;
+    float correct_in[ZONE_CT_CHANNEL_COUNT] = { 0.25f, 2.72f, 0.03f };
+    zone_sweep_task_record_ct_channels(NULL, /*zi=*/2, /*relay_mask=*/0x04u, correct_in);
+    bool correct_derived_ch1 = ((s_ct_derive.derived_mask & (1u << 1)) != 0) &&
+                               (s_ct_derive.zone_for_ch[1] == 2u);
+    float correct_total = s_ct_derive.measured_total_a;
+    bool correct_unmeasured = ((s_sweep.summed_unmeasured_mask & (1u << 2)) != 0);
+    step5_restore();
+
+    step5_reset();
+    s_zone_ct_channel_valid = true;
+    s_zone_ct_channel[0] = 0u; s_zone_ct_channel[1] = 0u; s_zone_ct_channel[2] = 0u; /* WRONG */
+    s_ct_idle_a[0] = 0.23f;
+    float wrong_in[ZONE_CT_CHANNEL_COUNT] = { 0.25f, 2.72f, 0.03f };
+    zone_sweep_task_record_ct_channels(NULL, /*zi=*/2, /*relay_mask=*/0x04u, wrong_in);
+    float wrong_total = s_ct_derive.measured_total_a;
+
+    TEST_CHECK(correct_derived_ch1,
+               "correct membership: zone 2 takes the per_zone path and derives channel 1's "
+               "ct_channel_map entry");
+    TEST_CHECK(fabsf(correct_total - 2.72f) < 1e-6f,
+               "correct membership: zone 2 contributes its raw channel-1 reading to the total");
+    TEST_CHECK(!correct_unmeasured, "correct membership: zone 2 is measured, not skipped");
+    TEST_CHECK((s_ct_derive.derived_mask & (1u << 1)) == 0,
+               "wrong membership derives no channel-1 map entry at all, because it never looks at "
+               "channel 1");
+    TEST_CHECK((s_sweep.summed_unmeasured_mask & (1u << 2)) != 0,
+               "wrong membership reads zone 2 off the shared channel, finds nothing above its idle "
+               "baseline, and records the zone as UNMEASURED -- a demonstrably different outcome, "
+               "so the correct-map checks above are attribution, not an insensitive fixture");
+    TEST_CHECK(fabsf(correct_total - wrong_total) > 1.0f,
+               "the two totals differ by more than a whole amp, far outside any noise band");
+    step5_restore();
 }
 
 static void test_sweep_status_get_handler_reports_summed_unmeasured_mask(void)
@@ -13205,6 +13539,12 @@ void run_test_zones_http(void)
     test_record_ct_channels_summed_mode_derives_normal_from_channel3();
     test_record_ct_channels_summed_mode_negative_delta_leaves_zone_unmeasured();
     test_record_ct_channels_summed_mode_nan_sample_leaves_zone_unmeasured();
+    test_zone_ct_channel_accessor_is_all_or_nothing();
+    test_shared_ch_predicate_collapses_onto_both_legacy_topologies();
+    test_record_ct_channels_all_two_map_collapses_onto_summed();
+    test_record_ct_channels_identity_map_collapses_onto_per_zone();
+    test_record_ct_channels_two_ct_split_attributes_per_channel();
+    test_record_ct_channels_wrong_membership_negative();
     test_sweep_status_get_handler_reports_summed_unmeasured_mask();
 
     test_zone_sweep_derive_k_ct_scales_by_the_measured_over_expected_ratio();

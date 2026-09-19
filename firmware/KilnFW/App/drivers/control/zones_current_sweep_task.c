@@ -44,7 +44,28 @@ static void zone_sweep_task_set_zone_index(void *ctx, uint8_t zi)
  * this field existed) leaves both callbacks below on their original,
  * unmodified per-zone-CT behaviour. */
 static bool s_ct_topology_summed = false;
-static float s_ct_summed_idle_a = 0.0f;
+
+/* docs/CT_CHANNEL_MASK_PLAN.md step 5: the committed per-zone "which physical
+ * CT channel does this zone's current appear on" map, sampled fresh at the
+ * start of every run exactly like s_ct_topology_summed above.
+ * s_zone_ct_channel_valid is the gate, and it is the safety property of this
+ * whole step: while it is clear, both pre-existing branches below run
+ * completely unchanged, so every board already in the field keeps today's
+ * behaviour bit for bit. A zero-initialised map would otherwise read as "all
+ * three zones on channel 0" -- itself a real topology -- and that must never
+ * be mistaken for one an operator actually answered. */
+static uint8_t s_zone_ct_channel[ZONE_CT_CHANNEL_COUNT] = {0u, 0u, 0u};
+static bool s_zone_ct_channel_valid = false;
+/* Per-channel idle baseline, indexed by CT channel.
+ *
+ * This REPLACES the single s_ct_summed_idle_a scalar the summed path used to
+ * keep: a genuine split needs the idle draw of every channel with two or more
+ * member zones, and carrying both a scalar and an array that must always
+ * agree is precisely the "reset one side of a pair" class CLAUDE.md lists
+ * (two pieces of state joined by a contract no type expresses, updated on
+ * different paths). The summed path now reads s_ct_idle_a[ZONE_CT_CHANNEL_
+ * COUNT-1], which is the same number it always read. */
+static float s_ct_idle_a[ZONE_CT_CHANNEL_COUNT] = {0.0f, 0.0f, 0.0f};
 
 /* CT_COMMISSIONING_PLAN.md step 3 -- 0x031F, U8, 0=per_zone/1=summed. Same
  * committed-cache read as zone_cfg_committed_f32() above, u8 twin. Unset
@@ -65,14 +86,112 @@ static uint8_t zone_cfg_committed_ct_topology(void)
     return 0u;
 }
 
+/* The wire id of zone_ct_channel[zi] -- docs/CT_CHANNEL_MASK_PLAN.md step 2,
+ * 0x0320-0x0322, U8, value 0-2. One place, same discipline as
+ * ZONE_KCT_PARAM_ID/ZONE_CT_MAP_PARAM_ID below. */
+#define ZONE_CT_CHANNEL_PARAM_ID(zi) ((uint16_t)(0x0320u + (zi)))
+
+/* docs/CT_CHANNEL_MASK_PLAN.md step 5 -- the per-zone CT channel map, read
+ * from the same committed cache as zone_cfg_committed_ct_topology() above so
+ * that a change committed on the Pico is picked up by the very next sweep,
+ * exactly the way a topology change already is.
+ *
+ * Deliberately all-or-nothing: unless all three zones are present, `set`, and
+ * in range, this returns false and the caller leaves the generalised arm
+ * disabled entirely. That mirrors the Pico's own discipline for this field
+ * (config_params_finalize_zone_ct_channel() derives the group bit at
+ * COMMIT_CONFIG only once all three zones have been answered, so a partial
+ * answer never reads as confirmed) -- a half-answered map is not a topology,
+ * and inventing the missing entries is precisely the misattribution this plan
+ * exists to prevent. */
+static bool zone_cfg_committed_zone_ct_channel(uint8_t *out_ch)
+{
+    uint8_t found = 0u;
+    uint8_t tmp[ZONE_CT_CHANNEL_COUNT] = {0u, 0u, 0u};
+    size_t count = safety_cfg_store_param_count();
+    for (size_t i = 0; i < count; i++) {
+        safety_cfg_param_t row;
+        memset(&row, 0, sizeof(row));
+        if (!safety_cfg_store_get_by_index(i, &row)) {
+            continue;
+        }
+        if (row.param_id < ZONE_CT_CHANNEL_PARAM_ID(0) ||
+            row.param_id > ZONE_CT_CHANNEL_PARAM_ID(ZONE_CT_CHANNEL_COUNT - 1)) {
+            continue;
+        }
+        uint8_t zi = (uint8_t)(row.param_id - ZONE_CT_CHANNEL_PARAM_ID(0));
+        if (!row.set || row.value.u8_val >= ZONE_CT_CHANNEL_COUNT) {
+            return false; /* unanswered or out of range -- not a map at all */
+        }
+        tmp[zi] = row.value.u8_val;
+        found |= (uint8_t)(1u << zi);
+    }
+    if (found != (uint8_t)((1u << ZONE_CT_CHANNEL_COUNT) - 1u)) {
+        return false;
+    }
+    for (uint8_t z = 0; z < ZONE_CT_CHANNEL_COUNT; z++) {
+        out_ch[z] = tmp[z];
+    }
+    return true;
+}
+
+/* member(ch) = { z : zone_ct_channel[z] == ch }, the same predicate
+ * safety_guards.c's step-4 arm uses. Only meaningful with a valid map. */
+static uint8_t zone_ct_member_count(uint8_t ch)
+{
+    uint8_t n = 0u;
+    for (uint8_t z = 0; z < ZONE_CT_CHANNEL_COUNT; z++) {
+        if (s_zone_ct_channel[z] == ch) {
+            n++;
+        }
+    }
+    return n;
+}
+
+/* The single predicate both record callbacks branch on, so they can never
+ * disagree about where a zone's normal comes from.
+ *
+ * True means "this zone is measured on a channel it SHARES", which is the
+ * case needing the idle-subtraction treatment today's summed path gives
+ * channel 2. Both collapses fall straight out of it:
+ *   - a committed identity map {0,1,2} gives every channel exactly one
+ *     member, so this is false for every zone and the untouched per-zone path
+ *     runs;
+ *   - a committed all-2 map {2,2,2} gives channel 2 three members, so this is
+ *     true for every zone with ch == 2, which is what the summed path
+ *     hardcodes.
+ * With no committed map it degrades to reading s_ct_topology_summed, i.e.
+ * precisely today's behaviour. */
+static bool zone_sweep_shared_ch_for_zone(uint8_t zi, uint8_t *out_ch)
+{
+    if (s_zone_ct_channel_valid) {
+        if (zi >= ZONE_CT_CHANNEL_COUNT) {
+            return false;
+        }
+        uint8_t ch = s_zone_ct_channel[zi];
+        if (zone_ct_member_count(ch) < 2u) {
+            return false; /* a channel one zone owns alone IS a per-zone CT */
+        }
+        *out_ch = ch;
+        return true;
+    }
+    if (s_ct_topology_summed) {
+        *out_ch = (uint8_t)(ZONE_CT_CHANNEL_COUNT - 1);
+        return true;
+    }
+    return false;
+}
+
 static void zone_sweep_task_record_normal(void *ctx, uint8_t zi, float avg_a)
 {
     (void)ctx;
-    if (s_ct_topology_summed) {
-        /* CT_COMMISSIONING_PLAN.md step 3: in summed mode the normal comes
-         * from channel 3 alone (zone_sweep_task_record_ct_channels() below),
-         * not from sample_current()'s ct_mask-based sum -- avg_a here is
-         * simply not the right number in this topology. */
+    uint8_t shared_ch = 0u;
+    if (zone_sweep_shared_ch_for_zone(zi, &shared_ch)) {
+        /* CT_COMMISSIONING_PLAN.md step 3 / CT_CHANNEL_MASK_PLAN.md step 5:
+         * on a shared channel the normal comes from that channel alone
+         * (zone_sweep_task_record_ct_channels() below), not from
+         * sample_current()'s ct_mask-based sum -- avg_a here is simply not
+         * the right number for a zone whose current shares a CT. */
         return;
     }
     zone_normals_set(zi, avg_a);
@@ -101,6 +220,12 @@ static struct {
      * that were meant to be discarded would commit exactly the leftovers
      * that function's H3 repair exists to prevent. */
     bool    map_push_failed;
+    /* step 5: one bit per zone whose measured contribution actually landed in
+     * measured_total_a, set on every path that adds to that total. The
+     * generalised planner's completeness check reads this instead of the two
+     * path-specific masks (unresolved_zone_mask / summed_unmeasured_mask),
+     * which between them cover the same ground but only one topology each. */
+    uint8_t measured_zone_mask;
 } s_ct_derive;
 
 /* Forward declaration + identical redefinition (legal in C when the token
@@ -116,19 +241,23 @@ static void zone_sweep_task_record_ct_channels(void *ctx, uint8_t zi, uint8_t re
                                                 const float *per_ch_avg_a)
 {
     (void)ctx;
-    if (s_ct_topology_summed) {
-        /* CT_COMMISSIONING_PLAN.md step 3: summed topology has no per-relay
-         * channel mapping to derive at all -- one shared CT (channel 3,
-         * index ZONE_CT_CHANNEL_COUNT-1) reads every zone, so the one-relay-
-         * one-channel check (GUARD_TEST_MATRIX.md sec 3.3) is skipped
-         * entirely rather than attempted and refused: s_ct_derive is left
-         * untouched (derived_mask stays 0), which is also what makes
-         * zone_sweep_push_ct_channel_map()/zone_sweep_push_k_ct_v_per_a()
-         * naturally no-op afterward -- neither of those Pico-side fields
-         * means anything in this topology. Instead, this zone's normal is
-         * derived straight from the shared channel and recorded here (the
-         * only place with both per_ch_avg_a and zi in hand). */
-        float with_on = per_ch_avg_a[ZONE_CT_CHANNEL_COUNT - 1];
+    uint8_t shared_ch = 0u;
+    if (zone_sweep_shared_ch_for_zone(zi, &shared_ch)) {
+        /* CT_COMMISSIONING_PLAN.md step 3 / CT_CHANNEL_MASK_PLAN.md step 5: a
+         * SHARED channel has no per-relay channel mapping to derive at all --
+         * two or more zones read on one CT, so the one-relay-one-channel
+         * check (GUARD_TEST_MATRIX.md sec 3.3) is skipped entirely rather
+         * than attempted and refused: s_ct_derive.derived_mask is left
+         * untouched for that channel, which is also what makes
+         * zone_sweep_push_ct_channel_map() naturally no-op for it -- a single
+         * relay id genuinely cannot name two member zones. Instead, this
+         * zone's normal is derived straight from the shared channel and
+         * recorded here (the only place with both per_ch_avg_a and zi in
+         * hand).
+         *
+         * Under the legacy summed topology shared_ch is ZONE_CT_CHANNEL_COUNT-1
+         * for every zone, so this is byte-for-byte the path that ran before. */
+        float with_on = per_ch_avg_a[shared_ch];
         if (isnan(with_on)) {
             /* 2026-09-10 fix (finding: NaN sample -> incomplete total, no
              * refusal): a NaN shared-CT sample used to fall straight through
@@ -144,9 +273,9 @@ static void zone_sweep_task_record_ct_channels(void *ctx, uint8_t zi, uint8_t re
              * which zone needs a re-sweep, and so the calibration refuses
              * rather than silently derives from a hole in the total. */
             ESP_LOGW(ZONES_HTTP_TAG,
-                     "zone %u: summed-CT reading with relay on was NaN -- treating as unmeasured, "
-                     "not persisting a normal",
-                     zi);
+                     "zone %u: shared-CT (ch %u) reading with relay on was NaN -- treating as "
+                     "unmeasured, not persisting a normal",
+                     zi, shared_ch);
             s_sweep.summed_unmeasured_mask |= (uint8_t)(1u << zi);
         } else {
             float normal_a = 0.0f;
@@ -157,8 +286,8 @@ static void zone_sweep_task_record_ct_channels(void *ctx, uint8_t zi, uint8_t re
              * floor unchanged". Read the same way zone_sweep_derive_k_ct's
              * own `k_old` is, further down this file. */
             float live_k_ct = 0.0f;
-            (void)zone_cfg_committed_f32(ZONE_KCT_PARAM_ID(ZONE_CT_CHANNEL_COUNT - 1), &live_k_ct);
-            if (zone_sweep_summed_normal_a(with_on, s_ct_summed_idle_a, live_k_ct, &normal_a)) {
+            (void)zone_cfg_committed_f32(ZONE_KCT_PARAM_ID(shared_ch), &live_k_ct);
+            if (zone_sweep_summed_normal_a(with_on, s_ct_idle_a[shared_ch], live_k_ct, &normal_a)) {
                 zone_normals_set(zi, normal_a);
                 /* 2026-09-10 fix (finding A, s14_s15_ct_calibration_sweep
                  * audit): the shared channel absolutely DOES have a scale
@@ -177,6 +306,9 @@ static void zone_sweep_task_record_ct_channels(void *ctx, uint8_t zi, uint8_t re
                  * the same "an incomplete total scales k_ct low" reason the
                  * per_zone branch already documents. */
                 s_ct_derive.measured_total_a += normal_a;
+                if (zi < 8) {
+                    s_ct_derive.measured_zone_mask |= (uint8_t)(1u << zi);
+                }
             } else {
                 /* opus review finding (MEDIUM): the shared channel read
                  * LOWER with this zone on than idle -- a wiring/noise
@@ -192,9 +324,9 @@ static void zone_sweep_task_record_ct_channels(void *ctx, uint8_t zi, uint8_t re
                  * time instead -- MAX31856_CHANNEL_COUNT growing past 8
                  * without this file being revisited is now a build failure,
                  * not a silently dropped zone. */
-                ESP_LOGW(ZONES_HTTP_TAG, "zone %u: summed-CT reading with relay on (%.3fA) was below the idle "
-                              "baseline (%.3fA) -- treating as unmeasured, not persisting a normal",
-                         zi, (double)with_on, (double)s_ct_summed_idle_a);
+                ESP_LOGW(ZONES_HTTP_TAG, "zone %u: shared-CT (ch %u) reading with relay on (%.3fA) was below "
+                              "the idle baseline (%.3fA) -- treating as unmeasured, not persisting a normal",
+                         zi, shared_ch, (double)with_on, (double)s_ct_idle_a[shared_ch]);
                 s_sweep.summed_unmeasured_mask |= (uint8_t)(1u << zi);
             }
         }
@@ -244,6 +376,9 @@ static void zone_sweep_task_record_ct_channels(void *ctx, uint8_t zi, uint8_t re
      * calibrate from an incomplete one rather than under-counting the kiln
      * and scaling k_ct down to match. */
     s_ct_derive.measured_total_a += per_ch_avg_a[ch];
+    if (zi < 8) {
+        s_ct_derive.measured_zone_mask |= (uint8_t)(1u << zi);
+    }
 }
 
 /* The wire id of ct_channel_map[ch] -- one place, so the staging, the
@@ -739,6 +874,98 @@ static uint8_t zone_sweep_plan_k_ct_summed(float *out_k, char *note, size_t note
     return (uint8_t)(1u << ch);
 }
 
+/* docs/CT_CHANNEL_MASK_PLAN.md step 5: the member()-aware planner, used
+ * whenever a per-zone CT map is committed. It replaces the CHOICE between the
+ * two planners below, not their arithmetic.
+ *
+ * On the ratio itself, one deliberate departure from a literal reading of the
+ * plan's "sum the measured contributions over exactly the zones in member(ch)":
+ * the scale factor is derived as measured_total / (P/V), and P
+ * (ZONE_MAX_POWER_PARAM_ID) is a WHOLE-KILN nameplate figure -- there is no
+ * per-zone power rating anywhere in the config. Splitting it per channel would
+ * have to assume every zone draws an equal share, which is an invented fact,
+ * and on a deliberately unequal kiln it would scale each channel's k_ct wrong
+ * in opposite directions. Both existing branches already compare the
+ * whole-kiln measured total against the whole-kiln expected current and apply
+ * that one ratio to each channel's k_old (the per_zone loop passes the same
+ * measured_total_a to every channel), so that is kept exactly. What member()
+ * generalises here is what the plan's own last sentence asks for: the
+ * completeness requirement, and WHICH channels get calibrated at all -- a
+ * channel with no member zones is inert and is skipped rather than being
+ * handed a scale factor for current it never sees.
+ *
+ * Both collapses hold: an identity map gives all three channels one member
+ * each, so every channel is planned exactly as the per_zone loop plans it; an
+ * all-2 map gives channels 0 and 1 no members and channel 2 three, which is
+ * precisely the summed planner's single-channel result. */
+static uint8_t zone_sweep_plan_k_ct_mapped(float *out_k, char *note, size_t note_cap)
+{
+    uint8_t required = 0u;
+    for (uint8_t z = 0; z < ZONE_CT_CHANNEL_COUNT; z++) {
+        if (z < s_sweep.zones_total) {
+            required |= (uint8_t)(1u << z);
+        }
+    }
+    /* Same "an incomplete total scales k_ct low" refusal both existing
+     * branches make, off the one mask that is set on every measuring path. */
+    if ((s_ct_derive.measured_zone_mask & required) != required) {
+        snprintf(note, note_cap,
+                 "not every zone was measured -- an incomplete total would scale k_ct low, "
+                 "so it was not set");
+        return 0;
+    }
+    if (s_ct_derive.conflict_mask != 0) {
+        snprintf(note, note_cap,
+                 "two zones claimed one CT channel -- CT scale not calibrated");
+        return 0;
+    }
+    if (s_ct_derive.map_push_failed) {
+        snprintf(note, note_cap, "the CT map write failed -- CT scale not calibrated");
+        return 0;
+    }
+    float mains_v = 0.0f, power_w = 0.0f;
+    if (!zone_cfg_committed_f32(ZONE_MAINS_VOLTAGE_PARAM_ID, &mains_v) ||
+        !zone_cfg_committed_f32(ZONE_MAX_POWER_PARAM_ID, &power_w)) {
+        snprintf(note, note_cap, "CT scale not calibrated: %.70s",
+                 zone_kct_derive_str(ZONE_KCT_DERIVE_NO_NAMEPLATE));
+        return 0;
+    }
+    uint8_t plan_mask = 0;
+    for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+        if (zone_ct_member_count(c) == 0u) {
+            continue; /* no zone appears on it -- nothing to scale */
+        }
+        /* CT_COMMISSIONING_PLAN.md step 1: manual still wins over the sweep,
+         * same check both other planners make. */
+        float existing_a_fs = 0.0f, existing_zero_mv = 0.0f;
+        safety_ct_cal_source_t existing_source = SAFETY_CT_CAL_SOURCE_SWEEP;
+        if (safety_cfg_store_get_ct_cal_input(c, &existing_a_fs, &existing_zero_mv, &existing_source) &&
+            existing_source == SAFETY_CT_CAL_SOURCE_MANUAL) {
+            continue;
+        }
+        float k_old = 0.0f;
+        if (!zone_cfg_committed_f32(ZONE_KCT_PARAM_ID(c), &k_old)) {
+            k_old = 0.0f; /* never committed -- zone_sweep_derive_k_ct() refuses on it */
+        }
+        float k_new = 0.0f;
+        zone_kct_derive_t r =
+            zone_sweep_derive_k_ct(s_ct_derive.measured_total_a, power_w, mains_v, k_old, &k_new);
+        if (r != ZONE_KCT_DERIVE_OK) {
+            /* One channel's refusal ends the whole calibration, exactly as the
+             * per_zone loop does: the scale factor is a property of the
+             * measurement, not of a channel. */
+            snprintf(note, note_cap, "CT scale not calibrated: %.70s", zone_kct_derive_str(r));
+            return 0;
+        }
+        out_k[c] = k_new;
+        plan_mask |= (uint8_t)(1u << c);
+    }
+    if (plan_mask == 0) {
+        snprintf(note, note_cap, "every CT channel was calibrated manually -- none was rederived");
+    }
+    return plan_mask;
+}
+
 /* Decides what this run may calibrate, ahead of touching the link at all --
  * separated from the staging below so the whole decision (including every
  * refusal) is reachable from a host test without a fake link. Returns the
@@ -746,6 +973,9 @@ static uint8_t zone_sweep_plan_k_ct_summed(float *out_k, char *note, size_t note
  * reason whenever that mask comes back 0. */
 static uint8_t zone_sweep_plan_k_ct(float *out_k, char *note, size_t note_cap)
 {
+    if (s_zone_ct_channel_valid) {
+        return zone_sweep_plan_k_ct_mapped(out_k, note, note_cap);
+    }
     if (s_ct_topology_summed) {
         return zone_sweep_plan_k_ct_summed(out_k, note, note_cap);
     }
@@ -1538,12 +1768,35 @@ static void zone_sweep_task(void *arg)
      * with any relay on (zone_sweep_check_refusal()'s RELAYS_ON case), so
      * this sample is genuinely an idle baseline. */
     s_ct_topology_summed = (zone_cfg_committed_ct_topology() != 0u);
-    s_ct_summed_idle_a = 0.0f;
-    if (s_ct_topology_summed) {
+    memset(s_ct_idle_a, 0, sizeof(s_ct_idle_a));
+    /* CT_CHANNEL_MASK_PLAN.md step 5: the committed per-zone map, read fresh
+     * on the same cadence and for the same reason as the topology byte above.
+     * Sampled BEFORE the idle baseline because whether an idle sample is
+     * needed at all depends on it. */
+    s_zone_ct_channel_valid = zone_cfg_committed_zone_ct_channel(s_zone_ct_channel);
+    if (!s_zone_ct_channel_valid) {
+        s_zone_ct_channel[0] = 0u;
+        s_zone_ct_channel[1] = 1u;
+        s_zone_ct_channel[2] = 2u; /* inert while the flag is clear; never read */
+    }
+    /* An idle baseline is needed for every channel that is SHARED, since that
+     * is the only case whose normal is a delta against it. Under the legacy
+     * summed topology that is exactly channel ZONE_CT_CHANNEL_COUNT-1 and
+     * nothing else, which is the sample that was taken here before. */
+    bool need_idle = false;
+    for (uint8_t z = 0; z < ZONE_CT_CHANNEL_COUNT; z++) {
+        uint8_t ch = 0u;
+        if (zone_sweep_shared_ch_for_zone(z, &ch)) {
+            need_idle = true;
+            break;
+        }
+    }
+    if (need_idle) {
         float idle_ch[ZONE_CT_CHANNEL_COUNT];
         zone_sweep_hw_sample_channels(NULL, idle_ch);
-        float idle = idle_ch[ZONE_CT_CHANNEL_COUNT - 1];
-        s_ct_summed_idle_a = isnan(idle) ? 0.0f : idle;
+        for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+            s_ct_idle_a[c] = isnan(idle_ch[c]) ? 0.0f : idle_ch[c];
+        }
     }
 
     zone_sweep_all_result_t result;
