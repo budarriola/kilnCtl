@@ -203,7 +203,7 @@ top edge `Y=60` (right) to `Y=86` (left), bottom edge `Y=617` (right) to
 about 25px higher than its left, so it is markedly less square in frame than
 before. `capture_lcd.ps1`'s defaults are now the smallest axis-aligned box
 containing all four corners, `X=296 Y=58 W=853 H=578`
-(`tools/PcTools/scripts/capture_lcd.ps1:55-58`), which includes a few pixels of
+(`tools/PcTools/scripts/capture_lcd.ps1:57-60`), which includes a few pixels of
 bezel on the tighter sides rather than clipping any UI content. (The previous,
 2026-09-10 rectangle was `X=102 Y=12 W=907 H=609`.)
 
