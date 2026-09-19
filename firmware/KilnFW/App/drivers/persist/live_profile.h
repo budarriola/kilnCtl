@@ -98,6 +98,40 @@ typedef struct {
 size_t live_edit_record_encode(const live_edit_record_t *rec, void *out, size_t cap);
 bool live_edit_record_decode(const void *blob, size_t len, live_edit_record_t *out);
 
+/* Top-level decision-layer entry point (plan section 5/6/10's `decide`
+ * action), combining the pure rules below into one call per decision kind.
+ * Returns true if the decision may proceed -- the caller (pass 2's HTTP
+ * handler) then performs whatever kind-specific storage step is its own
+ * scope (writing a new user slot for save-as, overwriting the origin slot
+ * for overwrite) and, on success, calls live_profile_clear() to retire the
+ * working slot. This function performs NO persistence itself and leaves the
+ * record/working slot untouched either way; false means refused, with a
+ * human-readable reason in err.
+ *
+ * SAVE_AS: refuses on a name collision (live_edit_name_collides(),
+ *   exclude_id 0xFF -- always a fresh slot, never a rename target).
+ * OVERWRITE: refuses (a) structurally, checked FIRST, if the record's
+ *   origin is a builtin or outside the user id range (live_edit_can_
+ *   overwrite()) -- so a caller cannot bypass the structural refusal by
+ *   also setting confirm -- and (b) if confirm is false (owner decision
+ *   3/section 6: "user profile requires an explicit confirm flag").
+ *   candidate_name/confirm are ignored for the kinds that don't use them.
+ * DISCARD: always allowed -- plan section 5: "Discard deletes the working
+ *   slot," unconditionally.
+ */
+bool live_edit_decide(live_edit_decision_kind_t action, const live_edit_record_t *rec, const char *candidate_name,
+                       bool confirm, const char *(*name_at)(void *ctx, uint8_t id), void *ctx, char *err,
+                       size_t err_cap);
+
+/* Plan section 5: abort/trip/reboot handling. "GET /api/profile/live reports
+ * pending_decision whenever the record says pending and the executor is not
+ * RUNNING." A DONE, a HALTED, a FAULTED trip and a reboot that interrupted
+ * the firing all land in "not RUNNING" and all raise the same prompt --
+ * deliberately a single uniform condition, never a per-reason special case,
+ * so this predicate takes only the two facts that matter and nothing about
+ * how the run ended. */
+bool live_edit_should_prompt(const live_edit_record_t *rec, bool executor_running);
+
 /* ---- pure: decision-layer rules -------------------------------------------
  * Asserted here, independent of any HTTP handler (plan section 11: "asserted
  * at the decision layer, not only the handler" -- profiles_http.c is one of

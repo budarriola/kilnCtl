@@ -191,6 +191,116 @@ static void test_name_no_collision_distinct_name(void)
 }
 
 // ---------------------------------------------------------------------------
+// live_edit_decide -- top-level decision-layer entry point (plan section 5/6)
+
+static void test_decide_save_as_refuses_name_collision(void)
+{
+    TEST_SECTION("live_edit_decide -- SAVE_AS refuses a name collision");
+    fake_name_table_t t = {0};
+    t.names[0] = "Bisque Fast";
+    char err[128];
+    bool ok = live_edit_decide(LIVE_EDIT_DECISION_SAVE_AS, NULL, "  bisque fast  ", false, fake_name_at, &t, err,
+                                sizeof(err));
+    TEST_CHECK(!ok, "a colliding save-as name is refused");
+    TEST_CHECK(err[0] != '\0', "a reason is given");
+}
+
+static void test_decide_save_as_accepts_distinct_name(void)
+{
+    TEST_SECTION("live_edit_decide -- SAVE_AS accepts a distinct name");
+    fake_name_table_t t = {0};
+    t.names[0] = "Bisque Fast";
+    char err[128];
+    bool ok =
+        live_edit_decide(LIVE_EDIT_DECISION_SAVE_AS, NULL, "Glaze Slow", false, fake_name_at, &t, err, sizeof(err));
+    TEST_CHECK(ok, "a distinct save-as name is allowed");
+}
+
+static void test_decide_overwrite_refuses_builtin_before_confirm(void)
+{
+    TEST_SECTION("live_edit_decide -- OVERWRITE refuses a builtin origin even with confirm=1");
+    live_edit_record_t rec = {0};
+    rec.origin_is_builtin = 1;
+    rec.origin_id = 200;
+    char err[128];
+    bool ok = live_edit_decide(LIVE_EDIT_DECISION_OVERWRITE, &rec, NULL, true, NULL, NULL, err, sizeof(err));
+    TEST_CHECK(!ok, "a builtin origin is refused structurally, regardless of confirm");
+}
+
+static void test_decide_overwrite_refuses_without_confirm(void)
+{
+    TEST_SECTION("live_edit_decide -- OVERWRITE of a user profile without confirm=1 is refused");
+    live_edit_record_t rec = {0};
+    rec.origin_is_builtin = 0;
+    rec.origin_id = 2;
+    char err[128];
+    bool ok = live_edit_decide(LIVE_EDIT_DECISION_OVERWRITE, &rec, NULL, false, NULL, NULL, err, sizeof(err));
+    TEST_CHECK(!ok, "a user-profile overwrite without an explicit confirm flag is refused");
+    TEST_CHECK(err[0] != '\0', "a reason is given");
+}
+
+static void test_decide_overwrite_allowed_with_confirm(void)
+{
+    TEST_SECTION("live_edit_decide -- OVERWRITE of a user profile with confirm=1 is allowed");
+    live_edit_record_t rec = {0};
+    rec.origin_is_builtin = 0;
+    rec.origin_id = 2;
+    char err[128];
+    bool ok = live_edit_decide(LIVE_EDIT_DECISION_OVERWRITE, &rec, NULL, true, NULL, NULL, err, sizeof(err));
+    TEST_CHECK(ok, "an explicitly confirmed user-profile overwrite is allowed");
+}
+
+static void test_decide_discard_always_allowed(void)
+{
+    TEST_SECTION("live_edit_decide -- DISCARD is always allowed");
+    char err[128];
+    bool ok = live_edit_decide(LIVE_EDIT_DECISION_DISCARD, NULL, NULL, false, NULL, NULL, err, sizeof(err));
+    TEST_CHECK(ok, "discard needs no record, name or confirmation");
+}
+
+// ---------------------------------------------------------------------------
+// live_edit_should_prompt -- plan section 5's abort/trip/reboot handling
+
+static void test_should_prompt_when_pending_and_not_running(void)
+{
+    TEST_SECTION("live_edit_should_prompt -- pending + not running raises the prompt");
+    live_edit_record_t rec = {0};
+    rec.pending = 1;
+    TEST_CHECK(live_edit_should_prompt(&rec, false), "pending and not RUNNING prompts");
+}
+
+static void test_should_prompt_false_while_running(void)
+{
+    TEST_SECTION("live_edit_should_prompt -- pending but still RUNNING does not prompt yet");
+    live_edit_record_t rec = {0};
+    rec.pending = 1;
+    TEST_CHECK(!live_edit_should_prompt(&rec, true), "a pending record while still running does not prompt");
+}
+
+static void test_should_prompt_false_when_not_pending(void)
+{
+    TEST_SECTION("live_edit_should_prompt -- nothing pending never prompts");
+    live_edit_record_t rec = {0};
+    rec.pending = 0;
+    TEST_CHECK(!live_edit_should_prompt(&rec, false), "no pending record means no prompt even when not running");
+}
+
+static void test_should_prompt_uniform_across_abort_trip_reboot(void)
+{
+    TEST_SECTION("live_edit_should_prompt -- DONE, HALTED, FAULTED and a post-reboot record all prompt identically");
+    // Plan section 5 is explicit that the prompt condition must not special-
+    // case HOW the run ended -- a DONE, a HALTED, a FAULTED trip and a
+    // reboot that interrupted the firing all reduce to the same two facts
+    // (pending, not running), so all four are asserted to agree here.
+    live_edit_record_t rec = {0};
+    rec.pending = 1;
+    TEST_CHECK(live_edit_should_prompt(&rec, false), "a clean DONE prompts");
+    TEST_CHECK(live_edit_should_prompt(&rec, false), "a HALTED run prompts identically");
+    TEST_CHECK(live_edit_should_prompt(&rec, false), "a FAULTED trip prompts identically");
+    TEST_CHECK(live_edit_should_prompt(&rec, false), "a reboot that interrupted the firing prompts identically");
+}
+
+// ---------------------------------------------------------------------------
 // live_edit_check_window -- plan section 2's edit window rule
 
 static profile_t make_test_profile(void)
@@ -429,6 +539,16 @@ int main(void)
     test_name_collision_case_and_whitespace_insensitive();
     test_name_collision_excludes_self();
     test_name_no_collision_distinct_name();
+    test_decide_save_as_refuses_name_collision();
+    test_decide_save_as_accepts_distinct_name();
+    test_decide_overwrite_refuses_builtin_before_confirm();
+    test_decide_overwrite_refuses_without_confirm();
+    test_decide_overwrite_allowed_with_confirm();
+    test_decide_discard_always_allowed();
+    test_should_prompt_when_pending_and_not_running();
+    test_should_prompt_false_while_running();
+    test_should_prompt_false_when_not_pending();
+    test_should_prompt_uniform_across_abort_trip_reboot();
     test_window_refuses_change_to_frozen_segment();
     test_window_allows_target_change_on_running_segment();
     test_window_refuses_seg_kind_change_on_running_segment();

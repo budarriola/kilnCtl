@@ -175,6 +175,54 @@ bool live_edit_name_collides(const char *candidate_name, const char *(*name_at)(
     return false;
 }
 
+bool live_edit_decide(live_edit_decision_kind_t action, const live_edit_record_t *rec, const char *candidate_name,
+                       bool confirm, const char *(*name_at)(void *ctx, uint8_t id), void *ctx, char *err,
+                       size_t err_cap)
+{
+    switch (action) {
+    case LIVE_EDIT_DECISION_SAVE_AS:
+        /* exclude_id 0xFF -- save-as always targets a fresh slot, never a
+         * rename target (that is what OVERWRITE is for). */
+        if (live_edit_name_collides(candidate_name, name_at, ctx, 0xFF, err, err_cap)) {
+            return false; /* live_edit_name_collides already filled err */
+        }
+        return true;
+    case LIVE_EDIT_DECISION_OVERWRITE:
+        /* Structural refusal first (plan section 6) -- a builtin origin is
+         * refused before confirm is even inspected, so a caller cannot
+         * bypass the structural check by also setting confirm. */
+        if (!live_edit_can_overwrite(rec, err, err_cap)) {
+            return false; /* live_edit_can_overwrite already filled err */
+        }
+        if (!confirm) {
+            if (err) snprintf(err, err_cap, "overwrite requires explicit confirmation (confirm=1)");
+            return false;
+        }
+        return true;
+    case LIVE_EDIT_DECISION_DISCARD:
+        /* No collision or ownership question -- plan section 5: "Discard
+         * deletes the working slot", unconditionally. */
+        return true;
+    default:
+        if (err) snprintf(err, err_cap, "unknown decision action %d", (int)action);
+        return false;
+    }
+}
+
+bool live_edit_should_prompt(const live_edit_record_t *rec, bool executor_running)
+{
+    /* Plan section 5: "GET /api/profile/live reports pending_decision
+     * whenever the record says pending and the executor is not RUNNING."
+     * Deliberately does not distinguish DONE/HALTED/FAULTED/a reboot that
+     * interrupted the firing -- all of those just mean "not RUNNING", and
+     * the plan is explicit that this must be a single uniform condition
+     * rather than one that tries to special-case how the run ended. */
+    if (!rec) {
+        return false;
+    }
+    return rec->pending != 0 && !executor_running;
+}
+
 static bool segments_equal(const profile_segment_t *a, const profile_segment_t *b)
 {
     return memcmp(a, b, sizeof(*a)) == 0;
