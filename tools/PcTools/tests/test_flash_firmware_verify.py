@@ -443,11 +443,22 @@ class PreFlashProbeWiringTest(FlashFirmwareVerifyWiringTest):
             mf.flash_firmware(verify=True)
         self.assertEqual(verify_mock.call_args[0][2], "192.168.1.156")
 
-    def test_no_preflash_probe_when_verify_is_false(self):
+    def test_preflash_probe_runs_even_when_verify_is_false(self):
+        """d6747fc6 made _preflash_board_address() unconditional on purpose
+        (see mcp_server_flash.py's comment right above where it's called,
+        currently around line 950-955): the partition-offset write guard
+        (_check_app_flash_offset_matches_chip()) consumes that probed
+        address too, and that guard runs regardless of `verify` -- the
+        write itself is not something verify=False should be able to skip
+        confirming. This test used to assert the opposite
+        (preflash_mock.assert_not_called()), which was already stale
+        against that intentional change; it is rewritten here to assert
+        the actual, intended behaviour instead of re-asserting the
+        superseded one."""
         with unittest.mock.patch.object(mf, "_verify_flash_landed") as verify_mock:
             mf.flash_firmware(verify=False)
         verify_mock.assert_not_called()
-        self.preflash_mock.assert_not_called()
+        self.preflash_mock.assert_called()
 
 
 class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
