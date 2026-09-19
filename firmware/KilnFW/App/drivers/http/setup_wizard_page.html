@@ -204,6 +204,19 @@
     .steprow .steptitle { flex: 1 1 auto; }
     .steprow { align-items: center; row-gap: 0.25em; }
     .wfield input[type=text], .wfield input[type=number], .wfield select { max-width: 100%; }
+    /* Owner report ("setup wizard looks horrible on a phone"): the top
+       .gstepper used to render "N. Full Step Title" per pill -- at phone
+       width every one of the 14 pills wrapped to (or near) its own
+       full-width line, turning the very top of the page into ~2000px of
+       redundant text that the detailed #stepRows overview below (which
+       already spells out every title, its safety flag and its readiness
+       detail) repeats in full. Hiding .gstep-title here collapses each
+       pill down to just its number ("1.", "2.", ...) so the whole 14-step
+       stepper wraps into a compact grid a couple of rows tall -- state
+       colour (done/current/regressed/...) and the hover/aria-label full
+       title are unchanged, only the duplicated inline text is gone. */
+    .gstep-title { display: none; }
+    .gstepper span { padding: 0.25em 0.55em; }
   }
 </style>
 </head>
@@ -1486,7 +1499,19 @@ function gRenderStepper() {
   el.innerHTML = latestMerged.map(function (s) {
     var cls = s.state; // pending|done|skipped|regressed
     if (s.id === current) cls += ' current';
-    return '<span class="' + cls + '">' + (s.id + 1) + '. ' + window.kcEscapeHtml(s.title) + '</span>';
+    // Title text moves into its own span (.gstep-title) rather than being
+    // concatenated straight into the pill: the phone-width media query
+    // below hides that span so each pill shrinks to just its number,
+    // turning 14 near-full-width wrapped lines (one per step, each padded
+    // out to the longest title) into a compact wrapped grid of number
+    // chips -- the full title is still present for a mouse hover (title=)
+    // and for a screen reader (aria-label=), and the overview list below
+    // already spells out every title in full, so nothing here is lost,
+    // only the redundant, space-hungry duplicate.
+    var title = window.kcEscapeHtml(s.title);
+    return '<span class="' + cls + '" title="' + title + '" aria-label="' + (s.id + 1) + '. ' + title + '">' +
+      '<span class="gstep-num">' + (s.id + 1) + '.</span>' +
+      '<span class="gstep-title"> ' + title + '</span></span>';
   }).join('');
 }
 
