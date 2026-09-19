@@ -886,6 +886,44 @@ bool safety_cfg_store_get_ct_cal_input(size_t ch, float *out_a_fs, float *out_ze
     return true;
 }
 
+// safety_ct_cal_blob_t v2's operator-entered trim, as the ct_verify
+// fingerprint producer reads it. Identity here unless a test sets it: the
+// real getter answers for every in-range channel regardless of whether the
+// channel's A_fs was ever entered, so this stub must too.
+static float s_ct_cal_trim_offset_a[SAFETY_CT_CAL_CHANNELS];
+static float s_ct_cal_trim_gain[SAFETY_CT_CAL_CHANNELS];
+static bool s_ct_cal_trim_seeded = false;
+
+bool safety_cfg_store_get_ct_cal_trim(size_t ch, float *out_trim_offset_a, float *out_trim_gain)
+{
+    if (!s_ct_cal_trim_seeded) {
+        for (size_t c = 0; c < SAFETY_CT_CAL_CHANNELS; c++) {
+            s_ct_cal_trim_offset_a[c] = 0.0f;
+            s_ct_cal_trim_gain[c] = 1.0f;
+        }
+        s_ct_cal_trim_seeded = true;
+    }
+    if (ch >= SAFETY_CT_CAL_CHANNELS) {
+        return false;
+    }
+    if (out_trim_offset_a) *out_trim_offset_a = s_ct_cal_trim_offset_a[ch];
+    if (out_trim_gain) *out_trim_gain = s_ct_cal_trim_gain[ch];
+    return true;
+}
+
+bool safety_cfg_store_set_ct_cal_trim(size_t ch, float trim_offset_a, float trim_gain,
+                                       esp_err_t *out_nvs_err)
+{
+    if (out_nvs_err) *out_nvs_err = ESP_OK;
+    if (ch >= SAFETY_CT_CAL_CHANNELS) {
+        return false;
+    }
+    (void)safety_cfg_store_get_ct_cal_trim(ch, NULL, NULL); /* seed the defaults */
+    s_ct_cal_trim_offset_a[ch] = trim_offset_a;
+    s_ct_cal_trim_gain[ch] = trim_gain;
+    return true;
+}
+
 bool safety_cfg_store_set_ct_cal_input(size_t ch, float a_fs, float zero_mv, safety_ct_cal_source_t source,
                                         float *out_k_ct_v_per_a, uint16_t *out_zero_counts,
                                         esp_err_t *out_nvs_err)

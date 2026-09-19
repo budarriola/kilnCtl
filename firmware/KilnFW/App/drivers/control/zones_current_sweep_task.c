@@ -2020,11 +2020,13 @@ void ct_verify_collect_fingerprint_in(ct_verify_fingerprint_in_t *out)
         (void)zone_cfg_committed_f32(ZONE_KCT_PARAM_ID(c), &out->k_ct_v_per_a[c]);
         out->zero_counts[c] = 0u;
         (void)zone_cfg_committed_u16(ZONE_CT_ZERO_COUNTS_PARAM_ID(c), &out->zero_counts[c]);
-        /* Identity until safety_ct_cal_blob_t v2 stores a real trim -- see
-         * ct_verify_fingerprint_in_t's own note on why these are hashed
-         * before they exist. */
+        /* The real operator-entered trim, stored since safety_ct_cal_blob_t
+         * v2. The getter always answers for an in-range channel (identity on
+         * a board that has never entered one), so a failed read here can only
+         * mean an out-of-range channel index. */
         out->trim_offset_a[c] = 0.0f;
         out->trim_gain[c] = 1.0f;
+        (void)safety_cfg_store_get_ct_cal_trim(c, &out->trim_offset_a[c], &out->trim_gain[c]);
     }
 }
 

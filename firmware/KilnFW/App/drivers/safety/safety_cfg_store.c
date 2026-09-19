@@ -62,7 +62,17 @@ NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
  * limit -- checked below like every other literal this file/tree uses,
  * same discipline zones_config_store.c's NVS_KEY_LEN_CHECK documents. */
 #define NVS_KEY_SAFETY_CT_CAL "safetyctcal"
-#define SAFETY_CT_CAL_BLOB_VERSION 1u
+/* v2 (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md): adds the operator-entered
+ * offset/gain trim to each channel's entry. load_ct_cal() below carries a
+ * stored v1 record forward field for field and seeds the trim at identity --
+ * a board holding a real calibration must never lose it to a version bump.
+ * Rollback cost (older firmware, same NVS): a pre-bump build reads this
+ * blob, sees version 2, and resets the CT calibration inputs to defaults for
+ * that boot -- the same "configuration quietly reverts to defaults" shape as
+ * the zones_cfg/ota_rollback_esp() hazard. The blob itself is untouched
+ * until that older build writes one, so returning to a v2-aware build
+ * restores everything as long as nothing was re-entered in between. */
+#define SAFETY_CT_CAL_BLOB_VERSION 2u
 
 /* S8 rate-guard write provenance (docs/audits/s8_auto_calc_design_2026-09-
  * 09.md "Part 3") -- own key/version, same "not one of the Pico-fetched
@@ -87,12 +97,38 @@ typedef struct {
 
 static relay_type_t s_safety_relay_type = RELAY_TYPE_CONTACTOR;
 
-/* CT_COMMISSIONING_PLAN.md step 1 -- per-channel calibration input state. */
+/* CT_COMMISSIONING_PLAN.md step 1 -- per-channel calibration input state.
+ *
+ * FROZEN v1 layout. This is not a duplicate of the live struct below to be
+ * kept in sync: it is a byte-exact record of what version 1 actually wrote
+ * to flash, and it must never change again. load_ct_cal()'s migration reads
+ * a stored v1 blob through it. */
+typedef struct {
+    uint8_t has_value;
+    uint8_t source;
+    float a_fs;
+    float zero_mv;
+} safety_ct_cal_entry_v1_t;
+
+typedef struct {
+    uint8_t version;
+    safety_ct_cal_entry_v1_t ch[SAFETY_CT_CAL_CHANNELS];
+} safety_ct_cal_blob_v1_t;
+
+/* Live (v2) layout: v1 plus the operator-entered trim. `trim_offset_a` is an
+ * amps-domain offset and `trim_gain` a dimensionless scale, applied on top of
+ * the clamp ratio -- see safety_cfg_store.h's own comment on why a trim is a
+ * separate quantity from A_fs rather than folded into it. Identity is
+ * 0.0f / 1.0f, which is what reset_ct_cal_to_defaults() and the v1 migration
+ * both seed: memset() alone would leave trim_gain at 0.0f, i.e. a channel
+ * that reads zero amps. */
 typedef struct {
     uint8_t has_value; /* 0/1 -- never set means "unset", not a real 0 A_fs */
     uint8_t source;    /* safety_ct_cal_source_t */
     float a_fs;
     float zero_mv;
+    float trim_offset_a;
+    float trim_gain;
 } safety_ct_cal_entry_t;
 
 typedef struct {
@@ -788,11 +824,24 @@ static void reset_ct_cal_to_defaults(void)
 {
     memset(&s_ct_cal, 0, sizeof(s_ct_cal));
     s_ct_cal.version = SAFETY_CT_CAL_BLOB_VERSION;
+    for (size_t c = 0; c < SAFETY_CT_CAL_CHANNELS; c++) {
+        /* Identity trim, NOT memset's 0.0f gain -- a zero gain would scale
+         * every reading on the channel to zero amps. */
+        s_ct_cal.ch[c].trim_offset_a = 0.0f;
+        s_ct_cal.ch[c].trim_gain = 1.0f;
+    }
 }
 
-/* Same current/migrate(none-yet)/refuse discipline as load_safety_relay_
- * type() -- see that function's own comment for the reasoning, identical
- * here. */
+/* Current / MIGRATE / refuse, in that order.
+ *
+ * The migration is the point of the v2 bump: a board that has a real
+ * clamp ratio entered must keep it. A stored v1 blob is a DIFFERENT SIZE
+ * from a v2 one, so the length is read first and the version discriminated
+ * against it -- reading straight into a v2-sized struct (what this function
+ * used to do) rejects every v1 record on size before its version byte is
+ * ever looked at, which is exactly the "resets to defaults" hazard the plan
+ * names. Anything that is neither a current nor a known-older record is
+ * still refused wholesale; defaults stand. */
 static void load_ct_cal(void)
 {
     reset_ct_cal_to_defaults();
@@ -802,20 +851,52 @@ static void load_ct_cal(void)
     if (err != HAL_OK) {
         return; /* never saved, or partition trouble -- defaults stand */
     }
-    safety_ct_cal_blob_t loaded;
+    union {
+        safety_ct_cal_blob_t v2;
+        safety_ct_cal_blob_v1_t v1;
+        uint8_t raw[1];
+    } loaded;
+    memset(&loaded, 0, sizeof(loaded));
     size_t len = sizeof(loaded);
     err = hal_kv_get_blob(&h, NVS_KEY_SAFETY_CT_CAL, &loaded, &len);
     hal_kv_close(&h);
-    if (err != HAL_OK || len != sizeof(loaded)) {
-        return; /* nothing stored, unreadable, or wrong size -- defaults stand */
+    if (err != HAL_OK || len == 0) {
+        return; /* nothing stored or unreadable -- defaults stand */
     }
-    if (loaded.version != SAFETY_CT_CAL_BLOB_VERSION) {
-        ESP_LOGW(TAG, "safety CT calibration-input blob is version %u, this build knows only %u -- "
-                      "resetting to defaults",
-                 (unsigned)loaded.version, (unsigned)SAFETY_CT_CAL_BLOB_VERSION);
+    uint8_t stored_version = loaded.raw[0];
+
+    if (stored_version == SAFETY_CT_CAL_BLOB_VERSION && len == sizeof(loaded.v2)) {
+        s_ct_cal = loaded.v2;
         return;
     }
-    s_ct_cal = loaded;
+    if (stored_version == 1u && len == sizeof(loaded.v1)) {
+        /* v1 -> v2: carry every stored field forward verbatim, seed the trim
+         * at identity. Nothing entered by an operator is discarded. */
+        for (size_t c = 0; c < SAFETY_CT_CAL_CHANNELS; c++) {
+            s_ct_cal.ch[c].has_value = loaded.v1.ch[c].has_value;
+            s_ct_cal.ch[c].source = loaded.v1.ch[c].source;
+            s_ct_cal.ch[c].a_fs = loaded.v1.ch[c].a_fs;
+            s_ct_cal.ch[c].zero_mv = loaded.v1.ch[c].zero_mv;
+            s_ct_cal.ch[c].trim_offset_a = 0.0f;
+            s_ct_cal.ch[c].trim_gain = 1.0f;
+        }
+        s_ct_cal.version = SAFETY_CT_CAL_BLOB_VERSION;
+        ESP_LOGI(TAG, "safety CT calibration-input blob migrated v1 -> v%u; entered ratios kept, "
+                      "trim seeded at identity",
+                 (unsigned)SAFETY_CT_CAL_BLOB_VERSION);
+        /* Deliberately NOT re-saved here: load_ct_cal() runs from
+         * safety_cfg_store_init(), whose calling task's stack is not
+         * guaranteed to be internal RAM, and save_ct_cal() refuses (and must
+         * refuse) an NVS write from a PSRAM stack. The migrated record is
+         * live immediately and is rewritten as v2 by the next ordinary
+         * set_ct_cal_* write; until then the v1 blob on flash stays readable
+         * by both builds, which is the safer of the two states. */
+        return;
+    }
+    ESP_LOGW(TAG, "safety CT calibration-input blob is version %u (%u bytes), this build knows "
+                  "%u and the v1 layout -- resetting to defaults",
+             (unsigned)stored_version, (unsigned)len, (unsigned)SAFETY_CT_CAL_BLOB_VERSION);
+    reset_ct_cal_to_defaults();
 }
 
 /* Direct write, no flash-worker indirection -- same "httpd-worker-only
@@ -1077,6 +1158,59 @@ bool safety_cfg_store_set_ct_cal_input(size_t ch, float a_fs, float zero_mv,
     }
     if (out_zero_counts) {
         *out_zero_counts = zc;
+    }
+    return true;
+}
+
+bool safety_cfg_store_get_ct_cal_trim(size_t ch, float *out_trim_offset_a, float *out_trim_gain)
+{
+    if (ch >= SAFETY_CT_CAL_CHANNELS) {
+        return false;
+    }
+    /* Deliberately NOT gated on has_value: the trim is always defined (it is
+     * seeded at identity by reset_ct_cal_to_defaults() and by the v1
+     * migration), and a caller that folds it into a reading needs a real
+     * number on every channel, not a "never set" it would have to invent an
+     * identity for itself. */
+    if (out_trim_offset_a) {
+        *out_trim_offset_a = s_ct_cal.ch[ch].trim_offset_a;
+    }
+    if (out_trim_gain) {
+        *out_trim_gain = s_ct_cal.ch[ch].trim_gain;
+    }
+    return true;
+}
+
+bool safety_cfg_store_set_ct_cal_trim(size_t ch, float trim_offset_a, float trim_gain,
+                                       esp_err_t *out_nvs_err)
+{
+    if (out_nvs_err) {
+        *out_nvs_err = ESP_OK;
+    }
+    if (ch >= SAFETY_CT_CAL_CHANNELS) {
+        return false;
+    }
+    /* Refuse, never clamp -- CT_ATTRIBUTION_VERIFICATION_PLAN.md: "do not
+     * clamp a bad trim into a plausible-looking one". A clamped entry would
+     * leave the operator looking at a number the board is not using. */
+    if (!isfinite(trim_offset_a) || trim_offset_a < SAFETY_CT_CAL_TRIM_OFFSET_A_MIN ||
+        trim_offset_a > SAFETY_CT_CAL_TRIM_OFFSET_A_MAX) {
+        return false;
+    }
+    if (!isfinite(trim_gain) || trim_gain < SAFETY_CT_CAL_TRIM_GAIN_MIN ||
+        trim_gain > SAFETY_CT_CAL_TRIM_GAIN_MAX) {
+        return false;
+    }
+    s_ct_cal.ch[ch].trim_offset_a = trim_offset_a;
+    s_ct_cal.ch[ch].trim_gain = trim_gain;
+    esp_err_t err = save_ct_cal();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "safety_cfg_store_set_ct_cal_trim: NVS write failed (%s) -- applied live but "
+                      "will not survive a reboot",
+                 esp_err_to_name(err));
+    }
+    if (out_nvs_err) {
+        *out_nvs_err = err;
     }
     return true;
 }

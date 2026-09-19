@@ -90,10 +90,12 @@ Status: PARTIALLY BUILT. Landed so far (this commit):
     other five facts never do) and the gate/display cross product widened from
     256 to 1536 combinations so the enum's six values are actually walked.
 
-Still unbuilt: the `SAFETY_CT_CAL_BLOB_VERSION` 1->2 migration that adds the
-operator-entered offset/gain trim. The fingerprint already hashes
-`trim_offset_a`/`trim_gain` at their identity values, so landing the trim is a
-one-line producer change that cannot forget to invalidate standing verdicts.
+`SAFETY_CT_CAL_BLOB_VERSION` is now 2: each channel's record carries
+`trim_offset_a`/`trim_gain`, `load_ct_cal()` migrates a stored v1 blob forward
+(discriminating on length before version, since the two layouts differ in
+size) and seeds the trim at identity, and the fingerprint producer reads the
+real values through `safety_cfg_store_get_ct_cal_trim()`. Entry surface on
+`safety_commissioning_page.html` (owner decision 3 below) is still to come.
 
 Four owner decisions of
 2026-09-18 — settle time, verdict scope, an operator-entered clamp ratio with

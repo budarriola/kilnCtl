@@ -93,11 +93,12 @@ typedef struct {
  * here, a change to it leaves a stale verdict standing -- that is the hole
  * this struct exists to close, so add to it rather than working around it.
  *
- * `trim_offset_a` / `trim_gain` are the operator-entered scale trim the plan
- * adds to safety_ct_cal_blob_t in its v2 bump. They are hashed NOW, with
- * today's producer passing the identity values (0.0f / 1.0f), precisely so
- * that landing the trim is a one-line producer change that CANNOT forget to
- * extend the fingerprint. */
+ * `trim_offset_a` / `trim_gain` are the operator-entered scale trim stored in
+ * safety_ct_cal_blob_t since its v2 bump. They were hashed BEFORE they
+ * existed, with the producer passing the identity values, precisely so that
+ * landing the trim would be a one-line producer change that CANNOT forget to
+ * extend the fingerprint -- which is how it landed. The producer now reads
+ * them via safety_cfg_store_get_ct_cal_trim(). */
 typedef struct {
     uint8_t zone_count;
     uint8_t ct_installed;                          /* param 0x0109 as cached; 1 when unknown */
@@ -112,8 +113,8 @@ typedef struct {
     float   gain[CT_VERIFY_CHANNELS];              /* params 0x030B-0x030D */
     float   k_ct_v_per_a[CT_VERIFY_CHANNELS];      /* params 0x0308-0x030A, derived */
     uint16_t zero_counts[CT_VERIFY_CHANNELS];      /* params 0x0302-0x0304, derived (U16 on the wire) */
-    float   trim_offset_a[CT_VERIFY_CHANNELS];     /* not yet stored -- see the note above */
-    float   trim_gain[CT_VERIFY_CHANNELS];         /* not yet stored -- see the note above */
+    float   trim_offset_a[CT_VERIFY_CHANNELS];     /* operator-entered offset trim, amps */
+    float   trim_gain[CT_VERIFY_CHANNELS];         /* operator-entered scale trim, dimensionless */
 } ct_verify_fingerprint_in_t;
 
 /* PURE. FNV-1a over the fields above, in a fixed order, with every float

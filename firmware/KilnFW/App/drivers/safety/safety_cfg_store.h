@@ -452,6 +452,44 @@ bool safety_cfg_store_set_ct_cal_input(size_t ch, float a_fs, float zero_mv,
                                         safety_ct_cal_source_t source, float *out_k_ct_v_per_a,
                                         uint16_t *out_zero_counts, esp_err_t *out_nvs_err);
 
+/* Operator-entered per-channel TRIM (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md).
+ * Stored in the same ESP-local record as the pair above, which is what took
+ * SAFETY_CT_CAL_BLOB_VERSION from 1 to 2.
+ *
+ * Why a trim is a separate quantity from A_fs and from `gain`: A_fs is what
+ * the clamp CLAIMS (its nameplate ratio, which the operator re-edits when the
+ * clamp is swapped), `gain` is the fixed front-end divider (R46/R43, a
+ * property of the board, not of the clamp), and the trim is the measured
+ * disagreement between the claim and a reference meter -- "my 30 A clamp
+ * reads 4 % high". Folding it into A_fs would destroy the distinction the
+ * operator needs to re-edit either one independently.
+ *
+ * Ranges are sanity bounds on an ENTRY, refused rather than clamped (same
+ * discipline as safety_ct_cal_convert()): a trim wide enough to hide a wrong
+ * clamp ratio is a wrong clamp ratio, and must be corrected there. The gain
+ * band is +/- one octave around unity; the offset band is far wider than any
+ * plausible residual offset on a kiln branch circuit and far below a real
+ * load. Identity is 0.0 A / 1.0. */
+#define SAFETY_CT_CAL_TRIM_OFFSET_A_MIN (-50.0f)
+#define SAFETY_CT_CAL_TRIM_OFFSET_A_MAX 50.0f
+#define SAFETY_CT_CAL_TRIM_GAIN_MIN 0.5f
+#define SAFETY_CT_CAL_TRIM_GAIN_MAX 2.0f
+
+/* Reads channel `ch`'s trim. Unlike safety_cfg_store_get_ct_cal_input(), this
+ * is NOT gated on the channel ever having been set: the trim is always
+ * defined (identity on a fresh board, and identity after the v1->v2
+ * migration), so every channel has a real number to report. Returns false
+ * (outputs untouched) only for an out-of-range channel. */
+bool safety_cfg_store_get_ct_cal_trim(size_t ch, float *out_trim_offset_a, float *out_trim_gain);
+
+/* Validates both values against the ranges above and persists them. Returns
+ * false (nothing changed) for an out-of-range channel or an out-of-range/
+ * non-finite value -- never clamps a bad trim into a plausible-looking one.
+ * `out_nvs_err` (optional) reports the NVS write's own esp_err_t, same
+ * convention as safety_cfg_store_set_ct_cal_input(). */
+bool safety_cfg_store_set_ct_cal_trim(size_t ch, float trim_offset_a, float trim_gain,
+                                       esp_err_t *out_nvs_err);
+
 /* ---------------------------------------------------------------------- */
 /* S8 rate-guard (max_rate_c_per_min, 0x0204) write provenance --
  * docs/audits/s8_auto_calc_design_2026-09-09.md "Part 3". ESP-local, never

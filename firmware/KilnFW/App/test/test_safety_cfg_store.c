@@ -1259,6 +1259,203 @@ static void test_cache_stale_cleared_by_direct_refetch_not_only_maybe_refetch(vo
                "which entry point reached it");
 }
 
+// ---------------------------------------------------------------------------
+// docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md -- safety_ct_cal_blob_t v1 -> v2.
+// ---------------------------------------------------------------------------
+
+// Stages a v1 CT-calibration blob (the FROZEN pre-trim layout) on flash,
+// exactly as a board commissioned by a pre-bump build would hold it.
+static void stage_v1_ct_cal_blob(void)
+{
+    safety_ct_cal_blob_v1_t v1;
+    memset(&v1, 0, sizeof(v1));
+    v1.version = 1u;
+    v1.ch[0].has_value = 1;
+    v1.ch[0].source = (uint8_t)SAFETY_CT_CAL_SOURCE_MANUAL;
+    v1.ch[0].a_fs = 30.0f;
+    v1.ch[0].zero_mv = 59.0f;
+    v1.ch[2].has_value = 1;
+    v1.ch[2].source = (uint8_t)SAFETY_CT_CAL_SOURCE_SWEEP;
+    v1.ch[2].a_fs = 100.0f;
+    v1.ch[2].zero_mv = -12.5f;
+
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+               "setup: stage handle opens");
+    TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_SAFETY_CT_CAL, &v1, sizeof(v1)) == HAL_OK,
+               "setup: v1 ct_cal blob stages");
+    TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "setup: stage commits");
+    hal_kv_close(&h);
+}
+
+static void test_ct_cal_v1_blob_migrates_forward_instead_of_resetting(void)
+{
+    TEST_SECTION("load_ct_cal -- a v1 blob (a board commissioned before the trim existed) is "
+                 "MIGRATED, not reset: every entered A_fs/zero_mv/source survives the bump");
+
+    fake_kv_reset_all();
+    stub_reset();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    stage_v1_ct_cal_blob();
+
+    TEST_CHECK(SAFETY_CT_CAL_BLOB_VERSION == 2u,
+               "the bump this migration exists for actually happened -- without it the v1 blob "
+               "below is 'current version' and nothing here is proved");
+    TEST_CHECK(sizeof(safety_ct_cal_blob_v1_t) != sizeof(safety_ct_cal_blob_t),
+               "v1 and v2 really are different sizes -- which is why load_ct_cal() must "
+               "discriminate on LENGTH before version, not read into a v2-sized struct");
+
+    TEST_CHECK(safety_cfg_store_init() == ESP_OK, "init loads the stored blob");
+
+    float a_fs = 0.0f, zero_mv = 0.0f;
+    safety_ct_cal_source_t source = SAFETY_CT_CAL_SOURCE_SWEEP;
+    TEST_CHECK(safety_cfg_store_get_ct_cal_input(0, &a_fs, &zero_mv, &source),
+               "channel 0's entered calibration survived the migration");
+    TEST_CHECK(fabsf(a_fs - 30.0f) < 1e-6f, "its clamp ratio is carried forward verbatim");
+    TEST_CHECK(fabsf(zero_mv - 59.0f) < 1e-6f, "so is its zero offset");
+    TEST_CHECK(source == SAFETY_CT_CAL_SOURCE_MANUAL,
+               "and its provenance -- a migrated MANUAL channel must still beat the sweep");
+
+    TEST_CHECK(safety_cfg_store_get_ct_cal_input(2, &a_fs, &zero_mv, &source),
+               "channel 2 survived too");
+    TEST_CHECK(fabsf(a_fs - 100.0f) < 1e-6f && fabsf(zero_mv - (-12.5f)) < 1e-6f &&
+                   source == SAFETY_CT_CAL_SOURCE_SWEEP,
+               "with its own values, not channel 0's");
+
+    TEST_CHECK(!safety_cfg_store_get_ct_cal_input(1, NULL, NULL, NULL),
+               "a channel that was unset in v1 is still unset -- the migration invents nothing");
+
+    float off = 9.0f, gain = 9.0f;
+    for (size_t c = 0; c < SAFETY_CT_CAL_CHANNELS; c++) {
+        TEST_CHECK(safety_cfg_store_get_ct_cal_trim(c, &off, &gain), "the new trim reads back");
+        TEST_CHECK(off == 0.0f && gain == 1.0f,
+                   "seeded at IDENTITY, never at memset's 0.0 gain -- a zero gain would scale the "
+                   "whole channel to zero amps");
+    }
+
+    fake_kv_reset_all();
+}
+
+static void test_ct_cal_migration_is_not_vacuous_a_broken_carry_forward_would_fail(void)
+{
+    TEST_SECTION("load_ct_cal -- NEGATIVE-TEST ANCHOR: the migration's carry-forward is what the "
+                 "test above measures, and the values it checks are the ones a broken carry would "
+                 "lose -- an unmigrated (reset-to-defaults) load reports has_value false");
+
+    // The shape a defective migration takes: the v1 record is on flash and
+    // readable, but the loader refuses it. That is observable ONLY as
+    // has_value == false / defaulted values, which is exactly what the
+    // assertions above would catch. Proved here from the other side: a blob
+    // this build genuinely cannot know IS reset, and reads back that way.
+    fake_kv_reset_all();
+    stub_reset();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+
+    safety_ct_cal_blob_t future;
+    memset(&future, 0, sizeof(future));
+    future.version = (uint8_t)(SAFETY_CT_CAL_BLOB_VERSION + 1u);
+    future.ch[0].has_value = 1;
+    future.ch[0].a_fs = 30.0f;
+    {
+        hal_kv_handle_t h;
+        TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+                   "setup: stage handle opens");
+        TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_SAFETY_CT_CAL, &future, sizeof(future)) == HAL_OK,
+                   "setup: newer-than-this-build blob stages");
+        TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "setup: stage commits");
+        hal_kv_close(&h);
+    }
+
+    TEST_CHECK(safety_cfg_store_init() == ESP_OK, "init runs");
+    TEST_CHECK(!safety_cfg_store_get_ct_cal_input(0, NULL, NULL, NULL),
+               "a version this build cannot know is refused wholesale, not reinterpreted field by "
+               "field -- and a refusal is visibly different from a migration");
+    float off = 9.0f, gain = 9.0f;
+    TEST_CHECK(safety_cfg_store_get_ct_cal_trim(0, &off, &gain) && off == 0.0f && gain == 1.0f,
+               "and the defaults it falls back to still carry an identity trim");
+
+    fake_kv_reset_all();
+}
+
+static void test_ct_cal_trim_roundtrips_and_survives_a_reboot(void)
+{
+    TEST_SECTION("safety_cfg_store_set_ct_cal_trim -- the entered trim persists and comes back "
+                 "after a fresh init, alongside the A_fs/zero_mv pair it sits beside");
+
+    fake_kv_reset_all();
+    stub_reset();
+    TEST_CHECK(safety_cfg_store_init() == ESP_OK, "setup: first boot, no blob");
+
+    esp_err_t nvs_err = ESP_FAIL;
+    TEST_CHECK(safety_cfg_store_set_ct_cal_input(1, 30.0f, 59.0f, SAFETY_CT_CAL_SOURCE_MANUAL,
+                                                 NULL, NULL, NULL),
+               "setup: a clamp ratio is entered on channel 1");
+    TEST_CHECK(safety_cfg_store_set_ct_cal_trim(1, -1.25f, 1.04f, &nvs_err),
+               "a 4% scale trim with a small offset is accepted");
+    TEST_CHECK(nvs_err == ESP_OK, "and the NVS write reports its own result, not a silent success");
+
+    float off = 0.0f, gain = 0.0f;
+    TEST_CHECK(safety_cfg_store_get_ct_cal_trim(1, &off, &gain) && fabsf(off - (-1.25f)) < 1e-6f &&
+                   fabsf(gain - 1.04f) < 1e-6f,
+               "it reads back immediately, before any reboot");
+
+    // Reboot.
+    stub_reset();
+    TEST_CHECK(safety_cfg_store_init() == ESP_OK, "reload succeeds");
+    TEST_CHECK(safety_cfg_store_get_ct_cal_trim(1, &off, &gain) && fabsf(off - (-1.25f)) < 1e-6f &&
+                   fabsf(gain - 1.04f) < 1e-6f,
+               "and survives the reboot as a v2 blob");
+    float a_fs = 0.0f, zero_mv = 0.0f;
+    TEST_CHECK(safety_cfg_store_get_ct_cal_input(1, &a_fs, &zero_mv, NULL) &&
+                   fabsf(a_fs - 30.0f) < 1e-6f && fabsf(zero_mv - 59.0f) < 1e-6f,
+               "without disturbing the pair stored in the same record");
+    TEST_CHECK(safety_cfg_store_get_ct_cal_trim(0, &off, &gain) && off == 0.0f && gain == 1.0f,
+               "and a channel nobody trimmed is still at identity, not at channel 1's values");
+
+    fake_kv_reset_all();
+}
+
+static void test_ct_cal_trim_refuses_out_of_range_rather_than_clamping(void)
+{
+    TEST_SECTION("safety_cfg_store_set_ct_cal_trim -- CT_ATTRIBUTION_VERIFICATION_PLAN.md: "
+                 "'do not clamp a bad trim into a plausible-looking one'");
+
+    fake_kv_reset_all();
+    stub_reset();
+    TEST_CHECK(safety_cfg_store_init() == ESP_OK, "setup: first boot");
+
+    TEST_CHECK(safety_cfg_store_set_ct_cal_trim(1, 0.0f, 1.10f, NULL), "setup: a good trim lands");
+
+    TEST_CHECK(!safety_cfg_store_set_ct_cal_trim(1, 0.0f, 4.0f, NULL),
+               "a gain past the ceiling is refused");
+    TEST_CHECK(!safety_cfg_store_set_ct_cal_trim(1, 0.0f, 0.1f, NULL),
+               "a gain below the floor is refused");
+    TEST_CHECK(!safety_cfg_store_set_ct_cal_trim(1, 500.0f, 1.0f, NULL),
+               "an absurd offset is refused");
+    TEST_CHECK(!safety_cfg_store_set_ct_cal_trim(1, NAN, 1.0f, NULL), "a non-finite offset is refused");
+    TEST_CHECK(!safety_cfg_store_set_ct_cal_trim(1, 0.0f, NAN, NULL), "a non-finite gain is refused");
+    TEST_CHECK(!safety_cfg_store_set_ct_cal_trim(SAFETY_CT_CAL_CHANNELS, 0.0f, 1.0f, NULL),
+               "an out-of-range channel is refused");
+
+    float off = 0.0f, gain = 0.0f;
+    TEST_CHECK(safety_cfg_store_get_ct_cal_trim(1, &off, &gain) && off == 0.0f &&
+                   fabsf(gain - 1.10f) < 1e-6f,
+               "and every refusal left the previously ACCEPTED trim exactly as it was -- refused "
+               "means nothing changed, not 'clamped to the nearest legal value'");
+
+    // The boundaries themselves are inclusive -- the NEGATIVE half of this
+    // check: a strict comparison where the header promises [min, max] flips
+    // one of these.
+    TEST_CHECK(safety_cfg_store_set_ct_cal_trim(1, SAFETY_CT_CAL_TRIM_OFFSET_A_MIN,
+                                                SAFETY_CT_CAL_TRIM_GAIN_MIN, NULL),
+               "exactly at both minimums is accepted");
+    TEST_CHECK(safety_cfg_store_set_ct_cal_trim(1, SAFETY_CT_CAL_TRIM_OFFSET_A_MAX,
+                                                SAFETY_CT_CAL_TRIM_GAIN_MAX, NULL),
+               "exactly at both maximums is accepted");
+
+    fake_kv_reset_all();
+}
+
 void run_test_safety_cfg_store(void)
 {
     test_index_for_id_finds_known_and_rejects_unknown();
@@ -1291,4 +1488,8 @@ void run_test_safety_cfg_store(void)
     test_ct_cal_set_rejects_out_of_range_channel_and_value();
     test_ct_cal_set_reports_nvs_failure_via_out_param();
     test_cache_stale_cleared_by_direct_refetch_not_only_maybe_refetch();
+    test_ct_cal_v1_blob_migrates_forward_instead_of_resetting();
+    test_ct_cal_migration_is_not_vacuous_a_broken_carry_forward_would_fail();
+    test_ct_cal_trim_roundtrips_and_survives_a_reboot();
+    test_ct_cal_trim_refuses_out_of_range_rather_than_clamping();
 }
