@@ -94,10 +94,33 @@ function status(opts) {
 /* ---- 1. The ring count is driven by configuration, never hardcoded ---- */
 [1, 2, 3].forEach(function (n) {
   var out = renderKilnGraphicHtml(cfg(n), status());
-  must(countOf(out, /class="kg-glow"/g) === n,
-    'a ' + n + '-zone config must draw exactly ' + n + ' glowing rings, got ' +
-    countOf(out, /class="kg-glow"/g));
+  must(countOf(out, /class="kg-body"/g) === n,
+    'a ' + n + '-zone config must draw exactly ' + n + ' ring sections, got ' +
+    countOf(out, /class="kg-body"/g));
+  /* The small orange heater indicator stays one-per-ring as well. */
+  must(countOf(out, /class="kg-port"/g) === n,
+    'a ' + n + '-zone config must draw exactly ' + n + ' heater ports, got ' +
+    countOf(out, /class="kg-port"/g));
 });
+
+/* ---- 1b. The large orange fills are GONE (owner request, 2026-09-18) and the
+   lid is drawn in the body's own projection: same centre axis and same rx/ry
+   as a ring arc, so it sits on the kiln instead of floating above it. ---- */
+(function () {
+  var out = renderKilnGraphicHtml(cfg(3), status());
+  must(out.indexOf('kg-glow"') < 0,
+    'the large orange ring fills must not be drawn any more');
+  var lid = /<ellipse class="kg-lid-top" cx="(\d+)" cy="(\d+)" rx="(\d+)" ry="(\d+)"/.exec(out);
+  must(lid !== null, 'the lid top face must be drawn');
+  var body = /<path class="kg-body" d="M(-?\d+),(\d+) v(\d+) a(\d+),(\d+)/.exec(out);
+  must(body !== null, 'a ring body must be drawn');
+  /* Same rx/ry as the body arc == same perspective; same centre axis. */
+  must(lid[3] === body[4] && lid[4] === body[5],
+    'the lid must use the body arc rx,ry (' + body[4] + ',' + body[5] +
+    '), got ' + lid[3] + ',' + lid[4]);
+  must(parseInt(lid[1], 10) === parseInt(body[1], 10) + parseInt(body[4], 10),
+    'the lid must share the body centre axis');
+})();
 
 /* ---- 2. Zone order is z0 at the TOP, z2 at the BOTTOM ---- */
 (function () {

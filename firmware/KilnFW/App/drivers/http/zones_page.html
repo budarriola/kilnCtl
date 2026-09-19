@@ -128,6 +128,15 @@
   .relaybits label, .thermobits label {
     display: inline-flex; align-items: center; gap: 0.35em; min-height: 32px;
     font-weight: normal; margin-right: 1em; margin-top: 0.4em; }
+  /* One bordered frame per inheritance group, so the fields a .groupsrc
+     select governs read as belonging to it. Hidden via the element's own
+     .hidden property (never an inline display style) whenever that group is
+     inherited rather than Custom -- those fields are not editable per-zone in
+     that state. Theme tokens only, no new colours, and no fixed width, so the
+     260px-floor zone grid is unaffected on a phone. */
+  .groupFrame { border: 1px solid var(--border); border-radius: var(--ui-radius);
+                padding: 0.5em 0.7em; margin: 0.6em 0; }
+  .groupFrameTitle { margin: 0 0 0.4em; font-size: 0.85em; font-weight: 600; color: var(--muted); }
   .row2 { display: flex; gap: 0.7em; }
   .row2 > div { flex: 1; }
   /* One number input per neighbouring zone (zoneBlock()'s couplingHtml) --
@@ -216,9 +225,11 @@
   #kilnGraphic .kg-svg { width: 100%; max-width: 470px; height: auto; display: block; }
   .kg-shell .kg-body { fill: var(--card-bg); stroke: var(--border); stroke-width: 2; }
   .kg-shell .kg-lid { fill: var(--card-bg); stroke: var(--border); stroke-width: 2; }
-  .kg-shell .kg-lid-top { fill: var(--bg); stroke: var(--border); stroke-width: 2; }
+  /* The lid is a SOLID cap drawn in the body's own projection, not an open
+     ring floating above it: same fill as the body, distinguished by its
+     outline and by the seam arc where it meets the top ring. */
+  .kg-shell .kg-lid-top { fill: var(--card-bg); stroke: var(--border); stroke-width: 2; }
   .kg-shell .kg-leg { fill: var(--muted); opacity: .55; }
-  .kg-glow { fill: #e8600f; }
   .kg-port-glow { fill: #e8600f; opacity: .55; }
   .kg-port { fill: #ffb163; stroke: var(--border); stroke-width: 1.5; }
   .kg-zonelabel { font: 600 13px system-ui, sans-serif; fill: var(--fg); }
@@ -931,22 +942,26 @@ function renderKilnGraphicHtml(z, st) {
   s += '<svg class="kg-svg" viewBox="0 0 ' + W + ' ' + H + '" role="img" ' +
     'aria-label="Kiln drawn with ' + n + ' zone ring section' + (n === 1 ? '' : 's') + '">';
 
-  /* Shell: a flat lid slab, no controller box, no brand plate, no logo. */
+  /* Shell: rings first, then the lid on top of them -- no controller box, no
+     brand plate, no logo. */
   s += '<g class="kg-shell">';
-  s += '<path class="kg-lid" d="M' + (CX - RX) + ',' + (TOP - 26) + ' v14 a' + RX + ',' + RY +
-    ' 0 0 0 ' + (2 * RX) + ',0 v-14 z"/>';
-  s += '<ellipse class="kg-lid-top" cx="' + CX + '" cy="' + (TOP - 26) + '" rx="' + RX + '" ry="' + RY + '"/>';
 
   for (i = 0; i < n; i++) {
     y = TOP + i * RING_H;
-    /* The glowing seam is drawn FIRST and the body over it, so only its top
-       arc shows -- the glowing ring of the reference photograph. */
-    s += '<ellipse class="kg-glow" cx="' + CX + '" cy="' + y + '" rx="' + (RX - 6) + '" ry="' + (RY - 4) + '"/>';
     s += '<path class="kg-body" d="M' + (CX - RX) + ',' + y + ' v' + RING_H +
       ' a' + RX + ',' + RY + ' 0 0 0 ' + (2 * RX) + ',0 v-' + RING_H + ' z"/>';
     s += '<circle class="kg-port-glow" cx="' + CX + '" cy="' + Math.round(y + RING_H * 0.62) + '" r="13"/>';
     s += '<circle class="kg-port" cx="' + CX + '" cy="' + Math.round(y + RING_H * 0.62) + '" r="7"/>';
   }
+  /* The lid, drawn LAST so it sits on the top ring rather than under it, and
+     in the SAME projection as the body: its collar bottom uses the body's own
+     RX,RY arc, landing exactly on the top ring's rim at y = TOP, and its top
+     face is the same ellipse raised by the collar height. Same centre axis
+     (CX), same rx/ry, so the lid reads as part of the same cylinder. */
+  s += '<path class="kg-lid" d="M' + (CX - RX) + ',' + (TOP - 14) + ' v14 a' + RX + ',' + RY +
+    ' 0 0 0 ' + (2 * RX) + ',0 v-14 z"/>';
+  s += '<ellipse class="kg-lid-top" cx="' + CX + '" cy="' + (TOP - 14) + '" rx="' + RX + '" ry="' + RY + '"/>';
+
   var base = TOP + n * RING_H;
   s += '<path class="kg-leg" d="M' + (CX - RX + 14) + ',' + (base + 6) + ' l-8,' + (STAND - 16) + ' h16 l4,-' + (STAND - 16) + ' z"/>';
   s += '<path class="kg-leg" d="M' + (CX + RX - 14) + ',' + (base + 6) + ' l8,' + (STAND - 16) + ' h-16 l-4,-' + (STAND - 16) + ' z"/>';
@@ -1510,14 +1525,28 @@ function zoneBlock(z, i, relayCount, thermoCount) {
        with exactly one type. When this zone's settings are inherited
        (3.5), the inherited tc_type is written through to every channel in
        THIS zone's thermo_mask on save -- see saveBtn's channel-type pass. */
+    /* One .groupFrame per inheritance group, each named for the .groupsrc
+       select that governs it, so hiding an inherited group hides exactly the
+       fields that select affects and nothing else. Field classes, order
+       within a group and the save-time selectors are unchanged -- saveAll()
+       reads .kp/.ramp/... off the terminal zone's stack by class, which is
+       nesting-independent. */
+    '<div class="groupFrame" data-group="tc"><p class="groupFrameTitle">Thermocouple type</p>' +
     '<label>Thermocouple type wired to channel ' + i + '</label>' +
     tcTypeSelectHtml('tctype', z.tc_type) +
+    '</div>' +
+    /* Calibration offset is per SENSOR and belongs to NO inheritance group
+       (saveAll()'s own comment: "tc_type yes, cal offset no"), so it sits
+       outside every frame and stays visible whatever the selects say. */
+    '<label>Calibration offset (&deg;C)</label><input type="number" step="0.1" class="cal" value="' + z.cal_offset_c + '">' +
+    '<div class="groupFrame" data-group="control"><p class="groupFrameTitle">Control (mode, Kp/Ki/Kd, fuzzy strength)</p>' +
     '<div class="heaterOnly">' +
     '<label>Control mode</label>' + modeHtml +
     '<p class="modehint hint">' + (MODE_DESC[mode] || MODE_DESC[0]) + '</p>' +
     '</div>' +
-    '<label>Calibration offset (&deg;C)</label><input type="number" step="0.1" class="cal" value="' + z.cal_offset_c + '">' +
     pidPanelHtml +
+    '</div>' +
+    '<div class="groupFrame" data-group="limits"><p class="groupFrameTitle">Limits (max/min temp, ramp, rise rate)</p>' +
     '<div class="heaterOnly">' +
     '<label>Max ramp rate (&deg;C/hr) -- user-entered feasibility ceiling for the Profiles page</label>' +
     '<input type="number" step="1" class="ramp" value="' + z.max_ramp_c_per_hr + '">' +
@@ -1539,6 +1568,8 @@ function zoneBlock(z, i, relayCount, thermoCount) {
       '<div><label>Min temp &deg;C -- below this reads as a broken/disconnected sensor</label>' +
       '<input type="number" step="1" class="mintemp" value="' + z.min_temp_c + '"></div>' +
     '</div>' +
+    '</div>' +
+    '<div class="groupFrame" data-group="relaytiming"><p class="groupFrameTitle">Relay timing (window/min-on/min-off)</p>' +
     '<div class="heaterOnly">' +
     '<label>Relay timing (ms, 0 = use firmware default: 60000/10000/2000) ' +
     infoDetailsHtml('relayTiming', 'relay timing') +
@@ -1549,6 +1580,8 @@ function zoneBlock(z, i, relayCount, thermoCount) {
       '<div><label>Min off</label><input type="number" step="100" class="minoff" value="' + (z.heater_min_off_ms || 0) + '"></div>' +
     '</div>' +
     '</div>' +
+    '</div>' +
+    '<div class="groupFrame" data-group="guards"><p class="groupFrameTitle">Guards (the 8 thresholds + cross-zone)</p>' +
     '<div class="heaterOnly">' +
     '<label>Cross-zone plausibility (&deg;C, 0 = disabled) ' +
     infoDetailsHtml('crossZone', 'cross-zone plausibility') +
@@ -1581,7 +1614,8 @@ function zoneBlock(z, i, relayCount, thermoCount) {
         '<div><label>Frozen-sensor window (s)</label>' +
         '<input type="number" step="10" class="frozenwindow" value="' + (z.guard_frozen_window_s || 0) + '"></div>' +
       '</div>' +
-    '</details>';
+    '</details>' +
+    '</div>';
 
   /* docs/ON_OFF_ZONE_PLAN.md step 6: zone_type (ZONES_CFG_VERSION 22->23,
    * zone_cfg_t::zone_type/failsafe_state/hyst_c/min_on_s/min_off_s -- storage
@@ -1965,6 +1999,10 @@ function initInheritanceControls() {
   refreshAllInheritance();
   updateZonePanel(zoneDiv(0));
   initGroupSourceControls();
+  /* AFTER initGroupSourceControls(), which is what gives the .groupsrc selects
+     their stored values -- running it before would read every group as Custom
+     on a fresh load and show frames the stored config says are inherited. */
+  applyAllGroupFrames();
 }
 
 // docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs (ZONES_CFG_VERSION 20->21): the five independent
@@ -2033,6 +2071,36 @@ function initGroupSourceControls() {
 // matching emit) -- kept in one place so a typo here shows up as every group
 // silently falling back to Custom, not a hard-to-spot per-group mismatch.
 var SRC_GROUPS = ['limits', 'relaytiming', 'control', 'guards', 'tc'];
+
+/* Owner request 2026-09-18: a group's fields are only editable per-zone when
+ * that group's select says "Custom settings for this zone", so each .groupsrc
+ * select shows or hides the .groupFrame holding exactly the fields it governs
+ * -- no more, no less. Hiding uses the element's own .hidden property rather
+ * than an inline display style, so nothing has to be un-set later to restore
+ * the frame and the CSS keeps one source of truth for layout.
+ *
+ * Submission semantics are deliberately unchanged: a hidden frame's inputs are
+ * still in the DOM, and saveAll() already reads every inheritable field off
+ * the TERMINAL zone's stack (resolveGroupTerminal()), not off the zone whose
+ * frame is hidden -- so what an inherited zone saves is what it displays it is
+ * inheriting, exactly as before this change. */
+function applyGroupFrames(k) {
+  var div = zoneDiv(k);
+  if (!div) return;
+  SRC_GROUPS.forEach(function (group) {
+    var frame = div.querySelector('.groupFrame[data-group="' + group + '"]');
+    if (!frame) return;
+    /* 255 is "Custom settings for this zone". groupSettingsSourceOf() returns
+       255 for zone 0 unconditionally (it has no selects and is always its own
+       source), so zone 0's frames are never hidden. */
+    frame.hidden = (groupSettingsSourceOf(k, group) !== 255);
+  });
+}
+
+function applyAllGroupFrames() {
+  var thermoCount = parseInt(document.getElementById('thermoCount').value, 10) || 0;
+  for (var k = 0; k < thermoCount; k++) applyGroupFrames(k);
+}
 
 /* docs/ON_OFF_ZONE_PLAN.md step 6: shows/hides the same .heaterOnly/
  * .onoffPanel/.onoffWarn elements zoneBlock() sets an initial inline style
@@ -2116,6 +2184,13 @@ document.getElementById('zones').addEventListener('change', function (e) {
     if (zdiv && fromTerminal !== undefined) {
       copyCustomStackValues(zoneDiv(parseInt(fromTerminal, 10)).querySelector('.customStack'), zdiv.querySelector('.customStack'));
     }
+  }
+  /* Both selects reach the frames: a .groupsrc change is the direct case, and
+     the whole-zone .settingssrc shortcut above has just rewritten every
+     .groupsrc value, so the frames must follow it too. Placed after that
+     shortcut block so it reads the values it just set, not the previous ones. */
+  if (e.target.classList.contains('groupsrc') || e.target.classList.contains('settingssrc')) {
+    applyAllGroupFrames();
   }
   if (e.target.classList.contains('settingssrc') || e.target.classList.contains('mode') ||
       e.target.classList.contains('kp') || e.target.classList.contains('ki') ||

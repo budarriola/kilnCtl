@@ -185,9 +185,19 @@ function renderZoneFragment(zoneType) {
   // and evaluate them with the minimal locals they close over, rather than
   // re-deriving the gating structure by hand (which would just re-assert
   // this test author's belief about the markup, not the real markup).
+  // Three ranges, not two: settingsStackHtml is extracted from its own
+  // declaration rather than being swept up with pidPanelHtml, because the
+  // stack no longer ends at the guards <details> -- it ends at the closing
+  // </div> of the per-group frame that wraps the guards (the 2026-09-18
+  // group-frame change). Each range is terminated by the first matching
+  // marker AFTER its own start, so "    '</div>';" resolves to pidPanelHtml's
+  // own terminator in the first range and to the stack's in the second.
   const TEMPLATE_SRC = extractRange(
     '  var pidPanelHtml =',
-    "    '</details>';"
+    "    '</div>';"
+  ) + '\n' + extractRange(
+    '  var settingsStackHtml =',
+    "    '</div>';"
   ) + '\n' + extractRange(
     '  var zoneType = z.zone_type || 0;',
     "    '</div>';"

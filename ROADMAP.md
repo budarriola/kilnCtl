@@ -2376,6 +2376,26 @@ bench board reports a ~39-minute-old `trip_reason` alongside a healthy live
 state, which an event-keyed banner would have painted as a permanent false
 trip.
 
+**Owner corrections, 2026-09-18.** Two things the drawing got wrong once it
+was in front of the owner. The large orange slabs under the top rim and at the
+foot of each upper ring — the per-ring `kg-glow` ellipses, mostly painted over
+by the ring bodies so only their top arcs showed — are gone; the small orange
+heater indicator circles stay, one per ring. The lid was drawn before the rings
+and floated above them on its own geometry, reading as an open ring rather than
+a lid: it is now emitted last, in the body's own projection (same centre axis,
+same `rx`/`ry` arc as the ring rim), filled with the card background so it
+reads as a solid cap. `tools/check_zone_graphic_render.ps1` grew assertions for
+all three facts and each was negative-tested by sabotage and a hand restore.
+
+The same pass answered a second owner request about the settings below the
+graphic: each per-group inheritance selector now shows or hides a bordered
+frame containing exactly the fields that selector governs, visible only while
+it says "Custom settings for this zone". Hiding is the element's own `hidden`
+property, never an inline display style, and submission semantics are
+unchanged — an inherited zone already saved through the terminal zone's stack.
+`firmware/KilnFW/App/test/test_zones_group_frames.js` covers the rule,
+including that zone 0's frames never hide.
+
 **Stage 2 CLOSED 2026-09-18 — the type is on the wire and settable.**
 `"relay_types"` is reported by `GET /api/zones` as one small integer per relay,
 dense and 0-based like `relay_names`; `relay_type_N=` on the `POST` stores it,
