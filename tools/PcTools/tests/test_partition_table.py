@@ -400,6 +400,34 @@ class ReadChipPartitionTableFromHttpTests(unittest.TestCase):
         self.assertGreater(len(csv_entries), 3)  # real CSV has far more than 3 rows
         self.assertEqual(len(chip_entries), 3)
 
+    def test_recovery_image_response_raises_not_every_partition_missing(self):
+        """A board running the recovery image answers GET /api/partitions
+        with no "partitions" array at all (partition_http_client.
+        RecoveryImageResponse). debug_check_partition_table()'s path
+        (check_chip_partition_table_via_http() -> read_chip_partition_
+        table_from_http()) must propagate that raise, not swallow it into
+        an empty chip_entries list -- an empty list would diff against
+        partitions.csv as "every single partition is only in the CSV,
+        missing from the chip", which reads like a catastrophically wrong
+        board rather than the much simpler, correct explanation: the board
+        is just running the recovery image right now."""
+        from kilnctrl import partition_http_client
+
+        def fake_get_partitions(host, timeout=5.0):
+            raise partition_http_client.RecoveryImageResponse(
+                running="recovery", running_offset="0x009000", next_update="app",
+            )
+
+        csv_path = _write_csv(_SAMPLE_CSV_TEXT)
+        try:
+            with self.assertRaises(partition_http_client.RecoveryImageResponse) as ctx:
+                pt.check_chip_partition_table_via_http(
+                    "192.168.1.156", csv_path=csv_path, get_partitions_fn=fake_get_partitions,
+                )
+        finally:
+            os.remove(csv_path)
+        self.assertEqual(ctx.exception.running, "recovery")
+
 
 if __name__ == "__main__":
     unittest.main()

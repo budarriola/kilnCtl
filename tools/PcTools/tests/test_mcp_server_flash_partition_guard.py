@@ -140,6 +140,27 @@ class TestPartitionOffsetGuard(unittest.TestCase):
         )
         self.assertIsNone(result)
 
+    def test_recovery_shaped_response_does_not_refuse_the_flash(self):
+        """A board answering with the recovery image's shape raises
+        partition_http_client.RecoveryImageResponse -- a PartitionHttpError
+        subclass, so it falls into the same except branch as a plain
+        transport error above ("proceeding without this confirmation").
+        This guard's job is confirming the WRITE OFFSET is safe, not
+        diagnosing which image is running (that is
+        _verify_flash_landed()'s job, post-flash); a recovery-mode board
+        must not be refused here, same as any other unreachable-for-this-
+        purpose case."""
+
+        def _raises_recovery(host, timeout=5.0):
+            raise partition_http_client.RecoveryImageResponse(
+                running="recovery", running_offset="0x009000", next_update="app",
+            )
+
+        result = flash_mod._check_app_flash_offset_matches_chip(
+            "10.0.0.5", _APP_TARGET, get_partitions_fn=_raises_recovery
+        )
+        self.assertIsNone(result)
+
 
 class TestResolveAppFlashTarget(unittest.TestCase):
     """_resolve_app_flash_target() reads partitions.csv fresh per flash --

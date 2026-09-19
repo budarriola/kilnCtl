@@ -97,23 +97,18 @@ class GetPartitionsTest(unittest.TestCase):
             with self.assertRaises(phc.PartitionHttpError):
                 phc.get_partitions("192.168.1.156")
 
-    def test_main_app_shape_marked_not_recovery(self):
-        body = json.dumps(_sample_body()).encode("utf-8")
-        with unittest.mock.patch("urllib.request.urlopen", return_value=_fake_response(body)):
-            data = phc.get_partitions("192.168.1.156")
-        self.assertIs(data["is_recovery_shape"], False)
-
-    def test_recovery_shape_is_identified_not_malformed(self):
+    def test_recovery_shape_raises_recovery_image_response_not_malformed(self):
         """The recovery image (firmware/KilnFW_recovery/main/recovery_http.c's
         partitions_get()) answers GET /api/partitions with a different,
         smaller shape -- {"running", "running_offset", "next_update"}, no
         "partitions" array. docs/audits/web_code_duplication_drift_2026-09-18.md
         section 2.3: this used to be rejected as a malformed response
-        ("missing 'running'/'partitions'") instead of being read as the
-        valid, distinct shape it is. get_partitions() must return normally,
-        still exposing the running partition, and flag the shape so callers
-        (mcp_server_flash._verify_flash_landed) can report "running the
-        recovery image" instead of a generic mismatch."""
+        ("missing 'running'/'partitions'"). get_partitions() must now raise
+        the distinguishable RecoveryImageResponse (still a PartitionHttpError,
+        so an un-updated `except PartitionHttpError` caller keeps working)
+        carrying the three fields, rather than normalizing into an empty
+        partitions table -- an empty list would misread as "board has no
+        partitions" to any caller that doesn't check a flag."""
         recovery_body = {
             "running": "recovery",
             "running_offset": "0x009000",
@@ -121,12 +116,12 @@ class GetPartitionsTest(unittest.TestCase):
         }
         raw = json.dumps(recovery_body).encode("utf-8")
         with unittest.mock.patch("urllib.request.urlopen", return_value=_fake_response(raw)):
-            data = phc.get_partitions("192.168.4.1")
-        self.assertEqual(data["running"], "recovery")
-        self.assertEqual(data["partitions"], [])
-        self.assertIs(data["is_recovery_shape"], True)
-        self.assertEqual(data["next_update"], "app")
-        self.assertEqual(data["running_offset"], "0x009000")
+            with self.assertRaises(phc.RecoveryImageResponse) as ctx:
+                phc.get_partitions("192.168.4.1")
+        self.assertIsInstance(ctx.exception, phc.PartitionHttpError)
+        self.assertEqual(ctx.exception.running, "recovery")
+        self.assertEqual(ctx.exception.running_offset, "0x009000")
+        self.assertEqual(ctx.exception.next_update, "app")
 
     def test_recovery_shape_via_running_offset_only(self):
         """Same recovery shape, minus next_update -- running_offset alone
@@ -135,9 +130,10 @@ class GetPartitionsTest(unittest.TestCase):
         recovery_body = {"running": "recovery", "running_offset": "0x009000"}
         raw = json.dumps(recovery_body).encode("utf-8")
         with unittest.mock.patch("urllib.request.urlopen", return_value=_fake_response(raw)):
-            data = phc.get_partitions("192.168.4.1")
-        self.assertIs(data["is_recovery_shape"], True)
-        self.assertEqual(data["running"], "recovery")
+            with self.assertRaises(phc.RecoveryImageResponse) as ctx:
+                phc.get_partitions("192.168.4.1")
+        self.assertEqual(ctx.exception.running, "recovery")
+        self.assertEqual(ctx.exception.next_update, "?")
 
     def test_missing_partitions_and_no_recovery_fields_still_raises(self):
         """A response with neither shape's distinguishing fields (no

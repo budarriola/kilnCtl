@@ -379,6 +379,20 @@ the divergence reflects a real capability difference — but the recovery image'
 should be renamed or should include an explicit
 `"image":"recovery"` discriminator so a client can tell which question it just asked.
 
+*Closing note, 2026-09-19:* the `/api/partitions` half landed, as a raise rather than
+a normalize. `partition_http_client.get_partitions()` now raises
+`RecoveryImageResponse` (a `PartitionHttpError` subclass carrying `running`,
+`running_offset`, `next_update`) instead of returning a shape with an
+empty `partitions` list — an earlier version of this fix normalized to
+`partitions: []`, which was rejected in review because it let a recovery-mode
+board misread as "board has no partitions" rather than "board didn't answer with
+a table at all." `mcp_server_flash._verify_flash_landed()` and
+`_preflash_board_address()` both catch it explicitly;
+`partition_table.read_chip_partition_table_from_http()` and
+`_check_app_flash_offset_matches_chip()` let it propagate/fall through to their
+existing `PartitionHttpError` handling unchanged. The `/api/boot_guard`
+`"image":"recovery"` discriminator half of this recommendation remains open.
+
 **2.4, the weakened `esc()` — worth doing, and it is a two-line change.**
 Either add the missing `'` replacement, or better, delete all three page-local copies
 (`safety_config_page.html:190`, `zones_page.html:788`, `ota_page.html:396`) and use

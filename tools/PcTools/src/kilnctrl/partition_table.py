@@ -459,6 +459,19 @@ def read_chip_partition_table_from_http(
     failure, non-2xx response, or malformed body -- this function adds no
     further leniency, since a firmware/tool JSON-shape mismatch here should
     fail loudly rather than silently report an empty or partial table.
+
+    In particular, a board running the RECOVERY image answers this same
+    route with a different, smaller shape (no ``partitions`` array --
+    ``firmware/KilnFW_recovery/main/recovery_http.c``'s ``partitions_get()``),
+    and ``get_partitions_fn`` raises ``partition_http_client.
+    RecoveryImageResponse`` (a ``PartitionHttpError`` subclass) for it. This
+    function does not catch that: it propagates up unchanged, so
+    ``debug_check_partition_table()`` and ``check_chip_partition_table_via_http()``
+    raise "board is running the recovery image" rather than silently
+    returning an empty entry list that would then diff against
+    ``partitions.csv`` as "every partition missing from the board" -- a
+    confusing, actively misleading report for what is actually just the
+    wrong image running.
     """
     if get_partitions_fn is None:
         from . import partition_http_client

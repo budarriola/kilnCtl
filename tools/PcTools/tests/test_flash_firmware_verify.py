@@ -95,6 +95,29 @@ class VerifyFlashLandedTest(unittest.TestCase):
         self.assertIn("does NOT fix this", msg)
         self.assertIn("KNOWN GAP", msg)
 
+    def test_recovery_image_response_fails_loud_naming_recovery(self):
+        """docs/audits/web_code_duplication_drift_2026-09-18.md section 2.3:
+        a board that came up running the recovery image answers
+        GET /api/partitions with partition_http_client.RecoveryImageResponse
+        (raised, not returned as a normal dict). _verify_flash_landed() must
+        catch it and fail loud naming the recovery image and next_update --
+        not the generic "malformed response" PartitionHttpError this used to
+        surface as, and not the every-poll-attempt retry loop a plain
+        PartitionHttpError gets (the board answered; retrying won't change
+        what image it's running)."""
+        with unittest.mock.patch.object(
+            partition_http_client, "get_partitions",
+            side_effect=partition_http_client.RecoveryImageResponse(
+                running="recovery", running_offset="0x009000", next_update="app",
+            ),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                mf._verify_flash_landed("192.168.1.50", self.bin_path)
+        msg = str(ctx.exception)
+        self.assertIn("RECOVERY", msg)
+        self.assertIn("recovery", msg)
+        self.assertIn("app", msg)  # next_update named
+
     def test_build_timestamp_mismatch_fails_loud_with_both_values(self):
         with unittest.mock.patch.object(
             partition_http_client, "get_partitions",
@@ -419,6 +442,28 @@ class WrongAddressRegressionTest(unittest.TestCase):
             if host != "192.168.1.156":
                 raise partition_http_client.PartitionHttpError("unreachable: timed out")
             return {"running": "app", "partitions": []}
+
+        with self._patch_resolve("192.168.1.156"), unittest.mock.patch.object(
+            partition_http_client, "get_partitions", side_effect=fake_get_partitions
+        ):
+            self.assertEqual(mf._preflash_board_address(None), "192.168.1.156")
+
+    def test_preflash_probe_counts_a_recovery_running_board_as_observed_up(self):
+        """A board answering with the recovery image's shape raises
+        partition_http_client.RecoveryImageResponse -- that still means the
+        board answered GET /api/partitions, just not with the main app's
+        table. _preflash_board_address() must return that candidate rather
+        than treating it as unreachable and falling through to the next
+        one/None: downgrading a recovery-mode board to 'never observed up'
+        would turn _verify_flash_landed()'s eventual hard failure into its
+        soft bring-up WARNING instead."""
+
+        def fake_get_partitions(host, timeout=None):
+            if host != "192.168.1.156":
+                raise partition_http_client.PartitionHttpError("unreachable: timed out")
+            raise partition_http_client.RecoveryImageResponse(
+                running="recovery", running_offset="0x009000", next_update="app",
+            )
 
         with self._patch_resolve("192.168.1.156"), unittest.mock.patch.object(
             partition_http_client, "get_partitions", side_effect=fake_get_partitions

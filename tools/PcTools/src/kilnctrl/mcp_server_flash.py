@@ -340,10 +340,22 @@ def _preflash_board_address(host: Optional[str]) -> Optional[str]:
     candidate address afterwards is a HARD verification failure, not the
     benign "HTTP isn't up yet during bring-up" case. Without this
     observation the two are indistinguishable, which is what let a
-    misdirected verifier read as benign noise."""
+    misdirected verifier read as benign noise.
+
+    A board that answers with the RECOVERY image's shape
+    (partition_http_client.RecoveryImageResponse) still counts as
+    "observed up" here: it answered GET /api/partitions, just not with the
+    main app's table. Treating that as unreachable and falling through to
+    the next candidate (or to None) would make a recovery-mode board that
+    was up before AND after a flash read as "never observed up", which
+    downgrades _verify_flash_landed()'s eventual failure from a hard error
+    to its soft bring-up WARNING -- exactly the misdiagnosis this whole
+    pre-flash probe exists to prevent."""
     for candidate in _resolve_verify_hosts(host):
         try:
             partition_http_client.get_partitions(candidate, timeout=_VERIFY_HTTP_TIMEOUT_S)
+            return candidate
+        except partition_http_client.RecoveryImageResponse:
             return candidate
         except partition_http_client.PartitionHttpError:
             continue
@@ -399,6 +411,7 @@ def _verify_flash_landed(
     partitions_data: Optional[dict] = None
     resolved_host: Optional[str] = None
     tried: "list[str]" = []
+    recovery_exc: Optional[partition_http_client.RecoveryImageResponse] = None
     for attempt in range(_VERIFY_POLL_ATTEMPTS):
         if attempt:
             time.sleep(_VERIFY_POLL_INTERVAL_S)
@@ -410,11 +423,43 @@ def _verify_flash_landed(
                 resolved_host = candidate
                 last_exc = None
                 break
+            except partition_http_client.RecoveryImageResponse as exc:
+                # The board answered -- just with the recovery image's
+                # shape, not the main app's. That is itself the failure
+                # this whole function exists to report (the board did not
+                # boot the app image just flashed), so stop polling and
+                # raise immediately below rather than retrying attempts
+                # that will keep coming back the same way.
+                recovery_exc = exc
+                resolved_host = candidate
+                break
             except partition_http_client.PartitionHttpError as exc:
                 last_exc = exc
                 continue
-        if partitions_data is not None:
+        if partitions_data is not None or recovery_exc is not None:
             break
+
+    if recovery_exc is not None:
+        # docs/audits/web_code_duplication_drift_2026-09-18.md section 2.3:
+        # the recovery image answers GET /api/partitions with its own
+        # smaller shape (running/running_offset/next_update, no partitions
+        # array). partition_http_client.get_partitions() raises
+        # RecoveryImageResponse for it rather than returning a normalized
+        # dict or a generic "malformed response" error -- it is still the
+        # same underlying fact this whole check exists to report: the
+        # board did not boot the app image just flashed.
+        raise RuntimeError(
+            f"flash reported OK, but the board came up running the RECOVERY "
+            f"image (partition {recovery_exc.running!r}, "
+            f"next_update={recovery_exc.next_update!r}), not {app_partition_name!r}. "
+            f"flash_firmware() wrote the app image to the {app_partition_name!r} "
+            "partition, but the bootloader fell back to recovery -- see "
+            "CLAUDE.md's boot_guard recovery-mode notes and "
+            "docs/OTA_SINGLE_SLOT_PLAN.md for the blank/unset `otadata` gap "
+            "this can indicate. ota_rollback_esp() does NOT fix this (it reverts "
+            "between OTA images over the app's own HTTP API, which recovery does "
+            "not run)."
+        )
 
     if partitions_data is None:
         addresses = ", ".join(tried) if tried else "(no candidate address)"
@@ -448,26 +493,11 @@ def _verify_flash_landed(
 
     running = partitions_data.get("running")
     if running != app_partition_name:
-        if partitions_data.get("is_recovery_shape"):
-            # docs/audits/web_code_duplication_drift_2026-09-18.md section
-            # 2.3: the recovery image answers GET /api/partitions with its
-            # own smaller shape (running/running_offset/next_update, no
-            # partitions array). partition_http_client.get_partitions()
-            # normalizes that into this same dict rather than raising a
-            # "malformed response" error, but it is still the same
-            # underlying fact this whole check exists to report: the board
-            # did not boot the app image just flashed.
-            raise RuntimeError(
-                f"flash reported OK, but the board came up running the RECOVERY "
-                f"image (partition {running!r}, next_update={partitions_data.get('next_update')!r}), "
-                f"not {app_partition_name!r}. flash_firmware() wrote the app image to "
-                f"the {app_partition_name!r} partition, but the bootloader fell back "
-                "to recovery -- see CLAUDE.md's boot_guard recovery-mode notes and "
-                "docs/OTA_SINGLE_SLOT_PLAN.md for the blank/unset `otadata` gap "
-                "this can indicate. ota_rollback_esp() does NOT fix this (it reverts "
-                "between OTA images over the app's own HTTP API, which recovery does "
-                "not run)."
-            )
+        # A recovery-shaped response never reaches this point -- it is
+        # caught above (RecoveryImageResponse) and raised immediately with
+        # its own message, before partitions_data is ever set. Anything
+        # here is a main-app-shaped response reporting a genuinely
+        # different running partition (e.g. a stale OTA pointer).
         raise RuntimeError(
             f"flash reported OK, but the board is running partition {running!r}, "
             f"not {app_partition_name!r} -- flash_firmware() wrote the app image to "

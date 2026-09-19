@@ -47,11 +47,20 @@ flashing -- was misdiagnosed as returning a malformed response instead of
 reporting the much more useful fact that it is running the recovery image.
 Per that audit, the fix belongs on this client (recognizing the recovery
 shape) rather than growing the recovery image to match the main app's
-shape. get_partitions() now recognizes both: a recovery-shaped response is
-normalized to also carry ``"partitions": []`` and ``"is_recovery_shape":
-True`` so every caller can keep reading ``data["running"]`` unconditionally
--- callers that care about telling the two images apart check
-``is_recovery_shape``.
+shape. get_partitions() now recognizes the recovery shape and raises
+``RecoveryImageResponse`` (carrying ``running``/``running_offset``/
+``next_update``) instead of the generic "malformed" ``PartitionHttpError`` --
+deliberately NOT normalizing it into the main app's
+``{"running", "partitions": [...]}`` shape with an empty ``partitions``
+list, since a caller that only checks ``"partitions" in data`` (rather than
+an explicit recovery flag) would then read an empty table as "board has NO
+partitions" instead of "board didn't answer with a table at all", which is
+a worse misdiagnosis than the one this fix replaces. Callers that need to
+tell the two images apart catch ``RecoveryImageResponse`` explicitly (see
+``mcp_server_flash._verify_flash_landed()`` and
+``partition_table.read_chip_partition_table_from_http()``); callers that
+don't care still get a raise, same as before this fix, via
+``RecoveryImageResponse``'s ``PartitionHttpError`` base class.
 """
 from __future__ import annotations
 
@@ -84,6 +93,35 @@ class PartitionHttpError(RuntimeError):
         self.detail = detail
 
 
+class RecoveryImageResponse(PartitionHttpError):
+    """Raised by get_partitions() in place of the generic "malformed
+    response" PartitionHttpError when the response is recognizably the
+    RECOVERY image's shape (KilnFW_recovery/main/recovery_http.c's
+    partitions_get(): {"running", "running_offset", "next_update"}, no
+    "partitions" array) rather than an actually broken one. A subclass of
+    PartitionHttpError, not a sibling exception, so any existing
+    ``except PartitionHttpError`` still catches it -- a caller that hasn't
+    been updated to distinguish the two keeps its prior "proceed without
+    this confirmation" behaviour unchanged, and only a caller that wants
+    the more precise diagnosis needs to add an
+    ``except RecoveryImageResponse`` before it.
+
+    ``running``/``running_offset``/``next_update`` mirror the response
+    body's own field names exactly (running_offset stays the hex string the
+    firmware sent, e.g. "0x009000" -- this class does no numeric parsing)."""
+
+    def __init__(self, running: str, running_offset: str, next_update: str, body_text: str = ""):
+        super().__init__(
+            f"GET /api/partitions: board is running the RECOVERY image "
+            f"(running={running!r}, running_offset={running_offset!r}, "
+            f"next_update={next_update!r}), not the main app"
+        )
+        self.running = running
+        self.running_offset = running_offset
+        self.next_update = next_update
+        self.detail = body_text
+
+
 def _url(host: str, path: str) -> str:
     return f"http://{host}{path}"
 
@@ -102,17 +140,16 @@ def _http_error_detail(exc: Exception) -> "tuple[Optional[int], str]":
 
 def get_partitions(host: str, timeout: float = PARTITION_HTTP_TIMEOUT_S) -> dict:
     """GET /api/partitions and return the decoded JSON object
-    ``{"running": <label>, "partitions": [...]}`` (main app), or the
-    recovery image's ``{"running": <label>, "running_offset": <hex str>,
-    "next_update": <label>}`` normalized to also carry ``"partitions": []``
-    and ``"is_recovery_shape": True`` -- see this module's docstring for why
-    both shapes are legitimate rather than one being malformed. Raises
-    PartitionHttpError on any transport failure, non-2xx response, invalid
-    JSON, or a response missing "running" entirely, missing "partitions"
-    without also looking like the recovery shape, or any per-entry required
-    field on the main-app shape -- loud failure rather than a partial or
-    empty table read back as "MATCH: no partitions" would be a dangerously
-    wrong reading of the board's real state."""
+    ``{"running": <label>, "partitions": [...]}`` (main app shape only).
+    Raises RecoveryImageResponse (a PartitionHttpError subclass -- see its
+    docstring) when the response is the recovery image's
+    ``{"running", "running_offset", "next_update"}`` shape instead. Raises
+    plain PartitionHttpError on any transport failure, non-2xx response,
+    invalid JSON, or a response missing "running" entirely, missing
+    "partitions" without also looking like the recovery shape, or any
+    per-entry required field on the main-app shape -- loud failure rather
+    than a partial or empty table read back as "MATCH: no partitions" would
+    be a dangerously wrong reading of the board's real state."""
     req = urllib.request.Request(_url(host, "/api/partitions"), method="GET")
     try:
         with http_auth.urlopen(req, timeout=timeout) as resp:
@@ -136,13 +173,17 @@ def get_partitions(host: str, timeout: float = PARTITION_HTTP_TIMEOUT_S) -> dict
         # (KilnFW_recovery/main/recovery_http.c's partitions_get()) answers
         # this same route with {"running", "running_offset", "next_update"}
         # instead -- a valid, deliberately smaller response, not a
-        # malformed one. Normalize it so every caller can keep reading
-        # data["running"] unconditionally.
+        # malformed one, but not one this function returns as data: raise
+        # a distinguishable exception so a caller has to opt in to reading
+        # a recovery-mode board's fields, rather than silently getting an
+        # empty partitions table that reads as "board has no partitions".
         if "next_update" in data or "running_offset" in data:
-            normalized = dict(data)
-            normalized["partitions"] = []
-            normalized["is_recovery_shape"] = True
-            return normalized
+            raise RecoveryImageResponse(
+                running=data.get("running", "?"),
+                running_offset=data.get("running_offset", "?"),
+                next_update=data.get("next_update", "?"),
+                body_text=body_text,
+            )
         raise PartitionHttpError(
             f"GET /api/partitions response missing 'running'/'partitions': {body_text!r}"
         )
@@ -159,6 +200,4 @@ def get_partitions(host: str, timeout: float = PARTITION_HTTP_TIMEOUT_S) -> dict
             raise PartitionHttpError(
                 f"GET /api/partitions entry {i} ({entry.get('label', '?')!r}) missing {missing}"
             )
-    data = dict(data)
-    data["is_recovery_shape"] = False
     return data
