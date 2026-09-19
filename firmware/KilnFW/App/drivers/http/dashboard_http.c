@@ -297,8 +297,28 @@ void dashboard_get_status(dashboard_status_t *out)
              * null-until-known convention every other one does, so a caller
              * that skips checking safety_ready would see a false "de-
              * energized" for a link that has simply never answered, not a
-             * confirmed-open relay. */
-            out->safety_relay_known = true;
+             * confirmed-open relay.
+             *
+             * Follow-up (2026-09-19): safety_status_err == ESP_OK alone is
+             * NOT "the Pico answered" -- safety_link_get_status() returns
+             * ESP_OK for any initialized link object and just copies its
+             * cached (possibly never-updated, or once-updated-then-stale)
+             * fields; sl.link_up is the actual staleness-gated "is it
+             * currently answering" bit (see dashboard_safety_ready()'s own
+             * doc comment for the identical bug already fixed for
+             * safety_ready). Without also gating on safety_link_up here, a
+             * Pico that never answered read as a confident "known, off" (K4
+             * pill showing OFF instead of unknown), and one that answered
+             * once then died held its last relay state as "known" forever.
+             * danger_mode_get_relay_status() (danger_mode.c) already gates
+             * on !st.link_up correctly; this was the one holdout.
+             *
+             * Reuses dashboard_safety_ready() itself (not just the same
+             * shape of expression) so this field can never again drift from
+             * safety_ready's own "must equal link_up" contract -- a caller
+             * that only checks safety_ready before trusting this field gets
+             * the identical answer either way. */
+            out->safety_relay_known = dashboard_safety_ready(true, safety_status_err, safety_link_up);
             out->safety_relay_energized = (sl.flags & SAFETY_FLAG_RELAY) != 0u;
             out->safety_heating_enabled = (sl.flags & SAFETY_FLAG_ENABLED) != 0u;
             /* Not from the wire -- this is the ESP's OWN block bitmask, read

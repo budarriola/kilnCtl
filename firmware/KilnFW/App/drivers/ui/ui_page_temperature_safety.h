@@ -20,9 +20,12 @@ extern "C" {
  * "Safety (K4): n/a".
  *
  * known == false (the link has never actually answered this poll -- see
- * dashboard_http.h's safety_relay_known doc comment) renders "n/a", never
- * "off": unknown and confirmed-de-energized are different states, and
- * collapsing them would silently misreport a dead safety link as a
+ * dashboard_http.h's safety_relay_known doc comment) renders "n/a" here;
+ * the web pill (main_page.html's renderSafetyCard()) renders the SAME
+ * condition as "unknown" instead -- same data, deliberately different
+ * wording per surface (UI_PLAN.md 6.3), not a drift to fix. Either way,
+ * unknown and confirmed-de-energized are different states, and collapsing
+ * them into "off" would silently misreport a dead safety link as a
  * de-energized relay. Deliberately does NOT take safety_heating_enabled --
  * see this file's .c header comment / ui_page_temperature.c's own comment on
  * why that flag means ARMED, not "relay energized".
