@@ -104,14 +104,11 @@
   and the guard-threshold overrides.</p>
   <p><strong>This file does NOT include Wi-Fi credentials</strong> (see
   Restore below for why).</p>
-  <p><strong>It also does NOT include your saved kiln configurations.</strong>
-  Those are the named slots that let this controller be moved between kilns;
-  each one is a complete kiln identity spanning both processors, and they are
-  downloaded and uploaded one at a time on the
-  <a href="/settings/kiln_configs">Kiln configurations</a> page. A backup taken
-  here is not a substitute for downloading them -- if you are about to do
-  something risky, save each kiln configuration from that page as well. The web
-  login password is likewise never included, on either side.</p>
+  <p>It also includes every saved <a href="/settings/kiln_configs">kiln
+  configuration</a> slot -- the named snapshots that let this controller be
+  moved between kilns. Each one can still be downloaded and uploaded
+  individually on that page instead, if you only need one. The web login
+  password is never included, on either side.</p>
   <div class="action-row">
     <a class="button" href="/api/backup/export" download="kilnctl_backup.json">Download backup</a>
   </div>
@@ -128,19 +125,34 @@
   join, and this page has no way to know whether that's true, so it never
   guesses. Set up Wi-Fi on the <a href="/wifi">Wi-Fi</a> page after
   restoring, same as on a brand-new board.</p>
-  <p>Restoring does not create, overwrite or delete any saved kiln
-  configuration slot, and never changes which kiln configuration is active --
-  restore this file and your kiln configurations are exactly as they were.
-  Restore them from the <a href="/settings/kiln_configs">Kiln configurations</a>
-  page instead.</p>
+  <p>Restoring also brings in every kiln configuration slot the file
+  contains, matched to your existing slots by identity, never by name. It
+  never changes which kiln configuration is currently active. Two modes
+  control what happens to slots on this board that are NOT in the file:</p>
+  <ul>
+    <li><strong>Merge (default, safer):</strong> slots only in the file are
+    created here; slots only on this board are left alone.</li>
+    <li><strong>Mirror:</strong> in addition to Merge's behavior, any slot on
+    this board that is not in the file is <strong>deleted</strong>, so this
+    board ends up holding exactly the file's set of kiln configurations.</li>
+  </ul>
   <p>Restore is refused outright (nothing is written) while a profile is
   running, the heaters are commanded on, or a firmware update is already in
   progress -- the same check this board's own OTA update uses before writing
   anything. The whole file is validated before any single field is written;
-  a malformed or truncated upload changes nothing and reports why.</p>
+  a malformed or truncated upload changes nothing and reports why. Before
+  anything is written, this page always previews the exact plan (every
+  create, rename, and -- in Mirror mode -- delete, named) and asks you to
+  confirm it.</p>
   <div class="restore-controls">
     <input type="file" id="restoreFile" accept="application/json,.json">
     <button type="button" id="restoreBtn">Restore from file</button>
+  </div>
+  <div class="action-row" role="radiogroup" aria-label="Kiln config restore mode">
+    <label><input type="radio" name="kcRestoreMode" value="merge" id="kcModeMerge" checked>
+      Merge (default) -- only add/update, never delete a slot</label>
+    <label><input type="radio" name="kcRestoreMode" value="mirror" id="kcModeMirror">
+      Mirror -- also delete any slot on this board not in the file</label>
   </div>
   <p id="restoreStatus"></p>
 </div>
@@ -162,6 +174,18 @@
   });
 })();
 
+function kcRestoreMode() {
+  return document.getElementById('kcModeMirror').checked ? 'mirror' : 'merge';
+}
+
+// Two-step flow: a dry-run POST first (X-Kiln-Config-Dry-Run: 1) computes and
+// returns the exact kiln-config plan (every create/rename/delete, named,
+// plain text one line per line -- see backup_import.c's own comment on this
+// response shape) WITHOUT writing anything, so the confirm dialog can name
+// every Mirror-mode deletion instead of a generic warning. Only on
+// confirmation is the same body POSTed again for real, with the same mode
+// and an X-Kiln-Config-Ack-Delete count derived from the dry-run's own
+// "delete " lines -- never a value the operator typed by hand.
 document.getElementById('restoreBtn').addEventListener('click', function () {
   var input = document.getElementById('restoreFile');
   var status = document.getElementById('restoreStatus');
@@ -169,25 +193,58 @@ document.getElementById('restoreBtn').addEventListener('click', function () {
     status.textContent = 'Choose a backup file first.';
     return;
   }
-  if (!kcConfirm('This overwrites saved profiles and every zone setting (PID/model/thermocouple type, ' +
-               'name, wiring, calibration, limits, timing, guard thresholds) with the contents of this ' +
-               'file. Wi-Fi credentials are not affected. Continue?')) {
-    return;
-  }
+  var mode = kcRestoreMode();
   status.textContent = 'Reading file...';
   var reader = new FileReader();
   reader.onload = function () {
-    status.textContent = 'Uploading...';
+    var body = reader.result;
+    status.textContent = 'Checking what this restore would do...';
     window.kcFetchWithSafetyAck('/api/backup/import', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: reader.result,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Kiln-Config-Mode': mode,
+        'X-Kiln-Config-Dry-Run': '1',
+      },
+      body: body,
     }).then(function (r) {
       return r.text().then(function (t) { return { ok: r.ok, text: t }; });
-    }).then(function (res) {
-      status.textContent = res.ok ? 'Restore complete.' : ('Restore refused: ' + res.text);
+    }).then(function (dry) {
+      if (!dry.ok) {
+        status.textContent = 'Restore refused: ' + dry.text;
+        return;
+      }
+      var planLines = dry.text.split('\n').filter(function (l) { return l.length > 0; });
+      var deleteCount = planLines.filter(function (l) { return l.indexOf('delete "') === 0; }).length;
+      var planText = planLines.length > 0
+        ? ('Kiln configuration changes:\n' + planLines.map(function (l) { return '  - ' + l; }).join('\n') + '\n\n')
+        : 'No kiln configuration slots are created, renamed, or deleted by this restore.\n\n';
+      var msg = 'This overwrites saved profiles and every zone setting (PID/model/thermocouple type, ' +
+        'name, wiring, calibration, limits, timing, guard thresholds) with the contents of this file. ' +
+        'Wi-Fi credentials are not affected.\n\nRestore mode: ' + mode + '.\n\n' + planText +
+        'Continue?';
+      if (!kcConfirm(msg)) {
+        status.textContent = 'Restore cancelled.';
+        return;
+      }
+      status.textContent = 'Uploading...';
+      var headers = { 'Content-Type': 'application/json', 'X-Kiln-Config-Mode': mode };
+      if (deleteCount > 0) {
+        headers['X-Kiln-Config-Ack-Delete'] = String(deleteCount);
+      }
+      window.kcFetchWithSafetyAck('/api/backup/import', {
+        method: 'POST',
+        headers: headers,
+        body: body,
+      }).then(function (r) {
+        return r.text().then(function (t) { return { ok: r.ok, text: t }; });
+      }).then(function (res) {
+        status.textContent = res.ok ? 'Restore complete.' : ('Restore refused: ' + res.text);
+      }).catch(function () {
+        status.textContent = 'Upload failed -- check the connection and try again.';
+      });
     }).catch(function () {
-      status.textContent = 'Upload failed -- check the connection and try again.';
+      status.textContent = 'Could not check the restore plan -- check the connection and try again.';
     });
   };
   reader.onerror = function () {
