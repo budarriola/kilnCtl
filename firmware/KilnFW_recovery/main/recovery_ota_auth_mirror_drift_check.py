@@ -40,25 +40,47 @@ WHAT IS COMPARED, and why each normalization exists:
    is exercised by a positive test (both the old and new ordering return
    400/429 on the same malformed-input fixture; only the numeric HTTP
    status told them apart, and both are assigned in this same file so an
-   accidental swap does not fail to compile).
+   accidental swap does not fail to compile). NOTE: this item, including the
+   per-route HMAC context strings ("esp" / "boot-guard-reset" / "sw-reset")
+   and their ordering against ota_http.c's OTA_HTTP_CONTEXT_* cases, is
+   asserted here against a hardcoded transcription of ota_http.c's strings
+   at the time this check was written -- it is NOT diffed byte-for-byte
+   against ota_http.c the way item 1 diffs against ota_http_util.c. A
+   rename of ota_http.c's context strings will not be caught by this check;
+   re-verify by hand against ota_http.c:408-414 and
+   tools/PcTools/src/kilnctrl/ota_http_client.py's derive_mac() call sites
+   if either changes.
 
-3. Route coverage: every mutating (state-changing) POST route registered in
-   recovery_http.c's routes[] table -- currently ota_esp_post(),
-   boot_guard_reset_post(), sw_reset_post() -- must call
-   recovery_authenticate_request() somewhere in its body. This is the
-   assertion that actually closes
+3. Route coverage: every mutating (state-changing, i.e. HTTP_POST/HTTP_PUT/
+   HTTP_DELETE/HTTP_ANY) route registered in recovery_http.c's routes[]
+   table must call recovery_authenticate_request() somewhere in its own
+   handler body. This is the assertion that actually closes
    docs/audits/web_code_duplication_drift_2026-09-18.md section 2.2: the
    drift this check originally guarded (item 2 above) was narrow enough
    that two whole routes with NO auth check at all sat right next to it,
    undetected, until an audit caught them by hand. A future route that
    mutates state and forgets to call the helper now fails this check
-   instead of silently shipping unauthenticated. GET routes (challenge_get,
-   partitions_get, boot_guard_get) are intentionally NOT required to
-   authenticate -- see recovery_http.c's own file header for why
-   /api/boot_guard's GET is deliberately open (diagnostics, no NVS write).
-   Adding a new mutating handler to MUTATING_ROUTE_HANDLERS below is
-   required, not optional -- an entry missing from that list makes this
-   check pass vacuously on exactly the handler that most needs it covered.
+   instead of silently shipping unauthenticated -- and because the mutating
+   handler set is parsed directly out of routes[] (see item 4 below) rather
+   than hand-maintained, a *forgotten* entry cannot make the check pass
+   vacuously the way a hand-maintained list could. GET routes
+   (challenge_get, partitions_get, boot_guard_get) are intentionally NOT
+   required to authenticate -- see recovery_http.c's own file header for
+   why /api/boot_guard's GET is deliberately open (diagnostics, no NVS
+   write).
+
+4. Route-coverage completeness: MUTATING_ROUTE_HANDLERS is no longer a
+   hand-maintained list disconnected from recovery_http.c's actual routes[]
+   table -- discover_mutating_handlers() parses routes[] itself, matching
+   every entry whose `.method` is HTTP_POST, HTTP_PUT, HTTP_DELETE or
+   HTTP_ANY, and returns their `.handler` names for item 3 to check. This
+   closes the gap where a hand-maintained list could silently fall behind
+   routes[] (an entry could be added to routes[] and never added to the
+   list, making item 3 pass vacuously on exactly the new, uncovered
+   handler). ROUTE_COVERAGE_ALLOWLIST below is the only escape hatch for a
+   deliberately-excluded mutating route (e.g. a future route proven safe
+   without per-request auth for some documented reason) -- it is currently
+   empty, since every mutating route today is expected to authenticate.
 
 Usage: python recovery_ota_auth_mirror_drift_check.py [repo_root]
 Exit 0: all three comparisons pass.
@@ -139,15 +161,20 @@ ORDER_MARKERS = [
     ("missing or malformed X-Ota-Mac header (want 64 hex chars)", "missing/malformed header string"),
     ("could not read X-Ota-Mac header", "header-read-failure string"),
     ("X-Ota-Mac must be 64 hex characters", "bad hex string"),
-    ("ota_auth_lockout_is_locked(&s_lockout, t)", "lockout check"),
+    ("ota_auth_lockout_is_locked(lockout, t)", "lockout check"),
 ]
 
 
 def check_ordering(recovery_text: str) -> list:
     """Returns a list of problems (empty if none)."""
     problems = []
+    # recovery_authenticate_request() takes a per-route `context`/`lockout`
+    # pair (2026-09-19 fix -- see recovery_http.c's file header on why one
+    # shared lockout across three routes was itself a finding); the ordering
+    # check only cares about the body, so the signature match is loose about
+    # the parameter list rather than pinning the exact parameter names.
     handler_match = re.search(
-        r"static bool recovery_authenticate_request\(httpd_req_t \*req, esp_err_t \*out_err\)\n\{\n(.*?)\n\}\n",
+        r"static bool recovery_authenticate_request\([^)]*\)\n\{\n(.*?)\n\}\n",
         recovery_text,
         re.DOTALL,
     )
@@ -174,26 +201,66 @@ def check_ordering(recovery_text: str) -> list:
 
 # --- route-coverage check --------------------------------------------------
 
-# Every mutating (state-changing) POST handler registered in recovery_http.c's
-# routes[] table. A new mutating route MUST be added here -- see this
-# module's docstring item 3 for why an omission here is worse than a missing
-# check entirely. GET handlers (challenge_get, partitions_get,
-# boot_guard_get) are deliberately excluded: they don't mutate state.
-MUTATING_ROUTE_HANDLERS = [
-    "ota_esp_post",
-    "boot_guard_reset_post",
-    "sw_reset_post",
-]
+# Methods considered mutating/state-changing for this check's purposes.
+MUTATING_METHODS = {"HTTP_POST", "HTTP_PUT", "HTTP_DELETE", "HTTP_ANY"}
+
+# Deliberate exclusions from route coverage -- a mutating route named here is
+# allowed to skip recovery_authenticate_request() without failing the check.
+# Empty today: every mutating route in routes[] is expected to authenticate.
+# See this module's docstring item 4 before adding an entry -- it is an
+# escape hatch, not a place to quietly grow the unauthenticated surface.
+ROUTE_COVERAGE_ALLOWLIST = set()
+
+ROUTES_TABLE_RE = re.compile(
+    r"static const httpd_uri_t routes\[\] = \{(.*?)\};", re.DOTALL
+)
+ROUTE_ENTRY_METHOD_RE = re.compile(r"\.method\s*=\s*(HTTP_\w+)")
+ROUTE_ENTRY_HANDLER_RE = re.compile(r"\.handler\s*=\s*(\w+)")
 
 AUTH_CALL_MARKER = "recovery_authenticate_request("
 
 
+def discover_mutating_handlers(recovery_text: str) -> list:
+    """Parses recovery_http.c's routes[] table (after stripping comments) and
+    returns the `.handler` names of every entry whose `.method` is
+    HTTP_POST/HTTP_PUT/HTTP_DELETE/HTTP_ANY. Returns None (via raising) if
+    the table itself can't be located, so a rename of routes[] fails loud
+    rather than silently checking zero handlers."""
+    text = strip_comments(recovery_text)
+    m = ROUTES_TABLE_RE.search(text)
+    if not m:
+        raise LookupError("could not locate routes[] table in recovery_http.c")
+    table_body = m.group(1)
+    handlers = []
+    # Each entry is a brace-delimited struct literal; split on top-level
+    # "}," boundaries (good enough here -- entries don't nest braces).
+    for entry in re.split(r"\}\s*,", table_body):
+        method_m = ROUTE_ENTRY_METHOD_RE.search(entry)
+        handler_m = ROUTE_ENTRY_HANDLER_RE.search(entry)
+        if not method_m or not handler_m:
+            continue
+        if method_m.group(1) in MUTATING_METHODS:
+            handlers.append(handler_m.group(1))
+    return handlers
+
+
 def check_route_coverage(recovery_text: str) -> list:
-    """Returns a list of problems (empty if none): every handler named in
-    MUTATING_ROUTE_HANDLERS must call recovery_authenticate_request()
-    somewhere in its own body."""
+    """Returns a list of problems (empty if none): every mutating handler
+    discovered in routes[] (methods in MUTATING_METHODS, minus
+    ROUTE_COVERAGE_ALLOWLIST) must call recovery_authenticate_request()
+    somewhere in its own body, and that call must survive comment-stripping
+    (a commented-out call must NOT count -- see docstring item 3)."""
     problems = []
-    for handler in MUTATING_ROUTE_HANDLERS:
+    try:
+        handlers = discover_mutating_handlers(recovery_text)
+    except LookupError as exc:
+        return [str(exc)]
+    if not handlers:
+        return ["discovered zero mutating routes in routes[] -- update this check's "
+                "parsing rather than letting it pass vacuously"]
+    for handler in handlers:
+        if handler in ROUTE_COVERAGE_ALLOWLIST:
+            continue
         handler_match = re.search(
             r"static esp_err_t " + re.escape(handler) + r"\(httpd_req_t \*req\)\n\{\n(.*?)\n\}\n",
             recovery_text,
@@ -201,10 +268,12 @@ def check_route_coverage(recovery_text: str) -> list:
         )
         if not handler_match:
             problems.append(f"could not locate handler {handler}() in recovery_http.c -- "
-                             "update MUTATING_ROUTE_HANDLERS/this check's regex rather than "
-                             "letting it pass vacuously")
+                             "update this check's regex rather than letting it pass vacuously")
             continue
-        body = handler_match.group(1)
+        # Strip comments before testing for the auth-call marker -- a
+        # commented-out call (e.g. "// recovery_authenticate_request(...)")
+        # must not satisfy coverage.
+        body = strip_comments(handler_match.group(1))
         if AUTH_CALL_MARKER not in body:
             problems.append(
                 f"{handler}() does not call recovery_authenticate_request() -- this route "
@@ -273,10 +342,11 @@ def main() -> int:
     if failed:
         return 1
 
+    mutating_count = len(discover_mutating_handlers(recovery_text))
     print(
         f"RECOVERY OTA-AUTH MIRROR DRIFT CHECK: OK ({len(recovery_lines)} normalized "
         "hex-decode lines match; header->hex->lockout ordering and wire strings confirmed; "
-        f"{len(MUTATING_ROUTE_HANDLERS)} mutating routes all call recovery_authenticate_request())"
+        f"{mutating_count} mutating routes all call recovery_authenticate_request())"
     )
     return 0
 

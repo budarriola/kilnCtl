@@ -209,17 +209,33 @@ free by calling the helper. `recovery_ota_auth_mirror_drift_check.py` (still
 wired in as `check_recovery_ota_auth_mirror.ps1`) was extended two ways: its
 ordering/wire-string comparison now targets `recovery_authenticate_request()`
 instead of `ota_esp_post()` (which is now just a caller), and a new
-route-coverage assertion walks a fixed list of every mutating POST handler
-registered in `recovery_http.c`'s `routes[]` table
-(`ota_esp_post`/`boot_guard_reset_post`/`sw_reset_post`) and fails if any of
-them no longer calls the helper -- so a future unauthenticated mutating
-route fails this check instead of sitting undetected next to it, which is
-exactly how these two got missed the first time. Negative-tested: removing
-the call from `sw_reset_post()` failed the check with a named-handler
-message, and restoring by hand reproduced the exact previously-committed
-blob (`git diff` clean, `git hash-object` match) before re-confirming green.
-`check_00_kilnfw_recovery_target_build.ps1`, `check_recovery_image_size.ps1`
-and `check_recovery_ota_auth_mirror.ps1` all pass. Fixed in `ea09ba0a`.
+route-coverage assertion parses `recovery_http.c`'s `routes[]` table itself
+(every entry whose `.method` is `HTTP_POST`/`HTTP_PUT`/`HTTP_DELETE`/
+`HTTP_ANY`, currently `ota_esp_post`/`boot_guard_reset_post`/`sw_reset_post`)
+rather than checking against a hand-maintained list, and fails if any
+discovered handler no longer calls the helper -- so a future unauthenticated
+mutating route fails this check instead of sitting undetected next to it,
+which is exactly how these two got missed the first time; because the
+handler set is derived from `routes[]` rather than hand-copied, that claim
+holds even for a route nobody remembered to add to a list by hand, which an
+earlier hand-maintained-list version of this check could not say. A
+follow-up review found the auth helper also hardcoded the HMAC context to
+`"esp"` for all three routes (mismatching the main app's/PC client's
+per-route contexts) and shared one lockout across all three routes (so
+failures against one route could lock out an unrelated one); both are fixed
+in the same pass -- the helper now takes `context`/`lockout` parameters and
+each route passes its own (`"esp"`/`"boot-guard-reset"`/`"sw-reset"` with
+`s_lockout_esp`/`s_lockout_boot_guard_reset`/`s_lockout_sw_reset`). The
+route-coverage substring test now also strips comments first, so a
+commented-out call to the helper does not count as coverage. Negative-tested:
+removing the call from `sw_reset_post()` failed the check with a
+named-handler message; adding an unauthenticated fake `/api/wipe` POST route
+to `routes[]` also failed the check (new route-discovery coverage, not just
+the fixed three); restoring by hand in both cases reproduced the exact
+previously-committed blob (`git diff` clean, `git hash-object` match) before
+re-confirming green. `check_00_kilnfw_recovery_target_build.ps1`,
+`check_recovery_image_size.ps1` and `check_recovery_ota_auth_mirror.ps1` all
+pass. Fixed in `ea09ba0a`, hardened further in a follow-up commit on top.
 
 ### 2.3 `/api/boot_guard` and `/api/partitions` return different JSON shapes in the two images
 

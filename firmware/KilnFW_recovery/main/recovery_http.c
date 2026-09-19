@@ -3,7 +3,13 @@
 // Auth mechanism: docs/OTA_SINGLE_SLOT_PLAN.md section 3 item 3 /
 // firmware/CommonFW/docs/UPDATE_PROTOCOL.md section 2 --
 //   key = HMAC-SHA256(ap_password, "kilnctl-ota-v1")
-//   mac = HMAC-SHA256(key, nonce || "esp")
+//   mac = HMAC-SHA256(key, nonce || context)
+// where context is "esp" for POST /api/ota/esp, "boot-guard-reset" for POST
+// /api/ota/esp/boot_guard_reset, and "sw-reset" for POST /api/sw_reset --
+// matching ota_http.c's per-route OTA_HTTP_CONTEXT_* strings and
+// ota_http_client.py's derive_mac() calls exactly (see
+// recovery_authenticate_request()'s own comment for the per-route lockout
+// state that goes with each context).
 // carried in the request as header "X-Ota-Mac", hex-encoded, checked
 // against a single-use, 30s-expiry nonce from GET /api/ota/challenge via
 // the same ota_auth.c state machine the main KilnFW image uses (copied in
@@ -68,7 +74,13 @@ static const char *TAG = "recovery_http";
 #define BOOT_GUARD_NAMESPACE_LEGACY "boot_guard"
 
 static ota_auth_nonce_state_t s_nonce;
-static ota_auth_lockout_state_t s_lockout;
+// Per-route lockouts, mirroring ota_http.c:408-414's s_lockout_esp /
+// s_lockout_sw_reset / s_lockout_boot_guard_reset -- a shared lockout would
+// let repeated failures against one route (e.g. boot_guard_reset) lock out
+// an unrelated route (e.g. ota_esp_post) that never saw a bad MAC itself.
+static ota_auth_lockout_state_t s_lockout_esp;
+static ota_auth_lockout_state_t s_lockout_boot_guard_reset;
+static ota_auth_lockout_state_t s_lockout_sw_reset;
 
 static uint32_t now_ms(void)
 {
@@ -195,6 +207,14 @@ static esp_err_t challenge_get(httpd_req_t *req)
 // route gets this for free by calling it, instead of becoming a ninth
 // hand-copy.
 //
+// `context` is the per-route HMAC context string appended after the nonce
+// ("esp" / "boot-guard-reset" / "sw-reset" -- must match the caller's route
+// exactly, see the file header comment) and `lockout` is that route's own
+// ota_auth_lockout_state_t. Each caller passes its own static lockout
+// instance (s_lockout_esp / s_lockout_boot_guard_reset / s_lockout_sw_reset)
+// so repeated failures against one route cannot lock out an unrelated one,
+// mirroring ota_http.c:408-414's per-context lockouts.
+//
 // On success: returns true, sends nothing (caller proceeds).
 // On failure: returns false, having already sent the appropriate error
 // status/body itself via *out_err -- caller must return *out_err
@@ -204,7 +224,8 @@ static esp_err_t challenge_get(httpd_req_t *req)
 // ota_esp_post()'s, now just a caller) against ota_http_authenticate_
 // request()/ota_http_hex_decode() in the main app -- see that check's
 // header comment before changing wire strings or ordering here.
-static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err)
+static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err,
+                                           const char *context, ota_auth_lockout_state_t *lockout)
 {
     uint32_t t = now_ms();
 
@@ -234,7 +255,7 @@ static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err)
         return false;
     }
 
-    if (ota_auth_lockout_is_locked(&s_lockout, t)) {
+    if (ota_auth_lockout_is_locked(lockout, t)) {
         httpd_resp_set_status(req, "429 Too Many Requests");
         *out_err = httpd_resp_send(req, "locked out, retry later", HTTPD_RESP_USE_STRLEN);
         return false;
@@ -259,23 +280,24 @@ static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err)
     hmac_sha256((const uint8_t *)ap_password, strlen(ap_password),
                 (const uint8_t *)"kilnctl-ota-v1", strlen("kilnctl-ota-v1"), key);
 
-    uint8_t msg[OTA_AUTH_NONCE_LEN + 3];
+    size_t context_len = strlen(context);
+    uint8_t msg[OTA_AUTH_NONCE_LEN + 16];
     memcpy(msg, s_nonce.nonce, OTA_AUTH_NONCE_LEN);
-    memcpy(msg + OTA_AUTH_NONCE_LEN, "esp", 3);
+    memcpy(msg + OTA_AUTH_NONCE_LEN, context, context_len);
     uint8_t expected_mac[32];
-    hmac_sha256(key, sizeof(key), msg, sizeof(msg), expected_mac);
+    hmac_sha256(key, sizeof(key), msg, OTA_AUTH_NONCE_LEN + context_len, expected_mac);
 
     // Invalidate the nonce unconditionally before deciding pass/fail --
     // UPDATE_PROTOCOL.md section 2 step 4.
     ota_auth_nonce_invalidate(&s_nonce);
 
     if (!ota_auth_constant_time_equal(claimed_mac, expected_mac, sizeof(expected_mac))) {
-        ota_auth_lockout_record_failure(&s_lockout, t);
+        ota_auth_lockout_record_failure(lockout, t);
         httpd_resp_set_status(req, "403 Forbidden");
         *out_err = httpd_resp_send(req, "bad MAC", HTTPD_RESP_USE_STRLEN);
         return false;
     }
-    ota_auth_lockout_record_success(&s_lockout);
+    ota_auth_lockout_record_success(lockout);
     return true;
 }
 
@@ -283,7 +305,7 @@ static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err)
 static esp_err_t ota_esp_post(httpd_req_t *req)
 {
     esp_err_t auth_err = ESP_OK;
-    if (!recovery_authenticate_request(req, &auth_err)) {
+    if (!recovery_authenticate_request(req, &auth_err, "esp", &s_lockout_esp)) {
         return auth_err;
     }
 
@@ -378,7 +400,7 @@ static esp_err_t boot_guard_get(httpd_req_t *req)
 static esp_err_t boot_guard_reset_post(httpd_req_t *req)
 {
     esp_err_t auth_err = ESP_OK;
-    if (!recovery_authenticate_request(req, &auth_err)) {
+    if (!recovery_authenticate_request(req, &auth_err, "boot-guard-reset", &s_lockout_boot_guard_reset)) {
         return auth_err;
     }
 
@@ -404,7 +426,7 @@ static esp_err_t boot_guard_reset_post(httpd_req_t *req)
 static esp_err_t sw_reset_post(httpd_req_t *req)
 {
     esp_err_t auth_err = ESP_OK;
-    if (!recovery_authenticate_request(req, &auth_err)) {
+    if (!recovery_authenticate_request(req, &auth_err, "sw-reset", &s_lockout_sw_reset)) {
         return auth_err;
     }
 
