@@ -40,15 +40,24 @@ WHAT IS COMPARED, and why each normalization exists:
    is exercised by a positive test (both the old and new ordering return
    400/429 on the same malformed-input fixture; only the numeric HTTP
    status told them apart, and both are assigned in this same file so an
-   accidental swap does not fail to compile). NOTE: this item, including the
-   per-route HMAC context strings ("esp" / "boot-guard-reset" / "sw-reset")
-   and their ordering against ota_http.c's OTA_HTTP_CONTEXT_* cases, is
-   asserted here against a hardcoded transcription of ota_http.c's strings
-   at the time this check was written -- it is NOT diffed byte-for-byte
-   against ota_http.c the way item 1 diffs against ota_http_util.c. A
-   rename of ota_http.c's context strings will not be caught by this check;
-   re-verify by hand against ota_http.c:408-414 and
-   tools/PcTools/src/kilnctrl/ota_http_client.py's derive_mac() call sites
+   accidental swap does not fail to compile).
+
+   NOTE on context strings: ORDER_MARKERS above checks recovery_
+   authenticate_request()'s own body and has no notion of which context
+   string a given *caller* passes it -- it would stay green even if
+   boot_guard_reset_post() were reverted to call with "esp" instead of its
+   own "boot-guard-reset". That specific hazard is covered separately by
+   check_route_contexts()/ROUTE_CONTEXT_MARKERS below, which pins each of
+   the three mutating handlers (ota_esp_post/boot_guard_reset_post/
+   sw_reset_post) to its own expected context literal in its own call site.
+   Both ORDER_MARKERS and ROUTE_CONTEXT_MARKERS's three context strings
+   ("esp" / "boot-guard-reset" / "sw-reset") are asserted here against a
+   hardcoded transcription of ota_http.c's OTA_HTTP_CONTEXT_* strings
+   (ota_http.c:408-414) and ota_http_client.py's derive_mac() call sites
+   (:513, :630) at the time this check was written -- NOT diffed
+   byte-for-byte against either file the way item 1 diffs hex_decode()
+   against ota_http_util.c. A rename of any of those strings on either side
+   will not be caught by this check; re-verify by hand against both files
    if either changes.
 
 3. Route coverage: every mutating (state-changing, i.e. HTTP_POST/HTTP_PUT/
@@ -199,6 +208,54 @@ def check_ordering(recovery_text: str) -> list:
     return problems
 
 
+# --- per-route context-string check -----------------------------------------
+
+# Each mutating handler must call recovery_authenticate_request() with its
+# own, distinct HMAC context literal -- see the module docstring item 2 NOTE.
+# This is a hardcoded transcription of ota_http.c:408-414's OTA_HTTP_CONTEXT_*
+# strings and ota_http_client.py's derive_mac() call sites (:513, :630), not a
+# diff against either file (unlike item 1's hex_decode() comparison) -- if
+# either changes, re-verify by hand and update this table.
+ROUTE_CONTEXT_MARKERS = [
+    ("ota_esp_post", 'recovery_authenticate_request(req, &auth_err, "esp"'),
+    ("boot_guard_reset_post", 'recovery_authenticate_request(req, &auth_err, "boot-guard-reset"'),
+    ("sw_reset_post", 'recovery_authenticate_request(req, &auth_err, "sw-reset"'),
+]
+
+
+def check_route_contexts(recovery_text: str) -> list:
+    """Returns a list of problems (empty if none): each handler in
+    ROUTE_CONTEXT_MARKERS must call recovery_authenticate_request() with its
+    own pinned context literal in its own body -- catches a handler reverted
+    to (or copy-pasted with) the wrong context string, e.g.
+    boot_guard_reset_post() calling with "esp" instead of
+    "boot-guard-reset", which the ordering/route-coverage checks alone do
+    not: both only look for *a* call to the helper, not *which* context
+    string it passes."""
+    problems = []
+    for handler, expected_marker in ROUTE_CONTEXT_MARKERS:
+        handler_match = re.search(
+            r"static esp_err_t " + re.escape(handler) + r"\(httpd_req_t \*req\)\n\{\n(.*?)\n\}\n",
+            recovery_text,
+            re.DOTALL,
+        )
+        if not handler_match:
+            problems.append(f"could not locate handler {handler}() in recovery_http.c -- "
+                             "update ROUTE_CONTEXT_MARKERS/this check's regex rather than "
+                             "letting it pass vacuously")
+            continue
+        body = strip_comments(handler_match.group(1))
+        if expected_marker not in body:
+            problems.append(
+                f"{handler}() does not call recovery_authenticate_request() with its own "
+                f"context ({expected_marker!r} not found) -- a copy-pasted or reverted "
+                "context string would authenticate with the wrong HMAC input and either "
+                "reject every legitimate caller or, worse, accept a MAC computed for a "
+                "different route"
+            )
+    return problems
+
+
 # --- route-coverage check --------------------------------------------------
 
 # Methods considered mutating/state-changing for this check's purposes.
@@ -336,6 +393,13 @@ def main() -> int:
     if coverage_problems:
         print("RECOVERY OTA-AUTH MIRROR DRIFT CHECK: FAILED (route coverage)")
         for p in coverage_problems:
+            print(f"  {p}")
+        failed = True
+
+    context_problems = check_route_contexts(recovery_text)
+    if context_problems:
+        print("RECOVERY OTA-AUTH MIRROR DRIFT CHECK: FAILED (per-route context strings)")
+        for p in context_problems:
             print(f"  {p}")
         failed = True
 

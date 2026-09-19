@@ -280,8 +280,29 @@ static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err,
     hmac_sha256((const uint8_t *)ap_password, strlen(ap_password),
                 (const uint8_t *)"kilnctl-ota-v1", strlen("kilnctl-ota-v1"), key);
 
+    // Sized for the longest of the three known context literals,
+    // "boot-guard-reset" (16 chars, no NUL -- this buffer is never treated
+    // as a C string). The _Static_assert()s below pin all three literals'
+    // lengths so this comment can't silently go stale if one is renamed.
+    // The runtime bounds check right after guards any FUTURE context this
+    // helper is called with that the static asserts don't know about --
+    // belt and suspenders, since `context` is caller-supplied even though
+    // every current caller is a literal in this same file.
+    _Static_assert(sizeof("esp") - 1 <= 16, "context literal exceeds msg[] headroom");
+    _Static_assert(sizeof("boot-guard-reset") - 1 <= 16, "context literal exceeds msg[] headroom");
+    _Static_assert(sizeof("sw-reset") - 1 <= 16, "context literal exceeds msg[] headroom");
     size_t context_len = strlen(context);
     uint8_t msg[OTA_AUTH_NONCE_LEN + 16];
+    if (context_len > sizeof(msg) - OTA_AUTH_NONCE_LEN) {
+        // Cannot happen with today's three call sites (all compile-time
+        // literals covered by the _Static_assert()s above) -- this guards
+        // only against a future caller passing a longer context without
+        // also growing msg[], which would otherwise overflow it.
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        *out_err = httpd_resp_send(req, "internal error: auth context too long",
+                                    HTTPD_RESP_USE_STRLEN);
+        return false;
+    }
     memcpy(msg, s_nonce.nonce, OTA_AUTH_NONCE_LEN);
     memcpy(msg + OTA_AUTH_NONCE_LEN, context, context_len);
     uint8_t expected_mac[32];
