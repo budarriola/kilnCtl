@@ -543,8 +543,9 @@ store's version in synthetic scratch text with no matching step/macro (FAIL,
 naming the store) and separately run the function against today's real,
 already-compliant production files (PASS) — 15 assertions total, up from 9.
 The fire-profiles frozen-input-struct extension above is separately
-negative-tested by assertions 19-20 (missing `sizeof` assert; `crc32` not
-the last field), 20 assertions total as of 2026-09-19.
+negative-tested by assertions 19-22 (missing `sizeof` assert; `crc32` not
+the last field; a commented-out `sizeof` assert; a trailing comment naming
+`crc32` after the true last member), 22 assertions total as of 2026-09-19.
 
 **Still explicitly follow-up, not assumed done:** D1's "exactly one NEW step
 per bump" defect-catching rule and the fixture-must-be-referenced rule, for
