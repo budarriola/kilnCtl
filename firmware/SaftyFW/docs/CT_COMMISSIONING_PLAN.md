@@ -427,6 +427,51 @@ waiting to happen.
   that `i_normal_a` (the per-zone expected-current baseline) is unmeasured —
   not because the gain was never entered.
 
+## Step 6 CLOSED by owner decision, 2026-09-19 — software walkthrough only
+
+The owner decided this bench's ~4 W fixture cannot record `i_normal_a` and
+that no real load will be attached now, so step 6's remaining bench run is
+closed as a software walkthrough rather than left open pending hardware that
+is not coming. The walkthrough ran end to end against the live board
+(COM14, link protocol v12, FW `1baa828c` built 2026-09-18 22:20:20Z):
+
+- **Commissioning state read back:** `ct_installed=1`, `ct_topology=1`
+  (summed); `ct_channel_map` is not applicable in summed mode. Channel 2's
+  calibration: `k_ct_v_per_a[2]=1`, `zero_counts[2]=63`, `gain[2]=0.715`;
+  channels 0/1 hold their unset `k_ct_v_per_a=0`/`zero_counts=0` defaults
+  and are not-fitted in this topology. `i_present_a=2` (auto-derived).
+  `i_normal_a` was not measured on any channel (`safety_get_commissioning`:
+  S14 ch0/ch1/ch2 all DORMANT; S15 z0/z1/z2 all DORMANT).
+- **Live status:** `safety_get_status` reported the link up, SaftyFW armed
+  and not tripped, the safety thermocouple valid at 25.23 C, currents
+  "not fitted, not fitted, 0.02 A" (raw ADC counts 16, 17, 85 -- channel 2
+  near its zero offset of 63, consistent with no load), and "ct zone: -"
+  (no single zone attributable, as expected with no zone commanded on).
+- **Current sweep run** (`zone_current_sweep_start(confirm=true)`, all
+  three zones, ~5 s/zone): finished `state=done`, `zones_done=3/3`, but
+  `summed_unmeasured_mask=7` (all three zones) and
+  `k_ct_reason='an incomplete pass -- some zone never cleared the noise
+  floor, so k_ct was not set'`, `nameplate_reason='zone 0: no measured
+  normal current for this zone yet'`. The sweep tool's own status message
+  states this outcome is expected on this project's ~4 W bench fixture,
+  whose per-zone current (~23 mA alone, ~70 mA all three) sits below the
+  firmware's 0.045 A noise floor. **Verdict: INCONCLUSIVE**, exactly as
+  predicted -- no `i_normal_a` was pushed for any zone
+  (`i_normal_pushed_mask=0`).
+- **Post-sweep confirmation nothing changed:** `safety_get_ct_cal_raw` and
+  `safety_get_commissioning` read back byte-identical to their pre-sweep
+  values (config CRC 21975 unchanged both before and after), no trip
+  latched, and `safety_get_status` still reported "armed (relay_owner not
+  tripped)" with all relays off.
+
+**A real load is required before S14/S15 can ever arm on this fixture.**
+No amount of further software work on this bench changes that; the sweep
+already runs correctly and reports INCONCLUSIVE honestly rather than
+fabricating a normal-current baseline from noise. This closes step 6 and,
+with it, the whole `CT_COMMISSIONING_PLAN.md` step list -- steps 0-5 were
+already done, and step 6 is now closed by owner decision rather than
+technically completed.
+
 ## Order and ownership
 
 Step 0 first (it may make step 3's under-current warn moot on this bench).
