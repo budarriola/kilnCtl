@@ -477,6 +477,51 @@ uint32_t zones_config_generation(void)
     return 0;
 }
 
+// live_profile.c/profiles_http.c are the http/persist tier, deliberately not
+// linked into this control-tier host executable (same reasoning as
+// profiles_http_get() above) -- fixed at 0 so reload_live_profile_if_changed()
+// takes its cheap "unchanged" return every tick, matching this file's
+// pre-existing behavior for every test that doesn't specifically exercise the
+// live-edit pickup path (none do yet; that is test_live_profile.c's job).
+uint32_t live_profile_generation(void)
+{
+    return 0;
+}
+
+bool live_profile_load_working(profile_t *out)
+{
+    (void)out;
+    return false;
+}
+
+// profile_executor_live_pickup.c (linked for real -- it is a small pure
+// file) calls live_edit_check_window(), which lives in live_profile.c,
+// deliberately not linked into this executable (see comment above). Never
+// actually reached here: live_profile_generation() always returns 0, so
+// reload_live_profile_if_changed() always takes its early-return before any
+// candidate is loaded -- live_edit_check_window() is exercised for real by
+// test_live_profile.c, its own executable.
+bool live_edit_check_window(const profile_t *running, const profile_t *candidate, uint8_t segment_index, char *err,
+                             size_t err_cap)
+{
+    (void)running;
+    (void)candidate;
+    (void)segment_index;
+    if (err && err_cap) err[0] = '\0';
+    return false;
+}
+
+bool profiles_validate_candidate(const profile_t *candidate, int mode, char *warnings_json, size_t warnings_json_cap,
+                                  char *err_msg, size_t err_cap)
+{
+    (void)candidate;
+    (void)mode;
+    (void)warnings_json;
+    (void)warnings_json_cap;
+    if (err_msg && err_cap) err_msg[0] = '\0';
+    return true;
+}
+
 bool zones_config_get_continue_on_zone_trip(void)
 {
     return g_continue_on_zone_trip;

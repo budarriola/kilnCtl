@@ -596,6 +596,21 @@ try {
             "`"$(Join-Path $driversDir 'persist/firing_stats_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
             "`"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
+            # docs/LIVE_PROFILE_EDIT_PLAN.md pass 1: profile_executor.c (#included
+            # above) now calls profile_executor_live_pickup_check() from
+            # reload_live_profile_if_changed(). Linked for REAL rather than
+            # faked -- it is a small pure file (no hal_kv/FreeRTOS deps) and
+            # this executable already fakes live_profile_generation()/
+            # live_profile_load_working()/profiles_validate_candidate()
+            # themselves (test_profile_executor_prestart.c's own fakes),
+            # which is enough for this pickup function to compile and link
+            # against without pulling in live_profile.c's hal_kv-backed half --
+            # live_edit_check_window() (the one real dependency
+            # profile_executor_live_pickup.c has) is faked directly inside
+            # test_profile_executor_prestart.c instead, alongside its other
+            # fakes of this same module's surface (live_profile.c itself is
+            # tested for real by test_live_profile.c, its own executable).
+            "`"$(Join-Path $driversDir 'control/profile_executor_live_pickup.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
     # 2026-09-08: flash_worker_wait.c linked in -- adaptive_tune.c (linked
@@ -721,6 +736,34 @@ try {
     # there is more than one .obj to place.
 
     Invoke-HostTestExe -Name "profiles_http" -ExePath $exe7 -BuildCmd $cmd7
+
+    # ---- test_live_profile.c: its own separate executable ---------------------
+    # docs/LIVE_PROFILE_EDIT_PLAN.md pass 1. Same "#includes the .c directly"
+    # reason as test_zones_http.c/test_profiles_http.c above -- it reaches
+    # live_profile.c's persistence functions and profile_executor_live_pickup.c's
+    # pure pickup check by #including both files directly, and needs the REAL
+    # host hal_kv backend (fake_kv.c) so live_profile.c's read-back-verified
+    # writes are exercised for real. Fakes profile_encode_current_blob()/
+    # profile_decode_blob() locally (a tiny memcpy stand-in, not the real wire
+    # format -- that format's own correctness is test_profiles_http.c's job)
+    # since profiles_http.c (the real implementation) is not linked into this
+    # executable; live_profile.c itself forward-declares the shared
+    # profile_decode_result_t/PROFILE_DECODE_OK type behind a
+    # PROFILE_DECODE_RESULT_SHIM_DECLARED guard rather than pulling in
+    # profiles_http_internal.h (esp_http_server.h, not host-safe -- same
+    # reasoning as profile_executor.c's own local forward declaration of
+    # profiles_validate_candidate()), and this test file pre-declares an
+    # identical shim ahead of live_profile.c's #include so both agree on the
+    # type without a duplicate enum-tag definition error.
+    $exeLp = Join-Path $outDir "kilnctl_host_tests_live_profile.exe"
+    $lpObjDir = Join-Path $outDir "live_profile_obj"
+    New-Item -ItemType Directory -Force -Path $lpObjDir | Out-Null
+    $cmdLp = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$lpObjDir\\`" /Fe:`"$exeLp`" `"$(Join-Path $testDir 'test_live_profile.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "live_profile" -ExePath $exeLp -BuildCmd $cmdLp
 
     # ---- test_ota_http.c: its own EIGHTH, separate executable -----------------
     # ota_http.c/factory_reset.c shipped their security fixes (empty-AP-password
@@ -2279,7 +2322,11 @@ try {
     # host-compiled directly (GCC-only asm blob externs; wifi_provision_http.c
     # also #includes <sys/socket.h> with no host stub), so each tests its
     # fix's pure formatter plus the real may_disclose gate composition.
-    $totalExpected = 54
+    # 54 -> 55: docs/LIVE_PROFILE_EDIT_PLAN.md pass 1 added
+    # test_live_profile.c (55th) as its own Invoke-HostTestExe call --
+    # live_profile.c's persistence functions and profile_executor_live_
+    # pickup.c's pure pickup check, both untested until now.
+    $totalExpected = 55
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the
