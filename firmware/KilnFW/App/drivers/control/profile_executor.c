@@ -4,10 +4,12 @@
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h> /* free() -- reload_live_profile_if_changed()'s candidate blob is heap-allocated, see profile_executor_firing_stats.c's established pattern */
 #include <string.h>
 
 #include <time.h>
 
+#include "esp_heap_caps.h" /* heap_caps_malloc() */
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
@@ -322,18 +324,24 @@ static void reload_live_profile_if_changed(void)
         return;
     }
 
-    /* static, not a stack local: check_executor_task_stack_budget.ps1's
+    /* Heap-allocated, not a stack local: check_executor_task_stack_budget.ps1's
      * ceiling (executor_task_entry's own reachable stack) is exceeded once
      * this profile_t-sized candidate sits on top of live_profile_load_
      * working()'s own internal decode buffer and profile_decode_blob()'s
-     * frame further down the same call chain. Safe as `static` because
-     * reload_live_profile_if_changed() is only ever called serially, from
-     * this one task's own tick loop -- never re-entered, never called from
-     * any other task -- the same "single dedicated caller, no concurrency"
-     * argument kiln_cfg_swap.c's flash_worker_lint.py allowlist entry makes
-     * for its own worker-task-only buffers. */
-    static profile_t candidate;
-    if (!live_profile_load_working(&candidate)) {
+     * frame further down the same call chain. Same established pattern as
+     * profile_executor_firing_stats.c's firing_stats_persist()/
+     * firing_stats_load() (heap_caps_malloc() + free() on every return
+     * path, never a bigger stack) -- freed before every return below.
+     * Internal DRAM: this path reads NVS via hal_kv, same reasoning as
+     * firing_stats_load()'s own MALLOC_CAP_INTERNAL comment. */
+    profile_t *candidate = heap_caps_malloc(sizeof(*candidate), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (candidate == NULL) {
+        ESP_LOGE(PE_TAG, "reload_live_profile_if_changed: malloc(%u) failed -- live edit not adopted this tick",
+                 (unsigned)sizeof(*candidate));
+        return;
+    }
+    if (!live_profile_load_working(candidate)) {
+        free(candidate);
         return; /* nothing pending, or it's not for this run -- pass 2's HTTP
                   * layer is the only writer and only ever targets this run's
                   * own origin id, so a mismatch here just means "no-op". */
@@ -341,9 +349,10 @@ static void reload_live_profile_if_changed(void)
 
     char err_msg[128];
     profile_live_pickup_result_t result = profile_executor_live_pickup_check(
-        &s_exec.profile, &candidate, s_exec.segment_index, live_pickup_validate_hard, NULL, err_msg, sizeof(err_msg));
+        &s_exec.profile, candidate, s_exec.segment_index, live_pickup_validate_hard, NULL, err_msg, sizeof(err_msg));
     if (result != PROFILE_LIVE_PICKUP_OK) {
         ESP_LOGW(PE_TAG, "live profile edit NOT adopted (result %d): %s", (int)result, err_msg);
+        free(candidate);
         return;
     }
 
@@ -351,7 +360,8 @@ static void reload_live_profile_if_changed(void)
      * every firing-stats accumulator are left exactly as they were, which is
      * the continuity guarantee plan section 1 asks for ("the running segment
      * keeps running"). */
-    s_exec.profile = candidate;
+    s_exec.profile = *candidate;
+    free(candidate);
     ESP_LOGW(PE_TAG, "OPERATOR ACTION MID-FIRING: live profile edit adopted at segment %u", s_exec.segment_index);
 }
 
