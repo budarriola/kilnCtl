@@ -842,6 +842,33 @@ this board, measured rather than assumed, is on the order of a few mA std /
 datasheet estimate, when picking `i_present_a`/S14's `overcurrent_pct`
 margins against real board noise.
 
+### Measured noise floor — RUN 2026-09-18
+
+Second capture, taken with **Wi-Fi associated and the front panel
+flushing** — deliberately not a quiet-bench condition, so this reflects a
+realistic in-service noise floor rather than a best case. All four relays
+off, nothing heating: 288 samples over 60.2 s, 4.78 Hz achieved poll rate.
+
+| Channel | mean (counts) | std (counts) | min | max |
+|---|---|---|---|---|
+| 0 | 16.10 | 0.301 | — | — |
+| 1 | 17.00 | 0.000 | — | — |
+| 2 (fitted) | 104.78 | 4.367 | 99 | 121 |
+
+Channel 1's 0.000 std means that channel read a single fixed value for the
+entire 60.2 s capture — it is a constant reading, not evidence of a
+quieter channel than 0 or 2.
+
+Channel 2's elevated mean and spread relative to channels 0 and 1 is
+consistent with the existing understanding of that channel (§5.2/§0.2):
+lead pickup on the fitted clamp, not a defect in the ADC or reference rail.
+
+3σ on channel 2 is approximately 13 counts, approximately 15 mA referred to
+the input — consistent in order of magnitude with the 2026-09-06 run's ~13
+mA peak-to-peak figure above, taken under quieter bench conditions on the
+same physical channel (labelled channel 3 there under that run's 1-indexed
+channel numbering).
+
 ---
 
 ## Completion checklist

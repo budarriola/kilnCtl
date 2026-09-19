@@ -67,13 +67,12 @@ document, do not solve.
 
 ## Steps
 
-0. **Noise floor** (bench, no heating): with `ct_installed=yes`, all relays
-   off, capture raw counts on channel 3 for 60 s at 20 Hz, report mean and
-   standard deviation, repeat with the LCD backlight and Wi-Fi active. Store
-   the result in `CURRENT_SENSE.md` §4. Decides the smallest detectable step
-   (3σ) and therefore whether per-heater open detection is viable on this
-   bench. Tool: a PcTools MCP call that reads the existing raw-counts
-   diagnostic (add one if only amps are exposed).
+0. **Noise floor — DONE, 2026-09-18.** Measured with Wi-Fi associated and
+   the front panel flushing (a realistic in-service condition, not a quiet
+   bench), all four relays off, nothing heating. Mean/std/3σ figures are
+   recorded in `firmware/SaftyFW/docs/CURRENT_SENSE.md` §4, "Measured noise
+   floor — RUN 2026-09-18" — see that section rather than repeating the
+   numbers here.
 1. **Editable calibration fields** (KilnFW page + SaftyFW params). **ESP
    side: done (2026-09-06).** `A_fs[3]`/`zero_mv[3]` are ASKED fields on
    `safety_commissioning_page.html` (section 3), each with its own "Apply"
