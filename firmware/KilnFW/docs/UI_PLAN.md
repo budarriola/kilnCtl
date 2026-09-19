@@ -1048,7 +1048,7 @@ E are the only two items that touch that file.
 Nothing in waves 1-3 touches `main_page.html`, any HTTP handler, any
 `httpd_uri_t` registration, or any task creation.
 
-### 6.8 Owner decisions — all five answered 2026-09-19
+### 6.8 Owner decisions — five answered 2026-09-19, plus a sixth owner rule
 
 These are **decided**, not open. They are recorded here because the arithmetic
 and the wave order above depend on them.
@@ -1079,3 +1079,15 @@ and the wave order above depend on them.
    whole 4px inter-row gap from both sides and would let adjacent rows'
    hit-boxes overlap — the mis-tap defect already fixed once on the relay-life
    page. The 8px touch-target shortfall is the accepted cost of this decision.
+
+6. **The dashboard's `Kiln: <name>` line is hidden when the board holds only
+   one kiln configuration — owner rule 2026-09-19** ("if there is only one
+   kiln config on the board do not show it on the lcd"). Owned by wave F
+   (6.5), since it lives in `ui_page_home_refresh.c`'s status line: count the
+   slots with `kiln_cfg_store_list()` (a RAM read, safe on the 1 Hz LVGL
+   tick) and append the `  Kiln: %s` suffix only when that count is two or
+   more. With zero or one config the suffix is omitted entirely — not
+   `(none)`, not the single name — and the freed width goes to the rest of
+   the status text. The web dashboard keeps showing the active name
+   regardless. Host test: the status-line formatter with counts 0, 1, 2 and
+   an active id set; the two-or-more case must still name the active config.
