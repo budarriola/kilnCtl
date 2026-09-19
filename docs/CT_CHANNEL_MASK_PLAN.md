@@ -1,6 +1,10 @@
 # Zone-to-CT channel mapping — supporting one, two, or three shared CTs
 
-Status: opened 2026-09-18. Owner request: kilns with one OR TWO shared current
+Status: BUILT, confirmed 2026-09-19. All six steps of the sequence below have
+landed, including step 6's per-zone selector surface on
+`safety_commissioning_page.html`. Nothing software-only remains outstanding.
+
+Opened 2026-09-18. Owner request: kilns with one OR TWO shared current
 transformers covering all zones (partial population), not just the two cases
 `ct_topology` can express today (three per-zone CTs, or exactly one on
 channel 2). This plan replaces an earlier per-channel-installed-mask draft:

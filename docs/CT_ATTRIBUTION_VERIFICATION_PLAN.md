@@ -1,6 +1,19 @@
 # CT attribution verification — commissioning plan
 
-Status: PARTIALLY BUILT. Landed so far (this commit):
+Status: SUBSTANTIALLY BUILT and verified under both CT topologies (individual
+per-zone CTs and a shared/summed CT), 2026-09-19. Everything below has landed;
+re-audited this pass by reading the engine, task, HTTP, wizard-step and
+PcTools code plus the host tests for both topologies, and by building and
+running them (zones host-test suite 2499/2499 checks passed, `run_all_checks.ps1`
+113/0/0). No functional defect was found in the attribution/normal-current
+logic for either topology. Two stale-documentation items found and fixed this
+pass: this plan's own "`CURRENT_SENSE.md` section 5's table row remains to be
+corrected separately" line was itself stale (that row was corrected in
+`ea22d31e`, before this plan's own last edit) and is retracted below; nothing
+else needed correcting. What remains is entirely hardware-gated (see "What the
+physics permits here, honestly" below) — no software-only item is outstanding.
+
+Landed so far:
 
 - Step 9's false verdict is fixed. `step9SweepVerdict()`
   (`firmware/KilnFW/App/drivers/http/setup_wizard_page.html`) is now the single
@@ -377,8 +390,10 @@ first suggests:
    `current_snapshot_t.present[]`, which `current_any_present()` returns, which
    S3/S4/S9 and S6b's current-gated trip read. A bad `gain` therefore moves a
    guard input, not only a wattage display. The three `gain[0..2]` rows are
-   relabelled to match; no other field's labelling was touched, and
-   `CURRENT_SENSE.md` section 5's table row remains to be corrected separately.
+   relabelled to match; no other field's labelling was touched.
+   `CURRENT_SENSE.md` section 5's table row is corrected too (`ea22d31e`,
+   2026-09-18) — this plan's own earlier claim that it "remains to be
+   corrected separately" is itself stale and is retracted here.
 3. **Offset trim already exists** as `zero_mv`, operator-entered in the same
    form, with an auto-measure action beside it.
 
