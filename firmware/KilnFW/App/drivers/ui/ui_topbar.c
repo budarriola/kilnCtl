@@ -157,7 +157,7 @@ void ui_topbar_create(lv_obj_t *scr, const ui_topbar_cfg_t *cfg, ui_topbar_t *ou
         lv_obj_set_style_pad_all(icons, 0, 0);
         lv_obj_remove_flag(icons, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_flex_flow(icons, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(icons, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+        lv_obj_set_flex_align(icons, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
         lv_obj_set_style_pad_gap(icons, UI_TOPBAR_ICON_GAP_PX, 0);
         lv_obj_align(icons, LV_ALIGN_TOP_RIGHT, 0, 0);
         /* NOT clickable itself. It only has to CONTAIN the touch point so
@@ -166,9 +166,13 @@ void ui_topbar_create(lv_obj_t *scr, const ui_topbar_cfg_t *cfg, ui_topbar_t *ou
          * icons be swallowed by a container that does nothing. */
         out->icons = icons;
 
-        /* Left-to-right order: Back, Home, Prev, Next, Gear. Back leftmost
-         * puts the most-used control furthest from the screen edge, where a
-         * finger is least likely to slip off the glass. */
+        /* Left-to-right order: Back, Home, Prev, Next, Warning, Gear. Back
+         * leftmost puts the most-used control furthest from the screen edge,
+         * where a finger is least likely to slip off the glass. The warning
+         * indicator is built before the gear (and the row is
+         * LV_FLEX_ALIGN_END) so the gear is always the rightmost child and
+         * stays flush with the container's right edge even while the hidden
+         * warning slot collapses to zero width. */
         if (cfg->back_page) {
             out->back_btn = build_icon(icons, LV_SYMBOL_LEFT, nav_cb, (void *)cfg->back_page);
         }
@@ -185,11 +189,11 @@ void ui_topbar_create(lv_obj_t *scr, const ui_topbar_cfg_t *cfg, ui_topbar_t *ou
         if (cfg->next_cb) {
             out->next_btn = build_icon(icons, LV_SYMBOL_NEXT, cfg->next_cb, NULL);
         }
-        if (cfg->gear_cb) {
-            out->gear_btn = build_icon(icons, LV_SYMBOL_SETTINGS, cfg->gear_cb, NULL);
-        }
         if (cfg->warning_icon) {
             out->warning_btn = build_indicator(icons, LV_SYMBOL_WARNING);
+        }
+        if (cfg->gear_cb) {
+            out->gear_btn = build_icon(icons, LV_SYMBOL_SETTINGS, cfg->gear_cb, NULL);
         }
 
         /* Every icon here got its click area extended toward
