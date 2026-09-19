@@ -28,11 +28,17 @@
 // profiles_cfg_fs.c's (see that header for the full four-way table) --
 // STRICT file_rev > nvs_rev to adopt the file, content-equal short-circuits
 // before any log, both-invalid means "never fired," NVS-valid/file-invalid
-// migrates lazily. There is no DELETE for this item (a profile's history
-// is only ever appended-to via firing_stats_persist(), never erased), so
-// unlike profiles_cfg_fs.c's rev array there is nothing to distinguish
-// "legitimately removed" from "failed NVS write" -- unused simplifies to
-// "nvs_valid == false, trust the file if present."
+// migrates lazily. Historically there was no DELETE for this item (a
+// profile's history was only ever appended-to via firing_stats_persist()),
+// so the resolve logic above still has no "legitimately removed" case to
+// distinguish from "failed NVS write" -- unused still simplifies to
+// "nvs_valid == false, trust the file if present." docs/
+// PROFILE_SLOTS_100_PLAN.md section 7 task 10 (2026-09-19) adds the first
+// real delete path, firing_stats_cfg_fs_delete() below, invoked ONLY when
+// the owning profile SLOT itself is deleted (profile_executor.h's
+// firing_stats_erase(), called from profiles_http.c's nvs_erase_slot()) --
+// never as part of ordinary resolve/persist traffic, so the reasoning above
+// is unaffected for any id that has not been through a slot delete.
 //
 // REV STORAGE: one NVS key per id ("fsr_<id>", under FIRING_STATS_NVS_
 // NAMESPACE/PARTITION -- profile_executor_firing_stats.c's own constants,
@@ -79,6 +85,14 @@ void firing_stats_cfg_fs_load_raw(uint8_t id, profile_firing_history_blob_t *out
 /* Writes id's file at `rev`. No-op returning ESP_ERR_INVALID_STATE if
  * cfg_fs never mounted. */
 esp_err_t firing_stats_cfg_fs_save(uint8_t id, const profile_firing_history_blob_t *blob, uint32_t rev);
+
+/* Deletes id's file ("stats/fs<id>.dat") and its "fsr_<id>" rev key --
+ * profile_executor.h's firing_stats_erase() calls this for the file/rev
+ * half of a slot-delete prune (it erases the "fs_<id>" blob key itself).
+ * ESP_ERR_NOT_FOUND on either half is treated as success, same convention
+ * as profiles_cfg_fs_delete(); cfg_fs unmounted degrades to "file side is a
+ * no-op, rev key still erased." Safe to call for an id that never fired. */
+esp_err_t firing_stats_cfg_fs_delete(uint8_t id);
 
 /* Reads id's persisted rev counter ("fsr_<id>" in FIRING_STATS_NVS_NAMESPACE/
  * PARTITION). Missing (never saved through the bridge yet) reads as 0. */

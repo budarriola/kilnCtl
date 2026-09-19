@@ -595,6 +595,53 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
     free(blob);
 }
 
+/* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 10: erases this id's
+ * firing-history blob ("fs_<id>", profiles_nvs/fire_stats) plus the
+ * cfg-filesystem mirror and its rev key (firing_stats_cfg_fs_delete()) --
+ * called from profiles_http.c's nvs_erase_slot() when a profile SLOT is
+ * deleted, so a later profile created at the same id never inherits the
+ * previous occupant's runs. Best-effort like every other half of a slot
+ * delete (profiles_cfg_fs_delete() one line above this call site in
+ * profiles_http.c): a failure here is logged and swallowed, never turned
+ * into a failed slot delete. Safe (a clean no-op) for an id that never
+ * fired -- HAL_NOT_FOUND on the NVS erase is treated as success, matching
+ * nvs_erase_slot()'s own hal_kv_erase_key() call. Does NOT check
+ * caller_stack_is_external(): both of today's callers are the same
+ * httpd_worker path nvs_erase_slot() already guards before reaching this
+ * point, and this function only erases (frees flash), never allocates a
+ * heap blob the way firing_stats_persist() above does. */
+void firing_stats_erase(uint8_t profile_id)
+{
+    char key[16];
+    snprintf(key, sizeof(key), "fs_%u", (unsigned)profile_id);
+    hal_kv_handle_t h;
+    hal_status_t err =
+        hal_kv_open(&h, FIRING_STATS_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, FIRING_STATS_NVS_PARTITION);
+    if (err != HAL_OK) {
+        ESP_LOGW(PE_TAG, "firing_stats_erase(%u): hal_kv_open failed: %s", (unsigned)profile_id,
+                 hal_status_to_name(err));
+    } else {
+        hal_status_t erase_err = hal_kv_erase_key(&h, key);
+        if (erase_err != HAL_OK && erase_err != HAL_NOT_FOUND) {
+            ESP_LOGW(PE_TAG, "firing_stats_erase(%u): erase failed: %s", (unsigned)profile_id,
+                     hal_status_to_name(erase_err));
+        } else {
+            err = hal_kv_commit(&h);
+            if (err != HAL_OK) {
+                ESP_LOGW(PE_TAG, "firing_stats_erase(%u): commit failed: %s", (unsigned)profile_id,
+                         hal_status_to_name(err));
+            }
+        }
+        hal_kv_close(&h);
+    }
+
+    esp_err_t file_err = firing_stats_cfg_fs_delete(profile_id);
+    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(PE_TAG, "firing_stats_erase(%u): cfg-fs delete failed: %s", (unsigned)profile_id,
+                 esp_err_to_name(file_err));
+    }
+}
+
 /* Called from the tick loop's non-RUNNING branch (DONE/FAULTED) and from
  * profile_executor_halt() (an operator stop out of RUNNING/PAUSED, which
  * never passes through that tick-loop transition). s_exec.fs_persisted

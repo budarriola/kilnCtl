@@ -490,6 +490,24 @@ uint32_t profile_executor_last_run_started_unix_s(uint8_t profile_id)
     return g_fake_last_run_unix_s;
 }
 
+// ---- profile_executor.h -- fake firing_stats_erase(): profiles_http.c
+// (#included above) now calls this from nvs_erase_slot() (docs/
+// PROFILE_SLOTS_100_PLAN.md section 7 task 10). The real definition lives in
+// profile_executor_firing_stats.c, a control-tier file with its own heavy
+// dependency set (esp_heap_caps, zones_config_accessors.h, the executor's
+// internal state) this HTTP-tier executable has no other reason to link --
+// same reasoning as the profiles_builtin.h/profile_feasibility.h fakes
+// above. This fake only records the call (last id + count) so tests below
+// can assert nvs_erase_slot() reaches it with the right id, exactly once,
+// without needing a real firing-stats store here.
+static int     g_firing_stats_erase_calls = 0;
+static uint8_t g_firing_stats_erase_last_id = 0xFF;
+void firing_stats_erase(uint8_t profile_id)
+{
+    g_firing_stats_erase_calls++;
+    g_firing_stats_erase_last_id = profile_id;
+}
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
@@ -796,6 +814,43 @@ static void test_pcfg_nvs_wins_when_it_has_the_higher_rev_and_resyncs_file(void)
     profile_t file_p;
     TEST_CHECK(pcfg_file_profile(0, &file_p), "the file still decodes (resync wrote it)");
     assert_profiles_equal(&file_p, &fresh_nvs, "the file was resynced to NVS's winning content");
+}
+
+static void test_nvs_erase_slot_prunes_firing_stats(void)
+{
+    TEST_SECTION("nvs_erase_slot() prunes that id's firing history (task 10, PROFILE_SLOTS_100_PLAN.md sec 7)");
+    pcfg_reset_all();
+
+    profile_t p = make_stored_profile();
+    s_profiles.profiles[3] = p;
+    s_profiles.used_bitmap = 0x08;
+    TEST_CHECK(nvs_save_slot(3) == ESP_OK, "save slot 3");
+
+    g_firing_stats_erase_calls = 0;
+    g_firing_stats_erase_last_id = 0xFF;
+    TEST_CHECK(nvs_erase_slot(3) == ESP_OK, "erase slot 3 succeeds");
+    TEST_CHECK(g_firing_stats_erase_calls == 1, "firing_stats_erase() called exactly once");
+    TEST_CHECK(g_firing_stats_erase_last_id == 3, "firing_stats_erase() called with the erased slot's id");
+}
+
+static void test_nvs_erase_slot_prunes_firing_stats_for_never_fired_slot(void)
+{
+    TEST_SECTION("nvs_erase_slot() still calls firing_stats_erase() for a slot that never fired -- must be a "
+                 "safe no-op on the real (unfaked) side, task 10's part (a)");
+    pcfg_reset_all();
+
+    profile_t p = make_stored_profile();
+    s_profiles.profiles[5] = p;
+    s_profiles.used_bitmap = 0x20;
+    TEST_CHECK(nvs_save_slot(5) == ESP_OK, "save slot 5 -- never fired, no fs_5/fsr_5 key exists anywhere");
+
+    g_firing_stats_erase_calls = 0;
+    g_firing_stats_erase_last_id = 0xFF;
+    TEST_CHECK(nvs_erase_slot(5) == ESP_OK, "erase still succeeds for a profile that was never fired");
+    TEST_CHECK(g_firing_stats_erase_calls == 1, "firing_stats_erase() is still called -- it is this "
+                                                 "function's job (real implementation), not this handler's, to "
+                                                 "treat a missing key as a no-op");
+    TEST_CHECK(g_firing_stats_erase_last_id == 5, "called with the right id");
 }
 
 static void test_pcfg_stale_file_after_delete_is_not_resurrected(void)
@@ -1978,6 +2033,9 @@ void run_test_profiles_http(void)
     test_nvs_save_slot_refuses_when_calling_stack_is_external_ram();
     test_nvs_save_slot_proceeds_normally_on_an_internal_ram_stack();
     test_builtin_json_emits_seg_kind_and_resolved_zone_mask();
+
+    test_nvs_erase_slot_prunes_firing_stats();
+    test_nvs_erase_slot_prunes_firing_stats_for_never_fired_slot();
 
     test_pcfg_mounted_migrates_nvs_only_slot_to_file();
     test_pcfg_file_wins_when_it_has_the_higher_rev();

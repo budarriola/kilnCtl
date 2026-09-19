@@ -34,6 +34,9 @@
                                 * read-through/dual-write bridge to the `cfg`
                                 * LittleFS partition, one file per slot. See
                                 * that header for the full policy. */
+#include "profile_executor.h" /* firing_stats_erase() -- docs/PROFILE_SLOTS_100_PLAN.md
+                                 * section 7 task 10, called from nvs_erase_slot() below
+                                 * so deleting a slot also prunes its firing history. */
 
 const char *PROFILES_TAG = "profiles_http";
 
@@ -782,6 +785,12 @@ esp_err_t nvs_erase_slot(uint8_t id)
      * after its file write succeeded" on the next boot. */
     uint32_t new_rev = s_profile_rev[id] + 1;
     (void)profiles_cfg_fs_delete(id); /* logged internally on failure, best-effort */
+    /* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 10: prune this id's
+     * firing history too, best-effort, same "delete must not itself fail"
+     * contract as the cfg-fs delete just above -- see firing_stats_erase()'s
+     * own doc comment (profile_executor.h) for why this matters once ids
+     * start being reused at higher slot counts. */
+    firing_stats_erase(id);
 
     hal_kv_handle_t h;
     hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, PROFILES_NVS_PARTITION);

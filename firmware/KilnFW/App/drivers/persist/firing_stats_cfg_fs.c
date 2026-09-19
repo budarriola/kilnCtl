@@ -166,6 +166,49 @@ esp_err_t firing_stats_cfg_fs_save(uint8_t id, const profile_firing_history_blob
     return err;
 }
 
+// docs/PROFILE_SLOTS_100_PLAN.md section 7 task 10: deletes id's file and
+// its "fsr_<id>" rev key. Mirrors profiles_cfg_fs_delete()'s own
+// NOT_FOUND-is-success convention on the file half; the rev-key erase uses
+// the same convention via hal_kv_erase_key()'s HAL_NOT_FOUND. cfg_fs
+// unmounted degrades the file half to a no-op (nothing to delete), matching
+// every other function in this file's "PARTITION ABSENT" policy -- the rev
+// key is still erased regardless, since that lives in NVS, not cfg_fs.
+esp_err_t firing_stats_cfg_fs_delete(uint8_t id)
+{
+    esp_err_t file_err = ESP_OK;
+    if (cfg_fs_is_available()) {
+        char path[40];
+        firing_stats_cfg_fs_path(id, path, sizeof(path));
+        file_err = cfg_fs_delete(path);
+        if (file_err != ESP_OK && file_err != ESP_ERR_NOT_FOUND) {
+            ESP_LOGW(FSCF_TAG, "fs%u file delete failed: %s", id, esp_err_to_name(file_err));
+        } else {
+            file_err = ESP_OK;
+        }
+    }
+
+    char key[16];
+    snprintf(key, sizeof(key), "fsr_%u", (unsigned)id);
+    hal_kv_handle_t h;
+    hal_status_t kv_err =
+        hal_kv_open(&h, FIRING_STATS_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, FIRING_STATS_NVS_PARTITION);
+    if (kv_err != HAL_OK) {
+        ESP_LOGW(FSCF_TAG, "fs%u rev key delete: hal_kv_open failed: %s", id, hal_status_to_name(kv_err));
+        return file_err;
+    }
+    hal_status_t erase_err = hal_kv_erase_key(&h, key);
+    if (erase_err != HAL_OK && erase_err != HAL_NOT_FOUND) {
+        ESP_LOGW(FSCF_TAG, "fs%u rev key delete failed: %s", id, hal_status_to_name(erase_err));
+    } else {
+        hal_status_t commit_err = hal_kv_commit(&h);
+        if (commit_err != HAL_OK) {
+            ESP_LOGW(FSCF_TAG, "fs%u rev key delete: commit failed: %s", id, hal_status_to_name(commit_err));
+        }
+    }
+    hal_kv_close(&h);
+    return file_err;
+}
+
 // Persists just the rev counter, called alongside the caller's own NVS blob
 // write so both land in the same read-modify-write transaction. Exposed as
 // a small helper rather than folded into firing_stats_cfg_fs_save() itself,

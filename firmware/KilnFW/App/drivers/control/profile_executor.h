@@ -530,6 +530,19 @@ bool profile_executor_zone_is_active(uint8_t zone_index);
 void firing_stats_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
                                         bool *diverged);
 
+/* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 10: deleting a profile slot
+ * (profiles_http.c's nvs_erase_slot()) must also prune that id's firing
+ * history, or a later id reused for a new, never-fired profile would read
+ * back the PREVIOUS occupant's runs the first time someone opens its
+ * history page. Erases "fs_<id>"/"fsr_<id>" from profiles_nvs/fire_stats
+ * and the cfg-filesystem mirror file (stats/fs<id>.dat), best-effort on
+ * each -- a failure here is logged and otherwise swallowed, matching
+ * nvs_erase_slot()'s own profiles_cfg_fs_delete() call one line above where
+ * this is invoked; deleting a profile is not undone by a stats-prune
+ * failure. Safe to call for an id that never fired (both erases read back
+ * "not found", already the success case). */
+void firing_stats_erase(uint8_t profile_id);
+
 #ifdef __cplusplus
 }
 #endif
