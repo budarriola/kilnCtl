@@ -512,11 +512,18 @@ fit:
   monolithic-tail shape like zones' pre-v26 converter, not a chain. This
   store DOES already carry the frozen-input `_Static_assert`/`crc32`-last-
   field discipline per historical struct (`profile_persisted_v3_t`, sized
-  and offset-asserted) — but wiring the check to inspect it would need to
-  know its own naming/dispatch convention (`expected_len_for_version()`'s
-  `switch`), which is different from zones' `zones_cfg_v<N>_t` convention.
-  Enforced today: `convert_profile_v<PROFILE_VERSION-1>(...)` must exist.
-  The struct/fixture/D2 depth is follow-up, not enforced yet.
+  and offset-asserted). Enforced today: `convert_profile_v<PROFILE_VERSION-1>
+  (...)` must exist, **and (2026-09-19)** its frozen input type
+  `profile_persisted_v<PROFILE_VERSION-1>_t` must carry a `_Static_assert`
+  pinning its `sizeof` and must have `crc32` as its structurally last field
+  — the same rule 3 zones already enforced, taught to this store's naming
+  convention (`profile_persisted_v<N>_t`, found by name rather than via
+  `expected_len_for_version()`'s `switch`, which the check does not need to
+  parse to check this). Still deliberately not enforced for this store: D1's
+  "exactly one" accumulation rule (this store is a monolithic tail like
+  zones' pre-v26 converter, not a chain, so it does not apply the same way),
+  a fixture-must-be-referenced rule (no `cfg_blobs` captured for this store
+  yet), and D2's expiry floor (no tail-eviction policy of its own).
 - **RP2040 safety config** (`Test-SaftyConfigStoreMigrationStep`): has no
   per-transition function at all — migration is two inline
   `if (version == CONFIG_STORE_FORMAT_VERSION_V<N>)` branches inside
@@ -535,15 +542,20 @@ rule: `test_check_config_migration_steps.ps1` assertions 10-15 bump each
 store's version in synthetic scratch text with no matching step/macro (FAIL,
 naming the store) and separately run the function against today's real,
 already-compliant production files (PASS) — 15 assertions total, up from 9.
+The fire-profiles frozen-input-struct extension above is separately
+negative-tested by assertions 19-20 (missing `sizeof` assert; `crc32` not
+the last field), 20 assertions total as of 2026-09-19.
 
 **Still explicitly follow-up, not assumed done:** D1's "exactly one NEW step
-per bump" defect-catching rule, the frozen-input assert/`crc32`-last-field
-discipline, the fixture-must-be-referenced rule, and D2's expiry floor, for
-all three of these stores. Extending each one further is real work per
-store (kiln-config slots and RP2040 safety config would need new scaffolding
-that does not exist in their current design; fire profiles would "only"
-need the check taught its existing scaffolding) and is not silently assumed
-covered by this pass.
+per bump" defect-catching rule and the fixture-must-be-referenced rule, for
+all three of these stores; D2's expiry floor, for all three; and the
+frozen-input assert/`crc32`-last-field discipline for kiln-config slots and
+RP2040 safety config specifically (fire profiles' copy of that one rule
+landed 2026-09-19, above — the "check taught its existing scaffolding" case
+this paragraph used to name as still open). Kiln-config slots and RP2040
+safety config would need new scaffolding that does not exist in their
+current design to go further; that is not silently assumed covered by this
+pass.
 
 ## 6. Decisions — all settled
 

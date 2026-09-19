@@ -43,8 +43,24 @@
 #      branched on in config_store.c (only mentioned in a header comment)
 #      -> FAIL, the orphaned-macro path distinct from assertion 14's
 #      missing-macro path.
+#  19-20. Fire profiles' 2026-09-19 frozen-input-struct extension (plan sec
+#      5.1's "check taught its existing scaffolding" follow-up): the
+#      converter exists but its frozen input type profile_persisted_v<N>_t
+#      either has no _Static_assert pinning its sizeof (19), or has one but
+#      crc32 is not its last field (20) -> FAIL, named, in each case.
+#   21. Fire profiles: the _Static_assert pinning sizeof exists but is
+#      COMMENTED OUT (`// _Static_assert(...)`) -> FAIL, proving
+#      Remove-CComments actually strips it before the regex runs rather than
+#      a commented-out assert satisfying the rule.
+#   22. Fire profiles: the true last struct member is followed by a trailing
+#      `/* ... crc32 ... */` comment mentioning "crc32" -- the OLD
+#      last-member-line check took the whole raw line (including the
+#      comment) and matched the word "crc32" inside the comment text itself,
+#      so a struct whose real last field is NOT crc32 still passed -> FAIL
+#      after the fix, since the comment is stripped before the last member
+#      is read.
 #
-# This does not touch the real repo tree; assertions 1-8, 10, 12, 14, 16-18
+# This does not touch the real repo tree; assertions 1-8, 10, 12, 14, 16-22
 # are entirely synthetic text, and assertions 9, 11, 13, 15 only READ the
 # real tree (none of these functions ever writes anything).
 #
@@ -346,6 +362,100 @@ if ($r18.Ok) {
     Write-Host "Assertion 18 OK: a macro defined but only mentioned in a header comment (never branched on in the .c file) is caught as orphaned."
 }
 
+# ---------------------------------------------------------------------
+# Assertions 19-20: fire profiles' frozen-input-struct extension
+# (2026-09-19, docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 5.1). A correctly
+# named convert_profile_v<N-1>(...) converter exists in both cases -- these
+# prove the NEW struct-discipline checks fire independently of the
+# pre-existing converter-existence check.
+# ---------------------------------------------------------------------
+
+# --- Assertion 19: converter exists, but profile_persisted_v4_t (its frozen
+# input type) has no _Static_assert pinning its sizeof -> FAIL, named. ---
+$profilesNoAssertSource = @"
+typedef struct {
+    uint8_t version;
+    uint8_t data[300];
+    uint32_t crc32;
+} profile_persisted_v4_t;
+
+static void convert_profile_v4(const profile_persisted_v4_t *src, profile_t *out) { }
+"@
+$r19 = Test-ProfilesMigrationStep -VersionHeaderText "#define PROFILE_VERSION 5`n" -SourceText $profilesNoAssertSource
+if ($r19.Ok) {
+    $failures += "Assertion 19 FAILED: expected FAIL when profile_persisted_v4_t has no _Static_assert pinning its sizeof, got PASS."
+} elseif (($r19.Failures -join " ") -notmatch "no _Static_assert pinning sizeof\(profile_persisted_v4_t\)") {
+    $failures += "Assertion 19 FAILED: failure did not cite the missing sizeof assert: $($r19.Failures -join '; ')"
+} else {
+    Write-Host "Assertion 19 OK: a frozen input struct with no sizeof _Static_assert is caught."
+}
+
+# --- Assertion 20: converter exists, sizeof is pinned, but crc32 is NOT the
+# frozen input type's last field -> FAIL, named. ---
+$profilesBadCrcSource = @"
+typedef struct {
+    uint8_t version;
+    uint32_t crc32;
+    uint8_t data[300];
+} profile_persisted_v4_t;
+_Static_assert(sizeof(profile_persisted_v4_t) == 308, "pin it");
+
+static void convert_profile_v4(const profile_persisted_v4_t *src, profile_t *out) { }
+"@
+$r20 = Test-ProfilesMigrationStep -VersionHeaderText "#define PROFILE_VERSION 5`n" -SourceText $profilesBadCrcSource
+if ($r20.Ok) {
+    $failures += "Assertion 20 FAILED: expected FAIL when profile_persisted_v4_t's last field is not crc32, got PASS."
+} elseif (($r20.Failures -join " ") -notmatch "last field is not crc32") {
+    $failures += "Assertion 20 FAILED: failure did not cite the crc32-last-field rule: $($r20.Failures -join '; ')"
+} else {
+    Write-Host "Assertion 20 OK: a frozen input struct whose last field is not crc32 is caught."
+}
+
+# --- Assertion 21: the sizeof _Static_assert exists but is COMMENTED OUT ->
+# FAIL, proving Remove-CComments strips it before the regex runs. ---
+$profilesCommentedAssertSource = @"
+typedef struct {
+    uint8_t version;
+    uint8_t data[300];
+    uint32_t crc32;
+} profile_persisted_v4_t;
+// _Static_assert(sizeof(profile_persisted_v4_t) == 308, "pin it");
+
+static void convert_profile_v4(const profile_persisted_v4_t *src, profile_t *out) { }
+"@
+$r21 = Test-ProfilesMigrationStep -VersionHeaderText "#define PROFILE_VERSION 5`n" -SourceText $profilesCommentedAssertSource
+if ($r21.Ok) {
+    $failures += "Assertion 21 FAILED: expected FAIL when profile_persisted_v4_t's sizeof _Static_assert is commented out, got PASS."
+} elseif (($r21.Failures -join " ") -notmatch "no _Static_assert pinning sizeof\(profile_persisted_v4_t\)") {
+    $failures += "Assertion 21 FAILED: failure did not cite the missing (commented-out) sizeof assert: $($r21.Failures -join '; ')"
+} else {
+    Write-Host "Assertion 21 OK: a commented-out sizeof _Static_assert does not satisfy the rule."
+}
+
+# --- Assertion 22: the true last struct member is NOT crc32, but is followed
+# by a trailing comment that happens to mention "crc32" -> FAIL. Before the
+# Remove-CComments fix, the last-member-line check read the raw line
+# (including the comment) and matched the word "crc32" inside the comment
+# text, so this exact shape wrongly passed. ---
+$profilesTrailingCommentSource = @"
+typedef struct {
+    uint8_t version;
+    uint32_t crc32;
+    uint8_t data[300]; /* follows crc32 */
+} profile_persisted_v4_t;
+_Static_assert(sizeof(profile_persisted_v4_t) == 308, "pin it");
+
+static void convert_profile_v4(const profile_persisted_v4_t *src, profile_t *out) { }
+"@
+$r22 = Test-ProfilesMigrationStep -VersionHeaderText "#define PROFILE_VERSION 5`n" -SourceText $profilesTrailingCommentSource
+if ($r22.Ok) {
+    $failures += "Assertion 22 FAILED: expected FAIL when the true last member is 'data' with only a trailing comment mentioning crc32, got PASS."
+} elseif (($r22.Failures -join " ") -notmatch "last field is not crc32") {
+    $failures += "Assertion 22 FAILED: failure did not cite the crc32-last-field rule: $($r22.Failures -join '; ')"
+} else {
+    Write-Host "Assertion 22 OK: a trailing comment mentioning crc32 after the true (non-crc32) last member does not satisfy the rule."
+}
+
 if ($failures.Count -gt 0) {
     Write-Host ""
     Write-Host "test_check_config_migration_steps: $($failures.Count) assertion(s) FAILED:" -ForegroundColor Red
@@ -354,5 +464,5 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ""
-Write-Host "test_check_config_migration_steps: all 18 assertions passed." -ForegroundColor Green
+Write-Host "test_check_config_migration_steps: all 22 assertions passed." -ForegroundColor Green
 exit 0

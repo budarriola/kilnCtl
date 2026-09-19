@@ -28,19 +28,27 @@
 #     convert_profile_v<N>(...) and convert DIRECTLY from historical
 #     version N to current, not N -> N+1 -- a monolithic-tail shape, like
 #     zones' pre-v26 converter, rather than a chain. Enforced: a
-#     convert_profile_v<CURRENT-1>(...) converter must exist.
+#     convert_profile_v<CURRENT-1>(...) converter must exist, AND
+#     (2026-09-19) the frozen input type profile_persisted_v<CURRENT-1>_t
+#     must have a _Static_assert pinning its sizeof and crc32 as its
+#     structurally last field -- this store already carries that discipline
+#     in code, the check just did not look for it before.
 #   - RP2040 safety config (Test-SaftyConfigStoreMigrationStep): has no
 #     per-transition function at all -- migration is inline `if (version ==
 #     CONFIG_STORE_FORMAT_VERSION_V<N>)` branches in
 #     config_store_unpack_ex(). Enforced: a CONFIG_STORE_FORMAT_VERSION_V
 #     <CURRENT-1> macro must be defined and actually branched on.
 #
-# What is deliberately NOT enforced for the latter three stores -- D1's
-# "exactly one NEW step per bump" defect-catching rule, the frozen-input
-# _Static_assert/crc32-last-field discipline, the captured-fixture-must-be-
-# referenced rule, and D2's expiry floor -- is follow-up work, not silently
-# assumed done; see docs/CONFIG_MIGRATION_CHAIN_PLAN.md section 5 for why
-# each is deferred rather than faked against a shape it doesn't fit.
+# What is deliberately NOT enforced for kiln-config slots and RP2040 safety
+# config specifically -- D1's "exactly one NEW step per bump" defect-catching
+# rule, the frozen-input _Static_assert/crc32-last-field discipline, the
+# captured-fixture-must-be-referenced rule, and D2's expiry floor -- is
+# follow-up work, not silently assumed done; see
+# docs/CONFIG_MIGRATION_CHAIN_PLAN.md section 5 for why each is deferred
+# rather than faked against a shape it doesn't fit. Fire profiles now has the
+# frozen-input-struct rule (above); it still lacks D1's "exactly one" rule
+# (moot -- it's a monolithic tail, not a chain), the fixture rule, and D2's
+# expiry floor.
 #
 # WHAT THIS CHECKS, against firmware/KilnFW/App/drivers/persist/
 # zones_config_json.h (ZONES_CFG_VERSION) and zones_config_migrate.c (steps,
@@ -81,6 +89,28 @@
 # tree. See firmware/KilnFW/App/test/test_check_config_migration_steps.ps1.
 
 $ErrorActionPreference = "Stop"
+
+function Remove-CComments {
+    <#
+      Strips C block comments (/* ... */, non-greedy, dot-matches-newline)
+      and line comments (// ... to end of line) from a text blob, replacing
+      each with nothing (not even a placeholder), so a commented-OUT
+      `_Static_assert` or a trailing `/* ... */` after a struct member can
+      never satisfy a regex looking for real code. Used before every
+      frozen-input-struct check in this script (zones' rule 3 and fire
+      profiles' equivalent) -- both previously matched inside comments,
+      which let a stale/commented-out assert or a trailing-comment member
+      line pass as real.
+
+      Deliberately simple: this codebase's structs and asserts never embed
+      "/*"/"*/"/"//" inside a string literal, so no string-literal awareness
+      is needed here.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Text)
+    $noBlockComments = [regex]::Replace($Text, '(?s)/\*.*?\*/', '')
+    $noLineComments = [regex]::Replace($noBlockComments, '//[^\r\n]*', '')
+    return $noLineComments
+}
 
 function Test-KilnCfgStoreMigrationStep {
     <#
@@ -130,6 +160,19 @@ function Test-ProfilesMigrationStep {
       version must be consumable, freshly, by the current release") this
       shape can express without a redesign.
 
+      2026-09-19 extension: this store DOES already carry the frozen-input
+      _Static_assert/crc32-last-field discipline per historical struct
+      (docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 5.1 names
+      profile_persisted_v3_t specifically as already having it) -- what was
+      missing was teaching this check to look, not building new scaffolding
+      in profiles_http.c. Mirrors zones' rule 3 (Test-ZonesMigrationSteps
+      above): the frozen input type profile_persisted_v<CURRENT-1>_t must
+      have a _Static_assert pinning its sizeof, and crc32 must be its last
+      field. Deliberately NOT added here (still real follow-up, per the
+      plan): a fixture-must-be-referenced rule (no cfg_blobs captured for
+      this store yet) and D2's expiry floor (this store has no tail-eviction
+      policy of its own).
+
       Returns @{ Ok; Failures }.
     #>
     param(
@@ -149,6 +192,34 @@ function Test-ProfilesMigrationStep {
         $failures.Add("fire profiles store: PROFILE_VERSION is $current but no " +
             "convert_profile_v${expectedFrom}(...) converter exists in profiles_http.c")
     }
+
+    # Frozen-input struct discipline for profile_persisted_v<expectedFrom>_t,
+    # mirroring zones' rule 3. Checked independently of whether the converter
+    # match above succeeded, so a converter that exists but whose frozen
+    # input type lost its guard rails is still caught. Comments are stripped
+    # first (Remove-CComments) so a commented-OUT _Static_assert, or a
+    # trailing "/* ... */" after the true last struct member, cannot pass.
+    $inputType = "profile_persisted_v${expectedFrom}_t"
+    $cleanSource = Remove-CComments -Text $SourceText
+    $sizeofAssert = [regex]::Match($cleanSource,
+        "_Static_assert\s*\(\s*sizeof\s*\(\s*$inputType\s*\)")
+    if (-not $sizeofAssert.Success) {
+        $failures.Add("fire profiles store: no _Static_assert pinning sizeof($inputType) -- the frozen input type must be sized")
+    }
+
+    $structBody = [regex]::Match($cleanSource,
+        "typedef\s+struct\s*\{(?<body>(?:[^{}]|\{[^{}]*\})*)\}\s*$inputType\s*;", "Singleline")
+    if (-not $structBody.Success) {
+        $failures.Add("fire profiles store: could not find 'typedef struct { ... } $inputType;' to check crc32 field position")
+    } else {
+        $bodyLines = $structBody.Groups["body"].Value -split "`n" |
+            Where-Object { $_.Trim() -ne "" }
+        $lastMemberLine = $bodyLines | Select-Object -Last 1
+        if (-not $lastMemberLine -or $lastMemberLine -notmatch '\bcrc32\b') {
+            $failures.Add("fire profiles store: $inputType's last field is not crc32 (found: '$lastMemberLine')")
+        }
+    }
+
     return @{ Ok = ($failures.Count -eq 0); Failures = $failures }
 }
 
@@ -260,21 +331,24 @@ function Test-ZonesMigrationSteps {
 
         if ($matchingStep) {
             # Rule 3: frozen input type's sizeof is pinned, and crc32 is its
-            # last field.
+            # last field. Comments stripped first (Remove-CComments) so a
+            # commented-OUT _Static_assert, or a trailing "/* ... */" after
+            # the true last struct member, cannot pass.
             $inputType = "zones_cfg_v${expectedFrom}_t"
-            $sizeofAssert = [regex]::Match($MigrateFileText + $VersionHeaderText,
+            $cleanZonesText = Remove-CComments -Text ($MigrateFileText + $VersionHeaderText)
+            $sizeofAssert = [regex]::Match($cleanZonesText,
                 "_Static_assert\s*\(\s*sizeof\s*\(\s*$inputType\s*\)")
             if (-not $sizeofAssert.Success) {
                 $failures.Add("no _Static_assert pinning sizeof($inputType) -- the frozen input type must be sized")
             }
 
-            $structBody = [regex]::Match($MigrateFileText + $VersionHeaderText,
+            $structBody = [regex]::Match($cleanZonesText,
                 "typedef\s+struct\s*\{(?<body>(?:[^{}]|\{[^{}]*\})*)\}\s*$inputType\s*;", "Singleline")
             if (-not $structBody.Success) {
                 $failures.Add("could not find 'typedef struct { ... } $inputType;' to check crc32 field position")
             } else {
                 $bodyLines = $structBody.Groups["body"].Value -split "`n" |
-                    Where-Object { $_.Trim() -ne "" -and -not ($_.Trim().StartsWith("/*")) -and -not ($_.Trim().StartsWith("//")) -and -not ($_.Trim().StartsWith("*")) }
+                    Where-Object { $_.Trim() -ne "" }
                 $lastMemberLine = $bodyLines | Select-Object -Last 1
                 if (-not $lastMemberLine -or $lastMemberLine -notmatch '\bcrc32\b') {
                     $failures.Add("$inputType's last field is not crc32 (found: '$lastMemberLine')")
