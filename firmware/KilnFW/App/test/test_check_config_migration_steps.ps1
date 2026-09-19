@@ -31,10 +31,15 @@
 #   9. The REAL production zones_config_json.h/zones_config_migrate.c/test
 #      tree, dot-sourced and scanned directly (not a copy) -> PASS, proving
 #      today's real check is not vacuous on the actual tree.
+#  10-15. The same FAIL-then-PASS-on-real-tree pattern for the three
+#      follow-up stores' narrower rules: kiln-config slots
+#      (Test-KilnCfgStoreMigrationStep), fire profiles
+#      (Test-ProfilesMigrationStep), and RP2040 safety config
+#      (Test-SaftyConfigStoreMigrationStep).
 #
-# This does not touch the real repo tree; assertions 1-8 are entirely
-# synthetic text, and assertion 9 only READS the real tree
-# (Test-ZonesMigrationSteps never writes anything).
+# This does not touch the real repo tree; assertions 1-8, 10, 12, 14 are
+# entirely synthetic text, and assertions 9, 11, 13, 15 only READ the real
+# tree (none of these functions ever writes anything).
 #
 # Usage: powershell -ExecutionPolicy Bypass -File App\test\test_check_config_migration_steps.ps1
 
@@ -225,6 +230,78 @@ if (-not $r9.Ok) {
     Write-Host "Assertion 9 OK: the real production tree (ZONES_CFG_VERSION still within the tail) passes."
 }
 
+# ---------------------------------------------------------------------
+# Assertions 10-15: the follow-up rules for the other three governed
+# stores (docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 5's later revision).
+# Each store gets one FAIL (a version bump with no matching step, in
+# synthetic scratch text) and one PASS (against the real production tree,
+# which is already compliant with the narrower rule this script enforces
+# for it) -- same "prove it can fail, then prove today's tree is not
+# vacuously green" pattern as assertions 1-9.
+# ---------------------------------------------------------------------
+
+# --- Assertion 10: kiln-config slots, version bumped with no step -> FAIL, named. ---
+$r10 = Test-KilnCfgStoreMigrationStep -VersionHeaderText "#define KILN_CFG_STORE_VERSION 4`n" `
+    -SourceText "static void migrate_store_v2_to_v3(const kiln_cfg_store_blob_v2_t *src, kiln_cfg_store_blob_t *dst) { }`n"
+if ($r10.Ok) {
+    $failures += "Assertion 10 FAILED: expected FAIL when KILN_CFG_STORE_VERSION bumps to 4 with no migrate_store_v3_to_v4, got PASS."
+} elseif (($r10.Failures -join " ") -notmatch "migrate_store_v3_to_v4") {
+    $failures += "Assertion 10 FAILED: failure did not name the missing kiln-config step: $($r10.Failures -join '; ')"
+} else {
+    Write-Host "Assertion 10 OK: a kiln-config slot store version bump with no matching migrate_store_* step is caught."
+}
+
+# --- Assertion 11: kiln-config slots, the REAL production files -> PASS. ---
+$realKilnCfgHeader = Get-Content -Raw (Join-Path $repoRoot "firmware\KilnFW\App\drivers\persist\kiln_cfg_store_internal.h")
+$realKilnCfgSource = Get-Content -Raw (Join-Path $repoRoot "firmware\KilnFW\App\drivers\persist\kiln_cfg_store.c")
+$r11 = Test-KilnCfgStoreMigrationStep -VersionHeaderText $realKilnCfgHeader -SourceText $realKilnCfgSource
+if (-not $r11.Ok) {
+    $failures += "Assertion 11 FAILED: expected PASS against the real kiln-config slot store, got failures: $($r11.Failures -join '; ')"
+} else {
+    Write-Host "Assertion 11 OK: the real kiln-config slot store (migrate_store_v2_to_v3 for KILN_CFG_STORE_VERSION 3) passes."
+}
+
+# --- Assertion 12: fire profiles, version bumped with no converter -> FAIL, named. ---
+$r12 = Test-ProfilesMigrationStep -VersionHeaderText "#define PROFILE_VERSION 5`n" `
+    -SourceText "static void convert_profile_v3(const profile_persisted_v3_t *src, profile_t *out) { }`n"
+if ($r12.Ok) {
+    $failures += "Assertion 12 FAILED: expected FAIL when PROFILE_VERSION bumps to 5 with no convert_profile_v4, got PASS."
+} elseif (($r12.Failures -join " ") -notmatch "convert_profile_v4") {
+    $failures += "Assertion 12 FAILED: failure did not name the missing profiles converter: $($r12.Failures -join '; ')"
+} else {
+    Write-Host "Assertion 12 OK: a fire-profiles version bump with no matching convert_profile_* converter is caught."
+}
+
+# --- Assertion 13: fire profiles, the REAL production file -> PASS. ---
+$realProfilesSource = Get-Content -Raw (Join-Path $repoRoot "firmware\KilnFW\App\drivers\http\profiles_http.c")
+$r13 = Test-ProfilesMigrationStep -VersionHeaderText $realProfilesSource -SourceText $realProfilesSource
+if (-not $r13.Ok) {
+    $failures += "Assertion 13 FAILED: expected PASS against the real fire profiles store, got failures: $($r13.Failures -join '; ')"
+} else {
+    Write-Host "Assertion 13 OK: the real fire profiles store (convert_profile_v3 for PROFILE_VERSION 4) passes."
+}
+
+# --- Assertion 14: RP2040 safety config, version bumped with no V<N-1> macro -> FAIL, named. ---
+$r14 = Test-SaftyConfigStoreMigrationStep -VersionHeaderText "#define CONFIG_STORE_FORMAT_VERSION 4u`n#define CONFIG_STORE_FORMAT_VERSION_V1 1u`n#define CONFIG_STORE_FORMAT_VERSION_V2 2u`n" `
+    -SourceText "if (version == CONFIG_STORE_FORMAT_VERSION_V1) { } if (version == CONFIG_STORE_FORMAT_VERSION_V2) { }`n"
+if ($r14.Ok) {
+    $failures += "Assertion 14 FAILED: expected FAIL when CONFIG_STORE_FORMAT_VERSION bumps to 4 with no _V3 macro, got PASS."
+} elseif (($r14.Failures -join " ") -notmatch "CONFIG_STORE_FORMAT_VERSION_V3") {
+    $failures += "Assertion 14 FAILED: failure did not name the missing safety-config macro: $($r14.Failures -join '; ')"
+} else {
+    Write-Host "Assertion 14 OK: a safety-config version bump with no matching CONFIG_STORE_FORMAT_VERSION_V<N-1> macro is caught."
+}
+
+# --- Assertion 15: RP2040 safety config, the REAL production files -> PASS. ---
+$realSaftyHeader = Get-Content -Raw (Join-Path $repoRoot "firmware\SaftyFW\src\config_store.h")
+$realSaftySource = Get-Content -Raw (Join-Path $repoRoot "firmware\SaftyFW\src\config_store.c")
+$r15 = Test-SaftyConfigStoreMigrationStep -VersionHeaderText $realSaftyHeader -SourceText $realSaftySource
+if (-not $r15.Ok) {
+    $failures += "Assertion 15 FAILED: expected PASS against the real RP2040 safety config store, got failures: $($r15.Failures -join '; ')"
+} else {
+    Write-Host "Assertion 15 OK: the real RP2040 safety config store (CONFIG_STORE_FORMAT_VERSION_V2 for version 3) passes."
+}
+
 if ($failures.Count -gt 0) {
     Write-Host ""
     Write-Host "test_check_config_migration_steps: $($failures.Count) assertion(s) FAILED:" -ForegroundColor Red
@@ -233,5 +310,5 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ""
-Write-Host "test_check_config_migration_steps: all 9 assertions passed." -ForegroundColor Green
+Write-Host "test_check_config_migration_steps: all 15 assertions passed." -ForegroundColor Green
 exit 0

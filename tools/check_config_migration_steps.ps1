@@ -2,18 +2,45 @@
 # docs/CONFIG_MIGRATION_CHAIN_PLAN.md section 5, "a config version bump must
 # fail the build if it does not bring its step and its test."
 #
-# SCOPE, deliberately narrow today: docs/CONFIG_MIGRATION_CHAIN_PLAN.md
-# section 0.1 governs four stores (ESP zones config, ESP kiln-config slots,
-# ESP fire profiles, RP2040 safety config). This check enforces the plan's
-# D1 (section 1.1's "exactly one step") and D2 (section 4.2's expiry floor)
-# rules against the ESP zones config store only -- the sole governed store
-# with an empty, D1-shaped step table today (ZONES_CFG_VERSION 26, the
-# monolithic pre-v26 tail still handles everything, no zones_cfg_step_*
-# function exists yet). The other three stores each predate D1 with their
-# own accumulated history (kiln_cfg_store.c carries two chained steps
-# already, grandfathered per the plan's own "under D1 it stops
-# accumulating" language) and are not mechanically enforced by this script
-# -- extending it to them is follow-up work, not silently assumed done here.
+# SCOPE: docs/CONFIG_MIGRATION_CHAIN_PLAN.md section 0.1 governs four
+# stores (ESP zones config, ESP kiln-config slots, ESP fire profiles,
+# RP2040 safety config). This script enforces all four, but NOT to the same
+# depth -- each store's on-disk migration shape is different, and forcing
+# an identical rule set onto a shape it doesn't fit would either be vacuous
+# or require an unrelated refactor. See section 5 of the plan for exactly
+# which rules apply to which store and why.
+#
+#   - ESP zones config (Test-ZonesMigrationSteps): the FULL D1 ("exactly
+#     one step") + D2 (expiry floor) + frozen-input-assert + fixture rule
+#     set, unchanged from the pass that landed this script. Still the sole
+#     store with an empty, D1-shaped step table today (ZONES_CFG_VERSION
+#     26, the monolithic pre-v26 tail handles everything, no
+#     zones_cfg_step_* function exists yet).
+#   - ESP kiln-config slots (Test-KilnCfgStoreMigrationStep): already
+#     carries two pre-D1 GRANDFATHERED steps (migrate_store_v1_to_v2,
+#     migrate_store_v2_to_v3) that a naive "exactly one total" rule would
+#     immediately flag (the plan's own stated risk). Enforced instead: a
+#     migrate_store_v<CURRENT-1>_to_v<CURRENT>(...) function must exist for
+#     the CURRENT version. Frozen-struct/fixture/D2 rules are not enforced
+#     here -- this store has no crc32-last-field or expiry-floor convention
+#     of its own to check against.
+#   - ESP fire profiles (Test-ProfilesMigrationStep): converters are named
+#     convert_profile_v<N>(...) and convert DIRECTLY from historical
+#     version N to current, not N -> N+1 -- a monolithic-tail shape, like
+#     zones' pre-v26 converter, rather than a chain. Enforced: a
+#     convert_profile_v<CURRENT-1>(...) converter must exist.
+#   - RP2040 safety config (Test-SaftyConfigStoreMigrationStep): has no
+#     per-transition function at all -- migration is inline `if (version ==
+#     CONFIG_STORE_FORMAT_VERSION_V<N>)` branches in
+#     config_store_unpack_ex(). Enforced: a CONFIG_STORE_FORMAT_VERSION_V
+#     <CURRENT-1> macro must be defined and actually branched on.
+#
+# What is deliberately NOT enforced for the latter three stores -- D1's
+# "exactly one NEW step per bump" defect-catching rule, the frozen-input
+# _Static_assert/crc32-last-field discipline, the captured-fixture-must-be-
+# referenced rule, and D2's expiry floor -- is follow-up work, not silently
+# assumed done; see docs/CONFIG_MIGRATION_CHAIN_PLAN.md section 5 for why
+# each is deferred rather than faked against a shape it doesn't fit.
 #
 # WHAT THIS CHECKS, against firmware/KilnFW/App/drivers/persist/
 # zones_config_json.h (ZONES_CFG_VERSION) and zones_config_migrate.c (steps,
@@ -54,6 +81,117 @@
 # tree. See firmware/KilnFW/App/test/test_check_config_migration_steps.ps1.
 
 $ErrorActionPreference = "Stop"
+
+function Test-KilnCfgStoreMigrationStep {
+    <#
+      docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 5 follow-up: the ESP
+      kiln-config slot store. Unlike zones this store already carries two
+      pre-D1 GRANDFATHERED steps (migrate_store_v1_to_v2, migrate_store_v2_
+      to_v3) -- the plan explicitly warns a naive "exactly one step total"
+      rule would immediately flag that history. So this check enforces only
+      the part of D1 that generalizes cleanly regardless of how many old
+      steps already exist: a step function named
+      migrate_store_v<CURRENT-1>_to_v<CURRENT>(...) must exist in
+      kiln_cfg_store.c for the CURRENT version. Older steps are not
+      re-inspected -- same "the tail keeps whatever coverage it has"
+      posture the plan sec 3 states for zones' pre-v26 converter.
+
+      Returns @{ Ok; Failures }.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$VersionHeaderText,
+        [Parameter(Mandatory = $true)][string]$SourceText
+    )
+    $failures = New-Object System.Collections.Generic.List[string]
+    $verMatch = [regex]::Match($VersionHeaderText, '#define\s+KILN_CFG_STORE_VERSION\s+(\d+)')
+    if (-not $verMatch.Success) {
+        $failures.Add("kiln-config slot store: could not find '#define KILN_CFG_STORE_VERSION <N>'")
+        return @{ Ok = $false; Failures = $failures }
+    }
+    $current = [int]$verMatch.Groups[1].Value
+    $expectedFrom = $current - 1
+    $stepPattern = "migrate_store_v${expectedFrom}_to_v${current}\s*\("
+    if ($SourceText -notmatch $stepPattern) {
+        $failures.Add("kiln-config slot store: KILN_CFG_STORE_VERSION is $current but no " +
+            "migrate_store_v${expectedFrom}_to_v${current}(...) step function exists in kiln_cfg_store.c")
+    }
+    return @{ Ok = ($failures.Count -eq 0); Failures = $failures }
+}
+
+function Test-ProfilesMigrationStep {
+    <#
+      docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 5 follow-up: the ESP fire
+      profiles store. Its converters are named convert_profile_v<N>(...) and
+      each converts DIRECTLY from historical version N to the current
+      in-memory profile_t (not N -> N+1) -- a "monolithic tail of typed
+      converters" shape, closer to zones' pre-v26 switch-based tail than to
+      a chained step. Enforces only that the converter for the immediately
+      preceding version exists, which is the part of D1 ("the nearest prior
+      version must be consumable, freshly, by the current release") this
+      shape can express without a redesign.
+
+      Returns @{ Ok; Failures }.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$VersionHeaderText,
+        [Parameter(Mandatory = $true)][string]$SourceText
+    )
+    $failures = New-Object System.Collections.Generic.List[string]
+    $verMatch = [regex]::Match($VersionHeaderText, '#define\s+PROFILE_VERSION\s+(\d+)')
+    if (-not $verMatch.Success) {
+        $failures.Add("fire profiles store: could not find '#define PROFILE_VERSION <N>'")
+        return @{ Ok = $false; Failures = $failures }
+    }
+    $current = [int]$verMatch.Groups[1].Value
+    $expectedFrom = $current - 1
+    $stepPattern = "convert_profile_v${expectedFrom}\s*\("
+    if ($SourceText -notmatch $stepPattern) {
+        $failures.Add("fire profiles store: PROFILE_VERSION is $current but no " +
+            "convert_profile_v${expectedFrom}(...) converter exists in profiles_http.c")
+    }
+    return @{ Ok = ($failures.Count -eq 0); Failures = $failures }
+}
+
+function Test-SaftyConfigStoreMigrationStep {
+    <#
+      docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 5 follow-up: the RP2040 safety
+      config store. It has no per-transition function at all -- migration is
+      a couple of inline `if (version == CONFIG_STORE_FORMAT_VERSION_V<N>)`
+      branches in config_store_unpack_ex() -- so what this checks is the
+      store's own actual convention: a named
+      CONFIG_STORE_FORMAT_VERSION_V<CURRENT-1> macro must exist (naming the
+      immediately preceding format this build still knows how to read), and
+      config_store.c must actually branch on it (so the macro cannot be
+      declared and then silently orphaned).
+
+      Returns @{ Ok; Failures }.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$VersionHeaderText,
+        [Parameter(Mandatory = $true)][string]$SourceText
+    )
+    $failures = New-Object System.Collections.Generic.List[string]
+    $verMatch = [regex]::Match($VersionHeaderText, '#define\s+CONFIG_STORE_FORMAT_VERSION\s+(\d+)u?')
+    if (-not $verMatch.Success) {
+        $failures.Add("RP2040 safety config store: could not find '#define CONFIG_STORE_FORMAT_VERSION <N>'")
+        return @{ Ok = $false; Failures = $failures }
+    }
+    $current = [int]$verMatch.Groups[1].Value
+    $expectedFrom = $current - 1
+    $macroName = "CONFIG_STORE_FORMAT_VERSION_V${expectedFrom}"
+    $macroPattern = "#define\s+${macroName}\s+\d+u?"
+    if ($VersionHeaderText -notmatch $macroPattern) {
+        $failures.Add("RP2040 safety config store: CONFIG_STORE_FORMAT_VERSION is $current but no " +
+            "$macroName macro naming the immediately preceding format is defined in config_store.h")
+    } else {
+        $branchPattern = "==\s*${macroName}\b"
+        if ($SourceText -notmatch $branchPattern -and $VersionHeaderText -notmatch $branchPattern) {
+            $failures.Add("RP2040 safety config store: $macroName is defined but config_store.c has no " +
+                "'== $macroName' branch actually handling it -- an orphaned macro")
+        }
+    }
+    return @{ Ok = ($failures.Count -eq 0); Failures = $failures }
+}
 
 function Test-ZonesMigrationSteps {
     <#
@@ -212,7 +350,16 @@ $versionHeader = Join-Path $repoRoot "firmware\KilnFW\App\drivers\persist\zones_
 $migrateFile = Join-Path $repoRoot "firmware\KilnFW\App\drivers\persist\zones_config_migrate.c"
 $testTreeRoot = Join-Path $repoRoot "firmware\KilnFW\App\test"
 
-foreach ($p in @($versionHeader, $migrateFile, $testTreeRoot)) {
+$kilnCfgVersionHeader = Join-Path $repoRoot "firmware\KilnFW\App\drivers\persist\kiln_cfg_store_internal.h"
+$kilnCfgSource = Join-Path $repoRoot "firmware\KilnFW\App\drivers\persist\kiln_cfg_store.c"
+
+$profilesSource = Join-Path $repoRoot "firmware\KilnFW\App\drivers\http\profiles_http.c"
+
+$saftyVersionHeader = Join-Path $repoRoot "firmware\SaftyFW\src\config_store.h"
+$saftySource = Join-Path $repoRoot "firmware\SaftyFW\src\config_store.c"
+
+foreach ($p in @($versionHeader, $migrateFile, $testTreeRoot, $kilnCfgVersionHeader, $kilnCfgSource,
+        $profilesSource, $saftyVersionHeader, $saftySource)) {
     if (-not (Test-Path $p)) {
         Write-Host "check_config_migration_steps: FAIL -- expected path not found: $p"
         exit 1
@@ -238,21 +385,38 @@ foreach ($f in $testFiles) {
     }
 }
 
-$result = Test-ZonesMigrationSteps -VersionHeaderText $versionHeaderText `
+$zonesResult = Test-ZonesMigrationSteps -VersionHeaderText $versionHeaderText `
     -MigrateFileText $migrateFileText `
     -TestTreeFileNames $testTreeFileNames `
     -TestTreeFileContents $testTreeFileContents
 
-if (-not $result.Ok) {
+$kilnCfgResult = Test-KilnCfgStoreMigrationStep -VersionHeaderText (Get-Content -Raw $kilnCfgVersionHeader) `
+    -SourceText (Get-Content -Raw $kilnCfgSource)
+
+$profilesSourceText = Get-Content -Raw $profilesSource
+$profilesResult = Test-ProfilesMigrationStep -VersionHeaderText $profilesSourceText `
+    -SourceText $profilesSourceText
+
+$saftyResult = Test-SaftyConfigStoreMigrationStep -VersionHeaderText (Get-Content -Raw $saftyVersionHeader) `
+    -SourceText (Get-Content -Raw $saftySource)
+
+$allFailures = @()
+$allFailures += $zonesResult.Failures
+$allFailures += $kilnCfgResult.Failures
+$allFailures += $profilesResult.Failures
+$allFailures += $saftyResult.Failures
+
+if ($allFailures.Count -gt 0) {
     Write-Host ""
-    Write-Host "FAILED: check_config_migration_steps found $($result.Failures.Count) problem(s)" -ForegroundColor Red
-    Write-Host "        with the zones config migration chain (docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 5):" -ForegroundColor Red
-    foreach ($f in $result.Failures) {
+    Write-Host "FAILED: check_config_migration_steps found $($allFailures.Count) problem(s)" -ForegroundColor Red
+    Write-Host "        across the governed config stores (docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 5):" -ForegroundColor Red
+    foreach ($f in $allFailures) {
         Write-Host "  - $f" -ForegroundColor Red
     }
     Write-Host ""
     exit 1
 }
 
-Write-Host "check_config_migration_steps: PASS (ZONES_CFG_VERSION within the tail's range, no step required yet; scope: zones store only)"
+Write-Host ("check_config_migration_steps: PASS -- zones (full D1/D2 rule set, still within the tail), " +
+    "kiln-config slots, fire profiles, and RP2040 safety config (existence-of-current-step rule) all satisfied")
 exit 0

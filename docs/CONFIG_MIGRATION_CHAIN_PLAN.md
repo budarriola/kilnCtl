@@ -28,7 +28,7 @@ byte a future release can bump):
 | ESP zones config | `ZONES_CFG_VERSION` (`firmware/KilnFW/App/drivers/persist/zones_config_json.h`) | 26; monolithic converter v1..v25 |
 | ESP saved kiln-config slots | `KILN_CFG_STORE_VERSION` (`firmware/KilnFW/App/drivers/persist/kiln_cfg_store_internal.h`) | 3; a real two-step chain — see §1.1 |
 | ESP fire profiles | `PROFILE_VERSION` (`firmware/KilnFW/App/drivers/http/profiles_http.c`) | 4; monolithic per-version branches |
-| RP2040 safety config | `CONFIG_STORE_FORMAT_VERSION` (`firmware/SaftyFW/src/config_store.h`) | 2; one v1->v2 branch, which IS a single step |
+| RP2040 safety config | `CONFIG_STORE_FORMAT_VERSION` (`firmware/SaftyFW/src/config_store.h`) | 3 as of the CT-channel-mask pass — corrected from this table's earlier "2, one v1->v2 branch"; `config_store_unpack_ex()` now carries two inline branches (`CONFIG_STORE_FORMAT_VERSION_V1`, `_V2`), not one |
 
 Not governed, and why:
 
@@ -448,11 +448,15 @@ A config version bump must fail the build if it does not bring its step and its
 test. `check_no_orphaned_checks.ps1` exists because "someone remembers" failed
 at least three times.
 
-Landed (this pass): `tools/check_config_migration_steps.ps1`, picked up
-automatically by `run_all_checks.ps1`'s `check_*.ps1` glob, asserting for the
-ESP zones config store (the sole governed store with an empty, D1-shaped step
-table today — see §0.1's other three stores for why they are not yet covered
-by this script):
+Landed 2026-09-17: `tools/check_config_migration_steps.ps1`, picked up
+automatically by `run_all_checks.ps1`'s `check_*.ps1` glob, originally scoped
+to the ESP zones config store only (the sole governed store with an empty,
+D1-shaped step table at the time). **Extended 2026-09-19** to also cover the
+other three governed stores — see the new subsection after the negative-test
+paragraph below for what that extension actually checks, and why it is
+narrower than the zones rule set rather than an identical copy of it.
+
+The full zones rule set (unchanged by the extension):
 
 1. A step exists whose input is `CURRENT_VERSION - 1`, unless the current
    version is still within the tail's range (26 for zones).
@@ -479,10 +483,67 @@ real (pre-bump) tree. Wired into `run_all_checks.ps1` alongside the other
 `test_check_*.ps1` negative tests. Eight checks in this repo previously
 shipped as vacuous passes without that discipline.
 
-Extending enforcement to the other three governed stores (kiln-config slots,
-fire profiles, RP2040 safety config) is follow-up work, not assumed done
-here — kiln-config slots in particular carries two pre-D1 accumulated steps
-today that a naive "exactly one step" rule would immediately flag.
+### 5.1 Extension to the other three governed stores (2026-09-19)
+
+Each of the other three stores has a genuinely different on-disk migration
+shape from zones', so the extension enforces the part of D1 that generalizes
+to that shape rather than forcing an identical rule set onto code it doesn't
+fit:
+
+- **ESP kiln-config slots** (`Test-KilnCfgStoreMigrationStep`): already
+  carries two pre-D1 GRANDFATHERED steps (`migrate_store_v1_to_v2`,
+  `migrate_store_v2_to_v3`) — exactly the case this section's earlier
+  revision warned a naive "exactly one step total" rule would immediately
+  flag. Enforced instead: `migrate_store_v<CURRENT-1>_to_v<CURRENT>(...)`
+  must exist in `kiln_cfg_store.c` for the live `KILN_CFG_STORE_VERSION`.
+  This is a real, negative-tested check (bumping the version in scratch
+  text without adding the matching function fails, naming it) but it does
+  not re-enforce D1's "exactly one" accumulation rule, a frozen-input
+  `_Static_assert`/`crc32`-last-field convention (this store has neither —
+  it uses a length-based migration detection and one aggregate BSS/heap
+  budget assert covering all historical structs together, not a per-step
+  one), a fixture-must-be-referenced rule, or an expiry floor. None of
+  those conventions exist in this store's own design to check against
+  today; inventing one here would be a check enforcing a policy this store
+  never adopted, not a check catching a real regression.
+- **ESP fire profiles** (`Test-ProfilesMigrationStep`): its converters
+  (`convert_profile_v1/v2/v3`) each convert DIRECTLY from a historical
+  version to the current in-memory `profile_t`, not `N -> N+1` — a
+  monolithic-tail shape like zones' pre-v26 converter, not a chain. This
+  store DOES already carry the frozen-input `_Static_assert`/`crc32`-last-
+  field discipline per historical struct (`profile_persisted_v3_t`, sized
+  and offset-asserted) — but wiring the check to inspect it would need to
+  know its own naming/dispatch convention (`expected_len_for_version()`'s
+  `switch`), which is different from zones' `zones_cfg_v<N>_t` convention.
+  Enforced today: `convert_profile_v<PROFILE_VERSION-1>(...)` must exist.
+  The struct/fixture/D2 depth is follow-up, not enforced yet.
+- **RP2040 safety config** (`Test-SaftyConfigStoreMigrationStep`): has no
+  per-transition function at all — migration is two inline
+  `if (version == CONFIG_STORE_FORMAT_VERSION_V<N>)` branches inside
+  `config_store_unpack_ex()`. Enforced: a
+  `CONFIG_STORE_FORMAT_VERSION_V<CURRENT-1>` macro must be defined in
+  `config_store.h` AND actually referenced by a matching branch in
+  `config_store.c` (an orphaned macro is caught). Depth beyond that
+  (frozen-struct/fixture/D2) needs the same kind of scaffolding this store
+  doesn't have yet — its migration inputs are raw byte offsets
+  (`REC_V1_OFF_*`/`REC_V2_OFF_*`), not typed frozen structs — and building
+  that scaffold is a real firmware change, not a check-only change, so it
+  is left as follow-up rather than attempted here.
+
+All three additions are negative-tested the same way as the original zones
+rule: `test_check_config_migration_steps.ps1` assertions 10-15 bump each
+store's version in synthetic scratch text with no matching step/macro (FAIL,
+naming the store) and separately run the function against today's real,
+already-compliant production files (PASS) — 15 assertions total, up from 9.
+
+**Still explicitly follow-up, not assumed done:** D1's "exactly one NEW step
+per bump" defect-catching rule, the frozen-input assert/`crc32`-last-field
+discipline, the fixture-must-be-referenced rule, and D2's expiry floor, for
+all three of these stores. Extending each one further is real work per
+store (kiln-config slots and RP2040 safety config would need new scaffolding
+that does not exist in their current design; fire profiles would "only"
+need the check taught its existing scaffolding) and is not silently assumed
+covered by this pass.
 
 ## 6. Decisions — all settled
 
