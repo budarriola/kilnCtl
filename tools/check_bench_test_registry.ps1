@@ -80,16 +80,21 @@ if only_in_registry:
     problems.append("Case ids in registry.py but not found in the plan doc:\n" +
                      "\n".join(f"  {c}" for c in only_in_registry))
 
-# The doc's own WEB header figure (96) does not match the sum of its own
-# parenthetical per-sub-area breakdown (119) -- a pre-existing typo in the
-# doc, not something this check can fix. Validate against the itemized
-# breakdown (the number actually used to derive registry.py's per-area
-# lists), which is the number that matters for catching real drift.
-web_breakdown_match = re.search(r"\|\s*WEB\s*\|\s*\d+\s*\(([^)]+)\)", text)
+# The doc's own WEB header figure and its parenthetical per-sub-area
+# breakdown must now agree with each other AND with registry.py (the header
+# figure used to be a stale 96 against a breakdown/registry of 119 -- fixed
+# 2026-09-19 -- so this check no longer skips the header number).
+web_breakdown_match = re.search(r"\|\s*WEB\s*\|\s*(\d+)\s*\(([^)]+)\)", text)
 if not web_breakdown_match:
     problems.append("Could not find the WEB per-sub-area breakdown in the plan doc's §3 summary table")
 else:
-    breakdown_sum = sum(int(n) for n in re.findall(r"(\d+)", web_breakdown_match.group(1)))
+    header_total = int(web_breakdown_match.group(1))
+    breakdown_sum = sum(int(n) for n in re.findall(r"(\d+)", web_breakdown_match.group(2)))
+    if header_total != breakdown_sum:
+        problems.append(
+            f"WEB case count mismatch: plan doc's WEB header figure ({header_total}) "
+            f"does not match its own per-sub-area breakdown sum ({breakdown_sum})"
+        )
     if breakdown_sum != len(web_ids):
         problems.append(
             f"WEB case count mismatch: plan doc's per-sub-area breakdown sums to "
@@ -114,15 +119,10 @@ print(f"OK: {len(registry_ids)} case ids agree between the plan doc and registry
 sys.exit(0)
 '@
 
-$tmpScript = Join-Path $env:TEMP "check_bench_test_registry_$PID.py"
-Set-Content -Path $tmpScript -Value $pyScript -Encoding utf8
-
-try {
-    & $venvPython $tmpScript $planDoc $repoRoot
-    $exitCode = $LASTEXITCODE
-}
-finally {
-    Remove-Item -Path $tmpScript -Force -ErrorAction SilentlyContinue
-}
+# Piped to python's stdin (script name "-") instead of written to a temp
+# .py file: a temp .py file trips check_source_path_drift.ps1, which reads
+# any *.py path it sees mentioned as a source-file reference.
+$pyScript | & $venvPython - $planDoc $repoRoot
+$exitCode = $LASTEXITCODE
 
 exit $exitCode
