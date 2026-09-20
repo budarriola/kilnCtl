@@ -1456,8 +1456,16 @@ Extends the existing kiln-config management page (`/settings/kiln_configs`,
 `kiln_configs_page.html`, moved off the dashboard 2026-09-18). Confirm dialog per section
 7.3. Backup page gains a pointer link (**landed 2026-09-18** -- the Export and
 Restore cards on `backup_page.html` now both link to `/settings/kiln_configs`
-and state plainly what a backup does and does not cover). LCD line and banner
-per section 7.4.
+and state plainly what a backup does and does not cover). **Also landed
+2026-09-19:** `backup_page.html`'s whole-backup restore now covers the
+`kiln_configs[]` array the export already included (`backup_export.c`'s
+`"kiln_configs"` key) with a Merge/Mirror mode radio, a dry-run
+(`X-Kiln-Config-Dry-Run: 1`) preview that names every create/rename/delete
+before the confirm dialog is shown, and the ack-delete count for a real Mirror
+restore derived from that same preview rather than typed by hand. This is the
+whole-backup-file path (`/api/backup/import`), distinct from item 9's own
+per-slot download/upload UI on `/settings/kiln_configs`, which remains open.
+LCD line and banner per section 7.4.
 *Acceptance:* Apply cannot be pressed without the dialog; hardware-differs
 requires the explicit acknowledgement checkbox; a 404 on the new routes hides
 the new controls without breaking the existing ones; the divergence banner has
