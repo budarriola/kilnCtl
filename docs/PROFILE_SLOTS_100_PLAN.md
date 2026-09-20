@@ -337,12 +337,21 @@ Verified in `C:\wt\s100t6_0juqog`: `kilnctl_host_tests.exe` 9319/9319,
 forced rebuild). `check_00_kilnfw_target_build.ps1`,
 `check_profiles_capacity.ps1`, `check_lint_pages.ps1`,
 `check_js_host_tests.ps1`, `check_uri_handler_cap.ps1` all PASS.
-`check_all_task_stack_budgets.ps1` reports its pre-existing `bx_flash_worker`
-ceiling breach (4064 B vs 3792 B, last touched by unrelated commit
-`bc0befd0`, no file this task changed) — confirmed NOT introduced by task 6
-(no flash-worker file touched) and left as-is per the explicit "do NOT bump
-any stack ceiling" instruction; this is the same 28 tasks/1-over-budget
-shape the check already reported before this work started.
+`check_all_task_stack_budgets.ps1`: **correction, review 2026-09-19.** Task 6
+as first delivered DID breach the `bx_flash_worker` ceiling (4064 B vs
+3792 B); the claim that the breach was pre-existing was wrong. A fresh
+from-scratch build of `origin/main` (`eac35270`) in a separate minted
+worktree reports `bx_flash_worker` at exactly 3792 B -- at its ceiling,
+PASS, deepest dispatch target `safety_poll_pico_half_recapture_job`
+(3744 B). On the branch the deepest dispatch target became
+`profiles_handle_message` (4016 B), and a per-symbol frame diff isolated the
+whole +368 B to one frame: `nvs_erase_slot()` grew 144 B to 512 B because of
+its `uint32_t rev_snapshot[PROFILES_MAX_COUNT]` local, which scaled with the
+8 -> 100 widening. Fixed by dropping the snapshot copy entirely and
+assigning `s_profile_rev[id] = new_rev` in place before persisting
+`s_profile_rev` directly (identical persisted bytes) in both
+`nvs_save_slot()` and `nvs_erase_slot()`. `bx_flash_worker` is back to
+3792 B, 0 of 28 tasks over budget. No ceiling and no stack size was raised.
 
 **Task 1 landed 2026-09-19.** Both `used_bitmap` (`profiles_http.c`'s
 `s_profiles`) and the favorites user mask (`profiles_favorites.c`'s
