@@ -715,8 +715,22 @@ static hal_status_t used_bitmap_load(hal_kv_handle_t *h, profiles_slot_bitmap_t 
     return HAL_OK;
 }
 
+/* Forward declaration: both of today's callers (nvs_save_slot(),
+ * nvs_erase_slot()) already refuse up front when the calling task's stack is
+ * in PSRAM, so the guard below is defence in depth -- but this is a real NVS
+ * write call site in a PSRAM-stack-guarded module (DRAM_PSRAM_STATUS.md
+ * section 7.2/9), and every such site in this file carries the same refusal
+ * rather than relying on a caller a future edit could add without it. */
+static bool caller_stack_is_external(void);
+
 static hal_status_t used_bitmap_save(hal_kv_handle_t *h, const profiles_slot_bitmap_t *bm)
 {
+    if (caller_stack_is_external()) {
+        ESP_LOGE(PROFILES_TAG, "used_bitmap_save: REFUSING -- calling task's stack is in external RAM "
+                      "(PSRAM); an NVS write from here would abort the whole board. See "
+                      "DRAM_PSRAM_PLAN.md section 7.2.");
+        return HAL_NOT_READY;
+    }
     return hal_kv_set_blob(h, NVS_KEY_USED, bm, sizeof(*bm));
 }
 
