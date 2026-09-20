@@ -1574,6 +1574,7 @@ def judge_operator_trip(
     trip_reason: Optional[int],
     expected_reason: int,
     cleared_after: Optional[bool],
+    trip_mask: Optional[int] = None,
 ) -> CaseResult:
     """SP-08/SP-09 shared shape: an operator-induced trip must show up as
     EXACTLY the expected `trip_reason` (never a different or additional
@@ -1596,6 +1597,20 @@ def judge_operator_trip(
             ),
             observed={"trip_reason": trip_reason, "expected_reason": expected_reason},
         )
+    expected_mask = safety_trip_mask_for_reason(expected_reason)
+    if trip_mask is not None and trip_mask != expected_mask:
+        # Plan section 6 rule 5: the reason ALONE matching is not enough --
+        # a second guard latched at the same time shows up only in the
+        # mask, and clearing on a reason match alone would wipe it
+        # unseen. The caller must not have cleared in that case either.
+        return CaseResult(
+            Verdict.FAIL,
+            reason=(
+                f"trip_reason={trip_reason} matched but trip_mask={trip_mask:#06x} is not exactly "
+                f"the expected {expected_mask:#06x} -- another guard is latched too"
+            ),
+            observed={"trip_reason": trip_reason, "trip_mask": trip_mask, "expected_mask": expected_mask},
+        )
     if cleared_after is False:
         return CaseResult(
             Verdict.FAIL,
@@ -1608,7 +1623,10 @@ def judge_operator_trip(
             reason="trip latched correctly but the post-clear state could not be read back",
             observed={"trip_reason": trip_reason},
         )
-    return CaseResult(Verdict.PASS, observed={"trip_reason": trip_reason, "cleared_after": cleared_after})
+    return CaseResult(
+        Verdict.PASS,
+        observed={"trip_reason": trip_reason, "trip_mask": trip_mask, "cleared_after": cleared_after},
+    )
 
 
 def judge_wifi_mode_returned_home(

@@ -276,21 +276,32 @@ def _case_fl11(ctx: dict) -> CaseResult:
     if isinstance(flash_text, str) and flash_text.lower().startswith("error"):
         return J.judge_flash_round_trip(None, None, "pico", error=flash_text)
 
-    status_text = srv.safety_get_status()
+    # safety_get_diag(), not safety_get_status(): SafetyStatus carries no
+    # trip_reason/trip_mask at all, so parsing the status text would report
+    # "no trip_reason" and FAIL every run.
+    status_text = srv.safety_get_diag()
     trip_reason = None
-    m = re.search(r"trip_reason[:=]\s*(\d+)", status_text)
+    m = re.search(r"trip_reason\s*[:=]?\s*(\d+)", status_text)
     if m:
         trip_reason = int(m.group(1))
+    trip_mask = None
+    mm = re.search(r"trip_mask\s*[:=]?\s*(0x[0-9a-fA-F]+|\d+)", status_text)
+    if mm:
+        trip_mask = int(mm.group(1), 0)
+    expected_mask = J.safety_trip_mask_for_reason(_FL11_EXPECTED_TRIP_REASON)
 
     cleared_after: "bool | None" = None
-    if trip_reason == _FL11_EXPECTED_TRIP_REASON:
+    # Plan section 6 rule 5: exactly-matched reason AND mask before any
+    # safety_clear_trip(). S6a is reason 6, so the mask must be 0x0020 and
+    # nothing else -- a mask the report omits is not a match.
+    if trip_reason == _FL11_EXPECTED_TRIP_REASON and trip_mask == expected_mask:
         srv.safety_clear_trip()
-        after_text = srv.safety_get_status()
+        after_text = srv.safety_get_diag()
         after_m = re.search(r"trip_reason[:=]\s*(\d+)", after_text)
         if after_m:
             cleared_after = int(after_m.group(1)) == 0
 
-    return J.judge_operator_trip(trip_reason, _FL11_EXPECTED_TRIP_REASON, cleared_after)
+    return J.judge_operator_trip(trip_reason, _FL11_EXPECTED_TRIP_REASON, cleared_after, trip_mask=trip_mask)
 
 
 #: Wire this wave's judge functions into the shared REGISTRY. Imported by

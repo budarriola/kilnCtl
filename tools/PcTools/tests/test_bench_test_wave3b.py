@@ -221,15 +221,30 @@ class Sp08Sp09AttendedGateTest(unittest.TestCase):
         self.assertIn("--attended", result.reason)
 
 
+def _diag_text(trip_reason, trip_mask=None):
+    """The REAL shape of SafetyDiag.describe() (devices_safety.py) -- space
+    separators, a bracketed reason description, a hex mask. The earlier
+    fixture said "trip_reason=8", a string no device ever emits, which is
+    the "idealized test input" bug class: it let SP-08/SP-09 read their trip
+    off safety_get_status() (which carries no trip_reason at all) and still
+    look green."""
+    if trip_mask is None:
+        trip_mask = (1 << (trip_reason - 1)) if trip_reason else 0
+    return (
+        f"boot reason: power_on | state armed | trip_reason {trip_reason} [desc] | "
+        f"warn_mask 0x0000 | trip_mask 0x{trip_mask:04x} | uptime 1000 ms"
+    )
+
+
 class _FakeSafetySrv:
-    """Injectable stand-in for ctx["srv"] -- returns canned status text and
+    """Injectable stand-in for ctx["srv"] -- returns canned diag text and
     records whether safety_clear_trip() was called."""
 
     def __init__(self, status_sequence):
         self._sequence = list(status_sequence)
         self.clear_called = 0
 
-    def safety_get_status(self):
+    def safety_get_diag(self):
         if len(self._sequence) > 1:
             return self._sequence.pop(0)
         return self._sequence[0]
@@ -245,7 +260,7 @@ class Sp08AttendedFlowTest(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.FAIL)
 
     def test_full_trip_and_clear_passes(self):
-        srv = _FakeSafetySrv(["trip_reason=8", "trip_reason=0"])
+        srv = _FakeSafetySrv([_diag_text(8), _diag_text(0)])
         ctx = {"attended": True, "operator_prompt_fn": lambda q, t: True, "srv": srv}
         result = CS._case_sp08(ctx)
         self.assertEqual(result.verdict, Verdict.PASS)
@@ -254,13 +269,13 @@ class Sp08AttendedFlowTest(unittest.TestCase):
     def test_wrong_trip_reason_fails(self):
         """Negative test: SP-08 (E-stop, expects 8) sees S6b (7) instead --
         must FAIL, not PASS on "something tripped"."""
-        srv = _FakeSafetySrv(["trip_reason=7", "trip_reason=0"])
+        srv = _FakeSafetySrv([_diag_text(7), _diag_text(0)])
         ctx = {"attended": True, "operator_prompt_fn": lambda q, t: True, "srv": srv}
         result = CS._case_sp08(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
 
     def test_sp09_full_trip_and_clear_passes(self):
-        srv = _FakeSafetySrv(["trip_reason=7", "trip_reason=0"])
+        srv = _FakeSafetySrv([_diag_text(7), _diag_text(0)])
         ctx = {"attended": True, "operator_prompt_fn": lambda q, t: True, "srv": srv}
         result = CS._case_sp09(ctx)
         self.assertEqual(result.verdict, Verdict.PASS)
@@ -377,6 +392,45 @@ class Fl10FlashOutcomeTest(unittest.TestCase):
         ctx = {"allow_flash": True, "ap_password": "pw", "srv": srv}
         result = CFL._case_fl10(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
+
+
+class TripMaskRuleFiveTest(unittest.TestCase):
+    """Plan section 6 rule 5: safety_clear_trip() only on an exactly-matched
+    reason AND mask."""
+
+    def test_extra_guard_in_the_mask_fails_and_never_clears(self):
+        # reason 8 (E-stop) but the mask also carries bit 5 (S6a) -- a
+        # second guard is latched, so this must FAIL and must NOT clear.
+        srv = _FakeSafetySrv([_diag_text(8, trip_mask=0x0080 | 0x0020)])
+        ctx = {"attended": True, "operator_prompt_fn": lambda q, t: True, "srv": srv}
+        result = CS._case_sp08(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("trip_mask", result.reason)
+        self.assertEqual(srv.clear_called, 0)
+
+    def test_a_missing_mask_is_not_a_match(self):
+        srv = _FakeSafetySrv(["boot reason: power_on | trip_reason 8 [desc] | uptime 1 ms"])
+        ctx = {"attended": True, "operator_prompt_fn": lambda q, t: True, "srv": srv}
+        result = CS._case_sp08(ctx)
+        self.assertEqual(srv.clear_called, 0)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
+    def test_judge_passes_on_an_exact_mask(self):
+        result = J.judge_operator_trip(8, 8, True, trip_mask=1 << 7)
+        self.assertEqual(result.verdict, Verdict.PASS)
+
+    def test_fl11_expects_s6a_mask_0x0020(self):
+        self.assertEqual(J.safety_trip_mask_for_reason(CFL._FL11_EXPECTED_TRIP_REASON), 0x0020)
+
+
+class AlwaysLastAcrossEverySuiteTest(unittest.TestCase):
+    def test_web_sec_05_is_last_in_every_suite_containing_it(self):
+        from kilnctrl.bench_test import registry as R
+        containing = [n for n, ids in R.SUITES.items() if "WEB-SEC-05" in ids]
+        self.assertIn("web", containing)
+        self.assertIn("full", containing)
+        for name in containing:
+            self.assertEqual(R.SUITES[name][-1], "WEB-SEC-05", name)
 
 
 if __name__ == "__main__":

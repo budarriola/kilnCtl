@@ -444,3 +444,19 @@ _NIGHTLY_ORDER: List[str] = [
 assert len(_NIGHTLY_ORDER) == len(set(_NIGHTLY_ORDER)), "duplicate id in _NIGHTLY_ORDER"
 SUITES["nightly"] = list(_NIGHTLY_ORDER)
 SUITES["full"] = _fixed_order(REGISTRY.keys())
+
+
+def _enforce_always_last() -> None:
+    """Move `_ALWAYS_LAST` to the end of EVERY suite that contains it, not
+    just the ones built through `_fixed_order()`. `SUITES["web"]` is a plain
+    `list(_WEB_IDS)`, so WEB-SEC-05 sat mid-list there with 24 web cases
+    scheduled after it -- each one then facing the per-IP lockout that case
+    deliberately trips, which has no admin unlock route (memory
+    project_login_lockout_saturation_accepted). Anything that appends a new
+    suite below this call must call it again."""
+    for name, ids in SUITES.items():
+        if _ALWAYS_LAST in ids and ids[-1] != _ALWAYS_LAST:
+            SUITES[name] = [c for c in ids if c != _ALWAYS_LAST] + [_ALWAYS_LAST]
+
+
+_enforce_always_last()
