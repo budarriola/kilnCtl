@@ -69,16 +69,30 @@ extern "C" {
 
 #define FAKE_KV_MAX_PARTITIONS         4
 #define FAKE_KV_MAX_NAMESPACES_PER_PART 4
-/* 4 -> 12 (2026-09-06 flash-safety review): profiles_http.c's "kiln_cfg"
- * namespace alone holds 9 live keys at once in the worst case (prof_used
- * plus up to PROFILES_MAX_COUNT=8 "profN" slot keys), which sat exactly at
- * the old cap of 4 -- any test staging more than 4 profile slots at once
- * would have silently failed to store the later ones (find_key()'s "table
- * full" HAL_NO_MEM, not a crash) rather than reporting a real capacity
- * error. 12 gives headroom above today's worst known case (9) rather than
- * matching it exactly, same "loose headroom, not a tight fit" discipline
- * stubs/nvs.h's own blob-size bumps used. */
-#define FAKE_KV_MAX_KEYS_PER_NS         12
+/* 4 -> 12 (2026-09-06 flash-safety review) -> 128 (2026-09-19, docs/
+ * PROFILE_SLOTS_100_PLAN.md task 6 widened PROFILES_MAX_COUNT 8 -> 100):
+ * profiles_http.c's "kiln_cfg" namespace is the worst known caller. At
+ * PROFILES_MAX_COUNT=8 it held 9 live keys at once ("prof_used" plus up to
+ * 8 "profN" slot keys), which sat exactly at the then-cap of 4 -- any test
+ * staging more than 4 profile slots at once would have hit find_key()'s
+ * "table full" HAL_NO_MEM on the later ones rather than actually exercising
+ * the capacity it thought it had. With PROFILES_MAX_COUNT now 100, that same
+ * namespace's worst case is "prof_used" + up to 100 "profN" keys +
+ * profiles_favorites.c's "prof_favusr"/"prof_favbi" = 103 keys live at once
+ * -- the OLD 12-key cap would silently strand any host test that drives
+ * profiles through this real fake (rather than test_profiles_http.c's own
+ * nvs_stub) somewhere around profile #10, long before reaching 100. 128
+ * gives headroom above that 103 rather than matching it exactly, same
+ * "loose headroom, not a tight fit" discipline stubs/nvs.h's own blob-size
+ * bumps used -- and see fake_kv.c's FAKE_KV_KNOWN_WORST_CASE_KILN_CFG_KEYS
+ * _Static_assert, which pins this cap against that 103 number at compile
+ * time so the two can't drift apart silently again. (This header
+ * deliberately does NOT include a firmware app header like profiles_types.h
+ * to derive 100/103 automatically -- fake_kv.h/.c are shared, portable HAL
+ * fakes used by SaftyFW's host tests too, and pulling an ESP32-app-specific
+ * header into them would be a worse dependency than hand-pinning the
+ * number and asserting it.) */
+#define FAKE_KV_MAX_KEYS_PER_NS         128
 #define FAKE_KV_MAX_KEY_LEN            16
 #define FAKE_KV_MAX_NAME_LEN           16
 /* 256 -> 8192 (HW_ABSTRACTION.md Phase 3 item 3, the nvs.h -> hal_kv.h

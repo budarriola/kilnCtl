@@ -745,6 +745,47 @@ if (-not $sysinfoOrigContent.Contains($sysinfoGoodBlock)) {
     }
 }
 
+# --- 12) Negative test: fake_kv's kiln_cfg key-count static assertion ---
+# Proves the compile-time tripwire in fake_kv.c (FAKE_KV_KNOWN_WORST_CASE_
+# KILN_CFG_KEYS _Static_assert) actually fires: shrinking FAKE_KV_MAX_KEYS_
+# PER_NS back to its old, too-small 12-key value (the exact value that let
+# profiles_http.c's 100-slot "kiln_cfg" namespace silently strand every
+# profN write past slot ~10 with nothing but an easy-to-miss HAL_NO_MEM
+# return) must fail the BUILD, not compile and quietly reintroduce the
+# overflow at runtime.
+Write-Host "`n--- Negative test: fake_kv kiln_cfg key-count static assertion ---"
+
+$kvCapGoodLine = '#define FAKE_KV_MAX_KEYS_PER_NS         128'
+$kvCapMutantLine = '#define FAKE_KV_MAX_KEYS_PER_NS         12'
+
+$kvCapHeaderPath = Join-Path $hostDir "fake_kv.h"
+$kvCapOrigContent = (Get-Content $kvCapHeaderPath -Raw) -replace "`r`n", "`n"
+if (-not $kvCapOrigContent.Contains($kvCapGoodLine)) {
+    $failures += "Negative test setup FAILED: expected FAKE_KV_MAX_KEYS_PER_NS #define line not found verbatim in fake_kv.h -- source drifted from what this script mutates. Update kvCapGoodLine/kvCapMutantLine together with fake_kv.h."
+} else {
+    $kvCapMutantContent = $kvCapOrigContent.Replace($kvCapGoodLine, $kvCapMutantLine)
+    # fake_kv.c #includes "fake_kv.h" with a quoted include, which MSVC
+    # resolves against the INCLUDING FILE's own directory first, ahead of any
+    # /I path -- so both the mutant header and an unmodified copy of fake_kv.c
+    # are placed together in $workDir, rather than relying on /I order to
+    # shadow the real fake_kv.h.
+    $kvCapMutantHeader = Join-Path $workDir "fake_kv.h"
+    $kvCapMutantSrc = Join-Path $workDir "fake_kv_capshrink.c"
+    Set-Content -Path $kvCapMutantHeader -Value $kvCapMutantContent -Encoding ASCII -NoNewline
+    Copy-Item -Path (Join-Path $hostDir "fake_kv.c") -Destination $kvCapMutantSrc -Force
+
+    $kvCapMutantExe = Join-Path $workDir "fake_kv_capshrink_mutant.exe"
+    $r = Invoke-ClLink -SourceFiles @($kvCapMutantSrc, (Join-Path $here "test_fake_kv.c"), (Join-Path $commonDir "hal_status.c")) `
+        -OutExe $kvCapMutantExe -IncludeDirs @($ifaceDir, $hostDir)
+    if ($r.ExitCode -eq 0) {
+        $failures += "NEGATIVE TEST FAILED: shrinking FAKE_KV_MAX_KEYS_PER_NS back to 12 compiled cleanly -- the FAKE_KV_KNOWN_WORST_CASE_KILN_CFG_KEYS static assertion does not actually catch a too-small cap for kiln_cfg's 103-key worst case."
+    } elseif ($r.Output -notmatch "FAKE_KV_MAX_KEYS_PER_NS must cover kiln_cfg") {
+        $failures += "Negative test: mutant fake_kv.h (cap shrink) failed to compile, but not with the expected static_assert message -- confirm the failure is actually the intended tripwire:`n$($r.Output)"
+    } else {
+        Write-Host "OK   negative test: shrinking FAKE_KV_MAX_KEYS_PER_NS to 12 correctly fails the BUILD via the kiln_cfg static assertion"
+    }
+}
+
 Remove-Item -Recurse -Force $workDir -ErrorAction SilentlyContinue
 
 Write-Host "`n=== Totals (normal runs only): pass=$totalPass fail=$totalFail ==="

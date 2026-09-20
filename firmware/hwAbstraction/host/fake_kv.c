@@ -13,6 +13,24 @@ typedef struct {
 _Static_assert(sizeof(fake_kv_tag_t) <= HAL_KV_HANDLE_STORAGE_BYTES,
                "fake_kv_tag_t must fit hal_kv_handle_t storage");
 
+/* The known worst-case key count for profiles_http.c/profiles_favorites.c's
+ * shared "kiln_cfg" namespace: PROFILES_MAX_COUNT (100, firmware/KilnFW/App/
+ * drivers/http/profiles_http.c) "profN" keys, + "prof_used", +
+ * "prof_favusr"/"prof_favbi" (profiles_favorites.c) = 103. Hand-pinned here
+ * rather than computed from profiles_types.h's PROFILES_MAX_COUNT -- this
+ * file is a shared, portable HAL fake (SaftyFW's host tests link it too),
+ * and including an ESP32 app header just to derive one constant would be a
+ * worse dependency than a hand-pinned number with a compile-time tripwire.
+ * If FAKE_KV_MAX_KEYS_PER_NS (fake_kv.h) is ever lowered, or this number
+ * needs to grow because profiles_http.c's namespace grows again, this
+ * assertion fails the BUILD rather than letting a host test silently strand
+ * partway through staging its keys (find_key()'s "table full" -> HAL_NO_MEM
+ * on writes past the cap, easy to miss if a caller loop doesn't check every
+ * return). See fake_kv.h's FAKE_KV_MAX_KEYS_PER_NS comment for the history. */
+#define FAKE_KV_KNOWN_WORST_CASE_KILN_CFG_KEYS 103
+_Static_assert(FAKE_KV_MAX_KEYS_PER_NS >= FAKE_KV_KNOWN_WORST_CASE_KILN_CFG_KEYS,
+               "FAKE_KV_MAX_KEYS_PER_NS must cover kiln_cfg's known worst case (103 keys) -- see the comment above");
+
 typedef struct {
     bool     in_use;
     char     name[FAKE_KV_MAX_KEY_LEN];

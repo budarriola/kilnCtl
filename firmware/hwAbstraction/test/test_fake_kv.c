@@ -271,6 +271,50 @@ int main(void)
     CHECK(len == 1 && buf8[0] == 'y');
     fake_kv_reset_all();
 
+    /* --- kiln_cfg's real worst case: PROFILES_MAX_COUNT=100 "profN" keys +
+     * "prof_used" + "prof_favusr"/"prof_favbi" = 103 keys live at once in one
+     * namespace, matching profiles_http.c/profiles_favorites.c's actual
+     * NVS layout (see fake_kv.c's FAKE_KV_KNOWN_WORST_CASE_KILN_CFG_KEYS).
+     * This is the scenario the 12-key cap used to strand silently partway
+     * through (a caller looping profN writes without checking every return
+     * would have just lost slots 12..99); with the cap now 128, every one of
+     * these 103 keys must actually be stored, not merely accepted with a
+     * later slot quietly overwritten. --- */
+    CHECK(hal_kv_init_partition("kiln_nvs") == HAL_OK);
+    hal_kv_handle_t hp;
+    memset(&hp, 0, sizeof(hp));
+    CHECK(hal_kv_open(&hp, "kiln_cfg", HAL_KV_MODE_READ_WRITE, "kiln_nvs") == HAL_OK);
+    uint8_t used_bitmap[4] = {0xAA, 0xBB, 0xCC, 0xDD};
+    CHECK(hal_kv_set_blob(&hp, "prof_used", used_bitmap, sizeof(used_bitmap)) == HAL_OK);
+    CHECK(hal_kv_set_blob(&hp, "prof_favusr", used_bitmap, sizeof(used_bitmap)) == HAL_OK);
+    CHECK(hal_kv_set_blob(&hp, "prof_favbi", used_bitmap, sizeof(used_bitmap)) == HAL_OK);
+    for (int i = 0; i < 100; i++) {
+        char key[16];
+        snprintf(key, sizeof(key), "prof%d", i);
+        uint8_t val = (uint8_t)(i & 0xFF);
+        CHECK(hal_kv_set_blob(&hp, key, &val, 1) == HAL_OK);
+    }
+    CHECK(hal_kv_commit(&hp) == HAL_OK);
+    /* Read every one of the 100 profN keys back and confirm none were
+     * silently dropped or overwritten by a later key colliding into a slot a
+     * too-small cap had already recycled. */
+    for (int i = 0; i < 100; i++) {
+        char key[16];
+        snprintf(key, sizeof(key), "prof%d", i);
+        uint8_t val = 0xFF;
+        size_t vlen = sizeof(val);
+        CHECK(hal_kv_get_blob(&hp, key, &val, &vlen) == HAL_OK);
+        CHECK(vlen == 1 && val == (uint8_t)(i & 0xFF));
+    }
+    size_t bmlen = sizeof(used_bitmap);
+    uint8_t got_bitmap[4] = {0};
+    CHECK(hal_kv_get_blob(&hp, "prof_used", got_bitmap, &bmlen) == HAL_OK);
+    CHECK(memcmp(got_bitmap, used_bitmap, sizeof(used_bitmap)) == 0);
+    hal_kv_stats_t prof_stats;
+    CHECK(hal_kv_stats("kiln_nvs", &prof_stats) == HAL_OK);
+    CHECK(prof_stats.used_entries == 103); /* 100 profN + prof_used + prof_favusr + prof_favbi */
+    fake_kv_reset_all();
+
     printf("RESULT pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
