@@ -882,6 +882,61 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
         Fail "sdkconfig copy did not verify (hash mismatch) -- refusing to build against an unconfirmed config"
     }
 
+    # STALE CACHED BUILD CONFIG GUARD (2026-09-19).
+    # ----------------------------------------------
+    # $WorktreePath's build\ directory is PERSISTENT across runs (see the
+    # cost discussion at the top of this file), and idf.py's own
+    # CMAKE_CONFIGURE_DEPENDS wiring on sdkconfig does not reliably repeat a
+    # full CMake configure for every Kconfig-gated `if(CONFIG_...)` branch in
+    # a component CMakeLists.txt merely because ninja's ordinary incremental
+    # build noticed sdkconfig's mtime changed -- a reviewer observed exactly
+    # this class of drift directly: a checkbuild worktree whose build\ had
+    # been configured from an older sdkconfig kept
+    # CONFIG_KILNCTL_ENABLE_GPIO_PROBE=n cached in its generated
+    # sdkconfig.h/CMake state even after this script copied in a newer
+    # sdkconfig with that option set to y, and `idf.py build` (an ordinary
+    # incremental ninja invocation, not a reconfigure) did not correct it.
+    # The ELF that came out of that build then disagreed with the very
+    # sdkconfig this script had just verified byte-identical above, and
+    # every downstream ELF-grading check (the four stack-budget checks this
+    # file's header names) silently graded the wrong binary.
+    #
+    # Fix: this script now tracks, itself, which sdkconfig content the build
+    # directory was last actually reconfigured against -- a marker written
+    # right next to the artifacts it produces (build\.sdkconfig_built.sha256,
+    # a sibling of KilnCtrl.elf, not something idf.py maintains on its own).
+    # If that marker disagrees with the sdkconfig just copied in (including
+    # "no marker yet", which covers both a brand-new build directory and one
+    # left over from before this guard existed), the build directory is
+    # reconfigured explicitly (`idf.py reconfigure`) BEFORE `idf.py build`
+    # runs, so this run's build reflects the sdkconfig that was just verified
+    # rather than whatever CMake state happened to already be cached. The
+    # marker is only updated after a build this script itself confirms
+    # succeeded (see the write site below, after the freshness check), so a
+    # failed or aborted run never claims a config it did not actually build.
+    $SdkconfigHashMarker = Join-Path $WorktreePath "firmware\KilnFW\build\.sdkconfig_built.sha256"
+    $CMakeCacheFile = Join-Path $WorktreePath "firmware\KilnFW\build\CMakeCache.txt"
+    $previousBuiltHash = $null
+    if (Test-Path -LiteralPath $SdkconfigHashMarker) {
+        try { $previousBuiltHash = ([System.IO.File]::ReadAllText($SdkconfigHashMarker, [System.Text.Encoding]::UTF8)).Trim() } catch { $previousBuiltHash = $null }
+    }
+    $sdkconfigStale = ($previousBuiltHash -ne $mainHash)
+    if ($sdkconfigStale -and (Test-Path -LiteralPath $CMakeCacheFile)) {
+        $prevDisplay = if ($previousBuiltHash) { $previousBuiltHash } else { "(none recorded -- first run under this guard, or a build directory from before it existed)" }
+        Write-Host "STALE CONFIG: build directory at $WorktreePath was last reconfigured against sdkconfig hash $prevDisplay; the sdkconfig just copied in hashes $mainHash. Running 'idf.py reconfigure' before building so cached CMake/Kconfig state (e.g. a component's compile-time CONFIG_* branch) cannot disagree with the config this run verified." -ForegroundColor Yellow
+        & $IdfProfile *>&1 | Out-Null
+        $reconfigureOutput = & idf.py -C (Join-Path $WorktreePath "firmware\KilnFW") reconfigure 2>&1
+        $reconfigureExit = $LASTEXITCODE
+        $reconfigureOutput | Write-Host
+        if ($reconfigureExit -ne 0) {
+            Fail "idf.py reconfigure failed (exit $reconfigureExit) while correcting a stale cached build config (previous sdkconfig hash $prevDisplay, current $mainHash) -- see output above."
+        }
+    } elseif ($sdkconfigStale) {
+        Write-Host "No prior $CMakeCacheFile -- this build directory has never been configured, so the upcoming 'idf.py build' will perform a full first-time configure against sdkconfig hash $mainHash (no separate reconfigure step needed)."
+    } else {
+        Write-Host "Config unchanged: build directory at $WorktreePath was already configured against sdkconfig hash $mainHash -- no reconfigure needed."
+    }
+
     # FRESHNESS SIGNAL, FIXED 2026-09-09 (opus review of 16f0563f).
     # ------------------------------------------------------------
     # The original check took $buildStart = Get-Date AFTER the mirror above
@@ -973,6 +1028,19 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
     $tolerance = [TimeSpan]::FromSeconds(2)
     if (($binTime -lt $newestSourceTime.Subtract($tolerance)) -or ($elfTime -lt $newestSourceTime.Subtract($tolerance))) {
         Fail "idf.py build reported success (exit 0) but $binPath (mtime $binTime) / $elfPath (mtime $elfTime) predate the newest tracked source file's mtime ($newestSourceTime) -- the build silently did not relink against current source (known cause: MSYSTEM/MSYS environment inherited from a git-bash launcher confusing idf.py, or any other silent no-op). Refusing to publish a stale artifact as current."
+    }
+
+    # Record the sdkconfig this build directory is now known-good against,
+    # ONLY after the build succeeded and passed the freshness check above --
+    # see the "STALE CACHED BUILD CONFIG GUARD" comment. A run that fails
+    # anywhere above this line leaves the previous marker (or none) in place,
+    # so a subsequent run still sees the config as stale and reconfigures,
+    # rather than this run falsely claiming a config it never finished
+    # building against.
+    try {
+        [System.IO.File]::WriteAllText($SdkconfigHashMarker, $mainHash, (New-Object System.Text.UTF8Encoding($false)))
+    } catch {
+        Fail "could not write $SdkconfigHashMarker ($($_.Exception.Message)) -- refusing to report PASS when the stale-config guard's own bookkeeping cannot be trusted for the next run."
     }
 
     # Publish into the shared main-tree build/ directory so the ELF-reading
@@ -1155,5 +1223,5 @@ public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFile
 }
 
 Write-Host ""
-Write-Host "PASS: KilnFW target build succeeded, $binPath produced." -ForegroundColor Green
+Write-Host "PASS: KilnFW target build succeeded, $binPath produced (built against sdkconfig hash $mainHash)." -ForegroundColor Green
 exit 0

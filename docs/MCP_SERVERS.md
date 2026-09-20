@@ -439,6 +439,32 @@ known absolute path for the real shared tree instead of a self-reported
 claim, so a distinct source tree always gets its own hash-tagged directory
 and never shares a mirror with another tree.
 
+**Stale cached build config self-heals (2026-09-19).** A reviewer found that
+`check_00_kilnfw_target_build.ps1`'s persistent per-tree checkbuild directory
+(`C:\wt\checkbuild_<hash>`, above) could carry a `build/` configured against
+an OLDER sdkconfig than the one just copied in from the invoking tree, with
+nothing comparing the two -- every downstream ELF-grading check then graded a
+binary built against the wrong config (observed: `CONFIG_KILNCTL_ENABLE_GPIO_PROBE`
+cached `n` while the copied sdkconfig said `y`). Both `check_00_kilnfw_target_build.ps1`
+and `check_00_kilnfw_recovery_target_build.ps1` now hash the config that
+actually governs the build (`sdkconfig` for the main target, `sdkconfig.defaults`
+for recovery) and compare it against a marker file left by the last build that
+used this checkbuild directory (`build\.sdkconfig_built.sha256` /
+`build\.sdkconfig_defaults_built.sha256`). A mismatch (or no marker, on an
+already-configured `build/`) runs `idf.py reconfigure` before building, printing
+both the previous and current hash; the marker is rewritten only after the
+freshness check passes, so a build that fails never reports a false "known
+good against this hash." The PASS line itself now names the sdkconfig hash the
+graded ELF was built from, e.g. `PASS: KilnFW target build succeeded, ...
+(built against sdkconfig hash D72984E5...)`, so a later reader/check does not
+have to trust that the checkbuild directory happened to be current -- it can
+compare that hash against the invoking tree's own `sdkconfig`. Net effect:
+**a stale checkbuild directory is no longer something an agent needs to
+hand-delete before trusting a stack-margin or other ELF-derived measurement --
+the check now detects and corrects it itself.** `check_00_saftyfw_target_build.ps1`
+needed no equivalent change: it already runs `cmake .` (an unconditional
+reconfigure) on every invocation, never trusting a cached configure across runs.
+
 **`tools/push_verify.ps1`** -- verify a commit actually landed on
 `origin/main`, in one unambiguous verdict line. This project has produced
 four false "landed" reports from two specific causes: (1) running the

@@ -33,7 +33,15 @@
 #     sdkconfig.defaults IS the whole configuration (docs/
 #     OTA_SINGLE_SLOT_PLAN.md section 3: deliberately minimal, no
 #     board-specific tuning, same for every board). idf.py regenerates
-#     sdkconfig from it on every configure; there is nothing to diverge from.
+#     sdkconfig from it on every configure; there is nothing to diverge from
+#     in the sense of "which board" -- but this project's build\ directory
+#     is still persistent/incremental like the main target's, so it shares
+#     that check's stale-cached-build-config risk if sdkconfig.defaults
+#     itself changes (a Kconfig-gated compile-time branch could still build
+#     against an old cached configure). 2026-09-19 added the same
+#     hash-tracked reconfigure guard here as check_00_kilnfw_target_build.ps1
+#     uses for the main sdkconfig -- see "STALE CACHED BUILD CONFIG GUARD"
+#     below.
 #   * No submodule dependency (no LVGL, no PSRAM, no touch driver).
 #   * The whole project is ~14 files. A full `idf.py build` here has been
 #     observed to run well under the main target's ~138s cold build (no
@@ -217,7 +225,53 @@ try {
     $binPath = Join-Path $dstRoot "build\KilnFW_recovery.bin"
     $elfPath = Join-Path $dstRoot "build\KilnFW_recovery.elf"
 
-    Write-Host "Building KilnFW_recovery target in $dstRoot ..."
+    # STALE CACHED BUILD CONFIG GUARD (2026-09-19), shared mechanism with
+    # check_00_kilnfw_target_build.ps1's identically-named block. $dstRoot's
+    # build\ directory is persistent/incremental across runs (see this
+    # file's own header on why that is deliberate), and this project's
+    # config comes from sdkconfig.defaults rather than a copied board
+    # sdkconfig -- but the underlying risk is the same one a reviewer
+    # observed on the main target: an ordinary incremental `idf.py build`
+    # is not guaranteed to redo a full CMake configure just because a
+    # tracked config input's mtime changed, so a Kconfig-gated compile-time
+    # branch in this project's CMakeLists.txt/main could keep building
+    # against whatever was cached from an earlier sdkconfig.defaults even
+    # after the mirror step above delivers a changed one. Track the
+    # defaults-file content this build directory was last reconfigured
+    # against, and force `idf.py reconfigure` before building whenever it
+    # disagrees (including "never recorded", which covers a brand-new build
+    # directory and one left over from before this guard existed).
+    #
+    # sdkconfig.defaults really is the whole governing input here, and
+    # that depends on the /MIR mirror above: this project has no tracked
+    # sdkconfig (it is gitignored and absent from the invoking tree), and
+    # the mirror excludes only build\, so any sdkconfig idf.py generated
+    # at $dstRoot's root during an earlier run is deleted every run and
+    # regenerated from the defaults. That matters, because ESP-IDF applies
+    # sdkconfig.defaults only as defaults -- an existing sdkconfig wins, so
+    # `idf.py reconfigure` alone would NOT pick up a changed defaults file.
+    # If a tracked sdkconfig is ever added to this project, hash that
+    # instead (as the main target's check does), or this guard becomes
+    # cosmetic.
+    $recoveryDefaultsHash = (Get-FileHash -LiteralPath (Join-Path $dstRoot "sdkconfig.defaults") -Algorithm SHA256).Hash
+    $recoveryHashMarker = Join-Path $dstRoot "build\.sdkconfig_defaults_built.sha256"
+    $recoveryCMakeCache = Join-Path $dstRoot "build\CMakeCache.txt"
+    $recoveryPreviousHash = $null
+    if (Test-Path -LiteralPath $recoveryHashMarker) {
+        try { $recoveryPreviousHash = ([System.IO.File]::ReadAllText($recoveryHashMarker, [System.Text.Encoding]::UTF8)).Trim() } catch { $recoveryPreviousHash = $null }
+    }
+    if (($recoveryPreviousHash -ne $recoveryDefaultsHash) -and (Test-Path -LiteralPath $recoveryCMakeCache)) {
+        $recoveryPrevDisplay = if ($recoveryPreviousHash) { $recoveryPreviousHash } else { "(none recorded)" }
+        Write-Host "STALE CONFIG: $dstRoot\build was last reconfigured against sdkconfig.defaults hash $recoveryPrevDisplay; the mirrored sdkconfig.defaults now hashes $recoveryDefaultsHash. Running 'idf.py reconfigure' first." -ForegroundColor Yellow
+        $reconfigureOutput = & idf.py -C $dstRoot reconfigure 2>&1
+        $reconfigureExit = $LASTEXITCODE
+        $reconfigureOutput | Write-Host
+        if ($reconfigureExit -ne 0) {
+            Fail "idf.py reconfigure failed (exit $reconfigureExit) in $dstRoot while correcting a stale cached build config (previous sdkconfig.defaults hash $recoveryPrevDisplay, current $recoveryDefaultsHash) -- see output above."
+        }
+    }
+
+    Write-Host "Building KilnFW_recovery target in $dstRoot (sdkconfig.defaults hash $recoveryDefaultsHash) ..."
     $buildOutput = & idf.py -C $dstRoot build 2>&1
     $buildExit = $LASTEXITCODE
     $buildOutput | Write-Host
@@ -249,6 +303,16 @@ try {
         Fail "idf.py build reported success (exit 0) but $binPath (mtime $binTime) / $elfPath (mtime $elfTime) predate the newest source file's mtime ($newestSourceTime) -- refusing to publish a stale artifact as current."
     }
 
+    # Record the sdkconfig.defaults content this build directory is now
+    # known-good against -- only after a build this script itself confirmed
+    # succeeded and passed the freshness check above. See the "STALE CACHED
+    # BUILD CONFIG GUARD" comment further up.
+    try {
+        [System.IO.File]::WriteAllText($recoveryHashMarker, $recoveryDefaultsHash, (New-Object System.Text.UTF8Encoding($false)))
+    } catch {
+        Fail "could not write $recoveryHashMarker ($($_.Exception.Message)) -- refusing to report PASS when the stale-config guard's own bookkeeping cannot be trusted for the next run."
+    }
+
     # Publish into this tree's own firmware/KilnFW_recovery/build/, which is
     # exactly where tools/check_recovery_image_size.py's DEFAULT_RECOVERY_BIN
     # looks. A plain Copy-Item -Force is sufficient here (unlike
@@ -275,7 +339,7 @@ try {
         Copy-Item -LiteralPath $publishedBin -Destination $canonicalBin -Force
     }
 
-    Write-Host "PASS: built $([System.IO.Path]::GetFileName($binPath)) ($((Get-Item -LiteralPath $binPath).Length) B), published to $mainRecoveryBuildDir (including as recovery.bin for tools/check_recovery_image_size.py)."
+    Write-Host "PASS: built $([System.IO.Path]::GetFileName($binPath)) ($((Get-Item -LiteralPath $binPath).Length) B) against sdkconfig.defaults hash $recoveryDefaultsHash, published to $mainRecoveryBuildDir (including as recovery.bin for tools/check_recovery_image_size.py)."
 } finally {
     Exit-BuildLock -Lock $lock
 }
