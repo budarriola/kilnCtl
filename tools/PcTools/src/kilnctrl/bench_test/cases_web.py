@@ -133,6 +133,25 @@ def _case_web_x01(ctx: dict) -> CaseResult:
 _ALWAYS_OPEN_TIERS = frozenset({"ROUTE_TIER_OPEN", "ROUTE_TIER_SAFETY_REDUCE", "ROUTE_TIER_ADMIN_BOOTSTRAP"})
 _ADMIN_TIERS = frozenset({"ROUTE_TIER_ADMIN", "ROUTE_TIER_USER"})
 
+#: GET routes that are read-only by tier but have a real side effect on the
+#: board, so the sweep must never invoke them even though their tier would
+#: otherwise mark them safe to exercise. Found by grepping
+#: route_tier_table.h's GET rows against the *_http.c handlers for anything
+#: named scan/reset/clear/start/challenge/reboot/erase, then reading each
+#: hit's handler body (wifi_provision_http.c's scan_get_handler,
+#: networks_get_handler, ota_http.c's ota_challenge_get_handler):
+#:   /scan                 -- calls wifi_prov_scan(), which can disturb the
+#:                            Wi-Fi link this suite's own HTTP calls run over.
+#:   /networks             -- also calls wifi_prov_scan() internally (a
+#:                            merged saved+scanned status readout), same
+#:                            disturbance as /scan even though the name
+#:                            doesn't say so.
+#:   /api/ota/challenge    -- mints/rotates the OTA auth nonce
+#:                            (ota_auth_nonce_issue()) on every call.
+#: Excluded rows are recorded in the case's detail as "excluded: side
+#: effect" and never fetched -- see the loop below.
+_SIDE_EFFECT_EXCLUDE = frozenset({"/scan", "/networks", "/api/ota/challenge"})
+
 _ROUTE_TIER_ROW_RE = re.compile(
     r'ROUTE_TIER\(\s*"([^"]*)"\s*,\s*(HTTP_[A-Za-z0-9_]+)\s*,\s*(ROUTE_TIER_[A-Za-z0-9_]+)\s*\)'
 )
@@ -182,6 +201,12 @@ def _case_web_x03(ctx: dict) -> CaseResult:
     results: List[dict] = []
     for uri, method, tier in rows:
         row: dict = {"uri": uri, "method": method, "tier": tier, "exercised": False, "ok": True}
+        if uri in _SIDE_EFFECT_EXCLUDE:
+            # Read-only by tier but has a real side effect -- see
+            # _SIDE_EFFECT_EXCLUDE's comment. Never fetched.
+            row["detail"] = "excluded: side effect"
+            results.append(row)
+            continue
         if method != "HTTP_GET" or not host:
             # Non-GET rows (or no board attached, e.g. a unit test feeding
             # ctx with no "host") are recorded, never invoked -- see this

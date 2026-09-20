@@ -182,6 +182,41 @@ class WebX03Test(unittest.TestCase):
         self.assertNotIn("/api/zones", calls)
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
 
+    def test_side_effect_routes_are_excluded_and_never_fetched(self):
+        """/scan, /networks and /api/ota/challenge are read-only by tier but
+        have real side effects (Wi-Fi scan, nonce mint) -- the sweep must
+        record them as excluded and never fetch them, even though their
+        OPEN tier would otherwise mark them safe to exercise."""
+        text = "\n".join([
+            'ROUTE_TIER("/scan", HTTP_GET, ROUTE_TIER_OPEN),',
+            'ROUTE_TIER("/networks", HTTP_GET, ROUTE_TIER_OPEN),',
+            'ROUTE_TIER("/api/ota/challenge", HTTP_GET, ROUTE_TIER_OPEN),',
+            'ROUTE_TIER("/api/status", HTTP_GET, ROUTE_TIER_OPEN),',
+        ])
+        ctx = {"host": "1.2.3.4"}
+        responses = {"/api/auth/config": (200, '{"web_enabled":false}'), "/api/status": (200, "{}")}
+        calls = []
+
+        def _get(host, path, timeout=5.0):
+            calls.append(path)
+            return responses.get(path, (404, None))
+
+        with mock.patch("builtins.open", mock.mock_open(read_data=text)):
+            with mock.patch.object(C, "_http_get_raw", side_effect=_get):
+                result = REGISTRY["WEB-X-03"].judge(ctx)
+
+        for excluded in ("/scan", "/networks", "/api/ota/challenge"):
+            self.assertNotIn(excluded, calls)
+
+        rows_by_uri = {r["uri"]: r for r in result.observed["rows"]}
+        for excluded in ("/scan", "/networks", "/api/ota/challenge"):
+            row = rows_by_uri[excluded]
+            self.assertFalse(row["exercised"])
+            self.assertEqual(row["detail"], "excluded: side effect")
+
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(result.observed["exercised"], 1)
+
     def test_unreadable_table_file_fails(self):
         ctx = {"host": "1.2.3.4", "route_tier_table_path": os.path.join(REPO_ROOT, "does_not_exist.h")}
         result = REGISTRY["WEB-X-03"].judge(ctx)

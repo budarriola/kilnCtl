@@ -401,12 +401,19 @@ def judge_route_tier_sweep(results: "list[dict]") -> CaseResult:
         return CaseResult(
             Verdict.FAIL,
             reason=f"{len(violations)} route(s) did not match their declared tier",
-            observed={"violations": violations, "total_rows": len(results)},
+            observed={"violations": violations, "total_rows": len(results), "rows": results},
         )
     exercised = sum(1 for r in results if r.get("exercised"))
     if exercised == 0:
-        return CaseResult(Verdict.INCONCLUSIVE, reason="no GET routes were exercised", observed={"total_rows": len(results)})
-    return CaseResult(Verdict.PASS, observed={"total_rows": len(results), "exercised": exercised})
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason="no GET routes were exercised",
+            observed={"total_rows": len(results), "rows": results},
+        )
+    return CaseResult(
+        Verdict.PASS,
+        observed={"total_rows": len(results), "exercised": exercised, "rows": results},
+    )
 
 
 def judge_rate_guard_consistency(safety_side: dict, esp_side: dict) -> CaseResult:
