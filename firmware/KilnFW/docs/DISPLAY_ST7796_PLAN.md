@@ -1001,10 +1001,27 @@ bytes and breaks every display push.
       (no existing HTTP-exposed stat for it; would need a stack/CPU profiler
       tool this pass didn't reach for). ST7796 row still open — no ST7796
       attached to measure against.
-- [ ] **9.2 Raise `max_transfer_sz` to one full LVGL buffer** (480×40×2 = 38400,
-      or clamp `KILNCTL_LVGL_BUF_ROWS` so one flush fits under the 32768-byte
-      hardware cap — 34 rows = 32640 B). Collapses 27 transactions per flush into
-      one. Costs ~200 bytes of internal DRAM, not 38 kB. Cheapest real win.
+- [x] **9.2 Raise `max_transfer_sz`.** **Found already landed 2026-09-20 audit**
+      (predates this pass; not re-touched here) as `KILNCTL_SPI_MAX_TRANSFER_SZ`
+      = 32768 (`App/drivers/hw/settings.h`), the hard-cap-clamp alternative this
+      item itself names, applied via `main_boot_early.c`'s
+      `hal_spi_bus_cfg_t::max_transfer_sz`, both sites citing this section by
+      number in their own comments. Costs ~216 B of internal DRAM (32768 B /
+      4092 B/step × 24 B/step per §9's own accounting) for two DMA descriptor
+      arrays, not a 32 KB buffer — confirmed by re-reading `hal_spi_esp.c`,
+      which passes the value straight to `spi_bus_config_t::max_transfer_sz`
+      and allocates nothing else from it. Today's ILI9488 codec still chunks
+      each flush at `ILI9488_SCRATCH_BYTES` (1440 B), so this alone changes
+      nothing observable on the currently-attached panel; it is 9.7's
+      zero-copy-whole-buffer precondition, same as before. Verified this pass
+      via a full from-scratch `firmware/KilnFW/App/test/build_host_tests.ps1`
+      (56/56 host-test executables) and a non-`-Fast` `tools/run_all_checks.ps1`
+      (119/119 checks, 0 skipped/failed, including
+      `check_all_task_stack_budgets.ps1` and `check_httpd_task_stack_budget.ps1`
+      against a real target build) — no regression from this value being in
+      place. Not independently flash-verified beyond what 9.3/9.4 already
+      required, since the value itself changes no runtime behavior on today's
+      panel.
 - [x] **9.3 Set `SPI_TRANS_DMA_USE_PSRAM`** on flush transactions so LVGL's PSRAM
       buffers are DMA'd in place instead of bounce-copied into internal DRAM.
       **LANDED 2026-09-02, default OFF** behind `CONFIG_KILNCTL_SPI_DMA_USE_PSRAM`.
@@ -1049,9 +1066,38 @@ bytes and breaks every display push.
       `App/drivers/Kconfig`, not only in this document — someone using
       `menuconfig` to flip this option sees it without having read this
       plan.
-- [ ] **9.5 Thermocouple transfers → `spi_device_polling_transmit`.** 11 µs
-      versus 26 µs. Do not mix polling and queued transactions on the *same*
-      device; across devices the bus lock handles it.
+- [x] **9.5 Thermocouple transfers → `spi_device_polling_transmit`.**
+      **Found already landed 2026-09-20 audit** (predates this pass; not
+      re-touched here): `MAX31856.c`'s `max31856_read_burst()`/
+      `max31856_write_burst()` call `hal_spi_transfer_polling()` exclusively,
+      which routes through `spi_owner_transfer_polling()` →
+      `spi_device_polling_transmit()` on the shared SPI owner task
+      (`esp_spi_owner.c`), never `spi_device_transmit()` — 11 µs vs 26 µs per
+      §9's measured numbers, both cited in the code's own comments. The
+      display flush path was deliberately left on the queued/ISR call
+      (`spi_owner_transfer()`, not `_polling()`) — correct per this item's
+      own "do not mix... across devices the bus lock handles it" — and
+      `test_esp_spi_owner.c::test_owner_task_dispatches_polling_vs_queued`/
+      `test_owner_task_dispatches_queued_when_not_polling` prove the owner
+      task's dispatch actually branches on `request.use_polling` rather than
+      always taking one path, with `test_max31856_hal_spi.c` separately
+      asserting the MAX31856 call site specifically produces a
+      `FAKE_SPI_XFER_POLLING` record. `spi_device_polling_transmit()` busy-
+      waits only the calling task (the shared SPI owner task, dedicated to
+      this purpose and never itself holding a module lock across the call —
+      confirmed by reading `esp_spi_owner.c`'s dispatch loop), for ~11 µs at
+      a time, well below anything safety-timing-sensitive; it does not run
+      on `safety_poll` or any other task directly. Verified this pass via a
+      full from-scratch host-test rebuild (56/56 passed, including the
+      dispatch and hal-adapter tests above) and a non-`-Fast`
+      `tools/run_all_checks.ps1` (119/119, 0 skipped/failed). Stack effect:
+      `thermo_owner`'s measured call-graph depth through
+      `hal_spi_transfer_polling → spi_owner_transfer_polling →
+      spi_owner_transfer_impl` is 608 B against its 4096 B budget (77.8%
+      free per `check_all_task_stack_budgets.py`) — unchanged from before
+      this audit, since no source changed. Not independently flash-verified
+      beyond what was already required to land this — no ST7796/ILI9488
+      hardware step is added by this item.
 - [x] **9.6 Async flush — WIRED INTO lvgl_port.c 2026-09-03, still default
       OFF** behind `CONFIG_KILNCTL_SPI_ASYNC_FLUSH`. `esp_spi_owner.c`'s
       `spi_owner_transfer_async()` (landed 2026-09-02, described in the
