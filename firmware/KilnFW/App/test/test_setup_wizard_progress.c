@@ -100,6 +100,8 @@ static void test_migration_from_v1(void)
     v1.steps[3].ts = 12345;
     v1.steps[9].state = (uint8_t)SETUP_WIZ_STEP_SKIPPED;
     v1.steps[9].ts = 999;
+    v1.steps[12].state = (uint8_t)SETUP_WIZ_STEP_DONE; /* old step 12: first profile & final gate */
+    v1.steps[12].ts = 44444;
 
     hal_kv_handle_t h;
     hal_status_t open_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, NVS_PARTITION);
@@ -113,14 +115,17 @@ static void test_migration_from_v1(void)
     esp_err_t err = setup_wizard_progress_start();
     TEST_CHECK(err == ESP_OK, "start() against a v1 blob still returns ESP_OK");
 
-    setup_wizard_step_t s3, s9, s0;
+    setup_wizard_step_t s3, s9, s0, s11;
     setup_wizard_progress_get_step(3, &s3);
     setup_wizard_progress_get_step(9, &s9);
     setup_wizard_progress_get_step(0, &s0);
+    setup_wizard_progress_get_step(11, &s11);
     TEST_CHECK(s3.state == SETUP_WIZ_STEP_DONE && s3.ts == 12345, "v1 migration: step 3's state+ts carry forward");
     TEST_CHECK(s9.state == SETUP_WIZ_STEP_SKIPPED && s9.ts == 999, "v1 migration: step 9's state+ts carry forward");
     TEST_CHECK(s3.note[0] == '\0', "v1 migration: note (did not exist in v1) defaults to empty");
     TEST_CHECK(s0.state == SETUP_WIZ_STEP_PENDING, "v1 migration: an untouched v1 step still reads PENDING");
+    TEST_CHECK(s11.state == SETUP_WIZ_STEP_DONE && s11.ts == 44444,
+               "v1 migration: OLD step 12 (first profile) lands at NEW step 11, shifted down one slot");
 }
 
 // ---------------------------------------------------------------------
@@ -220,11 +225,15 @@ static void test_migration_from_v3_legacy(void)
     esp_err_t err = setup_wizard_progress_start();
     TEST_CHECK(err == ESP_OK, "start() against a v3-legacy (14-step) blob still returns ESP_OK");
 
-    setup_wizard_step_t s2, s12;
+    setup_wizard_step_t s2, s11, s12;
     setup_wizard_progress_get_step(2, &s2);
+    setup_wizard_progress_get_step(11, &s11);
     setup_wizard_progress_get_step(12, &s12);
     TEST_CHECK(s2.state == SETUP_WIZ_STEP_DONE && s2.ts == 11111,
                "v3-legacy migration: step 2 (below the removed slot) carries forward unchanged");
+    TEST_CHECK(s11.state == SETUP_WIZ_STEP_PENDING,
+               "v3-legacy migration: new step 11 (never recorded in this era -- old step 12 was untouched) reads "
+               "PENDING after migration");
     TEST_CHECK(s12.state == SETUP_WIZ_STEP_SKIPPED && s12.ts == 33333,
                "v3-legacy migration: OLD step 13 (authentication) lands at NEW step 12, shifted down one slot");
     TEST_CHECK(strcmp(s12.note, "left off") == 0, "v3-legacy migration: step 13's note survives the shift to step 12");

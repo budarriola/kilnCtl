@@ -1210,7 +1210,7 @@ function loadCommissioningShared(fetchImpl, confirmImpl) {
 // step 11 ("Coupling matrix (optional)") was removed and steps after it
 // shifted down by one -- this test follows that renumbering. It
 // intentionally does NOT drive the DOM-only renderStep12() (fetch/document-
-// heavy, same class as the other untested optional-step renderers 8-11) --
+// heavy, same class as the other untested optional-step renderers 8-10) --
 // see the file header's extraction rationale for why this suite only
 // reaches the page's pure/state functions.
 (function testStep12AuthWizardStepExistsAndIsOptional() {

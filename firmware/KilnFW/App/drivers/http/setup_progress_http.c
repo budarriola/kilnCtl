@@ -104,7 +104,7 @@ static esp_err_t api_setup_progress_get_handler(httpd_req_t *req)
                      "%s\"%u\":{\"state\":\"%s\",\"ts\":%u,\"note\":\"%s\"}", i == 0 ? "" : ",", (unsigned)i,
                      setup_wizard_step_state_name(s->steps[i].state), (unsigned)s->steps[i].ts, note_esc);
         if (n < 0 || (size_t)n >= sizeof(s->json) - o) {
-    /* Still unreachable at SETUP_WIZARD_STEP_COUNT=13 against a
+            /* Still unreachable at SETUP_WIZARD_STEP_COUNT=13 against a
              * 2048-byte buffer (recomputed worst case 1492 bytes, see the
              * SETUP_PROGRESS_JSON_CAP comment above) -- re-verified, not
              * merely re-asserted, each time the count has changed (13->14 on
