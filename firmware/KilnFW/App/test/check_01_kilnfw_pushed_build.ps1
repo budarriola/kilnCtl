@@ -295,6 +295,24 @@ try {
         Fail "could not determine a newest source mtime under $WorktreePath after checkout -- refusing to grade artifact freshness with no signal to grade it against"
     }
 
+    # BUILD THE SAFTYFW SLOT A/B IMAGES THE EMBED_FILES GUARD REQUIRES
+    # (2026-09-20). App/drivers/CMakeLists.txt FATAL_ERRORs at configure time
+    # if firmware\SaftyFW\build\SaftyFW_slotA.bin / SaftyFW_slotB.bin are
+    # missing -- introduced by the Pico embedded auto-update chain (docs/PICO_AUTO_UPDATE_PLAN.md).
+    # This worktree is a PRISTINE `git worktree add` of origin/main (see the
+    # header comment above) with no prior SaftyFW build ever run in it, so
+    # without this step the very next `idf.py build` below would fail
+    # immediately on a from-scratch clone of origin/main -- not because
+    # origin/main's KilnFW source is actually broken, but because nothing
+    # upstream in this worktree ever produced these two files. Shared with
+    # check_00_kilnfw_target_build.ps1, which hit the same guard first but
+    # happened not to notice because its mirrored worktree carries build
+    # history across runs; see lib_saftyfw_slot_images.ps1 for the full
+    # rationale and why a missing arm-none-eabi toolchain is a hard FAIL
+    # here too, never a SKIP.
+    . (Join-Path $PSScriptRoot "lib_saftyfw_slot_images.ps1")
+    Ensure-SaftyfwSlotImages -KilnfwWorktreePath $WorktreePath
+
     & $IdfProfile *>&1 | Out-Null
 
     # Unlike check_00, ccache is left ENABLED here on purpose: this worktree
