@@ -470,6 +470,7 @@ from .mcp_server_wifi import *  # noqa: F401,F403
 from .mcp_server_ota import *  # noqa: F401,F403
 from .mcp_server_control import *  # noqa: F401,F403
 from .mcp_server_config_presets import *  # noqa: F401,F403
+from .mcp_server_config_convert import *  # noqa: F401,F403
 from .mcp_server_capability_preflight import *  # noqa: F401,F403
 from .mcp_server_ui_test import *  # noqa: F401,F403
 from .mcp_server_profiles import *  # noqa: F401,F403

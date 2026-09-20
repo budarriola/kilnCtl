@@ -93,6 +93,8 @@ GROUP_OVERRIDES = {
     "load_config_preset": "presets",
     "capability_preflight_check": "presets",
     "factory_default_then_load_preset": "presets",
+    # Best-effort file-only config version conversion -- never touches a board.
+    "convert_config": "presets",
 }
 
 #: Extra search tokens for tools whose names hide what they are for.
@@ -206,6 +208,8 @@ KEYWORDS = {
     "run_pctools_tests": ("pytest", "unit", "python", "regression"),
     "run_repo_checks": ("lint", "guard", "invariant", "ci", "grep", "audit"),
     "list_config_presets": ("bench", "fixture", "known", "good", "default", "json"),
+    "convert_config": ("migrate", "migration", "version", "upgrade", "downgrade", "backup",
+                        "profile", "blob", "zones", "schema", "lossy"),
     "load_config_preset": ("bench", "fixture", "known", "good", "default", "consistent", "zones"),
     "capability_preflight_check": ("preflight", "capability", "endpoint", "missing", "fatal",
                                    "benign", "reflash", "firmware", "version", "campaign",

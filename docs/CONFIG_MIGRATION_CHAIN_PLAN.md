@@ -594,3 +594,26 @@ rediscovered as surprises:
    the exposure scales with how far behind the board is.
 4. **`cfg`/NVS divergence** (§1.5) must be settled before the `cfg` partition
    goes live, not after.
+
+## 7. PC-side arbitrary-jump converter (2026-09-17)
+
+D1 keeps firmware single-step only; the owner separately asked for a PC-side
+tool that jumps any version to any other, best-effort, without ever touching
+a board. Landed as `tools/PcTools/src/kilnctrl/config_convert.py` (CLI:
+`tools/PcTools/scripts/config_convert.py`; MCP: `convert_config`). Scope
+today: the `kilnctl_backup` document (delegates to the existing
+`cfg_convert.py`) and a new `kilnctl_profile_blob` wrapper for the raw
+`profile_persisted_t` NVS record (v1-v4, mirroring `PROFILE_VERSION`).
+Forward steps mirror firmware's migration exactly; backward steps drop what
+the older layout cannot express and name every drop in a per-field report
+(`report.lossy` is true only when something is actually dropped, never
+merely defaulted). `kiln_cfg_store`'s package format and SaftyFW's raw
+`config_store_record_t` are deliberately NOT implemented yet -- refused with
+a named reason, not attempted. A regex-based mirror-drift check
+(`tools/check_config_convert_mirror.py`) fails if `PROFILE_VERSION` or its
+sibling constants are bumped in firmware without a matching update here;
+negative-tested by bumping `PROFILE_VERSION` in a scratch copy of
+`profiles_http.c` and confirming failure, then restoring byte-exact via
+`git cat-file blob`. CRC32 uses Python's `zlib.crc32()` as an unverified
+stand-in for `esp_crc32_le()` -- believed equivalent, not confirmed against a
+real captured NVS blob.
