@@ -218,6 +218,118 @@ def get_heap_status(host: Optional[str] = None) -> str:
     return "\n".join(lines)
 
 
+def _describe_crash_report(rec: dict) -> str:
+    """One-line-per-field summary of a GET /api/crash_report record with
+    ``present: true`` -- the same fields get_heap_status()'s
+    UNACKNOWLEDGED CRASH REPORT banner surfaces, plus exc_pc, since this is
+    the point where an operator/agent decides whether the record is safe to
+    dismiss."""
+    return (
+        f"reset_reason={rec.get('found_on_boot_reset_reason')!r} "
+        f"exc_task={rec.get('exc_task')!r} exc_cause_str={rec.get('exc_cause_str')!r} "
+        f"exc_pc={rec.get('exc_pc')!r} exc_addr={rec.get('exc_addr')!r} "
+        f"already_acknowledged={rec.get('acknowledged')}"
+    )
+
+
+@_srv._tool()
+def crash_report_ack(confirm: bool = False, host: Optional[str] = None) -> str:
+    """Acknowledge the board's last-crash record (POST
+    /api/crash_report/ack, diagnostics_http.c's crash_report_ack_post_
+    handler(), ROUTE_TIER_ADMIN) -- the same action the diagnostics page's
+    "Acknowledge" button performs, and the same one get_heap_status()'s
+    "UNACKNOWLEDGED CRASH REPORT" banner and capability_preflight() are
+    checking for. This does NOT erase the coredump image (that is
+    ``/api/crash_report/clear``, which this tool never calls) -- only marks
+    the record reviewed.
+
+    Always fetches the CURRENT report first (GET /api/crash_report). If no
+    crash is on record (``present: false``) or the record is already
+    acknowledged, this returns that and does nothing else -- no POST is ever
+    sent for a record that is not both present and unacknowledged.
+
+    Otherwise the report's summary (reset reason, task, exception cause/PC,
+    whether the backtrace frame is trustworthy) is put in the result FIRST,
+    before anything is acknowledged, so a caller reading the result sees
+    what it is about to dismiss rather than a bare "ok".
+
+    REFUSES UNLESS ``confirm=True`` -- without it, this is a dry run: it
+    reports the pending record (or "nothing pending") and says what it
+    WOULD acknowledge, but sends no POST. This mirrors safety_set_rate_
+    guard()'s confirm gate, for the same reason: acknowledging a crash
+    nobody has actually read defeats the entire point of the banner that
+    led here.
+
+    With ``confirm=True``, POSTs the ack (crash_report_ack_http_client.py,
+    over the same web-auth seam every other ADMIN-tier write tool in this
+    package uses -- KILNCTL_WEB_USERNAME/KILNCTL_WEB_PASSWORD from the
+    environment, http_auth.urlopen()'s one-retry-after-401 login), then
+    re-fetches GET /api/crash_report and FAILS LOUDLY (does not report
+    success) if the record still reads ``acknowledged: false`` afterward --
+    an ``{"ok":true}`` POST reply is not trusted alone, same rule
+    safety_cfg_http_client.apply_safety_fields()'s verify=True path and
+    safety_set_tc_type()/safety_set_rate_guard()'s docstrings already state
+    for this codebase's write tools generally (see CLAUDE.md's boot_guard
+    write-lies section for why an unverified success report is exactly the
+    failure class this project has been bitten by before).
+
+    A 409 ("no crash record to acknowledge") or 500 ("failed to persist
+    acknowledgement") from the board is reported as a failure naming which
+    one, distinguished by crash_report_ack_http_client's
+    CrashReportAckHttpError.status -- never collapsed into a single generic
+    error string.
+
+    Host is auto-resolved the same way get_heap_status()/the OTA/control
+    tools do; pass `host` explicitly for kilnctl.local or a board reachable
+    only from a different network than this link's serial port.
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as get_heap_status()
+    from . import crash_report_ack_http_client
+
+    resolved = _ota_resolve_host(host)
+    try:
+        before = dashboard_http_client.get_crash_report(resolved)
+    except dashboard_http_client.DashboardHttpError as exc:
+        return f"error: could not read GET /api/crash_report (host={resolved}): {exc}"
+
+    if not before.get("present"):
+        return f"nothing pending -- GET /api/crash_report reports present=false (host={resolved})"
+
+    summary = _describe_crash_report(before)
+    if before.get("acknowledged"):
+        return f"already acknowledged, nothing to do -- {summary} (host={resolved})"
+
+    if not confirm:
+        return (
+            f"DRY RUN (pass confirm=True to actually acknowledge) -- pending crash: {summary} "
+            f"(host={resolved})"
+        )
+
+    try:
+        crash_report_ack_http_client.post_crash_report_ack(resolved)
+    except crash_report_ack_http_client.CrashReportAckHttpError as exc:
+        if exc.status == 409:
+            return (f"failed: board reports no crash record to acknowledge (409) even though "
+                     f"the pre-fetch above saw one -- {summary} (host={resolved}): {exc}")
+        if exc.status == 500:
+            return (f"failed: board could not persist the acknowledgement (500) -- record is "
+                     f"still unacknowledged -- {summary} (host={resolved}): {exc}")
+        return f"error acknowledging crash report over HTTP (host={resolved}): {exc}"
+
+    try:
+        after = dashboard_http_client.get_crash_report(resolved)
+    except dashboard_http_client.DashboardHttpError as exc:
+        return (f"error: POST /api/crash_report/ack returned ok, but the confirming re-fetch "
+                f"failed (host={resolved}): {exc} -- acknowledgement state UNKNOWN, re-check "
+                f"before trusting this")
+
+    if not after.get("present") or after.get("acknowledged"):
+        return f"ok - acknowledged and confirmed by read-back: {summary} (host={resolved})"
+    return (f"FAILED: POST /api/crash_report/ack returned ok, but the re-fetched record still "
+            f"reads acknowledged=false -- {summary} (host={resolved}). Do not trust this as "
+            f"acknowledged.")
+
+
 @_srv._tool()
 def fetch_event_log(kind: str, host: Optional[str] = None) -> str:
     """Fetch and decode the board's on-flash binary event log, over HTTP

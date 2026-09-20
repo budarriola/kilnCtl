@@ -22,11 +22,18 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (169 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-09-20, when `convert_config` was
-added -- the MCP surface for `tools/PcTools/src/kilnctrl/config_convert.py`,
-the PC-side best-effort config-version converter (file-only, never writes to
-a board; see `docs/CONFIG_MIGRATION_CHAIN_PLAN.md`). The one before it was
+the rest behind a search facade (170 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-09-20, when `crash_report_ack` was
+added -- an MCP tool for POST /api/crash_report/ack (diagnostics_http.c,
+ROUTE_TIER_ADMIN), which acknowledges the board's last-crash record the same
+way the diagnostics page's own "Acknowledge" button does; it fetches
+GET /api/crash_report first and reports the pending record's summary before
+doing anything, refuses to POST unless `confirm=True`, and fails loud if a
+read-back after the POST still shows the record unacknowledged. The one
+before it was `convert_config`, same day -- the MCP surface for
+`tools/PcTools/src/kilnctrl/config_convert.py`, the PC-side best-effort
+config-version converter (file-only, never writes to a board; see
+`docs/CONFIG_MIGRATION_CHAIN_PLAN.md`). The one before that was
 `safety_set_log_level`, same day -- an HTTP client for POST
 /api/safety/log_level, which had no caller anywhere. The one before that was
 `saleae_decode_kilnlink`, same day --
