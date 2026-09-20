@@ -271,6 +271,32 @@ class ClientsUseTheSeamTest(unittest.TestCase):
     This is the check that a future client added with a bare
     urllib.request.urlopen call gets caught."""
 
+    # Narrow, named exemptions only -- (filename, function name) pairs whose
+    # bench-test cases must prove a request is REFUSED (a 401/403, or "no
+    # credential presented at all") without ever going through http_auth.
+    # http_auth.urlopen() auto-logs-in and retries once on any 401 using
+    # KILNCTL_WEB_USERNAME/PASSWORD from the environment -- exactly wrong for
+    # these cases, since it would silently authenticate a request that is
+    # supposed to prove it was NOT authenticated, defeating the bench-test
+    # case outright. See 74f260a1 and the OT-E09/OT-E10 bench-test cases.
+    # A new direct urlopen call anywhere else -- or a NEW function that isn't
+    # added here -- must still fail the test below.
+    _EXEMPT_FUNCTIONS = {
+        ("ota_http_client.py", "push_esp_image_unauthenticated"),  # OT-E09: no credential at all
+        ("ota_http_client.py", "push_esp_image_with_session"),     # OT-E10: explicit session cookie, no auto-login
+    }
+
+    @staticmethod
+    def _enclosing_function(lines, lineno_0based):
+        """Walk backwards from a 0-based line index to the nearest top-level
+        (unindented) `def`, i.e. the function the given line lives in."""
+        for i in range(lineno_0based, -1, -1):
+            stripped = lines[i]
+            if stripped.startswith("def ") or stripped.startswith("async def "):
+                after = stripped.split("def ", 1)[1]
+                return after.split("(", 1)[0].strip()
+        return None
+
     def test_no_client_calls_urllib_urlopen_directly(self):
         pkg = os.path.join(os.path.dirname(__file__), "..", "src", "kilnctrl")
         offenders = []
@@ -278,13 +304,47 @@ class ClientsUseTheSeamTest(unittest.TestCase):
             if not name.endswith(".py") or name == "http_auth.py":
                 continue
             with open(os.path.join(pkg, name), encoding="utf-8") as handle:
-                for lineno, line in enumerate(handle, 1):
-                    if "urllib.request.urlopen(" in line:
-                        offenders.append(f"{name}:{lineno}")
+                lines = handle.readlines()
+            for lineno, line in enumerate(lines, 1):
+                if "urllib.request.urlopen(" not in line:
+                    continue
+                func = self._enclosing_function(lines, lineno - 1)
+                if (name, func) in self._EXEMPT_FUNCTIONS:
+                    continue
+                offenders.append(f"{name}:{lineno} (in {func})")
         self.assertEqual(
             offenders, [],
             "these call urllib.request.urlopen directly and would break the moment web "
-            "authentication is enabled -- route them through http_auth.urlopen instead")
+            "authentication is enabled -- route them through http_auth.urlopen instead, or if "
+            "the call is deliberately raw (proving a request is refused, where http_auth's "
+            "auto-login-on-401 would defeat the case), add it to _EXEMPT_FUNCTIONS by name "
+            "with a comment explaining why")
+
+    def test_exempt_functions_still_exist_and_still_call_urlopen_directly(self):
+        """Guards against the exemption list going stale (e.g. the function
+        renamed or its raw call removed), which would silently exempt
+        nothing -- or worse, exempt a since-repurposed function by accident
+        if a new function happened to reuse the same name."""
+        pkg = os.path.join(os.path.dirname(__file__), "..", "src", "kilnctrl")
+        found = set()
+        for name, func in self._EXEMPT_FUNCTIONS:
+            path = os.path.join(pkg, name)
+            with open(path, encoding="utf-8") as handle:
+                lines = handle.readlines()
+            in_func = False
+            for line in lines:
+                if line.startswith(f"def {func}(") or line.startswith(f"async def {func}("):
+                    in_func = True
+                    continue
+                if in_func and (line.startswith("def ") or line.startswith("async def ")):
+                    in_func = False
+                if in_func and "urllib.request.urlopen(" in line:
+                    found.add((name, func))
+        missing = self._EXEMPT_FUNCTIONS - found
+        self.assertEqual(
+            missing, set(),
+            "an exempted (file, function) no longer contains a direct urlopen call -- "
+            "remove it from _EXEMPT_FUNCTIONS")
 
 
 if __name__ == "__main__":

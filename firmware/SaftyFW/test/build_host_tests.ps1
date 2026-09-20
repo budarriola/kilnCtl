@@ -396,6 +396,26 @@ try {
     & $configStoreFlashExe
     $configStoreFlashExit = $LASTEXITCODE
 
+    # Each executable above prints its own "all passed"/"ALL PASS" line on
+    # success, so whichever one happens to run last leaves that string as the
+    # visible console tail even when an EARLIER executable failed -- the exit
+    # code below was already correct (first non-zero wins), but the tail read
+    # as a pass regardless. Print one explicit aggregate verdict, naming every
+    # executable that failed, so the printed tail always matches the exit code.
+    $results = [ordered]@{
+        "saftyfw_host_tests.exe"       = $mainExit
+        "kilnlink_fuzz_payloads.exe"   = $fuzzExit
+        "hal_spi_pico_tests.exe"       = $halSpiPicoExit
+        "config_store_flash_tests.exe" = $configStoreFlashExit
+    }
+    $failed = $results.GetEnumerator() | Where-Object { $_.Value -ne 0 }
+    if ($failed) {
+        $names = ($failed | ForEach-Object { "$($_.Key) (exit $($_.Value))" }) -join ", "
+        Write-Host "SAFTYFW HOST TESTS: FAILED -- $names"
+    } else {
+        Write-Host "SAFTYFW HOST TESTS: all passed"
+    }
+
     if ($mainExit -ne 0) {
         exit $mainExit
     }
