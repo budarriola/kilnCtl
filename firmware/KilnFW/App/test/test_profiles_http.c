@@ -746,7 +746,7 @@ static void test_pcfg_mounted_migrates_nvs_only_slot_to_file(void)
 
     profile_t src = make_stored_profile();
     s_profiles.profiles[0] = src;
-    s_profiles.used_bitmap = 0x01;
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x01);
     TEST_CHECK(nvs_save_slot(0) == ESP_OK, "nvs_save_slot succeeds with cfg_fs mounted");
 
     // Simulate a reboot: wipe the RAM/file view of what a fresh load
@@ -758,7 +758,7 @@ static void test_pcfg_mounted_migrates_nvs_only_slot_to_file(void)
     profiles_state_t out;
     bool any_found = false;
     TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "reload succeeds");
-    TEST_CHECK((out.used_bitmap & 0x01) != 0, "slot 0 still reported used after reload");
+    TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, 0), "slot 0 still reported used after reload");
     assert_profiles_equal(&out.profiles[0], &src, "reloaded slot 0 (file migrated from NVS)");
 
     profile_t file_p;
@@ -779,7 +779,7 @@ static void test_pcfg_file_wins_when_it_has_the_higher_rev(void)
     strncpy(file_side.name, "FileSide", PROFILE_NAME_MAX_LEN);
 
     s_profiles.profiles[0] = nvs_side;
-    s_profiles.used_bitmap = 0x01;
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x01);
     TEST_CHECK(nvs_save_slot(0) == ESP_OK, "nvs_save_slot(0) writes rev 1 to both sides");
     // Overwrite JUST the file with different content at a HIGHER rev, as if
     // an earlier save's file write landed but its NVS write then failed.
@@ -789,7 +789,7 @@ static void test_pcfg_file_wins_when_it_has_the_higher_rev(void)
     profiles_state_t out;
     bool any_found = false;
     TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "reload succeeds");
-    TEST_CHECK((out.used_bitmap & 0x01) != 0, "slot 0 still used");
+    TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, 0), "slot 0 still used");
     assert_profiles_equal(&out.profiles[0], &file_side, "FILE content wins (higher rev)");
 }
 
@@ -812,7 +812,7 @@ static void test_pcfg_nvs_wins_when_it_has_the_higher_rev_and_resyncs_file(void)
     // profiles_cfg_fs_save() for it -- the direct NVS stage below plays that
     // role).
     s_profiles.profiles[0] = fresh_nvs;
-    s_profiles.used_bitmap = 0x01;
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x01);
     profile_persisted_t persisted = { .version = PROFILE_VERSION, .profile = fresh_nvs, .crc32 = 0 };
     persisted.crc32 = compute_profile_crc(&persisted);
     stage_profile_blob(0, &persisted, sizeof(persisted));
@@ -844,7 +844,7 @@ static void test_nvs_erase_slot_prunes_firing_stats(void)
 
     profile_t p = make_stored_profile();
     s_profiles.profiles[3] = p;
-    s_profiles.used_bitmap = 0x08;
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x08);
     TEST_CHECK(nvs_save_slot(3) == ESP_OK, "save slot 3");
 
     g_firing_stats_erase_calls = 0;
@@ -862,7 +862,7 @@ static void test_nvs_erase_slot_prunes_firing_stats_for_never_fired_slot(void)
 
     profile_t p = make_stored_profile();
     s_profiles.profiles[5] = p;
-    s_profiles.used_bitmap = 0x20;
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x20);
     TEST_CHECK(nvs_save_slot(5) == ESP_OK, "save slot 5 -- never fired, no fs_5/fsr_5 key exists anywhere");
 
     g_firing_stats_erase_calls = 0;
@@ -883,7 +883,7 @@ static void test_profiles_http_delete_clears_favorite(void)
 
     profile_t p = make_stored_profile();
     s_profiles.profiles[7] = p;
-    s_profiles.used_bitmap = 0x80;
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x80);
     TEST_CHECK(nvs_save_slot(7) == ESP_OK, "save slot 7");
 
     (void)profiles_favorites_set(7, false); // start from a known-clear state regardless of test order
@@ -904,7 +904,7 @@ static void test_profiles_http_delete_refuses_running_slot(void)
 
     profile_t p = make_stored_profile();
     s_profiles.profiles[6] = p;
-    s_profiles.used_bitmap = 0x40;
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x40);
     TEST_CHECK(nvs_save_slot(6) == ESP_OK, "save slot 6");
 
     g_fake_exec_state = PROFILE_EXEC_RUNNING;
@@ -935,7 +935,7 @@ static void test_pcfg_stale_file_after_delete_is_not_resurrected(void)
 
     profile_t p = make_stored_profile();
     s_profiles.profiles[0] = p;
-    s_profiles.used_bitmap = 0x01;
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x01);
     TEST_CHECK(nvs_save_slot(0) == ESP_OK, "save lands on both sides at rev 1");
 
     // Simulate the file-delete half of nvs_erase_slot() failing (the NVS
@@ -958,7 +958,7 @@ static void test_pcfg_stale_file_after_delete_is_not_resurrected(void)
     profiles_state_t out;
     bool any_found = false;
     TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "reload succeeds");
-    TEST_CHECK((out.used_bitmap & 0x01) == 0,
+    TEST_CHECK(!profiles_slot_bitmap_test(&out.used_bitmap, 0),
                "slot 0 stays unused after delete even if a stale file existed -- rev comparison, not file "
                "presence alone, decides");
 }
@@ -970,14 +970,14 @@ static void test_pcfg_partition_absent_behaves_exactly_like_before(void)
 
     profile_t src = make_stored_profile();
     s_profiles.profiles[0] = src;
-    s_profiles.used_bitmap = 0x01;
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x01);
     TEST_CHECK(nvs_save_slot(0) == ESP_OK, "save succeeds with no cfg partition at all");
 
     memset(&s_profiles, 0, sizeof(s_profiles));
     profiles_state_t out;
     bool any_found = false;
     TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "reload succeeds");
-    TEST_CHECK((out.used_bitmap & 0x01) != 0, "slot 0 used");
+    TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, 0), "slot 0 used");
     assert_profiles_equal(&out.profiles[0], &src, "NVS is the sole source of truth when cfg_fs is unavailable");
 }
 
@@ -994,7 +994,7 @@ static void test_pcfg_mount_failed_behaves_like_absent(void)
 
     profile_t src = make_stored_profile();
     s_profiles.profiles[0] = src;
-    s_profiles.used_bitmap = 0x01;
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x01);
     TEST_CHECK(nvs_save_slot(0) == ESP_OK, "save still succeeds through NVS despite the failed mount");
 
     memset(&s_profiles, 0, sizeof(s_profiles));
@@ -1082,7 +1082,7 @@ static void test_v1_blob_loads_and_preserves_all_fields(void)
 
     TEST_CHECK(err == ESP_OK, "no NVS error");
     TEST_CHECK(any_found, "the prof_used bitmap key was present");
-    TEST_CHECK((out.used_bitmap & 0x01) != 0,
+    TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, 0),
               "REGRESSION: slot 0 must still be reported used -- a v1 blob rejected as \"wrong length for "
               "its claimed version\" is exactly the bug that wiped real saved profiles on the bench board");
     assert_profiles_equal(&out.profiles[0], &src, "v1 regression");
@@ -1108,7 +1108,7 @@ static void test_version_zero_rejected(void)
     esp_err_t err = nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
 
     TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK((out.used_bitmap & 0x01) == 0, "version 0 must never be installed as a used slot");
+    TEST_CHECK(!profiles_slot_bitmap_test(&out.used_bitmap, 0), "version 0 must never be installed as a used slot");
     profile_t zero;
     memset(&zero, 0, sizeof(zero));
     TEST_CHECK(memcmp(&out.profiles[0], &zero, sizeof(zero)) == 0,
@@ -1138,7 +1138,7 @@ static void test_length_mismatch_rejected(void)
     esp_err_t err = nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
 
     TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK((out.used_bitmap & 0x01) == 0, "a length mismatch for the claimed version must be rejected");
+    TEST_CHECK(!profiles_slot_bitmap_test(&out.used_bitmap, 0), "a length mismatch for the claimed version must be rejected");
     profile_t zero;
     memset(&zero, 0, sizeof(zero));
     TEST_CHECK(memcmp(&out.profiles[0], &zero, sizeof(zero)) == 0, "nothing may leak through from a rejected blob");
@@ -1165,7 +1165,7 @@ static void test_bad_crc_rejected(void)
     esp_err_t err = nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
 
     TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK((out.used_bitmap & 0x01) == 0, "a CRC mismatch must be rejected");
+    TEST_CHECK(!profiles_slot_bitmap_test(&out.used_bitmap, 0), "a CRC mismatch must be rejected");
     profile_t zero;
     memset(&zero, 0, sizeof(zero));
     TEST_CHECK(memcmp(&out.profiles[0], &zero, sizeof(zero)) == 0, "nothing may leak through from a CRC-rejected blob");
@@ -1196,12 +1196,12 @@ static void test_newer_version_refused_not_wiped(void)
     memcpy(blob_before, &p, sizeof(p));
 
     memset(&s_profiles, 0, sizeof(s_profiles));
-    s_profiles.used_bitmap = 0xFF; /* deliberately wrong, so a no-op bug can't accidentally read as a pass */
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0xFF); /* deliberately wrong, so a no-op bug can't accidentally read as a pass */
 
     (void)profiles_http_start(); /* returns ESP_ERR_INVALID_STATE (no HTTP server in this stub) AFTER the
                                   * NVS load logic below has already run -- exactly what's under test. */
 
-    TEST_CHECK((s_profiles.used_bitmap & 0x01) == 0, "a refused newer-version blob must not be reported used");
+    TEST_CHECK(!profiles_slot_bitmap_test(&s_profiles.used_bitmap, 0), "a refused newer-version blob must not be reported used");
 
     nvs_stub_entry_t *e = nvs_stub_find(PROFILES_NVS_PARTITION, NVS_NAMESPACE, "prof0", false);
     TEST_CHECK(e != NULL && e->has_blob, "the staged slot must still exist in NVS");
@@ -1256,9 +1256,9 @@ static void test_one_bad_slot_does_not_affect_others(void)
     esp_err_t err = nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
 
     TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK((out.used_bitmap & 0x01) != 0, "slot 0 (good) must still be used");
-    TEST_CHECK((out.used_bitmap & 0x02) == 0, "slot 1 (bad CRC) must be marked unused");
-    TEST_CHECK((out.used_bitmap & 0x04) != 0, "slot 2 (good) must still be used, unaffected by slot 1's corruption");
+    TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, 0), "slot 0 (good) must still be used");
+    TEST_CHECK(!profiles_slot_bitmap_test(&out.used_bitmap, 1), "slot 1 (bad CRC) must be marked unused");
+    TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, 2), "slot 2 (good) must still be used, unaffected by slot 1's corruption");
     assert_profiles_equal(&out.profiles[0], &good0, "slot 0");
     assert_profiles_equal(&out.profiles[2], &good2, "slot 2");
 }
@@ -1333,7 +1333,7 @@ static void test_profiles_list_json_valid_with_escape_heavy_names(void)
         p->segments[0].target_c = 100.0f;
         p->segments[0].ramp_c_per_hr = 50.0f;
         p->segments[0].dwell_min = 5;
-        s_profiles.used_bitmap |= (uint8_t)(1u << id);
+        profiles_slot_bitmap_set(&s_profiles.used_bitmap, id);
     }
 
     s_chunk_capture_len = 0;
@@ -1371,7 +1371,7 @@ static void test_profiles_list_carries_last_run_started_unix_s(void)
     p->segments[0].target_c = 100.0f;
     p->segments[0].ramp_c_per_hr = 50.0f;
     p->segments[0].dwell_min = 5;
-    s_profiles.used_bitmap |= (uint8_t)(1u << 0);
+    profiles_slot_bitmap_set(&s_profiles.used_bitmap, 0);
 
     g_fake_last_run_unix_s = 1726700000u;
 
@@ -1425,7 +1425,7 @@ static void test_v2_blob_migrates_distinct_multi_segment_values(void)
     esp_err_t err = nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
 
     TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK((out.used_bitmap & 0x01) != 0, "a v2 blob must migrate to a used slot, not be dropped");
+    TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, 0), "a v2 blob must migrate to a used slot, not be dropped");
     assert_profiles_equal(&out.profiles[0], &src, "v2->v3 migration");
     for (uint8_t i = 0; i < out.profiles[0].segment_count; i++) {
         char msg[112];
@@ -1466,7 +1466,7 @@ static void test_v3_blob_migrates_with_no_rules(void)
     esp_err_t err = nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
 
     TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK((out.used_bitmap & 0x01) != 0, "a v3 blob must migrate to a used slot, not be dropped");
+    TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, 0), "a v3 blob must migrate to a used slot, not be dropped");
     assert_profiles_equal(&out.profiles[0], &src, "v3->v4 migration");
     TEST_CHECK(out.profiles[0].on_off_rule_count == 0,
               "migration default: a v3 blob never had a rule, so on_off_rule_count must land at 0");
@@ -1665,7 +1665,7 @@ static void test_profiles_http_save_accepts_cone10_profile_on_80c_zone(void)
     bool ok = profiles_http_save(PROFILES_MAX_COUNT, &p, &out_id, &warn_count, err_msg, sizeof(err_msg));
 
     TEST_CHECK(ok, "a 1285C target on an 80C zone must be ACCEPTED at save time");
-    TEST_CHECK((s_profiles.used_bitmap & (1u << out_id)) != 0, "the profile must actually be written to storage");
+    TEST_CHECK(profiles_slot_bitmap_test(&s_profiles.used_bitmap, out_id), "the profile must actually be written to storage");
     TEST_CHECK(warn_count >= 1, "the over-ceiling condition must still be surfaced as a warning, not silently "
                                 "dropped");
 }
@@ -1762,7 +1762,7 @@ static void test_profiles_http_save_accepts_2015c_gas_kiln_profile_on_80c_zone(v
     bool ok = profiles_http_save(PROFILES_MAX_COUNT, &p, &out_id, &warn_count, err_msg, sizeof(err_msg));
 
     TEST_CHECK(ok, "2015C must be storable -- it is PROFILE_TARGET_C_MAX exactly, not past it");
-    TEST_CHECK((s_profiles.used_bitmap & (1u << out_id)) != 0, "the 2015C profile must actually be written");
+    TEST_CHECK(profiles_slot_bitmap_test(&s_profiles.used_bitmap, out_id), "the 2015C profile must actually be written");
     TEST_CHECK(warn_count >= 1, "2015C on an 80C zone must still be flagged as exceeding this kiln's ceiling");
 
     /* Positive control on the input-sanity bound itself, now that it moved:
@@ -1997,6 +1997,114 @@ static void test_nvs_save_slot_proceeds_normally_on_an_internal_ram_stack(void)
 // are the same static functions builtin_list_get_handler() and
 // profile_detail_get_handler() call.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// profiles_slot_bitmap_t widening (docs/PROFILE_SLOTS_100_PLAN.md section 7
+// task 1) -- two REQUIRED regression tests named by that task:
+//   1. the persisted NVS_KEY_USED byte for a fixed 8-slot fixture must stay
+//      byte-identical to the pre-widening uint8_t scalar format.
+//   2. ids 31, 32, 33, 99 (each landing in a different word of the new
+//      4-word bitmap, and each >= 32 -- the exact width that made the old
+//      `1u << id` scalar test undefined behavior) must round-trip through
+//      the accessors.
+// ---------------------------------------------------------------------------
+static void test_slot_bitmap_persisted_byte_identical_for_8slot_fixture(void)
+{
+    TEST_SECTION("profiles_slot_bitmap_t -- persisted NVS_KEY_USED byte for a full "
+                 "8-slot fixture is byte-identical to the pre-widening uint8_t format");
+
+    nvs_stub_reset();
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0);
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        profiles_slot_set(id);
+    }
+    TEST_CHECK(profiles_slot_bitmap_to_u32(&s_profiles.used_bitmap) == 0xFFu,
+              "all 8 slots set must reduce to the same 0xFF word[0] the old scalar held");
+
+    /* nvs_save_slot() persists the whole used_bitmap byte as a side effect of
+     * saving any one slot -- stage a real, decodable profile at every one of
+     * the 8 slots so the reload below (which re-derives its own used bit per
+     * slot from a successful decode, not just from the raw persisted byte)
+     * actually reports all 8 as used. */
+    profile_t src = make_stored_profile();
+    esp_err_t err = ESP_OK;
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        s_profiles.profiles[id] = src;
+        esp_err_t e = nvs_save_slot(id);
+        if (e != ESP_OK) {
+            err = e;
+        }
+    }
+    TEST_CHECK(err == ESP_OK, "saving all 8 slots as used must not error");
+
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    uint8_t persisted = 0;
+    esp_err_t rd = nvs_get_u8(h, NVS_KEY_USED, &persisted);
+    nvs_close(h);
+    TEST_CHECK(rd == ESP_OK, "the prof_used key must exist after a save");
+    TEST_CHECK(persisted == 0xFFu,
+              "REGRESSION: the persisted byte for an 8-slot fixture must stay exactly 0xFF -- "
+              "the widened in-RAM type must never change the on-flash wire format");
+
+    /* And the round trip back through the real loader reconstructs the same
+     * 8-slot set. */
+    profiles_state_t out;
+    bool any_found = false;
+    err = nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
+    TEST_CHECK(err == ESP_OK && any_found, "reload after the fixture save must succeed");
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, id),
+                  "every one of the 8 fixture slots must still read back used");
+    }
+
+    /* Leave global state clean for later tests. */
+    nvs_stub_reset();
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0);
+}
+
+static void test_slot_bitmap_round_trips_high_ids(void)
+{
+    TEST_SECTION("profiles_slot_bitmap_t -- ids 31, 32, 33, 99 round-trip through the "
+                 "accessors (32 is the exact width that made the old `1u << id` scalar "
+                 "test undefined behavior; 31/33 flank the word-0/word-1 boundary; 99 "
+                 "lands in word 3)");
+
+    const unsigned ids[] = {31, 32, 33, 99};
+    profiles_slot_bitmap_t bm;
+    profiles_slot_bitmap_from_u32(&bm, 0);
+
+    for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
+        TEST_CHECK(!profiles_slot_bitmap_test(&bm, ids[i]), "id must start clear");
+    }
+
+    for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
+        profiles_slot_bitmap_set(&bm, ids[i]);
+        TEST_CHECK(profiles_slot_bitmap_test(&bm, ids[i]), "id must read back set immediately after set");
+    }
+    /* Setting one id must not disturb any other -- the whole point of using
+     * separate words rather than one overflowing scalar. */
+    for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
+        TEST_CHECK(profiles_slot_bitmap_test(&bm, ids[i]), "id must still read back set after siblings were set");
+    }
+    TEST_CHECK(!profiles_slot_bitmap_test(&bm, 0), "an unrelated low id must remain untouched");
+    TEST_CHECK(!profiles_slot_bitmap_test(&bm, 63), "an unrelated word-1/word-2 boundary id must remain untouched");
+    /* word[0] covers bits 0..31 -- of the four test ids, only 31 lands in it.
+     * The persistence seam (profiles_slot_bitmap_to_u32()) only ever reads
+     * word[0], so this pins down exactly what a persist would see: id 31's
+     * bit, and nothing leaked in from 32/33/99. */
+    TEST_CHECK(profiles_slot_bitmap_to_u32(&bm) == (1u << 31),
+              "only id 31 lives in word[0] -- 32/33/99 must not leak a bit into the "
+              "persisted word even though all four ids are set in the wider struct");
+
+    for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
+        profiles_slot_bitmap_clear(&bm, ids[i]);
+        TEST_CHECK(!profiles_slot_bitmap_test(&bm, ids[i]), "id must read back clear immediately after clear");
+    }
+    for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
+        TEST_CHECK(!profiles_slot_bitmap_test(&bm, ids[i]), "id must still read back clear after siblings were cleared");
+    }
+}
+
 static void test_builtin_json_emits_seg_kind_and_resolved_zone_mask(void)
 {
     TEST_SECTION("builtin catalogue JSON carries seg_kind and the zone_mask the schedule "
@@ -2105,6 +2213,8 @@ void run_test_profiles_http(void)
     test_validate_candidate_hard_mode_20pct_ramp_band_still_only_warns();
     test_nvs_save_slot_refuses_when_calling_stack_is_external_ram();
     test_nvs_save_slot_proceeds_normally_on_an_internal_ram_stack();
+    test_slot_bitmap_persisted_byte_identical_for_8slot_fixture();
+    test_slot_bitmap_round_trips_high_ids();
     test_builtin_json_emits_seg_kind_and_resolved_zone_mask();
 
     test_nvs_erase_slot_prunes_firing_stats();

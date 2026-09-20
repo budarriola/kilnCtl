@@ -28,35 +28,42 @@ NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
 NVS_KEY_LEN_CHECK(NVS_KEY_FAV_USER);
 NVS_KEY_LEN_CHECK(NVS_KEY_FAV_BUILTIN);
 
-/* Bit i = user slot i is favorited. Only PROFILES_MAX_COUNT bits are ever
- * set, but a u32 is what hal_kv stores natively. */
-static uint32_t s_fav_user;
+/* Bit i = user slot i is favorited. Widened uint32_t -> profiles_slot_bitmap_t
+ * (docs/PROFILE_SLOTS_100_PLAN.md section 7 task 1) so an id up to the
+ * 128-id ceiling can be addressed once PROFILES_MAX_COUNT is later raised --
+ * the plan's Status section names the old `user_mask & (1u << i)` scalar
+ * test in favorites_list_get_handler() as undefined behavior once `i`
+ * reaches 32. Still at 8 slots today, so only word[0] bits 0..7 are ever
+ * set; persisted exactly as before (favorites_save()/favorites_load_key()
+ * below read/write only that one word via hal_kv_get/set_u32, so the NVS
+ * bytes stay byte-identical to before this change). */
+static profiles_slot_bitmap_t s_fav_user;
 /* Bit i = builtin catalogue index i is favorited. 32 bits for the 28 shipped
  * entries, the same shape (and for the same reason) as profiles_builtin.c's
- * hidden mask. */
+ * hidden mask -- not affected by the user-slot count, so this one stays a
+ * plain uint32_t. */
 static uint32_t s_fav_builtin;
 
-_Static_assert(PROFILES_MAX_COUNT <= 32, "user favorite mask is a uint32_t");
-
-/* Resolves an id in either namespace to the mask that holds it and the bit
- * within that mask. Returns false for an id that names no profile at all. */
-static bool fav_locate(uint8_t id, uint32_t **out_mask, uint32_t *out_bit)
+/* Resolves an id in either namespace. Returns false for an id that names no
+ * profile at all. `*out_is_user` tells the caller which namespace the id
+ * landed in; `*out_builtin_bit` is only meaningful when it comes back
+ * false. The two masks are different types now (profiles_slot_bitmap_t vs a
+ * plain uint32_t), so they can no longer share one out-pointer the way a
+ * single scalar mask pointer used to. */
+static bool fav_locate(uint8_t id, bool *out_is_user, uint32_t *out_builtin_bit)
 {
     if (id < PROFILES_MAX_COUNT) {
-        if (out_mask) {
-            *out_mask = &s_fav_user;
-        }
-        if (out_bit) {
-            *out_bit = 1u << id;
+        if (out_is_user) {
+            *out_is_user = true;
         }
         return true;
     }
     if (profiles_builtin_id_valid(id)) {
-        if (out_mask) {
-            *out_mask = &s_fav_builtin;
+        if (out_is_user) {
+            *out_is_user = false;
         }
-        if (out_bit) {
-            *out_bit = 1u << (uint32_t)(id - PROFILE_BUILTIN_ID_BASE);
+        if (out_builtin_bit) {
+            *out_builtin_bit = 1u << (uint32_t)(id - PROFILE_BUILTIN_ID_BASE);
         }
         return true;
     }
@@ -70,7 +77,7 @@ static hal_status_t favorites_save(void)
     if (err != HAL_OK) {
         return err;
     }
-    err = hal_kv_set_u32(&h, NVS_KEY_FAV_USER, s_fav_user);
+    err = hal_kv_set_u32(&h, NVS_KEY_FAV_USER, profiles_slot_bitmap_to_u32(&s_fav_user));
     if (err == HAL_OK) {
         err = hal_kv_set_u32(&h, NVS_KEY_FAV_BUILTIN, s_fav_builtin);
     }
@@ -98,7 +105,7 @@ static hal_status_t favorites_load_key(hal_kv_handle_t *h, const char *key, uint
 
 esp_err_t profiles_favorites_start(void)
 {
-    s_fav_user = 0;
+    profiles_slot_bitmap_from_u32(&s_fav_user, 0);
     s_fav_builtin = 0;
 
     /* Calling this when profiles_http.c or profiles_builtin.c has already
@@ -123,48 +130,66 @@ esp_err_t profiles_favorites_start(void)
         return hal_status_to_esp_err(err);
     }
 
-    err = favorites_load_key(&h, NVS_KEY_FAV_USER, &s_fav_user);
+    uint32_t fav_user_word0 = 0;
+    err = favorites_load_key(&h, NVS_KEY_FAV_USER, &fav_user_word0);
     if (err == HAL_OK) {
+        profiles_slot_bitmap_from_u32(&s_fav_user, fav_user_word0);
         err = favorites_load_key(&h, NVS_KEY_FAV_BUILTIN, &s_fav_builtin);
     }
     hal_kv_close(&h);
     if (err != HAL_OK) {
         ESP_LOGW(TAG, "favorites read failed: %s -- starting with none", hal_status_to_name(err));
-        s_fav_user = 0;
+        profiles_slot_bitmap_from_u32(&s_fav_user, 0);
         s_fav_builtin = 0;
         return hal_status_to_esp_err(err);
     }
 
-    ESP_LOGI(TAG, "favorites: saved mask 0x%02lx, builtin mask 0x%08lx", (unsigned long)s_fav_user,
-             (unsigned long)s_fav_builtin);
+    ESP_LOGI(TAG, "favorites: saved mask 0x%02lx, builtin mask 0x%08lx",
+             (unsigned long)profiles_slot_bitmap_to_u32(&s_fav_user), (unsigned long)s_fav_builtin);
     return ESP_OK;
 }
 
 bool profiles_favorites_is(uint8_t id)
 {
-    uint32_t *mask = NULL;
-    uint32_t bit = 0;
-    if (!fav_locate(id, &mask, &bit)) {
+    bool is_user = false;
+    uint32_t builtin_bit = 0;
+    if (!fav_locate(id, &is_user, &builtin_bit)) {
         return false;
     }
-    return (*mask & bit) != 0;
+    if (is_user) {
+        return profiles_slot_bitmap_test(&s_fav_user, id);
+    }
+    return (s_fav_builtin & builtin_bit) != 0;
 }
 
 esp_err_t profiles_favorites_set(uint8_t id, bool favorite)
 {
-    uint32_t *mask = NULL;
-    uint32_t bit = 0;
-    if (!fav_locate(id, &mask, &bit)) {
+    bool is_user = false;
+    uint32_t builtin_bit = 0;
+    if (!fav_locate(id, &is_user, &builtin_bit)) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    uint32_t updated = favorite ? (*mask | bit) : (*mask & ~bit);
-    if (updated == *mask) {
+    bool changed;
+    if (is_user) {
+        bool was = profiles_slot_bitmap_test(&s_fav_user, id);
+        changed = (was != favorite);
+        if (favorite) {
+            profiles_slot_bitmap_set(&s_fav_user, id);
+        } else {
+            profiles_slot_bitmap_clear(&s_fav_user, id);
+        }
+    } else {
+        uint32_t updated = favorite ? (s_fav_builtin | builtin_bit) : (s_fav_builtin & ~builtin_bit);
+        changed = (updated != s_fav_builtin);
+        s_fav_builtin = updated;
+    }
+
+    if (!changed) {
         /* No change -- nothing to write. Saying OK here keeps an unfavorite
          * of something that was never favorited from reporting a failure. */
         return ESP_OK;
     }
-    *mask = updated;
 
     hal_status_t err = favorites_save();
     if (err != HAL_OK) {
@@ -175,7 +200,7 @@ esp_err_t profiles_favorites_set(uint8_t id, bool favorite)
     return ESP_OK;
 }
 
-void profiles_favorites_masks(uint32_t *out_user, uint32_t *out_builtin)
+void profiles_favorites_masks(profiles_slot_bitmap_t *out_user, uint32_t *out_builtin)
 {
     if (out_user) {
         *out_user = s_fav_user;

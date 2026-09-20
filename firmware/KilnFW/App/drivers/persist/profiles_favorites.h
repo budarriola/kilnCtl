@@ -53,6 +53,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "profiles_slot_bitmap.h"
 
 /* Loads the persisted favorite masks. Call once at boot, BEFORE
  * profiles_http_start() registers the read paths that report them. A missing
@@ -71,7 +72,15 @@ esp_err_t profiles_favorites_set(uint8_t id, bool favorite);
 
 /* Raw masks, for the JSON listing. Bit i of *out_user is user slot i; bit i
  * of *out_builtin is builtin catalogue index i (that is, id
- * PROFILE_BUILTIN_ID_BASE+i). Either pointer may be NULL. */
-void profiles_favorites_masks(uint32_t *out_user, uint32_t *out_builtin);
+ * PROFILE_BUILTIN_ID_BASE+i). Either pointer may be NULL.
+ *
+ * `out_user` widened uint32_t* -> profiles_slot_bitmap_t* (docs/
+ * PROFILE_SLOTS_100_PLAN.md section 7 task 1) -- the plan's Status section
+ * names the old `user_mask & (1u << i)` scalar test as undefined behavior
+ * once `i` reaches 32, which the 100-slot raise (task 6) would do.
+ * `out_builtin` stays a plain uint32_t: the builtin catalogue is a fixed
+ * .rodata table (28 entries today, see profiles_builtin.h) nowhere near 32
+ * and is not affected by the user-slot count. */
+void profiles_favorites_masks(profiles_slot_bitmap_t *out_user, uint32_t *out_builtin);
 
 #endif /* PROFILES_FAVORITES_H */

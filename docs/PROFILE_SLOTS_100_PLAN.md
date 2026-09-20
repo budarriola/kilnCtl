@@ -246,8 +246,10 @@ One commit each, sized for a sonnet implementer, each independently buildable an
    The response bytes for 8 slots must be byte-identical to today's -- diff them.
 3. **Move `s_profiles.profiles[]` off `.bss`** into a PSRAM allocation made at init, with
    an internal-DRAM fallback and a logged failure path. Still at 8.
-4. **Add `test_profiles_capacity.c`**, parsing `partitions.csv`, asserted against the
+4. **Add a profiles-capacity check**, parsing `partitions.csv`, asserted against the
    *current* 8 slots and the *current* 0x80000 `cfg`. It must pass before anything grows.
+   (Shipped as `tools/check_profiles_capacity.ps1`/`.py`, not a host-test `.c` file --
+   corrected 2026-09-19, see Status section below.)
 5. **Grow `cfg` to 0x250000** in `partitions.csv`, with the full comment block
    (arithmetic, why the whole tail, what it costs). Source-only; no flash.
 6. **Raise `PROFILES_MAX_COUNT` to 100** plus the live-edit slot at 100. Mechanical: loop
@@ -268,16 +270,45 @@ One commit each, sized for a sonnet implementer, each independently buildable an
 ### Status (2026-09-19, Opus review of phase A)
 
 Phase A landed: tasks 2, 4, 5, 9 (reverted, see below), 10, 11 (this section).
-Tasks 1, 3, 6, 7, 8, 12 are NOT started.
+Task 1 landed 2026-09-19 (see below). Tasks 3, 6, 7, 8, 12 are NOT started.
 
-**Task 1 is a hard, unstarted prerequisite for task 6** — do not raise
-`PROFILES_MAX_COUNT` past 32 before it lands. Two sites already do a bit test
-past what their current (narrower) types can hold once ids reach 32:
-`profiles_catalog_http.c`'s `profiles_list_get_handler()`
-(`s_profiles.used_bitmap & (1u << id)` — `used_bitmap` is a `uint8_t`) and
-its `favorites_get_handler()` (`user_mask & (1u << i)` on a 32-bit mask,
-undefined at `i` == 32). Both are inert at today's 8 slots but must not be
-carried forward silently when task 6 runs.
+**Task 1 landed 2026-09-19.** Both `used_bitmap` (`profiles_http.c`'s
+`s_profiles`) and the favorites user mask (`profiles_favorites.c`'s
+`s_fav_user`) are now `profiles_slot_bitmap_t` (4x`uint32_t`, ids 0..127) --
+see `profiles_slot_bitmap.h` for the type and its
+test/set/clear/from_u32/to_u32 accessors. Every consumer (NVS load/save in
+`profiles_http.c`, the two sites named below, `profiles_edit_http.c`'s free-
+slot search/save/delete, and the host test fixtures) goes through the
+accessors; nothing bit-tests the raw scalar directly any more. Persistence is
+unchanged: `nvs_save_slot()`/`nvs_load_all_from()` and
+`favorites_save()`/`profiles_favorites_start()` only ever read/write
+`word[0]` via `profiles_slot_bitmap_to_u32()`/`_from_u32()`, so the persisted
+NVS bytes and the 8-slot HTTP response bytes are byte-identical to before.
+The two sites the paragraph below used to warn about are now fixed:
+`profiles_catalog_http.c`'s `profiles_list_get_handler()` and
+`favorites_list_get_handler()` both call the accessors instead of shifting
+into a narrow scalar. `PROFILES_MAX_COUNT` is unchanged (still 8, task 6's
+job). New host tests in `test_profiles_http.c`:
+`test_slot_bitmap_persisted_byte_identical_for_8slot_fixture()` (asserts the
+persisted `prof_used` byte for a full 8-slot fixture stays exactly `0xFF`,
+and that the real loader reconstructs all 8 slots as used) and
+`test_slot_bitmap_round_trips_high_ids()` (ids 31/32/33/99 -- the 32-bit
+boundary that made the old scalar test undefined behavior -- set/test/clear
+independently without disturbing each other or leaking into `word[0]`).
+Negative-tested: deliberately broke `profiles_slot_bitmap_set()`'s word index
+(`id / 16` instead of `id / 32`), confirmed a forced full rebuild failed
+(10 failures in `test_profiles_http.c`), restored the source by hand, confirmed
+a SHA-256 match against the pre-break file, then forced another full rebuild
+and confirmed 54/54 host test executables green again.
+
+Previously (now historical): **Task 1 was a hard, unstarted prerequisite for
+task 6** — do not raise `PROFILES_MAX_COUNT` past 32 before it lands. Two
+sites already do a bit test past what their current (narrower) types can
+hold once ids reach 32: `profiles_catalog_http.c`'s
+`profiles_list_get_handler()` (`s_profiles.used_bitmap & (1u << id)` —
+`used_bitmap` is a `uint8_t`) and its `favorites_get_handler()` (`user_mask &
+(1u << i)` on a 32-bit mask, undefined at `i` == 32). Both are inert at
+today's 8 slots but must not be carried forward silently when task 6 runs.
 
 **Task 9 was superseded, not completed as originally planned** and its
 commit was reverted: `docs/UI_PLAN.md` section 6 Wave 2 E (already

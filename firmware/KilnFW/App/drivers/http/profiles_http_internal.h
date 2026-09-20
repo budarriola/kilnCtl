@@ -48,6 +48,7 @@
 
 #include "esp_err.h"
 #include "esp_http_server.h"
+#include "profiles_slot_bitmap.h"
 
 /* ---- shared log tag ------------------------------------------------------ */
 extern const char *PROFILES_TAG;
@@ -74,13 +75,33 @@ extern const char *PROFILES_TAG;
 /* ---- shared profile-slot storage (profiles_http.c) ------------------------
  * All 8 slots kept resident -- see profiles_http.c's own doc comment on
  * profiles_state_t for why. Read by profiles_catalog_http.c's listing/detail
- * handlers and mutated by profiles_edit_http.c's post/delete handlers. */
+ * handlers and mutated by profiles_edit_http.c's post/delete handlers.
+ *
+ * `used_bitmap` widened uint8_t -> profiles_slot_bitmap_t (docs/
+ * PROFILE_SLOTS_100_PLAN.md section 7 task 1) so an id past 7 (up to the
+ * 128-id ceiling section 2 of that plan documents) can be addressed once
+ * PROFILES_MAX_COUNT is later raised -- still 8 today, so behavior and the
+ * persisted NVS byte are unchanged. Every reader/writer goes through
+ * profiles_slot_used()/profiles_slot_set()/profiles_slot_clear() below
+ * rather than testing `.words[]` directly. */
 typedef struct {
     profile_t profiles[PROFILES_MAX_COUNT];
-    uint8_t used_bitmap; /* bit N = slot N in use */
+    profiles_slot_bitmap_t used_bitmap;
 } profiles_state_t;
 
 extern profiles_state_t s_profiles;
+
+/* Accessors for s_profiles.used_bitmap -- the ONLY sanctioned way to test/
+ * set/clear a slot's used bit. Defined in profiles_http.c (which owns
+ * s_profiles); declared here so profiles_catalog_http.c and
+ * profiles_edit_http.c (the other two files this header seams together)
+ * use the exact same bit logic rather than re-deriving it. `id` may be
+ * anything up to PROFILES_SLOT_BITMAP_MAX_ID -- an id at or past
+ * PROFILES_MAX_COUNT is simply never set, not a caller error, matching the
+ * old scalar's behavior of silently reading 0 past its own width. */
+bool profiles_slot_used(uint8_t id);
+void profiles_slot_set(uint8_t id);
+void profiles_slot_clear(uint8_t id);
 
 /* ---- shared on-flash blob encode/decode (profiles_http.c) -----------------
  * Widened non-static (2026-09-07, docs/FILESYSTEM_USER_DATA_PLAN.md section 5

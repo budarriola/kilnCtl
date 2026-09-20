@@ -187,6 +187,26 @@ _Static_assert(PROFILE_TARGET_C_MAX <= ZONE_MAX_TEMP_C_MAX,
  * need the type too. */
 profiles_state_t s_profiles;
 
+/* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 1 -- the sanctioned way to
+ * test/set/clear a bit of s_profiles.used_bitmap. Thin wrappers over the
+ * generic profiles_slot_bitmap_t helpers (profiles_slot_bitmap.h); kept
+ * here (not inline in the header) so this is the one place s_profiles is
+ * touched by name for this purpose. */
+bool profiles_slot_used(uint8_t id)
+{
+    return profiles_slot_bitmap_test(&s_profiles.used_bitmap, id);
+}
+
+void profiles_slot_set(uint8_t id)
+{
+    profiles_slot_bitmap_set(&s_profiles.used_bitmap, id);
+}
+
+void profiles_slot_clear(uint8_t id)
+{
+    profiles_slot_bitmap_clear(&s_profiles.used_bitmap, id);
+}
+
 /* On-flash per-slot layout, one per "profN" key. version-prefixed so a slot
  * can be told apart from a stale/rolled-back/corrupt one at load time --
  * see nvs_load_all_from(). profile_t itself (the payload) stays in
@@ -583,7 +603,7 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
         return err;
     }
     if (kv_err == HAL_OK) {
-        out->used_bitmap = bitmap;
+        profiles_slot_bitmap_from_u32(&out->used_bitmap, bitmap);
         if (out_any_found) {
             *out_any_found = true;
         }
@@ -605,7 +625,7 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
     bool nvs_slot_valid[PROFILES_MAX_COUNT] = {0};
 
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
-        if (!(out->used_bitmap & (1u << id))) {
+        if (!profiles_slot_bitmap_test(&out->used_bitmap, id)) {
             continue;
         }
         char key[8];
@@ -616,7 +636,7 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
         if (slot_kv_err != HAL_OK) {
             ESP_LOGW(PROFILES_TAG, "prof%u load from '%s' failed (%s) -- marking unused", id, partition,
                      hal_status_to_name(slot_kv_err));
-            out->used_bitmap &= ~(1u << id);
+            profiles_slot_bitmap_clear(&out->used_bitmap, id);
             continue;
         }
         /* decode_profile_blob() is the ONE place a stored blob is checked
@@ -643,12 +663,12 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
             break;
         case PROFILE_DECODE_NEWER:
             ESP_LOGW(PROFILES_TAG, "prof%u load from '%s' refused: %s", id, partition, reason);
-            out->used_bitmap &= ~(1u << id);
+            profiles_slot_bitmap_clear(&out->used_bitmap, id);
             continue;
         case PROFILE_DECODE_CORRUPT:
         default:
             ESP_LOGW(PROFILES_TAG, "prof%u load from '%s' rejected: %s -- marking unused", id, partition, reason);
-            out->used_bitmap &= ~(1u << id);
+            profiles_slot_bitmap_clear(&out->used_bitmap, id);
             continue;
         }
     }
@@ -674,10 +694,10 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
                                                         &resolved, &resolved_rev, &used_file);
             if (trustworthy) {
                 out->profiles[id] = resolved;
-                out->used_bitmap |= (uint8_t)(1u << id);
+                profiles_slot_bitmap_set(&out->used_bitmap, id);
             } else {
                 memset(&out->profiles[id], 0, sizeof(out->profiles[id]));
-                out->used_bitmap &= (uint8_t)~(1u << id);
+                profiles_slot_bitmap_clear(&out->used_bitmap, id);
             }
             s_profile_rev[id] = resolved_rev;
         }
@@ -743,7 +763,7 @@ esp_err_t nvs_save_slot(uint8_t id)
     persisted.crc32 = compute_profile_crc(&persisted);
     kv_err = hal_kv_set_blob(&h, key, &persisted, sizeof(persisted));
     if (kv_err == HAL_OK) {
-        kv_err = hal_kv_set_u8(&h, NVS_KEY_USED, s_profiles.used_bitmap);
+        kv_err = hal_kv_set_u8(&h, NVS_KEY_USED, (uint8_t)profiles_slot_bitmap_to_u32(&s_profiles.used_bitmap));
     }
     uint32_t rev_snapshot[PROFILES_MAX_COUNT];
     memcpy(rev_snapshot, s_profile_rev, sizeof(rev_snapshot));
@@ -809,7 +829,7 @@ esp_err_t nvs_erase_slot(uint8_t id)
         hal_kv_close(&h);
         return hal_status_to_esp_err(erase_err);
     }
-    kv_err = hal_kv_set_u8(&h, NVS_KEY_USED, s_profiles.used_bitmap);
+    kv_err = hal_kv_set_u8(&h, NVS_KEY_USED, (uint8_t)profiles_slot_bitmap_to_u32(&s_profiles.used_bitmap));
     uint32_t rev_snapshot[PROFILES_MAX_COUNT];
     memcpy(rev_snapshot, s_profile_rev, sizeof(rev_snapshot));
     rev_snapshot[id] = new_rev;
@@ -885,7 +905,7 @@ static void migrate_from_default_partition(void)
         }
 
         s_profiles.profiles[id] = old_profile;
-        s_profiles.used_bitmap |= (1u << id);
+        profiles_slot_set(id);
         esp_err_t save_err = nvs_save_slot(id);
         if (save_err != ESP_OK) {
             ESP_LOGE(PROFILES_TAG,
@@ -894,7 +914,7 @@ static void migrate_from_default_partition(void)
                      id, PROFILES_NVS_PARTITION, esp_err_to_name(save_err));
             /* Don't let a failed write claim the slot as migrated in RAM --
              * a write failure on this slot must not affect any other. */
-            s_profiles.used_bitmap &= ~(1u << id);
+            profiles_slot_clear(id);
             memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
         }
     }
@@ -946,7 +966,7 @@ bool profiles_http_get(uint8_t id, profile_t *out)
         return true;
     }
 
-    if (id >= PROFILES_MAX_COUNT || !(s_profiles.used_bitmap & (1u << id))) {
+    if (id >= PROFILES_MAX_COUNT || !profiles_slot_used(id)) {
         return false;
     }
     *out = s_profiles.profiles[id];
@@ -1250,7 +1270,7 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
     } else {
         int free_slot = -1;
         for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) {
-            if (!(s_profiles.used_bitmap & (1u << i))) {
+            if (!profiles_slot_used(i)) {
                 free_slot = i;
                 break;
             }
@@ -1309,7 +1329,7 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
     }
 
     s_profiles.profiles[target_id] = *candidate;
-    s_profiles.used_bitmap |= (1u << target_id);
+    profiles_slot_set(target_id);
     esp_err_t err = nvs_save_slot(target_id);
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "nvs_save_slot(%u) failed: %s -- profile applied live but will not survive a reboot",
@@ -1333,7 +1353,7 @@ bool profiles_http_delete(uint8_t id)
     if (profiles_builtin_id_valid(id)) {
         return false;
     }
-    if (id >= PROFILES_MAX_COUNT || !(s_profiles.used_bitmap & (1u << id))) {
+    if (id >= PROFILES_MAX_COUNT || !profiles_slot_used(id)) {
         return false;
     }
     /* Opus review item 2 (PROFILE_SLOTS_100_PLAN.md section 7): refuse to
@@ -1348,7 +1368,7 @@ bool profiles_http_delete(uint8_t id)
     if ((pstat.state == PROFILE_EXEC_RUNNING || pstat.state == PROFILE_EXEC_PAUSED) && pstat.profile_id == id) {
         return false;
     }
-    s_profiles.used_bitmap &= ~(1u << id);
+    profiles_slot_clear(id);
     memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
     esp_err_t err = nvs_erase_slot((uint8_t)id);
     if (err != ESP_OK) {

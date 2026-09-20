@@ -463,7 +463,7 @@ esp_err_t profile_post_handler(httpd_req_t *req)
     } else {
         int free_slot = -1;
         for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) {
-            if (!(s_profiles.used_bitmap & (1u << i))) {
+            if (!profiles_slot_used(i)) {
                 free_slot = i;
                 break;
             }
@@ -529,7 +529,7 @@ esp_err_t profile_post_handler(httpd_req_t *req)
     }
 
     s_profiles.profiles[target_id] = tmp;
-    s_profiles.used_bitmap |= (1u << target_id);
+    profiles_slot_set(target_id);
     esp_err_t err = nvs_save_slot(target_id);
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "nvs_save_slot(%u) failed: %s -- profile applied live but will not survive a reboot",
@@ -591,7 +591,7 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id missing or out of range");
         return ESP_OK;
     }
-    if (!(s_profiles.used_bitmap & (1u << id))) {
+    if (!profiles_slot_used(id)) {
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such profile");
         return ESP_OK;
     }
@@ -608,7 +608,7 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
         return httpd_resp_sendstr(req, "profile is currently running -- stop it before deleting");
     }
 
-    s_profiles.used_bitmap &= ~(1u << id);
+    profiles_slot_clear(id);
     memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
     esp_err_t err = nvs_erase_slot((uint8_t)id);
     if (err != ESP_OK) {

@@ -313,7 +313,7 @@ esp_err_t profiles_list_get_handler(httpd_req_t *req)
     esp_err_t err = httpd_resp_send_chunk(req, "[", 1);
     bool first = true;
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT && err == ESP_OK; id++) {
-        if (!(s_profiles.used_bitmap & (1u << id))) {
+        if (!profiles_slot_used(id)) {
             continue;
         }
         const profile_t *p = &s_profiles.profiles[id];
@@ -392,7 +392,7 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
         return berr;
     }
 
-    if (id >= PROFILES_MAX_COUNT || !(s_profiles.used_bitmap & (1u << id))) {
+    if (id >= PROFILES_MAX_COUNT || !profiles_slot_used(id)) {
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such profile");
         return ESP_OK;
     }
@@ -542,7 +542,8 @@ send:
  * `{"user_mask":N,"builtin_mask":N,"ids":[...]}` object) is unchanged. */
 esp_err_t favorites_list_get_handler(httpd_req_t *req)
 {
-    uint32_t user_mask = 0, builtin_mask = 0;
+    profiles_slot_bitmap_t user_mask;
+    uint32_t builtin_mask = 0;
     profiles_favorites_masks(&user_mask, &builtin_mask);
 
     /* Widest one id can ever render as: a comma plus up to 3 digits (ids are
@@ -552,15 +553,18 @@ esp_err_t favorites_list_get_handler(httpd_req_t *req)
 #define FAV_ID_CHUNK_MAX 8
     _Static_assert(FAV_ID_CHUNK_MAX >= 1 + 3 + 1, "one favorited id (comma + 3 digits + NUL) must fit");
 
+    /* "user_mask" stays a single number in the wire format -- word[0] of the
+     * widened bitmap is exactly the old uint32_t's bits, and at today's 8
+     * slots that is the whole mask, so this is byte-identical to before. */
     char header[64];
     int n = snprintf(header, sizeof(header), "{\"user_mask\":%lu,\"builtin_mask\":%lu,\"ids\":[",
-                     (unsigned long)user_mask, (unsigned long)builtin_mask);
+                     (unsigned long)profiles_slot_bitmap_to_u32(&user_mask), (unsigned long)builtin_mask);
     httpd_resp_set_type(req, "application/json");
     esp_err_t err = send_chunk_checked(req, header, n, sizeof(header), "favorites header");
 
     bool first = true;
     for (uint8_t i = 0; i < PROFILES_MAX_COUNT && err == ESP_OK; i++) {
-        if (!(user_mask & (1u << i))) {
+        if (!profiles_slot_bitmap_test(&user_mask, i)) {
             continue;
         }
         char idbuf[FAV_ID_CHUNK_MAX];
