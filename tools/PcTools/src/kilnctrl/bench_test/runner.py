@@ -261,6 +261,22 @@ class BenchTestRunner:
                             reason=f"dependency {spec.depends_on} was {dep.verdict}",
                         )
                         continue
+                    if dep is None and spec.depends_on in requested:
+                        # The dependency IS in this run but has not executed
+                        # yet -- i.e. the suite order puts it AFTER us. The
+                        # old `dep is not None` gate fell through silently
+                        # here and ran the observer against a board whose
+                        # dependency never happened, which reads as a real
+                        # verdict but is measuring nothing. Report the
+                        # ordering fault instead of fabricating a result.
+                        results[cid] = CaseResult(
+                            Verdict.NOT_RUN,
+                            reason=(
+                                f"suite order fault: dependency {spec.depends_on} is in this "
+                                f"run but is scheduled after {cid}"
+                            ),
+                        )
+                        continue
                 if spec.judge is None:
                     results[cid] = CaseResult(Verdict.NOT_RUN, reason="not_implemented")
                     continue

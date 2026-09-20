@@ -106,14 +106,23 @@ class ParseRouteTierTableTest(unittest.TestCase):
 
     def test_against_the_real_header(self):
         """The whole point of generating WEB-X-03 rather than hardcoding it:
-        this must track the real file. 150 rows as of the plan doc's
-        2026-09-19 recount (CLAUDE.md's kiln_help()/kicad_help() tool-count
-        style caveat applies equally here -- re-verify rather than trusting
-        a hardcoded number if this ever fails)."""
+        this must track the real file. The expected count is DERIVED from
+        the header by an independent, deliberately dumber counter (every
+        ``ROUTE_TIER("`` occurrence outside a comment or preprocessor
+        line) rather than hardcoded: a hardcoded 150 went stale the
+        moment the live-edit routes landed and the real table reached 155,
+        which reddens this test for a reason that has nothing to do with the
+        parser it exists to check. The lower bound keeps the derivation from
+        going vacuous if the counter itself ever matches nothing."""
         with open(ROUTE_TABLE_PATH, "r", encoding="utf-8") as f:
             text = f.read()
         rows = C.parse_route_tier_table(text)
-        self.assertEqual(len(rows), 150)
+        expected = len([
+            line for line in text.splitlines()
+            if 'ROUTE_TIER("' in line and not line.lstrip().startswith(("*", "//", "#"))
+        ])
+        self.assertGreater(expected, 100, "the independent ROUTE_TIER( counter found suspiciously few rows")
+        self.assertEqual(len(rows), expected)
         uris = {uri for uri, _method, _tier in rows}
         self.assertIn("/", uris)
         self.assertIn("/diagnostics", uris)

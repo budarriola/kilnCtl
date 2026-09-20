@@ -279,7 +279,53 @@ def _fixed_order(ids) -> List[str]:
     def key(cid: str) -> "tuple":
         spec = REGISTRY[cid]
         return (1 if spec.heat else 0, _ORDER_RANK.get(spec.area, 7), cid)
-    return sorted(ids, key=key)
+    ordered = sorted(ids, key=key)
+    return _after_their_dependencies(ordered)
+
+
+def _after_their_dependencies(ordered: List[str]) -> List[str]:
+    """Move every case whose ``depends_on`` names another case in the SAME
+    list to sit immediately after that case, preserving the §5.2 order for
+    everything else.
+
+    Without this, the heat/read-only partition above sorts every observer
+    (SP-06, SP-03, SP-04, LCD-02/03/04, SK-02, AT-03, AT-05 -- all
+    read-only) *ahead* of the heat case it observes, so each one runs
+    against a board where its dependency has not happened yet. That is the
+    same exemption `_NIGHTLY_ORDER` already spells out by hand ("SP-04 ...
+    deliberately sit inside the OTA block"); this generalizes it so the
+    `full` suite cannot silently drift out of it as new dependent cases are
+    registered. A dependency chain is followed transitively, and a
+    dependency on a case not in this list is left alone (running one case
+    on its own is still allowed).
+    """
+    remaining = list(ordered)
+    placed: List[str] = []
+    present = set(ordered)
+    deferrals: Dict[str, int] = {}
+    limit = len(ordered) + 1
+    while remaining:
+        cid = remaining.pop(0)
+        dep = REGISTRY[cid].depends_on
+        if deferrals.get(cid, 0) >= limit:
+            # A dependency cycle (or a self-dependency): stop deferring and
+            # place it, rather than spinning forever. Nothing registers one
+            # today; this is a guard, not a supported configuration.
+            placed.append(cid)
+            continue
+        if dep and dep in present and dep not in placed:
+            # Its dependency is still ahead of us: defer this case until
+            # just after the dependency lands.
+            try:
+                idx = remaining.index(dep)
+            except ValueError:  # pragma: no cover - dep already consumed
+                placed.append(cid)
+                continue
+            deferrals[cid] = deferrals.get(cid, 0) + 1
+            remaining.insert(idx + 1, cid)
+            continue
+        placed.append(cid)
+    return placed
 
 
 #: The suite names bench_test_run()/bench_test.ps1 accept. `smoke` is fully

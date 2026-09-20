@@ -77,9 +77,38 @@ class SuiteTest(unittest.TestCase):
         self.assertLess(idx["ST-05"], idx["FL-01"])
         self.assertLess(idx["FL-01"], idx["SK-01"])
         self.assertLess(idx["SK-01"], idx["SP-01"])
-        last_read_only = max(idx[c] for c in ids if not R.get_case(c).heat)
-        first_heat = min(idx[c] for c in ids if R.get_case(c).heat)
+        # Observers (a read-only case with `depends_on` naming a heat case)
+        # are the one deliberate exemption from the read-only/heat
+        # partition: they must follow what they observe, exactly as
+        # _NIGHTLY_ORDER already spells out by hand for SP-04/LCD-04.
+        observers = {c for c in ids if R.get_case(c).depends_on in idx}
+        last_read_only = max(idx[c] for c in ids if not R.get_case(c).heat and c not in observers)
+        first_heat = min(idx[c] for c in ids if R.get_case(c).heat and c not in observers)
         self.assertLess(last_read_only, first_heat, "every heat case (AT-*/HP-*) must run after every read-only case")
+
+    def test_full_suite_runs_every_case_after_its_dependency(self):
+        """A case whose `depends_on` is also in the suite must run AFTER it.
+        The `full` suite's §5.2 heat/read-only sort alone put every
+        (read-only) observer ahead of the (heat) case it observes -- SP-06
+        before HP-01, AT-03 before AT-02, AT-05 before AT-01 -- and the
+        runner's dependency gate only fires once the dependency has a
+        recorded result, so each of those ran against a board where its
+        dependency had not happened yet and reported a real-looking verdict
+        measuring nothing."""
+        for suite in ("full", "nightly"):
+            ids = R.SUITES[suite]
+            idx = {cid: i for i, cid in enumerate(ids)}
+            for cid in ids:
+                dep = R.get_case(cid).depends_on
+                if dep and dep in idx:
+                    self.assertLess(idx[dep], idx[cid], f"{suite}: {cid} runs before its dependency {dep}")
+
+    def test_full_suite_places_the_new_autotune_dependents(self):
+        idx = {cid: i for i, cid in enumerate(R.SUITES["full"])}
+        self.assertEqual(R.get_case("AT-03").depends_on, "AT-02")
+        self.assertEqual(R.get_case("AT-05").depends_on, "AT-01")
+        self.assertEqual(idx["AT-03"], idx["AT-02"] + 1)
+        self.assertEqual(idx["AT-05"], idx["AT-01"] + 1)
 
     def test_nightly_suite_also_uses_the_fixed_order(self):
         ids = R.SUITES["nightly"]
