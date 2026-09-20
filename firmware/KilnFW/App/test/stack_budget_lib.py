@@ -96,6 +96,74 @@ CALL_RE = re.compile(r"\bcall(?:4|8|12)\t([0-9a-f]+)(?: <([^>]+)>)?")
 CALLX_RE = re.compile(r"\bcallx(?:4|8|12)\b")
 
 
+# Address of the instruction a disassembly line describes, e.g.
+# "42084dfe:\tb08765        \tcall8 ...". Needed to tell a line that is
+# really part of the current function from a line objdump merely PRINTED
+# under that function's caption -- see symbol_sizes() below.
+LINE_ADDR_RE = re.compile(r"^([0-9a-f]+):\t")
+
+
+def symbol_sizes(objdump, elf):
+    """{addr:int -> size_bytes:int} for every sized function symbol, read
+    from the ELF symbol table (`objdump -t`).
+
+    WHY THIS EXISTS (2026-09-19). `objdump -d` is a LINEAR SWEEP: it prints
+    every byte of an executable section and captions those bytes with the
+    nearest preceding symbol. Bytes that belong to no function at all --
+    literal pools, jump tables, alignment padding, and the constant blobs the
+    toolchain parks between functions in `.flash.text` -- are therefore
+    printed under the previous function's name, and objdump decodes them as
+    if they were instructions. Xtensa instructions are unaligned and
+    variable-length, so arbitrary data routinely decodes into a plausible
+    `call8 <some real symbol>` line.
+
+    The analyser's linear parse credited those fabricated lines to the
+    captioned function, inventing call-graph edges out of nothing. A real
+    instance: `calc_content_width` (LVGL layout; ELF symbol size 0x1e1, so
+    it genuinely ends at 0x42084625) picked up a `call8
+    cfg_fs_confirm_format_job_run` decoded from data at 0x42084dfe, ~2 KB
+    past its own end and visibly surrounded by objdump `.byte` lines. That
+    one phantom edge grafted the whole LittleFS mount path (`cfg_fs_init`
+    -> `sweep_tmp$constprop$0`, 1232 B of frame by itself) onto the lvgl
+    task and reported lvgl at 5888 B against a 4880 B ceiling. No firmware
+    behaviour had changed; a code-layout shift had merely moved which data
+    landed behind which function.
+
+    The symbol table is the authority on where a function ends, so bound
+    each function's disassembly to [addr, addr + size) and ignore anything
+    outside it. A size-0 symbol (hand-written assembly with no `.size`
+    directive) stays unbounded exactly as before -- missing information is
+    not a reason to start dropping real edges."""
+    try:
+        result = subprocess.run([objdump, "-t", elf], capture_output=True, text=True)
+    except OSError as exc:
+        raise ElfParseError(f"could not run {objdump} -t on {elf}: {exc}") from exc
+    if result.returncode != 0:
+        raise ElfParseError(
+            f"{objdump} -t {elf} exited {result.returncode} -- could not read the symbol table "
+            f"(needed to bound each function to its real extent). objdump stderr:\n"
+            f"{result.stderr.strip()}"
+        )
+    sizes = {}
+    for line in result.stdout.splitlines():
+        # "42084444 l     F .flash.text\t000001e1 calc_content_width"
+        parts = line.split()
+        if len(parts) < 5 or "F" not in parts[1:-3]:
+            continue
+        try:
+            addr = int(parts[0], 16)
+            size = int(parts[-2], 16)
+        except ValueError:
+            continue
+        if size <= 0:
+            continue
+        # Aliases can share an address; the larger span is the safe one --
+        # it can only ever admit MORE of the real function, never less.
+        if size > sizes.get(addr, 0):
+            sizes[addr] = size
+    return sizes
+
+
 def find_objdump():
     env = os.environ.get("XTENSA_OBJDUMP")
     if env and os.path.isfile(env):
@@ -188,14 +256,19 @@ def parse(objdump, elf):
             f"stderr:\n{result.stderr.strip()}"
         )
     out = result.stdout
+    sizes = symbol_sizes(objdump, elf)
     frames, calls, names, name_addrs, indirect = {}, {}, {}, {}, {}
     seen_entry = set()
     cur = None
+    cur_end = None   # first address PAST the current function per the ELF
+                     # symbol table; None means "size unknown, unbounded".
     for line in out.splitlines():
         m = FN_RE.match(line)
         if m:
             cur = int(m.group(1), 16)
             name = m.group(2)
+            size = sizes.get(cur)
+            cur_end = (cur + size) if size else None
             frames.setdefault(cur, 0)
             calls.setdefault(cur, set())
             indirect.setdefault(cur, False)
@@ -204,6 +277,17 @@ def parse(objdump, elf):
             continue
         if cur is None:
             continue
+        if cur_end is not None:
+            la = LINE_ADDR_RE.match(line)
+            if la and int(la.group(1), 16) >= cur_end:
+                # Past this function's real end: objdump is captioning
+                # inter-function data (literal pool / jump table / padding /
+                # blob) with this function's name and decoding it as
+                # instructions. Those bytes belong to no function, so credit
+                # them to none -- see symbol_sizes()'s docstring.
+                cur = None
+                cur_end = None
+                continue
         if cur not in seen_entry:
             e = ENTRY_RE.search(line)
             if e:
