@@ -76,6 +76,17 @@ static inline void *heap_caps_malloc(size_t size, uint32_t caps)
     return malloc(size);
 }
 
+// profiles_live_http.c (docs/LIVE_PROFILE_EDIT_PLAN.md pass 2) pairs its
+// heap_caps_malloc() calls with the real heap_caps_free(), not a bare
+// free() -- both real ESP-IDF free() and heap_caps_malloc()'s host stub
+// above ultimately go through the same malloc()/free() pool on the host, so
+// this is just a thin alias, same as heap_caps_malloc()'s own comment
+// describes for handlers that DO use plain free() to release their buffer.
+static inline void heap_caps_free(void *ptr)
+{
+    free(ptr);
+}
+
 // Added for safety_cfg_store.c's host test (test_safety_cfg_store.c): that
 // file's real code calls the real esp_ptr_external_ram() to refuse a flash
 // write from a task whose stack lives in PSRAM (2026-08-23 panic fix --

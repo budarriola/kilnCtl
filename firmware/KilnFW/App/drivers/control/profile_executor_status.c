@@ -394,6 +394,35 @@ void profile_executor_get_status(profile_exec_status_t *out)
     xSemaphoreGive(s_exec.lock);
 }
 
+void profile_executor_get_live_status(profile_executor_live_status_t *out)
+{
+    if (!out) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+
+    if (s_exec.lock == NULL) {
+        LOG_PRESTART_ONCE(
+            "profile_executor_get_live_status() called before profile_executor_start() -- reporting inactive");
+        return;
+    }
+
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    out->active = (s_exec.state == PROFILE_EXEC_RUNNING || s_exec.state == PROFILE_EXEC_PAUSED ||
+                   s_exec.state == PROFILE_EXEC_FAULTED);
+    if (out->active) {
+        out->profile_id = s_exec.profile_id;
+        out->segment_index = s_exec.segment_index;
+    }
+    out->has_refusal = s_exec.live_edit_last_refusal.valid;
+    if (out->has_refusal) {
+        out->refusal_generation = s_exec.live_edit_last_refusal.generation;
+        out->refusal_result = (int)s_exec.live_edit_last_refusal.result;
+        strncpy(out->refusal_err_msg, s_exec.live_edit_last_refusal.err_msg, sizeof(out->refusal_err_msg) - 1);
+    }
+    xSemaphoreGive(s_exec.lock);
+}
+
 bool profile_executor_zone_is_active(uint8_t zone_index)
 {
     if (zone_index >= MAX31856_CHANNEL_COUNT) {

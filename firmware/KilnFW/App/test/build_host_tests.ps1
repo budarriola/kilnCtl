@@ -781,6 +781,27 @@ try {
 
     Invoke-HostTestExe -Name "live_profile" -ExePath $exeLp -BuildCmd $cmdLp
 
+    # ---- test_profiles_live_http.c: its own separate executable ---------------
+    # docs/LIVE_PROFILE_EDIT_PLAN.md pass 2 (section 10/11 HTTP surface). Same
+    # "#includes the .c directly" reason as test_live_profile.c above -- it
+    # reaches profiles_live_http.c's `static` handlers directly, and links the
+    # REAL live_profile.c (in turn needing the real host hal_kv backend,
+    # fake_kv.c) so the fork/save/decide storage paths are exercised for real;
+    # the httpd-tier neighbours (profiles_http.c/profiles_edit_http.c) are not
+    # linked here and are faked locally instead (real coverage for those
+    # bodies is test_profiles_http.c's job). Needs the same
+    # /experimental:c11atomics switch as test_live_profile.c since it also
+    # pulls in live_profile.c's <stdatomic.h> use.
+    $exePlh = Join-Path $outDir "kilnctl_host_tests_profiles_live_http.exe"
+    $plhObjDir = Join-Path $outDir "profiles_live_http_obj"
+    New-Item -ItemType Directory -Force -Path $plhObjDir | Out-Null
+    $cmdPlh = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics " +
+            "/Fo:`"$plhObjDir\\`" /Fe:`"$exePlh`" `"$(Join-Path $testDir 'test_profiles_live_http.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "profiles_live_http" -ExePath $exePlh -BuildCmd $cmdPlh
+
     # ---- test_ota_http.c: its own EIGHTH, separate executable -----------------
     # ota_http.c/factory_reset.c shipped their security fixes (empty-AP-password
     # refusal, per-context HMAC/lockout separation, auth-before-interlock on
@@ -2342,7 +2363,11 @@ try {
     # test_live_profile.c (55th) as its own Invoke-HostTestExe call --
     # live_profile.c's persistence functions and profile_executor_live_
     # pickup.c's pure pickup check, both untested until now.
-    $totalExpected = 55
+    # 55 -> 56: docs/LIVE_PROFILE_EDIT_PLAN.md pass 2 added
+    # test_profiles_live_http.c (56th) as its own Invoke-HostTestExe call --
+    # profiles_live_http.c's five HTTP handlers (status/fork/accept/decide/
+    # page), untested until now.
+    $totalExpected = 56
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the

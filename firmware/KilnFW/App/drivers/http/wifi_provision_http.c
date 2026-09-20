@@ -1097,8 +1097,19 @@ esp_err_t wifi_provision_http_start(void)
      * designed. Set to 151: 142 plus 9 spare slots, same headroom
      * convention as every bump above. RAM cost: 11 extra pointer slots * 4
      * bytes = 44 bytes, noise against the documented ~11.9 kB DRAM failure
-     * floor. */
-    config.max_uri_handlers = 151;
+     * floor.
+     *
+     * Bumped 151 -> 160, 2026-09-19: docs/LIVE_PROFILE_EDIT_PLAN.md pass 2's
+     * five new routes (GET /live_profile, GET+POST /api/profile/live, POST
+     * /api/profile/live/fork, POST /api/profile/live/decide --
+     * profiles_live_http.c) plus two favorites routes that landed
+     * concurrently (GET /api/profiles/favorites, POST /api/profile/favorite)
+     * left only two spare slots against 151. check_uri_handler_cap.ps1's own
+     * count is the actual authority here, not this comment's arithmetic --
+     * set to 160 for the same ~9-slot headroom convention as every bump
+     * above; re-verify with a fresh run of that check rather than trusting
+     * this number if it drifts. */
+    config.max_uri_handlers = 160;
     /* Default (4096) is tight for the largest POST handlers on this server:
      * zones_post_handler (zones_http.c) alone stacks a 2561-byte body
      * buffer plus a ~170-byte zones_cfg_t scratch copy on top of whatever

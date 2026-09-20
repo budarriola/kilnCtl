@@ -531,6 +531,30 @@ bool profile_executor_zone_is_active(uint8_t zone_index);
  * (e.g. uart_bridge_ext_control.c's bx_flash_worker handlers). */
 bool profile_executor_get_active_id(uint8_t *out_id);
 
+/* docs/LIVE_PROFILE_EDIT_PLAN.md pass 2: GET /api/profile/live's one locked
+ * read of the live-edit-relevant slice of s_exec -- the run's identity/
+ * segment position (meaningful only while active), and the last definitive
+ * pickup refusal (s_exec.live_edit_last_refusal). This is the ONLY sanctioned
+ * way for the HTTP layer to see that field; it must never reach into s_exec
+ * directly. Takes s_exec.lock only, briefly, mirroring every other status
+ * accessor in this file -- never call this while already holding a lock. */
+typedef struct {
+    bool active;             /* state is RUNNING, PAUSED or FAULTED (owner
+                               * decision 4: live editing is allowed in all
+                               * three) */
+    uint8_t profile_id;      /* meaningful only when active */
+    uint8_t segment_index;   /* meaningful only when active -- plan section
+                               * 10's editable_from_segment derives from this */
+    bool has_refusal;
+    uint32_t refusal_generation;
+    int refusal_result;      /* profile_live_pickup_result_t, cast to int so
+                               * this header does not have to pull in
+                               * profile_executor_live_pickup.h */
+    char refusal_err_msg[128];
+} profile_executor_live_status_t;
+
+void profile_executor_get_live_status(profile_executor_live_status_t *out);
+
 /* GET /api/cfgfs dual-write picture for the firing_stats_cfg_fs.c bridge --
  * see profile_executor_firing_stats.c's definition (firing_stats_get_
  * dualwrite_status()) for the aggregation shape and its documented

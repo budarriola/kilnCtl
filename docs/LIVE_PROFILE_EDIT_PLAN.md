@@ -341,6 +341,31 @@ time-of-check/time-of-use hole. No file in that feature needs changing.
 
 ## 10. HTTP surface
 
+**Status (2026-09-19, pass 2): delivered.** All five routes below are wired
+in `firmware/KilnFW/App/drivers/http/profiles_live_http.c` and covered by a
+new host-only suite, `firmware/KilnFW/App/test/test_profiles_live_http.c`
+(56th `build_host_tests.ps1` executable, 66/66 checks), which `#include`s
+`profiles_live_http.c` and the real `live_profile.c` directly (real
+`hal_kv`-backed fork/save/decide storage; the httpd-tier neighbours
+`profiles_http.c`/`profiles_edit_http.c` are faked locally, not linked --
+their own coverage is `test_profiles_http.c`'s job). Writing this suite
+caught two real bugs in the handler, not just test-harness issues: the fork
+handler passed `&working_id` (a `uint8_t*`) where `live_profile_fork()`
+expects a `profile_t *out_working` buffer (a target-build compile error,
+`-Wincompatible-pointer-types`, invisible to the host build since the host
+suite's own scaffolding didn't call the real function signature until this
+pass) — fixed by allocating a real scratch `profile_t` and reading
+`working_id` back from `rec.working_id` instead; and the overwrite
+decide-action handler had **inverted** `live_edit_can_overwrite()`'s sense,
+forbidding overwrite exactly when it was allowed and vice versa — a
+correctness bug the new tests caught directly, fixed by negating the
+condition. `check_uri_handler_cap.ps1` now reports 155/160 (5 spare slots);
+`check_route_tier_coverage.ps1`, `check_httpd_task_stack_budget.ps1`,
+`check_all_task_stack_budgets.ps1` (0 over) and `check_lint_pages.ps1` all
+pass, along with a fresh `check_00_kilnfw_target_build.ps1`. The live-edit
+page itself (`live_profile_page.html`) is still the pass-1 placeholder; a
+sibling worktree owns the real page and will merge it separately.
+
 All five routes are ADMIN. Each needs a row in
 `firmware/KilnFW/App/drivers/http/route_tier_table.h` **in the same change**,
 or `tools/check_route_tier_coverage.ps1` fails the build fail-closed.

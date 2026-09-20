@@ -105,7 +105,8 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
         "http/setup_wizard_page.html"
         "http/kiln_configs_page.html"
         "http/commissioning_shared.js"
-        "http/login_page.html" "net/security_page.html")
+        "http/login_page.html" "net/security_page.html"
+        "http/live_profile_page.html")
     set(KILNCTL_GZIP_ASSET_FILES "")
     foreach(asset ${KILNCTL_GZIP_ASSETS})
         get_filename_component(kilnctl_gz_basename "${asset}" NAME)
@@ -506,6 +507,9 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # a separate module rather than a fourth split file: see
                        # its own header comment for why.
                        "http/profiles_export_http.c"
+                       # docs/LIVE_PROFILE_EDIT_PLAN.md pass 2: the five-route
+                       # HTTP surface over pass 1's live_profile.c backend.
+                       "http/profiles_live_http.c"
                        # profiles_builtin.c is hand-written and #includes the
                        # machine-generated profiles_builtin_table.inc, which is
                        # NOT listed here (it is not a translation unit).

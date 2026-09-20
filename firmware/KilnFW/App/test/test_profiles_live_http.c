@@ -1,0 +1,686 @@
+// Host tests for App/drivers/http/profiles_live_http.c (docs/LIVE_PROFILE_EDIT_PLAN.md
+// pass 2, section 10/11). Its own SEPARATE executable, same "#include the .c
+// directly" convention as test_profiles_http.c/test_live_profile.c: this file
+// reaches every one of profiles_live_http.c's `static` handlers with no other
+// seam. Links the REAL live_profile.c (host hal_kv backend, fake_kv.c) so the
+// fork/save/decide storage paths are exercised for real; fakes the httpd-tier
+// seams (profiles_http_get/save, profiles_parse_profile_fields,
+// profiles_validate_candidate, profile_executor_get_live_status,
+// profiles_builtin_*, wifi_provision_http_get_server/kiln_http_register) the
+// same way test_live_profile.c fakes profile_encode_current_blob() --
+// profiles_http.c/profiles_edit_http.c are NOT linked here, so this file
+// supplies deterministic stand-ins instead. Real coverage for those
+// functions' own bodies lives in test_profiles_http.c. The httpd request/
+// response capture stubs below (s_resp_status/s_resp_body, a capturing
+// httpd_req_recv() reading from a test-staged buffer) copy test_ota_http.c's
+// pattern.
+#include "test_common.h"
+
+int g_test_failures = 0;
+int g_test_count = 0;
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
+#include <stdio.h>
+
+#include "esp_err.h"
+#include "esp_http_server.h"
+#include "hal_kv.h"
+
+// Pull the REAL type/prototype declarations in ahead of the fakes below
+// (profiles_http_internal.h/profiles_builtin.h/profile_executor.h are also
+// #included transitively later via profiles_live_http.c's own #includes --
+// doing it here first, instead of re-declaring these types/signatures by
+// hand, means the fakes below are checked against the one real signature
+// rather than risking a silently-mismatched hand copy).
+#include "profile_executor.h"
+#include "profiles_builtin.h"
+#include "../drivers/http/profiles_http_internal.h"
+
+// live_profile.c guards its own internal shim declaration of
+// profile_decode_result_t behind this macro (see that file's header
+// comment) -- defining the macro here, ahead of its #include below, tells
+// it profiles_http_internal.h (pulled in just above) already provides the
+// real type, so it does not also declare its own duplicate.
+#define PROFILE_DECODE_RESULT_SHIM_DECLARED
+
+// ---- fakes: the shared wire format (profiles_http.c, not linked here) --
+// live_profile.c reuses profile_encode_current_blob()/profile_decode_blob();
+// same trivial memcpy stand-in test_live_profile.c uses (the real format's
+// correctness is test_profiles_http.c's job).
+size_t profile_encode_current_blob(const profile_t *profile, void *out, size_t cap)
+{
+    if (!profile || !out || cap < sizeof(profile_t)) {
+        return 0;
+    }
+    memcpy(out, profile, sizeof(profile_t));
+    return sizeof(profile_t);
+}
+
+profile_decode_result_t profile_decode_blob(const void *blob, size_t len, profile_t *out, const char **err_reason)
+{
+    if (!blob || !out || len != sizeof(profile_t)) {
+        if (err_reason) {
+            *err_reason = "bad length";
+        }
+        return PROFILE_DECODE_CORRUPT;
+    }
+    memcpy(out, blob, sizeof(profile_t));
+    return PROFILE_DECODE_OK;
+}
+
+// ---- fakes: profiles_builtin.h --------------------------------------------
+static bool g_fake_builtin_on = false;
+static builtin_profile_t g_fake_builtin;
+
+bool profiles_builtin_id_valid(uint8_t id)
+{
+    return g_fake_builtin_on && id == PROFILE_BUILTIN_ID_BASE;
+}
+const builtin_profile_t *profiles_builtin_entry(uint8_t id)
+{
+    return profiles_builtin_id_valid(id) ? &g_fake_builtin : NULL;
+}
+bool profiles_builtin_get(uint8_t id, profile_t *out)
+{
+    if (!profiles_builtin_id_valid(id) || !out) {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    strncpy(out->name, g_fake_builtin.code, sizeof(out->name) - 1);
+    out->segment_count = g_fake_builtin.segment_count;
+    memcpy(out->segments, g_fake_builtin.segments, sizeof(out->segments));
+    return true;
+}
+
+// ---- fakes: s_profiles/profiles_slot_used (profiles_http_internal.h) ------
+static profiles_state_t g_fake_profiles_state;
+profiles_state_t *profiles_storage_ensure(void)
+{
+    return &g_fake_profiles_state;
+}
+bool profiles_slot_used(uint8_t id)
+{
+    if (id >= PROFILES_MAX_COUNT) {
+        return false;
+    }
+    return (g_fake_profiles_state.used_bitmap.words[0] & (1u << id)) != 0;
+}
+void profiles_slot_set(uint8_t id)
+{
+    if (id < PROFILES_MAX_COUNT) {
+        g_fake_profiles_state.used_bitmap.words[0] |= (1u << id);
+    }
+}
+void profiles_slot_clear(uint8_t id)
+{
+    if (id < PROFILES_MAX_COUNT) {
+        g_fake_profiles_state.used_bitmap.words[0] &= ~(1u << id);
+    }
+}
+
+// ---- fakes: profiles_http_get/save/delete (real impl is profiles_http.c,
+// not linked here) -- a tiny in-memory slot array is enough to exercise
+// profiles_live_http.c's own call sites (fork's origin read, decide's
+// save_as/overwrite writes). ----------------------------------------------
+static profile_t g_fake_slots[PROFILES_MAX_COUNT];
+static bool g_fake_profiles_http_get_fail = false;
+static bool g_fake_profiles_http_save_fail = false;
+
+bool profiles_http_get(uint8_t id, profile_t *out)
+{
+    if (g_fake_profiles_http_get_fail || id >= PROFILES_MAX_COUNT || !profiles_slot_used(id) || !out) {
+        return false;
+    }
+    *out = g_fake_slots[id];
+    return true;
+}
+bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id, uint8_t *out_warning_count,
+                         char *err_msg, size_t err_cap)
+{
+    if (g_fake_profiles_http_save_fail) {
+        snprintf(err_msg, err_cap, "save refused (test)");
+        return false;
+    }
+    uint8_t id = requested_id;
+    if (id >= PROFILES_MAX_COUNT) {
+        for (id = 0; id < PROFILES_MAX_COUNT; id++) {
+            if (!profiles_slot_used(id)) {
+                break;
+            }
+        }
+        if (id >= PROFILES_MAX_COUNT) {
+            snprintf(err_msg, err_cap, "no free slot");
+            return false;
+        }
+    }
+    g_fake_slots[id] = *candidate;
+    profiles_slot_set(id);
+    if (out_id) {
+        *out_id = id;
+    }
+    if (out_warning_count) {
+        *out_warning_count = 0;
+    }
+    return true;
+}
+bool profiles_http_delete(uint8_t id)
+{
+    if (id >= PROFILES_MAX_COUNT || !profiles_slot_used(id)) {
+        return false;
+    }
+    profiles_slot_clear(id);
+    return true;
+}
+
+// ---- fakes: profiles_parse_profile_fields/profiles_validate_candidate
+// (real impl is profiles_edit_http.c, not linked here). Body format for
+// these tests is a single token: any body containing "badbound" parses to
+// a candidate named "badbound" that validate_candidate always rejects
+// (simulating a bound violation whose err_msg names the segment/value/
+// limit, per the real function's contract); g_fake_parse_ok=false
+// simulates a parse failure regardless of body. -----------------------------
+static bool g_fake_parse_ok = true;
+
+bool profiles_parse_profile_fields(const char *body, profile_t *p, char *err_msg, size_t err_cap)
+{
+    if (!g_fake_parse_ok) {
+        snprintf(err_msg, err_cap, "bad parse (test)");
+        return false;
+    }
+    memset(p, 0, sizeof(*p));
+    strncpy(p->name, (body && strstr(body, "badbound")) ? "badbound" : "cand", sizeof(p->name) - 1);
+    p->segment_count = 1;
+    p->segments[0].target_c = 100.0f;
+    return true;
+}
+
+bool profiles_validate_candidate(const profile_t *candidate, profile_validate_mode_t mode, char *warnings_json,
+                                  size_t warnings_json_cap, char *err_msg, size_t err_cap)
+{
+    (void)mode;
+    if (warnings_json && warnings_json_cap) {
+        warnings_json[0] = '\0';
+    }
+    if (strcmp(candidate->name, "badbound") == 0) {
+        snprintf(err_msg, err_cap, "segment 0 target 3000.0 exceeds limit 2015.0");
+        return false;
+    }
+    return true;
+}
+
+// ---- fakes: profile_executor.h's live-status accessor ---------------------
+static profile_executor_live_status_t g_fake_live_status;
+void profile_executor_get_live_status(profile_executor_live_status_t *out)
+{
+    *out = g_fake_live_status;
+}
+
+// ---- fakes: wifi_provision_http.h / http_auth_http.h ----------------------
+static httpd_handle_t g_fake_server = (httpd_handle_t)0x1234;
+static bool g_fake_no_server = false;
+httpd_handle_t wifi_provision_http_get_server(void)
+{
+    return g_fake_no_server ? NULL : g_fake_server;
+}
+static int g_fake_register_count = 0;
+esp_err_t kiln_http_register(httpd_handle_t server, const httpd_uri_t *uri_handler)
+{
+    (void)server;
+    (void)uri_handler;
+    g_fake_register_count++;
+    return ESP_OK;
+}
+
+// ---- fakes: web_encoding.h --------------------------------------------
+bool web_client_accepts_gzip(httpd_req_t *req)
+{
+    (void)req;
+    return true;
+}
+esp_err_t web_send_gzip_not_acceptable(httpd_req_t *req, const char *tag, const char *page_name)
+{
+    (void)req;
+    (void)tag;
+    (void)page_name;
+    return ESP_FAIL;
+}
+void web_set_asset_cache_headers(httpd_req_t *req)
+{
+    (void)req;
+}
+
+// gzip-embedded page symbols the real firmware gets from the linker.
+const uint8_t live_profile_page_html_gz_start[] = {0x1f, 0x8b};
+const uint8_t live_profile_page_html_gz_end[] = {0};
+
+// ---- httpd request/response capture stubs (test_ota_http.c's pattern) -----
+static const char *s_stub_body_ptr;
+static size_t s_stub_body_len;
+static size_t s_stub_body_pos;
+
+static char s_resp_status[32];
+static char s_resp_body[1024];
+
+static void stub_reset_http(void)
+{
+    s_stub_body_ptr = NULL;
+    s_stub_body_len = 0;
+    s_stub_body_pos = 0;
+    strncpy(s_resp_status, "200 OK", sizeof(s_resp_status) - 1);
+    s_resp_status[sizeof(s_resp_status) - 1] = '\0';
+    s_resp_body[0] = '\0';
+}
+
+static void stub_set_body(const char *body)
+{
+    s_stub_body_ptr = body;
+    s_stub_body_len = body ? strlen(body) : 0;
+    s_stub_body_pos = 0;
+}
+
+int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
+{
+    (void)r;
+    size_t remaining = s_stub_body_len - s_stub_body_pos;
+    size_t n = remaining < buf_len ? remaining : buf_len;
+    if (n == 0) {
+        return 0;
+    }
+    memcpy(buf, s_stub_body_ptr + s_stub_body_pos, n);
+    s_stub_body_pos += n;
+    return (int)n;
+}
+
+esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t *uri_handler)
+{
+    (void)handle;
+    (void)uri_handler;
+    return ESP_OK;
+}
+esp_err_t httpd_resp_set_type(httpd_req_t *r, const char *type)
+{
+    (void)r;
+    (void)type;
+    return ESP_OK;
+}
+esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *value)
+{
+    (void)r;
+    (void)field;
+    (void)value;
+    return ESP_OK;
+}
+esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
+{
+    (void)r;
+    (void)buf;
+    (void)buf_len;
+    return ESP_OK;
+}
+esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *buf, size_t buf_len)
+{
+    (void)r;
+    if (buf && buf_len > 0) {
+        size_t n = buf_len;
+        if (n >= sizeof(s_resp_body)) {
+            n = sizeof(s_resp_body) - 1;
+        }
+        memcpy(s_resp_body, buf, n);
+        s_resp_body[n] = '\0';
+    }
+    return ESP_OK;
+}
+esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char *msg)
+{
+    (void)r;
+    snprintf(s_resp_status, sizeof(s_resp_status), "%d", (int)error);
+    strncpy(s_resp_body, msg ? msg : "", sizeof(s_resp_body) - 1);
+    s_resp_body[sizeof(s_resp_body) - 1] = '\0';
+    return ESP_OK;
+}
+esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status)
+{
+    (void)r;
+    strncpy(s_resp_status, status ? status : "", sizeof(s_resp_status) - 1);
+    s_resp_status[sizeof(s_resp_status) - 1] = '\0';
+    return ESP_OK;
+}
+esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s)
+{
+    (void)r;
+    strncpy(s_resp_body, s ? s : "", sizeof(s_resp_body) - 1);
+    s_resp_body[sizeof(s_resp_body) - 1] = '\0';
+    return ESP_OK;
+}
+
+// asm("_binary_...") is a GCC/binutils extension with no MSVC equivalent --
+// #define it away, same convention test_profiles_http.c/test_zones_http.c
+// use for the identical embedded-page-blob externs.
+#define asm(x)
+
+// Pull in the real modules under test: live_profile.c AFTER the fakes above
+// (same convention test_live_profile.c uses for its own real-storage
+// backend), then profiles_live_http.c which #includes live_profile.h only
+// (declarations) and needs live_profile.c's real bodies linked in.
+#include "../drivers/persist/live_profile.c"
+#include "../drivers/http/profiles_live_http.c"
+
+#undef asm
+
+// ---------------------------------------------------------------------------
+// test helpers
+
+static httpd_req_t make_req(const char *body)
+{
+    stub_reset_http();
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    if (body) {
+        req.content_len = (long long)strlen(body);
+        stub_set_body(body);
+    }
+    return req;
+}
+
+static void reset_fakes(void)
+{
+    memset(&g_fake_live_status, 0, sizeof(g_fake_live_status));
+    memset(&g_fake_profiles_state, 0, sizeof(g_fake_profiles_state));
+    memset(g_fake_slots, 0, sizeof(g_fake_slots));
+    g_fake_profiles_http_get_fail = false;
+    g_fake_profiles_http_save_fail = false;
+    g_fake_parse_ok = true;
+    g_fake_builtin_on = false;
+    g_fake_no_server = false;
+    char discard_err[64];
+    live_profile_clear(discard_err, sizeof(discard_err));
+}
+
+// ---------------------------------------------------------------------------
+
+static void test_get_status_inactive(void)
+{
+    TEST_SECTION("GET /api/profile/live -- inactive, no pending");
+    reset_fakes();
+    httpd_req_t req = make_req(NULL);
+    esp_err_t err = api_profile_live_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strstr(s_resp_body, "\"active\":false") != NULL, "reports active:false");
+}
+
+static void test_get_status_active_with_refusal(void)
+{
+    TEST_SECTION("GET /api/profile/live -- active, has_refusal");
+    reset_fakes();
+    g_fake_live_status.active = true;
+    g_fake_live_status.profile_id = 2;
+    g_fake_live_status.segment_index = 1;
+    g_fake_live_status.has_refusal = true;
+    g_fake_live_status.refusal_generation = 5;
+    g_fake_live_status.refusal_result = 1;
+    strncpy(g_fake_live_status.refusal_err_msg, "window violation", sizeof(g_fake_live_status.refusal_err_msg) - 1);
+
+    httpd_req_t req = make_req(NULL);
+    esp_err_t err = api_profile_live_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strstr(s_resp_body, "\"active\":true") != NULL, "reports active:true");
+    TEST_CHECK(strstr(s_resp_body, "\"origin_id\":2") != NULL, "reports origin_id");
+    TEST_CHECK(strstr(s_resp_body, "window violation") != NULL, "reports last_refusal message");
+}
+
+static void test_fork_refused_when_inactive(void)
+{
+    TEST_SECTION("POST /api/profile/live/fork -- 409 when nothing running");
+    reset_fakes();
+    httpd_req_t req = make_req(NULL);
+    esp_err_t err = api_profile_live_fork_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK (sendstr success)");
+    TEST_CHECK(strcmp(s_resp_status, "409 Conflict") == 0, "status is 409");
+}
+
+static void test_fork_success(void)
+{
+    TEST_SECTION("POST /api/profile/live/fork -- success, idempotent");
+    reset_fakes();
+    g_fake_live_status.active = true;
+    g_fake_live_status.profile_id = 0;
+    profiles_slot_set(0);
+    strncpy(g_fake_slots[0].name, "origin", sizeof(g_fake_slots[0].name) - 1);
+
+    httpd_req_t req = make_req(NULL);
+    esp_err_t err = api_profile_live_fork_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "first fork ok");
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL, "reports ok:true");
+
+    httpd_req_t req2 = make_req(NULL);
+    esp_err_t err2 = api_profile_live_fork_post_handler(&req2);
+    TEST_CHECK(err2 == ESP_OK, "second fork ok (idempotent)");
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL, "idempotent fork still reports ok:true");
+}
+
+static void test_accept_requires_active_and_forked(void)
+{
+    TEST_SECTION("POST /api/profile/live -- 409 when no active firing");
+    reset_fakes();
+    httpd_req_t req = make_req("body=ok");
+    esp_err_t err = api_profile_live_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strcmp(s_resp_status, "409 Conflict") == 0, "409 with nothing running");
+
+    TEST_SECTION("POST /api/profile/live -- 409 when not forked yet");
+    g_fake_live_status.active = true;
+    g_fake_live_status.profile_id = 0;
+    httpd_req_t req2 = make_req("body=ok");
+    esp_err_t err2 = api_profile_live_post_handler(&req2);
+    TEST_CHECK(err2 == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strcmp(s_resp_status, "409 Conflict") == 0, "409 without a fork");
+}
+
+static void fork_for_tests(uint8_t origin_id)
+{
+    g_fake_live_status.active = true;
+    g_fake_live_status.profile_id = origin_id;
+    g_fake_live_status.segment_index = 0;
+    profiles_slot_set(origin_id);
+    strncpy(g_fake_slots[origin_id].name, "origin", sizeof(g_fake_slots[origin_id].name) - 1);
+    httpd_req_t freq = make_req(NULL);
+    esp_err_t ferr = api_profile_live_fork_post_handler(&freq);
+    TEST_CHECK(ferr == ESP_OK, "fork_for_tests: fork ok");
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL, "fork_for_tests: fork reports ok");
+}
+
+static void test_accept_bad_parse_400(void)
+{
+    TEST_SECTION("POST /api/profile/live -- 400 on parse failure");
+    reset_fakes();
+    fork_for_tests(0);
+    g_fake_parse_ok = false;
+
+    httpd_req_t req = make_req("garbage");
+    esp_err_t err = api_profile_live_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strcmp(s_resp_status, "400 Bad Request") == 0, "400 on bad parse");
+}
+
+static void test_accept_bad_bound_400(void)
+{
+    TEST_SECTION("POST /api/profile/live -- 400 naming segment/value/limit on a bound violation");
+    reset_fakes();
+    fork_for_tests(0);
+
+    httpd_req_t req = make_req("body=badbound");
+    esp_err_t err = api_profile_live_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strcmp(s_resp_status, "400 Bad Request") == 0, "400 on bound violation");
+    TEST_CHECK(strstr(s_resp_body, "segment 0") != NULL, "err names the segment");
+}
+
+static void test_accept_success_200(void)
+{
+    TEST_SECTION("POST /api/profile/live -- 200 accept, working slot saved");
+    reset_fakes();
+    fork_for_tests(0);
+
+    httpd_req_t req = make_req("body=ok");
+    esp_err_t err = api_profile_live_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL, "200 with ok:true");
+
+    profile_t working;
+    TEST_CHECK(live_profile_load_working(&working), "working slot readable after accept");
+    TEST_CHECK(strcmp(working.name, "cand") == 0, "working slot holds the parsed candidate");
+}
+
+static void test_decide_nothing_pending_409(void)
+{
+    TEST_SECTION("POST /api/profile/live/decide -- 409 when nothing pending");
+    reset_fakes();
+    httpd_req_t req = make_req("action=discard");
+    esp_err_t err = api_profile_live_decide_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strcmp(s_resp_status, "409 Conflict") == 0, "409 nothing pending");
+}
+
+static void test_decide_discard(void)
+{
+    TEST_SECTION("POST /api/profile/live/decide -- discard clears the pending record");
+    reset_fakes();
+    fork_for_tests(0);
+
+    httpd_req_t req = make_req("action=discard");
+    esp_err_t err = api_profile_live_decide_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL, "discard reports ok:true");
+
+    live_edit_record_t rec;
+    TEST_CHECK(!live_profile_load_record(&rec) || !rec.pending, "record no longer pending after discard");
+}
+
+static void test_decide_save_as_missing_name_400(void)
+{
+    TEST_SECTION("POST /api/profile/live/decide -- save_as without name is 400");
+    reset_fakes();
+    fork_for_tests(0);
+    httpd_req_t req = make_req("action=save_as");
+    esp_err_t err = api_profile_live_decide_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strcmp(s_resp_status, "400 Bad Request") == 0, "400 missing name");
+}
+
+static void test_decide_save_as_success(void)
+{
+    TEST_SECTION("POST /api/profile/live/decide -- save_as into a free slot");
+    reset_fakes();
+    fork_for_tests(0);
+
+    httpd_req_t req = make_req("action=save_as&name=NewOne");
+    esp_err_t err = api_profile_live_decide_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL, "save_as ok:true");
+    TEST_CHECK(profiles_slot_used(1), "landed in the next free slot (0 is origin)");
+}
+
+static void test_decide_overwrite_builtin_403(void)
+{
+    TEST_SECTION("POST /api/profile/live/decide -- overwrite of a builtin origin is 403");
+    reset_fakes();
+    g_fake_builtin_on = true;
+    fork_for_tests(PROFILE_BUILTIN_ID_BASE);
+
+    httpd_req_t req = make_req("action=overwrite&confirm=1");
+    esp_err_t err = api_profile_live_decide_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strcmp(s_resp_status, "403 Forbidden") == 0, "403 on builtin overwrite");
+}
+
+static void test_decide_overwrite_missing_confirm_400(void)
+{
+    TEST_SECTION("POST /api/profile/live/decide -- overwrite without confirm=1 is 400");
+    reset_fakes();
+    fork_for_tests(0);
+
+    httpd_req_t req = make_req("action=overwrite");
+    esp_err_t err = api_profile_live_decide_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strcmp(s_resp_status, "400 Bad Request") == 0, "400 missing confirm");
+}
+
+static void test_decide_overwrite_success(void)
+{
+    TEST_SECTION("POST /api/profile/live/decide -- overwrite with confirm=1 succeeds");
+    reset_fakes();
+    fork_for_tests(0);
+
+    httpd_req_t req = make_req("action=overwrite&confirm=1");
+    esp_err_t err = api_profile_live_decide_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL, "overwrite ok:true");
+}
+
+static void test_decide_unknown_action_400(void)
+{
+    TEST_SECTION("POST /api/profile/live/decide -- unknown action is 400");
+    reset_fakes();
+    fork_for_tests(0);
+    httpd_req_t req = make_req("action=bogus");
+    esp_err_t err = api_profile_live_decide_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strcmp(s_resp_status, "400 Bad Request") == 0, "400 unknown action");
+}
+
+static void test_registration_registers_all_five_routes(void)
+{
+    TEST_SECTION("profiles_live_http_start() registers all five routes");
+    reset_fakes();
+    g_fake_register_count = 0;
+    esp_err_t err = profiles_live_http_start();
+    TEST_CHECK(err == ESP_OK, "start() returns ESP_OK");
+    TEST_CHECK(g_fake_register_count == 5, "exactly five routes registered");
+}
+
+static void test_registration_no_server(void)
+{
+    TEST_SECTION("profiles_live_http_start() fails cleanly with no server");
+    reset_fakes();
+    g_fake_no_server = true;
+    esp_err_t err = profiles_live_http_start();
+    TEST_CHECK(err != ESP_OK, "start() fails without a server");
+    g_fake_no_server = false;
+}
+
+int main(void)
+{
+    // fake_kv.c requires every partition to be explicitly initialized before
+    // hal_kv_open() will succeed -- same requirement test_live_profile.c's
+    // main() documents. LIVE_PROFILE_NVS_PARTITION's literal is duplicated
+    // here since that macro is private to live_profile.c.
+    hal_kv_init_partition("profiles_nvs");
+
+    test_get_status_inactive();
+    test_get_status_active_with_refusal();
+    test_fork_refused_when_inactive();
+    test_fork_success();
+    test_accept_requires_active_and_forked();
+    test_accept_bad_parse_400();
+    test_accept_bad_bound_400();
+    test_accept_success_200();
+    test_decide_nothing_pending_409();
+    test_decide_discard();
+    test_decide_save_as_missing_name_400();
+    test_decide_save_as_success();
+    test_decide_overwrite_builtin_403();
+    test_decide_overwrite_missing_confirm_400();
+    test_decide_overwrite_success();
+    test_decide_unknown_action_400();
+    test_registration_registers_all_five_routes();
+    test_registration_no_server();
+
+    printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
+    if (g_test_failures > 0) {
+        printf("%d FAILURE(S)\n", g_test_failures);
+        return 1;
+    }
+    return 0;
+}

@@ -51,6 +51,7 @@
 #include "unit_pref.h"
 #include "profiles_http.h"
 #include "profiles_export_http.h"
+#include "profiles_live_http.h"
 #include "log_http.h"
 #include "adaptive_tune.h"
 #include "adaptive_tune_http.h"
@@ -389,6 +390,14 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (profiles_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "profiles_http_start failed: %s -- no Profiles page this boot",
                  esp_err_to_name(profiles_err));
+    }
+    // docs/LIVE_PROFILE_EDIT_PLAN.md pass 2: must run after profiles_http_start()
+    // just above -- calls the same profiles_http_get()/profiles_http_save()
+    // seam.
+    esp_err_t profiles_live_err = profiles_live_http_start();
+    if (profiles_live_err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "profiles_live_http_start failed: %s -- no live profile editing this boot",
+                 esp_err_to_name(profiles_live_err));
     }
     // Must run AFTER profiles_http_start() just above -- see
     // profiles_export_http.h's own comment: both handlers read/write the
