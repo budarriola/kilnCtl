@@ -91,10 +91,10 @@ class SuiteTest(unittest.TestCase):
         # ST/FL/SK/SP prefix specifically rather than "all read-only before
         # all heat" (no longer true in nightly: OT-B01/OT-E* are read-only
         # yet legitimately run after the heat-originating HP-* block).
-        prefix_end = max(idx[c] for c in ids if R.get_case(c).area in ("ST", "FL", "SK", "SP") and c not in ("SK-02", "SP-03", "SP-06"))
+        prefix_end = max(idx[c] for c in ids if R.get_case(c).area in ("ST", "FL", "SK", "SP") and c not in ("SK-02", "SP-03", "SP-06", "SP-04"))
         heat_ids = [c for c in ids if R.get_case(c).heat]
         first_non_prefix = min(i for cid, i in idx.items() if cid not in (
-            "SK-02", "SP-03", "SP-06"
+            "SK-02", "SP-03", "SP-06", "SP-04", "SP-04"
         ) and R.get_case(cid).area not in ("ST", "FL", "SK", "SP"))
         self.assertLess(prefix_end, first_non_prefix)
         if heat_ids:
@@ -110,7 +110,10 @@ class SuiteTest(unittest.TestCase):
         self.assertLess(idx["HP-01"], idx["SK-02"])
         ot_ids = [c for c in ids if c.startswith("OT-")]
         self.assertTrue(ot_ids)
-        non_ot_ids = [c for c in ids if not c.startswith("OT-")]
+        # SP-04 is OT-B01's observer and deliberately sits inside the OTA
+        # block (right after OT-B01), so it is not part of the "everything
+        # else runs before the OTA block" set.
+        non_ot_ids = [c for c in ids if not c.startswith("OT-") and c != "SP-04"]
         self.assertLess(max(idx[c] for c in non_ot_ids), min(idx[c] for c in ot_ids))
         # SK-02's own dependency wiring, and each SP observer sits right
         # after the HP case it depends on (§5.2's "HP-01 (with ... SP-*
@@ -120,6 +123,8 @@ class SuiteTest(unittest.TestCase):
         self.assertEqual(R.get_case("SP-03").depends_on, "HP-02")
         self.assertEqual(idx["SP-06"], idx["HP-01"] + 1)
         self.assertEqual(idx["SP-03"], idx["HP-02"] + 1)
+        self.assertEqual(R.get_case("SP-04").depends_on, "OT-B01")
+        self.assertEqual(idx["SP-04"], idx["OT-B01"] + 1)
 
     def test_nightly_matches_plan_5_1_membership(self):
         """Plan §5.1's nightly membership, spelled out explicitly so a future
@@ -130,13 +135,14 @@ class SuiteTest(unittest.TestCase):
         expected = set(R.SUITES["smoke"]) | {
             "ST-01", "ST-02", "ST-03", "ST-04",
             "HP-01", "HP-02", "HP-04", "HP-05", "HP-06", "HP-08",
-            "SK-02", "SP-03", "SP-06",
+            "SK-02", "SP-03", "SP-06", "SP-04",
             "WEB-DASH-03", "WEB-DASH-06", "WEB-DASH-07", "WEB-DASH-09",
             "WEB-PROF-02", "WEB-PROF-03", "WEB-PROF-04", "WEB-PROF-05",
             "WEB-PROF-06", "WEB-PROF-07", "WEB-PROF-08", "WEB-PROF-09",
             "WEB-ZONE-02", "WEB-ZONE-03", "WEB-ZONE-05", "WEB-ZONE-09", "WEB-ZONE-12",
             "WEB-BAK-02", "WEB-BAK-03",
             "WEB-KCFG-02", "WEB-KCFG-03",
+            "WEB-DASH-13",
             "WEB-DIAG-07", "WEB-DIAG-08",
             "WEB-OTA-01", "WEB-OTA-02",
             "WEB-SEC-03",

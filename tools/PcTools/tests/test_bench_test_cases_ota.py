@@ -139,6 +139,34 @@ class Otb01Test(unittest.TestCase):
         result = C._case_otb01(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
 
+    def test_never_clears_a_trip_that_is_not_s6a(self):
+        """Plan doc section 6 rule 5: a trip whose reason/mask is not
+        exactly S6a (reason 6, mask 1 << 5) stops the run for a human --
+        safety_clear_trip() must NOT be called at all."""
+        called = {"v": False}
+        ctx = self._ctx(trip_reason=7, trip_mask=0x0040)
+
+        def clear_trip_fn():
+            called["v"] = True
+
+        ctx["_clear_trip_fn"] = clear_trip_fn
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertFalse(called["v"], "safety_clear_trip() was called on a non-S6a trip")
+        self.assertIsNone(ctx["_otb01"]["clear_ok"])
+
+    def test_never_clears_when_mask_has_extra_bits(self):
+        called = {"v": False}
+        ctx = self._ctx(trip_reason=6, trip_mask=0x0060)
+
+        def clear_trip_fn():
+            called["v"] = True
+
+        ctx["_clear_trip_fn"] = clear_trip_fn
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertFalse(called["v"], "safety_clear_trip() was called with extra trip bits set")
+
     def test_link_never_up_fails(self):
         ctx = self._ctx(link_up=False)
         result = C._case_otb01(ctx)

@@ -191,7 +191,17 @@ def _case_otb01(ctx: dict) -> CaseResult:
 
     clear_ok = None
     readiness_trip_ok = None
-    if link_up:
+    # Plan doc section 6 rule 5 / CLAUDE.md: NEVER clear a trip without first
+    # confirming, from safety_get_status()/get_diag(), that the link is up and
+    # trip_mask == 1 << (trip_reason - 1) with trip_reason == 6 and no other
+    # bit set. Anything else stops the run for a human -- the judge's own
+    # check runs too late to be that gate, since by then the clear already
+    # happened. A non-S6a trip therefore leaves clear_ok None and the judge
+    # FAILs on the reason/mask it observed.
+    clear_allowed = (
+        link_up and trip_reason == 6 and trip_mask == (1 << (6 - 1))
+    )
+    if clear_allowed:
         try:
             clear_trip_fn()
         except Exception:
