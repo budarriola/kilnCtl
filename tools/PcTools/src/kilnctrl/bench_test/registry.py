@@ -6,7 +6,7 @@ directions, so this module and the plan document cannot silently drift.
 Wave 0 only *implements* the read-only cases in the ``smoke`` suite (see
 ``cases_smoke.py``); ids from later waves are still declared here (with
 ``judge=None``, meaning "not implemented yet") so the registry-vs-doc check
-is honest about the whole 180-case matrix from day one rather than only
+is honest about the whole 203-case matrix from day one rather than only
 wave 0's slice of it.
 """
 from __future__ import annotations
@@ -241,6 +241,25 @@ for cid in _LCD_IDS:
 for cid, desc in _SP:
     register(_c(cid, "SP", desc, heat=(cid == "SP-09"), operator_only=cid in ("SP-08", "SP-09")))
 
+#: Fixed run-order ranks for `nightly`/`full` (plan §5.2): ST first, then
+#: FL (read-only), then the fixed SK-01/03/04 subset, then SP (read-only),
+#: then everything else, with the heat-originating areas (AT-*, HP-*) last
+#: of all -- never alphabetical, since that would run heat cases (AT-*)
+#: before read-only smoke-style checks (SK-*, SP-*, ST-*).
+_ORDER_RANK = {"ST": 0, "FL": 1, "SK": 2, "SP": 3}
+
+
+def _fixed_order(ids) -> List[str]:
+    """Sort `ids` by the §5.2 fixed order, not alphabetically. Every
+    heat-originating case (AT-*, HP-*, or any other case flagged
+    ``heat=True``, e.g. OT-E07/OT-E08) sorts after every read-only case
+    regardless of area; ties within a bucket fall back to plain id order."""
+    def key(cid: str) -> "tuple":
+        spec = REGISTRY[cid]
+        return (1 if spec.heat else 0, _ORDER_RANK.get(spec.area, 7), cid)
+    return sorted(ids, key=key)
+
+
 #: The suite names bench_test_run()/bench_test.ps1 accept. `smoke` is fully
 #: populated by cases_smoke.py below; `nightly`/`full` are declared per the
 #: plan's §5.1 membership but, in wave 0, only actually contain the subset
@@ -266,10 +285,10 @@ SUITES["safety"] = [c for c in REGISTRY if c.startswith("SP-")]
 # nightly/full memberships per plan §5.1 -- wave 0 only implements the
 # smoke subset, so running these today executes that subset and reports
 # NOT_RUN: not_implemented for the rest (see runner.py).
-SUITES["nightly"] = sorted(set(SUITES["smoke"]) | {
+SUITES["nightly"] = _fixed_order(set(SUITES["smoke"]) | {
     "ST-01", "ST-02", "ST-03", "ST-04",
     "HP-01", "HP-02", "HP-04", "HP-05", "HP-06", "HP-08",
     "SK-02", "SP-03", "SP-06",
     "OT-B01", "OT-E01", "OT-E02", "OT-E03", "OT-E12",
 })
-SUITES["full"] = sorted(REGISTRY.keys())
+SUITES["full"] = _fixed_order(REGISTRY.keys())

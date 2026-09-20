@@ -66,6 +66,30 @@ class SuiteTest(unittest.TestCase):
         self.assertTrue(all(c.startswith("WEB-") for c in R.SUITES["web"]))
         self.assertTrue(all(c.startswith("LCD-") for c in R.SUITES["lcd"]))
 
+    def test_full_suite_is_not_alphabetical_heat_cases_run_last(self):
+        """plan §5.2 fixed order: ST -> FL (read-only) -> SK-01/03/04 ->
+        SP (read-only) -> everything else -> AT-*/HP-* (heat) last. A plain
+        alphabetical sort would run AT-* before SK-*/SP-*/ST-*, which is
+        exactly what this order must avoid."""
+        ids = R.SUITES["full"]
+        self.assertNotEqual(ids, sorted(ids), "full suite must not be plain-alphabetical")
+        idx = {cid: i for i, cid in enumerate(ids)}
+        self.assertLess(idx["ST-05"], idx["FL-01"])
+        self.assertLess(idx["FL-01"], idx["SK-01"])
+        self.assertLess(idx["SK-01"], idx["SP-01"])
+        last_read_only = max(idx[c] for c in ids if not R.get_case(c).heat)
+        first_heat = min(idx[c] for c in ids if R.get_case(c).heat)
+        self.assertLess(last_read_only, first_heat, "every heat case (AT-*/HP-*) must run after every read-only case")
+
+    def test_nightly_suite_also_uses_the_fixed_order(self):
+        ids = R.SUITES["nightly"]
+        idx = {cid: i for i, cid in enumerate(ids)}
+        self.assertLess(idx["ST-05"], idx["FL-01"])
+        heat_ids = [c for c in ids if R.get_case(c).heat]
+        if heat_ids:
+            read_only_ids = [c for c in ids if not R.get_case(c).heat]
+            self.assertLess(max(idx[c] for c in read_only_ids), min(idx[c] for c in heat_ids))
+
 
 class HeatFlagTest(unittest.TestCase):
     def test_all_hp_cases_are_flagged_heat(self):
