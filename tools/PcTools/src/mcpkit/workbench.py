@@ -282,7 +282,7 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
     root = repo_root()
     saftyfw_report = None
     if target in ("build", "reconfigure") and not skip_saftyfw:
-        saftyfw_report = build_saftyfw()
+        saftyfw_report = build_saftyfw(jobs)
         saftyfw_ok = "saftyfw: OK" in saftyfw_report
         if not saftyfw_ok:
             return (

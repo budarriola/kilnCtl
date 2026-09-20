@@ -603,12 +603,10 @@ function Invoke-ChecksParallel {
     return $results
 }
 
-# THREE PHASES for the target builds (1a/1b), plus the rest (2) and the
-# serial-only UI sweep (3). This used to be a single flat "phase 1" that ran
-# all three target builds concurrently, on the same guarantee the original
-# strict-alphabetical serial order gave for free: every target build must
-# FINISH (and publish its artifacts into the shared firmware/*/build/
-# directories) before anything that reads those artifacts runs (the
+# Phase 1 runs all three full target builds concurrently, on the guarantee
+# the original strict-alphabetical serial order gave for free: every target
+# build must FINISH (and publish its artifacts into the shared firmware/*/
+# build/ directories) before anything that reads those artifacts runs (the
 # stack-budget checks, compile_esp_backends.ps1/compile_pico_backends.ps1,
 # check_saftyfw_task_count.ps1, check_recovery_image_size.ps1, etc.) -- those
 # consumers only SKIP on a MISSING artifact, not a STALE one, so if they ran
@@ -616,48 +614,37 @@ function Invoke-ChecksParallel {
 # artifact from a previous run instead of this one, same failure shape
 # check_00_kilnfw_target_build.ps1's own header documents.
 #
-# 2026-09-20: the KilnFW application build now EMBED_FILES SaftyFW's slot
-# images (firmware/SaftyFW/build/SaftyFW_slotA.bin/slotB.bin, produced as a
-# side effect of check_00_saftyfw_target_build.ps1) and fails at CMake
-# configure time if either is missing -- see docs/PICO_AUTO_UPDATE_PLAN.md.
-# That makes the two builds NOT independent any more: check_00_kilnfw_
-# target_build.ps1 must not start until check_00_saftyfw_target_build.ps1 has
-# actually finished and published its two .bin files, or it will either fail
-# outright (no prior SaftyFW build ever ran) or silently embed a stale pair
-# left over from an earlier run (same "grade a leftover artifact" trap as
-# above, just one build depending on another's output instead of a checker
-# reading it). check_00_kilnfw_recovery_target_build.ps1 has no such
-# dependency -- the recovery build does not embed anything -- so it stays
-# grouped with the KilnFW application build rather than the SaftyFW one.
+# 2026-09-20 (docs/PICO_AUTO_UPDATE_PLAN.md): the KilnFW application build
+# EMBED_FILES SaftyFW's slot images (SaftyFW_slotA.bin/slotB.bin) and fails
+# at CMake configure time if either is missing or stale. This briefly split
+# phase 1 into a serialized 1a (SaftyFW alone) / 1b (the two KilnFW builds)
+# because check_00_kilnfw_target_build.ps1 read those slot bins out of the
+# shared firmware/SaftyFW/build/ directory, the same "one build depending on
+# another's published output" hazard the paragraph above describes for
+# checkers reading a build's output. That split is no longer needed:
+# check_00_kilnfw_target_build.ps1 now builds the SaftyFW slot images it
+# embeds inside its OWN isolated checkbuild worktree rather than reading the
+# shared firmware/SaftyFW/build/ directory, so it no longer depends on
+# check_00_saftyfw_target_build.ps1 having run first or at all. All three
+# target builds are independent again (separate build dirs, separate
+# build_lock.ps1 mutex names) and run concurrently in one flat phase 1, same
+# as before the 2026-09-20 pass; everything else (all lint/drift/mirror/
+# host-test checks, which don't touch any target build's output) runs
+# throttled in phase 2. Checks that DO share a build directory among
+# themselves (e.g. two build_lock.ps1 users) still serialize correctly
+# within phase 2 via that same named mutex -- they just queue instead of
+# racing, exactly as build_lock.ps1's own header describes for two
+# concurrent manual runs.
 #
-# Shape chosen to keep as much concurrency as the dependency allows:
-#   Phase 1a: check_00_saftyfw_target_build.ps1 ALONE.
-#   Phase 1b: check_00_kilnfw_target_build.ps1 and check_00_kilnfw_recovery_
-#             target_build.ps1, concurrently with each other (they don't
-#             depend on one another, just both on 1a having finished).
-# The two KilnFW builds are independent of each other (separate build dirs,
-# separate build_lock.ps1 mutex names -- the recovery build doesn't embed, so
-# it can't race the app build's EMBED_FILES read of the same two .bin files
-# anyway) so they still run concurrently with each other in phase 1b;
-# everything else (all lint/drift/mirror/host-test checks, which don't touch
-# any target build's output) runs throttled in phase 2. Checks that DO share
-# a build directory among themselves (e.g. two build_lock.ps1 users) still
-# serialize correctly within phase 2 via that same named mutex -- they just
-# queue instead of racing, exactly as build_lock.ps1's own header describes
-# for two concurrent manual runs.
-#
-# check_00_kilnfw_recovery_target_build.ps1 (2026-09-17) is grouped into
-# phase 1b for the same "consumers only SKIP on missing, not stale" reason
-# above: it publishes firmware/KilnFW_recovery/build/recovery.bin, and
-# tools/check_recovery_image_size.ps1 (phase 2) only SKIPs on a MISSING
-# recovery.bin, not a stale or in-progress one -- if it ran concurrently with
-# this build it could read a partially-written file or silently fall back to
-# its old "not built yet" SKIP depending on scheduling.
-$saftyfwBuildCheck = $checks | Where-Object {
-    $_.FullName -match 'check_00_saftyfw_target_build\.ps1$'
-}
+# The main tree's own `build_kilnfw()` MCP tool (tools/PcTools/src/mcpkit/
+# workbench.py) is a SEPARATE path from this standing check and keeps its
+# own SaftyFW-then-KilnFW build ordering: it reads bins out of the shared,
+# non-isolated firmware/SaftyFW/build/ directory (there is no per-call
+# checkbuild worktree for that tool), so the same real dependency applies
+# there and that ordering was deliberately NOT reverted.
 $buildChecks = $checks | Where-Object {
     $_.FullName -match 'check_00_kilnfw_target_build\.ps1$' -or
+    $_.FullName -match 'check_00_saftyfw_target_build\.ps1$' -or
     $_.FullName -match 'check_00_kilnfw_recovery_target_build\.ps1$'
 }
 # check_ui_responsive_sweep.ps1 (2026-09-17, diagnosed): drives real headless
@@ -688,23 +675,18 @@ $restChecks = $restChecks | Where-Object {
 }
 
 $results = @()
-if ($saftyfwBuildCheck.Count -gt 0) {
-    Write-Host "Phase 1a/4: SaftyFW target build ($($saftyfwBuildCheck.Count)) -- must finish before phase 1b (KilnFW embeds its output)" -ForegroundColor Cyan
-    $results += Invoke-ChecksParallel -ChecksToRun $saftyfwBuildCheck -MaxParallel ([Math]::Max(1, $saftyfwBuildCheck.Count)) `
-        -RepoRoot $repoRoot -SelfcheckPy $selfcheckPy -SelfcheckPython $selfcheckPython -ScratchDir $scratchDir -SkipExitCode $SkipExitCode
-}
 if ($buildChecks.Count -gt 0) {
-    Write-Host "Phase 1b/4: KilnFW target builds ($($buildChecks.Count))" -ForegroundColor Cyan
+    Write-Host "Phase 1/3: full target builds ($($buildChecks.Count))" -ForegroundColor Cyan
     $results += Invoke-ChecksParallel -ChecksToRun $buildChecks -MaxParallel ([Math]::Max(1, $buildChecks.Count)) `
         -RepoRoot $repoRoot -SelfcheckPy $selfcheckPy -SelfcheckPython $selfcheckPython -ScratchDir $scratchDir -SkipExitCode $SkipExitCode
 }
 if ($restChecks.Count -gt 0) {
-    Write-Host "Phase 2/4: remaining checks ($($restChecks.Count))" -ForegroundColor Cyan
+    Write-Host "Phase 2/3: remaining checks ($($restChecks.Count))" -ForegroundColor Cyan
     $results += Invoke-ChecksParallel -ChecksToRun $restChecks -MaxParallel $MaxParallel `
         -RepoRoot $repoRoot -SelfcheckPy $selfcheckPy -SelfcheckPython $selfcheckPython -ScratchDir $scratchDir -SkipExitCode $SkipExitCode
 }
 if ($uiSweepChecks.Count -gt 0) {
-    Write-Host "Phase 3/4: serial-only checks ($($uiSweepChecks.Count))" -ForegroundColor Cyan
+    Write-Host "Phase 3/3: serial-only checks ($($uiSweepChecks.Count))" -ForegroundColor Cyan
     $results += Invoke-ChecksParallel -ChecksToRun $uiSweepChecks -MaxParallel 1 `
         -RepoRoot $repoRoot -SelfcheckPy $selfcheckPy -SelfcheckPython $selfcheckPython -ScratchDir $scratchDir -SkipExitCode $SkipExitCode
 }

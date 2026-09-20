@@ -142,7 +142,7 @@ def _write_slot(tmp_path, name, commit, dirty=False, extra=b"\xaa" * 64):
 
 def test_skip_when_bins_missing(tmp_path):
     result = fresh.check_slot_bins_fresh(
-        tmp_path / "SaftyFW_slotA.bin", tmp_path / "SaftyFW_slotB.bin", None, tmp_path,
+        tmp_path / "SaftyFW_slotA.bin", tmp_path / "SaftyFW_slotB.bin", tmp_path,
     )
     assert result.status == "SKIP"
 
@@ -150,7 +150,7 @@ def test_skip_when_bins_missing(tmp_path):
 def test_fail_on_unequal_length(tmp_path):
     a = _write_slot(tmp_path, "a.bin", "abc1234", extra=b"\xaa" * 64)
     b = _write_slot(tmp_path, "b.bin", "abc1234", extra=b"\xaa" * 65)
-    result = fresh.check_slot_bins_fresh(a, b, None, tmp_path)
+    result = fresh.check_slot_bins_fresh(a, b, tmp_path)
     assert result.status == "FAIL"
     assert "length" in result.message
 
@@ -159,7 +159,7 @@ def test_fail_on_byte_identical_slots(tmp_path):
     a = _write_slot(tmp_path, "a.bin", "abc1234")
     b = tmp_path / "b.bin"
     b.write_bytes(a.read_bytes())
-    result = fresh.check_slot_bins_fresh(a, b, None, tmp_path)
+    result = fresh.check_slot_bins_fresh(a, b, tmp_path)
     assert result.status == "FAIL"
     assert "identical" in result.message
 
@@ -167,7 +167,19 @@ def test_fail_on_byte_identical_slots(tmp_path):
 def test_fail_on_mismatched_commits_between_slots(tmp_path):
     a = _write_slot(tmp_path, "a.bin", "abc1234", extra=b"\xaa" * 64)
     b = _write_slot(tmp_path, "b.bin", "def5678", extra=b"\xbb" * 64)
-    result = fresh.check_slot_bins_fresh(a, b, None, tmp_path)
+    result = fresh.check_slot_bins_fresh(a, b, tmp_path)
+    assert result.status == "FAIL"
+    assert "disagree" in result.message
+
+
+def test_fail_on_mismatched_config_format_version_between_slots(tmp_path):
+    """D5: slot agreement must also cover config_format_version, not just
+    commit/dirty -- a swapped-schema pair could otherwise pass."""
+    a = tmp_path / "a.bin"
+    b = tmp_path / "b.bin"
+    a.write_bytes(b"\xaa" * 64 + _make_record("abc1234", config_format_version=2) + b"\xaa" * 64)
+    b.write_bytes(b"\xbb" * 64 + _make_record("abc1234", config_format_version=3) + b"\xbb" * 64)
+    result = fresh.check_slot_bins_fresh(a, b, tmp_path)
     assert result.status == "FAIL"
     assert "disagree" in result.message
 
@@ -175,8 +187,8 @@ def test_fail_on_mismatched_commits_between_slots(tmp_path):
 def test_dirty_flag_warns_not_fails(tmp_path):
     a = _write_slot(tmp_path, "a.bin", "abc1234", dirty=True, extra=b"\xaa" * 64)
     b = _write_slot(tmp_path, "b.bin", "abc1234", dirty=True, extra=b"\xbb" * 64)
-    result = fresh.check_slot_bins_fresh(a, b, None, tmp_path)
-    assert result.status == "PASS"
+    result = fresh.check_slot_bins_fresh(a, b, tmp_path)
+    assert result.status == "WARN"
     assert "DIRTY" in result.message
 
 
@@ -184,66 +196,22 @@ def test_skip_when_git_unavailable(tmp_path, monkeypatch):
     a = _write_slot(tmp_path, "a.bin", "abc1234", extra=b"\xaa" * 64)
     b = _write_slot(tmp_path, "b.bin", "abc1234", extra=b"\xbb" * 64)
     monkeypatch.setattr(fresh, "git_short_head", lambda repo_root: None)
-    result = fresh.check_slot_bins_fresh(a, b, None, tmp_path)
+    result = fresh.check_slot_bins_fresh(a, b, tmp_path)
     assert result.status == "SKIP"
 
 
 def test_stale_record_fails(tmp_path, monkeypatch):
     """Negative test: a record whose commit does NOT match HEAD must FAIL,
     not silently pass. Without this, a stale-but-present record (the exact
-    hazard this check exists to catch -- KilnFW embedding an old SaftyFW
-    build) would read as healthy."""
+    hazard this check exists to catch -- SaftyFW slot bins built from an
+    older commit than the current tree) would read as healthy."""
     a = _write_slot(tmp_path, "a.bin", "stale01", extra=b"\xaa" * 64)
     b = _write_slot(tmp_path, "b.bin", "stale01", extra=b"\xbb" * 64)
     monkeypatch.setattr(fresh, "git_short_head", lambda repo_root: "fresh99")
-    result = fresh.check_slot_bins_fresh(a, b, None, tmp_path)
+    result = fresh.check_slot_bins_fresh(a, b, tmp_path)
     assert result.status == "FAIL"
     assert "stale01" in result.message
     assert "fresh99" in result.message
-
-
-def test_skip_when_kilnctrl_bin_missing(tmp_path, monkeypatch):
-    a = _write_slot(tmp_path, "a.bin", "abc1234", extra=b"\xaa" * 64)
-    b = _write_slot(tmp_path, "b.bin", "abc1234", extra=b"\xbb" * 64)
-    monkeypatch.setattr(fresh, "git_short_head", lambda repo_root: "abc1234")
-    result = fresh.check_slot_bins_fresh(a, b, tmp_path / "KilnCtrl.bin", tmp_path)
-    assert result.status == "SKIP"
-
-
-def test_fail_when_kilnctrl_bin_has_no_record(tmp_path, monkeypatch):
-    a = _write_slot(tmp_path, "a.bin", "abc1234", extra=b"\xaa" * 64)
-    b = _write_slot(tmp_path, "b.bin", "abc1234", extra=b"\xbb" * 64)
-    kiln = tmp_path / "KilnCtrl.bin"
-    kiln.write_bytes(b"\x00" * 2000)
-    monkeypatch.setattr(fresh, "git_short_head", lambda repo_root: "abc1234")
-    result = fresh.check_slot_bins_fresh(a, b, kiln, tmp_path)
-    assert result.status == "FAIL"
-    assert "no saftyfw_image_identity_t record" in result.message
-
-
-def test_fail_when_kilnctrl_bin_embeds_stale_identity(tmp_path, monkeypatch):
-    a = _write_slot(tmp_path, "a.bin", "abc1234", extra=b"\xaa" * 64)
-    b = _write_slot(tmp_path, "b.bin", "abc1234", extra=b"\xbb" * 64)
-    kiln = tmp_path / "KilnCtrl.bin"
-    # KilnCtrl.bin embeds an OLDER build than the freshly-rebuilt slot bins.
-    kiln.write_bytes(b"\x00" * 500 + _make_record("oldbuild") + b"\x00" * 500)
-    monkeypatch.setattr(fresh, "git_short_head", lambda repo_root: "abc1234")
-    result = fresh.check_slot_bins_fresh(a, b, kiln, tmp_path)
-    assert result.status == "FAIL"
-    assert "stale" in result.message
-
-
-def test_pass_when_kilnctrl_bin_embeds_both_slots(tmp_path, monkeypatch):
-    a = _write_slot(tmp_path, "a.bin", "abc1234", extra=b"\xaa" * 64)
-    b = _write_slot(tmp_path, "b.bin", "abc1234", extra=b"\xbb" * 64)
-    kiln = tmp_path / "KilnCtrl.bin"
-    kiln.write_bytes(
-        b"\x00" * 300 + _make_record("abc1234", dirty=False)
-        + b"\x00" * 300 + _make_record("abc1234", dirty=False) + b"\x00" * 300
-    )
-    monkeypatch.setattr(fresh, "git_short_head", lambda repo_root: "abc1234")
-    result = fresh.check_slot_bins_fresh(a, b, kiln, tmp_path)
-    assert result.status == "PASS"
 
 
 def test_git_short_head_real_repo_matches_git_cli():

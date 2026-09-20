@@ -1,6 +1,6 @@
-# check_embedded_pico_image_fresh.ps1 -- proves the SaftyFW slot images
-# embedded into the KilnFW application build are the ones the current
-# SaftyFW source tree actually produces, not a stale leftover pair.
+# check_embedded_pico_image_fresh.ps1 -- proves the two SaftyFW slot images
+# the KilnFW application build embeds are a matched, current pair, not a
+# stale or mismatched one.
 #
 # BACKGROUND (docs/PICO_AUTO_UPDATE_PLAN.md, 2026-09-20 owner decision): the
 # KilnFW application now EMBED_FILES two SaftyFW slot images
@@ -14,38 +14,52 @@
 #   2. they are equal length (position-dependent linking, same source);
 #   3. they are NOT byte-identical (they must differ -- same source, two
 #      different link addresses);
-#   4. each carries exactly one valid identity record, and the two records
-#      agree with each other;
-#   5. the record's commit matches the current repo HEAD (`git rev-parse
+#   4. each carries exactly one valid identity record;
+#   5. the two records agree with each other -- commit, dirty flag, AND
+#      config_format_version (D5: a schema mismatch between slots is just
+#      as real a defect as a commit mismatch, and used to slip through);
+#   6. the record's commit matches the current repo HEAD (`git rev-parse
 #      --short HEAD`, the same invocation SaftyFW's own build stamps with) --
-#      UNLESS the record's `dirty` flag is set, in which case this step
-#      WARNS but still PASSES (a deliberately dirty local build is not a
-#      staleness bug);
-#   6. firmware/KilnFW/build/KilnCtrl.bin actually embeds a matching record
-#      (catching a KilnFW build that is stale relative to a freshly rebuilt
-#      SaftyFW, even though the SaftyFW bins themselves are current).
+#      UNLESS the record's `dirty` flag is set, in which case this step is
+#      skipped and the check reports WARN instead of PASS (a deliberately
+#      dirty local build is not a staleness bug, but it is worth flagging
+#      visibly rather than reading as an ordinary silent PASS -- see D3).
+#
+# OUT OF SCOPE (opus review 2026-09-20, D1): this check does NOT look at
+# firmware/KilnFW/build/KilnCtrl.bin's own embedded copy of the record.
+# check_00_kilnfw_target_build.ps1 builds in an isolated
+# `C:\wt\checkbuild_*` worktree, so the in-tree KilnCtrl.bin this standing
+# check would otherwise read is whatever a previous, unrelated build left
+# behind -- comparing against it would FAIL on an ordinary healthy tree
+# whenever that leftover .bin was stale or missing, for reasons having
+# nothing to do with whether the slot bins themselves are fresh. The
+# KilnCtrl.bin-embedding comparison still exists, but only as a best-effort
+# provenance note at actual flash time (`_pico_image_provenance_note()` in
+# tools/PcTools/src/kilnctrl/mcp_server_flash.py), never as a standing gate.
+#
+# KNOWN LIMITATION (D4): the identity record carries no slot indicator, so
+# this check cannot detect slotA and slotB content being swapped between the
+# two output files (a swapped pair still agrees on every field this check
+# can see) -- see pico_image_freshness.py's module docstring.
 #
 # All the actual parsing/comparison logic lives in the importable, unit-
 # tested tools/PcTools/src/kilnctrl/pico_image_freshness.py -- this wrapper
 # only locates files and a Python interpreter and prints the verdict, same
 # split as check_httpd_task_stack_budget.ps1/.py.
 #
-# SKIP CONTRACT (exit 3, run_all_checks.ps1's reserved SKIP status): this
-# check SKIPS -- does not PASS -- when the SaftyFW slot bins do not exist yet
-# (SaftyFW hasn't been built) or when KilnCtrl.bin doesn't exist yet (KilnFW
-# hasn't been built) or git is unavailable. This worktree, minted before the
-# other two agents' firmware changes landed, has neither the objcopy step
-# nor the EMBED_FILES wiring yet -- SKIP here is the correct, expected
-# result until those land, not a bug in this check.
+# STATUS CONTRACT: this check can print PASS, WARN (a visible warning line,
+# still exit 0 -- distinct from a silent PASS whose message merely mentions
+# "WARNING", per D3), FAIL (exit 1), or SKIP (exit 3, run_all_checks.ps1's
+# reserved SKIP status) when the SaftyFW slot bins do not exist yet
+# (SaftyFW hasn't been built) or git is unavailable.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File firmware\KilnFW\App\test\check_embedded_pico_image_fresh.ps1
-#   ... -SlotABin <path> -SlotBBin <path> -KilnCtrlBin <path>   # point at another build/worktree
+#   ... -SlotABin <path> -SlotBBin <path>   # point at another build/worktree
 
 param(
     [string]$SlotABin,
-    [string]$SlotBBin,
-    [string]$KilnCtrlBin
+    [string]$SlotBBin
 )
 
 $ErrorActionPreference = "Stop"
@@ -53,7 +67,6 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..\..")).Path
 
 if (-not $SlotABin) { $SlotABin = Join-Path $repoRoot "firmware\SaftyFW\build\SaftyFW_slotA.bin" }
 if (-not $SlotBBin) { $SlotBBin = Join-Path $repoRoot "firmware\SaftyFW\build\SaftyFW_slotB.bin" }
-if (-not $KilnCtrlBin) { $KilnCtrlBin = Join-Path $repoRoot "firmware\KilnFW\build\KilnCtrl.bin" }
 
 # Same venv-or-PATH-fallback pattern as check_bench_test_registry.ps1: a
 # worktree checkout has no venv of its own (gitignored, per-clone), so this
@@ -79,22 +92,19 @@ import sys
 repo_root = sys.argv[1]
 slot_a = sys.argv[2]
 slot_b = sys.argv[3]
-kilnctrl_bin = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else None
 
 sys.path.insert(0, repo_root + r"\tools\PcTools\src")
 from pathlib import Path
 from kilnctrl import pico_image_freshness as fresh
 
-result = fresh.check_slot_bins_fresh(
-    Path(slot_a), Path(slot_b),
-    Path(kilnctrl_bin) if kilnctrl_bin else None,
-    Path(repo_root),
-)
+result = fresh.check_slot_bins_fresh(Path(slot_a), Path(slot_b), Path(repo_root))
 print(f"{result.status}: {result.message}")
 if result.status == "SKIP":
     sys.exit(3)
 elif result.status == "FAIL":
     sys.exit(1)
+elif result.status == "WARN":
+    sys.exit(2)
 else:
     sys.exit(0)
 '@
@@ -102,9 +112,17 @@ else:
 $tmpPy = Join-Path $env:TEMP "check_embedded_pico_image_fresh_$PID.py"
 Set-Content -Path $tmpPy -Value $pyScript -Encoding utf8
 try {
-    & $python $tmpPy $repoRoot $SlotABin $SlotBBin $KilnCtrlBin
+    $output = & $python $tmpPy $repoRoot $SlotABin $SlotBBin
     $code = $LASTEXITCODE
 } finally {
     Remove-Item -ErrorAction SilentlyContinue $tmpPy
 }
+if ($code -eq 2) {
+    # WARN (D3): print visibly as a warning, distinct from a silent PASS
+    # whose message merely happens to mention "WARNING", but still exit 0 --
+    # a dirty local build is not a failure.
+    foreach ($line in $output) { Write-Warning $line }
+    exit 0
+}
+$output | Write-Host
 exit $code

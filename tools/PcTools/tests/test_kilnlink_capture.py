@@ -562,6 +562,92 @@ def test_link_device_enum_matches_uart_proto_device_t():
     assert "SAFETY" not in Device.__members__
 
 
+UPDATE_TASK_C = REPO_ROOT / "firmware" / "SaftyFW" / "src" / "tasks" / "update_task.c"
+LINK_FRAME_H = REPO_ROOT / "firmware" / "SaftyFW" / "src" / "tasks" / "link_frame.h"
+
+
+def test_update_wire_format_matches_saftyfw_source():
+    """Opus review 2026-09-20 drift guard: kilnlink_capture.py's hand-copied
+    UPDATE_STATE_NAMES, UPDATE_ERR_BITS, CMD_NAMES[0x10..0x14] and its
+    assumed UPDATE_STATUS header length are mirrors of
+    firmware/SaftyFW/src/tasks/update_task.c's update_task_wire_state_t /
+    UPDATE_STATUS_ERR_* / UPDATE_STATUS_HEADER_LEN and
+    firmware/SaftyFW/src/tasks/link_frame.h's LINK_FRAME_UPDATE_*_CMD --
+    none of these are in firmware/CommonFW/include/kilnlink/, so they fall
+    outside test_cmd_names_covers_every_kilnlink_cmd_id_defined_in_firmware
+    above and would otherwise drift silently. Fails hard (never skips) if
+    either source file goes missing, same policy as the other drift guards
+    in this section."""
+    assert UPDATE_TASK_C.is_file(), f"missing firmware source at {UPDATE_TASK_C}"
+    assert LINK_FRAME_H.is_file(), f"missing firmware header at {LINK_FRAME_H}"
+    update_task_text = UPDATE_TASK_C.read_text(encoding="utf-8", errors="replace")
+    link_frame_text = LINK_FRAME_H.read_text(encoding="utf-8", errors="replace")
+
+    # CMD_NAMES[0x10..0x14] vs LINK_FRAME_UPDATE_*_CMD.
+    cmd_defines = dict(
+        (name, int(hexval, 16))
+        for name, hexval in re.findall(
+            r"#define\s+LINK_FRAME_UPDATE_([A-Z]+)_CMD\s+0x([0-9A-Fa-f]+)u?",
+            link_frame_text,
+        )
+    )
+    assert cmd_defines, "parsed no LINK_FRAME_UPDATE_*_CMD defines from link_frame.h"
+    expected_cmd_names = {
+        cmd_defines["BEGIN"]: "UPDATE_BEGIN",
+        cmd_defines["DATA"]: "UPDATE_DATA",
+        cmd_defines["END"]: "UPDATE_END",
+        cmd_defines["ABORT"]: "UPDATE_ABORT",
+        cmd_defines["STATUS"]: "UPDATE_STATUS",
+    }
+    for cmd_id, name in expected_cmd_names.items():
+        assert kc.CMD_NAMES.get(cmd_id) == name, (
+            f"CMD_NAMES[0x{cmd_id:02X}] = {kc.CMD_NAMES.get(cmd_id)!r}, "
+            f"expected {name!r} per link_frame.h"
+        )
+
+    # UPDATE_STATE_NAMES vs update_task_wire_state_t.
+    state_block_m = re.search(
+        r"typedef enum \{(.*?)\}\s*update_task_wire_state_t;", update_task_text, re.DOTALL
+    )
+    assert state_block_m, "update_task_wire_state_t enum body not found in update_task.c"
+    state_body = re.sub(r"//.*", "", state_block_m.group(1))
+    state_entries = re.findall(
+        r"UPDATE_TASK_STATE_([A-Z_]+)\s*(?:=\s*(\d+))?", state_body
+    )
+    expected_states: dict[int, str] = {}
+    next_val = 0
+    for name, explicit in state_entries:
+        val = int(explicit) if explicit else next_val
+        expected_states[val] = name
+        next_val = val + 1
+    assert expected_states, "parsed no UPDATE_TASK_STATE_* entries from update_task.c"
+    assert kc.UPDATE_STATE_NAMES == expected_states, (
+        f"UPDATE_STATE_NAMES {kc.UPDATE_STATE_NAMES} has drifted from "
+        f"update_task_wire_state_t {expected_states}"
+    )
+
+    # UPDATE_ERR_BITS vs UPDATE_STATUS_ERR_* bitmask defines.
+    err_defines = re.findall(
+        r"#define\s+UPDATE_STATUS_ERR_([A-Z_]+)\s+\(1u\s*<<\s*(\d+)\)",
+        update_task_text,
+    )
+    assert err_defines, "parsed no UPDATE_STATUS_ERR_* defines from update_task.c"
+    expected_err_bits = [(1 << int(shift), name) for name, shift in err_defines]
+    expected_err_bits.sort(key=lambda pair: pair[0])
+    assert kc.UPDATE_ERR_BITS == expected_err_bits, (
+        f"UPDATE_ERR_BITS {kc.UPDATE_ERR_BITS} has drifted from "
+        f"UPDATE_STATUS_ERR_* {expected_err_bits}"
+    )
+
+    # 16-byte UPDATE_STATUS header length, used by kc._decode_update_status.
+    header_len_m = re.search(r"#define\s+UPDATE_STATUS_HEADER_LEN\s+(\d+)u?", update_task_text)
+    assert header_len_m, "UPDATE_STATUS_HEADER_LEN not found in update_task.c"
+    assert int(header_len_m.group(1)) == 16, (
+        "UPDATE_STATUS_HEADER_LEN in update_task.c is no longer 16 -- "
+        "kc._decode_update_status's fixed header parsing assumes exactly 16"
+    )
+
+
 def test_task_ids_are_the_protocol_modules_own_not_a_local_copy():
     from kilnctrl import protocol
 

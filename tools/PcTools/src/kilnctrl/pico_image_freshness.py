@@ -20,6 +20,28 @@ own "NO FIXED OFFSET, DELIBERATELY" comment. This module does the same scan
 independently (does not call into any C code) so a corrupted or absent
 record in a real .bin is caught exactly the way a real board's boot-time
 scanner would see it.
+
+Known limitation (opus review 2026-09-20, D4): the identity record carries
+no slot indicator (slot A vs. slot B). ``check_slot_bins_fresh`` compares
+the two slot .bin files by commit/dirty/config_format_version only -- it
+cannot detect a build that wrote the same slot's image to both output
+paths, or a swap of slotA/slotB content between the two files, since a
+swapped pair still agrees on every field this module can see. That defect
+class needs a slot indicator added to the record itself to catch
+mechanically; it is not caught today.
+
+Scope (opus review 2026-09-20, D1): this module only checks the two
+SaftyFW slot .bin files against each other and against repo HEAD. It does
+NOT compare against the KilnFW application .bin's embedded copy of the
+record -- ``check_00_kilnfw_target_build.ps1`` builds in an isolated
+checkbuild worktree under C:/wt/, so ``firmware/KilnFW/build/KilnCtrl.bin``
+in the main tree is whatever was built there most recently, not necessarily
+fresh, and the standing suite would FAIL on an otherwise healthy tree
+whenever that in-tree .bin happened to be stale or absent. The
+embedded-in-KilnCtrl.bin comparison still exists, but only in the
+flash-time path (`_pico_image_provenance_note()` in mcp_server_flash.py),
+where it is a best-effort provenance note on an actual flash, not a
+standing pass/fail gate.
 """
 from __future__ import annotations
 
@@ -54,7 +76,6 @@ _STRUCT_FMT = "<IIHBB%dsHHI" % COMMIT_MAX
 assert struct.calcsize(_STRUCT_FMT) == RECORD_SIZE
 
 SCAN_STEP = 4
-SCAN_OVERLAP = RECORD_SIZE - SCAN_STEP
 
 
 @dataclasses.dataclass(frozen=True)
@@ -151,15 +172,17 @@ class FreshnessResult:
     message: str
 
 
-def check_slot_bins_fresh(
-    slot_a: Path, slot_b: Path, kilnctrl_bin: Optional[Path], repo_root: Path,
-) -> FreshnessResult:
-    """The whole check, as one importable, testable function. `kilnctrl_bin`
-    may be None or absent (SKIP for that half only when the KilnFW build
-    itself is what's missing, not a FAIL -- see check_embedded_pico_image_
-    fresh.ps1's own SKIP contract)."""
+def check_slot_bins_fresh(slot_a: Path, slot_b: Path, repo_root: Path) -> FreshnessResult:
+    """The whole check, as one importable, testable function.
+
+    Scope (D1): compares the two SaftyFW slot .bin files against each other
+    and against repo HEAD only. Does NOT look at KilnFW's application .bin
+    at all -- that comparison lives only in the flash-time provenance note
+    (`_pico_image_provenance_note()` in mcp_server_flash.py); see this
+    module's docstring for why it does not belong in this standing check.
+    """
     if not slot_a.exists() or not slot_b.exists():
-        return FreshnessResult("SKIP", "SKIP: SaftyFW slot bins not built yet "
+        return FreshnessResult("SKIP", "SaftyFW slot bins not built yet "
                                         f"({slot_a} / {slot_b})")
 
     a_bytes = slot_a.read_bytes()
@@ -189,24 +212,33 @@ def check_slot_bins_fresh(
     except (IdentityNotFound, MultipleIdentitiesFound) as exc:
         return FreshnessResult("FAIL", f"slotB identity record invalid: {exc}")
 
-    if ident_a.commit != ident_b.commit or ident_a.dirty != ident_b.dirty:
+    if (ident_a.commit != ident_b.commit or ident_a.dirty != ident_b.dirty
+            or ident_a.config_format_version != ident_b.config_format_version):
         return FreshnessResult(
             "FAIL",
-            f"slotA identity ({ident_a.commit}, dirty={ident_a.dirty}) and "
-            f"slotB identity ({ident_b.commit}, dirty={ident_b.dirty}) "
-            "disagree -- both slots must be built from the same commit.",
+            f"slotA identity ({ident_a.commit}, dirty={ident_a.dirty}, "
+            f"config_format_version={ident_a.config_format_version}) and "
+            f"slotB identity ({ident_b.commit}, dirty={ident_b.dirty}, "
+            f"config_format_version={ident_b.config_format_version}) "
+            "disagree -- both slots must be built from the same commit and "
+            "config schema.",
         )
 
     if ident_a.dirty:
+        # Only the HEAD comparison below is skipped for a dirty build (a
+        # dirty working tree's commit is not meaningfully comparable to
+        # HEAD) -- there is no other remaining step to fall through to
+        # since the KilnCtrl.bin embedding comparison (D1) no longer lives
+        # in this function.
         return FreshnessResult(
-            "PASS",
+            "WARN",
             f"SaftyFW slot images carry a DIRTY build (commit {ident_a.commit}) "
             "-- WARNING only, not a failure, per the dirty-flag carve-out.",
         )
 
     head = git_short_head(repo_root)
     if head is None:
-        return FreshnessResult("SKIP", "SKIP: could not resolve `git rev-parse --short HEAD`")
+        return FreshnessResult("SKIP", "could not resolve `git rev-parse --short HEAD`")
 
     if ident_a.commit != head:
         return FreshnessResult(
@@ -217,36 +249,9 @@ def check_slot_bins_fresh(
             "embeds it.",
         )
 
-    if kilnctrl_bin is None or not kilnctrl_bin.exists():
-        return FreshnessResult("SKIP", "SKIP: KilnCtrl.bin not built yet "
-                                        f"({kilnctrl_bin})")
-
-    kiln_bytes = kilnctrl_bin.read_bytes()
-    embedded = find_all_identities(kiln_bytes)
-    distinct = {(r.record_version, r.dirty, r.commit, r.config_format_version) for r in embedded}
-    if not distinct:
-        return FreshnessResult(
-            "FAIL",
-            "KilnCtrl.bin carries no saftyfw_image_identity_t record at all "
-            "-- the SaftyFW slot images were not embedded (or EMBED_FILES "
-            "was silently dropped).",
-        )
-    # KilnCtrl.bin legitimately embeds BOTH slot A and slot B, so up to two
-    # distinct records are expected there (unlike the single-slot .bin
-    # files above) -- what matters is that every one found matches the
-    # freshly-built slot identity, not that there is only one.
-    if (ident_a.record_version, ident_a.dirty, ident_a.commit, ident_a.config_format_version) not in distinct:
-        return FreshnessResult(
-            "FAIL",
-            f"KilnCtrl.bin's embedded SaftyFW identity/identities {sorted(distinct)} "
-            f"do not include the freshly built slot identity (commit "
-            f"{ident_a.commit}, dirty={ident_a.dirty}) -- the KilnFW build "
-            "is stale relative to the SaftyFW build. Rebuild KilnFW "
-            "(check_00_kilnfw_target_build.ps1).",
-        )
-
     return FreshnessResult(
         "PASS",
-        f"SaftyFW slot images and KilnCtrl.bin all agree on commit {ident_a.commit} "
-        f"(dirty={ident_a.dirty}), matching repo HEAD.",
+        f"SaftyFW slot images agree on commit {ident_a.commit} "
+        f"(dirty={ident_a.dirty}, config_format_version={ident_a.config_format_version}), "
+        "matching repo HEAD.",
     )

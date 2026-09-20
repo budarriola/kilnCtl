@@ -726,7 +726,8 @@ def _pico_image_provenance_note(app_bin_path: str) -> str:
     try:
         if not os.path.isfile(app_bin_path):
             return f"pico image: no embedded SaftyFW identity (app binary not found: {app_bin_path})"
-        data = open(app_bin_path, "rb").read()
+        with open(app_bin_path, "rb") as f:
+            data = f.read()
         records = pico_image_freshness.find_all_identities(data)
     except Exception as exc:  # noqa: BLE001 - provenance note must never block a flash
         return f"pico image: could not inspect embedded SaftyFW identity ({exc})"

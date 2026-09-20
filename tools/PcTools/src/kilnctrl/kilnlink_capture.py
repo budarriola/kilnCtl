@@ -121,6 +121,14 @@ CMD_NAMES: dict[int, str] = {
     0x0D: "TRIP_EVENT (Frame D)",
     0x0E: "POWER (Frame E)",
     0x0F: "ANNOUNCE_VERSION",
+    # Pico firmware-update relay frames (firmware/SaftyFW/src/tasks/link_frame.h
+    # LINK_FRAME_UPDATE_*_CMD -- NOT firmware/CommonFW/include/kilnlink/, so
+    # these are outside the KILNLINK_*_CMD drift-guard test below).
+    0x10: "UPDATE_BEGIN",
+    0x11: "UPDATE_DATA",
+    0x12: "UPDATE_END",
+    0x13: "UPDATE_ABORT",
+    0x14: "UPDATE_STATUS",
     0x16: "SET_CONFIG",
     0x17: "ROLLBACK",
     0x18: "ANNOUNCE_REBOOT",
@@ -145,15 +153,12 @@ CMD_NAMES: dict[int, str] = {
     0x2B: "GET_STACK_MARGIN",
     0x2C: "STACK_MARGIN",
     0x2D: "APPLY_CONFIG_VOLATILE",
-    # Pico firmware-update relay frames (firmware/SaftyFW/src/tasks/link_frame.h
-    # LINK_FRAME_UPDATE_*_CMD -- NOT firmware/CommonFW/include/kilnlink/, so
-    # these are outside the KILNLINK_*_CMD drift-guard test below).
-    0x10: "UPDATE_BEGIN",
-    0x11: "UPDATE_DATA",
-    0x12: "UPDATE_END",
-    0x13: "UPDATE_ABORT",
-    0x14: "UPDATE_STATUS",
 }
+# Every KILNLINK_*_CMD id defined in firmware/CommonFW/include/kilnlink/ must
+# appear above; tests/test_kilnlink_capture.py parses those headers and fails
+# if one is missing, so a new firmware command cannot silently decode as
+# UNKNOWN(0x..) here. Ids without a structured decoder below still get their
+# name plus a raw hex payload dump, which is the deliberate fallback.
 
 #: update_task_wire_state_t (firmware/SaftyFW/src/tasks/update_task.c),
 #: mirrored -- same reasoning as CMD_NAMES/LogLevel above: a real board can
@@ -190,11 +195,6 @@ UPDATE_ERR_BITS: "list[tuple[int, str]]" = [
     (1 << 6, "CRC_MISMATCH"),
     (1 << 7, "INTERNAL"),
 ]
-# Every KILNLINK_*_CMD id defined in firmware/CommonFW/include/kilnlink/ must
-# appear above; tests/test_kilnlink_capture.py parses those headers and fails
-# if one is missing, so a new firmware command cannot silently decode as
-# UNKNOWN(0x..) here. Ids without a structured decoder below still get their
-# name plus a raw hex payload dump, which is the deliberate fallback.
 
 
 # ---------------------------------------------------------------------------
