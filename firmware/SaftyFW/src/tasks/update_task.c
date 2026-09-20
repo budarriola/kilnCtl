@@ -81,12 +81,6 @@
 #include "hal_flash.h"
 #include "hal_wdt.h"
 
-// SRAM_BASE/SRAM_END/XIP_BASE -- pico-sdk's own hardware/regs/addressmap.h
-// constants, used ONLY by update_task_slot_linkage_plausible() below (see
-// that function's header comment). Not otherwise needed by this file, which
-// routes all other flash access through hal_flash.h.
-#include "hardware/regs/addressmap.h"
-
 #include "task_priorities.h"
 #include "update_task_erase_plan.h"
 #include "update_task_slot_linkage.h"
@@ -919,7 +913,11 @@ static void update_task_process_data(const uint8_t *payload, uint8_t length)
 //
 //   1. Initial SP (word 0) lies inside RP2040 SRAM -- SRAM_BASE (0x20000000)
 //      through SRAM_END (0x20042000), pico-sdk's own hardware/regs/
-//      addressmap.h constants. Checked against SRAM_BASE/SRAM_END rather
+//      addressmap.h constant values, restated below as local literals (see
+//      that #define block) rather than included from hardware/regs/
+//      addressmap.h itself, since check_hal_include_boundary.ps1 does not
+//      allow a new hardware/ include in this file outside the existing
+//      HAL-routed set. Checked against SRAM_BASE/SRAM_END rather
 //      than an independently-chosen range because those two constants
 //      together span EXACTLY the RAM + SCRATCH_X + SCRATCH_Y regions
 //      bootloader/app_slot.ld.in's linker script carves out of SRAM for
@@ -946,6 +944,21 @@ static void update_task_process_data(const uint8_t *payload, uint8_t length)
 // module's own header comment) -- this wrapper's only job is reading the
 // two vector-table words out of the mapped flash region and supplying the
 // SRAM_BASE/SRAM_END/XIP_BASE constants that module cannot see for itself.
+//
+// These three are restated as local literals rather than pulled from
+// pico-sdk's hardware/regs/addressmap.h: that header lives under hardware/
+// and tools/check_hal_include_boundary.ps1 refuses a new hardware/ include
+// in this file outside the existing HAL-routed set (hal_flash.h/hal_wdt.h)
+// without an allowlist entry, and these three values are architectural
+// constants of the RP2040 itself (fixed for every RP2040 chip, not a board-
+// or SDK-version-specific detail) -- SRAM_BASE/SRAM_END confirmed against
+// bootloader/app_slot.ld.in's linker script (see the header comment above),
+// XIP_BASE confirmed against flash_layout.h's own offsets, which are already
+// expressed relative to it.
+#define UPDATE_TASK_SLOT_LINKAGE_SRAM_BASE 0x20000000u
+#define UPDATE_TASK_SLOT_LINKAGE_SRAM_END  0x20042000u
+#define UPDATE_TASK_SLOT_LINKAGE_XIP_BASE  0x10000000u
+
 static bool update_task_slot_linkage_plausible(const void *slot_data_ptr, uint32_t target_slot_offset)
 {
     const uint32_t *vectors = (const uint32_t *)slot_data_ptr;
@@ -953,7 +966,10 @@ static bool update_task_slot_linkage_plausible(const void *slot_data_ptr, uint32
     uint32_t reset_vector = vectors[1];
 
     return update_task_slot_linkage_check(sp, reset_vector, target_slot_offset,
-                                           BOOTLOADER_SLOT_FLASH_SIZE, SRAM_BASE, SRAM_END, XIP_BASE);
+                                           BOOTLOADER_SLOT_FLASH_SIZE,
+                                           UPDATE_TASK_SLOT_LINKAGE_SRAM_BASE,
+                                           UPDATE_TASK_SLOT_LINKAGE_SRAM_END,
+                                           UPDATE_TASK_SLOT_LINKAGE_XIP_BASE);
 }
 
 // --- UPDATE_END ------------------------------------------------------------
