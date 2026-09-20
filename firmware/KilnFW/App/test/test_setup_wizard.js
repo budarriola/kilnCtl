@@ -648,6 +648,38 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   assert(summedOk.valid, 'step8: summed topology tolerates the same zone id on multiple CT channels');
 })();
 
+// ---- Step 8: validateStep8() must consult committed_mask/committed_zone
+// too, not only the sweep-measured mask -- a channel a previous session
+// already committed but never re-swept this session must still count as
+// mapped (mask | committed_mask), and a channel known to BOTH sources that
+// disagrees on zone must block until the operator re-commits. ------------
+(function testValidateStep8ConsultsCommittedMask() {
+  const ctx = loadPageScript(noopFetch);
+
+  // CT0 only known via committed_mask (never swept this session) -- must
+  // still count as mapped, not be treated as absent.
+  const committedOnly = ctx.validateStep8(1, 0, 0x0, [], 0x1, [2]);
+  assert(committedOnly.valid,
+    'step8: a channel known only via committed_mask (not the sweep) is still recognized as mapped');
+
+  // CT0 known via BOTH sources, same zone -- agreement, no error.
+  const bothAgree = ctx.validateStep8(1, 0, 0x1, [1], 0x1, [1]);
+  assert(bothAgree.valid, 'step8: sweep and committed agreeing on the same zone is not flagged');
+
+  // CT0 known via BOTH sources, DIFFERENT zone -- must block and name both.
+  const disagree = ctx.validateStep8(1, 0, 0x1, [0], 0x1, [2]);
+  assert(!disagree.valid, 'step8: sweep vs committed disagreement on the same channel blocks the step');
+  assert(/sweep says zone 1/.test(disagree.errors[0]), 'step8: disagreement names the sweep-measured zone');
+  assert(/safety processor has zone 3 committed/.test(disagree.errors[0]),
+    'step8: disagreement names the committed zone');
+  assert(/re-commit/.test(disagree.errors[0]), 'step8: disagreement tells the operator to re-commit');
+
+  // A channel with no committed_mask/committed_zone args at all (backward
+  // compatibility with the pre-fix call shape) must not throw or misbehave.
+  const noCommittedArgs = ctx.validateStep8(1, 0, 0x3, [0, 1]);
+  assert(noCommittedArgs.valid, 'step8: omitting committed_mask/committed_zone entirely still validates correctly');
+})();
+
 // ---- Step 8: heat-required marking is not silently walkable past -------
 (function testStep9HeatWarningPresent() {
   const html = fs.readFileSync(PAGE_PATH, 'utf8');

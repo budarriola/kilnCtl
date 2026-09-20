@@ -128,21 +128,7 @@ $JargonRegex = ($JargonPatterns -join '|')
 # off property-access chains like "p.c" in chart code (main_page.html).
 $SourceFilePattern = '(?<![.\w])[A-Za-z_][A-Za-z0-9_]{2,}\.(c|h|py|ps1|cmake)\b'
 
-# Whole-file, temporary allowlist for the jargon-class pass (Pass 4) only.
-# setup_wizard_page.html is mid-rewrite by another agent (worktree
-# C:\wt\wizrework_koxpk7, coupling-matrix step removal) as of 2026-09-19;
-# excluding it here avoids a merge collision with that in-flight work. As of
-# this writing the file trips exactly six jargon-class hits, all doc/source
-# citations in step-explainer text: :296 "docs/SETUP_WIZARD.md's
-# implementation steps 8-11...", :991 "(project_no_cts_fitted_guard_coverage)",
-# :1242 "-- this is a deliberate owner decision (SETUP_WIZARD.md section 10
-# Q4)...", :1255 "(autotune_engine.c, quoted verbatim)...", :2544 "(applied in
-# thermo_task.c)...", :2681 "(SETUP_WIZARD.md section 6)." That other agent
-# owns removing these along with the coupling-matrix step; this entry should
-# be removed once that rewrite lands and the file is clean.
-$JargonFileAllowlist = @(
-    'setup_wizard_page\.html$'
-)
+$JargonFileAllowlist = @()
 
 function Test-Allowlisted {
     param([string]$RelPath, [string]$Line)

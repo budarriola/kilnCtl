@@ -966,7 +966,18 @@ function getCommissioningParam(commissioning, name) {
  * channels mapped to the same zone is a real misconfiguration (the
  * dashboard can show only one CT per single-zone card), so it is flagged
  * here client-side even though nothing on the wire refuses it today. */
-function validateStep8(ctInstalled, ctTopology, mapMask, zoneForCh) {
+// sweepMask/sweepZone are the current-sweep-MEASURED map (`mask`/`zone[]` from
+// GET /api/zones/ct_channel_map); committedMask/committedZone are what is
+// actually written on the safety processor today (`committed_mask`/
+// `committed_zone[]`, same response). A channel counts as mapped for
+// completeness purposes the moment EITHER source has it, per
+// `(mask | committed_mask)` -- consulting only the sweep-measured mask missed
+// a channel a previous session already committed but never re-swept this
+// session. When both sources have a channel and disagree on which zone, that
+// is a real, unresolved conflict (a stale sweep, or a commit from another
+// tab) -- surfaced explicitly rather than silently preferring one source, and
+// blocking until the operator re-commits so the two sources agree again.
+function validateStep8(ctInstalled, ctTopology, mapMask, zoneForCh, committedMask, committedZone) {
   if (ctInstalled !== 1) return { valid: true, errors: [] };
   var errors = [];
   if (ctTopology !== 0 && ctTopology !== 1) {
@@ -974,11 +985,20 @@ function validateStep8(ctInstalled, ctTopology, mapMask, zoneForCh) {
       'safety commissioning screen).');
     return { valid: false, errors: errors };
   }
+  committedMask = committedMask || 0;
+  committedZone = committedZone || [];
   if (ctTopology === 0) {
+    var effectiveMask = mapMask | committedMask;
     var seen = {};
     for (var ch = 0; ch < (zoneForCh || []).length; ch++) {
-      if (!(mapMask & (1 << ch))) continue; // not derived yet -- nothing to validate for this channel
-      var z = zoneForCh[ch];
+      if (!(effectiveMask & (1 << ch))) continue; // neither source has this channel yet
+      if ((mapMask & (1 << ch)) && (committedMask & (1 << ch)) && zoneForCh[ch] !== committedZone[ch]) {
+        errors.push('CT channel ' + ch + ': sweep says zone ' + (zoneForCh[ch] + 1) +
+          ', safety processor has zone ' + (committedZone[ch] + 1) + ' committed -- re-commit this channel\'s ' +
+          'mapping so the two sources agree before this step can pass.');
+        continue;
+      }
+      var z = (mapMask & (1 << ch)) ? zoneForCh[ch] : committedZone[ch];
       if (seen.hasOwnProperty(z)) {
         errors.push('CT channels ' + seen[z] + ' and ' + ch + ' both map to zone ' + (z + 1) +
           ' under per-zone topology -- the dashboard can only show one CT per single-zone card, so one ' +
@@ -1269,7 +1289,7 @@ function renderStep9() {
         ' Ki=' + (z.pid_ki || 0) + ' Kd=' + (z.pid_kd || 0) + '</span></div>';
       if (pre) {
         html += '<p class="werr">Autotune refuses this zone: "' + window.kcEscapeHtml(pre) + '" ' +
-          '(autotune_engine.c, quoted verbatim). Hand-enter gains instead, or fix the cause above first.</p>';
+          'Hand-enter gains instead, or fix the cause above first.</p>';
       } else {
         html += '<p class="hint"><a href="/settings/zones">Run autotune on this zone &rarr;</a> (multi-hour, ' +
           'one zone at a time, needs a rested kiln at ambient -- the linked page shows the full warning and ' +
@@ -2778,8 +2798,18 @@ function renderStep7() {
         return;
       }
       if (ctMapNeeded && ctMapAllSet) {
-        var mapCheck = validateStep8(fields.ctInstalled, fields.ctTopology, 0x07, fields.ctChannelMap);
+        var mapCheck = validateStep8(fields.ctInstalled, fields.ctTopology, 0x07, fields.ctChannelMap, 0, []);
         if (!mapCheck.valid) { renderErrList(errEl, mapCheck.errors); return; }
+      }
+      // Independent of what is being typed right now: does the sweep-
+      // measured map (ctMask/ctZone) agree with what is already committed
+      // on the safety processor (ctCommittedMask/ctCommittedZone)? A channel
+      // known to only one source is fine (effectiveMask = mask|committed_mask
+      // still counts it mapped); a channel known to BOTH sources that
+      // disagrees on zone is a real conflict and must block here.
+      if (fields.ctInstalled === 1 && fields.ctTopology === 0) {
+        var mapAgreement = validateStep8(fields.ctInstalled, fields.ctTopology, ctMask, ctZone, ctCommittedMask, ctCommittedZone);
+        if (!mapAgreement.valid) { renderErrList(errEl, mapAgreement.errors); return; }
       }
 
       // Commit-time re-check (requirement 2 / same discipline as step 6's
