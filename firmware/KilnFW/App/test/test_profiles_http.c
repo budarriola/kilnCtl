@@ -257,11 +257,25 @@ esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *valu
 }
 void web_set_asset_cache_headers(httpd_req_t *r);
 void web_set_asset_cache_headers(httpd_req_t *r) { (void)r; }
+// Same convention as s_chunk_capture above, for the (much rarer) handlers
+// that reply via a single httpd_resp_send() rather than chunked -- notably
+// profile_detail_get_handler(), which test_profile_detail_json_valid_at_
+// max_capacity() below drives directly.
+static char s_send_capture[16384];
+static size_t s_send_capture_len = 0;
+static bool s_send_capture_on = false;
 esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
 {
     (void)r;
-    (void)buf;
-    (void)buf_len;
+    if (s_send_capture_on && buf) {
+        long long n = buf_len < 0 ? (long long)strlen(buf) : buf_len;
+        if (n >= (long long)sizeof(s_send_capture)) {
+            n = (long long)sizeof(s_send_capture) - 1;
+        }
+        memcpy(s_send_capture, buf, (size_t)n);
+        s_send_capture[n] = '\0';
+        s_send_capture_len = (size_t)n;
+    }
     return ESP_OK;
 }
 esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *buf, size_t buf_len)
@@ -302,19 +316,44 @@ int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
     (void)buf_len;
     return 0;
 }
+// Controllable per test (default NULL, matching the always-ESP_FAIL behavior
+// every existing test in this file relies on) -- test_profile_detail_json_
+// valid_at_max_capacity() below is the first test in this file that needs
+// profile_detail_get_handler()'s ?id= query to actually resolve.
+static const char *s_stub_query_str = NULL;
 esp_err_t httpd_req_get_url_query_str(httpd_req_t *r, char *buf, size_t buf_len)
 {
     (void)r;
-    (void)buf;
-    (void)buf_len;
-    return ESP_FAIL;
+    if (!s_stub_query_str) {
+        return ESP_FAIL;
+    }
+    snprintf(buf, buf_len, "%s", s_stub_query_str);
+    return ESP_OK;
 }
 esp_err_t httpd_query_key_value(const char *qs, const char *key, char *val, size_t val_size)
 {
-    (void)qs;
-    (void)key;
-    (void)val;
-    (void)val_size;
+    if (!qs) {
+        return ESP_FAIL;
+    }
+    size_t klen = strlen(key);
+    const char *p = qs;
+    while (p && *p) {
+        if (strncmp(p, key, klen) == 0 && p[klen] == '=') {
+            const char *v = p + klen + 1;
+            const char *amp = strchr(v, '&');
+            size_t vlen = amp ? (size_t)(amp - v) : strlen(v);
+            if (vlen >= val_size) {
+                vlen = val_size - 1;
+            }
+            memcpy(val, v, vlen);
+            val[vlen] = '\0';
+            return ESP_OK;
+        }
+        p = strchr(p, '&');
+        if (p) {
+            p++;
+        }
+    }
     return ESP_FAIL;
 }
 
@@ -1473,6 +1512,109 @@ static void test_profiles_list_json_valid_with_escape_heavy_names(void)
               "all 8 user-slot entries must be present in the listing, none dropped");
 }
 
+// Opus review pass (docs/ON_OFF_ZONE_PLAN.md step 5b) -- profile_detail_
+// get_handler()'s PROFILE_DETAIL_JSON_CAP budgeted PROFILE_MAX_ON_OFF_RULES
+// at 128 bytes/rule, but a rule object with a real temp_source key measures
+// 182 bytes worst case; combined with 12 worst-case segments and a 512-byte
+// escaped ceiling_note this could overflow the 128-byte-per-rule budget and
+// silently truncate the response -- profiles_catalog_http.c's APPEND macro
+// `goto send;`s on overflow rather than erroring, so the handler would still
+// return ESP_OK/200 with an incomplete JSON body. Renders one profile at
+// every worst-case dimension at once (12 segments, 8 rules with maximal
+// field values, a triggered 512-byte-worst-case ceiling_note) and asserts
+// the response is complete, syntactically valid JSON with every segment and
+// rule present -- the fix (128 -> 224) is verified here, not just at the
+// #define.
+static void test_profile_detail_json_valid_at_max_capacity(void)
+{
+    TEST_SECTION("profile_detail_get_handler -- a max-capacity profile (12 segments, 8 on/off "
+                 "rules, a triggered ceiling_note) renders complete, valid JSON");
+
+    nvs_stub_reset();
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    memset(g_stub_zone_max_temp_c, 0, sizeof(g_stub_zone_max_temp_c));
+
+    const uint8_t id = 0;
+    profile_t *p = &s_profiles.profiles[id];
+    memset(p, 0, sizeof(*p));
+    for (int i = 0; i < PROFILE_NAME_MAX_LEN; i++) {
+        p->name[i] = (i % 2 == 0) ? '"' : '\\'; /* worst-case escape load, same as the list test */
+    }
+    p->name[PROFILE_NAME_MAX_LEN] = '\0';
+    p->zone_mask = 0xFF;
+    p->segment_count = PROFILE_MAX_SEGMENTS;
+    for (uint8_t i = 0; i < PROFILE_MAX_SEGMENTS; i++) {
+        profile_segment_t *seg = &p->segments[i];
+        seg->seg_kind = PROFILE_SEG_KIND_ZONE_RAMP; /* must stay ZONE_RAMP so
+                                 profile_exceeds_zone_ceiling() below still evaluates this
+                                 segment -- io_target/io_state/io_blocking/io_leave_on_at_end
+                                 are still maxed below even though they're not meaningful for
+                                 this seg_kind, since the JSON renderer emits them regardless
+                                 of validity and this test is after worst-case byte width. */
+        seg->target_c = 99999.99f; /* zone 0's max_temp_c below (10C) makes segment 0 trip the
+                                     ceiling_note check (must stay POSITIVE and > 10.0 for
+                                     profile_exceeds_zone_ceiling()'s target > zone_max_c test
+                                     to fire); every segment shares this large-magnitude value
+                                     so none of them are cheap to render either. */
+        seg->ramp_c_per_hr = -99999.99f;
+        seg->dwell_min = 4294967295u; /* UINT32_MAX: 10 digits, the true worst case for %lu */
+        seg->io_target = 255;
+        seg->io_state = 255;
+        seg->io_blocking = 255;
+        seg->io_leave_on_at_end = 255;
+    }
+    g_stub_zone_max_temp_c[0] = 10.0f; /* triggers profile_exceeds_zone_ceiling()'s note */
+
+    p->on_off_rule_count = PROFILE_MAX_ON_OFF_RULES;
+    for (uint8_t i = 0; i < PROFILE_MAX_ON_OFF_RULES; i++) {
+        profile_on_off_rule_t *r = &p->on_off_rules[i];
+        r->segment_index = PROFILE_MAX_SEGMENTS - 1;
+        r->zone_index = 255;
+        r->enable = 1;
+        r->phase_mask = 0xFF;
+        r->direction_mask = 0xFF;
+        r->temp_source = 255; /* JSON renderer prints this field unconditionally, so byte-width
+                                  worst case uses the uint8_t's full range, not just the one
+                                  value (1) that means "live" per profile_executor.c */
+        r->temp_ref_zone = 255;
+        r->temp_cmp = 255;
+        r->temp_threshold_c = -99999.99f;
+        r->time_start_s = 65535;
+        r->time_stop_s = 65535;
+        r->invert = 1;
+    }
+    profiles_slot_bitmap_set(&s_profiles.used_bitmap, id);
+
+    s_stub_query_str = "id=0";
+    s_send_capture_len = 0;
+    s_send_capture[0] = '\0';
+    s_send_capture_on = true;
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = profile_detail_get_handler(&req);
+    s_send_capture_on = false;
+    s_stub_query_str = NULL;
+
+    TEST_CHECK(err == ESP_OK, "the handler must not report a transport error");
+    TEST_CHECK(s_send_capture_len > 0, "some JSON must have been sent");
+    TEST_CHECK(json_is_well_formed(s_send_capture),
+              "the response must be syntactically well-formed JSON (balanced braces/brackets, "
+              "no unterminated string) at every worst-case dimension at once -- if this fires, "
+              "PROFILE_DETAIL_JSON_CAP is undersized again");
+    TEST_CHECK(count_occurrences(s_send_capture, "\"seg_kind\":") == PROFILE_MAX_SEGMENTS,
+              "all 12 segments must be present, not silently dropped by a truncation that "
+              "still parses as valid JSON up to the cut point");
+    TEST_CHECK(count_occurrences(s_send_capture, "\"zone\":255") == PROFILE_MAX_ON_OFF_RULES,
+              "all 8 on/off rules must be present");
+    TEST_CHECK(strstr(s_send_capture, "\"exceeds_ceiling\":true") != NULL,
+              "the triggered ceiling_note path must have actually run (otherwise this test "
+              "isn't exercising the 512-byte escaped ceiling_note worst case at all)");
+    size_t len = strlen(s_send_capture);
+    TEST_CHECK(len >= 2 && s_send_capture[len - 1] == '}' && s_send_capture[len - 2] == ']',
+              "the response must end with the closing \"]}\" of on_off_rules/the outer object, "
+              "not be cut off mid-array/mid-object");
+}
+
 static void test_profiles_list_carries_last_run_started_unix_s(void)
 {
     TEST_SECTION("profiles_list_get_handler -- carries last_run_started_unix_s from "
@@ -2463,6 +2605,7 @@ void run_test_profiles_http(void)
     test_newer_version_refused_not_wiped();
     test_one_bad_slot_does_not_affect_others();
     test_profiles_list_json_valid_with_escape_heavy_names();
+    test_profile_detail_json_valid_at_max_capacity();
     test_profiles_list_carries_last_run_started_unix_s();
     test_validate_io_segment_zone_ownership();
     test_validate_io_segment_drdy_lcd_gap_refused();

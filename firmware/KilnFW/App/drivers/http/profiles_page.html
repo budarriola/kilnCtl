@@ -298,7 +298,7 @@
   .oo-checks { display: flex; flex-wrap: wrap; gap: 0.6em; margin-top: 0.2em; }
   .oo-check { display: inline-flex; align-items: center; gap: 0.3em; min-height: 40px; font-size: 0.85em; }
   .oo-check input[type=checkbox] { width: 20px; height: 20px; }
-  .oo-inline { display: flex; align-items: center; gap: 0.4em; font-weight: normal; }
+  .oo-inline { display: flex; align-items: center; gap: 0.4em; font-weight: normal; min-height: 40px; }
   .oo-inline input[type=checkbox] { width: auto; }
   .oo-summary { font-size: 0.8em; color: var(--muted); margin: 0.3em 0 0; }
 </style>
@@ -941,12 +941,29 @@ document.getElementById('ooInfoSlot').querySelector('details').addEventListener(
 });
 
 function ooZoneOptionsHtml(selected) {
-  if (onOffZones.length === 0) return '<option value="">(none)</option>';
   var html = '';
+  var found = false;
   onOffZones.forEach(function (z) {
+    if (z.index === selected) found = true;
     html += '<option value="' + z.index + '"' + (z.index === selected ? ' selected' : '') + '>' +
             window.kcEscapeHtml(z.name) + '</option>';
   });
+  // A stored rule can name a zone that is no longer an on/off zone (retyped,
+  // deleted, or -- when onOffZones is empty -- simply because none exist on
+  // this board at all). Losing that value on the wire is worse than an
+  // orphan option: ooRulesToParams() would send rule*_zone= empty (or the
+  // first on/off zone's index picked by the browser's own <select> default),
+  // http_form_find_field() sees a present-but-blank field and
+  // profiles_edit_http.c silently drops the whole rule (empty) or
+  // validate_on_off_rules() silently retargets a different device (browser
+  // default) -- either way "Saved" lies. Keep the real value round-tripping
+  // and visibly flagged instead; save is refused client-side below while any
+  // row carries one of these.
+  if (selected != null && selected >= 0 && !found) {
+    html += '<option value="' + selected + '" selected>Zone ' + selected +
+            ' (no longer an on/off zone)</option>';
+  }
+  if (html === '') html = '<option value="">(none)</option>';
   return html;
 }
 
@@ -981,9 +998,12 @@ function refreshOoUi() {
   });
   document.getElementById('ooNoZonesMsg').style.display = onOffZones.length === 0 ? '' : 'none';
   document.getElementById('addOoBtn').style.display = onOffZones.length === 0 ? 'none' : '';
-  if (onOffZones.length === 0) {
-    document.getElementById('oorules').innerHTML = '';
-  }
+  // Deliberately NOT clearing #oorules here when onOffZones is empty --
+  // loadZones()/refreshOoUi() run every time a segment is added, and wiping
+  // the DOM would silently destroy already-loaded rules that reference a
+  // zone this render just doesn't know about yet (or that no on/off zone
+  // exists at all). ooZoneOptionsHtml() above keeps each row's real stored
+  // value visible (flagged, if stale) instead.
   document.querySelectorAll('#oorules .oorule').forEach(ooUpdateSummary);
 }
 
@@ -1200,6 +1220,22 @@ function ooRulesToParams() {
     params.push('rule' + i + '_invert=' + (row.querySelector('.oo-invert').checked ? 1 : 0));
   });
   return params;
+}
+
+// True when any on/off rule row's zone <select> is currently showing the
+// orphan option ooZoneOptionsHtml() emits for a stored zone_index that is
+// no longer among onOffZones -- extracted out of the saveBtn click handler
+// so it has one definition testable on its own (test_on_off_rules_editor.js
+// defects 1/2 coverage) instead of only being exercisable through a full
+// click simulation.
+function ooHasStaleZoneRow() {
+  var stale = false;
+  document.querySelectorAll('#oorules .oorule').forEach(function (row) {
+    if (stale) return;
+    var opt = row.querySelector('.oo-zone').selectedOptions[0];
+    if (opt && /no longer an on\/off zone/.test(opt.textContent)) stale = true;
+  });
+  return stale;
 }
 
 /* Compact read-only summary for wherever a profile is displayed/previewed
@@ -2093,6 +2129,17 @@ document.getElementById('saveBtn').addEventListener('click', function () {
       params.push('seg' + i + '_dwell=' + row.querySelector('.s-dwell').value);
     }
   });
+  // Refuse client-side rather than silently saving a rule that still points
+  // at a zone ooZoneOptionsHtml() had to flag as "no longer an on/off zone"
+  // -- letting this through would either save a device the operator can no
+  // longer see/edit, or (if the browser instead falls back to the first
+  // real option) silently retarget the rule to a different device. Force
+  // the operator to look at the row and either repoint it or delete it.
+  if (ooHasStaleZoneRow()) {
+    msg.innerHTML = '<span class="err">One or more On/off device rules target a zone that is no ' +
+      'longer an on/off device -- fix or remove that rule before saving.</span>';
+    return;
+  }
   params = params.concat(ooRulesToParams());
   msg.textContent = 'Saving…';
   fetch('/api/profile', {

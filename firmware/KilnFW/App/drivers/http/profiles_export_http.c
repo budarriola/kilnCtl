@@ -73,8 +73,10 @@ static esp_err_t export_get_handler(httpd_req_t *req)
      * shared, previously-exhausted resource; see profile_post_handler's own
      * comment on the 2026-08-31 stack-overflow audit). 256B fixed part +
      * 192B/segment matches profiles_catalog_http.c's own per-segment budget
-     * for the richer (seg_kind/io_*) field set below. */
-    const size_t cap = 256 + (size_t)PROFILE_MAX_SEGMENTS * 192 + (size_t)PROFILE_MAX_ON_OFF_RULES * 128;
+     * for the richer (seg_kind/io_*) field set below. Rule term widened
+     * 128 -> 224 (Opus review pass): a rule object with temp_source measured
+     * 182 bytes worst case. */
+    const size_t cap = 256 + (size_t)PROFILE_MAX_SEGMENTS * 192 + (size_t)PROFILE_MAX_ON_OFF_RULES * 224;
     char *json = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!json) {
         ESP_LOGE(TAG, "GET /api/profile/export: malloc(%u) failed", (unsigned)cap);

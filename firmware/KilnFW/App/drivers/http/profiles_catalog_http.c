@@ -406,8 +406,11 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
      * sizeof(ceiling_note)*2 = 512 bytes worst case (every byte escaped;
      * ceiling_note itself widened 160 -> 256 to satisfy -Werror=format-
      * truncation's conservative worst-case-float-width analysis). +
-     * PROFILE_MAX_ON_OFF_RULES * 128 (2026-09-08, plan step 5) -- each rule
-     * object measured well under 110 bytes worst case, rounded up. */
+     * PROFILE_MAX_ON_OFF_RULES * 224 (2026-09-08, plan step 5; widened
+     * 128 -> 224 in the Opus review pass) -- a rule object with temp_source
+     * measured 182 bytes worst case, not the ~110 originally assumed;
+     * combined with 12 segments + a 512-byte escaped ceiling_note the old
+     * 128 figure could overflow this buffer and truncate the JSON. */
     /* Heap-allocated (2026-09-08, httpd_worker stack-budget pass) -- this was
      * a single ~4.1 KB stack-local array, the dominant frame in
      * check_httpd_task_stack_budget's worst reachable httpd path. PSRAM,
@@ -423,7 +426,7 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
      * this comment previously described backwards). Freed on the one `send:` exit
      * every path below funnels through; an allocation failure degrades to a
      * clean 500 rather than a stack overflow. */
-#define PROFILE_DETAIL_JSON_CAP (816 + PROFILE_MAX_SEGMENTS * 192 + PROFILE_MAX_ON_OFF_RULES * 128)
+#define PROFILE_DETAIL_JSON_CAP (816 + PROFILE_MAX_SEGMENTS * 192 + PROFILE_MAX_ON_OFF_RULES * 224)
     char *json = heap_caps_malloc(PROFILE_DETAIL_JSON_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!json) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");

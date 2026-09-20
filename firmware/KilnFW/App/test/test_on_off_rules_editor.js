@@ -15,6 +15,21 @@
  * temp_source-follows-temp_cmp derivation (0 when "(none)", 1 otherwise --
  * only 0/1 are wired by profile_resolve_on_off_rule() today).
  *
+ * Opus review pass (2026-09-20) added coverage for a second, more serious
+ * class of bug found in the same area: ooZoneOptionsHtml()/refreshOoUi() and
+ * ooRulesToParams() are ALL extracted verbatim now (no more hand-rolled
+ * stand-ins for the zone/segment option renderers) so this test exercises
+ * the exact code the real page runs, including the fix for:
+ *   - a stored rule whose zone_index is not among onOffZones (either because
+ *     onOffZones is empty, or because it names some OTHER zone) used to
+ *     either send rule*_zone= empty (dropped silently server-side) or fall
+ *     back to the browser's default-selected option (silently retargeted).
+ *   - refreshOoUi() used to wipe #oorules' entire innerHTML whenever
+ *     onOffZones was empty, destroying any already-loaded rule rows.
+ *   - the saveBtn click handler must refuse to submit while any row is
+ *     showing the "no longer an on/off zone" orphan option -- tested here
+ *     via the extracted ooHasStaleZoneRow() helper.
+ *
  * Run: node firmware/KilnFW/App/test/test_on_off_rules_editor.js
  * Exit code 0 on all-pass, 1 otherwise.
  */
@@ -46,7 +61,8 @@ function assert(cond, label) {
 // ---------------------------------------------------------------------------
 // Minimal regex-based HTML->DOM parser (adapted from test_zones_type_toggle.js):
 // class lists, single-class querySelector(All), .value/.checked honoring
-// "selected"/"checked" attributes, and document.getElementById.
+// "selected"/"checked" attributes, .textContent, and .selectedOptions on a
+// <select>, plus document.getElementById.
 // ---------------------------------------------------------------------------
 const VOID_TAGS = new Set(['input', 'br', 'img', 'hr']);
 
@@ -71,6 +87,7 @@ class Node2 {
     }
     if (this.tag === 'input') this._checked = this.attrs.checked !== undefined;
     this.classList = { contains: (c) => this.classes.includes(c) };
+    this.style = {};
   }
   get value() {
     if (this.tag === 'select') {
@@ -82,6 +99,20 @@ class Node2 {
   set value(v) { this._value = v; }
   get checked() { return !!this._checked; }
   set checked(v) { this._checked = !!v; }
+  get textContent() {
+    let out = this._text;
+    for (const c of this.children) out += c.textContent;
+    return out;
+  }
+  get selectedOptions() {
+    if (this.tag !== 'select') return [];
+    const opts = this.children.filter((c) => c.tag === 'option');
+    const flagged = opts.filter((o) => o.attrs.selected !== undefined);
+    if (flagged.length) return flagged;
+    // Real <select> behavior with no explicit "selected" attribute anywhere:
+    // the first option is selected by default.
+    return opts.length ? [opts[0]] : [];
+  }
   matches(sel) {
     if (sel[0] === '.') return this.classes.includes(sel.slice(1));
     return this.tag === sel;
@@ -146,58 +177,74 @@ function parseHtml(html) {
 
 // ---------------------------------------------------------------------------
 // Extract the real functions under test, verbatim, from the real page.
+// Opus review fix: ooZoneOptionsHtml/ooSegmentOptionsHtml/refreshOoUi/
+// ooHasStaleZoneRow are now extracted too, instead of hand-rolled stand-ins,
+// so this test runs the exact code the page ships (defects 1/2/save-refusal
+// live entirely inside these functions).
 // ---------------------------------------------------------------------------
 const RULES_SRC =
+  extractRange('function ooZoneOptionsHtml(selected) {', '}') + '\n' +
+  extractRange('function ooSegmentOptionsHtml(selected) {', '}') + '\n' +
+  extractRange('function refreshOoUi() {', '}') + '\n' +
   extractRange('function ooPhaseChecksHtml(mask) {', '}') + '\n' +
   extractRange('function ooDirChecksHtml(mask) {', '}') + '\n' +
   extractRange('function ooRuleFieldsHtml(r) {', '}') + '\n' +
-  extractRange('function ooRulesToParams() {', '}');
+  extractRange('function ooRulesToParams() {', '}') + '\n' +
+  extractRange('function ooHasStaleZoneRow() {', '}');
 
 assert(RULES_SRC.indexOf('rule\' + i + \'_temp_source') !== -1,
   'sanity: extracted range includes the temp_source field name');
+assert(RULES_SRC.indexOf('no longer an on/off zone') !== -1,
+  'sanity: extracted range includes the real ooZoneOptionsHtml() orphan-option fix');
 
-// Build a fake document that supports exactly what ooRulesToParams() and
-// ooRuleFieldsHtml()'s helpers need: getElementById('oorules') and
-// querySelectorAll('.oorule') on the root, plus the per-row selectors.
+// Build a fake document that supports exactly what the real functions need:
+// getElementById('oorules')/('segments'), querySelectorAll('.oorule') on the
+// root, plus the per-row selectors. onOffZones/window.kcEscapeHtml are the
+// real page's own globals, provided here as the real page provides them.
 function buildContext(rules, onOffZones, segmentCount) {
-  var oorulesHtml = '<div id="oorules">' + rules.map(function (r) {
-    return '<div class="oorule">' + '__FIELDS__' + '</div>';
-  }).join('') + '</div>';
-
   const sandbox = {
     onOffZones: onOffZones,
     infoIconHtml: function () { return ''; },
-    ooZoneOptionsHtml: function (selected) {
-      return onOffZones.map(function (z) {
-        return '<option value="' + z.index + '"' + (z.index === selected ? ' selected' : '') + '>' + z.name + '</option>';
-      }).join('');
-    },
-    ooSegmentOptionsHtml: function (selected) {
-      var out = '';
-      for (var i = 0; i < segmentCount; i++) {
-        out += '<option value="' + i + '"' + (i === selected ? ' selected' : '') + '>Step ' + (i + 1) + '</option>';
-      }
-      return out;
-    },
+    window: { kcEscapeHtml: function (s) { return String(s); } },
+    ooUpdateSummary: function () { /* cosmetic-only, irrelevant to this test's assertions */ },
   };
   vm.createContext(sandbox);
   vm.runInContext(RULES_SRC, sandbox);
+
+  // document must exist BEFORE ooRuleFieldsHtml() runs: ooSegmentOptionsHtml()
+  // reads document.getElementById('segments').children.length. Start with
+  // the rule rows empty, then fill them in below via the equivalent of
+  // ooRuleRow()'s real innerHTML assignment.
+  var segmentsHtml = '<div id="segments">' +
+    Array(segmentCount).fill('<div class="seg"></div>').join('') + '</div>';
+  var ooNoZonesMsgHtml = '<div id="ooNoZonesMsg" style=""></div>';
+  var addOoBtnHtml = '<div id="addOoBtn" style=""></div>';
+  const root = parseHtml(segmentsHtml + '<div id="oorules"></div>' + ooNoZonesMsgHtml + addOoBtnHtml);
+  sandbox.document = {
+    getElementById: function (id) { return root.getElementById(id); },
+    // Supports the two shapes the real page actually calls on `document`:
+    // a bare class selector, and "#id .class" (id-scoped descendant).
+    querySelectorAll: function (sel) {
+      var m = /^#([\w-]+)\s+(.+)$/.exec(sel);
+      if (m) {
+        var scopeEl = root.getElementById(m[1]);
+        return scopeEl ? scopeEl.querySelectorAll(m[2]) : [];
+      }
+      return root.querySelectorAll(sel);
+    },
+  };
 
   // Render each rule's real fields markup with the real function, then
   // splice it into the fake document exactly as ooRuleRow() would via
   // innerHTML (minus the "Remove rule" button, irrelevant here).
   var perRuleHtml = rules.map(function (r) { return sandbox.ooRuleFieldsHtml(r); });
-  var html = '<div id="oorules">' + perRuleHtml.map(function (h) {
+  var oorulesEl = root.getElementById('oorules');
+  var newOorules = parseHtml('<div id="oorules">' + perRuleHtml.map(function (h) {
     return '<div class="oorule">' + h + '</div>';
-  }).join('') + '</div>';
-  const root = parseHtml(html);
-  const oorulesEl = root.getElementById('oorules');
-  sandbox.document = {
-    getElementById: function (id) {
-      if (id === 'oorules') return oorulesEl;
-      return root.getElementById(id);
-    },
-  };
+  }).join('') + '</div>');
+  var newOorulesEl = newOorules.getElementById('oorules');
+  oorulesEl.children = newOorulesEl.children;
+  oorulesEl.children.forEach(function (c) { c.parent = oorulesEl; });
   return sandbox;
 }
 
@@ -277,6 +324,99 @@ function buildContext(rules, onOffZones, segmentCount) {
   assert(asMap.rule1_temp_cmp === '2' && asMap.rule1_temp_c === '100',
     'second rule\'s temperature condition does not fall back to the first rule\'s');
   assert(asMap.rule1_invert === '1', 'second rule\'s invert is independent of the first');
+})();
+
+// ---------------------------------------------------------------------------
+// DEFECT 1 (Opus review): a stored rule targeting zone 7, but onOffZones is
+// EMPTY (no on/off-typed zone exists on this board at all). Before the fix,
+// ooZoneOptionsHtml() rendered only '<option value="">(none)</option>' and
+// ooRulesToParams() sent rule0_zone= (empty) -- profiles_edit_http.c's
+// `if (len <= 0) break;` then silently dropped the rule with an HTTP 200
+// "Saved". The fix must keep the real value 7 round-tripping via a flagged
+// orphan option, and refreshOoUi() must not wipe the row out of the DOM.
+// ---------------------------------------------------------------------------
+(function testEmptyOnOffZonesRoundTripsStoredZone() {
+  const rule = {
+    zone: 7, segment: 0, enable: 1, phase_mask: 0, direction_mask: 0,
+    temp_source: 0, temp_cmp: 0, temp_c: 0, time_start_s: 0, time_stop_s: 0, invert: 0,
+  };
+  const ctx = buildContext([rule], /* onOffZones */ [], 1);
+
+  const optionsHtml = ctx.ooZoneOptionsHtml(7);
+  assert(optionsHtml.indexOf('value="7" selected') !== -1,
+    'ooZoneOptionsHtml(7) with an empty onOffZones still emits a selected option for zone 7');
+  assert(optionsHtml.indexOf('(none)') === -1,
+    'the empty-onOffZones fallback to a valueless "(none)" option must not fire when a stored ' +
+    'zone_index exists -- that is exactly the value that used to get silently dropped');
+
+  const params = ctx.ooRulesToParams();
+  const asMap = {};
+  params.forEach(function (p) { const i = p.indexOf('='); asMap[p.slice(0, i)] = p.slice(i + 1); });
+  assert(asMap.rule0_zone === '7',
+    'DEFECT 1: rule0_zone must still be 7, not empty, even with zero on/off zones on the board');
+
+  // refreshOoUi() must not have wiped the row: it must still exist and still
+  // carry the flagged zone after a re-render pass (the exact "any + Add
+  // segment wipes loaded rules" regression named in the review).
+  ctx.refreshOoUi();
+  const rows = ctx.document.querySelectorAll('#oorules .oorule');
+  assert(rows.length === 1,
+    'DEFECT 1: refreshOoUi() with zero on/off zones must not clear #oorules -- the row must survive');
+  const zsel = rows[0].querySelector('.oo-zone');
+  assert(zsel.value === '7',
+    'DEFECT 1: the surviving row still shows the real stored zone (7) after refreshOoUi()');
+})();
+
+// ---------------------------------------------------------------------------
+// DEFECT 2 (Opus review): other on/off zones DO exist, but not the one this
+// rule was saved against (a stale zone_index -- retyped or deleted). Before
+// the fix this either sent empty (dropped) or silently fell back to the
+// browser's first-option default (retargeted to a different, wrong device).
+// The fix must flag it as an orphan option (never silently retarget) and the
+// save handler must refuse via ooHasStaleZoneRow().
+// ---------------------------------------------------------------------------
+(function testStaleZoneAmongOthersIsFlaggedAndRefusesSave() {
+  const zones = [{ index: 1, name: 'Damper' }, { index: 2, name: 'Vent' }];
+  const rule = {
+    zone: 9 /* not among zones above */, segment: 0, enable: 1, phase_mask: 0,
+    direction_mask: 0, temp_source: 0, temp_cmp: 0, temp_c: 0,
+    time_start_s: 0, time_stop_s: 0, invert: 0,
+  };
+  const ctx = buildContext([rule], zones, 1);
+
+  const optionsHtml = ctx.ooZoneOptionsHtml(9);
+  assert(optionsHtml.indexOf('value="9" selected') !== -1,
+    'DEFECT 2: a stale zone_index (9) not among onOffZones still gets a selected orphan option');
+  assert(/no longer an on\/off zone/.test(optionsHtml),
+    'DEFECT 2: the orphan option is visibly flagged so the operator notices, not silently kept');
+
+  const params = ctx.ooRulesToParams();
+  const asMap = {};
+  params.forEach(function (p) { const i = p.indexOf('='); asMap[p.slice(0, i)] = p.slice(i + 1); });
+  assert(asMap.rule0_zone === '9',
+    'DEFECT 2: rule0_zone must round-trip as the real stored value (9), never silently retargeted ' +
+    'to the first real on/off zone (1) by a browser <select> default');
+
+  assert(ctx.ooHasStaleZoneRow() === true,
+    'DEFECT 2: ooHasStaleZoneRow() must detect the flagged row so save is refused client-side');
+})();
+
+// ---------------------------------------------------------------------------
+// Sanity: a rule whose zone_index IS among onOffZones must never be flagged
+// stale (no false positive that would block an ordinary, valid save).
+// ---------------------------------------------------------------------------
+(function testValidZoneIsNeverFlaggedStale() {
+  const zones = [{ index: 1, name: 'Damper' }, { index: 2, name: 'Vent' }];
+  const rule = {
+    zone: 2, segment: 0, enable: 1, phase_mask: 0, direction_mask: 0,
+    temp_source: 0, temp_cmp: 0, temp_c: 0, time_start_s: 0, time_stop_s: 0, invert: 0,
+  };
+  const ctx = buildContext([rule], zones, 1);
+  const optionsHtml = ctx.ooZoneOptionsHtml(2);
+  assert(!/no longer an on\/off zone/.test(optionsHtml),
+    'a rule targeting a real, still-existing on/off zone is never flagged as an orphan');
+  assert(ctx.ooHasStaleZoneRow() === false,
+    'ooHasStaleZoneRow() is false when every row targets a real on/off zone -- no false-positive refusal');
 })();
 
 console.log('');
