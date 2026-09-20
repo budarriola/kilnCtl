@@ -21,7 +21,7 @@ NVS_KEY_LEN_CHECK(NVS_PARTITION);
 NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
 NVS_KEY_LEN_CHECK(NVS_KEY_PROGRESS);
 
-#define SETUP_WIZARD_PROGRESS_VERSION 4u
+#define SETUP_WIZARD_PROGRESS_VERSION 5u
 
 /* Historical on-disk step count for the v1 and v2 blob layouts below --
  * FROZEN at 13, deliberately never tied to the live SETUP_WIZARD_STEP_COUNT
@@ -45,7 +45,20 @@ NVS_KEY_LEN_CHECK(NVS_KEY_PROGRESS);
 /* The old step index removed 2026-09-19 ("Coupling matrix (optional)") --
  * present in both the v1/v2 (13-step) and v3 (14-step) on-disk layouts, at
  * the same index in both since it predates the v3 step-13 addition. */
-#define SETUP_WIZARD_REMOVED_OLD_STEP_INDEX 11u
+#define SETUP_WIZARD_REMOVED_OLD_STEP_11_INDEX 11u
+
+/* Historical on-disk step count for the v4 blob layout (2026-09-19's
+ * "drop old step 11" era, ids 0..12) -- frozen for the same reason as the
+ * constants above: SETUP_WIZARD_STEP_COUNT itself moved on again (to 12) the
+ * same day, when a second, separate step was folded away. */
+#define SETUP_WIZARD_LEGACY_V4_STEP_COUNT 13u
+
+/* The old step index removed 2026-09-19, second pass ("Current sensing:
+ * install & calibrate", folded into step 7). This index is the same 8 in
+ * every source layout this migrates from (v1/v2/v3's pre-step-11-drop
+ * numbering and v4's post-step-11-drop numbering alike), because 8 < 11 in
+ * both -- dropping step 11 never moves step 8. */
+#define SETUP_WIZARD_REMOVED_OLD_STEP_8_INDEX 8u
 
 /* ---- version 1 (historical): {state, ts} per step, no note ---- */
 typedef struct {
@@ -113,14 +126,32 @@ _Static_assert(sizeof(setup_wizard_progress_v3_legacy_t) ==
                    4 + SETUP_WIZARD_LEGACY_V3_STEP_COUNT * (8 + SETUP_WIZARD_NOTE_MAX),
                "setup_wizard_progress_v3_legacy_t layout changed");
 
-/* ---- version 4 (current): same per-step record, SETUP_WIZARD_STEP_COUNT
- * (13) steps -- 2026-09-19 dropped the old step 11 ("Coupling matrix
- * (optional)") and shifted every step after it down by one slot (see
- * remap_dropping_old_step_11() below and setup_wizard_progress.h's header
- * comment). Note this blob is BYTE-IDENTICAL in size to the historical v2
- * blob (both hold 13 records of setup_wizard_step_record_t) -- the two are
- * told apart by the `version` field alone, checked explicitly in
- * setup_wizard_progress_start() before either is trusted. */
+/* ---- version 4 (historical, 2026-09-19 morning..2026-09-19 evening): same
+ * per-step record, 13 steps -- dropped the old step 11 ("Coupling matrix
+ * (optional)") and shifted every step after it down by one slot. Kept around
+ * ONLY so a board that persisted a v4 blob in that window still migrates
+ * forward (dropping the second removed step, old step 8) instead of having
+ * its progress silently discarded. Note this blob is BYTE-IDENTICAL in size
+ * to the historical v2 blob (both hold 13 records of
+ * setup_wizard_step_record_t) -- the two are told apart by the `version`
+ * field alone, checked explicitly in setup_wizard_progress_start() before
+ * either is trusted. */
+typedef struct {
+    uint8_t version;
+    uint8_t reserved[3];
+    setup_wizard_step_record_t steps[SETUP_WIZARD_LEGACY_V4_STEP_COUNT];
+} setup_wizard_progress_v4_legacy_t;
+
+_Static_assert(sizeof(setup_wizard_progress_v4_legacy_t) ==
+                   4 + SETUP_WIZARD_LEGACY_V4_STEP_COUNT * (8 + SETUP_WIZARD_NOTE_MAX),
+               "setup_wizard_progress_v4_legacy_t layout changed");
+
+/* ---- version 5 (current): same per-step record, SETUP_WIZARD_STEP_COUNT
+ * (12) steps -- 2026-09-19 additionally dropped the old step 8 ("Current
+ * sensing: install & calibrate", folded into step 7's safety-processor
+ * commissioning screen) and shifted every step after it down by one more
+ * slot (see remap_drop_index() below and setup_wizard_progress.h's header
+ * comment). */
 typedef struct {
     uint8_t version;
     uint8_t reserved[3];
@@ -145,8 +176,8 @@ static void apply_defaults(void)
     }
 }
 
-/* Fills s_steps from a validated current-version (v4, 13-step) blob. */
-static void adopt_v4(const setup_wizard_progress_blob_t *blob)
+/* Fills s_steps from a validated current-version (v5, 12-step) blob. */
+static void adopt_v5(const setup_wizard_progress_blob_t *blob)
 {
     for (uint8_t i = 0; i < SETUP_WIZARD_STEP_COUNT; i++) {
         s_steps[i].state = (setup_wizard_step_state_t)blob->steps[i].state;
@@ -156,80 +187,106 @@ static void adopt_v4(const setup_wizard_progress_blob_t *blob)
     }
 }
 
-/* Shared remap for every pre-v4 layout (v1, v2-legacy, v3-legacy): the old
- * step 11 ("Coupling matrix (optional)", removed 2026-09-19) sat at the same
- * index in all three, and everything after it shifts down by one slot in
- * the new (13-step) numbering. `old_count` is the source layout's own step
- * count (13 for v1/v2, 14 for v3); `has_note` says whether the source
+/* General "drop one step index, shift everything after it down one slot"
+ * remap, shared by every migration below. `dest` must already be at
+ * PENDING/empty defaults for its whole `dest_count` -- the dropped index and
+ * any source index beyond `dest_count`'s re-index range are deliberately
+ * left untouched, since there is nothing to migrate for either. `old_count`
+ * is the source layout's own step count; `has_note` says whether the source
  * per-step record carries a note field (false only for v1's 8-byte record).
- * s_steps must already be at defaults (apply_defaults()) before this runs,
- * since the removed old step 11 and any new step beyond old_count's re-index
- * range are deliberately left untouched (PENDING) -- there is nothing to
- * migrate for either. */
-static void remap_dropping_old_step_11(const void *old_steps, size_t old_stride, uint8_t old_count, bool has_note)
+ * Every known record layout starts with {state(u8), reserved[3], ts(u32)} --
+ * only the tail (note[], present or not) differs, so this is layout-agnostic
+ * beyond that. */
+static void remap_drop_index(setup_wizard_step_t *dest, uint8_t dest_count,
+                              const void *old_steps, size_t old_stride, uint8_t old_count,
+                              uint8_t drop_index, bool has_note)
 {
     for (uint8_t old_i = 0; old_i < old_count; old_i++) {
-        if (old_i == SETUP_WIZARD_REMOVED_OLD_STEP_INDEX) {
-            continue; /* the coupling-matrix step itself -- discarded, not migrated */
+        if (old_i == drop_index) {
+            continue; /* the removed step itself -- discarded, not migrated */
         }
-        uint8_t new_i = (old_i < SETUP_WIZARD_REMOVED_OLD_STEP_INDEX) ? old_i : (uint8_t)(old_i - 1);
-        if (new_i >= SETUP_WIZARD_STEP_COUNT) {
+        uint8_t new_i = (old_i < drop_index) ? old_i : (uint8_t)(old_i - 1);
+        if (new_i >= dest_count) {
             continue; /* should not happen for any known old_count, but never write out of bounds */
         }
         const uint8_t *rec = (const uint8_t *)old_steps + (size_t)old_i * old_stride;
-        /* Every known record layout (v1 and v2/v3) starts with {state(u8),
-         * reserved[3], ts(u32)} -- only the tail (note[], present or not)
-         * differs, so this part is layout-agnostic. */
         uint8_t state = rec[0];
         uint32_t ts;
         memcpy(&ts, rec + 4, sizeof(ts));
-        s_steps[new_i].state = (setup_wizard_step_state_t)state;
-        s_steps[new_i].ts = ts;
+        dest[new_i].state = (setup_wizard_step_state_t)state;
+        dest[new_i].ts = ts;
         if (has_note) {
-            memcpy(s_steps[new_i].note, rec + 8, SETUP_WIZARD_NOTE_MAX);
-            s_steps[new_i].note[SETUP_WIZARD_NOTE_MAX - 1] = '\0';
+            memcpy(dest[new_i].note, rec + 8, SETUP_WIZARD_NOTE_MAX);
+            dest[new_i].note[SETUP_WIZARD_NOTE_MAX - 1] = '\0';
         } else {
-            s_steps[new_i].note[0] = '\0';
+            dest[new_i].note[0] = '\0';
         }
     }
 }
 
-/* Migrates a validated version-1 blob forward: state/ts carry over (note
- * defaults to empty -- v1 predates that field entirely) for every step
- * except the removed old step 11, which is dropped, and every step after it
- * shifts down one slot per remap_dropping_old_step_11(). v1 predates step 13
- * ("Authentication") too, so the new step 12 is left at its already-applied
- * PENDING default -- nothing recorded for it to migrate. */
+/* Migrates a validated version-1 blob all the way to v5: first drops old
+ * step 11 ("Coupling matrix") into a 13-step intermediate, then drops old
+ * step 8 ("Current sensing: install & calibrate", same index either side of
+ * the step-11 drop since 8 < 11) from that intermediate into s_steps. Note
+ * defaults to empty throughout -- v1 predates that field entirely. */
 static void adopt_v1_migrate(const setup_wizard_progress_v1_t *blob)
 {
-    remap_dropping_old_step_11(blob->steps, sizeof(blob->steps[0]), SETUP_WIZARD_LEGACY_V1V2_STEP_COUNT, false);
-    ESP_LOGI(TAG, "migrated setup wizard progress v1 -> v%u (old step 11 dropped, steps after it shifted down, "
-                  "note defaults empty, new step 12 defaults pending)",
+    setup_wizard_step_t tmp[SETUP_WIZARD_LEGACY_V4_STEP_COUNT];
+    memset(tmp, 0, sizeof(tmp));
+    remap_drop_index(tmp, SETUP_WIZARD_LEGACY_V4_STEP_COUNT,
+                      blob->steps, sizeof(blob->steps[0]), SETUP_WIZARD_LEGACY_V1V2_STEP_COUNT,
+                      SETUP_WIZARD_REMOVED_OLD_STEP_11_INDEX, false);
+    remap_drop_index(s_steps, SETUP_WIZARD_STEP_COUNT,
+                      tmp, sizeof(tmp[0]), SETUP_WIZARD_LEGACY_V4_STEP_COUNT,
+                      SETUP_WIZARD_REMOVED_OLD_STEP_8_INDEX, true);
+    ESP_LOGI(TAG, "migrated setup wizard progress v1 -> v%u (old steps 11 and 8 dropped, later steps shifted "
+                  "down, note defaults empty)",
              SETUP_WIZARD_PROGRESS_VERSION);
 }
 
-/* Migrates a validated legacy version-2 (13-step) blob forward: every stored
- * record except the removed old step 11 carries over via
- * remap_dropping_old_step_11(); v2 predates step 13 ("Authentication") too,
- * so the new step 12 is left at its already-applied PENDING default. */
+/* Migrates a validated legacy version-2 (13-step) blob the same two-step way
+ * as v1 above, except the source already carries notes. */
 static void adopt_v2_legacy_migrate(const setup_wizard_progress_v2_legacy_t *blob)
 {
-    remap_dropping_old_step_11(blob->steps, sizeof(blob->steps[0]), SETUP_WIZARD_LEGACY_V1V2_STEP_COUNT, true);
-    ESP_LOGI(TAG, "migrated setup wizard progress v2 (13 steps) -> v%u (old step 11 dropped, steps after it "
-                  "shifted down, new step 12 defaults pending)",
+    setup_wizard_step_t tmp[SETUP_WIZARD_LEGACY_V4_STEP_COUNT];
+    memset(tmp, 0, sizeof(tmp));
+    remap_drop_index(tmp, SETUP_WIZARD_LEGACY_V4_STEP_COUNT,
+                      blob->steps, sizeof(blob->steps[0]), SETUP_WIZARD_LEGACY_V1V2_STEP_COUNT,
+                      SETUP_WIZARD_REMOVED_OLD_STEP_11_INDEX, true);
+    remap_drop_index(s_steps, SETUP_WIZARD_STEP_COUNT,
+                      tmp, sizeof(tmp[0]), SETUP_WIZARD_LEGACY_V4_STEP_COUNT,
+                      SETUP_WIZARD_REMOVED_OLD_STEP_8_INDEX, true);
+    ESP_LOGI(TAG, "migrated setup wizard progress v2 (13 steps) -> v%u (old steps 11 and 8 dropped, later steps "
+                  "shifted down)",
              SETUP_WIZARD_PROGRESS_VERSION);
 }
 
-/* Migrates a validated legacy version-3 (14-step) blob forward: every stored
- * record except the removed old step 11 carries over via
- * remap_dropping_old_step_11(), INCLUDING old step 13 ("Authentication"),
- * which lands at new step 12 -- v3 is the one historical layout that already
- * had it recorded. */
+/* Migrates a validated legacy version-3 (14-step) blob the same way,
+ * INCLUDING old step 13 ("Authentication"), which lands at new step 11. */
 static void adopt_v3_legacy_migrate(const setup_wizard_progress_v3_legacy_t *blob)
 {
-    remap_dropping_old_step_11(blob->steps, sizeof(blob->steps[0]), SETUP_WIZARD_LEGACY_V3_STEP_COUNT, true);
-    ESP_LOGI(TAG, "migrated setup wizard progress v3 (14 steps) -> v%u (13 steps, old step 11 dropped, "
-                  "steps after it shifted down)",
+    setup_wizard_step_t tmp[SETUP_WIZARD_LEGACY_V4_STEP_COUNT];
+    memset(tmp, 0, sizeof(tmp));
+    remap_drop_index(tmp, SETUP_WIZARD_LEGACY_V4_STEP_COUNT,
+                      blob->steps, sizeof(blob->steps[0]), SETUP_WIZARD_LEGACY_V3_STEP_COUNT,
+                      SETUP_WIZARD_REMOVED_OLD_STEP_11_INDEX, true);
+    remap_drop_index(s_steps, SETUP_WIZARD_STEP_COUNT,
+                      tmp, sizeof(tmp[0]), SETUP_WIZARD_LEGACY_V4_STEP_COUNT,
+                      SETUP_WIZARD_REMOVED_OLD_STEP_8_INDEX, true);
+    ESP_LOGI(TAG, "migrated setup wizard progress v3 (14 steps) -> v%u (old steps 11 and 8 dropped, later steps "
+                  "shifted down)",
+             SETUP_WIZARD_PROGRESS_VERSION);
+}
+
+/* Migrates a validated legacy version-4 (13-step, old step 11 already
+ * dropped) blob forward by dropping the second removed step, old step 8. */
+static void adopt_v4_legacy_migrate(const setup_wizard_progress_v4_legacy_t *blob)
+{
+    remap_drop_index(s_steps, SETUP_WIZARD_STEP_COUNT,
+                      blob->steps, sizeof(blob->steps[0]), SETUP_WIZARD_LEGACY_V4_STEP_COUNT,
+                      SETUP_WIZARD_REMOVED_OLD_STEP_8_INDEX, true);
+    ESP_LOGI(TAG, "migrated setup wizard progress v4 (13 steps) -> v%u (12 steps, old step 8 dropped, steps "
+                  "after it shifted down)",
              SETUP_WIZARD_PROGRESS_VERSION);
 }
 
@@ -282,16 +339,32 @@ esp_err_t setup_wizard_progress_start(void)
         return ESP_OK;
     }
 
-    /* v4 (current) and legacy v2 are BYTE-IDENTICAL in size (both 13 records
-     * of setup_wizard_step_record_t) -- `version` is the only thing that
-     * tells them apart, so this size bucket must check it before anything
-     * else. */
+    /* v5 (current, 12-step) is its OWN size now -- unlike the old v2/v4
+     * pairing, dropping a second step means the current blob is no longer
+     * byte-identical to any legacy one, so this bucket only ever holds v5. */
     if (len == sizeof(setup_wizard_progress_blob_t)) {
-        const setup_wizard_progress_blob_t *v4 = (const setup_wizard_progress_blob_t *)&raw;
-        if (v4->version == SETUP_WIZARD_PROGRESS_VERSION &&
-            steps_valid(v4->steps, sizeof(v4->steps[0]), SETUP_WIZARD_STEP_COUNT)) {
-            adopt_v4(v4);
-            ESP_LOGI(TAG, "setup wizard progress loaded (v%u)", (unsigned)v4->version);
+        const setup_wizard_progress_blob_t *v5 = (const setup_wizard_progress_blob_t *)&raw;
+        if (v5->version == SETUP_WIZARD_PROGRESS_VERSION &&
+            steps_valid(v5->steps, sizeof(v5->steps[0]), SETUP_WIZARD_STEP_COUNT)) {
+            adopt_v5(v5);
+            ESP_LOGI(TAG, "setup wizard progress loaded (v%u)", (unsigned)v5->version);
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "stored setup wizard progress blob is %u-step-sized but version/fields do not check out "
+                      "(saw version %u, expected %u) -- defaulting",
+                 (unsigned)SETUP_WIZARD_STEP_COUNT, (unsigned)v5->version, (unsigned)SETUP_WIZARD_PROGRESS_VERSION);
+        return ESP_OK;
+    }
+
+    /* Legacy v2 (13 steps, pre-2026-09-18) and legacy v4 (13 steps,
+     * 2026-09-19's brief between-removals window) are BYTE-IDENTICAL in
+     * size -- `version` is the only thing that tells them apart, so this
+     * size bucket must check it before anything else. */
+    if (len == sizeof(setup_wizard_progress_v4_legacy_t)) {
+        const setup_wizard_progress_v4_legacy_t *v4 = (const setup_wizard_progress_v4_legacy_t *)&raw;
+        if (v4->version == 4u &&
+            steps_valid(v4->steps, sizeof(v4->steps[0]), SETUP_WIZARD_LEGACY_V4_STEP_COUNT)) {
+            adopt_v4_legacy_migrate(v4);
             return ESP_OK;
         }
         const setup_wizard_progress_v2_legacy_t *v2 = (const setup_wizard_progress_v2_legacy_t *)&raw;
@@ -301,9 +374,8 @@ esp_err_t setup_wizard_progress_start(void)
             return ESP_OK;
         }
         ESP_LOGW(TAG, "stored setup wizard progress blob is 13-step-sized but version/fields do not check out "
-                      "(saw version %u, expected %u current or 2 legacy) -- defaulting",
-                 (unsigned)((const setup_wizard_progress_blob_t *)&raw)->version,
-                 (unsigned)SETUP_WIZARD_PROGRESS_VERSION);
+                      "(saw version %u, expected 4 or 2 legacy) -- defaulting",
+                 (unsigned)((const setup_wizard_progress_v4_legacy_t *)&raw)->version);
         return ESP_OK;
     }
 
@@ -332,9 +404,11 @@ esp_err_t setup_wizard_progress_start(void)
         return ESP_OK;
     }
 
-    ESP_LOGW(TAG, "stored setup wizard progress blob is size %u (recognize v1=%u, v2/v4=%u, v3-legacy=%u) -- defaulting",
+    ESP_LOGW(TAG, "stored setup wizard progress blob is size %u (recognize v1=%u, v2/v4-legacy=%u, v3-legacy=%u, "
+                  "v5-current=%u) -- defaulting",
              (unsigned)len, (unsigned)sizeof(setup_wizard_progress_v1_t),
-             (unsigned)sizeof(setup_wizard_progress_blob_t), (unsigned)sizeof(setup_wizard_progress_v3_legacy_t));
+             (unsigned)sizeof(setup_wizard_progress_v4_legacy_t), (unsigned)sizeof(setup_wizard_progress_v3_legacy_t),
+             (unsigned)sizeof(setup_wizard_progress_blob_t));
     return ESP_OK;
 }
 

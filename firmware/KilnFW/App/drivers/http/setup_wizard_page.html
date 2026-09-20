@@ -277,25 +277,24 @@ from the board (<code>GET /api/readiness</code>), never trusted from memory alon
   <div id="stepBody5" hidden></div>
   <div id="stepBody6" hidden></div>
   <!-- Step 7 (implementation step 8 of SETUP_WIZARD.md section 8):
-       safety processor commissioning, embedded inline per owner decision --
-       reuses the /api/safety/commissioning write path and its
-       confirm_commit_landed() read-back via commissioning_shared.js, rather
-       than a second implementation of confirm-and-verify. -->
+       safety processor commissioning, embedded inline -- reuses the
+       existing /api/safety/commissioning write path and its own
+       confirm-then-read-back verification, rather than a second
+       implementation of confirm-and-verify. This step also covers
+       current-sensing (CT) install, topology, per-zone channel mapping and
+       gain calibration, folded in 2026-09-19 so the same one screen and
+       write path own the whole safety-processor commissioning surface. -->
   <div id="stepBody7" hidden></div>
-  <!-- Steps 8-12 (this pass): CT setup, CT mapping verification (heat),
-       PID gains (autotune or hand-entered; the coupling matrix summary is
-       folded into this step's own render, see renderStep10), final gate,
-       authentication. Former step 11 ("Coupling matrix (optional)") was
-       removed 2026-09-19 -- see the comment above WIZARD_STEPS -- and steps
-       after it renumbered down by one (old 12 "First profile..." -> new 11,
-       old 13 "Authentication" -> new 12); setup_wizard_progress.c's v4 NVS
-       migration (remap_dropping_old_step_11()) keeps an old blob's real
-       per-step state for these two intact across the shift. -->
+  <!-- Steps 8-11 (this pass): CT mapping verification (heat), PID gains
+       (autotune or hand-entered; the cross-zone coupling summary is folded
+       into this step's own render, see renderStep9), final gate,
+       authentication. Persisted-state compatibility for every step
+       removal/renumber is handled server-side by
+       setup_wizard_progress.c's versioned migration chain, not by a gap. -->
   <div id="stepBody8" hidden></div>
   <div id="stepBody9" hidden></div>
   <div id="stepBody10" hidden></div>
   <div id="stepBody11" hidden></div>
-  <div id="stepBody12" hidden></div>
 
   <div id="stepGenericContent" hidden>
     <p class="hint">This step's own screen (fields, live validation, the commit path) is not built yet
@@ -346,28 +345,34 @@ var WIZARD_STEPS = [
   { id: 4, title: 'Zone type: heater vs on/off device', readinessKeys: ['control_mode'], safety: false },
   { id: 5, title: 'Relays: count, assignment, names', readinessKeys: ['relays_assigned'], safety: false },
   { id: 6, title: 'Zone commissioning limits', readinessKeys: ['guard_max_temp', 'guard_cross_zone'], safety: true },
-  { id: 7, title: 'Safety processor commissioning', readinessKeys: ['safety_commissioned'], safety: true },
-  { id: 8, title: 'Current sensing: install & calibrate', readinessKeys: [], safety: true },
-  { id: 9, title: 'CT mapping verification', readinessKeys: ['ct_attribution'], safety: true },
-  { id: 10, title: 'PID gains (autotune or by hand)', readinessKeys: ['autotune'], safety: false },
-  // Former step 11 ("Coupling matrix (optional)") was removed 2026-09-19
-  // (owner report: nothing on that screen could be triggered from the
-  // wizard -- the matrix is only ever populated as a by-product of a
-  // zone's autotune, run from step 10 or /settings/zones). Its summary now
-  // lives as one line inside step 10's own render (renderStep10), linking to
-  // /settings/zones where the full matrix already displays. Steps after it
-  // are RENUMBERED down by one (old 12 "First profile..." -> 11, old 13
-  // "Authentication" -> 12), keeping ids a dense 0..12 run as
-  // setup_wizard_step_count_mirror_drift_check.py requires. Persisted-state
-  // compatibility for this shift is handled server-side, not by a gap: an
-  // old NVS blob's real per-step state for what were steps 12/13 survives at
-  // the new indices 11/12 via setup_wizard_progress.c's v4 migration
-  // (remap_dropping_old_step_11()); only whatever was stored for the removed
-  // step 11 itself is discarded, matching computeStepState()'s existing
-  // "absence of data is not absence of problems" discipline for content that
-  // is no longer read.
-  { id: 11, title: 'First profile & final readiness gate', readinessKeys: ['profile_saved', 'storage'], safety: false },
-  { id: 12, title: 'Authentication (optional)', readinessKeys: [], safety: false },
+  // Step 7 absorbed the former standalone "Current sensing: install &
+  // calibrate" step 2026-09-19 (the old screen told an operator to "set the
+  // map manually" but offered no way to do it from the page). CT install,
+  // topology, per-zone channel mapping and gain calibration are now all
+  // written from this one screen, through the same staged/committed write
+  // path this step already used for tc_type/abs_max_temp_c. readinessKeys
+  // stays ['safety_commissioned']: that item already tracks every applicable
+  // parameter in the safety processor's config set, including the CT mapping
+  // and calibration fields, so it reflects this step's now-larger scope with
+  // no separate key needed.
+  { id: 7, title: 'Safety processor & current-sensing commissioning', readinessKeys: ['safety_commissioned'], safety: true },
+  { id: 8, title: 'CT mapping verification', readinessKeys: ['ct_attribution'], safety: true },
+  { id: 9, title: 'PID gains (autotune or by hand)', readinessKeys: ['autotune'], safety: false },
+  // Former steps "Coupling matrix (optional)" and "Current sensing: install
+  // & calibrate" were both removed from the numbered list 2026-09-19 -- the
+  // first because nothing on that screen could be triggered from the wizard
+  // itself (its summary now lives as one line inside step 9's own render,
+  // linking to the full matrix elsewhere); the second because it was folded
+  // into step 7 above. Steps after them are RENUMBERED down to keep ids a
+  // dense run, as the step-count mirror-drift check requires. Persisted-state
+  // compatibility for every shift like this is handled server-side, not by a
+  // gap: an old NVS blob's real per-step state for a step that moved survives
+  // at its new index via setup_wizard_progress.c's versioned migration chain;
+  // only whatever was stored for a step that was actually removed is
+  // discarded, matching computeStepState()'s existing "absence of data is
+  // not absence of problems" discipline for content that is no longer read.
+  { id: 10, title: 'First profile & final readiness gate', readinessKeys: ['profile_saved', 'storage'], safety: false },
+  { id: 11, title: 'Authentication (optional)', readinessKeys: [], safety: false },
 ];
 
 function defaultProgress() {
@@ -403,12 +408,13 @@ function computeStepState(step, storedStep, readinessByKey) {
   // back to an empty item list, or readiness_http.c's own checklist got
   // truncated and dropped exactly this step's key(s)) must never fall
   // through to trusting the stored blob -- absence of data is not absence
-  // of problems. Steps that legitimately declare no readinessKeys (8
-  // and 13 -- step 9 gained 'ct_attribution' with
-  // docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md, which is exactly what lets
-  // this file's existing regression machinery refuse a stale 'done' there;
-  // see the comment above WIZARD_STEPS) are unaffected: this can
-  // only be true for a step that named keys and got none of them back.
+  // of problems. Steps that legitimately declare no readinessKeys (0
+  // and 11, "Welcome / preflight" and "Authentication (optional)" as of
+  // the 2026-09-19 step-count reduction to 12 -- step 8 has
+  // 'ct_attribution' with docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md, which is
+  // exactly what lets this file's existing regression machinery refuse a
+  // stale 'done' there; see the comment above WIZARD_STEPS) are unaffected:
+  // this can only be true for a step that named keys and got none of them back.
   var readinessUnresolved = step.readinessKeys.length > 0 && items.length === 0;
 
   if (storedState === 'skipped') {
@@ -988,81 +994,20 @@ function ctZoneAssignmentHtml(mapMask, zoneForCh, ctTopology) {
 }
 var ZONE_CT_CHANNEL_COUNT_JS = 3; // mirrors ZONE_CT_CHANNEL_COUNT (zones_config_accessors.h)
 
-function renderStep8() {
-  var el = document.getElementById('stepBody8');
-  el.innerHTML = '<p class="hint">Loading current sensing setup&hellip;</p>';
-  return Promise.all([
-    fetchJsonOr('/api/safety/commissioning', null),
-    fetchJsonOr('/api/zones/ct_channel_map', null),
-  ]).then(function (r) {
-    var commissioning = r[0], ctMap = r[1];
-    if (!commissioning) {
-      el.innerHTML = '<p class="werr">Could not reach the safety processor -- reload once it answers again.</p>';
-      return;
-    }
-    var ctInstalled = getCommissioningParam(commissioning, 'ct_installed');
-    var ctTopology = getCommissioningParam(commissioning, 'ct_topology');
-    var html = '<p class="hint">Current sensing (installed, topology, per-channel mapping and gain/offset ' +
-      'calibration) is written through the safety processor\'s guided commissioning flow -- ' +
-      '<a href="/safety/commissioning">open it &rarr;</a> -- the same named-confirmation, read-back-verified ' +
-      'write path step 7 uses, not a second one.</p>';
-    if (ctInstalled === null) {
-      html += '<p class="hint">Not yet commissioned -- <code>ct_installed</code> is unknown until step 7 ' +
-        'is completed.</p>';
-    } else if (ctInstalled === 0) {
-      html += '<div class="review-row"><span>CT installed?</span><span class="rv">No</span></div>' +
-        '<p class="hint">A legitimate finish: guards S3 (welded contactor), S4, S9 and S14, which need a ' +
-        'current reading, report <b>deliberately_off</b> rather than blocking anything ' +
-        '(project_no_cts_fitted_guard_coverage).</p>';
-    } else {
-      var topoName = (ctTopology === 1) ? 'summed (one CT reads several zones together)' :
-        (ctTopology === 0) ? 'per-zone (one CT per zone)' : 'not set yet';
-      html += '<div class="review-row"><span>CT installed?</span><span class="rv">Yes</span></div>' +
-        '<div class="review-row"><span>Topology</span><span class="rv">' + window.kcEscapeHtml(topoName) +
-        '</span></div>';
-      html += '<h4>Dashboard consequence of the current mapping</h4>' +
-        (ctMap ? ctZoneAssignmentHtml(ctMap.mask, ctMap.zone, ctTopology) :
-          '<p class="hint">Could not read the current mapping.</p>');
-    }
-    html += '<div id="step8Err"></div><div id="step8Ok"></div>';
-    html += '<div class="gnav"><button type="button" id="step8Done">I have reviewed CT setup above &amp; mark done</button></div>';
-    el.innerHTML = html;
-
-    document.getElementById('step8Done').addEventListener('click', function () {
-      // Commit-time re-check (same discipline as every other step): re-read
-      // ct_installed/ct_topology/mapping right now, not the snapshot this
-      // screen loaded with -- another tab could be mid-edit on /safety/commissioning.
-      Promise.all([
-        fetchJsonOr('/api/safety/commissioning', null),
-        fetchJsonOr('/api/zones/ct_channel_map', null),
-      ]).then(function (fresh) {
-        var freshInstalled = getCommissioningParam(fresh[0], 'ct_installed');
-        var freshTopo = getCommissioningParam(fresh[0], 'ct_topology');
-        var freshMap = fresh[1];
-        var v = validateStep8(freshInstalled, freshTopo, freshMap ? freshMap.mask : 0, freshMap ? freshMap.zone : []);
-        var errEl = document.getElementById('step8Err');
-        if (!v.valid) { renderErrList(errEl, v.errors); return; }
-        renderErrList(errEl, []);
-        postStepState(8, 'done').then(function () { loadAll(); });
-      });
-    });
-  });
-}
-
-/* ---- Step 9 (CT mapping verification, applies HEAT). Requirement 3: this
+/* ---- Step 8 (CT mapping verification, applies HEAT). Requirement 3: this
  * is one of only two steps in the whole wizard that heats the kiln (the
- * other is step 10's autotune) -- the screen must not be walkable into
+ * other is step 9's autotune) -- the screen must not be walkable into
  * unaware, must clearly say heat + owner presence are required, and must
  * remain skippable/resumable. Reuses /api/zones/current_sweep/{start,
- * status,abort} verbatim (zones_current_sweep_task.c) -- no second sweep
- * implementation. Busy refusal mirrors safety_commissioning_page.html's
- * checkFiringOrAutotuneRunning(): poll /api/profile_exec + /api/autotune,
+ * status,abort} verbatim -- no second sweep
+ * implementation. Busy refusal mirrors the existing safety-commissioning
+ * page's own busy check: poll /api/profile_exec + /api/autotune,
  * refuse when either is actually running, never block on a failed fetch. */
-var step9Poll = null;
+var step8Poll = null;
 
-function step9StopPoll() { if (step9Poll) { clearInterval(step9Poll); step9Poll = null; } }
+function step8StopPoll() { if (step8Poll) { clearInterval(step8Poll); step8Poll = null; } }
 
-function step9CheckBusy() {
+function step8CheckBusy() {
   return Promise.all([
     fetchJsonOr('/api/profile_exec', null),
     fetchJsonOr('/api/autotune', null),
@@ -1090,7 +1035,7 @@ function step9CheckBusy() {
 // ct_map_derived_mask carries one bit per resolved CT channel. Everything
 // else -- no zones swept, a partial mask, a missing mask -- is INCONCLUSIVE,
 // and an inconclusive run must never render or persist a green verdict.
-function step9SweepVerdict(st) {
+function step8SweepVerdict(st) {
   if (!st || st.state !== 'done') {
     return { resolved: false, text: 'The CT verification sweep did not finish.' };
   }
@@ -1108,9 +1053,9 @@ function step9SweepVerdict(st) {
     ' This step is not complete -- the result is inconclusive, not a pass.' };
 }
 
-function renderStep9() {
-  var el = document.getElementById('stepBody9');
-  step9StopPoll();
+function renderStep8() {
+  var el = document.getElementById('stepBody8');
+  step8StopPoll();
   el.innerHTML = '<p class="hint">Loading&hellip;</p>';
   return fetchJsonOr('/api/safety/commissioning', null).then(function (commissioning) {
     var ctInstalled = getCommissioningParam(commissioning, 'ct_installed');
@@ -1127,11 +1072,11 @@ function renderStep9() {
       // Posting 'done' instead makes the two screens agree, and matches the
       // one-word fix the review recommended over making `safety` a
       // predicate over live ct_installed.
-      el.innerHTML = '<p class="hint">No CT installed (step 8) -- there is nothing to verify. This is a ' +
-        'legitimate finish, not a deferral.</p><div class="gnav"><button type="button" id="step9Skip">No CT ' +
+      el.innerHTML = '<p class="hint">No CT installed (step 7) -- there is nothing to verify. This is a ' +
+        'legitimate finish, not a deferral.</p><div class="gnav"><button type="button" id="step8Skip">No CT ' +
         'installed &amp; mark done</button></div>';
-      document.getElementById('step9Skip').addEventListener('click', function () {
-        postStepState(9, 'done', 'ct_installed=0, nothing to verify').then(function () { loadAll(); });
+      document.getElementById('step8Skip').addEventListener('click', function () {
+        postStepState(8, 'done', 'ct_installed=0, nothing to verify').then(function () { loadAll(); });
       });
       return;
     }
@@ -1140,29 +1085,31 @@ function renderStep9() {
       '<b>Closing this browser tab does NOT stop it</b> -- use the Abort button below, or ' +
       '<a href="/settings/zones">/settings/zones</a>, to actually stop heating.</div>';
     html += '<label style="display:flex;align-items:center;gap:0.5em;min-height:32px;"><input type="checkbox" ' +
-      'id="step9Ack"> I am present and the kiln is safe to heat right now.</label>';
-    html += '<div id="step9Busy" class="hint"></div>';
-    html += '<div id="step9Status" class="hint">Not running.</div>';
-    html += '<div id="step9Err"></div><div id="step9Ok"></div>';
-    html += '<div class="gnav"><button type="button" id="step9Start" disabled>Start CT verification sweep</button>' +
-      '<button type="button" id="step9Abort">Abort</button>' +
-      '<button type="button" id="step9SkipLater">Skip for now</button></div>';
+      'id="step8Ack"> I am present and the kiln is safe to heat right now.</label>';
+    html += '<div id="step8Busy" class="hint"></div>';
+    html += '<div id="step8Status" class="hint">Not running.</div>';
+    html += '<div id="step8Err"></div><div id="step8Ok"></div>';
+    html += '<p class="hint">Skipping stays pending: this step is safety-relevant, so "Skip for now" leaves ' +
+      'it outstanding and permanently blocks "setup complete" until you come back and finish it.</p>';
+    html += '<div class="gnav"><button type="button" id="step8Start" disabled>Start CT verification sweep</button>' +
+      '<button type="button" id="step8Abort">Abort</button>' +
+      '<button type="button" id="step8SkipLater">Skip for now</button></div>';
     el.innerHTML = html;
 
-    var ackBox = document.getElementById('step9Ack');
-    var startBtn = document.getElementById('step9Start');
+    var ackBox = document.getElementById('step8Ack');
+    var startBtn = document.getElementById('step8Start');
     ackBox.addEventListener('change', function () { startBtn.disabled = !ackBox.checked; });
 
     function renderSweepStatus(st) {
-      var statusEl = document.getElementById('step9Status');
+      var statusEl = document.getElementById('step8Status');
       if (!st) { statusEl.textContent = 'Could not read sweep status.'; return; }
       statusEl.textContent = 'State: ' + st.state + ' -- zone ' + (st.zone_index + 1) + ', ' + st.zones_done +
         ' of ' + st.zones_total + ' zones done.' + (st.reason ? ' (' + st.reason + ')' : '') +
         (st.ct_map_reason ? ' CT mapping: ' + st.ct_map_reason : '');
       if (st.state === 'done') {
-        step9StopPoll();
-        var v = step9SweepVerdict(st);
-        var okEl = document.getElementById('step9Ok');
+        step8StopPoll();
+        var v = step8SweepVerdict(st);
+        var okEl = document.getElementById('step8Ok');
         if (!v.resolved) {
           // A sweep that RAN is not a sweep that RESOLVED anything. The
           // firmware reports which CT channels it could actually attribute
@@ -1176,23 +1123,23 @@ function renderStep9() {
           return;
         }
         okEl.innerHTML = '<p class="wok">' + v.text + '</p>';
-        postStepState(9, 'done').then(function () {
+        postStepState(8, 'done').then(function () {
           armStepMessage(9, function () {
-            var ok2 = document.getElementById('step9Ok');
+            var ok2 = document.getElementById('step8Ok');
             if (ok2) ok2.innerHTML = '<p class="wok">' + v.text + '</p>';
           });
           loadAll();
         });
       } else if (st.state === 'failed' || st.state === 'aborted') {
-        step9StopPoll();
+        step8StopPoll();
       }
     }
 
-    document.getElementById('step9Start').addEventListener('click', function () {
-      var errEl = document.getElementById('step9Err');
+    document.getElementById('step8Start').addEventListener('click', function () {
+      var errEl = document.getElementById('step8Err');
       renderErrList(errEl, []);
       if (!ackBox.checked) { renderErrList(errEl, ['Confirm you are present and it is safe to heat first.']); return; }
-      step9CheckBusy().then(function (busyReason) {
+      step8CheckBusy().then(function (busyReason) {
         if (busyReason) { renderErrList(errEl, [busyReason]); return; }
         fetch('/api/zones/current_sweep/start', { method: 'POST' }).then(function (r) {
           return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, body: j }; });
@@ -1203,23 +1150,23 @@ function renderStep9() {
             renderErrList(errEl, [res.body && res.body.reason ? res.body.reason : 'sweep refused to start']);
             return;
           }
-          step9StopPoll();
-          step9Poll = setInterval(function () {
+          step8StopPoll();
+          step8Poll = setInterval(function () {
             fetchJsonOr('/api/zones/current_sweep/status', null).then(renderSweepStatus);
           }, 2000);
         });
       });
     });
 
-    document.getElementById('step9Abort').addEventListener('click', function () {
+    document.getElementById('step8Abort').addEventListener('click', function () {
       fetch('/api/zones/current_sweep/abort', { method: 'POST' }).then(function () {
         return fetchJsonOr('/api/zones/current_sweep/status', null).then(renderSweepStatus);
       });
     });
 
-    document.getElementById('step9SkipLater').addEventListener('click', function () {
-      step9StopPoll();
-      postStepState(9, 'skipped', 'deferred -- resume later, requires heat + owner present').then(function () { loadAll(); });
+    document.getElementById('step8SkipLater').addEventListener('click', function () {
+      step8StopPoll();
+      postStepState(8, 'skipped', 'deferred -- resume later, requires heat + owner present').then(function () { loadAll(); });
     });
   });
 }
@@ -1266,12 +1213,16 @@ function couplingSummaryHtml(matrix, zones) {
     total++;
     if (c.valid) measured++;
   });
+  if (total === 0) {
+    return '<p class="hint">Cross-zone coupling: not applicable for a single-zone kiln (no other ' +
+      'zone to couple with).</p>';
+  }
   return '<p class="hint">Cross-zone coupling: ' + measured + ' of ' + total +
     ' pair(s) measured (populated by autotune). <a href="/settings/zones">View matrix &rarr;</a></p>';
 }
 
-function renderStep10() {
-  var el = document.getElementById('stepBody10');
+function renderStep9() {
+  var el = document.getElementById('stepBody9');
   el.innerHTML = '<p class="hint">Loading zones&hellip;</p>';
   return Promise.all([
     fetchJsonOr('/api/zones', null),
@@ -1290,7 +1241,7 @@ function renderStep10() {
       return;
     }
     var html = '<p class="hint"><b>Hand-entered gains complete this step just as fully as autotune does</b> ' +
-      '-- this is a deliberate owner decision (SETUP_WIZARD.md section 10 Q4), not a shortcut nobody ' +
+      '-- autotune is not required, this is a deliberate design choice, not a shortcut nobody ' +
       'noticed. <code>/api/readiness</code>\'s <code>autotune</code> item accepts either a full identified ' +
       'model or <code>kp &gt; 0</code> typed in by hand, for every zone, and this screen checks the exact ' +
       'same thing.</p>';
@@ -1354,7 +1305,7 @@ function renderStep10() {
             resultEl.textContent = matched ? 'Stored.' : 'WARNING: board reports different gains than sent.';
             resultEl.className = matched ? 's10result wok' : 's10result werr';
             if (matched && kp > 0) {
-              postStepState(10, 'done').then(function () { loadAll(); });
+              postStepState(9, 'done').then(function () { loadAll(); });
             }
           });
         }).catch(function (e) {
@@ -1378,8 +1329,8 @@ function renderStep10() {
  * design (plan section 5: the wizard stores no config value and no
  * completion flag; the only authority is /api/readiness, read fresh every
  * time). */
-function renderStep11() {
-  var el = document.getElementById('stepBody11');
+function renderStep10() {
+  var el = document.getElementById('stepBody10');
   el.innerHTML = '<p class="hint">Loading&hellip;</p>';
   return fetchJsonOr('/api/profiles', null).then(function (profiles) {
     var gate = computeCompleteness(latestMerged, latestReadiness);
@@ -1394,58 +1345,104 @@ function renderStep11() {
   });
 }
 
-/* ---- Step 12 (WEB_AUTH_PLAN.md section 11, renumbered from 13 on
- * 2026-09-19 when former step 11 "Coupling matrix (optional)" was removed):
- * "the setup wizard should recommend enabling it. It presents an 'enable
- * authentication' step that is skippable, defaults the checkbox to off to
- * match the shipped default, and states in one line what is at stake ...
- * Recommend without overriding the owner's default." This step never itself
- * decides transition legality or touches sessions -- it only reads GET
- * /api/security/policy for the current state and, when the owner opts in,
- * links to the real security settings page (/settings/security) where
- * web_auth_policy_check_transition() (via POST /api/security/policy) is the
- * one place that enforces "no administrator credential -> refused" and
- * clears sessions on enable. The checkbox here is a plain, unpersisted
- * intent toggle -- checking it never calls the enable API by itself, it
- * only reveals the link, so leaving this step without following the link
- * changes nothing on the board (the shipped default is preserved either
- * way). readinessKeys: [] -- like steps 8/9, this step is optional and
+/* ---- Step 11 (WEB_AUTH_PLAN.md section 11; renumbered from 13 to 12 on
+ * 2026-09-19 when former step 11 "Coupling matrix (optional)" was removed,
+ * then from 12 to 11 later the same day when the standalone CT step was
+ * folded into step 7): "the setup wizard should recommend enabling it. It
+ * presents an 'enable authentication' step that is skippable ... states in
+ * one line what is at stake ... Recommend without overriding the owner's
+ * default." This step embeds real credential-setting and the enable switch
+ * directly (GET /api/auth/config for current state, POST /api/auth/security
+ * with cmd=set_web_password then cmd=set_policy to apply) rather than only
+ * linking out to /settings/security -- credentials are staged in this
+ * form's own inputs and sent straight to that route; nothing here logs or
+ * persists them anywhere else, and the status line always reflects a fresh
+ * read-back rather than a wizard-owned copy of web_enabled/admin_username
+ * (same "no wizard-owned copy of a config value" rule every other step
+ * follows). readinessKeys: [] -- like step 0, this step is optional and
  * never blocks the final completeness gate. */
-function renderStep12() {
-  var el = document.getElementById('stepBody12');
+function renderStep11() {
+  var el = document.getElementById('stepBody11');
   el.innerHTML = '<p class="hint">Loading&hellip;</p>';
-  return fetchJsonOr('/api/security/policy', null).then(function (cfg) {
+  // Reads/writes the real routes directly (GET /api/auth/config, POST
+  // /api/auth/security) -- credentials are staged in this form's own inputs
+  // and sent straight to that route; nothing here logs or persists them
+  // anywhere else. Never stores a copy of web_enabled/admin_username either
+  // (same "no wizard-owned copy of a config value" rule every other step
+  // follows) -- statusLine below always reflects a fresh read-back.
+  return fetchJsonOr('/api/auth/config', null).then(function (cfg) {
     var webOn = !!(cfg && cfg.web_enabled);
     var lcdOn = !!(cfg && cfg.lcd_enabled);
+    var credsSet = !!(cfg && cfg.admin_password_set);
+    var adminUser = (cfg && cfg.admin_username) || '';
     var statusLine = (webOn || lcdOn)
       ? ('<p class="hint">Currently: web login ' + (webOn ? 'ON' : 'off') + ', LCD lock ' +
-         (lcdOn ? 'ON' : 'off') + '.</p>')
-      : '<p class="hint">Currently off for both the web UI and the LCD (the shipped default).</p>';
+         (lcdOn ? 'ON' : 'off') + ', administrator credential ' + (credsSet ? 'set' : 'NOT set') + '.</p>')
+      : ('<p class="hint">Currently off for both the web UI and the LCD (the shipped default). ' +
+         'Administrator credential ' + (credsSet ? 'already set.' : 'not set yet.') + '</p>');
     var html = '<p class="hint">Optional. With authentication off, anyone on the network can start a ' +
       'firing or change a safety limit -- the OTA/factory-reset/system-reset routes still require the ' +
       'AP password either way.</p>' +
       statusLine +
+      '<div class="wfield"><label for="s11User">Administrator username</label>' +
+      '<input type="text" id="s11User" autocomplete="username" value="' + window.kcEscapeHtml(adminUser) + '"></div>' +
+      '<div class="wfield"><label for="s11Pass">Administrator password</label>' +
+      '<input type="password" id="s11Pass" autocomplete="new-password" placeholder="leave blank to keep current"></div>' +
       '<label style="display:flex;align-items:center;gap:0.5em;min-height:32px;">' +
-      '<input type="checkbox" id="step12Enable"> I want to enable authentication for this kiln</label>' +
-      '<p class="hint" id="step12Link" hidden>Set an administrator password/PIN and turn it on here: ' +
-      '<a href="/settings/security">Security settings &rarr;</a> (enabling is refused until an ' +
-      'administrator credential is set for that interface).</p>' +
-      '<div class="gnav"><button type="button" id="step12Skip">Skip (optional) &amp; mark done</button>' +
-      '<button type="button" id="step12Done">Mark reviewed</button></div>';
+      '<input type="checkbox" id="step11Enable"' + (webOn ? ' checked' : '') + '> Require this login for the web UI</label>' +
+      '<div id="step11Err"></div><p id="step11Msg" class="hint"></p>' +
+      '<div class="gnav"><button type="button" id="step11Save">Save credentials &amp; policy</button>' +
+      '<button type="button" id="step11Skip">Skip (optional) &amp; mark done</button></div>';
     el.innerHTML = html;
-    // Deliberately always unchecked on render -- plan section 11: "defaults
-    // the checkbox to off to match the shipped default" -- this reflects
-    // intent to opt in during THIS visit, not whatever the board's current
-    // policy already is (shown separately in statusLine above).
-    document.getElementById('step12Enable').checked = false;
-    document.getElementById('step12Enable').addEventListener('change', function (e) {
-      document.getElementById('step12Link').hidden = !e.target.checked;
+    var errEl = document.getElementById('step11Err');
+    var msgEl = document.getElementById('step11Msg');
+    document.getElementById('step11Save').addEventListener('click', function () {
+      msgEl.textContent = '';
+      var username = document.getElementById('s11User').value.trim();
+      var password = document.getElementById('s11Pass').value;
+      var wantEnable = document.getElementById('step11Enable').checked;
+      if (wantEnable && !username) {
+        renderErrList(errEl, ['Enter an administrator username before requiring login.']);
+        return;
+      }
+      if (wantEnable && !password && !credsSet) {
+        renderErrList(errEl, ['Set an administrator password -- none is on record yet.']);
+        return;
+      }
+      renderErrList(errEl, []);
+      var chain = Promise.resolve();
+      if (username && password) {
+        chain = chain.then(function () {
+          return fetch('/api/auth/security', {
+            method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'cmd=set_web_password&role=admin&username=' + encodeURIComponent(username) +
+              '&password=' + encodeURIComponent(password),
+          });
+        });
+      }
+      chain = chain.then(function () {
+        return fetch('/api/auth/security', {
+          method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'cmd=set_policy&web_enabled=' + (wantEnable ? '1' : '0'),
+        });
+      });
+      chain.then(function (res) {
+        return res.json().catch(function () { return {}; }).then(function (body) {
+          return { ok: res.ok, body: body };
+        });
+      }).then(function (r) {
+        if (!r.ok) {
+          renderErrList(errEl, [(r.body && r.body.error) || 'Save refused -- see status above and try again.']);
+          return;
+        }
+        msgEl.textContent = 'Saved. Read back: web login is now ' + (wantEnable ? 'ON' : 'off') + '.';
+        postStepState(11, 'done').then(function () { loadAll(); });
+      }).catch(function () {
+        renderErrList(errEl, ['Could not reach the board to save this -- try again once it answers.']);
+      });
     });
-    document.getElementById('step12Skip').addEventListener('click', function () {
-      postStepState(12, 'skipped', 'optional, deferred').then(function () { loadAll(); });
-    });
-    document.getElementById('step12Done').addEventListener('click', function () {
-      postStepState(12, 'done').then(function () { loadAll(); });
+    document.getElementById('step11Skip').addEventListener('click', function () {
+      postStepState(11, 'skipped', 'optional, deferred').then(function () { loadAll(); });
     });
   });
 }
@@ -2508,8 +2505,9 @@ function renderStep7() {
   return Promise.all([
     fetchJsonOr('/api/safety/commissioning', null),
     fetchJsonOr('/api/zones', null),
+    fetchJsonOr('/api/zones/ct_channel_map', null),
   ]).then(function (r) {
-    var commissioning = r[0], zonesData = r[1];
+    var commissioning = r[0], zonesData = r[1], ctMapData = r[2];
     if (!commissioning) {
       el.innerHTML = '<p class="werr">Could not reach the safety processor -- reload once it answers again.</p>';
       return;
@@ -2529,11 +2527,12 @@ function renderStep7() {
     var highestZoneMax = zoneMaxTemps.filter(function (v) { return v > 0; })
       .reduce(function (a, b) { return Math.max(a, b); }, 0);
 
-    var html = '<p class="hint">Commissions the RP2040 safety processor\'s own thermocouple type, ' +
-      'calibration offset, absolute-maximum ceiling, and current-transformer (CT) setup -- stored on the ' +
-      'Pico, outside both OTA slots, enforced there independent of everything else on this board. Embedded ' +
-      'here (not linked out) by design, reusing <a href="/safety/commissioning">/safety/commissioning</a>\'s ' +
-      'own write path and its confirm_commit_landed() read-back verbatim.</p>';
+    var html = '<p class="hint">Commissions the safety processor\'s own thermocouple type, ' +
+      'calibration offset, absolute-maximum ceiling, and current-transformer (CT) install, topology, ' +
+      'per-zone mapping and gain calibration -- stored on the safety processor, outside both firmware ' +
+      'update slots, enforced there independent of everything else on this board. This screen writes those ' +
+      'values through the exact same stage-then-commit, then-read-back-confirmed path as ' +
+      '<a href="/safety/commissioning">/safety/commissioning</a>, not a second write path.</p>';
     html += '<p class="hint">' + (commissioning.link_up ? 'Safety processor: LINK UP.' :
       'Safety processor: LINK DOWN -- values below are the ESP\'s last cached copy and may be stale.') +
       (commissioning.commissioned ? ' Commissioned: YES.' : ' Commissioned: NO.') + '</p>';
@@ -2559,8 +2558,8 @@ function renderStep7() {
 
     html += '<div class="wfield"><label for="s7TcOffset">Calibration offset (tc_offset_c, &deg;C)</label>' +
       '<input type="number" step="any" id="s7TcOffset" placeholder="0 = no correction">' +
-      '<p class="hint">Added to the safety board\'s own MAX31856 reading, before any guard sees it ' +
-      '(applied in thermo_task.c). 0 means no correction.</p></div>';
+      '<p class="hint">Added to the safety board\'s own MAX31856 reading, before any guard sees it. ' +
+      '0 means no correction.</p></div>';
 
     html += '<div class="wfield"><label for="s7AbsMax">Absolute-maximum ceiling (abs_max_temp_c, &deg;C)</label>' +
       '<input type="number" step="any" min="0.0001" id="s7AbsMax" placeholder="e.g. 1300">' +
@@ -2582,6 +2581,39 @@ function renderStep7() {
       '<option value="0">Per-zone (one CT per zone)</option></select>' +
       '<p class="hint">Required whenever CTs are fitted.</p></div>';
 
+    // Two independent sources for "which zone does CT channel N watch",
+    // shown distinctly rather than merged into one number: `mask`/`zone[]`
+    // is what the current-sweep step MEASURED; `committed_mask`/
+    // `committed_zone[]` is what is actually written on the safety
+    // processor today (only reported once all three of ids 0x0106-0x0108
+    // are set there). A channel counts as mapped for the dashboard the
+    // moment either source has it -- this display never conflates the two
+    // into a single number.
+    var ctMask = (ctMapData && ctMapData.mask) || 0;
+    var ctZone = (ctMapData && ctMapData.zone) || [];
+    var ctCommittedMask = (ctMapData && ctMapData.committed_mask) || 0;
+    var ctCommittedZone = (ctMapData && ctMapData.committed_zone) || [];
+    var ctMapRows = '';
+    for (var mch = 0; mch < 3; mch++) {
+      var measuredTxt = (ctMask & (1 << mch)) ? ('zone ' + (ctZone[mch] + 1) + ' (measured by current-sweep)') : 'not measured yet';
+      var committedTxt = (ctCommittedMask & (1 << mch)) ? ('zone ' + (ctCommittedZone[mch] + 1) + ' (set on the safety processor)') : 'not set on the safety processor';
+      ctMapRows += '<div class="review-row"><span>CT' + mch + '</span><span class="rv">' + measuredTxt + ' -- ' + committedTxt + '</span></div>';
+    }
+    html += '<div class="wfield"><label>Current CT channel mapping (both sources)</label>' + ctMapRows + '</div>';
+
+    var zoneOptsHtml = '<option value="">-- choose --</option>';
+    for (var zi = 0; zi < thermoCountS7; zi++) {
+      zoneOptsHtml += '<option value="' + zi + '">Zone ' + (zi + 1) + '</option>';
+    }
+    html += '<div class="wfield" id="s7CtMapWrap"><label>Per-zone CT channel mapping</label>' +
+      '<p class="hint">Which zone each current-transformer channel actually watches -- the map itself, not just ' +
+      'a link to set it elsewhere. Required, all three together, only when CTs are fitted with per-zone ' +
+      'topology; a summed CT (one shared channel) has no per-relay question to answer here.</p>' +
+      [0, 1, 2].map(function (ch) {
+        return '<div class="wfield"><label for="s7CtMap' + ch + '">CT channel ' + ch + '</label>' +
+          '<select id="s7CtMap' + ch + '">' + zoneOptsHtml + '</select></div>';
+      }).join('') + '</div>';
+
     html += '<div id="step7Err"></div><div id="step7Ok"></div><p id="step7Msg" class="hint"></p>';
     html += '<div class="gnav"><button type="button" id="step7Save">Stage &amp; commit</button></div>';
     el.innerHTML = html;
@@ -2592,6 +2624,20 @@ function renderStep7() {
     if (byId[260] && byId[260].set) setVal('s7AbsMax', byId[260].value);
     if (byId[265] && byId[265].set) setVal('s7CtInstalled', byId[265].value);
     if (byId[799] && byId[799].set) setVal('s7CtTopology', byId[799].value);
+    if (byId[262] && byId[262].set) setVal('s7CtMap0', byId[262].value);
+    if (byId[263] && byId[263].set) setVal('s7CtMap1', byId[263].value);
+    if (byId[264] && byId[264].set) setVal('s7CtMap2', byId[264].value);
+
+    function refreshCtMapVisibility() {
+      var wrap = document.getElementById('s7CtMapWrap');
+      if (!wrap) return;
+      var installed = document.getElementById('s7CtInstalled').value === '1';
+      var perZone = document.getElementById('s7CtTopology').value === '0';
+      wrap.style.display = (installed && perZone) ? '' : 'none';
+    }
+    document.getElementById('s7CtInstalled').addEventListener('change', refreshCtMapVisibility);
+    document.getElementById('s7CtTopology').addEventListener('change', refreshCtMapVisibility);
+    refreshCtMapVisibility();
 
     document.getElementById('step7Save').addEventListener('click', function () {
       var errEl = document.getElementById('step7Err');
@@ -2605,6 +2651,7 @@ function renderStep7() {
       var absMaxRaw = document.getElementById('s7AbsMax').value;
       var ctInstalledRaw = document.getElementById('s7CtInstalled').value;
       var ctTopologyRaw = document.getElementById('s7CtTopology').value;
+      var ctMapRaw = [0, 1, 2].map(function (ch) { return document.getElementById('s7CtMap' + ch).value; });
 
       var fields = {
         tcType: tcTypeRaw === '' ? -1 : parseInt(tcTypeRaw, 10),
@@ -2612,7 +2659,20 @@ function renderStep7() {
         absMaxTempC: parseFloat(absMaxRaw),
         ctInstalled: ctInstalledRaw === '' ? -1 : parseInt(ctInstalledRaw, 10),
         ctTopology: ctTopologyRaw === '' ? -1 : parseInt(ctTopologyRaw, 10),
+        ctChannelMap: ctMapRaw.map(function (v) { return v === '' ? -1 : parseInt(v, 10); }),
       };
+      var ctMapNeeded = fields.ctInstalled === 1 && fields.ctTopology === 0;
+      var ctMapAnySet = fields.ctChannelMap.some(function (v) { return v >= 0; });
+      var ctMapAllSet = fields.ctChannelMap.every(function (v) { return v >= 0; });
+      if (ctMapNeeded && ctMapAnySet && !ctMapAllSet) {
+        renderErrList(errEl, ['Per-zone CT channel mapping is all-or-nothing -- set all three channels ' +
+          'together, or leave all three blank.']);
+        return;
+      }
+      if (ctMapNeeded && ctMapAllSet) {
+        var mapCheck = validateStep8(fields.ctInstalled, fields.ctTopology, 0x07, fields.ctChannelMap);
+        if (!mapCheck.valid) { renderErrList(errEl, mapCheck.errors); return; }
+      }
 
       // Commit-time re-check (requirement 2 / same discipline as step 6's
       // mirror-image check): re-fetch zones fresh right now -- a zone's
@@ -2635,6 +2695,11 @@ function renderStep7() {
         ];
         if (fields.ctInstalled === 1) {
           bodyPairs.push({ id: 799, name: 'ct_topology', value: fields.ctTopology });
+        }
+        if (ctMapNeeded && ctMapAllSet) {
+          bodyPairs.push({ id: 262, name: 'ct_channel_map[0]', value: fields.ctChannelMap[0] });
+          bodyPairs.push({ id: 263, name: 'ct_channel_map[1]', value: fields.ctChannelMap[1] });
+          bodyPairs.push({ id: 264, name: 'ct_channel_map[2]', value: fields.ctChannelMap[2] });
         }
 
         fetchJsonOr('/api/safety/commissioning', null).then(function (freshCommissioning) {
@@ -2696,8 +2761,8 @@ function gRenderStepDetail(stepId) {
   var safetyNote = document.getElementById('stepSafetyNote');
   if (s.safety) {
     safetyNote.hidden = false;
-    safetyNote.textContent = 'Safety-relevant: skipping this step blocks "setup complete" ' +
-      '(SETUP_WIZARD.md section 6).';
+    safetyNote.textContent = 'Safety-relevant: skipping this step blocks "setup complete" until it ' +
+      'is completed.';
   } else {
     safetyNote.hidden = true;
   }
@@ -2713,20 +2778,17 @@ function gRenderStepDetail(stepId) {
     regressedNote.hidden = true;
   }
 
-  // Dispatch to this step's real content (0-6, 8-12) or the generic
-  // not-built-yet placeholder (7 only, as of this pass -- a different pass
-  // owns that step). Only one body div is ever visible at a time.
-  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].forEach(function (id) {
+  // Dispatch to this step's real content. Only one body div is ever visible
+  // at a time.
+  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].forEach(function (id) {
     var body = document.getElementById('stepBody' + id);
     if (body) body.hidden = (stepId !== id);
   });
-  // Every step 0-13 has real content as of this pass (step 7 landed here;
-  // 8-12 landed in a concurrent pass; 13 is WEB_AUTH_PLAN.md item 11's
-  // wizard step) -- the generic placeholder never shows.
+  // Every step 0-11 has real content -- the generic placeholder never shows.
   document.getElementById('stepGenericContent').hidden = true;
   if (step2Poll) { clearInterval(step2Poll); step2Poll = null; }
   if (step3PollTimer) { clearTimeout(step3PollTimer); step3PollTimer = null; }
-  if (step9Poll) { step9StopPoll(); }
+  if (step8Poll) { step8StopPoll(); }
   var renderPromise;
   if (stepId === 0) renderPromise = renderStep0();
   else if (stepId === 1) renderPromise = renderStep1();
@@ -2740,7 +2802,6 @@ function gRenderStepDetail(stepId) {
   else if (stepId === 9) renderPromise = renderStep9();
   else if (stepId === 10) renderPromise = renderStep10();
   else if (stepId === 11) renderPromise = renderStep11();
-  else if (stepId === 12) renderPromise = renderStep12();
   // Apply a save confirmation armed for THIS step (see armStepMessage()
   // above) only after this step's own render has actually finished
   // rebuilding the DOM -- applying it any earlier would just get overwritten

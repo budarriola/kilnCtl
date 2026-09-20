@@ -35,14 +35,18 @@
 // zones_config_migrate.c documents for its own per-zone structs. A v1 blob
 // loads with every note defaulted to empty; nothing else changes. Version 3
 // grew the step count 13->14 (added step 13, "Authentication (optional)").
-// Version 4 (current) DROPS what was step 11 ("Coupling matrix (optional)",
-// removed from the wizard 2026-09-19 -- setup_wizard_page.html's own comment
-// above WIZARD_STEPS has the rationale) and shifts every step after it down
-// by one slot (old 12 "First profile..." -> new 11, old 13 "Authentication"
-// -> new 12), so SETUP_WIZARD_STEP_COUNT goes back to 13. An old v1/v2/v3
-// blob's real per-step state survives this shift (see
-// setup_wizard_progress.c's remap_dropping_old_step_11()); only whatever was
-// recorded for the removed step itself is discarded, never anything else.
+// Version 4 DROPPED what was step 11 ("Coupling matrix (optional)", removed
+// from the wizard 2026-09-19) and shifted every step after it down by one
+// slot, landing SETUP_WIZARD_STEP_COUNT at 13. Version 5 (current) removes a
+// second, separate step: the old standalone step 8 ("Current sensing:
+// install & calibrate") was folded into step 7 (safety processor
+// commissioning), which now also carries the CT channel-mapping and gain
+// calibration fields, and every step after old 8 shifts down by one more
+// slot -- SETUP_WIZARD_STEP_COUNT is now 12. An old blob's real per-step
+// state survives both shifts (see setup_wizard_progress.c's
+// remap_drop_index() and the version-specific migrate functions built on
+// it); only whatever was recorded for a removed step itself is discarded,
+// never anything else.
 #ifndef KILNCTL_SETUP_WIZARD_PROGRESS_H
 #define KILNCTL_SETUP_WIZARD_PROGRESS_H
 
@@ -65,7 +69,7 @@ extern "C" {
 // rejected it with "step out of range"; found 2026-09-18 against the live
 // bench board). setup_wizard_step_count_mirror_drift_check.py pins these two
 // counts against each other so this cannot happen again silently.
-#define SETUP_WIZARD_STEP_COUNT 13
+#define SETUP_WIZARD_STEP_COUNT 12
 
 typedef enum {
     SETUP_WIZ_STEP_PENDING = 0,
