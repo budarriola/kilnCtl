@@ -52,6 +52,14 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+# PROFILES_MAX_COUNT mirrors the firmware constant (profiles_types.h) -- see
+# kilnctrl.protocol's own copy for why the two must move together. sys.path
+# is set up before the import (repo_root/tools/PcTools/src holds the
+# kilnctrl package) so a bare `uv run python
+# tools/PcTools/scripts/full_board_backup.py` still works from any cwd.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from kilnctrl.protocol import PROFILES_MAX_COUNT  # noqa: E402
+
 # Some endpoints (observed on /api/zones's safety_wiring.tc_temp_c) emit a
 # bare lowercase `nan` for an unread thermocouple channel -- valid as a
 # printf("%f", NAN) string but NOT valid JSON (Python's parser only accepts
@@ -91,8 +99,12 @@ GET_ENDPOINTS = [
     ("/api/cfgfs", "cfg filesystem file listing + dual-write status (may be unmounted/empty)", False),
 ]
 
-# /api/firing_history requires ?profile_id=N -- probe every user profile slot.
-FIRING_HISTORY_PROFILE_IDS = range(8)  # PROFILES_MAX_COUNT
+# /api/firing_history requires ?profile_id=N. Default probes every user
+# profile slot 0..PROFILES_MAX_COUNT-1 (100 as of docs/PROFILE_SLOTS_100_PLAN.md
+# section 7 task 6) -- main() below narrows this to only the ids actually
+# present in /api/profiles when that endpoint answered, so a 100-slot board
+# with a handful of profiles saved does not cost 100 requests every backup.
+FIRING_HISTORY_PROFILE_IDS = range(PROFILES_MAX_COUNT)
 
 
 def _get_json(url: str, timeout: float):
@@ -261,7 +273,24 @@ def main() -> int:
         print(f"OK: {path}  ({item})")
         ok_count += 1
 
-    for pid in FIRING_HISTORY_PROFILE_IDS:
+    # Narrow the firing-history probe to ids actually present in
+    # /api/profiles when that endpoint answered -- a 100-slot board (docs/
+    # PROFILE_SLOTS_100_PLAN.md section 7 task 6) with only a handful of
+    # profiles saved should not cost 100 requests every backup. Falls back
+    # to the full PROFILES_MAX_COUNT range if /api/profiles failed or came
+    # back in an unexpected shape, matching this script's existing
+    # best-effort convention elsewhere.
+    profiles_data = archive["endpoints"].get("/api/profiles")
+    firing_history_ids = FIRING_HISTORY_PROFILE_IDS
+    if isinstance(profiles_data, list):
+        present_ids = sorted({
+            entry["id"] for entry in profiles_data
+            if isinstance(entry, dict) and not entry.get("builtin", False) and isinstance(entry.get("id"), int)
+        })
+        if present_ids:
+            firing_history_ids = present_ids
+
+    for pid in firing_history_ids:
         url = f"http://{args.host}/api/firing_history?profile_id={pid}"
         data, err = _get_json(url, args.timeout)
         if err:

@@ -479,7 +479,7 @@ PROFILES_CMD_ACK_LAST_RUN = 0x0A
 #: empty/-1/out-of-range id field.
 PROFILES_SAVE_ID_NEW = 0xFF
 #: Max user profile slots (writable ids 0..7). NVS-backed, see profiles_http.c.
-PROFILES_MAX_COUNT = 8
+PROFILES_MAX_COUNT = 100  # docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6
 
 #: First id of the read-only shipped catalogue -- mirrors
 #: ``PROFILE_BUILTIN_ID_BASE`` in ``App/drivers/persist/profiles_builtin.h``. Ids

@@ -1200,22 +1200,25 @@ static uint32_t cfgfs_read_zones_nvs_rev(void)
  *
  * BUFFER SIZE (2026-09-08 widening: per-item dual-write rows for every
  * bridge, not zones only; WIDENED AGAIN same day when relay_cycles/
- * adaptive_tune/firing_stats moved off the stale nvs_only list): worst case
- * is now 17 item rows (zones, kiln_cfg_store, 4 pref-backed items,
- * PROFILES_MAX_COUNT=8 profile slots, relay_cycles, adaptive_tune,
- * firing_stats) at up to ~120 bytes each (longest name "display_power" and
- * "firing_stats" -- both under the same 120 B/row estimate, both revs at
- * UINT32_MAX) = 17 * 120 = 2040 bytes for the items array alone (was ~1700 B
- * for 14 items), plus the pre-existing sections (header/capacity/format
+ * adaptive_tune/firing_stats moved off the stale nvs_only list; 2026-09-19,
+ * docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6, collapsed the
+ * PROFILES_MAX_COUNT profile-slot rows -- 8 of them at the time -- into ONE
+ * aggregate "profiles" row so raising that constant to 100 doesn't also
+ * mean 100 rows here): worst case is now 10 item rows (zones,
+ * kiln_cfg_store, 4 pref-backed items, one aggregate profiles row,
+ * relay_cycles, adaptive_tune, firing_stats) at up to ~120 bytes each
+ * (longest name "display_power" and "firing_stats" -- both under the same
+ * 120 B/row estimate, both revs at UINT32_MAX) = 10 * 120 = 1200 bytes for
+ * the items array alone (was 2040 B for 17 items), plus the pre-existing
+ * sections (header/capacity/format
  * ~300 B typical, nvs_only/nvs_permanent name lists ~300 B fixed now that
  * nvs_only is an empty array instead of three names, files[] typically a
  * handful of entries in real use though pathologically up to
  * CFG_FS_STATUS_MAX_FILES=32 max-length names could itself exceed any
  * reasonable buffer -- that pre-existing limit is unchanged by this pass).
- * 2040 + 300 + 300 = ~2640 B worst case; 3072 already covered the old 14-item
- * worst case (~2330 B) with ~740 B headroom, so the new ~2640 B worst case
- * still fits under 3072 with ~430 B headroom to spare -- NOT raised this
- * pass. cfg_fs_status_build_json() still fails loudly with
+ * 1200 + 300 + 300 = ~1800 B worst case, well under 3072 (previously ~2640 B
+ * worst case for 17 items) -- NOT raised this pass, and this collapse only
+ * grows the headroom. cfg_fs_status_build_json() still fails loudly with
  * ESP_ERR_INVALID_SIZE rather than truncating if a pathological files[]
  * list (or a future item count) ever pushes past it. */
 typedef struct {
@@ -1330,14 +1333,47 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
         time_sync_get_tz_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
         cfgfs_add_item(items, &n_items, "tz", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
     }
-    static const char *const profile_names[PROFILES_MAX_COUNT] = {
-        "profile0", "profile1", "profile2", "profile3", "profile4", "profile5", "profile6", "profile7",
-    };
-    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
-        bool file_valid = false, nvs_valid = false, diverged = false;
-        uint32_t file_rev = 0, nvs_rev = 0;
-        profiles_http_get_dualwrite_status(id, &file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
-        cfgfs_add_item(items, &n_items, profile_names[id], file_valid, file_rev, nvs_valid, nvs_rev, diverged);
+    /* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6: at PROFILES_MAX_COUNT
+     * == 8 this used to be one row per slot (a literal profile_names[8]
+     * table plus a matching loop). At 100 slots that would mean 100
+     * per-slot rows, which both blows CFG_FS_STATUS_MAX_ITEMS (still 18 --
+     * NOT raised for this) and makes /api/cfgfs's response dominated by a
+     * single feature. Replaced with ONE aggregate "profiles" row: how many
+     * slots are in use, how many of those are diverged, and (as the worst
+     * case seen) the file/nvs rev pair of the single most-diverged slot --
+     * cfg_fs_dualwrite_item_t has no field for "used/diverged counts", so
+     * those two numbers are carried in file_rev/nvs_rev respectively
+     * (documented in the log line below and in this comment, not silently
+     * repurposed); `diverged` is true iff any slot diverged, which is what
+     * actually gates operator attention. */
+    {
+        uint32_t used_count = 0, diverged_count = 0;
+        uint32_t worst_file_rev = 0, worst_nvs_rev = 0, worst_gap = 0;
+        for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+            bool file_valid = false, nvs_valid = false, diverged = false;
+            uint32_t file_rev = 0, nvs_rev = 0;
+            profiles_http_get_dualwrite_status(id, &file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+            if (file_valid || nvs_valid) {
+                used_count++;
+            }
+            if (diverged) {
+                diverged_count++;
+                uint32_t gap = (nvs_rev > file_rev) ? (nvs_rev - file_rev) : (file_rev - nvs_rev);
+                if (gap >= worst_gap) {
+                    worst_gap = gap;
+                    worst_file_rev = file_rev;
+                    worst_nvs_rev = nvs_rev;
+                }
+            }
+        }
+        if (diverged_count > 0) {
+            ESP_LOGW(TAG, "profiles: %u/%u slots in use, %u diverged, worst rev pair file=%u nvs=%u",
+                     (unsigned)used_count, (unsigned)PROFILES_MAX_COUNT, (unsigned)diverged_count,
+                     (unsigned)worst_file_rev, (unsigned)worst_nvs_rev);
+        }
+        /* file_rev carries the used-slot count, nvs_rev carries the
+         * diverged-slot count -- see the comment above this block. */
+        cfgfs_add_item(items, &n_items, "profiles", true, used_count, true, diverged_count, diverged_count > 0);
     }
 
     /* 2026-09-08: the three items that used to be reported via the stale
