@@ -236,6 +236,14 @@ void hal_wdt_reboot(void) {}
 // executes (the interlock check always refuses first), but must resolve.
 // ---------------------------------------------------------------------------
 esp_err_t profiles_builtin_restore_all(void) { return ESP_OK; }
+// ---------------------------------------------------------------------------
+// profile_executor.h -- factory_reset.c's execute_scope_job() drops the
+// last-run-started RAM cache after erasing profiles_nvs (that erase destroys
+// "fs_<id>" without going through firing_stats_erase()). Same "never reached
+// here, but must resolve" note as the stub above: profile_executor_*.c is not
+// part of this host test build. The real function is covered by
+// test_profile_executor_prestart.c.
+void firing_stats_cache_invalidate_all(void) {}
 
 // ---------------------------------------------------------------------------
 // cfg_fs_mount.h (2026-09-07) -- factory_reset.c's "all" scope now also

@@ -236,6 +236,11 @@ static portMUX_TYPE s_fs_last_run_data_mux = portMUX_INITIALIZER_UNLOCKED;
  * Returns false for anything else (a stale/invalid/out-of-range id) -- such
  * an id is never cached and every lookup for it just falls back to a direct
  * firing_stats_load(), which is already correct, if not O(1). */
+/* The index map below keys user slots by raw id, so the two id spaces must
+ * not overlap -- a PROFILES_MAX_COUNT past PROFILE_BUILTIN_ID_BASE would
+ * make builtin ids alias user slots silently. */
+_Static_assert(PROFILES_MAX_COUNT <= PROFILE_BUILTIN_ID_BASE,
+               "user profile ids must not reach into the builtin id space");
 static bool fs_last_run_cache_index(uint8_t profile_id, size_t *out_idx)
 {
     if (profile_id < PROFILES_MAX_COUNT) {
@@ -349,6 +354,25 @@ void firing_stats_cache_store(uint8_t profile_id, uint32_t started_unix_s)
     }
     portENTER_CRITICAL(&s_fs_last_run_data_mux);
     s_fs_last_run_cache[idx] = started_unix_s;
+    portEXIT_CRITICAL(&s_fs_last_run_data_mux);
+}
+
+/* See profile_executor.h for why this exists (factory_reset.c erases the
+ * whole profiles NVS partition without ever calling firing_stats_erase()).
+ * Resets every slot to the UNCACHED sentinel so the next lookup for any id
+ * does a real firing_stats_load() against whatever NVS now holds. No
+ * allocation and no NVS here: if the cache was never allocated there is
+ * nothing stale to drop. The loop runs under the data spinlock, which is
+ * bounded by PROFILES_MAX_COUNT + g_builtin_profile_count plain stores. */
+void firing_stats_cache_invalidate_all(void)
+{
+    if (s_fs_last_run_cache == NULL) {
+        return;
+    }
+    portENTER_CRITICAL(&s_fs_last_run_data_mux);
+    for (size_t i = 0; i < s_fs_last_run_cache_count; i++) {
+        s_fs_last_run_cache[i] = FS_LAST_RUN_CACHE_UNCACHED;
+    }
     portEXIT_CRITICAL(&s_fs_last_run_data_mux);
 }
 

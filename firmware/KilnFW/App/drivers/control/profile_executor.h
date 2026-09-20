@@ -551,6 +551,19 @@ void firing_stats_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, boo
  * "not found", already the success case). */
 void firing_stats_erase(uint8_t profile_id);
 
+/* Drops every entry from the last-run-started RAM cache that
+ * profile_executor_last_run_started_unix_s() reads (see
+ * profile_executor_firing_stats.c's "last-run-started RAM cache" section).
+ * Needed by any path that destroys "fs_<id>" WITHOUT going through
+ * firing_stats_erase() -- today that is factory_reset.c's wholesale
+ * hal_kv_erase_partition(PROFILES_NVS_PARTITION) for the "profiles" and
+ * "all" scopes. That path does schedule a reboot, but the reboot is delayed
+ * (and its task creation can fail), so without this the cache would keep
+ * serving pre-erase timestamps to GET /api/profiles in the meantime: the
+ * exact "reset one side of a pair" bug class CLAUDE.md lists. Safe to call
+ * before the cache has ever been allocated (a no-op then). */
+void firing_stats_cache_invalidate_all(void);
+
 #ifdef __cplusplus
 }
 #endif

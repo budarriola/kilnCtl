@@ -7782,6 +7782,47 @@ static void test_firing_stats_last_run_cache_invalidated_on_persist_and_erase(vo
     fake_kv_reset_all();
 }
 
+// Guards the one path that destroys "fs_<id>" WITHOUT calling
+// firing_stats_erase(): factory_reset.c's wholesale
+// hal_kv_erase_partition(PROFILES_NVS_PARTITION) for the "profiles"/"all"
+// scopes. factory_reset.c is not linked into any host test, so this
+// exercises the invalidation entry point it calls, against a partition
+// erase performed the same way.
+static void test_firing_stats_cache_invalidate_all_after_partition_erase(void)
+{
+    TEST_SECTION("firing_stats_cache_invalidate_all() -- a wholesale profiles-partition erase "
+                 "(factory_reset.c, which never calls firing_stats_erase()) must not leave "
+                 "GET /api/profiles serving pre-erase last-run timestamps out of the RAM cache.");
+
+    fake_kv_reset_all();
+    hal_kv_init_partition(FIRING_STATS_NVS_PARTITION);
+
+    profile_firing_run_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.profile_id = 4;
+    strncpy(rec.profile_name, "FactoryReset", sizeof(rec.profile_name) - 1);
+    rec.run_started_unix_s = 4242;
+    rec.duration_s = 60;
+    rec.zone_mask = 0x01;
+    firing_stats_persist(&rec);
+    TEST_CHECK(profile_executor_last_run_started_unix_s(4) == 4242u,
+               "precondition: the persisted run is cached");
+
+    // The erase factory_reset.c actually performs: the whole partition, with
+    // no per-id firing_stats_erase() anywhere in that path.
+    fake_kv_reset_all();
+    hal_kv_init_partition(FIRING_STATS_NVS_PARTITION);
+    TEST_CHECK(profile_executor_last_run_started_unix_s(4) == 4242u,
+               "without invalidation the cache DOES keep serving the pre-erase value -- this is "
+               "the defect being guarded, asserted so the guard cannot go vacuous");
+
+    firing_stats_cache_invalidate_all();
+    TEST_CHECK(profile_executor_last_run_started_unix_s(4) == 0u,
+               "after invalidate_all() the lookup re-reads the (now erased) NVS and reports 0");
+
+    fake_kv_reset_all();
+}
+
 static void test_firing_stats_persist_refuses_when_calling_stack_is_external_ram(void)
 {
     TEST_SECTION("firing_stats_persist -- refuses (does not crash) when called with a PSRAM "
@@ -8692,6 +8733,7 @@ void run_test_profile_executor_prestart(void)
     test_run_refused_by_readiness_estop_unverified();
     test_run_passes_the_readiness_gate_when_ready();
     test_halt_is_a_silent_noop_before_start();
+    test_firing_stats_cache_invalidate_all_after_partition_erase();
     test_firing_stats_persist_refuses_when_calling_stack_is_external_ram();
     test_firing_stats_persist_proceeds_normally_on_an_internal_ram_stack();
     test_pause_resume_refuse_before_start();

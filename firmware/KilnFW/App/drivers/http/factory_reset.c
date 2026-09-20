@@ -17,6 +17,8 @@
 #include "nvs_key_check.h"
 #include "http_form.h"
 #include "ota_http.h" /* interlocks + challenge/response auth -- see reset_post_handler() */
+#include "profile_executor.h" /* firing_stats_cache_invalidate_all() -- see the erase loop in
+                                * execute_scope_job() below */
 #include "profiles_builtin.h"
 #include "wifi_provision_http.h"
 
@@ -188,6 +190,24 @@ static void execute_scope_job(void *arg)
             }
         } else {
             ESP_LOGW(TAG, "erased NVS partition '%s'", part);
+        }
+    }
+
+    /* "fs_<id>" firing-history blobs live in PROFILES_NVS_PARTITION, and the
+     * erase above wiped them without going through firing_stats_erase() --
+     * the one path that normally keeps profile_executor_last_run_started_
+     * unix_s()'s RAM cache in step with NVS. Drop the cache here so
+     * GET /api/profiles cannot keep reporting pre-erase "last run" times
+     * during the (delayed, and not guaranteed) reboot scheduled below.
+     * Unconditional on the erase result, same best-effort reasoning as
+     * firing_stats_erase() itself: if the partition is gone or half-gone,
+     * a cached value from before it is wrong either way.
+     * "wifi"/"kiln" never list that partition, so this only fires for
+     * "profiles"/"all" -- checked against the list rather than assumed. */
+    for (size_t i = 0; scope->partitions[i] != NULL; i++) {
+        if (strcmp(scope->partitions[i], PROFILES_NVS_PARTITION) == 0) {
+            firing_stats_cache_invalidate_all();
+            break;
         }
     }
 
