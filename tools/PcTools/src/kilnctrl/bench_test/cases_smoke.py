@@ -133,14 +133,42 @@ def _case_fl06(ctx: dict) -> CaseResult:
 
 
 def _case_fl07(ctx: dict) -> CaseResult:
-    from .. import dashboard_http_client
+    """FL-07 never FAILs (plan §7 owner decision 6): a route error is
+    recorded as INCONCLUSIVE, with the board's own partition table and
+    git's partitions.csv printed side by side as the decision requires,
+    never dropped."""
+    from .. import dashboard_http_client, partition_http_client
 
     host = ctx["host"]
+    board_partitions: Any = None
+    try:
+        board_partitions = partition_http_client.get_partitions(host)
+    except Exception as exc:  # noqa: BLE001
+        board_partitions = f"error: {exc}"
+
+    csv_path = ctx.get("partitions_csv_path") or os.path.join(
+        ctx.get("repo_root", "."), "firmware", "KilnFW", "partitions.csv"
+    )
+    try:
+        with open(csv_path, "r", encoding="utf-8") as f:
+            partitions_csv = f.read()
+    except OSError as exc:
+        partitions_csv = f"error: {exc}"
+
+    tables = {"board_partitions": board_partitions, "partitions_csv": partitions_csv}
+
     try:
         data = dashboard_http_client.get_cfgfs_status(host)
     except Exception as exc:  # noqa: BLE001
-        return CaseResult(Verdict.FAIL, reason=f"GET /api/cfgfs failed: {exc}", observed={})
-    return J.judge_cfgfs_state(data)
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=f"GET /api/cfgfs failed: {exc} (record-only, plan §7 decision 6)",
+            observed=dict(tables, cfgfs="error: " + str(exc)),
+        )
+    result = J.judge_cfgfs_state(data)
+    if result.observed is not None:
+        result.observed = dict(result.observed, **tables)
+    return result
 
 
 def _case_fl08(ctx: dict) -> CaseResult:

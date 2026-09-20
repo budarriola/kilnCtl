@@ -102,11 +102,19 @@ def judge_coredump_readable(status: Optional[int], body: Any) -> CaseResult:
 
 
 def judge_cfgfs_state(data: dict) -> CaseResult:
-    """FL-07: pending must be False; mounted is recorded, not judged, per
-    open question §7.4 (CONFIG_FILESYSTEM.md)."""
+    """FL-07: record-only (plan §7 owner decision 6) -- the `cfg` LittleFS
+    partition is unformatted/unmounted on the bench board today
+    (CLAUDE.md/CONFIG_FILESYSTEM.md), so a pending/unknown format state is
+    expected, not a defect. This case never FAILs: `format_pending` False
+    is PASS, anything else is INCONCLUSIVE with the full state recorded so
+    a human can review it, never silently dropped."""
     pending = data.get("format_pending", data.get("pending"))
     if pending is not False:
-        return CaseResult(Verdict.FAIL, reason=f"format_pending={pending!r}, expected False", observed=data)
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=f"format_pending={pending!r}, not confirmed False (record-only, plan §7 decision 6)",
+            observed=data,
+        )
     return CaseResult(Verdict.PASS, observed=data)
 
 
@@ -137,8 +145,8 @@ def judge_stack_margin(report_text: str, min_free_bytes: Optional[int] = None) -
 
 def judge_pico_stack_margins(tasks: "list[dict]", min_fraction: float = 0.25) -> CaseResult:
     """SK-03: every task's free >= 25% of configured (memory
-    project_saftyfw_minimal_stack_overflows -- the interim rule per open
-    question §7.5)."""
+    project_saftyfw_minimal_stack_overflows -- the flat interim rule per
+    plan §7 owner decision 4, pending a wave 1 Pico baseline)."""
     if not tasks:
         return CaseResult(Verdict.FAIL, reason="no task entries reported", observed={"tasks": tasks})
     failing = []

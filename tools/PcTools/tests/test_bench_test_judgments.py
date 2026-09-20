@@ -126,9 +126,14 @@ class CfgFsStateTest(unittest.TestCase):
         r = J.judge_cfgfs_state({"format_pending": False, "mounted": False})
         self.assertEqual(r.verdict, Verdict.PASS)
 
-    def test_pending_fails(self):
+    def test_pending_is_inconclusive_not_fail(self):
+        # FL-07 never FAILs (plan §7 owner decision 6) -- record-only.
         r = J.judge_cfgfs_state({"format_pending": True})
-        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
+    def test_missing_field_is_inconclusive_not_fail(self):
+        r = J.judge_cfgfs_state({})
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
 
 
 class PicoSlotMetadataTest(unittest.TestCase):
