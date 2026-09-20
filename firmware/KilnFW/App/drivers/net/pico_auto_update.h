@@ -59,10 +59,19 @@ extern "C" {
  * (boot_guard.h) so there is one number in the tree to remember. */
 #define PICO_AUTO_UPDATE_ATTEMPT_BUDGET 3u
 
-/* Every outcome docs/PICO_AUTO_UPDATE_PLAN.md sec 9 step 3 names. The three
+/* Every outcome docs/PICO_AUTO_UPDATE_PLAN.md sec 9 step 3 names. The four
  * ABANDONED_* values are exactly the "unrecoverable" causes of plan sec 4/
- * 10.3 and are the only outcomes that set the readiness-gate key
- * (READINESS_GATE_KEY_PICO_UPDATE_UNRECOVERABLE). */
+ * 10.3 (this classification, and is_unrecoverable() below, are unchanged by
+ * the 2026-09-20 amendments). What DOES differ per-cause, as of the same
+ * amendments, is how pico_auto_update_boot.c's switch CONSUMES an
+ * unrecoverable verdict at boot: BUDGET_SPENT (option c) and PRIOR_FAILED
+ * (Opus review, same day) are surfaced as a non-blocking
+ * pico_auto_update_state_set_warning() rather than
+ * pico_auto_update_state_set_blocking(true) -- see that switch and
+ * docs/PICO_AUTO_UPDATE_PLAN.md sec 4/10.3's amendment notes. Only
+ * NO_IMAGE and CHAIN_GAP still actually refuse the next firing start;
+ * treat this enum's is_unrecoverable() as "the decision cannot self-heal",
+ * not as "blocks firing" -- those stopped being the same thing here. */
 typedef enum {
     PICO_AUTO_UPDATE_MATCH = 0,           /* identity equal, dirty==0: no action, counter untouched */
     PICO_AUTO_UPDATE_NEEDED,              /* mismatch, an attempt may be made (budget remains, chain ok) */

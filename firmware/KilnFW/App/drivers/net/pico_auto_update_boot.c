@@ -145,10 +145,27 @@ static bool attempt_update_staged_locked(const char *commit_for_log, uint32_t im
     if (!ota_pico_relay_start(s_link, image_length, image_crc32, NULL, NULL)) {
         /* ota_pico_relay_start() returning false means the relay task never
          * took ownership, so releasing the mutex is still OURS to do -- its
-         * header states this contract explicitly. */
-        ESP_LOGE(TAG, "the relay task could not be started -- update abandoned");
+         * header states this contract explicitly.
+         *
+         * Review finding (Opus, 2026-09-20): this is an ESP-local failure
+         * (task creation, typically) -- the relay never touched the Pico at
+         * all, so it says nothing about the Pico or the staged image. It
+         * used to call pico_update_attempts_record_failure() here, which
+         * persists prior_attempt_failed for this pair_hash; decide() then
+         * returns ABANDONED_PRIOR_FAILED on every future boot with no
+         * escape (the only clear is a MATCH, which an abandoned pair can
+         * never reach). A transient local hiccup must not latch a permanent
+         * refusal. Do NOT record a terminal failure here -- the attempt
+         * count above was already bumped, so the existing attempt budget
+         * (pico_update_attempts_record_attempt(), just above) still bounds
+         * retries across reboots without this. record_failure() is kept for
+         * a genuine terminal relay OUTCOME (the relay took ownership, ran,
+         * and reported back a non-retryable result) -- no such caller exists
+         * yet; see pico_update_attempts.h's header comment on
+         * pico_update_attempts_record_failure() for why it is kept anyway. */
+        ESP_LOGW(TAG, "the relay task could not be started (local failure, Pico untouched) -- "
+                      "standing down this boot, budget already counted above");
         ota_http_update_end();
-        (void)pico_update_attempts_record_failure(pair_hash);
         return false;
     }
     /* From here the relay task owns the mutex and the outcome. It reboots the
@@ -366,16 +383,19 @@ static void pico_auto_update_task(void *arg)
                           "future mismatch may start with a partly-spent budget");
         }
         pico_auto_update_state_set_blocking(false, NULL);
+        pico_auto_update_state_set_warning(NULL);
         break;
 
     case PICO_AUTO_UPDATE_LINK_DOWN:
         ESP_LOGW(TAG, "%s", why);
         pico_auto_update_state_set_blocking(false, NULL);
+        pico_auto_update_state_set_warning(NULL);
         break;
 
     case PICO_AUTO_UPDATE_DEFER_FIRING:
         ESP_LOGW(TAG, "%s (%s)", why, gate_reason[0] != '\0' ? gate_reason : "interlock");
         pico_auto_update_state_set_blocking(false, NULL);
+        pico_auto_update_state_set_warning(NULL);
         break;
 
     case PICO_AUTO_UPDATE_NEEDED: {
@@ -386,6 +406,7 @@ static void pico_auto_update_task(void *arg)
             /* Standing down is not abandonment: the budget is intact unless
              * the attempt actually began, and the next boot re-evaluates. */
             pico_auto_update_state_set_blocking(false, NULL);
+            pico_auto_update_state_set_warning(NULL);
         }
         break;
     }
@@ -413,7 +434,33 @@ static void pico_auto_update_task(void *arg)
         break;
     }
 
-    default: /* the remaining ABANDONED_* causes: NO_IMAGE, CHAIN_GAP, PRIOR_FAILED */
+    case PICO_AUTO_UPDATE_ABANDONED_PRIOR_FAILED: {
+        /* Review finding (Opus, 2026-09-20), fix part (a): this used to fall
+         * into the default: branch and set_blocking(true) -- a PERMANENT
+         * firing refusal with no operator escape, since the only clear is a
+         * verified MATCH (pico_update_attempts_clear() above), and an
+         * abandoned pair never attempts again to reach one. That was made
+         * worse by fix part (b) above still leaving a stale
+         * prior_attempt_failed=true possibly already persisted on a board
+         * flashed with 67ae5a08-era firmware (the record_failure() call this
+         * commit removes from attempt_update_staged_locked()) -- even a
+         * clean rebuild of THIS fix cannot un-persist that old NVS record by
+         * itself. Treat it the same as BUDGET_SPENT: non-blocking, surfaced
+         * as a /readiness warning naming the pair, so a stale flag can never
+         * latch a permanent refusal either. The attempt budget above still
+         * bounds any real retry storm independently of this flag. */
+        char warn_reason[PICO_AUTO_UPDATE_STATE_REASON_MAX];
+        snprintf(warn_reason, sizeof(warn_reason),
+                "Pico update: prior attempt for this pair reported a terminal failure "
+                "(against %.24s)",
+                in.expected_commit != NULL ? in.expected_commit : "");
+        ESP_LOGW(TAG, "%s -- %s", why, warn_reason);
+        pico_auto_update_state_set_blocking(false, NULL);
+        pico_auto_update_state_set_warning(warn_reason);
+        break;
+    }
+
+    default: /* the remaining ABANDONED_* causes: NO_IMAGE, CHAIN_GAP */
         ESP_LOGE(TAG, "automatic Pico update abandoned: %s%s%s", why,
                  (use_embedded ? emb.reason[0] : img.reason[0]) != '\0' ? " -- " : "",
                  use_embedded ? emb.reason : img.reason);

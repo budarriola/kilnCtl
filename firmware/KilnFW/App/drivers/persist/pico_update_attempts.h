@@ -104,7 +104,28 @@ bool pico_update_attempts_next_slot(uint32_t pair_hash, int *out_slot);
 
 /* Marks `pair_hash`'s most recent attempt as a terminal (non-retryable)
  * failure -- plan sec 4/7's third unrecoverable cause. Does not touch the
- * count. Read-back verified the same way. Returns true iff confirmed. */
+ * count. Read-back verified the same way. Returns true iff confirmed.
+ *
+ * NO CALLER as of 2026-09-20 (Opus review fix). pico_auto_update_boot.c's
+ * attempt_update_staged_locked() used to call this when
+ * ota_pico_relay_start() returned false -- but that return means the relay
+ * task never took ownership, an ESP-local failure (task-create, typically)
+ * that never touched the Pico at all. Persisting a terminal failure for
+ * that made ABANDONED_PRIOR_FAILED latch permanently (the only clear is a
+ * verified MATCH, which an abandoned pair can never attempt again to
+ * reach), off a fault that says nothing about the Pico or the staged image.
+ * This function is intentionally kept, undeleted, for a GENUINE terminal
+ * relay OUTCOME -- the relay took ownership, ran, and the far side (or
+ * ota_pico_relay.c's own state machine) reported back a result that is
+ * known non-retryable, as opposed to "budget spent" or "local hiccup,
+ * budget still bounds it." No such call site exists yet; ota_pico_relay.c's
+ * own header names the same still-unwired hook (the SAFETY_LINK_UPDATE_
+ * STATE_REJECTED_SLOT_LINKAGE retry note). Do not re-wire this to the
+ * ota_pico_relay_start() failure path removed above -- and note that even
+ * once a real caller is wired up, pico_auto_update_boot.c's
+ * ABANDONED_PRIOR_FAILED handling is now non-blocking (set_warning, not
+ * set_blocking) regardless, so this counter alone can never again latch a
+ * permanent firing refusal. */
 bool pico_update_attempts_record_failure(uint32_t pair_hash);
 
 /* Clears the record entirely -- called only once the Pico reports the

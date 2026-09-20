@@ -20,6 +20,14 @@
 // so a boot that reaches ABANDONED_BUDGET_SPENT and calls only
 // set_warning() leaves is_blocking() false, exactly as readiness_gate.h
 // requires.
+//
+// Opus review, 2026-09-20 (same pass as the record_failure fix in
+// pico_auto_update_boot.c): ABANDONED_PRIOR_FAILED joined BUDGET_SPENT as
+// non-blocking too, for the same reason -- the only clear for that cause is
+// a verified MATCH, which an abandoned pair can never attempt again to
+// reach, so a persisted (possibly stale) failure flag must not be able to
+// latch a permanent refusal either. NO_IMAGE and CHAIN_GAP are the only two
+// ABANDONED_* causes still consumed with set_blocking(true).
 #include <string.h>
 
 #include "test_common.h"
@@ -57,17 +65,38 @@ static void test_budget_spent_sets_warning_without_blocking(void)
 
 static void test_other_unrecoverable_causes_still_block(void)
 {
-    // The three OTHER ABANDONED_* causes (NO_IMAGE, CHAIN_GAP, PRIOR_FAILED)
-    // keep the pre-F2 behavior: set_blocking(true) with no warning. F2's
-    // scope is BUDGET_SPENT alone, per its own finding text.
+    // The two REMAINING ABANDONED_* causes (NO_IMAGE, CHAIN_GAP) keep the
+    // pre-F2 behavior: set_blocking(true) with no warning. PRIOR_FAILED
+    // moved to the non-blocking/warning group alongside BUDGET_SPENT in the
+    // 2026-09-20 Opus review pass -- see test_prior_failed_sets_warning_
+    // without_blocking() below.
     pico_auto_update_state_set_blocking(true, "no usable embedded/staged image");
-    TEST_CHECK(pico_auto_update_state_is_blocking(), "an image/chain-gap/prior-failed cause still blocks");
+    TEST_CHECK(pico_auto_update_state_is_blocking(), "an image/chain-gap cause still blocks");
     TEST_CHECK(!pico_auto_update_state_is_warning(),
               "blocking for one of the other causes does not, by itself, raise the separate warning flag");
     TEST_CHECK(strcmp(pico_auto_update_state_reason(), "no usable embedded/staged image") == 0,
               "the blocking reason is recorded verbatim");
 
     pico_auto_update_state_set_blocking(false, NULL); // restore
+}
+
+static void test_prior_failed_sets_warning_without_blocking(void)
+{
+    // The exact sequence pico_auto_update_boot.c's ABANDONED_PRIOR_FAILED
+    // case now performs, mirroring ABANDONED_BUDGET_SPENT's F2 fix: a
+    // warning naming the pair, blocking left/forced false.
+    pico_auto_update_state_set_blocking(false, NULL);
+    pico_auto_update_state_set_warning(
+        "Pico update: prior attempt for this pair reported a terminal failure (against abc123)");
+
+    TEST_CHECK(!pico_auto_update_state_is_blocking(),
+              "a prior-failed pair must never block firing -- only a warning, same rationale as F2's "
+              "budget-spent fix: the only clear (a verified MATCH) is unreachable once abandoned");
+    TEST_CHECK(pico_auto_update_state_is_warning(), "the prior failure IS surfaced, as a warning");
+    TEST_CHECK(strstr(pico_auto_update_state_warning_reason(), "abc123") != NULL,
+              "the warning names the commit pair");
+
+    pico_auto_update_state_set_warning(NULL); // restore
 }
 
 static void test_set_blocking_false_clears_reason(void)
@@ -83,5 +112,6 @@ void run_test_pico_auto_update_state(void)
     test_default_state_is_neither_blocking_nor_warning();
     test_budget_spent_sets_warning_without_blocking();
     test_other_unrecoverable_causes_still_block();
+    test_prior_failed_sets_warning_without_blocking();
     test_set_blocking_false_clears_reason();
 }
