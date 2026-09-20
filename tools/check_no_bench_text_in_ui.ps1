@@ -29,13 +29,23 @@
 #      firmware/KilnFW/App/drivers/http/*.html and *.js.
 #   2. Same C-style comment stripping over every firmware/KilnFW/App/drivers/
 #      ui/*.c and *.h file (the LCD's own strings).
-#   3. A narrower pass over firmware/KilnFW/App/drivers/http/*_http.c: any
-#      line that is (a) not a comment and (b) looks like it hands a string to
-#      the HTTP client -- httpd_resp_send_err(...), httpd_resp_sendstr(...),
-#      or an snprintf(...) into a buffer literally named detail/msg/hint/
-#      reason/message -- is scanned for the forbidden list. Server-side
-#      ESP_LOGI/ESP_LOGW/ESP_LOGE calls are deliberately NOT scanned here:
-#      those are developer log lines nobody using the product ever sees.
+#   3. A quoted-line + paren-depth pass over firmware/KilnFW/App/drivers/
+#      http/*_http.c: after C-style comment stripping, every line that
+#      carries a string literal (contains a quote) is scanned for the
+#      forbidden list, EXCEPT lines that are part of an ESP_LOGI/ESP_LOGW/
+#      ESP_LOGE(...) call -- those are developer log lines nobody using the
+#      product ever sees. A call's own extent (including multi-line
+#      snprintf/detail-message continuations, which carry no call anchor of
+#      their own) is tracked with a running open-paren-minus-close-paren
+#      depth count seeded when an ESP_LOG*( line is seen and decremented
+#      line by line until it returns to zero; parens INSIDE string literals
+#      are stripped before counting so a literal like "alloc failed (see
+#      log" cannot desync the counter, and the exclusion window is also
+#      abandoned at a line ending in a bare `;` as a second guard against
+#      the same failure shape. Any line NOT inside such a window that
+#      carries a quote -- including a plain httpd_resp_send_err(...)/
+#      httpd_resp_sendstr(...) call or an snprintf(...) into a detail/msg/
+#      hint/reason/message buffer -- is scanned.
 #
 # The forbidden word list ($ForbiddenPatterns below) is maintained by hand,
 # same shape as check_hal_include_boundary.ps1's allowlists: add a new
@@ -119,9 +129,17 @@ $JargonRegex = ($JargonPatterns -join '|')
 $SourceFilePattern = '(?<![.\w])[A-Za-z_][A-Za-z0-9_]{2,}\.(c|h|py|ps1|cmake)\b'
 
 # Whole-file, temporary allowlist for the jargon-class pass (Pass 4) only.
-# setup_wizard_page.html is mid-rewrite by another agent as of 2026-09-19;
-# excluding it here avoids a merge collision with that in-flight work. This
-# entry should be removed once that rewrite lands and the file is clean.
+# setup_wizard_page.html is mid-rewrite by another agent (worktree
+# C:\wt\wizrework_koxpk7, coupling-matrix step removal) as of 2026-09-19;
+# excluding it here avoids a merge collision with that in-flight work. As of
+# this writing the file trips exactly six jargon-class hits, all doc/source
+# citations in step-explainer text: :296 "docs/SETUP_WIZARD.md's
+# implementation steps 8-11...", :991 "(project_no_cts_fitted_guard_coverage)",
+# :1242 "-- this is a deliberate owner decision (SETUP_WIZARD.md section 10
+# Q4)...", :1255 "(autotune_engine.c, quoted verbatim)...", :2544 "(applied in
+# thermo_task.c)...", :2681 "(SETUP_WIZARD.md section 6)." That other agent
+# owns removing these along with the coupling-matrix step; this entry should
+# be removed once that rewrite lands and the file is clean.
 $JargonFileAllowlist = @(
     'setup_wizard_page\.html$'
 )
@@ -270,28 +288,64 @@ foreach ($f in $uiFiles) {
 # anchor on their own line and were previously invisible here. ESP_LOG*
 # calls (developer log lines nobody using the product ever sees) are
 # excluded, including their continuation lines when the call itself spans
-# multiple lines, tracked via a running paren-depth count.
+# multiple lines, tracked via a running paren-depth count. Parens INSIDE
+# string literals are stripped before counting, so a message like
+# "alloc failed (see log" cannot desync the depth counter and mute this
+# pass for the remainder of the file. As a second guard against that same
+# failure shape, the exclusion window is also capped: it is abandoned (depth
+# forced back to 0, line no longer treated as inside the ESP_LOG call) at
+# the next line that ends (ignoring trailing whitespace) in a bare `;` while
+# depth is already 0 going in -- i.e. a statement terminator seen with no
+# open call above it means whatever call was open must have already closed.
+# If depth is still > 0 after the last line of the file, that is itself a
+# bug in this scan (an unbalanced ESP_LOG call or a stripping miss) and this
+# function fails loudly (throws, naming file:line) instead of silently
+# leaving the rest of the file unscanned.
+function Remove-StringLiteralsForParenCount {
+    param([string]$Line)
+    # Strip "..." contents (handling \" and \\ escapes) so parens inside
+    # string literals never reach the paren counter. Comments are already
+    # stripped by Get-CCommentStripped before this runs.
+    return [regex]::Replace($Line, '"(?:\\.|[^"\\])*"', '""')
+}
+
 function Get-NonEspLogQuotedLineIndices {
-    param([string[]]$Lines)
+    param([string[]]$Lines, [string]$RelPath)
     $indices = @()
     $espLogDepth = 0
     for ($i = 0; $i -lt $Lines.Count; $i++) {
         $line = $Lines[$i]
+        $countable = Remove-StringLiteralsForParenCount -Line $line
         if ($espLogDepth -gt 0) {
-            $opens = ([regex]::Matches($line, '\(')).Count
-            $closes = ([regex]::Matches($line, '\)')).Count
+            $opens = ([regex]::Matches($countable, '\(')).Count
+            $closes = ([regex]::Matches($countable, '\)')).Count
             $espLogDepth += ($opens - $closes)
-            if ($espLogDepth -lt 0) { $espLogDepth = 0 }
+            if ($espLogDepth -le 0) {
+                $espLogDepth = 0
+                continue
+            }
+            # Continuation-window cap: a line ending in a bare `;` can only
+            # be a real continuation of the open call if that call's parens
+            # haven't already balanced out per the countable text on this
+            # very line. If the line ends in `;` and the running depth
+            # nonetheless still reads >0, treat it as the call having
+            # actually closed (abandon the exclusion) rather than trust an
+            # ever-growing depth to eventually close on its own.
+            if ($countable.TrimEnd() -match ';$') { $espLogDepth = 0 }
             continue
         }
         if ($line -match 'ESP_LOG[IWE]\s*\(') {
-            $opens = ([regex]::Matches($line, '\(')).Count
-            $closes = ([regex]::Matches($line, '\)')).Count
+            $opens = ([regex]::Matches($countable, '\(')).Count
+            $closes = ([regex]::Matches($countable, '\)')).Count
             $espLogDepth = $opens - $closes
             if ($espLogDepth -lt 0) { $espLogDepth = 0 }
+            if ($espLogDepth -gt 0 -and $countable.TrimEnd() -match ';$') { $espLogDepth = 0 }
             continue
         }
         if ($line -match '"') { $indices += $i }
+    }
+    if ($espLogDepth -gt 0) {
+        throw "check_no_bench_text_in_ui: Get-NonEspLogQuotedLineIndices: unbalanced ESP_LOG*() paren depth ($espLogDepth) persisted past end of file in ${RelPath}:$($Lines.Count) -- an ESP_LOG call was never seen to close, muting this pass. Fix the source or this stripper."
     }
     return $indices
 }
@@ -309,7 +363,7 @@ foreach ($f in $httpCFiles) {
     $rel = Get-RelPath -FullPath $f.FullName
     $raw = Get-Content -Path $f.FullName
     $stripped = Get-CCommentStripped -Lines $raw
-    $quotedIdx = Get-NonEspLogQuotedLineIndices -Lines $stripped
+    $quotedIdx = Get-NonEspLogQuotedLineIndices -Lines $stripped -RelPath $rel
     foreach ($i in $quotedIdx) {
         if ($stripped[$i] -match $ForbiddenRegex) {
             if (Test-Allowlisted -RelPath $rel -Line $stripped[$i]) { continue }

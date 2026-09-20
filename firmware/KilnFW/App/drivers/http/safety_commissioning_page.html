@@ -547,7 +547,7 @@ var GROUPS = [
         guards: ['S3', 'S4', 'S14'], derivedCt: 2, note: 'Same as ct_channel_map[0], for CT2.' },
       { id: 529, name: 'safety_tc_installed', type: 'bool', risk: 'dangerous', noDefault: true,
         guards: ['S2', 'S10', 'S13'],
-        note: '0x0211 -- minted after this page was first written. The boolean form of ' +
+        note: 'The boolean form of ' +
           '"where is the safety processor\'s own thermocouple": true whenever ' +
           'tc_source is OWN_J7 or BOTH, false only for BORROWED_ZONE. Written by the guided ' +
           'flow\'s second question, not typed here directly.' },
@@ -736,7 +736,7 @@ var GROUPS = [
           'exists to catch a CT on the wrong jack or an element/wiring change.' },
       { id: 798, name: 'overcurrent_time_s', type: 'u16', risk: 'nuisance', unit: 's', def: 30, guards: ['S14'] },
       { id: 799, name: 'ct_topology', type: 'enum', risk: 'dangerous', guards: ['S14', 'S15'],
-        enumOpts: [ [0, 'Per-zone (one CT per zone -- default)'], [1, 'Summed (one shared CT, channel 3, reads every zone)'] ],
+        enumOpts: [ [0, 'Per-zone (one CT per zone -- default)'], [1, 'Summed (one shared CT, channel 2, reads every zone)'] ],
         note: 'SUPERSEDED by the three per-zone "zone N CT channel" selectors below, ' +
           'which say the same thing and more: ' +
           'per-zone is every zone on its own channel, summed is every zone on channel 2. ' +

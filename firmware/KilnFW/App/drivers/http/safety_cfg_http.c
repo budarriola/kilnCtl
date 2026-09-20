@@ -1583,6 +1583,14 @@ static esp_err_t ct_auto_zero_post_handler(httpd_req_t *req)
 /* POST /api/safety/commissioning/bench_preset                            */
 /* ---------------------------------------------------------------------- */
 
+/* Dev-tools-only: this table and its handler are only ever registered
+ * behind CONFIG_KILNCTL_DEV_TOOLS (see the #if around bench_uri's
+ * registration below). Guarding the definitions here too, not just the
+ * registration, keeps a release build (CONFIG_KILNCTL_DEV_TOOLS unset) from
+ * emitting an unused-function/unused-variable warning for code that build
+ * can never call. */
+#if CONFIG_KILNCTL_DEV_TOOLS
+
 /* COMMISSIONING.md sec 4.1: "A dev-only preset may be applied for bench
  * testing... It must be VISIBLY a bench preset: applying it leaves
  * calibration_missing set." The four sec-1 fields (tc_source,
@@ -1693,6 +1701,8 @@ static esp_err_t bench_preset_post_handler(httpd_req_t *req)
     safety_cfg_store_clear_rate_guard_meta();
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
+
+#endif /* CONFIG_KILNCTL_DEV_TOOLS */
 
 /* ---------------------------------------------------------------------- */
 /* GET/POST /api/safety/rate_guard/auto -- S8 auto-calc write path         */
