@@ -98,7 +98,7 @@ static void test_migration_from_v1(void)
     v1.version = 1;
     v1.steps[3].state = (uint8_t)SETUP_WIZ_STEP_DONE;
     v1.steps[3].ts = 12345;
-    v1.steps[9].state = (uint8_t)SETUP_WIZ_STEP_SKIPPED; /* old step 9: shifts down TWO slots (past both removed steps) to new step 8 */
+    v1.steps[9].state = (uint8_t)SETUP_WIZ_STEP_SKIPPED; /* old step 9: sits above removed old step 8 only, so shifts down ONE slot to new step 8 */
     v1.steps[9].ts = 999;
     v1.steps[12].state = (uint8_t)SETUP_WIZ_STEP_DONE; /* old step 12: first profile & final gate */
     v1.steps[12].ts = 44444;
@@ -115,18 +115,25 @@ static void test_migration_from_v1(void)
     esp_err_t err = setup_wizard_progress_start();
     TEST_CHECK(err == ESP_OK, "start() against a v1 blob still returns ESP_OK");
 
-    setup_wizard_step_t s3, s8, s0, s11;
+    setup_wizard_step_t s3, s8, s0, s10, s11;
     setup_wizard_progress_get_step(3, &s3);
     setup_wizard_progress_get_step(8, &s8);
     setup_wizard_progress_get_step(0, &s0);
+    setup_wizard_progress_get_step(10, &s10);
     setup_wizard_progress_get_step(11, &s11);
     TEST_CHECK(s3.state == SETUP_WIZ_STEP_DONE && s3.ts == 12345, "v1 migration: step 3's state+ts carry forward");
     TEST_CHECK(s8.state == SETUP_WIZ_STEP_SKIPPED && s8.ts == 999,
-               "v1 migration: old step 9 lands at NEW step 8, shifted down two slots past both removed steps");
+               "v1 migration: old step 9 lands at NEW step 8, shifted down one slot past removed old step 8");
     TEST_CHECK(s3.note[0] == '\0', "v1 migration: note (did not exist in v1) defaults to empty");
     TEST_CHECK(s0.state == SETUP_WIZ_STEP_PENDING, "v1 migration: an untouched v1 step still reads PENDING");
-    TEST_CHECK(s11.state == SETUP_WIZ_STEP_DONE && s11.ts == 44444,
-               "v1 migration: OLD step 12 (first profile) lands at NEW step 11, shifted down one slot");
+    /* Old step 12 sits above BOTH removed slots (8 and 11), so it shifts down
+     * two slots, not one -- same arithmetic the v2 case below documents. The
+     * assertion used to name new step 11 here, left over from the v4 era when
+     * only old step 11 had been removed. */
+    TEST_CHECK(s10.state == SETUP_WIZ_STEP_DONE && s10.ts == 44444,
+               "v1 migration: OLD step 12 (first profile) lands at NEW step 10, shifted down two slots");
+    TEST_CHECK(s11.state == SETUP_WIZ_STEP_PENDING,
+               "v1 migration: new step 11 (authentication) has no v1 counterpart and stays PENDING");
 }
 
 // ---------------------------------------------------------------------

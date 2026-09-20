@@ -678,6 +678,29 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   // compatibility with the pre-fix call shape) must not throw or misbehave.
   const noCommittedArgs = ctx.validateStep8(1, 0, 0x3, [0, 1]);
   assert(noCommittedArgs.valid, 'step8: omitting committed_mask/committed_zone entirely still validates correctly');
+
+  // The union must actually be WALKED, not merely computed: two channels
+  // known only through committed_mask/committed_zone (sweep arrays empty,
+  // so every such channel sits past zoneForCh.length) that both claim the
+  // same zone is exactly the per-zone clash this step exists to refuse.
+  // Bounding the walk by zoneForCh alone made this pass vacuously.
+  const committedOnlyClash = ctx.validateStep8(1, 0, 0x0, [], 0x3, [1, 1]);
+  assert(!committedOnlyClash.valid,
+    'step8: two committed-only channels claiming the same zone is refused, not skipped');
+  assert(/both map to zone 2/.test(committedOnlyClash.errors[0]),
+    'step8: the committed-only clash names the contested zone');
+
+  // Same two channels, distinct zones -- must still pass.
+  const committedOnlyOk = ctx.validateStep8(1, 0, 0x0, [], 0x3, [0, 1]);
+  assert(committedOnlyOk.valid, 'step8: committed-only channels on distinct zones validate');
+
+  // A mask bit with no usable zone behind it must be reported, never folded
+  // into the duplicate-detection map as undefined (where two such channels
+  // would read as a bogus clash on the same phantom zone).
+  const maskWithoutZone = ctx.validateStep8(1, 0, 0x0, [], 0x3, [undefined, undefined]);
+  assert(!maskWithoutZone.valid, 'step8: a mapped channel with no zone behind it is refused');
+  assert(/no zone came back with it/.test(maskWithoutZone.errors[0]),
+    'step8: a mapped channel with no zone says so plainly rather than naming a phantom zone');
 })();
 
 // ---- Step 8: heat-required marking is not silently walkable past -------

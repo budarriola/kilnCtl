@@ -1,5 +1,6 @@
 #include "setup_wizard_progress.h"
 
+#include <stddef.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -197,6 +198,22 @@ static void adopt_v5(const setup_wizard_progress_blob_t *blob)
  * Every known record layout starts with {state(u8), reserved[3], ts(u32)} --
  * only the tail (note[], present or not) differs, so this is layout-agnostic
  * beyond that. */
+/* The v1 -> v5 and v2/v3 -> v5 paths above run this twice, using an
+ * intermediate array of the IN-RAM setup_wizard_step_t as the second pass's
+ * SOURCE -- so that struct, not just the on-disk records, has to keep the
+ * {state at 0, ts at 4, note at 8} shape this function reads by byte offset.
+ * It does today only because setup_wizard_step_state_t is a 4-byte enum on
+ * this target; nothing else pins it, so pin it here rather than let a future
+ * enum/packing change silently migrate garbage. */
+_Static_assert(offsetof(setup_wizard_step_t, ts) == 4,
+               "setup_wizard_step_t.ts moved -- remap_drop_index() reads it at byte offset 4");
+_Static_assert(offsetof(setup_wizard_step_t, note) == 8,
+               "setup_wizard_step_t.note moved -- remap_drop_index() reads it at byte offset 8");
+_Static_assert(sizeof(setup_wizard_step_t) == 8 + SETUP_WIZARD_NOTE_MAX,
+               "setup_wizard_step_t grew padding -- remap_drop_index() strides over it");
+_Static_assert(sizeof(setup_wizard_step_state_t) == 4,
+               "setup_wizard_step_state_t is no longer 4 bytes -- remap_drop_index() reads the state "
+               "byte at offset 0, which is only the enum's value on a 4-byte little-endian enum");
 static void remap_drop_index(setup_wizard_step_t *dest, uint8_t dest_count,
                               const void *old_steps, size_t old_stride, uint8_t old_count,
                               uint8_t drop_index, bool has_note)

@@ -990,7 +990,14 @@ function validateStep8(ctInstalled, ctTopology, mapMask, zoneForCh, committedMas
   if (ctTopology === 0) {
     var effectiveMask = mapMask | committedMask;
     var seen = {};
-    for (var ch = 0; ch < (zoneForCh || []).length; ch++) {
+    // Bound the walk by BOTH sources, not just the sweep-measured array: a
+    // channel present only in committed_zone[] (never swept this session)
+    // sits past zoneForCh.length, and bounding by zoneForCh alone made the
+    // whole union silently unreachable -- effectiveMask was computed and
+    // then never consulted for those channels, so a committed-only duplicate
+    // zone assignment passed the step.
+    var chCount = Math.max((zoneForCh || []).length, (committedZone || []).length);
+    for (var ch = 0; ch < chCount; ch++) {
       if (!(effectiveMask & (1 << ch))) continue; // neither source has this channel yet
       if ((mapMask & (1 << ch)) && (committedMask & (1 << ch)) && zoneForCh[ch] !== committedZone[ch]) {
         errors.push('CT channel ' + ch + ': sweep says zone ' + (zoneForCh[ch] + 1) +
@@ -999,6 +1006,14 @@ function validateStep8(ctInstalled, ctTopology, mapMask, zoneForCh, committedMas
         continue;
       }
       var z = (mapMask & (1 << ch)) ? zoneForCh[ch] : committedZone[ch];
+      if (!(z >= 0)) {
+        // Mask bit set but the matching source array has no usable zone for
+        // it -- report that rather than folding undefined/NaN into `seen`,
+        // where it would read as a duplicate of the next such channel.
+        errors.push('CT channel ' + ch + ' is reported as mapped but no zone came back with it -- ' +
+          're-run the current sweep, or re-commit the mapping for this channel.');
+        continue;
+      }
       if (seen.hasOwnProperty(z)) {
         errors.push('CT channels ' + seen[z] + ' and ' + ch + ' both map to zone ' + (z + 1) +
           ' under per-zone topology -- the dashboard can only show one CT per single-zone card, so one ' +
@@ -1452,6 +1467,18 @@ function renderStep11() {
             method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             body: 'cmd=set_web_password&role=admin&username=' + encodeURIComponent(username) +
               '&password=' + encodeURIComponent(password),
+          }).then(function (res) {
+            // The credential write must be CHECKED before the policy write
+            // runs: chaining straight through would enable the login policy
+            // on a board whose administrator credential was just refused
+            // (too short, bad role, store full), locking the web UI behind a
+            // credential that does not exist. Reject here so the catch below
+            // surfaces it and cmd=set_policy is never sent.
+            if (res.ok) return null;
+            return res.json().catch(function () { return {}; }).then(function (body) {
+              throw new Error((body && body.error) ||
+                'The board refused the administrator login details -- login was NOT turned on.');
+            });
           });
         });
       }
@@ -1472,8 +1499,9 @@ function renderStep11() {
         }
         msgEl.textContent = 'Saved. Read back: web login is now ' + (wantEnable ? 'ON' : 'off') + '.';
         postStepState(11, 'done').then(function () { loadAll(); });
-      }).catch(function () {
-        renderErrList(errEl, ['Could not reach the board to save this -- try again once it answers.']);
+      }).catch(function (err) {
+        renderErrList(errEl, [(err && err.message) ||
+          'Could not reach the board to save this -- try again once it answers.']);
       });
     });
     document.getElementById('step11Skip').addEventListener('click', function () {
