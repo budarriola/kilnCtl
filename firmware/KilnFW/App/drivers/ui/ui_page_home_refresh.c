@@ -117,6 +117,14 @@ void ui_home_refresh_cb(lv_timer_t *timer)
     profile_exec_status_t st;
     profile_executor_get_status(&st);
 
+    /* UI_PLAN.md 6.5 -- right-quarter rail, same ds/st snapshot, no new
+     * producer call. Kept out-of-line (see ui_home_rail_refresh()'s own
+     * header comment in ui_page_home_internal.h) so this callback's own
+     * stack frame does not grow -- it is already the lvgl task's deepest
+     * known dispatch target against check_all_task_stack_budgets.py's
+     * 4880 B ceiling. */
+    ui_home_rail_refresh(&ds, &st);
+
     /* Progress bar -- see s_ui_home_progress_wrap's own static-declaration comment.
      * dashboard_plan_exec_fields() reports elapsed 0 / total -1 for IDLE, so
      * the "running" gate below matches main_page.html's renderProgress()
@@ -857,5 +865,52 @@ lag_notice_done:;
         lv_obj_remove_flag(s_ui_home_pause_btn, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(s_ui_home_pause_btn, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+/* UI_PLAN.md 6.5 -- fills the right-quarter rail. Called once per tick from
+ * ui_home_refresh_cb() above, given pointers to the SAME ds/st snapshot
+ * that callback already fetched -- no new dashboard_get_status()/
+ * profile_executor_get_status() call, no new lock. All buffers here are
+ * this function's OWN small locals, not ui_home_refresh_cb()'s -- see this
+ * function's prototype (ui_page_home_internal.h) for why it is kept
+ * out-of-line rather than inlined into that callback's body. */
+void ui_home_rail_refresh(const dashboard_status_t *ds, const profile_exec_status_t *st)
+{
+    for (uint32_t i = 0; i < KILN_IO_RELAY_COUNT; i++) {
+        bool on = ds->io_ready && !ds->io_read_failed && ds->relay_on[i];
+        lv_obj_set_style_bg_color(s_ui_home_rail_relay_pill[i],
+                                   on ? UI_THEME_ACCENT_4 : UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    }
+
+    for (uint32_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        if (i >= s_ui_home_zone_count) {
+            lv_obj_add_flag(s_ui_home_rail_zone_row[i], LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        lv_obj_remove_flag(s_ui_home_rail_zone_row[i], LV_OBJ_FLAG_HIDDEN);
+
+        char name_buf[20];
+        if (!zones_config_get_name((uint8_t)i, name_buf, sizeof(name_buf)) || name_buf[0] == '\0') {
+            snprintf(name_buf, sizeof(name_buf), "Zone %u", (unsigned)(i + 1));
+        }
+        lv_label_set_text(s_ui_home_rail_zone_name[i], name_buf);
+
+        bool valid = (i < ds->channel_count) && ds->channels[i].valid;
+        char temp_buf[16];
+        ui_page_home_rail_format_zone_temp(valid, ds->channels[i].temp_c, temp_buf, sizeof(temp_buf));
+        lv_label_set_text(s_ui_home_rail_zone_temp[i], temp_buf);
+
+        int pct = st->zones[i].active ? ui_page_home_rail_duty_pct(st->zones[i].duty) : 0;
+        lv_bar_set_value(s_ui_home_rail_zone_bar[i], pct, LV_ANIM_OFF);
+    }
+
+    char watts_buf[16];
+    ui_page_home_rail_format_kiln_watts(ds->power_valid, ds->power_w, watts_buf, sizeof(watts_buf));
+    if (watts_buf[0] == '\0') {
+        lv_obj_add_flag(s_ui_home_rail_watts_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_remove_flag(s_ui_home_rail_watts_label, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(s_ui_home_rail_watts_label, watts_buf);
     }
 }

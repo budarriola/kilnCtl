@@ -233,6 +233,20 @@ uint32_t s_ui_home_lag_notice_ticks;
 lv_obj_t *s_ui_home_chart;                     /* home page's compact chart -- actual + planned-ahead */
 lv_chart_series_t *s_ui_home_chart_actual_series;
 lv_chart_series_t *s_ui_home_chart_planned_series;
+
+/* UI_PLAN.md 6.5 -- the dashboard's right-quarter rail. graph_row wraps the
+ * chart (now 74% width, was 100%) and this rail (25%, 4px gap between).
+ * See ui_page_home_rail.h for the pure formatting helpers this rail's
+ * refresh calls into, and ui_home_rail_refresh() (ui_page_home_refresh.c)
+ * for the per-tick fill using the same ds/st snapshot the rest of
+ * ui_home_refresh_cb() already fetched -- no new producer call. */
+lv_obj_t *s_ui_home_rail;
+lv_obj_t *s_ui_home_rail_relay_pill[KILN_IO_RELAY_COUNT];
+lv_obj_t *s_ui_home_rail_zone_row[MAX31856_CHANNEL_COUNT];
+lv_obj_t *s_ui_home_rail_zone_name[MAX31856_CHANNEL_COUNT];
+lv_obj_t *s_ui_home_rail_zone_temp[MAX31856_CHANNEL_COUNT];
+lv_obj_t *s_ui_home_rail_zone_bar[MAX31856_CHANNEL_COUNT];
+lv_obj_t *s_ui_home_rail_watts_label;
 /* These arrays ARE the chart's backing store (lv_chart_set_series_ext_y_array()),
  * not a scratch copy, so they must outlive the chart -- static, matching every
  * other widget on this page's "built once, page never torn down" lifetime
@@ -743,9 +757,33 @@ lv_obj_t *ui_page_home_build(void)
     lv_obj_set_style_pad_all(s_ui_home_lag_notice, 3, 0);
     lv_label_set_text(s_ui_home_lag_notice, "");
 
-    s_ui_home_chart = lv_chart_create(content);
-    lv_obj_set_width(s_ui_home_chart, lv_pct(100));
-    lv_obj_set_flex_grow(s_ui_home_chart, 1);
+    /* UI_PLAN.md 6.5 -- graph_row replaces the chart as the flex_grow(1)
+     * child of `content`: it takes the same residual vertical space the
+     * chart used to take alone, and splits it 74/25 horizontally between
+     * the chart and the new rail (4px gap between, see section 6.5's
+     * arithmetic: 0.74*464=343, 0.25*464=116, +4 gap = 463 <= 464). Cross
+     * axis STRETCH so both children fill graph_row's full height, matching
+     * what the chart's own flex_grow(1)/lv_pct(100) height used to give it
+     * directly. */
+    lv_obj_t *graph_row = lv_obj_create(content);
+    lv_obj_remove_flag(graph_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_width(graph_row, lv_pct(100));
+    lv_obj_set_flex_grow(graph_row, 1);
+    lv_obj_set_style_bg_opa(graph_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(graph_row, 0, 0);
+    lv_obj_set_style_pad_all(graph_row, 0, 0);
+    lv_obj_set_style_pad_gap(graph_row, UI_THEME_SPACE_1, 0);
+    lv_obj_set_flex_flow(graph_row, LV_FLEX_FLOW_ROW);
+    /* This LVGL build's lv_flex_align_t has no STRETCH value (cross axis
+     * placement is only START/END/CENTER) -- both children set their own
+     * height to lv_pct(100) explicitly instead (s_ui_home_chart above,
+     * s_ui_home_rail below), so START here is a no-op given their explicit
+     * full-height sizing, not a real behaviour choice. */
+    lv_obj_set_flex_align(graph_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    s_ui_home_chart = lv_chart_create(graph_row);
+    lv_obj_set_width(s_ui_home_chart, lv_pct(74));
+    lv_obj_set_height(s_ui_home_chart, lv_pct(100));
     lv_obj_set_style_bg_color(s_ui_home_chart, UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_bg_opa(s_ui_home_chart, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_ui_home_chart, 0, 0);
@@ -960,6 +998,133 @@ lv_obj_t *ui_page_home_build(void)
         s_ui_home_chart_legend_swatch[i] = swatch;
         s_ui_home_chart_legend_label[i] = label;
     }
+
+    /* UI_PLAN.md 6.5 -- the right-quarter rail. Sibling of s_ui_home_chart
+     * inside graph_row (25% width, card-backed so its 3/4 split against
+     * the chart is visible/sampleable per 6.5's numeric-verification
+     * recipe), column flow, 4px inner padding + 4px gap between children,
+     * matching the section's 108px-inner-width arithmetic (116 - 2*4). */
+    s_ui_home_rail = lv_obj_create(graph_row);
+    lv_obj_remove_flag(s_ui_home_rail, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_width(s_ui_home_rail, lv_pct(25));
+    lv_obj_set_height(s_ui_home_rail, lv_pct(100));
+    lv_obj_set_style_bg_color(s_ui_home_rail, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_bg_opa(s_ui_home_rail, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_ui_home_rail, 0, 0);
+    lv_obj_set_style_radius(s_ui_home_rail, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_set_style_pad_all(s_ui_home_rail, UI_THEME_SPACE_1, 0);
+    lv_obj_set_style_pad_gap(s_ui_home_rail, UI_THEME_SPACE_1, 0);
+    lv_obj_set_flex_flow(s_ui_home_rail, LV_FLEX_FLOW_COLUMN);
+
+    /* "Relays" caption, montserrat_10 -- same small-caption style the
+     * chart's Y-tick labels use. */
+    lv_obj_t *relay_caption = lv_label_create(s_ui_home_rail);
+    lv_obj_set_style_text_color(relay_caption, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_obj_set_style_bg_opa(relay_caption, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_text_font(relay_caption, &lv_font_montserrat_10, 0);
+    lv_label_set_text(relay_caption, "Relays");
+
+    /* 4 relay pills, 24px wide, 4px gaps -- KILN_IO_RELAY_COUNT fixed at
+     * build time (4 today), so no runtime-count gate is needed the way
+     * ui_page_temperature.c's per-zone relay rows need one (that page
+     * loops over a per-ZONE relay count; this rail is one pill per
+     * physical relay, always KILN_IO_RELAY_COUNT of them). Colour only
+     * (no room for UI_RELAY_DISPLAY numbering text at 24x18) -- ON is
+     * UI_THEME_ACCENT_4 (same green the safety-relay line on the
+     * Temperature page uses), off is a plain card-toned pill so the two
+     * states read apart without a new colour. */
+    lv_obj_t *relay_row = lv_obj_create(s_ui_home_rail);
+    lv_obj_remove_flag(relay_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_width(relay_row, lv_pct(100));
+    lv_obj_set_height(relay_row, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(relay_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(relay_row, 0, 0);
+    lv_obj_set_style_pad_all(relay_row, 0, 0);
+    lv_obj_set_style_pad_gap(relay_row, UI_THEME_SPACE_1, 0);
+    lv_obj_set_flex_flow(relay_row, LV_FLEX_FLOW_ROW);
+    for (uint32_t i = 0; i < KILN_IO_RELAY_COUNT; i++) {
+        lv_obj_t *pill = lv_obj_create(relay_row);
+        lv_obj_remove_flag(pill, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(pill, 24, 18);
+        lv_obj_set_style_bg_color(pill, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+        lv_obj_set_style_bg_opa(pill, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(pill, 0, 0);
+        lv_obj_set_style_radius(pill, 4, 0);
+        lv_obj_set_style_pad_all(pill, 0, 0);
+        s_ui_home_rail_relay_pill[i] = pill;
+    }
+
+    /* Per-zone blocks: name / temperature / duty bar, up to MAX31856_
+     * CHANNEL_COUNT (3) built at once -- ui_home_rail_refresh() hides
+     * whichever are past s_ui_home_zone_count, same "built once, hide the
+     * unused tail" idiom the chart's tick-label arrays already use. */
+    for (uint32_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        lv_obj_t *zrow = lv_obj_create(s_ui_home_rail);
+        lv_obj_remove_flag(zrow, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_width(zrow, lv_pct(100));
+        lv_obj_set_height(zrow, LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_opa(zrow, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(zrow, 0, 0);
+        lv_obj_set_style_pad_all(zrow, 0, 0);
+        lv_obj_set_style_pad_gap(zrow, 2, 0);
+        lv_obj_set_flex_flow(zrow, LV_FLEX_FLOW_COLUMN);
+
+        lv_obj_t *name = lv_label_create(zrow);
+        lv_obj_set_width(name, lv_pct(100));
+        lv_label_set_long_mode(name, LV_LABEL_LONG_CLIP);
+        lv_obj_set_style_text_color(name, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+        lv_obj_set_style_bg_opa(name, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_10, 0);
+
+        lv_obj_t *temp = lv_label_create(zrow);
+        lv_obj_set_width(temp, lv_pct(100));
+        lv_label_set_long_mode(temp, LV_LABEL_LONG_CLIP);
+        lv_obj_set_style_text_color(temp, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+        lv_obj_set_style_bg_opa(temp, LV_OPA_TRANSP, 0);
+
+        lv_obj_t *bar = lv_bar_create(zrow);
+        lv_obj_set_width(bar, lv_pct(100));
+        lv_obj_set_height(bar, 8);
+        lv_bar_set_range(bar, 0, 100);
+        lv_obj_set_style_bg_color(bar, UI_THEME_COLOR_BG, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(bar, UI_THEME_ACCENT_1, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_INDICATOR);
+        lv_obj_set_style_radius(bar, 3, LV_PART_MAIN);
+        lv_obj_set_style_radius(bar, 3, LV_PART_INDICATOR);
+
+        s_ui_home_rail_zone_row[i] = zrow;
+        s_ui_home_rail_zone_name[i] = name;
+        s_ui_home_rail_zone_temp[i] = temp;
+        s_ui_home_rail_zone_bar[i] = bar;
+    }
+
+    /* Kiln-total watts line -- owner decision 6.8 item 1: shown only when
+     * ds.power_valid, zero height when hidden (same idiom as
+     * s_ui_home_trip_strip/s_ui_home_lag_notice above). montserrat_10, same
+     * as the other rail captions -- this is a secondary readout, not the
+     * page's headline number. */
+    s_ui_home_rail_watts_label = lv_label_create(s_ui_home_rail);
+    lv_obj_set_width(s_ui_home_rail_watts_label, lv_pct(100));
+    lv_label_set_long_mode(s_ui_home_rail_watts_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_color(s_ui_home_rail_watts_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_obj_set_style_bg_opa(s_ui_home_rail_watts_label, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_text_font(s_ui_home_rail_watts_label, &lv_font_montserrat_10, 0);
+    lv_label_set_text(s_ui_home_rail_watts_label, "");
+    lv_obj_add_flag(s_ui_home_rail_watts_label, LV_OBJ_FLAG_HIDDEN);
+
+    /* UI_PAGE_HOME_RAIL_WORST_CASE_HEIGHT_PX -- pinned by check_ui_budget_
+     * asserts.ps1. Matches section 6.5's arithmetic: caption(14) + gap(4) +
+     * relay row(22) + gap(4) + 3 zone blocks (46 each = 138) + 2 inter-block
+     * gaps (4 each = 8) + gap(4) + watts line (14, zero when hidden) = 208,
+     * against the row's own height (228, itself
+     * UI_THEME_PAGE_CONTENT_BUDGET_PX(268) - action_row(36) - gap(4)). */
+#define UI_PAGE_HOME_RAIL_WORST_CASE_HEIGHT_PX (14 + 4 + 22 + 4 + (3 * 46) + (2 * 4) + 4 + 14)
+_Static_assert(UI_PAGE_HOME_RAIL_WORST_CASE_HEIGHT_PX <=
+                   (UI_THEME_PAGE_CONTENT_BUDGET_PX - 36 - UI_THEME_SPACE_1),
+               "ui_page_home.c: dashboard rail no longer fits its column of the "
+               "action_row-height-reduced content budget -- split across more pages, don't scroll");
+#undef UI_PAGE_HOME_RAIL_WORST_CASE_HEIGHT_PX
 
     /* Progress bar -- see s_ui_home_progress_wrap's own static-declaration comment.
      * Sits directly under the chart, above action_row (the Start/Stop

@@ -120,6 +120,16 @@ extern lv_obj_t *s_ui_home_pause_btn_label;
 extern ui_topbar_t s_ui_home_topbar;
 extern lv_obj_t *s_ui_home_status_label;
 
+/* UI_PLAN.md 6.5 -- right-quarter rail widgets, built once in
+ * ui_page_home_build(), filled every tick by ui_home_rail_refresh() below. */
+extern lv_obj_t *s_ui_home_rail;
+extern lv_obj_t *s_ui_home_rail_relay_pill[KILN_IO_RELAY_COUNT];
+extern lv_obj_t *s_ui_home_rail_zone_row[MAX31856_CHANNEL_COUNT];
+extern lv_obj_t *s_ui_home_rail_zone_name[MAX31856_CHANNEL_COUNT];
+extern lv_obj_t *s_ui_home_rail_zone_temp[MAX31856_CHANNEL_COUNT];
+extern lv_obj_t *s_ui_home_rail_zone_bar[MAX31856_CHANNEL_COUNT];
+extern lv_obj_t *s_ui_home_rail_watts_label;
+
 /* ---- helpers, defined in ui_page_home.c or ui_page_home_actions.c, used
  * from another file in the split -------------------------------------- */
 void ui_home_format_duration(uint32_t seconds, char *out, size_t out_cap);
@@ -155,6 +165,13 @@ void ui_home_chart_set_legend(bool has_span, bool has_actual_multi, bool has_pla
 /* ---- refresh.c: the 1 Hz timer callback, called directly once from
  * ui_page_home_build() to paint real numbers before the first tick ------ */
 void ui_home_refresh_cb(lv_timer_t *timer);
+
+/* UI_PLAN.md 6.5 -- fills the right-quarter rail from the SAME ds/st
+ * snapshot ui_home_refresh_cb() already holds (no new producer call, no
+ * new lock). Kept out-of-line from ui_home_refresh_cb()'s own frame on
+ * purpose -- see its definition's header comment for the stack-budget
+ * reasoning (lvgl task, check_all_task_stack_budgets.py). */
+void ui_home_rail_refresh(const dashboard_status_t *ds, const profile_exec_status_t *st);
 
 #ifdef __cplusplus
 }

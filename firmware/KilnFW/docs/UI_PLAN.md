@@ -887,7 +887,16 @@ reference in the same frame: mean RGB `(1.9, 0.0, 0.4)`. Source side,
 `ui_page_diagnostics.c` contains no reset control; its only `Safety (K4)`
 reference is the display-only `build_relay_life_row()` call.
 
-### 6.5 Right quarter of the dashboard: relays, zone temperatures, zone power
+### 6.5 Right quarter of the dashboard: relays, zone temperatures, zone power — implemented 2026-09-19, awaiting bench verification
+
+Host tests (`test_ui_page_home_rail.c`, negative-tested), the `ui_page_home.c`
+`_Static_assert` (registered in `check_ui_budget_asserts.ps1`), the KilnFW
+target build, `check_all_task_stack_budgets.py` (lvgl task unchanged at
+4848 B against the 4880 B ceiling — `ui_home_rail_refresh()` is called
+out-of-line from `ui_home_refresh_cb()`, so it does not add to that
+callback's own measured frame) and `check_stack_margin_registration.ps1` all
+pass. The "Numeric verification" section below still needs a live bench
+capture — not done from this worktree.
 
 **Files.** `ui_page_home.c` (`ui_page_home_build()`, wrap the chart in a new
 row container), `ui_page_home_internal.h` (declare the rail's shared widgets),
@@ -1000,7 +1009,7 @@ topbar (see 6.2):
 | Worker | Item | Files owned |
 | --- | --- | --- |
 | E | 6.2 | done |
-| F | 6.5 | `ui_page_home.c`, `ui_page_home_internal.h`, `ui_page_home_refresh.c`, **new** `ui_page_home_rail.c/.h` |
+| F | 6.5 — done 2026-09-19 (bench verification pending) | `ui_page_home.c`, `ui_page_home_internal.h`, `ui_page_home_refresh.c`, **new** `ui_page_home_rail.c/.h` |
 
 Wave 3 — 6.1, which needs E's picker page *and* F's home-page edits.
 

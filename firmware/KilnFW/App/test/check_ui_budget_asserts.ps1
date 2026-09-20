@@ -75,6 +75,12 @@ $required = @(
         Asserts = @(
             "_Static_assert(UI_PAGE_PROFILE_PICKER_WORST_CASE_HEIGHT_PX <= UI_THEME_PAGE_CONTENT_BUDGET_PX,"
         )
+    },
+    @{
+        File = "ui_page_home.c"
+        Asserts = @(
+            "_Static_assert(UI_PAGE_HOME_RAIL_WORST_CASE_HEIGHT_PX <="
+        )
     }
 )
 
