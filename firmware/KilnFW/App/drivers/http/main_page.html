@@ -1277,6 +1277,36 @@ function profileOptionLabel(p, isFav) {
          ' (' + zoneListText(p.zone_mask) + ')';
 }
 
+// PROFILE_SLOTS_100_PLAN.md section 4 / section 7 task 8: <optgroup>
+// grouping for #profileSelect, replacing the flat favorites-first partition
+// above with three named groups -- Favorites, Recently fired, All -- so the
+// grouping reason is visible even without the star (an <optgroup> label
+// renders in most UAs even where the star glyph might not stand out) and so
+// a "recently fired" shortcut exists here too, matching /profiles' own
+// grouping. Pure/DOM-free on purpose (same discipline as
+// filterProfilesByName()/recentlyFiredProfiles() in profiles_page.html) so
+// it is testable without a fake DOM: returns { favorites, recent, all },
+// each a stable-ordered sub-list of `list` with no item repeated across
+// groups (recent excludes favorites -- already shown above it -- and all
+// excludes both).
+function groupProfilesForPicker(list, favIds, recentLimit) {
+  const favSet = {};
+  (favIds || []).forEach(function (id) { favSet[String(id)] = true; });
+  const favorites = [], nonFav = [];
+  (list || []).forEach(function (p) {
+    if (favSet[String(p.id)]) favorites.push(p); else nonFav.push(p);
+  });
+  const recent = nonFav
+    .filter(function (p) { return !!p.last_run_started_unix_s; })
+    .slice()
+    .sort(function (a, b) { return b.last_run_started_unix_s - a.last_run_started_unix_s; })
+    .slice(0, recentLimit || 5);
+  const recentSet = {};
+  recent.forEach(function (p) { recentSet[String(p.id)] = true; });
+  const all = nonFav.filter(function (p) { return !recentSet[String(p.id)]; });
+  return { favorites: favorites, recent: recent, all: all };
+}
+
 // Same degrade-on-old-firmware rule the kiln-config indicator below uses: a
 // 404 (firmware without the favorites route) or a malformed body yields an
 // empty list, which makes the picker behave exactly as it did before
@@ -1316,12 +1346,22 @@ function loadProfileList() {
     }
     runBtn.dataset.noProfiles = 'false';
     runBtn.disabled = runBtn.dataset.recoveryDisabled === 'true';
-    orderProfilesByFavorite(list, favIds).forEach(function (p) {
-      const opt = document.createElement('option');
-      opt.value = p.id;
-      opt.textContent = profileOptionLabel(p, isFavoriteProfile(p, favIds));
-      sel.appendChild(opt);
-    });
+    const groups = groupProfilesForPicker(list, favIds);
+    function appendGroup(label, items, isFav) {
+      if (items.length === 0) return;
+      const og = document.createElement('optgroup');
+      og.label = label;
+      items.forEach(function (p) {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = profileOptionLabel(p, isFav);
+        og.appendChild(opt);
+      });
+      sel.appendChild(og);
+    }
+    appendGroup('Favorites', groups.favorites, true);
+    appendGroup('Recently fired', groups.recent, false);
+    appendGroup('All', groups.all, false);
   }).catch(function () {});
 }
 

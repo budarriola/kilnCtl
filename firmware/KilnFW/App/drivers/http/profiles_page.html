@@ -321,6 +321,13 @@ runs its own PID/bang-bang loop and thermal guards independently.</p>
 original place and also lists it here for quick access.</p>
 <div id="favList"><p class="empty">Loading&hellip;</p></div>
 
+<div id="recentSection" style="display:none">
+<h2>Recently fired</h2>
+<p class="hint">The profiles this kiln has run most recently, so a common
+choice is not buried in a long list.</p>
+<div id="recentList"></div>
+</div>
+
 <h2>Profiles <button id="restoreBtn" type="button" class="small" style="display:none;float:right">Restore removed</button></h2>
 <p class="hint">Saved profiles and read-only shipped schedules in one list. Expand a
 profile to see its steps. A schedule with a dark red background is not usable on
@@ -341,6 +348,8 @@ above what a zone can reach.</p>
   <button id="bulkActionBtn" type="button" class="small"></button>
   <button id="bulkCancelBtn" type="button" class="small">Cancel</button>
 </div>
+<label for="profileFilter">Filter by name</label>
+<input type="text" id="profileFilter" placeholder="Type to filter&hellip;" autocomplete="off">
 <div id="list"><p class="empty">Loading&hellip;</p></div>
 <div id="catMsg"></div>
 
@@ -881,9 +890,36 @@ var catalogEntries = null; // array from /api/profiles/builtin?all=1, hidden one
 var favoriteIds = [];      // from /api/profiles/favorites
 var selectMode = null;     // null | 'export' | 'delete'
 var selectedIds = {};      // id -> true, only while selectMode is set
+var filterQuery = '';      // PROFILE_SLOTS_100_PLAN.md section 7 task 8
 
 function isFav(id) {
   return favoriteIds.some(function (x) { return String(x) === String(id); });
+}
+
+/* PROFILE_SLOTS_100_PLAN.md section 7 task 8: pure, DOM-free filter/sort
+ * helpers, kept separate from renderList()/renderFavorites() so a host test
+ * can exercise the matching/ordering logic without a fake DOM at all. Named
+ * with a "Profiles" suffix rather than the generic "filter"/"sort" to avoid
+ * colliding with Array.prototype methods of the same short name when this
+ * file is extracted verbatim into a test's vm context. */
+function filterProfilesByName(items, query) {
+  var q = String(query || '').trim().toLowerCase();
+  if (q === '') return items.slice();
+  return items.filter(function (p) { return String(p.name || '').toLowerCase().indexOf(q) !== -1; });
+}
+
+/* Newest-first by last_run_started_unix_s, excluding anything in excludeIds
+ * (favorites: already pinned in their own section, so repeating them here
+ * would just be noise) and anything that has never fired (0 -- see the
+ * server-side field's own doc comment: this also covers "fired before the
+ * board had an RTC/SNTP fix", which is indistinguishable from never-fired
+ * and correctly does not count as recent). */
+function recentlyFiredProfiles(items, excludeIds, limit) {
+  var excl = excludeIds || {};
+  return items
+    .filter(function (p) { return p.last_run_started_unix_s && !excl[String(p.id)]; })
+    .sort(function (a, b) { return b.last_run_started_unix_s - a.last_run_started_unix_s; })
+    .slice(0, limit || 5);
 }
 
 function loadFavorites() {
@@ -931,18 +967,23 @@ function refreshAll() {
 
     renderList();
     renderFavorites();
+    renderRecent();
   }).catch(function () {
     document.getElementById('list').innerHTML = '<p class="empty">Could not load profiles.</p>';
     document.getElementById('favList').innerHTML = '<p class="empty">Could not load favorites.</p>';
   });
 }
 
+/* The name filter only narrows this section -- Favorites and Recently fired
+ * (above it) stay pinned and unaffected, so a filter never hides the shortcut
+ * views it was added next to. */
 function renderList() {
   var el = document.getElementById('list');
   if (savedProfiles === null || catalogEntries === null) return;
-  var items = savedProfiles.concat(catalogEntries);
+  var items = filterProfilesByName(savedProfiles.concat(catalogEntries), filterQuery);
   if (items.length === 0) {
-    el.innerHTML = '<p class="empty">No profiles.</p>';
+    el.innerHTML = '<p class="empty">' + (filterQuery ? 'No profiles match &ldquo;' +
+      window.kcEscapeHtml(filterQuery) + '&rdquo;.' : 'No profiles.') + '</p>';
   } else {
     el.innerHTML = '';
     items.forEach(function (p) { el.appendChild(buildProfileItem(p, true)); });
@@ -958,6 +999,24 @@ function renderFavorites() {
     el.innerHTML = '<p class="empty">No favorites yet -- tap the star on any profile below to add it here.</p>';
     return;
   }
+  el.innerHTML = '';
+  items.forEach(function (p) { el.appendChild(buildProfileItem(p, false)); });
+}
+
+/* PROFILE_SLOTS_100_PLAN.md section 4 item 3 / section 7 task 8. */
+function renderRecent() {
+  var section = document.getElementById('recentSection');
+  var el = document.getElementById('recentList');
+  if (savedProfiles === null || catalogEntries === null) return;
+  var favExcl = {};
+  favoriteIds.forEach(function (id) { favExcl[String(id)] = true; });
+  var items = recentlyFiredProfiles(savedProfiles.concat(catalogEntries), favExcl, 5);
+  if (items.length === 0) {
+    section.style.display = 'none';
+    el.innerHTML = '';
+    return;
+  }
+  section.style.display = '';
   el.innerHTML = '';
   items.forEach(function (p) { el.appendChild(buildProfileItem(p, false)); });
 }
@@ -1666,7 +1725,12 @@ loadZones().then(function () { resetEditor(); refreshAll(); });
 // re-reads window.kcUnit at render time, so a fresh build picks up the new
 // unit; any row expanded before the toggle just collapses back to unopened,
 // the same as it already did for the catalogue pre-combination.
-window.addEventListener('kcunitchange', function () { renderList(); renderFavorites(); });
+window.addEventListener('kcunitchange', function () { renderList(); renderFavorites(); renderRecent(); });
+
+document.getElementById('profileFilter').addEventListener('input', function (e) {
+  filterQuery = e.target.value;
+  renderList();
+});
 
 (function () {
   var btn = document.getElementById('themeBtn');

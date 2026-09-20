@@ -267,6 +267,38 @@ One commit each, sized for a sonnet implementer, each independently buildable an
 
 ---
 
+## Status
+
+Section 7 task 8 (web: name filter plus favorites/recent grouping) done.
+
+- `profiles_page.html`: name filter input above the list (case-insensitive
+  substring, client-side only); favorites stay pinned/stable while filtering
+  (`renderFavorites()`/`renderRecent()` never read the filter query, verified
+  structurally by the new test); new "Recently fired" section between
+  Favorites and the filterable list, capped at 5, excluding favorites and
+  never-fired profiles.
+- `main_page.html`'s `#profileSelect`: `<optgroup>` grouping, order Favorites
+  / Recently fired / All; an empty group renders no `<optgroup>`.
+  `orderProfilesByFavorite()`/`isFavoriteProfile()`/`profileOptionLabel()`
+  left untouched (mirrored by LCD C code, independently tested) -- the new
+  `groupProfilesForPicker()` is additive.
+- No new HTTP route: `last_run_started_unix_s` added to the two existing
+  profile-list JSON responses (`profiles_list_get_handler`,
+  `send_builtin_summary`) via a new thin accessor,
+  `profile_executor_last_run_started_unix_s()`, forward-declared (not via
+  `profile_executor.h`) in `profiles_catalog_http.c` so `test_profiles_http.c`
+  keeps faking it instead of linking the heavy control-loop headers.
+- New tests: `test_profiles_page_filter.js` (filter + recent, favorites
+  pinned, 8 and 100 simulated slots), `test_profile_picker_optgroups.js`
+  (optgroup order/exclusivity, 8 and 100 simulated slots). `PROFILES_MAX_COUNT`
+  itself untouched (still 8).
+- Negative-tested: inverted `filterProfilesByName`'s match sense, confirmed 5
+  failures, restored by hand, re-confirmed 29/29 pass and restored file
+  matches original.
+- Verified: `check_js_host_tests.ps1`, `check_lint_pages.ps1`,
+  `check_ui_responsive_sweep.ps1`, `check_00_kilnfw_target_build.ps1`, full
+  C host-test suite (`test_profiles_http.c`'s 337/337) all green.
+
 ## 8. Open owner questions
 
 1. **Consume the entire 1.81 MiB tail, or stop at 2 MiB and keep 320 KiB spare?** Section 1
