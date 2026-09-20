@@ -967,6 +967,17 @@ uint8_t kiln_cfg_store_list(kiln_cfg_summary_t *out, uint8_t out_cap)
     return n;
 }
 
+uint8_t kiln_cfg_store_count(void)
+{
+    uint8_t n = 0;
+    for (int i = 0; i < KILN_CFG_MAX_COUNT; i++) {
+        if (s_store.entries[i].in_use) {
+            n++;
+        }
+    }
+    return n;
+}
+
 int32_t kiln_cfg_store_get_active_id(void)
 {
     return s_store.active_id;

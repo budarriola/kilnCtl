@@ -91,13 +91,11 @@ void ui_home_refresh_cb(lv_timer_t *timer)
      * decision (host-tested with counts 0, 1, 2). The list buffer itself
      * isn't consulted, just the count kiln_cfg_store_list() returns. */
     /* Only whether the count reaches the 2026-09-19 owner threshold (>= 2)
-     * matters here, never the entries themselves, so a 2-entry stack buffer
-     * is enough regardless of KILN_CFG_MAX_COUNT -- kiln_cfg_store_list()
-     * returns min(in_use, out_cap), which still lets a cap of 2 tell 0/1/2+
-     * apart. This replaces a KILN_CFG_MAX_COUNT-sized (~320 B) array on the
-     * 8192 B LVGL task stack, the same stack the 2026-09-04 panic corrupted. */
-    kiln_cfg_summary_t kiln_cfg_list[2];
-    uint8_t kiln_cfg_count = kiln_cfg_store_list(kiln_cfg_list, 2);
+     * matters here, never the entries themselves, so kiln_cfg_store_count()
+     * (a plain in_use tally, no kiln_cfg_summary_t buffer at all) is enough
+     * -- no need for even a 2-entry kiln_cfg_summary_t array on the 8192 B
+     * LVGL task stack, the same stack the 2026-09-04 panic corrupted. */
+    uint8_t kiln_cfg_count = kiln_cfg_store_count();
     int32_t active_kiln_id = kiln_cfg_store_get_active_id();
     char kiln_name[KILN_CFG_NAME_MAX_LEN + 1];
     bool have_kiln_name = (active_kiln_id != KILN_CFG_NO_ACTIVE_ID) &&

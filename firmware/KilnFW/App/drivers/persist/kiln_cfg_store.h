@@ -174,6 +174,13 @@ uint8_t kiln_cfg_store_max_count(void);
  * assigned in save order and slots are never reordered). */
 uint8_t kiln_cfg_store_list(kiln_cfg_summary_t *out, uint8_t out_cap);
 
+/* Number of saved configs currently in use, i.e. what kiln_cfg_store_list()
+ * would return given an unbounded out_cap -- for callers (the LCD's 1 Hz
+ * home refresh, see ui_page_home_kiln_suffix_visible()'s 2026-09-19 >= 2
+ * threshold) that need only the count, not the entries themselves, so they
+ * don't need a kiln_cfg_summary_t buffer on the stack at all. */
+uint8_t kiln_cfg_store_count(void);
+
 /* KILN_CFG_NO_ACTIVE_ID if nothing is currently marked active (first boot
  * before any save/apply, or the active config was deleted/failed validation
  * -- see kiln_cfg_store_init()'s fallback description). */
