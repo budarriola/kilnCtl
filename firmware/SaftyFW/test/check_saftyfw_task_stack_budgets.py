@@ -382,7 +382,16 @@ CEILING_BYTES = {
     # header comment describes. The declared stack (6144 B) is untouched and
     # still leaves 3600 B of margin; this table is an anti-drift ratchet, not
     # the overflow guard.
-    "update_task": 2544,
+    #
+    # 2026-09-20: update_task_process_end() now calls
+    # update_task_slot_linkage_plausible() (src/tasks/update_task.c) before
+    # the metadata flip -- see docs/BOOTLOADER.md's "Slot-linkage
+    # plausibility checked before the metadata flip" entry. That call's own
+    # small local frame (two uint32_t words plus a pointer) moved the
+    # measured total 2544 -> 2560 B. Re-pinned again to the new measured
+    # value, same ratchet as above; declared stack (6144 B) unchanged, still
+    # 3584 B of margin.
+    "update_task": 2560,
     "watchdog_task": 304,
 }
 

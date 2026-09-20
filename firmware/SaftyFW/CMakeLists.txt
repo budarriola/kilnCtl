@@ -172,6 +172,12 @@ set(SAFTYFW_APP_SOURCES
     # host test proving the walk still covers the slot exactly, with no gap and
     # no overrun -- see update_task_erase_plan.h.
     src/tasks/update_task_erase_plan.c
+    # 2026-09-20 -- the pure vector-table plausibility check behind the new
+    # slot-linkage validation in update_task_process_end() (owner decision,
+    # PICO_AUTO_UPDATE_PLAN.md), split out for the same host-testability
+    # reason as update_task_erase_plan.c immediately above -- see
+    # update_task_slot_linkage.h.
+    src/tasks/update_task_slot_linkage.c
     # Phase 10 -- update_task.c's own frame-receive/decision logic. These
     # four are the FROZEN, host-tested (272/272, test/build_host_tests.ps1)
     # pure modules from src/update/; bootloader/crc32.c and
@@ -539,6 +545,21 @@ function(saftyfw_add_slot_executable TARGET_NAME FLASH_ORIGIN)
     # keeps working the same way the SDK's own no_flash/copy_to_ram/etc.
     # binary-type mechanism does.
     pico_set_linker_script(${TARGET_NAME} ${_saftyfw_slot_ld})
+
+    # Raw binary image of this slot, for the ESP-side embed-and-push-to-Pico
+    # auto-update path (docs/PICO_AUTO_UPDATE_PLAN.md, owner decision
+    # 2026-09-20). picotool is still unavailable in this build environment
+    # (see the pico_add_extra_outputs() comment above) so no .uf2 is
+    # produced here -- but a plain position-dependent .bin needs nothing
+    # picotool-specific: ${CMAKE_OBJCOPY} (arm-none-eabi-objcopy) already
+    # produces one straight from the linked .elf with -O binary. Named
+    # ${TARGET_NAME}.bin (SaftyFW_slotA.bin / SaftyFW_slotB.bin) directly in
+    # the build directory; gitignored like every other build artifact.
+    add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
+        COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:${TARGET_NAME}> ${CMAKE_BINARY_DIR}/${TARGET_NAME}.bin
+        COMMENT "Generating ${TARGET_NAME}.bin (raw objcopy image, for ESP-side Pico auto-update embed)"
+        VERBATIM
+    )
 endfunction()
 
 # BOOTLOADER_SLOT_A_FLASH_OFFSET (0x00011000) / BOOTLOADER_SLOT_B_FLASH_OFFSET

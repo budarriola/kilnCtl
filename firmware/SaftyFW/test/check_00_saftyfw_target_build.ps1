@@ -151,6 +151,35 @@ if (-not (Test-Path $elf)) {
     Fail "ninja reported success (exit 0) but $elf does not exist -- refusing to report PASS without a real build artifact."
 }
 
+# SaftyFW_slotA.bin / SaftyFW_slotB.bin -- raw objcopy images of the two
+# slot-linked executables, produced by a POST_BUILD add_custom_command on
+# each SaftyFW_slotX target (firmware/SaftyFW/CMakeLists.txt,
+# saftyfw_add_slot_executable()). These feed the ESP-side embed-and-push-to-
+# Pico auto-update path (docs/PICO_AUTO_UPDATE_PLAN.md, owner decision
+# 2026-09-20). Checked here, not in a separate check file, because this is
+# the one check that actually runs the target build both slot executables
+# come from. The two images MUST NOT be byte-identical -- they are
+# position-dependent code linked at two different flash origins
+# (0x10011000 vs 0x100E1000), so identical bytes would mean the slot-specific
+# origin never actually took effect (e.g. a stale/cached link, or the wrong
+# linker script applied to both).
+$slotABin = Join-Path $buildDir "SaftyFW_slotA.bin"
+$slotBBin = Join-Path $buildDir "SaftyFW_slotB.bin"
+if (-not (Test-Path $slotABin)) {
+    Fail "ninja reported success but $slotABin does not exist -- SaftyFW_slotA's POST_BUILD objcopy step did not produce it."
+}
+if (-not (Test-Path $slotBBin)) {
+    Fail "ninja reported success but $slotBBin does not exist -- SaftyFW_slotB's POST_BUILD objcopy step did not produce it."
+}
+$slotABytes = [System.IO.File]::ReadAllBytes($slotABin)
+$slotBBytes = [System.IO.File]::ReadAllBytes($slotBBin)
+if ($slotABytes.Length -ne $slotBBytes.Length) {
+    Fail "$slotABin is $($slotABytes.Length) bytes but $slotBBin is $($slotBBytes.Length) bytes -- slot A and slot B are built from the SAME application sources and should produce equal-length images; a length mismatch means the two slot targets diverged (stale build, wrong sources, or a linker script problem)."
+}
+if ([System.Linq.Enumerable]::SequenceEqual([byte[]]$slotABytes, [byte[]]$slotBBytes)) {
+    Fail "$slotABin and $slotBBin are byte-identical -- these are position-dependent images linked at two different flash origins (0x10011000 / 0x100E1000) and must differ. Identical bytes means the slot-specific link origin did not actually take effect."
+}
+
 Write-Host ""
-Write-Host "PASS: SaftyFW target build succeeded, $elf produced." -ForegroundColor Green
+Write-Host "PASS: SaftyFW target build succeeded, $elf produced; SaftyFW_slotA.bin ($($slotABytes.Length) bytes) and SaftyFW_slotB.bin differ as expected." -ForegroundColor Green
 exit 0

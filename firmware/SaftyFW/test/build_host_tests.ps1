@@ -148,6 +148,13 @@ try {
         # source-text scan. See update_task_erase_plan.h.
         (Join-Path $srcDir "tasks\update_task_erase_plan.c"),
         (Join-Path $testDir "test_update_task_erase_plan.c"),
+        # 2026-09-20 -- the vector-table plausibility check behind the new
+        # Pico-side slot-linkage validation (owner decision,
+        # PICO_AUTO_UPDATE_PLAN.md): a slot-A-linked image landed in slot B
+        # (or vice versa) CRCs correctly but must still be rejected before
+        # its slot's metadata is flipped active. See update_task_slot_linkage.h.
+        (Join-Path $srcDir "tasks\update_task_slot_linkage.c"),
+        (Join-Path $testDir "test_update_task_slot_linkage.c"),
         (Join-Path $srcDir "clear_trip_diag_codec.c"),
         (Join-Path $testDir "test_clear_trip_diag_codec.c"),
         (Join-Path $srcDir "watchdog_overdue_diag_codec.c"),

@@ -410,6 +410,42 @@ is a bench visit to every board.
       `FLASH_BLOCK_SIZE` (64K) units, one `flash_safe_execute()` call per
       block, with `watchdog_task_checkin()` immediately before AND after each
       block (never during — nothing can run during the erase itself).
+- [x] **Slot-linkage plausibility checked before the metadata flip** (2026-09-20,
+      owner decision, `docs/PICO_AUTO_UPDATE_PLAN.md`) — `jump_to_app()`
+      (`bootloader/main.c`) trusts the active slot's vector table
+      unconditionally (loads SP/reset vector from that slot's own flash and
+      jumps, no plausibility check), and CRC verification alone cannot catch
+      an image linked for one slot's flash address landing in the OTHER slot:
+      the received bytes are exactly the bytes sent, just linked for the
+      wrong address, so the CRC matches either way. `update_task_process_end()`
+      now calls `update_task_slot_linkage_plausible()` (`src/tasks/update_task.c`)
+      immediately after the CRC check and before the metadata flip that would
+      make the new slot active: it reads the image's first 8 bytes (initial
+      SP, reset vector) and rejects unless the SP falls within RP2040 SRAM
+      (`SRAM_BASE`/`SRAM_END`, matching `app_slot.ld.in`'s combined RAM +
+      SCRATCH_X + SCRATCH_Y reservation) and the reset vector has the Thumb
+      bit set and lies inside the TARGET slot's own flash window
+      (`BOOTLOADER_SLOT_FLASH_SIZE`, `flash_layout.h`). The actual comparison
+      is a pure function, `update_task_slot_linkage_check()`
+      (`src/tasks/update_task_slot_linkage.c`/`.h`), host-tested in
+      `test_update_task_slot_linkage.c` (both wrong-slot directions, the
+      correct-slot accept case, garbage SP, missing Thumb bit, and the
+      half-open window boundary). A rejection calls
+      `update_task_revert_target_slot()` — the same path a CRC failure
+      takes — which only clears the target slot's own metadata entry and
+      never touches `active_slot`, so the previously-running slot is left
+      active and untouched. On the wire this reports a new
+      `UPDATE_TASK_STATE_REJECTED_SLOT_LINKAGE` (`update_task_wire_state_t`
+      value 8) alongside the existing `UPDATE_STATUS_ERR_CRC_MISMATCH` code:
+      the `state` field had headroom (values 0–7 used of a full byte) so a
+      new state needed no protocol version bump, but `last_error`'s 8-bit
+      bitmask has every bit already assigned, so this failure mode reuses
+      the closest existing bitmask value rather than claiming a nonexistent
+      spare bit — a caller distinguishes it from an ordinary CRC failure by
+      `state`, not by `last_error`. The tooling/PcTools codec table for
+      `UPDATE_STATUS` needs a new `state == 8` entry to render this
+      distinctly (not yet done here — out of this change's scope, see
+      handback).
 - [x] Whole-slot CRC verified by reading **back from flash** —
       `update_task_process_end()` (item 10.7): `bootloader_crc32()` over the
       XIP-mapped target slot's `[0, length)`, compared against the BEGIN

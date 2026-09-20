@@ -81,8 +81,15 @@
 #include "hal_flash.h"
 #include "hal_wdt.h"
 
+// SRAM_BASE/SRAM_END/XIP_BASE -- pico-sdk's own hardware/regs/addressmap.h
+// constants, used ONLY by update_task_slot_linkage_plausible() below (see
+// that function's header comment). Not otherwise needed by this file, which
+// routes all other flash access through hal_flash.h.
+#include "hardware/regs/addressmap.h"
+
 #include "task_priorities.h"
 #include "update_task_erase_plan.h"
+#include "update_task_slot_linkage.h"
 #include "watchdog_task.h"
 
 #include "current_task.h"
@@ -221,13 +228,35 @@ typedef enum {
     UPDATE_TASK_STATE_COMPLETE = 5,
     UPDATE_TASK_STATE_ABORTED = 6,
     UPDATE_TASK_STATE_FAILED = 7,
+    // Owner decision 2026-09-20 (Pico-side slot-linkage validation, see
+    // update_task_slot_linkage_plausible()'s header comment below): a
+    // DISTINCT wire state for "the image CRCed correctly but its vector
+    // table is not plausible for the slot it was just written into" --
+    // e.g. a slot-A-linked image landed in slot B, or vice versa. This is
+    // a NEW legal value of the existing 1-byte `state` field, not a wire
+    // layout change, so it needs no protocol-version bump: the `last_error`
+    // bitmask field (below) has no spare bit left (all 8 already assigned),
+    // which is why this distinct signal lives in `state` instead. The
+    // accompanying `last_error` byte still reports
+    // UPDATE_STATUS_ERR_CRC_MISMATCH -- not because the CRC actually
+    // mismatched, but because it is the closest existing bit: both cases
+    // are "the just-verified image failed a validity check performed on
+    // its landed bytes, right before the metadata flip that would make it
+    // active" (see update_task_process_end()'s call site). A caller that
+    // only reads `last_error` sees the same bit a genuine CRC failure
+    // would set; a caller that also reads `state` can tell the two apart
+    // by this value. (See the coordinator's task brief: a codec/name table
+    // for this value in tools/PcTools is a separate agent's follow-up.)
+    UPDATE_TASK_STATE_REJECTED_SLOT_LINKAGE = 8,
 } update_task_wire_state_t;
 
 // last_error bits. The first three mirror update_receiver.h's
 // update_precondition_flag_t bit-for-bit (see update_task_precond_to_wire()
 // below) so a caller that already knows that enum recognises them; the rest
 // are this frame's own additions for outcomes update_precondition_flag_t has
-// no bit for.
+// no bit for. All 8 bits of this field are now assigned -- see
+// UPDATE_TASK_STATE_REJECTED_SLOT_LINKAGE above for why a new failure mode
+// added 2026-09-20 reuses CRC_MISMATCH here rather than getting its own bit.
 #define UPDATE_STATUS_ERR_RELAY_CLOSED         (1u << 0)
 #define UPDATE_STATUS_ERR_TRIP_PENDING         (1u << 1)
 #define UPDATE_STATUS_ERR_TOO_HOT              (1u << 2)
@@ -860,6 +889,73 @@ static void update_task_process_data(const uint8_t *payload, uint8_t length)
     }
 }
 
+// --- Slot-linkage validation (owner decision 2026-09-20) --------------------
+//
+// bootloader/main.c's jump_to_app() jumps to whatever vector table sits at
+// the ACTIVE slot's start, unconditionally: word 0 loads straight into SP,
+// word 1 straight into PC (msr msp / bx). Nothing there checks those two
+// words are plausible for the slot they're in -- only that the full image
+// CRCs correctly against a checksum the ESP itself supplied for whatever
+// bytes it sent. That means an image linked for slot A but written into
+// slot B (a build/tooling mixup, not a transmission error -- the two slot
+// executables are the SAME sources at two different link origins, see
+// CMakeLists.txt's saftyfw_add_slot_executable()) sails through CRC
+// verification unchanged (the bytes received are exactly the bytes sent,
+// uncorrupted) and would still get jumped into with a stack pointer and
+// reset vector baked in for the WRONG absolute address. Depending on what
+// actually sits at the mismatched offset in the other slot's image, that is
+// not necessarily a hard fault the bootloader's fallback (main.c's 2-attempt
+// CRC retry, which only re-checks the SAME already-corrupt-relative-to-slot
+// image and would not catch this) or anything downstream would notice --
+// corrupt-code execution accepted as legitimate, on the SAFETY processor.
+//
+// This function catches exactly that build/tooling-mixup shape -- an
+// otherwise well-formed image linked for one slot's address, landed intact
+// in the OTHER slot -- before update_task_process_end() ever flips
+// meta.active_slot to point at it. It is a plausibility check, not a
+// signature check (docs/BOOTLOADER.md section 6, signing, stays unpicked),
+// against the two facts every valid Cortex-M image for this bootloader must
+// satisfy:
+//
+//   1. Initial SP (word 0) lies inside RP2040 SRAM -- SRAM_BASE (0x20000000)
+//      through SRAM_END (0x20042000), pico-sdk's own hardware/regs/
+//      addressmap.h constants. Checked against SRAM_BASE/SRAM_END rather
+//      than an independently-chosen range because those two constants
+//      together span EXACTLY the RAM + SCRATCH_X + SCRATCH_Y regions
+//      bootloader/app_slot.ld.in's linker script carves out of SRAM for
+//      this application (RAM: 0x20000000..0x20040000, 256K; SCRATCH_X:
+//      0x20040000..0x20041000; SCRATCH_Y: 0x20041000..0x20042000 == SRAM_END)
+//      -- confirmed by reading that file, not assumed.
+//   2. Reset vector (word 1) has the Thumb bit set (bit 0 -- required for
+//      every Cortex-M instruction address; this MCU has no ARM mode) AND
+//      falls inside the TARGET slot's own flash window, i.e.
+//      [XIP_BASE + target_slot_offset, XIP_BASE + target_slot_offset +
+//      BOOTLOADER_SLOT_FLASH_SIZE) -- the slot the metadata flip is about to
+//      make active, not merely "some slot". A reset vector that decodes
+//      fine but points into the OTHER slot's flash window is exactly the
+//      wrong-slot-image signature this check exists to catch.
+//
+// Only used from update_task_process_end() below, against an INCOMING image
+// immediately after its CRC has already been confirmed and before it is
+// made active -- not reused for the currently-running application's own
+// self-check at boot (that is a different problem: this bootloader's own
+// jump_to_app() has no equivalent guard today, see the coordinator's task
+// brief on bootloader/main.c's fallback behavior).
+// The actual comparison arithmetic lives in update_task_slot_linkage.c/.h
+// (pure, no pico-sdk/FreeRTOS dependency, host-tested there -- see that
+// module's own header comment) -- this wrapper's only job is reading the
+// two vector-table words out of the mapped flash region and supplying the
+// SRAM_BASE/SRAM_END/XIP_BASE constants that module cannot see for itself.
+static bool update_task_slot_linkage_plausible(const void *slot_data_ptr, uint32_t target_slot_offset)
+{
+    const uint32_t *vectors = (const uint32_t *)slot_data_ptr;
+    uint32_t sp = vectors[0];
+    uint32_t reset_vector = vectors[1];
+
+    return update_task_slot_linkage_check(sp, reset_vector, target_slot_offset,
+                                           BOOTLOADER_SLOT_FLASH_SIZE, SRAM_BASE, SRAM_END, XIP_BASE);
+}
+
 // --- UPDATE_END ------------------------------------------------------------
 
 static void update_task_process_end(const uint8_t *payload, uint8_t length)
@@ -916,6 +1012,19 @@ static void update_task_process_end(const uint8_t *payload, uint8_t length)
 
     if (actual_crc != s_header.crc32) {
         update_task_send_status_now(UPDATE_TASK_STATE_FAILED, UPDATE_STATUS_ERR_CRC_MISMATCH);
+        update_task_revert_target_slot();
+        return;
+    }
+
+    // Slot-linkage plausibility check -- see
+    // update_task_slot_linkage_plausible()'s header comment above. Runs
+    // AFTER the CRC check (so a genuinely corrupted transfer is still
+    // reported as CRC_MISMATCH, not this) and BEFORE the metadata flip
+    // below that would make this slot active.
+    if (!update_task_slot_linkage_plausible(slot_data_ptr, s_slot_flash_offset)) {
+        log_task_log(LOG_LEVEL_ERROR, "update",
+                     "end: slot linkage implausible (SP/reset vector do not fit target slot -- wrong-slot image?)");
+        update_task_send_status_now(UPDATE_TASK_STATE_REJECTED_SLOT_LINKAGE, UPDATE_STATUS_ERR_CRC_MISMATCH);
         update_task_revert_target_slot();
         return;
     }
