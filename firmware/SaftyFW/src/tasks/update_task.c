@@ -959,13 +959,24 @@ static void update_task_process_data(const uint8_t *payload, uint8_t length)
 #define UPDATE_TASK_SLOT_LINKAGE_SRAM_END  0x20042000u
 #define UPDATE_TASK_SLOT_LINKAGE_XIP_BASE  0x10000000u
 
-static bool update_task_slot_linkage_plausible(const void *slot_data_ptr, uint32_t target_slot_offset)
+static bool update_task_slot_linkage_plausible(const void *slot_data_ptr, uint32_t target_slot_offset,
+                                                uint32_t image_length)
 {
+    // image_length guard: the two vector-table words read below are the
+    // first 8 bytes of the mapped region. update_image_header_validate()
+    // (image_header.c) only rejects length == 0 and length > max_length --
+    // an image as short as a few bytes (e.g. length == 4) passes that check
+    // and would otherwise let this read run past the end of a region only
+    // mapped for image_length bytes. Reject before touching vectors[0..1].
+    if (image_length < 8u) {
+        return false;
+    }
+
     const uint32_t *vectors = (const uint32_t *)slot_data_ptr;
     uint32_t sp = vectors[0];
     uint32_t reset_vector = vectors[1];
 
-    return update_task_slot_linkage_check(sp, reset_vector, target_slot_offset,
+    return update_task_slot_linkage_check(sp, reset_vector, image_length, target_slot_offset,
                                            BOOTLOADER_SLOT_FLASH_SIZE,
                                            UPDATE_TASK_SLOT_LINKAGE_SRAM_BASE,
                                            UPDATE_TASK_SLOT_LINKAGE_SRAM_END,
@@ -1037,7 +1048,7 @@ static void update_task_process_end(const uint8_t *payload, uint8_t length)
     // AFTER the CRC check (so a genuinely corrupted transfer is still
     // reported as CRC_MISMATCH, not this) and BEFORE the metadata flip
     // below that would make this slot active.
-    if (!update_task_slot_linkage_plausible(slot_data_ptr, s_slot_flash_offset)) {
+    if (!update_task_slot_linkage_plausible(slot_data_ptr, s_slot_flash_offset, s_header.length)) {
         log_task_log(LOG_LEVEL_ERROR, "update",
                      "end: slot linkage implausible (SP/reset vector do not fit target slot -- wrong-slot image?)");
         update_task_send_status_now(UPDATE_TASK_STATE_REJECTED_SLOT_LINKAGE, UPDATE_STATUS_ERR_CRC_MISMATCH);

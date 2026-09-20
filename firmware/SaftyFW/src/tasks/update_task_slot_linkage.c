@@ -1,10 +1,15 @@
 // update_task_slot_linkage.c -- see update_task_slot_linkage.h.
 #include "update_task_slot_linkage.h"
 
-bool update_task_slot_linkage_check(uint32_t sp, uint32_t reset_vector,
+bool update_task_slot_linkage_check(uint32_t sp, uint32_t reset_vector, uint32_t image_length,
                                      uint32_t target_slot_offset, uint32_t slot_size,
                                      uint32_t sram_base, uint32_t sram_end, uint32_t xip_base)
 {
+    if (image_length < 8u) {
+        // Too short to contain the two vector-table words this check is
+        // about -- see this function's header comment, point 0.
+        return false;
+    }
     if (sp < sram_base || sp > sram_end) {
         return false;
     }

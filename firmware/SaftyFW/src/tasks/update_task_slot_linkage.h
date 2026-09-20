@@ -16,6 +16,13 @@
 // received are exactly the bytes sent -- and would otherwise sail straight
 // into bootloader/main.c's unconditional jump_to_app().
 //
+// This check assumes a flash-resident slot image: it validates the reset
+// vector against the target slot's own XIP flash window because
+// bootloader/app_slot.ld.in places each slot's .vectors section at that
+// slot's flash origin; a copy_to_ram/no_flash slot build, whose reset vector
+// would legitimately point into SRAM instead, would be rejected by this
+// check by design, not by oversight.
+//
 // Owner decision 2026-09-20.
 #ifndef SAFTYFW_TASKS_UPDATE_TASK_SLOT_LINKAGE_H
 #define SAFTYFW_TASKS_UPDATE_TASK_SLOT_LINKAGE_H
@@ -27,7 +34,18 @@
 extern "C" {
 #endif
 
-// Returns true iff BOTH:
+// Returns true iff ALL of:
+//   0. `image_length` is at least 8 bytes -- the size of the two vector-table
+//      words (`sp`, `reset_vector`) this check is about. The caller
+//      (update_task.c's update_task_slot_linkage_plausible()) reads those
+//      two words out of a flash region mapped for exactly `image_length`
+//      bytes BEFORE this function ever runs, so that read is guarded there,
+//      not here -- update_image_header_validate() (image_header.c) only
+//      rejects length == 0 and length > max_length, so a length as short as
+//      4 bytes passes header validation and would otherwise read past the
+//      mapped region. `image_length` is threaded through to this pure,
+//      host-tested function too so that rule has test coverage independent
+//      of the on-target wrapper, and as defense in depth.
 //   1. `sp` lies inside [sram_base, sram_end] (inclusive of sram_end: a
 //      stack pointer initialised to the very top of RAM, one past the last
 //      usable byte, is the normal/expected value, not an overrun).
@@ -42,7 +60,7 @@ extern "C" {
 // pico-sdk's addressmap.h itself, so it stays host-testable with no
 // on-target dependency at all, same discipline as every other decision
 // module under src/update/ and this directory.
-bool update_task_slot_linkage_check(uint32_t sp, uint32_t reset_vector,
+bool update_task_slot_linkage_check(uint32_t sp, uint32_t reset_vector, uint32_t image_length,
                                      uint32_t target_slot_offset, uint32_t slot_size,
                                      uint32_t sram_base, uint32_t sram_end, uint32_t xip_base);
 
