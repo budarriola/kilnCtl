@@ -20,7 +20,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, capability_preflight, config_presets, coredump_fetch, debug_probe, devices, elf_archive, esp_app_desc, flash_provenance, http_auth, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, capability_preflight, config_presets, coredump_fetch, debug_probe, devices, elf_archive, esp_app_desc, flash_provenance, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -567,24 +567,31 @@ def _verify_flash_landed(
     return ""
 
 
+KILNCTL_AP_PASSWORD_ENV = "KILNCTL_AP_PASSWORD"
+
+
 def _resolve_boot_guard_password(ap_password: Optional[str]) -> Optional[str]:
     """Owner decision 2026-09-19: the post-flash boot_guard counter reset is
     DEFAULT ON whenever credentials are available, not opt-in per call. If
     the caller passes `ap_password` explicitly, that value wins (unchanged
-    behavior). Otherwise, falls back to the KILNCTL_WEB_PASSWORD environment
-    variable (the same variable http_auth.py's PASSWORD_ENV reads for the
-    admin session itself) IF KILNCTL_WEB_USERNAME is also set -- mirroring
-    the pair-of-env-vars convention the rest of this codebase uses to decide
-    whether web-auth credentials are actually configured, even though this
-    particular call only ever needs the password. Returns None (never the
-    empty string) when neither source has a value, so callers can treat
-    "None" uniformly as "no credential available" regardless of which source
-    was tried. Never logs or echoes the resolved value."""
+    behavior). Otherwise, falls back to the KILNCTL_AP_PASSWORD environment
+    variable.
+
+    This must be the board's AP Wi-Fi password, NOT the web admin password:
+    `POST /api/ota/esp/boot_guard_reset` verifies its HMAC keyed on the
+    board's AP Wi-Fi password (`wifi_prov_get_ap_password()`, ota_http.c:498-503
+    via ota_http_recovery.c:203), and `web_auth_store.c:157` guarantees the
+    web admin password is NEVER equal to the AP password -- so falling back
+    to KILNCTL_WEB_PASSWORD (the earlier, incorrect behavior) made this call
+    403 every single time it ran on its default-on fallback path. There is
+    no companion username variable: the AP password alone is the credential,
+    unlike the web admin username/password pair. Returns None (never the
+    empty string) when no source has a value, so callers can treat "None"
+    uniformly as "no credential available" regardless of which source was
+    tried. Never logs, prints, or persists the resolved value."""
     if ap_password:
         return ap_password
-    if os.environ.get(http_auth.USERNAME_ENV) and os.environ.get(http_auth.PASSWORD_ENV):
-        return os.environ.get(http_auth.PASSWORD_ENV)
-    return None
+    return os.environ.get(KILNCTL_AP_PASSWORD_ENV) or None
 
 
 def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
@@ -601,13 +608,15 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
 
     Owner decision 2026-09-19: this is now DEFAULT ON whenever a credential
     is available, not opt-in. Resolution order: `ap_password` if the caller
-    passed one explicitly, else the KILNCTL_WEB_USERNAME/KILNCTL_WEB_PASSWORD
-    environment variables via `_resolve_boot_guard_password()`. Pass
-    `reset_boot_guard=False` to opt out entirely regardless of credential
-    availability. If no credential is available from either source, this is
-    still a no-op -- but reports a one-line "skipped for lack of
-    credentials" note instead of returning "" silently, so a caller who
-    expected the reset to run can tell it didn't happen and why.
+    passed one explicitly, else the KILNCTL_AP_PASSWORD environment variable
+    (the board's AP Wi-Fi password, NOT the web admin password -- see
+    `_resolve_boot_guard_password()`'s header comment) via
+    `_resolve_boot_guard_password()`. Pass `reset_boot_guard=False` to opt
+    out entirely regardless of credential availability. If no credential is
+    available from either source, this is still a no-op -- but reports a
+    one-line "skipped for lack of credentials" note instead of returning ""
+    silently, so a caller who expected the reset to run can tell it didn't
+    happen and why.
 
     Resolves the board address the SAME way _verify_flash_landed() just
     confirmed one was reachable at (via _preflash_board_address(), which
@@ -634,7 +643,7 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
     resolved_password = _resolve_boot_guard_password(ap_password)
     if not resolved_password:
         return ("boot_guard_reset: skipped -- no credential available (neither `ap_password` "
-                "nor KILNCTL_WEB_USERNAME/KILNCTL_WEB_PASSWORD were set); the recovery-mode "
+                "nor KILNCTL_AP_PASSWORD were set); the recovery-mode "
                 "counter was NOT cleared by this flash.")
     resolved = _preflash_board_address(host) or pre_flash_host
     if not resolved:
@@ -857,10 +866,13 @@ def flash_firmware(
 
     The credential used is resolved by `_resolve_boot_guard_password()`: an
     explicit `ap_password` wins if given; otherwise it falls back to the
-    KILNCTL_WEB_USERNAME/KILNCTL_WEB_PASSWORD environment variables (the same
-    pair http_auth.py reads for the admin session). If neither is available,
-    this is a no-op, but the result gets one line saying the reset was
-    skipped for lack of credentials rather than silently doing nothing.
+    KILNCTL_AP_PASSWORD environment variable -- the board's AP Wi-Fi
+    password, NOT the web admin password (`KILNCTL_WEB_PASSWORD`); the two
+    are guaranteed distinct (`web_auth_store.c:157`) and the boot_guard_reset
+    route verifies its HMAC against the AP password specifically. If no
+    credential is available, this is a no-op, but the result gets one line
+    saying the reset was skipped for lack of credentials rather than
+    silently doing nothing.
     Passing `reset_boot_guard=False` opts out unconditionally, regardless of
     what credentials are available -- use this for a deliberate flash of
     something you expect might NOT boot cleanly and want free to walk into

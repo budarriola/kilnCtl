@@ -274,17 +274,16 @@ class FlashFirmwareVerifyWiringTest(unittest.TestCase):
         self.addCleanup(self._archive_patch.stop)
 
         # Owner decision 2026-09-19 made the post-flash boot_guard reset
-        # default-on whenever KILNCTL_WEB_USERNAME/PASSWORD are set -- clear
-        # them here so this whole test class (most of which never mocks the
-        # boot_guard HTTP calls) can't accidentally make a real network call
-        # just because the machine running the suite happens to have web
-        # auth configured. BootGuardResetWiringTest's own env tests set
-        # these back explicitly where they need to.
+        # default-on whenever KILNCTL_AP_PASSWORD is set -- clear it here so
+        # this whole test class (most of which never mocks the boot_guard
+        # HTTP calls) can't accidentally make a real network call just
+        # because the machine running the suite happens to have it set.
+        # BootGuardResetWiringTest's own env tests set it back explicitly
+        # where they need to.
         self._env_patch = unittest.mock.patch.dict(mf.os.environ, {}, clear=False)
         self._env_patch.start()
         self.addCleanup(self._env_patch.stop)
-        mf.os.environ.pop(mf.http_auth.USERNAME_ENV, None)
-        mf.os.environ.pop(mf.http_auth.PASSWORD_ENV, None)
+        mf.os.environ.pop(mf.KILNCTL_AP_PASSWORD_ENV, None)
 
     def test_verify_false_skips_verification_entirely(self):
         with unittest.mock.patch.object(mf, "_verify_flash_landed") as verify_mock:
@@ -575,32 +574,30 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
         self.assertIn("before=unknown", result)
         self.assertIn("after=0", result)
 
-    def _clear_web_auth_env(self):
-        """Isolate these tests from whatever KILNCTL_WEB_USERNAME/PASSWORD
-        happen to be set in the actual environment this suite runs in --
-        owner decision 2026-09-19 made the reset default-on whenever those
-        are present, so a real dev environment with them set would otherwise
+    def _clear_ap_password_env(self):
+        """Isolate these tests from whatever KILNCTL_AP_PASSWORD happens to
+        be set in the actual environment this suite runs in -- owner
+        decision 2026-09-19 made the reset default-on whenever it's
+        present, so a real dev environment with it set would otherwise
         make the "no credentials" tests flaky/order-dependent."""
         patcher = unittest.mock.patch.dict(
             mf.os.environ,
-            {mf.http_auth.USERNAME_ENV: "", mf.http_auth.PASSWORD_ENV: ""},
+            {mf.KILNCTL_AP_PASSWORD_ENV: ""},
             clear=False,
         )
         patcher.start()
         self.addCleanup(patcher.stop)
-        # patch.dict sets them to "" rather than removing them -- explicitly
+        # patch.dict sets it to "" rather than removing it -- explicitly
         # pop so os.environ.get(...) sees None, matching a genuinely unset var.
-        for key in (mf.http_auth.USERNAME_ENV, mf.http_auth.PASSWORD_ENV):
-            mf.os.environ.pop(key, None)
-        self.addCleanup(mf.os.environ.pop, mf.http_auth.USERNAME_ENV, None)
-        self.addCleanup(mf.os.environ.pop, mf.http_auth.PASSWORD_ENV, None)
+        mf.os.environ.pop(mf.KILNCTL_AP_PASSWORD_ENV, None)
+        self.addCleanup(mf.os.environ.pop, mf.KILNCTL_AP_PASSWORD_ENV, None)
 
     def test_skipped_without_ap_password_or_env_credentials(self):
         """Owner decision 2026-09-19: with neither an explicit `ap_password`
-        nor KILNCTL_WEB_USERNAME/PASSWORD set, the reset is a no-op (never
+        nor KILNCTL_AP_PASSWORD set, the reset is a no-op (never
         calls the HTTP endpoints) but the result must say so explicitly --
         a caller must be able to tell a skip from a silent success."""
-        self._clear_web_auth_env()
+        self._clear_ap_password_env()
         self.preflash_mock.return_value = "192.168.1.156"
         with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
              unittest.mock.patch.object(mf.ota_http, "get_boot_guard_status") as status_mock, \
@@ -612,14 +609,39 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
         self.assertIn("skipped", result)
         self.assertIn("no credential available", result)
 
-    def test_env_credentials_used_when_ap_password_omitted(self):
-        """The new default-on path: KILNCTL_WEB_USERNAME/PASSWORD alone
-        (no explicit `ap_password`) must trigger the same reset call, using
-        the env password."""
+    def test_web_password_alone_yields_skip_note_never_a_call(self):
+        """The old (wrong) fallback read KILNCTL_WEB_PASSWORD, which the
+        board's boot_guard_reset route rejects outright (it's keyed on the
+        AP Wi-Fi password, guaranteed distinct from the web admin password
+        by web_auth_store.c:157). Setting only KILNCTL_WEB_PASSWORD (and its
+        username companion) must still be treated as "no credential" -- it
+        must never be used as the boot_guard_reset password, and the HTTP
+        endpoints must never be called."""
+        self._clear_ap_password_env()
         self.preflash_mock.return_value = "192.168.1.156"
         env_patch = unittest.mock.patch.dict(
             mf.os.environ,
-            {mf.http_auth.USERNAME_ENV: "admin", mf.http_auth.PASSWORD_ENV: "envpw123"},
+            {"KILNCTL_WEB_USERNAME": "admin", "KILNCTL_WEB_PASSWORD": "webpw123"},
+        )
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+        with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
+             unittest.mock.patch.object(mf.ota_http, "get_boot_guard_status") as status_mock, \
+             unittest.mock.patch.object(mf.ota_http, "boot_guard_reset_esp") as reset_mock:
+            result = mf.flash_firmware(verify=True)
+        status_mock.assert_not_called()
+        reset_mock.assert_not_called()
+        self.assertIn("skipped", result)
+        self.assertIn("no credential available", result)
+
+    def test_env_credentials_used_when_ap_password_omitted(self):
+        """The new default-on path: KILNCTL_AP_PASSWORD alone
+        (no explicit `ap_password`) must trigger the same reset call, using
+        exactly the env value as the password."""
+        self.preflash_mock.return_value = "192.168.1.156"
+        env_patch = unittest.mock.patch.dict(
+            mf.os.environ,
+            {mf.KILNCTL_AP_PASSWORD_ENV: "envpw123"},
         )
         env_patch.start()
         self.addCleanup(env_patch.stop)
@@ -632,13 +654,14 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
                  return_value={"ok": True, "boot_count": 0}) as reset_mock:
             result = mf.flash_firmware(verify=True)
         reset_mock.assert_called_once_with("192.168.1.156", "envpw123")
+        self.assertEqual(reset_mock.call_args.args[1], os.environ[mf.KILNCTL_AP_PASSWORD_ENV])
         self.assertIn("cleared and verified", result)
 
     def test_explicit_ap_password_wins_over_env(self):
         self.preflash_mock.return_value = "192.168.1.156"
         env_patch = unittest.mock.patch.dict(
             mf.os.environ,
-            {mf.http_auth.USERNAME_ENV: "admin", mf.http_auth.PASSWORD_ENV: "envpw123"},
+            {mf.KILNCTL_AP_PASSWORD_ENV: "envpw123"},
         )
         env_patch.start()
         self.addCleanup(env_patch.stop)

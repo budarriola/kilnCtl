@@ -340,9 +340,11 @@ raise, a WARNING, or `verify=False`) -- see
 `docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md`. This used
 to require an explicit `ap_password` argument; it is now attempted whenever a
 credential is available at all: an explicit `ap_password` still wins if
-passed, otherwise it falls back to the `KILNCTL_WEB_USERNAME`/
-`KILNCTL_WEB_PASSWORD` environment variables (the same pair `http_auth.py`
-reads for the admin session). If neither is set, the tool result reports the
+passed, otherwise it falls back to the `KILNCTL_AP_PASSWORD` environment
+variable -- the board's **AP Wi-Fi password**, distinct from and never equal
+to the web admin password (`web_auth_store.c:157`), since
+`POST /api/ota/esp/boot_guard_reset` verifies its HMAC keyed on the AP
+password specifically. If it is not set, the tool result reports the
 reset was skipped for lack of credentials rather than saying nothing. Pass
 `reset_boot_guard=False` to opt out unconditionally. The password is never
 logged or echoed, and the result always names the counter's before/after

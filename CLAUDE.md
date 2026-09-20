@@ -515,12 +515,13 @@ just performed a deliberate flash (`flash_firmware()`'s verify step — wired up
 (`tools/PcTools/src/kilnctrl/mcp_server_flash.py`) that calls it ONLY after post-flash
 verification confirms full, unambiguous success — never on a raise, a WARNING, or
 `verify=False`. **Owner decision 2026-09-19: this is now DEFAULT ON, not opt-in** — a
-caller who omits `ap_password` falls back to the `KILNCTL_WEB_USERNAME`/
-`KILNCTL_WEB_PASSWORD` environment variables, and the reset runs automatically whenever
-either source yields a credential; a caller with neither gets the pre-`b09294fb` behavior
-plus one line in the result noting the reset was skipped for lack of credentials. Pass
-`reset_boot_guard=False` to opt out unconditionally regardless of credentials. The
-password is never logged or echoed.
+caller who omits `ap_password` falls back to the `KILNCTL_AP_PASSWORD` environment
+variable, the board's **AP Wi-Fi password** — distinct from, and never equal to, the
+web admin password (`web_auth_store.c:157`), since the `boot_guard_reset` route verifies
+its HMAC keyed on the AP password specifically; a caller with no credential gets the
+pre-`b09294fb` behavior plus one line in the result noting the reset was skipped for lack
+of credentials. Pass `reset_boot_guard=False` to opt out unconditionally regardless of
+credentials. The password is never logged or echoed.
 `flash_firmware()`'s result reports the counter's before value, the clear result, and the
 verified-or-not after value, never a silent clear. A `GET /api/boot_guard` diagnostics route
 also landed in the same commit, exposing `{"boot_count","recovery_mode"}` unauthenticated so
