@@ -160,6 +160,21 @@ bool live_edit_can_overwrite(const live_edit_record_t *rec, char *err, size_t er
 bool live_edit_name_collides(const char *candidate_name, const char *(*name_at)(void *ctx, uint8_t id), void *ctx,
                               uint8_t exclude_id, char *err, size_t err_cap);
 
+/* Same as live_edit_name_collides() above, plus an explicit `include_builtins`
+ * switch (Opus review of 5dd23944, finding 1/BLOCKER). live_edit_name_collides()
+ * itself is now a thin wrapper that always passes true, preserving its
+ * original behavior for its one remaining caller, live_edit_decide()'s
+ * LIVE_EDIT_DECISION_SAVE_AS path. Every USER-SLOT save (profiles_http_save(),
+ * profile_post_handler(), and the single- and batch-import paths in
+ * profiles_export_http.c/backup_import.c) must call this directly with
+ * include_builtins=false: a user profile saved under a builtin's name/code
+ * is not a collision -- it is exactly what the "Copy builtin" button
+ * produces on purpose, and refusing it also made an existing user slot
+ * already named like a builtin permanently unrenamable/uneditable, and
+ * refused importing a backup that legitimately contains one. */
+bool live_edit_name_collides_ex(const char *candidate_name, const char *(*name_at)(void *ctx, uint8_t id), void *ctx,
+                                 uint8_t exclude_id, bool include_builtins, char *err, size_t err_cap);
+
 /* Plan section 2: the edit-window rule. Compares `running` (the profile
  * currently executing, unmodified) against `candidate` (the operator's
  * proposed edit) at the given `segment_index`:

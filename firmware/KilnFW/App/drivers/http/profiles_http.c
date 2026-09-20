@@ -1519,17 +1519,25 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
     }
 
     /* Owner request 2026-09-19: saving must never silently create/overwrite a
-     * duplicate name. Reuses live_edit_name_collides() (live_profile.c),
-     * already used by the live-edit SAVE_AS path -- same case/whitespace
-     * normalization and same read-only-builtin scan. exclude_id is the slot
-     * this save is writing into: overwriting an existing slot's OWN unchanged
-     * name must stay legal, so that slot is excluded from the scan. Passing
-     * target_id directly (no profiles_slot_used() ternary) is enough: for a
-     * brand-new/unused slot, profiles_http_name_at() already returns NULL,
-     * which live_edit_name_collides()'s own `if (!existing) continue;`
-     * skips regardless of exclude_id's value. */
-    if (live_edit_name_collides(candidate->name, profiles_http_name_at, NULL, target_id, err_msg, err_cap)) {
-        return false; /* live_edit_name_collides already filled err_msg */
+     * duplicate name. Reuses live_edit_name_collides_ex() (live_profile.c),
+     * same case/whitespace normalization as the live-edit SAVE_AS path.
+     * exclude_id is the slot this save is writing into: overwriting an
+     * existing slot's OWN unchanged name must stay legal, so that slot is
+     * excluded from the scan. Passing target_id directly (no
+     * profiles_slot_used() ternary) is enough: for a brand-new/unused slot,
+     * profiles_http_name_at() already returns NULL, which
+     * live_edit_name_collides_ex()'s own `if (!existing) continue;` skips
+     * regardless of exclude_id's value.
+     *
+     * include_builtins=false (Opus review of 5dd23944, finding 1/BLOCKER):
+     * this writes a USER slot, and "SAVE-VS-COPY" above already redirects a
+     * save aimed at a builtin id into a fresh user slot -- refusing that new
+     * slot for merely sharing the builtin's name/code would defeat the
+     * copy-a-builtin feature entirely. See live_edit_name_collides_ex()'s
+     * doc comment. */
+    if (live_edit_name_collides_ex(candidate->name, profiles_http_name_at, NULL, target_id, false, err_msg,
+                                    err_cap)) {
+        return false; /* live_edit_name_collides_ex already filled err_msg */
     }
 
     s_profiles.profiles[target_id] = *candidate;

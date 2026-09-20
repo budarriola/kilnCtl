@@ -18,38 +18,10 @@
 #include "profiles_favorites.h"
 #include "zones_config_accessors.h"
 
-/* ---- shared JSON escaping, same convention as every other *_http.c ------
- * (see e.g. profiles_export_http.c/backup_export.c's own copies, and
- * backup_http_internal.h's comment on why these stay per-file `static`
- * rather than widened -- dashboard_json.c already defines a non-static
- * `json_escape()` of its own, so a second widened one anywhere would be an
- * immediate link-time collision, not a latent one). Needed here because
- * the dup-name refusal below echoes an operator-supplied profile name back
- * into a JSON error body.
- *
- * Guarded by PROFILES_HTTP_JSON_ESCAPE_DEFINED -- see
- * profiles_catalog_http.c's identical guard/comment: this file, profiles_http.c
- * and profiles_catalog_http.c are three separate TUs in the real target
- * build (each keeps its own copy, no collision), but test_profiles_http.c's
- * host test #includes all three into ONE TU, where two identical `static
- * json_escape` bodies would otherwise be a duplicate-symbol build error. */
-#ifndef PROFILES_HTTP_JSON_ESCAPE_DEFINED
-#define PROFILES_HTTP_JSON_ESCAPE_DEFINED
-static void json_escape(const char *src, char *out, size_t out_cap)
-{
-    size_t o = 0;
-    for (const char *p = src; *p && o + 2 < out_cap; p++) {
-        if (*p == '"' || *p == '\\') {
-            if (o + 3 >= out_cap) {
-                break;
-            }
-            out[o++] = '\\';
-        }
-        out[o++] = *p;
-    }
-    out[o] = '\0';
-}
-#endif
+/* profiles_http_json_escape() now lives in profiles_http_internal.h (Opus review of
+ * 5dd23944, finding 3) -- see that header's doc comment. Needed here
+ * because the dup-name refusal below echoes an operator-supplied profile
+ * name back into a JSON error body. */
 
 
 /* ---- POST /api/profile ----------------------------------------------------
@@ -604,14 +576,19 @@ esp_err_t profile_post_handler(httpd_req_t *req)
          * continue;` -- the profiles_slot_used()-guarded 0xFF fallback here
          * was redundant with that. */
         char name_err[128];
-        if (live_edit_name_collides(tmp.name, profile_post_name_at, NULL, target_id, name_err, sizeof(name_err))) {
+        /* include_builtins=false (Opus review of 5dd23944, finding 1/BLOCKER):
+         * this is a USER-SLOT save, and "Copy builtin" deliberately posts the
+         * builtin's own code back as the new slot's name -- that must save,
+         * not 400. See live_edit_name_collides_ex()'s doc comment. */
+        if (live_edit_name_collides_ex(tmp.name, profile_post_name_at, NULL, target_id, false, name_err,
+                                        sizeof(name_err))) {
             /* name_err can echo the operator-supplied name back verbatim
              * (see live_edit_name_collides()'s "%s" formats) -- escape
              * before embedding, else a name containing '"' breaks the JSON
              * and the page's r.json() throws instead of showing the real
              * refusal reason. */
             char name_err_escaped[sizeof(name_err) * 2 + 1];
-            json_escape(name_err, name_err_escaped, sizeof(name_err_escaped));
+            profiles_http_json_escape(name_err, name_err_escaped, sizeof(name_err_escaped));
             char json[192 + sizeof(name_err_escaped)];
             int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", name_err_escaped);
             httpd_resp_set_status(req, "400 Bad Request");

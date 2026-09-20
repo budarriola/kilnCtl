@@ -57,32 +57,8 @@ esp_err_t profiles_page_get_handler(httpd_req_t *req)
 
 /* ---- JSON ------------------------------------------------------------------ */
 
-/* PROFILES_HTTP_JSON_ESCAPE_DEFINED: profiles_edit_http.c (2026-09-20, Opus
- * review of 5dd23944 finding A) needs this exact same helper and guards its
- * own copy with this same macro -- real per-file builds never see both
- * definitions in one TU, so each file keeps its own static copy as usual,
- * but test_profiles_http.c's host test #includes profiles_http.c/
- * profiles_catalog_http.c/profiles_edit_http.c into ONE translation unit
- * (see that file's own header comment), where two identical `static
- * json_escape` bodies would otherwise be a C2084 "already has a body" /
- * duplicate-symbol error. Harmless in the real, per-file target build. */
-#ifndef PROFILES_HTTP_JSON_ESCAPE_DEFINED
-#define PROFILES_HTTP_JSON_ESCAPE_DEFINED
-static void json_escape(const char *src, char *out, size_t out_cap)
-{
-    size_t o = 0;
-    for (const char *p = src; *p && o + 2 < out_cap; p++) {
-        if (*p == '"' || *p == '\\') {
-            if (o + 3 >= out_cap) {
-                break;
-            }
-            out[o++] = '\\';
-        }
-        out[o++] = *p;
-    }
-    out[o] = '\0';
-}
-#endif
+/* profiles_http_json_escape() now lives in profiles_http_internal.h (Opus review of
+ * 5dd23944, finding 3) -- see that header's doc comment. */
 
 /* ---- Builtin catalogue JSON ------------------------------------------------
  *
@@ -111,7 +87,7 @@ static void json_escape(const char *src, char *out, size_t out_cap)
  * argument list. */
 static const char *esc(const char *src, char *buf, size_t cap)
 {
-    json_escape(src, buf, cap);
+    profiles_http_json_escape(src, buf, cap);
     return buf;
 }
 
@@ -296,7 +272,7 @@ esp_err_t builtin_list_get_handler(httpd_req_t *req)
 /* Worst-case size of one user-slot entry's JSON, sized against a name that
  * FULLY escapes -- the TODO.md bug this replaces: the old 96-byte-per-slot
  * budget was sized off PROFILE_NAME_MAX_LEN's raw 15 chars, but
- * json_escape() can double every one of them (a `"` or `\` costs two output
+ * profiles_http_json_escape() can double every one of them (a `"` or `\` costs two output
  * bytes), and the fixed text around the name is not free either. Counted
  * literally: `,{"id":255,"builtin":false,"name":"` (36) + up to
  * PROFILE_NAME_MAX_LEN*2 (30) escaped name bytes + `","zone_mask":255,`
@@ -330,7 +306,7 @@ esp_err_t profiles_list_get_handler(httpd_req_t *req)
         }
         const profile_t *p = &s_profiles.profiles[id];
         char name_escaped[PROFILE_NAME_MAX_LEN * 2 + 1];
-        json_escape(p->name, name_escaped, sizeof(name_escaped));
+        profiles_http_json_escape(p->name, name_escaped, sizeof(name_escaped));
         /* exceeds_ceiling (2026-09-02 owner correction): computed live against
          * each zone's CURRENT max_temp_c, not stored -- a profile that was
          * fine to save can start exceeding the ceiling later if the zone's
@@ -478,14 +454,14 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
     }
 
     char name_escaped[PROFILE_NAME_MAX_LEN * 2 + 1];
-    json_escape(p->name, name_escaped, sizeof(name_escaped));
+    profiles_http_json_escape(p->name, name_escaped, sizeof(name_escaped));
     /* exceeds_ceiling/ceiling_note (2026-09-02 owner correction): same live
      * check the list endpoint runs -- see profile_exceeds_zone_ceiling()'s
      * own comment. ceiling_note is "" when exceeds_ceiling is false. */
     char ceiling_note[256];
     bool exceeds_ceiling = profile_exceeds_zone_ceiling(p, ceiling_note, sizeof(ceiling_note));
     char ceiling_note_escaped[sizeof(ceiling_note) * 2];
-    json_escape(ceiling_note, ceiling_note_escaped, sizeof(ceiling_note_escaped));
+    profiles_http_json_escape(ceiling_note, ceiling_note_escaped, sizeof(ceiling_note_escaped));
     APPEND("{\"id\":%ld,\"builtin\":false,\"read_only\":false,\"name\":\"%s\",\"zone_mask\":%u,"
            "\"segment_count\":%u,\"feasibility\":\"%s\",\"exceeds_ceiling\":%s,"
            "\"ceiling_note\":\"%s\",\"segments\":[",

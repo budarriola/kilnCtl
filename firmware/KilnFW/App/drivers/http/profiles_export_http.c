@@ -15,7 +15,8 @@
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 
 #include "profiles_http.h"
-#include "profiles_http_internal.h" // PROFILE_TARGET_C_MIN/MAX, PROFILE_ON_OFF_RULE_JSON_MAX
+#include "profiles_http_internal.h" // PROFILE_TARGET_C_MIN/MAX, PROFILE_ON_OFF_RULE_JSON_MAX,
+                                     // profiles_http_json_escape() -- Opus review of 5dd23944, finding 3
 #include "backup_json.h" // shared hand-rolled JSON reader (see that header's own
                           // comment on why this codebase has no cJSON dependency)
 #include "wifi_provision_http.h"
@@ -28,22 +29,6 @@ static const char *TAG = "profiles_export_http";
  * way profiles_catalog_http.c sizes its export buffer (192B/segment,
  * rounded up) plus headroom for the top-level name/zone_mask keys. */
 #define PROFILE_IMPORT_BODY_MAX 4096
-
-/* ---- shared JSON escaping, same convention as every other *_http.c ------- */
-static void json_escape(const char *src, char *out, size_t out_cap)
-{
-    size_t o = 0;
-    for (const char *p = src; *p && o + 2 < out_cap; p++) {
-        if (*p == '"' || *p == '\\') {
-            if (o + 3 >= out_cap) {
-                break;
-            }
-            out[o++] = '\\';
-        }
-        out[o++] = *p;
-    }
-    out[o] = '\0';
-}
 
 /* ---- GET /api/profile/export?id=N ---------------------------------------- */
 
@@ -91,7 +76,7 @@ static esp_err_t export_get_handler(httpd_req_t *req)
     }
 
     char name_escaped[PROFILE_NAME_MAX_LEN * 2 + 1];
-    json_escape(p.name, name_escaped, sizeof(name_escaped));
+    profiles_http_json_escape(p.name, name_escaped, sizeof(name_escaped));
 
     size_t o = 0;
     int n;
@@ -450,7 +435,7 @@ static esp_err_t import_post_handler(httpd_req_t *req)
          * masking the real refusal reason behind a generic "could not reach
          * the board" error. */
         char err_escaped[sizeof(err_msg) * 2 + 1];
-        json_escape(err_msg, err_escaped, sizeof(err_escaped));
+        profiles_http_json_escape(err_msg, err_escaped, sizeof(err_escaped));
         char errjson[192 + sizeof(err_escaped)];
         int en = snprintf(errjson, sizeof(errjson), "{\"ok\":false,\"error\":\"%s\"}", err_escaped);
         httpd_resp_set_status(req, "400 Bad Request");

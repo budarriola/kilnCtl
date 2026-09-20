@@ -401,8 +401,14 @@ esp_err_t httpd_query_key_value(const char *qry, const char *key, char *val, siz
     return ESP_ERR_NOT_FOUND;
 }
 
-// dashboard_json.c is not linked here -- a faithful minimal stand-in for the
-// two characters that actually matter to these responses.
+// profiles_live_http.c itself calls dashboard_json.h's PROJECT-WIDE
+// json_escape() (quote/backslash only -- out of scope for the Opus review of
+// 5dd23944 finding 3, which only widened the THREE profiles_*_http.c copies
+// now unified as profiles_http_json_escape() in profiles_http_internal.h,
+// a distinct name chosen specifically so it would not collide with this
+// dashboard-wide one). dashboard_json.c is not linked into this executable
+// (see the file banner), so this remains a faithful minimal stand-in for
+// the two characters that actually matter to these responses.
 void json_escape(const char *src, char *out, size_t out_cap)
 {
     size_t o = 0;

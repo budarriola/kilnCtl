@@ -1453,7 +1453,7 @@ static void test_one_bad_slot_does_not_affect_others(void)
 // ---------------------------------------------------------------------------
 // Test 7 -- GET /api/profiles JSON stays valid with worst-case escape-heavy
 // names at a full slot count (all 8 slots used, every name built entirely
-// from '"' and '\\' -- json_escape()'s two double-cost characters).
+// from '"' and '\\' -- profiles_http_json_escape()'s two double-cost characters).
 // ---------------------------------------------------------------------------
 
 /* Very small brace/bracket/string balance checker -- enough to catch a
@@ -1509,7 +1509,7 @@ static void test_profiles_list_json_valid_with_escape_heavy_names(void)
         profile_t *p = &s_profiles.profiles[id];
         memset(p, 0, sizeof(*p));
         /* PROFILE_NAME_MAX_LEN (15) characters, alternating '"' and '\\' --
-         * json_escape() doubles every one of them, the worst case
+         * profiles_http_json_escape() doubles every one of them, the worst case
          * PROFILE_LIST_ENTRY_MAX's own comment sizes against. */
         for (int i = 0; i < PROFILE_NAME_MAX_LEN; i++) {
             p->name[i] = (i % 2 == 0) ? '"' : '\\';
@@ -2169,10 +2169,20 @@ static void test_profiles_http_save_allows_overwriting_a_slot_with_its_own_name(
     TEST_CHECK(out_id2 == out_id, "an overwrite-by-id must land back in the same slot");
 }
 
-static void test_profiles_http_save_rejects_builtin_name(void)
+static void test_profiles_http_save_allows_builtin_name(void)
 {
-    TEST_SECTION("profiles_http_save -- a name matching the read-only builtin catalogue is refused too "
-                 "(live_edit_name_collides() also scans profiles_builtin.h's g_builtin_profiles)");
+    /* Opus review of 5dd23944, finding 1/BLOCKER: this test used to assert
+     * the OPPOSITE (refused) -- that was the bug. profiles_catalog_http.c
+     * emits a builtin's `code` as its JSON "name", and profiles_page.html's
+     * copyBuiltin() posts that straight back as name= on a fresh USER-slot
+     * save -- refusing it meant "Copy builtin" was unusable for every
+     * builtin, and any user slot already named like one could never be
+     * edited again. profiles_http_save() now calls
+     * live_edit_name_collides_ex() with include_builtins=false, so a
+     * user-slot save naming itself after a builtin's code must succeed. */
+    TEST_SECTION("profiles_http_save -- a name matching the read-only builtin catalogue is now ALLOWED "
+                 "for a user-slot save (Opus review of 5dd23944, finding 1 -- this used to wrongly refuse "
+                 "every \"Copy builtin\")");
     memset(&s_profiles, 0, sizeof(s_profiles));
     g_fake_builtin_on = true;
     strcpy((char *)g_fake_builtin.code, "C6DHSC");
@@ -2183,8 +2193,43 @@ static void test_profiles_http_save_rejects_builtin_name(void)
     char err_msg[160] = "";
     bool ok = profiles_http_save(PROFILES_MAX_COUNT, &p, &out_id, &warn_count, err_msg, sizeof(err_msg));
 
-    TEST_CHECK(!ok, "a name colliding with a builtin schedule's code must be refused");
-    TEST_CHECK(strstr(err_msg, "builtin") != NULL, "the refusal must say why -- it names the builtin schedule");
+    TEST_CHECK(ok, "a user-slot save naming itself after a builtin's code must be allowed -- this is "
+                   "exactly what \"Copy builtin\" produces on purpose");
+    TEST_CHECK(err_msg[0] == '\0', "a successful save must not leave a stale refusal message");
+
+    g_fake_builtin_on = false;
+}
+
+static void test_profiles_http_save_allows_editing_existing_slot_named_like_builtin(void)
+{
+    /* Opus review of 5dd23944, finding 1/BLOCKER: exclude_id only ever
+     * excludes a USER slot from the user-vs-user scan, never a builtin from
+     * the (now-disabled-for-this-caller) builtin scan -- so before this fix,
+     * a user slot already named like a builtin (e.g. from an earlier "Copy
+     * builtin") could never be saved/edited again: every re-save of that
+     * SAME slot with its OWN unchanged name collided against the builtin
+     * scan, which exclude_id never touched. */
+    TEST_SECTION("profiles_http_save -- re-saving an EXISTING user slot that is already named like a "
+                 "builtin (e.g. a prior \"Copy builtin\") must succeed, not be permanently unrenamable");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    g_fake_builtin_on = true;
+    strcpy((char *)g_fake_builtin.code, "C6DHSC");
+
+    profile_t p = make_stored_profile();
+    strcpy(p.name, "c6dhsc");
+    uint8_t out_id = 0, warn_count = 0;
+    char err_msg[160] = "";
+    TEST_CHECK(profiles_http_save(PROFILES_MAX_COUNT, &p, &out_id, &warn_count, err_msg, sizeof(err_msg)),
+              "setup: the initial copy-as-builtin-name save must succeed");
+
+    profile_t p2 = p;
+    p2.segments[0].dwell_min = p2.segments[0].dwell_min + 1;
+    uint8_t out_id2 = 0, warn_count2 = 0;
+    char err_msg2[160] = "";
+    bool ok2 = profiles_http_save(out_id, &p2, &out_id2, &warn_count2, err_msg2, sizeof(err_msg2));
+
+    TEST_CHECK(ok2, "editing an existing slot that already carries a builtin-like name must succeed");
+    TEST_CHECK(out_id2 == out_id, "an edit-by-id must land back in the same slot");
 
     g_fake_builtin_on = false;
 }
@@ -2275,6 +2320,34 @@ static void test_profile_post_handler_collision_response_escapes_quote_in_name(v
               "page's r.json() threw instead of showing the refusal reason)");
     TEST_CHECK(strstr(s_resp_capture, "Bisque \\\"10\\\"") != NULL,
               "the escaped name must still be recoverable from the JSON (backslash-escaped quotes)");
+}
+
+static void test_profile_post_handler_collision_response_escapes_newline_in_name(void)
+{
+    /* Opus review of 5dd23944, finding 3: the old per-file json_escape()
+     * copies only escaped '"' and '\\' -- a raw control byte (a literal
+     * newline here, decoded from %0A the same way a browser-submitted form
+     * body would carry one) landed unescaped in the JSON body and broke it,
+     * exactly like the unescaped-quote defect finding A already covered.
+     * The shared profiles_http_json_escape() in profiles_http_internal.h now also emits
+     * \u00XX for any byte < 0x20. PROFILE_NAME_MAX_LEN is 15, so this name
+     * (plus the quote from finding A, both together per the review) stays
+     * short: "A\n\"B" (4 chars decoded). */
+    TEST_SECTION("profile_post_handler() -- a dup-name collision response stays well-formed JSON even "
+                 "when the colliding name contains a raw newline AND a '\"' (Opus review finding 3)");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+
+    char body1[256];
+    build_minimal_post_body(body1, sizeof(body1), "A%0A%22B");
+    TEST_CHECK(run_profile_post(body1) == ESP_OK, "setup: the first save (name containing newline+'\"') must succeed");
+
+    char body2[256];
+    build_minimal_post_body(body2, sizeof(body2), "A%0A%22B");
+    TEST_CHECK(run_profile_post(body2) == ESP_OK, "handler must still return ESP_OK on a refusal");
+    TEST_CHECK(json_is_well_formed(s_resp_capture),
+              "a collision response embedding a name with a raw newline must still be well-formed JSON");
+    TEST_CHECK(strstr(s_resp_capture, "\\u000a") != NULL,
+              "the newline must be escaped as \\u00XX, not left as a raw control byte");
 }
 
 static void test_profiles_list_marks_exceeds_ceiling(void)
@@ -2834,9 +2907,11 @@ void run_test_profiles_http(void)
     test_profiles_http_save_rejects_exact_duplicate_name();
     test_profiles_http_save_rejects_case_and_whitespace_variant_name();
     test_profiles_http_save_allows_overwriting_a_slot_with_its_own_name();
-    test_profiles_http_save_rejects_builtin_name();
+    test_profiles_http_save_allows_builtin_name();
+    test_profiles_http_save_allows_editing_existing_slot_named_like_builtin();
     test_profile_post_handler_collision_response_is_well_formed_json();
     test_profile_post_handler_collision_response_escapes_quote_in_name();
+    test_profile_post_handler_collision_response_escapes_newline_in_name();
     test_profiles_list_marks_exceeds_ceiling();
     test_validate_candidate_hard_mode_refuses_target_above_zone_ceiling();
     test_validate_candidate_hard_mode_refuses_ramp_above_zone_ceiling();

@@ -116,7 +116,21 @@ static const char *import_board_name_at(void *ctx_v, uint8_t id)
 {
     import_board_name_ctx_t *ctx = (import_board_name_ctx_t *)ctx_v;
     if (id >= PROFILES_MAX_COUNT || ctx->write_ids[id]) { return NULL; }
-    static profile_t scratch; /* single-threaded import path; no reentrancy */
+    /* Opus review of 5dd23944, nit 5: sizeof(profile_t) is well under 1 KB
+     * (name + PROFILE_MAX_SEGMENTS segments + PROFILE_MAX_ON_OFF_RULES
+     * on/off rules) -- small enough to fit comfortably on the httpd task's
+     * 8 KB stack -- but this MUST stay `static` regardless of size: this
+     * function returns a pointer INTO scratch (`scratch.name`) that its
+     * caller (live_edit_name_collides_ex(), by way of the `name_at`
+     * function-pointer seam) dereferences AFTER this function has already
+     * returned. A stack-local `scratch` would make that a dangling-pointer
+     * read the moment anything else touches this stack frame -- undefined
+     * behavior, not merely a style nit -- regardless of how small the
+     * struct is. `static` is the fix here, not the thing to remove; the
+     * comment it replaces already said as much ("single-threaded import
+     * path; no reentrancy"), which remains the correct and necessary
+     * reasoning. */
+    static profile_t scratch;
     if (!profiles_http_get(id, &scratch)) { return NULL; }
     return scratch.name;
 }
@@ -939,14 +953,34 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
             slot_used_sim[id] = profiles_http_get(id, &tmp);
             write_ids[id] = false;
         }
+        /* Opus review of 5dd23944, finding 2: this must simulate pass 2's
+         * commit loop in EXACT candidate order, one loop, has_id and !has_id
+         * candidates interleaved exactly as they appear -- not (as before)
+         * a first pass marking every has_id slot used, THEN a second pass
+         * allocating first-free slots for every !has_id candidate. That
+         * two-pass shape lets an EARLIER !has_id candidate grab a first-free
+         * slot that a LATER has_id candidate was always going to reserve
+         * for itself (pass 2 below commits candidates[i] with
+         * profiles_http_save(has_id ? id : PROFILES_MAX_COUNT, ...) in
+         * candidate order, so a first-free allocation made here for
+         * candidate i must only ever see the has_id reservations of
+         * candidates BEFORE i, exactly as pass 2's live slot_used state
+         * would at that point). Example the reviewer gave: board slot 0
+         * used, slot 1 free, slot 3 holds "A"; candidates
+         * [{no id,"A"}, {id:1,"Q"}] -- the old two-pass sim marked slot 1
+         * used for candidate 1 BEFORE candidate 0's first-free scan ran, so
+         * candidate 0 (no id) landed on slot 2, missing that pass 2 would
+         * actually give candidate 0 slot 1 (nothing marks it used yet at
+         * that point in commit order) and then collide committing candidate
+         * 1 into the same slot. This single-loop simulation instead gives
+         * candidate 0 slot 1 up front, matching pass 2 exactly, so this
+         * check now refuses in pass 1 (a duplicate "A"/slot-1-vs-slot-3
+         * name collision) with zero writes, instead of passing pass 1 and
+         * colliding mid-commit in pass 2. */
         for (size_t i = 0; i < candidate_count; i++) {
             if (candidates[i].has_id) {
                 write_ids[candidates[i].id] = true;
                 slot_used_sim[candidates[i].id] = true;
-            }
-        }
-        for (size_t i = 0; i < candidate_count; i++) {
-            if (candidates[i].has_id) {
                 continue;
             }
             int free_slot = -1;
@@ -975,15 +1009,28 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
                 continue; /* unnamed candidate -- see comment above */
             }
             char coll_err[128];
-            if (live_edit_name_collides(candidates[i].p.name, import_batch_name_at, &batch_ctx, (uint8_t)i,
-                                        coll_err, sizeof(coll_err))) {
-                snprintf(err_msg, err_cap, "profile entry %u: duplicate name within this import (%s)",
+            /* include_builtins=false both here and below (Opus review of
+             * 5dd23944, finding 1/BLOCKER): these candidates land in USER
+             * slots, and a backup legitimately containing a user copy of a
+             * builtin (or an existing board slot already named like one)
+             * must import, not refuse the whole restore. See
+             * live_edit_name_collides_ex()'s doc comment. */
+            if (live_edit_name_collides_ex(candidates[i].p.name, import_batch_name_at, &batch_ctx, (uint8_t)i, false,
+                                            coll_err, sizeof(coll_err))) {
+                /* -Werror=format-truncation: bound the %s width explicitly
+                 * so GCC can prove this fits at every call site's err_cap,
+                 * rather than assuming coll_err's full 128-byte declared
+                 * size could land in err_msg -- the single-loop pass-1
+                 * simulation above (finding 2) changed how this function
+                 * gets inlined/constant-propagated at its callers, which is
+                 * what surfaced this previously-quiet truncation risk. */
+                snprintf(err_msg, err_cap, "profile entry %u: duplicate name within this import (%.80s)",
                         (unsigned)i, coll_err);
                 return false;
             }
-            if (live_edit_name_collides(candidates[i].p.name, import_board_name_at, &board_ctx, 0xFF, coll_err,
-                                        sizeof(coll_err))) {
-                snprintf(err_msg, err_cap, "profile entry %u: %s", (unsigned)i, coll_err);
+            if (live_edit_name_collides_ex(candidates[i].p.name, import_board_name_at, &board_ctx, 0xFF, false,
+                                            coll_err, sizeof(coll_err))) {
+                snprintf(err_msg, err_cap, "profile entry %u: %.80s", (unsigned)i, coll_err);
                 return false;
             }
         }

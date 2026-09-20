@@ -532,8 +532,14 @@ Owner request 2026-09-19 (name uniqueness on save) done. `profiles_http_save()`
 and `profile_post_handler()` (`profiles_edit_http.c` -- the actual `/api/profile`
 POST handler, which bypassed `profiles_http_save()` entirely and needed its own
 copy of the check) now both refuse a save whose name, case/whitespace-normalized,
-collides with any other user slot or any read-only builtin catalogue entry, right
-before the slot write. Both reuse `live_edit_name_collides()` (`live_profile.c`,
+collides with any other USER SLOT ONLY, right before the slot write -- NOT any
+read-only builtin catalogue entry (Opus review of 5dd23944, finding 1/BLOCKER,
+fixed 2026-09-20: the original unconditional builtin scan made "Copy builtin"
+and any user profile named after a builtin unsavable, since a user copy of a
+builtin sharing its name is the intended product of that button; the builtin
+scan is now opt-in via `live_edit_name_collides_ex()`'s `include_builtins`
+parameter and stays `true` only for `live_edit_decide()`'s SAVE_AS caller).
+Both reuse `live_edit_name_collides()`/`live_edit_name_collides_ex()` (`live_profile.c`,
 previously only reached from the live-edit SAVE_AS path), each via its own small
 `name_at` seam backed by `s_profiles` -- matching the existing per-file-copy
 convention (`profiles_live_http.c`'s `live_http_name_at()`) rather than one

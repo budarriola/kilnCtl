@@ -1893,7 +1893,7 @@ function copyBuiltin(p) {
   }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
     .then(function (res) {
       if (!res.ok || res.data.ok === false) {
-        msg.innerHTML = '<span class="err">' + (res.data.error || 'copy failed') + '</span>';
+        msg.innerHTML = '<span class="err">' + window.kcEscapeHtml(res.data.error || 'copy failed') + '</span>';
         return;
       }
       msg.textContent = 'Saved a copy into profile slot ' + res.data.id + '.';

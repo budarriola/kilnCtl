@@ -46,9 +46,65 @@
 
 #include "profiles_http.h"
 
+#include <stdio.h>
+
 #include "esp_err.h"
 #include "esp_http_server.h"
 #include "profiles_slot_bitmap.h"
+
+/* ---- shared JSON escaping --------------------------------------------------
+ * Opus review of 5dd23944, finding 3: the per-file copies of this helper
+ * (profiles_edit_http.c, profiles_catalog_http.c, profiles_export_http.c --
+ * see their own PROFILES_HTTP_JSON_ESCAPE_DEFINED history) only escaped `"`
+ * and `\`, so an operator-supplied profile name containing a raw control
+ * byte (e.g. a literal newline, decoded from a form/JSON body) landed
+ * verbatim in a JSON string body and broke the response -- a client's
+ * r.json() throws instead of surfacing the real refusal reason. `static
+ * inline` here (this header, not a .c file) is deliberate: `static` alone in
+ * a header included by multiple TUs would just mean a silent per-TU
+ * duplicate (harmless but wasteful); `inline` on a `static` function is what
+ * actually lets multiple ordinary per-file TUs, AND test_profiles_http.c's
+ * single combined TU (which #includes profiles_http.c/profiles_catalog_http.c/
+ * profiles_edit_http.c together, all three reaching this same header once
+ * thanks to its own `#ifndef` guard), share one definition with zero
+ * duplicate-symbol risk either way -- no macro guard needed here, unlike the
+ * three now-removed per-file copies. backup_export.c, kiln_cfg_http.c and
+ * diagnostics_http.c keep their own separate copies -- they sit outside this
+ * split's three-file TU and widening into this header is out of this fix's
+ * scope.
+ *
+ * NAMED profiles_http_json_escape(), NOT json_escape(): dashboard_json.h
+ * (included by profiles_live_http.c, among others) already declares a
+ * project-wide non-static `void json_escape(...)` with the OLDER, narrower
+ * escaping (quote/backslash only -- the same gap this fix closes, but out of
+ * scope to widen here per the review). Reusing the bare name `json_escape`
+ * for this header's `static inline` triggered "static declaration follows
+ * non-static declaration" the moment any TU pulled in both headers
+ * (profiles_live_http.c does) -- a real conflict discovered while building
+ * target KilnFW, not a hypothetical. A distinct name sidesteps it entirely
+ * and is more honest anyway: this is not a drop-in replacement for the
+ * dashboard-wide helper, just the shared escaper for this split's three
+ * profiles_*_http.c files. */
+static inline void profiles_http_json_escape(const char *src, char *out, size_t out_cap)
+{
+    size_t o = 0;
+    for (const char *p = src; *p && o + 1 < out_cap; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '"' || c == '\\') {
+            if (o + 2 >= out_cap) break;
+            out[o++] = '\\';
+            out[o++] = (char)c;
+        } else if (c < 0x20) {
+            if (o + 6 >= out_cap) break;
+            int n = snprintf(&out[o], 7, "\\u%04x", c);
+            if (n != 6) break;
+            o += 6;
+        } else {
+            out[o++] = (char)c;
+        }
+    }
+    out[o] = '\0';
+}
 
 /* ---- shared log tag ------------------------------------------------------ */
 extern const char *PROFILES_TAG;

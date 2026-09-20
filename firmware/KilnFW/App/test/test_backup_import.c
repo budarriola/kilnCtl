@@ -178,20 +178,34 @@ profile_decode_result_t profile_decode_blob(const void *blob, size_t len, profil
 // ---- profiles_builtin.h stub bodies ---------------------------------------
 // live_profile.c (linked for real, see build_host_tests.ps1's comment on this
 // executable's $sources entry -- Opus review of 5dd23944 finding B) also
-// scans the read-only builtin catalogue inside live_edit_name_collides().
+// scans the read-only builtin catalogue inside live_edit_name_collides_ex().
 // This executable has no other reason to link the real profiles_builtin.c
-// table, so a "no builtins exist" fake is enough -- same convention as
-// test_profiles_http.c's own g_fake_builtin, just permanently off since none
-// of this file's tests exercise a builtin-name collision.
+// table, so a "no builtins exist" fake is enough for most tests here --
+// same convention as test_profiles_http.c's own g_fake_builtin.
+//
+// Opus review of 5dd23944, finding 1/BLOCKER: this toggle now defaults ON
+// for one id (rather than being permanently off) so
+// test_backup_import_allows_profile_named_like_a_builtin() below actually
+// exercises the include_builtins=false arm of backup_import.c's pass-1
+// dup-name check -- with the catalogue permanently empty, that test would
+// pass vacuously (nothing to collide against either way), the same class of
+// gap the BLOCKER finding itself came from. Off by default so every
+// pre-existing test in this file (none of which cares about builtins) is
+// unaffected.
+static bool g_fake_builtin_on = false;
 bool profiles_builtin_id_valid(uint8_t id)
 {
-    (void)id;
-    return false;
+    return g_fake_builtin_on && id == PROFILE_BUILTIN_ID_BASE;
 }
 const builtin_profile_t *profiles_builtin_entry(uint8_t id)
 {
-    (void)id;
-    return NULL;
+    static builtin_profile_t fake;
+    if (!profiles_builtin_id_valid(id)) {
+        return NULL;
+    }
+    memset(&fake, 0, sizeof(fake));
+    strcpy((char *)fake.code, "C6DHSC");
+    return &fake;
 }
 
 // ---- Embedded-page symbols backup_page_get_handler() references ----------
@@ -2085,6 +2099,80 @@ static void test_import_name_overwriting_the_slot_holding_that_name_allowed(void
     TEST_CHECK(g_profile_save_calls == 1, "the one candidate must actually be written");
 }
 
+// Opus review of 5dd23944, finding 2: the pass-1 write_ids[] simulation used
+// to mark EVERY has_id candidate's slot used FIRST, then allocate first-free
+// slots for the remaining candidates in a SECOND pass -- but pass 2's real
+// commit loop (backup_import_apply()'s "Pass 2: everything validated --
+// commit") processes candidates in plain candidate ORDER, has_id and !has_id
+// interleaved. That two-pass shape lets an unnumbered candidate appearing
+// BEFORE a has_id candidate simulate landing on a DIFFERENT first-free slot
+// than the one pass 2 will actually give it (pass 2's own first-free
+// allocation, inside profiles_http_save(), only ever sees the has_id
+// reservations of candidates already committed so far -- exactly what the
+// single-loop simulation now matches, and the old two-pass one did not).
+// This is the reviewer's own worked example: board slot 0 used, slot 1
+// free, slot 3 holds "A". candidates[0] (no id, "A") would land on slot 1
+// under the correct (and now real) simulation -- colliding with slot 3's
+// existing "A" -- so this refuses in pass 1 with zero writes.
+static void test_import_write_ids_sim_matches_pass2_commit_order(void)
+{
+    TEST_SECTION("backup_import_apply -- pass-1 write_ids[] simulation must match pass 2's exact commit "
+                 "order (Opus review of 5dd23944, finding 2) -- reviewer's example refuses in pass 1, "
+                 "zero writes");
+    reset_stub_state();
+
+    profile_t slot0;
+    memset(&slot0, 0, sizeof(slot0));
+    strncpy(slot0.name, "Other", sizeof(slot0.name) - 1);
+    test_stub_profiles_set(0, &slot0); // "slot 0 used"
+    // slot 1 left unset -- "slot 1 free"
+
+    profile_t slot3;
+    memset(&slot3, 0, sizeof(slot3));
+    strncpy(slot3.name, "A", sizeof(slot3.name) - 1);
+    test_stub_profiles_set(3, &slot3); // "slot 3 holds \"A\""
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,"
+        "\"profiles\":["
+        "{\"name\":\"A\",\"zone_mask\":1,\"segments\":[{\"target_c\":100,\"ramp_c_per_hr\":50,\"dwell_min\":30}]},"
+        "{\"id\":1,\"name\":\"Q\",\"zone_mask\":1,\"segments\":[{\"target_c\":100,\"ramp_c_per_hr\":50,\"dwell_min\":30}]}"
+        "],\"zones\":[]}";
+    char err[160];
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(!ok, "the reviewer's example (no-id \"A\" ahead of id:1 \"Q\", with slot 3 already \"A\") "
+                    "must be refused in pass 1");
+    TEST_CHECK(g_profile_save_calls == 0, "nothing may be written -- refused before pass 2 commits anything");
+}
+
+// Opus review of 5dd23944, finding 1/BLOCKER: importing a backup containing
+// a profile named after a builtin's code must succeed -- before this fix,
+// backup_import.c's pass-1 dup-name check scanned the builtin catalogue
+// unconditionally (via live_edit_name_collides()), so a backup taken from a
+// board that had legitimately "Copy builtin"-ed a schedule (or was hand-
+// edited/restored) refused the WHOLE restore, not just that one entry.
+static void test_import_allows_profile_named_like_a_builtin(void)
+{
+    TEST_SECTION("backup_import_apply -- a profile named after a builtin's code imports successfully "
+                 "(Opus review of 5dd23944, finding 1 -- this used to refuse the whole restore)");
+    reset_stub_state();
+    g_fake_builtin_on = true; // g_fake_builtin_entry's code is "C6DHSC" -- see the stub above
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,"
+        "\"profiles\":["
+        "{\"name\":\"c6dhsc\",\"zone_mask\":1,\"segments\":[{\"target_c\":100,\"ramp_c_per_hr\":50,\"dwell_min\":30}]}"
+        "],\"zones\":[]}";
+    char err[160];
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(ok, "a candidate whose name matches a builtin's code must import, not be refused");
+    TEST_CHECK(g_profile_save_calls == 1, "the one candidate must actually be written");
+
+    g_fake_builtin_on = false;
+}
+
 // RELEASE_HARDENING_PLAN.md item 7, "import of a deliberately hostile
 // config": the individual rejection tests above (malformed body, wrong
 // kind, too-new version, out-of-range model, overlong zone/profile name)
@@ -3945,6 +4033,8 @@ void run_test_backup_import(void)
     test_import_intra_batch_duplicate_name_refused_nothing_written();
     test_import_name_collides_with_existing_non_overwritten_slot_refused();
     test_import_name_overwriting_the_slot_holding_that_name_allowed();
+    test_import_write_ids_sim_matches_pass2_commit_order();
+    test_import_allows_profile_named_like_a_builtin();
     test_no_hostile_backup_input_produces_a_bootable_heat_commanding_state();
 
     test_v4_new_fields_round_trip_distinct_values();

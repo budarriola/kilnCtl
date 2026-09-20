@@ -160,8 +160,8 @@ static void normalize_for_compare(const char *raw, char *out, size_t out_cap)
     out[o] = '\0';
 }
 
-bool live_edit_name_collides(const char *candidate_name, const char *(*name_at)(void *ctx, uint8_t id), void *ctx,
-                              uint8_t exclude_id, char *err, size_t err_cap)
+bool live_edit_name_collides_ex(const char *candidate_name, const char *(*name_at)(void *ctx, uint8_t id), void *ctx,
+                                 uint8_t exclude_id, bool include_builtins, char *err, size_t err_cap)
 {
     char norm_candidate[PROFILE_NAME_MAX_LEN + 1];
     normalize_for_compare(candidate_name, norm_candidate, sizeof(norm_candidate));
@@ -181,16 +181,39 @@ bool live_edit_name_collides(const char *candidate_name, const char *(*name_at)(
         }
     }
 
-    /* LOW review item: a save-as must also be refused against the read-only
-     * builtin catalogue (profiles_builtin.c) -- exclude_id only ever names a
-     * USER id (0xFF for a fresh save-as, or a user id for a rename target),
-     * so it never accidentally excludes a builtin here. Read-only: this only
-     * ever COMPARES against g_builtin_profiles/profiles_builtin_entry(),
-     * never writes through them -- a builtin's `code` can never be altered.
-     * Ids are contiguous from PROFILE_BUILTIN_ID_BASE (profiles_builtin.c's
-     * builtin_index()), so profiles_builtin_id_valid() going false ends the
-     * scan; the `bid != 0` guard is only there to stop a uint8_t wraparound
-     * from looping forever if that ever stopped being true. */
+    /* Opus review of 5dd23944, finding 1 (BLOCKER): the builtin scan below
+     * must be OPT-IN, not unconditional. It was originally added (the "LOW
+     * review item" this comment used to describe) reasoning that exclude_id
+     * only ever names a USER id, so it could never accidentally exclude a
+     * builtin -- true, but that missed that a USER SLOT SAVE naming itself
+     * after a builtin's code is not a collision to refuse, it is exactly
+     * what "Copy builtin" produces on purpose (profiles_catalog_http.c
+     * emits a builtin's `code` as its JSON "name", and profiles_page.html's
+     * copyBuiltin() posts that straight back as the new user slot's name).
+     * With this scan unconditional, EVERY builtin copy got refused, and any
+     * existing user slot already named like a builtin (e.g. restored from a
+     * backup taken before this feature existed) could never be edited again
+     * -- exclude_id only ever excludes a USER slot, never the builtin whose
+     * name it shares. Callers writing a USER SLOT (profiles_http_save(),
+     * profile_post_handler(), and both the single-import and batch-import
+     * paths in profiles_export_http.c/backup_import.c) now pass
+     * include_builtins=false: a user copy of a builtin is a normal, allowed
+     * save. live_edit_decide()'s LIVE_EDIT_DECISION_SAVE_AS path (the
+     * in-progress live-editing "Save As" action, a different feature from
+     * the ones above and not implicated in this bug) keeps passing true via
+     * live_edit_name_collides() below, preserving its original behavior
+     * unchanged.
+     *
+     * Read-only either way: this only ever COMPARES against
+     * g_builtin_profiles/profiles_builtin_entry(), never writes through
+     * them -- a builtin's `code` can never be altered. Ids are contiguous
+     * from PROFILE_BUILTIN_ID_BASE (profiles_builtin.c's builtin_index()),
+     * so profiles_builtin_id_valid() going false ends the scan; the `bid !=
+     * 0` guard is only there to stop a uint8_t wraparound from looping
+     * forever if that ever stopped being true. */
+    if (!include_builtins) {
+        return false;
+    }
     for (uint8_t bid = PROFILE_BUILTIN_ID_BASE; bid != 0 && profiles_builtin_id_valid(bid); bid++) {
         const builtin_profile_t *b = profiles_builtin_entry(bid);
         if (!b) continue;
@@ -202,6 +225,17 @@ bool live_edit_name_collides(const char *candidate_name, const char *(*name_at)(
         }
     }
     return false;
+}
+
+bool live_edit_name_collides(const char *candidate_name, const char *(*name_at)(void *ctx, uint8_t id), void *ctx,
+                              uint8_t exclude_id, char *err, size_t err_cap)
+{
+    /* Original signature/behavior, kept for live_edit_decide()'s SAVE_AS
+     * path -- see live_edit_name_collides_ex()'s comment above for why that
+     * one caller keeps scanning builtins while every other caller (widened
+     * to call live_edit_name_collides_ex() directly with
+     * include_builtins=false) does not. */
+    return live_edit_name_collides_ex(candidate_name, name_at, ctx, exclude_id, true, err, err_cap);
 }
 
 bool live_edit_decide(live_edit_decision_kind_t action, const live_edit_record_t *rec, const char *candidate_name,
