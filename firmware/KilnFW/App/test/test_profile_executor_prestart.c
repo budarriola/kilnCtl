@@ -494,6 +494,25 @@ bool live_profile_load_working(profile_t *out)
     return false;
 }
 
+// HIGH-2/MEDIUM-1 review fix: profile_executor.c's reload_live_profile_if_
+// changed() now calls these two instead of the bare live_profile_load_
+// working() above -- never actually reached here either, same reasoning as
+// live_profile_load_working()'s own comment (live_profile_generation() is
+// pinned at 0, so the "unchanged" early return always fires first), but the
+// symbols must still exist for the link to succeed.
+bool live_profile_load_working_for_origin(uint8_t expect_origin_id, profile_t *out)
+{
+    (void)expect_origin_id;
+    (void)out;
+    return false;
+}
+
+bool live_profile_has_pending_for_origin(uint8_t origin_id)
+{
+    (void)origin_id;
+    return false;
+}
+
 // profile_executor_live_pickup.c (linked for real -- it is a small pure
 // file) calls live_edit_check_window(), which lives in live_profile.c,
 // deliberately not linked into this executable (see comment above). Never

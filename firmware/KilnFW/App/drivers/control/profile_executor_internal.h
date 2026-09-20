@@ -50,6 +50,7 @@
 #include "freertos/task.h"
 
 #include "heater_output.h"
+#include "profile_executor_live_pickup.h" /* profile_live_pickup_result_t -- live_edit_last_refusal field below */
 #include "run_state.h"
 #include "zone_coupling_solve.h"
 #include "autotune_engine.h"
@@ -831,6 +832,23 @@ typedef struct {
      * an edit fork()ed before this run started is picked up on its very
      * first tick because live_profile_generation() already differs from 0. */
     uint32_t live_edit_generation;
+
+    /* MEDIUM-3 (review): the last DEFINITIVE live-edit refusal this run has
+     * seen -- window or HARD-validate (never "not applicable"/malloc/not-
+     * running, none of which are definitive, see profile_live_pickup_
+     * should_advance_generation()'s doc comment). Pass 1 has no HTTP route
+     * to surface this (a bare ESP_LOGW was the only trace before this
+     * fix); pass 2's planned GET /api/profile/live is expected to read it.
+     * Cleared back to !valid at the START of every run (profile_executor_
+     * run(), matching every other per-run field in this struct) so a stale
+     * refusal from a PREVIOUS firing can never be reported against this
+     * one. */
+    struct {
+        bool     valid;
+        uint32_t generation;              /* the live_profile_generation() value refused */
+        profile_live_pickup_result_t result;
+        char     err_msg[128];
+    } live_edit_last_refusal;
 
     /* Every relay bit this run has ever been in a position to command, ORed
      * together and never cleared until the next run starts (TODO.md 6A.7's

@@ -438,6 +438,9 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * below if this run actually warm-starts. */
     s_exec.warm_started = false;
     s_exec.warm_start_reason[0] = '\0';
+    /* MEDIUM-3 (review): a refusal from a PREVIOUS firing must never be
+     * reported against this one. */
+    memset(&s_exec.live_edit_last_refusal, 0, sizeof(s_exec.live_edit_last_refusal));
     s_exec.warm_start_replayed_count = 0;
     memset(s_exec.warm_start_replayed_segments, 0, sizeof(s_exec.warm_start_replayed_segments));
     /* Feedforward inputs start from their safe values: no ramp commanded yet,
@@ -477,8 +480,23 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     /* Same "sample before this run can miss an edit" reasoning as the line
      * above, for the live-edit working slot (pass 1, section 3): a fork()
      * that landed moments before profile_executor_run() must not be lost
-     * because this run's first tick already believed generation 0. */
-    s_exec.live_edit_generation = live_profile_generation();
+     * because this run's first tick already believed generation 0.
+     *
+     * MEDIUM-2 (review): seeding straight from live_profile_generation() is
+     * wrong on a warm-start resume across a reboot, because that counter is
+     * RAM-only and resets to 0 while a pending working copy on disk does
+     * not (live_profile_generation()'s own doc comment, corrected). If this
+     * exact profile_id already has a pending live edit, force this run's
+     * baseline to NOT match the current generation, so the very first tick's
+     * reload_live_profile_if_changed() poll sees a "change" and picks the
+     * persisted edit up immediately, instead of silently treating it as
+     * already-seen until some unrelated later edit bumps the counter again.
+     * The ordinary (no pending edit for this profile) case is unaffected --
+     * same cheap seed as before. */
+    {
+        uint32_t gen = live_profile_generation();
+        s_exec.live_edit_generation = live_profile_has_pending_for_origin(profile_id) ? (gen - 1u) : gen;
+    }
 
     /* TODO.md 6A.5 load-staggering: n_zones for the phase-offset formula
      * "zone i starts its window at i*window_ms/n_zones" -- i is this run's

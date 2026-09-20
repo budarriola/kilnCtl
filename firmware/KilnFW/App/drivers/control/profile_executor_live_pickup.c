@@ -21,3 +21,10 @@ profile_live_pickup_result_t profile_executor_live_pickup_check(
 
     return PROFILE_LIVE_PICKUP_OK;
 }
+
+bool profile_live_pickup_should_advance_generation(profile_live_pickup_poll_outcome_kind_t kind,
+                                                    profile_live_pickup_result_t result)
+{
+    (void)result; /* every CHECKED result (OK or a REFUSED_*) advances alike -- see header comment */
+    return kind == PROFILE_LIVE_PICKUP_POLL_CHECKED;
+}

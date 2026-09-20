@@ -312,15 +312,42 @@ static bool live_pickup_validate_hard(void *ctx, const profile_t *candidate, cha
  * faulted, it just doesn't take effect until the run is RUNNING again, at
  * which point this same poll picks it up (the generation counter does not
  * reset just because a tick was skipped). */
+/* HIGH-2 (review) fix: this is called from executor_task_entry() OUTSIDE
+ * s_exec.lock (see call site) -- heap_caps_malloc(), live_profile_load_
+ * working_for_origin() (blocking NVS read) and live_pickup_validate_hard()
+ * (takes the zones-config lock) must never run while s_exec.lock is held
+ * (CLAUDE.md: "never hold a module lock across a blocking producer call").
+ * The lock is taken twice, briefly: once up front to snapshot just enough
+ * to decide whether there is anything to do, and once at the end to
+ * re-check state/segment_index (which can move while unlocked -- a pause, a
+ * segment advance, even a warm-started new run) and perform the window
+ * check + swap. HARD-validate is done in the UNLOCKED middle section, ahead
+ * of the (locked) window check, so its order relative to the window check
+ * is reversed from a lock-once implementation -- both are still evaluated
+ * before any generation advance or adoption decision is made, so this is
+ * cosmetic, not a behavior change. */
 static void reload_live_profile_if_changed(void)
 {
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
     uint32_t gen = live_profile_generation();
-    if (gen == s_exec.live_edit_generation) {
+    bool gen_changed = (gen != s_exec.live_edit_generation);
+    uint8_t profile_id = s_exec.profile_id;
+    bool running_now = (s_exec.state == PROFILE_EXEC_RUNNING);
+    xSemaphoreGive(s_exec.lock);
+
+    if (!gen_changed) {
         return;
     }
-    s_exec.live_edit_generation = gen;
-
-    if (s_exec.state != PROFILE_EXEC_RUNNING) {
+    if (!running_now) {
+        /* HIGH-1: cheap early-out while PAUSED/FAULTED -- do NOT touch
+         * s_exec.live_edit_generation (leaving it unconsumed is the whole
+         * fix: the tick that finds RUNNING again re-observes this same
+         * generation as still-new and does the real work then). Avoids
+         * spending a malloc/NVS-read/HARD-validate on every tick of a
+         * possibly long pause for an edit that cannot be adopted yet
+         * anyway -- the locked re-check in the RUNNING path below still
+         * exists to catch the state changing WHILE this function is
+         * unlocked, which this early check cannot. */
         return;
     }
 
@@ -338,31 +365,76 @@ static void reload_live_profile_if_changed(void)
     if (candidate == NULL) {
         ESP_LOGE(PE_TAG, "reload_live_profile_if_changed: malloc(%u) failed -- live edit not adopted this tick",
                  (unsigned)sizeof(*candidate));
+        /* HIGH-1: transient, not a definitive answer -- do NOT consume gen. */
         return;
     }
-    if (!live_profile_load_working(candidate)) {
+
+    /* MEDIUM-1 (review): refuses a pending record left over from a
+     * DIFFERENT run's undecided edit (foreign origin_id) as well as "no
+     * pending edit at all" -- neither is a definitive verdict on THIS run's
+     * own edit, so neither may consume the generation (HIGH-1). */
+    if (!live_profile_load_working_for_origin(profile_id, candidate)) {
         free(candidate);
-        return; /* nothing pending, or it's not for this run -- pass 2's HTTP
-                  * layer is the only writer and only ever targets this run's
-                  * own origin id, so a mismatch here just means "no-op". */
+        return;
     }
 
     char err_msg[128];
-    profile_live_pickup_result_t result = profile_executor_live_pickup_check(
-        &s_exec.profile, candidate, s_exec.segment_index, live_pickup_validate_hard, NULL, err_msg, sizeof(err_msg));
-    if (result != PROFILE_LIVE_PICKUP_OK) {
-        ESP_LOGW(PE_TAG, "live profile edit NOT adopted (result %d): %s", (int)result, err_msg);
-        free(candidate);
-        return;
+    bool candidate_valid = live_pickup_validate_hard(NULL, candidate, err_msg, sizeof(err_msg));
+
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    profile_live_pickup_poll_outcome_kind_t kind;
+    profile_live_pickup_result_t result = PROFILE_LIVE_PICKUP_OK;
+    if (s_exec.state != PROFILE_EXEC_RUNNING || s_exec.profile_id != profile_id) {
+        /* HIGH-1: PAUSED/FAULTED (or this run ended/changed) since the
+         * unlocked section started -- leave the generation unconsumed so
+         * whichever future tick finds RUNNING again for the right run picks
+         * this same edit back up (owner decision 4: editing while paused is
+         * allowed, it just doesn't apply until resumed). */
+        kind = PROFILE_LIVE_PICKUP_POLL_NOT_RUNNING;
+    } else if (!candidate_valid) {
+        kind = PROFILE_LIVE_PICKUP_POLL_CHECKED;
+        result = PROFILE_LIVE_PICKUP_REFUSED_INVALID;
+    } else if (live_edit_check_window(&s_exec.profile, candidate, s_exec.segment_index, err_msg, sizeof(err_msg))) {
+        kind = PROFILE_LIVE_PICKUP_POLL_CHECKED;
+        result = PROFILE_LIVE_PICKUP_REFUSED_WINDOW;
+    } else {
+        kind = PROFILE_LIVE_PICKUP_POLL_CHECKED;
+        result = PROFILE_LIVE_PICKUP_OK;
+        /* Swap CONTENT only -- segment_index/segment_elapsed_s/dwelling/
+         * io_segs/every firing-stats accumulator are left exactly as they
+         * were, which is the continuity guarantee plan section 1 asks for
+         * ("the running segment keeps running"). Race-free against a
+         * concurrent segment advance: both the window check just above and
+         * this swap run under the SAME lock acquisition, against the SAME
+         * s_exec.segment_index read, so nothing can move between the two. */
+        s_exec.profile = *candidate;
     }
 
-    /* Swap CONTENT only -- segment_index/segment_elapsed_s/dwelling/io_segs/
-     * every firing-stats accumulator are left exactly as they were, which is
-     * the continuity guarantee plan section 1 asks for ("the running segment
-     * keeps running"). */
-    s_exec.profile = *candidate;
+    /* HIGH-1: only a CHECKED outcome (OK or a REFUSED_*) may consume this
+     * generation -- see profile_live_pickup_should_advance_generation()'s
+     * doc comment. */
+    if (profile_live_pickup_should_advance_generation(kind, result)) {
+        s_exec.live_edit_generation = gen;
+    }
+
+    if (kind == PROFILE_LIVE_PICKUP_POLL_CHECKED) {
+        if (result == PROFILE_LIVE_PICKUP_OK) {
+            ESP_LOGW(PE_TAG, "OPERATOR ACTION MID-FIRING: live profile edit adopted at segment %u",
+                     s_exec.segment_index);
+            s_exec.live_edit_last_refusal.valid = false;
+        } else {
+            /* MEDIUM-3 (review): recorded, not just logged, so pass 2's
+             * planned GET /api/profile/live has something to read. */
+            ESP_LOGW(PE_TAG, "live profile edit NOT adopted (result %d): %s", (int)result, err_msg);
+            s_exec.live_edit_last_refusal.valid = true;
+            s_exec.live_edit_last_refusal.generation = gen;
+            s_exec.live_edit_last_refusal.result = result;
+            snprintf(s_exec.live_edit_last_refusal.err_msg, sizeof(s_exec.live_edit_last_refusal.err_msg), "%s",
+                     err_msg);
+        }
+    }
+    xSemaphoreGive(s_exec.lock);
     free(candidate);
-    ESP_LOGW(PE_TAG, "OPERATOR ACTION MID-FIRING: live profile edit adopted at segment %u", s_exec.segment_index);
 }
 
 /* profile_resolve_on_off_rule() -- see profile_executor_internal.h for the
@@ -409,6 +481,15 @@ void executor_task_entry(void *arg)
     (void)arg;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(PROFILE_EXECUTOR_TICK_MS));
+
+        /* HIGH-2 (review): called OUTSIDE s_exec.lock -- it takes the lock
+         * itself, briefly, at need (see its own doc comment). Placed ahead
+         * of reload_config_if_changed()/the rest of the locked tick body on
+         * purpose: an adopted edit must be visible to THIS tick's control
+         * math the same as a config reload is (same comment at the old call
+         * site, preserved below), and that requires it to have already run
+         * before the lock below is taken. */
+        reload_live_profile_if_changed();
 
         xSemaphoreTake(s_exec.lock, portMAX_DELAY);
         TickType_t now = xTaskGetTickCount();
@@ -576,9 +657,14 @@ void executor_task_entry(void *arg)
          * the bumpless seed a gain change needs is only honest against THIS
          * tick's measurement, and every gain/mode/mask/threshold the passes
          * below read must already be the post-edit one, so an edit can never
-         * be half-applied across a single tick's decide/apply split. */
+         * be half-applied across a single tick's decide/apply split.
+         * reload_live_profile_if_changed() ran earlier this same tick,
+         * BEFORE s_exec.lock was taken (HIGH-2 review fix, see its call site
+         * near the top of this loop and its own doc comment) -- its result
+         * is already reflected in s_exec.profile by the time this line
+         * runs, same "visible to this tick's control math" property this
+         * comment already documents for the config reload below. */
         reload_config_if_changed();
-        reload_live_profile_if_changed();
 
         /* --- Ramp-lock (TODO.md 6A.5(d)): is every active, not-already-
          * faulted zone within band of the CURRENT shared target? Only
