@@ -1163,10 +1163,25 @@ function bulkDelete(ids) {
   Promise.all(ids.map(function (id) {
     return fetch('/api/profile/delete', {
       method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'id=' + id,
+    }).then(function (r) {
+      // Review fold-in (PROFILE_SLOTS_100_PLAN.md section 7): a non-OK
+      // response (e.g. 409 "profile is currently running") must not be
+      // reported as a success -- surface the board's own message text.
+      if (r.ok) return null;
+      return r.text().then(function (body) { return { id: id, body: body || (r.status + ' ' + r.statusText) }; });
     });
-  })).then(function () {
-    if (ids.indexOf(editingId) !== -1) resetEditor();
-    msg.textContent = 'Deleted ' + ids.length + ' profile' + (ids.length === 1 ? '' : 's') + '.';
+  })).then(function (results) {
+    var failures = results.filter(function (x) { return x; });
+    var failedIds = failures.map(function (f) { return f.id; });
+    if (ids.indexOf(editingId) !== -1 && failedIds.indexOf(editingId) === -1) resetEditor();
+    if (failures.length === 0) {
+      msg.textContent = 'Deleted ' + ids.length + ' profile' + (ids.length === 1 ? '' : 's') + '.';
+    } else {
+      var okCount = ids.length - failures.length;
+      msg.innerHTML = '<span class="err">' +
+        (okCount > 0 ? 'Deleted ' + okCount + ', failed ' + failures.length + ': ' : 'Delete failed: ') +
+        failures.map(function (f) { return 'id ' + f.id + ': ' + f.body; }).join('; ') + '</span>';
+    }
     exitSelectMode();
     refreshAll();
   }).catch(function () {
@@ -1549,7 +1564,15 @@ function editProfile(id) {
 function deleteProfile(id) {
   fetch('/api/profile/delete', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'id=' + id,
-  }).then(function () { refreshAll(); if (editingId === id) resetEditor(); }).catch(function () {
+  }).then(function (r) {
+    // Review fold-in (PROFILE_SLOTS_100_PLAN.md section 7): a non-OK
+    // response (e.g. 409 "profile is currently running") must not be
+    // treated as a successful delete.
+    if (r.ok) { refreshAll(); if (editingId === id) resetEditor(); return; }
+    return r.text().then(function (body) {
+      document.getElementById('msg').innerHTML = '<span class="err">' + (body || (r.status + ' ' + r.statusText)) + '</span>';
+    });
+  }).catch(function () {
     document.getElementById('msg').innerHTML = '<span class="err">Could not reach the board -- delete not confirmed.</span>';
   });
 }

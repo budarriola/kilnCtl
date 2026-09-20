@@ -567,6 +567,15 @@ esp_err_t favorites_list_get_handler(httpd_req_t *req)
         if (!profiles_slot_bitmap_test(&user_mask, i)) {
             continue;
         }
+        /* Review fold-in (PROFILE_SLOTS_100_PLAN.md section 7): filter by the
+         * used bitmap too. An orphaned favorite bit surviving over an
+         * unused/deleted slot (e.g. a power cut between clearing the
+         * favorite and erasing the slot, or vice versa, pre-fix) must never
+         * be emitted here as a favorited id for a profile that no longer
+         * exists. */
+        if (!profiles_slot_used(i)) {
+            continue;
+        }
         char idbuf[FAV_ID_CHUNK_MAX];
         int in = snprintf(idbuf, sizeof(idbuf), "%s%u", first ? "" : ",", (unsigned)i);
         err = send_chunk_checked(req, idbuf, in, sizeof(idbuf), "favorites user id");

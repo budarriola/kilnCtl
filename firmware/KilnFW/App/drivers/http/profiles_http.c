@@ -1423,6 +1423,17 @@ bool profiles_http_delete(uint8_t id)
     if ((pstat.state == PROFILE_EXEC_RUNNING || pstat.state == PROFILE_EXEC_PAUSED) && pstat.profile_id == id) {
         return false;
     }
+    /* Clear the favorite mark BEFORE erasing the slot (review fold-in,
+     * PROFILE_SLOTS_100_PLAN.md section 7): erase-then-clear left a window
+     * where a power cut between the two steps could survive with the slot
+     * erased but its favorite bit still set -- an import that later lands on
+     * this same id inherits that orphaned favorite (profiles_favorites.h's
+     * lifecycle keeps favorites across import). Clearing first means the
+     * worst a power cut can leave behind is an erased-but-still-favorited
+     * slot that gets cleaned up the next time this id is reused, never an
+     * orphan bit surviving into a fresh profile. Best-effort: a failed save
+     * is logged inside the module and must not block the delete. */
+    (void)profiles_favorites_set((uint8_t)id, false);
     profiles_slot_clear(id);
     memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
     esp_err_t err = nvs_erase_slot((uint8_t)id);
@@ -1430,11 +1441,6 @@ bool profiles_http_delete(uint8_t id)
         ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u) failed: %s -- deleted live but may reappear after reboot", id,
                  esp_err_to_name(err));
     }
-    /* Slot now empty -- clear a dangling favorite the same way
-     * profiles_edit_http.c's web delete handler does (Opus review item 1).
-     * Best-effort: a failed save is logged inside the module and must not
-     * fail a delete that has already happened. */
-    (void)profiles_favorites_set((uint8_t)id, false);
     return true;
 }
 

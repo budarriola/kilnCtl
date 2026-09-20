@@ -608,6 +608,15 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
         return httpd_resp_sendstr(req, "profile is currently running -- stop it before deleting");
     }
 
+    /* Clear the favorite mark BEFORE erasing the slot (review fold-in,
+     * PROFILE_SLOTS_100_PLAN.md section 7): erase-then-clear left a window
+     * where a power cut between the two steps could survive with the slot
+     * erased but its favorite bit still set -- an import that later lands on
+     * this same id inherits that orphaned favorite (profiles_favorites.h's
+     * lifecycle keeps favorites across import, deliberately, unlike delete).
+     * A failed save is logged inside the module and does not fail the
+     * delete. */
+    (void)profiles_favorites_set((uint8_t)id, false);
     profiles_slot_clear(id);
     memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
     esp_err_t err = nvs_erase_slot((uint8_t)id);
@@ -615,13 +624,6 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
         ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%ld) failed: %s -- deleted live but may reappear after reboot", id,
                  esp_err_to_name(err));
     }
-    /* The slot is now empty, so a favorite pointing at it would reference
-     * nothing. Clearing it here is what keeps deletion from leaving a
-     * dangling favorite; see profiles_favorites.h for why an IMPORT over an
-     * occupied slot deliberately does the opposite and keeps the mark. A
-     * failed save is logged inside the module and does not fail the delete,
-     * which has already happened. */
-    (void)profiles_favorites_set((uint8_t)id, false);
     return httpd_resp_sendstr(req, "ok");
 }
 

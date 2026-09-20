@@ -533,6 +533,39 @@ void profile_executor_get_status(profile_exec_status_t *out)
 // Test helpers
 // ---------------------------------------------------------------------------
 
+// Source-text-scan helpers, same convention as test_zone_sweep_relay_off_
+// wiring.c / test_display_power_wiring.c: this codebase's own functions
+// close at column 0, so the first "\n}" after the opening brace is the real
+// end of the function.
+static const char *find_function_body(const char *text, const char *sig, size_t *out_len)
+{
+    const char *s = strstr(text, sig);
+    if (!s) {
+        return NULL;
+    }
+    const char *open = strchr(s, '{');
+    if (!open) {
+        return NULL;
+    }
+    const char *close = strstr(open, "\n}");
+    if (!close) {
+        return NULL;
+    }
+    *out_len = (size_t)(close - open);
+    return open;
+}
+
+static char *dup_range(const char *start, size_t len)
+{
+    char *buf = (char *)malloc(len + 1);
+    if (!buf) {
+        return NULL;
+    }
+    memcpy(buf, start, len);
+    buf[len] = '\0';
+    return buf;
+}
+
 static void stage_bitmap(uint8_t bitmap)
 {
     nvs_handle_t h;
@@ -924,6 +957,85 @@ static void test_profiles_http_delete_refuses_running_slot(void)
 
     g_fake_exec_state = PROFILE_EXEC_IDLE;
     g_fake_exec_profile_id = 0xFF;
+}
+
+// ---------------------------------------------------------------------------
+// Review fold-in (PROFILE_SLOTS_100_PLAN.md section 7): favorite-clear must
+// run BEFORE slot erase, not after. Runtime behavior is identical either way
+// on the happy path -- the bug this guards against is a power cut landing
+// BETWEEN the two steps, which no host test can simulate by actually
+// interrupting execution. Source-text scan is the established precedent for
+// this class of ordering property in this suite (test_zone_sweep_relay_off_
+// wiring.c, test_display_power_wiring.c, test_safety_core_s8_wiring.c):
+// extract each function's body and assert the favorite-clear call's source
+// offset precedes the erase call's.
+static void assert_favorite_clear_precedes_erase(const char *fn, const char *fn_name)
+{
+    const char *fav = strstr(fn, "profiles_favorites_set((uint8_t)id, false)");
+    TEST_CHECK(fav != NULL, "expected a profiles_favorites_set((uint8_t)id, false) call inside this function");
+    const char *erase_slot_call = strstr(fn, "profiles_slot_clear(id)");
+    TEST_CHECK(erase_slot_call != NULL, "expected a profiles_slot_clear(id) call inside this function");
+    if (fav && erase_slot_call) {
+        char msg[192];
+        snprintf(msg, sizeof(msg),
+                 "%s: favorite must be cleared BEFORE the slot is erased -- a power cut between the "
+                 "two must never leave the slot erased with its favorite bit still set (an import over "
+                 "that id would inherit the orphaned favorite)",
+                 fn_name);
+        TEST_CHECK(fav < erase_slot_call, msg);
+    }
+}
+
+static void test_delete_clears_favorite_before_erase_wiring(void)
+{
+    TEST_SECTION("profiles_http_delete()/profile_delete_post_handler() -- favorite-clear precedes "
+                 "slot-erase in source order (review fold-in, PROFILE_SLOTS_100_PLAN.md section 7)");
+
+    static const char *HTTP_C_CANDIDATES[] = {
+        "../drivers/http/profiles_http.c",
+        "App/drivers/http/profiles_http.c",
+        "firmware/KilnFW/App/drivers/http/profiles_http.c",
+    };
+    char *http_text = test_read_source_anchored(__FILE__, "../drivers/http/profiles_http.c",
+                                                 HTTP_C_CANDIDATES, 3);
+    TEST_CHECK(http_text != NULL, "could not locate profiles_http.c from the host test's working directory");
+    if (http_text) {
+        size_t len = 0;
+        const char *body = find_function_body(http_text, "bool profiles_http_delete(uint8_t id)", &len);
+        TEST_CHECK(body != NULL, "could not find profiles_http_delete()'s function body -- update this test "
+                                  "if it was renamed/restructured");
+        if (body) {
+            char *fn = dup_range(body, len);
+            if (fn) {
+                assert_favorite_clear_precedes_erase(fn, "profiles_http_delete()");
+                free(fn);
+            }
+        }
+        free(http_text);
+    }
+
+    static const char *EDIT_HTTP_C_CANDIDATES[] = {
+        "../drivers/http/profiles_edit_http.c",
+        "App/drivers/http/profiles_edit_http.c",
+        "firmware/KilnFW/App/drivers/http/profiles_edit_http.c",
+    };
+    char *edit_text = test_read_source_anchored(__FILE__, "../drivers/http/profiles_edit_http.c",
+                                                 EDIT_HTTP_C_CANDIDATES, 3);
+    TEST_CHECK(edit_text != NULL, "could not locate profiles_edit_http.c from the host test's working directory");
+    if (edit_text) {
+        size_t len = 0;
+        const char *body = find_function_body(edit_text, "profile_delete_post_handler(httpd_req_t *req)", &len);
+        TEST_CHECK(body != NULL, "could not find the web delete handler's function body -- update this test "
+                                  "if it was renamed/restructured");
+        if (body) {
+            char *fn = dup_range(body, len);
+            if (fn) {
+                assert_favorite_clear_precedes_erase(fn, "profile_delete_post_handler()");
+                free(fn);
+            }
+        }
+        free(edit_text);
+    }
 }
 
 static void test_pcfg_stale_file_after_delete_is_not_resurrected(void)
@@ -2221,6 +2333,7 @@ void run_test_profiles_http(void)
     test_nvs_erase_slot_prunes_firing_stats_for_never_fired_slot();
     test_profiles_http_delete_clears_favorite();
     test_profiles_http_delete_refuses_running_slot();
+    test_delete_clears_favorite_before_erase_wiring();
 
     test_pcfg_mounted_migrates_nvs_only_slot_to_file();
     test_pcfg_file_wins_when_it_has_the_higher_rev();

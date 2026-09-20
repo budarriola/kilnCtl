@@ -485,8 +485,26 @@ static void profiles_handle_message(void *vargs)
                     break;
                 }
                 bool ok = profiles_http_delete(del_id);
-                uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_PROFILES, subcmd, ok,
-                                             ok ? NULL : "no such profile");
+                if (!ok) {
+                    /* Review fold-in (PROFILE_SLOTS_100_PLAN.md section 7):
+                     * profiles_http_delete() returns false both for "no such
+                     * profile" and "that profile is currently running/paused
+                     * and refused" -- reporting the latter as "no such
+                     * profile" is a lie to a caller that just listed this id
+                     * as running. Query the executor first (the same check
+                     * profiles_http_delete() makes internally) so the reply
+                     * names the real reason. */
+                    profile_exec_status_t pstat;
+                    profile_executor_get_status(&pstat);
+                    bool is_running_this_id = (pstat.state == PROFILE_EXEC_RUNNING || pstat.state == PROFILE_EXEC_PAUSED)
+                                               && pstat.profile_id == del_id;
+                    uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_PROFILES, subcmd, false,
+                                                 is_running_this_id
+                                                     ? "profile is currently running -- stop it before deleting"
+                                                     : "no such profile");
+                } else {
+                    uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_PROFILES, subcmd, true, NULL);
+                }
                 break;
             }
             /* GET_EXEC_STATUS is handled inline in profiles_task(), before this
