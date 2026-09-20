@@ -477,6 +477,19 @@ esp_err_t profiles_builtin_restore_all(void)
     return ESP_OK;
 }
 
+// PROFILE_SLOTS_100_PLAN.md section 7 task 8: fake for the narrow accessor
+// profiles_catalog_http.c forward-declares (rather than #including
+// profile_executor.h -- see that declaration's comment). Defaults to 0
+// ("never fired") so every existing list/exceeds_ceiling assertion in this
+// file keeps passing unchanged; g_fake_last_run_unix_s lets a test opt into
+// a nonzero value to verify the new "last_run_started_unix_s" JSON field.
+static uint32_t g_fake_last_run_unix_s = 0;
+uint32_t profile_executor_last_run_started_unix_s(uint8_t profile_id)
+{
+    (void)profile_id;
+    return g_fake_last_run_unix_s;
+}
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------

@@ -501,6 +501,20 @@ bool profile_executor_resume(void);
 size_t profile_executor_get_firing_history(uint8_t profile_id, profile_firing_run_record_t *out,
                                             size_t max_entries);
 
+/* PROFILE_SLOTS_100_PLAN.md section 7 task 8: thin wrapper over
+ * profile_executor_get_firing_history() that returns just the newest run's
+ * run_started_unix_s (0 if never fired, or fired before the board had an
+ * RTC/SNTP fix -- both look like "not recent" to a caller and that is the
+ * correct behavior for the web "recently fired" ordering this feeds).
+ * Declared narrowly on purpose, separate from the record-returning function
+ * above: profiles_catalog_http.c calls this to add one field to the existing
+ * /api/profiles list JSON (no new HTTP route -- the URI handler cap has one
+ * spare slot) and forward-declares it locally rather than including this
+ * whole header, so it does not pull MAX31856.h/kiln_io.h/pid.h/safety_link.h/
+ * thermal_guard.h into that file or into test_profiles_http.c's host-test
+ * build (which does not link profile_executor.c). */
+uint32_t profile_executor_last_run_started_unix_s(uint8_t profile_id);
+
 /* True if zone_index is one of the zones the currently RUNNING/PAUSED
  * profile (if any) targets -- autotune_engine.c uses this to refuse
  * starting a step test against a zone a profile is actively driving,

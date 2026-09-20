@@ -13,6 +13,25 @@
 #include "web_encoding.h"
 #include "zones_config_query.h"  /* zones_config_get_thermo_count() -- builtin_effective_zone_mask() */
 
+/* PROFILE_SLOTS_100_PLAN.md section 4 item 3 / section 7 task 8: the web
+ * "recently fired" group needs a per-profile last-run timestamp, and the
+ * plan is explicit that this must cost one extra field in the EXISTING
+ * /api/profiles listing rather than a new route (the URI handler cap has one
+ * spare slot, check_uri_handler_cap.ps1). Declared here rather than by
+ * #including profile_executor.h: that header drags in MAX31856.h/kiln_io.h/
+ * pid.h/safety_link.h/thermal_guard.h, none of which this file otherwise
+ * needs, and test_profiles_http.c #includes this file directly (it does not
+ * link profile_executor.c -- see that test file's own header comment on why
+ * it fakes profile_executor-adjacent symbols instead) -- pulling that whole
+ * header chain in here would drag it into that host-test build too. A bare
+ * prototype for one small, stable-signature accessor keeps the dependency to
+ * exactly what's used; profile_executor_status.c (which already has every
+ * header this needs) implements it next to profile_executor_get_firing_history(),
+ * and test_profiles_http.c supplies its own fake, same convention as every
+ * other faked symbol in that file. */
+uint32_t profile_executor_last_run_started_unix_s(uint8_t profile_id);
+#define profile_last_run_started_unix_s(id) profile_executor_last_run_started_unix_s(id)
+
 /* TODO.md 10.6a: embedded pre-gzipped (CMakeLists.txt gzips it at configure
  * time before idf_component_register runs), hence the "_gz" in both the
  * filename and the symbol it generates. */
@@ -152,12 +171,14 @@ static esp_err_t send_builtin_summary(httpd_req_t *req, uint8_t id, const builti
     int n = snprintf(chunk, sizeof(chunk),
                      "%s{\"id\":%u,\"builtin\":true,\"name\":\"%s\",\"code\":\"%s\",\"title\":\"%s\","
                      "\"slug\":\"%s\",\"url\":\"https://digitalfire.com/schedule/%s\",\"hidden\":%s,"
-                     "\"zone_mask\":%u,\"segment_count\":%u,\"feasibility\":\"%s\"}",
+                     "\"zone_mask\":%u,\"segment_count\":%u,\"feasibility\":\"%s\","
+                     "\"last_run_started_unix_s\":%lu}",
                      first ? "" : ",", id, esc(b->code, code_e, sizeof(code_e)),
                      esc(b->code, code_e, sizeof(code_e)), esc(b->title, title_e, sizeof(title_e)),
                      esc(b->slug, slug_e, sizeof(slug_e)), b->slug,
                      profiles_builtin_is_hidden(id) ? "true" : "false", (unsigned)zone_mask,
-                     b->segment_count, profile_feasibility_verdict_str(rollup));
+                     b->segment_count, profile_feasibility_verdict_str(rollup),
+                     (unsigned long)profile_last_run_started_unix_s(id));
     return send_chunk_checked(req, chunk, n, sizeof(chunk), "builtin summary");
 }
 
@@ -262,7 +283,9 @@ esp_err_t builtin_list_get_handler(httpd_req_t *req)
  * PROFILE_NAME_MAX_LEN*2 (30) escaped name bytes + `","zone_mask":255,`
  * `"segment_count":12}` (37) = 103; rounded up with slack for the format
  * rather than re-deriving the exact count if a field ever widens. */
-#define PROFILE_LIST_ENTRY_MAX 190 /* +30 (2026-09-02) for the ",\"exceeds_ceiling\":false" marker */
+#define PROFILE_LIST_ENTRY_MAX 224 /* +30 (2026-09-02) for the ",\"exceeds_ceiling\":false" marker;
+                                     * +34 (PROFILE_SLOTS_100_PLAN.md task 8) for
+                                     * ",\"last_run_started_unix_s\":4294967295" (10-digit uint32 max) */
 
 /* Bytes reserved at the tail of `json` that no per-slot APPEND is ever
  * allowed to write into -- so the fallback "listing truncated" notice below
@@ -312,10 +335,11 @@ esp_err_t profiles_list_get_handler(httpd_req_t *req)
          * only; see profile_exceeds_zone_ceiling()'s own comment for why
          * this never blocks the save/list, only the actual run start. */
         bool exceeds = profile_exceeds_zone_ceiling(p, NULL, 0);
+        uint32_t last_run = profile_last_run_started_unix_s(id);
         APPEND("%s{\"id\":%u,\"builtin\":false,\"name\":\"%s\",\"zone_mask\":%u,\"segment_count\":%u,"
-               "\"exceeds_ceiling\":%s}",
+               "\"exceeds_ceiling\":%s,\"last_run_started_unix_s\":%lu}",
                first ? "" : ",", id, name_escaped, p->zone_mask, p->segment_count,
-               exceeds ? "true" : "false");
+               exceeds ? "true" : "false", (unsigned long)last_run);
         first = false;
     }
 

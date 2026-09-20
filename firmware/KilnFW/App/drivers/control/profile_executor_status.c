@@ -447,6 +447,15 @@ size_t profile_executor_get_firing_history(uint8_t profile_id, profile_firing_ru
     return n;
 }
 
+uint32_t profile_executor_last_run_started_unix_s(uint8_t profile_id)
+{
+    profile_firing_run_record_t rec;
+    if (profile_executor_get_firing_history(profile_id, &rec, 1) == 0) {
+        return 0;
+    }
+    return rec.run_started_unix_s;
+}
+
 size_t profile_executor_get_history_count(void)
 {
     /* See profile_executor_run()'s guard comment above. */
