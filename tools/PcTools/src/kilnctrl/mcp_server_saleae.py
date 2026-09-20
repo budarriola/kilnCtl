@@ -73,12 +73,15 @@ from . import mcp_server as _srv
 # alongside driving the board through the tools above, since the timing
 # between "arm" and "start talking to the DUT" then lives in one process.
 #
-# tools/PcTools/TODO.md capability 2 also wants captures decoded as
-# kilnlink frames, not raw transitions -- that decode step is NOT done here.
-# Building it blind (no capture ever taken this session -- no Saleae
-# hardware attached) risks a decoder nobody has run against a real capture,
-# so this wraps arm/capture/list only; decode is left as an explicit
-# follow-on for whoever has a board and a Logic analyzer both on the bench.
+# tools/PcTools/TODO.md capability 2's decode step landed separately, in
+# kilnctrl.kilnlink_capture: it decodes a Saleae Async Serial "Export Table
+# Data" CSV (or a raw binary capture) of the isolated ESP<->Pico kilnlink
+# UART into a frame timeline -- framing, CRC, device/task, cmd, and payload
+# fields, with malformed/partial frames reported at their byte offset
+# rather than dropped. Built and tested purely against synthetic fixtures
+# (kilnctrl.protocol.Frame + kilnlink_codec's own encoders) since no board +
+# Logic analyzer have been on the bench together this session either -- see
+# that module's docstring.
 # ---------------------------------------------------------------------------
 #: Anchored on __file__, not this MCP server process's CWD, which is
 #: whatever launched it (not necessarily the repo root) and is not something
@@ -145,5 +148,30 @@ def saleae_capture(
     except Exception as exc:  # noqa: BLE001 - surface the automation API's own error text
         return f"error: capture failed: {exc}"
     return f"ok - saved {path}"
+
+
+@_srv._tool()
+def saleae_decode_kilnlink(path: str, csv: bool = True) -> str:
+    """Decode a captured kilnlink UART link (ESP32-S3 <-> RP2040) into a
+    readable frame timeline: framing, msg type, device/task, sequence
+    number, CRC verdict, and payload fields decoded per frame type where
+    the protocol defines one.
+
+    ``path`` is a Saleae Logic 2 Async Serial analyzer "Export Table Data"
+    CSV by default (``csv=True``); pass ``csv=False`` for a raw binary
+    capture (the concatenated wire bytes). Malformed or partial frames are
+    reported inline with their byte offset in the capture, never silently
+    dropped -- that is what this tool is for: explaining exactly where and
+    how the link's framing broke, including recovering (resyncing) after
+    garbage bytes rather than giving up on the rest of the capture.
+    """
+    from . import kilnlink_capture
+
+    try:
+        data = kilnlink_capture.load_saleae_csv(path) if csv else kilnlink_capture.load_bytes(path)
+    except (OSError, ValueError) as exc:
+        return f"error: could not load capture: {exc}"
+    records = kilnlink_capture.decode_capture(data)
+    return kilnlink_capture.format_timeline(records)
 
 

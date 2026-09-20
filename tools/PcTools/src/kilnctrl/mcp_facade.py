@@ -173,6 +173,8 @@ KEYWORDS = {
     "sw_reset_esp": ("reboot", "reset both", "restart", "grace window",
                      "config_store", "commission while armed"),
     "saleae_capture": ("logic", "analyzer", "trace", "waveform", "timing"),
+    "saleae_decode_kilnlink": ("kilnlink", "frame", "decode", "uart", "link",
+                               "safety link", "resync", "crc", "timeline"),
     "touch_inject": ("tap", "press", "click", "simulate", "screen"),
     "press_button": ("lvgl", "ui", "tap", "screen", "page"),
     "profiles_start": ("firing", "ramp", "soak", "cone", "schedule"),

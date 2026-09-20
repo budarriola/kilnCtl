@@ -85,11 +85,19 @@ run instead by observing the firmware's own fault assertion (Pico GP10 low,
 ESP `GPIO_OUT_REG` bit 6 set) against the ESP held in reset (GP10 high) — which
 also documents that **this line fails de-asserted**.
 
-### 2. Saleae capture
+### 2. Saleae capture — decode landed 2026-09-20, unvalidated against real hardware
 
-`kilnlink` frame decoding for a capture is **not done** — deliberately: a
-decoder built against zero real captures risks one nobody has validated.
-Needs a board and analyzer on the bench at once.
+`kilnctrl.kilnlink_capture` decodes a Saleae Async Serial "Export Table Data"
+CSV (or a raw binary capture) of the isolated ESP<->Pico kilnlink UART into a
+frame timeline — framing, msg type, device/task, sequence number, CRC
+verdict, and per-cmd payload fields; malformed/partial frames are reported
+at their byte offset and decoding resyncs afterward rather than stopping.
+Exposed as `saleae_decode_kilnlink(path, csv=True)`. Built and pytest-covered
+(`tests/test_kilnlink_capture.py`) purely against synthetic fixtures encoded
+with the protocol's own rules (`tests/fixtures/kilnlink/`) — still **not
+run against a single real capture**, since no board + Logic analyzer have
+been on the bench together this session either. First real capture should
+be treated as this decoder's actual validation, not a formality.
 
 ### 3. Everything reachable headlessly — DONE 2026-09-05
 
@@ -277,8 +285,9 @@ to confirm PENDING_VERIFY → confirmed actually happens as documented.
 - [x] 1c. Coordinated two-board test: both halves confirmed electrically
       2026-08-23. A reusable *script* for it is still unwritten — the run was
       driven tool-call by tool-call.
-- [ ] 2. `kilnlink` frame decoding for a Saleae capture — not built,
-      deliberately, until a board + analyzer are on the bench together.
+- [x] 2. `kilnlink` frame decoding for a Saleae capture — landed 2026-09-20
+      as `kilnctrl.kilnlink_capture` / `saleae_decode_kilnlink()`; still
+      unvalidated against a real capture, see section 2 above.
 - [x] 3. GUI-vs-MCP capability audit — DONE 2026-09-05, full page-by-page
       pass (see "3. Everything reachable headlessly" above): one real gap
       (bare factory reset), closed via a new `press_button` action.

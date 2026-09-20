@@ -22,9 +22,11 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (166 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-09-19, when `bench_test_run`/
-`bench_test_list`/`bench_test_last` were added -- docs/BENCH_TEST_SYSTEM_PLAN.md
+the rest behind a search facade (167 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-09-20, when `saleae_decode_kilnlink`
+was added -- decodes a captured kilnlink UART link into a frame timeline,
+tools/PcTools/TODO.md capability 2. The three before it were `bench_test_run`/
+`bench_test_list`/`bench_test_last`, 2026-09-19 -- docs/BENCH_TEST_SYSTEM_PLAN.md
 Wave 0).
 
 ```
