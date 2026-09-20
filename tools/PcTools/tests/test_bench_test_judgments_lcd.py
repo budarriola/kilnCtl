@@ -126,5 +126,178 @@ class LcdNoScrollBudgetTest(unittest.TestCase):
         self.assertEqual(r.verdict, Verdict.PASS)
 
 
+class LcdHomeFiringTest(unittest.TestCase):
+    def test_passes_with_full_data(self):
+        r = J.judge_lcd_home_firing("home", _HOME_TARGETS, True, True, [1.0, 60.0], True, True)
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_wrong_page_fails(self):
+        r = J.judge_lcd_home_firing("profiles", _HOME_TARGETS, True, True, [1.0, 60.0], True, True)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_start_not_reading_stop_fails(self):
+        r = J.judge_lcd_home_firing("home", _HOME_TARGETS, False, True, [1.0, 60.0], True, True)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_progress_not_advancing_fails(self):
+        r = J.judge_lcd_home_firing("home", _HOME_TARGETS, True, True, [10.0, 10.0], True, True)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_missing_optional_data_is_inconclusive_not_pass(self):
+        r = J.judge_lcd_home_firing("home", _HOME_TARGETS, True, None, [], None, None)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
+
+class LcdHomePausedTest(unittest.TestCase):
+    def test_resume_label_and_zero_duties_pass(self):
+        r = J.judge_lcd_home_paused("Resume", [0.0, 0.0, 0.0])
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_wrong_label_fails(self):
+        r = J.judge_lcd_home_paused("Stop", [0.0, 0.0])
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_nonzero_duty_while_paused_fails(self):
+        r = J.judge_lcd_home_paused("Resume", [0.0, 0.4])
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_no_label_captured_is_inconclusive(self):
+        r = J.judge_lcd_home_paused(None, [])
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
+
+class LcdHomeTrippedTest(unittest.TestCase):
+    def test_visible_matching_and_cleared_passes(self):
+        r = J.judge_lcd_home_tripped(True, True, True)
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_strip_not_visible_fails(self):
+        r = J.judge_lcd_home_tripped(False, True, True)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_strip_still_lit_after_clear_fails(self):
+        r = J.judge_lcd_home_tripped(True, True, False)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_no_camera_data_is_inconclusive(self):
+        r = J.judge_lcd_home_tripped(True, None, None)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
+
+_PROFILE_ROWS = [
+    {"name": "profile_row_0", "starred": True},
+    {"name": "profile_row_1", "starred": False},
+]
+
+
+class LcdProfilesPickerTest(unittest.TestCase):
+    def test_passes_with_valid_picker(self):
+        r = J.judge_lcd_profiles_picker("profiles", _PROFILE_ROWS, True, True, "profile_detail")
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_wrong_page_fails(self):
+        r = J.judge_lcd_profiles_picker("home", _PROFILE_ROWS, True, True, "profile_detail")
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_too_many_rows_fails(self):
+        rows = [{"name": f"profile_row_{i}", "starred": False} for i in range(5)]
+        r = J.judge_lcd_profiles_picker("profiles", rows, True, True, "profile_detail", max_rows=4)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_favorite_not_sorted_first_fails(self):
+        rows = [{"name": "profile_row_0", "starred": False}, {"name": "profile_row_1", "starred": True}]
+        r = J.judge_lcd_profiles_picker("profiles", rows, True, True, "profile_detail")
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_missing_paging_fails(self):
+        r = J.judge_lcd_profiles_picker("profiles", _PROFILE_ROWS, False, True, "profile_detail")
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_no_rows_is_inconclusive(self):
+        r = J.judge_lcd_profiles_picker("profiles", [], True, True, None)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
+
+class LcdTemperaturePageTest(unittest.TestCase):
+    def test_matching_values_pass(self):
+        r = J.judge_lcd_temperature_page("temperature", {0: 100.0}, {0: 100.4}, True, True)
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_wrong_page_fails(self):
+        r = J.judge_lcd_temperature_page("home", {0: 100.0}, {0: 100.0}, True, True)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_value_mismatch_fails(self):
+        r = J.judge_lcd_temperature_page("temperature", {0: 100.0}, {0: 110.0}, True, True)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_safety_line_mismatch_fails(self):
+        r = J.judge_lcd_temperature_page("temperature", {0: 100.0}, {0: 100.0}, False, True)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_no_safety_line_is_inconclusive_not_fail(self):
+        r = J.judge_lcd_temperature_page("temperature", {0: 100.0}, {0: 100.0}, None, True)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
+    def test_no_zone_rows_is_inconclusive(self):
+        r = J.judge_lcd_temperature_page("temperature", {}, {0: 100.0}, True, True)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
+
+class LcdDiagnosticsPagesTest(unittest.TestCase):
+    def test_all_titles_in_order_passes(self):
+        r = J.judge_lcd_diagnostics_pages(list(J._DIAG_TITLES), False, 0, 2.0)
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_wrong_order_fails(self):
+        titles = list(J._DIAG_TITLES)
+        titles[0], titles[1] = titles[1], titles[0]
+        r = J.judge_lcd_diagnostics_pages(titles, False, 0, 2.0)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_relay_life_reset_button_present_fails(self):
+        r = J.judge_lcd_diagnostics_pages(list(J._DIAG_TITLES), True, 0, 2.0)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_crash_report_visible_entries_fails(self):
+        r = J.judge_lcd_diagnostics_pages(list(J._DIAG_TITLES), False, 1, 2.0)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_heap_diff_too_large_fails(self):
+        r = J.judge_lcd_diagnostics_pages(list(J._DIAG_TITLES), False, 0, 25.0)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_unparseable_heap_is_inconclusive_not_pass(self):
+        r = J.judge_lcd_diagnostics_pages(list(J._DIAG_TITLES), False, 0, None)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
+
+class LcdPinLockTest(unittest.TestCase):
+    def test_full_flow_passes(self):
+        r = J.judge_lcd_pin_lock(True, True, True, True)
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_keypad_not_raised_fails(self):
+        r = J.judge_lcd_pin_lock(False, True, True, True)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_wrong_pin_accepted_fails(self):
+        r = J.judge_lcd_pin_lock(True, False, True, True)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_right_pin_refused_fails(self):
+        r = J.judge_lcd_pin_lock(True, True, False, True)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_stop_gated_behind_pin_fails(self):
+        # This is the safety-critical check: Stop must NEVER be gated.
+        r = J.judge_lcd_pin_lock(True, True, True, False)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_missing_data_is_inconclusive_not_pass(self):
+        r = J.judge_lcd_pin_lock(None, None, None, None)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
+
 if __name__ == "__main__":
     unittest.main()

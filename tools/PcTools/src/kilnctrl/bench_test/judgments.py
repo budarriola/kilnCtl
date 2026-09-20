@@ -526,6 +526,269 @@ def judge_lcd_no_scroll_budget(pages_targets: "dict[str, dict]") -> CaseResult:
 
 
 # ---------------------------------------------------------------------------
+# LCD-02/03/04/09/14/16/19 (Wave 2, plan doc §3.8/§8). Same split as the
+# Wave 1c block above: these take already-fetched plain data and return a
+# CaseResult, with no I/O of their own -- cases_lcd.py does the fetching
+# (UI_TEST navigation, thermo/profile/safety reads, best-effort webcam
+# sampling via lcd_sampler.py).
+# ---------------------------------------------------------------------------
+
+_DIAG_TITLES = (
+    "Safety & Board Health", "Thermocouple Faults", "Trip Detail",
+    "Relay Life", "Crash Report",
+)
+
+
+def judge_lcd_home_firing(page: str, targets: "list[dict]",
+                           start_reads_stop: bool,
+                           pause_matches_accent1: Optional[bool],
+                           progress_samples: "list[float]",
+                           profile_name_greyed: Optional[bool],
+                           profile_name_tap_noop: Optional[bool]) -> CaseResult:
+    """LCD-02: home page while HP-01 is running. `progress_samples` is a
+    list of `ProfileExecStatus.segment_elapsed_s` readings taken ~60s apart
+    -- a real, already-wire-carried monotonic proxy for "the profile is
+    progressing", used instead of trying to derive a percentage from a
+    single webcam pixel sample. Camera-only sub-checks (`pause_matches_accent1`)
+    degrade to INCONCLUSIVE, never FAIL, on a missing capture -- same
+    discipline as judge_lcd_home_idle."""
+    observed = {
+        "page": page, "start_reads_stop": start_reads_stop,
+        "pause_matches_accent1": pause_matches_accent1,
+        "progress_samples": progress_samples,
+        "profile_name_greyed": profile_name_greyed,
+        "profile_name_tap_noop": profile_name_tap_noop,
+    }
+    if page != "home":
+        return CaseResult(Verdict.FAIL, reason=f"page={page!r}, expected 'home'", observed=observed)
+    if not start_reads_stop:
+        return CaseResult(Verdict.FAIL, reason="Start widget does not read 'Stop' while firing", observed=observed)
+    if pause_matches_accent1 is False:
+        return CaseResult(Verdict.FAIL, reason="Pause region does not read as ACCENT_1 while firing", observed=observed)
+    if len(progress_samples) >= 2 and progress_samples[-1] <= progress_samples[0]:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"progress did not advance between samples ({progress_samples[0]} -> {progress_samples[-1]})",
+            observed=observed,
+        )
+    if profile_name_greyed is False:
+        return CaseResult(Verdict.FAIL, reason="profile-name button is not greyed while firing", observed=observed)
+    if profile_name_tap_noop is False:
+        return CaseResult(Verdict.FAIL, reason="tapping the greyed profile-name button changed the page", observed=observed)
+    inconclusive_bits = [
+        pause_matches_accent1 is None,
+        len(progress_samples) < 2,
+        profile_name_greyed is None,
+        profile_name_tap_noop is None,
+    ]
+    if any(inconclusive_bits):
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason="one or more firing-window checks could not be exercised (no camera capture or no profile-name widget)",
+            observed=observed,
+        )
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_lcd_home_paused(pause_label: Optional[str], duties: "list[float]") -> CaseResult:
+    """LCD-03: HP-04's paused window. Pause widget must read 'Resume' and
+    every zone's duty must read 0 while paused."""
+    observed = {"pause_label": pause_label, "duties": duties}
+    if pause_label is None:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason="no Pause widget label was captured during the paused window",
+            observed=observed,
+        )
+    if str(pause_label).lower() != "resume":
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"Pause widget reads {pause_label!r} while paused, expected 'Resume'",
+            observed=observed,
+        )
+    if not duties:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no duty samples were captured during the paused window", observed=observed)
+    nonzero = [d for d in duties if d]
+    if nonzero:
+        return CaseResult(Verdict.FAIL, reason=f"duty(ies) nonzero while paused: {nonzero}", observed=observed)
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_lcd_home_tripped(strip_visible_before: bool,
+                            strip_matches_accent5_before: Optional[bool],
+                            strip_off_after_clear: Optional[bool]) -> CaseResult:
+    """LCD-04: observes OT-B01's S6a trip window. The strip must be visible
+    and read ACCENT_5 while the trip is latched, then be gone/off after
+    `safety_clear_trip()`. Never originates a trip itself -- if none is
+    latched when this runs, the case function reports NOT_RUN before this
+    is even called."""
+    observed = {
+        "strip_visible_before": strip_visible_before,
+        "strip_matches_accent5_before": strip_matches_accent5_before,
+        "strip_off_after_clear": strip_off_after_clear,
+    }
+    if not strip_visible_before:
+        return CaseResult(Verdict.FAIL, reason="trip strip was not visible while a trip was latched", observed=observed)
+    if strip_matches_accent5_before is False:
+        return CaseResult(Verdict.FAIL, reason="trip strip region does not read as ACCENT_5 while tripped", observed=observed)
+    if strip_off_after_clear is False:
+        return CaseResult(Verdict.FAIL, reason="trip strip is still visible/lit after safety_clear_trip()", observed=observed)
+    if strip_matches_accent5_before is None or strip_off_after_clear is None:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason="no camera capture available to confirm the trip strip's color",
+            observed=observed,
+        )
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_lcd_profiles_picker(page: str, rows: "list[dict]", paging_present: bool,
+                               new_icon_present: bool, detail_page: Optional[str],
+                               max_rows: int = 4) -> CaseResult:
+    """LCD-09: profiles picker reached by tapping Profiles from the hub.
+    `rows` is the subset of tap targets named `profile_row_*`."""
+    observed = {
+        "page": page, "row_count": len(rows), "paging_present": paging_present,
+        "new_icon_present": new_icon_present, "detail_page": detail_page,
+    }
+    if page != "profiles":
+        return CaseResult(Verdict.FAIL, reason=f"page={page!r}, expected 'profiles'", observed=observed)
+    if len(rows) > max_rows:
+        return CaseResult(Verdict.FAIL, reason=f"{len(rows)} rows shown, expected <= {max_rows}", observed=observed)
+    favorites = [r for r in rows if r.get("starred")]
+    if favorites and any(not r.get("starred") for r in rows[: len(favorites)]):
+        return CaseResult(Verdict.FAIL, reason="favorite row(s) are not sorted first", observed=observed)
+    if not paging_present:
+        return CaseResult(Verdict.FAIL, reason="no paging indicator found in the topbar", observed=observed)
+    if not new_icon_present:
+        return CaseResult(Verdict.FAIL, reason="New profile icon missing from the topbar", observed=observed)
+    if rows and detail_page != "profile_detail":
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"tapping a row opened {detail_page!r}, expected 'profile_detail'",
+            observed=observed,
+        )
+    if not rows:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no profile rows present to confirm row-tap navigation", observed=observed)
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_lcd_temperature_page(page: str, zone_rows: "dict[int, float]",
+                                readings: "dict[int, float]",
+                                safety_on: Optional[bool], expect_safety_on: bool,
+                                tolerance_c: float = 1.0) -> CaseResult:
+    """LCD-14: three zone rows within `tolerance_c` of `thermo_read()`, and
+    (post-rework) the Safety (K4) line matching whether a firing is active.
+    A pre-rework board with no Safety line target degrades that half to
+    INCONCLUSIVE rather than FAIL (plan: "[pre: line absent]")."""
+    observed = {
+        "page": page, "zone_rows": zone_rows, "readings": readings,
+        "safety_on": safety_on, "expect_safety_on": expect_safety_on,
+    }
+    if page != "temperature":
+        return CaseResult(Verdict.FAIL, reason=f"page={page!r}, expected 'temperature'", observed=observed)
+    if not zone_rows:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no zone rows with a numeric value were reported", observed=observed)
+    mismatches = {}
+    for zone, shown in zone_rows.items():
+        actual = readings.get(zone)
+        if shown is None or actual is None:
+            continue
+        if abs(shown - actual) > tolerance_c:
+            mismatches[zone] = (shown, actual)
+    if mismatches:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"zone value(s) differ from thermo_read() by more than {tolerance_c}C: {mismatches}",
+            observed=observed,
+        )
+    if safety_on is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no Safety (K4) line state reported (pre-rework LCD)", observed=observed)
+    if bool(safety_on) != bool(expect_safety_on):
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"Safety (K4) line reads on={safety_on}, expected {expect_safety_on}",
+            observed=observed,
+        )
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_lcd_diagnostics_pages(titles_seen: "list[str]", relay_life_has_reset: Optional[bool],
+                                 crash_report_visible_entries: Optional[int],
+                                 heap_diff_pct: Optional[float],
+                                 expected_titles: "tuple[str, ...]" = _DIAG_TITLES,
+                                 max_heap_diff_pct: float = 10.0) -> CaseResult:
+    """LCD-16: the 5 diagnostics sub-pages reached in order, Relay Life has
+    no Reset button (post-rework), Crash Report shows none, and the LCD's
+    own reported heap value is within `max_heap_diff_pct` of
+    `get_heap_status()`."""
+    observed = {
+        "titles_seen": titles_seen, "relay_life_has_reset": relay_life_has_reset,
+        "crash_report_visible_entries": crash_report_visible_entries,
+        "heap_diff_pct": heap_diff_pct,
+    }
+    if list(titles_seen) != list(expected_titles):
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"diagnostics titles seen {titles_seen!r}, expected {list(expected_titles)!r}",
+            observed=observed,
+        )
+    if relay_life_has_reset:
+        return CaseResult(Verdict.FAIL, reason="Relay Life page still shows a Reset button (pre-rework only)", observed=observed)
+    if crash_report_visible_entries:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"Crash Report page shows {crash_report_visible_entries} visible entrie(s), expected none",
+            observed=observed,
+        )
+    if heap_diff_pct is None:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason="could not compare the board-health page's heap value to get_heap_status()",
+            observed=observed,
+        )
+    if heap_diff_pct > max_heap_diff_pct:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"board-health heap value differs from get_heap_status() by {heap_diff_pct:.1f}%, expected <= {max_heap_diff_pct:.0f}%",
+            observed=observed,
+        )
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_lcd_pin_lock(keypad_raised: Optional[bool], wrong_pin_refused: Optional[bool],
+                        right_pin_started: Optional[bool], stop_not_gated: Optional[bool]) -> CaseResult:
+    """LCD-19: after `lcd_timeout_min`, Start raises the keypad; a wrong PIN
+    is refused; the right PIN starts; Stop is NEVER gated (plan: a tap on
+    Stop during a firing with the lock engaged must stop it with no PIN
+    prompt) -- this last check is the one that matters for safety, so it is
+    checked even though the others may be INCONCLUSIVE."""
+    observed = {
+        "keypad_raised": keypad_raised, "wrong_pin_refused": wrong_pin_refused,
+        "right_pin_started": right_pin_started, "stop_not_gated": stop_not_gated,
+    }
+    if keypad_raised is False:
+        return CaseResult(Verdict.FAIL, reason="Start tap after the LCD timeout did not raise the PIN keypad", observed=observed)
+    if wrong_pin_refused is False:
+        return CaseResult(Verdict.FAIL, reason="a wrong PIN was not refused", observed=observed)
+    if right_pin_started is False:
+        return CaseResult(Verdict.FAIL, reason="the correct PIN did not start the firing", observed=observed)
+    if stop_not_gated is False:
+        return CaseResult(
+            Verdict.FAIL,
+            reason="Stop was gated behind the PIN lock; the plan requires Stop is never gated",
+            observed=observed,
+        )
+    if None in (keypad_raised, wrong_pin_refused, right_pin_started, stop_not_gated):
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason="one or more PIN-lock checks could not be exercised (missing UI_TEST API or camera)",
+            observed=observed,
+        )
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+# ---------------------------------------------------------------------------
 # HP-* / SP-* (Wave 1b: HP + SP observers, plan doc section 3.6/3.9/8)
 # ---------------------------------------------------------------------------
 

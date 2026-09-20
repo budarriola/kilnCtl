@@ -306,6 +306,16 @@ def _case_hp04(ctx: dict) -> CaseResult:
         st = srv._profiles.get_exec_status()
         paused_state = st.state_name
         duties_while_paused = [z.duty for z in st.zones]
+        pause_ui_targets: list = []
+        try:
+            pause_ui_targets = srv._ui_test.list_tap_targets().get("targets", [])
+        except Exception:
+            pause_ui_targets = []
+        ctx["_hp04"] = {
+            "paused_state": paused_state,
+            "duties_while_paused": duties_while_paused,
+            "pause_ui_targets": pause_ui_targets,
+        }
         sleep(60)
         resume_result = srv._profiles.resume()
         if not resume_result.ok:

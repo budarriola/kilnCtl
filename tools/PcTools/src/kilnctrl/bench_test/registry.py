@@ -241,8 +241,11 @@ for cid, desc in _HP:
     register(_c(cid, "HP", desc, heat=True, est_duration_s=360))
 for cid in _WEB_IDS:
     register(_c(cid, "WEB", cid))
+_LCD_DEPENDS_ON = {
+    "LCD-02": "HP-01", "LCD-03": "HP-04", "LCD-04": "OT-B01", "LCD-19": "WEB-SEC-04",
+}
 for cid in _LCD_IDS:
-    register(_c(cid, "LCD", cid))
+    register(_c(cid, "LCD", cid, depends_on=_LCD_DEPENDS_ON.get(cid)))
 _SP_DEPENDS_ON = {"SP-03": "HP-02", "SP-06": "HP-01", "SP-04": "OT-B01"}
 for cid, desc in _SP:
     register(_c(
@@ -352,15 +355,18 @@ _NIGHTLY_ORDER: List[str] = [
     # WEB-X-02 are new to nightly.
     "WEB-OTA-02",
     "WEB-X-02",
-    "LCD-02", "LCD-03", "LCD-04", "LCD-09", "LCD-14", "LCD-16",
-    "HP-01", "SP-06",
+    # Only the LCD captures with no dependency can run here; LCD-02
+    # (depends_on HP-01), LCD-03 (HP-04) and LCD-04 (OT-B01) are observers
+    # and must follow the case they read, same as the SP observers.
+    "LCD-09", "LCD-14", "LCD-16",
+    "HP-01", "SP-06", "LCD-02",
     "HP-02", "SP-03",
-    "HP-04", "HP-05", "HP-06", "HP-08",
+    "HP-04", "LCD-03", "HP-05", "HP-06", "HP-08",
     "SK-02",
     "WEB-SEC-03",
     # SP-04 is a pure observer of OT-B01's already-collected trip/clear data
     # (cases_safety._case_sp04, depends_on="OT-B01"), so it follows it directly.
-    "OT-B01", "SP-04",
+    "OT-B01", "SP-04", "LCD-04",
     "OT-E01", "OT-E02", "OT-E03", "OT-E12",
 ]
 assert len(_NIGHTLY_ORDER) == len(set(_NIGHTLY_ORDER)), "duplicate id in _NIGHTLY_ORDER"
