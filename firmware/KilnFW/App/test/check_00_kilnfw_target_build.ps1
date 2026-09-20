@@ -442,6 +442,19 @@ $lock = Enter-BuildLock -Name $LockName
 try {
     if (-not (Test-Path -LiteralPath $WorktreePath)) {
         Write-Host "Setting up persistent build worktree at $WorktreePath (first run for this tree) ..."
+        # PRUNE FIRST (2026-09-19). The directory is gone, but git may still
+        # hold a registration for it under .git/worktrees -- the normal
+        # outcome when someone deletes C:\wt\checkbuild_<hex> by hand to
+        # force a from-scratch build, which is exactly what anyone chasing a
+        # suspected stale-build-artifact result does. `git worktree add`
+        # then refuses with "already registered" (exit 128), this check
+        # FAILS, and the ELF-reading checks that run after it silently grade
+        # the PREVIOUS run's stale KilnCtrl.elf -- confident numbers for a
+        # build that never happened. Pruning here lets a hand-deleted
+        # directory self-heal. `git worktree prune` only drops registrations
+        # whose directory is already missing, so it can never disturb a live
+        # worktree, this tree's own included.
+        & git -C $repoRoot worktree prune 2>&1 | Write-Host
         & git -C $repoRoot worktree add --detach $WorktreePath $headCommit 2>&1 | Write-Host
         if ($LASTEXITCODE -ne 0) {
             Fail "git worktree add failed (exit $LASTEXITCODE)"
