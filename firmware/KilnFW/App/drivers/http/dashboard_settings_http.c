@@ -4,6 +4,7 @@
 
 #include "dashboard_http_internal.h"
 
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -143,16 +144,28 @@ esp_err_t safety_log_level_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    /* Fails CLOSED on anything that is not exactly one of the two known
+     * peers. http_form_find_field() returns -1 for "field absent", -2 for
+     * "present but too long for out_cap" and 0 for "present but empty" --
+     * only -1 may fall through to the historical default. Treating -2/0 as
+     * "absent" would quietly send the level to the WRONG peer (over the wire
+     * to the Pico) for a body like "peer=relayyyyyyy", which is exactly the
+     * silent-wrong-default this route must not have. */
     char peer_val[8];
     int peer_len = http_form_find_field(body, "peer", peer_val, sizeof(peer_val));
-    if (peer_len > 0 && strcasecmp(peer_val, "relay") == 0) {
-        /* Local-only knob, no wire traffic -- always succeeds. */
-        uart_log_bridge_set_safety_relay_level((uint8_t)level);
-        return httpd_resp_sendstr(req, "{\"ok\":true}");
-    }
-    if (peer_len > 0 && strcasecmp(peer_val, "safety") != 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "peer must be \"safety\" or \"relay\"");
-        return ESP_OK;
+    if (peer_len != -1) {
+        bool is_relay  = (peer_len > 0) && (strcasecmp(peer_val, "relay") == 0);
+        bool is_safety = (peer_len > 0) && (strcasecmp(peer_val, "safety") == 0);
+        if (!is_relay && !is_safety) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "peer must be \"safety\" or \"relay\"");
+            return ESP_OK;
+        }
+        if (is_relay) {
+            /* Local-only knob, no wire traffic -- always succeeds. */
+            uart_log_bridge_set_safety_relay_level((uint8_t)level);
+            return httpd_resp_sendstr(req, "{\"ok\":true}");
+        }
     }
 
     esp_err_t err = safety_link_send_set_log_level(s_dash.safety, (uint8_t)level);

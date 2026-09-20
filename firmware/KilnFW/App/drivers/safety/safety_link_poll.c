@@ -478,6 +478,19 @@ static void safety_link_service_log_relay(SafetyLinkClass *link)
          * decode-failure handling, rather than reading payload[0] out of
          * bounds. */
         if (msg.length < 1u) {
+            /* DEFERRED, not overlooked: this discard -- and the two other
+             * places a relayed Pico log line can be lost (the ESP-side
+             * inbox-full drop, counted by uart_protocol's per-task
+             * broadcast_dropped, and the bridge-queue-full drop, counted by
+             * uart_log_bridge.c's s_dropped_lines) -- are NOT yet visible as
+             * a single dropped-LOG-frame count on the diagnostic frame.
+             * Surfacing one there needs a wire protocol version bump and new
+             * codec infrastructure, which this change deliberately does not
+             * take; tracked in tools/PcTools/TODO.md ("log relay" item 4).
+             * Until then, loss is accounted for only by those two existing,
+             * separate counters, and a malformed zero-length payload by
+             * neither -- read this comment, not a clean counter, before
+             * concluding no line was lost. */
             continue;
         }
         uint8_t level = msg.payload[0];

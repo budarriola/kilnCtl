@@ -541,11 +541,21 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
      * "non-negotiable" rules for Frame F) -- a full inbox drops the newest
      * BROADCAST via uart_protocol's own broadcast_dropped counter, which is
      * the correct outcome, not a bug to fix by growing this number. */
+    /* NOT fatal, deliberately -- unlike UART_TASK_ID_SAFETY above. This inbox
+     * carries nothing but best-effort console text; the transient internal-
+     * SRAM/PSRAM exhaustion uart_protocol_register_task() documents (and
+     * retries five times through) during Wi-Fi bring-up must never be able to
+     * take the SAFETY LINK ITSELF down as collateral. On failure the link
+     * comes up fully with log_inbox left NULL --
+     * safety_link_service_log_relay() (safety_link_poll.c) checks for exactly
+     * that and does nothing, so this boot simply relays no Pico log lines. */
     err = uart_protocol_register_task(&link->proto, UART_TASK_ID_LOG, SAFETY_LOG_INBOX_LEN,
                                        &link->log_inbox);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "register safety log task failed: %s", esp_err_to_name(err));
-        goto fail_proto;
+        link->log_inbox = NULL; /* register_task leaves *out untouched on failure */
+        ESP_LOGE(TAG, "register safety log task failed: %s -- Pico log relay disabled this "
+                      "boot, safety link itself unaffected", esp_err_to_name(err));
+        err = ESP_OK;
     }
 
     /* Set before the task exists, not after: the poll task calls back into the
