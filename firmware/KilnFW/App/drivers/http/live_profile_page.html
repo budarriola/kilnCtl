@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
@@ -60,7 +60,6 @@
            background: var(--button-bg); color: var(--fg); border: 1px solid var(--input-border);
            border-radius: var(--ui-radius); cursor: pointer; }
   button.small { min-height: 32px; padding: 0.3em 0.7em; font-size: 0.85em; }
-  .warn { color: var(--warn); }
   .err { color: var(--bad); font-weight: bold; }
   .empty { color: var(--muted); font-style: italic; }
   /* End-of-firing decision prompt (plan section 5/10) -- a banner, not a
@@ -81,7 +80,7 @@
 <div id="refusalBanner" class="card err" style="display:none;"></div>
 
 <div id="statusCard" class="card">
-  <div id="statusText" class="empty">Loading…</div>
+  <div id="statusText" class="empty">Loadingâ€¦</div>
 </div>
 
 <div id="decisionCard" class="card" style="display:none;">
@@ -352,7 +351,7 @@ function refreshLive() {
 
 document.getElementById('forkBtn').addEventListener('click', function () {
   var msg = document.getElementById('forkMsg');
-  msg.textContent = 'Forking…';
+  msg.textContent = 'Forkingâ€¦';
   fetch('/api/profile/live/fork', { method: 'POST' })
     .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
     .then(function (res) {
@@ -374,7 +373,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
   var params = ['id=' + btn.dataset.id, 'name=' + encodeURIComponent(btn.dataset.name || ''),
     'zone_mask=' + (btn.dataset.zoneMask || '0')];
   params = params.concat(collectSegmentParams(currentWorking ? currentWorking.segments : []));
-  msg.textContent = 'Saving…';
+  msg.textContent = 'Savingâ€¦';
   fetch('/api/profile/live', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
   }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, status: r.status, data: d }; }); })
@@ -402,7 +401,7 @@ document.getElementById('reloadBtn').addEventListener('click', function () {
 
 function decide(body) {
   var msg = document.getElementById('decideMsg');
-  msg.textContent = 'Working…';
+  msg.textContent = 'Workingâ€¦';
   return fetch('/api/profile/live/decide', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
   }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
