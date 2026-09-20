@@ -494,10 +494,8 @@ static void profiles_handle_message(void *vargs)
                      * as running. Query the executor first (the same check
                      * profiles_http_delete() makes internally) so the reply
                      * names the real reason. */
-                    profile_exec_status_t pstat;
-                    profile_executor_get_status(&pstat);
-                    bool is_running_this_id = (pstat.state == PROFILE_EXEC_RUNNING || pstat.state == PROFILE_EXEC_PAUSED)
-                                               && pstat.profile_id == del_id;
+                    uint8_t active_id = 0;
+                    bool is_running_this_id = profile_executor_get_active_id(&active_id) && active_id == del_id;
                     uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_PROFILES, subcmd, false,
                                                  is_running_this_id
                                                      ? "profile is currently running -- stop it before deleting"

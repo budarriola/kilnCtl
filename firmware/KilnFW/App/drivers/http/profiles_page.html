@@ -1180,7 +1180,7 @@ function bulkDelete(ids) {
       var okCount = ids.length - failures.length;
       msg.innerHTML = '<span class="err">' +
         (okCount > 0 ? 'Deleted ' + okCount + ', failed ' + failures.length + ': ' : 'Delete failed: ') +
-        failures.map(function (f) { return 'id ' + f.id + ': ' + f.body; }).join('; ') + '</span>';
+        failures.map(function (f) { return 'id ' + f.id + ': ' + window.kcEscapeHtml(f.body); }).join('; ') + '</span>';
     }
     exitSelectMode();
     refreshAll();
@@ -1570,7 +1570,7 @@ function deleteProfile(id) {
     // treated as a successful delete.
     if (r.ok) { refreshAll(); if (editingId === id) resetEditor(); return; }
     return r.text().then(function (body) {
-      document.getElementById('msg').innerHTML = '<span class="err">' + (body || (r.status + ' ' + r.statusText)) + '</span>';
+      document.getElementById('msg').innerHTML = '<span class="err">' + window.kcEscapeHtml(body || (r.status + ' ' + r.statusText)) + '</span>';
     });
   }).catch(function () {
     document.getElementById('msg').innerHTML = '<span class="err">Could not reach the board -- delete not confirmed.</span>';

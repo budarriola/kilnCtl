@@ -523,6 +523,14 @@ uint32_t profile_executor_last_run_started_unix_s(uint8_t profile_id);
  * that distinction meaningful in a way it wasn't before this pass). */
 bool profile_executor_zone_is_active(uint8_t zone_index);
 
+/* Narrow sibling of profile_executor_get_status(): true with *out_id set to
+ * the currently RUNNING/PAUSED profile's id, false (with *out_id set to 0)
+ * when idle/faulted/done/prestart. Deliberately avoids materializing a
+ * profile_exec_status_t on the caller's stack -- use this instead of
+ * profile_executor_get_status() from any task with a tight stack budget
+ * (e.g. uart_bridge_ext_control.c's bx_flash_worker handlers). */
+bool profile_executor_get_active_id(uint8_t *out_id);
+
 /* GET /api/cfgfs dual-write picture for the firing_stats_cfg_fs.c bridge --
  * see profile_executor_firing_stats.c's definition (firing_stats_get_
  * dualwrite_status()) for the aggregation shape and its documented

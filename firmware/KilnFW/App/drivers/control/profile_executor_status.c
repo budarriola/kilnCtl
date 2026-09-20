@@ -411,6 +411,34 @@ bool profile_executor_zone_is_active(uint8_t zone_index)
     return active;
 }
 
+bool profile_executor_get_active_id(uint8_t *out_id)
+{
+    /* Narrow sibling of profile_executor_get_status() for callers that only
+     * need "is a profile running/paused, and which one" -- e.g. the
+     * benchproto PROFILES_CMD_DELETE handler in uart_bridge_ext_control.c,
+     * which runs on bx_flash_worker's task stack (3792 B ceiling, zero
+     * headroom on clean main). profile_exec_status_t is large enough that a
+     * single stack-local instance of it there was itself the regression
+     * (see git history); this avoids materializing that struct at all. Same
+     * locking discipline as profile_executor_zone_is_active() just above:
+     * no producer call under the lock, pure field reads only. */
+    if (out_id) {
+        *out_id = 0;
+    }
+    if (s_exec.lock == NULL) {
+        LOG_PRESTART_ONCE("profile_executor_get_active_id() called before profile_executor_start() -- reporting idle");
+        return false;
+    }
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    bool active = (s_exec.state == PROFILE_EXEC_RUNNING || s_exec.state == PROFILE_EXEC_PAUSED);
+    uint8_t id = s_exec.profile_id;
+    xSemaphoreGive(s_exec.lock);
+    if (active && out_id) {
+        *out_id = id;
+    }
+    return active;
+}
+
 size_t profile_executor_get_firing_history(uint8_t profile_id, profile_firing_run_record_t *out,
                                             size_t max_entries)
 {

@@ -7,6 +7,9 @@
 #include <string.h>
 
 #include "esp_crc.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h" /* portMUX_TYPE -- profiles_storage_ensure()'s once-guard below */
+#include "freertos/task.h" /* vTaskDelay() -- same once-guard, the losing task's wait */
 #include "esp_heap_caps.h" /* heap_caps_malloc()/MALLOC_CAP_* -- profiles_storage_ensure()'s
                             * PSRAM allocation (docs/PROFILE_SLOTS_100_PLAN.md section 7 task 3) */
 #include "esp_log.h"
@@ -200,10 +203,37 @@ _Static_assert(PROFILE_TARGET_C_MAX <= ZONE_MAX_TEMP_C_MAX,
  * sizeof(s_profiles))`, used throughout the host tests, still zeroes the
  * allocated struct in place rather than the pointer itself. */
 static profiles_state_t *s_profiles_ptr = NULL;
+/* Review fold-in (PROFILE_SLOTS_100_PLAN.md section 7): the plain
+ * check-then-act above raced two callers on the first call each -- both
+ * could pass the NULL check, both allocate, and the losing store leaks its
+ * allocation (or worse, two callers observe two different pointers across
+ * the race window). Only the check-and-claim is under the critical section;
+ * heap_caps_malloc()/memset() below run outside it since they can take real
+ * time and must never run with interrupts disabled. */
+static portMUX_TYPE s_profiles_init_mux = portMUX_INITIALIZER_UNLOCKED;
+static bool s_profiles_init_claimed = false;
 
 profiles_state_t *profiles_storage_ensure(void)
 {
     if (s_profiles_ptr != NULL) {
+        return s_profiles_ptr;
+    }
+
+    bool claimed_by_me = false;
+    portENTER_CRITICAL(&s_profiles_init_mux);
+    if (!s_profiles_init_claimed) {
+        s_profiles_init_claimed = true;
+        claimed_by_me = true;
+    }
+    portEXIT_CRITICAL(&s_profiles_init_mux);
+
+    if (!claimed_by_me) {
+        /* Another task got there first and is allocating right now --
+         * spin until it publishes s_profiles_ptr. Bounded in practice by
+         * one heap_caps_malloc()+memset(), not an unbounded wait. */
+        while (s_profiles_ptr == NULL) {
+            vTaskDelay(1);
+        }
         return s_profiles_ptr;
     }
 

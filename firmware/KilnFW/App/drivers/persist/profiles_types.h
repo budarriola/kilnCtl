@@ -20,6 +20,17 @@ extern "C" {
 #define PROFILE_NAME_MAX_LEN 15
 #define PROFILE_MAX_SEGMENTS 12
 
+/* profiles_slot_bitmap.h's profiles_slot_bitmap_to_u32()/_from_u32() are the
+ * persistence seam that keeps the NVS "used-slots" key a single 32-bit
+ * scalar (word[0] only) -- byte-identical to before slot ids widened past a
+ * uint8_t/uint32_t scalar. Raising PROFILES_MAX_COUNT past 32 (task 6, not
+ * yet done) makes ids live in words[1]+ and that seam silently stops
+ * persisting them. This assert exists so that raise can't land without also
+ * widening the persisted bitmap format. */
+_Static_assert(PROFILES_MAX_COUNT <= 32,
+               "PROFILES_MAX_COUNT > 32 needs profiles_slot_bitmap.h's u32 "
+               "persistence seam widened first (task 6) -- see comment above");
+
 /* Owner's request, verbatim (2026-08-27): "insted of the relays and rules
  * section i want them to be part of the profile. unused relays or io may be
  * controled through the profile as a segment. the relay/io segments should
