@@ -20,7 +20,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, capability_preflight, config_presets, coredump_fetch, debug_probe, devices, elf_archive, esp_app_desc, flash_provenance, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, capability_preflight, config_presets, coredump_fetch, debug_probe, devices, elf_archive, esp_app_desc, flash_provenance, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, pico_image_freshness, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -710,6 +710,36 @@ def _archive_flashed_elf(build_dir: str, app_bin_path: str, tree_state,
         return f"\nWARNING: elf archiving FAILED (flash itself succeeded): {exc}"
 
 
+def _pico_image_provenance_note(app_bin_path: str) -> str:
+    """One-line note recording what the ESP application binary about to be
+    flashed believes about its embedded Pico (SaftyFW) image(s), per the
+    2026-09-20 owner decision that the ESP embeds both SaftyFW slot images
+    and auto-updates the Pico at boot (docs/PICO_AUTO_UPDATE_PLAN.md).
+
+    Read-only and best-effort: this NEVER changes flash behavior or blocks a
+    flash -- it only appends a line to the provenance report so a flash's
+    Pico expectation is on the record. Uses the same scanning parser as
+    check_embedded_pico_image_fresh.ps1
+    (tools/PcTools/src/kilnctrl/pico_image_freshness.py) rather than
+    duplicating the struct layout here.
+    """
+    try:
+        if not os.path.isfile(app_bin_path):
+            return f"pico image: no embedded SaftyFW identity (app binary not found: {app_bin_path})"
+        data = open(app_bin_path, "rb").read()
+        records = pico_image_freshness.find_all_identities(data)
+    except Exception as exc:  # noqa: BLE001 - provenance note must never block a flash
+        return f"pico image: could not inspect embedded SaftyFW identity ({exc})"
+    if not records:
+        return "pico image: no embedded SaftyFW identity record found in app binary (KilnFW built without embedded Pico images, or embedding not yet wired up)"
+    distinct = sorted({(r.commit, r.dirty, r.config_format_version) for r in records})
+    if len(distinct) == 1:
+        commit, dirty, cfg_ver = distinct[0]
+        dirty_note = " (DIRTY build)" if dirty else ""
+        return f"pico image: embedded SaftyFW identity commit={commit}{dirty_note}, config_format_version={cfg_ver}"
+    return f"pico image: embedded SaftyFW identities disagree across records: {distinct}"
+
+
 @_srv._tool()
 def flash_firmware(
     board_cfg: str = "board/esp32s3-builtin.cfg",
@@ -1016,6 +1046,7 @@ def flash_firmware(
     provenance_note = flash_provenance.format_report(tree_state)
     if kiln_fw_root:
         provenance_note += f"\nprovenance: kiln_fw_root override in use: {kiln_fw_root}"
+    provenance_note += "\n" + _pico_image_provenance_note(app_bin_path)
     _srv._session_log.info("flash_firmware: %s", provenance_note.replace("\n", " | "))
 
     stale = stale_check.check_kilnfw_stale(effective_kiln_fw_root)

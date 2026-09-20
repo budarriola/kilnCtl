@@ -249,7 +249,7 @@ def _cmake_build(tag: str, build_dir: str, jobs: int) -> str:
 _IDF_PROFILE = r"C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1"
 
 
-def build_kilnfw(target: str = "build", jobs: int = 0) -> str:
+def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = False) -> str:
     """Build the ESP32-S3 main firmware (``firmware/KilnFW``) via ESP-IDF.
 
     ``target`` is an idf.py target -- ``build``, ``fullclean``, ``reconfigure``.
@@ -257,13 +257,43 @@ def build_kilnfw(target: str = "build", jobs: int = 0) -> str:
     idf.py's argument parser rejects ``-- -j N``; it therefore only applies to
     an already-configured build directory and is ignored for other targets.
 
+    2026-09-20 (docs/PICO_AUTO_UPDATE_PLAN.md): the KilnFW APPLICATION build
+    now ``EMBED_FILES`` two SaftyFW slot images
+    (``firmware/SaftyFW/build/SaftyFW_slotA.bin``/``slotB.bin``) so the ESP
+    can update the Pico automatically at boot, and fails at CMake configure
+    time if either is missing or stale relative to the SaftyFW source tree.
+    For a ``build``/``reconfigure`` target this tool therefore now builds
+    SaftyFW FIRST (``build_saftyfw()``, which produces those slot bins as a
+    side effect of its own target build) and reports BOTH build outputs,
+    same ordering ``tools/run_all_checks.ps1`` phase 1a/1b now enforces for
+    the two ``check_00_*_target_build.ps1`` checks. A SaftyFW build failure
+    aborts before the KilnFW build even starts, since a KilnFW build against
+    a missing/stale pair would either fail its own configure step or --
+    worse -- silently embed whatever slot bins happen to already be on disk.
+    ``skip_saftyfw=True`` opts out (e.g. ``fullclean``, or a caller that just
+    built SaftyFW itself and wants to avoid a redundant rebuild) -- the
+    caller is then responsible for the slot bins being current;
+    ``check_embedded_pico_image_fresh.ps1`` is the check that catches it if
+    they are not.
+
     Flashing is deliberately not offered here: this board is programmed over
     JTAG with OpenOCD (``flash_firmware`` / ``debug_program``), never esptool.
     """
     root = repo_root()
+    saftyfw_report = None
+    if target in ("build", "reconfigure") and not skip_saftyfw:
+        saftyfw_report = build_saftyfw()
+        saftyfw_ok = "saftyfw: OK" in saftyfw_report
+        if not saftyfw_ok:
+            return (
+                f"kilnfw-{target}: ABORTED -- SaftyFW build (which produces the "
+                f"slot images this KilnFW build embeds) did not succeed:\n\n"
+                f"{saftyfw_report}"
+            )
     if not os.path.isfile(_IDF_PROFILE):
-        return (f"kilnfw: error: ESP-IDF profile not found at {_IDF_PROFILE} -- "
-                f"update _IDF_PROFILE in mcpkit/workbench.py if Espressif moved")
+        result = (f"kilnfw: error: ESP-IDF profile not found at {_IDF_PROFILE} -- "
+                  f"update _IDF_PROFILE in mcpkit/workbench.py if Espressif moved")
+        return f"{saftyfw_report}\n\n{result}" if saftyfw_report else result
     if jobs > 0 and target == "build":
         inner = f"cd '{os.path.join(root, 'firmware', 'KilnFW', 'build')}'; ninja -j {jobs}"
     else:
@@ -276,10 +306,13 @@ def build_kilnfw(target: str = "build", jobs: int = 0) -> str:
     # command is also guarding against.
     command = f"& '{_IDF_PROFILE}' *>&1 | Out-Null; {inner}; exit $LASTEXITCODE"
     build_dir = os.path.join(root, "firmware", "KilnFW", "build")
-    return _run_locked(
+    kilnfw_report = _run_locked(
         f"kilnfw-{target}", build_dir,
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
         timeout=1800)
+    if saftyfw_report is not None:
+        return f"{saftyfw_report}\n\n{kilnfw_report}"
+    return kilnfw_report
 
 
 def run_pctools_tests(pattern: Optional[str] = None) -> str:

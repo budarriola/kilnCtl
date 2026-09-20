@@ -423,17 +423,22 @@ re-verify with a fresh `-ListOnly` run rather than trusting this number).
 reachable through `tools/verify.ps1`'s manual "lint" stage -- is now enforced
 by the standing suite too;
 re-verify with a fresh `-ListOnly` run since this count drifts as checks are
-added) and runs them in three phases — phase 1 is three full target builds
-(`check_00_kilnfw_target_build.ps1`, `check_00_saftyfw_target_build.ps1`,
-`check_00_kilnfw_recovery_target_build.ps1`) concurrently; phase 2 is
-everything else throttled in parallel (`-MaxParallel`, default 8); phase 3
-is `check_ui_responsive_sweep.ps1` alone (`-MaxParallel 1`, forced serial
-since `eefff2dc` — it drives real headless Chrome over CDP and flaked under
-phase 2's concurrent load) — so a full run finishes in under 3 minutes on
-this 24-core machine instead of exceeding the 600s tool timeout. `-Only
-<regex>`/`-Skip <regex>` filter by repo-relative path for iterating on one
-check; `-Fast` skips all three phase-1 target builds for a caller that just
-ran one itself, never any other check. **Caveat:** `-Fast` then makes
+added) and runs them in four phases — **2026-09-20:** phase 1 split in two
+because the KilnFW application build now `EMBED_FILES`s both SaftyFW slot
+images (the ESP auto-updates the Pico at boot,
+`docs/PICO_AUTO_UPDATE_PLAN.md`), so it cannot start until SaftyFW's build has
+produced them. Phase 1a is `check_00_saftyfw_target_build.ps1` alone; phase 1b
+is the two KilnFW target builds (`check_00_kilnfw_target_build.ps1`,
+`check_00_kilnfw_recovery_target_build.ps1`) concurrently, started only after
+phase 1a finishes; phase 2 is everything else throttled in parallel
+(`-MaxParallel`, default 8); phase 3 is `check_ui_responsive_sweep.ps1` alone
+(`-MaxParallel 1`, forced serial since `eefff2dc` — it drives real headless
+Chrome over CDP and flaked under phase 2's concurrent load) — so a full run
+finishes in under 3 minutes on this 24-core machine instead of exceeding the
+600s tool timeout. `-Only <regex>`/`-Skip <regex>` filter by repo-relative
+path for iterating on one check; `-Fast` skips all three phase-1a/1b target
+builds for a caller that just ran one itself, never any other check.
+**Caveat:** `-Fast` then makes
 `check_recovery_image_size.ps1` (phase 2) SKIP, because it grades
 `recovery.bin`, which the skipped `check_00_kilnfw_recovery_target_build.ps1`
 would otherwise have produced — and since a SKIP fails the overall run by

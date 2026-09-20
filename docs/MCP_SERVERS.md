@@ -223,7 +223,7 @@ KiCad server has no equivalent -- there is nothing to compile there:
 
 | tool | server | notes |
 |------|--------|-------|
-| `build_kilnfw(target, jobs)` | kilnctrl | sources the Espressif PowerShell profile; `jobs>0` calls ninja directly because idf.py rejects `-- -j N` |
+| `build_kilnfw(target, jobs, skip_saftyfw)` | kilnctrl | sources the Espressif PowerShell profile; `jobs>0` calls ninja directly because idf.py rejects `-- -j N`. **2026-09-20:** for a `build`/`reconfigure` target it now builds SaftyFW first (via `build_saftyfw()`) and aborts before starting the KilnFW build if that fails, reporting both build reports -- the KilnFW application build `EMBED_FILES`s both SaftyFW slot images (`docs/PICO_AUTO_UPDATE_PLAN.md`) and needs a fresh pair present in `firmware/SaftyFW/build/`. Pass `skip_saftyfw=True` to opt out (e.g. a caller that just ran `build_saftyfw()` itself); `fullclean` and other non-build targets never trigger it. |
 | `build_saftyfw(jobs)` | kilnctrl | ninja in `firmware/SaftyFW/build` |
 | `build_saftyfw_host_tests()` | kilnctrl | off-target MSVC unit tests |
 | `run_pctools_tests(pattern)` | kilnctrl | the pytest suite |
@@ -322,6 +322,19 @@ Unit-tested in `tests/test_flash_provenance.py` against synthetic
 exact incident's mixed dirty set (schema files plus an unrelated edit) --
 with a required negative test that drops the `zones?_config` pattern and
 confirms the assertions fail, naming the file that slipped through.
+
+**2026-09-20: the provenance report also names the embedded Pico (SaftyFW)
+image identity.** Since the ESP application now embeds both SaftyFW slot
+images (`docs/PICO_AUTO_UPDATE_PLAN.md`), `flash_firmware()`'s provenance
+note gains one more line reading the `saftyfw_image_identity_t` record(s)
+found by scanning the app binary about to be flashed (same scanning parser
+as `check_embedded_pico_image_fresh.ps1`,
+`kilnctrl/pico_image_freshness.py`) -- the commit and dirty flag the
+embedded Pico image was built from, or a plain statement that no record was
+found (a KilnFW build predating this feature, or one built without the
+embedding wired up). This is read-only and purely informational: it never
+blocks or changes a flash, it only puts the Pico expectation on the same
+record as the rest of the flash's provenance.
 
 Two ESP32-S3 boards are now permanently on the bench (2026-09-05: the main
 board and the UnitTestFixture), and both share USB VID:PID 303A:1001 on

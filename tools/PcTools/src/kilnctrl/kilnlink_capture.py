@@ -103,6 +103,16 @@ class LinkDevice(enum.IntEnum):
 #: Frame ids (LINK_PROTOCOL.md secs 4/6), name only -- for the readable
 #: timeline. Not every id here has a structured decoder below; anything
 #: without one still gets a name and a raw hex payload dump.
+#
+# TODO (2026-09-20, docs/PICO_AUTO_UPDATE_PLAN.md): the ESP now embeds both
+# SaftyFW slot images and updates the Pico automatically at boot. That
+# firmware work is landing separately and is expected to add a new
+# update-failure status/enumerator for "image not linked for target slot" (or
+# similar -- name TBD by that change, not guessed here). When it lands, wire
+# its numeric value into this table (and into any bench case /
+# kilnlink_capture status-name lookup that enumerates ROLLBACK_RESULT- or
+# REBOOT_RESULT-style outcome codes) so the bench harness decodes it by name
+# instead of falling back to the UNKNOWN(0x..) path below.
 CMD_NAMES: dict[int, str] = {
     0x01: "GET_STATUS / STATUS (Frame A)",
     0x02: "REQUEST_ENABLE",
