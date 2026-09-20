@@ -57,7 +57,12 @@ class IdSpaceTests(unittest.TestCase):
         )
 
     def test_unaddressable_gap_is_rejected(self):
-        for bad in (PROFILES_MAX_COUNT, 64, PROFILES_BUILTIN_ID_BASE - 1, -1, 256):
+        # Every id here is derived from the two constants, never a literal in
+        # the gap: id 64 used to be hardcoded here and became a VALID user
+        # slot the moment PROFILES_MAX_COUNT went 8 -> 100
+        # (docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6).
+        gap_mid = (PROFILES_MAX_COUNT + PROFILES_BUILTIN_ID_BASE) // 2
+        for bad in (PROFILES_MAX_COUNT, gap_mid, PROFILES_BUILTIN_ID_BASE - 1, -1, 256):
             with self.assertRaises(ValueError):
                 devices.profiles_get(bad)
             with self.assertRaises(ValueError):
@@ -87,8 +92,10 @@ class SaveIsCopyTests(unittest.TestCase):
         self.assertEqual(body[1], PROFILES_SAVE_ID_NEW)
 
     def test_save_still_rejects_the_gap(self):
+        # Derived, not a literal: this was `9` (one past the old
+        # PROFILES_MAX_COUNT of 8) and became a valid user slot at 100 slots.
         with self.assertRaises(ValueError):
-            devices.profiles_save(9, "n", 0x01, self._segments(1))
+            devices.profiles_save(PROFILES_MAX_COUNT + 1, "n", 0x01, self._segments(1))
 
 
 class ReplyBudgetTests(unittest.TestCase):

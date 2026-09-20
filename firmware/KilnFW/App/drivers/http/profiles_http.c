@@ -635,13 +635,22 @@ profile_decode_result_t profile_decode_blob(const void *blob, size_t len, profil
  * headroom over a legitimate 12-segment submission, checked against
  * Content-Length before a single byte is read. */
 
-/* "prof" + up to 3 digits (max id 127, PROFILE_BUILTIN_ID_BASE's ceiling) +
- * NUL = 8 bytes, well inside NVS's 15-character key limit -- asserted here
- * rather than only trusted in a comment, per
- * docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6. */
-_Static_assert(sizeof("prof127") - 1 <= 15,
-               "profile_nvs_key()'s longest possible key must stay within "
-               "NVS's 15-character key limit");
+/* "prof" + the id's decimal digits + NUL. Asserted rather than only trusted
+ * in a comment, per docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6 -- and
+ * asserted against PROFILES_MAX_COUNT itself rather than against a literal
+ * id, so a future raise of the slot count cannot quietly outgrow either
+ * bound. The "+ 2" is the two reserved ids above the user range
+ * (LIVE_EDIT_WORKING_SLOT_ID and PROFILE_BENCH_SLOT_ID), the same "+ 2"
+ * profiles_types.h's own 128-id assert uses. Both call sites pass a
+ * `char key[8]` buffer, which is exactly "prof" + 3 digits + NUL -- a
+ * 4-digit id would silently TRUNCATE in snprintf() and alias two slots onto
+ * one NVS key, which is what the first assert catches; the second is the
+ * house NVS_KEY_LEN_CHECK() idiom applied to the longest key that buffer
+ * can ever hold. */
+_Static_assert(PROFILES_MAX_COUNT + 2 < 1000,
+               "profile_nvs_key() formats into a char[8] (\"prof\" + 3 digits + NUL) -- "
+               "a 4-digit id would truncate and alias two slots onto one NVS key");
+NVS_KEY_LEN_CHECK("prof999");
 
 static void profile_nvs_key(uint8_t id, char *out, size_t out_cap)
 {
@@ -903,23 +912,31 @@ esp_err_t nvs_save_slot(uint8_t id)
     if (kv_err == HAL_OK) {
         kv_err = used_bitmap_save(&h, &s_profiles.used_bitmap);
     }
-    uint32_t rev_snapshot[PROFILES_MAX_COUNT];
-    memcpy(rev_snapshot, s_profile_rev, sizeof(rev_snapshot));
-    rev_snapshot[id] = new_rev;
-    if (kv_err == HAL_OK) {
-        kv_err = hal_kv_set_blob(&h, NVS_KEY_PROFILE_REV, rev_snapshot, sizeof(rev_snapshot));
-    }
-    if (kv_err == HAL_OK) {
-        kv_err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-    /* Update the in-RAM rev regardless of NVS outcome: it is ephemeral for
+    /* Update the in-RAM rev in place and persist s_profile_rev itself rather
+     * than a stack copy of it: at PROFILES_MAX_COUNT == 100 that copy was a
+     * 400 B local (32 B at the old 8 slots) and it pushed nvs_erase_slot()'s
+     * twin of this block over bx_flash_worker's stack ceiling
+     * (check_all_task_stack_budgets.ps1). The persisted bytes are identical
+     * -- the snapshot only ever differed from s_profile_rev by this one
+     * element, which is assigned here instead. Assigning before the write
+     * rather than after it is also behaviour-identical: the old code
+     * assigned unconditionally once it got past hal_kv_open(), which is the
+     * only early return above this point.
+     *
+     * The in-RAM rev is updated regardless of NVS outcome: it is ephemeral for
      * this boot only (a reboot re-derives it from whatever actually got
      * persisted, via nvs_load_all_from()'s resolve pass), and keeping it in
      * lockstep with the file (already written above) means a subsequent
      * save/delete this boot bumps from the true latest rev instead of
      * replaying an already-used one. */
     s_profile_rev[id] = new_rev;
+    if (kv_err == HAL_OK) {
+        kv_err = hal_kv_set_blob(&h, NVS_KEY_PROFILE_REV, s_profile_rev, sizeof(s_profile_rev));
+    }
+    if (kv_err == HAL_OK) {
+        kv_err = hal_kv_commit(&h);
+    }
+    hal_kv_close(&h);
     return hal_status_to_esp_err(kv_err);
 }
 
@@ -968,17 +985,17 @@ esp_err_t nvs_erase_slot(uint8_t id)
         return hal_status_to_esp_err(erase_err);
     }
     kv_err = used_bitmap_save(&h, &s_profiles.used_bitmap);
-    uint32_t rev_snapshot[PROFILES_MAX_COUNT];
-    memcpy(rev_snapshot, s_profile_rev, sizeof(rev_snapshot));
-    rev_snapshot[id] = new_rev;
+    /* ephemeral this boot, see nvs_save_slot()'s identical comment -- and see
+     * that function for why s_profile_rev is updated in place and persisted
+     * directly instead of through a PROFILES_MAX_COUNT-sized stack copy. */
+    s_profile_rev[id] = new_rev;
     if (kv_err == HAL_OK) {
-        kv_err = hal_kv_set_blob(&h, NVS_KEY_PROFILE_REV, rev_snapshot, sizeof(rev_snapshot));
+        kv_err = hal_kv_set_blob(&h, NVS_KEY_PROFILE_REV, s_profile_rev, sizeof(s_profile_rev));
     }
     if (kv_err == HAL_OK) {
         kv_err = hal_kv_commit(&h);
     }
     hal_kv_close(&h);
-    s_profile_rev[id] = new_rev; /* ephemeral this boot, see nvs_save_slot()'s identical comment */
     return hal_status_to_esp_err(kv_err);
 }
 
