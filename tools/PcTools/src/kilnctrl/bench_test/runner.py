@@ -14,7 +14,7 @@ import time
 import traceback
 from typing import Any, Dict, List, Optional
 
-from .registry import CaseResult, Verdict, get_case, suite_case_ids
+from .registry import REGISTRY, CaseResult, Verdict, get_case, suite_case_ids
 from . import report as report_mod
 
 
@@ -39,6 +39,7 @@ class RunOutcome:
     preflight_ok: bool
     preflight_reason: str
     tainted: bool = False
+    run_dir: str = ""
 
     @property
     def exit_code(self) -> int:
@@ -92,31 +93,68 @@ class BenchTestRunner:
         if ok and banner:
             reasons.append(f"MCP server reports stale: {banner.strip()}")
 
-        ok, exec_status = _safe_call(srv.profiles_get_exec_status)
-        board_before["profiles_get_exec_status"] = exec_status if ok else f"error: {exec_status}"
-        if ok and isinstance(exec_status, str) and "RUNNING" in exec_status.upper():
+        # Structured fields, not substring parsing of the display string --
+        # "RUNNING" also matches inside "NOT RUNNING", and "trip_reason 0"
+        # matched inside "trip_reason 10". `_running()`/`_active()` below
+        # compare the actual state code the client decoded off the wire.
+        ok, exec_status = _safe_call(srv._profiles.get_exec_status)
+        board_before["profiles_get_exec_status"] = (
+            f"state={exec_status.state_name}" if ok else f"error: {exec_status}"
+        )
+        if ok and exec_status.state_name == "running":
             reasons.append("profiles_get_exec_status is not idle")
 
-        ok, at_status = _safe_call(srv.autotune_get_status)
-        board_before["autotune_get_status"] = at_status if ok else f"error: {at_status}"
-        if ok and isinstance(at_status, str) and "running" in at_status.lower():
+        ok, at_status = _safe_call(srv._autotune.get_status)
+        board_before["autotune_get_status"] = (
+            f"state={at_status.state_name}" if ok else f"error: {at_status}"
+        )
+        if ok and at_status.state_name in ("settling", "stepping", "relay_approach", "relay_cycling"):
             reasons.append("autotune_get_status is active")
 
-        ok, safety_status = _safe_call(srv.safety_get_status)
-        board_before["safety_get_status"] = safety_status if ok else f"error: {safety_status}"
-        if ok and isinstance(safety_status, str):
-            if "down" in safety_status.lower():
-                reasons.append("safety link is not up")
-            if "trip_reason" in safety_status.lower() and "trip_reason: 0" not in safety_status.lower() and "trip_reason:0" not in safety_status.lower():
-                # A latched trip stops the run for a human unless it is
-                # exactly S6a mid-clear, which no wave-0 case attempts.
-                if "trip_reason 0" not in safety_status.lower():
-                    reasons.append("a safety trip appears to be latched; operator must clear it")
+        ok, safety_status = _safe_call(srv._safety.get_status)
+        board_before["safety_get_status"] = (
+            f"link_up={safety_status.link_up}" if ok else f"error: {safety_status}"
+        )
+        if ok and not safety_status.link_up:
+            reasons.append("safety link is not up")
+
+        ok, safety_diag = _safe_call(srv._safety.get_diag)
+        board_before["safety_get_diag"] = (
+            f"trip_reason={safety_diag.trip_reason}" if ok else f"error: {safety_diag}"
+        )
+        if ok and safety_diag.ever_received and safety_diag.trip_reason != 0:
+            # A latched trip stops the run for a human unless it is
+            # exactly S6a mid-clear, which no wave-0 case attempts.
+            reasons.append(f"a safety trip is latched (trip_reason={safety_diag.trip_reason}); operator must clear it")
 
         ok, crash = _safe_call(srv.get_heap_status, ctx.get("host"))
         board_before["get_heap_status"] = crash if ok else f"error: {crash}"
-        if ok and isinstance(crash, str) and "UNACKNOWLEDGED CRASH REPORT" in crash:
-            reasons.append("unacknowledged crash report present")
+
+        # Real capability_preflight (capability_preflight.py), not a grep of
+        # get_heap_status's display text for "UNACKNOWLEDGED CRASH REPORT":
+        # this is the same check load-bearing for run_queue.py, so it also
+        # covers readiness-gate blockers and board-unreachable, not just the
+        # crash banner. An empty preset means "no HTTP-gated capability is
+        # required" -- the crash/readiness checks run regardless of preset.
+        # `ctx["capability_preflight_run"]` lets tests inject a fake
+        # report producer instead of hitting a real board.
+        from .. import capability_preflight  # noqa: PLC0415
+
+        cp_run = ctx.get("capability_preflight_run", capability_preflight.run_preflight)
+        ok, cp_report = _safe_call(
+            cp_run, {}, ctx.get("host") or capability_preflight.PREFLIGHT_AP_DEFAULT_HOST,
+        )
+        board_before["capability_preflight"] = cp_report.describe() if ok else f"error: {cp_report}"
+        if ok and not cp_report.ok:
+            if cp_report.board.crash_unacknowledged:
+                reasons.append(f"unacknowledged crash report present: {cp_report.board.crash_summary}")
+            elif cp_report.board.readiness_blocked:
+                names = ", ".join(k for k, _l, _d in cp_report.board.readiness_blocked)
+                reasons.append(f"readiness gate blocks: {names}")
+            elif not cp_report.board.reachable:
+                reasons.append(f"capability_preflight: board unreachable: {cp_report.board.error}")
+            else:
+                reasons.append("capability_preflight reports not ok")
 
         preflight_ok = not reasons
         return preflight_ok, "; ".join(reasons), board_before
@@ -132,16 +170,18 @@ class BenchTestRunner:
         srv = ctx.get("srv")
         board_after: Dict[str, Any] = {}
         if srv is not None:
-            ok, exec_status = _safe_call(srv.profiles_get_exec_status)
-            if ok and isinstance(exec_status, str) and "RUNNING" in exec_status.upper():
+            ok, exec_status = _safe_call(srv._profiles.get_exec_status)
+            if ok and exec_status.state_name == "running":
                 _safe_call(srv.profiles_stop)
-            ok, at_status = _safe_call(srv.autotune_get_status)
-            if ok and isinstance(at_status, str) and "running" in at_status.lower():
+            ok, at_status = _safe_call(srv._autotune.get_status)
+            if ok and at_status.state_name in ("settling", "stepping", "relay_approach", "relay_cycling"):
                 _safe_call(srv.autotune_abort)
             ok, heap = _safe_call(srv.get_heap_status, ctx.get("host"))
             board_after["get_heap_status"] = heap if ok else f"error: {heap}"
-            ok, safety_status = _safe_call(srv.safety_get_status)
-            board_after["safety_get_status"] = safety_status if ok else f"error: {safety_status}"
+            ok, safety_status = _safe_call(srv._safety.get_status)
+            board_after["safety_get_status"] = (
+                f"link_up={safety_status.link_up}" if ok else f"error: {safety_status}"
+            )
         return board_after
 
     # -- run ----------------------------------------------------------------
@@ -150,7 +190,16 @@ class BenchTestRunner:
              allow_heat: bool = True, tag: Optional[str] = None) -> RunOutcome:
         requested = suite_case_ids(suite)
         if cases:
-            requested = [c for c in requested if c in cases] or list(cases)
+            unknown = [c for c in cases if c not in REGISTRY]
+            if unknown:
+                raise ValueError(f"unknown bench-test case id(s): {', '.join(unknown)}")
+            out_of_suite = [c for c in cases if c not in requested]
+            if out_of_suite:
+                raise ValueError(
+                    f"case id(s) not in suite {suite!r}: {', '.join(out_of_suite)} "
+                    f"(suite {suite!r} has: {', '.join(requested)})"
+                )
+            requested = [c for c in requested if c in cases]
 
         run_id = report_mod.make_run_id(suite, tag)
         started = time.time()
@@ -217,12 +266,9 @@ class BenchTestRunner:
         )
 
         run_dir = report_mod.run_dir_path(self.logs_root, run_id)
+        outcome.run_dir = run_dir
         summary = report_mod.build_summary(outcome, board_before, board_after)
         report_mod.write_run(run_dir, summary, self.transcript)
-        outcome_dict = dataclasses.asdict(outcome)
-        outcome_dict["run_dir"] = run_dir
-        outcome_dict["exit_code"] = outcome.exit_code
-        outcome_dict["summary"] = summary
         self._last_run_dir = run_dir
         return outcome
 

@@ -19,30 +19,96 @@ from kilnctrl.bench_test import registry as R  # noqa: E402
 from kilnctrl.bench_test.runner import BenchTestRunner  # noqa: E402
 
 
+class _FakeExecStatus:
+    def __init__(self, state_name="idle"):
+        self.state_name = state_name
+
+
+class _FakeAutotuneStatus:
+    def __init__(self, state_name="idle"):
+        self.state_name = state_name
+
+
+class _FakeSafetyStatus:
+    def __init__(self, link_up=True):
+        self.link_up = link_up
+
+
+class _FakeSafetyDiag:
+    def __init__(self, ever_received=True, trip_reason=0):
+        self.ever_received = ever_received
+        self.trip_reason = trip_reason
+
+
+class _FakeProfilesClient:
+    def __init__(self, outer):
+        self._outer = outer
+
+    def get_exec_status(self):
+        return self._outer.exec_status
+
+
+class _FakeAutotuneClient:
+    def __init__(self, outer):
+        self._outer = outer
+
+    def get_status(self):
+        return self._outer.autotune_status
+
+
+class _FakeSafetyClient:
+    def __init__(self, outer):
+        self._outer = outer
+
+    def get_status(self):
+        return self._outer.safety_status
+
+    def get_diag(self):
+        return self._outer.safety_diag
+
+
+class _FakeCapabilityPreflightReport:
+    """Stands in for capability_preflight.PreflightReport -- just the
+    fields runner.preflight() reads off it."""
+
+    def __init__(self, ok=True, crash_unacknowledged=False, crash_summary=None,
+                 readiness_blocked=(), reachable=True, error=""):
+        self.ok = ok
+        self.board = _FakeCapabilityPreflightBoard(
+            crash_unacknowledged, crash_summary, readiness_blocked, reachable, error)
+
+    def describe(self):
+        return f"ok={self.ok}"
+
+
+class _FakeCapabilityPreflightBoard:
+    def __init__(self, crash_unacknowledged, crash_summary, readiness_blocked, reachable, error):
+        self.crash_unacknowledged = crash_unacknowledged
+        self.crash_summary = crash_summary
+        self.readiness_blocked = readiness_blocked
+        self.reachable = reachable
+        self.error = error
+
+
 class _FakeSrv:
     """Stands in for kilnctrl.mcp_server: every function the runner's
-    preflight/teardown calls, all returning healthy-board text by default."""
+    preflight/teardown calls, all returning a healthy board by default."""
 
     def __init__(self):
         self.stale = ""
-        self.exec_status = "state: 0 (idle)"
-        self.autotune_status = "status: idle"
-        self.safety_status = "link_up: true, trip_reason: 0"
+        self.exec_status = _FakeExecStatus("idle")
+        self.autotune_status = _FakeAutotuneStatus("idle")
+        self.safety_status = _FakeSafetyStatus(link_up=True)
+        self.safety_diag = _FakeSafetyDiag(ever_received=True, trip_reason=0)
         self.heap_status = "heap ok, no crash pending"
         self.profiles_stop_called = False
         self.autotune_abort_called = False
+        self._profiles = _FakeProfilesClient(self)
+        self._autotune = _FakeAutotuneClient(self)
+        self._safety = _FakeSafetyClient(self)
 
     def _stale_banner(self):
         return self.stale
-
-    def profiles_get_exec_status(self):
-        return self.exec_status
-
-    def autotune_get_status(self):
-        return self.autotune_status
-
-    def safety_get_status(self):
-        return self.safety_status
 
     def get_heap_status(self, host=None):
         return self.heap_status
@@ -60,7 +126,11 @@ class RunnerLifecycleTest(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix="bench_test_runner_test_")
         self.fake_srv = _FakeSrv()
-        self.ctx = {"srv": self.fake_srv, "host": None}
+        self.cp_report = _FakeCapabilityPreflightReport(ok=True)
+        self.ctx = {
+            "srv": self.fake_srv, "host": None,
+            "capability_preflight_run": lambda preset, host, **kw: self.cp_report,
+        }
         # Save/restore anything we monkeypatch onto the real REGISTRY so
         # this test never leaks state into other tests or the module.
         self._saved_specs = {}
@@ -89,19 +159,31 @@ class RunnerLifecycleTest(unittest.TestCase):
         self.assertIn("stale", reason.lower())
 
     def test_running_profile_fails_preflight(self):
-        self.fake_srv.exec_status = "state: 2 (RUNNING)"
+        self.fake_srv.exec_status = _FakeExecStatus("running")
         runner = BenchTestRunner(self.ctx, logs_root=self.tmpdir)
         ok, reason, before = runner.preflight()
         self.assertFalse(ok)
 
     def test_unacknowledged_crash_fails_preflight(self):
-        self.fake_srv.heap_status = "UNACKNOWLEDGED CRASH REPORT: safety_poll panic"
+        self.cp_report = _FakeCapabilityPreflightReport(
+            ok=False, crash_unacknowledged=True, crash_summary="safety_poll panic")
+        self.ctx["capability_preflight_run"] = lambda preset, host, **kw: self.cp_report
         runner = BenchTestRunner(self.ctx, logs_root=self.tmpdir)
         ok, reason, before = runner.preflight()
         self.assertFalse(ok)
+        self.assertIn("crash", reason.lower())
+
+    def test_readiness_blocked_fails_preflight(self):
+        self.cp_report = _FakeCapabilityPreflightReport(
+            ok=False, readiness_blocked=(("estop_verified", "E-stop", "not verified"),))
+        self.ctx["capability_preflight_run"] = lambda preset, host, **kw: self.cp_report
+        runner = BenchTestRunner(self.ctx, logs_root=self.tmpdir)
+        ok, reason, before = runner.preflight()
+        self.assertFalse(ok)
+        self.assertIn("readiness", reason.lower())
 
     def test_failed_preflight_marks_every_case_not_run(self):
-        self.fake_srv.exec_status = "state: 2 (RUNNING)"
+        self.fake_srv.exec_status = _FakeExecStatus("running")
         runner = BenchTestRunner(self.ctx, logs_root=self.tmpdir)
         outcome = runner.run(suite="smoke")
         self.assertFalse(outcome.preflight_ok)
@@ -171,7 +253,7 @@ class RunnerLifecycleTest(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(run_dir, "transcript.md")))
 
     def test_teardown_stops_a_stuck_profile_run(self):
-        self.fake_srv.exec_status = "state: 2 (RUNNING)"
+        self.fake_srv.exec_status = _FakeExecStatus("running")
         # Bypass preflight (which would refuse) to exercise teardown alone.
         runner = BenchTestRunner(self.ctx, logs_root=self.tmpdir)
         runner.teardown()

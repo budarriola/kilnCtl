@@ -50,7 +50,7 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     try:
         outcome = runner.run(suite=suite, cases=case_list, dry_run=dry_run,
                               allow_heat=allow_heat, tag=tag)
-    except KeyError as exc:
+    except (KeyError, ValueError) as exc:
         return f"error: {exc}"
 
     lines = [f"bench_test_run: suite={suite} run_id={outcome.run_id} exit_code={outcome.exit_code}"]
@@ -62,7 +62,7 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
             continue
         reason = f" -- {result.reason}" if result.reason else ""
         lines.append(f"  {cid}: {result.verdict}{reason}")
-    lines.append(f"run dir: {bt_report.run_dir_path(None, outcome.run_id)}")
+    lines.append(f"run dir: {outcome.run_dir}")
     return "\n".join(lines)
 
 
