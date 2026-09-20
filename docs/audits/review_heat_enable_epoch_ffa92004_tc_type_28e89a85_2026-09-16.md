@@ -365,3 +365,25 @@ builds passed; no claim here rests on them.
   findings are genuinely addressed.
 - **`28e89a85`: safe to stop iterating.** Every claim reproduced exactly, the
   anti-vacuity assertion is load-bearing, and both Pico invariants are intact.
+
+## Follow-up, 2026-09-20
+
+The BLOCKING finding above is now fixed, by `9b9ef3ef` ("Close the heat-enable
+stale-claim window the release epoch missed"), the same day this review landed.
+It does exactly what the "design tension" section above says a correct fix
+needs: it distinguishes an operator stop from the idle backstop rather than
+bumping `release_epoch[]` unconditionally or only on `was_held`. `heat_enable.c`
+now threads a `stop_transition` flag through the shared release body so a real
+stop/pause/abort transition advances the epoch (`stop_transition || was_held`,
+`heat_enable.c:469`) even when the claimant's bit was already clear at that
+call site -- closing exactly the window this review demonstrated -- while
+`heat_enable_release_backstop()`'s unconditional per-tick calls do not, so a
+legitimate in-flight acquire is not spuriously invalidated by an idle tick.
+`test_stale_claim_is_not_resurrected()` (`test_heat_enable.c:625`) still carries
+the anti-vacuity case this review flagged, reworded ("an idle-backstop tick
+with nothing held does not invalidate a legitimate acquire",
+`test_heat_enable.c:686`) rather than deleted or weakened. Verified on this
+pass: a full host-test rebuild (`build_host_tests.ps1`) reports 56/56
+executables built and passed at `HEAD` (`0b4524e2`), which includes
+`test_heat_enable`. No code change was needed this pass; this note closes the
+finding.
