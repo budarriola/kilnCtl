@@ -71,7 +71,7 @@ ST-01 already subsumes `check_stack_margin_registration.ps1`, `check_stack_margi
 | FL-04 | boot_guard counter | — | `GET /api/boot_guard` | `recovery_mode:false`, `boot_count` ≤ 1 (a higher count on a board that was just flashed by FL-10 is a FAIL — the footgun of `docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md`) | 2 s | no |
 | FL-05 | Recovery image present and sized | — | `GET /api/partitions` has a `recovery` row; `firmware/KilnFW_recovery/build/recovery.bin` (if built) ≤ that row's size | bound holds; `NOT_RUN` for the size half when no recovery build exists | 2 s | no |
 | FL-06 | Coredump partition readable | — | `GET /api/coredump/info` | route answers 200 with a well-formed body (a stored dump or none) | 2 s | no |
-| FL-07 | cfg partition state | — | `GET /api/cfgfs`, `GET /api/cfgfs/format_pending` | `pending:false`; mounted flag recorded (today unmounted, `docs/CONFIG_FILESYSTEM.md` — recorded, not judged, until the owner decides §7.4) | 3 s | no |
+| FL-07 | cfg partition state | — | `GET /api/cfgfs`, `GET /api/cfgfs/format_pending` | record-only (plan §7 owner decision 6): `pending:false` is PASS, anything else is INCONCLUSIVE with the board's partition table and git's `partitions.csv` printed side by side, never FAIL; mounted flag recorded (today unmounted, `docs/CONFIG_FILESYSTEM.md`) | 3 s | no |
 | FL-08 | Pico slot metadata | link up | `safety_get_fw_version()`, `safety_get_diag()` (boot reason, active slot per `firmware/SaftyFW/docs/BOOTLOADER.md`) | commit is a real hash; boot reason is `power_on`/`sw_reset`, **not** `watchdog`; active slot recorded | 3 s | no |
 | FL-09 | Pico image vs archive | — | `find_safty_crash_elf(commit)` | an archived ELF exists for the running Pico commit | 3 s | no |
 | FL-10 | ESP JTAG flash round trip (**optional, opt-in via `allow_flash`**) | idle, interlock ok, ST-04 fresh, no sensitive dirty files, `ap_password` supplied | `flash_firmware(verify=True, ap_password=…)` from the tree ST-04 built, or a `kiln_fw_root` worktree | tool returns success with verification PASSED, running partition `app`, `boot_guard` before/after reported and cleared; then FL-01..04 re-run | ~4 min | no |
@@ -83,7 +83,7 @@ ST-01 already subsumes `check_stack_margin_registration.ps1`, `check_stack_margi
 |---|---|---|---|---|---|---|
 | SK-01 | ESP high-water marks, idle | board up ≥ 2 min | `get_stack_margin()` (`mcp_server_info.py:91`) | every registered task alive (none "not running" except tasks the build config omits, listed in `stack_margin_baseline.py`), each `level` ≥ the budget in the committed baseline records read by `stack_margin_baseline.load_records()` (`check_stack_margin_baseline.ps1`'s data); write a new `stack_margin_bench_idle_<commit>_<ts>.json` record into the run dir | 5 s | no |
 | SK-02 | ESP high-water marks, exercised | HP-01 or HP-02 just completed in this run, plus one `GET /api/backup/export` and one `POST /api/zones` of the unchanged config to walk the httpd heavy paths | `get_stack_margin()` | as SK-01; additionally every task's margin ≥ 512 B absolute (the `httpd stack blob` class, memory `project_httpd_stack_blob_class`) | 5 s | no (reads after heat) |
-| SK-03 | Pico task margins | link up | `GET /api/saftyfw_stack_margin` (`safety_stack_margin_http.c:182`) | every task's free ≥ 25 % of configured (memory `project_saftyfw_minimal_stack_overflows` — the number is the open question §7.5) | 3 s | no |
+| SK-03 | Pico task margins | link up | `GET /api/saftyfw_stack_margin` (`safety_stack_margin_http.c:182`) | every task's free ≥ 25 % of configured (memory `project_saftyfw_minimal_stack_overflows` — flat interim rule per plan §7 owner decision 4, pending a wave 1 Pico baseline) | 3 s | no |
 | SK-04 | Heap and DRAM floor | — | `get_heap_status()` before and after the run's heaviest web case (WEB-DIAG-01) | internal DRAM largest free block never below 11.9 kB (memory `project_esp_internal_dram_exhaustion`); no `UNACKNOWLEDGED CRASH REPORT` banner | 5 s | no |
 
 Judgment for SK-01/02 depends on **one dependency**: the baseline records must exist for the running commit's task set; if a task is registered but has no baseline, the case is `INCONCLUSIVE` for that task and the record is still written so the next commit of the baseline has data.
@@ -242,10 +242,10 @@ WEB-DASH-01 render (`profileSelect`, `runBtn`, zone cards) · WEB-DASH-02 profil
 | OT OTA | 19 (12 ESP, 5 Pico, 2 both) | 0 (E07/E08 ride on HP/AT heat) | 5 Pico blocked, E06 operator/fixture, E11 needs NEW tool |
 | AT autotune | 5 | 2 | 0 |
 | HP heating profiles | 8 | 6 | 0 |
-| WEB | 96 (DASH 13, PROF 11, ZONE 13, SAF 4, STIM 2, COMM 7, RDY 4, WIZ 11, DIAG 11, OTA 8, WIFI 6, SEC 6, BAK 4, KCFG 5, SET 4, DISP 4, LOG 3, X 3) | 0 own heat (several observe HP/AT) | WIFI-06 operator |
+| WEB | 119 (DASH 13, PROF 11, ZONE 13, SAF 4, STIM 2, COMM 7, RDY 4, WIZ 11, DIAG 11, OTA 8, WIFI 6, SEC 6, BAK 4, KCFG 5, SET 4, DISP 4, LOG 3, X 3) | 0 own heat (several observe HP/AT) | WIFI-06 operator |
 | LCD | 21 | 0 own heat (observe HP) | LCD-20 only under OT-E11 |
 | SP | 11 | 1 (SP-09) | SP-08/09 operator; SP-10 INCONCLUSIVE by design |
-| **total** | **180** | **9 heat-originating** | |
+| **total** | **203** | **9 heat-originating** | |
 
 ## 5. Routine subsets, ordering, interdependence
 
@@ -287,7 +287,7 @@ Fixed, not alphabetical: **ST → FL (read-only) → SK-01/03/04 → SP read-onl
 
 1. **Log home (was Q1).** Decided: gitignored `logs/bench_test/<run>/` plus one human sentence per notable run in `docs/BENCH_TEST_LOG.md`. Matches the recommendation.
 2. **LCD suite (was Q2).** Decided: write against the post-rework LCD (`docs/UI_PLAN.md` §6), gated on `ui_rev`. Matches the recommendation.
-3. **Harness profile slot (was Q6).** Decided: **not** user slot 7. Owner's words: "i intended there to be 100 user profiles and 1 running profile for live edits. please place this after that with no visibility to the user." The harness slot is a hidden slot after the 100 user slots and the 1 live-edit slot (index 101 in a 0-based layout), never listed, exported, or shown on any page or the LCD. `slots100` (worktree, not yet on `main`) owns the concrete slot layout; this plan and any harness code only reference "the hidden bench slot after the live-edit slot" — the index itself is `slots100`'s to assign.
+3. **Harness profile slot (was Q6).** Decided: **not** user slot 7. Owner's words: "i intended there to be 100 user profiles and 1 running profile for live edits. please place this after that with no visibility to the user." The harness slot is a hidden slot after the 100 user slots and the 1 live-edit slot, never listed, exported, or shown on any page or the LCD. `slots100` (worktree, not yet on `main`) owns the concrete slot layout; this plan and any harness code only reference "the hidden bench slot after the live-edit slot" — the index itself is `slots100`'s to assign.
 4. **Pico stack threshold (was Q5).** Decided: capture a Pico baseline in wave 1; flat 25% interim rule for SK-03 meanwhile. Matches the recommendation.
 5. **Recovery-boot tool (was Q3, OT-E11).** Decided: stays owned by `docs/OTA_SINGLE_SLOT_PLAN.md`; bench cases that need `ota_recovery_boot_esp()` SKIP until it exists there. Matches the recommendation.
 6. **cfg partition FL-07 (was Q4).** Decided: record-only — INCONCLUSIVE with both the board's partition table and git's `partitions.csv` printed side by side, never FAIL. Firmer than the recommendation (which left the eventual verdict shape open); the verdict shape itself (INCONCLUSIVE, not PASS/FAIL) is now fixed.

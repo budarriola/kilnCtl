@@ -8,7 +8,6 @@ this wave adds).
 """
 from __future__ import annotations
 
-import dataclasses
 import datetime
 import json
 import os
@@ -39,12 +38,31 @@ def run_dir_path(logs_root: Optional[str], run_id: str) -> str:
     return os.path.join(root, run_id)
 
 
+_CREDENTIAL_KEY_RE = re.compile(
+    r'("(?:ap_password|password|wifi_password|web_password|psk|ssid_password)"\s*:\s*")[^"]*(")',
+    re.IGNORECASE,
+)
+_CREDENTIAL_QUERY_RE = re.compile(r"((?:ap_password|password|psk)=)\S+", re.IGNORECASE)
+
+#: Env var names whose *values* (KILNCTL_WEB_PASSWORD, and any Wi-Fi
+#: credential a wave 1+ commissioning case sources per plan §7 decision 7)
+#: must never appear literally in a written artifact, not just their key.
+_CREDENTIAL_ENV_NAME_RE = re.compile(r"PASSWORD|PSK", re.IGNORECASE)
+
+
 def _redact(text: str) -> str:
     """Belt-and-suspenders: even though wave 0's read-only cases never
-    handle a credential, transcript.md redacts anything shaped like one
-    before it is ever written (plan §6 rule 9)."""
-    text = re.sub(r'("ap_password"\s*:\s*")[^"]*(")', r"\1***\2", text)
-    text = re.sub(r"(ap_password=)\S+", r"\1***", text)
+    handle a credential, every artifact this module writes (transcript.md,
+    summary.json, board_before.json, board_after.json) is redacted before
+    it is ever written (plan §6 rule 9) -- both by key shape and by
+    scanning for the literal value of any credential-shaped environment
+    variable (e.g. ``KILNCTL_WEB_PASSWORD``, a Wi-Fi password) that
+    happens to be set, in case it leaked into observed/reason text."""
+    text = _CREDENTIAL_KEY_RE.sub(r"\1***\2", text)
+    text = _CREDENTIAL_QUERY_RE.sub(r"\1***", text)
+    for name, value in os.environ.items():
+        if value and _CREDENTIAL_ENV_NAME_RE.search(name):
+            text = text.replace(value, "***")
     return text
 
 
@@ -82,7 +100,7 @@ def write_run(run_dir: str, summary: Dict[str, Any], transcript_lines: "list[str
 
     summary_path = os.path.join(run_dir, "summary.json")
     with open(summary_path, "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2, sort_keys=True, default=str)
+        f.write(_redact(json.dumps(summary, indent=2, sort_keys=True, default=str)))
 
     transcript_path = os.path.join(run_dir, "transcript.md")
     with open(transcript_path, "w", encoding="utf-8") as f:
@@ -93,9 +111,9 @@ def write_run(run_dir: str, summary: Dict[str, Any], transcript_lines: "list[str
             f.write(f"- **{cid}**: {case['verdict']} -- {case['reason']}\n")
 
     with open(os.path.join(run_dir, "board_before.json"), "w", encoding="utf-8") as f:
-        json.dump(summary["board_before"], f, indent=2, sort_keys=True, default=str)
+        f.write(_redact(json.dumps(summary["board_before"], indent=2, sort_keys=True, default=str)))
     with open(os.path.join(run_dir, "board_after.json"), "w", encoding="utf-8") as f:
-        json.dump(summary["board_after"], f, indent=2, sort_keys=True, default=str)
+        f.write(_redact(json.dumps(summary["board_after"], indent=2, sort_keys=True, default=str)))
 
 
 def list_recent_runs(logs_root: Optional[str] = None, n: int = 1) -> "list[Dict[str, Any]]":
