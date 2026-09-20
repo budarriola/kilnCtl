@@ -1301,6 +1301,15 @@ bool validate_on_off_rules(const profile_t *candidate, char *err_msg, size_t err
             snprintf(err_msg, err_cap, "rule %u: temp_ref_zone %u out of range", i, r->temp_ref_zone);
             return false;
         }
+        /* TODO (Opus review N8): the catalog/export/edit HTTP handlers do not
+         * yet round-trip temp_ref_zone at all -- this bounds check is the
+         * only place today that knows the field exists. When temp_source==2
+         * (an explicit reference-zone thermocouple, distinct from
+         * temp_source 0/1) is actually wired up end to end, add
+         * temp_ref_zone to profiles_catalog_http.c's JSON output,
+         * profiles_export_http.c's export/import, and profiles_edit_http.c's
+         * form parser in the SAME change -- adding it to only one leaves the
+         * others silently dropping or defaulting the field. */
         if (r->temp_cmp != ON_OFF_TEMP_CMP_NONE &&
             (isnan(r->temp_threshold_c) || r->temp_threshold_c < PROFILE_TARGET_C_MIN ||
              r->temp_threshold_c > PROFILE_TARGET_C_MAX)) {

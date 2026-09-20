@@ -359,6 +359,37 @@ static void test_new_export_with_rules_key_round_trips_every_field(void)
     TEST_CHECK(r->invert == 0, "invert round-trips");
 }
 
+// An out-of-range temp_c must not be stored unbounded, even for a rule whose
+// temp_cmp is NONE (0) -- validate_on_off_rules() (profiles_http.c) only
+// range-checks temp_threshold_c when temp_cmp != NONE, so a rule that never
+// uses its threshold used to be able to carry an absurd stored value
+// straight through import with no bound applied at all (Opus review N5).
+// backup_json_field_opt_num() rejects an out-of-range value the same way
+// every sibling optional rule field already does -- has_v stays false and
+// the field is left at its zeroed default, not clamped to a boundary.
+#define MAKE_BODY_WITH_OUT_OF_RANGE_TEMP_C                                                        \
+    "{\"kind\":\"kilnctl_profile\",\"version\":2,\"name\":\"Cone6\",\"zone_mask\":1,"              \
+    "\"segments\":[{\"seg_kind\":0,\"target_c\":1200,\"ramp_c_per_hr\":100,"                       \
+    "\"dwell_min\":30,\"io_target\":0,\"io_state\":0,\"io_blocking\":0,"                           \
+    "\"io_leave_on_at_end\":0}],"                                                                   \
+    "\"on_off_rules\":[{\"zone\":2,\"segment\":0,\"enable\":1,\"phase_mask\":2,"                    \
+    "\"direction_mask\":1,\"temp_cmp\":0,\"temp_c\":999999,\"time_start_s\":5,"                     \
+    "\"time_stop_s\":0,\"invert\":0}]}"
+
+static void test_out_of_range_temp_c_is_not_stored_unbounded(void)
+{
+    reset_state();
+    esp_err_t err = run_import(MAKE_BODY_WITH_OUT_OF_RANGE_TEMP_C);
+    TEST_CHECK(err == ESP_OK, "a rule with an out-of-range temp_c still imports (temp_cmp is NONE, "
+                              "so validate_on_off_rules() does not itself refuse it)");
+    TEST_CHECK(s_save_called, "profiles_http_save() is reached");
+    TEST_CHECK(s_last_saved.on_off_rule_count == 1, "exactly one rule imported");
+    const profile_on_off_rule_t *r = &s_last_saved.on_off_rules[0];
+    TEST_CHECK(r->temp_threshold_c >= PROFILE_TARGET_C_MIN && r->temp_threshold_c <= PROFILE_TARGET_C_MAX,
+              "an out-of-range temp_c (999999) must never be stored unbounded, "
+              "even when temp_cmp is NONE and the value is otherwise unused");
+}
+
 int main(void)
 {
     TEST_SECTION("profile_export_import");
@@ -370,6 +401,7 @@ int main(void)
     test_negative_dwell_min_is_still_rejected();
     test_old_export_without_rules_key_imports_as_rules_free();
     test_new_export_with_rules_key_round_trips_every_field();
+    test_out_of_range_temp_c_is_not_stored_unbounded();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;

@@ -55,13 +55,22 @@ $failed = @()
 $passCount = 0
 
 foreach ($f in $files) {
-    & node $f.FullName *> $null
+    # Run through cmd /c with 2>&1 merged into stdout, captured as plain text.
+    # A passing test that merely writes to stderr (e.g. console.error) must
+    # not abort this check -- native stderr output inside PowerShell's own
+    # pipeline throws a NativeCommandError and stops the whole script under
+    # $ErrorActionPreference = 'Stop'. Routing through cmd /c avoids that:
+    # PowerShell never sees the child's stderr as its own error stream.
+    $out = & cmd /c "node `"$($f.FullName)`" 2>&1"
     $code = $LASTEXITCODE
     if ($code -eq 0) {
         Write-Output "PASS: $($f.Name)"
         $passCount++
     } else {
         Write-Output "FAIL: $($f.Name) (exit $code)"
+        if ($out) {
+            Write-Output ($out | Out-String)
+        }
         $failed += $f.Name
     }
 }

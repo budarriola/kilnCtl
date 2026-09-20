@@ -15,6 +15,7 @@
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 
 #include "profiles_http.h"
+#include "profiles_http_internal.h" // PROFILE_TARGET_C_MIN/MAX, PROFILE_ON_OFF_RULE_JSON_MAX
 #include "backup_json.h" // shared hand-rolled JSON reader (see that header's own
                           // comment on why this codebase has no cJSON dependency)
 #include "wifi_provision_http.h"
@@ -75,8 +76,13 @@ static esp_err_t export_get_handler(httpd_req_t *req)
      * 192B/segment matches profiles_catalog_http.c's own per-segment budget
      * for the richer (seg_kind/io_*) field set below. Rule term widened
      * 128 -> 224 (Opus review pass): a rule object with temp_source measured
-     * 182 bytes worst case. */
-    const size_t cap = 256 + (size_t)PROFILE_MAX_SEGMENTS * 192 + (size_t)PROFILE_MAX_ON_OFF_RULES * 224;
+     * 218 bytes worst case. This is a capacity budget, not a soft limit --
+     * if a profile's real JSON ever exceeds it, the APPEND macro's own
+     * snprintf bounds check below catches that at write time and this
+     * handler returns a clean 500 ("profile too large to export"); it never
+     * silently truncates the response. */
+    const size_t cap =
+        256 + (size_t)PROFILE_MAX_SEGMENTS * 192 + (size_t)PROFILE_MAX_ON_OFF_RULES * PROFILE_ON_OFF_RULE_JSON_MAX;
     char *json = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!json) {
         ESP_LOGE(TAG, "GET /api/profile/export: malloc(%u) failed", (unsigned)cap);
@@ -379,9 +385,18 @@ static esp_err_t import_post_handler(httpd_req_t *req)
             r->temp_cmp = (uint8_t)dv;
         }
         r->temp_threshold_c = 0.0f;
-        double dtemp = 0.0;
-        if (backup_json_field_num(re, "temp_c", &dtemp)) {
-            r->temp_threshold_c = (float)dtemp;
+        has_v = false;
+        /* Bounded the same as every sibling optional field above (and the
+         * same range validate_on_off_rules() itself enforces once
+         * temp_cmp != NONE, profiles_http.c) -- an out-of-range value here
+         * used to be stored unbounded whenever temp_cmp==NONE, since that
+         * validation path skips the range check for a rule whose threshold
+         * is unused; bounding at import time keeps a stored-but-dormant
+         * value sane regardless of temp_cmp. */
+        if (backup_json_field_opt_num(re, "temp_c", (double)PROFILE_TARGET_C_MIN, (double)PROFILE_TARGET_C_MAX,
+                                       &dv, &has_v, "temp_c", NULL, 0, rule_i) &&
+            has_v) {
+            r->temp_threshold_c = (float)dv;
         }
         r->time_start_s = 0;
         has_v = false;

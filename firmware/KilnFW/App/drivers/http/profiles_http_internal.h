@@ -72,6 +72,17 @@ extern const char *PROFILES_TAG;
  * profiles_edit_http.c's profile_post_handler() is the only reader. */
 #define PROFILE_BODY_MAX 2048
 
+/* Per-on/off-rule JSON object byte budget, shared by every writer that
+ * builds one of these objects into a fixed-capacity buffer
+ * (profiles_catalog_http.c's PROFILE_DETAIL_JSON_CAP and
+ * profiles_export_http.c's export cap) -- a rule object with temp_source
+ * measured 218 bytes worst case (widened 128 -> 224, Opus review pass).
+ * Distinct from PROFILE_LIST_ENTRY_MAX (profiles_catalog_http.c), which
+ * bounds a whole profile-list entry, not one rule object; both currently
+ * happen to be 224 but for unrelated reasons and must not be assumed to
+ * track each other. */
+#define PROFILE_ON_OFF_RULE_JSON_MAX 224
+
 /* ---- shared profile-slot storage (profiles_http.c) ------------------------
  * All 8 slots kept resident -- see profiles_http.c's own doc comment on
  * profiles_state_t for why. Read by profiles_catalog_http.c's listing/detail

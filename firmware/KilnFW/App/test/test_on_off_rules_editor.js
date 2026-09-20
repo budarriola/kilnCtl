@@ -117,6 +117,10 @@ class Node2 {
     if (sel[0] === '.') return this.classes.includes(sel.slice(1));
     return this.tag === sel;
   }
+  getAttribute(name) {
+    const v = this.attrs[name];
+    return v === undefined ? null : v;
+  }
   querySelectorAll(sel) {
     const out = [];
     const parts = sel.split(':checked');
@@ -389,6 +393,9 @@ function buildContext(rules, onOffZones, segmentCount) {
     'DEFECT 2: a stale zone_index (9) not among onOffZones still gets a selected orphan option');
   assert(/no longer an on\/off zone/.test(optionsHtml),
     'DEFECT 2: the orphan option is visibly flagged so the operator notices, not silently kept');
+  assert(/data-oo-stale="1"/.test(optionsHtml),
+    'the orphan option also carries data-oo-stale="1" -- the attribute ooHasStaleZoneRow() actually ' +
+    'checks (Opus review N6), independent of the human-readable label text');
 
   const params = ctx.ooRulesToParams();
   const asMap = {};
@@ -417,6 +424,30 @@ function buildContext(rules, onOffZones, segmentCount) {
     'a rule targeting a real, still-existing on/off zone is never flagged as an orphan');
   assert(ctx.ooHasStaleZoneRow() === false,
     'ooHasStaleZoneRow() is false when every row targets a real on/off zone -- no false-positive refusal');
+})();
+
+// ---------------------------------------------------------------------------
+// Opus review N6: ooHasStaleZoneRow() must key off data-oo-stale="1", not the
+// orphan option's label text, so a copy-editing change to the label alone
+// can never silently disable the save-refusal guard. Simulate exactly that:
+// a row whose selected option's label happens to match the old wording but
+// carries no data-oo-stale attribute (i.e. a real, non-orphan option that
+// coincidentally reused the phrase) must NOT be treated as stale.
+// ---------------------------------------------------------------------------
+(function testLabelOnlyMatchWithoutAttributeIsNotFlaggedStale() {
+  const zones = [{ index: 1, name: 'no longer an on/off zone' }];
+  const rule = {
+    zone: 1, segment: 0, enable: 1, phase_mask: 0, direction_mask: 0,
+    temp_source: 0, temp_cmp: 0, temp_c: 0, time_start_s: 0, time_stop_s: 0, invert: 0,
+  };
+  const ctx = buildContext([rule], zones, 1);
+  const optionsHtml = ctx.ooZoneOptionsHtml(1);
+  assert(optionsHtml.indexOf('data-oo-stale="1"') === -1,
+    'a real, non-orphan option never carries data-oo-stale="1", even if its label text happens to ' +
+    'match the orphan wording');
+  assert(ctx.ooHasStaleZoneRow() === false,
+    'ooHasStaleZoneRow() must not be fooled by label text alone -- a real zone whose NAME coincidentally ' +
+    'reads "no longer an on/off zone" must never trip the stale guard');
 })();
 
 console.log('');

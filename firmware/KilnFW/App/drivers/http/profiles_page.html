@@ -960,7 +960,11 @@ function ooZoneOptionsHtml(selected) {
   // and visibly flagged instead; save is refused client-side below while any
   // row carries one of these.
   if (selected != null && selected >= 0 && !found) {
-    html += '<option value="' + selected + '" selected>Zone ' + selected +
+    // data-oo-stale="1" is the sanctioned way to detect this option --
+    // ooHasStaleZoneRow() below reads the attribute, not the label text, so
+    // a copy-editing change to the label alone can never silently disable
+    // the save-refusal guard.
+    html += '<option value="' + selected + '" selected data-oo-stale="1">Zone ' + selected +
             ' (no longer an on/off zone)</option>';
   }
   if (html === '') html = '<option value="">(none)</option>';
@@ -1227,13 +1231,15 @@ function ooRulesToParams() {
 // no longer among onOffZones -- extracted out of the saveBtn click handler
 // so it has one definition testable on its own (test_on_off_rules_editor.js
 // defects 1/2 coverage) instead of only being exercisable through a full
-// click simulation.
+// click simulation. Reads the data-oo-stale="1" attribute ooZoneOptionsHtml()
+// sets on the orphan option, not its label text -- a label-only wording
+// change must never disable this guard (Opus review N6).
 function ooHasStaleZoneRow() {
   var stale = false;
   document.querySelectorAll('#oorules .oorule').forEach(function (row) {
     if (stale) return;
     var opt = row.querySelector('.oo-zone').selectedOptions[0];
-    if (opt && /no longer an on\/off zone/.test(opt.textContent)) stale = true;
+    if (opt && opt.getAttribute('data-oo-stale') === '1') stale = true;
   });
   return stale;
 }
