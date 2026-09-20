@@ -776,11 +776,16 @@ New button: 36x36 topbar icon with `LV_SYMBOL_FILE` (no new colour —
 opening it over the dashboard changes nothing about this arithmetic.
 
 Row internals (464px wide, 64px tall): star/name label `flex_grow(1)` with
-`LV_LABEL_LONG_DOT`, then a 64x36 Delete button right-aligned and vertically
-centred, for user slots only. Name width is `464 - 8 (pad) - 4 - 64 = 388`
-with Delete, 452 without. The row's own vertical padding is
-`(64 - 36) / 2 = 14` above and below the Delete button; the name label is a
-single montserrat_14 line (20px) centred in the same 64px.
+`LV_LABEL_LONG_CLIP` (not `LONG_DOT` -- `LONG_DOT`'s
+`lv_obj_get_self_height()` -> `lv_label_set_long_mode()` ->
+`lv_obj_invalidate()` -> `lv_event_send()` -> `cleanup_event_list()` ->
+`lv_malloc_core()` chain, newly reachable from `ui_home_refresh_cb()`
+through `lv_obj_update_layout()`, re-breaks the lvgl task's 4880 B stack
+ceiling), then a 64x36 Delete button right-aligned and vertically centred,
+for user slots only. Name width is `464 - 8 (pad) - 4 - 64 = 388` with
+Delete, 452 without. The row's own vertical padding is `(64 - 36) / 2 = 14`
+above and below the Delete button; the name label is a single
+montserrat_14 line (20px) centred in the same 64px.
 
 **Tests owed.**
 

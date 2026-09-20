@@ -71,6 +71,7 @@ typedef struct picker_ctx_s {
     lv_obj_t *row_label[UI_PAGE_PROFILE_PICKER_ROWS_PER_PAGE];
     lv_obj_t *row_del_btn[UI_PAGE_PROFILE_PICKER_ROWS_PER_PAGE];
     int64_t del_confirm_deadline_us[UI_PAGE_PROFILE_PICKER_ROWS_PER_PAGE];
+    uint8_t del_confirm_id[UI_PAGE_PROFILE_PICKER_ROWS_PER_PAGE];
 } picker_ctx_t;
 
 /* Per-row event user data: which context and which on-page slot (0..3) this
@@ -184,6 +185,22 @@ static void delete_btn_clicked_cb(lv_event_t *e)
 
     if (armed) {
         ctx->del_confirm_deadline_us[slot] = 0;
+        /* id (above) was just recomputed from ctx->ids at THIS tap, which
+         * render()'s load_ids() keeps current -- so it already reflects
+         * anything that reordered rows since the arming tap (another delete
+         * completing, a favorite toggle from elsewhere, a background
+         * refresh). Comparing it against the id armed back then, rather than
+         * re-deriving a second copy of "current id at this slot" via a new
+         * helper, is the cheapest correct re-check on the lvgl task's
+         * already zero-slack stack (UI_PLAN.md 6.2) -- an earlier version
+         * that called load_ids() again from a dedicated function measured
+         * 80 B over the 4880 B ceiling here. On mismatch, disarm and
+         * re-render instead of deleting the wrong profile. */
+        if (id != ctx->del_confirm_id[slot]) {
+            ESP_LOGW(TAG, "profile picker: armed id %u no longer at slot %u", ctx->del_confirm_id[slot], slot);
+            render(ctx);
+            return;
+        }
         bool ok = profiles_http_delete(id);
         if (ok) {
             esp_err_t fav_err = profiles_favorites_set(id, false);
@@ -199,6 +216,7 @@ static void delete_btn_clicked_cb(lv_event_t *e)
         render(ctx);
     } else {
         ctx->del_confirm_deadline_us[slot] = now + UI_PAGE_PROFILE_PICKER_DELETE_CONFIRM_US;
+        ctx->del_confirm_id[slot] = id;
         if (ctx->row_del_btn[slot]) {
             lv_obj_t *label = lv_obj_get_child(ctx->row_del_btn[slot], 0);
             if (label) {
@@ -368,14 +386,15 @@ static void new_profile_cb(lv_event_t *e)
  * LONG_CLIP, not LONG_DOT: LONG_DOT's lv_obj_get_self_height() ->
  * lv_label_set_long_mode() -> lv_obj_invalidate() -> lv_event_send() ->
  * cleanup_event_list() -> lv_malloc_core() chain, newly reachable from
- * ui_home_refresh_cb() through lv_obj_update_layout(), pushed the lvgl
- * task's measured worst-case stack from 4128 B to 4384 B against a 4128 B
- * ceiling this task has carried since the 2026-09-04 panic post-mortem (see
- * check_all_task_stack_budgets.ps1 and this file's own history) -- do not
- * reintroduce LONG_DOT here without re-measuring that budget. A name that
- * overflows the column is simply clipped rather than ellipsized; profile
- * names are short enough in practice (PROFILE_NAME_MAX_LEN) that this is a
- * cosmetic trade, not a usability loss. */
+ * ui_home_refresh_cb() through lv_obj_update_layout(), would push
+ * ui_home_refresh_cb's own contribution higher than its measured 4128 B
+ * against the lvgl task's 4880 B stack ceiling this task has carried since
+ * the 2026-09-04 panic post-mortem (see check_all_task_stack_budgets.ps1
+ * and this file's own history) -- do not reintroduce LONG_DOT here
+ * without re-measuring that budget. A name that overflows the column is
+ * simply clipped rather than ellipsized; profile names are short enough
+ * in practice (PROFILE_NAME_MAX_LEN) that this is a cosmetic trade, not a
+ * usability loss. */
 static void build_row(picker_ctx_t *ctx, uint8_t slot, row_ud_t *name_ud, row_ud_t *del_ud)
 {
     lv_obj_t *row = lv_obj_create(ctx->rows_col);
@@ -470,7 +489,12 @@ static lv_obj_t *build(picker_ctx_t *ctx, bool manage, row_ud_t *name_ud, row_ud
     lv_obj_remove_flag(ctx->rows_col, LV_OBJ_FLAG_SCROLLABLE);
 
     for (uint8_t slot = 0; slot < UI_PAGE_PROFILE_PICKER_ROWS_PER_PAGE; slot++) {
-        build_row(ctx, slot, &name_ud[slot], &del_ud[slot]);
+        /* del_ud is NULL on the pick (non-manage) build; only form &del_ud[slot]
+         * when it's actually backed by an array, since offsetting a NULL
+         * pointer is undefined behaviour even though build_row() never
+         * dereferences it outside the ctx->manage branch. */
+        row_ud_t *row_del_ud = ctx->manage ? &del_ud[slot] : NULL;
+        build_row(ctx, slot, &name_ud[slot], row_del_ud);
     }
 
     ui_topbar_raise(&ctx->tb);
