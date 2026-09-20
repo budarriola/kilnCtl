@@ -722,3 +722,91 @@ def judge_link_stats_delta(before: "dict[str, Any]", after: "dict[str, Any]") ->
             observed={"before": before, "after": after, "deltas": deltas},
         )
     return CaseResult(Verdict.PASS, observed={"before": before, "after": after, "deltas": deltas})
+
+
+def judge_web_rw_toggle(field: str, original: Any, test_value: Any, write_ok: bool, after_write: Any,
+                         restore_ok: bool, restored: Any) -> CaseResult:
+    """WEB read/write round-trip cases (plan doc section 3.7, Wave 2):
+    ``field`` was read, ``test_value`` written, read back, and ``original``
+    restored -- in the case's own ``finally``, so this is called after the
+    restore has already been attempted regardless of what happened above it.
+
+    Verdict shape (task instruction): FAIL unconditionally if the restore
+    itself did not round-trip -- leaving the board holding the test value is
+    a hazard this suite must never paper over, no matter how the write path
+    under test behaved. Only once the restore is confirmed does the verdict
+    become "about the write path": did the POST actually take effect,
+    confirmed by a real read-back rather than trusting the response body
+    alone."""
+    observed = {
+        "field": field, "original": original, "test_value": test_value,
+        "after_write": after_write, "restored": restored,
+    }
+    if not restore_ok or restored != original:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=(
+                f"{field} restore did not round-trip: expected {original!r} back, "
+                f"board now reads {restored!r} (restore POST ok={restore_ok})"
+            ),
+            observed=observed,
+        )
+    if not write_ok or after_write != test_value:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"{field} write did not take effect: wrote {test_value!r}, board read back {after_write!r}",
+            observed=observed,
+        )
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_web_sec03(pw_ok: bool, enabled_ok: bool, dashboard_ok: Optional[bool],
+                     admin_route_gated: Optional[bool], login_ok: bool, session_ok: bool,
+                     extend_ok: bool, restore_ok: bool, restore_matches: bool,
+                     state: Optional[dict] = None) -> CaseResult:
+    """WEB-SEC-03: enable web auth with the harness credential, verify the
+    auth surface (dashboard still open, an ADMIN-tier route now gated, login
+    + session + extend all work), then disable and confirm the restore
+    round-tripped. Same "restore failure always FAILs, otherwise the verdict
+    is about the write path" shape as :func:`judge_web_rw_toggle`, just with
+    more write-path steps to check in order -- the first one that did not
+    hold names the reason."""
+    observed = dict(state or {})
+    if not restore_ok or not restore_matches:
+        return CaseResult(
+            Verdict.FAIL,
+            reason="auth policy restore did not round-trip -- board may be left with web_enabled changed",
+            observed=observed,
+        )
+    if not pw_ok:
+        return CaseResult(
+            Verdict.FAIL,
+            reason="set_web_password did not confirm ok:true before enabling web auth -- refused to enable "
+                   "against an unstored credential",
+            observed=observed,
+        )
+    if not enabled_ok:
+        return CaseResult(Verdict.FAIL, reason="set_policy(web_enabled=1) did not report ok:true", observed=observed)
+    if not dashboard_ok:
+        return CaseResult(
+            Verdict.FAIL, reason="dashboard '/' did not answer 200 while web auth was enabled", observed=observed
+        )
+    if not admin_route_gated:
+        return CaseResult(
+            Verdict.FAIL,
+            reason="/settings/zones was reachable with no session while web auth was enabled",
+            observed=observed,
+        )
+    if not login_ok:
+        return CaseResult(
+            Verdict.FAIL, reason="POST /api/auth/login did not succeed with the harness credential", observed=observed
+        )
+    if not session_ok:
+        return CaseResult(
+            Verdict.FAIL, reason="GET /api/auth/session did not confirm the session after login", observed=observed
+        )
+    if not extend_ok:
+        return CaseResult(
+            Verdict.FAIL, reason="POST /api/auth/session/extend did not return 200", observed=observed
+        )
+    return CaseResult(Verdict.PASS, observed=observed)

@@ -337,7 +337,10 @@ _NIGHTLY_ORDER: List[str] = [
     "SK-01", "SK-03", "SK-04",
     "SP-01", "SP-02", "SP-05", "SP-07",
     *_WEB_SMOKE_IDS,
-    "WEB-DASH-03", "WEB-DASH-06", "WEB-DASH-07", "WEB-DASH-09",
+    # WEB-DASH-13 is not in the plan's own §5.1 nightly bullet list but is
+    # the same read/write-round-trip shape and is implemented in this wave,
+    # so it rides along with the other WEB-DASH round trips.
+    "WEB-DASH-03", "WEB-DASH-06", "WEB-DASH-07", "WEB-DASH-09", "WEB-DASH-13",
     "WEB-PROF-02", "WEB-PROF-03", "WEB-PROF-04", "WEB-PROF-05",
     "WEB-PROF-06", "WEB-PROF-07", "WEB-PROF-08", "WEB-PROF-09",
     "WEB-ZONE-02", "WEB-ZONE-03", "WEB-ZONE-05", "WEB-ZONE-09", "WEB-ZONE-12",
