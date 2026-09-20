@@ -59,6 +59,10 @@ NOT YET SUPPORTED (best-effort tool, refuses rather than guesses):
     against risks silently WRONG output, which is worse than refusing. This
     module refuses this kind by name with a pointer to config_store.c/.h so
     a future pass has the exact place to start.
+  - The ESP's raw zones_cfg_t NVS/blob record
+    (firmware/KilnFW/App/drivers/persist/zones_config_json.h,
+    ZONES_CFG_VERSION) is likewise refused by name (kind
+    "kilnctl_zones_blob") rather than guessed at.
 
 CRC. profile_persisted_t's crc32 tail is esp_crc32_le() (a standard
 reflected CRC-32, poly 0xEDB88320, no init complement, no final XOR -- the
@@ -70,6 +74,14 @@ round-trip tests below prove this module's own pack/unpack/crc are mutually
 consistent, not that they match real on-flash bytes byte-for-byte. Treat a
 v2+ profile_blob conversion as unverified against real hardware until a real
 captured blob is added to tools/PcTools/tests/fixtures/config_convert/.
+
+CRC RANGE. firmware's compute_profile_crc() (profiles_http.c:487-492, and the
+v2/v3 checks near :583/:597) computes the CRC over the WHOLE persisted
+struct -- body bytes AND the crc32 field itself, zeroed to 4 zero bytes --
+never over the body alone. This module reproduces that exactly: every
+encoder appends `_crc32(body + b"\\x00\\x00\\x00\\x00")`, and
+decode_profile_blob() checks an incoming v2+ blob's stored CRC the same way
+before trusting it.
 """
 from __future__ import annotations
 
@@ -164,6 +176,13 @@ KNOWN_UNSUPPORTED_KINDS = {
         "~100-field binary layout has been verified against real captured "
         "records. See config_convert.py's module docstring."
     ),
+    "kilnctl_zones_blob": (
+        "the ESP's raw zones_cfg_t NVS/blob record "
+        "(firmware/KilnFW/App/drivers/persist/zones_config_json.h, "
+        "ZONES_CFG_VERSION) is not yet supported by this tool -- no PC-side "
+        "struct/CRC mirror for it has been implemented or verified here. "
+        "See config_convert.py's module docstring."
+    ),
 }
 
 
@@ -253,7 +272,10 @@ def decode_profile_blob(blob: bytes) -> "tuple[int, dict]":
     """Decode a raw profN NVS record into (version, profile_dict). Raises
     ConfigConvertError for an unrecognized version or a length that does not
     match its claimed version (firmware treats that as corrupt too -- see
-    expected_len_for_version() in profiles_http.c)."""
+    expected_len_for_version() in profiles_http.c). v2+ blobs also get their
+    stored crc32 checked, over the same range firmware's compute_profile_crc()
+    uses (body + the crc32 field itself zeroed) -- v1 predates the crc32 tail
+    and has no check here, mirroring profiles_http.c's version==1 branch."""
     if len(blob) < 1:
         raise ConfigConvertError("empty profile blob")
     version = blob[0]
@@ -267,6 +289,16 @@ def decode_profile_blob(blob: bytes) -> "tuple[int, dict]":
             f"blob length {len(blob)} does not match version {version}'s expected length {expected} "
             "-- firmware treats this as corrupt, not a valid record to migrate"
         )
+
+    if version != 1:
+        stored_crc = int.from_bytes(blob[-4:], "little")
+        computed_crc = _crc32(blob[:-4] + b"\x00\x00\x00\x00")
+        if stored_crc != computed_crc:
+            raise ConfigConvertError(
+                f"CRC mismatch for profile version {version} blob "
+                f"(stored 0x{stored_crc:08x}, computed 0x{computed_crc:08x}) -- treating as corrupt, "
+                "same as profiles_http.c's own load path"
+            )
 
     if version == 1:
         fmt = _PERSISTED_V1_FMT
@@ -287,6 +319,11 @@ def decode_profile_blob(blob: bytes) -> "tuple[int, dict]":
     name = _decode_name(vals[i]); i += 1
     zone_mask = vals[i]; i += 1
     segment_count = vals[i]; i += 1
+    if segment_count > PROFILE_MAX_SEGMENTS:
+        raise ConfigConvertError(
+            f"segment_count {segment_count} exceeds PROFILE_MAX_SEGMENTS ({PROFILE_MAX_SEGMENTS}) -- "
+            "treating as corrupt rather than silently clamping"
+        )
 
     segments = []
     for _ in range(PROFILE_MAX_SEGMENTS):
@@ -340,7 +377,7 @@ def _encode_v1_or_v2(profile: dict, version: int) -> bytes:
         body += struct.pack("<" + _SEG_V2_FMT, s["target_c"], s["ramp_c_per_hr"], s["dwell_min"])
     if version == 1:
         return body
-    return body + struct.pack("<I", _crc32(body))
+    return body + struct.pack("<I", _crc32(body + b"\x00\x00\x00\x00"))
 
 
 def _encode_v3(profile: dict) -> bytes:
@@ -353,7 +390,7 @@ def _encode_v3(profile: dict) -> bytes:
             "<" + _SEG_V3_FMT, s["target_c"], s["ramp_c_per_hr"], s["dwell_min"], s["seg_kind"],
             s["io_target"], s["io_state"], s["io_blocking"], s["io_leave_on_at_end"],
         )
-    return body + struct.pack("<I", _crc32(body))
+    return body + struct.pack("<I", _crc32(body + b"\x00\x00\x00\x00"))
 
 
 def _encode_v4(profile: dict) -> bytes:
@@ -374,7 +411,7 @@ def _encode_v4(profile: dict) -> bytes:
             r["direction_mask"], r["temp_source"], r["temp_ref_zone"], r["temp_cmp"],
             r["temp_threshold_c"], r["time_start_s"], r["time_stop_s"], r["invert"],
         )
-    return body + struct.pack("<I", _crc32(body))
+    return body + struct.pack("<I", _crc32(body + b"\x00\x00\x00\x00"))
 
 
 def convert_profile_blob(blob: bytes, target_version: int) -> "tuple[bytes, ConversionReport]":
@@ -400,9 +437,6 @@ def convert_profile_blob(blob: bytes, target_version: int) -> "tuple[bytes, Conv
         report.add("document", "version", "kept", "source and target versions are identical")
     else:
         if source_version < 3 <= target_version:
-            for s in profile["segments"]:
-                if any(s[k] for k in ("seg_kind", "io_target", "io_state", "io_blocking", "io_leave_on_at_end")):
-                    continue  # nothing to report; defaults already applied at decode
             report.add("segments", "seg_kind/io_target/io_state/io_blocking/io_leave_on_at_end", "defaulted",
                         "source predates relay/IO segments (PROFILE_VERSION 2->3); every segment defaults to "
                         "PROFILE_SEG_KIND_ZONE_RAMP with IO fields cleared, exactly firmware's own migration")

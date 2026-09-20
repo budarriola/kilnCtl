@@ -6,6 +6,7 @@ docstring for scope and for what is deliberately NOT supported yet
 """
 import json
 import struct
+import zlib
 
 import pytest
 
@@ -54,6 +55,11 @@ def test_detect_kind_kiln_cfg_package_names_the_gap():
 def test_detect_kind_safety_config_store_names_the_gap():
     with pytest.raises(cc.ConfigConvertError, match="config_store.c"):
         cc.detect_kind({"kind": "safety_config_store"})
+
+
+def test_detect_kind_zones_blob_names_the_gap():
+    with pytest.raises(cc.ConfigConvertError, match="zones_config_json.h"):
+        cc.detect_kind({"kind": "kilnctl_zones_blob"})
 
 
 def test_detect_kind_not_a_dict():
@@ -120,6 +126,43 @@ def test_forward_v1_to_v2_no_shape_change_besides_crc():
     assert version == 2
     assert profile["name"] == "Cone06"
     assert len(out) == cc._EXPECTED_LEN[2]
+
+
+def test_crc_covers_body_plus_zeroed_crc_field_like_compute_profile_crc():
+    """Pins the CRC range to match firmware's compute_profile_crc()
+    (profiles_http.c:487-492): the CRC is computed over the WHOLE persisted
+    struct with the crc32 field zeroed -- body bytes plus 4 zero bytes, not
+    body bytes alone."""
+    v1_blob = _pack_v1()
+    v2_blob = cc._encode_v1_or_v2(cc.decode_profile_blob(v1_blob)[1], 2)
+    body = v2_blob[:-4]
+    stored_crc = int.from_bytes(v2_blob[-4:], "little")
+    assert stored_crc == zlib.crc32(body + b"\x00\x00\x00\x00") & 0xFFFFFFFF
+
+
+def test_decode_profile_blob_rejects_flipped_byte_crc_mismatch():
+    v1_blob = _pack_v1()
+    v2_blob = cc._encode_v1_or_v2(cc.decode_profile_blob(v1_blob)[1], 2)
+    corrupted = bytearray(v2_blob)
+    corrupted[10] ^= 0xFF  # flip a byte inside the name field (bytes 4-19), well before the CRC tail
+    with pytest.raises(cc.ConfigConvertError, match="CRC mismatch"):
+        cc.decode_profile_blob(bytes(corrupted))
+
+
+def test_decode_profile_blob_v1_has_no_crc_check():
+    # v1 predates the crc32 tail entirely -- decoding must not attempt one.
+    blob = _pack_v1()
+    version, profile = cc.decode_profile_blob(blob)
+    assert version == 1
+    assert profile["name"] == "Cone06"
+
+
+def test_decode_profile_blob_segment_count_overflow_refuses():
+    blob = bytearray(_pack_v1())
+    # _HEADER_FMT layout: version(1)+pad(3) + name(16) + zone_mask(1) + segment_count(1) -> byte 21.
+    blob[21] = cc.PROFILE_MAX_SEGMENTS + 1
+    with pytest.raises(cc.ConfigConvertError, match="segment_count"):
+        cc.decode_profile_blob(bytes(blob))
 
 
 def test_forward_v2_to_v3_adds_relay_io_fields_defaulted():
