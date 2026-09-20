@@ -609,7 +609,7 @@ static void test_restore_all_sets_every_count_and_persists(void)
     for (uint8_t i = 0; i < RELAY_CYCLES_COUNT; i++) {
         backup[i] = 1000u + i;
     }
-    TEST_CHECK(relay_cycles_restore_all(backup) == true, "restore succeeds on the normal path");
+    TEST_CHECK(relay_cycles_restore_all(backup, 0, NULL) == true, "restore succeeds on the normal path");
     for (uint8_t i = 0; i < RELAY_CYCLES_COUNT; i++) {
         TEST_CHECK(s_rc.counts[i] == backup[i], "every restored count lands in RAM");
     }
@@ -646,7 +646,7 @@ static void test_restore_all_is_idempotent(void)
     for (uint8_t i = 0; i < RELAY_CYCLES_COUNT; i++) {
         backup[i] = 500u + i * 3u;
     }
-    TEST_CHECK(relay_cycles_restore_all(backup) == true, "first restore succeeds");
+    TEST_CHECK(relay_cycles_restore_all(backup, 0, NULL) == true, "first restore succeeds");
     relay_cycles_blob_t blob_first;
     hal_kv_handle_t h;
     hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
@@ -654,7 +654,7 @@ static void test_restore_all_is_idempotent(void)
     hal_kv_get_blob(&h, NVS_KEY_CYCLES, &blob_first, &len);
     hal_kv_close(&h);
 
-    TEST_CHECK(relay_cycles_restore_all(backup) == true, "second restore of the same archive succeeds");
+    TEST_CHECK(relay_cycles_restore_all(backup, 0, NULL) == true, "second restore of the same archive succeeds");
     relay_cycles_blob_t blob_second;
     hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
     len = sizeof(blob_second);
@@ -684,7 +684,7 @@ static void test_restore_all_refuses_out_of_range_count_and_writes_nothing(void)
     }
     backup[2] = RELAY_CYCLES_RESTORE_MAX_COUNT + 1u; // the one corrupted field
 
-    TEST_CHECK(relay_cycles_restore_all(backup) == false,
+    TEST_CHECK(relay_cycles_restore_all(backup, 0, NULL) == false,
                "restore is refused because of the single out-of-range field");
     TEST_CHECK(s_rc.counts[0] == 11 && s_rc.counts[1] == 22 && s_rc.counts[2] == 33,
                "RAM counts are completely unchanged -- not even the valid fields were applied "
@@ -699,7 +699,111 @@ static void test_restore_all_rejects_null_pointer(void)
 {
     TEST_SECTION("relay_cycles_restore_all -- a NULL counts pointer is refused, not undefined behavior");
     reset_all();
-    TEST_CHECK(relay_cycles_restore_all(NULL) == false, "NULL is refused");
+    TEST_CHECK(relay_cycles_restore_all(NULL, 0, NULL) == false, "NULL is refused");
+}
+
+// MONOTONIC GUARD (2026-09-20 backup/restore review finding): the positive
+// half -- a legitimate HIGHER value must still be accepted verbatim, with
+// nothing reported as clamped.
+static void test_restore_all_accepts_higher_value_no_clamp(void)
+{
+    TEST_SECTION("relay_cycles_restore_all -- a value ABOVE the board's live count is accepted "
+                 "verbatim and reported as not clamped");
+    reset_all();
+    s_rc.counts[0] = 100;
+    s_rc.counts[1] = 200;
+
+    uint32_t backup[RELAY_CYCLES_COUNT];
+    for (uint8_t i = 0; i < RELAY_CYCLES_COUNT; i++) {
+        backup[i] = 9000u + i; // above every live count set above (and above the zeroed defaults)
+    }
+    relay_cycles_restore_result_t result;
+    memset(&result, 0, sizeof(result));
+    TEST_CHECK(relay_cycles_restore_all(backup, 0, &result) == true,
+               "restore of a higher value succeeds");
+    for (uint8_t i = 0; i < RELAY_CYCLES_COUNT; i++) {
+        TEST_CHECK(s_rc.counts[i] == backup[i], "the higher requested value is applied exactly");
+        TEST_CHECK(result.entries[i].clamped == false, "not reported as clamped");
+        TEST_CHECK(result.entries[i].requested == backup[i] && result.entries[i].applied == backup[i],
+                   "requested == applied for an unclamped relay");
+    }
+}
+
+// MONOTONIC GUARD, negative half: a value BELOW the board's live count must
+// be refused in effect (clamped back up to the live count, never applied),
+// and the clamp must be visible -- both numbers, named by relay -- in
+// out_result. This is the exact defect the backup/restore review found:
+// relay_cycles_restore_all() used to accept this silently.
+static void test_restore_all_clamps_value_below_live_count(void)
+{
+    TEST_SECTION("relay_cycles_restore_all -- NEGATIVE TEST: a value BELOW the board's live count is "
+                 "clamped back UP to the live count, never silently applied, and the clamp is reported "
+                 "with both the requested and applied numbers");
+    reset_all();
+    s_rc.counts[0] = 5000; // relay 0's live count is well above what the "archive" below claims
+    s_rc.counts[1] = 300;
+    s_rc.counts[2] = 10;
+    s_rc.counts[3] = 10;
+    s_rc.counts[4] = 10;
+
+    uint32_t backup[RELAY_CYCLES_COUNT];
+    backup[0] = 42; // stale/understated -- must be refused (clamped up), not applied
+    backup[1] = 300; // equal to live -- not a lowering, must NOT be reported as clamped
+    backup[2] = 11; // a real higher value -- must be applied exactly
+    backup[3] = 10;
+    backup[4] = 10;
+
+    relay_cycles_restore_result_t result;
+    memset(&result, 0, sizeof(result));
+    TEST_CHECK(relay_cycles_restore_all(backup, 0, &result) == true,
+               "restore call succeeds (a clamp is not a persist failure)");
+
+    TEST_CHECK(s_rc.counts[0] == 5000,
+               "relay 0's live count is NEVER moved downward -- this is the defect the 2026-09-20 "
+               "backup/restore review found and this guard closes");
+    TEST_CHECK(result.entries[0].clamped == true, "relay 0 is reported as clamped");
+    TEST_CHECK(result.entries[0].requested == 42 && result.entries[0].applied == 5000,
+               "the report names BOTH numbers: what was requested (42) and what was actually applied "
+               "(5000, the live count) -- never a silent success");
+
+    TEST_CHECK(s_rc.counts[1] == 300 && result.entries[1].clamped == false,
+               "a value equal to the live count is not a lowering and is not reported as clamped");
+    TEST_CHECK(s_rc.counts[2] == 11 && result.entries[2].clamped == false,
+               "a genuinely higher value is applied exactly and not reported as clamped");
+}
+
+// The override: allow_lower_mask lets ONE named relay (a physically replaced
+// one) restart below its live count, while every OTHER relay in the SAME
+// call keeps the monotonic guard -- proves the override is per-relay, not
+// all-or-nothing, and fails closed by default (bit unset = safe behaviour).
+static void test_restore_all_allow_lower_mask_overrides_one_relay_only(void)
+{
+    TEST_SECTION("relay_cycles_restore_all -- allow_lower_mask permits an explicit, per-relay override "
+                 "(a replaced relay restarting near zero) without weakening the guard for any other "
+                 "relay in the same call");
+    reset_all();
+    s_rc.counts[0] = 5000; // the "replaced" relay -- caller explicitly permits lowering this one
+    s_rc.counts[1] = 300;  // NOT permitted -- must still be clamped if the request tries to lower it
+
+    uint32_t backup[RELAY_CYCLES_COUNT];
+    backup[0] = 0;  // replaced relay restarting at zero
+    backup[1] = 1;  // stale/understated -- allow_lower_mask does NOT cover this relay
+    backup[2] = 0;
+    backup[3] = 0;
+    backup[4] = 0;
+
+    relay_cycles_restore_result_t result;
+    memset(&result, 0, sizeof(result));
+    uint8_t allow_lower_mask = (uint8_t)(1u << 0); // relay 0 only
+    TEST_CHECK(relay_cycles_restore_all(backup, allow_lower_mask, &result) == true, "restore succeeds");
+
+    TEST_CHECK(s_rc.counts[0] == 0 && result.entries[0].clamped == false,
+               "relay 0's explicit override is honored exactly -- accepted at 0, not clamped");
+    TEST_CHECK(s_rc.counts[1] == 300 && result.entries[1].clamped == true,
+               "relay 1 is NOT in the mask -- still clamped back up to its live count, unaffected by "
+               "relay 0's override in the same call");
+    TEST_CHECK(result.entries[1].requested == 1 && result.entries[1].applied == 300,
+               "relay 1's clamp reports both numbers");
 }
 
 // ---------------------------------------------------------------------
@@ -873,7 +977,7 @@ static void test_cfg_fs_reset_all_composes_with_migration_never_loses_counts(voi
     restore[0] = 5000;
     restore[1] = 2994;
     restore[2] = 3214;
-    TEST_CHECK(relay_cycles_restore_all(restore) == true, "restore succeeds");
+    TEST_CHECK(relay_cycles_restore_all(restore, 0x1Fu, NULL) == true, "restore succeeds");
     memset(&s_rc, 0, sizeof(s_rc));
     TEST_CHECK(relay_cycles_init() == ESP_OK, "reload after restore");
     TEST_CHECK(s_rc.counts[0] == 5000 && s_rc.counts[1] == 2994 && s_rc.counts[2] == 3214,
@@ -1101,6 +1205,9 @@ void run_test_relay_cycles(void)
     test_restore_all_is_idempotent();
     test_restore_all_refuses_out_of_range_count_and_writes_nothing();
     test_restore_all_rejects_null_pointer();
+    test_restore_all_accepts_higher_value_no_clamp();
+    test_restore_all_clamps_value_below_live_count();
+    test_restore_all_allow_lower_mask_overrides_one_relay_only();
     test_maybe_persist_skips_without_blocking_when_persist_lock_is_busy();
 
     test_cfg_fs_partition_absent_behaves_like_before();

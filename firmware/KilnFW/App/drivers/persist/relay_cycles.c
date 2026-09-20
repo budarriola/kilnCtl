@@ -694,6 +694,16 @@ static hal_status_t persist_snapshot(const reset_persist_job_arg_t *snap)
     }
 
     relay_cycles_blob_t blob;
+    /* Zero first (2026-09-20 finding, surfaced by this pass's new restore
+     * tests): the struct has padding between `version` and `counts` (uint8_t
+     * followed by a uint32_t array) that field-by-field assignment below
+     * never touches, so an uninitialized stack blob wrote uninitialized
+     * padding bytes to flash. Harmless today (nothing reads padding back),
+     * but it also meant two writes of otherwise byte-identical content were
+     * not reliably byte-identical on disk, which is exactly what test_
+     * restore_all_is_idempotent() checks -- this was a latent flake, not a
+     * change in behavior from this pass's actual guard logic. */
+    memset(&blob, 0, sizeof(blob));
     blob.version = RELAY_CYCLES_VERSION;
     memcpy(blob.counts, snap->counts, sizeof(blob.counts));
     memcpy(blob.types, snap->types, sizeof(blob.types));
@@ -963,7 +973,8 @@ bool relay_cycles_reset_timeout(unsigned relay, uint32_t timeout_ms, bool *out_t
  * field than a real relay with that many operations. */
 #define RELAY_CYCLES_RESTORE_MAX_COUNT 100000000u /* 100M -- far past any rated life in this file's own table */
 
-bool relay_cycles_restore_all(const uint32_t counts[RELAY_CYCLES_COUNT])
+bool relay_cycles_restore_all(const uint32_t counts[RELAY_CYCLES_COUNT], uint8_t allow_lower_mask,
+                               relay_cycles_restore_result_t *out_result)
 {
     if (!counts || !ensure_lock()) {
         return false;
@@ -977,17 +988,45 @@ bool relay_cycles_restore_all(const uint32_t counts[RELAY_CYCLES_COUNT])
     }
 
     reset_persist_job_arg_t snap;
+    relay_cycles_restore_result_t local_result;
     xSemaphoreTake(s_rc.lock, portMAX_DELAY);
-    memcpy(s_rc.counts, counts, sizeof(s_rc.counts));
+    /* MONOTONIC GUARD (2026-09-20 review finding): the ceiling loop above is
+     * the only validation that used to run -- a value below s_rc.counts[r]
+     * (the board's live count) sailed straight through and silently moved a
+     * wear counter backward. For every relay whose bit is unset in
+     * `allow_lower_mask`, clamp a lower request up to the live count instead;
+     * `local_result` records requested/applied/clamped for EVERY relay so the
+     * caller can name it, never silently. */
+    for (uint8_t r = 0; r < RELAY_CYCLES_COUNT; r++) {
+        uint32_t live = s_rc.counts[r];
+        uint32_t requested = counts[r];
+        bool allow_lower = (allow_lower_mask & (uint8_t)(1u << r)) != 0;
+        bool clamp = (requested < live) && !allow_lower;
+        uint32_t applied = clamp ? live : requested;
+        local_result.entries[r].requested = requested;
+        local_result.entries[r].applied = applied;
+        local_result.entries[r].clamped = clamp;
+        if (clamp) {
+            ESP_LOGW(TAG, "relay_cycles_restore_all: relay %u requested %lu is below live count %lu -- "
+                          "clamped to %lu (pass allow_lower_mask bit %u to override for a genuinely "
+                          "replaced relay)", r, (unsigned long)requested, (unsigned long)live,
+                     (unsigned long)applied, r);
+        }
+        s_rc.counts[r] = applied;
+    }
     /* Restore composes with the cfg-filesystem bridge the same way it composes
      * with NVS -- it is not a parallel persistence path, it drives the SAME
      * rev-then-write mechanism this module's other writers use, which is why
      * it takes its snapshot through the one shared head above rather than
-     * carrying its own copy of it. The new counts are memcpy'd into s_rc
+     * carrying its own copy of it. The new counts are written into s_rc
      * FIRST, inside the same critical section, so the snapshot the head
-     * takes is the restored state, not the pre-restore state. */
+     * takes is the restored (post-clamp) state, not the pre-restore state. */
     relay_cycles_fill_snapshot_locked(&snap);
     xSemaphoreGive(s_rc.lock);
+
+    if (out_result) {
+        *out_result = local_result;
+    }
 
     reset_persist_job_ctx_t ctx = { .snap = &snap, .err = ESP_FAIL };
     esp_err_t err;

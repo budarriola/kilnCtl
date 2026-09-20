@@ -170,21 +170,68 @@ bool relay_cycles_reset(unsigned relay);
  * reset() otherwise, and the same internal-SRAM-stack task requirement. */
 bool relay_cycles_reset_timeout(unsigned relay, uint32_t timeout_ms, bool *out_timed_out);
 
+/* Per-relay outcome of a relay_cycles_restore_all() call, filled in
+ * regardless of the overall return value so a caller (diagnostics_http.c's
+ * restore handler) can name every affected relay in its response -- see
+ * relay_cycles_restore_all()'s own comment for why this exists: a silent
+ * downward move of a wear counter is exactly the failure class this project
+ * has been bitten by repeatedly (CLAUDE.md's "reset one side of a pair" /
+ * unchecked-success classes), so this struct makes "was anything clamped"
+ * mechanically visible rather than something a caller has to notice on its
+ * own by re-deriving it from the request. */
+typedef struct {
+    uint32_t requested; /* the value the caller asked to restore */
+    uint32_t applied;   /* the value actually written -- equals `requested`
+                          * unless `clamped` is true */
+    bool     clamped;   /* true iff `requested` was below the board's live
+                          * count and this relay's bit was not set in
+                          * `allow_lower_mask`, so `applied` was raised back
+                          * up to the live count instead of accepted verbatim */
+} relay_cycles_restore_entry_t;
+
+typedef struct {
+    relay_cycles_restore_entry_t entries[RELAY_CYCLES_COUNT];
+} relay_cycles_restore_result_t;
+
 /* Restores all RELAY_CYCLES_COUNT counts from a backup (e.g.
- * /api/status.relay_counts previously captured by full_board_backup.py),
+ * /api/status.relay_life previously captured by full_board_backup.py),
  * validates every value against a sanity ceiling BEFORE writing anything
  * (all-or-nothing -- a single out-of-range value refuses the whole call so a
  * truncated/corrupt backup field cannot land a partial restore), and
  * persists immediately through the same flash-worker path
  * relay_cycles_reset() uses. Idempotent: calling this twice with the same
- * `counts` produces the same on-disk blob both times. types/rated_overrides
- * are left untouched, same as relay_cycles_reset()'s convention. Returns
- * false for a NULL pointer, an out-of-range count, or a persist failure (in
- * which case the in-RAM counts ARE updated but not yet durable -- same
- * "keep going, retry later" contract relay_cycles_reset() documents). MUST
- * be called from a task with an internal-SRAM stack, same constraint as
- * every other write path in this module. */
-bool relay_cycles_restore_all(const uint32_t counts[RELAY_CYCLES_COUNT]);
+ * `counts` (and the same `allow_lower_mask`) produces the same on-disk blob
+ * both times. types/rated_overrides are left untouched, same as
+ * relay_cycles_reset()'s convention. MUST be called from a task with an
+ * internal-SRAM stack, same constraint as every other write path in this
+ * module.
+ *
+ * MONOTONIC GUARD (2026-09-20 backup/restore review finding): a relay's wear
+ * count is safety-relevant, irreversible-in-spirit data -- understating it is
+ * the error that gets a worn contactor treated as fresh rather than replaced
+ * (RELAY_LIFE_BUDGET.md). Before this fix, only the upper sanity ceiling
+ * below was enforced, so a stale/wrong archive could silently LOWER a live
+ * count. Now, for every relay whose bit is NOT set in `allow_lower_mask`, a
+ * requested value below the board's current live count is CLAMPED UP to the
+ * live count rather than either being applied verbatim or refusing the whole
+ * request -- the rest of the restore still proceeds, matching this project's
+ * standing "make it visible, never silent" rule rather than adding a second,
+ * more surprising all-or-nothing failure mode. `allow_lower_mask` is the
+ * deliberate, explicit override for the one legitimate case (a physically
+ * replaced relay restarting at/near zero): set the corresponding bit to
+ * accept that relay's requested value exactly, even if it is below the live
+ * count, still subject to the sanity ceiling below. Pass 0 for the default,
+ * safe behaviour (never move any counter downward). `out_result`, if
+ * non-NULL, is filled with every relay's requested/applied/clamped outcome
+ * regardless of the overall return value, so a caller can report exactly
+ * what happened; on a refused call (out-of-range value) `out_result` is left
+ * untouched -- nothing was decided per-relay since nothing was written.
+ * Returns false for a NULL `counts` pointer, an out-of-range count, or a
+ * persist failure (in which case the in-RAM counts ARE updated but not yet
+ * durable -- same "keep going, retry later" contract relay_cycles_reset()
+ * documents). */
+bool relay_cycles_restore_all(const uint32_t counts[RELAY_CYCLES_COUNT], uint8_t allow_lower_mask,
+                               relay_cycles_restore_result_t *out_result);
 
 /* Writes to NVS if anything changed and the interval has elapsed. Cheap to
  * call every control tick. */

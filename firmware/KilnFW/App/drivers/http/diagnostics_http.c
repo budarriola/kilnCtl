@@ -747,18 +747,35 @@ static esp_err_t relay_cycles_reset_post_handler(httpd_req_t *req)
 }
 #undef RELAY_CYCLES_RESET_BODY_MAX
 
-/* POST /api/relay_cycles/restore c0=N&c1=N&c2=N&c3=N&c4=N -- backup-gate pass
- * 2026-09-07 (docs/FILESYSTEM_PLAN.md runbook). full_board_backup.py already
- * captures these five counts as /api/status's relay_counts array; this is
+/* POST /api/relay_cycles/restore c0=N&c1=N&c2=N&c3=N&c4=N[&allow_lower=M] --
+ * backup-gate pass 2026-09-07 (docs/FILESYSTEM_PLAN.md runbook). full_board_
+ * backup.py already captures these five counts as /api/status's `relay_life`
+ * array (NOT a `relay_counts` array -- there is no such key in that
+ * response; this comment used to say otherwise, fixed 2026-09-20); this is
  * the matching restore path, added because none existed. Same form-body
  * convention as relay_cycles_reset_post_handler() just above, one field per
- * RELAY_CYCLES_COUNT slot rather than a single index. All-or-nothing: a
- * missing/malformed field refuses the WHOLE request before relay_cycles_
- * restore_all() is even called, and relay_cycles_restore_all() itself
- * repeats the sanity-ceiling check on every value (see that function's own
+ * RELAY_CYCLES_COUNT slot rather than a single index. All-or-nothing on the
+ * upper sanity ceiling: a missing/malformed field, or one that exceeds it,
+ * refuses the WHOLE request before relay_cycles_restore_all() is even
+ * called for the missing-field case, and relay_cycles_restore_all() itself
+ * repeats the ceiling check on every value (see that function's own
  * comment) -- defence in depth, not redundant trust, since this handler
- * cannot see that ceiling constant without including relay_cycles.c. */
-#define RELAY_CYCLES_RESTORE_BODY_MAX 128
+ * cannot see that ceiling constant without including relay_cycles.c.
+ *
+ * MONOTONIC GUARD (2026-09-20 review finding): relay_cycles_restore_all()
+ * now clamps a per-relay value below the board's live count back up to that
+ * live count, rather than silently accepting it -- a wear counter must never
+ * move downward by surprise (RELAY_LIFE_BUDGET.md). `allow_lower` is the
+ * optional, explicit override for a genuinely replaced relay: a bitmask (one
+ * bit per RELAY_CYCLES_COUNT slot, decimal) naming which relay(s) may be
+ * restored to a value below their live count exactly as given. Omitted
+ * defaults to 0 (the safe behaviour -- never lower anything). Any value that
+ * does not parse as a plain decimal integer, or that sets a bit outside
+ * 0..RELAY_CYCLES_COUNT-1, is refused (fail closed) rather than silently
+ * masked down to the valid range. The response always names every relay
+ * that was clamped, with both the requested and applied values, so a clamp
+ * is visible to the caller rather than a silent partial success. */
+#define RELAY_CYCLES_RESTORE_BODY_MAX 160
 static esp_err_t relay_cycles_restore_post_handler(httpd_req_t *req)
 {
     if (req->content_len <= 0 || req->content_len > RELAY_CYCLES_RESTORE_BODY_MAX) {
@@ -800,16 +817,63 @@ static esp_err_t relay_cycles_restore_post_handler(httpd_req_t *req)
         counts[r] = (uint32_t)v;
     }
 
-    bool ok = relay_cycles_restore_all(counts);
+    /* Optional allow_lower bitmask -- absent means 0 (default safe
+     * behaviour). Fail closed on anything that doesn't parse cleanly or sets
+     * a bit past the valid relay range, rather than clamping the mask itself
+     * down to something "close enough". */
+    uint8_t allow_lower_mask = 0;
+    char allow_lower_val[16];
+    int allow_lower_len = http_form_find_field(body, "allow_lower", allow_lower_val, sizeof(allow_lower_val));
+    if (allow_lower_len > 0) {
+        char *endp = NULL;
+        unsigned long v = strtoul(allow_lower_val, &endp, 10);
+        unsigned long max_mask = (1ul << RELAY_CYCLES_COUNT) - 1ul;
+        if (endp == allow_lower_val || *endp != '\0' || v > max_mask) {
+            char err[80];
+            snprintf(err, sizeof(err), "field \"allow_lower\" must be a decimal bitmask 0..%lu", max_mask);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
+            return ESP_OK;
+        }
+        allow_lower_mask = (uint8_t)v;
+    }
 
-    char json[192];
+    relay_cycles_restore_result_t result;
+    memset(&result, 0, sizeof(result));
+    bool ok = relay_cycles_restore_all(counts, allow_lower_mask, &result);
+
+    /* Build the "which relays were clamped" fragment first -- shared between
+     * the success and failure response bodies below, since a clamp is a
+     * fact about the request that matters either way and must never be
+     * dropped on a persist failure. Empty when relay_cycles_restore_all()
+     * refused before ever deciding per-relay (the ceiling case) -- `result`
+     * was zero-initialized above precisely so that case reads as "nothing
+     * clamped" rather than garbage. */
+    char clamped_json[RELAY_CYCLES_COUNT * 48 + 4];
+    size_t clamped_off = 0;
+    clamped_json[0] = '\0';
+    bool any_clamped = false;
+    for (uint8_t r = 0; r < RELAY_CYCLES_COUNT; r++) {
+        if (!result.entries[r].clamped) {
+            continue;
+        }
+        int w = snprintf(clamped_json + clamped_off, sizeof(clamped_json) - clamped_off,
+                          "%s{\"relay\":%u,\"requested\":%lu,\"applied\":%lu}", any_clamped ? "," : "",
+                          r, (unsigned long)result.entries[r].requested, (unsigned long)result.entries[r].applied);
+        if (w > 0 && (size_t)w < sizeof(clamped_json) - clamped_off) {
+            clamped_off += (size_t)w;
+        }
+        any_clamped = true;
+    }
+
+    char json[RELAY_CYCLES_COUNT * 48 + 192];
     int n;
     if (ok) {
-        n = snprintf(json, sizeof(json), "{\"ok\":true}");
+        n = snprintf(json, sizeof(json), "{\"ok\":true,\"clamped\":[%s]}", clamped_json);
         httpd_resp_set_status(req, "200 OK");
     } else {
         n = snprintf(json, sizeof(json),
-            "{\"ok\":false,\"error\":\"restore refused or persist failed -- see board log for which\"}");
+            "{\"ok\":false,\"error\":\"restore refused or persist failed -- see board log for which\","
+            "\"clamped\":[%s]}", clamped_json);
         httpd_resp_set_status(req, "500 Internal Server Error");
     }
     httpd_resp_set_type(req, "application/json");

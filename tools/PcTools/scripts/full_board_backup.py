@@ -534,17 +534,27 @@ def restore_full(host: str, archive: dict, timeout: float = 10.0, dry_run: bool 
         except (KeyError, TypeError, ValueError) as e:
             _record("relay_cycle_counters", False, f"archive's relay_life entries are malformed: {e}")
         else:
-            # MONOTONIC GUARD, PC side, 2026-09-20 review finding.
-            # relay_cycles_restore_all() (relay_cycles.c) checks only an
-            # UPPER sanity ceiling (RELAY_CYCLES_RESTORE_MAX_COUNT); it will
-            # happily accept a value LOWER than the board's current count.
-            # A wear counter can therefore only ever be moved in the
-            # understating direction by a stale archive -- and understated
-            # wear on a contactor is exactly the error that gets a relay
-            # welded closed rather than replaced (RELAY_LIFE_BUDGET.md).
-            # Firmware is out of scope for this change, so the clamp lives
-            # here and is REPORTED, never silent: each relay is restored to
-            # max(live count, archived count).
+            # MONOTONIC GUARD, PC side, 2026-09-20 review finding, UPDATED
+            # same day once relay_cycles_restore_all() (relay_cycles.c) grew
+            # its own firmware-side clamp: firmware now also refuses to move
+            # a relay's live count downward (it clamps a lower request back
+            # up to the live count it sees AT THE TIME OF THE POST, and names
+            # every clamped relay -- both numbers -- in the response body).
+            # This client-side clamp is kept anyway, as defence in depth, not
+            # redundant trust: it is the ONLY guard that runs if this script
+            # ever talks to an older board image that predates the firmware
+            # fix, and it also catches the case this comment used to miss --
+            # this tool cannot see the board's live count as of the moment
+            # the POST actually lands, only as of the earlier /api/status
+            # snapshot `live_status` below, so relying on the firmware guard
+            # alone would leave a window where a value this tool itself
+            # thought was safe still needed firmware's later, more current
+            # clamp. Each relay is restored to max(live count, archived
+            # count) here; the response is inspected below for firmware's
+            # OWN "clamped" list so a clamp applied only by firmware (because
+            # the board's live count moved between this script's snapshot and
+            # the POST) is also reported, distinctly, rather than silently
+            # assumed to be the same event as this script's own clamp.
             live = {}
             live_relay_life = live_status.get("relay_life") if isinstance(live_status, dict) else None
             if isinstance(live_relay_life, list):
