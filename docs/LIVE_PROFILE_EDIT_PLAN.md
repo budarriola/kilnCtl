@@ -341,30 +341,38 @@ time-of-check/time-of-use hole. No file in that feature needs changing.
 
 ## 10. HTTP surface
 
-**Status (2026-09-19, pass 2): delivered.** All five routes below are wired
-in `firmware/KilnFW/App/drivers/http/profiles_live_http.c` and covered by a
-new host-only suite, `firmware/KilnFW/App/test/test_profiles_live_http.c`
-(56th `build_host_tests.ps1` executable, 66/66 checks), which `#include`s
-`profiles_live_http.c` and the real `live_profile.c` directly (real
-`hal_kv`-backed fork/save/decide storage; the httpd-tier neighbours
-`profiles_http.c`/`profiles_edit_http.c` are faked locally, not linked --
-their own coverage is `test_profiles_http.c`'s job). Writing this suite
-caught two real bugs in the handler, not just test-harness issues: the fork
-handler passed `&working_id` (a `uint8_t*`) where `live_profile_fork()`
-expects a `profile_t *out_working` buffer (a target-build compile error,
-`-Wincompatible-pointer-types`, invisible to the host build since the host
-suite's own scaffolding didn't call the real function signature until this
-pass) — fixed by allocating a real scratch `profile_t` and reading
-`working_id` back from `rec.working_id` instead; and the overwrite
-decide-action handler had **inverted** `live_edit_can_overwrite()`'s sense,
-forbidding overwrite exactly when it was allowed and vice versa — a
-correctness bug the new tests caught directly, fixed by negating the
-condition. `check_uri_handler_cap.ps1` now reports 155/160 (5 spare slots);
-`check_route_tier_coverage.ps1`, `check_httpd_task_stack_budget.ps1`,
-`check_all_task_stack_budgets.ps1` (0 over) and `check_lint_pages.ps1` all
-pass, along with a fresh `check_00_kilnfw_target_build.ps1`. The live-edit
-page itself (`live_profile_page.html`) is still the pass-1 placeholder; a
-sibling worktree owns the real page and will merge it separately.
+**Status (2026-09-19, pass 2): delivered and landed**, together with the
+real live-edit page. The five routes below are wired in
+`firmware/KilnFW/App/drivers/http/profiles_live_http.c`, each with an ADMIN
+row in `route_tier_table.h` (the auth gate is `kiln_http_register()`'s
+central table lookup, which fails closed to ADMIN, not per-handler code);
+the page is `firmware/KilnFW/App/drivers/http/live_profile_page.html` with
+`test_live_profile_page.js` extracting its helpers verbatim by line marker.
+Host coverage is `test_profiles_live_http.c` (56th `build_host_tests.ps1`
+executable, 104/104 checks). `check_uri_handler_cap.ps1` reports 155/160.
+
+Four handler bugs were found and fixed across the two passes: the fork
+handler passed a `uint8_t*` where `live_profile_fork()` wants a
+`profile_t *out_working`; the overwrite decide-action had
+`live_edit_can_overwrite()`'s sense **inverted**; a failed
+`live_profile_save_working()` answered 200 OK; and `working_id` reported the
+working slot whether or not a fork had happened. Refusals now carry
+`{"ok":false,"error":...}` JSON, matching `POST /api/profile` and what the
+page's error path actually parses.
+
+One route was added beyond the original list: `GET /api/profile/live?content=1`
+serves the working copy's body. The page cannot use `GET /api/profile?id=`
+for it, because the working slot deliberately lives outside the catalogue
+array and that route can only 404 on it.
+
+**Still open:**
+
+- **Bench verification.** Nothing here has run on hardware. Everything in
+  section 11's "cannot be tested without a real firing" list is still
+  unverified, and so is the page itself against a live firing.
+- **The pending record is NVS-only** — see the "Owner decision needed"
+  section at the end of this document (whether it should dual-write to
+  `cfg_fs` like zones config does).
 
 All five routes are ADMIN. Each needs a row in
 `firmware/KilnFW/App/drivers/http/route_tier_table.h` **in the same change**,
@@ -374,6 +382,7 @@ or `tools/check_route_tier_coverage.ps1` fails the build fail-closed.
 |---|---|---|
 | `GET /live_profile` | — | the page. ADMIN, matching `/profiles` |
 | `GET /api/profile/live` | — | `{active, origin_id, origin_is_builtin, working_id, editable_from_segment, pending_decision, last_refusal}` |
+| `GET /api/profile/live?content=1` | — | the working copy's own body (`{id,name,zone_mask,segment_count,segments[]}`); 409 if no working copy exists. The working slot is outside the catalogue array, so `GET /api/profile?id=` cannot serve it |
 | `POST /api/profile/live/fork` | none | origin is whatever is running; the request names nothing. Idempotent — a second call returns the existing working copy. Refuses if no slot is free, or if nothing is running |
 | `POST /api/profile/live` | the same form `POST /api/profile` takes | validate → write working slot → bump generation. 400 on a bound violation naming segment/value/limit; 409 on a difference at or before the running segment |
 | `POST /api/profile/live/decide` | `action=save_as&name=…` \| `action=overwrite&confirm=1` \| `action=discard` | overwrite: 403 on a builtin origin, 400 without `confirm=1` |
