@@ -282,11 +282,11 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   // removed from WIZARD_STEPS 2026-09-19 -- its info is now folded into step
   // 10's own render -- so it can no longer stand in here: mergeAllSteps()
   // only iterates the live WIZARD_STEPS table, and a stray progress.steps['11']
-  // is simply never read, which would make this assertion vacuous. Step 12
-  // (authentication, renumbered from 13 on the same 2026-09-19 change) is
-  // the same shape -- safety:false, no readinessKeys.)
+  // is simply never read, which would make this assertion vacuous. Step 11
+  // (authentication, renumbered 13 -> 12 -> 11 across the two 2026-09-19
+  // changes) is the same shape -- safety:false, no readinessKeys.)
   const nonSafetySkippedProgress = JSON.parse(JSON.stringify(allDoneProgress));
-  nonSafetySkippedProgress.steps['12'] = { state: 'skipped', note: 'not needed' };
+  nonSafetySkippedProgress.steps['11'] = { state: 'skipped', note: 'not needed' };
   const mergedNonSafetySkipped = ctx.mergeAllSteps(nonSafetySkippedProgress, allOkReadiness);
   const gateNonSafetyOk = ctx.computeCompleteness(mergedNonSafetySkipped, allOkReadiness);
   assert(gateNonSafetyOk.complete === true, 'skipping a non-safety step (12: authentication) does not block completion');
@@ -325,9 +325,9 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   const gate = ctx.computeCompleteness(merged, readinessWithCrash);
   assert(gate.complete === false,
     'an unmapped not_done firing-gate item (crash_report) blocks "Setup complete" even with all 13 steps done');
-  assert(gate.reasons.some((r) => /crash_report|Unacknowledged crash report/.test(r)),
+  assert(gate.reasons.some((r) => /crash_report|Unacknowledged crash report/.test(r.text)),
     'the refusal names the crash_report item, not a generic message');
-  assert(gate.reasons.some((r) => /estop_verified|E-stop interlock verified/.test(r)),
+  assert(gate.reasons.some((r) => /estop_verified|E-stop interlock verified/.test(r.text)),
     'the refusal also names estop_verified independently -- both real gate blockers surface, not just the first');
 
   // And the inverse: once every item (step-tracked AND whole-board) reads
@@ -360,7 +360,7 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   const gate = ctx.computeCompleteness(merged, unreachable);
   assert(gate.complete === false, 'unreachable readiness (empty item list) never reads as complete, ' +
     'even with every step stored done');
-  assert(gate.reasons.some((r) => /could not be read/.test(r)),
+  assert(gate.reasons.some((r) => /could not be read/.test(r.text)),
     'unreachable readiness: the gate names the checklist as unreadable, not as "nothing outstanding"');
 })();
 
@@ -648,16 +648,16 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   assert(summedOk.valid, 'step8: summed topology tolerates the same zone id on multiple CT channels');
 })();
 
-// ---- Step 9: heat-required marking is not silently walkable past -------
+// ---- Step 8: heat-required marking is not silently walkable past -------
 (function testStep9HeatWarningPresent() {
   const html = fs.readFileSync(PAGE_PATH, 'utf8');
-  assert(/APPLIES HEAT/.test(html), 'step9: the page source names the heat warning verbatim');
-  assert(/step9Ack/.test(html), 'step9: an explicit presence/safety acknowledgement checkbox gates the start button');
-  assert(/step9SkipLater/.test(html), 'step9: the step offers an explicit skip-for-later control');
-  assert(/does NOT stop it/.test(html), 'step9: closing the tab not stopping a running sweep is stated, not implied');
+  assert(/APPLIES HEAT/.test(html), 'step8: the page source names the heat warning verbatim');
+  assert(/step8Ack/.test(html), 'step8: an explicit presence/safety acknowledgement checkbox gates the start button');
+  assert(/step8SkipLater/.test(html), 'step8: the step offers an explicit skip-for-later control');
+  assert(/does NOT stop it/.test(html), 'step8: closing the tab not stopping a running sweep is stated, not implied');
 })();
 
-// Step 9 used to print "Verification complete." and post state 'done' for
+// Step 8 used to print "Verification complete." and post state 'done' for
 // ANY sweep that reached state 'done', whether or not it had resolved a
 // single CT channel -- a confident false statement about a safety-relevant
 // commissioning step. On this bench every zone is expected to come out
@@ -666,54 +666,54 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
 (function testStep9VerdictRefusesGreenWhenNothingResolved() {
   const ctx = loadPageScript(noopFetch);
 
-  const nothing = ctx.step9SweepVerdict({ state: 'done', zones_total: 3, ct_map_derived_mask: 0,
+  const nothing = ctx.step8SweepVerdict({ state: 'done', zones_total: 3, ct_map_derived_mask: 0,
     ct_map_reason: 'no channel above the respond floor' });
-  assert(nothing.resolved === false, 'step9 verdict: a done sweep that resolved NO channel is not a pass');
-  assert(/NOT resolved/.test(nothing.text), 'step9 verdict: the inconclusive text says so plainly');
+  assert(nothing.resolved === false, 'step8 verdict: a done sweep that resolved NO channel is not a pass');
+  assert(/NOT resolved/.test(nothing.text), 'step8 verdict: the inconclusive text says so plainly');
   assert(!/^Verification complete/.test(nothing.text),
-    'step9 verdict: an inconclusive run never claims verification is complete');
+    'step8 verdict: an inconclusive run never claims verification is complete');
   assert(/no channel above the respond floor/.test(nothing.text),
-    'step9 verdict: the firmware reason is carried through, not swallowed');
+    'step8 verdict: the firmware reason is carried through, not swallowed');
 
-  const partial = ctx.step9SweepVerdict({ state: 'done', zones_total: 3, ct_map_derived_mask: 0x3 });
-  assert(partial.resolved === false, 'step9 verdict: 2 of 3 zones resolved is still not a pass');
+  const partial = ctx.step8SweepVerdict({ state: 'done', zones_total: 3, ct_map_derived_mask: 0x3 });
+  assert(partial.resolved === false, 'step8 verdict: 2 of 3 zones resolved is still not a pass');
 
-  const all = ctx.step9SweepVerdict({ state: 'done', zones_total: 3, ct_map_derived_mask: 0x7 });
-  assert(all.resolved === true, 'step9 verdict: a channel resolved for every zone is a pass');
+  const all = ctx.step8SweepVerdict({ state: 'done', zones_total: 3, ct_map_derived_mask: 0x7 });
+  assert(all.resolved === true, 'step8 verdict: a channel resolved for every zone is a pass');
 
-  const noZones = ctx.step9SweepVerdict({ state: 'done', zones_total: 0, ct_map_derived_mask: 0 });
-  assert(noZones.resolved === false, 'step9 verdict: a sweep over zero zones proves nothing');
+  const noZones = ctx.step8SweepVerdict({ state: 'done', zones_total: 0, ct_map_derived_mask: 0 });
+  assert(noZones.resolved === false, 'step8 verdict: a sweep over zero zones proves nothing');
 
-  const missing = ctx.step9SweepVerdict({ state: 'done', zones_total: 3 });
+  const missing = ctx.step8SweepVerdict({ state: 'done', zones_total: 3 });
   assert(missing.resolved === false,
-    'step9 verdict: an absent ct_map_derived_mask is inconclusive, never a pass');
+    'step8 verdict: an absent ct_map_derived_mask is inconclusive, never a pass');
 
-  const running = ctx.step9SweepVerdict({ state: 'running', zones_total: 3, ct_map_derived_mask: 0x7 });
-  assert(running.resolved === false, 'step9 verdict: only a finished sweep can be a pass');
+  const running = ctx.step8SweepVerdict({ state: 'running', zones_total: 3, ct_map_derived_mask: 0x7 });
+  assert(running.resolved === false, 'step8 verdict: only a finished sweep can be a pass');
 })();
 
 (function testStep9InconclusiveDoesNotPersistDone() {
   const html = fs.readFileSync(PAGE_PATH, 'utf8');
-  assert(!/document\.getElementById\('step9Ok'\)\.innerHTML = '<p class="wok">Verification complete\.<\/p>'/.test(html),
-    'step9: the unconditional green verdict on state=done is gone');
-  assert(/if \(!v\.resolved\)[\s\S]{0,800}?postStepState\(9, 'done'\)/.test(html),
-    'step9: postStepState(9, done) is reached only after the resolved check');
-  // The only legitimate 'skipped' post for step 9 is the operator's own
+  assert(!/document\.getElementById\('step8Ok'\)\.innerHTML = '<p class="wok">Verification complete\.<\/p>'/.test(html),
+    'step8: the unconditional green verdict on state=done is gone');
+  assert(/if \(!v\.resolved\)[\s\S]{0,800}?postStepState\(8, 'done'\)/.test(html),
+    'step8: postStepState(8, done) is reached only after the resolved check');
+  // The only legitimate 'skipped' post for step 8 is the operator's own
   // explicit "Skip for now" button. An inconclusive SWEEP must leave the step
   // PENDING instead: computeCompleteness() treats a skipped safety step as an
   // outstanding reason forever, so posting skipped from the result path would
   // trade one wrong verdict for another.
-  const skipped = html.match(/postStepState\(9, 'skipped'/g) || [];
-  assert(skipped.length === 1, 'step9: exactly one skipped post exists (the explicit operator button)');
-  assert(/postStepState\(9, 'skipped', 'deferred/.test(html),
-    'step9: that one skipped post is the deferred/Skip-for-now path, not a sweep result');
+  const skipped = html.match(/postStepState\(8, 'skipped'/g) || [];
+  assert(skipped.length === 1, 'step8: exactly one skipped post exists (the explicit operator button)');
+  assert(/postStepState\(8, 'skipped', 'deferred/.test(html),
+    'step8: that one skipped post is the deferred/Skip-for-now path, not a sweep result');
 })();
 
 // The state strings below are the ones the firmware actually emits --
 // exec_state_name() (dashboard_exec_http.c) and autotune_state_name()
 // (dashboard_json.c) are both lowercase. The original version of this test
 // fed 'RUNNING'/'IDLE', which the firmware never sends, so it passed against
-// a step9CheckBusy() that could not refuse a real firing (idealized-test-
+// a step8CheckBusy() that could not refuse a real firing (idealized-test-
 // input class). Do not "fix" a failure here by re-uppercasing the fixture.
 (function testStep9CheckBusy() {
   const ctx = loadPageScript(makeFetch((url) => {
@@ -721,9 +721,9 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
     if (url === '/api/autotune') return { ok: true, status: 200, body: { state: 'idle' } };
     return { ok: true, status: 200, body: {} };
   }));
-  return ctx.step9CheckBusy().then((reason) => {
+  return ctx.step8CheckBusy().then((reason) => {
     assert(typeof reason === 'string' && /firing is currently running/.test(reason),
-      'step9CheckBusy: a running firing refuses the CT verification sweep');
+      'step8CheckBusy: a running firing refuses the CT verification sweep');
   });
 })();
 
@@ -733,9 +733,9 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
     if (url === '/api/autotune') return { ok: true, status: 200, body: { state: 'idle' } };
     return { ok: true, status: 200, body: {} };
   }));
-  return ctx.step9CheckBusy().then((reason) => {
+  return ctx.step8CheckBusy().then((reason) => {
     assert(typeof reason === 'string' && /firing is currently running/.test(reason),
-      'step9CheckBusy: a PAUSED firing still refuses the sweep (relays are still owned)');
+      'step8CheckBusy: a PAUSED firing still refuses the sweep (relays are still owned)');
   });
 })();
 
@@ -745,9 +745,9 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
     if (url === '/api/autotune') return { ok: true, status: 200, body: { state: 'stepping' } };
     return { ok: true, status: 200, body: {} };
   }));
-  return ctx.step9CheckBusy().then((reason) => {
+  return ctx.step8CheckBusy().then((reason) => {
     assert(typeof reason === 'string' && /autotune is currently running/.test(reason),
-      'step9CheckBusy: a running autotune refuses the sweep');
+      'step8CheckBusy: a running autotune refuses the sweep');
   });
 })();
 
@@ -757,32 +757,32 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
     if (url === '/api/autotune') return { ok: true, status: 200, body: { state: 'done' } };
     return { ok: true, status: 200, body: {} };
   }));
-  return ctx.step9CheckBusy().then((reason) => {
+  return ctx.step8CheckBusy().then((reason) => {
     assert(reason === null,
-      'step9CheckBusy: a FINISHED firing/autotune (state "done") does not block the sweep forever');
+      'step8CheckBusy: a FINISHED firing/autotune (state "done") does not block the sweep forever');
   });
 })();
 
 (function testStep9CheckBusyNeverBlocksOnFailedFetch() {
   const ctx = loadPageScript(function () { return Promise.reject(new Error('network down')); });
-  return ctx.step9CheckBusy().then((reason) => {
-    assert(reason === null, 'step9CheckBusy: a failed fetch never blocks the start (matches ' +
+  return ctx.step8CheckBusy().then((reason) => {
+    assert(reason === null, 'step8CheckBusy: a failed fetch never blocks the start (matches ' +
       'checkFiringOrAutotuneRunning()\'s own rule)');
   });
 })();
 
 // §4: a CT-less kiln (this bench's normal state -- project_no_cts_fitted_
-// guard_coverage) must be able to reach "setup complete". Step 9's own copy
-// posted 'skipped' for ct_installed=0 while WIZARD_STEPS marks step 9
+// guard_coverage) must be able to reach "setup complete". Step 8's own copy
+// posted 'skipped' for ct_installed=0 while WIZARD_STEPS marks step 8
 // safety:true unconditionally, so computeCompleteness() blocked forever.
 // The fix posts 'done' instead -- same precedent step 8 already sets for
 // ct_installed=0 (:869) and the same treatment `deliberately_off` gets.
 (function testCtSkipPostsDoneNotSkipped() {
   const html = fs.readFileSync(PAGE_PATH, 'utf8');
-  assert(/postStepState\(9, 'done', 'ct_installed=0, nothing to verify'\)/.test(html),
-    'step9: the no-CT exit posts done (a complete answer), not skipped (which blocks forever)');
-  assert(!/postStepState\(9, 'skipped', 'ct_installed=0, nothing to verify'\)/.test(html),
-    'step9: the old skipped-forever call is gone');
+  assert(/postStepState\(8, 'done', 'ct_installed=0, nothing to verify'\)/.test(html),
+    'step8: the no-CT exit posts done (a complete answer), not skipped (which blocks forever)');
+  assert(!/postStepState\(8, 'skipped', 'ct_installed=0, nothing to verify'\)/.test(html),
+    'step8: the old skipped-forever call is gone');
 })();
 
 (function testCtSkipDoneAllowsCompletion() {
@@ -794,13 +794,13 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
     version: 1,
     steps: Object.fromEntries(ctx.WIZARD_STEPS.map((s) => [String(s.id), { state: 'done' }])),
   };
-  // Step 9 stored 'done' via the CT-less exit, exactly like the fixed code
+  // Step 8 stored 'done' via the CT-less exit, exactly like the fixed code
   // now posts -- must NOT read as a blocking skip.
-  allDoneProgress.steps['9'] = { state: 'done', note: 'ct_installed=0, nothing to verify' };
+  allDoneProgress.steps['8'] = { state: 'done', note: 'ct_installed=0, nothing to verify' };
   const merged = ctx.mergeAllSteps(allDoneProgress, allOkReadiness);
   const gate = ctx.computeCompleteness(merged, allOkReadiness);
   assert(gate.complete === true,
-    'a CT-less kiln that finished step 9 via the no-CT exit (state done) can reach setup complete');
+    'a CT-less kiln that finished step 8 via the no-CT exit (state done) can reach setup complete');
 })();
 
 // §5: step 7's abs-max comparison must slice to thermo_count, matching step
@@ -852,7 +852,7 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   const merged = ctx.mergeAllSteps({ version: 1, steps: {} }, readiness);
   const gate = ctx.computeCompleteness(merged, readiness);
   assert(gate.complete === false, 'completeness gate: a not_done readiness item blocks "complete"');
-  assert(gate.reasons.some((r) => /guard_max_temp is not_done/.test(r)),
+  assert(gate.reasons.some((r) => /guard_max_temp is not_done/.test(r.text)),
     'completeness gate: the outstanding item is named in the reasons list');
 })();
 
@@ -1206,36 +1206,37 @@ function loadCommissioningShared(fetchImpl, confirmImpl) {
 // at stake." This is a shape assertion on the real WIZARD_STEPS table (not a
 // second, hand-maintained copy of it) so a future edit that renames/removes
 // this step without updating the plan's own acceptance line is caught here,
-// not just by eye. Step id renumbered 13 -> 12 on 2026-09-19 when former
-// step 11 ("Coupling matrix (optional)") was removed and steps after it
-// shifted down by one -- this test follows that renumbering. It
-// intentionally does NOT drive the DOM-only renderStep12() (fetch/document-
-// heavy, same class as the other untested optional-step renderers 8-10) --
-// see the file header's extraction rationale for why this suite only
-// reaches the page's pure/state functions.
-(function testStep12AuthWizardStepExistsAndIsOptional() {
+// not just by eye. Step id renumbered 13 -> 12 -> 11 (2026-09-19, two
+// passes: former step 11 "Coupling matrix (optional)" removed first, then
+// the standalone CT install/calibrate step folded into safety commissioning
+// (step 7), each shifting everything after it down by one) -- this test
+// follows both renumberings. It intentionally does NOT drive the DOM-only
+// renderStep11() (fetch/document-heavy, same class as the other untested
+// optional-step renderers 8-10) -- see the file header's extraction
+// rationale for why this suite only reaches the page's pure/state functions.
+(function testStep11AuthWizardStepExistsAndIsOptional() {
   const ctx = loadPageScript(noopFetch);
-  const step12 = ctx.WIZARD_STEPS.filter((s) => s.id === 12)[0];
-  assert(!!step12, 'WIZARD_STEPS declares a step 12 (section 11\'s authentication step)');
-  assert(/auth/i.test(step12.title), 'step 12 is titled about authentication, not a generic placeholder');
-  assert(step12.safety === false, 'step 12 is not safety-relevant (skipping it must never block the gate)');
-  assert(step12.readinessKeys.length === 0,
-    'step 12 declares no readiness keys -- it is purely optional/recommend-only, per plan section 11');
+  const step11 = ctx.WIZARD_STEPS.filter((s) => s.id === 11)[0];
+  assert(!!step11, 'WIZARD_STEPS declares a step 11 (section 11\'s authentication step)');
+  assert(/auth/i.test(step11.title), 'step 11 is titled about authentication, not a generic placeholder');
+  assert(step11.safety === false, 'step 11 is not safety-relevant (skipping it must never block the gate)');
+  assert(step11.readinessKeys.length === 0,
+    'step 11 declares no readiness keys -- it is purely optional/recommend-only, per plan section 11');
 
   // Confirm the "never blocks completion" half end-to-end through the real
   // gate function, the same way testGateBlocksOnUnmappedFiringGateItem()
   // above proves the opposite direction for a real blocking item.
   const allDoneProgress = {
     version: 1,
-    steps: Object.fromEntries(ctx.WIZARD_STEPS.filter((s) => s.id !== 12).map((s) => [String(s.id), { state: 'done' }])),
+    steps: Object.fromEntries(ctx.WIZARD_STEPS.filter((s) => s.id !== 11).map((s) => [String(s.id), { state: 'done' }])),
   };
-  allDoneProgress.steps['12'] = { state: 'skipped', note: 'left off' };
+  allDoneProgress.steps['11'] = { state: 'skipped', note: 'left off' };
   const stepKeyItems = ctx.WIZARD_STEPS.reduce((acc, s) => acc.concat(s.readinessKeys.map((k) => item(k, 'ok'))), []);
   const readiness = readinessOf(stepKeyItems);
   const merged = ctx.mergeAllSteps(allDoneProgress, readiness);
   const gate = ctx.computeCompleteness(merged, readiness);
   assert(gate.complete === true,
-    'skipping step 12 (authentication, non-safety) does not block "Setup complete" -- same precedent as ' +
+    'skipping step 11 (authentication, non-safety) does not block "Setup complete" -- same precedent as ' +
     'testGateAllowsSkippedNonSafetyStep\'s non-safety-skip assertion above');
 })();
 

@@ -266,7 +266,7 @@ from the board (<code>GET /api/readiness</code>), never trusted from memory alon
   <!-- Steps 0-3 (implementation steps 4-5 of SETUP_WIZARD.md section 8):
        real content, wired to the same endpoints/validation the existing
        settings pages already use -- see the per-step render*/commit*
-       functions below. Steps 4-12 fall through to #stepGenericContent. -->
+       functions below. Every step 0-11 now has its own real body. -->
   <div id="stepBody0" hidden></div>
   <div id="stepBody1" hidden></div>
   <div id="stepBody2" hidden></div>
@@ -295,14 +295,6 @@ from the board (<code>GET /api/readiness</code>), never trusted from memory alon
   <div id="stepBody9" hidden></div>
   <div id="stepBody10" hidden></div>
   <div id="stepBody11" hidden></div>
-
-  <div id="stepGenericContent" hidden>
-    <p class="hint">This step's own screen (fields, live validation, the commit path) is not built yet
-      -- docs/SETUP_WIZARD.md's implementation steps 8-11 add that one step at a time. This shell
-      already tracks and renders this step's true state from the board, and lets you jump straight to
-      it (deep link <code>#step=N</code>), independent of every other step and resumable after a
-      reload or a reboot.</p>
-  </div>
 
   <div class="gnav">
     <button type="button" onclick="gGoto('overview')">Back to overview</button>
@@ -492,26 +484,49 @@ function computeCompleteness(mergedSteps, readiness) {
   // closed and say so explicitly, the same way readiness_http.c's own
   // `checklist_truncated` item fails closed on its side.
   if (items.length === 0) {
-    reasons.push('The readiness checklist could not be read from the board -- completeness is unknown, not confirmed.');
+    reasons.push({ text: 'The readiness checklist could not be read from the board -- completeness is unknown, not confirmed.', fix_url: null });
   }
   items.forEach(function (it) {
     if (it.status === 'not_done' || it.status === 'cannot_yet') {
-      reasons.push(it.label + ' is ' + it.status + ' -- ' + it.detail);
+      // Decision 3: a reason no wizard step owns (no step's readinessKeys
+      // names this item's key) still deserves a way to act on it -- render
+      // the readiness item's own fix_url, exactly as readiness_page.html
+      // does, rather than leaving the operator to go find /readiness by hand.
+      reasons.push({ text: it.label + ' is ' + it.status + ' -- ' + it.detail, fix_url: it.fix_url || null });
     }
   });
   mergedSteps.forEach(function (s) {
     if (s.safety && s.state === 'skipped') {
-      reasons.push('Step ' + s.id + ' (' + s.title + ') is safety-relevant and was skipped.');
+      reasons.push({ text: 'Step ' + s.id + ' (' + s.title + ') is safety-relevant and was skipped.', fix_url: null, step_id: s.id });
     }
     // §2c continued: a step whose readiness data could not be resolved at
     // all is exactly as "not confirmed" as the top-level empty-list case
     // above, even when other steps' items came back fine (a partially
     // truncated checklist, not a fully failed fetch).
     if (s.state === 'unknown') {
-      reasons.push('Step ' + s.id + ' (' + s.title + ') readiness could not be read -- state unknown.');
+      reasons.push({ text: 'Step ' + s.id + ' (' + s.title + ') readiness could not be read -- state unknown.', fix_url: null, step_id: s.id });
     }
   });
   return { complete: reasons.length === 0, reasons: reasons };
+}
+
+// Decision 3: a reason with no step-owned readiness key (an external
+// fix_url from readiness_http.c) renders as a link to that fix, exactly
+// like readiness_page.html's own '<a class="fix">Fix this &rarr;</a>'; a
+// reason tied to one of THIS wizard's own steps (safety-skipped/unknown)
+// links to that step instead via gGoto(), since there is nowhere more
+// specific for the operator to go than the step itself.
+function gateReasonsHtml(reasons) {
+  return reasons.map(function (r) {
+    var text = window.kcEscapeHtml(r.text);
+    if (r.fix_url) {
+      return '<li>' + text + ' <a href="' + window.kcEscapeHtml(r.fix_url) + '">Fix this &rarr;</a></li>';
+    }
+    if (r.step_id !== undefined && r.step_id !== null) {
+      return '<li>' + text + ' <a href="#step=' + r.step_id + '" onclick="gGoto(' + r.step_id + ')">Go to step &rarr;</a></li>';
+    }
+    return '<li>' + text + '</li>';
+  }).join('');
 }
 
 // Task requirement 3: "resumable across browser sessions and reboots" --
@@ -1338,7 +1353,7 @@ function renderStep10() {
       ? '<div class="gate gate-complete">Setup complete -- every readiness item is ok or deliberately off, ' +
         'and no safety-relevant step was skipped.</div>'
       : ('<div class="gate gate-incomplete">Not complete yet:<ul>' +
-        gate.reasons.map(function (r) { return '<li>' + window.kcEscapeHtml(r) + '</li>'; }).join('') + '</ul></div>');
+        gateReasonsHtml(gate.reasons) + '</ul></div>');
     html += '<p class="hint">' + ((profiles && profiles.length) ? profiles.length + ' profile(s) saved.' :
       'No profile saved yet.') + ' <a href="/profiles">Manage profiles &rarr;</a></p>';
     el.innerHTML = html;
@@ -1576,7 +1591,7 @@ function gRenderOverview() {
   } else {
     gateEl.innerHTML = '<div class="gate gate-incomplete">Setup NOT complete. Outstanding before this ' +
       'kiln can be marked ready:<ul>' +
-      gate.reasons.map(function (r) { return '<li>' + window.kcEscapeHtml(r) + '</li>'; }).join('') +
+      gateReasonsHtml(gate.reasons) +
       '</ul></div>';
   }
 }
@@ -2499,6 +2514,54 @@ function renderStep6() {
  * here is treated as critical (named confirm + independent read-back),
  * since this whole step exists to change what the safety processor's own
  * over-temperature protection believes. ---- */
+// Same wire format and result handling as safety_commissioning_page.html's
+// wireCtCalButtons(): each row posts ch/a_fs/zero_mv/commit=1 straight to
+// POST /api/safety/commissioning/ct_cal (source=manual is fixed server-side)
+// and reports the derived k_ct_v_per_a/zero_counts inline, then reloads this
+// step so the "source" label and stored values reflect what was just applied.
+function wireStep7CtCalButtons() {
+  document.querySelectorAll('#s7CtCalWrap .ct-cal-row').forEach(function (row) {
+    var ch = row.getAttribute('data-ct-cal-ch');
+    var btn = row.querySelector('.ct-cal-apply');
+    var result = row.querySelector('.ct-cal-result');
+    if (!btn) return;
+    btn.onclick = function () {
+      var afs = row.querySelector('.ct-cal-afs').value;
+      var zmv = row.querySelector('.ct-cal-zeromv').value;
+      if (afs === '' || zmv === '') {
+        result.textContent = 'enter both A_fs and zero_mv first';
+        result.className = 'ct-cal-result crc-mismatch';
+        return;
+      }
+      btn.disabled = true;
+      result.textContent = 'applying...';
+      result.className = 'ct-cal-result';
+      var body = 'ch=' + encodeURIComponent(ch) + '&a_fs=' + encodeURIComponent(afs) +
+        '&zero_mv=' + encodeURIComponent(zmv) + '&commit=1';
+      fetch('/api/safety/commissioning/ct_cal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body,
+      }).then(function (r) { return r.json().catch(function () { return { ok: false, reason: 'bad response' }; }); })
+        .then(function (j) {
+          btn.disabled = false;
+          if (j.ok) {
+            result.textContent = 'ok -- k_ct_v_per_a=' + j.k_ct_v_per_a + ', zero_counts=' + j.zero_counts;
+            result.className = 'ct-cal-result';
+            renderStep7();
+          } else {
+            result.textContent = 'FAILED: ' + (j.reason || 'unknown error');
+            result.className = 'ct-cal-result crc-mismatch';
+          }
+        }).catch(function () {
+          btn.disabled = false;
+          result.textContent = 'FAILED: request error';
+          result.className = 'ct-cal-result crc-mismatch';
+        });
+    };
+  });
+}
+
 function renderStep7() {
   var el = document.getElementById('stepBody7');
   el.innerHTML = '<p class="hint">Loading safety processor status&hellip;</p>';
@@ -2528,11 +2591,13 @@ function renderStep7() {
       .reduce(function (a, b) { return Math.max(a, b); }, 0);
 
     var html = '<p class="hint">Commissions the safety processor\'s own thermocouple type, ' +
-      'calibration offset, absolute-maximum ceiling, and current-transformer (CT) install, topology, ' +
-      'per-zone mapping and gain calibration -- stored on the safety processor, outside both firmware ' +
-      'update slots, enforced there independent of everything else on this board. This screen writes those ' +
+      'calibration offset, absolute-maximum ceiling, and current-transformer (CT) install, topology and ' +
+      'per-zone mapping -- stored on the safety processor, outside both firmware update slots, enforced ' +
+      'there independent of everything else on this board. This screen writes those ' +
       'values through the exact same stage-then-commit, then-read-back-confirmed path as ' +
-      '<a href="/safety/commissioning">/safety/commissioning</a>, not a second write path.</p>';
+      '<a href="/safety/commissioning">/safety/commissioning</a>, not a second write path. CT gain ' +
+      'calibration (A_fs / zero_mv per channel) is entered directly below too -- it is not a Pico param ' +
+      'and commits through its own endpoint, not this screen\'s "Stage &amp; commit".</p>';
     html += '<p class="hint">' + (commissioning.link_up ? 'Safety processor: LINK UP.' :
       'Safety processor: LINK DOWN -- values below are the ESP\'s last cached copy and may be stale.') +
       (commissioning.commissioned ? ' Commissioned: YES.' : ' Commissioned: NO.') + '</p>';
@@ -2593,13 +2658,20 @@ function renderStep7() {
     var ctZone = (ctMapData && ctMapData.zone) || [];
     var ctCommittedMask = (ctMapData && ctMapData.committed_mask) || 0;
     var ctCommittedZone = (ctMapData && ctMapData.committed_zone) || [];
+    // k_mask/k[] are a third, independent source: per-channel measured/
+    // calibrated gain (A per volt) presence and value, distinct from BOTH
+    // the sweep-measured zone mapping and the committed zone mapping above --
+    // a channel can be zone-mapped with no gain measured yet, or vice versa.
+    var ctKMask = (ctMapData && ctMapData.k_mask) || 0;
+    var ctK = (ctMapData && ctMapData.k) || [];
     var ctMapRows = '';
     for (var mch = 0; mch < 3; mch++) {
       var measuredTxt = (ctMask & (1 << mch)) ? ('zone ' + (ctZone[mch] + 1) + ' (measured by current-sweep)') : 'not measured yet';
       var committedTxt = (ctCommittedMask & (1 << mch)) ? ('zone ' + (ctCommittedZone[mch] + 1) + ' (set on the safety processor)') : 'not set on the safety processor';
-      ctMapRows += '<div class="review-row"><span>CT' + mch + '</span><span class="rv">' + measuredTxt + ' -- ' + committedTxt + '</span></div>';
+      var kTxt = (ctKMask & (1 << mch)) ? ('k=' + ctK[mch]) : 'no gain measured';
+      ctMapRows += '<div class="review-row"><span>CT' + mch + '</span><span class="rv">' + measuredTxt + ' -- ' + committedTxt + ' -- ' + kTxt + '</span></div>';
     }
-    html += '<div class="wfield"><label>Current CT channel mapping (both sources)</label>' + ctMapRows + '</div>';
+    html += '<div class="wfield"><label>Current CT channel mapping (three sources)</label>' + ctMapRows + '</div>';
 
     var zoneOptsHtml = '<option value="">-- choose --</option>';
     for (var zi = 0; zi < thermoCountS7; zi++) {
@@ -2613,6 +2685,34 @@ function renderStep7() {
         return '<div class="wfield"><label for="s7CtMap' + ch + '">CT channel ' + ch + '</label>' +
           '<select id="s7CtMap' + ch + '">' + zoneOptsHtml + '</select></div>';
       }).join('') + '</div>';
+
+    // CT gain calibration (ct_cal): A_fs (clamp full-scale rating, amps) and
+    // zero_mv (measured zero-current offset, millivolts) per channel. NOT a
+    // Pico param id -- converts via safety_ct_cal_convert() into
+    // k_ct_v_per_a/zero_counts and posts straight to
+    // POST /api/safety/commissioning/ct_cal (safety_cfg_http.c), same as
+    // /safety/commissioning's own ct-cal-row Apply button. Kept as its own
+    // section with its own per-row Apply, not folded into "Stage & commit",
+    // for the same reason that screen keeps it separate: it does not ride
+    // the generic params[] staging pass.
+    var ctCalArr = (commissioning.ct_cal || []);
+    var ctCalRows = [0, 1, 2].map(function (ch) {
+      var c = ctCalArr[ch] || {};
+      var afsVal = c.has_value ? c.a_fs : '';
+      var zmvVal = c.has_value ? c.zero_mv : '';
+      var srcTxt = c.has_value ? (' (source: ' + window.kcEscapeHtml(String(c.source || 'unknown')) + ')') : ' (not calibrated yet)';
+      return '<div class="wfield ct-cal-row" data-ct-cal-ch="' + ch + '"><label>CT channel ' + ch + ' gain calibration' + srcTxt + '</label>' +
+        '<label>A_fs (clamp full-scale rating, A) <input type="number" step="any" min="0" class="ct-cal-afs" ' +
+        'value="' + window.kcEscapeHtml(String(afsVal)) + '" placeholder="e.g. 30"></label> ' +
+        '<label>zero_mv (measured zero-current offset, mV) <input type="number" step="any" class="ct-cal-zeromv" ' +
+        'value="' + window.kcEscapeHtml(String(zmvVal)) + '" placeholder="e.g. 0, 2.5"></label> ' +
+        '<button type="button" class="ct-cal-apply">Apply</button> <span class="ct-cal-result"></span></div>';
+    }).join('');
+    html += '<div class="wfield" id="s7CtCalWrap"><label>CT gain calibration</label>' +
+      '<p class="hint">Converts a clamp\'s full-scale amp rating and a measured zero-current millivolt offset ' +
+      'into the safety processor\'s internal gain/offset counts. Each row commits on its own Apply -- these are ' +
+      'ESP-local inputs that write straight to the safety processor, not part of "Stage &amp; commit" above.' +
+      '</p>' + ctCalRows + '</div>';
 
     html += '<div id="step7Err"></div><div id="step7Ok"></div><p id="step7Msg" class="hint"></p>';
     html += '<div class="gnav"><button type="button" id="step7Save">Stage &amp; commit</button></div>';
@@ -2635,9 +2735,17 @@ function renderStep7() {
       var perZone = document.getElementById('s7CtTopology').value === '0';
       wrap.style.display = (installed && perZone) ? '' : 'none';
     }
+    function refreshCtCalVisibility() {
+      var wrap = document.getElementById('s7CtCalWrap');
+      if (!wrap) return;
+      wrap.style.display = (document.getElementById('s7CtInstalled').value === '1') ? '' : 'none';
+    }
     document.getElementById('s7CtInstalled').addEventListener('change', refreshCtMapVisibility);
     document.getElementById('s7CtTopology').addEventListener('change', refreshCtMapVisibility);
+    document.getElementById('s7CtInstalled').addEventListener('change', refreshCtCalVisibility);
     refreshCtMapVisibility();
+    refreshCtCalVisibility();
+    wireStep7CtCalButtons();
 
     document.getElementById('step7Save').addEventListener('click', function () {
       var errEl = document.getElementById('step7Err');
@@ -2784,8 +2892,6 @@ function gRenderStepDetail(stepId) {
     var body = document.getElementById('stepBody' + id);
     if (body) body.hidden = (stepId !== id);
   });
-  // Every step 0-11 has real content -- the generic placeholder never shows.
-  document.getElementById('stepGenericContent').hidden = true;
   if (step2Poll) { clearInterval(step2Poll); step2Poll = null; }
   if (step3PollTimer) { clearTimeout(step3PollTimer); step3PollTimer = null; }
   if (step8Poll) { step8StopPoll(); }
