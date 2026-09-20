@@ -192,6 +192,77 @@ class SymbolizeMismatchTests(unittest.TestCase):
                 )
             run_mock.assert_not_called()
 
+    def test_resolved_gdb_passed_on_cmdline(self):
+        """2026-09-19 fix: a matching ELF must still symbolize even when the
+        subprocess's own PATH has no GDB on it -- confirmed live against a
+        real archived ELF/coredump pair that esp_coredump accepts fine but
+        which failed with a bare non-zero exit ("GDB executable not found")
+        until GDB was explicitly resolved and passed via --gdb. This does not
+        depend on a real GDB install: _resolve_gdb_path is mocked directly,
+        and the test asserts the resolved path lands in the subprocess argv,
+        with subprocess.run itself also mocked (matching this file's existing
+        no-real-espcoredump-install convention)."""
+        ok_result = unittest.mock.Mock(returncode=0, stdout="Crashed task: profile_executor\n", stderr="")
+        fake_gdb = os.path.join(self.tmpdir, "xtensa-esp32s3-elf-gdb.exe")
+        with open(fake_gdb, "w") as f:
+            f.write("# fake gdb, never executed\n")
+        with unittest.mock.patch("subprocess.run", return_value=ok_result) as run_mock, \
+             unittest.mock.patch.object(coredump_fetch, "_resolve_gdb_path", return_value=fake_gdb):
+            out = coredump_fetch.symbolize_coredump(
+                self.coredump_path, self.elf_path, idf_path=self.idf_dir,
+            )
+        self.assertIn("profile_executor", out)
+        cmd = run_mock.call_args[0][0]
+        self.assertIn("--gdb", cmd)
+        self.assertEqual(cmd[cmd.index("--gdb") + 1], fake_gdb)
+
+    def test_gdb_not_found_is_an_environment_failure_not_a_mismatch(self):
+        """The exact failure mode this fix targets: espcoredump exits
+        non-zero with 'GDB executable not found' (its own GDB_NOT_FOUND_ERROR
+        message) against an ELF that actually DOES match the coredump.
+        Before this fix that non-zero exit was indistinguishable from a
+        genuine SHA256 mismatch to symbolize_coredump's caller. It must now
+        surface as a distinctly-worded environment failure, never a
+        content-mismatch verdict."""
+        no_gdb_result = unittest.mock.Mock(
+            returncode=1, stdout="",
+            stderr="GDB executable not found. Please install GDB or set up ESP-IDF to complete the action.",
+        )
+        with unittest.mock.patch("subprocess.run", return_value=no_gdb_result), \
+             unittest.mock.patch.object(coredump_fetch, "_resolve_gdb_path", return_value=None):
+            with self.assertRaises(coredump_fetch.CoredumpSymbolizeError) as ctx:
+                coredump_fetch.symbolize_coredump(
+                    self.coredump_path, self.elf_path, idf_path=self.idf_dir,
+                )
+        msg = str(ctx.exception)
+        self.assertNotIn("SHA256", msg)
+        self.assertIn("GDB executable not found", msg)
+
+    def test_find_matching_archived_elf_does_not_report_unsymbolizable_on_missing_gdb(self):
+        """find_matching_archived_elf must abort loudly on the FIRST
+        candidate's environment failure rather than trying every remaining
+        candidate and reporting a false PERMANENTLY UNSYMBOLIZABLE -- the
+        2026-09-16 contract this module already has for other environment
+        markers, now also covering the GDB one."""
+        elf2 = os.path.join(self.tmpdir, "KilnCtrl-second.elf")
+        with open(elf2, "wb") as f:
+            f.write(b"\x7fELF fake 2")
+        no_gdb_result = unittest.mock.Mock(
+            returncode=1, stdout="",
+            stderr="GDB executable not found. Please install GDB or set up ESP-IDF to complete the action.",
+        )
+        with unittest.mock.patch("subprocess.run", return_value=no_gdb_result) as run_mock, \
+             unittest.mock.patch.object(coredump_fetch, "_resolve_gdb_path", return_value=None):
+            with self.assertRaises(coredump_fetch.CoredumpSymbolizeError) as ctx:
+                coredump_fetch.find_matching_archived_elf(
+                    self.coredump_path, [self.elf_path, elf2], idf_path=self.idf_dir,
+                )
+        msg = str(ctx.exception)
+        self.assertNotIn("PERMANENTLY UNSYMBOLIZABLE", msg)
+        self.assertIn("GDB executable not found", msg)
+        # Aborted after the first candidate -- never tried the second.
+        run_mock.assert_called_once()
+
 
 class FindMatchingArchivedElfTests(unittest.TestCase):
     """Negative tests for the 2026-09-16 gap: `find_crash_elf()`/

@@ -52,6 +52,7 @@ sub = p.add_subparsers(dest="cmd", required=True)
 info = sub.add_parser("info_corefile")
 info.add_argument("--core", "-c", required=True)
 info.add_argument("--core-format", "-t", required=True)
+info.add_argument("--gdb", "-g")
 info.add_argument("prog")
 
 args = p.parse_args()

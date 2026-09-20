@@ -36,6 +36,7 @@ subprocess mismatch case).
 """
 from __future__ import annotations
 
+import glob
 import hashlib
 import json
 import logging
@@ -224,9 +225,64 @@ def _resolve_espcoredump_python(espcoredump_python: Optional[str]) -> str:
     return sys.executable
 
 
+def _resolve_gdb_path(gdb: Optional[str] = None,
+                       chip: str = ESP_IDF_CHIP_TARGET) -> Optional[str]:
+    """Finds the target-specific GDB (`xtensa-esp32s3-elf-gdb[.exe]`) that
+    `espcoredump.py`'s `info_corefile`/`dbg_corefile` needs to produce a
+    backtrace.
+
+    2026-09-19 finding: confirmed live against a real archived ELF that
+    esp_coredump's own SHA256 check happily accepts (`KilnCtrl-cc8cadd80b20.elf`
+    against `coredump-a4bf9e22018a.bin`) -- with no GDB on the subprocess's
+    PATH, espcoredump still exits non-zero (`GDB executable not found. ...`),
+    which `find_matching_archived_elf`/`symbolize_coredump`'s old
+    non-zero-exit handling could not distinguish from a genuine content
+    mismatch. Every candidate then fails identically for this one
+    environment reason, which surfaces as "PERMANENTLY UNSYMBOLIZABLE" --
+    exactly the environment-failure-reported-as-a-data-verdict class this
+    module exists to avoid (see `_ENVIRONMENT_FAILURE_MARKERS` above). Once
+    a GDB was placed on PATH, the SAME ELF/coredump pair symbolized
+    cleanly -- proving the pair was never mismatched at all.
+
+    The MCP server's own process does not normally have ESP-IDF's
+    `export.ps1`/`export.sh` PATH additions sourced (those are shell-session
+    state, not something this module's subprocess inherits), so this
+    resolves GDB explicitly instead of assuming it is already on PATH, the
+    same way `_resolve_espcoredump_python` resolves the interpreter.
+
+    Preference order: an explicit `gdb` argument; `shutil.which()` (covers a
+    session that DID source export.ps1/.sh); then a glob under
+    `IDF_TOOLS_PATH` (falling back to the default `~/.espressif`) for
+    `tools/xtensa-esp-elf-gdb/*/xtensa-esp-elf-gdb/bin/xtensa-<chip>-elf-gdb*`,
+    newest version first. Returns None (not a raise) if nothing is found --
+    the caller passes that through to espcoredump unmodified, which still
+    produces its own recognizable `GDB executable not found` failure rather
+    than a fabricated one, and that failure is now a recognized environment
+    marker rather than a false mismatch verdict."""
+    if gdb:
+        return gdb
+    found = shutil.which(f"xtensa-{chip}-elf-gdb")
+    if found:
+        return found
+    tools_root = os.environ.get("IDF_TOOLS_PATH") or os.path.join(
+        os.path.expanduser("~"), ".espressif")
+    pattern = os.path.join(tools_root, "tools", "xtensa-esp-elf-gdb", "*",
+                            "xtensa-esp-elf-gdb", "bin", f"xtensa-{chip}-elf-gdb*")
+    candidates = sorted(glob.glob(pattern), reverse=True)
+    for candidate in candidates:
+        # Exclude sibling utilities that happen to glob-match a loose
+        # trailing '*' (e.g. gdb-3.x/gprof variants do not, but keep this
+        # defensive since the glob is not chip-suffix-exact).
+        base = os.path.basename(candidate)
+        if base.startswith(f"xtensa-{chip}-elf-gdb") and os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def symbolize_coredump(coredump_path: str, elf_path: str, *, fw_build: str = "<unspecified>",
                         espcoredump_python: Optional[str] = None,
                         idf_path: Optional[str] = None,
+                        gdb_path: Optional[str] = None,
                         subcommand: str = "info_corefile") -> str:
     """Runs ESP-IDF's `espcoredump.py <subcommand>` against `coredump_path`
     with `--rom-elf`/prog `elf_path`, and returns its stdout on success.
@@ -279,10 +335,36 @@ def symbolize_coredump(coredump_path: str, elf_path: str, *, fw_build: str = "<u
     # verdict instead of an argparse usage error.
     cmd = [
         python, script, "--chip", ESP_IDF_CHIP_TARGET, subcommand,
-        "--core", coredump_path, "--core-format", "raw", elf_path,
+        "--core", coredump_path, "--core-format", "raw",
     ]
+    # 2026-09-19 fix: resolve GDB explicitly and pass it via --gdb rather than
+    # relying on it already being on this subprocess's PATH. The MCP server
+    # process does not have ESP-IDF's export.ps1/.sh PATH additions sourced,
+    # so without this espcoredump exits non-zero with "GDB executable not
+    # found" -- an environment failure that used to look exactly like a
+    # genuine SHA256 mismatch to the caller (see _resolve_gdb_path's
+    # docstring for the confirmed live repro: a real archived ELF that
+    # matches its coredump fine was reported PERMANENTLY UNSYMBOLIZABLE
+    # purely because no GDB was reachable). Inserted before the positional
+    # `prog` (elf_path) -- kept last so anything scanning cmd[-1] for "the
+    # ELF this call was about" (this module's own tests included) keeps
+    # working regardless of whether a GDB was resolved.
+    resolved_gdb = _resolve_gdb_path(gdb_path)
+    if resolved_gdb:
+        cmd += ["--gdb", resolved_gdb]
+    cmd.append(elf_path)
+    # Run with cwd set to the ELF's own directory: espcoredump.py's wrapper
+    # looks for project_description.json next to `prog` (get_prefix_map_
+    # gdbinit_files) purely to enable reproducible-build path remapping in
+    # backtraces -- optional and merely WARNs if missing, but archived ELFs
+    # live in elf_archive/, not a build/ directory, so this always warns for
+    # them today. Setting cwd here costs nothing and matches the two places
+    # the ELF and any sibling project_description.json (see
+    # archive_kiln_elf(), which now also archives it when available) are
+    # expected to be found together.
+    elf_dir = os.path.dirname(os.path.abspath(elf_path)) or None
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=elf_dir)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise CoredumpSymbolizeError(
             f"failed to run espcoredump ({cmd!r}) against elf={elf_path!r} fw_build={fw_build!r}: {exc}"
@@ -326,12 +408,19 @@ _ENVIRONMENT_FAILURE_MARKERS = (
     "IDF_PATH is not set",
     "espcoredump.py not found",
     "failed to run espcoredump",
+    # 2026-09-19: "GDB executable not found" (esp_coredump's own
+    # GDB_NOT_FOUND_ERROR) is an environment problem, not a content verdict --
+    # confirmed live that a genuinely matching ELF/coredump pair produces
+    # this exact non-zero exit when no GDB is reachable, which used to be
+    # indistinguishable from a real SHA256 mismatch (see _resolve_gdb_path).
+    "GDB executable not found",
 )
 
 
 def find_matching_archived_elf(coredump_path: str, candidate_elves: list[str], *,
                                 espcoredump_python: Optional[str] = None,
                                 idf_path: Optional[str] = None,
+                                gdb_path: Optional[str] = None,
                                 subcommand: str = "info_corefile") -> tuple[str, str]:
     """Finds the ELF that actually produced `coredump_path`, by trying each
     of `candidate_elves` against espcoredump/esp_coredump's own embedded
@@ -381,7 +470,8 @@ def find_matching_archived_elf(coredump_path: str, candidate_elves: list[str], *
             out = symbolize_coredump(
                 coredump_path, elf_path,
                 fw_build=f"<candidate {os.path.basename(elf_path)}, content-based search>",
-                espcoredump_python=espcoredump_python, idf_path=idf_path, subcommand=subcommand,
+                espcoredump_python=espcoredump_python, idf_path=idf_path, gdb_path=gdb_path,
+                subcommand=subcommand,
             )
         except CoredumpSymbolizeError as exc:
             msg = str(exc)

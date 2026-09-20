@@ -1591,8 +1591,25 @@ def archive_kiln_elf(elf_path: str, fw_build: str, git_commit: Optional[str],
     build_timestamps_match() already normalized for comparison -- see that
     function's doc comment for why raw __DATE__ strings are not safe to key
     on directly (single-digit-day padding varies)."""
-    return _archive(elf_path, kiln_archive_dir(), "KilnCtrl", normalize_build_timestamp(fw_build),
-                     extra={"git_commit": git_commit, "source": source})
+    result = _archive(elf_path, kiln_archive_dir(), "KilnCtrl", normalize_build_timestamp(fw_build),
+                       extra={"git_commit": git_commit, "source": source})
+    # 2026-09-19: also carry project_description.json alongside the archived
+    # ELF, cheap best-effort convenience for coredump_fetch.symbolize_coredump
+    # -- espcoredump.py's wrapper only WARNs (never fails) when this file is
+    # missing next to the ELF it's given, so this is not required for
+    # symbolizing to work (see coredump_fetch._resolve_gdb_path's docstring
+    # for the actual fatal cause that warning used to get confused with),
+    # but having it present removes a spurious warning from every future
+    # symbolize run against this archived ELF.
+    try:
+        src_desc = os.path.join(os.path.dirname(os.path.abspath(elf_path)), "project_description.json")
+        if os.path.isfile(src_desc):
+            dst_desc = os.path.join(os.path.dirname(result.path), "project_description.json")
+            shutil.copy2(src_desc, dst_desc)
+    except OSError as exc:  # noqa: BLE001 -- best-effort convenience, never blocks the real archive
+        print(f"elf_archive: WARNING -- could not copy project_description.json alongside "
+              f"{result.path}: {exc}")
+    return result
 
 
 def archive_safty_elf(elf_path: str, safty_fw_root: str, source: str) -> ArchiveResult:
