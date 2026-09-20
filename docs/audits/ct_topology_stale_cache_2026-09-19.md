@@ -102,6 +102,7 @@ Poisoned `zone_cfg_ct_topology_row_set()` to `return !row.set;`, deleted
 `firmware/KilnFW/App/test/build`, forced a full host-test rebuild: the
 `zones_http` test executable failed (only failure among 54). Restored the
 source by hand, confirmed `git hash-object` matched the pre-poison hash
-(`0084b5b14d531957407adb3b9434820e5657b1d8`), deleted the build directory
-again, and forced a second full clean rebuild: 54/54 executables built and
-passed.
+(a blob id captured at the time of this audit; the file has since changed,
+so it no longer matches HEAD's current blob there and is not cited as a
+resolvable hash), deleted the build directory again, and forced a second
+full clean rebuild: 54/54 executables built and passed.

@@ -149,8 +149,9 @@ and `profile_executor_status.c` (lines 59, 153). Result: FAILED —
 removing the prefix; `git diff --quiet` empty on both files;
 `git hash-object` (first 8 chars
 blob:firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c`489bc22c`
-and blob:firmware/KilnFW/App/drivers/control/profile_executor_status.c`552f8a05`
-respectively) matched HEAD on both. Re-run:
+and, at the time of this audit, 552f8a05 for `profile_executor_status.c`
+-- that file has since changed, so its blob id is no longer cited as
+resolvable against current HEAD) matched HEAD on both at audit time. Re-run:
 PASS — "1 enable / 2 release wire call(s)...".
 
 **Verdict: load-bearing.**
