@@ -264,6 +264,11 @@ static size_t build_commissioning_json(const safety_cfg_http_snapshot_t *s, char
     APPEND(",\"cached_config_crc\":%u", (unsigned)s->cached_crc);
     APPEND(",\"stale\":%s", snapshot_is_stale(s) ? "true" : "false");
     APPEND(",\"commissioned\":%s", s->commissioned ? "true" : "false");
+#if CONFIG_KILNCTL_DEV_TOOLS
+    APPEND(",\"dev_tools_enabled\":true");
+#else
+    APPEND(",\"dev_tools_enabled\":false");
+#endif
     if (s->fetched_ms_ago_or_neg1 < 0) {
         APPEND(",\"fetched_ms_ago\":null");
     } else {
@@ -2033,10 +2038,16 @@ esp_err_t safety_cfg_http_start(SafetyLinkClass *link_or_null, kiln_io_t *io_or_
     static const httpd_uri_t post_uri = {
         .uri = "/api/safety/commissioning", .method = HTTP_POST, .handler = commissioning_post_handler,
     };
+#if CONFIG_KILNCTL_DEV_TOOLS
+    /* Dev-tools-only: applies a fixed set of test values, meant for a
+     * developer bringing up a board, not for an operator commissioning a
+     * real kiln. Gated out of release builds entirely -- see
+     * CONFIG_KILNCTL_DEV_TOOLS in App/Kconfig.projbuild. */
     static const httpd_uri_t bench_uri = {
         .uri = "/api/safety/commissioning/bench_preset", .method = HTTP_POST,
         .handler = bench_preset_post_handler,
     };
+#endif
     static const httpd_uri_t relay_type_uri = {
         .uri = "/api/safety/commissioning/relay_type", .method = HTTP_POST,
         .handler = relay_type_post_handler,
@@ -2072,7 +2083,10 @@ esp_err_t safety_cfg_http_start(SafetyLinkClass *link_or_null, kiln_io_t *io_or_
         .handler = commissioning_page_get_handler,
     };
 
-    const httpd_uri_t *uris[] = { &page_uri,       &get_uri,          &post_uri,       &bench_uri,
+    const httpd_uri_t *uris[] = { &page_uri,       &get_uri,          &post_uri,
+#if CONFIG_KILNCTL_DEV_TOOLS
+                                   &bench_uri,
+#endif
                                    &relay_type_uri, &ct_cal_uri,       &ct_trim_uri,
                                    &ct_auto_zero_uri,
                                    &rate_guard_auto_get_uri, &rate_guard_auto_post_uri };

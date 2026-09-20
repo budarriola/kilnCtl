@@ -137,9 +137,8 @@
     var busyAction = opts.busyAction ||
       'changing the safety thermocouple configuration mid-run is not safe';
     var verifyCaveat = opts.verifyCaveat ||
-      ' (this could not independently confirm the MAX31856 chip itself accepted the type -- ' +
-      'only that the safety processor\'s config record now holds it; see THERMOCOUPLE.md\'s ' +
-      'CR1-verify note).';
+      ' (this could not independently confirm the thermocouple sensor chip itself accepted the ' +
+      'type -- only that the safety processor\'s config record now holds it).';
 
     function doPost() {
       var body = bodyPairs.map(function (p) {

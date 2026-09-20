@@ -287,8 +287,8 @@
      above) in the brand's old spot, so the heading was pure duplication. -->
 <p>Each zone reads one or more MAX31856 thermocouple channels -- pick which
 channels feed a zone below; when more than one is checked, the zone's control
-temperature is the average of that channel set's valid readings
-(thermo_combine.c). PID tuning lives here too, per the project's settled page
+temperature is the average of that channel set's valid readings.
+PID tuning lives here too, per the project's settled page
 layout. Calibration offset is stored here but not yet applied to live
 readings anywhere -- that's a separate, not-yet-built change to the readout
 path.</p>
@@ -1091,7 +1091,7 @@ var FUZZY_RULE_TABLE_HTML =
 var INFO_HTML = {
   coupling: '<p class="hint">Cross-zone coupling to feedforward: &deg;C per unit duty at the ' +
     'other zone\'s heater, measured, not a ratio -- 0 means no coupling measured/assumed. There ' +
-    'is no per-pair autotune step yet, so this is an editable field per PID_EXPANSION_PLAN.md 2c: ' +
+    'is no per-pair autotune step yet, so this is an editable field: ' +
     'one number per other zone, diagonal omitted (self-gain is the identified plant model\'s job). ' +
     'Values are non-negative -- the feedforward\'s own sign carries the direction. Omitting a cell ' +
     'from a save preserves its stored value, so a zone that scrolls out of view cannot silently ' +
@@ -1143,7 +1143,7 @@ var INFO_HTML = {
     'measurements, never another zone\'s. The calibration offset is part of "thermocouple type" on ' +
     'this page\'s single dropdown but is excluded from that group\'s mirroring for the same reason: ' +
     'it corrects THIS physical sensor, not a policy choice a zone can share.</p>',
-  zoneType: '<p class="hint">docs/ON_OFF_ZONE_PLAN.md: a Heater zone is PID/bang-bang controlled and ' +
+  zoneType: '<p class="hint">A Heater zone is PID/bang-bang controlled and ' +
     'is a heat source in the thermal model. An On/off device (vent, damper, fan, water feed) is ' +
     'switched fully on or off -- it is never PID-modulated, is never treated as a heat source or a ' +
     'heat victim, and guards 1/2/3/4/9 (which all assume a controlled heater) are disabled for it. ' +
@@ -2010,7 +2010,7 @@ function updateOnOffCycles(div) {
   var offS = parseFloat(div.querySelector('.minoffs').value) || 0;
   var total = onS + offS;
   out.textContent = (total > 0)
-    ? ('Worst-case switching: ' + (3600 / total).toFixed(1) + ' cycles/hr at these minimum times -- see RELAY_LIFE_BUDGET.md for this relay type\'s rated life.')
+    ? ('Worst-case switching: ' + (3600 / total).toFixed(1) + ' cycles/hr at these minimum times -- check this relay type\'s rated life.')
     : '';
 }
 

@@ -268,9 +268,9 @@
      kind of stray back-link once nav.js's shared topbar covers it --
      measured 99x17 in the headless-Chromium sweep that flagged it. -->
 <p class="lead">The web twin of the LCD's Diagnostics, Board Health and
-Thermocouple Faults pages (UI_PLAN.md's "page structure rework"; the latter
-two folded in here 2026-08-27 at the owner's request -- "most of the
-information is there anyway") -- everything below reads GET /api/status, GET
+Thermocouple Faults pages (Board Health and Thermocouple Faults are folded in
+here since most of that information belongs on this same page) --
+everything below reads GET /api/status, GET
 /api/board_temps and GET /api/thermo/faults, the same live snapshots each
 panel's own refresh timer reads, not a second implementation of any of
 them.</p>
@@ -294,14 +294,14 @@ them.</p>
 <div class="card" id="safetyBuildCard">
   <div class="row"><span class="label">Not yet announced this boot</span><span class="value">n/a</span></div>
 </div>
-<p class="note">CommonFW/docs/LINK_PROTOCOL.md sec 7: "Show the safety
-processor's own build identity, not just the ESP's" -- two processors means
-two firmwares that can be out of sync. Same /api/status fields safety_page.html
-already renders, mirrored here since this is the page for "is this board
-healthy," not only the Wi-Fi-link-specific one. Today (2026-08-21) SaftyFW's
-link_task.c does not yet generate a real build identity -- it announces
-dirty=1 with an empty commit/datetime -- so "unknown"/blank fields here are
-this firmware honestly reporting what arrived, not a bug in this page.</p>
+<p class="note">This shows the safety processor's own build identity, not just
+the main board's -- two processors means two firmwares that can be out of
+sync. Same status fields the Safety page already renders, mirrored here
+since this is the page for "is this board healthy," not only the Wi-Fi-link-
+specific one. The safety processor does not yet always report a real build
+identity -- it can announce a modified build with an empty commit/date -- so
+an "unknown"/blank field here is this firmware honestly reporting what
+arrived, not a bug in this page.</p>
 
 <h2>Memory</h2>
 <div class="card">
@@ -327,8 +327,8 @@ more slack and is not the resource to watch.</p>
   <div class="row"><span class="label">ESP32-S3 die temp</span><span class="value" id="esp32Temp">--</span></div>
   <div id="cjRows"></div>
 </div>
-<p class="note">Cold-junction temperatures are each MAX31856's own local-
-ambient reading (board_temps.c), a different number from the kiln-process
+<p class="note">Cold-junction temperatures are each thermocouple sensor's own
+local-ambient reading, a different number from the kiln-process
 temperature shown on the dashboard -- this is board/enclosure health, not
 firing progress.</p>
 
@@ -345,7 +345,7 @@ firing progress.</p>
      convention across this page, not a second one invented here. -->
 <div id="relayWearCard"><p>Loading&hellip;</p></div>
 <p class="note">Budget is "on the order of 10^5 operations" for this board's
-EE2-12NUH relays (relay_cycles.h, citing docs/HARDWARE.md) -- an order-of-
+EE2-12NUH relays -- an order-of-
 magnitude figure from the part's own life rating, not a datasheet guarantee
 for this specific unit, so the proportion below is shown rounded to the
 nearest whole percent, not as a precise remaining-life gauge. A 60&nbsp;s
@@ -522,8 +522,8 @@ report, not a single occurrence.</p>
 
 <p class="note">More detail (safety-processor link stats) lives on its own
 page -- per-channel thermocouple fault registers used to be a second such
-page (/diagnostics/thermo) but are folded into the "Thermocouple faults"
-section above as of 2026-08-27 (owner request), so only one link remains
+page but are folded into the "Thermocouple faults"
+section above, so only one link remains
 here:</p>
 <div class="linklist">
   <a href="/safety">Safety</a>
@@ -929,7 +929,7 @@ here:</p>
                        'The saved exception frame is NOT self-consistent -- its program counter is ' +
                        'not a code address (0xfffffffd means the saved PC was 0). Do NOT read the ' +
                        'fault address above as a struct field offset, and do not symbolize the PC. ' +
-                       'Decode the coredump partition with espcoredump.py instead.');
+                       'Decode the coredump partition with the crash-analysis tooling instead.');
     }
     // NOT the reset reason of the crash -- it is the reason for the boot on
     // which this dump was first noticed. For a dump found after a reflash or

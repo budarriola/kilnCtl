@@ -119,10 +119,9 @@
      brand's old spot, so the heading duplicated it. -->
 <p class="lead">The web twin of the LCD's Safety page, plus the DIAG/
 TRIP_EVENT detail the panel's ~264px budget had no room for -- everything
-here already rides on GET /api/status (dashboard_http.c); this page adds no
-new endpoint. "Clear trip" posts to the existing POST /api/safety/clear_trip
-(CommonFW/docs/LINK_PROTOCOL.md sec 4) -- the action this data has never had
-on the web before this pass.</p>
+here already rides on the same status data the dashboard uses; this page
+adds no new endpoint. "Clear trip" posts to the existing clear-trip
+action -- something this data has never had on the web before this pass.</p>
 
 <div id="staleBanner" class="stale-banner">Disconnected -- last update <span id="staleAge">?</span>s ago. Values below are frozen, not live.</div>
 <div id="breakerBanner" class="breaker-banner">TRIP_INEFFECTIVE -- power is still flowing. Go to the breaker.</div>
@@ -152,8 +151,8 @@ POWER frame has arrived at all), not zero watts.</p>
 <div class="card" id="buildCard">
   <div class="row"><span class="label">Not yet announced this boot</span><span class="value">n/a</span></div>
 </div>
-<p class="note">CommonFW/docs/LINK_PROTOCOL.md sec 7: "Show the safety processor's own build
-identity, not just the ESP's" -- two processors means two firmwares that can be out of sync, and
+<p class="note">This shows the safety processor's own build identity, not just
+the main board's -- two processors means two firmwares that can be out of sync, and
 a config CRC of 0 means the safety processor is still running compiled-in defaults nobody has
 commissioned.</p>
 
@@ -162,9 +161,8 @@ commissioned.</p>
   <div class="row"><span class="label">Not yet received this boot</span><span class="value">n/a</span></div>
 </div>
 <p class="note">diag_trip_mask / diag_warn_mask are raw per-guard bitmasks
-from the Pico (SaftyFW's safety_guards.h) -- this firmware has no guard-name
-table to decode them against (same reason dashboard_http.c leaves them
-numeric), so they render here as hex, not as named guards.</p>
+from the safety processor -- this firmware has no guard-name
+table to decode them against, so they render here as hex, not as named guards.</p>
 
 <h2>Last trip (Frame D)</h2>
 <div class="card" id="tripCard">

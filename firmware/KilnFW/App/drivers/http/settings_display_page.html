@@ -111,7 +111,7 @@ browser only.</p>
        CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE) -- this markup default only
        shows if that fetch hasn't landed yet. -->
   <p class="hint" id="kcDpBrightnessNote">Inert on this board today: the backlight has no
-    hardware control line fitted yet (see docs/UI_PLAN.md). The setting is saved and will take
+    hardware control line fitted yet. The setting is saved and will take
     effect once that hardware is verified.</p>
 
   <label for="kcDpTimeout">Turn off after</label>
@@ -164,8 +164,8 @@ browser only.</p>
         // follows this setting, so only show the "no hardware line" hint
         // on a board actually built without it.
         brightnessNote.textContent = d.brightness_inert
-          ? 'Inert on this board today: the backlight has no hardware control line fitted yet ' +
-            '(see docs/UI_PLAN.md). The setting is saved and will take effect once that hardware ' +
+          ? 'Inert on this board today: the backlight has no hardware control line fitted yet. ' +
+            'The setting is saved and will take effect once that hardware ' +
             'is verified.'
           : 'Applies live to the panel backlight.';
       })

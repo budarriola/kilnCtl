@@ -160,6 +160,22 @@ the exact command to run by hand rather than silently skipping.
 Remove the worktree when done: `git worktree remove C:\wt\<name>` (add
 `--force` only if it reports uncommitted changes you intend to discard).
 
+### Developer-only tools (`CONFIG_KILNCTL_DEV_TOOLS`)
+
+`firmware/KilnFW/App/Kconfig.projbuild`'s `CONFIG_KILNCTL_DEV_TOOLS` gates
+development-only affordances that must not ship in release firmware --
+currently the safety commissioning page's "Apply test preset" button and
+its backing route, which stage a fixed set of test values rather than
+anything derived from a real installation. It defaults to `n`; a from-
+scratch `idf.py build` with no `sdkconfig` leaves it off, matching a
+release build. The shared development board's own `firmware/KilnFW/sdkconfig`
+is gitignored (generated, not checked in), and that bench build turns this
+on by hand -- add `CONFIG_KILNCTL_DEV_TOOLS=y` to it (or via `idf.py
+menuconfig`, under "KilnCtrl Application") when bringing up a fresh bench
+`sdkconfig`. A clean-worktree verification build never sets this, so
+`check_00_kilnfw_target_build.ps1` and friends always exercise the
+release-shaped (off) path.
+
 ## Verifying the clone
 
 ```powershell

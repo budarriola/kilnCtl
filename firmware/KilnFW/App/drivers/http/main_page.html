@@ -990,7 +990,7 @@ function renderPidPopup(z) {
     'confirmation beyond clicking Apply below. This is meant for small nudges to gains that are already ' +
     'close, not for rescuing a badly-behaved kiln -- if the zone is far off, prefer re-running autotune.</p>' +
     '<p class="warn" id="pidPopupBumplessWarn" style="display:none">This zone’s reading is currently ' +
-    'INVALID while its firing is active -- profile_executor.c only re-seeds the control integral bumplessly ' +
+    'INVALID while its firing is active -- the controller only re-seeds the control integral bumplessly ' +
     'when the reading is valid at the moment the new gains are noticed; with an invalid reading right now it ' +
     'falls back to a cold reset instead, and the commanded duty CAN step. ' +
     '<label style="display:inline;font-weight:normal"><input type="checkbox" id="pidPopupBumplessAck"> ' +
@@ -1829,7 +1829,7 @@ function renderSafetyTrip(data) {
   var cause = (data.trip_event_ever_received && data.trip_reason === reason && data.trip_reason_cause)
     ? data.trip_reason_cause
     : (data.diag_trip_reason_cause || 'Detail not available on this firmware build.');
-  var remedy = data.diag_trip_reason_remedy || 'See firmware/SaftyFW/docs/SAFETY_MODEL.md.';
+  var remedy = data.diag_trip_reason_remedy || 'Check the safety processor documentation for this trip reason.';
   var html = '<div class="banner safety-trip">' +
     '<h3>' + (ineffective ? '!! SAFETY TRIP -- TRIP_INEFFECTIVE !!' : 'SAFETY PROCESSOR TRIPPED') + '</h3>' +
     '<div class="row"><span>Reason</span><span>' + window.kcEscapeHtml(words) + '</span></div>' +
@@ -1927,7 +1927,7 @@ function renderZonesConfigLoadFault(data) {
   var detail, remedy;
   if (data.zones_config_load_fault_newer) {
     detail = 'Stored zone config is version ' + onDisk + '; this firmware only understands up to version ' +
-      fwVer + ' -- likely an OTA rollback past a config schema bump (see ota_rollback_esp() in CLAUDE.md).';
+      fwVer + ' -- likely an OTA rollback past a config schema bump.';
     remedy = 'Reflash the matching (or newer) firmware to restore the tuned config.';
   } else {
     detail = 'Stored zone config is version ' + onDisk + ' and this firmware (version ' + fwVer +

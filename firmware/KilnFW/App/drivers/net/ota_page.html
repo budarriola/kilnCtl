@@ -135,9 +135,8 @@ the board, only used locally in this page to sign each request.</p>
 <p class="note">This proves you're on the network with the AP password --
 it does not stop anyone else who also knows it, and it can't stop a
 compromised ESP from pushing anything it likes to the safety processor
-(the ESP is the only thing authorising a Pico update). See
-UPDATE_PROTOCOL.md section 2, "What this does and does not defend
-against".</p>
+(the ESP is the only thing authorising a Pico update): this password limits
+who can trigger an update, not what an already-authorized update can do.</p>
 
 <div id="espPicker" style="display:none">
   <label for="espFile">New ESP image (.bin)</label>

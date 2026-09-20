@@ -55,9 +55,17 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $httpDir = Join-Path $repoRoot "firmware\KilnFW\App\drivers\http"
 $uiDir = Join-Path $repoRoot "firmware\KilnFW\App\drivers\ui"
+$netDir = Join-Path $repoRoot "firmware\KilnFW\App\drivers\net"
 
 if (-not (Test-Path $httpDir)) { throw "check_no_bench_text_in_ui: $httpDir not found -- has it moved?" }
 if (-not (Test-Path $uiDir)) { throw "check_no_bench_text_in_ui: $uiDir not found -- has it moved?" }
+if (-not (Test-Path $netDir)) { throw "check_no_bench_text_in_ui: $netDir not found -- has it moved?" }
+
+# Specific net/ files in scope: the served pages/handlers that reach an end
+# user, not the whole net/ directory (which also holds low-level link/state
+# code with no user-visible strings).
+$NetHtmlNames = @("ota_page.html", "security_page.html", "wifi_provision_page.html")
+$NetHttpCNames = @("wifi_prov_api.c", "web_auth_login.c", "ota_auth.c", "ota_pico_relay.c")
 
 # --- Forbidden word list. Word-boundary regex, case-insensitive. Kept narrow
 # and specific on purpose -- broad words like "test" or "board" alone would
@@ -89,6 +97,33 @@ $Allowlist = @(
        Reason = "internal API route name (not user-visible text); the visible button/dialog text was reworded to 'test preset' 2026-09-19, but the wire route itself is unchanged behavior, out of scope for a string-only sweep" }
     @{ PathPattern = 'safety_cfg_http\.c$'; ContentPattern = '"/api/safety/commissioning/bench_preset"'
        Reason = "same internal API route name, server side" }
+)
+
+# --- Jargon class: internal repo/process jargon (doc filenames, "owner
+# decision", "worktree", bare source filenames, etc.) that leaks
+# development-context language into user-facing text without necessarily
+# containing a bench/fixture word. Checked as a second, separately-named
+# pattern list so a hit reads as its own class in the failure message. ---
+$JargonPatterns = @(
+    '\b[A-Z][A-Z0-9_]{2,}\.md\b'
+    '\bdocs/'
+    '\bCLAUDE\.md\b'
+    '\bproject_[a-z0-9_]{8,}\b'
+    'owner decision|owner request|quoted verbatim|per owner'
+    '\bworktree\b'
+)
+$JargonRegex = ($JargonPatterns -join '|')
+# Bare source-filename mentions (e.g. "readiness_http.c"), applied only to
+# HTML text nodes / quoted JS strings. The negative lookbehind keeps this
+# off property-access chains like "p.c" in chart code (main_page.html).
+$SourceFilePattern = '(?<![.\w])[A-Za-z_][A-Za-z0-9_]{2,}\.(c|h|py|ps1|cmake)\b'
+
+# Whole-file, temporary allowlist for the jargon-class pass (Pass 4) only.
+# setup_wizard_page.html is mid-rewrite by another agent as of 2026-09-19;
+# excluding it here avoids a merge collision with that in-flight work. This
+# entry should be removed once that rewrite lands and the file is clean.
+$JargonFileAllowlist = @(
+    'setup_wizard_page\.html$'
 )
 
 function Test-Allowlisted {
@@ -181,11 +216,17 @@ function Get-RelPath {
 
 $violations = @()
 
-# --- Pass 1: served pages (.html, .js) under drivers/http/ ---
-$pages = Get-ChildItem -Path $httpDir -File | Where-Object { $_.Extension -in @(".html", ".js") }
+# --- Pass 1: served pages (.html, .js) under drivers/http/ and the
+# specific net/ pages named above. ---
+$pages = @(Get-ChildItem -Path $httpDir -File | Where-Object { $_.Extension -in @(".html", ".js") })
 if ($pages.Count -eq 0) {
     throw "check_no_bench_text_in_ui: found 0 .html/.js files under $httpDir -- expected several served pages. Scan target has gone blind."
 }
+$netPages = @(Get-ChildItem -Path $netDir -File | Where-Object { $NetHtmlNames -contains $_.Name })
+if ($netPages.Count -eq 0) {
+    throw "check_no_bench_text_in_ui: found 0 of the expected net/ pages ($($NetHtmlNames -join ', ')) under $netDir -- scan target has gone blind."
+}
+$pages = @($pages) + @($netPages)
 foreach ($f in $pages) {
     $rel = Get-RelPath -FullPath $f.FullName
     $raw = Get-Content -Path $f.FullName
@@ -221,22 +262,55 @@ foreach ($f in $uiFiles) {
     }
 }
 
-# --- Pass 3: JSON msg/reason/hint/detail strings HTTP handlers send back,
-# under drivers/http/*_http.c. Restricted to lines that look like they hand a
-# string to the client (httpd_resp_send_err/httpd_resp_sendstr, or an
-# snprintf into a buffer named detail/msg/hint/reason/message) so ordinary
-# ESP_LOG* developer log lines are not in scope. ---
-$httpCFiles = Get-ChildItem -Path $httpDir -File -Filter "*_http.c"
+# --- Pass 3: string-literal lines in drivers/http/*_http.c and the named
+# net/ handler files. Scans every line that carries a string literal
+# (contains a quote), NOT just lines matching a specific call shape --
+# multi-line C string continuations (the normal shape for a long
+# snprintf/detail message split across several literals) carry no call
+# anchor on their own line and were previously invisible here. ESP_LOG*
+# calls (developer log lines nobody using the product ever sees) are
+# excluded, including their continuation lines when the call itself spans
+# multiple lines, tracked via a running paren-depth count.
+function Get-NonEspLogQuotedLineIndices {
+    param([string[]]$Lines)
+    $indices = @()
+    $espLogDepth = 0
+    for ($i = 0; $i -lt $Lines.Count; $i++) {
+        $line = $Lines[$i]
+        if ($espLogDepth -gt 0) {
+            $opens = ([regex]::Matches($line, '\(')).Count
+            $closes = ([regex]::Matches($line, '\)')).Count
+            $espLogDepth += ($opens - $closes)
+            if ($espLogDepth -lt 0) { $espLogDepth = 0 }
+            continue
+        }
+        if ($line -match 'ESP_LOG[IWE]\s*\(') {
+            $opens = ([regex]::Matches($line, '\(')).Count
+            $closes = ([regex]::Matches($line, '\)')).Count
+            $espLogDepth = $opens - $closes
+            if ($espLogDepth -lt 0) { $espLogDepth = 0 }
+            continue
+        }
+        if ($line -match '"') { $indices += $i }
+    }
+    return $indices
+}
+
+$httpCFiles = @(Get-ChildItem -Path $httpDir -File -Filter "*_http.c")
 if ($httpCFiles.Count -eq 0) {
     throw "check_no_bench_text_in_ui: found 0 *_http.c files under $httpDir -- expected several HTTP handler files. Scan target has gone blind."
 }
-$clientStringPattern = 'httpd_resp_send_err\s*\(|httpd_resp_sendstr\s*\(|snprintf\s*\(\s*(detail|msg|hint|reason|message)\b'
+$netCFiles = @(Get-ChildItem -Path $netDir -File | Where-Object { $NetHttpCNames -contains $_.Name })
+if ($netCFiles.Count -eq 0) {
+    throw "check_no_bench_text_in_ui: found 0 of the expected net/ handler files ($($NetHttpCNames -join ', ')) under $netDir -- scan target has gone blind."
+}
+$httpCFiles = @($httpCFiles) + @($netCFiles)
 foreach ($f in $httpCFiles) {
     $rel = Get-RelPath -FullPath $f.FullName
     $raw = Get-Content -Path $f.FullName
     $stripped = Get-CCommentStripped -Lines $raw
-    for ($i = 0; $i -lt $stripped.Count; $i++) {
-        if ($stripped[$i] -notmatch $clientStringPattern) { continue }
+    $quotedIdx = Get-NonEspLogQuotedLineIndices -Lines $stripped
+    foreach ($i in $quotedIdx) {
         if ($stripped[$i] -match $ForbiddenRegex) {
             if (Test-Allowlisted -RelPath $rel -Line $stripped[$i]) { continue }
             $violations += "${rel}:$($i+1): $($stripped[$i].Trim())"
@@ -244,10 +318,45 @@ foreach ($f in $httpCFiles) {
     }
 }
 
+# --- Pass 4: jargon class -- development-context/internal-process language
+# (doc filenames, "owner decision", bare source filenames, etc.) over the
+# same served pages as Pass 1, minus the temporary allowlist above. Reported
+# separately from $violations so the failure message names this as its own
+# class, distinct from the bench/fixture word list. ---
+$jargonViolations = @()
+foreach ($f in $pages) {
+    $rel = Get-RelPath -FullPath $f.FullName
+    $skip = $false
+    foreach ($p in $JargonFileAllowlist) { if ($rel -match $p) { $skip = $true; break } }
+    if ($skip) { continue }
+    $raw = Get-Content -Path $f.FullName
+    $stripped = $raw
+    if ($f.Extension -eq ".html") { $stripped = Get-HtmlCommentStripped -Lines $stripped }
+    $stripped = Get-CCommentStripped -Lines $stripped
+    for ($i = 0; $i -lt $stripped.Count; $i++) {
+        $line = $stripped[$i]
+        $hit = $null
+        if ($line -match $JargonRegex) {
+            $hit = $Matches[0]
+        } elseif ($line -match $SourceFilePattern) {
+            $hit = $Matches[0]
+        }
+        if ($null -eq $hit) { continue }
+        if (Test-Allowlisted -RelPath $rel -Line $line) { continue }
+        $jargonViolations += "${rel}:$($i+1): $($line.Trim())"
+    }
+}
+
 if ($violations.Count -gt 0) {
     Write-Host "BENCH/FIXTURE TEXT FOUND IN USER-FACING UI:" -ForegroundColor Red
     foreach ($v in $violations) { Write-Host "  $v" -ForegroundColor Red }
-    throw "$($violations.Count) forbidden-word hit(s) in user-facing web/LCD/HTTP-message text -- reword to product language, or add a reviewed entry to `$Allowlist in tools\check_no_bench_text_in_ui.ps1 if this is a confirmed non-user-visible exception."
+}
+if ($jargonViolations.Count -gt 0) {
+    Write-Host "DEVELOPMENT-CONTEXT / INTERNAL-JARGON TEXT FOUND IN USER-FACING UI:" -ForegroundColor Red
+    foreach ($v in $jargonViolations) { Write-Host "  $v" -ForegroundColor Red }
+}
+if ($violations.Count -gt 0 -or $jargonViolations.Count -gt 0) {
+    throw "$($violations.Count) forbidden-word hit(s) and $($jargonViolations.Count) jargon-class hit(s) in user-facing web/LCD/HTTP-message text -- reword to product language, or add a reviewed entry to `$Allowlist (bench/fixture words) or `$JargonFileAllowlist (jargon class) in tools\check_no_bench_text_in_ui.ps1 if this is a confirmed non-user-visible exception."
 }
 
 Write-Host "check_no_bench_text_in_ui: PASS ($($pages.Count) served page(s), $($uiFiles.Count) UI source file(s), $($httpCFiles.Count) *_http.c file(s) scanned, 0 violations)"

@@ -13,4 +13,18 @@ menu "KilnCtrl Application"
             wiring. The pin numbers themselves live under "KilnCtrl Hardware
             Configuration".
 
+    config KILNCTL_DEV_TOOLS
+        bool "Enable developer-only tools (release firmware must leave this off)"
+        default n
+        help
+            Gates development-only affordances that have no place in
+            firmware shipped to an operator -- currently the safety
+            commissioning page's "Apply test preset" button and its
+            /api/safety/commissioning/bench_preset route, which stage a
+            fixed set of test values rather than anything derived from a
+            real kiln. When this is off, the route is not registered at
+            all and the button is hidden from the served page. Bench
+            builds enable this; a release build must not. See
+            docs/SETUP.md for how the bench build's sdkconfig sets it.
+
 endmenu

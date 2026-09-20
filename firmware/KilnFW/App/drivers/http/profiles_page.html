@@ -313,7 +313,7 @@
 <p>Create and edit named firing profiles here. Run them from the Dashboard.
 A profile can target more than one zone; when it does, every selected zone
 shares one ramp/dwell schedule and the schedule waits for the slowest zone
-to catch up before advancing (ramp-lock, TODO.md 6A.5) -- each zone still
+to catch up before advancing (ramp-lock) -- each zone still
 runs its own PID/bang-bang loop and thermal guards independently.</p>
 
 <h2>Favorites</h2>
@@ -358,7 +358,7 @@ above what a zone can reach.</p>
 <input type="text" id="pname" maxlength="15">
 <label>Zone(s) -- select more than one to run them together off a single shared
 ramp/dwell schedule (ramp-lock: the schedule only advances once every
-selected zone has caught up, TODO.md 6A.5)</label>
+selected zone has caught up)</label>
 <div id="pzone"></div>
 <p class="hint" id="zoneCeiling"></p>
 

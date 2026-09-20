@@ -401,8 +401,10 @@ script fails to load, and the Bash tool still reports exit 0 for the wrapper
 host-test builds need a short worktree path (e.g. `C:\wt\...`); the default
 `.claude/worktrees/...` path overflows the MSVC command line.
 
-As of 2026-09-19 it discovers 114 checks (`-ListOnly` at commit `a42ac369`,
-which added `check_lint_pages.ps1` so `lint_pages.js` -- previously only
+As of 2026-09-19 it discovers 116 checks (`-ListOnly -AllowFewerChecks`,
+recounted at this commit; the count drifts upward as checks are added, so
+re-verify with a fresh `-ListOnly` run rather than trusting this number).
+`a42ac369` added `check_lint_pages.ps1` so `lint_pages.js` -- previously only
 reachable through `tools/verify.ps1`'s manual "lint" stage -- is now enforced
 by the standing suite too;
 re-verify with a fresh `-ListOnly` run since this count drifts as checks are
