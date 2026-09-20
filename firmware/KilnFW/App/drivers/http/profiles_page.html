@@ -903,9 +903,12 @@ function isFav(id) {
  * colliding with Array.prototype methods of the same short name when this
  * file is extracted verbatim into a test's vm context. */
 function filterProfilesByName(items, query) {
-  var q = String(query || '').trim().toLowerCase();
+  var nfc = function (s) {
+    return (typeof s.normalize === 'function') ? s.normalize('NFC') : s;
+  };
+  var q = nfc(String(query || '').trim()).toLowerCase();
   if (q === '') return items.slice();
-  return items.filter(function (p) { return String(p.name || '').toLowerCase().indexOf(q) !== -1; });
+  return items.filter(function (p) { return nfc(String(p.name || '')).toLowerCase().indexOf(q) !== -1; });
 }
 
 /* Newest-first by last_run_started_unix_s, excluding anything in excludeIds
@@ -981,6 +984,17 @@ function renderList() {
   var el = document.getElementById('list');
   if (savedProfiles === null || catalogEntries === null) return;
   var items = filterProfilesByName(savedProfiles.concat(catalogEntries), filterQuery);
+  if (selectMode) {
+    // A name filter change can hide a row that's still checked in
+    // selectedIds -- drop those so the "Delete/Export selected (N)" count
+    // (and what actually gets acted on) never counts a row that isn't
+    // visible any more.
+    var visible = {};
+    items.forEach(function (p) { visible[String(p.id)] = true; });
+    Object.keys(selectedIds).forEach(function (id) {
+      if (!visible[id]) delete selectedIds[id];
+    });
+  }
   if (items.length === 0) {
     el.innerHTML = '<p class="empty">' + (filterQuery ? 'No profiles match &ldquo;' +
       window.kcEscapeHtml(filterQuery) + '&rdquo;.' : 'No profiles.') + '</p>';

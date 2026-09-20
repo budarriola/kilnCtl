@@ -288,6 +288,64 @@ function runIntegrationCheck(scaleLabel, items) {
     'recent section hides itself (display:none) when no profile has ever fired');
 }
 
+// ---------------------------------------------------------------------------
+// Part 4: bulk select mode -- a name filter that hides a checked row must
+// drop that id from selectedIds and let updateSelectionBar() re-derive the
+// "Delete selected (N)" count from what's left, so an id the operator can
+// no longer see is never silently still queued for delete/export.
+// ---------------------------------------------------------------------------
+{
+  const dom = makeFakeDom();
+  const ctx = makeContext(dom);
+  let lastN = null;
+  ctx.updateSelectionBar = function () { lastN = Object.keys(ctx.selectedIds).length; };
+  ctx.savedProfiles = [
+    mkProfile(1, 'Bisque Slow'),
+    mkProfile(2, 'cone6_glaze'),
+    mkProfile(3, 'Bisque Fast'),
+  ];
+  ctx.catalogEntries = [];
+  ctx.favoriteIds = [];
+  ctx.selectMode = 'delete';
+  ctx.selectedIds = { '1': true, '2': true, '3': true };
+  ctx.filterQuery = '';
+  ctx.renderList();
+  assert(Object.keys(ctx.selectedIds).length === 3,
+    'no filter: nothing hidden, all 3 checked ids survive renderList()');
+
+  ctx.filterQuery = 'bisque';
+  ctx.renderList();
+  assert(Object.keys(ctx.selectedIds).sort().join(',') === '1,3',
+    'filtering to "bisque" drops id 2 (now hidden) from selectedIds, keeps 1 and 3 (still visible)');
+  assert(lastN === 2, 'updateSelectionBar() is called after the drop and sees the reduced count');
+
+  ctx.filterQuery = '';
+  ctx.renderList();
+  assert(Object.keys(ctx.selectedIds).sort().join(',') === '1,3',
+    'clearing the filter does not resurrect a previously-dropped selection (2 stays gone)');
+}
+
+// ---------------------------------------------------------------------------
+// Part 5: filterProfilesByName() normalizes both the query and each name
+// with NFC before comparing, so a precomposed name (single codepoint, e.g.
+// "\u00e9") matches a decomposed query (base + combining mark, "e\u0301")
+// and vice versa -- same visible text, different byte sequence.
+// ---------------------------------------------------------------------------
+{
+  const dom = makeFakeDom();
+  const ctx = makeContext(dom);
+  const precomposed = 'Bisqu\u00e9';       // "Bisqu\u00e9", single codepoint e-acute
+  const decomposed = 'Bisque\u0301';       // "Bisque" + combining acute accent
+  const items = [mkProfile(1, precomposed)];
+  const viaDecomposedQuery = ctx.filterProfilesByName(items, decomposed);
+  assert(viaDecomposedQuery.length === 1,
+    'a decomposed query matches a precomposed name of the same visible text (NFC-normalized)');
+  const items2 = [mkProfile(2, decomposed)];
+  const viaPrecomposedQuery = ctx.filterProfilesByName(items2, precomposed);
+  assert(viaPrecomposedQuery.length === 1,
+    'a precomposed query matches a decomposed name of the same visible text (NFC-normalized)');
+}
+
 console.log('');
 console.log(passed + ' passed, ' + failed + ' failed');
 if (failed > 0) {

@@ -30,7 +30,6 @@
  * and test_profiles_http.c supplies its own fake, same convention as every
  * other faked symbol in that file. */
 uint32_t profile_executor_last_run_started_unix_s(uint8_t profile_id);
-#define profile_last_run_started_unix_s(id) profile_executor_last_run_started_unix_s(id)
 
 /* TODO.md 10.6a: embedded pre-gzipped (CMakeLists.txt gzips it at configure
  * time before idf_component_register runs), hence the "_gz" in both the
@@ -178,7 +177,7 @@ static esp_err_t send_builtin_summary(httpd_req_t *req, uint8_t id, const builti
                      esc(b->slug, slug_e, sizeof(slug_e)), b->slug,
                      profiles_builtin_is_hidden(id) ? "true" : "false", (unsigned)zone_mask,
                      b->segment_count, profile_feasibility_verdict_str(rollup),
-                     (unsigned long)profile_last_run_started_unix_s(id));
+                     (unsigned long)profile_executor_last_run_started_unix_s(id));
     return send_chunk_checked(req, chunk, n, sizeof(chunk), "builtin summary");
 }
 
@@ -284,7 +283,7 @@ esp_err_t builtin_list_get_handler(httpd_req_t *req)
  * `"segment_count":12}` (37) = 103; rounded up with slack for the format
  * rather than re-deriving the exact count if a field ever widens. */
 #define PROFILE_LIST_ENTRY_MAX 224 /* +30 (2026-09-02) for the ",\"exceeds_ceiling\":false" marker;
-                                     * +34 (PROFILE_SLOTS_100_PLAN.md task 8) for
+                                     * +37 (PROFILE_SLOTS_100_PLAN.md task 8) for
                                      * ",\"last_run_started_unix_s\":4294967295" (10-digit uint32 max) */
 
 /* Bytes reserved at the tail of `json` that no per-slot APPEND is ever
@@ -335,7 +334,7 @@ esp_err_t profiles_list_get_handler(httpd_req_t *req)
          * only; see profile_exceeds_zone_ceiling()'s own comment for why
          * this never blocks the save/list, only the actual run start. */
         bool exceeds = profile_exceeds_zone_ceiling(p, NULL, 0);
-        uint32_t last_run = profile_last_run_started_unix_s(id);
+        uint32_t last_run = profile_executor_last_run_started_unix_s(id);
         APPEND("%s{\"id\":%u,\"builtin\":false,\"name\":\"%s\",\"zone_mask\":%u,\"segment_count\":%u,"
                "\"exceeds_ceiling\":%s,\"last_run_started_unix_s\":%lu}",
                first ? "" : ",", id, name_escaped, p->zone_mask, p->segment_count,

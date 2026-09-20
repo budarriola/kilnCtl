@@ -1228,6 +1228,40 @@ static void test_profiles_list_json_valid_with_escape_heavy_names(void)
               "all 8 user-slot entries must be present in the listing, none dropped");
 }
 
+static void test_profiles_list_carries_last_run_started_unix_s(void)
+{
+    TEST_SECTION("profiles_list_get_handler -- carries last_run_started_unix_s from "
+                 "profile_executor_last_run_started_unix_s() (PROFILE_SLOTS_100_PLAN.md section 7 task 8)");
+
+    nvs_stub_reset();
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    profile_t *p = &s_profiles.profiles[0];
+    memset(p, 0, sizeof(*p));
+    strncpy(p->name, "test", PROFILE_NAME_MAX_LEN);
+    p->zone_mask = 0x01;
+    p->segment_count = 1;
+    p->segments[0].target_c = 100.0f;
+    p->segments[0].ramp_c_per_hr = 50.0f;
+    p->segments[0].dwell_min = 5;
+    s_profiles.used_bitmap |= (uint8_t)(1u << 0);
+
+    g_fake_last_run_unix_s = 1726700000u;
+
+    s_chunk_capture_len = 0;
+    s_chunk_capture[0] = '\0';
+    s_chunk_capture_on = true;
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = profiles_list_get_handler(&req);
+    s_chunk_capture_on = false;
+
+    g_fake_last_run_unix_s = 0; /* restore the "never fired" default for later tests */
+
+    TEST_CHECK(err == ESP_OK, "handler must not report an error");
+    TEST_CHECK(strstr(s_chunk_capture, "\"last_run_started_unix_s\":1726700000") != NULL,
+              "the fake nonzero last-run timestamp must appear verbatim in the list JSON");
+}
+
 // ---------------------------------------------------------------------------
 // Test 4b -- THE mandatory regression test for THIS pass's own shape change
 // (PROFILE_VERSION 2->3, profile_segment_t growing the relay/IO fields): a
@@ -1928,6 +1962,7 @@ void run_test_profiles_http(void)
     test_newer_version_refused_not_wiped();
     test_one_bad_slot_does_not_affect_others();
     test_profiles_list_json_valid_with_escape_heavy_names();
+    test_profiles_list_carries_last_run_started_unix_s();
     test_validate_io_segment_zone_ownership();
     test_validate_io_segment_drdy_lcd_gap_refused();
     test_profiles_http_save_accepts_cone10_profile_on_80c_zone();

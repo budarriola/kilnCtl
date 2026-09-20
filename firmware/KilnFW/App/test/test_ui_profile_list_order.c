@@ -1,7 +1,10 @@
 // Host tests for ui_profile_list_order.c -- the pure stable-partition seam
-// that must order LCD profile list/picker ids exactly the way main_page.html's
-// orderProfilesByFavorite() orders web dashboard options (favorites first,
-// each group's original relative order preserved, set equality, no drops).
+// that must order LCD profile list/picker ids the same way
+// main_page.html's orderProfilesByFavorite() orders its options (favorites
+// first, each group's original relative order preserved, set equality, no
+// drops). That JS function is kept in main_page.html only as the LCD
+// mirror reference for this ordering now -- the web dashboard's own
+// favorites/recent grouping (and name filter) live in profiles_page.html.
 #include "test_common.h"
 #include "../drivers/ui/ui_profile_list_order.h"
 
