@@ -43,11 +43,26 @@ class RunOutcome:
 
     @property
     def exit_code(self) -> int:
-        """Mirrors run_all_checks.ps1's three-way contract (bench_test.ps1
-        uses this): 0 all-PASS, 3 nothing failed but something was
-        SKIP/INCONCLUSIVE, 1 otherwise."""
+        """Wave 2's four-way contract (`tools/bench_test.ps1`'s header has
+        the full rationale). The plan text pins only one point directly --
+        §6 rule 11: a SKIP/INCONCLUSIVE case must exit distinctly from a
+        FAIL, and `bench_test.ps1` "exits 3 for either". Everything else
+        here (0/1/2, and NOT_RUN sharing SKIP/INCONCLUSIVE's bucket) is this
+        wave's own fill-in for what §2.4/§8 leave unstated, chosen to mirror
+        `run_all_checks.ps1`'s own three-way convention plus one more code
+        so a refused run (never even attempted a case) is distinguishable
+        from a run that attempted cases and something inside it failed:
+
+          0 -- preflight passed and every executed case PASSed
+          1 -- preflight passed but at least one case FAILed
+          2 -- preflight itself refused the run (no case was attempted)
+          3 -- preflight passed, nothing FAILed, but something was
+               SKIP/INCONCLUSIVE/NOT_RUN (plan §6 rule 11's bucket --
+               NOT_RUN added here since an unimplemented/dependency-skipped
+               case is the same "incomplete, not broken" shape)
+        """
         if not self.preflight_ok:
-            return 1
+            return 2
         verdicts = [r.verdict for r in self.results.values()]
         if any(v == Verdict.FAIL for v in verdicts):
             return 1
@@ -145,6 +160,15 @@ class BenchTestRunner:
             cp_run, {}, ctx.get("host") or capability_preflight.PREFLIGHT_AP_DEFAULT_HOST,
         )
         board_before["capability_preflight"] = cp_report.describe() if ok else f"error: {cp_report}"
+        # Fed to docs/BENCH_TEST_LOG.md's one-line-per-run entry
+        # (report.append_log_line) -- best-effort, never a second board
+        # round trip: cp_report already carries the ESP's fw_build.
+        board_before["esp_fw_build"] = getattr(cp_report.board, "fw_build", None) if ok else None
+        ok_pico, pico_fw = _safe_call(getattr(srv._safety, "get_fw_version", lambda: None))
+        board_before["safety_get_fw_version"] = (
+            pico_fw.describe() if ok_pico and hasattr(pico_fw, "describe") else
+            (str(pico_fw) if ok_pico else f"error: {pico_fw}")
+        )
         if ok and not cp_report.ok:
             if cp_report.board.crash_unacknowledged:
                 reasons.append(f"unacknowledged crash report present: {cp_report.board.crash_summary}")
@@ -276,7 +300,12 @@ class BenchTestRunner:
         run_dir = report_mod.run_dir_path(self.logs_root, run_id)
         outcome.run_dir = run_dir
         summary = report_mod.build_summary(outcome, board_before, board_after)
-        report_mod.write_run(run_dir, summary, self.transcript)
+        # ctx["bench_test_log_doc_path"] lets tests (and, in principle, an
+        # alternate deployment) redirect docs/BENCH_TEST_LOG.md's append --
+        # production code never sets it, so a real run always appends to
+        # the real doc at its default path (report.default_log_doc_path()).
+        report_mod.write_run(run_dir, summary, self.transcript,
+                              log_doc_path=self.ctx.get("bench_test_log_doc_path"))
         self._last_run_dir = run_dir
         return outcome
 

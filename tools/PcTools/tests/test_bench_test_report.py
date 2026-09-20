@@ -134,7 +134,8 @@ class BuildSummaryAndWriteRunTest(unittest.TestCase):
             )
             summary = report_mod.build_summary(outcome, {}, {})
             run_dir = os.path.join(self.tmpdir, "20260101T000000Z_smoke_footer")
-            report_mod.write_run(run_dir, summary, ["line one"])
+            report_mod.write_run(run_dir, summary, ["line one"],
+                                  log_doc_path=os.path.join(self.tmpdir, "BENCH_TEST_LOG.md"))
             with open(os.path.join(run_dir, "transcript.md"), encoding="utf-8") as f:
                 transcript = f.read()
             self.assertIn("## Verdicts", transcript)
@@ -146,7 +147,8 @@ class BuildSummaryAndWriteRunTest(unittest.TestCase):
     def test_write_run_creates_summary_and_transcript_and_captures_dir(self):
         summary = report_mod.build_summary(self._make_outcome(), {}, {})
         run_dir = os.path.join(self.tmpdir, "20260101T000000Z_smoke")
-        report_mod.write_run(run_dir, summary, ["line one", "ap_password=hunter2"])
+        report_mod.write_run(run_dir, summary, ["line one", "ap_password=hunter2"],
+                              log_doc_path=os.path.join(self.tmpdir, "BENCH_TEST_LOG.md"))
 
         self.assertTrue(os.path.isdir(os.path.join(run_dir, "captures")))
         with open(os.path.join(run_dir, "summary.json"), encoding="utf-8") as f:
@@ -170,6 +172,94 @@ class BuildSummaryAndWriteRunTest(unittest.TestCase):
     def test_list_recent_runs_on_missing_root_returns_empty(self):
         missing = os.path.join(self.tmpdir, "does-not-exist")
         self.assertEqual(report_mod.list_recent_runs(logs_root=missing), [])
+
+    def test_write_run_appends_one_log_line(self):
+        summary = report_mod.build_summary(self._make_outcome(), {}, {})
+        run_dir = os.path.join(self.tmpdir, "20260101T000000Z_smoke")
+        doc_path = os.path.join(self.tmpdir, "BENCH_TEST_LOG.md")
+        report_mod.write_run(run_dir, summary, ["line one"], log_doc_path=doc_path)
+        with open(doc_path, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("20260101T000000Z_smoke", text)
+        self.assertIn("PASS=1", text)
+        # exactly one appended log-line entry (no accidental duplication or
+        # read-modify-write of a previous line) -- count bullet lines, not
+        # occurrences of the run id, since it also appears inside the run
+        # dir path this particular run_dir happens to share.
+        log_lines = [ln for ln in text.splitlines() if ln.startswith("- `")]
+        self.assertEqual(len(log_lines), 1)
+
+
+class AppendLogLineTest(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="bench_test_log_test_")
+        self.doc_path = os.path.join(self.tmpdir, "BENCH_TEST_LOG.md")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _summary(self, **overrides):
+        base = {
+            "run_id": "20260101T000000Z_nightly",
+            "suite": "nightly",
+            "exit_code": 0,
+            "cases": {
+                "ST-05": {"verdict": Verdict.PASS},
+                "FL-01": {"verdict": Verdict.FAIL},
+                "SK-01": {"verdict": Verdict.INCONCLUSIVE},
+                "SP-01": {"verdict": Verdict.NOT_RUN},
+                "SP-02": {"verdict": Verdict.SKIP},
+            },
+            "board_before": {
+                "esp_fw_build": "2026-09-19T12:00:00Z",
+                "safety_get_fw_version": "commit=abc1234, dirty=False",
+            },
+        }
+        base.update(overrides)
+        return base
+
+    def test_creates_file_with_header_on_first_use(self):
+        report_mod.append_log_line(self._summary(), "/some/run/dir", doc_path=self.doc_path)
+        with open(self.doc_path, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("# Bench Test Log", text)
+        self.assertIn("20260101T000000Z_nightly", text)
+
+    def test_line_carries_the_four_named_verdict_counts_and_fw_builds(self):
+        line = report_mod.append_log_line(self._summary(), "/some/run/dir", doc_path=self.doc_path)
+        self.assertIn("PASS=1", line)
+        self.assertIn("FAIL=1", line)
+        self.assertIn("INCONCLUSIVE=1", line)
+        self.assertIn("NOT_RUN=1", line)
+        self.assertIn("esp_fw=2026-09-19T12:00:00Z", line)
+        self.assertIn("pico_fw=commit=abc1234", line)
+
+    def test_second_call_appends_rather_than_overwrites(self):
+        report_mod.append_log_line(self._summary(run_id="run-1"), "/dir/1", doc_path=self.doc_path)
+        report_mod.append_log_line(self._summary(run_id="run-2"), "/dir/2", doc_path=self.doc_path)
+        with open(self.doc_path, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("run-1", text)
+        self.assertIn("run-2", text)
+        self.assertEqual(text.count("# Bench Test Log"), 1, "header must be written only once")
+
+    def test_credential_shaped_env_value_never_reaches_the_log_line(self):
+        secret = "supersekretvalue999"
+        os.environ["KILNCTL_WEB_PASSWORD"] = secret
+        try:
+            summary = self._summary(board_before={
+                "esp_fw_build": f"leaked {secret}",
+                "safety_get_fw_version": "commit=abc1234",
+            })
+            line = report_mod.append_log_line(summary, "/some/dir", doc_path=self.doc_path)
+            self.assertNotIn(secret, line)
+        finally:
+            del os.environ["KILNCTL_WEB_PASSWORD"]
+
+    def test_missing_board_before_fields_degrade_to_unknown(self):
+        line = report_mod.append_log_line(self._summary(board_before={}), "/some/dir", doc_path=self.doc_path)
+        self.assertIn("esp_fw=unknown", line)
+        self.assertIn("pico_fw=unknown", line)
 
 
 if __name__ == "__main__":

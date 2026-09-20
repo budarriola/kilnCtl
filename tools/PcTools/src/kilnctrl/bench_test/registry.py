@@ -298,13 +298,66 @@ SUITES["heat"] = [c for c in REGISTRY if c.startswith("HP-")]
 SUITES["web"] = list(_WEB_IDS)
 SUITES["lcd"] = list(_LCD_IDS)
 SUITES["safety"] = [c for c in REGISTRY if c.startswith("SP-")]
-# nightly/full memberships per plan §5.1 -- wave 0 only implements the
-# smoke subset, so running these today executes that subset and reports
-# NOT_RUN: not_implemented for the rest (see runner.py).
-SUITES["nightly"] = _fixed_order(set(SUITES["smoke"]) | {
-    "ST-01", "ST-02", "ST-03", "ST-04",
-    "HP-01", "HP-02", "HP-04", "HP-05", "HP-06", "HP-08",
-    "SK-02", "SP-03", "SP-06",
-    "OT-B01", "OT-E01", "OT-E02", "OT-E03", "OT-E12",
-})
+# nightly/full memberships per plan §5.1 -- wave 2 implements the harness
+# ordering for the full §5.1 nightly membership; some of these ids still
+# report NOT_RUN: not_implemented until the WEB/LCD/OTA case wave(s) land
+# judge functions for them (registry.py never gates a suite's *membership*
+# on what has a judge yet -- see the module docstring).
+#
+# §5.2's fixed order, restricted to the ids nightly actually includes, is
+# NOT simply `_fixed_order()` (that helper only knows ST/FL/SK/SP's ranks
+# and puts everything else -- WEB, LCD, HP, OT -- in one alphabetical
+# bucket after them, which would alphabetize OT-* ahead of WEB-* and
+# scatter the HP/SP-observer and HP/SK-02 pairs). Wave 2 instead writes the
+# nightly order out explicitly, encoding §5.2's actual sequence and §5.3's
+# interdependence rules:
+#   - ST first, then read-only FL/SK-01,03,04/SP, matching `smoke`.
+#   - WEB render cases (`smoke`'s -01/-X-03 set), then the nightly-only WEB
+#     read/write round trips (auth still off) and WEB-X-01/02, then the
+#     nightly-only LCD captures -- all before any heat, since none of them
+#     need a firing running.
+#   - HP-01 immediately followed by its observer SP-06 (plan §5.2: "HP-01
+#     (with ... SP-04 observers)" generalizes to any SP case whose
+#     `depends_on` names it -- SP-06 depends_on="HP-01"), then HP-02
+#     immediately followed by its observer SP-03 (depends_on="HP-02"),
+#     then HP-04/05/06/08, then SK-02 last of the HP group since it
+#     depends_on="HP-01" and the plan places SK-02 after the HP block
+#     (§5.2: "... HP-05/06 -> SK-02 -> HP-03 -> ...").
+#   - WEB-SEC-03 (an auth-on/off round trip) grouped with the OTA block per
+#     §5.2's "OT-E10 with WEB-SEC-03" pairing and §5.3 rule 4 (auth-on
+#     cases grouped at the end so a failure to disable auth blinds as few
+#     later cases as possible).
+#   - OT-B01 then OT-E01/E02/E03/E12 strictly last ("OTA last"): every
+#     other nightly case that could affect board state (HP writes zones
+#     config live briefly, WEB round trips write and restore config) has
+#     already run and been torn down by the time an OTA reboots the board.
+_NIGHTLY_ORDER: List[str] = [
+    "ST-01", "ST-02", "ST-03", "ST-04", "ST-05",
+    "FL-01", "FL-02", "FL-03", "FL-04", "FL-05", "FL-06", "FL-07", "FL-08", "FL-09",
+    "SK-01", "SK-03", "SK-04",
+    "SP-01", "SP-02", "SP-05", "SP-07",
+    *_WEB_SMOKE_IDS,
+    "WEB-DASH-03", "WEB-DASH-06", "WEB-DASH-07", "WEB-DASH-09",
+    "WEB-PROF-02", "WEB-PROF-03", "WEB-PROF-04", "WEB-PROF-05",
+    "WEB-PROF-06", "WEB-PROF-07", "WEB-PROF-08", "WEB-PROF-09",
+    "WEB-ZONE-02", "WEB-ZONE-03", "WEB-ZONE-05", "WEB-ZONE-09", "WEB-ZONE-12",
+    "WEB-BAK-02", "WEB-BAK-03",
+    "WEB-KCFG-02", "WEB-KCFG-03",
+    "WEB-DIAG-07", "WEB-DIAG-08",
+    # WEB-OTA-01 and WEB-X-01 are already in `_WEB_SMOKE_IDS` above (both
+    # end in "-01", same as every WEB render case) -- only WEB-OTA-02 and
+    # WEB-X-02 are new to nightly.
+    "WEB-OTA-02",
+    "WEB-X-02",
+    "LCD-02", "LCD-03", "LCD-04", "LCD-09", "LCD-14", "LCD-16",
+    "HP-01", "SP-06",
+    "HP-02", "SP-03",
+    "HP-04", "HP-05", "HP-06", "HP-08",
+    "SK-02",
+    "WEB-SEC-03",
+    "OT-B01",
+    "OT-E01", "OT-E02", "OT-E03", "OT-E12",
+]
+assert len(_NIGHTLY_ORDER) == len(set(_NIGHTLY_ORDER)), "duplicate id in _NIGHTLY_ORDER"
+SUITES["nightly"] = list(_NIGHTLY_ORDER)
 SUITES["full"] = _fixed_order(REGISTRY.keys())

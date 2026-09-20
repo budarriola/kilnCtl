@@ -4,11 +4,25 @@
 # A thin caller of the `kilnctrl` MCP server's bench_test_run tool over
 # HTTP (port 8767, plan §2.1) -- the runner itself lives in plain Python
 # under tools/PcTools/src/kilnctrl/bench_test/, this script only forwards
-# arguments and translates the result into the same three-way exit-code
-# contract tools/run_all_checks.ps1 uses:
-#   0 -- every requested case PASSed
-#   3 -- nothing FAILed, but something was SKIP/INCONCLUSIVE/NOT_RUN
-#   1 -- otherwise (a FAIL, a preflight failure, or the call itself failed)
+# arguments and translates the result into an exit-code contract.
+#
+# Sections 2.4/8 of the plan do not pin an exact exit-code scheme, so this
+# is Wave 2's own choice -- four-way rather than run_all_checks.ps1's
+# three-way, because "the board refused to even start" (a bad E-stop/link/
+# crash state) and "the harness itself couldn't do its job" (unreachable
+# MCP server, bad suite/case name) are different failure shapes an operator
+# needs to tell apart at a glance:
+#   0 -- every requested case PASSed (preflight ok, no FAIL/SKIP/
+#        INCONCLUSIVE/NOT_RUN)
+#   1 -- preflight passed but at least one case FAILed
+#   2 -- the board's own preflight refused the run outright (RunOutcome.
+#        exit_code in tools/PcTools/src/kilnctrl/bench_test/runner.py) --
+#        no case was attempted
+#   3 -- harness error (couldn't reach/parse the MCP server, an unknown
+#        suite/case name, or a run that reached the board but left
+#        something SKIP/INCONCLUSIVE/NOT_RUN with nothing FAILed -- plan
+#        §6 rule 11's requirement that SKIP/INCONCLUSIVE never look like a
+#        clean PASS)
 #
 # Requires the `kilnctrl` MCP server to be running and fresh (see
 # tools\PcTools\scripts\mcp_servers.ps1 status). If bench_test_run doesn't
@@ -53,15 +67,25 @@ Write-Host $output
 
 if ($callExit -ne 0) {
     Write-Error "bench_test.ps1: could not reach bench_test_run on the kilnctrl MCP server (port $Port) -- is it running and fresh? .\tools\PcTools\scripts\mcp_servers.ps1 status"
-    exit 1
+    exit 3
+}
+
+$outputText = $output | Out-String
+
+# A bad suite/case name (KeyError/ValueError, caught by
+# mcp_server_bench_test.py) comes back as a plain "error: ..." string with
+# no exit_code at all -- that is the harness failing to even start a run,
+# not the board's own preflight refusing one.
+if ($outputText -match "^error:") {
+    exit 3
 }
 
 # The tool's own text reply carries "exit_code=N" (mcp_server_bench_test.py's
 # bench_test_run()) -- parse that rather than re-deriving pass/fail here, so
 # there is exactly one place (the Python runner) that decides verdicts.
-if ($output -match "exit_code=(\d+)") {
+if ($outputText -match "exit_code=(\d+)") {
     exit [int]$Matches[1]
 }
 
-Write-Error "bench_test.ps1: could not find an exit_code in bench_test_run's reply -- treating as a hard failure"
-exit 1
+Write-Error "bench_test.ps1: could not find an exit_code in bench_test_run's reply -- treating as a harness error"
+exit 3

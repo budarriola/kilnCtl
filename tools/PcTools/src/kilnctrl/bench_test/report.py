@@ -94,7 +94,8 @@ def build_summary(outcome, board_before: Dict[str, Any], board_after: Dict[str, 
     }
 
 
-def write_run(run_dir: str, summary: Dict[str, Any], transcript_lines: "list[str]") -> None:
+def write_run(run_dir: str, summary: Dict[str, Any], transcript_lines: "list[str]",
+              log_doc_path: Optional[str] = None) -> None:
     os.makedirs(run_dir, exist_ok=True)
     os.makedirs(os.path.join(run_dir, "captures"), exist_ok=True)
 
@@ -115,6 +116,94 @@ def write_run(run_dir: str, summary: Dict[str, Any], transcript_lines: "list[str
         f.write(_redact(json.dumps(summary["board_before"], indent=2, sort_keys=True, default=str)))
     with open(os.path.join(run_dir, "board_after.json"), "w", encoding="utf-8") as f:
         f.write(_redact(json.dumps(summary["board_after"], indent=2, sort_keys=True, default=str)))
+
+    # One human-readable line per run in docs/BENCH_TEST_LOG.md (plan §7
+    # decision 1) -- best-effort: a doc-write failure (e.g. read-only
+    # worktree) must never take down an otherwise-successful run.
+    try:
+        append_log_line(summary, run_dir, doc_path=log_doc_path)
+    except OSError:
+        pass
+
+
+def _repo_root() -> str:
+    """Same relative-path convention as default_logs_root()."""
+    return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", ".."))
+
+
+def default_log_doc_path() -> str:
+    return os.path.join(_repo_root(), "docs", "BENCH_TEST_LOG.md")
+
+
+_LOG_HEADER = (
+    "# Bench Test Log\n\n"
+    "One line per `bench_test_run()` call, newest last, appended automatically\n"
+    "by `report.append_log_line()` (plan §7 owner decision 1: gitignored\n"
+    "`logs/bench_test/<run>/` for the full machine record, plus a human sentence\n"
+    "here). Never edit a past line by hand -- append only. A line never carries a\n"
+    "credential; anything that looks like one is `***` before it is written, same\n"
+    "as `transcript.md`/`summary.json` (`_redact()`).\n\n"
+)
+
+
+def _verdict_counts(summary: Dict[str, Any]) -> Dict[str, int]:
+    counts = {v: 0 for v in ("PASS", "FAIL", "SKIP", "INCONCLUSIVE", "NOT_RUN")}
+    for case in summary.get("cases", {}).values():
+        verdict = case.get("verdict")
+        if verdict in counts:
+            counts[verdict] += 1
+    return counts
+
+
+def _fw_build_summary(summary: Dict[str, Any]) -> "tuple[str, str]":
+    """Best-effort one-word-ish fw identity for each processor, read back
+    from whatever `board_before` already collected during preflight
+    (`runner.py`'s `esp_fw_build` / `safety_get_fw_version` entries) --
+    never a fresh board round trip of its own, so a harness-error run (no
+    board contact at all) still gets a log line, just with `unknown`."""
+    board_before = summary.get("board_before") or {}
+    esp = board_before.get("esp_fw_build") or "unknown"
+    pico_raw = board_before.get("safety_get_fw_version") or "unknown"
+    # `SafetyFwVersion.describe()` is a multi-field human sentence
+    # ("commit=... build=... dirty=..."); keep only the first token-ish
+    # chunk so the log line stays one line and skimmable.
+    pico = str(pico_raw).split(",")[0].split("\n")[0].strip() or "unknown"
+    return str(esp), pico
+
+
+def append_log_line(summary: Dict[str, Any], run_dir: str, doc_path: Optional[str] = None) -> str:
+    """Append one redacted line to docs/BENCH_TEST_LOG.md for this run
+    (plan §7 decision 1). Idempotent in *format* -- every call appends
+    a freshly-formatted line built only from `summary`/`run_dir`, never
+    read-modify-write of a previous line -- so two processes appending
+    concurrently can only interleave whole lines, never corrupt one.
+    Creates the file with its header on first use. Returns the line written
+    (without the trailing newline), for tests to assert against without
+    re-reading the file.
+    """
+    path = doc_path or default_log_doc_path()
+    counts = _verdict_counts(summary)
+    esp_fw, pico_fw = _fw_build_summary(summary)
+    try:
+        rel_run_dir = os.path.relpath(run_dir, _repo_root()).replace(os.sep, "/")
+    except ValueError:
+        rel_run_dir = run_dir.replace(os.sep, "/")
+    line = (
+        f"- `{summary.get('run_id')}` suite=`{summary.get('suite')}` "
+        f"exit_code={summary.get('exit_code')} "
+        f"PASS={counts['PASS']} FAIL={counts['FAIL']} "
+        f"INCONCLUSIVE={counts['INCONCLUSIVE']} NOT_RUN={counts['NOT_RUN']} "
+        f"SKIP={counts['SKIP']} esp_fw={esp_fw} pico_fw={pico_fw} "
+        f"log=`{rel_run_dir}/`"
+    )
+    line = _redact(line)
+    is_new = not os.path.isfile(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        if is_new:
+            f.write(_LOG_HEADER)
+        f.write(line + "\n")
+    return line
 
 
 def list_recent_runs(logs_root: Optional[str] = None, n: int = 1) -> "list[Dict[str, Any]]":

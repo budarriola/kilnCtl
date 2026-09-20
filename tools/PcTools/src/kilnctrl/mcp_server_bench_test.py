@@ -39,8 +39,12 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     Writes one run directory under `logs/bench_test/<UTC timestamp>_
     <suite>[_<tag>]/` (summary.json, transcript.md, board_before/after.json)
     and returns a short text summary plus that run's exit-code contract
-    (0 all-PASS, 3 nothing failed but something SKIP/INCONCLUSIVE/NOT_RUN,
-    1 otherwise -- the same three-way contract run_all_checks.ps1 uses).
+    (0 all-PASS; 1 a case FAILed; 2 preflight refused the run outright;
+    3 nothing FAILed but something was SKIP/INCONCLUSIVE/NOT_RUN -- see
+    `RunOutcome.exit_code`'s docstring and `tools/bench_test.ps1`'s header
+    for the full rationale). Also appends one line to
+    `docs/BENCH_TEST_LOG.md` per run (never a credential) via
+    `report.append_log_line()`.
 
     No case in this wave heats, flashes, writes config, or touches Wi-Fi."""
     case_list = [c.strip() for c in cases.split(",") if c.strip()] if cases else None

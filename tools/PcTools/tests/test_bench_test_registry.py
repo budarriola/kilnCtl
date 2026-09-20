@@ -85,10 +85,67 @@ class SuiteTest(unittest.TestCase):
         ids = R.SUITES["nightly"]
         idx = {cid: i for i, cid in enumerate(ids)}
         self.assertLess(idx["ST-05"], idx["FL-01"])
+        # ST/FL/SK-01,03,04/SP read-only block still precedes every WEB/LCD/
+        # HP/OT case, exactly as in `full` -- OT-B01/OT-E* are the one
+        # deliberate exception (plan §5.2: "OTA last"), so this checks the
+        # ST/FL/SK/SP prefix specifically rather than "all read-only before
+        # all heat" (no longer true in nightly: OT-B01/OT-E* are read-only
+        # yet legitimately run after the heat-originating HP-* block).
+        prefix_end = max(idx[c] for c in ids if R.get_case(c).area in ("ST", "FL", "SK", "SP") and c not in ("SK-02", "SP-03", "SP-06"))
         heat_ids = [c for c in ids if R.get_case(c).heat]
+        first_non_prefix = min(i for cid, i in idx.items() if cid not in (
+            "SK-02", "SP-03", "SP-06"
+        ) and R.get_case(cid).area not in ("ST", "FL", "SK", "SP"))
+        self.assertLess(prefix_end, first_non_prefix)
         if heat_ids:
-            read_only_ids = [c for c in ids if not R.get_case(c).heat]
-            self.assertLess(max(idx[c] for c in read_only_ids), min(idx[c] for c in heat_ids))
+            self.assertGreater(min(idx[c] for c in heat_ids), prefix_end)
+
+    def test_nightly_hp_before_sk02_and_ota_last(self):
+        """Plan §5.3 interdependence rules, the two named in the task:
+        HP runs before SK-02 (SK-02 depends_on='HP-01' and needs real httpd
+        traffic from a firing already in flight), and the OTA block
+        (OT-B01/OT-E*) is the very last thing nightly runs."""
+        ids = R.SUITES["nightly"]
+        idx = {cid: i for i, cid in enumerate(ids)}
+        self.assertLess(idx["HP-01"], idx["SK-02"])
+        ot_ids = [c for c in ids if c.startswith("OT-")]
+        self.assertTrue(ot_ids)
+        non_ot_ids = [c for c in ids if not c.startswith("OT-")]
+        self.assertLess(max(idx[c] for c in non_ot_ids), min(idx[c] for c in ot_ids))
+        # SK-02's own dependency wiring, and each SP observer sits right
+        # after the HP case it depends on (§5.2's "HP-01 (with ... SP-*
+        # observers)" pattern).
+        self.assertEqual(R.get_case("SK-02").depends_on, "HP-01")
+        self.assertEqual(R.get_case("SP-06").depends_on, "HP-01")
+        self.assertEqual(R.get_case("SP-03").depends_on, "HP-02")
+        self.assertEqual(idx["SP-06"], idx["HP-01"] + 1)
+        self.assertEqual(idx["SP-03"], idx["HP-02"] + 1)
+
+    def test_nightly_matches_plan_5_1_membership(self):
+        """Plan §5.1's nightly membership, spelled out explicitly so a future
+        edit to either the plan or this list is forced to reconcile the two
+        (check_bench_test_registry.ps1 checks ids-exist, not this specific
+        set membership)."""
+        ids = set(R.SUITES["nightly"])
+        expected = set(R.SUITES["smoke"]) | {
+            "ST-01", "ST-02", "ST-03", "ST-04",
+            "HP-01", "HP-02", "HP-04", "HP-05", "HP-06", "HP-08",
+            "SK-02", "SP-03", "SP-06",
+            "WEB-DASH-03", "WEB-DASH-06", "WEB-DASH-07", "WEB-DASH-09",
+            "WEB-PROF-02", "WEB-PROF-03", "WEB-PROF-04", "WEB-PROF-05",
+            "WEB-PROF-06", "WEB-PROF-07", "WEB-PROF-08", "WEB-PROF-09",
+            "WEB-ZONE-02", "WEB-ZONE-03", "WEB-ZONE-05", "WEB-ZONE-09", "WEB-ZONE-12",
+            "WEB-BAK-02", "WEB-BAK-03",
+            "WEB-KCFG-02", "WEB-KCFG-03",
+            "WEB-DIAG-07", "WEB-DIAG-08",
+            "WEB-OTA-01", "WEB-OTA-02",
+            "WEB-SEC-03",
+            "WEB-X-01", "WEB-X-02",
+            "LCD-02", "LCD-03", "LCD-04", "LCD-09", "LCD-14", "LCD-16",
+            "OT-B01", "OT-E01", "OT-E02", "OT-E03", "OT-E12",
+        }
+        self.assertEqual(ids, expected)
+        self.assertEqual(len(R.SUITES["nightly"]), len(set(R.SUITES["nightly"])), "no duplicate ids in nightly")
 
 
 class HeatFlagTest(unittest.TestCase):

@@ -130,6 +130,8 @@ class RunnerLifecycleTest(unittest.TestCase):
         self.ctx = {
             "srv": self.fake_srv, "host": None,
             "capability_preflight_run": lambda preset, host, **kw: self.cp_report,
+            # Never let a unit test append to the real docs/BENCH_TEST_LOG.md.
+            "bench_test_log_doc_path": os.path.join(self.tmpdir, "BENCH_TEST_LOG.md"),
         }
         # Save/restore anything we monkeypatch onto the real REGISTRY so
         # this test never leaks state into other tests or the module.
@@ -189,7 +191,9 @@ class RunnerLifecycleTest(unittest.TestCase):
         self.assertFalse(outcome.preflight_ok)
         for result in outcome.results.values():
             self.assertEqual(result.verdict, R.Verdict.NOT_RUN)
-        self.assertEqual(outcome.exit_code, 1)
+        # Wave 2's four-way contract: a refused preflight (no case even
+        # attempted) is its own code, distinct from a case FAIL.
+        self.assertEqual(outcome.exit_code, 2)
 
     def test_all_passing_cases_exit_zero(self):
         self._patch_judge("ST-05", lambda ctx: R.CaseResult(R.Verdict.PASS))
