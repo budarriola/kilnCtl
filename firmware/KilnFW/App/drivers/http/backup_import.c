@@ -2400,9 +2400,11 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
      * fallback landing in internal DRAM at that size is exactly the hazard
      * PROFILE_SLOTS_100_PLAN.md section 7 task 7 calls out (sockets reset
      * below ~11.9 KB of internal DRAM headroom on this board). Fail cleanly
-     * with a logged error and a clean 400 instead -- see the "out of memory"
-     * `err_msg` path just below, indistinguishable from any other pass-1
-     * validation refusal to the caller. */
+     * with a logged error instead -- see the "out of memory" `err_msg` path
+     * just below. Note this is NOT a "nothing changed" 400: we are past
+     * kiln_configs[]'s commit pass, so it sets *partial_write_out (a 500
+     * naming what landed), exactly like the three sibling candidate-array
+     * allocation failures just below it. */
     profile_candidate_t *candidates = heap_caps_malloc(sizeof(profile_candidate_t) * PROFILES_MAX_COUNT,
                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!candidates) {

@@ -407,8 +407,9 @@ export side was confirmed to already stream via `backup_stream_printf()`/a small
   each -- ~42.8 KB at the 100 slots a concurrent sibling worktree is raising
   `PROFILES_MAX_COUNT` to) no longer falls back to `malloc()` (internal DRAM) when the
   `MALLOC_CAP_SPIRAM` allocation fails. It now logs `ESP_LOGE` naming the byte count
-  and refuses cleanly with the same "out of memory (profile candidates)" 400 the
-  caller already handled -- no behavior change at today's 8 slots (PSRAM allocation
+  and refuses cleanly with the same "out of memory (profile candidates)" failure the
+  caller already handled (a `*partial_write_out` 500, not a 400: kiln_configs[] has
+  already committed by this point) -- no behavior change at today's 8 slots (PSRAM allocation
   never fails on this board), only the failure path at high slot counts. The sibling
   `zone_candidates`/`timing_profile_candidates` arrays are sized by
   `MAX31856_CHANNEL_COUNT` (3-4 entries), not `PROFILES_MAX_COUNT`, so their existing
