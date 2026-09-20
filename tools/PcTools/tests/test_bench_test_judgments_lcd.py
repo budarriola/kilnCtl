@@ -44,6 +44,18 @@ class LcdHomeIdleTest(unittest.TestCase):
         r = J.judge_lcd_home_idle("home", targets, None, None)
         self.assertEqual(r.verdict, Verdict.FAIL)
 
+    def test_absent_pause_target_still_passes_with_a_capture(self):
+        """A board that omits a hidden Pause target entirely must not pin
+        LCD-01 at INCONCLUSIVE forever when the camera worked fine."""
+        targets = [t for t in _HOME_TARGETS if t["name"] != "pause"]
+        r = J.judge_lcd_home_idle("home", targets, True, None)
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_absent_pause_still_inconclusive_without_a_capture(self):
+        targets = [t for t in _HOME_TARGETS if t["name"] != "pause"]
+        r = J.judge_lcd_home_idle("home", targets, None, None)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
     def test_pause_not_hidden_fails(self):
         targets = [dict(t, hidden=False) if t["name"] == "pause" else t for t in _HOME_TARGETS]
         r = J.judge_lcd_home_idle("home", targets, None, None)

@@ -350,7 +350,12 @@ def judge_lcd_home_idle(page: str, targets: "list[dict]",
         return CaseResult(Verdict.FAIL, reason="Pause target is not hidden on home/idle", observed=observed)
     if start_matches_accent4 is False:
         return CaseResult(Verdict.FAIL, reason="Start button region does not read as ACCENT_4", observed=observed)
-    if start_matches_accent4 is None or pause_is_hidden is None:
+    # Only the checks a capture could actually have answered make this
+    # INCONCLUSIVE. A board that does not list a hidden Pause target at all
+    # legitimately yields pause_is_hidden=None with a perfectly good frame --
+    # requiring it unconditionally made LCD-01 permanently INCONCLUSIVE on
+    # such a board, which reads like a broken camera rather than a pass.
+    if start_matches_accent4 is None or (pause is not None and pause_is_hidden is None):
         return CaseResult(
             Verdict.INCONCLUSIVE,
             reason="no camera capture available (webcam busy or unreachable) -- widget state checked, color not",

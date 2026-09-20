@@ -55,12 +55,13 @@ WIDGET_CORNERS: Tuple[Tuple[float, float], ...] = (
 #:   right edge:  x=1145 (top) .. x=1147 (bottom)  (quoted as "1145-1147")
 #:   top edge:    y=86 (left) .. y=60 (right)
 #:   bottom edge: y=635 (left) .. y=617 (right)
-#: giving corners TL=(298,86) TR=(1146,60) BL=(323,635) BR=(1147,617) --
-#: consistent with "the board sits rotated a few degrees with its right
+#: giving corners TL=(298,86) TR=(1145,60) BL=(323,635) BR=(1147,617), every value quoted verbatim from
+#: CLAUDE.md (no midpoints invented) --
+#: and consistent with "the board sits rotated a few degrees with its right
 #: side about 25px higher than its left".
 FRAME_CORNERS: Tuple[Tuple[float, float], ...] = (
     (298.0, 86.0),
-    (1146.0, 60.0),
+    (1145.0, 60.0),
     (323.0, 635.0),
     (1147.0, 617.0),
 )
