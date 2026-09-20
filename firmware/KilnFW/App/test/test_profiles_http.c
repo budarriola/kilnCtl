@@ -508,6 +508,27 @@ void firing_stats_erase(uint8_t profile_id)
     g_firing_stats_erase_last_id = profile_id;
 }
 
+// ---- profile_executor.h -- fake profile_executor_get_status(): Opus review
+// item 2 (PROFILE_SLOTS_100_PLAN.md section 7) has profiles_http_delete()
+// refuse to delete the slot the executor is currently running/paused on.
+// Defaults to IDLE (nothing running); tests that need a "delete refused"
+// case set g_fake_exec_state/g_fake_exec_profile_id first.
+static profile_exec_state_t g_fake_exec_state = PROFILE_EXEC_IDLE;
+static uint8_t              g_fake_exec_profile_id = 0xFF;
+void profile_executor_get_status(profile_exec_status_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->state = g_fake_exec_state;
+    out->profile_id = g_fake_exec_profile_id;
+}
+
+// NOTE: profiles_favorites_set()/profiles_favorites_is() are NOT faked here
+// -- this executable links persist/profiles_favorites.c for REAL (see
+// build_host_tests.ps1's exe7 comment: "a fake would not exercise the
+// delete-clears-the-favorite path"). Opus review item 1's test below marks
+// a slot favorite via the real profiles_favorites_set() and asserts through
+// the real profiles_favorites_is() that profiles_http_delete() clears it.
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
@@ -851,6 +872,58 @@ static void test_nvs_erase_slot_prunes_firing_stats_for_never_fired_slot(void)
                                                  "function's job (real implementation), not this handler's, to "
                                                  "treat a missing key as a no-op");
     TEST_CHECK(g_firing_stats_erase_last_id == 5, "called with the right id");
+}
+
+static void test_profiles_http_delete_clears_favorite(void)
+{
+    TEST_SECTION("profiles_http_delete() clears the deleted slot's favorite mark (Opus review item 1, "
+                 "PROFILE_SLOTS_100_PLAN.md sec 7) -- profiles_edit_http.c's web delete handler already "
+                 "does this; the benchproto path must not leave it undone");
+    pcfg_reset_all();
+
+    profile_t p = make_stored_profile();
+    s_profiles.profiles[7] = p;
+    s_profiles.used_bitmap = 0x80;
+    TEST_CHECK(nvs_save_slot(7) == ESP_OK, "save slot 7");
+
+    (void)profiles_favorites_set(7, false); // start from a known-clear state regardless of test order
+    TEST_CHECK(profiles_favorites_set(7, true) == ESP_OK, "mark slot 7 favorite");
+    TEST_CHECK(profiles_favorites_is(7), "slot 7 is favorite before delete");
+
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+    TEST_CHECK(profiles_http_delete(7), "profiles_http_delete succeeds");
+    TEST_CHECK(!profiles_favorites_is(7), "profiles_http_delete() cleared slot 7's favorite mark");
+}
+
+static void test_profiles_http_delete_refuses_running_slot(void)
+{
+    TEST_SECTION("profiles_http_delete() refuses a slot the executor is currently running or has paused "
+                 "(Opus review item 2, PROFILE_SLOTS_100_PLAN.md sec 7)");
+    pcfg_reset_all();
+
+    profile_t p = make_stored_profile();
+    s_profiles.profiles[6] = p;
+    s_profiles.used_bitmap = 0x40;
+    TEST_CHECK(nvs_save_slot(6) == ESP_OK, "save slot 6");
+
+    g_fake_exec_state = PROFILE_EXEC_RUNNING;
+    g_fake_exec_profile_id = 6;
+    TEST_CHECK(!profiles_http_delete(6), "delete refused while the executor is RUNNING this slot");
+    profile_t still_there;
+    TEST_CHECK(profiles_http_get(6, &still_there), "slot 6 is still present after the refused delete");
+
+    g_fake_exec_state = PROFILE_EXEC_PAUSED;
+    g_fake_exec_profile_id = 6;
+    TEST_CHECK(!profiles_http_delete(6), "delete refused while the executor is PAUSED on this slot");
+
+    // A different slot running does not block deleting slot 6.
+    g_fake_exec_state = PROFILE_EXEC_RUNNING;
+    g_fake_exec_profile_id = 3;
+    TEST_CHECK(profiles_http_delete(6), "delete succeeds when the executor is running a DIFFERENT slot");
+
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
 }
 
 static void test_pcfg_stale_file_after_delete_is_not_resurrected(void)
@@ -2036,6 +2109,8 @@ void run_test_profiles_http(void)
 
     test_nvs_erase_slot_prunes_firing_stats();
     test_nvs_erase_slot_prunes_firing_stats_for_never_fired_slot();
+    test_profiles_http_delete_clears_favorite();
+    test_profiles_http_delete_refuses_running_slot();
 
     test_pcfg_mounted_migrates_nvs_only_slot_to_file();
     test_pcfg_file_wins_when_it_has_the_higher_rev();

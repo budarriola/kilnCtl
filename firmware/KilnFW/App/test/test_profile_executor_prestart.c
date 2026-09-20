@@ -8755,7 +8755,7 @@ static void reset_all_fscf(void)
     // ring's max depth, from a leftover fs7.dat before this fix). Every
     // profile_id these tests use (5, 7, 9, 11) is deleted explicitly, both the
     // committed and any orphaned .tmp copy.
-    static const uint8_t known_ids[] = {5, 7, 9, 11};
+    static const uint8_t known_ids[] = {5, 7, 9, 11, 13};
     char path[600];
     for (size_t i = 0; i < sizeof(known_ids) / sizeof(known_ids[0]); i++) {
         char rel[40];
@@ -8966,6 +8966,94 @@ static void test_fscf_history_read_uses_the_heap_not_the_httpd_stack(void)
     reset_all_fscf();
 }
 
+// Opus review item 3 (PROFILE_SLOTS_100_PLAN.md sec 7): test 10's
+// nvs_erase_slot()/firing_stats_erase() coverage in test_profiles_http.c
+// only exercises firing_stats_erase() through a FAKE (it never links the
+// real firing_stats_cfg_fs.c). This executable already mounts a real cfg_fs
+// against a temp directory for the tests above, so it is where
+// firing_stats_cfg_fs_delete() itself gets exercised for real: a mounted
+// delete of an id that has a file (ordinary case), a delete of an id that
+// was never persisted (NOT_FOUND-as-success, both on the file half via
+// cfg_fs_delete() and the rev-key half via hal_kv_erase_key()), and an
+// unmounted cfg_fs (the file half degrades to a no-op, matching every other
+// function in this file's "PARTITION ABSENT" policy).
+static void test_firing_stats_erase_deletes_file_and_nvs(void)
+{
+    TEST_SECTION("firing_stats_erase() -- real firing_stats_cfg_fs_delete(): a persisted run's file and "
+                 "NVS blob are both gone afterward, and the read path reports no history");
+    reset_all_fscf();
+    TEST_CHECK(cfg_fs_init(FS_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+
+    profile_firing_run_record_t rec = make_fscf_record(13, 5000, 4000);
+    firing_stats_persist(&rec);
+
+    char path[64];
+    firing_stats_cfg_fs_path(13, path, sizeof(path));
+    bool exists = false;
+    TEST_CHECK(cfg_fs_exists(path, &exists) == ESP_OK && exists, "the persist created a file for id 13");
+
+    firing_stats_erase(13);
+
+    exists = true;
+    TEST_CHECK(cfg_fs_exists(path, &exists) == ESP_OK && !exists, "firing_stats_cfg_fs_delete() removed the file");
+    // firing_stats_load() returning false means "unreadable/corrupt", not "no history" --
+    // a never-fired (or freshly erased) id is a SUCCESSFUL load of an empty (count==0)
+    // blob (nvs_only_load()'s HAL_NOT_FOUND-is-success convention), so the erased case
+    // must be told apart by out.count, not by the return value.
+    profile_firing_history_blob_t out;
+    memset(&out, 0xAA, sizeof(out));
+    TEST_CHECK(firing_stats_load(13, &out), "the NVS blob is gone but the load itself still succeeds (empty history)");
+    TEST_CHECK(out.count == 0, "the loaded blob reports zero runs -- the erased history is actually gone");
+
+    profile_firing_run_record_t hist[PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH];
+    memset(hist, 0, sizeof(hist));
+    TEST_CHECK(profile_executor_get_firing_history(13, hist, PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH) == 0,
+               "the history read path finds nothing for the erased id either");
+}
+
+static void test_firing_stats_erase_never_fired_id_is_a_safe_no_op(void)
+{
+    TEST_SECTION("firing_stats_erase() -- NOT_FOUND-as-success: erasing an id that was never persisted "
+                 "(no file, no NVS key) is a safe no-op on both halves, cfg_fs mounted");
+    reset_all_fscf();
+    TEST_CHECK(cfg_fs_init(FS_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+
+    char path[64];
+    firing_stats_cfg_fs_path(13, path, sizeof(path));
+    bool exists = true;
+    TEST_CHECK(cfg_fs_exists(path, &exists) == ESP_OK && !exists, "id 13 has no file to begin with");
+
+    // Must not crash/log-abort; the only observable contract is "still no
+    // file, still no history" -- firing_stats_erase() itself returns void.
+    firing_stats_erase(13);
+
+    exists = true;
+    TEST_CHECK(cfg_fs_exists(path, &exists) == ESP_OK && !exists, "still no file after erasing a never-fired id");
+    profile_firing_history_blob_t out;
+    memset(&out, 0xAA, sizeof(out));
+    TEST_CHECK(firing_stats_load(13, &out), "load still succeeds -- a never-fired id is empty history, not an error");
+    TEST_CHECK(out.count == 0, "still no NVS history for a never-fired id");
+}
+
+static void test_firing_stats_erase_degrades_when_cfg_fs_unmounted(void)
+{
+    TEST_SECTION("firing_stats_erase() -- cfg_fs UNMOUNTED: the file half degrades to a no-op "
+                 "(cfg_fs_is_available() false), but the NVS half still runs and behaves like before");
+    reset_all_fscf(); // deliberately no cfg_fs_init() -- partition absent for this test
+
+    profile_firing_run_record_t rec = make_fscf_record(13, 6000, 100);
+    firing_stats_persist(&rec); // NVS-only dual-write half, same as test_fscf_partition_absent_behaves_like_before()
+
+    profile_firing_history_blob_t out;
+    TEST_CHECK(firing_stats_load(13, &out) && out.count == 1, "the NVS-only record reads back before erase");
+
+    firing_stats_erase(13); // must not crash or attempt a cfg_fs write while unmounted
+
+    memset(&out, 0xAA, sizeof(out));
+    TEST_CHECK(firing_stats_load(13, &out), "load still succeeds after erase (empty history), cfg_fs still unmounted");
+    TEST_CHECK(out.count == 0, "erase still clears the NVS half while cfg_fs stays unmounted");
+}
+
 int main(void)
 {
     run_test_profile_executor_prestart();
@@ -8974,6 +9062,9 @@ int main(void)
     test_fscf_dual_write_stays_in_sync_across_repeated_persists();
     test_fscf_negative_no_file_write_means_file_never_catches_up();
     test_fscf_history_read_uses_the_heap_not_the_httpd_stack();
+    test_firing_stats_erase_deletes_file_and_nvs();
+    test_firing_stats_erase_never_fired_id_is_a_safe_no_op();
+    test_firing_stats_erase_degrades_when_cfg_fs_unmounted();
     reset_all_fscf();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

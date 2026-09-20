@@ -19,6 +19,11 @@
 #include "kiln_io.h"
 #include "profile_feasibility.h"
 #include "profiles_builtin.h"
+#include "profiles_favorites.h" /* profiles_favorites_set() -- see profiles_http_delete()'s doc
+                                  * comment; profiles_edit_http.c's web delete handler already
+                                  * clears a deleted slot's favorite mark, and this benchproto
+                                  * path must not leave that half undone (Opus review item 1,
+                                  * PROFILE_SLOTS_100_PLAN.md section 7). */
 #include "wifi_provision_http.h"
 #include "zones_config_accessors.h"
 #include "on_off_trigger_decide.h" /* on_off_phase_bit_t/on_off_direction_bit_t/on_off_temp_cmp_t --
@@ -1331,6 +1336,18 @@ bool profiles_http_delete(uint8_t id)
     if (id >= PROFILES_MAX_COUNT || !(s_profiles.used_bitmap & (1u << id))) {
         return false;
     }
+    /* Opus review item 2 (PROFILE_SLOTS_100_PLAN.md section 7): refuse to
+     * delete a slot the executor is currently running or has paused --
+     * deleting it out from under an in-progress firing would leave
+     * profile_executor_run()'s copied-at-start name/segments as the only
+     * surviving record of what is actually executing, and a later re-save
+     * of this id would silently relabel that run's history. Same check as
+     * profiles_edit_http.c's web delete handler. */
+    profile_exec_status_t pstat;
+    profile_executor_get_status(&pstat);
+    if ((pstat.state == PROFILE_EXEC_RUNNING || pstat.state == PROFILE_EXEC_PAUSED) && pstat.profile_id == id) {
+        return false;
+    }
     s_profiles.used_bitmap &= ~(1u << id);
     memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
     esp_err_t err = nvs_erase_slot((uint8_t)id);
@@ -1338,6 +1355,11 @@ bool profiles_http_delete(uint8_t id)
         ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u) failed: %s -- deleted live but may reappear after reboot", id,
                  esp_err_to_name(err));
     }
+    /* Slot now empty -- clear a dangling favorite the same way
+     * profiles_edit_http.c's web delete handler does (Opus review item 1).
+     * Best-effort: a failed save is logged inside the module and must not
+     * fail a delete that has already happened. */
+    (void)profiles_favorites_set((uint8_t)id, false);
     return true;
 }
 

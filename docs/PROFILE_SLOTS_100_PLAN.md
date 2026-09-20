@@ -288,6 +288,18 @@ separate concurrent session). Trimming the doomed page to favorites+recent
 only would have been thrown away by that replacement; UI_PLAN owns the LCD
 profile list going forward, not this plan.
 
+**Owner decision, 2026-09-19 (post phase-A review):** beyond the 100 user slots and the
+1 live-edit slot, there is **one additional hidden bench-harness slot** for
+`docs/BENCH_TEST_SYSTEM_PLAN.md`'s bench test system to use. It is never listed,
+exported, or shown on any web page or the LCD -- the same visibility exclusion the
+live-edit slot already gets, extended to a second id. This pass does not implement it:
+`PROFILES_MAX_COUNT` is still 8 (task 6 has not landed, see above), so there is no slot
+layout yet for a bench-harness id to occupy one line of. When task 6 lands and the
+100/live-edit id numbering is actually cut in, revisit whether adding id 101 alongside
+it is still a one-line addition against that new layout, and if so add it then, with its
+own visibility exclusions and a host test proving it is excluded from the catalogue/
+favorites listing, the web page, and the LCD page -- not before.
+
 ---
 
 ## Status

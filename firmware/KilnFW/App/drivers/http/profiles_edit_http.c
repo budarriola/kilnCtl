@@ -10,6 +10,9 @@
 
 #include "MAX31856.h"
 #include "http_form.h"
+#include "profile_executor.h" /* profile_executor_get_status() -- Opus review item 2,
+                                 * PROFILE_SLOTS_100_PLAN.md section 7: refuse to delete
+                                 * the slot the executor is currently running/paused on. */
 #include "profiles_builtin.h"
 #include "profiles_favorites.h"
 #include "zones_config_accessors.h"
@@ -591,6 +594,18 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
     if (!(s_profiles.used_bitmap & (1u << id))) {
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such profile");
         return ESP_OK;
+    }
+    /* Opus review item 2 (PROFILE_SLOTS_100_PLAN.md section 7): refuse to
+     * delete a slot the executor is currently running or has paused. Same
+     * check as profiles_http.c's benchproto profiles_http_delete(). */
+    profile_exec_status_t pstat;
+    profile_executor_get_status(&pstat);
+    if ((pstat.state == PROFILE_EXEC_RUNNING || pstat.state == PROFILE_EXEC_PAUSED) && pstat.profile_id == id) {
+        /* Set explicitly rather than via httpd_resp_send_err(): esp_http_server
+         * has no HTTPD_409_CONFLICT enumerator (kiln_cfg_http.c's identical
+         * comment/pattern). */
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "profile is currently running -- stop it before deleting");
     }
 
     s_profiles.used_bitmap &= ~(1u << id);
