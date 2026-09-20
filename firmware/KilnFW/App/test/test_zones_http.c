@@ -12244,6 +12244,118 @@ static void reset_sweep_state_for_test(void)
     s_test_heat_sweep_claim_end_calls = 0;
 }
 
+// ---------------------------------------------------------------------------
+// ct_channel_map_get_handler() -- MEDIUM 1/2 fix, review round 2
+// (docs/audits/ct_topology_stale_cache_2026-09-19.md): sweep-derived
+// (mask/zone[]) and safety-processor-committed (committed_mask/
+// committed_zone[]) must stay two SEPARATE fields, never merged, and the
+// committed side must mirror the Pico's own all-three-or-nothing group rule
+// (config_params_finalize_ct_channel_map(), SaftyFW config_params.c).
+// ---------------------------------------------------------------------------
+
+static void test_ct_channel_map_get_handler_sweep_and_committed_both_present(void)
+{
+    TEST_SECTION("ct_channel_map_get_handler: sweep-derived and committed stay separate fields");
+
+    zone_ct_map_clear();
+    TEST_CHECK(zone_ct_map_set(0, 2), "sweep derives CT0 -> zone 2");
+    test_cfg_rows_reset();
+    test_cfg_set_u8(0x0106u, 1u, true); // committed CT0 -> zone 1 (disagrees with the sweep)
+    test_cfg_set_u8(0x0107u, 0u, true); // committed CT1 -> zone 0
+    test_cfg_set_u8(0x0108u, 2u, true); // committed CT2 -> zone 2
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = ct_channel_map_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+
+    TEST_CHECK(strstr(s_last_resp_body, "\"mask\":1") != NULL,
+              "mask reports ONLY the sweep-derived channel (CT0), unmerged with the committed set");
+    TEST_CHECK(strstr(s_last_resp_body, "\"zone\":[2,0,0]") != NULL,
+              "zone[] reports the sweep-derived value for CT0 (2), never the committed value (1) -- "
+              "a merge here would silently swap out a measured value for a typed one");
+    TEST_CHECK(strstr(s_last_resp_body, "\"committed_mask\":7") != NULL,
+              "committed_mask reports all three committed rows (0x0106-0x0108 all set)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"committed_zone\":[1,0,2]") != NULL,
+              "committed_zone[] reports the Pico's own committed values exactly, including the "
+              "one (CT0=1) that disagrees with what the sweep measured (CT0=2) -- both are visible, "
+              "not collapsed into one number the page could mistake for either source");
+
+    zone_ct_map_clear();
+    test_cfg_rows_reset();
+}
+
+static void test_ct_channel_map_get_handler_committed_only(void)
+{
+    TEST_SECTION("ct_channel_map_get_handler: committed map with nothing swept yet");
+
+    zone_ct_map_clear();
+    test_cfg_rows_reset();
+    test_cfg_set_u8(0x0106u, 0u, true);
+    test_cfg_set_u8(0x0107u, 1u, true);
+    test_cfg_set_u8(0x0108u, 2u, true);
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = ct_channel_map_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+
+    TEST_CHECK(strstr(s_last_resp_body, "\"mask\":0") != NULL,
+              "mask is 0 -- the sweep has never run, and committed values must not leak into it");
+    TEST_CHECK(strstr(s_last_resp_body, "\"committed_mask\":7") != NULL,
+              "committed_mask reports the full committed map even with no sweep at all");
+    TEST_CHECK(strstr(s_last_resp_body, "\"committed_zone\":[0,1,2]") != NULL,
+              "committed_zone[] reports the manually-entered map exactly");
+
+    zone_ct_map_clear();
+    test_cfg_rows_reset();
+}
+
+static void test_ct_channel_map_get_handler_two_of_three_partial_reports_zero(void)
+{
+    TEST_SECTION("ct_channel_map_get_handler: a 2-of-3 committed partial is NOT reported as committed");
+
+    zone_ct_map_clear();
+    test_cfg_rows_reset();
+    test_cfg_set_u8(0x0106u, 0u, true);
+    test_cfg_set_u8(0x0107u, 1u, true);
+    // 0x0108 (CT2) deliberately left unset -- mirrors
+    // config_params_finalize_ct_channel_map()'s own two-of-three case, which
+    // never sets the Pico's group bit either.
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = ct_channel_map_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+
+    TEST_CHECK(strstr(s_last_resp_body, "\"committed_mask\":0") != NULL,
+              "committed_mask is 0 for a 2-of-3 partial -- the group rule is all-three-or-nothing, "
+              "matching what the Pico itself would report, never a partial mask");
+    TEST_CHECK(strstr(s_last_resp_body, "\"committed_zone\":[0,0,0]") != NULL,
+              "committed_zone[] stays all-zero when the group is not confirmed -- the two rows "
+              "that WERE set individually must not leak through committed_mask==0");
+
+    zone_ct_map_clear();
+    test_cfg_rows_reset();
+}
+
+static void test_ct_channel_map_get_handler_neither_present(void)
+{
+    TEST_SECTION("ct_channel_map_get_handler: neither sweep nor committed map present");
+
+    zone_ct_map_clear();
+    test_cfg_rows_reset();
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = ct_channel_map_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+
+    TEST_CHECK(strstr(s_last_resp_body, "\"mask\":0") != NULL, "mask is 0 with nothing swept");
+    TEST_CHECK(strstr(s_last_resp_body, "\"committed_mask\":0") != NULL,
+              "committed_mask is 0 with nothing committed on the safety processor");
+}
+
 static void test_zones_current_sweep_start_wired_refusals(void)
 {
     static kiln_io_t dummy_io;
@@ -14709,6 +14821,11 @@ void run_test_zones_http(void)
     test_ct_mapping_mismatch_outside_band_warns();
     test_ct_mapping_mismatch_tiny_normal_needs_absolute_delta_too();
     test_ct_mapping_warn_mask_wiring();
+
+    test_ct_channel_map_get_handler_sweep_and_committed_both_present();
+    test_ct_channel_map_get_handler_committed_only();
+    test_ct_channel_map_get_handler_two_of_three_partial_reports_zero();
+    test_ct_channel_map_get_handler_neither_present();
 
     test_zones_current_sweep_start_wired_refusals();
     test_zones_current_sweep_start_atomic_gate_closes_the_race();

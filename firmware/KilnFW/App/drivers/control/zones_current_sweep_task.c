@@ -2297,7 +2297,15 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
      * exactly the situation CLAUDE.md's readiness_http.c pattern already
      * handles elsewhere: try ONE bounded live fetch here rather than just
      * telling the operator to retry -- a fetch that lands turns a spurious
-     * refusal into a working sweep in the same request. */
+     * refusal into a working sweep in the same request.
+     *
+     * Worst case this blocks the calling httpd worker for roughly 4-5 s, no
+     * lock of THIS module's own held across it: safety_cfg_store_refetch()
+     * takes s_store_lock with portMAX_DELAY (safety_cfg_store.c) and can sit
+     * behind another writer for the full SAFETY_CFG_STORE_REFETCH_BUDGET_MS
+     * (2000 ms) live-fetch budget, plus whatever an NVS flush of the
+     * refetched page costs on top. That is a real request-latency cost, not
+     * a lock this task holds while it waits. */
     bool ct_topology_unknown = !zone_cfg_ct_topology_row_set();
     if (ct_topology_unknown && link_up && s_hw_safety) {
         bool peer_known = false;

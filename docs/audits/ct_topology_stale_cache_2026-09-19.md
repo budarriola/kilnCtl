@@ -73,10 +73,22 @@ sources of the same fact), but a distinct code path with no shared fix.
   (checks `row.set` on param 0x031F) and used it in place of
   `fetched_ms_ago() == UINT32_MAX`; added a bounded live-refetch-and-retry
   when unknown but link-up.
-- `zones_http.c`: `ct_channel_map_get_handler()` now merges the safety
-  processor's committed `ct_channel_map[0..2]` into any channel the
-  sweep-derived record left blank, without adding any new route. Sweep-
-  derived values remain authoritative wherever present.
+- `zones_http.c`: `ct_channel_map_get_handler()` reads the safety processor's
+  committed `ct_channel_map[0..2]` in addition to the sweep-derived record,
+  without adding any new route -- but reports it as separate
+  `committed_mask`/`committed_zone[0..2]` fields, never merged into
+  `mask`/`zone[0..2]`. The first cut of this fix (same day, review round 2)
+  did merge the two, which destroyed provenance: `safety_commissioning_page.html`
+  renders a set `mask` bit as read-only "DERIVED from the sweep" text and can
+  never surface its "safety processor disagrees with what the sweep measured"
+  warning for a channel that was actually filled in from the committed side,
+  not the sweep. `mask`/`zone[0..2]` are therefore sweep-only again, exactly
+  as before this whole fix; `committed_mask`/`committed_zone[0..2]` are the
+  new, separate channel for "what the Pico itself has confirmed". Per
+  `config_params_finalize_ct_channel_map()` (SaftyFW `config_params.c`),
+  which only ever sets the Pico's own group bit once all three of
+  0x0106-0x0108 are committed, `committed_mask` mirrors that all-or-nothing
+  rule: a 2-of-3 partial reports `committed_mask` 0, not a partial mask.
 - Host tests added in `test_zones_http.c`
   (`test_zones_current_sweep_start_wired_refusals()`): uncommitted-row +
   link-down (still LINK_DOWN), uncommitted-row + link-up + peer unknown
