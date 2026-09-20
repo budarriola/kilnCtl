@@ -89,7 +89,19 @@ typedef struct {
     profiles_slot_bitmap_t used_bitmap;
 } profiles_state_t;
 
-extern profiles_state_t s_profiles;
+/* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 3: this struct (dominated by
+ * profiles[PROFILES_MAX_COUNT], and growing further once task 6 raises
+ * PROFILES_MAX_COUNT) is lazily allocated from PSRAM rather than reserved as
+ * a .bss global -- see profiles_storage_ensure()'s doc comment in
+ * profiles_http.c (which owns the allocation and its internal-RAM/empty-
+ * fallback path) for the full rationale. `s_profiles` stays usable exactly
+ * as before EVERYWHERE it already appears (`s_profiles.foo`,
+ * `&s_profiles`, `memset(&s_profiles, 0, sizeof(s_profiles))`) because this
+ * macro expands to a dereference of the lazily-allocated pointer, not to a
+ * plain global -- it is intentionally NOT `extern profiles_state_t
+ * s_profiles;` any more. */
+profiles_state_t *profiles_storage_ensure(void);
+#define s_profiles (*profiles_storage_ensure())
 
 /* Accessors for s_profiles.used_bitmap -- the ONLY sanctioned way to test/
  * set/clear a slot's used bit. Defined in profiles_http.c (which owns

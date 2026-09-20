@@ -7,6 +7,8 @@
 #include <string.h>
 
 #include "esp_crc.h"
+#include "esp_heap_caps.h" /* heap_caps_malloc()/MALLOC_CAP_* -- profiles_storage_ensure()'s
+                            * PSRAM allocation (docs/PROFILE_SLOTS_100_PLAN.md section 7 task 3) */
 #include "esp_log.h"
 
 #include "hal_kv.h"
@@ -184,8 +186,61 @@ _Static_assert(PROFILE_TARGET_C_MAX <= ZONE_MAX_TEMP_C_MAX,
  * prof_used bitmap still exists in NVS/RAM so a listing never has to probe
  * 8 keys to find out which exist. profiles_state_t itself now lives in
  * profiles_http_internal.h -- profiles_catalog_http.c/profiles_edit_http.c
- * need the type too. */
-profiles_state_t s_profiles;
+ * need the type too.
+ *
+ * docs/PROFILE_SLOTS_100_PLAN.md section 7 task 3: profiles_state_t
+ * (dominated by profiles[PROFILES_MAX_COUNT], and growing further once task
+ * 6 raises PROFILES_MAX_COUNT) is now a lazily allocated PSRAM buffer
+ * instead of a .bss global -- see profiles_storage_ensure() below, the only
+ * function that touches this pointer directly. Every other reference in
+ * this module (and profiles_catalog_http.c/profiles_edit_http.c/the host
+ * tests) keeps writing `s_profiles.foo`, which profiles_http_internal.h's
+ * `#define s_profiles (*profiles_storage_ensure())` transparently turns
+ * into a call through this pointer -- so `memset(&s_profiles, 0,
+ * sizeof(s_profiles))`, used throughout the host tests, still zeroes the
+ * allocated struct in place rather than the pointer itself. */
+static profiles_state_t *s_profiles_ptr = NULL;
+
+profiles_state_t *profiles_storage_ensure(void)
+{
+    if (s_profiles_ptr != NULL) {
+        return s_profiles_ptr;
+    }
+
+    /* hal_kv_set_blob()/nvs_set_blob() (nvs_save_slot() below) COPY the
+     * bytes they are given into their own internal write buffer
+     * synchronously -- they never DMA the caller's buffer -- so a PSRAM
+     * source here is safe for the NVS write path. This is heap DATA, not a
+     * task STACK: it is a different hazard from the PSRAM-stack class of
+     * bug (a task whose STACK lives in PSRAM can panic
+     * esp_task_stack_is_sane_cache_disabled() on an NVS write, guarded
+     * separately in safety_cfg_store.c/nvs_save_slot()'s own
+     * esp_ptr_external_ram() check on the CALLING stack, not on this
+     * buffer). heap_caps_malloc() is a host-test stub (App/test/stubs/
+     * esp_heap_caps.h) that allocates via the host's real malloc(), caps
+     * ignored -- so this path runs for real, allocation included, under the
+     * host test suite too. */
+    profiles_state_t *p = heap_caps_malloc(sizeof(profiles_state_t), MALLOC_CAP_SPIRAM);
+    if (p == NULL) {
+        ESP_LOGW(PROFILES_TAG, "profiles storage: %u-byte PSRAM allocation failed, falling back "
+                 "to internal RAM", (unsigned)sizeof(profiles_state_t));
+        p = heap_caps_malloc(sizeof(profiles_state_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    if (p == NULL) {
+        /* Both pools failed. Never dereference NULL: every caller of
+         * `s_profiles` goes through this function, so falling back to one
+         * static instance leaves the profile store empty-but-valid (no
+         * profiles resident this boot) instead of crashing the first
+         * request that touches it. */
+        static profiles_state_t s_profiles_fallback;
+        ESP_LOGE(PROFILES_TAG, "profiles storage: internal RAM allocation also failed -- "
+                 "profile store starting EMPTY (no user profiles available this boot)");
+        p = &s_profiles_fallback;
+    }
+    memset(p, 0, sizeof(*p));
+    s_profiles_ptr = p;
+    return s_profiles_ptr;
+}
 
 /* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 1 -- the sanctioned way to
  * test/set/clear a bit of s_profiles.used_bitmap. Thin wrappers over the

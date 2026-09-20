@@ -270,7 +270,8 @@ One commit each, sized for a sonnet implementer, each independently buildable an
 ### Status (2026-09-19, Opus review of phase A)
 
 Phase A landed: tasks 2, 4, 5, 9 (reverted, see below), 10, 11 (this section).
-Task 1 landed 2026-09-19 (see below). Tasks 3, 6, 7, 8, 12 are NOT started.
+Task 1 landed 2026-09-19 (see below). Task 3 landed 2026-09-19 (see below).
+Tasks 6, 7, 8, 12 are NOT started.
 
 **Task 1 landed 2026-09-19.** Both `used_bitmap` (`profiles_http.c`'s
 `s_profiles`) and the favorites user mask (`profiles_favorites.c`'s
@@ -300,6 +301,35 @@ Negative-tested: deliberately broke `profiles_slot_bitmap_set()`'s word index
 (10 failures in `test_profiles_http.c`), restored the source by hand, confirmed
 a SHA-256 match against the pre-break file, then forced another full rebuild
 and confirmed 54/54 host test executables green again.
+
+**Task 3 landed 2026-09-19.** `s_profiles` (`profiles_state_t`, dominated by
+`profiles[PROFILES_MAX_COUNT]`) is no longer a `.bss` global. It is now
+lazily allocated by `profiles_storage_ensure()` (`profiles_http.c`) on first
+use: PSRAM first (`heap_caps_malloc(..., MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)`),
+falling back to internal RAM (`MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT`) if
+PSRAM is unavailable/exhausted, and finally to a small static struct with a
+logged failure if both allocations fail -- the store then starts empty but
+never crashes. Every existing call site keeps compiling and behaving
+unchanged: `profiles_http_internal.h` now declares
+`profiles_state_t *profiles_storage_ensure(void);` and `#define s_profiles
+(*profiles_storage_ensure())`, so `s_profiles.foo`, `&s_profiles`, and
+`memset(&s_profiles, 0, sizeof(s_profiles))` (used ~30 times across
+`test_profiles_http.c`) all still work verbatim -- the macro expands to a
+dereference of the lazily-allocated pointer, never a plain global. The
+host-test build's `esp_heap_caps.h` stub already backed `heap_caps_malloc()`
+with real `malloc()` (caps ignored), so no new test infrastructure was
+needed. NVS's write path was confirmed to copy the caller's buffer
+synchronously (`nvs_set_blob()`/`hal_kv_set_blob()`), never DMA it, so a
+heap/PSRAM-resident data buffer (as opposed to a PSRAM-resident task stack,
+a distinct and unrelated hazard) is safe to pass to it. No new task was
+registered or needed -- `check_all_task_stack_budgets.ps1`'s task count is
+unaffected by this change. Negative-tested: deliberately made
+`profiles_storage_ensure()` never cache its allocation (returning a fresh,
+freshly-zeroed buffer on every call instead of caching it in
+`s_profiles_ptr`), confirmed a forced full rebuild failed (46 failures in
+`test_profiles_http.c`), restored the source by hand, confirmed a SHA-256
+match against the pre-break file, then forced another full rebuild and
+confirmed 54/54 host test executables green again.
 
 Previously (now historical): **Task 1 was a hard, unstarted prerequisite for
 task 6** — do not raise `PROFILES_MAX_COUNT` past 32 before it lands. Two
