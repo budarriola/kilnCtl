@@ -20,7 +20,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, config_presets, dashboard_http_client, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, config_presets, dashboard_http_client, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, safety_log_level_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -306,6 +306,49 @@ def safety_clear_trip() -> str:
     afterwards to see whether it actually cleared.
     """
     return _srv._send(UART_TASK_ID_SAFETY, devices.safety_clear_trip())
+
+
+@_srv._tool()
+def safety_set_log_level(level: int, peer: Optional[str] = None, host: Optional[str] = None) -> str:
+    """Set the safety processor's runtime UART log verbosity: 0=ERROR,
+    1=WARN, 2=INFO, 3=DEBUG, 4=VERBOSE.
+
+    Calls POST /api/safety/log_level (dashboard_settings_http.c's
+    safety_log_level_post_handler(), ROUTE_TIER_ADMIN), which forwards a
+    SET_LOG_LEVEL frame to the Pico over the isolated safety link. This
+    route was found fully built and registered with no client anywhere
+    during the 2026-09-20 "no client" audit -- this tool is that client.
+
+    Diagnostic only: it changes what the Pico logs, nothing about its
+    guards, trips, or relays. Fire-and-forget over the link, same as
+    safety_clear_trip()/safety_set_poll_period() -- the ESP's {"ok":true}
+    means the frame was queued, not that the Pico applied it; there is no
+    read-back to confirm the level landed (the Pico does not currently
+    report its own log level anywhere this tool can read).
+
+    `peer` selects which log stream the level applies to: "safety" (the
+    Pico itself, over the isolated link) or "relay" (a local ESP-side
+    filter on the relayed Pico log stream). Leave it None to send no peer
+    field, which the firmware handler treats as its historical "safety"
+    default.
+
+    Host is auto-resolved the same way the OTA/control tools do; pass
+    `host` explicitly for kilnctl.local or a board reachable only from a
+    different network than this link's serial port.
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as safety_get_commissioning()
+
+    resolved = _ota_resolve_host(host)
+    try:
+        response = safety_log_level_http_client.set_safety_log_level(resolved, level, peer=peer)
+    except safety_log_level_http_client.SafetyLogLevelHttpError as exc:
+        return f"error setting safety log level over HTTP (host={resolved}): {exc}"
+    if response.get("ok"):
+        name = (safety_log_level_http_client.SAFETY_LOG_LEVEL_NAMES[level]
+                if 0 <= level < len(safety_log_level_http_client.SAFETY_LOG_LEVEL_NAMES) else str(level))
+        return (f"ok - queued log level {level} ({name}) for "
+                f"{peer or 'safety'} (host={resolved})")
+    return f"refused - board reported: {response} (host={resolved})"
 
 
 @_srv._tool()

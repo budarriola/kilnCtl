@@ -47,8 +47,13 @@ static esp_err_t session_status_get_handler(httpd_req_t *req)
     // page never renders a lock UI on a board that has never had auth
     // turned on -- same collapse http_auth_check() itself performs.
     if (!http_auth_policy_web_enabled()) {
+        // web_auth_admin_bootstrap_needed() is defined as effective_enabled &&
+        // !admin_configured -- with effective_enabled false here it can never
+        // be true, so this is reported directly rather than computed.
         httpd_resp_set_type(req, "application/json");
-        return httpd_resp_sendstr(req, "{\"role\":\"admin\",\"prompt\":false,\"seconds_left\":-1}");
+        return httpd_resp_sendstr(req,
+                                   "{\"role\":\"admin\",\"prompt\":false,\"seconds_left\":-1,"
+                                   "\"bootstrap_needed\":false}");
     }
 
     char token[128];
@@ -78,10 +83,39 @@ static esp_err_t session_status_get_handler(httpd_req_t *req)
         seconds_left = (elapsed_ms >= timeout_ms) ? 0 : (long)((timeout_ms - elapsed_ms) / 1000u);
     }
 
+    // Surfaces the same predicate POST /api/auth/bootstrap_password's own
+    // handler gates on (web_auth_admin_bootstrap_needed(), net/web_auth_session.h)
+    // so the OPEN login page can tell "first run / locked out, no admin
+    // credential yet" apart from "credential set, please log in" without
+    // itself needing an ADMIN-tier route -- this route is ROUTE_TIER_OPEN
+    // already and adds no new capability: bootstrap_password's real gate is
+    // still that same predicate, re-checked independently at its own
+    // enforcement point (http_auth_enforce.c) and its own handler (defence
+    // in depth comment there). This is read-only reporting, not a second
+    // gate.
+    // Resolved through http_auth_policy_admin_bootstrap_needed(), the single
+    // accessor kiln_http_prehandler() itself uses -- never re-derived here
+    // from raw policy/credential state, and never with a hardcoded
+    // effective_enabled. http_auth_policy_iface.h says so explicitly: a
+    // second copy of that collapse is the reset-one-side-of-a-pair shape
+    // CLAUDE.md warns about, and it would silently drift the moment
+    // http_auth_policy_web_enabled()'s ABSENT/OK/UNREADABLE handling changes.
+    bool bootstrap_needed = http_auth_policy_admin_bootstrap_needed();
+
+    // Deliberately still 128 B, unchanged by the bootstrap_needed field:
+    // this repo's rule against enlarging httpd-stack locals is categorical,
+    // and no growth is needed here. Worst case is 90 bytes -- the longest
+    // role_name() is "admin" (5), prompt/bootstrap_needed are at most
+    // "false" (5 each), and seconds_left is a long, at most 20 characters
+    // even at LONG_MIN -- so the fixed scaffolding (55 B) plus 5 + 5 + 5 +
+    // 20 stays under 91. snprintf's return is checked below, so a future
+    // field that does overflow fails loud (500) rather than truncating the
+    // JSON silently.
     char body[128];
-    int n = snprintf(body, sizeof(body), "{\"role\":\"%s\",\"prompt\":%s,\"seconds_left\":%ld}",
+    int n = snprintf(body, sizeof(body),
+                      "{\"role\":\"%s\",\"prompt\":%s,\"seconds_left\":%ld,\"bootstrap_needed\":%s}",
                       role_name(valid ? role : WEB_AUTH_SESSION_ROLE_NONE), prompt ? "true" : "false",
-                      seconds_left);
+                      seconds_left, bootstrap_needed ? "true" : "false");
     if (n < 0 || (size_t)n >= sizeof(body)) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "internal error");
         return ESP_OK;

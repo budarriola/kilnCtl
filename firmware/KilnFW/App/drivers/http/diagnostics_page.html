@@ -487,6 +487,27 @@ means its file and NVS copies briefly disagreed; the newer revision wins and res
 one automatically, so a diverged flag that keeps recurring rather than clearing is the thing to
 report, not a single occurrence.</p>
 
+<!-- GET /api/dualwrite_window (dualwrite_window_http.c, ROUTE_TIER_ADMIN) and
+     POST /api/dualwrite_window/restore_verified (same file) were found fully
+     built and registered with no client anywhere -- no HTML page, no JS, no
+     PcTools/MCP tool -- during the 2026-09-20 "no client" audit. This module
+     exists so the owner-approved cfg-migration exit criteria (20 clean
+     boots, one file-backed firing, one verified restore round trip) are
+     readable by a person; the measurement deliberately never auto-acts, so
+     this card only ever DISPLAYS progress and lets a person RECORD a restore
+     they personally verified -- it never decides that a restore succeeded on
+     its own. Own independent poll (pollDualwriteWindow below), same
+     slow-fetch-must-not-block-the-page pattern as pollCfgFs()/pollCrash(). -->
+<h2>Config Migration Exit Window</h2>
+<div class="card" id="dualwriteWindowCard"><div class="row"><span class="label">Migration exit window</span>
+  <span class="value">loading&hellip;</span></div></div>
+<p class="note">This exits only once all three
+criteria below are met: enough consecutive clean boots, at least one firing completed while
+file-backed, and one restore that a person has actually opened and checked byte-for-byte against
+what was backed up. "Record a verified restore" below is that attestation -- press it only after
+you have personally restored a backup onto a board (or a spare) and confirmed the restored
+config matches, never as a routine click.</p>
+
 <h2>Danger Zone</h2>
 <div class="danger-card" id="dangerCard">
   <p><strong>Manual relay/heater/thermocouple hardware test.</strong> This section
@@ -1183,6 +1204,62 @@ here:</p>
     });
   }
 
+  // --- Config migration exit window (dualwrite_window_http.c) -------------
+  // GET /api/dualwrite_window -> {consecutive_clean_boots, clean_boots_target,
+  // firing_complete, restore_verified, window_may_close}. Pure display plus
+  // one attestation button; this page never computes window_may_close
+  // itself, only shows the board's own answer.
+  var dwwSubmitting = false;
+  function renderDualwriteWindow(st) {
+    var bootsOk = st.consecutive_clean_boots >= st.clean_boots_target;
+    var rows = '';
+    rows += '<div class="row"><span class="label">Consecutive clean boots</span><span class="value" style="color:' +
+            (bootsOk ? 'var(--ok)' : 'var(--muted)') + '">' + st.consecutive_clean_boots + ' of ' +
+            st.clean_boots_target + '</span></div>';
+    rows += '<div class="row"><span class="label">File-backed firing completed</span><span class="value" style="color:' +
+            (st.firing_complete ? 'var(--ok)' : 'var(--muted)') + '">' +
+            (st.firing_complete ? 'yes' : 'not yet') + '</span></div>';
+    rows += '<div class="row"><span class="label">Restore verified</span><span class="value" style="color:' +
+            (st.restore_verified ? 'var(--ok)' : 'var(--muted)') + '">' +
+            (st.restore_verified ? 'yes' : 'not yet') + '</span></div>';
+    rows += '<div class="row headline"><span class="label">Window may close</span><span class="value">' +
+            (st.window_may_close ? 'YES -- all three criteria met' : 'not yet') + '</span></div>';
+    if (!st.restore_verified) {
+      rows += '<div class="row"><span class="label"></span><span class="value">' +
+              '<button id="dwwRecordRestoreBtn" class="danger-btn" style="width:auto;display:inline-block;">' +
+              'Record a verified restore</button></span></div>';
+    }
+    document.getElementById('dualwriteWindowCard').innerHTML = rows;
+    var btn = document.getElementById('dwwRecordRestoreBtn');
+    if (btn) {
+      btn.addEventListener('click', function () {
+        if (dwwSubmitting) return;
+        if (kcConfirm('Record a verified restore? Only confirm this after you have personally ' +
+                       'restored a backup and checked the result matches, byte for byte.')) {
+          dwwSubmitting = true;
+          btn.disabled = true;
+          fetch('/api/dualwrite_window/restore_verified', { method: 'POST' }).then(function () {
+            dwwSubmitting = false;
+            return pollDualwriteWindow();
+          }).catch(function () {
+            dwwSubmitting = false;
+            btn.disabled = false;
+          });
+        }
+      });
+    }
+  }
+  function pollDualwriteWindow() {
+    return fetchJsonTimeout('/api/dualwrite_window', 4000).then(function (j) {
+      if (!j || typeof j.consecutive_clean_boots !== 'number') throw new Error('malformed /api/dualwrite_window response');
+      renderDualwriteWindow(j);
+    }).catch(function () {
+      document.getElementById('dualwriteWindowCard').innerHTML =
+        '<div class="row"><span class="label">Migration exit window</span><span class="value">' +
+        'could not load (board unreachable, or the request failed/timed out)</span></div>';
+    });
+  }
+
   // --- Thermocouple faults (folded in from thermo_faults_page.html) -------
   // Same MAX31856_MASK_xxx / MAX31856_FAULT_xxx bit layout as MAX31856.h and
   // ui_page_thermo_faults.c's format_fault_summary() -- SR shares bit
@@ -1466,6 +1543,7 @@ here:</p>
   scheduleThermoFaults();
   pollPartitions();
   pollCfgFs();
+  pollDualwriteWindow();
 
   // UI_PLAN.md item 7: re-render the board-health temperatures and the
   // thermocouple-fault cards' CJ readings in the new unit immediately on
@@ -1701,6 +1779,10 @@ here:</p>
   // far less time-critical) so a mount that fails mid-session still shows
   // up without a manual refresh.
   setInterval(pollCfgFs, 10000);
+  // Same slow, non-time-critical cadence as pollCfgFs above -- this state
+  // changes at most once per boot/firing/attestation, never worth polling
+  // faster.
+  setInterval(pollDualwriteWindow, 10000);
 })();
 </script>
 </body>

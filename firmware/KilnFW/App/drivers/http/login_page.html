@@ -15,6 +15,11 @@
 </style>
 </head>
 <body>
+<!-- Not hidden in the markup: the ordinary login form is the fail-closed
+     default, so a session check that never resolves (a board that accepts the
+     connection and then stalls -- neither .then nor .catch ever runs) still
+     leaves a usable login form on screen rather than a blank page. The
+     load-time fetch below sets BOTH forms explicitly once it has an answer. -->
 <form id="login-form" autocomplete="on">
   <h2>Kiln Login</h2>
   <label for="username">Username</label>
@@ -24,8 +29,21 @@
   <div id="error"></div>
   <button type="submit">Log in</button>
 </form>
+<form id="bootstrap-form" autocomplete="off" hidden>
+  <h2>Set Administrator Password</h2>
+  <p style="font-size:0.85rem;max-width:18rem;">No administrator credential is configured yet. Choose one now
+  to finish setup or to regain access after a lockout.</p>
+  <label for="bootstrap-username">Username</label>
+  <input id="bootstrap-username" name="username" type="text" autocomplete="username" required>
+  <label for="bootstrap-password">New password</label>
+  <input id="bootstrap-password" name="password" type="password" autocomplete="new-password" required>
+  <label for="bootstrap-password-confirm">Confirm password</label>
+  <input id="bootstrap-password-confirm" name="password_confirm" type="password" autocomplete="new-password" required>
+  <div id="bootstrap-error"></div>
+  <button type="submit">Set password</button>
+</form>
 <script>
-document.getElementById('login-form').addEventListener('submit', function (evt) {
+function submitLogin(evt) {
   evt.preventDefault();
   var errorEl = document.getElementById('error');
   errorEl.textContent = '';
@@ -46,6 +64,64 @@ document.getElementById('login-form').addEventListener('submit', function (evt) 
   }).catch(function () {
     errorEl.textContent = 'Network error.';
   });
+}
+
+function submitBootstrap(evt) {
+  evt.preventDefault();
+  var errorEl = document.getElementById('bootstrap-error');
+  errorEl.textContent = '';
+  var pw = document.getElementById('bootstrap-password').value;
+  var confirm = document.getElementById('bootstrap-password-confirm').value;
+  if (pw !== confirm) {
+    errorEl.textContent = 'Passwords do not match.';
+    return;
+  }
+  var body = 'username=' + encodeURIComponent(document.getElementById('bootstrap-username').value) +
+             '&password=' + encodeURIComponent(pw);
+  fetch('/api/auth/bootstrap_password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body
+  }).then(function (resp) {
+    if (resp.ok) {
+      window.location.href = '/login';
+      return;
+    }
+    return resp.text().then(function (text) {
+      if (resp.status === 409) {
+        // Administrator credential got configured elsewhere (another tab, a
+        // race) between page load and submit -- reload to fall back to the
+        // ordinary login form rather than showing a stale bootstrap form.
+        window.location.reload();
+        return;
+      }
+      errorEl.textContent = text || 'Could not set password.';
+    });
+  }).catch(function () {
+    errorEl.textContent = 'Network error.';
+  });
+}
+
+document.getElementById('login-form').addEventListener('submit', submitLogin);
+document.getElementById('bootstrap-form').addEventListener('submit', submitBootstrap);
+
+// GET /api/auth/session is ROUTE_TIER_OPEN and reports bootstrap_needed --
+// the same predicate POST /api/auth/bootstrap_password's own handler and
+// route-tier enforcement gate on (web_auth_admin_bootstrap_needed(),
+// net/web_auth_session.h): true only when web auth is enabled AND no
+// administrator credential is configured yet (first run, or every admin
+// credential cleared). This page never decides that gate itself -- it only
+// asks the board and shows the matching form; the firmware refuses the
+// POST outright once a credential exists, regardless of what this page
+// renders.
+fetch('/api/auth/session').then(function (resp) {
+  return resp.ok ? resp.json() : { bootstrap_needed: false };
+}).catch(function () {
+  return { bootstrap_needed: false };
+}).then(function (status) {
+  var showBootstrap = !!status.bootstrap_needed;
+  document.getElementById('bootstrap-form').hidden = !showBootstrap;
+  document.getElementById('login-form').hidden = showBootstrap;
 });
 </script>
 </body>
