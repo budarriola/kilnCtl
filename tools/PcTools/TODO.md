@@ -136,12 +136,17 @@ is done and covers: program/reset/halt/resume/step/read/write memory/read
 registers, `openocd.exe` path resolution, halt refused on the ESP mid-profile,
 flash writes requiring explicit confirm, every halt/reset/write logged.
 
-- [ ] The Pico-ARMED write-refusal gate has only been read-only smoke-tested
-      against a board that was NOT confirmed to actually be `ARMED` at the
-      time (the live SWD read came back an invalid `relay_owner_state_t` byte,
-      so the gate correctly fail-closed rather than proving the true-ARMED
-      case). Do a live build+flash+arm sequence before relying on this gate
-      for anything beyond defense-in-depth.
+- [x] `mcp_server_debug.debug_write_memory()`'s ARMED gate itself now has real
+      unit coverage (`tests/test_debug_write_memory_armed_gate.py`, mocks only
+      `debug_probe.pico_armed_state()`/`write_memory()`, calls the real gate
+      function): refusal on armed=True and armed=None (fail-closed), permitted
+      on armed=False, peer="esp" bypasses it, confirm=False still refuses
+      first. Negative-tested (inverted condition -> 3/5 red -> byte-restored ->
+      green). Still open: no live build+flash+arm run has confirmed the SWD
+      read itself reports true-ARMED correctly on real hardware (prior smoke
+      test only saw an invalid byte, i.e. fail-closed by accident, not by a
+      confirmed ARMED read) — do that before relying on this beyond
+      defense-in-depth.
 
 ⚠️ Standing hazard, not yet mitigated by anything in code: **any PC debug
 connection into the safety domain bonds `GND_Safty` to PC ground**, and if the
@@ -258,11 +263,20 @@ to confirm PENDING_VERIFY → confirmed actually happens as documented.
 
 - [ ] Live-hardware verification of all of the above (needs a board, see first
       step above)
-- [ ] `min_compatible` field / cross-check itself is still open on the
-      **firmware** side (`UPDATE_PROTOCOL.md`'s own checklist,
-      "`min_compatible` field added to both version frames" / "Both sides
-      check both directions of `peer.protocol >= self.min_compatible`") —
-      out of scope here, owned by `firmware/CommonFW`
+- [x] `min_compatible` field/cross-check: re-checked 2026-09-20, this note was
+      stale — `UPDATE_PROTOCOL.md`'s own checklist was already `[x]` done (wire
+      field, both-directions formula, ESP fault flag, Pico
+      DEGRADED_NO_CONTEXT, all host-tested). The real gap found instead: on
+      SaftyFW, `link_task_handle_announce_version()` (`link_task.c`, not
+      compiled into host tests — pulls in FreeRTOS/pico-sdk) called the
+      already-tested formula but its own decode-to-verdict wiring had zero
+      coverage. Extracted to a pure `link_task_evaluate_announce_version()`
+      (`link_task_announce_eval.c/.h`, same split pattern as
+      `link_task_commit_reject.c`), host-tested
+      (`test_link_task_announce_eval.c`, 4 cases both directions), negative-
+      tested (inverted verdict -> red -> byte-restored -> green). No protocol
+      version bump needed — this was a test-coverage gap, not a wire-format
+      gap.
 
 ## What this does not become
 

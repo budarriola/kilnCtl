@@ -138,6 +138,8 @@ try {
         (Join-Path $testDir "test_link_task_tc_type_gate.c"),
         (Join-Path $srcDir "tasks\link_task_commit_reject.c"),
         (Join-Path $testDir "test_link_task_commit_reject.c"),
+        (Join-Path $srcDir "tasks\link_task_announce_eval.c"),
+        (Join-Path $testDir "test_link_task_announce_eval.c"),
         (Join-Path $srcDir "tasks\update_task_reboot_policy.c"),
         (Join-Path $testDir "test_update_task_reboot_policy.c"),
         # 2026-09-18 -- update_task_erase_slot()'s chunk-walk arithmetic, split

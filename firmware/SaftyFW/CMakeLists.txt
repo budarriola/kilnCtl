@@ -144,6 +144,11 @@ set(SAFTYFW_APP_SOURCES
     # host-testable (test/test_link_task_commit_reject.c) -- see
     # link_task_commit_reject.h.
     src/tasks/link_task_commit_reject.c
+    # Pure ANNOUNCE_VERSION decode-to-verdict (peer version + degraded_no_
+    # context), split out of link_task_handle_announce_version() so it is
+    # host-testable (test/test_link_task_announce_eval.c) -- see
+    # link_task_announce_eval.h.
+    src/tasks/link_task_announce_eval.c
     src/tasks/link_task.c
     # Pure Frame B (DIAG) `flags` byte assembly, split out of link_task.c's
     # link_task_send_diag() so it is host-testable (test/test_link_diag_

@@ -75,6 +75,7 @@
 #include "max31856.h" // MAX31856_TC_TYPE_* range check, see link_task_handle_set_config()
 #include "reboot_announce.h" // SAFETY_CMD_ANNOUNCE_REBOOT (0x18), see link_task_handle_announce_reboot()
 #include "safety_core.h"
+#include "link_task_announce_eval.h" // pure ANNOUNCE_VERSION -> degraded verdict, see link_task_handle_announce_version()
 #include "link_task_commit_reject.h" // pure write-decision -> wire-reason mapping, see link_task_handle_commit_config()
 #include "link_task_tc_type_gate.h"
 #include "snapshots.h"
@@ -1340,8 +1341,15 @@ static void link_task_handle_announce_version(const kilnlink_frame_t *frame)
         return;
     }
 
-    uint16_t peer_protocol = msg.protocol_version;
-    uint16_t peer_min_compatible = msg.min_compatible;
+    // The decode-to-verdict step is factored into
+    // link_task_evaluate_announce_version() (link_task_announce_eval.c) so it
+    // can be host-tested: this file pulls in FreeRTOS/pico-sdk and is not
+    // built for the host test executable, which had left the actual
+    // ANNOUNCE_VERSION wiring -- as opposed to the pure
+    // link_frame_versions_compatible() formula it calls, which already was
+    // tested -- with no coverage at all.
+    link_task_announce_eval_t eval = link_task_evaluate_announce_version(
+        &msg, KILNLINK_PROTOCOL_VERSION, KILNLINK_MIN_COMPATIBLE);
 
     // Cached unconditionally, even if this peer turns out incompatible below
     // -- an incompatible peer's own protocol_version is still real,
@@ -1351,18 +1359,14 @@ static void link_task_handle_announce_version(const kilnlink_frame_t *frame)
     // is deliberately a narrower, additive-feature-specific question than
     // "are we fully compatible" (see link_frame_pack_status()'s doc comment,
     // link_frame.h).
-    s_peer_protocol_version = peer_protocol;
-
-    bool compatible = link_frame_versions_compatible(KILNLINK_PROTOCOL_VERSION,
-                                                       KILNLINK_MIN_COMPATIBLE, peer_protocol,
-                                                       peer_min_compatible);
+    s_peer_protocol_version = eval.peer_protocol_version;
 
     // LINK_PROTOCOL.md section 4, "What each side does about a mismatch":
     // the Pico enters DEGRADED_NO_CONTEXT and does NOT latch a trip. This is
     // the ONLY effect a version mismatch has from in here -- no relay/trip
     // call, by design (and this file could not make one anyway, see the
     // header comment).
-    s_degraded_no_context = !compatible;
+    s_degraded_no_context = eval.degraded_no_context;
 }
 
 // SAFETY_CMD_REQUEST_ENABLE (0x02), CommonFW/docs/LINK_PROTOCOL.md section 4
