@@ -138,7 +138,6 @@
 // When the shared profile_editor.js lands, this file's segment-rendering
 // functions are the ones to delete in favour of it.
 
-var MAX_SEGMENTS = 40; // matches PROFILE_MAX_SEGMENTS's practical ceiling used elsewhere in the UI
 var pollTimer = null;
 var lastWorkingId = null;
 
@@ -254,7 +253,12 @@ function collectSegmentParams(originalSegments) {
 var currentWorking = null; // last-fetched /api/profile?id=working_id response
 
 function loadWorkingCopy(workingId, editableFromSegment) {
-  return fetch('/api/profile?id=' + workingId).then(function (r) { return r.json(); }).then(function (p) {
+  // Review fix (landing pass): the working copy is NOT in the ordinary
+  // profile catalogue (it deliberately lives outside profiles_http.c's slot
+  // array, so it can never show up in /api/profiles or favorites), so
+  // /api/profile?id=<working_id> 404s on it. The board serves the working
+  // copy's body on the live route itself, ?content=1.
+  return fetch('/api/profile/live?content=1').then(function (r) { return r.json(); }).then(function (p) {
     currentWorking = p;
     document.getElementById('workingName').textContent = p.name;
     document.getElementById('saveBtn').dataset.zoneMask = p.zone_mask;
@@ -301,7 +305,9 @@ function showRefusal(text) {
 function refreshLive() {
   return fetch('/api/profile/live').then(function (r) { return r.json(); }).then(function (live) {
     setStatusText(live);
-    showRefusal(live.last_refusal);
+    // last_refusal is an object {generation,result,message} or null -- show
+    // its message, never the object itself.
+    showRefusal(live.last_refusal ? live.last_refusal.message : null);
 
     var decisionCard = document.getElementById('decisionCard');
     var forkCard = document.getElementById('forkCard');

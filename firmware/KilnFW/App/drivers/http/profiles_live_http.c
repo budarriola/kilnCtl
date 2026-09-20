@@ -24,6 +24,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
+#include "dashboard_json.h" /* json_escape() */
 #include "http_auth_http.h"
 #include "http_form.h"
 #include "live_profile.h"
@@ -73,22 +74,44 @@ static esp_err_t send_json(httpd_req_t *req, const char *json)
     return httpd_resp_send_chunk(req, NULL, 0);
 }
 
+/* Review fix (landing pass, 2026-09-19): every refusal on this surface is a
+ * {"ok":false,"error":"..."} JSON body with the right status, NOT bare text.
+ * That is the house shape POST /api/profile already uses
+ * (profiles_edit_http.c), and live_profile_page.html -- like every other
+ * page -- does `r.json().then(...)` on the error path and reads `.error`.
+ * A plain-text body made `r.json()` throw, so the page fell into its
+ * network-failure catch and showed "could not reach the board" INSTEAD of
+ * the server's message naming the offending segment/value/limit, which is
+ * exactly what plan section 10 requires the operator to see. */
+static esp_err_t send_err_json(httpd_req_t *req, const char *status, const char *msg)
+{
+    char escaped[320];
+    json_escape(msg ? msg : "", escaped, sizeof(escaped));
+    char json[400];
+    int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", escaped);
+    httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+
 static esp_err_t send_conflict(httpd_req_t *req, const char *msg)
 {
-    httpd_resp_set_status(req, "409 Conflict");
-    return httpd_resp_sendstr(req, msg);
+    return send_err_json(req, "409 Conflict", msg);
 }
 
 static esp_err_t send_forbidden(httpd_req_t *req, const char *msg)
 {
-    httpd_resp_set_status(req, "403 Forbidden");
-    return httpd_resp_sendstr(req, msg);
+    return send_err_json(req, "403 Forbidden", msg);
 }
 
 static esp_err_t send_bad_request(httpd_req_t *req, const char *msg)
 {
-    httpd_resp_set_status(req, "400 Bad Request");
-    return httpd_resp_sendstr(req, msg);
+    return send_err_json(req, "400 Bad Request", msg);
+}
+
+static esp_err_t send_server_error(httpd_req_t *req, const char *msg)
+{
+    return send_err_json(req, "500 Internal Server Error", msg);
 }
 
 /* Small, fixed-size POST body reader (form fields only, no profile blob) --
@@ -131,50 +154,133 @@ static esp_err_t live_profile_page_get_handler(httpd_req_t *req)
                             (size_t)(live_profile_page_html_gz_end - live_profile_page_html_gz_start));
 }
 
-/* ---- GET /api/profile/live --------------------------------------------- */
+/* ---- GET /api/profile/live ---------------------------------------------
+ *
+ * Plain form: the plan section 10 status object.
+ *
+ * `?content=1`: the WORKING COPY'S profile body, in the same field shape
+ * GET /api/profile returns, so live_profile_page.html can populate its
+ * segment editor. Review fix (landing pass, 2026-09-19): the page
+ * originally fetched `/api/profile?id=<working_id>` for this, which can
+ * never work -- the working slot is deliberately NOT in profiles_http.c's
+ * s_profiles array (live_profile.h's own header explains why), so that
+ * endpoint 404s on it, and it must stay out of the catalogue/favorites for
+ * exactly the same reason. Served on this existing route rather than a
+ * sixth one so the route-tier row, the URI-handler cap and the plan's
+ * five-route surface are all unchanged.
+ */
+
+static esp_err_t live_send_working_content(httpd_req_t *req)
+{
+    live_edit_record_t rec;
+    if (!live_profile_load_record(&rec) || !rec.pending) {
+        return send_conflict(req, "no working copy -- fork first");
+    }
+    profile_t *w = heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!w) {
+        return send_server_error(req, "out of memory");
+    }
+    if (!live_profile_load_working(w)) {
+        heap_caps_free(w);
+        return send_conflict(req, "working copy is not readable");
+    }
+
+#define LIVE_CONTENT_CAP (256 + PROFILE_MAX_SEGMENTS * 192)
+    char *json = heap_caps_malloc(LIVE_CONTENT_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!json) {
+        heap_caps_free(w);
+        return send_server_error(req, "out of memory");
+    }
+    size_t o = 0;
+    int n;
+    bool truncated = false;
+#define LIVE_APPEND(...)                                                                             \
+    do {                                                                                             \
+        n = snprintf(json + o, LIVE_CONTENT_CAP - o, __VA_ARGS__);                                   \
+        if (n < 0 || (size_t)n >= LIVE_CONTENT_CAP - o) {                                            \
+            truncated = true;                                                                        \
+        } else {                                                                                     \
+            o += (size_t)n;                                                                          \
+        }                                                                                            \
+    } while (0)
+
+    char name_escaped[PROFILE_NAME_MAX_LEN * 2 + 2];
+    json_escape(w->name, name_escaped, sizeof(name_escaped));
+    LIVE_APPEND("{\"id\":%u,\"name\":\"%s\",\"zone_mask\":%u,\"segment_count\":%u,\"segments\":[",
+                (unsigned)LIVE_EDIT_WORKING_SLOT_ID, name_escaped, w->zone_mask, w->segment_count);
+    for (uint8_t i = 0; i < w->segment_count && !truncated; i++) {
+        const profile_segment_t *sg = &w->segments[i];
+        LIVE_APPEND("%s{\"seg_kind\":%u,\"target_c\":%.2f,\"ramp_c_per_hr\":%.2f,\"dwell_min\":%lu,"
+                    "\"io_target\":%u,\"io_state\":%u,\"io_blocking\":%u,\"io_leave_on_at_end\":%u}",
+                    i == 0 ? "" : ",", sg->seg_kind, (double)sg->target_c, (double)sg->ramp_c_per_hr,
+                    (unsigned long)sg->dwell_min, sg->io_target, sg->io_state, sg->io_blocking,
+                    sg->io_leave_on_at_end);
+    }
+    LIVE_APPEND("]}");
+#undef LIVE_APPEND
+    heap_caps_free(w);
+    if (truncated) {
+        heap_caps_free(json);
+        return send_server_error(req, "working copy did not fit the response buffer");
+    }
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_send(req, json, o);
+    heap_caps_free(json);
+    return err;
+#undef LIVE_CONTENT_CAP
+}
 
 static esp_err_t api_profile_live_get_handler(httpd_req_t *req)
 {
+    char query[64];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char val[8];
+        if (httpd_query_key_value(query, "content", val, sizeof(val)) == ESP_OK && strcmp(val, "1") == 0) {
+            return live_send_working_content(req);
+        }
+    }
+
     profile_executor_live_status_t st;
     profile_executor_get_live_status(&st);
 
     live_edit_record_t rec;
     bool have_rec = live_profile_load_record(&rec);
+    bool pending = have_rec && rec.pending;
 
-    char json[512];
-    int n;
-    if (!st.active) {
-        n = snprintf(json, sizeof(json),
-                     "{\"active\":false,\"origin_id\":0,\"origin_is_builtin\":false,"
-                     "\"working_id\":0,\"editable_from_segment\":0,"
-                     "\"pending_decision\":%s,\"last_refusal\":%s}",
-                     (have_rec && rec.pending) ? "true" : "false",
-                     st.has_refusal ? "true" : "false");
+    /* Review fix: working_id used to be reported unconditionally, so the
+     * page could never tell "a firing is running but nothing has been
+     * forked yet" from "a working copy exists" -- its Fork button never
+     * appeared and it immediately tried to load a working copy that did not
+     * exist. -1 is the "no working copy" answer; the page already tests
+     * `working_id >= 0`. */
+    int working_id = pending ? (int)LIVE_EDIT_WORKING_SLOT_ID : -1;
+
+    /* last_refusal is always an object or null -- never a bare boolean.
+     * (It was `true`/`false` on the inactive branch, which the page rendered
+     * as the literal text "true".) */
+    char refbuf[300];
+    if (st.has_refusal) {
+        char msg_escaped[sizeof(st.refusal_err_msg) * 2 + 2];
+        json_escape(st.refusal_err_msg, msg_escaped, sizeof(msg_escaped));
+        snprintf(refbuf, sizeof(refbuf), "{\"generation\":%u,\"result\":%d,\"message\":\"%s\"}",
+                 (unsigned)st.refusal_generation, st.refusal_result, msg_escaped);
     } else {
-        bool pending_decision = have_rec && rec.pending && live_edit_should_prompt(&rec, st.active);
-        if (st.has_refusal) {
-            char refbuf[256];
-            snprintf(refbuf, sizeof(refbuf), "{\"generation\":%u,\"result\":%d,\"message\":\"%s\"}",
-                     (unsigned)st.refusal_generation, st.refusal_result, st.refusal_err_msg);
-            n = snprintf(json, sizeof(json),
-                         "{\"active\":true,\"origin_id\":%u,\"origin_is_builtin\":%s,"
-                         "\"working_id\":%u,\"editable_from_segment\":%u,"
-                         "\"pending_decision\":%s,\"last_refusal\":%s}",
-                         (unsigned)st.profile_id, (have_rec && rec.origin_is_builtin) ? "true" : "false",
-                         (unsigned)LIVE_EDIT_WORKING_SLOT_ID, (unsigned)st.segment_index,
-                         pending_decision ? "true" : "false", refbuf);
-        } else {
-            n = snprintf(json, sizeof(json),
-                         "{\"active\":true,\"origin_id\":%u,\"origin_is_builtin\":%s,"
-                         "\"working_id\":%u,\"editable_from_segment\":%u,"
-                         "\"pending_decision\":%s,\"last_refusal\":null}",
-                         (unsigned)st.profile_id, (have_rec && rec.origin_is_builtin) ? "true" : "false",
-                         (unsigned)LIVE_EDIT_WORKING_SLOT_ID, (unsigned)st.segment_index,
-                         pending_decision ? "true" : "false");
-        }
+        snprintf(refbuf, sizeof(refbuf), "null");
     }
+
+    bool pending_decision = pending && live_edit_should_prompt(&rec, st.active);
+
+    char json[640];
+    int n = snprintf(json, sizeof(json),
+                     "{\"active\":%s,\"origin_id\":%u,\"origin_is_builtin\":%s,"
+                     "\"working_id\":%d,\"editable_from_segment\":%u,"
+                     "\"pending_decision\":%s,\"last_refusal\":%s}",
+                     st.active ? "true" : "false", (unsigned)(st.active ? st.profile_id : 0),
+                     (have_rec && rec.origin_is_builtin) ? "true" : "false", working_id,
+                     (unsigned)(st.active ? st.segment_index : 0), pending_decision ? "true" : "false",
+                     refbuf);
     if (n < 0 || (size_t)n >= sizeof(json)) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, NULL);
+        return send_server_error(req, "status response did not fit");
     }
     return send_json(req, json);
 }
@@ -200,7 +306,7 @@ static esp_err_t api_profile_live_fork_post_handler(httpd_req_t *req)
 
     profile_t *origin = heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!origin) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, NULL);
+        return send_server_error(req, "out of memory");
     }
     if (!live_http_get_origin_reference(st.profile_id, origin_is_builtin, origin)) {
         heap_caps_free(origin);
@@ -210,7 +316,7 @@ static esp_err_t api_profile_live_fork_post_handler(httpd_req_t *req)
     profile_t *working = heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!working) {
         heap_caps_free(origin);
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, NULL);
+        return send_server_error(req, "out of memory");
     }
     live_edit_record_t rec;
     char err[128] = {0};
@@ -250,7 +356,7 @@ static esp_err_t api_profile_live_post_handler(httpd_req_t *req)
     }
     char *body = heap_caps_malloc((size_t)req->content_len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!body) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, NULL);
+        return send_server_error(req, "out of memory");
     }
     size_t received = 0;
     while (received < (size_t)req->content_len) {
@@ -266,7 +372,7 @@ static esp_err_t api_profile_live_post_handler(httpd_req_t *req)
     profile_t *candidate = heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!candidate) {
         heap_caps_free(body);
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, NULL);
+        return send_server_error(req, "out of memory");
     }
     char err[160] = {0};
     bool parsed = profiles_parse_profile_fields(body, candidate, err, sizeof(err));
@@ -276,9 +382,24 @@ static esp_err_t api_profile_live_post_handler(httpd_req_t *req)
         return send_bad_request(req, err);
     }
 
-    char warn_json[256] = {0};
-    if (!profiles_validate_candidate(candidate, PROFILE_VALIDATE_HARD, warn_json, sizeof(warn_json), err,
+    /* Review fix (landing pass): the warnings buffer was a 256-byte stack
+     * local, far below the cap profile_post_handler() uses for the same
+     * validator (PROFILE_MAX_SEGMENTS * 96 + 16). append_warning() stops
+     * rather than overruns, but a stopped append also drops the closing
+     * `]`, so an over-full warnings array shipped MALFORMED JSON in an
+     * otherwise-200 response -- which the page then failed to parse and
+     * reported as a lost connection. Heap (PSRAM), same convention as the
+     * other transient buffers in this file, and off the 8 KB httpd stack. */
+    const size_t warn_json_cap = PROFILE_MAX_SEGMENTS * 96 + 16;
+    char *warn_json = heap_caps_malloc(warn_json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!warn_json) {
+        heap_caps_free(candidate);
+        return send_server_error(req, "out of memory");
+    }
+    warn_json[0] = '\0';
+    if (!profiles_validate_candidate(candidate, PROFILE_VALIDATE_HARD, warn_json, warn_json_cap, err,
                                       sizeof(err))) {
+        heap_caps_free(warn_json);
         heap_caps_free(candidate);
         return send_bad_request(req, err);
     }
@@ -290,12 +411,14 @@ static esp_err_t api_profile_live_post_handler(httpd_req_t *req)
     }
     profile_t *running = heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!running) {
+        heap_caps_free(warn_json);
         heap_caps_free(candidate);
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, NULL);
+        return send_server_error(req, "out of memory");
     }
     if (live_http_get_origin_reference(st.profile_id, origin_is_builtin, running)) {
         if (live_edit_check_window(running, candidate, st.segment_index, err, sizeof(err))) {
             heap_caps_free(running);
+            heap_caps_free(warn_json);
             heap_caps_free(candidate);
             return send_conflict(req, err);
         }
@@ -305,12 +428,29 @@ static esp_err_t api_profile_live_post_handler(httpd_req_t *req)
     bool saved = live_profile_save_working(candidate, err, sizeof(err));
     heap_caps_free(candidate);
     if (!saved) {
-        return httpd_resp_sendstr(req, err); /* 500 default status */
+        heap_caps_free(warn_json);
+        /* Review fix: this used to be a bare httpd_resp_sendstr(), whose
+         * default status is 200 OK -- a failed working-slot write reported
+         * SUCCESS to the page. */
+        return send_server_error(req, err);
     }
 
-    char json[320];
-    snprintf(json, sizeof(json), "{\"ok\":true,\"warnings\":%s}", warn_json[0] ? warn_json : "[]");
-    return send_json(req, json);
+    size_t resp_cap = warn_json_cap + 48;
+    char *json = heap_caps_malloc(resp_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!json) {
+        heap_caps_free(warn_json);
+        return send_server_error(req, "out of memory");
+    }
+    int rn = snprintf(json, resp_cap, "{\"ok\":true,\"warnings\":%s}", warn_json[0] ? warn_json : "[]");
+    heap_caps_free(warn_json);
+    if (rn < 0 || (size_t)rn >= resp_cap) {
+        heap_caps_free(json);
+        return send_server_error(req, "response did not fit");
+    }
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t send_err = httpd_resp_send(req, json, (size_t)rn);
+    heap_caps_free(json);
+    return send_err;
 }
 
 /* ---- POST /api/profile/live/decide -------------------------------------
@@ -339,7 +479,7 @@ static esp_err_t api_profile_live_decide_post_handler(httpd_req_t *req)
     if (strcmp(action, "discard") == 0) {
         live_edit_decide(LIVE_EDIT_DECISION_DISCARD, &rec, NULL, false, live_http_name_at, NULL, err, sizeof(err));
         live_profile_clear(err, sizeof(err));
-        return httpd_resp_sendstr(req, "{\"ok\":true}");
+        return send_json(req, "{\"ok\":true}");
     }
 
     if (strcmp(action, "save_as") == 0) {
@@ -353,11 +493,11 @@ static esp_err_t api_profile_live_decide_post_handler(httpd_req_t *req)
         }
         profile_t *working = heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!working) {
-            return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, NULL);
+            return send_server_error(req, "out of memory");
         }
         if (!live_profile_load_working(working)) {
             heap_caps_free(working);
-            return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, NULL);
+            return send_server_error(req, "out of memory");
         }
         strncpy(working->name, name, sizeof(working->name) - 1);
         working->name[sizeof(working->name) - 1] = '\0';
@@ -372,7 +512,7 @@ static esp_err_t api_profile_live_decide_post_handler(httpd_req_t *req)
         live_profile_clear(err, sizeof(err));
         char json[128];
         snprintf(json, sizeof(json), "{\"ok\":true,\"id\":%u}", (unsigned)out_id);
-        return httpd_resp_sendstr(req, json);
+        return send_json(req, json);
     }
 
     if (strcmp(action, "overwrite") == 0) {
@@ -391,11 +531,11 @@ static esp_err_t api_profile_live_decide_post_handler(httpd_req_t *req)
         }
         profile_t *working = heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!working) {
-            return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, NULL);
+            return send_server_error(req, "out of memory");
         }
         if (!live_profile_load_working(working)) {
             heap_caps_free(working);
-            return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, NULL);
+            return send_server_error(req, "out of memory");
         }
         uint8_t out_id = 0;
         uint8_t warn_count = 0;
@@ -405,7 +545,7 @@ static esp_err_t api_profile_live_decide_post_handler(httpd_req_t *req)
             return send_bad_request(req, err);
         }
         live_profile_clear(err, sizeof(err));
-        return httpd_resp_sendstr(req, "{\"ok\":true}");
+        return send_json(req, "{\"ok\":true}");
     }
 
     return send_bad_request(req, "unknown action");

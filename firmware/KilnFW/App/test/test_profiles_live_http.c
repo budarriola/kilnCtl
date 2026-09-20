@@ -315,8 +315,18 @@ esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *valu
 esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
 {
     (void)r;
-    (void)buf;
-    (void)buf_len;
+    // Captured, not discarded: the landing-pass review fix moved every
+    // refusal on this surface onto httpd_resp_send() with a JSON
+    // {"ok":false,"error":...} body, so a stub that threw the body away
+    // would silently hollow out every err-message assertion below.
+    if (buf && buf_len > 0) {
+        size_t n = (size_t)buf_len;
+        if (n >= sizeof(s_resp_body)) {
+            n = sizeof(s_resp_body) - 1;
+        }
+        memcpy(s_resp_body, buf, n);
+        s_resp_body[n] = '\0';
+    }
     return ESP_OK;
 }
 esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *buf, size_t buf_len)
@@ -353,6 +363,56 @@ esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s)
     strncpy(s_resp_body, s ? s : "", sizeof(s_resp_body) - 1);
     s_resp_body[sizeof(s_resp_body) - 1] = '\0';
     return ESP_OK;
+}
+
+// GET /api/profile/live?content=1 -- query-string seam.
+static const char *s_stub_query = NULL;
+esp_err_t httpd_req_get_url_query_str(httpd_req_t *r, char *buf, size_t buf_len)
+{
+    (void)r;
+    if (!s_stub_query) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    strncpy(buf, s_stub_query, buf_len - 1);
+    buf[buf_len - 1] = '\0';
+    return ESP_OK;
+}
+esp_err_t httpd_query_key_value(const char *qry, const char *key, char *val, size_t val_size)
+{
+    size_t klen = strlen(key);
+    const char *p2 = qry;
+    while (p2 && *p2) {
+        if (strncmp(p2, key, klen) == 0 && p2[klen] == '=') {
+            const char *v = p2 + klen + 1;
+            const char *amp = strchr(v, '&');
+            size_t n = amp ? (size_t)(amp - v) : strlen(v);
+            if (n >= val_size) {
+                n = val_size - 1;
+            }
+            memcpy(val, v, n);
+            val[n] = '\0';
+            return ESP_OK;
+        }
+        p2 = strchr(p2, '&');
+        if (p2) {
+            p2++;
+        }
+    }
+    return ESP_ERR_NOT_FOUND;
+}
+
+// dashboard_json.c is not linked here -- a faithful minimal stand-in for the
+// two characters that actually matter to these responses.
+void json_escape(const char *src, char *out, size_t out_cap)
+{
+    size_t o = 0;
+    for (const char *c = src ? src : ""; *c && o + 2 < out_cap; c++) {
+        if (*c == '"' || *c == '\\') {
+            out[o++] = '\\';
+        }
+        out[o++] = *c;
+    }
+    out[o < out_cap ? o : out_cap - 1] = '\0';
 }
 
 // asm("_binary_...") is a GCC/binutils extension with no MSVC equivalent --
@@ -394,6 +454,7 @@ static void reset_fakes(void)
     g_fake_parse_ok = true;
     g_fake_builtin_on = false;
     g_fake_no_server = false;
+    s_stub_query = NULL;
     char discard_err[64];
     live_profile_clear(discard_err, sizeof(discard_err));
 }
@@ -630,6 +691,137 @@ static void test_decide_unknown_action_400(void)
     TEST_CHECK(strcmp(s_resp_status, "400 Bad Request") == 0, "400 unknown action");
 }
 
+/* ---- landing-pass review-fix regression tests --------------------------- */
+
+// working_id must be -1 until a fork has actually happened. Before this fix
+// the handler reported LIVE_EDIT_WORKING_SLOT_ID unconditionally whenever a
+// firing was active, so live_profile_page.html could never tell "running,
+// nothing forked" from "a working copy exists": its Fork button never
+// appeared and it immediately tried to load a working copy that was not
+// there.
+static void test_get_status_working_id_minus_one_until_forked(void)
+{
+    TEST_SECTION("GET /api/profile/live -- working_id is -1 until a fork exists");
+    reset_fakes();
+    g_fake_live_status.active = true;
+    g_fake_live_status.profile_id = 0;
+    profiles_slot_set(0);
+
+    httpd_req_t req = make_req(NULL);
+    TEST_CHECK(api_profile_live_get_handler(&req) == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strstr(s_resp_body, "\"working_id\":-1") != NULL, "no fork yet -> working_id:-1");
+
+    fork_for_tests(0);
+    httpd_req_t req2 = make_req(NULL);
+    TEST_CHECK(api_profile_live_get_handler(&req2) == ESP_OK, "handler returns ESP_OK after fork");
+    char expect[32];
+    snprintf(expect, sizeof(expect), "\"working_id\":%d", (int)LIVE_EDIT_WORKING_SLOT_ID);
+    TEST_CHECK(strstr(s_resp_body, expect) != NULL, "after fork -> working_id is the working slot id");
+}
+
+// last_refusal is an object or null -- never a bare boolean. The inactive
+// branch used to emit `"last_refusal":false`, which the page rendered into
+// its red banner as the literal word "false".
+static void test_get_status_last_refusal_is_null_not_false(void)
+{
+    TEST_SECTION("GET /api/profile/live -- last_refusal is null, never a boolean");
+    reset_fakes();
+    httpd_req_t req = make_req(NULL);
+    TEST_CHECK(api_profile_live_get_handler(&req) == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strstr(s_resp_body, "\"last_refusal\":null") != NULL, "inactive, no refusal -> null");
+    TEST_CHECK(strstr(s_resp_body, "\"last_refusal\":false") == NULL, "never the boolean false");
+    TEST_CHECK(strstr(s_resp_body, "\"last_refusal\":true") == NULL, "never the boolean true");
+}
+
+// ?content=1 serves the working copy's body. The page needs this because the
+// working slot deliberately lives OUTSIDE profiles_http.c's slot array (so it
+// can never appear in the catalogue or in favorites), which means
+// GET /api/profile?id=<working_id> can only ever 404 on it.
+static void test_get_content_requires_a_working_copy(void)
+{
+    TEST_SECTION("GET /api/profile/live?content=1 -- 409 before any fork");
+    reset_fakes();
+    s_stub_query = "content=1";
+    httpd_req_t req = make_req(NULL);
+    TEST_CHECK(api_profile_live_get_handler(&req) == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strcmp(s_resp_status, "409 Conflict") == 0, "409 with no working copy");
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":false") != NULL, "refusal body is JSON, not bare text");
+}
+
+static void test_get_content_serves_the_working_copy(void)
+{
+    TEST_SECTION("GET /api/profile/live?content=1 -- serves the working copy body");
+    reset_fakes();
+    fork_for_tests(0);
+    httpd_req_t areq = make_req("body=ok");
+    TEST_CHECK(api_profile_live_post_handler(&areq) == ESP_OK, "accept an edit first");
+
+    s_stub_query = "content=1";
+    httpd_req_t req = make_req(NULL);
+    TEST_CHECK(api_profile_live_get_handler(&req) == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strstr(s_resp_body, "\"name\":\"cand\"") != NULL, "body carries the working copy's name");
+    TEST_CHECK(strstr(s_resp_body, "\"segments\":[") != NULL, "body carries a segments array");
+    TEST_CHECK(strstr(s_resp_body, "\"seg_kind\":0") != NULL, "segment objects carry seg_kind");
+    TEST_CHECK(strstr(s_resp_body, "\"target_c\":100.00") != NULL, "segment objects carry target_c");
+    char expect[40];
+    snprintf(expect, sizeof(expect), "\"id\":%u", (unsigned)LIVE_EDIT_WORKING_SLOT_ID);
+    TEST_CHECK(strstr(s_resp_body, expect) != NULL, "body reports the working slot id");
+}
+
+// The edit-window rule's polarity, pinned at the handler. live_edit_check_
+// window() returns TRUE on a REFUSAL, so `if (check_window(...)) 409` is the
+// correct reading -- an inverted handler would 409 every legal edit and wave
+// every illegal one through. Here the running profile has two segments and
+// the executor is on index 1, while the candidate has only one segment: the
+// running segment itself would be deleted out from under the run.
+static void test_accept_window_violation_409(void)
+{
+    TEST_SECTION("POST /api/profile/live -- 409 on an edit-window violation");
+    reset_fakes();
+    fork_for_tests(0);
+    g_fake_slots[0].segment_count = 2;
+    g_fake_live_status.segment_index = 1;
+
+    httpd_req_t req = make_req("body=ok");
+    TEST_CHECK(api_profile_live_post_handler(&req) == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strcmp(s_resp_status, "409 Conflict") == 0, "409 on a window violation");
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":false") != NULL, "refusal body is JSON");
+}
+
+// ...and the same handler must NOT refuse a legal edit: same fork, executor
+// on the segment the candidate still has. Without this pair the test above
+// would pass just as happily against an always-409 handler.
+static void test_accept_inside_the_window_200(void)
+{
+    TEST_SECTION("POST /api/profile/live -- an in-window edit is accepted");
+    reset_fakes();
+    fork_for_tests(0);
+    g_fake_slots[0].segment_count = 1;
+    g_fake_live_status.segment_index = 0;
+
+    httpd_req_t req = make_req("body=ok");
+    TEST_CHECK(api_profile_live_post_handler(&req) == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strcmp(s_resp_status, "200 OK") == 0, "no refusal status set");
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL, "accepted");
+}
+
+// Every refusal on this surface is {"ok":false,"error":...} JSON with the
+// right status -- the shape POST /api/profile already uses, and the shape the
+// page's `r.json().then(d => d.error)` error path requires. A plain-text body
+// made the page report a lost connection instead of the server's own message.
+static void test_refusals_are_json_with_an_error_field(void)
+{
+    TEST_SECTION("refusals carry {\"ok\":false,\"error\":...} JSON");
+    reset_fakes();
+    fork_for_tests(0);
+    httpd_req_t req = make_req("body=badbound");
+    TEST_CHECK(api_profile_live_post_handler(&req) == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strcmp(s_resp_status, "400 Bad Request") == 0, "400 on a bound violation");
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":false") != NULL, "body has ok:false");
+    TEST_CHECK(strstr(s_resp_body, "\"error\":\"segment 0") != NULL,
+               "body has an error field naming the segment");
+}
+
 static void test_registration_registers_all_five_routes(void)
 {
     TEST_SECTION("profiles_live_http_start() registers all five routes");
@@ -674,6 +866,13 @@ int main(void)
     test_decide_overwrite_missing_confirm_400();
     test_decide_overwrite_success();
     test_decide_unknown_action_400();
+    test_get_status_working_id_minus_one_until_forked();
+    test_get_status_last_refusal_is_null_not_false();
+    test_get_content_requires_a_working_copy();
+    test_get_content_serves_the_working_copy();
+    test_accept_window_violation_409();
+    test_accept_inside_the_window_200();
+    test_refusals_are_json_with_an_error_field();
     test_registration_registers_all_five_routes();
     test_registration_no_server();
 
