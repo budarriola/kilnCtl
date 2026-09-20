@@ -62,8 +62,10 @@
 > its place the same day:** an ESP-driven Pico OTA cannot reach the data
 > phase on this hardware — recorded under M8 below, diagnosis in
 > `docs/audits/pico_ota_erase_watchdog_reset_2026-09-18.md`. The `kilnctrl`
-> MCP tool count moved 160 to 161 (`a80e9fb5`, `safety_get_ct_cal_raw`) and
-> is already correct in `CLAUDE.md:25` and `docs/MCP_SERVERS.md:156`.
+> MCP tool count is now 170 as of `dd3ed13c` (`crash_report_ack`; earlier
+> additions `safety_get_ct_cal_raw`, `bench_test_*`, `saleae_decode_kilnlink`,
+> `safety_set_log_level`, `convert_config`); `CLAUDE.md` holds the
+> authoritative count from here on.
 >
 > **Reviewed before that:** 2026-09-18, docs/ROADMAP sync
 > (eighteenth sweep, docs-only — no source or firmware changed this sweep).
