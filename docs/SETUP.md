@@ -183,6 +183,16 @@ release-shaped (off) path.
 # without a .gitmodules entry -- setup.ps1 now detects and names that case.
 git submodule status
 
+# KilnFW embeds the SaftyFW bootloader's two slot images (App/drivers/CMakeLists.txt's
+# EMBED_FILES, owner decision 2026-09-20) and refuses to configure without them, so a
+# from-scratch clone builds SaftyFW's slot targets first -- same toolchain
+# firmware/SaftyFW/test/check_00_saftyfw_target_build.ps1 drives, plus the objcopy step
+# to get from .elf to the raw .bin EMBED_FILES needs:
+cmake -G Ninja -B firmware/SaftyFW/build firmware/SaftyFW
+cmake --build firmware/SaftyFW/build --target SaftyFW_slotA SaftyFW_slotB
+arm-none-eabi-objcopy -O binary firmware/SaftyFW/build/SaftyFW_slotA.elf firmware/SaftyFW/build/SaftyFW_slotA.bin
+arm-none-eabi-objcopy -O binary firmware/SaftyFW/build/SaftyFW_slotB.elf firmware/SaftyFW/build/SaftyFW_slotB.bin
+
 # KilnFW builds
 idf.py -C firmware/KilnFW build
 

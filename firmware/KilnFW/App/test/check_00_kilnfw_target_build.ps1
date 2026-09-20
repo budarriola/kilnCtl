@@ -649,6 +649,25 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
     Mirror-Tree (Join-Path $repoRoot "firmware\CommonFW") (Join-Path $WorktreePath "firmware\CommonFW") `
         $MirrorSpecs[2].XD $MirrorSpecs[2].XF
 
+    # firmware/SaftyFW -- added 2026-09-20 alongside the EMBED_FILES change in
+    # App/drivers/CMakeLists.txt (commit "Embed SaftyFW slot A/B images in
+    # KilnFW"). That CMakeLists.txt now FATAL_ERRORs at configure time unless
+    # firmware/SaftyFW/build/SaftyFW_slotA.bin and SaftyFW_slotB.bin already
+    # exist -- so a from-scratch worktree that never built SaftyFW would fail
+    # its very first KilnFW configure. Mirrored here (source only, not build\)
+    # for the SAME reason CommonFW is mirrored above rather than left to the
+    # worktree's own stale git checkout: this build must grade THIS tree's
+    # SaftyFW source, not whatever the worktree's one-time `git worktree add`
+    # happened to check out. Deliberately NOT added to the witness/dirty-set
+    # assertions below (those stay scoped to KilnFW/hwAbstraction/CommonFW,
+    # the trees check_00 has always graded) -- SaftyFW already has its own
+    # dedicated freshness-graded check, check_00_saftyfw_target_build.ps1, so
+    # this mirror's job is only to make the EMBED_FILES guard buildable at
+    # all in a from-scratch worktree, not to duplicate that check's coverage.
+    $SaftyfwMirrorXD = @("build", "bootloader\build", ".git")
+    Mirror-Tree (Join-Path $repoRoot "firmware\SaftyFW") (Join-Path $WorktreePath "firmware\SaftyFW") `
+        $SaftyfwMirrorXD @()
+
     # DID THE MIRROR ACTUALLY DELIVER THIS TREE'S SOURCE? A check that cannot
     # see the source it was invoked to grade must FAIL loudly, never quietly
     # build whatever the previous run happened to leave behind. exit 3/SKIP is
@@ -992,6 +1011,87 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
     )
     if (-not $newestSourceTime) {
         Fail "could not determine a newest source mtime under $WorktreePath after mirroring -- refusing to grade artifact freshness with no signal to grade it against"
+    }
+
+    # BUILD THE SAFTYFW SLOT A/B IMAGES THE EMBED_FILES GUARD REQUIRES
+    # (2026-09-20). App/drivers/CMakeLists.txt FATAL_ERRORs at configure time
+    # if firmware\SaftyFW\build\SaftyFW_slotA.bin / SaftyFW_slotB.bin are
+    # missing -- so on a from-scratch worktree (no prior SaftyFW build ever
+    # ran here) the very next `idf.py build` below would fail immediately,
+    # not because of anything wrong with this tree's KilnFW source, but
+    # because nothing upstream ever produced these two files. This mirrors
+    # firmware\SaftyFW\test\check_00_saftyfw_target_build.ps1's own
+    # cmake -G Ninja / ninja invocation (same toolchain, same PICO_SDK_PATH
+    # default) rather than reinventing it, then adds the one step that check
+    # does not need for itself: objcopy'ing the two slot ELFs to raw .bin,
+    # which is exactly what EMBED_FILES consumes.
+    #
+    # SKIP is not available here the way it is in check_00_saftyfw_target_
+    # build.ps1 -- this check already requires the xtensa ESP-IDF toolchain
+    # unconditionally, and KilnFW's own build cannot proceed at all without
+    # these two files once they are missing, so a missing arm-none-eabi
+    # toolchain here is a hard FAIL, not a soft SKIP.
+    $SaftyfwWorktreeDir = Join-Path $WorktreePath "firmware\SaftyFW"
+    $SaftyfwBuildDir = Join-Path $SaftyfwWorktreeDir "build"
+    $slotABin = Join-Path $SaftyfwBuildDir "SaftyFW_slotA.bin"
+    $slotBBin = Join-Path $SaftyfwBuildDir "SaftyFW_slotB.bin"
+    $slotAElf = Join-Path $SaftyfwBuildDir "SaftyFW_slotA.elf"
+    $slotBElf = Join-Path $SaftyfwBuildDir "SaftyFW_slotB.elf"
+
+    $saftyfwNewest = Get-NewestSourceTime @($SaftyfwWorktreeDir)
+    $slotBinsStale = $true
+    if ((Test-Path -LiteralPath $slotABin) -and (Test-Path -LiteralPath $slotBBin)) {
+        $slotATime = (Get-Item -LiteralPath $slotABin).LastWriteTime
+        $slotBTime = (Get-Item -LiteralPath $slotBBin).LastWriteTime
+        if ((-not $saftyfwNewest) -or (($slotATime -gt $saftyfwNewest) -and ($slotBTime -gt $saftyfwNewest))) {
+            $slotBinsStale = $false
+        }
+    }
+
+    if ($slotBinsStale) {
+        $haveArmToolchain = [bool](Get-Command "arm-none-eabi-gcc" -ErrorAction SilentlyContinue)
+        if (-not $haveArmToolchain -and -not $env:PICO_TOOLCHAIN_PATH) {
+            Fail "firmware\SaftyFW\build\SaftyFW_slotA.bin/SaftyFW_slotB.bin are missing or stale in $SaftyfwBuildDir and arm-none-eabi-gcc is not on PATH (PICO_TOOLCHAIN_PATH not set either) -- App/drivers/CMakeLists.txt's EMBED_FILES guard requires these two files, and this check cannot build them without the arm-none-eabi toolchain."
+        }
+        if (-not $env:PICO_SDK_PATH) {
+            $env:PICO_SDK_PATH = "C:\pico-tools\pico-sdk"
+            Write-Host "PICO_SDK_PATH not set -- defaulting to $env:PICO_SDK_PATH (see firmware\SaftyFW\CMakeLists.txt header comment)."
+        }
+        if (-not (Test-Path -LiteralPath $SaftyfwBuildDir)) {
+            New-Item -ItemType Directory -Path $SaftyfwBuildDir | Out-Null
+        }
+        Push-Location $SaftyfwWorktreeDir
+        try {
+            Write-Host "Configuring SaftyFW (cmake -G Ninja -B build .) in $SaftyfwWorktreeDir for the embedded slot images ..."
+            cmake -G Ninja -B build . 2>&1 | Write-Host
+            if ($LASTEXITCODE -ne 0) {
+                Fail "cmake configure of $SaftyfwWorktreeDir failed (exit $LASTEXITCODE) while building the SaftyFW slot images App/drivers/CMakeLists.txt's EMBED_FILES guard requires."
+            }
+        } finally {
+            if ((Get-Location).Path -eq $SaftyfwWorktreeDir) { Pop-Location }
+        }
+        Push-Location $SaftyfwBuildDir
+        try {
+            Write-Host "Building SaftyFW_slotA/SaftyFW_slotB (ninja) ..."
+            ninja SaftyFW_slotA SaftyFW_slotB 2>&1 | Write-Host
+            if ($LASTEXITCODE -ne 0) {
+                Fail "ninja build of SaftyFW_slotA/SaftyFW_slotB failed (exit $LASTEXITCODE) -- see output above. KilnFW's own build cannot proceed without these two images (App/drivers/CMakeLists.txt's EMBED_FILES guard)."
+            }
+        } finally {
+            Pop-Location
+        }
+        foreach ($pair in @(@{Elf=$slotAElf; Bin=$slotABin}, @{Elf=$slotBElf; Bin=$slotBBin})) {
+            if (-not (Test-Path -LiteralPath $pair.Elf)) {
+                Fail "ninja reported success but $($pair.Elf) does not exist -- refusing to report PASS without the real SaftyFW slot artifact."
+            }
+            & arm-none-eabi-objcopy -O binary $pair.Elf $pair.Bin
+            if ($LASTEXITCODE -ne 0) {
+                Fail "arm-none-eabi-objcopy failed (exit $LASTEXITCODE) converting $($pair.Elf) to $($pair.Bin)."
+            }
+        }
+        Write-Host "SaftyFW slot images built and staged: $slotABin, $slotBBin"
+    } else {
+        Write-Host "SaftyFW slot images already current in $SaftyfwBuildDir (newer than all mirrored SaftyFW source) -- not rebuilding."
     }
 
     & $IdfProfile *>&1 | Out-Null
