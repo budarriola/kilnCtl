@@ -177,10 +177,16 @@ link, ~0.02% of capacity — see `telemetry_capture.py`'s module docstring for
 the full numbers and the shared-queue starvation risk from OTHER log
 traffic.
 
-- [ ] Pico logs emitted as `kilnlink` LOG frames (device `SAFETY`, task 5),
-      relayed by the ESP — **firmware side pending**: needs the relay itself
-      and a source-device field on `Frame`; the primary path once the link
-      is up
+- [x] Pico logs emitted as `kilnlink` LOG frames (device `SAFETY`, task 5),
+      relayed by the ESP — landed 2026-09-20: `SafetyLinkClass` registers a
+      dedicated `log_inbox` for `UART_TASK_ID_LOG` on the isolated link
+      (`firmware/KilnFW/App/drivers/safety/safety_link.h`/`.c`);
+      `safety_link_service_log_relay()` (`safety_link_poll.c`, called from
+      `safety_poll_task()`, bounded to 4 drains/pass, never blocks) forwards
+      each line into the existing ESP-side log-bridge queue via
+      `uart_log_bridge_relay_safety()` (`uart_log_bridge.c`/`.h`), tagged
+      with a `SAFETY ` prefix — no new task, reuses the bridge's existing
+      sender task/queue.
 - [ ] RTT-over-SWD console as the fallback path — **firmware side pending**
 - [x] Pico USB CDC explicitly reported as absent unless
       `SAFTYFW_ENABLE_USB_STDIO` was built in — PC side done:
@@ -194,9 +200,20 @@ traffic.
       from the source-processor tag, shown in both per-source and
       interleaved log lines. Relayed/RTT values slot in once those
       transports exist (firmware side pending, see above)
-- [ ] Per-peer level filter — **firmware side pending**
-- [ ] Runtime log-level control for the safety processor over the link,
-      default warnings+errors — **firmware side pending**
+- [x] Per-peer level filter — landed 2026-09-20: the ESP-side RELAY floor
+      (`uart_log_bridge_set_safety_relay_level()`/`_get_safety_relay_level()`,
+      default WARN) is independent of the Pico's own runtime filter (next
+      item, unchanged) — two peers, two knobs, both settable through the
+      existing `POST /api/safety/log_level` route (no new route) via an
+      optional `peer` field: `peer=relay` sets the ESP-side relay floor
+      (local only, no wire traffic), `peer=safety`/omitted sets the Pico's
+      own filter as before
+      (`firmware/KilnFW/App/drivers/http/dashboard_settings_http.c`).
+- [x] Runtime log-level control for the safety processor over the link,
+      default warnings+errors — already implemented pre-existing:
+      `log_task_set_level()`/`_get_level()` (SaftyFW `log_task`, default
+      WARN) and the `SAFETY_CMD_SET_LOG_LEVEL` (0x1B) handler in
+      `link_task.c`; confirmed working, not touched this session.
 - [x] Transport availability shown honestly as build-time capability, not a
       toggle — `console_capture.check_transport_availability()`, tested in
       `tests/test_console_capture_transport.py`. `TRANSPORT_SAFETY_PROBE_UART`
@@ -204,11 +221,11 @@ traffic.
       `list_debug_probe_ports()`), not by description text, since Windows
       exposes composite interface strings there and pyserial strips `MI_xx`.
 - [ ] Dropped-log-frame counter surfaced from the diagnostic frame —
-      **firmware side pending**: the wire already carries `tx_frames_dropped`/
-      `tx_dropped_sat` (`devices_safety.py`), but those count the isolated
-      link's shared TX ring generally, not LOG frames specifically — there is
-      nothing to attribute a drop to "a LOG frame" until the LOG-frame relay
-      above exists to carry LOG traffic over that ring at all
+      **deliberately deferred, 2026-09-20**: LOG-frame relay now exists
+      (above), but attributing a drop specifically to a LOG frame needs a
+      wire protocol version bump plus new codec/field infrastructure on the
+      diagnostic frame — judged disproportionate to the scope of this pass;
+      left for a dedicated follow-up
 - [ ] Pico log emission best-effort and droppable — never blocking, per
       no-hang rule 3 — **firmware side pending**
 
@@ -296,15 +313,15 @@ to confirm PENDING_VERIFY → confirmed actually happens as documented.
       once the isolated link's baud fix landed.
 
 **Logging and consoles**
-- [ ] Pico logs emitted as `kilnlink` LOG frames, relayed by the ESP — firmware side pending
+- [x] Pico logs emitted as `kilnlink` LOG frames, relayed by the ESP — landed 2026-09-20 (see "Logging and consoles" above)
 - [ ] RTT-over-SWD console as the fallback path — firmware side pending
 - [x] Pico USB CDC **not** offered as a transport; reported as absent unless built in
 - [x] Transport marked per line (relayed / probe-UART / RTT) — for the transports that exist today
-- [ ] Per-peer level filter — firmware side pending
-- [ ] Runtime log-level control for the safety processor over the link, default warnings+errors — firmware side pending
+- [x] Per-peer level filter — landed 2026-09-20 (see "Logging and consoles" above)
+- [x] Runtime log-level control for the safety processor over the link, default warnings+errors — already implemented pre-existing (`log_task`)
 - [x] Transport availability shown honestly
-- [ ] Dropped-log-frame counter surfaced from the diagnostic frame — firmware side pending (no LOG-frame relay to attribute a drop to yet)
-- [ ] Pico log emission best-effort and droppable — never blocking — firmware side pending
+- [ ] Dropped-log-frame counter surfaced from the diagnostic frame — deliberately deferred 2026-09-20, needs a wire protocol version bump
+- [x] Pico log emission best-effort and droppable — never blocking — already implemented pre-existing (non-blocking `xQueueSend`/enqueue in `log_task`)
 
 **Firmware updates**
 - [x] `ota_status`, `ota_update_esp`, `ota_update_pico`

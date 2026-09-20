@@ -140,6 +140,14 @@ static const char *TAG = "safety_link";
  * SAFETY_LINK_BACKOFF_MAX_STREAK is a related, separate mitigation. */
 #define SAFETY_INBOX_LEN 4
 
+/* Depth of the separate (ESP, UART_TASK_ID_LOG) inbox on this link -- see its
+ * registration site below for why a second, tiny queue exists at all. Kept
+ * deliberately small for the identical reason SAFETY_INBOX_LEN above is: a
+ * log line is explicitly allowed to be lost (best-effort, never blocking the
+ * Pico that logged it, LINK_PROTOCOL.md sec 6), so a deeper queue would only
+ * spend PSRAM to delay the same drop, not prevent it. */
+#define SAFETY_LOG_INBOX_LEN 4
+
 /* 2026-08-28: measured, not guessed -- stack_margin_register("safety_poll",
  * ...) below now reports this task's real uxTaskGetStackHighWaterMark(). At
  * 4096 the live reading was 1192 B free (29.1% headroom, [LOW]) under
@@ -517,6 +525,26 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
                                        &link->inbox);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "register safety task failed: %s", esp_err_to_name(err));
+        goto fail_proto;
+    }
+
+    /* SAFETY_CMD_... aside: task_id 5 is UART_TASK_ID_LOG, not a SAFETY_CMD
+     * at all -- the Pico's log_task (firmware/SaftyFW/src/tasks/log_task.c)
+     * addresses its console lines here with the SAME payload shape this
+     * board's own uart_log_bridge.c uses for the PC link (CommonFW/docs/
+     * LINK_PROTOCOL.md sec 6, "Frame F"). Before this registration, a frame
+     * addressed to (ESP, task 5) on the isolated link hit no registered slot
+     * and was silently discarded by uart_protocol_rx_task() -- every Pico
+     * log line was lost. A tiny inbox (matches SAFETY_INBOX_LEN's own
+     * congestion reasoning above): log_task is the lowest-priority task in
+     * the system and this is best-effort by design (LINK_PROTOCOL.md's two
+     * "non-negotiable" rules for Frame F) -- a full inbox drops the newest
+     * BROADCAST via uart_protocol's own broadcast_dropped counter, which is
+     * the correct outcome, not a bug to fix by growing this number. */
+    err = uart_protocol_register_task(&link->proto, UART_TASK_ID_LOG, SAFETY_LOG_INBOX_LEN,
+                                       &link->log_inbox);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "register safety log task failed: %s", esp_err_to_name(err));
         goto fail_proto;
     }
 

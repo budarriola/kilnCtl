@@ -428,6 +428,90 @@ static void test_one_enqueue_per_call(void)
     TEST_CHECK(g_stub_queue_send_calls == 2, "two calls produce exactly two enqueues, never split/merged");
 }
 
+// ---- uart_log_bridge_relay_safety() / per-peer relay filter (2026-09-20,
+// tools/PcTools/TODO.md log relay item 1/2). Uses ring_test_setup() (not
+// plain uart_log_bridge_early_init()) so xQueueSend() actually reports
+// success/failure instead of the disabled-ring stub's fixed pdFALSE --
+// these tests care about uart_log_bridge_relay_safety()'s bool return,
+// unlike the verbatim-forward tests above which only ever inspected the
+// captured item and the call count. ----
+
+static void test_relay_safety_tags_and_forwards_at_default_level(void)
+{
+    ring_test_setup();
+    uart_log_bridge_set_safety_relay_level(UART_LOG_LEVEL_WARN); // restore default explicitly
+
+    g_stub_queue_send_calls = 0;
+    memset(g_stub_last_queue_item, 0, sizeof(g_stub_last_queue_item));
+    const char *msg = "link_task: trip asserted";
+    bool queued = uart_log_bridge_relay_safety(UART_LOG_LEVEL_WARN, msg, (uint8_t)strlen(msg));
+    TEST_CHECK(queued, "a WARN line at the default WARN floor is queued, not filtered");
+    TEST_CHECK(g_stub_queue_send_calls == 1, "exactly one enqueue for one relayed line");
+
+    char text[160];
+    captured_entry_text(text, sizeof(text));
+    TEST_CHECK(strcmp(text, "SAFETY link_task: trip asserted") == 0,
+               "relayed line carries the \"SAFETY \" prefix ahead of the verbatim wire text");
+}
+
+static void test_relay_safety_filters_below_floor(void)
+{
+    ring_test_setup();
+    uart_log_bridge_set_safety_relay_level(UART_LOG_LEVEL_WARN);
+
+    g_stub_queue_send_calls = 0;
+    uint32_t dropped_before = s_dropped_lines;
+    const char *msg = "log_task: verbose chatter";
+    bool queued =
+        uart_log_bridge_relay_safety(UART_LOG_LEVEL_INFO, msg, (uint8_t)strlen(msg));
+    TEST_CHECK(!queued, "INFO is less severe than the WARN floor -- filtered, not queued");
+    TEST_CHECK(g_stub_queue_send_calls == 0, "a filtered line never reaches the queue at all");
+    TEST_CHECK(s_dropped_lines == dropped_before,
+               "filtered is NOT the same as dropped -- the shared drop counter must not move");
+}
+
+static void test_relay_safety_level_is_independently_settable(void)
+{
+    ring_test_setup();
+
+    // Loosen the relay floor to VERBOSE: a line that was filtered above must
+    // now get through, proving the two calls (filter vs. relay) are wired to
+    // the SAME setting, and that setting is the one this test controls --
+    // not, e.g., the Pico's own log_task level, which this file never
+    // touches (item 2's "per-peer", independently-settable filter).
+    uart_log_bridge_set_safety_relay_level(UART_LOG_LEVEL_VERBOSE);
+    TEST_CHECK(uart_log_bridge_get_safety_relay_level() == UART_LOG_LEVEL_VERBOSE,
+               "getter reflects what the setter just stored");
+
+    g_stub_queue_send_calls = 0;
+    const char *msg = "log_task: verbose chatter";
+    bool queued =
+        uart_log_bridge_relay_safety(UART_LOG_LEVEL_INFO, msg, (uint8_t)strlen(msg));
+    TEST_CHECK(queued, "same INFO line now passes once the floor is loosened to VERBOSE");
+
+    // Restore the documented default so no other test in this executable
+    // observes a loosened floor left behind by this one.
+    uart_log_bridge_set_safety_relay_level(UART_LOG_LEVEL_WARN);
+}
+
+static void test_relay_safety_boundary_is_inclusive(void)
+{
+    ring_test_setup();
+    uart_log_bridge_set_safety_relay_level(UART_LOG_LEVEL_WARN);
+
+    // A line exactly AT the floor is kept (">", not ">=", in the filter
+    // comparison) -- one level less severe (numerically one greater) is not.
+    g_stub_queue_send_calls = 0;
+    TEST_CHECK(uart_log_bridge_relay_safety(UART_LOG_LEVEL_WARN, "x", 1),
+               "a line exactly at the floor is kept");
+    TEST_CHECK(g_stub_queue_send_calls == 1, "kept line reaches the queue");
+
+    g_stub_queue_send_calls = 0;
+    TEST_CHECK(!uart_log_bridge_relay_safety(UART_LOG_LEVEL_INFO, "x", 1),
+               "one level less severe than the floor is filtered");
+    TEST_CHECK(g_stub_queue_send_calls == 0, "filtered line never reaches the queue");
+}
+
 void run_test_uart_log_bridge(void)
 {
     TEST_SECTION("uart_log_bridge");
@@ -442,6 +526,10 @@ void run_test_uart_log_bridge(void)
     test_all_error_queue_drops_incoming_warn();
     test_room_available_no_eviction();
     test_eviction_bounded_per_call();
+    test_relay_safety_tags_and_forwards_at_default_level();
+    test_relay_safety_filters_below_floor();
+    test_relay_safety_level_is_independently_settable();
+    test_relay_safety_boundary_is_inclusive();
 
     // The eviction tests above turn on the stub queue's ring mode
     // (g_stub_queue_ring_enabled = 1, in ring_test_setup()) and never turned

@@ -54,6 +54,18 @@
 #include "kilnlink/kilnlink_set_param.h"
 #include "kilnlink/kilnlink_version.h"
 
+/* uart_log_bridge_relay_safety() -- see safety_link_service_log_relay()
+ * below. Declared here, not #include "../bridge/uart_log_bridge.h": that
+ * header's own #include of uart_protocol.h (needed for uart_protocol_t*
+ * elsewhere in that header) resolves via a relative path that collides
+ * with the host-test stub uart_protocol.h this translation unit picks up
+ * when test_safety_link_compile.c textually #includes this file --
+ * redefinition errors (uart_owner_t, uart_proto_message_t, etc.) in the
+ * host build even though the target build was fine. A single extern decl
+ * of just the one function this file calls sidesteps it; keep the
+ * signature in sync with uart_log_bridge.h by hand. */
+bool uart_log_bridge_relay_safety(uint8_t level, const char *text, uint8_t text_len);
+
 /* 2026-09-15 (Opus review F3): this used to pull zones_config_get_safety_
  * tc_type() for a since-removed push to the Pico (see safety_update_health()'s
  * own comment below) -- the include stays because other zones_config_
@@ -433,6 +445,48 @@ static void safety_poll_service_pico_half_recapture(void)
     }
 }
 
+/* How many (ESP, UART_TASK_ID_LOG) messages to drain per poll-loop pass --
+ * bounded so a burst of Pico log lines can never turn this into an
+ * unbounded loop on a task that also has to keep GET_STATUS/DIAG/POWER
+ * moving. SAFETY_LOG_INBOX_LEN (safety_link.c) is only 4 deep, so 4 is
+ * already "drain it completely, once, every pass" -- any log line beyond
+ * that arrived faster than this loop can be scheduled and is exactly the
+ * case uart_protocol's own broadcast_dropped counter (not this loop) is
+ * supposed to absorb, per Frame F's "best-effort and droppable" rule. */
+#define SAFETY_LOG_RELAY_MAX_PER_PASS 4u
+
+/* Drains SafetyLinkClass::log_inbox (registered in safety_link.c's start(),
+ * "Frame F" / CommonFW/docs/LINK_PROTOCOL.md sec 6) and relays each message
+ * onward through uart_log_bridge_relay_safety(). Non-blocking throughout
+ * (xQueueReceive with a zero timeout): called every safety_poll_task pass,
+ * including the `period == 0` (polling off) branch below, so a Pico log
+ * line is never held up behind the ESP's own poll cadence, and this task
+ * never itself waits on anything the Pico may never send. */
+static void safety_link_service_log_relay(SafetyLinkClass *link)
+{
+    if (!link || !link->log_inbox) {
+        return;
+    }
+    uart_proto_message_t msg;
+    for (unsigned i = 0; i < SAFETY_LOG_RELAY_MAX_PER_PASS; i++) {
+        if (xQueueReceive(link->log_inbox, &msg, 0) != pdTRUE) {
+            break;
+        }
+        /* Untrusted wire input (CommonFW/README.md rule 6): a LOG payload
+         * with no bytes at all (length 0, no level byte) is malformed --
+         * discard silently, same convention as safety_link_inbox.c's own
+         * decode-failure handling, rather than reading payload[0] out of
+         * bounds. */
+        if (msg.length < 1u) {
+            continue;
+        }
+        uint8_t level = msg.payload[0];
+        const char *text = (const char *)&msg.payload[1];
+        uint8_t text_len = (uint8_t)(msg.length - 1u);
+        (void)uart_log_bridge_relay_safety(level, text, text_len);
+    }
+}
+
 void safety_poll_task(void *arg)
 {
     SafetyLinkClass *link = (SafetyLinkClass *)arg;
@@ -499,6 +553,7 @@ void safety_poll_task(void *arg)
          * No-op whenever nothing is pending; safe with no module lock held. */
         heat_enable_service_pending_release();
         safety_poll_service_pico_half_recapture();
+        safety_link_service_log_relay(link);
 
         if (period == 0u) {
             /* Polling off: still drain anything the peer pushes unsolicited,

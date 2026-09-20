@@ -102,6 +102,28 @@ static uart_log_bridge_t s_bridge;
  * bound, which is still far better than the previous silent-drop behavior. */
 static volatile uint32_t s_dropped_lines = 0;
 
+/* uart_log_bridge_set_safety_relay_level()'s backing store -- see the header
+ * comment for the full "per-peer filter" rationale. UART_LOG_LEVEL_WARN
+ * (1) matches log_task.h's own documented default so a board with this
+ * knob never touched relays exactly what it always did. */
+static volatile uint8_t s_safety_relay_level = UART_LOG_LEVEL_WARN;
+
+void uart_log_bridge_set_safety_relay_level(uint8_t level)
+{
+    if (level > UART_LOG_LEVEL_VERBOSE) {
+        level = UART_LOG_LEVEL_VERBOSE; /* clamp rather than reject -- same
+                                          * "never let a bogus value wedge a
+                                          * runtime knob" discipline as
+                                          * log_task_set_level(). */
+    }
+    s_safety_relay_level = level;
+}
+
+uint8_t uart_log_bridge_get_safety_relay_level(void)
+{
+    return s_safety_relay_level;
+}
+
 /* ESP-IDF's default formatted line looks like (optionally ANSI-colored):
  *   "E (12345) TAG: message\r\n"
  * Strip a leading color escape (if present), pull the level off the first
@@ -292,6 +314,50 @@ static int uart_log_vprintf(const char *fmt, va_list args)
     }
 
     return n;
+}
+
+bool uart_log_bridge_relay_safety(uint8_t level, const char *text, uint8_t text_len)
+{
+    /* Per-peer filter (uart_log_bridge_set_safety_relay_level()'s own doc
+     * comment) -- applied first, before this line ever competes for queue
+     * space with the ESP's own native lines. A filtered line is not a
+     * "dropped" one (not counted in s_dropped_lines below), same
+     * distinction log_task.h draws on the Pico's own end of this link. */
+    if (level > s_safety_relay_level) {
+        return false;
+    }
+    if (!s_bridge.queue || !text) {
+        return false;
+    }
+
+    static const char PREFIX[] = "SAFETY ";
+    static const size_t PREFIX_LEN = sizeof(PREFIX) - 1;
+
+    uart_log_entry_t entry;
+    entry.level = (level <= UART_LOG_LEVEL_VERBOSE) ? level : UART_LOG_LEVEL_VERBOSE;
+    memcpy(entry.text, PREFIX, PREFIX_LEN);
+    /* Untrusted wire input (CommonFW/README.md rule 6): clamp text_len to
+     * what actually fits after the prefix rather than trusting the caller's
+     * byte, which came verbatim off the isolated link. */
+    size_t max_text = sizeof(entry.text) - PREFIX_LEN;
+    size_t copy_len = ((size_t)text_len < max_text) ? (size_t)text_len : max_text;
+    memcpy(entry.text + PREFIX_LEN, text, copy_len);
+    entry.len = (uint8_t)(PREFIX_LEN + copy_len);
+
+    if (xQueueSend(s_bridge.queue, &entry, 0) != pdTRUE) {
+        /* Deliberately NO eviction attempt here, unlike uart_log_vprintf()'s
+         * ERROR/WARN protection above: that logic already runs against
+         * whatever is queued (native or relayed) whenever ITS OWN producer
+         * calls it, so a relayed ERROR/WARN sitting in the queue is already
+         * exactly as protected against a later native eviction as a native
+         * one is. Adding a second, separate eviction scan here would only
+         * duplicate that cost on this path too, for no additional line kept
+         * -- best-effort, droppable, never blocking (LINK_PROTOCOL.md sec 6)
+         * is satisfied by the plain xQueueSend(...,0) above alone. */
+        s_dropped_lines++;
+        return false;
+    }
+    return true;
 }
 
 /* 2026-09-08 stack-margin fix (uart_log_bridge measured LOW live, 1080 B

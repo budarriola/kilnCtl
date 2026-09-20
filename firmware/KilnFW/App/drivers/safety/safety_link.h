@@ -1170,6 +1170,15 @@ typedef struct {
     uart_owner_t    owner;
     uart_protocol_t proto;
     QueueHandle_t   inbox;       /* frames addressed to (ESP, UART_TASK_ID_SAFETY) */
+    /* frames addressed to (ESP, UART_TASK_ID_LOG) -- the Pico's own log_task
+     * (LOG_LEVEL_*, firmware/SaftyFW/src/tasks/log_task.h) sends ordinary
+     * BROADCAST frames here, same wire shape KilnFW's own uart_log_bridge.c
+     * uses for its native lines (CommonFW/docs/LINK_PROTOCOL.md sec 6, Frame
+     * F). Drained non-blockingly by safety_poll_task (safety_link_poll.c)
+     * and handed to uart_log_bridge_relay_safety() -- a SEPARATE inbox from
+     * `inbox` above so a burst of Pico log lines can never delay or starve a
+     * GET_STATUS/DIAG/POWER reply sharing the same poll cycle. */
+    QueueHandle_t   log_inbox;
     TaskHandle_t    poll_task;
 
     /* Guards everything below. Held only for the duration of a field
