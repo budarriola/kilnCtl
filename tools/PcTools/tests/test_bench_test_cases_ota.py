@@ -642,12 +642,12 @@ class Ote07Ote08Test(unittest.TestCase):
         return ctx
 
     def test_ote07_refused_during_running_firing_passes(self):
-        ctx = self._ctx("RUNNING", "_exec_state_fn")
+        ctx = self._ctx("running", "_exec_state_fn")
         result = C._case_ote07(ctx)
         self.assertEqual(result.verdict, Verdict.PASS, result.reason)
 
     def test_ote07_push_accepted_during_firing_fails(self):
-        ctx = self._ctx("RUNNING", "_exec_state_fn", ota_http_client=_FakeOtaClient(push_result=_OtaPushResult(True, 200)))
+        ctx = self._ctx("running", "_exec_state_fn", ota_http_client=_FakeOtaClient(push_result=_OtaPushResult(True, 200)))
         result = C._case_ote07(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
 
@@ -657,12 +657,12 @@ class Ote07Ote08Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.SKIP)
 
     def test_ote08_refused_during_autotune_passes(self):
-        ctx = self._ctx("ACTIVE", "_autotune_state_fn")
+        ctx = self._ctx("stepping", "_autotune_state_fn")
         result = C._case_ote08(ctx)
         self.assertEqual(result.verdict, Verdict.PASS, result.reason)
 
     def test_ote08_push_accepted_during_autotune_fails(self):
-        ctx = self._ctx("ACTIVE", "_autotune_state_fn", ota_http_client=_FakeOtaClient(push_result=_OtaPushResult(True, 200)))
+        ctx = self._ctx("stepping", "_autotune_state_fn", ota_http_client=_FakeOtaClient(push_result=_OtaPushResult(True, 200)))
         result = C._case_ote08(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
 
@@ -671,12 +671,49 @@ class Ote07Ote08Test(unittest.TestCase):
 
         def state_fn():
             calls["n"] += 1
-            return "RUNNING" if calls["n"] == 1 else "PAUSED"
+            return "running" if calls["n"] == 1 else "paused"
 
-        ctx = self._ctx("RUNNING", "_exec_state_fn")
+        ctx = self._ctx("running", "_exec_state_fn")
         ctx["_exec_state_fn"] = state_fn
         result = C._case_ote07(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_ote08_passes_across_a_settling_to_stepping_transition(self):
+        """Autotune legitimately moves settling -> stepping during the case.
+        Comparing the raw state_name before/after would FAIL that ordinary,
+        correct run; the "active" normalization is what makes the judge's
+        state_after check mean "still autotuning" rather than "still in the
+        exact same sub-state"."""
+        seq = iter(["settling", "stepping", "stepping"])
+        ctx = self._ctx("stepping", "_autotune_state_fn")
+        ctx["_autotune_state_fn"] = lambda: next(seq)
+        result = C._case_ote08(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_ote08_fails_when_autotune_dies_across_the_refused_push(self):
+        seq = iter(["stepping", "aborted", "aborted"])
+        ctx = self._ctx("stepping", "_autotune_state_fn")
+        ctx["_autotune_state_fn"] = lambda: next(seq)
+        result = C._case_ote08(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("disturbed", result.reason)
+
+    def test_default_expected_states_exist_in_the_real_device_vocabularies(self):
+        """The defect this pins: OT-E07 defaulted to "RUNNING" and OT-E08 to
+        "ACTIVE", neither of which any real status object can ever return
+        (devices_profiles/devices_autotune's STATE_NAMES are lowercase, and
+        autotune has no "active" state at all). Both cases were therefore
+        structurally incapable of passing on a board, while their unit tests
+        -- which fed the same fabricated strings back in -- stayed green."""
+        from kilnctrl.devices_profiles import ProfileExecStatus
+        from kilnctrl.devices_autotune import AutotuneStatus
+        self.assertIn(C.OTE07_DEFAULT_STATE, set(ProfileExecStatus.STATE_NAMES.values()))
+        self.assertTrue(
+            C.OTE08_ACTIVE_STATES <= set(AutotuneStatus.STATE_NAMES.values()),
+            "OTE08_ACTIVE_STATES names a state devices_autotune does not have",
+        )
+        # ...and the label it normalizes to must NOT collide with a real one.
+        self.assertNotIn(C.OTE08_ACTIVE_LABEL, set(AutotuneStatus.STATE_NAMES.values()))
 
 
 class Ote09Test(unittest.TestCase):

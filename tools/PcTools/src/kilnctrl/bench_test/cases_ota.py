@@ -687,28 +687,58 @@ def _case_update_refused_during_state(
                 pass
 
 
+#: `devices_profiles.ProfileExecStatus.STATE_NAMES` -- the real, LOWERCASE
+#: vocabulary `state_name` actually returns. OT-E07's default was written as
+#: "RUNNING" (the plan document's prose casing), which no real status can
+#: ever equal, so the case could only ever report INCONCLUSIVE on a board
+#: while its unit tests -- which fed the same fabricated "RUNNING" back in
+#: -- stayed green. `test_bench_test_cases_ota.py` now pins both defaults
+#: against the device modules' own STATE_NAMES so the two cannot drift
+#: apart again.
+OTE07_DEFAULT_STATE = "running"
+
+#: Autotune has no single "active" state: `devices_autotune.AutotuneStatus.
+#: STATE_NAMES` reports settling/stepping/relay_approach/relay_cycling while
+#: a run is in flight, and which one is current legitimately changes DURING
+#: the case (settling -> stepping), so comparing a raw state_name before and
+#: after the push would fail on an ordinary, correct run. OT-E08 therefore
+#: normalizes any in-flight state to this one label and compares that; a run
+#: that drops to idle/done/aborted across the refused push still fails the
+#: judge's state_after check, which is the thing the case exists to catch.
+OTE08_ACTIVE_STATES = frozenset({"settling", "stepping", "relay_approach", "relay_cycling"})
+OTE08_ACTIVE_LABEL = "active"
+
+
+def _normalize_autotune_state(state_name):
+    """Map any in-flight autotune state to OTE08_ACTIVE_LABEL, leaving
+    idle/done/aborted/None as-is so they still read as "not active"."""
+    return OTE08_ACTIVE_LABEL if state_name in OTE08_ACTIVE_STATES else state_name
+
+
 def _case_ote07(ctx: dict) -> CaseResult:
-    """OT-E07: an OTA update attempted while HP-01-shaped firing is
-    RUNNING (and, per the plan, again with PAUSED -- ``ctx["_exec_state_fn"]``
-    lets a caller feed either) must be refused, and the firing must
-    continue unaffected."""
+    """OT-E07: an OTA update attempted while an HP-01-shaped firing is
+    running (and, per the plan, again while paused -- pass
+    ``ctx["_ote07_expected_state"] = "paused"``) must be refused, and the
+    firing must continue unaffected."""
     get_state_fn = ctx.get("_exec_state_fn")
     if get_state_fn is None:
         srv = _srv(ctx)
         get_state_fn = lambda: getattr(srv._profiles.get_exec_status(), "state_name", None)
-    expected_state = ctx.get("_ote07_expected_state", "RUNNING")
+    expected_state = ctx.get("_ote07_expected_state", OTE07_DEFAULT_STATE)
     return _case_update_refused_during_state(ctx, get_state_fn, expected_state)
 
 
 def _case_ote08(ctx: dict) -> CaseResult:
-    """OT-E08: an OTA update attempted while AT-01-shaped autotune is
+    """OT-E08: an OTA update attempted while an AT-01-shaped autotune is
     active must be refused (`ota_interlock.c:50`), and autotune must
-    continue unaffected."""
-    get_state_fn = ctx.get("_autotune_state_fn")
-    if get_state_fn is None:
+    continue unaffected. The raw state_name is normalized to "active"
+    first -- see OTE08_ACTIVE_STATES."""
+    raw_state_fn = ctx.get("_autotune_state_fn")
+    if raw_state_fn is None:
         srv = _srv(ctx)
-        get_state_fn = lambda: getattr(srv._autotune.get_status(), "state_name", None)
-    expected_state = ctx.get("_ote08_expected_state", "ACTIVE")
+        raw_state_fn = lambda: getattr(srv._autotune.get_status(), "state_name", None)
+    get_state_fn = lambda: _normalize_autotune_state(raw_state_fn())
+    expected_state = ctx.get("_ote08_expected_state", OTE08_ACTIVE_LABEL)
     return _case_update_refused_during_state(ctx, get_state_fn, expected_state)
 
 
