@@ -216,6 +216,10 @@ class StatusDiagConsistencyTest(unittest.TestCase):
         r = J.judge_status_diag_consistency(True, "idle", "power_on", 0)
         self.assertEqual(r.verdict, Verdict.PASS)
 
+    def test_healthy_passes_with_matching_mask(self):
+        r = J.judge_status_diag_consistency(True, "idle", "power_on", 0, trip_mask=0)
+        self.assertEqual(r.verdict, Verdict.PASS)
+
     def test_link_down_fails(self):
         r = J.judge_status_diag_consistency(False, "idle", "power_on", 0)
         self.assertEqual(r.verdict, Verdict.FAIL)
@@ -231,6 +235,66 @@ class StatusDiagConsistencyTest(unittest.TestCase):
     def test_unexpected_state_fails(self):
         r = J.judge_status_diag_consistency(True, "tripped", "power_on", 0)
         self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_trip_reason_none_is_inconclusive_not_pass(self):
+        """The SP-02 defect this guards against: a diag report the case
+        cannot parse must never silently read as trip_reason=0 (healthy) --
+        that would make this judge always PASS regardless of the board's
+        real trip state. It must not be a bare FAIL either (no evidence of
+        an actual trip), so it is INCONCLUSIVE, a third distinct outcome."""
+        r = J.judge_status_diag_consistency(True, "idle", "power_on", None)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
+    def test_mask_inconsistent_with_reason_fails(self):
+        """trip_reason=6 (S6a) implies trip_mask 1<<5 = 0x0020
+        (link_frame_trip_mask_for_reason()); a diag reporting a different
+        mask for the same reason is the exact status/diag inconsistency
+        this case exists to catch, and must FAIL even though trip_reason
+        alone is nonzero (so it would already FAIL on that ground; this
+        confirms the mask check is not skipped/short-circuited for a
+        nonzero reason)."""
+        r = J.judge_status_diag_consistency(True, "idle", "power_on", 6, trip_mask=0x0040)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_mask_matches_expected_for_zero_reason(self):
+        r = J.judge_status_diag_consistency(True, "idle", "power_on", 0, trip_mask=0x0000)
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_mask_nonzero_with_zero_reason_fails(self):
+        """trip_reason=0 (NONE) implies trip_mask=0; a nonzero mask reported
+        alongside reason 0 is an inconsistency even though the reason field
+        alone reads 'healthy'."""
+        r = J.judge_status_diag_consistency(True, "idle", "power_on", 0, trip_mask=0x0020)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+
+class ParseTripFieldsTest(unittest.TestCase):
+    """Pins the parsing vocabulary against SafetyDiag.describe()'s real text
+    shape (devices_safety.py), not an invented fixture shape -- the bug this
+    whole fix addresses was a regex written against a form
+    (`trip_reason=8`) no device or describe() implementation ever emits."""
+
+    _REAL_DIAG_TEXT = (
+        "link up | boot_reason power_on | state idle | "
+        "trip_reason 6 [S6a mainFault] | warn_mask 0x0000 | "
+        "trip_mask 0x0020 | uptime 12345 ms | last_seq 7"
+    )
+
+    def test_parses_real_diag_text_shape(self):
+        self.assertEqual(J.parse_trip_reason(self._REAL_DIAG_TEXT), 6)
+        self.assertEqual(J.parse_trip_mask(self._REAL_DIAG_TEXT), 0x0020)
+
+    def test_does_not_match_invented_equals_form_field_absent(self):
+        # The status text has neither field at all -- this must return
+        # None, never a stale/wrong parse and never a silent 0.
+        status_text_no_trip_fields = "link up | state idle | armed False"
+        self.assertIsNone(J.parse_trip_reason(status_text_no_trip_fields))
+        self.assertIsNone(J.parse_trip_mask(status_text_no_trip_fields))
+
+    def test_parses_zero_trip_reason_and_mask(self):
+        healthy_diag_text = "link up | trip_reason 0 [NONE] | trip_mask 0x0000"
+        self.assertEqual(J.parse_trip_reason(healthy_diag_text), 0)
+        self.assertEqual(J.parse_trip_mask(healthy_diag_text), 0)
 
 
 class EstopVerifyTest(unittest.TestCase):

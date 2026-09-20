@@ -265,12 +265,18 @@ def _case_sp02(ctx: dict) -> CaseResult:
     m = re.search(r"boot[_ ]reason[:=]\s*([a-zA-Z_]+)", diag_text)
     if m:
         boot_reason = m.group(1).lower()
-    trip_reason = 0
-    m2 = re.search(r"trip_reason[:=]\s*(\d+)", status_text)
-    if m2:
-        trip_reason = int(m2.group(1))
+    # trip_reason/trip_mask live only in safety_get_diag()'s text -- NOT
+    # safety_get_status()'s (SafetyStatus carries neither field; see
+    # cases_safety.py's identical fix for SP-08/SP-09). Parsing them off
+    # status_text can only ever fail to match, and a silent default to 0
+    # would then always pass this consistency check regardless of the
+    # board's real trip state -- J.parse_trip_reason returns None on no
+    # match, and judge_status_diag_consistency treats that as INCONCLUSIVE,
+    # never as an assumed-healthy 0.
+    trip_reason = J.parse_trip_reason(diag_text)
+    trip_mask = J.parse_trip_mask(diag_text)
     state = "armed" if "armed" in status_text.lower() else "idle"
-    return J.judge_status_diag_consistency(link_up, state, boot_reason, trip_reason)
+    return J.judge_status_diag_consistency(link_up, state, boot_reason, trip_reason, trip_mask=trip_mask)
 
 
 def _case_sp05(ctx: dict) -> CaseResult:

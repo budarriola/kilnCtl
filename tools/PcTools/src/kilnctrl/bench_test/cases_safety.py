@@ -24,8 +24,6 @@ pure and unit-testable the same way as every other judge function here.
 """
 from __future__ import annotations
 
-import re
-
 from . import judgments as J
 from . import operator as OP
 from .cases_smoke import _srv
@@ -39,24 +37,13 @@ _SP08_EXPECTED_TRIP_REASON = 8  # SAFETY_TRIP_ESTOP (S7)
 _SP09_EXPECTED_TRIP_REASON = 7  # SAFETY_TRIP_LINK_DEAD (S6b)
 
 
-#: Both fields live in `safety_get_diag()`'s text (SafetyDiag.describe:
-#: "trip_reason 6 [...] | warn_mask 0x0000 | trip_mask 0x0020"), NOT in
-#: `safety_get_status()` -- SafetyStatus carries no trip_reason field at
-#: all, so reading the trip off the status text can only ever report
-#: "no trip_reason reported" and FAIL every time. The separators are
-#: spaces there, so accept `:`/`=`/whitespace alike.
-def _read_trip_reason(diag_text: str) -> "int | None":
-    m = re.search(r"trip_reason\s*[:=]?\s*(\d+)", diag_text)
-    return int(m.group(1)) if m else None
-
-
-def _read_trip_mask(diag_text: str) -> "int | None":
-    """Plan section 6 rule 5 needs the MASK as well as the reason: a second
-    guard latched alongside the expected one is visible only here."""
-    m = re.search(r"trip_mask\s*[:=]?\s*(0x[0-9a-fA-F]+|\d+)", diag_text)
-    if not m:
-        return None
-    return int(m.group(1), 0)
+#: SP-02 (cases_smoke.py) needs this identical parsing, so it now lives in
+#: judgments.py as `parse_trip_reason`/`parse_trip_mask` and both callers
+#: import it from there rather than keeping their own copy -- a duplicated
+#: regex is exactly how one copy can silently drift from the real text
+#: shape while the other stays correct.
+_read_trip_reason = J.parse_trip_reason
+_read_trip_mask = J.parse_trip_mask
 
 
 def _operator_trip_case(ctx: dict, question: str, expected_reason: int, timeout_s: float) -> CaseResult:

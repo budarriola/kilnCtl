@@ -315,18 +315,42 @@ def judge_commissioning_readback(commissioning: dict, esp_max_temp_c: Optional[f
 
 
 def judge_status_diag_consistency(link_up: bool, state: Optional[str], boot_reason: Optional[str],
-                                   trip_reason: Optional[int]) -> CaseResult:
+                                   trip_reason: Optional[int], trip_mask: Optional[int] = None) -> CaseResult:
     """SP-02: link up, state armed/idle as appropriate, boot reason not
-    watchdog, trip_reason 0."""
+    watchdog, trip_reason 0, and (when both fields were actually parsed)
+    trip_mask consistent with trip_reason via the same formula
+    (`link_frame_trip_mask_for_reason()`).
+
+    `trip_reason=None` means the report did not carry the field at all --
+    this must NOT be treated as "0 / no trip" (that silently passes a
+    board that IS tripped but whose report couldn't be parsed) -- it is
+    INCONCLUSIVE instead, distinct from both PASS and the FAIL a real
+    nonzero trip_reason produces."""
     if not link_up:
         return CaseResult(Verdict.FAIL, reason="link is not up", observed={"link_up": link_up})
     if boot_reason == "watchdog":
         return CaseResult(Verdict.FAIL, reason="boot reason is watchdog", observed={"boot_reason": boot_reason})
-    if trip_reason not in (0, None):
+    if trip_reason is None:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason="trip_reason not reported (diag text did not parse) -- cannot judge trip state",
+            observed={"trip_reason": trip_reason},
+        )
+    if trip_reason != 0:
         return CaseResult(Verdict.FAIL, reason=f"trip_reason={trip_reason}, expected 0", observed={"trip_reason": trip_reason})
+    expected_mask = safety_trip_mask_for_reason(trip_reason)
+    if trip_mask is not None and trip_mask != expected_mask:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=(
+                f"trip_reason={trip_reason} implies trip_mask={expected_mask:#06x}, "
+                f"but diag reports trip_mask={trip_mask:#06x} -- status/diag are inconsistent"
+            ),
+            observed={"trip_reason": trip_reason, "trip_mask": trip_mask, "expected_mask": expected_mask},
+        )
     if state not in ("armed", "idle"):
         return CaseResult(Verdict.FAIL, reason=f"state={state!r}, expected armed or idle", observed={"state": state})
-    return CaseResult(Verdict.PASS, observed={"link_up": link_up, "state": state, "boot_reason": boot_reason, "trip_reason": trip_reason})
+    return CaseResult(Verdict.PASS, observed={"link_up": link_up, "state": state, "boot_reason": boot_reason, "trip_reason": trip_reason, "trip_mask": trip_mask})
 
 
 def judge_estop_verify(flags: Optional[int], asserted_bit: int = 0x04) -> CaseResult:
@@ -1555,6 +1579,27 @@ def judge_faulted_run(
     if post_ack_state == "faulted":
         return CaseResult(Verdict.FAIL, reason="state is still 'faulted' after Acknowledge", observed=observed)
     return CaseResult(Verdict.PASS, observed=observed)
+
+
+#: Both fields live in `safety_get_diag()`'s text (SafetyDiag.describe:
+#: "trip_reason 6 [...] | warn_mask 0x0000 | trip_mask 0x0020"), NEVER in
+#: `safety_get_status()`'s text -- SafetyStatus (devices_safety.py) carries
+#: neither field, so parsing either one off the status report can only ever
+#: report "not found" (never a real, possibly-nonzero value). Shared here
+#: (rather than duplicated per case module) so SP-02 and SP-08/SP-09 read
+#: the exact same vocabulary the device module itself emits, not an
+#: invented one only a test fixture would produce. The separators are
+#: spaces in the real text, so accept `:`/`=`/whitespace alike.
+def parse_trip_reason(diag_text: str) -> "int | None":
+    m = re.search(r"trip_reason\s*[:=]?\s*(\d+)", diag_text)
+    return int(m.group(1)) if m else None
+
+
+def parse_trip_mask(diag_text: str) -> "int | None":
+    m = re.search(r"trip_mask\s*[:=]?\s*(0x[0-9a-fA-F]+|\d+)", diag_text)
+    if not m:
+        return None
+    return int(m.group(1), 0)
 
 
 def safety_trip_mask_for_reason(trip_reason: int) -> int:
