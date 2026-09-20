@@ -88,7 +88,7 @@ class IdleGateTest(unittest.TestCase):
 
 class Otb01Test(unittest.TestCase):
     def _ctx(self, state_name="idle", link_up=True, trip_reason=6, trip_mask=0x0020,
-              enabled_after_clear=True, readiness_ok=True):
+              enabled_after_clear=True, readiness_ok=True, relay_energized=False):
         _clockstate, now, sleep = _clock()
         srv = _FakeSrv(state_name=state_name)
         statuses = iter([_SafetyStatus(link_up=link_up)] * 5)
@@ -108,6 +108,7 @@ class Otb01Test(unittest.TestCase):
         ctx = {
             "srv": srv, "host": "192.168.4.1", "ap_password": "secret",
             "ota_http_client": type("O", (), {"sw_reset": staticmethod(lambda host, pw: {"ok": True})})(),
+            "dashboard_http_client": _FakeDashboardClient(relay_energized=relay_energized),
             "_now": now, "_sleep": sleep,
             "_get_safety_status_fn": get_status_fn,
             "_get_safety_diag_fn": lambda: diag,
@@ -180,6 +181,31 @@ class Otb01Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("boom", result.reason)
 
+    def test_refuses_dual_reset_while_relay_energized(self):
+        """Reviewer's landed-review gap: OT-B01 previously only gated on
+        the executor being idle. A relay still energized (e.g. from a
+        stuck/manual path unrelated to the executor) must also refuse the
+        dual reset -- and sw_reset must never even be attempted."""
+        sw_reset_called = {"v": False}
+        ctx = self._ctx(relay_energized=True)
+        ctx["_sw_reset_fn"] = lambda: sw_reset_called.__setitem__("v", True)
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.SKIP)
+        self.assertIn("energized", result.reason)
+        self.assertFalse(sw_reset_called["v"], "sw_reset_esp was called while a relay was still energized")
+
+    def test_refuses_dual_reset_when_relay_state_unreadable(self):
+        ctx = self._ctx()
+        ctx["dashboard_http_client"] = type("D", (), {"get_status": staticmethod(lambda host: (_ for _ in ()).throw(RuntimeError("no reply")))})()
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.SKIP)
+        self.assertIn("could not confirm", result.reason)
+
+    def test_relay_not_energized_still_passes(self):
+        ctx = self._ctx(relay_energized=False)
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
 
 class Sp04ObserverTest(unittest.TestCase):
     def test_not_run_when_otb01_absent(self):
@@ -211,10 +237,12 @@ class _OtaPushResult:
 
 
 class _FakeOtaClient:
-    def __init__(self, push_result=None, phases=None, boot_guard_recovery=False):
+    def __init__(self, push_result=None, phases=None, boot_guard_recovery=False, interlock_ok=True, interlock_reason=""):
         self.push_result = push_result or _OtaPushResult(True)
         self._phases = list(phases or ["done"])
         self.boot_guard_recovery = boot_guard_recovery
+        self.interlock_ok = interlock_ok
+        self.interlock_reason = interlock_reason
         self.pushed = []
 
     def push_esp_image(self, host, path, ap_password, timeout=None):
@@ -227,6 +255,22 @@ class _FakeOtaClient:
 
     def get_boot_guard_status(self, host):
         return {"recovery_mode": self.boot_guard_recovery}
+
+    def get_interlock(self, host):
+        if self.interlock_ok:
+            return {"ok": True}
+        return {"ok": False, "reason": self.interlock_reason}
+
+    def rollback_esp(self, host, ap_password):
+        return {"ok": True}
+
+    def push_esp_image_unauthenticated(self, host, path, timeout=None):
+        self.pushed.append(path)
+        return self.push_result
+
+    def push_esp_image_with_session(self, host, path, session_cookie, timeout=None):
+        self.pushed.append((path, session_cookie))
+        return self.push_result
 
 
 class _FakePartitionClient:
@@ -246,12 +290,16 @@ class _FakeZonesClient:
 
 
 class _FakeDashboardClient:
-    def __init__(self, fw_build="B1", load_fault=False):
+    def __init__(self, fw_build="B1", load_fault=False, relay_energized=False):
         self.fw_build = fw_build
         self.load_fault = load_fault
+        self.relay_energized = relay_energized
 
     def get_status(self, host):
-        return {"fw_build": self.fw_build, "zones_config_load_fault": self.load_fault}
+        return {
+            "fw_build": self.fw_build, "zones_config_load_fault": self.load_fault,
+            "safety_relay_energized": self.relay_energized,
+        }
 
 
 class Ote01Test(unittest.TestCase):
@@ -291,6 +339,26 @@ class Ote01Test(unittest.TestCase):
         self.assertIn("_ote01", ctx)
         self.assertIn("_ote_pre_update", ctx)
 
+    def test_interlock_not_ok_skips_before_pushing(self):
+        """Plan doc section 6 rule 1: every OTA action confirms
+        GET /api/ota/interlock ok:true immediately before the call --
+        a not-ok interlock must refuse before push_esp_image is ever
+        attempted."""
+        client = _FakeOtaClient(interlock_ok=False, interlock_reason="kiln is not idle")
+        ctx = self._ctx(ota_http_client=client)
+        result = C._case_ote01(ctx)
+        self.assertEqual(result.verdict, Verdict.SKIP)
+        self.assertIn("kiln is not idle", result.reason)
+        self.assertEqual(client.pushed, [], "push_esp_image was called despite a not-ok interlock")
+
+    def test_interlock_read_error_skips(self):
+        client = _FakeOtaClient()
+        client.get_interlock = lambda host: (_ for _ in ()).throw(RuntimeError("timeout"))
+        ctx = self._ctx(ota_http_client=client)
+        result = C._case_ote01(ctx)
+        self.assertEqual(result.verdict, Verdict.SKIP)
+        self.assertIn("could not read /api/ota/interlock", result.reason)
+
 
 class Ote02Test(unittest.TestCase):
     def test_not_run_without_ote01(self):
@@ -301,7 +369,7 @@ class Ote02Test(unittest.TestCase):
         ctx = {
             "srv": _FakeSrv(state_name="idle"), "host": "10.0.0.5", "ap_password": "secret",
             "_ote_pre_update": {"fw_build": "B1", "zones": {"zones": [{"pid_kp": 1.0, "pid_ki": 0.1, "pid_kd": 0.0}]}},
-            "ota_http_client": type("O", (), {"rollback_esp": staticmethod(lambda host, pw: {"ok": True})})(),
+            "ota_http_client": _FakeOtaClient(),
             "zones_http_client": _FakeZonesClient(),
             "dashboard_http_client": _FakeDashboardClient(fw_build="B1", load_fault=True),
             "_now": lambda: 0.0, "_sleep": lambda s: None,
@@ -315,7 +383,7 @@ class Ote02Test(unittest.TestCase):
         ctx = {
             "srv": _FakeSrv(state_name="idle"), "host": "10.0.0.5", "ap_password": "secret",
             "_ote_pre_update": {"fw_build": "B1", "zones": gains},
-            "ota_http_client": type("O", (), {"rollback_esp": staticmethod(lambda host, pw: {"ok": True})})(),
+            "ota_http_client": _FakeOtaClient(),
             "zones_http_client": _FakeZonesClient(zones=gains),
             "dashboard_http_client": _FakeDashboardClient(fw_build="B1", load_fault=False),
             "_now": lambda: 0.0, "_sleep": lambda s: None,
@@ -323,13 +391,26 @@ class Ote02Test(unittest.TestCase):
         result = C._case_ote02(ctx)
         self.assertEqual(result.verdict, Verdict.PASS, result.reason)
 
+    def test_interlock_not_ok_skips_before_rolling_back(self):
+        ctx = {
+            "srv": _FakeSrv(state_name="idle"), "host": "10.0.0.5", "ap_password": "secret",
+            "_ote_pre_update": {"fw_build": "B1", "zones": {"zones": [{"pid_kp": 1.0, "pid_ki": 0.1, "pid_kd": 0.0}]}},
+            "ota_http_client": _FakeOtaClient(interlock_ok=False, interlock_reason="an update is already in progress"),
+            "zones_http_client": _FakeZonesClient(),
+            "dashboard_http_client": _FakeDashboardClient(fw_build="B1", load_fault=False),
+            "_now": lambda: 0.0, "_sleep": lambda s: None,
+        }
+        result = C._case_ote02(ctx)
+        self.assertEqual(result.verdict, Verdict.SKIP)
+        self.assertIn("already in progress", result.reason)
+
     def test_gains_changed_without_load_fault_still_fails(self):
         before = {"zones": [{"pid_kp": 1.0, "pid_ki": 0.1, "pid_kd": 0.0}]}
         after = {"zones": [{"pid_kp": 9.0, "pid_ki": 0.1, "pid_kd": 0.0}]}
         ctx = {
             "srv": _FakeSrv(state_name="idle"), "host": "10.0.0.5", "ap_password": "secret",
             "_ote_pre_update": {"fw_build": "B1", "zones": before},
-            "ota_http_client": type("O", (), {"rollback_esp": staticmethod(lambda host, pw: {"ok": True})})(),
+            "ota_http_client": _FakeOtaClient(),
             "zones_http_client": _FakeZonesClient(zones=after),
             "dashboard_http_client": _FakeDashboardClient(fw_build="B1", load_fault=False),
             "_now": lambda: 0.0, "_sleep": lambda s: None,
@@ -358,6 +439,13 @@ class Ote03Test(unittest.TestCase):
         ctx = self._ctx(ota_http_client=_FakeOtaClient(push_result=_OtaPushResult(True, 200)))
         result = C._case_ote03(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_interlock_not_ok_skips_before_pushing(self):
+        client = _FakeOtaClient(push_result=_OtaPushResult(False, 400), interlock_ok=False, interlock_reason="kiln is not idle")
+        ctx = self._ctx(ota_http_client=client)
+        result = C._case_ote03(ctx)
+        self.assertEqual(result.verdict, Verdict.SKIP)
+        self.assertEqual(client.pushed, [])
 
     def test_refused_but_partition_changed_still_fails(self):
         # simulate RUNNING changing across the call by giving different
@@ -391,6 +479,278 @@ class Ote12Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.FAIL)
 
 
+class Ote04Test(unittest.TestCase):
+    def _ctx(self, **overrides):
+        ctx = {
+            "srv": _FakeSrv(state_name="idle"), "host": "10.0.0.5", "ap_password": "secret",
+            "ota_truncated_image_path": "/tmp/truncated.bin",
+            "ota_http_client": _FakeOtaClient(push_result=_OtaPushResult(False, 400)),
+            "partition_http_client": _FakePartitionClient(running="app"),
+            "dashboard_http_client": _FakeDashboardClient(fw_build="B1"),
+        }
+        ctx.update(overrides)
+        return ctx
+
+    def test_skips_without_image_path(self):
+        result = C._case_ote04(self._ctx(ota_truncated_image_path=None))
+        self.assertEqual(result.verdict, Verdict.SKIP)
+
+    def test_refused_unchanged_passes(self):
+        result = C._case_ote04(self._ctx())
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_accepted_push_fails(self):
+        ctx = self._ctx(ota_http_client=_FakeOtaClient(push_result=_OtaPushResult(True, 200)))
+        result = C._case_ote04(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_interlock_not_ok_skips_before_pushing(self):
+        client = _FakeOtaClient(push_result=_OtaPushResult(False, 400), interlock_ok=False, interlock_reason="not idle")
+        ctx = self._ctx(ota_http_client=client)
+        result = C._case_ote04(ctx)
+        self.assertEqual(result.verdict, Verdict.SKIP)
+        self.assertEqual(client.pushed, [])
+
+
+class Ote05Test(unittest.TestCase):
+    def _ctx(self, **overrides):
+        ctx = {
+            "srv": _FakeSrv(state_name="idle"), "host": "10.0.0.5", "ap_password": "secret",
+            "ota_wrong_build_image_path": "/tmp/recovery.bin",
+            "ota_http_client": _FakeOtaClient(push_result=_OtaPushResult(False, 400)),
+            "partition_http_client": _FakePartitionClient(running="app"),
+            "dashboard_http_client": _FakeDashboardClient(fw_build="B1"),
+        }
+        ctx.update(overrides)
+        return ctx
+
+    def test_skips_without_image_path(self):
+        result = C._case_ote05(self._ctx(ota_wrong_build_image_path=None))
+        self.assertEqual(result.verdict, Verdict.SKIP)
+
+    def test_refused_unchanged_passes(self):
+        result = C._case_ote05(self._ctx())
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_accepted_push_fails(self):
+        ctx = self._ctx(ota_http_client=_FakeOtaClient(push_result=_OtaPushResult(True, 200)))
+        result = C._case_ote05(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_interlock_not_ok_skips_before_pushing(self):
+        client = _FakeOtaClient(push_result=_OtaPushResult(False, 400), interlock_ok=False, interlock_reason="not idle")
+        ctx = self._ctx(ota_http_client=client)
+        result = C._case_ote05(ctx)
+        self.assertEqual(result.verdict, Verdict.SKIP)
+        self.assertEqual(client.pushed, [])
+
+
+class Ote06Test(unittest.TestCase):
+    def _ctx(self, **overrides):
+        ctx = {
+            "srv": _FakeSrv(state_name="idle"), "host": "10.0.0.5", "ap_password": "secret",
+            "ota_image_path": "/tmp/image.bin",
+            "ota_http_client": _FakeOtaClient(),
+            "partition_http_client": _FakePartitionClient(running="app"),
+            "zones_http_client": _FakeZonesClient(),
+            "dashboard_http_client": _FakeDashboardClient(fw_build="B1"),
+            "_now": lambda: 0.0, "_sleep": lambda s: None,
+        }
+        ctx.update(overrides)
+        return ctx
+
+    def test_skips_without_attended_prompt_seam(self):
+        ctx = self._ctx()
+        self.assertNotIn("attended_prompt", ctx)
+        result = C._case_ote06(ctx)
+        self.assertEqual(result.verdict, Verdict.SKIP)
+        self.assertEqual(result.reason, "requires --attended")
+
+    def test_operator_declines_ready_prompt_skips(self):
+        ctx = self._ctx(attended_prompt=lambda msg: False)
+        result = C._case_ote06(ctx)
+        self.assertEqual(result.verdict, Verdict.SKIP)
+
+    def test_operator_no_response_to_ready_prompt_skips(self):
+        ctx = self._ctx(attended_prompt=lambda msg: None)
+        result = C._case_ote06(ctx)
+        self.assertEqual(result.verdict, Verdict.SKIP)
+
+    def test_operator_confirms_and_state_unchanged_passes(self):
+        calls = {"n": 0}
+
+        def prompt(msg):
+            calls["n"] += 1
+            return True
+
+        push_calls = {"n": 0}
+
+        def push_fn():
+            push_calls["n"] += 1
+            raise RuntimeError("connection dropped")
+
+        ctx = self._ctx(attended_prompt=prompt, _push_fn=push_fn)
+        result = C._case_ote06(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(push_calls["n"], 1)
+
+    def test_operator_does_not_confirm_restoration_is_inconclusive(self):
+        responses = iter([True, False])
+        ctx = self._ctx(attended_prompt=lambda msg: next(responses), _push_fn=lambda: None)
+        result = C._case_ote06(ctx)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
+    def test_fw_build_changed_across_power_loss_fails(self):
+        responses = iter([True, True])
+        ctx = self._ctx(
+            attended_prompt=lambda msg: next(responses), _push_fn=lambda: None,
+            dashboard_http_client=_FakeDashboardClient(fw_build="B2"),
+        )
+        # pre-read uses fw_build_before via _fw_build(ctx, host) each call, so
+        # force a changing sequence with a stateful fake
+        class _Changing:
+            def __init__(self):
+                self.n = 0
+
+            def get_status(self, host):
+                self.n += 1
+                return {"fw_build": "B1" if self.n == 1 else "B2", "zones_config_load_fault": False}
+
+        ctx["dashboard_http_client"] = _Changing()
+        result = C._case_ote06(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("fw_build changed", result.reason)
+
+    def test_interlock_not_ok_skips_before_prompting(self):
+        ctx = self._ctx(ota_http_client=_FakeOtaClient(interlock_ok=False, interlock_reason="not idle"))
+        prompted = {"v": False}
+        ctx["attended_prompt"] = lambda msg: prompted.__setitem__("v", True) or True
+        result = C._case_ote06(ctx)
+        self.assertEqual(result.verdict, Verdict.SKIP)
+        self.assertFalse(prompted["v"], "operator was prompted despite a not-ok interlock")
+
+
+class Ote07Ote08Test(unittest.TestCase):
+    def _ctx(self, expected_state, state_fn_key, **overrides):
+        ctx = {
+            "host": "10.0.0.5", "ap_password": "secret", "ota_image_path": "/tmp/image.bin",
+            "ota_http_client": _FakeOtaClient(push_result=_OtaPushResult(False, 409), interlock_ok=False, interlock_reason="not idle"),
+            state_fn_key: lambda: expected_state,
+        }
+        ctx.update(overrides)
+        return ctx
+
+    def test_ote07_refused_during_running_firing_passes(self):
+        ctx = self._ctx("RUNNING", "_exec_state_fn")
+        result = C._case_ote07(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_ote07_push_accepted_during_firing_fails(self):
+        ctx = self._ctx("RUNNING", "_exec_state_fn", ota_http_client=_FakeOtaClient(push_result=_OtaPushResult(True, 200)))
+        result = C._case_ote07(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_ote07_wrong_precondition_state_skips(self):
+        ctx = self._ctx("idle", "_exec_state_fn")
+        result = C._case_ote07(ctx)
+        self.assertEqual(result.verdict, Verdict.SKIP)
+
+    def test_ote08_refused_during_autotune_passes(self):
+        ctx = self._ctx("ACTIVE", "_autotune_state_fn")
+        result = C._case_ote08(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_ote08_push_accepted_during_autotune_fails(self):
+        ctx = self._ctx("ACTIVE", "_autotune_state_fn", ota_http_client=_FakeOtaClient(push_result=_OtaPushResult(True, 200)))
+        result = C._case_ote08(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_ote07_state_disturbed_by_refused_push_fails(self):
+        calls = {"n": 0}
+
+        def state_fn():
+            calls["n"] += 1
+            return "RUNNING" if calls["n"] == 1 else "PAUSED"
+
+        ctx = self._ctx("RUNNING", "_exec_state_fn")
+        ctx["_exec_state_fn"] = state_fn
+        result = C._case_ote07(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+
+class Ote09Test(unittest.TestCase):
+    def _ctx(self, **overrides):
+        ctx = {
+            "srv": _FakeSrv(state_name="idle"), "host": "10.0.0.5",
+            "ota_image_path": "/tmp/image.bin",
+            "ota_http_client": _FakeOtaClient(push_result=_OtaPushResult(False, 401)),
+            "partition_http_client": _FakePartitionClient(running="app"),
+            "dashboard_http_client": _FakeDashboardClient(fw_build="B1"),
+        }
+        ctx.update(overrides)
+        return ctx
+
+    def test_no_credential_refused_passes(self):
+        result = C._case_ote09(self._ctx())
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_no_credential_accepted_fails(self):
+        ctx = self._ctx(ota_http_client=_FakeOtaClient(push_result=_OtaPushResult(True, 200)))
+        result = C._case_ote09(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_skips_without_image_path(self):
+        result = C._case_ote09(self._ctx(ota_image_path=None))
+        self.assertEqual(result.verdict, Verdict.SKIP)
+
+
+class Ote10Test(unittest.TestCase):
+    def _ctx(self, **overrides):
+        ctx = {
+            "srv": _FakeSrv(state_name="idle"), "host": "10.0.0.5",
+            "ota_image_path": "/tmp/image.bin",
+            "web_admin_username": "admin", "web_admin_password": "adminpw",
+            "web_user_username": "user1", "web_user_password": "user1pw",
+            "ota_http_client": _FakeOtaClient(),
+            "_login_fn": lambda user, pw: (200, f"sid-{user}"),
+        }
+        ctx.update(overrides)
+        return ctx
+
+    def test_skips_without_credentials(self):
+        result = C._case_ote10(self._ctx(web_user_username=None))
+        self.assertEqual(result.verdict, Verdict.SKIP)
+
+    def test_admin_ok_user_refused_passes(self):
+        def push_with_session(cookie):
+            return _OtaPushResult(cookie == "sid-admin")
+
+        ctx = self._ctx(_push_with_session_fn=push_with_session)
+        result = C._case_ote10(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_admin_refused_fails(self):
+        ctx = self._ctx(_push_with_session_fn=lambda cookie: _OtaPushResult(False))
+        result = C._case_ote10(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_user_accepted_fails(self):
+        ctx = self._ctx(_push_with_session_fn=lambda cookie: _OtaPushResult(True))
+        result = C._case_ote10(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_interlock_not_ok_skips(self):
+        ctx = self._ctx(ota_http_client=_FakeOtaClient(interlock_ok=False, interlock_reason="not idle"))
+        result = C._case_ote10(ctx)
+        self.assertEqual(result.verdict, Verdict.SKIP)
+
+    def test_login_failure_fails(self):
+        ctx = self._ctx(_login_fn=lambda user, pw: (401, None))
+        result = C._case_ote10(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+
 class RegistryWiringTest(unittest.TestCase):
     def test_sp04_depends_on_otb01(self):
         self.assertEqual(get_case("SP-04").depends_on, "OT-B01")
@@ -400,6 +760,13 @@ class RegistryWiringTest(unittest.TestCase):
         self.assertIs(get_case("OT-E01").judge, C._case_ote01)
         self.assertIs(get_case("OT-E02").judge, C._case_ote02)
         self.assertIs(get_case("OT-E03").judge, C._case_ote03)
+        self.assertIs(get_case("OT-E04").judge, C._case_ote04)
+        self.assertIs(get_case("OT-E05").judge, C._case_ote05)
+        self.assertIs(get_case("OT-E06").judge, C._case_ote06)
+        self.assertIs(get_case("OT-E07").judge, C._case_ote07)
+        self.assertIs(get_case("OT-E08").judge, C._case_ote08)
+        self.assertIs(get_case("OT-E09").judge, C._case_ote09)
+        self.assertIs(get_case("OT-E10").judge, C._case_ote10)
         self.assertIs(get_case("OT-E12").judge, C._case_ote12)
         self.assertIs(get_case("SP-04").judge, CS._case_sp04)
 

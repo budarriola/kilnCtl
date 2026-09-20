@@ -647,6 +647,118 @@ class PushImageLoggingTest(unittest.TestCase):
         self.assertNotIn(self.SECRET, all_output)
 
 
+class GetInterlockTest(unittest.TestCase):
+    """GET /api/ota/interlock -- unauthenticated, no challenge/HMAC dance."""
+
+    def test_parses_ok_true(self):
+        body = json.dumps({"ok": True}).encode()
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", return_value=_fake_response(body)):
+            result = ota.get_interlock("kiln.local")
+        self.assertTrue(result["ok"])
+
+    def test_parses_ok_false_with_reason(self):
+        body = json.dumps({"ok": False, "reason": "an update is already in progress"}).encode()
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", return_value=_fake_response(body)):
+            result = ota.get_interlock("kiln.local")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "an update is already in progress")
+
+    def test_no_challenge_fetched_first(self):
+        body = json.dumps({"ok": True}).encode()
+        calls = {"n": 0}
+
+        def wrapper(req, timeout=None):
+            calls["n"] += 1
+            return _fake_response(body)
+
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=wrapper):
+            ota.get_interlock("kiln.local")
+        self.assertEqual(calls["n"], 1)
+
+    def test_unreachable_host_raises(self):
+        err = urllib.error.URLError("no route to host")
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(ota.OtaHttpError):
+                ota.get_interlock("192.0.2.1")
+
+    def test_bad_json_raises(self):
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", return_value=_fake_response(b"not json")):
+            with self.assertRaises(ota.OtaHttpError):
+                ota.get_interlock("kiln.local")
+
+
+class PushImageUnauthenticatedTest(unittest.TestCase):
+    """OT-E09: no X-Ota-Mac header at all -- plain unauthenticated POST."""
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".bin", delete=False)
+        self.tmp.write(b"\xe9\x00\x00\x00fake-image-bytes")
+        self.tmp.close()
+        self.addCleanup(os.unlink, self.tmp.name)
+
+    def test_no_mac_header_sent(self):
+        ok_body = json.dumps({"ok": True}).encode()
+        captured = {}
+
+        def wrapper(req, timeout=None):
+            captured["req"] = req
+            return _fake_response(ok_body)
+
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=wrapper):
+            result = ota.push_esp_image_unauthenticated("kiln.local", self.tmp.name)
+        self.assertTrue(result.ok)
+        self.assertIsNone(captured["req"].get_header("X-ota-mac"))
+        self.assertIsNone(captured["req"].get_header("X-ota-nonce"))
+
+    def test_refused_returns_not_ok(self):
+        err = urllib.error.HTTPError("http://x/api/ota/esp", 401, "Unauthorized", hdrs=None,
+                                      fp=io.BytesIO(b"missing credential"))
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=err):
+            result = ota.push_esp_image_unauthenticated("kiln.local", self.tmp.name)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status_code, 401)
+
+    def test_missing_file_raises(self):
+        with self.assertRaises(ota.OtaHttpError):
+            ota.push_esp_image_unauthenticated("kiln.local", "/no/such/file.bin")
+
+
+class PushImageWithSessionTest(unittest.TestCase):
+    """OT-E10: a kiln_sid web-auth session cookie in place of the AP-password
+    challenge/HMAC dance."""
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".bin", delete=False)
+        self.tmp.write(b"\xe9\x00\x00\x00fake-image-bytes")
+        self.tmp.close()
+        self.addCleanup(os.unlink, self.tmp.name)
+
+    def test_sends_cookie_header_no_challenge(self):
+        ok_body = json.dumps({"ok": True}).encode()
+        captured = {}
+
+        def wrapper(req, timeout=None):
+            captured["req"] = req
+            return _fake_response(ok_body)
+
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=wrapper):
+            result = ota.push_esp_image_with_session("kiln.local", self.tmp.name, "abc123")
+        self.assertTrue(result.ok)
+        self.assertEqual(captured["req"].get_header("Cookie"), "kiln_sid=abc123")
+
+    def test_user_tier_session_refused(self):
+        err = urllib.error.HTTPError("http://x/api/ota/esp", 403, "Forbidden", hdrs=None,
+                                      fp=io.BytesIO(b"admin required"))
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=err):
+            result = ota.push_esp_image_with_session("kiln.local", self.tmp.name, "usersession")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status_code, 403)
+
+    def test_missing_file_raises(self):
+        with self.assertRaises(ota.OtaHttpError):
+            ota.push_esp_image_with_session("kiln.local", "/no/such/file.bin", "abc")
+
+
 if __name__ == "__main__":
     unittest.main()
 

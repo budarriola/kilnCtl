@@ -656,3 +656,146 @@ def sw_reset(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -
 
     log.info("sw_reset accepted: host=%s status=%d body=%r", host, status_code, body_text)
     return {"ok": True, "status_code": status_code, "detail": body_text}
+
+
+def get_interlock(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
+    """GET /api/ota/interlock -- unauthenticated (ota_http_recovery.c's
+    ota_interlock_get_handler(), same exposure level as GET /api/status)
+    read of the board's own live OTA interlock state
+    (ota_http_check_interlocks() / ota_interlock.c). Returns
+    ``{"ok": true}`` when idle-and-clear, or
+    ``{"ok": false, "reason": "<why>", "needs_ack": bool}`` otherwise.
+
+    Plan doc section 6 rule 1: "Flash or OTA while ... GET
+    /api/ota/interlock is not ok -- checked immediately before the call,
+    not at run start." This is the client-side helper bench_test's
+    cases_ota.py calls right before every OTA action (push/rollback) to
+    honor that rule; no new firmware route was added for this -- the route
+    has existed since ota_http_recovery.c's original landing.
+
+    A non-2xx response (unexpected -- this route does not itself refuse
+    with an HTTP error status, it reports the refusal IN the 200 body) or
+    unparseable JSON both raise ``OtaHttpError``, same as every other
+    reader in this module -- a caller must never treat "could not read
+    the interlock" as "the interlock is ok".
+    """
+    req = urllib.request.Request(_url(host, "/api/ota/interlock"), method="GET")
+    try:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
+            body_text = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        status_code, detail = _http_error_detail(exc)
+        raise OtaHttpError(f"/api/ota/interlock refused: HTTP {status_code}: {detail}",
+                            status_code, detail) from exc
+    except urllib.error.URLError as exc:
+        _, detail = _http_error_detail(exc)
+        raise OtaHttpError(f"/api/ota/interlock unreachable: {detail}") from exc
+    try:
+        return json.loads(body_text)
+    except Exception as exc:
+        raise OtaHttpError(f"/api/ota/interlock response was not valid JSON: {body_text!r}") from exc
+
+
+def push_esp_image_unauthenticated(host: str, path: str,
+                                    timeout: float = OTA_ESP_UPLOAD_TIMEOUT_S) -> OtaPushResult:
+    """OT-E09: POST /api/ota/esp with NO ``X-Ota-Mac`` header at all --
+    confirms the board refuses an update pushed with no credential rather
+    than silently accepting one because some other check (interlock, size)
+    happened to be satisfied. Deliberately bypasses ``_push_image()``'s
+    challenge/HMAC dance entirely rather than sending a wrong MAC, since
+    the plan's own wording is "no credential" (a wrong-but-present MAC is
+    a different, already-covered code path in ota_http.c's authenticate()).
+
+    A non-2xx response is reported the same way ``_push_image()`` does
+    (`OtaPushResult(ok=False, ...)`) rather than raising, so callers can
+    use the same result-object comparison as every other push case;
+    ``OtaHttpError`` is still raised for a genuinely unparseable response
+    or a transport failure, both of which also count as "refused" from a
+    caller's point of view.
+    """
+    if not os.path.isfile(path):
+        raise OtaHttpError(f"no such file: {path}")
+    with open(path, "rb") as f:
+        data = f.read()
+    req = urllib.request.Request(
+        _url(host, "/api/ota/esp"),
+        data=data,
+        method="POST",
+        headers={"Content-Type": "application/octet-stream", "Content-Length": str(len(data))},
+    )
+    log.info("OTA push (no credential) starting: host=%s path=%s size=%d", host, path, len(data))
+    try:
+        # Deliberately NOT http_auth.urlopen: that wrapper auto-logs-in and
+        # retries once on a 401 using KILNCTL_WEB_USERNAME/PASSWORD from the
+        # environment -- exactly the credential this case exists to prove is
+        # NOT presented. Using it here would silently authenticate an
+        # "unauthenticated" push whenever those variables happen to be set,
+        # defeating OT-E09 outright.
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status_code = resp.status
+            body_text = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        status_code, detail = _http_error_detail(exc)
+        log.warning("OTA push (no credential) refused: host=%s status=%s detail=%s", host, status_code, detail)
+        return OtaPushResult(ok=False, status_code=status_code or 0, body={"reason": detail})
+    except urllib.error.URLError as exc:
+        _, detail = _http_error_detail(exc)
+        raise OtaHttpError(f"/api/ota/esp unreachable: {detail}") from exc
+    try:
+        body = json.loads(body_text)
+    except Exception as exc:
+        raise OtaHttpError(f"/api/ota/esp response was not valid JSON: {body_text!r}",
+                            status_code, body_text) from exc
+    return OtaPushResult(ok=bool(body.get("ok")), status_code=status_code, body=body)
+
+
+def push_esp_image_with_session(host: str, path: str, session_cookie: str,
+                                 timeout: float = OTA_ESP_UPLOAD_TIMEOUT_S) -> OtaPushResult:
+    """OT-E10: POST /api/ota/esp authenticated by a ``kiln_sid`` web-auth
+    session cookie instead of the AP-password challenge/HMAC -- per
+    ota_http.c's ``ota_http_check_auth()`` comment (around its
+    ``http_auth_policy_web_enabled()`` branch): once web auth is on,
+    ``kiln_http_register()``'s enforcement pre-handler has already required
+    a valid ADMIN session before this handler is ever reached, so the
+    AP-password challenge is retired for that request entirely -- no nonce
+    fetch, no ``X-Ota-Mac`` header, just the session cookie. A non-admin
+    (``user``-tier) session is expected to be refused by that same
+    pre-handler (403) before ever reaching ota_http.c's own logic, which is
+    exactly what OT-E10 exercises by calling this twice, once per tier.
+    """
+    if not os.path.isfile(path):
+        raise OtaHttpError(f"no such file: {path}")
+    with open(path, "rb") as f:
+        data = f.read()
+    req = urllib.request.Request(
+        _url(host, "/api/ota/esp"),
+        data=data,
+        method="POST",
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Length": str(len(data)),
+            "Cookie": f"kiln_sid={session_cookie}",
+        },
+    )
+    log.info("OTA push (session auth) starting: host=%s path=%s size=%d", host, path, len(data))
+    try:
+        # Deliberately NOT http_auth.urlopen: this case supplies its own
+        # session cookie explicitly (admin vs. user tier) and must not have
+        # it silently swapped out or retried against a *different* logged-in
+        # identity by that wrapper's own auto-login-on-401 behaviour.
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status_code = resp.status
+            body_text = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        status_code, detail = _http_error_detail(exc)
+        log.warning("OTA push (session auth) refused: host=%s status=%s detail=%s", host, status_code, detail)
+        return OtaPushResult(ok=False, status_code=status_code or 0, body={"reason": detail})
+    except urllib.error.URLError as exc:
+        _, detail = _http_error_detail(exc)
+        raise OtaHttpError(f"/api/ota/esp unreachable: {detail}") from exc
+    try:
+        body = json.loads(body_text)
+    except Exception as exc:
+        raise OtaHttpError(f"/api/ota/esp response was not valid JSON: {body_text!r}",
+                            status_code, body_text) from exc
+    return OtaPushResult(ok=bool(body.get("ok")), status_code=status_code, body=body)

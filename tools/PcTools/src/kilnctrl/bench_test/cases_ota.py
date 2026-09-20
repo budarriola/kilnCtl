@@ -11,6 +11,7 @@ every case is thin: fetch/act, then delegate to judgments.py. Pico OTA
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Optional
 
 from . import judgments as J
@@ -50,6 +51,42 @@ def _dashboard_client(ctx: dict):
     if client is None:
         from .. import dashboard_http_client as client
     return client
+
+
+def _interlock_ok(ctx: dict, host: str) -> "tuple[bool, str]":
+    """Plan doc section 6 rule 1: every OTA action must first confirm
+    ``GET /api/ota/interlock`` reports ``ok:true`` -- checked immediately
+    before the call, never assumed from a run-start snapshot. Any error
+    reading it refuses rather than assuming ok, same discipline as
+    ``_is_idle`` above. Injectable via ``ctx["_interlock_fn"]`` so this can
+    be unit-tested without a real board (this wave is unit/mock only, per
+    the standing unacknowledged crash report on the bench board)."""
+    ota = _ota_client(ctx)
+    interlock_fn = ctx.get("_interlock_fn") or (lambda: ota.get_interlock(host))
+    try:
+        body = interlock_fn()
+    except Exception as exc:
+        return False, f"could not read /api/ota/interlock: {type(exc).__name__}: {exc}"
+    ok = bool(body.get("ok"))
+    return ok, ("" if ok else str(body.get("reason", "")))
+
+
+def _relays_energized(ctx: dict, host) -> Optional[bool]:
+    """``dashboard_status_t.safety_relay_energized`` -- same accessor
+    ``cases_heat._read_energized`` uses. Landed-review gap fix for OT-B01:
+    the dual reset previously only gated on the executor being idle, which
+    does not by itself guarantee no relay is latched on via some other
+    path (a stuck relay, a manual bench test, etc.); dual-resetting both
+    processors while a relay is still energized is exactly the situation
+    CLAUDE.md's dual-reflash procedure exists to avoid surprises around.
+    Returns None (not a crash) on any read failure -- callers must treat
+    that as "cannot confirm", never as "de-energized"."""
+    dashboard = _dashboard_client(ctx)
+    try:
+        status = dashboard.get_status(host)
+    except Exception:
+        return None
+    return status.get("safety_relay_energized")
 
 
 def _is_idle(ctx: dict) -> "tuple[bool, str]":
@@ -152,6 +189,13 @@ def _case_otb01(ctx: dict) -> CaseResult:
     ap_password = ctx.get("ap_password")
     srv = _srv(ctx)
     ota = _ota_client(ctx)
+
+    energized = _relays_energized(ctx, host)
+    if energized is None:
+        return CaseResult(Verdict.SKIP, reason="could not confirm relays de-energized before dual reset")
+    if energized:
+        return CaseResult(Verdict.SKIP, reason="refusing dual reset: a relay is still energized")
+
     if not ap_password:
         return CaseResult(Verdict.SKIP, reason="no ap_password credential available for sw_reset_esp")
 
@@ -245,6 +289,10 @@ def _case_ote01(ctx: dict) -> CaseResult:
     if not ap_password or not image_path:
         return CaseResult(Verdict.SKIP, reason="ota_image_path/ap_password not provided for OT-E01")
 
+    ok, ireason = _interlock_ok(ctx, host)
+    if not ok:
+        return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to push: {ireason}")
+
     ota = _ota_client(ctx)
     zones = _zones_client(ctx)
 
@@ -315,6 +363,10 @@ def _case_ote02(ctx: dict) -> CaseResult:
     if not ap_password:
         return CaseResult(Verdict.SKIP, reason="no ap_password credential available for ota_rollback_esp")
 
+    ok, ireason = _interlock_ok(ctx, host)
+    if not ok:
+        return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to roll back: {ireason}")
+
     ota = _ota_client(ctx)
     zones = _zones_client(ctx)
     dashboard = _dashboard_client(ctx)
@@ -373,6 +425,10 @@ def _case_ote03(ctx: dict) -> CaseResult:
     if not ap_password or not image_path:
         return CaseResult(Verdict.SKIP, reason="ota_corrupt_image_path/ap_password not provided for OT-E03")
 
+    ok, ireason = _interlock_ok(ctx, host)
+    if not ok:
+        return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to push: {ireason}")
+
     ota = _ota_client(ctx)
     running_before = _running_partition(ctx, host)
     fw_build_before = _fw_build(ctx, host)
@@ -388,6 +444,378 @@ def _case_ote03(ctx: dict) -> CaseResult:
     fw_build_after = _fw_build(ctx, host)
 
     return J.judge_ota_push_refused(refused, running_before, running_after, fw_build_before, fw_build_after)
+
+
+def _case_ote04(ctx: dict) -> CaseResult:
+    """OT-E04: push the first 60% of the ST-04 image (a truncated file) --
+    same refusal contract as OT-E03 (judge_ota_push_refused): refused
+    before reboot, RUNNING/fw_build unchanged."""
+    idle, reason = _is_idle(ctx)
+    if not idle:
+        return CaseResult(Verdict.SKIP, reason=reason)
+
+    host = ctx.get("host")
+    ap_password = ctx.get("ap_password")
+    image_path = ctx.get("ota_truncated_image_path")
+    if not ap_password or not image_path:
+        return CaseResult(Verdict.SKIP, reason="ota_truncated_image_path/ap_password not provided for OT-E04")
+
+    ok, ireason = _interlock_ok(ctx, host)
+    if not ok:
+        return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to push: {ireason}")
+
+    ota = _ota_client(ctx)
+    running_before = _running_partition(ctx, host)
+    fw_build_before = _fw_build(ctx, host)
+
+    refused = None
+    try:
+        push = ota.push_esp_image(host, image_path, ap_password)
+        refused = not push.ok
+    except Exception:
+        refused = True  # a raised transport/HMAC error is also a refusal
+
+    running_after = _running_partition(ctx, host)
+    fw_build_after = _fw_build(ctx, host)
+
+    return J.judge_ota_push_refused(refused, running_before, running_after, fw_build_before, fw_build_after)
+
+
+def _case_ote05(ctx: dict) -> CaseResult:
+    """OT-E05: push `recovery.bin` (or any non-KilnCtrl app_desc) to
+    /api/ota/esp -- refused naming the project mismatch, or rejected at
+    verify without ever changing RUNNING. Same unchanged-state contract as
+    OT-E03/E04 (judge_ota_push_refused); this module never inspects the
+    board's refusal text for a specific substring, only that RUNNING/
+    fw_build never moved."""
+    idle, reason = _is_idle(ctx)
+    if not idle:
+        return CaseResult(Verdict.SKIP, reason=reason)
+
+    host = ctx.get("host")
+    ap_password = ctx.get("ap_password")
+    image_path = ctx.get("ota_wrong_build_image_path")
+    if not ap_password or not image_path:
+        return CaseResult(Verdict.SKIP, reason="ota_wrong_build_image_path/ap_password not provided for OT-E05")
+
+    ok, ireason = _interlock_ok(ctx, host)
+    if not ok:
+        return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to push: {ireason}")
+
+    ota = _ota_client(ctx)
+    running_before = _running_partition(ctx, host)
+    fw_build_before = _fw_build(ctx, host)
+
+    refused = None
+    try:
+        push = ota.push_esp_image(host, image_path, ap_password)
+        refused = not push.ok
+    except Exception:
+        refused = True
+
+    running_after = _running_partition(ctx, host)
+    fw_build_after = _fw_build(ctx, host)
+
+    return J.judge_ota_push_refused(refused, running_before, running_after, fw_build_before, fw_build_after)
+
+
+def _case_ote06(ctx: dict) -> CaseResult:
+    """OT-E06: power loss mid-write -- an ``--attended`` operator case.
+    Needs a human (or a fixture relay a human has wired up) to physically
+    cut the ESP's own supply power partway through the transfer and then
+    restore it; there is no way to do that from software alone, so this
+    case is gated on an injectable ``ctx["attended_prompt"]`` callable
+    (``str -> True | False | None``) another concurrent change
+    (``bench3b``) is wiring the real ``--attended`` CLI mechanism for.
+    ``None`` (no callable at all -- the flag was not passed) or a False/
+    None answer from the operator both SKIP/INCONCLUSIVE rather than ever
+    touching the board, so this case merges cleanly ahead of that
+    mechanism landing.
+
+    push_fn is injectable (``ctx["_push_fn"]``) because the real
+    push_esp_image() call blocks synchronously for the whole streamed
+    transfer -- in a real run the fixture/operator cuts power to the ESP
+    *while* this call is in flight (a background thread or a second
+    process, outside this pure case's scope), so the call is expected to
+    raise (connection dropped) rather than return normally. The judge
+    (judge_ota_power_loss_mid_write) does not require that specific
+    failure shape -- what it actually checks is what the plan cares about:
+    fw_build/RUNNING/fingerprint all read back exactly as they were before
+    the push was ever attempted, once power is restored."""
+    idle, reason = _is_idle(ctx)
+    if not idle:
+        return CaseResult(Verdict.SKIP, reason=reason)
+
+    host = ctx.get("host")
+    ap_password = ctx.get("ap_password")
+    image_path = ctx.get("ota_image_path")
+    if not ap_password or not image_path:
+        return CaseResult(Verdict.SKIP, reason="ota_image_path/ap_password not provided for OT-E06")
+
+    ok, ireason = _interlock_ok(ctx, host)
+    if not ok:
+        return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to push: {ireason}")
+
+    prompt = ctx.get("attended_prompt")
+    if prompt is None:
+        return CaseResult(Verdict.SKIP, reason="requires --attended")
+
+    ready = prompt(
+        "OT-E06: be ready to cut power to the ESP's own supply (fixture_set_relay, "
+        "or by hand) at roughly 40% OTA progress, then restore it. Confirm ready to proceed."
+    )
+    if ready is not True:
+        reason = "operator did not respond to the power-cut prompt" if ready is None else "operator declined to proceed"
+        return CaseResult(Verdict.SKIP, reason=reason)
+
+    ota = _ota_client(ctx)
+    zones = _zones_client(ctx)
+
+    fw_build_before = _fw_build(ctx, host)
+    try:
+        zones_before = zones.get_zones(host)
+    except Exception:
+        zones_before = None
+
+    push_fn = ctx.get("_push_fn") or (lambda: ota.push_esp_image(host, image_path, ap_password))
+    try:
+        push_fn()
+    except Exception:
+        pass  # expected: the connection drops when the fixture/operator cuts power mid-write
+
+    restored = prompt("OT-E06: confirm ESP supply power has been restored and the board has rebooted.")
+    if restored is not True:
+        reason = "operator did not confirm power restoration" if restored is None else "operator reported power was not restored"
+        return CaseResult(Verdict.INCONCLUSIVE, reason=reason)
+
+    now = ctx.get("_now")
+    sleep = ctx.get("_sleep")
+    import time as _time
+    now = now or _time.monotonic
+    sleep = sleep or _time.sleep
+
+    running_after = None
+    fw_build_after = None
+    deadline = now() + 60.0
+    while now() < deadline:
+        running_after = _running_partition(ctx, host)
+        fw_build_after = _fw_build(ctx, host)
+        if fw_build_after:
+            break
+        sleep(2.0)
+
+    fingerprint_identical = None
+    try:
+        zones_after = zones.get_zones(host)
+        fingerprint_identical = (_pid_gains(zones_before) == _pid_gains(zones_after)) if zones_before else None
+    except Exception:
+        pass
+
+    return J.judge_ota_power_loss_mid_write(
+        fw_build_before, fw_build_after, running_after, "app", fingerprint_identical,
+    )
+
+
+def _case_update_refused_during_state(
+    ctx: dict, get_exec_state_fn, expected_state: str, image_ctx_key: str = "ota_image_path",
+) -> CaseResult:
+    """Shared body of OT-E07 (during a firing)/OT-E08 (during autotune):
+    read the exec/autotune state, read the live interlock, attempt a push,
+    then confirm the state is unchanged. Deliberately does NOT gate on
+    `_is_idle`/`_interlock_ok` the way every other case in this module
+    does -- the entire point of this pair is exercising the busy path, so
+    treating "not idle"/"interlock not ok" as a precondition failure would
+    make the case SKIP the very thing it exists to test. Both cases start
+    their own short HP/AT run per the plan's fixed order footnote
+    ("OT-E07/E08 (re-using a short HP/AT)"); the run itself is started and
+    torn down by an injectable ``ctx["_start_state_fn"]``/
+    ``ctx["_stop_state_fn"]`` pair so this stays unit-testable without
+    actually driving a firing or an autotune step from this module (that
+    machinery already lives in cases_heat.py/the AT-* cases and is not
+    duplicated here)."""
+    host = ctx.get("host")
+    ap_password = ctx.get("ap_password")
+    image_path = ctx.get(image_ctx_key)
+    if not ap_password or not image_path:
+        return CaseResult(Verdict.SKIP, reason=f"{image_ctx_key}/ap_password not provided")
+
+    start_fn = ctx.get("_start_state_fn")
+    stop_fn = ctx.get("_stop_state_fn")
+    started_here = False
+    state_before = get_exec_state_fn()
+    if state_before != expected_state:
+        if start_fn is None:
+            return CaseResult(
+                Verdict.SKIP,
+                reason=f"state is {state_before!r}, not {expected_state!r}, and no _start_state_fn was provided to start one",
+            )
+        try:
+            start_fn()
+        except Exception as exc:
+            return CaseResult(Verdict.SKIP, reason=f"could not start {expected_state}: {type(exc).__name__}: {exc}")
+        started_here = True
+        state_before = get_exec_state_fn()
+
+    try:
+        if state_before != expected_state:
+            return CaseResult(
+                Verdict.INCONCLUSIVE,
+                reason=f"state_before={state_before!r} after starting one, expected {expected_state!r}",
+            )
+
+        interlock_ok, _ireason = _interlock_ok(ctx, host)
+
+        ota = _ota_client(ctx)
+        push_fn = ctx.get("_push_fn") or (lambda: ota.push_esp_image(host, image_path, ap_password))
+        push_refused = None
+        try:
+            push = push_fn()
+            push_refused = not getattr(push, "ok", False)
+        except Exception:
+            push_refused = True
+
+        state_after = get_exec_state_fn()
+
+        return J.judge_ota_update_refused_during_state(
+            interlock_ok, push_refused, state_before, state_after, expected_state,
+        )
+    finally:
+        if started_here and stop_fn is not None:
+            try:
+                stop_fn()
+            except Exception:
+                pass
+
+
+def _case_ote07(ctx: dict) -> CaseResult:
+    """OT-E07: an OTA update attempted while HP-01-shaped firing is
+    RUNNING (and, per the plan, again with PAUSED -- ``ctx["_exec_state_fn"]``
+    lets a caller feed either) must be refused, and the firing must
+    continue unaffected."""
+    get_state_fn = ctx.get("_exec_state_fn")
+    if get_state_fn is None:
+        srv = _srv(ctx)
+        get_state_fn = lambda: getattr(srv._profiles.get_exec_status(), "state_name", None)
+    expected_state = ctx.get("_ote07_expected_state", "RUNNING")
+    return _case_update_refused_during_state(ctx, get_state_fn, expected_state)
+
+
+def _case_ote08(ctx: dict) -> CaseResult:
+    """OT-E08: an OTA update attempted while AT-01-shaped autotune is
+    active must be refused (`ota_interlock.c:50`), and autotune must
+    continue unaffected."""
+    get_state_fn = ctx.get("_autotune_state_fn")
+    if get_state_fn is None:
+        srv = _srv(ctx)
+        get_state_fn = lambda: getattr(srv._autotune.get_status(), "state_name", None)
+    expected_state = ctx.get("_ote08_expected_state", "ACTIVE")
+    return _case_update_refused_during_state(ctx, get_state_fn, expected_state)
+
+
+def _case_ote09(ctx: dict) -> CaseResult:
+    """OT-E09: POST /api/ota/esp with no credential at all (no
+    ``X-Ota-Mac`` header) -- 401/403, nothing written. Deliberately does
+    NOT require ``ap_password`` in ctx (there is none to use for this
+    case)."""
+    idle, reason = _is_idle(ctx)
+    if not idle:
+        return CaseResult(Verdict.SKIP, reason=reason)
+
+    host = ctx.get("host")
+    image_path = ctx.get("ota_image_path")
+    if not image_path:
+        return CaseResult(Verdict.SKIP, reason="ota_image_path not provided for OT-E09")
+
+    ok, ireason = _interlock_ok(ctx, host)
+    if not ok:
+        return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to push: {ireason}")
+
+    ota = _ota_client(ctx)
+    running_before = _running_partition(ctx, host)
+    fw_build_before = _fw_build(ctx, host)
+
+    push_fn = ctx.get("_push_no_credential_fn") or (lambda: ota.push_esp_image_unauthenticated(host, image_path))
+    refused = None
+    try:
+        push = push_fn()
+        refused = not push.ok
+    except Exception:
+        refused = True
+
+    running_after = _running_partition(ctx, host)
+    fw_build_after = _fw_build(ctx, host)
+
+    return J.judge_ota_push_refused(refused, running_before, running_after, fw_build_before, fw_build_after)
+
+
+def _case_ote10(ctx: dict) -> CaseResult:
+    """OT-E10: with web auth on (WEB-SEC-03 turned it on earlier in this
+    run), OT-E01 repeated with an ADMIN session cookie instead of the
+    AP-password HMAC must succeed, and again with a ``user``-tier session
+    must be refused. Credentials come only from ctx overrides or the
+    ``KILNCTL_WEB_*`` environment variables (same discipline as
+    cases_web_rw.py's WEB-SEC-03: never hardcoded, never logged) -- SKIP
+    if either the admin or the user-tier credential pair is missing,
+    since there is no separate operator-visible knob for the second,
+    non-admin account this case specifically needs."""
+    idle, reason = _is_idle(ctx)
+    if not idle:
+        return CaseResult(Verdict.SKIP, reason=reason)
+
+    host = ctx.get("host")
+    image_path = ctx.get("ota_image_path")
+    if not image_path:
+        return CaseResult(Verdict.SKIP, reason="ota_image_path not provided for OT-E10")
+
+    admin_user = ctx.get("web_admin_username") or os.environ.get("KILNCTL_WEB_USERNAME")
+    admin_pass = ctx.get("web_admin_password") or os.environ.get("KILNCTL_WEB_PASSWORD")
+    user_user = ctx.get("web_user_username") or os.environ.get("KILNCTL_WEB_USER_USERNAME")
+    user_pass = ctx.get("web_user_password") or os.environ.get("KILNCTL_WEB_USER_PASSWORD")
+    if not all([admin_user, admin_pass, user_user, user_pass]):
+        return CaseResult(
+            Verdict.SKIP,
+            reason=(
+                "requires KILNCTL_WEB_USERNAME/PASSWORD (admin) and "
+                "KILNCTL_WEB_USER_USERNAME/PASSWORD (a distinct user-tier account) -- credentials not provided"
+            ),
+        )
+
+    ok, ireason = _interlock_ok(ctx, host)
+    if not ok:
+        return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to push: {ireason}")
+
+    login_fn = ctx.get("_login_fn")
+    if login_fn is None:
+        return CaseResult(Verdict.SKIP, reason="no _login_fn provided to establish a web-auth session")
+
+    admin_status, admin_cookie = login_fn(admin_user, admin_pass)
+    if admin_status != 200 or not admin_cookie:
+        return CaseResult(Verdict.FAIL, reason=f"admin login failed: status={admin_status!r}")
+
+    user_status, user_cookie = login_fn(user_user, user_pass)
+    if user_status != 200 or not user_cookie:
+        return CaseResult(Verdict.FAIL, reason=f"user login failed: status={user_status!r}")
+
+    ota = _ota_client(ctx)
+    push_with_session_fn = ctx.get("_push_with_session_fn") or (
+        lambda cookie: ota.push_esp_image_with_session(host, image_path, cookie)
+    )
+
+    admin_ok = None
+    try:
+        admin_result = push_with_session_fn(admin_cookie)
+        admin_ok = bool(getattr(admin_result, "ok", False))
+    except Exception:
+        admin_ok = False
+
+    user_refused = None
+    try:
+        user_result = push_with_session_fn(user_cookie)
+        user_refused = not getattr(user_result, "ok", False)
+    except Exception:
+        user_refused = True
+
+    return J.judge_ota_session_auth_tiers(admin_ok, user_refused)
 
 
 def _case_ote12(ctx: dict) -> CaseResult:
@@ -408,6 +836,13 @@ _CASE_FUNCS = {
     "OT-E01": _case_ote01,
     "OT-E02": _case_ote02,
     "OT-E03": _case_ote03,
+    "OT-E04": _case_ote04,
+    "OT-E05": _case_ote05,
+    "OT-E06": _case_ote06,
+    "OT-E07": _case_ote07,
+    "OT-E08": _case_ote08,
+    "OT-E09": _case_ote09,
+    "OT-E10": _case_ote10,
     "OT-E12": _case_ote12,
 }
 for _cid, _fn in _CASE_FUNCS.items():

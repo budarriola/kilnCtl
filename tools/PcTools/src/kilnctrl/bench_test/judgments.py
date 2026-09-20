@@ -1219,6 +1219,101 @@ def judge_ota_rollback(
     return CaseResult(Verdict.PASS, observed=observed)
 
 
+def judge_ota_power_loss_mid_write(
+    fw_build_before: Optional[str],
+    fw_build_after: Optional[str],
+    running: Optional[str],
+    expected_running: str,
+    fingerprint_identical: Optional[bool],
+) -> CaseResult:
+    """OT-E06: power cut mid-write must leave the board exactly where it
+    started -- the bootloader refuses the partial image, so ``fw_build``
+    and RUNNING after power is restored must equal what they were before
+    the push was ever attempted, same "unchanged" contract as
+    ``judge_ota_push_refused`` (OT-E03/04/05) but observed across a real
+    power cycle rather than an HTTP refusal. ``fingerprint_identical`` is
+    None only when a zones read failed on one side -- that is INCONCLUSIVE,
+    never a silent PASS, since the whole point of this case is confirming
+    nothing changed."""
+    observed = {
+        "fw_build_before": fw_build_before, "fw_build_after": fw_build_after,
+        "running": running, "expected_running": expected_running,
+        "fingerprint_identical": fingerprint_identical,
+    }
+    if fw_build_after != fw_build_before:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"fw_build changed across a power-loss-mid-write ({fw_build_before!r} -> {fw_build_after!r}) -- bootloader accepted a partial image",
+            observed=observed,
+        )
+    if running != expected_running:
+        return CaseResult(
+            Verdict.FAIL, reason=f"running={running!r}, expected {expected_running!r} after power restore",
+            observed=observed,
+        )
+    if fingerprint_identical is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="zones-config fingerprint was not readable on one side of the power cut", observed=observed)
+    if fingerprint_identical is not True:
+        return CaseResult(Verdict.FAIL, reason="zones-config fingerprint changed across a power-loss-mid-write", observed=observed)
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_ota_update_refused_during_state(
+    interlock_ok: Optional[bool],
+    push_refused: Optional[bool],
+    state_before: Optional[str],
+    state_after: Optional[str],
+    expected_state: str,
+) -> CaseResult:
+    """OT-E07/OT-E08: an OTA push attempted while a firing (OT-E07) or
+    autotune (OT-E08) is active must be refused, and that firing/autotune
+    must continue unaffected -- both the live GET /api/ota/interlock read
+    and the push attempt itself must agree the update was blocked, and the
+    state (``profiles_get_exec_status``/``autotune_get_status``) must read
+    the same active value before and after the attempt, never having been
+    disturbed by the refused push."""
+    observed = {
+        "interlock_ok": interlock_ok, "push_refused": push_refused,
+        "state_before": state_before, "state_after": state_after, "expected_state": expected_state,
+    }
+    if state_before != expected_state:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=f"state_before={state_before!r}, expected {expected_state!r} -- the case's own precondition was not met",
+            observed=observed,
+        )
+    if interlock_ok is not False:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"GET /api/ota/interlock reported ok={interlock_ok!r} while {expected_state} was active, expected ok:false",
+            observed=observed,
+        )
+    if not push_refused:
+        return CaseResult(Verdict.FAIL, reason="OTA push was accepted while a firing/autotune was active, expected a refusal", observed=observed)
+    if state_after != expected_state:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"state_after={state_after!r}, expected {expected_state!r} -- the refused push disturbed the run in progress",
+            observed=observed,
+        )
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_ota_session_auth_tiers(admin_ok: Optional[bool], user_refused: Optional[bool]) -> CaseResult:
+    """OT-E10: with web auth on, an ADMIN session cookie must be accepted
+    for an OTA push (ota_http.c retires the AP-password HMAC entirely once
+    ``http_auth_policy_web_enabled()`` is true -- the route-tier
+    pre-handler already required ADMIN before the handler was reached) and
+    a ``user``-tier session must be refused for the same route
+    (`route_tier_table.h`'s ADMIN tier on ``/api/ota/esp``)."""
+    observed = {"admin_ok": admin_ok, "user_refused": user_refused}
+    if admin_ok is not True:
+        return CaseResult(Verdict.FAIL, reason="OTA push with an ADMIN session cookie was refused, expected accepted", observed=observed)
+    if not user_refused:
+        return CaseResult(Verdict.FAIL, reason="OTA push with a user-tier session cookie was accepted, expected refused", observed=observed)
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
 def judge_ota_partitions_state(running: Optional[str], expected_running: str) -> CaseResult:
     """OT-E12: otadata/partition state recorded after every OT-E case. Only
     FAILs the one condition the plan names: RUNNING reads back 'recovery'

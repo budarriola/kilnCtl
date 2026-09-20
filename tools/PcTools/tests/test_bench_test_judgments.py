@@ -334,5 +334,64 @@ class RateGuardConsistencyTest(unittest.TestCase):
         self.assertEqual(r.verdict, Verdict.FAIL)
 
 
+class OtaPowerLossMidWriteTest(unittest.TestCase):
+    def test_unchanged_state_passes(self):
+        r = J.judge_ota_power_loss_mid_write("B1", "B1", "app", "app", True)
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_fw_build_changed_fails(self):
+        r = J.judge_ota_power_loss_mid_write("B1", "B2", "app", "app", True)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("fw_build changed", r.reason)
+
+    def test_wrong_running_partition_fails(self):
+        r = J.judge_ota_power_loss_mid_write("B1", "B1", "recovery", "app", True)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_unreadable_fingerprint_is_inconclusive(self):
+        r = J.judge_ota_power_loss_mid_write("B1", "B1", "app", "app", None)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
+    def test_fingerprint_changed_fails(self):
+        r = J.judge_ota_power_loss_mid_write("B1", "B1", "app", "app", False)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+
+class OtaUpdateRefusedDuringStateTest(unittest.TestCase):
+    def test_refused_and_state_unchanged_passes(self):
+        r = J.judge_ota_update_refused_during_state(False, True, "RUNNING", "RUNNING", "RUNNING")
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_precondition_not_met_is_inconclusive(self):
+        r = J.judge_ota_update_refused_during_state(False, True, "idle", "idle", "RUNNING")
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
+    def test_interlock_reports_ok_while_busy_fails(self):
+        r = J.judge_ota_update_refused_during_state(True, True, "RUNNING", "RUNNING", "RUNNING")
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_push_accepted_fails(self):
+        r = J.judge_ota_update_refused_during_state(False, False, "RUNNING", "RUNNING", "RUNNING")
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_state_disturbed_by_refused_push_fails(self):
+        r = J.judge_ota_update_refused_during_state(False, True, "RUNNING", "PAUSED", "RUNNING")
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+
+class OtaSessionAuthTiersTest(unittest.TestCase):
+    def test_admin_ok_user_refused_passes(self):
+        r = J.judge_ota_session_auth_tiers(True, True)
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_admin_refused_fails(self):
+        r = J.judge_ota_session_auth_tiers(False, True)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_user_accepted_fails(self):
+        r = J.judge_ota_session_auth_tiers(True, False)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+
 if __name__ == "__main__":
     unittest.main()
