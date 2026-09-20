@@ -223,6 +223,18 @@ ALLOWLIST = {
     # only from ota_pico_post_handler()'s single-threaded httpd handler, not
     # a PSRAM-stacked task.
     "ota_http_pico.c",
+    # Owner decision 2026-09-20, task 3: the esp_partition_erase_range()/
+    # esp_partition_write() call sites that used to live inline in
+    # ota_http_pico.c's ota_pico_do_stage() (see that file's entry just above)
+    # moved into this new shared module, pico_img_stage.c, so
+    # net/pico_auto_update_boot.c's embedded-image writer and
+    # ota_http_pico.c's HTTP-streaming writer call the same
+    # begin/write_chunk/finish() sequence instead of each keeping its own
+    # copy. Same reasoning as the entry above: both callers run on the httpd
+    # task or the boot task respectively -- internal-SRAM stack, never the
+    # flash worker, never PSRAM-stacked -- so moving the calls here changes
+    # nothing about which stack they run on, only which file owns the code.
+    "pico_img_stage.c",
     # Pattern 3 (init-time only): ota_record_save() runs once from
     # app_main's boot-time OTA-verify sequence.
     "ota_record.c",

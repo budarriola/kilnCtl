@@ -24,22 +24,32 @@ NVS_KEY_LEN_CHECK(NVS_KEY_REC);
 /* Bumped whenever pico_update_attempts_record_t's layout changes -- same
  * "discard rather than migrate" convention as boot_guard.c/run_state.c: a
  * lost attempt-count record costs at most one fresh budget, never a reason
- * to mis-parse an old layout. */
-#define PUA_RECORD_VERSION 1
+ * to mis-parse an old layout.
+ *
+ * v2 (2026-09-20): added last_slot, the persisted embedded-slot alternation
+ * for docs/PICO_AUTO_UPDATE_PLAN.md's embedded-image work -- see
+ * pico_update_attempts_next_slot(). A v1 record on flash simply fails
+ * record_is_valid() and is discarded (fresh budget), same as any other
+ * corruption -- there is no v1->v2 migration here, matching this module's
+ * own "discard rather than migrate" convention (NOT the CONFIG_MIGRATION_
+ * CHAIN_PLAN.md policy, which applies to the two processors' PERSISTENT
+ * CONFIG stores, not this attempt-budget scratch counter). */
+#define PUA_RECORD_VERSION 2
 
 /* Single-slot record -- see this module's header top comment. pair_hash
- * says WHICH (expected, observed) pair the count/failed fields belong to;
- * a load for a different pair is treated as no record at all. */
+ * says WHICH (expected, observed) pair the count/failed/last_slot fields
+ * belong to; a load for a different pair is treated as no record at all. */
 typedef struct {
     uint8_t  version;
     uint8_t  reserved[3];
     uint32_t pair_hash;
     uint32_t attempt_count;
-    uint32_t failed; /* 0 or 1 -- kept as uint32_t so the struct stays 4-aligned throughout */
+    uint32_t failed;    /* 0 or 1 -- kept as uint32_t so the struct stays 4-aligned throughout */
+    uint32_t last_slot; /* 0 = SaftyFW_slotA, 1 = SaftyFW_slotB; which embedded image the last attempt for this pair pushed */
     uint32_t crc32;
 } pico_update_attempts_record_t;
 
-typedef char pua_record_size_check[(sizeof(pico_update_attempts_record_t) == 20) ? 1 : -1];
+typedef char pua_record_size_check[(sizeof(pico_update_attempts_record_t) == 24) ? 1 : -1];
 
 /* Table-less CRC32 (IEEE 802.3/zlib polynomial) -- copied from
  * boot_guard.c's crc32_compute() rather than shared, so this module builds
@@ -99,7 +109,7 @@ uint32_t pico_update_attempts_pair_hash(const char *expected, const uint8_t *obs
     return crc32_compute(scratch, off);
 }
 
-static hal_status_t persist_record(uint32_t pair_hash, uint32_t count, bool failed)
+static hal_status_t persist_record(uint32_t pair_hash, uint32_t count, bool failed, int last_slot)
 {
     pico_update_attempts_record_t rec;
     memset(&rec, 0, sizeof(rec));
@@ -107,6 +117,7 @@ static hal_status_t persist_record(uint32_t pair_hash, uint32_t count, bool fail
     rec.pair_hash = pair_hash;
     rec.attempt_count = count;
     rec.failed = failed ? 1u : 0u;
+    rec.last_slot = (last_slot != 0) ? 1u : 0u;
     rec.crc32 = record_crc(&rec);
 
     hal_kv_handle_t h;
@@ -167,7 +178,8 @@ bool pico_update_attempts_load(uint32_t pair_hash, uint32_t *out_count, bool *ou
  * a verify step needs to tell a genuine match apart from an unreadable
  * write, and this caller treats those two outcomes differently (retry vs.
  * give up quietly). */
-static bool verify_record(uint32_t pair_hash, uint32_t expected_count, bool expected_failed)
+static bool verify_record(uint32_t pair_hash, uint32_t expected_count, bool expected_failed,
+                           int expected_last_slot)
 {
     pico_update_attempts_record_t rec;
     hal_kv_handle_t h;
@@ -182,10 +194,11 @@ static bool verify_record(uint32_t pair_hash, uint32_t expected_count, bool expe
         return false;
     }
     return rec.pair_hash == pair_hash && rec.attempt_count == expected_count
-           && (rec.failed != 0u) == expected_failed;
+           && (rec.failed != 0u) == expected_failed
+           && rec.last_slot == ((expected_last_slot != 0) ? 1u : 0u);
 }
 
-static hal_status_t erase_then_persist(uint32_t pair_hash, uint32_t count, bool failed)
+static hal_status_t erase_then_persist(uint32_t pair_hash, uint32_t count, bool failed, int last_slot)
 {
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
@@ -198,34 +211,34 @@ static hal_status_t erase_then_persist(uint32_t pair_hash, uint32_t count, bool 
                  hal_status_to_name(erase_err));
     }
     hal_kv_close(&h);
-    return persist_record(pair_hash, count, failed);
+    return persist_record(pair_hash, count, failed, last_slot);
 }
 
 /* Shared write-verify-retry-once sequence -- boot_guard.c's
  * clear_persisted_counter_verified_locked(), generalized to an arbitrary
- * (count, failed) pair instead of always clearing to 0. Never trust the
- * write call's own return code alone (2026-09-08 boot_guard audit: a HAL_OK
- * write was observed not to reach flash) -- read it back before reporting
- * success. */
-static bool write_verified(uint32_t pair_hash, uint32_t count, bool failed)
+ * (count, failed, last_slot) tuple instead of always clearing to 0. Never
+ * trust the write call's own return code alone (2026-09-08 boot_guard audit:
+ * a HAL_OK write was observed not to reach flash) -- read it back before
+ * reporting success. */
+static bool write_verified(uint32_t pair_hash, uint32_t count, bool failed, int last_slot)
 {
-    hal_status_t err = persist_record(pair_hash, count, failed);
-    bool verified = (err == HAL_OK) && verify_record(pair_hash, count, failed);
+    hal_status_t err = persist_record(pair_hash, count, failed, last_slot);
+    bool verified = (err == HAL_OK) && verify_record(pair_hash, count, failed, last_slot);
     if (!verified) {
         ESP_LOGW(TAG, "pico-update-attempts write did not verify on the first attempt -- retrying "
                       "once with an explicit erase-then-write");
-        err = erase_then_persist(pair_hash, count, failed);
-        verified = (err == HAL_OK) && verify_record(pair_hash, count, failed);
+        err = erase_then_persist(pair_hash, count, failed, last_slot);
+        verified = (err == HAL_OK) && verify_record(pair_hash, count, failed, last_slot);
     }
     if (!verified) {
-        ESP_LOGE(TAG, "pico-update-attempts write for pair 0x%08lx (count=%lu failed=%d) did not "
+        ESP_LOGE(TAG, "pico-update-attempts write for pair 0x%08lx (count=%lu failed=%d slot=%d) did not "
                       "verify after retry -- caller must not trust this attempt was persisted",
-                 (unsigned long)pair_hash, (unsigned long)count, (int)failed);
+                 (unsigned long)pair_hash, (unsigned long)count, (int)failed, last_slot);
     }
     return verified;
 }
 
-bool pico_update_attempts_record_attempt(uint32_t pair_hash, uint32_t *out_new_count)
+bool pico_update_attempts_record_attempt(uint32_t pair_hash, int slot_tried, uint32_t *out_new_count)
 {
     uint32_t prior_count = 0;
     bool have = pico_update_attempts_load(pair_hash, &prior_count, NULL);
@@ -241,14 +254,27 @@ bool pico_update_attempts_record_attempt(uint32_t pair_hash, uint32_t *out_new_c
     if (have) {
         (void)pico_update_attempts_load(pair_hash, NULL, &prior_failed);
     }
-    return write_verified(pair_hash, new_count, prior_failed);
+    return write_verified(pair_hash, new_count, prior_failed, slot_tried);
 }
 
 bool pico_update_attempts_record_failure(uint32_t pair_hash)
 {
     uint32_t count = 0;
     (void)pico_update_attempts_load(pair_hash, &count, NULL);
-    return write_verified(pair_hash, count, true);
+    pico_update_attempts_record_t rec;
+    int last_slot = load_record(&rec) && rec.pair_hash == pair_hash ? (int)rec.last_slot : 0;
+    return write_verified(pair_hash, count, true, last_slot);
+}
+
+bool pico_update_attempts_next_slot(uint32_t pair_hash, int *out_slot)
+{
+    pico_update_attempts_record_t rec;
+    bool have = load_record(&rec) && rec.pair_hash == pair_hash;
+    int next = (have && rec.last_slot == 0u) ? 1 : 0; /* fresh pair, or last was B -> start/return to A */
+    if (out_slot != NULL) {
+        *out_slot = next;
+    }
+    return have;
 }
 
 bool pico_update_attempts_clear(void)

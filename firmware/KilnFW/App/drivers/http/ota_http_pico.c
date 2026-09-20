@@ -39,6 +39,10 @@
 #include "ota_record.h"
 #include "pico_image_manifest.h" /* pico_image_manifest_store() -- record what was staged, so a
                                   * LATER BOOT can re-use this image (PICO_AUTO_UPDATE_PLAN.md G1) */
+#include "pico_img_stage.h" /* shared erase/write/manifest sequence -- owner decision 2026-09-20,
+                             * task 3: this HTTP path and net/pico_auto_update_boot.c's embedded-
+                             * image path now both call into pico_img_stage_begin/write_chunk/
+                             * finish() rather than each keeping its own copy */
 #include "profile_executor.h" /* PROFILE_EXEC_* enum only, not its live state -- see below */
 #include "run_state.h"
 #include "stack_margin.h"
@@ -89,9 +93,7 @@ static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
     // without skipping past an initializer -- same discipline
     // ota_esp_do_transfer() uses for handle/ota_began/target.
     size_t content_len = 0;
-    const esp_partition_t *part = NULL;
-    uint32_t crc = OTA_IMAGE_CRC32_INIT; // seed 0, no final XOR -- see ota_image_crc.h
-    size_t written = 0;
+    pico_img_stage_ctx_t stage;
 
     // Image SHA-256 over every byte staged into pico_img -- same
     // best-effort, record-not-gate reasoning as ota_esp_do_transfer()'s own
@@ -120,18 +122,16 @@ static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
         goto cleanup;
     }
 
-    part = ota_pico_img_partition();
-    if (!part) {
-        snprintf(fail_reason, sizeof(fail_reason), "pico_img staging partition not found");
+    if (!pico_img_stage_begin(&stage, content_len, fail_reason, sizeof(fail_reason))) {
+        // pico_img_stage_begin() covers both "partition not found" and
+        // "image too large for the partition" -- same two failure shapes
+        // the inline version used to distinguish, folded into one message.
+        // Neither is really a client error, but a too-large image is closer
+        // to one than a missing partition is, so keep that one distinction
+        // rather than flattening both to 500.
+        bool too_large = (strstr(fail_reason, "large") != NULL);
         ESP_LOGE(OTA_HTTP_TAG, "OTA pico update from %s: %s", ip, fail_reason);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, fail_reason);
-        goto cleanup;
-    }
-    if (content_len > part->size) {
-        snprintf(fail_reason, sizeof(fail_reason), "image (%u B) larger than the pico_img partition (%u B)",
-                 (unsigned)content_len, (unsigned)part->size);
-        ESP_LOGW(OTA_HTTP_TAG, "OTA pico update from %s: %s", ip, fail_reason);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, fail_reason);
+        httpd_resp_send_err(req, too_large ? HTTPD_400_BAD_REQUEST : HTTPD_500_INTERNAL_SERVER_ERROR, fail_reason);
         goto cleanup;
     }
 
@@ -147,22 +147,10 @@ static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
         }
     }
 
-    // Erase only what this upload needs, rounded up to the flash sector
-    // size esp_partition_write() requires already-erased -- not the whole
-    // 896K partition, which would cost real time for no benefit on a
-    // typical (much smaller) Pico image.
-    {
-        uint32_t sector = esp_partition_get_main_flash_sector_size();
-        size_t erase_len = ((content_len + sector - 1u) / sector) * sector;
-        esp_err_t erc = esp_partition_erase_range(part, 0, erase_len);
-        if (erc != ESP_OK) {
-            snprintf(fail_reason, sizeof(fail_reason), "pico_img erase failed: %s", esp_err_to_name(erc));
-            ESP_LOGE(OTA_HTTP_TAG, "OTA pico update from %s: %s", ip, fail_reason);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "flash erase failed");
-            goto cleanup;
-        }
-    }
-
+    // Erase (rounded up to the flash sector size) already happened inside
+    // pico_img_stage_begin() above -- not the whole 896K partition, which
+    // would cost real time for no benefit on a typical (much smaller) Pico
+    // image.
     {
         psa_status_t hs = psa_hash_setup(&sha_op, PSA_ALG_SHA_256);
         sha_op_active = (hs == PSA_SUCCESS);
@@ -182,39 +170,35 @@ static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
     // no faster than it can be written to flash is the same principle
     // applied to this (fast) staging step.
     int last_logged_decile = 0;
-    while (written < content_len) {
-        size_t want = content_len - written;
+    while (stage.written < content_len) {
+        size_t want = content_len - stage.written;
         if (want > sizeof(s_ota_pico_chunk)) {
             want = sizeof(s_ota_pico_chunk);
         }
         int ret = httpd_req_recv(req, (char *)s_ota_pico_chunk, want);
         if (ret <= 0) {
             snprintf(fail_reason, sizeof(fail_reason), "body read failed/closed at %u/%u bytes (%d)",
-                     (unsigned)written, (unsigned)content_len, ret);
+                     (unsigned)stage.written, (unsigned)content_len, ret);
             ESP_LOGW(OTA_HTTP_TAG, "OTA pico update from %s: %s", ip, fail_reason);
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed mid-transfer");
             goto cleanup;
         }
 
-        esp_err_t werr = esp_partition_write(part, written, s_ota_pico_chunk, (size_t)ret);
-        if (werr != ESP_OK) {
-            snprintf(fail_reason, sizeof(fail_reason), "pico_img write failed at %u bytes: %s",
-                     (unsigned)written, esp_err_to_name(werr));
+        if (!pico_img_stage_write_chunk(&stage, s_ota_pico_chunk, (size_t)ret, fail_reason, sizeof(fail_reason))) {
             ESP_LOGE(OTA_HTTP_TAG, "OTA pico update from %s: %s", ip, fail_reason);
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "flash write failed");
             goto cleanup;
         }
-        crc = ota_image_crc32_update(crc, s_ota_pico_chunk, (size_t)ret);
         if (sha_op_active) {
             (void)psa_hash_update(&sha_op, s_ota_pico_chunk, (size_t)ret);
         }
-        written += (size_t)ret;
 
-        int decile = (int)((written * 10u) / content_len);
+        int decile = (int)((stage.written * 10u) / content_len);
         if (decile > last_logged_decile) {
             last_logged_decile = decile;
             ESP_LOGI(OTA_HTTP_TAG, "OTA pico update from %s: staged %u%% (%u/%u bytes)", ip,
-                     (unsigned)((written * 100u) / content_len), (unsigned)written, (unsigned)content_len);
+                     (unsigned)((stage.written * 100u) / content_len), (unsigned)stage.written,
+                     (unsigned)content_len);
         }
     }
 
@@ -231,30 +215,31 @@ static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
         sha_op_active = false; // finished (or failed to finish) -- nothing left to abort in cleanup
     }
 
-    ESP_LOGI(OTA_HTTP_TAG, "OTA pico update from %s: staged %u bytes to pico_img, crc32=0x%08X -- starting relay",
-             ip, (unsigned)written, (unsigned)crc);
-
     // docs/PICO_AUTO_UPDATE_PLAN.md G1: remember what was just staged, so a
-    // LATER BOOT can re-use this image. Until now the bytes were written,
-    // handed straight to the relay, and never described -- which left a
-    // perfectly good image in pico_img that nothing could identify or trust
-    // after a reboot, and left the boot-time auto-updater with no image
-    // source at all. Written BEFORE the relay starts on purpose: if this
-    // relay attempt fails, the staged image is still good and the next boot
-    // should be able to retry with it.
+    // LATER BOOT can re-use this image. pico_img_stage_finish() persists the
+    // read-back-verified manifest (pico_image_manifest_store()) and hands
+    // back the final CRC-32 -- written BEFORE the relay starts on purpose:
+    // if this relay attempt fails, the staged image is still good and the
+    // next boot should be able to retry with it.
     //
-    // Deliberately not fatal to this request. The bytes are staged and the
-    // relay can still run; all that is lost is the ability for a future boot
-    // to re-use them. pico_image_manifest_store() read-back verifies and logs
-    // loudly on its own if the record did not reach flash.
-    if (!pico_image_manifest_store((uint32_t)written, crc)) {
+    // Deliberately not fatal to this request on a false return. The bytes
+    // are staged and the relay can still run; all that is lost is the
+    // ability for a future boot to re-use them. pico_img_stage_finish()
+    // (via pico_image_manifest_store()) logs loudly on its own if the
+    // record did not reach flash.
+    uint32_t crc = 0;
+    if (!pico_img_stage_finish(&stage, &crc)) {
         ESP_LOGW(OTA_HTTP_TAG, "OTA pico update from %s: the staged-image manifest did not verify -- "
                       "this update proceeds, but a later boot will not be able to re-use this "
                       "staged image for an automatic update",
                  ip);
     }
 
-    if (!ota_pico_relay_start(ota_http_safety, (uint32_t)written, crc, NULL, have_sha_digest ? sha_digest : NULL)) {
+    ESP_LOGI(OTA_HTTP_TAG, "OTA pico update from %s: staged %u bytes to pico_img, crc32=0x%08X -- starting relay",
+             ip, (unsigned)stage.written, (unsigned)crc);
+
+    if (!ota_pico_relay_start(ota_http_safety, (uint32_t)stage.written, crc, NULL,
+                              have_sha_digest ? sha_digest : NULL)) {
         snprintf(fail_reason, sizeof(fail_reason), "image staged, but the relay task could not be started");
         ESP_LOGE(OTA_HTTP_TAG, "OTA pico update from %s: %s", ip, fail_reason);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, fail_reason);
@@ -266,7 +251,7 @@ static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
         char body[160];
         int n = snprintf(body, sizeof(body),
                           "{\"ok\":true,\"status\":\"relay_started\",\"bytes\":%u,\"crc32\":\"0x%08X\"}",
-                          (unsigned)written, (unsigned)crc);
+                          (unsigned)stage.written, (unsigned)crc);
         httpd_resp_set_status(req, "202 Accepted");
         httpd_resp_set_type(req, "application/json");
         ota_http_send_json_clamped(req, body, n, sizeof(body));

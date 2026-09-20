@@ -324,7 +324,8 @@ static bool relay_wait_for_states(SafetyLinkClass *link, uint32_t since_ms, uint
                 uint32_t bit = (st.state < 32u) ? (1u << st.state) : 0u;
                 bool terminal = (st.state == SAFETY_LINK_UPDATE_STATE_REFUSED) ||
                                  (st.state == SAFETY_LINK_UPDATE_STATE_FAILED) ||
-                                 (st.state == SAFETY_LINK_UPDATE_STATE_ABORTED);
+                                 (st.state == SAFETY_LINK_UPDATE_STATE_ABORTED) ||
+                                 (st.state == SAFETY_LINK_UPDATE_STATE_REJECTED_SLOT_LINKAGE);
                 if ((bit & accept_state_mask) || terminal) {
                     *out = st;
                     return true;
@@ -621,6 +622,10 @@ static void relay_task_fn(void *arg)
             format_reason(reason, sizeof(reason),
                      "image still incomplete after %u retransmission rounds -- gave up",
                      (unsigned)RELAY_MAX_RETRANSMIT_ROUNDS);
+            goto abort_and_fail;
+        } else if (st.state == SAFETY_LINK_UPDATE_STATE_REJECTED_SLOT_LINKAGE) {
+            format_reason(reason, sizeof(reason),
+                     "Pico rejected the image: vector table not linked for the slot it was written into");
             goto abort_and_fail;
         } else {
             format_update_error(st.last_error, err_str, sizeof(err_str));

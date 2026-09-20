@@ -78,10 +78,10 @@ static void test_record_attempt_increments_and_verifies(void)
     uint32_t pair = 0x1111u;
     uint32_t new_count = 0;
 
-    TEST_CHECK(pico_update_attempts_record_attempt(pair, &new_count), "first attempt verifies");
+    TEST_CHECK(pico_update_attempts_record_attempt(pair, 0, &new_count), "first attempt verifies");
     TEST_CHECK(new_count == 1u, "first attempt for a fresh pair starts at 1");
 
-    TEST_CHECK(pico_update_attempts_record_attempt(pair, &new_count), "second attempt verifies");
+    TEST_CHECK(pico_update_attempts_record_attempt(pair, 0, &new_count), "second attempt verifies");
     TEST_CHECK(new_count == 2u, "second attempt for the SAME pair increments rather than resetting");
 
     uint32_t loaded_count = 0;
@@ -101,7 +101,7 @@ static void test_new_pair_gets_a_fresh_budget(void)
     uint32_t new_count = 0;
 
     for (int i = 0; i < 3; i++) {
-        TEST_CHECK(pico_update_attempts_record_attempt(pair_a, &new_count), "pair A attempt verifies");
+        TEST_CHECK(pico_update_attempts_record_attempt(pair_a, 0, &new_count), "pair A attempt verifies");
     }
     TEST_CHECK(new_count == 3u, "pair A ran up to 3 attempts");
 
@@ -111,7 +111,7 @@ static void test_new_pair_gets_a_fresh_budget(void)
     // pair A's count of 3 -- this is exactly the "reset one side of a pair"
     // class CLAUDE.md warns about, applied to two DIFFERENT real mismatches
     // sharing one persisted slot.
-    TEST_CHECK(pico_update_attempts_record_attempt(pair_b, &new_count), "pair B's first attempt verifies");
+    TEST_CHECK(pico_update_attempts_record_attempt(pair_b, 0, &new_count), "pair B's first attempt verifies");
     TEST_CHECK(new_count == 1u,
                "pair B starts at 1, NOT 4 -- a new (expected, observed) pair must not inherit an "
                "unrelated prior pair's attempt count");
@@ -129,7 +129,7 @@ static void test_record_failure_sets_flag_without_touching_count(void)
     reset_store();
     uint32_t pair = 0x2222u;
     uint32_t new_count = 0;
-    TEST_CHECK(pico_update_attempts_record_attempt(pair, &new_count), "one attempt recorded");
+    TEST_CHECK(pico_update_attempts_record_attempt(pair, 0, &new_count), "one attempt recorded");
     TEST_CHECK(new_count == 1u, "count is 1 before the failure");
 
     TEST_CHECK(pico_update_attempts_record_failure(pair), "record_failure verifies");
@@ -150,9 +150,9 @@ static void test_attempt_after_failure_preserves_failed_flag(void)
     reset_store();
     uint32_t pair = 0x3333u;
     uint32_t new_count = 0;
-    TEST_CHECK(pico_update_attempts_record_attempt(pair, &new_count), "attempt 1");
+    TEST_CHECK(pico_update_attempts_record_attempt(pair, 0, &new_count), "attempt 1");
     TEST_CHECK(pico_update_attempts_record_failure(pair), "marked failed");
-    TEST_CHECK(pico_update_attempts_record_attempt(pair, &new_count), "attempt 2, same pair");
+    TEST_CHECK(pico_update_attempts_record_attempt(pair, 0, &new_count), "attempt 2, same pair");
 
     bool failed_after = false;
     TEST_CHECK(pico_update_attempts_load(pair, NULL, &failed_after), "record still present");
@@ -166,7 +166,7 @@ static void test_clear_removes_the_record(void)
     reset_store();
     uint32_t pair = 0x4444u;
     uint32_t new_count = 0;
-    TEST_CHECK(pico_update_attempts_record_attempt(pair, &new_count), "attempt recorded");
+    TEST_CHECK(pico_update_attempts_record_attempt(pair, 0, &new_count), "attempt recorded");
     TEST_CHECK(pico_update_attempts_clear(), "clear reports verified");
 
     uint32_t count_after = 999;
@@ -194,7 +194,7 @@ static void test_record_attempt_recovers_from_a_single_lying_write(void)
     uint32_t new_count = 0;
 
     fake_kv_script_silent_set_noops(1u);
-    TEST_CHECK(pico_update_attempts_record_attempt(pair, &new_count),
+    TEST_CHECK(pico_update_attempts_record_attempt(pair, 0, &new_count),
                "the bounded erase-then-retry recovers when only the first write lies");
 
     uint32_t loaded = 0;
@@ -209,11 +209,50 @@ static void test_record_attempt_refuses_success_when_every_write_lies(void)
     uint32_t new_count = 0;
 
     fake_kv_script_silent_set_noops(2u); /* both the first attempt AND the retry lie */
-    bool verified = pico_update_attempts_record_attempt(pair, &new_count);
+    bool verified = pico_update_attempts_record_attempt(pair, 0, &new_count);
     TEST_CHECK(!verified,
                "record_attempt reports FAILURE when neither the write nor its retry actually took "
                "-- a return-code-only version would have wrongly reported success here, which is "
                "exactly the 2026-09-08 boot_guard failure shape this module copies the fix for");
+}
+
+// Embedded-slot alternation (docs/PICO_AUTO_UPDATE_PLAN.md sec 9 step 4): a
+// fresh pair always starts at slot 0 (A); each recorded attempt flips which
+// slot the NEXT attempt for the SAME pair should try, and that choice
+// survives a simulated reboot (a fresh in-memory struct, same NVS-backed
+// fake_kv store) since it is read back from the persisted record, not from
+// any process-lifetime state.
+static void test_next_slot_alternates_and_survives_reboot(void)
+{
+    reset_store();
+    uint32_t pair = 0xA1B2C3D4u;
+    int slot = -1;
+
+    bool have = pico_update_attempts_next_slot(pair, &slot);
+    TEST_CHECK(!have, "a fresh pair has no prior record");
+    TEST_CHECK(slot == 0, "a fresh pair's first suggested slot is A (0)");
+
+    uint32_t new_count = 0;
+    TEST_CHECK(pico_update_attempts_record_attempt(pair, 0, &new_count), "attempt 1 tries slot A");
+
+    // Simulate a reboot: nothing but the NVS-backed fake_kv store survives.
+    have = pico_update_attempts_next_slot(pair, &slot);
+    TEST_CHECK(have, "the slot A attempt is readable after a simulated reboot");
+    TEST_CHECK(slot == 1, "after slot A was tried, the next suggested slot is B (1)");
+
+    TEST_CHECK(pico_update_attempts_record_attempt(pair, 1, &new_count), "attempt 2 tries slot B");
+    have = pico_update_attempts_next_slot(pair, &slot);
+    TEST_CHECK(have, "the slot B attempt is readable after a simulated reboot");
+    TEST_CHECK(slot == 0, "after slot B was tried, the next suggested slot flips back to A (0)");
+
+    // A different pair (e.g. a corrected expected commit) is a fresh budget
+    // per this module's own header comment, and must ALSO be a fresh
+    // alternation -- it must not inherit slot B's "next is A" from the
+    // unrelated pair above.
+    uint32_t other_pair = 0xDEADBEEFu;
+    have = pico_update_attempts_next_slot(other_pair, &slot);
+    TEST_CHECK(!have, "an unrelated pair has no record of its own");
+    TEST_CHECK(slot == 0, "an unrelated pair's first suggested slot is still A (0), not inherited");
 }
 
 void run_test_pico_update_attempts(void)
@@ -229,4 +268,5 @@ void run_test_pico_update_attempts(void)
     test_clear_removes_the_record();
     test_record_attempt_recovers_from_a_single_lying_write();
     test_record_attempt_refuses_success_when_every_write_lies();
+    test_next_slot_alternates_and_survives_reboot();
 }

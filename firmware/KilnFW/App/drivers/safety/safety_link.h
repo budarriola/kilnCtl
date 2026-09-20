@@ -710,6 +710,14 @@ typedef enum {
     SAFETY_LINK_UPDATE_STATE_COMPLETE  = 5,
     SAFETY_LINK_UPDATE_STATE_ABORTED   = 6,
     SAFETY_LINK_UPDATE_STATE_FAILED    = 7,
+    /* Owner decision 2026-09-20: the Pico's update_task.c now returns this
+     * wire state (reusing the CRC_MISMATCH error bit) when the image it just
+     * verified was written into the wrong slot -- linked against the OTHER
+     * slot's vector table/entry point. Mirrored here so
+     * net/ota_pico_relay.c's relay_wait_for_states() terminal set recognizes
+     * it as a distinct, nameable rejection instead of falling through to a
+     * generic 10 s UPDATE_END timeout. */
+    SAFETY_LINK_UPDATE_STATE_REJECTED_SLOT_LINKAGE = 8,
 } safety_link_update_state_t;
 
 /* UPDATE_STATUS_ERR_* bitmask, SaftyFW src/tasks/update_task.c -- mirrored,

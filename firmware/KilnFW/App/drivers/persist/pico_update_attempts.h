@@ -68,8 +68,40 @@ bool pico_update_attempts_load(uint32_t pair_hash, uint32_t *out_count, bool *ou
  * NOT trust that the attempt was actually counted (the same "logging
  * unchecked success" class CLAUDE.md's standing note names). `out_new_count`
  * (may be NULL) receives the count that was attempted (whether or not it
- * verified), for logging. */
-bool pico_update_attempts_record_attempt(uint32_t pair_hash, uint32_t *out_new_count);
+ * verified), for logging.
+ *
+ * `slot_tried` (0 = embedded SaftyFW_slotA, 1 = embedded SaftyFW_slotB) is
+ * persisted alongside the count -- see pico_update_attempts_next_slot()'s
+ * header comment for why: with two position-dependent embedded images and
+ * no way for the ESP to know which slot the Pico's bootloader will actually
+ * select, alternating which one is pushed on successive attempts means a
+ * wrong first guess is followed by the right one rather than repeating the
+ * same wrong guess for the whole budget. */
+bool pico_update_attempts_record_attempt(uint32_t pair_hash, int slot_tried, uint32_t *out_new_count);
+
+/* Which embedded slot image (0=A, 1=B) the NEXT attempt for `pair_hash`
+ * should push, alternating from whichever was tried last for this exact
+ * pair. A fresh pair (no record, or a record for a different pair) always
+ * starts at slot 0 (A) -- an arbitrary but fixed starting point, since
+ * nothing distinguishes the two slots' likelihood of being correct on a
+ * board this ESP has never attempted before.
+ *
+ * HOOK FOR THE SAFTYFW-SIDE REJECTION (not implemented yet, tracked here
+ * deliberately): a parallel SaftyFW change is adding a distinct, definitive
+ * "wrong slot" rejection code to the update protocol, which SaftyFW's own
+ * bootloader can only really know once it inspects the incoming image
+ * against the slot it is about to write. Today, ANY relay failure --
+ * wrong-slot or otherwise -- is treated identically (ota_pico_relay's
+ * existing failure path, unchanged by this feature) and consumes one
+ * attempt from the budget like any other failure. Once that rejection code
+ * exists on the wire, the retry-on-wrong-slot behaviour belongs HERE: a
+ * relay failure specifically identified as "wrong slot" should retry
+ * immediately with pico_update_attempts_next_slot()'s other value WITHOUT
+ * calling pico_update_attempts_record_attempt() again (i.e. without
+ * consuming budget for a guess that was never given a fair chance to
+ * succeed) -- see pico_auto_update_boot.c's attempt_update(), which names
+ * this same hook at its ota_pico_relay_start() call site. */
+bool pico_update_attempts_next_slot(uint32_t pair_hash, int *out_slot);
 
 /* Marks `pair_hash`'s most recent attempt as a terminal (non-retryable)
  * failure -- plan sec 4/7's third unrecoverable cause. Does not touch the

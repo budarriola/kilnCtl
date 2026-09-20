@@ -88,6 +88,12 @@ try {
         # firmwares from firmware/CommonFW -- which is exactly why it is
         # host-tested here rather than trusted to two target builds.
         (Join-Path $testDir "test_pico_image_identity.c"),
+        # Owner decision 2026-09-20: the two SaftyFW slot images embedded in
+        # this build and whether they carry one agreeing identity --
+        # pico_image_embedded_describe_from() is the pure, buffer-based core
+        # under test (see that header's own doc comment for the split from
+        # the EMBED_FILES-symbol wrapper, which is not host-testable).
+        (Join-Path $testDir "test_pico_image_embedded.c"),
         (Join-Path $testDir "test_boot_button.c"),
         (Join-Path $testDir "test_backlight_pwm.c"),
         (Join-Path $testDir "test_display_power_policy.c"),
@@ -834,6 +840,12 @@ try {
             # backing store.
             "`"$(Join-Path $driversDir 'persist/pico_image_manifest.c')`" " +
             "`"$(Join-Path $driversDir 'http/ota_image_crc.c')`" " +
+            # Owner decision 2026-09-20: ota_http_pico.c's ota_pico_do_stage()
+            # now calls pico_img_stage_begin/write_chunk/finish() (shared with
+            # net/pico_auto_update_boot.c's embedded-image writer) instead of
+            # its own inline erase/write/manifest logic -- linked in for real,
+            # same rationale as pico_image_manifest.c/ota_image_crc.c beside it.
+            "`"$(Join-Path $driversDir 'net/pico_img_stage.c')`" " +
             "`"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
             "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +

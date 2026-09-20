@@ -589,3 +589,37 @@ history and are not hypothetical — each has already caused a problem here once
 4. Leave `coredump` (5.3) alone unless something forces the issue.
 5. ~~Revisit 5.4 only if 4.1 justifies it~~ — 4.1 does not justify it;
    decided not pursued.
+
+## Embedded SaftyFW slot images (2026-09-20)
+
+Owner decision 2026-09-20 (overriding `docs/PICO_AUTO_UPDATE_PLAN.md` sec 2's
+"CORRECTION 2026-09-18"): `App/drivers/CMakeLists.txt` now `EMBED_FILES`s
+both SaftyFW two-slot bootloader binaries
+(`firmware/SaftyFW/build/SaftyFW_slotA.bin` /
+`SaftyFW_slotB.bin`) directly into `KilnCtrl.bin`, refusing to configure if
+either is missing. Measured this pass, same worktree/toolchain/sdkconfig,
+`check_00_kilnfw_target_build.ps1`:
+
+```
+KilnCtrl.bin, with both embedded slots (this commit)   2,698,672 B
+  SaftyFW_slotA.bin                                       119,044 B
+  SaftyFW_slotB.bin                                       119,044 B
+  raw embedded payload                                    238,088 B
+KilnCtrl.bin, without embedding (computed: measured total
+  minus the exact raw embedded payload above)          ~2,460,584 B
+app partition (ota_0 / ota_1 / factory, all equal)     3,145,728 B
+free with both slots embedded                            447,056 B  (14.2%)
+```
+
+The "without embedding" figure is computed by subtracting the two slot
+files' exact on-disk byte counts from this pass's measured total, not from a
+second twin build with `EMBED_FILES` removed — the two `.bin`s are raw,
+uncompressed payloads (`EMBED_FILES`, not `EMBED_TXTFILES`/gzip), so no
+compression ratio or other nonlinearity is in play, and the only material
+difference from an actual twin build is a few bytes of section-alignment
+padding. 14.2% headroom remains on the smallest app partition with both
+slots embedded — comfortable, but this is the single largest jump this
+document has recorded from one change (prior baselines moved by tens of KB
+across many commits; this one is +238,088 B in one step) and any second
+embedded artifact proposed later should be weighed against this section, not
+just against the raw partition size.

@@ -126,6 +126,33 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     endforeach()
 endif()
 
+# Owner decision 2026-09-20 (docs/PICO_AUTO_UPDATE_PLAN.md, overriding its
+# own sec 2 "CORRECTION 2026-09-18"): embed both SaftyFW two-slot bootloader
+# images directly into this application build -- see
+# net/pico_image_embedded.h's own doc comment for the full rationale and the
+# fleet-wide-refusal hazard this creates. Produced by
+# firmware/SaftyFW/test/check_00_saftyfw_target_build.ps1 (which links
+# SaftyFW_slotA.elf/SaftyFW_slotB.elf) followed by
+# `arm-none-eabi-objcopy -O binary <slot>.elf <slot>.bin` for each slot --
+# this component does not build SaftyFW itself, it only refuses to configure
+# if the two .bin files are not already sitting in firmware/SaftyFW/build/.
+if(NOT CMAKE_BUILD_EARLY_EXPANSION)
+    set(KILNCTL_SAFTYFW_SLOTA_BIN "${KILNCTL_REPO_ROOT}/firmware/SaftyFW/build/SaftyFW_slotA.bin")
+    set(KILNCTL_SAFTYFW_SLOTB_BIN "${KILNCTL_REPO_ROOT}/firmware/SaftyFW/build/SaftyFW_slotB.bin")
+    if(NOT EXISTS "${KILNCTL_SAFTYFW_SLOTA_BIN}")
+        message(FATAL_ERROR "App/drivers/CMakeLists.txt: missing ${KILNCTL_SAFTYFW_SLOTA_BIN} -- "
+                             "run firmware/SaftyFW/test/check_00_saftyfw_target_build.ps1, then "
+                             "arm-none-eabi-objcopy -O binary firmware/SaftyFW/build/SaftyFW_slotA.elf "
+                             "${KILNCTL_SAFTYFW_SLOTA_BIN}")
+    endif()
+    if(NOT EXISTS "${KILNCTL_SAFTYFW_SLOTB_BIN}")
+        message(FATAL_ERROR "App/drivers/CMakeLists.txt: missing ${KILNCTL_SAFTYFW_SLOTB_BIN} -- "
+                             "run firmware/SaftyFW/test/check_00_saftyfw_target_build.ps1, then "
+                             "arm-none-eabi-objcopy -O binary firmware/SaftyFW/build/SaftyFW_slotB.elf "
+                             "${KILNCTL_SAFTYFW_SLOTB_BIN}")
+    endif()
+endif()
+
 # esp_driver_tsens (driver/temperature_sensor.h, used by board_temps.c for
 # the ESP32-S3 internal die-temperature sensor) is named on the assumption
 # that this IDF version keeps the same per-peripheral esp_driver_* component
@@ -287,6 +314,13 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # against what the Pico reports and acts on the answer.
                        "net/pico_image_source.c"
                        "net/pico_auto_update_boot.c"
+                       # Owner decision 2026-09-20: embedded SaftyFW slot
+                       # images (see the EMBED_FILES block below and
+                       # pico_image_embedded.h's own doc comment) and the
+                       # erase/write/manifest sequence shared with
+                       # http/ota_http_pico.c's upload path.
+                       "net/pico_image_embedded.c"
+                       "net/pico_img_stage.c"
                        "http/backup_http.c"
                        "persist/backup_json.c"
                        "http/backup_export.c"
@@ -598,6 +632,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        INCLUDE_DIRS "." "bridge" "common" "control" "http" "hw" "net" "owners" "persist" "safety" "sim" "ui" "../../../hwAbstraction/interface"
                        PRIV_INCLUDE_DIRS "${CMAKE_CURRENT_BINARY_DIR}"
                        EMBED_TXTFILES ${KILNCTL_GZIP_ASSET_FILES} "${kilnctl_tuning_rec_out}"
+                       EMBED_FILES "${KILNCTL_SAFTYFW_SLOTA_BIN}" "${KILNCTL_SAFTYFW_SLOTB_BIN}"
                        REQUIRES esp_driver_i2c esp_driver_spi esp_driver_uart esp_driver_gpio
                                 esp_driver_tsens esp_driver_ledc
                                 esp_wifi esp_netif esp_event nvs_flash esp_http_server esp_timer
