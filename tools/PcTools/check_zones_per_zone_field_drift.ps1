@@ -26,10 +26,22 @@ $ErrorActionPreference = "Stop"
 $scriptDir = $PSScriptRoot
 $checkScript = Join-Path $scriptDir "zones_per_zone_field_drift_check.py"
 $venvPython = Join-Path $scriptDir ".venv\Scripts\python.exe"
+$venvCfg = Join-Path $scriptDir ".venv\pyvenv.cfg"
 
+# Prefer the real PcTools venv (python.exe AND pyvenv.cfg next to it -- a
+# bare python.exe with no pyvenv.cfg is not trusted as a real venv). A
+# worktree checkout (under C:\wt\) has no venv of its own -- gitignored,
+# per-clone -- so this falls back to `python`/`python3` on PATH there.
+# Unlike check_bench_test_registry.ps1's inline script, this check's own
+# .py does not insert tools\PcTools\src onto sys.path itself (it imports
+# selfcheck_common, which imports kilnctrl.protocol directly), so the PATH
+# fallback also sets PYTHONPATH to that src directory for the duration of
+# this call so `import kilnctrl...` still resolves without a venv.
 $python = $null
-if (Test-Path $venvPython) {
+$usingVenv = $false
+if ((Test-Path $venvPython) -and (Test-Path $venvCfg)) {
     $python = $venvPython
+    $usingVenv = $true
 } else {
     $cmd = Get-Command python -ErrorAction SilentlyContinue
     if (-not $cmd) { $cmd = Get-Command python3 -ErrorAction SilentlyContinue }
@@ -42,5 +54,22 @@ if (-not $python) {
     exit 1
 }
 
-& $python $checkScript
+if ($usingVenv) {
+    Write-Host "check_zones_per_zone_field_drift.ps1: using venv python at $python"
+    & $python $checkScript
+} else {
+    Write-Host "check_zones_per_zone_field_drift.ps1: no venv at $venvPython -- using PATH python at $python"
+    $srcDir = Join-Path $scriptDir "src"
+    $prevPythonPath = $env:PYTHONPATH
+    if ($prevPythonPath) {
+        $env:PYTHONPATH = "$srcDir;$prevPythonPath"
+    } else {
+        $env:PYTHONPATH = "$srcDir"
+    }
+    try {
+        & $python $checkScript
+    } finally {
+        $env:PYTHONPATH = $prevPythonPath
+    }
+}
 exit $LASTEXITCODE

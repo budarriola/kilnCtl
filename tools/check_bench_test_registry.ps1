@@ -7,12 +7,29 @@
 # Exit 0 on agreement, 1 on any mismatch (named).
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$venvPython = Join-Path $repoRoot "tools\PcTools\.venv\Scripts\python.exe"
 $planDoc = Join-Path $repoRoot "docs\BENCH_TEST_SYSTEM_PLAN.md"
 
-if (-not (Test-Path $venvPython)) {
-    Write-Error "check_bench_test_registry.ps1: venv python not found at $venvPython"
-    exit 1
+# Prefer the repo's own PcTools venv when it's a real, healthy venv (its
+# python.exe AND a pyvenv.cfg next to it -- a bare python.exe with no
+# pyvenv.cfg is not trusted as a real venv). A worktree checkout (under
+# C:\wt\) has no venv of its own -- gitignored, per-clone -- so this falls
+# back to `python` on PATH there rather than hard-failing; the pyScript
+# below inserts tools\PcTools\src onto sys.path itself, so a plain PATH
+# python can still import kilnctrl for this check specifically.
+$venvPython = Join-Path $repoRoot "tools\PcTools\.venv\Scripts\python.exe"
+$venvCfg = Join-Path $repoRoot "tools\PcTools\.venv\pyvenv.cfg"
+if ((Test-Path $venvPython) -and (Test-Path $venvCfg)) {
+    $python = $venvPython
+    Write-Host "check_bench_test_registry.ps1: using venv python at $python"
+} else {
+    $cmd = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $cmd) { $cmd = Get-Command python3 -ErrorAction SilentlyContinue }
+    if (-not $cmd) {
+        Write-Error "check_bench_test_registry.ps1: no venv python at $venvPython and no python/python3 on PATH"
+        exit 1
+    }
+    $python = $cmd.Source
+    Write-Host "check_bench_test_registry.ps1: no venv at $venvPython -- using PATH python at $python"
 }
 if (-not (Test-Path $planDoc)) {
     Write-Error "check_bench_test_registry.ps1: plan doc not found at $planDoc"
@@ -122,7 +139,7 @@ sys.exit(0)
 # Piped to python's stdin (script name "-") instead of written to a temp
 # .py file: a temp .py file trips check_source_path_drift.ps1, which reads
 # any *.py path it sees mentioned as a source-file reference.
-$pyScript | & $venvPython - $planDoc $repoRoot
+$pyScript | & $python - $planDoc $repoRoot
 $exitCode = $LASTEXITCODE
 
 exit $exitCode
