@@ -106,9 +106,10 @@ def write_run(run_dir: str, summary: Dict[str, Any], transcript_lines: "list[str
     with open(transcript_path, "w", encoding="utf-8") as f:
         f.write(f"# bench_test transcript -- {summary['run_id']}\n\n")
         f.write(_redact("\n".join(transcript_lines)))
-        f.write("\n\n## Verdicts\n\n")
+        footer_lines = ["", "", "## Verdicts", ""]
         for cid, case in summary["cases"].items():
-            f.write(f"- **{cid}**: {case['verdict']} -- {case['reason']}\n")
+            footer_lines.append(f"- **{cid}**: {case['verdict']} -- {case['reason']}")
+        f.write(_redact("\n".join(footer_lines)) + "\n")
 
     with open(os.path.join(run_dir, "board_before.json"), "w", encoding="utf-8") as f:
         f.write(_redact(json.dumps(summary["board_before"], indent=2, sort_keys=True, default=str)))

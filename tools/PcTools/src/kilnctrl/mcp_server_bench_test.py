@@ -10,7 +10,6 @@ implemented yet.
 """
 from __future__ import annotations
 
-import json
 from typing import Optional
 
 from . import mcp_server as _srv
@@ -63,7 +62,7 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
         reason = f" -- {result.reason}" if result.reason else ""
         lines.append(f"  {cid}: {result.verdict}{reason}")
     lines.append(f"run dir: {outcome.run_dir}")
-    return "\n".join(lines)
+    return bt_report._redact("\n".join(lines))
 
 
 @_srv._tool()

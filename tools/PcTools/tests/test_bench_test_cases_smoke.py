@@ -158,5 +158,27 @@ class Sp07Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.FAIL)
 
 
+class RepoRootTest(unittest.TestCase):
+    def test_resolved_root_contains_firmware_regardless_of_cwd(self):
+        """cases_smoke.py used to fall back to ctx.get("repo_root", ".")
+        -- a cwd-relative path nothing populated -- when FL-05/FL-07 built
+        firmware-tree paths. _repo_root() must resolve to the real repo
+        root (derived from __file__, same pattern as
+        report.default_logs_root()) no matter what directory the test
+        runner's cwd happens to be."""
+        root = C._repo_root()
+        self.assertTrue(
+            os.path.isdir(os.path.join(root, "firmware")),
+            f"expected {root} to contain a firmware/ directory",
+        )
+        cwd = os.getcwd()
+        try:
+            os.chdir(os.path.dirname(root))
+            self.assertEqual(C._repo_root(), root)
+            self.assertTrue(os.path.isdir(os.path.join(C._repo_root(), "firmware")))
+        finally:
+            os.chdir(cwd)
+
+
 if __name__ == "__main__":
     unittest.main()

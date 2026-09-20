@@ -26,6 +26,12 @@ from . import judgments as J
 from .registry import CaseResult, Verdict, get_case
 
 
+def _repo_root() -> str:
+    """tools/PcTools/src/kilnctrl/bench_test/ -> repo root is five levels
+    up. Same convention as report.default_logs_root()."""
+    return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", ".."))
+
+
 def _srv(ctx: dict):
     srv = ctx.get("srv")
     if srv is None:
@@ -117,7 +123,7 @@ def _case_fl05(ctx: dict) -> CaseResult:
     recovery_row = next((p for p in data.get("partitions", []) if p.get("label") == "recovery"), None)
     recovery_bin_size = None
     candidate = ctx.get("recovery_bin_path") or os.path.join(
-        ctx.get("repo_root", "."), "firmware", "KilnFW_recovery", "build", "recovery.bin"
+        ctx.get("repo_root") or _repo_root(), "firmware", "KilnFW_recovery", "build", "recovery.bin"
     )
     if os.path.isfile(candidate):
         recovery_bin_size = os.path.getsize(candidate)
@@ -147,7 +153,7 @@ def _case_fl07(ctx: dict) -> CaseResult:
         board_partitions = f"error: {exc}"
 
     csv_path = ctx.get("partitions_csv_path") or os.path.join(
-        ctx.get("repo_root", "."), "firmware", "KilnFW", "partitions.csv"
+        ctx.get("repo_root") or _repo_root(), "firmware", "KilnFW", "partitions.csv"
     )
     try:
         with open(csv_path, "r", encoding="utf-8") as f:

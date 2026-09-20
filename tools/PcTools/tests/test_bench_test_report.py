@@ -107,6 +107,42 @@ class BuildSummaryAndWriteRunTest(unittest.TestCase):
         self.assertEqual(summary["board_before"], {"a": 1})
         self.assertEqual(summary["board_after"], {"b": 2})
 
+    def test_verdicts_footer_is_redacted(self):
+        """report.py:109-111's `## Verdicts` footer used to be written
+        straight from the un-redacted summary dict, bypassing _redact()
+        even though every other artifact this module writes is redacted.
+        Prove a secret sitting in a case's `reason` -- surfaced via a
+        credential-shaped env var, the same mechanism _redact() scans
+        for -- never survives into the footer."""
+        secret = "supersekretvalue999"
+        os.environ["KILNCTL_WEB_PASSWORD"] = secret
+        try:
+            outcome = _FakeOutcome(
+                run_id="20260101T000000Z_smoke",
+                suite="smoke",
+                requested=["ST-05"],
+                executed=["ST-05"],
+                results={
+                    "ST-05": CaseResult(
+                        Verdict.FAIL, reason=f"leaked value {secret} in reason", observed={}
+                    )
+                },
+                started=1000.0,
+                ended=1001.5,
+                preflight_ok=True,
+                preflight_reason="",
+            )
+            summary = report_mod.build_summary(outcome, {}, {})
+            run_dir = os.path.join(self.tmpdir, "20260101T000000Z_smoke_footer")
+            report_mod.write_run(run_dir, summary, ["line one"])
+            with open(os.path.join(run_dir, "transcript.md"), encoding="utf-8") as f:
+                transcript = f.read()
+            self.assertIn("## Verdicts", transcript)
+            self.assertIn("ST-05", transcript)
+            self.assertNotIn(secret, transcript)
+        finally:
+            del os.environ["KILNCTL_WEB_PASSWORD"]
+
     def test_write_run_creates_summary_and_transcript_and_captures_dir(self):
         summary = report_mod.build_summary(self._make_outcome(), {}, {})
         run_dir = os.path.join(self.tmpdir, "20260101T000000Z_smoke")
