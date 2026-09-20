@@ -10,6 +10,7 @@
 
 #include "MAX31856.h"
 #include "http_form.h"
+#include "live_profile.h" /* live_edit_name_collides() -- profile_post_handler()'s dup-name refusal */
 #include "profile_executor.h" /* profile_executor_get_status() -- Opus review item 2,
                                  * PROFILE_SLOTS_100_PLAN.md section 7: refuse to delete
                                  * the slot the executor is currently running/paused on. */
@@ -425,6 +426,20 @@ bool profiles_validate_candidate(const profile_t *candidate, profile_validate_mo
     return true;
 }
 
+/* live_edit_name_collides()'s name_at seam, backed directly by s_profiles --
+ * same pattern profiles_live_http.c's live_http_name_at()/profiles_http.c's
+ * profiles_http_name_at() already use (three small copies rather than one
+ * shared symbol, matching how s_profiles itself is already reached from each
+ * of these files independently via profiles_http_internal.h). */
+static const char *profile_post_name_at(void *ctx, uint8_t id)
+{
+    (void)ctx;
+    if (id >= PROFILES_MAX_COUNT || !profiles_slot_used(id)) {
+        return NULL;
+    }
+    return s_profiles.profiles[id].name;
+}
+
 esp_err_t profile_post_handler(httpd_req_t *req)
 {
     if (req->content_len <= 0 || req->content_len > PROFILE_BODY_MAX) {
@@ -543,6 +558,24 @@ esp_err_t profile_post_handler(httpd_req_t *req)
         esp_err_t ret = httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
         free(warn_json);
         return ret;
+    }
+
+    /* Owner request 2026-09-19: saving must never silently create/overwrite a
+     * duplicate name. Same check/helper profiles_http_save() now runs --
+     * see that function's comment. exclude_id lets overwriting a slot with
+     * its own unchanged name stay legal. */
+    {
+        uint8_t exclude_id = profiles_slot_used(target_id) ? target_id : (uint8_t)0xFF;
+        char name_err[128];
+        if (live_edit_name_collides(tmp.name, profile_post_name_at, NULL, exclude_id, name_err, sizeof(name_err))) {
+            char json[192];
+            int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", name_err);
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_set_type(req, "application/json");
+            esp_err_t ret = httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+            free(warn_json);
+            return ret;
+        }
     }
 
     s_profiles.profiles[target_id] = tmp;

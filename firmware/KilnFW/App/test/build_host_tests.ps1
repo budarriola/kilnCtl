@@ -704,10 +704,27 @@ try {
     $exe7 = Join-Path $outDir "kilnctl_host_tests_profiles_http.exe"
     $phObjDir = Join-Path $outDir "profiles_http_obj"
     New-Item -ItemType Directory -Force -Path $phObjDir | Out-Null
-    $cmd7 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+    # /experimental:c11atomics: live_profile.c (linked in below) uses
+    # <stdatomic.h> -- same MSVC requirement test_live_profile.c/
+    # test_profile_executor_live_pickup.c already needed for the same reason
+    # (see this file's own comment above them).
+    $cmd7 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics " +
             "/Fo:`"$phObjDir\\`" /Fe:`"$exe7`" `"$(Join-Path $testDir 'test_profiles_http.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/profiles_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
+            # Owner request 2026-09-19 (dup-name save refusal): profiles_http.c
+            # (#included above) now calls live_edit_name_collides(), which
+            # lives in live_profile.c. Linked in for REAL rather than faked --
+            # it is a small, pure, already host-tested function (its own
+            # executable below) over profiles_builtin_id_valid()/entry(),
+            # which this executable already fakes (test_profiles_http.c's own
+            # g_fake_builtin, same as every other symbol from profiles_builtin.h
+            # this file resolves). live_profile.c's OTHER entry points
+            # (live_edit_decide()/live_profile_load_record() etc, which pull
+            # in profile_encode_current_blob()/hal_kv persistence) are never
+            # reached from this executable's tests, so nothing else needs
+            # faking here.
+            "`"$(Join-Path $driversDir 'persist/live_profile.c')`" " +
             # docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6's bench-slot
             # exclusion test needs the REAL ui_page_profile_picker_is_deletable()
             # (not a hand-rolled stand-in) -- this file is small and pure

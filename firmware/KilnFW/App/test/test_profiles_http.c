@@ -2060,6 +2060,104 @@ static void test_profiles_http_save_accepts_2015c_gas_kiln_profile_on_80c_zone(v
               "stale hand-typed literal");
 }
 
+// ---------------------------------------------------------------------------
+// Owner request 2026-09-19: saving a profile must NEVER be allowed with a
+// name that already exists. profiles_http_save() now runs
+// live_edit_name_collides() (live_profile.c, already used by the live-edit
+// SAVE_AS path) right before writing the slot.
+// ---------------------------------------------------------------------------
+
+static void test_profiles_http_save_rejects_exact_duplicate_name(void)
+{
+    TEST_SECTION("profiles_http_save -- a name that already exists in another slot is refused");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+
+    profile_t p = make_stored_profile();
+    strcpy(p.name, "Bisque Fast");
+    uint8_t out_id = 0, warn_count = 0;
+    char err_msg[160] = "";
+    TEST_CHECK(profiles_http_save(PROFILES_MAX_COUNT, &p, &out_id, &warn_count, err_msg, sizeof(err_msg)),
+              "setup: the first save of this name must succeed");
+
+    profile_t p2 = make_stored_profile();
+    strcpy(p2.name, "Bisque Fast");
+    uint8_t out_id2 = 0, warn_count2 = 0;
+    char err_msg2[160] = "";
+    bool ok2 = profiles_http_save(PROFILES_MAX_COUNT, &p2, &out_id2, &warn_count2, err_msg2, sizeof(err_msg2));
+
+    TEST_CHECK(!ok2, "saving a second profile with the exact same name must be refused");
+    TEST_CHECK(strstr(err_msg2, "Bisque Fast") != NULL, "the refusal must name the offending profile");
+    TEST_CHECK(!profiles_slot_bitmap_test(&s_profiles.used_bitmap, out_id2) || out_id2 == out_id,
+              "the refused save must not land in a second slot");
+}
+
+static void test_profiles_http_save_rejects_case_and_whitespace_variant_name(void)
+{
+    TEST_SECTION("profiles_http_save -- a case/whitespace variant of an existing name is also refused "
+                 "(live_edit_name_collides() normalizes both before comparing)");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+
+    profile_t p = make_stored_profile();
+    strcpy(p.name, "Bisque Fast");
+    uint8_t out_id = 0, warn_count = 0;
+    char err_msg[160] = "";
+    TEST_CHECK(profiles_http_save(PROFILES_MAX_COUNT, &p, &out_id, &warn_count, err_msg, sizeof(err_msg)),
+              "setup: the first save must succeed");
+
+    profile_t p2 = make_stored_profile();
+    strcpy(p2.name, "  BISQUE fast  ");
+    uint8_t out_id2 = 0, warn_count2 = 0;
+    char err_msg2[160] = "";
+    bool ok2 = profiles_http_save(PROFILES_MAX_COUNT, &p2, &out_id2, &warn_count2, err_msg2, sizeof(err_msg2));
+
+    TEST_CHECK(!ok2, "a case/whitespace-only variant of an existing name must still be refused");
+}
+
+static void test_profiles_http_save_allows_overwriting_a_slot_with_its_own_name(void)
+{
+    TEST_SECTION("profiles_http_save -- overwriting an existing slot with its OWN unchanged name stays legal "
+                 "(exclude_id must exempt the slot being written)");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+
+    profile_t p = make_stored_profile();
+    strcpy(p.name, "Bisque Fast");
+    uint8_t out_id = 0, warn_count = 0;
+    char err_msg[160] = "";
+    TEST_CHECK(profiles_http_save(PROFILES_MAX_COUNT, &p, &out_id, &warn_count, err_msg, sizeof(err_msg)),
+              "setup: the first save must succeed");
+
+    /* Re-save targeting the SAME slot, same name, some other field changed
+     * (dwell_min) -- must be accepted, not refused as colliding with itself. */
+    profile_t p2 = p;
+    p2.segments[0].dwell_min = p2.segments[0].dwell_min + 1;
+    uint8_t out_id2 = 0, warn_count2 = 0;
+    char err_msg2[160] = "";
+    bool ok2 = profiles_http_save(out_id, &p2, &out_id2, &warn_count2, err_msg2, sizeof(err_msg2));
+
+    TEST_CHECK(ok2, "overwriting a slot with its own name must be accepted, not refused as a collision");
+    TEST_CHECK(out_id2 == out_id, "an overwrite-by-id must land back in the same slot");
+}
+
+static void test_profiles_http_save_rejects_builtin_name(void)
+{
+    TEST_SECTION("profiles_http_save -- a name matching the read-only builtin catalogue is refused too "
+                 "(live_edit_name_collides() also scans profiles_builtin.h's g_builtin_profiles)");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    g_fake_builtin_on = true;
+    strcpy((char *)g_fake_builtin.code, "C6DHSC");
+
+    profile_t p = make_stored_profile();
+    strcpy(p.name, "c6dhsc"); /* case-insensitive match against the builtin's code */
+    uint8_t out_id = 0, warn_count = 0;
+    char err_msg[160] = "";
+    bool ok = profiles_http_save(PROFILES_MAX_COUNT, &p, &out_id, &warn_count, err_msg, sizeof(err_msg));
+
+    TEST_CHECK(!ok, "a name colliding with a builtin schedule's code must be refused");
+    TEST_CHECK(strstr(err_msg, "builtin") != NULL, "the refusal must say why -- it names the builtin schedule");
+
+    g_fake_builtin_on = false;
+}
+
 static void test_profiles_list_marks_exceeds_ceiling(void)
 {
     TEST_SECTION("profiles_list_get_handler -- a saved over-ceiling profile is marked "
@@ -2614,6 +2712,10 @@ void run_test_profiles_http(void)
     test_profiles_http_save_accepts_target_exactly_at_zone_limit();
     test_profiles_http_save_accepts_one_degree_over_zone_limit();
     test_profiles_http_save_accepts_2015c_gas_kiln_profile_on_80c_zone();
+    test_profiles_http_save_rejects_exact_duplicate_name();
+    test_profiles_http_save_rejects_case_and_whitespace_variant_name();
+    test_profiles_http_save_allows_overwriting_a_slot_with_its_own_name();
+    test_profiles_http_save_rejects_builtin_name();
     test_profiles_list_marks_exceeds_ceiling();
     test_validate_candidate_hard_mode_refuses_target_above_zone_ceiling();
     test_validate_candidate_hard_mode_refuses_ramp_above_zone_ceiling();

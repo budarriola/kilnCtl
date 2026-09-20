@@ -22,6 +22,7 @@
 #include "MAX31856.h"
 #include "http_form.h"
 #include "kiln_io.h"
+#include "live_profile.h" /* live_edit_name_collides() -- profiles_http_save() dup-name refusal */
 #include "profile_feasibility.h"
 #include "profiles_builtin.h"
 #include "profiles_favorites.h" /* profiles_favorites_set() -- see profiles_http_delete()'s doc
@@ -1381,6 +1382,17 @@ bool profile_exceeds_zone_ceiling(const profile_t *p, char *note, size_t note_ca
     return false;
 }
 
+/* live_edit_name_collides()'s name_at seam, backed directly by s_profiles --
+ * same pattern profiles_live_http.c's live_http_name_at() already uses. */
+static const char *profiles_http_name_at(void *ctx, uint8_t id)
+{
+    (void)ctx;
+    if (id >= PROFILES_MAX_COUNT || !profiles_slot_used(id)) {
+        return NULL;
+    }
+    return s_profiles.profiles[id].name;
+}
+
 bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
                         uint8_t *out_warning_count, char *err_msg, size_t err_cap)
 {
@@ -1504,6 +1516,18 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
      * stops the run. */
     if (profile_exceeds_zone_ceiling(candidate, NULL, 0)) {
         warn_count++;
+    }
+
+    /* Owner request 2026-09-19: saving must never silently create/overwrite a
+     * duplicate name. Reuses live_edit_name_collides() (live_profile.c),
+     * already used by the live-edit SAVE_AS path -- same case/whitespace
+     * normalization and same read-only-builtin scan. exclude_id is the slot
+     * this save is writing into: overwriting an existing slot's OWN unchanged
+     * name must stay legal, so that slot is excluded from the scan; a
+     * brand-new slot excludes nothing (0xFF, never a valid profile id). */
+    uint8_t exclude_id = profiles_slot_used(target_id) ? target_id : (uint8_t)0xFF;
+    if (live_edit_name_collides(candidate->name, profiles_http_name_at, NULL, exclude_id, err_msg, err_cap)) {
+        return false; /* live_edit_name_collides already filled err_msg */
     }
 
     s_profiles.profiles[target_id] = *candidate;

@@ -528,6 +528,31 @@ export side was confirmed to already stream via `backup_stream_printf()`/a small
   `backup_import_post_handler` still the deepest handler path at 4544 B),
   `check_uri_handler_cap.ps1` (150 of 151 -- unchanged, no new routes added).
 
+Owner request 2026-09-19 (name uniqueness on save) done. `profiles_http_save()`
+and `profile_post_handler()` (`profiles_edit_http.c` -- the actual `/api/profile`
+POST handler, which bypassed `profiles_http_save()` entirely and needed its own
+copy of the check) now both refuse a save whose name, case/whitespace-normalized,
+collides with any other user slot or any read-only builtin catalogue entry, right
+before the slot write. Both reuse `live_edit_name_collides()` (`live_profile.c`,
+previously only reached from the live-edit SAVE_AS path), each via its own small
+`name_at` seam backed by `s_profiles` -- matching the existing per-file-copy
+convention (`profiles_live_http.c`'s `live_http_name_at()`) rather than one
+shared symbol. `exclude_id` is the slot being written (or none, for a new slot),
+so overwriting a slot with its own unchanged name stays legal. Every other save
+path (`backup_import.c`'s batch commit, `profiles_export_http.c`'s single-profile
+import, `profiles_live_http.c`'s SAVE_AS/OVERWRITE, the profile builder review
+page) already funnels through `profiles_http_save()` and is covered without
+further changes; a duplicate name inside a batch import rejects only that entry
+(existing per-candidate semantics, not all-or-nothing). `profiles_page.html`'s
+save and import flows already surfaced `result.data.error`/`res.data.error`, so
+no client change was needed. New tests in `test_profiles_http.c`: exact-duplicate
+rejected, case/whitespace variant rejected, same-slot self-overwrite allowed,
+builtin-name collision rejected. Negative-tested (short-circuited the new check
+with `false &&`, confirmed 6 failures, removed the sabotage, forced full rebuild,
+confirmed 830/830 clean). Full host-test suite (56/56 executables) and
+`run_all_checks.ps1 -Fast -Only "profile|lint|isolation|include" -AllowFewerChecks
+-AllowSkips` (9/9) both green.
+
 ## 8. Open owner questions
 
 1. **Consume the entire 1.81 MiB tail, or stop at 2 MiB and keep 320 KiB spare?** Section 1
