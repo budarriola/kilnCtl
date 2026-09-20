@@ -995,7 +995,7 @@ topbar (see 6.2):
 | Worker | Item | Files owned |
 | --- | --- | --- |
 | E | 6.2 | **new** `ui_page_profile_picker.c/.h`, `ui_page_profiles.c`, delete `ui_page_profiles_mine.c` / `ui_page_profiles_family.c`, `kiln_ui.c`, `check_ui_budget_asserts.ps1`, and `ui_topbar.c` (one extra icon slot) **after A** |
-| F | 6.5 | done — `ui_page_home_rail.c/.h` (pure rail formatters + the count-gated `Kiln:` suffix rule), wired into `ui_page_home_internal.h`/`ui_page_home_refresh.c`, host-tested in `test_ui_page_home_rail.c` |
+| F | 6.5 | logic layer landed (`ui_page_home_rail.c/.h`, `test_ui_page_home_rail.c`); widget tree in `ui_page_home.c` still open |
 
 Wave 3 — 6.1, which needs E's picker page *and* F's home-page edits.
 

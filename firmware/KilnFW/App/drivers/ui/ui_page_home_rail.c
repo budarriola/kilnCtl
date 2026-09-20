@@ -42,6 +42,9 @@ int ui_page_home_rail_duty_pct(float duty_fraction)
 
 void ui_page_home_rail_format_zone_temp(bool valid, float temp_c, char *out, size_t out_cap)
 {
+    if (out == NULL || out_cap == 0) {
+        return;
+    }
     if (!valid || isnan(temp_c)) {
         snprintf(out, out_cap, "--.-");
         return;

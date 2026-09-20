@@ -85,6 +85,7 @@ static void *kiln_cfg_store_test_malloc(size_t n)
 #define malloc kiln_cfg_store_test_malloc
 
 #include "../drivers/persist/kiln_cfg_store.c"
+#include "../drivers/ui/ui_page_home_rail.h"
 
 // Shared mutable stub state, defined in test_profile_feasibility.c and
 // declared extern (ad-hoc, same convention as test_backup_import.c) so this
@@ -3166,6 +3167,48 @@ static void test_set_active_id_raw_drops_pending_flag_owned_by_old_slot(void)
     s_stub_ceiling_diverged = false;
 }
 
+// ui_page_home_refresh.c calls kiln_cfg_store_list() with a fixed cap of 2
+// (not KILN_CFG_MAX_COUNT) since only whether the count reaches the
+// "2 or more" owner threshold matters, never the entries themselves --
+// this replaced a ~320B KILN_CFG_MAX_COUNT-sized array on the 8192B LVGL
+// task stack. Prove that a cap of 2 still lets
+// ui_page_home_kiln_suffix_visible() decide correctly at 1, 2 and 5 saved
+// configs (kiln_cfg_store_list() returns min(in_use, out_cap), so 5 in_use
+// against a cap of 2 must still report 2, which is >= 2 -- not a false
+// negative from the returned count being capped).
+static void test_home_rail_kiln_count_decision_survives_cap_of_two(void)
+{
+    TEST_SECTION("kiln_cfg_store_list(cap=2) -- still decides the >= 2 threshold correctly "
+                 "at 1, 2 and 5 saved configs (ui_page_home_refresh.c's stack-shrink fix)");
+    reset_state();
+
+    kiln_cfg_summary_t rows2[2];
+    char reason[96] = {0};
+    int32_t id = -1;
+
+    // 1 config: cap-2 list returns 1, threshold says hidden.
+    TEST_CHECK(kiln_cfg_store_save_current("Kiln A", -1, &id, reason, sizeof(reason)), "save 1st succeeds");
+    uint8_t n = kiln_cfg_store_list(rows2, 2);
+    TEST_CHECK(n == 1, "cap=2, 1 in_use: list returns 1");
+    TEST_CHECK(!ui_page_home_kiln_suffix_visible(n), "1 config: suffix hidden");
+
+    // 2 configs: cap-2 list returns 2, threshold says visible.
+    TEST_CHECK(kiln_cfg_store_save_current("Kiln B", -1, &id, reason, sizeof(reason)), "save 2nd succeeds");
+    n = kiln_cfg_store_list(rows2, 2);
+    TEST_CHECK(n == 2, "cap=2, 2 in_use: list returns 2");
+    TEST_CHECK(ui_page_home_kiln_suffix_visible(n), "2 configs: suffix visible");
+
+    // 5 configs: cap-2 list is still capped at 2 (not 5), and 2 still
+    // satisfies the >= 2 threshold, so the decision does not regress even
+    // though the returned count under-reports the true total.
+    TEST_CHECK(kiln_cfg_store_save_current("Kiln C", -1, &id, reason, sizeof(reason)), "save 3rd succeeds");
+    TEST_CHECK(kiln_cfg_store_save_current("Kiln D", -1, &id, reason, sizeof(reason)), "save 4th succeeds");
+    TEST_CHECK(kiln_cfg_store_save_current("Kiln E", -1, &id, reason, sizeof(reason)), "save 5th succeeds");
+    n = kiln_cfg_store_list(rows2, 2);
+    TEST_CHECK(n == 2, "cap=2, 5 in_use: list is still capped at 2, not 5");
+    TEST_CHECK(ui_page_home_kiln_suffix_visible(n), "5 configs: suffix still visible");
+}
+
 static void test_apply_autosave_targets_incoming_slot_via_real_override(void)
 {
     TEST_SECTION("kiln_cfg_store_apply -- REAL kiln_cfg_store_set_autosave_target_override()/"
@@ -3307,6 +3350,7 @@ void run_test_kiln_cfg_store(void)
     test_autosave_defers_when_cache_generation_moved_since_latch_evaluated();
     test_capture_expected_pico_fields_excludes_abs_max_and_tc_type();
     test_set_active_id_raw_drops_pending_flag_owned_by_old_slot();
+    test_home_rail_kiln_count_decision_survives_cap_of_two();
 
     cfg_fs_deinit();
 }
