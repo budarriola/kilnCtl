@@ -77,13 +77,20 @@ class SuiteTest(unittest.TestCase):
         self.assertLess(idx["ST-05"], idx["FL-01"])
         self.assertLess(idx["FL-01"], idx["SK-01"])
         self.assertLess(idx["SK-01"], idx["SP-01"])
-        # Observers (a read-only case with `depends_on` naming a heat case)
-        # are the one deliberate exemption from the read-only/heat
-        # partition: they must follow what they observe, exactly as
-        # _NIGHTLY_ORDER already spells out by hand for SP-04/LCD-04.
+        # Two deliberate, individually-pinned exemptions from the
+        # read-only/heat partition:
+        #   - observers (a read-only case whose `depends_on` names a heat
+        #     case) must follow what they observe, exactly as
+        #     _NIGHTLY_ORDER already spells out by hand for SP-04/LCD-04;
+        #   - WEB-SEC-05 (lockout) must run dead last, even after heat
+        #     (registry._ALWAYS_LAST).
+        # Both exemptions are narrow (a named id, and cases that declare a
+        # dependency) and each has its own assertion below, so excluding
+        # them here does not hollow out the general rule.
         observers = {c for c in ids if R.get_case(c).depends_on in idx}
-        last_read_only = max(idx[c] for c in ids if not R.get_case(c).heat and c not in observers)
-        first_heat = min(idx[c] for c in ids if R.get_case(c).heat and c not in observers)
+        exempt = observers | {"WEB-SEC-05"}
+        last_read_only = max(idx[c] for c in ids if not R.get_case(c).heat and c not in exempt)
+        first_heat = min(idx[c] for c in ids if R.get_case(c).heat and c not in exempt)
         self.assertLess(last_read_only, first_heat, "every heat case (AT-*/HP-*) must run after every read-only case")
 
     def test_full_suite_runs_every_case_after_its_dependency(self):
@@ -109,6 +116,19 @@ class SuiteTest(unittest.TestCase):
         self.assertEqual(R.get_case("AT-05").depends_on, "AT-01")
         self.assertEqual(idx["AT-03"], idx["AT-02"] + 1)
         self.assertEqual(idx["AT-05"], idx["AT-01"] + 1)
+
+    def test_web_sec_05_runs_last_in_full_suite(self):
+        """plan §5.1 WEB-SEC-05 (lockout): denies every new address for a
+        while, so it must be the very last thing any suite containing it
+        runs -- never leave anything, heat cases included, behind it."""
+        ids = R.SUITES["full"]
+        self.assertIn("WEB-SEC-05", ids)
+        self.assertEqual(ids[-1], "WEB-SEC-05")
+
+    def test_nightly_suite_excludes_web_sec_05(self):
+        """Owner decision: nightly never runs the lockout case at all."""
+        self.assertNotIn("WEB-SEC-05", R.SUITES["nightly"])
+
 
     def test_nightly_suite_also_uses_the_fixed_order(self):
         ids = R.SUITES["nightly"]

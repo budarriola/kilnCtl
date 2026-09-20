@@ -250,7 +250,10 @@ for cid, desc in _AT:
 for cid, desc in _HP:
     register(_c(cid, "HP", desc, heat=True, est_duration_s=360))
 for cid in _WEB_IDS:
-    register(_c(cid, "WEB", cid))
+    # WEB-WIFI-06 (AP-mode toggle) needs a human to watch the AP fallback
+    # come up and go back to normal -- operator_only, gated by --attended
+    # via operator.require_attended() inside its case function.
+    register(_c(cid, "WEB", cid, operator_only=(cid == "WEB-WIFI-06")))
 _LCD_DEPENDS_ON = {
     "LCD-02": "HP-01", "LCD-03": "HP-04", "LCD-04": "OT-B01", "LCD-19": "WEB-SEC-04",
 }
@@ -271,12 +274,25 @@ for cid, desc in _SP:
 _ORDER_RANK = {"ST": 0, "FL": 1, "SK": 2, "SP": 3}
 
 
+#: WEB-SEC-05 (lockout: 6 bad logins -> 429) denies every new address for a
+#: while (memory project_login_lockout_saturation_accepted) -- it must run
+#: dead last in ANY suite that includes it, after even the heat-originating
+#: cases, so nothing else in the same run risks tripping over its own
+#: lockout. This is a hard exception to the "heat last" rule below, not a
+#: new general rule -- exactly one case gets this treatment.
+_ALWAYS_LAST = "WEB-SEC-05"
+
+
 def _fixed_order(ids) -> List[str]:
     """Sort `ids` by the §5.2 fixed order, not alphabetically. Every
     heat-originating case (AT-*, HP-*, or any other case flagged
     ``heat=True``, e.g. OT-E07/OT-E08) sorts after every read-only case
-    regardless of area; ties within a bucket fall back to plain id order."""
+    regardless of area; ties within a bucket fall back to plain id order.
+    WEB-SEC-05 is a further, singular exception: it sorts after everything
+    else, heat included (see _ALWAYS_LAST)."""
     def key(cid: str) -> "tuple":
+        if cid == _ALWAYS_LAST:
+            return (2, 0, cid)
         spec = REGISTRY[cid]
         return (1 if spec.heat else 0, _ORDER_RANK.get(spec.area, 7), cid)
     ordered = sorted(ids, key=key)

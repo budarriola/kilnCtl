@@ -1555,3 +1555,154 @@ def judge_faulted_run(
     if post_ack_state == "faulted":
         return CaseResult(Verdict.FAIL, reason="state is still 'faulted' after Acknowledge", observed=observed)
     return CaseResult(Verdict.PASS, observed=observed)
+
+
+def safety_trip_mask_for_reason(trip_reason: int) -> int:
+    """`trip_mask = 1 << (trip_reason - 1)`, 0 for trip_reason 0 (NONE) --
+    mirrors link_frame_trip_mask_for_reason() (firmware/SaftyFW/src/tasks/
+    link_frame.c) and devices_safety.py's own helper of the same name.
+    Duplicated here (rather than imported) so this pure-judgment module
+    keeps zero dependency on the live-device client modules -- see this
+    file's docstring on why every judge function here is import-light and
+    I/O-free."""
+    if not trip_reason:
+        return 0
+    return 1 << (trip_reason - 1)
+
+
+def judge_operator_trip(
+    trip_reason: Optional[int],
+    expected_reason: int,
+    cleared_after: Optional[bool],
+) -> CaseResult:
+    """SP-08/SP-09 shared shape: an operator-induced trip must show up as
+    EXACTLY the expected `trip_reason` (never a different or additional
+    guard also latched) and must clear when asked.
+
+    `expected_reason` is the plan's own SP-08 (S7, ESTOP=8) / SP-09 (S6b,
+    LINK_DEAD=7) value -- callers pass the specific one their case is
+    checking, never a guessed default, per CLAUDE.md's warning that bit
+    position is NOT the guard number past S3."""
+    if trip_reason is None:
+        return CaseResult(Verdict.FAIL, reason="no trip_reason reported after the operator action", observed={})
+    if trip_reason != expected_reason:
+        expected_mask = safety_trip_mask_for_reason(expected_reason)
+        observed_mask = safety_trip_mask_for_reason(trip_reason)
+        return CaseResult(
+            Verdict.FAIL,
+            reason=(
+                f"trip_reason={trip_reason} (mask {observed_mask:#04x}) does not match the expected "
+                f"trip_reason={expected_reason} (mask {expected_mask:#04x})"
+            ),
+            observed={"trip_reason": trip_reason, "expected_reason": expected_reason},
+        )
+    if cleared_after is False:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"trip_reason={trip_reason} latched correctly but did not clear after safety_clear_trip()",
+            observed={"trip_reason": trip_reason, "cleared_after": cleared_after},
+        )
+    if cleared_after is None:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason="trip latched correctly but the post-clear state could not be read back",
+            observed={"trip_reason": trip_reason},
+        )
+    return CaseResult(Verdict.PASS, observed={"trip_reason": trip_reason, "cleared_after": cleared_after})
+
+
+def judge_wifi_mode_returned_home(
+    mode_during_ap: Optional[str],
+    mode_after: Optional[str],
+    operator_confirmed_ap_seen: Optional[bool],
+) -> CaseResult:
+    """WEB-WIFI-06: toggling AP mode on must actually report `mode="ap"`
+    while it's on (or the operator must confirm they saw the AP network --
+    the board's own status read and the operator's eyes are independent
+    checks, either is enough), and the board must return to `mode="home"`
+    afterward. Never trusts the operator's yes/no alone without ALSO
+    checking that going back to "home" actually took, since a stuck-in-AP
+    board is a real regression an operator's "yes I saw it" would not
+    catch."""
+    if operator_confirmed_ap_seen is False and mode_during_ap != "ap":
+        return CaseResult(
+            Verdict.FAIL,
+            reason="operator did not observe the AP network and the board never reported mode=ap",
+            observed={"mode_during_ap": mode_during_ap, "operator_confirmed_ap_seen": operator_confirmed_ap_seen},
+        )
+    if mode_after != "home":
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"board did not return to mode=home afterward (reported mode={mode_after!r})",
+            observed={"mode_after": mode_after},
+        )
+    return CaseResult(
+        Verdict.PASS,
+        observed={
+            "mode_during_ap": mode_during_ap,
+            "mode_after": mode_after,
+            "operator_confirmed_ap_seen": operator_confirmed_ap_seen,
+        },
+    )
+
+
+def judge_flash_round_trip(
+    verified: Optional[bool],
+    running_partition: Optional[str],
+    expected_partition: str,
+    error: Optional[str],
+) -> CaseResult:
+    """FL-10/FL-11: a JTAG flash round trip is only a PASS when the tool's
+    own post-flash verification (flash_firmware()'s `verify=True`, or the
+    S6a-clear procedure's link-up check for FL-11) reported success AND the
+    board is confirmed running the expected partition/side. Any refusal or
+    exception from the flashing tool itself is a FAIL, never a lesser
+    verdict (plan section 6 rule 3: never treat a refusal as anything but a
+    FAIL) -- callers pass that in as `error`."""
+    if error:
+        return CaseResult(Verdict.FAIL, reason=f"flashing tool reported an error: {error}", observed={"error": error})
+    if verified is False:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"post-flash verification failed (running partition={running_partition!r}, expected {expected_partition!r})",
+            observed={"running_partition": running_partition, "expected_partition": expected_partition},
+        )
+    if verified is None:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason="flash completed but verification result could not be determined",
+            observed={"running_partition": running_partition},
+        )
+    if running_partition is not None and running_partition != expected_partition:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"verified=True but running partition {running_partition!r} != expected {expected_partition!r}",
+            observed={"running_partition": running_partition, "expected_partition": expected_partition},
+        )
+    return CaseResult(Verdict.PASS, observed={"running_partition": running_partition, "verified": verified})
+
+
+def judge_login_lockout(status_codes: "list[Optional[int]]") -> CaseResult:
+    """WEB-SEC-05: 6 deliberately-wrong logins against /api/auth/login must
+    eventually draw a 429 (memory project_login_lockout_saturation_accepted:
+    ~1 request per 19s denies login to any new address afterward, which is
+    why this case must run dead last -- see registry._ALWAYS_LAST). A run
+    that never sees a 429 across all attempts is a real regression: either
+    the lockout stopped engaging, or every attempt unexpectedly succeeded
+    (401 the whole way through is also wrong -- the endpoint should have
+    started refusing outright)."""
+    if not status_codes:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no login attempts were made", observed={})
+    if 429 in status_codes:
+        return CaseResult(Verdict.PASS, observed={"status_codes": status_codes})
+    if 200 in status_codes:
+        return CaseResult(
+            Verdict.FAIL,
+            reason="a deliberately-wrong-password login attempt succeeded (200) -- credentials or lockout logic broken",
+            observed={"status_codes": status_codes},
+        )
+    return CaseResult(
+        Verdict.FAIL,
+        reason=f"no 429 seen across {len(status_codes)} bad-login attempts -- lockout did not engage",
+        observed={"status_codes": status_codes},
+    )

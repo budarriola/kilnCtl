@@ -36,7 +36,14 @@ param(
     [string]$Tag,
     [string]$ApPassword,
     [string]$HostAddr,
-    [int]$Port = 8767
+    [int]$Port = 8767,
+    # A human is physically at the bench: operator-only cases (SP-08, SP-09,
+    # WEB-WIFI-06) ask a yes/no question instead of SKIPping with reason
+    # "requires --attended" (docs/BENCH_TEST_SYSTEM_PLAN.md §6, Wave 3b).
+    [switch]$Attended,
+    # Opts into FL-10/FL-11 (ESP/Pico JTAG flash round trip) -- independent
+    # of -Attended, since a flash needs no operator present.
+    [switch]$AllowFlash
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,6 +65,8 @@ if ($Cases) { $toolArgs["cases"] = ($Cases -join ",") }
 if ($Tag) { $toolArgs["tag"] = $Tag }
 if ($ApPassword) { $toolArgs["ap_password"] = $ApPassword }
 if ($HostAddr) { $toolArgs["host"] = $HostAddr }
+if ($Attended) { $toolArgs["attended"] = [bool]$Attended }
+if ($AllowFlash) { $toolArgs["allow_flash"] = [bool]$AllowFlash }
 
 $jsonArgs = $toolArgs | ConvertTo-Json -Compress
 

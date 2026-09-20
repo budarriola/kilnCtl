@@ -203,10 +203,102 @@ def _case_sk03(ctx: dict) -> CaseResult:
     return J.judge_pico_stack_margins(tasks)
 
 
+# ---------------------------------------------------------------------------
+# FL-10/FL-11 -- Wave 3b, opt-in JTAG flash round trips (plan §8 Wave 3
+# part B). Neither runs in `nightly`/`full` by default -- both are gated by
+# `ctx.get("allow_flash")`, SKIP otherwise, per the plan's "optional,
+# opt-in" column. Neither is gated by --attended: owner decision 10 keeps
+# operator_only (registry.py) purely descriptive here, since these two are
+# allowed to run unattended once opted into -- conflating the two gates
+# would contradict that decision.
+# ---------------------------------------------------------------------------
+
+_FL10_APP_PARTITION = "app"
+#: SAFETY_TRIP_MAIN_FAULT = 6 (S6a) -- firmware/SaftyFW/src/safety_guards.h.
+#: Expected during FL-11's dual-reflash window while the ESP's safety-link
+#: handshake is still coming up (CLAUDE.md: "expected, not a bug").
+_FL11_EXPECTED_TRIP_REASON = 6
+
+
+def _case_fl10(ctx: dict) -> CaseResult:
+    """FL-10: ESP JTAG flash round trip. Opt-in via `ctx["allow_flash"]`;
+    also needs `ctx["ap_password"]` (flash_firmware()'s boot_guard_reset and
+    verification path use it -- see mcp_server_flash.py). A refusal or
+    exception from the flashing tool itself is always a FAIL, never a
+    lesser verdict (plan §6 rule 3) -- `judgments.judge_flash_round_trip`
+    treats any `error:`-prefixed reply that way."""
+    if not ctx.get("allow_flash"):
+        return CaseResult(Verdict.SKIP, reason="opt-in: pass allow_flash=True to run FL-10")
+    ap_password = ctx.get("ap_password")
+    if not ap_password:
+        return CaseResult(Verdict.SKIP, reason="opt-in: FL-10 requires ap_password")
+
+    srv = _srv(ctx)
+    kwargs = {"verify": True, "ap_password": ap_password}
+    kiln_fw_root = ctx.get("kiln_fw_root")
+    if kiln_fw_root:
+        kwargs["kiln_fw_root"] = kiln_fw_root
+    try:
+        text = srv.flash_firmware(**kwargs)
+    except Exception as exc:  # noqa: BLE001
+        return J.judge_flash_round_trip(None, None, _FL10_APP_PARTITION, error=str(exc))
+
+    if text.startswith("error:"):
+        return J.judge_flash_round_trip(None, None, _FL10_APP_PARTITION, error=text)
+
+    running_match = re.search(r"running\s+'(\w+)'", text)
+    running_partition = running_match.group(1) if running_match else None
+    if "confirmed the board is running" in text:
+        return J.judge_flash_round_trip(True, running_partition, _FL10_APP_PARTITION, error=None)
+    if "WARNING" in text:
+        return J.judge_flash_round_trip(False, running_partition, _FL10_APP_PARTITION, error=None)
+    # Flashed OK but verify=False's early return, or some other shape this
+    # parsing doesn't recognize yet -- record-only rather than guessing.
+    return J.judge_flash_round_trip(None, running_partition, _FL10_APP_PARTITION, error=None)
+
+
+def _case_fl11(ctx: dict) -> CaseResult:
+    """FL-11: Pico JTAG flash round trip (opt-in via `allow_flash`), then
+    the S6a procedure of plan §6: confirm link comes back up with ONLY
+    SAFETY_TRIP_MAIN_FAULT latched (never a different or additional guard),
+    then clear it and confirm the clear. `debug_program(peer="pico")`
+    failing outright is a FAIL via the same `judge_flash_round_trip` path
+    FL-10 uses; the S6a check itself reuses `judge_operator_trip` (it is
+    generic trip-then-clear reasoning, not actually operator-specific)."""
+    if not ctx.get("allow_flash"):
+        return CaseResult(Verdict.SKIP, reason="opt-in: pass allow_flash=True to run FL-11")
+
+    srv = _srv(ctx)
+    try:
+        flash_text = srv.debug_program(peer="pico")
+    except Exception as exc:  # noqa: BLE001
+        return J.judge_flash_round_trip(None, None, "pico", error=str(exc))
+    if isinstance(flash_text, str) and flash_text.lower().startswith("error"):
+        return J.judge_flash_round_trip(None, None, "pico", error=flash_text)
+
+    status_text = srv.safety_get_status()
+    trip_reason = None
+    m = re.search(r"trip_reason[:=]\s*(\d+)", status_text)
+    if m:
+        trip_reason = int(m.group(1))
+
+    cleared_after: "bool | None" = None
+    if trip_reason == _FL11_EXPECTED_TRIP_REASON:
+        srv.safety_clear_trip()
+        after_text = srv.safety_get_status()
+        after_m = re.search(r"trip_reason[:=]\s*(\d+)", after_text)
+        if after_m:
+            cleared_after = int(after_m.group(1)) == 0
+
+    return J.judge_operator_trip(trip_reason, _FL11_EXPECTED_TRIP_REASON, cleared_after)
+
+
 #: Wire this wave's judge functions into the shared REGISTRY. Imported by
 #: __init__.py after cases_smoke, so these assignments win over that
 #: module's wave-0 placeholders for FL-09/SK-01/SK-03; SK-02 is new.
 _CASE_FUNCS = {
+    "FL-10": _case_fl10,
+    "FL-11": _case_fl11,
     "SK-01": _case_sk01,
     "SK-02": _case_sk02,
     "SK-03": _case_sk03,

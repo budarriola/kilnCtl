@@ -10,11 +10,85 @@ starting its own heat. `registry.py` marks both `depends_on` the case they
 observe so the runner's own NOT_RUN-on-unmet-dependency handling applies
 when that case is requested but fails; this module's own guard covers the
 case where the observed case was never requested at all.
+Wave 3b adds SP-08 (E-stop press) and SP-09 (link-loss): both are
+operator-only (registry.py's `operator_only=True`) and gated by
+`operator.require_attended()` -- an unattended run SKIPs them with reason
+"requires --attended" rather than hanging or FAILing (plan section 6). When
+attended, each asks the operator to perform the physical action, reads the
+resulting trip_reason off `safety_get_status()`'s text report (same regex
+`cases_smoke._case_sp02` already uses), clears it via `safety_clear_trip()`,
+and confirms the clear via a second status read --
+`judgments.judge_operator_trip` does the actual pass/fail reasoning, kept
+pure and unit-testable the same way as every other judge function here.
 """
 from __future__ import annotations
 
+import re
+
 from . import judgments as J
+from . import operator as OP
+from .cases_smoke import _srv
 from .registry import CaseResult, Verdict, get_case
+
+#: SP-08 expects S7 (E-stop), SP-09 expects S6b (link-dead) -- the actual
+#: enum values from firmware/SaftyFW/src/safety_guards.h (SAFETY_TRIP_ESTOP=8,
+#: SAFETY_TRIP_LINK_DEAD=7). CLAUDE.md warns bit position is NOT the guard
+#: number past S3, so these are named constants, never re-derived from a mask.
+_SP08_EXPECTED_TRIP_REASON = 8  # SAFETY_TRIP_ESTOP (S7)
+_SP09_EXPECTED_TRIP_REASON = 7  # SAFETY_TRIP_LINK_DEAD (S6b)
+
+
+def _read_trip_reason(status_text: str) -> "int | None":
+    m = re.search(r"trip_reason[:=]\s*(\d+)", status_text)
+    return int(m.group(1)) if m else None
+
+
+def _operator_trip_case(ctx: dict, question: str, expected_reason: int, timeout_s: float) -> CaseResult:
+    """Shared body for SP-08/SP-09: gate on --attended, ask the operator to
+    perform the action, read the trip, clear it, confirm the clear."""
+    skip = OP.require_attended(ctx)
+    if skip is not None:
+        return skip
+
+    answered = OP.ask_operator(ctx, question, timeout_s=timeout_s)
+    if not answered:
+        return CaseResult(
+            Verdict.FAIL,
+            reason="operator did not confirm the action was performed (answered no/timed out)",
+            observed={"operator_answer": answered},
+        )
+
+    srv = _srv(ctx)
+    status_text = srv.safety_get_status()
+    trip_reason = _read_trip_reason(status_text)
+
+    cleared_after: "bool | None" = None
+    if trip_reason == expected_reason:
+        srv.safety_clear_trip()
+        after_text = srv.safety_get_status()
+        after_reason = _read_trip_reason(after_text)
+        if after_reason is not None:
+            cleared_after = after_reason == 0
+
+    return J.judge_operator_trip(trip_reason, expected_reason, cleared_after)
+
+
+def _case_sp08(ctx: dict) -> CaseResult:
+    return _operator_trip_case(
+        ctx,
+        "Press the E-stop now, wait a couple seconds, then release it. Confirm when done.",
+        _SP08_EXPECTED_TRIP_REASON,
+        timeout_s=120.0,
+    )
+
+
+def _case_sp09(ctx: dict) -> CaseResult:
+    return _operator_trip_case(
+        ctx,
+        "Pull the safety link cable now, wait for the trip, then reconnect it. Confirm when done.",
+        _SP09_EXPECTED_TRIP_REASON,
+        timeout_s=180.0,
+    )
 
 
 def _case_sp03(ctx: dict) -> CaseResult:
@@ -48,6 +122,8 @@ _CASE_FUNCS = {
     "SP-03": _case_sp03,
     "SP-06": _case_sp06,
     "SP-04": _case_sp04,
+    "SP-08": _case_sp08,
+    "SP-09": _case_sp09,
 }
 for _cid, _fn in _CASE_FUNCS.items():
     get_case(_cid).judge = _fn

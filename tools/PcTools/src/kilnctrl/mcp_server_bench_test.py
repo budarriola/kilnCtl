@@ -21,7 +21,8 @@ from .bench_test.runner import BenchTestRunner
 @_srv._tool()
 def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = False,
                     allow_heat: bool = True, ap_password: Optional[str] = None,
-                    tag: Optional[str] = None, host: Optional[str] = None) -> str:
+                    tag: Optional[str] = None, host: Optional[str] = None,
+                    attended: bool = False, allow_flash: bool = False) -> str:
     """Run a standardized bench-test suite against this board
     (docs/BENCH_TEST_SYSTEM_PLAN.md). `suite` is one of `smoke`, `static`,
     `flash`, `stack`, `ota`, `autotune`, `heat`, `web`, `lcd`, `safety`,
@@ -46,9 +47,18 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     `docs/BENCH_TEST_LOG.md` per run (never a credential) via
     `report.append_log_line()`.
 
-    No case in this wave heats, flashes, writes config, or touches Wi-Fi."""
+    `attended=True` (plan §6, Wave 3b) says a human is physically present at
+    the bench, so operator-only cases (SP-08, SP-09, WEB-WIFI-06) ask a
+    yes/no question instead of SKIPping with reason "requires --attended" --
+    see bench_test/operator.py. `allow_flash=True` opts into FL-10/FL-11
+    (an ESP/Pico JTAG flash round trip); both stay SKIP without it,
+    independent of `attended`, since a flash needs no operator present.
+
+    No case in this wave heats, flashes, writes config, or touches Wi-Fi,
+    unless it was explicitly opted into as above."""
     case_list = [c.strip() for c in cases.split(",") if c.strip()] if cases else None
-    ctx = {"host": host, "ap_password": ap_password, "tag": tag}
+    ctx = {"host": host, "ap_password": ap_password, "tag": tag,
+           "attended": attended, "allow_flash": allow_flash}
     runner = BenchTestRunner(ctx)
     try:
         outcome = runner.run(suite=suite, cases=case_list, dry_run=dry_run,

@@ -26,13 +26,16 @@ to non-GET rows under a real session.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, List, Optional, Tuple
 
 from . import judgments as J
+from . import operator as OP
 from .registry import CaseResult, Verdict, get_case
 
 
@@ -233,12 +236,118 @@ def _case_web_x03(ctx: dict) -> CaseResult:
     return J.judge_route_tier_sweep(results)
 
 
+def _wifi_status(host: str) -> "tuple[Optional[int], Optional[dict]]":
+    """GET /status (wifi_provision_http.c's status_get_handler, ROUTE_TIER_OPEN)
+    -- {"mode": "home"|"ap", ...}. Bare, unauthenticated GET like the tier
+    sweep above: this route is OPEN, and Wi-Fi credentials are never read
+    from or logged by this case (plan §6 rule 9) -- only the `mode` field is
+    ever inspected."""
+    status, text = _http_get_raw(host, "/status")
+    if status != 200 or not text:
+        return status, None
+    try:
+        body = json.loads(text)
+    except (ValueError, TypeError):
+        return status, None
+    return status, body if isinstance(body, dict) else None
+
+
+def _case_web_wifi06(ctx: dict) -> CaseResult:
+    """WEB-WIFI-06: AP-mode toggle is operator-only (plan §5, WEB-WIFI
+    section) -- an unattended run SKIPs (never FAILs, never hangs). When
+    attended, the operator is asked to trigger AP mode (e.g. via the Wi-Fi
+    page's own control, or by disconnecting the board's home network) and
+    confirm they saw it come up; this case also reads the board's own
+    `/status` before asking (in case AP mode is already up when the case
+    starts) and afterward to confirm the round trip back to `mode=home` --
+    see judgments.judge_wifi_mode_returned_home for why neither signal alone
+    is trusted."""
+    skip = OP.require_attended(ctx)
+    if skip is not None:
+        return skip
+
+    host = ctx.get("host")
+    if not host:
+        return CaseResult(Verdict.NOT_RUN, reason="no host configured", observed={})
+
+    mode_during_ap: Optional[str] = None
+    _status, body = _wifi_status(host)
+    if body:
+        mode_during_ap = body.get("mode")
+
+    confirmed = OP.ask_operator(
+        ctx,
+        "Toggle the board's Wi-Fi to AP mode, confirm you see the AP network appear, "
+        "then toggle it back to normal (home) mode. Did you see the AP network?",
+        timeout_s=180.0,
+    )
+
+    _status2, body2 = _wifi_status(host)
+    mode_after = body2.get("mode") if body2 else None
+
+    return J.judge_wifi_mode_returned_home(mode_during_ap, mode_after, confirmed)
+
+
+#: Deliberately never the real password -- WEB-SEC-05 exists to prove every
+#: attempt fails and the endpoint starts refusing outright (429), so this is
+#: a fixed, obviously-wrong string, never anything read from the environment.
+_SEC05_WRONG_PASSWORD = "bench-test-deliberately-wrong"
+_SEC05_ATTEMPTS = 6
+
+
+def _sec05_login_attempt(host: str, username: str, password: str, timeout: float = 5.0) -> Optional[int]:
+    url = f"http://{host}/api/auth/login"
+    body = urllib.parse.urlencode({"username": username, "password": password}).encode("ascii")
+    req = urllib.request.Request(
+        url, data=body, method="POST", headers={"Content-Type": "application/x-www-form-urlencoded"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.getcode()
+    except urllib.error.HTTPError as exc:
+        return exc.code
+    except (urllib.error.URLError, OSError):
+        return None
+
+
+def _case_web_sec05(ctx: dict) -> CaseResult:
+    """WEB-SEC-05: lockout (plan §5.1 WEB-SEC section). Credentials come
+    ONLY from KILNCTL_WEB_USERNAME/KILNCTL_WEB_PASSWORD (never persisted or
+    logged) -- but only the USERNAME is ever actually sent; the password is
+    always the fixed wrong string above, since this case's entire point is
+    to force failed attempts. SKIPs (not FAIL) when no host or no username
+    is configured, since a username is needed to exercise the real login
+    path rather than an arbitrary/nonexistent one.
+
+    No policy this case touches is reversible in a `finally`: the lockout it
+    trips is a genuine, self-expiring per-IP counter in the board's own RAM
+    (web_auth_login_http.c's login_lockout_slot_t table), not a toggle this
+    tooling flips -- there is no admin "clear my own lockout" route, by
+    design (memory project_login_lockout_saturation_accepted, an accepted
+    owner decision, not a defect to work around). This is exactly why the
+    case is pinned dead last in the suite (registry._ALWAYS_LAST): nothing
+    scheduled after it in the same run can be blocked by its own lockout."""
+    host = ctx.get("host")
+    if not host:
+        return CaseResult(Verdict.NOT_RUN, reason="no host configured", observed={})
+    username = os.environ.get("KILNCTL_WEB_USERNAME")
+    if not username:
+        return CaseResult(Verdict.SKIP, reason="KILNCTL_WEB_USERNAME not set in the environment")
+
+    status_codes = [
+        _sec05_login_attempt(host, username, _SEC05_WRONG_PASSWORD) for _ in range(_SEC05_ATTEMPTS)
+    ]
+    return J.judge_login_lockout(status_codes)
+
+
 #: Wire this wave's judge functions into the shared REGISTRY (see
 #: registry.py's module docstring for why ids are declared there and wired
 #: up here at import time).
 _CASE_FUNCS = {cid: _make_render_case(path, landmark_id, expect_nav) for cid, path, landmark_id, expect_nav in _PAGES}
 _CASE_FUNCS["WEB-X-01"] = _case_web_x01
 _CASE_FUNCS["WEB-X-03"] = _case_web_x03
+_CASE_FUNCS["WEB-WIFI-06"] = _case_web_wifi06
+_CASE_FUNCS["WEB-SEC-05"] = _case_web_sec05
 
 for _cid, _fn in _CASE_FUNCS.items():
     get_case(_cid).judge = _fn
