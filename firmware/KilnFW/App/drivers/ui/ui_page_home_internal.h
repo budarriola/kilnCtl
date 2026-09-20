@@ -120,6 +120,13 @@ extern lv_obj_t *s_ui_home_pause_btn_label;
 extern ui_topbar_t s_ui_home_topbar;
 extern lv_obj_t *s_ui_home_status_label;
 
+/* UI_PLAN.md 6.1 -- selected-profile name left of Start, tap opens the
+ * profile picker page ("profile_picker", pick mode). Grows to absorb
+ * action_row's leftover width; Start/Pause are pinned to their existing
+ * ~96px drawn size (see ui_home_build_button()'s grow parameter). */
+extern lv_obj_t *s_ui_home_profile_btn;
+extern lv_obj_t *s_ui_home_profile_label;
+
 /* UI_PLAN.md 6.5 -- right-quarter rail widgets, built once in
  * ui_page_home_build(), filled every tick by ui_home_rail_refresh() below. */
 extern lv_obj_t *s_ui_home_rail;
@@ -129,6 +136,9 @@ extern lv_obj_t *s_ui_home_rail_zone_name[MAX31856_CHANNEL_COUNT];
 extern lv_obj_t *s_ui_home_rail_zone_temp[MAX31856_CHANNEL_COUNT];
 extern lv_obj_t *s_ui_home_rail_zone_bar[MAX31856_CHANNEL_COUNT];
 extern lv_obj_t *s_ui_home_rail_watts_label;
+
+/* UI_PLAN.md 6.1 -- see ui_page_home_refresh.c for the full doc comment. */
+void ui_home_profile_label_refresh(const profile_exec_status_t *st);
 
 /* ---- helpers, defined in ui_page_home.c or ui_page_home_actions.c, used
  * from another file in the split -------------------------------------- */
@@ -141,6 +151,7 @@ void ui_home_menu_nav_cb(lv_event_t *e);
 lv_obj_t *ui_home_build_button(lv_obj_t *parent, const char *text, lv_color_t bg, lv_event_cb_t cb,
                                 int32_t height, lv_obj_t **out_label);
 void ui_home_fire_btn_cb(lv_event_t *e);
+void ui_home_profile_btn_cb(lv_event_t *e);
 void ui_home_pause_resume_btn_cb(lv_event_t *e);
 
 /* WEB_AUTH_PLAN.md item 10 -- one shared corner-tap handler for all four

@@ -431,6 +431,8 @@ lv_obj_t *s_ui_home_fire_btn;      /* merged Start/Stop button */
 lv_obj_t *s_ui_home_fire_btn_label;
 lv_obj_t *s_ui_home_pause_btn;      /* merged Pause/Resume button -- see ui_home_pause_resume_btn_cb() */
 lv_obj_t *s_ui_home_pause_btn_label;
+lv_obj_t *s_ui_home_profile_btn;    /* UI_PLAN.md 6.1 -- selected profile name, opens the picker */
+lv_obj_t *s_ui_home_profile_label;
 ui_topbar_t s_ui_home_topbar;       /* Menu gear icon, shared chrome -- see ui_topbar.h */
 
 /* WiFi/IP/mDNS status readout, in the status bar. Text comes from
@@ -1250,11 +1252,30 @@ _Static_assert(UI_PAGE_HOME_RAIL_WORST_CASE_HEIGHT_PX <=
      * ui_home_build_button()) -- hidden costs zero row width, same discipline as
      * s_ui_home_trip_strip/s_ui_home_progress_wrap elsewhere on this page, so a hidden pause
      * button never leaves the Start/Stop button looking off-center. */
+    /* UI_PLAN.md 6.1: selected-profile name, first child so it absorbs the
+     * row's leftover width (flex_grow(1)) while Pause/Start below are pinned
+     * to their existing ~96px drawn size -- ui_home_build_button() always
+     * grows its button to 1, so Pause/Start are overridden back to a fixed
+     * width right after construction rather than adding a second growth
+     * mode to that shared helper for its one remaining caller pair. Tap
+     * opens the already-landed 6.2 picker page in pick mode
+     * ("profile_picker" -- see kiln_ui_register_page() in kiln_ui.c). */
+    s_ui_home_profile_btn = ui_home_build_button(action_row, "--", UI_THEME_ACCENT_2, ui_home_profile_btn_cb, 36,
+                                &s_ui_home_profile_label);
+    lv_label_set_long_mode(s_ui_home_profile_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(s_ui_home_profile_label, lv_pct(100));
+    lv_obj_set_style_text_align(s_ui_home_profile_label, LV_TEXT_ALIGN_CENTER, 0);
+    ui_theme_apply_touch_area(s_ui_home_profile_btn, true);
+
     s_ui_home_pause_btn = ui_home_build_button(action_row, "Pause", UI_THEME_ACCENT_1, ui_home_pause_resume_btn_cb, 36,
                                 &s_ui_home_pause_btn_label);
     lv_obj_add_flag(s_ui_home_pause_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_flex_grow(s_ui_home_pause_btn, 0);
+    lv_obj_set_width(s_ui_home_pause_btn, 96);
 
     s_ui_home_fire_btn = ui_home_build_button(action_row, "Start", UI_THEME_ACCENT_4, ui_home_fire_btn_cb, 36, &s_ui_home_fire_btn_label);
+    lv_obj_set_flex_grow(s_ui_home_fire_btn, 0);
+    lv_obj_set_width(s_ui_home_fire_btn, 96);
 
     /* Pages are never torn down (kiln_ui.h's header comment), so a timer
      * created once here and never deleted matches that lifetime. */

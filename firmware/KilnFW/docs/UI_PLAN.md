@@ -628,7 +628,20 @@ Two facts hold for every item and are not repeated per item:
   `sdkconfig.defaults` and renders ~14px per line. montserrat_12 is **not**
   enabled — do not use it without enabling it and re-checking flash size.
 
-### 6.1 Dashboard: selected profile name left of Start, tapping it opens a picker
+### 6.1 Dashboard: selected profile name left of Start, tapping it opens a picker — implemented 2026-09-19, awaiting bench verification
+
+Host tests unchanged (55/55, no new pure module here -- Start/Pause's fixed
+96px width is set by overriding `ui_home_build_button()`'s default
+`flex_grow(1)` back to 0 on those two buttons post-construction, rather than
+adding a second growth mode to that shared helper), the KilnFW target build,
+`check_all_task_stack_budgets.py` (lvgl unchanged at 4848 B against the
+4880 B ceiling -- the new `ui_home_profile_label_refresh()` is called
+out-of-line from `ui_home_refresh_cb()`, same discipline as 6.5's
+`ui_home_rail_refresh()`), `check_ui_budget_asserts.ps1` (no new assert
+needed, action_row's 36px contribution is unchanged) and
+`check_stack_margin_registration.ps1` all pass. The "Numeric verification"
+section above still needs a live bench capture -- not done from this
+worktree.
 
 **Files.** `ui_page_home.c` (`ui_page_home_build()`, the `action_row` block
 at the end), `ui_page_home_internal.h` (declare the new
@@ -1011,7 +1024,8 @@ topbar (see 6.2):
 | E | 6.2 | done |
 | F | 6.5 — done 2026-09-19 (bench verification pending) | `ui_page_home.c`, `ui_page_home_internal.h`, `ui_page_home_refresh.c`, **new** `ui_page_home_rail.c/.h` |
 
-Wave 3 — 6.1, which needs E's picker page *and* F's home-page edits.
+Wave 3 — 6.1, which needs E's picker page *and* F's home-page edits — done
+2026-09-19 (bench verification pending), same worker F, same files.
 
 **Collisions, stated explicitly.** 6.1 and 6.5 both edit `ui_page_home.c`,
 `ui_page_home_internal.h` and `ui_page_home_refresh.c` — give them to the same

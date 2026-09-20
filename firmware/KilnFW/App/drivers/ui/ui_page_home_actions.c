@@ -255,6 +255,16 @@ void ui_home_menu_nav_cb(lv_event_t *e)
     kiln_ui_show("config");
 }
 
+/* UI_PLAN.md 6.1: tap the profile name left of Start to open the picker in
+ * pick mode ("profile_picker" -- kiln_ui_register_page() in kiln_ui.c wires
+ * that name to ui_page_profile_picker_build_pick(); "profiles" is the
+ * separate unified manage list reached from the menu instead). */
+void ui_home_profile_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    kiln_ui_show("profile_picker");
+}
+
 /* out_label, if non-NULL, receives the button's label widget so a caller can
  * change its text/color later (the merged fire button's state-driven text --
  * see ui_home_fire_btn_cb()/ui_home_refresh_cb()).
