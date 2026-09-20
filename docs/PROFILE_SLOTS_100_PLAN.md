@@ -271,7 +271,78 @@ One commit each, sized for a sonnet implementer, each independently buildable an
 
 Phase A landed: tasks 2, 4, 5, 9 (reverted, see below), 10, 11 (this section).
 Task 1 landed 2026-09-19 (see below). Task 3 landed 2026-09-19 (see below).
-Tasks 6, 7, 8, 12 are NOT started.
+Task 6 landed 2026-09-19 (see below, in worktree `C:\wt\s100t6_0juqog`).
+Tasks 7, 12 are NOT started (task 8 landed separately, see the Status section
+below the historical block).
+
+**Task 6 landed 2026-09-19.** `PROFILES_MAX_COUNT` raised 8 -> 100.
+`PROFILE_BUILTIN_ID_BASE` (128) documented as a hard ceiling in
+`profiles_types.h`. `LIVE_EDIT_WORKING_SLOT_ID` becomes 100 automatically
+(`PROFILES_MAX_COUNT`). Both `used_bitmap` and the favorites masks already
+used the 4-word `profiles_slot_bitmap_t` from task 1; the NVS-persisted
+`prof_favusr`/`prof_favbi`/`prof_used` keys now write and read the full
+4-word blob (previously only `word[0]`), with read-side migration accepting
+the old single-word/single-byte legacy blob (probed by blob length; falls
+back to `hal_kv_get_u8`/`hal_kv_get_u32` plus `profiles_slot_bitmap_from_u32`
+on a length mismatch). `_Static_assert` added on `profile_nvs_key()`'s output
+length (<=15 chars — NVS key length limit).
+
+**Owner decision from the paragraph above implemented:** `PROFILE_BENCH_SLOT_ID`
+= `LIVE_EDIT_WORKING_SLOT_ID + 1` = 101, in new file
+`profiles_bench_slot.h`. Same visibility exclusion as the live-edit slot:
+excluded from `profiles_catalog_http.c`'s catalogue loop bound (`<
+PROFILES_MAX_COUNT`), from `profiles_favorites.c` (`profiles_favorites_set()`
+returns `ESP_ERR_INVALID_ARG` for it, `profiles_favorites_is()` returns
+`false`), and from the LCD picker's deletable range
+(`ui_page_profile_picker_is_deletable()` returns `false` for it, since it is
+not `< PROFILES_MAX_COUNT` and not a builtin id either).
+
+Mechanical sweep to the new constant: `profiles_catalog_http.c`,
+`diagnostics_http.c` (kept as ONE aggregate `profiles` row, never 100
+per-slot rows; `CFG_FS_STATUS_MAX_ITEMS` untouched at 18), `protocol.py`,
+`full_board_backup.py`, host tests re-derived from `PROFILES_MAX_COUNT`
+instead of hardcoding 7/8 (`test_ui_page_profile_picker_format.c`).
+`check_profiles_capacity.py` already derived the constant dynamically and
+needed no change. Did NOT touch `kiln_cfg_store`'s 8 config slots,
+`BACKUP_BODY_MAX`, `backup_import.c`, any stack ceiling in
+`check_all_task_stack_budgets.py`, any task stack size, or any httpd stack
+buffer, and added no new HTTP route (`check_uri_handler_cap.ps1` unchanged
+at 150/151).
+
+New host tests in `test_profiles_http.c`:
+`test_slot_bitmap_legacy_u8_migrates_on_read()` (stages real decodable
+profile blobs plus a legacy single-byte `prof_used`, confirms
+`nvs_load_all_from()` migrates it into the widened bitmap — staging a
+bitmap byte alone is insufficient since a slot's used-bit is cleared again
+if no decodable profile blob backs it, per the existing "one bad slot
+doesn't take down the others" design);
+`test_profiles_http_save_fills_all_100_then_reuses_deleted_slot()` (fills
+all 100 slots, confirms a first-free-slot save is refused when full, deletes
+slot 50, confirms the next first-free-slot save lands back at 50); and
+`test_bench_slot_id_excluded_from_catalogue_favorites_and_lcd_order()`.
+`test_slot_bitmap_persisted_byte_identical_for_8slot_fixture()` was
+re-scoped to a fixed `SLOT_BITMAP_FIXTURE_SLOTS = 8` (independent of
+`PROFILES_MAX_COUNT`) and its post-save assertion switched from a legacy
+`nvs_get_u8()` read to a `nvs_get_blob()` read of the full bitmap, since a
+save now always writes the widened blob.
+
+Negative-tested: sabotaged `profiles_bench_slot.h` (`+ 1` -> `- 1`),
+confirmed 5 assertion failures in the new bench-slot exclusion test,
+restored the exact inverse edit by hand (file is new/untracked, so no
+`git cat-file blob HEAD:...` baseline existed), then forced a full rebuild
+(deleted `App/test/build`) and confirmed clean.
+
+Verified in `C:\wt\s100t6_0juqog`: `kilnctl_host_tests.exe` 9319/9319,
+`kilnctl_host_tests_profiles_http.exe` 819/819 (both from a from-scratch
+forced rebuild). `check_00_kilnfw_target_build.ps1`,
+`check_profiles_capacity.ps1`, `check_lint_pages.ps1`,
+`check_js_host_tests.ps1`, `check_uri_handler_cap.ps1` all PASS.
+`check_all_task_stack_budgets.ps1` reports its pre-existing `bx_flash_worker`
+ceiling breach (4064 B vs 3792 B, last touched by unrelated commit
+`bc0befd0`, no file this task changed) — confirmed NOT introduced by task 6
+(no flash-worker file touched) and left as-is per the explicit "do NOT bump
+any stack ceiling" instruction; this is the same 28 tasks/1-over-budget
+shape the check already reported before this work started.
 
 **Task 1 landed 2026-09-19.** Both `used_bitmap` (`profiles_http.c`'s
 `s_profiles`) and the favorites user mask (`profiles_favorites.c`'s
@@ -288,8 +359,8 @@ NVS bytes and the 8-slot HTTP response bytes are byte-identical to before.
 The two sites the paragraph below used to warn about are now fixed:
 `profiles_catalog_http.c`'s `profiles_list_get_handler()` and
 `favorites_list_get_handler()` both call the accessors instead of shifting
-into a narrow scalar. `PROFILES_MAX_COUNT` is unchanged (still 8, task 6's
-job). New host tests in `test_profiles_http.c`:
+into a narrow scalar. `PROFILES_MAX_COUNT` was unchanged at the time (still 8,
+task 6's job -- task 6 has since landed, see above; raised to 100). New host tests in `test_profiles_http.c`:
 `test_slot_bitmap_persisted_byte_identical_for_8slot_fixture()` (asserts the
 persisted `prof_used` byte for a full 8-slot fixture stays exactly `0xFF`,
 and that the real loader reconstructs all 8 slots as used) and
@@ -353,13 +424,14 @@ profile list going forward, not this plan.
 1 live-edit slot, there is **one additional hidden bench-harness slot** for
 `docs/BENCH_TEST_SYSTEM_PLAN.md`'s bench test system to use. It is never listed,
 exported, or shown on any web page or the LCD -- the same visibility exclusion the
-live-edit slot already gets, extended to a second id. This pass does not implement it:
-`PROFILES_MAX_COUNT` is still 8 (task 6 has not landed, see above), so there is no slot
-layout yet for a bench-harness id to occupy one line of. When task 6 lands and the
-100/live-edit id numbering is actually cut in, revisit whether adding id 101 alongside
-it is still a one-line addition against that new layout, and if so add it then, with its
-own visibility exclusions and a host test proving it is excluded from the catalogue/
-favorites listing, the web page, and the LCD page -- not before.
+live-edit slot already gets, extended to a second id. This pass did not implement it:
+`PROFILES_MAX_COUNT` was still 8 (task 6 had not landed, see above), so there was no slot
+layout yet for a bench-harness id to occupy one line of.
+
+**Implemented 2026-09-19 as part of task 6**, once the 100/live-edit id numbering was
+actually cut in: `PROFILE_BENCH_SLOT_ID` = 101, with its own visibility exclusions and a
+host test proving it is excluded from the catalogue/favorites listing and the LCD picker's
+deletable range. Full detail in the task 6 status block above.
 
 ---
 

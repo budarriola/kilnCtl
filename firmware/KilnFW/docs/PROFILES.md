@@ -47,7 +47,7 @@ Limits, all compile-time:
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `PROFILES_MAX_COUNT` | 8 | storage slots, ids 0..7 |
+| `PROFILES_MAX_COUNT` | 100 | storage slots, ids 0..99 |
 | `PROFILE_NAME_MAX_LEN` | 15 | name characters, not counting the NUL |
 | `PROFILE_MAX_SEGMENTS` | 12 | segments per profile |
 
@@ -58,11 +58,14 @@ for that case.
 
 ### Storage
 
-NVS namespace `kiln_cfg`, one blob per slot under keys `prof0`..`prof7`, plus
-a one-byte `prof_used` bitmap (bit N = slot N in use). All eight slots are
-loaded resident at boot — each is well under 200 bytes, so lazy per-request
+NVS namespace `kiln_cfg`, one blob per slot under keys `prof0`..`prof99`, plus
+a 4x`uint32_t` `prof_used` bitmap (bit N = slot N in use; widened 2026-09-19
+from a single byte, see below — read-side migration accepts the old
+single-byte blob). All 100 slots are loaded resident at boot, now via a
+lazily-allocated PSRAM (falling back to internal RAM) buffer rather than a
+`.bss` global — each slot is well under 200 bytes, so lazy per-request
 loading would be more code than it saves, and the bitmap still means a
-listing never has to probe eight keys.
+listing never has to probe 100 keys.
 
 If the bitmap says a slot is used but its blob is missing or the wrong size
 (a stale layout from before a struct change), **the blob wins**: the slot is
@@ -74,38 +77,40 @@ blobs.
 reads through `profiles_http_get()` and never touches NVS — the same
 one-owner discipline `zones_http.c` established for zone config.
 
-### 100-slot work in progress (docs/PROFILE_SLOTS_100_PLAN.md, 2026-09-19)
+### 100-slot work (docs/PROFILE_SLOTS_100_PLAN.md)
 
-`PROFILES_MAX_COUNT` is still 8 as of this writing — the plan's phase A
-(tasks 2, 4, 5, 9, 10, 11) landed the groundwork without yet raising the
-count:
+`PROFILES_MAX_COUNT` is 100 as of 2026-09-19 (plan task 6, landed in
+`C:\wt\s100t6_0juqog`). `PROFILE_BUILTIN_ID_BASE` (128) is documented in
+`profiles_types.h` as a hard ceiling. Ahead of it:
 
 - The `cfg` LittleFS partition (see `docs/CONFIG_FILESYSTEM.md`) was grown
   in place to take the entire remaining flash tail, `0x250000` (2.31 MiB) —
-  the byte budget a 100-slot `used_bitmap`/blob table will need once task 6
-  raises `PROFILES_MAX_COUNT`.
-- Deleting a profile slot (`nvs_erase_slot()`, `profiles_http.c`) now also
+  the byte budget the 100-slot `used_bitmap`/blob table needs.
+- Deleting a profile slot (`nvs_erase_slot()`, `profiles_http.c`) also
   prunes that id's firing-history ring (`firing_stats_erase()`,
   `profile_executor_firing_stats.c`) — both the "fs_<id>" NVS blob and its
   cfg-fs mirror file. Before this, a slot id reused for a new, never-fired
   profile would read back the PREVIOUS occupant's history the first time its
   history page was opened.
-
-**Hard, unstarted prerequisite for raising `PROFILES_MAX_COUNT` past 32
-(plan task 6): plan task 1** — widening `used_bitmap` from `uint8_t` to
-`uint32_t[4]` (plus widening the favorites mask) behind accessors. Not part
-of phase A; nobody has started it as of this writing. Two concrete
-undefined-behavior sites in `profiles_catalog_http.c` depend on it:
-`profiles_list_get_handler()`'s `s_profiles.used_bitmap & (1u << id)` (line
-286, `used_bitmap` is a `uint8_t`) and `favorites_get_handler()`'s 32-bit
-`user_mask & (1u << i)` — both are undefined once `id`/`i` reaches 32. Do
-not raise `PROFILES_MAX_COUNT` above 32 until task 1 lands.
+- Plan task 1: `used_bitmap` and the favorites masks widened from `uint8_t`/
+  a narrow scalar to `profiles_slot_bitmap_t` (4x`uint32_t`, ids 0..127)
+  behind accessors, fixing the two sites that used to shift into a narrow
+  scalar (`profiles_catalog_http.c`'s `profiles_list_get_handler()` and
+  `favorites_get_handler()`).
+- Plan task 6: `PROFILES_MAX_COUNT` raised to 100. `LIVE_EDIT_WORKING_SLOT_ID`
+  is `PROFILES_MAX_COUNT` (100). A second hidden slot,
+  `PROFILE_BENCH_SLOT_ID` (101, `profiles_bench_slot.h`), reserved for
+  `docs/BENCH_TEST_SYSTEM_PLAN.md`'s bench harness — excluded from the
+  catalogue, favorites, and the LCD picker's deletable range the same way
+  the live-edit slot is. Persisted `prof_favusr`/`prof_favbi`/`prof_used`
+  keys now write/read the full 4-word bitmap blob, with read-side migration
+  accepting the old single-word/single-byte legacy blob.
 
 ### Built-in schedules (2026-08-20)
 
 28 published [Digital Fire](https://digitalfire.com/schedule) firing
 schedules ship read-only in flash, addressed at `PROFILE_BUILTIN_ID_BASE`
-(128) + index — a separate id space from the 8 user slots above, so they can
+(128) + index — a separate id space from the 100 user slots above, so they can
 neither fill them nor be evicted by them. Full design (why a separate id
 space, why "removable" is a hide recorded in an NVS mask rather than a
 delete, how the table is generated, and the feasibility formulas that badge
