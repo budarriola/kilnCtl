@@ -564,3 +564,20 @@ record. Two options for the owner to pick between, neither implemented here:
 
 No recommendation is made here; this needs an explicit owner call before
 either option is implemented.
+
+---
+
+## Name-uniqueness scope (Opus review nit N1, 2026-09-20)
+
+Decision 3 above ("name collisions on save-as: REFUSE") is enforced across
+**USER slots only, everywhere in this feature** -- a name matching a
+builtin schedule's code is never itself a collision. This includes
+`live_edit_decide()`'s `LIVE_EDIT_DECISION_SAVE_AS` path: it now calls
+`live_edit_name_collides_ex(..., include_builtins=false)` directly, the same
+as `profiles_http_save()`, `profile_post_handler()`, and the single-/batch-
+import paths in `profiles_export_http.c`/`backup_import.c`. SAVE_AS writes a
+fresh user slot, so "Copy builtin" followed by "Save As" reusing that same
+name is a normal, allowed save, not a collision -- consistent with the
+5dd23944 fix that made ordinary builtin-copy saves work at all. See
+`live_profile.c`'s `live_edit_name_collides_ex()` comment for the full
+history.

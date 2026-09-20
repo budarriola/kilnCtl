@@ -75,7 +75,11 @@ static esp_err_t export_get_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    char name_escaped[PROFILE_NAME_MAX_LEN * 2 + 1];
+    /* *6+1, not *2+1 (Opus review nit N3): profiles_http_json_escape() emits
+     * \u00XX (6 output bytes) for a control byte, not just a doubled
+     * backslash for '"'/'\\' -- *2+1 could silently truncate the escaped
+     * name. See profiles_catalog_http.c's identical comment. */
+    char name_escaped[PROFILE_NAME_MAX_LEN * 6 + 1];
     profiles_http_json_escape(p.name, name_escaped, sizeof(name_escaped));
 
     size_t o = 0;

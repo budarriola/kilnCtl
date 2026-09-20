@@ -108,8 +108,11 @@ bool live_edit_record_decode(const void *blob, size_t len, live_edit_record_t *o
  * record/working slot untouched either way; false means refused, with a
  * human-readable reason in err.
  *
- * SAVE_AS: refuses on a name collision (live_edit_name_collides(),
- *   exclude_id 0xFF -- always a fresh slot, never a rename target).
+ * SAVE_AS: refuses on a name collision among USER slots only
+ *   (live_edit_name_collides_ex(..., include_builtins=false), exclude_id
+ *   0xFF -- always a fresh slot, never a rename target; Opus review nit N1:
+ *   SAVE_AS writes a user slot, so a name matching a builtin's code is not
+ *   refused here either, same as every other USER-SLOT writer).
  * OVERWRITE: refuses (a) structurally, checked FIRST, if the record's
  *   origin is a builtin or outside the user id range (live_edit_can_
  *   overwrite()) -- so a caller cannot bypass the structural refusal by
@@ -162,12 +165,15 @@ bool live_edit_name_collides(const char *candidate_name, const char *(*name_at)(
 
 /* Same as live_edit_name_collides() above, plus an explicit `include_builtins`
  * switch (Opus review of 5dd23944, finding 1/BLOCKER). live_edit_name_collides()
- * itself is now a thin wrapper that always passes true, preserving its
- * original behavior for its one remaining caller, live_edit_decide()'s
- * LIVE_EDIT_DECISION_SAVE_AS path. Every USER-SLOT save (profiles_http_save(),
- * profile_post_handler(), and the single- and batch-import paths in
- * profiles_export_http.c/backup_import.c) must call this directly with
- * include_builtins=false: a user profile saved under a builtin's name/code
+ * itself is now a thin wrapper that always passes true, kept published and
+ * directly unit-tested but with no remaining production caller (Opus review
+ * nit N1 widened live_edit_decide()'s LIVE_EDIT_DECISION_SAVE_AS path, its
+ * last caller, to call this function directly with include_builtins=false
+ * instead). Every USER-SLOT save (profiles_http_save(),
+ * profile_post_handler(), live_edit_decide()'s SAVE_AS, and the single- and
+ * batch-import paths in profiles_export_http.c/backup_import.c) calls this
+ * directly with include_builtins=false: a user profile saved under a
+ * builtin's name/code
  * is not a collision -- it is exactly what the "Copy builtin" button
  * produces on purpose, and refusing it also made an existing user slot
  * already named like a builtin permanently unrenamable/uneditable, and

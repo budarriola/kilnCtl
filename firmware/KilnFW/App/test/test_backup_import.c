@@ -147,7 +147,16 @@ psa_status_t g_stub_psa_import_key_result = PSA_SUCCESS;
 // and same guarded profile_decode_result_t shim as test_live_profile.c's
 // identical fakes (see that file's header comment); the real format's own
 // correctness is test_profiles_http.c's job.
-#ifndef PROFILE_DECODE_RESULT_SHIM_DECLARED
+//
+// N5 follow-on: backup_import.c (self-included above at line 79) now pulls
+// in profiles_http_internal.h directly (for profiles_http_first_free_slot()),
+// which already declares the REAL profile_decode_result_t with these same
+// three values -- so this shim must not redeclare it in that case, or MSVC
+// reports "redefinition" (profiles_http_internal.h has no shim-cooperating
+// guard of its own to check instead). Guarding on its own include guard
+// macro, PROFILES_HTTP_INTERNAL_H, keeps this shim usable standalone too, in
+// case some future edit stops pulling that header in.
+#if !defined(PROFILE_DECODE_RESULT_SHIM_DECLARED) && !defined(PROFILES_HTTP_INTERNAL_H)
 #define PROFILE_DECODE_RESULT_SHIM_DECLARED
 typedef enum {
     PROFILE_DECODE_OK,

@@ -2350,6 +2350,31 @@ static void test_profile_post_handler_collision_response_escapes_newline_in_name
               "the newline must be escaped as \\u00XX, not left as a raw control byte");
 }
 
+static void test_profile_post_handler_allows_builtin_name(void)
+{
+    /* Opus review nit N2: profile_post_handler() (POST /api/profile) is the
+     * actual handler behind "Save"/"Save As" and copyBuiltin() -- covers it
+     * the same way test_profiles_http_save_allows_builtin_name() already
+     * covers profiles_http_save() (profiles_edit_http.c:566's live_edit_
+     * name_collides_ex() call with include_builtins=false). Negative-tested:
+     * flipping that literal false->true here reproduces a wrongful 400. */
+    TEST_SECTION("profile_post_handler() -- a name matching the read-only builtin catalogue is ALLOWED "
+                 "(Opus review nit N2 -- covers profiles_edit_http.c:566)");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    g_fake_builtin_on = true;
+    strcpy((char *)g_fake_builtin.code, "C6DHSC");
+
+    char body[256];
+    build_minimal_post_body(body, sizeof(body), "c6dhsc");
+    esp_err_t err = run_profile_post(body);
+
+    g_fake_builtin_on = false;
+
+    TEST_CHECK(err == ESP_OK, "the handler must return ESP_OK");
+    TEST_CHECK(strstr(s_resp_capture, "\"ok\":true") != NULL,
+              "a save naming itself after a builtin's code must succeed, not be refused as a 400 collision");
+}
+
 static void test_profiles_list_marks_exceeds_ceiling(void)
 {
     TEST_SECTION("profiles_list_get_handler -- a saved over-ceiling profile is marked "
@@ -2912,6 +2937,7 @@ void run_test_profiles_http(void)
     test_profile_post_handler_collision_response_is_well_formed_json();
     test_profile_post_handler_collision_response_escapes_quote_in_name();
     test_profile_post_handler_collision_response_escapes_newline_in_name();
+    test_profile_post_handler_allows_builtin_name();
     test_profiles_list_marks_exceeds_ceiling();
     test_validate_candidate_hard_mode_refuses_target_above_zone_ceiling();
     test_validate_candidate_hard_mode_refuses_ramp_above_zone_ceiling();

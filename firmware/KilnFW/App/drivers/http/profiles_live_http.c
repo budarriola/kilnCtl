@@ -258,10 +258,34 @@ static esp_err_t api_profile_live_get_handler(httpd_req_t *req)
     /* last_refusal is always an object or null -- never a bare boolean.
      * (It was `true`/`false` on the inactive branch, which the page rendered
      * as the literal text "true".) */
-    char refbuf[300];
+    char refbuf[320]; /* fixed JSON text (~60 B) + msg_escaped's up-to-240 B, plus margin */
     if (st.has_refusal) {
-        char msg_escaped[sizeof(st.refusal_err_msg) * 2 + 2];
-        json_escape(st.refusal_err_msg, msg_escaped, sizeof(msg_escaped));
+        /* profiles_http_json_escape(), not the narrower json_escape()
+         * (Opus review nit N4): json_escape() only doubles '"'/'\\' and
+         * leaves a raw control byte (e.g. a literal newline) unescaped,
+         * breaking this JSON the same way profile_post_handler()'s
+         * collision message once did (Opus review of 5dd23944, finding 3).
+         * refusal_err_msg is copied out of profile_executor's own live-edit
+         * refusal record (profile_executor_status.c), not operator input,
+         * but it is still free-form text.
+         *
+         * Truncated to 40 source chars BEFORE escaping (msg_trunc), not
+         * escaped at its full sizeof(st.refusal_err_msg)==128: a full-width
+         * *6+1 escape buffer (769 B) would also force refbuf/json below to
+         * grow to match, cascading a rare diagnostic string's worst case
+         * through every buffer downstream -- for a status line the operator
+         * reads on screen, 40 chars is already generous, and
+         * profiles_http_json_escape()'s own `o + 1 < out_cap` bound makes a
+         * shorter buffer a safe, non-corrupting truncation either way. */
+        char msg_trunc[41];
+        /* Precision "%.40s", not a bare "%s" -- GCC's -Werror=format-truncation
+         * cannot prove a bare "%s" fits msg_trunc from st.refusal_err_msg's
+         * declared size alone, even though msg_trunc's own sizeof is the
+         * snprintf limit; a compile-time precision makes the 40-char cap
+         * visible to the compiler too. */
+        snprintf(msg_trunc, sizeof(msg_trunc), "%.40s", st.refusal_err_msg);
+        char msg_escaped[sizeof(msg_trunc) * 6];
+        profiles_http_json_escape(msg_trunc, msg_escaped, sizeof(msg_escaped));
         snprintf(refbuf, sizeof(refbuf), "{\"generation\":%u,\"result\":%d,\"message\":\"%s\"}",
                  (unsigned)st.refusal_generation, st.refusal_result, msg_escaped);
     } else {

@@ -277,10 +277,20 @@ esp_err_t builtin_list_get_handler(httpd_req_t *req)
  * literally: `,{"id":255,"builtin":false,"name":"` (36) + up to
  * PROFILE_NAME_MAX_LEN*2 (30) escaped name bytes + `","zone_mask":255,`
  * `"segment_count":12}` (37) = 103; rounded up with slack for the format
- * rather than re-deriving the exact count if a field ever widens. */
-#define PROFILE_LIST_ENTRY_MAX 224 /* +30 (2026-09-02) for the ",\"exceeds_ceiling\":false" marker;
+ * rather than re-deriving the exact count if a field ever widens.
+ *
+ * Recomputed (Opus review nit N3, 2026-09-20): profiles_http_json_escape()
+ * can emit \u00XX (6 output bytes) for a control byte, not just a doubled
+ * backslash for '"'/'\\' -- the *2 name-escaping term above understated the
+ * true worst case. With PROFILE_NAME_MAX_LEN*6 (90) escaped name bytes, the
+ * base entry is 36 + 90 + 37 = 163, plus the two markers below (+30, +37) =
+ * 230. The constant is widened to keep the same ~121-byte slack margin the
+ * original 224 (vs. its own 103-byte base) carried. */
+#define PROFILE_LIST_ENTRY_MAX 352 /* +30 (2026-09-02) for the ",\"exceeds_ceiling\":false" marker;
                                      * +37 (PROFILE_SLOTS_100_PLAN.md task 8) for
-                                     * ",\"last_run_started_unix_s\":4294967295" (10-digit uint32 max) */
+                                     * ",\"last_run_started_unix_s\":4294967295" (10-digit uint32 max);
+                                     * base recomputed to 230 for N3's *6 name-escaping term above,
+                                     * +121 slack (matching the original margin) = 351, rounded to 352 */
 
 /* Chunked (2026-09-19, 100-slot plan task 2): the old shape built the ENTIRE
  * user-slot section into one stack-local `json[PROFILES_MAX_COUNT *
@@ -305,7 +315,11 @@ esp_err_t profiles_list_get_handler(httpd_req_t *req)
             continue;
         }
         const profile_t *p = &s_profiles.profiles[id];
-        char name_escaped[PROFILE_NAME_MAX_LEN * 2 + 1];
+        /* *6+1, not *2+1 (Opus review nit N3): profiles_http_json_escape()
+         * can emit \u00XX (6 output bytes) for any control byte, not just a
+         * doubled backslash for '"'/'\\' -- *2+1 under-sized this whenever a
+         * name held a control byte, silently truncating the escaped name. */
+        char name_escaped[PROFILE_NAME_MAX_LEN * 6 + 1];
         profiles_http_json_escape(p->name, name_escaped, sizeof(name_escaped));
         /* exceeds_ceiling (2026-09-02 owner correction): computed live against
          * each zone's CURRENT max_temp_c, not stored -- a profile that was
@@ -453,7 +467,9 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
         rollup = profile_feasibility_profile_mask(p->zone_mask, p, per_seg, PROFILE_MAX_SEGMENTS);
     }
 
-    char name_escaped[PROFILE_NAME_MAX_LEN * 2 + 1];
+    /* *6+1, not *2+1 -- see the identical N3 comment above in
+     * profiles_list_get_handler(). */
+    char name_escaped[PROFILE_NAME_MAX_LEN * 6 + 1];
     profiles_http_json_escape(p->name, name_escaped, sizeof(name_escaped));
     /* exceeds_ceiling/ceiling_note (2026-09-02 owner correction): same live
      * check the list endpoint runs -- see profile_exceeds_zone_ceiling()'s

@@ -198,11 +198,12 @@ bool live_edit_name_collides_ex(const char *candidate_name, const char *(*name_a
      * profile_post_handler(), and both the single-import and batch-import
      * paths in profiles_export_http.c/backup_import.c) now pass
      * include_builtins=false: a user copy of a builtin is a normal, allowed
-     * save. live_edit_decide()'s LIVE_EDIT_DECISION_SAVE_AS path (the
-     * in-progress live-editing "Save As" action, a different feature from
-     * the ones above and not implicated in this bug) keeps passing true via
-     * live_edit_name_collides() below, preserving its original behavior
-     * unchanged.
+     * save. Opus review nit N1 widened this to live_edit_decide()'s
+     * LIVE_EDIT_DECISION_SAVE_AS path too (see that switch case): it also
+     * writes a USER slot, so it now calls live_edit_name_collides_ex()
+     * directly with include_builtins=false instead of going through
+     * live_edit_name_collides() below. Name uniqueness is enforced across
+     * USER slots only, everywhere in this feature.
      *
      * Read-only either way: this only ever COMPARES against
      * g_builtin_profiles/profiles_builtin_entry(), never writes through
@@ -230,11 +231,14 @@ bool live_edit_name_collides_ex(const char *candidate_name, const char *(*name_a
 bool live_edit_name_collides(const char *candidate_name, const char *(*name_at)(void *ctx, uint8_t id), void *ctx,
                               uint8_t exclude_id, char *err, size_t err_cap)
 {
-    /* Original signature/behavior, kept for live_edit_decide()'s SAVE_AS
-     * path -- see live_edit_name_collides_ex()'s comment above for why that
-     * one caller keeps scanning builtins while every other caller (widened
-     * to call live_edit_name_collides_ex() directly with
-     * include_builtins=false) does not. */
+    /* Original always-scan-builtins signature/behavior. As of Opus review
+     * nit N1, live_edit_decide()'s SAVE_AS path no longer calls this --
+     * every writer of a USER slot now goes through
+     * live_edit_name_collides_ex(..., include_builtins=false) directly (see
+     * that function's comment above). This wrapper has no remaining
+     * production caller; it stays published (declared in live_profile.h)
+     * and directly unit-tested so the include_builtins=true arm of
+     * live_edit_name_collides_ex() keeps coverage. */
     return live_edit_name_collides_ex(candidate_name, name_at, ctx, exclude_id, true, err, err_cap);
 }
 
@@ -245,9 +249,19 @@ bool live_edit_decide(live_edit_decision_kind_t action, const live_edit_record_t
     switch (action) {
     case LIVE_EDIT_DECISION_SAVE_AS:
         /* exclude_id 0xFF -- save-as always targets a fresh slot, never a
-         * rename target (that is what OVERWRITE is for). */
-        if (live_edit_name_collides(candidate_name, name_at, ctx, 0xFF, err, err_cap)) {
-            return false; /* live_edit_name_collides already filled err */
+         * rename target (that is what OVERWRITE is for).
+         *
+         * Opus review nit N1: SAVE_AS writes a USER slot, exactly like
+         * profiles_http_save()/profile_post_handler()/the import paths --
+         * a save-as naming itself after a builtin's code (e.g. "Copy
+         * builtin" followed by "Save As" reusing the same name) is a
+         * normal, allowed save, not a collision. Name uniqueness is
+         * enforced across USER slots only, everywhere -- so this now calls
+         * live_edit_name_collides_ex() directly with include_builtins=false,
+         * matching every other writer instead of the builtin-scanning
+         * wrapper. */
+        if (live_edit_name_collides_ex(candidate_name, name_at, ctx, 0xFF, false, err, err_cap)) {
+            return false; /* live_edit_name_collides_ex already filled err */
         }
         return true;
     case LIVE_EDIT_DECISION_OVERWRITE:

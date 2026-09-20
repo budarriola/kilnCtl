@@ -51,6 +51,8 @@
                             * dup-name pre-check below (before pass 2 writes anything) */
 #include "ota_http.h" /* ota_http_check_interlocks() -- see backup_http.h's header comment */
 #include "profiles_http.h"
+#include "profiles_http_internal.h" /* profiles_http_first_free_slot() -- Opus review nit N5, shared
+                                      * with profiles_http.c's own first-free-slot scan */
 #include "safety_ceiling_sync.h" /* 2026-09-10: a restored backup can raise max_temp_c same as a POST -- see
                                   * the guard immediately before the zone-tuning commit loop below. */
 #include "safety_cfg_write.h" /* 2026-09-16: safety_cfg_write_apply_pairs() -- the same stage/COMMIT_CONFIG/
@@ -133,6 +135,15 @@ static const char *import_board_name_at(void *ctx_v, uint8_t id)
     static profile_t scratch;
     if (!profiles_http_get(id, &scratch)) { return NULL; }
     return scratch.name;
+}
+
+/* profiles_http_first_free_slot()'s predicate callback (Opus review nit N5)
+ * for this file's pass-1 SIMULATED table: ctx is the caller's own
+ * slot_used_sim[PROFILES_MAX_COUNT] array. */
+static bool backup_import_slot_used_sim_cb(void *ctx, uint8_t id)
+{
+    const bool *slot_used_sim = (const bool *)ctx;
+    return slot_used_sim[id];
 }
 
 typedef struct {
@@ -983,13 +994,15 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
                 slot_used_sim[candidates[i].id] = true;
                 continue;
             }
-            int free_slot = -1;
-            for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
-                if (!slot_used_sim[id]) {
-                    free_slot = id;
-                    break;
-                }
-            }
+            /* profiles_http_first_free_slot() (Opus review nit N5) -- shared
+             * with profiles_http_save()'s own first-free-slot scan
+             * (profiles_http.c) so the two allocation policies cannot
+             * silently drift apart. This caller passes the SIMULATED
+             * slot_used_sim table (this pass-1 loop's own commit-order
+             * simulation, per the comment above), not the board's live
+             * profiles_slot_used() state -- see the helper's own comment for
+             * why that split exists. */
+            int free_slot = profiles_http_first_free_slot(backup_import_slot_used_sim_cb, slot_used_sim);
             if (free_slot < 0) {
                 /* profiles_http_save() would refuse this exact way at
                  * commit time ("profile storage full") -- catching it here

@@ -538,7 +538,13 @@ fixed 2026-09-20: the original unconditional builtin scan made "Copy builtin"
 and any user profile named after a builtin unsavable, since a user copy of a
 builtin sharing its name is the intended product of that button; the builtin
 scan is now opt-in via `live_edit_name_collides_ex()`'s `include_builtins`
-parameter and stays `true` only for `live_edit_decide()`'s SAVE_AS caller).
+parameter -- Opus review nit N1, 2026-09-20, widened this further:
+`live_edit_decide()`'s SAVE_AS caller, the last caller still passing `true`,
+now also passes `include_builtins=false` directly, since SAVE_AS writes a
+fresh USER slot exactly like every other writer here. Name uniqueness is
+enforced across USER slots only, everywhere in this feature; the
+`include_builtins=true` arm of `live_edit_name_collides_ex()` has no
+remaining production caller and keeps coverage only via a direct unit test).
 Both reuse `live_edit_name_collides()`/`live_edit_name_collides_ex()` (`live_profile.c`,
 previously only reached from the live-edit SAVE_AS path), each via its own small
 `name_at` seam backed by `s_profiles` -- matching the existing per-file-copy

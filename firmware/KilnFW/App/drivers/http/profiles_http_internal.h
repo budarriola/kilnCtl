@@ -106,6 +106,36 @@ static inline void profiles_http_json_escape(const char *src, char *out, size_t 
     out[o] = '\0';
 }
 
+/* Opus review nit N5: profiles_http_save() (profiles_http.c) and
+ * backup_import.c's pass-1 commit simulation each used to scan for the
+ * lowest unused slot id with their own independent copy of the same
+ * "for id in 0..PROFILES_MAX_COUNT, first !used wins" loop -- correct in
+ * both places today, but two independent copies of one allocation policy
+ * are exactly the shape that drifts silently (one gets fixed, edited, or
+ * widened -- e.g. a future "prefer the id most recently freed" policy --
+ * and the other doesn't). Factored into one shared helper so they cannot
+ * diverge.
+ *
+ * Takes a predicate callback, not a caller-materialized `bool[PROFILES_MAX_
+ * COUNT]` array: an earlier version of this helper took the array, but
+ * profiles_http_save() is reached from bx_flash_worker's dispatch
+ * (check_all_task_stack_budgets.ps1), and that extra PROFILES_MAX_COUNT-byte
+ * local pushed it 32 B over that task's ceiling. A callback lets
+ * profiles_http.c answer straight from profiles_slot_used() with no local
+ * buffer at all, while backup_import.c's caller still answers from its own
+ * SIMULATED table (pass 2's commit order marks ids used as it goes, not the
+ * board's live state) via a small adapter closure. Returns the lowest id
+ * for which is_used(ctx, id) is false, or -1 if every slot is taken. */
+static inline int profiles_http_first_free_slot(bool (*is_used)(void *ctx, uint8_t id), void *ctx)
+{
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        if (!is_used(ctx, id)) {
+            return (int)id;
+        }
+    }
+    return -1;
+}
+
 /* ---- shared log tag ------------------------------------------------------ */
 extern const char *PROFILES_TAG;
 

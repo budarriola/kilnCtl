@@ -1393,6 +1393,15 @@ static const char *profiles_http_name_at(void *ctx, uint8_t id)
     return s_profiles.profiles[id].name;
 }
 
+/* profiles_http_first_free_slot()'s predicate callback (Opus review nit N5)
+ * for the live-board case: ctx is unused, this just forwards to
+ * profiles_slot_used(). */
+static bool profiles_http_slot_used_cb(void *ctx, uint8_t id)
+{
+    (void)ctx;
+    return profiles_slot_used(id);
+}
+
 bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
                         uint8_t *out_warning_count, char *err_msg, size_t err_cap)
 {
@@ -1458,13 +1467,13 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
     if (requested_id < PROFILES_MAX_COUNT) {
         target_id = requested_id;
     } else {
-        int free_slot = -1;
-        for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) {
-            if (!profiles_slot_used(i)) {
-                free_slot = i;
-                break;
-            }
-        }
+        /* profiles_http_first_free_slot() (Opus review nit N5) -- shared with
+         * backup_import.c's pass-1 commit simulation so the two allocation
+         * scans cannot silently drift apart. A callback straight onto
+         * profiles_slot_used(), not a materialized bool[PROFILES_MAX_COUNT]
+         * array -- see the helper's own comment: that array once pushed
+         * bx_flash_worker over its stack ceiling. */
+        int free_slot = profiles_http_first_free_slot(profiles_http_slot_used_cb, NULL);
         if (free_slot < 0) {
             snprintf(err_msg, err_cap, "profile storage full");
             return false;

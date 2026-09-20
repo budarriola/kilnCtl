@@ -247,6 +247,24 @@ static void test_decide_save_as_accepts_distinct_name(void)
     TEST_CHECK(ok, "a distinct save-as name is allowed");
 }
 
+static void test_decide_save_as_allows_builtin_name(void)
+{
+    TEST_SECTION("live_edit_decide -- Opus review nit N1: SAVE_AS naming a builtin's code is now allowed");
+    // SAVE_AS writes a fresh USER slot, exactly like profiles_http_save()/
+    // profile_post_handler()/the import paths -- a "Copy builtin" followed
+    // by "Save As" reusing the same name is a normal, allowed save, not a
+    // collision, so this must NOT scan the builtin catalogue any more.
+    fake_name_table_t t = {0}; // empty user table -- only the builtin fake below could collide
+    memset(&g_fake_builtin, 0, sizeof(g_fake_builtin));
+    memcpy((char *)g_fake_builtin.code, "C6DHSC", 7); // established pattern, see test_name_collision_scans_builtin_catalogue
+    g_fake_builtin_on = true;
+    char err[128];
+    bool ok =
+        live_edit_decide(LIVE_EDIT_DECISION_SAVE_AS, NULL, "  c6dhsc  ", false, fake_name_at, &t, err, sizeof(err));
+    g_fake_builtin_on = false; // restore the empty-catalogue default for every other test
+    TEST_CHECK(ok, "a save-as name matching a builtin's code is allowed, not refused as a collision");
+}
+
 static void test_decide_overwrite_refuses_builtin_before_confirm(void)
 {
     TEST_SECTION("live_edit_decide -- OVERWRITE refuses a builtin origin even with confirm=1");
@@ -822,6 +840,7 @@ int main(void)
     test_name_collision_scans_builtin_catalogue();
     test_decide_save_as_refuses_name_collision();
     test_decide_save_as_accepts_distinct_name();
+    test_decide_save_as_allows_builtin_name();
     test_decide_overwrite_refuses_builtin_before_confirm();
     test_decide_overwrite_refuses_without_confirm();
     test_decide_overwrite_allowed_with_confirm();
