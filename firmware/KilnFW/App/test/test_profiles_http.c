@@ -215,6 +215,11 @@ static nvs_stub_entry_t *nvs_stub_find(const char *partition, const char *ns, co
 
 #undef asm
 
+// docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6's bench-slot exclusion
+// test needs PROFILE_BENCH_SLOT_ID and the real LCD-picker deletability check.
+#include "../drivers/persist/profiles_bench_slot.h"
+#include "../drivers/ui/ui_page_profile_picker_format.h"
+
 // ---------------------------------------------------------------------------
 
 // ---- Embedded-page symbol page_get_handler() references -------------------
@@ -2119,44 +2124,100 @@ static void test_nvs_save_slot_proceeds_normally_on_an_internal_ram_stack(void)
 //      `1u << id` scalar test undefined behavior) must round-trip through
 //      the accessors.
 // ---------------------------------------------------------------------------
-static void test_slot_bitmap_persisted_byte_identical_for_8slot_fixture(void)
+/* Fixed at 8, deliberately NOT PROFILES_MAX_COUNT: this test's whole point is
+ * a small fixture that used to fit in the pre-widening single scalar byte,
+ * independent of wherever PROFILES_MAX_COUNT sits today (100 as of task 6). */
+#define SLOT_BITMAP_FIXTURE_SLOTS 8
+
+static void test_slot_bitmap_legacy_u8_migrates_on_read(void)
 {
-    TEST_SECTION("profiles_slot_bitmap_t -- persisted NVS_KEY_USED byte for a full "
-                 "8-slot fixture is byte-identical to the pre-widening uint8_t format");
+    TEST_SECTION("profiles_slot_bitmap_t -- a pre-widening single-byte NVS_KEY_USED "
+                 "(0xFF, 8 slots) migrates losslessly on read");
 
     nvs_stub_reset();
     profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0);
-    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+
+    /* nvs_load_all_from() clears a slot's used bit unless a decodable "profN"
+     * blob is also present at that id (one bad/missing slot must not take
+     * any other slot down, TODO.md 8.1) -- stage a real decodable blob at
+     * each of the 8 fixture ids so this test actually exercises the
+     * used_bitmap migration path rather than tripping that unrelated guard. */
+    profile_t src = make_stored_profile();
+    profile_persisted_t persisted = { .version = PROFILE_VERSION, .profile = src, .crc32 = 0 };
+    persisted.crc32 = compute_profile_crc(&persisted);
+    for (uint8_t id = 0; id < SLOT_BITMAP_FIXTURE_SLOTS; id++) {
+        stage_profile_blob(id, &persisted, sizeof(persisted));
+    }
+
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    esp_err_t err = nvs_set_u8(h, NVS_KEY_USED, 0xFFu);
+    TEST_CHECK(err == ESP_OK, "staging the legacy scalar byte must succeed");
+    nvs_commit(h);
+    nvs_close(h);
+
+    profiles_state_t out;
+    bool any_found = false;
+    err = nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
+    TEST_CHECK(err == ESP_OK, "reading a legacy single-byte used_bitmap must not error");
+    for (uint8_t id = 0; id < SLOT_BITMAP_FIXTURE_SLOTS; id++) {
+        TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, id),
+                  "legacy bit for a fixture slot must migrate to the widened bitmap");
+    }
+    for (uint8_t id = SLOT_BITMAP_FIXTURE_SLOTS; id < PROFILES_MAX_COUNT; id++) {
+        TEST_CHECK(!profiles_slot_bitmap_test(&out.used_bitmap, id),
+                  "a legacy byte only ever set bits 0..7 -- no other id may come back used");
+    }
+
+    nvs_stub_reset();
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0);
+}
+
+static void test_slot_bitmap_persisted_byte_identical_for_8slot_fixture(void)
+{
+    TEST_SECTION("profiles_slot_bitmap_t -- saving a full 8-slot fixture persists the "
+                 "widened blob and round-trips through the real loader");
+
+    nvs_stub_reset();
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0);
+    for (uint8_t id = 0; id < SLOT_BITMAP_FIXTURE_SLOTS; id++) {
         profiles_slot_set(id);
     }
     TEST_CHECK(profiles_slot_bitmap_to_u32(&s_profiles.used_bitmap) == 0xFFu,
-              "all 8 slots set must reduce to the same 0xFF word[0] the old scalar held");
+              "all 8 fixture slots set must reduce to the same 0xFF word[0] the old scalar held");
 
-    /* nvs_save_slot() persists the whole used_bitmap byte as a side effect of
+    /* nvs_save_slot() persists the whole used_bitmap as a side effect of
      * saving any one slot -- stage a real, decodable profile at every one of
-     * the 8 slots so the reload below (which re-derives its own used bit per
-     * slot from a successful decode, not just from the raw persisted byte)
-     * actually reports all 8 as used. */
+     * the 8 fixture slots so the reload below (which re-derives its own used
+     * bit per slot from a successful decode, not just from the raw
+     * persisted bitmap) actually reports all 8 as used. */
     profile_t src = make_stored_profile();
     esp_err_t err = ESP_OK;
-    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+    for (uint8_t id = 0; id < SLOT_BITMAP_FIXTURE_SLOTS; id++) {
         s_profiles.profiles[id] = src;
         esp_err_t e = nvs_save_slot(id);
         if (e != ESP_OK) {
             err = e;
         }
     }
-    TEST_CHECK(err == ESP_OK, "saving all 8 slots as used must not error");
+    TEST_CHECK(err == ESP_OK, "saving all 8 fixture slots as used must not error");
 
+    /* Since task 6 a save always writes the widened 4-word blob (never the
+     * old scalar byte) -- the byte-identical wire-format guarantee applies
+     * only to the READ side (a pre-existing board's legacy byte, covered by
+     * test_slot_bitmap_legacy_u8_migrates_on_read() above), not to a fresh
+     * save. Confirm the persisted key is now the full-size blob. */
     nvs_handle_t h;
     nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    uint8_t persisted = 0;
-    esp_err_t rd = nvs_get_u8(h, NVS_KEY_USED, &persisted);
+    profiles_slot_bitmap_t persisted;
+    memset(&persisted, 0, sizeof(persisted));
+    size_t len = sizeof(persisted);
+    esp_err_t rd = nvs_get_blob(h, NVS_KEY_USED, &persisted, &len);
     nvs_close(h);
-    TEST_CHECK(rd == ESP_OK, "the prof_used key must exist after a save");
-    TEST_CHECK(persisted == 0xFFu,
-              "REGRESSION: the persisted byte for an 8-slot fixture must stay exactly 0xFF -- "
-              "the widened in-RAM type must never change the on-flash wire format");
+    TEST_CHECK(rd == ESP_OK, "the prof_used key must exist and be blob-typed after a save");
+    TEST_CHECK(len == sizeof(persisted), "the persisted blob must be the full widened size");
+    TEST_CHECK(profiles_slot_bitmap_to_u32(&persisted) == 0xFFu,
+              "REGRESSION: word[0] of the persisted blob for an 8-slot fixture must be 0xFF");
 
     /* And the round trip back through the real loader reconstructs the same
      * 8-slot set. */
@@ -2164,7 +2225,7 @@ static void test_slot_bitmap_persisted_byte_identical_for_8slot_fixture(void)
     bool any_found = false;
     err = nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
     TEST_CHECK(err == ESP_OK && any_found, "reload after the fixture save must succeed");
-    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+    for (uint8_t id = 0; id < SLOT_BITMAP_FIXTURE_SLOTS; id++) {
         TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, id),
                   "every one of the 8 fixture slots must still read back used");
     }
@@ -2215,6 +2276,98 @@ static void test_slot_bitmap_round_trips_high_ids(void)
     for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
         TEST_CHECK(!profiles_slot_bitmap_test(&bm, ids[i]), "id must still read back clear after siblings were cleared");
     }
+}
+
+// docs/PROFILE_SLOTS_100_PLAN.md section 5's explicit task-6 regression: fill
+// all 100 slots, list, delete slot 50, then save with requested_id ==
+// PROFILES_MAX_COUNT (the "first free slot" sentinel) and confirm the new
+// profile lands back in the one hole, slot 50.
+static void test_profiles_http_save_fills_all_100_then_reuses_deleted_slot(void)
+{
+    TEST_SECTION("profiles_http_save/_delete -- fill all 100 slots, delete slot 50, "
+                 "then a first-free-slot save lands back in 50");
+
+    nvs_stub_reset();
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0);
+
+    profile_t p = make_stored_profile();
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        uint8_t out_id = 0, warn_count = 0;
+        char err_msg[128];
+        snprintf(p.name, sizeof(p.name), "P%u", (unsigned)id);
+        bool ok = profiles_http_save(id, &p, &out_id, &warn_count, err_msg, sizeof(err_msg));
+        TEST_CHECK(ok, "saving directly into each of the 100 slots by id must succeed");
+        TEST_CHECK(out_id == id, "a save aimed at a specific empty slot must land there");
+    }
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        TEST_CHECK(profiles_slot_bitmap_test(&s_profiles.used_bitmap, id),
+                  "every one of the 100 slots must read back used after the fill");
+    }
+
+    /* A first-free-slot save now must refuse -- there is no hole. */
+    {
+        uint8_t out_id = 0, warn_count = 0;
+        char err_msg[128];
+        snprintf(p.name, sizeof(p.name), "Overflow");
+        bool ok = profiles_http_save(PROFILES_MAX_COUNT, &p, &out_id, &warn_count, err_msg, sizeof(err_msg));
+        TEST_CHECK(!ok, "a first-free-slot save with all 100 slots full must be refused, not overwrite anything");
+    }
+
+    TEST_CHECK(profiles_http_delete(50), "deleting slot 50 out of a full board must succeed");
+    TEST_CHECK(!profiles_slot_bitmap_test(&s_profiles.used_bitmap, 50), "slot 50 must read back unused after delete");
+
+    uint8_t out_id = 0, warn_count = 0;
+    char err_msg[128];
+    snprintf(p.name, sizeof(p.name), "Refill");
+    bool ok = profiles_http_save(PROFILES_MAX_COUNT, &p, &out_id, &warn_count, err_msg, sizeof(err_msg));
+    TEST_CHECK(ok, "a first-free-slot save with exactly one hole must succeed");
+    TEST_CHECK(out_id == 50, "the first-free-slot save must land in the one deleted hole, slot 50, not append past 99");
+    TEST_CHECK(profiles_slot_bitmap_test(&s_profiles.used_bitmap, 50), "slot 50 must read back used again after the refill");
+
+    nvs_stub_reset();
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0);
+}
+
+// docs/PROFILE_SLOTS_100_PLAN.md's "Owner decision, 2026-09-19 (post phase-A
+// review)": PROFILE_BENCH_SLOT_ID (101) must be structurally invisible --
+// never in the catalogue, never favoritable, never reachable through the
+// LCD-picker ordering module -- exactly like LIVE_EDIT_WORKING_SLOT_ID (100)
+// already is. profiles_bench_slot.h documents this as "free by construction"
+// (every ordinary loop is bounded by PROFILES_MAX_COUNT); this test pins
+// that claim down for the three call sites the plan names.
+static void test_bench_slot_id_excluded_from_catalogue_favorites_and_lcd_order(void)
+{
+    TEST_SECTION("PROFILE_BENCH_SLOT_ID (101) is excluded from the catalogue loop bound, "
+                 "the favorites accessor, and the LCD picker's deletable-id range");
+
+    TEST_CHECK(PROFILE_BENCH_SLOT_ID == LIVE_EDIT_WORKING_SLOT_ID + 1,
+              "bench slot id must be exactly one past the live-edit working slot");
+    TEST_CHECK(PROFILE_BENCH_SLOT_ID == PROFILES_MAX_COUNT + 1,
+              "at today's PROFILES_MAX_COUNT (100) the bench slot must be id 101");
+    TEST_CHECK(PROFILE_BENCH_SLOT_ID < PROFILE_BUILTIN_ID_BASE,
+              "the bench slot must still leave every builtin id (>= 128) untouched");
+
+    /* Catalogue/favorites loop bound: PROFILE_BENCH_SLOT_ID is never < PROFILES_MAX_COUNT,
+     * so any `for (id = 0; id < PROFILES_MAX_COUNT; id++)` loop -- profiles_list_get_handler(),
+     * favorites_list_get_handler(), profiles_export_http.c, backup export/import,
+     * ui_page_profile_picker.c's catalogue build -- never reaches it. */
+    TEST_CHECK(!(PROFILE_BENCH_SLOT_ID < PROFILES_MAX_COUNT),
+              "the bench slot id must fall outside every ordinary 0..PROFILES_MAX_COUNT-1 loop");
+
+    /* Favorites: fav_locate() rejects it -- neither a user slot nor a valid
+     * builtin id, so profiles_favorites_is()/_set() answer false/refuse. */
+    TEST_CHECK(profiles_favorites_is((uint8_t)PROFILE_BENCH_SLOT_ID) == false,
+              "the bench slot must never read back as favorited");
+    esp_err_t fav_err = profiles_favorites_set((uint8_t)PROFILE_BENCH_SLOT_ID, true);
+    TEST_CHECK(fav_err == ESP_ERR_INVALID_ARG,
+              "favoriting the bench slot id must be refused, exactly like any other out-of-range id");
+
+    /* LCD picker: ui_page_profile_picker_is_deletable() must also say no --
+     * same structural test the live-edit slot already gets. */
+    TEST_CHECK(ui_page_profile_picker_is_deletable((uint8_t)PROFILE_BENCH_SLOT_ID) == false,
+              "the LCD picker must never treat the bench slot as a deletable user slot");
 }
 
 static void test_builtin_json_emits_seg_kind_and_resolved_zone_mask(void)
@@ -2326,7 +2479,10 @@ void run_test_profiles_http(void)
     test_nvs_save_slot_refuses_when_calling_stack_is_external_ram();
     test_nvs_save_slot_proceeds_normally_on_an_internal_ram_stack();
     test_slot_bitmap_persisted_byte_identical_for_8slot_fixture();
+    test_slot_bitmap_legacy_u8_migrates_on_read();
     test_slot_bitmap_round_trips_high_ids();
+    test_profiles_http_save_fills_all_100_then_reuses_deleted_slot();
+    test_bench_slot_id_excluded_from_catalogue_favorites_and_lcd_order();
     test_builtin_json_emits_seg_kind_and_resolved_zone_mask();
 
     test_nvs_erase_slot_prunes_firing_stats();

@@ -697,6 +697,13 @@ try {
             "/Fo:`"$phObjDir\\`" /Fe:`"$exe7`" `"$(Join-Path $testDir 'test_profiles_http.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/profiles_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
+            # docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6's bench-slot
+            # exclusion test needs the REAL ui_page_profile_picker_is_deletable()
+            # (not a hand-rolled stand-in) -- this file is small and pure
+            # (no LVGL/ESP-IDF beyond the type-only stub headers already on
+            # this executable's include path), same reasoning as
+            # profiles_favorites.c above.
+            "`"$(Join-Path $driversDir 'ui/ui_page_profile_picker_format.c')`" " +
             # profiles_edit_http.c/profiles_catalog_http.c (both reached from
             # profiles_http.c, #included above) now call profiles_favorites_*(),
             # so this executable needs that module linked in as a plain

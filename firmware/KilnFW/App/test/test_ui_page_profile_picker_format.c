@@ -2,6 +2,7 @@
 // "tests owed" items (c) and (d): the favorite star is a display-only label
 // prefix (never folded into the id), and a builtin id is never deletable.
 #include "test_common.h"
+#include "../drivers/persist/profiles_types.h" /* PROFILES_MAX_COUNT */
 #include "../drivers/ui/ui_page_profile_picker_format.h"
 
 #include <string.h>
@@ -43,8 +44,10 @@ void run_test_ui_page_profile_picker_format(void)
     TEST_SECTION("ui_page_profile_picker_is_deletable: user slots yes, builtins no");
     {
         TEST_CHECK(ui_page_profile_picker_is_deletable(0) == true, "user slot 0 is deletable");
-        TEST_CHECK(ui_page_profile_picker_is_deletable(7) == true, "user slot 7 (PROFILES_MAX_COUNT-1) is deletable");
-        TEST_CHECK(ui_page_profile_picker_is_deletable(8) == false, "id 8, one past PROFILES_MAX_COUNT-1, is not deletable");
+        TEST_CHECK(ui_page_profile_picker_is_deletable(PROFILES_MAX_COUNT - 1) == true,
+                   "last user slot (PROFILES_MAX_COUNT-1) is deletable");
+        TEST_CHECK(ui_page_profile_picker_is_deletable(PROFILES_MAX_COUNT) == false,
+                   "id PROFILES_MAX_COUNT, one past the last user slot, is not deletable");
         TEST_CHECK(ui_page_profile_picker_is_deletable(127) == false,
                    "id 127, just below PROFILE_BUILTIN_ID_BASE, is not deletable -- the header's contract is "
                    "PROFILES_MAX_COUNT, not PROFILE_BUILTIN_ID_BASE");
