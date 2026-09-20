@@ -663,6 +663,13 @@ esp_err_t safety_link_send_commit_config(SafetyLinkClass *link, uint16_t *out_pa
 // references safety_cfg_store's read side and safety_link_get_peer_build_
 // status(). Same test-controlled stand-in reasoning as the two link senders
 // above -- nothing here drives the push, only the decisions that feed it.
+// 2026-09-19 fix: zones_current_sweep_start()'s bounded live-refetch-on-
+// unknown-topology path (see its own comment) reads out_known/out_config_crc
+// from this same stub. Defaults to "peer not known" (byte-for-byte the old
+// fixed stub), so every existing test that doesn't care keeps behaving
+// exactly as before; a test that wants the fetch-lands path sets
+// s_peer_build_status_known explicitly.
+static bool s_peer_build_status_known = false;
 esp_err_t safety_link_get_peer_build_status(SafetyLinkClass *link, bool *out_known, bool *out_dirty,
                                              uint8_t *commit_buf, uint8_t *out_commit_len,
                                              uint8_t *datetime_buf, uint8_t *out_datetime_len,
@@ -670,7 +677,7 @@ esp_err_t safety_link_get_peer_build_status(SafetyLinkClass *link, bool *out_kno
 {
     (void)link; (void)out_dirty; (void)commit_buf; (void)out_commit_len;
     (void)datetime_buf; (void)out_datetime_len; (void)out_config_version;
-    if (out_known) *out_known = false;
+    if (out_known) *out_known = s_peer_build_status_known;
     if (out_config_crc) *out_config_crc = 0;
     return ESP_OK;
 }
@@ -686,6 +693,12 @@ static bool s_cfg_refetch_ok = true;
 // Set true to make refetch() re-point the store at whatever the pushes have
 // staged -- i.e. model a Pico that really did commit what it was sent.
 static bool s_cfg_refetch_applies_staged = false;
+// 2026-09-19 fix: models a refetch that lands and confirms 0x031F was
+// genuinely committed on the Pico (an operator's new topology, or any other
+// board that has always had one set) -- separate from s_cfg_refetch_applies_
+// staged above, which is specifically about SET_PARAM pushes THIS run just
+// staged, not an independent live value the sweep never sent.
+static bool s_cfg_refetch_sets_ct_topology = false;
 // opus review finding (MEDIUM): zones_current_sweep_start() now refuses to
 // start when the safety param cache has never been fetched
 // (safety_cfg_store_fetched_ms_ago() == UINT32_MAX). Defaults to "just
@@ -702,6 +715,7 @@ static void test_cfg_rows_reset(void)
     s_cfg_row_count = 0;
     s_cfg_refetch_ok = true;
     s_cfg_refetch_applies_staged = false;
+    s_cfg_refetch_sets_ct_topology = false;
     s_cfg_fetched_ms_ago = 0;
     test_ct_cal_reset();
 }
@@ -758,6 +772,9 @@ bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc)
     (void)link; (void)config_crc;
     if (!s_cfg_refetch_ok) {
         return false;
+    }
+    if (s_cfg_refetch_sets_ct_topology) {
+        test_cfg_set_u8(0x031Fu, 0u, true);
     }
     if (s_cfg_refetch_applies_staged) {
         // Every SET_PARAM this run sent, now "committed" -- the read-back a
@@ -12237,6 +12254,19 @@ static void test_zones_current_sweep_start_wired_refusals(void)
     memset(&dummy_thermo, 0, sizeof(dummy_thermo));
     dummy_thermo.initialized = true;
 
+    // 2026-09-19 fix: zones_current_sweep_start() now asks zone_cfg_ct_
+    // topology_row_set() (0x031F's OWN `.set` flag), not safety_cfg_store_
+    // fetched_ms_ago(), whether CT topology is genuinely known -- see that
+    // function's own comment for why. Every refusal test in this function
+    // below is exercising a DIFFERENT dimension and must not also trip over
+    // this one, so the committed row is stood up here exactly the way this
+    // file's other cross-cutting preconditions (s_zones_config_valid,
+    // s_test_safety_link_up, ...) already are: once, up front, so a test
+    // that does not mention CT topology reads as "already commissioned",
+    // matching every board actually running this refusal function today.
+    test_cfg_rows_reset();
+    test_cfg_set_u8(0x031Fu, 0u, true);
+
     reset_sweep_state_for_test();
     zones_http_set_hw(NULL, NULL, NULL);
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
@@ -12335,6 +12365,86 @@ static void test_zones_current_sweep_start_wired_refusals(void)
     // by the wired function, not just the pure helper.
     TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_ALREADY_RUNNING,
               "a second start while one is active is refused");
+
+    // ---- 2026-09-19 fix: the CT-topology-unknown dimension itself --------
+    // A genuinely uncommitted 0x031F (row.set == false, e.g. a first boot
+    // after the v2->v3 store bump, or a truly uncommissioned Pico) with the
+    // safety link DOWN must still refuse -- there is nothing to fetch.
+    reset_sweep_state_for_test();
+    zones_http_set_hw(&dummy_io, &dummy_thermo, &dummy_safety);
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    test_cfg_rows_reset();
+    test_cfg_set_u8(0x031Fu, 0u, false); // present but unset -- never committed
+    s_test_safety_link_up = false;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_LINK_DOWN,
+              "link down is still checked first even with an uncommitted CT topology row "
+              "(order matches zone_sweep_check_refusal()'s own doc comment)");
+
+    // Same uncommitted row, but the link IS up: the real regression this
+    // fix addresses (docs/audits/ct_topology_stale_cache_2026-09-19.md) --
+    // an operator who just committed a NEW topology on the Pico without this
+    // ESP session having re-requested a FW_VERSION frame must not be told to
+    // "retry once the link has synced" when a live fetch would answer the
+    // question in the same request. safety_link_get_peer_build_status()'s
+    // stub above reports out_known=false, so this models the "peer version
+    // not yet known at all" case -- no fetch attempt is even possible, and
+    // the refusal is the correct, honest answer.
+    reset_sweep_state_for_test();
+    zones_http_set_hw(&dummy_io, &dummy_thermo, &dummy_safety);
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    test_cfg_rows_reset();
+    test_cfg_set_u8(0x031Fu, 0u, false);
+    s_test_safety_link_up = true;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_CT_TOPOLOGY_UNKNOWN,
+              "an uncommitted CT topology row with no known peer CRC is refused, "
+              "not silently allowed through");
+
+    // Now the peer IS known and a live refetch would land (models a Pico
+    // that already committed the operator's new topology, and this ESP's
+    // FIRST live round trip since -- exactly confirm_commit_landed()'s own
+    // "never trust a bare ACK, force a live read-back" contract, just
+    // reached from a different caller): the bounded fetch inside
+    // zones_current_sweep_start() must pick it up and let the sweep start in
+    // the SAME request, instead of making the operator retry.
+    reset_sweep_state_for_test();
+    zones_http_set_hw(&dummy_io, &dummy_thermo, &dummy_safety);
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    test_cfg_rows_reset();
+    test_cfg_set_u8(0x031Fu, 0u, false);
+    s_test_safety_link_up = true;
+    s_peer_build_status_known = true; // safety_link_get_peer_build_status() stub below reads this
+    s_cfg_refetch_ok = true;
+    s_cfg_refetch_sets_ct_topology = true; // the fake "live fetch landed" outcome
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_OK,
+              "a bounded live refetch that lands turns a stale-cache refusal into a clean start, "
+              "in the same request, instead of telling the operator to retry");
+    s_peer_build_status_known = false;
+    s_cfg_refetch_sets_ct_topology = false;
+
+    // And the mirror case: the peer is known, but the refetch itself fails
+    // (comms hiccup, backing off) -- must still honestly refuse, never claim
+    // OK on an unconfirmed guess.
+    reset_sweep_state_for_test();
+    zones_http_set_hw(&dummy_io, &dummy_thermo, &dummy_safety);
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    test_cfg_rows_reset();
+    test_cfg_set_u8(0x031Fu, 0u, false);
+    s_test_safety_link_up = true;
+    s_peer_build_status_known = true;
+    s_cfg_refetch_ok = false;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_CT_TOPOLOGY_UNKNOWN,
+              "a refetch attempt that fails is still refused -- never a false OK");
+    s_peer_build_status_known = false;
+    s_cfg_refetch_ok = true;
+
+    // Restore the baseline every earlier check in this function relied on,
+    // so a test appended after this one is not affected by this block.
+    test_cfg_rows_reset();
+    test_cfg_set_u8(0x031Fu, 0u, true);
 
     reset_sweep_state_for_test();
     zones_http_set_hw(NULL, NULL, NULL);

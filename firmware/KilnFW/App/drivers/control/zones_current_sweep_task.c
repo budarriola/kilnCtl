@@ -89,6 +89,26 @@ static uint8_t zone_cfg_committed_ct_topology(void)
     return 0u;
 }
 
+/* Same lookup as zone_cfg_committed_ct_topology() above, but reporting
+ * whether 0x031F has ever actually been COMMITTED (row.set), not what value
+ * it reads as when unset. This is the correct "do we genuinely know the
+ * topology" signal -- see zones_current_sweep_start()'s own use of it,
+ * below, for why safety_cfg_store_fetched_ms_ago() used to answer this
+ * question instead and got it wrong. */
+static bool zone_cfg_ct_topology_row_set(void)
+{
+    size_t count = safety_cfg_store_param_count();
+    for (size_t i = 0; i < count; i++) {
+        safety_cfg_param_t row;
+        memset(&row, 0, sizeof(row));
+        if (!safety_cfg_store_get_by_index(i, &row) || row.param_id != 0x031Fu) {
+            continue;
+        }
+        return row.set;
+    }
+    return false;
+}
+
 /* The wire id of zone_ct_channel[zi] -- docs/CT_CHANNEL_MASK_PLAN.md step 2,
  * 0x0320-0x0322, U8, value 0-2. One place, same discipline as
  * ZONE_KCT_PARAM_ID/ZONE_CT_MAP_PARAM_ID below. */
@@ -2248,14 +2268,46 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
      * the foreign-load condition to the operator explicitly instead of
      * silently overriding whatever they had on. */
     bool relays_on = s_hw_io && (kiln_io_get_relay_shadow(s_hw_io) != 0);
-    /* opus review finding (MEDIUM): zone_cfg_committed_ct_topology() below
-     * silently defaults an UNFETCHED safety param cache to per_zone, the
-     * same value a genuinely-committed per_zone board reads -- the two are
-     * indistinguishable to that accessor. Every first boot after the v2->v3
-     * store bump starts with safety_cfg_store_fetched_ms_ago() ==
-     * UINT32_MAX (never fetched), so refuse here rather than let a
-     * summed-topology board sweep and persist per-zone-shaped normals. */
-    bool ct_topology_unknown = (safety_cfg_store_fetched_ms_ago() == UINT32_MAX);
+    /* opus review finding (MEDIUM), CORRECTED 2026-09-19 (reset-one-side
+     * class -- see docs/audits/ct_topology_stale_cache_2026-09-19.md):
+     * zone_cfg_committed_ct_topology() below silently defaults an UNSET
+     * safety param cache to per_zone, the same value a genuinely-committed
+     * per_zone board reads -- the two are indistinguishable to that
+     * accessor, so a real signal is needed before trusting the topology.
+     *
+     * The ORIGINAL fix for that (safety_cfg_store_fetched_ms_ago() ==
+     * UINT32_MAX) asked the wrong question: fetched_ms_ago() answers "has
+     * this BOOT done a live round trip to the Pico", which is false for
+     * almost the whole life of a boot that never needed one (its NVS-loaded
+     * cache already agreed with the Pico's live config_crc at boot, per
+     * safety_cfg_store_maybe_refetch()'s "steady state -- no UART traffic at
+     * all, by design"). That made this refusal fire any time an operator
+     * committed a NEW value on the Pico (e.g. via /api/safety/commissioning)
+     * without also happening to be the ESP session that requested a FW_VERSION
+     * frame afterward -- exactly the "changed CT topology, verify-mapping
+     * still says not fetched" report this fix addresses. zone_cfg_committed_
+     * ct_topology() itself already asks the RIGHT question a few lines up
+     * (row.set, true for anything ever genuinely committed, whether that
+     * commit was read back this boot or loaded from the persisted cache) --
+     * this refusal now asks the same question its own topology accessor
+     * does, so the two can never disagree about what "known" means again.
+     *
+     * If the row is still genuinely unset (a first boot after the v2->v3
+     * store bump, or a truly uncommissioned Pico) but the link is up, this is
+     * exactly the situation CLAUDE.md's readiness_http.c pattern already
+     * handles elsewhere: try ONE bounded live fetch here rather than just
+     * telling the operator to retry -- a fetch that lands turns a spurious
+     * refusal into a working sweep in the same request. */
+    bool ct_topology_unknown = !zone_cfg_ct_topology_row_set();
+    if (ct_topology_unknown && link_up && s_hw_safety) {
+        bool peer_known = false;
+        uint16_t live_crc = 0;
+        (void)safety_link_get_peer_build_status(s_hw_safety, &peer_known, NULL, NULL, NULL, NULL, NULL, NULL,
+                                                 &live_crc);
+        if (peer_known && safety_cfg_store_refetch(s_hw_safety, live_crc)) {
+            ct_topology_unknown = !zone_cfg_ct_topology_row_set();
+        }
+    }
     zone_sweep_refusal_t refusal = zone_sweep_check_refusal(
         s_sweep.active, have_hw, s_zones_config_valid, s_zones.cfg.thermo_count,
         profile_running_or_paused, autotune_engine_is_active(), link_up, trip_latched, relays_on,

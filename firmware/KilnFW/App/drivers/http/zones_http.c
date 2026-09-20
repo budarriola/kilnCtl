@@ -544,6 +544,46 @@ static esp_err_t ct_channel_map_get_handler(httpd_req_t *req)
     uint8_t mask = 0;
     uint8_t zone_for_ch[ZONE_CT_CHANNEL_COUNT];
     zones_ct_channel_map_derived(&mask, zone_for_ch);
+    /* 2026-09-19 fix (reset-one-side class -- an operator's manual mapping
+     * entered on /safety/commissioning was invisible here): zones_ct_channel_
+     * map_derived()'s own doc comment already says this record "says nothing
+     * about whether the safety processor's own ct_channel_map[c] is set: an
+     * operator may always have typed it in by hand instead" -- but until now
+     * nothing in this handler ever actually looked. The Pico's own committed
+     * ct_channel_map[0..2] (param ids 0x0106-0x0108, the SAME field the
+     * commissioning page's manual-entry writes land on -- see zone_ct_map_
+     * set()'s own comment for that write path) is read here as a second,
+     * independent source for exactly the channels the sweep never derived: a
+     * genuinely committed manual entry always wins over "not mapped yet" for
+     * its channel, and a channel neither source has an answer for still
+     * correctly reads as unmapped. The sweep-derived value is left as
+     * authoritative wherever it exists (mask bit already set) -- this only
+     * fills in what it left blank. */
+    {
+        /* safety_cfg_store_get_by_index() is positional (table order), not
+         * keyed by param id -- see SAFETY_CFG_PARAM_TABLE's own header
+         * comment -- so this is one scan of the whole table, not one per
+         * channel, matching every other multi-field reader in this file. */
+        size_t count = safety_cfg_store_param_count();
+        for (size_t i = 0; i < count; i++) {
+            safety_cfg_param_t row;
+            memset(&row, 0, sizeof(row));
+            if (!safety_cfg_store_get_by_index(i, &row)) {
+                continue;
+            }
+            if (row.param_id < 0x0106u || row.param_id > 0x0108u) {
+                continue;
+            }
+            uint8_t c = (uint8_t)(row.param_id - 0x0106u);
+            if ((mask & (1u << c)) != 0) {
+                continue; /* sweep already derived this channel -- keep it */
+            }
+            if (row.set && row.value.u8_val < MAX31856_CHANNEL_COUNT) {
+                zone_for_ch[c] = row.value.u8_val;
+                mask |= (uint8_t)(1u << c);
+            }
+        }
+    }
     /* M12b: the derived CT scale rides the SAME endpoint rather than getting
      * one of its own -- it is the same question ("what did the sweep derive,
      * and is this field still a manual-entry field?") asked about a second
