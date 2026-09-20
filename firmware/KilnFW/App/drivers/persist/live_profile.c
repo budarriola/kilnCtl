@@ -2,6 +2,7 @@
 
 #include "live_profile.h"
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,7 @@
 
 #include "hal_kv.h"
 #include "nvs_key_check.h"
+#include "profiles_builtin.h" /* live_edit_name_collides() also scans the read-only catalogue -- LOW review item */
 
 /* profile_encode_current_blob()/profile_decode_blob() live in
  * profiles_http_internal.h, which pulls in esp_http_server.h -- NOT
@@ -67,7 +69,13 @@ typedef struct {
     char     origin_name[PROFILE_NAME_MAX_LEN + 1];
 } live_edit_persisted_t;
 
-static uint32_t s_live_profile_generation;
+/* Atomic (LOW review item): live_profile_generation() is read from the
+ * executor task while live_profile_fork()/live_profile_save_working()/
+ * live_profile_clear() bump it from the HTTP task -- a plain uint32_t
+ * increment is not guaranteed atomic on this target, and a torn read/write
+ * here is exactly the kind of cross-task counter this codebase already uses
+ * _Atomic for (see wifi_provision_http.c's s_httpd_open_sockets). */
+static _Atomic uint32_t s_live_profile_generation;
 
 /* ---- pure: record encode/decode ------------------------------------------ */
 
@@ -169,6 +177,27 @@ bool live_edit_name_collides(const char *candidate_name, const char *(*name_at)(
         normalize_for_compare(existing, norm_existing, sizeof(norm_existing));
         if (strcmp(norm_candidate, norm_existing) == 0) {
             if (err) snprintf(err, err_cap, "a profile named \"%s\" already exists (id %u)", existing, id);
+            return true;
+        }
+    }
+
+    /* LOW review item: a save-as must also be refused against the read-only
+     * builtin catalogue (profiles_builtin.c) -- exclude_id only ever names a
+     * USER id (0xFF for a fresh save-as, or a user id for a rename target),
+     * so it never accidentally excludes a builtin here. Read-only: this only
+     * ever COMPARES against g_builtin_profiles/profiles_builtin_entry(),
+     * never writes through them -- a builtin's `code` can never be altered.
+     * Ids are contiguous from PROFILE_BUILTIN_ID_BASE (profiles_builtin.c's
+     * builtin_index()), so profiles_builtin_id_valid() going false ends the
+     * scan; the `bid != 0` guard is only there to stop a uint8_t wraparound
+     * from looping forever if that ever stopped being true. */
+    for (uint8_t bid = PROFILE_BUILTIN_ID_BASE; bid != 0 && profiles_builtin_id_valid(bid); bid++) {
+        const builtin_profile_t *b = profiles_builtin_entry(bid);
+        if (!b) continue;
+        char norm_existing[PROFILE_NAME_MAX_LEN + 1];
+        normalize_for_compare(b->code, norm_existing, sizeof(norm_existing));
+        if (strcmp(norm_candidate, norm_existing) == 0) {
+            if (err) snprintf(err, err_cap, "a builtin schedule named \"%s\" already exists (id %u)", b->code, bid);
             return true;
         }
     }
@@ -409,7 +438,7 @@ bool live_profile_save_working(const profile_t *p, char *err, size_t err_cap)
         if (err) snprintf(err, err_cap, "working profile write could not be verified by read-back");
         return false;
     }
-    s_live_profile_generation++;
+    atomic_fetch_add(&s_live_profile_generation, 1u);
     return true;
 }
 
@@ -449,6 +478,47 @@ bool live_profile_load_working(profile_t *out)
     return dres == PROFILE_DECODE_OK;
 }
 
+/* MEDIUM-1 (review): the pickup-side half of the origin_id guard -- fork()
+ * above refuses a NEW fork from adopting a stale pending record, but the
+ * RUNNING executor's own poll (profile_executor.c's live-edit pickup) must
+ * independently refuse to ADOPT a working copy that isn't for the profile
+ * it is currently running, in case a record ever reaches this state some
+ * other way than fork() (a future decision-layer bug, a hand-edited NVS
+ * blob during bring-up, etc.) -- "compare in fork and in the pickup
+ * caller" per the review. Returns false (untouched *out) if there is no
+ * pending record, the record isn't pending, or its origin_id does not
+ * match expect_origin_id -- all three are "not for this run", indistinguishable
+ * to the caller on purpose (see profile_executor.c's reload_live_profile_
+ * if_changed(), which treats every one of them as a no-op, not a refusal
+ * worth recording). */
+bool live_profile_load_working_for_origin(uint8_t expect_origin_id, profile_t *out)
+{
+    live_edit_record_t rec;
+    if (!live_profile_load_record(&rec) || !rec.pending) {
+        return false;
+    }
+    if (rec.origin_id != expect_origin_id) {
+        return false;
+    }
+    return live_profile_load_working(out);
+}
+
+/* MEDIUM-2 (review): profile_executor_run.c seeds s_exec.live_edit_generation
+ * from live_profile_generation() at the start of every run, including a
+ * warm-start resume after a reboot -- but s_live_profile_generation is
+ * RAM-only and resets across that reboot, while a pending working copy on
+ * disk does not. Seeding straight from the (reset) counter makes that run
+ * believe the persisted edit is its own already-seen baseline, so it is
+ * never adopted until some UNRELATED later edit bumps the counter again.
+ * This lets the caller check, before seeding, whether a pending record
+ * already exists for the profile about to run -- see profile_executor_run.c
+ * for how the answer is used. */
+bool live_profile_has_pending_for_origin(uint8_t origin_id)
+{
+    live_edit_record_t rec;
+    return live_profile_load_record(&rec) && rec.pending && rec.origin_id == origin_id;
+}
+
 bool live_profile_fork(uint8_t origin_id, bool origin_is_builtin, const char *origin_name, const profile_t *origin,
                         profile_t *out_working, live_edit_record_t *out_record, char *err, size_t err_cap)
 {
@@ -458,9 +528,25 @@ bool live_profile_fork(uint8_t origin_id, bool origin_is_builtin, const char *or
     }
 
     /* Idempotent: a pending record already on disk wins over re-forking --
-     * plan section 10's "second call returns the existing working copy". */
+     * plan section 10's "second call returns the existing working copy".
+     * MEDIUM-1 (review): but ONLY when that pending record is for THIS SAME
+     * origin_id. A record left pending by a previous, still-undecided
+     * firing (its own operator abandoned the prompt, tripped, or rebooted
+     * before answering save-as/overwrite/discard) must never be silently
+     * handed to a NEW firing of a DIFFERENT profile as if it were that new
+     * firing's own edit -- refuse instead, so the stale record's prompt is
+     * what the operator sees, not a fork silently masquerading as one. */
     live_edit_record_t existing;
     if (live_profile_load_record(&existing) && existing.pending) {
+        if (existing.origin_id != origin_id) {
+            if (err) {
+                snprintf(err, err_cap,
+                         "a live edit is already pending for a different profile (origin id %u) -- resolve it "
+                         "(save-as/overwrite/discard) before starting a new one",
+                         existing.origin_id);
+            }
+            return false;
+        }
         if (!live_profile_load_working(out_working)) {
             if (err) snprintf(err, err_cap, "a live edit is pending but its working profile could not be loaded");
             return false;
@@ -520,11 +606,11 @@ bool live_profile_clear(char *err, size_t err_cap)
         if (err) snprintf(err, err_cap, "clear could not be verified by read-back");
         return false;
     }
-    s_live_profile_generation++;
+    atomic_fetch_add(&s_live_profile_generation, 1u);
     return true;
 }
 
 uint32_t live_profile_generation(void)
 {
-    return s_live_profile_generation;
+    return atomic_load(&s_live_profile_generation);
 }

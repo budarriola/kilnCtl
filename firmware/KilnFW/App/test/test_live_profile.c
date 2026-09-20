@@ -20,6 +20,7 @@ int g_test_count = 0;
 #include "hal_kv.h"
 #include "live_profile.h"
 #include "profile_executor_live_pickup.h"
+#include "profiles_builtin.h" /* builtin_profile_t/PROFILE_BUILTIN_ID_BASE for the fakes below */
 
 // ---- fakes: the shared wire format (profiles_http.c, not linked here) -----
 // Deliberately trivial and NOT the real format: a raw memcpy of the
@@ -53,6 +54,22 @@ profile_decode_result_t profile_decode_blob(const void *blob, size_t len, profil
     }
     memcpy(out, blob, sizeof(profile_t));
     return PROFILE_DECODE_OK;
+}
+
+// ---- fakes: profiles_builtin.h (LOW review item -- live_edit_name_collides()
+// now also scans the read-only builtin catalogue). Off by default (empty
+// catalogue) so every existing test in this file is untouched; the new
+// builtin-collision test below turns it on via g_fake_builtin_on.
+static bool              g_fake_builtin_on = false;
+static builtin_profile_t g_fake_builtin;
+
+bool profiles_builtin_id_valid(uint8_t id)
+{
+    return g_fake_builtin_on && id == PROFILE_BUILTIN_ID_BASE;
+}
+const builtin_profile_t *profiles_builtin_entry(uint8_t id)
+{
+    return profiles_builtin_id_valid(id) ? &g_fake_builtin : NULL;
 }
 
 // Pull in the real module under test, AFTER the fakes above. Same
@@ -190,6 +207,20 @@ static void test_name_no_collision_distinct_name(void)
     TEST_CHECK(!collides, "a distinct name never collides");
 }
 
+static void test_name_collision_scans_builtin_catalogue(void)
+{
+    TEST_SECTION("live_edit_name_collides -- LOW review item: also scans the read-only builtin catalogue");
+    fake_name_table_t t = {0}; // empty user table -- the ONLY collision source here is the builtin fake below
+    memset(&g_fake_builtin, 0, sizeof(g_fake_builtin));
+    memcpy((char *)g_fake_builtin.code, "C6DHSC", 7); // established pattern, see test_profiles_http.c
+    g_fake_builtin_on = true;
+    char err[128];
+    bool collides = live_edit_name_collides("  c6dhsc  ", fake_name_at, &t, 0xFF, err, sizeof(err));
+    g_fake_builtin_on = false; // restore the empty-catalogue default for every other test
+    TEST_CHECK(collides, "a name matching a builtin schedule's code is refused, case/whitespace-insensitively");
+    TEST_CHECK(err[0] != '\0', "a reason naming the builtin schedule is given");
+}
+
 // ---------------------------------------------------------------------------
 // live_edit_decide -- top-level decision-layer entry point (plan section 5/6)
 
@@ -287,17 +318,28 @@ static void test_should_prompt_false_when_not_pending(void)
 
 static void test_should_prompt_uniform_across_abort_trip_reboot(void)
 {
-    TEST_SECTION("live_edit_should_prompt -- DONE, HALTED, FAULTED and a post-reboot record all prompt identically");
-    // Plan section 5 is explicit that the prompt condition must not special-
-    // case HOW the run ended -- a DONE, a HALTED, a FAULTED trip and a
-    // reboot that interrupted the firing all reduce to the same two facts
-    // (pending, not running), so all four are asserted to agree here.
+    TEST_SECTION("live_edit_should_prompt -- DONE, HALTED, FAULTED and a post-reboot record all reduce to the same "
+                 "two facts");
+    // LOW (review): the previous version of this test called
+    // live_edit_should_prompt(&rec, false) FOUR times under four different
+    // labels (DONE/HALTED/FAULTED/reboot) even though the function's own
+    // signature -- bool live_edit_should_prompt(const live_edit_record_t
+    // *rec, bool executor_running) -- has no parameter that could possibly
+    // distinguish any of those four callers from one another: all four
+    // calls were byte-identical, so all four either passed or failed
+    // together and the test was really only checking the FIRST one. Plan
+    // section 5's actual claim is narrower and honestly testable: the
+    // prompt condition depends on nothing BUT (pending, executor_running),
+    // so any caller in ANY of those four situations -- which all agree that
+    // the executor is not RUNNING -- gets the identical answer merely
+    // because they pass the identical two arguments. That is asserted once,
+    // directly, rather than by repeating the same call under relabeled
+    // pretenses.
     live_edit_record_t rec = {0};
     rec.pending = 1;
-    TEST_CHECK(live_edit_should_prompt(&rec, false), "a clean DONE prompts");
-    TEST_CHECK(live_edit_should_prompt(&rec, false), "a HALTED run prompts identically");
-    TEST_CHECK(live_edit_should_prompt(&rec, false), "a FAULTED trip prompts identically");
-    TEST_CHECK(live_edit_should_prompt(&rec, false), "a reboot that interrupted the firing prompts identically");
+    TEST_CHECK(live_edit_should_prompt(&rec, false),
+               "pending + not-running prompts, regardless of which not-running story (DONE/HALTED/FAULTED/reboot) "
+               "the caller has -- the function has no input that could tell them apart");
 }
 
 // ---------------------------------------------------------------------------
@@ -481,7 +523,17 @@ static void test_fork_then_load_working_and_record(void)
 
 static void test_fork_is_idempotent_when_already_pending(void)
 {
-    TEST_SECTION("live_profile_fork -- a second fork while one is pending returns the EXISTING working copy");
+    TEST_SECTION("live_profile_fork -- a second fork for the SAME origin_id while one is pending returns the "
+                 "EXISTING working copy");
+    // MEDIUM-1 (review) note: this test used to re-fork with a DIFFERENT
+    // origin_id (6) here and asserted that call still "succeeded", which is
+    // exactly the bug MEDIUM-1 fixed -- a second, unrelated run's fork must
+    // now be REFUSED, not silently handed the first run's stale working
+    // copy (see test_fork_refuses_pending_for_different_origin() below,
+    // which covers that case for real). What this test is actually meant to
+    // prove -- idempotency -- only makes sense for the SAME origin_id
+    // calling fork() twice (e.g. a client retrying its own request), so the
+    // second call below now reuses origin_id 5.
     profile_t origin = make_test_profile();
     profile_t working1, working2;
     live_edit_record_t rec1, rec2;
@@ -491,10 +543,11 @@ static void test_fork_is_idempotent_when_already_pending(void)
 
     profile_t different_origin = make_test_profile();
     different_origin.segments[0].target_c = 12345.0f; // would be visibly different if re-forked
-    TEST_CHECK(live_profile_fork(6, false, "Different", &different_origin, &working2, &rec2, err, sizeof(err)),
-               "second fork call succeeds (idempotent, does not error)");
-    TEST_CHECK(rec2.origin_id == 5, "the EXISTING record wins, not the second call's origin_id");
-    TEST_CHECK(working2.segments[0].target_c != 12345.0f, "the existing working copy is untouched by the second call");
+    TEST_CHECK(live_profile_fork(5, false, "Original", &different_origin, &working2, &rec2, err, sizeof(err)),
+               "second fork call for the SAME origin_id succeeds (idempotent, does not error)");
+    TEST_CHECK(rec2.origin_id == 5, "the EXISTING record's origin_id round-trips");
+    TEST_CHECK(working2.segments[0].target_c != 12345.0f,
+               "the existing working copy is untouched by the second call, not re-forked from the new origin");
 
     TEST_CHECK(live_profile_clear(err, sizeof(err)), "clear succeeds");
 }
@@ -521,6 +574,112 @@ static void test_clear_is_idempotent(void)
     TEST_CHECK(!live_profile_load_record(&rec), "no record is readable after clear");
 }
 
+// ---------------------------------------------------------------------------
+// MEDIUM-1 (review): live_profile_fork() and live_profile_load_working_for_
+// origin() must both refuse a pending record left over from a DIFFERENT
+// run's undecided edit -- a stale pending record from a previous firing
+// must never be silently adopted by a new one.
+
+static void test_fork_refuses_pending_for_different_origin(void)
+{
+    TEST_SECTION("live_profile_fork -- MEDIUM-1: a pending record for a DIFFERENT origin_id is refused, not adopted");
+    profile_t origin_a = make_test_profile();
+    profile_t working;
+    live_edit_record_t rec;
+    char err[128];
+    TEST_CHECK(live_profile_fork(7, false, "Run A", &origin_a, &working, &rec, err, sizeof(err)),
+               "first fork (origin 7) succeeds");
+
+    profile_t origin_b = make_test_profile();
+    origin_b.segments[0].target_c = 54321.0f; // would be visibly different if wrongly adopted
+    profile_t working2;
+    live_edit_record_t rec2;
+    bool ok = live_profile_fork(8, false, "Run B", &origin_b, &working2, &rec2, err, sizeof(err));
+    TEST_CHECK(!ok, "a second run (origin 8) is refused while origin 7's edit is still pending, not silently handed "
+                     "origin 7's stale working copy");
+    TEST_CHECK(err[0] != '\0', "a reason is given");
+
+    TEST_CHECK(live_profile_clear(err, sizeof(err)), "clear succeeds");
+}
+
+static void test_load_working_for_origin_refuses_foreign_id(void)
+{
+    TEST_SECTION("live_profile_load_working_for_origin -- MEDIUM-1: refuses a pending record for a different run");
+    profile_t origin = make_test_profile();
+    profile_t working;
+    live_edit_record_t rec;
+    char err[128];
+    TEST_CHECK(live_profile_fork(9, false, "Run C", &origin, &working, &rec, err, sizeof(err)), "fork (origin 9) succeeds");
+
+    profile_t out;
+    TEST_CHECK(live_profile_load_working_for_origin(9, &out), "the SAME origin_id (9) may load the pending working copy");
+    TEST_CHECK(!live_profile_load_working_for_origin(10, &out),
+               "a DIFFERENT origin_id (10) is refused even though a pending record exists");
+    TEST_CHECK(live_profile_has_pending_for_origin(9), "has_pending_for_origin agrees for the real origin");
+    TEST_CHECK(!live_profile_has_pending_for_origin(10), "has_pending_for_origin agrees for the foreign origin");
+
+    TEST_CHECK(live_profile_clear(err, sizeof(err)), "clear succeeds");
+}
+
+// ---------------------------------------------------------------------------
+// HIGH-1 (review): profile_live_pickup_should_advance_generation() -- the
+// pure decision this fix extracted so the real defect (the tick loop
+// consuming a generation before it had actually looked at the candidate)
+// is host-testable at all, since executor_task_entry()'s real tick loop is
+// not reachable from a host test (see test_profile_executor_prestart.c's
+// own doc comments on that point). This is this fix's proxy for "an edit
+// made while PAUSED is picked up on resume": PROFILE_LIVE_PICKUP_POLL_NOT_
+// RUNNING (what a poll made while paused reaches) must never advance the
+// generation, so the SAME generation is still "new" on the tick that finds
+// RUNNING again.
+
+static void test_should_advance_generation_false_when_not_running(void)
+{
+    TEST_SECTION("profile_live_pickup_should_advance_generation -- HIGH-1: NOT_RUNNING never consumes the generation "
+                 "(a paused edit is picked up on resume)");
+    TEST_CHECK(!profile_live_pickup_should_advance_generation(PROFILE_LIVE_PICKUP_POLL_NOT_RUNNING,
+                                                               PROFILE_LIVE_PICKUP_OK),
+               "PAUSED/FAULTED leaves the generation unconsumed regardless of what `result` happens to hold");
+}
+
+static void test_should_advance_generation_false_on_malloc_failure(void)
+{
+    TEST_SECTION("profile_live_pickup_should_advance_generation -- HIGH-1: a transient malloc failure never "
+                 "consumes the generation either");
+    TEST_CHECK(!profile_live_pickup_should_advance_generation(PROFILE_LIVE_PICKUP_POLL_MALLOC_FAILED,
+                                                               PROFILE_LIVE_PICKUP_OK),
+               "a transient failure must be retried next tick, not silently marked seen");
+}
+
+static void test_should_advance_generation_false_when_not_applicable(void)
+{
+    TEST_SECTION("profile_live_pickup_should_advance_generation -- HIGH-1: NOT_APPLICABLE (nothing pending, or a "
+                 "foreign origin_id) never consumes the generation");
+    TEST_CHECK(!profile_live_pickup_should_advance_generation(PROFILE_LIVE_PICKUP_POLL_NOT_APPLICABLE,
+                                                               PROFILE_LIVE_PICKUP_OK),
+               "neither answer is a definitive verdict on THIS run's own edit");
+}
+
+static void test_should_advance_generation_true_when_checked_ok(void)
+{
+    TEST_SECTION("profile_live_pickup_should_advance_generation -- HIGH-1: CHECKED+OK advances the generation");
+    TEST_CHECK(profile_live_pickup_should_advance_generation(PROFILE_LIVE_PICKUP_POLL_CHECKED, PROFILE_LIVE_PICKUP_OK),
+               "the candidate was actually evaluated and adopted -- safe to mark this generation seen");
+}
+
+static void test_should_advance_generation_true_when_checked_refused(void)
+{
+    TEST_SECTION("profile_live_pickup_should_advance_generation -- HIGH-1: CHECKED+a REFUSED_* result ALSO advances "
+                 "the generation");
+    TEST_CHECK(profile_live_pickup_should_advance_generation(PROFILE_LIVE_PICKUP_POLL_CHECKED,
+                                                              PROFILE_LIVE_PICKUP_REFUSED_WINDOW),
+               "a definitive refusal is still a definitive answer -- re-evaluating an unchanged generation forever "
+               "would never let the operator's NEXT edit be seen as new");
+    TEST_CHECK(profile_live_pickup_should_advance_generation(PROFILE_LIVE_PICKUP_POLL_CHECKED,
+                                                              PROFILE_LIVE_PICKUP_REFUSED_INVALID),
+               "same for a HARD-validate refusal");
+}
+
 int main(void)
 {
     // fake_kv.c (the host hal_kv backend) requires every partition to be
@@ -539,6 +698,7 @@ int main(void)
     test_name_collision_case_and_whitespace_insensitive();
     test_name_collision_excludes_self();
     test_name_no_collision_distinct_name();
+    test_name_collision_scans_builtin_catalogue();
     test_decide_save_as_refuses_name_collision();
     test_decide_save_as_accepts_distinct_name();
     test_decide_overwrite_refuses_builtin_before_confirm();
@@ -562,6 +722,13 @@ int main(void)
     test_fork_then_load_working_and_record();
     test_fork_is_idempotent_when_already_pending();
     test_save_working_bumps_generation();
+    test_fork_refuses_pending_for_different_origin();
+    test_load_working_for_origin_refuses_foreign_id();
+    test_should_advance_generation_false_when_not_running();
+    test_should_advance_generation_false_on_malloc_failure();
+    test_should_advance_generation_false_when_not_applicable();
+    test_should_advance_generation_true_when_checked_ok();
+    test_should_advance_generation_true_when_checked_refused();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

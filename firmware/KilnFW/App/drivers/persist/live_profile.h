@@ -203,6 +203,21 @@ bool live_profile_fork(uint8_t origin_id, bool origin_is_builtin, const char *or
 bool live_profile_save_working(const profile_t *p, char *err, size_t err_cap);
 bool live_profile_load_working(profile_t *out);
 
+/* MEDIUM-1 (review): same as live_profile_load_working() but also refuses
+ * (returns false, *out untouched) unless the pending record's origin_id
+ * equals expect_origin_id -- the pickup-side half of the stale-record guard
+ * live_profile_fork() applies on the fork side. The RUNNING executor is the
+ * only caller that knows which profile it is actually running, so it is the
+ * only caller that can supply this. */
+bool live_profile_load_working_for_origin(uint8_t expect_origin_id, profile_t *out);
+
+/* MEDIUM-2 (review): true iff a pending record exists whose origin_id is
+ * origin_id. profile_executor_run() uses this to decide how to seed
+ * s_exec.live_edit_generation at run start -- see its call site and
+ * live_profile_generation()'s own doc comment below for why the plain
+ * "reboot ends any run" seeding used to be wrong for a warm-started run. */
+bool live_profile_has_pending_for_origin(uint8_t origin_id);
+
 /* Read-back verified: writes, then reads the value back and compares before
  * reporting success -- same discipline boot_guard_mark_healthy()'s
  * verify_persisted_count() fix uses (never trust a write's return code
@@ -221,9 +236,16 @@ bool live_profile_clear(char *err, size_t err_cap);
 
 /* RAM-only generation counter, same shape as zones_config_generation() --
  * bumped by live_profile_fork()/live_profile_save_working(), polled once per
- * control-tick by profile_executor_live_pickup's caller. Never persisted:
- * a reboot ends any run, so there is nothing for a stale counter to pick up
- * across one, matching zones_config_generation()'s own precedent. */
+ * control-tick by profile_executor_live_pickup's caller. Never persisted,
+ * and reset to 0 across a reboot -- CORRECTION (MEDIUM-2, review): a reboot
+ * does NOT always end the run this counter is tracking, since a firing can
+ * warm-start-resume across one (profile_executor_plan_warm_start()). A
+ * working copy forked/saved just before that reboot is still on disk with
+ * this RAM counter back at 0, so profile_executor_run() must not seed its
+ * own baseline straight from this value without first checking
+ * live_profile_has_pending_for_origin() -- see that function and
+ * profile_executor_run.c's call site. Atomic: bumped from the HTTP task,
+ * polled from the executor task. */
 uint32_t live_profile_generation(void);
 
 #ifdef __cplusplus

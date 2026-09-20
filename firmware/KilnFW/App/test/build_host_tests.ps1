@@ -758,7 +758,14 @@ try {
     $exeLp = Join-Path $outDir "kilnctl_host_tests_live_profile.exe"
     $lpObjDir = Join-Path $outDir "live_profile_obj"
     New-Item -ItemType Directory -Force -Path $lpObjDir | Out-Null
-    $cmdLp = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+    # LOW (review): live_profile.c now uses <stdatomic.h> for
+    # s_live_profile_generation (same idiom as wifi_provision_http.c's
+    # s_httpd_open_sockets, which is never compiled on the host -- this is
+    # the FIRST host test to pull stdatomic.h in). MSVC's own
+    # vcruntime_c11_stdatomic.h refuses outright ("C atomic support is not
+    # enabled") under plain /std:c11 -- /experimental:c11atomics is the
+    # documented MSVC switch that turns it on.
+    $cmdLp = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics " +
             "/Fo:`"$lpObjDir\\`" /Fe:`"$exeLp`" `"$(Join-Path $testDir 'test_live_profile.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
