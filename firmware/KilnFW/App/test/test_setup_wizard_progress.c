@@ -127,12 +127,15 @@ static void test_migration_from_v1(void)
 // Migration from the legacy 13-step (v2) blob, pre-2026-09-18 fix
 // ---------------------------------------------------------------------
 
-// 2026-09-18: SETUP_WIZARD_STEP_COUNT grew 13 -> 14 alongside the wizard
-// page's new step 13 ("Authentication (optional)"). Proves an existing
-// board's real, already-persisted progress (steps 0..12, v2 format) is
-// carried forward untouched into the new 14-step layout, and that the new
-// step 13 defaults to PENDING rather than the whole record being discarded
-// as "unrecognized size" -- this task's own compat requirement.
+// v2's 13 steps (ids 0..12) predate BOTH later changes: the 2026-09-18 growth
+// to 14 (new step 13, "Authentication") and the 2026-09-19 removal of the
+// OLD step 11 ("Coupling matrix (optional)", which shifted old step 12 down
+// to new step 11). Proves an existing board's real, already-persisted
+// progress on an unaffected step (8, below the removed slot) carries forward
+// unchanged, that old step 12's data lands at NEW step 11 rather than being
+// lost or duplicated, that the removed old step 11 itself is discarded (not
+// left to bleed into the new step 11), and that the brand-new step 12
+// (never recorded in this era) defaults to PENDING.
 static void test_migration_from_v2_legacy(void)
 {
     reset();
@@ -146,6 +149,11 @@ static void test_migration_from_v2_legacy(void)
     v2.steps[9].state = (uint8_t)SETUP_WIZ_STEP_SKIPPED;
     v2.steps[9].ts = 66666;
     strncpy(v2.steps[9].note, "no CT installed yet", sizeof(v2.steps[9].note) - 1);
+    v2.steps[11].state = (uint8_t)SETUP_WIZ_STEP_SKIPPED; /* old step 11: coupling matrix, "optional, deferred" */
+    v2.steps[11].ts = 70000;
+    strncpy(v2.steps[11].note, "optional, deferred", sizeof(v2.steps[11].note) - 1);
+    v2.steps[12].state = (uint8_t)SETUP_WIZ_STEP_DONE; /* old step 12: first profile & final gate */
+    v2.steps[12].ts = 77777;
 
     hal_kv_handle_t h;
     hal_status_t open_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, NVS_PARTITION);
@@ -159,18 +167,73 @@ static void test_migration_from_v2_legacy(void)
     esp_err_t err = setup_wizard_progress_start();
     TEST_CHECK(err == ESP_OK, "start() against a v2-legacy (13-step) blob still returns ESP_OK");
 
-    setup_wizard_step_t s8, s9, s13;
+    setup_wizard_step_t s8, s9, s11, s12;
     setup_wizard_progress_get_step(8, &s8);
     setup_wizard_progress_get_step(9, &s9);
-    setup_wizard_progress_get_step(13, &s13);
+    setup_wizard_progress_get_step(11, &s11);
+    setup_wizard_progress_get_step(12, &s12);
     TEST_CHECK(s8.state == SETUP_WIZ_STEP_DONE && s8.ts == 55555,
-               "v2-legacy migration: step 8's state+ts carry forward exactly");
+               "v2-legacy migration: step 8 (below the removed slot) carries forward exactly, at the same index");
     TEST_CHECK(s9.state == SETUP_WIZ_STEP_SKIPPED && s9.ts == 66666,
-               "v2-legacy migration: step 9's state+ts carry forward exactly");
+               "v2-legacy migration: step 9 (below the removed slot) carries forward exactly, at the same index");
     TEST_CHECK(strcmp(s9.note, "no CT installed yet") == 0, "v2-legacy migration: step 9's note carries forward");
-    TEST_CHECK(s13.state == SETUP_WIZ_STEP_PENDING,
-               "v2-legacy migration: the new step 13 (did not exist in the 13-step record) defaults to PENDING, "
-               "not rejected and not made up from step 12's data");
+    TEST_CHECK(s11.state == SETUP_WIZ_STEP_DONE && s11.ts == 77777,
+               "v2-legacy migration: NEW step 11 gets OLD step 12's data (first profile), shifted down one slot -- "
+               "not the old step 11's own (coupling matrix, SKIPPED) data");
+    TEST_CHECK(s12.state == SETUP_WIZ_STEP_PENDING,
+               "v2-legacy migration: new step 12 (authentication -- did not exist in this era) defaults to PENDING");
+}
+
+// ---------------------------------------------------------------------
+// Migration from the legacy 14-step (v3) blob, the 2026-09-18..09-19 window
+// ---------------------------------------------------------------------
+
+// v3 is the one historical layout that already had a real, distinct step 13
+// (authentication) on disk -- this is the case that proves it lands at NEW
+// step 12 rather than being dropped alongside the removed old step 11.
+static void test_migration_from_v3_legacy(void)
+{
+    reset();
+    setup_wizard_progress_start();
+
+    setup_wizard_progress_v3_legacy_t v3;
+    memset(&v3, 0, sizeof(v3));
+    v3.version = 3;
+    v3.steps[2].state = (uint8_t)SETUP_WIZ_STEP_DONE;
+    v3.steps[2].ts = 11111;
+    v3.steps[11].state = (uint8_t)SETUP_WIZ_STEP_SKIPPED; /* old step 11: coupling matrix */
+    v3.steps[11].ts = 22222;
+    strncpy(v3.steps[11].note, "optional, deferred", sizeof(v3.steps[11].note) - 1);
+    v3.steps[13].state = (uint8_t)SETUP_WIZ_STEP_SKIPPED; /* old step 13: authentication */
+    v3.steps[13].ts = 33333;
+    strncpy(v3.steps[13].note, "left off", sizeof(v3.steps[13].note) - 1);
+
+    hal_kv_handle_t h;
+    hal_status_t open_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, NVS_PARTITION);
+    TEST_CHECK(open_err == HAL_OK, "test setup: hal_kv_open for the v3-legacy stash succeeds");
+    hal_status_t set_err = hal_kv_set_blob(&h, NVS_KEY_PROGRESS, &v3, sizeof(v3));
+    TEST_CHECK(set_err == HAL_OK, "test setup: stashing the v3-legacy-shaped (14-step) blob succeeds");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+
+    apply_defaults();
+    esp_err_t err = setup_wizard_progress_start();
+    TEST_CHECK(err == ESP_OK, "start() against a v3-legacy (14-step) blob still returns ESP_OK");
+
+    setup_wizard_step_t s2, s12;
+    setup_wizard_progress_get_step(2, &s2);
+    setup_wizard_progress_get_step(12, &s12);
+    TEST_CHECK(s2.state == SETUP_WIZ_STEP_DONE && s2.ts == 11111,
+               "v3-legacy migration: step 2 (below the removed slot) carries forward unchanged");
+    TEST_CHECK(s12.state == SETUP_WIZ_STEP_SKIPPED && s12.ts == 33333,
+               "v3-legacy migration: OLD step 13 (authentication) lands at NEW step 12, shifted down one slot");
+    TEST_CHECK(strcmp(s12.note, "left off") == 0, "v3-legacy migration: step 13's note survives the shift to step 12");
+
+    /* Old step 11 (coupling matrix) must be genuinely gone, not merely
+     * unreachable -- SETUP_WIZARD_STEP_COUNT is 13 now, so index 11 in the
+     * NEW numbering is step 12's slot per the check above, and there is no
+     * new index left over for the old data to leak into. */
+    TEST_CHECK(SETUP_WIZARD_STEP_COUNT == 13, "the current step count is 13 -- one fewer than v3's 14");
 }
 
 // ---------------------------------------------------------------------
@@ -328,6 +391,7 @@ void run_test_setup_wizard_progress(void)
     test_get_all_matches_get_step();
     test_migration_from_v1();
     test_migration_from_v2_legacy();
+    test_migration_from_v3_legacy();
     test_set_step_rejects_out_of_range_index();
     test_set_step_rejects_invalid_state();
     test_partition_init_failure_degrades_to_defaults();

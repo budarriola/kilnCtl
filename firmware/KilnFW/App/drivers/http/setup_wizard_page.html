@@ -283,13 +283,19 @@ from the board (<code>GET /api/readiness</code>), never trusted from memory alon
        than a second implementation of confirm-and-verify. -->
   <div id="stepBody7" hidden></div>
   <!-- Steps 8-12 (this pass): CT setup, CT mapping verification (heat),
-       PID gains (autotune or hand-entered), coupling matrix, final gate. -->
+       PID gains (autotune or hand-entered; the coupling matrix summary is
+       folded into this step's own render, see renderStep10), final gate,
+       authentication. Former step 11 ("Coupling matrix (optional)") was
+       removed 2026-09-19 -- see the comment above WIZARD_STEPS -- and steps
+       after it renumbered down by one (old 12 "First profile..." -> new 11,
+       old 13 "Authentication" -> new 12); setup_wizard_progress.c's v4 NVS
+       migration (remap_dropping_old_step_11()) keeps an old blob's real
+       per-step state for these two intact across the shift. -->
   <div id="stepBody8" hidden></div>
   <div id="stepBody9" hidden></div>
   <div id="stepBody10" hidden></div>
   <div id="stepBody11" hidden></div>
   <div id="stepBody12" hidden></div>
-  <div id="stepBody13" hidden></div>
 
   <div id="stepGenericContent" hidden>
     <p class="hint">This step's own screen (fields, live validation, the commit path) is not built yet
@@ -318,11 +324,13 @@ from the board (<code>GET /api/readiness</code>), never trusted from memory alon
 // the /api/readiness item(s) (readiness_http.c's own `key` field -- see that
 // file's append_item() call sites) this step's DONE claim is checked
 // against; readiness is authoritative over anything the progress store says
-// (section 5 item 3; section 1 table). Steps 8/9/11 have NO 1:1 readiness
+// (section 5 item 3; section 1 table). Steps 8/9 have NO 1:1 readiness
 // item today (the plan's own reuse map, section 7, lists no dedicated
-// checklist entry for CT mapping verification or the coupling matrix) --
+// checklist entry for CT mapping verification) --
 // left as an empty array rather than guessing a wrong key, and flagged here
 // so a later step wiring real content does not have to rediscover this.
+// (Step 11, "Coupling matrix (optional)", also had no readiness item and was
+// removed entirely 2026-09-19 -- see the comment above WIZARD_STEPS.)
 // `safety` marks the plan's section 6 "safety-relevant = 6, 7, 8 (if
 // ct_installed), 9 (if ct_installed)" list; 8/9 are marked safety:true
 // unconditionally here since this shell cannot yet read ct_installed
@@ -342,9 +350,24 @@ var WIZARD_STEPS = [
   { id: 8, title: 'Current sensing: install & calibrate', readinessKeys: [], safety: true },
   { id: 9, title: 'CT mapping verification', readinessKeys: ['ct_attribution'], safety: true },
   { id: 10, title: 'PID gains (autotune or by hand)', readinessKeys: ['autotune'], safety: false },
-  { id: 11, title: 'Coupling matrix (optional)', readinessKeys: [], safety: false },
-  { id: 12, title: 'First profile & final readiness gate', readinessKeys: ['profile_saved', 'storage'], safety: false },
-  { id: 13, title: 'Authentication (optional)', readinessKeys: [], safety: false },
+  // Former step 11 ("Coupling matrix (optional)") was removed 2026-09-19
+  // (owner report: nothing on that screen could be triggered from the
+  // wizard -- the matrix is only ever populated as a by-product of a
+  // zone's autotune, run from step 10 or /settings/zones). Its summary now
+  // lives as one line inside step 10's own render (renderStep10), linking to
+  // /settings/zones where the full matrix already displays. Steps after it
+  // are RENUMBERED down by one (old 12 "First profile..." -> 11, old 13
+  // "Authentication" -> 12), keeping ids a dense 0..12 run as
+  // setup_wizard_step_count_mirror_drift_check.py requires. Persisted-state
+  // compatibility for this shift is handled server-side, not by a gap: an
+  // old NVS blob's real per-step state for what were steps 12/13 survives at
+  // the new indices 11/12 via setup_wizard_progress.c's v4 migration
+  // (remap_dropping_old_step_11()); only whatever was stored for the removed
+  // step 11 itself is discarded, matching computeStepState()'s existing
+  // "absence of data is not absence of problems" discipline for content that
+  // is no longer read.
+  { id: 11, title: 'First profile & final readiness gate', readinessKeys: ['profile_saved', 'storage'], safety: false },
+  { id: 12, title: 'Authentication (optional)', readinessKeys: [], safety: false },
 ];
 
 function defaultProgress() {
@@ -380,7 +403,7 @@ function computeStepState(step, storedStep, readinessByKey) {
   // back to an empty item list, or readiness_http.c's own checklist got
   // truncated and dropped exactly this step's key(s)) must never fall
   // through to trusting the stored blob -- absence of data is not absence
-  // of problems. Steps that legitimately declare no readinessKeys (8, 11
+  // of problems. Steps that legitimately declare no readinessKeys (8
   // and 13 -- step 9 gained 'ct_attribution' with
   // docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md, which is exactly what lets
   // this file's existing regression machinery refuse a stale 'done' there;
@@ -883,10 +906,12 @@ function step6LimitConfirmLines(priorZones, liveZones, thermoCount) {
 }
 
 /* ==========================================================================
- * Steps 8-11 (this pass): CT setup, CT mapping verification (HEAT), PID
- * gains (autotune or hand-entered), coupling matrix. Step 7 (safety
- * processor commissioning) is a different pass's territory and is left
- * exactly as the shell generates it today (generic placeholder) -- not
+ * Steps 8-10 (this pass): CT setup, CT mapping verification (HEAT), PID
+ * gains (autotune or hand-entered; step 10 also carries the cross-zone
+ * coupling summary, see couplingSummaryHtml() -- the former standalone step
+ * 11 was removed 2026-09-19, see the comment above WIZARD_STEPS). Step 7
+ * (safety processor commissioning) is a different pass's territory and is
+ * left exactly as the shell generates it today (generic placeholder) -- not
  * touched here.
  * ========================================================================== */
 
@@ -1223,10 +1248,36 @@ function autotunePrecheck(zone) {
   return null;
 }
 
+// Cross-zone coupling summary line folded into step 10 (2026-09-19 removal
+// of former step 11 "Coupling matrix (optional)" -- see the comment above
+// WIZARD_STEPS). Reuses GET /api/autotune/matrix verbatim, same as the old
+// step 11 did; ON_OFF zones are excluded from the pair count for the same
+// reason the old step excluded them from its review rows (their coupling
+// row/column is zeroed by construction -- ON_OFF_ZONE_PLAN.md).
+function couplingSummaryHtml(matrix, zones) {
+  if (!matrix || !matrix.cells) {
+    return '<p class="hint">Cross-zone coupling: no data yet (populated by autotune). ' +
+      '<a href="/settings/zones">View matrix &rarr;</a></p>';
+  }
+  var total = 0, measured = 0;
+  matrix.cells.forEach(function (c) {
+    if (zones[c.i] && zones[c.i].zone_type === 1) return;
+    if (zones[c.j] && zones[c.j].zone_type === 1) return;
+    total++;
+    if (c.valid) measured++;
+  });
+  return '<p class="hint">Cross-zone coupling: ' + measured + ' of ' + total +
+    ' pair(s) measured (populated by autotune). <a href="/settings/zones">View matrix &rarr;</a></p>';
+}
+
 function renderStep10() {
   var el = document.getElementById('stepBody10');
   el.innerHTML = '<p class="hint">Loading zones&hellip;</p>';
-  return fetchJsonOr('/api/zones', null).then(function (data) {
+  return Promise.all([
+    fetchJsonOr('/api/zones', null),
+    fetchJsonOr('/api/autotune/matrix', null),
+  ]).then(function (r) {
+    var data = r[0], matrix = r[1];
     if (!data) {
       el.innerHTML = '<p class="werr">Could not reach this board -- reload once it answers again.</p>';
       return;
@@ -1267,6 +1318,7 @@ function renderStep10() {
       html += '<button type="button" class="s10save" data-zone="' + i + '">Save gains for zone ' + (i + 1) + '</button>';
       html += '<span class="s10result" data-zone="' + i + '"></span></div>';
     }
+    html += couplingSummaryHtml(matrix, zones);
     html += '<p class="hint">Status: ' + window.kcEscapeHtml(
       (latestMerged.filter(function (m) { return m.id === 10; })[0] || {}).detail || '') + '</p>';
     el.innerHTML = html;
@@ -1314,55 +1366,20 @@ function renderStep10() {
   });
 }
 
-/* ---- Step 11 (coupling matrix, optional). Reuses GET /api/autotune/matrix
- * verbatim -- no second matrix. ON_OFF zones are excluded from the review
- * (their coupling row/column is zeroed by construction -- ON_OFF_ZONE_PLAN.md). */
+/* ---- Step 11 (first profile + final readiness gate, renumbered from 12 on
+ * 2026-09-19 when former step 11 "Coupling matrix (optional)" was removed).
+ * Requirement 4: the completion gate itself is NOT reimplemented here --
+ * computeCompleteness() (already landed, already tested) is the single
+ * source of truth and is rendered on the OVERVIEW screen's gate banner;
+ * this step screen just shows the same verdict inline plus a link to save
+ * a profile, since readinessKeys ['profile_saved','storage'] already drives
+ * this step's own done/pending state through the normal computeStepState()
+ * path -- no separate "mark setup complete" write exists anywhere, by
+ * design (plan section 5: the wizard stores no config value and no
+ * completion flag; the only authority is /api/readiness, read fresh every
+ * time). */
 function renderStep11() {
   var el = document.getElementById('stepBody11');
-  el.innerHTML = '<p class="hint">Loading&hellip;</p>';
-  return Promise.all([
-    fetchJsonOr('/api/autotune/matrix', null),
-    fetchJsonOr('/api/zones', null),
-  ]).then(function (r) {
-    var matrix = r[0], data = r[1];
-    var html = '<p class="hint">Optional: the cross-zone coupling matrix, built up as each zone is autotuned. ' +
-      'Can be deferred -- a kiln with only one zone, or zones tuned by hand, may never populate this.</p>';
-    if (!matrix || !matrix.cells) {
-      html += '<p class="hint">No coupling data yet.</p>';
-    } else {
-      var zones = (data && data.zones) || [];
-      matrix.cells.forEach(function (c) {
-        if (zones[c.i] && zones[c.i].zone_type === 1) return; // on/off zones excluded
-        if (zones[c.j] && zones[c.j].zone_type === 1) return;
-        var val = c.valid ? ('k=' + c.k + ' tau=' + c.tau_s + 's dead_time=' + c.dead_time_s + 's') : 'not measured yet';
-        html += '<div class="review-row"><span>zone ' + (c.i + 1) + ' &rarr; zone ' + (c.j + 1) + '</span>' +
-          '<span class="rv">' + val + '</span></div>';
-      });
-    }
-    html += '<div class="gnav"><button type="button" id="step11Skip">Skip (optional) &amp; mark done</button>' +
-      '<button type="button" id="step11Done">Mark reviewed</button></div>';
-    el.innerHTML = html;
-    document.getElementById('step11Skip').addEventListener('click', function () {
-      postStepState(11, 'skipped', 'optional, deferred').then(function () { loadAll(); });
-    });
-    document.getElementById('step11Done').addEventListener('click', function () {
-      postStepState(11, 'done').then(function () { loadAll(); });
-    });
-  });
-}
-
-/* ---- Step 12 (first profile + final readiness gate). Requirement 4: the
- * completion gate itself is NOT reimplemented here -- computeCompleteness()
- * (already landed, already tested) is the single source of truth and is
- * rendered on the OVERVIEW screen's gate banner; this step screen just
- * shows the same verdict inline plus a link to save a profile, since
- * readinessKeys ['profile_saved','storage'] already drives this step's own
- * done/pending state through the normal computeStepState() path -- no
- * separate "mark setup complete" write exists anywhere, by design (plan
- * section 5: the wizard stores no config value and no completion flag; the
- * only authority is /api/readiness, read fresh every time). */
-function renderStep12() {
-  var el = document.getElementById('stepBody12');
   el.innerHTML = '<p class="hint">Loading&hellip;</p>';
   return fetchJsonOr('/api/profiles', null).then(function (profiles) {
     var gate = computeCompleteness(latestMerged, latestReadiness);
@@ -1377,23 +1394,25 @@ function renderStep12() {
   });
 }
 
-/* ---- Step 13 (WEB_AUTH_PLAN.md section 11): "the setup wizard should
- * recommend enabling it. It presents an 'enable authentication' step that is
- * skippable, defaults the checkbox to off to match the shipped default, and
- * states in one line what is at stake ... Recommend without overriding the
- * owner's default." This step never itself decides transition legality or
- * touches sessions -- it only reads GET /api/security/policy for the current
- * state and, when the owner opts in, links to the real security settings
- * page (/settings/security) where web_auth_policy_check_transition() (via
- * POST /api/security/policy) is the one place that enforces "no
- * administrator credential -> refused" and clears sessions on enable. The
- * checkbox here is a plain, unpersisted intent toggle -- checking it never
- * calls the enable API by itself, it only reveals the link, so leaving this
- * step without following the link changes nothing on the board (the shipped
- * default is preserved either way). readinessKeys: [] -- like steps 8/9/11,
- * this step is optional and never blocks the final completeness gate. */
-function renderStep13() {
-  var el = document.getElementById('stepBody13');
+/* ---- Step 12 (WEB_AUTH_PLAN.md section 11, renumbered from 13 on
+ * 2026-09-19 when former step 11 "Coupling matrix (optional)" was removed):
+ * "the setup wizard should recommend enabling it. It presents an 'enable
+ * authentication' step that is skippable, defaults the checkbox to off to
+ * match the shipped default, and states in one line what is at stake ...
+ * Recommend without overriding the owner's default." This step never itself
+ * decides transition legality or touches sessions -- it only reads GET
+ * /api/security/policy for the current state and, when the owner opts in,
+ * links to the real security settings page (/settings/security) where
+ * web_auth_policy_check_transition() (via POST /api/security/policy) is the
+ * one place that enforces "no administrator credential -> refused" and
+ * clears sessions on enable. The checkbox here is a plain, unpersisted
+ * intent toggle -- checking it never calls the enable API by itself, it
+ * only reveals the link, so leaving this step without following the link
+ * changes nothing on the board (the shipped default is preserved either
+ * way). readinessKeys: [] -- like steps 8/9, this step is optional and
+ * never blocks the final completeness gate. */
+function renderStep12() {
+  var el = document.getElementById('stepBody12');
   el.innerHTML = '<p class="hint">Loading&hellip;</p>';
   return fetchJsonOr('/api/security/policy', null).then(function (cfg) {
     var webOn = !!(cfg && cfg.web_enabled);
@@ -1407,26 +1426,26 @@ function renderStep13() {
       'AP password either way.</p>' +
       statusLine +
       '<label style="display:flex;align-items:center;gap:0.5em;min-height:32px;">' +
-      '<input type="checkbox" id="step13Enable"> I want to enable authentication for this kiln</label>' +
-      '<p class="hint" id="step13Link" hidden>Set an administrator password/PIN and turn it on here: ' +
+      '<input type="checkbox" id="step12Enable"> I want to enable authentication for this kiln</label>' +
+      '<p class="hint" id="step12Link" hidden>Set an administrator password/PIN and turn it on here: ' +
       '<a href="/settings/security">Security settings &rarr;</a> (enabling is refused until an ' +
       'administrator credential is set for that interface).</p>' +
-      '<div class="gnav"><button type="button" id="step13Skip">Skip (optional) &amp; mark done</button>' +
-      '<button type="button" id="step13Done">Mark reviewed</button></div>';
+      '<div class="gnav"><button type="button" id="step12Skip">Skip (optional) &amp; mark done</button>' +
+      '<button type="button" id="step12Done">Mark reviewed</button></div>';
     el.innerHTML = html;
     // Deliberately always unchecked on render -- plan section 11: "defaults
     // the checkbox to off to match the shipped default" -- this reflects
     // intent to opt in during THIS visit, not whatever the board's current
     // policy already is (shown separately in statusLine above).
-    document.getElementById('step13Enable').checked = false;
-    document.getElementById('step13Enable').addEventListener('change', function (e) {
-      document.getElementById('step13Link').hidden = !e.target.checked;
+    document.getElementById('step12Enable').checked = false;
+    document.getElementById('step12Enable').addEventListener('change', function (e) {
+      document.getElementById('step12Link').hidden = !e.target.checked;
     });
-    document.getElementById('step13Skip').addEventListener('click', function () {
-      postStepState(13, 'skipped', 'optional, deferred').then(function () { loadAll(); });
+    document.getElementById('step12Skip').addEventListener('click', function () {
+      postStepState(12, 'skipped', 'optional, deferred').then(function () { loadAll(); });
     });
-    document.getElementById('step13Done').addEventListener('click', function () {
-      postStepState(13, 'done').then(function () { loadAll(); });
+    document.getElementById('step12Done').addEventListener('click', function () {
+      postStepState(12, 'done').then(function () { loadAll(); });
     });
   });
 }
@@ -2723,7 +2742,6 @@ function gRenderStepDetail(stepId) {
   else if (stepId === 10) renderPromise = renderStep10();
   else if (stepId === 11) renderPromise = renderStep11();
   else if (stepId === 12) renderPromise = renderStep12();
-  else if (stepId === 13) renderPromise = renderStep13();
   // Apply a save confirmation armed for THIS step (see armStepMessage()
   // above) only after this step's own render has actually finished
   // rebuilding the DOM -- applying it any earlier would just get overwritten

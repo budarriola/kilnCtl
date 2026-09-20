@@ -30,10 +30,19 @@
 // (docs/SETUP_WIZARD.md implementation step 3), not this module's.
 //
 // SCHEMA HISTORY / MIGRATION: version 1 stored {state, ts} per step only.
-// Version 2 (current) appends `note[SETUP_WIZARD_NOTE_MAX]` to the TAIL of
-// each per-step record -- same "append only at the true tail" discipline
+// Version 2 appended `note[SETUP_WIZARD_NOTE_MAX]` to the TAIL of each
+// per-step record -- same "append only at the true tail" discipline
 // zones_config_migrate.c documents for its own per-zone structs. A v1 blob
-// loads with every note defaulted to empty; nothing else changes.
+// loads with every note defaulted to empty; nothing else changes. Version 3
+// grew the step count 13->14 (added step 13, "Authentication (optional)").
+// Version 4 (current) DROPS what was step 11 ("Coupling matrix (optional)",
+// removed from the wizard 2026-09-19 -- setup_wizard_page.html's own comment
+// above WIZARD_STEPS has the rationale) and shifts every step after it down
+// by one slot (old 12 "First profile..." -> new 11, old 13 "Authentication"
+// -> new 12), so SETUP_WIZARD_STEP_COUNT goes back to 13. An old v1/v2/v3
+// blob's real per-step state survives this shift (see
+// setup_wizard_progress.c's remap_dropping_old_step_11()); only whatever was
+// recorded for the removed step itself is discarded, never anything else.
 #ifndef KILNCTL_SETUP_WIZARD_PROGRESS_H
 #define KILNCTL_SETUP_WIZARD_PROGRESS_H
 
@@ -47,15 +56,16 @@
 extern "C" {
 #endif
 
-// One row per docs/SETUP_WIZARD.md section 3's table (steps 0..13). Kept in
-// lockstep with setup_wizard_page.html's WIZARD_STEPS array -- the two used
-// to drift silently (WIZARD_STEPS grew a 14th entry, step 13 "Authentication
-// (optional)", for the web-auth work while this constant stayed at 13, so
-// GET /api/setup/progress never surfaced step 13 and POST rejected it with
-// "step out of range"; found 2026-09-18 against the live bench board).
-// setup_wizard_step_count_mirror_drift_check.py pins these two counts
-// against each other so this cannot happen again silently.
-#define SETUP_WIZARD_STEP_COUNT 14
+// One row per docs/SETUP_WIZARD.md section 3's table (steps 0..12 as of
+// 2026-09-19's removal of the former step 11, "Coupling matrix (optional)").
+// Kept in lockstep with setup_wizard_page.html's WIZARD_STEPS array -- the
+// two used to drift silently (WIZARD_STEPS grew a 14th entry, step 13
+// "Authentication (optional)", for the web-auth work while this constant
+// stayed at 13, so GET /api/setup/progress never surfaced step 13 and POST
+// rejected it with "step out of range"; found 2026-09-18 against the live
+// bench board). setup_wizard_step_count_mirror_drift_check.py pins these two
+// counts against each other so this cannot happen again silently.
+#define SETUP_WIZARD_STEP_COUNT 13
 
 typedef enum {
     SETUP_WIZ_STEP_PENDING = 0,

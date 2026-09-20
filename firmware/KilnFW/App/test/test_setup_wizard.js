@@ -277,12 +277,19 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   assert(gateSafetyBlocked.complete === false, 'gate refuses complete when a safety-relevant step is skipped');
 
   // A skipped NON-safety step (deliberately_off-equivalent choice, e.g.
-  // coupling matrix) must NOT block completion by itself.
+  // authentication) must NOT block completion by itself. (Former step 11,
+  // "Coupling matrix (optional)", was this test's original example, but was
+  // removed from WIZARD_STEPS 2026-09-19 -- its info is now folded into step
+  // 10's own render -- so it can no longer stand in here: mergeAllSteps()
+  // only iterates the live WIZARD_STEPS table, and a stray progress.steps['11']
+  // is simply never read, which would make this assertion vacuous. Step 12
+  // (authentication, renumbered from 13 on the same 2026-09-19 change) is
+  // the same shape -- safety:false, no readinessKeys.)
   const nonSafetySkippedProgress = JSON.parse(JSON.stringify(allDoneProgress));
-  nonSafetySkippedProgress.steps['11'] = { state: 'skipped', note: 'not needed' };
+  nonSafetySkippedProgress.steps['12'] = { state: 'skipped', note: 'not needed' };
   const mergedNonSafetySkipped = ctx.mergeAllSteps(nonSafetySkippedProgress, allOkReadiness);
   const gateNonSafetyOk = ctx.computeCompleteness(mergedNonSafetySkipped, allOkReadiness);
-  assert(gateNonSafetyOk.complete === true, 'skipping a non-safety step (11: coupling matrix) does not block completion');
+  assert(gateNonSafetyOk.complete === true, 'skipping a non-safety step (12: authentication) does not block completion');
 })();
 
 // ---- Owner decision 2026-09-09: /api/readiness is now a REAL firing gate
@@ -290,7 +297,7 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
 // and estop_verified with NO override. The wizard must consume that SAME
 // predicate -- computeCompleteness() already iterates every item in the raw
 // /api/readiness response, not just the keys any WIZARD_STEPS entry declares,
-// so a whole-board item none of the 14 steps track (crash_report,
+// so a whole-board item none of the 13 steps track (crash_report,
 // recovery_mode, safety_trip, estop_verified, safety_context, cfg_fs) still
 // blocks "Setup complete" the instant readiness_http.c reports it not_done --
 // there is no second, wizard-owned copy of "is this board allowed to fire" to
@@ -317,7 +324,7 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   const merged = ctx.mergeAllSteps(allDoneProgress, readinessWithCrash);
   const gate = ctx.computeCompleteness(merged, readinessWithCrash);
   assert(gate.complete === false,
-    'an unmapped not_done firing-gate item (crash_report) blocks "Setup complete" even with all 14 steps done');
+    'an unmapped not_done firing-gate item (crash_report) blocks "Setup complete" even with all 13 steps done');
   assert(gate.reasons.some((r) => /crash_report|Unacknowledged crash report/.test(r)),
     'the refusal names the crash_report item, not a generic message');
   assert(gate.reasons.some((r) => /estop_verified|E-stop interlock verified/.test(r)),
@@ -1199,33 +1206,37 @@ function loadCommissioningShared(fetchImpl, confirmImpl) {
 // at stake." This is a shape assertion on the real WIZARD_STEPS table (not a
 // second, hand-maintained copy of it) so a future edit that renames/removes
 // this step without updating the plan's own acceptance line is caught here,
-// not just by eye. It intentionally does NOT drive the DOM-only
-// renderStep13() (fetch/document-heavy, same class as the other untested
-// optional-step renderers 8-12) -- see the file header's extraction
-// rationale for why this suite only reaches the page's pure/state functions.
-(function testStep13AuthWizardStepExistsAndIsOptional() {
+// not just by eye. Step id renumbered 13 -> 12 on 2026-09-19 when former
+// step 11 ("Coupling matrix (optional)") was removed and steps after it
+// shifted down by one -- this test follows that renumbering. It
+// intentionally does NOT drive the DOM-only renderStep12() (fetch/document-
+// heavy, same class as the other untested optional-step renderers 8-11) --
+// see the file header's extraction rationale for why this suite only
+// reaches the page's pure/state functions.
+(function testStep12AuthWizardStepExistsAndIsOptional() {
   const ctx = loadPageScript(noopFetch);
-  const step13 = ctx.WIZARD_STEPS.filter((s) => s.id === 13)[0];
-  assert(!!step13, 'WIZARD_STEPS declares a step 13 (section 11\'s authentication step)');
-  assert(/auth/i.test(step13.title), 'step 13 is titled about authentication, not a generic placeholder');
-  assert(step13.safety === false, 'step 13 is not safety-relevant (skipping it must never block the gate)');
-  assert(step13.readinessKeys.length === 0,
-    'step 13 declares no readiness keys -- it is purely optional/recommend-only, per plan section 11');
+  const step12 = ctx.WIZARD_STEPS.filter((s) => s.id === 12)[0];
+  assert(!!step12, 'WIZARD_STEPS declares a step 12 (section 11\'s authentication step)');
+  assert(/auth/i.test(step12.title), 'step 12 is titled about authentication, not a generic placeholder');
+  assert(step12.safety === false, 'step 12 is not safety-relevant (skipping it must never block the gate)');
+  assert(step12.readinessKeys.length === 0,
+    'step 12 declares no readiness keys -- it is purely optional/recommend-only, per plan section 11');
 
   // Confirm the "never blocks completion" half end-to-end through the real
   // gate function, the same way testGateBlocksOnUnmappedFiringGateItem()
   // above proves the opposite direction for a real blocking item.
   const allDoneProgress = {
     version: 1,
-    steps: Object.fromEntries(ctx.WIZARD_STEPS.filter((s) => s.id !== 13).map((s) => [String(s.id), { state: 'done' }])),
+    steps: Object.fromEntries(ctx.WIZARD_STEPS.filter((s) => s.id !== 12).map((s) => [String(s.id), { state: 'done' }])),
   };
-  allDoneProgress.steps['13'] = { state: 'skipped', note: 'left off' };
+  allDoneProgress.steps['12'] = { state: 'skipped', note: 'left off' };
   const stepKeyItems = ctx.WIZARD_STEPS.reduce((acc, s) => acc.concat(s.readinessKeys.map((k) => item(k, 'ok'))), []);
   const readiness = readinessOf(stepKeyItems);
   const merged = ctx.mergeAllSteps(allDoneProgress, readiness);
   const gate = ctx.computeCompleteness(merged, readiness);
   assert(gate.complete === true,
-    'skipping step 13 (authentication, non-safety) does not block "Setup complete" -- matches step 11\'s coupling-matrix precedent');
+    'skipping step 12 (authentication, non-safety) does not block "Setup complete" -- same precedent as ' +
+    'testGateAllowsSkippedNonSafetyStep\'s non-safety-skip assertion above');
 })();
 
 // ---- NEGATIVE TEST (task requirement): prove testReadbackMismatchFailsLoudly

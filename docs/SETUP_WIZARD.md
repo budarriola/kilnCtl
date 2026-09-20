@@ -165,8 +165,19 @@ time zone (`/api/settings/tz`), units (`/api/unit_pref`), display power
 | 8 | Current sensing: `ct_installed`, `ct_topology`, `ct_mask`, calibration ▲ | 5, 7 | `/api/safety/commissioning`, `/ct_cal`, `/ct_auto_zero` | Idle offset auto-zero requires **all relays off**. Answering "not installed" is a legitimate finish (S3/S4/S9/S14 report off) |
 | 9 | CT mapping verification 🔥◆ | 8 | `/api/zones/current_sweep/start` + `/status` | Energises one relay group at a time and watches the CT. Needs load. Explicit heat warning + abort button |
 | 10 | PID gains — autotune or by hand 🔥◆ | 2,3,5,6,7 | `/api/autotune/start`, `/matrix`, `/accept`; `POST /api/zones/pid` | **Multi-hour, one zone at a time.** Needs a *rested* kiln (all zones at ambient, not just the one under test). Refusals to surface verbatim from `autotune_engine.c`: no relay mask, no thermo mask, on/off zone, zone active in a firing, sweep active, OTA in progress, relay authority blocked, invalid zones cfg |
-| 11 | Coupling matrix | 10 | `/api/autotune/matrix` | Optional; ON_OFF zones excluded. Can be deferred |
-| 12 | First profile saved + final readiness gate | all | read-only + `/api/readiness` | Refuses "complete" while any item is `not_done` (§5) |
+| 11 | First profile saved + final readiness gate | all | read-only + `/api/readiness` | Refuses "complete" while any item is `not_done` (§5) |
+
+Step "Coupling matrix (optional)" (formerly numbered 11 here) was removed
+2026-09-19: nothing on that screen could be triggered from the wizard itself
+(owner report), and the matrix is only ever populated as a by-product of a
+zone's PID autotune (step 10). Its summary — "N of M pairs measured" — now
+lives as one line inside step 10's own screen, linking out to
+`/settings/zones` where the full matrix already displays
+(`GET /api/autotune/matrix`, unchanged). Steps after it were renumbered down
+by one; `setup_wizard_progress.c`'s versioned NVS migration keeps an old
+board's real per-step state intact across the shift (see that file's schema
+history comment). This table does not separately list the authentication
+step (step 12, WEB_AUTH_PLAN.md §11) added later — see that plan document.
 
 Dependency rules the implementer must enforce (each is already enforced
 somewhere in firmware — the wizard only *explains* it earlier):
@@ -261,8 +272,8 @@ Setup spans days. Requirements:
 | 7 | the whole guided flow in `safety_commissioning_page.html`; `safety_cfg_http.c` commit + `confirm_commit_landed()`; PcTools `safety_set_commissioning_fields()` |
 | 8 | `/api/safety/commissioning/ct_cal`, `/ct_auto_zero`, `/api/zones/ct_channel_map` |
 | 9 | `/api/zones/current_sweep/{start,status,abort}` (`zones_current_sweep_task.c`) |
-| 10,11 | `/api/autotune{,/start,/abort,/accept,/matrix}`, `/api/zones/pid`, `/api/tuning_recommendations`, `autotune_engine.c`'s refusal strings |
-| 12 | `/api/profiles`, `/api/kiln_configs` (save the finished setup as a named preset) |
+| 10 | `/api/autotune{,/start,/abort,/accept,/matrix}`, `/api/zones/pid`, `/api/tuning_recommendations`, `autotune_engine.c`'s refusal strings (`/matrix` also backs step 10's own coupling summary line since the former standalone coupling step was removed 2026-09-19) |
+| 11 | `/api/profiles`, `/api/kiln_configs` (save the finished setup as a named preset) |
 
 **Do not duplicate:** any bound, any 0-means-unset rule, any rejection text.
 The wizard renders what the firmware says.
@@ -286,6 +297,16 @@ Each is independently mergeable. R = reversible without a flash. F = needs a fla
 | 9 | **DONE (this pass).** **Steps 8–9** (CT setup, then sweep verification under load). Step 8 does NOT reimplement the Pico write path -- it reads `ct_installed`/`ct_topology` off `GET /api/safety/commissioning`'s `params[]` (same `getCommissioningParam()` pattern step 6's `getAbsMaxTempC()` already used) and `GET /api/zones/ct_channel_map` for the per-channel assignment, links out to `/safety/commissioning` for any edit, and spells out the dashboard-grouping consequence (`9d515708`) per channel: single-zone assignment renders in that zone's card, a summed/shared CT renders in the shared section, and an unmapped channel is simply hidden -- so a forgotten mapping never even shows up as an error. `validateStep8()` is the one new client-side rule: under per-zone topology, two CT channels mapped to the same zone is flagged (the dashboard can only show one CT per single-zone card). Step 9 is explicitly heat-marked: a full-width warning banner states heat + owner presence + "closing this tab does not stop it" before anything is enabled, an "I am present" checkbox gates the Start button, `step9CheckBusy()` mirrors `checkFiringOrAutotuneRunning()` (polls `/api/profile_exec` + `/api/autotune`, never blocks on a failed fetch), and the existing `/api/zones/current_sweep/{start,status,abort}` triad is reused verbatim with the sweep's own refusal string (`zone_sweep_refusal_str()`) rendered on failure. `ct_installed=0` is treated as a legitimate skip, not a dead end | Host tests (`test_setup_wizard.js`): `validateStep8` (not-installed short-circuits, missing topology refused, per-zone clash refused and named, summed topology tolerant), page-source assertions that the heat warning/ack checkbox/skip control/"does not stop it" text are all actually present, `step9CheckBusy()` (a running firing refuses; a failed fetch never blocks). `check_ui_responsive_sweep.ps1` at every viewport (117/117 passed) | F, ◆, 🔥 |
 | 10 | **DONE (this pass).** **Steps 10–11** (PID gains, coupling). Step 10 states explicitly, in the UI text itself, that hand-entered gains complete the step exactly as fully as autotune (`/api/readiness`'s own `autotune` item already accepts `kp > 0` typed by hand OR an identified model per zone -- this screen checks the identical thing, not a second rule) -- both paths are offered side by side, never framed as a fallback. The screens this pass could check client-side without duplicating the engine (`zone.thermo_mask == 0`, `zone_type == 1` on/off) surface `autotune_engine.c`'s own refusal strings verbatim (`autotunePrecheck()`) before the "Run autotune" link (out to the existing `/settings/zones` flow -- its own multi-hour warning and every OTHER real-time refusal, e.g. busy/OTA/sweep-active, are not re-implemented here) is even offered; hand-entered gains post through the existing narrow `POST /api/zones/pid` and re-read `/api/zones` to confirm the write landed, same "confirm, don't assume" pattern `main_page.html`'s PID popup already uses. Step 11 (coupling matrix) reuses `GET /api/autotune/matrix` verbatim, excludes ON_OFF zones from the review, and is explicitly optional/skippable | Host tests: `autotunePrecheck()` (no-thermocouple / on-off-zone / no-relay-mask refusal text matches `autotune_engine.c` verbatim; a normal zone has no refusal), page-source assertion that the hand-entered-counts-as-complete framing is actually in the UI text. `check_ui_responsive_sweep.ps1` at every viewport | F, ◆, 🔥, highest |
 | 11 | **DONE (this pass).** **Step 12 + completion gate** — the refusal to declare complete. NOT reimplemented: this screen calls the already-landed, already-tested `computeCompleteness()` (step 3's own shell) and renders its verdict plus a link to `/profiles`; there is still no separate "mark setup complete" write anywhere -- readiness, read fresh, stays the only authority (plan section 5). Negative-tested THIS pass (not just re-verified): disabled the `not_done`/`cannot_yet` branch in `computeCompleteness()` (`if (false && (it.status === 'not_done' ...`), reran `test_setup_wizard.js`, got 4 RED including `FAIL: gate refuses complete with one outstanding not_done item`, restored the line by hand, confirmed `git diff` on the page clean before committing | Host test: a `not_done` readiness item blocks `complete` and is named in `reasons` (negative-tested as above) | F |
+
+Rows above describe the wizard as it stood when each pass shipped and are
+left as-is. **2026-09-19 update:** the "Step 11 (coupling matrix)" screen
+described in row 10 above was removed (owner report: nothing on it could be
+triggered from the wizard). Its summary was folded into step 10's own
+render, and steps after it (formerly 12 "first profile + completion gate",
+13 "authentication") were renumbered down by one to 11 and 12 respectively.
+See `setup_wizard_progress.c`'s schema-history comment for the NVS
+migration that keeps an existing board's per-step state intact across the
+shift.
 
 **UI rules for every step above:** no new colours (reuse `--ui-*`, `--ok`,
 `--warn`, `--bad`, `--fault-color`); `check_ui_responsive_sweep.ps1` must pass
