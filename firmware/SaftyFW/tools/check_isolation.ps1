@@ -1,4 +1,4 @@
-# check_isolation.ps1 -- the CI grep check both docs/ARCHITECTURE.md section 2
+﻿# check_isolation.ps1 -- the CI grep check both docs/ARCHITECTURE.md section 2
 # ("The one rule that matters") and TODO.md Phase 2's own checklist call for:
 #
 #   safety_core.c does not #include the link header, and link_task.c does not
@@ -163,10 +163,19 @@ foreach ($f in $safetyCoreFiles) {
 # Catches the pin number in any GPIOn spelling, this repo's own relay pin
 # symbol/net names, and the word "relay" generally, in actual code (comments
 # are already stripped by Get-CodeOnlyLines above).
+# Globbed, not a literal two-name list: link_task.c has been split three times
+# (link_task_commit_reject.c, link_task_tc_type_gate.c,
+# link_task_announce_eval.c) to make pure decision logic host-testable, and a
+# hardcoded list silently stops covering whatever moved out -- exactly the
+# "a split breaks a filename-keyed check" class CLAUDE.md names. The two base
+# files stay named explicitly so a rename/deletion still reports MISSING.
 $linkTaskFiles = @(
     (Join-Path $root "src\tasks\link_task.c"),
     (Join-Path $root "src\tasks\link_task.h")
 )
+$linkTaskFiles += @(Get-ChildItem -Path (Join-Path $root "src\tasks") -File |
+    Where-Object { $_.Name -like 'link_task_*.c' -or $_.Name -like 'link_task_*.h' } |
+    ForEach-Object { $_.FullName })
 $relayPattern = 'GPIO\s*0*6\b|SAFTYFW_PIN_RELAY|saftyRelay|relay_owner|\brelay\b'
 foreach ($f in $linkTaskFiles) {
     if (-not (Test-Path $f)) {
