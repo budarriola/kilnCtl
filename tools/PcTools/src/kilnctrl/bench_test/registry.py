@@ -238,8 +238,12 @@ for cid in _WEB_IDS:
     register(_c(cid, "WEB", cid))
 for cid in _LCD_IDS:
     register(_c(cid, "LCD", cid))
+_SP_DEPENDS_ON = {"SP-03": "HP-02", "SP-06": "HP-01"}
 for cid, desc in _SP:
-    register(_c(cid, "SP", desc, heat=(cid == "SP-09"), operator_only=cid in ("SP-08", "SP-09")))
+    register(_c(
+        cid, "SP", desc, heat=(cid == "SP-09"), operator_only=cid in ("SP-08", "SP-09"),
+        depends_on=_SP_DEPENDS_ON.get(cid),
+    ))
 
 #: Fixed run-order ranks for `nightly`/`full` (plan §5.2): ST first, then
 #: FL (read-only), then the fixed SK-01/03/04 subset, then SP (read-only),

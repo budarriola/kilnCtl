@@ -406,3 +406,193 @@ def judge_lcd_no_scroll_budget(pages_targets: "dict[str, dict]") -> CaseResult:
             observed=observed,
         )
     return CaseResult(Verdict.PASS, observed=observed)
+
+
+# ---------------------------------------------------------------------------
+# HP-* / SP-* (Wave 1b: HP + SP observers, plan doc section 3.6/3.9/8)
+# ---------------------------------------------------------------------------
+
+def judge_rested(temps: "dict[int, float]", ambient_ref: float, band: float = 2.0) -> bool:
+    """Rest gate (plan section 2.4/5.2 rule 7): every zone within `band` of
+    `ambient_ref` AND of each other -- not merely near its own cold
+    junction (memory project_autotune_needs_rested_baseline: residual heat
+    biases things low if this is skipped). Plain bool, not a CaseResult --
+    this is a precondition callers loop on, not a case verdict of its own.
+    """
+    if not temps:
+        return False
+    values = list(temps.values())
+    if max(values) - min(values) > band:
+        return False
+    return all(abs(v - ambient_ref) <= band for v in values)
+
+
+def judge_zone_rise_ordering(rises: "dict[int, float]", primary_zone: int, min_rise: float = 5.0) -> CaseResult:
+    """HP-01: zone `primary_zone` rises >= `min_rise`; every other zone
+    present rises LESS than the primary zone's own rise. Coupling on this
+    fixture is real (5-12 C/duty) so other zones WILL move -- judged by
+    ordering against the primary zone's rise, never by requiring them to
+    stay flat (plan section 3.6)."""
+    primary_rise = rises.get(primary_zone)
+    if primary_rise is None:
+        return CaseResult(
+            Verdict.FAIL, reason=f"no rise recorded for zone {primary_zone}", observed={"rises": rises}
+        )
+    if primary_rise < min_rise:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"zone {primary_zone} rose {primary_rise:.1f}C, expected >= {min_rise:.1f}C",
+            observed={"rises": rises}, expected={"min_rise_c": min_rise},
+        )
+    offenders = {z: r for z, r in rises.items() if z != primary_zone and r >= primary_rise}
+    if offenders:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"zone(s) {sorted(offenders)} rose as much as or more than primary zone {primary_zone}",
+            observed={"rises": rises, "primary_rise_c": primary_rise},
+        )
+    return CaseResult(Verdict.PASS, observed={"rises": rises, "primary_rise_c": primary_rise})
+
+
+def judge_all_zones_rise(rises: "dict[int, float]", zone_mask: int, min_rise: float = 5.0) -> CaseResult:
+    """HP-02: every zone named by `zone_mask` rises >= `min_rise`."""
+    expected_zones = [z for z in range(3) if zone_mask & (1 << z)]
+    shortfalls = {
+        z: rises.get(z) for z in expected_zones if rises.get(z) is None or rises.get(z) < min_rise
+    }
+    if shortfalls:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"zone(s) {sorted(shortfalls)} did not rise >= {min_rise:.1f}C",
+            observed={"rises": rises, "shortfalls": shortfalls}, expected={"min_rise_c": min_rise},
+        )
+    return CaseResult(Verdict.PASS, observed={"rises": rises})
+
+
+def judge_relay_energized(samples: "list[tuple[str, Optional[bool]]]") -> CaseResult:
+    """HP-01 / SP-06: K4 (`safety_relay_energized`) true only while the
+    profile state is `running`, false the rest of the time -- each sample
+    is (state_name, energized_or_None). `None` means the board did not
+    report the field that tick (no host, or a stale build); if every sample
+    is `None` this is INCONCLUSIVE, never a silent PASS."""
+    if not samples:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no safety_relay_energized samples collected", observed={})
+    reported = [(s, e) for s, e in samples if e is not None]
+    if not reported:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason="safety_relay_energized was never reported (no host, or a stale build)",
+            observed={"samples": samples},
+        )
+    offenders = [(s, e) for s, e in reported if (s == "running") != bool(e)]
+    if offenders:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"{len(offenders)} sample(s) disagree: relay-energized must track RUNNING exactly",
+            observed={"offenders": offenders, "samples": samples},
+        )
+    return CaseResult(Verdict.PASS, observed={"samples": samples})
+
+
+def judge_pause_resume(paused_state: str, duties_while_paused: "list[float]", final_state: str) -> CaseResult:
+    """HP-04: pause holds state and zeroes every duty; resume completes the run."""
+    if paused_state != "paused":
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"state after profiles_pause() was {paused_state!r}, expected 'paused'",
+            observed={"paused_state": paused_state},
+        )
+    nonzero = [d for d in duties_while_paused if d]
+    if nonzero:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"{len(nonzero)} zone(s) had nonzero duty while paused",
+            observed={"duties_while_paused": duties_while_paused},
+        )
+    if final_state != "done":
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"profile did not reach DONE after resume (state={final_state!r})",
+            observed={"final_state": final_state},
+        )
+    return CaseResult(Verdict.PASS, observed={"paused_state": paused_state, "final_state": final_state})
+
+
+def judge_stop(state_after_stop: str, duties: "list[float]", relays: "list[bool]", acked: bool) -> CaseResult:
+    """HP-05: stop leaves RUNNING, zeroes duties and relays, and the last-run
+    card can be acknowledged."""
+    if state_after_stop == "running":
+        return CaseResult(
+            Verdict.FAIL, reason="state still RUNNING after profiles_stop()", observed={"state": state_after_stop}
+        )
+    if any(duties):
+        return CaseResult(Verdict.FAIL, reason="a zone duty is nonzero after stop", observed={"duties": duties})
+    if any(relays):
+        return CaseResult(
+            Verdict.FAIL, reason="a relay is still commanded on after stop", observed={"relays": relays}
+        )
+    if not acked:
+        return CaseResult(
+            Verdict.FAIL, reason="profiles_ack_last_run() did not clear the last-run card", observed={"acked": acked}
+        )
+    return CaseResult(Verdict.PASS, observed={"state": state_after_stop, "duties": duties, "relays": relays})
+
+
+def judge_unauthenticated_stop(http_status: Optional[int], state_after: str) -> CaseResult:
+    """HP-06: stop is never gated -- an unauthenticated POST still succeeds
+    (200, SAFETY_REDUCE tier) and the firing actually stops."""
+    if http_status != 200:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"POST /api/profile_exec/stop (no session) returned {http_status!r}, expected 200",
+            observed={"status": http_status},
+        )
+    if state_after == "running":
+        return CaseResult(
+            Verdict.FAIL, reason="firing still RUNNING after the unauthenticated stop", observed={"state": state_after}
+        )
+    return CaseResult(Verdict.PASS, observed={"status": http_status, "state": state_after})
+
+
+def judge_firing_history(entries: "list[dict]", expected_name_prefix: str = "BENCH_") -> CaseResult:
+    """HP-08: a completed bench run appears with the right profile name, a
+    start time and an outcome."""
+    if not entries:
+        return CaseResult(Verdict.FAIL, reason="firing history is empty", observed={"entries": entries})
+    matches = [e for e in entries if str(e.get("profile_name", e.get("name", ""))).startswith(expected_name_prefix)]
+    if not matches:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"no history entry names a {expected_name_prefix!r} profile",
+            observed={"entries": entries},
+        )
+    for entry in matches:
+        if "start_time" not in entry and "started" not in entry:
+            return CaseResult(Verdict.FAIL, reason="a matching history entry has no start-time field", observed={"entry": entry})
+        if "outcome" not in entry and "state" not in entry:
+            return CaseResult(Verdict.FAIL, reason="a matching history entry has no outcome field", observed={"entry": entry})
+    return CaseResult(Verdict.PASS, observed={"matches": matches})
+
+
+def judge_link_stats_delta(before: "dict[str, Any]", after: "dict[str, Any]") -> CaseResult:
+    """SP-03: crc_errors/timeouts/broadcast_dropped deltas are 0 across a
+    firing. GET_STATUS timeouts are a separate, by-design-noisy counter
+    (memory project_get_status_has_no_reply) and are not part of this
+    comparison."""
+    deltas: "dict[str, Optional[int]]" = {}
+    for key in ("crc_errors", "timeouts", "broadcast_dropped"):
+        b, a = before.get(key), after.get(key)
+        deltas[key] = None if (b is None or a is None) else (a - b)
+    unknown = [k for k, d in deltas.items() if d is None]
+    if len(unknown) == len(deltas):
+        return CaseResult(
+            Verdict.INCONCLUSIVE, reason="no link-stats fields were comparable", observed={"before": before, "after": after}
+        )
+    bad = {k: d for k, d in deltas.items() if d}
+    if bad:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"nonzero delta(s) over the firing: {bad}",
+            observed={"before": before, "after": after, "deltas": deltas},
+        )
+    return CaseResult(Verdict.PASS, observed={"before": before, "after": after, "deltas": deltas})

@@ -306,7 +306,27 @@ Waves that can run in parallel are marked; each is one PR-sized change and each 
 
 **Wave 1a — WEB render + tier sweep (parallel).** `cases_web.py`: the 18 `-01` render cases via `ui_step(backend="web")`, WEB-X-01, WEB-X-03 generated from `route_tier_table.h` (parse the 150 `ROUTE_TIER(...)` rows at run time so the sweep cannot go stale). Touches only the new package and tests. **DONE (2026-09-19).** 19 case ids wired (17 page renders + WEB-X-01 + WEB-X-03), registered into `SUITES["smoke"]` via `_WEB_SMOKE_IDS`; wired via the one-line `from . import cases_web` in `bench_test/__init__.py` per the low-conflict pattern. `parse_route_tier_table()` regex-parses the real header (asserted at 150 rows in a dedicated test); WEB-X-03 exercises only `HTTP_GET` rows live, records non-GET rows without invoking them (read-only this wave). 145 PcTools unit tests pass (`pytest tools/PcTools/tests/test_bench_test_*.py`), including a negative test proving `judge_web_render`'s landmark check can fail. Verified at the unit level only — the bench board is currently blocked by an unacknowledged crash report (`touch_log_tap_targets`), so no hardware run was attempted.
 
-**Wave 1b — HP + SP observers (parallel).** `cases_heat.py`, `cases_safety.py`: slot-7 profile builder, rest gate, HP-01/02/04/05/06/08, SP-03/06, the cooldown timer. Touches the new package; reads `mcp_server_profiles.py`, `mcp_server_safety.py`, `mcp_server_io.py` functions.
+**Wave 1b — HP + SP observers (parallel). DONE (unit-tested only, never run against the bench board).**
+`cases_heat.py`, `cases_safety.py` implement the bench profile builder
+(`BENCH_PROFILE_SLOT_ID`, defaulting to 7 today with a one-line TODO to
+switch to 101 once `PROFILES_MAX_COUNT` is 100 on main -- `slots100` owns
+the concrete index), the rest gate (`_rest_gate`, 2C band, 25-min timeout),
+HP-01/02/04/05/06/08, and SP-03/SP-06 (implemented as observers reading
+`ctx["_hp01"]`/`ctx["_hp02"]`, stashed there by `cases_heat._hp_run`, rather
+than driving their own firing -- `registry.py` now marks both `depends_on`
+the HP case they observe). Every heat case refuses to start if
+`capability_preflight` is not ok (unacknowledged crash report, a latched
+trip, an unreachable board) and restores board state in `finally`
+(`_cleanup_bench_profile`: stop + delete the hidden slot). Calls the same
+in-process client objects the MCP tools already wrap (`srv._profiles`,
+`srv._safety`, `srv._thermo`) -- no new HTTP routes, no firmware changes.
+Tests: `test_bench_test_judgments_heat.py` (pure verdict derivation,
+including the "zone 0 rises more than zones 1-2" ordering rule),
+`test_bench_test_cases_heat.py` (profile builder, rest gate, capability
+preflight gate, cleanup, all board access faked), `test_bench_test_cases_safety.py`
+(SP-03/SP-06 observer logic and NOT_RUN-when-absent behavior). **Not run
+against the bench board** -- it is blocked by a standing unacknowledged
+crash report (`touch_log_tap_targets` panic); this wave is unit-level only.
 
 **Wave 1c — LCD capture pipeline (parallel). DONE 2026-09-19.** `cases_lcd.py` + `lcd_sampler.py`: wrap `capture_lcd.ps1`/`sample_lcd_region.ps1`, the widget-centre→frame transform, the bezel-calibrated tolerance, LCD-01/08/21 first. Touches the new package; added a `-Json` output switch to `sample_lcd_region.ps1` (one file, backwards compatible — plain-text output unchanged when omitted). The transform is a full least-squares affine fit (not scale-only) from the four CLAUDE.md 2026-09-19 corner measurements, since the panel sits rotated a few degrees; residual on each corner is ~6.3 px on the 1280x720 frame (the 4 real-world corners are not perfectly affine-consistent, so a true least-squares fit leaves this small, uniform residual rather than interpolating one corner exactly at another's expense). LCD-01/08 degrade their color half to `INCONCLUSIVE` (never a fabricated PASS) when no webcam frame can be captured (camera busy, ffmpeg exit -5); LCD-21 checks the no-scroll budget over whatever pages the run actually visited. The webcam was free this session: one real `capture_lcd.ps1 -Full` frame was taken and sampled at the panel's top-left corner (296,58) and the bezel reference (100,100) via the new `-Json` switch, both reading pure black -- consistent with the board's screen off/idle in ambient light at capture time, not diagnostic of the pipeline (no live board session was attempted, so page state and LVGL calls were not exercised). Coverage is 45 new pytest cases against mocked subprocess/board calls, all passing.
 
