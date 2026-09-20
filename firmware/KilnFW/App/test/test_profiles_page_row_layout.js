@@ -78,8 +78,11 @@ assert(PI_ACTS_RULE && !/float\s*:/.test(PI_ACTS_RULE[0]),
 
 const PI_ROW_RULE = /\.pi-row\s*\{[^}]*\}/.exec(CSS);
 assert(!!PI_ROW_RULE, '.pi-row rule exists');
-assert(PI_ROW_RULE && /display:\s*flex/.test(PI_ROW_RULE[0]),
-  '.pi-row is a real flex container');
+assert(PI_ROW_RULE && /display:\s*inline-flex/.test(PI_ROW_RULE[0]),
+  '.pi-row is inline-flex (2026-09-19: plain `display: flex` is a block box, which ' +
+  'gets its own anonymous line above <summary>\'s disclosure-marker line -- the ' +
+  '48px-per-row summary-height regression; inline-flex shares the marker\'s line ' +
+  'instead, so summary height matches row height)');
 
 const PI_LABEL_RULE = /\.pi-label\s*\{[^}]*\}/.exec(CSS);
 assert(!!PI_LABEL_RULE, '.pi-label rule exists');
@@ -195,6 +198,15 @@ assert(item1.children.indexOf(item2) === -1 && item2.children.indexOf(item1) ===
   'the two rows are siblings, not nested one inside the other');
 assert(item1.parentNode === container && item2.parentNode === container,
   'both rows share the same parent (ruling out the accumulating-nesting hypothesis for the staircase)');
+
+// ---- Check 4: selectMode 'export' puts the checkbox wrapper first in .pi-row ----
+context.selectMode = 'export';
+const item3 = context.buildProfileItem(Object.assign({}, profile, { id: 44, name: 'exp_row' }), true);
+const summary3 = item3.children.find((c) => c.tagName === 'SUMMARY');
+const row3 = summary3.children[0];
+assert(row3.children.length > 0 && row3.children[0].className === 'sel-cb-wrap',
+  "with selectMode 'export', .sel-cb-wrap is children[0] of .pi-row (checkbox leads the row)");
+context.selectMode = null;
 
 console.log('');
 console.log(passed + ' passed, ' + failed + ' failed');

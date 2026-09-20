@@ -160,7 +160,20 @@
      .pi-acts float comment above this, kept for that part), so the triangle
      stays governed by summary's own untouched `display: list-item` and only
      this inner span becomes the flex container. */
-  .pi-row { display: flex; align-items: center; width: 100%; gap: 0.4em; }
+  /* 2026-09-19: was `display: flex` at `width: 100%`. <summary>'s UA style is
+     `display: list-item; list-style: disclosure-closed inside`, so a
+     block-level flex child gets its own anonymous line ABOVE the disclosure
+     marker's line instead of sharing it -- every summary rendered at
+     marker-line-height (16px) + row-height (32px) = 48px, on every row,
+     regardless of width. `inline-flex` keeps this span inline with the
+     marker so both share one line and the summary collapses to the row's
+     own height; `width: calc(100% - 1.5em)` replaces the lost `width: 100%`
+     (an inline-level box does not stretch to its container) with a fixed
+     allowance for the marker's own rendered width, and `vertical-align:
+     middle` keeps the row centered on the marker's line rather than
+     baseline-aligned below it. */
+  .pi-row { display: inline-flex; align-items: center; width: calc(100% - 1.5em);
+            vertical-align: middle; gap: 0.4em; }
   /* flex: 1 1 auto + min-width: 0 is what lets a long profile name ellipsize
      instead of wrapping under the action icons (the "cpl_z1" three-line
      wrap in the owner's screenshot) -- a flex item's default min-width is
