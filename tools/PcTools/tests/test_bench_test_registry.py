@@ -110,10 +110,11 @@ class SuiteTest(unittest.TestCase):
         self.assertLess(idx["HP-01"], idx["SK-02"])
         ot_ids = [c for c in ids if c.startswith("OT-")]
         self.assertTrue(ot_ids)
-        # SP-04 is OT-B01's observer and deliberately sits inside the OTA
-        # block (right after OT-B01), so it is not part of the "everything
-        # else runs before the OTA block" set.
-        non_ot_ids = [c for c in ids if not c.startswith("OT-") and c != "SP-04"]
+        # SP-04 and LCD-04 are OT-B01's observers and deliberately sit
+        # inside the OTA block (right after OT-B01), so they are not part of
+        # the "everything else runs before the OTA block" set.
+        _ot_observers = ("SP-04", "LCD-04")
+        non_ot_ids = [c for c in ids if not c.startswith("OT-") and c not in _ot_observers]
         self.assertLess(max(idx[c] for c in non_ot_ids), min(idx[c] for c in ot_ids))
         # SK-02's own dependency wiring, and each SP observer sits right
         # after the HP case it depends on (§5.2's "HP-01 (with ... SP-*
@@ -125,6 +126,14 @@ class SuiteTest(unittest.TestCase):
         self.assertEqual(idx["SP-03"], idx["HP-02"] + 1)
         self.assertEqual(R.get_case("SP-04").depends_on, "OT-B01")
         self.assertEqual(idx["SP-04"], idx["OT-B01"] + 1)
+        # LCD-04 reads OT-B01's trip window too, and follows its SP observer.
+        self.assertEqual(R.get_case("LCD-04").depends_on, "OT-B01")
+        self.assertGreater(idx["LCD-04"], idx["OT-B01"])
+        # Every nightly observer runs after the case it depends on.
+        for cid in ids:
+            dep = R.get_case(cid).depends_on
+            if dep and dep in idx:
+                self.assertLess(idx[dep], idx[cid], f"{cid} runs before its dependency {dep}")
 
     def test_nightly_matches_plan_5_1_membership(self):
         """Plan §5.1's nightly membership, spelled out explicitly so a future
