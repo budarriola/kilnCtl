@@ -215,6 +215,33 @@ class SymbolizeMismatchTests(unittest.TestCase):
         cmd = run_mock.call_args[0][0]
         self.assertIn("--gdb", cmd)
         self.assertEqual(cmd[cmd.index("--gdb") + 1], fake_gdb)
+        # --gdb must land as a FLAG before the subcommand's own positional
+        # `prog` argument -- pins the argv shape the real invocation relies
+        # on rather than just checking --gdb is present somewhere.
+        self.assertGreater(cmd.index("--gdb"), cmd.index("info_corefile"))
+
+    def test_resolve_gdb_path_finds_newest_version_under_idf_tools_path(self):
+        """Real (unmocked) _resolve_gdb_path against a fake IDF_TOOLS_PATH
+        tree with several planted xtensa-esp32s3-elf-gdb.exe versions --
+        confirms both that the glob/lookup shape actually works end to end
+        (not just the mocked call sites the other tests use) and that the
+        newest version is chosen numerically, not lexicographically (a plain
+        string sort would rank "9.0" ahead of "12.1")."""
+        fake_tools_root = os.path.join(self.tmpdir, "fake_idf_tools")
+        versions = ["9.0_20231005", "12.1_20240403", "12.1_20250301", "13.0_20250101"]
+        for version in versions:
+            gdb_dir = os.path.join(fake_tools_root, "tools", "xtensa-esp-elf-gdb",
+                                    version, "xtensa-esp-elf-gdb", "bin")
+            os.makedirs(gdb_dir, exist_ok=True)
+            with open(os.path.join(gdb_dir, "xtensa-esp32s3-elf-gdb.exe"), "w") as f:
+                f.write("# fake gdb, never executed\n")
+        with unittest.mock.patch.dict(os.environ, {"IDF_TOOLS_PATH": fake_tools_root}), \
+             unittest.mock.patch("shutil.which", return_value=None):
+            found = coredump_fetch._resolve_gdb_path()
+        self.assertIsNotNone(found)
+        # Newest by version number, "13.0_20250101", not by lexicographic
+        # sort (which would incorrectly pick "9.0_20231005").
+        self.assertIn(os.path.join("13.0_20250101", "xtensa-esp-elf-gdb", "bin"), found)
 
     def test_gdb_not_found_is_an_environment_failure_not_a_mismatch(self):
         """The exact failure mode this fix targets: espcoredump exits

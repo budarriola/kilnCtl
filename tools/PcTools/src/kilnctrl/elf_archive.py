@@ -1591,25 +1591,29 @@ def archive_kiln_elf(elf_path: str, fw_build: str, git_commit: Optional[str],
     build_timestamps_match() already normalized for comparison -- see that
     function's doc comment for why raw __DATE__ strings are not safe to key
     on directly (single-digit-day padding varies)."""
-    result = _archive(elf_path, kiln_archive_dir(), "KilnCtrl", normalize_build_timestamp(fw_build),
-                       extra={"git_commit": git_commit, "source": source})
-    # 2026-09-19: also carry project_description.json alongside the archived
-    # ELF, cheap best-effort convenience for coredump_fetch.symbolize_coredump
-    # -- espcoredump.py's wrapper only WARNs (never fails) when this file is
-    # missing next to the ELF it's given, so this is not required for
-    # symbolizing to work (see coredump_fetch._resolve_gdb_path's docstring
-    # for the actual fatal cause that warning used to get confused with),
-    # but having it present removes a spurious warning from every future
-    # symbolize run against this archived ELF.
-    try:
-        src_desc = os.path.join(os.path.dirname(os.path.abspath(elf_path)), "project_description.json")
-        if os.path.isfile(src_desc):
-            dst_desc = os.path.join(os.path.dirname(result.path), "project_description.json")
-            shutil.copy2(src_desc, dst_desc)
-    except OSError as exc:  # noqa: BLE001 -- best-effort convenience, never blocks the real archive
-        print(f"elf_archive: WARNING -- could not copy project_description.json alongside "
-              f"{result.path}: {exc}")
-    return result
+    # NOTE (2026-09-19, reverted same day): a prior version of this function
+    # also copied the build's project_description.json alongside the
+    # archived ELF, to silence espcoredump.py's "does not exist" WARNING
+    # when that file is absent. That was wrong on two counts: (1)
+    # project_description.json's `gdbinit_files['02_prefix_map']` entry is
+    # an ABSOLUTE path recorded at build time -- after a fullclean, or when
+    # read from a different worktree/checkout than the one that produced it,
+    # that path no longer exists, and esp_coredump's CoreDump.__init__
+    # (`coredump.py`) raises `ValueError(f'{self.extra_gdbinit_file} does
+    # not exist')` for a MISSING extra_gdbinit_file -- turning a harmless
+    # WARNING into a hard failure indistinguishable from a genuine ELF/
+    # coredump mismatch, exactly the class of false-negative this archive
+    # exists to prevent (verified against the real
+    # espcoredump.py/esp_coredump sources: a missing project_description.json
+    # merely logs a warning and returns '', but a PRESENT one with a stale
+    # absolute path is read and passed straight through as
+    # extra_gdbinit_file). (2) it was written once per archive directory
+    # rather than once per ELF, so every later flash's copy silently
+    # overwrote the file for every ELF archived before it. Not worth fixing
+    # to be per-ELF and stripped of gdbinit_files just to silence a cosmetic
+    # warning -- removed instead.
+    return _archive(elf_path, kiln_archive_dir(), "KilnCtrl", normalize_build_timestamp(fw_build),
+                     extra={"git_commit": git_commit, "source": source})
 
 
 def archive_safty_elf(elf_path: str, safty_fw_root: str, source: str) -> ArchiveResult:

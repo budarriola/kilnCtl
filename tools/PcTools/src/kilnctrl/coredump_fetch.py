@@ -41,6 +41,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -268,7 +269,20 @@ def _resolve_gdb_path(gdb: Optional[str] = None,
         os.path.expanduser("~"), ".espressif")
     pattern = os.path.join(tools_root, "tools", "xtensa-esp-elf-gdb", "*",
                             "xtensa-esp-elf-gdb", "bin", f"xtensa-{chip}-elf-gdb*")
-    candidates = sorted(glob.glob(pattern), reverse=True)
+    # Sort by the version directory component (the glob's '*', e.g.
+    # "12.1_20240403") numerically rather than lexicographically -- a plain
+    # string sort would rank "9.0" ahead of "12.1" ("9" > "1" as characters),
+    # picking an OLDER toolchain as "newest". Split into alternating
+    # digit/non-digit runs and compare ints where possible so "12" sorts
+    # after "9".
+    def _version_sort_key(path: str) -> tuple:
+        # tools_root/tools/xtensa-esp-elf-gdb/<version>/xtensa-esp-elf-gdb/bin/...
+        rel = os.path.relpath(path, os.path.join(tools_root, "tools", "xtensa-esp-elf-gdb"))
+        version = rel.split(os.sep, 1)[0]
+        return tuple(int(part) if part.isdigit() else part
+                     for part in re.split(r"(\d+)", version))
+
+    candidates = sorted(glob.glob(pattern), key=_version_sort_key, reverse=True)
     for candidate in candidates:
         # Exclude sibling utilities that happen to glob-match a loose
         # trailing '*' (e.g. gdb-3.x/gprof variants do not, but keep this
@@ -353,18 +367,19 @@ def symbolize_coredump(coredump_path: str, elf_path: str, *, fw_build: str = "<u
     if resolved_gdb:
         cmd += ["--gdb", resolved_gdb]
     cmd.append(elf_path)
-    # Run with cwd set to the ELF's own directory: espcoredump.py's wrapper
-    # looks for project_description.json next to `prog` (get_prefix_map_
-    # gdbinit_files) purely to enable reproducible-build path remapping in
-    # backtraces -- optional and merely WARNs if missing, but archived ELFs
-    # live in elf_archive/, not a build/ directory, so this always warns for
-    # them today. Setting cwd here costs nothing and matches the two places
-    # the ELF and any sibling project_description.json (see
-    # archive_kiln_elf(), which now also archives it when available) are
-    # expected to be found together.
-    elf_dir = os.path.dirname(os.path.abspath(elf_path)) or None
+    # NOTE: espcoredump.py's wrapper looks for project_description.json
+    # next to `prog` (get_prefix_map_gdbinit_path(kwargs['prog'])), resolved
+    # from os.path.dirname(prog_path) -- i.e. from elf_path itself, not from
+    # this subprocess's cwd. Setting cwd here did nothing for that lookup
+    # (a prior version of this comment claimed otherwise). Archived ELFs
+    # have no sibling project_description.json at all (elf_archive.py no
+    # longer copies one -- see its 2026-09-19 revert note: a stale, absolute
+    # path recorded in that file at build time turns espcoredump's harmless
+    # "does not exist" WARNING into a hard ValueError once the build tree
+    # that produced it is gone), so this always logs that one WARNING for
+    # them, which is expected and does not affect symbolization.
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=elf_dir)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise CoredumpSymbolizeError(
             f"failed to run espcoredump ({cmd!r}) against elf={elf_path!r} fw_build={fw_build!r}: {exc}"
